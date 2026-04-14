@@ -41,26 +41,12 @@ export const builtinSlashCommands: SlashCommand[] = [
   },
   {
     name: "model",
-    description: "Switch model (e.g. /model z-ai/glm-5.1). Use /model --list to see options.",
+    description: "Switch model. Use /model <id> or just /model to open picker.",
     async handler(args, ctx) {
       const current = ctx.agent.model;
-      const currentDisplay = displayModel(current);
-
       if (!args) {
-        const lines = [
-          `Current model: ${currentDisplay}`,
-          `Default model: ${displayModel(userConfig.getDefaultModel() || "openrouter/z-ai/glm-5.1")}`,
-        ];
-        const recent = userConfig.getRecentModels();
-        if (recent.length > 0) {
-          lines.push("Recent models:");
-          for (const m of recent.slice(0, 5)) {
-            const marker = m === current ? "* " : "  ";
-            lines.push(`${marker}${displayModel(m)}`);
-          }
-        }
-        lines.push("Run `/model --list` to see popular models.");
-        return lines.join("\n");
+        ctx.openPicker("model");
+        return;
       }
 
       if (args === "--list" || args === "-l") {
@@ -76,34 +62,19 @@ export const builtinSlashCommands: SlashCommand[] = [
       const next = normalizeModel(args);
       ctx.agent.model = next;
       userConfig.pushRecentModel(next);
-
-      // Persist to session if available
       if (ctx.sessionManager) {
         ctx.sessionManager.setMetadata({ model: next });
       }
-
       return `Model switched to ${displayModel(next)}.`;
     },
   },
   {
     name: "key",
-    description: "Set or view API key (e.g. /key sk-or-v1-xxx). Omit to see masked current key.",
+    description: "Set API key. Use /key <value> or just /key to open picker.",
     async handler(args, ctx) {
       if (!args) {
-        const envKey = process.env.OPENROUTER_API_KEY;
-        const configKey = userConfig.getApiKey();
-        const lines = [];
-        if (envKey) {
-          lines.push(`Environment key: ${maskKey(envKey)}`);
-        }
-        if (configKey) {
-          lines.push(`Config key: ${maskKey(configKey)}`);
-        }
-        if (!envKey && !configKey) {
-          lines.push("No API key configured.");
-          lines.push("Set one with: /key <your-openrouter-key>");
-        }
-        return lines.join("\n");
+        ctx.openPicker("key");
+        return;
       }
       userConfig.setApiKey(args);
       ctx.agent.setProvider(ctx.createProvider(args));

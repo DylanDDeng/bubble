@@ -1,13 +1,15 @@
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
 import type { Agent } from "../agent.js";
 import type { CliArgs } from "../cli.js";
 import type { SessionManager } from "../session.js";
 import type { AgentEvent, Message, Provider } from "../types.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
+import { UserConfig, displayModel, maskKey } from "../config.js";
 import { InputBox } from "./input-box.js";
 import { MessageList, type DisplayMessage, type DisplayToolCall } from "./message-list.js";
 import { theme } from "./theme.js";
+import { ModelPicker, KeyPicker } from "./model-picker.js";
 
 interface AppProps {
   agent: Agent;
@@ -65,9 +67,12 @@ export function App({ agent, args, sessionManager, createProvider }: AppProps) {
   const [streamingContent, setStreamingContent] = useState("");
   const [streamingReasoning, setStreamingReasoning] = useState("");
   const [streamingTools, setStreamingTools] = useState<DisplayToolCall[]>([]);
+  const [pickerMode, setPickerMode] = useState<"model" | "key" | null>(null);
+
+  const userConfig = new UserConfig();
 
   useInput((_input, key) => {
-    if (key.escape) {
+    if (key.escape && !pickerMode) {
       exit();
     }
   });
@@ -79,6 +84,27 @@ export function App({ agent, args, sessionManager, createProvider }: AppProps) {
   const clearMessages = useCallback(() => {
     setMessages([]);
   }, []);
+
+  const openPicker = useCallback((mode: "model" | "key") => {
+    setPickerMode(mode);
+  }, []);
+
+  const handleModelSelect = useCallback((model: string) => {
+    agent.model = model;
+    userConfig.pushRecentModel(model);
+    sessionManager?.setMetadata({ model });
+    addMessage("assistant", `Model switched to ${displayModel(model)}.`);
+    setPickerMode(null);
+  }, [agent, addMessage, sessionManager, userConfig]);
+
+  const handleKeySubmit = useCallback((key: string) => {
+    userConfig.setApiKey(key);
+    if (createProvider) {
+      agent.setProvider(createProvider(key));
+    }
+    addMessage("assistant", `API key updated to ${maskKey(key)} and active for the next message.`);
+    setPickerMode(null);
+  }, [agent, addMessage, createProvider, userConfig]);
 
   const handleSubmit = useCallback(
     async (input: string) => {
@@ -95,6 +121,7 @@ export function App({ agent, args, sessionManager, createProvider }: AppProps) {
           createProvider: createProvider ?? (() => {
             throw new Error("Provider creation not available");
           }),
+          openPicker,
         });
         if (handled) {
           if (result) {
@@ -151,7 +178,6 @@ export function App({ agent, args, sessionManager, createProvider }: AppProps) {
               setMessages((prev) => {
                 const last = prev[prev.length - 1];
                 if (last?.role === "assistant") {
-                  // Merge into the last assistant message (auto-continue fold)
                   const merged: DisplayMessage = {
                     ...last,
                     reasoning: currentReasoning || last.reasoning,
@@ -194,13 +220,13 @@ export function App({ agent, args, sessionManager, createProvider }: AppProps) {
         setStreamingTools([]);
       }
     },
-    [agent, args.cwd]
+    [agent, args.cwd, openPicker, createProvider]
   );
 
   return (
     <Box flexDirection="column" height="100%">
       <Box flexDirection="column" flexGrow={1} padding={1}>
-        {messages.length === 0 && !isRunning && (
+        {messages.length === 0 && !isRunning && !pickerMode && (
           <Text color={theme.muted}>
             Welcome! Type a message and press Enter. Shift+Enter for new line. Esc to quit.
           </Text>
@@ -211,9 +237,23 @@ export function App({ agent, args, sessionManager, createProvider }: AppProps) {
           streamingReasoning={streamingReasoning}
           streamingTools={streamingTools}
         />
+        {pickerMode === "model" && (
+          <ModelPicker
+            current={agent.model}
+            recent={userConfig.getRecentModels()}
+            onSelect={handleModelSelect}
+            onCancel={() => setPickerMode(null)}
+          />
+        )}
+        {pickerMode === "key" && (
+          <KeyPicker
+            onSubmit={handleKeySubmit}
+            onCancel={() => setPickerMode(null)}
+          />
+        )}
       </Box>
       <Box paddingX={1} paddingBottom={1} flexShrink={0}>
-        <InputBox onSubmit={handleSubmit} disabled={isRunning} />
+        <InputBox onSubmit={handleSubmit} disabled={isRunning || !!pickerMode} />
       </Box>
       {sessionManager && (
         <Box paddingX={1}>
