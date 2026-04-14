@@ -1,0 +1,14 @@
+import type { Agent } from "../agent.js";
+
+export interface SlashCommandContext {
+  agent: Agent;
+  addMessage: (role: "user" | "assistant" | "error", content: string) => void;
+  clearMessages: () => void;
+  exit: () => void;
+}
+
+export interface SlashCommand {
+  name: string;
+  description: string;
+  handler: (args: string, ctx: SlashCommandContext) => Promise<string | void>;
+}

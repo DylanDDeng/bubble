@@ -4,6 +4,7 @@ import type { Agent } from "../agent.js";
 import type { CliArgs } from "../cli.js";
 import type { SessionManager } from "../session.js";
 import type { AgentEvent, Message } from "../types.js";
+import { registry as slashRegistry } from "../slash-commands/index.js";
 import { InputBox } from "./input-box.js";
 import { MessageList, type DisplayMessage, type DisplayToolCall } from "./message-list.js";
 
@@ -69,9 +70,33 @@ export function App({ agent, args, sessionManager }: AppProps) {
     }
   });
 
+  const addMessage = useCallback((role: DisplayMessage["role"], content: string) => {
+    setMessages((prev) => [...prev, { role, content }]);
+  }, []);
+
+  const clearMessages = useCallback(() => {
+    setMessages([]);
+  }, []);
+
   const handleSubmit = useCallback(
     async (input: string) => {
       if (!input.trim()) return;
+
+      // Intercept slash commands
+      if (input.startsWith("/")) {
+        const { handled, result } = await slashRegistry.execute(input, {
+          agent,
+          addMessage,
+          clearMessages,
+          exit,
+        });
+        if (handled) {
+          if (result) {
+            addMessage("assistant", result);
+          }
+          return;
+        }
+      }
 
       setMessages((prev) => [...prev, { role: "user", content: input }]);
       setIsRunning(true);
