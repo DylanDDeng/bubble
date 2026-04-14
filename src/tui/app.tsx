@@ -7,6 +7,7 @@ import type { AgentEvent, Message } from "../types.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import { InputBox } from "./input-box.js";
 import { MessageList, type DisplayMessage, type DisplayToolCall } from "./message-list.js";
+import { theme } from "./theme.js";
 
 interface AppProps {
   agent: Agent;
@@ -195,7 +196,7 @@ export function App({ agent, args, sessionManager }: AppProps) {
     <Box flexDirection="column" height="100%">
       <Box flexDirection="column" flexGrow={1} padding={1}>
         {messages.length === 0 && !isRunning && (
-          <Text dimColor>
+          <Text color={theme.muted}>
             Welcome! Type a message and press Enter. Shift+Enter for new line. Esc to quit.
           </Text>
         )}
@@ -211,7 +212,7 @@ export function App({ agent, args, sessionManager }: AppProps) {
       </Box>
       {sessionManager && (
         <Box paddingX={1}>
-          <Text dimColor>Session: {sessionManager.getSessionFile()}</Text>
+          <Text color={theme.muted}>Session: {sessionManager.getSessionFile()}</Text>
         </Box>
       )}
     </Box>

@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { Box, Text, useInput, useStdout } from "ink";
 import { registry as slashRegistry } from "../slash-commands/index.js";
+import { theme } from "./theme.js";
 
 interface InputBoxProps {
   onSubmit: (value: string) => void;
@@ -176,7 +177,7 @@ export function InputBox({ onSubmit, disabled }: InputBoxProps) {
 
   return (
     <Box flexDirection="column">
-      <Text>{topBorder.slice(0, contentWidth)}</Text>
+      <Text color={theme.border}>{topBorder.slice(0, contentWidth)}</Text>
       <Box flexDirection="column" paddingX={PADDING_X}>
         {displayedLines.map(({ text: line, index }) => {
           const displayLine = (line || " ").slice(0, contentWidth);
@@ -198,11 +199,11 @@ export function InputBox({ onSubmit, disabled }: InputBoxProps) {
         })}
         {disabled && (
           <Box>
-            <Text dimColor>Agent is thinking...</Text>
+            <Text color={theme.muted}>Agent is thinking...</Text>
           </Box>
         )}
       </Box>
-      <Text>{bottomBorder.slice(0, contentWidth)}</Text>
+      <Text color={theme.border}>{bottomBorder.slice(0, contentWidth)}</Text>
       {showSuggestions && (
         <Box flexDirection="column" marginTop={1}>
           {suggestions.map((cmd, i) => (

@@ -1,5 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
+import { theme } from "./theme.js";
 
 export interface DisplayMessage {
   role: "user" | "assistant" | "error";
@@ -40,7 +41,7 @@ function MessageItem({ message }: { message: DisplayMessage }) {
   if (message.role === "user") {
     return (
       <Box marginBottom={1} flexDirection="column">
-        <Text bold color="green">You</Text>
+        <Text bold color={theme.user}>You</Text>
         <Text>{message.content}</Text>
       </Box>
     );
@@ -49,14 +50,14 @@ function MessageItem({ message }: { message: DisplayMessage }) {
   if (message.role === "error") {
     return (
       <Box marginBottom={1} flexDirection="column">
-        <Text color="red">Error: {message.content}</Text>
+        <Text color={theme.error}>Error: {message.content}</Text>
       </Box>
     );
   }
 
   return (
     <Box marginBottom={1} flexDirection="column">
-      <Text bold color="blue">Agent</Text>
+      <Text bold color={theme.agent}>Agent</Text>
       {message.reasoning && <ThinkingBlock reasoning={message.reasoning} />}
       {message.toolCalls?.map((tc) => (
         <ToolCallDisplay key={tc.id} toolCall={tc} />
@@ -69,7 +70,7 @@ function MessageItem({ message }: { message: DisplayMessage }) {
 function StreamingMessage({ content, reasoning, tools }: { content: string; reasoning: string; tools: DisplayToolCall[] }) {
   return (
     <Box marginBottom={1} flexDirection="column">
-      <Text bold color="blue">Agent</Text>
+      <Text bold color={theme.agent}>Agent</Text>
       {reasoning && <ThinkingBlock reasoning={reasoning} />}
       {tools.map((tc) => (
         <ToolCallDisplay key={tc.id} toolCall={tc} isStreaming={!tc.result} />
@@ -85,13 +86,13 @@ function ThinkingBlock({ reasoning }: { reasoning: string }) {
   const hasMore = lines.length > 3;
   return (
     <Box flexDirection="column" marginLeft={2} marginBottom={1}>
-      <Text dimColor bold>Thinking</Text>
+      <Text color={theme.thinking} bold>Thinking</Text>
       {preview.map((line, i) => (
-        <Text key={i} dimColor>
+        <Text key={i} color={theme.thinking}>
           {line}
         </Text>
       ))}
-      {hasMore && <Text dimColor>... ({lines.length - 3} more lines)</Text>}
+      {hasMore && <Text color={theme.thinking}>... ({lines.length - 3} more lines)</Text>}
     </Box>
   );
 }
@@ -104,12 +105,12 @@ function ToolCallDisplay({ toolCall, isStreaming }: { toolCall: DisplayToolCall;
   return (
     <Box flexDirection="column" marginLeft={2} marginTop={1}>
       <Box>
-        <Text dimColor>{isStreaming ? "▶ " : "✓ "}</Text>
-        <Text bold color="cyan">{toolCall.name}</Text>
+        <Text color={theme.muted}>{isStreaming ? "▶ " : "✓ "}</Text>
+        <Text bold color={theme.toolName}>{toolCall.name}</Text>
       </Box>
       {resultPreview && (
         <Box marginLeft={2}>
-          <Text dimColor color={toolCall.isError ? "red" : undefined}>
+          <Text color={toolCall.isError ? theme.toolError : theme.toolResult}>
             {toolCall.isError ? `Error: ${resultPreview}` : resultPreview}
           </Text>
         </Box>
