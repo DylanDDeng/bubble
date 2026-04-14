@@ -4,6 +4,7 @@ import { Box, Text } from "ink";
 export interface DisplayMessage {
   role: "user" | "assistant" | "error";
   content: string;
+  reasoning?: string;
   toolCalls?: DisplayToolCall[];
 }
 
@@ -18,17 +19,18 @@ export interface DisplayToolCall {
 interface MessageListProps {
   messages: DisplayMessage[];
   streamingContent: string;
+  streamingReasoning: string;
   streamingTools: DisplayToolCall[];
 }
 
-export function MessageList({ messages, streamingContent, streamingTools }: MessageListProps) {
+export function MessageList({ messages, streamingContent, streamingReasoning, streamingTools }: MessageListProps) {
   return (
     <Box flexDirection="column">
       {messages.map((msg, i) => (
         <MessageItem key={i} message={msg} />
       ))}
-      {(streamingContent || streamingTools.length > 0) && (
-        <StreamingMessage content={streamingContent} tools={streamingTools} />
+      {(streamingContent || streamingReasoning || streamingTools.length > 0) && (
+        <StreamingMessage content={streamingContent} reasoning={streamingReasoning} tools={streamingTools} />
       )}
     </Box>
   );
@@ -55,6 +57,7 @@ function MessageItem({ message }: { message: DisplayMessage }) {
   return (
     <Box marginBottom={1} flexDirection="column">
       <Text bold color="blue">Agent</Text>
+      {message.reasoning && <ThinkingBlock reasoning={message.reasoning} />}
       {message.content && <Text>{message.content}</Text>}
       {message.toolCalls?.map((tc) => (
         <ToolCallDisplay key={tc.id} toolCall={tc} />
@@ -63,14 +66,32 @@ function MessageItem({ message }: { message: DisplayMessage }) {
   );
 }
 
-function StreamingMessage({ content, tools }: { content: string; tools: DisplayToolCall[] }) {
+function StreamingMessage({ content, reasoning, tools }: { content: string; reasoning: string; tools: DisplayToolCall[] }) {
   return (
     <Box marginBottom={1} flexDirection="column">
       <Text bold color="blue">Agent</Text>
+      {reasoning && <ThinkingBlock reasoning={reasoning} />}
       {content && <Text>{content}</Text>}
       {tools.map((tc) => (
         <ToolCallDisplay key={tc.id} toolCall={tc} isStreaming={!tc.result} />
       ))}
+    </Box>
+  );
+}
+
+function ThinkingBlock({ reasoning }: { reasoning: string }) {
+  const lines = reasoning.split("\n").filter((l) => l.trim() !== "");
+  const preview = lines.slice(0, 3);
+  const hasMore = lines.length > 3;
+  return (
+    <Box flexDirection="column" marginLeft={2} marginBottom={1}>
+      <Text dimColor bold>Thinking</Text>
+      {preview.map((line, i) => (
+        <Text key={i} dimColor>
+          {line}
+        </Text>
+      ))}
+      {hasMore && <Text dimColor>... ({lines.length - 3} more lines)</Text>}
     </Box>
   );
 }

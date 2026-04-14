@@ -63,8 +63,25 @@ export function createOpenRouterProvider(options: OpenRouterProviderOptions): Pr
         };
       }
 
+      const reasoning = (delta as any)?.reasoning ?? (delta as any)?.thinking;
+      if (reasoning) {
+        yield { type: "reasoning_delta", content: reasoning };
+      }
+
       if (delta?.content) {
-        yield { type: "text", content: delta.content };
+        // Some models (e.g. DeepSeek via OpenRouter) wrap reasoning in <think> tags inside content.
+        const thinkMatch = delta.content.match(/<think>([\s\S]*?)<\/think>/);
+        if (thinkMatch) {
+          if (thinkMatch[1]) {
+            yield { type: "reasoning_delta", content: thinkMatch[1] };
+          }
+          const remaining = delta.content.replace(/<think>[\s\S]*?<\/think>/, "");
+          if (remaining) {
+            yield { type: "text", content: remaining };
+          }
+        } else {
+          yield { type: "text", content: delta.content };
+        }
       }
 
       if (delta?.tool_calls) {

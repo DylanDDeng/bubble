@@ -51,6 +51,7 @@ export class Agent {
       const assistantMsg: Extract<Message, { role: "assistant" }> = {
         role: "assistant",
         content: "",
+        reasoning: "",
         toolCalls: [],
       };
 
@@ -75,6 +76,10 @@ export class Agent {
           case "text":
             assistantMsg.content += chunk.content;
             yield { type: "text_delta", content: chunk.content };
+            break;
+          case "reasoning_delta":
+            assistantMsg.reasoning = (assistantMsg.reasoning || "") + chunk.content;
+            yield { type: "reasoning_delta", content: chunk.content };
             break;
 
           case "tool_call":

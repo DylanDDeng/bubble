@@ -47,6 +47,7 @@ function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] 
       result.push({
         role: "assistant",
         content: m.content,
+        reasoning: m.reasoning || undefined,
         toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       });
     }
@@ -59,6 +60,7 @@ export function App({ agent, args, sessionManager }: AppProps) {
   const [messages, setMessages] = useState<DisplayMessage[]>(() => reconstructDisplayMessages(agent.messages));
   const [isRunning, setIsRunning] = useState(false);
   const [streamingContent, setStreamingContent] = useState("");
+  const [streamingReasoning, setStreamingReasoning] = useState("");
   const [streamingTools, setStreamingTools] = useState<DisplayToolCall[]>([]);
 
   useInput((_input, key) => {
@@ -74,9 +76,11 @@ export function App({ agent, args, sessionManager }: AppProps) {
       setMessages((prev) => [...prev, { role: "user", content: input }]);
       setIsRunning(true);
       setStreamingContent("");
+      setStreamingReasoning("");
       setStreamingTools([]);
 
       let assistantContent = "";
+      let assistantReasoning = "";
       const toolCalls: DisplayToolCall[] = [];
 
       try {
@@ -85,6 +89,10 @@ export function App({ agent, args, sessionManager }: AppProps) {
             case "text_delta":
               assistantContent += event.content;
               setStreamingContent(assistantContent);
+              break;
+            case "reasoning_delta":
+              assistantReasoning += event.content;
+              setStreamingReasoning(assistantReasoning);
               break;
             case "tool_start": {
               const tc: DisplayToolCall = {
@@ -107,20 +115,26 @@ export function App({ agent, args, sessionManager }: AppProps) {
             }
             case "turn_end": {
               const currentContent = assistantContent;
+              const currentReasoning = assistantReasoning;
               const currentToolCalls = [...toolCalls];
               setMessages((prev) => {
                 const msg: DisplayMessage = {
                   role: "assistant",
                   content: currentContent,
                 };
+                if (currentReasoning) {
+                  msg.reasoning = currentReasoning;
+                }
                 if (currentToolCalls.length > 0) {
                   msg.toolCalls = currentToolCalls;
                 }
                 return [...prev, msg];
               });
               setStreamingContent("");
+              setStreamingReasoning("");
               setStreamingTools([]);
               assistantContent = "";
+              assistantReasoning = "";
               toolCalls.length = 0;
               break;
             }
@@ -131,6 +145,7 @@ export function App({ agent, args, sessionManager }: AppProps) {
       } finally {
         setIsRunning(false);
         setStreamingContent("");
+        setStreamingReasoning("");
         setStreamingTools([]);
       }
     },
@@ -148,6 +163,7 @@ export function App({ agent, args, sessionManager }: AppProps) {
         <MessageList
           messages={messages}
           streamingContent={streamingContent}
+          streamingReasoning={streamingReasoning}
           streamingTools={streamingTools}
         />
       </Box>
