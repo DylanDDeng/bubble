@@ -165,13 +165,14 @@ export function InputBox({ onSubmit, disabled }: InputBoxProps) {
   const hasMoreAbove = scrollOffset > 0;
   const hasMoreBelow = scrollOffset + visibleLines < totalLines;
 
+  const contentWidth = Math.max(1, width - PADDING_X * 2);
   const borderChar = "─";
   const topBorder = hasMoreAbove
-    ? `─── ↑ ${scrollOffset} more ${borderChar.repeat(Math.max(0, width - 14 - scrollOffset.toString().length))}`
-    : borderChar.repeat(width);
+    ? `─── ↑ ${scrollOffset} more ${borderChar.repeat(Math.max(0, contentWidth - 14 - scrollOffset.toString().length))}`
+    : borderChar.repeat(contentWidth);
   const bottomBorder = hasMoreBelow
-    ? `─── ↓ ${totalLines - scrollOffset - visibleLines} more ${borderChar.repeat(Math.max(0, width - 16 - (totalLines - scrollOffset - visibleLines).toString().length))}`
-    : borderChar.repeat(width);
+    ? `─── ↓ ${totalLines - scrollOffset - visibleLines} more ${borderChar.repeat(Math.max(0, contentWidth - 16 - (totalLines - scrollOffset - visibleLines).toString().length))}`
+    : borderChar.repeat(contentWidth);
 
   return (
     <Box flexDirection="column">
@@ -196,30 +197,33 @@ export function InputBox({ onSubmit, disabled }: InputBoxProps) {
           ))}
         </Box>
       )}
-      <Text>{topBorder.slice(0, width)}</Text>
+      <Text>{topBorder.slice(0, contentWidth)}</Text>
       <Box flexDirection="column" paddingX={PADDING_X}>
-        {displayedLines.map(({ text: line, index }) => (
-          <Box key={index} height={1}>
-            {index === cursorLineIndex ? (
-              <>
-                <Text>{line.slice(0, cursorCol)}</Text>
-                <Text backgroundColor="white" color="black">
-                  {line[cursorCol] || " "}
-                </Text>
-                <Text>{line.slice(cursorCol + 1)}</Text>
-              </>
-            ) : (
-              <Text>{line || " "}</Text>
-            )}
-          </Box>
-        ))}
+        {displayedLines.map(({ text: line, index }) => {
+          const displayLine = (line || " ").slice(0, contentWidth);
+          return (
+            <Box key={index} height={1} overflow="hidden">
+              {index === cursorLineIndex ? (
+                <>
+                  <Text>{displayLine.slice(0, cursorCol)}</Text>
+                  <Text backgroundColor="white" color="black">
+                    {displayLine[cursorCol] || " "}
+                  </Text>
+                  <Text>{displayLine.slice(cursorCol + 1)}</Text>
+                </>
+              ) : (
+                <Text>{displayLine}</Text>
+              )}
+            </Box>
+          );
+        })}
         {disabled && (
           <Box>
             <Text dimColor>Agent is thinking...</Text>
           </Box>
         )}
       </Box>
-      <Text>{bottomBorder.slice(0, width)}</Text>
+      <Text>{bottomBorder.slice(0, contentWidth)}</Text>
     </Box>
   );
 }
