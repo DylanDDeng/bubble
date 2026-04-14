@@ -2,7 +2,7 @@ import type { Message, Provider, StreamChunk, ToolDefinition } from "./types.js"
 
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const OPENAI_BETA_RESPONSES = "responses=experimental";
-const CODEX_CLIENT_VERSION = "0.80.0";
+const CODEX_CLIENT_VERSION = "0.121.0";
 const MODEL_DISCOVERY_PATHS = [
   `/codex/models?client_version=${CODEX_CLIENT_VERSION}`,
   "/models",

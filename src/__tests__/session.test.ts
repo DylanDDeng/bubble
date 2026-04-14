@@ -49,6 +49,26 @@ describe("SessionManager", () => {
     expect((messages[1] as any).content).toBe("new");
   });
 
+  it("drops incomplete trailing tool turns when restoring messages", () => {
+    const file = join(tmpDir, "incomplete-tool-turn.jsonl");
+    const sm = new SessionManager(file);
+    sm.appendMessage({ role: "user", content: "hello" });
+    sm.appendMessage({ role: "assistant", content: "hi" });
+    sm.appendMessage({ role: "user", content: "list files" });
+    sm.appendMessage({
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "call_1", name: "ls", arguments: "{\"path\":\".\"}" }],
+    });
+    sm.appendMessage({ role: "tool", toolCallId: "call_1", content: "f package.json" });
+
+    const restored = sm.getMessages();
+    expect(restored).toHaveLength(2);
+    expect(restored[0].role).toBe("user");
+    expect(restored[1].role).toBe("assistant");
+    expect((restored[1] as any).content).toBe("hi");
+  });
+
   it("ignores corrupted jsonl lines gracefully", () => {
     const file = join(tmpDir, "corrupt.jsonl");
     const { writeFileSync } = require("node:fs");

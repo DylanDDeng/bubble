@@ -158,10 +158,47 @@ export class SessionManager {
       }
     }
 
-    return messages;
+    return pruneIncompleteTail(messages);
   }
 
   getSessionFile(): string {
     return this.sessionFile;
   }
+}
+
+function pruneIncompleteTail(messages: Message[]): Message[] {
+  let currentTurnStart = -1;
+  let hasCompletedAssistant = false;
+  let sawNonUserInCurrentTurn = false;
+
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+    if (message.role === "system") continue;
+
+    if (message.role === "user") {
+      currentTurnStart = i;
+      hasCompletedAssistant = false;
+      sawNonUserInCurrentTurn = false;
+      continue;
+    }
+
+    if (currentTurnStart === -1) {
+      continue;
+    }
+
+    sawNonUserInCurrentTurn = true;
+
+    if (message.role === "assistant") {
+      const hasPendingTools = !!message.toolCalls && message.toolCalls.length > 0;
+      if (!hasPendingTools) {
+        hasCompletedAssistant = true;
+      }
+    }
+  }
+
+  if (currentTurnStart >= 0 && sawNonUserInCurrentTurn && !hasCompletedAssistant) {
+    return messages.slice(0, currentTurnStart);
+  }
+
+  return messages;
 }

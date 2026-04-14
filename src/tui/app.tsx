@@ -94,14 +94,31 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
   }, []);
 
   const handleModelSelect = useCallback((model: string) => {
-    agent.model = model;
-    const decoded = model.includes(":") ? model.split(":") : [agent.providerId || safeRegistry.getDefault()?.id || "openrouter", model];
-    agent.providerId = decoded[0];
-    userConfig.pushRecentModel(model);
-    sessionManager?.setMetadata({ model });
-    addMessage("assistant", `Model switched to ${displayModel(model)}.`);
-    setPickerMode(null);
-  }, [agent, addMessage, sessionManager, userConfig, safeRegistry]);
+    const run = async () => {
+      agent.model = model;
+      const decoded = model.includes(":")
+        ? model.split(":")
+        : [agent.providerId || safeRegistry.getDefault()?.id || "openrouter", model];
+      const providerId = decoded[0];
+
+      await safeRegistry.prepareProvider(providerId);
+      const provider = safeRegistry.getConfigured().find((item) => item.id === providerId);
+      if (!provider?.apiKey || !createProvider) {
+        addMessage("error", `Provider ${providerId} is not configured or has no active credentials.`);
+        setPickerMode(null);
+        return;
+      }
+
+      agent.setProvider(createProvider(provider.apiKey, provider.baseURL));
+      agent.providerId = providerId;
+      userConfig.pushRecentModel(model);
+      sessionManager?.setMetadata({ model });
+      addMessage("assistant", `Model switched to ${displayModel(model)}.`);
+      setPickerMode(null);
+    };
+
+    void run();
+  }, [agent, addMessage, sessionManager, userConfig, safeRegistry, createProvider]);
 
   const handleProviderSelect = useCallback(async (providerId: string) => {
     await safeRegistry.prepareProvider(providerId);

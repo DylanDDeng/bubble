@@ -173,10 +173,15 @@ export const builtinSlashCommands: SlashCommand[] = [
       }
       const defaultProvider = ctx.registry.getDefault()?.id || "openrouter";
       const next = args.includes(":") ? args : encodeModel(defaultProvider, args);
-      const { providerId } = decodeModel(next);
-      ctx.agent.model = next;
-      ctx.agent.providerId = providerId || defaultProvider;
-      persistSelectedModel(next, ctx);
+      const { providerId, modelId } = decodeModel(next);
+      const targetProviderId = providerId || defaultProvider;
+
+      await ctx.registry.prepareProvider(targetProviderId);
+      const switched = switchToProviderModel(targetProviderId, modelId, ctx);
+      if (!switched) {
+        return `Provider ${targetProviderId} is not configured or has no active credentials.`;
+      }
+
       return `Model switched to ${displayModel(next)}.`;
     },
   },
