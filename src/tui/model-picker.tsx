@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { Box, Text, useInput, useStdout } from "ink";
 import { theme } from "./theme.js";
 import { ProviderRegistry, encodeModel, displayModel, type ModelInfo } from "../provider-registry.js";
@@ -17,13 +17,16 @@ export interface ModelPickerProps {
   onCancel: () => void;
 }
 
+const DEFAULT_GROUP_LIMIT = 6;
+
 export function ModelPicker({ registry, current, recent, onSelect, onCancel }: ModelPickerProps) {
   const { stdout } = useStdout();
   const termHeight = stdout?.rows || 24;
-  const maxVisible = Math.max(5, termHeight - 8);
+  const maxVisible = Math.max(5, termHeight - 10);
 
-  const [options, setOptions] = useState<Option[]>([]);
+  const [rawOptions, setRawOptions] = useState<Option[]>([]);
   const [loading, setLoading] = useState(true);
+  const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
 
   useEffect(() => {
@@ -40,7 +43,7 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
         opts.push({ id: m, label: displayModel(m), group: "Recent" });
       }
 
-      // Then fetch per-provider models
+      // Per-provider models
       for (const provider of enabled) {
         const models = await registry.listModels(provider);
         for (const m of models) {
@@ -55,13 +58,12 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
         }
       }
 
-      // Ensure current model exists
       if (!seen.has(current)) {
         opts.unshift({ id: current, label: displayModel(current), group: "Current" });
       }
 
       if (!cancelled) {
-        setOptions(opts);
+        setRawOptions(opts);
         const idx = opts.findIndex((o) => o.id === current);
         setSelectedIndex(idx >= 0 ? idx : 0);
         setLoading(false);
@@ -72,6 +74,24 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
       cancelled = true;
     };
   }, [registry, current, recent]);
+
+  const options = useMemo(() => {
+    if (!query.trim()) {
+      // Without query: limit each group to DEFAULT_GROUP_LIMIT
+      const counts = new Map<string, number>();
+      return rawOptions.filter((opt) => {
+        if (opt.group === "Recent" || opt.group === "Current") return true;
+        const count = counts.get(opt.group) || 0;
+        if (count < DEFAULT_GROUP_LIMIT) {
+          counts.set(opt.group, count + 1);
+          return true;
+        }
+        return false;
+      });
+    }
+    const q = query.toLowerCase();
+    return rawOptions.filter((opt) => opt.label.toLowerCase().includes(q) || opt.group.toLowerCase().includes(q));
+  }, [rawOptions, query]);
 
   useInput((input, key) => {
     if (key.escape) {
@@ -91,20 +111,21 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
       setSelectedIndex((i) => Math.min(options.length - 1, i + 1));
       return;
     }
-    if (input && input.length === 1 && /[a-z0-9]/i.test(input)) {
-      const char = input.toLowerCase();
-      for (let i = selectedIndex + 1; i < options.length; i++) {
-        if (options[i].label.toLowerCase().startsWith(char)) {
-          setSelectedIndex(i);
-          return;
-        }
-      }
-      for (let i = 0; i <= selectedIndex; i++) {
-        if (options[i].label.toLowerCase().startsWith(char)) {
-          setSelectedIndex(i);
-          return;
-        }
-      }
+    if (key.backspace || key.delete) {
+      setQuery((q) => {
+        const next = q.slice(0, -1);
+        setSelectedIndex(0);
+        return next;
+      });
+      return;
+    }
+    if (input && !key.ctrl && !key.meta) {
+      setQuery((q) => {
+        const next = q + input;
+        setSelectedIndex(0);
+        return next;
+      });
+      return;
     }
   });
 
@@ -116,10 +137,18 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
   return (
     <Box flexDirection="column" marginY={1}>
       <Text bold color={theme.accent}>Select Model</Text>
-      <Text color={theme.muted}>↑/↓ to navigate, Enter to select, Esc to cancel</Text>
+      <Box borderStyle="round" borderColor={theme.borderActive} paddingX={1}>
+        <Text color={query ? undefined : theme.muted}>
+          {query || "Type to search..."}
+        </Text>
+      </Box>
+      <Text color={theme.muted}>↑/↓ navigate, Enter select, Esc cancel, Backspace clear</Text>
       {loading && <Text color={theme.muted}>Loading models...</Text>}
       {!loading && (
         <Box flexDirection="column" marginTop={1}>
+          {options.length === 0 && (
+            <Text color={theme.muted}>No models match "{query}"</Text>
+          )}
           {visible.map((opt, i) => {
             const actualIndex = start + i;
             const isSelected = actualIndex === selectedIndex;
