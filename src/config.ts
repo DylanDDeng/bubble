@@ -78,10 +78,9 @@ export function maskKey(key: string): string {
   return key.slice(0, 6) + "..." + key.slice(-4);
 }
 
-/** Normalize a model string to "provider/model" format. */
+/** Normalize a model string by stripping accidental openrouter/ prefix. */
 export function normalizeModel(model: string): string {
-  if (model.includes("/")) return model;
-  return `openrouter/${model}`;
+  return model.startsWith("openrouter/") ? model.slice("openrouter/".length) : model;
 }
 
 /** Strip provider prefix for display if it's openrouter. */
@@ -89,18 +88,18 @@ export function displayModel(model: string): string {
   return model.startsWith("openrouter/") ? model.slice("openrouter/".length) : model;
 }
 
-/** Built-in curated list of popular OpenRouter models. */
+/** Built-in curated list of popular OpenRouter models (native IDs). */
 export const POPULAR_MODELS: string[] = [
-  "openrouter/z-ai/glm-5.1",
-  "openrouter/deepseek/deepseek-chat",
-  "openrouter/deepseek/deepseek-r1",
-  "openrouter/anthropic/claude-3.7-sonnet",
-  "openrouter/anthropic/claude-3.5-sonnet",
-  "openrouter/openai/gpt-4o",
-  "openrouter/openai/gpt-4o-mini",
-  "openrouter/google/gemini-2.5-pro-preview-03-25",
-  "openrouter/google/gemini-2.0-flash-001",
-  "openrouter/meta-llama/llama-3.3-70b-instruct",
-  "openrouter/nousresearch/hermes-3-llama-3.1-405b",
-  "openrouter/qwen/qwen-2.5-72b-instruct",
+  "z-ai/glm-5.1",
+  "deepseek/deepseek-chat",
+  "deepseek/deepseek-r1",
+  "anthropic/claude-3.7-sonnet",
+  "anthropic/claude-3.5-sonnet",
+  "openai/gpt-4o",
+  "openai/gpt-4o-mini",
+  "google/gemini-2.5-pro-preview-03-25",
+  "google/gemini-2.0-flash-001",
+  "meta-llama/llama-3.3-70b-instruct",
+  "nousresearch/hermes-3-llama-3.1-405b",
+  "qwen/qwen-2.5-72b-instruct",
 ];
