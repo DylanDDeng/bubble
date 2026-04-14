@@ -21,6 +21,11 @@ export const theme = {
   toolResult: "gray",
   toolError: "red",
   code: "yellow",
+
+  // Message surfaces
+  userMessageBorder: "red",
+  userMessageBg: "#2a2a34",
+  userMessageText: "#f3f3f7",
 } as const;
 
 export type ThemeColor = (typeof theme)[keyof typeof theme];

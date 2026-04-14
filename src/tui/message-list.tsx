@@ -1,5 +1,5 @@
 import React from "react";
-import { Box, Text } from "ink";
+import { Box, Text, useStdout } from "ink";
 import { theme } from "./theme.js";
 import { highlightCode, inferLang } from "./code-highlight.js";
 import { MarkdownContent } from "./markdown.js";
@@ -41,12 +41,7 @@ export function MessageList({ messages, streamingContent, streamingReasoning, st
 
 function MessageItem({ message }: { message: DisplayMessage }) {
   if (message.role === "user") {
-    return (
-      <Box marginBottom={1} flexDirection="column">
-        <Text bold color={theme.user}>You</Text>
-        <Text>{message.content}</Text>
-      </Box>
-    );
+    return <UserMessageBlock content={message.content} />;
   }
 
   if (message.role === "error") {
@@ -59,7 +54,6 @@ function MessageItem({ message }: { message: DisplayMessage }) {
 
   return (
     <Box marginBottom={1} flexDirection="column">
-      <Text bold color={theme.agent}>Agent</Text>
       {message.reasoning && <ThinkingBlock reasoning={message.reasoning} />}
       {message.toolCalls?.map((tc) => (
         <ToolCallDisplay key={tc.id} toolCall={tc} />
@@ -72,7 +66,6 @@ function MessageItem({ message }: { message: DisplayMessage }) {
 function StreamingMessage({ content, reasoning, tools }: { content: string; reasoning: string; tools: DisplayToolCall[] }) {
   return (
     <Box marginBottom={1} flexDirection="column">
-      <Text bold color={theme.agent}>Agent</Text>
       {reasoning && <ThinkingBlock reasoning={reasoning} />}
       {tools.map((tc) => (
         <ToolCallDisplay key={tc.id} toolCall={tc} isStreaming={!tc.result} />
@@ -95,6 +88,29 @@ function ThinkingBlock({ reasoning }: { reasoning: string }) {
         </Text>
       ))}
       {hasMore && <Text color={theme.thinking}>... ({lines.length - 3} more lines)</Text>}
+    </Box>
+  );
+}
+
+function UserMessageBlock({ content }: { content: string }) {
+  const { stdout } = useStdout();
+  const width = Math.max(20, (stdout?.columns || 80) - 2);
+  const lines = content.split("\n");
+  const paddedLines = ["", ...lines, ""];
+
+  return (
+    <Box marginBottom={1} flexDirection="column">
+      <Box flexDirection="column">
+        {paddedLines.map((line, index) => (
+          <Text
+            key={index}
+            backgroundColor={theme.userMessageBg}
+            color={theme.userMessageText}
+          >
+            {padVisual(line || " ", width)}
+          </Text>
+        ))}
+      </Box>
     </Box>
   );
 }
@@ -191,4 +207,28 @@ function ToolCallDisplay({ toolCall, isStreaming }: { toolCall: DisplayToolCall;
       )}
     </Box>
   );
+}
+
+function visualWidth(str: string): number {
+  let width = 0;
+  for (const char of str) {
+    const code = char.codePointAt(0) || 0;
+    if (
+      (code >= 0x4e00 && code <= 0x9fff) ||
+      (code >= 0x3000 && code <= 0x303f) ||
+      (code >= 0xff00 && code <= 0xffef) ||
+      (code >= 0x3040 && code <= 0x309f) ||
+      (code >= 0x30a0 && code <= 0x30ff)
+    ) {
+      width += 2;
+    } else {
+      width += 1;
+    }
+  }
+  return width;
+}
+
+function padVisual(str: string, width: number): string {
+  const currentWidth = visualWidth(str);
+  return str + " ".repeat(Math.max(0, width - currentWidth));
 }
