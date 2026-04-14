@@ -1,12 +1,19 @@
 import React, { useState } from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text, useInput, useStdout } from "ink";
 
 interface InputBoxProps {
   onSubmit: (value: string) => void;
   disabled?: boolean;
 }
 
+const MIN_VISIBLE_LINES = 3;
+const MAX_VISIBLE_LINES = 5;
+const PADDING_X = 1;
+
 export function InputBox({ onSubmit, disabled }: InputBoxProps) {
+  const { stdout } = useStdout();
+  const width = stdout.columns || 80;
+
   const [text, setText] = useState("");
   const [cursor, setCursor] = useState(0);
 
@@ -85,28 +92,64 @@ export function InputBox({ onSubmit, disabled }: InputBoxProps) {
   const cursorLineIndex = beforeCursor.split("\n").length - 1;
   const cursorCol = beforeCursor.split("\n").pop()?.length || 0;
 
+  const totalLines = Math.max(lines.length, 1);
+  const visibleLines = Math.min(Math.max(totalLines, MIN_VISIBLE_LINES), MAX_VISIBLE_LINES);
+
+  // Scroll offset: keep cursor line in view
+  let scrollOffset = 0;
+  if (totalLines > visibleLines) {
+    scrollOffset = Math.min(
+      Math.max(cursorLineIndex - Math.floor(visibleLines / 2), 0),
+      totalLines - visibleLines
+    );
+  }
+
+  const displayedLines = [];
+  for (let i = 0; i < visibleLines; i++) {
+    const lineIndex = scrollOffset + i;
+    displayedLines.push({
+      text: lines[lineIndex] || "",
+      index: lineIndex,
+    });
+  }
+
+  const hasMoreAbove = scrollOffset > 0;
+  const hasMoreBelow = scrollOffset + visibleLines < totalLines;
+
+  const borderChar = "─";
+  const topBorder = hasMoreAbove
+    ? `─── ↑ ${scrollOffset} more ${borderChar.repeat(Math.max(0, width - 14 - scrollOffset.toString().length))}`
+    : borderChar.repeat(width);
+  const bottomBorder = hasMoreBelow
+    ? `─── ↓ ${totalLines - scrollOffset - visibleLines} more ${borderChar.repeat(Math.max(0, width - 16 - (totalLines - scrollOffset - visibleLines).toString().length))}`
+    : borderChar.repeat(width);
+
   return (
-    <Box flexDirection="column" borderStyle="single" paddingX={1}>
-      {lines.map((line, i) => (
-        <Box key={i}>
-          {i === cursorLineIndex ? (
-            <>
-              <Text>{line.slice(0, cursorCol)}</Text>
-              <Text backgroundColor="white" color="black">
-                {line[cursorCol] || " "}
-              </Text>
-              <Text>{line.slice(cursorCol + 1)}</Text>
-            </>
-          ) : (
-            <Text>{line}</Text>
-          )}
-        </Box>
-      ))}
-      {disabled && (
-        <Box>
-          <Text dimColor>Agent is thinking...</Text>
-        </Box>
-      )}
+    <Box flexDirection="column">
+      <Text>{topBorder.slice(0, width)}</Text>
+      <Box flexDirection="column" paddingX={PADDING_X}>
+        {displayedLines.map(({ text: line, index }) => (
+          <Box key={index} height={1}>
+            {index === cursorLineIndex ? (
+              <>
+                <Text>{line.slice(0, cursorCol)}</Text>
+                <Text backgroundColor="white" color="black">
+                  {line[cursorCol] || " "}
+                </Text>
+                <Text>{line.slice(cursorCol + 1)}</Text>
+              </>
+            ) : (
+              <Text>{line || " "}</Text>
+            )}
+          </Box>
+        ))}
+        {disabled && (
+          <Box>
+            <Text dimColor>Agent is thinking...</Text>
+          </Box>
+        )}
+      </Box>
+      <Text>{bottomBorder.slice(0, width)}</Text>
     </Box>
   );
 }
