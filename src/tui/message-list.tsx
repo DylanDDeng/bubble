@@ -2,6 +2,7 @@ import React from "react";
 import { Box, Text } from "ink";
 import { theme } from "./theme.js";
 import { highlightCode, inferLang } from "./code-highlight.js";
+import { MarkdownContent } from "./markdown.js";
 
 export interface DisplayMessage {
   role: "user" | "assistant" | "error";
@@ -63,7 +64,7 @@ function MessageItem({ message }: { message: DisplayMessage }) {
       {message.toolCalls?.map((tc) => (
         <ToolCallDisplay key={tc.id} toolCall={tc} />
       ))}
-      {message.content && <Text>{message.content}</Text>}
+      {message.content && <MarkdownContent content={message.content} />}
     </Box>
   );
 }
