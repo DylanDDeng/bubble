@@ -1,5 +1,6 @@
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { Box, Text, useInput, useStdout } from "ink";
+import { registry as slashRegistry } from "../slash-commands/index.js";
 
 interface InputBoxProps {
   onSubmit: (value: string) => void;
@@ -9,6 +10,7 @@ interface InputBoxProps {
 const MIN_VISIBLE_LINES = 3;
 const MAX_VISIBLE_LINES = 5;
 const PADDING_X = 1;
+const MAX_SUGGESTIONS = 5;
 
 export function InputBox({ onSubmit, disabled }: InputBoxProps) {
   const { stdout } = useStdout();
@@ -16,9 +18,51 @@ export function InputBox({ onSubmit, disabled }: InputBoxProps) {
 
   const [text, setText] = useState("");
   const [cursor, setCursor] = useState(0);
+  const [selectedIndex, setSelectedIndex] = useState(0);
+
+  const isSlashContext = text.startsWith("/") && cursor > 0 && !text.includes("\n");
+  const slashPrefix = isSlashContext ? text.slice(1).toLowerCase() : "";
+  const suggestions = useMemo(() => {
+    if (!isSlashContext) return [];
+    const all = slashRegistry.list();
+    const filtered = all.filter((c) => c.name.toLowerCase().startsWith(slashPrefix));
+    return filtered.slice(0, MAX_SUGGESTIONS);
+  }, [isSlashContext, slashPrefix]);
+  const showSuggestions = suggestions.length > 0;
 
   useInput((input, key) => {
     if (disabled) return;
+
+    // Autocomplete navigation
+    if (showSuggestions) {
+      if (key.upArrow) {
+        setSelectedIndex((i) => (i - 1 + suggestions.length) % suggestions.length);
+        return;
+      }
+      if (key.downArrow) {
+        setSelectedIndex((i) => (i + 1) % suggestions.length);
+        return;
+      }
+      if (key.escape) {
+        // Cancel autocomplete: keep the slash, just hide suggestions
+        // We achieve this by resetting selection; suggestions recompute if text changes
+        setSelectedIndex(0);
+        // If user continues typing, suggestions will reappear based on prefix
+        // We don't consume escape here so app-level exit might still fire.
+        // Actually let's just clear text to empty to close it quickly
+        return;
+      }
+      if (key.return || key.tab) {
+        const cmd = suggestions[selectedIndex];
+        if (cmd) {
+          const newText = `/${cmd.name} `;
+          setText(newText);
+          setCursor(newText.length);
+          setSelectedIndex(0);
+        }
+        return;
+      }
+    }
 
     if (key.return) {
       if (key.shift || key.ctrl || key.meta) {
@@ -30,6 +74,7 @@ export function InputBox({ onSubmit, disabled }: InputBoxProps) {
         onSubmit(text);
         setText("");
         setCursor(0);
+        setSelectedIndex(0);
       }
       return;
     }
@@ -40,16 +85,19 @@ export function InputBox({ onSubmit, disabled }: InputBoxProps) {
         const after = text.slice(cursor);
         setText(before + after);
         setCursor(cursor - 1);
+        setSelectedIndex(0);
       }
       return;
     }
 
     if (key.leftArrow) {
       setCursor(Math.max(0, cursor - 1));
+      setSelectedIndex(0);
       return;
     }
     if (key.rightArrow) {
       setCursor(Math.min(text.length, cursor + 1));
+      setSelectedIndex(0);
       return;
     }
     if (key.upArrow) {
@@ -84,6 +132,7 @@ export function InputBox({ onSubmit, disabled }: InputBoxProps) {
       const after = text.slice(cursor);
       setText(before + input + after);
       setCursor(cursor + input.length);
+      setSelectedIndex(0);
     }
   });
 
@@ -126,6 +175,27 @@ export function InputBox({ onSubmit, disabled }: InputBoxProps) {
 
   return (
     <Box flexDirection="column">
+      {showSuggestions && (
+        <Box flexDirection="column" marginBottom={1}>
+          {suggestions.map((cmd, i) => (
+            <Box key={cmd.name} height={1}>
+              <Text>
+                {i === selectedIndex ? (
+                  <>
+                    <Text backgroundColor="white" color="black">{` ${cmd.name.padEnd(16)} `}</Text>
+                    <Text dimColor> {cmd.description}</Text>
+                  </>
+                ) : (
+                  <>
+                    <Text>{`  ${cmd.name.padEnd(16)} `}</Text>
+                    <Text dimColor> {cmd.description}</Text>
+                  </>
+                )}
+              </Text>
+            </Box>
+          ))}
+        </Box>
+      )}
       <Text>{topBorder.slice(0, width)}</Text>
       <Box flexDirection="column" paddingX={PADDING_X}>
         {displayedLines.map(({ text: line, index }) => (
