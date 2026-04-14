@@ -16,7 +16,8 @@
     "diff": "^7.0.0",
     "ink": "^7.0.0",
     "openai": "^4.77.0",
-    "react": "^19.2.5"
+    "react": "^19.2.5",
+    "shiki": "^4.0.2"
   },
   "devDependencies": {
     "@types/diff": "^7.0.0",
