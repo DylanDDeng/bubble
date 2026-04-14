@@ -1,0 +1,28 @@
+{
+  "name": "my-coding-agent",
+  "version": "0.1.0",
+  "description": "A minimal coding agent inspired by pi-mono",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc && node dist/main.js",
+    "start": "node dist/main.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@types/react": "^19.2.14",
+    "chalk": "^5.3.0",
+    "diff": "^7.0.0",
+    "ink": "^7.0.0",
+    "openai": "^4.77.0",
+    "react": "^19.2.5"
+  },
+  "devDependencies": {
+    "@types/diff": "^7.0.0",
+    "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^4.1.4",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.4"
+  }
+}
