@@ -5,6 +5,7 @@
  */
 
 import OpenAI from "openai";
+import { createOpenAICodexProvider, isOpenAICodexBaseUrl } from "./provider-openai-codex.js";
 import type { Message, Provider, StreamChunk, ToolDefinition } from "./types.js";
 
 export interface ProviderInstanceOptions {
@@ -14,7 +15,23 @@ export interface ProviderInstanceOptions {
   reasoning?: boolean;
 }
 
+export function createUnavailableProvider(message: string): Provider {
+  async function* streamChat(): AsyncIterable<StreamChunk> {
+    throw new Error(message);
+  }
+
+  async function complete(): Promise<string> {
+    throw new Error(message);
+  }
+
+  return { streamChat, complete };
+}
+
 export function createProviderInstance(options: ProviderInstanceOptions): Provider {
+  if (isOpenAICodexBaseUrl(options.baseURL)) {
+    return createOpenAICodexProvider(options);
+  }
+
   const client = new OpenAI({
     apiKey: options.apiKey,
     baseURL: options.baseURL,

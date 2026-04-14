@@ -1,8 +1,32 @@
 import { UserConfig, maskKey } from "../config.js";
-import { encodeModel, displayModel, BUILTIN_PROVIDERS } from "../provider-registry.js";
+import { encodeModel, decodeModel, displayModel, BUILTIN_PROVIDERS } from "../provider-registry.js";
 import type { SlashCommand } from "./types.js";
 
 const userConfig = new UserConfig();
+
+function persistSelectedModel(model: string, ctx: Parameters<SlashCommand["handler"]>[1]) {
+  userConfig.pushRecentModel(model);
+  if (ctx.sessionManager) {
+    ctx.sessionManager.setMetadata({ model });
+  }
+}
+
+function switchToProviderModel(
+  providerId: string,
+  modelId: string,
+  ctx: Parameters<SlashCommand["handler"]>[1]
+) {
+  const provider = ctx.registry.getConfigured().find((item) => item.id === providerId);
+  if (!provider?.apiKey) {
+    return false;
+  }
+
+  ctx.agent.setProvider(ctx.createProvider(provider.apiKey, provider.baseURL));
+  ctx.agent.providerId = providerId;
+  ctx.agent.model = encodeModel(providerId, modelId);
+  persistSelectedModel(ctx.agent.model, ctx);
+  return true;
+}
 
 export const builtinSlashCommands: SlashCommand[] = [
   {
@@ -64,6 +88,9 @@ export const builtinSlashCommands: SlashCommand[] = [
       }
 
       if (flag === "--remove" && value) {
+        if (ctx.registry.getModelConfig().hasProvider(value)) {
+          return `Provider ${value} is defined in ~/.my-agent/models.json. Please edit that file directly.`;
+        }
         ctx.registry.removeProvider(value);
         return `Provider ${value} removed.`;
       }
@@ -73,6 +100,9 @@ export const builtinSlashCommands: SlashCommand[] = [
         const p = providers.find((x) => x.id === value);
         if (!p) return `Provider ${value} is not configured.`;
         ctx.registry.setDefault(value);
+        if (ctx.registry.getModelConfig().hasProvider(value)) {
+          return `Default provider set to ${p.name}. Note: config is managed via ~/.my-agent/models.json.`;
+        }
         return `Default provider set to ${p.name}.`;
       }
 
@@ -81,12 +111,56 @@ export const builtinSlashCommands: SlashCommand[] = [
         const lines = ["Configured providers:"];
         for (const p of providers) {
           const marker = p.id === ctx.registry.getDefault()?.id ? "* " : "  ";
-          lines.push(`${marker}${p.name} (${p.id}) ${p.enabled ? "" : "[disabled]"}`);
+          const source = ctx.registry.getModelConfig().hasProvider(p.id) ? " [models.json]" : "";
+          const oauth = ctx.registry.getAuthStorage().has(p.id) ? " [oauth]" : "";
+          lines.push(`${marker}${p.name} (${p.id}) ${p.enabled ? "" : "[disabled]"}${oauth}${source}`);
+        }
+        if (ctx.registry.getModelConfig().getLoadError()) {
+          lines.push(`Warning: failed to load models.json: ${ctx.registry.getModelConfig().getLoadError()}`);
         }
         return lines.join("\n");
       }
 
       return `Usage: /provider [--add|--remove|--set|--list] <id>`;
+    },
+  },
+  {
+    name: "login",
+    description: "OAuth login for supported providers. Usage: /login [openai-codex]",
+    async handler(args, ctx) {
+      const providerId = args?.trim() || "openai-codex";
+      if (!ctx.registry.supportsOAuth(providerId)) {
+        return `Unsupported OAuth provider: ${providerId}. Currently only 'openai-codex' is supported.`;
+      }
+      const { loginOpenAICodex } = await import("../oauth/openai-codex.js");
+      const tokens = await loginOpenAICodex({
+        onStatus: (msg) => ctx.addMessage("assistant", msg),
+      });
+      ctx.registry.getAuthStorage().set(providerId, {
+        type: "oauth",
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        expiresAt: tokens.expiresAt,
+        idToken: tokens.idToken,
+        accountId: tokens.accountId,
+      });
+
+      await ctx.registry.prepareProvider(providerId);
+      ctx.registry.setDefault(providerId);
+
+      const provider = ctx.registry.getConfigured().find((item) => item.id === providerId);
+      const discoveredModels = provider ? await ctx.registry.listModels(provider) : [];
+      const defaultModel = discoveredModels[0]?.id || ctx.registry.getDefaultModel(providerId);
+      if (!defaultModel) {
+        return `OpenAI Codex OAuth login succeeded, but no default model is configured for ${providerId}.`;
+      }
+
+      const switched = switchToProviderModel(providerId, defaultModel, ctx);
+      if (!switched) {
+        return `OpenAI Codex OAuth login succeeded, but the provider could not be activated. Tokens saved to ${ctx.registry.getAuthStorage().getPath()}`;
+      }
+
+      return `OpenAI Codex OAuth login successful. Switched to ${displayModel(ctx.agent.model)}. Account: ${tokens.accountId || "unknown"}. Tokens saved to ${ctx.registry.getAuthStorage().getPath()}`;
     },
   },
   {
@@ -99,12 +173,10 @@ export const builtinSlashCommands: SlashCommand[] = [
       }
       const defaultProvider = ctx.registry.getDefault()?.id || "openrouter";
       const next = args.includes(":") ? args : encodeModel(defaultProvider, args);
+      const { providerId } = decodeModel(next);
       ctx.agent.model = next;
-      ctx.agent.providerId = defaultProvider;
-      userConfig.pushRecentModel(next);
-      if (ctx.sessionManager) {
-        ctx.sessionManager.setMetadata({ model: next });
-      }
+      ctx.agent.providerId = providerId || defaultProvider;
+      persistSelectedModel(next, ctx);
       return `Model switched to ${displayModel(next)}.`;
     },
   },
@@ -120,9 +192,39 @@ export const builtinSlashCommands: SlashCommand[] = [
       if (!provider) {
         return "No provider configured. Use /provider --add <id> first.";
       }
+      if (ctx.registry.getModelConfig().hasProvider(provider.id)) {
+        return `API key for ${provider.name} is managed in ~/.my-agent/models.json. Please edit that file directly.`;
+      }
       ctx.registry.updateProviderKey(provider.id, args);
       ctx.agent.setProvider(ctx.createProvider(args, provider.baseURL));
+      ctx.agent.providerId = provider.id;
       return `API key updated for ${provider.name} to ${maskKey(args)}.`;
+    },
+  },
+  {
+    name: "logout",
+    description: "Remove OAuth credentials for a provider. Usage: /logout [openai-codex]",
+    async handler(args, ctx) {
+      const providerId = args?.trim() || "openai-codex";
+      if (!ctx.registry.getAuthStorage().has(providerId)) {
+        return `No OAuth credentials found for ${providerId}.`;
+      }
+      ctx.registry.getAuthStorage().remove(providerId);
+
+      const fallback = ctx.registry.getDefault();
+      if (fallback?.apiKey) {
+        const fallbackModel = ctx.registry.getDefaultModel(fallback.id);
+        if (fallbackModel) {
+          switchToProviderModel(fallback.id, fallbackModel, ctx);
+          return `OAuth credentials for ${providerId} removed. Switched to ${fallback.name}.`;
+        }
+        ctx.agent.setProvider(ctx.createProvider(fallback.apiKey, fallback.baseURL));
+        ctx.agent.providerId = fallback.id;
+      } else if (ctx.agent.providerId === providerId) {
+        ctx.agent.providerId = "";
+      }
+
+      return `OAuth credentials for ${providerId} removed.`;
     },
   },
   {

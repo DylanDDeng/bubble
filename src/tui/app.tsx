@@ -103,7 +103,8 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
     setPickerMode(null);
   }, [agent, addMessage, sessionManager, userConfig, safeRegistry]);
 
-  const handleProviderSelect = useCallback((providerId: string) => {
+  const handleProviderSelect = useCallback(async (providerId: string) => {
+    await safeRegistry.prepareProvider(providerId);
     const providers = safeRegistry.getConfigured();
     const p = providers.find((x) => x.id === providerId);
     if (!p) {
@@ -166,6 +167,13 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
           }
           return;
         }
+      }
+
+      const activeProviderId = agent.providerId || safeRegistry.getDefault()?.id;
+      const hasActiveProvider = !!activeProviderId && safeRegistry.getEnabled().some((provider) => provider.id === activeProviderId);
+      if (!hasActiveProvider) {
+        addMessage("error", "No provider configured. Use /login for ChatGPT or /provider --add <id> before sending a prompt.");
+        return;
       }
 
       setMessages((prev) => [...prev, { role: "user", content: input }]);

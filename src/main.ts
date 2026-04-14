@@ -6,7 +6,7 @@ import chalk from "chalk";
 import { Agent } from "./agent.js";
 import { parseArgs, printHelp } from "./cli.js";
 import { UserConfig } from "./config.js";
-import { createProviderInstance } from "./provider.js";
+import { createProviderInstance, createUnavailableProvider } from "./provider.js";
 import { ProviderRegistry, displayModel, encodeModel, decodeModel } from "./provider-registry.js";
 import { SessionManager } from "./session.js";
 import { buildSystemPrompt } from "./system-prompt.js";
@@ -23,6 +23,7 @@ async function main() {
 
   const userConfig = new UserConfig();
   const registry = new ProviderRegistry(userConfig);
+  const printMode = args.print || !!args.prompt;
 
   // Ensure at least one provider is configured (backward compatible)
   let providers = registry.getConfigured();
@@ -35,17 +36,23 @@ async function main() {
   }
 
   if (providers.length === 0) {
-    console.error(chalk.red("Error: No provider configured. Use /provider --add <id> in the TUI or set OPENROUTER_API_KEY."));
-    process.exit(1);
+    if (printMode) {
+      console.error(chalk.red("Error: No provider configured. Start interactive mode and use /login or /provider --add <id>."));
+      process.exit(1);
+    }
+    console.log(chalk.dim("No provider configured yet. Start with /login for ChatGPT or /provider --add <id> for an API key."));
   }
 
-  const defaultProvider = registry.getDefault()!;
+  const defaultProvider = registry.getDefault();
+  const unavailableProviderMessage = "No provider configured. Use /login for ChatGPT or /provider --add <id> before sending a prompt.";
 
-  const provider = createProviderInstance({
-    apiKey: defaultProvider.apiKey,
-    baseURL: defaultProvider.baseURL,
-    reasoning: args.reasoning,
-  });
+  const provider = defaultProvider
+    ? createProviderInstance({
+        apiKey: defaultProvider.apiKey,
+        baseURL: defaultProvider.baseURL,
+        reasoning: args.reasoning,
+      })
+    : createUnavailableProvider(unavailableProviderMessage);
   const createProvider = (apiKey: string, baseURL: string) =>
     createProviderInstance({ apiKey, baseURL, reasoning: args.reasoning });
 
@@ -60,16 +67,23 @@ async function main() {
 
   // Model resolution fallback:
   // 1. CLI flag  2. Session metadata  3. Built-in default
-  const cliModel = args.model.includes(":") ? args.model : encodeModel(defaultProvider.id, args.model);
+  const fallbackProviderId = defaultProvider?.id || "openai-codex";
+  const fallbackModelId = registry.getDefaultModel(fallbackProviderId) || args.model;
+  const cliModel = args.model.includes(":") ? args.model : encodeModel(fallbackProviderId, fallbackModelId);
   const sessionModel = sessionManager?.getMetadata().model;
   const effectiveModel = sessionModel ? sessionModel : cliModel;
   const { providerId: effectiveProviderId, modelId: effectiveModelId } = decodeModel(effectiveModel);
-  const activeProviderId = effectiveProviderId || defaultProvider.id;
+  const activeProviderId = effectiveProviderId || fallbackProviderId;
+  if (registry.supportsOAuth(activeProviderId) && registry.getAuthStorage().has(activeProviderId)) {
+    await registry.prepareProvider(activeProviderId);
+  }
   const activeProvider = registry.getConfigured().find((p) => p.id === activeProviderId) || defaultProvider;
   const activeModel = encodeModel(activeProviderId, effectiveModelId);
 
   const agent = new Agent({
-    provider: createProvider(activeProvider.apiKey, activeProvider.baseURL),
+    provider: activeProvider
+      ? createProvider(activeProvider.apiKey, activeProvider.baseURL)
+      : provider,
     providerId: activeProviderId,
     model: activeModel,
     tools,

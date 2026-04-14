@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { Box, Text, useInput, useStdout } from "ink";
 import { theme } from "./theme.js";
-import { ProviderRegistry, encodeModel, displayModel, type ModelInfo } from "../provider-registry.js";
+import { ProviderRegistry, encodeModel, decodeModel, displayModel, type ModelInfo } from "../provider-registry.js";
 
 interface Option {
   id: string;
   label: string;
   group: string;
+  providerBadge: string;
 }
 
 export interface ModelPickerProps {
@@ -16,8 +17,6 @@ export interface ModelPickerProps {
   onSelect: (model: string) => void;
   onCancel: () => void;
 }
-
-const DEFAULT_GROUP_LIMIT = 6;
 
 export function ModelPicker({ registry, current, recent, onSelect, onCancel }: ModelPickerProps) {
   const { stdout } = useStdout();
@@ -40,10 +39,12 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
       for (const m of recent.slice(0, 5)) {
         if (seen.has(m)) continue;
         seen.add(m);
-        opts.push({ id: m, label: displayModel(m), group: "Recent" });
+        const { providerId } = decodeModel(m);
+        const provider = enabled.find((p) => p.id === providerId);
+        opts.push({ id: m, label: displayModel(m), group: "Recent", providerBadge: provider?.name || providerId || "" });
       }
 
-      // Per-provider models
+      // Per-provider models (flattened, pi-mono style)
       for (const provider of enabled) {
         const models = await registry.listModels(provider);
         for (const m of models) {
@@ -54,12 +55,15 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
             id: fullId,
             label: m.name,
             group: provider.name,
+            providerBadge: provider.name,
           });
         }
       }
 
       if (!seen.has(current)) {
-        opts.unshift({ id: current, label: displayModel(current), group: "Current" });
+        const { providerId } = decodeModel(current);
+        const provider = enabled.find((p) => p.id === providerId);
+        opts.unshift({ id: current, label: displayModel(current), group: "Current", providerBadge: provider?.name || providerId || "" });
       }
 
       if (!cancelled) {
@@ -76,21 +80,11 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
   }, [registry, current, recent]);
 
   const options = useMemo(() => {
-    if (!query.trim()) {
-      // Without query: limit each group to DEFAULT_GROUP_LIMIT
-      const counts = new Map<string, number>();
-      return rawOptions.filter((opt) => {
-        if (opt.group === "Recent" || opt.group === "Current") return true;
-        const count = counts.get(opt.group) || 0;
-        if (count < DEFAULT_GROUP_LIMIT) {
-          counts.set(opt.group, count + 1);
-          return true;
-        }
-        return false;
-      });
-    }
+    if (!query.trim()) return rawOptions;
     const q = query.toLowerCase();
-    return rawOptions.filter((opt) => opt.label.toLowerCase().includes(q) || opt.group.toLowerCase().includes(q));
+    return rawOptions.filter((opt) =>
+      opt.label.toLowerCase().includes(q) || opt.providerBadge.toLowerCase().includes(q)
+    );
   }, [rawOptions, query]);
 
   useInput((input, key) => {
@@ -132,7 +126,7 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
   const start = Math.max(0, Math.min(selectedIndex, options.length - maxVisible));
   const visible = options.slice(start, start + maxVisible);
 
-  let lastGroup = "";
+
 
   return (
     <Box flexDirection="column" marginY={1}>
@@ -152,22 +146,22 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
           {visible.map((opt, i) => {
             const actualIndex = start + i;
             const isSelected = actualIndex === selectedIndex;
-            const showGroup = opt.group !== lastGroup;
-            lastGroup = opt.group;
             return (
-              <Box key={opt.id} flexDirection="column">
-                {showGroup && (
+              <Box key={opt.id}>
+                <Text color={isSelected ? theme.accent : undefined}>
+                  {isSelected ? "> " : "  "}
+                  {opt.label}
+                </Text>
+                <Box marginLeft={1}>
                   <Text color={theme.muted} dimColor>
-                    {opt.group}
-                  </Text>
-                )}
-                <Box>
-                  <Text color={isSelected ? theme.accent : undefined}>
-                    {isSelected ? "> " : "  "}
-                    {opt.label}
-                    {opt.id === current ? " (current)" : ""}
+                    {opt.providerBadge}
                   </Text>
                 </Box>
+                {opt.id === current && (
+                  <Box marginLeft={1}>
+                    <Text color={theme.accent}>●</Text>
+                  </Box>
+                )}
               </Box>
             );
           })}
