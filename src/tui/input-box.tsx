@@ -176,27 +176,6 @@ export function InputBox({ onSubmit, disabled }: InputBoxProps) {
 
   return (
     <Box flexDirection="column">
-      {showSuggestions && (
-        <Box flexDirection="column" marginBottom={1}>
-          {suggestions.map((cmd, i) => (
-            <Box key={cmd.name} height={1}>
-              <Text>
-                {i === selectedIndex ? (
-                  <>
-                    <Text backgroundColor="white" color="black">{` ${cmd.name.padEnd(16)} `}</Text>
-                    <Text dimColor> {cmd.description}</Text>
-                  </>
-                ) : (
-                  <>
-                    <Text>{`  ${cmd.name.padEnd(16)} `}</Text>
-                    <Text dimColor> {cmd.description}</Text>
-                  </>
-                )}
-              </Text>
-            </Box>
-          ))}
-        </Box>
-      )}
       <Text>{topBorder.slice(0, contentWidth)}</Text>
       <Box flexDirection="column" paddingX={PADDING_X}>
         {displayedLines.map(({ text: line, index }) => {
@@ -224,6 +203,27 @@ export function InputBox({ onSubmit, disabled }: InputBoxProps) {
         )}
       </Box>
       <Text>{bottomBorder.slice(0, contentWidth)}</Text>
+      {showSuggestions && (
+        <Box flexDirection="column" marginTop={1}>
+          {suggestions.map((cmd, i) => (
+            <Box key={cmd.name} height={1}>
+              <Text>
+                {i === selectedIndex ? (
+                  <>
+                    <Text backgroundColor="white" color="black">{` ${cmd.name.padEnd(16)} `}</Text>
+                    <Text dimColor> {cmd.description}</Text>
+                  </>
+                ) : (
+                  <>
+                    <Text>{`  ${cmd.name.padEnd(16)} `}</Text>
+                    <Text dimColor> {cmd.description}</Text>
+                  </>
+                )}
+              </Text>
+            </Box>
+          ))}
+        </Box>
+      )}
     </Box>
   );
 }
