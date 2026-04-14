@@ -6,6 +6,7 @@
 import chalk from "chalk";
 import { Agent } from "./agent.js";
 import { parseArgs, printHelp } from "./cli.js";
+import { UserConfig, normalizeModel, displayModel } from "./config.js";
 import { createOpenRouterProvider } from "./provider.js";
 import { SessionManager } from "./session.js";
 import { buildSystemPrompt } from "./system-prompt.js";
@@ -26,6 +27,8 @@ async function main() {
     process.exit(1);
   }
 
+  const userConfig = new UserConfig();
+
   const provider = createOpenRouterProvider({ apiKey, reasoning: args.reasoning });
   const tools = createAllTools(args.cwd);
   const systemPrompt = buildSystemPrompt({ workingDir: args.cwd });
@@ -36,9 +39,18 @@ async function main() {
     sessionManager = SessionManager.create(args.cwd, args.sessionName);
   }
 
+  // Model resolution fallback (opencode-style):
+  // 1. CLI flag  2. Session metadata  3. User config default  4. Built-in default
+  const cliModel = normalizeModel(args.model);
+  const sessionModel = sessionManager?.getMetadata().model;
+  const configDefault = userConfig.getDefaultModel();
+  const effectiveModel = sessionModel
+    ? normalizeModel(sessionModel)
+    : cliModel;
+
   const agent = new Agent({
     provider,
-    model: args.model,
+    model: effectiveModel,
     tools,
     systemPrompt,
     temperature: 0.2,
@@ -50,6 +62,16 @@ async function main() {
     },
   });
 
+  // Sync model back to session metadata if it came from CLI or config default
+  if (sessionManager) {
+    sessionManager.setMetadata({ model: agent.model });
+  }
+
+  // Push to recent if it came from CLI flag
+  if (cliModel === agent.model) {
+    userConfig.pushRecentModel(agent.model);
+  }
+
   // Restore session if requested
   if (sessionManager) {
     const history = sessionManager.getMessages();
@@ -57,6 +79,10 @@ async function main() {
       agent.messages = [{ role: "system", content: systemPrompt }, ...history];
       console.log(chalk.dim(`Resumed session: ${sessionManager.getSessionFile()}`));
     }
+  }
+
+  if (configDefault && configDefault !== agent.model) {
+    console.log(chalk.dim(`Default model in config: ${displayModel(configDefault)}`));
   }
 
   // Print mode: single prompt, then exit

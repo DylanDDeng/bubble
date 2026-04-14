@@ -5,16 +5,21 @@
  * For simplicity, this version uses a flat append-only log.
  */
 
-import { mkdirSync, appendFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
+import { mkdirSync, appendFileSync, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import type { Message } from "./types.js";
 
+export interface SessionMetadata {
+  model?: string;
+}
+
 export interface SessionEntry {
   id: string;
-  type: "message" | "compaction";
+  type: "metadata" | "message" | "compaction";
   data?: Message;
   summary?: string;
+  metadata?: SessionMetadata;
   timestamp: number;
 }
 
@@ -63,6 +68,48 @@ export class SessionManager {
     }
   }
 
+  private persist(entry: SessionEntry) {
+    const dir = dirname(this.sessionFile);
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
+    }
+    appendFileSync(this.sessionFile, JSON.stringify(entry) + "\n");
+    this.flushed = true;
+  }
+
+  private rewrite(entries: SessionEntry[]) {
+    const dir = dirname(this.sessionFile);
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
+    }
+    writeFileSync(this.sessionFile, entries.map((e) => JSON.stringify(e)).join("\n") + "\n");
+    this.entries = entries;
+    this.flushed = true;
+  }
+
+  getMetadata(): SessionMetadata {
+    const entry = this.entries.find((e) => e.type === "metadata");
+    return entry?.metadata ?? {};
+  }
+
+  setMetadata(metadata: SessionMetadata) {
+    const idx = this.entries.findIndex((e) => e.type === "metadata");
+    const entry: SessionEntry = {
+      id: "metadata",
+      type: "metadata",
+      metadata,
+      timestamp: Date.now(),
+    };
+    if (idx >= 0) {
+      const next = [...this.entries];
+      next[idx] = entry;
+      this.rewrite(next);
+    } else {
+      this.entries.unshift(entry);
+      this.rewrite(this.entries);
+    }
+  }
+
   appendMessage(message: Message) {
     const entry: SessionEntry = {
       id: `${this.entries.length + 1}`,
@@ -83,15 +130,6 @@ export class SessionManager {
     };
     this.entries.push(entry);
     this.persist(entry);
-  }
-
-  private persist(entry: SessionEntry) {
-    const dir = dirname(this.sessionFile);
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
-    }
-    appendFileSync(this.sessionFile, JSON.stringify(entry) + "\n");
-    this.flushed = true;
   }
 
   getMessages(): Message[] {

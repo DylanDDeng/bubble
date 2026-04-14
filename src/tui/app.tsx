@@ -90,6 +90,7 @@ export function App({ agent, args, sessionManager }: AppProps) {
           addMessage,
           clearMessages,
           exit,
+          sessionManager,
         });
         if (handled) {
           if (result) {

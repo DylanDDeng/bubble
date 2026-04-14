@@ -1,4 +1,7 @@
+import { UserConfig, normalizeModel, displayModel, POPULAR_MODELS } from "../config.js";
 import type { SlashCommand } from "./types.js";
+
+const userConfig = new UserConfig();
 
 export const builtinSlashCommands: SlashCommand[] = [
   {
@@ -38,14 +41,48 @@ export const builtinSlashCommands: SlashCommand[] = [
   },
   {
     name: "model",
-    description: "Switch model (e.g. /model z-ai/glm-5.1)",
+    description: "Switch model (e.g. /model z-ai/glm-5.1). Use /model --list to see options.",
     async handler(args, ctx) {
+      const current = ctx.agent.model;
+      const currentDisplay = displayModel(current);
+
       if (!args) {
-        return "Usage: /model <model-id>";
+        const lines = [
+          `Current model: ${currentDisplay}`,
+          `Default model: ${displayModel(userConfig.getDefaultModel() || "openrouter/z-ai/glm-5.1")}`,
+        ];
+        const recent = userConfig.getRecentModels();
+        if (recent.length > 0) {
+          lines.push("Recent models:");
+          for (const m of recent.slice(0, 5)) {
+            const marker = m === current ? "* " : "  ";
+            lines.push(`${marker}${displayModel(m)}`);
+          }
+        }
+        lines.push("Run `/model --list` to see popular models.");
+        return lines.join("\n");
       }
-      // This is a lightweight override; in a full app you'd rebuild the agent
-      (ctx.agent as any).model = args;
-      return `Model switched to ${args}. Note: provider auth is unchanged.`;
+
+      if (args === "--list" || args === "-l") {
+        const lines = ["Popular models:"];
+        for (const m of POPULAR_MODELS) {
+          const marker = m === current ? "* " : "  ";
+          lines.push(`${marker}${displayModel(m)}`);
+        }
+        lines.push("Run `/model <model-id>` to switch.");
+        return lines.join("\n");
+      }
+
+      const next = normalizeModel(args);
+      ctx.agent.model = next;
+      userConfig.pushRecentModel(next);
+
+      // Persist to session if available
+      if (ctx.sessionManager) {
+        ctx.sessionManager.setMetadata({ model: next });
+      }
+
+      return `Model switched to ${displayModel(next)}.`;
     },
   },
   {

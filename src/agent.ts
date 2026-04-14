@@ -20,7 +20,7 @@ export interface AgentOptions {
 export class Agent {
   messages: Message[] = [];
   private provider: Provider;
-  private model: string;
+  private _model: string;
   private tools: Map<string, ToolRegistryEntry> = new Map();
   private temperature: number;
   private reasoning?: boolean;
@@ -28,7 +28,7 @@ export class Agent {
 
   constructor(options: AgentOptions) {
     this.provider = options.provider;
-    this.model = options.model;
+    this._model = options.model;
     this.temperature = options.temperature ?? 0.2;
     this.reasoning = options.reasoning;
     this.onMessageAppend = options.onMessageAppend;
@@ -40,6 +40,14 @@ export class Agent {
     for (const tool of options.tools) {
       this.tools.set(tool.name, tool);
     }
+  }
+
+  get model(): string {
+    return this._model;
+  }
+
+  set model(value: string) {
+    this._model = value;
   }
 
   async *run(userInput: string, cwd: string): AsyncIterable<AgentEvent> {
