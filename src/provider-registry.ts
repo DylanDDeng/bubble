@@ -47,12 +47,7 @@ export class ProviderRegistry {
   }
 
   getConfigured(): ProviderProfile[] {
-    const providers = this.config.getProviders();
-    if (!providers || providers.length === 0) {
-      // Backward-compatible fallback: create OpenRouter from legacy apiKey
-      return [{ ...BUILTIN_PROVIDERS[0], apiKey: this.config.getApiKey() || "", enabled: true }];
-    }
-    return providers;
+    return this.config.getProviders() ?? [];
   }
 
   getEnabled(): ProviderProfile[] {

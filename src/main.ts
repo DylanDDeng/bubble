@@ -34,11 +34,12 @@ async function main() {
     }
   }
 
-  const defaultProvider = registry.getDefault();
-  if (!defaultProvider) {
+  if (providers.length === 0) {
     console.error(chalk.red("Error: No provider configured. Use /provider --add <id> in the TUI or set OPENROUTER_API_KEY."));
     process.exit(1);
   }
+
+  const defaultProvider = registry.getDefault()!;
 
   const provider = createProviderInstance({
     apiKey: defaultProvider.apiKey,
