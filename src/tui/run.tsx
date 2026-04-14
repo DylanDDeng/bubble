@@ -3,8 +3,14 @@ import React from "react";
 import type { Agent } from "../agent.js";
 import type { CliArgs } from "../cli.js";
 import type { SessionManager } from "../session.js";
+import type { Provider } from "../types.js";
 import { App } from "./app.js";
 
-export function runTui(agent: Agent, args: CliArgs, sessionManager?: SessionManager) {
-  render(<App agent={agent} args={args} sessionManager={sessionManager} />);
+export function runTui(
+  agent: Agent,
+  args: CliArgs,
+  sessionManager?: SessionManager,
+  createProvider?: (apiKey: string) => Provider
+) {
+  render(<App agent={agent} args={args} sessionManager={sessionManager} createProvider={createProvider} />);
 }

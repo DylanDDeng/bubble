@@ -1,5 +1,6 @@
 import type { Agent } from "../agent.js";
 import type { SessionManager } from "../session.js";
+import type { Provider } from "../types.js";
 
 export interface SlashCommandContext {
   agent: Agent;
@@ -7,6 +8,7 @@ export interface SlashCommandContext {
   clearMessages: () => void;
   exit: () => void;
   sessionManager?: SessionManager;
+  createProvider: (apiKey: string) => Provider;
 }
 
 export interface SlashCommand {

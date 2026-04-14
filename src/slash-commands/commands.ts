@@ -1,4 +1,4 @@
-import { UserConfig, normalizeModel, displayModel, POPULAR_MODELS } from "../config.js";
+import { UserConfig, normalizeModel, displayModel, maskKey, POPULAR_MODELS } from "../config.js";
 import type { SlashCommand } from "./types.js";
 
 const userConfig = new UserConfig();
@@ -83,6 +83,31 @@ export const builtinSlashCommands: SlashCommand[] = [
       }
 
       return `Model switched to ${displayModel(next)}.`;
+    },
+  },
+  {
+    name: "key",
+    description: "Set or view API key (e.g. /key sk-or-v1-xxx). Omit to see masked current key.",
+    async handler(args, ctx) {
+      if (!args) {
+        const envKey = process.env.OPENROUTER_API_KEY;
+        const configKey = userConfig.getApiKey();
+        const lines = [];
+        if (envKey) {
+          lines.push(`Environment key: ${maskKey(envKey)}`);
+        }
+        if (configKey) {
+          lines.push(`Config key: ${maskKey(configKey)}`);
+        }
+        if (!envKey && !configKey) {
+          lines.push("No API key configured.");
+          lines.push("Set one with: /key <your-openrouter-key>");
+        }
+        return lines.join("\n");
+      }
+      userConfig.setApiKey(args);
+      ctx.agent.setProvider(ctx.createProvider(args));
+      return `API key updated to ${maskKey(args)} and active for the next message.`;
     },
   },
   {

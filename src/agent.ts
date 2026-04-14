@@ -50,6 +50,10 @@ export class Agent {
     this._model = value;
   }
 
+  setProvider(provider: Provider) {
+    this.provider = provider;
+  }
+
   async *run(userInput: string, cwd: string): AsyncIterable<AgentEvent> {
     this.appendMessage({ role: "user", content: userInput });
 

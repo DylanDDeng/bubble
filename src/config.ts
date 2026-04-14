@@ -14,6 +14,7 @@ const CONFIG_PATH = join(homedir(), ".my-agent", "config.json");
 export interface UserConfigData {
   defaultModel?: string;
   recentModels?: string[];
+  apiKey?: string;
 }
 
 export class UserConfig {
@@ -60,6 +61,21 @@ export class UserConfig {
     this.data.recentModels = uniq.slice(0, 10);
     this.save();
   }
+
+  getApiKey(): string | undefined {
+    return this.data.apiKey;
+  }
+
+  setApiKey(key: string) {
+    this.data.apiKey = key;
+    this.save();
+  }
+}
+
+/** Mask an API key for safe display. */
+export function maskKey(key: string): string {
+  if (key.length <= 12) return "****";
+  return key.slice(0, 6) + "..." + key.slice(-4);
 }
 
 /** Normalize a model string to "provider/model" format. */

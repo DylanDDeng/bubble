@@ -3,7 +3,7 @@ import { Box, Text, useApp, useInput } from "ink";
 import type { Agent } from "../agent.js";
 import type { CliArgs } from "../cli.js";
 import type { SessionManager } from "../session.js";
-import type { AgentEvent, Message } from "../types.js";
+import type { AgentEvent, Message, Provider } from "../types.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import { InputBox } from "./input-box.js";
 import { MessageList, type DisplayMessage, type DisplayToolCall } from "./message-list.js";
@@ -13,6 +13,7 @@ interface AppProps {
   agent: Agent;
   args: CliArgs;
   sessionManager?: SessionManager;
+  createProvider?: (apiKey: string) => Provider;
 }
 
 function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] {
@@ -57,7 +58,7 @@ function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] 
   return result;
 }
 
-export function App({ agent, args, sessionManager }: AppProps) {
+export function App({ agent, args, sessionManager, createProvider }: AppProps) {
   const { exit } = useApp();
   const [messages, setMessages] = useState<DisplayMessage[]>(() => reconstructDisplayMessages(agent.messages));
   const [isRunning, setIsRunning] = useState(false);
@@ -91,6 +92,9 @@ export function App({ agent, args, sessionManager }: AppProps) {
           clearMessages,
           exit,
           sessionManager,
+          createProvider: createProvider ?? (() => {
+            throw new Error("Provider creation not available");
+          }),
         });
         if (handled) {
           if (result) {

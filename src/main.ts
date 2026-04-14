@@ -21,15 +21,16 @@ async function main() {
     process.exit(0);
   }
 
-  const apiKey = args.apiKey || process.env.OPENROUTER_API_KEY;
+  const userConfig = new UserConfig();
+
+  const apiKey = args.apiKey || process.env.OPENROUTER_API_KEY || userConfig.getApiKey();
   if (!apiKey) {
-    console.error(chalk.red("Error: OPENROUTER_API_KEY not set. Use -k or set the environment variable."));
+    console.error(chalk.red("Error: OPENROUTER_API_KEY not set. Use -k, set the environment variable, or use /key in the TUI."));
     process.exit(1);
   }
 
-  const userConfig = new UserConfig();
-
   const provider = createOpenRouterProvider({ apiKey, reasoning: args.reasoning });
+  const createProvider = (key: string) => createOpenRouterProvider({ apiKey: key, reasoning: args.reasoning });
   const tools = createAllTools(args.cwd);
   const systemPrompt = buildSystemPrompt({ workingDir: args.cwd });
 
@@ -110,7 +111,7 @@ async function main() {
 
   // Interactive mode: use Ink TUI
   const { runTui } = await import("./tui/run.js");
-  runTui(agent, args, sessionManager);
+  runTui(agent, args, sessionManager, createProvider);
 }
 
 async function readPipedStdin(): Promise<string | undefined> {
