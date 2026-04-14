@@ -10,6 +10,7 @@ export const theme = {
   warning: "yellow",
 
   // UI chrome
+  accent: "cyan",
   border: "gray",
   borderActive: "cyan",
   muted: "gray",

@@ -10,6 +10,7 @@ import { highlightCode } from "./code-highlight.js";
 
 type Block =
   | { type: "paragraph"; lines: string[] }
+  | { type: "heading"; level: number; text: string }
   | { type: "code"; lang: string; lines: string[] }
   | { type: "table"; headers: string[]; rows: string[][] };
 
@@ -53,6 +54,14 @@ function parseBlocks(text: string): Block[] {
       } else {
         blocks.push({ type: "paragraph", lines: tableLines });
       }
+      continue;
+    }
+
+    // Heading
+    const headingMatch = line.match(/^(#{1,6})\s+(.*)$/);
+    if (headingMatch) {
+      blocks.push({ type: "heading", level: headingMatch[1].length, text: headingMatch[2].trim() });
+      i++;
       continue;
     }
 
@@ -245,6 +254,23 @@ function TableBlock({ headers, rows }: { headers: string[]; rows: string[][] }) 
   );
 }
 
+function HeadingBlock({ level, text }: { level: number; text: string }) {
+  const props: any = { bold: true };
+  if (level === 1) {
+    props.underline = true;
+    props.color = theme.accent;
+  } else if (level === 2) {
+    props.color = theme.accent;
+  } else if (level === 3) {
+    props.color = theme.warning;
+  }
+  return (
+    <Box marginTop={1} marginBottom={1}>
+      <Text {...props}>{text}</Text>
+    </Box>
+  );
+}
+
 export function MarkdownContent({ content }: { content: string }) {
   const blocks = React.useMemo(() => parseBlocks(content), [content]);
 
@@ -256,6 +282,9 @@ export function MarkdownContent({ content }: { content: string }) {
         }
         if (block.type === "table") {
           return <TableBlock key={i} headers={block.headers} rows={block.rows} />;
+        }
+        if (block.type === "heading") {
+          return <HeadingBlock key={i} level={block.level} text={block.text} />;
         }
         return (
           <Box key={i} flexDirection="column" marginBottom={1}>
