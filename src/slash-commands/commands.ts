@@ -1,4 +1,5 @@
-import { UserConfig, normalizeModel, displayModel, maskKey, POPULAR_MODELS } from "../config.js";
+import { UserConfig, maskKey } from "../config.js";
+import { encodeModel, displayModel, BUILTIN_PROVIDERS } from "../provider-registry.js";
 import type { SlashCommand } from "./types.js";
 
 const userConfig = new UserConfig();
@@ -40,27 +41,66 @@ export const builtinSlashCommands: SlashCommand[] = [
     },
   },
   {
+    name: "provider",
+    description: "Manage providers. /provider to open picker, /provider --add <id>, /provider --remove <id>, /provider --set <id>",
+    async handler(args, ctx) {
+      if (!args) {
+        ctx.openPicker("provider");
+        return;
+      }
+
+      const parts = args.trim().split(/\s+/);
+      const flag = parts[0];
+      const value = parts[1];
+
+      if (flag === "--add" && value) {
+        const builtin = BUILTIN_PROVIDERS.find((p) => p.id === value);
+        if (!builtin) {
+          const ids = BUILTIN_PROVIDERS.map((p) => p.id).join(", ");
+          return `Unknown provider "${value}". Supported: ${ids}`;
+        }
+        ctx.openPicker("provider");
+        return;
+      }
+
+      if (flag === "--remove" && value) {
+        ctx.registry.removeProvider(value);
+        return `Provider ${value} removed.`;
+      }
+
+      if (flag === "--set" && value) {
+        const providers = ctx.registry.getConfigured();
+        const p = providers.find((x) => x.id === value);
+        if (!p) return `Provider ${value} is not configured.`;
+        ctx.registry.setDefault(value);
+        return `Default provider set to ${p.name}.`;
+      }
+
+      if (flag === "--list") {
+        const providers = ctx.registry.getConfigured();
+        const lines = ["Configured providers:"];
+        for (const p of providers) {
+          const marker = p.id === ctx.registry.getDefault()?.id ? "* " : "  ";
+          lines.push(`${marker}${p.name} (${p.id}) ${p.enabled ? "" : "[disabled]"}`);
+        }
+        return lines.join("\n");
+      }
+
+      return `Usage: /provider [--add|--remove|--set|--list] <id>`;
+    },
+  },
+  {
     name: "model",
     description: "Switch model. Use /model <id> or just /model to open picker.",
     async handler(args, ctx) {
-      const current = ctx.agent.model;
       if (!args) {
         ctx.openPicker("model");
         return;
       }
-
-      if (args === "--list" || args === "-l") {
-        const lines = ["Popular models:"];
-        for (const m of POPULAR_MODELS) {
-          const marker = m === current ? "* " : "  ";
-          lines.push(`${marker}${displayModel(m)}`);
-        }
-        lines.push("Run `/model <model-id>` to switch.");
-        return lines.join("\n");
-      }
-
-      const next = normalizeModel(args);
+      const defaultProvider = ctx.registry.getDefault()?.id || "openrouter";
+      const next = args.includes(":") ? args : encodeModel(defaultProvider, args);
       ctx.agent.model = next;
+      ctx.agent.providerId = defaultProvider;
       userConfig.pushRecentModel(next);
       if (ctx.sessionManager) {
         ctx.sessionManager.setMetadata({ model: next });
@@ -70,15 +110,19 @@ export const builtinSlashCommands: SlashCommand[] = [
   },
   {
     name: "key",
-    description: "Set API key. Use /key <value> or just /key to open picker.",
+    description: "Set API key for the current or a specific provider. /key to open picker.",
     async handler(args, ctx) {
       if (!args) {
         ctx.openPicker("key");
         return;
       }
-      userConfig.setApiKey(args);
-      ctx.agent.setProvider(ctx.createProvider(args));
-      return `API key updated to ${maskKey(args)} and active for the next message.`;
+      const provider = ctx.registry.getDefault();
+      if (!provider) {
+        return "No provider configured. Use /provider --add <id> first.";
+      }
+      ctx.registry.updateProviderKey(provider.id, args);
+      ctx.agent.setProvider(ctx.createProvider(args, provider.baseURL));
+      return `API key updated for ${provider.name} to ${maskKey(args)}.`;
     },
   },
   {

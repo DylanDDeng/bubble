@@ -1,6 +1,7 @@
 import type { Agent } from "../agent.js";
 import type { SessionManager } from "../session.js";
 import type { Provider } from "../types.js";
+import type { ProviderRegistry } from "../provider-registry.js";
 
 export interface SlashCommandContext {
   agent: Agent;
@@ -8,8 +9,9 @@ export interface SlashCommandContext {
   clearMessages: () => void;
   exit: () => void;
   sessionManager?: SessionManager;
-  createProvider: (apiKey: string) => Provider;
-  openPicker: (mode: "model" | "key") => void;
+  createProvider: (apiKey: string, baseURL: string) => Provider;
+  openPicker: (mode: "model" | "key" | "provider") => void;
+  registry: ProviderRegistry;
 }
 
 export interface SlashCommand {

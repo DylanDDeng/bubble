@@ -1,31 +1,30 @@
 /**
- * OpenRouter Provider implementation.
+ * OpenAI-compatible Provider implementation.
  *
- * OpenRouter is fully OpenAI API compatible, so we use the openai SDK
- * but point it to https://openrouter.ai/api/v1 and pass OpenRouter-specific
- * options (e.g. reasoning).
+ * Works with OpenRouter, OpenAI, DeepSeek, Google, Groq, Together, and local OpenAI-compatible endpoints.
  */
 
 import OpenAI from "openai";
 import type { Message, Provider, StreamChunk, ToolDefinition } from "./types.js";
 
-export interface OpenRouterProviderOptions {
+export interface ProviderInstanceOptions {
   apiKey: string;
-  /** Whether to request reasoning mode (supported by z-ai/glm-5.1, etc.) */
+  baseURL: string;
+  /** Whether to request reasoning mode */
   reasoning?: boolean;
 }
 
-export function createOpenRouterProvider(options: OpenRouterProviderOptions): Provider {
+export function createProviderInstance(options: ProviderInstanceOptions): Provider {
   const client = new OpenAI({
     apiKey: options.apiKey,
-    baseURL: "https://openrouter.ai/api/v1",
+    baseURL: options.baseURL,
   });
 
   async function* streamChat(
     messages: Message[],
-    options: { model: string; tools?: ToolDefinition[]; temperature?: number; reasoning?: boolean }
+    chatOptions: { model: string; tools?: ToolDefinition[]; temperature?: number; reasoning?: boolean }
   ): AsyncIterable<StreamChunk> {
-    const tools = options.tools?.map((t) => ({
+    const tools = chatOptions.tools?.map((t) => ({
       type: "function" as const,
       function: {
         name: t.name,
@@ -35,15 +34,15 @@ export function createOpenRouterProvider(options: OpenRouterProviderOptions): Pr
     }));
 
     const body: any = {
-      model: options.model,
+      model: chatOptions.model,
       messages: messages as any,
       tools: tools && tools.length > 0 ? tools : undefined,
       tool_choice: tools && tools.length > 0 ? "auto" : undefined,
-      temperature: options.temperature ?? 0.2,
+      temperature: chatOptions.temperature ?? 0.2,
       stream: true,
     };
 
-    if (options.reasoning) {
+    if (chatOptions.reasoning) {
       body.reasoning = { enabled: true };
     }
 
@@ -69,7 +68,6 @@ export function createOpenRouterProvider(options: OpenRouterProviderOptions): Pr
       }
 
       if (delta?.content) {
-        // Some models (e.g. DeepSeek via OpenRouter) wrap reasoning in <think> tags inside content.
         const thinkMatch = delta.content.match(/<think>([\s\S]*?)<\/think>/);
         if (thinkMatch) {
           if (thinkMatch[1]) {
@@ -87,7 +85,6 @@ export function createOpenRouterProvider(options: OpenRouterProviderOptions): Pr
       if (delta?.tool_calls) {
         const tc = delta.tool_calls[0];
         if (tc.id && tc.function?.name) {
-          // New tool call starts
           currentToolCall = { id: tc.id, name: tc.function.name, args: "" };
           yield {
             type: "tool_call",
@@ -110,7 +107,6 @@ export function createOpenRouterProvider(options: OpenRouterProviderOptions): Pr
         }
       }
 
-      // Tool call end detection: OpenAI signals end via finish_reason
       const finishReason = chunk.choices[0]?.finish_reason;
       if (finishReason === "tool_calls" && currentToolCall) {
         yield {
@@ -128,13 +124,13 @@ export function createOpenRouterProvider(options: OpenRouterProviderOptions): Pr
     yield { type: "done" };
   }
 
-  async function complete(messages: Message[], options?: { model?: string; temperature?: number; reasoning?: boolean }): Promise<string> {
+  async function complete(messages: Message[], chatOptions?: { model?: string; temperature?: number; reasoning?: boolean }): Promise<string> {
     const body: any = {
-      model: options?.model ?? "z-ai/glm-5.1",
+      model: chatOptions?.model ?? "z-ai/glm-5.1",
       messages: messages as any,
-      temperature: options?.temperature ?? 0.2,
+      temperature: chatOptions?.temperature ?? 0.2,
     };
-    if (options?.reasoning) {
+    if (chatOptions?.reasoning) {
       body.reasoning = { enabled: true };
     }
     const response = await client.chat.completions.create(body);

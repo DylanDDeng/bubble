@@ -5,17 +5,19 @@ import type { CliArgs } from "../cli.js";
 import type { SessionManager } from "../session.js";
 import type { AgentEvent, Message, Provider } from "../types.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
-import { UserConfig, displayModel, maskKey } from "../config.js";
+import { UserConfig, maskKey } from "../config.js";
 import { InputBox } from "./input-box.js";
 import { MessageList, type DisplayMessage, type DisplayToolCall } from "./message-list.js";
 import { theme } from "./theme.js";
-import { ModelPicker, KeyPicker } from "./model-picker.js";
+import { ModelPicker, ProviderPicker, KeyPicker } from "./model-picker.js";
+import { ProviderRegistry, encodeModel, displayModel } from "../provider-registry.js";
 
 interface AppProps {
   agent: Agent;
   args: CliArgs;
   sessionManager?: SessionManager;
-  createProvider?: (apiKey: string) => Provider;
+  createProvider?: (apiKey: string, baseURL: string) => Provider;
+  registry?: ProviderRegistry;
 }
 
 function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] {
@@ -60,16 +62,18 @@ function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] 
   return result;
 }
 
-export function App({ agent, args, sessionManager, createProvider }: AppProps) {
+export function App({ agent, args, sessionManager, createProvider, registry }: AppProps) {
   const { exit } = useApp();
   const [messages, setMessages] = useState<DisplayMessage[]>(() => reconstructDisplayMessages(agent.messages));
   const [isRunning, setIsRunning] = useState(false);
   const [streamingContent, setStreamingContent] = useState("");
   const [streamingReasoning, setStreamingReasoning] = useState("");
   const [streamingTools, setStreamingTools] = useState<DisplayToolCall[]>([]);
-  const [pickerMode, setPickerMode] = useState<"model" | "key" | null>(null);
+  const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | null>(null);
+  const [keyProviderId, setKeyProviderId] = useState<string | null>(null);
 
   const userConfig = new UserConfig();
+  const safeRegistry = registry ?? new ProviderRegistry(userConfig);
 
   useInput((_input, key) => {
     if (key.escape && !pickerMode) {
@@ -85,26 +89,58 @@ export function App({ agent, args, sessionManager, createProvider }: AppProps) {
     setMessages([]);
   }, []);
 
-  const openPicker = useCallback((mode: "model" | "key") => {
+  const openPicker = useCallback((mode: "model" | "key" | "provider") => {
     setPickerMode(mode);
   }, []);
 
   const handleModelSelect = useCallback((model: string) => {
     agent.model = model;
+    const decoded = model.includes(":") ? model.split(":") : [agent.providerId || safeRegistry.getDefault()?.id || "openrouter", model];
+    agent.providerId = decoded[0];
     userConfig.pushRecentModel(model);
     sessionManager?.setMetadata({ model });
     addMessage("assistant", `Model switched to ${displayModel(model)}.`);
     setPickerMode(null);
-  }, [agent, addMessage, sessionManager, userConfig]);
+  }, [agent, addMessage, sessionManager, userConfig, safeRegistry]);
+
+  const handleProviderSelect = useCallback((providerId: string) => {
+    const providers = safeRegistry.getConfigured();
+    const p = providers.find((x) => x.id === providerId);
+    if (!p) {
+      addMessage("error", `Provider ${providerId} not found.`);
+      setPickerMode(null);
+      return;
+    }
+    if (!p.apiKey) {
+      setKeyProviderId(providerId);
+      setPickerMode("key");
+      return;
+    }
+    safeRegistry.setDefault(providerId);
+    agent.setProvider(createProvider!(p.apiKey, p.baseURL));
+    agent.providerId = providerId;
+    addMessage("assistant", `Switched to provider ${p.name}. Use /model to pick a model.`);
+    setPickerMode(null);
+  }, [addMessage, agent, createProvider, safeRegistry]);
 
   const handleKeySubmit = useCallback((key: string) => {
-    userConfig.setApiKey(key);
-    if (createProvider) {
-      agent.setProvider(createProvider(key));
+    const targetId = keyProviderId || safeRegistry.getDefault()?.id;
+    if (!targetId) {
+      addMessage("error", "No provider selected.");
+      setPickerMode(null);
+      setKeyProviderId(null);
+      return;
     }
-    addMessage("assistant", `API key updated to ${maskKey(key)} and active for the next message.`);
+    safeRegistry.updateProviderKey(targetId, key);
+    const p = safeRegistry.getConfigured().find((x) => x.id === targetId);
+    if (p && createProvider) {
+      agent.setProvider(createProvider(key, p.baseURL));
+      agent.providerId = targetId;
+    }
+    addMessage("assistant", `API key updated for ${p?.name || targetId} to ${maskKey(key)}.`);
     setPickerMode(null);
-  }, [agent, addMessage, createProvider, userConfig]);
+    setKeyProviderId(null);
+  }, [addMessage, agent, createProvider, keyProviderId, safeRegistry]);
 
   const handleSubmit = useCallback(
     async (input: string) => {
@@ -122,6 +158,7 @@ export function App({ agent, args, sessionManager, createProvider }: AppProps) {
             throw new Error("Provider creation not available");
           }),
           openPicker,
+          registry: safeRegistry,
         });
         if (handled) {
           if (result) {
@@ -220,8 +257,13 @@ export function App({ agent, args, sessionManager, createProvider }: AppProps) {
         setStreamingTools([]);
       }
     },
-    [agent, args.cwd, openPicker, createProvider]
+    [agent, args.cwd, openPicker, createProvider, safeRegistry]
   );
+
+  const currentProviderId = agent.providerId || safeRegistry.getDefault()?.id;
+  const keyTarget = keyProviderId
+    ? safeRegistry.getConfigured().find((p) => p.id === keyProviderId)
+    : safeRegistry.getDefault();
 
   return (
     <Box flexDirection="column" height="100%">
@@ -239,16 +281,29 @@ export function App({ agent, args, sessionManager, createProvider }: AppProps) {
         />
         {pickerMode === "model" && (
           <ModelPicker
+            registry={safeRegistry}
             current={agent.model}
             recent={userConfig.getRecentModels()}
             onSelect={handleModelSelect}
             onCancel={() => setPickerMode(null)}
           />
         )}
-        {pickerMode === "key" && (
-          <KeyPicker
-            onSubmit={handleKeySubmit}
+        {pickerMode === "provider" && (
+          <ProviderPicker
+            providers={safeRegistry.getConfigured().map((p) => ({ id: p.id, name: p.name, enabled: p.enabled }))}
+            current={currentProviderId}
+            onSelect={handleProviderSelect}
             onCancel={() => setPickerMode(null)}
+          />
+        )}
+        {pickerMode === "key" && keyTarget && (
+          <KeyPicker
+            providerName={keyTarget.name}
+            onSubmit={handleKeySubmit}
+            onCancel={() => {
+              setPickerMode(null);
+              setKeyProviderId(null);
+            }}
           />
         )}
       </Box>

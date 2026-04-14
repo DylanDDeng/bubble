@@ -2,12 +2,12 @@
  * Main entry point - assembles all layers and runs the agent.
  */
 
-
 import chalk from "chalk";
 import { Agent } from "./agent.js";
 import { parseArgs, printHelp } from "./cli.js";
-import { UserConfig, normalizeModel, displayModel } from "./config.js";
-import { createOpenRouterProvider } from "./provider.js";
+import { UserConfig } from "./config.js";
+import { createProviderInstance } from "./provider.js";
+import { ProviderRegistry, displayModel, encodeModel, decodeModel } from "./provider-registry.js";
 import { SessionManager } from "./session.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { createAllTools } from "./tools/index.js";
@@ -22,15 +22,32 @@ async function main() {
   }
 
   const userConfig = new UserConfig();
+  const registry = new ProviderRegistry(userConfig);
 
-  const apiKey = args.apiKey || process.env.OPENROUTER_API_KEY || userConfig.getApiKey();
-  if (!apiKey) {
-    console.error(chalk.red("Error: OPENROUTER_API_KEY not set. Use -k, set the environment variable, or use /key in the TUI."));
+  // Ensure at least one provider is configured (backward compatible)
+  let providers = registry.getConfigured();
+  if (providers.length === 0) {
+    const apiKey = args.apiKey || process.env.OPENROUTER_API_KEY || userConfig.getApiKey();
+    if (apiKey) {
+      registry.addProvider("openrouter", apiKey);
+      providers = registry.getConfigured();
+    }
+  }
+
+  const defaultProvider = registry.getDefault();
+  if (!defaultProvider) {
+    console.error(chalk.red("Error: No provider configured. Use /provider --add <id> in the TUI or set OPENROUTER_API_KEY."));
     process.exit(1);
   }
 
-  const provider = createOpenRouterProvider({ apiKey, reasoning: args.reasoning });
-  const createProvider = (key: string) => createOpenRouterProvider({ apiKey: key, reasoning: args.reasoning });
+  const provider = createProviderInstance({
+    apiKey: defaultProvider.apiKey,
+    baseURL: defaultProvider.baseURL,
+    reasoning: args.reasoning,
+  });
+  const createProvider = (apiKey: string, baseURL: string) =>
+    createProviderInstance({ apiKey, baseURL, reasoning: args.reasoning });
+
   const tools = createAllTools(args.cwd);
   const systemPrompt = buildSystemPrompt({ workingDir: args.cwd });
 
@@ -40,18 +57,20 @@ async function main() {
     sessionManager = SessionManager.create(args.cwd, args.sessionName);
   }
 
-  // Model resolution fallback (opencode-style):
-  // 1. CLI flag  2. Session metadata  3. User config default  4. Built-in default
-  const cliModel = normalizeModel(args.model);
+  // Model resolution fallback:
+  // 1. CLI flag  2. Session metadata  3. Built-in default
+  const cliModel = args.model.includes(":") ? args.model : encodeModel(defaultProvider.id, args.model);
   const sessionModel = sessionManager?.getMetadata().model;
-  const configDefault = userConfig.getDefaultModel();
-  const effectiveModel = sessionModel
-    ? normalizeModel(sessionModel)
-    : cliModel;
+  const effectiveModel = sessionModel ? sessionModel : cliModel;
+  const { providerId: effectiveProviderId, modelId: effectiveModelId } = decodeModel(effectiveModel);
+  const activeProviderId = effectiveProviderId || defaultProvider.id;
+  const activeProvider = registry.getConfigured().find((p) => p.id === activeProviderId) || defaultProvider;
+  const activeModel = encodeModel(activeProviderId, effectiveModelId);
 
   const agent = new Agent({
-    provider,
-    model: effectiveModel,
+    provider: createProvider(activeProvider.apiKey, activeProvider.baseURL),
+    providerId: activeProviderId,
+    model: activeModel,
     tools,
     systemPrompt,
     temperature: 0.2,
@@ -63,12 +82,10 @@ async function main() {
     },
   });
 
-  // Sync model back to session metadata if it came from CLI or config default
   if (sessionManager) {
     sessionManager.setMetadata({ model: agent.model });
   }
 
-  // Push to recent if it came from CLI flag
   if (cliModel === agent.model) {
     userConfig.pushRecentModel(agent.model);
   }
@@ -80,10 +97,6 @@ async function main() {
       agent.messages = [{ role: "system", content: systemPrompt }, ...history];
       console.log(chalk.dim(`Resumed session: ${sessionManager.getSessionFile()}`));
     }
-  }
-
-  if (configDefault && configDefault !== agent.model) {
-    console.log(chalk.dim(`Default model in config: ${displayModel(configDefault)}`));
   }
 
   // Print mode: single prompt, then exit
@@ -111,7 +124,7 @@ async function main() {
 
   // Interactive mode: use Ink TUI
   const { runTui } = await import("./tui/run.js");
-  runTui(agent, args, sessionManager, createProvider);
+  runTui(agent, args, sessionManager, createProvider, registry);
 }
 
 async function readPipedStdin(): Promise<string | undefined> {

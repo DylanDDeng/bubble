@@ -9,6 +9,7 @@ import type { AgentEvent, Message, ParsedToolCall, Provider, ToolDefinition, Too
 
 export interface AgentOptions {
   provider: Provider;
+  providerId?: string;
   model: string;
   tools: ToolRegistryEntry[];
   temperature?: number;
@@ -20,6 +21,7 @@ export interface AgentOptions {
 export class Agent {
   messages: Message[] = [];
   private provider: Provider;
+  private _providerId: string;
   private _model: string;
   private tools: Map<string, ToolRegistryEntry> = new Map();
   private temperature: number;
@@ -28,6 +30,7 @@ export class Agent {
 
   constructor(options: AgentOptions) {
     this.provider = options.provider;
+    this._providerId = options.providerId ?? "";
     this._model = options.model;
     this.temperature = options.temperature ?? 0.2;
     this.reasoning = options.reasoning;
@@ -48,6 +51,21 @@ export class Agent {
 
   set model(value: string) {
     this._model = value;
+  }
+
+  get providerId(): string {
+    return this._providerId;
+  }
+
+  set providerId(value: string) {
+    this._providerId = value;
+  }
+
+  get apiModel(): string {
+    if (this._model.includes(":")) {
+      return this._model.split(":").slice(1).join(":");
+    }
+    return this._model;
   }
 
   setProvider(provider: Provider) {
@@ -77,7 +95,7 @@ export class Agent {
       }));
 
       const stream = this.provider.streamChat(this.messages, {
-        model: this.model,
+        model: this.apiModel,
         tools: toolDefinitions,
         temperature: this.temperature,
         reasoning: this.reasoning,

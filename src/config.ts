@@ -8,6 +8,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
+import type { ProviderProfile } from "./provider-registry.js";
 
 const CONFIG_PATH = join(homedir(), ".my-agent", "config.json");
 
@@ -15,6 +16,8 @@ export interface UserConfigData {
   defaultModel?: string;
   recentModels?: string[];
   apiKey?: string;
+  providers?: ProviderProfile[];
+  defaultProvider?: string;
 }
 
 export class UserConfig {
@@ -70,6 +73,24 @@ export class UserConfig {
     this.data.apiKey = key;
     this.save();
   }
+
+  getProviders(): ProviderProfile[] {
+    return this.data.providers?.slice() ?? [];
+  }
+
+  setProviders(providers: ProviderProfile[]) {
+    this.data.providers = providers;
+    this.save();
+  }
+
+  getDefaultProvider(): string | undefined {
+    return this.data.defaultProvider;
+  }
+
+  setDefaultProvider(id: string) {
+    this.data.defaultProvider = id;
+    this.save();
+  }
 }
 
 /** Mask an API key for safe display. */
@@ -77,29 +98,3 @@ export function maskKey(key: string): string {
   if (key.length <= 12) return "****";
   return key.slice(0, 6) + "..." + key.slice(-4);
 }
-
-/** Normalize a model string by stripping accidental openrouter/ prefix. */
-export function normalizeModel(model: string): string {
-  return model.startsWith("openrouter/") ? model.slice("openrouter/".length) : model;
-}
-
-/** Strip provider prefix for display if it's openrouter. */
-export function displayModel(model: string): string {
-  return model.startsWith("openrouter/") ? model.slice("openrouter/".length) : model;
-}
-
-/** Built-in curated list of popular OpenRouter models (native IDs). */
-export const POPULAR_MODELS: string[] = [
-  "z-ai/glm-5.1",
-  "deepseek/deepseek-chat",
-  "deepseek/deepseek-r1",
-  "anthropic/claude-3.7-sonnet",
-  "anthropic/claude-3.5-sonnet",
-  "openai/gpt-4o",
-  "openai/gpt-4o-mini",
-  "google/gemini-2.5-pro-preview-03-25",
-  "google/gemini-2.0-flash-001",
-  "meta-llama/llama-3.3-70b-instruct",
-  "nousresearch/hermes-3-llama-3.1-405b",
-  "qwen/qwen-2.5-72b-instruct",
-];
