@@ -58,10 +58,10 @@ function MessageItem({ message }: { message: DisplayMessage }) {
     <Box marginBottom={1} flexDirection="column">
       <Text bold color="blue">Agent</Text>
       {message.reasoning && <ThinkingBlock reasoning={message.reasoning} />}
-      {message.content && <Text>{message.content}</Text>}
       {message.toolCalls?.map((tc) => (
         <ToolCallDisplay key={tc.id} toolCall={tc} />
       ))}
+      {message.content && <Text>{message.content}</Text>}
     </Box>
   );
 }
@@ -71,10 +71,10 @@ function StreamingMessage({ content, reasoning, tools }: { content: string; reas
     <Box marginBottom={1} flexDirection="column">
       <Text bold color="blue">Agent</Text>
       {reasoning && <ThinkingBlock reasoning={reasoning} />}
-      {content && <Text>{content}</Text>}
       {tools.map((tc) => (
         <ToolCallDisplay key={tc.id} toolCall={tc} isStreaming={!tc.result} />
       ))}
+      {content && <Text>{content}</Text>}
     </Box>
   );
 }

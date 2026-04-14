@@ -118,6 +118,20 @@ export function App({ agent, args, sessionManager }: AppProps) {
               const currentReasoning = assistantReasoning;
               const currentToolCalls = [...toolCalls];
               setMessages((prev) => {
+                const last = prev[prev.length - 1];
+                if (last?.role === "assistant") {
+                  // Merge into the last assistant message (auto-continue fold)
+                  const merged: DisplayMessage = {
+                    ...last,
+                    reasoning: currentReasoning || last.reasoning,
+                    content:
+                      last.content && currentContent
+                        ? last.content + "\n" + currentContent
+                        : last.content + currentContent,
+                    toolCalls: [...(last.toolCalls || []), ...currentToolCalls],
+                  };
+                  return [...prev.slice(0, -1), merged];
+                }
                 const msg: DisplayMessage = {
                   role: "assistant",
                   content: currentContent,
