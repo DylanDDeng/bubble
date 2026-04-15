@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
 import type { Agent } from "../agent.js";
 import type { CliArgs } from "../cli.js";
@@ -405,6 +405,11 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
           />
         )}
       </Box>
+      {isRunning && !pickerMode && (
+        <Box paddingX={1} paddingBottom={1} flexShrink={0}>
+          <WaitingIndicator tools={streamingTools} />
+        </Box>
+      )}
       <Box paddingX={1} paddingBottom={1} flexShrink={0}>
         <InputBox onSubmit={handleSubmit} disabled={isRunning || !!pickerMode} />
       </Box>
@@ -413,6 +418,113 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
           <Text color={theme.muted}>Session: {sessionManager.getSessionFile()}</Text>
         </Box>
       )}
+    </Box>
+  );
+}
+
+function WaitingIndicator({ tools }: { tools: DisplayToolCall[] }) {
+  const frames = ["◦", "•", "◦"];
+  const genericPhrases = [
+    "mapping the workspace",
+    "reading the room",
+    "following the threads",
+    "connecting the pieces",
+    "sorting the context",
+    "scanning the structure",
+    "shaping the next step",
+    "gathering signal",
+    "checking the edges",
+    "lining up the answer",
+    "tracing the flow",
+    "building the picture",
+    "walking the graph",
+    "collecting the clues",
+    "framing the problem",
+    "locating the source",
+    "resolving the shape",
+    "untangling the state",
+    "comparing the paths",
+    "narrowing the target",
+    "tracking the changes",
+    "reading the patterns",
+    "weighing the options",
+    "assembling the context",
+    "following the signal",
+    "checking the assumptions",
+    "aligning the details",
+    "testing the shape",
+    "pulling the thread",
+    "cleaning the edges",
+    "refining the draft",
+    "verifying the route",
+    "making sense of it",
+    "looking for leverage",
+    "stitching the answer",
+    "holding the thread",
+    "distilling the noise",
+    "finding the seam",
+    "reading between the lines",
+    "preparing the response",
+  ];
+  const [frameIndex, setFrameIndex] = useState(0);
+  const [phrase, setPhrase] = useState(genericPhrases[0]);
+
+  useEffect(() => {
+    const activeTool = [...tools].reverse().find((tool) => !tool.result);
+    if (!activeTool) return;
+
+    const toolTargets: Record<string, string> = {
+      read: "reading files",
+      write: "writing changes",
+      edit: "patching files",
+      grep: "searching the codebase",
+      ls: "listing directories",
+      bash: "running commands",
+      web_search: "searching the web",
+      web_fetch: "fetching a page",
+    };
+
+    setPhrase(toolTargets[activeTool.name] || `running ${activeTool.name}`);
+  }, [tools]);
+
+  useEffect(() => {
+    const frameTimer = setInterval(() => {
+      setFrameIndex((index) => (index + 1) % frames.length);
+    }, 220);
+
+    const phraseTimer = setInterval(() => {
+      const activeTool = [...tools].reverse().find((tool) => !tool.result);
+      if (activeTool) {
+        const toolTargets: Record<string, string> = {
+          read: "reading files",
+          write: "writing changes",
+          edit: "patching files",
+          grep: "searching the codebase",
+          ls: "listing directories",
+          bash: "running commands",
+          web_search: "searching the web",
+          web_fetch: "fetching a page",
+        };
+        setPhrase(toolTargets[activeTool.name] || `running ${activeTool.name}`);
+        return;
+      }
+
+      setPhrase((current) => {
+        const candidates = genericPhrases.filter((item) => item !== current);
+        return candidates[Math.floor(Math.random() * candidates.length)] || current;
+      });
+    }, 1100);
+
+    return () => {
+      clearInterval(frameTimer);
+      clearInterval(phraseTimer);
+    };
+  }, [tools]);
+
+  return (
+    <Box>
+      <Text color={theme.accent}>{frames[frameIndex]}</Text>
+      <Text color={theme.muted}> {phrase}</Text>
     </Box>
   );
 }

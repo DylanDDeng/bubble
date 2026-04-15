@@ -197,11 +197,6 @@ export function InputBox({ onSubmit, disabled }: InputBoxProps) {
             </Box>
           );
         })}
-        {disabled && (
-          <Box>
-            <Text color={theme.muted}>Agent is thinking...</Text>
-          </Box>
-        )}
       </Box>
       <Text color={theme.border}>{bottomBorder.slice(0, contentWidth)}</Text>
       {showSuggestions && (
