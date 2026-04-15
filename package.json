@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "A terminal coding agent",
   "type": "module",
+  "bin": {
+    "bubble": "./dist/main.js"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsc && node dist/main.js",

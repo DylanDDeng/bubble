@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 /**
  * Main entry point - assembles all layers and runs the agent.
  */

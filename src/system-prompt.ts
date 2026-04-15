@@ -30,7 +30,7 @@ export function buildSystemPrompt(options: SystemPromptOptions = {}): string {
   const configuredModel = options.configuredModel;
   const configuredModelId = options.configuredModelId;
   const workingDir = options.workingDir ?? cwd().replace(/\\/g, "/");
-  const tools = options.tools ?? ["read", "bash", "edit", "write", "grep", "ls"];
+  const tools = options.tools ?? ["read", "bash", "edit", "write", "grep", "ls", "web_search"];
   const snippets = options.toolSnippets ?? defaultToolSnippets;
 
   const visibleTools = tools.filter((name) => snippets[name]);
@@ -81,4 +81,5 @@ const defaultToolSnippets: Record<string, string> = {
   write: "Write a new file or overwrite an existing one",
   grep: "Search file contents using regex",
   ls: "List files in a directory",
+  web_search: "Search the public web for current information",
 };
