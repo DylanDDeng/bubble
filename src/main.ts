@@ -9,6 +9,7 @@ import { Agent } from "./agent.js";
 import { parseArgs, printHelp } from "./cli.js";
 import { UserConfig } from "./config.js";
 import { createProviderInstance, createUnavailableProvider } from "./provider.js";
+import { getDefaultThinkingLevel } from "./provider-transform.js";
 import { ProviderRegistry, displayModel, encodeModel, decodeModel } from "./provider-registry.js";
 import { SessionManager } from "./session.js";
 import { buildSystemPrompt } from "./system-prompt.js";
@@ -50,13 +51,14 @@ async function main() {
 
   const provider = defaultProvider
     ? createProviderInstance({
+        providerId: defaultProvider.id,
         apiKey: defaultProvider.apiKey,
         baseURL: defaultProvider.baseURL,
-        reasoning: args.reasoning,
+        reasoningEffort: args.reasoningEffort,
       })
     : createUnavailableProvider(unavailableProviderMessage);
-  const createProvider = (apiKey: string, baseURL: string) =>
-    createProviderInstance({ apiKey, baseURL, reasoning: args.reasoning });
+  const createProvider = (providerId: string, apiKey: string, baseURL: string) =>
+    createProviderInstance({ providerId, apiKey, baseURL, reasoningEffort: args.reasoningEffort });
 
   const tools = createAllTools(args.cwd);
 
@@ -68,10 +70,11 @@ async function main() {
 
   // Model resolution fallback:
   // 1. CLI flag  2. Session metadata  3. Built-in default
-  const fallbackProviderId = defaultProvider?.id || "openai-codex";
-  const fallbackModelId = registry.getDefaultModel(fallbackProviderId) || args.model;
+  const fallbackProviderId = defaultProvider?.id || "openai";
+  const fallbackModelId = registry.getDefaultModel(fallbackProviderId, defaultProvider?.authType) || args.model;
   const cliModel = args.model.includes(":") ? args.model : encodeModel(fallbackProviderId, fallbackModelId);
   const sessionModel = sessionManager?.getMetadata().model;
+  const sessionReasoningEffort = sessionManager?.getMetadata().reasoningEffort;
   const effectiveModel = sessionModel ? sessionModel : cliModel;
   const { providerId: effectiveProviderId, modelId: effectiveModelId } = decodeModel(effectiveModel);
   const activeProviderId = effectiveProviderId || fallbackProviderId;
@@ -80,6 +83,9 @@ async function main() {
   }
   const activeProvider = registry.getConfigured().find((p) => p.id === activeProviderId) || defaultProvider;
   const activeModel = encodeModel(activeProviderId, effectiveModelId);
+  const initialThinkingLevel = sessionReasoningEffort
+    ?? args.reasoningEffort
+    ?? getDefaultThinkingLevel(activeProviderId, effectiveModelId);
   const systemPrompt = buildSystemPrompt({
     agentName: "Bubble",
     configuredProvider: activeProviderId,
@@ -90,23 +96,22 @@ async function main() {
 
   const agent = new Agent({
     provider: activeProvider
-      ? createProvider(activeProvider.apiKey, activeProvider.baseURL)
+      ? createProvider(activeProviderId, activeProvider.apiKey, activeProvider.baseURL)
       : provider,
     providerId: activeProviderId,
     model: activeModel,
     tools,
     systemPrompt,
     temperature: 0.2,
-    reasoning: args.reasoning,
+    reasoningEffort: initialThinkingLevel,
     onMessageAppend: (message) => {
       if (sessionManager && message.role !== "system") {
         sessionManager.appendMessage(message);
       }
     },
   });
-
   if (sessionManager) {
-    sessionManager.setMetadata({ model: agent.model });
+    sessionManager.setMetadata({ model: agent.model, reasoningEffort: agent.reasoning });
   }
 
   if (cliModel === agent.model) {

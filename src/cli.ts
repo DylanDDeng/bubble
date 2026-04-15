@@ -2,6 +2,8 @@
  * CLI argument parsing.
  */
 
+import type { ReasoningEffort } from "./types.js";
+
 export interface CliArgs {
   model: string;
   cwd: string;
@@ -11,7 +13,7 @@ export interface CliArgs {
   noSession?: boolean;
   print?: boolean;
   prompt?: string;
-  reasoning?: boolean;
+  reasoningEffort?: ReasoningEffort;
 }
 
 export function parseArgs(argv: string[]): CliArgs {
@@ -45,8 +47,15 @@ export function parseArgs(argv: string[]): CliArgs {
         args.noSession = true;
         break;
       case "--reasoning":
-        args.reasoning = true;
+        args.reasoningEffort = "medium";
         break;
+      case "--reasoning-effort": {
+        const value = argv[++i] as ReasoningEffort | undefined;
+        if (value && ["off", "minimal", "low", "medium", "high", "xhigh"].includes(value)) {
+          args.reasoningEffort = value;
+        }
+        break;
+      }
       case "--print":
       case "-p":
         args.print = true;
@@ -73,7 +82,8 @@ Options:
   -r, --resume             Resume last session
   --session <name>         Session name for persistence
   --no-session             Don't save session to disk
-  --reasoning              Enable reasoning mode (OpenRouter models that support it)
+  --reasoning              Enable reasoning mode at medium effort
+  --reasoning-effort <l>   Set reasoning effort: off|minimal|low|medium|high|xhigh
   -p, --print              Non-interactive mode (single prompt)
   -h, --help               Show this help
 `);

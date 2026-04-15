@@ -17,6 +17,7 @@ export interface ImageContent {
 }
 
 export type ContentPart = TextContent | ImageContent;
+export type ReasoningEffort = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 export interface UserMessage {
   role: "user";
@@ -114,10 +115,10 @@ export interface Provider {
       model: string;
       tools?: ToolDefinition[];
       temperature?: number;
-      reasoning?: boolean;
+      reasoningEffort?: ReasoningEffort;
     }
   ): AsyncIterable<StreamChunk>;
-  complete(messages: Message[], options?: { model?: string; temperature?: number; reasoning?: boolean }): Promise<string>;
+  complete(messages: Message[], options?: { model?: string; temperature?: number; reasoningEffort?: ReasoningEffort }): Promise<string>;
 }
 
 // ============================================================================

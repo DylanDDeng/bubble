@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
+import { homedir } from "node:os";
 import type { Agent } from "../agent.js";
 import type { CliArgs } from "../cli.js";
 import type { SessionManager } from "../session.js";
@@ -12,12 +13,14 @@ import { theme } from "./theme.js";
 import { ModelPicker, ProviderPicker, KeyPicker } from "./model-picker.js";
 import { BUILTIN_PROVIDERS, ProviderRegistry, encodeModel, displayModel } from "../provider-registry.js";
 import { buildSystemPrompt } from "../system-prompt.js";
+import type { ReasoningEffort } from "../types.js";
+import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingLevel } from "../provider-transform.js";
 
 interface AppProps {
   agent: Agent;
   args: CliArgs;
   sessionManager?: SessionManager;
-  createProvider?: (apiKey: string, baseURL: string) => Provider;
+  createProvider?: (providerId: string, apiKey: string, baseURL: string) => Provider;
   registry?: ProviderRegistry;
 }
 
@@ -70,6 +73,8 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
   const [streamingContent, setStreamingContent] = useState("");
   const [streamingReasoning, setStreamingReasoning] = useState("");
   const [streamingTools, setStreamingTools] = useState<DisplayToolCall[]>([]);
+  const [usageTotals, setUsageTotals] = useState({ prompt: 0, completion: 0 });
+  const [thinkingLevel, setThinkingLevel] = useState<ReasoningEffort>(agent.reasoning);
   const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | "login" | "logout" | null>(null);
   const [keyProviderId, setKeyProviderId] = useState<string | null>(null);
 
@@ -77,6 +82,22 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
   const safeRegistry = registry ?? new ProviderRegistry(userConfig);
 
   useInput((_input, key) => {
+    if (key.tab && key.shift && !pickerMode) {
+      const modelParts = agent.model.includes(":")
+        ? agent.model.split(":")
+        : [agent.providerId || safeRegistry.getDefault()?.id || "openrouter", agent.model];
+      const providerId = modelParts[0];
+      const modelId = modelParts.slice(1).join(":");
+      const availableLevels = getAvailableThinkingLevels(providerId, modelId);
+      const currentLevel = normalizeThinkingLevel(agent.reasoning, availableLevels);
+      const currentIndex = availableLevels.indexOf(currentLevel);
+      const nextLevel = availableLevels[(currentIndex + 1) % availableLevels.length];
+      agent.reasoning = nextLevel;
+      setThinkingLevel(nextLevel);
+      sessionManager?.setMetadata({ model: agent.model, reasoningEffort: nextLevel });
+      return;
+    }
+
     if (key.escape && !pickerMode) {
       exit();
     }
@@ -110,7 +131,12 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
         return;
       }
 
-      agent.setProvider(createProvider(provider.apiKey, provider.baseURL));
+      const modelId = model.includes(":") ? model.split(":").slice(1).join(":") : model;
+      agent.reasoning = normalizeThinkingLevel(
+        agent.reasoning || getDefaultThinkingLevel(providerId, modelId),
+        getAvailableThinkingLevels(providerId, modelId),
+      );
+      agent.setProvider(createProvider(providerId, provider.apiKey, provider.baseURL));
       agent.providerId = providerId;
       agent.setSystemPrompt(buildSystemPrompt({
         agentName: "Bubble",
@@ -120,7 +146,8 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
         workingDir: args.cwd,
       }));
       userConfig.pushRecentModel(model);
-      sessionManager?.setMetadata({ model });
+      setThinkingLevel(agent.reasoning);
+      sessionManager?.setMetadata({ model, reasoningEffort: agent.reasoning });
       addMessage("assistant", `Model switched to ${displayModel(model)}.`);
       setPickerMode(null);
     };
@@ -143,7 +170,7 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
       return;
     }
     safeRegistry.setDefault(providerId);
-    agent.setProvider(createProvider!(p.apiKey, p.baseURL));
+    agent.setProvider(createProvider!(providerId, p.apiKey, p.baseURL));
     agent.providerId = providerId;
     addMessage("assistant", `Switched to provider ${p.name}. Use /model to pick a model.`);
     setPickerMode(null);
@@ -159,9 +186,9 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
         cwd: args.cwd,
         exit,
       sessionManager,
-      createProvider: createProvider ?? (() => {
+      createProvider: createProvider ?? ((() => {
         throw new Error("Provider creation not available");
-      }),
+      }) as any),
       openPicker,
       registry: safeRegistry,
     });
@@ -180,9 +207,9 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
         cwd: args.cwd,
         exit,
       sessionManager,
-      createProvider: createProvider ?? (() => {
+      createProvider: createProvider ?? ((() => {
         throw new Error("Provider creation not available");
-      }),
+      }) as any),
       openPicker,
       registry: safeRegistry,
     });
@@ -202,7 +229,7 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
     safeRegistry.updateProviderKey(targetId, key);
     const p = safeRegistry.getConfigured().find((x) => x.id === targetId);
     if (p && createProvider) {
-      agent.setProvider(createProvider(key, p.baseURL));
+      agent.setProvider(createProvider(targetId, key, p.baseURL));
       agent.providerId = targetId;
     }
     addMessage("assistant", `API key updated for ${p?.name || targetId} to ${maskKey(key)}.`);
@@ -223,9 +250,9 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
           cwd: args.cwd,
           exit,
           sessionManager,
-          createProvider: createProvider ?? (() => {
+          createProvider: createProvider ?? ((() => {
             throw new Error("Provider creation not available");
-          }),
+          }) as any),
           openPicker,
           registry: safeRegistry,
         });
@@ -285,6 +312,12 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
               break;
             }
             case "turn_end": {
+              if (event.usage) {
+                setUsageTotals((totals) => ({
+                  prompt: totals.prompt + event.usage!.promptTokens,
+                  completion: totals.completion + event.usage!.completionTokens,
+                }));
+              }
               const currentContent = assistantContent;
               const currentReasoning = assistantReasoning;
               const currentToolCalls = [...toolCalls];
@@ -366,7 +399,9 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
         )}
         {pickerMode === "provider" && (
           <ProviderPicker
-            providers={safeRegistry.getConfigured().map((p) => ({ id: p.id, name: p.name, enabled: p.enabled }))}
+            providers={safeRegistry.getConfigured()
+              .filter((p) => p.id !== "openai-codex")
+              .map((p) => ({ id: p.id, name: p.name, enabled: p.enabled }))}
             current={currentProviderId}
             onSelect={handleProviderSelect}
             onCancel={() => setPickerMode(null)}
@@ -413,11 +448,13 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
       <Box paddingX={1} paddingBottom={1} flexShrink={0}>
         <InputBox onSubmit={handleSubmit} disabled={isRunning || !!pickerMode} />
       </Box>
-      {sessionManager && (
-        <Box paddingX={1}>
-          <Text color={theme.muted}>Session: {sessionManager.getSessionFile()}</Text>
-        </Box>
-      )}
+      <FooterBar
+        cwd={args.cwd}
+        providerId={agent.providerId || safeRegistry.getDefault()?.id || "unknown"}
+        model={displayModel(agent.model)}
+        reasoningEffort={thinkingLevel}
+        usageTotals={usageTotals}
+      />
     </Box>
   );
 }
@@ -527,4 +564,44 @@ function WaitingIndicator({ tools }: { tools: DisplayToolCall[] }) {
       <Text color={theme.muted}> {phrase}</Text>
     </Box>
   );
+}
+
+function FooterBar({
+  cwd,
+  providerId,
+  model,
+  reasoningEffort,
+  usageTotals,
+}: {
+  cwd: string;
+  providerId: string;
+  model: string;
+  reasoningEffort: string;
+  usageTotals: { prompt: number; completion: number };
+}) {
+  const left = `${formatCwd(cwd)}${usageTotals.prompt || usageTotals.completion ? `  ↑${formatTokens(usageTotals.prompt)} ↓${formatTokens(usageTotals.completion)}` : ""}`;
+  const right = `${providerId} • ${model}${reasoningEffort && reasoningEffort !== "off" ? ` • ${reasoningEffort}` : " • thinking off"}`;
+
+  return (
+    <Box paddingX={1} flexShrink={0}>
+      <Text color={theme.muted}>{left}</Text>
+      <Box flexGrow={1} />
+      <Text color={theme.muted}>{right}</Text>
+    </Box>
+  );
+}
+
+function formatTokens(count: number): string {
+  if (count < 1000) return String(count);
+  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
+  if (count < 1000000) return `${Math.round(count / 1000)}k`;
+  return `${(count / 1000000).toFixed(1)}M`;
+}
+
+function formatCwd(cwd: string): string {
+  const home = homedir();
+  if (cwd.startsWith(home)) {
+    return `~${cwd.slice(home.length)}`;
+  }
+  return cwd;
 }

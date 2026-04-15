@@ -11,6 +11,7 @@ import type { Message } from "./types.js";
 
 export interface SessionMetadata {
   model?: string;
+  reasoningEffort?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 }
 
 export interface SessionEntry {

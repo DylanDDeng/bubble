@@ -1,4 +1,6 @@
-import type { Message, Provider, StreamChunk, ToolDefinition } from "./types.js";
+import type { Message, Provider, ReasoningEffort, StreamChunk, ToolDefinition } from "./types.js";
+import { listBuiltinModels } from "./model-catalog.js";
+import { resolveProviderRequestConfig } from "./provider-transform.js";
 
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const OPENAI_BETA_RESPONSES = "responses=experimental";
@@ -8,25 +10,13 @@ const MODEL_DISCOVERY_PATHS = [
   "/models",
 ];
 
-const FALLBACK_MODEL_ORDER = [
-  "gpt-5.4",
-  "gpt-5.4-mini",
-  "gpt-5.3-codex",
-  "gpt-5.3-codex-spark",
-  "gpt-5.2-codex",
-  "gpt-5.2",
-  "gpt-5.1-codex-max",
-  "gpt-5.1-codex-mini",
-  "gpt-5.1",
-] as const;
-
 export function isOpenAICodexBaseUrl(baseURL: string): boolean {
   const normalized = baseURL.trim().replace(/\/+$/, "");
   return normalized === DEFAULT_CODEX_BASE_URL || normalized.startsWith(`${DEFAULT_CODEX_BASE_URL}/`);
 }
 
 export function getOpenAICodexFallbackModels(): string[] {
-  return [...FALLBACK_MODEL_ORDER];
+  return listBuiltinModels("openai-codex").map((model) => model.id);
 }
 
 export function extractChatGptAccountId(accessToken: string): string | undefined {
@@ -48,14 +38,22 @@ export function extractChatGptAccountId(accessToken: string): string | undefined
 }
 
 export function createOpenAICodexProvider(options: {
+  providerId?: string;
   apiKey: string;
   baseURL: string;
-  reasoning?: boolean;
+  reasoningEffort?: ReasoningEffort;
 }): Provider {
+  const sessionId = globalThis.crypto?.randomUUID?.() ?? `bubble_${Date.now()}`;
+
   async function* streamChat(
     messages: Message[],
-    chatOptions: { model: string; tools?: ToolDefinition[]; temperature?: number; reasoning?: boolean }
+    chatOptions: { model: string; tools?: ToolDefinition[]; temperature?: number; reasoningEffort?: ReasoningEffort }
   ): AsyncIterable<StreamChunk> {
+    const requestConfig = resolveProviderRequestConfig(
+      "openai-codex",
+      chatOptions.model,
+      chatOptions.reasoningEffort ?? options.reasoningEffort ?? "off",
+    );
     const accountId = extractChatGptAccountId(options.apiKey);
     if (!accountId) {
       throw new Error("Failed to extract chatgpt_account_id from ChatGPT OAuth token.");
@@ -63,12 +61,13 @@ export function createOpenAICodexProvider(options: {
 
     const response = await fetch(resolveCodexUrl(options.baseURL), {
       method: "POST",
-      headers: buildSseHeaders(options.apiKey, accountId),
+      headers: buildSseHeaders(options.apiKey, accountId, sessionId),
       body: JSON.stringify(
         buildRequestBody(messages, {
           model: chatOptions.model,
           tools: chatOptions.tools,
-          reasoning: chatOptions.reasoning ?? options.reasoning,
+          reasoningEffort: requestConfig.reasoningEffort,
+          sessionId,
         })
       ),
     });
@@ -211,13 +210,13 @@ export function createOpenAICodexProvider(options: {
 
   async function complete(
     messages: Message[],
-    chatOptions?: { model?: string; temperature?: number; reasoning?: boolean }
+    chatOptions?: { model?: string; temperature?: number; reasoningEffort?: ReasoningEffort }
   ): Promise<string> {
     let content = "";
     for await (const chunk of streamChat(messages, {
       model: chatOptions?.model ?? "gpt-5.4",
       temperature: chatOptions?.temperature,
-      reasoning: chatOptions?.reasoning,
+      reasoningEffort: chatOptions?.reasoningEffort,
     })) {
       if (chunk.type === "text") {
         content += chunk.content;
@@ -241,7 +240,12 @@ export async function fetchOpenAICodexModels(options: {
   for (const path of MODEL_DISCOVERY_PATHS) {
     const response = await fetch(resolveRelativeUrl(options.baseURL, path), {
       method: "GET",
-      headers: buildBaseHeaders(options.accessToken, accountId, { accept: "application/json" }),
+      headers: buildBaseHeaders(
+        options.accessToken,
+        accountId,
+        globalThis.crypto?.randomUUID?.() ?? `bubble_${Date.now()}`,
+        { accept: "application/json" },
+      ),
     }).catch(() => undefined);
 
     if (!response?.ok) continue;
@@ -261,7 +265,8 @@ function buildRequestBody(
   options: {
     model: string;
     tools?: ToolDefinition[];
-    reasoning?: boolean;
+    reasoningEffort?: ReasoningEffort;
+    sessionId?: string;
   }
 ) {
   const instructions = messages
@@ -277,6 +282,7 @@ function buildRequestBody(
     instructions: instructions || undefined,
     input,
     include: ["reasoning.encrypted_content"],
+    prompt_cache_key: options.sessionId,
     tool_choice: "auto",
     parallel_tool_calls: true,
     text: { verbosity: "medium" },
@@ -289,10 +295,6 @@ function buildRequestBody(
       description: tool.description,
       parameters: tool.parameters,
     }));
-  }
-
-  if (options.reasoning) {
-    body.reasoning = { effort: "medium", summary: "auto" };
   }
 
   return body;
@@ -400,18 +402,20 @@ async function* parseSse(response: Response): AsyncIterable<Record<string, unkno
 function buildBaseHeaders(
   accessToken: string,
   accountId: string,
+  sessionId: string,
   extraHeaders?: Record<string, string>
 ): Headers {
   const headers = new Headers(extraHeaders);
   headers.set("Authorization", `Bearer ${accessToken}`);
-  headers.set("chatgpt-account-id", accountId);
+  headers.set("ChatGPT-Account-Id", accountId);
   headers.set("originator", "bubble");
   headers.set("User-Agent", "bubble");
+  headers.set("session_id", sessionId);
   return headers;
 }
 
-function buildSseHeaders(accessToken: string, accountId: string): Headers {
-  const headers = buildBaseHeaders(accessToken, accountId, {
+function buildSseHeaders(accessToken: string, accountId: string, sessionId: string): Headers {
+  const headers = buildBaseHeaders(accessToken, accountId, sessionId, {
     accept: "text/event-stream",
     "content-type": "application/json",
   });
@@ -471,7 +475,8 @@ function extractModelIds(payload: unknown): string[] {
 }
 
 function sortCodexModelIds(ids: string[]): string[] {
-  const preferred = new Map<string, number>(FALLBACK_MODEL_ORDER.map((id, index) => [id, index]));
+  const preferredModels = getOpenAICodexFallbackModels();
+  const preferred = new Map<string, number>(preferredModels.map((id, index) => [id, index]));
   return [...ids].sort((left, right) => {
     const leftRank = preferred.get(left) ?? Number.MAX_SAFE_INTEGER;
     const rightRank = preferred.get(right) ?? Number.MAX_SAFE_INTEGER;

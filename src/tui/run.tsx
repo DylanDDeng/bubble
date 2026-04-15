@@ -11,7 +11,7 @@ export function runTui(
   agent: Agent,
   args: CliArgs,
   sessionManager?: SessionManager,
-  createProvider?: (apiKey: string, baseURL: string) => Provider,
+  createProvider?: (providerId: string, apiKey: string, baseURL: string) => Provider,
   registry?: ProviderRegistry
 ) {
   render(<App agent={agent} args={args} sessionManager={sessionManager} createProvider={createProvider} registry={registry} />);

@@ -3,7 +3,7 @@
  * It maintains message state, calls the LLM, executes tools, and auto-continues.
  */
 
-import type { AgentEvent, Message, ParsedToolCall, Provider, ToolDefinition, ToolResult, ToolRegistryEntry } from "./types.js";
+import type { AgentEvent, Message, ParsedToolCall, Provider, ReasoningEffort, ToolDefinition, ToolResult, ToolRegistryEntry } from "./types.js";
 
 export interface AgentOptions {
   provider: Provider;
@@ -11,7 +11,7 @@ export interface AgentOptions {
   model: string;
   tools: ToolRegistryEntry[];
   temperature?: number;
-  reasoning?: boolean;
+  reasoningEffort?: ReasoningEffort;
   systemPrompt?: string;
   onMessageAppend?: (message: Message) => void;
 }
@@ -23,7 +23,7 @@ export class Agent {
   private _model: string;
   private tools: Map<string, ToolRegistryEntry> = new Map();
   private temperature: number;
-  private reasoning?: boolean;
+  private reasoningEffort: ReasoningEffort;
   private onMessageAppend?: (message: Message) => void;
 
   constructor(options: AgentOptions) {
@@ -31,7 +31,7 @@ export class Agent {
     this._providerId = options.providerId ?? "";
     this._model = options.model;
     this.temperature = options.temperature ?? 0.2;
-    this.reasoning = options.reasoning;
+    this.reasoningEffort = options.reasoningEffort ?? "off";
     this.onMessageAppend = options.onMessageAppend;
 
     if (options.systemPrompt) {
@@ -70,6 +70,14 @@ export class Agent {
     this.provider = provider;
   }
 
+  get reasoning(): ReasoningEffort {
+    return this.reasoningEffort;
+  }
+
+  set reasoning(value: ReasoningEffort) {
+    this.reasoningEffort = value;
+  }
+
   setSystemPrompt(prompt: string) {
     const systemMessage: Extract<Message, { role: "system" }> = { role: "system", content: prompt };
     if (this.messages[0]?.role === "system") {
@@ -105,7 +113,7 @@ export class Agent {
         model: this.apiModel,
         tools: toolDefinitions,
         temperature: this.temperature,
-        reasoning: this.reasoning,
+        reasoningEffort: this.reasoningEffort,
       });
 
       for await (const chunk of stream) {

@@ -6,9 +6,14 @@
  */
 
 import type { UserConfig } from "./config.js";
+import {
+  BUILTIN_PROVIDERS as CATALOG_PROVIDERS,
+  getBuiltinProvider,
+  listBuiltinModels,
+} from "./model-catalog.js";
 import { ModelConfig } from "./model-config.js";
 import { AuthStorage } from "./oauth/index.js";
-import { fetchOpenAICodexModels, getOpenAICodexFallbackModels } from "./provider-openai-codex.js";
+import { fetchOpenAICodexModels } from "./provider-openai-codex.js";
 import { refreshOpenAICodex } from "./oauth/openai-codex.js";
 
 export interface ProviderProfile {
@@ -17,18 +22,8 @@ export interface ProviderProfile {
   baseURL: string;
   apiKey: string;
   enabled: boolean;
+  authType?: "api" | "oauth";
 }
-
-export const BUILTIN_PROVIDERS: Omit<ProviderProfile, "apiKey" | "enabled">[] = [
-  { id: "openrouter", name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1" },
-  { id: "openai", name: "OpenAI", baseURL: "https://api.openai.com/v1" },
-  { id: "openai-codex", name: "OpenAI Codex (ChatGPT)", baseURL: "https://chatgpt.com/backend-api" },
-  { id: "deepseek", name: "DeepSeek", baseURL: "https://api.deepseek.com/v1" },
-  { id: "google", name: "Google", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai" },
-  { id: "groq", name: "Groq", baseURL: "https://api.groq.com/openai/v1" },
-  { id: "together", name: "Together AI", baseURL: "https://api.together.xyz/v1" },
-  { id: "local", name: "Local (OpenAI-compatible)", baseURL: "http://localhost:11434/v1" },
-];
 
 export interface ModelInfo {
   id: string;
@@ -36,18 +31,7 @@ export interface ModelInfo {
   providerId: string;
 }
 
-const OAUTH_PROVIDER_IDS = new Set(["openai-codex"]);
-const OPENAI_CODEX_FALLBACK_MODELS = getOpenAICodexFallbackModels();
-
-const STATIC_MODELS: Record<string, string[]> = {
-  "openai-codex": OPENAI_CODEX_FALLBACK_MODELS,
-  openai: ["gpt-4o", "gpt-4o-mini", "o1-preview", "o1-mini", "gpt-4-turbo"],
-  deepseek: ["deepseek-chat", "deepseek-reasoner"],
-  google: ["gemini-2.5-pro-preview-03-25", "gemini-2.0-flash-001", "gemini-1.5-pro-latest"],
-  groq: ["llama-3.3-70b-versatile", "mixtral-8x7b-32768", "gemma-2-9b-it"],
-  together: ["meta-llama/Llama-3.3-70B-Instruct-Turbo", "Qwen/Qwen2.5-72B-Instruct"],
-  local: ["llama3.1", "qwen2.5", "deepseek-coder-v2"],
-};
+export const BUILTIN_PROVIDERS = CATALOG_PROVIDERS;
 
 export class ProviderRegistry {
   private config: UserConfig;
@@ -69,23 +53,34 @@ export class ProviderRegistry {
   }
 
   supportsOAuth(providerId: string): boolean {
-    return OAUTH_PROVIDER_IDS.has(providerId);
+    return !!getBuiltinProvider(providerId)?.supportsOAuth;
   }
 
-  getDefaultModel(providerId: string): string | undefined {
+  private resolveOAuthAuthKey(providerId: string): string {
+    if (providerId === "openai" && !this.authStorage.has("openai") && this.authStorage.has("openai-codex")) {
+      return "openai-codex";
+    }
+    return providerId;
+  }
+
+  getDefaultModel(providerId: string, authType: ProviderProfile["authType"] = "api"): string | undefined {
     const customModels = this.modelConfig.getCustomModels(providerId);
     if (customModels.length > 0) {
       return customModels[0].id;
     }
-    return STATIC_MODELS[providerId]?.[0];
+    if (providerId === "openai" && authType === "oauth") {
+      return listBuiltinModels("openai-codex")[0]?.id;
+    }
+    return listBuiltinModels(providerId)[0]?.id;
   }
 
   async prepareProvider(providerId: string): Promise<void> {
-    if (providerId === "openai-codex" && this.authStorage.isExpired("openai-codex")) {
-      const creds = this.authStorage.get("openai-codex");
+    const authKey = this.resolveOAuthAuthKey(providerId);
+    if (providerId === "openai" && this.authStorage.isExpired(authKey)) {
+      const creds = this.authStorage.get(authKey);
       if (creds?.refreshToken) {
         const refreshed = await refreshOpenAICodex(creds.refreshToken);
-        this.authStorage.set("openai-codex", {
+        this.authStorage.set("openai", {
           type: "oauth",
           accessToken: refreshed.accessToken,
           refreshToken: refreshed.refreshToken,
@@ -105,7 +100,7 @@ export class ProviderRegistry {
 
     if (keys.length > 0) {
       providers = keys.map((id) => {
-        const builtin = BUILTIN_PROVIDERS.find((p) => p.id === id);
+        const builtin = getBuiltinProvider(id);
         const cfg = modelsJsonProviders[id];
         return {
           id,
@@ -113,6 +108,7 @@ export class ProviderRegistry {
           baseURL: cfg.baseURL || builtin?.baseURL || "",
           apiKey: cfg.apiKey || "",
           enabled: true,
+          authType: "api",
         };
       });
     } else {
@@ -122,10 +118,15 @@ export class ProviderRegistry {
 
     // 3. Inject OAuth access tokens
     for (const p of providers) {
-      if (!p.apiKey && this.authStorage.has(p.id)) {
-        const token = this.authStorage.getAccessToken(p.id);
+      const authKey = this.resolveOAuthAuthKey(p.id);
+      if (this.authStorage.has(authKey)) {
+        const token = this.authStorage.getAccessToken(authKey);
         if (token) {
           p.apiKey = token;
+          p.authType = "oauth";
+          if (p.id === "openai") {
+            p.baseURL = "https://chatgpt.com/backend-api";
+          }
         }
       }
     }
@@ -133,13 +134,17 @@ export class ProviderRegistry {
     // 4. Auto-include built-in OAuth providers that have credentials
     const configuredIds = new Set(providers.map((p) => p.id));
     for (const builtin of BUILTIN_PROVIDERS) {
+      if (builtin.id === "openai-codex") continue;
       if (configuredIds.has(builtin.id)) continue;
-      if (this.authStorage.has(builtin.id)) {
-        const token = this.authStorage.getAccessToken(builtin.id);
+      const authKey = this.resolveOAuthAuthKey(builtin.id);
+      if (this.authStorage.has(authKey)) {
+        const token = this.authStorage.getAccessToken(authKey);
         providers.push({
           ...builtin,
           apiKey: token || "",
           enabled: !!token,
+          authType: "oauth",
+          ...(builtin.id === "openai" ? { baseURL: "https://chatgpt.com/backend-api" } : {}),
         });
       }
     }
@@ -163,7 +168,7 @@ export class ProviderRegistry {
   }
 
   addProvider(id: string, apiKey: string) {
-    const builtin = BUILTIN_PROVIDERS.find((p) => p.id === id);
+    const builtin = getBuiltinProvider(id);
     if (!builtin) return false;
     const providers = this.config.getProviders();
     const idx = providers.findIndex((p) => p.id === id);
@@ -214,7 +219,7 @@ export class ProviderRegistry {
       }
     }
 
-    if (provider.id === "openai-codex" && provider.apiKey) {
+    if (provider.id === "openai" && provider.authType === "oauth" && provider.apiKey) {
       try {
         const models = await fetchOpenAICodexModels({
           baseURL: provider.baseURL,
@@ -226,10 +231,18 @@ export class ProviderRegistry {
       } catch {
         // fall through to static
       }
+      return listBuiltinModels("openai-codex").map((model) => ({
+        id: model.id,
+        name: model.name,
+        providerId: provider.id,
+      }));
     }
 
-    const ids = STATIC_MODELS[provider.id] || [];
-    return ids.map((id) => ({ id, name: id, providerId: provider.id }));
+    return listBuiltinModels(provider.id).map((model) => ({
+      id: model.id,
+      name: model.name,
+      providerId: provider.id,
+    }));
   }
 }
 

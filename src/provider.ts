@@ -6,13 +6,15 @@
 
 import OpenAI from "openai";
 import { createOpenAICodexProvider, isOpenAICodexBaseUrl } from "./provider-openai-codex.js";
-import type { Message, Provider, StreamChunk, ToolDefinition } from "./types.js";
+import { resolveProviderRequestConfig } from "./provider-transform.js";
+import type { Message, Provider, ReasoningEffort, StreamChunk, ToolDefinition } from "./types.js";
 
 export interface ProviderInstanceOptions {
+  providerId?: string;
   apiKey: string;
   baseURL: string;
-  /** Whether to request reasoning mode */
-  reasoning?: boolean;
+  /** Requested reasoning effort */
+  reasoningEffort?: ReasoningEffort;
 }
 
 export function createUnavailableProvider(message: string): Provider {
@@ -29,7 +31,7 @@ export function createUnavailableProvider(message: string): Provider {
 
 export function createProviderInstance(options: ProviderInstanceOptions): Provider {
   if (isOpenAICodexBaseUrl(options.baseURL)) {
-    return createOpenAICodexProvider(options);
+    return createOpenAICodexProvider({ ...options, providerId: options.providerId || "openai-codex" });
   }
 
   const client = new OpenAI({
@@ -39,8 +41,13 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
 
   async function* streamChat(
     messages: Message[],
-    chatOptions: { model: string; tools?: ToolDefinition[]; temperature?: number; reasoning?: boolean }
+    chatOptions: { model: string; tools?: ToolDefinition[]; temperature?: number; reasoningEffort?: ReasoningEffort }
   ): AsyncIterable<StreamChunk> {
+    const requestConfig = resolveProviderRequestConfig(
+      options.providerId || "",
+      chatOptions.model,
+      chatOptions.reasoningEffort ?? options.reasoningEffort ?? "off",
+    );
     const tools = chatOptions.tools?.map((t) => ({
       type: "function" as const,
       function: {
@@ -59,7 +66,7 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
       stream: true,
     };
 
-    if (chatOptions.reasoning) {
+    if (requestConfig.reasoningEffort && requestConfig.reasoningEffort !== "off") {
       body.reasoning = { enabled: true };
     }
 
@@ -141,13 +148,18 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
     yield { type: "done" };
   }
 
-  async function complete(messages: Message[], chatOptions?: { model?: string; temperature?: number; reasoning?: boolean }): Promise<string> {
+  async function complete(messages: Message[], chatOptions?: { model?: string; temperature?: number; reasoningEffort?: ReasoningEffort }): Promise<string> {
+    const requestConfig = resolveProviderRequestConfig(
+      options.providerId || "",
+      chatOptions?.model ?? "z-ai/glm-5.1",
+      chatOptions?.reasoningEffort ?? options.reasoningEffort ?? "off",
+    );
     const body: any = {
       model: chatOptions?.model ?? "z-ai/glm-5.1",
       messages: messages as any,
       temperature: chatOptions?.temperature ?? 0.2,
     };
-    if (chatOptions?.reasoning) {
+    if (requestConfig.reasoningEffort && requestConfig.reasoningEffort !== "off") {
       body.reasoning = { enabled: true };
     }
     const response = await client.chat.completions.create(body);
