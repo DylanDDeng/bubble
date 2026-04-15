@@ -94,7 +94,9 @@ function ThinkingBlock({ reasoning }: { reasoning: string }) {
 
 function UserMessageBlock({ content }: { content: string }) {
   const { stdout } = useStdout();
+  const horizontalPadding = 2;
   const width = Math.max(20, (stdout?.columns || 80) - 2);
+  const contentWidth = Math.max(1, width - horizontalPadding * 2);
   const lines = content.split("\n");
   const paddedLines = ["", ...lines, ""];
 
@@ -107,7 +109,9 @@ function UserMessageBlock({ content }: { content: string }) {
             backgroundColor={theme.userMessageBg}
             color={theme.userMessageText}
           >
-            {padVisual(line || " ", width)}
+            {" ".repeat(horizontalPadding)}
+            {padVisual(line || " ", contentWidth)}
+            {" ".repeat(horizontalPadding)}
           </Text>
         ))}
       </Box>
