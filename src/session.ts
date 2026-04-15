@@ -1,7 +1,6 @@
 /**
  * Session Manager - Append-only JSONL persistence.
  *
- * Inspired by pi-mono's tree-structured sessions.
  * For simplicity, this version uses a flat append-only log.
  */
 
@@ -36,7 +35,7 @@ export class SessionManager {
   }
 
   static create(cwd: string, sessionName?: string): SessionManager {
-    const agentDir = join(homedir(), ".my-agent");
+    const agentDir = join(homedir(), ".bubble");
     const safeCwd = cwd.replace(/[/\\:]/g, "_");
     const sessionsDir = join(agentDir, "sessions", safeCwd);
     mkdirSync(sessionsDir, { recursive: true });
@@ -47,7 +46,7 @@ export class SessionManager {
   }
 
   static listSessions(cwd: string): string[] {
-    const agentDir = join(homedir(), ".my-agent");
+    const agentDir = join(homedir(), ".bubble");
     const safeCwd = cwd.replace(/[/\\:]/g, "_");
     const sessionsDir = join(agentDir, "sessions", safeCwd);
     if (!existsSync(sessionsDir)) return [];

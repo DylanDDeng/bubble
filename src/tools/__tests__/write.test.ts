@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { createWriteTool } from "../write.js";
 
 describe("write tool", () => {
-  const tmpDir = join(tmpdir(), "my-coding-agent-test-write-" + Date.now());
+  const tmpDir = join(tmpdir(), "bubble-test-write-" + Date.now());
   mkdirSync(tmpDir, { recursive: true });
 
   it("writes a new file", async () => {

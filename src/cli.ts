@@ -64,7 +64,7 @@ export function parseArgs(argv: string[]): CliArgs {
 
 export function printHelp() {
   console.log(`
-Usage: my-coding-agent [options] [prompt]
+Usage: bubble [options] [prompt]
 
 Options:
   -m, --model <model>      Model to use (default: z-ai/glm-5.1)

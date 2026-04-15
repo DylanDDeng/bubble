@@ -1,6 +1,5 @@
 /**
  * Core types for the coding agent.
- * Inspired by pi-mono's separation of concerns.
  */
 
 // ============================================================================

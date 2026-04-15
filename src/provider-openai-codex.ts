@@ -405,8 +405,8 @@ function buildBaseHeaders(
   const headers = new Headers(extraHeaders);
   headers.set("Authorization", `Bearer ${accessToken}`);
   headers.set("chatgpt-account-id", accountId);
-  headers.set("originator", "my-coding-agent");
-  headers.set("User-Agent", "my-coding-agent");
+  headers.set("originator", "bubble");
+  headers.set("User-Agent", "bubble");
   return headers;
 }
 

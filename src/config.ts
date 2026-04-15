@@ -1,8 +1,7 @@
 /**
  * User-level configuration manager.
  *
- * Inspired by opencode's workspace + global config layering.
- * For our lightweight agent, we use a single JSON file in ~/.my-agent/config.json.
+ * Uses a single JSON file in ~/.bubble/config.json.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -10,7 +9,7 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import type { ProviderProfile } from "./provider-registry.js";
 
-const CONFIG_PATH = join(homedir(), ".my-agent", "config.json");
+const CONFIG_PATH = join(homedir(), ".bubble", "config.json");
 
 export interface UserConfigData {
   defaultModel?: string;

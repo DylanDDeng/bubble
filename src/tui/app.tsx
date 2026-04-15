@@ -10,7 +10,7 @@ import { InputBox } from "./input-box.js";
 import { MessageList, type DisplayMessage, type DisplayToolCall } from "./message-list.js";
 import { theme } from "./theme.js";
 import { ModelPicker, ProviderPicker, KeyPicker } from "./model-picker.js";
-import { ProviderRegistry, encodeModel, displayModel } from "../provider-registry.js";
+import { BUILTIN_PROVIDERS, ProviderRegistry, encodeModel, displayModel } from "../provider-registry.js";
 
 interface AppProps {
   agent: Agent;
@@ -69,7 +69,7 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
   const [streamingContent, setStreamingContent] = useState("");
   const [streamingReasoning, setStreamingReasoning] = useState("");
   const [streamingTools, setStreamingTools] = useState<DisplayToolCall[]>([]);
-  const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | null>(null);
+  const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | "login" | "logout" | null>(null);
   const [keyProviderId, setKeyProviderId] = useState<string | null>(null);
 
   const userConfig = new UserConfig();
@@ -89,7 +89,7 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
     setMessages([]);
   }, []);
 
-  const openPicker = useCallback((mode: "model" | "key" | "provider") => {
+  const openPicker = useCallback((mode: "model" | "key" | "provider" | "login" | "logout") => {
     setPickerMode(mode);
   }, []);
 
@@ -140,6 +140,46 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
     addMessage("assistant", `Switched to provider ${p.name}. Use /model to pick a model.`);
     setPickerMode(null);
   }, [addMessage, agent, createProvider, safeRegistry]);
+
+  const handleLoginProviderSelect = useCallback(async (providerId: string) => {
+    setPickerMode(null);
+    const command = `/login ${providerId}`;
+    const { handled, result } = await slashRegistry.execute(command, {
+      agent,
+      addMessage,
+      clearMessages,
+      exit,
+      sessionManager,
+      createProvider: createProvider ?? (() => {
+        throw new Error("Provider creation not available");
+      }),
+      openPicker,
+      registry: safeRegistry,
+    });
+    if (handled && result) {
+      addMessage("assistant", result);
+    }
+  }, [agent, addMessage, clearMessages, createProvider, exit, openPicker, safeRegistry, sessionManager]);
+
+  const handleLogoutProviderSelect = useCallback(async (providerId: string) => {
+    setPickerMode(null);
+    const command = `/logout ${providerId}`;
+    const { handled, result } = await slashRegistry.execute(command, {
+      agent,
+      addMessage,
+      clearMessages,
+      exit,
+      sessionManager,
+      createProvider: createProvider ?? (() => {
+        throw new Error("Provider creation not available");
+      }),
+      openPicker,
+      registry: safeRegistry,
+    });
+    if (handled && result) {
+      addMessage("assistant", result);
+    }
+  }, [agent, addMessage, clearMessages, createProvider, exit, openPicker, safeRegistry, sessionManager]);
 
   const handleKeySubmit = useCallback((key: string) => {
     const targetId = keyProviderId || safeRegistry.getDefault()?.id;
@@ -319,6 +359,28 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
             current={currentProviderId}
             onSelect={handleProviderSelect}
             onCancel={() => setPickerMode(null)}
+          />
+        )}
+        {pickerMode === "login" && (
+          <ProviderPicker
+            providers={BUILTIN_PROVIDERS
+              .filter((p) => safeRegistry.supportsOAuth(p.id))
+              .map((p) => ({ id: p.id, name: p.name, enabled: true }))}
+            current={currentProviderId}
+            onSelect={handleLoginProviderSelect}
+            onCancel={() => setPickerMode(null)}
+            title="Select Login Provider"
+          />
+        )}
+        {pickerMode === "logout" && (
+          <ProviderPicker
+            providers={safeRegistry.getConfigured()
+              .filter((p) => safeRegistry.getAuthStorage().has(p.id))
+              .map((p) => ({ id: p.id, name: p.name, enabled: true }))}
+            current={currentProviderId}
+            onSelect={handleLogoutProviderSelect}
+            onCancel={() => setPickerMode(null)}
+            title="Select Logout Provider"
           />
         )}
         {pickerMode === "key" && keyTarget && (

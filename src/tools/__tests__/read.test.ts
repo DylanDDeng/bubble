@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { createReadTool } from "../read.js";
 
 describe("read tool", () => {
-  const tmpDir = join(tmpdir(), "my-coding-agent-test-read-" + Date.now());
+  const tmpDir = join(tmpdir(), "bubble-test-read-" + Date.now());
   mkdirSync(tmpDir, { recursive: true });
 
   it("reads a simple file", async () => {

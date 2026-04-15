@@ -1,7 +1,5 @@
 /**
  * Agent - The core decision loop.
- *
- * This is a simplified version of pi-agent-core's Agent class.
  * It maintains message state, calls the LLM, executes tools, and auto-continues.
  */
 

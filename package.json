@@ -1,7 +1,7 @@
 {
-  "name": "my-coding-agent",
+  "name": "bubble",
   "version": "0.1.0",
-  "description": "A minimal coding agent inspired by pi-mono",
+  "description": "A terminal coding agent",
   "type": "module",
   "scripts": {
     "build": "tsc",

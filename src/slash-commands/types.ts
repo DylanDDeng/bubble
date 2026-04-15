@@ -10,7 +10,7 @@ export interface SlashCommandContext {
   exit: () => void;
   sessionManager?: SessionManager;
   createProvider: (apiKey: string, baseURL: string) => Provider;
-  openPicker: (mode: "model" | "key" | "provider") => void;
+  openPicker: (mode: "model" | "key" | "provider" | "login" | "logout") => void;
   registry: ProviderRegistry;
 }
 

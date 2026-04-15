@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { createEditTool } from "../edit.js";
 
 describe("edit tool", () => {
-  const tmpDir = join(tmpdir(), "my-coding-agent-test-edit-" + Date.now());
+  const tmpDir = join(tmpdir(), "bubble-test-edit-" + Date.now());
   mkdirSync(tmpDir, { recursive: true });
 
   it("applies a single replacement", async () => {

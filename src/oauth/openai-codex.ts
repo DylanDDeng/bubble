@@ -1,7 +1,5 @@
 /**
  * OpenAI Codex OAuth login (PKCE + local callback).
- *
- * Based on the official codex-cli and pi-mono implementations.
  */
 
 import { createServer } from "node:http";

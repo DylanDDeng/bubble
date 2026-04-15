@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { SessionManager } from "../session.js";
 
 describe("SessionManager", () => {
-  const tmpDir = join(tmpdir(), "my-coding-agent-test-session-" + Date.now());
+  const tmpDir = join(tmpdir(), "bubble-test-session-" + Date.now());
   mkdirSync(tmpDir, { recursive: true });
 
   it("creates a new session and persists messages", () => {

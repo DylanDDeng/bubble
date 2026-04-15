@@ -1,5 +1,5 @@
 /**
- * OAuth credential storage in ~/.my-agent/auth.json
+ * OAuth credential storage in ~/.bubble/auth.json
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import type { OAuthCredentials } from "./types.js";
 
-const AUTH_PATH = join(homedir(), ".my-agent", "auth.json");
+const AUTH_PATH = join(homedir(), ".bubble", "auth.json");
 
 export class AuthStorage {
   private data: Record<string, OAuthCredentials> = {};

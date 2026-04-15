@@ -1,8 +1,8 @@
 /**
- * models.json loader - inspired by pi-mono's model configuration.
+ * models.json loader.
  *
  * Users can define providers, API keys, base URLs, and custom models
- * in ~/.my-agent/models.json.
+ * in ~/.bubble/models.json.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import type { ModelInfo } from "./provider-registry.js";
 
-const MODELS_PATH = join(homedir(), ".my-agent", "models.json");
+const MODELS_PATH = join(homedir(), ".bubble", "models.json");
 
 export interface ProviderModelConfig {
   baseURL?: string;

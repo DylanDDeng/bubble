@@ -1,6 +1,5 @@
 /**
  * System prompt construction.
- * Heavily inspired by pi-mono's buildSystemPrompt.
  */
 
 import { cwd } from "node:process";

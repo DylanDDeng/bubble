@@ -89,7 +89,7 @@ export const builtinSlashCommands: SlashCommand[] = [
 
       if (flag === "--remove" && value) {
         if (ctx.registry.getModelConfig().hasProvider(value)) {
-          return `Provider ${value} is defined in ~/.my-agent/models.json. Please edit that file directly.`;
+          return `Provider ${value} is defined in ~/.bubble/models.json. Please edit that file directly.`;
         }
         ctx.registry.removeProvider(value);
         return `Provider ${value} removed.`;
@@ -101,7 +101,7 @@ export const builtinSlashCommands: SlashCommand[] = [
         if (!p) return `Provider ${value} is not configured.`;
         ctx.registry.setDefault(value);
         if (ctx.registry.getModelConfig().hasProvider(value)) {
-          return `Default provider set to ${p.name}. Note: config is managed via ~/.my-agent/models.json.`;
+          return `Default provider set to ${p.name}. Note: config is managed via ~/.bubble/models.json.`;
         }
         return `Default provider set to ${p.name}.`;
       }
@@ -128,7 +128,11 @@ export const builtinSlashCommands: SlashCommand[] = [
     name: "login",
     description: "OAuth login for supported providers. Usage: /login [openai-codex]",
     async handler(args, ctx) {
-      const providerId = args?.trim() || "openai-codex";
+      const providerId = args?.trim();
+      if (!providerId) {
+        ctx.openPicker("login");
+        return;
+      }
       if (!ctx.registry.supportsOAuth(providerId)) {
         return `Unsupported OAuth provider: ${providerId}. Currently only 'openai-codex' is supported.`;
       }
@@ -198,7 +202,7 @@ export const builtinSlashCommands: SlashCommand[] = [
         return "No provider configured. Use /provider --add <id> first.";
       }
       if (ctx.registry.getModelConfig().hasProvider(provider.id)) {
-        return `API key for ${provider.name} is managed in ~/.my-agent/models.json. Please edit that file directly.`;
+        return `API key for ${provider.name} is managed in ~/.bubble/models.json. Please edit that file directly.`;
       }
       ctx.registry.updateProviderKey(provider.id, args);
       ctx.agent.setProvider(ctx.createProvider(args, provider.baseURL));
@@ -210,7 +214,11 @@ export const builtinSlashCommands: SlashCommand[] = [
     name: "logout",
     description: "Remove OAuth credentials for a provider. Usage: /logout [openai-codex]",
     async handler(args, ctx) {
-      const providerId = args?.trim() || "openai-codex";
+      const providerId = args?.trim();
+      if (!providerId) {
+        ctx.openPicker("logout");
+        return;
+      }
       if (!ctx.registry.getAuthStorage().has(providerId)) {
         return `No OAuth credentials found for ${providerId}.`;
       }

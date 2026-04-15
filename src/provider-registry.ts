@@ -1,5 +1,5 @@
 /**
- * Multi-provider registry inspired by opencode and pi-mono.
+ * Multi-provider registry.
  *
  * Supports OpenAI-compatible providers with dynamic or static model lists.
  * Reads provider configuration from models.json first, then falls back to config.json.
@@ -98,7 +98,7 @@ export class ProviderRegistry {
   }
 
   getConfigured(): ProviderProfile[] {
-    // 1. Try models.json first (pi-mono style)
+    // 1. Try models.json first
     const modelsJsonProviders = this.modelConfig.getAllProviders();
     const keys = Object.keys(modelsJsonProviders);
     let providers: ProviderProfile[] = [];

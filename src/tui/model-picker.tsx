@@ -44,7 +44,7 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
         opts.push({ id: m, label: displayModel(m), group: "Recent", providerBadge: provider?.name || providerId || "" });
       }
 
-      // Per-provider models (flattened, pi-mono style)
+      // Per-provider models (flattened list)
       for (const provider of enabled) {
         const models = await registry.listModels(provider);
         for (const m of models) {
@@ -176,9 +176,10 @@ export interface ProviderPickerProps {
   current?: string;
   onSelect: (providerId: string) => void;
   onCancel: () => void;
+  title?: string;
 }
 
-export function ProviderPicker({ providers, current, onSelect, onCancel }: ProviderPickerProps) {
+export function ProviderPicker({ providers, current, onSelect, onCancel, title }: ProviderPickerProps) {
   const { stdout } = useStdout();
   const termHeight = stdout?.rows || 24;
   const maxVisible = Math.max(5, termHeight - 8);
@@ -228,7 +229,7 @@ export function ProviderPicker({ providers, current, onSelect, onCancel }: Provi
 
   return (
     <Box flexDirection="column" marginY={1}>
-      <Text bold color={theme.accent}>Select Provider</Text>
+      <Text bold color={theme.accent}>{title || "Select Provider"}</Text>
       <Text color={theme.muted}>↑/↓ to navigate, Enter to select, Esc to cancel</Text>
       <Box flexDirection="column" marginTop={1}>
         {visible.map((p, i) => {
