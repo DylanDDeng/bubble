@@ -34,4 +34,18 @@ describe("web search tool", () => {
     expect(result.content).toContain("status 500");
     expect(result.content).toContain("upstream failure");
   });
+
+  it("uses the remote Exa MCP web search tool name", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      text: async () => 'data: {"result":{"content":[{"type":"text","text":"ok"}]}}\n\n',
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const tool = createWebSearchTool();
+    await tool.execute({ query: "example" }, { cwd: process.cwd() });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.params.name).toBe("web_search_exa");
+  });
 });
