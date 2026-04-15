@@ -11,6 +11,7 @@ import { MessageList, type DisplayMessage, type DisplayToolCall } from "./messag
 import { theme } from "./theme.js";
 import { ModelPicker, ProviderPicker, KeyPicker } from "./model-picker.js";
 import { BUILTIN_PROVIDERS, ProviderRegistry, encodeModel, displayModel } from "../provider-registry.js";
+import { buildSystemPrompt } from "../system-prompt.js";
 
 interface AppProps {
   agent: Agent;
@@ -111,6 +112,13 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
 
       agent.setProvider(createProvider(provider.apiKey, provider.baseURL));
       agent.providerId = providerId;
+      agent.setSystemPrompt(buildSystemPrompt({
+        agentName: "Bubble",
+        configuredProvider: providerId,
+        configuredModel: displayModel(model),
+        configuredModelId: model,
+        workingDir: args.cwd,
+      }));
       userConfig.pushRecentModel(model);
       sessionManager?.setMetadata({ model });
       addMessage("assistant", `Model switched to ${displayModel(model)}.`);
@@ -144,11 +152,12 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
   const handleLoginProviderSelect = useCallback(async (providerId: string) => {
     setPickerMode(null);
     const command = `/login ${providerId}`;
-    const { handled, result } = await slashRegistry.execute(command, {
-      agent,
-      addMessage,
-      clearMessages,
-      exit,
+      const { handled, result } = await slashRegistry.execute(command, {
+        agent,
+        addMessage,
+        clearMessages,
+        cwd: args.cwd,
+        exit,
       sessionManager,
       createProvider: createProvider ?? (() => {
         throw new Error("Provider creation not available");
@@ -164,11 +173,12 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
   const handleLogoutProviderSelect = useCallback(async (providerId: string) => {
     setPickerMode(null);
     const command = `/logout ${providerId}`;
-    const { handled, result } = await slashRegistry.execute(command, {
-      agent,
-      addMessage,
-      clearMessages,
-      exit,
+      const { handled, result } = await slashRegistry.execute(command, {
+        agent,
+        addMessage,
+        clearMessages,
+        cwd: args.cwd,
+        exit,
       sessionManager,
       createProvider: createProvider ?? (() => {
         throw new Error("Provider creation not available");
@@ -210,6 +220,7 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
           agent,
           addMessage,
           clearMessages,
+          cwd: args.cwd,
           exit,
           sessionManager,
           createProvider: createProvider ?? (() => {

@@ -7,6 +7,7 @@ export interface SlashCommandContext {
   agent: Agent;
   addMessage: (role: "user" | "assistant" | "error", content: string) => void;
   clearMessages: () => void;
+  cwd: string;
   exit: () => void;
   sessionManager?: SessionManager;
   createProvider: (apiKey: string, baseURL: string) => Provider;

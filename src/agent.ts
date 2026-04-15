@@ -70,6 +70,15 @@ export class Agent {
     this.provider = provider;
   }
 
+  setSystemPrompt(prompt: string) {
+    const systemMessage: Extract<Message, { role: "system" }> = { role: "system", content: prompt };
+    if (this.messages[0]?.role === "system") {
+      this.messages[0] = systemMessage;
+      return;
+    }
+    this.messages.unshift(systemMessage);
+  }
+
   async *run(userInput: string, cwd: string): AsyncIterable<AgentEvent> {
     this.appendMessage({ role: "user", content: userInput });
 

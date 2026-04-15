@@ -5,6 +5,14 @@
 import { cwd } from "node:process";
 
 export interface SystemPromptOptions {
+  /** Agent display name */
+  agentName?: string;
+  /** Configured provider id */
+  configuredProvider?: string;
+  /** Configured model name */
+  configuredModel?: string;
+  /** Full configured model id */
+  configuredModelId?: string;
   /** Names of available tools */
   tools?: string[];
   /** One-line description for each tool */
@@ -17,6 +25,10 @@ export interface SystemPromptOptions {
 
 export function buildSystemPrompt(options: SystemPromptOptions = {}): string {
   const date = new Date().toISOString().slice(0, 10);
+  const agentName = options.agentName ?? "Bubble";
+  const configuredProvider = options.configuredProvider;
+  const configuredModel = options.configuredModel;
+  const configuredModelId = options.configuredModelId;
   const workingDir = options.workingDir ?? cwd().replace(/\\/g, "/");
   const tools = options.tools ?? ["read", "bash", "edit", "write", "grep", "ls"];
   const snippets = options.toolSnippets ?? defaultToolSnippets;
@@ -46,7 +58,11 @@ export function buildSystemPrompt(options: SystemPromptOptions = {}): string {
 
   const guidelinesText = guidelines.map((g) => `- ${g}`).join("\n");
 
-  return `You are an expert coding assistant operating in a terminal environment. You help users by reading files, executing commands, editing code, and writing new files.
+  return `You are ${agentName}, an expert coding assistant operating in a terminal environment. You help users by reading files, executing commands, editing code, and writing new files.
+
+Configured model: ${configuredModel ?? "unknown"}
+Configured provider: ${configuredProvider ?? "unknown"}
+Configured model id: ${configuredModelId ?? "unknown"}
 
 Available tools:
 ${toolsList}

@@ -57,7 +57,6 @@ async function main() {
     createProviderInstance({ apiKey, baseURL, reasoning: args.reasoning });
 
   const tools = createAllTools(args.cwd);
-  const systemPrompt = buildSystemPrompt({ workingDir: args.cwd });
 
   // Session management
   let sessionManager: SessionManager | undefined;
@@ -79,6 +78,13 @@ async function main() {
   }
   const activeProvider = registry.getConfigured().find((p) => p.id === activeProviderId) || defaultProvider;
   const activeModel = encodeModel(activeProviderId, effectiveModelId);
+  const systemPrompt = buildSystemPrompt({
+    agentName: "Bubble",
+    configuredProvider: activeProviderId,
+    configuredModel: displayModel(activeModel),
+    configuredModelId: activeModel,
+    workingDir: args.cwd,
+  });
 
   const agent = new Agent({
     provider: activeProvider

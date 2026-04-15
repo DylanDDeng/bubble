@@ -1,5 +1,6 @@
 import { UserConfig, maskKey } from "../config.js";
 import { encodeModel, decodeModel, displayModel, BUILTIN_PROVIDERS } from "../provider-registry.js";
+import { buildSystemPrompt } from "../system-prompt.js";
 import type { SlashCommand } from "./types.js";
 
 const userConfig = new UserConfig();
@@ -9,6 +10,17 @@ function persistSelectedModel(model: string, ctx: Parameters<SlashCommand["handl
   if (ctx.sessionManager) {
     ctx.sessionManager.setMetadata({ model });
   }
+}
+
+function syncSystemPrompt(ctx: Parameters<SlashCommand["handler"]>[1], model: string) {
+  const { providerId, modelId } = decodeModel(model);
+  ctx.agent.setSystemPrompt(buildSystemPrompt({
+    agentName: "Bubble",
+    configuredProvider: providerId,
+    configuredModel: displayModel(model),
+    configuredModelId: model,
+    workingDir: ctx.cwd,
+  }));
 }
 
 function switchToProviderModel(
@@ -24,6 +36,7 @@ function switchToProviderModel(
   ctx.agent.setProvider(ctx.createProvider(provider.apiKey, provider.baseURL));
   ctx.agent.providerId = providerId;
   ctx.agent.model = encodeModel(providerId, modelId);
+  syncSystemPrompt(ctx, ctx.agent.model);
   persistSelectedModel(ctx.agent.model, ctx);
   return true;
 }
