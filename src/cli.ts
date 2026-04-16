@@ -11,7 +11,6 @@ export interface CliArgs {
   apiKey?: string;
   resume?: boolean;
   sessionName?: string;
-  noSession?: boolean;
   print?: boolean;
   prompt?: string;
   thinkingLevel?: ThinkingLevel;
@@ -43,9 +42,6 @@ export function parseArgs(argv: string[]): CliArgs {
         break;
       case "--session":
         args.sessionName = argv[++i];
-        break;
-      case "--no-session":
-        args.noSession = true;
         break;
       case "--reasoning":
         args.thinkingLevel = "medium";
@@ -80,9 +76,8 @@ Options:
   -m, --model <model>      Model to use (default: z-ai/glm-5.1)
   --cwd <dir>              Working directory (default: current)
   -k, --api-key <key>      OpenRouter API key (or set OPENROUTER_API_KEY env)
-  -r, --resume             Resume last session
-  --session <name>         Session name for persistence
-  --no-session             Don't save session to disk
+  -r, --resume             Resume a previous session (latest by default)
+  --session <name>         Session name to create or resume
   --reasoning              Enable reasoning mode at medium effort
   --reasoning-effort <l>   Set reasoning effort: off|minimal|low|medium|high|xhigh
   -p, --print              Non-interactive mode (single prompt)

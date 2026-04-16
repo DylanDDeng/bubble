@@ -1,12 +1,17 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { SessionManager } from "../session.js";
 
 describe("SessionManager", () => {
   const tmpDir = join(tmpdir(), "bubble-test-session-" + Date.now());
   mkdirSync(tmpDir, { recursive: true });
+  process.env.BUBBLE_HOME = tmpDir;
+
+  afterEach(() => {
+    process.env.BUBBLE_HOME = tmpDir;
+  });
 
   it("creates a new session and persists messages", () => {
     const file = join(tmpDir, "test.jsonl");
@@ -103,6 +108,24 @@ describe("SessionManager", () => {
     const line = readFileSync(file, "utf-8").trim();
     expect(JSON.parse(line).type).toBe("marker");
     expect(JSON.parse(line).kind).toBe("thinking_level_switch");
+  });
+
+  it("can resume the latest prior session explicitly", () => {
+    const first = SessionManager.create(tmpDir, "resume-a.jsonl");
+    first.appendMessage({ role: "user", content: "older" });
+
+    const second = SessionManager.create(tmpDir, "resume-b.jsonl");
+    second.appendMessage({ role: "user", content: "newer" });
+
+    const resumed = SessionManager.resume(tmpDir);
+    expect(resumed).toBeDefined();
+    expect(resumed!.getSessionFile()).toContain("resume-b.jsonl");
+  });
+
+  it("creates a fresh session file by default", () => {
+    const fresh = SessionManager.createFresh(tmpDir);
+    expect(fresh.getMessages()).toHaveLength(0);
+    expect(fresh.getSessionFile()).toContain(".jsonl");
   });
 
   it("compacts older turns into a summary entry", () => {

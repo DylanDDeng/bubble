@@ -10,6 +10,7 @@ export interface CompactResult {
   compacted: boolean;
   summary?: string;
   entries?: SessionLogEntry[];
+  messages?: Message[];
   droppedEntries?: number;
 }
 
@@ -66,8 +67,57 @@ export function compactSessionEntries(
   };
 }
 
+export function compactMessages(
+  messages: Message[],
+  options: CompactOptions = {},
+): CompactResult {
+  const keepRecentTurns = options.keepRecentTurns ?? 2;
+  const maxSummaryItems = options.maxSummaryItems ?? 4;
+  const systemMessages = messages.filter((message) => message.role === "system");
+  const nonSystemMessages = messages.filter((message) => message.role !== "system");
+  const turnStartIndexes = nonSystemMessages
+    .map((message, index) => (message.role === "user" ? index : -1))
+    .filter((index) => index >= 0);
+
+  if (turnStartIndexes.length <= keepRecentTurns) {
+    return { compacted: false };
+  }
+
+  const keepStartIndex = turnStartIndexes[Math.max(0, turnStartIndexes.length - keepRecentTurns)];
+  if (keepStartIndex <= 0) {
+    return { compacted: false };
+  }
+
+  const oldMessages = nonSystemMessages.slice(0, keepStartIndex);
+  const keptMessages = nonSystemMessages.slice(keepStartIndex);
+  const summary = buildMessageSummary(oldMessages, maxSummaryItems);
+  if (!summary) {
+    return { compacted: false };
+  }
+
+  const compactedMessages: Message[] = [
+    ...systemMessages.map((message) => cloneMessage(message)),
+    {
+      role: "system",
+      content: `Previous conversation summary:\n${summary}`,
+    },
+    ...keptMessages.map((message) => cloneMessage(message)),
+  ];
+
+  return {
+    compacted: true,
+    summary,
+    messages: compactedMessages,
+    droppedEntries: oldMessages.length,
+  };
+}
+
 function buildCompactionSummary(entries: SessionLogEntry[], maxSummaryItems: number): string {
   const messages = entriesToMessages(entries);
+  return buildMessageSummary(messages, maxSummaryItems);
+}
+
+function buildMessageSummary(messages: Message[], maxSummaryItems: number): string {
   if (messages.length === 0) {
     return "";
   }
@@ -237,4 +287,25 @@ function findLatestSummaryIndex(entries: SessionLogEntry[]): number {
 
 function nextSummaryId(entries: SessionLogEntry[]): string {
   return `${entries.length + 1}`;
+}
+
+function cloneMessage(message: Message): Message {
+  if (message.role === "assistant") {
+    return {
+      ...message,
+      toolCalls: message.toolCalls?.map((toolCall) => ({ ...toolCall })),
+    };
+  }
+
+  if (message.role === "user" && Array.isArray(message.content)) {
+    return {
+      ...message,
+      content: message.content.map((part) => ({
+        ...part,
+        ...(part.type === "image_url" ? { image_url: { ...part.image_url } } : {}),
+      })),
+    };
+  }
+
+  return { ...message };
 }

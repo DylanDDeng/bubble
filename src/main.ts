@@ -62,10 +62,18 @@ async function main() {
 
   const tools = createAllTools(args.cwd);
 
-  // Session management
-  let sessionManager: SessionManager | undefined;
-  if (!args.noSession) {
-    sessionManager = SessionManager.create(args.cwd, args.sessionName);
+  // Session management:
+  // - default: always start a fresh session
+  // - --resume: explicitly restore the latest or a named session
+  let sessionManager = args.resume
+    ? SessionManager.resume(args.cwd, args.sessionName)
+    : undefined;
+  let resumedExistingSession = !!sessionManager;
+  if (!sessionManager) {
+    sessionManager = args.sessionName && !args.resume
+      ? SessionManager.create(args.cwd, args.sessionName)
+      : SessionManager.createFresh(args.cwd);
+    resumedExistingSession = false;
   }
 
   // Model resolution fallback:
@@ -120,7 +128,7 @@ async function main() {
   }
 
   // Restore session if requested
-  if (sessionManager) {
+  if (resumedExistingSession && sessionManager) {
     const history = sessionManager.getMessages();
     if (history.length > 0) {
       agent.messages = [{ role: "system", content: systemPrompt }, ...history];

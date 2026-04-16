@@ -1,8 +1,12 @@
+import { getContextBudget } from "./budget.js";
+import { compactMessages } from "./compact.js";
 import { pruneMessages } from "./prune.js";
 import type { AssistantMessage, Message, SystemMessage } from "../types.js";
 
 export interface ProjectionOptions {
-  mode?: "full" | "pruned";
+  mode?: "full" | "pruned" | "budgeted";
+  providerId?: string;
+  modelId?: string;
 }
 
 export function projectMessages(messages: Message[], options: ProjectionOptions = {}): Message[] {
@@ -38,6 +42,31 @@ export function projectMessages(messages: Message[], options: ProjectionOptions 
 
   if (mode === "pruned") {
     return pruneMessages(projected);
+  }
+
+  if (mode === "budgeted") {
+    const pruned = pruneMessages(projected);
+    if (!options.providerId || !options.modelId) {
+      return pruned;
+    }
+
+    const budget = getContextBudget(options.providerId, options.modelId, pruned);
+    if (!budget.shouldCompact) {
+      return pruned;
+    }
+
+    const compacted = compactMessages(pruned, { keepRecentTurns: 2 });
+    if (!compacted.compacted || !compacted.messages) {
+      return pruned;
+    }
+
+    const afterFirstPass = getContextBudget(options.providerId, options.modelId, compacted.messages);
+    if (!afterFirstPass.shouldCompact) {
+      return compacted.messages;
+    }
+
+    const tighter = compactMessages(pruned, { keepRecentTurns: 1 });
+    return tighter.compacted && tighter.messages ? tighter.messages : compacted.messages;
   }
 
   return projected;

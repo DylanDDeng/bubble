@@ -118,7 +118,11 @@ export class Agent {
         parameters: t.parameters,
       }));
 
-      const projectedMessages = projectMessages(this.messages, { mode: "pruned" });
+      const projectedMessages = projectMessages(this.messages, {
+        mode: "budgeted",
+        providerId: this.providerId,
+        modelId: this.apiModel,
+      });
       const stream = this.provider.streamChat(projectedMessages, {
         model: this.apiModel,
         tools: toolDefinitions,

@@ -24,20 +24,31 @@ export class SessionManager {
   }
 
   static create(cwd: string, sessionName?: string): SessionManager {
-    const agentDir = join(homedir(), ".bubble");
-    const safeCwd = cwd.replace(/[/\\:]/g, "_");
-    const sessionsDir = join(agentDir, "sessions", safeCwd);
-    mkdirSync(sessionsDir, { recursive: true });
+    const file = resolveSessionFile(cwd, sessionName || `${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`);
+    return new SessionManager(file);
+  }
 
-    const name = sessionName || `${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`;
-    const file = join(sessionsDir, name);
+  static resume(cwd: string, sessionName?: string): SessionManager | undefined {
+    if (sessionName) {
+      const file = resolveSessionFile(cwd, sessionName);
+      return existsSync(file) ? new SessionManager(file) : undefined;
+    }
+
+    const latest = this.listSessions(cwd).sort().at(-1);
+    if (!latest) {
+      return undefined;
+    }
+
+    return new SessionManager(resolveSessionFile(cwd, latest));
+  }
+
+  static createFresh(cwd: string): SessionManager {
+    const file = resolveSessionFile(cwd, `${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`);
     return new SessionManager(file);
   }
 
   static listSessions(cwd: string): string[] {
-    const agentDir = join(homedir(), ".bubble");
-    const safeCwd = cwd.replace(/[/\\:]/g, "_");
-    const sessionsDir = join(agentDir, "sessions", safeCwd);
+    const sessionsDir = getSessionsDir(cwd);
     if (!existsSync(sessionsDir)) return [];
     return readdirSync(sessionsDir).filter((file) => file.endsWith(".jsonl"));
   }
@@ -114,4 +125,16 @@ export class SessionManager {
   getSessionFile(): string {
     return this.sessionFile;
   }
+}
+
+function getSessionsDir(cwd: string): string {
+  const agentDir = process.env.BUBBLE_HOME || join(homedir(), ".bubble");
+  const safeCwd = cwd.replace(/[/\\:]/g, "_");
+  const sessionsDir = join(agentDir, "sessions", safeCwd);
+  mkdirSync(sessionsDir, { recursive: true });
+  return sessionsDir;
+}
+
+function resolveSessionFile(cwd: string, sessionName: string): string {
+  return join(getSessionsDir(cwd), sessionName);
 }

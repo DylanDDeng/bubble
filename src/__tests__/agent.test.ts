@@ -151,4 +151,38 @@ describe("Agent", () => {
     expect((captured[0][0] as any).content).toContain("system-1");
     expect(captured[0].some((message) => message.role === "assistant" && message.content === "")).toBe(false);
   });
+
+  it("auto-compacts oversized history before sending it to the provider", async () => {
+    const captured: Message[][] = [];
+    const provider: Provider = {
+      async *streamChat(messages) {
+        captured.push(messages);
+        yield { type: "text", content: "ok" };
+        yield { type: "done" };
+      },
+      async complete() {
+        return "ok";
+      },
+    };
+
+    const agent = new Agent({
+      provider,
+      providerId: "openai",
+      model: "openai:gpt-4o",
+      tools: [],
+      systemPrompt: "system",
+    });
+
+    for (let i = 0; i < 5; i++) {
+      agent.messages.push({ role: "user", content: `turn ${i} ` + "x".repeat(120000) });
+      agent.messages.push({ role: "assistant", content: `reply ${i}` });
+    }
+
+    await collectEvents(agent, "latest turn", "/tmp");
+
+    expect(captured).toHaveLength(1);
+    const systemMessages = captured[0].filter((message) => message.role === "system");
+    expect(systemMessages.length).toBeGreaterThan(0);
+    expect(systemMessages.some((message) => message.content.includes("Previous conversation summary:"))).toBe(true);
+  });
 });
