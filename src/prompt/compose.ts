@@ -1,0 +1,79 @@
+import type { ThinkingLevel } from "../types.js";
+import { buildAnthropicProviderPrompt } from "./provider-prompts/anthropic.js";
+import { buildCodexProviderPrompt } from "./provider-prompts/codex.js";
+import { buildDefaultProviderPrompt } from "./provider-prompts/default.js";
+import { buildGeminiProviderPrompt } from "./provider-prompts/gemini.js";
+import { buildGptProviderPrompt } from "./provider-prompts/gpt.js";
+import { buildEnvironmentPrompt, defaultToolNames, type EnvironmentPromptOptions } from "./environment.js";
+import { buildRuntimePrompt } from "./runtime.js";
+
+export interface ComposeSystemPromptOptions extends EnvironmentPromptOptions {
+  agentName?: string;
+  guidelines?: string[];
+  thinkingLevel?: ThinkingLevel;
+}
+
+export function composeSystemPrompt(options: ComposeSystemPromptOptions = {}): string {
+  const agentName = options.agentName ?? "Bubble";
+  const providerPrompt = buildProviderPrompt(agentName, options.configuredProvider, options.configuredModelId, options.configuredModel);
+  const environmentPrompt = buildEnvironmentPrompt({
+    configuredProvider: options.configuredProvider,
+    configuredModel: options.configuredModel,
+    configuredModelId: options.configuredModelId,
+    workingDir: options.workingDir,
+    currentDate: options.currentDate,
+    tools: options.tools ?? defaultToolNames,
+    toolSnippets: options.toolSnippets,
+  });
+  const runtimePrompt = buildRuntimePrompt({
+    thinkingLevel: options.thinkingLevel,
+    guidelines: buildGuidelines(options.tools ?? defaultToolNames, options.guidelines ?? []),
+  });
+
+  return [providerPrompt, environmentPrompt, runtimePrompt].join("\n\n");
+}
+
+function buildProviderPrompt(
+  agentName: string,
+  providerId?: string,
+  modelId?: string,
+  modelName?: string,
+): string {
+  const provider = providerId ?? "";
+  const rawModel = modelId ?? modelName ?? "";
+  const model = rawModel.includes(":") ? rawModel.split(":").slice(1).join(":") : rawModel;
+
+  if (provider === "anthropic" || model.startsWith("claude")) {
+    return buildAnthropicProviderPrompt(agentName);
+  }
+  if (provider === "google" || model.startsWith("gemini")) {
+    return buildGeminiProviderPrompt(agentName);
+  }
+  if (provider === "openai-codex" || model.includes("codex") || model.startsWith("gpt-5")) {
+    return buildCodexProviderPrompt(agentName);
+  }
+  if (provider === "openai" || provider === "openrouter" || model.startsWith("gpt") || model.startsWith("o1")) {
+    return buildGptProviderPrompt(agentName);
+  }
+
+  return buildDefaultProviderPrompt(agentName);
+}
+
+function buildGuidelines(tools: string[], extraGuidelines: string[]): string[] {
+  const guidelines: string[] = [];
+  const add = (item: string) => {
+    if (!guidelines.includes(item)) {
+      guidelines.push(item);
+    }
+  };
+
+  if (tools.includes("bash") && tools.some((tool) => tool === "grep" || tool === "ls")) {
+    add("Prefer grep/ls over bash for file exploration when they fit the task");
+  }
+
+  for (const item of extraGuidelines) {
+    add(item);
+  }
+
+  return guidelines;
+}

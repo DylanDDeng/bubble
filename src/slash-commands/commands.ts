@@ -9,7 +9,8 @@ const userConfig = new UserConfig();
 function persistSelectedModel(model: string, ctx: Parameters<SlashCommand["handler"]>[1]) {
   userConfig.pushRecentModel(model);
   if (ctx.sessionManager) {
-    ctx.sessionManager.setMetadata({ model, reasoningEffort: ctx.agent.reasoning });
+    ctx.sessionManager.setMetadata({ model, thinkingLevel: ctx.agent.thinking, reasoningEffort: ctx.agent.thinking });
+    ctx.sessionManager.appendMarker("model_switch", model);
   }
 }
 
@@ -20,6 +21,7 @@ function syncSystemPrompt(ctx: Parameters<SlashCommand["handler"]>[1], model: st
     configuredProvider: providerId,
     configuredModel: displayModel(model),
     configuredModelId: model,
+    thinkingLevel: ctx.agent.thinking,
     workingDir: ctx.cwd,
   }));
 }
@@ -34,8 +36,8 @@ function switchToProviderModel(
     return false;
   }
 
-  ctx.agent.reasoning = normalizeThinkingLevel(
-    ctx.agent.reasoning,
+  ctx.agent.thinking = normalizeThinkingLevel(
+    ctx.agent.thinking,
     getAvailableThinkingLevels(providerId, modelId),
   );
   ctx.agent.setProvider(ctx.createProvider(providerId, provider.apiKey, provider.baseURL));
@@ -260,9 +262,25 @@ export const builtinSlashCommands: SlashCommand[] = [
   },
   {
     name: "compact",
-    description: "Manually compact the session context (placeholder)",
+    description: "Manually compact the current session context",
     async handler(args, ctx) {
-      return "Compaction not implemented yet.";
+      if (!ctx.sessionManager) {
+        return "Compaction requires session persistence. Restart without --no-session.";
+      }
+
+      const result = ctx.sessionManager.compact();
+      if (!result.compacted) {
+        return "Session is already compact enough.";
+      }
+
+      const systemMessage = ctx.agent.messages.find((message) => message.role === "system");
+      ctx.clearMessages();
+      ctx.agent.messages = [
+        ...(systemMessage ? [systemMessage] : []),
+        ...ctx.sessionManager.getMessages(),
+      ];
+
+      return `Compacted session context. Dropped ${result.droppedEntries ?? 0} log entries into a summary.`;
     },
   },
 ];

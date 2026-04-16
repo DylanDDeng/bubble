@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -17,8 +17,8 @@ describe("SessionManager", () => {
 
     const lines = readFileSync(file, "utf-8").trim().split("\n");
     expect(lines).toHaveLength(2);
-    expect(JSON.parse(lines[0]).data.role).toBe("user");
-    expect(JSON.parse(lines[1]).data.role).toBe("assistant");
+    expect(JSON.parse(lines[0]).type).toBe("user_message");
+    expect(JSON.parse(lines[1]).type).toBe("assistant_message");
   });
 
   it("restores messages from disk", () => {
@@ -71,11 +71,58 @@ describe("SessionManager", () => {
 
   it("ignores corrupted jsonl lines gracefully", () => {
     const file = join(tmpDir, "corrupt.jsonl");
-    const { writeFileSync } = require("node:fs");
     writeFileSync(file, '{"type":"message","data":{"role":"user"}}\nthis is not json\n', "utf-8");
 
     const sm = new SessionManager(file);
     const messages = sm.getMessages();
     expect(messages).toHaveLength(1);
+  });
+
+  it("maps legacy reasoningEffort metadata to thinkingLevel", () => {
+    const file = join(tmpDir, "legacy-metadata.jsonl");
+    writeFileSync(
+      file,
+      `${JSON.stringify({
+        id: "metadata",
+        type: "metadata",
+        metadata: { model: "openai:gpt-5.4", reasoningEffort: "high" },
+        timestamp: Date.now(),
+      })}\n`,
+      "utf-8",
+    );
+
+    const sm = new SessionManager(file);
+    expect(sm.getMetadata().thinkingLevel).toBe("high");
+  });
+
+  it("persists structured markers", () => {
+    const file = join(tmpDir, "marker.jsonl");
+    const sm = new SessionManager(file);
+    sm.appendMarker("thinking_level_switch", "high");
+
+    const line = readFileSync(file, "utf-8").trim();
+    expect(JSON.parse(line).type).toBe("marker");
+    expect(JSON.parse(line).kind).toBe("thinking_level_switch");
+  });
+
+  it("compacts older turns into a summary entry", () => {
+    const file = join(tmpDir, "compact-structured.jsonl");
+    const sm = new SessionManager(file);
+    sm.appendMessage({ role: "user", content: "task one" });
+    sm.appendMessage({ role: "assistant", content: "reply one" });
+    sm.appendMessage({ role: "user", content: "task two" });
+    sm.appendMessage({ role: "assistant", content: "reply two" });
+    sm.appendMessage({ role: "user", content: "task three" });
+    sm.appendMessage({ role: "assistant", content: "reply three" });
+
+    const result = sm.compact({ keepRecentTurns: 2 });
+    expect(result.compacted).toBe(true);
+
+    const lines = readFileSync(file, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
+    expect(lines.some((line) => line.type === "summary")).toBe(true);
+
+    const restored = sm.getMessages();
+    expect(restored[0].role).toBe("system");
+    expect((restored[0] as any).content).toContain("Previous conversation summary:");
   });
 });

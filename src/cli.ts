@@ -2,7 +2,8 @@
  * CLI argument parsing.
  */
 
-import type { ReasoningEffort } from "./types.js";
+import type { ThinkingLevel } from "./types.js";
+import { isThinkingLevel } from "./variant/thinking-level.js";
 
 export interface CliArgs {
   model: string;
@@ -13,7 +14,7 @@ export interface CliArgs {
   noSession?: boolean;
   print?: boolean;
   prompt?: string;
-  reasoningEffort?: ReasoningEffort;
+  thinkingLevel?: ThinkingLevel;
 }
 
 export function parseArgs(argv: string[]): CliArgs {
@@ -47,12 +48,12 @@ export function parseArgs(argv: string[]): CliArgs {
         args.noSession = true;
         break;
       case "--reasoning":
-        args.reasoningEffort = "medium";
+        args.thinkingLevel = "medium";
         break;
       case "--reasoning-effort": {
-        const value = argv[++i] as ReasoningEffort | undefined;
-        if (value && ["off", "minimal", "low", "medium", "high", "xhigh"].includes(value)) {
-          args.reasoningEffort = value;
+        const value = argv[++i];
+        if (isThinkingLevel(value)) {
+          args.thinkingLevel = value;
         }
         break;
       }

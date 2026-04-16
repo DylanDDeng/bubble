@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
-import { homedir } from "node:os";
 import type { Agent } from "../agent.js";
 import type { CliArgs } from "../cli.js";
 import type { SessionManager } from "../session.js";
@@ -11,10 +10,13 @@ import { InputBox } from "./input-box.js";
 import { MessageList, type DisplayMessage, type DisplayToolCall } from "./message-list.js";
 import { theme } from "./theme.js";
 import { ModelPicker, ProviderPicker, KeyPicker } from "./model-picker.js";
-import { BUILTIN_PROVIDERS, ProviderRegistry, encodeModel, displayModel } from "../provider-registry.js";
+import { BUILTIN_PROVIDERS, ProviderRegistry, displayModel } from "../provider-registry.js";
 import { buildSystemPrompt } from "../system-prompt.js";
-import type { ReasoningEffort } from "../types.js";
+import type { ThinkingLevel } from "../types.js";
 import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingLevel } from "../provider-transform.js";
+import { projectMessages } from "../context/projector.js";
+import { getContextBudget } from "../context/budget.js";
+import { FooterBar, buildFooterData } from "./footer.js";
 
 interface AppProps {
   agent: Agent;
@@ -74,7 +76,7 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
   const [streamingReasoning, setStreamingReasoning] = useState("");
   const [streamingTools, setStreamingTools] = useState<DisplayToolCall[]>([]);
   const [usageTotals, setUsageTotals] = useState({ prompt: 0, completion: 0 });
-  const [thinkingLevel, setThinkingLevel] = useState<ReasoningEffort>(agent.reasoning);
+  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(agent.thinking);
   const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | "login" | "logout" | null>(null);
   const [keyProviderId, setKeyProviderId] = useState<string | null>(null);
 
@@ -89,12 +91,21 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
       const providerId = modelParts[0];
       const modelId = modelParts.slice(1).join(":");
       const availableLevels = getAvailableThinkingLevels(providerId, modelId);
-      const currentLevel = normalizeThinkingLevel(agent.reasoning, availableLevels);
+      const currentLevel = normalizeThinkingLevel(agent.thinking, availableLevels);
       const currentIndex = availableLevels.indexOf(currentLevel);
       const nextLevel = availableLevels[(currentIndex + 1) % availableLevels.length];
-      agent.reasoning = nextLevel;
+      agent.thinking = nextLevel;
+      agent.setSystemPrompt(buildSystemPrompt({
+        agentName: "Bubble",
+        configuredProvider: providerId,
+        configuredModel: displayModel(agent.model),
+        configuredModelId: agent.model,
+        thinkingLevel: nextLevel,
+        workingDir: args.cwd,
+      }));
       setThinkingLevel(nextLevel);
-      sessionManager?.setMetadata({ model: agent.model, reasoningEffort: nextLevel });
+      sessionManager?.setMetadata({ model: agent.model, thinkingLevel: nextLevel, reasoningEffort: nextLevel });
+      sessionManager?.appendMarker("thinking_level_switch", nextLevel);
       return;
     }
 
@@ -132,8 +143,8 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
       }
 
       const modelId = model.includes(":") ? model.split(":").slice(1).join(":") : model;
-      agent.reasoning = normalizeThinkingLevel(
-        agent.reasoning || getDefaultThinkingLevel(providerId, modelId),
+      agent.thinking = normalizeThinkingLevel(
+        agent.thinking || getDefaultThinkingLevel(providerId, modelId),
         getAvailableThinkingLevels(providerId, modelId),
       );
       agent.setProvider(createProvider(providerId, provider.apiKey, provider.baseURL));
@@ -143,11 +154,13 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
         configuredProvider: providerId,
         configuredModel: displayModel(model),
         configuredModelId: model,
+        thinkingLevel: agent.thinking,
         workingDir: args.cwd,
       }));
       userConfig.pushRecentModel(model);
-      setThinkingLevel(agent.reasoning);
-      sessionManager?.setMetadata({ model, reasoningEffort: agent.reasoning });
+      setThinkingLevel(agent.thinking);
+      sessionManager?.setMetadata({ model, thinkingLevel: agent.thinking, reasoningEffort: agent.thinking });
+      sessionManager?.appendMarker("model_switch", model);
       addMessage("assistant", `Model switched to ${displayModel(model)}.`);
       setPickerMode(null);
     };
@@ -449,11 +462,18 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
         <InputBox onSubmit={handleSubmit} disabled={isRunning || !!pickerMode} />
       </Box>
       <FooterBar
-        cwd={args.cwd}
-        providerId={agent.providerId || safeRegistry.getDefault()?.id || "unknown"}
-        model={displayModel(agent.model)}
-        reasoningEffort={thinkingLevel}
-        usageTotals={usageTotals}
+        data={buildFooterData({
+          cwd: args.cwd,
+          providerId: agent.providerId || safeRegistry.getDefault()?.id || "unknown",
+          model: displayModel(agent.model),
+          thinkingLevel,
+          usageTotals,
+          budget: getContextBudget(
+            agent.providerId || safeRegistry.getDefault()?.id || "unknown",
+            agent.apiModel,
+            projectMessages(agent.messages, { mode: "pruned" }),
+          ),
+        })}
       />
     </Box>
   );
@@ -564,44 +584,4 @@ function WaitingIndicator({ tools }: { tools: DisplayToolCall[] }) {
       <Text color={theme.muted}> {phrase}</Text>
     </Box>
   );
-}
-
-function FooterBar({
-  cwd,
-  providerId,
-  model,
-  reasoningEffort,
-  usageTotals,
-}: {
-  cwd: string;
-  providerId: string;
-  model: string;
-  reasoningEffort: string;
-  usageTotals: { prompt: number; completion: number };
-}) {
-  const left = `${formatCwd(cwd)}${usageTotals.prompt || usageTotals.completion ? `  ↑${formatTokens(usageTotals.prompt)} ↓${formatTokens(usageTotals.completion)}` : ""}`;
-  const right = `${providerId} • ${model}${reasoningEffort && reasoningEffort !== "off" ? ` • ${reasoningEffort}` : " • thinking off"}`;
-
-  return (
-    <Box paddingX={1} flexShrink={0}>
-      <Text color={theme.muted}>{left}</Text>
-      <Box flexGrow={1} />
-      <Text color={theme.muted}>{right}</Text>
-    </Box>
-  );
-}
-
-function formatTokens(count: number): string {
-  if (count < 1000) return String(count);
-  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
-  if (count < 1000000) return `${Math.round(count / 1000)}k`;
-  return `${(count / 1000000).toFixed(1)}M`;
-}
-
-function formatCwd(cwd: string): string {
-  const home = homedir();
-  if (cwd.startsWith(home)) {
-    return `~${cwd.slice(home.length)}`;
-  }
-  return cwd;
 }

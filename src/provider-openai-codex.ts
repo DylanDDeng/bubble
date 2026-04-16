@@ -1,4 +1,4 @@
-import type { Message, Provider, ReasoningEffort, StreamChunk, ToolDefinition } from "./types.js";
+import type { Message, Provider, StreamChunk, ThinkingLevel, ToolDefinition } from "./types.js";
 import { listBuiltinModels } from "./model-catalog.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
 
@@ -41,18 +41,18 @@ export function createOpenAICodexProvider(options: {
   providerId?: string;
   apiKey: string;
   baseURL: string;
-  reasoningEffort?: ReasoningEffort;
+  thinkingLevel?: ThinkingLevel;
 }): Provider {
   const sessionId = globalThis.crypto?.randomUUID?.() ?? `bubble_${Date.now()}`;
 
   async function* streamChat(
     messages: Message[],
-    chatOptions: { model: string; tools?: ToolDefinition[]; temperature?: number; reasoningEffort?: ReasoningEffort }
+    chatOptions: { model: string; tools?: ToolDefinition[]; temperature?: number; thinkingLevel?: ThinkingLevel }
   ): AsyncIterable<StreamChunk> {
     const requestConfig = resolveProviderRequestConfig(
       "openai-codex",
       chatOptions.model,
-      chatOptions.reasoningEffort ?? options.reasoningEffort ?? "off",
+      chatOptions.thinkingLevel ?? options.thinkingLevel ?? "off",
     );
     const accountId = extractChatGptAccountId(options.apiKey);
     if (!accountId) {
@@ -210,13 +210,13 @@ export function createOpenAICodexProvider(options: {
 
   async function complete(
     messages: Message[],
-    chatOptions?: { model?: string; temperature?: number; reasoningEffort?: ReasoningEffort }
+    chatOptions?: { model?: string; temperature?: number; thinkingLevel?: ThinkingLevel }
   ): Promise<string> {
     let content = "";
     for await (const chunk of streamChat(messages, {
       model: chatOptions?.model ?? "gpt-5.4",
       temperature: chatOptions?.temperature,
-      reasoningEffort: chatOptions?.reasoningEffort,
+      thinkingLevel: chatOptions?.thinkingLevel,
     })) {
       if (chunk.type === "text") {
         content += chunk.content;
@@ -265,7 +265,7 @@ function buildRequestBody(
   options: {
     model: string;
     tools?: ToolDefinition[];
-    reasoningEffort?: ReasoningEffort;
+    reasoningEffort?: ThinkingLevel;
     sessionId?: string;
   }
 ) {

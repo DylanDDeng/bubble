@@ -54,11 +54,11 @@ async function main() {
         providerId: defaultProvider.id,
         apiKey: defaultProvider.apiKey,
         baseURL: defaultProvider.baseURL,
-        reasoningEffort: args.reasoningEffort,
+        thinkingLevel: args.thinkingLevel,
       })
     : createUnavailableProvider(unavailableProviderMessage);
   const createProvider = (providerId: string, apiKey: string, baseURL: string) =>
-    createProviderInstance({ providerId, apiKey, baseURL, reasoningEffort: args.reasoningEffort });
+    createProviderInstance({ providerId, apiKey, baseURL, thinkingLevel: args.thinkingLevel });
 
   const tools = createAllTools(args.cwd);
 
@@ -74,7 +74,7 @@ async function main() {
   const fallbackModelId = registry.getDefaultModel(fallbackProviderId, defaultProvider?.authType) || args.model;
   const cliModel = args.model.includes(":") ? args.model : encodeModel(fallbackProviderId, fallbackModelId);
   const sessionModel = sessionManager?.getMetadata().model;
-  const sessionReasoningEffort = sessionManager?.getMetadata().reasoningEffort;
+  const sessionThinkingLevel = sessionManager?.getMetadata().thinkingLevel;
   const effectiveModel = sessionModel ? sessionModel : cliModel;
   const { providerId: effectiveProviderId, modelId: effectiveModelId } = decodeModel(effectiveModel);
   const activeProviderId = effectiveProviderId || fallbackProviderId;
@@ -83,14 +83,15 @@ async function main() {
   }
   const activeProvider = registry.getConfigured().find((p) => p.id === activeProviderId) || defaultProvider;
   const activeModel = encodeModel(activeProviderId, effectiveModelId);
-  const initialThinkingLevel = sessionReasoningEffort
-    ?? args.reasoningEffort
+  const initialThinkingLevel = sessionThinkingLevel
+    ?? args.thinkingLevel
     ?? getDefaultThinkingLevel(activeProviderId, effectiveModelId);
   const systemPrompt = buildSystemPrompt({
     agentName: "Bubble",
     configuredProvider: activeProviderId,
     configuredModel: displayModel(activeModel),
     configuredModelId: activeModel,
+    thinkingLevel: initialThinkingLevel,
     workingDir: args.cwd,
   });
 
@@ -103,7 +104,7 @@ async function main() {
     tools,
     systemPrompt,
     temperature: 0.2,
-    reasoningEffort: initialThinkingLevel,
+    thinkingLevel: initialThinkingLevel,
     onMessageAppend: (message) => {
       if (sessionManager && message.role !== "system") {
         sessionManager.appendMessage(message);
@@ -111,7 +112,7 @@ async function main() {
     },
   });
   if (sessionManager) {
-    sessionManager.setMetadata({ model: agent.model, reasoningEffort: agent.reasoning });
+    sessionManager.setMetadata({ model: agent.model, thinkingLevel: agent.thinking, reasoningEffort: agent.thinking });
   }
 
   if (cliModel === agent.model) {

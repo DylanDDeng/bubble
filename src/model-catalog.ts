@@ -12,6 +12,7 @@ export interface BuiltinModelDefinition {
   name: string;
   providerId: string;
   reasoningLevels: ReasoningEffort[];
+  contextWindow?: number;
 }
 
 export const BUILTIN_PROVIDERS: BuiltinProviderDefinition[] = [
@@ -32,35 +33,35 @@ const GPT51_CODEX_MINI_LEVELS: ReasoningEffort[] = ["off", "medium", "high"];
 const OPENAI_CHAT_LEVELS: ReasoningEffort[] = ["off"];
 
 export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
-  { id: "gpt-5.4", name: "gpt-5.4", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS },
-  { id: "gpt-5.4-mini", name: "gpt-5.4-mini", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS },
-  { id: "gpt-5.3-codex", name: "gpt-5.3-codex", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS },
-  { id: "gpt-5.3-codex-spark", name: "gpt-5.3-codex-spark", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS },
-  { id: "gpt-5.2-codex", name: "gpt-5.2-codex", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS },
-  { id: "gpt-5.2", name: "gpt-5.2", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS },
-  { id: "gpt-5.1-codex-max", name: "gpt-5.1-codex-max", providerId: "openai-codex", reasoningLevels: GPT51_CODEX_MAX_LEVELS },
-  { id: "gpt-5.1-codex-mini", name: "gpt-5.1-codex-mini", providerId: "openai-codex", reasoningLevels: GPT51_CODEX_MINI_LEVELS },
-  { id: "gpt-5.1", name: "gpt-5.1", providerId: "openai-codex", reasoningLevels: GPT51_LEVELS },
+  { id: "gpt-5.4", name: "gpt-5.4", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000 },
+  { id: "gpt-5.4-mini", name: "gpt-5.4-mini", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000 },
+  { id: "gpt-5.3-codex", name: "gpt-5.3-codex", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000 },
+  { id: "gpt-5.3-codex-spark", name: "gpt-5.3-codex-spark", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000 },
+  { id: "gpt-5.2-codex", name: "gpt-5.2-codex", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000 },
+  { id: "gpt-5.2", name: "gpt-5.2", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000 },
+  { id: "gpt-5.1-codex-max", name: "gpt-5.1-codex-max", providerId: "openai-codex", reasoningLevels: GPT51_CODEX_MAX_LEVELS, contextWindow: 272000 },
+  { id: "gpt-5.1-codex-mini", name: "gpt-5.1-codex-mini", providerId: "openai-codex", reasoningLevels: GPT51_CODEX_MINI_LEVELS, contextWindow: 272000 },
+  { id: "gpt-5.1", name: "gpt-5.1", providerId: "openai-codex", reasoningLevels: GPT51_LEVELS, contextWindow: 272000 },
 
-  { id: "gpt-4o", name: "gpt-4o", providerId: "openai", reasoningLevels: OPENAI_CHAT_LEVELS },
-  { id: "gpt-4o-mini", name: "gpt-4o-mini", providerId: "openai", reasoningLevels: OPENAI_CHAT_LEVELS },
-  { id: "o1-preview", name: "o1-preview", providerId: "openai", reasoningLevels: ["off", "low", "medium", "high"] },
-  { id: "o1-mini", name: "o1-mini", providerId: "openai", reasoningLevels: ["off", "low", "medium", "high"] },
-  { id: "gpt-4-turbo", name: "gpt-4-turbo", providerId: "openai", reasoningLevels: OPENAI_CHAT_LEVELS },
+  { id: "gpt-4o", name: "gpt-4o", providerId: "openai", reasoningLevels: OPENAI_CHAT_LEVELS, contextWindow: 128000 },
+  { id: "gpt-4o-mini", name: "gpt-4o-mini", providerId: "openai", reasoningLevels: OPENAI_CHAT_LEVELS, contextWindow: 128000 },
+  { id: "o1-preview", name: "o1-preview", providerId: "openai", reasoningLevels: ["off", "low", "medium", "high"], contextWindow: 128000 },
+  { id: "o1-mini", name: "o1-mini", providerId: "openai", reasoningLevels: ["off", "low", "medium", "high"], contextWindow: 128000 },
+  { id: "gpt-4-turbo", name: "gpt-4-turbo", providerId: "openai", reasoningLevels: OPENAI_CHAT_LEVELS, contextWindow: 128000 },
 
-  { id: "deepseek-chat", name: "deepseek-chat", providerId: "deepseek", reasoningLevels: ["off"] },
-  { id: "deepseek-reasoner", name: "deepseek-reasoner", providerId: "deepseek", reasoningLevels: ["off"] },
-  { id: "gemini-2.5-pro-preview-03-25", name: "gemini-2.5-pro-preview-03-25", providerId: "google", reasoningLevels: ["off", "low", "high"] },
-  { id: "gemini-2.0-flash-001", name: "gemini-2.0-flash-001", providerId: "google", reasoningLevels: ["off"] },
-  { id: "gemini-1.5-pro-latest", name: "gemini-1.5-pro-latest", providerId: "google", reasoningLevels: ["off"] },
-  { id: "llama-3.3-70b-versatile", name: "llama-3.3-70b-versatile", providerId: "groq", reasoningLevels: ["off"] },
-  { id: "mixtral-8x7b-32768", name: "mixtral-8x7b-32768", providerId: "groq", reasoningLevels: ["off"] },
-  { id: "gemma-2-9b-it", name: "gemma-2-9b-it", providerId: "groq", reasoningLevels: ["off"] },
-  { id: "meta-llama/Llama-3.3-70B-Instruct-Turbo", name: "meta-llama/Llama-3.3-70B-Instruct-Turbo", providerId: "together", reasoningLevels: ["off"] },
-  { id: "Qwen/Qwen2.5-72B-Instruct", name: "Qwen/Qwen2.5-72B-Instruct", providerId: "together", reasoningLevels: ["off"] },
-  { id: "llama3.1", name: "llama3.1", providerId: "local", reasoningLevels: ["off"] },
-  { id: "qwen2.5", name: "qwen2.5", providerId: "local", reasoningLevels: ["off"] },
-  { id: "deepseek-coder-v2", name: "deepseek-coder-v2", providerId: "local", reasoningLevels: ["off"] },
+  { id: "deepseek-chat", name: "deepseek-chat", providerId: "deepseek", reasoningLevels: ["off"], contextWindow: 64000 },
+  { id: "deepseek-reasoner", name: "deepseek-reasoner", providerId: "deepseek", reasoningLevels: ["off"], contextWindow: 64000 },
+  { id: "gemini-2.5-pro-preview-03-25", name: "gemini-2.5-pro-preview-03-25", providerId: "google", reasoningLevels: ["off", "low", "high"], contextWindow: 128000 },
+  { id: "gemini-2.0-flash-001", name: "gemini-2.0-flash-001", providerId: "google", reasoningLevels: ["off"], contextWindow: 128000 },
+  { id: "gemini-1.5-pro-latest", name: "gemini-1.5-pro-latest", providerId: "google", reasoningLevels: ["off"], contextWindow: 128000 },
+  { id: "llama-3.3-70b-versatile", name: "llama-3.3-70b-versatile", providerId: "groq", reasoningLevels: ["off"], contextWindow: 32768 },
+  { id: "mixtral-8x7b-32768", name: "mixtral-8x7b-32768", providerId: "groq", reasoningLevels: ["off"], contextWindow: 32768 },
+  { id: "gemma-2-9b-it", name: "gemma-2-9b-it", providerId: "groq", reasoningLevels: ["off"], contextWindow: 32768 },
+  { id: "meta-llama/Llama-3.3-70B-Instruct-Turbo", name: "meta-llama/Llama-3.3-70B-Instruct-Turbo", providerId: "together", reasoningLevels: ["off"], contextWindow: 32768 },
+  { id: "Qwen/Qwen2.5-72B-Instruct", name: "Qwen/Qwen2.5-72B-Instruct", providerId: "together", reasoningLevels: ["off"], contextWindow: 32768 },
+  { id: "llama3.1", name: "llama3.1", providerId: "local", reasoningLevels: ["off"], contextWindow: 32768 },
+  { id: "qwen2.5", name: "qwen2.5", providerId: "local", reasoningLevels: ["off"], contextWindow: 32768 },
+  { id: "deepseek-coder-v2", name: "deepseek-coder-v2", providerId: "local", reasoningLevels: ["off"], contextWindow: 32768 },
 ];
 
 export function listBuiltinModels(providerId: string): BuiltinModelDefinition[] {
@@ -76,4 +77,8 @@ export function getBuiltinModel(providerId: string, modelId: string): BuiltinMod
 
 export function getBuiltinProvider(providerId: string): BuiltinProviderDefinition | undefined {
   return BUILTIN_PROVIDERS.find((provider) => provider.id === providerId);
+}
+
+export function getModelContextWindow(providerId: string, modelId: string): number | undefined {
+  return getBuiltinModel(providerId, modelId)?.contextWindow;
 }

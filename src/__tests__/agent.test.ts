@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { Agent } from "../agent.js";
 import type { AgentEvent, Message, Provider, StreamChunk, ToolRegistryEntry } from "../types.js";
 
@@ -118,5 +118,37 @@ describe("Agent", () => {
     await collectEvents(agent, "Hi", "/tmp");
     expect(appended.some((m) => m.role === "user")).toBe(true);
     expect(appended.some((m) => m.role === "assistant")).toBe(true);
+  });
+
+  it("projects messages before sending them to the provider", async () => {
+    const captured: Message[][] = [];
+    const provider: Provider = {
+      async *streamChat(messages) {
+        captured.push(messages);
+        yield { type: "text", content: "ok" };
+        yield { type: "done" };
+      },
+      async complete() {
+        return "ok";
+      },
+    };
+
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [],
+      systemPrompt: "system-1",
+    });
+
+    agent.messages.unshift({ role: "system", content: "system-0" });
+    agent.messages.push({ role: "assistant", content: "" });
+
+    await collectEvents(agent, "Hi", "/tmp");
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0][0].role).toBe("system");
+    expect((captured[0][0] as any).content).toContain("system-0");
+    expect((captured[0][0] as any).content).toContain("system-1");
+    expect(captured[0].some((message) => message.role === "assistant" && message.content === "")).toBe(false);
   });
 });

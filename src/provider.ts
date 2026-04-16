@@ -7,14 +7,14 @@
 import OpenAI from "openai";
 import { createOpenAICodexProvider, isOpenAICodexBaseUrl } from "./provider-openai-codex.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
-import type { Message, Provider, ReasoningEffort, StreamChunk, ToolDefinition } from "./types.js";
+import type { Message, Provider, StreamChunk, ThinkingLevel, ToolDefinition } from "./types.js";
 
 export interface ProviderInstanceOptions {
   providerId?: string;
   apiKey: string;
   baseURL: string;
-  /** Requested reasoning effort */
-  reasoningEffort?: ReasoningEffort;
+  /** Requested thinking level */
+  thinkingLevel?: ThinkingLevel;
 }
 
 export function createUnavailableProvider(message: string): Provider {
@@ -41,12 +41,12 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
 
   async function* streamChat(
     messages: Message[],
-    chatOptions: { model: string; tools?: ToolDefinition[]; temperature?: number; reasoningEffort?: ReasoningEffort }
+    chatOptions: { model: string; tools?: ToolDefinition[]; temperature?: number; thinkingLevel?: ThinkingLevel }
   ): AsyncIterable<StreamChunk> {
     const requestConfig = resolveProviderRequestConfig(
       options.providerId || "",
       chatOptions.model,
-      chatOptions.reasoningEffort ?? options.reasoningEffort ?? "off",
+      chatOptions.thinkingLevel ?? options.thinkingLevel ?? "off",
     );
     const tools = chatOptions.tools?.map((t) => ({
       type: "function" as const,
@@ -148,11 +148,11 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
     yield { type: "done" };
   }
 
-  async function complete(messages: Message[], chatOptions?: { model?: string; temperature?: number; reasoningEffort?: ReasoningEffort }): Promise<string> {
+  async function complete(messages: Message[], chatOptions?: { model?: string; temperature?: number; thinkingLevel?: ThinkingLevel }): Promise<string> {
     const requestConfig = resolveProviderRequestConfig(
       options.providerId || "",
       chatOptions?.model ?? "z-ai/glm-5.1",
-      chatOptions?.reasoningEffort ?? options.reasoningEffort ?? "off",
+      chatOptions?.thinkingLevel ?? options.thinkingLevel ?? "off",
     );
     const body: any = {
       model: chatOptions?.model ?? "z-ai/glm-5.1",

@@ -1,32 +1,20 @@
 /**
- * Session Manager - Append-only JSONL persistence.
- *
- * For simplicity, this version uses a flat append-only log.
+ * Session Manager - Append-only JSONL persistence over a structured session log.
  */
 
 import { mkdirSync, appendFileSync, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
+import { compactSessionEntries, type CompactOptions, type CompactResult } from "./context/compact.js";
 import type { Message } from "./types.js";
+import { SessionLog } from "./session-log.js";
+import type { SessionLogEntry, SessionMarkerKind, SessionMetadata } from "./session-types.js";
 
-export interface SessionMetadata {
-  model?: string;
-  reasoningEffort?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
-}
-
-export interface SessionEntry {
-  id: string;
-  type: "metadata" | "message" | "compaction";
-  data?: Message;
-  summary?: string;
-  metadata?: SessionMetadata;
-  timestamp: number;
-}
+export type { SessionLogEntry, SessionMarkerKind, SessionMetadata } from "./session-types.js";
 
 export class SessionManager {
   private sessionFile: string;
-  private entries: SessionEntry[] = [];
-  private flushed = false;
+  private log = new SessionLog();
 
   constructor(sessionFile: string) {
     this.sessionFile = sessionFile;
@@ -51,154 +39,79 @@ export class SessionManager {
     const safeCwd = cwd.replace(/[/\\:]/g, "_");
     const sessionsDir = join(agentDir, "sessions", safeCwd);
     if (!existsSync(sessionsDir)) return [];
-    // Simple listing, in real app sort by mtime
-    return readdirSync(sessionsDir).filter((f) => f.endsWith(".jsonl"));
+    return readdirSync(sessionsDir).filter((file) => file.endsWith(".jsonl"));
   }
 
   private load() {
     const content = readFileSync(this.sessionFile, "utf-8");
-    const lines = content.split("\n").filter((l) => l.trim() !== "");
-    for (const line of lines) {
-      try {
-        const entry = JSON.parse(line) as SessionEntry;
-        this.entries.push(entry);
-      } catch {
-        // skip corrupt lines
-      }
-    }
+    const lines = content.split("\n").filter((line) => line.trim() !== "");
+    this.log.load(lines);
   }
 
-  private persist(entry: SessionEntry) {
+  private persist(entry: SessionLogEntry | SessionLogEntry[]) {
     const dir = dirname(this.sessionFile);
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true });
     }
-    appendFileSync(this.sessionFile, JSON.stringify(entry) + "\n");
-    this.flushed = true;
+
+    const entries = Array.isArray(entry) ? entry : [entry];
+    if (entries.length === 0) {
+      return;
+    }
+
+    appendFileSync(this.sessionFile, entries.map((item) => JSON.stringify(item)).join("\n") + "\n");
   }
 
-  private rewrite(entries: SessionEntry[]) {
+  private rewrite(entries: SessionLogEntry[]) {
     const dir = dirname(this.sessionFile);
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true });
     }
-    writeFileSync(this.sessionFile, entries.map((e) => JSON.stringify(e)).join("\n") + "\n");
-    this.entries = entries;
-    this.flushed = true;
+    writeFileSync(this.sessionFile, entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    this.log.replace(entries);
   }
 
   getMetadata(): SessionMetadata {
-    const entry = this.entries.find((e) => e.type === "metadata");
-    return entry?.metadata ?? {};
+    return this.log.getMetadata();
   }
 
   setMetadata(metadata: SessionMetadata) {
-    const idx = this.entries.findIndex((e) => e.type === "metadata");
-    const entry: SessionEntry = {
-      id: "metadata",
-      type: "metadata",
-      metadata,
-      timestamp: Date.now(),
-    };
-    if (idx >= 0) {
-      const next = [...this.entries];
-      next[idx] = entry;
-      this.rewrite(next);
-    } else {
-      this.entries.unshift(entry);
-      this.rewrite(this.entries);
-    }
+    const nextEntries = this.log.setMetadata(metadata);
+    this.rewrite(nextEntries);
   }
 
   appendMessage(message: Message) {
-    const entry: SessionEntry = {
-      id: `${this.entries.length + 1}`,
-      type: "message",
-      data: message,
-      timestamp: Date.now(),
-    };
-    this.entries.push(entry);
-    this.persist(entry);
+    const entries = this.log.appendMessage(message);
+    this.persist(entries);
   }
 
   appendCompaction(summary: string) {
-    const entry: SessionEntry = {
-      id: `${this.entries.length + 1}`,
-      type: "compaction",
-      summary,
-      timestamp: Date.now(),
-    };
-    this.entries.push(entry);
+    const entry = this.log.appendSummary(summary);
     this.persist(entry);
   }
 
+  appendMarker(kind: SessionMarkerKind, value: string) {
+    const entry = this.log.appendMarker(kind, value);
+    this.persist(entry);
+  }
+
+  compact(options?: CompactOptions): CompactResult {
+    const result = compactSessionEntries(this.log.list(), options);
+    if (result.compacted && result.entries) {
+      this.rewrite(result.entries);
+    }
+    return result;
+  }
+
   getMessages(): Message[] {
-    const messages: Message[] = [];
-    let compactionIndex = -1;
+    return this.log.toMessages();
+  }
 
-    // Find the latest compaction
-    for (let i = this.entries.length - 1; i >= 0; i--) {
-      if (this.entries[i].type === "compaction") {
-        compactionIndex = i;
-        break;
-      }
-    }
-
-    if (compactionIndex >= 0) {
-      messages.push({
-        role: "system",
-        content: `Previous conversation summary: ${this.entries[compactionIndex].summary}`,
-      });
-    }
-
-    const startIndex = compactionIndex >= 0 ? compactionIndex + 1 : 0;
-    for (let i = startIndex; i < this.entries.length; i++) {
-      if (this.entries[i].type === "message" && this.entries[i].data) {
-        messages.push(this.entries[i].data!);
-      }
-    }
-
-    return pruneIncompleteTail(messages);
+  getEntries(): SessionLogEntry[] {
+    return this.log.list();
   }
 
   getSessionFile(): string {
     return this.sessionFile;
   }
-}
-
-function pruneIncompleteTail(messages: Message[]): Message[] {
-  let currentTurnStart = -1;
-  let hasCompletedAssistant = false;
-  let sawNonUserInCurrentTurn = false;
-
-  for (let i = 0; i < messages.length; i++) {
-    const message = messages[i];
-    if (message.role === "system") continue;
-
-    if (message.role === "user") {
-      currentTurnStart = i;
-      hasCompletedAssistant = false;
-      sawNonUserInCurrentTurn = false;
-      continue;
-    }
-
-    if (currentTurnStart === -1) {
-      continue;
-    }
-
-    sawNonUserInCurrentTurn = true;
-
-    if (message.role === "assistant") {
-      const hasPendingTools = !!message.toolCalls && message.toolCalls.length > 0;
-      if (!hasPendingTools) {
-        hasCompletedAssistant = true;
-      }
-    }
-  }
-
-  if (currentTurnStart >= 0 && sawNonUserInCurrentTurn && !hasCompletedAssistant) {
-    return messages.slice(0, currentTurnStart);
-  }
-
-  return messages;
 }
