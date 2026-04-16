@@ -13,7 +13,7 @@ interface InputBoxProps {
 const MIN_VISIBLE_LINES = 3;
 const MAX_VISIBLE_LINES = 5;
 const PADDING_X = 1;
-const MAX_SUGGESTIONS = 5;
+const MAX_VISIBLE_SUGGESTIONS = 8;
 
 interface SlashSuggestion {
   type: "command" | "skill";
@@ -44,10 +44,20 @@ export function InputBox({ onSubmit, disabled, skillRegistry }: InputBoxProps) {
       description: skill.description,
     }));
     const all = [...commandSuggestions, ...skillSuggestions];
-    const filtered = all.filter((item) => item.name.toLowerCase().startsWith(slashPrefix));
-    return filtered.slice(0, MAX_SUGGESTIONS);
+    return all.filter((item) => item.name.toLowerCase().startsWith(slashPrefix));
   }, [isSlashContext, slashPrefix, skillRegistry]);
   const showSuggestions = suggestions.length > 0;
+
+  let suggestionOffset = 0;
+  if (showSuggestions && suggestions.length > MAX_VISIBLE_SUGGESTIONS) {
+    suggestionOffset = Math.min(
+      Math.max(selectedIndex - Math.floor(MAX_VISIBLE_SUGGESTIONS / 2), 0),
+      suggestions.length - MAX_VISIBLE_SUGGESTIONS,
+    );
+  }
+  const visibleSuggestions = showSuggestions
+    ? suggestions.slice(suggestionOffset, suggestionOffset + MAX_VISIBLE_SUGGESTIONS)
+    : [];
 
   useInput((input, key) => {
     if (disabled) return;
@@ -219,7 +229,9 @@ export function InputBox({ onSubmit, disabled, skillRegistry }: InputBoxProps) {
       <Text color={theme.border}>{bottomBorder.slice(0, contentWidth)}</Text>
       {showSuggestions && (
         <Box flexDirection="column" marginTop={1}>
-          {suggestions.map((cmd, i) => (
+          {visibleSuggestions.map((cmd, visibleIndex) => {
+            const i = suggestionOffset + visibleIndex;
+            return (
             <Box key={cmd.name} height={1}>
               <Text>
                 {i === selectedIndex ? (
@@ -237,7 +249,16 @@ export function InputBox({ onSubmit, disabled, skillRegistry }: InputBoxProps) {
                 )}
               </Text>
             </Box>
-          ))}
+            );
+          })}
+          {suggestions.length > MAX_VISIBLE_SUGGESTIONS && (
+            <Text color={theme.muted}>
+              {`Showing ${suggestionOffset + 1}-${Math.min(
+                suggestionOffset + MAX_VISIBLE_SUGGESTIONS,
+                suggestions.length,
+              )} of ${suggestions.length}`}
+            </Text>
+          )}
         </Box>
       )}
     </Box>
