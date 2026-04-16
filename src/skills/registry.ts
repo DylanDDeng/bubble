@@ -6,6 +6,7 @@ import type { SkillDiagnostic, SkillRecord, SkillSummary } from "./types.js";
 export interface SkillRegistryOptions {
   cwd?: string;
   bubbleHome?: string;
+  agentsHome?: string;
   skillPaths?: string[];
 }
 
@@ -16,8 +17,10 @@ export class SkillRegistry {
   constructor(options: SkillRegistryOptions = {}) {
     const cwd = options.cwd ?? process.cwd();
     const bubbleHome = options.bubbleHome ?? process.env.BUBBLE_HOME ?? join(homedir(), ".bubble");
+    const agentsHome = options.agentsHome ?? join(homedir(), ".agents");
     const roots = [
       { path: join(bubbleHome, "skills"), source: "user" as const },
+      { path: join(agentsHome, "skills"), source: "user" as const },
       { path: join(cwd, ".bubble", "skills"), source: "project" as const },
       ...(options.skillPaths ?? []).map((path) => ({ path, source: "configured" as const })),
     ];
