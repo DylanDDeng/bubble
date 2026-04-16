@@ -7,6 +7,8 @@ import type { SlashCommand } from "./types.js";
 const userConfig = new UserConfig();
 
 function persistSelectedModel(model: string, ctx: Parameters<SlashCommand["handler"]>[1]) {
+  userConfig.setDefaultModel(model);
+  userConfig.setDefaultThinkingLevel(ctx.agent.thinking);
   userConfig.pushRecentModel(model);
   if (ctx.sessionManager) {
     ctx.sessionManager.setMetadata({ model, thinkingLevel: ctx.agent.thinking, reasoningEffort: ctx.agent.thinking });

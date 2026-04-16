@@ -39,6 +39,8 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
     baseURL: options.baseURL,
   });
 
+  const fallbackModel = "gpt-4o";
+
   async function* streamChat(
     messages: Message[],
     chatOptions: { model: string; tools?: ToolDefinition[]; temperature?: number; thinkingLevel?: ThinkingLevel }
@@ -151,11 +153,11 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
   async function complete(messages: Message[], chatOptions?: { model?: string; temperature?: number; thinkingLevel?: ThinkingLevel }): Promise<string> {
     const requestConfig = resolveProviderRequestConfig(
       options.providerId || "",
-      chatOptions?.model ?? "z-ai/glm-5.1",
+      chatOptions?.model ?? fallbackModel,
       chatOptions?.thinkingLevel ?? options.thinkingLevel ?? "off",
     );
     const body: any = {
-      model: chatOptions?.model ?? "z-ai/glm-5.1",
+      model: chatOptions?.model ?? fallbackModel,
       messages: messages as any,
       temperature: chatOptions?.temperature ?? 0.2,
     };

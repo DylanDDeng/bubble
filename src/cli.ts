@@ -6,7 +6,7 @@ import type { ThinkingLevel } from "./types.js";
 import { isThinkingLevel } from "./variant/thinking-level.js";
 
 export interface CliArgs {
-  model: string;
+  model?: string;
   cwd: string;
   apiKey?: string;
   resume?: boolean;
@@ -18,7 +18,6 @@ export interface CliArgs {
 
 export function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {
-    model: "z-ai/glm-5.1",
     cwd: process.cwd(),
   };
 
@@ -73,9 +72,9 @@ export function printHelp() {
 Usage: bubble [options] [prompt]
 
 Options:
-  -m, --model <model>      Model to use (default: z-ai/glm-5.1)
+  -m, --model <model>      Model to use
   --cwd <dir>              Working directory (default: current)
-  -k, --api-key <key>      OpenRouter API key (or set OPENROUTER_API_KEY env)
+  -k, --api-key <key>      API key for the active provider
   -r, --resume             Resume a previous session (latest by default)
   --session <name>         Session name to create or resume
   --reasoning              Enable reasoning mode at medium effort

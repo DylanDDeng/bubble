@@ -60,7 +60,7 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
         }
       }
 
-      if (!seen.has(current)) {
+      if (current && !seen.has(current)) {
         const { providerId } = decodeModel(current);
         const provider = enabled.find((p) => p.id === providerId);
         opts.unshift({ id: current, label: displayModel(current), group: "Current", providerBadge: provider?.name || providerId || "" });

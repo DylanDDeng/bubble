@@ -69,29 +69,44 @@ async function main() {
     resumedExistingSession = false;
   }
 
-  // Model resolution fallback:
-  // 1. CLI flag  2. Session metadata  3. Built-in default
-  const fallbackProviderId = defaultProvider?.id || "openai";
-  const fallbackModelId = registry.getDefaultModel(fallbackProviderId, defaultProvider?.authType) || args.model;
-  const cliModel = args.model.includes(":") ? args.model : encodeModel(fallbackProviderId, fallbackModelId);
+  // Model resolution:
+  // 1. Session metadata  2. User-configured default model  3. CLI flag
+  // No implicit built-in model fallback.
+  const fallbackProviderId = defaultProvider?.id || "";
   const sessionModel = sessionManager?.getMetadata().model;
+  const configuredModel = sessionModel ?? userConfig.getDefaultModel() ?? args.model;
   const sessionThinkingLevel = sessionManager?.getMetadata().thinkingLevel;
-  const effectiveModel = sessionModel ? sessionModel : cliModel;
-  const { providerId: effectiveProviderId, modelId: effectiveModelId } = decodeModel(effectiveModel);
-  const activeProviderId = effectiveProviderId || fallbackProviderId;
+  const configuredThinkingLevel = userConfig.getDefaultThinkingLevel();
+  const normalizedConfiguredModel = configuredModel
+    ? (configuredModel.includes(":")
+      ? configuredModel
+      : (fallbackProviderId ? encodeModel(fallbackProviderId, configuredModel) : ""))
+    : "";
+  const { providerId: effectiveProviderId, modelId: effectiveModelId } = normalizedConfiguredModel
+    ? decodeModel(normalizedConfiguredModel)
+    : { providerId: undefined, modelId: "" };
+  let activeProviderId = effectiveProviderId || fallbackProviderId;
   if (registry.supportsOAuth(activeProviderId) && registry.getAuthStorage().has(activeProviderId)) {
     await registry.prepareProvider(activeProviderId);
   }
   const activeProvider = registry.getConfigured().find((p) => p.id === activeProviderId) || defaultProvider;
-  const activeModel = encodeModel(activeProviderId, effectiveModelId);
-  const initialThinkingLevel = sessionThinkingLevel
-    ?? args.thinkingLevel
-    ?? getDefaultThinkingLevel(activeProviderId, effectiveModelId);
+  const activeModel = activeProvider && effectiveModelId
+    ? encodeModel(activeProviderId, effectiveModelId)
+    : "";
+  if (!activeModel && !activeProvider) {
+    activeProviderId = "";
+  }
+  const initialThinkingLevel = activeModel
+    ? (sessionThinkingLevel
+      ?? args.thinkingLevel
+      ?? configuredThinkingLevel
+      ?? getDefaultThinkingLevel(activeProviderId, effectiveModelId))
+    : (sessionThinkingLevel ?? args.thinkingLevel ?? configuredThinkingLevel ?? "off");
   const systemPrompt = buildSystemPrompt({
     agentName: "Bubble",
-    configuredProvider: activeProviderId,
-    configuredModel: displayModel(activeModel),
-    configuredModelId: activeModel,
+    configuredProvider: activeProviderId || "none",
+    configuredModel: activeModel ? displayModel(activeModel) : "none",
+    configuredModelId: activeModel || "none",
     thinkingLevel: initialThinkingLevel,
     workingDir: args.cwd,
   });
@@ -100,7 +115,7 @@ async function main() {
     provider: activeProvider
       ? createProvider(activeProviderId, activeProvider.apiKey, activeProvider.baseURL)
       : provider,
-    providerId: activeProviderId,
+    providerId: activeProviderId || "",
     model: activeModel,
     tools,
     systemPrompt,
@@ -113,10 +128,14 @@ async function main() {
     },
   });
   if (sessionManager) {
-    sessionManager.setMetadata({ model: agent.model, thinkingLevel: agent.thinking, reasoningEffort: agent.thinking });
+    sessionManager.setMetadata({
+      ...(agent.model ? { model: agent.model } : {}),
+      thinkingLevel: agent.thinking,
+      reasoningEffort: agent.thinking,
+    });
   }
 
-  if (cliModel === agent.model) {
+  if (activeModel && args.model && normalizedConfiguredModel === agent.model) {
     userConfig.pushRecentModel(agent.model);
   }
 

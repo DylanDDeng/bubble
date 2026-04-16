@@ -103,6 +103,7 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
         thinkingLevel: nextLevel,
         workingDir: args.cwd,
       }));
+      userConfig.setDefaultThinkingLevel(nextLevel);
       setThinkingLevel(nextLevel);
       sessionManager?.setMetadata({ model: agent.model, thinkingLevel: nextLevel, reasoningEffort: nextLevel });
       sessionManager?.appendMarker("thinking_level_switch", nextLevel);
@@ -281,6 +282,10 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
       const hasActiveProvider = !!activeProviderId && safeRegistry.getEnabled().some((provider) => provider.id === activeProviderId);
       if (!hasActiveProvider) {
         addMessage("error", "No provider configured. Use /login for ChatGPT or /provider --add <id> before sending a prompt.");
+        return;
+      }
+      if (!agent.model) {
+        addMessage("error", "No model selected. Use /model after /login or provider setup.");
         return;
       }
 
@@ -465,7 +470,7 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
         data={buildFooterData({
           cwd: args.cwd,
           providerId: agent.providerId || safeRegistry.getDefault()?.id || "unknown",
-          model: displayModel(agent.model),
+          model: displayModel(agent.model) || "no model",
           thinkingLevel,
           usageTotals,
           budget: getContextBudget(

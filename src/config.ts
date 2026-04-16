@@ -8,11 +8,46 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import type { ProviderProfile } from "./provider-registry.js";
+import type { ThinkingLevel } from "./types.js";
 
-const CONFIG_PATH = join(homedir(), ".bubble", "config.json");
+const HIDDEN_PROVIDER_IDS = new Set(["openrouter", "openai-codex"]);
+
+function getConfigPath(): string {
+  const root = process.env.BUBBLE_HOME || join(homedir(), ".bubble");
+  return join(root, "config.json");
+}
+
+function isHiddenProviderId(providerId?: string): boolean {
+  return !!providerId && HIDDEN_PROVIDER_IDS.has(providerId);
+}
+
+function modelProviderId(model: string): string | undefined {
+  if (!model.includes(":")) return undefined;
+  return model.split(":", 1)[0];
+}
+
+function sanitizeRecentModels(models?: string[]): string[] | undefined {
+  if (!models) return undefined;
+  return models.filter((model) => !isHiddenProviderId(modelProviderId(model)));
+}
+
+function sanitizeProviders(providers?: ProviderProfile[]): ProviderProfile[] | undefined {
+  if (!providers) return undefined;
+  return providers.filter((provider) => !isHiddenProviderId(provider.id));
+}
+
+function sanitizeDefaultModel(model?: string): string | undefined {
+  if (!model) return undefined;
+  return isHiddenProviderId(modelProviderId(model)) ? undefined : model;
+}
+
+function sanitizeDefaultProvider(providerId?: string): string | undefined {
+  return isHiddenProviderId(providerId) ? undefined : providerId;
+}
 
 export interface UserConfigData {
   defaultModel?: string;
+  defaultThinkingLevel?: ThinkingLevel;
   recentModels?: string[];
   apiKey?: string;
   providers?: ProviderProfile[];
@@ -27,40 +62,64 @@ export class UserConfig {
   }
 
   private load() {
-    if (!existsSync(CONFIG_PATH)) return;
+    const configPath = getConfigPath();
+    if (!existsSync(configPath)) return;
     try {
-      const raw = readFileSync(CONFIG_PATH, "utf-8");
-      this.data = JSON.parse(raw) as UserConfigData;
+      const raw = readFileSync(configPath, "utf-8");
+      const parsed = JSON.parse(raw) as UserConfigData;
+      this.data = {
+        ...parsed,
+        defaultModel: sanitizeDefaultModel(parsed.defaultModel),
+        recentModels: sanitizeRecentModels(parsed.recentModels),
+        providers: sanitizeProviders(parsed.providers),
+        defaultProvider: sanitizeDefaultProvider(parsed.defaultProvider),
+      };
     } catch {
       this.data = {};
     }
   }
 
   private save() {
-    const dir = dirname(CONFIG_PATH);
+    const configPath = getConfigPath();
+    const dir = dirname(configPath);
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true });
     }
-    writeFileSync(CONFIG_PATH, JSON.stringify(this.data, null, 2) + "\n");
+    writeFileSync(configPath, JSON.stringify(this.data, null, 2) + "\n");
   }
 
   getDefaultModel(): string | undefined {
-    return this.data.defaultModel;
+    return sanitizeDefaultModel(this.data.defaultModel)
+      ?? sanitizeRecentModels(this.data.recentModels)?.[0];
   }
 
   setDefaultModel(model: string) {
-    this.data.defaultModel = model;
+    this.data.defaultModel = sanitizeDefaultModel(model);
+    this.save();
+  }
+
+  getDefaultThinkingLevel(): ThinkingLevel | undefined {
+    return this.data.defaultThinkingLevel;
+  }
+
+  setDefaultThinkingLevel(level: ThinkingLevel) {
+    this.data.defaultThinkingLevel = level;
     this.save();
   }
 
   getRecentModels(): string[] {
-    return this.data.recentModels?.slice() ?? [];
+    return sanitizeRecentModels(this.data.recentModels)?.slice() ?? [];
   }
 
   pushRecentModel(model: string) {
+    if (isHiddenProviderId(modelProviderId(model))) {
+      return;
+    }
     const recent = this.data.recentModels ?? [];
     const uniq = [model, ...recent.filter((m) => m !== model)];
-    this.data.recentModels = uniq.slice(0, 10);
+    const sanitized = sanitizeRecentModels(uniq.slice(0, 10));
+    this.data.recentModels = sanitized;
+    this.data.defaultModel = sanitized?.[0];
     this.save();
   }
 
@@ -74,20 +133,20 @@ export class UserConfig {
   }
 
   getProviders(): ProviderProfile[] {
-    return this.data.providers?.slice() ?? [];
+    return sanitizeProviders(this.data.providers)?.slice() ?? [];
   }
 
   setProviders(providers: ProviderProfile[]) {
-    this.data.providers = providers;
+    this.data.providers = sanitizeProviders(providers);
     this.save();
   }
 
   getDefaultProvider(): string | undefined {
-    return this.data.defaultProvider;
+    return sanitizeDefaultProvider(this.data.defaultProvider);
   }
 
   setDefaultProvider(id: string) {
-    this.data.defaultProvider = id;
+    this.data.defaultProvider = sanitizeDefaultProvider(id);
     this.save();
   }
 }

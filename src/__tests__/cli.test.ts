@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 import { parseArgs } from "../cli.js";
 
 describe("parseArgs", () => {
+  it("does not set a default model anymore", () => {
+    const args = parseArgs([]);
+    expect(args.model).toBeUndefined();
+  });
+
   it("does not expose no-session anymore", () => {
     const args = parseArgs(["--no-session"]);
     expect("noSession" in args).toBe(false);
