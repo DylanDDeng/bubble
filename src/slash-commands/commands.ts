@@ -192,6 +192,9 @@ export const builtinSlashCommands: SlashCommand[] = [
     description: "Switch model. Use /model <id> or just /model to open picker.",
     async handler(args, ctx) {
       if (!args) {
+        if (ctx.registry.getEnabled().length === 0) {
+          return "No provider configured. Use /login or /provider --add <id> first.";
+        }
         ctx.openPicker("model");
         return;
       }
