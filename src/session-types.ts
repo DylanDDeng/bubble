@@ -6,7 +6,7 @@ export interface SessionMetadata {
   reasoningEffort?: ThinkingLevel;
 }
 
-export type SessionMarkerKind = "model_switch" | "provider_switch" | "thinking_level_switch";
+export type SessionMarkerKind = "model_switch" | "provider_switch" | "thinking_level_switch" | "skill_activated";
 
 interface BaseSessionLogEntry {
   id: string;

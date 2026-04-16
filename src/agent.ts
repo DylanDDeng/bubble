@@ -15,6 +15,7 @@ export interface AgentOptions {
   thinkingLevel?: ThinkingLevel;
   systemPrompt?: string;
   onMessageAppend?: (message: Message) => void;
+  onToolResult?: (toolName: string, result: ToolResult) => void;
 }
 
 export class Agent {
@@ -26,6 +27,7 @@ export class Agent {
   private temperature: number;
   private thinkingLevel: ThinkingLevel;
   private onMessageAppend?: (message: Message) => void;
+  private onToolResult?: (toolName: string, result: ToolResult) => void;
 
   constructor(options: AgentOptions) {
     this.provider = options.provider;
@@ -34,6 +36,7 @@ export class Agent {
     this.temperature = options.temperature ?? 0.2;
     this.thinkingLevel = options.thinkingLevel ?? "off";
     this.onMessageAppend = options.onMessageAppend;
+    this.onToolResult = options.onToolResult;
 
     if (options.systemPrompt) {
       this.messages.push({ role: "system", content: options.systemPrompt });
@@ -185,6 +188,7 @@ export class Agent {
             toolCallId: tc.id,
             content: result.content,
           });
+          this.onToolResult?.(tc.name, result);
           yield { type: "tool_end", id: tc.id, name: tc.name, result };
         }
 

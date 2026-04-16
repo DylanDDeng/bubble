@@ -4,6 +4,7 @@
 
 import type { ThinkingLevel } from "./types.js";
 import { composeSystemPrompt } from "./prompt/compose.js";
+import type { SkillSummary } from "./skills/types.js";
 
 export interface SystemPromptOptions {
   /** Agent display name */
@@ -26,6 +27,8 @@ export interface SystemPromptOptions {
   thinkingLevel?: ThinkingLevel;
   /** Current date override */
   currentDate?: string;
+  /** Prompt-visible skills */
+  skills?: SkillSummary[];
 }
 
 export function buildSystemPrompt(options: SystemPromptOptions = {}): string {

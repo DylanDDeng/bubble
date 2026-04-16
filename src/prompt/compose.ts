@@ -6,11 +6,14 @@ import { buildGeminiProviderPrompt } from "./provider-prompts/gemini.js";
 import { buildGptProviderPrompt } from "./provider-prompts/gpt.js";
 import { buildEnvironmentPrompt, defaultToolNames, type EnvironmentPromptOptions } from "./environment.js";
 import { buildRuntimePrompt } from "./runtime.js";
+import { buildSkillsPrompt } from "./skills.js";
+import type { SkillSummary } from "../skills/types.js";
 
 export interface ComposeSystemPromptOptions extends EnvironmentPromptOptions {
   agentName?: string;
   guidelines?: string[];
   thinkingLevel?: ThinkingLevel;
+  skills?: SkillSummary[];
 }
 
 export function composeSystemPrompt(options: ComposeSystemPromptOptions = {}): string {
@@ -29,8 +32,9 @@ export function composeSystemPrompt(options: ComposeSystemPromptOptions = {}): s
     thinkingLevel: options.thinkingLevel,
     guidelines: buildGuidelines(options.tools ?? defaultToolNames, options.guidelines ?? []),
   });
+  const skillsPrompt = buildSkillsPrompt(options.skills ?? []);
 
-  return [providerPrompt, environmentPrompt, runtimePrompt].join("\n\n");
+  return [providerPrompt, environmentPrompt, runtimePrompt, skillsPrompt].filter(Boolean).join("\n\n");
 }
 
 function buildProviderPrompt(

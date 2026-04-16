@@ -1,11 +1,13 @@
 import React, { useMemo, useState } from "react";
 import { Box, Text, useInput, useStdout } from "ink";
 import { registry as slashRegistry } from "../slash-commands/index.js";
+import type { SkillRegistry } from "../skills/registry.js";
 import { theme } from "./theme.js";
 
 interface InputBoxProps {
   onSubmit: (value: string) => void;
   disabled?: boolean;
+  skillRegistry?: SkillRegistry;
 }
 
 const MIN_VISIBLE_LINES = 3;
@@ -13,7 +15,13 @@ const MAX_VISIBLE_LINES = 5;
 const PADDING_X = 1;
 const MAX_SUGGESTIONS = 5;
 
-export function InputBox({ onSubmit, disabled }: InputBoxProps) {
+interface SlashSuggestion {
+  type: "command" | "skill";
+  name: string;
+  description: string;
+}
+
+export function InputBox({ onSubmit, disabled, skillRegistry }: InputBoxProps) {
   const { stdout } = useStdout();
   const width = stdout.columns || 80;
 
@@ -25,10 +33,20 @@ export function InputBox({ onSubmit, disabled }: InputBoxProps) {
   const slashPrefix = isSlashContext ? text.slice(1).toLowerCase() : "";
   const suggestions = useMemo(() => {
     if (!isSlashContext) return [];
-    const all = slashRegistry.list();
-    const filtered = all.filter((c) => c.name.toLowerCase().startsWith(slashPrefix));
+    const commandSuggestions: SlashSuggestion[] = slashRegistry.list().map((command) => ({
+      type: "command",
+      name: command.name,
+      description: command.description,
+    }));
+    const skillSuggestions: SlashSuggestion[] = (skillRegistry?.summaries() ?? []).map((skill) => ({
+      type: "skill",
+      name: skill.name,
+      description: skill.description,
+    }));
+    const all = [...commandSuggestions, ...skillSuggestions];
+    const filtered = all.filter((item) => item.name.toLowerCase().startsWith(slashPrefix));
     return filtered.slice(0, MAX_SUGGESTIONS);
-  }, [isSlashContext, slashPrefix]);
+  }, [isSlashContext, slashPrefix, skillRegistry]);
   const showSuggestions = suggestions.length > 0;
 
   useInput((input, key) => {
@@ -54,9 +72,9 @@ export function InputBox({ onSubmit, disabled }: InputBoxProps) {
         return;
       }
       if (key.return || key.tab) {
-        const cmd = suggestions[selectedIndex];
-        if (cmd) {
-          const newText = `/${cmd.name} `;
+        const suggestion = suggestions[selectedIndex];
+        if (suggestion) {
+          const newText = `/${suggestion.name} `;
           setText(newText);
           setCursor(newText.length);
           setSelectedIndex(0);
@@ -207,11 +225,13 @@ export function InputBox({ onSubmit, disabled }: InputBoxProps) {
                 {i === selectedIndex ? (
                   <>
                     <Text backgroundColor="white" color="black">{` ${cmd.name.padEnd(16)} `}</Text>
+                    <Text color={theme.muted}>[{cmd.type}]</Text>
                     <Text dimColor> {cmd.description}</Text>
                   </>
                 ) : (
                   <>
                     <Text>{`  ${cmd.name.padEnd(16)} `}</Text>
+                    <Text color={theme.muted}>[{cmd.type}]</Text>
                     <Text dimColor> {cmd.description}</Text>
                   </>
                 )}

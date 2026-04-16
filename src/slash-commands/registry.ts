@@ -24,6 +24,13 @@ export class SlashCommandRegistry {
 
     const cmd = this.commands.get(name);
     if (!cmd) {
+      const skill = ctx.skillRegistry.get(name);
+      if (skill) {
+        return {
+          handled: true,
+          result: `Skill "${skill.meta.name}": ${skill.meta.description}\nUse /${skill.meta.name} <your request> to run with this skill, or /skill ${skill.meta.name} to inspect it.`,
+        };
+      }
       return {
         handled: true,
         result: `Unknown command: /${name}. Use /help to see available commands.`,

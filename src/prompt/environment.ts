@@ -19,9 +19,10 @@ export const defaultToolSnippets: Record<string, string> = {
   ls: "List files in a directory",
   web_search: "Search the public web for current information",
   web_fetch: "Fetch and extract the contents of a specific webpage",
+  skill: "Load a named skill with specialized instructions and bundled resources",
 };
 
-export const defaultToolNames = ["read", "bash", "edit", "write", "grep", "ls", "web_search", "web_fetch"];
+export const defaultToolNames = ["read", "bash", "edit", "write", "grep", "ls", "web_search", "web_fetch", "skill"];
 
 export function buildEnvironmentPrompt(options: EnvironmentPromptOptions = {}): string {
   const configuredProvider = options.configuredProvider ?? "unknown";

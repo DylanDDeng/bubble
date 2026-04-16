@@ -13,6 +13,7 @@ import { getDefaultThinkingLevel } from "./provider-transform.js";
 import { ProviderRegistry, displayModel, encodeModel, decodeModel } from "./provider-registry.js";
 import { SessionManager } from "./session.js";
 import { buildSystemPrompt } from "./system-prompt.js";
+import { SkillRegistry } from "./skills/registry.js";
 import { createAllTools } from "./tools/index.js";
 import type { Message } from "./types.js";
 
@@ -26,6 +27,10 @@ async function main() {
 
   const userConfig = new UserConfig();
   const registry = new ProviderRegistry(userConfig);
+  const skillRegistry = new SkillRegistry({
+    cwd: args.cwd,
+    skillPaths: userConfig.getSkillPaths(),
+  });
   const printMode = args.print || !!args.prompt;
 
   // Resolve configured providers only; do not auto-inject OpenRouter as a startup default.
@@ -53,7 +58,7 @@ async function main() {
   const createProvider = (providerId: string, apiKey: string, baseURL: string) =>
     createProviderInstance({ providerId, apiKey, baseURL, thinkingLevel: args.thinkingLevel });
 
-  const tools = createAllTools(args.cwd);
+  const tools = createAllTools(args.cwd, skillRegistry);
 
   // Session management:
   // - default: always start a fresh session
@@ -109,6 +114,7 @@ async function main() {
     configuredModelId: activeModel || "none",
     thinkingLevel: initialThinkingLevel,
     workingDir: args.cwd,
+    skills: skillRegistry.summaries(),
   });
 
   const agent = new Agent({
@@ -124,6 +130,14 @@ async function main() {
     onMessageAppend: (message) => {
       if (sessionManager && message.role !== "system") {
         sessionManager.appendMessage(message);
+      }
+    },
+    onToolResult: (toolName, result) => {
+      if (!sessionManager) return;
+      if (toolName !== "skill" || result.isError) return;
+      const match = result.content.match(/^Skill:\s+([^\n]+)$/m);
+      if (match?.[1]) {
+        sessionManager.appendMarker("skill_activated", match[1].trim());
       }
     },
   });
@@ -173,7 +187,7 @@ async function main() {
 
   // Interactive mode: use Ink TUI
   const { runTui } = await import("./tui/run.js");
-  runTui(agent, args, sessionManager, createProvider, registry);
+  runTui(agent, args, sessionManager, createProvider, registry, skillRegistry);
 }
 
 async function readPipedStdin(): Promise<string | undefined> {

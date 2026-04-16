@@ -17,6 +17,8 @@ import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingL
 import { projectMessages } from "../context/projector.js";
 import { getContextBudget } from "../context/budget.js";
 import { FooterBar, buildFooterData } from "./footer.js";
+import { SkillRegistry } from "../skills/registry.js";
+import { parseSkillInvocation } from "../skills/invocation.js";
 
 interface AppProps {
   agent: Agent;
@@ -24,6 +26,7 @@ interface AppProps {
   sessionManager?: SessionManager;
   createProvider?: (providerId: string, apiKey: string, baseURL: string) => Provider;
   registry?: ProviderRegistry;
+  skillRegistry?: SkillRegistry;
 }
 
 function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] {
@@ -68,7 +71,7 @@ function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] 
   return result;
 }
 
-export function App({ agent, args, sessionManager, createProvider, registry }: AppProps) {
+export function App({ agent, args, sessionManager, createProvider, registry, skillRegistry }: AppProps) {
   const { exit } = useApp();
   const [messages, setMessages] = useState<DisplayMessage[]>(() => reconstructDisplayMessages(agent.messages));
   const [isRunning, setIsRunning] = useState(false);
@@ -82,6 +85,10 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
 
   const userConfig = new UserConfig();
   const safeRegistry = registry ?? new ProviderRegistry(userConfig);
+  const safeSkillRegistry = skillRegistry ?? new SkillRegistry({
+    cwd: args.cwd,
+    skillPaths: userConfig.getSkillPaths(),
+  });
 
   useInput((_input, key) => {
     if (key.tab && key.shift && !pickerMode) {
@@ -102,6 +109,7 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
         configuredModelId: agent.model,
         thinkingLevel: nextLevel,
         workingDir: args.cwd,
+        skills: safeSkillRegistry?.summaries() ?? [],
       }));
       userConfig.setDefaultThinkingLevel(nextLevel);
       setThinkingLevel(nextLevel);
@@ -157,6 +165,7 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
         configuredModelId: model,
         thinkingLevel: agent.thinking,
         workingDir: args.cwd,
+        skills: safeSkillRegistry?.summaries() ?? [],
       }));
       userConfig.pushRecentModel(model);
       setThinkingLevel(agent.thinking);
@@ -205,6 +214,7 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
       }) as any),
       openPicker,
       registry: safeRegistry,
+      skillRegistry: safeSkillRegistry!,
     });
     if (handled && result) {
       addMessage("assistant", result);
@@ -226,6 +236,7 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
       }) as any),
       openPicker,
       registry: safeRegistry,
+      skillRegistry: safeSkillRegistry!,
     });
     if (handled && result) {
       addMessage("assistant", result);
@@ -255,8 +266,122 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
     async (input: string) => {
       if (!input.trim()) return;
 
+      const runAgentInput = async (actualInput: string, displayInput: string = actualInput) => {
+        const activeProviderId = agent.providerId || safeRegistry.getDefault()?.id;
+        const hasActiveProvider = !!activeProviderId && safeRegistry.getEnabled().some((provider) => provider.id === activeProviderId);
+        if (!hasActiveProvider) {
+          addMessage("error", "No provider configured. Use /login for ChatGPT or /provider --add <id> before sending a prompt.");
+          return;
+        }
+        if (!agent.model) {
+          addMessage("error", "No model selected. Use /model after /login or provider setup.");
+          return;
+        }
+
+        setMessages((prev) => [...prev, { role: "user", content: displayInput }]);
+        setIsRunning(true);
+        setStreamingContent("");
+        setStreamingReasoning("");
+        setStreamingTools([]);
+
+        let assistantContent = "";
+        let assistantReasoning = "";
+        const toolCalls: DisplayToolCall[] = [];
+
+        try {
+          for await (const event of agent.run(actualInput, args.cwd)) {
+            switch (event.type) {
+              case "text_delta":
+                assistantContent += event.content;
+                setStreamingContent(assistantContent);
+                break;
+              case "reasoning_delta":
+                assistantReasoning += event.content;
+                setStreamingReasoning(assistantReasoning);
+                break;
+              case "tool_start": {
+                const tc: DisplayToolCall = {
+                  id: event.id,
+                  name: event.name,
+                  args: event.args,
+                };
+                toolCalls.push(tc);
+                setStreamingTools([...toolCalls]);
+                break;
+              }
+              case "tool_end": {
+                const tc = toolCalls.find((t) => t.id === event.id);
+                if (tc) {
+                  tc.result = event.result.content;
+                  tc.isError = event.result.isError;
+                  setStreamingTools([...toolCalls]);
+                }
+                break;
+              }
+              case "turn_end": {
+                if (event.usage) {
+                  setUsageTotals((totals) => ({
+                    prompt: totals.prompt + event.usage!.promptTokens,
+                    completion: totals.completion + event.usage!.completionTokens,
+                  }));
+                }
+                const currentContent = assistantContent;
+                const currentReasoning = assistantReasoning;
+                const currentToolCalls = [...toolCalls];
+                setMessages((prev) => {
+                  const last = prev[prev.length - 1];
+                  if (last?.role === "assistant") {
+                    const merged: DisplayMessage = {
+                      ...last,
+                      reasoning: currentReasoning || last.reasoning,
+                      content:
+                        last.content && currentContent
+                          ? last.content + "\n" + currentContent
+                          : last.content + currentContent,
+                      toolCalls: [...(last.toolCalls || []), ...currentToolCalls],
+                    };
+                    return [...prev.slice(0, -1), merged];
+                  }
+                  const msg: DisplayMessage = {
+                    role: "assistant",
+                    content: currentContent,
+                  };
+                  if (currentReasoning) {
+                    msg.reasoning = currentReasoning;
+                  }
+                  if (currentToolCalls.length > 0) {
+                    msg.toolCalls = currentToolCalls;
+                  }
+                  return [...prev, msg];
+                });
+                setStreamingContent("");
+                setStreamingReasoning("");
+                setStreamingTools([]);
+                assistantContent = "";
+                assistantReasoning = "";
+                toolCalls.length = 0;
+                break;
+              }
+            }
+          }
+        } catch (err: any) {
+          setMessages((prev) => [...prev, { role: "error", content: err.message }]);
+        } finally {
+          setIsRunning(false);
+          setStreamingContent("");
+          setStreamingReasoning("");
+          setStreamingTools([]);
+        }
+      };
+
       // Intercept slash commands
       if (input.startsWith("/")) {
+        const skillInvocation = parseSkillInvocation(input, safeSkillRegistry);
+        if (skillInvocation) {
+          await runAgentInput(skillInvocation.actualPrompt, input);
+          return;
+        }
+
         const { handled, result } = await slashRegistry.execute(input, {
           agent,
           addMessage,
@@ -269,6 +394,7 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
           }) as any),
           openPicker,
           registry: safeRegistry,
+          skillRegistry: safeSkillRegistry!,
         });
         if (handled) {
           if (result) {
@@ -277,114 +403,9 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
           return;
         }
       }
-
-      const activeProviderId = agent.providerId || safeRegistry.getDefault()?.id;
-      const hasActiveProvider = !!activeProviderId && safeRegistry.getEnabled().some((provider) => provider.id === activeProviderId);
-      if (!hasActiveProvider) {
-        addMessage("error", "No provider configured. Use /login for ChatGPT or /provider --add <id> before sending a prompt.");
-        return;
-      }
-      if (!agent.model) {
-        addMessage("error", "No model selected. Use /model after /login or provider setup.");
-        return;
-      }
-
-      setMessages((prev) => [...prev, { role: "user", content: input }]);
-      setIsRunning(true);
-      setStreamingContent("");
-      setStreamingReasoning("");
-      setStreamingTools([]);
-
-      let assistantContent = "";
-      let assistantReasoning = "";
-      const toolCalls: DisplayToolCall[] = [];
-
-      try {
-        for await (const event of agent.run(input, args.cwd)) {
-          switch (event.type) {
-            case "text_delta":
-              assistantContent += event.content;
-              setStreamingContent(assistantContent);
-              break;
-            case "reasoning_delta":
-              assistantReasoning += event.content;
-              setStreamingReasoning(assistantReasoning);
-              break;
-            case "tool_start": {
-              const tc: DisplayToolCall = {
-                id: event.id,
-                name: event.name,
-                args: event.args,
-              };
-              toolCalls.push(tc);
-              setStreamingTools([...toolCalls]);
-              break;
-            }
-            case "tool_end": {
-              const tc = toolCalls.find((t) => t.id === event.id);
-              if (tc) {
-                tc.result = event.result.content;
-                tc.isError = event.result.isError;
-                setStreamingTools([...toolCalls]);
-              }
-              break;
-            }
-            case "turn_end": {
-              if (event.usage) {
-                setUsageTotals((totals) => ({
-                  prompt: totals.prompt + event.usage!.promptTokens,
-                  completion: totals.completion + event.usage!.completionTokens,
-                }));
-              }
-              const currentContent = assistantContent;
-              const currentReasoning = assistantReasoning;
-              const currentToolCalls = [...toolCalls];
-              setMessages((prev) => {
-                const last = prev[prev.length - 1];
-                if (last?.role === "assistant") {
-                  const merged: DisplayMessage = {
-                    ...last,
-                    reasoning: currentReasoning || last.reasoning,
-                    content:
-                      last.content && currentContent
-                        ? last.content + "\n" + currentContent
-                        : last.content + currentContent,
-                    toolCalls: [...(last.toolCalls || []), ...currentToolCalls],
-                  };
-                  return [...prev.slice(0, -1), merged];
-                }
-                const msg: DisplayMessage = {
-                  role: "assistant",
-                  content: currentContent,
-                };
-                if (currentReasoning) {
-                  msg.reasoning = currentReasoning;
-                }
-                if (currentToolCalls.length > 0) {
-                  msg.toolCalls = currentToolCalls;
-                }
-                return [...prev, msg];
-              });
-              setStreamingContent("");
-              setStreamingReasoning("");
-              setStreamingTools([]);
-              assistantContent = "";
-              assistantReasoning = "";
-              toolCalls.length = 0;
-              break;
-            }
-          }
-        }
-      } catch (err: any) {
-        setMessages((prev) => [...prev, { role: "error", content: err.message }]);
-      } finally {
-        setIsRunning(false);
-        setStreamingContent("");
-        setStreamingReasoning("");
-        setStreamingTools([]);
-      }
+      await runAgentInput(input);
     },
-    [agent, args.cwd, openPicker, createProvider, safeRegistry]
+    [agent, args.cwd, openPicker, createProvider, safeRegistry, safeSkillRegistry]
   );
 
   const currentProviderId = agent.providerId || safeRegistry.getDefault()?.id;
@@ -464,7 +485,7 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
         </Box>
       )}
       <Box paddingX={1} paddingBottom={1} flexShrink={0}>
-        <InputBox onSubmit={handleSubmit} disabled={isRunning || !!pickerMode} />
+        <InputBox onSubmit={handleSubmit} disabled={isRunning || !!pickerMode} skillRegistry={safeSkillRegistry} />
       </Box>
       <FooterBar
         data={buildFooterData({

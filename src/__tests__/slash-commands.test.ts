@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import type { SlashCommandContext } from "../slash-commands/types.js";
+import { SkillRegistry } from "../skills/registry.js";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 function createContext(overrides: Partial<SlashCommandContext> = {}): SlashCommandContext {
   return {
@@ -20,8 +24,27 @@ function createContext(overrides: Partial<SlashCommandContext> = {}): SlashComma
     registry: {
       getEnabled: () => [],
     } as any,
+    skillRegistry: new SkillRegistry({ cwd: "/tmp" }),
     ...overrides,
   };
+}
+
+function createSkillRegistryFixture(): SkillRegistry {
+  const root = join(tmpdir(), `bubble-skill-slash-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  const cwd = join(root, "project");
+  mkdirSync(join(cwd, ".bubble", "skills", "repo-review"), { recursive: true });
+  writeFileSync(
+    join(cwd, ".bubble", "skills", "repo-review", "SKILL.md"),
+    `---
+description: Review a codebase for architecture and risks.
+tags:
+  - review
+---
+
+Read the repo carefully before proposing changes.
+`,
+  );
+  return new SkillRegistry({ cwd, bubbleHome: join(root, "home") });
 }
 
 describe("slash commands", () => {
@@ -32,5 +55,41 @@ describe("slash commands", () => {
     expect(result.handled).toBe(true);
     expect(result.result).toBe("No provider configured. Use /login or /provider --add <id> first.");
     expect(ctx.openPicker).not.toHaveBeenCalled();
+  });
+
+  it("lists available skills", async () => {
+    const ctx = createContext({
+      skillRegistry: createSkillRegistryFixture(),
+    });
+
+    const result = await slashRegistry.execute("/skills", ctx);
+    expect(result.handled).toBe(true);
+    expect(result.result).toContain("Available skills:");
+    expect(result.result).toContain("repo-review");
+  });
+
+  it("loads a skill explicitly via /skill", async () => {
+    const appendMarker = vi.fn();
+    const ctx = createContext({
+      skillRegistry: createSkillRegistryFixture(),
+      sessionManager: {
+        appendMarker,
+      } as any,
+    });
+
+    const result = await slashRegistry.execute("/skill repo-review", ctx);
+    expect(result.handled).toBe(true);
+    expect(result.result).toContain("Skill: repo-review");
+    expect(appendMarker).toHaveBeenCalledWith("skill_activated", "repo-review");
+  });
+
+  it("loads a skill directly via /<skill-name> alias", async () => {
+    const ctx = createContext({
+      skillRegistry: createSkillRegistryFixture(),
+    });
+
+    const result = await slashRegistry.execute("/repo-review", ctx);
+    expect(result.handled).toBe(true);
+    expect(result.result).toContain('Use /repo-review <your request> to run with this skill');
   });
 });

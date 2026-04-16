@@ -48,6 +48,7 @@ function sanitizeDefaultProvider(providerId?: string): string | undefined {
 export interface UserConfigData {
   defaultModel?: string;
   defaultThinkingLevel?: ThinkingLevel;
+  skillPaths?: string[];
   recentModels?: string[];
   apiKey?: string;
   providers?: ProviderProfile[];
@@ -147,6 +148,15 @@ export class UserConfig {
 
   setDefaultProvider(id: string) {
     this.data.defaultProvider = sanitizeDefaultProvider(id);
+    this.save();
+  }
+
+  getSkillPaths(): string[] {
+    return Array.isArray(this.data.skillPaths) ? this.data.skillPaths.slice() : [];
+  }
+
+  setSkillPaths(paths: string[]) {
+    this.data.skillPaths = paths.slice();
     this.save();
   }
 }

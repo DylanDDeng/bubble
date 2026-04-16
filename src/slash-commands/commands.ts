@@ -2,6 +2,7 @@ import { UserConfig, maskKey } from "../config.js";
 import { encodeModel, decodeModel, displayModel, BUILTIN_PROVIDERS, isUserVisibleProvider } from "../provider-registry.js";
 import { getAvailableThinkingLevels, normalizeThinkingLevel } from "../provider-transform.js";
 import { buildSystemPrompt } from "../system-prompt.js";
+import { formatLoadedSkill } from "../tools/skill.js";
 import type { SlashCommand } from "./types.js";
 
 const userConfig = new UserConfig();
@@ -25,6 +26,7 @@ function syncSystemPrompt(ctx: Parameters<SlashCommand["handler"]>[1], model: st
     configuredModelId: model,
     thinkingLevel: ctx.agent.thinking,
     workingDir: ctx.cwd,
+    skills: ctx.skillRegistry.summaries(),
   }));
 }
 
@@ -51,6 +53,57 @@ function switchToProviderModel(
 }
 
 export const builtinSlashCommands: SlashCommand[] = [
+  {
+    name: "skills",
+    description: "List available skills and any skill diagnostics",
+    async handler(args, ctx) {
+      const skills = ctx.skillRegistry.summaries();
+      const diagnostics = ctx.skillRegistry.getDiagnostics();
+      const lines: string[] = [];
+
+      if (skills.length === 0) {
+        lines.push("No skills available.");
+      } else {
+        lines.push("Available skills:");
+        for (const skill of skills) {
+          const tagSuffix = skill.tags && skill.tags.length > 0 ? ` [tags: ${skill.tags.join(", ")}]` : "";
+          lines.push(`- ${skill.name}: ${skill.description}${tagSuffix}`);
+        }
+      }
+
+      if (diagnostics.length > 0) {
+        lines.push("", "Skill diagnostics:");
+        for (const diagnostic of diagnostics) {
+          const prefix = diagnostic.level === "error" ? "ERROR" : "WARN";
+          const target = diagnostic.skillName ?? diagnostic.filePath ?? "skills";
+          lines.push(`- ${prefix} ${target}: ${diagnostic.message}`);
+        }
+      }
+
+      return lines.join("\n");
+    },
+  },
+  {
+    name: "skill",
+    description: "Load a skill explicitly. Usage: /skill <name>",
+    async handler(args, ctx) {
+      const name = args.trim();
+      if (!name) {
+        return "Usage: /skill <name>";
+      }
+
+      const skill = ctx.skillRegistry.get(name);
+      if (!skill) {
+        const available = ctx.skillRegistry.summaries().map((item) => item.name).join(", ");
+        return available
+          ? `Unknown skill "${name}". Available skills: ${available}`
+          : `Unknown skill "${name}". No skills are currently available.`;
+      }
+
+      ctx.sessionManager?.appendMarker("skill_activated", skill.meta.name);
+      return formatLoadedSkill(skill);
+    },
+  },
   {
     name: "help",
     description: "Show available slash commands",

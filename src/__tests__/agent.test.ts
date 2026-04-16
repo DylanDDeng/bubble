@@ -120,6 +120,37 @@ describe("Agent", () => {
     expect(appended.some((m) => m.role === "assistant")).toBe(true);
   });
 
+  it("calls onToolResult when a tool finishes successfully", async () => {
+    const provider = createMockProvider([
+      [
+        { type: "tool_call", id: "tc_1", name: "dummy", arguments: "", isStart: true, isEnd: false },
+        {
+          type: "tool_call",
+          id: "tc_1",
+          name: "dummy",
+          arguments: '{"value":"42"}',
+          isStart: false,
+          isEnd: true,
+        },
+        { type: "done" },
+      ],
+      [{ type: "text", content: "Done!" }, { type: "done" }],
+    ]);
+
+    const seen: Array<{ toolName: string; content: string }> = [];
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [dummyTool],
+      onToolResult: (toolName, result) => {
+        seen.push({ toolName, content: result.content });
+      },
+    });
+
+    await collectEvents(agent, "Call dummy", "/tmp");
+    expect(seen).toEqual([{ toolName: "dummy", content: "result: 42" }]);
+  });
+
   it("projects messages before sending them to the provider", async () => {
     const captured: Message[][] = [];
     const provider: Provider = {
