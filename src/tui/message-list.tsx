@@ -64,13 +64,16 @@ function MessageItem({ message }: { message: DisplayMessage }) {
 }
 
 function StreamingMessage({ content, reasoning, tools }: { content: string; reasoning: string; tools: DisplayToolCall[] }) {
+  const deferredContent = React.useDeferredValue(content);
+  const deferredReasoning = React.useDeferredValue(reasoning);
+
   return (
     <Box marginBottom={1} flexDirection="column">
-      {reasoning && <ThinkingBlock reasoning={reasoning} />}
+      {deferredReasoning && <ThinkingBlock reasoning={deferredReasoning} />}
       {tools.map((tc) => (
         <ToolCallDisplay key={tc.id} toolCall={tc} isStreaming={!tc.result} />
       ))}
-      {content && <Text>{content}</Text>}
+      {deferredContent && <MarkdownContent content={deferredContent} />}
     </Box>
   );
 }

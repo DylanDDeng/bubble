@@ -32,6 +32,13 @@ export interface ModelInfo {
 }
 
 export const BUILTIN_PROVIDERS = CATALOG_PROVIDERS;
+export const USER_VISIBLE_PROVIDER_IDS = BUILTIN_PROVIDERS
+  .filter((provider) => provider.id !== "openrouter" && provider.id !== "openai-codex")
+  .map((provider) => provider.id);
+
+export function isUserVisibleProvider(providerId: string): boolean {
+  return USER_VISIBLE_PROVIDER_IDS.includes(providerId);
+}
 
 export class ProviderRegistry {
   private config: UserConfig;
@@ -160,7 +167,11 @@ export class ProviderRegistry {
     const enabled = this.getEnabled();
     if (enabled.length === 0) return undefined;
     const defaultId = this.config.getDefaultProvider();
-    return enabled.find((p) => p.id === defaultId) || enabled[0];
+    const preferred = enabled.filter((provider) => isUserVisibleProvider(provider.id));
+    return preferred.find((p) => p.id === defaultId)
+      || preferred[0]
+      || enabled.find((p) => p.id === defaultId)
+      || enabled[0];
   }
 
   setDefault(id: string) {
@@ -267,7 +278,7 @@ export function displayModel(model: string): string {
 }
 
 /** Normalize user input to provider:model format when possible. */
-export function normalizeModel(model: string, defaultProvider = "openrouter"): string {
+export function normalizeModel(model: string, defaultProvider = "openai"): string {
   const { providerId, modelId } = decodeModel(model);
   if (providerId) return model;
   return encodeModel(defaultProvider, modelId);

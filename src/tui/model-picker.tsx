@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { Box, Text, useInput, useStdout } from "ink";
 import { theme } from "./theme.js";
-import { ProviderRegistry, encodeModel, decodeModel, displayModel, type ModelInfo } from "../provider-registry.js";
+import { ProviderRegistry, encodeModel, decodeModel, displayModel, isUserVisibleProvider, type ModelInfo } from "../provider-registry.js";
 
 interface Option {
   id: string;
@@ -45,7 +45,7 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
       }
 
       // Per-provider models (flattened list)
-      for (const provider of enabled) {
+      for (const provider of enabled.filter((item) => isUserVisibleProvider(item.id))) {
         const models = await registry.listModels(provider);
         for (const m of models) {
           const fullId = encodeModel(m.providerId, m.id);

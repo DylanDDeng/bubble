@@ -1,5 +1,5 @@
 import { UserConfig, maskKey } from "../config.js";
-import { encodeModel, decodeModel, displayModel, BUILTIN_PROVIDERS } from "../provider-registry.js";
+import { encodeModel, decodeModel, displayModel, BUILTIN_PROVIDERS, isUserVisibleProvider } from "../provider-registry.js";
 import { getAvailableThinkingLevels, normalizeThinkingLevel } from "../provider-transform.js";
 import { buildSystemPrompt } from "../system-prompt.js";
 import type { SlashCommand } from "./types.js";
@@ -98,9 +98,9 @@ export const builtinSlashCommands: SlashCommand[] = [
       const value = parts[1];
 
       if (flag === "--add" && value) {
-        const builtin = BUILTIN_PROVIDERS.find((p) => p.id === value && p.id !== "openai-codex");
+        const builtin = BUILTIN_PROVIDERS.find((p) => p.id === value && isUserVisibleProvider(p.id));
         if (!builtin) {
-          const ids = BUILTIN_PROVIDERS.filter((p) => p.id !== "openai-codex").map((p) => p.id).join(", ");
+          const ids = BUILTIN_PROVIDERS.filter((p) => isUserVisibleProvider(p.id)).map((p) => p.id).join(", ");
           return `Unknown provider "${value}". Supported: ${ids}`;
         }
         ctx.openPicker("provider");
@@ -195,7 +195,7 @@ export const builtinSlashCommands: SlashCommand[] = [
         ctx.openPicker("model");
         return;
       }
-      const defaultProvider = ctx.registry.getDefault()?.id || "openrouter";
+      const defaultProvider = ctx.registry.getDefault()?.id || "openai";
       const next = args.includes(":") ? args : encodeModel(defaultProvider, args);
       const { providerId, modelId } = decodeModel(next);
       const targetProviderId = providerId || defaultProvider;
@@ -265,7 +265,7 @@ export const builtinSlashCommands: SlashCommand[] = [
     description: "Manually compact the current session context",
     async handler(args, ctx) {
       if (!ctx.sessionManager) {
-        return "Compaction requires session persistence. Restart without --no-session.";
+        return "Compaction requires session persistence. Start an interactive session first.";
       }
 
       const result = ctx.sessionManager.compact();

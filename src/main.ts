@@ -28,15 +28,8 @@ async function main() {
   const registry = new ProviderRegistry(userConfig);
   const printMode = args.print || !!args.prompt;
 
-  // Ensure at least one provider is configured (backward compatible)
-  let providers = registry.getConfigured();
-  if (providers.length === 0) {
-    const apiKey = args.apiKey || process.env.OPENROUTER_API_KEY || userConfig.getApiKey();
-    if (apiKey) {
-      registry.addProvider("openrouter", apiKey);
-      providers = registry.getConfigured();
-    }
-  }
+  // Resolve configured providers only; do not auto-inject OpenRouter as a startup default.
+  const providers = registry.getConfigured();
 
   if (providers.length === 0) {
     if (printMode) {

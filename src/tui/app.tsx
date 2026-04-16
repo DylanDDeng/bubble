@@ -10,7 +10,7 @@ import { InputBox } from "./input-box.js";
 import { MessageList, type DisplayMessage, type DisplayToolCall } from "./message-list.js";
 import { theme } from "./theme.js";
 import { ModelPicker, ProviderPicker, KeyPicker } from "./model-picker.js";
-import { BUILTIN_PROVIDERS, ProviderRegistry, displayModel } from "../provider-registry.js";
+import { BUILTIN_PROVIDERS, ProviderRegistry, displayModel, isUserVisibleProvider } from "../provider-registry.js";
 import { buildSystemPrompt } from "../system-prompt.js";
 import type { ThinkingLevel } from "../types.js";
 import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingLevel } from "../provider-transform.js";
@@ -87,7 +87,7 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
     if (key.tab && key.shift && !pickerMode) {
       const modelParts = agent.model.includes(":")
         ? agent.model.split(":")
-        : [agent.providerId || safeRegistry.getDefault()?.id || "openrouter", agent.model];
+        : [agent.providerId || safeRegistry.getDefault()?.id || "openai", agent.model];
       const providerId = modelParts[0];
       const modelId = modelParts.slice(1).join(":");
       const availableLevels = getAvailableThinkingLevels(providerId, modelId);
@@ -131,7 +131,7 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
       agent.model = model;
       const decoded = model.includes(":")
         ? model.split(":")
-        : [agent.providerId || safeRegistry.getDefault()?.id || "openrouter", model];
+        : [agent.providerId || safeRegistry.getDefault()?.id || "openai", model];
       const providerId = decoded[0];
 
       await safeRegistry.prepareProvider(providerId);
@@ -413,7 +413,7 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
         {pickerMode === "provider" && (
           <ProviderPicker
             providers={safeRegistry.getConfigured()
-              .filter((p) => p.id !== "openai-codex")
+              .filter((p) => isUserVisibleProvider(p.id))
               .map((p) => ({ id: p.id, name: p.name, enabled: p.enabled }))}
             current={currentProviderId}
             onSelect={handleProviderSelect}
@@ -423,7 +423,7 @@ export function App({ agent, args, sessionManager, createProvider, registry }: A
         {pickerMode === "login" && (
           <ProviderPicker
             providers={BUILTIN_PROVIDERS
-              .filter((p) => safeRegistry.supportsOAuth(p.id))
+              .filter((p) => isUserVisibleProvider(p.id) && safeRegistry.supportsOAuth(p.id))
               .map((p) => ({ id: p.id, name: p.name, enabled: true }))}
             current={currentProviderId}
             onSelect={handleLoginProviderSelect}
