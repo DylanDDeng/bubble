@@ -19,6 +19,7 @@ export interface FooterData {
   providerId: string;
   model: string;
   thinkingLevel: string;
+  showThinking: boolean;
   usageTotals: FooterUsageTotals;
   budget?: FooterBudget;
 }
@@ -33,8 +34,11 @@ export function FooterBar({ data }: { data: FooterData }) {
       ? `  ~${formatTokens(data.budget.estimatedTokens)}`
       : "";
 
+  const thinkingText = data.showThinking
+    ? (data.thinkingLevel && data.thinkingLevel !== "off" ? ` • ${data.thinkingLevel}` : " • thinking off")
+    : "";
   const left = `${formatCwd(data.cwd)}${usageText}${budgetText}`;
-  const right = `${data.providerId} • ${data.model}${data.thinkingLevel && data.thinkingLevel !== "off" ? ` • ${data.thinkingLevel}` : " • thinking off"}`;
+  const right = `${data.providerId} • ${data.model}${thinkingText}`;
 
   return (
     <Box paddingX={1} flexShrink={0}>

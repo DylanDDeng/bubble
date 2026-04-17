@@ -21,6 +21,10 @@ export const BUILTIN_PROVIDERS: BuiltinProviderDefinition[] = [
   { id: "openai-codex", name: "OpenAI Codex (ChatGPT)", baseURL: "https://chatgpt.com/backend-api" },
   { id: "deepseek", name: "DeepSeek", baseURL: "https://api.deepseek.com/v1" },
   { id: "google", name: "Google", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai" },
+  { id: "zhipuai", name: "Zhipu AI", baseURL: "https://open.bigmodel.cn/api/paas/v4" },
+  { id: "zhipuai-coding-plan", name: "Zhipu AI Coding Plan", baseURL: "https://open.bigmodel.cn/api/coding/paas/v4" },
+  { id: "zai", name: "Z.AI", baseURL: "https://api.z.ai/api/paas/v4" },
+  { id: "zai-coding-plan", name: "Z.AI Coding Plan", baseURL: "https://api.z.ai/api/coding/paas/v4" },
   { id: "groq", name: "Groq", baseURL: "https://api.groq.com/openai/v1" },
   { id: "together", name: "Together AI", baseURL: "https://api.together.xyz/v1" },
   { id: "local", name: "Local (OpenAI-compatible)", baseURL: "http://localhost:11434/v1" },
@@ -31,6 +35,7 @@ const GPT51_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high"];
 const GPT51_CODEX_MAX_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high", "xhigh"];
 const GPT51_CODEX_MINI_LEVELS: ReasoningEffort[] = ["off", "medium", "high"];
 const OPENAI_CHAT_LEVELS: ReasoningEffort[] = ["off"];
+const TOGGLE_THINKING_LEVELS: ReasoningEffort[] = ["off", "medium"];
 
 export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "gpt-5.4", name: "gpt-5.4", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000 },
@@ -54,6 +59,18 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "gemini-2.5-pro-preview-03-25", name: "gemini-2.5-pro-preview-03-25", providerId: "google", reasoningLevels: ["off", "low", "high"], contextWindow: 128000 },
   { id: "gemini-2.0-flash-001", name: "gemini-2.0-flash-001", providerId: "google", reasoningLevels: ["off"], contextWindow: 128000 },
   { id: "gemini-1.5-pro-latest", name: "gemini-1.5-pro-latest", providerId: "google", reasoningLevels: ["off"], contextWindow: 128000 },
+  { id: "glm-5.1", name: "GLM-5.1", providerId: "zhipuai", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
+  { id: "glm-4.7", name: "GLM-4.7", providerId: "zhipuai", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
+  { id: "glm-4.6", name: "GLM-4.6", providerId: "zhipuai", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
+  { id: "glm-5.1", name: "GLM-5.1", providerId: "zhipuai-coding-plan", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
+  { id: "glm-4.7", name: "GLM-4.7", providerId: "zhipuai-coding-plan", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
+  { id: "glm-4.6", name: "GLM-4.6", providerId: "zhipuai-coding-plan", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
+  { id: "glm-5.1", name: "GLM-5.1", providerId: "zai", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
+  { id: "glm-4.7", name: "GLM-4.7", providerId: "zai", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
+  { id: "glm-4.6", name: "GLM-4.6", providerId: "zai", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
+  { id: "glm-5-turbo", name: "GLM-5-Turbo", providerId: "zai-coding-plan", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
+  { id: "glm-4.7", name: "GLM-4.7", providerId: "zai-coding-plan", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
+  { id: "glm-4.6", name: "GLM-4.6", providerId: "zai-coding-plan", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
   { id: "llama-3.3-70b-versatile", name: "llama-3.3-70b-versatile", providerId: "groq", reasoningLevels: ["off"], contextWindow: 32768 },
   { id: "mixtral-8x7b-32768", name: "mixtral-8x7b-32768", providerId: "groq", reasoningLevels: ["off"], contextWindow: 32768 },
   { id: "gemma-2-9b-it", name: "gemma-2-9b-it", providerId: "groq", reasoningLevels: ["off"], contextWindow: 32768 },

@@ -12,7 +12,7 @@ export interface SlashCommandContext {
   exit: () => void;
   sessionManager?: SessionManager;
   createProvider: (providerId: string, apiKey: string, baseURL: string) => Provider;
-  openPicker: (mode: "model" | "key" | "provider" | "login" | "logout") => void;
+  openPicker: (mode: "model" | "key" | "provider" | "provider-add" | "login" | "logout", providerId?: string) => void;
   registry: ProviderRegistry;
   skillRegistry: SkillRegistry;
 }

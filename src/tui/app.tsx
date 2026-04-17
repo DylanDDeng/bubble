@@ -80,7 +80,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   const [streamingTools, setStreamingTools] = useState<DisplayToolCall[]>([]);
   const [usageTotals, setUsageTotals] = useState({ prompt: 0, completion: 0 });
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(agent.thinking);
-  const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | "login" | "logout" | null>(null);
+  const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | "provider-add" | "login" | "logout" | null>(null);
   const [keyProviderId, setKeyProviderId] = useState<string | null>(null);
 
   const userConfig = new UserConfig();
@@ -131,7 +131,10 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     setMessages([]);
   }, []);
 
-  const openPicker = useCallback((mode: "model" | "key" | "provider" | "login" | "logout") => {
+  const openPicker = useCallback((mode: "model" | "key" | "provider" | "provider-add" | "login" | "logout", providerId?: string) => {
+    if (mode === "key") {
+      setKeyProviderId(providerId ?? null);
+    }
     setPickerMode(mode);
   }, []);
 
@@ -180,14 +183,19 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
 
   const handleProviderSelect = useCallback(async (providerId: string) => {
     await safeRegistry.prepareProvider(providerId);
-    const providers = safeRegistry.getConfigured();
-    const p = providers.find((x) => x.id === providerId);
-    if (!p) {
+    const configured = safeRegistry.getConfigured();
+    const p = configured.find((x) => x.id === providerId);
+    const builtin = BUILTIN_PROVIDERS.find((x) => x.id === providerId);
+    if (!p && !builtin) {
       addMessage("error", `Provider ${providerId} not found.`);
       setPickerMode(null);
       return;
     }
-    if (!p.apiKey) {
+    if (!p?.apiKey) {
+      if (!p && builtin) {
+        safeRegistry.addProvider(providerId, "");
+      }
+      safeRegistry.setDefault(providerId);
       setKeyProviderId(providerId);
       setPickerMode("key");
       return;
@@ -198,6 +206,18 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     addMessage("assistant", `Switched to provider ${p.name}. Use /model to pick a model.`);
     setPickerMode(null);
   }, [addMessage, agent, createProvider, safeRegistry]);
+
+  const handleProviderAddSelect = useCallback((providerId: string) => {
+    const ok = safeRegistry.addProvider(providerId, "");
+    if (!ok) {
+      addMessage("error", `Provider ${providerId} could not be added.`);
+      setPickerMode(null);
+      return;
+    }
+    safeRegistry.setDefault(providerId);
+    setKeyProviderId(providerId);
+    setPickerMode("key");
+  }, [addMessage, safeRegistry]);
 
   const handleLoginProviderSelect = useCallback(async (providerId: string) => {
     setPickerMode(null);
@@ -438,12 +458,31 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         )}
         {pickerMode === "provider" && (
           <ProviderPicker
-            providers={safeRegistry.getConfigured()
+            providers={BUILTIN_PROVIDERS
               .filter((p) => isUserVisibleProvider(p.id))
-              .map((p) => ({ id: p.id, name: p.name, enabled: p.enabled }))}
+              .map((p) => {
+                const configured = safeRegistry.getConfigured().find((item) => item.id === p.id);
+                const configuredLabel = configured?.apiKey ? "configured" : "needs key";
+                return {
+                  id: p.id,
+                  name: `${p.name} [${configuredLabel}]`,
+                  enabled: true,
+                };
+              })}
             current={currentProviderId}
             onSelect={handleProviderSelect}
             onCancel={() => setPickerMode(null)}
+          />
+        )}
+        {pickerMode === "provider-add" && (
+          <ProviderPicker
+            providers={BUILTIN_PROVIDERS
+              .filter((p) => isUserVisibleProvider(p.id))
+              .map((p) => ({ id: p.id, name: p.name, enabled: true }))}
+            current={currentProviderId}
+            onSelect={handleProviderAddSelect}
+            onCancel={() => setPickerMode(null)}
+            title="Add Provider"
           />
         )}
         {pickerMode === "login" && (
@@ -493,6 +532,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           providerId: agent.providerId || safeRegistry.getDefault()?.id || "unknown",
           model: displayModel(agent.model) || "no model",
           thinkingLevel,
+          showThinking: getAvailableThinkingLevels(agent.providerId, agent.apiModel).length > 2,
           usageTotals,
           budget: getContextBudget(
             agent.providerId || safeRegistry.getDefault()?.id || "unknown",

@@ -141,7 +141,7 @@ export const builtinSlashCommands: SlashCommand[] = [
   },
   {
     name: "provider",
-    description: "Manage providers. /provider to open picker, /provider --add <id>, /provider --remove <id>, /provider --set <id>",
+    description: "Manage providers. /provider to switch, /provider --add [id] to add, /provider --remove <id>, /provider --set <id>",
     async handler(args, ctx) {
       if (!args) {
         ctx.openPicker("provider");
@@ -152,13 +152,20 @@ export const builtinSlashCommands: SlashCommand[] = [
       const flag = parts[0];
       const value = parts[1];
 
-      if (flag === "--add" && value) {
+      if (flag === "--add") {
+        if (!value) {
+          ctx.openPicker("provider-add");
+          return;
+        }
+
         const builtin = BUILTIN_PROVIDERS.find((p) => p.id === value && isUserVisibleProvider(p.id));
         if (!builtin) {
           const ids = BUILTIN_PROVIDERS.filter((p) => isUserVisibleProvider(p.id)).map((p) => p.id).join(", ");
           return `Unknown provider "${value}". Supported: ${ids}`;
         }
-        ctx.openPicker("provider");
+        ctx.registry.addProvider(value, "");
+        ctx.registry.setDefault(value);
+        ctx.openPicker("key", value);
         return;
       }
 

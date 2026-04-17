@@ -16,6 +16,31 @@ describe("provider transform", () => {
     expect(google.reasoningEffort).toBe("high");
   });
 
+  it("emits Zhipu/Z.AI thinking config for coding-plan compatible providers", () => {
+    const zhipu = resolveProviderRequestConfig("zhipuai-coding-plan", "glm-5.1", "medium");
+    const zai = resolveProviderRequestConfig("zai-coding-plan", "glm-5-turbo", "medium");
+
+    expect(zhipu.reasoningEffort).toBeUndefined();
+    expect(zhipu.extraBody).toEqual({
+      thinking: {
+        type: "enabled",
+        clear_thinking: false,
+      },
+    });
+    expect(zai.extraBody).toEqual({
+      thinking: {
+        type: "enabled",
+        clear_thinking: false,
+      },
+    });
+  });
+
+  it("does not emit Zhipu/Z.AI thinking config when thinking is off", () => {
+    const config = resolveProviderRequestConfig("zhipuai", "glm-4.7", "off");
+    expect(config.effectiveThinkingLevel).toBe("off");
+    expect(config.extraBody).toBeUndefined();
+  });
+
   it("keeps unsupported providers at UI-only thinking state", () => {
     const config = resolveProviderRequestConfig("deepseek", "deepseek-chat", "high");
     expect(config.effectiveThinkingLevel).toBe("off");

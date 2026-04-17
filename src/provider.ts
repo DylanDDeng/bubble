@@ -68,6 +68,10 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
       stream: true,
     };
 
+    if (requestConfig.extraBody) {
+      Object.assign(body, requestConfig.extraBody);
+    }
+
     if (requestConfig.reasoningEffort && requestConfig.reasoningEffort !== "off") {
       body.reasoning = { enabled: true };
     }
@@ -88,7 +92,7 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
         };
       }
 
-      const reasoning = (delta as any)?.reasoning ?? (delta as any)?.thinking;
+      const reasoning = (delta as any)?.reasoning ?? (delta as any)?.thinking ?? (delta as any)?.reasoning_content;
       if (reasoning) {
         yield { type: "reasoning_delta", content: reasoning };
       }
@@ -161,6 +165,11 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
       messages: messages as any,
       temperature: chatOptions?.temperature ?? 0.2,
     };
+
+    if (requestConfig.extraBody) {
+      Object.assign(body, requestConfig.extraBody);
+    }
+
     if (requestConfig.reasoningEffort && requestConfig.reasoningEffort !== "off") {
       body.reasoning = { enabled: true };
     }

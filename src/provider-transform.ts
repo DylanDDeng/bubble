@@ -5,6 +5,7 @@ export { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingL
 export interface ProviderRequestConfig {
   effectiveThinkingLevel: ThinkingLevel;
   reasoningEffort?: ThinkingLevel;
+  extraBody?: Record<string, unknown>;
 }
 
 export function resolveProviderRequestConfig(
@@ -19,6 +20,24 @@ export function resolveProviderRequestConfig(
   // Keep the session/UI state, but don't send reasoning flags on this provider until the protocol is clearer.
   if (providerId === "openai-codex") {
     return { effectiveThinkingLevel };
+  }
+
+  // Zhipu/Z.AI OpenAI-compatible endpoints expose reasoning via a provider-specific
+  // `thinking` block rather than OpenAI's `reasoning_effort` shape.
+  if (
+    ["zhipuai", "zhipuai-coding-plan", "zai", "zai-coding-plan"].includes(providerId)
+  ) {
+    return {
+      effectiveThinkingLevel,
+      extraBody: effectiveThinkingLevel === "off"
+        ? undefined
+        : {
+            thinking: {
+              type: "enabled",
+              clear_thinking: false,
+            },
+          },
+    };
   }
 
   if (
