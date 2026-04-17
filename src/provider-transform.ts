@@ -6,7 +6,12 @@ export interface ProviderRequestConfig {
   effectiveThinkingLevel: ThinkingLevel;
   reasoningEffort?: ThinkingLevel;
   extraBody?: Record<string, unknown>;
+  omitTemperature?: boolean;
 }
+
+const MOONSHOT_PROVIDER_IDS = new Set(["moonshot-cn", "moonshot-intl", "kimi-for-coding"]);
+const KIMI_K25_FAMILY = new Set(["kimi-k2.5", "k2.6-code-preview"]);
+const KIMI_THINKING_FAMILY = new Set(["kimi-k2-thinking", "kimi-k2-thinking-turbo"]);
 
 export function resolveProviderRequestConfig(
   providerId: string,
@@ -38,6 +43,24 @@ export function resolveProviderRequestConfig(
             },
           },
     };
+  }
+
+  // Moonshot / Kimi: kimi-k2.5 (incl. k2.6-code-preview) locks temperature/top_p/n/penalties
+  // and exposes thinking via extra_body.thinking; kimi-k2-thinking family locks temperature=1.
+  if (MOONSHOT_PROVIDER_IDS.has(providerId)) {
+    if (KIMI_K25_FAMILY.has(modelId)) {
+      return {
+        effectiveThinkingLevel,
+        omitTemperature: true,
+        extraBody: {
+          thinking: { type: effectiveThinkingLevel === "off" ? "disabled" : "enabled" },
+        },
+      };
+    }
+    if (KIMI_THINKING_FAMILY.has(modelId)) {
+      return { effectiveThinkingLevel, omitTemperature: true };
+    }
+    return { effectiveThinkingLevel };
   }
 
   if (

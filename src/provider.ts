@@ -9,6 +9,32 @@ import { createOpenAICodexProvider, isOpenAICodexBaseUrl } from "./provider-open
 import { resolveProviderRequestConfig } from "./provider-transform.js";
 import type { Message, Provider, StreamChunk, ThinkingLevel, ToolDefinition } from "./types.js";
 
+function toChatCompletionsMessage(message: Message): Record<string, unknown> {
+  if (message.role === "assistant") {
+    const out: Record<string, unknown> = {
+      role: "assistant",
+      content: message.content || null,
+    };
+    if (message.toolCalls && message.toolCalls.length > 0) {
+      out.tool_calls = message.toolCalls.map((tc) => ({
+        id: tc.id,
+        type: "function",
+        function: { name: tc.name, arguments: tc.arguments || "{}" },
+      }));
+      // Kimi-k2.5 with thinking enabled requires reasoning_content to be echoed
+      // back on assistant messages that carry tool_calls. Harmless for other providers.
+      if (message.reasoning) {
+        out.reasoning_content = message.reasoning;
+      }
+    }
+    return out;
+  }
+  if (message.role === "tool") {
+    return { role: "tool", tool_call_id: message.toolCallId, content: message.content };
+  }
+  return { role: message.role, content: message.content };
+}
+
 export interface ProviderInstanceOptions {
   providerId?: string;
   apiKey: string;
@@ -61,12 +87,14 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
 
     const body: any = {
       model: chatOptions.model,
-      messages: messages as any,
+      messages: messages.map(toChatCompletionsMessage),
       tools: tools && tools.length > 0 ? tools : undefined,
       tool_choice: tools && tools.length > 0 ? "auto" : undefined,
-      temperature: chatOptions.temperature ?? 0.2,
       stream: true,
     };
+    if (!requestConfig.omitTemperature) {
+      body.temperature = chatOptions.temperature ?? 0.2;
+    }
 
     if (requestConfig.extraBody) {
       Object.assign(body, requestConfig.extraBody);
@@ -162,9 +190,11 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
     );
     const body: any = {
       model: chatOptions?.model ?? fallbackModel,
-      messages: messages as any,
-      temperature: chatOptions?.temperature ?? 0.2,
+      messages: messages.map(toChatCompletionsMessage),
     };
+    if (!requestConfig.omitTemperature) {
+      body.temperature = chatOptions?.temperature ?? 0.2;
+    }
 
     if (requestConfig.extraBody) {
       Object.assign(body, requestConfig.extraBody);
