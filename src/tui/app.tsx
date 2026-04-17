@@ -19,6 +19,7 @@ import { getContextBudget } from "../context/budget.js";
 import { FooterBar, buildFooterData } from "./footer.js";
 import { SkillRegistry } from "../skills/registry.js";
 import { parseSkillInvocation } from "../skills/invocation.js";
+import { useTerminalSize } from "./use-terminal-size.js";
 
 interface AppProps {
   agent: Agent;
@@ -82,6 +83,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(agent.thinking);
   const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | "provider-add" | "login" | "logout" | null>(null);
   const [keyProviderId, setKeyProviderId] = useState<string | null>(null);
+  const { columns: terminalColumns } = useTerminalSize();
 
   const userConfig = new UserConfig();
   const safeRegistry = registry ?? new ProviderRegistry(userConfig);
@@ -446,6 +448,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           streamingContent={streamingContent}
           streamingReasoning={streamingReasoning}
           streamingTools={streamingTools}
+          terminalColumns={terminalColumns}
         />
         {pickerMode === "model" && (
           <ModelPicker
@@ -524,7 +527,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         </Box>
       )}
       <Box paddingX={1} paddingBottom={1} flexShrink={0}>
-        <InputBox onSubmit={handleSubmit} disabled={isRunning || !!pickerMode} skillRegistry={safeSkillRegistry} />
+        <InputBox onSubmit={handleSubmit} disabled={isRunning || !!pickerMode} skillRegistry={safeSkillRegistry} terminalColumns={terminalColumns} />
       </Box>
       <FooterBar
         data={buildFooterData({

@@ -4,7 +4,8 @@
  */
 
 import React from "react";
-import { Box, Text, useStdout } from "ink";
+import { Box, Text } from "ink";
+import { useTerminalSize } from "./use-terminal-size.js";
 import { theme } from "./theme.js";
 import { highlightCode } from "./code-highlight.js";
 
@@ -202,8 +203,7 @@ function CodeBlock({ lang, lines }: { lang: string; lines: string[] }) {
 }
 
 function TableBlock({ headers, rows }: { headers: string[]; rows: string[][] }) {
-  const { stdout } = useStdout();
-  const termWidth = stdout?.columns || 80;
+  const { columns: termWidth } = useTerminalSize();
   const colCount = headers.length;
 
   const maxWidths = headers.map((h, i) => {

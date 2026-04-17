@@ -1,5 +1,5 @@
 import React from "react";
-import { Box, Text, useStdout } from "ink";
+import { Box, Text } from "ink";
 import { theme } from "./theme.js";
 import { highlightCode, inferLang } from "./code-highlight.js";
 import { MarkdownContent } from "./markdown.js";
@@ -24,13 +24,14 @@ interface MessageListProps {
   streamingContent: string;
   streamingReasoning: string;
   streamingTools: DisplayToolCall[];
+  terminalColumns: number;
 }
 
-export function MessageList({ messages, streamingContent, streamingReasoning, streamingTools }: MessageListProps) {
+export function MessageList({ messages, streamingContent, streamingReasoning, streamingTools, terminalColumns }: MessageListProps) {
   return (
     <Box flexDirection="column">
       {messages.map((msg, i) => (
-        <MessageItem key={i} message={msg} />
+        <MessageItem key={i} message={msg} terminalColumns={terminalColumns} />
       ))}
       {(streamingContent || streamingReasoning || streamingTools.length > 0) && (
         <StreamingMessage content={streamingContent} reasoning={streamingReasoning} tools={streamingTools} />
@@ -39,9 +40,9 @@ export function MessageList({ messages, streamingContent, streamingReasoning, st
   );
 }
 
-function MessageItem({ message }: { message: DisplayMessage }) {
+function MessageItem({ message, terminalColumns }: { message: DisplayMessage; terminalColumns: number }) {
   if (message.role === "user") {
-    return <UserMessageBlock content={message.content} />;
+    return <UserMessageBlock content={message.content} terminalColumns={terminalColumns} />;
   }
 
   if (message.role === "error") {
@@ -95,13 +96,12 @@ function ThinkingBlock({ reasoning }: { reasoning: string }) {
   );
 }
 
-function UserMessageBlock({ content }: { content: string }) {
-  const { stdout } = useStdout();
+function UserMessageBlock({ content, terminalColumns }: { content: string; terminalColumns: number }) {
   const horizontalPadding = 2;
-  const width = Math.max(20, (stdout?.columns || 80) - 2);
+  const width = Math.max(20, terminalColumns - 2);
   const contentWidth = Math.max(1, width - horizontalPadding * 2);
-  const lines = content.split("\n");
-  const paddedLines = ["", ...lines, ""];
+  const wrappedLines = content.split("\n").flatMap((line) => wrapByVisualWidth(line, contentWidth));
+  const paddedLines = ["", ...wrappedLines, ""];
 
   return (
     <Box marginBottom={1} flexDirection="column">
@@ -238,4 +238,39 @@ function visualWidth(str: string): number {
 function padVisual(str: string, width: number): string {
   const currentWidth = visualWidth(str);
   return str + " ".repeat(Math.max(0, width - currentWidth));
+}
+
+function charVisualWidth(char: string): number {
+  const code = char.codePointAt(0) || 0;
+  if (
+    (code >= 0x4e00 && code <= 0x9fff) ||
+    (code >= 0x3000 && code <= 0x303f) ||
+    (code >= 0xff00 && code <= 0xffef) ||
+    (code >= 0x3040 && code <= 0x309f) ||
+    (code >= 0x30a0 && code <= 0x30ff)
+  ) {
+    return 2;
+  }
+  return 1;
+}
+
+function wrapByVisualWidth(line: string, maxWidth: number): string[] {
+  if (maxWidth <= 0) return [line];
+  if (line === "") return [""];
+  const result: string[] = [];
+  let current = "";
+  let currentWidth = 0;
+  for (const char of line) {
+    const w = charVisualWidth(char);
+    if (currentWidth + w > maxWidth) {
+      result.push(current);
+      current = char;
+      currentWidth = w;
+    } else {
+      current += char;
+      currentWidth += w;
+    }
+  }
+  if (current !== "" || result.length === 0) result.push(current);
+  return result;
 }

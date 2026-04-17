@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { Box, Text, useInput, useStdout } from "ink";
+import { Box, Text, useInput } from "ink";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import type { SkillRegistry } from "../skills/registry.js";
 import { theme } from "./theme.js";
@@ -8,6 +8,7 @@ interface InputBoxProps {
   onSubmit: (value: string) => void;
   disabled?: boolean;
   skillRegistry?: SkillRegistry;
+  terminalColumns: number;
 }
 
 const MIN_VISIBLE_LINES = 3;
@@ -21,9 +22,8 @@ interface SlashSuggestion {
   description: string;
 }
 
-export function InputBox({ onSubmit, disabled, skillRegistry }: InputBoxProps) {
-  const { stdout } = useStdout();
-  const width = stdout.columns || 80;
+export function InputBox({ onSubmit, disabled, skillRegistry, terminalColumns }: InputBoxProps) {
+  const width = terminalColumns;
 
   const [text, setText] = useState("");
   const [cursor, setCursor] = useState(0);
