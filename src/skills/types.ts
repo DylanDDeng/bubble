@@ -25,6 +25,7 @@ export interface SkillSummary {
   name: string;
   description: string;
   tags?: string[];
+  source?: "user" | "project" | "configured";
 }
 
 export interface SkillDiagnostic {

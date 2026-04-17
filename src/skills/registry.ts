@@ -42,6 +42,7 @@ export class SkillRegistry {
       name: skill.meta.name,
       description: skill.meta.description,
       tags: skill.meta.tags,
+      source: skill.source,
     }));
   }
 
