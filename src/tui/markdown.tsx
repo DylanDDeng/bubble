@@ -144,8 +144,8 @@ function parseInline(text: string): React.ReactNode[] {
       nodes.push(<Text key={match.index} italic>{content}</Text>);
     } else if (marker.startsWith("`")) {
       nodes.push(
-        <Text key={match.index} color={theme.code} backgroundColor="gray">
-          {" " + content + " "}
+        <Text key={match.index} color="#a78bfa">
+          {content}
         </Text>
       );
     }
@@ -193,7 +193,7 @@ function CodeBlock({ lang, lines }: { lang: string; lines: string[] }) {
   return (
     <Box flexDirection="column" marginY={1}>
       {lang && <Text color={theme.muted}>{lang}</Text>}
-      <Box flexDirection="column" borderStyle="round" borderColor={theme.muted} paddingX={1}>
+      <Box flexDirection="column">
         {highlighted?.map((line, i) => (
           <Text key={i}>{line || " "}</Text>
         ))}
