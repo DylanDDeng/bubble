@@ -7,6 +7,8 @@ export interface ProjectionOptions {
   mode?: "full" | "pruned" | "budgeted";
   providerId?: string;
   modelId?: string;
+  usageAnchorTokens?: number;
+  anchorMessageCount?: number;
 }
 
 export function projectMessages(messages: Message[], options: ProjectionOptions = {}): Message[] {
@@ -50,7 +52,17 @@ export function projectMessages(messages: Message[], options: ProjectionOptions 
       return pruned;
     }
 
-    const budget = getContextBudget(options.providerId, options.modelId, pruned);
+    const budget = getContextBudget(
+      options.providerId,
+      options.modelId,
+      pruned,
+      options.usageAnchorTokens !== undefined && options.anchorMessageCount !== undefined
+        ? {
+            usageAnchorTokens: options.usageAnchorTokens,
+            tailMessages: pruned.slice(Math.min(options.anchorMessageCount, pruned.length)),
+          }
+        : undefined,
+    );
     if (!budget.shouldCompact) {
       return pruned;
     }

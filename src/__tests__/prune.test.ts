@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pruneMessages } from "../context/prune.js";
+import { aggressivePruneMessages, pruneMessages } from "../context/prune.js";
 import type { Message } from "../types.js";
 
 function longText(label: string): string {
@@ -55,5 +55,49 @@ describe("pruneMessages", () => {
     const pruned = pruneMessages(messages);
     expect((pruned[1] as any).content).toBe(messages[1].content);
     expect((pruned[3] as any).content).toBe(messages[3].content);
+  });
+});
+
+describe("aggressivePruneMessages", () => {
+  it("drops the content of every prunable tool output regardless of recency", () => {
+    const messages: Message[] = [
+      { role: "user", content: "do a lot of reads" },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          { id: "c1", name: "read", arguments: "{\"file\":\"a.ts\"}" },
+          { id: "c2", name: "read", arguments: "{\"file\":\"b.ts\"}" },
+          { id: "c3", name: "grep", arguments: "{\"pattern\":\"foo\"}" },
+        ],
+      },
+      { role: "tool", toolCallId: "c1", content: longText("a") },
+      { role: "tool", toolCallId: "c2", content: longText("b") },
+      { role: "tool", toolCallId: "c3", content: longText("hits") },
+    ];
+
+    const pruned = aggressivePruneMessages(messages);
+    expect((pruned[2] as any).content).toContain("output omitted");
+    expect((pruned[3] as any).content).toContain("output omitted");
+    expect((pruned[4] as any).content).toContain("output omitted");
+  });
+
+  it("still skips short outputs and errors", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          { id: "c1", name: "read", arguments: "{\"file\":\"a.ts\"}" },
+          { id: "c2", name: "bash", arguments: "{\"command\":\"ls\"}" },
+        ],
+      },
+      { role: "tool", toolCallId: "c1", content: "short" },
+      { role: "tool", toolCallId: "c2", content: "Error: failed" },
+    ];
+
+    const pruned = aggressivePruneMessages(messages);
+    expect((pruned[1] as any).content).toBe("short");
+    expect((pruned[2] as any).content).toBe("Error: failed");
   });
 });

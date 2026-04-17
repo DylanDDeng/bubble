@@ -133,4 +133,5 @@ export type AgentEvent =
   | { type: "tool_start"; id: string; name: string; args: Record<string, any> }
   | { type: "tool_end"; id: string; name: string; result: ToolResult }
   | { type: "turn_end"; usage?: { promptTokens: number; completionTokens: number } }
+  | { type: "context_recovered"; droppedMessages: number; reason: "overflow" }
   | { type: "agent_end" };

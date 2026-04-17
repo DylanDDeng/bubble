@@ -216,4 +216,80 @@ describe("Agent", () => {
     expect(systemMessages.length).toBeGreaterThan(0);
     expect(systemMessages.some((message) => message.content.includes("Previous conversation summary:"))).toBe(true);
   });
+
+  it("rethrows non-overflow errors without retry", async () => {
+    let callCount = 0;
+    const provider: Provider = {
+      async *streamChat() {
+        callCount += 1;
+        throw new Error("401 Invalid Authentication");
+      },
+      async complete() {
+        return "";
+      },
+    };
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [] });
+    await expect(collectEvents(agent, "hi", "/tmp")).rejects.toThrow(/401/);
+    expect(callCount).toBe(1);
+  });
+
+  it("recovers from context overflow and retries", async () => {
+    let callCount = 0;
+    const provider: Provider = {
+      async *streamChat() {
+        callCount += 1;
+        if (callCount === 1) {
+          throw new Error("400 context_length_exceeded: prompt too long");
+        }
+        yield { type: "text", content: "recovered" };
+        yield { type: "done" };
+      },
+      async complete() {
+        return "";
+      },
+    };
+    const agent = new Agent({
+      provider,
+      providerId: "openai",
+      model: "openai:gpt-4o",
+      tools: [],
+      systemPrompt: "sys",
+    });
+    for (let i = 0; i < 5; i++) {
+      agent.messages.push({ role: "user", content: `turn ${i}` });
+      agent.messages.push({ role: "assistant", content: `reply ${i}` });
+    }
+
+    const events = await collectEvents(agent, "latest", "/tmp");
+    expect(events.some((e) => e.type === "context_recovered")).toBe(true);
+    expect(events.some((e) => e.type === "text_delta" && e.content === "recovered")).toBe(true);
+    expect(callCount).toBe(2);
+  });
+
+  it("gives up after 3 consecutive overflow attempts", async () => {
+    let callCount = 0;
+    const provider: Provider = {
+      async *streamChat() {
+        callCount += 1;
+        throw new Error("Prompt is too long");
+      },
+      async complete() {
+        return "";
+      },
+    };
+    const agent = new Agent({
+      provider,
+      providerId: "openai",
+      model: "openai:gpt-4o",
+      tools: [],
+      systemPrompt: "sys",
+    });
+    for (let i = 0; i < 10; i++) {
+      agent.messages.push({ role: "user", content: `turn ${i}` });
+      agent.messages.push({ role: "assistant", content: `reply ${i}` });
+    }
+
+    await expect(collectEvents(agent, "latest", "/tmp")).rejects.toThrow(/too long/i);
+    expect(callCount).toBe(4); // initial + 3 retries
+  });
 });
