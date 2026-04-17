@@ -71,8 +71,8 @@ function buildGuidelines(tools: string[], extraGuidelines: string[]): string[] {
     }
   };
 
-  if (tools.includes("bash") && tools.some((tool) => tool === "grep" || tool === "ls")) {
-    add("Prefer grep/ls over bash for file exploration when they fit the task");
+  if (tools.includes("bash") && tools.includes("grep")) {
+    add("Prefer grep over bash for file search when it fits the task");
   }
 
   for (const item of extraGuidelines) {

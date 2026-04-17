@@ -138,7 +138,6 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   bash: "Bash",
   grep: "Grep",
   glob: "Glob",
-  ls: "LS",
   web_fetch: "WebFetch",
   web_search: "WebSearch",
 };
@@ -174,8 +173,6 @@ function getToolHeader(toolCall: DisplayToolCall): string | undefined {
     case "read":
     case "write":
     case "edit":
-      return args.path ? trunc(String(args.path), 60) : undefined;
-    case "ls":
       return args.path ? trunc(String(args.path), 60) : undefined;
     case "bash":
       return args.command ? trunc(String(args.command).replace(/\n/g, " "), 60) : undefined;
@@ -223,8 +220,6 @@ function summarizeToolResult(tc: DisplayToolCall): string {
       return `Found ${p(lineCount, "match", "matches")}`;
     case "glob":
       return `Found ${p(lineCount, "file", "files")}`;
-    case "ls":
-      return p(lineCount, "entry", "entries");
     case "web_search":
       return `${p(lineCount, "result", "results")}`;
     case "web_fetch":

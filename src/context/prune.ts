@@ -1,7 +1,7 @@
 import type { AssistantMessage, Message, ToolCall, ToolMessage } from "../types.js";
 
 const PRUNEABLE_TOOLS = new Set([
-  "read", "bash", "grep", "ls", "web_search", "web_fetch", "edit", "write", "glob",
+  "read", "bash", "grep", "web_search", "web_fetch", "edit", "write", "glob",
 ]);
 const TOOL_RESULT_KEEP_COUNT = 2;
 const MIN_PRUNE_LENGTH = 240;

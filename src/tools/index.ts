@@ -7,7 +7,6 @@ export { createBashTool } from "./bash.js";
 export { createWriteTool } from "./write.js";
 export { createEditTool } from "./edit.js";
 export { createGrepTool } from "./grep.js";
-export { createLsTool } from "./ls.js";
 export { createWebFetchTool } from "./web-fetch.js";
 export { createWebSearchTool } from "./web-search.js";
 export { createSkillTool } from "./skill.js";
@@ -17,7 +16,6 @@ import type { SkillRegistry } from "../skills/registry.js";
 import { createBashTool } from "./bash.js";
 import { createEditTool } from "./edit.js";
 import { createGrepTool } from "./grep.js";
-import { createLsTool } from "./ls.js";
 import { createReadTool } from "./read.js";
 import { createSkillTool } from "./skill.js";
 import { createWebFetchTool } from "./web-fetch.js";
@@ -31,7 +29,6 @@ export function createAllTools(cwd: string, skillRegistry?: SkillRegistry): Tool
     createWriteTool(cwd, { refuseOverwrite: true }),
     createEditTool(cwd),
     createGrepTool(cwd),
-    createLsTool(cwd),
     createWebSearchTool(),
     createWebFetchTool(),
     ...(skillRegistry ? [createSkillTool(skillRegistry)] : []),

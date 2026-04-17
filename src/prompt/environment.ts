@@ -16,13 +16,12 @@ export const defaultToolSnippets: Record<string, string> = {
   edit: "Apply targeted string replacements to a file",
   write: "Write a new file or overwrite an existing one",
   grep: "Search file contents using regex",
-  ls: "List files in a directory",
   web_search: "Search the public web for current information",
   web_fetch: "Fetch and extract the contents of a specific webpage",
   skill: "Load a named skill with specialized instructions and bundled resources",
 };
 
-export const defaultToolNames = ["read", "bash", "edit", "write", "grep", "ls", "web_search", "web_fetch", "skill"];
+export const defaultToolNames = ["read", "bash", "edit", "write", "grep", "web_search", "web_fetch", "skill"];
 
 export function buildEnvironmentPrompt(options: EnvironmentPromptOptions = {}): string {
   const configuredProvider = options.configuredProvider ?? "unknown";

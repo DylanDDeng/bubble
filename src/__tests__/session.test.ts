@@ -63,9 +63,9 @@ describe("SessionManager", () => {
     sm.appendMessage({
       role: "assistant",
       content: "",
-      toolCalls: [{ id: "call_1", name: "ls", arguments: "{\"path\":\".\"}" }],
+      toolCalls: [{ id: "call_1", name: "bash", arguments: "{\"command\":\"ls\"}" }],
     });
-    sm.appendMessage({ role: "tool", toolCallId: "call_1", content: "f package.json" });
+    sm.appendMessage({ role: "tool", toolCallId: "call_1", content: "package.json" });
 
     const restored = sm.getMessages();
     expect(restored).toHaveLength(2);

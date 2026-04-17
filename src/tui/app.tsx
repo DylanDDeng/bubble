@@ -611,7 +611,6 @@ function WaitingIndicator({ tools }: { tools: DisplayToolCall[] }) {
       write: "writing changes",
       edit: "patching files",
       grep: "searching the codebase",
-      ls: "listing directories",
       bash: "running commands",
       web_search: "searching the web",
       web_fetch: "fetching a page",
