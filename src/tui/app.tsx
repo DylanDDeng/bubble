@@ -20,6 +20,7 @@ import { FooterBar, buildFooterData } from "./footer.js";
 import { SkillRegistry } from "../skills/registry.js";
 import { parseSkillInvocation } from "../skills/invocation.js";
 import { useTerminalSize } from "./use-terminal-size.js";
+import { WelcomeBanner } from "./welcome.js";
 
 interface AppProps {
   agent: Agent;
@@ -83,6 +84,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(agent.thinking);
   const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | "provider-add" | "login" | "logout" | null>(null);
   const [keyProviderId, setKeyProviderId] = useState<string | null>(null);
+  const [verboseTrace, setVerboseTrace] = useState(false);
   const { columns: terminalColumns } = useTerminalSize();
 
   const userConfig = new UserConfig();
@@ -92,7 +94,12 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     skillPaths: userConfig.getSkillPaths(),
   });
 
-  useInput((_input, key) => {
+  useInput((input, key) => {
+    if (key.ctrl && input === "o" && !pickerMode) {
+      setVerboseTrace((v) => !v);
+      return;
+    }
+
     if (key.tab && key.shift && !pickerMode) {
       const modelParts = agent.model.includes(":")
         ? agent.model.split(":")
@@ -439,9 +446,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     <Box flexDirection="column" height="100%">
       <Box flexDirection="column" flexGrow={1} padding={1}>
         {messages.length === 0 && !isRunning && !pickerMode && (
-          <Text color={theme.muted}>
-            Welcome! Type a message and press Enter. Shift+Enter for new line. Esc to quit.
-          </Text>
+          <WelcomeBanner terminalColumns={terminalColumns} />
         )}
         <MessageList
           messages={messages}
@@ -449,6 +454,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           streamingReasoning={streamingReasoning}
           streamingTools={streamingTools}
           terminalColumns={terminalColumns}
+          verboseTrace={verboseTrace}
         />
         {pickerMode === "model" && (
           <ModelPicker
@@ -542,6 +548,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
             agent.apiModel,
             projectMessages(agent.messages, { mode: "pruned" }),
           ),
+          verboseTrace,
         })}
       />
     </Box>

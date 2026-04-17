@@ -22,6 +22,7 @@ export interface FooterData {
   showThinking: boolean;
   usageTotals: FooterUsageTotals;
   budget?: FooterBudget;
+  verboseTrace?: boolean;
 }
 
 export function FooterBar({ data }: { data: FooterData }) {
@@ -37,8 +38,9 @@ export function FooterBar({ data }: { data: FooterData }) {
   const thinkingText = data.showThinking
     ? (data.thinkingLevel && data.thinkingLevel !== "off" ? ` • ${data.thinkingLevel}` : " • thinking off")
     : "";
+  const traceText = data.verboseTrace ? " • ⌃O trace:on" : " • ⌃O trace";
   const left = `${formatCwd(data.cwd)}${usageText}${budgetText}`;
-  const right = `${data.providerId} • ${data.model}${thinkingText}`;
+  const right = `${data.providerId} • ${data.model}${thinkingText}${traceText}`;
 
   return (
     <Box paddingX={1} flexShrink={0}>

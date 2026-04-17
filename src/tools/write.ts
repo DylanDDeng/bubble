@@ -3,7 +3,7 @@
  */
 
 import { constants } from "node:fs";
-import { access, mkdir, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
 
@@ -39,10 +39,20 @@ export function createWriteTool(cwd: string, options: WriteToolOptions = {}): To
         }
       }
 
+      let existed = false;
+      try {
+        await readFile(filePath, "utf-8");
+        existed = true;
+      } catch {
+        // new file
+      }
+
       try {
         await mkdir(dirname(filePath), { recursive: true });
         await writeFile(filePath, args.content, "utf-8");
-        return { content: `Wrote ${filePath}` };
+        const lineCount = args.content.split("\n").length;
+        const verb = existed ? "Updated" : "Wrote";
+        return { content: `${verb} ${lineCount} lines to ${filePath}` };
       } catch (err: any) {
         return { content: `Error: ${err.message}`, isError: true };
       }
