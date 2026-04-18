@@ -21,6 +21,7 @@ import { SkillRegistry } from "../skills/registry.js";
 import { parseSkillInvocation } from "../skills/invocation.js";
 import { useTerminalSize } from "./use-terminal-size.js";
 import { WelcomeBanner } from "./welcome.js";
+import { expandAtMentions } from "./file-mentions.js";
 
 interface AppProps {
   agent: Agent;
@@ -432,9 +433,16 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           return;
         }
       }
-      await runAgentInput(input);
+      const expansion = await expandAtMentions(input, args.cwd);
+      if (expansion.missing.length > 0) {
+        addMessage("error", `Could not resolve @mention: ${expansion.missing.join(", ")}`);
+      }
+      for (const skip of expansion.skipped) {
+        addMessage("error", `Skipped @${skip.path}: ${skip.reason}`);
+      }
+      await runAgentInput(expansion.text, input);
     },
-    [agent, args.cwd, openPicker, createProvider, safeRegistry, safeSkillRegistry]
+    [addMessage, agent, args.cwd, openPicker, createProvider, safeRegistry, safeSkillRegistry]
   );
 
   const currentProviderId = agent.providerId || safeRegistry.getDefault()?.id;
@@ -533,7 +541,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         </Box>
       )}
       <Box paddingX={1} paddingBottom={1} flexShrink={0}>
-        <InputBox onSubmit={handleSubmit} disabled={isRunning || !!pickerMode} skillRegistry={safeSkillRegistry} terminalColumns={terminalColumns} />
+        <InputBox onSubmit={handleSubmit} disabled={isRunning || !!pickerMode} skillRegistry={safeSkillRegistry} terminalColumns={terminalColumns} cwd={args.cwd} />
       </Box>
       <FooterBar
         data={buildFooterData({
