@@ -13,6 +13,7 @@ export const theme = {
   accent: "cyan",
   border: "gray",
   borderActive: "cyan",
+  inputBorder: "#8A7FC6",
   muted: "gray",
 
   // Content

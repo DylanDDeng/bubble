@@ -251,7 +251,7 @@ export function InputBox({ onSubmit, disabled, skillRegistry, terminalColumns, c
 
   return (
     <Box flexDirection="column">
-      <Text color={theme.border}>{topBorder.slice(0, contentWidth)}</Text>
+      <Text color={theme.inputBorder}>{topBorder.slice(0, contentWidth)}</Text>
       <Box flexDirection="column" paddingX={PADDING_X}>
         {displayedLines.map(({ text: line, index }) => {
           const displayLine = (line || " ").slice(0, contentWidth);
@@ -272,7 +272,7 @@ export function InputBox({ onSubmit, disabled, skillRegistry, terminalColumns, c
           );
         })}
       </Box>
-      <Text color={theme.border}>{bottomBorder.slice(0, contentWidth)}</Text>
+      <Text color={theme.inputBorder}>{bottomBorder.slice(0, contentWidth)}</Text>
       {showSuggestions && mode === "slash" && (
         <Box flexDirection="column" marginTop={1}>
           {slashSuggestions

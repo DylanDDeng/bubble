@@ -126,6 +126,7 @@ export function WelcomeBanner({
   if (!twoColumn) {
     return (
       <Box
+        width={terminalColumns}
         flexDirection="column"
         borderStyle="round"
         borderColor={theme.border}
@@ -146,6 +147,7 @@ export function WelcomeBanner({
 
   return (
     <Box
+      width={terminalColumns}
       borderStyle="round"
       borderColor={theme.border}
       paddingY={1}
