@@ -42,6 +42,7 @@ const CAT: (string | null)[][] = [
 ];
 
 const MIN_TWO_COLUMN_WIDTH = 80;
+const MAX_BANNER_WIDTH = 88;
 
 function Sprite({ pixels }: { pixels: (string | null)[][] }) {
   const rows: React.ReactElement[] = [];
@@ -76,20 +77,21 @@ export function WelcomeBanner({
   recentSessions,
 }: WelcomeBannerProps) {
   const twoColumn = terminalColumns >= MIN_TWO_COLUMN_WIDTH;
-  const rightColWidth = twoColumn ? Math.min(44, Math.max(30, Math.floor(terminalColumns * 0.4))) : 0;
+  const effectiveWidth = Math.min(terminalColumns, MAX_BANNER_WIDTH);
+  const rightColWidth = twoColumn ? Math.min(40, Math.max(28, Math.floor(effectiveWidth * 0.4))) : 0;
 
   const leftColumn = (
     <Box flexDirection="column" flexGrow={1} paddingX={2}>
       <Box alignSelf="center">
         <Text bold color={theme.userMessageText}>{greeting}</Text>
       </Box>
-      <Box alignSelf="center" marginTop={1}>
+      <Box alignSelf="center">
         <Box flexDirection="column">
           <Sprite pixels={CAT} />
         </Box>
       </Box>
       {modelLabel && (
-        <Box alignSelf="center" marginTop={1}>
+        <Box alignSelf="center">
           <Text color={theme.muted}>{modelLabel}</Text>
         </Box>
       )}
@@ -126,9 +128,9 @@ export function WelcomeBanner({
   if (!twoColumn) {
     return (
       <Box
-        width={terminalColumns}
+        width={effectiveWidth}
         flexDirection="column"
-        borderStyle="round"
+        borderStyle="bold"
         borderColor={theme.border}
         paddingY={1}
       >
@@ -147,8 +149,8 @@ export function WelcomeBanner({
 
   return (
     <Box
-      width={terminalColumns}
-      borderStyle="round"
+      width={effectiveWidth}
+      borderStyle="bold"
       borderColor={theme.border}
       paddingY={1}
       flexDirection="row"
