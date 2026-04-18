@@ -411,8 +411,13 @@ function DiffBlock({ result, terminalColumns, maxLines, verbose }: { result: str
   const maxNum = lines.reduce((acc, l) => Math.max(acc, l.num), 0);
   const numWidth = Math.max(2, String(maxNum).length);
   const leftMargin = 2;
-  const prefixWidth = numWidth + 3; // " NUM ± "
-  const bandWidth = Math.max(10, terminalColumns - leftMargin - 1);
+  const prefixWidth = numWidth + 4; // " NUM ± "
+  // Reserve the full left-margin chain from terminal edge to diff content:
+  // app padding (1) + ToolCallDisplay marginLeft (2) + DiffBlock marginLeft (2)
+  // + right padding (1) + 1-col safety = 7. Without this, each row overflows
+  // by 1 column, the terminal auto-wraps, and every line renders with a blank
+  // row beneath it.
+  const bandWidth = Math.max(10, terminalColumns - 7);
   const contentWidth = Math.max(1, bandWidth - prefixWidth);
 
   return (
