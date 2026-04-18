@@ -6,13 +6,13 @@
  * flipping mode) happen via the injected PlanController.
  */
 
-import type { AgentMode, PlanDecision, ToolRegistryEntry, ToolResult } from "../types.js";
+import type { PermissionMode, PlanDecision, ToolRegistryEntry, ToolResult } from "../types.js";
 
 export interface PlanController {
   /** Ask the user to approve/reject/edit the proposed plan. */
   requestApproval(plan: string): Promise<PlanDecision>;
   /** Switch the agent's mode. Called after an approval so the next turn runs unconstrained. */
-  setMode(mode: AgentMode): void;
+  setMode(mode: PermissionMode): void;
 }
 
 export function createExitPlanModeTool(controller: PlanController): ToolRegistryEntry {

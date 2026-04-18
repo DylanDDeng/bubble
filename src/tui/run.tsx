@@ -6,7 +6,8 @@ import type { SessionManager } from "../session.js";
 import type { Provider } from "../types.js";
 import type { ProviderRegistry } from "../provider-registry.js";
 import type { SkillRegistry } from "../skills/registry.js";
-import { App, type PlanHandlerRef } from "./app.js";
+import { App, type ApprovalHandlerRef, type PlanHandlerRef } from "./app.js";
+import type { BashAllowlist } from "../approval/session-cache.js";
 
 export interface RunTuiOptions {
   sessionManager?: SessionManager;
@@ -14,6 +15,9 @@ export interface RunTuiOptions {
   registry?: ProviderRegistry;
   skillRegistry?: SkillRegistry;
   planHandlerRef?: PlanHandlerRef;
+  approvalHandlerRef?: ApprovalHandlerRef;
+  bashAllowlist?: BashAllowlist;
+  bypassEnabled?: boolean;
 }
 
 export function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions = {}) {
@@ -26,6 +30,9 @@ export function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions = {})
       registry={options.registry}
       skillRegistry={options.skillRegistry}
       planHandlerRef={options.planHandlerRef}
+      approvalHandlerRef={options.approvalHandlerRef}
+      bashAllowlist={options.bashAllowlist}
+      bypassEnabled={options.bypassEnabled}
     />,
   );
 }

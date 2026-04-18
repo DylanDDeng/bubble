@@ -1,4 +1,4 @@
-import type { AgentMode, ThinkingLevel } from "../types.js";
+import type { PermissionMode, ThinkingLevel } from "../types.js";
 import { buildAnthropicProviderPrompt } from "./provider-prompts/anthropic.js";
 import { buildCodexProviderPrompt } from "./provider-prompts/codex.js";
 import { buildDefaultProviderPrompt } from "./provider-prompts/default.js";
@@ -13,7 +13,7 @@ export interface ComposeSystemPromptOptions extends EnvironmentPromptOptions {
   agentName?: string;
   guidelines?: string[];
   thinkingLevel?: ThinkingLevel;
-  mode?: AgentMode;
+  mode?: PermissionMode;
   skills?: SkillSummary[];
 }
 

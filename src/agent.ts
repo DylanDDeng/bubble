@@ -8,8 +8,8 @@ import { compactMessagesWithLLM } from "./context/compact-llm.js";
 import { isContextOverflowError } from "./context/overflow.js";
 import { projectMessages } from "./context/projector.js";
 import { aggressivePruneMessages } from "./context/prune.js";
-import { PLAN_MODE_ENTER_REMINDER, PLAN_MODE_EXIT_REMINDER } from "./prompt/reminders.js";
-import type { AgentEvent, AgentMode, Message, ParsedToolCall, Provider, ThinkingLevel, Todo, ToolDefinition, ToolResult, ToolRegistryEntry } from "./types.js";
+import { reminderForMode } from "./prompt/reminders.js";
+import type { AgentEvent, PermissionMode, Message, ParsedToolCall, Provider, ThinkingLevel, Todo, ToolDefinition, ToolResult, ToolRegistryEntry } from "./types.js";
 
 const MAX_CONSECUTIVE_OVERFLOW_RECOVERIES = 3;
 
@@ -20,13 +20,13 @@ export interface AgentOptions {
   tools: ToolRegistryEntry[];
   temperature?: number;
   thinkingLevel?: ThinkingLevel;
-  mode?: AgentMode;
+  mode?: PermissionMode;
   todos?: Todo[];
   systemPrompt?: string;
   onMessageAppend?: (message: Message) => void;
   onToolResult?: (toolName: string, result: ToolResult) => void;
   onTodosUpdate?: (todos: Todo[]) => void;
-  onModeUpdate?: (mode: AgentMode) => void;
+  onModeUpdate?: (mode: PermissionMode) => void;
 }
 
 export class Agent {
@@ -37,9 +37,9 @@ export class Agent {
   private tools: Map<string, ToolRegistryEntry> = new Map();
   private temperature: number;
   private thinkingLevel: ThinkingLevel;
-  private _mode: AgentMode;
+  private _mode: PermissionMode;
   private _modeVersion = 0;
-  private onModeUpdate?: (mode: AgentMode) => void;
+  private onModeUpdate?: (mode: PermissionMode) => void;
   private _todos: Todo[];
   private _todosVersion = 0;
   private onTodosUpdate?: (todos: Todo[]) => void;
@@ -69,10 +69,10 @@ export class Agent {
       this.tools.set(tool.name, tool);
     }
 
-    // If the agent boots directly into plan mode, inject the plan-mode reminder so the
-    // model sees the active rules on its very first turn. No exit reminder at boot.
-    if (this._mode === "plan") {
-      this.injectSystemReminder(PLAN_MODE_ENTER_REMINDER);
+    // If the agent boots in a non-default mode, inject the corresponding reminder so the
+    // model sees the active rules on its very first turn. Default mode needs no reminder.
+    if (this._mode !== "default") {
+      this.injectSystemReminder(reminderForMode(this._mode));
     }
   }
 
@@ -123,21 +123,19 @@ export class Agent {
     this.thinkingLevel = value;
   }
 
-  get mode(): AgentMode {
+  get mode(): PermissionMode {
     return this._mode;
   }
 
-  set mode(value: AgentMode) {
+  set mode(value: PermissionMode) {
     this.setMode(value);
   }
 
-  setMode(value: AgentMode): void {
+  setMode(value: PermissionMode): void {
     if (this._mode === value) return;
     this._mode = value;
     this._modeVersion += 1;
-    this.injectSystemReminder(
-      value === "plan" ? PLAN_MODE_ENTER_REMINDER : PLAN_MODE_EXIT_REMINDER,
-    );
+    this.injectSystemReminder(reminderForMode(value));
     this.onModeUpdate?.(value);
   }
 

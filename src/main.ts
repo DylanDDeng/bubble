@@ -15,7 +15,10 @@ import { SessionManager } from "./session.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { SkillRegistry } from "./skills/registry.js";
 import { createAllTools, type PlanController } from "./tools/index.js";
-import type { AgentMode, Message, PlanDecision } from "./types.js";
+import { PermissionAwareApprovalController } from "./approval/controller.js";
+import { BashAllowlist } from "./approval/session-cache.js";
+import type { ApprovalDecision, ApprovalRequest } from "./approval/types.js";
+import type { PermissionMode, Message, PlanDecision } from "./types.js";
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -72,11 +75,22 @@ async function main() {
             action: "reject",
             reason: "No interactive UI available to approve the plan.",
           }),
-    setMode: (mode: AgentMode) => {
+    setMode: (mode: PermissionMode) => {
       agentRef?.setMode(mode);
     },
   };
-  const tools = createAllTools(args.cwd, skillRegistry, { todoStore, planController });
+  const approvalHandlerRef: { current?: (req: ApprovalRequest) => Promise<ApprovalDecision> } = {};
+  const bashAllowlist = new BashAllowlist();
+  const approvalController = new PermissionAwareApprovalController({
+    getMode: () => agentRef?.mode ?? "default",
+    handlerRef: approvalHandlerRef,
+    bashAllowlist,
+  });
+  const tools = createAllTools(args.cwd, skillRegistry, {
+    todoStore,
+    planController,
+    approvalController,
+  });
 
   // Session management:
   // - default: always start a fresh session
@@ -126,7 +140,7 @@ async function main() {
       ?? getDefaultThinkingLevel(activeProviderId, effectiveModelId))
     : (sessionThinkingLevel ?? args.thinkingLevel ?? configuredThinkingLevel ?? "off");
   const restoredTodos = sessionManager?.getTodos() ?? [];
-  const initialMode: AgentMode = args.mode ?? "default";
+  const initialMode: PermissionMode = args.mode ?? "default";
   const systemPrompt = buildSystemPrompt({
     agentName: "Bubble",
     configuredProvider: activeProviderId || "none",
@@ -231,6 +245,9 @@ async function main() {
     registry,
     skillRegistry,
     planHandlerRef,
+    approvalHandlerRef,
+    bashAllowlist,
+    bypassEnabled: args.bypassEnabled,
   });
 }
 

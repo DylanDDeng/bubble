@@ -3,7 +3,7 @@ import { Box, Static, Text, useApp, useInput } from "ink";
 import type { Agent } from "../agent.js";
 import type { CliArgs } from "../cli.js";
 import type { SessionManager } from "../session.js";
-import type { AgentEvent, AgentMode, Message, PlanDecision, Provider, Todo } from "../types.js";
+import type { AgentEvent, PermissionMode, Message, PlanDecision, Provider, Todo } from "../types.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import { UserConfig, maskKey } from "../config.js";
 import { InputBox } from "./input-box.js";
@@ -25,10 +25,18 @@ import { expandAtMentions } from "./file-mentions.js";
 import { getRecentSessions } from "./recent-activity.js";
 import { TodosPanel } from "./todos.js";
 import { PlanConfirm } from "./plan-confirm.js";
+import { ApprovalDialog } from "./approval/approval-dialog.js";
+import { getNextPermissionMode } from "../permission/mode.js";
+import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
+import type { BashAllowlist } from "../approval/session-cache.js";
 import os from "node:os";
 
 export interface PlanHandlerRef {
   current?: (plan: string) => Promise<PlanDecision>;
+}
+
+export interface ApprovalHandlerRef {
+  current?: (req: ApprovalRequest) => Promise<ApprovalDecision>;
 }
 
 interface AppProps {
@@ -39,6 +47,10 @@ interface AppProps {
   registry?: ProviderRegistry;
   skillRegistry?: SkillRegistry;
   planHandlerRef?: PlanHandlerRef;
+  approvalHandlerRef?: ApprovalHandlerRef;
+  bashAllowlist?: BashAllowlist;
+  /** Whether the bypassPermissions mode is reachable via Shift+Tab cycling. */
+  bypassEnabled?: boolean;
 }
 
 function buildTips(agent: Agent, registry: ProviderRegistry): string[] {
@@ -106,7 +118,7 @@ function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] 
   return result;
 }
 
-export function App({ agent, args, sessionManager, createProvider, registry, skillRegistry, planHandlerRef }: AppProps) {
+export function App({ agent, args, sessionManager, createProvider, registry, skillRegistry, planHandlerRef, approvalHandlerRef, bashAllowlist, bypassEnabled }: AppProps) {
   const { exit } = useApp();
   const [messages, setMessages] = useState<DisplayMessage[]>(() => reconstructDisplayMessages(agent.messages));
   const [isRunning, setIsRunning] = useState(false);
@@ -115,11 +127,15 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   const [streamingTools, setStreamingTools] = useState<DisplayToolCall[]>([]);
   const [usageTotals, setUsageTotals] = useState({ prompt: 0, completion: 0 });
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(agent.thinking);
-  const [agentMode, setAgentMode] = useState<AgentMode>(agent.mode);
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>(agent.mode);
   const [todos, setTodos] = useState<Todo[]>(() => agent.getTodos());
   const [pendingPlan, setPendingPlan] = useState<{
     plan: string;
     resolve: (decision: PlanDecision) => void;
+  } | null>(null);
+  const [pendingApproval, setPendingApproval] = useState<{
+    request: ApprovalRequest;
+    resolve: (decision: ApprovalDecision) => void;
   } | null>(null);
   const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | "provider-add" | "login" | "logout" | null>(null);
   const [keyProviderId, setKeyProviderId] = useState<string | null>(null);
@@ -146,8 +162,21 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     };
   }, [planHandlerRef]);
 
+  useEffect(() => {
+    if (!approvalHandlerRef) return;
+    approvalHandlerRef.current = (request: ApprovalRequest) =>
+      new Promise<ApprovalDecision>((resolve) => {
+        setPendingApproval({ request, resolve });
+      });
+    return () => {
+      if (approvalHandlerRef.current) {
+        approvalHandlerRef.current = undefined;
+      }
+    };
+  }, [approvalHandlerRef]);
+
   const rebuildSystemPrompt = useCallback(
-    (overrides?: { thinkingLevel?: ThinkingLevel; mode?: AgentMode }) => {
+    (overrides?: { thinkingLevel?: ThinkingLevel; mode?: PermissionMode }) => {
       const modelParts = agent.model.includes(":")
         ? agent.model.split(":")
         : [agent.providerId || safeRegistry.getDefault()?.id || "openai", agent.model];
@@ -167,7 +196,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   );
 
   useInput((input, key) => {
-    if (pendingPlan) return;
+    if (pendingPlan || pendingApproval) return;
     if (key.ctrl && input === "o" && !pickerMode) {
       setVerboseTrace((v) => !v);
       return;
@@ -193,12 +222,13 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       return;
     }
 
-    // Shift+Tab: toggle plan mode. Agent.setMode injects a <system-reminder>,
-    // so we do not need to rebuild the (cache-friendly) static system prompt here.
+    // Shift+Tab: cycle through permission modes (default → acceptEdits → plan
+    // → [bypassPermissions if enabled] → default). Agent.setMode injects a
+    // <system-reminder>, so we do not rebuild the cache-friendly system prompt here.
     if (key.tab && key.shift && !pickerMode) {
-      const nextMode: AgentMode = agent.mode === "plan" ? "default" : "plan";
+      const nextMode = getNextPermissionMode(agent.mode, { bypassEnabled });
       agent.setMode(nextMode);
-      setAgentMode(nextMode);
+      setPermissionMode(nextMode);
       sessionManager?.appendMarker("mode_switch", nextMode);
       return;
     }
@@ -320,6 +350,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       openPicker,
       registry: safeRegistry,
       skillRegistry: safeSkillRegistry!,
+      bashAllowlist,
     });
     if (handled && result) {
       addMessage("assistant", result);
@@ -342,6 +373,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       openPicker,
       registry: safeRegistry,
       skillRegistry: safeSkillRegistry!,
+      bashAllowlist,
     });
     if (handled && result) {
       addMessage("assistant", result);
@@ -428,7 +460,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
                 break;
               }
               case "mode_changed": {
-                setAgentMode(event.mode);
+                setPermissionMode(event.mode);
                 sessionManager?.appendMarker("mode_switch", event.mode);
                 break;
               }
@@ -509,10 +541,11 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           openPicker,
           registry: safeRegistry,
           skillRegistry: safeSkillRegistry!,
+          bashAllowlist,
         });
         if (handled) {
-          if (agent.mode !== agentMode) {
-            setAgentMode(agent.mode);
+          if (agent.mode !== permissionMode) {
+            setPermissionMode(agent.mode);
           }
           if (result) {
             addMessage("assistant", result);
@@ -671,13 +704,33 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           />
         </Box>
       )}
-      {isRunning && !pickerMode && !pendingPlan && (
+      {pendingApproval && !pickerMode && !pendingPlan && (
+        <Box paddingX={1} flexShrink={0}>
+          <ApprovalDialog
+            request={pendingApproval.request}
+            onDecision={(decision) => {
+              const resolve = pendingApproval.resolve;
+              setPendingApproval(null);
+              resolve(decision);
+            }}
+            onRequestModeSwitch={(mode) => {
+              agent.setMode(mode);
+              setPermissionMode(mode);
+              sessionManager?.appendMarker("mode_switch", mode);
+            }}
+            onAllowBashPrefix={(prefix) => {
+              bashAllowlist?.add(prefix);
+            }}
+          />
+        </Box>
+      )}
+      {isRunning && !pickerMode && !pendingPlan && !pendingApproval && (
         <Box paddingX={1} paddingBottom={1} flexShrink={0}>
           <WaitingIndicator tools={streamingTools} />
         </Box>
       )}
       <Box paddingX={1} paddingBottom={1} flexShrink={0}>
-        <InputBox onSubmit={handleSubmit} disabled={isRunning || !!pickerMode || !!pendingPlan} skillRegistry={safeSkillRegistry} terminalColumns={terminalColumns} cwd={args.cwd} />
+        <InputBox onSubmit={handleSubmit} disabled={isRunning || !!pickerMode || !!pendingPlan || !!pendingApproval} skillRegistry={safeSkillRegistry} terminalColumns={terminalColumns} cwd={args.cwd} />
       </Box>
       <FooterBar
         data={buildFooterData({
@@ -686,7 +739,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           model: displayModel(agent.model) || "no model",
           thinkingLevel,
           showThinking: getAvailableThinkingLevels(agent.providerId, agent.apiModel).length > 2,
-          mode: agentMode,
+          mode: permissionMode,
           usageTotals,
           budget: getContextBudget(
             agent.providerId || safeRegistry.getDefault()?.id || "unknown",

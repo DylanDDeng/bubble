@@ -8,6 +8,8 @@ import { constants } from "node:fs";
 import { access, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createTwoFilesPatch } from "diff";
+import { gateToolAction } from "../approval/tool-helper.js";
+import type { ApprovalController } from "../approval/types.js";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
 
 export interface EditArgs {
@@ -15,7 +17,7 @@ export interface EditArgs {
   edits: Array<{ oldText: string; newText: string }>;
 }
 
-export function createEditTool(cwd: string): ToolRegistryEntry {
+export function createEditTool(cwd: string, approval?: ApprovalController): ToolRegistryEntry {
   return {
     name: "edit",
     description:
@@ -73,15 +75,22 @@ export function createEditTool(cwd: string): ToolRegistryEntry {
         }
       }
 
-      // Apply all edits
+      // Apply all edits in-memory to compute the proposed next content + diff.
       for (const edit of edits) {
         content = content.replace(edit.oldText, edit.newText);
       }
+      const diff = createTwoFilesPatch(filePath, filePath, original, content, "original", "modified", { context: 3 });
+
+      // Gate on the approval controller BEFORE persisting the change.
+      const gate = await gateToolAction(approval, {
+        type: "edit",
+        path: filePath,
+        diff,
+        fileExists: true,
+      });
+      if (!gate.approved) return gate.result;
 
       await writeFile(filePath, content, "utf-8");
-
-      // Generate unified diff for feedback
-      const diff = createTwoFilesPatch(filePath, filePath, original, content, "original", "modified");
 
       return {
         content: `Edited ${filePath}\n\nDiff:\n${diff}`,

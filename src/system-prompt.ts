@@ -2,7 +2,7 @@
  * Backward-compatible system prompt wrapper.
  */
 
-import type { AgentMode, ThinkingLevel } from "./types.js";
+import type { PermissionMode, ThinkingLevel } from "./types.js";
 import { composeSystemPrompt } from "./prompt/compose.js";
 import type { SkillSummary } from "./skills/types.js";
 
@@ -26,7 +26,7 @@ export interface SystemPromptOptions {
   /** Current thinking level */
   thinkingLevel?: ThinkingLevel;
   /** Current agent mode (default or plan) */
-  mode?: AgentMode;
+  mode?: PermissionMode;
   /** Current date override */
   currentDate?: string;
   /** Prompt-visible skills */

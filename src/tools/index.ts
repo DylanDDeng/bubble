@@ -14,6 +14,7 @@ export { createTodoTool, type TodoStore } from "./todo.js";
 export { createExitPlanModeTool, type PlanController } from "./exit-plan-mode.js";
 
 import type { ToolRegistryEntry } from "../types.js";
+import type { ApprovalController } from "../approval/types.js";
 import type { SkillRegistry } from "../skills/registry.js";
 import { createBashTool } from "./bash.js";
 import { createEditTool } from "./edit.js";
@@ -29,6 +30,7 @@ import { createWriteTool } from "./write.js";
 export interface CreateAllToolsOptions {
   todoStore?: TodoStore;
   planController?: PlanController;
+  approvalController?: ApprovalController;
 }
 
 export function createAllTools(
@@ -36,11 +38,12 @@ export function createAllTools(
   skillRegistry?: SkillRegistry,
   options: CreateAllToolsOptions = {},
 ): ToolRegistryEntry[] {
+  const approval = options.approvalController;
   return [
     createReadTool(cwd),
-    createBashTool(cwd),
-    createWriteTool(cwd, { refuseOverwrite: true }),
-    createEditTool(cwd),
+    createBashTool(cwd, approval),
+    createWriteTool(cwd, { refuseOverwrite: true }, approval),
+    createEditTool(cwd, approval),
     createGrepTool(cwd),
     createWebSearchTool(),
     createWebFetchTool(),

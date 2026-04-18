@@ -106,10 +106,28 @@ export interface ToolRegistryEntry extends ToolDefinition {
 }
 
 // ============================================================================
-// Agent mode
+// Permission mode
 // ============================================================================
 
-export type AgentMode = "default" | "plan";
+/**
+ * Runtime permission policy for tool execution. Mirrors Claude Code's
+ * `EXTERNAL_PERMISSION_MODES`:
+ *
+ * - `default`         — every destructive tool asks via the approval UI.
+ * - `acceptEdits`     — edits/writes auto-approve; bash still asks.
+ * - `plan`            — read-only tools only; the model must propose via
+ *                       exit_plan_mode and get user approval before executing.
+ * - `bypassPermissions` — everything auto-approves. Must be explicitly enabled
+ *                       via --dangerously-skip-permissions at startup.
+ * - `dontAsk`         — same as bypass but silent (no prompts, no extra
+ *                       narration). Not in the Shift+Tab cycle.
+ */
+export type PermissionMode =
+  | "default"
+  | "acceptEdits"
+  | "plan"
+  | "bypassPermissions"
+  | "dontAsk";
 
 export type PlanDecision =
   | { action: "approve"; plan: string }
@@ -163,6 +181,6 @@ export type AgentEvent =
   | { type: "tool_end"; id: string; name: string; result: ToolResult }
   | { type: "turn_end"; usage?: { promptTokens: number; completionTokens: number } }
   | { type: "context_recovered"; droppedMessages: number; reason: "overflow" }
-  | { type: "mode_changed"; mode: AgentMode }
+  | { type: "mode_changed"; mode: PermissionMode }
   | { type: "todos_updated"; todos: Todo[] }
   | { type: "agent_end" };

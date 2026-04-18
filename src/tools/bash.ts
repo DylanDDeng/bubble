@@ -5,11 +5,13 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { platform } from "node:os";
+import { gateToolAction } from "../approval/tool-helper.js";
+import type { ApprovalController } from "../approval/types.js";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
 
 const MAX_OUTPUT = 50 * 1024;
 
-export function createBashTool(cwd: string): ToolRegistryEntry {
+export function createBashTool(cwd: string, approval?: ApprovalController): ToolRegistryEntry {
   return {
     name: "bash",
     description:
@@ -29,6 +31,9 @@ export function createBashTool(cwd: string): ToolRegistryEntry {
 
       const command = String(args.command);
       const timeoutSec = typeof args.timeout === "number" ? args.timeout : 60;
+
+      const gate = await gateToolAction(approval, { type: "bash", command, cwd });
+      if (!gate.approved) return gate.result;
 
       return new Promise((resolve) => {
         const shell = platform() === "win32" ? "cmd.exe" : "bash";

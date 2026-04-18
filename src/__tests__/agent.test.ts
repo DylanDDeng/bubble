@@ -503,7 +503,35 @@ describe("Agent", () => {
       agent.setMode("default");
       metas = agent.messages.filter((m) => m.role === "user" && (m as any).isMeta);
       expect(metas).toHaveLength(2);
-      expect((metas[1] as any).content).toContain("Plan mode has been exited");
+      expect((metas[1] as any).content).toContain("Permission mode is now: default");
+    });
+
+    it("injects an acceptEdits reminder when switching to acceptEdits", () => {
+      const agent = new Agent({
+        provider: createMockProvider([]),
+        model: "gpt-4o",
+        tools: [],
+        systemPrompt: "stable",
+      });
+      agent.setMode("acceptEdits");
+      const metas = agent.messages.filter((m) => m.role === "user" && (m as any).isMeta);
+      expect(metas).toHaveLength(1);
+      expect((metas[0] as any).content).toContain("acceptEdits");
+      expect((metas[0] as any).content).toContain("blanket approval");
+    });
+
+    it("injects a bypass reminder when switching to bypassPermissions", () => {
+      const agent = new Agent({
+        provider: createMockProvider([]),
+        model: "gpt-4o",
+        tools: [],
+        systemPrompt: "stable",
+      });
+      agent.setMode("bypassPermissions");
+      const metas = agent.messages.filter((m) => m.role === "user" && (m as any).isMeta);
+      expect(metas).toHaveLength(1);
+      expect((metas[0] as any).content).toContain("bypassPermissions");
+      expect((metas[0] as any).content).toContain("auto-approve");
     });
 
     it("keeps the static system prompt unchanged across mode flips", () => {

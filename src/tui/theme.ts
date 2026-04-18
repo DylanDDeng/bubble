@@ -8,6 +8,7 @@ export const theme = {
   agent: "blue",
   error: "red",
   warning: "yellow",
+  success: "green",
 
   // UI chrome
   accent: "cyan",

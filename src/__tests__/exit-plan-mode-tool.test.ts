@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { createExitPlanModeTool } from "../tools/exit-plan-mode.js";
-import type { AgentMode, PlanDecision } from "../types.js";
+import type { PermissionMode, PlanDecision } from "../types.js";
 
 function createController(respond: (plan: string) => Promise<PlanDecision>) {
-  const setModeCalls: AgentMode[] = [];
+  const setModeCalls: PermissionMode[] = [];
   return {
     controller: {
       requestApproval: respond,
-      setMode: (mode: AgentMode) => {
+      setMode: (mode: PermissionMode) => {
         setModeCalls.push(mode);
       },
     },

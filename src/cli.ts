@@ -2,7 +2,7 @@
  * CLI argument parsing.
  */
 
-import type { AgentMode, ThinkingLevel } from "./types.js";
+import type { PermissionMode, ThinkingLevel } from "./types.js";
 import { isThinkingLevel } from "./variant/thinking-level.js";
 
 export interface CliArgs {
@@ -14,7 +14,9 @@ export interface CliArgs {
   print?: boolean;
   prompt?: string;
   thinkingLevel?: ThinkingLevel;
-  mode?: AgentMode;
+  mode?: PermissionMode;
+  /** When true, --dangerously-skip-permissions was passed; bypassPermissions is reachable via the mode cycle and auto-approves every tool. */
+  bypassEnabled?: boolean;
 }
 
 export function parseArgs(argv: string[]): CliArgs {
@@ -60,6 +62,13 @@ export function parseArgs(argv: string[]): CliArgs {
       case "--plan":
         args.mode = "plan";
         break;
+      case "--accept-edits":
+        args.mode = "acceptEdits";
+        break;
+      case "--dangerously-skip-permissions":
+        args.bypassEnabled = true;
+        args.mode = "bypassPermissions";
+        break;
       default:
         if (!arg.startsWith("-") && !args.prompt) {
           args.prompt = arg;
@@ -84,6 +93,9 @@ Options:
   --reasoning              Enable reasoning mode at medium effort
   --reasoning-effort <l>   Set reasoning effort: off|minimal|low|medium|high|xhigh
   --plan                   Start in plan mode (read-only investigation; propose before executing)
+  --accept-edits           Start with edits/writes auto-approved (bash still prompts)
+  --dangerously-skip-permissions
+                           Enable bypass mode (auto-approve EVERY tool; disables all safety prompts)
   -p, --print              Non-interactive mode (single prompt)
   -h, --help               Show this help
 `);

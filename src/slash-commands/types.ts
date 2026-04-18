@@ -3,6 +3,7 @@ import type { SessionManager } from "../session.js";
 import type { Provider } from "../types.js";
 import type { ProviderRegistry } from "../provider-registry.js";
 import type { SkillRegistry } from "../skills/registry.js";
+import type { BashAllowlist } from "../approval/session-cache.js";
 
 export interface SlashCommandContext {
   agent: Agent;
@@ -15,6 +16,7 @@ export interface SlashCommandContext {
   openPicker: (mode: "model" | "key" | "provider" | "provider-add" | "login" | "logout", providerId?: string) => void;
   registry: ProviderRegistry;
   skillRegistry: SkillRegistry;
+  bashAllowlist?: BashAllowlist;
 }
 
 export interface SlashCommand {

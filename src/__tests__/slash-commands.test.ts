@@ -139,6 +139,30 @@ describe("slash commands", () => {
     expect(result.result).toContain("already empty");
   });
 
+  it("/permissions lists the bash allowlist and /permissions clear empties it", async () => {
+    const { BashAllowlist } = await import("../approval/session-cache.js");
+    const allowlist = new BashAllowlist();
+    allowlist.add("git status");
+    allowlist.add("npm test");
+
+    const ctx = createContext({
+      bashAllowlist: allowlist,
+    } as any);
+
+    let result = await slashRegistry.execute("/permissions", ctx);
+    expect(result.handled).toBe(true);
+    expect(result.result).toContain("Session-allowed bash prefixes");
+    expect(result.result).toContain("git status");
+    expect(result.result).toContain("npm test");
+
+    result = await slashRegistry.execute("/permissions clear", ctx);
+    expect(result.result).toContain("Cleared 2");
+    expect(allowlist.size()).toBe(0);
+
+    result = await slashRegistry.execute("/permissions clear", ctx);
+    expect(result.result).toContain("already empty");
+  });
+
   it("loads a skill directly via /<skill-name> alias", async () => {
     const ctx = createContext({
       skillRegistry: createSkillRegistryFixture(),

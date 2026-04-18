@@ -2,7 +2,8 @@ import React from "react";
 import { Box, Text } from "ink";
 import { homedir } from "node:os";
 import { theme } from "./theme.js";
-import type { AgentMode } from "../types.js";
+import type { PermissionMode } from "../types.js";
+import { PERMISSION_MODE_INFO } from "../permission/mode.js";
 
 export interface FooterUsageTotals {
   prompt: number;
@@ -21,7 +22,7 @@ export interface FooterData {
   model: string;
   thinkingLevel: string;
   showThinking: boolean;
-  mode?: AgentMode;
+  mode?: PermissionMode;
   usageTotals: FooterUsageTotals;
   budget?: FooterBudget;
   verboseTrace?: boolean;
@@ -42,24 +43,32 @@ export function FooterBar({ data }: { data: FooterData }) {
     : "";
   const traceText = data.verboseTrace ? " • ⌃O trace:on" : " • ⌃O trace";
   const left = `${formatCwd(data.cwd)}${usageText}${budgetText}`;
-  const isPlan = data.mode === "plan";
   const right = `${data.providerId} • ${data.model}${thinkingText}${traceText}`;
 
   return (
     <Box paddingX={1} flexShrink={0}>
       <Text color={theme.muted}>{left}</Text>
-      {isPlan && (
-        <>
-          <Text color={theme.muted}>  </Text>
-          <Text color={theme.accent} bold>
-            {" PLAN "}
-          </Text>
-          <Text color={theme.muted}> ⇧⇥ exit</Text>
-        </>
-      )}
+      <ModeBadge mode={data.mode} />
       <Box flexGrow={1} />
       <Text color={theme.muted}>{right}</Text>
     </Box>
+  );
+}
+
+function ModeBadge({ mode }: { mode?: PermissionMode }) {
+  if (!mode || mode === "default") return null;
+  const info = PERMISSION_MODE_INFO[mode];
+  const color = theme[info.color] ?? theme.muted;
+  const symbol = info.symbol ? `${info.symbol} ` : "";
+  return (
+    <>
+      <Text color={theme.muted}>  </Text>
+      <Text color={color} bold>
+        {symbol}
+        {info.shortTitle} on
+      </Text>
+      <Text color={theme.muted}> ⇧⇥</Text>
+    </>
   );
 }
 

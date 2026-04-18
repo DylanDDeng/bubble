@@ -327,7 +327,7 @@ export const builtinSlashCommands: SlashCommand[] = [
   },
   {
     name: "plan",
-    description: "Toggle plan mode on/off (equivalent to Shift+Tab)",
+    description: "Toggle plan mode on/off (Shift+Tab cycles through all permission modes)",
     async handler(args, ctx) {
       const next = ctx.agent.mode === "plan" ? "default" : "plan";
       ctx.agent.setMode(next);
@@ -360,6 +360,32 @@ export const builtinSlashCommands: SlashCommand[] = [
       for (const todo of todos) {
         const label = todo.status === "in_progress" ? (todo.activeForm || todo.content) : todo.content;
         lines.push(`  ${glyph(todo.status)} ${label}`);
+      }
+      return lines.join("\n");
+    },
+  },
+  {
+    name: "permissions",
+    description: "Show the session bash allowlist. Use /permissions clear to reset it.",
+    async handler(args, ctx) {
+      if (!ctx.bashAllowlist) {
+        return "No approval controller is attached to this session.";
+      }
+      const sub = args.trim();
+      if (sub === "clear") {
+        const size = ctx.bashAllowlist.size();
+        if (size === 0) return "Bash allowlist is already empty.";
+        ctx.bashAllowlist.clear();
+        return `Cleared ${size} bash prefix${size === 1 ? "" : "es"} from the session allowlist.`;
+      }
+
+      const entries = ctx.bashAllowlist.list();
+      if (entries.length === 0) {
+        return "Bash allowlist is empty. Approving \"Yes, and don't ask again for <prefix>\" adds entries here.";
+      }
+      const lines = [`Session-allowed bash prefixes (${entries.length}):`];
+      for (const prefix of entries) {
+        lines.push(`  ${prefix}`);
       }
       return lines.join("\n");
     },

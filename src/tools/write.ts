@@ -5,6 +5,8 @@
 import { constants } from "node:fs";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { gateToolAction } from "../approval/tool-helper.js";
+import type { ApprovalController } from "../approval/types.js";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
 
 export interface WriteToolOptions {
@@ -12,7 +14,11 @@ export interface WriteToolOptions {
   refuseOverwrite?: boolean;
 }
 
-export function createWriteTool(cwd: string, options: WriteToolOptions = {}): ToolRegistryEntry {
+export function createWriteTool(
+  cwd: string,
+  options: WriteToolOptions = {},
+  approval?: ApprovalController,
+): ToolRegistryEntry {
   return {
     name: "write",
     description: `Write a file to disk. Creates parent directories if needed.${options.refuseOverwrite ? " Will not overwrite existing files." : ""}`,
@@ -46,6 +52,14 @@ export function createWriteTool(cwd: string, options: WriteToolOptions = {}): To
       } catch {
         // new file
       }
+
+      const gate = await gateToolAction(approval, {
+        type: "write",
+        path: filePath,
+        content: args.content,
+        fileExists: existed,
+      });
+      if (!gate.approved) return gate.result;
 
       try {
         await mkdir(dirname(filePath), { recursive: true });

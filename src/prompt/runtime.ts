@@ -1,4 +1,4 @@
-import type { AgentMode, ThinkingLevel } from "../types.js";
+import type { PermissionMode, ThinkingLevel } from "../types.js";
 
 export interface RuntimePromptOptions {
   thinkingLevel?: ThinkingLevel;
@@ -7,7 +7,7 @@ export interface RuntimePromptOptions {
    * system prompt — mode changes are signalled via <system-reminder> injections
    * (see src/prompt/reminders.ts) so the base prompt stays stable for caching.
    */
-  mode?: AgentMode;
+  mode?: PermissionMode;
   guidelines?: string[];
 }
 
