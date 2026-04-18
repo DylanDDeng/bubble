@@ -127,7 +127,7 @@ export class SessionManager {
   }
 }
 
-function getSessionsDir(cwd: string): string {
+export function getSessionsDir(cwd: string): string {
   const agentDir = process.env.BUBBLE_HOME || join(homedir(), ".bubble");
   const safeCwd = cwd.replace(/[/\\:]/g, "_");
   const sessionsDir = join(agentDir, "sessions", safeCwd);

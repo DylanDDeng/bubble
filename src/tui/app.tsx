@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useState } from "react";
-import { Box, Text, useApp, useInput } from "ink";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { Box, Static, Text, useApp, useInput } from "ink";
 import type { Agent } from "../agent.js";
 import type { CliArgs } from "../cli.js";
 import type { SessionManager } from "../session.js";
@@ -22,6 +22,8 @@ import { parseSkillInvocation } from "../skills/invocation.js";
 import { useTerminalSize } from "./use-terminal-size.js";
 import { WelcomeBanner } from "./welcome.js";
 import { expandAtMentions } from "./file-mentions.js";
+import { getRecentSessions } from "./recent-activity.js";
+import os from "node:os";
 
 interface AppProps {
   agent: Agent;
@@ -30,6 +32,28 @@ interface AppProps {
   createProvider?: (providerId: string, apiKey: string, baseURL: string) => Provider;
   registry?: ProviderRegistry;
   skillRegistry?: SkillRegistry;
+}
+
+function buildTips(agent: Agent, registry: ProviderRegistry): string[] {
+  const tips: string[] = [];
+  const hasProvider = registry.getEnabled().length > 0;
+  if (!hasProvider) {
+    tips.push("Run /login or /provider --add to configure a model");
+  } else if (agent.model) {
+    tips.push(`Ready with ${displayModel(agent.model)}`);
+  } else {
+    tips.push("Run /model to pick a model");
+  }
+  tips.push("Type @ to reference a file");
+  tips.push("Type / for commands and skills");
+  return tips;
+}
+
+function friendlyCwd(cwd: string): string {
+  const home = os.homedir();
+  if (cwd === home) return "~";
+  if (cwd.startsWith(home + "/")) return "~" + cwd.slice(home.length);
+  return cwd;
 }
 
 function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] {
@@ -450,12 +474,39 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     ? safeRegistry.getConfigured().find((p) => p.id === keyProviderId)
     : safeRegistry.getDefault();
 
+  const welcomeItems = useMemo(
+    () =>
+      agent.messages.some((m) => m.role === "user")
+        ? []
+        : [{
+            key: "welcome",
+            greeting: "Welcome to Bubble",
+            modelLabel: agent.model ? displayModel(agent.model) : undefined,
+            cwd: friendlyCwd(args.cwd),
+            tips: buildTips(agent, safeRegistry),
+            recentSessions: getRecentSessions(args.cwd, 3),
+          }],
+    // Snapshot once at mount — Static commits this to scrollback.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
   return (
     <Box flexDirection="column" height="100%">
-      <Box flexDirection="column" flexGrow={1} padding={1}>
-        {messages.length === 0 && !isRunning && !pickerMode && (
-          <WelcomeBanner terminalColumns={terminalColumns} />
+      <Static items={welcomeItems}>
+        {(item) => (
+          <WelcomeBanner
+            key={item.key}
+            terminalColumns={terminalColumns}
+            greeting={item.greeting}
+            modelLabel={item.modelLabel}
+            cwd={item.cwd}
+            tips={item.tips}
+            recentSessions={item.recentSessions}
+          />
         )}
+      </Static>
+      <Box flexDirection="column" flexGrow={1} padding={1}>
         <MessageList
           messages={messages}
           streamingContent={streamingContent}
