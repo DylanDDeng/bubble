@@ -8,7 +8,8 @@ import { compactMessagesWithLLM } from "./context/compact-llm.js";
 import { isContextOverflowError } from "./context/overflow.js";
 import { projectMessages } from "./context/projector.js";
 import { aggressivePruneMessages } from "./context/prune.js";
-import type { AgentEvent, Message, ParsedToolCall, Provider, ThinkingLevel, ToolDefinition, ToolResult, ToolRegistryEntry } from "./types.js";
+import { PLAN_MODE_ENTER_REMINDER, PLAN_MODE_EXIT_REMINDER } from "./prompt/reminders.js";
+import type { AgentEvent, AgentMode, Message, ParsedToolCall, Provider, ThinkingLevel, Todo, ToolDefinition, ToolResult, ToolRegistryEntry } from "./types.js";
 
 const MAX_CONSECUTIVE_OVERFLOW_RECOVERIES = 3;
 
@@ -19,9 +20,13 @@ export interface AgentOptions {
   tools: ToolRegistryEntry[];
   temperature?: number;
   thinkingLevel?: ThinkingLevel;
+  mode?: AgentMode;
+  todos?: Todo[];
   systemPrompt?: string;
   onMessageAppend?: (message: Message) => void;
   onToolResult?: (toolName: string, result: ToolResult) => void;
+  onTodosUpdate?: (todos: Todo[]) => void;
+  onModeUpdate?: (mode: AgentMode) => void;
 }
 
 export class Agent {
@@ -32,6 +37,12 @@ export class Agent {
   private tools: Map<string, ToolRegistryEntry> = new Map();
   private temperature: number;
   private thinkingLevel: ThinkingLevel;
+  private _mode: AgentMode;
+  private _modeVersion = 0;
+  private onModeUpdate?: (mode: AgentMode) => void;
+  private _todos: Todo[];
+  private _todosVersion = 0;
+  private onTodosUpdate?: (todos: Todo[]) => void;
   private onMessageAppend?: (message: Message) => void;
   private onToolResult?: (toolName: string, result: ToolResult) => void;
   private lastInputTokens: number | null = null;
@@ -43,8 +54,12 @@ export class Agent {
     this._model = options.model;
     this.temperature = options.temperature ?? 0.2;
     this.thinkingLevel = options.thinkingLevel ?? "off";
+    this._mode = options.mode ?? "default";
+    this._todos = options.todos ? [...options.todos] : [];
     this.onMessageAppend = options.onMessageAppend;
     this.onToolResult = options.onToolResult;
+    this.onTodosUpdate = options.onTodosUpdate;
+    this.onModeUpdate = options.onModeUpdate;
 
     if (options.systemPrompt) {
       this.messages.push({ role: "system", content: options.systemPrompt });
@@ -53,6 +68,16 @@ export class Agent {
     for (const tool of options.tools) {
       this.tools.set(tool.name, tool);
     }
+
+    // If the agent boots directly into plan mode, inject the plan-mode reminder so the
+    // model sees the active rules on its very first turn. No exit reminder at boot.
+    if (this._mode === "plan") {
+      this.injectSystemReminder(PLAN_MODE_ENTER_REMINDER);
+    }
+  }
+
+  injectSystemReminder(content: string): void {
+    this.appendMessage({ role: "user", content, isMeta: true });
   }
 
   get model(): string {
@@ -96,6 +121,44 @@ export class Agent {
 
   set reasoning(value: ThinkingLevel) {
     this.thinkingLevel = value;
+  }
+
+  get mode(): AgentMode {
+    return this._mode;
+  }
+
+  set mode(value: AgentMode) {
+    this.setMode(value);
+  }
+
+  setMode(value: AgentMode): void {
+    if (this._mode === value) return;
+    this._mode = value;
+    this._modeVersion += 1;
+    this.injectSystemReminder(
+      value === "plan" ? PLAN_MODE_ENTER_REMINDER : PLAN_MODE_EXIT_REMINDER,
+    );
+    this.onModeUpdate?.(value);
+  }
+
+  /** Internal: snapshot counter that bumps on every mode change. Used by run loop. */
+  get modeVersion(): number {
+    return this._modeVersion;
+  }
+
+  getTodos(): Todo[] {
+    return this._todos.map((todo) => ({ ...todo }));
+  }
+
+  setTodos(next: Todo[]): void {
+    this._todos = next.map((todo) => ({ ...todo }));
+    this._todosVersion += 1;
+    this.onTodosUpdate?.(this.getTodos());
+  }
+
+  /** Internal: snapshot counter that bumps on every setTodos. Used by run loop to detect mutations. */
+  get todosVersion(): number {
+    return this._todosVersion;
   }
 
   setSystemPrompt(prompt: string) {
@@ -216,6 +279,8 @@ export class Agent {
 
         for (const tc of parsedCalls) {
           yield { type: "tool_start", id: tc.id, name: tc.name, args: tc.parsedArgs };
+          const todosVersionBefore = this._todosVersion;
+          const modeVersionBefore = this._modeVersion;
           const result = await this.executeTool(tc, cwd);
           this.appendMessage({
             role: "tool",
@@ -224,6 +289,12 @@ export class Agent {
           });
           this.onToolResult?.(tc.name, result);
           yield { type: "tool_end", id: tc.id, name: tc.name, result };
+          if (this._todosVersion !== todosVersionBefore) {
+            yield { type: "todos_updated", todos: this.getTodos() };
+          }
+          if (this._modeVersion !== modeVersionBefore) {
+            yield { type: "mode_changed", mode: this._mode };
+          }
         }
 
         // Auto-continue: if we have tool results, the LLM needs to respond to them
@@ -285,6 +356,16 @@ export class Agent {
     if (!tool) {
       return {
         content: `Error: Unknown tool "${toolCall.name}"`,
+        isError: true,
+      };
+    }
+
+    if (this._mode === "plan" && !tool.readOnly) {
+      return {
+        content:
+          `Error: Tool "${toolCall.name}" is not allowed in plan mode. ` +
+          `In plan mode you may only use read-only tools (read, grep, web_search, web_fetch, skill). ` +
+          `To modify files or run commands, present your proposal and call exit_plan_mode so the user can review and approve it.`,
         isError: true,
       };
     }

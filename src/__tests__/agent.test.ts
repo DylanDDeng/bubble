@@ -266,6 +266,261 @@ describe("Agent", () => {
     expect(callCount).toBe(2);
   });
 
+  describe("todos", () => {
+    it("yields a todos_updated event after a tool mutates todos", async () => {
+      let appendedTodos: any[] | undefined;
+      const todoMutator: ToolRegistryEntry = {
+        name: "todo_write",
+        readOnly: true,
+        description: "writes todos",
+        parameters: { type: "object", properties: {}, required: [] },
+        async execute(_args, _ctx) {
+          return { content: "updated" };
+        },
+      };
+
+      const provider = createMockProvider([
+        [
+          { type: "tool_call", id: "tc_1", name: "todo_write", arguments: "", isStart: true, isEnd: false },
+          { type: "tool_call", id: "tc_1", name: "todo_write", arguments: "{}", isStart: false, isEnd: true },
+          { type: "done" },
+        ],
+        [{ type: "text", content: "ok" }, { type: "done" }],
+      ]);
+
+      const agent = new Agent({
+        provider,
+        model: "gpt-4o",
+        tools: [todoMutator],
+        onTodosUpdate: (todos) => {
+          appendedTodos = todos;
+        },
+      });
+
+      // Simulate the tool mutating state during execution.
+      const originalExecute = todoMutator.execute;
+      todoMutator.execute = async (args, ctx) => {
+        agent.setTodos([{ content: "one", activeForm: "doing one", status: "in_progress" }]);
+        return originalExecute(args, ctx);
+      };
+
+      const events = await collectEvents(agent, "go", "/tmp");
+      const updated = events.find((e) => e.type === "todos_updated") as any;
+      expect(updated).toBeTruthy();
+      expect(updated.todos).toEqual([
+        { content: "one", activeForm: "doing one", status: "in_progress" },
+      ]);
+      expect(appendedTodos).toEqual([
+        { content: "one", activeForm: "doing one", status: "in_progress" },
+      ]);
+    });
+
+    it("does not emit todos_updated when a tool leaves the list unchanged", async () => {
+      const inertTool: ToolRegistryEntry = {
+        name: "inert",
+        readOnly: true,
+        description: "no-op",
+        parameters: { type: "object", properties: {}, required: [] },
+        async execute() {
+          return { content: "nothing" };
+        },
+      };
+      const provider = createMockProvider([
+        [
+          { type: "tool_call", id: "tc_1", name: "inert", arguments: "", isStart: true, isEnd: false },
+          { type: "tool_call", id: "tc_1", name: "inert", arguments: "{}", isStart: false, isEnd: true },
+          { type: "done" },
+        ],
+        [{ type: "text", content: "done" }, { type: "done" }],
+      ]);
+      const agent = new Agent({ provider, model: "gpt-4o", tools: [inertTool] });
+      const events = await collectEvents(agent, "go", "/tmp");
+      expect(events.some((e) => e.type === "todos_updated")).toBe(false);
+    });
+
+    it("accepts initial todos and exposes them via getTodos()", () => {
+      const agent = new Agent({
+        provider: createMockProvider([]),
+        model: "gpt-4o",
+        tools: [],
+        todos: [{ content: "bootstrap", activeForm: "bootstrapping", status: "pending" }],
+      });
+      expect(agent.getTodos()).toEqual([
+        { content: "bootstrap", activeForm: "bootstrapping", status: "pending" },
+      ]);
+    });
+  });
+
+  describe("plan mode", () => {
+    const writeTool: ToolRegistryEntry = {
+      name: "write",
+      description: "write",
+      parameters: { type: "object", properties: {}, required: [] },
+      async execute() {
+        return { content: "wrote" };
+      },
+    };
+    const readTool: ToolRegistryEntry = {
+      name: "read",
+      readOnly: true,
+      description: "read",
+      parameters: { type: "object", properties: {}, required: [] },
+      async execute() {
+        return { content: "read ok" };
+      },
+    };
+
+    const singleCallProvider = (toolName: string) =>
+      createMockProvider([
+        [
+          { type: "tool_call", id: "tc_1", name: toolName, arguments: "", isStart: true, isEnd: false },
+          { type: "tool_call", id: "tc_1", name: toolName, arguments: "{}", isStart: false, isEnd: true },
+          { type: "done" },
+        ],
+        [{ type: "text", content: "ok" }, { type: "done" }],
+      ]);
+
+    it("rejects non-readOnly tools in plan mode", async () => {
+      const agent = new Agent({
+        provider: singleCallProvider("write"),
+        model: "gpt-4o",
+        tools: [writeTool, readTool],
+        mode: "plan",
+      });
+      const events = await collectEvents(agent, "go", "/tmp");
+      const toolEnd = events.find((e) => e.type === "tool_end") as any;
+      expect(toolEnd.result.isError).toBe(true);
+      expect(toolEnd.result.content).toContain("plan mode");
+      expect(toolEnd.result.content).toContain("exit_plan_mode");
+    });
+
+    it("allows readOnly tools in plan mode", async () => {
+      const agent = new Agent({
+        provider: singleCallProvider("read"),
+        model: "gpt-4o",
+        tools: [writeTool, readTool],
+        mode: "plan",
+      });
+      const events = await collectEvents(agent, "go", "/tmp");
+      const toolEnd = events.find((e) => e.type === "tool_end") as any;
+      expect(toolEnd.result.isError).toBeFalsy();
+      expect(toolEnd.result.content).toBe("read ok");
+    });
+
+    it("allows non-readOnly tools in default mode", async () => {
+      const agent = new Agent({
+        provider: singleCallProvider("write"),
+        model: "gpt-4o",
+        tools: [writeTool, readTool],
+        // mode defaults to "default"
+      });
+      const events = await collectEvents(agent, "go", "/tmp");
+      const toolEnd = events.find((e) => e.type === "tool_end") as any;
+      expect(toolEnd.result.isError).toBeFalsy();
+      expect(toolEnd.result.content).toBe("wrote");
+    });
+
+    it("yields mode_changed when a tool flips the mode via setMode", async () => {
+      const flipTool: ToolRegistryEntry = {
+        name: "flip",
+        readOnly: true,
+        description: "flip",
+        parameters: { type: "object", properties: {}, required: [] },
+        async execute() {
+          return { content: "ok" };
+        },
+      };
+      const provider = createMockProvider([
+        [
+          { type: "tool_call", id: "tc_1", name: "flip", arguments: "", isStart: true, isEnd: false },
+          { type: "tool_call", id: "tc_1", name: "flip", arguments: "{}", isStart: false, isEnd: true },
+          { type: "done" },
+        ],
+        [{ type: "text", content: "done" }, { type: "done" }],
+      ]);
+      const modeUpdates: string[] = [];
+      const agent = new Agent({
+        provider,
+        model: "gpt-4o",
+        tools: [flipTool],
+        mode: "plan",
+        onModeUpdate: (m) => modeUpdates.push(m),
+      });
+      flipTool.execute = async () => {
+        agent.setMode("default");
+        return { content: "flipped" };
+      };
+
+      const events = await collectEvents(agent, "go", "/tmp");
+      const modeEvent = events.find((e) => e.type === "mode_changed") as any;
+      expect(modeEvent).toBeTruthy();
+      expect(modeEvent.mode).toBe("default");
+      expect(modeUpdates).toEqual(["default"]);
+      expect(agent.mode).toBe("default");
+    });
+
+    it("does not yield mode_changed when setMode is called with the current mode", async () => {
+      const agent = new Agent({
+        provider: createMockProvider([]),
+        model: "gpt-4o",
+        tools: [],
+      });
+      expect(agent.mode).toBe("default");
+      agent.setMode("default");
+      expect(agent.modeVersion).toBe(0);
+    });
+
+    it("injects a plan-mode <system-reminder> when booting in plan mode", () => {
+      const agent = new Agent({
+        provider: createMockProvider([]),
+        model: "gpt-4o",
+        tools: [],
+        systemPrompt: "stable system prompt",
+        mode: "plan",
+      });
+      const metaMessages = agent.messages.filter(
+        (m) => m.role === "user" && (m as any).isMeta,
+      );
+      expect(metaMessages).toHaveLength(1);
+      expect((metaMessages[0] as any).content).toContain("<system-reminder>");
+      expect((metaMessages[0] as any).content).toContain("Plan mode is now ACTIVE");
+    });
+
+    it("injects enter/exit <system-reminder>s on mode transitions", () => {
+      const agent = new Agent({
+        provider: createMockProvider([]),
+        model: "gpt-4o",
+        tools: [],
+        systemPrompt: "stable",
+      });
+      expect(agent.messages.filter((m) => m.role === "user" && (m as any).isMeta)).toHaveLength(0);
+
+      agent.setMode("plan");
+      let metas = agent.messages.filter((m) => m.role === "user" && (m as any).isMeta);
+      expect(metas).toHaveLength(1);
+      expect((metas[0] as any).content).toContain("Plan mode is now ACTIVE");
+
+      agent.setMode("default");
+      metas = agent.messages.filter((m) => m.role === "user" && (m as any).isMeta);
+      expect(metas).toHaveLength(2);
+      expect((metas[1] as any).content).toContain("Plan mode has been exited");
+    });
+
+    it("keeps the static system prompt unchanged across mode flips", () => {
+      const agent = new Agent({
+        provider: createMockProvider([]),
+        model: "gpt-4o",
+        tools: [],
+        systemPrompt: "stable system prompt",
+      });
+      const before = (agent.messages[0] as any).content;
+      agent.setMode("plan");
+      agent.setMode("default");
+      agent.setMode("plan");
+      expect((agent.messages[0] as any).content).toBe(before);
+    });
+  });
+
   it("gives up after 3 consecutive overflow attempts", async () => {
     let callCount = 0;
     const provider: Provider = {

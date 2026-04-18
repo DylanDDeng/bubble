@@ -6,7 +6,7 @@ import { mkdirSync, appendFileSync, existsSync, readFileSync, readdirSync, write
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { compactSessionEntries, type CompactOptions, type CompactResult } from "./context/compact.js";
-import type { Message } from "./types.js";
+import type { Message, Todo } from "./types.js";
 import { SessionLog } from "./session-log.js";
 import type { SessionLogEntry, SessionMarkerKind, SessionMetadata } from "./session-types.js";
 
@@ -104,6 +104,15 @@ export class SessionManager {
   appendMarker(kind: SessionMarkerKind, value: string) {
     const entry = this.log.appendMarker(kind, value);
     this.persist(entry);
+  }
+
+  appendTodosSnapshot(todos: Todo[]) {
+    const entry = this.log.appendTodosSnapshot(todos);
+    this.persist(entry);
+  }
+
+  getTodos(): Todo[] {
+    return this.log.getTodos();
   }
 
   compact(options?: CompactOptions): CompactResult {

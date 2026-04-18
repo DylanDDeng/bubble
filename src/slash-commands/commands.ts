@@ -326,6 +326,45 @@ export const builtinSlashCommands: SlashCommand[] = [
     },
   },
   {
+    name: "plan",
+    description: "Toggle plan mode on/off (equivalent to Shift+Tab)",
+    async handler(args, ctx) {
+      const next = ctx.agent.mode === "plan" ? "default" : "plan";
+      ctx.agent.setMode(next);
+      return next === "plan"
+        ? "Entered plan mode. The assistant will investigate and propose a plan before making changes."
+        : "Exited plan mode.";
+    },
+  },
+  {
+    name: "todos",
+    description: "Show the current todo list. Use /todos clear to reset it.",
+    async handler(args, ctx) {
+      const sub = args.trim();
+      if (sub === "clear") {
+        const previous = ctx.agent.getTodos().length;
+        if (previous === 0) {
+          return "Todo list is already empty.";
+        }
+        ctx.agent.setTodos([]);
+        return `Cleared ${previous} todo item${previous === 1 ? "" : "s"}.`;
+      }
+
+      const todos = ctx.agent.getTodos();
+      if (todos.length === 0) {
+        return "No todos yet. The assistant will create some when working on multi-step tasks.";
+      }
+      const glyph = (status: string) =>
+        status === "completed" ? "✔" : status === "in_progress" ? "▶" : "○";
+      const lines = ["Todos:"];
+      for (const todo of todos) {
+        const label = todo.status === "in_progress" ? (todo.activeForm || todo.content) : todo.content;
+        lines.push(`  ${glyph(todo.status)} ${label}`);
+      }
+      return lines.join("\n");
+    },
+  },
+  {
     name: "compact",
     description: "Manually compact the current session context",
     async handler(args, ctx) {

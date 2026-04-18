@@ -6,15 +6,26 @@ import type { SessionManager } from "../session.js";
 import type { Provider } from "../types.js";
 import type { ProviderRegistry } from "../provider-registry.js";
 import type { SkillRegistry } from "../skills/registry.js";
-import { App } from "./app.js";
+import { App, type PlanHandlerRef } from "./app.js";
 
-export function runTui(
-  agent: Agent,
-  args: CliArgs,
-  sessionManager?: SessionManager,
-  createProvider?: (providerId: string, apiKey: string, baseURL: string) => Provider,
-  registry?: ProviderRegistry,
-  skillRegistry?: SkillRegistry,
-) {
-  render(<App agent={agent} args={args} sessionManager={sessionManager} createProvider={createProvider} registry={registry} skillRegistry={skillRegistry} />);
+export interface RunTuiOptions {
+  sessionManager?: SessionManager;
+  createProvider?: (providerId: string, apiKey: string, baseURL: string) => Provider;
+  registry?: ProviderRegistry;
+  skillRegistry?: SkillRegistry;
+  planHandlerRef?: PlanHandlerRef;
+}
+
+export function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions = {}) {
+  render(
+    <App
+      agent={agent}
+      args={args}
+      sessionManager={options.sessionManager}
+      createProvider={options.createProvider}
+      registry={options.registry}
+      skillRegistry={options.skillRegistry}
+      planHandlerRef={options.planHandlerRef}
+    />,
+  );
 }

@@ -14,8 +14,8 @@ import { ProviderRegistry, displayModel, encodeModel, decodeModel } from "./prov
 import { SessionManager } from "./session.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { SkillRegistry } from "./skills/registry.js";
-import { createAllTools } from "./tools/index.js";
-import type { Message } from "./types.js";
+import { createAllTools, type PlanController } from "./tools/index.js";
+import type { AgentMode, Message, PlanDecision } from "./types.js";
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -58,7 +58,25 @@ async function main() {
   const createProvider = (providerId: string, apiKey: string, baseURL: string) =>
     createProviderInstance({ providerId, apiKey, baseURL, thinkingLevel: args.thinkingLevel });
 
-  const tools = createAllTools(args.cwd, skillRegistry);
+  let agentRef: Agent | undefined;
+  const todoStore = {
+    getTodos: () => agentRef?.getTodos() ?? [],
+    setTodos: (todos: Parameters<Agent["setTodos"]>[0]) => agentRef?.setTodos(todos),
+  };
+  const planHandlerRef: { current?: (plan: string) => Promise<PlanDecision> } = {};
+  const planController: PlanController = {
+    requestApproval: (plan) =>
+      planHandlerRef.current
+        ? planHandlerRef.current(plan)
+        : Promise.resolve({
+            action: "reject",
+            reason: "No interactive UI available to approve the plan.",
+          }),
+    setMode: (mode: AgentMode) => {
+      agentRef?.setMode(mode);
+    },
+  };
+  const tools = createAllTools(args.cwd, skillRegistry, { todoStore, planController });
 
   // Session management:
   // - default: always start a fresh session
@@ -107,16 +125,18 @@ async function main() {
       ?? configuredThinkingLevel
       ?? getDefaultThinkingLevel(activeProviderId, effectiveModelId))
     : (sessionThinkingLevel ?? args.thinkingLevel ?? configuredThinkingLevel ?? "off");
+  const restoredTodos = sessionManager?.getTodos() ?? [];
+  const initialMode: AgentMode = args.mode ?? "default";
   const systemPrompt = buildSystemPrompt({
     agentName: "Bubble",
     configuredProvider: activeProviderId || "none",
     configuredModel: activeModel ? displayModel(activeModel) : "none",
     configuredModelId: activeModel || "none",
     thinkingLevel: initialThinkingLevel,
+    mode: initialMode,
     workingDir: args.cwd,
     skills: skillRegistry.summaries(),
   });
-
   const agent = new Agent({
     provider: activeProvider
       ? createProvider(activeProviderId, activeProvider.apiKey, activeProvider.baseURL)
@@ -127,10 +147,15 @@ async function main() {
     systemPrompt,
     temperature: 0.2,
     thinkingLevel: initialThinkingLevel,
+    mode: initialMode,
+    todos: restoredTodos,
     onMessageAppend: (message) => {
-      if (sessionManager && message.role !== "system") {
-        sessionManager.appendMessage(message);
-      }
+      if (!sessionManager) return;
+      if (message.role === "system") return;
+      // <system-reminder> injections are runtime/ephemeral; don't persist them —
+      // they will be re-injected as needed on resume based on the current mode.
+      if (message.role === "user" && (message as any).isMeta) return;
+      sessionManager.appendMessage(message);
     },
     onToolResult: (toolName, result) => {
       if (!sessionManager) return;
@@ -140,7 +165,14 @@ async function main() {
         sessionManager.appendMarker("skill_activated", match[1].trim());
       }
     },
+    onTodosUpdate: (todos) => {
+      sessionManager?.appendTodosSnapshot(todos);
+    },
+    onModeUpdate: (mode) => {
+      sessionManager?.appendMarker("mode_switch", mode);
+    },
   });
+  agentRef = agent;
   if (sessionManager) {
     sessionManager.setMetadata({
       ...(agent.model ? { model: agent.model } : {}),
@@ -158,6 +190,12 @@ async function main() {
     const history = sessionManager.getMessages();
     if (history.length > 0) {
       agent.messages = [{ role: "system", content: systemPrompt }, ...history];
+      // Reassigning agent.messages drops any <system-reminder> we injected during
+      // construction. Re-inject if the agent is starting in plan mode.
+      if (agent.mode === "plan") {
+        const { PLAN_MODE_ENTER_REMINDER } = await import("./prompt/reminders.js");
+        agent.injectSystemReminder(PLAN_MODE_ENTER_REMINDER);
+      }
       console.log(chalk.dim(`Resumed session: ${sessionManager.getSessionFile()}`));
     }
   }
@@ -187,7 +225,13 @@ async function main() {
 
   // Interactive mode: use Ink TUI
   const { runTui } = await import("./tui/run.js");
-  runTui(agent, args, sessionManager, createProvider, registry, skillRegistry);
+  runTui(agent, args, {
+    sessionManager,
+    createProvider,
+    registry,
+    skillRegistry,
+    planHandlerRef,
+  });
 }
 
 async function readPipedStdin(): Promise<string | undefined> {

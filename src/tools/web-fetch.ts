@@ -8,6 +8,7 @@ import { callExaMcpTool } from "./exa-mcp.js";
 export function createWebFetchTool(): ToolRegistryEntry {
   return {
     name: "web_fetch",
+    readOnly: true,
     description: "Fetch and extract the contents of a specific URL using a remote web crawling service.",
     parameters: {
       type: "object",

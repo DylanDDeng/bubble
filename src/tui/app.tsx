@@ -3,7 +3,7 @@ import { Box, Static, Text, useApp, useInput } from "ink";
 import type { Agent } from "../agent.js";
 import type { CliArgs } from "../cli.js";
 import type { SessionManager } from "../session.js";
-import type { AgentEvent, Message, Provider } from "../types.js";
+import type { AgentEvent, AgentMode, Message, PlanDecision, Provider, Todo } from "../types.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import { UserConfig, maskKey } from "../config.js";
 import { InputBox } from "./input-box.js";
@@ -23,7 +23,13 @@ import { useTerminalSize } from "./use-terminal-size.js";
 import { WelcomeBanner } from "./welcome.js";
 import { expandAtMentions } from "./file-mentions.js";
 import { getRecentSessions } from "./recent-activity.js";
+import { TodosPanel } from "./todos.js";
+import { PlanConfirm } from "./plan-confirm.js";
 import os from "node:os";
+
+export interface PlanHandlerRef {
+  current?: (plan: string) => Promise<PlanDecision>;
+}
 
 interface AppProps {
   agent: Agent;
@@ -32,6 +38,7 @@ interface AppProps {
   createProvider?: (providerId: string, apiKey: string, baseURL: string) => Provider;
   registry?: ProviderRegistry;
   skillRegistry?: SkillRegistry;
+  planHandlerRef?: PlanHandlerRef;
 }
 
 function buildTips(agent: Agent, registry: ProviderRegistry): string[] {
@@ -61,6 +68,7 @@ function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] 
   for (const m of agentMessages) {
     if (m.role === "system" || m.role === "tool") continue;
     if (m.role === "user") {
+      if (m.isMeta) continue; // <system-reminder> injections are not user-visible
       result.push({
         role: "user",
         content: typeof m.content === "string" ? m.content : "(multimedia)",
@@ -98,7 +106,7 @@ function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] 
   return result;
 }
 
-export function App({ agent, args, sessionManager, createProvider, registry, skillRegistry }: AppProps) {
+export function App({ agent, args, sessionManager, createProvider, registry, skillRegistry, planHandlerRef }: AppProps) {
   const { exit } = useApp();
   const [messages, setMessages] = useState<DisplayMessage[]>(() => reconstructDisplayMessages(agent.messages));
   const [isRunning, setIsRunning] = useState(false);
@@ -107,6 +115,12 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   const [streamingTools, setStreamingTools] = useState<DisplayToolCall[]>([]);
   const [usageTotals, setUsageTotals] = useState({ prompt: 0, completion: 0 });
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(agent.thinking);
+  const [agentMode, setAgentMode] = useState<AgentMode>(agent.mode);
+  const [todos, setTodos] = useState<Todo[]>(() => agent.getTodos());
+  const [pendingPlan, setPendingPlan] = useState<{
+    plan: string;
+    resolve: (decision: PlanDecision) => void;
+  } | null>(null);
   const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | "provider-add" | "login" | "logout" | null>(null);
   const [keyProviderId, setKeyProviderId] = useState<string | null>(null);
   const [verboseTrace, setVerboseTrace] = useState(false);
@@ -119,13 +133,48 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     skillPaths: userConfig.getSkillPaths(),
   });
 
+  useEffect(() => {
+    if (!planHandlerRef) return;
+    planHandlerRef.current = (plan: string) =>
+      new Promise<PlanDecision>((resolve) => {
+        setPendingPlan({ plan, resolve });
+      });
+    return () => {
+      if (planHandlerRef.current) {
+        planHandlerRef.current = undefined;
+      }
+    };
+  }, [planHandlerRef]);
+
+  const rebuildSystemPrompt = useCallback(
+    (overrides?: { thinkingLevel?: ThinkingLevel; mode?: AgentMode }) => {
+      const modelParts = agent.model.includes(":")
+        ? agent.model.split(":")
+        : [agent.providerId || safeRegistry.getDefault()?.id || "openai", agent.model];
+      const providerId = modelParts[0];
+      agent.setSystemPrompt(buildSystemPrompt({
+        agentName: "Bubble",
+        configuredProvider: providerId,
+        configuredModel: displayModel(agent.model),
+        configuredModelId: agent.model,
+        thinkingLevel: overrides?.thinkingLevel ?? agent.thinking,
+        mode: overrides?.mode ?? agent.mode,
+        workingDir: args.cwd,
+        skills: safeSkillRegistry?.summaries() ?? [],
+      }));
+    },
+    [agent, args.cwd, safeRegistry, safeSkillRegistry],
+  );
+
   useInput((input, key) => {
+    if (pendingPlan) return;
     if (key.ctrl && input === "o" && !pickerMode) {
       setVerboseTrace((v) => !v);
       return;
     }
 
-    if (key.tab && key.shift && !pickerMode) {
+    // Ctrl+R: cycle thinking level (formerly Shift+Tab)
+    if (key.ctrl && input === "r" && !pickerMode) {
       const modelParts = agent.model.includes(":")
         ? agent.model.split(":")
         : [agent.providerId || safeRegistry.getDefault()?.id || "openai", agent.model];
@@ -136,19 +185,21 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       const currentIndex = availableLevels.indexOf(currentLevel);
       const nextLevel = availableLevels[(currentIndex + 1) % availableLevels.length];
       agent.thinking = nextLevel;
-      agent.setSystemPrompt(buildSystemPrompt({
-        agentName: "Bubble",
-        configuredProvider: providerId,
-        configuredModel: displayModel(agent.model),
-        configuredModelId: agent.model,
-        thinkingLevel: nextLevel,
-        workingDir: args.cwd,
-        skills: safeSkillRegistry?.summaries() ?? [],
-      }));
+      rebuildSystemPrompt({ thinkingLevel: nextLevel });
       userConfig.setDefaultThinkingLevel(nextLevel);
       setThinkingLevel(nextLevel);
       sessionManager?.setMetadata({ model: agent.model, thinkingLevel: nextLevel, reasoningEffort: nextLevel });
       sessionManager?.appendMarker("thinking_level_switch", nextLevel);
+      return;
+    }
+
+    // Shift+Tab: toggle plan mode. Agent.setMode injects a <system-reminder>,
+    // so we do not need to rebuild the (cache-friendly) static system prompt here.
+    if (key.tab && key.shift && !pickerMode) {
+      const nextMode: AgentMode = agent.mode === "plan" ? "default" : "plan";
+      agent.setMode(nextMode);
+      setAgentMode(nextMode);
+      sessionManager?.appendMarker("mode_switch", nextMode);
       return;
     }
 
@@ -372,6 +423,15 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
                 }
                 break;
               }
+              case "todos_updated": {
+                setTodos(event.todos);
+                break;
+              }
+              case "mode_changed": {
+                setAgentMode(event.mode);
+                sessionManager?.appendMarker("mode_switch", event.mode);
+                break;
+              }
               case "turn_end": {
                 if (event.usage) {
                   setUsageTotals((totals) => ({
@@ -451,6 +511,9 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           skillRegistry: safeSkillRegistry!,
         });
         if (handled) {
+          if (agent.mode !== agentMode) {
+            setAgentMode(agent.mode);
+          }
           if (result) {
             addMessage("assistant", result);
           }
@@ -586,13 +649,35 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           />
         )}
       </Box>
-      {isRunning && !pickerMode && (
+      {todos.length > 0 && !pickerMode && !pendingPlan && (
+        <Box paddingX={1} flexShrink={0}>
+          <TodosPanel todos={todos} terminalColumns={terminalColumns} />
+        </Box>
+      )}
+      {pendingPlan && !pickerMode && (
+        <Box paddingX={1} flexShrink={0}>
+          <PlanConfirm
+            initialPlan={pendingPlan.plan}
+            onApprove={(finalPlan) => {
+              const resolve = pendingPlan.resolve;
+              setPendingPlan(null);
+              resolve({ action: "approve", plan: finalPlan });
+            }}
+            onReject={(reason) => {
+              const resolve = pendingPlan.resolve;
+              setPendingPlan(null);
+              resolve({ action: "reject", reason });
+            }}
+          />
+        </Box>
+      )}
+      {isRunning && !pickerMode && !pendingPlan && (
         <Box paddingX={1} paddingBottom={1} flexShrink={0}>
           <WaitingIndicator tools={streamingTools} />
         </Box>
       )}
       <Box paddingX={1} paddingBottom={1} flexShrink={0}>
-        <InputBox onSubmit={handleSubmit} disabled={isRunning || !!pickerMode} skillRegistry={safeSkillRegistry} terminalColumns={terminalColumns} cwd={args.cwd} />
+        <InputBox onSubmit={handleSubmit} disabled={isRunning || !!pickerMode || !!pendingPlan} skillRegistry={safeSkillRegistry} terminalColumns={terminalColumns} cwd={args.cwd} />
       </Box>
       <FooterBar
         data={buildFooterData({
@@ -601,6 +686,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           model: displayModel(agent.model) || "no model",
           thinkingLevel,
           showThinking: getAvailableThinkingLevels(agent.providerId, agent.apiModel).length > 2,
+          mode: agentMode,
           usageTotals,
           budget: getContextBudget(
             agent.providerId || safeRegistry.getDefault()?.id || "unknown",

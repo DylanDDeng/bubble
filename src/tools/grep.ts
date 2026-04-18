@@ -11,6 +11,7 @@ const MAX_MATCHES = 100;
 export function createGrepTool(cwd: string): ToolRegistryEntry {
   return {
     name: "grep",
+    readOnly: true,
     description: `Search file contents using regex (via ripgrep). Returns up to ${MAX_MATCHES} matches.`,
     parameters: {
       type: "object",

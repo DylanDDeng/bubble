@@ -13,6 +13,7 @@ const MAX_BYTES = 100 * 1024;
 export function createReadTool(cwd: string): ToolRegistryEntry {
   return {
     name: "read",
+    readOnly: true,
     description: `Read the contents of a file. Output is truncated to ${MAX_LINES} lines or ${MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files.`,
     parameters: {
       type: "object",

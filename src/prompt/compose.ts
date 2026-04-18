@@ -1,4 +1,4 @@
-import type { ThinkingLevel } from "../types.js";
+import type { AgentMode, ThinkingLevel } from "../types.js";
 import { buildAnthropicProviderPrompt } from "./provider-prompts/anthropic.js";
 import { buildCodexProviderPrompt } from "./provider-prompts/codex.js";
 import { buildDefaultProviderPrompt } from "./provider-prompts/default.js";
@@ -13,6 +13,7 @@ export interface ComposeSystemPromptOptions extends EnvironmentPromptOptions {
   agentName?: string;
   guidelines?: string[];
   thinkingLevel?: ThinkingLevel;
+  mode?: AgentMode;
   skills?: SkillSummary[];
 }
 
@@ -30,6 +31,7 @@ export function composeSystemPrompt(options: ComposeSystemPromptOptions = {}): s
   });
   const runtimePrompt = buildRuntimePrompt({
     thinkingLevel: options.thinkingLevel,
+    mode: options.mode,
     guidelines: buildGuidelines(options.tools ?? defaultToolNames, options.guidelines ?? []),
   });
   const skillsPrompt = buildSkillsPrompt(options.skills ?? []);

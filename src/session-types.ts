@@ -1,4 +1,4 @@
-import type { AssistantMessage, Message, ThinkingLevel, ToolCall, ToolMessage, UserMessage } from "./types.js";
+import type { AssistantMessage, Message, ThinkingLevel, Todo, ToolCall, ToolMessage, UserMessage } from "./types.js";
 
 export interface SessionMetadata {
   model?: string;
@@ -6,7 +6,7 @@ export interface SessionMetadata {
   reasoningEffort?: ThinkingLevel;
 }
 
-export type SessionMarkerKind = "model_switch" | "provider_switch" | "thinking_level_switch" | "skill_activated";
+export type SessionMarkerKind = "model_switch" | "provider_switch" | "thinking_level_switch" | "skill_activated" | "mode_switch";
 
 interface BaseSessionLogEntry {
   id: string;
@@ -49,6 +49,11 @@ export interface SessionToolResultEntry extends BaseSessionLogEntry {
   message: ToolMessage;
 }
 
+export interface SessionTodosSnapshotEntry extends BaseSessionLogEntry {
+  type: "todos_snapshot";
+  todos: Todo[];
+}
+
 export type SessionLogEntry =
   | SessionMetadataEntry
   | SessionSummaryEntry
@@ -56,7 +61,8 @@ export type SessionLogEntry =
   | SessionUserMessageEntry
   | SessionAssistantMessageEntry
   | SessionToolCallEntry
-  | SessionToolResultEntry;
+  | SessionToolResultEntry
+  | SessionTodosSnapshotEntry;
 
 export interface LegacySessionEntry {
   id: string;

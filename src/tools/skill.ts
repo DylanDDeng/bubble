@@ -29,6 +29,7 @@ export function formatLoadedSkill(skill: SkillRecord): string {
 export function createSkillTool(registry: SkillRegistry): ToolRegistryEntry {
   return {
     name: "skill",
+    readOnly: true,
     description: "Load a named skill on demand. Use this when a task clearly matches one of the available skills.",
     parameters: {
       type: "object",

@@ -39,6 +39,31 @@ describe("SessionManager", () => {
     expect(messages[1].role).toBe("assistant");
   });
 
+  it("persists todos snapshots and returns the latest on reload", () => {
+    const file = join(tmpDir, "todos.jsonl");
+    const sm1 = new SessionManager(file);
+    sm1.appendTodosSnapshot([
+      { content: "a", activeForm: "doing a", status: "pending" },
+    ]);
+    sm1.appendTodosSnapshot([
+      { content: "a", activeForm: "doing a", status: "completed" },
+      { content: "b", activeForm: "doing b", status: "in_progress" },
+    ]);
+
+    const sm2 = new SessionManager(file);
+    expect(sm2.getTodos()).toEqual([
+      { content: "a", activeForm: "doing a", status: "completed" },
+      { content: "b", activeForm: "doing b", status: "in_progress" },
+    ]);
+  });
+
+  it("returns an empty todos list when no snapshot has been written", () => {
+    const file = join(tmpDir, "no-todos.jsonl");
+    const sm = new SessionManager(file);
+    sm.appendMessage({ role: "user", content: "hi" });
+    expect(sm.getTodos()).toEqual([]);
+  });
+
   it("handles compaction by injecting a summary", () => {
     const file = join(tmpDir, "compact.jsonl");
     const sm = new SessionManager(file);

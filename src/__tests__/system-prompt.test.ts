@@ -21,6 +21,22 @@ describe("system prompt", () => {
     expect(prompt).toContain("Current working directory: /tmp/project");
   });
 
+  it("keeps the system prompt identical across agent modes (cache-friendly)", () => {
+    const defaultPrompt = buildSystemPrompt({
+      configuredProvider: "openai",
+      configuredModel: "gpt-4o",
+      mode: "default",
+    });
+    const planPrompt = buildSystemPrompt({
+      configuredProvider: "openai",
+      configuredModel: "gpt-4o",
+      mode: "plan",
+    });
+    expect(planPrompt).toBe(defaultPrompt);
+    expect(defaultPrompt).not.toContain("PLAN MODE");
+    expect(defaultPrompt).not.toContain("Current mode");
+  });
+
   it("falls back to gemini-style provider guidance for google models", () => {
     const prompt = buildSystemPrompt({
       configuredProvider: "google",

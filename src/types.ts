@@ -23,6 +23,11 @@ export type ReasoningEffort = ThinkingLevel;
 export interface UserMessage {
   role: "user";
   content: string | ContentPart[];
+  /**
+   * Marks this message as harness-emitted metadata (e.g. a <system-reminder>),
+   * not actual user input. Renderers may hide these; compaction should generally preserve them.
+   */
+  isMeta?: boolean;
 }
 
 export interface AssistantMessage {
@@ -96,6 +101,30 @@ export interface ToolContext {
 
 export interface ToolRegistryEntry extends ToolDefinition {
   execute: ToolExecutor;
+  /** Whether this tool is allowed in plan mode. Defaults to false (treated as write-capable). */
+  readOnly?: boolean;
+}
+
+// ============================================================================
+// Agent mode
+// ============================================================================
+
+export type AgentMode = "default" | "plan";
+
+export type PlanDecision =
+  | { action: "approve"; plan: string }
+  | { action: "reject"; reason?: string };
+
+// ============================================================================
+// Todos
+// ============================================================================
+
+export type TodoStatus = "pending" | "in_progress" | "completed";
+
+export interface Todo {
+  content: string;
+  status: TodoStatus;
+  activeForm: string;
 }
 
 // ============================================================================
@@ -134,4 +163,6 @@ export type AgentEvent =
   | { type: "tool_end"; id: string; name: string; result: ToolResult }
   | { type: "turn_end"; usage?: { promptTokens: number; completionTokens: number } }
   | { type: "context_recovered"; droppedMessages: number; reason: "overflow" }
+  | { type: "mode_changed"; mode: AgentMode }
+  | { type: "todos_updated"; todos: Todo[] }
   | { type: "agent_end" };

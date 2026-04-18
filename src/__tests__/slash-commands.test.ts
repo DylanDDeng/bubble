@@ -83,6 +83,62 @@ describe("slash commands", () => {
     expect(appendMarker).toHaveBeenCalledWith("skill_activated", "repo-review");
   });
 
+  it("/plan toggles the agent mode and delegates to setMode", async () => {
+    let mode = "default";
+    const ctx = createContext({
+      agent: {
+        model: "openai:gpt-4o",
+        providerId: "openai",
+        thinking: "off",
+        get mode() {
+          return mode;
+        },
+        setMode: (next: string) => {
+          mode = next;
+        },
+      } as any,
+    });
+
+    let result = await slashRegistry.execute("/plan", ctx);
+    expect(result.handled).toBe(true);
+    expect(mode).toBe("plan");
+    expect(result.result).toContain("Entered plan mode");
+
+    result = await slashRegistry.execute("/plan", ctx);
+    expect(mode).toBe("default");
+    expect(result.result).toContain("Exited plan mode");
+  });
+
+  it("/todos lists items; /todos clear empties the list", async () => {
+    let todos = [
+      { content: "a", activeForm: "doing a", status: "in_progress" },
+      { content: "b", activeForm: "doing b", status: "pending" },
+    ];
+    const ctx = createContext({
+      agent: {
+        model: "openai:gpt-4o",
+        providerId: "openai",
+        thinking: "off",
+        getTodos: () => todos,
+        setTodos: (next: any[]) => {
+          todos = next;
+        },
+      } as any,
+    });
+
+    let result = await slashRegistry.execute("/todos", ctx);
+    expect(result.result).toContain("Todos:");
+    expect(result.result).toContain("doing a");
+    expect(result.result).toContain("b");
+
+    result = await slashRegistry.execute("/todos clear", ctx);
+    expect(result.result).toContain("Cleared 2");
+    expect(todos).toEqual([]);
+
+    result = await slashRegistry.execute("/todos clear", ctx);
+    expect(result.result).toContain("already empty");
+  });
+
   it("loads a skill directly via /<skill-name> alias", async () => {
     const ctx = createContext({
       skillRegistry: createSkillRegistryFixture(),

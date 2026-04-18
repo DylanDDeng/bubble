@@ -2,7 +2,7 @@
  * CLI argument parsing.
  */
 
-import type { ThinkingLevel } from "./types.js";
+import type { AgentMode, ThinkingLevel } from "./types.js";
 import { isThinkingLevel } from "./variant/thinking-level.js";
 
 export interface CliArgs {
@@ -14,6 +14,7 @@ export interface CliArgs {
   print?: boolean;
   prompt?: string;
   thinkingLevel?: ThinkingLevel;
+  mode?: AgentMode;
 }
 
 export function parseArgs(argv: string[]): CliArgs {
@@ -56,6 +57,9 @@ export function parseArgs(argv: string[]): CliArgs {
       case "-p":
         args.print = true;
         break;
+      case "--plan":
+        args.mode = "plan";
+        break;
       default:
         if (!arg.startsWith("-") && !args.prompt) {
           args.prompt = arg;
@@ -79,6 +83,7 @@ Options:
   --session <name>         Session name to create or resume
   --reasoning              Enable reasoning mode at medium effort
   --reasoning-effort <l>   Set reasoning effort: off|minimal|low|medium|high|xhigh
+  --plan                   Start in plan mode (read-only investigation; propose before executing)
   -p, --print              Non-interactive mode (single prompt)
   -h, --help               Show this help
 `);

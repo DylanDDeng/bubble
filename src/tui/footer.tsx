@@ -2,6 +2,7 @@ import React from "react";
 import { Box, Text } from "ink";
 import { homedir } from "node:os";
 import { theme } from "./theme.js";
+import type { AgentMode } from "../types.js";
 
 export interface FooterUsageTotals {
   prompt: number;
@@ -20,6 +21,7 @@ export interface FooterData {
   model: string;
   thinkingLevel: string;
   showThinking: boolean;
+  mode?: AgentMode;
   usageTotals: FooterUsageTotals;
   budget?: FooterBudget;
   verboseTrace?: boolean;
@@ -36,15 +38,25 @@ export function FooterBar({ data }: { data: FooterData }) {
       : "";
 
   const thinkingText = data.showThinking
-    ? (data.thinkingLevel && data.thinkingLevel !== "off" ? ` • ${data.thinkingLevel}` : " • thinking off")
+    ? (data.thinkingLevel && data.thinkingLevel !== "off" ? ` • ⌃R ${data.thinkingLevel}` : " • ⌃R thinking off")
     : "";
   const traceText = data.verboseTrace ? " • ⌃O trace:on" : " • ⌃O trace";
   const left = `${formatCwd(data.cwd)}${usageText}${budgetText}`;
+  const isPlan = data.mode === "plan";
   const right = `${data.providerId} • ${data.model}${thinkingText}${traceText}`;
 
   return (
     <Box paddingX={1} flexShrink={0}>
       <Text color={theme.muted}>{left}</Text>
+      {isPlan && (
+        <>
+          <Text color={theme.muted}>  </Text>
+          <Text color={theme.accent} bold>
+            {" PLAN "}
+          </Text>
+          <Text color={theme.muted}> ⇧⇥ exit</Text>
+        </>
+      )}
       <Box flexGrow={1} />
       <Text color={theme.muted}>{right}</Text>
     </Box>

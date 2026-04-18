@@ -1,7 +1,13 @@
-import type { ThinkingLevel } from "../types.js";
+import type { AgentMode, ThinkingLevel } from "../types.js";
 
 export interface RuntimePromptOptions {
   thinkingLevel?: ThinkingLevel;
+  /**
+   * Kept for API compatibility. Agent mode is no longer baked into the static
+   * system prompt — mode changes are signalled via <system-reminder> injections
+   * (see src/prompt/reminders.ts) so the base prompt stays stable for caching.
+   */
+  mode?: AgentMode;
   guidelines?: string[];
 }
 
