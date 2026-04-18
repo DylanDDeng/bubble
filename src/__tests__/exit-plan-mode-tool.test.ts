@@ -2,16 +2,23 @@ import { describe, expect, it } from "vitest";
 import { createExitPlanModeTool } from "../tools/exit-plan-mode.js";
 import type { PermissionMode, PlanDecision } from "../types.js";
 
-function createController(respond: (plan: string) => Promise<PlanDecision>) {
+function createController(
+  respond: (plan: string) => Promise<PlanDecision>,
+  initialMode: PermissionMode = "plan",
+) {
   const setModeCalls: PermissionMode[] = [];
+  let mode: PermissionMode = initialMode;
   return {
     controller: {
+      getMode: () => mode,
       requestApproval: respond,
-      setMode: (mode: PermissionMode) => {
-        setModeCalls.push(mode);
+      setMode: (next: PermissionMode) => {
+        setModeCalls.push(next);
+        mode = next;
       },
     },
     setModeCalls,
+    getMode: () => mode,
   };
 }
 
@@ -20,6 +27,18 @@ describe("exit_plan_mode tool", () => {
     const { controller } = createController(async () => ({ action: "reject" }));
     const tool = createExitPlanModeTool(controller);
     expect(tool.readOnly).toBe(true);
+  });
+
+  it("returns an error without prompting the user when called outside plan mode", async () => {
+    const { controller, setModeCalls } = createController(
+      async () => ({ action: "approve", plan: "p" }),
+      "default",
+    );
+    const tool = createExitPlanModeTool(controller);
+    const result = await tool.execute({ plan: "some plan" }, { cwd: "/tmp" });
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("only valid while plan mode is active");
+    expect(setModeCalls).toEqual([]); // did not flip
   });
 
   it("rejects empty plan arg", async () => {

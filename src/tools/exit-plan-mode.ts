@@ -9,6 +9,8 @@
 import type { PermissionMode, PlanDecision, ToolRegistryEntry, ToolResult } from "../types.js";
 
 export interface PlanController {
+  /** Reads the current permission mode (used to gate the tool). */
+  getMode: () => PermissionMode;
   /** Ask the user to approve/reject/edit the proposed plan. */
   requestApproval(plan: string): Promise<PlanDecision>;
   /** Switch the agent's mode. Called after an approval so the next turn runs unconstrained. */
@@ -20,9 +22,10 @@ export function createExitPlanModeTool(controller: PlanController): ToolRegistry
     name: "exit_plan_mode",
     readOnly: true,
     description:
-      "Call this after finishing investigation in plan mode to present a concrete plan to the user. " +
-      "The user may approve (optionally with edits) or reject. On approval, the agent is switched out of plan mode and may begin execution. " +
-      "On rejection, remain in plan mode and iterate on the plan.",
+      "ONLY call this tool when the harness has told you (via a <system-reminder>) that plan mode is ACTIVE. " +
+      "Do NOT call it during ordinary work — in default mode you should just use the regular tools directly. " +
+      "In plan mode: after investigating, call this with a concrete step-by-step plan so the user can approve, edit, or reject. " +
+      "Approval automatically switches the agent out of plan mode.",
     parameters: {
       type: "object",
       properties: {
@@ -34,6 +37,18 @@ export function createExitPlanModeTool(controller: PlanController): ToolRegistry
       required: ["plan"],
     },
     async execute(args): Promise<ToolResult> {
+      // Hard gate: this tool is a no-op outside plan mode. Without this check some
+      // models call it during normal work (misled by the word "plan" in the schema),
+      // which pops a confusing approval dialog to the user.
+      if (controller.getMode() !== "plan") {
+        return {
+          content:
+            "Error: exit_plan_mode is only valid while plan mode is active. " +
+            "You are currently NOT in plan mode — proceed with the user's request directly using the regular tools.",
+          isError: true,
+        };
+      }
+
       const plan = typeof args.plan === "string" ? args.plan.trim() : "";
       if (!plan) {
         return { content: "Error: plan is required and must be a non-empty string", isError: true };

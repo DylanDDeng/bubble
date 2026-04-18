@@ -68,6 +68,7 @@ async function main() {
   };
   const planHandlerRef: { current?: (plan: string) => Promise<PlanDecision> } = {};
   const planController: PlanController = {
+    getMode: () => agentRef?.mode ?? "default",
     requestApproval: (plan) =>
       planHandlerRef.current
         ? planHandlerRef.current(plan)
