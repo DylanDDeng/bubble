@@ -169,6 +169,10 @@ export class Agent {
   }
 
   async *run(userInput: string, cwd: string): AsyncIterable<AgentEvent> {
+    if (this._todos.length > 0 && this._todos.every((t) => t.status === "completed")) {
+      this.setTodos([]);
+      yield { type: "todos_updated", todos: [] };
+    }
     this.appendMessage({ role: "user", content: userInput });
 
     let consecutiveOverflowRecoveries = 0;
