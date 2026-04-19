@@ -106,78 +106,7 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
 
     const stream = (await client.chat.completions.create(body as any)) as any;
 
-    let currentToolCall: { id?: string; name?: string; args: string } | null = null;
-
-    for await (const chunk of stream) {
-      const delta = chunk.choices[0]?.delta;
-      const usage = (chunk as any).usage;
-
-      if (usage) {
-        yield {
-          type: "usage",
-          promptTokens: usage.prompt_tokens,
-          completionTokens: usage.completion_tokens,
-        };
-      }
-
-      const reasoning = (delta as any)?.reasoning ?? (delta as any)?.thinking ?? (delta as any)?.reasoning_content;
-      if (reasoning) {
-        yield { type: "reasoning_delta", content: reasoning };
-      }
-
-      if (delta?.content) {
-        const thinkMatch = delta.content.match(/<think>([\s\S]*?)<\/think>/);
-        if (thinkMatch) {
-          if (thinkMatch[1]) {
-            yield { type: "reasoning_delta", content: thinkMatch[1] };
-          }
-          const remaining = delta.content.replace(/<think>[\s\S]*?<\/think>/, "");
-          if (remaining) {
-            yield { type: "text", content: remaining };
-          }
-        } else {
-          yield { type: "text", content: delta.content };
-        }
-      }
-
-      if (delta?.tool_calls) {
-        const tc = delta.tool_calls[0];
-        if (tc.id && tc.function?.name) {
-          currentToolCall = { id: tc.id, name: tc.function.name, args: "" };
-          yield {
-            type: "tool_call",
-            id: tc.id,
-            name: tc.function.name,
-            arguments: "",
-            isStart: true,
-            isEnd: false,
-          };
-        } else if (currentToolCall && tc.function?.arguments) {
-          currentToolCall.args += tc.function.arguments;
-          yield {
-            type: "tool_call",
-            id: currentToolCall.id!,
-            name: currentToolCall.name!,
-            arguments: tc.function.arguments,
-            isStart: false,
-            isEnd: false,
-          };
-        }
-      }
-
-      const finishReason = chunk.choices[0]?.finish_reason;
-      if (finishReason === "tool_calls" && currentToolCall) {
-        yield {
-          type: "tool_call",
-          id: currentToolCall.id!,
-          name: currentToolCall.name!,
-          arguments: "",
-          isStart: false,
-          isEnd: true,
-        };
-        currentToolCall = null;
-      }
-    }
+    yield* translateOpenAIStream(stream);
 
     yield { type: "done" };
   }
@@ -208,4 +137,81 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
   }
 
   return { streamChat, complete };
+}
+
+/**
+ * Convert an OpenAI-compatible chat-completions stream into our internal StreamChunk events.
+ *
+ * Multi-tool-call streams are buffered by `index` and emitted in index order at
+ * `finish_reason === "tool_calls"`, so the agent layer always sees a clean
+ * (isStart -> args -> isEnd) sequence per call. This matters for providers like
+ * Kimi K2.5 that emit several parallel tool calls per assistant turn -- the
+ * previous single-slot implementation silently dropped every call but the last.
+ */
+export async function* translateOpenAIStream(stream: AsyncIterable<any>): AsyncIterable<StreamChunk> {
+  const toolCalls = new Map<number, { id: string; name: string; args: string }>();
+
+  function* flushToolCalls(): Generator<StreamChunk> {
+    if (toolCalls.size === 0) return;
+    const sorted = [...toolCalls.entries()].sort(([a], [b]) => a - b);
+    for (const [, entry] of sorted) {
+      if (!entry.id || !entry.name) continue;
+      yield { type: "tool_call", id: entry.id, name: entry.name, arguments: "", isStart: true, isEnd: false };
+      if (entry.args) {
+        yield { type: "tool_call", id: entry.id, name: entry.name, arguments: entry.args, isStart: false, isEnd: false };
+      }
+      yield { type: "tool_call", id: entry.id, name: entry.name, arguments: "", isStart: false, isEnd: true };
+    }
+    toolCalls.clear();
+  }
+
+  for await (const chunk of stream) {
+    const delta = chunk.choices?.[0]?.delta;
+    const usage = (chunk as any).usage;
+
+    if (usage) {
+      yield { type: "usage", promptTokens: usage.prompt_tokens, completionTokens: usage.completion_tokens };
+    }
+
+    const reasoning = (delta as any)?.reasoning ?? (delta as any)?.thinking ?? (delta as any)?.reasoning_content;
+    if (reasoning) {
+      yield { type: "reasoning_delta", content: reasoning };
+    }
+
+    if (delta?.content) {
+      const thinkMatch = delta.content.match(/<think>([\s\S]*?)<\/think>/);
+      if (thinkMatch) {
+        if (thinkMatch[1]) {
+          yield { type: "reasoning_delta", content: thinkMatch[1] };
+        }
+        const remaining = delta.content.replace(/<think>[\s\S]*?<\/think>/, "");
+        if (remaining) {
+          yield { type: "text", content: remaining };
+        }
+      } else {
+        yield { type: "text", content: delta.content };
+      }
+    }
+
+    if (delta?.tool_calls) {
+      for (const tc of delta.tool_calls) {
+        const idx = typeof tc.index === "number" ? tc.index : 0;
+        let entry = toolCalls.get(idx);
+        if (!entry) {
+          entry = { id: "", name: "", args: "" };
+          toolCalls.set(idx, entry);
+        }
+        if (tc.id) entry.id = tc.id;
+        if (tc.function?.name) entry.name = tc.function.name;
+        if (typeof tc.function?.arguments === "string") entry.args += tc.function.arguments;
+      }
+    }
+
+    const finishReason = chunk.choices?.[0]?.finish_reason;
+    if (finishReason === "tool_calls") {
+      yield* flushToolCalls();
+    }
+  }
+
+  yield* flushToolCalls();
 }
