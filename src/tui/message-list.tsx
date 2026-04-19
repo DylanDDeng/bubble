@@ -82,25 +82,19 @@ function StreamingMessage({ content, reasoning, tools, terminalColumns }: { cont
 
 function ThinkingBlock({ reasoning, verbose }: { reasoning: string; verbose: boolean }) {
   const lines = reasoning.split("\n").filter((l) => l.trim() !== "");
-  if (!verbose) {
-    return (
-      <Box marginLeft={2} marginBottom={1}>
-        <Text color={theme.thinking} bold>● Thinking</Text>
-        <Text color={theme.muted}> ({lines.length} line{lines.length === 1 ? "" : "s"})</Text>
-      </Box>
-    );
-  }
-  const preview = lines.slice(0, 3);
-  const hasMore = lines.length > 3;
+  const shown = verbose ? lines : lines.slice(0, 3);
+  const hiddenCount = lines.length - shown.length;
   return (
     <Box flexDirection="column" marginLeft={2} marginBottom={1}>
       <Text color={theme.thinking} bold>Thinking</Text>
-      {preview.map((line, i) => (
+      {shown.map((line, i) => (
         <Text key={i} color={theme.thinking}>
           {line}
         </Text>
       ))}
-      {hasMore && <Text color={theme.thinking}>... ({lines.length - 3} more lines)</Text>}
+      {hiddenCount > 0 && (
+        <Text color={theme.thinking}>... ({hiddenCount} more line{hiddenCount === 1 ? "" : "s"})</Text>
+      )}
     </Box>
   );
 }
