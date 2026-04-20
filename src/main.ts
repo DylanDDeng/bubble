@@ -134,14 +134,16 @@ async function main() {
     const { registry: slashRegistry } = await import("./slash-commands/index.js");
     slashRegistry.addDynamicSource(() => mcpManager.getPromptCommands());
   }
+  // Signal-based shutdown for Ctrl-C / kill. For /quit (ink's own unmount) the
+  // quit command handler shuts MCP down directly — process.once("exit", ...)
+  // runs synchronously and can't await async work, so relying on it is a trap.
   const shutdownMcp = async () => {
     try {
       await mcpManager.shutdown();
     } catch {
-      // ignore
+      // ignore — we're exiting anyway
     }
   };
-  process.once("exit", () => { void shutdownMcp(); });
   process.once("SIGINT", () => { void shutdownMcp().then(() => process.exit(130)); });
   process.once("SIGTERM", () => { void shutdownMcp().then(() => process.exit(143)); });
 
