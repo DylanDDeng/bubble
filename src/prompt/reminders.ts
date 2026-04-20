@@ -69,3 +69,18 @@ export function reminderForMode(mode: PermissionMode): string {
 // Backward-compat exports kept in case external code pinned the old names.
 export const PLAN_MODE_ENTER_REMINDER = reminderForMode("plan");
 export const PLAN_MODE_EXIT_REMINDER = reminderForMode("default");
+
+/**
+ * Announce the set of deferred tools. Their schemas are not in the tool list
+ * sent to the model — the model must call `tool_search` to load them before
+ * they can be invoked.
+ */
+export function buildDeferredToolsReminder(names: string[]): string {
+  if (names.length === 0) return wrapInSystemReminder("No deferred tools.");
+  const lines = [
+    "The following deferred tools are available via tool_search. Their schemas are NOT loaded — calling them directly will fail. Use tool_search with query \"select:<name>[,<name>...]\" to load tool schemas before calling them:",
+    "",
+    ...names,
+  ];
+  return wrapInSystemReminder(lines.join("\n"));
+}

@@ -103,6 +103,13 @@ export interface ToolRegistryEntry extends ToolDefinition {
   execute: ToolExecutor;
   /** Whether this tool is allowed in plan mode. Defaults to false (treated as write-capable). */
   readOnly?: boolean;
+  /**
+   * If true, this tool is omitted from the tool list sent to the model on each
+   * turn until unlocked via `tool_search`. Only the tool's name appears in a
+   * startup &lt;system-reminder&gt;. Used for MCP tools to keep them out of the
+   * per-turn context cost when not in use.
+   */
+  deferred?: boolean;
 }
 
 // ============================================================================

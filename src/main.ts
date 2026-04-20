@@ -14,11 +14,13 @@ import { ProviderRegistry, displayModel, encodeModel, decodeModel } from "./prov
 import { SessionManager } from "./session.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { SkillRegistry } from "./skills/registry.js";
-import { createAllTools, type PlanController } from "./tools/index.js";
+import { createAllTools, type PlanController, type ToolSearchController } from "./tools/index.js";
 import { PermissionAwareApprovalController } from "./approval/controller.js";
 import { BashAllowlist } from "./approval/session-cache.js";
 import type { ApprovalDecision, ApprovalRequest } from "./approval/types.js";
 import { SettingsManager } from "./permissions/settings.js";
+import { loadMcpConfig } from "./mcp/config.js";
+import { McpManager } from "./mcp/manager.js";
 import type { PermissionMode, Message, PlanDecision } from "./types.js";
 
 async function main() {
@@ -94,11 +96,54 @@ async function main() {
     cwd: args.cwd,
     getRuleSet: () => settingsManager.getMerged().ruleSet,
   });
+  const toolSearchController: ToolSearchController = {
+    listDeferred: () => agentRef?.listDeferredTools() ?? [],
+    unlock: (names) => agentRef?.unlockDeferredTools(names),
+  };
   const tools = createAllTools(args.cwd, skillRegistry, {
     todoStore,
     planController,
     approvalController,
+    toolSearchController,
   });
+
+  // Bring up MCP servers (if any). Failures are captured per-server and never
+  // block the rest of startup; /mcp surfaces status at runtime.
+  const mcpLoaded = loadMcpConfig({ cwd: args.cwd });
+  for (const d of mcpLoaded.diagnostics) {
+    console.error(chalk.yellow(`[mcp:${d.scope}] ${d.path}: ${d.message}`));
+  }
+  const mcpManager = new McpManager({ servers: mcpLoaded.servers });
+  if (mcpLoaded.servers.length > 0) {
+    await mcpManager.start();
+    for (const state of mcpManager.getStates()) {
+      if (state.status.kind === "connected") {
+        const tn = state.status.tools.length;
+        const pn = state.status.prompts.length;
+        const parts = [`${tn} tool${tn === 1 ? "" : "s"}`];
+        if (pn > 0) parts.push(`${pn} prompt${pn === 1 ? "" : "s"}`);
+        console.log(chalk.dim(`[mcp] ${state.name}: connected, ${parts.join(", ")}`));
+      }
+    }
+    tools.push(...mcpManager.getToolEntries());
+  }
+
+  // Expose MCP prompts as slash commands. Queried live at each lookup so
+  // /mcp reconnect picks up new prompts without restarting the process.
+  {
+    const { registry: slashRegistry } = await import("./slash-commands/index.js");
+    slashRegistry.addDynamicSource(() => mcpManager.getPromptCommands());
+  }
+  const shutdownMcp = async () => {
+    try {
+      await mcpManager.shutdown();
+    } catch {
+      // ignore
+    }
+  };
+  process.once("exit", () => { void shutdownMcp(); });
+  process.once("SIGINT", () => { void shutdownMcp().then(() => process.exit(130)); });
+  process.once("SIGTERM", () => { void shutdownMcp().then(() => process.exit(143)); });
 
   // Session management:
   // - default: always start a fresh session
@@ -256,6 +301,7 @@ async function main() {
     approvalHandlerRef,
     bashAllowlist,
     settingsManager,
+    mcpManager,
     bypassEnabled: args.bypassEnabled,
   });
 }

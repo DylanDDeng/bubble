@@ -30,6 +30,7 @@ import { getNextPermissionMode } from "../permission/mode.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
 import type { BashAllowlist } from "../approval/session-cache.js";
 import type { SettingsManager } from "../permissions/settings.js";
+import type { McpManager } from "../mcp/manager.js";
 import os from "node:os";
 
 export interface PlanHandlerRef {
@@ -51,6 +52,7 @@ interface AppProps {
   approvalHandlerRef?: ApprovalHandlerRef;
   bashAllowlist?: BashAllowlist;
   settingsManager?: SettingsManager;
+  mcpManager?: McpManager;
   /** Whether the bypassPermissions mode is reachable via Shift+Tab cycling. */
   bypassEnabled?: boolean;
 }
@@ -120,7 +122,7 @@ function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] 
   return result;
 }
 
-export function App({ agent, args, sessionManager, createProvider, registry, skillRegistry, planHandlerRef, approvalHandlerRef, bashAllowlist, settingsManager, bypassEnabled }: AppProps) {
+export function App({ agent, args, sessionManager, createProvider, registry, skillRegistry, planHandlerRef, approvalHandlerRef, bashAllowlist, settingsManager, mcpManager, bypassEnabled }: AppProps) {
   const { exit } = useApp();
   const [messages, setMessages] = useState<DisplayMessage[]>(() => reconstructDisplayMessages(agent.messages));
   const [isRunning, setIsRunning] = useState(false);
@@ -354,6 +356,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       skillRegistry: safeSkillRegistry!,
       bashAllowlist,
       settingsManager,
+      mcpManager,
     });
     if (handled && result) {
       addMessage("assistant", result);
@@ -378,6 +381,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       skillRegistry: safeSkillRegistry!,
       bashAllowlist,
       settingsManager,
+      mcpManager,
     });
     if (handled && result) {
       addMessage("assistant", result);
@@ -532,7 +536,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           return;
         }
 
-        const { handled, result } = await slashRegistry.execute(input, {
+        const { handled, result, inject } = await slashRegistry.execute(input, {
           agent,
           addMessage,
           clearMessages,
@@ -547,6 +551,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           skillRegistry: safeSkillRegistry!,
           bashAllowlist,
           settingsManager,
+          mcpManager,
         });
         if (handled) {
           if (agent.mode !== permissionMode) {
@@ -554,6 +559,9 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           }
           if (result) {
             addMessage("assistant", result);
+          }
+          if (inject) {
+            await runAgentInput(inject, input);
           }
           return;
         }

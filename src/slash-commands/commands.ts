@@ -493,6 +493,72 @@ export const builtinSlashCommands: SlashCommand[] = [
     },
   },
   {
+    name: "mcp",
+    description: "Manage MCP servers. Usage: /mcp [list|reconnect <name>]",
+    async handler(args, ctx) {
+      const tokens = args.trim().split(/\s+/).filter(Boolean);
+      const sub = tokens[0] ?? "list";
+
+      if (!ctx.mcpManager) {
+        return "MCP is not initialized for this session.";
+      }
+
+      if (sub === "reconnect") {
+        const name = tokens[1];
+        if (!name) return "Usage: /mcp reconnect <server-name>";
+        const state = await ctx.mcpManager.reconnect(name);
+        if (!state) return `Unknown MCP server: ${name}`;
+        if (state.status.kind === "connected") {
+          return `Reconnected ${name}. ${state.status.tools.length} tool${state.status.tools.length === 1 ? "" : "s"} available.`;
+        }
+        if (state.status.kind === "failed") {
+          return `Failed to connect ${name}: ${state.status.error}`;
+        }
+        return `${name}: ${state.status.kind}`;
+      }
+
+      if (sub !== "list" && sub !== "") {
+        return `Unknown /mcp subcommand "${sub}". Use /mcp list or /mcp reconnect <name>.`;
+      }
+
+      const states = ctx.mcpManager.getStates();
+      if (states.length === 0) {
+        return "No MCP servers configured. Add entries under `mcpServers` in ~/.bubble/settings.json or <cwd>/.bubble/settings.json.";
+      }
+
+      const lines: string[] = ["MCP servers:"];
+      for (const state of states) {
+        const transport = state.config.type;
+        const scope = state.scope;
+        if (state.status.kind === "connected") {
+          const info = state.status.serverInfo ? ` ${state.status.serverInfo.name}@${state.status.serverInfo.version}` : "";
+          const tn = state.status.tools.length;
+          const pn = state.status.prompts.length;
+          const counts = [`${tn} tool${tn === 1 ? "" : "s"}`];
+          if (pn > 0) counts.push(`${pn} prompt${pn === 1 ? "" : "s"}`);
+          lines.push(`  ✔ ${state.name} [${scope}/${transport}]${info} — ${counts.join(", ")}`);
+          for (const tool of state.status.tools) {
+            lines.push(`      · ${tool.name}${tool.description ? ` — ${tool.description.replace(/\s+/g, " ").slice(0, 80)}` : ""}`);
+          }
+          if (pn > 0) {
+            lines.push(`    prompts (use as /mcp__${state.name}__<name>):`);
+            for (const p of state.status.prompts) {
+              const argSig = p.arguments?.length
+                ? ` <${p.arguments.map((a) => (a.required ? a.name : `${a.name}?`)).join("> <")}>`
+                : "";
+              lines.push(`      · /mcp__${state.name}__${p.name}${argSig}${p.description ? ` — ${p.description.replace(/\s+/g, " ").slice(0, 70)}` : ""}`);
+            }
+          }
+        } else if (state.status.kind === "failed") {
+          lines.push(`  ✘ ${state.name} [${scope}/${transport}] — ${state.status.error}`);
+        } else {
+          lines.push(`  ○ ${state.name} [${scope}/${transport}] — disabled`);
+        }
+      }
+      return lines.join("\n");
+    },
+  },
+  {
     name: "compact",
     description: "Manually compact the current session context",
     async handler(args, ctx) {

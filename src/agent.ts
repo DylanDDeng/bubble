@@ -8,7 +8,7 @@ import { compactMessagesWithLLM } from "./context/compact-llm.js";
 import { isContextOverflowError } from "./context/overflow.js";
 import { projectMessages } from "./context/projector.js";
 import { aggressivePruneMessages } from "./context/prune.js";
-import { reminderForMode } from "./prompt/reminders.js";
+import { buildDeferredToolsReminder, reminderForMode } from "./prompt/reminders.js";
 import type { AgentEvent, PermissionMode, Message, ParsedToolCall, Provider, ThinkingLevel, Todo, ToolDefinition, ToolResult, ToolRegistryEntry } from "./types.js";
 
 const MAX_CONSECUTIVE_OVERFLOW_RECOVERIES = 3;
@@ -35,6 +35,7 @@ export class Agent {
   private _providerId: string;
   private _model: string;
   private tools: Map<string, ToolRegistryEntry> = new Map();
+  private unlockedDeferred: Set<string> = new Set();
   private temperature: number;
   private thinkingLevel: ThinkingLevel;
   private _mode: PermissionMode;
@@ -74,6 +75,33 @@ export class Agent {
     if (this._mode !== "default") {
       this.injectSystemReminder(reminderForMode(this._mode));
     }
+
+    // Advertise any deferred tools so the model knows they exist and how to
+    // reach them. Keeps the per-turn tool list small; schemas load on demand.
+    const deferredNames = [...this.tools.values()]
+      .filter((t) => t.deferred)
+      .map((t) => t.name);
+    if (deferredNames.length > 0) {
+      this.injectSystemReminder(buildDeferredToolsReminder(deferredNames));
+    }
+  }
+
+  /** Unlock a list of deferred tools so they're included in subsequent turns. */
+  unlockDeferredTools(names: string[]): void {
+    for (const n of names) {
+      if (this.tools.has(n)) this.unlockedDeferred.add(n);
+    }
+  }
+
+  /** All deferred tools in this session (for tool_search to inspect). */
+  listDeferredTools(): ToolRegistryEntry[] {
+    return [...this.tools.values()].filter((t) => t.deferred);
+  }
+
+  /** Whether a given tool is deferred and not yet unlocked. */
+  isDeferredAndLocked(name: string): boolean {
+    const tool = this.tools.get(name);
+    return !!tool?.deferred && !this.unlockedDeferred.has(name);
   }
 
   injectSystemReminder(content: string): void {
@@ -191,11 +219,13 @@ export class Agent {
       let turnUsage: { promptTokens: number; completionTokens: number } | undefined;
       let assistantAppended = false;
 
-      const toolDefinitions: ToolDefinition[] = Array.from(this.tools.values()).map((t) => ({
-        name: t.name,
-        description: t.description,
-        parameters: t.parameters,
-      }));
+      const toolDefinitions: ToolDefinition[] = Array.from(this.tools.values())
+        .filter((t) => !t.deferred || this.unlockedDeferred.has(t.name))
+        .map((t) => ({
+          name: t.name,
+          description: t.description,
+          parameters: t.parameters,
+        }));
 
       try {
         const projectedMessages = projectMessages(this.messages, {
@@ -368,6 +398,15 @@ export class Agent {
           `Error: Tool "${toolCall.name}" is not allowed in plan mode. ` +
           `In plan mode you may only use read-only tools (read, grep, web_search, web_fetch, skill). ` +
           `To modify files or run commands, present your proposal and call exit_plan_mode so the user can review and approve it.`,
+        isError: true,
+      };
+    }
+
+    if (tool.deferred && !this.unlockedDeferred.has(tool.name)) {
+      return {
+        content:
+          `Error: Tool "${toolCall.name}" is a deferred tool; its schema is not yet loaded. ` +
+          `Call tool_search first with query "select:${toolCall.name}" to load its schema, then retry.`,
         isError: true,
       };
     }
