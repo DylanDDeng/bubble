@@ -18,6 +18,7 @@ import { createAllTools, type PlanController } from "./tools/index.js";
 import { PermissionAwareApprovalController } from "./approval/controller.js";
 import { BashAllowlist } from "./approval/session-cache.js";
 import type { ApprovalDecision, ApprovalRequest } from "./approval/types.js";
+import { SettingsManager } from "./permissions/settings.js";
 import type { PermissionMode, Message, PlanDecision } from "./types.js";
 
 async function main() {
@@ -82,10 +83,16 @@ async function main() {
   };
   const approvalHandlerRef: { current?: (req: ApprovalRequest) => Promise<ApprovalDecision> } = {};
   const bashAllowlist = new BashAllowlist();
+  const settingsManager = new SettingsManager(args.cwd);
+  for (const d of settingsManager.getMerged().diagnostics) {
+    console.error(chalk.yellow(`[settings:${d.scope}] ${d.path}: ${d.message}`));
+  }
   const approvalController = new PermissionAwareApprovalController({
     getMode: () => agentRef?.mode ?? "default",
     handlerRef: approvalHandlerRef,
     bashAllowlist,
+    cwd: args.cwd,
+    getRuleSet: () => settingsManager.getMerged().ruleSet,
   });
   const tools = createAllTools(args.cwd, skillRegistry, {
     todoStore,
@@ -248,6 +255,7 @@ async function main() {
     planHandlerRef,
     approvalHandlerRef,
     bashAllowlist,
+    settingsManager,
     bypassEnabled: args.bypassEnabled,
   });
 }

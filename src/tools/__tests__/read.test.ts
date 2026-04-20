@@ -2,7 +2,17 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import type { ApprovalController } from "../../approval/types.js";
+import { buildRuleSet, checkPermission } from "../../permissions/rule.js";
 import { createReadTool } from "../read.js";
+
+function makeApproval(allow: string[], deny: string[]): ApprovalController {
+  const rules = buildRuleSet(allow, deny);
+  return {
+    request: async () => ({ action: "approve" }),
+    checkRules: (query) => checkPermission(rules, query),
+  };
+}
 
 describe("read tool", () => {
   const tmpDir = join(tmpdir(), "bubble-test-read-" + Date.now());
@@ -35,6 +45,31 @@ describe("read tool", () => {
 
     expect(result.isError).toBe(true);
     expect(result.content).toContain("Cannot read file");
+  });
+
+  it("deny rule blocks reads before touching disk", async () => {
+    const file = join(tmpDir, "secret.env");
+    writeFileSync(file, "SECRET=abc", "utf-8");
+
+    const approval = makeApproval([], [`Read(${tmpDir}/*.env)`]);
+    const tool = createReadTool(tmpDir, approval);
+    const result = await tool.execute({ path: "secret.env" }, { cwd: tmpDir });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("deny rule");
+    expect(result.content).not.toContain("SECRET=abc");
+  });
+
+  it("reads normally when no deny rule matches", async () => {
+    const file = join(tmpDir, "ok.txt");
+    writeFileSync(file, "visible", "utf-8");
+
+    const approval = makeApproval([], ["Read(/tmp/nonexistent/**)"]);
+    const tool = createReadTool(tmpDir, approval);
+    const result = await tool.execute({ path: "ok.txt" }, { cwd: tmpDir });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.content).toBe("visible");
   });
 
   it("truncates large files", async () => {

@@ -40,13 +40,13 @@ export function createAllTools(
 ): ToolRegistryEntry[] {
   const approval = options.approvalController;
   return [
-    createReadTool(cwd),
+    createReadTool(cwd, approval),
     createBashTool(cwd, approval),
     createWriteTool(cwd, { refuseOverwrite: true }, approval),
     createEditTool(cwd, approval),
     createGrepTool(cwd),
     createWebSearchTool(),
-    createWebFetchTool(),
+    createWebFetchTool(approval),
     ...(skillRegistry ? [createSkillTool(skillRegistry)] : []),
     ...(options.todoStore ? [createTodoTool(options.todoStore)] : []),
     ...(options.planController ? [createExitPlanModeTool(options.planController)] : []),

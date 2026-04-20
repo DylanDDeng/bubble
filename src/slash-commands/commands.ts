@@ -1,9 +1,60 @@
 import { UserConfig, maskKey } from "../config.js";
+import { parseRule } from "../permissions/rule.js";
+import type { RuleList, SettingsScope } from "../permissions/settings.js";
 import { encodeModel, decodeModel, displayModel, BUILTIN_PROVIDERS, isUserVisibleProvider } from "../provider-registry.js";
 import { getAvailableThinkingLevels, normalizeThinkingLevel } from "../provider-transform.js";
 import { buildSystemPrompt } from "../system-prompt.js";
 import { formatLoadedSkill } from "../tools/skill.js";
-import type { SlashCommand } from "./types.js";
+import type { SlashCommand, SlashCommandContext } from "./types.js";
+
+const VALID_SCOPES: SettingsScope[] = ["user", "project", "local"];
+const VALID_LISTS: RuleList[] = ["allow", "deny"];
+
+function isScope(value: string): value is SettingsScope {
+  return (VALID_SCOPES as string[]).includes(value);
+}
+
+function isList(value: string): value is RuleList {
+  return (VALID_LISTS as string[]).includes(value);
+}
+
+function handlePermissionsMutation(
+  sub: "add" | "remove",
+  tokens: string[],
+  ctx: SlashCommandContext,
+): string {
+  if (!ctx.settingsManager) {
+    return "No settings manager is attached to this session.";
+  }
+
+  const [scope, list, ...ruleParts] = tokens;
+  if (!scope || !list || ruleParts.length === 0) {
+    return `Usage: /permissions ${sub} <user|project|local> <allow|deny> <rule>\n`
+      + `Example: /permissions ${sub} local allow Bash(git status)`;
+  }
+  if (!isScope(scope)) {
+    return `Unknown scope "${scope}". Use one of: ${VALID_SCOPES.join(", ")}.`;
+  }
+  if (!isList(list)) {
+    return `Unknown list "${list}". Use allow or deny.`;
+  }
+
+  const rule = ruleParts.join(" ");
+  const parsed = parseRule(rule);
+  if (!parsed.ok) {
+    return `Invalid rule: ${parsed.error.message}`;
+  }
+
+  if (sub === "add") {
+    const added = ctx.settingsManager.addRule(scope, list, rule);
+    if (!added) return `Rule already present in ${scope} ${list}: ${rule}`;
+    return `Added to ${scope} ${list}: ${rule}\n  → ${ctx.settingsManager.getPath(scope)}`;
+  }
+
+  const removed = ctx.settingsManager.removeRule(scope, list, rule);
+  if (!removed) return `Rule not found in ${scope} ${list}: ${rule}`;
+  return `Removed from ${scope} ${list}: ${rule}`;
+}
 
 const userConfig = new UserConfig();
 
@@ -366,26 +417,77 @@ export const builtinSlashCommands: SlashCommand[] = [
   },
   {
     name: "permissions",
-    description: "Show the session bash allowlist. Use /permissions clear to reset it.",
+    description: "Inspect or edit allow/deny rules. Subcommands: add <scope> <list> <rule>, remove <scope> <list> <rule>, clear (session allowlist), reload.",
     async handler(args, ctx) {
-      if (!ctx.bashAllowlist) {
-        return "No approval controller is attached to this session.";
+      const tokens = args.trim().split(/\s+/).filter(Boolean);
+      const sub = tokens[0] ?? "";
+
+      if (sub === "add" || sub === "remove") {
+        return handlePermissionsMutation(sub, tokens.slice(1), ctx);
       }
-      const sub = args.trim();
+
       if (sub === "clear") {
+        if (!ctx.bashAllowlist) return "No approval controller is attached to this session.";
         const size = ctx.bashAllowlist.size();
         if (size === 0) return "Bash allowlist is already empty.";
         ctx.bashAllowlist.clear();
         return `Cleared ${size} bash prefix${size === 1 ? "" : "es"} from the session allowlist.`;
       }
 
-      const entries = ctx.bashAllowlist.list();
-      if (entries.length === 0) {
-        return "Bash allowlist is empty. Approving \"Yes, and don't ask again for <prefix>\" adds entries here.";
+      if (sub === "reload") {
+        if (!ctx.settingsManager) return "No settings manager is attached to this session.";
+        ctx.settingsManager.reload();
+        return "Reloaded permission settings from disk.";
       }
-      const lines = [`Session-allowed bash prefixes (${entries.length}):`];
-      for (const prefix of entries) {
-        lines.push(`  ${prefix}`);
+
+      const lines: string[] = [];
+
+      if (ctx.settingsManager) {
+        const merged = ctx.settingsManager.getMerged();
+        lines.push("Settings files:");
+        lines.push(`  user:    ${ctx.settingsManager.getPath("user")}`);
+        lines.push(`  project: ${ctx.settingsManager.getPath("project")}`);
+        lines.push(`  local:   ${ctx.settingsManager.getPath("local")}`);
+
+        if (merged.defaultMode) {
+          lines.push("", `defaultMode: ${merged.defaultMode}`);
+        }
+
+        lines.push("", `Allow rules (${merged.ruleSet.allow.length}):`);
+        if (merged.ruleSet.allow.length === 0) {
+          lines.push("  (none)");
+        } else {
+          for (const r of merged.ruleSet.allow) lines.push(`  ${r.source}`);
+        }
+
+        lines.push("", `Deny rules (${merged.ruleSet.deny.length}):`);
+        if (merged.ruleSet.deny.length === 0) {
+          lines.push("  (none)");
+        } else {
+          for (const r of merged.ruleSet.deny) lines.push(`  ${r.source}`);
+        }
+
+        if (merged.diagnostics.length > 0) {
+          lines.push("", "Diagnostics:");
+          for (const d of merged.diagnostics) {
+            lines.push(`  [${d.scope}] ${d.message}`);
+          }
+        }
+      }
+
+      if (ctx.bashAllowlist) {
+        const entries = ctx.bashAllowlist.list();
+        if (lines.length > 0) lines.push("");
+        lines.push(`Session bash allowlist (${entries.length}):`);
+        if (entries.length === 0) {
+          lines.push('  (none) — approving "Yes, and don\'t ask again for <prefix>" adds entries here');
+        } else {
+          for (const prefix of entries) lines.push(`  ${prefix}`);
+        }
+      }
+
+      if (lines.length === 0) {
+        return "Permissions system not attached to this session.";
       }
       return lines.join("\n");
     },

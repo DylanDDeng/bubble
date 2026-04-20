@@ -2,10 +2,11 @@
  * Web fetch tool - remote Exa MCP-backed page extraction.
  */
 
+import type { ApprovalController } from "../approval/types.js";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
 import { callExaMcpTool } from "./exa-mcp.js";
 
-export function createWebFetchTool(): ToolRegistryEntry {
+export function createWebFetchTool(approval?: ApprovalController): ToolRegistryEntry {
   return {
     name: "web_fetch",
     readOnly: true,
@@ -43,6 +44,16 @@ export function createWebFetchTool(): ToolRegistryEntry {
       const url = typeof args.url === "string" ? args.url.trim() : "";
       if (!url) {
         return { content: "Error: url is required", isError: true };
+      }
+
+      if (approval) {
+        const result = approval.checkRules({ tool: "WebFetch", url });
+        if (result.decision === "deny") {
+          return {
+            content: `Error: WebFetch blocked by deny rule: ${result.rule?.source ?? "<unknown>"} (${url})`,
+            isError: true,
+          };
+        }
       }
 
       const query = typeof args.query === "string" ? args.query.trim() : undefined;

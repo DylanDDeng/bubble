@@ -5,12 +5,13 @@
 import { constants } from "node:fs";
 import { access, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import type { ApprovalController } from "../approval/types.js";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
 
 const MAX_LINES = 250;
 const MAX_BYTES = 100 * 1024;
 
-export function createReadTool(cwd: string): ToolRegistryEntry {
+export function createReadTool(cwd: string, approval?: ApprovalController): ToolRegistryEntry {
   return {
     name: "read",
     readOnly: true,
@@ -26,6 +27,17 @@ export function createReadTool(cwd: string): ToolRegistryEntry {
     },
     async execute(args): Promise<ToolResult> {
       const filePath = resolve(cwd, args.path);
+
+      if (approval) {
+        const result = approval.checkRules({ tool: "Read", path: filePath, cwd });
+        if (result.decision === "deny") {
+          return {
+            content: `Error: Read blocked by deny rule: ${result.rule?.source ?? "<unknown>"} (${filePath})`,
+            isError: true,
+          };
+        }
+      }
+
       try {
         await access(filePath, constants.R_OK);
       } catch {

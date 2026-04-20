@@ -18,6 +18,7 @@ function makeApproval(decisionFor: (req: ApprovalRequest) => ApprovalDecision): 
         requests.push(req);
         return decisionFor(req);
       },
+      checkRules: () => ({ decision: "ask" }),
     },
     requests,
   };

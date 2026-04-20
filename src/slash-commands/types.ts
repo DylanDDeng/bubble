@@ -4,6 +4,7 @@ import type { Provider } from "../types.js";
 import type { ProviderRegistry } from "../provider-registry.js";
 import type { SkillRegistry } from "../skills/registry.js";
 import type { BashAllowlist } from "../approval/session-cache.js";
+import type { SettingsManager } from "../permissions/settings.js";
 
 export interface SlashCommandContext {
   agent: Agent;
@@ -17,6 +18,7 @@ export interface SlashCommandContext {
   registry: ProviderRegistry;
   skillRegistry: SkillRegistry;
   bashAllowlist?: BashAllowlist;
+  settingsManager?: SettingsManager;
 }
 
 export interface SlashCommand {

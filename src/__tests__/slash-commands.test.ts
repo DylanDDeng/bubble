@@ -151,7 +151,7 @@ describe("slash commands", () => {
 
     let result = await slashRegistry.execute("/permissions", ctx);
     expect(result.handled).toBe(true);
-    expect(result.result).toContain("Session-allowed bash prefixes");
+    expect(result.result).toContain("Session bash allowlist");
     expect(result.result).toContain("git status");
     expect(result.result).toContain("npm test");
 
@@ -161,6 +161,97 @@ describe("slash commands", () => {
 
     result = await slashRegistry.execute("/permissions clear", ctx);
     expect(result.result).toContain("already empty");
+  });
+
+  it("/permissions add writes a rule and makes it visible to getMerged", async () => {
+    const { SettingsManager } = await import("../permissions/settings.js");
+    const root = join(tmpdir(), `bubble-perms-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    const bubbleHome = join(root, "home");
+    const cwd = join(root, "project");
+    mkdirSync(bubbleHome, { recursive: true });
+    mkdirSync(cwd, { recursive: true });
+    const settingsManager = new SettingsManager(cwd, { bubbleHome });
+
+    const ctx = createContext({ settingsManager } as any);
+
+    const added = await slashRegistry.execute("/permissions add local allow Bash(git status)", ctx);
+    expect(added.handled).toBe(true);
+    expect(added.result).toContain("Added to local allow");
+
+    const merged = settingsManager.getMerged();
+    expect(merged.ruleSet.allow.map((r) => r.source)).toContain("Bash(git status)");
+  });
+
+  it("/permissions add rejects invalid rules", async () => {
+    const { SettingsManager } = await import("../permissions/settings.js");
+    const root = join(tmpdir(), `bubble-perms-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    const settingsManager = new SettingsManager(join(root, "project"), { bubbleHome: join(root, "home") });
+
+    const ctx = createContext({ settingsManager } as any);
+
+    const result = await slashRegistry.execute("/permissions add user allow Bash()", ctx);
+    expect(result.result).toContain("Invalid rule");
+  });
+
+  it("/permissions add rejects unknown scope or list", async () => {
+    const { SettingsManager } = await import("../permissions/settings.js");
+    const root = join(tmpdir(), `bubble-perms-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    const settingsManager = new SettingsManager(join(root, "project"), { bubbleHome: join(root, "home") });
+
+    const ctx = createContext({ settingsManager } as any);
+
+    expect((await slashRegistry.execute("/permissions add global allow Bash(ls)", ctx)).result)
+      .toContain("Unknown scope");
+    expect((await slashRegistry.execute("/permissions add user maybe Bash(ls)", ctx)).result)
+      .toContain("Unknown list");
+  });
+
+  it("/permissions remove deletes an existing rule", async () => {
+    const { SettingsManager } = await import("../permissions/settings.js");
+    const root = join(tmpdir(), `bubble-perms-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    const settingsManager = new SettingsManager(join(root, "project"), { bubbleHome: join(root, "home") });
+    settingsManager.addRule("local", "deny", "Bash(rm -rf:*)");
+
+    const ctx = createContext({ settingsManager } as any);
+
+    const result = await slashRegistry.execute("/permissions remove local deny Bash(rm -rf:*)", ctx);
+    expect(result.result).toContain("Removed from local deny");
+    expect(settingsManager.getMerged().ruleSet.deny).toHaveLength(0);
+  });
+
+  it("/permissions remove reports when the rule is missing", async () => {
+    const { SettingsManager } = await import("../permissions/settings.js");
+    const root = join(tmpdir(), `bubble-perms-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    const settingsManager = new SettingsManager(join(root, "project"), { bubbleHome: join(root, "home") });
+
+    const ctx = createContext({ settingsManager } as any);
+
+    const result = await slashRegistry.execute("/permissions remove local allow Bash(ls)", ctx);
+    expect(result.result).toContain("Rule not found");
+  });
+
+  it("/permissions add reports duplicates without writing twice", async () => {
+    const { SettingsManager } = await import("../permissions/settings.js");
+    const root = join(tmpdir(), `bubble-perms-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    const settingsManager = new SettingsManager(join(root, "project"), { bubbleHome: join(root, "home") });
+
+    const ctx = createContext({ settingsManager } as any);
+
+    await slashRegistry.execute("/permissions add user allow Bash(ls)", ctx);
+    const dup = await slashRegistry.execute("/permissions add user allow Bash(ls)", ctx);
+    expect(dup.result).toContain("already present");
+    expect(settingsManager.getMerged().ruleSet.allow).toHaveLength(1);
+  });
+
+  it("/permissions add without args shows usage", async () => {
+    const { SettingsManager } = await import("../permissions/settings.js");
+    const root = join(tmpdir(), `bubble-perms-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    const settingsManager = new SettingsManager(join(root, "project"), { bubbleHome: join(root, "home") });
+
+    const ctx = createContext({ settingsManager } as any);
+
+    const result = await slashRegistry.execute("/permissions add", ctx);
+    expect(result.result).toContain("Usage:");
   });
 
   it("loads a skill directly via /<skill-name> alias", async () => {

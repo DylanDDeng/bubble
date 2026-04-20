@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { PermissionAwareApprovalController } from "../approval/controller.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
+import { buildRuleSet } from "../permissions/rule.js";
 import type { PermissionMode } from "../types.js";
 
 function makeController(mode: PermissionMode, handler?: (req: ApprovalRequest) => Promise<ApprovalDecision>) {
@@ -9,6 +10,7 @@ function makeController(mode: PermissionMode, handler?: (req: ApprovalRequest) =
   return new PermissionAwareApprovalController({
     getMode: () => mode,
     handlerRef,
+    cwd: "/tmp/bubble-test",
   });
 }
 
@@ -35,6 +37,7 @@ describe("PermissionAwareApprovalController", () => {
     const c = new PermissionAwareApprovalController({
       getMode: () => "acceptEdits",
       handlerRef,
+      cwd: "/tmp/bubble-test",
     });
 
     expect(await c.request(EDIT_REQ)).toEqual({ action: "approve" });
@@ -58,6 +61,7 @@ describe("PermissionAwareApprovalController", () => {
     const c = new PermissionAwareApprovalController({
       getMode: () => "default",
       handlerRef: { current: handler },
+      cwd: "/tmp/bubble-test",
     });
     const result = await c.request(BASH_REQ);
     expect(result).toEqual({ action: "approve", feedback: "go" });
@@ -71,11 +75,115 @@ describe("PermissionAwareApprovalController", () => {
     expect(result.feedback).toContain("No interactive UI");
   });
 
+  it("allow rule skips the UI prompt", async () => {
+    const handler = vi.fn(async () => ({ action: "approve" }) as ApprovalDecision);
+    const c = new PermissionAwareApprovalController({
+      getMode: () => "default",
+      handlerRef: { current: handler },
+      cwd: "/tmp/bubble-test",
+      getRuleSet: () => buildRuleSet(["Bash(git status)"], []),
+    });
+    expect((await c.request({ type: "bash", command: "git status", cwd: "/tmp" })).action).toBe("approve");
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("deny rule rejects with a citation", async () => {
+    const handler = vi.fn(async () => ({ action: "approve" }) as ApprovalDecision);
+    const c = new PermissionAwareApprovalController({
+      getMode: () => "default",
+      handlerRef: { current: handler },
+      cwd: "/tmp/bubble-test",
+      getRuleSet: () => buildRuleSet([], ["Bash(rm -rf:*)"]),
+    });
+    const result = await c.request({ type: "bash", command: "rm -rf /tmp/x", cwd: "/tmp" });
+    expect(result.action).toBe("reject");
+    expect(result.feedback).toContain("deny rule");
+    expect(result.feedback).toContain("Bash(rm -rf:*)");
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("deny wins over allow when both match", async () => {
+    const c = new PermissionAwareApprovalController({
+      getMode: () => "default",
+      handlerRef: { current: async () => ({ action: "approve" }) },
+      cwd: "/tmp/bubble-test",
+      getRuleSet: () => buildRuleSet(["Bash"], ["Bash(rm -rf:*)"]),
+    });
+    const ok = await c.request({ type: "bash", command: "ls", cwd: "/tmp" });
+    expect(ok.action).toBe("approve");
+    const bad = await c.request({ type: "bash", command: "rm -rf /tmp/x", cwd: "/tmp" });
+    expect(bad.action).toBe("reject");
+  });
+
+  it("checkRules returns ask when no ruleSet is provided", () => {
+    const c = new PermissionAwareApprovalController({
+      getMode: () => "default",
+      handlerRef: {},
+      cwd: "/tmp/bubble-test",
+    });
+    expect(c.checkRules({ tool: "Read", path: "/etc/hosts", cwd: "/tmp" }).decision).toBe("ask");
+  });
+
+  it("checkRules honors Read deny rules without UI", () => {
+    const c = new PermissionAwareApprovalController({
+      getMode: () => "default",
+      handlerRef: {},
+      cwd: "/tmp/bubble-test",
+      getRuleSet: () => buildRuleSet([], ["Read(/etc/**)"]),
+    });
+    expect(c.checkRules({ tool: "Read", path: "/etc/hosts", cwd: "/tmp" }).decision).toBe("deny");
+    expect(c.checkRules({ tool: "Read", path: "/tmp/x.txt", cwd: "/tmp" }).decision).toBe("ask");
+  });
+
+  it("deny rule overrides bypassPermissions", async () => {
+    const c = new PermissionAwareApprovalController({
+      getMode: () => "bypassPermissions",
+      handlerRef: {},
+      cwd: "/tmp/bubble-test",
+      getRuleSet: () => buildRuleSet([], ["Bash(rm -rf:*)"]),
+    });
+    const safe = await c.request({ type: "bash", command: "ls", cwd: "/tmp" });
+    expect(safe.action).toBe("approve");
+
+    const dangerous = await c.request({ type: "bash", command: "rm -rf /tmp/x", cwd: "/tmp" });
+    expect(dangerous.action).toBe("reject");
+    expect(dangerous.feedback).toContain("deny rule");
+  });
+
+  it("deny rule overrides dontAsk", async () => {
+    const c = new PermissionAwareApprovalController({
+      getMode: () => "dontAsk",
+      handlerRef: {},
+      cwd: "/tmp/bubble-test",
+      getRuleSet: () => buildRuleSet([], ["Bash(rm -rf:*)"]),
+    });
+    const dangerous = await c.request({ type: "bash", command: "rm -rf /", cwd: "/tmp" });
+    expect(dangerous.action).toBe("reject");
+  });
+
+  it("deny rule overrides acceptEdits for writes", async () => {
+    const c = new PermissionAwareApprovalController({
+      getMode: () => "acceptEdits",
+      handlerRef: {},
+      cwd: "/tmp/bubble-test",
+      getRuleSet: () => buildRuleSet([], ["Write(/etc/**)"]),
+    });
+    const blocked = await c.request({
+      type: "write",
+      path: "/etc/hosts",
+      content: "x",
+      fileExists: true,
+    });
+    expect(blocked.action).toBe("reject");
+    expect(blocked.feedback).toContain("Write(/etc/**)");
+  });
+
   it("reads mode lazily so mode changes take effect on the next request", async () => {
     let mode: PermissionMode = "bypassPermissions";
     const c = new PermissionAwareApprovalController({
       getMode: () => mode,
       handlerRef: {},
+      cwd: "/tmp/bubble-test",
     });
     expect((await c.request(BASH_REQ)).action).toBe("approve");
     mode = "default";

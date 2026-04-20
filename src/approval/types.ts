@@ -6,6 +6,8 @@
  * request carries tool-typed data so the UI can render a meaningful preview.
  */
 
+import type { PermissionCheckResult, PermissionQuery } from "../permissions/types.js";
+
 export interface EditApprovalRequest {
   type: "edit";
   path: string;
@@ -40,8 +42,15 @@ export type ApprovalDecision =
 export interface ApprovalController {
   /**
    * Decide whether a tool call should proceed. May consult the current
-   * permission mode, session-level allowlists, and — as a final fallback —
-   * a user-interactive UI handler.
+   * permission mode, configured allow/deny rules, session-level allowlists,
+   * and — as a final fallback — a user-interactive UI handler.
    */
   request(req: ApprovalRequest): Promise<ApprovalDecision>;
+
+  /**
+   * Pure rule evaluation (no UI, no mode gates). Tools that silently execute
+   * unless explicitly denied (e.g. Read, WebFetch) call this to honor
+   * user-configured deny rules without changing the UX for the common case.
+   */
+  checkRules(query: PermissionQuery): PermissionCheckResult;
 }

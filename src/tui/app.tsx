@@ -29,6 +29,7 @@ import { ApprovalDialog } from "./approval/approval-dialog.js";
 import { getNextPermissionMode } from "../permission/mode.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
 import type { BashAllowlist } from "../approval/session-cache.js";
+import type { SettingsManager } from "../permissions/settings.js";
 import os from "node:os";
 
 export interface PlanHandlerRef {
@@ -49,6 +50,7 @@ interface AppProps {
   planHandlerRef?: PlanHandlerRef;
   approvalHandlerRef?: ApprovalHandlerRef;
   bashAllowlist?: BashAllowlist;
+  settingsManager?: SettingsManager;
   /** Whether the bypassPermissions mode is reachable via Shift+Tab cycling. */
   bypassEnabled?: boolean;
 }
@@ -118,7 +120,7 @@ function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] 
   return result;
 }
 
-export function App({ agent, args, sessionManager, createProvider, registry, skillRegistry, planHandlerRef, approvalHandlerRef, bashAllowlist, bypassEnabled }: AppProps) {
+export function App({ agent, args, sessionManager, createProvider, registry, skillRegistry, planHandlerRef, approvalHandlerRef, bashAllowlist, settingsManager, bypassEnabled }: AppProps) {
   const { exit } = useApp();
   const [messages, setMessages] = useState<DisplayMessage[]>(() => reconstructDisplayMessages(agent.messages));
   const [isRunning, setIsRunning] = useState(false);
@@ -351,6 +353,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       registry: safeRegistry,
       skillRegistry: safeSkillRegistry!,
       bashAllowlist,
+      settingsManager,
     });
     if (handled && result) {
       addMessage("assistant", result);
@@ -374,6 +377,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       registry: safeRegistry,
       skillRegistry: safeSkillRegistry!,
       bashAllowlist,
+      settingsManager,
     });
     if (handled && result) {
       addMessage("assistant", result);
@@ -542,6 +546,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           registry: safeRegistry,
           skillRegistry: safeSkillRegistry!,
           bashAllowlist,
+          settingsManager,
         });
         if (handled) {
           if (agent.mode !== permissionMode) {

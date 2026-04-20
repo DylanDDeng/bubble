@@ -83,6 +83,7 @@ describe("PermissionAwareApprovalController + BashAllowlist integration", () => 
         },
       },
       bashAllowlist,
+      cwd: "/tmp/bubble-test",
     });
 
     const req: ApprovalRequest = { type: "bash", command: "git status -s", cwd: "/tmp" };
@@ -103,6 +104,7 @@ describe("PermissionAwareApprovalController + BashAllowlist integration", () => 
         },
       },
       bashAllowlist,
+      cwd: "/tmp/bubble-test",
     });
 
     const req: ApprovalRequest = { type: "bash", command: "git push", cwd: "/tmp" };
@@ -124,6 +126,7 @@ describe("PermissionAwareApprovalController + BashAllowlist integration", () => 
         },
       },
       bashAllowlist,
+      cwd: "/tmp/bubble-test",
     });
 
     await controller.request({ type: "edit", path: "/tmp/x.ts", diff: "-", fileExists: true });
