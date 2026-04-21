@@ -13,9 +13,10 @@ interface InputBoxProps {
   cwd: string;
 }
 
-const MIN_VISIBLE_LINES = 3;
+const MIN_VISIBLE_LINES = 1;
 const MAX_VISIBLE_LINES = 5;
 const PADDING_X = 1;
+const PROMPT = "> ";
 const MAX_VISIBLE_SUGGESTIONS = 8;
 
 interface SlashSuggestion {
@@ -241,6 +242,7 @@ export function InputBox({ onSubmit, disabled, skillRegistry, terminalColumns, c
   const hasMoreBelow = scrollOffset + visibleLines < totalLines;
 
   const contentWidth = Math.max(1, width - PADDING_X * 2);
+  const lineWidth = Math.max(1, contentWidth - PROMPT.length);
   const borderChar = "─";
   const topBorder = hasMoreAbove
     ? `─── ↑ ${scrollOffset} more ${borderChar.repeat(Math.max(0, contentWidth - 14 - scrollOffset.toString().length))}`
@@ -254,9 +256,15 @@ export function InputBox({ onSubmit, disabled, skillRegistry, terminalColumns, c
       <Text color={theme.inputBorder}>{topBorder.slice(0, contentWidth)}</Text>
       <Box flexDirection="column" paddingX={PADDING_X}>
         {displayedLines.map(({ text: line, index }) => {
-          const displayLine = (line || " ").slice(0, contentWidth);
+          const displayLine = (line || " ").slice(0, lineWidth);
+          const isFirst = index === 0;
           return (
             <Box key={index} height={1} overflow="hidden">
+              {isFirst ? (
+                <Text color={theme.accent}>{PROMPT}</Text>
+              ) : (
+                <Text>{" ".repeat(PROMPT.length)}</Text>
+              )}
               {index === cursorLineIndex ? (
                 <>
                   <Text>{displayLine.slice(0, cursorCol)}</Text>
