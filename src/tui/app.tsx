@@ -585,7 +585,10 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
 
   const welcomeItems = useMemo(
     () =>
-      agent.messages.some((m) => m.role === "user")
+      // Only meta reminders (deferred-tools, mode transitions) at this point
+      // shouldn't count as "the user has started a conversation" — those are
+      // harness-injected and should not hide the banner.
+      agent.messages.some((m) => m.role === "user" && !(m as any).isMeta)
         ? []
         : [{
             key: "welcome",
