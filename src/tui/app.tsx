@@ -3,10 +3,10 @@ import { Box, Static, Text, useApp, useInput } from "ink";
 import type { Agent } from "../agent.js";
 import type { CliArgs } from "../cli.js";
 import type { SessionManager } from "../session.js";
-import type { AgentEvent, PermissionMode, Message, PlanDecision, Provider, Todo } from "../types.js";
+import type { AgentEvent, ContentPart, PermissionMode, Message, PlanDecision, Provider, Todo } from "../types.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import { UserConfig, maskKey } from "../config.js";
-import { InputBox } from "./input-box.js";
+import { InputBox, type SubmitPayload } from "./input-box.js";
 import { MessageList, type DisplayMessage, type DisplayToolCall } from "./message-list.js";
 import { theme } from "./theme.js";
 import { ModelPicker, ProviderPicker, KeyPicker } from "./model-picker.js";
@@ -408,10 +408,18 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   }, [addMessage, agent, createProvider, keyProviderId, safeRegistry]);
 
   const handleSubmit = useCallback(
-    async (input: string) => {
-      if (!input.trim()) return;
+    async (payload: SubmitPayload | string) => {
+      const normalized: SubmitPayload =
+        typeof payload === "string" ? { text: payload, images: [] } : payload;
+      const input = normalized.text;
+      const images = normalized.images;
+      if (!input.trim() && images.length === 0) return;
 
-      const runAgentInput = async (actualInput: string, displayInput: string = actualInput) => {
+      const runAgentInput = async (
+        actualInput: string | ContentPart[],
+        displayInput: string,
+        attachedImages: { filename?: string; bytes: number }[] = [],
+      ) => {
         const activeProviderId = agent.providerId || safeRegistry.getDefault()?.id;
         const hasActiveProvider = !!activeProviderId && safeRegistry.getEnabled().some((provider) => provider.id === activeProviderId);
         if (!hasActiveProvider) {
@@ -423,7 +431,14 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           return;
         }
 
-        setMessages((prev) => [...prev, { role: "user", content: displayInput }]);
+        const displayContent = attachedImages.length > 0
+          ? `${displayInput}${displayInput ? "\n" : ""}${attachedImages
+              .map((img, i) =>
+                `[image${attachedImages.length > 1 ? ` ${i + 1}` : ""}: ${img.filename ?? "clipboard"} · ${Math.max(1, Math.round(img.bytes / 1024))}KB]`,
+              )
+              .join(" ")}`
+          : displayInput;
+        setMessages((prev) => [...prev, { role: "user", content: displayContent }]);
         setIsRunning(true);
         setStreamingContent("");
         setStreamingReasoning("");
@@ -528,7 +543,8 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         }
       };
 
-      // Intercept slash commands
+      // Slash commands and skill invocations drop any attached images —
+      // they're meant for pure command routing.
       if (input.startsWith("/")) {
         const skillInvocation = parseSkillInvocation(input, safeSkillRegistry);
         if (skillInvocation) {
@@ -573,7 +589,20 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       for (const skip of expansion.skipped) {
         addMessage("error", `Skipped @${skip.path}: ${skip.reason}`);
       }
-      await runAgentInput(expansion.text, input);
+      const agentInput: string | ContentPart[] = images.length > 0
+        ? [
+            ...(expansion.text ? [{ type: "text" as const, text: expansion.text }] : []),
+            ...images.map((img) => ({
+              type: "image_url" as const,
+              image_url: { url: img.dataUrl },
+            })),
+          ]
+        : expansion.text;
+      await runAgentInput(
+        agentInput,
+        input,
+        images.map((img) => ({ filename: img.filename, bytes: img.bytes })),
+      );
     },
     [addMessage, agent, args.cwd, openPicker, createProvider, safeRegistry, safeSkillRegistry]
   );

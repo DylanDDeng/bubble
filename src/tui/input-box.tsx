@@ -1,12 +1,27 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Box, Text, useInput } from "ink";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Box, Text, useCursor, useInput, usePaste, type DOMElement } from "ink";
+import stringWidth from "string-width";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import type { SkillRegistry } from "../skills/registry.js";
 import { theme } from "./theme.js";
 import { filterFileSuggestions, findAtContext, listProjectFiles } from "./file-mentions.js";
+import {
+  ingestClipboardImage,
+  ingestImagePath,
+  isImageFilePath,
+  isScreenshotTempPath,
+  splitPastedPaths,
+  type ImageAttachment,
+} from "./image-paste.js";
+
+export interface SubmitPayload {
+  text: string;
+  images: ImageAttachment[];
+}
 
 interface InputBoxProps {
-  onSubmit: (value: string) => void;
+  onSubmit: (payload: SubmitPayload) => void;
+  onPasteNotice?: (notice: string) => void;
   disabled?: boolean;
   skillRegistry?: SkillRegistry;
   terminalColumns: number;
@@ -19,20 +34,106 @@ const PADDING_X = 1;
 const PROMPT = "> ";
 const MAX_VISIBLE_SUGGESTIONS = 8;
 
+type VisualLine = {
+  /** Segment of the source line that fits on this visual row. */
+  text: string;
+  /** Absolute offset in the source text where this visual row's characters start. */
+  absStart: number;
+  /** Index of the underlying logical (newline-separated) line. */
+  logicalLineIndex: number;
+};
+
+// Break a logical line into segments that each fit within `maxWidth` display
+// columns. Uses string-width so CJK and emoji wrap correctly; empty lines
+// still produce one empty segment so cursors on blank lines render.
+function wrapLineByWidth(line: string, maxWidth: number): string[] {
+  if (line.length === 0) return [""];
+  const out: string[] = [];
+  let current = "";
+  let currentWidth = 0;
+  for (const ch of line) {
+    const w = stringWidth(ch);
+    if (currentWidth + w > maxWidth && current.length > 0) {
+      out.push(current);
+      current = "";
+      currentWidth = 0;
+    }
+    current += ch;
+    currentWidth += w;
+  }
+  if (current.length > 0 || out.length === 0) out.push(current);
+  return out;
+}
+
+function computeVisualLines(text: string, maxWidth: number): VisualLine[] {
+  const logical = text.split("\n");
+  const out: VisualLine[] = [];
+  let abs = 0;
+  for (let lIdx = 0; lIdx < logical.length; lIdx++) {
+    const line = logical[lIdx];
+    const segments = wrapLineByWidth(line, maxWidth);
+    let offset = 0;
+    for (const seg of segments) {
+      out.push({ text: seg, absStart: abs + offset, logicalLineIndex: lIdx });
+      offset += seg.length;
+    }
+    abs += line.length + 1; // consume the "\n"
+  }
+  return out;
+}
+
+// Map a source-text cursor index to its (visualRow, visualCol) coordinates.
+function cursorToVisual(visualLines: VisualLine[], cursor: number): { row: number; col: number } {
+  if (visualLines.length === 0) return { row: 0, col: 0 };
+  let row = 0;
+  for (let i = 0; i < visualLines.length; i++) {
+    if (visualLines[i].absStart <= cursor) row = i;
+    else break;
+  }
+  const vl = visualLines[row];
+  const charOffset = Math.max(0, cursor - vl.absStart);
+  return { row, col: stringWidth(vl.text.slice(0, charOffset)) };
+}
+
+// Map a (visualRow, visualCol) target back to a source-text cursor index.
+// Used by up/down arrows to preserve the visual column when jumping rows.
+function visualToCursor(visualLines: VisualLine[], row: number, col: number): number {
+  if (visualLines.length === 0) return 0;
+  const clamped = Math.max(0, Math.min(visualLines.length - 1, row));
+  const vl = visualLines[clamped];
+  let width = 0;
+  let charOffset = 0;
+  for (const ch of vl.text) {
+    const w = stringWidth(ch);
+    if (width + w > col) break;
+    width += w;
+    charOffset += ch.length;
+  }
+  return vl.absStart + charOffset;
+}
+
 interface SlashSuggestion {
   type: "command" | "skill";
   name: string;
   description: string;
 }
 
-export function InputBox({ onSubmit, disabled, skillRegistry, terminalColumns, cwd }: InputBoxProps) {
+export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, terminalColumns, cwd }: InputBoxProps) {
   const width = terminalColumns;
 
   const [text, setText] = useState("");
   const [cursor, setCursor] = useState(0);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [projectFiles, setProjectFiles] = useState<string[] | null>(null);
+  const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
   const loadingFilesRef = useRef(false);
+  // Paste and the keystrokes that follow can arrive inside the same stdin chunk
+  // and dispatch within one discreteUpdates batch. If the Enter that a user
+  // typed after a paste fires before React commits the paste-driven setState,
+  // useInput's Enter branch reads stale `text` and submits without the paste.
+  // This ref flips synchronously at paste-start and clears after the paste
+  // commit has been flushed — useInput's Enter handler bails while it's set.
+  const pastePendingRef = useRef(false);
 
   const isSlashContext = text.startsWith("/") && cursor > 0 && !text.includes("\n");
   const slashPrefix = isSlashContext ? text.slice(1).toLowerCase() : "";
@@ -89,6 +190,125 @@ export function InputBox({ onSubmit, disabled, skillRegistry, terminalColumns, c
       activeCount - MAX_VISIBLE_SUGGESTIONS,
     );
   }
+
+  const insertTextAtCursor = React.useCallback(
+    (insertion: string) => {
+      if (!insertion) return;
+      setText((prev) => {
+        const c = cursor;
+        const before = prev.slice(0, c);
+        const after = prev.slice(c);
+        return before + insertion + after;
+      });
+      setCursor((c) => c + insertion.length);
+    },
+    [cursor],
+  );
+
+  const addAttachment = React.useCallback((att: ImageAttachment) => {
+    setAttachments((prev) => [...prev, att]);
+  }, []);
+
+  const notice = React.useCallback(
+    (msg: string) => {
+      onPasteNotice?.(msg);
+    },
+    [onPasteNotice],
+  );
+
+  // Empty paste is the common signal that the clipboard holds an image and the
+  // terminal has nothing textual to deliver. Probe the clipboard; if it yields
+  // an image, treat the paste as an image attachment. macOS only — Linux/Win
+  // terminals don't reliably emit empty pastes on image-only clipboards.
+  const tryClipboardImage = React.useCallback(async () => {
+    const { attachment, error } = await ingestClipboardImage();
+    if (attachment) {
+      addAttachment(attachment);
+      return true;
+    }
+    if (error && error !== "clipboard has no image") {
+      notice(`image paste failed: ${error}`);
+    }
+    return false;
+  }, [addAttachment, notice]);
+
+  usePaste((pasted) => {
+    pastePendingRef.current = true;
+    // Clear the ref after React has committed the paste-driven setState.
+    // setTimeout with 0 runs after the current discreteUpdates batch flushes.
+    const clearPending = () => {
+      setTimeout(() => {
+        pastePendingRef.current = false;
+      }, 0);
+    };
+
+    // Strip orphaned focus-event tails that can appear if focus reporting
+    // splits across the paste boundary.
+    const clean = pasted.replace(/\x1b\[I$/, "").replace(/\x1b\[O$/, "");
+
+    // Empty paste on macOS usually means "Cmd+V with an image on the clipboard".
+    if (clean.length === 0) {
+      if (process.platform === "darwin") {
+        void tryClipboardImage().finally(clearPending);
+      } else {
+        clearPending();
+      }
+      return;
+    }
+
+    // Look for image paths inside the paste (drag-and-drop from Finder/
+    // Nautilus/Explorer). Multi-selection can arrive newline- or
+    // space-separated.
+    const tokens = splitPastedPaths(clean);
+    const imageTokens = tokens.filter(isImageFilePath);
+
+    if (imageTokens.length === 0) {
+      // Plain text paste — insert into the input at the cursor.
+      insertTextAtCursor(clean);
+      clearPending();
+      return;
+    }
+
+    const handle = async () => {
+      const results = await Promise.all(imageTokens.map((t) => ingestImagePath(t)));
+      const successful: ImageAttachment[] = [];
+      const errors: string[] = [];
+      for (let i = 0; i < results.length; i++) {
+        const { attachment, error } = results[i]!;
+        if (attachment) {
+          successful.push(attachment);
+        } else if (error) {
+          errors.push(`${imageTokens[i]}: ${error}`);
+        }
+      }
+
+      // macOS screenshot shortcut writes a TemporaryItems path into the
+      // clipboard but the file may already be gone by the time we read it.
+      // Fall back to the clipboard image when that happens.
+      if (
+        successful.length === 0 &&
+        process.platform === "darwin" &&
+        imageTokens.some(isScreenshotTempPath)
+      ) {
+        const clipOk = await tryClipboardImage();
+        if (clipOk) return;
+      }
+
+      for (const att of successful) addAttachment(att);
+
+      const nonImageLines = tokens.filter((t) => !isImageFilePath(t));
+      if (successful.length > 0 && nonImageLines.length > 0) {
+        insertTextAtCursor(nonImageLines.join("\n"));
+      } else if (successful.length === 0) {
+        // None resolved — fall back to treating the paste as text.
+        insertTextAtCursor(clean);
+      }
+
+      for (const err of errors) notice(err);
+    };
+
+    void handle().finally(clearPending);
+  });
 
   const applyFileSuggestion = (selectedPath: string) => {
     if (!atContext) return;
@@ -147,10 +367,15 @@ export function InputBox({ onSubmit, disabled, skillRegistry, terminalColumns, c
         setText(before + "\n" + after);
         setCursor(cursor + 1);
       } else {
-        onSubmit(text);
+        // A paste is still mid-flight — dropping this Enter avoids submitting
+        // an input state that doesn't yet include the paste.
+        if (pastePendingRef.current) return;
+        if (text.trim().length === 0 && attachments.length === 0) return;
+        onSubmit({ text, images: attachments });
         setText("");
         setCursor(0);
         setSelectedIndex(0);
+        setAttachments([]);
       }
       return;
     }
@@ -162,6 +387,10 @@ export function InputBox({ onSubmit, disabled, skillRegistry, terminalColumns, c
         setText(before + after);
         setCursor(cursor - 1);
         setSelectedIndex(0);
+      } else if (attachments.length > 0) {
+        // Backspace at position 0 drops the most recent attachment so users
+        // can undo a misfired paste without submitting the message.
+        setAttachments((prev) => prev.slice(0, -1));
       }
       return;
     }
@@ -177,28 +406,14 @@ export function InputBox({ onSubmit, disabled, skillRegistry, terminalColumns, c
       return;
     }
     if (key.upArrow) {
-      const before = text.slice(0, cursor);
-      const lines = before.split("\n");
-      if (lines.length > 1) {
-        const currentLine = lines[lines.length - 1];
-        const prevLine = lines[lines.length - 2];
-        const targetCol = Math.min(currentLine.length, prevLine.length);
-        const newCursor = before.length - currentLine.length - 1 - (prevLine.length - targetCol);
-        setCursor(Math.max(0, newCursor));
+      if (cursorVisualRow > 0) {
+        setCursor(visualToCursor(visualLines, cursorVisualRow - 1, cursorVisualCol));
       }
       return;
     }
     if (key.downArrow) {
-      const before = text.slice(0, cursor);
-      const after = text.slice(cursor);
-      const linesBefore = before.split("\n");
-      const linesAfter = after.split("\n");
-      if (linesAfter.length > 1) {
-        const currentLine = linesBefore[linesBefore.length - 1];
-        const nextLine = linesAfter[1];
-        const targetCol = Math.min(currentLine.length, nextLine.length);
-        const newCursor = before.length + linesAfter[0].length + 1 + targetCol;
-        setCursor(Math.min(text.length, newCursor));
+      if (cursorVisualRow < visualLines.length - 1) {
+        setCursor(visualToCursor(visualLines, cursorVisualRow + 1, cursorVisualCol));
       }
       return;
     }
@@ -212,37 +427,78 @@ export function InputBox({ onSubmit, disabled, skillRegistry, terminalColumns, c
     }
   });
 
-  const lines = text.split("\n");
-  const beforeCursor = text.slice(0, cursor);
-  const cursorLineIndex = beforeCursor.split("\n").length - 1;
-  const cursorCol = beforeCursor.split("\n").pop()?.length || 0;
+  // Anchor the cursor to the content Box (which holds the visual rows). Its
+  // absolute yoga top lands exactly on the first visible visual row, so the
+  // y offset to the cursor's row is just (cursorVisualRow - scrollOffset) —
+  // no fiddly accounting for borders or the optional attachments row above.
+  const contentAreaRef = useRef<DOMElement | null>(null);
+  const lastCursorRef = useRef<{ x: number; y: number } | null>(null);
+  const { setCursorPosition } = useCursor();
 
-  const totalLines = Math.max(lines.length, 1);
+  const contentWidth = Math.max(1, width - PADDING_X * 2);
+  const lineWidth = Math.max(1, contentWidth - PROMPT.length);
+
+  const visualLines = useMemo(
+    () => computeVisualLines(text, lineWidth),
+    [text, lineWidth],
+  );
+  const { row: cursorVisualRow, col: cursorVisualCol } = cursorToVisual(visualLines, cursor);
+
+  const totalLines = Math.max(visualLines.length, 1);
   const visibleLines = Math.min(Math.max(totalLines, MIN_VISIBLE_LINES), MAX_VISIBLE_LINES);
 
-  // Scroll offset: keep cursor line in view
   let scrollOffset = 0;
   if (totalLines > visibleLines) {
     scrollOffset = Math.min(
-      Math.max(cursorLineIndex - Math.floor(visibleLines / 2), 0),
-      totalLines - visibleLines
+      Math.max(cursorVisualRow - Math.floor(visibleLines / 2), 0),
+      totalLines - visibleLines,
     );
   }
 
-  const displayedLines = [];
+  const displayedLines: { text: string; visualIdx: number }[] = [];
   for (let i = 0; i < visibleLines; i++) {
-    const lineIndex = scrollOffset + i;
+    const visualIdx = scrollOffset + i;
+    const vl = visualLines[visualIdx];
     displayedLines.push({
-      text: lines[lineIndex] || "",
-      index: lineIndex,
+      text: vl ? vl.text : "",
+      visualIdx,
     });
   }
 
   const hasMoreAbove = scrollOffset > 0;
   const hasMoreBelow = scrollOffset + visibleLines < totalLines;
 
-  const contentWidth = Math.max(1, width - PADDING_X * 2);
-  const lineWidth = Math.max(1, contentWidth - PROMPT.length);
+  // Measure after yoga runs (useLayoutEffect fires after Ink's resetAfterCommit
+  // calls onComputeLayout). Push the new position into useCursor's ref and bump
+  // `cursorTick` to force one more render so useCursor's useInsertionEffect
+  // sees the fresh value and Ink emits a cursor-only update.
+  const [cursorTick, setCursorTick] = useState(0);
+  useLayoutEffect(() => {
+    let node: DOMElement | undefined = contentAreaRef.current ?? undefined;
+    if (!node?.yogaNode) {
+      setCursorPosition(undefined);
+      return;
+    }
+    let left = 0;
+    let top = 0;
+    while (node?.yogaNode) {
+      const layout = node.yogaNode.getComputedLayout();
+      left += layout.left;
+      top += layout.top;
+      node = node.parentNode;
+    }
+    const rowWithin = cursorVisualRow - scrollOffset;
+    const colWithin = PADDING_X /* content box's own paddingX */ + PROMPT.length + cursorVisualCol;
+    const next = { x: left + colWithin, y: top + rowWithin };
+    const prev = lastCursorRef.current;
+    if (!prev || prev.x !== next.x || prev.y !== next.y) {
+      lastCursorRef.current = next;
+      setCursorPosition(next);
+      setCursorTick((t) => t + 1);
+    }
+  });
+  // Reference cursorTick so the effect re-runs on the forced render pass.
+  void cursorTick;
   const borderChar = "─";
   const topBorder = hasMoreAbove
     ? `─── ↑ ${scrollOffset} more ${borderChar.repeat(Math.max(0, contentWidth - 14 - scrollOffset.toString().length))}`
@@ -253,29 +509,32 @@ export function InputBox({ onSubmit, disabled, skillRegistry, terminalColumns, c
 
   return (
     <Box flexDirection="column">
+      {attachments.length > 0 && (
+        <Box flexDirection="row" flexWrap="wrap" paddingX={PADDING_X} marginBottom={0}>
+          {attachments.map((att, i) => {
+            const label = att.filename || "clipboard";
+            const kb = Math.max(1, Math.round(att.bytes / 1024));
+            return (
+              <Box key={i} marginRight={1}>
+                <Text color={theme.accent}>{`[img${attachments.length > 1 ? ` ${i + 1}` : ""}: ${label} · ${kb}KB]`}</Text>
+              </Box>
+            );
+          })}
+        </Box>
+      )}
       <Text color={theme.inputBorder}>{topBorder.slice(0, contentWidth)}</Text>
-      <Box flexDirection="column" paddingX={PADDING_X}>
-        {displayedLines.map(({ text: line, index }) => {
-          const displayLine = (line || " ").slice(0, lineWidth);
-          const isFirst = index === 0;
+      <Box flexDirection="column" paddingX={PADDING_X} ref={contentAreaRef}>
+        {displayedLines.map(({ text: line, visualIdx }) => {
+          const displayLine = line.length === 0 ? " " : line;
+          const isFirst = visualIdx === 0;
           return (
-            <Box key={index} height={1} overflow="hidden">
+            <Box key={visualIdx} height={1} overflow="hidden">
               {isFirst ? (
                 <Text color={theme.accent}>{PROMPT}</Text>
               ) : (
                 <Text>{" ".repeat(PROMPT.length)}</Text>
               )}
-              {index === cursorLineIndex ? (
-                <>
-                  <Text>{displayLine.slice(0, cursorCol)}</Text>
-                  <Text backgroundColor="white" color="black">
-                    {displayLine[cursorCol] || " "}
-                  </Text>
-                  <Text>{displayLine.slice(cursorCol + 1)}</Text>
-                </>
-              ) : (
-                <Text>{displayLine}</Text>
-              )}
+              <Text>{displayLine}</Text>
             </Box>
           );
         })}

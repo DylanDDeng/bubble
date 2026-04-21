@@ -9,7 +9,7 @@ import { isContextOverflowError } from "./context/overflow.js";
 import { projectMessages } from "./context/projector.js";
 import { aggressivePruneMessages } from "./context/prune.js";
 import { buildDeferredToolsReminder, reminderForMode } from "./prompt/reminders.js";
-import type { AgentEvent, PermissionMode, Message, ParsedToolCall, Provider, ThinkingLevel, Todo, ToolDefinition, ToolResult, ToolRegistryEntry } from "./types.js";
+import type { AgentEvent, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ThinkingLevel, Todo, ToolDefinition, ToolResult, ToolRegistryEntry } from "./types.js";
 
 const MAX_CONSECUTIVE_OVERFLOW_RECOVERIES = 3;
 
@@ -196,7 +196,7 @@ export class Agent {
     this.messages.unshift(systemMessage);
   }
 
-  async *run(userInput: string, cwd: string): AsyncIterable<AgentEvent> {
+  async *run(userInput: string | ContentPart[], cwd: string): AsyncIterable<AgentEvent> {
     if (this._todos.length > 0 && this._todos.every((t) => t.status === "completed")) {
       this.setTodos([]);
       yield { type: "todos_updated", todos: [] };
