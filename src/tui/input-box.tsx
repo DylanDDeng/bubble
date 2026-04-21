@@ -152,6 +152,19 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
     );
   }, [atContext, cwd, projectFiles]);
 
+  // Request a steady (non-blinking) block cursor via DECSCUSR while this
+  // component is mounted. Terminals default to a blinking cursor, which is
+  // distracting in an input that you'd glance away from. Restore the
+  // terminal default on unmount so the user's shell isn't left with our
+  // choice sticking around.
+  useEffect(() => {
+    if (!process.stdout.isTTY) return;
+    process.stdout.write("\x1b[2 q"); // steady block
+    return () => {
+      process.stdout.write("\x1b[0 q"); // reset to terminal default
+    };
+  }, []);
+
   const slashSuggestions = useMemo(() => {
     if (!isSlashContext) return [];
     const commandSuggestions: SlashSuggestion[] = slashRegistry.list().map((command) => ({
