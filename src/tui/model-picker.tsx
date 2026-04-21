@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from "react";
-import { Box, Text, useInput, useStdout } from "ink";
+import { Box, Text, useInput, usePaste, useStdout } from "ink";
 import { theme } from "./theme.js";
 import { ProviderRegistry, encodeModel, decodeModel, displayModel, isUserVisibleProvider, type ModelInfo } from "../provider-registry.js";
 
@@ -278,10 +278,18 @@ export function KeyPicker({ providerName, onSubmit, onCancel }: KeyPickerProps) 
     }
   });
 
+  // Append pasted clipboard content directly into the key field. Without
+  // this the paste falls through to whichever other hook (InputBox's
+  // usePaste) is active, and the key ends up in the main input area.
+  usePaste((pasted) => {
+    const clean = pasted.replace(/[\r\n\t]/g, "").trim();
+    if (clean) setValue((v) => v + clean);
+  });
+
   return (
     <Box flexDirection="column" marginY={1}>
       <Text bold color={theme.accent}>Enter API Key for {providerName}</Text>
-      <Text color={theme.muted}>Type the key, then press Enter. Esc to cancel.</Text>
+      <Text color={theme.muted}>Paste or type the key, then press Enter. Esc to cancel.</Text>
       <Box marginTop={1} borderStyle="round" borderColor={theme.borderActive} paddingX={1}>
         <Text>{value.replace(/./g, "*") || " "}</Text>
       </Box>

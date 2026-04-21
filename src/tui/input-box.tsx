@@ -321,7 +321,7 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
     };
 
     void handle().finally(clearPending);
-  });
+  }, { isActive: !disabled });
 
   const applyFileSuggestion = (selectedPath: string) => {
     if (!atContext) return;
