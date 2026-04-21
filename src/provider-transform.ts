@@ -10,7 +10,7 @@ export interface ProviderRequestConfig {
 }
 
 const MOONSHOT_PROVIDER_IDS = new Set(["moonshot-cn", "moonshot-intl", "kimi-for-coding"]);
-const KIMI_K25_FAMILY = new Set(["kimi-k2.5", "k2.6-code-preview"]);
+const KIMI_K25_FAMILY = new Set(["kimi-k2.5", "k2.6-code-preview", "kimi-k2.6"]);
 const KIMI_THINKING_FAMILY = new Set(["kimi-k2-thinking", "kimi-k2-thinking-turbo"]);
 
 export function resolveProviderRequestConfig(
@@ -45,8 +45,9 @@ export function resolveProviderRequestConfig(
     };
   }
 
-  // Moonshot / Kimi: kimi-k2.5 (incl. k2.6-code-preview) locks temperature/top_p/n/penalties
-  // and exposes thinking via extra_body.thinking; kimi-k2-thinking family locks temperature=1.
+  // Moonshot / Kimi: kimi-k2.5 family (incl. k2.6-code-preview, kimi-k2.6) locks
+  // temperature/top_p/n/penalties and exposes thinking via extra_body.thinking;
+  // kimi-k2-thinking family locks temperature=1.
   if (MOONSHOT_PROVIDER_IDS.has(providerId)) {
     if (KIMI_K25_FAMILY.has(modelId)) {
       return {
