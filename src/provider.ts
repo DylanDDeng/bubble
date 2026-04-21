@@ -139,6 +139,50 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
   return { streamChat, complete };
 }
 
+// Some providers (notably Fireworks-hosted Kimi) stream tool-call arguments
+// as repeated full snapshots in each delta instead of incremental chunks, so
+// a naive `+=` produces `{"x":1}{"x":1}` — not valid JSON. Parse the raw
+// stream; if it doesn't parse but contains a balanced `{…}` prefix or suffix
+// that does, use that. Empty or unsalvageable input becomes `"{}"` so the
+// downstream echo to the model is always valid JSON.
+export function normalizeToolArgs(raw: string): string {
+  const s = (raw ?? "").trim();
+  if (!s) return "{}";
+  try { JSON.parse(s); return s; } catch {}
+
+  const firstBrace = extractBalancedJson(s, 0);
+  if (firstBrace) {
+    try { JSON.parse(firstBrace); } catch { return "{}"; }
+    // If the content after the first balanced object is another valid object
+    // with the same parse, we've got a snapshot duplication — keep one copy.
+    const rest = s.slice(firstBrace.length).trim();
+    if (!rest) return firstBrace;
+    try { JSON.parse(rest); return firstBrace; } catch {}
+    return firstBrace;
+  }
+  return "{}";
+}
+
+function extractBalancedJson(s: string, start: number): string | null {
+  if (s[start] !== "{") return null;
+  let depth = 0;
+  let inStr = false;
+  let escape = false;
+  for (let i = start; i < s.length; i++) {
+    const c = s[i];
+    if (escape) { escape = false; continue; }
+    if (c === "\\" && inStr) { escape = true; continue; }
+    if (c === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (c === "{") depth++;
+    else if (c === "}") {
+      depth--;
+      if (depth === 0) return s.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
 /**
  * Convert an OpenAI-compatible chat-completions stream into our internal StreamChunk events.
  *
@@ -156,10 +200,9 @@ export async function* translateOpenAIStream(stream: AsyncIterable<any>): AsyncI
     const sorted = [...toolCalls.entries()].sort(([a], [b]) => a - b);
     for (const [, entry] of sorted) {
       if (!entry.id || !entry.name) continue;
+      const args = normalizeToolArgs(entry.args);
       yield { type: "tool_call", id: entry.id, name: entry.name, arguments: "", isStart: true, isEnd: false };
-      if (entry.args) {
-        yield { type: "tool_call", id: entry.id, name: entry.name, arguments: entry.args, isStart: false, isEnd: false };
-      }
+      yield { type: "tool_call", id: entry.id, name: entry.name, arguments: args, isStart: false, isEnd: false };
       yield { type: "tool_call", id: entry.id, name: entry.name, arguments: "", isStart: false, isEnd: true };
     }
     toolCalls.clear();
