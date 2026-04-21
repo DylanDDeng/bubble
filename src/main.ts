@@ -116,13 +116,12 @@ async function main() {
   const mcpManager = new McpManager({ servers: mcpLoaded.servers });
   if (mcpLoaded.servers.length > 0) {
     await mcpManager.start();
+    // Only surface failures at startup. Successful connections would push the
+    // welcome banner (committed to scrollback before ink's live region) above
+    // the visible area on small terminals. /mcp shows the full status.
     for (const state of mcpManager.getStates()) {
-      if (state.status.kind === "connected") {
-        const tn = state.status.tools.length;
-        const pn = state.status.prompts.length;
-        const parts = [`${tn} tool${tn === 1 ? "" : "s"}`];
-        if (pn > 0) parts.push(`${pn} prompt${pn === 1 ? "" : "s"}`);
-        console.log(chalk.dim(`[mcp] ${state.name}: connected, ${parts.join(", ")}`));
+      if (state.status.kind === "failed") {
+        console.error(chalk.yellow(`[mcp] ${state.name}: failed — ${state.status.error}`));
       }
     }
     tools.push(...mcpManager.getToolEntries());
