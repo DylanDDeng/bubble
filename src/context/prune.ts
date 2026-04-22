@@ -9,6 +9,8 @@ const MIN_PRUNE_LENGTH = 240;
 export function pruneMessages(messages: Message[]): Message[] {
   const toolNameByCallId = new Map<string, string>();
   const pruneCandidates: Array<{ index: number; toolName: string; message: ToolMessage }> = [];
+  const protectedToolCallIds = collectProtectedToolCallIds(messages);
+  let protectedRetainedCount = 0;
 
   for (let index = 0; index < messages.length; index++) {
     const message = messages[index];
@@ -24,6 +26,14 @@ export function pruneMessages(messages: Message[]): Message[] {
       continue;
     }
 
+    if (protectedToolCallIds.has(message.toolCallId)) {
+      const toolName = toolNameByCallId.get(message.toolCallId);
+      if (toolName && shouldPruneToolResult(toolName, message.content)) {
+        protectedRetainedCount += 1;
+      }
+      continue;
+    }
+
     const toolName = toolNameByCallId.get(message.toolCallId);
     if (!toolName || !shouldPruneToolResult(toolName, message.content)) {
       continue;
@@ -32,7 +42,8 @@ export function pruneMessages(messages: Message[]): Message[] {
     pruneCandidates.push({ index, toolName, message });
   }
 
-  const keepFrom = Math.max(0, pruneCandidates.length - TOOL_RESULT_KEEP_COUNT);
+  const keepBudget = Math.max(0, TOOL_RESULT_KEEP_COUNT - protectedRetainedCount);
+  const keepFrom = Math.max(0, pruneCandidates.length - keepBudget);
   const keepIndexes = new Set(pruneCandidates.slice(keepFrom).map((candidate) => candidate.index));
 
   return messages.map((message, index) => {
@@ -73,12 +84,14 @@ function summarizePrunedToolResult(toolName: string, content: string): string {
 }
 
 /**
- * Aggressive variant of pruneMessages: drops the content of *every* prunable
- * tool output, regardless of recency. Used as a last-resort microcompact pass
- * when a standard prune hasn't reclaimed enough budget.
+ * Aggressive variant of pruneMessages: drops the content of every prunable
+ * tool output except the latest unresolved tool turn that the model still
+ * needs to reason over. Used as a last-resort microcompact pass when a
+ * standard prune hasn't reclaimed enough budget.
  */
 export function aggressivePruneMessages(messages: Message[]): Message[] {
   const toolNameByCallId = new Map<string, string>();
+  const protectedToolCallIds = collectProtectedToolCallIds(messages);
   for (const message of messages) {
     if (message.role === "assistant" && message.toolCalls) {
       for (const toolCall of message.toolCalls) {
@@ -89,10 +102,31 @@ export function aggressivePruneMessages(messages: Message[]): Message[] {
 
   return messages.map((message) => {
     if (message.role !== "tool") return message;
+    if (protectedToolCallIds.has(message.toolCallId)) {
+      return message;
+    }
     const toolName = toolNameByCallId.get(message.toolCallId);
     if (!toolName || !shouldPruneToolResult(toolName, message.content)) {
       return message;
     }
     return { ...message, content: summarizePrunedToolResult(toolName, message.content) };
   });
+}
+
+function collectProtectedToolCallIds(messages: Message[]): Set<string> {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role === "tool" || message.role === "system") {
+      continue;
+    }
+    if (message.role === "user" && message.isMeta) {
+      continue;
+    }
+    if (message.role === "assistant" && message.toolCalls && message.toolCalls.length > 0) {
+      return new Set(message.toolCalls.map((toolCall) => toolCall.id));
+    }
+    break;
+  }
+
+  return new Set();
 }

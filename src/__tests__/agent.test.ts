@@ -217,6 +217,49 @@ describe("Agent", () => {
     expect(systemMessages.some((message) => message.content.includes("Previous conversation summary:"))).toBe(true);
   });
 
+  it("shrinks resident history after a long tool-heavy run", async () => {
+    const provider: Provider = {
+      async *streamChat() {
+        yield { type: "text", content: "done" };
+        yield { type: "done" };
+      },
+      async complete() {
+        return "done";
+      },
+    };
+
+    const agent = new Agent({
+      provider,
+      providerId: "openai",
+      model: "openai:gpt-4o",
+      tools: [],
+      systemPrompt: "system",
+    });
+
+    for (let i = 0; i < 30; i++) {
+      agent.messages.push({ role: "user", content: `turn ${i}` });
+      agent.messages.push({
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: `call_${i}`, name: "read", arguments: `{"path":"file-${i}.ts"}` }],
+      });
+      agent.messages.push({
+        role: "tool",
+        toolCallId: `call_${i}`,
+        content: `file ${i}\n${"x".repeat(12000)}`,
+      });
+    }
+
+    const beforeChars = JSON.stringify(agent.messages).length;
+    await collectEvents(agent, "latest", "/tmp");
+    const afterChars = JSON.stringify(agent.messages).length;
+
+    expect(afterChars).toBeLessThan(beforeChars);
+    expect(agent.messages.some((message) => (
+      message.role === "tool" && message.content.includes("output omitted to control context size")
+    ))).toBe(true);
+  });
+
   it("rethrows non-overflow errors without retry", async () => {
     let callCount = 0;
     const provider: Provider = {

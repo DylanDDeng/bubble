@@ -5,6 +5,7 @@
 
 import { compactMessages } from "./context/compact.js";
 import { compactMessagesWithLLM } from "./context/compact-llm.js";
+import { getContextBudget } from "./context/budget.js";
 import { isContextOverflowError } from "./context/overflow.js";
 import { projectMessages } from "./context/projector.js";
 import { aggressivePruneMessages } from "./context/prune.js";
@@ -12,6 +13,12 @@ import { buildDeferredToolsReminder, reminderForMode } from "./prompt/reminders.
 import type { AgentEvent, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ThinkingLevel, Todo, ToolDefinition, ToolResult, ToolRegistryEntry } from "./types.js";
 
 const MAX_CONSECUTIVE_OVERFLOW_RECOVERIES = 3;
+const RESIDENT_HISTORY_KEEP_RECENT_TURNS = 3;
+const RESIDENT_HISTORY_MESSAGE_LIMIT = 160;
+const RESIDENT_HISTORY_CHAR_SOFT_LIMIT = 256 * 1024;
+const RESIDENT_HISTORY_CHAR_HARD_LIMIT = 512 * 1024;
+const RESIDENT_HISTORY_HEAP_SOFT_LIMIT = 512 * 1024 * 1024;
+const RESIDENT_HISTORY_HEAP_HARD_LIMIT = 768 * 1024 * 1024;
 
 export interface AgentOptions {
   provider: Provider;
@@ -202,10 +209,12 @@ export class Agent {
       yield { type: "todos_updated", todos: [] };
     }
     this.appendMessage({ role: "user", content: userInput });
+    this.maybeCompactResidentHistory();
 
     let consecutiveOverflowRecoveries = 0;
 
     while (true) {
+      this.maybeCompactResidentHistory();
       yield { type: "turn_start" };
 
       const assistantMsg: Extract<Message, { role: "assistant" }> = {
@@ -279,6 +288,7 @@ export class Agent {
         }
 
         this.appendMessage(assistantMsg);
+        this.maybeCompactResidentHistory();
         assistantAppended = true;
       } catch (error) {
         if (assistantAppended) {
@@ -319,6 +329,7 @@ export class Agent {
             toolCallId: tc.id,
             content: result.content,
           });
+          this.maybeCompactResidentHistory();
           this.onToolResult?.(tc.name, result);
           yield { type: "tool_end", id: tc.id, name: tc.name, result };
           if (this._todosVersion !== todosVersionBefore) {
@@ -333,6 +344,7 @@ export class Agent {
         continue;
       }
 
+      this.maybeCompactResidentHistory();
       yield { type: "turn_end", usage: turnUsage };
       break;
     }
@@ -378,6 +390,55 @@ export class Agent {
     return 0;
   }
 
+  private maybeCompactResidentHistory(): void {
+    if (this.messages.length === 0) {
+      return;
+    }
+
+    const before = this.messages;
+    const beforeChars = estimateResidentChars(before);
+    const beforeToolChars = estimateToolPayloadChars(before);
+    let candidate = projectMessages(before, { mode: "pruned" });
+
+    const budget = this.providerId && this.apiModel
+      ? getContextBudget(this.providerId, this.apiModel, candidate)
+      : undefined;
+    const heapUsed = getCurrentHeapUsed();
+    const residentChars = estimateResidentChars(candidate);
+    const keepRecentTurns = countUserTurns(candidate) > 10
+      ? 2
+      : RESIDENT_HISTORY_KEEP_RECENT_TURNS;
+    const shouldAggressivelyPrune = residentChars >= RESIDENT_HISTORY_CHAR_HARD_LIMIT
+      || heapUsed >= RESIDENT_HISTORY_HEAP_HARD_LIMIT;
+    const shouldCompact = !!budget?.shouldCompact
+      || candidate.length >= RESIDENT_HISTORY_MESSAGE_LIMIT
+      || residentChars >= RESIDENT_HISTORY_CHAR_SOFT_LIMIT
+      || heapUsed >= RESIDENT_HISTORY_HEAP_SOFT_LIMIT;
+
+    if (shouldAggressivelyPrune) {
+      candidate = aggressivePruneMessages(candidate);
+    }
+
+    if (shouldCompact) {
+      const compacted = compactMessages(candidate, { keepRecentTurns });
+      if (compacted.compacted && compacted.messages) {
+        candidate = compacted.messages;
+      }
+    }
+
+    const afterChars = estimateResidentChars(candidate);
+    const afterToolChars = estimateToolPayloadChars(candidate);
+    if (
+      afterChars < beforeChars
+      || afterToolChars < beforeToolChars
+      || candidate.length < before.length
+    ) {
+      this.messages = candidate;
+      this.lastInputTokens = null;
+      this.lastAnchorMessageCount = null;
+    }
+  }
+
   private appendMessage(message: Message) {
     this.messages.push(message);
     this.onMessageAppend?.(message);
@@ -419,5 +480,62 @@ export class Agent {
         isError: true,
       };
     }
+  }
+}
+
+function estimateResidentChars(messages: Message[]): number {
+  let total = 0;
+
+  for (const message of messages) {
+    switch (message.role) {
+      case "system":
+        total += message.content.length;
+        break;
+      case "tool":
+        total += message.content.length + message.toolCallId.length;
+        break;
+      case "assistant":
+        total += message.content.length + (message.reasoning?.length ?? 0);
+        total += message.toolCalls?.reduce(
+          (sum, toolCall) => sum + toolCall.id.length + toolCall.name.length + toolCall.arguments.length,
+          0,
+        ) ?? 0;
+        break;
+      case "user":
+        if (typeof message.content === "string") {
+          total += message.content.length;
+        } else {
+          total += message.content.reduce((sum, part) => {
+            if (part.type === "text") {
+              return sum + part.text.length;
+            }
+            return sum + part.image_url.url.length;
+          }, 0);
+        }
+        break;
+    }
+  }
+
+  return total;
+}
+
+function estimateToolPayloadChars(messages: Message[]): number {
+  return messages.reduce((sum, message) => {
+    if (message.role !== "tool") {
+      return sum;
+    }
+    return sum + message.content.length;
+  }, 0);
+}
+
+function countUserTurns(messages: Message[]): number {
+  return messages.reduce((count, message) => count + (message.role === "user" && !message.isMeta ? 1 : 0), 0);
+}
+
+function getCurrentHeapUsed(): number {
+  try {
+    return process.memoryUsage().heapUsed;
+  } catch {
+    return 0;
   }
 }

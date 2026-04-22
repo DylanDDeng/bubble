@@ -3,21 +3,7 @@ import { Box, Text } from "ink";
 import { theme } from "./theme.js";
 import { highlightCode, inferLang } from "./code-highlight.js";
 import { MarkdownContent } from "./markdown.js";
-
-export interface DisplayMessage {
-  role: "user" | "assistant" | "error";
-  content: string;
-  reasoning?: string;
-  toolCalls?: DisplayToolCall[];
-}
-
-export interface DisplayToolCall {
-  id: string;
-  name: string;
-  args: Record<string, any>;
-  result?: string;
-  isError?: boolean;
-}
+import type { DisplayMessage, DisplayToolCall } from "./display-history.js";
 
 interface MessageListProps {
   messages: DisplayMessage[];

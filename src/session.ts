@@ -12,6 +12,9 @@ import type { SessionLogEntry, SessionMarkerKind, SessionMetadata } from "./sess
 
 export type { SessionLogEntry, SessionMarkerKind, SessionMetadata } from "./session-types.js";
 
+const AUTO_COMPACT_ENTRY_THRESHOLD = 180;
+const AUTO_COMPACT_KEEP_RECENT_TURNS = 3;
+
 export class SessionManager {
   private sessionFile: string;
   private log = new SessionLog();
@@ -94,6 +97,7 @@ export class SessionManager {
   appendMessage(message: Message) {
     const entries = this.log.appendMessage(message);
     this.persist(entries);
+    this.maybeAutoCompact();
   }
 
   appendCompaction(summary: string) {
@@ -109,6 +113,7 @@ export class SessionManager {
   appendTodosSnapshot(todos: Todo[]) {
     const entry = this.log.appendTodosSnapshot(todos);
     this.persist(entry);
+    this.maybeAutoCompact();
   }
 
   getTodos(): Todo[] {
@@ -133,6 +138,20 @@ export class SessionManager {
 
   getSessionFile(): string {
     return this.sessionFile;
+  }
+
+  private maybeAutoCompact() {
+    const entries = this.log.list();
+    if (entries.length < AUTO_COMPACT_ENTRY_THRESHOLD) {
+      return;
+    }
+
+    const result = compactSessionEntries(entries, {
+      keepRecentTurns: AUTO_COMPACT_KEEP_RECENT_TURNS,
+    });
+    if (result.compacted && result.entries) {
+      this.rewrite(result.entries);
+    }
   }
 }
 

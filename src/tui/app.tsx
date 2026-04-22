@@ -7,7 +7,8 @@ import type { AgentEvent, ContentPart, PermissionMode, Message, PlanDecision, Pr
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import { UserConfig, maskKey } from "../config.js";
 import { InputBox, type SubmitPayload } from "./input-box.js";
-import { MessageList, type DisplayMessage, type DisplayToolCall } from "./message-list.js";
+import { MessageList } from "./message-list.js";
+import { compactDisplayMessages, type DisplayMessage, type DisplayToolCall } from "./display-history.js";
 import { theme } from "./theme.js";
 import { ModelPicker, ProviderPicker, KeyPicker } from "./model-picker.js";
 import { BUILTIN_PROVIDERS, ProviderRegistry, displayModel, isUserVisibleProvider } from "../provider-registry.js";
@@ -124,7 +125,7 @@ function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] 
 
 export function App({ agent, args, sessionManager, createProvider, registry, skillRegistry, planHandlerRef, approvalHandlerRef, bashAllowlist, settingsManager, mcpManager, bypassEnabled }: AppProps) {
   const { exit } = useApp();
-  const [messages, setMessages] = useState<DisplayMessage[]>(() => reconstructDisplayMessages(agent.messages));
+  const [messages, setMessages] = useState<DisplayMessage[]>(() => compactDisplayMessages(reconstructDisplayMessages(agent.messages)));
   const [isRunning, setIsRunning] = useState(false);
   const [streamingContent, setStreamingContent] = useState("");
   const [streamingReasoning, setStreamingReasoning] = useState("");
@@ -242,9 +243,13 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     }
   });
 
-  const addMessage = useCallback((role: DisplayMessage["role"], content: string) => {
-    setMessages((prev) => [...prev, { role, content }]);
+  const updateDisplayMessages = useCallback((updater: (prev: DisplayMessage[]) => DisplayMessage[]) => {
+    setMessages((prev) => compactDisplayMessages(updater(prev)));
   }, []);
+
+  const addMessage = useCallback((role: DisplayMessage["role"], content: string) => {
+    updateDisplayMessages((prev) => [...prev, { role, content }]);
+  }, [updateDisplayMessages]);
 
   const clearMessages = useCallback(() => {
     setMessages([]);
@@ -438,7 +443,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
               )
               .join(" ")}`
           : displayInput;
-        setMessages((prev) => [...prev, { role: "user", content: displayContent }]);
+        updateDisplayMessages((prev) => [...prev, { role: "user", content: displayContent }]);
         setIsRunning(true);
         setStreamingContent("");
         setStreamingReasoning("");
@@ -497,7 +502,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
                 const currentContent = assistantContent;
                 const currentReasoning = assistantReasoning;
                 const currentToolCalls = [...toolCalls];
-                setMessages((prev) => {
+                updateDisplayMessages((prev) => {
                   const last = prev[prev.length - 1];
                   if (last?.role === "assistant") {
                     const merged: DisplayMessage = {
@@ -534,7 +539,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
             }
           }
         } catch (err: any) {
-          setMessages((prev) => [...prev, { role: "error", content: err.message }]);
+          updateDisplayMessages((prev) => [...prev, { role: "error", content: err.message }]);
         } finally {
           setIsRunning(false);
           setStreamingContent("");
@@ -604,7 +609,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         images.map((img) => ({ filename: img.filename, bytes: img.bytes })),
       );
     },
-    [addMessage, agent, args.cwd, openPicker, createProvider, safeRegistry, safeSkillRegistry]
+    [addMessage, agent, args.cwd, openPicker, createProvider, safeRegistry, safeSkillRegistry, updateDisplayMessages]
   );
 
   const currentProviderId = agent.providerId || safeRegistry.getDefault()?.id;

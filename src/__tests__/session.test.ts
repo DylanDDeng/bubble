@@ -173,4 +173,18 @@ describe("SessionManager", () => {
     expect(restored[0].role).toBe("system");
     expect((restored[0] as any).content).toContain("Previous conversation summary:");
   });
+
+  it("auto-compacts very long sessions while appending messages", () => {
+    const file = join(tmpDir, "auto-compact.jsonl");
+    const sm = new SessionManager(file);
+
+    for (let i = 0; i < 110; i++) {
+      sm.appendMessage({ role: "user", content: `task ${i}` });
+      sm.appendMessage({ role: "assistant", content: `reply ${i}` });
+    }
+
+    const lines = readFileSync(file, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
+    expect(lines.some((line) => line.type === "summary")).toBe(true);
+    expect(lines.length).toBeLessThan(220);
+  });
 });

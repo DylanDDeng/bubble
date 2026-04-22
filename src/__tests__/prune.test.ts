@@ -59,9 +59,19 @@ describe("pruneMessages", () => {
 });
 
 describe("aggressivePruneMessages", () => {
-  it("drops the content of every prunable tool output regardless of recency", () => {
+  it("drops older prunable tool output but preserves the latest unresolved tool turn", () => {
     const messages: Message[] = [
       { role: "user", content: "do a lot of reads" },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          { id: "old_1", name: "read", arguments: "{\"file\":\"old-a.ts\"}" },
+          { id: "old_2", name: "grep", arguments: "{\"pattern\":\"legacy\"}" },
+        ],
+      },
+      { role: "tool", toolCallId: "old_1", content: longText("old a") },
+      { role: "tool", toolCallId: "old_2", content: longText("old hits") },
       {
         role: "assistant",
         content: "",
@@ -79,7 +89,9 @@ describe("aggressivePruneMessages", () => {
     const pruned = aggressivePruneMessages(messages);
     expect((pruned[2] as any).content).toContain("output omitted");
     expect((pruned[3] as any).content).toContain("output omitted");
-    expect((pruned[4] as any).content).toContain("output omitted");
+    expect((pruned[5] as any).content).toBe(messages[5].content);
+    expect((pruned[6] as any).content).toBe(messages[6].content);
+    expect((pruned[7] as any).content).toBe(messages[7].content);
   });
 
   it("still skips short outputs and errors", () => {
@@ -99,5 +111,20 @@ describe("aggressivePruneMessages", () => {
     const pruned = aggressivePruneMessages(messages);
     expect((pruned[1] as any).content).toBe("short");
     expect((pruned[2] as any).content).toBe("Error: failed");
+  });
+
+  it("preserves the active tool turn even when meta reminders follow it", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "call_1", name: "read", arguments: "{\"file\":\"a.ts\"}" }],
+      },
+      { role: "tool", toolCallId: "call_1", content: longText("active read") },
+      { role: "user", content: "<system-reminder>mode changed</system-reminder>", isMeta: true },
+    ];
+
+    const pruned = aggressivePruneMessages(messages);
+    expect((pruned[1] as any).content).toBe(messages[1].content);
   });
 });
