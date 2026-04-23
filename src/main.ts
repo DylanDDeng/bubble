@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 
 /**
  * Main entry point - assembles all layers and runs the agent.
@@ -117,8 +117,8 @@ async function main() {
   if (mcpLoaded.servers.length > 0) {
     await mcpManager.start();
     // Only surface failures at startup. Successful connections would push the
-    // welcome banner (committed to scrollback before ink's live region) above
-    // the visible area on small terminals. /mcp shows the full status.
+    // welcome screen above the visible area on small terminals. /mcp shows the
+    // full status.
     for (const state of mcpManager.getStates()) {
       if (state.status.kind === "failed") {
         console.error(chalk.yellow(`[mcp] ${state.name}: failed — ${state.status.error}`));
@@ -133,8 +133,8 @@ async function main() {
     const { registry: slashRegistry } = await import("./slash-commands/index.js");
     slashRegistry.addDynamicSource(() => mcpManager.getPromptCommands());
   }
-  // Signal-based shutdown for Ctrl-C / kill. For /quit (ink's own unmount) the
-  // quit command handler shuts MCP down directly — process.once("exit", ...)
+  // Signal-based shutdown for Ctrl-C / kill. For /quit the command handler
+  // shuts MCP down directly — process.once("exit", ...)
   // runs synchronously and can't await async work, so relying on it is a trap.
   const shutdownMcp = async () => {
     try {
@@ -291,9 +291,9 @@ async function main() {
     return;
   }
 
-  // Interactive mode: use Ink TUI
+  // Interactive mode: OpenTUI uses Bun native FFI, matching opencode's TUI stack.
   const { runTui } = await import("./tui/run.js");
-  runTui(agent, args, {
+  await runTui(agent, args, {
     sessionManager,
     createProvider,
     registry,
