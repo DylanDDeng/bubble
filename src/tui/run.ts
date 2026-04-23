@@ -1,9 +1,15 @@
 import {
+  type BoxRenderable,
   createCliRenderer,
   type CliRenderer,
   type ScrollBoxRenderable,
   type SelectOption,
   type SelectRenderable,
+  StyledText,
+  fg,
+  bg,
+  bold,
+  dim,
   type TextRenderable,
   type TextareaRenderable,
 } from "@opentui/core";
@@ -30,7 +36,7 @@ import { registry as slashRegistry } from "../slash-commands/index.js";
 import { expandAtMentions, filterFileSuggestions, findAtContext, listProjectFiles } from "./file-mentions.js";
 import { compactDisplayMessages, type DisplayMessage, type DisplayToolCall } from "./display-history.js";
 import { getNextPermissionMode } from "../permission/mode.js";
-import type { BashAllowlist } from "../approval/session-cache.js";
+import { inferBashPrefix, type BashAllowlist } from "../approval/session-cache.js";
 import type { SettingsManager } from "../permissions/settings.js";
 import type { McpManager } from "../mcp/manager.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
@@ -54,22 +60,62 @@ export interface RunTuiOptions {
   settingsManager?: SettingsManager;
   mcpManager?: McpManager;
   bypassEnabled?: boolean;
+  theme?: Record<string, string>;
 }
 
-const theme = {
+const DEFAULT_THEME = {
   primary: "#fab283",
   accent: "#9d7cd8",
   secondary: "#5c9cf5",
+  info: "#56b6c2",
   text: "#eeeeee",
   textMuted: "#808080",
   background: "#0a0a0a",
   backgroundPanel: "#141414",
   backgroundElement: "#1e1e1e",
   border: "#484848",
+  borderSubtle: "#3c3c3c",
   error: "#e06c75",
   warning: "#f5a742",
   success: "#7fd88f",
+  messageUserText: "#d7e8ff",
+  messageUserBorder: "#5c9cf5",
+  messageAssistantText: "#eeeeee",
+  messageAssistantAccent: "#fab283",
+  messageThinkingText: "#8b949e",
+  messageThinkingBorder: "#282828",
+  toolText: "#a6acb8",
+  toolPending: "#fab283",
+  toolSuccess: "#7fd88f",
+  toolError: "#e06c75",
+  toolShell: "#56b6c2",
+  toolRead: "#9d7cd8",
+  toolWrite: "#f5a742",
+  toolSearch: "#5c9cf5",
 };
+
+let theme = DEFAULT_THEME;
+
+const HOME_LOGO = [
+  "█▀▀▄ █  █ █▀▀▄ █▀▀▄ █    █▀▀",
+  "█▀▀▄ █  █ █▀▀▄ █▀▀▄ █    █▀▀",
+  "▀▀▀  ▀▀▀▀ ▀▀▀  ▀▀▀  ▀▀▀▀ ▀▀▀▀",
+];
+
+const HOME_PROMPTS = [
+  "Fix a TODO in the codebase",
+  "What is the tech stack of this project?",
+  "Find the highest-risk bug in this repo",
+  "Explain how this feature is wired",
+];
+
+const HOME_TIPS = [
+  "Type @ followed by a filename to attach file context",
+  "Press Tab to cycle Build and Plan modes",
+  "Type / or press Ctrl+P to open commands",
+  "Use /compact to summarize long sessions near context limits",
+  "Shift+Enter adds a newline in your prompt",
+];
 
 type Child = any;
 type PickerMode = "model" | "key" | "provider" | "provider-add" | "login" | "logout" | "slash" | "file";
@@ -123,6 +169,7 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
     };
 
     try {
+      theme = resolveTheme(options.theme);
       renderer = await createCliRenderer({
         externalOutputMode: "passthrough",
         targetFps: 60,
@@ -141,6 +188,24 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
   });
 }
 
+function resolveTheme(overrides?: Record<string, string>) {
+  if (!overrides) return DEFAULT_THEME;
+  const next = { ...DEFAULT_THEME };
+  for (const [key, value] of Object.entries(overrides)) {
+    if (!(key in next)) continue;
+    if (!isColorValue(value)) continue;
+    (next as Record<string, string>)[key] = value;
+  }
+  return next;
+}
+
+function isColorValue(value: string) {
+  return /^#[0-9a-fA-F]{6}$/.test(value)
+    || /^#[0-9a-fA-F]{8}$/.test(value)
+    || value === "transparent"
+    || value === "none";
+}
+
 function OpenTuiApp(props: {
   agent: Agent;
   args: CliArgs;
@@ -151,6 +216,8 @@ function OpenTuiApp(props: {
   const registry = props.options.registry!;
   const skills = props.options.skillRegistry!;
   let currentMessages = compactDisplayMessages(reconstructDisplayMessages(props.agent.messages));
+  const homeTip = HOME_TIPS[Math.floor(Math.random() * HOME_TIPS.length)] ?? HOME_TIPS[0]!;
+  const homePrompt = HOME_PROMPTS[Math.floor(Math.random() * HOME_PROMPTS.length)] ?? HOME_PROMPTS[0]!;
   let promptText = "";
   const [isRunning, setIsRunning] = createSignal(false);
   const [streamingContent, setStreamingContent] = createSignal("");
@@ -167,23 +234,127 @@ function OpenTuiApp(props: {
     request: ApprovalRequest;
     resolve: (decision: ApprovalDecision) => void;
   }>();
+  let pendingApprovalRef: { request: ApprovalRequest; resolve: (decision: ApprovalDecision) => void } | undefined;
+  const PLAN_OPTIONS = ["Approve", "Reject"] as const;
+  const [approvalOptionIdx, setApprovalOptionIdx] = createSignal(0);
   let picker: PickerState | undefined;
   let previousPickerForKey: Extract<PickerState, { kind: "select" }> | undefined;
   let prompt: TextareaRenderable | undefined;
   let scrollbox: ScrollBoxRenderable | undefined;
   let transcript: TextRenderable | undefined;
   let dock: TextRenderable | undefined;
+  let approvalRoot: BoxRenderable | undefined;
+  let approvalHeaderTitle: TextRenderable | undefined;
+  let approvalMetaIcon: TextRenderable | undefined;
+  let approvalMetaTitle: TextRenderable | undefined;
+  let approvalSubtitle: TextRenderable | undefined;
+  let approvalPreviewScroll: ScrollBoxRenderable | undefined;
+  let approvalPreviewText: TextRenderable | undefined;
+  const approvalOptionBoxes: Array<BoxRenderable | undefined> = [];
+  const approvalOptionTexts: Array<TextRenderable | undefined> = [];
+  let pickerFrame: BoxRenderable | undefined;
   let selectList: SelectRenderable | undefined;
 
-  createEffect(() => {
+  const isInlinePicker = (state: PickerState | undefined): state is Extract<PickerState, { kind: "select" }> =>
+    !!state && state.kind === "select" && (state.mode === "slash" || state.mode === "file");
+
+  const approvalOptionsFor = (request?: ApprovalRequest) => {
+    if (!request) return ["Allow once", "Reject"] as const;
+    return canPersistApproval(request)
+      ? ["Allow once", "Allow always", "Reject"] as const
+      : ["Allow once", "Reject"] as const;
+  };
+
+  const canPersistApproval = (request: ApprovalRequest) => {
+    if (request.type === "bash") return !!props.options.bashAllowlist || !!props.options.settingsManager;
+    return !!props.options.settingsManager;
+  };
+
+  const persistApproval = (request: ApprovalRequest) => {
+    if (request.type === "bash") {
+      const prefix = inferBashPrefix(request.command);
+      if (!prefix) return;
+      props.options.bashAllowlist?.add(prefix);
+      if (props.options.settingsManager) {
+        props.options.settingsManager.addRule("local", "allow", `Bash(${prefix}:*)`);
+        setNotice(`Saved local allow rule for ${prefix}`);
+        return;
+      }
+      setNotice(`Allowed ${prefix} for the rest of this session`);
+      return;
+    }
+
+    const settings = props.options.settingsManager;
+    if (!settings) return;
+    const tool = request.type === "edit" ? "Edit" : "Write";
+    settings.addRule("local", "allow", `${tool}(${request.path})`);
+    setNotice(`Saved local allow rule for ${shortCwd(request.path)}`);
+  };
+
+  const resolveApprovalSelection = () => {
+    const approval = pendingApproval();
+    if (!approval) return false;
+    const options = approvalOptionsFor(approval.request);
+    const sel = Math.min(approvalOptionIdx(), options.length - 1);
+    const choice = options[sel];
+    pendingApprovalRef = undefined;
+    setPendingApproval(undefined);
+    setApprovalOptionIdx(0);
+    forceApprovalUI();
+    if (choice === "Allow once") {
+      approval.resolve({ action: "approve" });
+      return true;
+    }
+    if (choice === "Allow always") {
+      persistApproval(approval.request);
+      approval.resolve({ action: "approve" });
+      return true;
+    }
+    approval.resolve({ action: "reject", feedback: "Rejected by user." });
+    return true;
+  };
+
+  const forceApprovalUI = () => {
+    const approval = pendingApproval();
+    const plan = pendingPlan();
+    if (prompt) {
+      if (approval) {
+        const options = approvalOptionsFor(approval.request);
+        const sel = Math.min(approvalOptionIdx(), options.length - 1);
+        prompt.placeholder = `  ⇆ select · enter confirm · esc reject   [${options[sel]}]`;
+      } else if (plan) {
+        const sel = approvalOptionIdx();
+        prompt.placeholder = `  ⇆ select · enter confirm · esc reject   [${PLAN_OPTIONS[sel]}]`;
+      } else {
+        prompt.placeholder = `Ask anything... "${homePrompt}"`;
+      }
+    }
+    redrawDock();
+    redrawTranscript();
+  };
+
+  const installInteractiveHandlers = () => {
     if (props.options.planHandlerRef) {
       props.options.planHandlerRef.current = (plan: string) =>
-        new Promise<PlanDecision>((resolve) => setPendingPlan({ plan, resolve }));
+        new Promise<PlanDecision>((resolve) => {
+          setPendingPlan({ plan, resolve });
+          forceApprovalUI();
+        });
     }
     if (props.options.approvalHandlerRef) {
       props.options.approvalHandlerRef.current = (request: ApprovalRequest) =>
-        new Promise<ApprovalDecision>((resolve) => setPendingApproval({ request, resolve }));
+        new Promise<ApprovalDecision>((resolve) => {
+          pendingApprovalRef = { request, resolve };
+          setPendingApproval({ request, resolve });
+          forceApprovalUI();
+        });
     }
+  };
+
+  installInteractiveHandlers();
+
+  createEffect(() => {
+    installInteractiveHandlers();
   });
 
   onMount(() => {
@@ -209,12 +380,30 @@ function OpenTuiApp(props: {
 
     const plan = pendingPlan();
     if (plan) {
-      if (name === "y" || name === "return" || name === "enter") {
-        setPendingPlan(undefined);
-        plan.resolve({ action: "approve", plan: plan.plan });
+      if (name === "left" || name === "right" || name === "h" || name === "l") {
+        const opts = PLAN_OPTIONS;
+        const idx = approvalOptionIdx();
+        const next = name === "left" || name === "h"
+          ? (idx - 1 + opts.length) % opts.length
+          : (idx + 1) % opts.length;
+        setApprovalOptionIdx(next);
+        forceApprovalUI();
+        event.preventDefault?.();
+        return;
       }
-      if (name === "n" || name === "escape") {
+      if (name === "return" || name === "enter") {
+        const sel = approvalOptionIdx();
         setPendingPlan(undefined);
+        setApprovalOptionIdx(0);
+        if (sel === 0) {
+          plan.resolve({ action: "approve", plan: plan.plan });
+        } else {
+          plan.resolve({ action: "reject", reason: "Rejected by user." });
+        }
+      }
+      if (name === "escape") {
+        setPendingPlan(undefined);
+        setApprovalOptionIdx(0);
         plan.resolve({ action: "reject", reason: "Rejected by user." });
       }
       event.preventDefault?.();
@@ -223,12 +412,25 @@ function OpenTuiApp(props: {
 
     const approval = pendingApproval();
     if (approval) {
-      if (name === "y" || name === "return" || name === "enter") {
-        setPendingApproval(undefined);
-        approval.resolve({ action: "approve" });
+      if (name === "left" || name === "right" || name === "up" || name === "down" || name === "h" || name === "l") {
+        const opts = approvalOptionsFor(approval.request);
+        const idx = approvalOptionIdx();
+        const next = name === "left" || name === "up" || name === "h"
+          ? (idx - 1 + opts.length) % opts.length
+          : (idx + 1) % opts.length;
+        setApprovalOptionIdx(next);
+        forceApprovalUI();
+        event.preventDefault?.();
+        return;
       }
-      if (name === "n" || name === "escape") {
+      if (name === "return" || name === "enter") {
+        resolveApprovalSelection();
+      }
+      if (name === "escape") {
+        pendingApprovalRef = undefined;
         setPendingApproval(undefined);
+        setApprovalOptionIdx(0);
+        forceApprovalUI();
         approval.resolve({ action: "reject", feedback: "Rejected by user." });
       }
       event.preventDefault?.();
@@ -240,6 +442,23 @@ function OpenTuiApp(props: {
       props.agent.setMode(next);
       setMode(next);
       props.options.sessionManager?.appendMarker("mode_switch", next);
+      event.preventDefault?.();
+      return;
+    }
+
+    if (name === "tab" && !picker) {
+      const next = getNextPermissionMode(props.agent.mode, { bypassEnabled: props.options.bypassEnabled });
+      props.agent.setMode(next);
+      setMode(next);
+      props.options.sessionManager?.appendMarker("mode_switch", next);
+      event.preventDefault?.();
+      return;
+    }
+
+    if (event.ctrl && name === "p" && !picker && !isRunning()) {
+      openCommandPalette();
+      event.preventDefault?.();
+      return;
     }
   }, {});
 
@@ -247,26 +466,120 @@ function OpenTuiApp(props: {
     return extra ? [...currentMessages, extra] : currentMessages;
   }
 
-  function redrawTranscript(extra?: DisplayMessage) {
-    if (transcript) {
-      transcript.content = formatTranscript(currentTranscriptMessages(extra));
-    }
-    scrollbox?.requestRender();
-    setTimeout(() => scrollbox?.scrollTo(scrollbox.scrollHeight), 0);
+  function transcriptOptions() {
+    return {
+      cwd: props.args.cwd,
+      tip: homeTip,
+      width: Math.max(20, dimensions().width - 4),
+      plan: pendingPlan()?.plan,
+      selectedOption: approvalOptionIdx(),
+    };
   }
 
+  function redrawTranscript(extra?: DisplayMessage) {
+    if (transcript) {
+      transcript.content = formatTranscript(currentTranscriptMessages(extra), transcriptOptions());
+    }
+    scrollbox?.requestRender();
+    setTimeout(() => scrollbox?.scrollTo(scrollbox.scrollHeight), 50);
+  }
+
+  createEffect(() => {
+    dimensions();
+    redrawTranscript();
+  });
+
   function redrawDock() {
-    if (dock) dock.content = formatDock(picker);
+    if (dock) {
+      dock.content = formatDock({
+        picker,
+        plan: pendingPlan()?.plan,
+        selectedOption: approvalOptionIdx(),
+      });
+    }
+    redrawApprovalPanel();
     if (selectList) {
       const state = picker?.kind === "select" && !picker.loading ? picker : undefined;
+      const inlinePicker = isInlinePicker(state);
       selectList.visible = !!state;
       selectList.options = state ? state.items.map(toSelectOption) : [];
       selectList.selectedIndex = state ? state.index : 0;
       selectList.height = state ? selectHeight(state) : 0;
+      selectList.backgroundColor = inlinePicker ? theme.backgroundPanel : theme.background;
+      selectList.textColor = theme.text;
+      selectList.focusedTextColor = theme.text;
+      selectList.selectedBackgroundColor = inlinePicker ? theme.primary : theme.backgroundElement;
+      selectList.selectedTextColor = inlinePicker ? contrastText(theme.primary) : theme.primary;
+      selectList.descriptionColor = inlinePicker ? theme.textMuted : theme.textMuted;
+      selectList.selectedDescriptionColor = inlinePicker ? contrastText(theme.primary) : theme.text;
+      selectList.showDescription = state?.mode !== "file";
+      selectList.showScrollIndicator = !inlinePicker;
       selectList.requestRender();
+    }
+    if (pickerFrame) {
+      const state = picker?.kind === "select" && !picker.loading ? picker : undefined;
+      const inlinePicker = isInlinePicker(state);
+      pickerFrame.visible = !!state;
+      pickerFrame.border = inlinePicker;
+      pickerFrame.borderColor = inlinePicker ? theme.border : theme.background;
+      pickerFrame.backgroundColor = inlinePicker ? theme.backgroundPanel : "#00000000";
+      pickerFrame.title = undefined;
+      pickerFrame.requestRender();
     }
     dock?.requestRender();
   }
+
+  function redrawApprovalPanel() {
+    if (!approvalRoot) return;
+    const approval = pendingApproval();
+    if (!approval) {
+      approvalRoot.visible = false;
+      approvalRoot.requestRender();
+      return;
+    }
+
+    const options = approvalOptionsFor(approval.request);
+    const activeIndex = Math.min(approvalOptionIdx(), options.length - 1);
+    const meta = getApprovalPanelMeta(approval.request);
+
+    approvalRoot.visible = true;
+    if (approvalHeaderTitle) approvalHeaderTitle.content = "Permission required";
+    if (approvalMetaIcon) approvalMetaIcon.content = meta.icon;
+    if (approvalMetaTitle) approvalMetaTitle.content = meta.title;
+    if (approvalSubtitle) {
+      approvalSubtitle.content = meta.subtitle ?? "";
+      approvalSubtitle.visible = !!meta.subtitle;
+    }
+    if (approvalPreviewScroll) {
+      approvalPreviewScroll.visible = !!meta.preview;
+      approvalPreviewScroll.height = meta.previewHeight;
+    }
+    if (approvalPreviewText) {
+      approvalPreviewText.content = meta.preview || "";
+      approvalPreviewText.fg = meta.previewColor;
+    }
+
+    for (let i = 0; i < approvalOptionBoxes.length; i++) {
+      const box = approvalOptionBoxes[i];
+      const text = approvalOptionTexts[i];
+      const label = options[i];
+      if (!box || !text) continue;
+      box.visible = !!label;
+      if (!label) continue;
+      box.backgroundColor = i === activeIndex ? theme.warning : theme.backgroundPanel;
+      text.content = label;
+      text.fg = i === activeIndex ? contrastText(theme.warning) : theme.textMuted;
+    }
+
+    approvalRoot.requestRender();
+    approvalPreviewScroll?.requestRender();
+  }
+
+  createEffect(() => {
+    pendingPlan();
+    pendingApproval();
+    forceApprovalUI();
+  });
 
   function updatePickerFromMouse(event: any, confirm = false) {
     if (!picker || picker.kind !== "select" || !selectList || picker.items.length === 0) return;
@@ -353,7 +666,6 @@ function OpenTuiApp(props: {
       return;
     }
     picker = undefined;
-    prompt?.clear();
     redrawDock();
     setTimeout(() => prompt?.focus(), 0);
   }
@@ -369,7 +681,18 @@ function OpenTuiApp(props: {
   };
 
   async function submitPrompt() {
-    if (isRunning() || pendingPlan() || pendingApproval()) return;
+    if (pendingApprovalRef) {
+      resolveApprovalSelection();
+      return;
+    }
+    const plan = pendingPlan();
+    if (plan) {
+      setPendingPlan(undefined);
+      setApprovalOptionIdx(0);
+      plan.resolve({ action: "approve", plan: plan.plan });
+      return;
+    }
+    if (isRunning()) return;
     if (picker?.kind === "select" && picker.mode === "slash") {
       const item = picker.items[picker.index];
       if (item) await runPickerItem(item);
@@ -400,12 +723,7 @@ function OpenTuiApp(props: {
           kind: "select",
           mode: "slash",
           title: "Commands",
-          items: matches.map((command) => ({
-            label: `/${command.name}`,
-            detail: command.description,
-            value: command.name,
-            command: `/${command.name}`,
-          })),
+          items: buildSlashItems(query),
           index: 0,
         };
         redrawDock();
@@ -415,15 +733,20 @@ function OpenTuiApp(props: {
     await handleInput(input);
   }
 
-  function onPromptContentChange(value: string) {
-    promptText = value;
+  function onPromptContentChange(value?: unknown) {
+    const nextValue = typeof value === "string" ? value : prompt?.plainText ?? "";
+    promptText = nextValue;
     if (picker?.kind === "key") return;
     if (picker?.kind === "select" && picker.mode !== "slash" && picker.mode !== "file") {
-      filterActivePicker(value);
+      filterActivePicker(nextValue);
+      return;
+    }
+    if (picker?.kind === "select" && picker.mode === "slash" && picker.allItems && !nextValue.startsWith("/")) {
+      filterActivePicker(nextValue);
       return;
     }
 
-    const trimmedBeforeCursor = value;
+    const trimmedBeforeCursor = nextValue;
     const at = findAtContext(trimmedBeforeCursor, trimmedBeforeCursor.length);
     if (at) {
       void updateFileAutocomplete(at.query, at.start, at.end);
@@ -436,14 +759,7 @@ function OpenTuiApp(props: {
     }
 
     const query = trimmedBeforeCursor.slice(1).toLowerCase();
-    const commands = slashRegistry.list()
-      .filter((command) => command.name.toLowerCase().startsWith(query))
-      .map((command): PickerItem => ({
-        label: `/${command.name}`,
-        detail: command.description,
-        value: command.name,
-        command: `/${command.name}`,
-      }));
+    const commands = buildSlashItems(query);
 
     if (!commands.length) {
       if (picker?.kind === "select" && picker.mode === "slash") closePicker();
@@ -460,10 +776,38 @@ function OpenTuiApp(props: {
     redrawDock();
   }
 
+  function openCommandPalette() {
+    const items = buildSlashItems();
+    picker = {
+      kind: "select",
+      mode: "slash",
+      title: "Commands",
+      items,
+      allItems: items,
+      index: 0,
+    };
+    prompt?.clear();
+    promptText = "";
+    prompt?.focus();
+    redrawDock();
+  }
+
+  function buildSlashItems(query = ""): PickerItem[] {
+    return slashRegistry.list()
+      .filter((command) => !query || command.name.toLowerCase().startsWith(query))
+      .map((command): PickerItem => ({
+        label: `/${command.name}`,
+        detail: command.description,
+        value: command.name,
+        command: `/${command.name}`,
+      }));
+  }
+
   function filterActivePicker(value: string) {
     if (!picker || picker.kind !== "select") return;
     const source = picker.allItems ?? picker.items;
     const query = value.trim().toLowerCase();
+    const previousQuery = picker.query ?? "";
     const nextItems = query
       ? source.filter((item) => {
         const haystack = `${item.label} ${item.detail ?? ""} ${item.value}`.toLowerCase();
@@ -471,7 +815,9 @@ function OpenTuiApp(props: {
       })
       : source;
     picker.items = nextItems;
-    picker.index = Math.min(Math.max(0, picker.index), Math.max(0, nextItems.length - 1));
+    picker.index = query !== previousQuery
+      ? 0
+      : Math.min(Math.max(0, picker.index), Math.max(0, nextItems.length - 1));
     picker.query = value.trim();
     redrawDock();
   }
@@ -575,7 +921,15 @@ function OpenTuiApp(props: {
     prompt?.clear();
     promptText = "";
     const immediateItems = buildPickerItems(selectKind);
-    picker = { kind: "select", mode: selectKind, title: pickerTitle(selectKind), items: immediateItems, allItems: immediateItems, index: 0, loading: false };
+    picker = {
+      kind: "select",
+      mode: selectKind,
+      title: pickerTitle(selectKind),
+      items: immediateItems,
+      allItems: immediateItems,
+      index: preferredPickerIndex(selectKind, immediateItems),
+      loading: false,
+    };
     prompt?.focus();
     redrawDock();
   }
@@ -625,7 +979,7 @@ function OpenTuiApp(props: {
         for (const model of models) {
           items.push({
             label: model.name,
-            detail: provider.name,
+            detail: `${provider.name}${props.agent.model === `${provider.id}:${model.id}` ? " · current" : ""}`,
             value: `${provider.id}:${model.id}`,
             command: `/model ${provider.id}:${model.id}`,
           });
@@ -646,7 +1000,7 @@ function OpenTuiApp(props: {
     if (kind === "provider") {
       return registry.getConfigured().map((provider) => ({
         label: provider.name,
-        detail: provider.id === registry.getDefault()?.id ? "default" : provider.id,
+        detail: `${provider.id}${provider.id === registry.getDefault()?.id ? " · default" : ""}${provider.apiKey ? "" : " · needs key"}`,
         value: provider.id,
         command: `/provider --set ${provider.id}`,
       }));
@@ -706,6 +1060,7 @@ function OpenTuiApp(props: {
     let assistantContent = "";
     let assistantReasoning = "";
     const toolCalls: DisplayToolCall[] = [];
+    let runError: string | undefined;
     try {
       for await (const event of props.agent.run(actualInput, props.args.cwd)) {
         if (event.type === "text_delta") {
@@ -750,70 +1105,242 @@ function OpenTuiApp(props: {
         }
       }
     } catch (error: any) {
-      addMessage("error", error?.message || String(error));
+      runError = error?.message || String(error);
     } finally {
+      pendingApprovalRef = undefined;
+      setPendingApproval(undefined);
+      setApprovalOptionIdx(0);
       setIsRunning(false);
       setStreamingContent("");
       setStreamingReasoning("");
       setStreamingTools([]);
+      currentMessages = compactDisplayMessages(reconstructDisplayMessages(props.agent.messages));
+      if (runError) {
+        currentMessages = compactDisplayMessages([...currentMessages, { role: "error", content: runError }]);
+      }
+      redrawTranscript();
+      redrawDock();
       setTimeout(() => prompt?.focus(), 0);
     }
   }
 
-  return h("box", { flexDirection: "column", width: "100%", height: "100%", backgroundColor: theme.background }, () => [
-    h("box", { flexGrow: 1, minHeight: 0, paddingLeft: 2, paddingRight: 2, paddingBottom: 1 },
+  return h("box", { flexDirection: "column", width: "100%", height: "100%", backgroundColor: theme.background }, () => {
+    const approval = pendingApproval();
+    return [
+    h("box", { flexDirection: "column", flexGrow: 1, minHeight: 0, paddingLeft: 2, paddingRight: 2, paddingBottom: 1 },
       h("scrollbox", {
         ref: (ref: ScrollBoxRenderable) => { scrollbox = ref; },
         stickyScroll: true,
         stickyStart: "bottom",
         flexGrow: 1,
+        minHeight: 0,
       },
         h("box", { height: 1 }),
         h("text", {
-          ref: (ref: TextRenderable) => { transcript = ref; },
+          ref: (ref: TextRenderable) => {
+            transcript = ref;
+            transcript.content = formatTranscript(currentMessages, transcriptOptions());
+          },
           fg: theme.text,
           wrapMode: "word",
-          content: formatTranscript(currentMessages),
+          content: "",
         }),
       ),
       todos().length ? renderTodos(todos()) : null,
-      pendingPlan() ? renderPlanPrompt(pendingPlan()!.plan) : null,
-      pendingApproval() ? renderApprovalPrompt(pendingApproval()!.request) : null,
+
       h("text", {
         ref: (ref: TextRenderable) => { dock = ref; },
         fg: theme.text,
         wrapMode: "word",
-        content: formatDock(picker),
+        content: formatDock({
+          picker,
+          plan: pendingPlan()?.plan,
+          selectedOption: approvalOptionIdx(),
+        }),
       }),
-      h("select", {
-        ref: (ref: SelectRenderable) => { selectList = ref; },
+      h("box", {
+        ref: (ref: BoxRenderable) => { pickerFrame = ref; },
         visible: false,
-        height: 1,
-        options: [],
-        selectedIndex: 0,
-        backgroundColor: theme.background,
-        textColor: theme.text,
-        focusedTextColor: theme.text,
-        selectedBackgroundColor: theme.backgroundElement,
-        selectedTextColor: theme.primary,
-        descriptionColor: theme.textMuted,
-        selectedDescriptionColor: theme.text,
-        showDescription: true,
-        showScrollIndicator: true,
-        onMouseMove: (event: any) => updatePickerFromMouse(event, false),
-        onMouseDown: (event: any) => updatePickerFromMouse(event, false),
-        onMouseUp: (event: any) => updatePickerFromMouse(event, true),
-      }),
+      },
+        h("select", {
+          ref: (ref: SelectRenderable) => { selectList = ref; },
+          visible: false,
+          height: 1,
+          options: [],
+          selectedIndex: 0,
+          backgroundColor: theme.background,
+          textColor: theme.text,
+          focusedTextColor: theme.text,
+          selectedBackgroundColor: theme.backgroundElement,
+          selectedTextColor: theme.primary,
+          descriptionColor: theme.textMuted,
+          selectedDescriptionColor: theme.text,
+          showDescription: true,
+          showScrollIndicator: true,
+          onMouseMove: (event: any) => updatePickerFromMouse(event, false),
+          onMouseDown: (event: any) => updatePickerFromMouse(event, false),
+          onMouseUp: (event: any) => updatePickerFromMouse(event, true),
+        }),
+      ),
       notice() ? h("text", { fg: theme.warning }, notice()) : null,
+      h("box", {
+        ref: (ref: BoxRenderable) => { approvalRoot = ref; },
+        visible: !!approval,
+        backgroundColor: theme.backgroundPanel,
+        border: ["left"],
+        borderColor: theme.warning,
+        marginTop: 1,
+        flexDirection: "column",
+      },
+        h("box", {
+          gap: 1,
+          paddingLeft: 1,
+          paddingRight: 3,
+          paddingTop: 1,
+          paddingBottom: 1,
+          flexGrow: 1,
+          flexDirection: "column",
+        },
+          h("box", { flexDirection: "row", gap: 1, paddingLeft: 1, flexShrink: 0 },
+            h("text", { fg: theme.warning }, "△"),
+            h("text", {
+              ref: (ref: TextRenderable) => { approvalHeaderTitle = ref; },
+              fg: theme.text,
+              content: "Permission required",
+            }),
+          ),
+          h("box", { flexDirection: "row", gap: 1, paddingLeft: 1, flexShrink: 0 },
+            h("text", {
+              ref: (ref: TextRenderable) => { approvalMetaIcon = ref; },
+              fg: theme.textMuted,
+              content: approval ? getApprovalPanelMeta(approval.request).icon : "",
+            }),
+            h("text", {
+              ref: (ref: TextRenderable) => { approvalMetaTitle = ref; },
+              fg: theme.text,
+              wrapMode: "word",
+              content: approval ? getApprovalPanelMeta(approval.request).title : "",
+            }),
+          ),
+          h("box", { paddingLeft: 1, flexShrink: 0 },
+            h("text", {
+              ref: (ref: TextRenderable) => { approvalSubtitle = ref; },
+              fg: theme.textMuted,
+              wrapMode: "word",
+              visible: false,
+              content: "",
+            }),
+          ),
+          h("scrollbox", {
+            ref: (ref: ScrollBoxRenderable) => { approvalPreviewScroll = ref; },
+            height: approval ? getApprovalPanelMeta(approval.request).previewHeight : 3,
+            paddingLeft: 1,
+            paddingRight: 1,
+            visible: !!approval,
+          },
+            h("text", {
+              ref: (ref: TextRenderable) => { approvalPreviewText = ref; },
+              fg: approval ? getApprovalPanelMeta(approval.request).previewColor : theme.toolText,
+              wrapMode: "word",
+              content: approval ? (getApprovalPanelMeta(approval.request).preview || "") : "",
+            }),
+          ),
+        ),
+        h("box", {
+          flexDirection: "row",
+          flexShrink: 0,
+          gap: 1,
+          paddingTop: 1,
+          paddingLeft: 2,
+          paddingRight: 3,
+          paddingBottom: 1,
+          backgroundColor: theme.backgroundElement,
+          justifyContent: "space-between",
+          alignItems: "center",
+        },
+          h("box", { flexDirection: "row", gap: 1, flexShrink: 0 },
+            [0, 1, 2].map((index) =>
+              h("box", {
+                ref: (ref: BoxRenderable) => { approvalOptionBoxes[index] = ref; },
+                paddingLeft: 1,
+                paddingRight: 1,
+                visible: false,
+                backgroundColor: theme.backgroundPanel,
+                onMouseOver: () => {
+                  const approvalState = pendingApproval();
+                  if (!approvalState) return;
+                  const options = approvalOptionsFor(approvalState.request);
+                  if (!options[index]) return;
+                  setApprovalOptionIdx(index);
+                  forceApprovalUI();
+                },
+                onMouseUp: () => {
+                  const approvalState = pendingApproval();
+                  if (!approvalState) return;
+                  const options = approvalOptionsFor(approvalState.request);
+                  if (!options[index]) return;
+                  setApprovalOptionIdx(index);
+                  forceApprovalUI();
+                  resolveApprovalSelection();
+                },
+              },
+              h("text", {
+                ref: (ref: TextRenderable) => { approvalOptionTexts[index] = ref; },
+                fg: theme.textMuted,
+                content: "",
+              })),
+            ),
+          ),
+          h("box", { flexDirection: "row", gap: 2, flexShrink: 0 },
+            h("text", { fg: theme.text }, "⇆ ", h("span", { fg: theme.textMuted }, "select")),
+            h("text", { fg: theme.text }, "enter ", h("span", { fg: theme.textMuted }, "confirm")),
+            h("text", { fg: theme.text }, "esc ", h("span", { fg: theme.textMuted }, "reject")),
+          ),
+        ),
+      ),
       renderPrompt({
         ref: (ref) => { prompt = ref; },
         onSubmit: submitPrompt,
         onContentChange: onPromptContentChange,
         onKeyDown: handlePickerKey,
+        onUiKeyDown: (event: any) => {
+          const name = String(event.name || "").toLowerCase();
+          const approval = pendingApproval();
+          if (approval && (name === "left" || name === "right" || name === "up" || name === "down" || name === "h" || name === "l")) {
+            const opts = approvalOptionsFor(approval.request);
+            const idx = approvalOptionIdx();
+            const next = name === "left" || name === "up" || name === "h"
+              ? (idx - 1 + opts.length) % opts.length
+              : (idx + 1) % opts.length;
+            setApprovalOptionIdx(next);
+            forceApprovalUI();
+            event.preventDefault?.();
+            return true;
+          }
+          const plan = pendingPlan();
+          if (plan && (name === "left" || name === "right" || name === "h" || name === "l")) {
+            const idx = approvalOptionIdx();
+            const next = name === "left" || name === "h"
+              ? (idx - 1 + PLAN_OPTIONS.length) % PLAN_OPTIONS.length
+              : (idx + 1) % PLAN_OPTIONS.length;
+            setApprovalOptionIdx(next);
+            forceApprovalUI();
+            event.preventDefault?.();
+            return true;
+          }
+          return false;
+        },
         getText: () => prompt?.plainText ?? "",
-        disabled: isRunning,
+        disabled: () => isRunning() && !pendingApproval() && !pendingPlan(),
         mode,
         model: () => displayModel(props.agent.model) || "no model",
+        placeholder: () => {
+          const approval = pendingApproval();
+          if (approval) return "Press Enter to approve or Esc to reject";
+          const plan = pendingPlan();
+          if (plan) return "Press Enter to approve plan or Esc to reject";
+          return `Ask anything... "${homePrompt}"`;
+        },
       }),
     ),
     renderFooter({
@@ -823,18 +1350,21 @@ function OpenTuiApp(props: {
       mode,
       running: isRunning,
     }),
-  ]);
+  ];
+  });
 }
 
 function renderPrompt(input: {
   ref: (ref: TextareaRenderable) => void;
   onSubmit: () => void;
-  onContentChange: (value: string) => void;
+  onContentChange: (value?: unknown) => void;
   onKeyDown: (event: any) => boolean;
+  onUiKeyDown: (event: any) => boolean;
   getText: () => string;
   disabled: () => boolean;
   mode: () => PermissionMode;
   model: () => string;
+  placeholder: () => string;
 }) {
   return h("box", { flexDirection: "column", flexShrink: 0, marginTop: 1 },
     h("box", { border: ["left"], borderColor: theme.primary, backgroundColor: theme.backgroundElement },
@@ -842,7 +1372,7 @@ function renderPrompt(input: {
         h("textarea", {
           ref: input.ref,
           focused: true,
-          placeholder: "What should Bubble do?",
+          placeholder: input.placeholder(),
           placeholderColor: theme.textMuted,
           textColor: theme.text,
           focusedTextColor: theme.text,
@@ -850,13 +1380,14 @@ function renderPrompt(input: {
           focusedBackgroundColor: theme.backgroundElement,
           minHeight: 1,
           maxHeight: 6,
-          onContentChange: input.onContentChange,
+          onContentChange: () => input.onContentChange(input.getText()),
           keyBindings: [
             { name: "return", action: "submit" },
             { name: "linefeed", action: "submit" },
             { name: "return", shift: true, action: "newline" },
           ],
           onKeyDown: (event: any) => {
+            if (input.onUiKeyDown(event)) return;
             if (input.onKeyDown(event)) return;
             if (input.disabled()) event.preventDefault();
             setTimeout(() => input.onContentChange(input.getText()), 0);
@@ -879,7 +1410,8 @@ function renderPrompt(input: {
       () => input.disabled() ? h("text", { fg: theme.textMuted }, "esc interrupt") : h("text", { fg: theme.textMuted }, ""),
       h("box", { flexDirection: "row", gap: 2 },
         h("text", { fg: theme.text }, "⇧↵ ", h("span", { fg: theme.textMuted }, "newline")),
-        h("text", { fg: theme.text }, "/ ", h("span", { fg: theme.textMuted }, "commands")),
+        h("text", { fg: theme.text }, "tab ", h("span", { fg: theme.textMuted }, "agents")),
+        h("text", { fg: theme.text }, "ctrl+p ", h("span", { fg: theme.textMuted }, "commands")),
         h("text", { fg: theme.text }, "@ ", h("span", { fg: theme.textMuted }, "files")),
       ),
     ),
@@ -899,12 +1431,12 @@ function renderMessage(message: DisplayMessage, index: number) {
 function renderUserMessage(message: DisplayMessage, index: number) {
   return h("box", {
     border: ["left"],
-    borderColor: theme.primary,
+    borderColor: theme.messageUserBorder,
     marginTop: index === 0 ? 0 : 1,
     backgroundColor: theme.backgroundPanel,
   },
     h("box", { paddingTop: 1, paddingBottom: 1, paddingLeft: 2, backgroundColor: theme.backgroundPanel, flexShrink: 0 },
-      h("text", { fg: theme.text, wrapMode: "word" }, message.content || " "),
+      h("text", { fg: theme.messageUserText, wrapMode: "word" }, message.content || " "),
     ),
   );
 }
@@ -912,30 +1444,31 @@ function renderUserMessage(message: DisplayMessage, index: number) {
 function renderAssistantMessage(message: DisplayMessage) {
   const children: Child[] = [];
   if (message.reasoning) {
-    children.push(h("box", { paddingLeft: 2, marginTop: 1, border: ["left"], borderColor: theme.backgroundElement },
-      h("text", { fg: theme.textMuted, wrapMode: "word" }, `_Thinking:_ ${truncate(message.reasoning.trim(), 800)}`),
+    children.push(h("box", { paddingLeft: 2, marginTop: 1, border: ["left"], borderColor: theme.messageThinkingBorder },
+      h("text", { fg: theme.messageThinkingText, wrapMode: "word" }, `Thinking: ${truncate(message.reasoning.trim(), 800)}`),
     ));
   }
   for (const tool of message.toolCalls ?? []) children.push(renderTool(tool));
   if (message.content.trim()) {
     children.push(h("box", { paddingLeft: 3, marginTop: 1 },
-      h("text", { fg: theme.text, wrapMode: "word" }, message.content.trim()),
+      h("text", { fg: theme.messageAssistantText, wrapMode: "word" }, message.content.trim()),
     ));
     children.push(h("box", { paddingLeft: 3 },
-      h("text", { fg: theme.primary }, "▣ ", h("span", { fg: theme.text }, "Build")),
+      h("text", { fg: theme.messageAssistantAccent }, "▣ ", h("span", { fg: theme.text }, "Build")),
     ));
   }
-  if (!children.length) children.push(h("box", { paddingLeft: 3, marginTop: 1 }, h("text", { fg: theme.primary }, "▣ Bubble")));
+  if (!children.length) return null;
   return h("box", { flexDirection: "column", flexShrink: 0 }, children);
 }
 
 function renderTool(tool: DisplayToolCall) {
   const icon = tool.name === "bash" ? "$" : tool.name === "edit" || tool.name === "write" ? "✎" : "●";
+  const color = toolColor(tool);
   return h("box", { paddingLeft: 3, marginTop: 1, flexDirection: "column" },
-    h("text", { fg: tool.isError ? theme.error : tool.result ? theme.textMuted : theme.text },
+    h("text", { fg: color },
       `${tool.result ? "" : "~ "}${icon} ${displayToolName(tool.name)}${toolHeader(tool) ? ` ${toolHeader(tool)}` : ""}`,
     ),
-    () => tool.result ? h("text", { fg: tool.isError ? theme.error : theme.textMuted, wrapMode: "word" }, `  ${summarizeToolResult(tool)}`) : null,
+    () => tool.result ? h("text", { fg: tool.isError ? theme.toolError : theme.textMuted, wrapMode: "word" }, `  ${summarizeToolResult(tool)}`) : null,
   );
 }
 
@@ -953,29 +1486,6 @@ function renderPlanPrompt(plan: string) {
   },
     h("text", { fg: theme.warning }, "◆ Plan approval"),
     h("text", { fg: theme.text, wrapMode: "word", marginTop: 1 }, truncate(plan, 1800)),
-    h("text", { fg: theme.textMuted, marginTop: 1 }, "enter/y approve · n/esc reject"),
-  );
-}
-
-function renderApprovalPrompt(request: ApprovalRequest) {
-  const preview = request.type === "bash"
-    ? `$ ${request.command}`
-    : request.type === "edit"
-      ? `${request.path}\n${truncate(request.diff, 1200)}`
-      : `${request.path}\n${truncate(request.content, 1200)}`;
-  return h("box", {
-    border: true,
-    borderColor: theme.warning,
-    backgroundColor: theme.backgroundPanel,
-    paddingLeft: 2,
-    paddingRight: 2,
-    paddingTop: 1,
-    paddingBottom: 1,
-    marginTop: 1,
-    flexDirection: "column",
-  },
-    h("text", { fg: theme.warning }, `◆ Permission request · ${request.type}`),
-    h("text", { fg: theme.text, wrapMode: "word", marginTop: 1 }, preview),
     h("text", { fg: theme.textMuted, marginTop: 1 }, "enter/y approve · n/esc reject"),
   );
 }
@@ -1026,8 +1536,27 @@ function pickerTitle(kind: Exclude<PickerMode, "key">) {
   }
 }
 
-function formatDock(state: PickerState | undefined) {
+function preferredPickerIndex(kind: Exclude<PickerMode, "key">, items: PickerItem[]) {
+  if (kind === "model") {
+    const agentCurrent = items.findIndex((item) => item.detail?.includes("current"));
+    if (agentCurrent >= 0) return agentCurrent;
+  }
+  if (kind === "provider") {
+    const current = items.findIndex((item) => item.detail?.includes("default"));
+    if (current >= 0) return current;
+  }
+  return 0;
+}
+
+function formatDock(input: {
+  picker: PickerState | undefined;
+  plan?: string;
+  selectedOption?: number;
+}): string | StyledText {
+  if (input.plan) return formatPlanDock(input.plan, input.selectedOption ?? 0);
+  const state = input.picker;
   if (!state) return "";
+  if (state.kind === "select" && (state.mode === "slash" || state.mode === "file")) return "";
   if (state.kind === "key") {
     return [
       `╭─ ${state.title}`,
@@ -1057,6 +1586,70 @@ function formatDock(state: PickerState | undefined) {
     "│ (no options available)",
     "╰─ type filter · ↑/↓ move · enter select · esc cancel",
   ].join("\n");
+}
+
+function formatPlanDock(plan: string, selectedOption: number): StyledText {
+  const previewLines = formatDockPreviewLines(plan, { maxLines: 6, maxWidth: 110 });
+  const chunks: StyledText["chunks"] = [];
+  chunks.push(fg(theme.warning)("┃ "));
+  chunks.push(fg(theme.warning)(bold("△ ")));
+  chunks.push(fg(theme.text)(bold("Plan approval required\n")));
+  chunks.push(fg(theme.warning)("┃\n"));
+  for (const line of previewLines) {
+    chunks.push(fg(theme.warning)("┃  "));
+    chunks.push(fg(theme.toolText)(`${line || " "}\n`));
+  }
+  chunks.push(fg(theme.warning)("┃\n"));
+  chunks.push(fg(theme.warning)("┃  "));
+  const options = ["Approve", "Reject"];
+  for (let i = 0; i < options.length; i++) {
+    if (i > 0) chunks.push(fg(theme.text)("  "));
+    if (i === selectedOption) {
+      chunks.push(bg(theme.warning)(fg("#000000")(bold(` ${options[i]} `))));
+    } else {
+      chunks.push(bg(theme.backgroundElement)(fg(theme.textMuted)(` ${options[i]} `)));
+    }
+  }
+  chunks.push(fg(theme.text)("\n"));
+  chunks.push(fg(theme.warning)("┃  "));
+  chunks.push(dim(fg(theme.textMuted)("⇆ select · enter confirm · esc reject\n")));
+  return new StyledText(chunks);
+}
+
+function formatDockPreviewLines(value: string, options: { maxLines: number; maxWidth: number }) {
+  const normalized = value.replace(/\r\n/g, "\n").split("\n");
+  const lines: string[] = [];
+  let truncated = false;
+
+  for (const rawLine of normalized) {
+    if (lines.length >= options.maxLines) {
+      truncated = true;
+      break;
+    }
+
+    if (rawLine.length <= options.maxWidth) {
+      lines.push(rawLine || " ");
+      continue;
+    }
+
+    let remaining = rawLine;
+    while (remaining.length > options.maxWidth) {
+      if (lines.length >= options.maxLines) {
+        truncated = true;
+        break;
+      }
+      lines.push(remaining.slice(0, options.maxWidth));
+      remaining = remaining.slice(options.maxWidth);
+    }
+    if (truncated || lines.length >= options.maxLines) break;
+    lines.push(remaining || " ");
+  }
+
+  if (truncated && lines.length > 0) {
+    lines[lines.length - 1] = truncate(lines[lines.length - 1] || "", Math.max(8, options.maxWidth - 1));
+  }
+
+  return lines.slice(0, options.maxLines);
 }
 
 function selectHeight(state: Extract<PickerState, { kind: "select" }>) {
@@ -1107,36 +1700,219 @@ function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] 
   return result;
 }
 
-function formatTranscript(messages: DisplayMessage[]) {
-  if (!messages.length) return "";
-  const blocks: string[] = [];
-  for (const [index, message] of messages.entries()) {
+type TranscriptOptions = {
+  cwd: string;
+  tip: string;
+  width: number;
+  plan?: string;
+  selectedOption?: number;
+};
+
+function renderTranscript(messages: DisplayMessage[], options?: TranscriptOptions) {
+  const visibleMessages = messages.filter(hasRenderableMessage);
+  if (!visibleMessages.length) return renderHomeTranscript(options);
+  return visibleMessages.map((message, index) => renderMessage(message, index));
+}
+
+function renderHomeTranscript(options?: TranscriptOptions) {
+  const width = Math.max(20, options?.width ?? 80);
+  const cwd = options?.cwd ? shortCwd(options.cwd) : "";
+  const tip = options?.tip ?? HOME_TIPS[0]!;
+  return h("box", { flexDirection: "column", flexShrink: 0 },
+    h("text", { fg: theme.text }, ""),
+    h("text", { fg: theme.text }, ""),
+    ...HOME_LOGO.map((line) => h("text", { fg: theme.primary }, centerLine(line, width))),
+    h("text", { fg: theme.text }, ""),
+    h("text", { fg: theme.warning }, centerLine(`● Tip  ${tip}`, width)),
+    cwd ? h("text", { fg: theme.textMuted }, centerLine(`  ${cwd}`, width)) : null,
+  );
+}
+
+function formatTranscript(messages: DisplayMessage[], options?: TranscriptOptions): StyledText {
+  const visibleMessages = messages.filter(hasRenderableMessage);
+  if (!visibleMessages.length) return formatHomeTranscript(options);
+  const chunks: StyledText["chunks"] = [];
+  const append = (content: string, color = theme.text) => {
+    if (content) chunks.push(fg(color)(content));
+  };
+  const appendLine = (content = "", color = theme.text) => {
+    append(`${content}\n`, color);
+  };
+  const appendBlank = () => {
+    if (chunks.length > 0) appendLine("");
+  };
+
+  for (const [index, message] of visibleMessages.entries()) {
     if (message.role === "user") {
-      blocks.push(formatUserTranscript(message.content, index));
+      if (index > 0) appendBlank();
+      appendUserTranscript(chunks, message.content);
       continue;
     }
     if (message.role === "error") {
-      blocks.push(`│  Error\n│  ${message.content}`);
+      appendBlank();
+      appendLine("│  Error", theme.error);
+      for (const line of message.content.split(/\r?\n/)) {
+        append("│  ", theme.error);
+        appendLine(line || " ", theme.error);
+      }
       continue;
     }
     if (message.reasoning) {
-      blocks.push(`│  Thinking: ${truncate(message.reasoning.trim(), 500)}`);
+      appendBlank();
+      append("│  ", theme.messageThinkingBorder);
+      append("Thinking: ", theme.messageThinkingText);
+      appendLine(truncate(message.reasoning.trim(), 500), theme.messageThinkingText);
     }
     for (const tool of message.toolCalls ?? []) {
+      appendBlank();
       const icon = tool.name === "bash" ? "$" : tool.name === "edit" || tool.name === "write" ? "✎" : "●";
-      blocks.push(`   ${icon} ${displayToolName(tool.name)} ${toolHeader(tool)}\n     ${summarizeToolResult(tool)}`);
+      const color = toolColor(tool);
+      append(`   ${tool.result ? "" : "~ "}${icon} `, color);
+      append(displayToolName(tool.name), color);
+      const header = toolHeader(tool);
+      if (header) append(` ${header}`, theme.toolText);
+      appendLine("");
+      append("     ", theme.borderSubtle);
+      appendLine(summarizeToolResult(tool), tool.isError ? theme.toolError : theme.textMuted);
     }
     if (message.content.trim()) {
-      blocks.push(`   ${message.content.trim()}\n   ▣ Build`);
+      appendBlank();
+      for (const line of message.content.trim().split(/\r?\n/)) {
+        append("   ", theme.borderSubtle);
+        appendLine(line || " ", theme.messageAssistantText);
+      }
+      append("   ▣ ", theme.messageAssistantAccent);
+      appendLine("Build", theme.text);
     }
   }
-  return blocks.filter(Boolean).join("\n\n");
+  if (options?.plan) appendPlanTranscript(chunks, options.plan, options.selectedOption ?? 0);
+  return new StyledText(chunks);
 }
 
-function formatUserTranscript(content: string, index: number) {
-  const margin = index === 0 ? "" : "\n";
+function hasRenderableMessage(message: DisplayMessage) {
+  if (message.role === "error") return !!message.content.trim();
+  if (message.role === "user") return !!message.content.trim();
+  if (message.reasoning?.trim()) return true;
+  if (message.content.trim()) return true;
+  return (message.toolCalls?.length ?? 0) > 0;
+}
+
+function formatHomeTranscript(options?: TranscriptOptions): StyledText {
+  const width = Math.max(20, options?.width ?? 80);
+  const cwd = options?.cwd ? shortCwd(options.cwd) : "";
+  const tip = options?.tip ?? HOME_TIPS[0]!;
+  const chunks: StyledText["chunks"] = [];
+  const appendCentered = (line: string, color: string) => {
+    chunks.push(fg(color)(`${centerLine(line, width)}\n`));
+  };
+  appendCentered("", theme.text);
+  appendCentered("", theme.text);
+  for (const line of HOME_LOGO) appendCentered(line, theme.primary);
+  appendCentered("", theme.text);
+  appendCentered(`● Tip  ${tip}`, theme.warning);
+  if (cwd) appendCentered(`  ${cwd}`, theme.textMuted);
+  return new StyledText(chunks);
+}
+
+function centerLine(line: string, width: number) {
+  const pad = Math.max(0, Math.floor((width - plainWidth(line)) / 2));
+  return `${" ".repeat(pad)}${line}`;
+}
+
+function plainWidth(line: string) {
+  return line.replace(/\x1b\[[0-9;]*m/g, "").length;
+}
+
+function appendUserTranscript(chunks: StyledText["chunks"], content: string) {
   const lines = content.split(/\r?\n/);
-  return `${margin}│\n${lines.map((line) => `│  ${line || " "}`).join("\n")}\n│`;
+  chunks.push(fg(theme.messageUserBorder)("│\n"));
+  for (const line of lines) {
+    chunks.push(fg(theme.messageUserBorder)("│  "));
+    chunks.push(fg(theme.messageUserText)(`${line || " "}\n`));
+  }
+  chunks.push(fg(theme.messageUserBorder)("│\n"));
+}
+
+function appendPlanTranscript(chunks: StyledText["chunks"], plan: string, selectedOption: number) {
+  const lines = formatDockPreviewLines(plan, { maxLines: 6, maxWidth: 120 });
+  chunks.push(fg(theme.text)("\n"));
+  chunks.push(fg(theme.warning)("┃ "));
+  chunks.push(fg(theme.warning)(bold("△ ")));
+  chunks.push(bold(fg(theme.text)("Plan approval required\n")));
+  chunks.push(fg(theme.warning)("┃\n"));
+  for (const line of lines) {
+    chunks.push(fg(theme.warning)("┃  "));
+    chunks.push(fg(theme.toolText)(`${line || " "}\n`));
+  }
+  chunks.push(fg(theme.warning)("┃\n"));
+  chunks.push(fg(theme.warning)("┃  "));
+  const options = ["Approve", "Reject"];
+  for (let i = 0; i < options.length; i++) {
+    if (i > 0) chunks.push(fg(theme.text)("  "));
+    if (i === selectedOption) {
+      chunks.push(bg(theme.warning)(fg("#000000")(bold(` ${options[i]} `))));
+    } else {
+      chunks.push(bg(theme.backgroundElement)(fg(theme.textMuted)(` ${options[i]} `)));
+    }
+  }
+  chunks.push(fg(theme.text)("\n"));
+  chunks.push(fg(theme.warning)("┃  "));
+  chunks.push(dim(fg(theme.textMuted)("⇆ select · enter confirm · esc reject\n")));
+}
+
+function getApprovalPanelMeta(request: ApprovalRequest) {
+  if (request.type === "bash") {
+    return {
+      icon: "#",
+      title: "Shell command",
+      subtitle: "",
+      preview: `$ ${request.command}`,
+      previewHeight: 3,
+      previewColor: theme.text,
+    };
+  }
+
+  const path = shortCwd(request.path);
+  if (request.type === "edit") {
+    return {
+      icon: "→",
+      title: `Edit ${path}`,
+      subtitle: "",
+      preview: request.diff || "No diff provided",
+      previewHeight: 8,
+      previewColor: request.diff ? theme.toolText : theme.textMuted,
+    };
+  }
+
+  return {
+    icon: "→",
+    title: `Write ${path}`,
+    subtitle: "",
+    preview: request.content || "No content provided",
+    previewHeight: 8,
+    previewColor: request.content ? theme.toolText : theme.textMuted,
+  };
+}
+
+function contrastText(color: string) {
+  const hex = color.replace("#", "");
+  const normalized = hex.length === 8 ? hex.slice(0, 6) : hex;
+  if (normalized.length !== 6) return theme.text;
+  const r = Number.parseInt(normalized.slice(0, 2), 16);
+  const g = Number.parseInt(normalized.slice(2, 4), 16);
+  const b = Number.parseInt(normalized.slice(4, 6), 16);
+  const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+  return luminance > 160 ? "#000000" : "#ffffff";
+}
+
+function toolColor(tool: DisplayToolCall) {
+  if (tool.isError) return theme.toolError;
+  if (!tool.result) return theme.toolPending;
+  if (tool.name === "bash") return theme.toolShell;
+  if (tool.name === "read") return theme.toolRead;
+  if (tool.name === "write" || tool.name === "edit") return theme.toolWrite;
+  if (tool.name === "grep" || tool.name === "glob" || tool.name === "web_search" || tool.name === "web_fetch") return theme.toolSearch;
+  return theme.toolSuccess;
 }
 
 function displayToolName(name: string): string {
