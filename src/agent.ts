@@ -340,7 +340,12 @@ export class Agent {
           }
         }
 
-        // Auto-continue: if we have tool results, the LLM needs to respond to them
+        yield { type: "turn_end", usage: turnUsage };
+
+        // Auto-continue: if we have tool results, the LLM needs to respond to them.
+        // Emitting the turn boundary keeps UI renderers aligned with the persisted
+        // assistant/tool message sequence instead of merging the next answer into
+        // the tool-call turn.
         continue;
       }
 

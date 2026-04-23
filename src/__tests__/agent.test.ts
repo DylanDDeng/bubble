@@ -79,6 +79,39 @@ describe("Agent", () => {
     expect(agent.messages.filter((m) => m.role === "tool")).toHaveLength(1);
   });
 
+  it("emits a turn boundary between tool execution and the final answer", async () => {
+    const provider = createMockProvider([
+      [
+        { type: "tool_call", id: "tc_1", name: "dummy", arguments: "", isStart: true, isEnd: false },
+        {
+          type: "tool_call",
+          id: "tc_1",
+          name: "dummy",
+          arguments: '{"value":"42"}',
+          isStart: false,
+          isEnd: true,
+        },
+        { type: "done" },
+      ],
+      [{ type: "text", content: "Done!" }, { type: "done" }],
+    ]);
+
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [dummyTool] });
+    const events = await collectEvents(agent, "Call dummy", "/tmp");
+    const eventTypes = events.map((event) => event.type);
+
+    expect(eventTypes).toEqual([
+      "turn_start",
+      "tool_start",
+      "tool_end",
+      "turn_end",
+      "turn_start",
+      "text_delta",
+      "turn_end",
+      "agent_end",
+    ]);
+  });
+
   it("reports unknown tool error", async () => {
     const provider = createMockProvider([
       [

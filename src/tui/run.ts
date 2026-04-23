@@ -1115,13 +1115,24 @@ function OpenTuiApp(props: {
     let runError: string | undefined;
     try {
       for await (const event of props.agent.run(actualInput, props.args.cwd)) {
-        if (event.type === "text_delta") {
+        if (event.type === "turn_start") {
+          assistantContent = "";
+          assistantReasoning = "";
+          toolCalls.length = 0;
+          redrawTranscript({
+            role: "assistant",
+            content: "",
+            status: "thinking",
+            streaming: true,
+          });
+        } else if (event.type === "text_delta") {
           assistantContent += event.content;
           redrawTranscript({
             role: "assistant",
             content: assistantContent,
             reasoning: assistantReasoning || undefined,
             toolCalls: toolCalls.length ? [...toolCalls] : undefined,
+            status: "responding",
             streaming: true,
           });
         } else if (event.type === "reasoning_delta") {
@@ -1131,10 +1142,11 @@ function OpenTuiApp(props: {
             content: assistantContent,
             reasoning: assistantReasoning || undefined,
             toolCalls: toolCalls.length ? [...toolCalls] : undefined,
+            status: "thinking",
             streaming: true,
           });
         } else if (event.type === "tool_start") {
-          toolCalls.push({ id: event.id, name: event.name, args: event.args });
+          toolCalls.push({ id: event.id, name: event.name, args: event.args, status: "running" });
           redrawTranscript({
             role: "assistant",
             content: assistantContent,
@@ -1147,6 +1159,7 @@ function OpenTuiApp(props: {
           if (call) {
             call.result = event.result.content;
             call.isError = event.result.isError;
+            call.status = event.result.isError ? "error" : "completed";
             redrawTranscript({
               role: "assistant",
               content: assistantContent,
@@ -1167,7 +1180,9 @@ function OpenTuiApp(props: {
             reasoning: assistantReasoning || undefined,
             toolCalls: toolCalls.length ? [...toolCalls] : undefined,
           };
-          const nextMessages = [...displayMessages, assistantMessage];
+          const nextMessages = hasRenderableMessage(assistantMessage)
+            ? [...displayMessages, assistantMessage]
+            : displayMessages;
           displayMessages = nextMessages;
           redrawTranscript(undefined, nextMessages);
           assistantContent = "";
@@ -1582,6 +1597,11 @@ function renderUserMessage(message: DisplayMessage, index: number) {
 
 function renderAssistantMessage(message: DisplayMessage, syntaxStyle: SyntaxStyle) {
   const children: Child[] = [];
+  if (message.status && !message.reasoning?.trim() && !message.content.trim() && !(message.toolCalls?.length)) {
+    children.push(h("box", { paddingLeft: 3, marginTop: 1, flexShrink: 0 },
+      h("text", { fg: theme.messageThinkingText }, assistantStatusLabel(message)),
+    ));
+  }
   if (message.reasoning) {
     children.push(h("box", {
       paddingLeft: 2,
@@ -1591,7 +1611,7 @@ function renderAssistantMessage(message: DisplayMessage, syntaxStyle: SyntaxStyl
       flexDirection: "column",
       flexShrink: 0,
     },
-      renderMarkdownContent(`*Thinking:* ${message.reasoning.trim()}`, syntaxStyle, {
+      renderMarkdownContent(message.reasoning.trim(), syntaxStyle, {
         streaming: message.streaming === true,
         fg: theme.messageThinkingText,
       }),
@@ -1604,9 +1624,6 @@ function renderAssistantMessage(message: DisplayMessage, syntaxStyle: SyntaxStyl
         streaming: message.streaming === true,
         fg: theme.messageAssistantText,
       }),
-    ));
-    children.push(h("box", { paddingLeft: 3 },
-      h("text", { fg: theme.messageAssistantAccent }, "▣ ", h("span", { fg: theme.text }, "Build")),
     ));
   }
   if (!children.length) return null;
@@ -1719,6 +1736,7 @@ type TranscriptEntry = {
   refs: {
     userText?: TextRenderable;
     errorText?: TextRenderable;
+    statusText?: TextRenderable;
     reasoningMarkdown?: MarkdownRenderable;
     contentMarkdown?: MarkdownRenderable;
   };
@@ -1739,10 +1757,11 @@ function transcriptMessageKey(message: DisplayMessage, index: number) {
 function transcriptMessageSignature(message: DisplayMessage) {
   if (message.role !== "assistant") return message.role;
   const tools = (message.toolCalls ?? [])
-    .map((tool) => `${tool.id}:${tool.name}:${tool.result === undefined ? "pending" : "done"}:${tool.isError ? "error" : "ok"}`)
+    .map((tool) => `${tool.id}:${tool.name}:${tool.status ?? (tool.result === undefined ? "pending" : "completed")}:${tool.isError ? "error" : "ok"}`)
     .join("|");
   return [
     message.role,
+    message.status ?? "idle",
     message.reasoning?.trim() ? "reasoning" : "no-reasoning",
     message.content.trim() ? "content" : "no-content",
     tools,
@@ -1766,8 +1785,11 @@ function updateMessageEntry(entry: TranscriptEntry, message: DisplayMessage) {
     if (entry.refs.errorText) entry.refs.errorText.content = message.content;
     return;
   }
+  if (entry.refs.statusText) {
+    entry.refs.statusText.content = assistantStatusLabel(message);
+  }
   if (entry.refs.reasoningMarkdown) {
-    entry.refs.reasoningMarkdown.content = `*Thinking:* ${message.reasoning?.trim() ?? ""}`;
+    entry.refs.reasoningMarkdown.content = message.reasoning?.trim() ?? "";
     entry.refs.reasoningMarkdown.streaming = message.streaming === true;
   }
   if (entry.refs.contentMarkdown) {
@@ -1890,8 +1912,19 @@ function createAssistantEntry(
 ): TranscriptEntry | null {
   const children: Renderable[] = [];
   const refs: TranscriptEntry["refs"] = {};
+  if (message.status && !message.reasoning?.trim() && !message.content.trim() && !(message.toolCalls?.length)) {
+    const status = createText(ctx, assistantStatusLabel(message), {
+      fg: theme.messageThinkingText,
+    });
+    refs.statusText = status;
+    children.push(createBox(ctx, {
+      paddingLeft: 3,
+      marginTop: 1,
+      flexShrink: 0,
+    }, [status]));
+  }
   if (message.reasoning?.trim()) {
-    const markdown = createMarkdown(ctx, `*Thinking:* ${message.reasoning.trim()}`, syntaxStyle, {
+    const markdown = createMarkdown(ctx, message.reasoning.trim(), syntaxStyle, {
       streaming: message.streaming === true,
       fg: theme.messageThinkingText,
     });
@@ -1920,12 +1953,6 @@ function createAssistantEntry(
       flexDirection: "column",
       flexShrink: 0,
     }, [markdown]));
-    children.push(createBox(ctx, { paddingLeft: 3, flexShrink: 0 }, [
-      createText(ctx, new StyledText([
-        fg(theme.messageAssistantAccent)("▣ "),
-        fg(theme.text)("Build"),
-      ]), { fg: theme.text }),
-    ]));
   }
 
   if (!children.length) return null;
@@ -1942,7 +1969,7 @@ function createToolRenderable(ctx: RenderContext, tool: DisplayToolCall) {
   const color = toolColor(tool);
   const header = toolHeader(tool);
   const chunks: StyledText["chunks"] = [
-    fg(color)(`${tool.result ? "" : "~ "}${icon} ${displayToolName(tool.name)}`),
+    fg(color)(`${isToolFinished(tool) ? "" : "~ "}${icon} ${displayToolName(tool.name)}`),
   ];
   if (header) chunks.push(fg(theme.toolText)(` ${header}`));
   if (tool.result) {
@@ -1984,7 +2011,7 @@ function renderTool(tool: DisplayToolCall) {
   const color = toolColor(tool);
   return h("box", { paddingLeft: 3, marginTop: 1, flexDirection: "column", flexShrink: 0 },
     h("text", { fg: color },
-      `${tool.result ? "" : "~ "}${icon} ${displayToolName(tool.name)}${toolHeader(tool) ? ` ${toolHeader(tool)}` : ""}`,
+      `${isToolFinished(tool) ? "" : "~ "}${icon} ${displayToolName(tool.name)}${toolHeader(tool) ? ` ${toolHeader(tool)}` : ""}`,
     ),
     () => tool.result ? h("text", { fg: tool.isError ? theme.toolError : theme.textMuted, wrapMode: "word" }, `  ${summarizeToolResult(tool)}`) : null,
   );
@@ -2206,6 +2233,9 @@ function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] 
         args,
         result: toolResult ? (toolResult as any).content as string : undefined,
         isError: toolResult ? (toolResult as any).content?.startsWith?.("Error:") : false,
+        status: toolResult
+          ? ((toolResult as any).content?.startsWith?.("Error:") ? "error" : "completed")
+          : "pending",
       });
     }
     result.push({
@@ -2270,14 +2300,18 @@ function formatTranscript(messages: DisplayMessage[], options?: TranscriptOption
     if (message.reasoning) {
       appendBlank();
       append("│  ", theme.messageThinkingBorder);
-      append("Thinking: ", theme.messageThinkingText);
       appendLine(truncate(message.reasoning.trim(), 500), theme.messageThinkingText);
+    }
+    if (message.status && !message.reasoning?.trim() && !message.content.trim() && !(message.toolCalls?.length)) {
+      appendBlank();
+      append("   ", theme.borderSubtle);
+      appendLine(assistantStatusLabel(message), theme.messageThinkingText);
     }
     for (const tool of message.toolCalls ?? []) {
       appendBlank();
       const icon = tool.name === "bash" ? "$" : tool.name === "edit" || tool.name === "write" ? "✎" : "●";
       const color = toolColor(tool);
-      append(`   ${tool.result ? "" : "~ "}${icon} `, color);
+      append(`   ${isToolFinished(tool) ? "" : "~ "}${icon} `, color);
       append(displayToolName(tool.name), color);
       const header = toolHeader(tool);
       if (header) append(` ${header}`, theme.toolText);
@@ -2291,8 +2325,6 @@ function formatTranscript(messages: DisplayMessage[], options?: TranscriptOption
         append("   ", theme.borderSubtle);
         appendLine(line || " ", theme.messageAssistantText);
       }
-      append("   ▣ ", theme.messageAssistantAccent);
-      appendLine("Build", theme.text);
     }
   }
   if (options?.plan) appendPlanTranscript(chunks, options.plan, options.selectedOption ?? 0);
@@ -2322,6 +2354,7 @@ function renderHomeState(input: { width: number; cwd: string; tip: string }) {
 function hasRenderableMessage(message: DisplayMessage) {
   if (message.role === "error") return !!message.content.trim();
   if (message.role === "user") return !!message.content.trim();
+  if (message.status) return true;
   if (message.reasoning?.trim()) return true;
   if (message.content.trim()) return true;
   return (message.toolCalls?.length ?? 0) > 0;
@@ -2418,7 +2451,7 @@ function contrastText(color: string) {
 
 function toolColor(tool: DisplayToolCall) {
   if (tool.isError) return theme.toolError;
-  if (!tool.result) return theme.toolPending;
+  if (!isToolFinished(tool)) return theme.toolPending;
   if (tool.name === "bash") return theme.toolShell;
   if (tool.name === "read") return theme.toolRead;
   if (tool.name === "write" || tool.name === "edit") return theme.toolWrite;
@@ -2449,13 +2482,23 @@ function toolHeader(tool: DisplayToolCall): string {
 }
 
 function summarizeToolResult(tool: DisplayToolCall): string {
-  if (!tool.result) return "pending";
-  if (tool.isError) return truncate(tool.result.split("\n").find(Boolean) || "error", 120);
-  const lines = tool.result.replace(/\r\n/g, "\n").split("\n").filter((line) => line.trim()).length;
+  if (!isToolFinished(tool)) return tool.status === "running" ? "running" : "pending";
+  const result = tool.result ?? "";
+  if (tool.isError) return truncate(result.split("\n").find(Boolean) || "error", 120);
+  const lines = result.replace(/\r\n/g, "\n").split("\n").filter((line) => line.trim()).length;
   if (tool.name === "edit") return "patched file";
   if (tool.name === "write") return "wrote file";
   if (tool.name === "bash") return lines ? `${lines} line${lines === 1 ? "" : "s"} output` : "done";
   return lines ? `${lines} line${lines === 1 ? "" : "s"}` : "done";
+}
+
+function isToolFinished(tool: DisplayToolCall): boolean {
+  return tool.status === "completed" || tool.status === "error" || tool.result !== undefined;
+}
+
+function assistantStatusLabel(message: DisplayMessage): string {
+  if (message.status === "responding") return "Responding...";
+  return message.streaming ? "Thinking..." : "Thinking";
 }
 
 function truncate(value: string, max: number) {

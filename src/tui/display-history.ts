@@ -3,6 +3,8 @@ export interface DisplayMessage {
   content: string;
   reasoning?: string;
   toolCalls?: DisplayToolCall[];
+  status?: "thinking" | "responding";
+  streaming?: boolean;
   syntheticKind?: "ui_summary";
   hiddenCount?: number;
 }
@@ -11,6 +13,7 @@ export interface DisplayToolCall {
   id: string;
   name: string;
   args: Record<string, any>;
+  status?: "pending" | "running" | "completed" | "error";
   result?: string;
   isError?: boolean;
 }
