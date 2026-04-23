@@ -1186,10 +1186,14 @@ function OpenTuiApp(props: {
       h("box", {
         ref: (ref: BoxRenderable) => { approvalRoot = ref; },
         visible: !!approval,
+        position: "absolute",
+        left: 2,
+        right: 2,
+        bottom: 4,
+        zIndex: 200,
         backgroundColor: theme.backgroundPanel,
         border: ["left"],
         borderColor: theme.warning,
-        marginTop: 1,
         flexDirection: "column",
       },
         h("box", {
