@@ -48,6 +48,7 @@ import type { SettingsManager } from "../permissions/settings.js";
 import type { McpManager } from "../mcp/manager.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
 import { createFrames } from "./opencode-spinner.js";
+import { isModifiedEnterSequence, PROMPT_TEXTAREA_KEYBINDINGS } from "./prompt-keybindings.js";
 
 export interface PlanHandlerRef {
   current?: (plan: string) => Promise<PlanDecision>;
@@ -127,7 +128,7 @@ const HOME_TIPS = [
   "Press Tab to cycle Build and Plan modes",
   "Type / or press Ctrl+P to open commands",
   "Use /compact to summarize long sessions near context limits",
-  "Shift+Enter adds a newline in your prompt",
+  "Shift+Enter or Ctrl+J inserts a newline in your prompt",
 ];
 
 type Child = any;
@@ -290,6 +291,14 @@ function OpenTuiApp(props: {
       return "";
     }
   };
+
+  const isTrackedShiftReturn = (event: any) => {
+    const name = String(event.name || "").toLowerCase();
+    if (name !== "return" && name !== "enter") return false;
+    return !!event.shift;
+  };
+
+  const canInsertPromptNewline = () => !isRunning() && !pendingApproval() && !pendingPlan();
 
   const isInlinePicker = (state: PickerState | undefined): state is Extract<PickerState, { kind: "select" }> =>
     !!state && state.kind === "select" && (state.mode === "slash" || state.mode === "file");
@@ -505,14 +514,6 @@ function OpenTuiApp(props: {
       openCommandPalette();
       event.preventDefault?.();
       return;
-    }
-
-    if ((name === "return" || name === "enter" || name === "linefeed") && !event.shift) {
-      if (!picker && !isRunning()) {
-        event.preventDefault?.();
-        void submitPrompt();
-        return;
-      }
     }
   }, {});
 
@@ -1334,6 +1335,8 @@ function OpenTuiApp(props: {
         ref: (ref) => { sessionPromptRef = ref; },
         focused: !isHomeSurfaceActive(streamingDisplay),
         onSubmit: submitPrompt,
+        isFallbackNewlineKey: isTrackedShiftReturn,
+        onFallbackNewline: () => canInsertPromptNewline() && (activePrompt()?.newLine() ?? false),
         onContentChange: onPromptContentChange,
         onKeyDown: handlePickerKey,
         onUiKeyDown: promptUiKeyDown,
@@ -1388,6 +1391,8 @@ function OpenTuiApp(props: {
         },
         focused: isHomeSurfaceActive(streamingDisplay),
         onSubmit: submitPrompt,
+        isFallbackNewlineKey: isTrackedShiftReturn,
+        onFallbackNewline: () => canInsertPromptNewline() && (activePrompt()?.newLine() ?? false),
         onContentChange: onPromptContentChange,
         onKeyDown: handlePickerKey,
         onUiKeyDown: promptUiKeyDown,
@@ -1638,6 +1643,8 @@ function renderPrompt(input: {
   ref: (ref: TextareaRenderable) => void;
   focused: boolean;
   onSubmit: () => void;
+  isFallbackNewlineKey: (event: any) => boolean;
+  onFallbackNewline: () => boolean;
   onContentChange: (value?: unknown) => void;
   onKeyDown: (event: any) => boolean;
   onUiKeyDown: (event: any) => boolean;
@@ -1662,14 +1669,18 @@ function renderPrompt(input: {
           minHeight: 1,
           maxHeight: 6,
           onContentChange: () => input.onContentChange(input.getText()),
+          keyBindings: PROMPT_TEXTAREA_KEYBINDINGS,
           onKeyDown: (event: any) => {
             if (input.onUiKeyDown(event)) return;
             if (input.onKeyDown(event)) return;
-            const name = String(event.name || "").toLowerCase();
-            if ((name === "return" || name === "enter" || name === "linefeed") && !event.shift) {
-              event.preventDefault?.();
-              input.onSubmit();
-              return;
+            const modifiedEnter = isModifiedEnterSequence(event);
+            const fallbackNewline = modifiedEnter || input.isFallbackNewlineKey(event);
+            if (fallbackNewline) {
+              if (input.onFallbackNewline()) {
+                event.preventDefault?.();
+                setTimeout(() => input.onContentChange(input.getText()), 0);
+                return;
+              }
             }
             if (input.disabled()) event.preventDefault();
             setTimeout(() => input.onContentChange(input.getText()), 0);
@@ -1688,7 +1699,7 @@ function renderPrompt(input: {
     h("box", { width: "100%", flexDirection: "row", justifyContent: "space-between" },
       () => input.disabled() ? h("text", { fg: theme.textMuted }, "esc interrupt") : h("text", { fg: theme.textMuted }, ""),
       h("box", { flexDirection: "row", gap: 2 },
-        h("text", { fg: theme.text }, "⇧↵ ", h("span", { fg: theme.textMuted }, "newline")),
+        h("text", { fg: theme.text }, "⇧↵/ctrl+j ", h("span", { fg: theme.textMuted }, "newline")),
         h("text", { fg: theme.text }, "tab ", h("span", { fg: theme.textMuted }, "agents")),
         h("text", { fg: theme.text }, "ctrl+p ", h("span", { fg: theme.textMuted }, "commands")),
         h("text", { fg: theme.text }, "@ ", h("span", { fg: theme.textMuted }, "files")),
