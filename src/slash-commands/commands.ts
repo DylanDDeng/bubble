@@ -5,6 +5,8 @@ import { encodeModel, decodeModel, displayModel, BUILTIN_PROVIDERS, isUserVisibl
 import { getAvailableThinkingLevels, normalizeThinkingLevel } from "../provider-transform.js";
 import { buildSystemPrompt } from "../system-prompt.js";
 import { formatLoadedSkill } from "../tools/skill.js";
+import type { ThinkingLevel } from "../types.js";
+import { isThinkingLevel } from "../variant/thinking-level.js";
 import type { SlashCommand, SlashCommandContext } from "./types.js";
 
 const VALID_SCOPES: SettingsScope[] = ["user", "project", "local"];
@@ -84,7 +86,8 @@ function syncSystemPrompt(ctx: Parameters<SlashCommand["handler"]>[1], model: st
 function switchToProviderModel(
   providerId: string,
   modelId: string,
-  ctx: Parameters<SlashCommand["handler"]>[1]
+  ctx: Parameters<SlashCommand["handler"]>[1],
+  thinkingLevel?: ThinkingLevel,
 ) {
   const provider = ctx.registry.getConfigured().find((item) => item.id === providerId);
   if (!provider?.apiKey) {
@@ -92,7 +95,7 @@ function switchToProviderModel(
   }
 
   ctx.agent.thinking = normalizeThinkingLevel(
-    ctx.agent.thinking,
+    thinkingLevel ?? ctx.agent.thinking,
     getAvailableThinkingLevels(providerId, modelId),
   );
   ctx.agent.setProvider(ctx.createProvider(providerId, provider.apiKey, provider.baseURL));
@@ -101,6 +104,48 @@ function switchToProviderModel(
   syncSystemPrompt(ctx, ctx.agent.model);
   persistSelectedModel(ctx.agent.model, ctx);
   return true;
+}
+
+function parseModelArgs(args: string): { model?: string; thinkingLevel?: ThinkingLevel; error?: string } {
+  const tokens = args.trim().split(/\s+/).filter(Boolean);
+  let model: string | undefined;
+  let thinkingLevel: ThinkingLevel | undefined;
+
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token === "--reasoning-effort" || token === "--thinking") {
+      const value = tokens[++index];
+      if (!isThinkingLevel(value)) {
+        return { error: `Invalid reasoning effort "${value ?? ""}".` };
+      }
+      thinkingLevel = value;
+      continue;
+    }
+    if (!model) {
+      model = token;
+      continue;
+    }
+    return { error: `Unexpected model argument "${token}".` };
+  }
+
+  return { model, thinkingLevel };
+}
+
+function displaySelectedModel(model: string, thinkingLevel: ThinkingLevel): string {
+  const label = displayModel(model);
+  return thinkingLevel === "off" ? label : `${label} (${thinkingLevel})`;
+}
+
+function parseKeyArgs(args: string, ctx: Parameters<SlashCommand["handler"]>[1]) {
+  const trimmed = args.trim();
+  const [first, ...rest] = trimmed.split(/\s+/);
+  const explicitProvider = first
+    ? ctx.registry.getConfigured().find((provider) => provider.id === first)
+    : undefined;
+  if (explicitProvider) {
+    return { provider: explicitProvider, apiKey: rest.join(" ") };
+  }
+  return { provider: ctx.registry.getDefault(), apiKey: trimmed };
 }
 
 export const builtinSlashCommands: SlashCommand[] = [
@@ -312,7 +357,7 @@ export const builtinSlashCommands: SlashCommand[] = [
   },
   {
     name: "model",
-    description: "Switch model. Use /model <id> or just /model to open picker.",
+    description: "Switch model. Use /model <id> [--reasoning-effort <level>] or just /model to open picker.",
     async handler(args, ctx) {
       if (!args) {
         if (ctx.registry.getEnabled().length === 0) {
@@ -321,39 +366,51 @@ export const builtinSlashCommands: SlashCommand[] = [
         ctx.openPicker("model");
         return;
       }
+      const parsed = parseModelArgs(args);
+      if (parsed.error) {
+        return parsed.error;
+      }
+      if (!parsed.model) {
+        ctx.openPicker("model");
+        return;
+      }
       const defaultProvider = ctx.registry.getDefault()?.id || "openai";
-      const next = args.includes(":") ? args : encodeModel(defaultProvider, args);
+      const next = parsed.model.includes(":") ? parsed.model : encodeModel(defaultProvider, parsed.model);
       const { providerId, modelId } = decodeModel(next);
       const targetProviderId = providerId || defaultProvider;
 
       await ctx.registry.prepareProvider(targetProviderId);
-      const switched = switchToProviderModel(targetProviderId, modelId, ctx);
+      const switched = switchToProviderModel(targetProviderId, modelId, ctx, parsed.thinkingLevel);
       if (!switched) {
         return `Provider ${targetProviderId} is not configured or has no active credentials.`;
       }
 
-      return `Model switched to ${displayModel(next)}.`;
+      return `Model switched to ${displaySelectedModel(next, ctx.agent.thinking)}.`;
     },
   },
   {
     name: "key",
-    description: "Set API key for the current or a specific provider. /key to open picker.",
+    description: "Set API key for the current or a specific provider. Usage: /key [provider-id] <key>",
     async handler(args, ctx) {
       if (!args) {
         ctx.openPicker("key");
         return;
       }
-      const provider = ctx.registry.getDefault();
+      const { provider, apiKey } = parseKeyArgs(args, ctx);
       if (!provider) {
         return "No provider configured. Use /provider --add <id> first.";
+      }
+      if (!apiKey) {
+        return `Usage: /key ${provider.id} <key>`;
       }
       if (ctx.registry.getModelConfig().hasProvider(provider.id)) {
         return `API key for ${provider.name} is managed in ~/.bubble/models.json. Please edit that file directly.`;
       }
-      ctx.registry.updateProviderKey(provider.id, args);
-      ctx.agent.setProvider(ctx.createProvider(provider.id, args, provider.baseURL));
+      ctx.registry.updateProviderKey(provider.id, apiKey);
+      ctx.registry.setDefault(provider.id);
+      ctx.agent.setProvider(ctx.createProvider(provider.id, apiKey, provider.baseURL));
       ctx.agent.providerId = provider.id;
-      return `API key updated for ${provider.name} to ${maskKey(args)}.`;
+      return `API key updated for ${provider.name} to ${maskKey(apiKey)}.`;
     },
   },
   {

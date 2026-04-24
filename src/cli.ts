@@ -91,7 +91,7 @@ Options:
   -r, --resume             Resume a previous session (latest by default)
   --session <name>         Session name to create or resume
   --reasoning              Enable reasoning mode at medium effort
-  --reasoning-effort <l>   Set reasoning effort: off|minimal|low|medium|high|xhigh
+  --reasoning-effort <l>   Set reasoning effort: off|minimal|low|medium|high|xhigh|max
   --plan                   Start in plan mode (read-only investigation; propose before executing)
   --accept-edits           Start with edits/writes auto-approved (bash still prompts)
   --dangerously-skip-permissions

@@ -5,10 +5,12 @@ import { getNextThinkingLevel } from "../variant/thinking-level.js";
 describe("variant resolver", () => {
   it("returns model-specific thinking levels", () => {
     expect(getAvailableThinkingLevels("openai-codex", "gpt-5.1-codex-mini")).toEqual(["off", "medium", "high"]);
+    expect(getAvailableThinkingLevels("deepseek", "deepseek-v4-pro")).toEqual(["high", "max"]);
   });
 
   it("chooses medium as the default when supported", () => {
     expect(getDefaultThinkingLevel("openai-codex", "gpt-5.4")).toBe("medium");
+    expect(getDefaultThinkingLevel("deepseek", "deepseek-v4-pro")).toBe("high");
   });
 
   it("clamps unsupported levels downward", () => {

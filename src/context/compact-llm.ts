@@ -14,7 +14,7 @@ import type { Message, Provider, ToolCall } from "../types.js";
 export interface LLMCompactOptions extends CompactOptions {
   provider: Provider;
   model: string;
-  thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 }
 
 const COMPACT_SYSTEM_PROMPT = `You are a conversation summarizer. Your job is to produce a structured

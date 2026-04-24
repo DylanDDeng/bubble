@@ -57,6 +57,60 @@ describe("slash commands", () => {
     expect(ctx.openPicker).not.toHaveBeenCalled();
   });
 
+  it("/key can update an explicitly targeted provider before it is enabled", async () => {
+    const updateProviderKey = vi.fn();
+    const setDefault = vi.fn();
+    const createProvider = vi.fn(() => ({ streamChat: vi.fn(), complete: vi.fn() })) as any;
+    const setProvider = vi.fn();
+    const ctx = createContext({
+      agent: {
+        model: "zhipuai-coding-plan:glm-5.1",
+        providerId: "zhipuai-coding-plan",
+        thinking: "off",
+        setSystemPrompt: vi.fn(),
+        setProvider,
+      } as any,
+      createProvider,
+      registry: {
+        getDefault: () => ({
+          id: "zhipuai-coding-plan",
+          name: "Zhipu AI Coding Plan",
+          baseURL: "https://open.bigmodel.cn/api/coding/paas/v4",
+          apiKey: "zhipu-key",
+          enabled: true,
+        }),
+        getConfigured: () => [
+          {
+            id: "zhipuai-coding-plan",
+            name: "Zhipu AI Coding Plan",
+            baseURL: "https://open.bigmodel.cn/api/coding/paas/v4",
+            apiKey: "zhipu-key",
+            enabled: true,
+          },
+          {
+            id: "deepseek",
+            name: "DeepSeek",
+            baseURL: "https://api.deepseek.com",
+            apiKey: "",
+            enabled: true,
+          },
+        ],
+        getModelConfig: () => ({ hasProvider: () => false }),
+        updateProviderKey,
+        setDefault,
+      } as any,
+    });
+
+    const result = await slashRegistry.execute("/key deepseek sk-deepseek", ctx);
+
+    expect(result.handled).toBe(true);
+    expect(updateProviderKey).toHaveBeenCalledWith("deepseek", "sk-deepseek");
+    expect(setDefault).toHaveBeenCalledWith("deepseek");
+    expect(createProvider).toHaveBeenCalledWith("deepseek", "sk-deepseek", "https://api.deepseek.com");
+    expect(ctx.agent.providerId).toBe("deepseek");
+    expect(result.result).toContain("API key updated for DeepSeek");
+  });
+
   it("lists available skills", async () => {
     const ctx = createContext({
       skillRegistry: createSkillRegistryFixture(),

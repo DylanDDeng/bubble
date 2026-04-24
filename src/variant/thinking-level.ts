@@ -1,6 +1,6 @@
 import type { ThinkingLevel } from "../types.js";
 
-export const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+export const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 export function isThinkingLevel(value: string | undefined): value is ThinkingLevel {
   return !!value && THINKING_LEVELS.includes(value as ThinkingLevel);

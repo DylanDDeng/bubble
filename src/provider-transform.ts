@@ -27,6 +27,16 @@ export function resolveProviderRequestConfig(
     return { effectiveThinkingLevel };
   }
 
+  if (providerId === "deepseek" && modelId === "deepseek-v4-pro") {
+    return {
+      effectiveThinkingLevel,
+      extraBody: {
+        thinking: { type: "enabled" },
+        reasoning_effort: effectiveThinkingLevel,
+      },
+    };
+  }
+
   // Zhipu/Z.AI OpenAI-compatible endpoints expose reasoning via a provider-specific
   // `thinking` block rather than OpenAI's `reasoning_effort` shape.
   if (

@@ -46,4 +46,15 @@ describe("provider transform", () => {
     expect(config.effectiveThinkingLevel).toBe("off");
     expect(config.reasoningEffort).toBeUndefined();
   });
+
+  it("emits DeepSeek v4 pro thinking and reasoning effort fields", () => {
+    const config = resolveProviderRequestConfig("deepseek", "deepseek-v4-pro", "max");
+
+    expect(config.effectiveThinkingLevel).toBe("max");
+    expect(config.reasoningEffort).toBeUndefined();
+    expect(config.extraBody).toEqual({
+      thinking: { type: "enabled" },
+      reasoning_effort: "max",
+    });
+  });
 });

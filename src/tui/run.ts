@@ -31,10 +31,11 @@ import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import type { Agent } from "../agent.js";
 import type { CliArgs } from "../cli.js";
 import type { SessionManager } from "../session.js";
-import type { ContentPart, Message, PermissionMode, PlanDecision, Provider, Todo } from "../types.js";
+import type { ContentPart, Message, PermissionMode, PlanDecision, Provider, ThinkingLevel, Todo } from "../types.js";
 import type { ProviderRegistry } from "../provider-registry.js";
-import { BUILTIN_PROVIDERS, displayModel, isUserVisibleProvider } from "../provider-registry.js";
+import { BUILTIN_PROVIDERS, decodeModel, displayModel, isUserVisibleProvider } from "../provider-registry.js";
 import { listBuiltinModels } from "../model-catalog.js";
+import { getAvailableThinkingLevels } from "../provider-transform.js";
 import type { SkillRegistry } from "../skills/registry.js";
 import { parseSkillInvocation } from "../skills/invocation.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
@@ -777,8 +778,9 @@ function OpenTuiApp(props: {
     activePrompt()?.clear();
     promptText = "";
     if (picker?.kind === "key") {
+      const providerId = picker.providerId;
       closePicker();
-      await executeSlash(`/key ${input}`);
+      await executeSlash(providerId ? `/key ${providerId} ${input}` : `/key ${input}`);
       return;
     }
     if (input === "exit" || input === "quit" || input === ":q") {
@@ -1052,6 +1054,19 @@ function OpenTuiApp(props: {
             providerId: provider.id,
           }));
         for (const model of models) {
+          const reasoningLevels = getModelPickerReasoningLevels(provider.id, model.id);
+          if (reasoningLevels.length > 0) {
+            for (const level of reasoningLevels) {
+              const isCurrent = props.agent.model === `${provider.id}:${model.id}` && props.agent.thinking === level;
+              items.push({
+                label: `${model.name} (${level})`,
+                detail: `${provider.name}${isCurrent ? " · current" : ""}`,
+                value: `${provider.id}:${model.id}`,
+                command: `/model ${provider.id}:${model.id} --reasoning-effort ${level}`,
+              });
+            }
+            continue;
+          }
           items.push({
             label: model.name,
             detail: `${provider.name}${props.agent.model === `${provider.id}:${model.id}` ? " · current" : ""}`,
@@ -1073,12 +1088,24 @@ function OpenTuiApp(props: {
     }
 
     if (kind === "provider") {
-      return registry.getConfigured().map((provider) => ({
+      const configuredProviders = registry.getConfigured();
+      const configuredIds = new Set(configuredProviders.map((provider) => provider.id));
+      const configuredItems = configuredProviders.map((provider) => ({
         label: provider.name,
         detail: `${provider.id}${provider.id === registry.getDefault()?.id ? " · default" : ""}${provider.apiKey ? "" : " · needs key"}`,
         value: provider.id,
-        command: `/provider --set ${provider.id}`,
+        command: provider.apiKey ? `/provider --set ${provider.id}` : `/key ${provider.id}`,
+        next: provider.apiKey ? undefined : "key" as const,
       }));
+      const addableItems = BUILTIN_PROVIDERS
+        .filter((provider) => isUserVisibleProvider(provider.id) && !configuredIds.has(provider.id))
+        .map((provider) => ({
+          label: provider.name,
+          detail: `${provider.id} · add provider`,
+          value: provider.id,
+          command: `/provider --add ${provider.id}`,
+        }));
+      return [...configuredItems, ...addableItems];
     }
 
     if (kind === "provider-add") {
@@ -1570,7 +1597,7 @@ function OpenTuiApp(props: {
     renderFooter({
       cwd: props.args.cwd,
       provider: () => props.agent.providerId || registry.getDefault()?.id || "unknown",
-      model: () => displayModel(props.agent.model) || "no model",
+      model: () => displayModelWithThinking(props.agent.model, props.agent.thinking) || "no model",
       mode,
       running: isRunning,
     }),
@@ -2164,6 +2191,24 @@ function pickerTitle(kind: Exclude<PickerMode, "key">) {
     case "file":
       return "Files";
   }
+}
+
+function getModelPickerReasoningLevels(providerId: string, modelId: string): ThinkingLevel[] {
+  if (providerId !== "deepseek" || modelId !== "deepseek-v4-pro") {
+    return [];
+  }
+  return getAvailableThinkingLevels(providerId, modelId);
+}
+
+function displayModelWithThinking(model: string, thinkingLevel: ThinkingLevel): string {
+  if (!model) return "";
+  const { providerId, modelId } = decodeModel(model);
+  if (!providerId) return displayModel(model);
+  const levels = getAvailableThinkingLevels(providerId, modelId);
+  if (levels.length > 1 && thinkingLevel !== "off") {
+    return `${displayModel(model)} (${thinkingLevel})`;
+  }
+  return displayModel(model);
 }
 
 function preferredPickerIndex(kind: Exclude<PickerMode, "key">, items: PickerItem[]) {

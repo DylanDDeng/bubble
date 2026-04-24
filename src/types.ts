@@ -17,7 +17,7 @@ export interface ImageContent {
 }
 
 export type ContentPart = TextContent | ImageContent;
-export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type ReasoningEffort = ThinkingLevel;
 
 export interface UserMessage {

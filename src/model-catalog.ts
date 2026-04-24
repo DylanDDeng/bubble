@@ -19,7 +19,7 @@ export const BUILTIN_PROVIDERS: BuiltinProviderDefinition[] = [
   { id: "openrouter", name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1" },
   { id: "openai", name: "OpenAI", baseURL: "https://api.openai.com/v1", supportsOAuth: true },
   { id: "openai-codex", name: "OpenAI Codex (ChatGPT)", baseURL: "https://chatgpt.com/backend-api" },
-  { id: "deepseek", name: "DeepSeek", baseURL: "https://api.deepseek.com/v1" },
+  { id: "deepseek", name: "DeepSeek", baseURL: "https://api.deepseek.com" },
   { id: "google", name: "Google", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai" },
   { id: "zhipuai", name: "Zhipu AI", baseURL: "https://open.bigmodel.cn/api/paas/v4" },
   { id: "zhipuai-coding-plan", name: "Zhipu AI Coding Plan", baseURL: "https://open.bigmodel.cn/api/coding/paas/v4" },
@@ -40,6 +40,7 @@ const GPT51_CODEX_MAX_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high
 const GPT51_CODEX_MINI_LEVELS: ReasoningEffort[] = ["off", "medium", "high"];
 const OPENAI_CHAT_LEVELS: ReasoningEffort[] = ["off"];
 const TOGGLE_THINKING_LEVELS: ReasoningEffort[] = ["off", "medium"];
+const DEEPSEEK_V4_PRO_LEVELS: ReasoningEffort[] = ["high", "max"];
 
 export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "gpt-5.4", name: "gpt-5.4", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000 },
@@ -60,6 +61,7 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
 
   { id: "deepseek-chat", name: "deepseek-chat", providerId: "deepseek", reasoningLevels: ["off"], contextWindow: 64000 },
   { id: "deepseek-reasoner", name: "deepseek-reasoner", providerId: "deepseek", reasoningLevels: ["off"], contextWindow: 64000 },
+  { id: "deepseek-v4-pro", name: "deepseek-v4-pro", providerId: "deepseek", reasoningLevels: DEEPSEEK_V4_PRO_LEVELS, contextWindow: 128000 },
   { id: "gemini-2.5-pro-preview-03-25", name: "gemini-2.5-pro-preview-03-25", providerId: "google", reasoningLevels: ["off", "low", "high"], contextWindow: 128000 },
   { id: "gemini-2.0-flash-001", name: "gemini-2.0-flash-001", providerId: "google", reasoningLevels: ["off"], contextWindow: 128000 },
   { id: "gemini-1.5-pro-latest", name: "gemini-1.5-pro-latest", providerId: "google", reasoningLevels: ["off"], contextWindow: 128000 },
