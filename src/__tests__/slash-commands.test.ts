@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import type { SlashCommandContext } from "../slash-commands/types.js";
 import { SkillRegistry } from "../skills/registry.js";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -109,6 +109,71 @@ describe("slash commands", () => {
     expect(createProvider).toHaveBeenCalledWith("deepseek", "sk-deepseek", "https://api.deepseek.com");
     expect(ctx.agent.providerId).toBe("deepseek");
     expect(result.result).toContain("API key updated for DeepSeek");
+  });
+
+  it("/model preserves provider keys already written to config", async () => {
+    const originalBubbleHome = process.env.BUBBLE_HOME;
+    const root = join(tmpdir(), `bubble-model-persist-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    mkdirSync(root, { recursive: true });
+    process.env.BUBBLE_HOME = root;
+    writeFileSync(
+      join(root, "config.json"),
+      JSON.stringify({
+        providers: [
+          {
+            id: "deepseek",
+            name: "DeepSeek",
+            baseURL: "https://api.deepseek.com",
+            apiKey: "sk-preserve",
+            enabled: true,
+          },
+        ],
+        defaultProvider: "deepseek",
+      }, null, 2),
+    );
+
+    try {
+      const ctx = createContext({
+        agent: {
+          model: "",
+          providerId: "deepseek",
+          thinking: "off",
+          setSystemPrompt: vi.fn(),
+          setProvider: vi.fn(),
+        } as any,
+        createProvider: vi.fn(() => ({ streamChat: vi.fn(), complete: vi.fn() })) as any,
+        registry: {
+          getDefault: () => ({
+            id: "deepseek",
+            name: "DeepSeek",
+            baseURL: "https://api.deepseek.com",
+            apiKey: "sk-preserve",
+            enabled: true,
+          }),
+          getConfigured: () => [
+            {
+              id: "deepseek",
+              name: "DeepSeek",
+              baseURL: "https://api.deepseek.com",
+              apiKey: "sk-preserve",
+              enabled: true,
+            },
+          ],
+          getModelConfig: () => ({ hasProvider: () => false }),
+          prepareProvider: vi.fn(),
+        } as any,
+      });
+
+      await slashRegistry.execute("/model deepseek:deepseek-v4-pro --reasoning-effort max", ctx);
+
+      const saved = JSON.parse(readFileSync(join(root, "config.json"), "utf-8"));
+      expect(saved.providers[0].apiKey).toBe("sk-preserve");
+      expect(saved.defaultModel).toBe("deepseek:deepseek-v4-pro");
+      expect(saved.defaultThinkingLevel).toBe("max");
+    } finally {
+      if (originalBubbleHome === undefined) delete process.env.BUBBLE_HOME;
+      else process.env.BUBBLE_HOME = originalBubbleHome;
+    }
   });
 
   it("lists available skills", async () => {

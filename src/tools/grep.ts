@@ -5,6 +5,8 @@
 import { execFile } from "node:child_process";
 import { resolve } from "node:path";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
+import { isSensitivePath } from "./sensitive-paths.js";
+import { analyzeToolIntent } from "../agent/tool-intent.js";
 
 const MAX_MATCHES = 100;
 
@@ -12,7 +14,7 @@ export function createGrepTool(cwd: string): ToolRegistryEntry {
   return {
     name: "grep",
     readOnly: true,
-    description: `Search file contents using regex (via ripgrep). Returns up to ${MAX_MATCHES} matches.`,
+    description: `Search file contents using regex (via ripgrep). Use this instead of running grep, rg, or ripgrep through bash. Returns up to ${MAX_MATCHES} matches.`,
     parameters: {
       type: "object",
       properties: {
@@ -25,6 +27,30 @@ export function createGrepTool(cwd: string): ToolRegistryEntry {
     async execute(args): Promise<ToolResult> {
       const searchPath = args.path ? resolve(cwd, args.path) : cwd;
       const pattern = String(args.pattern);
+      const intent = analyzeToolIntent({
+        name: "grep",
+        parsedArgs: {
+          pattern,
+          path: args.path,
+          glob: args.glob,
+        },
+      });
+
+      if (isSensitivePath(searchPath)) {
+        return {
+          content: `Error: Search blocked for sensitive credential storage: ${searchPath}`,
+          isError: true,
+          status: "blocked",
+          metadata: {
+            kind: "security",
+            path: searchPath,
+            pattern,
+            searchSignature: intent.search?.signature,
+            searchFamily: intent.search?.familyKey,
+            reason: "Sensitive credential storage is not searchable from general-purpose tasks.",
+          },
+        };
+      }
 
       const rgArgs = ["--json", "-n", "--max-count", String(MAX_MATCHES), pattern];
       if (args.glob) {
@@ -53,15 +79,40 @@ export function createGrepTool(cwd: string): ToolRegistryEntry {
           }
 
           if (matches.length === 0) {
-            resolve({ content: "No matches found." });
+            resolve({
+              content: "No matches found.",
+              status: "no_match",
+              metadata: {
+                kind: "search",
+                path: searchPath,
+                pattern,
+                matches: 0,
+                truncated: false,
+                searchSignature: intent.search?.signature,
+                searchFamily: intent.search?.familyKey,
+              },
+            });
             return;
           }
 
           let output = matches.join("\n");
+          const truncated = matches.length >= MAX_MATCHES;
           if (matches.length >= MAX_MATCHES) {
             output += `\n[More than ${MAX_MATCHES} matches, output truncated]`;
           }
-          resolve({ content: output });
+          resolve({
+            content: output,
+            status: truncated ? "partial" : "success",
+            metadata: {
+              kind: "search",
+              path: searchPath,
+              pattern,
+              matches: matches.length,
+              truncated,
+              searchSignature: intent.search?.signature,
+              searchFamily: intent.search?.familyKey,
+            },
+          });
         });
       });
     },

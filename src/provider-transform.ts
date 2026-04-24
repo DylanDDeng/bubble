@@ -5,6 +5,7 @@ export { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingL
 export interface ProviderRequestConfig {
   effectiveThinkingLevel: ThinkingLevel;
   reasoningEffort?: ThinkingLevel;
+  reasoningContentEcho?: "tool_calls" | "all";
   extraBody?: Record<string, unknown>;
   omitTemperature?: boolean;
 }
@@ -30,6 +31,7 @@ export function resolveProviderRequestConfig(
   if (providerId === "deepseek" && modelId === "deepseek-v4-pro") {
     return {
       effectiveThinkingLevel,
+      reasoningContentEcho: "all",
       extraBody: {
         thinking: { type: "enabled" },
         reasoning_effort: effectiveThinkingLevel,
@@ -63,6 +65,7 @@ export function resolveProviderRequestConfig(
       return {
         effectiveThinkingLevel,
         omitTemperature: true,
+        reasoningContentEcho: "tool_calls",
         extraBody: {
           thinking: { type: effectiveThinkingLevel === "off" ? "disabled" : "enabled" },
         },

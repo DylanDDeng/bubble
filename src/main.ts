@@ -304,6 +304,7 @@ async function main() {
     settingsManager,
     mcpManager,
     bypassEnabled: args.bypassEnabled,
+    theme: userConfig.getTheme(),
   });
 }
 

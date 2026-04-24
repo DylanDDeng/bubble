@@ -49,6 +49,7 @@ export interface UserConfigData {
   defaultModel?: string;
   defaultThinkingLevel?: ThinkingLevel;
   skillPaths?: string[];
+  theme?: Record<string, string>;
   recentModels?: string[];
   apiKey?: string;
   providers?: ProviderProfile[];
@@ -157,6 +158,19 @@ export class UserConfig {
 
   setSkillPaths(paths: string[]) {
     this.data.skillPaths = paths.slice();
+    this.save();
+  }
+
+  getTheme(): Record<string, string> {
+    const theme = this.data.theme;
+    if (!theme || typeof theme !== "object" || Array.isArray(theme)) return {};
+    return Object.fromEntries(
+      Object.entries(theme).filter(([, value]) => typeof value === "string"),
+    );
+  }
+
+  setTheme(theme: Record<string, string>) {
+    this.data.theme = { ...theme };
     this.save();
   }
 }

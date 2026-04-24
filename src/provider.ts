@@ -9,12 +9,24 @@ import { createOpenAICodexProvider, isOpenAICodexBaseUrl } from "./provider-open
 import { resolveProviderRequestConfig } from "./provider-transform.js";
 import type { Message, Provider, StreamChunk, ThinkingLevel, ToolDefinition } from "./types.js";
 
-function toChatCompletionsMessage(message: Message): Record<string, unknown> {
+type ReasoningContentEcho = "tool_calls" | "all";
+
+export function toChatCompletionsMessage(
+  message: Message,
+  options: { reasoningContentEcho?: ReasoningContentEcho } = {},
+): Record<string, unknown> {
+  const reasoningContentEcho = options.reasoningContentEcho ?? "tool_calls";
   if (message.role === "assistant") {
     const out: Record<string, unknown> = {
       role: "assistant",
       content: message.content || null,
     };
+    if (
+      message.reasoning
+      && reasoningContentEcho === "all"
+    ) {
+      out.reasoning_content = message.reasoning;
+    }
     if (message.toolCalls && message.toolCalls.length > 0) {
       out.tool_calls = message.toolCalls.map((tc) => ({
         id: tc.id,
@@ -22,8 +34,8 @@ function toChatCompletionsMessage(message: Message): Record<string, unknown> {
         function: { name: tc.name, arguments: tc.arguments || "{}" },
       }));
       // Kimi-k2.5 with thinking enabled requires reasoning_content to be echoed
-      // back on assistant messages that carry tool_calls. Harmless for other providers.
-      if (message.reasoning) {
+      // back on assistant messages that carry tool_calls.
+      if (message.reasoning && reasoningContentEcho === "tool_calls") {
         out.reasoning_content = message.reasoning;
       }
     }
@@ -87,7 +99,9 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
 
     const body: any = {
       model: chatOptions.model,
-      messages: messages.map(toChatCompletionsMessage),
+      messages: messages.map((message) => toChatCompletionsMessage(message, {
+        reasoningContentEcho: requestConfig.reasoningContentEcho ?? "tool_calls",
+      })),
       tools: tools && tools.length > 0 ? tools : undefined,
       tool_choice: tools && tools.length > 0 ? "auto" : undefined,
       stream: true,
@@ -119,7 +133,9 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
     );
     const body: any = {
       model: chatOptions?.model ?? fallbackModel,
-      messages: messages.map(toChatCompletionsMessage),
+      messages: messages.map((message) => toChatCompletionsMessage(message, {
+        reasoningContentEcho: requestConfig.reasoningContentEcho ?? "tool_calls",
+      })),
     };
     if (!requestConfig.omitTemperature) {
       body.temperature = chatOptions?.temperature ?? 0.2;

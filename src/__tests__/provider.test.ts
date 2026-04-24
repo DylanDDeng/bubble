@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { translateOpenAIStream } from "../provider.js";
+import { toChatCompletionsMessage, translateOpenAIStream } from "../provider.js";
 import type { StreamChunk } from "../types.js";
 
 async function* fromArray<T>(items: T[]): AsyncIterable<T> {
@@ -17,6 +17,49 @@ function startEnds(chunks: StreamChunk[]) {
     .filter((c): c is Extract<StreamChunk, { type: "tool_call" }> => c.type === "tool_call")
     .map((c) => ({ id: c.id, name: c.name, args: c.arguments, isStart: c.isStart, isEnd: c.isEnd }));
 }
+
+describe("toChatCompletionsMessage", () => {
+  it("echoes reasoning content for DeepSeek-style thinking history", () => {
+    expect(toChatCompletionsMessage({
+      role: "assistant",
+      content: "done",
+      reasoning: "plan",
+    }, { reasoningContentEcho: "all" })).toEqual({
+      role: "assistant",
+      content: "done",
+      reasoning_content: "plan",
+    });
+  });
+
+  it("keeps tool-call-only reasoning echo compatibility by default", () => {
+    expect(toChatCompletionsMessage({
+      role: "assistant",
+      content: "",
+      reasoning: "used tool",
+      toolCalls: [{ id: "read:1", name: "read", arguments: "{\"path\":\"a\"}" }],
+    })).toEqual({
+      role: "assistant",
+      content: null,
+      reasoning_content: "used tool",
+      tool_calls: [{
+        id: "read:1",
+        type: "function",
+        function: { name: "read", arguments: "{\"path\":\"a\"}" },
+      }],
+    });
+  });
+
+  it("does not echo normal assistant reasoning unless configured", () => {
+    expect(toChatCompletionsMessage({
+      role: "assistant",
+      content: "done",
+      reasoning: "plan",
+    })).toEqual({
+      role: "assistant",
+      content: "done",
+    });
+  });
+});
 
 describe("translateOpenAIStream", () => {
   it("captures a single tool call streamed across chunks", async () => {

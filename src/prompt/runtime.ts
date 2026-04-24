@@ -16,6 +16,10 @@ const defaultGuidelines = [
   "Use edit for targeted changes to existing files; use write for creating new files",
   "Be concise in your responses",
   "Show file paths clearly when working with files",
+  "Prefer structured search tools over bash for repository searches whenever possible",
+  "Do not repeat near-identical searches when they are not producing new evidence",
+  "When investigating configuration or security questions, stop once the relevant load path, storage path, and exposure path are identified",
+  "Use the task tool for bounded investigative subproblems instead of letting the main loop churn on repeated exploratory searches",
 ];
 
 export function buildRuntimePrompt(options: RuntimePromptOptions = {}): string {

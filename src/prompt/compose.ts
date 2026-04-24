@@ -73,8 +73,12 @@ function buildGuidelines(tools: string[], extraGuidelines: string[]): string[] {
     }
   };
 
+  if (tools.includes("glob")) {
+    add("Use glob for file discovery and project structure inspection; do not use bash ls/find for this unless glob cannot answer");
+  }
+
   if (tools.includes("bash") && tools.includes("grep")) {
-    add("Prefer grep over bash for file search when it fits the task");
+    add("Use grep for content search; do not run grep, rg, or ripgrep through bash");
   }
 
   for (const item of extraGuidelines) {

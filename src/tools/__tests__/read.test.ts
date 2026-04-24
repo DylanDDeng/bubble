@@ -82,4 +82,25 @@ describe("read tool", () => {
 
     expect(result.content).toContain("Output truncated");
   });
+
+  it("blocks reads from sensitive credential storage paths", async () => {
+    const sensitiveRoot = join(tmpDir, "bubble-home");
+    mkdirSync(sensitiveRoot, { recursive: true });
+    const previous = process.env.BUBBLE_HOME;
+    process.env.BUBBLE_HOME = sensitiveRoot;
+    try {
+      const file = join(sensitiveRoot, "config.json");
+      writeFileSync(file, JSON.stringify({ apiKey: "secret" }), "utf-8");
+
+      const tool = createReadTool(tmpDir);
+      const result = await tool.execute({ path: file }, { cwd: tmpDir });
+
+      expect(result.isError).toBe(true);
+      expect(result.status).toBe("blocked");
+      expect(result.content).not.toContain("secret");
+    } finally {
+      if (previous === undefined) delete process.env.BUBBLE_HOME;
+      else process.env.BUBBLE_HOME = previous;
+    }
+  });
 });

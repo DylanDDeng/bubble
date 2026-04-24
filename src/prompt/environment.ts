@@ -15,13 +15,15 @@ export const defaultToolSnippets: Record<string, string> = {
   bash: "Execute a bash command",
   edit: "Apply targeted string replacements to a file",
   write: "Write a new file or overwrite an existing one",
+  glob: "Find files by glob pattern without using bash",
   grep: "Search file contents using regex",
   web_search: "Search the public web for current information",
   web_fetch: "Fetch and extract the contents of a specific webpage",
+  task: "Delegate a bounded investigative subtask to a read-only sub-agent",
   skill: "Load a named skill with specialized instructions and bundled resources",
 };
 
-export const defaultToolNames = ["read", "bash", "edit", "write", "grep", "web_search", "web_fetch", "skill"];
+export const defaultToolNames = ["read", "glob", "bash", "edit", "write", "grep", "web_search", "web_fetch", "task", "skill"];
 
 export function buildEnvironmentPrompt(options: EnvironmentPromptOptions = {}): string {
   const configuredProvider = options.configuredProvider ?? "unknown";

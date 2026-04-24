@@ -19,6 +19,8 @@ describe("system prompt", () => {
     expect(prompt).toContain("Configured model id: openai:gpt-5.4");
     expect(prompt).toContain("Current thinking level: high");
     expect(prompt).toContain("Current working directory: /tmp/project");
+    expect(prompt).toContain("- glob: Find files by glob pattern without using bash");
+    expect(prompt).toContain("Use glob for file discovery");
   });
 
   it("keeps the system prompt identical across agent modes (cache-friendly)", () => {

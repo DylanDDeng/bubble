@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Agent } from "../agent.js";
 import type { AgentEvent, Message, Provider, StreamChunk, ToolRegistryEntry } from "../types.js";
+import { createTaskTool } from "../tools/task.js";
 
 function createMockProvider(chunks: StreamChunk[][]): Provider {
   let callIndex = 0;
@@ -25,6 +26,10 @@ function collectEvents(agent: Agent, input: string, cwd: string): Promise<AgentE
     }
     return events;
   })();
+}
+
+function createTaskToolForTest(): ToolRegistryEntry {
+  return createTaskTool();
 }
 
 describe("Agent", () => {
@@ -184,6 +189,85 @@ describe("Agent", () => {
     expect(seen).toEqual([{ toolName: "dummy", content: "result: 42" }]);
   });
 
+  it("allows custom hooks to block tool execution", async () => {
+    const provider = createMockProvider([
+      [
+        { type: "tool_call", id: "tc_1", name: "dummy", arguments: "", isStart: true, isEnd: false },
+        { type: "tool_call", id: "tc_1", name: "dummy", arguments: "{\"value\":\"42\"}", isStart: false, isEnd: true },
+        { type: "done" },
+      ],
+      [{ type: "text", content: "Done!" }, { type: "done" }],
+    ]);
+
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [dummyTool],
+      hooks: [{
+        beforeToolCall(ctx) {
+          ctx.blockToolCall({
+            content: "blocked by custom hook",
+            isError: true,
+            status: "blocked",
+          });
+        },
+      }],
+    });
+
+    const events = await collectEvents(agent, "Call dummy", "/tmp");
+    const toolEnd = events.find((event) => event.type === "tool_end") as any;
+    expect(toolEnd.result.content).toBe("blocked by custom hook");
+  });
+
+  it("supports task subtasks and injects a post-task summary reminder", async () => {
+    const captured: Message[][] = [];
+    const provider: Provider = {
+      async *streamChat(messages) {
+        captured.push(messages);
+        if (captured.length === 1) {
+          yield { type: "tool_call", id: "outer_task", name: "task", arguments: "", isStart: true, isEnd: false };
+          yield {
+            type: "tool_call",
+            id: "outer_task",
+            name: "task",
+            arguments: "{\"prompt\":\"Check token storage\",\"description\":\"Investigate storage\"}",
+            isStart: false,
+            isEnd: true,
+          };
+          yield { type: "done" };
+          return;
+        }
+        if (captured.length === 2) {
+          yield { type: "text", content: "Subtask found config and env reads." };
+          yield { type: "done" };
+          return;
+        }
+        yield { type: "text", content: "Final answer." };
+        yield { type: "done" };
+      },
+      async complete() {
+        return "ok";
+      },
+    };
+
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [dummyTool, createTaskToolForTest()],
+      systemPrompt: "system",
+    });
+
+    const events = await collectEvents(agent, "Investigate secret storage", "/tmp");
+    const toolEnd = events.find((event) => event.type === "tool_end") as any;
+    expect(toolEnd.result.content).toContain("Subtask summary:");
+    expect(toolEnd.result.content).toContain("Subtask type: general_readonly");
+    expect(captured[2].some((message) => (
+      message.role === "user"
+      && typeof message.content === "string"
+      && message.content.includes("Summarize the task tool output above and continue with your task.")
+    ))).toBe(true);
+  });
+
   it("projects messages before sending them to the provider", async () => {
     const captured: Message[][] = [];
     const provider: Provider = {
@@ -214,6 +298,75 @@ describe("Agent", () => {
     expect((captured[0][0] as any).content).toContain("system-0");
     expect((captured[0][0] as any).content).toContain("system-1");
     expect(captured[0].some((message) => message.role === "assistant" && message.content === "")).toBe(false);
+  });
+
+  it("uses per-agent steps to disable tools on the final step", async () => {
+    const captured: Message[][] = [];
+    const provider: Provider = {
+      async *streamChat(messages, options) {
+        captured.push(messages);
+        expect(options.tools).toEqual([]);
+        yield { type: "text", content: "Final without tools." };
+        yield { type: "done" };
+      },
+      async complete() {
+        return "ok";
+      },
+    };
+
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [dummyTool],
+      systemPrompt: "system",
+      maxTurns: 1,
+    });
+
+    const events = await collectEvents(agent, "Do something", "/tmp");
+    expect(events.some((event) => event.type === "text_delta" && event.content === "Final without tools.")).toBe(true);
+    expect(captured[0].some((message) => (
+      message.role === "user"
+      && typeof message.content === "string"
+      && message.content.includes("CRITICAL - MAXIMUM STEPS REACHED")
+    ))).toBe(true);
+  });
+
+  it("uses task budget exhaustion to force a text-only follow-up turn", async () => {
+    const captured: Message[][] = [];
+    const provider: Provider = {
+      async *streamChat(messages, options) {
+        captured.push(messages);
+        if (captured.length === 1) {
+          yield { type: "tool_call", id: "tc_1", name: "dummy", arguments: "", isStart: true, isEnd: false };
+          yield { type: "tool_call", id: "tc_1", name: "dummy", arguments: "{\"value\":\"42\"}", isStart: false, isEnd: true };
+          yield { type: "usage", promptTokens: 50, completionTokens: 60 };
+          yield { type: "done" };
+          return;
+        }
+        expect(options.tools).toEqual([]);
+        yield { type: "text", content: "Budget summary." };
+        yield { type: "done" };
+      },
+      async complete() {
+        return "ok";
+      },
+    };
+
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [dummyTool],
+      systemPrompt: "system",
+      taskBudget: { total: 100 },
+    });
+
+    const events = await collectEvents(agent, "Call dummy", "/tmp");
+    expect(events.some((event) => event.type === "text_delta" && event.content === "Budget summary.")).toBe(true);
+    expect(captured[1].some((message) => (
+      message.role === "user"
+      && typeof message.content === "string"
+      && message.content.includes("task budget")
+    ))).toBe(true);
   });
 
   it("auto-compacts oversized history before sending it to the provider", async () => {
@@ -248,6 +401,36 @@ describe("Agent", () => {
     const systemMessages = captured[0].filter((message) => message.role === "system");
     expect(systemMessages.length).toBeGreaterThan(0);
     expect(systemMessages.some((message) => message.content.includes("Previous conversation summary:"))).toBe(true);
+  });
+
+  it("injects the security investigation workflow reminder for secret-storage questions", async () => {
+    const captured: Message[][] = [];
+    const provider: Provider = {
+      async *streamChat(messages) {
+        captured.push(messages);
+        yield { type: "text", content: "done" };
+        yield { type: "done" };
+      },
+      async complete() {
+        return "done";
+      },
+    };
+
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [],
+      systemPrompt: "system",
+    });
+
+    await collectEvents(agent, "Find where API keys are stored and whether they can leak", "/tmp");
+    const userMessages = captured[0].filter((message) => message.role === "user");
+    expect(userMessages.some((message) => (
+      typeof message.content === "string" && message.content.includes("Security/configuration investigation workflow is active")
+    ))).toBe(true);
+    expect(userMessages.some((message) => (
+      typeof message.content === "string" && message.content.includes("Workflow phase: investigate")
+    ))).toBe(true);
   });
 
   it("shrinks resident history after a long tool-heavy run", async () => {

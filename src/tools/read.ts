@@ -7,6 +7,7 @@ import { access, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { ApprovalController } from "../approval/types.js";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
+import { isSensitivePath } from "./sensitive-paths.js";
 
 const MAX_LINES = 250;
 const MAX_BYTES = 100 * 1024;
@@ -27,6 +28,19 @@ export function createReadTool(cwd: string, approval?: ApprovalController): Tool
     },
     async execute(args): Promise<ToolResult> {
       const filePath = resolve(cwd, args.path);
+
+      if (isSensitivePath(filePath)) {
+        return {
+          content: `Error: Access to sensitive credential storage is blocked: ${filePath}`,
+          isError: true,
+          status: "blocked",
+          metadata: {
+            kind: "security",
+            path: filePath,
+            reason: "Sensitive credential storage is not readable from general-purpose tasks.",
+          },
+        };
+      }
 
       if (approval) {
         const result = approval.checkRules({ tool: "Read", path: filePath, cwd });
@@ -69,7 +83,14 @@ export function createReadTool(cwd: string, approval?: ApprovalController): Tool
         result += `\n[Output truncated: exceeded ${MAX_LINES} lines or ${MAX_BYTES / 1024}KB limit]`;
       }
 
-      return { content: result };
+      return {
+        content: result,
+        status: "success",
+        metadata: {
+          kind: "read",
+          path: filePath,
+        },
+      };
     },
   };
 }

@@ -47,4 +47,24 @@ describe("UserConfig", () => {
     const restored = new UserConfig();
     expect(restored.getDefaultThinkingLevel()).toBe("high");
   });
+
+  it("loads theme overrides", () => {
+    process.env.BUBBLE_HOME = root;
+    writeFileSync(
+      join(root, "config.json"),
+      JSON.stringify({
+        theme: {
+          messageUserText: "#ffffff",
+          toolError: "#ff0000",
+          ignored: 42,
+        },
+      }, null, 2),
+    );
+
+    const config = new UserConfig();
+    expect(config.getTheme()).toEqual({
+      messageUserText: "#ffffff",
+      toolError: "#ff0000",
+    });
+  });
 });

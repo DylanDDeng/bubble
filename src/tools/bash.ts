@@ -8,6 +8,8 @@ import { platform } from "node:os";
 import { gateToolAction } from "../approval/tool-helper.js";
 import type { ApprovalController } from "../approval/types.js";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
+import { parseSearchBashCommand } from "../agent/tool-intent.js";
+import { referencesSensitivePath } from "./sensitive-paths.js";
 
 const MAX_OUTPUT = 50 * 1024;
 
@@ -31,6 +33,19 @@ export function createBashTool(cwd: string, approval?: ApprovalController): Tool
 
       const command = String(args.command);
       const timeoutSec = typeof args.timeout === "number" ? args.timeout : 60;
+      const parsedSearch = parseSearchBashCommand(command);
+
+      if (referencesSensitivePath(command)) {
+        return {
+          content: "Error: Bash access to sensitive credential storage is blocked.",
+          isError: true,
+          status: "blocked",
+          metadata: {
+            kind: "security",
+            reason: "Sensitive credential storage is not accessible from general-purpose bash commands.",
+          },
+        };
+      }
 
       const gate = await gateToolAction(approval, { type: "bash", command, cwd });
       if (!gate.approved) return gate.result;
@@ -77,7 +92,16 @@ export function createBashTool(cwd: string, approval?: ApprovalController): Tool
 
           if (timedOut) {
             output += `[Command timed out after ${timeoutSec}s]`;
-            resolve({ content: output.trim(), isError: true });
+            resolve({
+              content: output.trim(),
+              isError: true,
+              status: "timeout",
+              metadata: {
+                kind: parsedSearch ? "search" : "shell",
+                pattern: parsedSearch?.pattern,
+                path: parsedSearch?.path,
+              },
+            });
             return;
           }
 
@@ -86,10 +110,44 @@ export function createBashTool(cwd: string, approval?: ApprovalController): Tool
             output += "\n[Output truncated]";
           }
 
+          const normalizedOutput = output.trim();
+          if (parsedSearch && code === 1 && !stderr.trim()) {
+            resolve({
+              content: normalizedOutput === "(no output)" ? "stdout:\n(no matches)" : normalizedOutput,
+              isError: false,
+              status: "no_match",
+              metadata: {
+                kind: "search",
+                pattern: parsedSearch.pattern,
+                path: parsedSearch.path,
+                matches: 0,
+              },
+            });
+            return;
+          }
+
           const isError = code !== 0;
-          resolve({ content: output.trim(), isError });
+          resolve({
+            content: normalizedOutput,
+            isError,
+            status: isError ? "command_error" : "success",
+            metadata: {
+              kind: parsedSearch ? "search" : "shell",
+              pattern: parsedSearch?.pattern,
+              path: parsedSearch?.path,
+              matches: parsedSearch ? countSearchMatches(stdout) : undefined,
+            },
+          });
         });
       });
     },
   };
+}
+
+function countSearchMatches(stdout: string): number {
+  return stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .length;
 }

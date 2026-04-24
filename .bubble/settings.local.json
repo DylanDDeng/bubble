@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(cat README*:*)",
+      "Bash(find src:*)",
+      "Bash(head:*)",
+      "Bash(grep:*)",
+      "Write(/Users/chengshengdeng/bb/my-coding-agent/dashboard.html)",
+      "Edit(/Users/chengshengdeng/bb/my-coding-agent/dashboard.html)",
+      "Bash(cat package.json:*)",
+      "Bash(find src/skills:*)",
+      "Bash(pwd:*)"
+    ]
+  }
+}

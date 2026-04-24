@@ -9,8 +9,11 @@ import { getContextBudget } from "./context/budget.js";
 import { isContextOverflowError } from "./context/overflow.js";
 import { projectMessages } from "./context/projector.js";
 import { aggressivePruneMessages } from "./context/prune.js";
-import { buildDeferredToolsReminder, reminderForMode } from "./prompt/reminders.js";
+import { buildDeferredToolsReminder, buildToolFreezeReminder, reminderForMode } from "./prompt/reminders.js";
 import type { AgentEvent, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ThinkingLevel, Todo, ToolDefinition, ToolResult, ToolRegistryEntry } from "./types.js";
+import { HookBus, type TurnHooks } from "./orchestrator/hooks.js";
+import { createDefaultHooks } from "./orchestrator/default-hooks.js";
+import { filterToolsForSubtask, getSubtaskPolicy, type SubtaskType } from "./agent/subtask-policy.js";
 
 const MAX_CONSECUTIVE_OVERFLOW_RECOVERIES = 3;
 const RESIDENT_HISTORY_KEEP_RECENT_TURNS = 3;
@@ -28,12 +31,16 @@ export interface AgentOptions {
   temperature?: number;
   thinkingLevel?: ThinkingLevel;
   mode?: PermissionMode;
+  steps?: number;
+  maxTurns?: number;
+  taskBudget?: { total: number };
   todos?: Todo[];
   systemPrompt?: string;
   onMessageAppend?: (message: Message) => void;
   onToolResult?: (toolName: string, result: ToolResult) => void;
   onTodosUpdate?: (todos: Todo[]) => void;
   onModeUpdate?: (mode: PermissionMode) => void;
+  hooks?: TurnHooks[];
 }
 
 export class Agent {
@@ -53,6 +60,9 @@ export class Agent {
   private onTodosUpdate?: (todos: Todo[]) => void;
   private onMessageAppend?: (message: Message) => void;
   private onToolResult?: (toolName: string, result: ToolResult) => void;
+  private hookDefinitions: TurnHooks[];
+  private maxTurns?: number;
+  private taskBudget?: { total: number };
   private lastInputTokens: number | null = null;
   private lastAnchorMessageCount: number | null = null;
 
@@ -68,6 +78,9 @@ export class Agent {
     this.onToolResult = options.onToolResult;
     this.onTodosUpdate = options.onTodosUpdate;
     this.onModeUpdate = options.onModeUpdate;
+    this.hookDefinitions = options.hooks ?? [];
+    this.maxTurns = options.maxTurns ?? options.steps;
+    this.taskBudget = options.taskBudget;
 
     if (options.systemPrompt) {
       this.messages.push({ role: "system", content: options.systemPrompt });
@@ -204,18 +217,61 @@ export class Agent {
   }
 
   async *run(userInput: string | ContentPart[], cwd: string): AsyncIterable<AgentEvent> {
+    const hookBus = new HookBus();
+    for (const hooks of createDefaultHooks()) {
+      hookBus.register(hooks);
+    }
+    for (const hooks of this.hookDefinitions) {
+      hookBus.register(hooks);
+    }
+    const hookState = {};
+    const reminderQueue: string[] = [];
+    const queueReminder = (reminder: string) => {
+      reminderQueue.push(reminder);
+    };
+    const flushGovernorReminders = () => {
+      for (const reminder of reminderQueue.splice(0, reminderQueue.length)) {
+        this.injectSystemReminder(reminder);
+      }
+    };
+
     if (this._todos.length > 0 && this._todos.every((t) => t.status === "completed")) {
       this.setTodos([]);
       yield { type: "todos_updated", todos: [] };
     }
     this.appendMessage({ role: "user", content: userInput });
-    this.maybeCompactResidentHistory();
+    await hookBus.runBeforeTurn({
+      agent: this,
+      cwd,
+      input: userInput,
+      state: hookState,
+      queueReminder,
+      flushReminders: flushGovernorReminders,
+    });
+    flushGovernorReminders();
 
     let consecutiveOverflowRecoveries = 0;
+    let step = 0;
 
     while (true) {
-      this.maybeCompactResidentHistory();
+      flushGovernorReminders();
       yield { type: "turn_start" };
+      step += 1;
+      (hookState as any).turnCount = step;
+      if (this.taskBudget) {
+        (hookState as any).taskBudget = {
+          total: this.taskBudget.total,
+          spent: (hookState as any).taskBudget?.spent ?? 0,
+        };
+      }
+      let forceTextOnlyReason = (hookState as any).forceTextOnlyReason as string | undefined;
+      if (!forceTextOnlyReason && this.maxTurns !== undefined && step >= this.maxTurns) {
+        forceTextOnlyReason = "The configured maximum turns for this agent have been reached.";
+        (hookState as any).forceTextOnlyReason = forceTextOnlyReason;
+      }
+      if (forceTextOnlyReason) {
+        this.injectSystemReminder(buildToolFreezeReminder(forceTextOnlyReason));
+      }
 
       const assistantMsg: Extract<Message, { role: "assistant" }> = {
         role: "assistant",
@@ -228,8 +284,24 @@ export class Agent {
       let turnUsage: { promptTokens: number; completionTokens: number } | undefined;
       let assistantAppended = false;
 
-      const toolDefinitions: ToolDefinition[] = Array.from(this.tools.values())
-        .filter((t) => !t.deferred || this.unlockedDeferred.has(t.name))
+      let toolEntries = Array.from(this.tools.values())
+        .filter((t) => !t.deferred || this.unlockedDeferred.has(t.name));
+      const beforeModelCallCtx = {
+        agent: this,
+        cwd,
+        input: userInput,
+        state: hookState,
+        queueReminder,
+        flushReminders: flushGovernorReminders,
+        toolEntries,
+        disableTools: (reason: string) => {
+          (hookState as any).forceTextOnlyReason = reason;
+        },
+      };
+      await hookBus.runBeforeModelCall(beforeModelCallCtx);
+      toolEntries = beforeModelCallCtx.toolEntries;
+      flushGovernorReminders();
+      const toolDefinitions: ToolDefinition[] = (((hookState as any).forceTextOnlyReason ? [] : toolEntries))
         .map((t) => ({
           name: t.name,
           description: t.description,
@@ -283,12 +355,17 @@ export class Agent {
               turnUsage = { promptTokens: chunk.promptTokens, completionTokens: chunk.completionTokens };
               this.lastInputTokens = chunk.promptTokens;
               this.lastAnchorMessageCount = this.messages.length;
+              if ((hookState as any).taskBudget) {
+                (hookState as any).taskBudget.spent += chunk.promptTokens + chunk.completionTokens;
+                if ((hookState as any).taskBudget.spent >= (hookState as any).taskBudget.total) {
+                  (hookState as any).forceTextOnlyReason = "The configured task budget for this agent has been exhausted.";
+                }
+              }
               break;
           }
         }
 
         this.appendMessage(assistantMsg);
-        this.maybeCompactResidentHistory();
         assistantAppended = true;
       } catch (error) {
         if (assistantAppended) {
@@ -310,8 +387,9 @@ export class Agent {
 
       // Execute tools if any
       if (assistantMsg.toolCalls && assistantMsg.toolCalls.length > 0) {
-        const parsedCalls: ParsedToolCall[] = [];
-        for (const tc of assistantMsg.toolCalls) {
+        const parsedCalls: Array<ParsedToolCall & { arbiterNote?: string }> = [];
+        for (let index = 0; index < assistantMsg.toolCalls.length; index++) {
+          const tc = assistantMsg.toolCalls[index];
           try {
             parsedCalls.push({ ...tc, parsedArgs: JSON.parse(tc.arguments) });
           } catch {
@@ -319,18 +397,58 @@ export class Agent {
           }
         }
 
-        for (const tc of parsedCalls) {
+        const executedResults: ToolResult[] = [];
+        for (let index = 0; index < parsedCalls.length; index++) {
+          let tc = parsedCalls[index];
+          let blockedResult: ToolResult | undefined;
+          await hookBus.runBeforeToolCall({
+            agent: this,
+            cwd,
+            input: userInput,
+            state: hookState,
+            queueReminder,
+            flushReminders: flushGovernorReminders,
+            toolCall: tc,
+            blockedResult,
+            replaceToolCall: (toolCall) => {
+              tc = toolCall;
+            },
+            blockToolCall: (result) => {
+              blockedResult = result;
+            },
+          });
+          assistantMsg.toolCalls[index] = {
+            id: tc.id,
+            name: tc.name,
+            arguments: tc.arguments,
+          };
+          flushGovernorReminders();
           yield { type: "tool_start", id: tc.id, name: tc.name, args: tc.parsedArgs };
           const todosVersionBefore = this._todosVersion;
           const modeVersionBefore = this._modeVersion;
-          const result = await this.executeTool(tc, cwd);
+          let result = blockedResult ?? await this.executeTool(tc, cwd);
+          await hookBus.runAfterToolCall({
+            agent: this,
+            cwd,
+            input: userInput,
+            state: hookState,
+            queueReminder,
+            flushReminders: flushGovernorReminders,
+            toolCall: tc,
+            result,
+            replaceResult: (next) => {
+              result = next;
+            },
+          });
           this.appendMessage({
             role: "tool",
             toolCallId: tc.id,
             content: result.content,
           });
-          this.maybeCompactResidentHistory();
+          this.compactResidentHistory();
+          flushGovernorReminders();
           this.onToolResult?.(tc.name, result);
+          executedResults.push(result);
           yield { type: "tool_end", id: tc.id, name: tc.name, result };
           if (this._todosVersion !== todosVersionBefore) {
             yield { type: "todos_updated", todos: this.getTodos() };
@@ -339,6 +457,21 @@ export class Agent {
             yield { type: "mode_changed", mode: this._mode };
           }
         }
+
+        await hookBus.runBeforeContinuation({
+          agent: this,
+          cwd,
+          input: userInput,
+          state: hookState,
+          queueReminder,
+          flushReminders: flushGovernorReminders,
+          toolCalls: parsedCalls,
+          toolResults: executedResults,
+          requestTextOnlyTurn: (reason: string) => {
+            (hookState as any).forceTextOnlyReason = reason;
+          },
+        });
+        flushGovernorReminders();
 
         yield { type: "turn_end", usage: turnUsage };
 
@@ -349,7 +482,15 @@ export class Agent {
         continue;
       }
 
-      this.maybeCompactResidentHistory();
+      await hookBus.runAfterTurn({
+        agent: this,
+        cwd,
+        input: userInput,
+        state: hookState,
+        queueReminder,
+        flushReminders: flushGovernorReminders,
+      });
+      flushGovernorReminders();
       yield { type: "turn_end", usage: turnUsage };
       break;
     }
@@ -393,6 +534,79 @@ export class Agent {
       return before - this.messages.length;
     }
     return 0;
+  }
+
+  compactResidentHistory(): void {
+    this.maybeCompactResidentHistory();
+  }
+
+  async runSubtask(
+    input: string | ContentPart[],
+    cwd: string,
+    options?: { subtaskType?: string; description?: string },
+  ): Promise<ToolResult> {
+    const subtaskType = options?.subtaskType as SubtaskType | undefined;
+    const policy = getSubtaskPolicy(subtaskType);
+    const tools = filterToolsForSubtask(
+      [...this.tools.values()].filter((tool) => tool.name !== "task"),
+      subtaskType,
+    );
+    const subAgent = new Agent({
+      provider: this.provider,
+      providerId: this.providerId,
+      model: this.model,
+      tools,
+      temperature: this.temperature,
+      thinkingLevel: this.thinkingLevel,
+      mode: "plan",
+      maxTurns: policy.maxTurns,
+      taskBudget: policy.taskBudget,
+      systemPrompt: this.messages.find((message) => message.role === "system")?.content,
+      hooks: this.hookDefinitions,
+    });
+    subAgent.injectSystemReminder(`<system-reminder>\n${policy.reminder}\n</system-reminder>`);
+
+    let summary = "";
+    const toolNotes: string[] = [];
+    for await (const event of subAgent.run(input, cwd)) {
+      if (event.type === "text_delta") {
+        summary += event.content;
+      }
+      if (event.type === "tool_end") {
+        const detail = event.result.metadata?.reason
+          || event.result.content.split("\n").find((line) => line.trim())?.trim()
+          || "completed";
+        toolNotes.push(`${event.name}: ${detail}`);
+      }
+    }
+
+    const lines: string[] = [];
+    const trimmedSummary = summary.trim();
+    lines.push(`Subtask type: ${policy.type}`);
+    if (options?.description) {
+      lines.push(`Subtask description: ${options.description}`);
+    }
+    if (trimmedSummary) {
+      lines.push("", "Subtask summary:", trimmedSummary);
+    }
+    if (toolNotes.length > 0) {
+      lines.push("", "Subtask tools:");
+      for (const note of toolNotes.slice(0, 8)) {
+        lines.push(`- ${note}`);
+      }
+    }
+    if (lines.length === 0) {
+      lines.push("Subtask summary:", "No conclusive findings were produced.");
+    }
+
+    return {
+      content: lines.join("\n"),
+      status: policy.resultStatus,
+      metadata: {
+        kind: "security",
+        reason: `Subtask (${policy.type}) investigation completed.`,
+      },
+    };
   }
 
   private maybeCompactResidentHistory(): void {
@@ -462,7 +676,7 @@ export class Agent {
       return {
         content:
           `Error: Tool "${toolCall.name}" is not allowed in plan mode. ` +
-          `In plan mode you may only use read-only tools (read, grep, web_search, web_fetch, skill). ` +
+          `In plan mode you may only use read-only tools (read, grep, web_search, web_fetch, task, skill). ` +
           `To modify files or run commands, present your proposal and call exit_plan_mode so the user can review and approve it.`,
         isError: true,
       };
@@ -478,7 +692,7 @@ export class Agent {
     }
 
     try {
-      return await tool.execute(toolCall.parsedArgs, { cwd });
+      return await tool.execute(toolCall.parsedArgs, { cwd, agent: this });
     } catch (err: any) {
       return {
         content: `Error executing ${toolCall.name}: ${err.message || String(err)}`,

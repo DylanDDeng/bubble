@@ -87,9 +87,31 @@ export interface ParsedToolCall extends ToolCall {
   parsedArgs: Record<string, any>;
 }
 
+export type ToolResultStatus =
+  | "success"
+  | "no_match"
+  | "partial"
+  | "timeout"
+  | "blocked"
+  | "command_error";
+
+export interface ToolResultMetadata {
+  kind?: "search" | "read" | "write" | "edit" | "shell" | "web" | "security";
+  path?: string;
+  pattern?: string;
+  matches?: number;
+  truncated?: boolean;
+  searchSignature?: string;
+  searchFamily?: string;
+  reason?: string;
+  arbiterNote?: string;
+}
+
 export interface ToolResult {
   content: string;
   isError?: boolean;
+  status?: ToolResultStatus;
+  metadata?: ToolResultMetadata;
 }
 
 export type ToolExecutor = (args: Record<string, any>, ctx: ToolContext) => Promise<ToolResult>;
@@ -97,6 +119,13 @@ export type ToolExecutor = (args: Record<string, any>, ctx: ToolContext) => Prom
 export interface ToolContext {
   cwd: string;
   abortSignal?: AbortSignal;
+  agent?: {
+    runSubtask: (
+      input: string | ContentPart[],
+      cwd: string,
+      options?: { subtaskType?: string; description?: string },
+    ) => Promise<ToolResult>;
+  };
 }
 
 export interface ToolRegistryEntry extends ToolDefinition {

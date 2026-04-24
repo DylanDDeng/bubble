@@ -52,6 +52,7 @@ describe("provider transform", () => {
 
     expect(config.effectiveThinkingLevel).toBe("max");
     expect(config.reasoningEffort).toBeUndefined();
+    expect(config.reasoningContentEcho).toBe("all");
     expect(config.extraBody).toEqual({
       thinking: { type: "enabled" },
       reasoning_effort: "max",

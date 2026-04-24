@@ -58,9 +58,8 @@ function handlePermissionsMutation(
   return `Removed from ${scope} ${list}: ${rule}`;
 }
 
-const userConfig = new UserConfig();
-
 function persistSelectedModel(model: string, ctx: Parameters<SlashCommand["handler"]>[1]) {
+  const userConfig = new UserConfig();
   userConfig.setDefaultModel(model);
   userConfig.setDefaultThinkingLevel(ctx.agent.thinking);
   userConfig.pushRecentModel(model);
