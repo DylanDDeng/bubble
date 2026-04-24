@@ -278,11 +278,19 @@ function OpenTuiApp(props: {
   const approvalOptionTexts: Array<TextRenderable | undefined> = [];
   let pickerFrame: BoxRenderable | undefined;
   let selectList: SelectRenderable | undefined;
+  const inlinePickerRows: Array<BoxRenderable | undefined> = [];
+  const inlinePickerLabels: Array<TextRenderable | undefined> = [];
+  const inlinePickerDetails: Array<TextRenderable | undefined> = [];
 
   const activePrompt = () =>
     isHomeSurfaceActive()
       ? homePromptRef ?? sessionPromptRef
       : sessionPromptRef ?? homePromptRef;
+
+  const activeComposerShell = () =>
+    isHomeSurfaceActive()
+      ? homeComposerShell ?? sessionComposerShell
+      : sessionComposerShell ?? homeComposerShell;
 
   const readPromptText = () => {
     try {
@@ -611,34 +619,49 @@ function OpenTuiApp(props: {
       });
     }
     redrawApprovalPanel();
+    const state = picker?.kind === "select" && !picker.loading ? picker : undefined;
+    const stateMode = state?.mode;
+    const inlinePicker = stateMode === "slash" || stateMode === "file";
+    const pickerHeight = state ? selectHeight(state, inlinePicker ? inlinePickerAvailableRows() : undefined) : 0;
     if (selectList) {
-      const state = picker?.kind === "select" && !picker.loading ? picker : undefined;
-      const inlinePicker = isInlinePicker(state);
-      selectList.visible = !!state;
-      selectList.options = state ? state.items.map(toSelectOption) : [];
+      selectList.visible = !!state && !inlinePicker;
+      selectList.options = state && !inlinePicker ? state.items.map(toSelectOption) : [];
       selectList.selectedIndex = state ? state.index : 0;
-      selectList.height = state ? selectHeight(state) : 0;
-      selectList.backgroundColor = inlinePicker ? theme.backgroundPanel : theme.background;
+      selectList.height = state && !inlinePicker ? pickerHeight : 0;
+      selectList.backgroundColor = theme.background;
       selectList.textColor = theme.text;
       selectList.focusedTextColor = theme.text;
-      selectList.selectedBackgroundColor = inlinePicker ? theme.primary : theme.backgroundElement;
-      selectList.selectedTextColor = inlinePicker ? contrastText(theme.primary) : theme.primary;
-      selectList.descriptionColor = inlinePicker ? theme.textMuted : theme.textMuted;
-      selectList.selectedDescriptionColor = inlinePicker ? contrastText(theme.primary) : theme.text;
-      selectList.showDescription = state?.mode !== "file";
-      selectList.showScrollIndicator = !inlinePicker;
+      selectList.selectedBackgroundColor = theme.backgroundElement;
+      selectList.selectedTextColor = theme.primary;
+      selectList.descriptionColor = theme.textMuted;
+      selectList.selectedDescriptionColor = theme.text;
+      selectList.showDescription = !!state;
+      selectList.showScrollIndicator = true;
       selectList.requestRender();
     }
     if (pickerFrame) {
-      const state = picker?.kind === "select" && !picker.loading ? picker : undefined;
-      const inlinePicker = isInlinePicker(state);
       pickerFrame.visible = !!state;
-      pickerFrame.border = inlinePicker;
+      pickerFrame.border = inlinePicker ? ["left", "right"] : false;
       pickerFrame.borderColor = inlinePicker ? theme.border : theme.background;
-      pickerFrame.backgroundColor = inlinePicker ? theme.backgroundPanel : "#00000000";
+      pickerFrame.backgroundColor = inlinePicker ? theme.backgroundElement : "#00000000";
+      pickerFrame.position = inlinePicker ? "absolute" : undefined;
+      pickerFrame.zIndex = inlinePicker ? 1000 : 0;
+      if (inlinePicker) {
+        const geometry = inlinePickerGeometry(pickerHeight);
+        pickerFrame.left = geometry.left;
+        pickerFrame.top = geometry.top;
+        pickerFrame.width = geometry.width;
+        pickerFrame.height = geometry.height;
+      } else {
+        pickerFrame.left = undefined;
+        pickerFrame.top = undefined;
+        pickerFrame.width = "auto";
+        pickerFrame.height = "auto";
+      }
       pickerFrame.title = undefined;
       pickerFrame.requestRender();
     }
+    redrawInlinePickerRows(state, inlinePicker, pickerHeight);
     dock?.requestRender();
   }
 
@@ -686,6 +709,91 @@ function OpenTuiApp(props: {
 
     approvalRoot.requestRender();
     approvalPreviewScroll?.requestRender();
+  }
+
+  function inlinePickerAvailableRows() {
+    const anchor = activeComposerShell();
+    if (!anchor) return 10;
+    const parentY = pickerFrame?.parent?.y ?? 0;
+    return Math.max(1, anchor.y - parentY);
+  }
+
+  function inlinePickerGeometry(height: number) {
+    const anchor = activeComposerShell();
+    const parentX = pickerFrame?.parent?.x ?? 0;
+    const parentY = pickerFrame?.parent?.y ?? 0;
+    if (!anchor) {
+      return { left: 0, top: 0, width: "100%" as const, height };
+    }
+    const availableRows = Math.max(1, anchor.y - parentY);
+    const resolvedHeight = Math.max(1, Math.min(height, availableRows));
+    return {
+      left: Math.max(0, anchor.x - parentX),
+      top: Math.max(0, anchor.y - parentY - resolvedHeight),
+      width: anchor.width,
+      height: resolvedHeight,
+    };
+  }
+
+  function inlinePickerWindow(state: Extract<PickerState, { kind: "select" }>, height: number) {
+    if (!state.items.length) {
+      return [{ item: undefined, index: -1, label: "No matching items", detail: "" }];
+    }
+    const maxLabelWidth = Math.max(...state.items.map((item) => item.label.length));
+    const visibleCount = Math.max(1, Math.min(height, state.items.length));
+    const start = Math.min(
+      Math.max(0, state.index - visibleCount + 1),
+      Math.max(0, state.items.length - visibleCount),
+    );
+    return state.items.slice(start, start + visibleCount).map((item, offset) => ({
+      item,
+      index: start + offset,
+      label: item.label.padEnd(maxLabelWidth + 2),
+      detail: item.detail ? item.detail.replace(/\s+/g, " ") : "",
+    }));
+  }
+
+  function redrawInlinePickerRows(
+    state: Extract<PickerState, { kind: "select" }> | undefined,
+    inlinePicker: boolean,
+    height: number,
+  ) {
+    const rows = state && inlinePicker ? inlinePickerWindow(state, height) : [];
+    for (let index = 0; index < 10; index += 1) {
+      const row = inlinePickerRows[index];
+      const label = inlinePickerLabels[index];
+      const detail = inlinePickerDetails[index];
+      const data = rows[index];
+      const isSelected = !!data?.item && data.index === state?.index;
+      if (row) {
+        row.visible = !!data;
+        row.backgroundColor = isSelected ? theme.primary : theme.backgroundElement;
+        row.requestRender();
+      }
+      if (label) {
+        label.content = data ? data.label : "";
+        label.fg = data?.item
+          ? (isSelected ? contrastText(theme.primary) : theme.text)
+          : theme.textMuted;
+        label.requestRender();
+      }
+      if (detail) {
+        detail.content = data?.detail ?? "";
+        detail.fg = isSelected ? contrastText(theme.primary) : theme.textMuted;
+        detail.requestRender();
+      }
+    }
+  }
+
+  function updateInlinePickerFromMouse(rowIndex: number, confirm = false) {
+    const state = picker?.kind === "select" && isInlinePicker(picker) ? picker : undefined;
+    if (!state) return;
+    const height = selectHeight(state, inlinePickerAvailableRows());
+    const row = inlinePickerWindow(state, height)[rowIndex];
+    if (!row?.item) return;
+    picker = { ...state, index: row.index };
+    redrawDock();
+    if (confirm) void runPickerItem(row.item);
   }
 
   createEffect(() => {
@@ -878,17 +986,14 @@ function OpenTuiApp(props: {
     const query = trimmedBeforeCursor.slice(1).toLowerCase();
     const commands = buildSlashItems(query);
 
-    if (!commands.length) {
-      if (picker?.kind === "select" && picker.mode === "slash") closePicker();
-      return;
-    }
-
     picker = {
       kind: "select",
       mode: "slash",
       title: "Commands",
       items: commands,
-      index: Math.min(picker?.kind === "select" && picker.mode === "slash" ? picker.index : 0, commands.length - 1),
+      index: commands.length
+        ? Math.min(picker?.kind === "select" && picker.mode === "slash" ? picker.index : 0, commands.length - 1)
+        : 0,
     };
     redrawDock();
   }
@@ -910,8 +1015,19 @@ function OpenTuiApp(props: {
   }
 
   function buildSlashItems(query = ""): PickerItem[] {
+    const normalizedQuery = query.trim().toLowerCase();
     return slashRegistry.list()
-      .filter((command) => !query || command.name.toLowerCase().startsWith(query))
+      .filter((command) => {
+        if (!normalizedQuery) return true;
+        const name = command.name.toLowerCase();
+        const description = command.description.toLowerCase();
+        return name.startsWith(normalizedQuery)
+          || name.includes(normalizedQuery)
+          || description.includes(normalizedQuery)
+          || fuzzyMatch(name, normalizedQuery)
+          || fuzzyMatch(description, normalizedQuery);
+      })
+      .sort((a, b) => a.name.localeCompare(b.name))
       .map((command): PickerItem => ({
         label: `/${command.name}`,
         detail: command.description,
@@ -1424,6 +1540,7 @@ function OpenTuiApp(props: {
       }),
       h("box", {
         ref: (ref: BoxRenderable) => { pickerFrame = ref; },
+        flexDirection: "column",
         visible: false,
       },
       h("select", {
@@ -1445,6 +1562,33 @@ function OpenTuiApp(props: {
         onMouseDown: (event: any) => updatePickerFromMouse(event, false),
         onMouseUp: (event: any) => updatePickerFromMouse(event, true),
       }),
+      ...Array.from({ length: 10 }, (_, index) =>
+        h("box", {
+          ref: (ref: BoxRenderable) => { inlinePickerRows[index] = ref; },
+          visible: false,
+          height: 1,
+          flexDirection: "row",
+          paddingLeft: 1,
+          paddingRight: 1,
+          backgroundColor: theme.backgroundElement,
+          onMouseMove: () => updateInlinePickerFromMouse(index, false),
+          onMouseDown: () => updateInlinePickerFromMouse(index, false),
+          onMouseUp: () => updateInlinePickerFromMouse(index, true),
+        },
+        h("text", {
+          ref: (ref: TextRenderable) => { inlinePickerLabels[index] = ref; },
+          fg: theme.text,
+          flexShrink: 0,
+          content: "",
+        }),
+        h("text", {
+          ref: (ref: TextRenderable) => { inlinePickerDetails[index] = ref; },
+          fg: theme.textMuted,
+          wrapMode: "none",
+          content: "",
+        }),
+        ),
+      ),
       ),
     ];
   }
@@ -2337,6 +2481,16 @@ function preferredPickerIndex(kind: Exclude<PickerMode, "key">, items: PickerIte
   return 0;
 }
 
+function fuzzyMatch(value: string, query: string) {
+  let cursor = 0;
+  for (const char of query) {
+    cursor = value.indexOf(char, cursor);
+    if (cursor === -1) return false;
+    cursor += 1;
+  }
+  return true;
+}
+
 function formatDock(input: {
   picker: PickerState | undefined;
   plan?: string;
@@ -2441,7 +2595,10 @@ function formatDockPreviewLines(value: string, options: { maxLines: number; maxW
   return lines.slice(0, options.maxLines);
 }
 
-function selectHeight(state: Extract<PickerState, { kind: "select" }>) {
+function selectHeight(state: Extract<PickerState, { kind: "select" }>, maxRows = 10) {
+  if (state.mode === "slash" || state.mode === "file") {
+    return Math.max(1, Math.min(10, maxRows, state.items.length || 1));
+  }
   if (!state.items.length) return 1;
   const linesPerItem = 2;
   return Math.max(linesPerItem, Math.min(10, state.items.length * linesPerItem));
