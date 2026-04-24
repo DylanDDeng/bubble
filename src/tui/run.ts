@@ -1356,7 +1356,6 @@ function OpenTuiApp(props: {
   }
 
   function renderHomeSurface() {
-    const cwd = props.args.cwd ? shortCwd(props.args.cwd) : "";
     const homeHeight = Math.max(16, dimensions().height - 4);
     return h("box", {
       height: homeHeight,
@@ -1408,9 +1407,6 @@ function OpenTuiApp(props: {
         },
       }),
       ),
-      h("box", { height: 1, minHeight: 0, flexShrink: 1 }),
-      h("text", { fg: theme.warning }, `● Tip  ${homeTip}`),
-      cwd ? h("text", { fg: theme.textMuted }, `  ${cwd}`) : null,
     ]);
   }
 
@@ -1697,10 +1693,8 @@ function renderPrompt(input: {
     h("box", { width: "100%", flexDirection: "row", justifyContent: "space-between" },
       () => input.disabled() ? h("text", { fg: theme.textMuted }, "esc interrupt") : h("text", { fg: theme.textMuted }, ""),
       h("box", { flexDirection: "row", gap: 2 },
-        h("text", { fg: theme.text }, "⇧↵/ctrl+j ", h("span", { fg: theme.textMuted }, "newline")),
         h("text", { fg: theme.text }, "tab ", h("span", { fg: theme.textMuted }, "agents")),
         h("text", { fg: theme.text }, "ctrl+p ", h("span", { fg: theme.textMuted }, "commands")),
-        h("text", { fg: theme.text }, "@ ", h("span", { fg: theme.textMuted }, "files")),
       ),
     ),
   );
