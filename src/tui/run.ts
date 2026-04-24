@@ -47,6 +47,7 @@ import { inferBashPrefix, type BashAllowlist } from "../approval/session-cache.j
 import type { SettingsManager } from "../permissions/settings.js";
 import type { McpManager } from "../mcp/manager.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
+import { createFrames } from "./opencode-spinner.js";
 
 export interface PlanHandlerRef {
   current?: (plan: string) => Promise<PlanDecision>;
@@ -112,6 +113,9 @@ const HOME_PROMPTS = [
   "Explain how this feature is wired",
 ];
 
+const PROMPT_SCANNER_IDLE_FRAMES = ["        "];
+const PROMPT_SCANNER_INTERVAL_MS = 80;
+
 const HOME_LOGO = [
   "█▀▀▄ █  █ █▀▀▄ █▀▀▄ █    █▀▀",
   "█▀▀▄ █  █ █▀▀▄ █▀▀▄ █    █▀▀",
@@ -127,6 +131,7 @@ const HOME_TIPS = [
 ];
 
 type Child = any;
+type PromptScannerSync = (running: boolean) => void;
 type PickerMode = "model" | "key" | "provider" | "provider-add" | "login" | "logout" | "slash" | "file";
 type PickerItem = {
   label: string;
@@ -260,6 +265,7 @@ function OpenTuiApp(props: {
   let dock: TextRenderable | undefined;
   let homeComposerShell: BoxRenderable | undefined;
   let sessionComposerShell: BoxRenderable | undefined;
+  const promptScannerSyncs = new Set<PromptScannerSync>();
   let approvalRoot: BoxRenderable | undefined;
   let approvalHeaderTitle: TextRenderable | undefined;
   let approvalMetaIcon: TextRenderable | undefined;
@@ -344,6 +350,38 @@ function OpenTuiApp(props: {
     return true;
   };
 
+  const handleApprovalKey = (event: any) => {
+    const approval = pendingApproval();
+    if (!approval) return false;
+    const name = String(event.name || "").toLowerCase();
+    if (name === "left" || name === "right" || name === "up" || name === "down" || name === "h" || name === "l") {
+      const opts = approvalOptionsFor(approval.request);
+      const idx = approvalOptionIdx();
+      const next = name === "left" || name === "up" || name === "h"
+        ? (idx - 1 + opts.length) % opts.length
+        : (idx + 1) % opts.length;
+      setApprovalOptionIdx(next);
+      forceApprovalUI();
+      event.preventDefault?.();
+      return true;
+    }
+    if (name === "return" || name === "enter") {
+      resolveApprovalSelection();
+      event.preventDefault?.();
+      return true;
+    }
+    if (name === "escape") {
+      pendingApprovalRef = undefined;
+      setPendingApproval(undefined);
+      setApprovalOptionIdx(0);
+      forceApprovalUI();
+      approval.resolve({ action: "reject", feedback: "Rejected by user." });
+      event.preventDefault?.();
+      return true;
+    }
+    return false;
+  };
+
   const forceApprovalUI = () => {
     const approval = pendingApproval();
     const plan = pendingPlan();
@@ -362,6 +400,7 @@ function OpenTuiApp(props: {
       }
     }
     redrawDock();
+    redrawApprovalPanel();
     redrawTranscript();
   };
 
@@ -377,6 +416,7 @@ function OpenTuiApp(props: {
       props.options.approvalHandlerRef.current = (request: ApprovalRequest) =>
         new Promise<ApprovalDecision>((resolve) => {
           pendingApprovalRef = { request, resolve };
+          picker = undefined;
           setPendingApproval({ request, resolve });
           forceApprovalUI();
         });
@@ -408,6 +448,7 @@ function OpenTuiApp(props: {
       return;
     }
 
+    if (handleApprovalKey(event)) return;
     if (handlePickerKey(event)) return;
 
     const plan = pendingPlan();
@@ -437,33 +478,6 @@ function OpenTuiApp(props: {
         setPendingPlan(undefined);
         setApprovalOptionIdx(0);
         plan.resolve({ action: "reject", reason: "Rejected by user." });
-      }
-      event.preventDefault?.();
-      return;
-    }
-
-    const approval = pendingApproval();
-    if (approval) {
-      if (name === "left" || name === "right" || name === "up" || name === "down" || name === "h" || name === "l") {
-        const opts = approvalOptionsFor(approval.request);
-        const idx = approvalOptionIdx();
-        const next = name === "left" || name === "up" || name === "h"
-          ? (idx - 1 + opts.length) % opts.length
-          : (idx + 1) % opts.length;
-        setApprovalOptionIdx(next);
-        forceApprovalUI();
-        event.preventDefault?.();
-        return;
-      }
-      if (name === "return" || name === "enter") {
-        resolveApprovalSelection();
-      }
-      if (name === "escape") {
-        pendingApprovalRef = undefined;
-        setPendingApproval(undefined);
-        setApprovalOptionIdx(0);
-        forceApprovalUI();
-        approval.resolve({ action: "reject", feedback: "Rejected by user." });
       }
       event.preventDefault?.();
       return;
@@ -520,6 +534,32 @@ function OpenTuiApp(props: {
     if (sessionComposerShell) sessionComposerShell.visible = !homeActive;
     if (focus) setTimeout(() => activePrompt()?.focus(), 0);
     rootBox?.requestRender();
+  }
+
+  function registerPromptScanner(sync: PromptScannerSync) {
+    promptScannerSyncs.add(sync);
+    sync(isRunning());
+    return () => {
+      promptScannerSyncs.delete(sync);
+    };
+  }
+
+  function setRunningState(running: boolean) {
+    setIsRunning(running);
+    for (const sync of promptScannerSyncs) {
+      try {
+        sync(running);
+      } catch {
+        // The waiting animation is decorative; it must never block the agent run.
+      }
+    }
+    try {
+      homeComposerShell?.requestRender();
+      sessionComposerShell?.requestRender();
+      rootBox?.requestRender();
+    } catch {
+      // Keep the agent loop alive even if a renderable is already gone.
+    }
   }
 
   function transcriptOptions() {
@@ -1156,7 +1196,7 @@ function OpenTuiApp(props: {
     displayMessages = nextMessages;
     streamingDisplay = undefined;
     redrawTranscript(undefined, nextMessages);
-    setIsRunning(true);
+    setRunningState(true);
 
     let assistantContent = "";
     let assistantReasoning = "";
@@ -1246,7 +1286,7 @@ function OpenTuiApp(props: {
       pendingApprovalRef = undefined;
       setPendingApproval(undefined);
       setApprovalOptionIdx(0);
-      setIsRunning(false);
+      setRunningState(false);
       streamingDisplay = undefined;
       if (runError) {
         const errorMessage = runError;
@@ -1262,19 +1302,8 @@ function OpenTuiApp(props: {
   }
 
   function promptUiKeyDown(event: any) {
+    if (handleApprovalKey(event)) return true;
     const name = String(event.name || "").toLowerCase();
-    const approvalState = pendingApproval();
-    if (approvalState && (name === "left" || name === "right" || name === "up" || name === "down" || name === "h" || name === "l")) {
-      const opts = approvalOptionsFor(approvalState.request);
-      const idx = approvalOptionIdx();
-      const next = name === "left" || name === "up" || name === "h"
-        ? (idx - 1 + opts.length) % opts.length
-        : (idx + 1) % opts.length;
-      setApprovalOptionIdx(next);
-      forceApprovalUI();
-      event.preventDefault?.();
-      return true;
-    }
     const plan = pendingPlan();
     if (plan && (name === "left" || name === "right" || name === "h" || name === "l")) {
       const idx = approvalOptionIdx();
@@ -1600,6 +1629,7 @@ function OpenTuiApp(props: {
       model: () => displayModelWithThinking(props.agent.model, props.agent.thinking) || "no model",
       mode,
       running: isRunning,
+      registerScanner: registerPromptScanner,
     }),
   ]);
 }
@@ -1650,13 +1680,10 @@ function renderPrompt(input: {
           h("box", { flexDirection: "row", gap: 1 },
             h("text", { fg: theme.primary }, input.mode() === "plan" ? "Plan" : "Build"),
             h("text", { fg: theme.textMuted }, "·"),
-            h("text", { fg: theme.text }, input.model),
+            h("text", { fg: theme.text }, input.model()),
           ),
         ),
       ),
-    ),
-    h("box", { height: 1, border: ["left"], borderColor: theme.primary },
-      h("box", { height: 1, border: ["bottom"], borderColor: theme.backgroundElement }),
     ),
     h("box", { width: "100%", flexDirection: "row", justifyContent: "space-between" },
       () => input.disabled() ? h("text", { fg: theme.textMuted }, "esc interrupt") : h("text", { fg: theme.textMuted }, ""),
@@ -1668,6 +1695,83 @@ function renderPrompt(input: {
       ),
     ),
   );
+}
+
+function PromptScanner(input: {
+  running: () => boolean;
+  register: (sync: PromptScannerSync) => () => void;
+  idleContent?: string;
+  idleFg?: string;
+  runningFg?: string;
+}) {
+  let scannerRef: TextRenderable | undefined;
+  let frameIndex = 0;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const frames = createFrames({
+    color: theme.primary,
+    style: "blocks",
+    inactiveFactor: 0.6,
+    minAlpha: 0.3,
+  });
+
+  const renderFrame = () => {
+    if (!scannerRef) return;
+    const frame = frames[frameIndex % frames.length] ?? PROMPT_SCANNER_IDLE_FRAMES[0]!;
+    try {
+      scannerRef.content = frame;
+      scannerRef.fg = input.runningFg ?? theme.primary;
+      scannerRef.requestRender();
+    } catch {
+      stop();
+    }
+  };
+
+  const stop = () => {
+    if (timer) clearInterval(timer);
+    timer = undefined;
+    frameIndex = 0;
+    if (scannerRef) {
+      try {
+        scannerRef.content = input.idleContent ?? PROMPT_SCANNER_IDLE_FRAMES[0]!;
+        scannerRef.fg = input.idleFg ?? theme.backgroundElement;
+        scannerRef.requestRender();
+      } catch {
+        // Ignore stale renderables during surface switches.
+      }
+    }
+  };
+
+  const start = () => {
+    renderFrame();
+    if (timer) return;
+    timer = setInterval(() => {
+      frameIndex = (frameIndex + 1) % frames.length;
+      renderFrame();
+    }, PROMPT_SCANNER_INTERVAL_MS);
+  };
+
+  const sync = (running: boolean) => {
+    if (!scannerRef) return;
+    if (running) start();
+    else stop();
+  };
+
+  createEffect(() => {
+    sync(input.running());
+  });
+
+  const unregister = input.register(sync);
+  onCleanup(stop);
+  onCleanup(unregister);
+
+  return h("text", {
+    ref: (ref: TextRenderable) => {
+      scannerRef = ref;
+      sync(input.running());
+    },
+    fg: input.idleFg ?? theme.backgroundElement,
+    height: 1,
+  }, input.idleContent ?? PROMPT_SCANNER_IDLE_FRAMES[0]);
 }
 
 function renderMessage(message: DisplayMessage, index: number, syntaxStyle: SyntaxStyle) {
@@ -2164,10 +2268,17 @@ function renderFooter(input: {
   model: () => string;
   mode: () => PermissionMode;
   running: () => boolean;
+  registerScanner: (sync: PromptScannerSync) => () => void;
 }) {
   return h("box", { flexShrink: 0, height: 1, paddingLeft: 1, paddingRight: 1, flexDirection: "row" },
     h("text", { fg: theme.border }, "─ "),
-    h("text", { fg: theme.textMuted }, `${shortCwd(input.cwd)}  ${input.running() ? "running" : "idle"}`),
+    h(PromptScanner, {
+      running: input.running,
+      register: input.registerScanner,
+      idleContent: `${shortCwd(input.cwd)}  idle`,
+      idleFg: theme.textMuted,
+      runningFg: theme.primary,
+    }),
     () => input.mode() !== "default" ? h("text", { fg: theme.warning }, `  ${input.mode()} · ⇧⇥`) : null,
     h("box", { flexGrow: 1 }),
     h("text", { fg: theme.textMuted }, `${input.provider()} · ${input.model()}`),
