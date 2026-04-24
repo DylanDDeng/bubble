@@ -506,6 +506,7 @@ function OpenTuiApp(props: {
     return {
       cwd: props.args.cwd,
       width: Math.max(20, dimensions().width - 4),
+      tip: homeTip,
       plan: pendingPlan()?.plan,
       selectedOption: approvalOptionIdx(),
     };
@@ -1240,72 +1241,32 @@ function OpenTuiApp(props: {
     return false;
   }
 
-  function renderHomeView() {
-    return h("box", {
-      flexDirection: "column",
-      flexGrow: 1,
-      minHeight: 0,
-    },
-    [
-      h("box", {
-        flexGrow: 1,
-        minHeight: 0,
-        paddingLeft: 2,
-        paddingRight: 2,
-        flexDirection: "column",
-        alignItems: "center",
-      },
-      h("box", { flexGrow: 1, minHeight: 0 }),
-      h("box", { height: 4, minHeight: 0, flexShrink: 1 }),
-      h("box", { flexShrink: 0 },
-        h("box", { flexDirection: "column", flexShrink: 0 },
-          ...HOME_LOGO.map((line) => h("text", { fg: theme.primary }, line)),
-        ),
-      ),
-      h("box", { height: 1, minHeight: 0, flexShrink: 1 }),
-      h("text", { fg: theme.warning }, `● Tip  ${homeTip}`),
-      h("text", { fg: theme.textMuted }, shortCwd(props.args.cwd)),
-      notice() ? h("text", { fg: theme.warning }, notice()) : null,
-      h("box", { flexGrow: 1, minHeight: 0 }),
-      ),
-    ]);
+  function renderComposer() {
+    return h("box", { width: "100%", paddingLeft: 2, paddingRight: 2, flexShrink: 0 },
+      renderPrompt({
+        ref: (ref) => { promptRef = ref; },
+        focused: true,
+        onSubmit: submitPrompt,
+        onContentChange: onPromptContentChange,
+        onKeyDown: handlePickerKey,
+        onUiKeyDown: promptUiKeyDown,
+        getText: readPromptText,
+        disabled: () => isRunning() && !pendingApproval() && !pendingPlan(),
+        mode,
+        model: () => displayModel(props.agent.model) || "no model",
+        placeholder: () => {
+          const approvalState = pendingApproval();
+          if (approvalState) return "Press Enter to approve or Esc to reject";
+          const plan = pendingPlan();
+          if (plan) return "Press Enter to approve plan or Esc to reject";
+          return `Ask anything... "${homePrompt}"`;
+        },
+      }),
+    );
   }
 
-  function renderSessionView() {
-    const approval = pendingApproval();
-    return h("box", {
-      flexDirection: "column",
-      flexGrow: 1,
-      minHeight: 0,
-    },
-    [
-      h("box", {
-        flexDirection: "column",
-        flexGrow: 1,
-        minHeight: 0,
-        paddingLeft: 2,
-        paddingRight: 2,
-        paddingBottom: 1,
-      },
-      h("scrollbox", {
-        ref: (ref: ScrollBoxRenderable) => { scrollbox = ref; },
-        stickyScroll: true,
-        stickyStart: "bottom",
-        flexGrow: 1,
-        minHeight: 0,
-      },
-      h("box", { height: 1 }),
-      h("box", {
-        ref: (ref: BoxRenderable) => {
-          transcriptHost = ref;
-          updateTranscriptHost(ref, transcriptState, currentTranscriptMessages(streamingDisplay), transcriptOptions(), props.syntaxStyle);
-        },
-        flexDirection: "column",
-        flexShrink: 0,
-        width: "100%",
-      }),
-      ),
-      todos().length ? renderTodos(todos()) : null,
+  function renderPromptDock() {
+    return [
       h("text", {
         ref: (ref: TextRenderable) => { dock = ref; },
         fg: theme.text,
@@ -1340,6 +1301,48 @@ function OpenTuiApp(props: {
         onMouseUp: (event: any) => updatePickerFromMouse(event, true),
       }),
       ),
+    ];
+  }
+
+  function renderSessionView() {
+    const approval = pendingApproval();
+    return h("box", {
+      flexDirection: "column",
+      flexGrow: 1,
+      minHeight: 0,
+    },
+    [
+      h("box", {
+        flexDirection: "column",
+        flexGrow: 1,
+        minHeight: 0,
+        paddingLeft: 2,
+        paddingRight: 2,
+        paddingBottom: 1,
+      },
+      h("scrollbox", {
+        ref: (ref: ScrollBoxRenderable) => { scrollbox = ref; },
+        stickyScroll: true,
+        stickyStart: "bottom",
+        flexGrow: 1,
+        minHeight: 0,
+      },
+      h("box", { height: 1 }),
+      h("box", {
+        ref: (ref: BoxRenderable) => {
+          const isNewHost = transcriptHost !== ref;
+          transcriptHost = ref;
+          if (isNewHost) transcriptState.entries = [];
+          updateTranscriptHost(ref, transcriptState, currentTranscriptMessages(streamingDisplay), transcriptOptions(), props.syntaxStyle);
+          setTimeout(() => scrollbox?.scrollTo(scrollbox.scrollHeight), 0);
+        },
+        flexDirection: "column",
+        flexShrink: 0,
+        width: "100%",
+      }),
+      ),
+      todos().length ? renderTodos(todos()) : null,
+      ...renderPromptDock(),
       notice() ? h("text", { fg: theme.warning }, notice()) : null,
       h("box", {
         ref: (ref: BoxRenderable) => { approvalRoot = ref; },
@@ -1470,39 +1473,17 @@ function OpenTuiApp(props: {
     width: "100%",
     height: "100%",
     backgroundColor: theme.background,
-  }, () => {
-    return [
-      renderSessionView(),
-      h("box", { width: "100%", paddingLeft: 2, paddingRight: 2, flexShrink: 0 },
-        renderPrompt({
-          ref: (ref) => { promptRef = ref; },
-          focused: true,
-          onSubmit: submitPrompt,
-          onContentChange: onPromptContentChange,
-          onKeyDown: handlePickerKey,
-          onUiKeyDown: promptUiKeyDown,
-          getText: readPromptText,
-          disabled: () => isRunning() && !pendingApproval() && !pendingPlan(),
-          mode,
-          model: () => displayModel(props.agent.model) || "no model",
-          placeholder: () => {
-            const approvalState = pendingApproval();
-            if (approvalState) return "Press Enter to approve or Esc to reject";
-            const plan = pendingPlan();
-            if (plan) return "Press Enter to approve plan or Esc to reject";
-            return `Ask anything... "${homePrompt}"`;
-          },
-        }),
-      ),
-      renderFooter({
-        cwd: props.args.cwd,
-        provider: () => props.agent.providerId || registry.getDefault()?.id || "unknown",
-        model: () => displayModel(props.agent.model) || "no model",
-        mode,
-        running: isRunning,
-      }),
-    ];
-  });
+  }, [
+    renderSessionView(),
+    renderComposer(),
+    renderFooter({
+      cwd: props.args.cwd,
+      provider: () => props.agent.providerId || registry.getDefault()?.id || "unknown",
+      model: () => displayModel(props.agent.model) || "no model",
+      mode,
+      running: isRunning,
+    }),
+  ]);
 }
 
 function renderPrompt(input: {
@@ -1670,7 +1651,18 @@ function updateTranscriptHost(
   const nextEntries: TranscriptEntry[] = [];
 
   if (!visibleMessages.length && !options?.plan) {
-    clearTranscriptEntries(host, state);
+    const key = `home:${options?.cwd ?? ""}:${options?.width ?? 0}:${options?.tip ?? ""}`;
+    const previous = state.entries[0];
+    if (previous?.key !== key) {
+      clearTranscriptEntries(host, state);
+      const node = renderHomeState({
+        width: options?.width ?? 80,
+        cwd: options?.cwd ?? "",
+        tip: options?.tip ?? "",
+      }) as Renderable;
+      host.add(node);
+      state.entries = [{ key, signature: key, node, refs: {} }];
+    }
     host.requestRender();
     return;
   }
@@ -2251,6 +2243,7 @@ function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] 
 type TranscriptOptions = {
   cwd: string;
   width: number;
+  tip?: string;
   plan?: string;
   selectedOption?: number;
 };
