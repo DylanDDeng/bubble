@@ -118,9 +118,9 @@ const PROMPT_SCANNER_IDLE_FRAMES = ["        "];
 const PROMPT_SCANNER_INTERVAL_MS = 80;
 
 const HOME_LOGO = [
-  "█▀▀▄ █  █ █▀▀▄ █▀▀▄ █    █▀▀",
-  "█▀▀▄ █  █ █▀▀▄ █▀▀▄ █    █▀▀",
-  "▀▀▀  ▀▀▀▀ ▀▀▀  ▀▀▀  ▀▀▀▀ ▀▀▀▀",
+  " /\\_/\\  █▀▀▄ █  █ █▀▀▄ █▀▀▄ █    █▀▀",
+  "( o.o ) █▀▀▄ █  █ █▀▀▄ █▀▀▄ █    █▀▀",
+  " > ^ <  ▀▀▀  ▀▀▀▀ ▀▀▀  ▀▀▀  ▀▀▀▀ ▀▀▀▀",
 ];
 
 const HOME_TIPS = [
@@ -1650,7 +1650,7 @@ function renderPrompt(input: {
 }) {
   return h("box", { flexDirection: "column", flexShrink: 0, marginTop: 1 },
     h("box", { border: ["left"], borderColor: theme.primary, backgroundColor: theme.backgroundElement },
-      h("box", { flexDirection: "column", paddingLeft: 2, paddingRight: 2, paddingTop: 1, backgroundColor: theme.backgroundElement },
+      h("box", { flexDirection: "column", paddingLeft: 2, paddingRight: 2, paddingTop: 1, paddingBottom: 1, backgroundColor: theme.backgroundElement },
         h("textarea", {
           ref: input.ref,
           focused: input.focused,
