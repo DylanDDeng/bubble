@@ -1357,17 +1357,16 @@ function OpenTuiApp(props: {
 
   function renderHomeSurface() {
     const cwd = props.args.cwd ? shortCwd(props.args.cwd) : "";
+    const homeHeight = Math.max(16, dimensions().height - 4);
     return h("box", {
-      flexGrow: 1,
-      minHeight: 0,
+      height: homeHeight,
       flexDirection: "column",
       alignItems: "center",
+      justifyContent: "center",
       paddingLeft: 2,
       paddingRight: 2,
     },
     [
-      h("box", { flexGrow: 1, minHeight: 0 }),
-      h("box", { height: 4, minHeight: 0, flexShrink: 1 }),
       h("box", { flexShrink: 0, flexDirection: "column" },
         ...HOME_LOGO.map((line) => h("text", { fg: theme.primary }, line)),
       ),
@@ -1412,7 +1411,6 @@ function OpenTuiApp(props: {
       h("box", { height: 1, minHeight: 0, flexShrink: 1 }),
       h("text", { fg: theme.warning }, `● Tip  ${homeTip}`),
       cwd ? h("text", { fg: theme.textMuted }, `  ${cwd}`) : null,
-      h("box", { flexGrow: 1, minHeight: 0 }),
     ]);
   }
 
