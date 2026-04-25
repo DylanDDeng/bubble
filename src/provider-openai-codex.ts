@@ -197,8 +197,14 @@ export function createOpenAICodexProvider(options: {
         if (usage) {
           yield {
             type: "usage",
-            promptTokens: typeof usage.input_tokens === "number" ? usage.input_tokens : 0,
-            completionTokens: typeof usage.output_tokens === "number" ? usage.output_tokens : 0,
+            usage: {
+              promptTokens: typeof usage.input_tokens === "number" ? usage.input_tokens : 0,
+              completionTokens: typeof usage.output_tokens === "number" ? usage.output_tokens : 0,
+              reasoningTokens: typeof usage.output_tokens_details?.reasoning_tokens === "number"
+                ? usage.output_tokens_details.reasoning_tokens
+                : undefined,
+              totalTokens: typeof usage.total_tokens === "number" ? usage.total_tokens : undefined,
+            },
           };
         }
         continue;

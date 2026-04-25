@@ -40,7 +40,7 @@ const GPT51_CODEX_MAX_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high
 const GPT51_CODEX_MINI_LEVELS: ReasoningEffort[] = ["off", "medium", "high"];
 const OPENAI_CHAT_LEVELS: ReasoningEffort[] = ["off"];
 const TOGGLE_THINKING_LEVELS: ReasoningEffort[] = ["off", "medium"];
-const DEEPSEEK_V4_PRO_LEVELS: ReasoningEffort[] = ["high", "max"];
+const DEEPSEEK_V4_LEVELS: ReasoningEffort[] = ["high", "max"];
 
 export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "gpt-5.4", name: "gpt-5.4", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000 },
@@ -59,9 +59,8 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "o1-mini", name: "o1-mini", providerId: "openai", reasoningLevels: ["off", "low", "medium", "high"], contextWindow: 128000 },
   { id: "gpt-4-turbo", name: "gpt-4-turbo", providerId: "openai", reasoningLevels: OPENAI_CHAT_LEVELS, contextWindow: 128000 },
 
-  { id: "deepseek-chat", name: "deepseek-chat", providerId: "deepseek", reasoningLevels: ["off"], contextWindow: 64000 },
-  { id: "deepseek-reasoner", name: "deepseek-reasoner", providerId: "deepseek", reasoningLevels: ["off"], contextWindow: 64000 },
-  { id: "deepseek-v4-pro", name: "deepseek-v4-pro", providerId: "deepseek", reasoningLevels: DEEPSEEK_V4_PRO_LEVELS, contextWindow: 1048576 },
+  { id: "deepseek-v4-flash", name: "deepseek-v4-flash", providerId: "deepseek", reasoningLevels: DEEPSEEK_V4_LEVELS, contextWindow: 1048576 },
+  { id: "deepseek-v4-pro", name: "deepseek-v4-pro", providerId: "deepseek", reasoningLevels: DEEPSEEK_V4_LEVELS, contextWindow: 1048576 },
   { id: "gemini-2.5-pro-preview-03-25", name: "gemini-2.5-pro-preview-03-25", providerId: "google", reasoningLevels: ["off", "low", "high"], contextWindow: 128000 },
   { id: "gemini-2.0-flash-001", name: "gemini-2.0-flash-001", providerId: "google", reasoningLevels: ["off"], contextWindow: 128000 },
   { id: "gemini-1.5-pro-latest", name: "gemini-1.5-pro-latest", providerId: "google", reasoningLevels: ["off"], contextWindow: 128000 },

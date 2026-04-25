@@ -339,7 +339,7 @@ describe("Agent", () => {
         if (captured.length === 1) {
           yield { type: "tool_call", id: "tc_1", name: "dummy", arguments: "", isStart: true, isEnd: false };
           yield { type: "tool_call", id: "tc_1", name: "dummy", arguments: "{\"value\":\"42\"}", isStart: false, isEnd: true };
-          yield { type: "usage", promptTokens: 50, completionTokens: 60 };
+          yield { type: "usage", usage: { promptTokens: 50, completionTokens: 60 } };
           yield { type: "done" };
           return;
         }

@@ -153,6 +153,34 @@ describe("translateOpenAIStream", () => {
     expect(chunks.find((c) => c.type === "reasoning_delta")).toEqual({ type: "reasoning_delta", content: "thinking..." });
   });
 
+  it("forwards DeepSeek usage cache and reasoning token details", async () => {
+    const chunks = await collect(translateOpenAIStream(fromArray([
+      {
+        usage: {
+          prompt_tokens: 100,
+          prompt_cache_hit_tokens: 40,
+          prompt_cache_miss_tokens: 60,
+          completion_tokens: 20,
+          total_tokens: 120,
+          completion_tokens_details: { reasoning_tokens: 12 },
+        },
+        choices: [{ delta: {} }],
+      },
+    ])));
+
+    expect(chunks).toContainEqual({
+      type: "usage",
+      usage: {
+        promptTokens: 100,
+        promptCacheHitTokens: 40,
+        promptCacheMissTokens: 60,
+        completionTokens: 20,
+        totalTokens: 120,
+        reasoningTokens: 12,
+      },
+    });
+  });
+
   it("flushes pending tool calls if the stream ends without finish_reason=tool_calls", async () => {
     const chunks = await collect(translateOpenAIStream(fromArray([
       { choices: [{ delta: { tool_calls: [{ index: 0, id: "write:1", function: { name: "write", arguments: "{}" } }] } }] },

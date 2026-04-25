@@ -34,10 +34,11 @@ import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import type { Agent } from "../agent.js";
 import type { CliArgs } from "../cli.js";
 import type { SessionManager } from "../session.js";
-import type { ContentPart, Message, PermissionMode, PlanDecision, Provider, ThinkingLevel, Todo } from "../types.js";
+import type { ContentPart, Message, PermissionMode, PlanDecision, Provider, ThinkingLevel, Todo, TokenUsage } from "../types.js";
 import type { ProviderRegistry } from "../provider-registry.js";
 import { BUILTIN_PROVIDERS, decodeModel, displayModel, isUserVisibleProvider } from "../provider-registry.js";
 import { listBuiltinModels } from "../model-catalog.js";
+import { calculateUsageCost } from "../model-pricing.js";
 import { getAvailableThinkingLevels } from "../provider-transform.js";
 import type { SkillRegistry } from "../skills/registry.js";
 import { parseSkillInvocation } from "../skills/invocation.js";
@@ -174,6 +175,9 @@ type PromptScannerSync = (running: boolean) => void;
 type SidebarUsageState = {
   promptTokens: number;
   completionTokens: number;
+  promptCacheHitTokens: number;
+  promptCacheMissTokens: number;
+  reasoningTokens: number;
   turns: number;
 };
 type PickerMode = "model" | "key" | "provider" | "provider-add" | "login" | "logout" | "slash" | "file";
@@ -306,6 +310,9 @@ function OpenTuiApp(props: {
   const [sidebarUsage, setSidebarUsage] = createSignal<SidebarUsageState>({
     promptTokens: 0,
     completionTokens: 0,
+    promptCacheHitTokens: 0,
+    promptCacheMissTokens: 0,
+    reasoningTokens: 0,
     turns: 0,
   });
   const [gitState, setGitState] = createSignal<SidebarGitState>({ files: [] });
@@ -350,6 +357,11 @@ function OpenTuiApp(props: {
   const inlinePickerDetails: Array<TextRenderable | undefined> = [];
   const promptModeLabels = new Set<TextRenderable>();
   let footerModeBadge: TextRenderable | undefined;
+  let sidebarTokenText: TextRenderable | undefined;
+  let sidebarPercentText: TextRenderable | undefined;
+  let sidebarUsageText: TextRenderable | undefined;
+  let sidebarReasoningText: TextRenderable | undefined;
+  let sidebarCostText: TextRenderable | undefined;
 
   const activePrompt = () =>
     isHomeSurfaceActive()
@@ -379,7 +391,10 @@ function OpenTuiApp(props: {
 
   const sidebarVisible = () => sessionActive() && dimensions().width > SESSION_SIDEBAR_AUTO_WIDTH;
   const contentWidth = () => Math.max(20, dimensions().width - (sidebarVisible() ? SESSION_SIDEBAR_WIDTH : 0) - 4);
-  const bumpSidebar = () => setSidebarTick((value) => value + 1);
+  const bumpSidebar = () => {
+    setSidebarTick((value) => value + 1);
+    syncSidebarContext();
+  };
 
   function refreshGitSidebar() {
     setGitState(readGitSidebarState(props.args.cwd));
@@ -393,6 +408,27 @@ function OpenTuiApp(props: {
       (sidebarShell as any).width = visible ? SESSION_SIDEBAR_WIDTH : 0;
       sidebarShell.requestRender();
     }
+    rootBox?.requestRender();
+  }
+
+  function setSidebarText(ref: TextRenderable | undefined, content: string) {
+    if (!ref) return;
+    ref.content = content;
+    ref.requestRender();
+  }
+
+  function syncSidebarContext() {
+    const context = sidebarContextState();
+    setSidebarText(sidebarTokenText, `${formatCompactNumber(context.tokens)} tokens`);
+    setSidebarText(sidebarPercentText, `${context.percent}% used`);
+    setSidebarText(sidebarUsageText, context.turns > 0
+      ? `${formatCompactNumber(context.promptTokens)} in · ${formatCompactNumber(context.completionTokens)} out`
+      : "usage pending");
+    setSidebarText(sidebarReasoningText, context.reasoningTokens > 0
+      ? `${formatCompactNumber(context.reasoningTokens)} reasoning`
+      : "");
+    setSidebarText(sidebarCostText, context.costText);
+    sidebarShell?.requestRender();
     rootBox?.requestRender();
   }
 
@@ -1553,6 +1589,12 @@ function OpenTuiApp(props: {
             setSidebarUsage((current) => ({
               promptTokens: current.promptTokens + event.usage!.promptTokens,
               completionTokens: current.completionTokens + event.usage!.completionTokens,
+              promptCacheHitTokens: current.promptCacheHitTokens + (event.usage!.promptCacheHitTokens ?? 0),
+              promptCacheMissTokens: current.promptCacheMissTokens + (
+                event.usage!.promptCacheMissTokens
+                  ?? (event.usage!.promptCacheHitTokens === undefined ? event.usage!.promptTokens : 0)
+              ),
+              reasoningTokens: current.reasoningTokens + (event.usage!.reasoningTokens ?? 0),
               turns: current.turns + 1,
             }));
           }
@@ -1800,12 +1842,45 @@ function OpenTuiApp(props: {
         h("box", { flexDirection: "column", gap: 1, paddingRight: 1 },
           renderSidebarTitle(),
           renderSidebarSection("Context", [
-            h("text", { fg: theme.textMuted }, `${formatCompactNumber(context.tokens)} tokens`),
-            h("text", { fg: context.percent >= 75 ? theme.warning : theme.textMuted }, `${context.percent}% used`),
-            h("text", { fg: theme.textMuted }, context.turns > 0
-              ? `${formatCompactNumber(context.promptTokens)} in · ${formatCompactNumber(context.completionTokens)} out`
-              : "usage pending"),
-            h("text", { fg: theme.textMuted }, "cost unavailable"),
+            h("text", {
+              fg: theme.textMuted,
+              ref: (ref: TextRenderable) => {
+                sidebarTokenText = ref;
+                ref.content = `${formatCompactNumber(context.tokens)} tokens`;
+              },
+            }),
+            h("text", {
+              fg: context.percent >= 75 ? theme.warning : theme.textMuted,
+              ref: (ref: TextRenderable) => {
+                sidebarPercentText = ref;
+                ref.content = `${context.percent}% used`;
+              },
+            }),
+            h("text", {
+              fg: theme.textMuted,
+              ref: (ref: TextRenderable) => {
+                sidebarUsageText = ref;
+                ref.content = context.turns > 0
+                  ? `${formatCompactNumber(context.promptTokens)} in · ${formatCompactNumber(context.completionTokens)} out`
+                  : "usage pending";
+              },
+            }),
+            h("text", {
+              fg: theme.textMuted,
+              ref: (ref: TextRenderable) => {
+                sidebarReasoningText = ref;
+                ref.content = context.reasoningTokens > 0
+                  ? `${formatCompactNumber(context.reasoningTokens)} reasoning`
+                  : "";
+              },
+            }),
+            h("text", {
+              fg: theme.textMuted,
+              ref: (ref: TextRenderable) => {
+                sidebarCostText = ref;
+                ref.content = context.costText;
+              },
+            }),
           ]),
           renderSidebarMcp(mcpStates),
           renderSidebarLsp(),
@@ -1896,12 +1971,23 @@ function OpenTuiApp(props: {
       ? getContextBudget(providerId, modelId, props.agent.messages)
       : undefined;
     const usage = sidebarUsage();
+    const tokenUsage: TokenUsage = {
+      promptTokens: usage.promptTokens,
+      completionTokens: usage.completionTokens,
+      promptCacheHitTokens: usage.promptCacheHitTokens,
+      promptCacheMissTokens: usage.promptCacheMissTokens,
+      reasoningTokens: usage.reasoningTokens,
+      totalTokens: usage.promptTokens + usage.completionTokens,
+    };
+    const cost = providerId && modelId ? calculateUsageCost(providerId, modelId, tokenUsage) : undefined;
     return {
       tokens: budget?.estimatedTokens ?? 0,
       percent: Math.round(budget?.percent ?? 0),
       promptTokens: usage.promptTokens,
       completionTokens: usage.completionTokens,
+      reasoningTokens: usage.reasoningTokens,
       turns: usage.turns,
+      costText: cost ? `${formatCurrency(cost.cost)} spent${cost.estimated ? " est." : ""}` : "cost unavailable",
     };
   }
 
@@ -2999,7 +3085,7 @@ function pickerTitle(kind: Exclude<PickerMode, "key">) {
 }
 
 function getModelPickerReasoningLevels(providerId: string, modelId: string): ThinkingLevel[] {
-  if (providerId !== "deepseek" || modelId !== "deepseek-v4-pro") {
+  if (providerId !== "deepseek" || (modelId !== "deepseek-v4-flash" && modelId !== "deepseek-v4-pro")) {
     return [];
   }
   return getAvailableThinkingLevels(providerId, modelId);
@@ -3526,6 +3612,12 @@ function formatCompactNumber(value: number) {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
   if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
   return String(value);
+}
+
+function formatCurrency(value: number) {
+  if (value < 0.0001) return "$0.0000";
+  if (value < 1) return `$${value.toFixed(4)}`;
+  return `$${value.toFixed(2)}`;
 }
 
 function sidebarStatusColor(kind: string) {

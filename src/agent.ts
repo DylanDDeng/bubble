@@ -10,7 +10,7 @@ import { isContextOverflowError } from "./context/overflow.js";
 import { projectMessages } from "./context/projector.js";
 import { aggressivePruneMessages } from "./context/prune.js";
 import { buildDeferredToolsReminder, buildToolFreezeReminder, reminderForMode } from "./prompt/reminders.js";
-import type { AgentEvent, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ThinkingLevel, Todo, ToolDefinition, ToolResult, ToolRegistryEntry } from "./types.js";
+import type { AgentEvent, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ThinkingLevel, Todo, TokenUsage, ToolDefinition, ToolResult, ToolRegistryEntry } from "./types.js";
 import { HookBus, type TurnHooks } from "./orchestrator/hooks.js";
 import { createDefaultHooks } from "./orchestrator/default-hooks.js";
 import { filterToolsForSubtask, getSubtaskPolicy, type SubtaskType } from "./agent/subtask-policy.js";
@@ -281,7 +281,7 @@ export class Agent {
       };
 
       let currentToolCall: { id: string; name: string; args: string } | null = null;
-      let turnUsage: { promptTokens: number; completionTokens: number } | undefined;
+      let turnUsage: TokenUsage | undefined;
       let assistantAppended = false;
 
       let toolEntries = Array.from(this.tools.values())
@@ -352,11 +352,11 @@ export class Agent {
               break;
 
             case "usage":
-              turnUsage = { promptTokens: chunk.promptTokens, completionTokens: chunk.completionTokens };
-              this.lastInputTokens = chunk.promptTokens;
+              turnUsage = chunk.usage;
+              this.lastInputTokens = chunk.usage.promptTokens;
               this.lastAnchorMessageCount = this.messages.length;
               if ((hookState as any).taskBudget) {
-                (hookState as any).taskBudget.spent += chunk.promptTokens + chunk.completionTokens;
+                (hookState as any).taskBudget.spent += chunk.usage.promptTokens + chunk.usage.completionTokens;
                 if ((hookState as any).taskBudget.spent >= (hookState as any).taskBudget.total) {
                   (hookState as any).forceTextOnlyReason = "The configured task budget for this agent has been exhausted.";
                 }

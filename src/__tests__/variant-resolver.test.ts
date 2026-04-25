@@ -6,15 +6,18 @@ import { getNextThinkingLevel } from "../variant/thinking-level.js";
 describe("variant resolver", () => {
   it("returns model-specific thinking levels", () => {
     expect(getAvailableThinkingLevels("openai-codex", "gpt-5.1-codex-mini")).toEqual(["off", "medium", "high"]);
+    expect(getAvailableThinkingLevels("deepseek", "deepseek-v4-flash")).toEqual(["high", "max"]);
     expect(getAvailableThinkingLevels("deepseek", "deepseek-v4-pro")).toEqual(["high", "max"]);
   });
 
-  it("uses the DeepSeek v4 pro documented context window", () => {
+  it("uses the DeepSeek v4 documented context window", () => {
+    expect(getModelContextWindow("deepseek", "deepseek-v4-flash")).toBe(1048576);
     expect(getModelContextWindow("deepseek", "deepseek-v4-pro")).toBe(1048576);
   });
 
   it("chooses medium as the default when supported", () => {
     expect(getDefaultThinkingLevel("openai-codex", "gpt-5.4")).toBe("medium");
+    expect(getDefaultThinkingLevel("deepseek", "deepseek-v4-flash")).toBe("high");
     expect(getDefaultThinkingLevel("deepseek", "deepseek-v4-pro")).toBe("high");
   });
 

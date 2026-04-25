@@ -28,7 +28,7 @@ export function resolveProviderRequestConfig(
     return { effectiveThinkingLevel };
   }
 
-  if (providerId === "deepseek" && modelId === "deepseek-v4-pro") {
+  if (providerId === "deepseek" && (modelId === "deepseek-v4-flash" || modelId === "deepseek-v4-pro")) {
     return {
       effectiveThinkingLevel,
       reasoningContentEcho: "all",

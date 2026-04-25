@@ -106,6 +106,10 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
       tool_choice: tools && tools.length > 0 ? "auto" : undefined,
       stream: true,
     };
+    // DeepSeek only emits final usage in streaming mode when this flag is set.
+    if (options.providerId === "deepseek") {
+      body.stream_options = { include_usage: true };
+    }
     if (!requestConfig.omitTemperature) {
       body.temperature = chatOptions.temperature ?? 0.2;
     }
@@ -229,7 +233,19 @@ export async function* translateOpenAIStream(stream: AsyncIterable<any>): AsyncI
     const usage = (chunk as any).usage;
 
     if (usage) {
-      yield { type: "usage", promptTokens: usage.prompt_tokens, completionTokens: usage.completion_tokens };
+      yield {
+        type: "usage",
+        usage: {
+          promptTokens: typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : 0,
+          completionTokens: typeof usage.completion_tokens === "number" ? usage.completion_tokens : 0,
+          promptCacheHitTokens: typeof usage.prompt_cache_hit_tokens === "number" ? usage.prompt_cache_hit_tokens : undefined,
+          promptCacheMissTokens: typeof usage.prompt_cache_miss_tokens === "number" ? usage.prompt_cache_miss_tokens : undefined,
+          reasoningTokens: typeof usage.completion_tokens_details?.reasoning_tokens === "number"
+            ? usage.completion_tokens_details.reasoning_tokens
+            : undefined,
+          totalTokens: typeof usage.total_tokens === "number" ? usage.total_tokens : undefined,
+        },
+      };
     }
 
     const reasoning = (delta as any)?.reasoning ?? (delta as any)?.thinking ?? (delta as any)?.reasoning_content;

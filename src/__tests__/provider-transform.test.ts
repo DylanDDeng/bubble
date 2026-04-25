@@ -42,13 +42,14 @@ describe("provider transform", () => {
   });
 
   it("keeps unsupported providers at UI-only thinking state", () => {
-    const config = resolveProviderRequestConfig("deepseek", "deepseek-chat", "high");
+    const config = resolveProviderRequestConfig("deepseek", "unknown-model", "high");
     expect(config.effectiveThinkingLevel).toBe("off");
     expect(config.reasoningEffort).toBeUndefined();
   });
 
-  it("emits DeepSeek v4 pro thinking and reasoning effort fields", () => {
+  it("emits DeepSeek v4 thinking and reasoning effort fields", () => {
     const config = resolveProviderRequestConfig("deepseek", "deepseek-v4-pro", "max");
+    const flash = resolveProviderRequestConfig("deepseek", "deepseek-v4-flash", "high");
 
     expect(config.effectiveThinkingLevel).toBe("max");
     expect(config.reasoningEffort).toBeUndefined();
@@ -56,6 +57,10 @@ describe("provider transform", () => {
     expect(config.extraBody).toEqual({
       thinking: { type: "enabled" },
       reasoning_effort: "max",
+    });
+    expect(flash.extraBody).toEqual({
+      thinking: { type: "enabled" },
+      reasoning_effort: "high",
     });
   });
 });
