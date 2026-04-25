@@ -46,11 +46,13 @@ import { expandAtMentions, filterFileSuggestions, findAtContext, listProjectFile
 import { compactDisplayMessages, type DisplayMessage, type DisplayToolCall } from "./display-history.js";
 import { createMarkdownSyntaxStyle, createSubtleMarkdownSyntaxStyle } from "./markdown-theme.js";
 import { getNextPermissionMode } from "../permission/mode.js";
+import { getContextBudget } from "../context/budget.js";
 import { inferBashPrefix, type BashAllowlist } from "../approval/session-cache.js";
 import type { SettingsManager } from "../permissions/settings.js";
 import type { McpManager } from "../mcp/manager.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
 import { createFrames } from "./opencode-spinner.js";
+import { readGitSidebarState, type SidebarFileChange, type SidebarGitState } from "./sidebar-state.js";
 import {
   isModeCycleKeyEvent,
   isModeCycleSequence,
@@ -150,6 +152,8 @@ const HOME_PROMPTS = [
 
 const PROMPT_SCANNER_IDLE_FRAMES = ["        "];
 const PROMPT_SCANNER_INTERVAL_MS = 80;
+const SESSION_SIDEBAR_WIDTH = 42;
+const SESSION_SIDEBAR_AUTO_WIDTH = 120;
 
 const HOME_LOGO = [
   " /\\_/\\  █▀▀▄ █  █ █▀▀▄ █▀▀▄ █    █▀▀",
@@ -167,6 +171,11 @@ const HOME_TIPS = [
 
 type Child = any;
 type PromptScannerSync = (running: boolean) => void;
+type SidebarUsageState = {
+  promptTokens: number;
+  completionTokens: number;
+  turns: number;
+};
 type PickerMode = "model" | "key" | "provider" | "provider-add" | "login" | "logout" | "slash" | "file";
 type PickerItem = {
   label: string;
@@ -292,6 +301,14 @@ function OpenTuiApp(props: {
   const [todos, setTodos] = createSignal<Todo[]>(props.agent.getTodos());
   const [mode, setMode] = createSignal<PermissionMode>(props.agent.mode);
   const [notice, setNotice] = createSignal("");
+  const [sessionActive, setSessionActive] = createSignal(false);
+  const [sidebarTick, setSidebarTick] = createSignal(0);
+  const [sidebarUsage, setSidebarUsage] = createSignal<SidebarUsageState>({
+    promptTokens: 0,
+    completionTokens: 0,
+    turns: 0,
+  });
+  const [gitState, setGitState] = createSignal<SidebarGitState>({ files: [] });
   const [pendingPlan, setPendingPlan] = createSignal<{
     plan: string;
     resolve: (decision: PlanDecision) => void;
@@ -309,6 +326,7 @@ function OpenTuiApp(props: {
   let sessionPromptRef: TextareaRenderable | undefined;
   let scrollbox: ScrollBoxRenderable | undefined;
   let rootBox: BoxRenderable | undefined;
+  let sidebarShell: BoxRenderable | undefined;
   let transcriptHost: BoxRenderable | undefined;
   const transcriptState: TranscriptState = { entries: [] };
   let dock: TextRenderable | undefined;
@@ -358,6 +376,25 @@ function OpenTuiApp(props: {
   };
 
   const canInsertPromptNewline = () => !isRunning() && !pendingApproval() && !pendingPlan();
+
+  const sidebarVisible = () => sessionActive() && dimensions().width > SESSION_SIDEBAR_AUTO_WIDTH;
+  const contentWidth = () => Math.max(20, dimensions().width - (sidebarVisible() ? SESSION_SIDEBAR_WIDTH : 0) - 4);
+  const bumpSidebar = () => setSidebarTick((value) => value + 1);
+
+  function refreshGitSidebar() {
+    setGitState(readGitSidebarState(props.args.cwd));
+    bumpSidebar();
+  }
+
+  function syncSidebarChrome() {
+    const visible = sidebarVisible();
+    if (sidebarShell) {
+      sidebarShell.visible = visible;
+      (sidebarShell as any).width = visible ? SESSION_SIDEBAR_WIDTH : 0;
+      sidebarShell.requestRender();
+    }
+    rootBox?.requestRender();
+  }
 
   const promptModeTitle = () => mode() === "plan" ? "Plan" : "Build";
   const footerModeText = () => mode() !== "default" ? `  ${mode()} · tab` : "";
@@ -565,6 +602,7 @@ function OpenTuiApp(props: {
 
   onMount(() => {
     props.setRawModeCycleHandler?.(cycleModeFromRawSequence);
+    refreshGitSidebar();
     setTimeout(() => {
       activePrompt()?.focus();
       scrollbox?.scrollTo(scrollbox.scrollHeight);
@@ -642,8 +680,10 @@ function OpenTuiApp(props: {
 
   function syncPromptSurfaces(focus = false) {
     const homeActive = isHomeSurfaceActive(streamingDisplay);
+    setSessionActive(!homeActive);
     if (homeComposerShell) homeComposerShell.visible = homeActive;
     if (sessionComposerShell) sessionComposerShell.visible = !homeActive;
+    syncSidebarChrome();
     if (focus) setTimeout(() => activePrompt()?.focus(), 0);
     rootBox?.requestRender();
   }
@@ -677,7 +717,7 @@ function OpenTuiApp(props: {
   function transcriptOptions() {
     return {
       cwd: props.args.cwd,
-      width: Math.max(20, dimensions().width - 4),
+      width: contentWidth(),
       tip: homeTip,
       renderHome: renderHomeSurface,
       plan: pendingPlan()?.plan,
@@ -710,6 +750,8 @@ function OpenTuiApp(props: {
 
   createEffect(() => {
     dimensions();
+    sessionActive();
+    syncSidebarChrome();
     scrollbox?.requestRender();
     setTimeout(() => scrollbox?.scrollTo(scrollbox.scrollHeight), 50);
   });
@@ -1498,12 +1540,23 @@ function OpenTuiApp(props: {
               streaming: true,
             });
           }
+          refreshGitSidebar();
         } else if (event.type === "todos_updated") {
           setTodos(event.todos);
+          bumpSidebar();
         } else if (event.type === "mode_changed") {
           setMode(event.mode);
           syncModeChrome();
+          bumpSidebar();
         } else if (event.type === "turn_end") {
+          if (event.usage) {
+            setSidebarUsage((current) => ({
+              promptTokens: current.promptTokens + event.usage!.promptTokens,
+              completionTokens: current.completionTokens + event.usage!.completionTokens,
+              turns: current.turns + 1,
+            }));
+          }
+          bumpSidebar();
           const assistantMessage: DisplayMessage = {
             role: "assistant",
             content: assistantContent,
@@ -1538,6 +1591,7 @@ function OpenTuiApp(props: {
         redrawTranscript();
       }
       redrawDock();
+      refreshGitSidebar();
       setTimeout(() => activePrompt()?.focus(), 0);
     }
   }
@@ -1718,6 +1772,153 @@ function OpenTuiApp(props: {
       ),
       ),
     ];
+  }
+
+  function renderSessionSidebar() {
+    const context = sidebarContextState();
+    const mcpStates = sidebarMcpStates();
+    const files = gitState().files;
+    const activeTodos = todos().filter((todo) => todo.status !== "completed");
+    return h("box", {
+      ref: (ref: BoxRenderable) => {
+        sidebarShell = ref;
+        syncSidebarChrome();
+      },
+      width: sidebarVisible() ? SESSION_SIDEBAR_WIDTH : 0,
+      height: "100%",
+      flexShrink: 0,
+      backgroundColor: theme.backgroundPanel,
+      paddingTop: 1,
+      paddingBottom: 1,
+      paddingLeft: 2,
+      paddingRight: 2,
+      visible: sidebarVisible(),
+      flexDirection: "column",
+    },
+    [
+      h("scrollbox", { flexGrow: 1, minHeight: 0 },
+        h("box", { flexDirection: "column", gap: 1, paddingRight: 1 },
+          renderSidebarTitle(),
+          renderSidebarSection("Context", [
+            h("text", { fg: theme.textMuted }, `${formatCompactNumber(context.tokens)} tokens`),
+            h("text", { fg: context.percent >= 75 ? theme.warning : theme.textMuted }, `${context.percent}% used`),
+            h("text", { fg: theme.textMuted }, context.turns > 0
+              ? `${formatCompactNumber(context.promptTokens)} in · ${formatCompactNumber(context.completionTokens)} out`
+              : "usage pending"),
+            h("text", { fg: theme.textMuted }, "cost unavailable"),
+          ]),
+          renderSidebarMcp(mcpStates),
+          renderSidebarLsp(),
+          activeTodos.length ? renderSidebarTodos(activeTodos) : null,
+          files.length ? renderSidebarFiles(files) : null,
+        ),
+      ),
+      renderSidebarFooter(),
+    ]);
+  }
+
+  function renderSidebarTitle() {
+    const session = sessionDisplayName(props.options.sessionManager);
+    const branch = gitState().branch;
+    return h("box", { flexDirection: "column", flexShrink: 0 },
+      h("text", { fg: theme.text, wrapMode: "word" }, session),
+      h("text", { fg: theme.textMuted, wrapMode: "word" }, shortCwd(props.args.cwd)),
+      branch ? h("text", { fg: theme.textMuted }, `git: ${branch}`) : null,
+    );
+  }
+
+  function renderSidebarMcp(states: ReturnType<typeof sidebarMcpStates>) {
+    if (!states.length) {
+      return renderSidebarSection("MCP", [
+        h("text", { fg: theme.textMuted, wrapMode: "word" }, "No servers configured"),
+      ]);
+    }
+    const connected = states.filter((state) => state.kind === "connected").length;
+    const failed = states.filter((state) => state.kind === "failed").length;
+    return renderSidebarSection("MCP", [
+      h("text", { fg: failed ? theme.warning : theme.textMuted },
+        `${connected} active${failed ? `, ${failed} error${failed === 1 ? "" : "s"}` : ""}`),
+      ...states.slice(0, 5).map((state) =>
+        h("box", { flexDirection: "row", gap: 1 },
+          h("text", { fg: sidebarStatusColor(state.kind), flexShrink: 0 }, "*"),
+          h("text", { fg: theme.textMuted, wrapMode: "word" }, `${state.name} ${state.label}`),
+        ),
+      ),
+    ]);
+  }
+
+  function renderSidebarLsp() {
+    return renderSidebarSection("LSP", [
+      h("text", { fg: theme.textMuted, wrapMode: "word" }, "No LSP runtime attached"),
+    ]);
+  }
+
+  function renderSidebarTodos(activeTodos: Todo[]) {
+    return renderSidebarSection("Todo", activeTodos.slice(0, 6).map((todo) => {
+      const marker = todo.status === "in_progress" ? ">" : "o";
+      const color = todo.status === "in_progress" ? theme.primary : theme.textMuted;
+      return h("text", { fg: color, wrapMode: "word" }, `${marker} ${todo.activeForm || todo.content}`);
+    }));
+  }
+
+  function renderSidebarFiles(files: SidebarFileChange[]) {
+    return renderSidebarSection("Modified Files", files.slice(0, 8).map((file) =>
+      h("box", { flexDirection: "row", gap: 1, justifyContent: "space-between" },
+        h("text", { fg: theme.textMuted, wrapMode: "none" }, truncate(file.file, 25)),
+        h("box", { flexDirection: "row", gap: 1, flexShrink: 0 },
+          file.additions ? h("text", { fg: theme.diffAdded }, `+${file.additions}`) : null,
+          file.deletions ? h("text", { fg: theme.diffRemoved }, `-${file.deletions}`) : null,
+        ),
+      ),
+    ));
+  }
+
+  function renderSidebarFooter() {
+    return h("box", { flexDirection: "column", flexShrink: 0, paddingTop: 1 },
+      h("text", { fg: theme.textMuted }, `${props.agent.providerId || "unknown"} · ${displayModel(props.agent.model) || "no model"}`),
+      h("text", { fg: theme.textMuted }, "Bubble"),
+    );
+  }
+
+  function renderSidebarSection(title: string, children: Child[]) {
+    return h("box", { flexDirection: "column", flexShrink: 0 },
+      h("text", { fg: theme.text }, title),
+      ...children,
+    );
+  }
+
+  function sidebarContextState() {
+    sidebarTick();
+    const decoded = decodeModel(props.agent.model);
+    const providerId = props.agent.providerId || decoded.providerId || "";
+    const modelId = props.agent.apiModel || decoded.modelId || props.agent.model;
+    const budget = providerId && modelId
+      ? getContextBudget(providerId, modelId, props.agent.messages)
+      : undefined;
+    const usage = sidebarUsage();
+    return {
+      tokens: budget?.estimatedTokens ?? 0,
+      percent: Math.round(budget?.percent ?? 0),
+      promptTokens: usage.promptTokens,
+      completionTokens: usage.completionTokens,
+      turns: usage.turns,
+    };
+  }
+
+  function sidebarMcpStates() {
+    sidebarTick();
+    return (props.options.mcpManager?.getStates() ?? []).map((state) => {
+      const kind = state.status.kind;
+      return {
+        name: state.name,
+        kind,
+        label: kind === "connected"
+          ? "Connected"
+          : kind === "failed"
+            ? truncate(state.status.error, 42)
+            : kind,
+      };
+    });
   }
 
   function renderSessionView() {
@@ -1914,8 +2115,24 @@ function OpenTuiApp(props: {
     height: "100%",
     backgroundColor: theme.background,
   }, [
-    renderSessionView(),
-    renderComposer(),
+    h("box", {
+      flexDirection: "row",
+      flexGrow: 1,
+      minHeight: 0,
+    },
+    [
+      h("box", {
+        flexDirection: "column",
+        flexGrow: 1,
+        minWidth: 0,
+        minHeight: 0,
+      },
+      [
+        renderSessionView(),
+        renderComposer(),
+      ]),
+      renderSessionSidebar(),
+    ]),
     renderFooter({
       cwd: props.args.cwd,
       provider: () => props.agent.providerId || registry.getDefault()?.id || "unknown",
@@ -3296,6 +3513,26 @@ function assistantStatusLabel(message: DisplayMessage): string {
 
 function truncate(value: string, max: number) {
   return value.length > max ? value.slice(0, Math.max(1, max - 1)).trimEnd() + "…" : value;
+}
+
+function sessionDisplayName(sessionManager?: SessionManager) {
+  const file = sessionManager?.getSessionFile();
+  if (!file) return "Session";
+  const name = file.split(/[\\/]/).pop() || "Session";
+  return name.replace(/\.jsonl$/, "");
+}
+
+function formatCompactNumber(value: number) {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+  return String(value);
+}
+
+function sidebarStatusColor(kind: string) {
+  if (kind === "connected") return theme.success;
+  if (kind === "failed") return theme.error;
+  if (kind === "disabled") return theme.textMuted;
+  return theme.warning;
 }
 
 function shortCwd(cwd: string) {
