@@ -22,18 +22,16 @@ export const PERMISSION_MODE_INFO: Record<PermissionMode, PermissionModeInfo> = 
 };
 
 /**
- * Cycle order when the user presses Shift+Tab. `bypassPermissions` is only
- * included if the session was started with --dangerously-skip-permissions so
- * we never accidentally cycle users into a dangerous mode. `dontAsk` is never
- * cycled — it can only be set programmatically.
+ * Cycle order for the interactive mode keybind. This intentionally mirrors
+ * opencode's primary-agent switch: the keybind toggles Build and Plan only.
+ * Permission presets like acceptEdits/bypassPermissions remain opt-in through
+ * flags or commands and are never reached accidentally from Tab.
  */
 export function getNextPermissionMode(
   current: PermissionMode,
-  options: { bypassEnabled?: boolean } = {},
+  _options: { bypassEnabled?: boolean } = {},
 ): PermissionMode {
-  const cycle: PermissionMode[] = ["default", "acceptEdits", "plan"];
-  if (options.bypassEnabled) cycle.push("bypassPermissions");
-  const index = cycle.indexOf(current);
-  if (index === -1) return "default"; // current is dontAsk or otherwise out-of-cycle
-  return cycle[(index + 1) % cycle.length];
+  if (current === "plan") return "default";
+  if (current === "bypassPermissions" || current === "dontAsk") return "default";
+  return "plan";
 }

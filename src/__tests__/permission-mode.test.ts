@@ -2,22 +2,22 @@ import { describe, expect, it } from "vitest";
 import { getNextPermissionMode, PERMISSION_MODE_INFO } from "../permission/mode.js";
 
 describe("getNextPermissionMode", () => {
-  it("cycles default → acceptEdits → plan → default by default", () => {
-    expect(getNextPermissionMode("default")).toBe("acceptEdits");
+  it("toggles the interactive keybind between build/default and plan", () => {
+    expect(getNextPermissionMode("default")).toBe("plan");
     expect(getNextPermissionMode("acceptEdits")).toBe("plan");
     expect(getNextPermissionMode("plan")).toBe("default");
   });
 
-  it("includes bypassPermissions in the cycle when bypassEnabled is true", () => {
-    expect(getNextPermissionMode("default", { bypassEnabled: true })).toBe("acceptEdits");
+  it("does not cycle into bypassPermissions even when bypass is enabled", () => {
+    expect(getNextPermissionMode("default", { bypassEnabled: true })).toBe("plan");
     expect(getNextPermissionMode("acceptEdits", { bypassEnabled: true })).toBe("plan");
-    expect(getNextPermissionMode("plan", { bypassEnabled: true })).toBe("bypassPermissions");
+    expect(getNextPermissionMode("plan", { bypassEnabled: true })).toBe("default");
     expect(getNextPermissionMode("bypassPermissions", { bypassEnabled: true })).toBe("default");
   });
 
-  it("falls back to default when the current mode is not in the cycle (e.g. dontAsk)", () => {
+  it("falls back to default from non-interactive modes", () => {
     expect(getNextPermissionMode("dontAsk")).toBe("default");
-    expect(getNextPermissionMode("bypassPermissions")).toBe("default"); // bypass not enabled
+    expect(getNextPermissionMode("bypassPermissions")).toBe("default");
   });
 
   it("exposes display info for every permission mode", () => {

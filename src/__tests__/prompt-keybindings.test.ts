@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { isModifiedEnterSequence, PROMPT_TEXTAREA_KEYBINDINGS } from "../tui/prompt-keybindings.js";
+import {
+  isModeCycleKeyEvent,
+  isModeCycleSequence,
+  isModifiedEnterSequence,
+  PROMPT_TEXTAREA_KEYBINDINGS,
+} from "../tui/prompt-keybindings.js";
 
 function actionFor(input: { name: string; ctrl?: boolean; shift?: boolean; meta?: boolean }) {
   return PROMPT_TEXTAREA_KEYBINDINGS.find((binding) =>
@@ -27,5 +32,20 @@ describe("prompt textarea keybindings", () => {
     expect(isModifiedEnterSequence({ sequence: "\x1b[27;2;13~" })).toBe(true);
     expect(isModifiedEnterSequence({ sequence: "\r" })).toBe(false);
     expect(isModifiedEnterSequence({ sequence: "\x1b[13u" })).toBe(false);
+  });
+
+  it("detects tab mode-cycle keys before textarea handling", () => {
+    expect(isModeCycleSequence("\t")).toBe(true);
+    expect(isModeCycleSequence("\x1b[Z")).toBe(true);
+    expect(isModeCycleSequence("\x1b[9;1u")).toBe(true);
+    expect(isModeCycleSequence("\x1b[9;2u")).toBe(true);
+    expect(isModeCycleSequence("\x1b[57346;2u")).toBe(true);
+    expect(isModeCycleSequence("\x1b[27;2;9~")).toBe(true);
+    expect(isModeCycleSequence("\r")).toBe(false);
+
+    expect(isModeCycleKeyEvent({ name: "tab" })).toBe(true);
+    expect(isModeCycleKeyEvent({ name: "backtab" })).toBe(true);
+    expect(isModeCycleKeyEvent({ name: "shift+tab" })).toBe(true);
+    expect(isModeCycleKeyEvent({ name: "", raw: "\x1b[Z" })).toBe(true);
   });
 });

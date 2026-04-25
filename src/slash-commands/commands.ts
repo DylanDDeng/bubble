@@ -444,7 +444,7 @@ export const builtinSlashCommands: SlashCommand[] = [
   },
   {
     name: "plan",
-    description: "Toggle plan mode on/off (Shift+Tab cycles through all permission modes)",
+    description: "Toggle plan mode on/off (Tab switches Build/Plan)",
     async handler(args, ctx) {
       const next = ctx.agent.mode === "plan" ? "default" : "plan";
       ctx.agent.setMode(next);

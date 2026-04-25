@@ -51,7 +51,12 @@ import type { SettingsManager } from "../permissions/settings.js";
 import type { McpManager } from "../mcp/manager.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
 import { createFrames } from "./opencode-spinner.js";
-import { isModifiedEnterSequence, PROMPT_TEXTAREA_KEYBINDINGS } from "./prompt-keybindings.js";
+import {
+  isModeCycleKeyEvent,
+  isModeCycleSequence,
+  isModifiedEnterSequence,
+  PROMPT_TEXTAREA_KEYBINDINGS,
+} from "./prompt-keybindings.js";
 
 export interface PlanHandlerRef {
   current?: (plan: string) => Promise<PlanDecision>;
@@ -74,6 +79,8 @@ export interface RunTuiOptions {
   bypassEnabled?: boolean;
   theme?: Record<string, string>;
 }
+
+type RawModeCycleHandler = (sequence: string) => boolean;
 
 const treeSitterClient = getTreeSitterClient();
 
@@ -204,6 +211,7 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
     let renderer: CliRenderer | undefined;
     let syntaxStyle: SyntaxStyle | undefined;
     let subtleSyntaxStyle: SyntaxStyle | undefined;
+    let rawModeCycleHandler: RawModeCycleHandler | undefined;
     const exit = () => {
       try {
         renderer?.destroy();
@@ -224,12 +232,18 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
         gatherStats: false,
         exitOnCtrlC: false,
         useKittyKeyboard: {},
+        prependInputHandlers: [
+          (sequence: string) => rawModeCycleHandler?.(sequence) ?? false,
+        ],
         autoFocus: true,
         useMouse: true,
         openConsoleOnError: false,
         backgroundColor: theme.background,
       });
-      await render(() => h(OpenTuiApp, { agent, args, options, onExit: exit, syntaxStyle, subtleSyntaxStyle }), renderer);
+      const setRawModeCycleHandler = (handler: RawModeCycleHandler | undefined) => {
+        rawModeCycleHandler = handler;
+      };
+      await render(() => h(OpenTuiApp, { agent, args, options, onExit: exit, syntaxStyle, subtleSyntaxStyle, setRawModeCycleHandler }), renderer);
     } catch (error) {
       syntaxStyle?.destroy();
       subtleSyntaxStyle?.destroy();
@@ -263,6 +277,7 @@ function OpenTuiApp(props: {
   onExit: () => void;
   syntaxStyle: SyntaxStyle;
   subtleSyntaxStyle: SyntaxStyle;
+  setRawModeCycleHandler?: (handler: RawModeCycleHandler | undefined) => void;
 }) {
   const dimensions = useTerminalDimensions();
   const registry = props.options.registry!;
@@ -315,6 +330,8 @@ function OpenTuiApp(props: {
   const inlinePickerRows: Array<BoxRenderable | undefined> = [];
   const inlinePickerLabels: Array<TextRenderable | undefined> = [];
   const inlinePickerDetails: Array<TextRenderable | undefined> = [];
+  const promptModeLabels = new Set<TextRenderable>();
+  let footerModeBadge: TextRenderable | undefined;
 
   const activePrompt = () =>
     isHomeSurfaceActive()
@@ -341,6 +358,67 @@ function OpenTuiApp(props: {
   };
 
   const canInsertPromptNewline = () => !isRunning() && !pendingApproval() && !pendingPlan();
+
+  const promptModeTitle = () => mode() === "plan" ? "Plan" : "Build";
+  const footerModeText = () => mode() !== "default" ? `  ${mode()} · tab` : "";
+
+  function syncModeChrome() {
+    for (const label of [...promptModeLabels]) {
+      try {
+        if ((label as any).isDestroyed) {
+          promptModeLabels.delete(label);
+          continue;
+        }
+        label.content = promptModeTitle();
+        label.requestRender();
+      } catch {
+        promptModeLabels.delete(label);
+      }
+    }
+    if (footerModeBadge) {
+      footerModeBadge.content = footerModeText();
+      footerModeBadge.requestRender();
+    }
+    homeComposerShell?.requestRender();
+    sessionComposerShell?.requestRender();
+    rootBox?.requestRender();
+  }
+
+  const registerPromptModeLabel = (ref: TextRenderable) => {
+    promptModeLabels.add(ref);
+    ref.content = promptModeTitle();
+    ref.requestRender();
+  };
+
+  const registerFooterModeBadge = (ref: TextRenderable) => {
+    footerModeBadge = ref;
+    ref.content = footerModeText();
+    ref.requestRender();
+  };
+
+  const cycleMode = () => {
+    if (picker || pendingPlan()) return false;
+    const next = getNextPermissionMode(props.agent.mode, { bypassEnabled: props.options.bypassEnabled });
+    props.agent.setMode(next);
+    setMode(next);
+    setNotice(`Mode: ${next === "plan" ? "Plan" : "Build"}`);
+    redrawDock();
+    syncPromptSurfaces();
+    syncModeChrome();
+    return true;
+  };
+
+  const cycleModeFromKey = (event: any) => {
+    if (!isModeCycleKeyEvent(event) || !cycleMode()) return false;
+    event.preventDefault?.();
+    event.stopPropagation?.();
+    return true;
+  };
+
+  const cycleModeFromRawSequence = (sequence: string) => {
+    if (!isModeCycleSequence(sequence)) return false;
+    return cycleMode();
+  };
 
   const isInlinePicker = (state: PickerState | undefined): state is Extract<PickerState, { kind: "select" }> =>
     !!state && state.kind === "select" && (state.mode === "slash" || state.mode === "file");
@@ -480,7 +558,13 @@ function OpenTuiApp(props: {
     installInteractiveHandlers();
   });
 
+  createEffect(() => {
+    mode();
+    syncModeChrome();
+  });
+
   onMount(() => {
+    props.setRawModeCycleHandler?.(cycleModeFromRawSequence);
     setTimeout(() => {
       activePrompt()?.focus();
       scrollbox?.scrollTo(scrollbox.scrollHeight);
@@ -488,6 +572,7 @@ function OpenTuiApp(props: {
   });
 
   onCleanup(() => {
+    props.setRawModeCycleHandler?.(undefined);
     if (props.options.planHandlerRef) props.options.planHandlerRef.current = undefined;
     if (props.options.approvalHandlerRef) props.options.approvalHandlerRef.current = undefined;
   });
@@ -534,23 +619,7 @@ function OpenTuiApp(props: {
       return;
     }
 
-    if (name === "tab" && event.shift) {
-      const next = getNextPermissionMode(props.agent.mode, { bypassEnabled: props.options.bypassEnabled });
-      props.agent.setMode(next);
-      setMode(next);
-      props.options.sessionManager?.appendMarker("mode_switch", next);
-      event.preventDefault?.();
-      return;
-    }
-
-    if (name === "tab" && !picker) {
-      const next = getNextPermissionMode(props.agent.mode, { bypassEnabled: props.options.bypassEnabled });
-      props.agent.setMode(next);
-      setMode(next);
-      props.options.sessionManager?.appendMarker("mode_switch", next);
-      event.preventDefault?.();
-      return;
-    }
+    if (cycleModeFromKey(event)) return;
 
     if (event.ctrl && name === "p" && !picker && !isRunning()) {
       openCommandPalette();
@@ -1433,7 +1502,7 @@ function OpenTuiApp(props: {
           setTodos(event.todos);
         } else if (event.type === "mode_changed") {
           setMode(event.mode);
-          props.options.sessionManager?.appendMarker("mode_switch", event.mode);
+          syncModeChrome();
         } else if (event.type === "turn_end") {
           const assistantMessage: DisplayMessage = {
             role: "assistant",
@@ -1487,6 +1556,7 @@ function OpenTuiApp(props: {
       event.preventDefault?.();
       return true;
     }
+    if (cycleModeFromKey(event)) return true;
     return false;
   }
 
@@ -1514,6 +1584,7 @@ function OpenTuiApp(props: {
         getText: readPromptText,
         disabled: () => isRunning() && !pendingApproval() && !pendingPlan(),
         mode,
+        registerModeLabel: registerPromptModeLabel,
         model: () => displayModel(props.agent.model) || "no model",
         placeholder: () => {
           const approvalState = pendingApproval();
@@ -1568,6 +1639,7 @@ function OpenTuiApp(props: {
         getText: readPromptText,
         disabled: () => isRunning() && !pendingApproval() && !pendingPlan(),
         mode,
+        registerModeLabel: registerPromptModeLabel,
         model: () => displayModel(props.agent.model) || "no model",
         placeholder: () => {
           const approvalState = pendingApproval();
@@ -1851,6 +1923,7 @@ function OpenTuiApp(props: {
       mode,
       running: isRunning,
       registerScanner: registerPromptScanner,
+      registerModeBadge: registerFooterModeBadge,
     }),
   ]);
 }
@@ -1867,6 +1940,7 @@ function renderPrompt(input: {
   getText: () => string;
   disabled: () => boolean;
   mode: () => PermissionMode;
+  registerModeLabel?: (ref: TextRenderable) => void;
   model: () => string;
   placeholder: () => string;
 }) {
@@ -1905,7 +1979,10 @@ function renderPrompt(input: {
         }),
         h("box", { flexDirection: "row", flexShrink: 0, paddingTop: 1, gap: 1, justifyContent: "space-between" },
           h("box", { flexDirection: "row", gap: 1 },
-            h("text", { fg: theme.primary }, input.mode() === "plan" ? "Plan" : "Build"),
+            h("text", {
+              fg: theme.primary,
+              ref: input.registerModeLabel,
+            }, input.mode() === "plan" ? "Plan" : "Build"),
             h("text", { fg: theme.textMuted }, "·"),
             h("text", { fg: theme.text }, input.model()),
           ),
@@ -1915,7 +1992,7 @@ function renderPrompt(input: {
     h("box", { width: "100%", flexDirection: "row", justifyContent: "space-between" },
       () => input.disabled() ? h("text", { fg: theme.textMuted }, "esc interrupt") : h("text", { fg: theme.textMuted }, ""),
       h("box", { flexDirection: "row", gap: 2 },
-        h("text", { fg: theme.text }, "tab ", h("span", { fg: theme.textMuted }, "agents")),
+        h("text", { fg: theme.text }, "tab ", h("span", { fg: theme.textMuted }, "mode")),
         h("text", { fg: theme.text }, "ctrl+p ", h("span", { fg: theme.textMuted }, "commands")),
       ),
     ),
@@ -2665,6 +2742,7 @@ function renderFooter(input: {
   mode: () => PermissionMode;
   running: () => boolean;
   registerScanner: (sync: PromptScannerSync) => () => void;
+  registerModeBadge?: (ref: TextRenderable) => void;
 }) {
   return h("box", { flexShrink: 0, height: 1, paddingLeft: 1, paddingRight: 1, flexDirection: "row" },
     h("text", { fg: theme.border }, "─ "),
@@ -2675,7 +2753,10 @@ function renderFooter(input: {
       idleFg: theme.textMuted,
       runningFg: theme.primary,
     }),
-    () => input.mode() !== "default" ? h("text", { fg: theme.warning }, `  ${input.mode()} · ⇧⇥`) : null,
+    h("text", {
+      fg: theme.warning,
+      ref: input.registerModeBadge,
+    }, input.mode() !== "default" ? `  ${input.mode()} · tab` : ""),
     h("box", { flexGrow: 1 }),
     h("text", { fg: theme.textMuted }, `${input.provider()} · ${input.model()}`),
   );
