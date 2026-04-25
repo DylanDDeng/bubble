@@ -41,7 +41,7 @@ import { parseSkillInvocation } from "../skills/invocation.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import { expandAtMentions, filterFileSuggestions, findAtContext, listProjectFiles } from "./file-mentions.js";
 import { compactDisplayMessages, type DisplayMessage, type DisplayToolCall } from "./display-history.js";
-import { createMarkdownSyntaxStyle } from "./markdown-theme.js";
+import { createMarkdownSyntaxStyle, createSubtleMarkdownSyntaxStyle } from "./markdown-theme.js";
 import { getNextPermissionMode } from "../permission/mode.js";
 import { inferBashPrefix, type BashAllowlist } from "../approval/session-cache.js";
 import type { SettingsManager } from "../permissions/settings.js";
@@ -104,6 +104,19 @@ const DEFAULT_THEME = {
   toolWrite: "#f5a742",
   toolSearch: "#5c9cf5",
 };
+
+const THINKING_MARKDOWN_PREFIX = "_Thinking:_ ";
+
+const LOCAL_SLASH_COMMANDS = [
+  {
+    name: "thinking",
+    description: "Toggle thinking block visibility",
+  },
+  {
+    name: "toggle-thinking",
+    description: "Toggle thinking block visibility",
+  },
+] as const;
 
 let theme = DEFAULT_THEME;
 
@@ -176,11 +189,13 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
   return new Promise<void>(async (resolve, reject) => {
     let renderer: CliRenderer | undefined;
     let syntaxStyle: SyntaxStyle | undefined;
+    let subtleSyntaxStyle: SyntaxStyle | undefined;
     const exit = () => {
       try {
         renderer?.destroy();
       } finally {
         syntaxStyle?.destroy();
+        subtleSyntaxStyle?.destroy();
         resolve();
       }
     };
@@ -188,6 +203,7 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
     try {
       theme = resolveTheme(options.theme);
       syntaxStyle = createMarkdownSyntaxStyle(theme);
+      subtleSyntaxStyle = createSubtleMarkdownSyntaxStyle(theme);
       renderer = await createCliRenderer({
         externalOutputMode: "passthrough",
         targetFps: 60,
@@ -199,9 +215,10 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
         openConsoleOnError: false,
         backgroundColor: theme.background,
       });
-      await render(() => h(OpenTuiApp, { agent, args, options, onExit: exit, syntaxStyle }), renderer);
+      await render(() => h(OpenTuiApp, { agent, args, options, onExit: exit, syntaxStyle, subtleSyntaxStyle }), renderer);
     } catch (error) {
       syntaxStyle?.destroy();
+      subtleSyntaxStyle?.destroy();
       reject(error);
     }
   });
@@ -231,6 +248,7 @@ function OpenTuiApp(props: {
   options: RunTuiOptions;
   onExit: () => void;
   syntaxStyle: SyntaxStyle;
+  subtleSyntaxStyle: SyntaxStyle;
 }) {
   const dimensions = useTerminalDimensions();
   const registry = props.options.registry!;
@@ -240,6 +258,7 @@ function OpenTuiApp(props: {
   const homePrompt = HOME_PROMPTS[Math.floor(Math.random() * HOME_PROMPTS.length)] ?? HOME_PROMPTS[0]!;
   let promptText = "";
   const [isRunning, setIsRunning] = createSignal(false);
+  const [showThinking, setShowThinking] = createSignal(true);
   let streamingDisplay: DisplayMessage | undefined;
   const [todos, setTodos] = createSignal<Todo[]>(props.agent.getTodos());
   const [mode, setMode] = createSignal<PermissionMode>(props.agent.mode);
@@ -530,7 +549,7 @@ function OpenTuiApp(props: {
   }
 
   function hasTranscriptMessages(extra?: DisplayMessage) {
-    return currentTranscriptMessages(extra).some(hasRenderableMessage);
+    return currentTranscriptMessages(extra).some((message) => hasRenderableMessage(message, showThinking()));
   }
 
   function isHomeSurfaceActive(extra?: DisplayMessage) {
@@ -579,12 +598,13 @@ function OpenTuiApp(props: {
       renderHome: renderHomeSurface,
       plan: pendingPlan()?.plan,
       selectedOption: approvalOptionIdx(),
+      showThinking: showThinking(),
     };
   }
 
   function syncSessionMessages(messages = currentTranscriptMessages(streamingDisplay)) {
     if (!transcriptHost) return;
-    updateTranscriptHost(transcriptHost, transcriptState, messages, transcriptOptions(), props.syntaxStyle);
+    updateTranscriptHost(transcriptHost, transcriptState, messages, transcriptOptions(), props.syntaxStyle, props.subtleSyntaxStyle);
     syncPromptSurfaces();
   }
 
@@ -1016,7 +1036,7 @@ function OpenTuiApp(props: {
 
   function buildSlashItems(query = ""): PickerItem[] {
     const normalizedQuery = query.trim().toLowerCase();
-    return slashRegistry.list()
+    return [...LOCAL_SLASH_COMMANDS, ...slashRegistry.list()]
       .filter((command) => {
         if (!normalizedQuery) return true;
         const name = command.name.toLowerCase();
@@ -1110,6 +1130,16 @@ function OpenTuiApp(props: {
   }
 
   async function executeSlash(input: string) {
+    if (/^\/(?:thinking|toggle-thinking)(?:\s|$)/.test(input.trim())) {
+      setShowThinking((prev) => {
+        const next = !prev;
+        setNotice(next ? "Thinking blocks visible" : "Thinking blocks hidden");
+        return next;
+      });
+      redrawTranscript();
+      return true;
+    }
+
     const { handled, result, inject } = await slashRegistry.execute(input, {
       agent: props.agent,
       addMessage,
@@ -1622,7 +1652,7 @@ function OpenTuiApp(props: {
           const isNewHost = transcriptHost !== ref;
           transcriptHost = ref;
           if (isNewHost) transcriptState.entries = [];
-          updateTranscriptHost(ref, transcriptState, currentTranscriptMessages(streamingDisplay), transcriptOptions(), props.syntaxStyle);
+          updateTranscriptHost(ref, transcriptState, currentTranscriptMessages(streamingDisplay), transcriptOptions(), props.syntaxStyle, props.subtleSyntaxStyle);
           syncPromptSurfaces(isNewHost);
           setTimeout(() => scrollbox?.scrollTo(scrollbox.scrollHeight), 0);
         },
@@ -1921,14 +1951,20 @@ function PromptScanner(input: {
   }, input.idleContent ?? PROMPT_SCANNER_IDLE_FRAMES[0]);
 }
 
-function renderMessage(message: DisplayMessage, index: number, syntaxStyle: SyntaxStyle) {
+function renderMessage(
+  message: DisplayMessage,
+  index: number,
+  syntaxStyle: SyntaxStyle,
+  subtleSyntaxStyle: SyntaxStyle,
+  showThinking = true,
+) {
   if (message.role === "user") return renderUserMessage(message, index);
   if (message.role === "error") {
     return h("box", { border: ["left"], borderColor: theme.error, marginTop: 1, paddingLeft: 2, paddingTop: 1, paddingBottom: 1, backgroundColor: theme.backgroundPanel, flexShrink: 0 },
       h("text", { fg: theme.error, wrapMode: "word" }, message.content),
     );
   }
-  return renderAssistantMessage(message, syntaxStyle);
+  return renderAssistantMessage(message, syntaxStyle, subtleSyntaxStyle, showThinking);
 }
 
 function renderUserMessage(message: DisplayMessage, index: number) {
@@ -1945,14 +1981,15 @@ function renderUserMessage(message: DisplayMessage, index: number) {
   );
 }
 
-function renderAssistantMessage(message: DisplayMessage, syntaxStyle: SyntaxStyle) {
+function renderAssistantMessage(message: DisplayMessage, syntaxStyle: SyntaxStyle, subtleSyntaxStyle: SyntaxStyle, showThinking = true) {
   const children: Child[] = [];
-  if (message.status && !message.reasoning?.trim() && !message.content.trim() && !(message.toolCalls?.length)) {
+  const visibleReasoning = showThinking ? message.reasoning?.trim() : "";
+  if (message.status && !visibleReasoning && !message.content.trim() && !(message.toolCalls?.length)) {
     children.push(h("box", { paddingLeft: 3, marginTop: 1, flexShrink: 0 },
       h("text", { fg: theme.messageThinkingText }, assistantStatusLabel(message)),
     ));
   }
-  if (message.reasoning) {
+  if (visibleReasoning) {
     children.push(h("box", {
       paddingLeft: 2,
       marginTop: 1,
@@ -1961,7 +1998,7 @@ function renderAssistantMessage(message: DisplayMessage, syntaxStyle: SyntaxStyl
       flexDirection: "column",
       flexShrink: 0,
     },
-      renderMarkdownContent(message.reasoning.trim(), syntaxStyle, {
+      renderMarkdownContent(formatThinkingMarkdown(visibleReasoning), subtleSyntaxStyle, {
         streaming: message.streaming === true,
         fg: theme.messageThinkingText,
       }),
@@ -2014,8 +2051,10 @@ function updateTranscriptHost(
   messages: DisplayMessage[],
   options: TranscriptOptions | undefined,
   syntaxStyle: SyntaxStyle,
+  subtleSyntaxStyle: SyntaxStyle,
 ) {
-  const visibleMessages = messages.filter(hasRenderableMessage);
+  const showThinking = options?.showThinking ?? true;
+  const visibleMessages = messages.filter((message) => hasRenderableMessage(message, showThinking));
   const ctx = host.ctx;
   const nextEntries: TranscriptEntry[] = [];
 
@@ -2040,10 +2079,10 @@ function updateTranscriptHost(
 
   for (const [index, message] of visibleMessages.entries()) {
     const key = transcriptMessageKey(message, index);
-    const signature = transcriptMessageSignature(message);
+    const signature = transcriptMessageSignature(message, showThinking);
     const previous = state.entries[index];
     if (previous?.key === key && previous.signature === signature) {
-      updateMessageEntry(previous, message);
+      updateMessageEntry(previous, message, showThinking);
       nextEntries.push(previous);
       continue;
     }
@@ -2053,7 +2092,7 @@ function updateTranscriptHost(
       previous.node.destroyRecursively();
     }
 
-    const entry = createMessageEntry(ctx, message, index, syntaxStyle, key, signature);
+    const entry = createMessageEntry(ctx, message, index, syntaxStyle, subtleSyntaxStyle, key, signature, showThinking);
     if (entry) {
       host.add(entry.node, index);
       nextEntries.push(entry);
@@ -2117,15 +2156,16 @@ function transcriptMessageKey(message: DisplayMessage, index: number) {
   return `${index}:${message.role}`;
 }
 
-function transcriptMessageSignature(message: DisplayMessage) {
+function transcriptMessageSignature(message: DisplayMessage, showThinking = true) {
   if (message.role !== "assistant") return message.role;
   const tools = (message.toolCalls ?? [])
     .map((tool) => `${tool.id}:${tool.name}:${tool.status ?? (tool.result === undefined ? "pending" : "completed")}:${tool.isError ? "error" : "ok"}`)
     .join("|");
+  const visibleReasoning = showThinking && !!message.reasoning?.trim();
   return [
     message.role,
     message.status ?? "idle",
-    message.reasoning?.trim() ? "reasoning" : "no-reasoning",
+    visibleReasoning ? "reasoning" : "no-reasoning",
     message.content.trim() ? "content" : "no-content",
     tools,
   ].join(":");
@@ -2139,7 +2179,7 @@ function hashString(value: string) {
   return (hash >>> 0).toString(36);
 }
 
-function updateMessageEntry(entry: TranscriptEntry, message: DisplayMessage) {
+function updateMessageEntry(entry: TranscriptEntry, message: DisplayMessage, showThinking = true) {
   if (message.role === "user") {
     if (entry.refs.userText) entry.refs.userText.content = message.content || " ";
     return;
@@ -2152,7 +2192,7 @@ function updateMessageEntry(entry: TranscriptEntry, message: DisplayMessage) {
     entry.refs.statusText.content = assistantStatusLabel(message);
   }
   if (entry.refs.reasoningMarkdown) {
-    entry.refs.reasoningMarkdown.content = message.reasoning?.trim() ?? "";
+    entry.refs.reasoningMarkdown.content = showThinking ? formatThinkingMarkdown(message.reasoning?.trim() ?? "") : "";
     entry.refs.reasoningMarkdown.streaming = message.streaming === true;
   }
   if (entry.refs.contentMarkdown) {
@@ -2213,12 +2253,14 @@ function createMessageEntry(
   message: DisplayMessage,
   index: number,
   syntaxStyle: SyntaxStyle,
+  subtleSyntaxStyle: SyntaxStyle,
   key: string,
   signature: string,
+  showThinking = true,
 ): TranscriptEntry | null {
   if (message.role === "user") return createUserEntry(ctx, message, index, key, signature);
   if (message.role === "error") return createErrorEntry(ctx, message, key, signature);
-  return createAssistantEntry(ctx, message, syntaxStyle, key, signature);
+  return createAssistantEntry(ctx, message, syntaxStyle, subtleSyntaxStyle, key, signature, showThinking);
 }
 
 function createUserEntry(ctx: RenderContext, message: DisplayMessage, index: number, key: string, signature: string): TranscriptEntry {
@@ -2270,12 +2312,15 @@ function createAssistantEntry(
   ctx: RenderContext,
   message: DisplayMessage,
   syntaxStyle: SyntaxStyle,
+  subtleSyntaxStyle: SyntaxStyle,
   key: string,
   signature: string,
+  showThinking = true,
 ): TranscriptEntry | null {
   const children: Renderable[] = [];
   const refs: TranscriptEntry["refs"] = {};
-  if (message.status && !message.reasoning?.trim() && !message.content.trim() && !(message.toolCalls?.length)) {
+  const visibleReasoning = showThinking ? message.reasoning?.trim() : "";
+  if (message.status && !visibleReasoning && !message.content.trim() && !(message.toolCalls?.length)) {
     const status = createText(ctx, assistantStatusLabel(message), {
       fg: theme.messageThinkingText,
     });
@@ -2286,8 +2331,8 @@ function createAssistantEntry(
       flexShrink: 0,
     }, [status]));
   }
-  if (message.reasoning?.trim()) {
-    const markdown = createMarkdown(ctx, message.reasoning.trim(), syntaxStyle, {
+  if (visibleReasoning) {
+    const markdown = createMarkdown(ctx, formatThinkingMarkdown(visibleReasoning), subtleSyntaxStyle, {
       streaming: message.streaming === true,
       fg: theme.messageThinkingText,
     });
@@ -2656,24 +2701,32 @@ type TranscriptOptions = {
   renderHome?: () => ReturnType<typeof h>;
   plan?: string;
   selectedOption?: number;
+  showThinking?: boolean;
 };
 
-function renderTranscript(messages: DisplayMessage[], options: TranscriptOptions | undefined, syntaxStyle: SyntaxStyle) {
-  const visibleMessages = messages.filter(hasRenderableMessage);
+function renderTranscript(
+  messages: DisplayMessage[],
+  options: TranscriptOptions | undefined,
+  syntaxStyle: SyntaxStyle,
+  subtleSyntaxStyle: SyntaxStyle,
+) {
+  const showThinking = options?.showThinking ?? true;
+  const visibleMessages = messages.filter((message) => hasRenderableMessage(message, showThinking));
   if (!visibleMessages.length) return null;
-  const items = visibleMessages.map((message, index) => renderMessage(message, index, syntaxStyle));
+  const items = visibleMessages.map((message, index) => renderMessage(message, index, syntaxStyle, subtleSyntaxStyle, showThinking));
   if (options?.plan) items.push(renderPlanPrompt(options.plan));
   return items;
 }
 
-function renderSessionMessages(messages: DisplayMessage[], syntaxStyle: SyntaxStyle) {
-  const visibleMessages = messages.filter(hasRenderableMessage);
+function renderSessionMessages(messages: DisplayMessage[], syntaxStyle: SyntaxStyle, subtleSyntaxStyle: SyntaxStyle, showThinking = true) {
+  const visibleMessages = messages.filter((message) => hasRenderableMessage(message, showThinking));
   if (!visibleMessages.length) return null;
-  return visibleMessages.map((message, index) => renderMessage(message, index, syntaxStyle));
+  return visibleMessages.map((message, index) => renderMessage(message, index, syntaxStyle, subtleSyntaxStyle, showThinking));
 }
 
 function formatTranscript(messages: DisplayMessage[], options?: TranscriptOptions): StyledText {
-  const visibleMessages = messages.filter(hasRenderableMessage);
+  const showThinking = options?.showThinking ?? true;
+  const visibleMessages = messages.filter((message) => hasRenderableMessage(message, showThinking));
   const chunks: StyledText["chunks"] = [];
   const append = (content: string, color = theme.text) => {
     if (content) chunks.push(fg(color)(content));
@@ -2700,12 +2753,13 @@ function formatTranscript(messages: DisplayMessage[], options?: TranscriptOption
       }
       continue;
     }
-    if (message.reasoning) {
+    const visibleReasoning = showThinking ? message.reasoning?.trim() : "";
+    if (visibleReasoning) {
       appendBlank();
       append("│  ", theme.messageThinkingBorder);
-      appendLine(truncate(message.reasoning.trim(), 500), theme.messageThinkingText);
+      appendLine(truncate(formatThinkingMarkdown(visibleReasoning), 500), theme.messageThinkingText);
     }
-    if (message.status && !message.reasoning?.trim() && !message.content.trim() && !(message.toolCalls?.length)) {
+    if (message.status && !visibleReasoning && !message.content.trim() && !(message.toolCalls?.length)) {
       appendBlank();
       append("   ", theme.borderSubtle);
       appendLine(assistantStatusLabel(message), theme.messageThinkingText);
@@ -2754,13 +2808,18 @@ function renderHomeState(input: { width: number; cwd: string; tip: string }) {
   ));
 }
 
-function hasRenderableMessage(message: DisplayMessage) {
+function hasRenderableMessage(message: DisplayMessage, showThinking = true) {
   if (message.role === "error") return !!message.content.trim();
   if (message.role === "user") return !!message.content.trim();
   if (message.status) return true;
-  if (message.reasoning?.trim()) return true;
+  if (showThinking && message.reasoning?.trim()) return true;
   if (message.content.trim()) return true;
   return (message.toolCalls?.length ?? 0) > 0;
+}
+
+function formatThinkingMarkdown(content: string) {
+  const trimmed = content.trim();
+  return trimmed ? `${THINKING_MARKDOWN_PREFIX}${trimmed}` : "";
 }
 
 function appendUserTranscript(chunks: StyledText["chunks"], content: string) {
