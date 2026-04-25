@@ -3034,6 +3034,19 @@ function createToolRenderable(ctx: RenderContext, tool: DisplayToolCall, syntaxS
     chunks.push(fg(theme.text)("\n"));
     chunks.push(fg(theme.borderSubtle)("  "));
     chunks.push(fg(tool.isError ? theme.toolError : theme.textMuted)(summarizeToolResult(tool)));
+    const preview = toolPreview(tool);
+    if (preview) {
+      for (const line of preview.lines) {
+        chunks.push(fg(theme.text)("\n"));
+        chunks.push(fg(theme.borderSubtle)("  "));
+        chunks.push(fg(theme.toolText)(line));
+      }
+      if (preview.omitted > 0) {
+        chunks.push(fg(theme.text)("\n"));
+        chunks.push(fg(theme.borderSubtle)("  "));
+        chunks.push(fg(theme.textMuted)(`+ ${preview.omitted} more`));
+      }
+    }
   }
   return createBox(ctx, {
     paddingLeft: 3,
@@ -3092,7 +3105,7 @@ function renderTool(tool: DisplayToolCall, syntaxStyle: SyntaxStyle, width = 80)
     h("text", { fg: color },
       `${isToolFinished(tool) ? "" : "~ "}${icon} ${displayToolName(tool.name)}${toolHeader(tool) ? ` ${toolHeader(tool)}` : ""}`,
     ),
-    () => tool.result ? h("text", { fg: tool.isError ? theme.toolError : theme.textMuted, wrapMode: "word" }, `  ${summarizeToolResult(tool)}`) : null,
+    () => tool.result ? h("text", { fg: tool.isError ? theme.toolError : theme.textMuted, wrapMode: "word" }, toolSummaryWithPreview(tool)) : null,
   );
 }
 
@@ -3453,6 +3466,17 @@ function formatTranscript(messages: DisplayMessage[], options?: TranscriptOption
       appendLine("");
       append("     ", theme.borderSubtle);
       appendLine(summarizeToolResult(tool), tool.isError ? theme.toolError : theme.textMuted);
+      const preview = toolPreview(tool);
+      if (preview) {
+        for (const line of preview.lines) {
+          append("     ", theme.borderSubtle);
+          appendLine(line, theme.toolText);
+        }
+        if (preview.omitted > 0) {
+          append("     ", theme.borderSubtle);
+          appendLine(`+ ${preview.omitted} more`, theme.textMuted);
+        }
+      }
     }
     if (message.content.trim()) {
       appendBlank();
@@ -3674,6 +3698,35 @@ function summarizeToolResult(tool: DisplayToolCall): string {
   if (tool.name === "write") return "wrote file";
   if (tool.name === "bash") return lines ? `${lines} line${lines === 1 ? "" : "s"} output` : "done";
   return lines ? `${lines} line${lines === 1 ? "" : "s"}` : "done";
+}
+
+function toolSummaryWithPreview(tool: DisplayToolCall): string {
+  const summary = `  ${summarizeToolResult(tool)}`;
+  const preview = toolPreview(tool);
+  if (!preview) return summary;
+  const lines = preview.lines.map((line) => `  ${line}`);
+  if (preview.omitted > 0) {
+    lines.push(`  + ${preview.omitted} more`);
+  }
+  return [summary, ...lines].join("\n");
+}
+
+function toolPreview(tool: DisplayToolCall): { lines: string[]; omitted: number } | undefined {
+  if (!isToolFinished(tool) || tool.isError || !tool.result) return undefined;
+  if (tool.name !== "read" && tool.name !== "glob") return undefined;
+
+  const lines = tool.result
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim().length > 0);
+  if (!lines.length) return undefined;
+
+  const previewLines = lines.slice(0, 3).map((line) => truncate(line, 120));
+  return {
+    lines: previewLines,
+    omitted: Math.max(0, lines.length - previewLines.length),
+  };
 }
 
 function isToolFinished(tool: DisplayToolCall): boolean {
