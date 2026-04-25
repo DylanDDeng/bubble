@@ -5,6 +5,7 @@
 import { constants } from "node:fs";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { createTwoFilesPatch } from "diff";
 import { gateToolAction } from "../approval/tool-helper.js";
 import type { ApprovalController } from "../approval/types.js";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
@@ -46,17 +47,20 @@ export function createWriteTool(
       }
 
       let existed = false;
+      let oldContent = "";
       try {
-        await readFile(filePath, "utf-8");
+        oldContent = await readFile(filePath, "utf-8");
         existed = true;
       } catch {
         // new file
       }
+      const diff = createTwoFilesPatch(filePath, filePath, oldContent, args.content, "original", "modified", { context: 3 });
 
       const gate = await gateToolAction(approval, {
         type: "write",
         path: filePath,
         content: args.content,
+        diff,
         fileExists: existed,
       });
       if (!gate.approved) return gate.result;

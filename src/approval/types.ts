@@ -21,6 +21,8 @@ export interface WriteApprovalRequest {
   path: string;
   /** Full pending file contents. */
   content: string;
+  /** Unified patch from existing contents to pending contents. */
+  diff?: string;
   fileExists: boolean;
 }
 

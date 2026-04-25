@@ -1,9 +1,12 @@
 import {
   BoxRenderable,
+  CodeRenderable,
   createCliRenderer,
+  DiffRenderable,
   type CliRenderer,
   getTreeSitterClient,
   MarkdownRenderable,
+  LineNumberRenderable,
   type RenderContext,
   type Renderable,
   type ScrollBoxRenderable,
@@ -103,6 +106,17 @@ const DEFAULT_THEME = {
   toolRead: "#9d7cd8",
   toolWrite: "#f5a742",
   toolSearch: "#5c9cf5",
+  diffAdded: "#7fd88f",
+  diffRemoved: "#e06c75",
+  diffContext: "#a6acb8",
+  diffAddedBg: "#1d3424",
+  diffRemovedBg: "#3a1f24",
+  diffContextBg: "#1e1e1e",
+  diffLineNumber: "#808080",
+  diffAddedLineNumberBg: "#24412d",
+  diffRemovedLineNumberBg: "#47272d",
+  diffHighlightAdded: "#98f5a8",
+  diffHighlightRemoved: "#ff8b96",
 };
 
 const THINKING_MARKDOWN_PREFIX = "_Thinking:_ ";
@@ -293,6 +307,7 @@ function OpenTuiApp(props: {
   let approvalSubtitle: TextRenderable | undefined;
   let approvalPreviewScroll: ScrollBoxRenderable | undefined;
   let approvalPreviewText: TextRenderable | undefined;
+  let approvalPreviewDiff: DiffRenderable | undefined;
   const approvalOptionBoxes: Array<BoxRenderable | undefined> = [];
   const approvalOptionTexts: Array<TextRenderable | undefined> = [];
   let pickerFrame: BoxRenderable | undefined;
@@ -713,6 +728,16 @@ function OpenTuiApp(props: {
     if (approvalPreviewText) {
       approvalPreviewText.content = meta.preview || "";
       approvalPreviewText.fg = meta.previewColor;
+      approvalPreviewText.visible = !meta.diff;
+    }
+    if (approvalPreviewDiff) {
+      approvalPreviewDiff.visible = !!meta.diff;
+      if (meta.diff) {
+        approvalPreviewDiff.diff = meta.diff;
+        approvalPreviewDiff.view = diffViewMode(dimensions().width);
+        approvalPreviewDiff.filetype = filetype(meta.path);
+        approvalPreviewDiff.wrapMode = "word";
+      }
     }
 
     for (let i = 0; i < approvalOptionBoxes.length; i++) {
@@ -1727,7 +1752,30 @@ function OpenTuiApp(props: {
         ref: (ref: TextRenderable) => { approvalPreviewText = ref; },
         fg: approval ? getApprovalPanelMeta(approval.request).previewColor : theme.toolText,
         wrapMode: "word",
+        visible: !approval || !getApprovalPanelMeta(approval.request).diff,
         content: approval ? (getApprovalPanelMeta(approval.request).preview || "") : "",
+      }),
+      h("diff", {
+        ref: (ref: DiffRenderable) => { approvalPreviewDiff = ref; },
+        visible: !!approval && !!getApprovalPanelMeta(approval.request).diff,
+        diff: approval ? (getApprovalPanelMeta(approval.request).diff || "") : "",
+        view: diffViewMode(dimensions().width),
+        filetype: approval ? filetype(getApprovalPanelMeta(approval.request).path) : undefined,
+        syntaxStyle: props.syntaxStyle,
+        showLineNumbers: true,
+        width: "100%",
+        wrapMode: "word",
+        fg: theme.text,
+        addedBg: theme.diffAddedBg,
+        removedBg: theme.diffRemovedBg,
+        contextBg: theme.diffContextBg,
+        addedSignColor: theme.diffHighlightAdded,
+        removedSignColor: theme.diffHighlightRemoved,
+        lineNumberFg: theme.diffLineNumber,
+        lineNumberBg: theme.diffContextBg,
+        addedLineNumberBg: theme.diffAddedLineNumberBg,
+        removedLineNumberBg: theme.diffRemovedLineNumberBg,
+        treeSitterClient,
       }),
       ),
       ),
@@ -1957,6 +2005,7 @@ function renderMessage(
   syntaxStyle: SyntaxStyle,
   subtleSyntaxStyle: SyntaxStyle,
   showThinking = true,
+  width = 80,
 ) {
   if (message.role === "user") return renderUserMessage(message, index);
   if (message.role === "error") {
@@ -1964,7 +2013,7 @@ function renderMessage(
       h("text", { fg: theme.error, wrapMode: "word" }, message.content),
     );
   }
-  return renderAssistantMessage(message, syntaxStyle, subtleSyntaxStyle, showThinking);
+  return renderAssistantMessage(message, syntaxStyle, subtleSyntaxStyle, showThinking, width);
 }
 
 function renderUserMessage(message: DisplayMessage, index: number) {
@@ -1981,7 +2030,7 @@ function renderUserMessage(message: DisplayMessage, index: number) {
   );
 }
 
-function renderAssistantMessage(message: DisplayMessage, syntaxStyle: SyntaxStyle, subtleSyntaxStyle: SyntaxStyle, showThinking = true) {
+function renderAssistantMessage(message: DisplayMessage, syntaxStyle: SyntaxStyle, subtleSyntaxStyle: SyntaxStyle, showThinking = true, width = 80) {
   const children: Child[] = [];
   const visibleReasoning = showThinking ? message.reasoning?.trim() : "";
   if (message.status && !visibleReasoning && !message.content.trim() && !(message.toolCalls?.length)) {
@@ -2004,7 +2053,7 @@ function renderAssistantMessage(message: DisplayMessage, syntaxStyle: SyntaxStyl
       }),
     ));
   }
-  for (const tool of message.toolCalls ?? []) children.push(renderTool(tool));
+  for (const tool of message.toolCalls ?? []) children.push(renderTool(tool, syntaxStyle, width));
   if (message.content.trim()) {
     children.push(h("box", { paddingLeft: 3, marginTop: 1, flexDirection: "column", flexShrink: 0 },
       renderMarkdownContent(message.content.trim(), syntaxStyle, {
@@ -2092,7 +2141,17 @@ function updateTranscriptHost(
       previous.node.destroyRecursively();
     }
 
-    const entry = createMessageEntry(ctx, message, index, syntaxStyle, subtleSyntaxStyle, key, signature, showThinking);
+    const entry = createMessageEntry(
+      ctx,
+      message,
+      index,
+      syntaxStyle,
+      subtleSyntaxStyle,
+      key,
+      signature,
+      showThinking,
+      options?.width ?? 80,
+    );
     if (entry) {
       host.add(entry.node, index);
       nextEntries.push(entry);
@@ -2248,6 +2307,85 @@ function createMarkdown(
   });
 }
 
+function createDiffRenderable(ctx: RenderContext, diff: string, filePath: string | undefined, syntaxStyle: SyntaxStyle, width = 80) {
+  return new DiffRenderable(ctx, {
+    diff,
+    view: diffViewMode(width),
+    filetype: filetype(filePath),
+    syntaxStyle,
+    treeSitterClient,
+    showLineNumbers: true,
+    width: "100%",
+    wrapMode: "word",
+    fg: theme.text,
+    addedBg: theme.diffAddedBg,
+    removedBg: theme.diffRemovedBg,
+    contextBg: theme.diffContextBg,
+    addedSignColor: theme.diffHighlightAdded,
+    removedSignColor: theme.diffHighlightRemoved,
+    lineNumberFg: theme.diffLineNumber,
+    lineNumberBg: theme.diffContextBg,
+    addedLineNumberBg: theme.diffAddedLineNumberBg,
+    removedLineNumberBg: theme.diffRemovedLineNumberBg,
+  });
+}
+
+function renderDiffContent(diff: string, filePath: string | undefined, syntaxStyle: SyntaxStyle, width = 80) {
+  return h("diff", {
+    diff,
+    view: diffViewMode(width),
+    filetype: filetype(filePath),
+    syntaxStyle,
+    treeSitterClient,
+    showLineNumbers: true,
+    width: "100%",
+    wrapMode: "word",
+    fg: theme.text,
+    addedBg: theme.diffAddedBg,
+    removedBg: theme.diffRemovedBg,
+    contextBg: theme.diffContextBg,
+    addedSignColor: theme.diffHighlightAdded,
+    removedSignColor: theme.diffHighlightRemoved,
+    lineNumberFg: theme.diffLineNumber,
+    lineNumberBg: theme.diffContextBg,
+    addedLineNumberBg: theme.diffAddedLineNumberBg,
+    removedLineNumberBg: theme.diffRemovedLineNumberBg,
+  });
+}
+
+function createCodeBlockRenderable(ctx: RenderContext, content: string, filePath: string | undefined, syntaxStyle: SyntaxStyle) {
+  const code = new CodeRenderable(ctx, {
+    content,
+    filetype: filetype(filePath),
+    syntaxStyle,
+    treeSitterClient,
+    conceal: false,
+    fg: theme.text,
+    width: "100%",
+  });
+  const lineNumbers = new LineNumberRenderable(ctx, {
+    fg: theme.textMuted,
+    minWidth: 3,
+    paddingRight: 1,
+  });
+  lineNumbers.add(code);
+  return lineNumbers;
+}
+
+function renderCodeBlockContent(content: string, filePath: string | undefined, syntaxStyle: SyntaxStyle) {
+  return h("line_number", { fg: theme.textMuted, minWidth: 3, paddingRight: 1 },
+    h("code", {
+      content,
+      filetype: filetype(filePath),
+      syntaxStyle,
+      treeSitterClient,
+      conceal: false,
+      fg: theme.text,
+      width: "100%",
+    }),
+  );
+}
+
 function createMessageEntry(
   ctx: RenderContext,
   message: DisplayMessage,
@@ -2257,10 +2395,11 @@ function createMessageEntry(
   key: string,
   signature: string,
   showThinking = true,
+  width = 80,
 ): TranscriptEntry | null {
   if (message.role === "user") return createUserEntry(ctx, message, index, key, signature);
   if (message.role === "error") return createErrorEntry(ctx, message, key, signature);
-  return createAssistantEntry(ctx, message, syntaxStyle, subtleSyntaxStyle, key, signature, showThinking);
+  return createAssistantEntry(ctx, message, syntaxStyle, subtleSyntaxStyle, key, signature, showThinking, width);
 }
 
 function createUserEntry(ctx: RenderContext, message: DisplayMessage, index: number, key: string, signature: string): TranscriptEntry {
@@ -2316,6 +2455,7 @@ function createAssistantEntry(
   key: string,
   signature: string,
   showThinking = true,
+  width = 80,
 ): TranscriptEntry | null {
   const children: Renderable[] = [];
   const refs: TranscriptEntry["refs"] = {};
@@ -2347,7 +2487,7 @@ function createAssistantEntry(
     }, [markdown]));
   }
 
-  for (const tool of message.toolCalls ?? []) children.push(createToolRenderable(ctx, tool));
+  for (const tool of message.toolCalls ?? []) children.push(createToolRenderable(ctx, tool, syntaxStyle, width));
 
   if (message.content.trim()) {
     const markdown = createMarkdown(ctx, message.content.trim(), syntaxStyle, {
@@ -2372,10 +2512,53 @@ function createAssistantEntry(
   };
 }
 
-function createToolRenderable(ctx: RenderContext, tool: DisplayToolCall) {
+function createToolRenderable(ctx: RenderContext, tool: DisplayToolCall, syntaxStyle: SyntaxStyle, width = 80) {
   const icon = tool.name === "bash" ? "$" : tool.name === "edit" || tool.name === "write" ? "✎" : "●";
   const color = toolColor(tool);
   const header = toolHeader(tool);
+  const diff = extractToolDiff(tool);
+  if (diff && !tool.isError && tool.name === "edit") {
+    return createBox(ctx, {
+      paddingLeft: 3,
+      marginTop: 1,
+      flexDirection: "column",
+      flexShrink: 0,
+    }, [
+      createText(ctx, new StyledText([
+        fg(color)(`${icon} ${displayToolName(tool.name)}`),
+        fg(theme.toolText)(header ? ` ${header}` : ""),
+      ])),
+      createBox(ctx, {
+        paddingLeft: 1,
+        marginTop: 1,
+        border: ["left"],
+        borderColor: theme.borderSubtle,
+        flexDirection: "column",
+        flexShrink: 0,
+      }, [createDiffRenderable(ctx, diff, toolPath(tool), syntaxStyle, width)]),
+    ]);
+  }
+  if (!tool.isError && tool.name === "write" && typeof tool.args?.content === "string" && isToolFinished(tool)) {
+    return createBox(ctx, {
+      paddingLeft: 3,
+      marginTop: 1,
+      flexDirection: "column",
+      flexShrink: 0,
+    }, [
+      createText(ctx, new StyledText([
+        fg(color)(`${icon} ${displayToolName(tool.name)}`),
+        fg(theme.toolText)(header ? ` ${header}` : ""),
+      ])),
+      createBox(ctx, {
+        paddingLeft: 1,
+        marginTop: 1,
+        border: ["left"],
+        borderColor: theme.borderSubtle,
+        flexDirection: "column",
+        flexShrink: 0,
+      }, [createCodeBlockRenderable(ctx, tool.args.content, toolPath(tool), syntaxStyle)]),
+    ]);
+  }
   const chunks: StyledText["chunks"] = [
     fg(color)(`${isToolFinished(tool) ? "" : "~ "}${icon} ${displayToolName(tool.name)}`),
   ];
@@ -2414,9 +2597,30 @@ function createPlanRenderable(ctx: RenderContext, plan: string) {
   ]);
 }
 
-function renderTool(tool: DisplayToolCall) {
+function renderTool(tool: DisplayToolCall, syntaxStyle: SyntaxStyle, width = 80) {
   const icon = tool.name === "bash" ? "$" : tool.name === "edit" || tool.name === "write" ? "✎" : "●";
   const color = toolColor(tool);
+  const diff = extractToolDiff(tool);
+  if (diff && !tool.isError && tool.name === "edit") {
+    return h("box", { paddingLeft: 3, marginTop: 1, flexDirection: "column", flexShrink: 0 },
+      h("text", { fg: color },
+        `${icon} ${displayToolName(tool.name)}${toolHeader(tool) ? ` ${toolHeader(tool)}` : ""}`,
+      ),
+      h("box", { paddingLeft: 1, marginTop: 1, border: ["left"], borderColor: theme.borderSubtle, flexDirection: "column", flexShrink: 0 },
+        renderDiffContent(diff, toolPath(tool), syntaxStyle, width),
+      ),
+    );
+  }
+  if (!tool.isError && tool.name === "write" && typeof tool.args?.content === "string" && isToolFinished(tool)) {
+    return h("box", { paddingLeft: 3, marginTop: 1, flexDirection: "column", flexShrink: 0 },
+      h("text", { fg: color },
+        `${icon} ${displayToolName(tool.name)}${toolHeader(tool) ? ` ${toolHeader(tool)}` : ""}`,
+      ),
+      h("box", { paddingLeft: 1, marginTop: 1, border: ["left"], borderColor: theme.borderSubtle, flexDirection: "column", flexShrink: 0 },
+        renderCodeBlockContent(tool.args.content, toolPath(tool), syntaxStyle),
+      ),
+    );
+  }
   return h("box", { paddingLeft: 3, marginTop: 1, flexDirection: "column", flexShrink: 0 },
     h("text", { fg: color },
       `${isToolFinished(tool) ? "" : "~ "}${icon} ${displayToolName(tool.name)}${toolHeader(tool) ? ` ${toolHeader(tool)}` : ""}`,
@@ -2713,7 +2917,9 @@ function renderTranscript(
   const showThinking = options?.showThinking ?? true;
   const visibleMessages = messages.filter((message) => hasRenderableMessage(message, showThinking));
   if (!visibleMessages.length) return null;
-  const items = visibleMessages.map((message, index) => renderMessage(message, index, syntaxStyle, subtleSyntaxStyle, showThinking));
+  const items = visibleMessages.map((message, index) =>
+    renderMessage(message, index, syntaxStyle, subtleSyntaxStyle, showThinking, options?.width ?? 80)
+  );
   if (options?.plan) items.push(renderPlanPrompt(options.plan));
   return items;
 }
@@ -2887,6 +3093,8 @@ function getApprovalPanelMeta(request: ApprovalRequest) {
       preview: request.diff || "No diff provided",
       previewHeight: 8,
       previewColor: request.diff ? theme.toolText : theme.textMuted,
+      diff: request.diff,
+      path: request.path,
     };
   }
 
@@ -2894,9 +3102,11 @@ function getApprovalPanelMeta(request: ApprovalRequest) {
     icon: "→",
     title: `Write ${path}`,
     subtitle: "",
-    preview: request.content || "No content provided",
+    preview: request.diff || request.content || "No content provided",
     previewHeight: 8,
-    previewColor: request.content ? theme.toolText : theme.textMuted,
+    previewColor: request.diff || request.content ? theme.toolText : theme.textMuted,
+    diff: request.diff,
+    path: request.path,
   };
 }
 
@@ -2941,6 +3151,46 @@ function toolHeader(tool: DisplayToolCall): string {
   const args = tool.args || {};
   const value = args.path ?? args.command ?? args.pattern ?? args.url ?? args.query;
   return value ? `(${truncate(String(value).replace(/\n/g, " "), 64)})` : "";
+}
+
+function toolPath(tool: DisplayToolCall): string | undefined {
+  const value = tool.args?.path ?? tool.args?.filePath;
+  return typeof value === "string" ? value : undefined;
+}
+
+function extractToolDiff(tool: DisplayToolCall): string | undefined {
+  if (!tool.result) return undefined;
+  const marker = "\n\nDiff:\n";
+  const index = tool.result.indexOf(marker);
+  if (index === -1) return undefined;
+  const diff = tool.result.slice(index + marker.length).trim();
+  return diff ? diff : undefined;
+}
+
+function diffViewMode(width = 80): "unified" | "split" {
+  return width > 120 ? "split" : "unified";
+}
+
+function filetype(filePath?: string): string | undefined {
+  if (!filePath) return undefined;
+  const ext = filePath.toLowerCase().split(".").pop();
+  const map: Record<string, string> = {
+    cjs: "javascript",
+    css: "css",
+    html: "html",
+    js: "javascript",
+    json: "json",
+    jsx: "typescript",
+    md: "markdown",
+    mjs: "javascript",
+    py: "python",
+    rs: "rust",
+    ts: "typescript",
+    tsx: "typescript",
+    yaml: "yaml",
+    yml: "yaml",
+  };
+  return ext ? map[ext] : undefined;
 }
 
 function summarizeToolResult(tool: DisplayToolCall): string {

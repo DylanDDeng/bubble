@@ -81,6 +81,7 @@ describe("write tool with ApprovalController", () => {
     expect(requests[0].type).toBe("write");
     if (requests[0].type === "write") {
       expect(requests[0].fileExists).toBe(false);
+      expect(requests[0].diff).toContain("+hi");
     }
   });
 
@@ -94,6 +95,7 @@ describe("write tool with ApprovalController", () => {
       { cwd: dir },
     );
     expect(result.isError).toBeFalsy();
+    expect(result.content).toContain("Wrote 1 lines");
     expect(readFileSync(path, "utf-8")).toBe("hi");
   });
 });
