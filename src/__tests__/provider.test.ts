@@ -31,6 +31,34 @@ describe("toChatCompletionsMessage", () => {
     });
   });
 
+  it("preserves empty DeepSeek-style reasoning content on every assistant message", () => {
+    expect(toChatCompletionsMessage({
+      role: "assistant",
+      content: "done",
+    }, { reasoningContentEcho: "all" })).toEqual({
+      role: "assistant",
+      content: "done",
+      reasoning_content: "",
+    });
+  });
+
+  it("preserves empty DeepSeek-style reasoning content on assistant tool calls", () => {
+    expect(toChatCompletionsMessage({
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "read:1", name: "read", arguments: "{\"path\":\"a\"}" }],
+    }, { reasoningContentEcho: "all" })).toEqual({
+      role: "assistant",
+      content: null,
+      reasoning_content: "",
+      tool_calls: [{
+        id: "read:1",
+        type: "function",
+        function: { name: "read", arguments: "{\"path\":\"a\"}" },
+      }],
+    });
+  });
+
   it("keeps tool-call-only reasoning echo compatibility by default", () => {
     expect(toChatCompletionsMessage({
       role: "assistant",
@@ -41,6 +69,22 @@ describe("toChatCompletionsMessage", () => {
       role: "assistant",
       content: null,
       reasoning_content: "used tool",
+      tool_calls: [{
+        id: "read:1",
+        type: "function",
+        function: { name: "read", arguments: "{\"path\":\"a\"}" },
+      }],
+    });
+  });
+
+  it("does not add empty reasoning content for default tool-call echo mode", () => {
+    expect(toChatCompletionsMessage({
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "read:1", name: "read", arguments: "{\"path\":\"a\"}" }],
+    })).toEqual({
+      role: "assistant",
+      content: null,
       tool_calls: [{
         id: "read:1",
         type: "function",

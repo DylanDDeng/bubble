@@ -21,11 +21,10 @@ export function toChatCompletionsMessage(
       role: "assistant",
       content: message.content || null,
     };
-    if (
-      message.reasoning
-      && reasoningContentEcho === "all"
-    ) {
-      out.reasoning_content = message.reasoning;
+    if (reasoningContentEcho === "all") {
+      // DeepSeek thinking mode requires every assistant message to echo the
+      // provider field, even when the original value is an empty string.
+      out.reasoning_content = message.reasoning ?? "";
     }
     if (message.toolCalls && message.toolCalls.length > 0) {
       out.tool_calls = message.toolCalls.map((tc) => ({
