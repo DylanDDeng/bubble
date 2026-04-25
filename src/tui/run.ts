@@ -5,6 +5,7 @@ import {
   DiffRenderable,
   type CliRenderer,
   getTreeSitterClient,
+  InputRenderable,
   MarkdownRenderable,
   LineNumberRenderable,
   type RenderContext,
@@ -87,6 +88,17 @@ type RawModeCycleHandler = (sequence: string) => boolean;
 
 const treeSitterClient = getTreeSitterClient();
 
+const PROVIDER_PRIORITY = new Map<string, number>([
+  ["openai", 0],
+  ["deepseek", 1],
+  ["google", 2],
+  ["zhipuai", 3],
+  ["zhipuai-coding-plan", 4],
+  ["zai", 5],
+  ["zai-coding-plan", 6],
+  ["kimi-for-coding", 7],
+]);
+
 const DEFAULT_THEME = {
   primary: "#fab283",
   accent: "#9d7cd8",
@@ -153,6 +165,7 @@ const PROMPT_SCANNER_IDLE_FRAMES = ["        "];
 const PROMPT_SCANNER_INTERVAL_MS = 80;
 const SESSION_SIDEBAR_WIDTH = 42;
 const SESSION_SIDEBAR_AUTO_WIDTH = 120;
+const PROVIDER_DIALOG_ROWS = 11;
 
 const HOME_LOGO = [
   " /\\_/\\  █▀▀▄ █  █ █▀▀▄ █▀▀▄ █    █▀▀",
@@ -178,14 +191,31 @@ type SidebarUsageState = {
   reasoningTokens: number;
   turns: number;
 };
-type PickerMode = "model" | "key" | "provider" | "provider-add" | "login" | "logout" | "slash" | "file";
+type PickerMode = "model" | "key" | "provider" | "provider-add" | "provider-auth" | "login" | "logout" | "slash" | "file";
 type PickerItem = {
   label: string;
   detail?: string;
   value: string;
   command: string;
-  next?: "key";
+  next?: "auth" | "key";
+  after?: { mode: "model"; providerId: string };
+  category?: string;
+  gutter?: string;
+  footer?: string;
 };
+type ProviderDialogStep = "providers" | "auth" | "key" | "models";
+type ProviderDialogState = {
+  step: ProviderDialogStep;
+  providerId?: string;
+  query: string;
+  index: number;
+  apiKey: string;
+  error?: string;
+};
+type ProviderDialogRow =
+  | { type: "category"; label: string }
+  | { type: "empty"; label: string; detail?: string }
+  | { type: "item"; item: PickerItem; optionIndex: number };
 type PickerState =
   | {
       kind: "select";
@@ -198,7 +228,13 @@ type PickerState =
       allItems?: PickerItem[];
       meta?: Record<string, unknown>;
     }
-  | { kind: "key"; title: string; providerId?: string; previous?: Extract<PickerState, { kind: "select" }> };
+  | {
+      kind: "key";
+      title: string;
+      providerId?: string;
+      previous?: Extract<PickerState, { kind: "select" }>;
+      after?: { mode: "model"; providerId: string };
+    };
 
 function h(tag: string | ((props: any) => any), props?: Record<string, any> | null, ...children: Child[]) {
   const allProps = props ?? {};
@@ -326,6 +362,7 @@ function OpenTuiApp(props: {
   const PLAN_OPTIONS = ["Approve", "Reject"] as const;
   const [approvalOptionIdx, setApprovalOptionIdx] = createSignal(0);
   let picker: PickerState | undefined;
+  let providerDialog: ProviderDialogState | undefined;
   let previousPickerForKey: Extract<PickerState, { kind: "select" }> | undefined;
   let homePromptRef: TextareaRenderable | undefined;
   let sessionPromptRef: TextareaRenderable | undefined;
@@ -362,6 +399,17 @@ function OpenTuiApp(props: {
   const inlinePickerRows: Array<BoxRenderable | undefined> = [];
   const inlinePickerLabels: Array<TextRenderable | undefined> = [];
   const inlinePickerDetails: Array<TextRenderable | undefined> = [];
+  let providerDialogRoot: BoxRenderable | undefined;
+  let providerDialogTitle: TextRenderable | undefined;
+  let providerDialogEsc: TextRenderable | undefined;
+  let providerDialogInput: InputRenderable | undefined;
+  let providerDialogList: BoxRenderable | undefined;
+  let providerDialogFooter: TextRenderable | undefined;
+  const providerDialogRows: Array<BoxRenderable | undefined> = [];
+  const providerDialogGutters: Array<TextRenderable | undefined> = [];
+  const providerDialogLabels: Array<TextRenderable | undefined> = [];
+  const providerDialogDetails: Array<TextRenderable | undefined> = [];
+  const providerDialogFooters: Array<TextRenderable | undefined> = [];
   const promptModeLabels = new Set<TextRenderable>();
   let footerModeBadge: TextRenderable | undefined;
   let sidebarTokenText: TextRenderable | undefined;
@@ -626,6 +674,7 @@ function OpenTuiApp(props: {
         new Promise<ApprovalDecision>((resolve) => {
           pendingApprovalRef = { request, resolve };
           picker = undefined;
+          providerDialog = undefined;
           setPendingApproval({ request, resolve });
           forceApprovalUI();
         });
@@ -667,6 +716,7 @@ function OpenTuiApp(props: {
     }
 
     if (handleApprovalKey(event)) return;
+    if (handleProviderDialogKey(event)) return;
     if (handlePickerKey(event)) return;
 
     const plan = pendingPlan();
@@ -900,6 +950,362 @@ function OpenTuiApp(props: {
     }
     redrawInlinePickerRows(state, inlinePicker, pickerHeight);
     dock?.requestRender();
+  }
+
+  function openProviderDialog(step: ProviderDialogStep = "providers", providerId?: string) {
+    const items = providerDialogItemsFor(step, providerId);
+    picker = undefined;
+    providerDialog = {
+      step,
+      providerId,
+      query: "",
+      index: step === "models" ? preferredPickerIndex("model", items) : 0,
+      apiKey: "",
+    };
+    activePrompt()?.clear();
+    activePrompt()?.blur();
+    promptText = "";
+    redrawDock();
+    redrawProviderDialog();
+    setTimeout(() => providerDialogInput?.focus(), 0);
+  }
+
+  function closeProviderDialog() {
+    providerDialog = undefined;
+    providerDialogRoot && (providerDialogRoot.visible = false);
+    providerDialogRoot?.requestRender();
+    setTimeout(() => activePrompt()?.focus(), 0);
+  }
+
+  function providerDialogItemsFor(step: ProviderDialogStep, providerId?: string) {
+    if (step === "providers") return buildProviderConnectItems();
+    if (step === "auth") return providerId ? buildPickerItems("provider-auth", providerId) : [];
+    if (step === "models") return providerId ? buildPickerItems("model", providerId) : [];
+    return [];
+  }
+
+  function providerDialogFilteredItems(state = providerDialog) {
+    if (!state || state.step === "key") return [];
+    const items = providerDialogItemsFor(state.step, state.providerId);
+    const query = state.query.trim().toLowerCase();
+    if (!query) return items;
+    return items.filter((item) => {
+      const haystack = [
+        item.label,
+        item.detail,
+        item.value,
+        item.category,
+        item.footer,
+      ].filter(Boolean).join(" ").toLowerCase();
+      return haystack.includes(query) || fuzzyMatch(haystack, query);
+    });
+  }
+
+  function providerDialogVisibleRows(state = providerDialog): ProviderDialogRow[] {
+    if (!state) return [];
+    if (state.step === "key") {
+      return [{
+        type: "empty",
+        label: "Paste or type the API key, then press Enter.",
+        detail: state.error,
+      }];
+    }
+
+    const items = providerDialogFilteredItems(state);
+    if (!items.length) return [{ type: "empty", label: "No matching options" }];
+
+    const allRows: ProviderDialogRow[] = [];
+    let lastCategory = "";
+    items.forEach((item, optionIndex) => {
+      const category = item.category || "";
+      if (category && category !== lastCategory) {
+        allRows.push({ type: "category", label: category });
+        lastCategory = category;
+      }
+      allRows.push({ type: "item", item, optionIndex });
+    });
+
+    const selectedRow = Math.max(0, allRows.findIndex((row) => row.type === "item" && row.optionIndex === state.index));
+    const maxStart = Math.max(0, allRows.length - PROVIDER_DIALOG_ROWS);
+    const start = Math.min(maxStart, Math.max(0, selectedRow - Math.floor(PROVIDER_DIALOG_ROWS / 2)));
+    return allRows.slice(start, start + PROVIDER_DIALOG_ROWS);
+  }
+
+  function redrawProviderDialog() {
+    const state = providerDialog;
+    if (!providerDialogRoot) return;
+    if (!state) {
+      providerDialogRoot.visible = false;
+      providerDialogRoot.requestRender();
+      return;
+    }
+
+    const width = Math.max(48, Math.min(76, dimensions().width - 8));
+    const height = PROVIDER_DIALOG_ROWS + 7;
+    providerDialogRoot.visible = true;
+    providerDialogRoot.width = width;
+    providerDialogRoot.height = height;
+    providerDialogRoot.left = Math.max(2, Math.floor((dimensions().width - width) / 2));
+    providerDialogRoot.top = Math.max(1, Math.floor((dimensions().height - height) / 4));
+    providerDialogRoot.backgroundColor = theme.backgroundPanel;
+    providerDialogRoot.borderColor = theme.border;
+
+    if (providerDialogTitle) providerDialogTitle.content = providerDialogTitleFor(state);
+    if (providerDialogEsc) providerDialogEsc.content = "esc";
+    if (providerDialogInput) {
+      providerDialogInput.placeholder = state.step === "key" ? "API key" : "Search";
+      const value = state.step === "key" ? state.apiKey : state.query;
+      if (providerDialogInput.value !== value) providerDialogInput.value = value;
+    }
+
+    const rows = providerDialogVisibleRows(state);
+    for (let i = 0; i < PROVIDER_DIALOG_ROWS; i += 1) {
+      const row = rows[i];
+      const rowBox = providerDialogRows[i];
+      const gutter = providerDialogGutters[i];
+      const label = providerDialogLabels[i];
+      const detail = providerDialogDetails[i];
+      const footer = providerDialogFooters[i];
+      if (rowBox) {
+        rowBox.visible = !!row;
+        rowBox.backgroundColor = row?.type === "item" && row.optionIndex === state.index
+          ? theme.primary
+          : theme.backgroundPanel;
+      }
+      if (!row) {
+        if (gutter) gutter.content = "";
+        if (label) label.content = "";
+        if (detail) detail.content = "";
+        if (footer) footer.content = "";
+        continue;
+      }
+      const active = row.type === "item" && row.optionIndex === state.index;
+      const activeText = contrastText(theme.primary);
+      if (row.type === "category") {
+        if (gutter) gutter.content = "";
+        if (label) {
+          label.content = row.label;
+          label.fg = theme.textMuted;
+        }
+        if (detail) detail.content = "";
+        if (footer) footer.content = "";
+      } else if (row.type === "empty") {
+        if (gutter) gutter.content = "";
+        if (label) {
+          label.content = row.label;
+          label.fg = row.detail ? theme.error : theme.textMuted;
+        }
+        if (detail) {
+          detail.content = row.detail ?? "";
+          detail.fg = theme.error;
+        }
+        if (footer) footer.content = "";
+      } else {
+        if (gutter) {
+          gutter.content = row.item.gutter ?? " ";
+          gutter.fg = active ? activeText : providerDialogGutterColor(row.item.gutter);
+        }
+        if (label) {
+          label.content = truncate(row.item.label, 21);
+          label.fg = active ? activeText : theme.text;
+        }
+        if (detail) {
+          detail.content = truncate(row.item.detail ?? "", providerDialogDetailWidth());
+          detail.fg = active ? activeText : theme.textMuted;
+        }
+        if (footer) {
+          footer.content = row.item.footer ?? "";
+          footer.fg = active ? activeText : theme.textMuted;
+        }
+      }
+      rowBox?.requestRender();
+    }
+
+    if (providerDialogFooter) providerDialogFooter.content = providerDialogFooterFor(state);
+    providerDialogList?.requestRender();
+    providerDialogRoot.requestRender();
+  }
+
+  function providerDialogTitleFor(state: ProviderDialogState) {
+    if (state.step === "providers") return "Connect a provider";
+    const provider = providerDisplayName(state.providerId);
+    if (state.step === "auth") return `${provider} auth method`;
+    if (state.step === "key") return `${provider} API key`;
+    return `${provider} models`;
+  }
+
+  function providerDialogFooterFor(state: ProviderDialogState) {
+    if (state.step === "key") return "enter save · esc back";
+    const items = providerDialogFilteredItems(state);
+    const count = items.length ? ` ${Math.min(state.index + 1, items.length)}/${items.length}` : "";
+    const escLabel = state.step === "providers" ? "esc close" : "esc back";
+    return `type filter · ↑/↓ move · enter select · ${escLabel}${count}`;
+  }
+
+  function providerDialogGutterColor(gutter?: string) {
+    if (gutter === "●") return theme.primary;
+    if (gutter === "✓") return theme.success;
+    if (gutter === "○") return theme.warning;
+    return theme.textMuted;
+  }
+
+  function providerDialogDetailWidth() {
+    const width = typeof providerDialogRoot?.width === "number" ? providerDialogRoot.width : 72;
+    return Math.max(12, width - 43);
+  }
+
+  function providerDisplayName(providerId?: string) {
+    if (!providerId) return "Provider";
+    return registry.getConfigured().find((provider) => provider.id === providerId)?.name
+      ?? BUILTIN_PROVIDERS.find((provider) => provider.id === providerId)?.name
+      ?? providerId;
+  }
+
+  function updateProviderDialogFromMouse(rowIndex: number, confirm = false) {
+    const state = providerDialog;
+    if (!state || state.step === "key") return;
+    const row = providerDialogVisibleRows(state)[rowIndex];
+    if (!row || row.type !== "item") return;
+    providerDialog = { ...state, index: row.optionIndex };
+    redrawProviderDialog();
+    if (confirm) void runProviderDialogSelection();
+  }
+
+  function updateProviderDialogFromScroll(event: any) {
+    const direction = event?.scroll?.direction;
+    if (direction === "up") {
+      moveProviderDialogSelection(-1);
+      event.preventDefault?.();
+      event.stopPropagation?.();
+      return;
+    }
+    if (direction === "down") {
+      moveProviderDialogSelection(1);
+      event.preventDefault?.();
+      event.stopPropagation?.();
+    }
+  }
+
+  function moveProviderDialogSelection(delta: number) {
+    const state = providerDialog;
+    if (!state || state.step === "key") return false;
+    const items = providerDialogFilteredItems(state);
+    if (!items.length) return false;
+    const next = Math.min(items.length - 1, Math.max(0, state.index + delta));
+    if (next === state.index) return true;
+    providerDialog = { ...state, index: next };
+    redrawProviderDialog();
+    return true;
+  }
+
+  function handleProviderDialogKey(event: any): boolean {
+    const state = providerDialog;
+    if (!state) return false;
+    const name = String(event.name || "").toLowerCase();
+    if (name === "escape") {
+      if (state.step === "auth") {
+        openProviderDialog("providers");
+      } else if (state.step === "key") {
+        openProviderDialog(state.providerId && registry.supportsOAuth(state.providerId) ? "auth" : "providers", state.providerId);
+      } else if (state.step === "models") {
+        openProviderDialog("providers");
+      } else {
+        closeProviderDialog();
+      }
+      event.preventDefault?.();
+      return true;
+    }
+    if (state.step !== "key") {
+      const items = providerDialogFilteredItems(state);
+      if (name === "up") {
+        moveProviderDialogSelection(-1);
+        event.preventDefault?.();
+        return true;
+      }
+      if (name === "down") {
+        moveProviderDialogSelection(1);
+        event.preventDefault?.();
+        return true;
+      }
+      if (name === "pageup") {
+        providerDialog = { ...state, index: Math.max(0, state.index - 5) };
+        redrawProviderDialog();
+        event.preventDefault?.();
+        return true;
+      }
+      if (name === "pagedown") {
+        providerDialog = { ...state, index: Math.min(Math.max(0, items.length - 1), state.index + 5) };
+        redrawProviderDialog();
+        event.preventDefault?.();
+        return true;
+      }
+    }
+    if (name === "return" || name === "enter") {
+      void runProviderDialogSelection();
+      event.preventDefault?.();
+      return true;
+    }
+    return false;
+  }
+
+  async function runProviderDialogSelection() {
+    const state = providerDialog;
+    if (!state) return;
+    if (state.step === "key") {
+      const providerId = state.providerId;
+      const apiKey = state.apiKey.trim();
+      if (!providerId) return;
+      if (!apiKey) {
+        providerDialog = { ...state, error: "API key is required." };
+        redrawProviderDialog();
+        return;
+      }
+      await executeSlash(`/key ${providerId} ${apiKey}`);
+      openProviderDialog("models", providerId);
+      return;
+    }
+
+    const items = providerDialogFilteredItems(state);
+    const item = items[state.index];
+    if (!item) return;
+
+    if (state.step === "providers") {
+      if (item.next === "auth") {
+        openProviderDialog("auth", item.value);
+        return;
+      }
+      if (item.next === "key") {
+        ensureProviderConfiguredForKey(item.value);
+        openProviderDialog("key", item.value);
+        return;
+      }
+      await executeSlash(item.command);
+      openProviderDialog("models", item.value);
+      return;
+    }
+
+    if (state.step === "auth") {
+      if (item.next === "key") {
+        ensureProviderConfiguredForKey(item.value);
+        openProviderDialog("key", item.value);
+        return;
+      }
+      await executeSlash(item.command);
+      openProviderDialog("models", item.value);
+      return;
+    }
+
+    if (state.step === "models") {
+      closeProviderDialog();
+      await executeSlash(item.command);
+    }
+  }
+
+  function ensureProviderConfiguredForKey(providerId: string) {
+    if (!registry.getConfigured().some((provider) => provider.id === providerId)) {
+      registry.addProvider(providerId, "");
+    }
+    registry.setDefault(providerId);
   }
 
   function redrawApprovalPanel() {
@@ -1151,6 +1557,10 @@ function OpenTuiApp(props: {
   };
 
   async function submitPrompt() {
+    if (providerDialog) {
+      await runProviderDialogSelection();
+      return;
+    }
     if (pendingApprovalRef) {
       resolveApprovalSelection();
       return;
@@ -1175,8 +1585,12 @@ function OpenTuiApp(props: {
     promptText = "";
     if (picker?.kind === "key") {
       const providerId = picker.providerId;
+      const after = picker.after;
       closePicker();
       await executeSlash(providerId ? `/key ${providerId} ${input}` : `/key ${input}`);
+      if (after) {
+        await openPicker(after.mode, after.providerId);
+      }
       return;
     }
     if (input === "exit" || input === "quit" || input === ":q") {
@@ -1208,6 +1622,7 @@ function OpenTuiApp(props: {
   function onPromptContentChange(value?: unknown) {
     const nextValue = typeof value === "string" ? value : readPromptText();
     promptText = nextValue;
+    if (providerDialog) return;
     if (picker?.kind === "key") return;
     if (picker?.kind === "select" && picker.mode !== "slash" && picker.mode !== "file") {
       filterActivePicker(nextValue);
@@ -1247,6 +1662,8 @@ function OpenTuiApp(props: {
 
   function openCommandPalette() {
     const items = buildSlashItems();
+    providerDialog = undefined;
+    redrawProviderDialog();
     picker = {
       kind: "select",
       mode: "slash",
@@ -1394,6 +1811,10 @@ function OpenTuiApp(props: {
   }
 
   async function openPicker(kind: PickerMode, providerId?: string) {
+    if (kind === "provider" || kind === "provider-auth") {
+      openProviderDialog(kind === "provider-auth" ? "auth" : "providers", providerId);
+      return;
+    }
     if (kind === "key") {
       picker = {
         kind: "key",
@@ -1401,6 +1822,8 @@ function OpenTuiApp(props: {
         providerId,
         previous: previousPickerForKey,
       };
+      providerDialog = undefined;
+      redrawProviderDialog();
       previousPickerForKey = undefined;
       activePrompt()?.clear();
       activePrompt()?.focus();
@@ -1409,17 +1832,20 @@ function OpenTuiApp(props: {
     }
 
     const selectKind = kind as Exclude<PickerMode, "key">;
+    providerDialog = undefined;
+    redrawProviderDialog();
     activePrompt()?.clear();
     promptText = "";
-    const immediateItems = buildPickerItems(selectKind);
+    const immediateItems = buildPickerItems(selectKind, providerId);
     picker = {
       kind: "select",
       mode: selectKind,
-      title: pickerTitle(selectKind),
+      title: pickerTitle(selectKind, providerId),
       items: immediateItems,
       allItems: immediateItems,
       index: preferredPickerIndex(selectKind, immediateItems),
       loading: false,
+      meta: providerId ? { providerId } : undefined,
     };
     activePrompt()?.focus();
     redrawDock();
@@ -1436,8 +1862,33 @@ function OpenTuiApp(props: {
       await executeSlash(item.command);
       return;
     }
+    if (item.next === "auth") {
+      const immediateItems = buildPickerItems("provider-auth", item.value);
+      picker = {
+        kind: "select",
+        mode: "provider-auth",
+        title: pickerTitle("provider-auth", item.value),
+        items: immediateItems,
+        allItems: immediateItems,
+        index: 0,
+        loading: false,
+        meta: { providerId: item.value },
+      };
+      activePrompt()?.clear();
+      activePrompt()?.focus();
+      redrawDock();
+      return;
+    }
     if (item.next === "key") {
-      picker = { kind: "key", title: `Enter API key for ${item.value}`, providerId: item.value };
+      if (item.command.startsWith("/provider --add ")) {
+        await executeSlash(item.command);
+      }
+      picker = {
+        kind: "key",
+        title: `Enter API key for ${item.value}`,
+        providerId: item.value,
+        after: item.after,
+      };
       activePrompt()?.clear();
       activePrompt()?.focus();
       redrawDock();
@@ -1449,13 +1900,17 @@ function OpenTuiApp(props: {
     activePrompt()?.clear();
     closePicker();
     await executeSlash(item.command);
+    if (item.after) {
+      await openPicker(item.after.mode, item.after.providerId);
+    }
   }
 
-  function buildPickerItems(kind: Exclude<PickerMode, "key">): PickerItem[] {
+  function buildPickerItems(kind: Exclude<PickerMode, "key">, providerId?: string): PickerItem[] {
     if (kind === "slash") return [];
     if (kind === "model") {
       const items: PickerItem[] = [];
       for (const provider of registry.getEnabled()) {
+        if (providerId && provider.id !== providerId) continue;
         const customModels = registry.getModelConfig().getCustomModels(provider.id);
         const builtinProviderId = provider.id === "openai" && provider.authType === "oauth"
           ? "openai-codex"
@@ -1490,7 +1945,7 @@ function OpenTuiApp(props: {
         }
       }
       const currentModel = props.agent.model;
-      if (currentModel && !items.some((item) => item.value === currentModel)) {
+      if (!providerId && currentModel && !items.some((item) => item.value === currentModel)) {
         items.unshift({
           label: displayModel(currentModel),
           detail: "current",
@@ -1502,24 +1957,31 @@ function OpenTuiApp(props: {
     }
 
     if (kind === "provider") {
-      const configuredProviders = registry.getConfigured();
-      const configuredIds = new Set(configuredProviders.map((provider) => provider.id));
-      const configuredItems = configuredProviders.map((provider) => ({
-        label: provider.name,
-        detail: `${provider.id}${provider.id === registry.getDefault()?.id ? " · default" : ""}${provider.apiKey ? "" : " · needs key"}`,
+      return buildProviderConnectItems();
+    }
+
+    if (kind === "provider-auth") {
+      if (!providerId) return [];
+      const provider = BUILTIN_PROVIDERS.find((item) => item.id === providerId);
+      if (!provider) return [];
+      const items: PickerItem[] = [{
+        label: "API key",
+        detail: providerAuthDescription(provider.id, "api"),
         value: provider.id,
-        command: provider.apiKey ? `/provider --set ${provider.id}` : `/key ${provider.id}`,
-        next: provider.apiKey ? undefined : "key" as const,
-      }));
-      const addableItems = BUILTIN_PROVIDERS
-        .filter((provider) => isUserVisibleProvider(provider.id) && !configuredIds.has(provider.id))
-        .map((provider) => ({
-          label: provider.name,
-          detail: `${provider.id} · add provider`,
+        command: `/provider --add ${provider.id}`,
+        next: "key",
+        after: { mode: "model", providerId: provider.id },
+      }];
+      if (registry.supportsOAuth(provider.id)) {
+        items.unshift({
+          label: "ChatGPT login",
+          detail: providerAuthDescription(provider.id, "oauth"),
           value: provider.id,
-          command: `/provider --add ${provider.id}`,
-        }));
-      return [...configuredItems, ...addableItems];
+          command: `/login ${provider.id}`,
+          after: { mode: "model", providerId: provider.id },
+        });
+      }
+      return items;
     }
 
     if (kind === "provider-add") {
@@ -1552,6 +2014,91 @@ function OpenTuiApp(props: {
         value: provider.id,
         command: `/logout ${provider.id}`,
       }));
+  }
+
+  function buildProviderConnectItems(): PickerItem[] {
+    const configuredProviders = registry.getConfigured();
+    const configured = new Map(configuredProviders.map((provider) => [provider.id, provider]));
+    const defaultProviderId = registry.getDefault()?.id;
+    const builtinProviders = BUILTIN_PROVIDERS.filter((provider) => isUserVisibleProvider(provider.id));
+    const builtinIds = new Set(builtinProviders.map((provider) => provider.id));
+    const customProviders = configuredProviders
+      .filter((provider) => !builtinIds.has(provider.id))
+      .map((provider) => ({ id: provider.id, name: provider.name }));
+    return [...builtinProviders, ...customProviders]
+      .sort((a, b) => {
+        const ap = PROVIDER_PRIORITY.get(a.id) ?? 99;
+        const bp = PROVIDER_PRIORITY.get(b.id) ?? 99;
+        return ap - bp || a.name.localeCompare(b.name);
+      })
+      .map((provider) => {
+        const profile = configured.get(provider.id);
+        const connected = !!profile?.apiKey;
+        const needsKey = !!profile && !profile.apiKey;
+        const isDefault = connected && provider.id === defaultProviderId;
+        const group = PROVIDER_PRIORITY.has(provider.id) ? "Popular" : "Other";
+        const marker = isDefault ? "●" : connected ? "✓" : needsKey ? "○" : " ";
+        const detail = providerConnectDescription(provider.id);
+        const footer = isDefault ? "default" : connected ? "connected" : needsKey ? "needs key" : "";
+
+        if (connected) {
+          return {
+            label: provider.name,
+            detail,
+            value: provider.id,
+            command: `/provider --set ${provider.id}`,
+            after: { mode: "model", providerId: provider.id },
+            category: group,
+            gutter: marker,
+            footer,
+          };
+        }
+        if (needsKey) {
+          return {
+            label: provider.name,
+            detail,
+            value: provider.id,
+            command: `/key ${provider.id}`,
+            next: "key",
+            after: { mode: "model", providerId: provider.id },
+            category: group,
+            gutter: marker,
+            footer,
+          };
+        }
+        return {
+          label: provider.name,
+          detail,
+          value: provider.id,
+          command: `/provider --add ${provider.id}`,
+          next: registry.supportsOAuth(provider.id) ? "auth" : "key",
+          after: { mode: "model", providerId: provider.id },
+          category: group,
+          gutter: marker,
+          footer,
+        };
+      });
+  }
+
+  function providerConnectDescription(providerId: string): string {
+    const descriptions: Record<string, string> = {
+      openai: "ChatGPT login or API key",
+      deepseek: "API key",
+      google: "API key",
+      "zhipuai-coding-plan": "Coding Plan",
+      "zai-coding-plan": "Coding Plan",
+      "kimi-for-coding": "Coding Plan",
+      local: "OpenAI-compatible local endpoint",
+    };
+    return descriptions[providerId] ?? "API key";
+  }
+
+  function providerAuthDescription(providerId: string, type: "api" | "oauth"): string {
+    if (type === "oauth") {
+      return providerId === "openai" ? "Use ChatGPT account OAuth" : "OAuth login";
+    }
+    if (providerId === "openai") return "Use an OpenAI API key";
+    return "Paste provider API key";
   }
 
   async function runAgentInput(actualInput: string | ContentPart[], displayInput: string) {
@@ -1869,6 +2416,164 @@ function OpenTuiApp(props: {
       ),
       ),
     ];
+  }
+
+  function renderProviderDialog() {
+    return h("box", {
+      ref: (ref: BoxRenderable) => {
+        providerDialogRoot = ref;
+        redrawProviderDialog();
+      },
+      visible: false,
+      position: "absolute",
+      left: 4,
+      top: 2,
+      width: 72,
+      height: PROVIDER_DIALOG_ROWS + 7,
+      zIndex: 1200,
+      backgroundColor: theme.backgroundPanel,
+      border: true,
+      borderColor: theme.border,
+      flexDirection: "column",
+      onMouseScroll: updateProviderDialogFromScroll,
+    },
+    [
+      h("box", {
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "space-between",
+        paddingLeft: 2,
+        paddingRight: 2,
+        paddingTop: 1,
+        paddingBottom: 1,
+        flexShrink: 0,
+      },
+      h("text", {
+        ref: (ref: TextRenderable) => { providerDialogTitle = ref; },
+        fg: theme.text,
+        content: "Connect a provider",
+      }),
+      h("text", {
+        ref: (ref: TextRenderable) => { providerDialogEsc = ref; },
+        fg: theme.textMuted,
+        content: "esc",
+      })),
+      h("box", {
+        paddingLeft: 2,
+        paddingRight: 2,
+        paddingBottom: 1,
+        flexShrink: 0,
+      },
+      h("input", {
+        ref: (ref: InputRenderable) => { providerDialogInput = ref; },
+        width: "100%",
+        value: "",
+        placeholder: "Search",
+        fg: theme.text,
+        backgroundColor: theme.backgroundElement,
+        placeholderColor: theme.textMuted,
+        onInput: (value: string) => {
+          const state = providerDialog;
+          if (!state) return;
+          if (state.step === "key") {
+            providerDialog = { ...state, apiKey: value, error: undefined };
+          } else {
+            const items = providerDialogItemsFor(state.step, state.providerId).filter((item) => {
+              const query = value.trim().toLowerCase();
+              if (!query) return true;
+              const haystack = [item.label, item.detail, item.value, item.category, item.footer]
+                .filter(Boolean)
+                .join(" ")
+                .toLowerCase();
+              return haystack.includes(query) || fuzzyMatch(haystack, query);
+            });
+            providerDialog = {
+              ...state,
+              query: value,
+              index: value !== state.query ? 0 : Math.min(state.index, Math.max(0, items.length - 1)),
+              error: undefined,
+            };
+          }
+          redrawProviderDialog();
+        },
+        onKeyDown: (event: any) => {
+          handleProviderDialogKey(event);
+        },
+        onSubmit: () => {
+          void runProviderDialogSelection();
+        },
+      })),
+      h("box", {
+        ref: (ref: BoxRenderable) => { providerDialogList = ref; },
+        height: PROVIDER_DIALOG_ROWS,
+        paddingLeft: 1,
+        paddingRight: 1,
+        flexShrink: 0,
+        flexDirection: "column",
+        onMouseScroll: updateProviderDialogFromScroll,
+      },
+      ...Array.from({ length: PROVIDER_DIALOG_ROWS }, (_, index) =>
+        h("box", {
+          ref: (ref: BoxRenderable) => { providerDialogRows[index] = ref; },
+          visible: false,
+          height: 1,
+          flexDirection: "row",
+          gap: 1,
+          paddingLeft: 1,
+          paddingRight: 1,
+          onMouseMove: () => updateProviderDialogFromMouse(index, false),
+          onMouseDown: () => updateProviderDialogFromMouse(index, false),
+          onMouseUp: () => updateProviderDialogFromMouse(index, true),
+          onMouseScroll: updateProviderDialogFromScroll,
+        },
+        h("text", {
+          ref: (ref: TextRenderable) => { providerDialogGutters[index] = ref; },
+          width: 2,
+          flexShrink: 0,
+          fg: theme.textMuted,
+          content: "",
+        }),
+        h("text", {
+          ref: (ref: TextRenderable) => { providerDialogLabels[index] = ref; },
+          width: 22,
+          flexShrink: 0,
+          wrapMode: "none",
+          fg: theme.text,
+          content: "",
+        }),
+        h("text", {
+          ref: (ref: TextRenderable) => { providerDialogDetails[index] = ref; },
+          flexGrow: 1,
+          minWidth: 0,
+          wrapMode: "none",
+          fg: theme.textMuted,
+          content: "",
+        }),
+        h("text", {
+          ref: (ref: TextRenderable) => { providerDialogFooters[index] = ref; },
+          width: 12,
+          flexShrink: 0,
+          wrapMode: "none",
+          fg: theme.textMuted,
+          content: "",
+        })),
+      )),
+      h("box", {
+        flexDirection: "row",
+        justifyContent: "space-between",
+        paddingLeft: 2,
+        paddingRight: 2,
+        paddingTop: 1,
+        paddingBottom: 1,
+        flexShrink: 0,
+        backgroundColor: theme.backgroundElement,
+      },
+      h("text", {
+        ref: (ref: TextRenderable) => { providerDialogFooter = ref; },
+        fg: theme.textMuted,
+        content: "type filter · ↑/↓ move · enter select · esc cancel",
+      })),
+    ]);
   }
 
   function renderSessionSidebar() {
@@ -2284,6 +2989,7 @@ function OpenTuiApp(props: {
       registerScanner: registerPromptScanner,
       registerModeBadge: registerFooterModeBadge,
     }),
+    renderProviderDialog(),
   ]);
 }
 
@@ -3165,14 +3871,22 @@ function renderFooter(input: {
   );
 }
 
-function pickerTitle(kind: Exclude<PickerMode, "key">) {
+function pickerTitle(kind: Exclude<PickerMode, "key">, providerId?: string) {
   switch (kind) {
     case "model":
+      if (providerId) {
+        const provider = BUILTIN_PROVIDERS.find((item) => item.id === providerId);
+        return provider ? `${provider.name} Models` : "Select Model";
+      }
       return "Select Model";
     case "provider":
-      return "Select Provider";
+      return "Connect Provider";
     case "provider-add":
       return "Add Provider";
+    case "provider-auth": {
+      const provider = providerId ? BUILTIN_PROVIDERS.find((item) => item.id === providerId) : undefined;
+      return provider ? `${provider.name} Auth` : "Select Auth Method";
+    }
     case "login":
       return "Select Login Provider";
     case "logout":
