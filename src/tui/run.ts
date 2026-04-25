@@ -2399,7 +2399,7 @@ function renderMessage(
 function renderUserMessage(message: DisplayMessage, index: number) {
   return h("box", {
     border: ["left"],
-    borderColor: theme.messageUserBorder,
+    borderColor: theme.primary,
     marginTop: index === 0 ? 0 : 1,
     backgroundColor: theme.backgroundPanel,
     flexShrink: 0,
@@ -2791,7 +2791,7 @@ function createUserEntry(ctx: RenderContext, message: DisplayMessage, index: num
   refs.userText = text;
   const node = createBox(ctx, {
     border: ["left"],
-    borderColor: theme.messageUserBorder,
+    borderColor: theme.primary,
     marginTop: index === 0 ? 0 : 1,
     backgroundColor: theme.backgroundPanel,
     flexShrink: 0,
