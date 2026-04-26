@@ -14,6 +14,7 @@ import {
   type SelectOption,
   type SelectRenderable,
   StyledText,
+  RGBA,
   type SyntaxStyle,
   fg,
   bg,
@@ -253,6 +254,31 @@ function h(tag: string | ((props: any) => any), props?: Record<string, any> | nu
   return element;
 }
 
+function isDestroyedRenderable(ref: Renderable | undefined): boolean {
+  return !ref || (ref as any).isDestroyed === true;
+}
+
+function safeRequestRender(ref: Renderable | undefined): boolean {
+  if (!ref || isDestroyedRenderable(ref)) return false;
+  try {
+    ref.requestRender();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function safeSetText(ref: TextRenderable | undefined, content: string | StyledText): boolean {
+  if (!ref || isDestroyedRenderable(ref)) return false;
+  try {
+    ref.content = content;
+    ref.requestRender();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions = {}) {
   return new Promise<void>(async (resolve, reject) => {
     let renderer: CliRenderer | undefined;
@@ -350,6 +376,7 @@ function OpenTuiApp(props: {
     turns: 0,
   });
   const [gitState, setGitState] = createSignal<SidebarGitState>({ files: [] });
+  let uiDisposed = false;
   const [pendingPlan, setPendingPlan] = createSignal<{
     plan: string;
     resolve: (decision: PlanDecision) => void;
@@ -400,6 +427,7 @@ function OpenTuiApp(props: {
   const inlinePickerLabels: Array<TextRenderable | undefined> = [];
   const inlinePickerDetails: Array<TextRenderable | undefined> = [];
   let providerDialogRoot: BoxRenderable | undefined;
+  let providerDialogPanel: BoxRenderable | undefined;
   let providerDialogTitle: TextRenderable | undefined;
   let providerDialogEsc: TextRenderable | undefined;
   let providerDialogInput: InputRenderable | undefined;
@@ -411,7 +439,9 @@ function OpenTuiApp(props: {
   const providerDialogDetails: Array<TextRenderable | undefined> = [];
   const providerDialogFooters: Array<TextRenderable | undefined> = [];
   const promptModeLabels = new Set<TextRenderable>();
+  const promptModelLabels = new Set<TextRenderable>();
   let footerModeBadge: TextRenderable | undefined;
+  let footerModelStatus: TextRenderable | undefined;
   let sidebarTokenText: TextRenderable | undefined;
   let sidebarPercentText: TextRenderable | undefined;
   let sidebarUsageText: TextRenderable | undefined;
@@ -427,6 +457,14 @@ function OpenTuiApp(props: {
     isHomeSurfaceActive()
       ? homeComposerShell ?? sessionComposerShell
       : sessionComposerShell ?? homeComposerShell;
+
+  onCleanup(() => {
+    uiDisposed = true;
+    promptModeLabels.clear();
+    promptModelLabels.clear();
+    footerModeBadge = undefined;
+    footerModelStatus = undefined;
+  });
 
   const readPromptText = () => {
     try {
@@ -491,37 +529,53 @@ function OpenTuiApp(props: {
   const footerModeText = () => mode() !== "default" ? `  ${mode()} · tab` : "";
 
   function syncModeChrome() {
+    if (uiDisposed) return;
     for (const label of [...promptModeLabels]) {
-      try {
-        if ((label as any).isDestroyed) {
-          promptModeLabels.delete(label);
-          continue;
-        }
-        label.content = promptModeTitle();
-        label.requestRender();
-      } catch {
-        promptModeLabels.delete(label);
-      }
+      if (!safeSetText(label, promptModeTitle())) promptModeLabels.delete(label);
     }
-    if (footerModeBadge) {
-      footerModeBadge.content = footerModeText();
-      footerModeBadge.requestRender();
-    }
-    homeComposerShell?.requestRender();
-    sessionComposerShell?.requestRender();
-    rootBox?.requestRender();
+    if (footerModeBadge && !safeSetText(footerModeBadge, footerModeText())) footerModeBadge = undefined;
+    safeRequestRender(homeComposerShell);
+    safeRequestRender(sessionComposerShell);
+    safeRequestRender(rootBox);
   }
 
   const registerPromptModeLabel = (ref: TextRenderable) => {
+    if (uiDisposed) return;
     promptModeLabels.add(ref);
-    ref.content = promptModeTitle();
-    ref.requestRender();
+    if (!safeSetText(ref, promptModeTitle())) promptModeLabels.delete(ref);
+  };
+
+  const promptModelTitle = () => displayModel(props.agent.model) || "no model";
+  const footerModelStatusText = () =>
+    `${props.agent.providerId || registry.getDefault()?.id || "unknown"} · ${displayModelWithThinking(props.agent.model, props.agent.thinking) || "no model"}`;
+
+  const syncModelChrome = () => {
+    if (uiDisposed) return;
+    for (const label of [...promptModelLabels]) {
+      if (!safeSetText(label, promptModelTitle())) promptModelLabels.delete(label);
+    }
+    if (footerModelStatus && !safeSetText(footerModelStatus, footerModelStatusText())) footerModelStatus = undefined;
+    safeRequestRender(homeComposerShell);
+    safeRequestRender(sessionComposerShell);
+    safeRequestRender(rootBox);
+  };
+
+  const registerPromptModelLabel = (ref: TextRenderable) => {
+    if (uiDisposed) return;
+    promptModelLabels.add(ref);
+    if (!safeSetText(ref, promptModelTitle())) promptModelLabels.delete(ref);
+  };
+
+  const registerFooterModelStatus = (ref: TextRenderable) => {
+    if (uiDisposed) return;
+    footerModelStatus = ref;
+    if (!safeSetText(ref, footerModelStatusText())) footerModelStatus = undefined;
   };
 
   const registerFooterModeBadge = (ref: TextRenderable) => {
+    if (uiDisposed) return;
     footerModeBadge = ref;
-    ref.content = footerModeText();
-    ref.requestRender();
+    if (!safeSetText(ref, footerModeText())) footerModeBadge = undefined;
   };
 
   const cycleMode = () => {
@@ -973,6 +1027,7 @@ function OpenTuiApp(props: {
   function closeProviderDialog() {
     providerDialog = undefined;
     providerDialogRoot && (providerDialogRoot.visible = false);
+    providerDialogPanel && (providerDialogPanel.visible = false);
     providerDialogRoot?.requestRender();
     setTimeout(() => activePrompt()?.focus(), 0);
   }
@@ -980,7 +1035,14 @@ function OpenTuiApp(props: {
   function providerDialogItemsFor(step: ProviderDialogStep, providerId?: string) {
     if (step === "providers") return buildProviderConnectItems();
     if (step === "auth") return providerId ? buildPickerItems("provider-auth", providerId) : [];
-    if (step === "models") return providerId ? buildPickerItems("model", providerId) : [];
+    if (step === "models") {
+      const modelItems = buildPickerItems("model", providerId);
+      if (modelItems.length || providerId) return modelItems;
+      return buildProviderConnectItems()
+        .filter((item) => item.category === "Popular")
+        .slice(0, 6)
+        .map((item) => ({ ...item, category: "Popular providers" }));
+    }
     return [];
   }
 
@@ -1016,9 +1078,10 @@ function OpenTuiApp(props: {
 
     const allRows: ProviderDialogRow[] = [];
     let lastCategory = "";
+    const flatten = !!state.query.trim();
     items.forEach((item, optionIndex) => {
       const category = item.category || "";
-      if (category && category !== lastCategory) {
+      if (!flatten && category && category !== lastCategory) {
         allRows.push({ type: "category", label: category });
         lastCategory = category;
       }
@@ -1036,19 +1099,29 @@ function OpenTuiApp(props: {
     if (!providerDialogRoot) return;
     if (!state) {
       providerDialogRoot.visible = false;
+      providerDialogPanel && (providerDialogPanel.visible = false);
       providerDialogRoot.requestRender();
       return;
     }
 
-    const width = Math.max(48, Math.min(76, dimensions().width - 8));
+    const width = Math.max(48, Math.min(60, dimensions().width - 2));
     const height = PROVIDER_DIALOG_ROWS + 7;
     providerDialogRoot.visible = true;
-    providerDialogRoot.width = width;
-    providerDialogRoot.height = height;
-    providerDialogRoot.left = Math.max(2, Math.floor((dimensions().width - width) / 2));
-    providerDialogRoot.top = Math.max(1, Math.floor((dimensions().height - height) / 4));
-    providerDialogRoot.backgroundColor = theme.backgroundPanel;
-    providerDialogRoot.borderColor = theme.border;
+    providerDialogRoot.width = dimensions().width;
+    providerDialogRoot.height = dimensions().height;
+    providerDialogRoot.left = 0;
+    providerDialogRoot.top = 0;
+    providerDialogRoot.backgroundColor = RGBA.fromInts(0, 0, 0, 150);
+    if (providerDialogPanel) {
+      providerDialogPanel.visible = true;
+      providerDialogPanel.width = width;
+      providerDialogPanel.height = height;
+      providerDialogPanel.left = Math.max(0, Math.floor((dimensions().width - width) / 2));
+      providerDialogPanel.top = Math.max(0, Math.floor(dimensions().height / 4));
+      providerDialogPanel.backgroundColor = theme.backgroundPanel;
+      providerDialogPanel.borderColor = theme.backgroundPanel;
+      providerDialogPanel.requestRender();
+    }
 
     if (providerDialogTitle) providerDialogTitle.content = providerDialogTitleFor(state);
     if (providerDialogEsc) providerDialogEsc.content = "esc";
@@ -1085,7 +1158,7 @@ function OpenTuiApp(props: {
         if (gutter) gutter.content = "";
         if (label) {
           label.content = row.label;
-          label.fg = theme.textMuted;
+          label.fg = theme.accent;
         }
         if (detail) detail.content = "";
         if (footer) footer.content = "";
@@ -1102,15 +1175,18 @@ function OpenTuiApp(props: {
         if (footer) footer.content = "";
       } else {
         if (gutter) {
-          gutter.content = row.item.gutter ?? " ";
-          gutter.fg = active ? activeText : providerDialogGutterColor(row.item.gutter);
+          gutter.content = row.item.gutter ?? (isCurrentModelItem(row.item) ? "●" : " ");
+          gutter.fg = active ? activeText : providerDialogGutterColor(row.item.gutter ?? (isCurrentModelItem(row.item) ? "●" : undefined));
         }
         if (label) {
-          label.content = truncate(row.item.label, 21);
-          label.fg = active ? activeText : theme.text;
+          label.content = truncate(row.item.label, 37);
+          label.fg = active ? activeText : isCurrentModelItem(row.item) ? theme.primary : theme.text;
         }
         if (detail) {
-          detail.content = truncate(row.item.detail ?? "", providerDialogDetailWidth());
+          const detailText = state.query.trim() && state.step === "models"
+            ? row.item.category ?? row.item.detail ?? ""
+            : row.item.detail ?? "";
+          detail.content = truncate(detailText, providerDialogDetailWidth());
           detail.fg = active ? activeText : theme.textMuted;
         }
         if (footer) {
@@ -1131,6 +1207,7 @@ function OpenTuiApp(props: {
     const provider = providerDisplayName(state.providerId);
     if (state.step === "auth") return `${provider} auth method`;
     if (state.step === "key") return `${provider} API key`;
+    if (!state.providerId) return "Select model";
     return `${provider} models`;
   }
 
@@ -1138,8 +1215,12 @@ function OpenTuiApp(props: {
     if (state.step === "key") return "enter save · esc back";
     const items = providerDialogFilteredItems(state);
     const count = items.length ? ` ${Math.min(state.index + 1, items.length)}/${items.length}` : "";
+    if (state.step === "models") {
+      const connect = state.providerId ? "" : " · ctrl+o providers";
+      return `↑/↓ move · enter select · esc close${connect}${count}`;
+    }
     const escLabel = state.step === "providers" ? "esc close" : "esc back";
-    return `type filter · ↑/↓ move · enter select · ${escLabel}${count}`;
+    return `↑/↓ move · enter select · ${escLabel}${count}`;
   }
 
   function providerDialogGutterColor(gutter?: string) {
@@ -1150,8 +1231,11 @@ function OpenTuiApp(props: {
   }
 
   function providerDialogDetailWidth() {
-    const width = typeof providerDialogRoot?.width === "number" ? providerDialogRoot.width : 72;
-    return Math.max(12, width - 43);
+    return 16;
+  }
+
+  function isCurrentModelItem(item: PickerItem) {
+    return item.value === props.agent.model || item.detail?.includes("current");
   }
 
   function providerDisplayName(providerId?: string) {
@@ -1191,8 +1275,9 @@ function OpenTuiApp(props: {
     if (!state || state.step === "key") return false;
     const items = providerDialogFilteredItems(state);
     if (!items.length) return false;
-    const next = Math.min(items.length - 1, Math.max(0, state.index + delta));
-    if (next === state.index) return true;
+    let next = state.index + delta;
+    while (next < 0) next += items.length;
+    next %= items.length;
     providerDialog = { ...state, index: next };
     redrawProviderDialog();
     return true;
@@ -1208,41 +1293,67 @@ function OpenTuiApp(props: {
       } else if (state.step === "key") {
         openProviderDialog(state.providerId && registry.supportsOAuth(state.providerId) ? "auth" : "providers", state.providerId);
       } else if (state.step === "models") {
-        openProviderDialog("providers");
+        closeProviderDialog();
       } else {
         closeProviderDialog();
       }
       event.preventDefault?.();
+      event.stopPropagation?.();
       return true;
     }
     if (state.step !== "key") {
       const items = providerDialogFilteredItems(state);
-      if (name === "up") {
-        moveProviderDialogSelection(-1);
+      if (state.step === "models" && event.ctrl && name === "o") {
+        openProviderDialog("providers");
         event.preventDefault?.();
+        event.stopPropagation?.();
         return true;
       }
-      if (name === "down") {
+      if (name === "up" || (event.ctrl && name === "p")) {
+        moveProviderDialogSelection(-1);
+        event.preventDefault?.();
+        event.stopPropagation?.();
+        return true;
+      }
+      if (name === "down" || (event.ctrl && name === "n")) {
         moveProviderDialogSelection(1);
         event.preventDefault?.();
+        event.stopPropagation?.();
         return true;
       }
       if (name === "pageup") {
-        providerDialog = { ...state, index: Math.max(0, state.index - 5) };
+        providerDialog = { ...state, index: Math.max(0, state.index - 10) };
         redrawProviderDialog();
         event.preventDefault?.();
+        event.stopPropagation?.();
         return true;
       }
       if (name === "pagedown") {
-        providerDialog = { ...state, index: Math.min(Math.max(0, items.length - 1), state.index + 5) };
+        providerDialog = { ...state, index: Math.min(Math.max(0, items.length - 1), state.index + 10) };
         redrawProviderDialog();
         event.preventDefault?.();
+        event.stopPropagation?.();
+        return true;
+      }
+      if (name === "home") {
+        providerDialog = { ...state, index: 0 };
+        redrawProviderDialog();
+        event.preventDefault?.();
+        event.stopPropagation?.();
+        return true;
+      }
+      if (name === "end") {
+        providerDialog = { ...state, index: Math.max(0, items.length - 1) };
+        redrawProviderDialog();
+        event.preventDefault?.();
+        event.stopPropagation?.();
         return true;
       }
     }
     if (name === "return" || name === "enter") {
       void runProviderDialogSelection();
       event.preventDefault?.();
+      event.stopPropagation?.();
       return true;
     }
     return false;
@@ -1296,6 +1407,20 @@ function OpenTuiApp(props: {
     }
 
     if (state.step === "models") {
+      if (item.next === "auth") {
+        openProviderDialog("auth", item.value);
+        return;
+      }
+      if (item.next === "key") {
+        ensureProviderConfiguredForKey(item.value);
+        openProviderDialog("key", item.value);
+        return;
+      }
+      if (item.after) {
+        await executeSlash(item.command);
+        openProviderDialog("models", item.after.providerId);
+        return;
+      }
       closeProviderDialog();
       await executeSlash(item.command);
     }
@@ -1804,13 +1929,21 @@ function OpenTuiApp(props: {
       mcpManager: props.options.mcpManager,
     });
     if (!handled) return false;
+    if (uiDisposed) return true;
     if (props.agent.mode !== mode()) setMode(props.agent.mode);
+    syncModelChrome();
+    syncModeChrome();
+    if (uiDisposed) return true;
     if (result) addMessage("assistant", result);
     if (inject) await runAgentInput(inject, input);
     return true;
   }
 
   async function openPicker(kind: PickerMode, providerId?: string) {
+    if (kind === "model") {
+      openProviderDialog("models", providerId);
+      return;
+    }
     if (kind === "provider" || kind === "provider-auth") {
       openProviderDialog(kind === "provider-auth" ? "auth" : "providers", providerId);
       return;
@@ -1929,18 +2062,23 @@ function OpenTuiApp(props: {
               const isCurrent = props.agent.model === `${provider.id}:${model.id}` && props.agent.thinking === level;
               items.push({
                 label: `${model.name} (${level})`,
-                detail: `${provider.name}${isCurrent ? " · current" : ""}`,
+                detail: isCurrent ? "(current)" : undefined,
                 value: `${provider.id}:${model.id}`,
                 command: `/model ${provider.id}:${model.id} --reasoning-effort ${level}`,
+                category: provider.name,
+                gutter: isCurrent ? "●" : undefined,
               });
             }
             continue;
           }
+          const isCurrent = props.agent.model === `${provider.id}:${model.id}`;
           items.push({
             label: model.name,
-            detail: `${provider.name}${props.agent.model === `${provider.id}:${model.id}` ? " · current" : ""}`,
+            detail: isCurrent ? "(current)" : undefined,
             value: `${provider.id}:${model.id}`,
             command: `/model ${provider.id}:${model.id}`,
+            category: provider.name,
+            gutter: isCurrent ? "●" : undefined,
           });
         }
       }
@@ -1948,9 +2086,11 @@ function OpenTuiApp(props: {
       if (!providerId && currentModel && !items.some((item) => item.value === currentModel)) {
         items.unshift({
           label: displayModel(currentModel),
-          detail: "current",
+          detail: "(current)",
           value: currentModel,
           command: `/model ${currentModel}`,
+          category: "Recent",
+          gutter: "●",
         });
       }
       return items;
@@ -2283,7 +2423,8 @@ function OpenTuiApp(props: {
         disabled: () => isRunning() && !pendingApproval() && !pendingPlan(),
         mode,
         registerModeLabel: registerPromptModeLabel,
-        model: () => displayModel(props.agent.model) || "no model",
+        registerModelLabel: registerPromptModelLabel,
+        model: promptModelTitle,
         placeholder: () => {
           const approvalState = pendingApproval();
           if (approvalState) return "Press Enter to approve or Esc to reject";
@@ -2338,7 +2479,8 @@ function OpenTuiApp(props: {
         disabled: () => isRunning() && !pendingApproval() && !pendingPlan(),
         mode,
         registerModeLabel: registerPromptModeLabel,
-        model: () => displayModel(props.agent.model) || "no model",
+        registerModelLabel: registerPromptModelLabel,
+        model: promptModelTitle,
         placeholder: () => {
           const approvalState = pendingApproval();
           if (approvalState) return "Press Enter to approve or Esc to reject";
@@ -2426,154 +2568,171 @@ function OpenTuiApp(props: {
       },
       visible: false,
       position: "absolute",
-      left: 4,
-      top: 2,
-      width: 72,
-      height: PROVIDER_DIALOG_ROWS + 7,
-      zIndex: 1200,
-      backgroundColor: theme.backgroundPanel,
-      border: true,
-      borderColor: theme.border,
+      left: 0,
+      top: 0,
+      width: "100%",
+      height: "100%",
+      zIndex: 3000,
+      backgroundColor: RGBA.fromInts(0, 0, 0, 150),
       flexDirection: "column",
+      onMouseUp: () => closeProviderDialog(),
+      onMouseScroll: updateProviderDialogFromScroll,
+    },
+    h("box", {
+      ref: (ref: BoxRenderable) => {
+        providerDialogPanel = ref;
+        redrawProviderDialog();
+      },
+      visible: false,
+      position: "absolute",
+      width: 60,
+      height: PROVIDER_DIALOG_ROWS + 7,
+      backgroundColor: theme.backgroundPanel,
+      flexDirection: "column",
+      paddingTop: 1,
+      onMouseUp: (event: any) => {
+        event.stopPropagation?.();
+      },
       onMouseScroll: updateProviderDialogFromScroll,
     },
     [
-      h("box", {
-        flexDirection: "row",
-        alignItems: "center",
-        justifyContent: "space-between",
-        paddingLeft: 2,
-        paddingRight: 2,
-        paddingTop: 1,
-        paddingBottom: 1,
-        flexShrink: 0,
-      },
-      h("text", {
-        ref: (ref: TextRenderable) => { providerDialogTitle = ref; },
-        fg: theme.text,
-        content: "Connect a provider",
-      }),
-      h("text", {
-        ref: (ref: TextRenderable) => { providerDialogEsc = ref; },
-        fg: theme.textMuted,
-        content: "esc",
-      })),
-      h("box", {
-        paddingLeft: 2,
-        paddingRight: 2,
-        paddingBottom: 1,
-        flexShrink: 0,
-      },
-      h("input", {
-        ref: (ref: InputRenderable) => { providerDialogInput = ref; },
-        width: "100%",
-        value: "",
-        placeholder: "Search",
-        fg: theme.text,
-        backgroundColor: theme.backgroundElement,
-        placeholderColor: theme.textMuted,
-        onInput: (value: string) => {
-          const state = providerDialog;
-          if (!state) return;
-          if (state.step === "key") {
-            providerDialog = { ...state, apiKey: value, error: undefined };
-          } else {
-            const items = providerDialogItemsFor(state.step, state.providerId).filter((item) => {
-              const query = value.trim().toLowerCase();
-              if (!query) return true;
-              const haystack = [item.label, item.detail, item.value, item.category, item.footer]
-                .filter(Boolean)
-                .join(" ")
-                .toLowerCase();
-              return haystack.includes(query) || fuzzyMatch(haystack, query);
-            });
-            providerDialog = {
-              ...state,
-              query: value,
-              index: value !== state.query ? 0 : Math.min(state.index, Math.max(0, items.length - 1)),
-              error: undefined,
-            };
-          }
-          redrawProviderDialog();
-        },
-        onKeyDown: (event: any) => {
-          handleProviderDialogKey(event);
-        },
-        onSubmit: () => {
-          void runProviderDialogSelection();
-        },
-      })),
-      h("box", {
-        ref: (ref: BoxRenderable) => { providerDialogList = ref; },
-        height: PROVIDER_DIALOG_ROWS,
-        paddingLeft: 1,
-        paddingRight: 1,
-        flexShrink: 0,
-        flexDirection: "column",
-        onMouseScroll: updateProviderDialogFromScroll,
-      },
-      ...Array.from({ length: PROVIDER_DIALOG_ROWS }, (_, index) =>
         h("box", {
-          ref: (ref: BoxRenderable) => { providerDialogRows[index] = ref; },
-          visible: false,
-          height: 1,
           flexDirection: "row",
-          gap: 1,
+          alignItems: "center",
+          justifyContent: "space-between",
+          paddingLeft: 4,
+          paddingRight: 4,
+          flexShrink: 0,
+        },
+        h("text", {
+          ref: (ref: TextRenderable) => { providerDialogTitle = ref; },
+          fg: theme.text,
+          content: "Select model",
+        }),
+        h("text", {
+          ref: (ref: TextRenderable) => { providerDialogEsc = ref; },
+          fg: theme.textMuted,
+          content: "esc",
+          onMouseUp: () => closeProviderDialog(),
+        })),
+        h("box", {
+          paddingLeft: 4,
+          paddingRight: 4,
+          paddingTop: 1,
+          flexShrink: 0,
+        },
+        h("input", {
+          ref: (ref: InputRenderable) => { providerDialogInput = ref; },
+          width: "100%",
+          value: "",
+          placeholder: "Search",
+          fg: theme.textMuted,
+          backgroundColor: theme.backgroundPanel,
+          focusedBackgroundColor: theme.backgroundPanel,
+          cursorColor: theme.primary,
+          placeholderColor: theme.textMuted,
+          onInput: (value: string) => {
+            const state = providerDialog;
+            if (!state) return;
+            if (state.step === "key") {
+              providerDialog = { ...state, apiKey: value, error: undefined };
+            } else {
+              const items = providerDialogItemsFor(state.step, state.providerId).filter((item) => {
+                const query = value.trim().toLowerCase();
+                if (!query) return true;
+                const haystack = [item.label, item.detail, item.value, item.category, item.footer]
+                  .filter(Boolean)
+                  .join(" ")
+                  .toLowerCase();
+                return haystack.includes(query) || fuzzyMatch(haystack, query);
+              });
+              providerDialog = {
+                ...state,
+                query: value,
+                index: value !== state.query ? 0 : Math.min(state.index, Math.max(0, items.length - 1)),
+                error: undefined,
+              };
+            }
+            redrawProviderDialog();
+          },
+          onKeyDown: (event: any) => {
+            handleProviderDialogKey(event);
+          },
+          onSubmit: () => {
+            void runProviderDialogSelection();
+          },
+        })),
+        h("box", {
+          ref: (ref: BoxRenderable) => { providerDialogList = ref; },
+          height: PROVIDER_DIALOG_ROWS,
           paddingLeft: 1,
           paddingRight: 1,
-          onMouseMove: () => updateProviderDialogFromMouse(index, false),
-          onMouseDown: () => updateProviderDialogFromMouse(index, false),
-          onMouseUp: () => updateProviderDialogFromMouse(index, true),
+          paddingTop: 1,
+          flexShrink: 0,
+          flexDirection: "column",
           onMouseScroll: updateProviderDialogFromScroll,
         },
-        h("text", {
-          ref: (ref: TextRenderable) => { providerDialogGutters[index] = ref; },
-          width: 2,
+        ...Array.from({ length: PROVIDER_DIALOG_ROWS }, (_, index) =>
+          h("box", {
+            ref: (ref: BoxRenderable) => { providerDialogRows[index] = ref; },
+            visible: false,
+            height: 1,
+            flexDirection: "row",
+            gap: 1,
+            paddingLeft: 1,
+            paddingRight: 3,
+            onMouseMove: () => updateProviderDialogFromMouse(index, false),
+            onMouseDown: () => updateProviderDialogFromMouse(index, false),
+            onMouseUp: () => updateProviderDialogFromMouse(index, true),
+            onMouseScroll: updateProviderDialogFromScroll,
+          },
+          h("text", {
+            ref: (ref: TextRenderable) => { providerDialogGutters[index] = ref; },
+            width: 1,
+            flexShrink: 0,
+            fg: theme.textMuted,
+            content: "",
+          }),
+          h("text", {
+            ref: (ref: TextRenderable) => { providerDialogLabels[index] = ref; },
+            flexGrow: 1,
+            minWidth: 0,
+            wrapMode: "none",
+            fg: theme.text,
+            content: "",
+          }),
+          h("text", {
+            ref: (ref: TextRenderable) => { providerDialogDetails[index] = ref; },
+            width: 16,
+            flexShrink: 0,
+            wrapMode: "none",
+            fg: theme.textMuted,
+            content: "",
+          }),
+          h("text", {
+            ref: (ref: TextRenderable) => { providerDialogFooters[index] = ref; },
+            width: 8,
+            flexShrink: 0,
+            wrapMode: "none",
+            fg: theme.textMuted,
+            content: "",
+          })),
+        )),
+        h("box", {
+          flexDirection: "row",
+          justifyContent: "space-between",
+          paddingLeft: 4,
+          paddingRight: 2,
+          paddingTop: 1,
           flexShrink: 0,
-          fg: theme.textMuted,
-          content: "",
-        }),
+        },
         h("text", {
-          ref: (ref: TextRenderable) => { providerDialogLabels[index] = ref; },
-          width: 22,
-          flexShrink: 0,
-          wrapMode: "none",
-          fg: theme.text,
-          content: "",
-        }),
-        h("text", {
-          ref: (ref: TextRenderable) => { providerDialogDetails[index] = ref; },
-          flexGrow: 1,
-          minWidth: 0,
-          wrapMode: "none",
+          ref: (ref: TextRenderable) => { providerDialogFooter = ref; },
           fg: theme.textMuted,
-          content: "",
-        }),
-        h("text", {
-          ref: (ref: TextRenderable) => { providerDialogFooters[index] = ref; },
-          width: 12,
-          flexShrink: 0,
-          wrapMode: "none",
-          fg: theme.textMuted,
-          content: "",
+          content: "↑/↓ move · enter select · esc close",
         })),
-      )),
-      h("box", {
-        flexDirection: "row",
-        justifyContent: "space-between",
-        paddingLeft: 2,
-        paddingRight: 2,
-        paddingTop: 1,
-        paddingBottom: 1,
-        flexShrink: 0,
-        backgroundColor: theme.backgroundElement,
-      },
-      h("text", {
-        ref: (ref: TextRenderable) => { providerDialogFooter = ref; },
-        fg: theme.textMuted,
-        content: "type filter · ↑/↓ move · enter select · esc cancel",
-      })),
-    ]);
+      ]),
+    );
   }
 
   function renderSessionSidebar() {
@@ -2988,6 +3147,7 @@ function OpenTuiApp(props: {
       running: isRunning,
       registerScanner: registerPromptScanner,
       registerModeBadge: registerFooterModeBadge,
+      registerModelStatus: registerFooterModelStatus,
     }),
     renderProviderDialog(),
   ]);
@@ -3006,6 +3166,7 @@ function renderPrompt(input: {
   disabled: () => boolean;
   mode: () => PermissionMode;
   registerModeLabel?: (ref: TextRenderable) => void;
+  registerModelLabel?: (ref: TextRenderable) => void;
   model: () => string;
   placeholder: () => string;
 }) {
@@ -3049,7 +3210,10 @@ function renderPrompt(input: {
               ref: input.registerModeLabel,
             }, input.mode() === "plan" ? "Plan" : "Build"),
             h("text", { fg: theme.textMuted }, "·"),
-            h("text", { fg: theme.text }, input.model()),
+            h("text", {
+              fg: theme.text,
+              ref: input.registerModelLabel,
+            }, input.model()),
           ),
         ),
       ),
@@ -3173,6 +3337,11 @@ function renderUserMessage(message: DisplayMessage, index: number) {
 }
 
 function renderAssistantMessage(message: DisplayMessage, syntaxStyle: SyntaxStyle, subtleSyntaxStyle: SyntaxStyle, showThinking = true, width = 80) {
+  const modelSwitch = parseModelSwitchMessage(message.content);
+  if (modelSwitch && !message.reasoning?.trim() && !(message.toolCalls?.length)) {
+    return renderModelSwitchMessage(modelSwitch);
+  }
+
   const children: Child[] = [];
   const visibleReasoning = showThinking ? message.reasoning?.trim() : "";
   if (message.status && !visibleReasoning && !message.content.trim() && !(message.toolCalls?.length)) {
@@ -3206,6 +3375,36 @@ function renderAssistantMessage(message: DisplayMessage, syntaxStyle: SyntaxStyl
   }
   if (!children.length) return null;
   return h("box", { flexDirection: "column", flexShrink: 0 }, children);
+}
+
+function parseModelSwitchMessage(content: string) {
+  const match = content.trim().match(/^Model switched to (.+)\.$/);
+  return match?.[1]?.trim();
+}
+
+function modelSwitchStyledText(model: string): StyledText {
+  return new StyledText([
+    fg(theme.success)(bold("◆ Model")),
+    fg(theme.textMuted)(" switched to "),
+    fg(theme.primary)(bold(model)),
+  ]);
+}
+
+function renderModelSwitchMessage(model: string) {
+  return h("box", {
+    border: ["left"],
+    borderColor: theme.success,
+    marginTop: 1,
+    paddingLeft: 2,
+    paddingTop: 1,
+    paddingBottom: 1,
+    backgroundColor: theme.backgroundPanel,
+    flexShrink: 0,
+  },
+  h("text", {
+    fg: theme.text,
+    wrapMode: "none",
+  }, modelSwitchStyledText(model)));
 }
 
 function renderMarkdownContent(
@@ -3366,12 +3565,14 @@ function transcriptMessageKey(message: DisplayMessage, index: number) {
 
 function transcriptMessageSignature(message: DisplayMessage, showThinking = true, thinkingExpanded = false) {
   if (message.role !== "assistant") return message.role;
+  const modelSwitch = parseModelSwitchMessage(message.content);
   const tools = (message.toolCalls ?? [])
     .map((tool) => `${tool.id}:${tool.name}:${tool.status ?? (tool.result === undefined ? "pending" : "completed")}:${tool.isError ? "error" : "ok"}`)
     .join("|");
   const visibleReasoning = showThinking && !!message.reasoning?.trim();
   return [
     message.role,
+    modelSwitch ? "model-switch" : "standard",
     message.status ?? "idle",
     visibleReasoning ? (thinkingExpanded ? "reasoning-expanded" : "reasoning-collapsed") : "no-reasoning",
     message.content.trim() ? "content" : "no-content",
@@ -3615,6 +3816,11 @@ function createAssistantEntry(
   thinkingExpanded = false,
   onToggleThinking?: (key: string) => void,
 ): TranscriptEntry | null {
+  const modelSwitch = parseModelSwitchMessage(message.content);
+  if (modelSwitch && !message.reasoning?.trim() && !(message.toolCalls?.length)) {
+    return createModelSwitchEntry(ctx, modelSwitch, key, signature);
+  }
+
   const children: Renderable[] = [];
   const refs: TranscriptEntry["refs"] = {};
   const visibleReasoning = showThinking ? message.reasoning?.trim() : "";
@@ -3683,6 +3889,24 @@ function createAssistantEntry(
     node: createBox(ctx, { flexDirection: "column", flexShrink: 0 }, children),
     refs,
   };
+}
+
+function createModelSwitchEntry(ctx: RenderContext, model: string, key: string, signature: string): TranscriptEntry {
+  const node = createBox(ctx, {
+    border: ["left"],
+    borderColor: theme.success,
+    marginTop: 1,
+    paddingLeft: 2,
+    paddingTop: 1,
+    paddingBottom: 1,
+    backgroundColor: theme.backgroundPanel,
+    flexShrink: 0,
+  }, [
+    createText(ctx, modelSwitchStyledText(model), {
+      wrapMode: "none",
+    }),
+  ]);
+  return { key, signature, node, refs: {} };
 }
 
 function createToolRenderable(ctx: RenderContext, tool: DisplayToolCall, syntaxStyle: SyntaxStyle, width = 80) {
@@ -3852,6 +4076,7 @@ function renderFooter(input: {
   running: () => boolean;
   registerScanner: (sync: PromptScannerSync) => () => void;
   registerModeBadge?: (ref: TextRenderable) => void;
+  registerModelStatus?: (ref: TextRenderable) => void;
 }) {
   return h("box", { flexShrink: 0, height: 1, paddingLeft: 1, paddingRight: 1, flexDirection: "row" },
     h("text", { fg: theme.border }, "─ "),
@@ -3867,7 +4092,10 @@ function renderFooter(input: {
       ref: input.registerModeBadge,
     }, input.mode() !== "default" ? `  ${input.mode()} · tab` : ""),
     h("box", { flexGrow: 1 }),
-    h("text", { fg: theme.textMuted }, `${input.provider()} · ${input.model()}`),
+    h("text", {
+      fg: theme.textMuted,
+      ref: input.registerModelStatus,
+    }, `${input.provider()} · ${input.model()}`),
   );
 }
 
@@ -4193,6 +4421,15 @@ function formatTranscript(messages: DisplayMessage[], options?: TranscriptOption
       }
     }
     if (message.content.trim()) {
+      const modelSwitch = parseModelSwitchMessage(message.content);
+      if (modelSwitch && !visibleReasoning && !(message.toolCalls?.length)) {
+        appendBlank();
+        append("│  ", theme.success);
+        append("◆ Model", theme.success);
+        append(" switched to ", theme.textMuted);
+        appendLine(modelSwitch, theme.primary);
+        continue;
+      }
       appendBlank();
       for (const line of message.content.trim().split(/\r?\n/)) {
         append("   ", theme.borderSubtle);

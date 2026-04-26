@@ -48,13 +48,13 @@ Read the repo carefully before proposing changes.
 }
 
 describe("slash commands", () => {
-  it("returns guidance instead of opening an empty model picker when no provider is configured", async () => {
+  it("opens the model dialog when no provider is configured so provider fallback can be shown", async () => {
     const ctx = createContext();
     const result = await slashRegistry.execute("/model", ctx);
 
     expect(result.handled).toBe(true);
-    expect(result.result).toBe("No provider configured. Use /login or /provider --add <id> first.");
-    expect(ctx.openPicker).not.toHaveBeenCalled();
+    expect(result.result).toBeUndefined();
+    expect(ctx.openPicker).toHaveBeenCalledWith("model");
   });
 
   it("/key can update an explicitly targeted provider before it is enabled", async () => {

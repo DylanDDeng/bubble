@@ -360,7 +360,8 @@ export const builtinSlashCommands: SlashCommand[] = [
     async handler(args, ctx) {
       if (!args) {
         if (ctx.registry.getEnabled().length === 0) {
-          return "No provider configured. Use /login or /provider --add <id> first.";
+          ctx.openPicker("model");
+          return;
         }
         ctx.openPicker("model");
         return;
