@@ -1909,6 +1909,7 @@ function OpenTuiApp(props: {
       return true;
     }
 
+    const wasHomeSurfaceActive = isHomeSurfaceActive();
     const { handled, result, inject } = await slashRegistry.execute(input, {
       agent: props.agent,
       addMessage,
@@ -1934,7 +1935,16 @@ function OpenTuiApp(props: {
     syncModelChrome();
     syncModeChrome();
     if (uiDisposed) return true;
-    if (result) addMessage("assistant", result);
+    if (result) {
+      const modelSwitch = parseModelSwitchMessage(result);
+      if (modelSwitch && wasHomeSurfaceActive) {
+        setNotice(result);
+        redrawTranscript(undefined, displayMessages);
+        syncPromptSurfaces(true);
+      } else {
+        addMessage("assistant", result);
+      }
+    }
     if (inject) await runAgentInput(inject, input);
     return true;
   }
