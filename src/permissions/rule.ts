@@ -15,6 +15,7 @@ const KNOWN_TOOLS = new Set([
   "Read",
   "Write",
   "Edit",
+  "Lsp",
   "WebFetch",
   "WebSearch",
   "*",
@@ -122,6 +123,7 @@ export function matchRule(rule: PermissionRule, query: PermissionQuery): boolean
     case "Read":
     case "Write":
     case "Edit":
+    case "Lsp":
       if (!("path" in query) || !("cwd" in query)) return false;
       return matchPath(rule.pattern, query.path as string, query.cwd as string);
     case "WebFetch":

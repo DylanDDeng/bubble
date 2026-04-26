@@ -1,4 +1,5 @@
 import { UserConfig, maskKey } from "../config.js";
+import { formatDiagnostics } from "../lsp/index.js";
 import { parseRule } from "../permissions/rule.js";
 import type { RuleList, SettingsScope } from "../permissions/settings.js";
 import { encodeModel, decodeModel, displayModel, BUILTIN_PROVIDERS, isUserVisibleProvider } from "../provider-registry.js";
@@ -504,7 +505,9 @@ export const builtinSlashCommands: SlashCommand[] = [
       if (sub === "reload") {
         if (!ctx.settingsManager) return "No settings manager is attached to this session.";
         ctx.settingsManager.reload();
-        return "Reloaded permission settings from disk.";
+        ctx.lspService?.updateConfig(ctx.settingsManager.getMerged().lsp);
+        ctx.lspService?.restart();
+        return "Reloaded settings from disk.";
       }
 
       const lines: string[] = [];
@@ -555,6 +558,54 @@ export const builtinSlashCommands: SlashCommand[] = [
 
       if (lines.length === 0) {
         return "Permissions system not attached to this session.";
+      }
+      return lines.join("\n");
+    },
+  },
+  {
+    name: "lsp",
+    description: "Inspect or restart language servers. Usage: /lsp [status|diagnostics|restart]",
+    async handler(args, ctx) {
+      const tokens = args.trim().split(/\s+/).filter(Boolean);
+      const sub = tokens[0] ?? "status";
+      const lsp = ctx.lspService;
+      if (!lsp) return "LSP is not initialized for this session.";
+
+      if (sub === "restart") {
+        ctx.settingsManager?.reload();
+        ctx.lspService?.updateConfig(ctx.settingsManager?.getMerged().lsp);
+        await lsp.restart();
+        return "Restarted LSP servers.";
+      }
+
+      if (sub === "diagnostics") {
+        const diagnostics = lsp.diagnostics();
+        const entries = Object.entries(diagnostics).filter(([, issues]) => issues.length > 0);
+        if (entries.length === 0) return "No LSP diagnostics.";
+        const lines = ["LSP diagnostics:"];
+        for (const [file, issues] of entries.slice(0, 10)) {
+          lines.push(formatDiagnostics(file, issues, ctx.cwd));
+        }
+        if (entries.length > 10) lines.push(`... ${entries.length - 10} more file(s) with diagnostics`);
+        return lines.join("\n");
+      }
+
+      if (sub !== "status" && sub !== "list" && sub !== "") {
+        return `Unknown /lsp subcommand "${sub}". Use /lsp status, /lsp diagnostics, or /lsp restart.`;
+      }
+
+      if (lsp.isDisabled()) {
+        return "LSPs have been disabled in settings.";
+      }
+      const statuses = lsp.status();
+      if (statuses.length === 0) {
+        return "LSPs will activate as files are read.";
+      }
+      const lines = ["LSP servers:"];
+      for (const status of statuses) {
+        const marker = status.status === "connected" ? "*" : status.status === "starting" ? "~" : "!";
+        const suffix = status.message ? ` — ${status.message}` : "";
+        lines.push(`  ${marker} ${status.id} ${status.root}${suffix}`);
       }
       return lines.join("\n");
     },

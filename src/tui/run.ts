@@ -50,6 +50,7 @@ import { compactDisplayMessages, type DisplayMessage, type DisplayToolCall } fro
 import { createMarkdownSyntaxStyle, createSubtleMarkdownSyntaxStyle } from "./markdown-theme.js";
 import { getNextPermissionMode } from "../permission/mode.js";
 import { getContextBudget } from "../context/budget.js";
+import { getLspService, type LspService, type LspStatus } from "../lsp/index.js";
 import { inferBashPrefix, type BashAllowlist } from "../approval/session-cache.js";
 import type { SettingsManager } from "../permissions/settings.js";
 import type { McpManager } from "../mcp/manager.js";
@@ -80,6 +81,7 @@ export interface RunTuiOptions {
   approvalHandlerRef?: ApprovalHandlerRef;
   bashAllowlist?: BashAllowlist;
   settingsManager?: SettingsManager;
+  lspService?: LspService;
   mcpManager?: McpManager;
   bypassEnabled?: boolean;
   theme?: Record<string, string>;
@@ -362,11 +364,14 @@ function OpenTuiApp(props: {
   const [isRunning, setIsRunning] = createSignal(false);
   const [showThinking, setShowThinking] = createSignal(true);
   let streamingDisplay: DisplayMessage | undefined;
+  let sidebarLspSyncTimer: ReturnType<typeof setInterval> | undefined;
   const [todos, setTodos] = createSignal<Todo[]>(props.agent.getTodos());
   const [mode, setMode] = createSignal<PermissionMode>(props.agent.mode);
   const [notice, setNotice] = createSignal("");
   const [sessionActive, setSessionActive] = createSignal(false);
   const [sidebarTick, setSidebarTick] = createSignal(0);
+  const lspService = props.options.lspService ?? getLspService(props.args.cwd, props.options.settingsManager?.getMerged().lsp);
+  const [lspStatuses, setLspStatuses] = createSignal<LspStatus[]>(lspService.status());
   const [sidebarUsage, setSidebarUsage] = createSignal<SidebarUsageState>({
     promptTokens: 0,
     completionTokens: 0,
@@ -441,12 +446,15 @@ function OpenTuiApp(props: {
   const promptModeLabels = new Set<TextRenderable>();
   const promptModelLabels = new Set<TextRenderable>();
   let footerModeBadge: TextRenderable | undefined;
-  let footerModelStatus: TextRenderable | undefined;
   let sidebarTokenText: TextRenderable | undefined;
   let sidebarPercentText: TextRenderable | undefined;
   let sidebarUsageText: TextRenderable | undefined;
   let sidebarReasoningText: TextRenderable | undefined;
   let sidebarCostText: TextRenderable | undefined;
+  let sidebarLspSummaryText: TextRenderable | undefined;
+  const sidebarLspRows: Array<BoxRenderable | undefined> = [];
+  const sidebarLspMarkers: Array<TextRenderable | undefined> = [];
+  const sidebarLspLabels: Array<TextRenderable | undefined> = [];
 
   const activePrompt = () =>
     isHomeSurfaceActive()
@@ -463,7 +471,6 @@ function OpenTuiApp(props: {
     promptModeLabels.clear();
     promptModelLabels.clear();
     footerModeBadge = undefined;
-    footerModelStatus = undefined;
   });
 
   const readPromptText = () => {
@@ -525,6 +532,52 @@ function OpenTuiApp(props: {
     rootBox?.requestRender();
   }
 
+  function syncSidebarLsp() {
+    if (!sidebarLspSummaryText) return;
+    const statuses = lspService.status();
+    setLspStatuses(statuses);
+    if (lspService.isDisabled()) {
+      setSidebarText(sidebarLspSummaryText, "LSPs have been disabled in settings");
+      showSidebarLspRows([]);
+      return;
+    }
+    if (statuses.length === 0) {
+      setSidebarText(sidebarLspSummaryText, "LSPs will activate as files are read");
+      showSidebarLspRows([]);
+      return;
+    }
+    const connected = statuses.filter((status) => status.status === "connected").length;
+    const starting = statuses.filter((status) => status.status === "starting").length;
+    const failed = statuses.filter((status) => status.status === "error").length;
+    setSidebarText(sidebarLspSummaryText, [
+      connected ? `${connected} active` : "",
+      starting ? `${starting} starting` : "",
+      failed ? `${failed} error${failed === 1 ? "" : "s"}` : "",
+    ].filter(Boolean).join(", "));
+    showSidebarLspRows(statuses);
+  }
+
+  function showSidebarLspRows(statuses: LspStatus[]) {
+    for (let index = 0; index < sidebarLspRows.length; index++) {
+      const row = sidebarLspRows[index];
+      const marker = sidebarLspMarkers[index];
+      const label = sidebarLspLabels[index];
+      const status = statuses[index];
+      if (!row || !marker || !label) continue;
+      row.visible = !!status;
+      if (!status) {
+        safeRequestRender(row);
+        continue;
+      }
+      marker.fg = status.status === "connected" ? theme.success : status.status === "starting" ? theme.warning : theme.error;
+      marker.content = status.status === "connected" ? "*" : status.status === "starting" ? "~" : "!";
+      label.content = status.message ? `${status.id} ${status.root} (${status.message})` : `${status.id} ${status.root}`;
+      safeRequestRender(row);
+    }
+    sidebarShell?.requestRender();
+    rootBox?.requestRender();
+  }
+
   const promptModeTitle = () => mode() === "plan" ? "Plan" : "Build";
   const footerModeText = () => mode() !== "default" ? `  ${mode()} · tab` : "";
 
@@ -546,15 +599,12 @@ function OpenTuiApp(props: {
   };
 
   const promptModelTitle = () => displayModel(props.agent.model) || "no model";
-  const footerModelStatusText = () =>
-    `${props.agent.providerId || registry.getDefault()?.id || "unknown"} · ${displayModelWithThinking(props.agent.model, props.agent.thinking) || "no model"}`;
 
   const syncModelChrome = () => {
     if (uiDisposed) return;
     for (const label of [...promptModelLabels]) {
       if (!safeSetText(label, promptModelTitle())) promptModelLabels.delete(label);
     }
-    if (footerModelStatus && !safeSetText(footerModelStatus, footerModelStatusText())) footerModelStatus = undefined;
     safeRequestRender(homeComposerShell);
     safeRequestRender(sessionComposerShell);
     safeRequestRender(rootBox);
@@ -564,12 +614,6 @@ function OpenTuiApp(props: {
     if (uiDisposed) return;
     promptModelLabels.add(ref);
     if (!safeSetText(ref, promptModelTitle())) promptModelLabels.delete(ref);
-  };
-
-  const registerFooterModelStatus = (ref: TextRenderable) => {
-    if (uiDisposed) return;
-    footerModelStatus = ref;
-    if (!safeSetText(ref, footerModelStatusText())) footerModelStatus = undefined;
   };
 
   const registerFooterModeBadge = (ref: TextRenderable) => {
@@ -598,6 +642,8 @@ function OpenTuiApp(props: {
   };
 
   const cycleModeFromRawSequence = (sequence: string) => {
+    const rawKey = keyNameFromSequence(sequence);
+    if (rawKey && handleApprovalNavigation(rawKey)) return true;
     if (!isModeCycleSequence(sequence)) return false;
     return cycleMode();
   };
@@ -612,9 +658,63 @@ function OpenTuiApp(props: {
       : ["Allow once", "Reject"] as const;
   };
 
+  const keyNameFromSequence = (sequence?: string) => {
+    if (!sequence) return "";
+    if (sequence === "\x1b[D" || /^\x1b\[[0-9;]*D$/.test(sequence)) return "left";
+    if (sequence === "\x1b[C" || /^\x1b\[[0-9;]*C$/.test(sequence)) return "right";
+    if (sequence === "\x1b[A" || /^\x1b\[[0-9;]*A$/.test(sequence)) return "up";
+    if (sequence === "\x1b[B" || /^\x1b\[[0-9;]*B$/.test(sequence)) return "down";
+    if (sequence === "\r" || sequence === "\n") return "enter";
+    if (sequence === "\x1b") return "escape";
+    return "";
+  };
+
+  const keyNameFromEvent = (event: any) => {
+    const rawName = String(event.name || event.key || event.input || "").toLowerCase();
+    if (rawName === "arrowleft" || rawName === "left_arrow") return "left";
+    if (rawName === "arrowright" || rawName === "right_arrow") return "right";
+    if (rawName === "arrowup" || rawName === "up_arrow") return "up";
+    if (rawName === "arrowdown" || rawName === "down_arrow") return "down";
+    if (rawName === "return") return "enter";
+    if (rawName === "esc") return "escape";
+    return rawName || keyNameFromSequence(event.raw || event.sequence);
+  };
+
+  const moveApprovalOption = (direction: -1 | 1, optionCount: number) => {
+    const idx = approvalOptionIdx();
+    setApprovalOptionIdx((idx + direction + optionCount) % optionCount);
+    forceApprovalUI();
+  };
+
+  const rejectPendingPlan = (plan: { resolve: (decision: PlanDecision) => void }) => {
+    setPendingPlan(undefined);
+    setApprovalOptionIdx(0);
+    plan.resolve({ action: "reject", reason: "Rejected by user." });
+  };
+
+  const resolvePendingPlanSelection = (plan: { plan: string; resolve: (decision: PlanDecision) => void }) => {
+    const sel = approvalOptionIdx();
+    setPendingPlan(undefined);
+    setApprovalOptionIdx(0);
+    if (sel === 0) {
+      plan.resolve({ action: "approve", plan: plan.plan });
+    } else {
+      plan.resolve({ action: "reject", reason: "Rejected by user." });
+    }
+  };
+
   const canPersistApproval = (request: ApprovalRequest) => {
     if (request.type === "bash") return !!props.options.bashAllowlist || !!props.options.settingsManager;
     return !!props.options.settingsManager;
+  };
+
+  const approvalToolName = (request: ApprovalRequest) => {
+    switch (request.type) {
+      case "bash": return "Bash";
+      case "edit": return "Edit";
+      case "write": return "Write";
+      case "lsp": return "Lsp";
+    }
   };
 
   const persistApproval = (request: ApprovalRequest) => {
@@ -633,7 +733,7 @@ function OpenTuiApp(props: {
 
     const settings = props.options.settingsManager;
     if (!settings) return;
-    const tool = request.type === "edit" ? "Edit" : "Write";
+    const tool = approvalToolName(request);
     settings.addRule("local", "allow", `${tool}(${request.path})`);
     setNotice(`Saved local allow rule for ${shortCwd(request.path)}`);
   };
@@ -661,33 +761,61 @@ function OpenTuiApp(props: {
     return true;
   };
 
-  const handleApprovalKey = (event: any) => {
+  const handleApprovalNavigation = (name: string, preventOnly = false) => {
     const approval = pendingApproval();
-    if (!approval) return false;
-    const name = String(event.name || "").toLowerCase();
-    if (name === "left" || name === "right" || name === "up" || name === "down" || name === "h" || name === "l") {
+    if (approval) {
       const opts = approvalOptionsFor(approval.request);
-      const idx = approvalOptionIdx();
-      const next = name === "left" || name === "up" || name === "h"
-        ? (idx - 1 + opts.length) % opts.length
-        : (idx + 1) % opts.length;
-      setApprovalOptionIdx(next);
-      forceApprovalUI();
-      event.preventDefault?.();
-      return true;
+      if (name === "left" || name === "up" || name === "h") {
+        moveApprovalOption(-1, opts.length);
+        return true;
+      }
+      if (name === "right" || name === "down" || name === "l") {
+        moveApprovalOption(1, opts.length);
+        return true;
+      }
+      if (name === "enter") {
+        if (!preventOnly) resolveApprovalSelection();
+        return true;
+      }
+      if (name === "escape") {
+        if (!preventOnly) {
+          pendingApprovalRef = undefined;
+          setPendingApproval(undefined);
+          setApprovalOptionIdx(0);
+          forceApprovalUI();
+          approval.resolve({ action: "reject", feedback: "Rejected by user." });
+        }
+        return true;
+      }
     }
-    if (name === "return" || name === "enter") {
-      resolveApprovalSelection();
-      event.preventDefault?.();
-      return true;
+
+    const plan = pendingPlan();
+    if (plan) {
+      if (name === "left" || name === "h") {
+        moveApprovalOption(-1, PLAN_OPTIONS.length);
+        return true;
+      }
+      if (name === "right" || name === "l") {
+        moveApprovalOption(1, PLAN_OPTIONS.length);
+        return true;
+      }
+      if (name === "enter") {
+        if (!preventOnly) resolvePendingPlanSelection(plan);
+        return true;
+      }
+      if (name === "escape") {
+        if (!preventOnly) rejectPendingPlan(plan);
+        return true;
+      }
     }
-    if (name === "escape") {
-      pendingApprovalRef = undefined;
-      setPendingApproval(undefined);
-      setApprovalOptionIdx(0);
-      forceApprovalUI();
-      approval.resolve({ action: "reject", feedback: "Rejected by user." });
+    return false;
+  };
+
+  const handleApprovalKey = (event: any) => {
+    const name = keyNameFromEvent(event);
+    if (handleApprovalNavigation(name)) {
       event.preventDefault?.();
+      event.stopPropagation?.();
       return true;
     }
     return false;
@@ -748,6 +876,11 @@ function OpenTuiApp(props: {
 
   onMount(() => {
     props.setRawModeCycleHandler?.(cycleModeFromRawSequence);
+    const unsubscribeLsp = lspService.onStatusChange(() => {
+      syncSidebarLsp();
+    });
+    sidebarLspSyncTimer = setInterval(syncSidebarLsp, 1000);
+    onCleanup(unsubscribeLsp);
     refreshGitSidebar();
     setTimeout(() => {
       activePrompt()?.focus();
@@ -757,6 +890,7 @@ function OpenTuiApp(props: {
 
   onCleanup(() => {
     props.setRawModeCycleHandler?.(undefined);
+    if (sidebarLspSyncTimer) clearInterval(sidebarLspSyncTimer);
     stopThinkingSpinner();
     if (props.options.planHandlerRef) props.options.planHandlerRef.current = undefined;
     if (props.options.approvalHandlerRef) props.options.approvalHandlerRef.current = undefined;
@@ -1928,6 +2062,7 @@ function OpenTuiApp(props: {
       bashAllowlist: props.options.bashAllowlist,
       settingsManager: props.options.settingsManager,
       mcpManager: props.options.mcpManager,
+      lspService,
     });
     if (!handled) return false;
     if (uiDisposed) return true;
@@ -2329,6 +2464,7 @@ function OpenTuiApp(props: {
             });
           }
           refreshGitSidebar();
+          syncSidebarLsp();
         } else if (event.type === "todos_updated") {
           setTodos(event.todos);
           bumpSidebar();
@@ -2386,6 +2522,7 @@ function OpenTuiApp(props: {
       }
       redrawDock();
       refreshGitSidebar();
+      syncSidebarLsp();
       setTimeout(() => activePrompt()?.focus(), 0);
     }
   }
@@ -2852,8 +2989,48 @@ function OpenTuiApp(props: {
   }
 
   function renderSidebarLsp() {
+    const statuses = lspStatuses().slice(0, 5);
+    const connected = statuses.filter((status) => status.status === "connected").length;
+    const starting = statuses.filter((status) => status.status === "starting").length;
+    const failed = statuses.filter((status) => status.status === "error").length;
+    const summary = [
+      connected ? `${connected} active` : "",
+      starting ? `${starting} starting` : "",
+      failed ? `${failed} error${failed === 1 ? "" : "s"}` : "",
+    ].filter(Boolean).join(", ");
     return renderSidebarSection("LSP", [
-      h("text", { fg: theme.textMuted, wrapMode: "word" }, "No LSP runtime attached"),
+      h("text", {
+        fg: theme.textMuted,
+        wrapMode: "word",
+        ref: (ref: TextRenderable) => {
+          sidebarLspSummaryText = ref;
+          syncSidebarLsp();
+        },
+      }, lspService.isDisabled()
+        ? "LSPs have been disabled in settings"
+        : statuses.length
+          ? summary
+          : "LSPs will activate as files are read"),
+      ...Array.from({ length: 5 }, (_, index) => {
+        const status = statuses[index];
+        return h("box", {
+          flexDirection: "row",
+          gap: 1,
+          visible: !!status,
+          ref: (ref: BoxRenderable) => { sidebarLspRows[index] = ref; },
+        },
+        h("text", {
+          fg: status?.status === "connected" ? theme.success : status?.status === "starting" ? theme.warning : theme.error,
+          flexShrink: 0,
+          ref: (ref: TextRenderable) => { sidebarLspMarkers[index] = ref; },
+        }, status?.status === "connected" ? "*" : status?.status === "starting" ? "~" : "!"),
+          h("text", {
+            fg: theme.textMuted,
+            wrapMode: "word",
+            ref: (ref: TextRenderable) => { sidebarLspLabels[index] = ref; },
+          }, status ? (status.message ? `${status.id} ${status.root} (${status.message})` : `${status.id} ${status.root}`) : ""),
+        );
+      }),
     ]);
   }
 
@@ -2879,7 +3056,6 @@ function OpenTuiApp(props: {
 
   function renderSidebarFooter() {
     return h("box", { flexDirection: "column", flexShrink: 0, paddingTop: 1 },
-      h("text", { fg: theme.textMuted }, `${props.agent.providerId || "unknown"} · ${displayModel(props.agent.model) || "no model"}`),
       h("text", { fg: theme.textMuted }, "Bubble"),
     );
   }
@@ -3151,13 +3327,10 @@ function OpenTuiApp(props: {
     ]),
     renderFooter({
       cwd: props.args.cwd,
-      provider: () => props.agent.providerId || registry.getDefault()?.id || "unknown",
-      model: () => displayModelWithThinking(props.agent.model, props.agent.thinking) || "no model",
       mode,
       running: isRunning,
       registerScanner: registerPromptScanner,
       registerModeBadge: registerFooterModeBadge,
-      registerModelStatus: registerFooterModelStatus,
     }),
     renderProviderDialog(),
   ]);
@@ -4080,13 +4253,10 @@ function renderTodos(todos: Todo[]) {
 
 function renderFooter(input: {
   cwd: string;
-  provider: () => string;
-  model: () => string;
   mode: () => PermissionMode;
   running: () => boolean;
   registerScanner: (sync: PromptScannerSync) => () => void;
   registerModeBadge?: (ref: TextRenderable) => void;
-  registerModelStatus?: (ref: TextRenderable) => void;
 }) {
   return h("box", { flexShrink: 0, height: 1, paddingLeft: 1, paddingRight: 1, flexDirection: "row" },
     h("text", { fg: theme.border }, "─ "),
@@ -4102,10 +4272,6 @@ function renderFooter(input: {
       ref: input.registerModeBadge,
     }, input.mode() !== "default" ? `  ${input.mode()} · tab` : ""),
     h("box", { flexGrow: 1 }),
-    h("text", {
-      fg: theme.textMuted,
-      ref: input.registerModelStatus,
-    }, `${input.provider()} · ${input.model()}`),
   );
 }
 
@@ -4538,6 +4704,19 @@ function getApprovalPanelMeta(request: ApprovalRequest) {
       preview: `$ ${request.command}`,
       previewHeight: 3,
       previewColor: theme.text,
+    };
+  }
+
+  if (request.type === "lsp") {
+    const path = shortCwd(request.path);
+    return {
+      icon: "?",
+      title: `LSP ${request.operation}`,
+      subtitle: "",
+      preview: path,
+      previewHeight: 3,
+      previewColor: theme.text,
+      path: request.path,
     };
   }
 

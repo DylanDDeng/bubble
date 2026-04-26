@@ -95,6 +95,74 @@ describe("SettingsManager — loading", () => {
     expect(manager().getMerged().defaultMode).toBe("plan");
   });
 
+  it("local lsp setting beats project beats user", () => {
+    writeJson(join(bubbleHome, "settings.json"), {
+      lsp: true,
+    });
+    writeJson(join(cwd, ".bubble", "settings.json"), {
+      lsp: { typescript: { disabled: true } },
+    });
+    writeJson(join(cwd, ".bubble", "settings.local.json"), {
+      lsp: false,
+    });
+    expect(manager().getMerged().lsp).toBe(false);
+  });
+
+  it("loads multi-server lsp settings", () => {
+    writeJson(join(cwd, ".bubble", "settings.json"), {
+      lsp: {
+        typescript: { disabled: false },
+        eslint: { disabled: true },
+        oxlint: { disabled: true },
+        vue: { disabled: false },
+        deno: { disabled: true },
+      },
+    });
+
+    expect(manager().getMerged().lsp).toEqual({
+      typescript: { disabled: false },
+      eslint: { disabled: true },
+      oxlint: { disabled: true },
+      vue: { disabled: false },
+      deno: { disabled: true },
+    });
+  });
+
+  it("loads custom lsp server settings", () => {
+    writeJson(join(cwd, ".bubble", "settings.json"), {
+      lsp: {
+        python: {
+          command: ["pyright-langserver", "--stdio"],
+          extensions: [".py"],
+          rootMarkers: ["pyproject.toml"],
+          env: { PYRIGHT_PYTHON_FORCE_VERSION: "latest" },
+          initializationOptions: { typeCheckingMode: "basic" },
+          languageId: "python",
+        },
+      },
+    });
+
+    expect(manager().getMerged().lsp).toEqual({
+      python: {
+        command: ["pyright-langserver", "--stdio"],
+        extensions: [".py"],
+        rootMarkers: ["pyproject.toml"],
+        env: { PYRIGHT_PYTHON_FORCE_VERSION: "latest" },
+        initializationOptions: { typeCheckingMode: "basic" },
+        languageId: "python",
+      },
+    });
+  });
+
+  it("drops invalid lsp settings with a diagnostic", () => {
+    writeJson(join(cwd, ".bubble", "settings.json"), {
+      lsp: ["typescript"],
+    });
+    const merged = manager().getMerged();
+    expect(merged.lsp).toBeUndefined();
+    expect(merged.diagnostics[0].message).toContain("lsp");
+  });
+
   it("unknown defaultMode is dropped with a diagnostic", () => {
     writeJson(join(bubbleHome, "settings.json"), {
       permissions: { defaultMode: "yolo" },

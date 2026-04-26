@@ -150,6 +150,23 @@ describe("matchRule — Read/Write/Edit paths", () => {
     expect(matchRule(r, { tool: "Edit", path: "/etc/hosts", cwd: "/x" })).toBe(false);
     expect(matchRule(r, { tool: "Read", path: "/etc/hosts", cwd: "/x" })).toBe(false);
   });
+
+  it("matches Lsp path rules", () => {
+    expect(
+      matchRule(rule("Lsp(./src/**)"), {
+        tool: "Lsp",
+        path: resolve("/work/project/src/index.ts"),
+        cwd: "/work/project",
+      }),
+    ).toBe(true);
+    expect(
+      matchRule(rule("Lsp(./src/**)"), {
+        tool: "Lsp",
+        path: resolve("/work/project/test/index.ts"),
+        cwd: "/work/project",
+      }),
+    ).toBe(false);
+  });
 });
 
 describe("matchRule — WebFetch domain", () => {

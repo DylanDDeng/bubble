@@ -17,6 +17,7 @@ export type ToolName =
   | "Read"
   | "Write"
   | "Edit"
+  | "Lsp"
   | "WebFetch"
   | "WebSearch"
   | string; // allow unknown tools; only tool-name-level rules will apply
@@ -42,7 +43,7 @@ export type PermissionDecision = "allow" | "deny" | "ask";
  */
 export type PermissionQuery =
   | { tool: "Bash"; command: string }
-  | { tool: "Read" | "Write" | "Edit"; path: string; cwd: string }
+  | { tool: "Read" | "Write" | "Edit" | "Lsp"; path: string; cwd: string }
   | { tool: "WebFetch"; url: string }
   | { tool: "WebSearch" }
   | { tool: string }; // fallback for tools without structured args

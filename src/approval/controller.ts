@@ -110,6 +110,8 @@ export class PermissionAwareApprovalController implements ApprovalController {
         return { tool: "Write", path: req.path, cwd: this.options.cwd };
       case "edit":
         return { tool: "Edit", path: req.path, cwd: this.options.cwd };
+      case "lsp":
+        return { tool: "Lsp", path: req.path, cwd: this.options.cwd };
     }
   }
 }

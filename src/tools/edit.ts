@@ -11,13 +11,14 @@ import { createTwoFilesPatch } from "diff";
 import { gateToolAction } from "../approval/tool-helper.js";
 import type { ApprovalController } from "../approval/types.js";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
+import { formatDiagnosticBlocks, type LspService } from "../lsp/index.js";
 
 export interface EditArgs {
   path: string;
   edits: Array<{ oldText: string; newText: string }>;
 }
 
-export function createEditTool(cwd: string, approval?: ApprovalController): ToolRegistryEntry {
+export function createEditTool(cwd: string, approval?: ApprovalController, lsp?: LspService): ToolRegistryEntry {
   return {
     name: "edit",
     description:
@@ -92,8 +93,17 @@ export function createEditTool(cwd: string, approval?: ApprovalController): Tool
 
       await writeFile(filePath, content, "utf-8");
 
+      let output = `Edited ${filePath}\n\nDiff:\n${diff}`;
+      if (lsp) {
+        try {
+          await lsp.touchFile(filePath, "document");
+          output += formatDiagnosticBlocks(cwd, filePath, lsp.diagnostics());
+        } catch {
+          // LSP diagnostics should not turn a successful edit into a failed tool call.
+        }
+      }
       return {
-        content: `Edited ${filePath}\n\nDiff:\n${diff}`,
+        content: output,
       };
     },
   };

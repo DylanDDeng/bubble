@@ -32,10 +32,17 @@ export interface BashApprovalRequest {
   cwd: string;
 }
 
+export interface LspApprovalRequest {
+  type: "lsp";
+  path: string;
+  operation: string;
+}
+
 export type ApprovalRequest =
   | EditApprovalRequest
   | WriteApprovalRequest
-  | BashApprovalRequest;
+  | BashApprovalRequest
+  | LspApprovalRequest;
 
 export type ApprovalDecision =
   | { action: "approve"; feedback?: string }

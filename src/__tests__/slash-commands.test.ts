@@ -373,6 +373,76 @@ describe("slash commands", () => {
     expect(result.result).toContain("Usage:");
   });
 
+  it("/lsp reports server status", async () => {
+    const ctx = createContext({
+      lspService: {
+        isDisabled: () => false,
+        status: () => [{ id: "typescript", name: "typescript", root: ".", status: "connected" }],
+        diagnostics: () => ({}),
+        restart: vi.fn(),
+        updateConfig: vi.fn(),
+      } as any,
+    });
+
+    const result = await slashRegistry.execute("/lsp", ctx);
+
+    expect(result.handled).toBe(true);
+    expect(result.result).toContain("LSP servers:");
+    expect(result.result).toContain("typescript .");
+  });
+
+  it("/lsp diagnostics formats current diagnostics", async () => {
+    const ctx = createContext({
+      cwd: "/tmp/project",
+      lspService: {
+        isDisabled: () => false,
+        status: () => [],
+        diagnostics: () => ({
+          "/tmp/project/src/a.ts": [{
+            message: "Type mismatch",
+            severity: 1,
+            source: "typescript",
+            range: { start: { line: 1, character: 2 } },
+          }],
+        }),
+        restart: vi.fn(),
+        updateConfig: vi.fn(),
+      } as any,
+    });
+
+    const result = await slashRegistry.execute("/lsp diagnostics", ctx);
+
+    expect(result.result).toContain("LSP diagnostics:");
+    expect(result.result).toContain("src/a.ts:2:3 error");
+    expect(result.result).toContain("Type mismatch");
+  });
+
+  it("/lsp restart reloads settings and restarts the service", async () => {
+    const reload = vi.fn();
+    const updateConfig = vi.fn();
+    const restart = vi.fn();
+    const ctx = createContext({
+      settingsManager: {
+        reload,
+        getMerged: () => ({ lsp: false }),
+      } as any,
+      lspService: {
+        isDisabled: () => false,
+        status: () => [],
+        diagnostics: () => ({}),
+        restart,
+        updateConfig,
+      } as any,
+    });
+
+    const result = await slashRegistry.execute("/lsp restart", ctx);
+
+    expect(result.result).toContain("Restarted LSP");
+    expect(reload).toHaveBeenCalled();
+    expect(updateConfig).toHaveBeenCalledWith(false);
+    expect(restart).toHaveBeenCalled();
+  });
+
   it("loads a skill directly via /<skill-name> alias", async () => {
     const ctx = createContext({
       skillRegistry: createSkillRegistryFixture(),

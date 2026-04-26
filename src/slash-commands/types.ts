@@ -6,6 +6,7 @@ import type { SkillRegistry } from "../skills/registry.js";
 import type { BashAllowlist } from "../approval/session-cache.js";
 import type { SettingsManager } from "../permissions/settings.js";
 import type { McpManager } from "../mcp/manager.js";
+import type { LspService } from "../lsp/index.js";
 
 export interface SlashCommandContext {
   agent: Agent;
@@ -21,6 +22,7 @@ export interface SlashCommandContext {
   bashAllowlist?: BashAllowlist;
   settingsManager?: SettingsManager;
   mcpManager?: McpManager;
+  lspService?: LspService;
 }
 
 /**

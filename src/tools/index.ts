@@ -8,6 +8,7 @@ export { createWriteTool } from "./write.js";
 export { createEditTool } from "./edit.js";
 export { createGlobTool } from "./glob.js";
 export { createGrepTool } from "./grep.js";
+export { createLspTool } from "./lsp.js";
 export { createWebFetchTool } from "./web-fetch.js";
 export { createWebSearchTool } from "./web-search.js";
 export { createSkillTool } from "./skill.js";
@@ -24,6 +25,8 @@ import { createEditTool } from "./edit.js";
 import { createExitPlanModeTool, type PlanController } from "./exit-plan-mode.js";
 import { createGlobTool } from "./glob.js";
 import { createGrepTool } from "./grep.js";
+import { getLspService, type LspService } from "../lsp/index.js";
+import { createLspTool } from "./lsp.js";
 import { createReadTool } from "./read.js";
 import { createSkillTool } from "./skill.js";
 import { createTaskTool } from "./task.js";
@@ -38,6 +41,7 @@ export interface CreateAllToolsOptions {
   planController?: PlanController;
   approvalController?: ApprovalController;
   toolSearchController?: ToolSearchController;
+  lspService?: LspService;
 }
 
 export function createAllTools(
@@ -46,13 +50,15 @@ export function createAllTools(
   options: CreateAllToolsOptions = {},
 ): ToolRegistryEntry[] {
   const approval = options.approvalController;
+  const lsp = options.lspService ?? getLspService(cwd);
   return [
-    createReadTool(cwd, approval),
+    createReadTool(cwd, approval, lsp),
     createBashTool(cwd, approval),
-    createWriteTool(cwd, { refuseOverwrite: true }, approval),
-    createEditTool(cwd, approval),
+    createWriteTool(cwd, { refuseOverwrite: true }, approval, lsp),
+    createEditTool(cwd, approval, lsp),
     createGlobTool(cwd),
     createGrepTool(cwd),
+    createLspTool(cwd, lsp, approval),
     createWebSearchTool(),
     createWebFetchTool(approval),
     createTaskTool(),

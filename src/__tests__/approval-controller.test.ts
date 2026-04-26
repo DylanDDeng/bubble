@@ -17,6 +17,7 @@ function makeController(mode: PermissionMode, handler?: (req: ApprovalRequest) =
 const EDIT_REQ: ApprovalRequest = { type: "edit", path: "/tmp/f.ts", diff: "diff", fileExists: true };
 const WRITE_REQ: ApprovalRequest = { type: "write", path: "/tmp/new.ts", content: "hi", fileExists: false };
 const BASH_REQ: ApprovalRequest = { type: "bash", command: "ls", cwd: "/tmp" };
+const LSP_REQ: ApprovalRequest = { type: "lsp", path: "/tmp/bubble-test/src/a.ts", operation: "hover" };
 
 describe("PermissionAwareApprovalController", () => {
   it("auto-approves every request in bypassPermissions", async () => {
@@ -84,6 +85,19 @@ describe("PermissionAwareApprovalController", () => {
       getRuleSet: () => buildRuleSet(["Bash(git status)"], []),
     });
     expect((await c.request({ type: "bash", command: "git status", cwd: "/tmp" })).action).toBe("approve");
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("Lsp allow rule skips the UI prompt", async () => {
+    const handler = vi.fn(async () => ({ action: "approve" }) as ApprovalDecision);
+    const c = new PermissionAwareApprovalController({
+      getMode: () => "default",
+      handlerRef: { current: handler },
+      cwd: "/tmp/bubble-test",
+      getRuleSet: () => buildRuleSet(["Lsp(./src/**)"], []),
+    });
+
+    expect((await c.request(LSP_REQ)).action).toBe("approve");
     expect(handler).not.toHaveBeenCalled();
   });
 

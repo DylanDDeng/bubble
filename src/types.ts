@@ -96,7 +96,7 @@ export type ToolResultStatus =
   | "command_error";
 
 export interface ToolResultMetadata {
-  kind?: "search" | "read" | "write" | "edit" | "shell" | "web" | "security";
+  kind?: "search" | "read" | "write" | "edit" | "shell" | "web" | "security" | "lsp";
   path?: string;
   pattern?: string;
   matches?: number;

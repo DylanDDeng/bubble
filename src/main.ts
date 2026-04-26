@@ -19,6 +19,7 @@ import { PermissionAwareApprovalController } from "./approval/controller.js";
 import { BashAllowlist } from "./approval/session-cache.js";
 import type { ApprovalDecision, ApprovalRequest } from "./approval/types.js";
 import { SettingsManager } from "./permissions/settings.js";
+import { getLspService } from "./lsp/index.js";
 import { loadMcpConfig } from "./mcp/config.js";
 import { McpManager } from "./mcp/manager.js";
 import type { PermissionMode, Message, PlanDecision } from "./types.js";
@@ -100,11 +101,13 @@ async function main() {
     listDeferred: () => agentRef?.listDeferredTools() ?? [],
     unlock: (names) => agentRef?.unlockDeferredTools(names),
   };
+  const lspService = getLspService(args.cwd, settingsManager.getMerged().lsp);
   const tools = createAllTools(args.cwd, skillRegistry, {
     todoStore,
     planController,
     approvalController,
     toolSearchController,
+    lspService,
   });
 
   // Bring up MCP servers (if any). Failures are captured per-server and never
@@ -302,6 +305,7 @@ async function main() {
     approvalHandlerRef,
     bashAllowlist,
     settingsManager,
+    lspService,
     mcpManager,
     bypassEnabled: args.bypassEnabled,
     theme: userConfig.getTheme(),

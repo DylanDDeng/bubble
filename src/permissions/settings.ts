@@ -19,6 +19,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import type { PermissionMode } from "../types.js";
+import { normalizeLspConfig, type LspConfig } from "../lsp/config.js";
 import { parseRules } from "./rule.js";
 import type { PermissionRule, PermissionRuleSet } from "./types.js";
 
@@ -26,6 +27,7 @@ export type SettingsScope = "user" | "project" | "local";
 export type RuleList = "allow" | "deny";
 
 export interface RawSettings {
+  lsp?: unknown;
   permissions?: {
     defaultMode?: string;
     allow?: string[];
@@ -41,6 +43,7 @@ export interface SettingsDiagnostic {
 
 export interface MergedSettings {
   defaultMode?: PermissionMode;
+  lsp?: LspConfig;
   ruleSet: PermissionRuleSet;
   diagnostics: SettingsDiagnostic[];
 }
@@ -100,12 +103,26 @@ export class SettingsManager {
     const diagnostics: SettingsDiagnostic[] = [...this.fileDiagnostics];
 
     let defaultMode: PermissionMode | undefined;
+    let lsp: LspConfig | undefined;
     const allow: PermissionRule[] = [];
     const deny: PermissionRule[] = [];
 
     for (const scope of ["user", "project", "local"] as SettingsScope[]) {
       const data = this.raw[scope];
-      if (!data || !data.permissions) continue;
+      if (!data) continue;
+      if ("lsp" in data) {
+        const parsed = normalizeLspConfig(data.lsp);
+        if (parsed === undefined) {
+          diagnostics.push({
+            scope,
+            path: this.paths[scope],
+            message: "Ignored lsp setting — expected boolean or object.",
+          });
+        } else {
+          lsp = parsed;
+        }
+      }
+      if (!data.permissions) continue;
       const perms = data.permissions;
 
       if (typeof perms.defaultMode === "string") {
@@ -147,6 +164,7 @@ export class SettingsManager {
 
     return {
       defaultMode,
+      lsp,
       ruleSet: { allow, deny },
       diagnostics,
     };
