@@ -457,6 +457,11 @@ function OpenTuiApp(props: {
   const sidebarLspRows: Array<BoxRenderable | undefined> = [];
   const sidebarLspMarkers: Array<TextRenderable | undefined> = [];
   const sidebarLspLabels: Array<TextRenderable | undefined> = [];
+  const sidebarFileRows: Array<BoxRenderable | undefined> = [];
+  const sidebarFileLabels: Array<TextRenderable | undefined> = [];
+  const sidebarFileAdditions: Array<TextRenderable | undefined> = [];
+  const sidebarFileDeletions: Array<TextRenderable | undefined> = [];
+  let sidebarFileSection: BoxRenderable | undefined;
 
   const activePrompt = () =>
     isHomeSurfaceActive()
@@ -500,6 +505,7 @@ function OpenTuiApp(props: {
 
   function refreshGitSidebar() {
     setGitState(readGitSidebarState(props.args.cwd));
+    syncSidebarFiles();
     bumpSidebar();
   }
 
@@ -563,6 +569,37 @@ function OpenTuiApp(props: {
       failed ? `${failed} error${failed === 1 ? "" : "s"}` : "",
     ].filter(Boolean).join(", "));
     showSidebarLspRows(statuses);
+  }
+
+  function syncSidebarFiles() {
+    const files = gitState().files.slice(0, 8);
+    if (sidebarFileSection) {
+      sidebarFileSection.visible = files.length > 0;
+    }
+    for (let index = 0; index < 8; index++) {
+      const row = sidebarFileRows[index];
+      const label = sidebarFileLabels[index];
+      const additions = sidebarFileAdditions[index];
+      const deletions = sidebarFileDeletions[index];
+      const file = files[index];
+      if (!row || !label) continue;
+      if (file) {
+        row.visible = true;
+        label.content = truncate(file.file, 25);
+        if (additions) {
+          additions.content = `+${file.additions}`;
+          additions.visible = file.additions > 0;
+        }
+        if (deletions) {
+          deletions.content = `-${file.deletions}`;
+          deletions.visible = file.deletions > 0;
+        }
+      } else {
+        row.visible = false;
+      }
+      safeRequestRender(row);
+    }
+    sidebarShell?.requestRender();
   }
 
   function showSidebarLspRows(statuses: LspStatus[]) {
@@ -3050,7 +3087,7 @@ function OpenTuiApp(props: {
           renderSidebarMcp(mcpStates),
           renderSidebarLsp(),
           activeTodos.length ? renderSidebarTodos(activeTodos) : null,
-          files.length ? renderSidebarFiles(files) : null,
+          renderSidebarFiles(files),
         ),
       ),
       renderSidebarFooter(),
@@ -3142,15 +3179,44 @@ function OpenTuiApp(props: {
   }
 
   function renderSidebarFiles(files: SidebarFileChange[]) {
-    return renderSidebarSection("Modified Files", files.slice(0, 8).map((file) =>
-      h("box", { flexDirection: "row", gap: 1, justifyContent: "space-between" },
-        h("text", { fg: theme.textMuted, wrapMode: "none" }, truncate(file.file, 25)),
-        h("box", { flexDirection: "row", gap: 1, flexShrink: 0 },
-          file.additions ? h("text", { fg: theme.diffAdded }, `+${file.additions}`) : null,
-          file.deletions ? h("text", { fg: theme.diffRemoved }, `-${file.deletions}`) : null,
-        ),
-      ),
-    ));
+    const visible = files.slice(0, 8);
+    const hasFiles = visible.length > 0;
+    return h("box", {
+      flexDirection: "column",
+      flexShrink: 0,
+      visible: hasFiles,
+      ref: (ref: BoxRenderable) => { sidebarFileSection = ref; },
+    },
+      h("text", { fg: theme.text }, "Modified Files"),
+      ...Array.from({ length: 8 }, (_, index) => {
+        const file = visible[index];
+        return h("box", {
+          flexDirection: "row",
+          gap: 1,
+          justifyContent: "space-between",
+          visible: file !== undefined,
+          ref: (ref: BoxRenderable) => { sidebarFileRows[index] = ref; },
+        },
+          h("text", {
+            fg: theme.textMuted,
+            wrapMode: "none",
+            ref: (ref: TextRenderable) => { sidebarFileLabels[index] = ref; },
+          }, file ? truncate(file.file, 25) : ""),
+          h("box", { flexDirection: "row", gap: 1, flexShrink: 0 },
+            h("text", {
+              fg: theme.diffAdded,
+              visible: (file?.additions ?? 0) > 0,
+              ref: (ref: TextRenderable) => { sidebarFileAdditions[index] = ref; },
+            }, file ? `+${file.additions}` : ""),
+            h("text", {
+              fg: theme.diffRemoved,
+              visible: (file?.deletions ?? 0) > 0,
+              ref: (ref: TextRenderable) => { sidebarFileDeletions[index] = ref; },
+            }, file ? `-${file.deletions}` : ""),
+          ),
+        );
+      }),
+    );
   }
 
   function renderSidebarFooter() {
