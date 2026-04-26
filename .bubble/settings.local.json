@@ -10,7 +10,10 @@
       "Edit(/Users/chengshengdeng/bb/my-coding-agent/dashboard.html)",
       "Bash(cat package.json:*)",
       "Bash(find src/skills:*)",
-      "Bash(pwd:*)"
+      "Bash(pwd:*)",
+      "Bash(cd:*)",
+      "Bash(cat:*)",
+      "Bash(find:*)"
     ]
   }
 }
