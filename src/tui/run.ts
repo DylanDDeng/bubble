@@ -402,7 +402,7 @@ function OpenTuiApp(props: {
   let rootBox: BoxRenderable | undefined;
   let sidebarShell: BoxRenderable | undefined;
   let transcriptHost: BoxRenderable | undefined;
-  const transcriptState: TranscriptState = { entries: [], expandedThinking: new Set() };
+  const transcriptState: TranscriptState = { entries: [], expandedThinking: new Set(), expandedCompactions: new Set() };
   let dock: TextRenderable | undefined;
   let homeComposerShell: BoxRenderable | undefined;
   let sessionComposerShell: BoxRenderable | undefined;
@@ -448,6 +448,8 @@ function OpenTuiApp(props: {
   let footerModeBadge: TextRenderable | undefined;
   let sidebarTokenText: TextRenderable | undefined;
   let sidebarPercentText: TextRenderable | undefined;
+  let sidebarGaugeText: TextRenderable | undefined;
+  let sidebarGaugeLabelText: TextRenderable | undefined;
   let sidebarUsageText: TextRenderable | undefined;
   let sidebarReasoningText: TextRenderable | undefined;
   let sidebarCostText: TextRenderable | undefined;
@@ -521,6 +523,12 @@ function OpenTuiApp(props: {
     const context = sidebarContextState();
     setSidebarText(sidebarTokenText, `${formatCompactNumber(context.tokens)} tokens`);
     setSidebarText(sidebarPercentText, `${context.percent}% used`);
+    if (sidebarGaugeText) {
+      sidebarGaugeText.content = buildColoredGauge(context.percent, 30);
+    }
+    if (sidebarGaugeLabelText) {
+      sidebarGaugeLabelText.content = buildGaugeLabel(context.percent);
+    }
     setSidebarText(sidebarUsageText, context.turns > 0
       ? `${formatCompactNumber(context.promptTokens)} in · ${formatCompactNumber(context.completionTokens)} out`
       : "usage pending");
@@ -1010,6 +1018,14 @@ function OpenTuiApp(props: {
           transcriptState.expandedThinking.delete(key);
         } else {
           transcriptState.expandedThinking.add(key);
+        }
+        syncSessionMessages();
+      },
+      onToggleCompaction: (key: string) => {
+        if (transcriptState.expandedCompactions.has(key)) {
+          transcriptState.expandedCompactions.delete(key);
+        } else {
+          transcriptState.expandedCompactions.add(key);
         }
         syncSessionMessages();
       },
@@ -1904,18 +1920,7 @@ function OpenTuiApp(props: {
       return;
     }
 
-    const query = trimmedBeforeCursor.slice(1).toLowerCase();
-    const commands = buildSlashItems(query);
-
-    picker = {
-      kind: "select",
-      mode: "slash",
-      title: "Commands",
-      items: commands,
-      index: commands.length
-        ? Math.min(picker?.kind === "select" && picker.mode === "slash" ? picker.index : 0, commands.length - 1)
-        : 0,
-    };
+    filterSlashPicker(trimmedBeforeCursor.slice(1).toLowerCase());
     redrawDock();
   }
 
@@ -1939,24 +1944,79 @@ function OpenTuiApp(props: {
 
   function buildSlashItems(query = ""): PickerItem[] {
     const normalizedQuery = query.trim().toLowerCase();
-    return [...LOCAL_SLASH_COMMANDS, ...slashRegistry.list()]
-      .filter((command) => {
-        if (!normalizedQuery) return true;
-        const name = command.name.toLowerCase();
-        const description = command.description.toLowerCase();
-        return name.startsWith(normalizedQuery)
-          || name.includes(normalizedQuery)
-          || description.includes(normalizedQuery)
-          || fuzzyMatch(name, normalizedQuery)
-          || fuzzyMatch(description, normalizedQuery);
-      })
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .map((command): PickerItem => ({
+    const commands = [...LOCAL_SLASH_COMMANDS, ...slashRegistry.list()];
+    const matches = slashCommandMatches(commands, normalizedQuery);
+    return matches
+      .map(({ command }): PickerItem => ({
         label: `/${command.name}`,
         detail: command.description,
         value: command.name,
         command: `/${command.name}`,
       }));
+  }
+
+  function slashCommandMatches(commands: Array<{ name: string; description: string }>, normalizedQuery: string) {
+    if (!normalizedQuery) {
+      return commands
+        .map((command) => ({ command, score: 0 }))
+        .sort((a, b) => a.command.name.localeCompare(b.command.name));
+    }
+
+    const exact = commands.filter((command) => command.name.toLowerCase() === normalizedQuery);
+    if (exact.length) {
+      return exact
+        .map((command) => ({ command, score: 0 }))
+        .sort((a, b) => a.command.name.localeCompare(b.command.name));
+    }
+
+    const prefix = commands.filter((command) => command.name.toLowerCase().startsWith(normalizedQuery));
+    if (prefix.length) {
+      return prefix
+        .map((command) => ({ command, score: 1 }))
+        .sort((a, b) => a.command.name.localeCompare(b.command.name));
+    }
+
+    return commands
+      .map((command) => ({ command, score: slashCommandFallbackScore(command, normalizedQuery) }))
+      .filter((item) => item.score < Number.POSITIVE_INFINITY)
+      .sort((a, b) => a.score - b.score || a.command.name.localeCompare(b.command.name));
+  }
+
+  function slashCommandFallbackScore(command: { name: string; description: string }, normalizedQuery: string) {
+    const name = command.name.toLowerCase();
+    const description = command.description.toLowerCase();
+    if (name.includes(normalizedQuery)) return 2;
+    if (fuzzyMatch(name, normalizedQuery)) return 3;
+    if (description.includes(normalizedQuery)) return 4;
+    if (fuzzyMatch(description, normalizedQuery)) return 5;
+    return Number.POSITIVE_INFINITY;
+  }
+
+  function preferredSlashIndex(items: PickerItem[], query: string) {
+    const normalizedQuery = query.trim().toLowerCase();
+    if (!items.length || !normalizedQuery) return 0;
+    const exact = items.findIndex((item) => item.value.toLowerCase() === normalizedQuery);
+    if (exact >= 0) return exact;
+    const prefix = items.findIndex((item) => item.value.toLowerCase().startsWith(normalizedQuery));
+    return prefix >= 0 ? prefix : 0;
+  }
+
+  function filterSlashPicker(query: string) {
+    const previousQuery = picker?.kind === "select" && picker.mode === "slash" ? picker.query ?? "" : "";
+    const previousIndex = picker?.kind === "select" && picker.mode === "slash" ? picker.index : 0;
+    const commands = buildSlashItems(query);
+    picker = {
+      kind: "select",
+      mode: "slash",
+      title: "Commands",
+      items: commands,
+      index: commands.length
+        ? query === previousQuery
+          ? Math.min(Math.max(0, previousIndex), commands.length - 1)
+          : preferredSlashIndex(commands, query)
+        : 0,
+      query,
+    };
   }
 
   function filterActivePicker(value: string) {
@@ -2077,7 +2137,14 @@ function OpenTuiApp(props: {
         redrawTranscript(undefined, displayMessages);
         syncPromptSurfaces(true);
       } else {
-        addMessage("assistant", result);
+        const isCompactResult = result.startsWith("✓ Compaction complete");
+        if (isCompactResult) {
+          setNotice(result);
+          redrawTranscript();
+          setTimeout(() => setNotice(""), 4000);
+        } else {
+          addMessage("assistant", result);
+        }
       }
     }
     if (inject) await runAgentInput(inject, input);
@@ -2910,6 +2977,22 @@ function OpenTuiApp(props: {
           renderSidebarSection("Context", [
             h("text", {
               fg: theme.textMuted,
+              flexShrink: 0,
+              ref: (ref: TextRenderable) => {
+                sidebarGaugeText = ref;
+                ref.content = buildContextGauge(context.percent, 30);
+              },
+            }),
+            h("text", {
+              fg: context.percent >= 80 ? theme.error : context.percent >= 60 ? theme.warning : theme.success,
+              flexShrink: 0,
+              ref: (ref: TextRenderable) => {
+                sidebarGaugeLabelText = ref;
+                ref.content = buildGaugeLabel(context.percent);
+              },
+            }),
+            h("text", {
+              fg: theme.textMuted,
               ref: (ref: TextRenderable) => {
                 sidebarTokenText = ref;
                 ref.content = `${formatCompactNumber(context.tokens)} tokens`;
@@ -2943,11 +3026,26 @@ function OpenTuiApp(props: {
             h("text", {
               fg: theme.textMuted,
               ref: (ref: TextRenderable) => {
+                sidebarReasoningText = ref;
+                ref.content = context.reasoningTokens > 0
+                  ? `${formatCompactNumber(context.reasoningTokens)} reasoning`
+                  : "";
+              },
+            }),
+            h("text", {
+              fg: theme.textMuted,
+              ref: (ref: TextRenderable) => {
                 sidebarCostText = ref;
                 ref.content = context.costText;
               },
             }),
           ]),
+          currentTranscriptMessages().filter((m) => m.syntheticKind === "ui_compact_card").length > 0
+            ? renderSidebarSection("Compactions", [
+                h("text", { fg: theme.info, wrapMode: "word" },
+                  `${currentTranscriptMessages().filter((m) => m.syntheticKind === "ui_compact_card").length} in this session`),
+              ])
+            : null,
           renderSidebarMcp(mcpStates),
           renderSidebarLsp(),
           activeTodos.length ? renderSidebarTodos(activeTodos) : null,
@@ -3153,7 +3251,9 @@ function OpenTuiApp(props: {
       ),
       todos().length ? renderTodos(todos()) : null,
       ...renderPromptDock(),
-      notice() ? h("text", { fg: theme.warning }, notice()) : null,
+      notice() ? h("text", {
+        fg: notice().startsWith("✓") ? theme.success : notice().startsWith("✗") ? theme.error : theme.warning,
+      }, notice()) : null,
       h("box", {
         ref: (ref: BoxRenderable) => { approvalRoot = ref; },
         visible: !!approval,
@@ -3653,10 +3753,11 @@ function updateTranscriptHost(
   for (const [index, message] of visibleMessages.entries()) {
     const key = transcriptMessageKey(message, index);
     const thinkingExpanded = state.expandedThinking.has(key);
-    const signature = transcriptMessageSignature(message, showThinking, thinkingExpanded);
+    const compactionExpanded = state.expandedCompactions.has(key);
+    const signature = transcriptMessageSignature(message, showThinking, thinkingExpanded, compactionExpanded);
     const previous = state.entries[index];
     if (previous?.key === key && previous.signature === signature) {
-      updateMessageEntry(previous, message, showThinking, thinkingExpanded);
+      updateMessageEntry(previous, message, showThinking, thinkingExpanded, compactionExpanded);
       nextEntries.push(previous);
       continue;
     }
@@ -3677,7 +3778,9 @@ function updateTranscriptHost(
       showThinking,
       options?.width ?? 80,
       thinkingExpanded,
+      compactionExpanded,
       options?.onToggleThinking,
+      options?.onToggleCompaction,
     );
     if (entry) {
       host.add(entry.node, index);
@@ -3716,6 +3819,7 @@ function updateTranscriptHost(
 type TranscriptState = {
   entries: TranscriptEntry[];
   expandedThinking: Set<string>;
+  expandedCompactions: Set<string>;
 };
 
 type TranscriptEntry = {
@@ -3731,6 +3835,10 @@ type TranscriptEntry = {
     reasoningStreaming?: boolean;
     reasoningMarkdown?: MarkdownRenderable;
     contentMarkdown?: MarkdownRenderable;
+    compactionExpanded?: boolean;
+    compactionToggleText?: TextRenderable;
+    compactionContentText?: TextRenderable;
+    compactionDetailBox?: BoxRenderable;
   };
 };
 
@@ -3746,8 +3854,11 @@ function transcriptMessageKey(message: DisplayMessage, index: number) {
   return `${index}:${message.role}`;
 }
 
-function transcriptMessageSignature(message: DisplayMessage, showThinking = true, thinkingExpanded = false) {
+function transcriptMessageSignature(message: DisplayMessage, showThinking = true, thinkingExpanded = false, compactionExpanded = false) {
   if (message.role !== "assistant") return message.role;
+  if (message.syntheticKind === "ui_compact_card") {
+    return `compaction:${compactionExpanded ? "expanded" : "collapsed"}:${message.compactionMeta?.turns ?? 0}`;
+  }
   const modelSwitch = parseModelSwitchMessage(message.content);
   const tools = (message.toolCalls ?? [])
     .map((tool) => `${tool.id}:${tool.name}:${tool.status ?? (tool.result === undefined ? "pending" : "completed")}:${tool.isError ? "error" : "ok"}`)
@@ -3771,13 +3882,26 @@ function hashString(value: string) {
   return (hash >>> 0).toString(36);
 }
 
-function updateMessageEntry(entry: TranscriptEntry, message: DisplayMessage, showThinking = true, thinkingExpanded = false) {
+function updateMessageEntry(entry: TranscriptEntry, message: DisplayMessage, showThinking = true, thinkingExpanded = false, compactionExpanded = false) {
   if (message.role === "user") {
     if (entry.refs.userText) entry.refs.userText.content = message.content || " ";
     return;
   }
   if (message.role === "error") {
     if (entry.refs.errorText) entry.refs.errorText.content = message.content;
+    return;
+  }
+  if (message.syntheticKind === "ui_compact_card") {
+    if (entry.refs.compactionToggleText) {
+      entry.refs.compactionExpanded = compactionExpanded;
+      entry.refs.compactionToggleText.content = compactionToggleLabel(compactionExpanded);
+    }
+    if (entry.refs.compactionContentText && compactionExpanded) {
+      entry.refs.compactionContentText.content = message.content;
+    }
+    if (entry.refs.compactionDetailBox) {
+      entry.refs.compactionDetailBox.visible = compactionExpanded;
+    }
     return;
   }
   if (entry.refs.statusText) {
@@ -3935,10 +4059,13 @@ function createMessageEntry(
   showThinking = true,
   width = 80,
   thinkingExpanded = false,
+  compactionExpanded = false,
   onToggleThinking?: (key: string) => void,
+  onToggleCompaction?: (key: string) => void,
 ): TranscriptEntry | null {
   if (message.role === "user") return createUserEntry(ctx, message, index, key, signature);
   if (message.role === "error") return createErrorEntry(ctx, message, key, signature);
+  if (message.syntheticKind === "ui_compact_card") return createCompactionCardEntry(ctx, message, key, signature, compactionExpanded, onToggleCompaction);
   return createAssistantEntry(ctx, message, syntaxStyle, subtleSyntaxStyle, key, signature, showThinking, width, thinkingExpanded, onToggleThinking);
 }
 
@@ -4072,6 +4199,111 @@ function createAssistantEntry(
     node: createBox(ctx, { flexDirection: "column", flexShrink: 0 }, children),
     refs,
   };
+}
+
+function createCompactionCardEntry(
+  ctx: RenderContext,
+  message: DisplayMessage,
+  key: string,
+  signature: string,
+  expanded: boolean,
+  onToggle?: (key: string) => void,
+): TranscriptEntry {
+  const refs: TranscriptEntry["refs"] = {};
+  const meta = message.compactionMeta;
+  const statsParts: string[] = [];
+  if (meta?.turns) statsParts.push(`${meta.turns} turn${meta.turns === 1 ? "" : "s"}`);
+  if (meta?.messages) statsParts.push(`${meta.messages} message${meta.messages === 1 ? "" : "s"}`);
+  const statsLine = statsParts.length > 0 ? statsParts.join(" · ") : "Compacted";
+
+  const children: Renderable[] = [];
+
+  const headerRow = createBox(ctx, {
+    flexDirection: "row",
+    gap: 1,
+    flexShrink: 0,
+    alignItems: "center",
+  }, [
+    createText(ctx, new StyledText([
+      fg(theme.info)(bold("◈ Context Compacted")),
+    ]), { width: 20 }),
+    createText(ctx, new StyledText([
+      fg(theme.textMuted)(`─ ${statsLine}`),
+    ])),
+  ]);
+  children.push(headerRow);
+
+  if (meta?.summarySections && meta.summarySections.length > 0) {
+    const sectionLines: string[] = [];
+    for (const section of meta.summarySections) {
+      const firstLine = section.content.split("\n")[0] || "";
+      sectionLines.push(`${section.label}: ${firstLine}`);
+    }
+    const collapsedPreview = createBox(ctx, {
+      flexDirection: "column",
+      paddingLeft: 2,
+      flexShrink: 0,
+      visible: !expanded,
+    }, [
+      createText(ctx, sectionLines.join("\n"), {
+        fg: theme.textMuted,
+        wrapMode: "word",
+      }),
+    ]);
+    children.push(collapsedPreview);
+    refs.compactionDetailBox = collapsedPreview;
+  }
+
+  let contentTextRef: TextRenderable | undefined;
+  const compactionContentText = createText(ctx, message.content, {
+    fg: theme.textMuted,
+    wrapMode: "word",
+  });
+  contentTextRef = compactionContentText;
+  refs.compactionContentText = contentTextRef;
+
+  const expandedContent = createBox(ctx, {
+    flexDirection: "column",
+    paddingLeft: 2,
+    gap: 1,
+    flexShrink: 0,
+    visible: expanded,
+  }, [compactionContentText]);
+  children.push(expandedContent);
+
+  const toggleText = createText(ctx, compactionToggleLabel(expanded), {
+    fg: theme.secondary,
+    wrapMode: "none",
+    marginTop: 1,
+  });
+  refs.compactionToggleText = toggleText;
+  refs.compactionExpanded = expanded;
+
+  const toggleRow = createBox(ctx, {
+    flexShrink: 0,
+    paddingLeft: 2,
+    onMouseUp: () => onToggle?.(key),
+  }, [toggleText]);
+  children.push(toggleRow);
+
+  const node = createBox(ctx, {
+    border: true,
+    borderColor: theme.info,
+    backgroundColor: theme.backgroundPanel,
+    paddingLeft: 2,
+    paddingRight: 2,
+    paddingTop: 1,
+    paddingBottom: 1,
+    marginTop: 1,
+    flexDirection: "column",
+    flexShrink: 0,
+  }, children);
+
+  return { key, signature, node, refs };
+}
+
+function compactionToggleLabel(expanded: boolean): string {
+  return expanded ? "▲ Show less" : "▼ Show details";
 }
 
 function createModelSwitchEntry(ctx: RenderContext, model: string, key: string, signature: string): TranscriptEntry {
@@ -4509,6 +4741,7 @@ type TranscriptOptions = {
   selectedOption?: number;
   showThinking?: boolean;
   onToggleThinking?: (key: string) => void;
+  onToggleCompaction?: (key: string) => void;
 };
 
 function renderTranscript(
@@ -4876,6 +5109,34 @@ function isToolFinished(tool: DisplayToolCall): boolean {
 function assistantStatusLabel(message: DisplayMessage): string {
   if (message.status === "responding") return "Responding...";
   return message.streaming ? "Thinking..." : "Thinking";
+}
+
+function buildColoredGauge(percent: number, barWidth: number): StyledText {
+  const clamped = Math.max(0, Math.min(100, percent));
+  const filled = Math.round((clamped / 100) * barWidth);
+  const empty = barWidth - filled;
+  const gaugeColor = clamped >= 80 ? theme.error : clamped >= 60 ? theme.warning : theme.success;
+  const chunks: StyledText["chunks"] = [];
+  if (filled > 0) chunks.push(fg(gaugeColor)("█".repeat(filled)));
+  if (empty > 0) chunks.push(fg(theme.borderSubtle)("░".repeat(empty)));
+  return new StyledText(chunks);
+}
+
+function buildContextGauge(percent: number, barWidth: number): string {
+  const clamped = Math.max(0, Math.min(100, percent));
+  const filled = Math.round((clamped / 100) * barWidth);
+  const empty = barWidth - filled;
+  const block = filled > 0 ? "█".repeat(filled) : "";
+  const space = empty > 0 ? "░".repeat(empty) : "";
+  return `${block}${space}`;
+}
+
+function buildGaugeLabel(percent: number): string {
+  if (percent >= 95) return "⚠ Compact imminent";
+  if (percent >= 80) return "⚠ Approaching limit";
+  if (percent >= 60) return "● Context growing";
+  if (percent > 0) return "○ Available";
+  return "○ Empty";
 }
 
 function thinkingToggleLabel(expanded: boolean, streaming = false, spinnerFrame = ""): string {

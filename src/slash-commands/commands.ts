@@ -696,7 +696,8 @@ export const builtinSlashCommands: SlashCommand[] = [
         ...ctx.sessionManager.getMessages(),
       ];
 
-      return `Compacted session context. Dropped ${result.droppedEntries ?? 0} log entries into a summary.`;
+      const dropped = result.droppedEntries ?? 0;
+      return `✓ Compaction complete · ${dropped} log entr${dropped === 1 ? "y" : "ies"} summarized`;
     },
   },
 ];

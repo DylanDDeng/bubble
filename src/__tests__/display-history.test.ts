@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compactDisplayMessages, type DisplayMessage } from "../tui/display-history.js";
+import { compactDisplayMessages, truncateText, type DisplayMessage } from "../tui/display-history.js";
 
 describe("compactDisplayMessages", () => {
   it("caps retained UI messages and inserts a synthetic summary", () => {
@@ -10,8 +10,11 @@ describe("compactDisplayMessages", () => {
 
     const compacted = compactDisplayMessages(messages);
     expect(compacted.length).toBeLessThanOrEqual(81);
-    expect(compacted[0].syntheticKind).toBe("ui_summary");
+    expect(compacted[0].syntheticKind).toBe("ui_compact_card");
     expect(compacted[0].hiddenCount).toBe(20);
+    expect(compacted[0].compactionMeta).toBeDefined();
+    expect(compacted[0].compactionMeta!.messages).toBe(20);
+    expect(compacted[0].compactionMeta!.summarySections.length).toBeGreaterThan(0);
   });
 
   it("truncates older tool results but leaves the recent detail window intact", () => {
@@ -35,5 +38,13 @@ describe("compactDisplayMessages", () => {
     const recent = compacted.at(-1)!;
     expect(recent.content).toBe(messages.at(-1)!.content);
     expect(recent.toolCalls?.[0].result).toBe(messages.at(-1)!.toolCalls?.[0].result);
+  });
+
+  it("uses a visual separator for truncated text", () => {
+    const longText = "a".repeat(2000);
+    const truncated = truncateText(longText, 500);
+    expect(truncated.length).toBeLessThan(longText.length);
+    expect(truncated).toContain("✂");
+    expect(truncated).toContain("chars truncated");
   });
 });
