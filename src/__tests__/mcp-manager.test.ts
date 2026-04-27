@@ -49,9 +49,13 @@ describe("McpManager", () => {
       expect(result.content).toContain("echo:hello");
 
       // Prompt exposed as a synthetic slash command with inject output.
+      // Tools keep mcp__<server>__<tool> naming (permission-rule compatibility);
+      // prompts use flat /<name> naming to match opencode's UX convention.
       const commands = manager.getPromptCommands();
       expect(commands).toHaveLength(1);
-      expect(commands[0].name).toBe("mcp__fakesvr__greet");
+      expect(commands[0].name).toBe("greet");
+      expect(commands[0].source).toBe("mcp");
+      expect(commands[0].sourceLabel).toBe("fakesvr");
 
       const out = await commands[0].handler('"Ada Lovelace" formal', {} as any);
       expect(out).toEqual({ inject: "Hello Ada Lovelace! (formal)" });

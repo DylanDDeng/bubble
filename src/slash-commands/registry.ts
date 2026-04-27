@@ -1,42 +1,57 @@
 import type { SlashCommand, SlashCommandContext } from "./types.js";
+import { asUnified, type CommandSource, type UnifiedCommand } from "./unified.js";
 
 /**
  * Dynamic source: called at lookup time to produce extra commands (e.g. MCP
  * prompts loaded from a server after connect). The registry only keeps the
  * callback — commands are never cached, so re-registering after a reconnect
  * just works.
+ *
+ * Sources may return bare SlashCommand objects for backwards compatibility;
+ * the registry treats unlabelled commands as source: "builtin". MCP's dynamic
+ * source returns UnifiedCommand with source: "mcp".
  */
 export type DynamicSource = () => SlashCommand[];
 
 export class SlashCommandRegistry {
-  private commands = new Map<string, SlashCommand>();
+  private commands = new Map<string, UnifiedCommand>();
   private dynamicSources: DynamicSource[] = [];
 
   register(cmd: SlashCommand) {
-    this.commands.set(cmd.name, cmd);
+    this.commands.set(cmd.name, asUnified(cmd, "builtin"));
   }
 
   addDynamicSource(source: DynamicSource) {
     this.dynamicSources.push(source);
   }
 
-  get(name: string): SlashCommand | undefined {
+  get(name: string): UnifiedCommand | undefined {
     const builtin = this.commands.get(name);
     if (builtin) return builtin;
     for (const source of this.dynamicSources) {
       for (const cmd of source()) {
-        if (cmd.name === name) return cmd;
+        if (cmd.name === name) return asUnified(cmd);
       }
     }
     return undefined;
   }
 
-  list(): SlashCommand[] {
-    const out: SlashCommand[] = [...this.commands.values()];
+  list(): UnifiedCommand[] {
+    const out: UnifiedCommand[] = [...this.commands.values()];
     for (const source of this.dynamicSources) {
-      out.push(...source());
+      for (const cmd of source()) {
+        out.push(asUnified(cmd));
+      }
     }
     return out;
+  }
+
+  /**
+   * Convenience filter used by UI code that wants to group by source
+   * (e.g. builtin first, then mcp) without filtering in-line every time.
+   */
+  listBySource(source: CommandSource): UnifiedCommand[] {
+    return this.list().filter((cmd) => cmd.source === source);
   }
 
   async execute(

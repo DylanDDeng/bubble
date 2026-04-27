@@ -1,5 +1,6 @@
 import { UserConfig, maskKey } from "../config.js";
 import { formatDiagnostics } from "../lsp/index.js";
+import { normalizeNameForMCP } from "../mcp/name.js";
 import { parseRule } from "../permissions/rule.js";
 import type { RuleList, SettingsScope } from "../permissions/settings.js";
 import { encodeModel, decodeModel, displayModel, BUILTIN_PROVIDERS, isUserVisibleProvider } from "../provider-registry.js";
@@ -9,6 +10,7 @@ import { formatLoadedSkill } from "../tools/skill.js";
 import type { ThinkingLevel } from "../types.js";
 import { isThinkingLevel } from "../variant/thinking-level.js";
 import type { SlashCommand, SlashCommandContext } from "./types.js";
+import type { UnifiedCommand } from "./unified.js";
 
 const VALID_SCOPES: SettingsScope[] = ["user", "project", "local"];
 const VALID_LISTS: RuleList[] = ["allow", "deny"];
@@ -148,7 +150,7 @@ function parseKeyArgs(args: string, ctx: Parameters<SlashCommand["handler"]>[1])
   return { provider: ctx.registry.getDefault(), apiKey: trimmed };
 }
 
-export const builtinSlashCommands: SlashCommand[] = [
+const builtinSlashCommandEntries: SlashCommand[] = [
   {
     name: "skills",
     description: "List available skills and any skill diagnostics",
@@ -659,12 +661,13 @@ export const builtinSlashCommands: SlashCommand[] = [
             lines.push(`      · ${tool.name}${tool.description ? ` — ${tool.description.replace(/\s+/g, " ").slice(0, 80)}` : ""}`);
           }
           if (pn > 0) {
-            lines.push(`    prompts (use as /mcp__${state.name}__<name>):`);
+            lines.push(`    prompts (invoke as /<name>):`);
             for (const p of state.status.prompts) {
               const argSig = p.arguments?.length
                 ? ` <${p.arguments.map((a) => (a.required ? a.name : `${a.name}?`)).join("> <")}>`
                 : "";
-              lines.push(`      · /mcp__${state.name}__${p.name}${argSig}${p.description ? ` — ${p.description.replace(/\s+/g, " ").slice(0, 70)}` : ""}`);
+              const cmdName = normalizeNameForMCP(p.name);
+              lines.push(`      · /${cmdName}${argSig}${p.description ? ` — ${p.description.replace(/\s+/g, " ").slice(0, 70)}` : ""}`);
             }
           }
         } else if (state.status.kind === "failed") {
@@ -701,3 +704,13 @@ export const builtinSlashCommands: SlashCommand[] = [
     },
   },
 ];
+
+/**
+ * Public export — built-in commands tagged with `source: "builtin"` so the
+ * registry and TUI can group them uniformly alongside MCP-derived commands.
+ * Kept as a mapped projection to avoid adding the field to every object literal.
+ */
+export const builtinSlashCommands: UnifiedCommand[] = builtinSlashCommandEntries.map((cmd) => ({
+  ...cmd,
+  source: "builtin",
+}));

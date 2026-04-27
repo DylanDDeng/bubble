@@ -8,10 +8,10 @@
  */
 
 import type { ToolRegistryEntry, ToolResult, ToolSchema } from "../types.js";
-import type { SlashCommand } from "../slash-commands/types.js";
+import type { UnifiedCommand } from "../slash-commands/unified.js";
 import { MCPClient, type PromptContentBlock, type PromptMessage } from "./client.js";
 import { HttpTransport, StdioTransport } from "./transports.js";
-import { buildMcpToolName } from "./name.js";
+import { buildMcpToolName, normalizeNameForMCP } from "./name.js";
 import type {
   McpPromptInfo,
   McpServerConfig,
@@ -140,21 +140,40 @@ export class McpManager {
   }
 
   /**
-   * Produce SlashCommand[] for every prompt from every connected server.
+   * Produce UnifiedCommand[] for every prompt from every connected server.
    * Each command, when invoked, calls `prompts/get` with positionally-parsed
    * arguments and returns an `inject` payload that the harness hands back to
    * the agent as the user's next turn.
+   *
+   * Naming: prompts are exposed as /<promptName> directly (flat namespace,
+   * matching opencode's convention). When two servers export the same prompt
+   * name, last-registered wins and a diagnostic is emitted so the user can
+   * see which server "shadowed" which. Server iteration order follows the
+   * Map insertion order (stable: servers are inserted once at constructor
+   * time from the config's declared order).
+   *
+   * Tools, in contrast, keep their `mcp__<server>__<tool>` names so existing
+   * Claude Code-style permission rules (e.g. `Bash(git status)` neighbours)
+   * continue to match. See src/mcp/name.ts.
    */
-  getPromptCommands(): SlashCommand[] {
-    const commands: SlashCommand[] = [];
+  getPromptCommands(): UnifiedCommand[] {
+    const byName = new Map<string, UnifiedCommand>();
     for (const conn of this.connections.values()) {
       if (conn.state.status.kind !== "connected" || !conn.client) continue;
       const serverName = conn.state.name;
       for (const prompt of conn.state.status.prompts) {
-        commands.push(buildPromptCommand(serverName, prompt, () => conn.client));
+        const displayName = normalizeNameForMCP(prompt.name);
+        const cmd = buildPromptCommand(serverName, displayName, prompt, () => conn.client);
+        const existing = byName.get(displayName);
+        if (existing) {
+          this.onDiagnostic(
+            `[mcp] prompt /${displayName} from server "${serverName}" shadows the same prompt from "${existing.sourceLabel ?? "unknown"}"`,
+          );
+        }
+        byName.set(displayName, cmd);
       }
     }
-    return commands;
+    return [...byName.values()];
   }
 }
 
@@ -219,17 +238,19 @@ function coerceSchema(input: unknown): ToolSchema {
 
 function buildPromptCommand(
   serverName: string,
+  displayName: string,
   prompt: McpPromptInfo,
   getClient: () => MCPClient | undefined,
-): SlashCommand {
-  const name = buildMcpToolName(serverName, prompt.name);
+): UnifiedCommand {
   const argNames = (prompt.arguments ?? []).map((a) => a.name);
   const argSig = argNames.length > 0 ? ` <${argNames.join("> <")}>` : "";
   const description = `[MCP:${serverName}] ${prompt.description?.trim() || prompt.name}${argSig ? ` (args:${argSig})` : ""}`;
 
   return {
-    name,
+    name: displayName,
     description,
+    source: "mcp",
+    sourceLabel: serverName,
     async handler(args: string) {
       const client = getClient();
       if (!client) {
@@ -244,14 +265,14 @@ function buildPromptCommand(
       const required = (prompt.arguments ?? []).filter((a) => a.required).map((a) => a.name);
       const missing = required.filter((n) => !mapped[n]);
       if (missing.length > 0) {
-        return `Error: /${name} is missing required arg${missing.length === 1 ? "" : "s"}: ${missing.join(", ")}`;
+        return `Error: /${displayName} is missing required arg${missing.length === 1 ? "" : "s"}: ${missing.join(", ")}`;
       }
 
       try {
         const result = await client.getPrompt(prompt.name, mapped);
         const text = flattenPromptMessages(result.messages);
         if (!text.trim()) {
-          return `Error: /${name} returned an empty prompt.`;
+          return `Error: /${displayName} returned an empty prompt.`;
         }
         return { inject: text };
       } catch (err) {

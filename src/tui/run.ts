@@ -45,6 +45,8 @@ import { getAvailableThinkingLevels } from "../provider-transform.js";
 import type { SkillRegistry } from "../skills/registry.js";
 import { parseSkillInvocation } from "../skills/invocation.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
+import { sourceRank } from "../slash-commands/unified.js";
+import { sidebarMcpRowsFromStates, renderMcpRowMarker, type SidebarMcpRow } from "./sidebar-mcp.js";
 import { expandAtMentions, filterFileSuggestions, findAtContext, listProjectFiles } from "./file-mentions.js";
 import { compactDisplayMessages, type DisplayMessage, type DisplayToolCall } from "./display-history.js";
 import { createMarkdownSyntaxStyle, createSubtleMarkdownSyntaxStyle } from "./markdown-theme.js";
@@ -194,7 +196,7 @@ type SidebarUsageState = {
   reasoningTokens: number;
   turns: number;
 };
-type PickerMode = "model" | "key" | "provider" | "provider-add" | "provider-auth" | "login" | "logout" | "slash" | "file";
+type PickerMode = "model" | "key" | "provider" | "provider-add" | "provider-auth" | "login" | "logout" | "slash" | "file" | "mcp-reconnect";
 type PickerItem = {
   label: string;
   detail?: string;
@@ -370,6 +372,9 @@ function OpenTuiApp(props: {
   const [notice, setNotice] = createSignal("");
   const [sessionActive, setSessionActive] = createSignal(false);
   const [sidebarTick, setSidebarTick] = createSignal(0);
+  // Sidebar MCP section collapsed state. Persisted across sidebarTick bumps,
+  // only reset on actual mount. Collapse toggle exposed when > 2 servers.
+  const [mcpSectionOpen, setMcpSectionOpen] = createSignal(true);
   const lspService = props.options.lspService ?? getLspService(props.args.cwd, props.options.settingsManager?.getMerged().lsp);
   const [lspStatuses, setLspStatuses] = createSignal<LspStatus[]>(lspService.status());
   const [sidebarUsage, setSidebarUsage] = createSignal<SidebarUsageState>({
@@ -949,6 +954,14 @@ function OpenTuiApp(props: {
       return;
     }
 
+    // Ctrl+Shift+M opens the MCP reconnect picker. Shift is required because
+    // bare Ctrl+M is Enter on most terminals (historical TTY mapping).
+    if (event.ctrl && event.shift && name === "m") {
+      openMcpReconnectPicker();
+      event.preventDefault?.();
+      return;
+    }
+
     if (handleApprovalKey(event)) return;
     if (handleProviderDialogKey(event)) return;
     if (handlePickerKey(event)) return;
@@ -1182,12 +1195,12 @@ function OpenTuiApp(props: {
         pickerFrame.width = geometry.width;
         pickerFrame.height = geometry.height;
       } else {
-        pickerFrame.left = undefined;
-        pickerFrame.top = undefined;
-        pickerFrame.width = "auto";
-        pickerFrame.height = "auto";
-      }
-      pickerFrame.title = undefined;
+      pickerFrame.left = undefined;
+      pickerFrame.top = undefined;
+      pickerFrame.width = "auto";
+      pickerFrame.height = "auto";
+    }
+    pickerFrame.title = state?.title;
       pickerFrame.requestRender();
     }
     redrawInlinePickerRows(state, inlinePicker, pickerHeight);
@@ -1841,6 +1854,14 @@ function OpenTuiApp(props: {
       event.preventDefault?.();
       return true;
     }
+    // Inside the MCP reconnect picker, `r` is an alias for Enter — matches
+    // the `[r]` hint shown in the sidebar row.
+    if (name === "r" && picker.mode === "mcp-reconnect") {
+      const item = picker.items[picker.index];
+      if (item) void runPickerItem(item);
+      event.preventDefault?.();
+      return true;
+    }
     return false;
   }
 
@@ -1980,47 +2001,137 @@ function OpenTuiApp(props: {
     redrawDock();
   }
 
-  function buildSlashItems(query = ""): PickerItem[] {
-    const normalizedQuery = query.trim().toLowerCase();
-    const commands = [...LOCAL_SLASH_COMMANDS, ...slashRegistry.list()];
-    const matches = slashCommandMatches(commands, normalizedQuery);
-    return matches
-      .map(({ command }): PickerItem => ({
-        label: `/${command.name}`,
-        detail: command.description,
-        value: command.name,
-        command: `/${command.name}`,
-      }));
+  /**
+   * Builds the picker shown by `Ctrl+Shift+M`. Follows opencode's
+   * dialog-mcp.tsx visual convention:
+   *   - label (title)  → pure server name, no marker
+   *   - detail (descr) → "status · tools/prompts" or error summary
+   *
+   * We keep it to two lines (label + detail) because bubble's
+   * SelectOption/inline-picker only supports name+description. The
+   * footer-badge pattern from opencode (e.g. "✓ Enabled") is inlined
+   * into the detail line so it stays visible.
+   */
+  function buildMcpReconnectItems(): PickerItem[] {
+    const mgr = props.options.mcpManager;
+    if (!mgr) return [];
+    const rows = sidebarMcpRowsFromStates(mgr.getStates());
+    return rows.map((row): PickerItem => {
+      const statusWord = row.kind === "connected"
+        ? "connected"
+        : row.kind === "failed"
+          ? "failed"
+          : "disabled";
+      const detail = row.kind === "failed"
+        ? `${statusWord} · ${row.label}`
+        : `${statusWord} · ${row.label}`;
+      return {
+        label: row.name,
+        detail,
+        value: row.name,
+        command: `/mcp reconnect ${row.name}`,
+      };
+    });
   }
 
-  function slashCommandMatches(commands: Array<{ name: string; description: string }>, normalizedQuery: string) {
+  function openMcpReconnectPicker(focusServerName?: string) {
+    const items = buildMcpReconnectItems();
+    if (items.length === 0) {
+      addMessage("assistant", "No MCP servers configured.");
+      return;
+    }
+    const focusIdx = focusServerName
+      ? Math.max(0, items.findIndex((it) => it.value === focusServerName))
+      : 0;
+    providerDialog = undefined;
+    redrawProviderDialog();
+    picker = {
+      kind: "select",
+      mode: "mcp-reconnect",
+      title: "MCP servers — Enter or r to reconnect",
+      items,
+      allItems: items,
+      index: focusIdx,
+    };
+    activePrompt()?.clear();
+    promptText = "";
+    activePrompt()?.focus();
+    redrawDock();
+  }
+
+  /**
+   * Shape used for slash command matching. Built-ins from LOCAL_SLASH_COMMANDS
+   * are plain {name, description}; the registry returns UnifiedCommand which
+   * adds `source` / `sourceLabel`. Unlabelled entries default to "builtin"
+   * via the fallbacks below.
+   */
+  type SlashCandidate = {
+    name: string;
+    description: string;
+    source?: "builtin" | "mcp" | "skill";
+    sourceLabel?: string;
+  };
+
+  function buildSlashItems(query = ""): PickerItem[] {
+    const normalizedQuery = query.trim().toLowerCase();
+    const commands: SlashCandidate[] = [
+      ...LOCAL_SLASH_COMMANDS.map((c) => ({ ...c, source: "builtin" as const })),
+      ...slashRegistry.list(),
+    ];
+    const matches = slashCommandMatches(commands, normalizedQuery);
+    return matches.map(({ command }): PickerItem => {
+      const isMcp = command.source === "mcp";
+      const badge = isMcp ? " :mcp" : "";
+      const label = `/${command.name}${badge}`;
+      const detail = isMcp && command.sourceLabel
+        ? `[${command.sourceLabel}] ${command.description}`
+        : command.description;
+      return {
+        label,
+        detail,
+        value: command.name,
+        command: `/${command.name}`,
+      };
+    });
+  }
+
+  function slashCommandMatches(commands: SlashCandidate[], normalizedQuery: string) {
+    const sortKey = (a: { command: SlashCandidate }, b: { command: SlashCandidate }) =>
+      sourceRank(a.command.source) - sourceRank(b.command.source)
+      || a.command.name.localeCompare(b.command.name);
+
     if (!normalizedQuery) {
       return commands
         .map((command) => ({ command, score: 0 }))
-        .sort((a, b) => a.command.name.localeCompare(b.command.name));
+        .sort(sortKey);
     }
 
     const exact = commands.filter((command) => command.name.toLowerCase() === normalizedQuery);
     if (exact.length) {
       return exact
         .map((command) => ({ command, score: 0 }))
-        .sort((a, b) => a.command.name.localeCompare(b.command.name));
+        .sort(sortKey);
     }
 
     const prefix = commands.filter((command) => command.name.toLowerCase().startsWith(normalizedQuery));
     if (prefix.length) {
       return prefix
         .map((command) => ({ command, score: 1 }))
-        .sort((a, b) => a.command.name.localeCompare(b.command.name));
+        .sort(sortKey);
     }
 
     return commands
       .map((command) => ({ command, score: slashCommandFallbackScore(command, normalizedQuery) }))
       .filter((item) => item.score < Number.POSITIVE_INFINITY)
-      .sort((a, b) => a.score - b.score || a.command.name.localeCompare(b.command.name));
+      .sort(
+        (a, b) =>
+          a.score - b.score
+          || sourceRank(a.command.source) - sourceRank(b.command.source)
+          || a.command.name.localeCompare(b.command.name),
+      );
   }
 
-  function slashCommandFallbackScore(command: { name: string; description: string }, normalizedQuery: string) {
+  function slashCommandFallbackScore(command: SlashCandidate, normalizedQuery: string) {
     const name = command.name.toLowerCase();
     const description = command.description.toLowerCase();
     if (name.includes(normalizedQuery)) return 2;
@@ -2245,6 +2356,34 @@ function OpenTuiApp(props: {
       await executeSlash(item.command);
       return;
     }
+    if (picker?.kind === "select" && picker.mode === "mcp-reconnect") {
+      closePicker();
+      const mgr = props.options.mcpManager;
+      if (!mgr) {
+        addMessage("error", "MCP is not initialized for this session.");
+        return;
+      }
+      const name = item.value;
+      addMessage("assistant", `Reconnecting MCP server "${name}"…`);
+      try {
+        const state = await mgr.reconnect(name);
+        if (!state) {
+          addMessage("error", `Unknown MCP server: ${name}`);
+        } else if (state.status.kind === "connected") {
+          const tn = state.status.tools.length;
+          addMessage("assistant", `Reconnected ${name}. ${tn} tool${tn === 1 ? "" : "s"} available.`);
+        } else if (state.status.kind === "failed") {
+          addMessage("error", `Failed to connect ${name}: ${state.status.error}`);
+        } else {
+          addMessage("assistant", `${name}: ${state.status.kind}`);
+        }
+      } catch (err) {
+        addMessage("error", `Reconnect error for ${name}: ${(err as Error).message || String(err)}`);
+      } finally {
+        bumpSidebar();
+      }
+      return;
+    }
     if (item.next === "auth") {
       const immediateItems = buildPickerItems("provider-auth", item.value);
       picker = {
@@ -2290,6 +2429,7 @@ function OpenTuiApp(props: {
 
   function buildPickerItems(kind: Exclude<PickerMode, "key">, providerId?: string): PickerItem[] {
     if (kind === "slash") return [];
+    if (kind === "mcp-reconnect") return buildMcpReconnectItems();
     if (kind === "model") {
       const items: PickerItem[] = [];
       for (const provider of registry.getEnabled()) {
@@ -3112,16 +3252,53 @@ function OpenTuiApp(props: {
     }
     const connected = states.filter((state) => state.kind === "connected").length;
     const failed = states.filter((state) => state.kind === "failed").length;
-    return renderSidebarSection("MCP", [
-      h("text", { fg: failed ? theme.warning : theme.textMuted },
-        `${connected} active${failed ? `, ${failed} error${failed === 1 ? "" : "s"}` : ""}`),
-      ...states.slice(0, 5).map((state) =>
-        h("box", { flexDirection: "row", gap: 1 },
-          h("text", { fg: sidebarStatusColor(state.kind), flexShrink: 0 }, "*"),
-          h("text", { fg: theme.textMuted, wrapMode: "word" }, `${state.name} ${state.label}`),
-        ),
+    const foldable = states.length > 2;
+    const open = foldable ? mcpSectionOpen() : true;
+    const summary = `${connected} active${failed ? `, ${failed} error${failed === 1 ? "" : "s"}` : ""}`;
+
+    const header = foldable
+      ? h(
+          "box",
+          {
+            flexDirection: "row",
+            onMouseDown: () => setMcpSectionOpen((v) => !v),
+          },
+          h(
+            "text",
+            { fg: failed ? theme.warning : theme.textMuted },
+            `${open ? "▼" : "▶"} ${summary}`,
+          ),
+        )
+      : h("text", { fg: failed ? theme.warning : theme.textMuted }, summary);
+
+    const children: Child[] = [header];
+    if (open) {
+      for (const state of states.slice(0, 5)) {
+        children.push(renderSidebarMcpRow(state));
+      }
+      if (states.length > 5) {
+        children.push(
+          h("text", { fg: theme.textMuted, wrapMode: "word" }, `  …and ${states.length - 5} more`),
+        );
+      }
+    }
+    return renderSidebarSection("MCP", children);
+  }
+
+  function renderSidebarMcpRow(state: SidebarMcpRow) {
+    // Pure status display. Reconnect is reached via Ctrl+Shift+M or the
+    // /mcp reconnect slash command — the sidebar itself is read-only so the
+    // affordance matches its purpose: glance at health, don't operate here.
+    return h(
+      "box",
+      { flexDirection: "row", gap: 1 },
+      h("text", { fg: sidebarStatusColor(state.kind), flexShrink: 0 }, renderMcpRowMarker(state.kind)),
+      h(
+        "text",
+        { fg: theme.textMuted, wrapMode: "word" },
+        `${state.name} ${state.label}`,
       ),
-    ]);
+    );
   }
 
   function renderSidebarLsp() {
@@ -3261,20 +3438,9 @@ function OpenTuiApp(props: {
     };
   }
 
-  function sidebarMcpStates() {
+  function sidebarMcpStates(): SidebarMcpRow[] {
     sidebarTick();
-    return (props.options.mcpManager?.getStates() ?? []).map((state) => {
-      const kind = state.status.kind;
-      return {
-        name: state.name,
-        kind,
-        label: kind === "connected"
-          ? "Connected"
-          : kind === "failed"
-            ? truncate(state.status.error, 42)
-            : kind,
-      };
-    });
+    return sidebarMcpRowsFromStates(props.options.mcpManager?.getStates() ?? []);
   }
 
   function renderSessionView() {
@@ -4598,6 +4764,8 @@ function pickerTitle(kind: Exclude<PickerMode, "key">, providerId?: string) {
       return "Commands";
     case "file":
       return "Files";
+    case "mcp-reconnect":
+      return "MCP servers — Enter or r to reconnect";
   }
 }
 
