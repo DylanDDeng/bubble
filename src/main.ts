@@ -23,6 +23,7 @@ import { getLspService } from "./lsp/index.js";
 import { loadMcpConfig } from "./mcp/config.js";
 import { McpManager } from "./mcp/manager.js";
 import type { PermissionMode, Message, PlanDecision } from "./types.js";
+import { QuestionController } from "./question/index.js";
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -85,6 +86,7 @@ async function main() {
     },
   };
   const approvalHandlerRef: { current?: (req: ApprovalRequest) => Promise<ApprovalDecision> } = {};
+  const questionController = new QuestionController();
   const bashAllowlist = new BashAllowlist();
   const settingsManager = new SettingsManager(args.cwd);
   for (const d of settingsManager.getMerged().diagnostics) {
@@ -106,6 +108,7 @@ async function main() {
     todoStore,
     planController,
     approvalController,
+    questionController: printMode ? undefined : questionController,
     toolSearchController,
     lspService,
   });
@@ -206,6 +209,7 @@ async function main() {
     thinkingLevel: initialThinkingLevel,
     mode: initialMode,
     workingDir: args.cwd,
+    tools: tools.map((tool) => tool.name),
     skills: skillRegistry.summaries(),
   });
   const agent = new Agent({
@@ -214,6 +218,7 @@ async function main() {
       : provider,
     providerId: activeProviderId || "",
     model: activeModel,
+    sessionID: sessionManager?.getSessionFile(),
     tools,
     systemPrompt,
     temperature: 0.2,
@@ -303,6 +308,7 @@ async function main() {
     skillRegistry,
     planHandlerRef,
     approvalHandlerRef,
+    questionController,
     bashAllowlist,
     settingsManager,
     lspService,

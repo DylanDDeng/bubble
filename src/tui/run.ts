@@ -20,6 +20,7 @@ import {
   bg,
   bold,
   dim,
+  TextAttributes,
   TextRenderable,
   type TextareaRenderable,
 } from "@opentui/core";
@@ -57,6 +58,7 @@ import { inferBashPrefix, type BashAllowlist } from "../approval/session-cache.j
 import type { SettingsManager } from "../permissions/settings.js";
 import type { McpManager } from "../mcp/manager.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
+import type { QuestionAnswer, QuestionController, QuestionPrompt, QuestionRequest } from "../question/index.js";
 import { createFrames } from "./opencode-spinner.js";
 import { readGitSidebarState, type SidebarFileChange, type SidebarGitState } from "./sidebar-state.js";
 import {
@@ -81,6 +83,7 @@ export interface RunTuiOptions {
   skillRegistry?: SkillRegistry;
   planHandlerRef?: PlanHandlerRef;
   approvalHandlerRef?: ApprovalHandlerRef;
+  questionController?: QuestionController;
   bashAllowlist?: BashAllowlist;
   settingsManager?: SettingsManager;
   lspService?: LspService;
@@ -90,6 +93,7 @@ export interface RunTuiOptions {
 }
 
 type RawModeCycleHandler = (sequence: string) => boolean;
+type RawQuestionHandler = (sequence: string) => boolean;
 
 const treeSitterClient = getTreeSitterClient();
 
@@ -171,6 +175,10 @@ const PROMPT_SCANNER_INTERVAL_MS = 80;
 const SESSION_SIDEBAR_WIDTH = 42;
 const SESSION_SIDEBAR_AUTO_WIDTH = 120;
 const PROVIDER_DIALOG_ROWS = 11;
+const QUESTION_MAX_TABS = 4;
+const QUESTION_MAX_OPTIONS = 10;
+const QUESTION_MAX_CONFIRM_ROWS = 3;
+const QUESTION_PANEL_MIN_HEIGHT = 9;
 
 const HOME_LOGO = [
   " /\\_/\\  █▀▀▄ █  █ █▀▀▄ █▀▀▄ █    █▀▀",
@@ -216,6 +224,14 @@ type ProviderDialogState = {
   index: number;
   apiKey: string;
   error?: string;
+};
+type QuestionPanelState = {
+  request: QuestionRequest;
+  tab: number;
+  selected: number;
+  answers: QuestionAnswer[];
+  custom: string[];
+  editing: boolean;
 };
 type ProviderDialogRow =
   | { type: "category"; label: string }
@@ -289,6 +305,7 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
     let syntaxStyle: SyntaxStyle | undefined;
     let subtleSyntaxStyle: SyntaxStyle | undefined;
     let rawModeCycleHandler: RawModeCycleHandler | undefined;
+    let rawQuestionHandler: RawQuestionHandler | undefined;
     const exit = () => {
       try {
         renderer?.destroy();
@@ -310,7 +327,7 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
         exitOnCtrlC: false,
         useKittyKeyboard: {},
         prependInputHandlers: [
-          (sequence: string) => rawModeCycleHandler?.(sequence) ?? false,
+          (sequence: string) => rawQuestionHandler?.(sequence) || rawModeCycleHandler?.(sequence) || false,
         ],
         autoFocus: true,
         useMouse: true,
@@ -320,7 +337,10 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
       const setRawModeCycleHandler = (handler: RawModeCycleHandler | undefined) => {
         rawModeCycleHandler = handler;
       };
-      await render(() => h(OpenTuiApp, { agent, args, options, onExit: exit, syntaxStyle, subtleSyntaxStyle, setRawModeCycleHandler }), renderer);
+      const setRawQuestionHandler = (handler: RawQuestionHandler | undefined) => {
+        rawQuestionHandler = handler;
+      };
+      await render(() => h(OpenTuiApp, { agent, args, options, onExit: exit, syntaxStyle, subtleSyntaxStyle, setRawModeCycleHandler, setRawQuestionHandler }), renderer);
     } catch (error) {
       syntaxStyle?.destroy();
       subtleSyntaxStyle?.destroy();
@@ -355,6 +375,7 @@ function OpenTuiApp(props: {
   syntaxStyle: SyntaxStyle;
   subtleSyntaxStyle: SyntaxStyle;
   setRawModeCycleHandler?: (handler: RawModeCycleHandler | undefined) => void;
+  setRawQuestionHandler?: (handler: RawQuestionHandler | undefined) => void;
 }) {
   const dimensions = useTerminalDimensions();
   const registry = props.options.registry!;
@@ -395,6 +416,8 @@ function OpenTuiApp(props: {
     request: ApprovalRequest;
     resolve: (decision: ApprovalDecision) => void;
   }>();
+  const [pendingQuestion, setPendingQuestion] = createSignal<QuestionPanelState>();
+  const questionSyncTimers = new Set<ReturnType<typeof setTimeout>>();
   let pendingApprovalRef: { request: ApprovalRequest; resolve: (decision: ApprovalDecision) => void } | undefined;
   const PLAN_OPTIONS = ["Approve", "Reject"] as const;
   const [approvalOptionIdx, setApprovalOptionIdx] = createSignal(0);
@@ -429,8 +452,27 @@ function OpenTuiApp(props: {
   let approvalPreviewScroll: ScrollBoxRenderable | undefined;
   let approvalPreviewText: TextRenderable | undefined;
   let approvalPreviewDiff: DiffRenderable | undefined;
+  let questionCustomInput: TextareaRenderable | undefined;
   const approvalOptionBoxes: Array<BoxRenderable | undefined> = [];
   const approvalOptionTexts: Array<TextRenderable | undefined> = [];
+  let questionRoot: BoxRenderable | undefined;
+  let questionTabsRow: BoxRenderable | undefined;
+  const questionTabBoxes: Array<BoxRenderable | undefined> = [];
+  const questionTabTexts: Array<TextRenderable | undefined> = [];
+  let questionPromptText: TextRenderable | undefined;
+  let questionOptionsShell: BoxRenderable | undefined;
+  const questionOptionRows: Array<BoxRenderable | undefined> = [];
+  const questionOptionIndexTexts: Array<TextRenderable | undefined> = [];
+  const questionOptionLabelTexts: Array<TextRenderable | undefined> = [];
+  const questionOptionDescriptionTexts: Array<TextRenderable | undefined> = [];
+  const questionOptionCheckTexts: Array<TextRenderable | undefined> = [];
+  let questionCustomEditorShell: BoxRenderable | undefined;
+  let questionConfirmShell: BoxRenderable | undefined;
+  const questionConfirmTexts: Array<TextRenderable | undefined> = [];
+  let questionFooterTab: TextRenderable | undefined;
+  let questionFooterSelect: TextRenderable | undefined;
+  let questionFooterEnter: TextRenderable | undefined;
+  let questionFooterEsc: TextRenderable | undefined;
   let pickerFrame: BoxRenderable | undefined;
   let selectList: SelectRenderable | undefined;
   const inlinePickerRows: Array<BoxRenderable | undefined> = [];
@@ -499,7 +541,7 @@ function OpenTuiApp(props: {
     return !!event.shift;
   };
 
-  const canInsertPromptNewline = () => !isRunning() && !pendingApproval() && !pendingPlan();
+  const canInsertPromptNewline = () => !isRunning() && !pendingApproval() && !pendingPlan() && !pendingQuestion();
 
   const sidebarVisible = () => sessionActive() && dimensions().width > SESSION_SIDEBAR_AUTO_WIDTH;
   const contentWidth = () => Math.max(20, dimensions().width - (sidebarVisible() ? SESSION_SIDEBAR_WIDTH : 0) - 4);
@@ -731,6 +773,15 @@ function OpenTuiApp(props: {
     return rawName || keyNameFromSequence(event.raw || event.sequence);
   };
 
+  const questionKeyNameFromSequence = (sequence?: string) => {
+    const name = keyNameFromSequence(sequence);
+    if (name) return name;
+    if (sequence === "\t" || sequence === "\x1b[Z") return "tab";
+    if (sequence && /^[1-9]$/.test(sequence)) return sequence;
+    if (sequence && /^[hjkl]$/i.test(sequence)) return sequence.toLowerCase();
+    return "";
+  };
+
   const moveApprovalOption = (direction: -1 | 1, optionCount: number) => {
     const idx = approvalOptionIdx();
     setApprovalOptionIdx((idx + direction + optionCount) % optionCount);
@@ -894,6 +945,330 @@ function OpenTuiApp(props: {
     redrawTranscript();
   };
 
+  function questionStateFromRequest(request: QuestionRequest): QuestionPanelState {
+    return {
+      request,
+      tab: 0,
+      selected: 0,
+      answers: request.questions.map(() => []),
+      custom: request.questions.map(() => ""),
+      editing: false,
+    };
+  }
+
+  function currentQuestionSessionID() {
+    return props.options.sessionManager?.getSessionFile();
+  }
+
+  function controllerQuestionRequests() {
+    const controller = props.options.questionController;
+    if (!controller) return [];
+    const sessionID = currentQuestionSessionID();
+    const scoped = sessionID ? controller.list(sessionID) : [];
+    if (scoped.length > 0) return scoped;
+    const all = controller.list();
+    return all.length === 1 ? all : [];
+  }
+
+  function syncFirstPendingQuestion() {
+    const controller = props.options.questionController;
+    if (!controller) return;
+    const requests = controllerQuestionRequests();
+    const current = pendingQuestion();
+    if (current && requests.some((request) => request.id === current.request.id)) {
+      return;
+    }
+    const next = requests[0];
+    setPendingQuestion(next ? questionStateFromRequest(next) : undefined);
+    syncQuestionUI();
+  }
+
+  function scheduleQuestionSync() {
+    for (const delay of [0, 20, 75, 200, 500]) {
+      const timer = setTimeout(() => {
+        questionSyncTimers.delete(timer);
+        syncFirstPendingQuestion();
+      }, delay);
+      questionSyncTimers.add(timer);
+    }
+  }
+
+  function syncQuestionUI(focusCustom = false) {
+    redrawQuestionPanel();
+    syncPromptSurfaces();
+    redrawDock();
+    rootBox?.requestRender();
+    scrollbox?.requestRender();
+    if (focusCustom) {
+      setTimeout(() => questionCustomInput?.focus(), 0);
+    }
+  }
+
+  function updateQuestionState(updater: (state: QuestionPanelState) => QuestionPanelState | undefined, focusCustom = false) {
+    setPendingQuestion((current) => current ? updater(current) : undefined);
+    syncQuestionUI(focusCustom);
+  }
+
+  function questionAt(state: QuestionPanelState): QuestionPrompt | undefined {
+    return state.request.questions[state.tab];
+  }
+
+  function isSingleQuestion(state: QuestionPanelState) {
+    const first = state.request.questions[0];
+    return state.request.questions.length === 1 && first?.multiple !== true;
+  }
+
+  function isQuestionConfirmTab(state: QuestionPanelState) {
+    return !isSingleQuestion(state) && state.tab >= state.request.questions.length;
+  }
+
+  function questionCustomAllowed(question: QuestionPrompt | undefined) {
+    return question?.custom !== false;
+  }
+
+  function questionOptionTotal(state: QuestionPanelState) {
+    const q = questionAt(state);
+    if (!q) return 0;
+    return q.options.length + (questionCustomAllowed(q) ? 1 : 0);
+  }
+
+  function questionPanelHeight(state: QuestionPanelState) {
+    const tabRows = isSingleQuestion(state) ? 0 : 1;
+    const bodyRows = isQuestionConfirmTab(state)
+      ? Math.max(2, state.request.questions.length + 1)
+      : Math.max(2, questionOptionTotal(state) * 2 + (state.editing ? 2 : 0));
+    const wanted = QUESTION_PANEL_MIN_HEIGHT + tabRows + bodyRows;
+    const max = Math.max(QUESTION_PANEL_MIN_HEIGHT, dimensions().height - 6);
+    return Math.min(wanted, max);
+  }
+
+  function questionIsOtherSelected(state: QuestionPanelState) {
+    const q = questionAt(state);
+    return !!q && questionCustomAllowed(q) && state.selected === q.options.length;
+  }
+
+  function questionCustomPicked(state: QuestionPanelState) {
+    const value = state.custom[state.tab]?.trim();
+    return !!value && (state.answers[state.tab] ?? []).includes(value);
+  }
+
+  function moveQuestionSelection(delta: number) {
+    updateQuestionState((state) => {
+      if (isQuestionConfirmTab(state)) return state;
+      const total = questionOptionTotal(state);
+      if (total <= 0) return state;
+      return { ...state, selected: (state.selected + delta + total) % total };
+    });
+  }
+
+  function selectQuestionTab(tab: number) {
+    updateQuestionState((state) => {
+      const max = isSingleQuestion(state) ? 0 : state.request.questions.length;
+      const nextTab = ((tab % (max + 1)) + max + 1) % (max + 1);
+      return { ...state, tab: nextTab, selected: 0, editing: false };
+    });
+  }
+
+  function setQuestionAnswer(answer: string, custom = false) {
+    const controller = props.options.questionController;
+    const state = pendingQuestion();
+    if (!state || !controller) return;
+    const answers = state.answers.map((items) => [...items]);
+    const customValues = [...state.custom];
+    answers[state.tab] = [answer];
+    if (custom) customValues[state.tab] = answer;
+    if (isSingleQuestion(state)) {
+      controller.reply(state.request.id, [[answer]]);
+      setPendingQuestion(undefined);
+      syncQuestionUI();
+      return;
+    }
+    const nextTab = Math.min(state.tab + 1, state.request.questions.length);
+    setPendingQuestion({ ...state, answers, custom: customValues, tab: nextTab, selected: 0, editing: false });
+    syncQuestionUI();
+  }
+
+  function toggleQuestionAnswer(answer: string) {
+    updateQuestionState((state) => {
+      const answers = state.answers.map((items) => [...items]);
+      const current = answers[state.tab] ?? [];
+      const index = current.indexOf(answer);
+      if (index === -1) current.push(answer);
+      else current.splice(index, 1);
+      answers[state.tab] = current;
+      return { ...state, answers };
+    });
+  }
+
+  function selectQuestionOption() {
+    const state = pendingQuestion();
+    if (!state || isQuestionConfirmTab(state)) return;
+    const q = questionAt(state);
+    if (!q) return;
+    if (questionIsOtherSelected(state)) {
+      updateQuestionState((current) => ({ ...current, editing: true }), true);
+      return;
+    }
+    const option = q.options[state.selected];
+    if (!option) return;
+    if (q.multiple === true) {
+      toggleQuestionAnswer(option.label);
+      return;
+    }
+    setQuestionAnswer(option.label);
+  }
+
+  function commitQuestionCustom() {
+    const state = pendingQuestion();
+    if (!state) return;
+    const q = questionAt(state);
+    if (!q) return;
+    const nextText = (questionCustomInput?.plainText ?? state.custom[state.tab] ?? "").trim();
+    if (!nextText) {
+      updateQuestionState((current) => {
+        const answers = current.answers.map((items) => items.filter((item) => item !== current.custom[current.tab]));
+        const custom = [...current.custom];
+        custom[current.tab] = "";
+        return { ...current, answers, custom, editing: false };
+      });
+      return;
+    }
+    if (q.multiple === true) {
+      updateQuestionState((current) => {
+        const answers = current.answers.map((items) => [...items]);
+        const previous = current.custom[current.tab];
+        const currentAnswers = (answers[current.tab] ?? []).filter((item) => item !== previous);
+        if (!currentAnswers.includes(nextText)) currentAnswers.push(nextText);
+        answers[current.tab] = currentAnswers;
+        const custom = [...current.custom];
+        custom[current.tab] = nextText;
+        return { ...current, answers, custom, editing: false };
+      });
+      return;
+    }
+    setQuestionAnswer(nextText, true);
+  }
+
+  function submitQuestionAnswers() {
+    const state = pendingQuestion();
+    const controller = props.options.questionController;
+    if (!state || !controller) return;
+    const answers = state.request.questions.map((_, index) => [...(state.answers[index] ?? [])]);
+    controller.reply(state.request.id, answers);
+    setPendingQuestion(undefined);
+    syncQuestionUI();
+  }
+
+  function rejectQuestion() {
+    const state = pendingQuestion();
+    const controller = props.options.questionController;
+    if (!state || !controller) return;
+    controller.reject(state.request.id);
+    setPendingQuestion(undefined);
+    syncQuestionUI();
+  }
+
+  function handleQuestionKey(event: any) {
+    const state = pendingQuestion();
+    if (!state || pendingApproval()) return false;
+    const name = keyNameFromEvent(event);
+
+    if (state.editing && !isQuestionConfirmTab(state)) {
+      if (name === "escape") {
+        event.preventDefault?.();
+        updateQuestionState((current) => ({ ...current, editing: false }));
+        return true;
+      }
+      if (name === "enter") {
+        event.preventDefault?.();
+        commitQuestionCustom();
+        return true;
+      }
+      return false;
+    }
+
+    if (name === "escape") {
+      event.preventDefault?.();
+      rejectQuestion();
+      return true;
+    }
+
+    if (isSingleQuestion(state) && (name === "left" || name === "h" || name === "right" || name === "l" || name === "tab")) {
+      event.preventDefault?.();
+      const direction = name === "left" || name === "h" || (name === "tab" && event.shift) ? -1 : 1;
+      moveQuestionSelection(direction);
+      return true;
+    }
+
+    if (!isSingleQuestion(state) && (name === "left" || name === "h")) {
+      event.preventDefault?.();
+      selectQuestionTab(state.tab - 1);
+      return true;
+    }
+    if (!isSingleQuestion(state) && (name === "right" || name === "l" || name === "tab")) {
+      event.preventDefault?.();
+      selectQuestionTab(state.tab + (event.shift ? -1 : 1));
+      return true;
+    }
+
+    if (isQuestionConfirmTab(state)) {
+      if (name === "enter") {
+        event.preventDefault?.();
+        submitQuestionAnswers();
+        return true;
+      }
+      return true;
+    }
+
+    const total = questionOptionTotal(state);
+    const digit = Number(name);
+    if (!Number.isNaN(digit) && digit >= 1 && digit <= Math.min(total, 9)) {
+      event.preventDefault?.();
+      updateQuestionState((current) => ({ ...current, selected: digit - 1 }));
+      setTimeout(selectQuestionOption, 0);
+      return true;
+    }
+    if (name === "up" || name === "k") {
+      event.preventDefault?.();
+      moveQuestionSelection(-1);
+      return true;
+    }
+    if (name === "down" || name === "j") {
+      event.preventDefault?.();
+      moveQuestionSelection(1);
+      return true;
+    }
+    if (name === "enter") {
+      event.preventDefault?.();
+      selectQuestionOption();
+      return true;
+    }
+
+    return false;
+  }
+
+  function handleQuestionRawSequence(sequence: string) {
+    const state = pendingQuestion();
+    if (!state || pendingApproval()) return false;
+    const name = questionKeyNameFromSequence(sequence);
+    if (!name) return false;
+
+    if (state.editing && !isQuestionConfirmTab(state) && name !== "escape" && name !== "enter") {
+      return false;
+    }
+
+    return handleQuestionKey({
+      name,
+      key: name,
+      input: sequence,
+      raw: sequence,
+      sequence,
+      shift: sequence === "\x1b[Z",
+      preventDefault() {},
+      stopPropagation() {},
+    });
+  }
+
   const installInteractiveHandlers = () => {
     if (props.options.planHandlerRef) {
       props.options.planHandlerRef.current = (plan: string) =>
@@ -926,7 +1301,27 @@ function OpenTuiApp(props: {
   });
 
   onMount(() => {
+    const questionController = props.options.questionController;
+    if (questionController) {
+      const unsubscribeQuestion = questionController.subscribe((event) => {
+        if (event.request.sessionID && currentQuestionSessionID() && event.request.sessionID !== currentQuestionSessionID()) {
+          return;
+        }
+        if (event.type === "asked") {
+          if (!pendingQuestion()) setPendingQuestion(questionStateFromRequest(event.request));
+          syncQuestionUI();
+          return;
+        }
+        if (pendingQuestion()?.request.id === event.request.id) {
+          setPendingQuestion(undefined);
+          syncFirstPendingQuestion();
+        }
+      });
+      onCleanup(unsubscribeQuestion);
+      syncFirstPendingQuestion();
+    }
     props.setRawModeCycleHandler?.(cycleModeFromRawSequence);
+    props.setRawQuestionHandler?.(handleQuestionRawSequence);
     const unsubscribeLsp = lspService.onStatusChange(() => {
       syncSidebarLsp();
     });
@@ -941,7 +1336,10 @@ function OpenTuiApp(props: {
 
   onCleanup(() => {
     props.setRawModeCycleHandler?.(undefined);
+    props.setRawQuestionHandler?.(undefined);
     if (sidebarLspSyncTimer) clearInterval(sidebarLspSyncTimer);
+    for (const timer of questionSyncTimers) clearTimeout(timer);
+    questionSyncTimers.clear();
     stopThinkingSpinner();
     if (props.options.planHandlerRef) props.options.planHandlerRef.current = undefined;
     if (props.options.approvalHandlerRef) props.options.approvalHandlerRef.current = undefined;
@@ -963,6 +1361,7 @@ function OpenTuiApp(props: {
     }
 
     if (handleApprovalKey(event)) return;
+    if (handleQuestionKey(event)) return;
     if (handleProviderDialogKey(event)) return;
     if (handlePickerKey(event)) return;
 
@@ -1016,14 +1415,15 @@ function OpenTuiApp(props: {
   }
 
   function isHomeSurfaceActive(extra?: DisplayMessage) {
-    return !hasTranscriptMessages(extra) && !pendingPlan();
+    return !hasTranscriptMessages(extra) && !pendingPlan() && !pendingQuestion();
   }
 
   function syncPromptSurfaces(focus = false) {
     const homeActive = isHomeSurfaceActive(streamingDisplay);
     setSessionActive(!homeActive);
-    if (homeComposerShell) homeComposerShell.visible = homeActive;
-    if (sessionComposerShell) sessionComposerShell.visible = !homeActive;
+    const questionActive = !!pendingQuestion();
+    if (homeComposerShell) homeComposerShell.visible = homeActive && !questionActive;
+    if (sessionComposerShell) sessionComposerShell.visible = !homeActive && !questionActive;
     syncSidebarChrome();
     if (focus) setTimeout(() => activePrompt()?.focus(), 0);
     rootBox?.requestRender();
@@ -1148,6 +1548,7 @@ function OpenTuiApp(props: {
     dimensions();
     sessionActive();
     syncSidebarChrome();
+    redrawQuestionPanel();
     scrollbox?.requestRender();
     setTimeout(() => scrollbox?.scrollTo(scrollbox.scrollHeight), 50);
   });
@@ -1161,6 +1562,7 @@ function OpenTuiApp(props: {
       });
     }
     redrawApprovalPanel();
+    redrawQuestionPanel();
     const state = picker?.kind === "select" && !picker.loading ? picker : undefined;
     const stateMode = state?.mode;
     const inlinePicker = stateMode === "slash" || stateMode === "file";
@@ -1632,6 +2034,130 @@ function OpenTuiApp(props: {
       registry.addProvider(providerId, "");
     }
     registry.setDefault(providerId);
+  }
+
+  function redrawQuestionPanel() {
+    if (!questionRoot) return;
+    const state = pendingQuestion();
+    if (!state || pendingApproval()) {
+      questionRoot.visible = false;
+      questionRoot.requestRender();
+      return;
+    }
+
+    const q = questionAt(state);
+    const single = isSingleQuestion(state);
+    const confirm = isQuestionConfirmTab(state);
+    const optionTotal = questionOptionTotal(state);
+
+    questionRoot.visible = true;
+    questionRoot.height = questionPanelHeight(state);
+
+    if (questionTabsRow) questionTabsRow.visible = !single;
+    for (let index = 0; index < QUESTION_MAX_TABS; index++) {
+      const box = questionTabBoxes[index];
+      const text = questionTabTexts[index];
+      if (!box || !text) continue;
+      const label = index < state.request.questions.length
+        ? state.request.questions[index]?.header
+        : index === state.request.questions.length
+          ? "Confirm"
+          : "";
+      const active = index === state.tab;
+      const answered = index < state.request.questions.length && (state.answers[index]?.length ?? 0) > 0;
+      box.visible = !single && !!label;
+      box.backgroundColor = active ? theme.accent : theme.backgroundPanel;
+      text.content = label || "";
+      text.fg = active ? contrastText(theme.accent) : answered ? theme.text : theme.textMuted;
+    }
+
+    if (questionPromptText) {
+      questionPromptText.visible = !confirm;
+      questionPromptText.content = q ? `${q.question}${q.multiple ? " (select all that apply)" : ""}` : "";
+    }
+    if (questionOptionsShell) questionOptionsShell.visible = !confirm;
+
+    for (let index = 0; index < QUESTION_MAX_OPTIONS; index++) {
+      const row = questionOptionRows[index];
+      const indexText = questionOptionIndexTexts[index];
+      const labelText = questionOptionLabelTexts[index];
+      const descriptionText = questionOptionDescriptionTexts[index];
+      const checkText = questionOptionCheckTexts[index];
+      if (!row || !indexText || !labelText || !descriptionText || !checkText) continue;
+
+      const visible = !confirm && !!q && index < optionTotal;
+      row.visible = visible;
+      if (!visible || !q) {
+        indexText.content = "";
+        labelText.content = "";
+        descriptionText.content = "";
+        checkText.content = "";
+        continue;
+      }
+
+      const active = index === state.selected;
+      const isCustom = questionCustomAllowed(q) && index === q.options.length;
+      const option = q.options[index];
+      const customValue = state.custom[state.tab]?.trim() ?? "";
+      const label = isCustom ? "Type your own answer" : option?.label ?? "";
+      const picked = isCustom
+        ? questionCustomPicked(state)
+        : (state.answers[state.tab]?.includes(label) ?? false);
+      const multi = q.multiple === true;
+
+      row.backgroundColor = active ? theme.backgroundElement : theme.backgroundPanel;
+      indexText.content = `${index + 1}.`;
+      indexText.fg = active ? theme.secondary : theme.textMuted;
+      labelText.content = `${multi ? `[${picked ? "✓" : " "}] ` : ""}${label}`;
+      labelText.fg = active ? theme.secondary : picked ? theme.success : theme.text;
+      descriptionText.content = isCustom
+        ? customValue ? `Custom: ${customValue}` : "Enter a different answer."
+        : option?.description ?? "";
+      descriptionText.fg = theme.textMuted;
+      checkText.content = !multi && picked ? "✓" : "";
+      checkText.fg = theme.success;
+    }
+
+    if (questionCustomEditorShell) questionCustomEditorShell.visible = !confirm && !!q && state.editing;
+    if (questionCustomInput && q) {
+      const customValue = state.custom[state.tab] ?? "";
+      if (questionCustomInput.plainText !== customValue) questionCustomInput.setText(customValue);
+      if (!state.editing) {
+        try { questionCustomInput.blur(); } catch {}
+      }
+    }
+
+    if (questionConfirmShell) questionConfirmShell.visible = confirm;
+    for (let index = 0; index < QUESTION_MAX_CONFIRM_ROWS; index++) {
+      const text = questionConfirmTexts[index];
+      if (!text) continue;
+      const question = state.request.questions[index];
+      text.visible = confirm && !!question;
+      if (!question) {
+        text.content = "";
+        continue;
+      }
+      const value = state.answers[index]?.join(", ") ?? "";
+      text.content = `${question.header}: ${value || "(not answered)"}`;
+      text.fg = value ? theme.text : theme.error;
+    }
+
+    if (questionFooterTab) {
+      questionFooterTab.visible = !single;
+      questionFooterTab.content = "⇆ tab";
+    }
+    if (questionFooterSelect) {
+      questionFooterSelect.visible = !confirm;
+      questionFooterSelect.content = "↑↓ select";
+    }
+    if (questionFooterEnter) {
+      const enterHint = confirm ? "submit" : q?.multiple ? "toggle" : single ? "submit" : "confirm";
+      questionFooterEnter.content = `enter ${enterHint}`;
+    }
+    if (questionFooterEsc) questionFooterEsc.content = "esc dismiss";
+
+    questionRoot.requestRender();
+    questionCustomInput?.requestRender();
   }
 
   function redrawApprovalPanel() {
@@ -2687,6 +3213,9 @@ function OpenTuiApp(props: {
           });
         } else if (event.type === "tool_start") {
           toolCalls.push({ id: event.id, name: event.name, args: event.args, status: "running" });
+          if (event.name === "question") {
+            scheduleQuestionSync();
+          }
           redrawTranscript({
             role: "assistant",
             content: assistantContent,
@@ -2699,6 +3228,7 @@ function OpenTuiApp(props: {
           if (call) {
             call.result = event.result.content;
             call.isError = event.result.isError;
+            call.metadata = event.result.metadata;
             call.status = event.result.isError ? "error" : "completed";
             redrawTranscript({
               role: "assistant",
@@ -2707,6 +3237,9 @@ function OpenTuiApp(props: {
               toolCalls: [...toolCalls],
               streaming: true,
             });
+          }
+          if (event.name === "question") {
+            syncFirstPendingQuestion();
           }
           refreshGitSidebar();
           syncSidebarLsp();
@@ -2774,6 +3307,7 @@ function OpenTuiApp(props: {
 
   function promptUiKeyDown(event: any) {
     if (handleApprovalKey(event)) return true;
+    if (handleQuestionKey(event)) return true;
     const name = String(event.name || "").toLowerCase();
     const plan = pendingPlan();
     if (plan && (name === "left" || name === "right" || name === "h" || name === "l")) {
@@ -2794,13 +3328,13 @@ function OpenTuiApp(props: {
     return h("box", {
       ref: (ref: BoxRenderable) => {
         sessionComposerShell = ref;
-        ref.visible = !isHomeSurfaceActive(streamingDisplay);
+        ref.visible = !isHomeSurfaceActive(streamingDisplay) && !pendingQuestion();
       },
       width: "100%",
       paddingLeft: 2,
       paddingRight: 2,
       flexShrink: 0,
-      visible: !isHomeSurfaceActive(streamingDisplay),
+      visible: !isHomeSurfaceActive(streamingDisplay) && !pendingQuestion(),
     },
       renderPrompt({
         ref: (ref) => { sessionPromptRef = ref; },
@@ -2812,7 +3346,7 @@ function OpenTuiApp(props: {
         onKeyDown: handlePickerKey,
         onUiKeyDown: promptUiKeyDown,
         getText: readPromptText,
-        disabled: () => isRunning() && !pendingApproval() && !pendingPlan(),
+        disabled: () => isRunning() && !pendingApproval() && !pendingPlan() && !pendingQuestion(),
         mode,
         registerModeLabel: registerPromptModeLabel,
         registerModelLabel: registerPromptModelLabel,
@@ -2820,6 +3354,7 @@ function OpenTuiApp(props: {
         placeholder: () => {
           const approvalState = pendingApproval();
           if (approvalState) return "Press Enter to approve or Esc to reject";
+          if (pendingQuestion()) return "Answer the question below";
           const plan = pendingPlan();
           if (plan) return "Press Enter to approve plan or Esc to reject";
           return `Ask anything... "${homePrompt}"`;
@@ -2846,14 +3381,14 @@ function OpenTuiApp(props: {
       h("box", {
         ref: (ref: BoxRenderable) => {
           homeComposerShell = ref;
-          ref.visible = isHomeSurfaceActive(streamingDisplay);
+          ref.visible = isHomeSurfaceActive(streamingDisplay) && !pendingQuestion();
         },
         width: "100%",
         maxWidth: 75,
         zIndex: 1000,
         paddingTop: 1,
         flexShrink: 0,
-        visible: isHomeSurfaceActive(streamingDisplay),
+        visible: isHomeSurfaceActive(streamingDisplay) && !pendingQuestion(),
       },
       renderPrompt({
         ref: (ref) => {
@@ -2868,7 +3403,7 @@ function OpenTuiApp(props: {
         onKeyDown: handlePickerKey,
         onUiKeyDown: promptUiKeyDown,
         getText: readPromptText,
-        disabled: () => isRunning() && !pendingApproval() && !pendingPlan(),
+        disabled: () => isRunning() && !pendingApproval() && !pendingPlan() && !pendingQuestion(),
         mode,
         registerModeLabel: registerPromptModeLabel,
         registerModelLabel: registerPromptModelLabel,
@@ -2876,6 +3411,7 @@ function OpenTuiApp(props: {
         placeholder: () => {
           const approvalState = pendingApproval();
           if (approvalState) return "Press Enter to approve or Esc to reject";
+          if (pendingQuestion()) return "Answer the question below";
           const plan = pendingPlan();
           if (plan) return "Press Enter to approve plan or Esc to reject";
           return `Ask anything... "${homePrompt}"`;
@@ -2883,6 +3419,200 @@ function OpenTuiApp(props: {
       }),
       ),
     ]);
+  }
+
+  function renderQuestionPanelHost() {
+    return h("box", {
+      ref: (ref: BoxRenderable) => {
+        questionRoot = ref;
+        redrawQuestionPanel();
+      },
+      visible: false,
+      position: "absolute",
+      left: 2,
+      right: 2,
+      bottom: 4,
+      zIndex: 180,
+      height: QUESTION_PANEL_MIN_HEIGHT,
+      backgroundColor: theme.backgroundPanel,
+      border: ["left"],
+      borderColor: theme.accent,
+      flexDirection: "column",
+    },
+    h("box", {
+      gap: 1,
+      paddingLeft: 1,
+      paddingRight: 3,
+      paddingTop: 1,
+      paddingBottom: 1,
+      flexGrow: 1,
+      flexDirection: "column",
+    },
+    h("box", {
+      ref: (ref: BoxRenderable) => { questionTabsRow = ref; },
+      flexDirection: "row",
+      gap: 1,
+      paddingLeft: 1,
+      flexShrink: 0,
+      visible: false,
+    },
+    Array.from({ length: QUESTION_MAX_TABS }, (_, index) =>
+      h("box", {
+        ref: (ref: BoxRenderable) => { questionTabBoxes[index] = ref; },
+        paddingLeft: 1,
+        paddingRight: 1,
+        visible: false,
+        backgroundColor: theme.backgroundPanel,
+        onMouseOver: () => {
+          const state = pendingQuestion();
+          if (!state || isSingleQuestion(state)) return;
+          if (index > state.request.questions.length) return;
+          selectQuestionTab(index);
+        },
+        onMouseUp: () => {
+          const state = pendingQuestion();
+          if (!state || isSingleQuestion(state)) return;
+          if (index > state.request.questions.length) return;
+          selectQuestionTab(index);
+        },
+      },
+      h("text", {
+        ref: (ref: TextRenderable) => { questionTabTexts[index] = ref; },
+        fg: theme.textMuted,
+        content: "",
+      })),
+    ),
+    ),
+    h("text", {
+      ref: (ref: TextRenderable) => { questionPromptText = ref; },
+      fg: theme.text,
+      wrapMode: "word",
+      content: "",
+    }),
+    h("box", {
+      ref: (ref: BoxRenderable) => { questionOptionsShell = ref; },
+      flexDirection: "column",
+      gap: 1,
+    },
+    Array.from({ length: QUESTION_MAX_OPTIONS }, (_, index) => renderQuestionOptionHost(index)),
+    ),
+    h("box", {
+      ref: (ref: BoxRenderable) => { questionCustomEditorShell = ref; },
+      paddingLeft: 3,
+      visible: false,
+      flexShrink: 0,
+    },
+    h("textarea", {
+      ref: (ref: TextareaRenderable) => { questionCustomInput = ref; },
+      placeholder: "Type your own answer",
+      placeholderColor: theme.textMuted,
+      textColor: theme.text,
+      focusedTextColor: theme.text,
+      backgroundColor: theme.backgroundPanel,
+      focusedBackgroundColor: theme.backgroundPanel,
+      cursorColor: theme.primary,
+      minHeight: 1,
+      maxHeight: 6,
+      keyBindings: PROMPT_TEXTAREA_KEYBINDINGS,
+      onContentChange: () => {
+        const value = questionCustomInput?.plainText ?? "";
+        setPendingQuestion((current) => {
+          if (!current) return current;
+          const custom = [...current.custom];
+          custom[current.tab] = value;
+          return { ...current, custom };
+        });
+        redrawQuestionPanel();
+      },
+      onKeyDown: (event: any) => {
+        const name = keyNameFromEvent(event);
+        if (name === "escape") {
+          event.preventDefault?.();
+          updateQuestionState((current) => ({ ...current, editing: false }));
+        }
+        if (name === "enter" && !event.shift) {
+          event.preventDefault?.();
+          commitQuestionCustom();
+        }
+      },
+    }),
+    ),
+    h("box", {
+      ref: (ref: BoxRenderable) => { questionConfirmShell = ref; },
+      paddingLeft: 1,
+      gap: 1,
+      flexDirection: "column",
+      visible: false,
+    },
+    h("text", { fg: theme.text, content: "Review" }),
+    Array.from({ length: QUESTION_MAX_CONFIRM_ROWS }, (_, index) =>
+      h("text", {
+        ref: (ref: TextRenderable) => { questionConfirmTexts[index] = ref; },
+        fg: theme.textMuted,
+        wrapMode: "word",
+        visible: false,
+        content: "",
+      }),
+    ),
+    ),
+    ),
+    h("box", {
+      flexDirection: "row",
+      flexShrink: 0,
+      gap: 2,
+      paddingLeft: 2,
+      paddingRight: 3,
+      paddingBottom: 1,
+    },
+    h("text", { ref: (ref: TextRenderable) => { questionFooterTab = ref; }, fg: theme.textMuted, visible: false, content: "⇆ tab" }),
+    h("text", { ref: (ref: TextRenderable) => { questionFooterSelect = ref; }, fg: theme.textMuted, content: "↑↓ select" }),
+    h("text", { ref: (ref: TextRenderable) => { questionFooterEnter = ref; }, fg: theme.textMuted, content: "enter submit" }),
+    h("text", { ref: (ref: TextRenderable) => { questionFooterEsc = ref; }, fg: theme.textMuted, content: "esc dismiss" }),
+    ));
+  }
+
+  function renderQuestionOptionHost(index: number) {
+    return h("box", {
+      ref: (ref: BoxRenderable) => { questionOptionRows[index] = ref; },
+      flexDirection: "column",
+      visible: false,
+      onMouseOver: () => {
+        const state = pendingQuestion();
+        if (!state || isQuestionConfirmTab(state) || index >= questionOptionTotal(state)) return;
+        updateQuestionState((current) => ({ ...current, selected: index }));
+      },
+      onMouseUp: () => {
+        const state = pendingQuestion();
+        if (!state || isQuestionConfirmTab(state) || index >= questionOptionTotal(state)) return;
+        updateQuestionState((current) => ({ ...current, selected: index }));
+        setTimeout(selectQuestionOption, 0);
+      },
+    },
+    h("box", { flexDirection: "row" },
+      h("text", {
+        ref: (ref: TextRenderable) => { questionOptionIndexTexts[index] = ref; },
+        fg: theme.textMuted,
+        content: "",
+      }),
+      h("text", {
+        ref: (ref: TextRenderable) => { questionOptionLabelTexts[index] = ref; },
+        fg: theme.text,
+        content: "",
+      }),
+      h("text", {
+        ref: (ref: TextRenderable) => { questionOptionCheckTexts[index] = ref; },
+        fg: theme.success,
+        content: "",
+      }),
+    ),
+    h("box", { paddingLeft: 3 },
+      h("text", {
+        ref: (ref: TextRenderable) => { questionOptionDescriptionTexts[index] = ref; },
+        fg: theme.textMuted,
+        wrapMode: "word",
+        content: "",
+      }),
+    ));
   }
 
   function renderPromptDock() {
@@ -3487,6 +4217,7 @@ function OpenTuiApp(props: {
       notice() ? h("text", {
         fg: notice().startsWith("✓") ? theme.success : notice().startsWith("✗") ? theme.error : theme.warning,
       }, notice()) : null,
+      renderQuestionPanelHost(),
       h("box", {
         ref: (ref: BoxRenderable) => { approvalRoot = ref; },
         visible: !!approval,
@@ -4558,6 +5289,9 @@ function createModelSwitchEntry(ctx: RenderContext, model: string, key: string, 
 }
 
 function createToolRenderable(ctx: RenderContext, tool: DisplayToolCall, syntaxStyle: SyntaxStyle, width = 80) {
+  if (tool.name === "question") {
+    return createQuestionToolRenderable(ctx, tool);
+  }
   const icon = tool.name === "bash" ? "$" : tool.name === "edit" || tool.name === "write" ? "✎" : "●";
   const color = toolColor(tool);
   const header = toolHeader(tool);
@@ -4636,6 +5370,45 @@ function createToolRenderable(ctx: RenderContext, tool: DisplayToolCall, syntaxS
   ]);
 }
 
+function createQuestionToolRenderable(ctx: RenderContext, tool: DisplayToolCall) {
+  const questions = questionToolQuestions(tool);
+  const answers = questionToolAnswers(tool);
+  const rejected = isQuestionRejected(tool);
+  if (!isToolFinished(tool) || !answers) {
+    return createBox(ctx, {
+      paddingLeft: 3,
+      marginTop: 1,
+      flexDirection: "column",
+      flexShrink: 0,
+    }, [
+      createText(ctx, `${isToolFinished(tool) ? "" : "~ "}→ ${rejected ? "Asked" : "Asking"} questions...`, {
+        fg: rejected ? theme.textMuted : toolColor(tool),
+        attributes: rejected ? TextAttributes.STRIKETHROUGH : undefined,
+      }),
+    ]);
+  }
+
+  return createBox(ctx, {
+    border: ["left"],
+    borderColor: theme.borderSubtle,
+    backgroundColor: theme.backgroundPanel,
+    marginTop: 1,
+    paddingTop: 1,
+    paddingBottom: 1,
+    paddingLeft: 2,
+    flexDirection: "column",
+    flexShrink: 0,
+  }, [
+    createText(ctx, "# Questions", { fg: theme.textMuted }),
+    ...questions.map((question, index) =>
+      createBox(ctx, { flexDirection: "column", gap: 0, marginTop: index === 0 ? 1 : 0, flexShrink: 0 }, [
+        createText(ctx, question.question, { fg: theme.textMuted }),
+        createText(ctx, formatQuestionAnswer(answers[index]), { fg: theme.text }),
+      ]),
+    ),
+  ]);
+}
+
 function createPlanRenderable(ctx: RenderContext, plan: string) {
   return createBox(ctx, {
     border: true,
@@ -4656,6 +5429,9 @@ function createPlanRenderable(ctx: RenderContext, plan: string) {
 }
 
 function renderTool(tool: DisplayToolCall, syntaxStyle: SyntaxStyle, width = 80) {
+  if (tool.name === "question") {
+    return renderQuestionTool(tool);
+  }
   const icon = tool.name === "bash" ? "$" : tool.name === "edit" || tool.name === "write" ? "✎" : "●";
   const color = toolColor(tool);
   const diff = extractToolDiff(tool);
@@ -4685,6 +5461,39 @@ function renderTool(tool: DisplayToolCall, syntaxStyle: SyntaxStyle, width = 80)
     ),
     () => tool.result ? h("text", { fg: tool.isError ? theme.toolError : theme.textMuted, wrapMode: "word" }, toolSummaryWithPreview(tool)) : null,
   );
+}
+
+function renderQuestionTool(tool: DisplayToolCall) {
+  const questions = questionToolQuestions(tool);
+  const answers = questionToolAnswers(tool);
+  const rejected = isQuestionRejected(tool);
+  if (!isToolFinished(tool) || !answers) {
+    return h("box", { paddingLeft: 3, marginTop: 1, flexDirection: "column", flexShrink: 0 },
+      h("text", {
+        fg: rejected ? theme.textMuted : toolColor(tool),
+        attributes: rejected ? TextAttributes.STRIKETHROUGH : undefined,
+      }, `${isToolFinished(tool) ? "" : "~ "}→ ${rejected ? "Asked" : "Asking"} questions...`),
+    );
+  }
+
+  return h("box", {
+    border: ["left"],
+    borderColor: theme.borderSubtle,
+    backgroundColor: theme.backgroundPanel,
+    marginTop: 1,
+    paddingTop: 1,
+    paddingBottom: 1,
+    paddingLeft: 2,
+    flexDirection: "column",
+    flexShrink: 0,
+  },
+  h("text", { fg: theme.textMuted }, "# Questions"),
+  questions.map((question, index) =>
+    h("box", { flexDirection: "column", marginTop: index === 0 ? 1 : 0, flexShrink: 0 },
+      h("text", { fg: theme.textMuted, wrapMode: "word" }, question.question),
+      h("text", { fg: theme.text, wrapMode: "word" }, formatQuestionAnswer(answers[index])),
+    ),
+  ));
 }
 
 function renderPlanPrompt(plan: string) {
@@ -4951,9 +5760,10 @@ function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] 
         name: tc.name,
         args,
         result: toolResult ? (toolResult as any).content as string : undefined,
-        isError: toolResult ? (toolResult as any).content?.startsWith?.("Error:") : false,
+        isError: toolResult ? ((toolResult as any).isError ?? (toolResult as any).content?.startsWith?.("Error:")) : false,
+        metadata: toolResult ? (toolResult as any).metadata : undefined,
         status: toolResult
-          ? ((toolResult as any).content?.startsWith?.("Error:") ? "error" : "completed")
+          ? (((toolResult as any).isError ?? (toolResult as any).content?.startsWith?.("Error:")) ? "error" : "completed")
           : "pending",
       });
     }
@@ -5256,6 +6066,7 @@ function displayToolName(name: string): string {
     web_search: "WebSearch",
     task: "Task",
     todo: "Todo",
+    question: "Questions",
   };
   return labels[name] || name.charAt(0).toUpperCase() + name.slice(1);
 }
@@ -5308,6 +6119,11 @@ function filetype(filePath?: string): string | undefined {
 
 function summarizeToolResult(tool: DisplayToolCall): string {
   if (!isToolFinished(tool)) return tool.status === "running" ? "running" : "pending";
+  if (tool.name === "question") {
+    if (isQuestionRejected(tool)) return "dismissed";
+    const count = questionToolQuestions(tool).length || (Array.isArray(tool.args?.questions) ? tool.args.questions.length : 0);
+    return `asked ${count} question${count === 1 ? "" : "s"}`;
+  }
   const result = tool.result ?? "";
   if (tool.isError) return truncate(result.split("\n").find(Boolean) || "error", 120);
   const lines = result.replace(/\r\n/g, "\n").split("\n").filter((line) => line.trim()).length;
@@ -5344,6 +6160,46 @@ function toolPreview(tool: DisplayToolCall): { lines: string[]; omitted: number 
     lines: previewLines,
     omitted: Math.max(0, lines.length - previewLines.length),
   };
+}
+
+function questionToolQuestions(tool: DisplayToolCall): QuestionPrompt[] {
+  const fromMetadata = tool.metadata?.questions;
+  const source = Array.isArray(fromMetadata) ? fromMetadata : Array.isArray(tool.args?.questions) ? tool.args.questions : [];
+  return source
+    .filter((item): item is Record<string, unknown> => !!item && typeof item === "object")
+    .map((item) => ({
+      header: typeof item.header === "string" ? item.header : "",
+      question: typeof item.question === "string" ? item.question : "",
+      options: Array.isArray(item.options)
+        ? item.options
+            .filter((opt): opt is Record<string, unknown> => !!opt && typeof opt === "object")
+            .map((opt) => ({
+              label: typeof opt.label === "string" ? opt.label : "",
+              description: typeof opt.description === "string" ? opt.description : "",
+            }))
+        : [],
+      multiple: item.multiple === true,
+      custom: item.custom === false ? false : undefined,
+    }))
+    .filter((item) => item.question);
+}
+
+function questionToolAnswers(tool: DisplayToolCall): QuestionAnswer[] | undefined {
+  const value = tool.metadata?.answers;
+  if (!Array.isArray(value)) return undefined;
+  return value.map((answer) => Array.isArray(answer) ? answer.map((item) => String(item)) : []);
+}
+
+function isQuestionRejected(tool: DisplayToolCall): boolean {
+  return tool.name === "question" && (tool.isError === true || tool.status === "error") && (
+    tool.result?.includes("QuestionRejectedError") === true ||
+    tool.result?.includes("dismissed this question") === true ||
+    tool.metadata?.rejected === true
+  );
+}
+
+function formatQuestionAnswer(answer?: ReadonlyArray<string>) {
+  return answer?.length ? answer.join(", ") : "(no answer)";
 }
 
 function isToolFinished(tool: DisplayToolCall): boolean {

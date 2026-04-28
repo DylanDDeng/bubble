@@ -21,10 +21,11 @@ export const defaultToolSnippets: Record<string, string> = {
   web_search: "Search the public web for current information",
   web_fetch: "Fetch and extract the contents of a specific webpage",
   task: "Delegate a bounded investigative subtask to a read-only sub-agent",
+  question: "Ask the user structured questions when clarification or preference choices would materially improve the work",
   skill: "Load a named skill with specialized instructions and bundled resources",
 };
 
-export const defaultToolNames = ["read", "glob", "bash", "edit", "write", "grep", "lsp", "web_search", "web_fetch", "task", "skill"];
+export const defaultToolNames = ["read", "glob", "bash", "edit", "write", "grep", "lsp", "web_search", "web_fetch", "task", "question", "skill"];
 
 export function buildEnvironmentPrompt(options: EnvironmentPromptOptions = {}): string {
   const configuredProvider = options.configuredProvider ?? "unknown";

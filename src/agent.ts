@@ -25,6 +25,7 @@ const RESIDENT_HISTORY_HEAP_HARD_LIMIT = 768 * 1024 * 1024;
 
 export interface AgentOptions {
   provider: Provider;
+  sessionID?: string;
   providerId?: string;
   model: string;
   tools: ToolRegistryEntry[];
@@ -46,6 +47,7 @@ export interface AgentOptions {
 export class Agent {
   messages: Message[] = [];
   private provider: Provider;
+  private sessionID?: string;
   private _providerId: string;
   private _model: string;
   private tools: Map<string, ToolRegistryEntry> = new Map();
@@ -68,6 +70,7 @@ export class Agent {
 
   constructor(options: AgentOptions) {
     this.provider = options.provider;
+    this.sessionID = options.sessionID;
     this._providerId = options.providerId ?? "";
     this._model = options.model;
     this.temperature = options.temperature ?? 0.2;
@@ -444,6 +447,8 @@ export class Agent {
             role: "tool",
             toolCallId: tc.id,
             content: result.content,
+            metadata: result.metadata,
+            isError: result.isError,
           });
           this.compactResidentHistory();
           flushGovernorReminders();
@@ -676,7 +681,7 @@ export class Agent {
       return {
         content:
           `Error: Tool "${toolCall.name}" is not allowed in plan mode. ` +
-          `In plan mode you may only use read-only tools (read, grep, web_search, web_fetch, task, skill). ` +
+          `In plan mode you may only use read-only tools (read, glob, grep, lsp, web_search, web_fetch, task, skill, todo_write, tool_search, question, exit_plan_mode). ` +
           `To modify files or run commands, present your proposal and call exit_plan_mode so the user can review and approve it.`,
         isError: true,
       };
@@ -692,7 +697,12 @@ export class Agent {
     }
 
     try {
-      return await tool.execute(toolCall.parsedArgs, { cwd, agent: this });
+      return await tool.execute(toolCall.parsedArgs, {
+        cwd,
+        sessionID: this.sessionID,
+        toolCall: { id: toolCall.id, name: toolCall.name },
+        agent: this,
+      });
     } catch (err: any) {
       return {
         content: `Error executing ${toolCall.name}: ${err.message || String(err)}`,

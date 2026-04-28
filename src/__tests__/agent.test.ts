@@ -84,6 +84,38 @@ describe("Agent", () => {
     expect(agent.messages.filter((m) => m.role === "tool")).toHaveLength(1);
   });
 
+  it("persists tool metadata and error state on tool messages", async () => {
+    const metadataTool: ToolRegistryEntry = {
+      name: "metadata_tool",
+      description: "A tool with structured metadata",
+      parameters: {
+        type: "object",
+        properties: {},
+      },
+      async execute() {
+        return {
+          content: "blocked by user",
+          isError: true,
+          status: "blocked",
+          metadata: { kind: "question", rejected: true },
+        };
+      },
+    };
+    const provider = createMockProvider([
+      [
+        { type: "tool_call", id: "tc_meta", name: "metadata_tool", arguments: "{}", isStart: true, isEnd: true },
+        { type: "done" },
+      ],
+    ]);
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [metadataTool] });
+
+    await collectEvents(agent, "Call metadata tool", "/tmp");
+
+    const toolMessage = agent.messages.find((m) => m.role === "tool");
+    expect(toolMessage?.isError).toBe(true);
+    expect(toolMessage?.metadata).toEqual({ kind: "question", rejected: true });
+  });
+
   it("emits a turn boundary between tool execution and the final answer", async () => {
     const provider = createMockProvider([
       [

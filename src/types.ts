@@ -41,6 +41,8 @@ export interface ToolMessage {
   role: "tool";
   toolCallId: string;
   content: string;
+  metadata?: ToolResultMetadata;
+  isError?: boolean;
 }
 
 export interface SystemMessage {
@@ -96,7 +98,7 @@ export type ToolResultStatus =
   | "command_error";
 
 export interface ToolResultMetadata {
-  kind?: "search" | "read" | "write" | "edit" | "shell" | "web" | "security" | "lsp";
+  kind?: "search" | "read" | "write" | "edit" | "shell" | "web" | "security" | "lsp" | "question";
   path?: string;
   pattern?: string;
   matches?: number;
@@ -105,6 +107,7 @@ export interface ToolResultMetadata {
   searchFamily?: string;
   reason?: string;
   arbiterNote?: string;
+  [key: string]: unknown;
 }
 
 export interface ToolResult {
@@ -118,7 +121,12 @@ export type ToolExecutor = (args: Record<string, any>, ctx: ToolContext) => Prom
 
 export interface ToolContext {
   cwd: string;
+  sessionID?: string;
   abortSignal?: AbortSignal;
+  toolCall?: {
+    id: string;
+    name: string;
+  };
   agent?: {
     runSubtask: (
       input: string | ContentPart[],

@@ -81,6 +81,10 @@ function buildGuidelines(tools: string[], extraGuidelines: string[]): string[] {
     add("Use grep for content search; do not run grep, rg, or ripgrep through bash");
   }
 
+  if (tools.includes("question")) {
+    add("When the user is explicitly discussing, brainstorming, or shaping an approach instead of asking for immediate execution, use the question tool for targeted clarification or preference choices when it would materially improve the discussion; do not use it for generic permission-to-proceed questions");
+  }
+
   for (const item of extraGuidelines) {
     add(item);
   }

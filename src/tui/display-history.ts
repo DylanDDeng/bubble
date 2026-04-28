@@ -1,3 +1,5 @@
+import type { ToolResultMetadata } from "../types.js";
+
 export interface CompactionMeta {
   turns: number;
   messages: number;
@@ -26,6 +28,7 @@ export interface DisplayToolCall {
   status?: "pending" | "running" | "completed" | "error";
   result?: string;
   isError?: boolean;
+  metadata?: ToolResultMetadata;
 }
 
 const MAX_VISIBLE_MESSAGES = 80;

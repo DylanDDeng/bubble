@@ -17,9 +17,11 @@ const PLAN_MODE_ENTER = `
 Plan mode is now ACTIVE.
 
 Rules while in plan mode:
-- Only read-only tools are allowed (read, grep, web_search, web_fetch, task, skill, todo_write).
+- Only read-only tools are allowed, including read, glob, grep, lsp, web_search, web_fetch, task, skill, todo_write, tool_search, question, and exit_plan_mode.
 - Writes, edits, and shell commands WILL be rejected by the harness; do not try them.
-- Investigate the codebase, then call exit_plan_mode with a concrete step-by-step plan.
+- Investigate the codebase, then use the question tool to clarify important ambiguities, tradeoffs, requirements, or preference choices that would materially change the plan.
+- Call exit_plan_mode with a concrete step-by-step plan after the important questions are resolved.
+- Do not use the question tool to ask whether the plan is approved; exit_plan_mode is the approval step.
 - The user will approve, edit, or reject your plan. On approval the harness switches back to default mode and you may execute.
 - On rejection, remain in plan mode and iterate.
 `;
