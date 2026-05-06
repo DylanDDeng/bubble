@@ -31,6 +31,8 @@ import {
   render,
   spread,
   useKeyboard,
+  useRenderer,
+  useSelectionHandler,
   useTerminalDimensions,
 } from "@opentui/solid";
 import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
@@ -61,6 +63,7 @@ import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
 import type { QuestionAnswer, QuestionController, QuestionPrompt, QuestionRequest } from "../question/index.js";
 import type { MemoryScope } from "../memory/index.js";
 import { createFrames } from "./opencode-spinner.js";
+import { copyTextToClipboard } from "./clipboard.js";
 import { readGitSidebarState, type SidebarFileChange, type SidebarGitState } from "./sidebar-state.js";
 import {
   isModeCycleKeyEvent,
@@ -99,6 +102,9 @@ export interface RunTuiOptions {
 
 type RawModeCycleHandler = (sequence: string) => boolean;
 type RawQuestionHandler = (sequence: string) => boolean;
+type RawMouseSelectionHandler = (event: { type: string; button: number; x: number; y: number }) => void;
+type CopyToastVariant = "info" | "success" | "warning" | "error";
+type CopyToastState = { title?: string; message: string; variant: CopyToastVariant };
 
 const treeSitterClient = getTreeSitterClient();
 
@@ -311,6 +317,7 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
     let subtleSyntaxStyle: SyntaxStyle | undefined;
     let rawModeCycleHandler: RawModeCycleHandler | undefined;
     let rawQuestionHandler: RawQuestionHandler | undefined;
+    let rawMouseSelectionHandler: RawMouseSelectionHandler | undefined;
     const exit = () => {
       try {
         renderer?.destroy();
@@ -345,7 +352,18 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
       const setRawQuestionHandler = (handler: RawQuestionHandler | undefined) => {
         rawQuestionHandler = handler;
       };
-      await render(() => h(OpenTuiApp, { agent, args, options, onExit: exit, syntaxStyle, subtleSyntaxStyle, setRawModeCycleHandler, setRawQuestionHandler }), renderer);
+      const setRawMouseSelectionHandler = (handler: RawMouseSelectionHandler | undefined) => {
+        rawMouseSelectionHandler = handler;
+      };
+      const processSingleMouseEvent = (renderer as any).processSingleMouseEvent;
+      if (typeof processSingleMouseEvent === "function") {
+        (renderer as any).processSingleMouseEvent = (event: { type: string; button: number; x: number; y: number }) => {
+          const handled = processSingleMouseEvent.call(renderer, event);
+          if (handled) rawMouseSelectionHandler?.(event);
+          return handled;
+        };
+      }
+      await render(() => h(OpenTuiApp, { agent, args, options, onExit: exit, syntaxStyle, subtleSyntaxStyle, setRawModeCycleHandler, setRawQuestionHandler, setRawMouseSelectionHandler }), renderer);
     } catch (error) {
       syntaxStyle?.destroy();
       subtleSyntaxStyle?.destroy();
@@ -381,7 +399,9 @@ function OpenTuiApp(props: {
   subtleSyntaxStyle: SyntaxStyle;
   setRawModeCycleHandler?: (handler: RawModeCycleHandler | undefined) => void;
   setRawQuestionHandler?: (handler: RawQuestionHandler | undefined) => void;
+  setRawMouseSelectionHandler?: (handler: RawMouseSelectionHandler | undefined) => void;
 }) {
+  const renderer = useRenderer();
   const dimensions = useTerminalDimensions();
   const registry = props.options.registry!;
   const skills = props.options.skillRegistry!;
@@ -409,6 +429,9 @@ function OpenTuiApp(props: {
   const [todos, setTodos] = createSignal<Todo[]>(props.agent.getTodos());
   const [mode, setMode] = createSignal<PermissionMode>(props.agent.mode);
   const [notice, setNotice] = createSignal("");
+  let copyToastClearTimer: ReturnType<typeof setTimeout> | undefined;
+  let copyToastRoot: BoxRenderable | undefined;
+  let copyToastText: TextRenderable | undefined;
   const [sessionActive, setSessionActive] = createSignal(false);
   const [sidebarTick, setSidebarTick] = createSignal(0);
   // Sidebar MCP section collapsed state. Persisted across sidebarTick bumps,
@@ -540,10 +563,96 @@ function OpenTuiApp(props: {
 
   onCleanup(() => {
     uiDisposed = true;
+    if (copyToastClearTimer) clearTimeout(copyToastClearTimer);
     promptModeLabels.clear();
     promptModelLabels.clear();
     footerModeBadge = undefined;
   });
+
+  function showCopyToast(toast: CopyToastState, ttl = 2200) {
+    if (copyToastClearTimer) clearTimeout(copyToastClearTimer);
+    const sidebarOffset = sidebarVisible() ? SESSION_SIDEBAR_WIDTH : 0;
+    const mainAreaWidth = Math.max(20, dimensions().width - sidebarOffset - 4);
+    const color = toast.variant === "success"
+      ? theme.success
+      : toast.variant === "error"
+        ? theme.error
+        : toast.variant === "warning"
+          ? theme.warning
+          : theme.info;
+    const width = Math.max(24, Math.min(60, Math.min(mainAreaWidth, toast.message.length + 6)));
+    if (copyToastRoot) {
+      copyToastRoot.visible = true;
+      copyToastRoot.width = width;
+      copyToastRoot.right = sidebarOffset + 2;
+      copyToastRoot.borderColor = color;
+    }
+    if (copyToastText) {
+      copyToastText.fg = theme.text;
+      safeSetText(copyToastText, toast.message);
+    }
+    renderer.requestRender();
+    copyToastClearTimer = setTimeout(() => {
+      if (copyToastRoot) copyToastRoot.visible = false;
+      renderer.requestRender();
+      copyToastClearTimer = undefined;
+    }, ttl);
+  }
+
+  async function copySelectionText(text: string) {
+    const now = Date.now();
+    if (!text.trim()) return;
+    if (text === lastCopiedSelection && now - lastCopiedSelectionAt < 350) return;
+    const serial = ++selectionCopySerial;
+    let copied = false;
+    try {
+      await copyTextToClipboard(text);
+      copied = true;
+    } catch {
+      try {
+        copied = renderer.copyToClipboardOSC52(text);
+      } catch {
+        copied = false;
+      }
+    }
+    if (serial !== selectionCopySerial) return;
+    if (copied) {
+      lastCopiedSelection = text;
+      lastCopiedSelectionAt = Date.now();
+      showCopyToast({ message: "Copied to clipboard", variant: "info" });
+    } else {
+      showCopyToast({ message: "Failed to copy selection", variant: "error" }, 3000);
+    }
+  }
+
+  function isInsideRenderable(renderable: any, container: Renderable | undefined) {
+    if (!container) return false;
+    let current = renderable;
+    while (current) {
+      if (current === container) return true;
+      current = current.parent;
+    }
+    return false;
+  }
+
+  function getOpenTuiSelectionText(selection: any) {
+    const selectedRenderables = Array.isArray(selection?.selectedRenderables)
+      ? [...selection.selectedRenderables]
+      : undefined;
+    if (!selectedRenderables?.length) {
+      return typeof selection?.getSelectedText === "function" ? selection.getSelectedText() : "";
+    }
+
+    return selectedRenderables
+      .filter((renderable) => !renderable.isDestroyed && !isInsideRenderable(renderable, sidebarShell))
+      .sort((a, b) => {
+        if (a.y !== b.y) return a.y - b.y;
+        return a.x - b.x;
+      })
+      .map((renderable) => typeof renderable.getSelectedText === "function" ? renderable.getSelectedText() : "")
+      .filter(Boolean)
+      .join("\n");
+  }
 
   const readPromptText = () => {
     try {
@@ -1362,6 +1471,35 @@ function OpenTuiApp(props: {
     if (props.options.planHandlerRef) props.options.planHandlerRef.current = undefined;
     if (props.options.approvalHandlerRef) props.options.approvalHandlerRef.current = undefined;
   });
+
+  let lastCopiedSelection = "";
+  let lastCopiedSelectionAt = 0;
+  let selectionCopySerial = 0;
+  let rawSelectionStart: { x: number; y: number } | undefined;
+
+  useSelectionHandler((selection) => {
+    if (selection.isDragging) return;
+    const selectedText = getOpenTuiSelectionText(selection);
+    void copySelectionText(selectedText);
+  });
+
+  function handleRawMouseSelection(event: { type: string; button: number; x: number; y: number }) {
+    if (event.button !== 0) return;
+    if (event.type === "down") {
+      rawSelectionStart = { x: event.x, y: event.y };
+      return;
+    }
+    if (event.type !== "up") return;
+    const start = rawSelectionStart;
+    rawSelectionStart = undefined;
+    if (!start || (start.x === event.x && start.y === event.y)) return;
+    const selection = renderer.getSelection();
+    if (!selection || selection.isDragging) return;
+    void copySelectionText(getOpenTuiSelectionText(selection));
+  }
+
+  props.setRawMouseSelectionHandler?.(handleRawMouseSelection);
+  onCleanup(() => props.setRawMouseSelectionHandler?.(undefined));
 
   useKeyboard((event: any) => {
     const name = String(event.name || "").toLowerCase();
@@ -4386,6 +4524,37 @@ function OpenTuiApp(props: {
     ]);
   }
 
+  function renderNoticeOverlay() {
+    return h("box", {
+      ref: (ref: BoxRenderable) => {
+        copyToastRoot = ref;
+        ref.visible = false;
+      },
+      visible: false,
+      position: "absolute",
+      top: 2,
+      right: sidebarVisible() ? SESSION_SIDEBAR_WIDTH + 2 : 2,
+      zIndex: 4000,
+      flexDirection: "column",
+      alignItems: "flex-start",
+      width: 24,
+      paddingLeft: 2,
+      paddingRight: 2,
+      paddingTop: 1,
+      paddingBottom: 1,
+      backgroundColor: theme.backgroundPanel,
+      border: ["left", "right"],
+      borderColor: theme.info,
+    },
+      h("text", {
+        ref: (ref: TextRenderable) => { copyToastText = ref; },
+        fg: theme.text,
+        wrapMode: "word",
+        width: "100%",
+        content: "",
+      }));
+  }
+
   return h("box", {
     ref: (ref: BoxRenderable) => { rootBox = ref; },
     flexDirection: "column",
@@ -4419,6 +4588,7 @@ function OpenTuiApp(props: {
       registerModeBadge: registerFooterModeBadge,
     }),
     renderProviderDialog(),
+    renderNoticeOverlay(),
   ]);
 }
 
