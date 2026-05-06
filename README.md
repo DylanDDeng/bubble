@@ -18,13 +18,13 @@ curl -fsSL https://bun.sh/install | bash
 From npm:
 
 ```bash
-npm install -g bubble
+npm install -g @bubblebrain/bubble
 ```
 
 From a local package tarball:
 
 ```bash
-npm install -g ./bubble-0.0.1.tgz
+npm install -g ./bubblebrain-bubble-0.0.1.tgz
 ```
 
 ## Usage
