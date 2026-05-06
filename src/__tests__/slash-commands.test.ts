@@ -222,6 +222,10 @@ describe("slash commands", () => {
       mkdirSync(paths.globalRoot, { recursive: true });
       writeFileSync(paths.globalMemory, "# Bubble Memory\n\nprefer targeted memory tests\n", "utf-8");
 
+      result = await slashRegistry.execute("/memory status", ctx);
+      expect(result.result).toContain("environment: custom");
+      expect(result.result).toContain(`bubble home: ${home}`);
+
       result = await slashRegistry.execute("/memory search targeted", ctx);
       expect(result.result).toContain("Memory search results");
       expect(result.result).toContain("prefer targeted memory tests");

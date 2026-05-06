@@ -17,7 +17,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { homedir } from "node:os";
+import { getBubbleHome } from "../bubble-home.js";
 import type { PermissionMode } from "../types.js";
 import { normalizeLspConfig, type LspConfig } from "../lsp/config.js";
 import { parseRules } from "./rule.js";
@@ -49,7 +49,7 @@ export interface MergedSettings {
 }
 
 export interface SettingsManagerOptions {
-  /** Override for `~/.bubble`. Respects BUBBLE_HOME env var by default. */
+  /** Override for Bubble home. Respects BUBBLE_HOME/BUBBLE_DEV env vars by default. */
   bubbleHome?: string;
 }
 
@@ -73,9 +73,7 @@ export class SettingsManager {
 
   constructor(cwd: string, options: SettingsManagerOptions = {}) {
     this.cwd = cwd;
-    const bubbleHome = options.bubbleHome
-      ?? process.env.BUBBLE_HOME
-      ?? join(homedir(), ".bubble");
+    const bubbleHome = options.bubbleHome ?? getBubbleHome();
 
     this.paths = {
       user: join(bubbleHome, "settings.json"),

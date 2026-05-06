@@ -1,20 +1,19 @@
 /**
  * User-level configuration manager.
  *
- * Uses a single JSON file in ~/.bubble/config.json.
+ * Uses a single JSON file in Bubble home, normally ~/.bubble/config.json.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { homedir } from "node:os";
+import { getBubbleHome } from "./bubble-home.js";
 import type { ProviderProfile } from "./provider-registry.js";
 import type { ThinkingLevel } from "./types.js";
 
 const HIDDEN_PROVIDER_IDS = new Set(["openrouter", "openai-codex"]);
 
 function getConfigPath(): string {
-  const root = process.env.BUBBLE_HOME || join(homedir(), ".bubble");
-  return join(root, "config.json");
+  return join(getBubbleHome(), "config.json");
 }
 
 function isHiddenProviderId(providerId?: string): boolean {

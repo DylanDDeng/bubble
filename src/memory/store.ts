@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { getBubbleHomeInfo, type BubbleEnvironment } from "../bubble-home.js";
 import { MemoryDatabase, type MemoryJob } from "./db.js";
 import { getMemoryPaths, type MemoryPaths } from "./paths.js";
 import { buildReadPathPrompt } from "./prompts.js";
@@ -9,6 +10,8 @@ export type MemorySearchScope = MemoryScope | "all";
 
 export interface MemoryStatus {
   paths: MemoryPaths;
+  bubbleHome: string;
+  environment: BubbleEnvironment;
   files: Array<{ label: string; path: string; exists: boolean; bytes: number }>;
   database: {
     path: string;
@@ -51,6 +54,7 @@ export function buildMemoryPrompt(cwd: string): string | undefined {
 
 export function getMemoryStatus(cwd: string): MemoryStatus {
   const paths = getMemoryPaths(cwd);
+  const bubbleHome = getBubbleHomeInfo();
   const files = [
     { label: "global AGENTS.md", path: paths.globalAgents },
     { label: "global memory_summary.md", path: paths.globalSummary },
@@ -73,6 +77,8 @@ export function getMemoryStatus(cwd: string): MemoryStatus {
     const stats = db.stats();
     return {
       paths,
+      bubbleHome: bubbleHome.home,
+      environment: bubbleHome.environment,
       files,
       database: {
         path: paths.globalDatabase,

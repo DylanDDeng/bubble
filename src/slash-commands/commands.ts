@@ -173,6 +173,8 @@ async function handleMemoryCommand(args: string, ctx: Parameters<SlashCommand["h
     const status = getMemoryStatus(ctx.cwd);
     const lines = [
       "Memory status:",
+      `  environment: ${status.environment}`,
+      `  bubble home: ${status.bubbleHome}`,
       `  project root: ${status.paths.projectRoot}`,
       `  global root:  ${status.paths.globalRoot}`,
       `  startup pipeline: ${isMemoryDisabled() ? "disabled" : "enabled"}`,

@@ -11,8 +11,8 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { getBubbleHome } from "../bubble-home.js";
 import type { McpServerConfig, ScopedMcpServerConfig } from "./types.js";
 
 export interface McpConfigDiagnostic {
@@ -32,7 +32,7 @@ export interface LoadMcpConfigOptions {
 }
 
 export function loadMcpConfig(options: LoadMcpConfigOptions): LoadedMcpConfig {
-  const bubbleHome = options.bubbleHome ?? process.env.BUBBLE_HOME ?? join(homedir(), ".bubble");
+  const bubbleHome = options.bubbleHome ?? getBubbleHome();
   const paths: Record<"user" | "project" | "local", string> = {
     user: join(bubbleHome, "settings.json"),
     project: join(options.cwd, ".bubble", "settings.json"),

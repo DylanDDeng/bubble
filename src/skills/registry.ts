@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { getBubbleHome } from "../bubble-home.js";
 import { discoverSkills } from "./discovery.js";
 import type { SkillDiagnostic, SkillRecord, SkillSummary } from "./types.js";
 
@@ -16,7 +17,7 @@ export class SkillRegistry {
 
   constructor(options: SkillRegistryOptions = {}) {
     const cwd = options.cwd ?? process.cwd();
-    const bubbleHome = options.bubbleHome ?? process.env.BUBBLE_HOME ?? join(homedir(), ".bubble");
+    const bubbleHome = options.bubbleHome ?? getBubbleHome();
     const agentsHome = options.agentsHome ?? join(homedir(), ".agents");
     const roots = [
       { path: join(bubbleHome, "skills"), source: "user" as const },

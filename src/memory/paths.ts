@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join, parse, resolve } from "node:path";
+export { getBubbleHome } from "../bubble-home.js";
+import { getBubbleHome } from "../bubble-home.js";
 
 export interface MemoryPaths {
   globalRoot: string;
@@ -18,18 +19,15 @@ export interface MemoryPaths {
   projectLocalAgents: string;
 }
 
-export function getBubbleHome(): string {
-  return process.env.BUBBLE_HOME || join(homedir(), ".bubble");
-}
-
 export function getMemoryPaths(cwd: string): MemoryPaths {
-  const globalRoot = join(getBubbleHome(), "memories");
+  const bubbleHome = getBubbleHome();
+  const globalRoot = join(bubbleHome, "memories");
   const projectRoot = findProjectRoot(cwd);
   const projectBubbleRoot = join(projectRoot, ".bubble");
 
   return {
     globalRoot,
-    globalAgents: join(getBubbleHome(), "AGENTS.md"),
+    globalAgents: join(bubbleHome, "AGENTS.md"),
     globalSummary: join(globalRoot, "memory_summary.md"),
     globalMemory: join(globalRoot, "MEMORY.md"),
     globalRawMemories: join(globalRoot, "raw_memories.md"),

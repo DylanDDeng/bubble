@@ -1,8 +1,9 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { getBubbleHome } from "../bubble-home.js";
 
 export function getSensitivePaths(): string[] {
-  const bubbleHome = process.env.BUBBLE_HOME || join(homedir(), ".bubble");
+  const bubbleHome = getBubbleHome();
   return [
     resolve(bubbleHome, "config.json"),
     resolve(bubbleHome, "auth.json"),

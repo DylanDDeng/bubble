@@ -4,7 +4,7 @@
 
 import { mkdirSync, appendFileSync, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { homedir } from "node:os";
+import { getBubbleHome } from "./bubble-home.js";
 import { compactSessionEntries, type CompactOptions, type CompactResult } from "./context/compact.js";
 import type { Message, Todo } from "./types.js";
 import { SessionLog } from "./session-log.js";
@@ -156,7 +156,7 @@ export class SessionManager {
 }
 
 export function getSessionsDir(cwd: string): string {
-  const agentDir = process.env.BUBBLE_HOME || join(homedir(), ".bubble");
+  const agentDir = getBubbleHome();
   const safeCwd = cwd.replace(/[/\\:]/g, "_");
   const sessionsDir = join(agentDir, "sessions", safeCwd);
   mkdirSync(sessionsDir, { recursive: true });
