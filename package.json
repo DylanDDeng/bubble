@@ -4,7 +4,7 @@
   "description": "A terminal coding agent",
   "type": "module",
   "bin": {
-    "bubble": "./dist/main.js"
+    "bubble": "dist/main.js"
   },
   "files": [
     "dist",
