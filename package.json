@@ -1,5 +1,5 @@
 {
-  "name": "@bubblebrain/bubble",
+  "name": "@bubblebrain-ai/bubble",
   "version": "0.0.1",
   "description": "A terminal coding agent",
   "type": "module",
