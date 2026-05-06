@@ -1,14 +1,21 @@
 {
   "name": "bubble",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "A terminal coding agent",
   "type": "module",
   "bin": {
     "bubble": "./dist/main.js"
   },
+  "files": [
+    "dist",
+    "!dist/**/__tests__/**",
+    "!dist/**/*.test.js",
+    "!dist/**/*.test.d.ts"
+  ],
   "scripts": {
-    "build": "tsc && chmod +x dist/main.js",
+    "build": "rm -rf dist && tsc && chmod +x dist/main.js",
     "dev": "tsc && bun dist/main.js",
+    "prepack": "npm run build",
     "start": "bun dist/main.js",
     "test": "vitest run",
     "test:watch": "vitest"
