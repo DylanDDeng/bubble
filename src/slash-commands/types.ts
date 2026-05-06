@@ -7,6 +7,7 @@ import type { BashAllowlist } from "../approval/session-cache.js";
 import type { SettingsManager } from "../permissions/settings.js";
 import type { McpManager } from "../mcp/manager.js";
 import type { LspService } from "../lsp/index.js";
+import type { MemoryScope } from "../memory/index.js";
 
 export interface SlashCommandContext {
   agent: Agent;
@@ -23,6 +24,10 @@ export interface SlashCommandContext {
   settingsManager?: SettingsManager;
   mcpManager?: McpManager;
   lspService?: LspService;
+  flushMemory?: () => Promise<void>;
+  runMemoryCompaction?: () => Promise<string>;
+  runMemorySummary?: (scope?: MemoryScope) => Promise<string>;
+  runMemoryRefresh?: (scope?: MemoryScope) => Promise<string>;
 }
 
 /**

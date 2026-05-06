@@ -31,6 +31,8 @@ export interface SystemPromptOptions {
   currentDate?: string;
   /** Prompt-visible skills */
   skills?: SkillSummary[];
+  /** Prompt-visible memory guidance and summaries */
+  memoryPrompt?: string;
 }
 
 export function buildSystemPrompt(options: SystemPromptOptions = {}): string {

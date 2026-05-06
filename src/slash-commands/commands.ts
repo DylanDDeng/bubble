@@ -9,6 +9,14 @@ import { buildSystemPrompt } from "../system-prompt.js";
 import { formatLoadedSkill } from "../tools/skill.js";
 import type { ThinkingLevel } from "../types.js";
 import { isThinkingLevel } from "../variant/thinking-level.js";
+import {
+  buildMemoryPrompt,
+  getMemoryStatus,
+  isMemoryDisabled,
+  resetMemory,
+  searchMemory,
+  type MemoryScope,
+} from "../memory/index.js";
 import type { SlashCommand, SlashCommandContext } from "./types.js";
 import type { UnifiedCommand } from "./unified.js";
 
@@ -82,6 +90,7 @@ function syncSystemPrompt(ctx: Parameters<SlashCommand["handler"]>[1], model: st
     thinkingLevel: ctx.agent.thinking,
     workingDir: ctx.cwd,
     skills: ctx.skillRegistry.summaries(),
+    memoryPrompt: buildMemoryPrompt(ctx.cwd),
   }));
 }
 
@@ -136,6 +145,112 @@ function parseModelArgs(args: string): { model?: string; thinkingLevel?: Thinkin
 function displaySelectedModel(model: string, thinkingLevel: ThinkingLevel): string {
   const label = displayModel(model);
   return thinkingLevel === "off" ? label : `${label} (${thinkingLevel})`;
+}
+
+function parseMemoryScopeArgs(args: string): { scope: MemoryScope; rest: string; error?: string } {
+  const tokens = args.trim().split(/\s+/).filter(Boolean);
+  let scope: MemoryScope = "project";
+  const rest: string[] = [];
+  for (const token of tokens) {
+    if (token === "--global") {
+      scope = "global";
+      continue;
+    }
+    if (token === "--project") {
+      scope = "project";
+      continue;
+    }
+    rest.push(token);
+  }
+  return { scope, rest: rest.join(" ") };
+}
+
+async function handleMemoryCommand(args: string, ctx: Parameters<SlashCommand["handler"]>[1]): Promise<string> {
+  const trimmed = args.trim();
+  const [sub = "status", ...rest] = trimmed.split(/\s+/);
+
+  if (!trimmed || sub === "status") {
+    const status = getMemoryStatus(ctx.cwd);
+    const lines = [
+      "Memory status:",
+      `  project root: ${status.paths.projectRoot}`,
+      `  global root:  ${status.paths.globalRoot}`,
+      `  startup pipeline: ${isMemoryDisabled() ? "disabled" : "enabled"}`,
+      "",
+      "Files:",
+    ];
+    for (const file of status.files) {
+      lines.push(`  ${file.exists ? "present" : "missing"} ${file.label} (${file.bytes} bytes)`);
+      lines.push(`    ${file.path}`);
+    }
+    lines.push("", "SQLite state:");
+    lines.push(`  path: ${status.database.path}`);
+    lines.push(`  stage1Outputs: ${status.database.stage1Outputs}`);
+    lines.push(`  disabledThreads: ${status.database.disabledThreads}`);
+    for (const job of status.database.jobs) {
+      lines.push(`  job ${job.kind}/${job.jobKey}: ${job.status}`);
+      if (job.lastError) lines.push(`    lastError: ${job.lastError}`);
+    }
+    return lines.join("\n");
+  }
+
+  if (sub === "add") {
+    return "Manual memory writes are disabled. Bubble now follows the Codex-style automatic startup memory pipeline.";
+  }
+
+  if (sub === "search") {
+    const query = rest.join(" ").trim();
+    if (!query) {
+      return "Usage: /memory search <query>";
+    }
+    const results = searchMemory(ctx.cwd, query);
+    if (results.length === 0) {
+      return `No memory matches for "${query}".`;
+    }
+    const lines = [`Memory search results for "${query}":`];
+    for (const result of results) {
+      lines.push(`  ${result.scope} ${result.path}:${result.line}`);
+      lines.push(`    ${result.text}`);
+    }
+    return lines.join("\n");
+  }
+
+  if (sub === "compact") {
+    if (!ctx.runMemoryCompaction) {
+      return "Memory compaction is not attached to this session.";
+    }
+    return await ctx.runMemoryCompaction();
+  }
+
+  if (sub === "summarize") {
+    if (!ctx.runMemorySummary) {
+      return "Memory summary is not attached to this session.";
+    }
+    const parsed = parseMemoryScopeArgs(rest.join(" "));
+    if (parsed.rest) return "Usage: /memory summarize [--project|--global]";
+    const result = await ctx.runMemorySummary(parsed.scope);
+    if (ctx.agent.model) syncSystemPrompt(ctx, ctx.agent.model);
+    return result;
+  }
+
+  if (sub === "refresh") {
+    if (!ctx.runMemoryRefresh) {
+      return "Memory refresh is not attached to this session.";
+    }
+    const parsed = parseMemoryScopeArgs(rest.join(" "));
+    if (parsed.rest) return "Usage: /memory refresh [--project|--global]";
+    const result = await ctx.runMemoryRefresh(parsed.scope);
+    if (ctx.agent.model) syncSystemPrompt(ctx, ctx.agent.model);
+    return result;
+  }
+
+  if (sub === "reset") {
+    const result = resetMemory(ctx.cwd);
+    if (ctx.agent.model) syncSystemPrompt(ctx, ctx.agent.model);
+    return result;
+  }
+
+  return "Usage: /memory [status|search|compact|summarize|refresh|reset]";
 }
 
 function parseKeyArgs(args: string, ctx: Parameters<SlashCommand["handler"]>[1]) {
@@ -215,6 +330,13 @@ const builtinSlashCommandEntries: SlashCommand[] = [
     },
   },
   {
+    name: "memory",
+    description: "Inspect and maintain Codex-style automatic persistent memory. Usage: /memory [status|search|compact|summarize|refresh|reset]",
+    async handler(args, ctx) {
+      return handleMemoryCommand(args, ctx);
+    },
+  },
+  {
     name: "quit",
     description: "Exit the application",
     async handler(args, ctx) {
@@ -224,6 +346,11 @@ const builtinSlashCommandEntries: SlashCommand[] = [
         await ctx.mcpManager?.shutdown();
       } catch {
         // ignore — we're quitting anyway
+      }
+      try {
+        await ctx.flushMemory?.();
+      } catch {
+        // memory shutdown hooks are best-effort during exit
       }
       ctx.exit();
       // Belt-and-braces: if anything else (raw-mode tty handle, pending

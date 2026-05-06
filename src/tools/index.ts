@@ -17,6 +17,7 @@ export { createTodoTool, type TodoStore } from "./todo.js";
 export { createExitPlanModeTool, type PlanController } from "./exit-plan-mode.js";
 export { createToolSearchTool, type ToolSearchController } from "./tool-search.js";
 export { createQuestionTool } from "./question.js";
+export { createMemoryReadSummaryTool, createMemorySearchTool } from "./memory.js";
 
 import type { ToolRegistryEntry } from "../types.js";
 import type { ApprovalController } from "../approval/types.js";
@@ -37,6 +38,7 @@ import { createWebFetchTool } from "./web-fetch.js";
 import { createWebSearchTool } from "./web-search.js";
 import { createWriteTool } from "./write.js";
 import { createQuestionTool } from "./question.js";
+import { createMemoryReadSummaryTool, createMemorySearchTool } from "./memory.js";
 import type { QuestionController } from "../question/index.js";
 
 export interface CreateAllToolsOptions {
@@ -65,6 +67,8 @@ export function createAllTools(
     createLspTool(cwd, lsp, approval),
     createWebSearchTool(),
     createWebFetchTool(approval),
+    createMemorySearchTool(cwd),
+    createMemoryReadSummaryTool(cwd),
     createTaskTool(),
     ...(options.questionController ? [createQuestionTool(options.questionController)] : []),
     ...(skillRegistry ? [createSkillTool(skillRegistry)] : []),

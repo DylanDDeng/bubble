@@ -15,6 +15,7 @@ export interface ComposeSystemPromptOptions extends EnvironmentPromptOptions {
   thinkingLevel?: ThinkingLevel;
   mode?: PermissionMode;
   skills?: SkillSummary[];
+  memoryPrompt?: string;
 }
 
 export function composeSystemPrompt(options: ComposeSystemPromptOptions = {}): string {
@@ -36,7 +37,7 @@ export function composeSystemPrompt(options: ComposeSystemPromptOptions = {}): s
   });
   const skillsPrompt = buildSkillsPrompt(options.skills ?? []);
 
-  return [providerPrompt, environmentPrompt, runtimePrompt, skillsPrompt].filter(Boolean).join("\n\n");
+  return [providerPrompt, environmentPrompt, runtimePrompt, options.memoryPrompt, skillsPrompt].filter(Boolean).join("\n\n");
 }
 
 function buildProviderPrompt(

@@ -59,6 +59,7 @@ import type { SettingsManager } from "../permissions/settings.js";
 import type { McpManager } from "../mcp/manager.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
 import type { QuestionAnswer, QuestionController, QuestionPrompt, QuestionRequest } from "../question/index.js";
+import type { MemoryScope } from "../memory/index.js";
 import { createFrames } from "./opencode-spinner.js";
 import { readGitSidebarState, type SidebarFileChange, type SidebarGitState } from "./sidebar-state.js";
 import {
@@ -90,6 +91,10 @@ export interface RunTuiOptions {
   mcpManager?: McpManager;
   bypassEnabled?: boolean;
   theme?: Record<string, string>;
+  flushMemory?: () => Promise<void>;
+  runMemoryCompaction?: () => Promise<string>;
+  runMemorySummary?: (scope?: MemoryScope) => Promise<string>;
+  runMemoryRefresh?: (scope?: MemoryScope) => Promise<string>;
 }
 
 type RawModeCycleHandler = (sequence: string) => boolean;
@@ -380,6 +385,19 @@ function OpenTuiApp(props: {
   const dimensions = useTerminalDimensions();
   const registry = props.options.registry!;
   const skills = props.options.skillRegistry!;
+  let exitRequested = false;
+  async function requestExit() {
+    if (exitRequested) return;
+    exitRequested = true;
+    try {
+      await props.options.flushMemory?.();
+    } catch {
+      // Memory extraction is best-effort and must not trap the TUI on exit.
+    } finally {
+      props.onExit();
+    }
+  }
+
   let displayMessages = reconstructDisplayMessages(props.agent.messages);
   const homeTip = HOME_TIPS[Math.floor(Math.random() * HOME_TIPS.length)] ?? HOME_TIPS[0]!;
   const homePrompt = HOME_PROMPTS[Math.floor(Math.random() * HOME_PROMPTS.length)] ?? HOME_PROMPTS[0]!;
@@ -1348,7 +1366,7 @@ function OpenTuiApp(props: {
   useKeyboard((event: any) => {
     const name = String(event.name || "").toLowerCase();
     if (event.ctrl && name === "c") {
-      props.onExit();
+      void requestExit();
       return;
     }
 
@@ -2454,7 +2472,7 @@ function OpenTuiApp(props: {
       return;
     }
     if (input === "exit" || input === "quit" || input === ":q") {
-      props.onExit();
+      void requestExit();
       return;
     }
     if (input.startsWith("/") && !/\s/.test(input)) {
@@ -2784,7 +2802,7 @@ function OpenTuiApp(props: {
       addMessage,
       clearMessages,
       cwd: props.args.cwd,
-      exit: props.onExit,
+      exit: () => { void requestExit(); },
       sessionManager: props.options.sessionManager,
       createProvider: props.options.createProvider ?? ((() => {
         throw new Error("Provider creation not available");
@@ -2798,6 +2816,10 @@ function OpenTuiApp(props: {
       settingsManager: props.options.settingsManager,
       mcpManager: props.options.mcpManager,
       lspService,
+      flushMemory: props.options.flushMemory,
+      runMemoryCompaction: props.options.runMemoryCompaction,
+      runMemorySummary: props.options.runMemorySummary,
+      runMemoryRefresh: props.options.runMemoryRefresh,
     });
     if (!handled) return false;
     if (uiDisposed) return true;

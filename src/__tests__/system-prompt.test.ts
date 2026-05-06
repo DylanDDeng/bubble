@@ -71,6 +71,17 @@ describe("system prompt", () => {
     expect(withQuestion).toContain("explicitly discussing, brainstorming, or shaping an approach");
   });
 
+  it("includes memory prompt sections when provided", () => {
+    const prompt = buildSystemPrompt({
+      configuredProvider: "openai",
+      configuredModel: "gpt-5.4",
+      memoryPrompt: "## Persistent Memory\n- remember project conventions",
+    });
+
+    expect(prompt).toContain("## Persistent Memory");
+    expect(prompt).toContain("remember project conventions");
+  });
+
   it("encourages targeted question tool usage in plan mode reminders", () => {
     const reminder = reminderForMode("plan");
 

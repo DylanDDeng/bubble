@@ -24,6 +24,14 @@ import { loadMcpConfig } from "./mcp/config.js";
 import { McpManager } from "./mcp/manager.js";
 import type { PermissionMode, Message, PlanDecision } from "./types.js";
 import { QuestionController } from "./question/index.js";
+import {
+  buildMemoryPrompt,
+  formatMemoryStartupResult,
+  recordMemoryCitations,
+  runMemoryPhase2,
+  runMemoryStartupPipeline,
+  startMemoryStartupTask,
+} from "./memory/index.js";
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -211,6 +219,7 @@ async function main() {
     workingDir: args.cwd,
     tools: tools.map((tool) => tool.name),
     skills: skillRegistry.summaries(),
+    memoryPrompt: buildMemoryPrompt(args.cwd),
   });
   const agent = new Agent({
     provider: activeProvider
@@ -232,6 +241,9 @@ async function main() {
       // they will be re-injected as needed on resume based on the current mode.
       if (message.role === "user" && (message as any).isMeta) return;
       sessionManager.appendMessage(message);
+      if (message.role === "assistant") {
+        recordMemoryCitations(args.cwd, message.content);
+      }
     },
     onToolResult: (toolName, result) => {
       if (!sessionManager) return;
@@ -252,10 +264,37 @@ async function main() {
   if (sessionManager) {
     sessionManager.setMetadata({
       ...(agent.model ? { model: agent.model } : {}),
+      cwd: args.cwd,
       thinkingLevel: agent.thinking,
       reasoningEffort: agent.thinking,
     });
   }
+
+  const flushMemory = async () => {
+    // Codex-style memory runs at startup over historical rollouts. Exit should
+    // not perform an ad-hoc extraction of the just-finished session.
+  };
+  const runMemoryCompaction = async () =>
+    formatMemoryStartupResult(await runMemoryStartupPipeline({
+      cwd: args.cwd,
+      complete: (messages, completeOptions) => agent.complete(messages, completeOptions),
+      model: agent.apiModel,
+    }));
+  const runMemorySummary = async () => {
+    const result = await runMemoryPhase2({
+      cwd: args.cwd,
+      complete: (messages, completeOptions) => agent.complete(messages, completeOptions),
+      model: agent.apiModel,
+    });
+    return `Memory Phase 2 ${result.status}: selected ${result.selected}${result.reason ? ` (${result.reason})` : ""}.`;
+  };
+  const runMemoryRefresh = runMemoryCompaction;
+
+  startMemoryStartupTask({
+    cwd: args.cwd,
+    complete: (messages, completeOptions) => agent.complete(messages, completeOptions),
+    model: agent.apiModel,
+  });
 
   if (activeModel && args.model && normalizedConfiguredModel === agent.model) {
     userConfig.pushRecentModel(agent.model);
@@ -315,7 +354,12 @@ async function main() {
     mcpManager,
     bypassEnabled: args.bypassEnabled,
     theme: userConfig.getTheme(),
+    flushMemory,
+    runMemoryCompaction,
+    runMemorySummary,
+    runMemoryRefresh,
   });
+  await flushMemory();
 }
 
 async function readPipedStdin(): Promise<string | undefined> {

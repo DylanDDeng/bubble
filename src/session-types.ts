@@ -4,6 +4,7 @@ export interface SessionMetadata {
   model?: string;
   thinkingLevel?: ThinkingLevel;
   reasoningEffort?: ThinkingLevel;
+  cwd?: string;
 }
 
 export type SessionMarkerKind = "model_switch" | "provider_switch" | "thinking_level_switch" | "skill_activated" | "mode_switch";

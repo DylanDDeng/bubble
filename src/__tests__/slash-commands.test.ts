@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import type { SlashCommandContext } from "../slash-commands/types.js";
 import { SkillRegistry } from "../skills/registry.js";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -200,6 +200,98 @@ describe("slash commands", () => {
     expect(result.handled).toBe(true);
     expect(result.result).toContain("Skill: repo-review");
     expect(appendMarker).toHaveBeenCalledWith("skill_activated", "repo-review");
+  });
+
+  it("/memory disables manual add and searches automatic memory workspace", async () => {
+    const originalBubbleHome = process.env.BUBBLE_HOME;
+    const root = join(tmpdir(), `bubble-memory-slash-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    const cwd = join(root, "project");
+    const home = join(root, "home");
+    mkdirSync(join(cwd, ".git"), { recursive: true });
+    mkdirSync(home, { recursive: true });
+    process.env.BUBBLE_HOME = home;
+
+    try {
+      const ctx = createContext({ cwd });
+      let result = await slashRegistry.execute("/memory add prefer targeted memory tests", ctx);
+      expect(result.handled).toBe(true);
+      expect(result.result).toContain("Manual memory writes are disabled");
+
+      const { getMemoryPaths } = await import("../memory/index.js");
+      const paths = getMemoryPaths(cwd);
+      mkdirSync(paths.globalRoot, { recursive: true });
+      writeFileSync(paths.globalMemory, "# Bubble Memory\n\nprefer targeted memory tests\n", "utf-8");
+
+      result = await slashRegistry.execute("/memory search targeted", ctx);
+      expect(result.result).toContain("Memory search results");
+      expect(result.result).toContain("prefer targeted memory tests");
+      expect(result.result).toContain(join(home, "memories", "MEMORY.md"));
+    } finally {
+      if (originalBubbleHome === undefined) delete process.env.BUBBLE_HOME;
+      else process.env.BUBBLE_HOME = originalBubbleHome;
+    }
+  });
+
+  it("/memory compact delegates to startup memory pipeline", async () => {
+    const runMemoryCompaction = vi.fn(async () => "Memory startup succeeded.");
+    const ctx = createContext({ runMemoryCompaction });
+
+    const result = await slashRegistry.execute("/memory compact", ctx);
+
+    expect(result.handled).toBe(true);
+    expect(result.result).toContain("Memory startup");
+    expect(runMemoryCompaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("/memory summarize and refresh delegate to Codex-style memory handlers", async () => {
+    const runMemorySummary = vi.fn(async () => "Memory Phase 2 succeeded: selected 1.");
+    const runMemoryRefresh = vi.fn(async () => "Memory startup succeeded.");
+    const ctx = createContext({ runMemorySummary, runMemoryRefresh });
+
+    let result = await slashRegistry.execute("/memory summarize --global", ctx);
+    expect(result.handled).toBe(true);
+    expect(result.result).toContain("Phase 2");
+    expect(runMemorySummary).toHaveBeenCalledWith("global");
+
+    result = await slashRegistry.execute("/memory refresh --project", ctx);
+    expect(result.result).toContain("Memory startup");
+    expect(runMemoryRefresh).toHaveBeenCalledWith("project");
+  });
+
+  it("/memory reset clears automatic memory artifacts", async () => {
+    const originalBubbleHome = process.env.BUBBLE_HOME;
+    const root = join(tmpdir(), `bubble-memory-review-slash-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    const cwd = join(root, "project");
+    const home = join(root, "home");
+    mkdirSync(join(cwd, ".git"), { recursive: true });
+    process.env.BUBBLE_HOME = home;
+
+    try {
+      const { getMemoryPaths, MemoryDatabase } = await import("../memory/index.js");
+      const paths = getMemoryPaths(cwd);
+      mkdirSync(paths.globalRoot, { recursive: true });
+      writeFileSync(paths.globalMemory, "# Bubble Memory\n\nreset me\n", "utf-8");
+      const db = new MemoryDatabase(cwd);
+      db.upsertStage1Output({
+        sessionFile: "session.jsonl",
+        cwd,
+        entryCount: 4,
+        sourceUpdatedAt: "2026-04-29T00:00:00.000Z",
+        generatedAt: "2026-04-29T00:00:00.000Z",
+        rawMemory: "reset me",
+        rolloutSummary: "reset me",
+      });
+      db.close();
+
+      const ctx = createContext({ cwd });
+      const result = await slashRegistry.execute("/memory reset", ctx);
+      expect(result.result).toContain("Memory reset complete");
+      expect(existsSync(paths.globalMemory)).toBe(false);
+      expect(existsSync(paths.globalDatabase)).toBe(false);
+    } finally {
+      if (originalBubbleHome === undefined) delete process.env.BUBBLE_HOME;
+      else process.env.BUBBLE_HOME = originalBubbleHome;
+    }
   });
 
   it("/plan toggles the agent mode and delegates to setMode", async () => {

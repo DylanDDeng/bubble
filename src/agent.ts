@@ -158,6 +158,17 @@ export class Agent {
     this.provider = provider;
   }
 
+  complete(
+    messages: Message[],
+    options?: { model?: string; temperature?: number; thinkingLevel?: ThinkingLevel },
+  ): Promise<string> {
+    return this.provider.complete(messages, {
+      model: options?.model ?? this.apiModel,
+      temperature: options?.temperature ?? this.temperature,
+      thinkingLevel: options?.thinkingLevel ?? this.thinkingLevel,
+    });
+  }
+
   get thinking(): ThinkingLevel {
     return this.thinkingLevel;
   }
