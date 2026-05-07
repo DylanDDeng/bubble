@@ -308,8 +308,7 @@ async function main() {
       // Reassigning agent.messages drops any <system-reminder> we injected during
       // construction. Re-inject if the agent is starting in plan mode.
       if (agent.mode === "plan") {
-        const { PLAN_MODE_ENTER_REMINDER } = await import("./prompt/reminders.js");
-        agent.injectSystemReminder(PLAN_MODE_ENTER_REMINDER);
+        agent.injectModeReminder();
       }
       console.log(chalk.dim(`Resumed session: ${sessionManager.getSessionFile()}`));
     }

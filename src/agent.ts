@@ -9,7 +9,7 @@ import { getContextBudget } from "./context/budget.js";
 import { isContextOverflowError } from "./context/overflow.js";
 import { projectMessages } from "./context/projector.js";
 import { aggressivePruneMessages } from "./context/prune.js";
-import { buildDeferredToolsReminder, buildToolFreezeReminder, reminderForMode } from "./prompt/reminders.js";
+import { buildDeferredToolsReminder, buildToolFreezeReminder, isPermissionModeReminder, reminderForMode } from "./prompt/reminders.js";
 import type { AgentEvent, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ThinkingLevel, Todo, TokenUsage, ToolDefinition, ToolResult, ToolRegistryEntry } from "./types.js";
 import { HookBus, type TurnHooks } from "./orchestrator/hooks.js";
 import { createDefaultHooks } from "./orchestrator/default-hooks.js";
@@ -103,7 +103,7 @@ export class Agent {
     // If the agent boots in a non-default mode, inject the corresponding reminder so the
     // model sees the active rules on its very first turn. Default mode needs no reminder.
     if (this._mode !== "default") {
-      this.injectSystemReminder(reminderForMode(this._mode));
+      this.injectModeReminder();
     }
 
     // Advertise any deferred tools so the model knows they exist and how to
@@ -136,6 +136,15 @@ export class Agent {
 
   injectSystemReminder(content: string): void {
     this.appendMessage({ role: "user", content, isMeta: true });
+  }
+
+  injectModeReminder(): void {
+    this.messages = this.messages.filter((message) => !(
+      message.role === "user"
+      && message.isMeta
+      && isPermissionModeReminder(message.content)
+    ));
+    this.injectSystemReminder(reminderForMode(this._mode));
   }
 
   get model(): string {
@@ -205,7 +214,7 @@ export class Agent {
     if (this._mode === value) return;
     this._mode = value;
     this._modeVersion += 1;
-    this.injectSystemReminder(reminderForMode(value));
+    this.injectModeReminder();
     this.onModeUpdate?.(value);
   }
 
@@ -329,6 +338,9 @@ export class Agent {
       };
       await hookBus.runBeforeModelCall(beforeModelCallCtx);
       toolEntries = beforeModelCallCtx.toolEntries;
+      if (this._mode !== "plan") {
+        toolEntries = toolEntries.filter((t) => t.name !== "exit_plan_mode");
+      }
       flushGovernorReminders();
       const toolDefinitions: ToolDefinition[] = (((hookState as any).forceTextOnlyReason ? [] : toolEntries))
         .map((t) => ({
@@ -700,6 +712,14 @@ export class Agent {
 
   private async executeTool(toolCall: ParsedToolCall, cwd: string, abortSignal?: AbortSignal): Promise<ToolResult> {
     throwIfAborted(abortSignal);
+    if (toolCall.name === "exit_plan_mode" && this._mode !== "plan") {
+      return {
+        content:
+          "Ignored exit_plan_mode because plan mode is not active. " +
+          "Continue with the user's request directly using the regular tools.",
+      };
+    }
+
     const tool = this.tools.get(toolCall.name);
     if (!tool) {
       return {

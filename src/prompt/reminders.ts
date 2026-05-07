@@ -13,6 +13,13 @@ export function wrapInSystemReminder(content: string): string {
   return `<system-reminder>\n${content.trim()}\n</system-reminder>`;
 }
 
+export function isPermissionModeReminder(content: unknown): boolean {
+  if (typeof content !== "string") return false;
+  return content.includes("Plan mode is now ACTIVE")
+    || content.includes("Permission mode is now: bypassPermissions")
+    || content.includes("Permission mode is now: default Build mode");
+}
+
 const PLAN_MODE_ENTER = `
 Plan mode is now ACTIVE.
 
