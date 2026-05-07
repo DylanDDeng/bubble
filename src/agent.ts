@@ -23,6 +23,13 @@ const RESIDENT_HISTORY_CHAR_HARD_LIMIT = 512 * 1024;
 const RESIDENT_HISTORY_HEAP_SOFT_LIMIT = 512 * 1024 * 1024;
 const RESIDENT_HISTORY_HEAP_HARD_LIMIT = 768 * 1024 * 1024;
 
+export class AgentAbortError extends Error {
+  constructor(message = "Agent run cancelled.") {
+    super(message);
+    this.name = "AgentAbortError";
+  }
+}
+
 export interface AgentOptions {
   provider: Provider;
   sessionID?: string;
@@ -160,12 +167,13 @@ export class Agent {
 
   complete(
     messages: Message[],
-    options?: { model?: string; temperature?: number; thinkingLevel?: ThinkingLevel },
+    options?: { model?: string; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal },
   ): Promise<string> {
     return this.provider.complete(messages, {
       model: options?.model ?? this.apiModel,
       temperature: options?.temperature ?? this.temperature,
       thinkingLevel: options?.thinkingLevel ?? this.thinkingLevel,
+      abortSignal: options?.abortSignal,
     });
   }
 
@@ -230,7 +238,13 @@ export class Agent {
     this.messages.unshift(systemMessage);
   }
 
-  async *run(userInput: string | ContentPart[], cwd: string): AsyncIterable<AgentEvent> {
+  async *run(
+    userInput: string | ContentPart[],
+    cwd: string,
+    options: { abortSignal?: AbortSignal } = {},
+  ): AsyncIterable<AgentEvent> {
+    const abortSignal = options.abortSignal;
+    throwIfAborted(abortSignal);
     const hookBus = new HookBus();
     for (const hooks of createDefaultHooks()) {
       hookBus.register(hooks);
@@ -268,6 +282,7 @@ export class Agent {
     let step = 0;
 
     while (true) {
+      throwIfAborted(abortSignal);
       flushGovernorReminders();
       yield { type: "turn_start" };
       step += 1;
@@ -335,9 +350,11 @@ export class Agent {
           tools: toolDefinitions,
           temperature: this.temperature,
           thinkingLevel: this.thinkingLevel,
+          abortSignal,
         });
 
         for await (const chunk of stream) {
+          throwIfAborted(abortSignal);
           switch (chunk.type) {
             case "text":
               assistantMsg.content += chunk.content;
@@ -413,6 +430,7 @@ export class Agent {
 
         const executedResults: ToolResult[] = [];
         for (let index = 0; index < parsedCalls.length; index++) {
+          throwIfAborted(abortSignal);
           let tc = parsedCalls[index];
           let blockedResult: ToolResult | undefined;
           await hookBus.runBeforeToolCall({
@@ -440,7 +458,8 @@ export class Agent {
           yield { type: "tool_start", id: tc.id, name: tc.name, args: tc.parsedArgs };
           const todosVersionBefore = this._todosVersion;
           const modeVersionBefore = this._modeVersion;
-          let result = blockedResult ?? await this.executeTool(tc, cwd);
+          let result = blockedResult ?? await this.executeTool(tc, cwd, abortSignal);
+          throwIfAborted(abortSignal);
           await hookBus.runAfterToolCall({
             agent: this,
             cwd,
@@ -679,7 +698,8 @@ export class Agent {
     this.onMessageAppend?.(message);
   }
 
-  private async executeTool(toolCall: ParsedToolCall, cwd: string): Promise<ToolResult> {
+  private async executeTool(toolCall: ParsedToolCall, cwd: string, abortSignal?: AbortSignal): Promise<ToolResult> {
+    throwIfAborted(abortSignal);
     const tool = this.tools.get(toolCall.name);
     if (!tool) {
       return {
@@ -711,6 +731,7 @@ export class Agent {
       return await tool.execute(toolCall.parsedArgs, {
         cwd,
         sessionID: this.sessionID,
+        abortSignal,
         toolCall: { id: toolCall.id, name: toolCall.name },
         agent: this,
       });
@@ -757,6 +778,13 @@ function estimateResidentChars(messages: Message[]): number {
   }
 
   return total;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  const reason = signal.reason;
+  if (reason instanceof Error) throw reason;
+  throw new AgentAbortError(typeof reason === "string" ? reason : undefined);
 }
 
 function estimateToolPayloadChars(messages: Message[]): number {

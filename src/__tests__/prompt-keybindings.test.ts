@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  isEscapeSequence,
   isModeCycleKeyEvent,
   isModeCycleSequence,
   isModifiedEnterSequence,
@@ -47,5 +48,21 @@ describe("prompt textarea keybindings", () => {
     expect(isModeCycleKeyEvent({ name: "backtab" })).toBe(true);
     expect(isModeCycleKeyEvent({ name: "shift+tab" })).toBe(true);
     expect(isModeCycleKeyEvent({ name: "", raw: "\x1b[Z" })).toBe(true);
+  });
+
+  it("detects escape across raw and kitty keyboard encodings", () => {
+    expect(isEscapeSequence("\x1b")).toBe(true);
+    expect(isEscapeSequence("\x1b[27u")).toBe(true);
+    expect(isEscapeSequence("\x1b[27;1u")).toBe(true);
+    expect(isEscapeSequence("\x1b[27;1:1u")).toBe(true);
+    expect(isEscapeSequence("\x1b[27;1:3u")).toBe(true);
+    expect(isEscapeSequence("\x1b[57344u")).toBe(true);
+    expect(isEscapeSequence("\x1b[57344;1u")).toBe(true);
+    expect(isEscapeSequence("\x1b[57344;1:1u")).toBe(true);
+    expect(isEscapeSequence("\x1b[27;1;27~")).toBe(true);
+    expect(isEscapeSequence("\x1b[27;1:1;27~")).toBe(true);
+    expect(isEscapeSequence("\x1b[27;1;57344~")).toBe(true);
+    expect(isEscapeSequence("\x1b[13u")).toBe(false);
+    expect(isEscapeSequence("\t")).toBe(false);
   });
 });

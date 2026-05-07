@@ -23,6 +23,13 @@ export function isModeCycleSequence(value?: string) {
     || /^\x1b\[27;2;9~$/.test(value);
 }
 
+export function isEscapeSequence(value?: string) {
+  if (!value) return false;
+  return value === "\x1b"
+    || /^\x1b\[(?:27|57344)(?:;[1-9]\d*(?::[1-3])?)?u$/.test(value)
+    || /^\x1b\[27;[1-9]\d*(?::[1-3])?;(?:27|57344)~$/.test(value);
+}
+
 export function isModeCycleKeyEvent(input: { name?: string; raw?: string; sequence?: string }) {
   const name = String(input.name || "").toLowerCase();
   return name === "tab"

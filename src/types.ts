@@ -217,9 +217,10 @@ export interface Provider {
       tools?: ToolDefinition[];
       temperature?: number;
       thinkingLevel?: ThinkingLevel;
+      abortSignal?: AbortSignal;
     }
   ): AsyncIterable<StreamChunk>;
-  complete(messages: Message[], options?: { model?: string; temperature?: number; thinkingLevel?: ThinkingLevel }): Promise<string>;
+  complete(messages: Message[], options?: { model?: string; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal }): Promise<string>;
 }
 
 // ============================================================================

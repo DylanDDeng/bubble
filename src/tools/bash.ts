@@ -26,7 +26,7 @@ export function createBashTool(cwd: string, approval?: ApprovalController): Tool
       },
       required: ["command"],
     },
-    async execute(args): Promise<ToolResult> {
+    async execute(args, ctx): Promise<ToolResult> {
       if (!existsSync(cwd)) {
         return { content: `Error: Working directory does not exist: ${cwd}`, isError: true };
       }
@@ -63,12 +63,21 @@ export function createBashTool(cwd: string, approval?: ApprovalController): Tool
         let stdout = "";
         let stderr = "";
         let timedOut = false;
+        let aborted = false;
+
+        const abortChild = () => {
+          if (aborted) return;
+          aborted = true;
+          child.kill("SIGTERM");
+          setTimeout(() => child.kill("SIGKILL"), 5000);
+        };
 
         const timeoutHandle = setTimeout(() => {
           timedOut = true;
-          child.kill("SIGTERM");
-          setTimeout(() => child.kill("SIGKILL"), 5000);
+          abortChild();
         }, timeoutSec * 1000);
+        if (ctx.abortSignal?.aborted) abortChild();
+        ctx.abortSignal?.addEventListener("abort", abortChild, { once: true });
 
         child.stdout?.on("data", (data) => {
           stdout += data.toString();
@@ -79,11 +88,13 @@ export function createBashTool(cwd: string, approval?: ApprovalController): Tool
 
         child.on("error", (err) => {
           clearTimeout(timeoutHandle);
+          ctx.abortSignal?.removeEventListener("abort", abortChild);
           resolve({ content: `Error: ${err.message}`, isError: true });
         });
 
         child.on("close", (code) => {
           clearTimeout(timeoutHandle);
+          ctx.abortSignal?.removeEventListener("abort", abortChild);
 
           let output = "";
           if (stdout) output += `stdout:\n${stdout}\n`;
@@ -100,6 +111,22 @@ export function createBashTool(cwd: string, approval?: ApprovalController): Tool
                 kind: parsedSearch ? "search" : "shell",
                 pattern: parsedSearch?.pattern,
                 path: parsedSearch?.path,
+              },
+            });
+            return;
+          }
+
+          if (aborted || ctx.abortSignal?.aborted) {
+            output += "[Command cancelled]";
+            resolve({
+              content: output.trim(),
+              isError: true,
+              status: "blocked",
+              metadata: {
+                kind: parsedSearch ? "search" : "shell",
+                pattern: parsedSearch?.pattern,
+                path: parsedSearch?.path,
+                reason: "cancelled",
               },
             });
             return;

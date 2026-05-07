@@ -80,7 +80,7 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
 
   async function* streamChat(
     messages: Message[],
-    chatOptions: { model: string; tools?: ToolDefinition[]; temperature?: number; thinkingLevel?: ThinkingLevel }
+    chatOptions: { model: string; tools?: ToolDefinition[]; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal }
   ): AsyncIterable<StreamChunk> {
     const requestConfig = resolveProviderRequestConfig(
       options.providerId || "",
@@ -121,14 +121,16 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
       body.reasoning = { enabled: true };
     }
 
-    const stream = (await client.chat.completions.create(body as any)) as any;
+    const stream = (await client.chat.completions.create(body as any, {
+      signal: chatOptions.abortSignal,
+    } as any)) as any;
 
     yield* translateOpenAIStream(stream);
 
     yield { type: "done" };
   }
 
-  async function complete(messages: Message[], chatOptions?: { model?: string; temperature?: number; thinkingLevel?: ThinkingLevel }): Promise<string> {
+  async function complete(messages: Message[], chatOptions?: { model?: string; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal }): Promise<string> {
     const requestConfig = resolveProviderRequestConfig(
       options.providerId || "",
       chatOptions?.model ?? fallbackModel,
@@ -151,7 +153,9 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
     if (requestConfig.reasoningEffort && requestConfig.reasoningEffort !== "off") {
       body.reasoning = { enabled: true };
     }
-    const response = await client.chat.completions.create(body);
+    const response = await client.chat.completions.create(body, {
+      signal: chatOptions?.abortSignal,
+    } as any);
     return response.choices[0]?.message?.content ?? "";
   }
 

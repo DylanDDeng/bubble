@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Agent } from "../agent.js";
+import { Agent, AgentAbortError } from "../agent.js";
 import type { AgentEvent, Message, Provider, StreamChunk, ToolRegistryEntry } from "../types.js";
 import { createTaskTool } from "../tools/task.js";
 
@@ -56,6 +56,33 @@ describe("Agent", () => {
     expect(events.some((e) => e.type === "text_delta" && e.content === "Hello!")).toBe(true);
     expect(events.some((e) => e.type === "agent_end")).toBe(true);
     expect(agent.messages).toHaveLength(2); // user + assistant (no system prompt in this test)
+  });
+
+  it("aborts a running model stream without appending partial assistant output", async () => {
+    const controller = new AbortController();
+    const provider: Provider = {
+      async *streamChat(_messages, options) {
+        expect(options.abortSignal).toBe(controller.signal);
+        yield { type: "text", content: "partial" };
+        controller.abort(new AgentAbortError("stop"));
+        yield { type: "text", content: "late" };
+      },
+      async complete() {
+        return "mock completion";
+      },
+    };
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [] });
+    const events: AgentEvent[] = [];
+
+    await expect(async () => {
+      for await (const event of agent.run("Hi", "/tmp", { abortSignal: controller.signal })) {
+        events.push(event);
+      }
+    }).rejects.toThrow(AgentAbortError);
+
+    expect(events.some((event) => event.type === "text_delta" && event.content === "partial")).toBe(true);
+    expect(events.some((event) => event.type === "text_delta" && event.content === "late")).toBe(false);
+    expect(agent.messages).toEqual([{ role: "user", content: "Hi" }]);
   });
 
   it("auto-continues after a tool call", async () => {

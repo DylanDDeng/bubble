@@ -47,7 +47,7 @@ export function createOpenAICodexProvider(options: {
 
   async function* streamChat(
     messages: Message[],
-    chatOptions: { model: string; tools?: ToolDefinition[]; temperature?: number; thinkingLevel?: ThinkingLevel }
+    chatOptions: { model: string; tools?: ToolDefinition[]; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal }
   ): AsyncIterable<StreamChunk> {
     const requestConfig = resolveProviderRequestConfig(
       "openai-codex",
@@ -62,6 +62,7 @@ export function createOpenAICodexProvider(options: {
     const response = await fetch(resolveCodexUrl(options.baseURL), {
       method: "POST",
       headers: buildSseHeaders(options.apiKey, accountId, sessionId),
+      signal: chatOptions.abortSignal,
       body: JSON.stringify(
         buildRequestBody(messages, {
           model: chatOptions.model,
@@ -216,13 +217,14 @@ export function createOpenAICodexProvider(options: {
 
   async function complete(
     messages: Message[],
-    chatOptions?: { model?: string; temperature?: number; thinkingLevel?: ThinkingLevel }
+    chatOptions?: { model?: string; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal }
   ): Promise<string> {
     let content = "";
     for await (const chunk of streamChat(messages, {
       model: chatOptions?.model ?? "gpt-5.4",
       temperature: chatOptions?.temperature,
       thinkingLevel: chatOptions?.thinkingLevel,
+      abortSignal: chatOptions?.abortSignal,
     })) {
       if (chunk.type === "text") {
         content += chunk.content;

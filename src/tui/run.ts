@@ -36,7 +36,7 @@ import {
   useTerminalDimensions,
 } from "@opentui/solid";
 import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
-import type { Agent } from "../agent.js";
+import { AgentAbortError, type Agent } from "../agent.js";
 import type { CliArgs } from "../cli.js";
 import type { SessionManager } from "../session.js";
 import type { ContentPart, Message, PermissionMode, PlanDecision, Provider, ThinkingLevel, Todo, TokenUsage } from "../types.js";
@@ -71,6 +71,7 @@ import {
   isModifiedEnterSequence,
   PROMPT_TEXTAREA_KEYBINDINGS,
 } from "./prompt-keybindings.js";
+import { keyNameFromEvent, keyNameFromSequence } from "./global-key-router.js";
 
 export interface PlanHandlerRef {
   current?: (plan: string) => Promise<PlanDecision>;
@@ -100,8 +101,7 @@ export interface RunTuiOptions {
   runMemoryRefresh?: (scope?: MemoryScope) => Promise<string>;
 }
 
-type RawModeCycleHandler = (sequence: string) => boolean;
-type RawModalKeyHandler = (sequence: string) => boolean;
+type RawGlobalKeyHandler = (sequence: string) => boolean;
 type RawMouseSelectionHandler = (event: { type: string; button: number; x: number; y: number }) => void;
 type CopyToastVariant = "info" | "success" | "warning" | "error";
 type CopyToastState = { title?: string; message: string; variant: CopyToastVariant };
@@ -319,8 +319,7 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
     let renderer: CliRenderer | undefined;
     let syntaxStyle: SyntaxStyle | undefined;
     let subtleSyntaxStyle: SyntaxStyle | undefined;
-    let rawModeCycleHandler: RawModeCycleHandler | undefined;
-    let rawModalKeyHandler: RawModalKeyHandler | undefined;
+    let rawGlobalKeyHandler: RawGlobalKeyHandler | undefined;
     let rawMouseSelectionHandler: RawMouseSelectionHandler | undefined;
     const exit = () => {
       try {
@@ -343,18 +342,15 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
         exitOnCtrlC: false,
         useKittyKeyboard: {},
         prependInputHandlers: [
-          (sequence: string) => rawModalKeyHandler?.(sequence) || rawModeCycleHandler?.(sequence) || false,
+          (sequence: string) => rawGlobalKeyHandler?.(sequence) || false,
         ],
         autoFocus: true,
         useMouse: true,
         openConsoleOnError: false,
         backgroundColor: theme.background,
       });
-      const setRawModeCycleHandler = (handler: RawModeCycleHandler | undefined) => {
-        rawModeCycleHandler = handler;
-      };
-      const setRawModalKeyHandler = (handler: RawModalKeyHandler | undefined) => {
-        rawModalKeyHandler = handler;
+      const setRawGlobalKeyHandler = (handler: RawGlobalKeyHandler | undefined) => {
+        rawGlobalKeyHandler = handler;
       };
       const setRawMouseSelectionHandler = (handler: RawMouseSelectionHandler | undefined) => {
         rawMouseSelectionHandler = handler;
@@ -367,7 +363,7 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
           return handled;
         };
       }
-      await render(() => h(OpenTuiApp, { agent, args, options, onExit: exit, syntaxStyle, subtleSyntaxStyle, setRawModeCycleHandler, setRawModalKeyHandler, setRawMouseSelectionHandler }), renderer);
+      await render(() => h(OpenTuiApp, { agent, args, options, onExit: exit, syntaxStyle, subtleSyntaxStyle, setRawGlobalKeyHandler, setRawMouseSelectionHandler }), renderer);
     } catch (error) {
       syntaxStyle?.destroy();
       subtleSyntaxStyle?.destroy();
@@ -401,8 +397,7 @@ function OpenTuiApp(props: {
   onExit: () => void;
   syntaxStyle: SyntaxStyle;
   subtleSyntaxStyle: SyntaxStyle;
-  setRawModeCycleHandler?: (handler: RawModeCycleHandler | undefined) => void;
-  setRawModalKeyHandler?: (handler: RawModalKeyHandler | undefined) => void;
+  setRawGlobalKeyHandler?: (handler: RawGlobalKeyHandler | undefined) => void;
   setRawMouseSelectionHandler?: (handler: RawMouseSelectionHandler | undefined) => void;
 }) {
   const renderer = useRenderer();
@@ -433,6 +428,8 @@ function OpenTuiApp(props: {
   let promptHistoryIndex: number | undefined;
   let promptHistoryDraft = "";
   const [isRunning, setIsRunning] = createSignal(false);
+  let activeRun: { id: number; abortController: AbortController } | undefined;
+  let nextRunId = 0;
   const [showThinking, setShowThinking] = createSignal(true);
   let streamingDisplay: DisplayMessage | undefined;
   let sidebarLspSyncTimer: ReturnType<typeof setInterval> | undefined;
@@ -980,33 +977,6 @@ function OpenTuiApp(props: {
     return canPersistApproval(request)
       ? ["Allow once", "Allow always", "Reject"] as const
       : ["Allow once", "Reject"] as const;
-  };
-
-  const keyNameFromSequence = (sequence?: string) => {
-    if (!sequence) return "";
-    if (sequence === "\x1b[D" || /^\x1b\[[0-9;]*D$/.test(sequence)) return "left";
-    if (sequence === "\x1b[C" || /^\x1b\[[0-9;]*C$/.test(sequence)) return "right";
-    if (sequence === "\x1b[A" || /^\x1b\[[0-9;]*A$/.test(sequence)) return "up";
-    if (sequence === "\x1b[B" || /^\x1b\[[0-9;]*B$/.test(sequence)) return "down";
-    if (sequence === "\x1bOD") return "left";
-    if (sequence === "\x1bOC") return "right";
-    if (sequence === "\x1bOA") return "up";
-    if (sequence === "\x1bOB") return "down";
-    if (sequence === "\r" || sequence === "\n") return "enter";
-    if (sequence === "\x1b") return "escape";
-    return "";
-  };
-
-  const keyNameFromEvent = (event: any) => {
-    const rawName = String(event.name || event.key || event.input || "").toLowerCase();
-    if (["arrowleft", "left_arrow", "leftarrow", "cursorleft", "left"].includes(rawName)) return "left";
-    if (["arrowright", "right_arrow", "rightarrow", "cursorright", "right"].includes(rawName)) return "right";
-    if (["arrowup", "up_arrow", "uparrow", "cursorup", "up"].includes(rawName)) return "up";
-    if (["arrowdown", "down_arrow", "downarrow", "cursordown", "down"].includes(rawName)) return "down";
-    if (rawName === "return" || rawName === "enter") return "enter";
-    if (rawName === "esc" || rawName === "escape") return "escape";
-    if (rawName === "tab") return "tab";
-    return rawName || keyNameFromSequence(event.raw || event.sequence);
   };
 
   const modalKeyNameFromSequence = (sequence?: string) => {
@@ -1647,8 +1617,7 @@ function OpenTuiApp(props: {
       onCleanup(unsubscribeQuestion);
       syncFirstPendingQuestion();
     }
-    props.setRawModeCycleHandler?.(cycleModeFromRawSequence);
-    props.setRawModalKeyHandler?.(routeModalRawSequence);
+    props.setRawGlobalKeyHandler?.(routeGlobalRawSequence);
     const unsubscribeLsp = lspService.onStatusChange(() => {
       syncSidebarLsp();
     });
@@ -1662,8 +1631,7 @@ function OpenTuiApp(props: {
   });
 
   onCleanup(() => {
-    props.setRawModeCycleHandler?.(undefined);
-    props.setRawModalKeyHandler?.(undefined);
+    props.setRawGlobalKeyHandler?.(undefined);
     if (sidebarLspSyncTimer) clearInterval(sidebarLspSyncTimer);
     for (const timer of questionSyncTimers) clearTimeout(timer);
     questionSyncTimers.clear();
@@ -1702,29 +1670,7 @@ function OpenTuiApp(props: {
   onCleanup(() => props.setRawMouseSelectionHandler?.(undefined));
 
   useKeyboard((event: any) => {
-    const name = String(event.name || "").toLowerCase();
-    if (event.ctrl && name === "c") {
-      void requestExit();
-      return;
-    }
-
-    // Ctrl+Shift+M opens the MCP reconnect picker. Shift is required because
-    // bare Ctrl+M is Enter on most terminals (historical TTY mapping).
-    if (event.ctrl && event.shift && name === "m") {
-      openMcpReconnectPicker();
-      event.preventDefault?.();
-      return;
-    }
-
-    if (routeModalKey(event)) return;
-
-    if (cycleModeFromKey(event)) return;
-
-    if (event.ctrl && name === "p" && !picker && !isRunning()) {
-      openCommandPalette();
-      event.preventDefault?.();
-      return;
-    }
+    routeGlobalKeyEvent(event);
   }, {});
 
   function currentTranscriptMessages(extra?: DisplayMessage) {
@@ -1774,6 +1720,70 @@ function OpenTuiApp(props: {
     } catch {
       // Keep the agent loop alive even if a renderable is already gone.
     }
+  }
+
+  function beginAgentRun() {
+    const run = { id: ++nextRunId, abortController: new AbortController() };
+    activeRun = run;
+    setRunningState(true);
+    return run;
+  }
+
+  function finishAgentRun(run: { id: number; abortController: AbortController }) {
+    if (activeRun?.id === run.id) activeRun = undefined;
+    setRunningState(false);
+  }
+
+  function cancelActiveAgentRun() {
+    if (!activeRun || activeRun.abortController.signal.aborted) return false;
+    activeRun.abortController.abort(new AgentAbortError("Agent run cancelled by user."));
+    setNotice("Agent run cancelled");
+    redrawDock();
+    return true;
+  }
+
+  function preventGlobalKey(event: any) {
+    event.preventDefault?.();
+    event.stopPropagation?.();
+  }
+
+  function routeRunningCancel(name: string, event?: any) {
+    if (name !== "escape") return false;
+    if (!cancelActiveAgentRun()) return false;
+    if (event) preventGlobalKey(event);
+    return true;
+  }
+
+  function routeGlobalRawSequence(sequence: string) {
+    const name = keyNameFromSequence(sequence);
+    if (routeRunningCancel(name)) return true;
+    if (routeModalRawSequence(sequence)) return true;
+    if (cycleModeFromRawSequence(sequence)) return true;
+    return false;
+  }
+
+  function routeGlobalKeyEvent(event: any) {
+    const name = keyNameFromEvent(event);
+    if (event.ctrl && name === "c") {
+      void requestExit();
+      return true;
+    }
+    if (routeRunningCancel(name, event)) return true;
+    // Ctrl+Shift+M opens the MCP reconnect picker. Shift is required because
+    // bare Ctrl+M is Enter on most terminals (historical TTY mapping).
+    if (event.ctrl && event.shift && name === "m") {
+      openMcpReconnectPicker();
+      event.preventDefault?.();
+      return true;
+    }
+    if (routeModalKey(event)) return true;
+    if (cycleModeFromKey(event)) return true;
+    if (event.ctrl && name === "p" && !picker && !isRunning()) {
+      openCommandPalette();
+      event.preventDefault?.();
+      return true;
+    }
+    return false;
   }
 
   function transcriptOptions() {
@@ -3576,14 +3586,15 @@ function OpenTuiApp(props: {
     displayMessages = nextMessages;
     streamingDisplay = undefined;
     redrawTranscript(undefined, nextMessages);
-    setRunningState(true);
+    const run = beginAgentRun();
 
     let assistantContent = "";
     let assistantReasoning = "";
     const toolCalls: DisplayToolCall[] = [];
     let runError: string | undefined;
+    let runCancelled = false;
     try {
-      for await (const event of props.agent.run(actualInput, props.args.cwd)) {
+      for await (const event of props.agent.run(actualInput, props.args.cwd, { abortSignal: run.abortController.signal })) {
         if (event.type === "turn_start") {
           assistantContent = "";
           assistantReasoning = "";
@@ -3687,18 +3698,24 @@ function OpenTuiApp(props: {
         }
       }
     } catch (error: any) {
-      runError = error?.message || String(error);
+      runCancelled = error instanceof AgentAbortError || run.abortController.signal.aborted || error?.name === "AbortError";
+      if (!runCancelled) {
+        runError = error?.message || String(error);
+      }
     } finally {
       pendingApprovalRef = undefined;
       setPendingApproval(undefined);
       setApprovalOptionIdx(0);
-      setRunningState(false);
+      finishAgentRun(run);
       streamingDisplay = undefined;
       if (runError) {
         const errorMessage = runError;
         const nextMessages = [...displayMessages, { role: "error" as const, content: errorMessage }];
         displayMessages = nextMessages;
         redrawTranscript(undefined, nextMessages);
+      } else if (runCancelled) {
+        if (!notice()) setNotice("Agent run cancelled");
+        redrawTranscript();
       } else {
         redrawTranscript();
       }
@@ -3710,6 +3727,7 @@ function OpenTuiApp(props: {
   }
 
   function promptUiKeyDown(event: any) {
+    if (routeRunningCancel(keyNameFromEvent(event), event)) return true;
     const modalOwner = activeModalKeyOwner();
     if (modalOwner) {
       if (routeModalKey(event) || shouldModalSwallowUnhandledKey(modalOwner)) {
