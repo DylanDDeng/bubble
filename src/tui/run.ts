@@ -108,6 +108,7 @@ type CopyToastState = { title?: string; message: string; variant: CopyToastVaria
 type ModalKeyOwner = "approval" | "question" | "provider" | "picker";
 
 const treeSitterClient = getTreeSitterClient();
+const PROMPT_HISTORY_LIMIT = 100;
 
 const PROVIDER_PRIORITY = new Map<string, number>([
   ["openai", 0],
@@ -423,6 +424,12 @@ function OpenTuiApp(props: {
   const homeTip = HOME_TIPS[Math.floor(Math.random() * HOME_TIPS.length)] ?? HOME_TIPS[0]!;
   const homePrompt = HOME_PROMPTS[Math.floor(Math.random() * HOME_PROMPTS.length)] ?? HOME_PROMPTS[0]!;
   let promptText = "";
+  let promptHistory = displayMessages
+    .filter((message) => message.role === "user" && message.content !== "(multimedia)")
+    .map((message) => message.content)
+    .slice(-PROMPT_HISTORY_LIMIT);
+  let promptHistoryIndex: number | undefined;
+  let promptHistoryDraft = "";
   const [isRunning, setIsRunning] = createSignal(false);
   const [showThinking, setShowThinking] = createSignal(true);
   let streamingDisplay: DisplayMessage | undefined;
@@ -558,6 +565,77 @@ function OpenTuiApp(props: {
     isHomeSurfaceActive()
       ? homePromptRef ?? sessionPromptRef
       : sessionPromptRef ?? homePromptRef;
+
+  function setPromptText(value: string) {
+    promptText = value;
+    const prompt = activePrompt();
+    if (!prompt) return;
+    prompt.setText(value);
+    prompt.cursorOffset = value.length;
+    prompt.focus();
+  }
+
+  function resetPromptHistoryBrowse() {
+    promptHistoryIndex = undefined;
+    promptHistoryDraft = "";
+  }
+
+  function rememberPromptHistory(input: string) {
+    const value = input.trimEnd();
+    if (!value.trim()) return;
+    promptHistory.push(value);
+    if (promptHistory.length > PROMPT_HISTORY_LIMIT) {
+      promptHistory = promptHistory.slice(-PROMPT_HISTORY_LIMIT);
+    }
+    resetPromptHistoryBrowse();
+  }
+
+  function canBrowsePromptHistory(direction: "up" | "down") {
+    if (promptHistoryIndex !== undefined) return true;
+    const prompt = activePrompt();
+    const text = prompt?.plainText ?? promptText;
+    if (!text) return true;
+    const cursor = prompt?.logicalCursor;
+    if (!cursor) return true;
+    if (direction === "up") return cursor.row === 0;
+    return cursor.row >= text.split("\n").length - 1;
+  }
+
+  function browsePromptHistory(direction: "up" | "down") {
+    if (!promptHistory.length) return false;
+    if (!canBrowsePromptHistory(direction)) return false;
+
+    if (direction === "up") {
+      if (promptHistoryIndex === undefined) {
+        promptHistoryDraft = readPromptText() || promptText;
+        promptHistoryIndex = promptHistory.length - 1;
+      } else {
+        promptHistoryIndex = Math.max(0, promptHistoryIndex - 1);
+      }
+      setPromptText(promptHistory[promptHistoryIndex] ?? "");
+      return true;
+    }
+
+    if (promptHistoryIndex === undefined) return false;
+    if (promptHistoryIndex < promptHistory.length - 1) {
+      promptHistoryIndex += 1;
+      setPromptText(promptHistory[promptHistoryIndex] ?? "");
+    } else {
+      setPromptText(promptHistoryDraft);
+      resetPromptHistoryBrowse();
+    }
+    return true;
+  }
+
+  function handlePromptHistoryKey(event: any) {
+    if (event.shift || event.ctrl || event.meta || event.super || event.hyper) return false;
+    const name = keyNameFromEvent(event);
+    if (name !== "up" && name !== "down") return false;
+    if (!browsePromptHistory(name)) return false;
+    event.preventDefault?.();
+    event.stopPropagation?.();
+    return true;
+  }
 
   function blurInputsForModal() {
     homePromptRef?.blur();
@@ -2645,6 +2723,8 @@ function OpenTuiApp(props: {
   const clearMessages = () => {
     displayMessages = [];
     streamingDisplay = undefined;
+    promptHistory = [];
+    resetPromptHistoryBrowse();
     redrawTranscript(undefined, []);
   };
 
@@ -2673,6 +2753,7 @@ function OpenTuiApp(props: {
     if (!input.trim()) return;
     activePrompt()?.clear();
     promptText = "";
+    resetPromptHistoryBrowse();
     if (picker?.kind === "key") {
       const providerId = picker.providerId;
       const after = picker.after;
@@ -2712,6 +2793,12 @@ function OpenTuiApp(props: {
   function onPromptContentChange(value?: unknown) {
     const nextValue = typeof value === "string" ? value : readPromptText();
     promptText = nextValue;
+    if (
+      promptHistoryIndex !== undefined
+      && nextValue !== (promptHistory[promptHistoryIndex] ?? "")
+    ) {
+      resetPromptHistoryBrowse();
+    }
     if (providerDialog) return;
     if (picker?.kind === "key") return;
     if (picker?.kind === "select" && picker.mode !== "slash" && picker.mode !== "file") {
@@ -3403,6 +3490,7 @@ function OpenTuiApp(props: {
       return;
     }
 
+    rememberPromptHistory(displayInput);
     const nextMessages = [...displayMessages, { role: "user" as const, content: displayInput }];
     displayMessages = nextMessages;
     streamingDisplay = undefined;
@@ -3549,6 +3637,7 @@ function OpenTuiApp(props: {
       }
     }
     if (cycleModeFromKey(event)) return true;
+    if (handlePromptHistoryKey(event)) return true;
     return false;
   }
 
