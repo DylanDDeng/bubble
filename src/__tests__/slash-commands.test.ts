@@ -44,7 +44,7 @@ tags:
 Read the repo carefully before proposing changes.
 `,
   );
-  return new SkillRegistry({ cwd, bubbleHome: join(root, "home") });
+  return new SkillRegistry({ cwd, bubbleHome: join(root, "home"), agentsHome: join(root, "agents") });
 }
 
 describe("slash commands", () => {
@@ -176,15 +176,15 @@ describe("slash commands", () => {
     }
   });
 
-  it("lists available skills", async () => {
+  it("opens the skill picker from /skills", async () => {
     const ctx = createContext({
       skillRegistry: createSkillRegistryFixture(),
     });
 
     const result = await slashRegistry.execute("/skills", ctx);
     expect(result.handled).toBe(true);
-    expect(result.result).toContain("Available skills:");
-    expect(result.result).toContain("repo-review");
+    expect(result.result).toBeUndefined();
+    expect(ctx.openPicker).toHaveBeenCalledWith("skill");
   });
 
   it("loads a skill explicitly via /skill", async () => {

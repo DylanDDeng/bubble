@@ -270,32 +270,9 @@ function parseKeyArgs(args: string, ctx: Parameters<SlashCommand["handler"]>[1])
 const builtinSlashCommandEntries: SlashCommand[] = [
   {
     name: "skills",
-    description: "List available skills and any skill diagnostics",
+    description: "Open the searchable skills picker",
     async handler(args, ctx) {
-      const skills = ctx.skillRegistry.summaries();
-      const diagnostics = ctx.skillRegistry.getDiagnostics();
-      const lines: string[] = [];
-
-      if (skills.length === 0) {
-        lines.push("No skills available.");
-      } else {
-        lines.push("Available skills:");
-        for (const skill of skills) {
-          const tagSuffix = skill.tags && skill.tags.length > 0 ? ` [tags: ${skill.tags.join(", ")}]` : "";
-          lines.push(`- ${skill.name}: ${skill.description}${tagSuffix}`);
-        }
-      }
-
-      if (diagnostics.length > 0) {
-        lines.push("", "Skill diagnostics:");
-        for (const diagnostic of diagnostics) {
-          const prefix = diagnostic.level === "error" ? "ERROR" : "WARN";
-          const target = diagnostic.skillName ?? diagnostic.filePath ?? "skills";
-          lines.push(`- ${prefix} ${target}: ${diagnostic.message}`);
-        }
-      }
-
-      return lines.join("\n");
+      ctx.openPicker("skill");
     },
   },
   {

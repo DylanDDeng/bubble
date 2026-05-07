@@ -218,19 +218,20 @@ type SidebarUsageState = {
   reasoningTokens: number;
   turns: number;
 };
-type PickerMode = "model" | "key" | "provider" | "provider-add" | "provider-auth" | "login" | "logout" | "slash" | "file" | "mcp-reconnect";
+type PickerMode = "model" | "key" | "provider" | "provider-add" | "provider-auth" | "login" | "logout" | "skill" | "slash" | "file" | "mcp-reconnect";
 type PickerItem = {
   label: string;
   detail?: string;
   value: string;
   command: string;
+  action?: "insert-skill";
   next?: "auth" | "key";
   after?: { mode: "model"; providerId: string };
   category?: string;
   gutter?: string;
   footer?: string;
 };
-type ProviderDialogStep = "providers" | "auth" | "key" | "models";
+type ProviderDialogStep = "providers" | "auth" | "key" | "models" | "skills";
 type ProviderDialogState = {
   step: ProviderDialogStep;
   providerId?: string;
@@ -1953,6 +1954,7 @@ function OpenTuiApp(props: {
   function providerDialogItemsFor(step: ProviderDialogStep, providerId?: string) {
     if (step === "providers") return buildProviderConnectItems();
     if (step === "auth") return providerId ? buildPickerItems("provider-auth", providerId) : [];
+    if (step === "skills") return buildSkillItems();
     if (step === "models") {
       const modelItems = buildPickerItems("model", providerId);
       if (modelItems.length || providerId) return modelItems;
@@ -2097,17 +2099,19 @@ function OpenTuiApp(props: {
           gutter.fg = active ? activeText : providerDialogGutterColor(row.item.gutter ?? (isCurrentModelItem(row.item) ? "●" : undefined));
         }
         if (label) {
-          label.content = truncate(row.item.label, 37);
+          label.content = truncate(row.item.label, providerDialogLabelWidth(state));
           label.fg = active ? activeText : isCurrentModelItem(row.item) ? theme.primary : theme.text;
         }
         if (detail) {
           const detailText = state.query.trim() && state.step === "models"
             ? row.item.category ?? row.item.detail ?? ""
             : row.item.detail ?? "";
-          detail.content = truncate(detailText, providerDialogDetailWidth());
+          detail.width = providerDialogDetailWidth(state);
+          detail.content = truncate(detailText, providerDialogDetailWidth(state));
           detail.fg = active ? activeText : theme.textMuted;
         }
         if (footer) {
+          footer.width = providerDialogFooterWidth(state);
           footer.content = row.item.footer ?? "";
           footer.fg = active ? activeText : theme.textMuted;
         }
@@ -2122,6 +2126,7 @@ function OpenTuiApp(props: {
 
   function providerDialogTitleFor(state: ProviderDialogState) {
     if (state.step === "providers") return "Connect a provider";
+    if (state.step === "skills") return "Select skill";
     const provider = providerDisplayName(state.providerId);
     if (state.step === "auth") return `${provider} auth method`;
     if (state.step === "key") return `${provider} API key`;
@@ -2137,6 +2142,7 @@ function OpenTuiApp(props: {
       const connect = state.providerId ? "" : " · ctrl+o providers";
       return `↑/↓ move · enter select · esc close${connect}${count}`;
     }
+    if (state.step === "skills") return `↑/↓ move · enter insert · esc close${count}`;
     const escLabel = state.step === "providers" ? "esc close" : "esc back";
     return `↑/↓ move · enter select · ${escLabel}${count}`;
   }
@@ -2148,8 +2154,16 @@ function OpenTuiApp(props: {
     return theme.textMuted;
   }
 
-  function providerDialogDetailWidth() {
-    return 16;
+  function providerDialogLabelWidth(state: ProviderDialogState) {
+    return state.step === "skills" ? 22 : 37;
+  }
+
+  function providerDialogDetailWidth(state: ProviderDialogState) {
+    return state.step === "skills" ? 26 : 16;
+  }
+
+  function providerDialogFooterWidth(state: ProviderDialogState) {
+    return state.step === "skills" ? 9 : 8;
   }
 
   function isCurrentModelItem(item: PickerItem) {
@@ -2210,7 +2224,7 @@ function OpenTuiApp(props: {
         openProviderDialog("providers");
       } else if (state.step === "key") {
         openProviderDialog(state.providerId && registry.supportsOAuth(state.providerId) ? "auth" : "providers", state.providerId);
-      } else if (state.step === "models") {
+      } else if (state.step === "models" || state.step === "skills") {
         closeProviderDialog();
       } else {
         closeProviderDialog();
@@ -2341,6 +2355,12 @@ function OpenTuiApp(props: {
       }
       closeProviderDialog();
       await executeSlash(item.command);
+      return;
+    }
+
+    if (state.step === "skills") {
+      closeProviderDialog();
+      insertSkillPrompt(item.value);
     }
   }
 
@@ -2775,9 +2795,14 @@ function OpenTuiApp(props: {
     }
     if (input.startsWith("/") && !/\s/.test(input)) {
       const query = input.slice(1).toLowerCase();
-      const matches = slashRegistry.list().filter((command) => command.name.toLowerCase().startsWith(query));
+      const matches = slashCandidates().filter((command) => command.name.toLowerCase().startsWith(query));
       if (matches.length === 1) {
-        await executeSlash(`/${matches[0]!.name}`);
+        const match = matches[0]!;
+        if (match.source === "skill") {
+          insertSkillPrompt(match.name);
+        } else {
+          await executeSlash(`/${match.name}`);
+        }
         return;
       }
       if (matches.length > 1) {
@@ -2920,25 +2945,40 @@ function OpenTuiApp(props: {
     sourceLabel?: string;
   };
 
-  function buildSlashItems(query = ""): PickerItem[] {
-    const normalizedQuery = query.trim().toLowerCase();
-    const commands: SlashCandidate[] = [
+  function slashCandidates(): SlashCandidate[] {
+    const skillCommands: SlashCandidate[] = skills.summaries().map((skill) => ({
+      name: skill.name,
+      description: skill.description,
+      source: "skill" as const,
+      sourceLabel: skill.source,
+    }));
+    return [
       ...LOCAL_SLASH_COMMANDS.map((c) => ({ ...c, source: "builtin" as const })),
+      ...skillCommands,
       ...slashRegistry.list(),
     ];
+  }
+
+  function buildSlashItems(query = ""): PickerItem[] {
+    const normalizedQuery = query.trim().toLowerCase();
+    const commands = slashCandidates();
     const matches = slashCommandMatches(commands, normalizedQuery);
     return matches.map(({ command }): PickerItem => {
       const isMcp = command.source === "mcp";
-      const badge = isMcp ? " :mcp" : "";
+      const isSkill = command.source === "skill";
+      const badge = isMcp ? " :mcp" : isSkill ? " :skill" : "";
       const label = `/${command.name}${badge}`;
       const detail = isMcp && command.sourceLabel
         ? `[${command.sourceLabel}] ${command.description}`
+        : isSkill && command.sourceLabel
+          ? `[${command.sourceLabel}] ${command.description}`
         : command.description;
       return {
         label,
         detail,
         value: command.name,
         command: `/${command.name}`,
+        action: isSkill ? "insert-skill" : undefined,
       };
     });
   }
@@ -3070,6 +3110,13 @@ function OpenTuiApp(props: {
     closePicker();
   }
 
+  function insertSkillPrompt(skillName: string) {
+    closePicker();
+    resetPromptHistoryBrowse();
+    setPromptText(`/${skillName} `);
+    redrawDock();
+  }
+
   async function handleInput(input: string) {
     setNotice("");
     if (input.startsWith("/")) {
@@ -3161,6 +3208,10 @@ function OpenTuiApp(props: {
       openProviderDialog(kind === "provider-auth" ? "auth" : "providers", providerId);
       return;
     }
+    if (kind === "skill") {
+      openProviderDialog("skills");
+      return;
+    }
     if (kind === "key") {
       picker = {
         kind: "key",
@@ -3200,6 +3251,10 @@ function OpenTuiApp(props: {
   async function runPickerItem(item: PickerItem) {
     if (picker?.kind === "select" && picker.mode === "file") {
       applyFileSuggestion(item.value);
+      return;
+    }
+    if (item.action === "insert-skill" || (picker?.kind === "select" && picker.mode === "skill")) {
+      insertSkillPrompt(item.value);
       return;
     }
     if (picker?.kind === "select" && picker.mode === "slash") {
@@ -3282,6 +3337,7 @@ function OpenTuiApp(props: {
   function buildPickerItems(kind: Exclude<PickerMode, "key">, providerId?: string): PickerItem[] {
     if (kind === "slash") return [];
     if (kind === "mcp-reconnect") return buildMcpReconnectItems();
+    if (kind === "skill") return buildSkillItems();
     if (kind === "model") {
       const items: PickerItem[] = [];
       for (const provider of registry.getEnabled()) {
@@ -3396,6 +3452,26 @@ function OpenTuiApp(props: {
         value: provider.id,
         command: `/logout ${provider.id}`,
       }));
+  }
+
+  function buildSkillItems(): PickerItem[] {
+    return skills.summaries().map((skill) => {
+      const tags = skill.tags && skill.tags.length > 0 ? ` · ${skill.tags.join(", ")}` : "";
+      const category = skill.source === "project"
+        ? "Project skills"
+        : skill.source === "configured"
+          ? "Configured skills"
+          : "User skills";
+      return {
+        label: skill.name,
+        detail: `${skill.description}${tags}`,
+        value: skill.name,
+        command: `/${skill.name}`,
+        action: "insert-skill",
+        category,
+        footer: skill.source,
+      };
+    });
   }
 
   function buildProviderConnectItems(): PickerItem[] {
@@ -5935,6 +6011,8 @@ function pickerTitle(kind: Exclude<PickerMode, "key">, providerId?: string) {
       return "Select Login Provider";
     case "logout":
       return "Select Logout Provider";
+    case "skill":
+      return "Skills";
     case "slash":
       return "Commands";
     case "file":
