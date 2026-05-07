@@ -101,10 +101,11 @@ export interface RunTuiOptions {
 }
 
 type RawModeCycleHandler = (sequence: string) => boolean;
-type RawQuestionHandler = (sequence: string) => boolean;
+type RawModalKeyHandler = (sequence: string) => boolean;
 type RawMouseSelectionHandler = (event: { type: string; button: number; x: number; y: number }) => void;
 type CopyToastVariant = "info" | "success" | "warning" | "error";
 type CopyToastState = { title?: string; message: string; variant: CopyToastVariant };
+type ModalKeyOwner = "approval" | "question" | "provider" | "picker";
 
 const treeSitterClient = getTreeSitterClient();
 
@@ -316,7 +317,7 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
     let syntaxStyle: SyntaxStyle | undefined;
     let subtleSyntaxStyle: SyntaxStyle | undefined;
     let rawModeCycleHandler: RawModeCycleHandler | undefined;
-    let rawQuestionHandler: RawQuestionHandler | undefined;
+    let rawModalKeyHandler: RawModalKeyHandler | undefined;
     let rawMouseSelectionHandler: RawMouseSelectionHandler | undefined;
     const exit = () => {
       try {
@@ -339,7 +340,7 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
         exitOnCtrlC: false,
         useKittyKeyboard: {},
         prependInputHandlers: [
-          (sequence: string) => rawQuestionHandler?.(sequence) || rawModeCycleHandler?.(sequence) || false,
+          (sequence: string) => rawModalKeyHandler?.(sequence) || rawModeCycleHandler?.(sequence) || false,
         ],
         autoFocus: true,
         useMouse: true,
@@ -349,8 +350,8 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
       const setRawModeCycleHandler = (handler: RawModeCycleHandler | undefined) => {
         rawModeCycleHandler = handler;
       };
-      const setRawQuestionHandler = (handler: RawQuestionHandler | undefined) => {
-        rawQuestionHandler = handler;
+      const setRawModalKeyHandler = (handler: RawModalKeyHandler | undefined) => {
+        rawModalKeyHandler = handler;
       };
       const setRawMouseSelectionHandler = (handler: RawMouseSelectionHandler | undefined) => {
         rawMouseSelectionHandler = handler;
@@ -363,7 +364,7 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
           return handled;
         };
       }
-      await render(() => h(OpenTuiApp, { agent, args, options, onExit: exit, syntaxStyle, subtleSyntaxStyle, setRawModeCycleHandler, setRawQuestionHandler, setRawMouseSelectionHandler }), renderer);
+      await render(() => h(OpenTuiApp, { agent, args, options, onExit: exit, syntaxStyle, subtleSyntaxStyle, setRawModeCycleHandler, setRawModalKeyHandler, setRawMouseSelectionHandler }), renderer);
     } catch (error) {
       syntaxStyle?.destroy();
       subtleSyntaxStyle?.destroy();
@@ -398,7 +399,7 @@ function OpenTuiApp(props: {
   syntaxStyle: SyntaxStyle;
   subtleSyntaxStyle: SyntaxStyle;
   setRawModeCycleHandler?: (handler: RawModeCycleHandler | undefined) => void;
-  setRawQuestionHandler?: (handler: RawQuestionHandler | undefined) => void;
+  setRawModalKeyHandler?: (handler: RawModalKeyHandler | undefined) => void;
   setRawMouseSelectionHandler?: (handler: RawMouseSelectionHandler | undefined) => void;
 }) {
   const renderer = useRenderer();
@@ -555,6 +556,25 @@ function OpenTuiApp(props: {
     isHomeSurfaceActive()
       ? homePromptRef ?? sessionPromptRef
       : sessionPromptRef ?? homePromptRef;
+
+  function blurInputsForModal() {
+    homePromptRef?.blur();
+    sessionPromptRef?.blur();
+    questionCustomInput?.blur();
+    providerDialogInput?.blur();
+  }
+
+  function focusApprovalPanel() {
+    setTimeout(() => {
+      if (pendingApproval() || pendingPlan()) approvalRoot?.focus();
+    }, 0);
+  }
+
+  function restorePromptAfterModal() {
+    setTimeout(() => {
+      if (!activeModalKeyOwner()) activePrompt()?.focus();
+    }, 0);
+  }
 
   const activeComposerShell = () =>
     isHomeSurfaceActive()
@@ -862,8 +882,6 @@ function OpenTuiApp(props: {
   };
 
   const cycleModeFromRawSequence = (sequence: string) => {
-    const rawKey = keyNameFromSequence(sequence);
-    if (rawKey && handleApprovalNavigation(rawKey)) return true;
     if (!isModeCycleSequence(sequence)) return false;
     return cycleMode();
   };
@@ -884,6 +902,10 @@ function OpenTuiApp(props: {
     if (sequence === "\x1b[C" || /^\x1b\[[0-9;]*C$/.test(sequence)) return "right";
     if (sequence === "\x1b[A" || /^\x1b\[[0-9;]*A$/.test(sequence)) return "up";
     if (sequence === "\x1b[B" || /^\x1b\[[0-9;]*B$/.test(sequence)) return "down";
+    if (sequence === "\x1bOD") return "left";
+    if (sequence === "\x1bOC") return "right";
+    if (sequence === "\x1bOA") return "up";
+    if (sequence === "\x1bOB") return "down";
     if (sequence === "\r" || sequence === "\n") return "enter";
     if (sequence === "\x1b") return "escape";
     return "";
@@ -891,16 +913,17 @@ function OpenTuiApp(props: {
 
   const keyNameFromEvent = (event: any) => {
     const rawName = String(event.name || event.key || event.input || "").toLowerCase();
-    if (rawName === "arrowleft" || rawName === "left_arrow") return "left";
-    if (rawName === "arrowright" || rawName === "right_arrow") return "right";
-    if (rawName === "arrowup" || rawName === "up_arrow") return "up";
-    if (rawName === "arrowdown" || rawName === "down_arrow") return "down";
-    if (rawName === "return") return "enter";
-    if (rawName === "esc") return "escape";
+    if (["arrowleft", "left_arrow", "leftarrow", "cursorleft", "left"].includes(rawName)) return "left";
+    if (["arrowright", "right_arrow", "rightarrow", "cursorright", "right"].includes(rawName)) return "right";
+    if (["arrowup", "up_arrow", "uparrow", "cursorup", "up"].includes(rawName)) return "up";
+    if (["arrowdown", "down_arrow", "downarrow", "cursordown", "down"].includes(rawName)) return "down";
+    if (rawName === "return" || rawName === "enter") return "enter";
+    if (rawName === "esc" || rawName === "escape") return "escape";
+    if (rawName === "tab") return "tab";
     return rawName || keyNameFromSequence(event.raw || event.sequence);
   };
 
-  const questionKeyNameFromSequence = (sequence?: string) => {
+  const modalKeyNameFromSequence = (sequence?: string) => {
     const name = keyNameFromSequence(sequence);
     if (name) return name;
     if (sequence === "\t" || sequence === "\x1b[Z") return "tab";
@@ -918,6 +941,8 @@ function OpenTuiApp(props: {
   const rejectPendingPlan = (plan: { resolve: (decision: PlanDecision) => void }) => {
     setPendingPlan(undefined);
     setApprovalOptionIdx(0);
+    forceApprovalUI();
+    restorePromptAfterModal();
     plan.resolve({ action: "reject", reason: "Rejected by user." });
   };
 
@@ -925,6 +950,8 @@ function OpenTuiApp(props: {
     const sel = approvalOptionIdx();
     setPendingPlan(undefined);
     setApprovalOptionIdx(0);
+    forceApprovalUI();
+    restorePromptAfterModal();
     if (sel === 0) {
       plan.resolve({ action: "approve", plan: plan.plan });
     } else {
@@ -977,6 +1004,7 @@ function OpenTuiApp(props: {
     setPendingApproval(undefined);
     setApprovalOptionIdx(0);
     forceApprovalUI();
+    restorePromptAfterModal();
     if (choice === "Allow once") {
       approval.resolve({ action: "approve" });
       return true;
@@ -990,7 +1018,7 @@ function OpenTuiApp(props: {
     return true;
   };
 
-  const handleApprovalNavigation = (name: string, preventOnly = false) => {
+  const handleApprovalNavigation = (name: string, preventOnly = false, shift = false) => {
     const approval = pendingApproval();
     if (approval) {
       const opts = approvalOptionsFor(approval.request);
@@ -1000,6 +1028,10 @@ function OpenTuiApp(props: {
       }
       if (name === "right" || name === "down" || name === "l") {
         moveApprovalOption(1, opts.length);
+        return true;
+      }
+      if (name === "tab") {
+        moveApprovalOption(shift ? -1 : 1, opts.length);
         return true;
       }
       if (name === "enter") {
@@ -1012,6 +1044,7 @@ function OpenTuiApp(props: {
           setPendingApproval(undefined);
           setApprovalOptionIdx(0);
           forceApprovalUI();
+          restorePromptAfterModal();
           approval.resolve({ action: "reject", feedback: "Rejected by user." });
         }
         return true;
@@ -1028,6 +1061,10 @@ function OpenTuiApp(props: {
         moveApprovalOption(1, PLAN_OPTIONS.length);
         return true;
       }
+      if (name === "tab") {
+        moveApprovalOption(shift ? -1 : 1, PLAN_OPTIONS.length);
+        return true;
+      }
       if (name === "enter") {
         if (!preventOnly) resolvePendingPlanSelection(plan);
         return true;
@@ -1042,7 +1079,7 @@ function OpenTuiApp(props: {
 
   const handleApprovalKey = (event: any) => {
     const name = keyNameFromEvent(event);
-    if (handleApprovalNavigation(name)) {
+    if (handleApprovalNavigation(name, false, !!event.shift)) {
       event.preventDefault?.();
       event.stopPropagation?.();
       return true;
@@ -1055,6 +1092,7 @@ function OpenTuiApp(props: {
     const plan = pendingPlan();
     syncPromptSurfaces();
     const prompt = activePrompt();
+    if (approval || plan) blurInputsForModal();
     if (prompt) {
       if (approval) {
         const options = approvalOptionsFor(approval.request);
@@ -1069,6 +1107,7 @@ function OpenTuiApp(props: {
     }
     redrawDock();
     redrawApprovalPanel();
+    if (approval || plan) focusApprovalPanel();
     redrawTranscript();
   };
 
@@ -1374,17 +1413,44 @@ function OpenTuiApp(props: {
     return false;
   }
 
-  function handleQuestionRawSequence(sequence: string) {
-    const state = pendingQuestion();
-    if (!state || pendingApproval()) return false;
-    const name = questionKeyNameFromSequence(sequence);
-    if (!name) return false;
+  function activeModalKeyOwner(): ModalKeyOwner | undefined {
+    if (pendingApproval() || pendingPlan()) return "approval";
+    if (pendingQuestion()) return "question";
+    if (providerDialog) return "provider";
+    if (picker) return "picker";
+    return undefined;
+  }
 
-    if (state.editing && !isQuestionConfirmTab(state) && name !== "escape" && name !== "enter") {
-      return false;
+  function routeModalKey(event: any): boolean {
+    const owner = activeModalKeyOwner();
+    if (!owner) return false;
+    switch (owner) {
+      case "approval":
+        return handleApprovalKey(event);
+      case "question":
+        return handleQuestionKey(event);
+      case "provider":
+        return handleProviderDialogKey(event);
+      case "picker":
+        return handlePickerKey(event);
     }
+  }
 
-    return handleQuestionKey({
+  function shouldModalSwallowUnhandledKey(owner: ModalKeyOwner) {
+    if (owner === "approval") return true;
+    if (owner === "question") {
+      const state = pendingQuestion();
+      return !state?.editing || isQuestionConfirmTab(state);
+    }
+    return false;
+  }
+
+  function routeModalRawSequence(sequence: string) {
+    const owner = activeModalKeyOwner();
+    if (!owner) return false;
+    const name = modalKeyNameFromSequence(sequence);
+    if (!name) return false;
+    const handled = routeModalKey({
       name,
       key: name,
       input: sequence,
@@ -1394,6 +1460,7 @@ function OpenTuiApp(props: {
       preventDefault() {},
       stopPropagation() {},
     });
+    return handled || shouldModalSwallowUnhandledKey(owner);
   }
 
   const installInteractiveHandlers = () => {
@@ -1401,6 +1468,7 @@ function OpenTuiApp(props: {
       props.options.planHandlerRef.current = (plan: string) =>
         new Promise<PlanDecision>((resolve) => {
           setPendingPlan({ plan, resolve });
+          blurInputsForModal();
           forceApprovalUI();
         });
     }
@@ -1411,6 +1479,7 @@ function OpenTuiApp(props: {
           picker = undefined;
           providerDialog = undefined;
           setPendingApproval({ request, resolve });
+          blurInputsForModal();
           forceApprovalUI();
         });
     }
@@ -1448,7 +1517,7 @@ function OpenTuiApp(props: {
       syncFirstPendingQuestion();
     }
     props.setRawModeCycleHandler?.(cycleModeFromRawSequence);
-    props.setRawQuestionHandler?.(handleQuestionRawSequence);
+    props.setRawModalKeyHandler?.(routeModalRawSequence);
     const unsubscribeLsp = lspService.onStatusChange(() => {
       syncSidebarLsp();
     });
@@ -1463,7 +1532,7 @@ function OpenTuiApp(props: {
 
   onCleanup(() => {
     props.setRawModeCycleHandler?.(undefined);
-    props.setRawQuestionHandler?.(undefined);
+    props.setRawModalKeyHandler?.(undefined);
     if (sidebarLspSyncTimer) clearInterval(sidebarLspSyncTimer);
     for (const timer of questionSyncTimers) clearTimeout(timer);
     questionSyncTimers.clear();
@@ -1516,42 +1585,7 @@ function OpenTuiApp(props: {
       return;
     }
 
-    if (handleApprovalKey(event)) return;
-    if (handleQuestionKey(event)) return;
-    if (handleProviderDialogKey(event)) return;
-    if (handlePickerKey(event)) return;
-
-    const plan = pendingPlan();
-    if (plan) {
-      if (name === "left" || name === "right" || name === "h" || name === "l") {
-        const opts = PLAN_OPTIONS;
-        const idx = approvalOptionIdx();
-        const next = name === "left" || name === "h"
-          ? (idx - 1 + opts.length) % opts.length
-          : (idx + 1) % opts.length;
-        setApprovalOptionIdx(next);
-        forceApprovalUI();
-        event.preventDefault?.();
-        return;
-      }
-      if (name === "return" || name === "enter") {
-        const sel = approvalOptionIdx();
-        setPendingPlan(undefined);
-        setApprovalOptionIdx(0);
-        if (sel === 0) {
-          plan.resolve({ action: "approve", plan: plan.plan });
-        } else {
-          plan.resolve({ action: "reject", reason: "Rejected by user." });
-        }
-      }
-      if (name === "escape") {
-        setPendingPlan(undefined);
-        setApprovalOptionIdx(0);
-        plan.resolve({ action: "reject", reason: "Rejected by user." });
-      }
-      event.preventDefault?.();
-      return;
-    }
+    if (routeModalKey(event)) return;
 
     if (cycleModeFromKey(event)) return;
 
@@ -2583,9 +2617,7 @@ function OpenTuiApp(props: {
     }
     const plan = pendingPlan();
     if (plan) {
-      setPendingPlan(undefined);
-      setApprovalOptionIdx(0);
-      plan.resolve({ action: "approve", plan: plan.plan });
+      resolvePendingPlanSelection(plan);
       return;
     }
     if (isRunning()) return;
@@ -3466,19 +3498,13 @@ function OpenTuiApp(props: {
   }
 
   function promptUiKeyDown(event: any) {
-    if (handleApprovalKey(event)) return true;
-    if (handleQuestionKey(event)) return true;
-    const name = String(event.name || "").toLowerCase();
-    const plan = pendingPlan();
-    if (plan && (name === "left" || name === "right" || name === "h" || name === "l")) {
-      const idx = approvalOptionIdx();
-      const next = name === "left" || name === "h"
-        ? (idx - 1 + PLAN_OPTIONS.length) % PLAN_OPTIONS.length
-        : (idx + 1) % PLAN_OPTIONS.length;
-      setApprovalOptionIdx(next);
-      forceApprovalUI();
-      event.preventDefault?.();
-      return true;
+    const modalOwner = activeModalKeyOwner();
+    if (modalOwner) {
+      if (routeModalKey(event) || shouldModalSwallowUnhandledKey(modalOwner)) {
+        event.preventDefault?.();
+        event.stopPropagation?.();
+        return true;
+      }
     }
     if (cycleModeFromKey(event)) return true;
     return false;
@@ -4381,6 +4407,8 @@ function OpenTuiApp(props: {
       h("box", {
         ref: (ref: BoxRenderable) => { approvalRoot = ref; },
         visible: !!approval,
+        focusable: true,
+        onKeyDown: handleApprovalKey,
         position: "absolute",
         left: 2,
         right: 2,
@@ -4514,7 +4542,7 @@ function OpenTuiApp(props: {
         ),
       ),
       h("box", { flexDirection: "row", gap: 2, flexShrink: 0 },
-        h("text", { fg: theme.text }, "⇆ ", h("span", { fg: theme.textMuted }, "select")),
+        h("text", { fg: theme.text }, "⇆/tab ", h("span", { fg: theme.textMuted }, "select")),
         h("text", { fg: theme.text }, "enter ", h("span", { fg: theme.textMuted }, "confirm")),
         h("text", { fg: theme.text }, "esc ", h("span", { fg: theme.textMuted }, "reject")),
       ),
