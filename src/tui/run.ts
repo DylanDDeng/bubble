@@ -210,6 +210,7 @@ const HOME_TIPS = [
 type Child = any;
 type PromptScannerSync = (running: boolean) => void;
 type SidebarUsageState = {
+  contextTokens: number;
   promptTokens: number;
   completionTokens: number;
   promptCacheHitTokens: number;
@@ -448,6 +449,7 @@ function OpenTuiApp(props: {
   const lspService = props.options.lspService ?? getLspService(props.args.cwd, props.options.settingsManager?.getMerged().lsp);
   const [lspStatuses, setLspStatuses] = createSignal<LspStatus[]>(lspService.status());
   const [sidebarUsage, setSidebarUsage] = createSignal<SidebarUsageState>({
+    contextTokens: 0,
     promptTokens: 0,
     completionTokens: 0,
     promptCacheHitTokens: 0,
@@ -804,10 +806,13 @@ function OpenTuiApp(props: {
     setSidebarText(sidebarTokenText, `${formatCompactNumber(context.tokens)} tokens`);
     setSidebarText(sidebarPercentText, `${context.percent}% used`);
     if (sidebarGaugeText) {
-      sidebarGaugeText.content = buildColoredGauge(context.percent, 30);
+      sidebarGaugeText.content = buildContextGauge(context.percent, 30);
+      sidebarGaugeText.requestRender();
     }
     if (sidebarGaugeLabelText) {
-      sidebarGaugeLabelText.content = buildGaugeLabel(context.percent);
+      sidebarGaugeLabelText.content = buildGaugeLabel(context.percent, context.remainingTokens);
+      sidebarGaugeLabelText.fg = context.percent >= 80 ? theme.error : context.percent >= 60 ? theme.warning : theme.success;
+      sidebarGaugeLabelText.requestRender();
     }
     setSidebarText(sidebarUsageText, context.turns > 0
       ? `${formatCompactNumber(context.promptTokens)} in · ${formatCompactNumber(context.completionTokens)} out`
@@ -3575,6 +3580,7 @@ function OpenTuiApp(props: {
         } else if (event.type === "turn_end") {
           if (event.usage) {
             setSidebarUsage((current) => ({
+              contextTokens: event.usage!.promptTokens || current.contextTokens,
               promptTokens: current.promptTokens + event.usage!.promptTokens,
               completionTokens: current.completionTokens + event.usage!.completionTokens,
               promptCacheHitTokens: current.promptCacheHitTokens + (event.usage!.promptCacheHitTokens ?? 0),
@@ -4213,7 +4219,7 @@ function OpenTuiApp(props: {
               flexShrink: 0,
               ref: (ref: TextRenderable) => {
                 sidebarGaugeLabelText = ref;
-                ref.content = buildGaugeLabel(context.percent);
+                ref.content = buildGaugeLabel(context.percent, context.remainingTokens);
               },
             }),
             h("text", {
@@ -4465,6 +4471,13 @@ function OpenTuiApp(props: {
       ? getContextBudget(providerId, modelId, props.agent.messages)
       : undefined;
     const usage = sidebarUsage();
+    const contextTokens = usage.contextTokens || (budget?.estimatedTokens ?? 0);
+    const contextPercent = budget?.contextWindow
+      ? Math.min(100, Math.round((contextTokens / budget.contextWindow) * 100))
+      : Math.round(budget?.percent ?? 0);
+    const remainingTokens = budget?.contextWindow !== undefined
+      ? Math.max(0, budget.contextWindow - contextTokens)
+      : undefined;
     const tokenUsage: TokenUsage = {
       promptTokens: usage.promptTokens,
       completionTokens: usage.completionTokens,
@@ -4475,8 +4488,9 @@ function OpenTuiApp(props: {
     };
     const cost = providerId && modelId ? calculateUsageCost(providerId, modelId, tokenUsage) : undefined;
     return {
-      tokens: budget?.estimatedTokens ?? 0,
-      percent: Math.round(budget?.percent ?? 0),
+      tokens: contextTokens,
+      percent: contextPercent,
+      remainingTokens,
       promptTokens: usage.promptTokens,
       completionTokens: usage.completionTokens,
       reasoningTokens: usage.reasoningTokens,
@@ -6563,17 +6577,6 @@ function assistantStatusLabel(message: DisplayMessage): string {
   return message.streaming ? "Thinking..." : "Thinking";
 }
 
-function buildColoredGauge(percent: number, barWidth: number): StyledText {
-  const clamped = Math.max(0, Math.min(100, percent));
-  const filled = Math.round((clamped / 100) * barWidth);
-  const empty = barWidth - filled;
-  const gaugeColor = clamped >= 80 ? theme.error : clamped >= 60 ? theme.warning : theme.success;
-  const chunks: StyledText["chunks"] = [];
-  if (filled > 0) chunks.push(fg(gaugeColor)("█".repeat(filled)));
-  if (empty > 0) chunks.push(fg(theme.borderSubtle)("░".repeat(empty)));
-  return new StyledText(chunks);
-}
-
 function buildContextGauge(percent: number, barWidth: number): string {
   const clamped = Math.max(0, Math.min(100, percent));
   const filled = Math.round((clamped / 100) * barWidth);
@@ -6583,12 +6586,20 @@ function buildContextGauge(percent: number, barWidth: number): string {
   return `${block}${space}`;
 }
 
-function buildGaugeLabel(percent: number): string {
-  if (percent >= 95) return "⚠ Compact imminent";
-  if (percent >= 80) return "⚠ Approaching limit";
-  if (percent >= 60) return "● Context growing";
-  if (percent > 0) return "○ Available";
+function buildGaugeLabel(percent: number, remainingTokens?: number): string {
+  const remaining = remainingTokens === undefined ? "" : ` · ${formatContextRemaining(remainingTokens)} left`;
+  if (percent >= 95) return `⚠ Compact imminent${remaining}`;
+  if (percent >= 80) return `⚠ Approaching limit${remaining}`;
+  if (percent >= 60) return `● Context growing${remaining}`;
+  if (percent > 0) return `○ Available${remaining}`;
   return "○ Empty";
+}
+
+function formatContextRemaining(value: number) {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
+  if (value >= 100_000) return `${Math.round(value / 1_000)}K`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+  return String(value);
 }
 
 function thinkingToggleLabel(expanded: boolean, streaming = false, spinnerFrame = ""): string {
