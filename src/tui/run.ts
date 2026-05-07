@@ -469,6 +469,8 @@ function OpenTuiApp(props: {
   let homePromptRef: TextareaRenderable | undefined;
   let sessionPromptRef: TextareaRenderable | undefined;
   let scrollbox: ScrollBoxRenderable | undefined;
+  let transcriptScrollFollowing = true;
+  let transcriptScrollInitialized = false;
   let rootBox: BoxRenderable | undefined;
   let sidebarShell: BoxRenderable | undefined;
   let transcriptHost: BoxRenderable | undefined;
@@ -1159,6 +1161,51 @@ function OpenTuiApp(props: {
     }
   }
 
+  function transcriptMaxScrollTop() {
+    if (!scrollbox) return 0;
+    return Math.max(0, scrollbox.scrollHeight - scrollbox.viewport.height);
+  }
+
+  function isTranscriptAtBottom() {
+    if (!scrollbox) return true;
+    return scrollbox.scrollTop >= transcriptMaxScrollTop() - 1;
+  }
+
+  function updateTranscriptScrollFollowingFromPosition() {
+    if (!scrollbox) return;
+    transcriptScrollFollowing = isTranscriptAtBottom();
+    transcriptScrollInitialized = true;
+  }
+
+  function shouldFollowTranscriptBeforeUpdate() {
+    if (!scrollbox) return transcriptScrollFollowing;
+    if (!transcriptScrollInitialized) return true;
+    transcriptScrollFollowing = isTranscriptAtBottom();
+    return transcriptScrollFollowing;
+  }
+
+  function scrollTranscriptToBottom() {
+    if (!scrollbox) return;
+    scrollbox.scrollTo(scrollbox.scrollHeight);
+    transcriptScrollFollowing = true;
+    transcriptScrollInitialized = true;
+  }
+
+  function scheduleTranscriptScrollAfterUpdate(shouldFollow: boolean, delay = 50) {
+    setTimeout(() => {
+      if (!scrollbox) return;
+      if (shouldFollow && transcriptScrollFollowing) {
+        scrollTranscriptToBottom();
+      } else {
+        updateTranscriptScrollFollowingFromPosition();
+      }
+    }, delay);
+  }
+
+  function handleTranscriptMouseScroll() {
+    setTimeout(updateTranscriptScrollFollowingFromPosition, 0);
+  }
+
   function syncQuestionUI(focusCustom = false) {
     redrawQuestionPanel();
     syncPromptSurfaces();
@@ -1526,7 +1573,7 @@ function OpenTuiApp(props: {
     refreshGitSidebar();
     setTimeout(() => {
       activePrompt()?.focus();
-      scrollbox?.scrollTo(scrollbox.scrollHeight);
+      scrollTranscriptToBottom();
     }, 25);
   });
 
@@ -1719,28 +1766,23 @@ function OpenTuiApp(props: {
   }
 
   function redrawTranscript(extra?: DisplayMessage, baseMessages = displayMessages) {
+    const shouldFollow = shouldFollowTranscriptBeforeUpdate();
     streamingDisplay = extra;
     const nextMessages = compactDisplayMessages(extra ? [...baseMessages, extra] : baseMessages);
     syncSessionMessages(nextMessages);
     rootBox?.requestRender();
     scrollbox?.requestRender();
-    setTimeout(() => {
-      if (!scrollbox) return;
-      if (nextMessages.length <= 3) {
-        scrollbox.scrollTo(0);
-        return;
-      }
-      scrollbox.scrollTo(scrollbox.scrollHeight);
-    }, 50);
+    scheduleTranscriptScrollAfterUpdate(shouldFollow);
   }
 
   createEffect(() => {
+    const shouldFollow = shouldFollowTranscriptBeforeUpdate();
     dimensions();
     sessionActive();
     syncSidebarChrome();
     redrawQuestionPanel();
     scrollbox?.requestRender();
-    setTimeout(() => scrollbox?.scrollTo(scrollbox.scrollHeight), 50);
+    scheduleTranscriptScrollAfterUpdate(shouldFollow);
   });
 
   function redrawDock() {
@@ -4379,6 +4421,7 @@ function OpenTuiApp(props: {
         ref: (ref: ScrollBoxRenderable) => { scrollbox = ref; },
         stickyScroll: true,
         stickyStart: "bottom",
+        onMouseScroll: handleTranscriptMouseScroll,
         flexGrow: 1,
         minHeight: 0,
       },
@@ -4391,7 +4434,7 @@ function OpenTuiApp(props: {
           updateTranscriptHost(ref, transcriptState, currentTranscriptMessages(streamingDisplay), transcriptOptions(), props.syntaxStyle, props.subtleSyntaxStyle);
           syncThinkingSpinner();
           syncPromptSurfaces(isNewHost);
-          setTimeout(() => scrollbox?.scrollTo(scrollbox.scrollHeight), 0);
+          if (isNewHost) scheduleTranscriptScrollAfterUpdate(transcriptScrollFollowing, 0);
         },
         flexDirection: "column",
         flexShrink: 0,
