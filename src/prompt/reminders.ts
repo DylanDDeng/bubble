@@ -26,13 +26,6 @@ Rules while in plan mode:
 - On rejection, remain in plan mode and iterate.
 `;
 
-const ACCEPT_EDITS_ENTER = `
-Permission mode is now: acceptEdits.
-
-The user has granted blanket approval for file edits and writes in this session.
-Bash commands still require explicit approval. Other tool safety rules are unchanged.
-`;
-
 const BYPASS_ENTER = `
 Permission mode is now: bypassPermissions.
 
@@ -41,14 +34,10 @@ Proceed with extra care — explain risky actions in the chat BEFORE performing 
 prefer reversible operations when possible.
 `;
 
-const DONT_ASK_ENTER = `
-Permission mode is now: dontAsk.
-
-All tool calls auto-approve silently. Minimise narration; execute and report results tersely.
-`;
-
 const DEFAULT_ENTER = `
-Permission mode is now: default. Each destructive tool call will be confirmed by the user.
+Permission mode is now: default Build mode.
+
+File edits and writes auto-approve. Bash commands and other destructive tools still require explicit approval unless allowed by rules.
 `;
 
 /** Picks the correct reminder text for a transition TO a given mode. */
@@ -56,12 +45,8 @@ export function reminderForMode(mode: PermissionMode): string {
   switch (mode) {
     case "plan":
       return wrapInSystemReminder(PLAN_MODE_ENTER);
-    case "acceptEdits":
-      return wrapInSystemReminder(ACCEPT_EDITS_ENTER);
     case "bypassPermissions":
       return wrapInSystemReminder(BYPASS_ENTER);
-    case "dontAsk":
-      return wrapInSystemReminder(DONT_ASK_ENTER);
     case "default":
     default:
       return wrapInSystemReminder(DEFAULT_ENTER);

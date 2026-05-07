@@ -157,21 +157,17 @@ export interface ToolRegistryEntry extends ToolDefinition {
  * Runtime permission policy for tool execution. Mirrors Claude Code's
  * `EXTERNAL_PERMISSION_MODES`:
  *
- * - `default`         — every destructive tool asks via the approval UI.
- * - `acceptEdits`     — edits/writes auto-approve; bash still asks.
+ * - `default`         — normal Build mode: edits/writes auto-approve; bash
+ *                       and other destructive tools ask unless allowed by rules.
  * - `plan`            — read-only tools only; the model must propose via
  *                       exit_plan_mode and get user approval before executing.
  * - `bypassPermissions` — everything auto-approves. Must be explicitly enabled
  *                       via --dangerously-skip-permissions at startup.
- * - `dontAsk`         — same as bypass but silent (no prompts, no extra
- *                       narration). Not in the Shift+Tab cycle.
  */
 export type PermissionMode =
   | "default"
-  | "acceptEdits"
   | "plan"
-  | "bypassPermissions"
-  | "dontAsk";
+  | "bypassPermissions";
 
 export type PlanDecision =
   | { action: "approve"; plan: string }

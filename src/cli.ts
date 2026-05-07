@@ -15,8 +15,6 @@ export interface CliArgs {
   prompt?: string;
   thinkingLevel?: ThinkingLevel;
   mode?: PermissionMode;
-  /** When true, --dangerously-skip-permissions was passed; bypassPermissions is reachable via the mode cycle and auto-approves every tool. */
-  bypassEnabled?: boolean;
 }
 
 export function parseArgs(argv: string[]): CliArgs {
@@ -63,10 +61,10 @@ export function parseArgs(argv: string[]): CliArgs {
         args.mode = "plan";
         break;
       case "--accept-edits":
-        args.mode = "acceptEdits";
+        // Backward-compatible no-op: Build mode now includes edit/write auto-approval.
+        args.mode = "default";
         break;
       case "--dangerously-skip-permissions":
-        args.bypassEnabled = true;
         args.mode = "bypassPermissions";
         break;
       default:
@@ -93,7 +91,6 @@ Options:
   --reasoning              Enable reasoning mode at medium effort
   --reasoning-effort <l>   Set reasoning effort: off|minimal|low|medium|high|xhigh|max
   --plan                   Start in plan mode (read-only investigation; propose before executing)
-  --accept-edits           Start with edits/writes auto-approved (bash still prompts)
   --dangerously-skip-permissions
                            Enable bypass mode (auto-approve EVERY tool; disables all safety prompts)
   -p, --print              Non-interactive mode (single prompt)

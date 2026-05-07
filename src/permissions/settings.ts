@@ -55,10 +55,8 @@ export interface SettingsManagerOptions {
 
 const KNOWN_MODES: ReadonlySet<PermissionMode> = new Set<PermissionMode>([
   "default",
-  "acceptEdits",
   "plan",
   "bypassPermissions",
-  "dontAsk",
 ]);
 
 export class SettingsManager {
@@ -124,8 +122,9 @@ export class SettingsManager {
       const perms = data.permissions;
 
       if (typeof perms.defaultMode === "string") {
-        if (KNOWN_MODES.has(perms.defaultMode as PermissionMode)) {
-          defaultMode = perms.defaultMode as PermissionMode;
+        const rawMode = perms.defaultMode === "acceptEdits" ? "default" : perms.defaultMode;
+        if (KNOWN_MODES.has(rawMode as PermissionMode)) {
+          defaultMode = rawMode as PermissionMode;
         } else {
           diagnostics.push({
             scope,

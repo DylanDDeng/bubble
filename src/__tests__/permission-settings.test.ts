@@ -95,6 +95,13 @@ describe("SettingsManager — loading", () => {
     expect(manager().getMerged().defaultMode).toBe("plan");
   });
 
+  it("maps legacy acceptEdits defaultMode to default", () => {
+    writeJson(join(bubbleHome, "settings.json"), {
+      permissions: { defaultMode: "acceptEdits" },
+    });
+    expect(manager().getMerged().defaultMode).toBe("default");
+  });
+
   it("local lsp setting beats project beats user", () => {
     writeJson(join(bubbleHome, "settings.json"), {
       lsp: true,

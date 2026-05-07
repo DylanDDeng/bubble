@@ -352,7 +352,6 @@ async function main() {
     settingsManager,
     lspService,
     mcpManager,
-    bypassEnabled: args.bypassEnabled,
     theme: userConfig.getTheme(),
     flushMemory,
     runMemoryCompaction,

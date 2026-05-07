@@ -27,16 +27,11 @@ describe("PermissionAwareApprovalController", () => {
     expect(await c.request(BASH_REQ)).toEqual({ action: "approve" });
   });
 
-  it("auto-approves every request in dontAsk", async () => {
-    const c = makeController("dontAsk");
-    expect(await c.request(BASH_REQ)).toEqual({ action: "approve" });
-  });
-
-  it("auto-approves edit/write in acceptEdits but still asks for bash", async () => {
+  it("auto-approves edit/write in default Build mode but still asks for bash", async () => {
     const handler = vi.fn(async () => ({ action: "approve" }) as ApprovalDecision);
     const handlerRef = { current: handler };
     const c = new PermissionAwareApprovalController({
-      getMode: () => "acceptEdits",
+      getMode: () => "default",
       handlerRef,
       cwd: "/tmp/bubble-test",
     });
@@ -57,7 +52,7 @@ describe("PermissionAwareApprovalController", () => {
     expect(result.feedback).toContain("exit_plan_mode");
   });
 
-  it("delegates to the UI handler in default mode", async () => {
+  it("delegates bash to the UI handler in default mode", async () => {
     const handler = vi.fn(async () => ({ action: "approve", feedback: "go" }) as ApprovalDecision);
     const c = new PermissionAwareApprovalController({
       getMode: () => "default",
@@ -164,20 +159,9 @@ describe("PermissionAwareApprovalController", () => {
     expect(dangerous.feedback).toContain("deny rule");
   });
 
-  it("deny rule overrides dontAsk", async () => {
+  it("deny rule overrides default Build auto-approval for writes", async () => {
     const c = new PermissionAwareApprovalController({
-      getMode: () => "dontAsk",
-      handlerRef: {},
-      cwd: "/tmp/bubble-test",
-      getRuleSet: () => buildRuleSet([], ["Bash(rm -rf:*)"]),
-    });
-    const dangerous = await c.request({ type: "bash", command: "rm -rf /", cwd: "/tmp" });
-    expect(dangerous.action).toBe("reject");
-  });
-
-  it("deny rule overrides acceptEdits for writes", async () => {
-    const c = new PermissionAwareApprovalController({
-      getMode: () => "acceptEdits",
+      getMode: () => "default",
       handlerRef: {},
       cwd: "/tmp/bubble-test",
       getRuleSet: () => buildRuleSet([], ["Write(/etc/**)"]),

@@ -33,12 +33,12 @@ export interface ApprovalControllerOptions {
  * Default ApprovalController. Decision tree:
  *
  *   deny rule match              → reject (applies even under bypassPermissions)
- *   bypassPermissions / dontAsk  → auto-approve, no prompt
- *   acceptEdits + edit|write     → auto-approve
+ *   bypassPermissions            → auto-approve, no prompt
+ *   default + edit|write         → auto-approve
  *   plan                         → reject with instructions to use exit_plan_mode
  *   allow rule match             → auto-approve
  *   bash in session allowlist    → auto-approve
- *   default / other              → delegate to UI; if no UI, reject
+ *   bash / other                 → delegate to UI; if no UI, reject
  *
  * Deny rules sit at the top as a hard ceiling: bypassPermissions is a trust
  * escalation, not a policy override. Users who want to permit a currently-
@@ -66,11 +66,11 @@ export class PermissionAwareApprovalController implements ApprovalController {
 
     const mode = this.options.getMode();
 
-    if (mode === "bypassPermissions" || mode === "dontAsk") {
+    if (mode === "bypassPermissions") {
       return { action: "approve" };
     }
 
-    if (mode === "acceptEdits" && (req.type === "edit" || req.type === "write")) {
+    if (mode === "default" && (req.type === "edit" || req.type === "write")) {
       return { action: "approve" };
     }
 

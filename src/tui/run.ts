@@ -53,7 +53,7 @@ import { sidebarMcpRowsFromStates, renderMcpRowMarker, type SidebarMcpRow } from
 import { expandAtMentions, filterFileSuggestions, findAtContext, listProjectFiles } from "./file-mentions.js";
 import { compactDisplayMessages, type DisplayMessage, type DisplayToolCall } from "./display-history.js";
 import { createMarkdownSyntaxStyle, createSubtleMarkdownSyntaxStyle } from "./markdown-theme.js";
-import { getNextPermissionMode } from "../permission/mode.js";
+import { getNextPermissionMode, PERMISSION_MODE_INFO } from "../permission/mode.js";
 import { getContextBudget } from "../context/budget.js";
 import { getLspService, type LspService, type LspStatus } from "../lsp/index.js";
 import { inferBashPrefix, type BashAllowlist } from "../approval/session-cache.js";
@@ -93,7 +93,6 @@ export interface RunTuiOptions {
   settingsManager?: SettingsManager;
   lspService?: LspService;
   mcpManager?: McpManager;
-  bypassEnabled?: boolean;
   theme?: Record<string, string>;
   flushMemory?: () => Promise<void>;
   runMemoryCompaction?: () => Promise<string>;
@@ -201,7 +200,7 @@ const HOME_LOGO = [
 
 const HOME_TIPS = [
   "Type @ followed by a filename to attach file context",
-  "Press Tab to cycle Build and Plan modes",
+  "Press Shift+Tab to cycle Build, Plan, and Bypass modes",
   "Type / or press Ctrl+P to open commands",
   "Use /compact to summarize long sessions near context limits",
   "Shift+Enter or Ctrl+J inserts a newline in your prompt",
@@ -650,6 +649,14 @@ function OpenTuiApp(props: {
     }, 0);
   }
 
+  function focusQuestionPanel() {
+    setTimeout(() => {
+      const state = pendingQuestion();
+      if (!state || state.editing) return;
+      questionRoot?.focus();
+    }, 0);
+  }
+
   function restorePromptAfterModal() {
     setTimeout(() => {
       if (!activeModalKeyOwner()) activePrompt()?.focus();
@@ -902,14 +909,17 @@ function OpenTuiApp(props: {
 
   const promptModeTitle = () => mode() === "plan" ? "Plan" : "Build";
   const promptModeBadge = () => promptModeBadgeContent(mode());
-  const footerModeText = () => mode() !== "default" ? `  ${mode()} · tab` : "";
+  const footerModeText = () => footerPermissionModeText(mode());
 
   function syncModeChrome() {
     if (uiDisposed) return;
     for (const label of [...promptModeLabels]) {
       if (!safeSetText(label, promptModeBadge())) promptModeLabels.delete(label);
     }
-    if (footerModeBadge && !safeSetText(footerModeBadge, footerModeText())) footerModeBadge = undefined;
+    if (footerModeBadge) {
+      footerModeBadge.fg = permissionModeColor(mode());
+      if (!safeSetText(footerModeBadge, footerModeText())) footerModeBadge = undefined;
+    }
     safeRequestRender(homeComposerShell);
     safeRequestRender(sessionComposerShell);
     safeRequestRender(rootBox);
@@ -947,10 +957,10 @@ function OpenTuiApp(props: {
 
   const cycleMode = () => {
     if (picker || pendingPlan()) return false;
-    const next = getNextPermissionMode(props.agent.mode, { bypassEnabled: props.options.bypassEnabled });
+    const next = getNextPermissionMode(props.agent.mode);
     props.agent.setMode(next);
     setMode(next);
-    setNotice(`Mode: ${next === "plan" ? "Plan" : "Build"}`);
+    setNotice(`Mode: ${permissionModeBadgeLabel(next)}`);
     redrawDock();
     syncPromptSurfaces();
     syncModeChrome();
@@ -1263,11 +1273,15 @@ function OpenTuiApp(props: {
   function syncQuestionUI(focusCustom = false) {
     redrawQuestionPanel();
     syncPromptSurfaces();
+    const question = pendingQuestion();
+    if (question) blurInputsForModal();
     redrawDock();
     rootBox?.requestRender();
     scrollbox?.requestRender();
     if (focusCustom) {
       setTimeout(() => questionCustomInput?.focus(), 0);
+    } else if (question) {
+      focusQuestionPanel();
     }
   }
 
@@ -3845,6 +3859,8 @@ function OpenTuiApp(props: {
         redrawQuestionPanel();
       },
       visible: false,
+      focusable: true,
+      onKeyDown: handleQuestionKey,
       position: "absolute",
       left: 2,
       right: 2,
@@ -6002,9 +6018,9 @@ function renderFooter(input: {
       runningFg: theme.primary,
     }),
     h("text", {
-      fg: theme.warning,
+      fg: permissionModeColor(input.mode()),
       ref: input.registerModeBadge,
-    }, input.mode() !== "default" ? `  ${input.mode()} · tab` : ""),
+    }, footerPermissionModeText(input.mode())),
     h("box", { flexGrow: 1 }),
   );
 }
@@ -6498,12 +6514,37 @@ function contrastText(color: string) {
 }
 
 function promptModeBadgeContent(mode: PermissionMode): StyledText {
-  const isPlan = mode === "plan";
-  const color = isPlan ? theme.accent : theme.primary;
-  const label = isPlan ? "Plan" : "Build";
+  const color = permissionModeColor(mode);
+  const label = permissionModeBadgeLabel(mode);
   return new StyledText([
     bg(color)(fg(contrastText(color))(bold(` ${label} `))),
   ]);
+}
+
+function permissionModeBadgeLabel(mode: PermissionMode) {
+  switch (mode) {
+    case "default": return "Build";
+    case "plan": return "Plan";
+    case "bypassPermissions": return "Bypass";
+  }
+}
+
+function footerPermissionModeText(mode: PermissionMode) {
+  const info = PERMISSION_MODE_INFO[mode];
+  if (mode === "default") return "  mode: build · shift+tab plan";
+  if (mode === "plan") return "  mode: plan · shift+tab bypass";
+  return `  mode: ${info.shortTitle} · shift+tab build`;
+}
+
+function permissionModeColor(mode: PermissionMode) {
+  const info = PERMISSION_MODE_INFO[mode];
+  switch (info.color) {
+    case "accent": return theme.accent;
+    case "success": return theme.success;
+    case "warning": return theme.warning;
+    case "error": return theme.error;
+    case "muted": return theme.primary;
+  }
 }
 
 function toolColor(tool: DisplayToolCall) {
