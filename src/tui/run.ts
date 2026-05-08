@@ -6705,8 +6705,10 @@ function extractToolDiff(tool: DisplayToolCall): string | undefined {
   const marker = "\n\nDiff:\n";
   const index = tool.result.indexOf(marker);
   if (index === -1) return undefined;
-  const diff = tool.result.slice(index + marker.length).trim();
-  return diff ? diff : undefined;
+  const rawDiff = tool.result.slice(index + marker.length);
+  const diagnosticsIndex = rawDiff.search(/\n\nLSP diagnostics in /);
+  const diff = diagnosticsIndex === -1 ? rawDiff : rawDiff.slice(0, diagnosticsIndex);
+  return diff.trim().length > 0 ? diff : undefined;
 }
 
 function diffViewMode(width = 80): "unified" | "split" {
