@@ -143,12 +143,13 @@ export function createBashTool(cwd: string, approval?: ApprovalController): Tool
               content: normalizedOutput === "(no output)" ? "stdout:\n(no matches)" : normalizedOutput,
               isError: false,
               status: "no_match",
-              metadata: {
-                kind: "search",
-                pattern: parsedSearch.pattern,
-                path: parsedSearch.path,
-                matches: 0,
-              },
+            metadata: {
+              kind: "search",
+              pattern: parsedSearch.pattern,
+              path: parsedSearch.path,
+              command,
+              matches: 0,
+            },
             });
             return;
           }
@@ -162,6 +163,7 @@ export function createBashTool(cwd: string, approval?: ApprovalController): Tool
               kind: parsedSearch ? "search" : "shell",
               pattern: parsedSearch?.pattern,
               path: parsedSearch?.path,
+              command,
               matches: parsedSearch ? countSearchMatches(stdout) : undefined,
             },
           });

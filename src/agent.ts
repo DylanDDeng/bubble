@@ -539,6 +539,10 @@ export class Agent {
       });
       flushGovernorReminders();
       yield { type: "turn_end", usage: turnUsage };
+      if ((hookState as any).forceContinuationReason) {
+        delete (hookState as any).forceContinuationReason;
+        continue;
+      }
       break;
     }
 

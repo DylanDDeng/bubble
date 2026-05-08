@@ -129,8 +129,10 @@ describe("PermissionAwareApprovalController + BashAllowlist integration", () => 
       cwd: "/tmp/bubble-test",
     });
 
-    await controller.request({ type: "edit", path: "/tmp/x.ts", diff: "-", fileExists: true });
-    await controller.request({ type: "write", path: "/tmp/y.ts", content: "hi", fileExists: false });
-    expect(uiCalls).toBe(2);
+    const editDecision = await controller.request({ type: "edit", path: "/tmp/x.ts", diff: "-", fileExists: true });
+    const writeDecision = await controller.request({ type: "write", path: "/tmp/y.ts", content: "hi", fileExists: false });
+    expect(editDecision.action).toBe("approve");
+    expect(writeDecision.action).toBe("approve");
+    expect(uiCalls).toBe(0);
   });
 });

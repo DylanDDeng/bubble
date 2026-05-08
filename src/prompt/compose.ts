@@ -2,8 +2,11 @@ import type { PermissionMode, ThinkingLevel } from "../types.js";
 import { buildAnthropicProviderPrompt } from "./provider-prompts/anthropic.js";
 import { buildCodexProviderPrompt } from "./provider-prompts/codex.js";
 import { buildDefaultProviderPrompt } from "./provider-prompts/default.js";
+import { buildDeepSeekProviderPrompt } from "./provider-prompts/deepseek.js";
 import { buildGeminiProviderPrompt } from "./provider-prompts/gemini.js";
+import { buildGlmProviderPrompt } from "./provider-prompts/glm.js";
 import { buildGptProviderPrompt } from "./provider-prompts/gpt.js";
+import { buildKimiProviderPrompt } from "./provider-prompts/kimi.js";
 import { buildEnvironmentPrompt, defaultToolNames, type EnvironmentPromptOptions } from "./environment.js";
 import { buildRuntimePrompt } from "./runtime.js";
 import { buildSkillsPrompt } from "./skills.js";
@@ -58,6 +61,15 @@ function buildProviderPrompt(
   }
   if (provider === "openai-codex" || model.includes("codex") || model.startsWith("gpt-5")) {
     return buildCodexProviderPrompt(agentName);
+  }
+  if (provider === "deepseek" || model.startsWith("deepseek")) {
+    return buildDeepSeekProviderPrompt(agentName);
+  }
+  if (["moonshot-cn", "moonshot-intl", "kimi-for-coding"].includes(provider) || model.startsWith("kimi") || model.startsWith("k2.")) {
+    return buildKimiProviderPrompt(agentName);
+  }
+  if (["zhipuai", "zhipuai-coding-plan", "zai", "zai-coding-plan"].includes(provider) || model.startsWith("glm")) {
+    return buildGlmProviderPrompt(agentName);
   }
   if (provider === "openai" || provider === "openrouter" || model.startsWith("gpt") || model.startsWith("o1")) {
     return buildGptProviderPrompt(agentName);

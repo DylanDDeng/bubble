@@ -104,6 +104,11 @@ export function createEditTool(cwd: string, approval?: ApprovalController, lsp?:
       }
       return {
         content: output,
+        status: "success",
+        metadata: {
+          kind: "edit",
+          path: filePath,
+        },
       };
     },
   };

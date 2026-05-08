@@ -327,6 +327,80 @@ describe("Agent", () => {
     ))).toBe(true);
   });
 
+  it("continues once with a verification reminder when code was changed but not verified", async () => {
+    const captured: Message[][] = [];
+    const provider: Provider = {
+      async *streamChat(messages) {
+        captured.push(messages);
+        if (captured.length === 1) {
+          yield { type: "tool_call", id: "edit_1", name: "edit", arguments: "", isStart: true, isEnd: false };
+          yield { type: "tool_call", id: "edit_1", name: "edit", arguments: "{}", isStart: false, isEnd: true };
+          yield { type: "done" };
+          return;
+        }
+        if (captured.length === 2) {
+          yield { type: "text", content: "done without verification" };
+          yield { type: "done" };
+          return;
+        }
+        if (captured.length === 3) {
+          yield { type: "tool_call", id: "bash_1", name: "bash", arguments: "", isStart: true, isEnd: false };
+          yield {
+            type: "tool_call",
+            id: "bash_1",
+            name: "bash",
+            arguments: "{\"command\":\"npm run build\"}",
+            isStart: false,
+            isEnd: true,
+          };
+          yield { type: "done" };
+          return;
+        }
+        yield { type: "text", content: "verified" };
+        yield { type: "done" };
+      },
+      async complete() {
+        return "ok";
+      },
+    };
+    const editTool: ToolRegistryEntry = {
+      name: "edit",
+      description: "edit",
+      parameters: { type: "object", properties: {}, required: [] },
+      async execute() {
+        return {
+          content: "edited",
+          status: "success",
+          metadata: { kind: "edit", path: "/tmp/file.ts" },
+        };
+      },
+    };
+    const bashTool: ToolRegistryEntry = {
+      name: "bash",
+      description: "bash",
+      parameters: { type: "object", properties: {}, required: [] },
+      async execute(args) {
+        return {
+          content: "build ok",
+          status: "success",
+          metadata: { kind: "shell", command: args.command },
+        };
+      },
+    };
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [editTool, bashTool],
+    });
+
+    const events = await collectEvents(agent, "implement the change", "/tmp");
+    expect(captured).toHaveLength(4);
+    expect(captured[1].some((message) => message.role === "user" && String(message.content).includes("Verification required before final answer"))).toBe(true);
+    expect(captured[2].some((message) => message.role === "user" && String(message.content).includes("Files were changed but no verification evidence"))).toBe(true);
+    expect(events.some((event) => event.type === "tool_end" && event.name === "bash")).toBe(true);
+    expect(events.some((event) => event.type === "text_delta" && event.content === "verified")).toBe(true);
+  });
+
   it("projects messages before sending them to the provider", async () => {
     const captured: Message[][] = [];
     const provider: Provider = {

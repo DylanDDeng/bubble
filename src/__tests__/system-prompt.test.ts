@@ -19,6 +19,8 @@ describe("system prompt", () => {
     expect(prompt).toContain("Configured provider: openai");
     expect(prompt).toContain("Configured model id: openai:gpt-5.4");
     expect(prompt).toContain("Current thinking level: high");
+    expect(prompt).toContain("Execution protocol:");
+    expect(prompt).toContain("Verify with the narrowest meaningful command or runtime check when possible");
     expect(prompt).toContain("Current working directory: /tmp/project");
     expect(prompt).toContain("- glob: Find files by glob pattern without using bash");
     expect(prompt).toContain("Use glob for file discovery");
@@ -51,6 +53,31 @@ describe("system prompt", () => {
 
     expect(prompt).toContain("coding assistant running inside a terminal workspace");
     expect(prompt).toContain("Configured provider: google");
+  });
+
+  it("uses provider-specific prompts for DeepSeek, Kimi, and GLM families", () => {
+    const deepseek = buildSystemPrompt({
+      configuredProvider: "deepseek",
+      configuredModel: "deepseek-v4-pro",
+      configuredModelId: "deepseek:deepseek-v4-pro",
+    });
+    const kimi = buildSystemPrompt({
+      configuredProvider: "moonshot-cn",
+      configuredModel: "kimi-k2.6",
+      configuredModelId: "moonshot-cn:kimi-k2.6",
+    });
+    const glm = buildSystemPrompt({
+      configuredProvider: "zai",
+      configuredModel: "glm-5.1",
+      configuredModelId: "zai:glm-5.1",
+    });
+
+    expect(deepseek).toContain("running on a DeepSeek model");
+    expect(deepseek).toContain("inspect serialization and request-shape code");
+    expect(kimi).toContain("running on a Kimi/Moonshot model");
+    expect(kimi).toContain("Keep tool use disciplined");
+    expect(glm).toContain("running on a GLM/Z.AI model");
+    expect(glm).toContain("identify the failing boundary");
   });
 
   it("only includes question guidance when the question tool is available", () => {
@@ -88,5 +115,6 @@ describe("system prompt", () => {
     expect(reminder).toContain("question");
     expect(reminder).toContain("clarify important ambiguities, tradeoffs, requirements, or preference choices");
     expect(reminder).toContain("exit_plan_mode is the approval step");
+    expect(reminder).toContain("Do not edit files");
   });
 });

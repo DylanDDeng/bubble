@@ -13,6 +13,11 @@ export interface TurnHookState {
   workflowKey?: string;
   turnCount?: number;
   forceTextOnlyReason?: string;
+  forceContinuationReason?: string;
+  codeChanged?: boolean;
+  verificationCompleted?: boolean;
+  verificationReminderQueued?: boolean;
+  finalVerificationReminderSent?: boolean;
   taskBudget?: {
     total: number;
     spent: number;

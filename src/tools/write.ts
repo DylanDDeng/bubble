@@ -81,7 +81,14 @@ export function createWriteTool(
             // LSP diagnostics should not turn a successful write into a failed tool call.
           }
         }
-        return { content };
+        return {
+          content,
+          status: "success",
+          metadata: {
+            kind: "write",
+            path: filePath,
+          },
+        };
       } catch (err: any) {
         return { content: `Error: ${err.message}`, isError: true };
       }

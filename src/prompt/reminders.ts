@@ -26,6 +26,7 @@ Plan mode is now ACTIVE.
 Rules while in plan mode:
 - Only read-only tools are allowed, including read, glob, grep, lsp, web_search, web_fetch, task, skill, todo_write, tool_search, question, and exit_plan_mode.
 - Writes, edits, and shell commands WILL be rejected by the harness; do not try them.
+- Do not edit files or claim implementation is complete while plan mode is active.
 - Investigate the codebase, then use the question tool to clarify important ambiguities, tradeoffs, requirements, or preference choices that would materially change the plan.
 - Call exit_plan_mode with a concrete step-by-step plan after the important questions are resolved.
 - Do not use the question tool to ask whether the plan is approved; exit_plan_mode is the approval step.
@@ -39,12 +40,14 @@ Permission mode is now: bypassPermissions.
 ALL tool calls auto-approve with no user confirmation. The user has explicitly opted into this.
 Proceed with extra care — explain risky actions in the chat BEFORE performing them, and
 prefer reversible operations when possible.
+Do not perform destructive operations, credential exposure, or unrelated reversions just because approvals are bypassed.
 `;
 
 const DEFAULT_ENTER = `
 Permission mode is now: default Build mode.
 
 File edits and writes auto-approve. Bash commands and other destructive tools still require explicit approval unless allowed by rules.
+Execute the requested change end to end; do not stop at analysis unless blocked or the user explicitly asks for discussion only.
 `;
 
 /** Picks the correct reminder text for a transition TO a given mode. */
@@ -174,5 +177,16 @@ Treat the task output as a bounded subtask result:
 - extract the findings that matter
 - integrate them into your main reasoning
 - do not re-run the same exploratory search unless the subtask uncovered a concrete contradiction
+`);
+}
+
+export function buildVerificationReminder(reason: string): string {
+  return wrapInSystemReminder(`
+Verification required before final answer.
+
+${reason}
+
+You have changed files in this turn. Run the narrowest meaningful verification command or runtime check before finalizing.
+If verification truly cannot be run, state the concrete blocker and the residual risk.
 `);
 }
