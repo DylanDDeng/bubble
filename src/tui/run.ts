@@ -3252,7 +3252,9 @@ function OpenTuiApp(props: {
         const isCompactResult = result.startsWith("✓ Compaction complete");
         if (isCompactResult) {
           setNotice(result);
-          redrawTranscript();
+          displayMessages = reconstructDisplayMessages(props.agent.messages);
+          streamingDisplay = undefined;
+          redrawTranscript(undefined, displayMessages);
           setTimeout(() => setNotice(""), 4000);
         } else {
           addMessage("assistant", result);

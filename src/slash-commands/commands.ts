@@ -799,7 +799,6 @@ const builtinSlashCommandEntries: SlashCommand[] = [
       }
 
       const systemMessage = ctx.agent.messages.find((message) => message.role === "system");
-      ctx.clearMessages();
       ctx.agent.messages = [
         ...(systemMessage ? [systemMessage] : []),
         ...ctx.sessionManager.getMessages(),

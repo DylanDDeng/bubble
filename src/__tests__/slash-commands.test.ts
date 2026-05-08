@@ -247,6 +247,39 @@ describe("slash commands", () => {
     expect(runMemoryCompaction).toHaveBeenCalledTimes(1);
   });
 
+  it("/compact rebuilds agent history without clearing the TUI first", async () => {
+    const clearMessages = vi.fn();
+    const ctx = createContext({
+      clearMessages,
+      agent: {
+        messages: [
+          { role: "system", content: "system prompt" },
+          { role: "user", content: "old prompt" },
+        ],
+      } as any,
+      sessionManager: {
+        compact: vi.fn(() => ({ compacted: true, droppedEntries: 2 })),
+        getMessages: vi.fn(() => [
+          { role: "system", content: "Previous conversation summary:\nold prompt" },
+          { role: "user", content: "recent prompt" },
+          { role: "assistant", content: "recent answer" },
+        ]),
+      } as any,
+    });
+
+    const result = await slashRegistry.execute("/compact", ctx);
+
+    expect(result.handled).toBe(true);
+    expect(result.result).toContain("Compaction complete");
+    expect(clearMessages).not.toHaveBeenCalled();
+    expect(ctx.agent.messages).toEqual([
+      { role: "system", content: "system prompt" },
+      { role: "system", content: "Previous conversation summary:\nold prompt" },
+      { role: "user", content: "recent prompt" },
+      { role: "assistant", content: "recent answer" },
+    ]);
+  });
+
   it("/memory summarize and refresh delegate to Codex-style memory handlers", async () => {
     const runMemorySummary = vi.fn(async () => "Memory Phase 2 succeeded: selected 1.");
     const runMemoryRefresh = vi.fn(async () => "Memory startup succeeded.");
