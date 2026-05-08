@@ -7,7 +7,7 @@
     "node": ">=20.0.0"
   },
   "bin": {
-    "bubble": "dist/main.js"
+    "bubble": "dist/bin.js"
   },
   "files": [
     "dist",
@@ -16,7 +16,7 @@
     "!dist/**/*.test.d.ts"
   ],
   "scripts": {
-    "build": "rm -rf dist && tsc && chmod +x dist/main.js",
+    "build": "rm -rf dist && tsc && chmod +x dist/bin.js dist/main.js",
     "dev": "tsc && bun dist/main.js",
     "prepack": "npm run build",
     "start": "bun dist/main.js",

@@ -4,8 +4,8 @@ Bubble is a terminal coding agent for working inside local project folders. It c
 
 ## Requirements
 
-- Bun
-- Node.js and npm
+- Node.js 20+ and npm for installation
+- Bun for running Bubble
 
 Install Bun if it is not already available:
 
@@ -24,8 +24,13 @@ npm install -g @bubblebrain-ai/bubble
 From a local package tarball:
 
 ```bash
-npm install -g ./bubblebrain-ai-bubble-0.0.1.tgz
+npm install -g ./bubblebrain-ai-bubble-0.0.3.tgz
 ```
+
+The npm command installs a small Node.js launcher named `bubble`. When you run
+`bubble`, the launcher checks for Bun and starts the real Bubble runtime with
+`bun`. If Bun is missing, it prints the install command above instead of failing
+with a low-level runtime error.
 
 ## Usage
 
