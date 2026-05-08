@@ -554,6 +554,10 @@ function OpenTuiApp(props: {
   const sidebarLspRows: Array<BoxRenderable | undefined> = [];
   const sidebarLspMarkers: Array<TextRenderable | undefined> = [];
   const sidebarLspLabels: Array<TextRenderable | undefined> = [];
+  let sidebarTodoSection: BoxRenderable | undefined;
+  const sidebarTodoRows: Array<BoxRenderable | undefined> = [];
+  const sidebarTodoMarkers: Array<TextRenderable | undefined> = [];
+  const sidebarTodoLabels: Array<TextRenderable | undefined> = [];
   const sidebarFileRows: Array<BoxRenderable | undefined> = [];
   const sidebarFileLabels: Array<TextRenderable | undefined> = [];
   const sidebarFileAdditions: Array<TextRenderable | undefined> = [];
@@ -783,6 +787,12 @@ function OpenTuiApp(props: {
     setSidebarTick((value) => value + 1);
     syncSidebarContext();
   };
+  const syncTodosFromAgent = () => {
+    const nextTodos = props.agent.getTodos();
+    setTodos(nextTodos);
+    syncSidebarTodos(nextTodos);
+    bumpSidebar();
+  };
 
   function refreshGitSidebar() {
     setGitState(readGitSidebarState(props.args.cwd));
@@ -884,6 +894,35 @@ function OpenTuiApp(props: {
       safeRequestRender(row);
     }
     sidebarShell?.requestRender();
+  }
+
+  function syncSidebarTodos(nextTodos = todos()) {
+    const visible = nextTodos.slice(0, 8);
+    if (sidebarTodoSection) {
+      sidebarTodoSection.visible = visible.length > 0;
+    }
+    for (let index = 0; index < 8; index++) {
+      const row = sidebarTodoRows[index];
+      const marker = sidebarTodoMarkers[index];
+      const label = sidebarTodoLabels[index];
+      const todo = visible[index];
+      if (!row || !marker || !label) continue;
+      row.visible = !!todo;
+      if (!todo) {
+        safeRequestRender(row);
+        continue;
+      }
+      const completed = todo.status === "completed";
+      const inProgress = todo.status === "in_progress";
+      const labelText = inProgress ? (todo.activeForm || todo.content) : todo.content;
+      marker.content = completed ? "✓" : inProgress ? "◉" : "○";
+      marker.fg = completed ? theme.success : inProgress ? theme.warning : theme.textMuted;
+      label.content = labelText;
+      label.fg = completed ? theme.success : inProgress ? theme.warning : theme.textMuted;
+      safeRequestRender(row);
+    }
+    sidebarShell?.requestRender();
+    rootBox?.requestRender();
   }
 
   function showSidebarLspRows(statuses: LspStatus[]) {
@@ -3199,6 +3238,7 @@ function OpenTuiApp(props: {
     if (!handled) return false;
     if (uiDisposed) return true;
     if (props.agent.mode !== mode()) setMode(props.agent.mode);
+    syncTodosFromAgent();
     syncModelChrome();
     syncModeChrome();
     if (uiDisposed) return true;
@@ -3673,6 +3713,7 @@ function OpenTuiApp(props: {
           syncSidebarLsp();
         } else if (event.type === "todos_updated") {
           setTodos(event.todos);
+          syncSidebarTodos(event.todos);
           bumpSidebar();
         } else if (event.type === "mode_changed") {
           setMode(event.mode);
@@ -4388,7 +4429,7 @@ function OpenTuiApp(props: {
             : null,
           renderSidebarMcp(mcpStates),
           renderSidebarLsp(),
-          todos().length ? renderSidebarTodos(todos()) : null,
+          renderSidebarTodos(todos()),
           renderSidebarFiles(files),
         ),
       ),
@@ -4510,17 +4551,43 @@ function OpenTuiApp(props: {
   }
 
   function renderSidebarTodos(todos: Todo[]) {
-    return renderSidebarSection("Todo", todos.map((todo) => {
-      const completed = todo.status === "completed";
-      const inProgress = todo.status === "in_progress";
-      if (completed) {
-        return h("text", { fg: theme.success, wrapMode: "word" }, `✓ ${todo.activeForm || todo.content}`);
-      }
-      return h("text", {
-        fg: inProgress ? theme.warning : theme.textMuted,
-        wrapMode: "word",
-      }, `${inProgress ? "◉  " : "○  "}${todo.activeForm || todo.content}`);
-    }));
+    const visible = todos.slice(0, 8);
+    return h("box", {
+      flexDirection: "column",
+      flexShrink: 0,
+      visible: visible.length > 0,
+      ref: (ref: BoxRenderable) => {
+        sidebarTodoSection = ref;
+        syncSidebarTodos();
+      },
+    },
+      h("text", { fg: theme.text }, "Todo"),
+      ...Array.from({ length: 8 }, (_, index) => {
+        const todo = visible[index];
+        const completed = todo?.status === "completed";
+        const inProgress = todo?.status === "in_progress";
+        const labelText = todo
+          ? (inProgress ? (todo.activeForm || todo.content) : todo.content)
+          : "";
+        return h("box", {
+          flexDirection: "row",
+          gap: 1,
+          visible: !!todo,
+          ref: (ref: BoxRenderable) => { sidebarTodoRows[index] = ref; },
+        },
+          h("text", {
+            fg: completed ? theme.success : inProgress ? theme.warning : theme.textMuted,
+            flexShrink: 0,
+            ref: (ref: TextRenderable) => { sidebarTodoMarkers[index] = ref; },
+          }, completed ? "✓" : inProgress ? "◉" : "○"),
+          h("text", {
+            fg: completed ? theme.success : inProgress ? theme.warning : theme.textMuted,
+            wrapMode: "word",
+            ref: (ref: TextRenderable) => { sidebarTodoLabels[index] = ref; },
+          }, labelText),
+        );
+      }),
+    );
   }
 
   function renderSidebarFiles(files: SidebarFileChange[]) {
