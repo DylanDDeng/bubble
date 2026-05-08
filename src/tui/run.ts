@@ -4294,7 +4294,6 @@ function OpenTuiApp(props: {
     const context = sidebarContextState();
     const mcpStates = sidebarMcpStates();
     const files = gitState().files;
-    const activeTodos = todos().filter((todo) => todo.status !== "completed");
     return h("box", {
       ref: (ref: BoxRenderable) => {
         sidebarShell = ref;
@@ -4389,7 +4388,7 @@ function OpenTuiApp(props: {
             : null,
           renderSidebarMcp(mcpStates),
           renderSidebarLsp(),
-          activeTodos.length ? renderSidebarTodos(activeTodos) : null,
+          todos().length ? renderSidebarTodos(todos()) : null,
           renderSidebarFiles(files),
         ),
       ),
@@ -4510,11 +4509,17 @@ function OpenTuiApp(props: {
     ]);
   }
 
-  function renderSidebarTodos(activeTodos: Todo[]) {
-    return renderSidebarSection("Todo", activeTodos.slice(0, 6).map((todo) => {
-      const marker = todo.status === "in_progress" ? ">" : "o";
-      const color = todo.status === "in_progress" ? theme.primary : theme.textMuted;
-      return h("text", { fg: color, wrapMode: "word" }, `${marker} ${todo.activeForm || todo.content}`);
+  function renderSidebarTodos(todos: Todo[]) {
+    return renderSidebarSection("Todo", todos.map((todo) => {
+      const completed = todo.status === "completed";
+      const inProgress = todo.status === "in_progress";
+      if (completed) {
+        return h("text", { fg: theme.success, wrapMode: "word" }, `✓ ${todo.activeForm || todo.content}`);
+      }
+      return h("text", {
+        fg: inProgress ? theme.warning : theme.textMuted,
+        wrapMode: "word",
+      }, `${inProgress ? "◉  " : "○  "}${todo.activeForm || todo.content}`);
     }));
   }
 
@@ -5764,9 +5769,52 @@ function createModelSwitchEntry(ctx: RenderContext, model: string, key: string, 
   return { key, signature, node, refs: {} };
 }
 
+function createTodoWriteRenderable(ctx: RenderContext, tool: DisplayToolCall) {
+  const todos = (tool.args.todos as Todo[]) || [];
+  const summary = tool.result || "";
+
+  if (!isToolFinished(tool)) {
+    return createBox(ctx, {
+      paddingLeft: 3,
+      marginTop: 1,
+      flexDirection: "column",
+      flexShrink: 0,
+    }, [
+      createText(ctx, `~ → Planning tasks...`, { fg: toolColor(tool) }),
+    ]);
+  }
+
+  return createBox(ctx, {
+    border: ["left"],
+    borderColor: theme.borderSubtle,
+    backgroundColor: theme.backgroundPanel,
+    marginTop: 1,
+    paddingTop: 1,
+    paddingBottom: 1,
+    paddingLeft: 2,
+    flexDirection: "column",
+    flexShrink: 0,
+  }, [
+    createText(ctx, `# Todo  ${summary ? `— ${summary}` : ""}`, { fg: theme.textMuted }),
+    ...todos.map((todo, index) => {
+      const completed = todo.status === "completed";
+      const inProgress = todo.status === "in_progress";
+      const marker = completed ? "✓" : inProgress ? "◉" : "○";
+      const fg = completed ? theme.success : inProgress ? theme.warning : theme.textMuted;
+      return createText(ctx, `  ${marker} ${todo.content}`, {
+        fg,
+        marginTop: index === 0 ? 1 : 0,
+      });
+    }),
+  ]);
+}
+
 function createToolRenderable(ctx: RenderContext, tool: DisplayToolCall, syntaxStyle: SyntaxStyle, width = 80) {
   if (tool.name === "question") {
     return createQuestionToolRenderable(ctx, tool);
+  }
+  if (tool.name === "todo_write") {
+    return createTodoWriteRenderable(ctx, tool);
   }
   const icon = tool.name === "bash" ? "$" : tool.name === "edit" || tool.name === "write" ? "✎" : "●";
   const color = toolColor(tool);
