@@ -99,11 +99,11 @@ Stop once these categories are covered. Do not keep repeating near-identical sea
 
 export function buildLoopWarningReminder(reason: string): string {
   return wrapInSystemReminder(`
-Search loop warning.
+Tool loop warning.
 
 ${reason}
 
-Do not repeat near-identical grep/bash searches unless you are changing the path or testing a genuinely new hypothesis.
+Do not repeat near-identical reads or searches unless you are changing the path or testing a genuinely new hypothesis.
 If current evidence is sufficient, summarize your findings now.
 `);
 }
@@ -116,6 +116,20 @@ Reason: ${reason}
 
 Do not continue blind keyword searching. Use the evidence already gathered to reason about the answer.
 You may still read specific files if you already know where the relevant configuration or persistence logic lives.
+`);
+}
+
+export function buildExplorationFreezeReminder(reason: string): string {
+  return wrapInSystemReminder(`
+Implementation phase has advanced from exploration to modification.
+
+Reason: ${reason}
+
+You have enough context to act. Do not continue reading, searching, or delegating exploration.
+Choose one of:
+1. Use edit/write to make the requested change.
+2. If no safe change can be made from the gathered context, explain the concrete blocker.
+3. If files were already changed, run the narrowest meaningful verification or finish with the result.
 `);
 }
 

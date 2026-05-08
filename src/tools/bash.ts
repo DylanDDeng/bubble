@@ -8,7 +8,7 @@ import { platform } from "node:os";
 import { gateToolAction } from "../approval/tool-helper.js";
 import type { ApprovalController } from "../approval/types.js";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
-import { parseSearchBashCommand } from "../agent/tool-intent.js";
+import { parseReadBashCommand, parseSearchBashCommand } from "../agent/tool-intent.js";
 import { referencesSensitivePath } from "./sensitive-paths.js";
 
 const MAX_OUTPUT = 50 * 1024;
@@ -34,6 +34,7 @@ export function createBashTool(cwd: string, approval?: ApprovalController): Tool
       const command = String(args.command);
       const timeoutSec = typeof args.timeout === "number" ? args.timeout : 60;
       const parsedSearch = parseSearchBashCommand(command);
+      const parsedRead = parsedSearch ? undefined : parseReadBashCommand(command);
 
       if (referencesSensitivePath(command)) {
         return {
@@ -108,9 +109,9 @@ export function createBashTool(cwd: string, approval?: ApprovalController): Tool
               isError: true,
               status: "timeout",
               metadata: {
-                kind: parsedSearch ? "search" : "shell",
+                kind: parsedSearch ? "search" : parsedRead ? "read" : "shell",
                 pattern: parsedSearch?.pattern,
-                path: parsedSearch?.path,
+                path: parsedSearch?.path ?? parsedRead?.path,
               },
             });
             return;
@@ -123,9 +124,9 @@ export function createBashTool(cwd: string, approval?: ApprovalController): Tool
               isError: true,
               status: "blocked",
               metadata: {
-                kind: parsedSearch ? "search" : "shell",
+                kind: parsedSearch ? "search" : parsedRead ? "read" : "shell",
                 pattern: parsedSearch?.pattern,
-                path: parsedSearch?.path,
+                path: parsedSearch?.path ?? parsedRead?.path,
                 reason: "cancelled",
               },
             });
@@ -143,13 +144,13 @@ export function createBashTool(cwd: string, approval?: ApprovalController): Tool
               content: normalizedOutput === "(no output)" ? "stdout:\n(no matches)" : normalizedOutput,
               isError: false,
               status: "no_match",
-            metadata: {
-              kind: "search",
-              pattern: parsedSearch.pattern,
-              path: parsedSearch.path,
-              command,
-              matches: 0,
-            },
+              metadata: {
+                kind: "search",
+                pattern: parsedSearch.pattern,
+                path: parsedSearch.path,
+                command,
+                matches: 0,
+              },
             });
             return;
           }
@@ -160,9 +161,9 @@ export function createBashTool(cwd: string, approval?: ApprovalController): Tool
             isError,
             status: isError ? "command_error" : "success",
             metadata: {
-              kind: parsedSearch ? "search" : "shell",
+              kind: parsedSearch ? "search" : parsedRead ? "read" : "shell",
               pattern: parsedSearch?.pattern,
-              path: parsedSearch?.path,
+              path: parsedSearch?.path ?? parsedRead?.path,
               command,
               matches: parsedSearch ? countSearchMatches(stdout) : undefined,
             },

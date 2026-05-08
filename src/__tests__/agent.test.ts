@@ -32,6 +32,17 @@ function createTaskToolForTest(): ToolRegistryEntry {
   return createTaskTool();
 }
 
+function toolForAgentTest(name: string): ToolRegistryEntry {
+  return {
+    name,
+    description: "",
+    parameters: { type: "object", properties: {} },
+    async execute() {
+      return { content: `${name} ok`, status: "success" };
+    },
+  };
+}
+
 describe("Agent", () => {
   const dummyTool: ToolRegistryEntry = {
     name: "dummy",
@@ -276,6 +287,58 @@ describe("Agent", () => {
     const events = await collectEvents(agent, "Call dummy", "/tmp");
     const toolEnd = events.find((event) => event.type === "tool_end") as any;
     expect(toolEnd.result.content).toBe("blocked by custom hook");
+  });
+
+  it("constrains exploration tools after repeated implementation reads", async () => {
+    const toolNamesByCall: string[][] = [];
+    const provider: Provider = {
+      async *streamChat(_messages, options) {
+        toolNamesByCall.push((options.tools ?? []).map((tool) => tool.name));
+        if (toolNamesByCall.length === 1 || toolNamesByCall.length === 2) {
+          yield { type: "tool_call", id: `read_${toolNamesByCall.length}`, name: "read", arguments: "", isStart: true, isEnd: false };
+          yield {
+            type: "tool_call",
+            id: `read_${toolNamesByCall.length}`,
+            name: "read",
+            arguments: "{\"path\":\"index.html\",\"offset\":1,\"limit\":100}",
+            isStart: false,
+            isEnd: true,
+          };
+          yield { type: "done" };
+          return;
+        }
+        yield { type: "text", content: "Ready to edit." };
+        yield { type: "done" };
+      },
+      async complete() {
+        return "ok";
+      },
+    };
+
+    const readTool: ToolRegistryEntry = {
+      name: "read",
+      readOnly: true,
+      description: "",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return {
+          content: "<html></html>",
+          status: "success",
+          metadata: { kind: "read", path: "index.html" },
+        };
+      },
+    };
+
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [readTool, toolForAgentTest("edit"), toolForAgentTest("write"), toolForAgentTest("bash"), toolForAgentTest("lsp")],
+    });
+
+    const events = await collectEvents(agent, "改一下任意 html 文件", "/tmp");
+    const blockedRead = events.find((event) => event.type === "tool_end" && event.id === "read_2") as any;
+    expect(blockedRead.result.status).toBe("blocked");
+    expect(toolNamesByCall[2]).toEqual(["edit", "write", "bash", "lsp"]);
   });
 
   it("supports task subtasks and injects a post-task summary reminder", async () => {
