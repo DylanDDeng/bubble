@@ -3,6 +3,9 @@
   "version": "0.0.2",
   "description": "A terminal coding agent",
   "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "bin": {
     "bubble": "dist/main.js"
   },
