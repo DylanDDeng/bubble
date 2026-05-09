@@ -13,10 +13,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import type { ContentPart } from "../types.js";
 
 const execFileAsync = promisify(execFile);
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp)$/i;
+const IMAGE_EXT_SOURCE = String.raw`(?:png|jpe?g|gif|webp|bmp)`;
 
 // Anthropic/OpenAI image uploads cap at ~5MB base64. We target a bit below so
 // the base64 inflation (4/3) doesn't push us over.
@@ -36,6 +38,32 @@ export interface ImageAttachment {
   sourcePath?: string;
 }
 
+export interface ImagePathToken {
+  rawPath: string;
+  start: number;
+  end: number;
+}
+
+export interface ImageInputResolution {
+  actualInput: string | ContentPart[];
+  displayInput: string;
+  errors: string[];
+  attachments: ImageAttachment[];
+  imagePathCount: number;
+}
+
+export interface LabeledImageAttachment extends ImageAttachment {
+  label: string;
+}
+
+export interface ComposerImageResolution {
+  text: string;
+  attachments: LabeledImageAttachment[];
+  errors: string[];
+  imagePathCount: number;
+  nextLabelIndex: number;
+}
+
 export function isImageFilePath(raw: string): boolean {
   const s = raw.trim();
   if (!s) return false;
@@ -43,6 +71,121 @@ export function isImageFilePath(raw: string): boolean {
   // Require an absolute or home-relative path. Pasted arbitrary text shouldn't
   // be treated as a path.
   return path.isAbsolute(s) || s.startsWith("~") || /^[A-Za-z]:\\/.test(s);
+}
+
+export function extractImagePathTokens(input: string): ImagePathToken[] {
+  const pattern = new RegExp(
+    String.raw`(^|\s)(?:"([^"]+\.${IMAGE_EXT_SOURCE})"|'([^']+\.${IMAGE_EXT_SOURCE})'|((?:~|\/|[A-Za-z]:\\)(?:\\ |[^\s"'<>])+\.${IMAGE_EXT_SOURCE}))(?=$|\s)`,
+    "gi",
+  );
+  const tokens: ImagePathToken[] = [];
+  for (const match of input.matchAll(pattern)) {
+    const leading = match[1] ?? "";
+    const rawPath = match[2] ?? match[3] ?? match[4];
+    if (!rawPath || !isImageFilePath(rawPath)) continue;
+    const start = (match.index ?? 0) + leading.length;
+    const end = (match.index ?? 0) + match[0].length;
+    tokens.push({ rawPath, start, end });
+  }
+  return tokens;
+}
+
+export function removeImagePathTokens(input: string, tokens: ImagePathToken[]): string {
+  if (tokens.length === 0) return input.trim();
+  let out = "";
+  let cursor = 0;
+  for (const token of tokens) {
+    out += input.slice(cursor, token.start);
+    out += " ";
+    cursor = token.end;
+  }
+  out += input.slice(cursor);
+  return out
+    .replace(/[ \t]+/g, " ")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+export function imageAttachmentLabel(att: ImageAttachment, index: number): string {
+  return `image#${index}${imageExtension(att)}`;
+}
+
+export function imageAttachmentReference(att: ImageAttachment, index: number): string {
+  return `[${imageAttachmentLabel(att, index)}]`;
+}
+
+export function imageAttachmentLabelPattern(): RegExp {
+  return /\[image#(\d+)\.[^\]\s]+\]/g;
+}
+
+function defaultImagePrompt(count: number): string {
+  return count === 1
+    ? "Please analyze the attached image."
+    : "Please analyze the attached images.";
+}
+
+function imageExtension(att: ImageAttachment): string {
+  const fromPath = path.extname(att.filename ?? att.sourcePath ?? "").toLowerCase();
+  if (fromPath) return fromPath;
+  if (att.mediaType === "image/jpeg") return ".jpg";
+  if (att.mediaType === "image/webp") return ".webp";
+  if (att.mediaType === "image/gif") return ".gif";
+  if (att.mediaType === "image/bmp") return ".bmp";
+  return ".png";
+}
+
+export function buildImageContentParts(promptText: string, attachments: ImageAttachment[]): ContentPart[] {
+  const text = promptText.trim() || defaultImagePrompt(attachments.length);
+  return [
+    { type: "text", text },
+    ...attachments.map((attachment) => ({
+      type: "image_url" as const,
+      image_url: { url: attachment.dataUrl },
+    })),
+  ];
+}
+
+export function formatImageDisplayInput(promptText: string, attachments: ImageAttachment[], labelStart = 1): string {
+  const text = promptText.trim() || defaultImagePrompt(attachments.length);
+  const imageLines = attachments.map((attachment, index) => imageAttachmentReference(attachment, labelStart + index));
+  return `${text}\n${imageLines.join("\n")}`;
+}
+
+export function buildImageContentPartsFromLabels(
+  input: string,
+  attachmentsByLabel: Map<string, ImageAttachment>,
+): { actualInput?: ContentPart[]; displayInput: string; usedLabels: string[] } {
+  const matches = Array.from(input.matchAll(imageAttachmentLabelPattern()));
+  const usedLabels: string[] = [];
+  const parts: ContentPart[] = [];
+  let cursor = 0;
+
+  for (const match of matches) {
+    const label = match[0].slice(1, -1);
+    const attachment = attachmentsByLabel.get(label);
+    if (!attachment) continue;
+
+    const start = match.index ?? 0;
+    const before = input.slice(cursor, start).trim();
+    if (before) parts.push({ type: "text", text: before });
+    parts.push({ type: "image_url", image_url: { url: attachment.dataUrl } });
+    usedLabels.push(label);
+    cursor = start + match[0].length;
+  }
+  if (usedLabels.length === 0) return { displayInput: input, usedLabels: [] };
+
+  const rest = input.slice(cursor).trim();
+  if (rest) parts.push({ type: "text", text: rest });
+  if (!parts.some((part) => part.type === "text")) {
+    parts.unshift({ type: "text", text: defaultImagePrompt(usedLabels.length) });
+  }
+
+  return {
+    actualInput: parts,
+    displayInput: input.trim() || usedLabels.map((label) => `[${label}]`).join("\n"),
+    usedLabels,
+  };
 }
 
 /**
@@ -316,4 +459,122 @@ export async function ingestClipboardImage(): Promise<{ attachment?: ImageAttach
   const validation = validateImageSize(sized);
   if (!validation.ok) return { error: validation.reason };
   return { attachment: sized };
+}
+
+export async function resolveImageInput(input: string, options: { labelStart?: number } = {}): Promise<ImageInputResolution> {
+  const tokens = extractImagePathTokens(input);
+  if (tokens.length === 0) {
+    return {
+      actualInput: input,
+      displayInput: input,
+      errors: [],
+      attachments: [],
+      imagePathCount: 0,
+    };
+  }
+
+  const attachments: ImageAttachment[] = [];
+  const errors: string[] = [];
+  const attachmentsByToken = new Map<ImagePathToken, { attachment: ImageAttachment; label: string }>();
+  let nextLabelIndex = options.labelStart ?? 1;
+  for (const token of tokens) {
+    const result = await ingestImagePath(token.rawPath);
+    if (result.attachment) {
+      attachments.push(result.attachment);
+      attachmentsByToken.set(token, {
+        attachment: result.attachment,
+        label: imageAttachmentLabel(result.attachment, nextLabelIndex++),
+      });
+    } else {
+      errors.push(`${token.rawPath}: ${result.error ?? "could not attach image"}`);
+    }
+  }
+
+  if (attachments.length === 0) {
+    return {
+      actualInput: input,
+      displayInput: input,
+      errors,
+      attachments: [],
+      imagePathCount: tokens.length,
+    };
+  }
+
+  const parts: ContentPart[] = [];
+  let displayInput = "";
+  let cursor = 0;
+  for (const token of tokens) {
+    const entry = attachmentsByToken.get(token);
+    if (!entry) continue;
+    const before = input.slice(cursor, token.start);
+    displayInput += before;
+    const text = before.trim();
+    if (text) parts.push({ type: "text", text });
+    parts.push({ type: "image_url", image_url: { url: entry.attachment.dataUrl } });
+    displayInput += `[${entry.label}]`;
+    cursor = token.end;
+  }
+  const rest = input.slice(cursor);
+  displayInput += rest;
+  const restText = rest.trim();
+  if (restText) parts.push({ type: "text", text: restText });
+  if (!parts.some((part) => part.type === "text")) {
+    parts.unshift({ type: "text", text: defaultImagePrompt(attachments.length) });
+  }
+
+  return {
+    actualInput: parts,
+    displayInput: displayInput.trim(),
+    errors,
+    attachments,
+    imagePathCount: tokens.length,
+  };
+}
+
+export async function resolveComposerImagePaths(
+  input: string,
+  options: { labelStart?: number } = {},
+): Promise<ComposerImageResolution> {
+  const tokens = extractImagePathTokens(input);
+  let nextLabelIndex = options.labelStart ?? 1;
+  if (tokens.length === 0) {
+    return {
+      text: input,
+      attachments: [],
+      errors: [],
+      imagePathCount: 0,
+      nextLabelIndex,
+    };
+  }
+
+  const errors: string[] = [];
+  const attachments: LabeledImageAttachment[] = [];
+  const replacements = new Map<ImagePathToken, string>();
+  for (const token of tokens) {
+    const result = await ingestImagePath(token.rawPath);
+    if (!result.attachment) {
+      errors.push(`${token.rawPath}: ${result.error ?? "could not attach image"}`);
+      continue;
+    }
+    const label = imageAttachmentLabel(result.attachment, nextLabelIndex++);
+    attachments.push({ ...result.attachment, label });
+    replacements.set(token, `[${label}]`);
+  }
+
+  let text = "";
+  let cursor = 0;
+  for (const token of tokens) {
+    text += input.slice(cursor, token.start);
+    text += replacements.get(token) ?? input.slice(token.start, token.end);
+    cursor = token.end;
+  }
+  text += input.slice(cursor);
+
+  return {
+    text,
+    attachments,
+    errors,
+    imagePathCount: tokens.length,
+    nextLabelIndex,
+  };
 }

@@ -66,6 +66,13 @@ import { createFrames } from "./opencode-spinner.js";
 import { copyTextToClipboard } from "./clipboard.js";
 import { readGitSidebarState, type SidebarFileChange, type SidebarGitState } from "./sidebar-state.js";
 import {
+  buildImageContentPartsFromLabels,
+  imageAttachmentLabelPattern,
+  resolveComposerImagePaths,
+  resolveImageInput,
+  type ImageAttachment,
+} from "./image-paste.js";
+import {
   isModeCycleKeyEvent,
   isModeCycleSequence,
   isModifiedEnterSequence,
@@ -424,6 +431,10 @@ function OpenTuiApp(props: {
     .filter((message) => message.role === "user" && message.content !== "(multimedia)")
     .map((message) => message.content)
     .slice(-PROMPT_HISTORY_LIMIT);
+  let nextImageAttachmentIndex = nextImageLabelIndex(displayMessages);
+  const pendingImageAttachments = new Map<string, ImageAttachment>();
+  let composerImageResolutionSeq = 0;
+  let applyingComposerImageReplacement = false;
   let promptHistoryIndex: number | undefined;
   let promptHistoryDraft = "";
   const [isRunning, setIsRunning] = createSignal(false);
@@ -2886,6 +2897,9 @@ function OpenTuiApp(props: {
   function onPromptContentChange(value?: unknown) {
     const nextValue = typeof value === "string" ? value : readPromptText();
     promptText = nextValue;
+    if (!applyingComposerImageReplacement) {
+      void applyComposerImagePathReplacement(nextValue);
+    }
     if (
       promptHistoryIndex !== undefined
       && nextValue !== (promptHistory[promptHistoryIndex] ?? "")
@@ -3180,8 +3194,60 @@ function OpenTuiApp(props: {
     redrawDock();
   }
 
+  async function applyComposerImagePathReplacement(snapshot: string) {
+    const seq = ++composerImageResolutionSeq;
+    const result = await resolveComposerImagePaths(snapshot, { labelStart: nextImageAttachmentIndex });
+    if (seq !== composerImageResolutionSeq) return;
+    if (result.attachments.length === 0) return;
+    if ((readPromptText() || promptText) !== snapshot) return;
+
+    for (const attachment of result.attachments) {
+      pendingImageAttachments.set(attachment.label, attachment);
+    }
+    nextImageAttachmentIndex = Math.max(nextImageAttachmentIndex, result.nextLabelIndex);
+    applyingComposerImageReplacement = true;
+    try {
+      setPromptText(result.text);
+    } finally {
+      applyingComposerImageReplacement = false;
+    }
+  }
+
+  async function expandTextParts(parts: ContentPart[]): Promise<ContentPart[]> {
+    const expandedParts: ContentPart[] = [];
+    for (const part of parts) {
+      if (part.type !== "text") {
+        expandedParts.push(part);
+        continue;
+      }
+      const expansion = await expandAtMentions(part.text, props.args.cwd);
+      if (expansion.missing.length) addMessage("error", `Could not resolve @mention: ${expansion.missing.join(", ")}`);
+      for (const skipped of expansion.skipped) addMessage("error", `Skipped @${skipped.path}: ${skipped.reason}`);
+      expandedParts.push({ type: "text", text: expansion.text });
+    }
+    return expandedParts;
+  }
+
   async function handleInput(input: string) {
     setNotice("");
+    const labeledInput = buildImageContentPartsFromLabels(input, pendingImageAttachments);
+    if (labeledInput.actualInput) {
+      await runAgentInput(await expandTextParts(labeledInput.actualInput), labeledInput.displayInput);
+      for (const label of labeledInput.usedLabels) pendingImageAttachments.delete(label);
+      return;
+    }
+
+    const imageInput = await resolveImageInput(input, { labelStart: nextImageAttachmentIndex });
+    for (const error of imageInput.errors) addMessage("error", `Skipped image: ${error}`);
+
+    if (imageInput.attachments.length > 0) {
+      await runAgentInput(await expandTextParts(imageInput.actualInput as ContentPart[]), imageInput.displayInput);
+      nextImageAttachmentIndex += imageInput.attachments.length;
+      return;
+    }
+
+    if (imageInput.imagePathCount > 0) return;
+
     if (input.startsWith("/")) {
       const skillInvocation = parseSkillInvocation(input, skills);
       if (skillInvocation) {
@@ -6334,13 +6400,50 @@ function toSelectOption(item: PickerItem): SelectOption {
   };
 }
 
+function nextImageLabelIndex(messages: DisplayMessage[]): number {
+  let max = 0;
+  for (const message of messages) {
+    for (const match of message.content.matchAll(imageAttachmentLabelPattern())) {
+      max = Math.max(max, Number(match[1] ?? 0));
+    }
+  }
+  return max + 1;
+}
+
+function imageExtensionFromUrl(url: string): string {
+  const mediaMatch = url.match(/^data:image\/([^;,]+)/i);
+  const media = mediaMatch?.[1]?.toLowerCase();
+  if (media === "jpeg") return "jpg";
+  if (media === "png" || media === "webp" || media === "gif" || media === "bmp") return media;
+  const pathMatch = url.match(/\.([a-z0-9]+)(?:[?#].*)?$/i);
+  return pathMatch?.[1]?.toLowerCase() || "png";
+}
+
+function formatDisplayContentParts(content: ContentPart[], labelStart: number): string {
+  const text = content
+    .filter((part): part is Extract<ContentPart, { type: "text" }> => part.type === "text")
+    .map((part) => part.text)
+    .join("\n")
+    .trim();
+  let imageIndex = labelStart;
+  const imageLines = content
+    .filter((part): part is Extract<ContentPart, { type: "image_url" }> => part.type === "image_url")
+    .map((part) => `[image#${imageIndex++}.${imageExtensionFromUrl(part.image_url.url)}]`);
+  return [text, ...imageLines].filter(Boolean).join("\n") || "(multimedia)";
+}
+
 function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] {
   const result: DisplayMessage[] = [];
   for (const message of agentMessages) {
     if (message.role === "system" || message.role === "tool") continue;
     if (message.role === "user") {
       if (message.isMeta) continue;
-      result.push({ role: "user", content: typeof message.content === "string" ? message.content : "(multimedia)" });
+      result.push({
+        role: "user",
+        content: typeof message.content === "string"
+          ? message.content
+          : formatDisplayContentParts(message.content, nextImageLabelIndex(result)),
+      });
       continue;
     }
     const toolCalls: DisplayToolCall[] = [];
