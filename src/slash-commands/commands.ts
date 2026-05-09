@@ -197,7 +197,7 @@ async function handleMemoryCommand(args: string, ctx: Parameters<SlashCommand["h
   }
 
   if (sub === "add") {
-    return "Manual memory writes are disabled. Bubble now follows the Codex-style automatic startup memory pipeline.";
+    return "Manual memory writes are disabled. Bubble now follows the automatic startup memory pipeline.";
   }
 
   if (sub === "search") {
@@ -310,7 +310,7 @@ const builtinSlashCommandEntries: SlashCommand[] = [
   },
   {
     name: "memory",
-    description: "Inspect and maintain Codex-style automatic persistent memory. Usage: /memory [status|search|compact|summarize|refresh|reset]",
+    description: "Inspect and maintain Bubble's automatic persistent memory. Usage: /memory [status|search|compact|summarize|refresh|reset]",
     async handler(args, ctx) {
       return handleMemoryCommand(args, ctx);
     },
