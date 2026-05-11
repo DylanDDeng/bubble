@@ -204,3 +204,25 @@ You have changed files in this turn. Run the narrowest meaningful verification c
 If verification truly cannot be run, state the concrete blocker and the residual risk.
 `);
 }
+
+export function buildVerificationFailureReminder(reason: string): string {
+  return wrapInSystemReminder(`
+Verification failed after file changes.
+
+${reason}
+
+Do not finalize as complete while this failure is unresolved. Make one focused fix and rerun the most relevant verification.
+If you cannot fix it, explain the concrete blocker and the residual risk instead of claiming success.
+`);
+}
+
+export function buildFinalizeOpportunityReminder(reason: string): string {
+  return wrapInSystemReminder(`
+Completion checkpoint.
+
+${reason}
+
+If this satisfies the user's request, provide the final answer now.
+Continue using tools only if there is a concrete remaining requirement, failing check, or missing deliverable.
+`);
+}

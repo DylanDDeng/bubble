@@ -491,7 +491,14 @@ function OpenTuiApp(props: {
   let rootBox: BoxRenderable | undefined;
   let sidebarShell: BoxRenderable | undefined;
   let transcriptHost: BoxRenderable | undefined;
-  const transcriptState: TranscriptState = { entries: [], expandedThinking: new Set(), expandedCompactions: new Set() };
+  const transcriptState: TranscriptState = {
+    entries: [],
+    expandedThinking: new Set(),
+    expandedCompactions: new Set(),
+    expandedWrites: new Set(),
+    defaultThinkingExpanded: false,
+    defaultWritesExpanded: false,
+  };
   let dock: TextRenderable | undefined;
   let homeComposerShell: BoxRenderable | undefined;
   let sessionComposerShell: BoxRenderable | undefined;
@@ -1840,6 +1847,16 @@ function OpenTuiApp(props: {
       event.preventDefault?.();
       return true;
     }
+    if (event.ctrl && name === "t" && !picker) {
+      toggleVisibleThinkingBlocks();
+      event.preventDefault?.();
+      return true;
+    }
+    if (event.ctrl && name === "o" && !picker) {
+      toggleVisibleWriteBlocks();
+      event.preventDefault?.();
+      return true;
+    }
     if (routeModalKey(event)) return true;
     if (cycleModeFromKey(event)) return true;
     if (event.ctrl && name === "p" && !picker && !isRunning()) {
@@ -1867,6 +1884,14 @@ function OpenTuiApp(props: {
         }
         syncSessionMessages();
       },
+      onToggleWrite: (key: string) => {
+        if (transcriptState.expandedWrites.has(key)) {
+          transcriptState.expandedWrites.delete(key);
+        } else {
+          transcriptState.expandedWrites.add(key);
+        }
+        syncSessionMessages();
+      },
       onToggleCompaction: (key: string) => {
         if (transcriptState.expandedCompactions.has(key)) {
           transcriptState.expandedCompactions.delete(key);
@@ -1876,6 +1901,55 @@ function OpenTuiApp(props: {
         syncSessionMessages();
       },
     };
+  }
+
+  function toggleVisibleThinkingBlocks() {
+    const keys = transcriptState.entries
+      .filter((entry) => !!entry.refs.reasoningToggleText)
+      .map((entry) => entry.key);
+    if (!keys.length) {
+      setNotice("No thinking blocks to toggle");
+      return;
+    }
+    const shouldExpand = keys.some((key) => !transcriptState.expandedThinking.has(key));
+    transcriptState.defaultThinkingExpanded = shouldExpand;
+    for (const key of keys) {
+      if (shouldExpand) transcriptState.expandedThinking.add(key);
+      else transcriptState.expandedThinking.delete(key);
+    }
+    setNotice(shouldExpand ? "Thinking blocks expanded" : "Thinking blocks collapsed");
+    syncSessionMessages();
+  }
+
+  function toggleVisibleWriteBlocks() {
+    const keys = collectVisibleWriteKeys();
+    if (!keys.length) {
+      setNotice("No write previews to toggle");
+      return;
+    }
+    const shouldExpand = keys.some((key) => !transcriptState.expandedWrites.has(key));
+    transcriptState.defaultWritesExpanded = shouldExpand;
+    for (const key of keys) {
+      if (shouldExpand) transcriptState.expandedWrites.add(key);
+      else transcriptState.expandedWrites.delete(key);
+    }
+    setNotice(shouldExpand ? "Write previews expanded" : "Write previews collapsed");
+    syncSessionMessages();
+  }
+
+  function collectVisibleWriteKeys() {
+    const messages = currentTranscriptMessages(streamingDisplay)
+      .filter((message) => hasRenderableMessage(message, showThinking()));
+    const keys: string[] = [];
+    for (const [index, message] of messages.entries()) {
+      const messageKey = transcriptMessageKey(message, index);
+      for (const tool of message.toolCalls ?? []) {
+        if (isWritePreviewTool(tool)) {
+          keys.push(writeToolKey(messageKey, tool));
+        }
+      }
+    }
+    return keys;
   }
 
   function syncSessionMessages(messages = currentTranscriptMessages(streamingDisplay)) {
@@ -5332,9 +5406,20 @@ function updateTranscriptHost(
 
   for (const [index, message] of visibleMessages.entries()) {
     const key = transcriptMessageKey(message, index);
+    if (state.defaultThinkingExpanded && message.reasoning?.trim()) {
+      state.expandedThinking.add(key);
+    }
+    if (state.defaultWritesExpanded) {
+      for (const tool of message.toolCalls ?? []) {
+        if (isWritePreviewTool(tool)) {
+          state.expandedWrites.add(writeToolKey(key, tool));
+        }
+      }
+    }
     const thinkingExpanded = state.expandedThinking.has(key);
     const compactionExpanded = state.expandedCompactions.has(key);
-    const signature = transcriptMessageSignature(message, showThinking, thinkingExpanded, compactionExpanded);
+    const writeExpansionDigest = transcriptWriteExpansionSignature(message, key, state.expandedWrites);
+    const signature = transcriptMessageSignature(message, showThinking, thinkingExpanded, compactionExpanded, writeExpansionDigest);
     const previous = state.entries[index];
     if (previous?.key === key && previous.signature === signature) {
       updateMessageEntry(previous, message, showThinking, thinkingExpanded, compactionExpanded);
@@ -5359,8 +5444,10 @@ function updateTranscriptHost(
       options?.width ?? 80,
       thinkingExpanded,
       compactionExpanded,
+      state.expandedWrites,
       options?.onToggleThinking,
       options?.onToggleCompaction,
+      options?.onToggleWrite,
     );
     if (entry) {
       host.add(entry.node, index);
@@ -5400,6 +5487,9 @@ type TranscriptState = {
   entries: TranscriptEntry[];
   expandedThinking: Set<string>;
   expandedCompactions: Set<string>;
+  expandedWrites: Set<string>;
+  defaultThinkingExpanded: boolean;
+  defaultWritesExpanded: boolean;
 };
 
 type TranscriptEntry = {
@@ -5434,7 +5524,13 @@ function transcriptMessageKey(message: DisplayMessage, index: number) {
   return `${index}:${message.role}`;
 }
 
-function transcriptMessageSignature(message: DisplayMessage, showThinking = true, thinkingExpanded = false, compactionExpanded = false) {
+function transcriptMessageSignature(
+  message: DisplayMessage,
+  showThinking = true,
+  thinkingExpanded = false,
+  compactionExpanded = false,
+  writeExpansionDigest = "",
+) {
   if (message.role !== "assistant") return message.role;
   if (message.syntheticKind === "ui_compact_card") {
     return `compaction:${compactionExpanded ? "expanded" : "collapsed"}:${message.compactionMeta?.turns ?? 0}`;
@@ -5451,7 +5547,15 @@ function transcriptMessageSignature(message: DisplayMessage, showThinking = true
     visibleReasoning ? (thinkingExpanded ? "reasoning-expanded" : "reasoning-collapsed") : "no-reasoning",
     message.content.trim() ? "content" : "no-content",
     tools,
+    writeExpansionDigest,
   ].join(":");
+}
+
+function transcriptWriteExpansionSignature(message: DisplayMessage, messageKey: string, expandedWrites: Set<string>) {
+  return (message.toolCalls ?? [])
+    .filter((tool) => isWritePreviewTool(tool))
+    .map((tool) => `${tool.id}:${expandedWrites.has(writeToolKey(messageKey, tool)) ? "expanded" : "collapsed"}`)
+    .join("|");
 }
 
 function hashString(value: string) {
@@ -5640,13 +5744,15 @@ function createMessageEntry(
   width = 80,
   thinkingExpanded = false,
   compactionExpanded = false,
+  expandedWrites: Set<string> = new Set(),
   onToggleThinking?: (key: string) => void,
   onToggleCompaction?: (key: string) => void,
+  onToggleWrite?: (key: string) => void,
 ): TranscriptEntry | null {
   if (message.role === "user") return createUserEntry(ctx, message, index, key, signature);
   if (message.role === "error") return createErrorEntry(ctx, message, key, signature);
   if (message.syntheticKind === "ui_compact_card") return createCompactionCardEntry(ctx, message, key, signature, compactionExpanded, onToggleCompaction);
-  return createAssistantEntry(ctx, message, syntaxStyle, subtleSyntaxStyle, key, signature, showThinking, width, thinkingExpanded, onToggleThinking);
+  return createAssistantEntry(ctx, message, syntaxStyle, subtleSyntaxStyle, key, signature, showThinking, width, thinkingExpanded, expandedWrites, onToggleThinking, onToggleWrite);
 }
 
 function createUserEntry(ctx: RenderContext, message: DisplayMessage, index: number, key: string, signature: string): TranscriptEntry {
@@ -5704,7 +5810,9 @@ function createAssistantEntry(
   showThinking = true,
   width = 80,
   thinkingExpanded = false,
+  expandedWrites: Set<string> = new Set(),
   onToggleThinking?: (key: string) => void,
+  onToggleWrite?: (key: string) => void,
 ): TranscriptEntry | null {
   const modelSwitch = parseModelSwitchMessage(message.content);
   if (modelSwitch && !message.reasoning?.trim() && !(message.toolCalls?.length)) {
@@ -5756,7 +5864,17 @@ function createAssistantEntry(
     }, reasoningChildren));
   }
 
-  for (const tool of message.toolCalls ?? []) children.push(createToolRenderable(ctx, tool, syntaxStyle, width));
+  for (const tool of message.toolCalls ?? []) {
+    const toolKey = writeToolKey(key, tool);
+    children.push(createToolRenderable(
+      ctx,
+      tool,
+      syntaxStyle,
+      width,
+      expandedWrites.has(toolKey),
+      isWritePreviewTool(tool) ? () => onToggleWrite?.(toolKey) : undefined,
+    ));
+  }
 
   if (message.content.trim()) {
     const markdown = createMarkdown(ctx, message.content.trim(), syntaxStyle, {
@@ -5944,14 +6062,23 @@ function createTodoWriteRenderable(ctx: RenderContext, tool: DisplayToolCall) {
   ]);
 }
 
-function createToolRenderable(ctx: RenderContext, tool: DisplayToolCall, syntaxStyle: SyntaxStyle, width = 80) {
+const WRITE_PREVIEW_LINE_LIMIT = 10;
+
+function createToolRenderable(
+  ctx: RenderContext,
+  tool: DisplayToolCall,
+  syntaxStyle: SyntaxStyle,
+  width = 80,
+  writeExpanded = false,
+  onToggleWrite?: () => void,
+) {
   if (tool.name === "question") {
     return createQuestionToolRenderable(ctx, tool);
   }
   if (tool.name === "todo_write") {
     return createTodoWriteRenderable(ctx, tool);
   }
-  const icon = tool.name === "bash" ? "$" : tool.name === "edit" || tool.name === "write" ? "✎" : "●";
+  const icon = tool.name === "bash" ? "$" : tool.name === "edit" ? "✎" : "●";
   const color = toolColor(tool);
   const header = toolHeader(tool);
   const diff = extractToolDiff(tool);
@@ -5976,7 +6103,17 @@ function createToolRenderable(ctx: RenderContext, tool: DisplayToolCall, syntaxS
       }, [createDiffRenderable(ctx, diff, toolPath(tool), syntaxStyle, width)]),
     ]);
   }
-  if (!tool.isError && tool.name === "write" && typeof tool.args?.content === "string" && isToolFinished(tool)) {
+  if (isWritePreviewTool(tool)) {
+    const preview = formatWritePreview(tool.args.content, writeExpanded);
+    const writeLineCount = tool.args.content.split(/\r?\n/).length;
+    const summary = tool.result
+      ? summarizeToolResult(tool)
+      : `${isToolFinished(tool) ? "Prepared" : "Writing"} ${writeLineCount} line${writeLineCount === 1 ? "" : "s"} to ${toolPath(tool) ?? "file"}`;
+    const hint = preview.omitted > 0
+      ? `... +${preview.omitted} lines (${writeExpanded ? "ctrl+o to collapse" : "ctrl+o to expand"})`
+      : writeExpanded
+        ? "(ctrl+o to collapse)"
+        : "";
     return createBox(ctx, {
       paddingLeft: 3,
       marginTop: 1,
@@ -5984,17 +6121,31 @@ function createToolRenderable(ctx: RenderContext, tool: DisplayToolCall, syntaxS
       flexShrink: 0,
     }, [
       createText(ctx, new StyledText([
-        fg(color)(`${icon} ${displayToolName(tool.name)}`),
+        fg(color)(`${isToolFinished(tool) ? "" : "~ "}${icon} ${displayToolName(tool.name)}`),
         fg(theme.toolText)(header ? ` ${header}` : ""),
-      ])),
+      ]), {
+        onMouseUp: onToggleWrite,
+      }),
       createBox(ctx, {
         paddingLeft: 1,
-        marginTop: 1,
+        marginTop: 0,
         border: ["left"],
         borderColor: theme.borderSubtle,
         flexDirection: "column",
         flexShrink: 0,
-      }, [createCodeBlockRenderable(ctx, tool.args.content, toolPath(tool), syntaxStyle)]),
+      }, [
+        createText(ctx, `└ ${summary}`, {
+          fg: tool.isError ? theme.toolError : theme.textMuted,
+          onMouseUp: onToggleWrite,
+        }),
+        createCodeBlockRenderable(ctx, preview.content, toolPath(tool), syntaxStyle),
+        hint
+          ? createText(ctx, hint, {
+            fg: theme.textMuted,
+            onMouseUp: onToggleWrite,
+          })
+          : null,
+      ]),
     ]);
   }
   const chunks: StyledText["chunks"] = [
@@ -6091,7 +6242,7 @@ function renderTool(tool: DisplayToolCall, syntaxStyle: SyntaxStyle, width = 80)
   if (tool.name === "question") {
     return renderQuestionTool(tool);
   }
-  const icon = tool.name === "bash" ? "$" : tool.name === "edit" || tool.name === "write" ? "✎" : "●";
+  const icon = tool.name === "bash" ? "$" : tool.name === "edit" ? "✎" : "●";
   const color = toolColor(tool);
   const diff = extractToolDiff(tool);
   if (diff && !tool.isError && tool.name === "edit") {
@@ -6104,13 +6255,17 @@ function renderTool(tool: DisplayToolCall, syntaxStyle: SyntaxStyle, width = 80)
       ),
     );
   }
-  if (!tool.isError && tool.name === "write" && typeof tool.args?.content === "string" && isToolFinished(tool)) {
+  if (isWritePreviewTool(tool)) {
+    const preview = formatWritePreview(tool.args.content, false);
+    const summary = tool.result ?? `${isToolFinished(tool) ? "Prepared" : "Writing"} ${tool.args.content.split(/\r?\n/).length} lines to ${toolPath(tool) ?? "file"}`;
     return h("box", { paddingLeft: 3, marginTop: 1, flexDirection: "column", flexShrink: 0 },
       h("text", { fg: color },
-        `${icon} ${displayToolName(tool.name)}${toolHeader(tool) ? ` ${toolHeader(tool)}` : ""}`,
+        `${isToolFinished(tool) ? "" : "~ "}${icon} ${displayToolName(tool.name)}${toolHeader(tool) ? ` ${toolHeader(tool)}` : ""}`,
       ),
-      h("box", { paddingLeft: 1, marginTop: 1, border: ["left"], borderColor: theme.borderSubtle, flexDirection: "column", flexShrink: 0 },
-        renderCodeBlockContent(tool.args.content, toolPath(tool), syntaxStyle),
+      h("box", { paddingLeft: 1, marginTop: 0, border: ["left"], borderColor: theme.borderSubtle, flexDirection: "column", flexShrink: 0 },
+        h("text", { fg: theme.textMuted }, `└ ${summary}`),
+        renderCodeBlockContent(preview.content, toolPath(tool), syntaxStyle),
+        preview.omitted > 0 ? h("text", { fg: theme.textMuted }, `... +${preview.omitted} lines (ctrl+o to expand)`) : null,
       ),
     );
   }
@@ -6485,6 +6640,7 @@ type TranscriptOptions = {
   showThinking?: boolean;
   onToggleThinking?: (key: string) => void;
   onToggleCompaction?: (key: string) => void;
+  onToggleWrite?: (key: string) => void;
 };
 
 function renderTranscript(
@@ -6929,6 +7085,25 @@ function formatQuestionAnswer(answer?: ReadonlyArray<string>) {
 
 function isToolFinished(tool: DisplayToolCall): boolean {
   return tool.status === "completed" || tool.status === "error" || tool.result !== undefined;
+}
+
+function isWritePreviewTool(tool: DisplayToolCall): tool is DisplayToolCall & { args: { content: string } } {
+  return !tool.isError && tool.name === "write" && typeof tool.args?.content === "string";
+}
+
+function writeToolKey(messageKey: string, tool: DisplayToolCall) {
+  return `${messageKey}:write:${tool.id}`;
+}
+
+function formatWritePreview(content: string, expanded: boolean) {
+  const lines = content.split(/\r?\n/);
+  if (expanded || lines.length <= WRITE_PREVIEW_LINE_LIMIT) {
+    return { content, omitted: 0 };
+  }
+  return {
+    content: lines.slice(0, WRITE_PREVIEW_LINE_LIMIT).join("\n"),
+    omitted: lines.length - WRITE_PREVIEW_LINE_LIMIT,
+  };
 }
 
 function assistantStatusLabel(message: DisplayMessage): string {

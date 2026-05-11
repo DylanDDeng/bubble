@@ -464,6 +464,145 @@ describe("Agent", () => {
     expect(events.some((event) => event.type === "text_delta" && event.content === "verified")).toBe(true);
   });
 
+  it("offers finalization after changed code has passing verification", async () => {
+    const captured: Message[][] = [];
+    const provider: Provider = {
+      async *streamChat(messages) {
+        captured.push(messages);
+        if (captured.length === 1) {
+          yield { type: "tool_call", id: "edit_1", name: "edit", arguments: "{}", isStart: true, isEnd: true };
+          yield { type: "done" };
+          return;
+        }
+        if (captured.length === 2) {
+          yield { type: "tool_call", id: "bash_1", name: "bash", arguments: "", isStart: true, isEnd: false };
+          yield {
+            type: "tool_call",
+            id: "bash_1",
+            name: "bash",
+            arguments: "{\"command\":\"npm run build\"}",
+            isStart: false,
+            isEnd: true,
+          };
+          yield { type: "done" };
+          return;
+        }
+        yield { type: "text", content: "final" };
+        yield { type: "done" };
+      },
+      async complete() {
+        return "ok";
+      },
+    };
+    const editTool: ToolRegistryEntry = {
+      name: "edit",
+      description: "edit",
+      parameters: { type: "object", properties: {}, required: [] },
+      async execute() {
+        return {
+          content: "edited",
+          status: "success",
+          metadata: { kind: "edit", path: "/tmp/file.ts" },
+        };
+      },
+    };
+    const bashTool: ToolRegistryEntry = {
+      name: "bash",
+      description: "bash",
+      parameters: { type: "object", properties: {}, required: [] },
+      async execute(args) {
+        return {
+          content: "build ok",
+          status: "success",
+          metadata: { kind: "shell", command: args.command },
+        };
+      },
+    };
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [editTool, bashTool],
+    });
+
+    const events = await collectEvents(agent, "implement the change", "/tmp");
+    expect(captured).toHaveLength(3);
+    expect(captured[2].some((message) => message.role === "user" && String(message.content).includes("Completion checkpoint"))).toBe(true);
+    expect(events.some((event) => event.type === "text_delta" && event.content === "final")).toBe(true);
+  });
+
+  it("does not accept a final answer immediately after failed verification", async () => {
+    const captured: Message[][] = [];
+    const provider: Provider = {
+      async *streamChat(messages) {
+        captured.push(messages);
+        if (captured.length === 1) {
+          yield { type: "tool_call", id: "edit_1", name: "edit", arguments: "{}", isStart: true, isEnd: true };
+          yield { type: "done" };
+          return;
+        }
+        if (captured.length === 2) {
+          yield { type: "tool_call", id: "bash_1", name: "bash", arguments: "", isStart: true, isEnd: false };
+          yield {
+            type: "tool_call",
+            id: "bash_1",
+            name: "bash",
+            arguments: "{\"command\":\"npm run build\"}",
+            isStart: false,
+            isEnd: true,
+          };
+          yield { type: "done" };
+          return;
+        }
+        if (captured.length === 3) {
+          yield { type: "text", content: "done despite failure" };
+          yield { type: "done" };
+          return;
+        }
+        yield { type: "text", content: "blocked by failing verification" };
+        yield { type: "done" };
+      },
+      async complete() {
+        return "ok";
+      },
+    };
+    const editTool: ToolRegistryEntry = {
+      name: "edit",
+      description: "edit",
+      parameters: { type: "object", properties: {}, required: [] },
+      async execute() {
+        return {
+          content: "edited",
+          status: "success",
+          metadata: { kind: "edit", path: "/tmp/file.ts" },
+        };
+      },
+    };
+    const bashTool: ToolRegistryEntry = {
+      name: "bash",
+      description: "bash",
+      parameters: { type: "object", properties: {}, required: [] },
+      async execute(args) {
+        return {
+          content: "build failed",
+          isError: true,
+          status: "command_error",
+          metadata: { kind: "shell", command: args.command },
+        };
+      },
+    };
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [editTool, bashTool],
+    });
+
+    const events = await collectEvents(agent, "implement the change", "/tmp");
+    expect(captured).toHaveLength(4);
+    expect(captured[2].some((message) => message.role === "user" && String(message.content).includes("Verification failed after file changes"))).toBe(true);
+    expect(captured[3].some((message) => message.role === "user" && String(message.content).includes("Files were changed, but the latest verification evidence failed"))).toBe(true);
+    expect(events.some((event) => event.type === "text_delta" && event.content === "blocked by failing verification")).toBe(true);
+  });
+
   it("projects messages before sending them to the provider", async () => {
     const captured: Message[][] = [];
     const provider: Provider = {
