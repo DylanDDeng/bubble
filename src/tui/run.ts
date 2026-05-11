@@ -56,7 +56,7 @@ import { compactDisplayMessages, type DisplayMessage, type DisplayToolCall } fro
 import { createMarkdownSyntaxStyle, createSubtleMarkdownSyntaxStyle } from "./markdown-theme.js";
 import { hashString } from "./render-signature.js";
 import { findToolRenderer } from "./tool-renderers/registry.js";
-import { writeToolExpansionDigest, writeToolKey } from "./tool-renderers/write.js";
+import { writeToolKey } from "./tool-renderers/write.js";
 import { formatWritePreview, isWritePreviewTool } from "./tool-renderers/write-preview.js";
 import { getNextPermissionMode, PERMISSION_MODE_INFO } from "../permission/mode.js";
 import { getContextBudget } from "../context/budget.js";
@@ -3752,7 +3752,7 @@ function OpenTuiApp(props: {
           if (currentTurnHasToolCall) continue;
           redrawTranscript({
             role: "assistant",
-            content: assistantContent,
+            content: "",
             reasoning: assistantReasoning || undefined,
             toolCalls: toolCalls.length ? [...toolCalls] : undefined,
             status: "responding",
@@ -3762,7 +3762,7 @@ function OpenTuiApp(props: {
           assistantReasoning += event.content;
           redrawTranscript({
             role: "assistant",
-            content: currentTurnHasToolCall ? "" : assistantContent,
+            content: "",
             reasoning: assistantReasoning || undefined,
             toolCalls: toolCalls.length ? [...toolCalls] : undefined,
             status: "thinking",
@@ -5383,11 +5383,15 @@ function updateTranscriptHost(
       }
     }
     const compactionExpanded = state.expandedCompactions.has(key);
-    const writeExpansionDigest = writeToolExpansionDigest(message, key, state.expandedWrites);
-    const signature = transcriptMessageSignature(message, showThinking, compactionExpanded, writeExpansionDigest);
+    const signature = transcriptMessageSignature(message, compactionExpanded);
     const previous = state.entries[index];
     if (previous?.key === key && previous.signature === signature) {
-      updateMessageEntry(previous, message, showThinking, compactionExpanded);
+      updateMessageEntry(previous, message, showThinking, compactionExpanded, {
+        syntaxStyle,
+        expandedWrites: state.expandedWrites,
+        width: options?.width ?? 80,
+        onToggleWrite: options?.onToggleWrite,
+      });
       nextEntries.push(previous);
       continue;
     }
@@ -5461,15 +5465,25 @@ type TranscriptEntry = {
     userText?: TextRenderable;
     errorText?: TextRenderable;
     statusText?: TextRenderable;
+    statusBox?: BoxRenderable;
+    reasoningBox?: BoxRenderable;
     reasoningToggleText?: TextRenderable;
     reasoningStreaming?: boolean;
     reasoningMarkdown?: MarkdownRenderable;
+    toolsBox?: BoxRenderable;
+    toolEntries?: Map<string, ToolEntryRef>;
+    contentBox?: BoxRenderable;
     contentMarkdown?: MarkdownRenderable;
     compactionExpanded?: boolean;
     compactionToggleText?: TextRenderable;
     compactionContentText?: TextRenderable;
     compactionDetailBox?: BoxRenderable;
   };
+};
+
+type ToolEntryRef = {
+  signature: string;
+  node: Renderable;
 };
 
 function clearTranscriptEntries(host: BoxRenderable, state: TranscriptState) {
@@ -5486,31 +5500,35 @@ function transcriptMessageKey(message: DisplayMessage, index: number) {
 
 function transcriptMessageSignature(
   message: DisplayMessage,
-  showThinking = true,
   compactionExpanded = false,
-  writeExpansionDigest = "",
 ) {
   if (message.role !== "assistant") return message.role;
   if (message.syntheticKind === "ui_compact_card") {
     return `compaction:${compactionExpanded ? "expanded" : "collapsed"}:${message.compactionMeta?.turns ?? 0}`;
   }
   const modelSwitch = parseModelSwitchMessage(message.content);
-  const tools = (message.toolCalls ?? [])
-    .map((tool) => `${tool.id}:${tool.name}:${tool.status ?? (tool.result === undefined ? "pending" : "completed")}:${tool.isError ? "error" : "ok"}`)
-    .join("|");
-  const visibleReasoning = showThinking && !!message.reasoning?.trim();
+  const pureModelSwitch = modelSwitch && !message.reasoning?.trim() && !(message.toolCalls?.length);
+  if (pureModelSwitch) {
+    return `assistant:model-switch:${hashString(modelSwitch)}`;
+  }
   return [
     message.role,
-    modelSwitch ? "model-switch" : "standard",
-    message.status ?? "idle",
-    visibleReasoning ? "reasoning-visible" : "no-reasoning",
-    message.content.trim() ? "content" : "no-content",
-    tools,
-    writeExpansionDigest,
+    "standard",
   ].join(":");
 }
 
-function updateMessageEntry(entry: TranscriptEntry, message: DisplayMessage, showThinking = true, compactionExpanded = false) {
+function updateMessageEntry(
+  entry: TranscriptEntry,
+  message: DisplayMessage,
+  showThinking = true,
+  compactionExpanded = false,
+  assistantOptions?: {
+    syntaxStyle: SyntaxStyle;
+    expandedWrites: Set<string>;
+    width: number;
+    onToggleWrite?: (key: string) => void;
+  },
+) {
   if (message.role === "user") {
     if (entry.refs.userText) entry.refs.userText.content = message.content || " ";
     return;
@@ -5532,20 +5550,127 @@ function updateMessageEntry(entry: TranscriptEntry, message: DisplayMessage, sho
     }
     return;
   }
+  if (assistantOptions) {
+    updateAssistantEntry(entry, message, showThinking, assistantOptions);
+    return;
+  }
+}
+
+function updateAssistantEntry(
+  entry: TranscriptEntry,
+  message: DisplayMessage,
+  showThinking: boolean,
+  options: {
+    syntaxStyle: SyntaxStyle;
+    expandedWrites: Set<string>;
+    width: number;
+    onToggleWrite?: (key: string) => void;
+  },
+) {
+  const content = message.content.trim();
+  const visibleReasoning = showThinking ? message.reasoning?.trim() ?? "" : "";
+  const tools = message.toolCalls ?? [];
+  const showStatus = !!message.status && !visibleReasoning && !content && tools.length === 0;
+
   if (entry.refs.statusText) {
     entry.refs.statusText.content = assistantStatusLabel(message);
+  }
+  if (entry.refs.statusBox) {
+    entry.refs.statusBox.visible = showStatus;
   }
   if (entry.refs.reasoningToggleText) {
     entry.refs.reasoningStreaming = message.streaming === true;
     entry.refs.reasoningToggleText.content = thinkingLabelContent(message.streaming === true);
   }
   if (entry.refs.reasoningMarkdown) {
-    entry.refs.reasoningMarkdown.content = showThinking ? formatThinkingMarkdown(message.reasoning?.trim() ?? "") : "";
+    entry.refs.reasoningMarkdown.content = formatThinkingMarkdown(visibleReasoning);
     entry.refs.reasoningMarkdown.streaming = message.streaming === true;
   }
+  if (entry.refs.reasoningBox) {
+    entry.refs.reasoningBox.visible = !!visibleReasoning;
+  }
+  updateAssistantToolEntries(entry, tools, options);
   if (entry.refs.contentMarkdown) {
-    entry.refs.contentMarkdown.content = message.content.trim();
+    entry.refs.contentMarkdown.content = content;
     entry.refs.contentMarkdown.streaming = message.streaming === true;
+  }
+  if (entry.refs.contentBox) {
+    entry.refs.contentBox.visible = !!content;
+  }
+}
+
+function updateAssistantToolEntries(
+  entry: TranscriptEntry,
+  tools: DisplayToolCall[],
+  options: {
+    syntaxStyle: SyntaxStyle;
+    expandedWrites: Set<string>;
+    width: number;
+    onToggleWrite?: (key: string) => void;
+  },
+) {
+  const toolsBox = entry.refs.toolsBox;
+  if (!toolsBox) return;
+  toolsBox.visible = tools.length > 0;
+
+  const previousEntries = entry.refs.toolEntries ?? new Map<string, ToolEntryRef>();
+  const nextEntries = new Map<string, ToolEntryRef>();
+
+  tools.forEach((tool, index) => {
+    const toolKey = writeToolKey(entry.key, tool);
+    const writeExpanded = options.expandedWrites.has(toolKey);
+    const signature = toolRenderableSignature(tool, writeExpanded);
+    const previous = previousEntries.get(tool.id);
+    if (previous?.signature === signature) {
+      nextEntries.set(tool.id, previous);
+      return;
+    }
+
+    if (previous) {
+      toolsBox.remove(previous.node.id);
+      previous.node.destroyRecursively();
+    }
+    const node = createToolRenderable(
+      toolsBox.ctx,
+      tool,
+      options.syntaxStyle,
+      options.width,
+      writeExpanded,
+      isWritePreviewTool(tool) ? () => options.onToggleWrite?.(toolKey) : undefined,
+    );
+    toolsBox.add(node, index);
+    nextEntries.set(tool.id, { signature, node });
+  });
+
+  for (const [id, previous] of previousEntries.entries()) {
+    if (nextEntries.has(id)) continue;
+    toolsBox.remove(previous.node.id);
+    previous.node.destroyRecursively();
+  }
+
+  entry.refs.toolEntries = nextEntries;
+}
+
+function toolRenderableSignature(tool: DisplayToolCall, writeExpanded: boolean) {
+  return [
+    tool.id,
+    tool.name,
+    tool.status ?? (tool.result === undefined ? "pending" : "completed"),
+    tool.isError ? "error" : "ok",
+    tool.streamingArgs ? "streaming-args" : "args-complete",
+    writeExpanded ? "expanded" : "collapsed",
+    hashString(stableStringify(tool.args)),
+    hashString(tool.rawArguments ?? ""),
+    hashString(tool.result ?? ""),
+    hashString(stableStringify(tool.metadata ?? null)),
+  ].join(":");
+}
+
+function stableStringify(value: unknown) {
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    return String(value);
   }
 }
 
@@ -5781,77 +5906,88 @@ function createAssistantEntry(
   const children: Renderable[] = [];
   const refs: TranscriptEntry["refs"] = {};
   const visibleReasoning = showThinking ? message.reasoning?.trim() : "";
-  if (message.status && !visibleReasoning && !message.content.trim() && !(message.toolCalls?.length)) {
-    const status = createText(ctx, assistantStatusLabel(message), {
-      fg: theme.messageThinkingText,
-    });
-    refs.statusText = status;
-    children.push(createBox(ctx, {
-      paddingLeft: 3,
-      marginTop: 1,
-      flexShrink: 0,
-    }, [status]));
-  }
-  if (visibleReasoning) {
-    const reasoningChildren: Renderable[] = [];
-    const labelText = createText(ctx, thinkingLabelContent(message.streaming === true), {
-      fg: theme.messageThinkingText,
-      wrapMode: "none",
-    });
-    refs.reasoningToggleText = labelText;
-    refs.reasoningStreaming = message.streaming === true;
-    reasoningChildren.push(createBox(ctx, {
-      flexShrink: 0,
-    }, [labelText]));
-    const markdown = createMarkdown(ctx, formatThinkingMarkdown(visibleReasoning), subtleSyntaxStyle, {
-      streaming: message.streaming === true,
-      fg: theme.messageThinkingContentText,
-    });
-    refs.reasoningMarkdown = markdown;
-    reasoningChildren.push(markdown);
-    children.push(createBox(ctx, {
-      paddingLeft: 2,
-      marginTop: 1,
-      border: ["left"],
-      borderColor: theme.messageThinkingBorder,
-      flexDirection: "column",
-      flexShrink: 0,
-    }, reasoningChildren));
-  }
+  const content = message.content.trim();
+  const tools = message.toolCalls ?? [];
+  const showStatus = !!message.status && !visibleReasoning && !content && tools.length === 0;
 
-  for (const tool of message.toolCalls ?? []) {
-    const toolKey = writeToolKey(key, tool);
-    children.push(createToolRenderable(
-      ctx,
-      tool,
-      syntaxStyle,
-      width,
-      expandedWrites.has(toolKey),
-      isWritePreviewTool(tool) ? () => onToggleWrite?.(toolKey) : undefined,
-    ));
-  }
+  const status = createText(ctx, assistantStatusLabel(message), {
+    fg: theme.messageThinkingText,
+  });
+  refs.statusText = status;
+  const statusBox = createBox(ctx, {
+    paddingLeft: 3,
+    marginTop: 1,
+    flexShrink: 0,
+    visible: showStatus,
+  }, [status]);
+  refs.statusBox = statusBox;
+  children.push(statusBox);
 
-  if (message.content.trim()) {
-    const markdown = createMarkdown(ctx, message.content.trim(), syntaxStyle, {
-      streaming: message.streaming === true,
-      fg: theme.messageAssistantText,
-    });
-    refs.contentMarkdown = markdown;
-    children.push(createBox(ctx, {
-      paddingLeft: 3,
-      marginTop: 1,
-      flexDirection: "column",
+  const labelText = createText(ctx, thinkingLabelContent(message.streaming === true), {
+    fg: theme.messageThinkingText,
+    wrapMode: "none",
+  });
+  refs.reasoningToggleText = labelText;
+  refs.reasoningStreaming = message.streaming === true;
+  const markdown = createMarkdown(ctx, formatThinkingMarkdown(visibleReasoning ?? ""), subtleSyntaxStyle, {
+    streaming: message.streaming === true,
+    fg: theme.messageThinkingContentText,
+  });
+  refs.reasoningMarkdown = markdown;
+  const reasoningBox = createBox(ctx, {
+    paddingLeft: 2,
+    marginTop: 1,
+    border: ["left"],
+    borderColor: theme.messageThinkingBorder,
+    flexDirection: "column",
+    flexShrink: 0,
+    visible: !!visibleReasoning,
+  }, [
+    createBox(ctx, {
       flexShrink: 0,
-    }, [markdown]));
-  }
+    }, [labelText]),
+    markdown,
+  ]);
+  refs.reasoningBox = reasoningBox;
+  children.push(reasoningBox);
 
-  if (!children.length) return null;
-  return {
+  const toolsBox = createBox(ctx, {
+    flexDirection: "column",
+    flexShrink: 0,
+    visible: tools.length > 0,
+  });
+  refs.toolsBox = toolsBox;
+  refs.toolEntries = new Map();
+  children.push(toolsBox);
+
+  const contentMarkdown = createMarkdown(ctx, content, syntaxStyle, {
+    streaming: message.streaming === true,
+    fg: theme.messageAssistantText,
+  });
+  refs.contentMarkdown = contentMarkdown;
+  const contentBox = createBox(ctx, {
+    paddingLeft: 3,
+    marginTop: 1,
+    flexDirection: "column",
+    flexShrink: 0,
+    visible: !!content,
+  }, [contentMarkdown]);
+  refs.contentBox = contentBox;
+  children.push(contentBox);
+
+  const entry: TranscriptEntry = {
     key,
     signature,
     node: createBox(ctx, { flexDirection: "column", flexShrink: 0 }, children),
     refs,
   };
+  updateAssistantToolEntries(entry, tools, {
+    syntaxStyle,
+    expandedWrites,
+    width,
+    onToggleWrite,
+  });
+  return entry;
 }
 
 function createCompactionCardEntry(
