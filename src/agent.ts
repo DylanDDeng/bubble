@@ -135,13 +135,13 @@ export class Agent {
   }
 
   injectSystemReminder(content: string): void {
-    this.appendMessage({ role: "user", content, isMeta: true });
+    this.appendMessage({ role: "meta", kind: "system-reminder", content });
   }
 
   injectModeReminder(): void {
     this.messages = this.messages.filter((message) => !(
-      message.role === "user"
-      && message.isMeta
+      message.role === "meta"
+      && message.kind === "system-reminder"
       && isPermissionModeReminder(message.content)
     ));
     this.injectSystemReminder(reminderForMode(this._mode));
@@ -178,7 +178,7 @@ export class Agent {
     messages: Message[],
     options?: { model?: string; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal },
   ): Promise<string> {
-    return this.provider.complete(messages, {
+    return this.provider.complete(projectMessages(messages), {
       model: options?.model ?? this.apiModel,
       temperature: options?.temperature ?? this.temperature,
       thinkingLevel: options?.thinkingLevel ?? this.thinkingLevel,
@@ -639,7 +639,7 @@ export class Agent {
       systemPrompt: this.messages.find((message) => message.role === "system")?.content,
       hooks: this.hookDefinitions,
     });
-    subAgent.injectSystemReminder(`<system-reminder>\n${policy.reminder}\n</system-reminder>`);
+    subAgent.injectSystemReminder(policy.reminder);
 
     let summary = "";
     const toolNotes: string[] = [];
@@ -716,7 +716,7 @@ export class Agent {
     if (shouldCompact) {
       const compacted = compactMessages(candidate, { keepRecentTurns });
       if (compacted.compacted && compacted.messages) {
-        candidate = compacted.messages;
+        candidate = compacted.messages as typeof candidate;
       }
     }
 
@@ -798,6 +798,7 @@ function estimateResidentChars(messages: Message[]): number {
   for (const message of messages) {
     switch (message.role) {
       case "system":
+      case "meta":
         total += message.content.length;
         break;
       case "tool":
@@ -845,7 +846,7 @@ function estimateToolPayloadChars(messages: Message[]): number {
 }
 
 function countUserTurns(messages: Message[]): number {
-  return messages.reduce((count, message) => count + (message.role === "user" && !message.isMeta ? 1 : 0), 0);
+  return messages.reduce((count, message) => count + (message.role === "user" ? 1 : 0), 0);
 }
 
 function getCurrentHeapUsed(): number {

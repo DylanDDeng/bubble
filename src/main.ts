@@ -237,9 +237,9 @@ async function main() {
     onMessageAppend: (message) => {
       if (!sessionManager) return;
       if (message.role === "system") return;
-      // <system-reminder> injections are runtime/ephemeral; don't persist them —
+      // Runtime meta messages are ephemeral; don't persist them —
       // they will be re-injected as needed on resume based on the current mode.
-      if (message.role === "user" && (message as any).isMeta) return;
+      if (message.role === "meta") return;
       sessionManager.appendMessage(message);
       if (message.role === "assistant") {
         recordMemoryCitations(args.cwd, message.content);
@@ -305,7 +305,7 @@ async function main() {
     const history = sessionManager.getMessages();
     if (history.length > 0) {
       agent.messages = [{ role: "system", content: systemPrompt }, ...history];
-      // Reassigning agent.messages drops any <system-reminder> we injected during
+      // Reassigning agent.messages drops any runtime meta reminder injected during
       // construction. Re-inject if the agent is starting in plan mode.
       if (agent.mode === "plan") {
         agent.injectModeReminder();

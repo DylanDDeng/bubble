@@ -1,4 +1,4 @@
-import type { Message, Provider, StreamChunk, ThinkingLevel, ToolDefinition } from "./types.js";
+import type { Provider, ProviderMessage, StreamChunk, ThinkingLevel, ToolDefinition } from "./types.js";
 import { listBuiltinModels } from "./model-catalog.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
 
@@ -46,7 +46,7 @@ export function createOpenAICodexProvider(options: {
   const sessionId = globalThis.crypto?.randomUUID?.() ?? `bubble_${Date.now()}`;
 
   async function* streamChat(
-    messages: Message[],
+    messages: ProviderMessage[],
     chatOptions: { model: string; tools?: ToolDefinition[]; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal }
   ): AsyncIterable<StreamChunk> {
     const requestConfig = resolveProviderRequestConfig(
@@ -216,7 +216,7 @@ export function createOpenAICodexProvider(options: {
   }
 
   async function complete(
-    messages: Message[],
+    messages: ProviderMessage[],
     chatOptions?: { model?: string; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal }
   ): Promise<string> {
     let content = "";
@@ -269,7 +269,7 @@ export async function fetchOpenAICodexModels(options: {
 }
 
 function buildRequestBody(
-  messages: Message[],
+  messages: ProviderMessage[],
   options: {
     model: string;
     tools?: ToolDefinition[];
@@ -308,7 +308,7 @@ function buildRequestBody(
   return body;
 }
 
-function convertMessage(message: Message): Array<Record<string, unknown>> {
+function convertMessage(message: ProviderMessage): Array<Record<string, unknown>> {
   if (message.role === "system") {
     return [];
   }

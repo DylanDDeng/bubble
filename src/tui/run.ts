@@ -3752,7 +3752,7 @@ function OpenTuiApp(props: {
           if (currentTurnHasToolCall) continue;
           redrawTranscript({
             role: "assistant",
-            content: "",
+            content: assistantContent,
             reasoning: assistantReasoning || undefined,
             toolCalls: toolCalls.length ? [...toolCalls] : undefined,
             status: "responding",
@@ -6596,9 +6596,8 @@ function formatDisplayContentParts(content: ContentPart[], labelStart: number): 
 function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] {
   const result: DisplayMessage[] = [];
   for (const message of agentMessages) {
-    if (message.role === "system" || message.role === "tool") continue;
+    if (message.role === "system" || message.role === "meta" || message.role === "tool") continue;
     if (message.role === "user") {
-      if (message.isMeta) continue;
       result.push({
         role: "user",
         content: typeof message.content === "string"

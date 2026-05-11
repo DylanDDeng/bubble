@@ -9,7 +9,7 @@
 
 import { compactMessages as compactMessagesHeuristic } from "./compact.js";
 import type { CompactOptions, CompactResult } from "./compact.js";
-import type { Message, Provider, ToolCall } from "../types.js";
+import type { Message, Provider, ProviderMessage, ToolCall } from "../types.js";
 
 export interface LLMCompactOptions extends CompactOptions {
   provider: Provider;
@@ -59,9 +59,9 @@ export async function compactMessagesWithLLM(
   options: LLMCompactOptions,
 ): Promise<CompactResult> {
   const keepRecentTurns = options.keepRecentTurns ?? 2;
-  const systemMessages = messages.filter((m) => m.role === "system");
-  const nonSystemMessages = messages.filter((m) => m.role !== "system");
-  const turnStartIndexes = nonSystemMessages
+  const preservedContextMessages = messages.filter((m) => m.role === "system" || m.role === "meta");
+  const conversationalMessages = messages.filter((m) => m.role !== "system" && m.role !== "meta");
+  const turnStartIndexes = conversationalMessages
     .map((m, i) => (m.role === "user" ? i : -1))
     .filter((i) => i >= 0);
 
@@ -74,8 +74,8 @@ export async function compactMessagesWithLLM(
     return { compacted: false };
   }
 
-  const oldMessages = nonSystemMessages.slice(0, keepStartIndex);
-  const keptMessages = nonSystemMessages.slice(keepStartIndex);
+  const oldMessages = conversationalMessages.slice(0, keepStartIndex);
+  const keptMessages = conversationalMessages.slice(keepStartIndex);
 
   let summary: string;
   try {
@@ -92,7 +92,7 @@ export async function compactMessagesWithLLM(
     compacted: true,
     summary,
     messages: [
-      ...systemMessages,
+      ...preservedContextMessages,
       { role: "system", content: `Previous conversation summary:\n${summary}` },
       ...keptMessages,
     ],
@@ -102,7 +102,7 @@ export async function compactMessagesWithLLM(
 
 async function generateSummary(oldMessages: Message[], options: LLMCompactOptions): Promise<string> {
   const transcript = serializeTranscript(oldMessages);
-  const messages: Message[] = [
+  const messages: ProviderMessage[] = [
     { role: "system", content: COMPACT_SYSTEM_PROMPT },
     {
       role: "user",
@@ -133,6 +133,7 @@ function serializeTranscript(messages: Message[]): string {
         lines.push(`[tool] ${truncate(message.content, 800)}`);
         break;
       case "system":
+      case "meta":
         break;
     }
   }

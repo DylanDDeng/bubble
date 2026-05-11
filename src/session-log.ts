@@ -225,6 +225,8 @@ function normalizeMessageToEntries(message: Message, id: string, timestamp: numb
     }
     case "tool":
       return [{ id, type: "tool_result", message, timestamp }];
+    case "meta":
+      return [];
     case "system":
       return [{
         id,
@@ -280,7 +282,7 @@ function pruneIncompleteTail(messages: Message[]): Message[] {
 
   for (let i = 0; i < messages.length; i++) {
     const message = messages[i];
-    if (message.role === "system") continue;
+    if (message.role === "system" || message.role === "meta") continue;
 
     if (message.role === "user") {
       currentTurnStart = i;

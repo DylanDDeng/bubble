@@ -7,12 +7,12 @@
 import OpenAI from "openai";
 import { createOpenAICodexProvider, isOpenAICodexBaseUrl } from "./provider-openai-codex.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
-import type { Message, Provider, StreamChunk, ThinkingLevel, ToolDefinition } from "./types.js";
+import type { Provider, ProviderMessage, StreamChunk, ThinkingLevel, ToolDefinition } from "./types.js";
 
 type ReasoningContentEcho = "tool_calls" | "all";
 
 export function toChatCompletionsMessage(
-  message: Message,
+  message: ProviderMessage,
   options: { reasoningContentEcho?: ReasoningContentEcho } = {},
 ): Record<string, unknown> {
   const reasoningContentEcho = options.reasoningContentEcho ?? "tool_calls";
@@ -79,7 +79,7 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
   const fallbackModel = "gpt-4o";
 
   async function* streamChat(
-    messages: Message[],
+    messages: ProviderMessage[],
     chatOptions: { model: string; tools?: ToolDefinition[]; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal }
   ): AsyncIterable<StreamChunk> {
     const requestConfig = resolveProviderRequestConfig(
@@ -130,7 +130,7 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
     yield { type: "done" };
   }
 
-  async function complete(messages: Message[], chatOptions?: { model?: string; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal }): Promise<string> {
+  async function complete(messages: ProviderMessage[], chatOptions?: { model?: string; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal }): Promise<string> {
     const requestConfig = resolveProviderRequestConfig(
       options.providerId || "",
       chatOptions?.model ?? fallbackModel,

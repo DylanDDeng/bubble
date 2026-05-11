@@ -22,7 +22,7 @@ export function createExitPlanModeTool(controller: PlanController): ToolRegistry
     name: "exit_plan_mode",
     readOnly: true,
     description:
-      "ONLY call this tool when the harness has told you (via a <system-reminder>) that plan mode is ACTIVE. " +
+      "ONLY call this tool when the harness has told you via a runtime reminder that plan mode is ACTIVE. " +
       "Do NOT call it during ordinary work — in default mode you should just use the regular tools directly. " +
       "In plan mode: after investigating, call this with a concrete step-by-step plan so the user can approve, edit, or reject. " +
       "Approval automatically switches the agent out of plan mode.",

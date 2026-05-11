@@ -6,7 +6,7 @@ const PRUNEABLE_TOOLS = new Set([
 const TOOL_RESULT_KEEP_COUNT = 2;
 const MIN_PRUNE_LENGTH = 240;
 
-export function pruneMessages(messages: Message[]): Message[] {
+export function pruneMessages<T extends Message>(messages: T[]): T[] {
   const toolNameByCallId = new Map<string, string>();
   const pruneCandidates: Array<{ index: number; toolName: string; message: ToolMessage }> = [];
   const protectedToolCallIds = collectProtectedToolCallIds(messages);
@@ -59,7 +59,7 @@ export function pruneMessages(messages: Message[]): Message[] {
     return {
       ...message,
       content: summarizePrunedToolResult(candidate.toolName, candidate.message.content),
-    };
+    } as T;
   });
 }
 
@@ -89,7 +89,7 @@ function summarizePrunedToolResult(toolName: string, content: string): string {
  * needs to reason over. Used as a last-resort microcompact pass when a
  * standard prune hasn't reclaimed enough budget.
  */
-export function aggressivePruneMessages(messages: Message[]): Message[] {
+export function aggressivePruneMessages<T extends Message>(messages: T[]): T[] {
   const toolNameByCallId = new Map<string, string>();
   const protectedToolCallIds = collectProtectedToolCallIds(messages);
   for (const message of messages) {
@@ -109,17 +109,14 @@ export function aggressivePruneMessages(messages: Message[]): Message[] {
     if (!toolName || !shouldPruneToolResult(toolName, message.content)) {
       return message;
     }
-    return { ...message, content: summarizePrunedToolResult(toolName, message.content) };
+    return { ...message, content: summarizePrunedToolResult(toolName, message.content) } as T;
   });
 }
 
 function collectProtectedToolCallIds(messages: Message[]): Set<string> {
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index];
-    if (message.role === "tool" || message.role === "system") {
-      continue;
-    }
-    if (message.role === "user" && message.isMeta) {
+    if (message.role === "tool" || message.role === "system" || message.role === "meta") {
       continue;
     }
     if (message.role === "assistant" && message.toolCalls && message.toolCalls.length > 0) {

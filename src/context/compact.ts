@@ -73,9 +73,9 @@ export function compactMessages(
 ): CompactResult {
   const keepRecentTurns = options.keepRecentTurns ?? 2;
   const maxSummaryItems = options.maxSummaryItems ?? 4;
-  const systemMessages = messages.filter((message) => message.role === "system");
-  const nonSystemMessages = messages.filter((message) => message.role !== "system");
-  const turnStartIndexes = nonSystemMessages
+  const preservedContextMessages = messages.filter((message) => message.role === "system" || message.role === "meta");
+  const conversationalMessages = messages.filter((message) => message.role !== "system" && message.role !== "meta");
+  const turnStartIndexes = conversationalMessages
     .map((message, index) => (message.role === "user" ? index : -1))
     .filter((index) => index >= 0);
 
@@ -88,15 +88,15 @@ export function compactMessages(
     return { compacted: false };
   }
 
-  const oldMessages = nonSystemMessages.slice(0, keepStartIndex);
-  const keptMessages = nonSystemMessages.slice(keepStartIndex);
+  const oldMessages = conversationalMessages.slice(0, keepStartIndex);
+  const keptMessages = conversationalMessages.slice(keepStartIndex);
   const summary = buildMessageSummary(oldMessages, maxSummaryItems);
   if (!summary) {
     return { compacted: false };
   }
 
   const compactedMessages: Message[] = [
-    ...systemMessages.map((message) => cloneMessage(message)),
+    ...preservedContextMessages.map((message) => cloneMessage(message)),
     {
       role: "system",
       content: `Previous conversation summary:\n${summary}`,

@@ -4,7 +4,7 @@ export interface RuntimePromptOptions {
   thinkingLevel?: ThinkingLevel;
   /**
    * Kept for API compatibility. Agent mode is no longer baked into the static
-   * system prompt — mode changes are signalled via <system-reminder> injections
+   * system prompt — mode changes are signalled via hidden runtime reminders
    * (see src/prompt/reminders.ts) so the base prompt stays stable for caching.
    */
   mode?: PermissionMode;

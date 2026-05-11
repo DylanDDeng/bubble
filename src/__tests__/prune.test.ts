@@ -121,7 +121,7 @@ describe("aggressivePruneMessages", () => {
         toolCalls: [{ id: "call_1", name: "read", arguments: "{\"file\":\"a.ts\"}" }],
       },
       { role: "tool", toolCallId: "call_1", content: longText("active read") },
-      { role: "user", content: "<system-reminder>mode changed</system-reminder>", isMeta: true },
+      { role: "meta", kind: "system-reminder", content: "mode changed" },
     ];
 
     const pruned = aggressivePruneMessages(messages);

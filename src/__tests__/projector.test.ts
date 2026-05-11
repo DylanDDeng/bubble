@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { projectMessages, repairToolCallChains } from "../context/projector.js";
-import type { Message } from "../types.js";
+import type { Message, ProviderMessage } from "../types.js";
 
 describe("repairToolCallChains", () => {
   it("leaves a well-formed conversation untouched", () => {
-    const input: Message[] = [
+    const input: ProviderMessage[] = [
       { role: "user", content: "go" },
       {
         role: "assistant",
@@ -22,7 +22,7 @@ describe("repairToolCallChains", () => {
   });
 
   it("synthesizes a placeholder when a tool_call has no response", () => {
-    const input: Message[] = [
+    const input: ProviderMessage[] = [
       { role: "user", content: "go" },
       {
         role: "assistant",
@@ -47,16 +47,14 @@ describe("repairToolCallChains", () => {
   });
 
   it("pulls a tool message back into place when a foreign message interleaved between tool_calls and tool", () => {
-    // Simulates Shift+Tab firing mid-stream — setMode injects a meta-user
-    // reminder between the assistant's tool_calls and its tool result.
-    const input: Message[] = [
+    const input: ProviderMessage[] = [
       { role: "user", content: "go" },
       {
         role: "assistant",
         content: "",
         toolCalls: [{ id: "edit:6", name: "edit", arguments: "{}" }],
       },
-      { role: "user", content: "<system-reminder>", isMeta: true },
+      { role: "system", content: "runtime reminder" },
       { role: "tool", toolCallId: "edit:6", content: "ok" },
     ];
 
@@ -69,12 +67,12 @@ describe("repairToolCallChains", () => {
         toolCalls: [{ id: "edit:6", name: "edit", arguments: "{}" }],
       },
       { role: "tool", toolCallId: "edit:6", content: "ok" },
-      { role: "user", content: "<system-reminder>", isMeta: true },
+      { role: "system", content: "runtime reminder" },
     ]);
   });
 
   it("drops orphan tool messages with no preceding tool_call", () => {
-    const input: Message[] = [
+    const input: ProviderMessage[] = [
       { role: "user", content: "go" },
       { role: "tool", toolCallId: "ghost:1", content: "leftover" },
       { role: "assistant", content: "hi" },
@@ -86,7 +84,7 @@ describe("repairToolCallChains", () => {
   });
 
   it("drops orphan tool messages that don't match any pending id even if they appear inside a tool window", () => {
-    const input: Message[] = [
+    const input: ProviderMessage[] = [
       {
         role: "assistant",
         content: "",
@@ -107,7 +105,7 @@ describe("repairToolCallChains", () => {
   });
 
   it("preserves tool message order matching the assistant's toolCalls order", () => {
-    const input: Message[] = [
+    const input: ProviderMessage[] = [
       {
         role: "assistant",
         content: "",
@@ -143,5 +141,31 @@ describe("projectMessages", () => {
     const synth = out.find((m) => m.role === "tool") as any;
     expect(synth).toBeDefined();
     expect(synth.toolCallId).toBe("edit:6");
+  });
+
+  it("projects runtime meta into system context instead of user messages", () => {
+    const out = projectMessages([
+      { role: "system", content: "base" },
+      { role: "user", content: "go" },
+      { role: "meta", kind: "system-reminder", content: "Plan mode is now ACTIVE." },
+    ]);
+
+    expect(out).toEqual([
+      { role: "system", content: "base\n\nRuntime reminder:\nPlan mode is now ACTIVE." },
+      { role: "user", content: "go" },
+    ]);
+  });
+
+  it("does not project meta excluded from model context", () => {
+    const out = projectMessages([
+      { role: "system", content: "base" },
+      { role: "meta", kind: "runtime-context", content: "hidden", includeInLlm: false },
+      { role: "user", content: "go" },
+    ]);
+
+    expect(out).toEqual([
+      { role: "system", content: "base" },
+      { role: "user", content: "go" },
+    ]);
   });
 });

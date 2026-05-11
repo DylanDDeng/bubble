@@ -23,11 +23,6 @@ export type ReasoningEffort = ThinkingLevel;
 export interface UserMessage {
   role: "user";
   content: string | ContentPart[];
-  /**
-   * Marks this message as harness-emitted metadata (e.g. a <system-reminder>),
-   * not actual user input. Renderers may hide these; compaction should generally preserve them.
-   */
-  isMeta?: boolean;
 }
 
 export interface AssistantMessage {
@@ -50,7 +45,21 @@ export interface SystemMessage {
   content: string;
 }
 
-export type Message = UserMessage | AssistantMessage | ToolMessage | SystemMessage;
+export type MetaMessageKind = "system-reminder" | "runtime-context";
+
+export interface MetaMessage {
+  role: "meta";
+  kind: MetaMessageKind;
+  content: string;
+  /**
+   * Runtime metadata is hidden from transcript and session persistence. When
+   * true or omitted, the projector may convert it into model context.
+   */
+  includeInLlm?: boolean;
+}
+
+export type ProviderMessage = UserMessage | AssistantMessage | ToolMessage | SystemMessage;
+export type Message = ProviderMessage | MetaMessage;
 
 // ============================================================================
 // Tools
@@ -143,7 +152,7 @@ export interface ToolRegistryEntry extends ToolDefinition {
   /**
    * If true, this tool is omitted from the tool list sent to the model on each
    * turn until unlocked via `tool_search`. Only the tool's name appears in a
-   * startup &lt;system-reminder&gt;. Used for MCP tools to keep them out of the
+   * startup runtime reminder. Used for MCP tools to keep them out of the
    * per-turn context cost when not in use.
    */
   deferred?: boolean;
@@ -207,7 +216,7 @@ export interface TokenUsage {
 
 export interface Provider {
   streamChat(
-    messages: Message[],
+    messages: ProviderMessage[],
     options: {
       model: string;
       tools?: ToolDefinition[];
@@ -216,7 +225,7 @@ export interface Provider {
       abortSignal?: AbortSignal;
     }
   ): AsyncIterable<StreamChunk>;
-  complete(messages: Message[], options?: { model?: string; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal }): Promise<string>;
+  complete(messages: ProviderMessage[], options?: { model?: string; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal }): Promise<string>;
 }
 
 // ============================================================================

@@ -29,7 +29,7 @@ export function createToolSearchTool(controller: ToolSearchController): ToolRegi
     readOnly: true,
     description:
       'Fetches full schema definitions for deferred tools so they can be called. ' +
-      'Deferred tools appear by name in <system-reminder> messages; their parameters are unknown ' +
+      'Deferred tools appear by name in hidden runtime reminders; their parameters are unknown ' +
       'until loaded. Use this tool with query "select:<name>[,<name>...]" to load specific tools, ' +
       'or with free-text keywords to search for relevant tools.',
     parameters: {

@@ -1,6 +1,6 @@
 /**
  * System reminders - short, runtime-variable instructions injected into the
- * message stream as <system-reminder>-wrapped user messages with isMeta=true.
+ * message stream as hidden meta messages.
  *
  * Rationale: the static system prompt is stable and cacheable. Mode transitions
  * and other ephemeral state are signaled via reminders so we do not invalidate
@@ -10,7 +10,7 @@
 import type { PermissionMode } from "../types.js";
 
 export function wrapInSystemReminder(content: string): string {
-  return `<system-reminder>\n${content.trim()}\n</system-reminder>`;
+  return content.trim();
 }
 
 export function isPermissionModeReminder(content: unknown): boolean {
@@ -63,7 +63,6 @@ export function reminderForMode(mode: PermissionMode): string {
   }
 }
 
-// Backward-compat exports kept in case external code pinned the old names.
 export const PLAN_MODE_ENTER_REMINDER = reminderForMode("plan");
 export const PLAN_MODE_EXIT_REMINDER = reminderForMode("default");
 

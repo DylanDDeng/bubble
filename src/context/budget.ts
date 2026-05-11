@@ -24,6 +24,7 @@ export interface ContextBudgetOptions {
 export function estimateMessageTokens(message: Message): number {
   switch (message.role) {
     case "system":
+    case "meta":
     case "tool":
       return estimateTextTokens(message.content);
     case "assistant":

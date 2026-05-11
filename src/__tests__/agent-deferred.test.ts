@@ -60,13 +60,13 @@ describe("Agent deferred tools", () => {
     expect(namesTurn2).toEqual(["mcp__arxiv__search_papers", "read"]);
   });
 
-  it("injects a deferred-tools system-reminder at construction when any deferred tools exist", async () => {
+  it("injects a deferred-tools runtime reminder at construction when any deferred tools exist", async () => {
     const { provider } = spyProvider();
     const tools = [makeTool("mcp__arxiv__search_papers", { deferred: true })];
     const agent = new Agent({ provider, model: "gpt-4o", tools });
 
     const meta = agent.messages.find(
-      (m) => m.role === "user" && (m as any).isMeta && String((m as any).content).includes("deferred tools"),
+      (m) => m.role === "meta" && m.kind === "system-reminder" && m.content.includes("deferred tools"),
     );
     expect(meta).toBeDefined();
     expect(String((meta as any).content)).toContain("mcp__arxiv__search_papers");

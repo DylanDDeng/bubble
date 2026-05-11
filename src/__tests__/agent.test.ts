@@ -43,6 +43,18 @@ function toolForAgentTest(name: string): ToolRegistryEntry {
   };
 }
 
+function hasSystemContext(messages: Message[], text: string): boolean {
+  return messages.some((message) => message.role === "system" && message.content.includes(text));
+}
+
+function hasUserText(messages: Message[], text: string): boolean {
+  return messages.some((message) => (
+    message.role === "user"
+    && typeof message.content === "string"
+    && message.content.includes(text)
+  ));
+}
+
 describe("Agent", () => {
   const dummyTool: ToolRegistryEntry = {
     name: "dummy",
@@ -432,11 +444,8 @@ describe("Agent", () => {
     const toolEnd = events.find((event) => event.type === "tool_end") as any;
     expect(toolEnd.result.content).toContain("Subtask summary:");
     expect(toolEnd.result.content).toContain("Subtask type: general_readonly");
-    expect(captured[2].some((message) => (
-      message.role === "user"
-      && typeof message.content === "string"
-      && message.content.includes("Summarize the task tool output above and continue with your task.")
-    ))).toBe(true);
+    expect(hasSystemContext(captured[2], "Summarize the task tool output above and continue with your task.")).toBe(true);
+    expect(hasUserText(captured[2], "Summarize the task tool output above and continue with your task.")).toBe(false);
   });
 
   it("continues once with a verification reminder when code was changed but not verified", async () => {
@@ -507,8 +516,8 @@ describe("Agent", () => {
 
     const events = await collectEvents(agent, "implement the change", "/tmp");
     expect(captured).toHaveLength(4);
-    expect(captured[1].some((message) => message.role === "user" && String(message.content).includes("Verification required before final answer"))).toBe(true);
-    expect(captured[2].some((message) => message.role === "user" && String(message.content).includes("Files were changed but no verification evidence"))).toBe(true);
+    expect(hasSystemContext(captured[1], "Verification required before final answer")).toBe(true);
+    expect(hasSystemContext(captured[2], "Files were changed but no verification evidence")).toBe(true);
     expect(events.some((event) => event.type === "tool_end" && event.name === "bash")).toBe(true);
     expect(events.some((event) => event.type === "text_delta" && event.content === "verified")).toBe(true);
   });
@@ -575,7 +584,7 @@ describe("Agent", () => {
 
     const events = await collectEvents(agent, "implement the change", "/tmp");
     expect(captured).toHaveLength(3);
-    expect(captured[2].some((message) => message.role === "user" && String(message.content).includes("Completion checkpoint"))).toBe(true);
+    expect(hasSystemContext(captured[2], "Completion checkpoint")).toBe(true);
     expect(events.some((event) => event.type === "text_delta" && event.content === "final")).toBe(true);
   });
 
@@ -647,8 +656,8 @@ describe("Agent", () => {
 
     const events = await collectEvents(agent, "implement the change", "/tmp");
     expect(captured).toHaveLength(4);
-    expect(captured[2].some((message) => message.role === "user" && String(message.content).includes("Verification failed after file changes"))).toBe(true);
-    expect(captured[3].some((message) => message.role === "user" && String(message.content).includes("Files were changed, but the latest verification evidence failed"))).toBe(true);
+    expect(hasSystemContext(captured[2], "Verification failed after file changes")).toBe(true);
+    expect(hasSystemContext(captured[3], "Files were changed, but the latest verification evidence failed")).toBe(true);
     expect(events.some((event) => event.type === "text_delta" && event.content === "blocked by failing verification")).toBe(true);
   });
 
@@ -708,11 +717,7 @@ describe("Agent", () => {
 
     const events = await collectEvents(agent, "Do something", "/tmp");
     expect(events.some((event) => event.type === "text_delta" && event.content === "Final without tools.")).toBe(true);
-    expect(captured[0].some((message) => (
-      message.role === "user"
-      && typeof message.content === "string"
-      && message.content.includes("CRITICAL - MAXIMUM STEPS REACHED")
-    ))).toBe(true);
+    expect(hasSystemContext(captured[0], "CRITICAL - MAXIMUM STEPS REACHED")).toBe(true);
   });
 
   it("uses task budget exhaustion to force a text-only follow-up turn", async () => {
@@ -746,11 +751,7 @@ describe("Agent", () => {
 
     const events = await collectEvents(agent, "Call dummy", "/tmp");
     expect(events.some((event) => event.type === "text_delta" && event.content === "Budget summary.")).toBe(true);
-    expect(captured[1].some((message) => (
-      message.role === "user"
-      && typeof message.content === "string"
-      && message.content.includes("task budget")
-    ))).toBe(true);
+    expect(hasSystemContext(captured[1], "task budget")).toBe(true);
   });
 
   it("auto-compacts oversized history before sending it to the provider", async () => {
@@ -808,13 +809,8 @@ describe("Agent", () => {
     });
 
     await collectEvents(agent, "Find where API keys are stored and whether they can leak", "/tmp");
-    const userMessages = captured[0].filter((message) => message.role === "user");
-    expect(userMessages.some((message) => (
-      typeof message.content === "string" && message.content.includes("Security/configuration investigation workflow is active")
-    ))).toBe(true);
-    expect(userMessages.some((message) => (
-      typeof message.content === "string" && message.content.includes("Workflow phase: investigate")
-    ))).toBe(true);
+    expect(hasSystemContext(captured[0], "Security/configuration investigation workflow is active")).toBe(true);
+    expect(hasSystemContext(captured[0], "Workflow phase: investigate")).toBe(true);
   });
 
   it("shrinks resident history after a long tool-heavy run", async () => {
@@ -1197,7 +1193,7 @@ describe("Agent", () => {
       expect(agent.modeVersion).toBe(0);
     });
 
-    it("injects a plan-mode <system-reminder> when booting in plan mode", () => {
+    it("injects a plan-mode runtime reminder when booting in plan mode", () => {
       const agent = new Agent({
         provider: createMockProvider([]),
         model: "gpt-4o",
@@ -1206,29 +1202,28 @@ describe("Agent", () => {
         mode: "plan",
       });
       const metaMessages = agent.messages.filter(
-        (m) => m.role === "user" && (m as any).isMeta,
+        (m) => m.role === "meta" && m.kind === "system-reminder",
       );
       expect(metaMessages).toHaveLength(1);
-      expect((metaMessages[0] as any).content).toContain("<system-reminder>");
       expect((metaMessages[0] as any).content).toContain("Plan mode is now ACTIVE");
     });
 
-    it("replaces the mode <system-reminder> on mode transitions", () => {
+    it("replaces the mode runtime reminder on mode transitions", () => {
       const agent = new Agent({
         provider: createMockProvider([]),
         model: "gpt-4o",
         tools: [],
         systemPrompt: "stable",
       });
-      expect(agent.messages.filter((m) => m.role === "user" && (m as any).isMeta)).toHaveLength(0);
+      expect(agent.messages.filter((m) => m.role === "meta")).toHaveLength(0);
 
       agent.setMode("plan");
-      let metas = agent.messages.filter((m) => m.role === "user" && (m as any).isMeta);
+      let metas = agent.messages.filter((m) => m.role === "meta");
       expect(metas).toHaveLength(1);
       expect((metas[0] as any).content).toContain("Plan mode is now ACTIVE");
 
       agent.setMode("default");
-      metas = agent.messages.filter((m) => m.role === "user" && (m as any).isMeta);
+      metas = agent.messages.filter((m) => m.role === "meta");
       expect(metas).toHaveLength(1);
       expect((metas[0] as any).content).not.toContain("Plan mode is now ACTIVE");
       expect((metas[0] as any).content).toContain("Permission mode is now: default");
@@ -1245,7 +1240,7 @@ describe("Agent", () => {
       agent.setMode("plan");
       agent.setMode("bypassPermissions");
 
-      const metas = agent.messages.filter((m) => m.role === "user" && (m as any).isMeta);
+      const metas = agent.messages.filter((m) => m.role === "meta");
       expect(metas).toHaveLength(1);
       expect((metas[0] as any).content).toContain("bypassPermissions");
       expect((metas[0] as any).content).not.toContain("Plan mode is now ACTIVE");
@@ -1259,7 +1254,7 @@ describe("Agent", () => {
         systemPrompt: "stable",
       });
       agent.setMode("bypassPermissions");
-      const metas = agent.messages.filter((m) => m.role === "user" && (m as any).isMeta);
+      const metas = agent.messages.filter((m) => m.role === "meta");
       expect(metas).toHaveLength(1);
       expect((metas[0] as any).content).toContain("bypassPermissions");
       expect((metas[0] as any).content).toContain("auto-approve");

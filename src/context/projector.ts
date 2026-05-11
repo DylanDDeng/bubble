@@ -1,7 +1,7 @@
 import { getContextBudget } from "./budget.js";
 import { compactMessages } from "./compact.js";
 import { pruneMessages } from "./prune.js";
-import type { AssistantMessage, Message, SystemMessage, ToolMessage } from "../types.js";
+import type { AssistantMessage, Message, MetaMessage, ProviderMessage, SystemMessage, ToolMessage } from "../types.js";
 
 export interface ProjectionOptions {
   mode?: "full" | "pruned" | "budgeted";
@@ -11,36 +11,40 @@ export interface ProjectionOptions {
   anchorMessageCount?: number;
 }
 
-export function projectMessages(messages: Message[], options: ProjectionOptions = {}): Message[] {
+export function projectMessages(messages: Message[], options: ProjectionOptions = {}): ProviderMessage[] {
   const mode = options.mode ?? "full";
-  const projected: Message[] = [];
-  let systemBuffer: string[] = [];
-
-  const flushSystemBuffer = () => {
-    if (systemBuffer.length === 0) return;
-    projected.push({
-      role: "system",
-      content: systemBuffer.join("\n\n"),
-    } satisfies SystemMessage);
-    systemBuffer = [];
-  };
+  const projectedBody: ProviderMessage[] = [];
+  const systemContext: string[] = [];
 
   for (const message of messages) {
     if (message.role === "system") {
-      systemBuffer.push(message.content);
+      systemContext.push(message.content);
       continue;
     }
 
-    flushSystemBuffer();
+    if (message.role === "meta") {
+      if (message.includeInLlm !== false) {
+        systemContext.push(formatMetaMessage(message));
+      }
+      continue;
+    }
 
     if (message.role === "assistant" && isEmptyAssistantMessage(message)) {
       continue;
     }
 
-    projected.push(cloneMessage(message));
+    projectedBody.push(cloneMessage(message));
   }
 
-  flushSystemBuffer();
+  const projected: ProviderMessage[] = [
+    ...(systemContext.length > 0
+      ? [{
+          role: "system",
+          content: systemContext.join("\n\n"),
+        } satisfies SystemMessage]
+      : []),
+    ...projectedBody,
+  ];
 
   const repaired = repairToolCallChains(projected);
 
@@ -74,13 +78,14 @@ export function projectMessages(messages: Message[], options: ProjectionOptions 
       return pruned;
     }
 
-    const afterFirstPass = getContextBudget(options.providerId, options.modelId, compacted.messages);
+    const compactedMessages = compacted.messages as ProviderMessage[];
+    const afterFirstPass = getContextBudget(options.providerId, options.modelId, compactedMessages);
     if (!afterFirstPass.shouldCompact) {
-      return repairToolCallChains(compacted.messages);
+      return repairToolCallChains(compactedMessages);
     }
 
     const tighter = compactMessages(pruned, { keepRecentTurns: 1 });
-    const finalMessages = tighter.compacted && tighter.messages ? tighter.messages : compacted.messages;
+    const finalMessages = (tighter.compacted && tighter.messages ? tighter.messages : compactedMessages) as ProviderMessage[];
     return repairToolCallChains(finalMessages);
   }
 
@@ -103,8 +108,8 @@ export function projectMessages(messages: Message[], options: ProjectionOptions 
  * synthesize placeholder tool messages for any tool_call_id with no captured
  * result. Other messages keep their original order.
  */
-export function repairToolCallChains(messages: Message[]): Message[] {
-  const result: Message[] = [];
+export function repairToolCallChains(messages: ProviderMessage[]): ProviderMessage[] {
+  const result: ProviderMessage[] = [];
   const consumed = new Set<number>();
 
   for (let i = 0; i < messages.length; i++) {
@@ -165,7 +170,17 @@ function isEmptyAssistantMessage(message: AssistantMessage): boolean {
   return !hasContent && !hasReasoning && !hasToolCalls;
 }
 
-function cloneMessage(message: Message): Message {
+function formatMetaMessage(message: MetaMessage): string {
+  switch (message.kind) {
+    case "system-reminder":
+      return `Runtime reminder:\n${message.content}`;
+    case "runtime-context":
+    default:
+      return `Runtime context:\n${message.content}`;
+  }
+}
+
+function cloneMessage(message: ProviderMessage): ProviderMessage {
   if (message.role === "assistant") {
     return {
       ...message,
