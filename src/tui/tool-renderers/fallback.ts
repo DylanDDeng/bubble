@@ -37,7 +37,7 @@ function renderFallbackTool({ ctx, tool, syntaxStyle, width, helpers }: ToolRend
   }
 
   const chunks: StyledText["chunks"] = [
-    fg(color)(`${helpers.isToolFinished(tool) ? "" : "~ "}${icon} ${helpers.displayToolName(tool.name)}`),
+    fg(color)(`${icon} ${helpers.displayToolName(tool.name)}`),
   ];
   if (header) chunks.push(fg(theme.toolText)(` ${header}`));
   if (tool.result) {

@@ -60,7 +60,7 @@ function renderWriteTool({ ctx, tool, syntaxStyle, writeExpanded, onToggleWrite,
     flexShrink: 0,
   }, [
     helpers.createText(ctx, new StyledText([
-      fg(color)(`${helpers.isToolFinished(tool) ? "" : "~ "}${icon} ${helpers.displayToolName(tool.name)}`),
+      fg(color)(`${icon} ${helpers.displayToolName(tool.name)}`),
       fg(theme.toolText)(header ? ` ${header}` : ""),
     ]), {
       onMouseUp: onToggleWrite,
