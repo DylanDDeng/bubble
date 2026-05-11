@@ -55,9 +55,7 @@ import { expandAtMentions, filterFileSuggestions, findAtContext, listProjectFile
 import { compactDisplayMessages, type DisplayMessage, type DisplayToolCall } from "./display-history.js";
 import { createMarkdownSyntaxStyle, createSubtleMarkdownSyntaxStyle } from "./markdown-theme.js";
 import { hashString } from "./render-signature.js";
-import { StreamingRedrawThrottler, type RedrawReason } from "./streaming-redraw.js";
 import { findToolRenderer } from "./tool-renderers/registry.js";
-import { finishStreamingToolCall, upsertStreamingToolCall } from "./tool-renderers/streaming.js";
 import { writeToolExpansionDigest, writeToolKey } from "./tool-renderers/write.js";
 import { formatWritePreview, isWritePreviewTool } from "./tool-renderers/write-preview.js";
 import { getNextPermissionMode, PERMISSION_MODE_INFO } from "../permission/mode.js";
@@ -509,8 +507,6 @@ function OpenTuiApp(props: {
   let homeComposerShell: BoxRenderable | undefined;
   let sessionComposerShell: BoxRenderable | undefined;
   const promptScannerSyncs = new Set<PromptScannerSync>();
-  const STREAMING_TOOL_CALL_REDRAW_INTERVAL_MS = 80;
-  const streamingToolCallRedraw = new StreamingRedrawThrottler(STREAMING_TOOL_CALL_REDRAW_INTERVAL_MS);
   let approvalRoot: BoxRenderable | undefined;
   let approvalHeaderTitle: TextRenderable | undefined;
   let approvalMetaIcon: TextRenderable | undefined;
@@ -1703,7 +1699,6 @@ function OpenTuiApp(props: {
   onCleanup(() => {
     props.setRawGlobalKeyHandler?.(undefined);
     if (sidebarLspSyncTimer) clearInterval(sidebarLspSyncTimer);
-    streamingToolCallRedraw.cancel();
     for (const timer of questionSyncTimers) clearTimeout(timer);
     questionSyncTimers.clear();
     if (props.options.planHandlerRef) props.options.planHandlerRef.current = undefined;
@@ -1947,12 +1942,9 @@ function OpenTuiApp(props: {
   function redrawTranscript(
     extra?: DisplayMessage,
     baseMessages = displayMessages,
-    reason: RedrawReason = "normal",
   ) {
     streamingDisplay = extra;
-    streamingToolCallRedraw.schedule(reason, () => {
-      renderTranscriptNow(streamingDisplay, reason === "streaming-tool-call" ? displayMessages : baseMessages);
-    });
+    renderTranscriptNow(streamingDisplay, baseMessages);
   }
 
   function renderTranscriptNow(extra?: DisplayMessage, baseMessages = displayMessages) {
@@ -3739,6 +3731,7 @@ function OpenTuiApp(props: {
     let assistantContent = "";
     let assistantReasoning = "";
     const toolCalls: DisplayToolCall[] = [];
+    let currentTurnHasToolCall = false;
     let runError: string | undefined;
     let runCancelled = false;
     try {
@@ -3747,6 +3740,7 @@ function OpenTuiApp(props: {
           assistantContent = "";
           assistantReasoning = "";
           toolCalls.length = 0;
+          currentTurnHasToolCall = false;
           redrawTranscript({
             role: "assistant",
             content: "",
@@ -3755,6 +3749,7 @@ function OpenTuiApp(props: {
           });
         } else if (event.type === "text_delta") {
           assistantContent += event.content;
+          if (currentTurnHasToolCall) continue;
           redrawTranscript({
             role: "assistant",
             content: assistantContent,
@@ -3767,40 +3762,28 @@ function OpenTuiApp(props: {
           assistantReasoning += event.content;
           redrawTranscript({
             role: "assistant",
-            content: assistantContent,
+            content: currentTurnHasToolCall ? "" : assistantContent,
             reasoning: assistantReasoning || undefined,
             toolCalls: toolCalls.length ? [...toolCalls] : undefined,
             status: "thinking",
             streaming: true,
           });
         } else if (event.type === "tool_call_start") {
-          upsertStreamingToolCall(toolCalls, event.id, event.name, "");
+          currentTurnHasToolCall = true;
           redrawTranscript({
             role: "assistant",
-            content: assistantContent,
+            content: "",
             reasoning: assistantReasoning || undefined,
-            toolCalls: [...toolCalls],
-            streaming: true,
-          }, undefined, "streaming-tool-call");
-        } else if (event.type === "tool_call_delta") {
-          upsertStreamingToolCall(toolCalls, event.id, event.name, event.arguments);
-          redrawTranscript({
-            role: "assistant",
-            content: assistantContent,
-            reasoning: assistantReasoning || undefined,
-            toolCalls: [...toolCalls],
-            streaming: true,
-          }, undefined, "streaming-tool-call");
-        } else if (event.type === "tool_call_end") {
-          finishStreamingToolCall(toolCalls, event.id, event.name, event.arguments);
-          redrawTranscript({
-            role: "assistant",
-            content: assistantContent,
-            reasoning: assistantReasoning || undefined,
-            toolCalls: [...toolCalls],
+            toolCalls: toolCalls.length ? [...toolCalls] : undefined,
+            status: toolCalls.length ? undefined : "thinking",
             streaming: true,
           });
+        } else if (event.type === "tool_call_delta") {
+          currentTurnHasToolCall = true;
+        } else if (event.type === "tool_call_end") {
+          currentTurnHasToolCall = true;
         } else if (event.type === "tool_start") {
+          currentTurnHasToolCall = true;
           const existing = toolCalls.find((item) => item.id === event.id);
           if (existing) {
             existing.args = event.args;
@@ -3814,7 +3797,7 @@ function OpenTuiApp(props: {
           }
           redrawTranscript({
             role: "assistant",
-            content: assistantContent,
+            content: "",
             reasoning: assistantReasoning || undefined,
             toolCalls: [...toolCalls],
             streaming: true,
@@ -3828,7 +3811,7 @@ function OpenTuiApp(props: {
             call.status = event.result.isError ? "error" : "completed";
             redrawTranscript({
               role: "assistant",
-              content: assistantContent,
+              content: currentTurnHasToolCall ? "" : assistantContent,
               reasoning: assistantReasoning || undefined,
               toolCalls: [...toolCalls],
               streaming: true,
@@ -3865,7 +3848,7 @@ function OpenTuiApp(props: {
           bumpSidebar();
           const assistantMessage: DisplayMessage = {
             role: "assistant",
-            content: assistantContent,
+            content: currentTurnHasToolCall ? "" : assistantContent,
             reasoning: assistantReasoning || undefined,
             toolCalls: toolCalls.length ? [...toolCalls] : undefined,
           };
