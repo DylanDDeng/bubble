@@ -192,7 +192,7 @@ export interface Todo {
 export type StreamChunk =
   | { type: "text"; content: string }
   | { type: "reasoning_delta"; content: string }
-  | { type: "tool_call"; id: string; name: string; arguments: string; isStart: boolean; isEnd: boolean }
+  | { type: "tool_call"; id: string; name: string; arguments: string; isStart: boolean; isEnd: boolean; argumentsFull?: string }
   | { type: "usage"; usage: TokenUsage }
   | { type: "done" };
 
@@ -227,6 +227,9 @@ export type AgentEvent =
   | { type: "turn_start" }
   | { type: "text_delta"; content: string }
   | { type: "reasoning_delta"; content: string }
+  | { type: "tool_call_start"; id: string; name: string }
+  | { type: "tool_call_delta"; id: string; name: string; argumentsDelta: string; arguments: string }
+  | { type: "tool_call_end"; id: string; name: string; arguments: string }
   | { type: "tool_start"; id: string; name: string; args: Record<string, any> }
   | { type: "tool_end"; id: string; name: string; result: ToolResult }
   | { type: "turn_end"; usage?: TokenUsage }

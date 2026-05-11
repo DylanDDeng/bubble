@@ -209,26 +209,46 @@ function extractBalancedJson(s: string, start: number): string | null {
 /**
  * Convert an OpenAI-compatible chat-completions stream into our internal StreamChunk events.
  *
- * Multi-tool-call streams are buffered by `index` and emitted in index order at
- * `finish_reason === "tool_calls"`, so the agent layer always sees a clean
- * (isStart -> args -> isEnd) sequence per call. This matters for providers like
- * Kimi K2.5 that emit several parallel tool calls per assistant turn -- the
- * previous single-slot implementation silently dropped every call but the last.
+ * Multi-tool-call streams are tracked by `index`, but tool-call starts and
+ * argument deltas are emitted as soon as they arrive so the TUI can render
+ * partial write previews before the tool executes. End events are still flushed
+ * in index order to keep multi-call turns deterministic.
  */
 export async function* translateOpenAIStream(stream: AsyncIterable<any>): AsyncIterable<StreamChunk> {
-  const toolCalls = new Map<number, { id: string; name: string; args: string }>();
+  const toolCalls = new Map<number, { id: string; name: string; args: string; started: boolean }>();
 
   function* flushToolCalls(): Generator<StreamChunk> {
     if (toolCalls.size === 0) return;
     const sorted = [...toolCalls.entries()].sort(([a], [b]) => a - b);
     for (const [, entry] of sorted) {
       if (!entry.id || !entry.name) continue;
-      const args = normalizeToolArgs(entry.args);
-      yield { type: "tool_call", id: entry.id, name: entry.name, arguments: "", isStart: true, isEnd: false };
-      yield { type: "tool_call", id: entry.id, name: entry.name, arguments: args, isStart: false, isEnd: false };
-      yield { type: "tool_call", id: entry.id, name: entry.name, arguments: "", isStart: false, isEnd: true };
+      if (!entry.started) {
+        yield { type: "tool_call", id: entry.id, name: entry.name, arguments: "", isStart: true, isEnd: false };
+        entry.started = true;
+        if (entry.args) {
+          yield { type: "tool_call", id: entry.id, name: entry.name, arguments: entry.args, isStart: false, isEnd: false };
+        }
+      }
+      yield {
+        type: "tool_call",
+        id: entry.id,
+        name: entry.name,
+        arguments: "",
+        argumentsFull: normalizeToolArgs(entry.args),
+        isStart: false,
+        isEnd: true,
+      };
     }
     toolCalls.clear();
+  }
+
+  function* startToolCallIfReady(entry: { id: string; name: string; args: string; started: boolean }): Generator<StreamChunk> {
+    if (entry.started || !entry.id || !entry.name) return;
+    entry.started = true;
+    yield { type: "tool_call", id: entry.id, name: entry.name, arguments: "", isStart: true, isEnd: false };
+    if (entry.args) {
+      yield { type: "tool_call", id: entry.id, name: entry.name, arguments: entry.args, isStart: false, isEnd: false };
+    }
   }
 
   for await (const chunk of stream) {
@@ -276,12 +296,26 @@ export async function* translateOpenAIStream(stream: AsyncIterable<any>): AsyncI
         const idx = typeof tc.index === "number" ? tc.index : 0;
         let entry = toolCalls.get(idx);
         if (!entry) {
-          entry = { id: "", name: "", args: "" };
+          entry = { id: "", name: "", args: "", started: false };
           toolCalls.set(idx, entry);
         }
         if (tc.id) entry.id = tc.id;
         if (tc.function?.name) entry.name = tc.function.name;
-        if (typeof tc.function?.arguments === "string") entry.args += tc.function.arguments;
+        yield* startToolCallIfReady(entry);
+        if (typeof tc.function?.arguments === "string" && tc.function.arguments) {
+          const merged = mergeToolArgumentDelta(entry.args, tc.function.arguments);
+          entry.args = merged.args;
+          if (entry.started && merged.delta) {
+            yield {
+              type: "tool_call",
+              id: entry.id,
+              name: entry.name,
+              arguments: merged.delta,
+              isStart: false,
+              isEnd: false,
+            };
+          }
+        }
       }
     }
 
@@ -292,4 +326,25 @@ export async function* translateOpenAIStream(stream: AsyncIterable<any>): AsyncI
   }
 
   yield* flushToolCalls();
+}
+
+function mergeToolArgumentDelta(current: string, incoming: string): { args: string; delta: string } {
+  if (!current) return { args: incoming, delta: incoming };
+  if (!incoming) return { args: current, delta: "" };
+
+  // Standard OpenAI-compatible streams send incremental argument deltas. Some
+  // providers send cumulative snapshots instead. If the incoming chunk already
+  // contains what we have, emit only the new suffix so downstream state remains
+  // append-only.
+  if (incoming.startsWith(current)) {
+    return { args: incoming, delta: incoming.slice(current.length) };
+  }
+
+  // Repeated identical snapshots should not duplicate the TUI preview or final
+  // JSON arguments.
+  if (incoming === current || current.endsWith(incoming)) {
+    return { args: current, delta: "" };
+  }
+
+  return { args: current + incoming, delta: incoming };
 }

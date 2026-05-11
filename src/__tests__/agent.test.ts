@@ -122,6 +122,52 @@ describe("Agent", () => {
     expect(agent.messages.filter((m) => m.role === "tool")).toHaveLength(1);
   });
 
+  it("emits tool-call streaming lifecycle before executing the tool", async () => {
+    const provider = createMockProvider([
+      [
+        { type: "tool_call", id: "tc_1", name: "dummy", arguments: "", isStart: true, isEnd: false },
+        { type: "tool_call", id: "tc_1", name: "dummy", arguments: '{"value"', isStart: false, isEnd: false },
+        { type: "tool_call", id: "tc_1", name: "dummy", arguments: ':"42"}', isStart: false, isEnd: true },
+        { type: "done" },
+      ],
+      [{ type: "text", content: "Done!" }, { type: "done" }],
+    ]);
+
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [dummyTool] });
+    const events = await collectEvents(agent, "Call dummy", "/tmp");
+    const sequence = events.map((event) => event.type);
+
+    expect(sequence.indexOf("tool_call_start")).toBeLessThan(sequence.indexOf("tool_call_delta"));
+    expect(sequence.indexOf("tool_call_delta")).toBeLessThan(sequence.indexOf("tool_call_end"));
+    expect(sequence.indexOf("tool_call_end")).toBeLessThan(sequence.indexOf("tool_start"));
+    expect(events.filter((event) => event.type === "tool_call_delta").map((event) => event.arguments)).toEqual([
+      '{"value"',
+      '{"value":"42"}',
+    ]);
+  });
+
+  it("keeps interleaved streaming tool-call arguments isolated by id", async () => {
+    const provider = createMockProvider([
+      [
+        { type: "tool_call", id: "tc_1", name: "dummy", arguments: "", isStart: true, isEnd: false },
+        { type: "tool_call", id: "tc_2", name: "dummy", arguments: "", isStart: true, isEnd: false },
+        { type: "tool_call", id: "tc_1", name: "dummy", arguments: '{"value":"1"}', isStart: false, isEnd: true },
+        { type: "tool_call", id: "tc_2", name: "dummy", arguments: '{"value":"2"}', isStart: false, isEnd: true },
+        { type: "done" },
+      ],
+      [{ type: "text", content: "Done!" }, { type: "done" }],
+    ]);
+
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [dummyTool] });
+    const events = await collectEvents(agent, "Call dummy twice", "/tmp");
+
+    const toolCallEndEvents = events.filter((event) => event.type === "tool_call_end");
+    expect(toolCallEndEvents).toEqual([
+      expect.objectContaining({ id: "tc_1", arguments: '{"value":"1"}' }),
+      expect.objectContaining({ id: "tc_2", arguments: '{"value":"2"}' }),
+    ]);
+  });
+
   it("persists tool metadata and error state on tool messages", async () => {
     const metadataTool: ToolRegistryEntry = {
       name: "metadata_tool",
@@ -177,6 +223,9 @@ describe("Agent", () => {
 
     expect(eventTypes).toEqual([
       "turn_start",
+      "tool_call_start",
+      "tool_call_delta",
+      "tool_call_end",
       "tool_start",
       "tool_end",
       "turn_end",

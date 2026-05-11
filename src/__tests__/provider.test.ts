@@ -116,7 +116,8 @@ describe("translateOpenAIStream", () => {
 
     expect(startEnds(chunks)).toEqual([
       { id: "write:1", name: "write", args: "", isStart: true, isEnd: false },
-      { id: "write:1", name: "write", args: "{\"path\":\"a.html\"}", isStart: false, isEnd: false },
+      { id: "write:1", name: "write", args: "{\"path\":", isStart: false, isEnd: false },
+      { id: "write:1", name: "write", args: "\"a.html\"}", isStart: false, isEnd: false },
       { id: "write:1", name: "write", args: "", isStart: false, isEnd: true },
     ]);
   });
@@ -179,10 +180,27 @@ describe("translateOpenAIStream", () => {
 
     const argsById = new Map<string, string>();
     for (const e of startEnds(chunks)) {
-      if (!e.isStart && !e.isEnd) argsById.set(e.id, e.args);
+      if (!e.isStart && !e.isEnd) argsById.set(e.id, (argsById.get(e.id) ?? "") + e.args);
     }
     expect(argsById.get("write:1")).toBe("{\"a\":1}");
     expect(argsById.get("write:2")).toBe("{\"b\":2}");
+  });
+
+  it("deduplicates cumulative tool argument snapshots while streaming", async () => {
+    const chunks = await collect(translateOpenAIStream(fromArray([
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: "write:1", function: { name: "write" } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "{\"a\":" } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "{\"a\":1}" } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "{\"a\":1}" } }] } }] },
+      { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+    ])));
+
+    expect(startEnds(chunks)).toEqual([
+      { id: "write:1", name: "write", args: "", isStart: true, isEnd: false },
+      { id: "write:1", name: "write", args: "{\"a\":", isStart: false, isEnd: false },
+      { id: "write:1", name: "write", args: "1}", isStart: false, isEnd: false },
+      { id: "write:1", name: "write", args: "", isStart: false, isEnd: true },
+    ]);
   });
 
   it("forwards text and reasoning deltas alongside tool calls", async () => {

@@ -53,6 +53,12 @@ import { sidebarMcpRowsFromStates, renderMcpRowMarker, type SidebarMcpRow } from
 import { expandAtMentions, filterFileSuggestions, findAtContext, listProjectFiles } from "./file-mentions.js";
 import { compactDisplayMessages, type DisplayMessage, type DisplayToolCall } from "./display-history.js";
 import { createMarkdownSyntaxStyle, createSubtleMarkdownSyntaxStyle } from "./markdown-theme.js";
+import { hashString } from "./render-signature.js";
+import { StreamingRedrawThrottler, type RedrawReason } from "./streaming-redraw.js";
+import { findToolRenderer } from "./tool-renderers/registry.js";
+import { finishStreamingToolCall, upsertStreamingToolCall } from "./tool-renderers/streaming.js";
+import { writeToolExpansionDigest, writeToolKey } from "./tool-renderers/write.js";
+import { formatWritePreview, isWritePreviewTool } from "./tool-renderers/write-preview.js";
 import { getNextPermissionMode, PERMISSION_MODE_INFO } from "../permission/mode.js";
 import { getContextBudget } from "../context/budget.js";
 import { getLspService, type LspService, type LspStatus } from "../lsp/index.js";
@@ -512,6 +518,8 @@ function OpenTuiApp(props: {
   });
   let thinkingSpinnerFrameIndex = 0;
   let thinkingSpinnerTimer: ReturnType<typeof setInterval> | undefined;
+  const STREAMING_TOOL_CALL_REDRAW_INTERVAL_MS = 80;
+  const streamingToolCallRedraw = new StreamingRedrawThrottler(STREAMING_TOOL_CALL_REDRAW_INTERVAL_MS);
   let approvalRoot: BoxRenderable | undefined;
   let approvalHeaderTitle: TextRenderable | undefined;
   let approvalMetaIcon: TextRenderable | undefined;
@@ -1704,6 +1712,7 @@ function OpenTuiApp(props: {
   onCleanup(() => {
     props.setRawGlobalKeyHandler?.(undefined);
     if (sidebarLspSyncTimer) clearInterval(sidebarLspSyncTimer);
+    streamingToolCallRedraw.cancel();
     for (const timer of questionSyncTimers) clearTimeout(timer);
     questionSyncTimers.clear();
     stopThinkingSpinner();
@@ -1997,9 +2006,19 @@ function OpenTuiApp(props: {
     }, PROMPT_SCANNER_INTERVAL_MS);
   }
 
-  function redrawTranscript(extra?: DisplayMessage, baseMessages = displayMessages) {
-    const shouldFollow = shouldFollowTranscriptBeforeUpdate();
+  function redrawTranscript(
+    extra?: DisplayMessage,
+    baseMessages = displayMessages,
+    reason: RedrawReason = "normal",
+  ) {
     streamingDisplay = extra;
+    streamingToolCallRedraw.schedule(reason, () => {
+      renderTranscriptNow(streamingDisplay, reason === "streaming-tool-call" ? displayMessages : baseMessages);
+    });
+  }
+
+  function renderTranscriptNow(extra?: DisplayMessage, baseMessages = displayMessages) {
+    const shouldFollow = shouldFollowTranscriptBeforeUpdate();
     const nextMessages = compactDisplayMessages(extra ? [...baseMessages, extra] : baseMessages);
     syncSessionMessages(nextMessages);
     rootBox?.requestRender();
@@ -3821,8 +3840,42 @@ function OpenTuiApp(props: {
             status: "thinking",
             streaming: true,
           });
+        } else if (event.type === "tool_call_start") {
+          upsertStreamingToolCall(toolCalls, event.id, event.name, "");
+          redrawTranscript({
+            role: "assistant",
+            content: assistantContent,
+            reasoning: assistantReasoning || undefined,
+            toolCalls: [...toolCalls],
+            streaming: true,
+          }, undefined, "streaming-tool-call");
+        } else if (event.type === "tool_call_delta") {
+          upsertStreamingToolCall(toolCalls, event.id, event.name, event.arguments);
+          redrawTranscript({
+            role: "assistant",
+            content: assistantContent,
+            reasoning: assistantReasoning || undefined,
+            toolCalls: [...toolCalls],
+            streaming: true,
+          }, undefined, "streaming-tool-call");
+        } else if (event.type === "tool_call_end") {
+          finishStreamingToolCall(toolCalls, event.id, event.name, event.arguments);
+          redrawTranscript({
+            role: "assistant",
+            content: assistantContent,
+            reasoning: assistantReasoning || undefined,
+            toolCalls: [...toolCalls],
+            streaming: true,
+          });
         } else if (event.type === "tool_start") {
-          toolCalls.push({ id: event.id, name: event.name, args: event.args, status: "running" });
+          const existing = toolCalls.find((item) => item.id === event.id);
+          if (existing) {
+            existing.args = event.args;
+            existing.streamingArgs = false;
+            existing.status = "running";
+          } else {
+            toolCalls.push({ id: event.id, name: event.name, args: event.args, status: "running" });
+          }
           if (event.name === "question") {
             scheduleQuestionSync();
           }
@@ -5418,7 +5471,7 @@ function updateTranscriptHost(
     }
     const thinkingExpanded = state.expandedThinking.has(key);
     const compactionExpanded = state.expandedCompactions.has(key);
-    const writeExpansionDigest = transcriptWriteExpansionSignature(message, key, state.expandedWrites);
+    const writeExpansionDigest = writeToolExpansionDigest(message, key, state.expandedWrites);
     const signature = transcriptMessageSignature(message, showThinking, thinkingExpanded, compactionExpanded, writeExpansionDigest);
     const previous = state.entries[index];
     if (previous?.key === key && previous.signature === signature) {
@@ -5549,21 +5602,6 @@ function transcriptMessageSignature(
     tools,
     writeExpansionDigest,
   ].join(":");
-}
-
-function transcriptWriteExpansionSignature(message: DisplayMessage, messageKey: string, expandedWrites: Set<string>) {
-  return (message.toolCalls ?? [])
-    .filter((tool) => isWritePreviewTool(tool))
-    .map((tool) => `${tool.id}:${expandedWrites.has(writeToolKey(messageKey, tool)) ? "expanded" : "collapsed"}`)
-    .join("|");
-}
-
-function hashString(value: string) {
-  let hash = 5381;
-  for (let index = 0; index < value.length; index++) {
-    hash = ((hash << 5) + hash) ^ value.charCodeAt(index);
-  }
-  return (hash >>> 0).toString(36);
 }
 
 function updateMessageEntry(entry: TranscriptEntry, message: DisplayMessage, showThinking = true, thinkingExpanded = false, compactionExpanded = false) {
@@ -5716,6 +5754,26 @@ function createCodeBlockRenderable(ctx: RenderContext, content: string, filePath
   });
   lineNumbers.add(code);
   return lineNumbers;
+}
+
+function createToolRenderHelpers() {
+  return {
+    theme,
+    createBox: (ctx: RenderContext, options: Record<string, unknown>, children?: Array<Renderable | null | undefined>) =>
+      createBox(ctx, options as ConstructorParameters<typeof BoxRenderable>[1], children),
+    createText: (ctx: RenderContext, content: string | StyledText, options?: Record<string, unknown>) =>
+      createText(ctx, content, (options ?? {}) as ConstructorParameters<typeof TextRenderable>[1]),
+    createCodeBlockRenderable,
+    createDiffRenderable,
+    toolColor,
+    displayToolName,
+    toolHeader,
+    toolPath,
+    extractToolDiff,
+    summarizeToolResult,
+    isToolFinished,
+    toolPreview,
+  };
 }
 
 function renderCodeBlockContent(content: string, filePath: string | undefined, syntaxStyle: SyntaxStyle) {
@@ -6062,8 +6120,6 @@ function createTodoWriteRenderable(ctx: RenderContext, tool: DisplayToolCall) {
   ]);
 }
 
-const WRITE_PREVIEW_LINE_LIMIT = 10;
-
 function createToolRenderable(
   ctx: RenderContext,
   tool: DisplayToolCall,
@@ -6078,106 +6134,19 @@ function createToolRenderable(
   if (tool.name === "todo_write") {
     return createTodoWriteRenderable(ctx, tool);
   }
-  const icon = tool.name === "bash" ? "$" : tool.name === "edit" ? "✎" : "●";
-  const color = toolColor(tool);
-  const header = toolHeader(tool);
-  const diff = extractToolDiff(tool);
-  if (diff && !tool.isError && tool.name === "edit") {
-    return createBox(ctx, {
-      paddingLeft: 3,
-      marginTop: 1,
-      flexDirection: "column",
-      flexShrink: 0,
-    }, [
-      createText(ctx, new StyledText([
-        fg(color)(`${icon} ${displayToolName(tool.name)}`),
-        fg(theme.toolText)(header ? ` ${header}` : ""),
-      ])),
-      createBox(ctx, {
-        paddingLeft: 1,
-        marginTop: 1,
-        border: ["left"],
-        borderColor: theme.borderSubtle,
-        flexDirection: "column",
-        flexShrink: 0,
-      }, [createDiffRenderable(ctx, diff, toolPath(tool), syntaxStyle, width)]),
-    ]);
+  const renderer = findToolRenderer(tool);
+  if (renderer) {
+    return renderer.render({
+      ctx,
+      tool,
+      syntaxStyle,
+      width,
+      writeExpanded,
+      onToggleWrite,
+      helpers: createToolRenderHelpers(),
+    });
   }
-  if (isWritePreviewTool(tool)) {
-    const preview = formatWritePreview(tool.args.content, writeExpanded);
-    const writeLineCount = tool.args.content.split(/\r?\n/).length;
-    const summary = tool.result
-      ? summarizeToolResult(tool)
-      : `${isToolFinished(tool) ? "Prepared" : "Writing"} ${writeLineCount} line${writeLineCount === 1 ? "" : "s"} to ${toolPath(tool) ?? "file"}`;
-    const hint = preview.omitted > 0
-      ? `... +${preview.omitted} lines (${writeExpanded ? "ctrl+o to collapse" : "ctrl+o to expand"})`
-      : writeExpanded
-        ? "(ctrl+o to collapse)"
-        : "";
-    return createBox(ctx, {
-      paddingLeft: 3,
-      marginTop: 1,
-      flexDirection: "column",
-      flexShrink: 0,
-    }, [
-      createText(ctx, new StyledText([
-        fg(color)(`${isToolFinished(tool) ? "" : "~ "}${icon} ${displayToolName(tool.name)}`),
-        fg(theme.toolText)(header ? ` ${header}` : ""),
-      ]), {
-        onMouseUp: onToggleWrite,
-      }),
-      createBox(ctx, {
-        paddingLeft: 1,
-        marginTop: 0,
-        border: ["left"],
-        borderColor: theme.borderSubtle,
-        flexDirection: "column",
-        flexShrink: 0,
-      }, [
-        createText(ctx, `└ ${summary}`, {
-          fg: tool.isError ? theme.toolError : theme.textMuted,
-          onMouseUp: onToggleWrite,
-        }),
-        createCodeBlockRenderable(ctx, preview.content, toolPath(tool), syntaxStyle),
-        hint
-          ? createText(ctx, hint, {
-            fg: theme.textMuted,
-            onMouseUp: onToggleWrite,
-          })
-          : null,
-      ]),
-    ]);
-  }
-  const chunks: StyledText["chunks"] = [
-    fg(color)(`${isToolFinished(tool) ? "" : "~ "}${icon} ${displayToolName(tool.name)}`),
-  ];
-  if (header) chunks.push(fg(theme.toolText)(` ${header}`));
-  if (tool.result) {
-    chunks.push(fg(theme.text)("\n"));
-    chunks.push(fg(theme.borderSubtle)("  "));
-    chunks.push(fg(tool.isError ? theme.toolError : theme.textMuted)(summarizeToolResult(tool)));
-    const preview = toolPreview(tool);
-    if (preview) {
-      for (const line of preview.lines) {
-        chunks.push(fg(theme.text)("\n"));
-        chunks.push(fg(theme.borderSubtle)("  "));
-        chunks.push(fg(theme.toolText)(line));
-      }
-      if (preview.omitted > 0) {
-        chunks.push(fg(theme.text)("\n"));
-        chunks.push(fg(theme.borderSubtle)("  "));
-        chunks.push(fg(theme.textMuted)(`+ ${preview.omitted} more`));
-      }
-    }
-  }
-  return createBox(ctx, {
-    paddingLeft: 3,
-    marginTop: 1,
-    flexDirection: "column",
-    flexShrink: 0,
-  }, [
-    createText(ctx, new StyledText(chunks), { wrapMode: "word" }),
-  ]);
+  throw new Error(`No renderer for tool '${tool.name}'`);
 }
 
 function createQuestionToolRenderable(ctx: RenderContext, tool: DisplayToolCall) {
@@ -6265,7 +6234,11 @@ function renderTool(tool: DisplayToolCall, syntaxStyle: SyntaxStyle, width = 80)
       h("box", { paddingLeft: 1, marginTop: 0, border: ["left"], borderColor: theme.borderSubtle, flexDirection: "column", flexShrink: 0 },
         h("text", { fg: theme.textMuted }, `└ ${summary}`),
         renderCodeBlockContent(preview.content, toolPath(tool), syntaxStyle),
-        preview.omitted > 0 ? h("text", { fg: theme.textMuted }, `... +${preview.omitted} lines (ctrl+o to expand)`) : null,
+        preview.omittedLines > 0
+          ? h("text", { fg: theme.textMuted }, `... +${preview.omittedLines} lines (ctrl+o to expand)`)
+          : preview.omittedChars > 0
+            ? h("text", { fg: theme.textMuted }, `... +${preview.omittedChars} chars (ctrl+o to expand)`)
+            : null,
       ),
     );
   }
@@ -7085,25 +7058,6 @@ function formatQuestionAnswer(answer?: ReadonlyArray<string>) {
 
 function isToolFinished(tool: DisplayToolCall): boolean {
   return tool.status === "completed" || tool.status === "error" || tool.result !== undefined;
-}
-
-function isWritePreviewTool(tool: DisplayToolCall): tool is DisplayToolCall & { args: { content: string } } {
-  return !tool.isError && tool.name === "write" && typeof tool.args?.content === "string";
-}
-
-function writeToolKey(messageKey: string, tool: DisplayToolCall) {
-  return `${messageKey}:write:${tool.id}`;
-}
-
-function formatWritePreview(content: string, expanded: boolean) {
-  const lines = content.split(/\r?\n/);
-  if (expanded || lines.length <= WRITE_PREVIEW_LINE_LIMIT) {
-    return { content, omitted: 0 };
-  }
-  return {
-    content: lines.slice(0, WRITE_PREVIEW_LINE_LIMIT).join("\n"),
-    omitted: lines.length - WRITE_PREVIEW_LINE_LIMIT,
-  };
 }
 
 function assistantStatusLabel(message: DisplayMessage): string {

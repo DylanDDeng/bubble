@@ -25,6 +25,8 @@ export interface DisplayToolCall {
   id: string;
   name: string;
   args: Record<string, any>;
+  rawArguments?: string;
+  streamingArgs?: boolean;
   status?: "pending" | "running" | "completed" | "error";
   result?: string;
   isError?: boolean;

@@ -318,7 +318,7 @@ export class Agent {
         toolCalls: [],
       };
 
-      let currentToolCall: { id: string; name: string; args: string } | null = null;
+      const streamingToolCalls = new Map<string, { id: string; name: string; args: string }>();
       let turnUsage: TokenUsage | undefined;
       let assistantAppended = false;
 
@@ -379,10 +379,28 @@ export class Agent {
 
             case "tool_call":
               if (chunk.isStart) {
-                currentToolCall = { id: chunk.id, name: chunk.name, args: "" };
+                streamingToolCalls.set(chunk.id, { id: chunk.id, name: chunk.name, args: "" });
+                yield { type: "tool_call_start", id: chunk.id, name: chunk.name };
               }
+              if (!streamingToolCalls.has(chunk.id)) {
+                streamingToolCalls.set(chunk.id, { id: chunk.id, name: chunk.name, args: "" });
+              }
+              const currentToolCall = streamingToolCalls.get(chunk.id);
               if (currentToolCall) {
+                currentToolCall.name = chunk.name || currentToolCall.name;
                 currentToolCall.args += chunk.arguments;
+                if (chunk.argumentsFull !== undefined) {
+                  currentToolCall.args = chunk.argumentsFull;
+                }
+                if (chunk.arguments) {
+                  yield {
+                    type: "tool_call_delta",
+                    id: currentToolCall.id,
+                    name: currentToolCall.name,
+                    argumentsDelta: chunk.arguments,
+                    arguments: currentToolCall.args,
+                  };
+                }
               }
               if (chunk.isEnd && currentToolCall) {
                 assistantMsg.toolCalls!.push({
@@ -390,7 +408,13 @@ export class Agent {
                   name: currentToolCall.name,
                   arguments: currentToolCall.args,
                 });
-                currentToolCall = null;
+                yield {
+                  type: "tool_call_end",
+                  id: currentToolCall.id,
+                  name: currentToolCall.name,
+                  arguments: currentToolCall.args,
+                };
+                streamingToolCalls.delete(chunk.id);
               }
               break;
 
