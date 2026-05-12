@@ -9,12 +9,13 @@ export const fallbackToolRenderer: ToolRenderer = {
 
 function renderFallbackTool({ ctx, tool, syntaxStyle, width, helpers }: ToolRenderContext) {
   const { theme } = helpers;
-  const icon = tool.name === "bash" ? "$" : tool.name === "edit" ? "✎" : "●";
+  const icon = helpers.toolStateIcon(tool);
   const color = helpers.toolColor(tool);
   const header = helpers.toolHeader(tool);
   const diff = helpers.extractToolDiff(tool);
+  const isError = tool.isError === true || tool.status === "error";
 
-  if (diff && !tool.isError && tool.name === "edit") {
+  if (diff && !isError && tool.name === "edit") {
     return helpers.createBox(ctx, {
       paddingLeft: 3,
       marginTop: 1,
@@ -40,10 +41,14 @@ function renderFallbackTool({ ctx, tool, syntaxStyle, width, helpers }: ToolRend
     fg(color)(`${icon} ${helpers.displayToolName(tool.name)}`),
   ];
   if (header) chunks.push(fg(theme.toolText)(` ${header}`));
-  if (tool.result) {
-    chunks.push(fg(theme.text)("\n"));
-    chunks.push(fg(theme.borderSubtle)("  "));
-    chunks.push(fg(tool.isError ? theme.toolError : theme.textMuted)(helpers.summarizeToolResult(tool)));
+  const showTail = !!tool.result || tool.status === "running" || tool.status === "pending" || tool.streamingArgs === true;
+  if (showTail) {
+    const summary = helpers.summarizeToolResult(tool);
+    if (summary) {
+      chunks.push(fg(theme.text)("\n"));
+      chunks.push(fg(theme.borderSubtle)("  "));
+      chunks.push(fg(isError ? theme.toolError : theme.textMuted)(summary));
+    }
     const preview = helpers.toolPreview(tool);
     if (preview) {
       for (const line of preview.lines) {
@@ -59,12 +64,19 @@ function renderFallbackTool({ ctx, tool, syntaxStyle, width, helpers }: ToolRend
     }
   }
 
-  return helpers.createBox(ctx, {
-    paddingLeft: 3,
+  const containerProps: Record<string, unknown> = {
+    paddingLeft: isError ? 1 : 3,
     marginTop: 1,
     flexDirection: "column",
     flexShrink: 0,
-  }, [
+  };
+  if (isError) {
+    containerProps.border = ["left"];
+    containerProps.borderColor = theme.toolError;
+    containerProps.paddingLeft = 2;
+  }
+
+  return helpers.createBox(ctx, containerProps, [
     helpers.createText(ctx, new StyledText(chunks), { wrapMode: "word" }),
   ]);
 }

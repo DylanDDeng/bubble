@@ -1,4 +1,4 @@
-import type { ToolResultMetadata } from "../types.js";
+import type { ToolResultMetadata, TokenUsage } from "../types.js";
 
 export interface CompactionMeta {
   turns: number;
@@ -19,6 +19,9 @@ export interface DisplayMessage {
   syntheticKind?: "ui_compact_card";
   hiddenCount?: number;
   compactionMeta?: CompactionMeta;
+  turnStartedAt?: number;
+  turnCompletedAt?: number;
+  turnUsage?: TokenUsage;
 }
 
 export interface DisplayToolCall {
@@ -31,6 +34,8 @@ export interface DisplayToolCall {
   result?: string;
   isError?: boolean;
   metadata?: ToolResultMetadata;
+  startedAt?: number;
+  completedAt?: number;
 }
 
 const MAX_VISIBLE_MESSAGES = 80;

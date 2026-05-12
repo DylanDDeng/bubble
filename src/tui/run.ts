@@ -3733,6 +3733,7 @@ function OpenTuiApp(props: {
     let assistantReasoning = "";
     const toolCalls: DisplayToolCall[] = [];
     let currentTurnHasToolCall = false;
+    let turnStartedAt: number | undefined;
     let runError: string | undefined;
     let runCancelled = false;
     try {
@@ -3742,11 +3743,13 @@ function OpenTuiApp(props: {
           assistantReasoning = "";
           toolCalls.length = 0;
           currentTurnHasToolCall = false;
+          turnStartedAt = Date.now();
           redrawTranscript({
             role: "assistant",
             content: "",
             status: "thinking",
             streaming: true,
+            turnStartedAt,
           });
         } else if (event.type === "text_delta") {
           assistantContent += event.content;
@@ -3759,6 +3762,7 @@ function OpenTuiApp(props: {
             toolCalls: toolCalls.length ? [...toolCalls] : undefined,
             status: "thinking",
             streaming: true,
+            turnStartedAt,
           });
         } else if (event.type === "tool_call_start") {
           currentTurnHasToolCall = true;
@@ -3769,6 +3773,7 @@ function OpenTuiApp(props: {
             toolCalls: toolCalls.length ? [...toolCalls] : undefined,
             status: toolCalls.length ? undefined : "thinking",
             streaming: true,
+            turnStartedAt,
           });
         } else if (event.type === "tool_call_delta") {
           currentTurnHasToolCall = true;
@@ -3776,13 +3781,15 @@ function OpenTuiApp(props: {
           currentTurnHasToolCall = true;
         } else if (event.type === "tool_start") {
           currentTurnHasToolCall = true;
+          const now = Date.now();
           const existing = toolCalls.find((item) => item.id === event.id);
           if (existing) {
             existing.args = event.args;
             existing.streamingArgs = false;
             existing.status = "running";
+            existing.startedAt = existing.startedAt ?? now;
           } else {
-            toolCalls.push({ id: event.id, name: event.name, args: event.args, status: "running" });
+            toolCalls.push({ id: event.id, name: event.name, args: event.args, status: "running", startedAt: now });
           }
           if (event.name === "question") {
             scheduleQuestionSync();
@@ -3793,6 +3800,7 @@ function OpenTuiApp(props: {
             reasoning: assistantReasoning || undefined,
             toolCalls: [...toolCalls],
             streaming: true,
+            turnStartedAt,
           });
         } else if (event.type === "tool_end") {
           const call = toolCalls.find((item) => item.id === event.id);
@@ -3801,12 +3809,14 @@ function OpenTuiApp(props: {
             call.isError = event.result.isError;
             call.metadata = event.result.metadata;
             call.status = event.result.isError ? "error" : "completed";
+            call.completedAt = Date.now();
             redrawTranscript({
               role: "assistant",
               content: currentTurnHasToolCall ? "" : assistantContent,
               reasoning: assistantReasoning || undefined,
               toolCalls: [...toolCalls],
               streaming: true,
+              turnStartedAt,
             });
           }
           if (event.name === "question") {
@@ -3819,18 +3829,21 @@ function OpenTuiApp(props: {
           if (call) {
             call.metadata = mergeToolMetadata(call.metadata, event.update.metadata);
             call.result = event.update.message ?? call.result;
+            const finished = event.update.status === "failed" || event.update.status === "blocked" || event.update.status === "cancelled" || event.update.status === "completed";
             call.status = event.update.status === "failed" || event.update.status === "blocked" || event.update.status === "cancelled"
               ? "error"
               : event.update.status === "completed"
                 ? "completed"
                 : "running";
             call.isError = call.status === "error";
+            if (finished && call.completedAt === undefined) call.completedAt = Date.now();
             redrawTranscript({
               role: "assistant",
               content: currentTurnHasToolCall ? "" : assistantContent,
               reasoning: assistantReasoning || undefined,
               toolCalls: [...toolCalls],
               streaming: true,
+              turnStartedAt,
             });
           }
         } else if (event.type === "todos_updated") {
@@ -3862,6 +3875,9 @@ function OpenTuiApp(props: {
             content: currentTurnHasToolCall ? "" : assistantContent,
             reasoning: assistantReasoning || undefined,
             toolCalls: toolCalls.length ? [...toolCalls] : undefined,
+            turnStartedAt,
+            turnCompletedAt: Date.now(),
+            turnUsage: event.usage,
           };
           const nextMessages = hasRenderableMessage(assistantMessage)
             ? [...displayMessages, assistantMessage]
@@ -3871,6 +3887,7 @@ function OpenTuiApp(props: {
           assistantContent = "";
           assistantReasoning = "";
           toolCalls.length = 0;
+          turnStartedAt = undefined;
           streamingDisplay = undefined;
         }
       }
@@ -5274,20 +5291,38 @@ function renderAssistantMessage(message: DisplayMessage, syntaxStyle: SyntaxStyl
       flexDirection: "column",
       flexShrink: 0,
     },
-      h("text", { content: thinkingLabelContent(message.streaming === true), fg: theme.messageThinkingText, wrapMode: "none" }),
+      h("text", { content: thinkingLabelContent(message.streaming === true, reasoningElapsedMs(message)), fg: theme.messageThinkingText, wrapMode: "none" }),
       renderMarkdownContent(formatThinkingMarkdown(visibleReasoning), subtleSyntaxStyle, {
         streaming: message.streaming === true,
         fg: theme.messageThinkingContentText,
       }),
     ));
   }
-  for (const tool of message.toolCalls ?? []) children.push(renderTool(tool, syntaxStyle, width));
-  if (message.content.trim()) {
+  const toolCalls = message.toolCalls ?? [];
+  for (const tool of toolCalls) children.push(renderTool(tool, syntaxStyle, width));
+  const trimmedContent = message.content.trim();
+  if (trimmedContent && toolCalls.length > 0) {
+    children.push(h("box", { paddingLeft: 3, marginTop: 1, flexShrink: 0 },
+      h("text", { content: answerDividerStyledText(), wrapMode: "none" }),
+    ));
+  }
+  if (trimmedContent) {
     children.push(h("box", { paddingLeft: 3, marginTop: 1, flexDirection: "column", flexShrink: 0 },
-      renderMarkdownContent(message.content.trim(), syntaxStyle, {
+      renderMarkdownContent(trimmedContent, syntaxStyle, {
         streaming: message.streaming === true,
         fg: theme.messageAssistantText,
       }),
+    ));
+  }
+  if (message.streaming === true && trimmedContent) {
+    children.push(h("box", { paddingLeft: 3, flexShrink: 0 },
+      h("text", { fg: theme.primary, wrapMode: "none" }, "▌"),
+    ));
+  }
+  const summaryString = formatTurnSummary(message);
+  if (summaryString) {
+    children.push(h("box", { paddingLeft: 3, marginTop: 1, flexShrink: 0 },
+      h("text", { fg: theme.textMuted, wrapMode: "none" }, summaryString),
     ));
   }
   if (!children.length) return null;
@@ -5483,8 +5518,14 @@ type TranscriptEntry = {
     reasoningMarkdown?: MarkdownRenderable;
     toolsBox?: BoxRenderable;
     toolEntries?: Map<string, ToolEntryRef>;
+    answerDividerBox?: BoxRenderable;
+    answerDividerText?: TextRenderable;
     contentBox?: BoxRenderable;
     contentMarkdown?: MarkdownRenderable;
+    contentCursorBox?: BoxRenderable;
+    contentCursorText?: TextRenderable;
+    turnSummaryBox?: BoxRenderable;
+    turnSummaryText?: TextRenderable;
     compactionExpanded?: boolean;
     compactionToggleText?: TextRenderable;
     compactionContentText?: TextRenderable;
@@ -5584,14 +5625,16 @@ function updateAssistantEntry(
   const showStatus = !!message.status && !visibleReasoning && !content && tools.length === 0;
 
   if (entry.refs.statusText) {
-    entry.refs.statusText.content = assistantStatusLabel(message);
+    entry.refs.statusText.content = showStatus ? assistantStatusLabel(message) : "";
   }
   if (entry.refs.statusBox) {
     entry.refs.statusBox.visible = showStatus;
   }
   if (entry.refs.reasoningToggleText) {
     entry.refs.reasoningStreaming = message.streaming === true;
-    entry.refs.reasoningToggleText.content = thinkingLabelContent(message.streaming === true);
+    entry.refs.reasoningToggleText.content = visibleReasoning
+      ? thinkingLabelContent(message.streaming === true, reasoningElapsedMs(message))
+      : new StyledText([fg(theme.messageThinkingText)("")]);
   }
   if (entry.refs.reasoningMarkdown) {
     syncMarkdownRenderable(
@@ -5604,11 +5647,32 @@ function updateAssistantEntry(
     entry.refs.reasoningBox.visible = !!visibleReasoning;
   }
   updateAssistantToolEntries(entry, tools, options);
+  if (entry.refs.answerDividerBox) {
+    const showDivider = tools.length > 0 && !!content;
+    entry.refs.answerDividerBox.visible = showDivider;
+    if (entry.refs.answerDividerText) {
+      entry.refs.answerDividerText.content = showDivider
+        ? answerDividerStyledText()
+        : new StyledText([fg(theme.textMuted)("")]);
+    }
+  }
   if (entry.refs.contentMarkdown) {
     syncMarkdownRenderable(entry.refs.contentMarkdown, content, message.streaming === true);
   }
   if (entry.refs.contentBox) {
     entry.refs.contentBox.visible = !!content;
+  }
+  if (entry.refs.contentCursorBox) {
+    const cursorActive = message.streaming === true && !!content;
+    entry.refs.contentCursorBox.visible = cursorActive;
+    if (entry.refs.contentCursorText) entry.refs.contentCursorText.content = cursorActive ? "▌" : "";
+  }
+  const summaryString = formatTurnSummary(message);
+  if (entry.refs.turnSummaryText) {
+    entry.refs.turnSummaryText.content = summaryString ?? "";
+  }
+  if (entry.refs.turnSummaryBox) {
+    entry.refs.turnSummaryBox.visible = !!summaryString;
   }
 }
 
@@ -5955,6 +6019,7 @@ function createToolRenderHelpers() {
     summarizeToolResult,
     isToolFinished,
     toolPreview,
+    toolStateIcon,
   };
 }
 
@@ -6075,7 +6140,7 @@ function createAssistantEntry(
   refs.statusBox = statusBox;
   children.push(statusBox);
 
-  const labelText = createText(ctx, thinkingLabelContent(message.streaming === true), {
+  const labelText = createText(ctx, thinkingLabelContent(message.streaming === true, reasoningElapsedMs(message)), {
     fg: theme.messageThinkingText,
     wrapMode: "none",
   });
@@ -6112,6 +6177,18 @@ function createAssistantEntry(
   refs.toolEntries = new Map();
   children.push(toolsBox);
 
+  const showAnswerDivider = tools.length > 0 && !!content;
+  const answerDividerText = createText(ctx, showAnswerDivider ? answerDividerStyledText() : new StyledText([fg(theme.textMuted)("")]), { wrapMode: "none" });
+  refs.answerDividerText = answerDividerText;
+  const answerDividerBox = createBox(ctx, {
+    paddingLeft: 3,
+    marginTop: 1,
+    flexShrink: 0,
+    visible: showAnswerDivider,
+  }, [answerDividerText]);
+  refs.answerDividerBox = answerDividerBox;
+  children.push(answerDividerBox);
+
   const contentMarkdown = createMarkdown(ctx, content, syntaxStyle, {
     streaming: message.streaming === true,
     fg: theme.messageAssistantText,
@@ -6127,6 +6204,29 @@ function createAssistantEntry(
   refs.contentBox = contentBox;
   children.push(contentBox);
 
+  const cursorActive = message.streaming === true && !!content;
+  const contentCursorText = createText(ctx, "▌", { fg: theme.primary, wrapMode: "none" });
+  refs.contentCursorText = contentCursorText;
+  const contentCursorBox = createBox(ctx, {
+    paddingLeft: 3,
+    flexShrink: 0,
+    visible: cursorActive,
+  }, [contentCursorText]);
+  refs.contentCursorBox = contentCursorBox;
+  children.push(contentCursorBox);
+
+  const summaryString = formatTurnSummary(message);
+  const turnSummaryText = createText(ctx, summaryString ?? "", { fg: theme.textMuted, wrapMode: "none" });
+  refs.turnSummaryText = turnSummaryText;
+  const turnSummaryBox = createBox(ctx, {
+    paddingLeft: 3,
+    marginTop: 1,
+    flexShrink: 0,
+    visible: !!summaryString,
+  }, [turnSummaryText]);
+  refs.turnSummaryBox = turnSummaryBox;
+  children.push(turnSummaryBox);
+
   const entry: TranscriptEntry = {
     key,
     signature,
@@ -6140,6 +6240,13 @@ function createAssistantEntry(
     onToggleWrite,
   });
   return entry;
+}
+
+function answerDividerStyledText(): StyledText {
+  return new StyledText([
+    fg(theme.accent)("◆ "),
+    fg(theme.textMuted)(italic("Answer")),
+  ]);
 }
 
 function createCompactionCardEntry(
@@ -6396,7 +6503,7 @@ function renderTool(tool: DisplayToolCall, syntaxStyle: SyntaxStyle, width = 80)
   if (tool.name === "question") {
     return renderQuestionTool(tool);
   }
-  const icon = tool.name === "bash" ? "$" : tool.name === "edit" ? "✎" : "●";
+  const icon = toolStateIcon(tool);
   const color = toolColor(tool);
   const diff = extractToolDiff(tool);
   if (diff && !tool.isError && tool.name === "edit") {
@@ -7174,7 +7281,10 @@ function filetype(filePath?: string): string | undefined {
 }
 
 function summarizeToolResult(tool: DisplayToolCall): string {
-  if (!isToolFinished(tool)) return tool.status === "running" ? "running" : "pending";
+  if (!isToolFinished(tool)) {
+    if (tool.status === "running") return "running";
+    return tool.streamingArgs ? "preparing" : "pending";
+  }
   if (tool.name === "question") {
     if (isQuestionRejected(tool)) return "dismissed";
     const count = questionToolQuestions(tool).length || (Array.isArray(tool.args?.questions) ? tool.args.questions.length : 0);
@@ -7183,10 +7293,34 @@ function summarizeToolResult(tool: DisplayToolCall): string {
   const result = tool.result ?? "";
   if (tool.isError) return truncate(result.split("\n").find(Boolean) || "error", 120);
   const lines = result.replace(/\r\n/g, "\n").split("\n").filter((line) => line.trim()).length;
+  const matches = typeof tool.metadata?.matches === "number" ? tool.metadata.matches : undefined;
+  if (tool.name === "read") return "";
   if (tool.name === "edit") return "patched file";
   if (tool.name === "write") return "wrote file";
-  if (tool.name === "bash") return lines ? `${lines} line${lines === 1 ? "" : "s"} output` : "done";
+  if (tool.name === "grep" || tool.name === "glob") {
+    if (matches !== undefined) return `${matches} match${matches === 1 ? "" : "es"}`;
+    return lines ? `${lines} line${lines === 1 ? "" : "s"}` : "no matches";
+  }
+  if (tool.name === "bash") {
+    if (matches !== undefined) return `${matches} match${matches === 1 ? "" : "es"}`;
+    return lines ? `${lines} line${lines === 1 ? "" : "s"} output` : "done";
+  }
   return lines ? `${lines} line${lines === 1 ? "" : "s"}` : "done";
+}
+
+function toolStateIcon(tool: DisplayToolCall): string {
+  if (tool.isError || tool.status === "error") return "✗";
+  if (!isToolFinished(tool)) {
+    if (tool.status === "running") return "◐";
+    return "◌";
+  }
+  if (tool.name === "bash") return "$";
+  if (tool.name === "edit") return "✎";
+  if (tool.name === "write") return "✎";
+  if (tool.name === "read") return "▤";
+  if (tool.name === "grep" || tool.name === "glob") return "⌕";
+  if (tool.name === "web_fetch" || tool.name === "web_search") return "⌖";
+  return "●";
 }
 
 function toolSummaryWithPreview(tool: DisplayToolCall): string {
@@ -7202,7 +7336,7 @@ function toolSummaryWithPreview(tool: DisplayToolCall): string {
 
 function toolPreview(tool: DisplayToolCall): { lines: string[]; omitted: number } | undefined {
   if (!isToolFinished(tool) || tool.isError || !tool.result) return undefined;
-  if (tool.name !== "read" && tool.name !== "glob") return undefined;
+  if (tool.name !== "glob") return undefined;
 
   const lines = tool.result
     .replace(/\r\n/g, "\n")
@@ -7264,7 +7398,9 @@ function isToolFinished(tool: DisplayToolCall): boolean {
 
 function assistantStatusLabel(message: DisplayMessage): string {
   if (message.status === "responding") return "Responding...";
-  return message.streaming ? "Thinking..." : "Thinking";
+  const elapsed = formatDuration(reasoningElapsedMs(message));
+  if (message.streaming) return elapsed ? `Thinking ${elapsed}...` : "Thinking...";
+  return elapsed ? `Thought for ${elapsed}` : "Thinking";
 }
 
 function buildContextGauge(percent: number, barWidth: number): string {
@@ -7292,10 +7428,61 @@ function formatContextRemaining(value: number) {
   return String(value);
 }
 
-function thinkingLabelContent(streaming = false): StyledText {
+function thinkingLabelContent(streaming = false, elapsedMs?: number): StyledText {
+  const elapsed = formatDuration(elapsedMs);
+  const label = streaming
+    ? (elapsed ? `Thinking ${elapsed}...` : "Thinking...")
+    : (elapsed ? `Thought for ${elapsed}` : "Thought");
   return new StyledText([
-    fg(theme.messageThinkingText)(italic(streaming ? "Thinking..." : "Thinking")),
+    fg(theme.messageThinkingText)(italic(label)),
   ]);
+}
+
+function formatDuration(ms?: number): string {
+  if (ms === undefined || !Number.isFinite(ms) || ms <= 0) return "";
+  if (ms < 1000) return `${Math.max(1, Math.round(ms))}ms`;
+  const seconds = ms / 1000;
+  if (seconds < 10) return `${seconds.toFixed(1)}s`;
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remSec = Math.round(seconds - minutes * 60);
+  return remSec === 0 ? `${minutes}m` : `${minutes}m${remSec}s`;
+}
+
+function reasoningElapsedMs(message: DisplayMessage): number | undefined {
+  if (message.turnStartedAt === undefined) return undefined;
+  const end = !message.streaming ? (message.turnCompletedAt ?? Date.now()) : Date.now();
+  const diff = end - message.turnStartedAt;
+  return diff > 0 ? diff : undefined;
+}
+
+function toolElapsedMs(tool: DisplayToolCall): number | undefined {
+  if (tool.startedAt === undefined) return undefined;
+  const end = tool.completedAt ?? (tool.status === "completed" || tool.status === "error" ? Date.now() : undefined);
+  if (end === undefined) return undefined;
+  const diff = end - tool.startedAt;
+  return diff > 0 ? diff : undefined;
+}
+
+function turnElapsedMs(message: DisplayMessage): number | undefined {
+  if (message.turnStartedAt === undefined) return undefined;
+  const end = message.turnCompletedAt ?? Date.now();
+  const diff = end - message.turnStartedAt;
+  return diff > 0 ? diff : undefined;
+}
+
+function formatTurnSummary(message: DisplayMessage): string | undefined {
+  const parts: string[] = [];
+  const elapsed = turnElapsedMs(message);
+  if (elapsed !== undefined) parts.push(formatDuration(elapsed));
+  const usage = message.turnUsage;
+  if (usage) {
+    if (usage.promptTokens) parts.push(`${formatCompactNumber(usage.promptTokens)}↑`);
+    if (usage.completionTokens) parts.push(`${formatCompactNumber(usage.completionTokens)}↓`);
+    if (usage.reasoningTokens) parts.push(`${formatCompactNumber(usage.reasoningTokens)}◇`);
+  }
+  if (!parts.length) return undefined;
+  return `· ${parts.join(" · ")}`;
 }
 
 function truncate(value: string, max: number) {

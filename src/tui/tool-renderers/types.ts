@@ -32,4 +32,5 @@ export interface ToolRenderHelpers {
   summarizeToolResult: (tool: DisplayToolCall) => string;
   isToolFinished: (tool: DisplayToolCall) => boolean;
   toolPreview: (tool: DisplayToolCall) => { lines: string[]; omitted: number } | undefined;
+  toolStateIcon: (tool: DisplayToolCall) => string;
 }
