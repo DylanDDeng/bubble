@@ -106,6 +106,10 @@ function buildGuidelines(tools: string[], extraGuidelines: string[]): string[] {
     add("When the user is explicitly discussing, brainstorming, or shaping an approach instead of asking for immediate execution, use the question tool for targeted clarification or preference choices when it would materially improve the discussion; do not use it for generic permission-to-proceed questions");
   }
 
+  if (tools.includes("todo_write")) {
+    add("Use todo_write to plan any task that needs three or more concrete steps before you start. Mark each item completed as soon as it is done; do not batch updates");
+  }
+
   for (const item of extraGuidelines) {
     add(item);
   }

@@ -24,7 +24,7 @@ export function writeToolExpansionDigest(message: DisplayMessage, messageKey: st
 
 export function writeToolExpansionSignature(messageKey: string, tool: DisplayToolCall, expandedWrites: Set<string>) {
   if (!isWritePreviewTool(tool)) return "";
-  const content = tool.args.content;
+  const content = typeof tool.args.content === "string" ? tool.args.content : "";
   return [
     tool.id,
     expandedWrites.has(writeToolKey(messageKey, tool)) ? "expanded" : "collapsed",
@@ -40,16 +40,20 @@ function renderWriteTool({ ctx, tool, syntaxStyle, writeExpanded, onToggleWrite,
   const color = helpers.toolColor(tool);
   const icon = "●";
   const header = helpers.toolHeader(tool);
-  const preview = formatWritePreview(String(tool.args.content), writeExpanded);
-  const writeLineCount = String(tool.args.content).split(/\r?\n/).length;
+  const hasContent = typeof tool.args.content === "string";
+  const contentStr = hasContent ? String(tool.args.content) : "";
+  const preview = hasContent ? formatWritePreview(contentStr, writeExpanded) : null;
+  const writeLineCount = hasContent
+    ? contentStr.split(/\r?\n/).length
+    : (tool.streamingNewlineCount ?? 0) + 1;
   const summary = tool.result
     ? helpers.summarizeToolResult(tool)
     : `${helpers.isToolFinished(tool) ? "Prepared" : "Writing"} ${writeLineCount} line${writeLineCount === 1 ? "" : "s"} to ${helpers.toolPath(tool) ?? "file"}`;
-  const hint = preview.omittedLines > 0
+  const hint = preview && preview.omittedLines > 0
     ? `... +${preview.omittedLines} lines (${writeExpanded ? "ctrl+o to collapse" : "ctrl+o to expand"})`
-    : preview.omittedChars > 0
+    : preview && preview.omittedChars > 0
       ? `... +${preview.omittedChars} chars (${writeExpanded ? "ctrl+o to collapse" : "ctrl+o to expand"})`
-      : writeExpanded
+      : preview && writeExpanded
         ? "(ctrl+o to collapse)"
         : "";
 
@@ -77,7 +81,9 @@ function renderWriteTool({ ctx, tool, syntaxStyle, writeExpanded, onToggleWrite,
         fg: tool.isError ? theme.toolError : theme.textMuted,
         onMouseUp: onToggleWrite,
       }),
-      helpers.createCodeBlockRenderable(ctx, preview.content, helpers.toolPath(tool), syntaxStyle),
+      preview
+        ? helpers.createCodeBlockRenderable(ctx, preview.content, helpers.toolPath(tool), syntaxStyle)
+        : null,
       hint
         ? helpers.createText(ctx, hint, {
           fg: theme.textMuted,

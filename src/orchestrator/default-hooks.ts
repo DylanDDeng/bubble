@@ -1,12 +1,13 @@
 import { classifyTask } from "../agent/task-classifier.js";
+import { classifyTaskSize } from "../agent/task-size.js";
 import { EvidenceTracker } from "../agent/evidence-tracker.js";
 import { ExecutionGovernor } from "../agent/execution-governor.js";
 import { arbitrateToolCall } from "../agent/tool-arbiter.js";
 import {
-  buildFinalizeOpportunityReminder,
+  buildEditRetryEscalationReminder,
+  buildRedundantReadReminder,
+  buildSmallTaskHint,
   buildTaskSummaryReminder,
-  buildVerificationFailureReminder,
-  buildVerificationReminder,
   buildWorkflowPhaseReminder,
 } from "../prompt/reminders.js";
 import { reminderForTaskType } from "../prompt/task-reminders.js";
@@ -24,6 +25,13 @@ export function createDefaultHooks(): TurnHooks[] {
         const taskReminder = reminderForTaskType(taskType);
         if (taskReminder) {
           ctx.queueReminder(taskReminder);
+        }
+        // Small-task hint: counterweight to the default protocol's exploration
+        // bias, only fires once per run on focused one-shot requests like
+        // "写个 HTML 介绍元旦". Don't issue for the same input twice.
+        if (!ctx.state.smallTaskHintSent && classifyTaskSize(ctx.input) === "small") {
+          ctx.state.smallTaskHintSent = true;
+          ctx.queueReminder(buildSmallTaskHint());
         }
         if (taskType === "security_investigation") {
           ctx.state.evidenceTracker = new EvidenceTracker();
@@ -84,19 +92,57 @@ export function createDefaultHooks(): TurnHooks[] {
         }
         ctx.state.evidenceTracker?.observe(ctx.toolCall, ctx.result);
         ctx.state.governor?.afterToolResult(ctx.toolCall, ctx.result);
-        if (isCodeWriteResult(ctx.toolCall, ctx.result)) {
-          markCodeChanged(ctx.state);
-        } else if (ctx.state.codeChanged && isVerificationAttempt(ctx.toolCall, ctx.result)) {
-          ctx.state.verificationAttempted = true;
-          if (isSuccessfulToolResult(ctx.result)) {
-            ctx.state.verificationCompleted = true;
-            ctx.state.verificationFailed = false;
-          } else {
-            ctx.state.verificationCompleted = false;
-            ctx.state.verificationFailed = true;
-            ctx.state.finalizeReminderQueued = false;
+        // Edit/write retry-escalation: if the same tool with the same args
+        // failed twice in a row, models — especially thinking-heavy ones —
+        // can spiral on "identical content" / "not found" errors. Nudge them
+        // to change strategy.
+        if ((ctx.toolCall.name === "edit" || ctx.toolCall.name === "write") && ctx.result.isError) {
+          const hash = hashEditCall(ctx.toolCall);
+          const history: string[] = ctx.state.recentEditFailures ?? (ctx.state.recentEditFailures = []);
+          history.push(hash);
+          // Keep last 4 entries.
+          if (history.length > 4) history.shift();
+          const len = history.length;
+          if (len >= 2 && history[len - 1] === history[len - 2] && !ctx.state.editRetryReminderSent) {
+            ctx.state.editRetryReminderSent = true;
+            const summary = ctx.result.content.split("\n")[0] || "";
+            ctx.queueReminder(buildEditRetryEscalationReminder(
+              `Last failure: ${ctx.toolCall.name} on the same target with identical arguments. ${summary}`,
+            ));
+          }
+        } else if ((ctx.toolCall.name === "edit" || ctx.toolCall.name === "write") && !ctx.result.isError) {
+          // Successful mutation resets the dedup state so a later, unrelated
+          // failure won't fire the reminder spuriously.
+          ctx.state.recentEditFailures = [];
+          ctx.state.editRetryReminderSent = false;
+        }
+        // Redundant-Read detection: same file path read twice within this turn.
+        // Soft single-shot reminder, governor handles cumulative read budgets.
+        if (ctx.toolCall.name === "read" && !ctx.result.isError) {
+          const rawPath = ctx.toolCall.parsedArgs?.path ?? ctx.toolCall.parsedArgs?.file_path;
+          const path = typeof rawPath === "string" ? rawPath : undefined;
+          if (path) {
+            const seen: string[] = ctx.state.recentReadPaths ?? (ctx.state.recentReadPaths = []);
+            const flagged: Set<string> = ctx.state.redundantReadReminded ?? (ctx.state.redundantReadReminded = new Set());
+            if (seen.includes(path) && !flagged.has(path)) {
+              flagged.add(path);
+              ctx.queueReminder(buildRedundantReadReminder(path));
+            }
+            seen.push(path);
+            if (seen.length > 16) seen.shift();
           }
         }
+        if (isCodeWriteResult(ctx.toolCall, ctx.result)) {
+          markCodeChanged(ctx.state);
+        }
+        // Removed: active verification tracking. The previous design nagged the
+        // model every turn until it ran a recognised verification command, and
+        // narrowly accepted only test/lint commands — which meant ad-hoc python
+        // checks did not count, the nag never cleared, and reasoning models
+        // (DeepSeek v4-pro with hex-blindness) spiraled trying to "prove" the
+        // edit was correct. CC's approach is the opposite: verify when there
+        // is something real to verify, say so explicitly when there isn't, and
+        // trust the model to judge. We follow that.
         if (ctx.toolCall.name === "task") {
           ctx.queueReminder(buildTaskSummaryReminder());
         }
@@ -122,38 +168,11 @@ export function createDefaultHooks(): TurnHooks[] {
             "Search continuation has become low-yield. Summarize the strongest evidence already collected instead of continuing broad exploration.",
           );
         }
-        const changedThisTurn = ctx.toolResults.some((result) => result.metadata?.kind === "write" || result.metadata?.kind === "edit");
-        if (changedThisTurn && !ctx.state.verificationAttempted && !ctx.state.verificationCompleted && !ctx.state.verificationReminderQueued) {
-          ctx.state.verificationReminderQueued = true;
-          ctx.queueReminder(buildVerificationReminder(
-            "The previous turn changed files and no verification evidence has been observed yet.",
-          ));
-        }
-        if (ctx.state.codeChanged && ctx.state.verificationFailed && !ctx.state.verificationFailureReminderQueued) {
-          ctx.state.verificationFailureReminderQueued = true;
-          ctx.queueReminder(buildVerificationFailureReminder(
-            "A verification command or runtime check was attempted after file changes, but it did not pass.",
-          ));
-        }
-        if (ctx.state.codeChanged && ctx.state.verificationCompleted && !ctx.state.finalizeReminderQueued) {
-          ctx.state.finalizeReminderQueued = true;
-          ctx.queueReminder(buildFinalizeOpportunityReminder(
-            "A relevant verification command or runtime check passed after file changes.",
-          ));
-        }
+        // Verification reminders intentionally removed. See afterToolCall.
       },
-      afterTurn(ctx) {
-        if (ctx.state.codeChanged && ctx.state.verificationFailed && !ctx.state.verificationFailureReminderSent) {
-          ctx.state.verificationFailureReminderSent = true;
-          ctx.state.forceContinuationReason = "Files were changed, but the latest verification evidence failed.";
-          ctx.queueReminder(buildVerificationFailureReminder(ctx.state.forceContinuationReason));
-          return;
-        }
-        if (ctx.state.codeChanged && !ctx.state.verificationAttempted && !ctx.state.verificationCompleted && !ctx.state.finalVerificationReminderSent) {
-          ctx.state.finalVerificationReminderSent = true;
-          ctx.state.forceContinuationReason = "Files were changed but no verification evidence was observed before the final answer.";
-          ctx.queueReminder(buildVerificationReminder(ctx.state.forceContinuationReason));
-        }
+      afterTurn() {
+        // Verification force-continuation removed. The model decides whether
+        // verification is meaningful for the task, per the system prompt.
       },
     },
   ];
@@ -161,14 +180,6 @@ export function createDefaultHooks(): TurnHooks[] {
 
 function markCodeChanged(state: TurnHookState): void {
   state.codeChanged = true;
-  state.verificationAttempted = false;
-  state.verificationCompleted = false;
-  state.verificationFailed = false;
-  state.verificationReminderQueued = false;
-  state.finalVerificationReminderSent = false;
-  state.verificationFailureReminderQueued = false;
-  state.verificationFailureReminderSent = false;
-  state.finalizeReminderQueued = false;
 }
 
 function isCodeWriteResult(_toolCall: ParsedToolCall, result: ToolResult): boolean {
@@ -178,33 +189,26 @@ function isCodeWriteResult(_toolCall: ParsedToolCall, result: ToolResult): boole
   return result.metadata?.kind === "write" || result.metadata?.kind === "edit";
 }
 
-function isSuccessfulToolResult(result: ToolResult): boolean {
-  if (result.isError) {
-    return false;
+function hashEditCall(toolCall: ParsedToolCall): string {
+  // Cheap fingerprint that identifies "same edit/write call". JSON of the
+  // sorted parsed args is good enough — we only need stable equality between
+  // identical calls, not cryptographic strength.
+  try {
+    return `${toolCall.name}:${stableStringify(toolCall.parsedArgs)}`;
+  } catch {
+    return `${toolCall.name}:${toolCall.arguments}`;
   }
-  return result.status !== "blocked" && result.status !== "command_error" && result.status !== "timeout";
 }
 
-function isVerificationAttempt(toolCall: ParsedToolCall, result: ToolResult): boolean {
-  if (toolCall.name === "lsp") {
-    return true;
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(",")}]`;
   }
-  if (toolCall.name !== "bash") {
-    return false;
+  if (value && typeof value === "object") {
+    const entries = Object.keys(value as Record<string, unknown>)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableStringify((value as Record<string, unknown>)[key])}`);
+    return `{${entries.join(",")}}`;
   }
-  const command = typeof result.metadata?.command === "string"
-    ? result.metadata.command
-    : typeof toolCall.parsedArgs.command === "string"
-      ? toolCall.parsedArgs.command
-      : "";
-  return isVerificationCommand(command);
-}
-
-function isVerificationCommand(command: string): boolean {
-  const normalized = command.trim().toLowerCase();
-  return /\b(npm|pnpm|yarn|bun)\s+(test|run\s+(test|build|typecheck|lint|check|tsc)|exec\s+tsc)\b/.test(normalized)
-    || /\b(npx|pnpm\s+exec|bunx)\s+(vitest|tsc|eslint|playwright)\b/.test(normalized)
-    || /\b(python3?|uv\s+run\s+python3?|poetry\s+run\s+python3?)\s+(-m\s+)?(pytest|unittest|ruff|mypy)\b/.test(normalized)
-    || /\b(make|cmake)\s+(test|check)\b/.test(normalized)
-    || /\b(vitest|tsc|pytest|ruff|mypy|ctest|cargo\s+test|go\s+test|swift\s+test|mvn\s+test|gradle\s+test|\.\/gradlew\s+test)\b/.test(normalized);
+  return JSON.stringify(value ?? null);
 }

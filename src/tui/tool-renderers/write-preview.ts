@@ -3,8 +3,13 @@ import type { DisplayToolCall } from "../display-history.js";
 const WRITE_PREVIEW_LINE_LIMIT = 10;
 export const WRITE_PREVIEW_CHAR_LIMIT = 5000;
 
-export function isWritePreviewTool(tool: DisplayToolCall): tool is DisplayToolCall & { args: { content: string } } {
-  return !tool.isError && tool.name === "write" && typeof tool.args?.content === "string";
+export function isWritePreviewTool(tool: DisplayToolCall): tool is DisplayToolCall & { args: { content?: string } } {
+  if (tool.isError) return false;
+  if (tool.name !== "write") return false;
+  if (typeof tool.args?.content === "string") return true;
+  // While the model is still streaming the JSON args, content may not be
+  // populated yet — keep ownership so the header renders progressively.
+  return tool.streamingArgs === true;
 }
 
 export function formatWritePreview(content: string, expanded: boolean) {

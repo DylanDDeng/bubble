@@ -340,7 +340,7 @@ export class Agent {
         toolCalls: [],
       };
 
-      const streamingToolCalls = new Map<string, { id: string; name: string; args: string }>();
+      const streamingToolCalls = new Map<string, { id: string; name: string; args: string; argsCorrupt?: boolean }>();
       let turnUsage: TokenUsage | undefined;
       let assistantAppended = false;
 
@@ -414,6 +414,9 @@ export class Agent {
                 if (chunk.argumentsFull !== undefined) {
                   currentToolCall.args = chunk.argumentsFull;
                 }
+                if (chunk.argumentsCorrupt) {
+                  currentToolCall.argsCorrupt = true;
+                }
                 if (chunk.arguments) {
                   yield {
                     type: "tool_call_delta",
@@ -429,6 +432,7 @@ export class Agent {
                   id: currentToolCall.id,
                   name: currentToolCall.name,
                   arguments: currentToolCall.args,
+                  ...(currentToolCall.argsCorrupt ? { argsCorrupt: true } : {}),
                 });
                 yield {
                   type: "tool_call_end",
@@ -483,9 +487,13 @@ export class Agent {
         for (let index = 0; index < assistantMsg.toolCalls.length; index++) {
           const tc = assistantMsg.toolCalls[index];
           try {
-            parsedCalls.push({ ...tc, parsedArgs: JSON.parse(tc.arguments) });
+            parsedCalls.push({
+              ...tc,
+              parsedArgs: JSON.parse(tc.arguments),
+              ...(tc.argsCorrupt ? { argsCorrupt: true } : {}),
+            });
           } catch {
-            parsedCalls.push({ ...tc, parsedArgs: {} });
+            parsedCalls.push({ ...tc, parsedArgs: {}, argsCorrupt: true });
           }
         }
 
@@ -1294,6 +1302,29 @@ export class Agent {
       };
     }
 
+    if (toolCall.argsCorrupt) {
+      return {
+        content:
+          `Error: The arguments for "${toolCall.name}" failed to parse as JSON, indicating the tool call was truncated or malformed mid-stream. ` +
+          `Re-issue the call with valid JSON arguments; do not assume the previous attempt ran.`,
+        isError: true,
+        status: "blocked",
+        metadata: { kind: "security", reason: "args_corrupt" },
+      };
+    }
+
+    const missingRequired = findMissingRequiredArgs(tool.parameters, toolCall.parsedArgs);
+    if (missingRequired.length > 0) {
+      return {
+        content:
+          `Error: Tool "${toolCall.name}" was called without required argument${missingRequired.length === 1 ? "" : "s"}: ${missingRequired.map((name) => `"${name}"`).join(", ")}. ` +
+          `Re-issue the call with all required fields filled. Do not assume the previous attempt ran with default values.`,
+        isError: true,
+        status: "blocked",
+        metadata: { kind: "security", reason: "missing_required_args", missing: missingRequired },
+      };
+    }
+
     try {
       return await tool.execute(toolCall.parsedArgs, {
         cwd,
@@ -1310,6 +1341,26 @@ export class Agent {
       };
     }
   }
+}
+
+function findMissingRequiredArgs(
+  schema: { required?: string[] } | undefined,
+  args: Record<string, any> | undefined,
+): string[] {
+  const required = schema?.required;
+  if (!required || required.length === 0) return [];
+  const missing: string[] = [];
+  for (const name of required) {
+    const value = args ? args[name] : undefined;
+    // Empty strings/arrays are intentionally allowed — writing an empty file
+    // or passing an empty list can be legitimate. Only undefined/null counts
+    // as "missing", because the observed failure mode is `finalArgs: "{}"`
+    // where the field is entirely absent.
+    if (value === undefined || value === null) {
+      missing.push(name);
+    }
+  }
+  return missing;
 }
 
 function estimateResidentChars(messages: Message[]): number {

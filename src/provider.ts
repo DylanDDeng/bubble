@@ -5,10 +5,25 @@
  */
 
 import OpenAI from "openai";
+import { appendFileSync } from "node:fs";
 import { createOpenAICodexProvider, isOpenAICodexBaseUrl } from "./provider-openai-codex.js";
 import { createProviderProtocolArtifactFilter } from "./provider-artifacts.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
 import type { Provider, ProviderMessage, StreamChunk, ThinkingLevel, ToolDefinition } from "./types.js";
+
+// Diagnostic logger for tool-args byte-loss investigation. Activate with
+//   BUBBLE_DEBUG_TOOL_ARGS=/path/to/log.jsonl   (any writable path)
+// Each line is a JSON record describing a transition. When debugging is off,
+// the function is a no-op and free.
+const TOOL_ARGS_DEBUG_PATH = process.env.BUBBLE_DEBUG_TOOL_ARGS?.trim();
+function debugToolArgs(event: Record<string, unknown>): void {
+  if (!TOOL_ARGS_DEBUG_PATH) return;
+  try {
+    appendFileSync(TOOL_ARGS_DEBUG_PATH, JSON.stringify({ t: Date.now(), ...event }) + "\n", "utf-8");
+  } catch {
+    // Diagnostic failures must not affect the model session.
+  }
+}
 
 type ReasoningContentEcho = "tool_calls" | "all";
 
@@ -169,22 +184,47 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
 // stream; if it doesn't parse but contains a balanced `{…}` prefix or suffix
 // that does, use that. Empty or unsalvageable input becomes `"{}"` so the
 // downstream echo to the model is always valid JSON.
-export function normalizeToolArgs(raw: string): string {
+//
+// `corrupt` is set when the original raw was non-empty but unsalvageable,
+// signalling that the model's intended arguments were lost in transport;
+// downstream code should refuse to execute the call instead of silently
+// running with an empty args object.
+export interface NormalizedToolArgs {
+  args: string;
+  corrupt: boolean;
+}
+
+export function normalizeToolArgsDetailed(raw: string): NormalizedToolArgs {
   const s = (raw ?? "").trim();
-  if (!s) return "{}";
-  try { JSON.parse(s); return s; } catch {}
+  if (!s) {
+    debugToolArgs({ stage: "normalize", input: raw, output: "{}", reason: "empty" });
+    return { args: "{}", corrupt: false };
+  }
+  try { JSON.parse(s); debugToolArgs({ stage: "normalize", input: raw, output: s, reason: "passthrough" }); return { args: s, corrupt: false }; } catch {}
 
   const firstBrace = extractBalancedJson(s, 0);
   if (firstBrace) {
-    try { JSON.parse(firstBrace); } catch { return "{}"; }
+    try { JSON.parse(firstBrace); } catch {
+      debugToolArgs({ stage: "normalize", input: raw, output: "{}", reason: "first-brace-unparseable", firstBrace });
+      return { args: "{}", corrupt: true };
+    }
     // If the content after the first balanced object is another valid object
     // with the same parse, we've got a snapshot duplication — keep one copy.
     const rest = s.slice(firstBrace.length).trim();
-    if (!rest) return firstBrace;
-    try { JSON.parse(rest); return firstBrace; } catch {}
-    return firstBrace;
+    if (!rest) {
+      debugToolArgs({ stage: "normalize", input: raw, output: firstBrace, reason: "single-brace" });
+      return { args: firstBrace, corrupt: false };
+    }
+    try { JSON.parse(rest); debugToolArgs({ stage: "normalize", input: raw, output: firstBrace, reason: "snapshot-dedup", rest }); return { args: firstBrace, corrupt: false }; } catch {}
+    debugToolArgs({ stage: "normalize", input: raw, output: firstBrace, reason: "trailing-junk-dropped", rest });
+    return { args: firstBrace, corrupt: false };
   }
-  return "{}";
+  debugToolArgs({ stage: "normalize", input: raw, output: "{}", reason: "no-balanced-json" });
+  return { args: "{}", corrupt: true };
+}
+
+export function normalizeToolArgs(raw: string): string {
+  return normalizeToolArgsDetailed(raw).args;
 }
 
 function extractBalancedJson(s: string, start: number): string | null {
@@ -218,6 +258,12 @@ function extractBalancedJson(s: string, start: number): string | null {
 export async function* translateOpenAIStream(stream: AsyncIterable<any>): AsyncIterable<StreamChunk> {
   const toolCalls = new Map<number, { id: string; name: string; args: string; started: boolean }>();
   const textFilter = createProviderProtocolArtifactFilter();
+  // DeepSeek (and some inference re-hosts) sometimes deliver reasoning twice:
+  // once via a dedicated `reasoning_content` / `thinking` field, and again
+  // embedded as `<think>...</think>` inside `delta.content`. Track whether we
+  // have seen the dedicated channel; if yes, strip <think> blocks from text
+  // silently instead of yielding a second reasoning_delta.
+  let hasDedicatedReasoningChannel = false;
 
   function* flushToolCalls(): Generator<StreamChunk> {
     if (toolCalls.size === 0) return;
@@ -231,12 +277,15 @@ export async function* translateOpenAIStream(stream: AsyncIterable<any>): AsyncI
           yield { type: "tool_call", id: entry.id, name: entry.name, arguments: entry.args, isStart: false, isEnd: false };
         }
       }
+      const normalized = normalizeToolArgsDetailed(entry.args);
+      debugToolArgs({ stage: "flush-end", id: entry.id, name: entry.name, entryArgs: entry.args, finalArgs: normalized.args, corrupt: normalized.corrupt });
       yield {
         type: "tool_call",
         id: entry.id,
         name: entry.name,
         arguments: "",
-        argumentsFull: normalizeToolArgs(entry.args),
+        argumentsFull: normalized.args,
+        argumentsCorrupt: normalized.corrupt || undefined,
         isStart: false,
         isEnd: true,
       };
@@ -275,13 +324,14 @@ export async function* translateOpenAIStream(stream: AsyncIterable<any>): AsyncI
 
     const reasoning = (delta as any)?.reasoning ?? (delta as any)?.thinking ?? (delta as any)?.reasoning_content;
     if (reasoning) {
+      hasDedicatedReasoningChannel = true;
       yield { type: "reasoning_delta", content: reasoning };
     }
 
     if (delta?.content) {
       const thinkMatch = delta.content.match(/<think>([\s\S]*?)<\/think>/);
       if (thinkMatch) {
-        if (thinkMatch[1]) {
+        if (thinkMatch[1] && !hasDedicatedReasoningChannel) {
           yield { type: "reasoning_delta", content: thinkMatch[1] };
         }
         const remaining = delta.content.replace(/<think>[\s\S]*?<\/think>/, "");
@@ -309,6 +359,7 @@ export async function* translateOpenAIStream(stream: AsyncIterable<any>): AsyncI
         if (tc.function?.name) entry.name = tc.function.name;
         yield* startToolCallIfReady(entry);
         if (typeof tc.function?.arguments === "string" && tc.function.arguments) {
+          debugToolArgs({ stage: "raw-chunk", id: entry.id, name: entry.name, idx, raw: tc.function.arguments });
           const merged = mergeToolArgumentDelta(entry.args, tc.function.arguments);
           entry.args = merged.args;
           if (entry.started && merged.delta) {
@@ -339,22 +390,32 @@ export async function* translateOpenAIStream(stream: AsyncIterable<any>): AsyncI
 }
 
 function mergeToolArgumentDelta(current: string, incoming: string): { args: string; delta: string } {
-  if (!current) return { args: incoming, delta: incoming };
-  if (!incoming) return { args: current, delta: "" };
+  if (!current) {
+    debugToolArgs({ stage: "merge", branch: "empty-current", current, incoming, args: incoming, delta: incoming });
+    return { args: incoming, delta: incoming };
+  }
+  if (!incoming) {
+    debugToolArgs({ stage: "merge", branch: "empty-incoming", current, incoming, args: current, delta: "" });
+    return { args: current, delta: "" };
+  }
 
   // Standard OpenAI-compatible streams send incremental argument deltas. Some
   // providers send cumulative snapshots instead. If the incoming chunk already
   // contains what we have, emit only the new suffix so downstream state remains
   // append-only.
   if (incoming.startsWith(current)) {
-    return { args: incoming, delta: incoming.slice(current.length) };
+    const delta = incoming.slice(current.length);
+    debugToolArgs({ stage: "merge", branch: "snapshot-grow", current, incoming, args: incoming, delta });
+    return { args: incoming, delta };
   }
 
   // Repeated identical snapshots should not duplicate the TUI preview or final
   // JSON arguments.
   if (incoming === current || current.endsWith(incoming)) {
+    debugToolArgs({ stage: "merge", branch: "snapshot-dup", current, incoming, args: current, delta: "" });
     return { args: current, delta: "" };
   }
 
+  debugToolArgs({ stage: "merge", branch: "concat", current, incoming, args: current + incoming, delta: incoming });
   return { args: current + incoming, delta: incoming };
 }

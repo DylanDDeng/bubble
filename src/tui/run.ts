@@ -59,6 +59,7 @@ import { hashString } from "./render-signature.js";
 import { findToolRenderer } from "./tool-renderers/registry.js";
 import { writeToolKey } from "./tool-renderers/write.js";
 import { formatWritePreview, isWritePreviewTool } from "./tool-renderers/write-preview.js";
+import { extractStreamingArgsHint } from "./streaming-tool-args.js";
 import { getNextPermissionMode, PERMISSION_MODE_INFO } from "../permission/mode.js";
 import { getContextBudget } from "../context/budget.js";
 import { getLspService, type LspService, type LspStatus } from "../lsp/index.js";
@@ -3759,6 +3760,31 @@ function OpenTuiApp(props: {
     let turnStartedAt: number | undefined;
     let runError: string | undefined;
     let runCancelled = false;
+    // Throttle redraws driven by per-token streaming events (reasoning_delta
+    // and tool_call_delta). Both can fire hundreds of times per second on a
+    // long reply; coalescing into ~16fps keeps the transcript alive without
+    // thrashing OpenTUI's layout or re-parsing markdown per token.
+    let pendingStreamingRedrawTimer: ReturnType<typeof setTimeout> | undefined;
+    const STREAMING_REDRAW_INTERVAL_MS = 60;
+    const buildStreamingDisplay = (status?: DisplayMessage["status"]): DisplayMessage => ({
+      role: "assistant",
+      content: "",
+      reasoning: assistantReasoning || undefined,
+      toolCalls: toolCalls.length ? [...toolCalls] : undefined,
+      status,
+      streaming: true,
+      turnStartedAt,
+    });
+    const flushStreamingRedraw = () => {
+      if (pendingStreamingRedrawTimer === undefined) return;
+      clearTimeout(pendingStreamingRedrawTimer);
+      pendingStreamingRedrawTimer = undefined;
+      redrawTranscript(buildStreamingDisplay(toolCalls.length ? undefined : "thinking"));
+    };
+    const scheduleStreamingRedraw = () => {
+      if (pendingStreamingRedrawTimer !== undefined) return;
+      pendingStreamingRedrawTimer = setTimeout(flushStreamingRedraw, STREAMING_REDRAW_INTERVAL_MS);
+    };
     try {
       for await (const event of props.agent.run(actualInput, props.args.cwd, { abortSignal: run.abortController.signal })) {
         if (event.type === "turn_start") {
@@ -3778,37 +3804,56 @@ function OpenTuiApp(props: {
           assistantContent += event.content;
         } else if (event.type === "reasoning_delta") {
           assistantReasoning += event.content;
-          redrawTranscript({
-            role: "assistant",
-            content: "",
-            reasoning: assistantReasoning || undefined,
-            toolCalls: toolCalls.length ? [...toolCalls] : undefined,
-            status: "thinking",
-            streaming: true,
-            turnStartedAt,
-          });
+          scheduleStreamingRedraw();
         } else if (event.type === "tool_call_start") {
           currentTurnHasToolCall = true;
+          // Insert a streaming placeholder so the user sees feedback the moment
+          // the model commits to a tool call, instead of waiting for the args
+          // JSON to fully stream + parse.
+          if (!toolCalls.find((item) => item.id === event.id)) {
+            toolCalls.push({
+              id: event.id,
+              name: event.name,
+              args: {},
+              rawArguments: "",
+              streamingArgs: true,
+              status: "pending",
+            });
+          }
           redrawTranscript({
             role: "assistant",
             content: "",
             reasoning: assistantReasoning || undefined,
-            toolCalls: toolCalls.length ? [...toolCalls] : undefined,
-            status: toolCalls.length ? undefined : "thinking",
+            toolCalls: [...toolCalls],
             streaming: true,
             turnStartedAt,
           });
         } else if (event.type === "tool_call_delta") {
           currentTurnHasToolCall = true;
+          const existing = toolCalls.find((item) => item.id === event.id);
+          if (existing) {
+            existing.name = event.name || existing.name;
+            existing.rawArguments = event.arguments;
+            existing.streamingArgs = true;
+            const hint = extractStreamingArgsHint(event.arguments);
+            if (hint.path && existing.args.path !== hint.path) {
+              existing.args = { ...existing.args, path: hint.path };
+            }
+            existing.streamingNewlineCount = hint.newlineCount;
+            scheduleStreamingRedraw();
+          }
         } else if (event.type === "tool_call_end") {
           currentTurnHasToolCall = true;
         } else if (event.type === "tool_start") {
           currentTurnHasToolCall = true;
+          flushStreamingRedraw();
           const now = Date.now();
           const existing = toolCalls.find((item) => item.id === event.id);
           if (existing) {
             existing.args = event.args;
             existing.streamingArgs = false;
+            existing.streamingNewlineCount = undefined;
+            existing.rawArguments = undefined;
             existing.status = "running";
             existing.startedAt = existing.startedAt ?? now;
           } else {
@@ -3878,6 +3923,10 @@ function OpenTuiApp(props: {
           syncModeChrome();
           bumpSidebar();
         } else if (event.type === "turn_end") {
+          if (pendingStreamingRedrawTimer !== undefined) {
+            clearTimeout(pendingStreamingRedrawTimer);
+            pendingStreamingRedrawTimer = undefined;
+          }
           if (event.usage) {
             setSidebarUsage((current) => ({
               contextTokens: event.usage!.promptTokens || current.contextTokens,
@@ -3920,6 +3969,10 @@ function OpenTuiApp(props: {
         runError = error?.message || String(error);
       }
     } finally {
+      if (pendingStreamingRedrawTimer !== undefined) {
+        clearTimeout(pendingStreamingRedrawTimer);
+        pendingStreamingRedrawTimer = undefined;
+      }
       pendingApprovalRef = undefined;
       setPendingApproval(undefined);
       setApprovalOptionIdx(0);
@@ -5538,6 +5591,7 @@ type TranscriptEntry = {
     reasoningBox?: BoxRenderable;
     reasoningToggleText?: TextRenderable;
     reasoningStreaming?: boolean;
+    reasoningPlainText?: TextRenderable;
     reasoningMarkdown?: MarkdownRenderable;
     toolsBox?: BoxRenderable;
     toolEntries?: Map<string, ToolEntryRef>;
@@ -5653,18 +5707,31 @@ function updateAssistantEntry(
   if (entry.refs.statusBox) {
     entry.refs.statusBox.visible = showStatus;
   }
+  const streamingReasoning = message.streaming === true;
   if (entry.refs.reasoningToggleText) {
-    entry.refs.reasoningStreaming = message.streaming === true;
+    entry.refs.reasoningStreaming = streamingReasoning;
     entry.refs.reasoningToggleText.content = visibleReasoning
-      ? thinkingLabelContent(message.streaming === true, reasoningElapsedMs(message))
+      ? thinkingLabelContent(streamingReasoning, reasoningElapsedMs(message))
       : new StyledText([fg(theme.messageThinkingText)("")]);
   }
+  // During streaming we update only the plain text node — cheap per-delta. The
+  // markdown node stays hidden + stale. Once streaming ends (turn_end), we
+  // pay the parse cost exactly once and swap visibility.
+  if (entry.refs.reasoningPlainText) {
+    if (streamingReasoning) {
+      entry.refs.reasoningPlainText.content = formatThinkingMarkdown(visibleReasoning);
+    }
+    entry.refs.reasoningPlainText.visible = streamingReasoning && !!visibleReasoning;
+  }
   if (entry.refs.reasoningMarkdown) {
-    syncMarkdownRenderable(
-      entry.refs.reasoningMarkdown,
-      formatThinkingMarkdown(visibleReasoning),
-      message.streaming === true,
-    );
+    if (!streamingReasoning) {
+      syncMarkdownRenderable(
+        entry.refs.reasoningMarkdown,
+        formatThinkingMarkdown(visibleReasoning),
+        false,
+      );
+    }
+    entry.refs.reasoningMarkdown.visible = !streamingReasoning && !!visibleReasoning;
   }
   if (entry.refs.reasoningBox) {
     entry.refs.reasoningBox.visible = !!visibleReasoning;
@@ -6168,11 +6235,24 @@ function createAssistantEntry(
     wrapMode: "none",
   });
   refs.reasoningToggleText = labelText;
-  refs.reasoningStreaming = message.streaming === true;
-  const markdown = createMarkdown(ctx, formatThinkingMarkdown(visibleReasoning ?? ""), subtleSyntaxStyle, {
-    streaming: message.streaming === true,
+  const streamingReasoning = message.streaming === true;
+  refs.reasoningStreaming = streamingReasoning;
+  // While the model is still streaming we render reasoning as plain text — a
+  // single TextRenderable.content update is cheap, whereas re-parsing markdown
+  // (treesitter + cache clear) per token grows to O(N²) and freezes the TUI.
+  // The markdown variant is parsed once at turn_end and only then becomes
+  // visible.
+  const plainText = createText(ctx, formatThinkingMarkdown(visibleReasoning ?? ""), {
+    fg: theme.messageThinkingContentText,
+    wrapMode: "word",
+    visible: streamingReasoning && !!visibleReasoning,
+  });
+  refs.reasoningPlainText = plainText;
+  const markdown = createMarkdown(ctx, streamingReasoning ? "" : formatThinkingMarkdown(visibleReasoning ?? ""), subtleSyntaxStyle, {
+    streaming: false,
     fg: theme.messageThinkingContentText,
   });
+  markdown.visible = !streamingReasoning && !!visibleReasoning;
   refs.reasoningMarkdown = markdown;
   const reasoningBox = createBox(ctx, {
     paddingLeft: 2,
@@ -6186,6 +6266,7 @@ function createAssistantEntry(
     createBox(ctx, {
       flexShrink: 0,
     }, [labelText]),
+    plainText,
     markdown,
   ]);
   refs.reasoningBox = reasoningBox;
@@ -6540,18 +6621,23 @@ function renderTool(tool: DisplayToolCall, syntaxStyle: SyntaxStyle, width = 80)
     );
   }
   if (isWritePreviewTool(tool)) {
-    const preview = formatWritePreview(tool.args.content, false);
-    const summary = tool.result ?? `${isToolFinished(tool) ? "Prepared" : "Writing"} ${tool.args.content.split(/\r?\n/).length} lines to ${toolPath(tool) ?? "file"}`;
+    const hasContent = typeof tool.args.content === "string";
+    const contentStr = hasContent ? String(tool.args.content) : "";
+    const preview = hasContent ? formatWritePreview(contentStr, false) : null;
+    const lineCount = hasContent
+      ? contentStr.split(/\r?\n/).length
+      : (tool.streamingNewlineCount ?? 0) + 1;
+    const summary = tool.result ?? `${isToolFinished(tool) ? "Prepared" : "Writing"} ${lineCount} lines to ${toolPath(tool) ?? "file"}`;
     return h("box", { paddingLeft: 3, marginTop: 1, flexDirection: "column", flexShrink: 0 },
       h("text", { fg: color },
         `${icon} ${displayToolName(tool.name)}${toolHeader(tool) ? ` ${toolHeader(tool)}` : ""}`,
       ),
       h("box", { paddingLeft: 1, marginTop: 0, border: ["left"], borderColor: theme.borderSubtle, flexDirection: "column", flexShrink: 0 },
         h("text", { fg: theme.textMuted }, `└ ${summary}`),
-        renderCodeBlockContent(preview.content, toolPath(tool), syntaxStyle),
-        preview.omittedLines > 0
+        preview ? renderCodeBlockContent(preview.content, toolPath(tool), syntaxStyle) : null,
+        preview && preview.omittedLines > 0
           ? h("text", { fg: theme.textMuted }, `... +${preview.omittedLines} lines (ctrl+o to expand)`)
-          : preview.omittedChars > 0
+          : preview && preview.omittedChars > 0
             ? h("text", { fg: theme.textMuted }, `... +${preview.omittedChars} chars (ctrl+o to expand)`)
             : null,
       ),
@@ -7467,8 +7553,13 @@ function formatDuration(ms?: number): string {
   const seconds = ms / 1000;
   if (seconds < 10) return `${seconds.toFixed(1)}s`;
   if (seconds < 60) return `${Math.round(seconds)}s`;
-  const minutes = Math.floor(seconds / 60);
-  const remSec = Math.round(seconds - minutes * 60);
+  let minutes = Math.floor(seconds / 60);
+  let remSec = Math.round(seconds - minutes * 60);
+  // Math.round can lift remSec to exactly 60 (e.g. 239.6s → 3m60s). Carry into minutes.
+  if (remSec >= 60) {
+    minutes += Math.floor(remSec / 60);
+    remSec = remSec % 60;
+  }
   return remSec === 0 ? `${minutes}m` : `${minutes}m${remSec}s`;
 }
 

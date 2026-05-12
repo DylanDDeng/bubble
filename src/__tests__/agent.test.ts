@@ -322,6 +322,179 @@ describe("Agent", () => {
     expect(seen).toEqual([{ toolName: "dummy", content: "result: 42" }]);
   });
 
+  it("rejects a tool call whose arguments are not valid JSON", async () => {
+    const provider = createMockProvider([
+      [
+        { type: "tool_call", id: "tc_corrupt", name: "dummy", arguments: "", isStart: true, isEnd: false },
+        {
+          type: "tool_call",
+          id: "tc_corrupt",
+          name: "dummy",
+          arguments: '{"value":"unfini',
+          isStart: false,
+          isEnd: true,
+        },
+        { type: "done" },
+      ],
+      [{ type: "text", content: "retry result" }, { type: "done" }],
+    ]);
+
+    let executions = 0;
+    const tool: ToolRegistryEntry = {
+      name: "dummy",
+      description: "",
+      parameters: { type: "object", properties: { value: { type: "string" } }, required: ["value"] },
+      async execute(args) {
+        executions += 1;
+        return { content: `executed with ${args.value ?? "nothing"}` };
+      },
+    };
+
+    const seen: Array<{ toolName: string; content: string; isError?: boolean }> = [];
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [tool],
+      onToolResult: (toolName, result) => {
+        seen.push({ toolName, content: result.content, isError: result.isError });
+      },
+    });
+
+    await collectEvents(agent, "Call dummy", "/tmp");
+    expect(executions).toBe(0);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].isError).toBe(true);
+    expect(seen[0].content).toContain("failed to parse as JSON");
+  });
+
+  it("rejects a tool call whose provider-side stream was marked corrupt", async () => {
+    const provider = createMockProvider([
+      [
+        { type: "tool_call", id: "tc_corrupt2", name: "dummy", arguments: "", isStart: true, isEnd: false },
+        // argumentsFull is parseable JSON ({}) but the provider flagged the
+        // stream as corrupt — simulating normalizeToolArgs's salvage path
+        // that recovered nothing meaningful.
+        {
+          type: "tool_call",
+          id: "tc_corrupt2",
+          name: "dummy",
+          arguments: "",
+          argumentsFull: "{}",
+          argumentsCorrupt: true,
+          isStart: false,
+          isEnd: true,
+        },
+        { type: "done" },
+      ],
+      [{ type: "text", content: "retry" }, { type: "done" }],
+    ]);
+
+    let executions = 0;
+    const tool: ToolRegistryEntry = {
+      name: "dummy",
+      description: "",
+      parameters: { type: "object", properties: { value: { type: "string" } }, required: ["value"] },
+      async execute() {
+        executions += 1;
+        return { content: "should not run" };
+      },
+    };
+
+    const seen: Array<{ content: string; isError?: boolean }> = [];
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [tool],
+      onToolResult: (_toolName, result) => {
+        seen.push({ content: result.content, isError: result.isError });
+      },
+    });
+
+    await collectEvents(agent, "go", "/tmp");
+    expect(executions).toBe(0);
+    expect(seen[0].isError).toBe(true);
+    expect(seen[0].content).toContain("failed to parse as JSON");
+  });
+
+  it("rejects a tool call missing a required argument", async () => {
+    const provider = createMockProvider([
+      [
+        { type: "tool_call", id: "tc_empty", name: "dummy", arguments: "", isStart: true, isEnd: false },
+        {
+          type: "tool_call",
+          id: "tc_empty",
+          name: "dummy",
+          arguments: "{}",
+          isStart: false,
+          isEnd: true,
+        },
+        { type: "done" },
+      ],
+      [{ type: "text", content: "ack" }, { type: "done" }],
+    ]);
+
+    let executions = 0;
+    const tool: ToolRegistryEntry = {
+      name: "dummy",
+      description: "",
+      parameters: { type: "object", properties: { value: { type: "string" } }, required: ["value"] },
+      async execute() {
+        executions += 1;
+        return { content: "should not run" };
+      },
+    };
+
+    const seen: Array<{ content: string; isError?: boolean }> = [];
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [tool],
+      onToolResult: (_toolName, result) => {
+        seen.push({ content: result.content, isError: result.isError });
+      },
+    });
+
+    await collectEvents(agent, "Call dummy", "/tmp");
+    expect(executions).toBe(0);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].isError).toBe(true);
+    expect(seen[0].content).toContain('"value"');
+    expect(seen[0].content).toContain("required argument");
+  });
+
+  it("allows tools whose required list is empty to be called with empty args", async () => {
+    const provider = createMockProvider([
+      [
+        { type: "tool_call", id: "tc_noargs", name: "noargs", arguments: "{}", isStart: true, isEnd: true },
+        { type: "done" },
+      ],
+      [{ type: "text", content: "ok" }, { type: "done" }],
+    ]);
+
+    const tool: ToolRegistryEntry = {
+      name: "noargs",
+      description: "",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return { content: "noargs ran" };
+      },
+    };
+
+    const seen: Array<{ content: string; isError?: boolean }> = [];
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [tool],
+      onToolResult: (_toolName, result) => {
+        seen.push({ content: result.content, isError: result.isError });
+      },
+    });
+
+    await collectEvents(agent, "go", "/tmp");
+    expect(seen[0].isError).toBeFalsy();
+    expect(seen[0].content).toBe("noargs ran");
+  });
+
   it("allows custom hooks to block tool execution", async () => {
     const provider = createMockProvider([
       [
@@ -628,219 +801,6 @@ describe("Agent", () => {
     expect(result.status).toBe("completed");
     expect(result.summary).toBe("expensive");
     expect(result.error).toBeUndefined();
-  });
-
-  it("continues once with a verification reminder when code was changed but not verified", async () => {
-    const captured: Message[][] = [];
-    const provider: Provider = {
-      async *streamChat(messages) {
-        captured.push(messages);
-        if (captured.length === 1) {
-          yield { type: "tool_call", id: "edit_1", name: "edit", arguments: "", isStart: true, isEnd: false };
-          yield { type: "tool_call", id: "edit_1", name: "edit", arguments: "{}", isStart: false, isEnd: true };
-          yield { type: "done" };
-          return;
-        }
-        if (captured.length === 2) {
-          yield { type: "text", content: "done without verification" };
-          yield { type: "done" };
-          return;
-        }
-        if (captured.length === 3) {
-          yield { type: "tool_call", id: "bash_1", name: "bash", arguments: "", isStart: true, isEnd: false };
-          yield {
-            type: "tool_call",
-            id: "bash_1",
-            name: "bash",
-            arguments: "{\"command\":\"npm run build\"}",
-            isStart: false,
-            isEnd: true,
-          };
-          yield { type: "done" };
-          return;
-        }
-        yield { type: "text", content: "verified" };
-        yield { type: "done" };
-      },
-      async complete() {
-        return "ok";
-      },
-    };
-    const editTool: ToolRegistryEntry = {
-      name: "edit",
-      description: "edit",
-      parameters: { type: "object", properties: {}, required: [] },
-      async execute() {
-        return {
-          content: "edited",
-          status: "success",
-          metadata: { kind: "edit", path: "/tmp/file.ts" },
-        };
-      },
-    };
-    const bashTool: ToolRegistryEntry = {
-      name: "bash",
-      description: "bash",
-      parameters: { type: "object", properties: {}, required: [] },
-      async execute(args) {
-        return {
-          content: "build ok",
-          status: "success",
-          metadata: { kind: "shell", command: args.command },
-        };
-      },
-    };
-    const agent = new Agent({
-      provider,
-      model: "gpt-4o",
-      tools: [editTool, bashTool],
-    });
-
-    const events = await collectEvents(agent, "implement the change", "/tmp");
-    expect(captured).toHaveLength(4);
-    expect(hasSystemContext(captured[1], "Verification required before final answer")).toBe(true);
-    expect(hasSystemContext(captured[2], "Files were changed but no verification evidence")).toBe(true);
-    expect(events.some((event) => event.type === "tool_end" && event.name === "bash")).toBe(true);
-    expect(events.some((event) => event.type === "text_delta" && event.content === "verified")).toBe(true);
-  });
-
-  it("offers finalization after changed code has passing verification", async () => {
-    const captured: Message[][] = [];
-    const provider: Provider = {
-      async *streamChat(messages) {
-        captured.push(messages);
-        if (captured.length === 1) {
-          yield { type: "tool_call", id: "edit_1", name: "edit", arguments: "{}", isStart: true, isEnd: true };
-          yield { type: "done" };
-          return;
-        }
-        if (captured.length === 2) {
-          yield { type: "tool_call", id: "bash_1", name: "bash", arguments: "", isStart: true, isEnd: false };
-          yield {
-            type: "tool_call",
-            id: "bash_1",
-            name: "bash",
-            arguments: "{\"command\":\"npm run build\"}",
-            isStart: false,
-            isEnd: true,
-          };
-          yield { type: "done" };
-          return;
-        }
-        yield { type: "text", content: "final" };
-        yield { type: "done" };
-      },
-      async complete() {
-        return "ok";
-      },
-    };
-    const editTool: ToolRegistryEntry = {
-      name: "edit",
-      description: "edit",
-      parameters: { type: "object", properties: {}, required: [] },
-      async execute() {
-        return {
-          content: "edited",
-          status: "success",
-          metadata: { kind: "edit", path: "/tmp/file.ts" },
-        };
-      },
-    };
-    const bashTool: ToolRegistryEntry = {
-      name: "bash",
-      description: "bash",
-      parameters: { type: "object", properties: {}, required: [] },
-      async execute(args) {
-        return {
-          content: "build ok",
-          status: "success",
-          metadata: { kind: "shell", command: args.command },
-        };
-      },
-    };
-    const agent = new Agent({
-      provider,
-      model: "gpt-4o",
-      tools: [editTool, bashTool],
-    });
-
-    const events = await collectEvents(agent, "implement the change", "/tmp");
-    expect(captured).toHaveLength(3);
-    expect(hasSystemContext(captured[2], "Completion checkpoint")).toBe(true);
-    expect(events.some((event) => event.type === "text_delta" && event.content === "final")).toBe(true);
-  });
-
-  it("does not accept a final answer immediately after failed verification", async () => {
-    const captured: Message[][] = [];
-    const provider: Provider = {
-      async *streamChat(messages) {
-        captured.push(messages);
-        if (captured.length === 1) {
-          yield { type: "tool_call", id: "edit_1", name: "edit", arguments: "{}", isStart: true, isEnd: true };
-          yield { type: "done" };
-          return;
-        }
-        if (captured.length === 2) {
-          yield { type: "tool_call", id: "bash_1", name: "bash", arguments: "", isStart: true, isEnd: false };
-          yield {
-            type: "tool_call",
-            id: "bash_1",
-            name: "bash",
-            arguments: "{\"command\":\"npm run build\"}",
-            isStart: false,
-            isEnd: true,
-          };
-          yield { type: "done" };
-          return;
-        }
-        if (captured.length === 3) {
-          yield { type: "text", content: "done despite failure" };
-          yield { type: "done" };
-          return;
-        }
-        yield { type: "text", content: "blocked by failing verification" };
-        yield { type: "done" };
-      },
-      async complete() {
-        return "ok";
-      },
-    };
-    const editTool: ToolRegistryEntry = {
-      name: "edit",
-      description: "edit",
-      parameters: { type: "object", properties: {}, required: [] },
-      async execute() {
-        return {
-          content: "edited",
-          status: "success",
-          metadata: { kind: "edit", path: "/tmp/file.ts" },
-        };
-      },
-    };
-    const bashTool: ToolRegistryEntry = {
-      name: "bash",
-      description: "bash",
-      parameters: { type: "object", properties: {}, required: [] },
-      async execute(args) {
-        return {
-          content: "build failed",
-          isError: true,
-          status: "command_error",
-          metadata: { kind: "shell", command: args.command },
-        };
-      },
-    };
-    const agent = new Agent({
-      provider,
-      model: "gpt-4o",
-      tools: [editTool, bashTool],
-    });
-
-    const events = await collectEvents(agent, "implement the change", "/tmp");
-    expect(captured).toHaveLength(4);
-    expect(hasSystemContext(captured[2], "Verification failed after file changes")).toBe(true);
-    expect(hasSystemContext(captured[3], "Files were changed, but the latest verification evidence failed")).toBe(true);
-    expect(events.some((event) => event.type === "text_delta" && event.content === "blocked by failing verification")).toBe(true);
   });
 
   it("projects messages before sending them to the provider", async () => {

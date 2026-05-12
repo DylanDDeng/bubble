@@ -47,6 +47,46 @@ describe("edit tool", () => {
     expect(result.content).toContain("C");
   });
 
+  it("rejects an edit whose oldText equals newText byte-for-byte", async () => {
+    const file = join(tmpDir, "no-op.ts");
+    writeFileSync(file, "const color = '#ec489';\n", "utf-8");
+
+    const tool = createEditTool(tmpDir);
+    const result = await tool.execute(
+      {
+        path: "no-op.ts",
+        edits: [{ oldText: "'#ec489'", newText: "'#ec489'" }],
+      },
+      { cwd: tmpDir }
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("byte-identical");
+    expect(result.content).toContain("tokenizer");
+    expect(readFileSync(file, "utf-8")).toBe("const color = '#ec489';\n");
+  });
+
+  it("flags the specific index when only one edit in a batch is a no-op", async () => {
+    const file = join(tmpDir, "mixed-noop.ts");
+    writeFileSync(file, "const a = 1;\nconst b = 2;\n", "utf-8");
+
+    const tool = createEditTool(tmpDir);
+    const result = await tool.execute(
+      {
+        path: "mixed-noop.ts",
+        edits: [
+          { oldText: "const a = 1;", newText: "const a = 100;" },
+          { oldText: "const b = 2;", newText: "const b = 2;" },
+        ],
+      },
+      { cwd: tmpDir }
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("edits[1]");
+    expect(readFileSync(file, "utf-8")).toBe("const a = 1;\nconst b = 2;\n");
+  });
+
   it("returns error when oldText is not found", async () => {
     const file = join(tmpDir, "missing.ts");
     writeFileSync(file, "hello", "utf-8");

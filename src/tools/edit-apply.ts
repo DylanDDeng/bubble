@@ -165,16 +165,36 @@ function matchEdit(content: string, edit: EditOperation, index: number, total: n
     throw new EditApplyError(total === 1 ? "Error: oldText must not be empty." : `Error: edits[${index}].oldText must not be empty.`);
   }
 
+  if (edit.oldText === edit.newText) {
+    const header = total === 1
+      ? "Error: This edit is a no-op because oldText and newText are byte-identical."
+      : `Error: edits[${index}] is a no-op because oldText and newText are byte-identical.`;
+    throw new EditApplyError(
+      [
+        header,
+        "",
+        "Common causes and how to escape:",
+        "- Your tokenizer may be folding repeated characters into a single token (hex colors like '#ec489' vs '#ec4899', repeated digits, etc.). The two strings feel different in your head but serialize to identical bytes.",
+        "- Use the write tool with the full new content for changes that hinge on a single repeated character or trailing digit.",
+        "- Or re-read the file with the read tool, then copy the exact bytes you want to replace before retrying.",
+      ].join("\n"),
+    );
+  }
+
   const oldText = normalizeToLF(edit.oldText);
   const exact = findAllOccurrences(content, oldText);
   if (exact.length === 1) {
     return { editIndex: index, mode: "exact", start: exact[0], end: exact[0] + oldText.length };
   }
   if (exact.length > 1) {
+    const recovery = [
+      "",
+      "Extend oldText with more surrounding context (the lines immediately before/after) until it uniquely identifies the intended span.",
+    ].join("\n");
     throw new EditApplyError(
       total === 1
-        ? `Error: oldText appears ${exact.length} times in file. Must be unique: "${summarizeOldText(oldText)}"`
-        : `Error: edits[${index}].oldText appears ${exact.length} times in file. Must be unique: "${summarizeOldText(oldText)}"`,
+        ? `Error: oldText appears ${exact.length} times in file. Must be unique: "${summarizeOldText(oldText)}"${recovery}`
+        : `Error: edits[${index}].oldText appears ${exact.length} times in file. Must be unique: "${summarizeOldText(oldText)}"${recovery}`,
     );
   }
 
@@ -196,11 +216,18 @@ function matchEdit(content: string, edit: EditOperation, index: number, total: n
   }
 
   const hint = findBestLineHint(content, oldText);
-  const suffix = hint ? `\n${hint}` : "";
+  const hintSuffix = hint ? `\n${hint}` : "";
+  const recovery = [
+    "",
+    "How to recover:",
+    "- Re-read the file with the read tool to see its current bytes; the file may have been changed by a prior edit this turn.",
+    "- Shorten oldText to a smaller unique anchor and try again. Long multi-line anchors are fragile to whitespace and indentation.",
+    "- If many lines need to change, use the write tool with the full new content instead of stacking edits.",
+  ].join("\n");
   throw new EditApplyError(
     total === 1
-      ? `Error: oldText not found in file: "${summarizeOldText(oldText)}"${suffix}`
-      : `Error: edits[${index}].oldText not found in file: "${summarizeOldText(oldText)}"${suffix}`,
+      ? `Error: oldText not found in file: "${summarizeOldText(oldText)}"${hintSuffix}${recovery}`
+      : `Error: edits[${index}].oldText not found in file: "${summarizeOldText(oldText)}"${hintSuffix}${recovery}`,
   );
 }
 
@@ -242,7 +269,16 @@ export function applyEditsToContent(rawContent: string, edits: EditOperation[]):
   }
 
   if (normalizedNext === normalizedOriginal) {
-    throw new EditApplyError("Error: No changes made. The replacement produced identical content.");
+    throw new EditApplyError(
+      [
+        "Error: No changes made. The replacement produced identical content.",
+        "",
+        "Common causes and how to escape:",
+        "- oldText and newText are byte-identical. Verify newText actually contains the intended change (a missing trailing char like turning '#ec489' into '#ec4899' is a frequent culprit).",
+        "- The file already contains newText. Re-read the file to confirm the current state before editing again.",
+        "- For wholesale rewrites, use the write tool with the full new content instead.",
+      ].join("\n"),
+    );
   }
 
   return {

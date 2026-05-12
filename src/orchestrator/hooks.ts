@@ -15,14 +15,11 @@ export interface TurnHookState {
   forceTextOnlyReason?: string;
   forceContinuationReason?: string;
   codeChanged?: boolean;
-  verificationAttempted?: boolean;
-  verificationCompleted?: boolean;
-  verificationFailed?: boolean;
-  verificationReminderQueued?: boolean;
-  finalVerificationReminderSent?: boolean;
-  verificationFailureReminderQueued?: boolean;
-  verificationFailureReminderSent?: boolean;
-  finalizeReminderQueued?: boolean;
+  smallTaskHintSent?: boolean;
+  recentEditFailures?: string[];
+  editRetryReminderSent?: boolean;
+  recentReadPaths?: string[];
+  redundantReadReminded?: Set<string>;
   taskBudget?: {
     total: number;
     spent: number;

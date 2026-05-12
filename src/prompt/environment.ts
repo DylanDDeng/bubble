@@ -26,6 +26,7 @@ export const defaultToolSnippets: Record<string, string> = {
   close_agent: "Close or cancel a spawned subagent thread",
   question: "Ask the user structured questions when clarification or preference choices would materially improve the work",
   skill: "Load a named skill with specialized instructions and bundled resources",
+  todo_write: "Plan and track multi-step work. Mark each task completed as soon as it is done — do not batch.",
 };
 
 export const defaultToolNames = [
@@ -44,6 +45,7 @@ export const defaultToolNames = [
   "close_agent",
   "question",
   "skill",
+  "todo_write",
 ];
 
 export function buildEnvironmentPrompt(options: EnvironmentPromptOptions = {}): string {

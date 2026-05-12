@@ -18,9 +18,16 @@ describe("system prompt", () => {
     expect(prompt).toContain("terminal-native coding assistant optimized for iterative coding work");
     expect(prompt).toContain("Configured provider: openai");
     expect(prompt).toContain("Configured model id: openai:gpt-5.4");
-    expect(prompt).toContain("Current thinking level: high");
-    expect(prompt).toContain("Execution protocol:");
-    expect(prompt).toContain("Verify with the narrowest meaningful command or runtime check when possible");
+    // Thinking level is intentionally not surfaced in the prompt anymore — it's
+    // a meta-decision point that triggers redundant deliberation in reasoning
+    // models. The API param carries it instead.
+    expect(prompt).not.toContain("Current thinking level");
+    // Execution protocol is prose now, not numbered list — keep the test asserting
+    // the substance (verification expectation) is still surfaced.
+    expect(prompt).not.toContain("Execution protocol:\n1.");
+    expect(prompt).toContain("Work by understanding the requested outcome");
+    expect(prompt).toContain("verifying when possible");
+    expect(prompt).toMatch(/If a tool fails, diagnose the error/);
     expect(prompt).toContain("Current working directory: /tmp/project");
     expect(prompt).toContain("- glob: Find files by glob pattern without using bash");
     expect(prompt).toContain("Use glob for file discovery");
@@ -73,9 +80,10 @@ describe("system prompt", () => {
     });
 
     expect(deepseek).toContain("running on a DeepSeek model");
-    expect(deepseek).toContain("inspect serialization and request-shape code");
+    expect(deepseek).not.toContain("inspect serialization");
     expect(kimi).toContain("running on a Kimi/Moonshot model");
     expect(kimi).toContain("Keep tool use disciplined");
+    expect(kimi).not.toContain("message history serialization");
     expect(glm).toContain("running on a GLM/Z.AI model");
     expect(glm).toContain("identify the failing boundary");
   });

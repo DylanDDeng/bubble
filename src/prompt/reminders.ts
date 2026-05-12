@@ -193,35 +193,63 @@ Treat the task output as a bounded subtask result:
 `);
 }
 
-export function buildVerificationReminder(reason: string): string {
+// Removed: buildVerificationReminder / buildVerificationFailureReminder.
+// The verification reminder ladder pressured the model to run a "verification"
+// after every file change. For models with hex-tokenization blind spots (e.g.
+// DeepSeek v4-pro), this triggered death loops where the model wrote ad-hoc
+// validation scripts that found the bug but could never fix it. CC trusts the
+// model to decide when verification is meaningful; we follow that.
+
+/**
+ * Fired when the same edit/write tool call (identical tool name + args) has
+ * just failed for the second time in a row. Models — especially thinking-heavy
+ * ones — can otherwise spiral on `No changes made: identical content` or
+ * `oldText not found` because their internal reasoning convinces them they
+ * are typing the change correctly even though the JSON args arrive identical.
+ * This nudge forces a strategy change.
+ */
+export function buildEditRetryEscalationReminder(reason: string): string {
   return wrapInSystemReminder(`
-Verification required before final answer.
+The same edit/write call has failed twice with identical arguments.
 
 ${reason}
 
-You have changed files in this turn. Run the narrowest meaningful verification command or runtime check before finalizing.
-If verification truly cannot be run, state the concrete blocker and the residual risk.
+Stop retrying the same call. Pick one of:
+- Re-read the target file and compare the actual bytes to your intended oldText / newText. Trailing whitespace, unicode lookalikes, or off-by-one boundaries are common causes.
+- If you intended to add a single character (e.g. fixing a 5-digit hex color to 6 digits), confirm that your newText string actually contains the added character before sending again.
+- Use the write tool with the full new content of the file instead of edit — useful when the change spans many lines or the diff anchor is ambiguous.
+- If you cannot determine the cause, ask the user for clarification.
 `);
 }
 
-export function buildVerificationFailureReminder(reason: string): string {
+/**
+ * Fired the FIRST time the model re-reads a file it already read in this turn.
+ * Soft — does not freeze the tool. Just prevents a 3rd / 4th re-read.
+ */
+export function buildRedundantReadReminder(path: string): string {
   return wrapInSystemReminder(`
-Verification failed after file changes.
-
-${reason}
-
-Do not finalize as complete while this failure is unresolved. Make one focused fix and rerun the most relevant verification.
-If you cannot fix it, explain the concrete blocker and the residual risk instead of claiming success.
+You already read ${path} earlier in this turn. Use the content already in context rather than re-reading.
+Only re-read this path if a subsequent tool call (edit/write/bash) modified it since.
 `);
 }
 
-export function buildFinalizeOpportunityReminder(reason: string): string {
+/**
+ * Injected once at task start when the user's input looks like a small,
+ * focused task (e.g. "write an HTML page about X"). Counterweight to the
+ * default protocol which biases toward thorough exploration.
+ */
+export function buildSmallTaskHint(): string {
   return wrapInSystemReminder(`
-Completion checkpoint.
+This appears to be a small, focused task (short request, single deliverable, no integration ambiguity).
 
-${reason}
-
-If this satisfies the user's request, provide the final answer now.
-Continue using tools only if there is a concrete remaining requirement, failing check, or missing deliverable.
+Prefer direct execution over exploration:
+- If the target file path is given or obvious, use write/edit directly.
+- Do not glob, read, or grep adjacent files unless the request explicitly references them.
+- Do not pre-plan with todo_write for tasks that can be done in one or two tool calls.
+- Skip the "investigate the codebase" step that applies to larger changes.
 `);
 }
+
+// Removed: buildFinalizeOpportunityReminder. Was paired with the verification
+// nag ladder. Without the ladder, "you can finalize now" advice is redundant —
+// the model finalises whenever its own judgement says the task is done.

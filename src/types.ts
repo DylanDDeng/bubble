@@ -92,10 +92,24 @@ export interface ToolCall {
   id: string;
   name: string;
   arguments: string; // raw JSON string
+  /**
+   * Provider-side flag set when the streamed arguments were unsalvageable
+   * (truncated mid-JSON, malformed snapshot). Persists into history so the
+   * model and the orchestrator can both see the call was rejected upstream
+   * rather than executed silently with empty args.
+   */
+  argsCorrupt?: boolean;
 }
 
 export interface ParsedToolCall extends ToolCall {
   parsedArgs: Record<string, any>;
+  /**
+   * Set when the raw `arguments` string failed to JSON.parse, indicating
+   * upstream streaming corruption (truncated chunks, malformed deltas, etc.).
+   * Consumers should refuse to execute the tool and surface a tool_use_error
+   * so the model can re-issue the call.
+   */
+  argsCorrupt?: boolean;
 }
 
 export type ToolResultStatus =
@@ -270,7 +284,7 @@ export interface Todo {
 export type StreamChunk =
   | { type: "text"; content: string }
   | { type: "reasoning_delta"; content: string }
-  | { type: "tool_call"; id: string; name: string; arguments: string; isStart: boolean; isEnd: boolean; argumentsFull?: string }
+  | { type: "tool_call"; id: string; name: string; arguments: string; isStart: boolean; isEnd: boolean; argumentsFull?: string; argumentsCorrupt?: boolean }
   | { type: "usage"; usage: TokenUsage }
   | { type: "done" };
 

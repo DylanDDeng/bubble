@@ -30,6 +30,8 @@ export interface DisplayToolCall {
   args: Record<string, any>;
   rawArguments?: string;
   streamingArgs?: boolean;
+  /** During streaming, an approximate line count derived from `\n` escapes in rawArguments. */
+  streamingNewlineCount?: number;
   status?: "pending" | "running" | "completed" | "error";
   result?: string;
   isError?: boolean;
