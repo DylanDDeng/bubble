@@ -54,6 +54,7 @@ import { sidebarMcpRowsFromStates, renderMcpRowMarker, type SidebarMcpRow } from
 import { expandAtMentions, filterFileSuggestions, findAtContext, listProjectFiles } from "./file-mentions.js";
 import { compactDisplayMessages, type DisplayMessage, type DisplayToolCall } from "./display-history.js";
 import { createMarkdownSyntaxStyle, createSubtleMarkdownSyntaxStyle } from "./markdown-theme.js";
+import { markdownInlineSegments, type MarkdownInlineSegment } from "./markdown-inline.js";
 import { hashString } from "./render-signature.js";
 import { findToolRenderer } from "./tool-renderers/registry.js";
 import { writeToolKey } from "./tool-renderers/write.js";
@@ -5583,20 +5584,29 @@ function updateAssistantEntry(
     entry.refs.reasoningToggleText.content = thinkingLabelContent(message.streaming === true);
   }
   if (entry.refs.reasoningMarkdown) {
-    entry.refs.reasoningMarkdown.content = formatThinkingMarkdown(visibleReasoning);
-    entry.refs.reasoningMarkdown.streaming = message.streaming === true;
+    syncMarkdownRenderable(
+      entry.refs.reasoningMarkdown,
+      formatThinkingMarkdown(visibleReasoning),
+      message.streaming === true,
+    );
   }
   if (entry.refs.reasoningBox) {
     entry.refs.reasoningBox.visible = !!visibleReasoning;
   }
   updateAssistantToolEntries(entry, tools, options);
   if (entry.refs.contentMarkdown) {
-    entry.refs.contentMarkdown.content = content;
-    entry.refs.contentMarkdown.streaming = message.streaming === true;
+    syncMarkdownRenderable(entry.refs.contentMarkdown, content, message.streaming === true);
   }
   if (entry.refs.contentBox) {
     entry.refs.contentBox.visible = !!content;
   }
+}
+
+function syncMarkdownRenderable(markdown: MarkdownRenderable, content: string, streaming: boolean) {
+  if (markdown.content === content && markdown.streaming === streaming) return;
+  markdown.content = content;
+  markdown.streaming = streaming;
+  markdown.clearCache();
 }
 
 function updateAssistantToolEntries(
@@ -5701,6 +5711,7 @@ function createMarkdown(
     content,
     syntaxStyle,
     treeSitterClient,
+    renderNode: createSemanticMarkdownRenderNode(ctx, options?.fg ?? theme.messageAssistantText),
     streaming: options?.streaming === true,
     conceal: true,
     concealCode: false,
@@ -5719,6 +5730,105 @@ function createMarkdown(
       selectable: true,
     },
   });
+}
+
+function createSemanticMarkdownRenderNode(ctx: RenderContext, defaultFg: string) {
+  const palette = semanticMarkdownPalette(defaultFg);
+  return (token: any, context: { defaultRender: () => Renderable | null }) => {
+    switch (token?.type) {
+      case "hr":
+        return createText(ctx, new StyledText([
+          fg(theme.borderSubtle)("─".repeat(48)),
+        ]), {
+          fg: theme.borderSubtle,
+          wrapMode: "none",
+          flexShrink: 0,
+        });
+      case "heading":
+        return createText(ctx, markdownInlineToStyledText(markdownTokenInlineTokens(token), palette, token.text ?? "", { bold: true }), {
+          fg: defaultFg,
+          wrapMode: "word",
+          flexShrink: 0,
+        });
+      case "paragraph":
+        return createText(ctx, markdownInlineToStyledText(markdownTokenInlineTokens(token), palette, token.text ?? ""), {
+          fg: defaultFg,
+          wrapMode: "word",
+          flexShrink: 0,
+        });
+      case "list":
+        return createMarkdownList(ctx, token, palette, defaultFg);
+      default:
+        return context.defaultRender();
+    }
+  };
+}
+
+function createMarkdownList(
+  ctx: RenderContext,
+  token: any,
+  palette: SemanticMarkdownPalette,
+  defaultFg: string,
+) {
+  const ordered = token?.ordered === true;
+  const start = typeof token?.start === "number" ? token.start : 1;
+  const items = Array.isArray(token?.items) ? token.items : [];
+  if (items.length === 0) return null;
+
+  return createBox(ctx, {
+    flexDirection: "column",
+    flexShrink: 0,
+  }, items.map((item: any, index: number) => {
+    const marker = ordered ? `${start + index}. ` : "• ";
+    return createText(ctx, new StyledText([
+      fg(theme.textMuted)(marker),
+      ...markdownInlineToStyledText(markdownTokenInlineTokens(item), palette, item.text ?? "").chunks,
+    ]), {
+      fg: defaultFg,
+      wrapMode: "word",
+      flexShrink: 0,
+    });
+  }));
+}
+
+function markdownTokenInlineTokens(token: any): any[] | undefined {
+  if (Array.isArray(token?.tokens)) return token.tokens;
+  if (typeof token?.text === "string") return [{ type: "text", text: token.text }];
+  return undefined;
+}
+
+interface SemanticMarkdownPalette {
+  text: string;
+  textMuted: string;
+  success: string;
+  warning: string;
+  secondary: string;
+}
+
+function semanticMarkdownPalette(defaultFg: string): SemanticMarkdownPalette {
+  return {
+    text: defaultFg,
+    textMuted: theme.textMuted,
+    success: theme.success,
+    warning: theme.warning,
+    secondary: theme.secondary,
+  };
+}
+
+function markdownInlineToStyledText(
+  tokens: any[] | undefined,
+  palette: SemanticMarkdownPalette,
+  fallback = "",
+  style: Omit<MarkdownInlineSegment, "text"> = {},
+): StyledText {
+  const chunks = markdownInlineSegments(tokens, fallback, style).map((segment) => {
+    let chunk = fg(palette[segment.color ?? "text"])(segment.text);
+    if (segment.bold) chunk = bold(chunk);
+    if (segment.italic) chunk = italic(chunk);
+    if (segment.dim) chunk = dim(chunk);
+    return chunk;
+  });
+  return new StyledText(chunks);
 }
 
 function createDiffRenderable(ctx: RenderContext, diff: string, filePath: string | undefined, syntaxStyle: SyntaxStyle, width = 80) {
