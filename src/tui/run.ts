@@ -206,11 +206,34 @@ const QUESTION_MAX_OPTIONS = 10;
 const QUESTION_MAX_CONFIRM_ROWS = 3;
 const QUESTION_PANEL_MIN_HEIGHT = 9;
 
-const HOME_LOGO = [
-  " /\\_/\\  █▀▀▄ █  █ █▀▀▄ █▀▀▄ █    █▀▀",
-  "( o.o ) █▀▀▄ █  █ █▀▀▄ █▀▀▄ █    █▀▀",
-  " > ^ <  ▀▀▀  ▀▀▀▀ ▀▀▀  ▀▀▀  ▀▀▀▀ ▀▀▀▀",
+type HomeLogoLine = { text: string; tone: "primary" | "warning" | "accent" | "secondary" | "textMuted" };
+const HOME_LOGO: HomeLogoLine[] = [
+  { text: " /\\___/\\ ", tone: "primary" },
+  { text: "( ◕   ◕ )", tone: "primary" },
+  { text: "( ◡ ω ◡ )", tone: "warning" },
+  { text: " (\")_(\") ", tone: "warning" },
+  { text: "", tone: "primary" },
+  { text: "·  ◌   ○   ◯  ·", tone: "textMuted" },
+  { text: "", tone: "primary" },
+  { text: "██████╗ ██╗   ██╗██████╗ ██████╗ ██╗     ███████╗", tone: "primary" },
+  { text: "██╔══██╗██║   ██║██╔══██╗██╔══██╗██║     ██╔════╝", tone: "primary" },
+  { text: "██████╔╝██║   ██║██████╔╝██████╔╝██║     █████╗  ", tone: "warning" },
+  { text: "██╔══██╗██║   ██║██╔══██╗██╔══██╗██║     ██╔══╝  ", tone: "warning" },
+  { text: "██████╔╝╚██████╔╝██████╔╝██████╔╝███████╗███████╗", tone: "accent" },
+  { text: "╚═════╝  ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝╚══════╝", tone: "accent" },
+  { text: "", tone: "primary" },
+  { text: "── your bubble coding companion ──", tone: "secondary" },
 ];
+
+function homeLogoColor(tone: HomeLogoLine["tone"]) {
+  switch (tone) {
+    case "primary": return theme.primary;
+    case "warning": return theme.warning;
+    case "accent": return theme.accent;
+    case "secondary": return theme.secondary;
+    case "textMuted": return theme.textMuted;
+  }
+}
 
 const HOME_TIPS = [
   "Type @ followed by a filename to attach file context",
@@ -3985,8 +4008,8 @@ function OpenTuiApp(props: {
       paddingRight: 2,
     },
     [
-      h("box", { flexShrink: 0, flexDirection: "column" },
-        ...HOME_LOGO.map((line) => h("text", { fg: theme.primary }, line)),
+      h("box", { flexShrink: 0, flexDirection: "column", alignItems: "center" },
+        ...HOME_LOGO.map((line) => h("text", { fg: homeLogoColor(line.tone) }, line.text || " ")),
       ),
       h("box", { height: 1, minHeight: 0, flexShrink: 1 }),
       h("box", {
@@ -7027,7 +7050,7 @@ function renderHomeState(input: { width: number; cwd: string; tip: string }) {
   h("box", { flexDirection: "column", flexShrink: 0, width: "100%" },
     h("text", { fg: theme.text }, ""),
     h("text", { fg: theme.text }, ""),
-    ...HOME_LOGO.map((line) => h("text", { fg: theme.primary }, centerLine(line, width))),
+    ...HOME_LOGO.map((line) => h("text", { fg: homeLogoColor(line.tone) }, centerLine(line.text || " ", width))),
     h("text", { fg: theme.text }, ""),
     h("text", { fg: theme.warning }, centerLine(`● Tip  ${input.tip}`, width)),
     cwd ? h("text", { fg: theme.textMuted }, centerLine(`  ${cwd}`, width)) : null,
