@@ -6,6 +6,7 @@
 
 import OpenAI from "openai";
 import { createOpenAICodexProvider, isOpenAICodexBaseUrl } from "./provider-openai-codex.js";
+import { createProviderProtocolArtifactFilter } from "./provider-artifacts.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
 import type { Provider, ProviderMessage, StreamChunk, ThinkingLevel, ToolDefinition } from "./types.js";
 
@@ -216,6 +217,7 @@ function extractBalancedJson(s: string, start: number): string | null {
  */
 export async function* translateOpenAIStream(stream: AsyncIterable<any>): AsyncIterable<StreamChunk> {
   const toolCalls = new Map<number, { id: string; name: string; args: string; started: boolean }>();
+  const textFilter = createProviderProtocolArtifactFilter();
 
   function* flushToolCalls(): Generator<StreamChunk> {
     if (toolCalls.size === 0) return;
@@ -283,11 +285,15 @@ export async function* translateOpenAIStream(stream: AsyncIterable<any>): AsyncI
           yield { type: "reasoning_delta", content: thinkMatch[1] };
         }
         const remaining = delta.content.replace(/<think>[\s\S]*?<\/think>/, "");
-        if (remaining) {
-          yield { type: "text", content: remaining };
+        const cleaned = textFilter.push(remaining);
+        if (cleaned) {
+          yield { type: "text", content: cleaned };
         }
       } else {
-        yield { type: "text", content: delta.content };
+        const cleaned = textFilter.push(delta.content);
+        if (cleaned) {
+          yield { type: "text", content: cleaned };
+        }
       }
     }
 
@@ -325,6 +331,10 @@ export async function* translateOpenAIStream(stream: AsyncIterable<any>): AsyncI
     }
   }
 
+  const remainingText = textFilter.flush();
+  if (remainingText) {
+    yield { type: "text", content: remainingText };
+  }
   yield* flushToolCalls();
 }
 

@@ -8,6 +8,7 @@ export function createMemorySearchTool(cwd: string): ToolRegistryEntry {
     name: "memory_search",
     description: "Search persistent Bubble memory for prior project facts, user preferences, workflows, decisions, and gotchas.",
     readOnly: true,
+    effect: "read",
     parameters: {
       type: "object",
       properties: {
@@ -60,6 +61,7 @@ export function createMemoryReadSummaryTool(cwd: string): ToolRegistryEntry {
     name: "memory_read_summary",
     description: "Read the concise persistent memory summary for the current project, global scope, or both.",
     readOnly: true,
+    effect: "read",
     parameters: {
       type: "object",
       properties: {

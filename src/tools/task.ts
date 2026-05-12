@@ -5,6 +5,7 @@ export function createTaskTool(): ToolRegistryEntry {
   return {
     name: "task",
     readOnly: true,
+    effect: "read",
     description: `Delegate a bounded investigative subtask to a read-only sub-agent and return a concise summary.
 
 Use this when:

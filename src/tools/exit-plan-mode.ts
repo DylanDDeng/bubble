@@ -21,6 +21,8 @@ export function createExitPlanModeTool(controller: PlanController): ToolRegistry
   return {
     name: "exit_plan_mode",
     readOnly: true,
+    effect: "read",
+    requiresApproval: true,
     description:
       "ONLY call this tool when the harness has told you via a runtime reminder that plan mode is ACTIVE. " +
       "Do NOT call it during ordinary work — in default mode you should just use the regular tools directly. " +

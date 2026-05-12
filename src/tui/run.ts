@@ -40,7 +40,7 @@ import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { AgentAbortError, type Agent } from "../agent.js";
 import type { CliArgs } from "../cli.js";
 import type { SessionManager } from "../session.js";
-import type { ContentPart, Message, PermissionMode, PlanDecision, Provider, ThinkingLevel, Todo, TokenUsage } from "../types.js";
+import type { ContentPart, Message, PermissionMode, PlanDecision, Provider, ThinkingLevel, Todo, TokenUsage, ToolResultMetadata } from "../types.js";
 import type { ProviderRegistry } from "../provider-registry.js";
 import { BUILTIN_PROVIDERS, decodeModel, displayModel, isUserVisibleProvider } from "../provider-registry.js";
 import { listBuiltinModels } from "../model-catalog.js";
@@ -3750,15 +3750,6 @@ function OpenTuiApp(props: {
           });
         } else if (event.type === "text_delta") {
           assistantContent += event.content;
-          if (currentTurnHasToolCall) continue;
-          redrawTranscript({
-            role: "assistant",
-            content: assistantContent,
-            reasoning: assistantReasoning || undefined,
-            toolCalls: toolCalls.length ? [...toolCalls] : undefined,
-            status: "responding",
-            streaming: true,
-          });
         } else if (event.type === "reasoning_delta") {
           assistantReasoning += event.content;
           redrawTranscript({
@@ -3823,6 +3814,25 @@ function OpenTuiApp(props: {
           }
           refreshGitSidebar();
           syncSidebarLsp();
+        } else if (event.type === "tool_update") {
+          const call = toolCalls.find((item) => item.id === event.id);
+          if (call) {
+            call.metadata = mergeToolMetadata(call.metadata, event.update.metadata);
+            call.result = event.update.message ?? call.result;
+            call.status = event.update.status === "failed" || event.update.status === "blocked" || event.update.status === "cancelled"
+              ? "error"
+              : event.update.status === "completed"
+                ? "completed"
+                : "running";
+            call.isError = call.status === "error";
+            redrawTranscript({
+              role: "assistant",
+              content: currentTurnHasToolCall ? "" : assistantContent,
+              reasoning: assistantReasoning || undefined,
+              toolCalls: [...toolCalls],
+              streaming: true,
+            });
+          }
         } else if (event.type === "todos_updated") {
           setTodos(event.todos);
           syncSidebarTodos(event.todos);
@@ -5676,6 +5686,38 @@ function toolRenderableSignature(tool: DisplayToolCall, writeExpanded: boolean) 
   ].join(":");
 }
 
+function mergeToolMetadata(
+  current: ToolResultMetadata | undefined,
+  incoming: ToolResultMetadata | undefined,
+): ToolResultMetadata | undefined {
+  if (!incoming) return current;
+  if (current?.kind !== "subagent" || incoming.kind !== "subagent") {
+    return incoming;
+  }
+
+  const currentSubagents = Array.isArray(current.subagents) ? current.subagents : [];
+  const incomingSubagents = Array.isArray(incoming.subagents) ? incoming.subagents : [];
+  const byId = new Map<string, unknown>();
+  for (const item of currentSubagents) {
+    const subAgentId = typeof item === "object" && item !== null && "subAgentId" in item
+      ? String((item as Record<string, unknown>).subAgentId)
+      : "";
+    byId.set(subAgentId || `current:${byId.size}`, item);
+  }
+  for (const item of incomingSubagents) {
+    const subAgentId = typeof item === "object" && item !== null && "subAgentId" in item
+      ? String((item as Record<string, unknown>).subAgentId)
+      : "";
+    byId.set(subAgentId || `incoming:${byId.size}`, item);
+  }
+
+  return {
+    ...current,
+    ...incoming,
+    subagents: [...byId.values()],
+  };
+}
+
 function stableStringify(value: unknown) {
   try {
     return JSON.stringify(value) ?? "";
@@ -7059,6 +7101,11 @@ function displayToolName(name: string): string {
     glob: "Glob",
     web_fetch: "WebFetch",
     web_search: "WebSearch",
+    subagent: "Subagent",
+    spawn_agent: "SpawnAgent",
+    wait_agent: "WaitAgent",
+    send_input: "SendInput",
+    close_agent: "CloseAgent",
     task: "Task",
     todo: "Todo",
     question: "Questions",
@@ -7068,6 +7115,18 @@ function displayToolName(name: string): string {
 
 function toolHeader(tool: DisplayToolCall): string {
   const args = tool.args || {};
+  if (tool.name === "subagent") {
+    if (typeof args.agent === "string") return `(${args.agent})`;
+    if (Array.isArray(args.tasks)) return `(${args.tasks.length} tasks)`;
+  }
+  if (tool.name === "spawn_agent") {
+    const agent = args.agent_type ?? args.agent ?? "default";
+    return `(${agent})`;
+  }
+  if (tool.name === "wait_agent" || tool.name === "send_input" || tool.name === "close_agent") {
+    const agentId = args.agent_id ?? (Array.isArray(args.agent_ids) ? `${args.agent_ids.length} agents` : undefined);
+    return agentId ? `(${truncate(String(agentId), 64)})` : "";
+  }
   const value = args.path ?? args.command ?? args.pattern ?? args.url ?? args.query;
   return value ? `(${truncate(String(value).replace(/\n/g, " "), 64)})` : "";
 }

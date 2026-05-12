@@ -21,7 +21,7 @@ const defaultGuidelines = [
   "Prefer structured search tools over bash for repository searches whenever possible",
   "Do not repeat near-identical searches when they are not producing new evidence",
   "When investigating configuration or security questions, stop once the relevant load path, storage path, and exposure path are identified",
-  "Use the task tool for bounded investigative subproblems instead of letting the main loop churn on repeated exploratory searches",
+  "Use spawn_agent and wait_agent for bounded investigative subproblems instead of letting the main loop churn on repeated exploratory searches",
   "After code edits, run the narrowest meaningful verification command or explain why verification is not possible",
   "When finishing a coding task, report what changed, where it changed, verification results, and remaining risk",
   "Be concise in your responses",

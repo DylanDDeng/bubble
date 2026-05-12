@@ -16,6 +16,7 @@ export function createTodoTool(store: TodoStore): ToolRegistryEntry {
   return {
     name: "todo_write",
     readOnly: true,
+    effect: "read",
     description: `Create or update the task list for the current work. Send the COMPLETE list each call; this overwrites the prior list entirely.
 
 ## When to use

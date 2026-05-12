@@ -30,6 +30,7 @@ export function createSkillTool(registry: SkillRegistry): ToolRegistryEntry {
   return {
     name: "skill",
     readOnly: true,
+    effect: "read",
     description: "Load a named skill on demand. Use this when a task clearly matches one of the available skills.",
     parameters: {
       type: "object",

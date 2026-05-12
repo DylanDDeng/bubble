@@ -16,6 +16,8 @@ const MAX_OUTPUT = 50 * 1024;
 export function createBashTool(cwd: string, approval?: ApprovalController): ToolRegistryEntry {
   return {
     name: "bash",
+    effect: "unknown",
+    requiresApproval: true,
     description:
       "Execute a bash command in the working directory. Use timeout for long-running commands.",
     parameters: {

@@ -119,7 +119,7 @@ const BUDGETS: Record<TaskType, GovernorBudget> = {
 };
 
 const SEARCH_TOOLS_DISABLED = new Set(["grep", "web_search", "web_fetch"]);
-const EXPLORATION_TOOLS_DISABLED = new Set(["read", "glob", "grep", "web_search", "web_fetch", "task", "tool_search"]);
+const EXPLORATION_TOOLS_DISABLED = new Set(["read", "glob", "grep", "web_search", "web_fetch", "spawn_agent", "wait_agent", "send_input", "tool_search"]);
 
 type WorkPhase = "explore" | "modify" | "verify";
 

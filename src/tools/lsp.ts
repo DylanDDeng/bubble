@@ -28,6 +28,8 @@ export function createLspTool(
   return {
     name: "lsp",
     readOnly: true,
+    effect: "read",
+    requiresApproval: true,
     description:
       "Use the language server for code navigation. Supports goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol, goToImplementation, prepareCallHierarchy, incomingCalls, and outgoingCalls.",
     parameters: {

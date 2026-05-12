@@ -28,6 +28,8 @@ function isWithinWorkspace(cwd: string, filePath: string): boolean {
 export function createEditTool(cwd: string, approval?: ApprovalController, lsp?: LspService): ToolRegistryEntry {
   return {
     name: "edit",
+    effect: "write_direct",
+    requiresApproval: true,
     description:
       "Apply targeted string replacements to a file. Prefer exact oldText. The tool can tolerate line ending, trailing whitespace, Unicode punctuation/space, and blank-line differences only when the target is unique.",
     parameters: {

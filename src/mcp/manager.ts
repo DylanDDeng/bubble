@@ -202,6 +202,7 @@ function buildToolEntry(
     description,
     parameters,
     readOnly: false, // Conservative default; user can allow-list.
+    effect: "unknown",
     deferred: true, // Load schema on demand via tool_search to keep context small.
     async execute(args: Record<string, unknown>): Promise<ToolResult> {
       const client = getClient();

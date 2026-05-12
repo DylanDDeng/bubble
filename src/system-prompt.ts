@@ -33,6 +33,8 @@ export interface SystemPromptOptions {
   skills?: SkillSummary[];
   /** Prompt-visible memory guidance and summaries */
   memoryPrompt?: string;
+  /** Durable child-agent profile prompt used for subagents. */
+  agentProfilePrompt?: string;
 }
 
 export function buildSystemPrompt(options: SystemPromptOptions = {}): string {

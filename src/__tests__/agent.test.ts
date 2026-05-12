@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Agent, AgentAbortError } from "../agent.js";
+import { BudgetLedger } from "../agent/budget-ledger.js";
+import type { AgentProfile } from "../agent/profiles.js";
 import type { AgentEvent, Message, Provider, StreamChunk, ToolRegistryEntry } from "../types.js";
 import { createTaskTool } from "../tools/task.js";
 
@@ -446,6 +448,186 @@ describe("Agent", () => {
     expect(toolEnd.result.content).toContain("Subtask type: general_readonly");
     expect(hasSystemContext(captured[2], "Summarize the task tool output above and continue with your task.")).toBe(true);
     expect(hasUserText(captured[2], "Summarize the task tool output above and continue with your task.")).toBe(false);
+  });
+
+  it("emits live tool_update events from tools", async () => {
+    const provider = createMockProvider([
+      [
+        { type: "tool_call", id: "sub_1", name: "subagent_like", arguments: "", isStart: true, isEnd: false },
+        { type: "tool_call", id: "sub_1", name: "subagent_like", arguments: "{}", isStart: false, isEnd: true },
+      ],
+      [{ type: "text", content: "done" }],
+    ]);
+    const liveTool: ToolRegistryEntry = {
+      name: "subagent_like",
+      description: "",
+      parameters: { type: "object", properties: {} },
+      async execute(_args, ctx) {
+        ctx.emitUpdate?.({
+          type: "subagent_update",
+          parentToolCallId: ctx.toolCall?.id ?? "sub_1",
+          runId: "run_1",
+          subAgentId: "child_1",
+          agentName: "scout",
+          status: "running",
+          message: "running scout",
+        });
+        return { content: "subagent complete", metadata: { kind: "subagent" } };
+      },
+    };
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [liveTool],
+      systemPrompt: "system",
+    });
+
+    const events = await collectEvents(agent, "run subagent", "/tmp");
+    const update = events.find((event) => event.type === "tool_update") as Extract<AgentEvent, { type: "tool_update" }>;
+    const end = events.find((event) => event.type === "tool_end") as Extract<AgentEvent, { type: "tool_end" }>;
+
+    expect(update.update.subAgentId).toBe("child_1");
+    expect(update.update.message).toBe("running scout");
+    expect(events.indexOf(update)).toBeLessThan(events.indexOf(end));
+  });
+
+  it("propagates parent abort signals into subagent provider calls", async () => {
+    const controller = new AbortController();
+    let providerSawSignal = false;
+    const provider: Provider = {
+      async *streamChat(_messages, options) {
+        providerSawSignal = !!options.abortSignal;
+        controller.abort(new AgentAbortError("stop child"));
+        if (options.abortSignal?.aborted) {
+          throw options.abortSignal.reason;
+        }
+        yield { type: "text", content: "late" };
+      },
+      async complete() {
+        return "ok";
+      },
+    };
+    const profile: AgentProfile = {
+      name: "abort-test",
+      description: "Abort test",
+      source: "builtin",
+      mode: "readonly",
+      tools: { preset: "none" },
+      approval: "fail",
+      prompt: "Return briefly.",
+    };
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [],
+      systemPrompt: "system",
+    });
+
+    const result = await agent.runSubAgent("abort me", "/tmp", {
+      profile,
+      runId: "run-abort",
+      subAgentId: "child-abort",
+      parentToolCallId: "parent",
+      abortSignal: controller.signal,
+    });
+
+    expect(providerSawSignal).toBe(true);
+    expect(result.status).toBe("cancelled");
+    expect(result.error).toBe("stop child");
+  });
+
+  it("adds skill and memory prompt context to subagents only when selected tools need it", async () => {
+    const captured: Message[][] = [];
+    const provider: Provider = {
+      async *streamChat(messages) {
+        captured.push(messages);
+        yield { type: "text", content: "done" };
+      },
+      async complete() {
+        return "ok";
+      },
+    };
+    const profile: AgentProfile = {
+      name: "context-test",
+      description: "Context test",
+      source: "builtin",
+      mode: "readonly",
+      tools: {
+        preset: "explicit",
+        include: ["skill", "memory_search"],
+      },
+      approval: "fail",
+      prompt: "Use selected context.",
+    };
+    const tool = (name: string): ToolRegistryEntry => ({
+      name,
+      readOnly: true,
+      effect: "read",
+      description: "",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return { content: "ok" };
+      },
+    });
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [tool("skill"), tool("memory_search")],
+      systemPrompt: "parent system",
+      skills: [{ name: "debug-skill", description: "Debug workflow" }],
+      memoryPrompt: "Memory context visible to selected agents.",
+    });
+
+    await agent.runSubAgent("inspect", "/tmp", {
+      profile,
+      runId: "run-context",
+      subAgentId: "child-context",
+      parentToolCallId: "parent",
+    });
+
+    const system = captured[0].find((message) => message.role === "system")?.content ?? "";
+    expect(system).toContain("debug-skill");
+    expect(system).toContain("Memory context visible");
+    expect(system).toContain("Use selected context.");
+  });
+
+  it("does not cancel a subagent from a hidden per-child token budget", async () => {
+    const provider: Provider = {
+      async *streamChat() {
+        yield { type: "text", content: "expensive" };
+        yield { type: "usage", usage: { promptTokens: 6, completionTokens: 1 } };
+      },
+      async complete() {
+        return "ok";
+      },
+    };
+    const profile: AgentProfile = {
+      name: "budget-test",
+      description: "Budget test",
+      source: "builtin",
+      mode: "readonly",
+      tools: { preset: "none" },
+      approval: "fail",
+      prompt: "Return briefly.",
+    };
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [],
+      systemPrompt: "system",
+      budgetLedger: new BudgetLedger(),
+    });
+
+    const result = await agent.runSubAgent("spend budget", "/tmp", {
+      profile,
+      runId: "run-budget",
+      subAgentId: "child-budget",
+      parentToolCallId: "parent",
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.summary).toBe("expensive");
+    expect(result.error).toBeUndefined();
   });
 
   it("continues once with a verification reminder when code was changed but not verified", async () => {

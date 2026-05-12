@@ -27,6 +27,7 @@ export function createToolSearchTool(controller: ToolSearchController): ToolRegi
   return {
     name: "tool_search",
     readOnly: true,
+    effect: "read",
     description:
       'Fetches full schema definitions for deferred tools so they can be called. ' +
       'Deferred tools appear by name in hidden runtime reminders; their parameters are unknown ' +

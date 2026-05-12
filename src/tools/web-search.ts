@@ -11,6 +11,7 @@ export function createWebSearchTool(): ToolRegistryEntry {
   return {
     name: "web_search",
     readOnly: true,
+    effect: "read",
     description: "Search the web using a remote search service and return current, structured results.",
     parameters: {
       type: "object",

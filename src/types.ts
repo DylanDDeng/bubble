@@ -107,7 +107,7 @@ export type ToolResultStatus =
   | "command_error";
 
 export interface ToolResultMetadata {
-  kind?: "search" | "read" | "write" | "edit" | "shell" | "web" | "security" | "lsp" | "question";
+  kind?: "search" | "read" | "write" | "edit" | "shell" | "web" | "security" | "lsp" | "question" | "subagent";
   path?: string;
   pattern?: string;
   matches?: number;
@@ -123,6 +123,24 @@ export interface ToolResult {
   content: string;
   isError?: boolean;
   status?: ToolResultStatus;
+  metadata?: ToolResultMetadata;
+}
+
+export type ToolEffect = "read" | "write_patch" | "write_direct" | "unknown";
+
+export interface ToolUpdate {
+  type: "subagent_update";
+  parentToolCallId: string;
+  runId: string;
+  subAgentId: string;
+  agentName: string;
+  nickname?: string;
+  status: "queued" | "running" | "completed" | "failed" | "blocked" | "cancelled";
+  childEvent?: AgentEvent;
+  summaryDelta?: string;
+  toolName?: string;
+  toolCallId?: string;
+  message?: string;
   metadata?: ToolResultMetadata;
 }
 
@@ -142,13 +160,64 @@ export interface ToolContext {
       cwd: string,
       options?: { subtaskType?: string; description?: string },
     ) => Promise<ToolResult>;
+    runSubAgent?: (
+      input: string | ContentPart[],
+      cwd: string,
+      options: {
+        profile: import("./agent/profiles.js").AgentProfile;
+        runId: string;
+        subAgentId: string;
+        parentToolCallId: string;
+        approval?: "fail" | "disabled";
+        emitUpdate?: (update: ToolUpdate) => void;
+        description?: string;
+        abortSignal?: AbortSignal;
+        nickname?: string;
+        forkContext?: boolean;
+      },
+    ) => Promise<import("./agent/profiles.js").SubagentRunResult>;
+    spawnSubAgent?: (
+      input: string | ContentPart[],
+      cwd: string,
+      options: {
+        profile: import("./agent/profiles.js").AgentProfile;
+        parentToolCallId: string;
+        approval?: "fail" | "disabled";
+        description?: string;
+        abortSignal?: AbortSignal;
+        forkContext?: boolean;
+      },
+    ) => Promise<import("./agent/subagent-control.js").SubagentThreadSnapshot>;
+    waitSubAgents?: (
+      options: {
+        agentIds?: string[];
+        timeoutMs?: number;
+      },
+    ) => Promise<import("./agent/subagent-control.js").SubagentThreadSnapshot[]>;
+    sendSubAgentInput?: (
+      agentId: string,
+      input: string | ContentPart[],
+      cwd: string,
+      options?: {
+        interrupt?: boolean;
+        parentToolCallId?: string;
+        abortSignal?: AbortSignal;
+      },
+    ) => Promise<import("./agent/subagent-control.js").SubagentThreadSnapshot>;
+    closeSubAgent?: (agentId: string) => Promise<import("./agent/subagent-control.js").SubagentThreadSnapshot>;
+    listSubAgents?: () => import("./agent/subagent-control.js").SubagentThreadSnapshot[];
   };
+  emitUpdate?: (update: ToolUpdate) => void;
 }
 
 export interface ToolRegistryEntry extends ToolDefinition {
   execute: ToolExecutor;
   /** Whether this tool is allowed in plan mode. Defaults to false (treated as write-capable). */
   readOnly?: boolean;
+  /** Capability classification used by subagent profiles. Defaults to "unknown". */
+  effect?: ToolEffect;
+  /** True when the tool may call ApprovalController.request(...) for an interactive decision. */
+  requiresApproval?: boolean;
   /**
    * If true, this tool is omitted from the tool list sent to the model on each
    * turn until unlocked via `tool_search`. Only the tool's name appears in a
@@ -240,6 +309,7 @@ export type AgentEvent =
   | { type: "tool_call_delta"; id: string; name: string; argumentsDelta: string; arguments: string }
   | { type: "tool_call_end"; id: string; name: string; arguments: string }
   | { type: "tool_start"; id: string; name: string; args: Record<string, any> }
+  | { type: "tool_update"; id: string; name: string; update: ToolUpdate }
   | { type: "tool_end"; id: string; name: string; result: ToolResult }
   | { type: "turn_end"; usage?: TokenUsage }
   | { type: "context_recovered"; droppedMessages: number; reason: "overflow" }

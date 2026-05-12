@@ -6,6 +6,8 @@ export function createQuestionTool(controller: QuestionController): ToolRegistry
   return {
     name: "question",
     readOnly: true,
+    effect: "read",
+    requiresApproval: true,
     description: `Ask the user one or more structured questions during execution.
 
 Use this when you need to:
@@ -178,4 +180,3 @@ function formatQuestionToolResult(questions: QuestionPrompt[], answers: Question
     .join(", ");
   return `User has answered your questions: ${formatted}. You can now continue with the user's answers in mind.`;
 }
-

@@ -1,10 +1,12 @@
 import type { DisplayToolCall } from "../display-history.js";
 import type { ToolRenderer } from "./types.js";
 import { fallbackToolRenderer } from "./fallback.js";
+import { subagentToolRenderer } from "./subagent.js";
 import { writeToolRenderer } from "./write.js";
 
 const TOOL_RENDERERS: ToolRenderer[] = [
   writeToolRenderer,
+  subagentToolRenderer,
   fallbackToolRenderer,
 ];
 

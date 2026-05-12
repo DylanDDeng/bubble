@@ -20,12 +20,31 @@ export const defaultToolSnippets: Record<string, string> = {
   lsp: "Use the language server for code navigation, symbols, call hierarchy, and type-aware lookup",
   web_search: "Search the public web for current information",
   web_fetch: "Fetch and extract the contents of a specific webpage",
-  task: "Delegate a bounded investigative subtask to a read-only sub-agent",
+  spawn_agent: "Start a child subagent thread and return its agent id plus nickname",
+  wait_agent: "Wait for one or more spawned subagents to finish",
+  send_input: "Send follow-up input to an existing subagent thread",
+  close_agent: "Close or cancel a spawned subagent thread",
   question: "Ask the user structured questions when clarification or preference choices would materially improve the work",
   skill: "Load a named skill with specialized instructions and bundled resources",
 };
 
-export const defaultToolNames = ["read", "glob", "bash", "edit", "write", "grep", "lsp", "web_search", "web_fetch", "task", "question", "skill"];
+export const defaultToolNames = [
+  "read",
+  "glob",
+  "bash",
+  "edit",
+  "write",
+  "grep",
+  "lsp",
+  "web_search",
+  "web_fetch",
+  "spawn_agent",
+  "wait_agent",
+  "send_input",
+  "close_agent",
+  "question",
+  "skill",
+];
 
 export function buildEnvironmentPrompt(options: EnvironmentPromptOptions = {}): string {
   const configuredProvider = options.configuredProvider ?? "unknown";

@@ -6,6 +6,7 @@
 
 import chalk from "chalk";
 import { Agent } from "./agent.js";
+import { BudgetLedger } from "./agent/budget-ledger.js";
 import { parseArgs, printHelp } from "./cli.js";
 import { UserConfig } from "./config.js";
 import { createProviderInstance, createUnavailableProvider } from "./provider.js";
@@ -209,6 +210,8 @@ async function main() {
     : (sessionThinkingLevel ?? args.thinkingLevel ?? configuredThinkingLevel ?? "off");
   const restoredTodos = sessionManager?.getTodos() ?? [];
   const initialMode: PermissionMode = args.mode ?? "default";
+  const skillSummaries = skillRegistry.summaries();
+  const memoryPrompt = buildMemoryPrompt(args.cwd);
   const systemPrompt = buildSystemPrompt({
     agentName: "Bubble",
     configuredProvider: activeProviderId || "none",
@@ -218,9 +221,10 @@ async function main() {
     mode: initialMode,
     workingDir: args.cwd,
     tools: tools.map((tool) => tool.name),
-    skills: skillRegistry.summaries(),
-    memoryPrompt: buildMemoryPrompt(args.cwd),
+    skills: skillSummaries,
+    memoryPrompt,
   });
+  const budgetLedger = new BudgetLedger();
   const agent = new Agent({
     provider: activeProvider
       ? createProvider(activeProviderId, activeProvider.apiKey, activeProvider.baseURL)
@@ -259,6 +263,9 @@ async function main() {
     onModeUpdate: (mode) => {
       sessionManager?.appendMarker("mode_switch", mode);
     },
+    budgetLedger,
+    skills: skillSummaries,
+    memoryPrompt,
   });
   agentRef = agent;
   if (sessionManager) {

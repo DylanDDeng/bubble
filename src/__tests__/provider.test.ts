@@ -215,6 +215,59 @@ describe("translateOpenAIStream", () => {
     expect(chunks.find((c) => c.type === "reasoning_delta")).toEqual({ type: "reasoning_delta", content: "thinking..." });
   });
 
+  it("drops provider protocol tool-call markers emitted as text", async () => {
+    const chunks = await collect(translateOpenAIStream(fromArray([
+      { choices: [{ delta: { content: "<｜｜DSML｜｜tool_calls>" } }] },
+      { choices: [{ delta: { content: "final" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+    ])));
+
+    expect(chunks.filter((c) => c.type === "text").map((c: any) => c.content).join("")).toBe("final");
+  });
+
+  it("drops provider protocol tool-call markers split across text chunks", async () => {
+    const chunks = await collect(translateOpenAIStream(fromArray([
+      { choices: [{ delta: { content: "<｜｜DS" } }] },
+      { choices: [{ delta: { content: "ML｜｜tool" } }] },
+      { choices: [{ delta: { content: "_calls>" } }] },
+      { choices: [{ delta: { content: "final" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+    ])));
+
+    expect(chunks.filter((c) => c.type === "text").map((c: any) => c.content).join("")).toBe("final");
+  });
+
+  it("preserves ordinary text that only looks like a protocol marker prefix", async () => {
+    const chunks = await collect(translateOpenAIStream(fromArray([
+      { choices: [{ delta: { content: "<not a marker" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+    ])));
+
+    expect(chunks.filter((c) => c.type === "text").map((c: any) => c.content).join("")).toBe("<not a marker");
+  });
+
+  it("drops DSML invoke and parameter envelopes with attribute payloads", async () => {
+    const chunks = await collect(translateOpenAIStream(fromArray([
+      { choices: [{ delta: { content: "before " } }] },
+      { choices: [{ delta: { content: "<｜｜DSML｜｜invoke name=\"grep\">" } }] },
+      { choices: [{ delta: { content: "<｜｜DSML｜｜parameter name=\"pattern\">x</｜｜DSML｜｜parameter>" } }] },
+      { choices: [{ delta: { content: "</｜｜DSML｜｜invoke>" } }] },
+      { choices: [{ delta: { content: " after" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+    ])));
+
+    expect(chunks.filter((c) => c.type === "text").map((c: any) => c.content).join("")).toBe("before x after");
+  });
+
+  it("preserves source-like text with bare < followed by a non-pipe character", async () => {
+    const chunks = await collect(translateOpenAIStream(fromArray([
+      { choices: [{ delta: { content: "if (i < n) {" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+    ])));
+
+    expect(chunks.filter((c) => c.type === "text").map((c: any) => c.content).join("")).toBe("if (i < n) {");
+  });
+
   it("forwards DeepSeek usage cache and reasoning token details", async () => {
     const chunks = await collect(translateOpenAIStream(fromArray([
       {

@@ -14,6 +14,7 @@ export function createGrepTool(cwd: string): ToolRegistryEntry {
   return {
     name: "grep",
     readOnly: true,
+    effect: "read",
     description: `Search file contents using regex (via ripgrep). Use this instead of running grep, rg, or ripgrep through bash. Returns up to ${MAX_MATCHES} matches.`,
     parameters: {
       type: "object",

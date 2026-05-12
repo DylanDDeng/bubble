@@ -24,6 +24,8 @@ export function createWriteTool(
 ): ToolRegistryEntry {
   return {
     name: "write",
+    effect: "write_direct",
+    requiresApproval: true,
     description: `Write a file to disk. Creates parent directories if needed.${options.refuseOverwrite ? " Will not overwrite existing files." : ""}`,
     parameters: {
       type: "object",

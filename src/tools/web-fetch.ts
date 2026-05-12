@@ -10,6 +10,7 @@ export function createWebFetchTool(approval?: ApprovalController): ToolRegistryE
   return {
     name: "web_fetch",
     readOnly: true,
+    effect: "read",
     description: "Fetch and extract the contents of a specific URL using a remote web crawling service.",
     parameters: {
       type: "object",

@@ -4,16 +4,23 @@
  */
 
 import { compactMessages } from "./context/compact.js";
+import { randomUUID } from "node:crypto";
 import { compactMessagesWithLLM } from "./context/compact-llm.js";
 import { getContextBudget } from "./context/budget.js";
 import { isContextOverflowError } from "./context/overflow.js";
 import { projectMessages } from "./context/projector.js";
 import { aggressivePruneMessages } from "./context/prune.js";
 import { buildDeferredToolsReminder, buildToolFreezeReminder, isPermissionModeReminder, reminderForMode } from "./prompt/reminders.js";
-import type { AgentEvent, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ThinkingLevel, Todo, TokenUsage, ToolDefinition, ToolResult, ToolRegistryEntry } from "./types.js";
+import type { AgentEvent, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ThinkingLevel, Todo, TokenUsage, ToolDefinition, ToolResult, ToolRegistryEntry, ToolUpdate } from "./types.js";
 import { HookBus, type TurnHooks } from "./orchestrator/hooks.js";
 import { createDefaultHooks } from "./orchestrator/default-hooks.js";
-import { filterToolsForSubtask, getSubtaskPolicy, type SubtaskType } from "./agent/subtask-policy.js";
+import { getSubtaskPolicy, type SubtaskType } from "./agent/subtask-policy.js";
+import { BudgetLedger, composeAbortSignals } from "./agent/budget-ledger.js";
+import { assignAgentNickname, builtinAgentProfiles, mergeUsage, selectToolsForAgentProfile, validateAgentProfileTools, type AgentProfile, type SubagentRunResult } from "./agent/profiles.js";
+import { snapshotSubagentThread, subagentResultFromThread, type PendingSubagentToolUpdate, type SubagentThreadRecord, type SubagentThreadSnapshot } from "./agent/subagent-control.js";
+import { buildSystemPrompt } from "./system-prompt.js";
+import { isOnlyProviderProtocolArtifacts, stripProviderProtocolArtifacts } from "./provider-artifacts.js";
+import type { SkillSummary } from "./skills/types.js";
 
 const MAX_CONSECUTIVE_OVERFLOW_RECOVERIES = 3;
 const RESIDENT_HISTORY_KEEP_RECENT_TURNS = 3;
@@ -49,6 +56,10 @@ export interface AgentOptions {
   onTodosUpdate?: (todos: Todo[]) => void;
   onModeUpdate?: (mode: PermissionMode) => void;
   hooks?: TurnHooks[];
+  budgetLedger?: BudgetLedger;
+  budgetSource?: { runId: string; subAgentId?: string };
+  skills?: SkillSummary[];
+  memoryPrompt?: string;
 }
 
 export class Agent {
@@ -72,6 +83,12 @@ export class Agent {
   private hookDefinitions: TurnHooks[];
   private maxTurns?: number;
   private taskBudget?: { total: number };
+  private budgetLedger?: BudgetLedger;
+  private budgetSource: { runId: string; subAgentId?: string };
+  private skillSummaries: SkillSummary[];
+  private memoryPrompt?: string;
+  private subagentThreads: Map<string, SubagentThreadRecord> = new Map();
+  private pendingSubagentUpdates: PendingSubagentToolUpdate[] = [];
   private lastInputTokens: number | null = null;
   private lastAnchorMessageCount: number | null = null;
 
@@ -91,6 +108,10 @@ export class Agent {
     this.hookDefinitions = options.hooks ?? [];
     this.maxTurns = options.maxTurns ?? options.steps;
     this.taskBudget = options.taskBudget;
+    this.budgetLedger = options.budgetLedger;
+    this.budgetSource = options.budgetSource ?? { runId: this.sessionID ?? "agent" };
+    this.skillSummaries = options.skills ?? [];
+    this.memoryPrompt = options.memoryPrompt;
 
     if (options.systemPrompt) {
       this.messages.push({ role: "system", content: options.systemPrompt });
@@ -252,7 +273,7 @@ export class Agent {
     cwd: string,
     options: { abortSignal?: AbortSignal } = {},
   ): AsyncIterable<AgentEvent> {
-    const abortSignal = options.abortSignal;
+    const abortSignal = composeAbortSignals([options.abortSignal, this.budgetLedger?.signal]);
     throwIfAborted(abortSignal);
     const hookBus = new HookBus();
     for (const hooks of createDefaultHooks()) {
@@ -293,6 +314,7 @@ export class Agent {
     while (true) {
       throwIfAborted(abortSignal);
       flushGovernorReminders();
+      for (const update of this.drainSubagentToolUpdates()) yield update;
       yield { type: "turn_start" };
       step += 1;
       (hookState as any).turnCount = step;
@@ -420,6 +442,7 @@ export class Agent {
 
             case "usage":
               turnUsage = chunk.usage;
+              this.budgetLedger?.recordUsage(chunk.usage, this.budgetSource);
               this.lastInputTokens = chunk.usage.promptTokens;
               this.lastAnchorMessageCount = this.messages.length;
               if ((hookState as any).taskBudget) {
@@ -430,8 +453,10 @@ export class Agent {
               }
               break;
           }
+          for (const update of this.drainSubagentToolUpdates()) yield update;
         }
 
+        throwIfAborted(abortSignal);
         this.appendMessage(assistantMsg);
         assistantAppended = true;
       } catch (error) {
@@ -494,7 +519,39 @@ export class Agent {
           yield { type: "tool_start", id: tc.id, name: tc.name, args: tc.parsedArgs };
           const todosVersionBefore = this._todosVersion;
           const modeVersionBefore = this._modeVersion;
-          let result = blockedResult ?? await this.executeTool(tc, cwd, abortSignal);
+          const updateQueue = createUpdateQueue<ToolUpdate>();
+          let result: ToolResult;
+          if (blockedResult) {
+            result = blockedResult;
+          } else {
+            const toolExecution = this.executeTool(tc, cwd, abortSignal, (update) => updateQueue.push(update));
+            let settled = false;
+            let resolved: ToolResult | undefined;
+            let rejected: unknown;
+            void toolExecution
+              .then((value) => {
+                resolved = value;
+              })
+              .catch((error) => {
+                rejected = error;
+              })
+              .finally(() => {
+                settled = true;
+                updateQueue.wake();
+              });
+
+            while (!settled || updateQueue.hasItems()) {
+              for (const update of updateQueue.drain()) {
+                yield { type: "tool_update", id: tc.id, name: tc.name, update };
+              }
+              for (const update of this.drainSubagentToolUpdates()) yield update;
+              if (!settled) {
+                await updateQueue.wait();
+              }
+            }
+            if (rejected) throw rejected;
+            result = resolved ?? { content: `Error: Tool "${tc.name}" returned no result`, isError: true };
+          }
           throwIfAborted(abortSignal);
           await hookBus.runAfterToolCall({
             agent: this,
@@ -521,6 +578,7 @@ export class Agent {
           this.onToolResult?.(tc.name, result);
           executedResults.push(result);
           yield { type: "tool_end", id: tc.id, name: tc.name, result };
+          for (const update of this.drainSubagentToolUpdates()) yield update;
           if (this._todosVersion !== todosVersionBefore) {
             yield { type: "todos_updated", todos: this.getTodos() };
           }
@@ -570,6 +628,7 @@ export class Agent {
       break;
     }
 
+    for (const update of this.drainSubagentToolUpdates()) yield update;
     yield { type: "agent_end" };
   }
 
@@ -621,67 +680,522 @@ export class Agent {
     options?: { subtaskType?: string; description?: string },
   ): Promise<ToolResult> {
     const subtaskType = options?.subtaskType as SubtaskType | undefined;
-    const policy = getSubtaskPolicy(subtaskType);
-    const tools = filterToolsForSubtask(
-      [...this.tools.values()].filter((tool) => tool.name !== "task"),
-      subtaskType,
-    );
+    const profile = builtinAgentProfiles().find((item) => item.subtaskType === (subtaskType ?? "general_readonly"))
+      ?? builtinAgentProfiles().find((item) => item.subtaskType === "general_readonly")!;
+    const run = await this.runSubAgent(input, cwd, {
+      profile,
+      runId: randomUUID(),
+      subAgentId: randomUUID(),
+      parentToolCallId: "task",
+      description: options?.description,
+    });
+    const lines = [
+      "Note: task is deprecated. Use spawn_agent with a named profile instead.",
+      `Subtask type: ${profile.subtaskType ?? "general_readonly"}`,
+    ];
+    if (options?.description) {
+      lines.push(`Subtask description: ${options.description}`);
+    }
+    if (run.summary) {
+      lines.push("", "Subtask summary:", run.summary);
+    }
+    if (run.toolNotes.length > 0) {
+      lines.push("", "Subtask tools:", ...run.toolNotes.slice(0, 8).map((note) => `- ${note}`));
+    }
+    return {
+      content: lines.join("\n"),
+      status: getSubtaskPolicy(subtaskType).resultStatus,
+      isError: run.status !== "completed",
+      metadata: {
+        kind: "subagent",
+        reason: `Subtask (${profile.subtaskType ?? "general_readonly"}) investigation completed.`,
+        subagents: [run],
+      },
+    };
+  }
+
+  async runSubAgent(
+    input: string | ContentPart[],
+    cwd: string,
+    options: {
+      profile: AgentProfile;
+      runId: string;
+      subAgentId: string;
+      parentToolCallId: string;
+      approval?: "fail" | "disabled";
+      emitUpdate?: (update: ToolUpdate) => void;
+      description?: string;
+      abortSignal?: AbortSignal;
+      nickname?: string;
+      forkContext?: boolean;
+    },
+  ): Promise<SubagentRunResult> {
+    const record = this.createSubagentThreadRecord({
+      profile: options.profile,
+      task: typeof input === "string" ? input : "(multimodal task)",
+      runId: options.runId,
+      agentId: options.subAgentId,
+      parentToolCallId: options.parentToolCallId,
+      parentToolName: "subagent",
+      nickname: options.nickname,
+    });
+    await this.runSubagentThread(record, input, cwd, {
+      approval: options.approval ?? options.profile.approval,
+      abortSignal: options.abortSignal,
+      forkContext: options.forkContext,
+      directEmit: options.emitUpdate,
+    });
+    return subagentResultFromThread(record);
+  }
+
+  async spawnSubAgent(
+    input: string | ContentPart[],
+    cwd: string,
+    options: {
+      profile: AgentProfile;
+      parentToolCallId: string;
+      approval?: "fail" | "disabled";
+      description?: string;
+      abortSignal?: AbortSignal;
+      forkContext?: boolean;
+    },
+  ): Promise<SubagentThreadSnapshot> {
+    const record = this.createSubagentThreadRecord({
+      profile: options.profile,
+      task: typeof input === "string" ? input : "(multimodal task)",
+      parentToolCallId: options.parentToolCallId,
+      parentToolName: "spawn_agent",
+    });
+    this.subagentThreads.set(record.agentId, record);
+    this.queueSubagentUpdate(record, "queued", undefined, `Queued ${record.nickname} (${record.profile.name})`);
+    record.promise = this.runSubagentThread(record, input, cwd, {
+      approval: options.approval ?? record.profile.approval,
+      abortSignal: options.abortSignal,
+      forkContext: options.forkContext,
+      queueUpdates: true,
+    });
+    void record.promise.finally(() => this.notifySubagentWaiters(record));
+    return snapshotSubagentThread(record);
+  }
+
+  async waitSubAgents(options: { agentIds?: string[]; timeoutMs?: number } = {}): Promise<SubagentThreadSnapshot[]> {
+    const targets = this.resolveSubagentTargets(options.agentIds);
+    if (targets.length === 0) return [];
+    const completed = targets.filter((record) => isFinalSubagentStatus(record.status));
+    if (completed.length > 0) return completed.map(snapshotSubagentThread);
+
+    const timeoutMs = normalizeWaitTimeout(options.timeoutMs);
+    let waiter: (() => void) | undefined;
+    await Promise.race([
+      new Promise<void>((resolve) => {
+        waiter = resolve;
+        for (const record of targets) {
+          record.waiters.add(resolve);
+        }
+      }).finally(() => {
+        if (waiter) {
+          for (const record of targets) {
+            record.waiters.delete(waiter);
+          }
+        }
+      }),
+      new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+    ]);
+
+    const finished = targets.filter((record) => isFinalSubagentStatus(record.status));
+    return (finished.length > 0 ? finished : targets).map(snapshotSubagentThread);
+  }
+
+  async sendSubAgentInput(
+    agentId: string,
+    input: string | ContentPart[],
+    cwd: string,
+    options: { interrupt?: boolean; parentToolCallId?: string; abortSignal?: AbortSignal } = {},
+  ): Promise<SubagentThreadSnapshot> {
+    const record = this.subagentThreads.get(agentId);
+    if (!record) {
+      throw new Error(`Unknown subagent: ${agentId}`);
+    }
+    if (record.status === "running" || record.status === "queued") {
+      if (!options.interrupt) {
+        throw new Error(`Subagent ${agentId} is still running. Call wait_agent first or pass interrupt:true.`);
+      }
+      record.abortController.abort(new AgentAbortError(`Subagent ${agentId} interrupted.`));
+      await record.promise?.catch(() => undefined);
+      record.abortController = new AbortController();
+    }
+    if (record.status === "closed") {
+      throw new Error(`Subagent ${agentId} is closed.`);
+    }
+
+    record.parentToolCallId = options.parentToolCallId ?? record.parentToolCallId;
+    record.parentToolName = "send_input";
+    record.task = typeof input === "string" ? input : "(multimodal task)";
+    record.summary = "";
+    record.toolNotes = [];
+    record.usage = undefined;
+    record.error = undefined;
+    record.updatedAt = Date.now();
+    record.promise = this.runSubagentThread(record, input, cwd, {
+      approval: record.profile.approval,
+      abortSignal: options.abortSignal,
+      queueUpdates: true,
+      reuseAgent: true,
+    });
+    void record.promise.finally(() => this.notifySubagentWaiters(record));
+    return snapshotSubagentThread(record);
+  }
+
+  async closeSubAgent(agentId: string): Promise<SubagentThreadSnapshot> {
+    const record = this.subagentThreads.get(agentId);
+    if (!record) {
+      throw new Error(`Unknown subagent: ${agentId}`);
+    }
+    if (!isFinalSubagentStatus(record.status)) {
+      record.abortController.abort(new AgentAbortError(`Subagent ${agentId} closed.`));
+      await record.promise?.catch(() => undefined);
+    }
+    record.status = "closed";
+    record.updatedAt = Date.now();
+    this.queueSubagentUpdate(record, "cancelled", undefined, `${record.nickname} closed`);
+    this.notifySubagentWaiters(record);
+    return snapshotSubagentThread(record);
+  }
+
+  listSubAgents(): SubagentThreadSnapshot[] {
+    return [...this.subagentThreads.values()].map(snapshotSubagentThread);
+  }
+
+  private createSubagentThreadRecord(options: {
+    profile: AgentProfile;
+    task: string;
+    runId?: string;
+    agentId?: string;
+    parentToolCallId: string;
+    parentToolName: string;
+    nickname?: string;
+  }): SubagentThreadRecord {
+    const now = Date.now();
+    const nickname = options.nickname ?? assignAgentNickname(options.profile, this.activeSubagentNicknames());
+    return {
+      agentId: options.agentId ?? randomUUID(),
+      runId: options.runId ?? randomUUID(),
+      nickname,
+      profile: options.profile,
+      parentToolCallId: options.parentToolCallId,
+      parentToolName: options.parentToolName,
+      status: "queued",
+      task: options.task,
+      summary: "",
+      toolNotes: [],
+      createdAt: now,
+      updatedAt: now,
+      abortController: new AbortController(),
+      waiters: new Set(),
+    };
+  }
+
+  private async runSubagentThread(
+    record: SubagentThreadRecord,
+    input: string | ContentPart[],
+    cwd: string,
+    options: {
+      approval: "fail" | "disabled";
+      abortSignal?: AbortSignal;
+      forkContext?: boolean;
+      directEmit?: (update: ToolUpdate) => void;
+      queueUpdates?: boolean;
+      reuseAgent?: boolean;
+    },
+  ): Promise<void> {
+    const emit = (status: ToolUpdate["status"], event?: AgentEvent, message?: string) => {
+      const update = this.buildSubagentUpdate(record, status, event, message);
+      options.directEmit?.(update);
+      if (options.queueUpdates) {
+        this.pendingSubagentUpdates.push({ id: record.parentToolCallId, name: record.parentToolName, update });
+      }
+    };
+
+    const allTools = [...this.tools.values()];
+    const diagnostics = validateAgentProfileTools(allTools, record.profile, options.approval);
+    const blockingDiagnostics = diagnostics.filter((diagnostic) => diagnostic.severity === "error");
+    for (const diagnostic of diagnostics.filter((item) => item.severity === "warning")) {
+      record.toolNotes.push(`profile: ${diagnostic.message}`);
+    }
+    if (blockingDiagnostics.length > 0) {
+      record.status = "blocked";
+      record.error = blockingDiagnostics.map((diagnostic) => diagnostic.message).join("\n");
+      record.updatedAt = Date.now();
+      emit("blocked", undefined, record.error);
+      this.notifySubagentWaiters(record);
+      return;
+    }
+
+    const tools = selectToolsForAgentProfile(allTools, record.profile, options.approval);
+    const subAgent = options.reuseAgent && record.agent
+      ? record.agent
+      : this.createSubAgentInstance(record, tools, cwd, options.forkContext);
+    record.agent = subAgent;
+    record.status = "running";
+    record.updatedAt = Date.now();
+    emit("running", undefined, `Running ${record.nickname} (${record.profile.name})...`);
+    let turnSummaryBuffer = "";
+    let turnHadToolCall = false;
+    let executedAnyTool = false;
+
+    try {
+      const childAbortSignal = composeAbortSignals([
+        options.abortSignal,
+        record.abortController.signal,
+      ]);
+      for await (const event of subAgent.run(input, cwd, { abortSignal: childAbortSignal })) {
+        if (event.type === "text_delta") {
+          turnSummaryBuffer += event.content;
+        }
+        if (
+          event.type === "tool_call_start"
+          || event.type === "tool_call_delta"
+          || event.type === "tool_call_end"
+          || event.type === "tool_start"
+        ) {
+          turnHadToolCall = true;
+        }
+        if (event.type === "tool_end") {
+          executedAnyTool = true;
+          record.toolNotes.push(`${event.name}: ${summarizeSubagentToolEnd(event)}`);
+        }
+        if (event.type === "turn_end" && event.usage) {
+          record.usage = mergeUsage(record.usage, event.usage);
+        }
+        if (event.type === "turn_end") {
+          const turnSummary = stripProviderProtocolArtifacts(turnSummaryBuffer).trim();
+          if (!turnHadToolCall && turnSummary) {
+            // Only the latest tool-free assistant turn is a candidate for the summary;
+            // earlier ones are intermediate "I'll do X next" reasoning, not the final answer.
+            record.summary = turnSummary;
+          }
+          turnSummaryBuffer = "";
+          turnHadToolCall = false;
+        }
+        record.updatedAt = Date.now();
+        emit("running", event);
+      }
+    } catch (error: any) {
+      const cancelled = error instanceof AgentAbortError || error?.name === "AbortError";
+      record.status = cancelled ? "cancelled" : "failed";
+      record.summary = sanitizeSubagentSummary(record.summary);
+      record.error = error?.message || String(error);
+      record.updatedAt = Date.now();
+      emit(record.status, undefined, record.error);
+      this.notifySubagentWaiters(record);
+      return;
+    }
+
+    record.summary = sanitizeSubagentSummary(record.summary);
+    if (needsExplicitFinalSummary(record, executedAnyTool)) {
+      await this.runSubagentFinalSummaryTurn(record, subAgent, cwd, options.abortSignal, emit);
+    }
+
+    record.status = "completed";
+    record.summary = sanitizeSubagentSummary(record.summary);
+    record.updatedAt = Date.now();
+    emit("completed", undefined, record.summary || `${record.nickname} completed`);
+    this.notifySubagentWaiters(record);
+  }
+
+  private async runSubagentFinalSummaryTurn(
+    record: SubagentThreadRecord,
+    subAgent: NonNullable<SubagentThreadRecord["agent"]>,
+    cwd: string,
+    abortSignal: AbortSignal | undefined,
+    emit: (status: ToolUpdate["status"], event?: AgentEvent, message?: string) => void,
+  ): Promise<void> {
+    const prompt = [
+      "Produce the final subagent summary now.",
+      "Do not call tools. Do not announce next steps or plans.",
+      "Use the evidence already gathered in this child thread.",
+      "Return concise findings with concrete file paths and explicit uncertainty.",
+      "Your entire response will be returned to the parent as the subagent's answer.",
+    ].join("\n");
+    subAgent.injectSystemReminder([
+      "Subagent final-summary mode is active.",
+      "Do not call tools. Do not announce next steps.",
+      "Use only the evidence already gathered in this child thread.",
+      "Return the final concise summary as your complete response.",
+    ].join("\n"));
+    let finalBuffer = "";
+    let finalHadToolCall = false;
+    const finalAbortSignal = composeAbortSignals([abortSignal, record.abortController.signal]);
+
+    for await (const event of subAgent.run(prompt, cwd, { abortSignal: finalAbortSignal })) {
+      if (event.type === "text_delta") {
+        finalBuffer += event.content;
+      }
+      if (
+        event.type === "tool_call_start"
+        || event.type === "tool_call_delta"
+        || event.type === "tool_call_end"
+        || event.type === "tool_start"
+      ) {
+        finalHadToolCall = true;
+      }
+      if (event.type === "turn_end" && event.usage) {
+        record.usage = mergeUsage(record.usage, event.usage);
+      }
+      emit("running", event);
+    }
+
+    const finalSummary = sanitizeSubagentSummary(finalBuffer);
+    if (!finalHadToolCall && finalSummary) {
+      record.summary = finalSummary;
+    }
+  }
+
+  private createSubAgentInstance(
+    record: SubagentThreadRecord,
+    tools: ToolRegistryEntry[],
+    cwd: string,
+    forkContext?: boolean,
+  ): NonNullable<SubagentThreadRecord["agent"]> {
+    const childToolNames = tools.map((tool) => tool.name);
+    const childSystemPrompt = buildSystemPrompt({
+      agentName: "Bubble",
+      configuredProvider: this.providerId || "none",
+      configuredModel: this.model || "none",
+      configuredModelId: this.model || "none",
+      thinkingLevel: this.thinkingLevel,
+      mode: "plan",
+      workingDir: cwd,
+      tools: childToolNames,
+      skills: childToolNames.includes("skill") ? this.skillSummaries : undefined,
+      memoryPrompt: childToolNames.some((name) => name === "memory_search" || name === "memory_read_summary")
+        ? this.memoryPrompt
+        : undefined,
+      agentProfilePrompt: [
+        `You are subagent ${record.nickname}. Your agent profile is ${record.profile.name}.`,
+        record.profile.prompt,
+      ].filter(Boolean).join("\n\n"),
+    });
     const subAgent = new Agent({
       provider: this.provider,
       providerId: this.providerId,
-      model: this.model,
+      model: record.profile.model && record.profile.model !== "inherit" ? record.profile.model : this.model,
       tools,
       temperature: this.temperature,
       thinkingLevel: this.thinkingLevel,
       mode: "plan",
-      maxTurns: policy.maxTurns,
-      taskBudget: policy.taskBudget,
-      systemPrompt: this.messages.find((message) => message.role === "system")?.content,
+      maxTurns: record.profile.maxTurns,
+      budgetLedger: this.budgetLedger,
+      budgetSource: { runId: record.runId, subAgentId: record.agentId },
+      systemPrompt: childSystemPrompt,
       hooks: this.hookDefinitions,
     });
-    subAgent.injectSystemReminder(policy.reminder);
+    if (forkContext) {
+      subAgent.messages = this.forkMessagesForSubagent(childSystemPrompt);
+    }
+    return subAgent;
+  }
 
-    let summary = "";
-    const toolNotes: string[] = [];
-    for await (const event of subAgent.run(input, cwd)) {
-      if (event.type === "text_delta") {
-        summary += event.content;
-      }
-      if (event.type === "tool_end") {
-        const detail = event.result.metadata?.reason
-          || event.result.content.split("\n").find((line) => line.trim())?.trim()
-          || "completed";
-        toolNotes.push(`${event.name}: ${detail}`);
-      }
-    }
+  private forkMessagesForSubagent(childSystemPrompt: string): Message[] {
+    const forked = this.messages
+      .filter((message) => {
+        if (message.role === "system" || message.role === "meta") return false;
+        if (message.role === "assistant" && message.toolCalls?.some((call) => isSubagentLifecycleTool(call.name))) {
+          return false;
+        }
+        if (message.role === "tool" && message.metadata?.kind === "subagent") {
+          return false;
+        }
+        return true;
+      })
+      .slice(-20);
+    return [{ role: "system", content: childSystemPrompt }, ...forked];
+  }
 
-    const lines: string[] = [];
-    const trimmedSummary = summary.trim();
-    lines.push(`Subtask type: ${policy.type}`);
-    if (options?.description) {
-      lines.push(`Subtask description: ${options.description}`);
-    }
-    if (trimmedSummary) {
-      lines.push("", "Subtask summary:", trimmedSummary);
-    }
-    if (toolNotes.length > 0) {
-      lines.push("", "Subtask tools:");
-      for (const note of toolNotes.slice(0, 8)) {
-        lines.push(`- ${note}`);
-      }
-    }
-    if (lines.length === 0) {
-      lines.push("Subtask summary:", "No conclusive findings were produced.");
-    }
-
+  private buildSubagentUpdate(
+    record: SubagentThreadRecord,
+    status: ToolUpdate["status"],
+    event?: AgentEvent,
+    message?: string,
+  ): ToolUpdate {
     return {
-      content: lines.join("\n"),
-      status: policy.resultStatus,
+      type: "subagent_update",
+      parentToolCallId: record.parentToolCallId,
+      runId: record.runId,
+      subAgentId: record.agentId,
+      agentName: record.profile.name,
+      nickname: record.nickname,
+      status,
+      childEvent: event,
+      summaryDelta: event?.type === "text_delta" ? event.content : undefined,
+      toolName: "name" in (event ?? {}) ? (event as any).name : undefined,
+      toolCallId: "id" in (event ?? {}) ? (event as any).id : undefined,
+      message,
       metadata: {
-        kind: "security",
-        reason: `Subtask (${policy.type}) investigation completed.`,
+        kind: "subagent",
+        runId: record.runId,
+        subagents: [{
+          subAgentId: record.agentId,
+          agentName: record.profile.name,
+          nickname: record.nickname,
+          status,
+          profileSource: record.profile.source,
+          task: record.task,
+          summary: record.summary,
+          toolNotes: record.toolNotes,
+          usage: record.usage,
+          error: record.error,
+        }],
       },
     };
+  }
+
+  private queueSubagentUpdate(
+    record: SubagentThreadRecord,
+    status: ToolUpdate["status"],
+    event?: AgentEvent,
+    message?: string,
+  ): void {
+    this.pendingSubagentUpdates.push({
+      id: record.parentToolCallId,
+      name: record.parentToolName,
+      update: this.buildSubagentUpdate(record, status, event, message),
+    });
+  }
+
+  private drainSubagentToolUpdates(): AgentEvent[] {
+    return this.pendingSubagentUpdates.splice(0, this.pendingSubagentUpdates.length)
+      .map((pending) => ({
+        type: "tool_update" as const,
+        id: pending.id,
+        name: pending.name,
+        update: pending.update,
+      }));
+  }
+
+  private activeSubagentNicknames(): string[] {
+    return [...this.subagentThreads.values()]
+      .filter((record) => !isFinalSubagentStatus(record.status))
+      .map((record) => record.nickname);
+  }
+
+  private resolveSubagentTargets(agentIds?: string[]): SubagentThreadRecord[] {
+    if (!agentIds || agentIds.length === 0) {
+      return [...this.subagentThreads.values()].filter((record) => record.status !== "closed");
+    }
+    return agentIds.map((id) => {
+      const record = this.subagentThreads.get(id);
+      if (!record) {
+        throw new Error(`Unknown subagent: ${id}`);
+      }
+      return record;
+    });
+  }
+
+  private notifySubagentWaiters(record: SubagentThreadRecord): void {
+    for (const waiter of record.waiters) {
+      waiter();
+    }
   }
 
   private maybeCompactResidentHistory(): void {
@@ -738,7 +1252,12 @@ export class Agent {
     this.onMessageAppend?.(message);
   }
 
-  private async executeTool(toolCall: ParsedToolCall, cwd: string, abortSignal?: AbortSignal): Promise<ToolResult> {
+  private async executeTool(
+    toolCall: ParsedToolCall,
+    cwd: string,
+    abortSignal?: AbortSignal,
+    emitUpdate?: (update: ToolUpdate) => void,
+  ): Promise<ToolResult> {
     throwIfAborted(abortSignal);
     if (toolCall.name === "exit_plan_mode" && this._mode !== "plan") {
       return {
@@ -760,7 +1279,7 @@ export class Agent {
       return {
         content:
           `Error: Tool "${toolCall.name}" is not allowed in plan mode. ` +
-          `In plan mode you may only use read-only tools (read, glob, grep, lsp, web_search, web_fetch, task, skill, todo_write, tool_search, question, exit_plan_mode). ` +
+          `In plan mode you may only use read-only tools (read, glob, grep, lsp, web_search, web_fetch, spawn_agent, wait_agent, send_input, close_agent, skill, todo_write, tool_search, question, exit_plan_mode). ` +
           `To modify files or run commands, present your proposal and call exit_plan_mode so the user can review and approve it.`,
         isError: true,
       };
@@ -782,6 +1301,7 @@ export class Agent {
         abortSignal,
         toolCall: { id: toolCall.id, name: toolCall.name },
         agent: this,
+        emitUpdate,
       });
     } catch (err: any) {
       return {
@@ -836,6 +1356,34 @@ function throwIfAborted(signal?: AbortSignal): void {
   throw new AgentAbortError(typeof reason === "string" ? reason : undefined);
 }
 
+function createUpdateQueue<T>() {
+  const items: T[] = [];
+  let waiter: (() => void) | undefined;
+  return {
+    push(item: T) {
+      items.push(item);
+      this.wake();
+    },
+    drain(): T[] {
+      return items.splice(0, items.length);
+    },
+    hasItems(): boolean {
+      return items.length > 0;
+    },
+    wait(): Promise<void> {
+      if (items.length > 0) return Promise.resolve();
+      return new Promise((resolve) => {
+        waiter = resolve;
+      });
+    },
+    wake() {
+      const resolve = waiter;
+      waiter = undefined;
+      resolve?.();
+    },
+  };
+}
+
 function estimateToolPayloadChars(messages: Message[]): number {
   return messages.reduce((sum, message) => {
     if (message.role !== "tool") {
@@ -855,4 +1403,78 @@ function getCurrentHeapUsed(): number {
   } catch {
     return 0;
   }
+}
+
+function isFinalSubagentStatus(status: SubagentThreadRecord["status"]): boolean {
+  return status === "completed"
+    || status === "failed"
+    || status === "blocked"
+    || status === "cancelled"
+    || status === "closed";
+}
+
+function normalizeWaitTimeout(value: number | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 30_000;
+  return Math.max(100, Math.min(3_600_000, Math.floor(value)));
+}
+
+function isSubagentLifecycleTool(name: string): boolean {
+  return name === "subagent"
+    || name === "spawn_agent"
+    || name === "wait_agent"
+    || name === "send_input"
+    || name === "close_agent";
+}
+
+function sanitizeSubagentSummary(value: string): string {
+  return stripProviderProtocolArtifacts(value).trim();
+}
+
+function needsExplicitFinalSummary(record: SubagentThreadRecord, executedAnyTool: boolean): boolean {
+  // If the subagent actually invoked any tool, always solicit an explicit final
+  // summary. We cannot tell from the stream alone whether a tool-free trailing
+  // turn was the real answer or mid-thought narration ("Let me try X next:").
+  // Asking the model to restate its findings is cheap and yields predictable,
+  // clean output. (Profile-validation notes in `toolNotes` do not count as
+  // actual tool executions.)
+  if (executedAnyTool) return true;
+  if (!record.summary) return false;
+  if (isOnlyProviderProtocolArtifacts(record.summary)) return true;
+  if (/<\/?[｜|][^<>]*>/.test(record.summary)) return true;
+  return false;
+}
+
+function summarizeSubagentToolEnd(event: { name: string; result: ToolResult }): string {
+  const metadata = (event.result.metadata ?? {}) as Record<string, unknown>;
+  const reason = readString(metadata.reason);
+  if (reason) return reason;
+  const summary = readString(metadata.summary);
+  if (summary) return summary;
+  if (event.result.isError) {
+    const firstLine = event.result.content.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+    return firstLine ? truncateForNote(firstLine) : "failed";
+  }
+  const matches = readNumber(metadata.matches);
+  const pattern = readString(metadata.pattern);
+  const path = readString(metadata.path);
+  if (matches !== undefined) {
+    const target = pattern ? ` for ${pattern}` : "";
+    const within = path ? ` in ${path}` : "";
+    return `${matches} match${matches === 1 ? "" : "es"}${target}${within}`;
+  }
+  const kind = readString(metadata.kind);
+  if (path) return kind ? `${kind} ${path}` : path;
+  return event.result.status ?? "completed";
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function readNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function truncateForNote(value: string, max = 200): string {
+  return value.length <= max ? value : `${value.slice(0, max - 3)}...`;
 }

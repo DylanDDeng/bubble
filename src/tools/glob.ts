@@ -24,6 +24,7 @@ export function createGlobTool(cwd: string): ToolRegistryEntry {
   return {
     name: "glob",
     readOnly: true,
+    effect: "read",
     description: `Find files by glob pattern without using the shell. Use this for project structure discovery and filename searches. Returns up to ${MAX_RESULTS} files sorted by recent modification time.`,
     parameters: {
       type: "object",
