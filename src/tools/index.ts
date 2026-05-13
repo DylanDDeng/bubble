@@ -40,6 +40,7 @@ import { createWriteTool } from "./write.js";
 import { createQuestionTool } from "./question.js";
 import { createMemoryReadSummaryTool, createMemorySearchTool } from "./memory.js";
 import type { QuestionController } from "../question/index.js";
+import { FileStateTracker } from "./file-state.js";
 
 export interface CreateAllToolsOptions {
   todoStore?: TodoStore;
@@ -48,6 +49,7 @@ export interface CreateAllToolsOptions {
   questionController?: QuestionController;
   toolSearchController?: ToolSearchController;
   lspService?: LspService;
+  fileStateTracker?: FileStateTracker;
 }
 
 export function createAllTools(
@@ -57,11 +59,12 @@ export function createAllTools(
 ): ToolRegistryEntry[] {
   const approval = options.approvalController;
   const lsp = options.lspService ?? getLspService(cwd);
+  const fileState = options.fileStateTracker ?? new FileStateTracker(cwd);
   return [
-    createReadTool(cwd, approval, lsp),
-    createBashTool(cwd, approval),
-    createWriteTool(cwd, { refuseOverwrite: true }, approval, lsp),
-    createEditTool(cwd, approval, lsp),
+    createReadTool(cwd, approval, lsp, fileState),
+    createBashTool(cwd, approval, fileState),
+    createWriteTool(cwd, { refuseOverwrite: true }, approval, lsp, fileState),
+    createEditTool(cwd, approval, lsp, fileState),
     createGlobTool(cwd),
     createGrepTool(cwd),
     createLspTool(cwd, lsp, approval),

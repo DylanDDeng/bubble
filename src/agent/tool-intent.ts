@@ -334,7 +334,7 @@ function parseLineCount(value: string | undefined): number | undefined {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
-function shellSplit(command: string): string[] {
+export function shellSplit(command: string): string[] {
   const tokens: string[] = [];
   let current = "";
   let quote: "'" | '"' | null = null;

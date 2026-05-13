@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createBashTool } from "../bash.js";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 
 describe("bash tool", () => {
   const cwd = process.cwd();
@@ -57,5 +58,18 @@ describe("bash tool", () => {
       if (previous === undefined) delete process.env.BUBBLE_HOME;
       else process.env.BUBBLE_HOME = previous;
     }
+  });
+
+  it("allows rm to execute when no approval controller is attached", async () => {
+    const dir = join(tmpdir(), "bubble-bash-rm-file-" + Date.now());
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, "snake.html");
+    writeFileSync(file, "<html></html>", "utf-8");
+
+    const tool = createBashTool(dir);
+    const result = await tool.execute({ command: "rm snake.html" }, { cwd: dir });
+
+    expect(result.isError).toBe(false);
+    expect(existsSync(file)).toBe(false);
   });
 });

@@ -6,7 +6,7 @@
 
 import { constants } from "node:fs";
 import { access, readFile, writeFile } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { resolve } from "node:path";
 import { createTwoFilesPatch } from "diff";
 import { gateToolAction } from "../approval/tool-helper.js";
 import type { ApprovalController } from "../approval/types.js";
@@ -14,18 +14,14 @@ import type { ToolRegistryEntry, ToolResult } from "../types.js";
 import { formatDiagnosticBlocks, type LspService } from "../lsp/index.js";
 import { applyEditsToContent, EditApplyError, formatEditMatchNotes } from "./edit-apply.js";
 import { withFileMutationQueue } from "./file-mutation-queue.js";
+import { isWithinWorkspace, type FileStateTracker } from "./file-state.js";
 
 export interface EditArgs {
   path: string;
   edits: Array<{ oldText: string; newText: string }>;
 }
 
-function isWithinWorkspace(cwd: string, filePath: string): boolean {
-  const rel = relative(resolve(cwd), filePath);
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-}
-
-export function createEditTool(cwd: string, approval?: ApprovalController, lsp?: LspService): ToolRegistryEntry {
+export function createEditTool(cwd: string, approval?: ApprovalController, lsp?: LspService, fileState?: FileStateTracker): ToolRegistryEntry {
   return {
     name: "edit",
     effect: "write_direct",
@@ -96,7 +92,24 @@ export function createEditTool(cwd: string, approval?: ApprovalController, lsp?:
         });
         if (!gate.approved) return gate.result;
 
+        const latest = await readFile(filePath, "utf-8");
+        if (latest !== original) {
+          return {
+            content:
+              `Error: Cannot safely edit ${filePath} because it changed while approval was pending.\n\n`
+              + "Re-read the file and retry the edit against the latest content.",
+            isError: true,
+            status: "blocked",
+            metadata: {
+              kind: "security",
+              path: filePath,
+              reason: "changed",
+            },
+          };
+        }
+
         await writeFile(filePath, applied.content, "utf-8");
+        await fileState?.observe(filePath, "edit", applied.content).catch(() => undefined);
 
         let output = `Edited ${filePath}${formatEditMatchNotes(applied.matches)}\n\nDiff:\n${diff}`;
         if (lsp) {

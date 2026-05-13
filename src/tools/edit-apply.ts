@@ -175,7 +175,7 @@ function matchEdit(content: string, edit: EditOperation, index: number, total: n
         "",
         "Common causes and how to escape:",
         "- Your tokenizer may be folding repeated characters into a single token (hex colors like '#ec489' vs '#ec4899', repeated digits, etc.). The two strings feel different in your head but serialize to identical bytes.",
-        "- Use the write tool with the full new content for changes that hinge on a single repeated character or trailing digit.",
+        "- Use the write tool with overwrite=true and the full new content for full-file replacements that hinge on a single repeated character or trailing digit.",
         "- Or re-read the file with the read tool, then copy the exact bytes you want to replace before retrying.",
       ].join("\n"),
     );
@@ -222,7 +222,7 @@ function matchEdit(content: string, edit: EditOperation, index: number, total: n
     "How to recover:",
     "- Re-read the file with the read tool to see its current bytes; the file may have been changed by a prior edit this turn.",
     "- Shorten oldText to a smaller unique anchor and try again. Long multi-line anchors are fragile to whitespace and indentation.",
-    "- If many lines need to change, use the write tool with the full new content instead of stacking edits.",
+    "- If many lines need to change, use the write tool with overwrite=true and the full new content instead of stacking edits.",
   ].join("\n");
   throw new EditApplyError(
     total === 1
@@ -276,7 +276,7 @@ export function applyEditsToContent(rawContent: string, edits: EditOperation[]):
         "Common causes and how to escape:",
         "- oldText and newText are byte-identical. Verify newText actually contains the intended change (a missing trailing char like turning '#ec489' into '#ec4899' is a frequent culprit).",
         "- The file already contains newText. Re-read the file to confirm the current state before editing again.",
-        "- For wholesale rewrites, use the write tool with the full new content instead.",
+        "- For wholesale rewrites, use the write tool with overwrite=true and the full new content instead.",
       ].join("\n"),
     );
   }

@@ -217,7 +217,7 @@ ${reason}
 Stop retrying the same call. Pick one of:
 - Re-read the target file and compare the actual bytes to your intended oldText / newText. Trailing whitespace, unicode lookalikes, or off-by-one boundaries are common causes.
 - If you intended to add a single character (e.g. fixing a 5-digit hex color to 6 digits), confirm that your newText string actually contains the added character before sending again.
-- Use the write tool with the full new content of the file instead of edit — useful when the change spans many lines or the diff anchor is ambiguous.
+- Use the write tool with overwrite=true and the full new content instead of edit — useful when the change spans many lines or the diff anchor is ambiguous. Existing files must be read or modified in this session before full-file replacement.
 - If you cannot determine the cause, ask the user for clarification.
 `);
 }

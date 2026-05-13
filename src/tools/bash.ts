@@ -10,10 +10,11 @@ import type { ApprovalController } from "../approval/types.js";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
 import { parseReadBashCommand, parseSearchBashCommand } from "../agent/tool-intent.js";
 import { referencesSensitivePath } from "./sensitive-paths.js";
+import type { FileStateTracker } from "./file-state.js";
 
 const MAX_OUTPUT = 50 * 1024;
 
-export function createBashTool(cwd: string, approval?: ApprovalController): ToolRegistryEntry {
+export function createBashTool(cwd: string, approval?: ApprovalController, _fileState?: FileStateTracker): ToolRegistryEntry {
   return {
     name: "bash",
     effect: "unknown",

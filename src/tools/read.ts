@@ -9,11 +9,12 @@ import type { ApprovalController } from "../approval/types.js";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
 import { isSensitivePath } from "./sensitive-paths.js";
 import type { LspService } from "../lsp/index.js";
+import type { FileStateTracker } from "./file-state.js";
 
 const MAX_LINES = 250;
 const MAX_BYTES = 100 * 1024;
 
-export function createReadTool(cwd: string, approval?: ApprovalController, lsp?: LspService): ToolRegistryEntry {
+export function createReadTool(cwd: string, approval?: ApprovalController, lsp?: LspService, fileState?: FileStateTracker): ToolRegistryEntry {
   return {
     name: "read",
     readOnly: true,
@@ -83,6 +84,11 @@ export function createReadTool(cwd: string, approval?: ApprovalController, lsp?:
 
       if (truncated) {
         result += `\n[Output truncated: exceeded ${MAX_LINES} lines or ${MAX_BYTES / 1024}KB limit]`;
+      }
+
+      const isFullRead = offset === 0 && !truncated && offset + limit >= lines.length;
+      if (isFullRead) {
+        await fileState?.observe(filePath, "read", content).catch(() => undefined);
       }
 
       void lsp?.touchFile(filePath).catch(() => undefined);
