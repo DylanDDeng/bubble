@@ -319,22 +319,7 @@ const builtinSlashCommandEntries: SlashCommand[] = [
     name: "quit",
     description: "Exit the application",
     async handler(args, ctx) {
-      // Shut MCP stdio children down first; their stdout/stderr listeners
-      // otherwise hold the Node event loop open even after ink unmounts.
-      try {
-        await ctx.mcpManager?.shutdown();
-      } catch {
-        // ignore — we're quitting anyway
-      }
-      try {
-        await ctx.flushMemory?.();
-      } catch {
-        // memory shutdown hooks are best-effort during exit
-      }
       ctx.exit();
-      // Belt-and-braces: if anything else (raw-mode tty handle, pending
-      // timer, etc.) still holds the loop, force-exit shortly after.
-      setTimeout(() => process.exit(0), 100).unref();
     },
   },
   {

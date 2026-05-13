@@ -57,6 +57,31 @@ describe("slash commands", () => {
     expect(ctx.openPicker).toHaveBeenCalledWith("model");
   });
 
+  it("/quit only requests TUI exit and does not force process.exit", async () => {
+    vi.useFakeTimers();
+    const processExit = vi.spyOn(process, "exit").mockImplementation((() => undefined as never));
+    const shutdown = vi.fn();
+    const flushMemory = vi.fn();
+    const ctx = createContext({
+      mcpManager: { shutdown } as any,
+      flushMemory,
+    });
+
+    try {
+      const result = await slashRegistry.execute("/quit", ctx);
+      vi.runAllTimers();
+
+      expect(result.handled).toBe(true);
+      expect(ctx.exit).toHaveBeenCalledTimes(1);
+      expect(shutdown).not.toHaveBeenCalled();
+      expect(flushMemory).not.toHaveBeenCalled();
+      expect(processExit).not.toHaveBeenCalled();
+    } finally {
+      processExit.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("/key can update an explicitly targeted provider before it is enabled", async () => {
     const updateProviderKey = vi.fn();
     const setDefault = vi.fn();

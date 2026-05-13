@@ -148,9 +148,8 @@ async function main() {
     const { registry: slashRegistry } = await import("./slash-commands/index.js");
     slashRegistry.addDynamicSource(() => mcpManager.getPromptCommands());
   }
-  // Signal-based shutdown for Ctrl-C / kill. For /quit the command handler
-  // shuts MCP down directly — process.once("exit", ...)
-  // runs synchronously and can't await async work, so relying on it is a trap.
+  // Signal-based shutdown for Ctrl-C / kill. Normal /quit cleanup happens after
+  // the TUI renderer has been destroyed, avoiding native teardown races.
   const shutdownMcp = async () => {
     try {
       await mcpManager.shutdown();
@@ -281,6 +280,18 @@ async function main() {
     // Codex-style memory runs at startup over historical rollouts. Exit should
     // not perform an ad-hoc extraction of the just-finished session.
   };
+  const shutdownRuntime = async () => {
+    const results = await Promise.allSettled([
+      flushMemory(),
+      shutdownMcp(),
+      lspService.shutdown(),
+    ]);
+    for (const result of results) {
+      if (result.status === "rejected") {
+        // Shutdown is best-effort; never turn exit into a fatal error.
+      }
+    }
+  };
   const runMemoryCompaction = async () =>
     formatMemoryStartupResult(await runMemoryStartupPipeline({
       cwd: args.cwd,
@@ -321,50 +332,53 @@ async function main() {
     }
   }
 
-  // Print mode: single prompt, then exit
-  if (args.print || args.prompt) {
-    const prompt = args.prompt || (await readPipedStdin()) || "";
-    if (!prompt) {
-      console.error(chalk.red("Error: No prompt provided."));
-      process.exit(1);
-    }
-
-    for await (const event of agent.run(prompt, args.cwd)) {
-      if (event.type === "text_delta") {
-        process.stdout.write(event.content);
-      } else if (event.type === "tool_start") {
-        console.log(chalk.cyan(`\n[Tool: ${event.name}]`));
-      } else if (event.type === "tool_end") {
-        const color = event.result.isError ? chalk.red : chalk.dim;
-        console.log(color(`[Result: ${event.result.content.slice(0, 200)}${event.result.content.length > 200 ? "..." : ""}]`));
+  try {
+    // Print mode: single prompt, then exit
+    if (args.print || args.prompt) {
+      const prompt = args.prompt || (await readPipedStdin()) || "";
+      if (!prompt) {
+        console.error(chalk.red("Error: No prompt provided."));
+        process.exit(1);
       }
+
+      for await (const event of agent.run(prompt, args.cwd)) {
+        if (event.type === "text_delta") {
+          process.stdout.write(event.content);
+        } else if (event.type === "tool_start") {
+          console.log(chalk.cyan(`\n[Tool: ${event.name}]`));
+        } else if (event.type === "tool_end") {
+          const color = event.result.isError ? chalk.red : chalk.dim;
+          console.log(color(`[Result: ${event.result.content.slice(0, 200)}${event.result.content.length > 200 ? "..." : ""}]`));
+        }
+      }
+      console.log();
+
+      return;
     }
-    console.log();
 
-    return;
+    // Interactive mode: OpenTUI uses Bun native FFI, matching opencode's TUI stack.
+    const { runTui } = await import("./tui/run.js");
+    await runTui(agent, args, {
+      sessionManager,
+      createProvider,
+      registry,
+      skillRegistry,
+      planHandlerRef,
+      approvalHandlerRef,
+      questionController,
+      bashAllowlist,
+      settingsManager,
+      lspService,
+      mcpManager,
+      theme: userConfig.getTheme(),
+      flushMemory,
+      runMemoryCompaction,
+      runMemorySummary,
+      runMemoryRefresh,
+    });
+  } finally {
+    await shutdownRuntime();
   }
-
-  // Interactive mode: OpenTUI uses Bun native FFI, matching opencode's TUI stack.
-  const { runTui } = await import("./tui/run.js");
-  await runTui(agent, args, {
-    sessionManager,
-    createProvider,
-    registry,
-    skillRegistry,
-    planHandlerRef,
-    approvalHandlerRef,
-    questionController,
-    bashAllowlist,
-    settingsManager,
-    lspService,
-    mcpManager,
-    theme: userConfig.getTheme(),
-    flushMemory,
-    runMemoryCompaction,
-    runMemorySummary,
-    runMemoryRefresh,
-  });
-  await flushMemory();
 }
 
 async function readPipedStdin(): Promise<string | undefined> {
