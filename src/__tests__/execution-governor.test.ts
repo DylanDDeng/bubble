@@ -61,7 +61,7 @@ describe("ExecutionGovernor", () => {
     expect(governor.consumePendingReminders()[0]).toContain("Security/configuration investigation workflow is active");
   });
 
-  it("blocks repeated no-progress search families", () => {
+  it("warns on repeated no-progress search families without blocking", () => {
     const governor = new ExecutionGovernor("security_investigation");
     governor.consumePendingReminders();
 
@@ -79,11 +79,11 @@ describe("ExecutionGovernor", () => {
 
     const fourth = grepCall("token", "src");
     const decision = governor.beforeToolCall(fourth);
-    expect(decision.blockedResult?.status).toBe("blocked");
-    expect(governor.consumePendingReminders().some((item) => item.includes("Search tools are now constrained"))).toBe(true);
+    expect(decision.blockedResult).toBeUndefined();
+    expect(governor.consumePendingReminders().some((item) => item.includes("Repeated searches in the same family"))).toBe(true);
   });
 
-  it("moves implementation tasks from repeated reads into modify phase", () => {
+  it("warns on repeated reads without entering a modify-only phase", () => {
     const governor = new ExecutionGovernor("implementation");
 
     const first = readCall("three-kingdoms-td.html", 1, 100);
@@ -92,14 +92,13 @@ describe("ExecutionGovernor", () => {
 
     const second = readCall("three-kingdoms-td.html", 1, 100);
     const decision = governor.beforeToolCall(second);
-    expect(decision.blockedResult?.status).toBe("blocked");
-    expect(decision.blockedResult?.metadata?.kind).toBe("read");
-    expect(governor.snapshot().phase).toBe("modify");
-    expect(governor.snapshot().explorationFrozen).toBe(true);
-    expect(governor.consumePendingReminders().some((item) => item.includes("advanced from exploration to modification"))).toBe(true);
+    expect(decision.blockedResult).toBeUndefined();
+    expect(governor.snapshot().phase).toBe("observe");
+    expect(governor.snapshot().explorationFrozen).toBe(false);
+    expect(governor.consumePendingReminders().some((item) => item.includes("exact file range was already read"))).toBe(true);
   });
 
-  it("filters exploration tools during modify phase but keeps edit and verification tools", () => {
+  it("never filters exploration tools after repeated reads", () => {
     const governor = new ExecutionGovernor("implementation");
     const first = readCall("index.html", 1, 100);
     governor.beforeToolCall(first);
@@ -118,17 +117,18 @@ describe("ExecutionGovernor", () => {
       tool("lsp"),
     ]).map((entry) => entry.name);
 
-    expect(filtered).toEqual(["edit", "write", "bash", "lsp"]);
+    expect(filtered).toEqual(["read", "glob", "grep", "web_search", "tool_search", "edit", "write", "bash", "lsp"]);
   });
 
-  it("treats bash file readers as exploration during modify phase", () => {
+  it("warns on repeated bash file readers without blocking them", () => {
     const governor = new ExecutionGovernor("implementation");
     const first = bashCall("sed -n '1,100p' index.html");
     expect(governor.beforeToolCall(first).blockedResult).toBeUndefined();
     governor.afterToolResult(first, readResult("index.html"));
 
     const second = bashCall("sed -n '1,100p' index.html");
-    expect(governor.beforeToolCall(second).blockedResult?.status).toBe("blocked");
+    expect(governor.beforeToolCall(second).blockedResult).toBeUndefined();
+    expect(governor.consumePendingReminders().some((item) => item.includes("exact file range was already read"))).toBe(true);
   });
 });
 

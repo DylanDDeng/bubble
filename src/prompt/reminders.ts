@@ -224,12 +224,13 @@ Stop retrying the same call. Pick one of:
 
 /**
  * Fired the FIRST time the model re-reads a file it already read in this turn.
- * Soft — does not freeze the tool. Just prevents a 3rd / 4th re-read.
+ * Soft — does not freeze the tool. The model may still re-read when context was
+ * pruned, the requested range changed, or a later mutation needs verification.
  */
 export function buildRedundantReadReminder(path: string): string {
   return wrapInSystemReminder(`
-You already read ${path} earlier in this turn. Use the content already in context rather than re-reading.
-Only re-read this path if a subsequent tool call (edit/write/bash) modified it since.
+You already read ${path} earlier in this turn. If that content is still available and nothing changed, rely on it rather than re-reading.
+It is okay to re-read when you need to recover pruned context, inspect a different range, or verify a later edit/write/bash change.
 `);
 }
 

@@ -525,10 +525,12 @@ describe("Agent", () => {
     expect(toolEnd.result.content).toBe("blocked by custom hook");
   });
 
-  it("constrains exploration tools after repeated implementation reads", async () => {
+  it("keeps exploration tools available after repeated implementation reads", async () => {
     const toolNamesByCall: string[][] = [];
+    const captured: Message[][] = [];
     const provider: Provider = {
-      async *streamChat(_messages, options) {
+      async *streamChat(messages, options) {
+        captured.push(messages);
         toolNamesByCall.push((options.tools ?? []).map((tool) => tool.name));
         if (toolNamesByCall.length === 1 || toolNamesByCall.length === 2) {
           yield { type: "tool_call", id: `read_${toolNamesByCall.length}`, name: "read", arguments: "", isStart: true, isEnd: false };
@@ -572,9 +574,10 @@ describe("Agent", () => {
     });
 
     const events = await collectEvents(agent, "改一下任意 html 文件", "/tmp");
-    const blockedRead = events.find((event) => event.type === "tool_end" && event.id === "read_2") as any;
-    expect(blockedRead.result.status).toBe("blocked");
-    expect(toolNamesByCall[2]).toEqual(["edit", "write", "bash", "lsp"]);
+    const repeatedRead = events.find((event) => event.type === "tool_end" && event.id === "read_2") as any;
+    expect(repeatedRead.result.status).toBe("success");
+    expect(toolNamesByCall[2]).toEqual(["read", "edit", "write", "bash", "lsp"]);
+    expect(hasSystemContext(captured[2], "exact file range was already read")).toBe(true);
   });
 
   it("supports task subtasks and injects a post-task summary reminder", async () => {

@@ -45,18 +45,15 @@ export function createDefaultHooks(): TurnHooks[] {
       },
       beforeModelCall(ctx) {
         ctx.agent.compactResidentHistory();
-        if (ctx.state.governor) {
-          ctx.toolEntries = ctx.state.governor.filterToolDefinitions(ctx.toolEntries);
-        }
         if (ctx.state.taskType === "security_investigation" && ctx.state.evidenceTracker && ctx.state.governor) {
           const coverage = ctx.state.evidenceTracker.snapshot();
           const phase = resolveWorkflowPhase({
             coreCoverageComplete: ctx.state.evidenceTracker.isCoreCoverageComplete(),
-            searchFrozen: ctx.state.governor.snapshot().searchFrozen,
+            searchFrozen: false,
           });
           ctx.state.workflowPhase = phase;
           const summary = formatCoverageSummary(coverage);
-          const key = `${phase}:${ctx.state.evidenceTracker.key()}:${ctx.state.governor.snapshot().searchFrozen ? "1" : "0"}`;
+          const key = `${phase}:${ctx.state.evidenceTracker.key()}:0`;
           if (ctx.state.workflowKey !== key) {
             ctx.state.workflowKey = key;
             ctx.queueReminder(buildWorkflowPhaseReminder({
@@ -75,10 +72,7 @@ export function createDefaultHooks(): TurnHooks[] {
       beforeToolCall(ctx) {
         const arbitration = arbitrateToolCall(ctx.toolCall);
         ctx.replaceToolCall({ ...arbitration.toolCall, ...(arbitration.note ? { arbiterNote: arbitration.note } : {}) });
-        const decision = ctx.state.governor?.beforeToolCall(ctx.toolCall);
-        if (decision?.blockedResult) {
-          ctx.blockToolCall(decision.blockedResult);
-        }
+        ctx.state.governor?.beforeToolCall(ctx.toolCall);
       },
       afterToolCall(ctx) {
         if (ctx.toolCall.arbiterNote) {
@@ -160,14 +154,6 @@ export function createDefaultHooks(): TurnHooks[] {
           return;
         }
 
-        const allSearchResultsWereLowSignal = ctx.toolCalls.length > 0
-          && ctx.toolCalls.every((toolCall) => ["glob", "grep", "bash", "web_search", "web_fetch"].includes(toolCall.name))
-          && ctx.toolResults.every((result) => result.status === "no_match" || result.status === "blocked");
-        if (ctx.state.governor?.snapshot().searchFrozen && allSearchResultsWereLowSignal) {
-          ctx.requestTextOnlyTurn(
-            "Search continuation has become low-yield. Summarize the strongest evidence already collected instead of continuing broad exploration.",
-          );
-        }
         // Verification reminders intentionally removed. See afterToolCall.
       },
       afterTurn() {
