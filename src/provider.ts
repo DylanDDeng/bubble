@@ -26,6 +26,11 @@ function debugToolArgs(event: Record<string, unknown>): void {
 }
 
 type ReasoningContentEcho = "tool_calls" | "all";
+export type ToolArgsMergeMode = "delta" | "snapshot";
+
+export interface TranslateOpenAIStreamOptions {
+  toolArgsMergeMode?: ToolArgsMergeMode;
+}
 
 export function toChatCompletionsMessage(
   message: ProviderMessage,
@@ -141,7 +146,9 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
       signal: chatOptions.abortSignal,
     } as any)) as any;
 
-    yield* translateOpenAIStream(stream);
+    yield* translateOpenAIStream(stream, {
+      toolArgsMergeMode: resolveToolArgsMergeMode(options.providerId || "", options.baseURL),
+    });
 
     yield { type: "done" };
   }
@@ -227,6 +234,15 @@ export function normalizeToolArgs(raw: string): string {
   return normalizeToolArgsDetailed(raw).args;
 }
 
+function resolveToolArgsMergeMode(providerId: string, baseURL: string): ToolArgsMergeMode {
+  const id = providerId.toLowerCase();
+  const url = baseURL.toLowerCase();
+  // Fireworks-hosted Kimi has been observed to stream cumulative snapshots
+  // rather than OpenAI-style argument deltas.
+  if (id === "fireworks" || url.includes("fireworks.ai")) return "snapshot";
+  return "delta";
+}
+
 function extractBalancedJson(s: string, start: number): string | null {
   if (s[start] !== "{") return null;
   let depth = 0;
@@ -255,9 +271,13 @@ function extractBalancedJson(s: string, start: number): string | null {
  * partial write previews before the tool executes. End events are still flushed
  * in index order to keep multi-call turns deterministic.
  */
-export async function* translateOpenAIStream(stream: AsyncIterable<any>): AsyncIterable<StreamChunk> {
+export async function* translateOpenAIStream(
+  stream: AsyncIterable<any>,
+  options: TranslateOpenAIStreamOptions = {},
+): AsyncIterable<StreamChunk> {
   const toolCalls = new Map<number, { id: string; name: string; args: string; started: boolean }>();
   const textFilter = createProviderProtocolArtifactFilter();
+  const toolArgsMergeMode = options.toolArgsMergeMode ?? "delta";
   // DeepSeek (and some inference re-hosts) sometimes deliver reasoning twice:
   // once via a dedicated `reasoning_content` / `thinking` field, and again
   // embedded as `<think>...</think>` inside `delta.content`. Track whether we
@@ -360,7 +380,7 @@ export async function* translateOpenAIStream(stream: AsyncIterable<any>): AsyncI
         yield* startToolCallIfReady(entry);
         if (typeof tc.function?.arguments === "string" && tc.function.arguments) {
           debugToolArgs({ stage: "raw-chunk", id: entry.id, name: entry.name, idx, raw: tc.function.arguments });
-          const merged = mergeToolArgumentDelta(entry.args, tc.function.arguments);
+          const merged = mergeToolArgumentDelta(entry.args, tc.function.arguments, toolArgsMergeMode);
           entry.args = merged.args;
           if (entry.started && merged.delta) {
             yield {
@@ -389,7 +409,7 @@ export async function* translateOpenAIStream(stream: AsyncIterable<any>): AsyncI
   yield* flushToolCalls();
 }
 
-function mergeToolArgumentDelta(current: string, incoming: string): { args: string; delta: string } {
+function mergeToolArgumentDelta(current: string, incoming: string, mode: ToolArgsMergeMode): { args: string; delta: string } {
   if (!current) {
     debugToolArgs({ stage: "merge", branch: "empty-current", current, incoming, args: incoming, delta: incoming });
     return { args: incoming, delta: incoming };
@@ -399,23 +419,22 @@ function mergeToolArgumentDelta(current: string, incoming: string): { args: stri
     return { args: current, delta: "" };
   }
 
-  // Standard OpenAI-compatible streams send incremental argument deltas. Some
-  // providers send cumulative snapshots instead. If the incoming chunk already
-  // contains what we have, emit only the new suffix so downstream state remains
-  // append-only.
-  if (incoming.startsWith(current)) {
-    const delta = incoming.slice(current.length);
-    debugToolArgs({ stage: "merge", branch: "snapshot-grow", current, incoming, args: incoming, delta });
-    return { args: incoming, delta };
+  if (mode === "snapshot") {
+    // Snapshot streams repeat the current full argument buffer. Only treat a
+    // chunk as duplicate when it is exactly equal, or as growth when it carries
+    // the current buffer as a prefix. A suffix match is not enough: the next
+    // legitimate delta can be a single trailing character like "0".
+    if (incoming === current) {
+      debugToolArgs({ stage: "merge", branch: "snapshot-dup", current, incoming, args: current, delta: "" });
+      return { args: current, delta: "" };
+    }
+    if (incoming.startsWith(current)) {
+      const delta = incoming.slice(current.length);
+      debugToolArgs({ stage: "merge", branch: "snapshot-grow", current, incoming, args: incoming, delta });
+      return { args: incoming, delta };
+    }
   }
 
-  // Repeated identical snapshots should not duplicate the TUI preview or final
-  // JSON arguments.
-  if (incoming === current || current.endsWith(incoming)) {
-    debugToolArgs({ stage: "merge", branch: "snapshot-dup", current, incoming, args: current, delta: "" });
-    return { args: current, delta: "" };
-  }
-
-  debugToolArgs({ stage: "merge", branch: "concat", current, incoming, args: current + incoming, delta: incoming });
+  debugToolArgs({ stage: "merge", branch: mode === "delta" ? "delta-append" : "snapshot-fallback-concat", current, incoming, args: current + incoming, delta: incoming });
   return { args: current + incoming, delta: incoming };
 }

@@ -193,7 +193,7 @@ describe("translateOpenAIStream", () => {
       { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "{\"a\":1}" } }] } }] },
       { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "{\"a\":1}" } }] } }] },
       { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
-    ])));
+    ]), { toolArgsMergeMode: "snapshot" }));
 
     expect(startEnds(chunks)).toEqual([
       { id: "write:1", name: "write", args: "", isStart: true, isEnd: false },
@@ -201,6 +201,46 @@ describe("translateOpenAIStream", () => {
       { id: "write:1", name: "write", args: "1}", isStart: false, isEnd: false },
       { id: "write:1", name: "write", args: "", isStart: false, isEnd: true },
     ]);
+  });
+
+  it("preserves single-character trailing deltas in OpenAI-compatible mode", async () => {
+    const beforeTrailingZero = '{"path":"snake-pro.html","edits":[{"oldText":"* 100)","newText":"* 100';
+    const afterTrailingZero = ')"}]}';
+    const chunks = await collect(translateOpenAIStream(fromArray([
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: "edit:1", function: { name: "edit" } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: beforeTrailingZero } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "0" } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: afterTrailingZero } }] } }] },
+      { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+    ])));
+
+    const streamedArgs = startEnds(chunks)
+      .filter((event) => !event.isStart && !event.isEnd)
+      .map((event) => event.args)
+      .join("");
+    expect(streamedArgs).toContain("\"newText\":\"* 1000)\"");
+
+    const end = chunks.find((chunk): chunk is Extract<StreamChunk, { type: "tool_call" }> =>
+      chunk.type === "tool_call" && !!chunk.isEnd
+    );
+    expect(end?.argumentsFull).toContain("\"newText\":\"* 1000)\"");
+  });
+
+  it("does not suffix-deduplicate trailing characters in snapshot fallback", async () => {
+    const beforeTrailingZero = '{"n":"100';
+    const afterTrailingZero = '"}';
+    const chunks = await collect(translateOpenAIStream(fromArray([
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: "edit:1", function: { name: "edit" } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: beforeTrailingZero } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "0" } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: afterTrailingZero } }] } }] },
+      { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+    ]), { toolArgsMergeMode: "snapshot" }));
+
+    const end = chunks.find((chunk): chunk is Extract<StreamChunk, { type: "tool_call" }> =>
+      chunk.type === "tool_call" && !!chunk.isEnd
+    );
+    expect(end?.argumentsFull).toBe("{\"n\":\"1000\"}");
   });
 
   it("forwards text and reasoning deltas alongside tool calls", async () => {
