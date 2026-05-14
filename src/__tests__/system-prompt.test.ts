@@ -88,6 +88,7 @@ describe("system prompt", () => {
     expect(deepseek).not.toContain("inspect serialization");
     expect(kimi).toContain("running on a Kimi/Moonshot model");
     expect(kimi).toContain("Keep tool use disciplined");
+    expect(kimi).toContain("Evidence-first project exploration");
     expect(kimi).not.toContain("message history serialization");
     expect(fireworksKimi).toContain("running on a Kimi/Moonshot model");
     expect(glm).toContain("running on a GLM/Z.AI model");
