@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Box, Text, useCursor, useInput, usePaste, type DOMElement } from "ink";
+import { Box, Text, useCursor, useInput, usePaste, useStdout, type DOMElement } from "ink";
 import stringWidth from "string-width";
 import { appendFileSync } from "node:fs";
 import { registry as slashRegistry } from "../slash-commands/index.js";
@@ -34,6 +34,25 @@ const MAX_VISIBLE_LINES = 5;
 const PADDING_X = 1;
 const PROMPT = "> ";
 const MAX_VISIBLE_SUGGESTIONS = 8;
+
+export function needsCursorRowCompensation(
+  nextOutputHeight: number,
+  viewportRows: number,
+  previousOutputHeight: number | null,
+): boolean {
+  const hadPreviousFrame = previousOutputHeight !== null && previousOutputHeight > 0;
+  const isFullscreen = nextOutputHeight >= viewportRows;
+  const wasFullscreen = hadPreviousFrame && previousOutputHeight >= viewportRows;
+  const wasOverflowing = hadPreviousFrame && previousOutputHeight > viewportRows;
+  const isOverflowing = nextOutputHeight > viewportRows;
+  const isLeavingFullscreen = wasFullscreen && nextOutputHeight < viewportRows;
+
+  // Ink omits the trailing newline in two cases that matter for cursor math:
+  // the normal fullscreen frame, and the clear/sync frame used when leaving an
+  // overflowing viewport. buildCursorSuffix still assumes the cursor starts one
+  // line below the output, so pass y+1 in those cases.
+  return isFullscreen || wasOverflowing || (isOverflowing && hadPreviousFrame) || isLeavingFullscreen;
+}
 
 type VisualLine = {
   /** Segment of the source line that fits on this visual row. */
@@ -460,7 +479,12 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
   // layout shift.
   const cursorLineRef = useRef<DOMElement | null>(null);
   const lastCursorRef = useRef<{ x: number; y: number } | null>(null);
+  const previousOutputHeightRef = useRef<number | null>(null);
+  const previousViewportRowsRef = useRef<number | null>(null);
+  const previousInputFrameSignatureRef = useRef<string | null>(null);
+  const previousRowCompensationRef = useRef(0);
   const { setCursorPosition } = useCursor();
+  const { stdout } = useStdout();
 
   const contentWidth = Math.max(1, width - PADDING_X * 2);
   const lineWidth = Math.max(1, contentWidth - PROMPT.length);
@@ -494,6 +518,18 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
 
   const hasMoreAbove = scrollOffset > 0;
   const hasMoreBelow = scrollOffset + visibleLines < totalLines;
+  const inputFrameSignature = [
+    disabled ? "disabled" : "active",
+    text,
+    scrollOffset.toString(),
+    visibleLines.toString(),
+    attachments.map((att) => `${att.filename ?? "clipboard"}:${att.bytes}`).join(","),
+    mode ?? "none",
+    selectedIndex.toString(),
+    suggestionOffset.toString(),
+    activeCount.toString(),
+    projectFiles?.length.toString() ?? "loading",
+  ].join("\u0000");
 
   // Measure after yoga runs (useLayoutEffect fires after Ink's resetAfterCommit
   // calls onComputeLayout). Push the new position into useCursor's ref and bump
@@ -506,16 +542,12 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
   // we hide it entirely until input is active again.
   const [cursorTick, setCursorTick] = useState(0);
   useLayoutEffect(() => {
-    if (disabled) {
-      if (lastCursorRef.current !== null) {
-        lastCursorRef.current = null;
-        setCursorPosition(undefined);
-        setCursorTick((t) => t + 1);
-      }
-      return;
-    }
     let node: DOMElement | undefined = cursorLineRef.current ?? undefined;
     if (!node?.yogaNode) {
+      if (disabled && lastCursorRef.current !== null) {
+        lastCursorRef.current = null;
+        setCursorTick((t) => t + 1);
+      }
       setCursorPosition(undefined);
       return;
     }
@@ -533,27 +565,44 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
       lastNode = node;
       node = node.parentNode;
     }
-    // When the rendered frame overflows the terminal viewport, Ink takes the
-    // "fullscreen" clear-and-redraw path and writes the output WITHOUT a
-    // trailing newline. Its buildCursorSuffix, however, still assumes the
-    // terminal cursor is parked one line below the last content row (i.e. as
-    // if there were a trailing newline). moveUp = visibleLineCount - y then
-    // overshoots by one, landing on the row above the content — which is
-    // exactly our input box's top border. Compensate with +1 only in this
-    // path; in the normal path Ink emits the trailing \n and the math is
-    // correct, so adding here would push us 1 row too low.
     const rootHeight = lastNode?.yogaNode?.getComputedHeight() ?? 0;
-    const viewportRows = process.stdout.rows ?? 24;
-    const isFullscreen = rootHeight >= viewportRows;
+    const viewportRows = stdout.rows ?? process.stdout.rows ?? 24;
+    const previousOutputHeight = previousOutputHeightRef.current;
+    // After a clear/sync frame, Ink's physical terminal cursor remains on the
+    // last rendered row even though log-update records an output string with a
+    // trailing newline. The forced cursor render that follows has the same
+    // visible frame, so keep the same row compensation until the input frame
+    // content or height actually changes.
+    const sameRenderedFrame =
+      previousOutputHeight === rootHeight &&
+      previousViewportRowsRef.current === viewportRows &&
+      previousInputFrameSignatureRef.current === inputFrameSignature;
+    const rowCompensation = sameRenderedFrame
+      ? previousRowCompensationRef.current
+      : needsCursorRowCompensation(rootHeight, viewportRows, previousOutputHeight) ? 1 : 0;
+    previousOutputHeightRef.current = rootHeight;
+    previousViewportRowsRef.current = viewportRows;
+    previousInputFrameSignatureRef.current = inputFrameSignature;
+    previousRowCompensationRef.current = rowCompensation;
+
+    if (disabled) {
+      if (lastCursorRef.current !== null) {
+        lastCursorRef.current = null;
+        setCursorPosition(undefined);
+        setCursorTick((t) => t + 1);
+      }
+      return;
+    }
+
     const next = {
       x: left + PROMPT.length + cursorVisualCol,
-      y: top + (isFullscreen ? 1 : 0),
+      y: top + rowCompensation,
     };
     if (process.env.BUBBLE_CURSOR_DEBUG) {
       try {
         appendFileSync(
           "/tmp/bubble-cursor.log",
-          `${new Date().toISOString()} row=${cursorVisualRow} col=${cursorVisualCol} -> x=${next.x} y=${next.y} (rootH=${rootHeight}, vp=${viewportRows}, fs=${isFullscreen}) | ${trace.join(" < ")}\n`,
+          `${new Date().toISOString()} row=${cursorVisualRow} col=${cursorVisualCol} -> x=${next.x} y=${next.y} (rootH=${rootHeight}, prevH=${previousOutputHeight ?? "none"}, vp=${viewportRows}, comp=${rowCompensation}) | ${trace.join(" < ")}\n`,
         );
       } catch {}
     }

@@ -9,10 +9,16 @@ import { UserConfig, maskKey } from "../config.js";
 import { InputBox, type SubmitPayload } from "./input-box.js";
 import { MessageList } from "./message-list.js";
 import {
+  appendTextPart,
+  appendToolPart,
   compactDisplayMessages,
+  contentFromParts,
   nextDisplayMessageKey,
+  snapshotDisplayParts,
   type DisplayMessage,
+  type DisplayMessagePart,
   type DisplayToolCall,
+  toolCallsFromParts,
 } from "./display-history.js";
 import type { PendingApprovalHint } from "./message-list.js";
 import { theme } from "./theme.js";
@@ -201,6 +207,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   const [streamingContent, setStreamingContent] = useState("");
   const [streamingReasoning, setStreamingReasoning] = useState("");
   const [streamingTools, setStreamingTools] = useState<DisplayToolCall[]>([]);
+  const [streamingParts, setStreamingParts] = useState<DisplayMessagePart[]>([]);
   const [usageTotals, setUsageTotals] = useState({ prompt: 0, completion: 0 });
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(agent.thinking);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(agent.mode);
@@ -595,19 +602,27 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         setStreamingContent("");
         setStreamingReasoning("");
         setStreamingTools([]);
+        setStreamingParts([]);
 
         let assistantContent = "";
         let assistantReasoning = "";
         const toolCalls: DisplayToolCall[] = [];
+        const assistantParts: DisplayMessagePart[] = [];
         const abortController = new AbortController();
         activeAbortRef.current = abortController;
+
+        const syncStreamingParts = () => {
+          setStreamingParts(snapshotDisplayParts(assistantParts));
+        };
 
         try {
           for await (const event of agent.run(actualInput, args.cwd, { abortSignal: abortController.signal })) {
             switch (event.type) {
               case "text_delta":
                 assistantContent += event.content;
+                appendTextPart(assistantParts, event.content);
                 setStreamingContent(assistantContent);
+                syncStreamingParts();
                 break;
               case "reasoning_delta":
                 assistantReasoning += event.content;
@@ -619,13 +634,16 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
                 // sees the tool the moment it appears in the assistant
                 // response, not after the full arg payload finishes.
                 if (!toolCalls.some((t) => t.id === event.id)) {
-                  toolCalls.push({
+                  const toolCall: DisplayToolCall = {
                     id: event.id,
                     name: event.name,
                     args: {},
                     startedAt: Date.now(),
-                  });
+                  };
+                  toolCalls.push(toolCall);
+                  appendToolPart(assistantParts, toolCall);
                   setStreamingTools([...toolCalls]);
+                  syncStreamingParts();
                 }
                 break;
               }
@@ -638,6 +656,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
                 if (tc) {
                   tc.args = parsePartialArgs(event.arguments, tc.args);
                   setStreamingTools([...toolCalls]);
+                  syncStreamingParts();
                 }
                 break;
               }
@@ -657,14 +676,17 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
                   existing.args = event.args;
                   existing.startedAt = existing.startedAt ?? Date.now();
                 } else {
-                  toolCalls.push({
+                  const toolCall: DisplayToolCall = {
                     id: event.id,
                     name: event.name,
                     args: event.args,
                     startedAt: Date.now(),
-                  });
+                  };
+                  toolCalls.push(toolCall);
+                  appendToolPart(assistantParts, toolCall);
                 }
                 setStreamingTools([...toolCalls]);
+                syncStreamingParts();
                 break;
               }
               case "tool_end": {
@@ -673,6 +695,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
                   tc.result = event.result.content;
                   tc.isError = event.result.isError;
                   setStreamingTools([...toolCalls]);
+                  syncStreamingParts();
                 }
                 break;
               }
@@ -695,9 +718,11 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
                 const currentContent = assistantContent;
                 const currentReasoning = assistantReasoning;
                 const currentToolCalls = [...toolCalls];
+                const currentParts = snapshotDisplayParts(assistantParts);
                 updateDisplayMessages((prev) => {
                   const last = prev[prev.length - 1];
                   if (last?.role === "assistant") {
+                    const mergedParts = [...(last.parts ?? []), ...currentParts];
                     const merged: DisplayMessage = {
                       ...last,
                       reasoning: currentReasoning || last.reasoning,
@@ -706,28 +731,38 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
                           ? last.content + "\n" + currentContent
                           : last.content + currentContent,
                       toolCalls: [...(last.toolCalls || []), ...currentToolCalls],
+                      parts: mergedParts.length > 0 ? mergedParts : last.parts,
                     };
                     return [...prev.slice(0, -1), merged];
                   }
+                  const partContent = currentContent || contentFromParts(currentParts);
+                  const partToolCalls = currentToolCalls.length > 0
+                    ? currentToolCalls
+                    : toolCallsFromParts(currentParts);
                   const msg: DisplayMessage = {
                     key: nextDisplayMessageKey("asst"),
                     role: "assistant",
-                    content: currentContent,
+                    content: partContent,
                   };
                   if (currentReasoning) {
                     msg.reasoning = currentReasoning;
                   }
-                  if (currentToolCalls.length > 0) {
-                    msg.toolCalls = currentToolCalls;
+                  if (partToolCalls.length > 0) {
+                    msg.toolCalls = partToolCalls;
+                  }
+                  if (currentParts.length > 0) {
+                    msg.parts = currentParts;
                   }
                   return [...prev, msg];
                 });
                 setStreamingContent("");
                 setStreamingReasoning("");
                 setStreamingTools([]);
+                setStreamingParts([]);
                 assistantContent = "";
                 assistantReasoning = "";
                 toolCalls.length = 0;
+                assistantParts.length = 0;
                 break;
               }
             }
@@ -751,6 +786,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           setStreamingContent("");
           setStreamingReasoning("");
           setStreamingTools([]);
+          setStreamingParts([]);
         }
       };
 
@@ -874,6 +910,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           streamingContent={streamingContent}
           streamingReasoning={streamingReasoning}
           streamingTools={streamingTools}
+          streamingParts={streamingParts}
           terminalColumns={terminalColumns}
           verboseTrace={verboseTrace}
           pendingApproval={approvalHint}

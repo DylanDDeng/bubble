@@ -3,7 +3,7 @@ import { Box, Static, Text } from "ink";
 import { theme } from "./theme.js";
 import { highlightCode, inferLang } from "./code-highlight.js";
 import { MarkdownContent } from "./markdown.js";
-import type { DisplayMessage, DisplayToolCall } from "./display-history.js";
+import type { DisplayMessage, DisplayMessagePart, DisplayToolCall } from "./display-history.js";
 import { buildTraceGroups, formatElapsed, traceGroupLabel, type TraceGroup } from "./trace-groups.js";
 
 /**
@@ -22,6 +22,7 @@ interface MessageListProps {
   streamingContent: string;
   streamingReasoning: string;
   streamingTools: DisplayToolCall[];
+  streamingParts: DisplayMessagePart[];
   terminalColumns: number;
   verboseTrace: boolean;
   pendingApproval?: PendingApprovalHint | null;
@@ -34,12 +35,18 @@ export function MessageList({
   streamingContent,
   streamingReasoning,
   streamingTools,
+  streamingParts,
   terminalColumns,
   verboseTrace,
   pendingApproval,
   nowTick,
 }: MessageListProps) {
-  const hasStreaming = !!(streamingContent || streamingReasoning || streamingTools.length > 0);
+  const hasStreaming = !!(
+    streamingContent ||
+    streamingReasoning ||
+    streamingTools.length > 0 ||
+    streamingParts.length > 0
+  );
   // Split the message history so the trailing message — which can still be
   // mutated by a subsequent turn_end merging more content — stays in a normal
   // <Box>, while everything before it is committed to ink's <Static> region.
@@ -80,6 +87,7 @@ export function MessageList({
           content={streamingContent}
           reasoning={streamingReasoning}
           tools={streamingTools}
+          parts={streamingParts}
           terminalColumns={terminalColumns}
           verboseTrace={verboseTrace}
           pendingApproval={pendingApproval}
@@ -115,42 +123,40 @@ function MessageItem({
     );
   }
 
-  const lastToolIndex = (message.toolCalls?.length ?? 0) - 1;
   const hasVisibleAssistantContent =
     !!message.content ||
     (message.toolCalls?.length ?? 0) > 0 ||
+    (message.parts?.length ?? 0) > 0 ||
     (!!message.reasoning && verboseTrace);
   if (!hasVisibleAssistantContent) return null;
 
   return (
     <Box marginBottom={1} flexDirection="column">
       {message.reasoning && verboseTrace && <ReasoningTraceBlock reasoning={message.reasoning} />}
-      {message.toolCalls && (
-        verboseTrace ? (
-          message.toolCalls.map((tc, idx) => (
-            <ToolCallDisplay
-              key={tc.id}
-              toolCall={tc}
-              verbose={verboseTrace}
+      {message.parts && message.parts.length > 0 ? (
+        <MessageParts
+          parts={message.parts}
+          terminalColumns={terminalColumns}
+          verboseTrace={verboseTrace}
+          pendingApproval={undefined}
+          showExpandHint={showExpandHint}
+          nowTick={nowTick}
+        />
+      ) : (
+        <>
+          {message.toolCalls && (
+            <ToolsPart
+              toolCalls={message.toolCalls}
               terminalColumns={terminalColumns}
-              // Only attach the keyboard-shortcut hint to the last collapsed tool
-              // of the most recent message — repeating it on every old tool was
-              // visual noise.
-              showExpandHint={showExpandHint && idx === lastToolIndex}
-              compactTop={idx === 0}
+              verboseTrace={verboseTrace}
+              pendingApproval={undefined}
+              showExpandHint={showExpandHint}
               nowTick={nowTick}
             />
-          ))
-        ) : (
-          <TraceGroupList
-            toolCalls={message.toolCalls}
-            terminalColumns={terminalColumns}
-            pendingApproval={undefined}
-            nowTick={nowTick}
-          />
-        )
+          )}
+          {message.content && <MarkdownContent content={message.content} />}
+        </>
       )}
-      {message.content && <MarkdownContent content={message.content} />}
       {verboseTrace && message.toolCalls && message.toolCalls.length > 0 && (
         <TurnDigest toolCalls={message.toolCalls} />
       )}
@@ -162,6 +168,7 @@ function StreamingMessage({
   content,
   reasoning,
   tools,
+  parts,
   terminalColumns,
   verboseTrace,
   pendingApproval,
@@ -170,6 +177,7 @@ function StreamingMessage({
   content: string;
   reasoning: string;
   tools: DisplayToolCall[];
+  parts: DisplayMessagePart[];
   terminalColumns: number;
   verboseTrace: boolean;
   pendingApproval?: PendingApprovalHint | null;
@@ -177,43 +185,152 @@ function StreamingMessage({
 }) {
   const deferredContent = React.useDeferredValue(content);
   const deferredReasoning = React.useDeferredValue(reasoning);
+  const deferredParts = React.useDeferredValue(parts);
+  const visibleParts = deferredParts.length > 0
+    ? deferredParts
+    : fallbackStreamingParts(deferredContent, tools);
 
-  const lastIdx = tools.length - 1;
   return (
     <Box marginBottom={1} flexDirection="column">
       {deferredReasoning && verboseTrace && <ReasoningTraceBlock reasoning={deferredReasoning} />}
-      {tools.length > 0 && (
-        verboseTrace ? (
-          tools.map((tc, idx) => {
-            const isWaitingApproval =
-              tc.result === undefined && !!pendingApproval && approvalMatchesTool(pendingApproval, tc);
-            return (
-              <ToolCallDisplay
-                key={tc.id}
-                toolCall={tc}
-                isStreaming={tc.result === undefined}
-                verbose={verboseTrace}
-                terminalColumns={terminalColumns}
-                showExpandHint={idx === lastIdx}
-                waitingApproval={isWaitingApproval}
-                compactTop={idx === 0}
-                nowTick={nowTick}
-              />
-            );
-          })
-        ) : (
-          <TraceGroupList
-            toolCalls={tools}
-            terminalColumns={terminalColumns}
-            pendingApproval={pendingApproval}
-            nowTick={nowTick}
-            showActivity
-          />
-        )
+      {visibleParts.length > 0 && (
+        <MessageParts
+          parts={visibleParts}
+          terminalColumns={terminalColumns}
+          verboseTrace={verboseTrace}
+          pendingApproval={pendingApproval}
+          showExpandHint
+          nowTick={nowTick}
+          showActivity
+        />
       )}
-      {deferredContent && <MarkdownContent content={deferredContent} />}
     </Box>
   );
+}
+
+function MessageParts({
+  parts,
+  terminalColumns,
+  verboseTrace,
+  pendingApproval,
+  showExpandHint,
+  nowTick,
+  showActivity = false,
+}: {
+  parts: DisplayMessagePart[];
+  terminalColumns: number;
+  verboseTrace: boolean;
+  pendingApproval?: PendingApprovalHint | null;
+  showExpandHint: boolean;
+  nowTick?: number;
+  showActivity?: boolean;
+}) {
+  const lastToolsPartIndex = findLastToolsPartIndex(parts);
+  return (
+    <Box flexDirection="column">
+      {parts.map((part, idx) => {
+        if (part.type === "text") {
+          return <TimelineText key={`text-${idx}`} content={part.content} compactTop={idx === 0} />;
+        }
+        return (
+          <ToolsPart
+            key={`tools-${idx}`}
+            toolCalls={part.toolCalls}
+            terminalColumns={terminalColumns}
+            verboseTrace={verboseTrace}
+            pendingApproval={pendingApproval}
+            showExpandHint={showExpandHint && idx === lastToolsPartIndex}
+            compactTop={idx === 0}
+            nowTick={nowTick}
+            showActivity={showActivity && idx === lastToolsPartIndex}
+          />
+        );
+      })}
+    </Box>
+  );
+}
+
+function TimelineText({ content, compactTop }: { content: string; compactTop: boolean }) {
+  if (!content.trim()) return null;
+  return (
+    <Box marginLeft={2} marginTop={compactTop ? 0 : 1}>
+      <Text color={theme.agent}>⛬  </Text>
+      <Box flexDirection="column" flexGrow={1}>
+        <MarkdownContent content={content.trim()} />
+      </Box>
+    </Box>
+  );
+}
+
+function ToolsPart({
+  toolCalls,
+  terminalColumns,
+  verboseTrace,
+  pendingApproval,
+  showExpandHint,
+  compactTop = false,
+  nowTick,
+  showActivity = false,
+}: {
+  toolCalls: DisplayToolCall[];
+  terminalColumns: number;
+  verboseTrace: boolean;
+  pendingApproval?: PendingApprovalHint | null;
+  showExpandHint: boolean;
+  compactTop?: boolean;
+  nowTick?: number;
+  showActivity?: boolean;
+}) {
+  if (toolCalls.length === 0) return null;
+  if (!verboseTrace) {
+    return (
+      <TraceGroupList
+        toolCalls={toolCalls}
+        terminalColumns={terminalColumns}
+        pendingApproval={pendingApproval}
+        nowTick={nowTick}
+        compactTop={compactTop}
+        showActivity={showActivity}
+      />
+    );
+  }
+
+  const lastIdx = toolCalls.length - 1;
+  return (
+    <Box flexDirection="column">
+      {toolCalls.map((tc, idx) => {
+        const isWaitingApproval =
+          tc.result === undefined && !!pendingApproval && approvalMatchesTool(pendingApproval, tc);
+        return (
+          <ToolCallDisplay
+            key={tc.id}
+            toolCall={tc}
+            isStreaming={tc.result === undefined}
+            verbose={verboseTrace}
+            terminalColumns={terminalColumns}
+            showExpandHint={showExpandHint && idx === lastIdx}
+            waitingApproval={isWaitingApproval}
+            compactTop={idx === 0 && compactTop}
+            nowTick={nowTick}
+          />
+        );
+      })}
+    </Box>
+  );
+}
+
+function fallbackStreamingParts(content: string, tools: DisplayToolCall[]): DisplayMessagePart[] {
+  const parts: DisplayMessagePart[] = [];
+  if (tools.length > 0) parts.push({ type: "tools", toolCalls: tools });
+  if (content) parts.push({ type: "text", content });
+  return parts;
+}
+
+function findLastToolsPartIndex(parts: DisplayMessagePart[]): number {
+  for (let i = parts.length - 1; i >= 0; i--) {
+    if (parts[i]?.type === "tools") return i;
+  }
+  return -1;
 }
 
 function TraceGroupList({
@@ -221,12 +338,14 @@ function TraceGroupList({
   terminalColumns,
   pendingApproval,
   nowTick,
+  compactTop = false,
   showActivity = false,
 }: {
   toolCalls: DisplayToolCall[];
   terminalColumns: number;
   pendingApproval?: PendingApprovalHint | null;
   nowTick?: number;
+  compactTop?: boolean;
   showActivity?: boolean;
 }) {
   const groups = React.useMemo(() => buildTraceGroups(toolCalls), [toolCalls]);
@@ -250,7 +369,7 @@ function TraceGroupList({
           group={group}
           terminalColumns={terminalColumns}
           pendingApproval={pendingApproval}
-          compactTop={idx === 0}
+          compactTop={idx === 0 && compactTop}
           nowTick={nowTick}
         />
       ))}
