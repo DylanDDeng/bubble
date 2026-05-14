@@ -80,6 +80,7 @@ export function MessageList({
           reasoning={streamingReasoning}
           tools={streamingTools}
           terminalColumns={terminalColumns}
+          verboseTrace={verboseTrace}
           pendingApproval={pendingApproval}
           nowTick={nowTick}
         />
@@ -114,9 +115,15 @@ function MessageItem({
   }
 
   const lastToolIndex = (message.toolCalls?.length ?? 0) - 1;
+  const hasVisibleAssistantContent =
+    !!message.content ||
+    (message.toolCalls?.length ?? 0) > 0 ||
+    (!!message.reasoning && verboseTrace);
+  if (!hasVisibleAssistantContent) return null;
+
   return (
     <Box marginBottom={1} flexDirection="column">
-      {message.reasoning && <ThinkingBlock reasoning={message.reasoning} verbose={verboseTrace} />}
+      {message.reasoning && verboseTrace && <ReasoningTraceBlock reasoning={message.reasoning} />}
       {message.toolCalls?.map((tc, idx) => (
         <ToolCallDisplay
           key={tc.id}
@@ -127,6 +134,7 @@ function MessageItem({
           // of the most recent message — repeating it on every old tool was
           // visual noise.
           showExpandHint={showExpandHint && idx === lastToolIndex}
+          compactTop={idx === 0}
           nowTick={nowTick}
         />
       ))}
@@ -143,6 +151,7 @@ function StreamingMessage({
   reasoning,
   tools,
   terminalColumns,
+  verboseTrace,
   pendingApproval,
   nowTick,
 }: {
@@ -150,6 +159,7 @@ function StreamingMessage({
   reasoning: string;
   tools: DisplayToolCall[];
   terminalColumns: number;
+  verboseTrace: boolean;
   pendingApproval?: PendingApprovalHint | null;
   nowTick?: number;
 }) {
@@ -159,7 +169,7 @@ function StreamingMessage({
   const lastIdx = tools.length - 1;
   return (
     <Box marginBottom={1} flexDirection="column">
-      {deferredReasoning && <ThinkingBlock reasoning={deferredReasoning} verbose />}
+      {deferredReasoning && verboseTrace && <ReasoningTraceBlock reasoning={deferredReasoning} />}
       {tools.map((tc, idx) => {
         const isWaitingApproval =
           !tc.result && !!pendingApproval && approvalMatchesTool(pendingApproval, tc);
@@ -168,10 +178,11 @@ function StreamingMessage({
             key={tc.id}
             toolCall={tc}
             isStreaming={!tc.result}
-            verbose
+            verbose={verboseTrace}
             terminalColumns={terminalColumns}
             showExpandHint={idx === lastIdx}
             waitingApproval={isWaitingApproval}
+            compactTop={idx === 0}
             nowTick={nowTick}
           />
         );
@@ -189,28 +200,21 @@ function approvalMatchesTool(hint: PendingApprovalHint, tc: DisplayToolCall): bo
   return !hint.path || hint.path === tc.args.path;
 }
 
-function ThinkingBlock({ reasoning, verbose }: { reasoning: string; verbose: boolean }) {
+function ReasoningTraceBlock({ reasoning }: { reasoning: string }) {
   const lines = React.useMemo(
     () => reasoning.split("\n").filter((l) => l.trim() !== ""),
     [reasoning],
   );
-  const shown = verbose ? lines : lines.slice(0, 3);
-  const hiddenCount = lines.length - shown.length;
   return (
     <Box flexDirection="column" marginLeft={2} marginBottom={1}>
       <Text color={theme.thinkingDim} dimColor>
-        ✻ Thinking{lines.length > 0 ? ` · ${lines.length} line${lines.length === 1 ? "" : "s"}` : ""}
+        ✻ Reasoning trace{lines.length > 0 ? ` · ${lines.length} line${lines.length === 1 ? "" : "s"}` : ""}
       </Text>
-      {shown.map((line, i) => (
+      {lines.map((line, i) => (
         <Text key={i} color={theme.thinkingDim} dimColor italic>
           {line}
         </Text>
       ))}
-      {hiddenCount > 0 && (
-        <Text color={theme.thinkingDim} dimColor>
-          … (+{hiddenCount} more line{hiddenCount === 1 ? "" : "s"}, ctrl+o to expand)
-        </Text>
-      )}
     </Box>
   );
 }
@@ -360,6 +364,7 @@ function ToolCallDisplay({
   terminalColumns,
   showExpandHint = false,
   waitingApproval = false,
+  compactTop = false,
   nowTick,
 }: {
   toolCall: DisplayToolCall;
@@ -368,6 +373,7 @@ function ToolCallDisplay({
   terminalColumns: number;
   showExpandHint?: boolean;
   waitingApproval?: boolean;
+  compactTop?: boolean;
   nowTick?: number;
 }) {
   // Show raw output immediately, then upgrade to highlighted ANSI when shiki
@@ -440,7 +446,7 @@ function ToolCallDisplay({
   const isWritePreview = toolCall.name === "write" && !toolCall.isError && !!toolCall.result;
 
   return (
-    <Box flexDirection="column" marginLeft={2} marginTop={1}>
+    <Box flexDirection="column" marginLeft={2} marginTop={compactTop ? 0 : 1}>
       <Box>
         <Text color={bulletColor}>{glyph} </Text>
         <Text bold color={theme.toolName}>{name}</Text>

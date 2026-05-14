@@ -55,7 +55,7 @@ export function FooterBar({ data }: { data: FooterData }) {
       ? ` • ⌃R ${data.thinkingLevel}`
       : " • ⌃R off"
     : "";
-  const traceText = data.verboseTrace ? " • ⌃O trace:on" : " • ⌃O trace";
+  const traceText = data.verboseTrace ? " • ⌃O details:on" : " • ⌃O details";
 
   const bar =
     data.budget?.contextWindow && data.budget.percent !== undefined

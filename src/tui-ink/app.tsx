@@ -1204,7 +1204,7 @@ function WaitingIndicator({
   } else if (state === "text") {
     phrase = "writing the response";
   } else if (state === "reasoning") {
-    phrase = "thinking it through";
+    phrase = "working through the request";
   } else {
     phrase = idlePhrase;
   }
