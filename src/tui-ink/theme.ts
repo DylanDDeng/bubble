@@ -26,6 +26,11 @@ export const theme = {
   toolError: "red",
   toolPending: "yellow",
   code: "yellow",
+  traceAction: "#E89A6B",
+  traceCount: "#c9c1bd",
+  traceDetail: "gray",
+  traceCommand: "#59BCE8",
+  tracePending: "yellow",
 
   // Message surfaces — user input is rendered as a left rail rather than a
   // full-width filled block, so most terminals (light or dark) stay readable.
