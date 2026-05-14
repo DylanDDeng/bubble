@@ -87,6 +87,7 @@ import {
   PROMPT_TEXTAREA_KEYBINDINGS,
 } from "./prompt-keybindings.js";
 import { keyNameFromEvent, keyNameFromSequence } from "./global-key-router.js";
+import { EscapeConfirmationGate } from "./escape-confirmation.js";
 
 export interface PlanHandlerRef {
   current?: (plan: string) => Promise<PlanDecision>;
@@ -123,6 +124,7 @@ type ModalKeyOwner = "approval" | "question" | "provider" | "picker";
 
 const treeSitterClient = getTreeSitterClient();
 const PROMPT_HISTORY_LIMIT = 100;
+const ESC_CANCEL_CONFIRM_WINDOW_MS = 1800;
 
 const PROVIDER_PRIORITY = new Map<string, number>([
   ["openai", 0],
@@ -472,6 +474,9 @@ function OpenTuiApp(props: {
   const [isRunning, setIsRunning] = createSignal(false);
   let activeRun: { id: number; abortController: AbortController } | undefined;
   let nextRunId = 0;
+  const runningCancelGate = new EscapeConfirmationGate(ESC_CANCEL_CONFIRM_WINDOW_MS);
+  const [runningCancelHint, setRunningCancelHint] = createSignal("");
+  let runningCancelHintTimer: ReturnType<typeof setTimeout> | undefined;
   const [showThinking, setShowThinking] = createSignal(true);
   let streamingDisplay: DisplayMessage | undefined;
   let sidebarLspSyncTimer: ReturnType<typeof setInterval> | undefined;
@@ -715,6 +720,7 @@ function OpenTuiApp(props: {
   onCleanup(() => {
     uiDisposed = true;
     if (copyToastClearTimer) clearTimeout(copyToastClearTimer);
+    if (runningCancelHintTimer) clearTimeout(runningCancelHintTimer);
     promptModeLabels.clear();
     promptModelLabels.clear();
     footerModeBadge = undefined;
@@ -1816,6 +1822,7 @@ function OpenTuiApp(props: {
   }
 
   function beginAgentRun() {
+    clearRunningCancelHint();
     const run = { id: ++nextRunId, abortController: new AbortController() };
     activeRun = run;
     setRunningState(true);
@@ -1824,11 +1831,55 @@ function OpenTuiApp(props: {
 
   function finishAgentRun(run: { id: number; abortController: AbortController }) {
     if (activeRun?.id === run.id) activeRun = undefined;
+    clearRunningCancelHint();
     setRunningState(false);
+  }
+
+  function requestComposerRender() {
+    try {
+      activeComposerShell()?.requestRender();
+      rootBox?.requestRender();
+    } catch {
+      // Render hints are best-effort and must not interfere with cancellation.
+    }
+  }
+
+  function clearRunningCancelHint() {
+    runningCancelGate.clear();
+    if (runningCancelHintTimer) {
+      clearTimeout(runningCancelHintTimer);
+      runningCancelHintTimer = undefined;
+    }
+    if (runningCancelHint()) {
+      setRunningCancelHint("");
+      requestComposerRender();
+    }
+  }
+
+  function armRunningCancelHint(run: { id: number; abortController: AbortController }) {
+    const decision = runningCancelGate.press(run.id);
+    if (decision.action === "confirm") return true;
+
+    setRunningCancelHint("Press Esc again to stop");
+    if (runningCancelHintTimer) clearTimeout(runningCancelHintTimer);
+    runningCancelHintTimer = setTimeout(() => {
+      if (!runningCancelGate.isArmed(run.id)) {
+        if (runningCancelHint()) {
+          setRunningCancelHint("");
+          requestComposerRender();
+        }
+        runningCancelHintTimer = undefined;
+        return;
+      }
+      clearRunningCancelHint();
+    }, Math.max(0, decision.expiresAt - Date.now()));
+    requestComposerRender();
+    return false;
   }
 
   function cancelActiveAgentRun() {
     if (!activeRun || activeRun.abortController.signal.aborted) return false;
+    clearRunningCancelHint();
     activeRun.abortController.abort(new AgentAbortError("Agent run cancelled by user."));
     setNotice("Agent run cancelled");
     redrawDock();
@@ -1842,6 +1893,12 @@ function OpenTuiApp(props: {
 
   function routeRunningCancel(name: string, event?: any) {
     if (name !== "escape") return false;
+    if (!activeRun || activeRun.abortController.signal.aborted) return false;
+    const shouldCancel = armRunningCancelHint(activeRun);
+    if (!shouldCancel) {
+      if (event) preventGlobalKey(event);
+      return true;
+    }
     if (!cancelActiveAgentRun()) return false;
     if (event) preventGlobalKey(event);
     return true;
@@ -1849,8 +1906,8 @@ function OpenTuiApp(props: {
 
   function routeGlobalRawSequence(sequence: string) {
     const name = keyNameFromSequence(sequence);
-    if (routeRunningCancel(name)) return true;
     if (routeModalRawSequence(sequence)) return true;
+    if (routeRunningCancel(name)) return true;
     if (cycleModeFromRawSequence(sequence)) return true;
     return false;
   }
@@ -1861,6 +1918,7 @@ function OpenTuiApp(props: {
       void requestExit();
       return true;
     }
+    if (routeModalKey(event)) return true;
     if (routeRunningCancel(name, event)) return true;
     // Ctrl+Shift+M opens the MCP reconnect picker. Shift is required because
     // bare Ctrl+M is Enter on most terminals (historical TTY mapping).
@@ -1879,7 +1937,6 @@ function OpenTuiApp(props: {
       event.preventDefault?.();
       return true;
     }
-    if (routeModalKey(event)) return true;
     if (cycleModeFromKey(event)) return true;
     if (event.ctrl && name === "p" && !picker && !isRunning()) {
       openCommandPalette();
@@ -4011,7 +4068,6 @@ function OpenTuiApp(props: {
   }
 
   function promptUiKeyDown(event: any) {
-    if (routeRunningCancel(keyNameFromEvent(event), event)) return true;
     const modalOwner = activeModalKeyOwner();
     if (modalOwner) {
       if (routeModalKey(event) || shouldModalSwallowUnhandledKey(modalOwner)) {
@@ -4020,6 +4076,7 @@ function OpenTuiApp(props: {
         return true;
       }
     }
+    if (routeRunningCancel(keyNameFromEvent(event), event)) return true;
     if (cycleModeFromKey(event)) return true;
     if (handlePromptHistoryKey(event)) return true;
     return false;
@@ -4052,6 +4109,7 @@ function OpenTuiApp(props: {
         registerModeLabel: registerPromptModeLabel,
         registerModelLabel: registerPromptModelLabel,
         model: promptModelTitle,
+        interruptHint: runningCancelHint,
         placeholder: () => {
           const approvalState = pendingApproval();
           if (approvalState) return "Press Enter to approve or Esc to reject";
@@ -4114,6 +4172,7 @@ function OpenTuiApp(props: {
         registerModeLabel: registerPromptModeLabel,
         registerModelLabel: registerPromptModelLabel,
         model: promptModelTitle,
+        interruptHint: runningCancelHint,
         placeholder: () => {
           const approvalState = pendingApproval();
           if (approvalState) return "Press Enter to approve or Esc to reject";
@@ -5197,6 +5256,7 @@ function renderPrompt(input: {
   registerModeLabel?: (ref: TextRenderable) => void;
   registerModelLabel?: (ref: TextRenderable) => void;
   model: () => string;
+  interruptHint: () => string;
   placeholder: () => string;
 }) {
   return h("box", { flexDirection: "column", flexShrink: 0, marginTop: 1 },
@@ -5248,7 +5308,9 @@ function renderPrompt(input: {
       ),
     ),
     h("box", { width: "100%", flexDirection: "row", justifyContent: "space-between" },
-      () => input.disabled() ? h("text", { fg: theme.textMuted }, "esc interrupt") : h("text", { fg: theme.textMuted }, ""),
+      () => input.disabled() && input.interruptHint()
+        ? h("text", { fg: theme.warning }, input.interruptHint())
+        : h("text", { fg: theme.textMuted }, ""),
       h("box", { flexDirection: "row", gap: 2 },
         h("text", { fg: theme.text }, "tab ", h("span", { fg: theme.textMuted }, "mode")),
         h("text", { fg: theme.text }, "ctrl+p ", h("span", { fg: theme.textMuted }, "commands")),
