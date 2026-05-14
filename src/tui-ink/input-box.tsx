@@ -138,6 +138,11 @@ interface SlashSuggestion {
   description: string;
 }
 
+export function shouldSubmitExactSlashSuggestion(input: string, suggestionName?: string): boolean {
+  if (!suggestionName) return false;
+  return input.trim() === `/${suggestionName}`;
+}
+
 export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, terminalColumns, cwd }: InputBoxProps) {
   const width = terminalColumns;
 
@@ -387,6 +392,17 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
       if (key.return || key.tab) {
         if (mode === "slash" && navigable) {
           const suggestion = slashSuggestions[selectedIndex];
+          const exactSuggestion = slashSuggestions.find((item) =>
+            shouldSubmitExactSlashSuggestion(text, item.name),
+          );
+          if (key.return && exactSuggestion) {
+            onSubmit({ text, images: attachments });
+            setText("");
+            setCursor(0);
+            setSelectedIndex(0);
+            setAttachments([]);
+            return;
+          }
           if (suggestion) {
             const newText = `/${suggestion.name} `;
             setText(newText);
@@ -679,7 +695,7 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
                   <Text>
                     {i === selectedIndex ? (
                       <>
-                        <Text backgroundColor="white" color="black">{` ${cmd.name.padEnd(16)} `}</Text>
+                        <Text bold>{` ${cmd.name.padEnd(16)} `}</Text>
                         <Text color={theme.muted}>[{cmd.type}]</Text>
                         <Text dimColor> {cmd.description}</Text>
                       </>

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
 import { AgentAbortError, type Agent } from "../agent.js";
 import type { CliArgs } from "../cli.js";
@@ -33,9 +33,8 @@ import { FooterBar, buildFooterData } from "./footer.js";
 import { SkillRegistry } from "../skills/registry.js";
 import { parseSkillInvocation } from "../skills/invocation.js";
 import { useTerminalSize } from "./use-terminal-size.js";
-import { WelcomeBanner } from "./welcome.js";
+import { WelcomeBanner, shouldShowWelcomeBanner } from "./welcome.js";
 import { expandAtMentions } from "./file-mentions.js";
-import { getRecentSessions } from "./recent-activity.js";
 import { TodosPanel } from "./todos.js";
 import { PlanConfirm } from "./plan-confirm.js";
 import { ApprovalDialog } from "./approval/approval-dialog.js";
@@ -49,6 +48,8 @@ import type { QuestionAnswer, QuestionController, QuestionRequest } from "../que
 import type { MemoryScope } from "../memory/index.js";
 import { QuestionDialog } from "./question-dialog.js";
 import os from "node:os";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 
 export interface PlanHandlerRef {
   current?: (plan: string) => Promise<PlanDecision>;
@@ -224,6 +225,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | null>(null);
   const [keyProviderId, setKeyProviderId] = useState<string | null>(null);
   const [verboseTrace, setVerboseTrace] = useState(false);
+  const startedWithVisibleHistoryRef = useRef(messages.some((message) => message.syntheticKind !== "ui_summary"));
   const { columns: terminalColumns } = useTerminalSize();
   const activeAbortRef = useRef<AbortController | null>(null);
   const exitRequestedRef = useRef(false);
@@ -882,29 +884,35 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       })()
     : null;
 
-  const showWelcome =
-    messages.length === 0 &&
-    !streamingContent &&
-    !streamingReasoning &&
-    streamingTools.length === 0 &&
-    !pickerMode &&
-    !pendingPlan &&
-    !pendingApproval &&
-    !pendingQuestion;
+  const hasBlockingOverlay = !!pickerMode || !!pendingPlan || !!pendingApproval || !!pendingQuestion;
+  const showWelcome = shouldShowWelcomeBanner({
+    messages,
+    startedWithVisibleHistory: startedWithVisibleHistoryRef.current,
+    hasOverlay: hasBlockingOverlay,
+  });
+  const mcpStates = mcpManager?.getStates() ?? [];
+  const mcpConnectedCount = mcpStates.filter((state) => state.status.kind === "connected").length;
+  const hasAgentsFile = useMemo(
+    () => existsSync(join(args.cwd, "AGENTS.md")) || existsSync(join(args.cwd, ".bubble", "AGENTS.md")),
+    [args.cwd],
+  );
+
+  const welcomeBannerNode = showWelcome ? (
+    <WelcomeBanner
+      terminalColumns={terminalColumns}
+      modelLabel={agent.model ? displayModel(agent.model) : undefined}
+      cwd={friendlyCwd(args.cwd)}
+      tips={buildTips(agent, safeRegistry)}
+      skillsCount={safeSkillRegistry.summaries().length}
+      mcpConnectedCount={mcpConnectedCount}
+      mcpTotalCount={mcpStates.length}
+      hasAgentsFile={hasAgentsFile}
+    />
+  ) : null;
 
   return (
     <Box flexDirection="column" height="100%">
       <Box flexDirection="column" flexGrow={1} padding={1}>
-        {showWelcome && (
-          <WelcomeBanner
-            terminalColumns={terminalColumns}
-            greeting="Welcome to Bubble"
-            modelLabel={agent.model ? displayModel(agent.model) : undefined}
-            cwd={friendlyCwd(args.cwd)}
-            tips={buildTips(agent, safeRegistry)}
-            recentSessions={getRecentSessions(args.cwd, 3)}
-          />
-        )}
         <MessageList
           messages={messages}
           streamingContent={streamingContent}
@@ -915,6 +923,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           verboseTrace={verboseTrace}
           pendingApproval={approvalHint}
           nowTick={nowTick}
+          welcomeBanner={welcomeBannerNode}
         />
         {pickerMode === "model" && (
           <ModelPicker

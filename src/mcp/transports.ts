@@ -26,6 +26,8 @@ import type {
 
 type IncomingHandler = (msg: JsonRpcResponse | JsonRpcNotification | JsonRpcRequest) => void;
 
+export const MCP_HTTP_CLOSE_TIMEOUT_MS = 750;
+
 // ---------------------------------------------------------------------------
 // Stdio
 // ---------------------------------------------------------------------------
@@ -256,13 +258,19 @@ export class HttpTransport implements McpTransport {
     this.closed = true;
     // Best-effort session termination. Per spec, DELETE /mcp with the session id.
     if (this.sessionId) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), MCP_HTTP_CLOSE_TIMEOUT_MS);
+      timeout.unref?.();
       try {
         await fetch(this.url, {
           method: "DELETE",
           headers: { "Mcp-Session-Id": this.sessionId, ...this.baseHeaders },
+          signal: controller.signal,
         });
       } catch {
         // ignore
+      } finally {
+        clearTimeout(timeout);
       }
     }
     this.closeHandler?.();

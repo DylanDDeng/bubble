@@ -28,7 +28,18 @@ interface MessageListProps {
   pendingApproval?: PendingApprovalHint | null;
   /** Animation tick used to refresh in-progress elapsed counters. */
   nowTick?: number;
+  /**
+   * Optional banner rendered as the first item of the scrollback Static
+   * stream. Committed to scrollback once on initial mount so it doesn't
+   * float between older messages and the live tail as the conversation
+   * progresses.
+   */
+  welcomeBanner?: React.ReactNode;
 }
+
+type StaticItem =
+  | { kind: "welcome"; key: string }
+  | { kind: "message"; key: string; message: DisplayMessage };
 
 export function MessageList({
   messages,
@@ -40,6 +51,7 @@ export function MessageList({
   verboseTrace,
   pendingApproval,
   nowTick,
+  welcomeBanner,
 }: MessageListProps) {
   const hasStreaming = !!(
     streamingContent ||
@@ -57,20 +69,38 @@ export function MessageList({
   const frozen = lastIndex >= 0 ? messages.slice(0, lastIndex) : [];
   const live = lastIndex >= 0 ? messages[lastIndex] : undefined;
 
+  const staticItems: StaticItem[] = [];
+  if (welcomeBanner) {
+    staticItems.push({ kind: "welcome", key: "welcome" });
+  }
+  for (let i = 0; i < frozen.length; i++) {
+    const msg = frozen[i]!;
+    staticItems.push({
+      kind: "message",
+      key: msg.key ?? `frozen-${i}`,
+      message: msg,
+    });
+  }
+
   return (
     <Box flexDirection="column">
-      <Static items={frozen}>
-        {(msg, i) => (
-          <MessageItem
-            key={msg.key ?? `frozen-${i}`}
-            message={msg}
-            terminalColumns={terminalColumns}
-            verboseTrace={verboseTrace}
-            // Older messages don't anchor the expand hint — only the tail does.
-            showExpandHint={false}
-            nowTick={undefined}
-          />
-        )}
+      <Static items={staticItems}>
+        {(item) => {
+          if (item.kind === "welcome") {
+            return <React.Fragment key={item.key}>{welcomeBanner}</React.Fragment>;
+          }
+          return (
+            <MessageItem
+              key={item.key}
+              message={item.message}
+              terminalColumns={terminalColumns}
+              verboseTrace={verboseTrace}
+              // Older messages don't anchor the expand hint — only the tail does.
+              showExpandHint={false}
+              nowTick={undefined}
+            />
+          );
+        }}
       </Static>
       {live && (
         <MessageItem
@@ -131,7 +161,7 @@ function MessageItem({
   if (!hasVisibleAssistantContent) return null;
 
   return (
-    <Box marginBottom={1} flexDirection="column">
+    <Box marginTop={1} marginBottom={1} flexDirection="column">
       {message.reasoning && verboseTrace && <ReasoningTraceBlock reasoning={message.reasoning} />}
       {message.parts && message.parts.length > 0 ? (
         <MessageParts
@@ -191,18 +221,24 @@ function StreamingMessage({
     : fallbackStreamingParts(deferredContent, tools);
 
   return (
-    <Box marginBottom={1} flexDirection="column">
-      {deferredReasoning && verboseTrace && <ReasoningTraceBlock reasoning={deferredReasoning} />}
+    <Box flexDirection="column">
+      {deferredReasoning && verboseTrace && (
+        <Box marginTop={1} flexDirection="column">
+          <ReasoningTraceBlock reasoning={deferredReasoning} />
+        </Box>
+      )}
       {visibleParts.length > 0 && (
-        <MessageParts
-          parts={visibleParts}
-          terminalColumns={terminalColumns}
-          verboseTrace={verboseTrace}
-          pendingApproval={pendingApproval}
-          showExpandHint
-          nowTick={nowTick}
-          showActivity
-        />
+        <Box marginTop={1} marginBottom={1} flexDirection="column">
+          <MessageParts
+            parts={visibleParts}
+            terminalColumns={terminalColumns}
+            verboseTrace={verboseTrace}
+            pendingApproval={pendingApproval}
+            showExpandHint
+            nowTick={nowTick}
+            showActivity
+          />
+        </Box>
       )}
     </Box>
   );

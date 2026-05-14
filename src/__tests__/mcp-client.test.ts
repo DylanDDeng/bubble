@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { MCPClient } from "../mcp/client.js";
+import { HttpTransport, MCP_HTTP_CLOSE_TIMEOUT_MS } from "../mcp/transports.js";
 import type {
   JsonRpcNotification,
   JsonRpcRequest,
@@ -63,6 +64,14 @@ class FakeTransport implements McpTransport {
     this.errorHandler?.(err);
   }
 }
+
+const originalFetch = globalThis.fetch;
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 describe("MCPClient", () => {
   it("performs initialize handshake, lists tools, calls tool", async () => {
@@ -193,5 +202,36 @@ describe("MCPClient", () => {
     const client = new MCPClient(transport, { name: "t", version: "0" });
     await client.start();
     await expect(client.listTools()).rejects.toThrow(/Method not found/);
+  });
+});
+
+describe("HttpTransport", () => {
+  it("does not hang forever when session close DELETE stalls", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    globalThis.fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }), {
+          headers: {
+            "content-type": "application/json",
+            "mcp-session-id": "session-1",
+          },
+        });
+      }
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          reject(init.signal?.reason ?? new Error("aborted"));
+        });
+      });
+    }) as unknown as typeof fetch;
+
+    const transport = new HttpTransport({ type: "http", url: "https://example.test/mcp" });
+    await transport.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
+
+    const closePromise = transport.close();
+    await vi.advanceTimersByTimeAsync(MCP_HTTP_CLOSE_TIMEOUT_MS + 1);
+    await expect(closePromise).resolves.toBeUndefined();
+    expect(calls).toBe(2);
   });
 });

@@ -398,7 +398,26 @@ async function readPipedStdin(): Promise<string | undefined> {
   });
 }
 
-main().catch((err) => {
-  console.error(chalk.red(`Fatal error: ${err.message}`));
-  process.exit(1);
-});
+main()
+  .then(() => {
+    void exitAfterFlush(0);
+  })
+  .catch((err) => {
+    console.error(chalk.red(`Fatal error: ${err.message}`));
+    void exitAfterFlush(1);
+  });
+
+async function exitAfterFlush(code: number): Promise<void> {
+  await Promise.all([
+    flushStream(process.stdout),
+    flushStream(process.stderr),
+  ]);
+  process.exit(code);
+}
+
+function flushStream(stream: NodeJS.WriteStream): Promise<void> {
+  if (stream.destroyed || stream.writableEnded) return Promise.resolve();
+  return new Promise((resolve) => {
+    stream.write("", () => resolve());
+  });
+}
