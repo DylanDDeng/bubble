@@ -73,6 +73,11 @@ describe("system prompt", () => {
       configuredModel: "kimi-k2.6",
       configuredModelId: "moonshot-cn:kimi-k2.6",
     });
+    const fireworksKimi = buildSystemPrompt({
+      configuredProvider: "fireworks",
+      configuredModel: "K2.6",
+      configuredModelId: "fireworks:accounts/fireworks/models/kimi-k2p6",
+    });
     const glm = buildSystemPrompt({
       configuredProvider: "zai",
       configuredModel: "glm-5.1",
@@ -84,6 +89,7 @@ describe("system prompt", () => {
     expect(kimi).toContain("running on a Kimi/Moonshot model");
     expect(kimi).toContain("Keep tool use disciplined");
     expect(kimi).not.toContain("message history serialization");
+    expect(fireworksKimi).toContain("running on a Kimi/Moonshot model");
     expect(glm).toContain("running on a GLM/Z.AI model");
     expect(glm).toContain("identify the failing boundary");
   });

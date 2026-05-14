@@ -1,25 +1,39 @@
 /**
- * Read tool - read file contents with truncation.
+ * Read tool - read file contents with truncation, dedup, and auto-pagination.
  */
 
 import { constants } from "node:fs";
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { ApprovalController } from "../approval/types.js";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
 import { isSensitivePath } from "./sensitive-paths.js";
 import type { LspService } from "../lsp/index.js";
-import type { FileStateTracker } from "./file-state.js";
+import type { FileStateTracker, ReadHistoryEntry } from "./file-state.js";
 
-const MAX_LINES = 250;
-const MAX_BYTES = 100 * 1024;
+const MAX_LINES = 2500;
+const MAX_BYTES = 256 * 1024;
+
+const FILE_UNCHANGED_STUB =
+  "File unchanged since last read. The earlier read tool_result in this conversation is still current — refer to that instead of re-reading. If you need a different range, call read again with explicit offset/limit; if the file has actually changed, edit or write will refresh this cache automatically.";
+
+const END_OF_FILE_STUB = (totalLines: number) =>
+  `End of file reached. All ${totalLines} lines of this file have already been returned by previous read tool_results in this conversation. Refer to those results, or pass an explicit offset to re-read a specific range.`;
 
 export function createReadTool(cwd: string, approval?: ApprovalController, lsp?: LspService, fileState?: FileStateTracker): ToolRegistryEntry {
+  const localHistory = new Map<string, ReadHistoryEntry>();
+  const getHistory = (path: string): ReadHistoryEntry | undefined =>
+    fileState?.getReadHistory(path) ?? localHistory.get(path);
+  const setHistory = (path: string, entry: ReadHistoryEntry): void => {
+    if (fileState) fileState.setReadHistory(path, entry);
+    else localHistory.set(path, entry);
+  };
+
   return {
     name: "read",
     readOnly: true,
     effect: "read",
-    description: `Read the contents of a file. Output is truncated to ${MAX_LINES} lines or ${MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files.`,
+    description: `Read the contents of a file. Output is truncated to ${MAX_LINES} lines or ${MAX_BYTES / 1024}KB (whichever is hit first). For large files: either pass explicit offset/limit to target a range, or simply call read again — the tool auto-advances to the next page when the previous read was truncated and the file is unchanged.`,
     parameters: {
       type: "object",
       properties: {
@@ -61,13 +75,67 @@ export function createReadTool(cwd: string, approval?: ApprovalController, lsp?:
         return { content: `Error: Cannot read file: ${filePath}`, isError: true };
       }
 
-      let content = await readFile(filePath, "utf-8");
+      const argOffset = typeof args.offset === "number" ? args.offset : undefined;
+      const argLimit = typeof args.limit === "number" ? args.limit : undefined;
 
+      let currentMtimeMs: number | undefined;
+      try {
+        currentMtimeMs = (await stat(filePath)).mtimeMs;
+      } catch {
+        currentMtimeMs = undefined;
+      }
+
+      const prior = getHistory(filePath);
+      const sameArgs = prior !== undefined
+        && prior.argOffset === argOffset
+        && prior.argLimit === argLimit;
+      const mtimeUnchanged = prior !== undefined
+        && currentMtimeMs !== undefined
+        && Math.floor(prior.mtimeMs) === Math.floor(currentMtimeMs);
+
+      let effectiveOffset = argOffset !== undefined ? Math.max(0, argOffset - 1) : 0;
+      let autoAdvanceNote: string | undefined;
+
+      if (prior && sameArgs && mtimeUnchanged) {
+        if (prior.truncated && argOffset === undefined) {
+          const nextStart = prior.effectiveOffset + prior.returnedLines;
+          if (nextStart >= prior.totalLines) {
+            return {
+              content: END_OF_FILE_STUB(prior.totalLines),
+              status: "success",
+              metadata: { kind: "read", path: filePath, dedup: "end_of_file" },
+            };
+          }
+          effectiveOffset = nextStart;
+          autoAdvanceNote =
+            `[Auto-advanced from previous truncated read of ${filePath}. ` +
+            `Showing lines ${effectiveOffset + 1}+ (file has ${prior.totalLines} lines). ` +
+            `Pass an explicit offset/limit to override this auto-paging.]`;
+        } else if (
+          argOffset === undefined
+          && prior.effectiveOffset > 0
+          && !prior.truncated
+        ) {
+          return {
+            content: END_OF_FILE_STUB(prior.totalLines),
+            status: "success",
+            metadata: { kind: "read", path: filePath, dedup: "end_of_file" },
+          };
+        } else {
+          return {
+            content: FILE_UNCHANGED_STUB,
+            status: "success",
+            metadata: { kind: "read", path: filePath, dedup: "unchanged" },
+          };
+        }
+      }
+
+      const content = await readFile(filePath, "utf-8");
       const lines = content.split("\n");
-      const offset = typeof args.offset === "number" ? Math.max(0, args.offset - 1) : 0;
-      const limit = typeof args.limit === "number" ? args.limit : lines.length;
+      const totalLines = lines.length;
+      const effectiveLimit = argLimit !== undefined ? argLimit : totalLines;
 
-      let sliced = lines.slice(offset, offset + limit);
+      let sliced = lines.slice(effectiveOffset, effectiveOffset + effectiveLimit);
       let truncated = false;
 
       if (sliced.length > MAX_LINES) {
@@ -82,11 +150,30 @@ export function createReadTool(cwd: string, approval?: ApprovalController, lsp?:
         truncated = true;
       }
 
+      if (autoAdvanceNote) {
+        result = `${autoAdvanceNote}\n${result}`;
+      }
       if (truncated) {
-        result += `\n[Output truncated: exceeded ${MAX_LINES} lines or ${MAX_BYTES / 1024}KB limit]`;
+        const lastLine = effectiveOffset + sliced.length;
+        result += `\n[Output truncated at line ${lastLine} of ${totalLines}. Call read again on the same path to auto-advance to the next page, or pass explicit offset/limit.]`;
       }
 
-      const isFullRead = offset === 0 && !truncated && offset + limit >= lines.length;
+      if (currentMtimeMs !== undefined) {
+        setHistory(filePath, {
+          argOffset,
+          argLimit,
+          effectiveOffset,
+          effectiveLimit,
+          returnedLines: sliced.length,
+          totalLines,
+          mtimeMs: currentMtimeMs,
+          truncated,
+        });
+      }
+
+      const isFullRead = effectiveOffset === 0
+        && !truncated
+        && effectiveOffset + effectiveLimit >= totalLines;
       if (isFullRead) {
         await fileState?.observe(filePath, "read", content).catch(() => undefined);
       }
@@ -99,6 +186,8 @@ export function createReadTool(cwd: string, approval?: ApprovalController, lsp?:
         metadata: {
           kind: "read",
           path: filePath,
+          ...(autoAdvanceNote ? { autoAdvanced: true } : {}),
+          ...(truncated ? { truncated: true } : {}),
         },
       };
     },

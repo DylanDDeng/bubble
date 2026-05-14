@@ -5,7 +5,6 @@ import { ExecutionGovernor } from "../agent/execution-governor.js";
 import { arbitrateToolCall } from "../agent/tool-arbiter.js";
 import {
   buildEditRetryEscalationReminder,
-  buildRedundantReadReminder,
   buildSmallTaskHint,
   buildTaskSummaryReminder,
   buildWorkflowPhaseReminder,
@@ -110,22 +109,11 @@ export function createDefaultHooks(): TurnHooks[] {
           ctx.state.recentEditFailures = [];
           ctx.state.editRetryReminderSent = false;
         }
-        // Redundant-Read detection: same file path read twice within this turn.
-        // Soft single-shot reminder, governor handles cumulative read budgets.
-        if (ctx.toolCall.name === "read" && !ctx.result.isError) {
-          const rawPath = ctx.toolCall.parsedArgs?.path ?? ctx.toolCall.parsedArgs?.file_path;
-          const path = typeof rawPath === "string" ? rawPath : undefined;
-          if (path) {
-            const seen: string[] = ctx.state.recentReadPaths ?? (ctx.state.recentReadPaths = []);
-            const flagged: Set<string> = ctx.state.redundantReadReminded ?? (ctx.state.redundantReadReminded = new Set());
-            if (seen.includes(path) && !flagged.has(path)) {
-              flagged.add(path);
-              ctx.queueReminder(buildRedundantReadReminder(path));
-            }
-            seen.push(path);
-            if (seen.length > 16) seen.shift();
-          }
-        }
+        // Redundant-Read detection moved into the read tool itself: it now
+        // returns a FILE_UNCHANGED_STUB (or auto-advances to the next page)
+        // when the same args land on an unchanged file. Hook-level reminder
+        // is removed to avoid duplicate signals and to let the structural
+        // dedup do the work.
         if (isCodeWriteResult(ctx.toolCall, ctx.result)) {
           markCodeChanged(ctx.state);
         }

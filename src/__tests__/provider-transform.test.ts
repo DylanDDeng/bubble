@@ -63,4 +63,12 @@ describe("provider transform", () => {
       reasoning_effort: "high",
     });
   });
+
+  it("uses Fireworks Kimi agent defaults", () => {
+    const config = resolveProviderRequestConfig("fireworks", "accounts/fireworks/models/kimi-k2p6", "off");
+
+    expect(config.effectiveThinkingLevel).toBe("off");
+    expect(config.reasoningContentEcho).toBe("none");
+    expect(config.maxTokens).toBe(4096);
+  });
 });

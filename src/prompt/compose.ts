@@ -60,6 +60,7 @@ function buildProviderPrompt(
   const provider = providerId ?? "";
   const rawModel = modelId ?? modelName ?? "";
   const model = rawModel.includes(":") ? rawModel.split(":").slice(1).join(":") : rawModel;
+  const lowerModel = model.toLowerCase();
 
   if (provider === "anthropic" || model.startsWith("claude")) {
     return buildAnthropicProviderPrompt(agentName);
@@ -73,7 +74,7 @@ function buildProviderPrompt(
   if (provider === "deepseek" || model.startsWith("deepseek")) {
     return buildDeepSeekProviderPrompt(agentName);
   }
-  if (["moonshot-cn", "moonshot-intl", "kimi-for-coding"].includes(provider) || model.startsWith("kimi") || model.startsWith("k2.")) {
+  if (["moonshot-cn", "moonshot-intl", "kimi-for-coding"].includes(provider) || lowerModel.includes("kimi") || lowerModel.includes("k2.")) {
     return buildKimiProviderPrompt(agentName);
   }
   if (["zhipuai", "zhipuai-coding-plan", "zai", "zai-coding-plan"].includes(provider) || model.startsWith("glm")) {

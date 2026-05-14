@@ -16,6 +16,7 @@ import { SessionManager } from "./session.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { SkillRegistry } from "./skills/registry.js";
 import { createAllTools, type PlanController, type ToolSearchController } from "./tools/index.js";
+import { FileStateTracker } from "./tools/file-state.js";
 import { PermissionAwareApprovalController } from "./approval/controller.js";
 import { BashAllowlist } from "./approval/session-cache.js";
 import type { ApprovalDecision, ApprovalRequest } from "./approval/types.js";
@@ -113,6 +114,7 @@ async function main() {
     unlock: (names) => agentRef?.unlockDeferredTools(names),
   };
   const lspService = getLspService(args.cwd, settingsManager.getMerged().lsp);
+  const fileStateTracker = new FileStateTracker(args.cwd);
   const tools = createAllTools(args.cwd, skillRegistry, {
     todoStore,
     planController,
@@ -120,6 +122,7 @@ async function main() {
     questionController: printMode ? undefined : questionController,
     toolSearchController,
     lspService,
+    fileStateTracker,
   });
 
   // Bring up MCP servers (if any). Failures are captured per-server and never
@@ -265,6 +268,7 @@ async function main() {
     budgetLedger,
     skills: skillSummaries,
     memoryPrompt,
+    fileStateTracker,
   });
   agentRef = agent;
   if (sessionManager) {

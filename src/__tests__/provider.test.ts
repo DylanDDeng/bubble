@@ -103,6 +103,23 @@ describe("toChatCompletionsMessage", () => {
       content: "done",
     });
   });
+
+  it("can suppress reasoning echo for providers that do not require it", () => {
+    expect(toChatCompletionsMessage({
+      role: "assistant",
+      content: "",
+      reasoning: "used tool",
+      toolCalls: [{ id: "read:1", name: "read", arguments: "{\"path\":\"a\"}" }],
+    }, { reasoningContentEcho: "none" })).toEqual({
+      role: "assistant",
+      content: null,
+      tool_calls: [{
+        id: "read:1",
+        type: "function",
+        function: { name: "read", arguments: "{\"path\":\"a\"}" },
+      }],
+    });
+  });
 });
 
 describe("translateOpenAIStream", () => {
@@ -201,6 +218,28 @@ describe("translateOpenAIStream", () => {
       { id: "write:1", name: "write", args: "1}", isStart: false, isEnd: false },
       { id: "write:1", name: "write", args: "", isStart: false, isEnd: true },
     ]);
+  });
+
+  it("deduplicates cumulative reasoning snapshots while streaming", async () => {
+    const chunks = await collect(translateOpenAIStream(fromArray([
+      { choices: [{ delta: { reasoning_content: "I need" } }] },
+      { choices: [{ delta: { reasoning_content: "I need to inspect" } }] },
+      { choices: [{ delta: { reasoning_content: "I need to inspect" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+    ]), { reasoningMergeMode: "snapshot" }));
+
+    expect(chunks.filter((c) => c.type === "reasoning_delta").map((c: any) => c.content).join("")).toBe("I need to inspect");
+  });
+
+  it("deduplicates embedded think content followed by a dedicated reasoning snapshot", async () => {
+    const chunks = await collect(translateOpenAIStream(fromArray([
+      { choices: [{ delta: { content: "<think>I need to inspect</think>" } }] },
+      { choices: [{ delta: { reasoning_content: "I need to inspect" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+    ]), { reasoningMergeMode: "snapshot" }));
+
+    expect(chunks.filter((c) => c.type === "reasoning_delta").map((c: any) => c.content).join("")).toBe("I need to inspect");
+    expect(chunks.filter((c) => c.type === "text").map((c: any) => c.content).join("")).toBe("");
   });
 
   it("preserves single-character trailing deltas in OpenAI-compatible mode", async () => {

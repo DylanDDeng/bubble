@@ -20,7 +20,9 @@ import { assignAgentNickname, builtinAgentProfiles, mergeUsage, selectToolsForAg
 import { snapshotSubagentThread, subagentResultFromThread, type PendingSubagentToolUpdate, type SubagentThreadRecord, type SubagentThreadSnapshot } from "./agent/subagent-control.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { isOnlyProviderProtocolArtifacts, stripProviderProtocolArtifacts } from "./provider-artifacts.js";
+import { debugReasoningStream, summarizeDebugText } from "./reasoning-debug.js";
 import type { SkillSummary } from "./skills/types.js";
+import type { FileStateTracker } from "./tools/file-state.js";
 
 const MAX_CONSECUTIVE_OVERFLOW_RECOVERIES = 3;
 const RESIDENT_HISTORY_KEEP_RECENT_TURNS = 3;
@@ -60,6 +62,7 @@ export interface AgentOptions {
   budgetSource?: { runId: string; subAgentId?: string };
   skills?: SkillSummary[];
   memoryPrompt?: string;
+  fileStateTracker?: FileStateTracker;
 }
 
 export class Agent {
@@ -87,6 +90,7 @@ export class Agent {
   private budgetSource: { runId: string; subAgentId?: string };
   private skillSummaries: SkillSummary[];
   private memoryPrompt?: string;
+  private fileStateTracker?: FileStateTracker;
   private subagentThreads: Map<string, SubagentThreadRecord> = new Map();
   private pendingSubagentUpdates: PendingSubagentToolUpdate[] = [];
   private lastInputTokens: number | null = null;
@@ -112,6 +116,7 @@ export class Agent {
     this.budgetSource = options.budgetSource ?? { runId: this.sessionID ?? "agent" };
     this.skillSummaries = options.skills ?? [];
     this.memoryPrompt = options.memoryPrompt;
+    this.fileStateTracker = options.fileStateTracker;
 
     if (options.systemPrompt) {
       this.messages.push({ role: "system", content: options.systemPrompt });
@@ -395,6 +400,15 @@ export class Agent {
               yield { type: "text_delta", content: chunk.content };
               break;
             case "reasoning_delta":
+              debugReasoningStream({
+                stage: "agent_receive",
+                providerId: this._providerId,
+                modelId: this.apiModel,
+                turnStep: step,
+                beforeLength: assistantMsg.reasoning?.length ?? 0,
+                delta: summarizeDebugText(chunk.content),
+                afterLength: (assistantMsg.reasoning?.length ?? 0) + chunk.content.length,
+              });
               assistantMsg.reasoning = (assistantMsg.reasoning || "") + chunk.content;
               yield { type: "reasoning_delta", content: chunk.content };
               break;
@@ -650,6 +664,7 @@ export class Agent {
       if (afterTokens < beforeTokens) {
         this.lastInputTokens = null;
         this.lastAnchorMessageCount = null;
+        this.fileStateTracker?.invalidateReadHistory();
         return before - this.messages.length;
       }
     }
@@ -665,6 +680,7 @@ export class Agent {
       this.messages = llmResult.messages;
       this.lastInputTokens = null;
       this.lastAnchorMessageCount = null;
+      this.fileStateTracker?.invalidateReadHistory();
       return before - this.messages.length;
     }
 
@@ -673,6 +689,7 @@ export class Agent {
       this.messages = fallback.messages;
       this.lastInputTokens = null;
       this.lastAnchorMessageCount = null;
+      this.fileStateTracker?.invalidateReadHistory();
       return before - this.messages.length;
     }
     return 0;
@@ -1252,6 +1269,7 @@ export class Agent {
       this.messages = candidate;
       this.lastInputTokens = null;
       this.lastAnchorMessageCount = null;
+      this.fileStateTracker?.invalidateReadHistory();
     }
   }
 

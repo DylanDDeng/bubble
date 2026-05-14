@@ -38,6 +38,7 @@ import {
 } from "@opentui/solid";
 import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { AgentAbortError, type Agent } from "../agent.js";
+import { debugReasoningStream, summarizeDebugText } from "../reasoning-debug.js";
 import type { CliArgs } from "../cli.js";
 import type { SessionManager } from "../session.js";
 import type { ContentPart, Message, PermissionMode, PlanDecision, Provider, ThinkingLevel, Todo, TokenUsage, ToolResultMetadata } from "../types.js";
@@ -3808,6 +3809,14 @@ function OpenTuiApp(props: {
         } else if (event.type === "text_delta") {
           assistantContent += event.content;
         } else if (event.type === "reasoning_delta") {
+          debugReasoningStream({
+            stage: "ui_append",
+            providerId: props.agent.providerId,
+            modelId: props.agent.apiModel,
+            beforeLength: assistantReasoning.length,
+            delta: summarizeDebugText(event.content),
+            afterLength: assistantReasoning.length + event.content.length,
+          });
           assistantReasoning += event.content;
           scheduleStreamingRedraw();
         } else if (event.type === "tool_call_start") {

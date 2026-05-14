@@ -74,13 +74,68 @@ describe("read tool", () => {
 
   it("truncates large files", async () => {
     const file = join(tmpDir, "huge.txt");
-    const lines = Array.from({ length: 300 }, (_, i) => `line ${i}`);
+    const lines = Array.from({ length: 3000 }, (_, i) => `line ${i}`);
     writeFileSync(file, lines.join("\n"), "utf-8");
 
     const tool = createReadTool(tmpDir);
     const result = await tool.execute({ path: "huge.txt" }, { cwd: tmpDir });
 
     expect(result.content).toContain("Output truncated");
+  });
+
+  it("returns a stub when the same range is re-read on an unchanged file", async () => {
+    const file = join(tmpDir, "dedup.txt");
+    writeFileSync(file, "alpha\nbeta\ngamma", "utf-8");
+
+    const tool = createReadTool(tmpDir);
+    const first = await tool.execute({ path: "dedup.txt" }, { cwd: tmpDir });
+    expect(first.content).toContain("alpha");
+
+    const second = await tool.execute({ path: "dedup.txt" }, { cwd: tmpDir });
+    expect(second.content).toContain("File unchanged since last read");
+    expect(second.metadata?.dedup).toBe("unchanged");
+  });
+
+  it("auto-advances to the next page when a truncated read is repeated", async () => {
+    const file = join(tmpDir, "paged.txt");
+    const lines = Array.from({ length: 6000 }, (_, i) => `line ${i + 1}`);
+    writeFileSync(file, lines.join("\n"), "utf-8");
+
+    const tool = createReadTool(tmpDir);
+
+    const first = await tool.execute({ path: "paged.txt" }, { cwd: tmpDir });
+    expect(first.content).toContain("line 1");
+    expect(first.content).toContain("Output truncated");
+    expect(first.metadata?.truncated).toBe(true);
+
+    const second = await tool.execute({ path: "paged.txt" }, { cwd: tmpDir });
+    expect(second.metadata?.autoAdvanced).toBe(true);
+    expect(second.content).toContain("Auto-advanced");
+    expect(second.content).toContain("line 2501");
+    expect(second.content).not.toContain("line 1\n");
+
+    const third = await tool.execute({ path: "paged.txt" }, { cwd: tmpDir });
+    expect(third.content).toContain("line 5001");
+    expect(third.content).not.toContain("Output truncated");
+
+    const fourth = await tool.execute({ path: "paged.txt" }, { cwd: tmpDir });
+    expect(fourth.content).toContain("End of file reached");
+  });
+
+  it("does not dedup when the file changes on disk", async () => {
+    const file = join(tmpDir, "mutating.txt");
+    writeFileSync(file, "v1", "utf-8");
+
+    const tool = createReadTool(tmpDir);
+    const first = await tool.execute({ path: "mutating.txt" }, { cwd: tmpDir });
+    expect(first.content).toBe("v1");
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    writeFileSync(file, "v2", "utf-8");
+
+    const second = await tool.execute({ path: "mutating.txt" }, { cwd: tmpDir });
+    expect(second.content).toBe("v2");
+    expect(second.metadata?.dedup).toBeUndefined();
   });
 
   it("blocks reads from sensitive credential storage paths", async () => {

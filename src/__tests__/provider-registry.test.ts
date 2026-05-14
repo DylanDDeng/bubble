@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { ProviderRegistry, normalizeModel } from "../provider-registry.js";
+import { ProviderRegistry, displayModel, normalizeModel } from "../provider-registry.js";
 
 describe("provider registry", () => {
   it("normalizes provider-less models to openai by default", () => {
     expect(normalizeModel("gpt-4o")).toBe("openai:gpt-4o");
+  });
+
+  it("uses built-in display names for encoded models", () => {
+    expect(displayModel("fireworks:accounts/fireworks/models/kimi-k2p6")).toBe("Kimi-K2.6");
   });
 
   it("prefers user-visible providers over hidden openrouter defaults", () => {

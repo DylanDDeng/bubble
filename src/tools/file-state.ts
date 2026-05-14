@@ -19,10 +19,39 @@ export type FileFreshnessResult =
   | { ok: true; version: FileVersion }
   | { ok: false; reason: "unobserved" | "missing" | "changed"; observed?: FileVersion; current?: FileVersion };
 
+export interface ReadHistoryEntry {
+  argOffset: number | undefined;
+  argLimit: number | undefined;
+  effectiveOffset: number;
+  effectiveLimit: number;
+  returnedLines: number;
+  totalLines: number;
+  mtimeMs: number;
+  truncated: boolean;
+}
+
 export class FileStateTracker {
   private readonly observed = new Map<string, ObservedFileState>();
+  private readonly readHistory = new Map<string, ReadHistoryEntry>();
 
   constructor(private readonly cwd: string) {}
+
+  getReadHistory(filePath: string): ReadHistoryEntry | undefined {
+    return this.readHistory.get(this.resolvePath(filePath));
+  }
+
+  setReadHistory(filePath: string, entry: ReadHistoryEntry): void {
+    this.readHistory.set(this.resolvePath(filePath), entry);
+  }
+
+  /**
+   * Drops all read-dedup state. Call this whenever conversation history is
+   * compacted or pruned, because the dedup stub points the model back at
+   * earlier tool_result content that may no longer be resident.
+   */
+  invalidateReadHistory(): void {
+    this.readHistory.clear();
+  }
 
   async observe(filePath: string, source: FileObservationSource, content?: string): Promise<FileVersion> {
     const absolute = this.resolvePath(filePath);

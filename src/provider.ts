@@ -9,6 +9,7 @@ import { appendFileSync } from "node:fs";
 import { createOpenAICodexProvider, isOpenAICodexBaseUrl } from "./provider-openai-codex.js";
 import { createProviderProtocolArtifactFilter } from "./provider-artifacts.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
+import { debugReasoningStream, summarizeDebugText } from "./reasoning-debug.js";
 import type { Provider, ProviderMessage, StreamChunk, ThinkingLevel, ToolDefinition } from "./types.js";
 
 // Diagnostic logger for tool-args byte-loss investigation. Activate with
@@ -25,11 +26,14 @@ function debugToolArgs(event: Record<string, unknown>): void {
   }
 }
 
-type ReasoningContentEcho = "tool_calls" | "all";
+type ReasoningContentEcho = "tool_calls" | "all" | "none";
 export type ToolArgsMergeMode = "delta" | "snapshot";
 
 export interface TranslateOpenAIStreamOptions {
   toolArgsMergeMode?: ToolArgsMergeMode;
+  reasoningMergeMode?: ToolArgsMergeMode;
+  debugProviderId?: string;
+  debugModelId?: string;
 }
 
 export function toChatCompletionsMessage(
@@ -138,6 +142,10 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
       Object.assign(body, requestConfig.extraBody);
     }
 
+    if (requestConfig.maxTokens !== undefined) {
+      body.max_tokens = requestConfig.maxTokens;
+    }
+
     if (requestConfig.reasoningEffort && requestConfig.reasoningEffort !== "off") {
       body.reasoning = { enabled: true };
     }
@@ -148,6 +156,9 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
 
     yield* translateOpenAIStream(stream, {
       toolArgsMergeMode: resolveToolArgsMergeMode(options.providerId || "", options.baseURL),
+      reasoningMergeMode: resolveReasoningMergeMode(options.providerId || "", options.baseURL),
+      debugProviderId: options.providerId || "",
+      debugModelId: chatOptions.model,
     });
 
     yield { type: "done" };
@@ -171,6 +182,10 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
 
     if (requestConfig.extraBody) {
       Object.assign(body, requestConfig.extraBody);
+    }
+
+    if (requestConfig.maxTokens !== undefined) {
+      body.max_tokens = requestConfig.maxTokens;
     }
 
     if (requestConfig.reasoningEffort && requestConfig.reasoningEffort !== "off") {
@@ -243,6 +258,13 @@ function resolveToolArgsMergeMode(providerId: string, baseURL: string): ToolArgs
   return "delta";
 }
 
+function resolveReasoningMergeMode(providerId: string, baseURL: string): ToolArgsMergeMode {
+  const id = providerId.toLowerCase();
+  const url = baseURL.toLowerCase();
+  if (id === "fireworks" || url.includes("fireworks.ai")) return "snapshot";
+  return "delta";
+}
+
 function extractBalancedJson(s: string, start: number): string | null {
   if (s[start] !== "{") return null;
   let depth = 0;
@@ -278,6 +300,9 @@ export async function* translateOpenAIStream(
   const toolCalls = new Map<number, { id: string; name: string; args: string; started: boolean }>();
   const textFilter = createProviderProtocolArtifactFilter();
   const toolArgsMergeMode = options.toolArgsMergeMode ?? "delta";
+  const reasoningMergeMode = options.reasoningMergeMode ?? "delta";
+  let reasoningBuffer = "";
+  let rawChunkSeq = 0;
   // DeepSeek (and some inference re-hosts) sometimes deliver reasoning twice:
   // once via a dedicated `reasoning_content` / `thinking` field, and again
   // embedded as `<think>...</think>` inside `delta.content`. Track whether we
@@ -323,8 +348,22 @@ export async function* translateOpenAIStream(
   }
 
   for await (const chunk of stream) {
+    rawChunkSeq += 1;
     const delta = chunk.choices?.[0]?.delta;
     const usage = (chunk as any).usage;
+    const finishReason = chunk.choices?.[0]?.finish_reason;
+
+    debugReasoningStream({
+      stage: "provider_raw",
+      providerId: options.debugProviderId,
+      modelId: options.debugModelId,
+      chunkSeq: rawChunkSeq,
+      finishReason,
+      content: summarizeDebugText(delta?.content),
+      reasoning: summarizeDebugText((delta as any)?.reasoning),
+      thinking: summarizeDebugText((delta as any)?.thinking),
+      reasoningContent: summarizeDebugText((delta as any)?.reasoning_content),
+    });
 
     if (usage) {
       yield {
@@ -342,17 +381,54 @@ export async function* translateOpenAIStream(
       };
     }
 
-    const reasoning = (delta as any)?.reasoning ?? (delta as any)?.thinking ?? (delta as any)?.reasoning_content;
+    const reasoningField = (delta as any)?.reasoning !== undefined
+      ? "reasoning"
+      : (delta as any)?.thinking !== undefined
+        ? "thinking"
+        : (delta as any)?.reasoning_content !== undefined
+          ? "reasoning_content"
+          : undefined;
+    const reasoning = reasoningField ? (delta as any)[reasoningField] : undefined;
     if (reasoning) {
       hasDedicatedReasoningChannel = true;
-      yield { type: "reasoning_delta", content: reasoning };
+      const merged = mergeStreamingText(reasoningBuffer, reasoning, reasoningMergeMode);
+      reasoningBuffer = merged.args;
+      debugReasoningStream({
+        stage: "provider_emit",
+        providerId: options.debugProviderId,
+        modelId: options.debugModelId,
+        chunkSeq: rawChunkSeq,
+        source: reasoningField,
+        mergeMode: reasoningMergeMode,
+        suppressed: !merged.delta,
+        emitted: summarizeDebugText(merged.delta),
+        buffer: summarizeDebugText(reasoningBuffer),
+      });
+      if (merged.delta) {
+        yield { type: "reasoning_delta", content: merged.delta };
+      }
     }
 
     if (delta?.content) {
       const thinkMatch = delta.content.match(/<think>([\s\S]*?)<\/think>/);
       if (thinkMatch) {
         if (thinkMatch[1] && !hasDedicatedReasoningChannel) {
-          yield { type: "reasoning_delta", content: thinkMatch[1] };
+          const merged = mergeStreamingText(reasoningBuffer, thinkMatch[1], reasoningMergeMode);
+          reasoningBuffer = merged.args;
+          debugReasoningStream({
+            stage: "provider_emit",
+            providerId: options.debugProviderId,
+            modelId: options.debugModelId,
+            chunkSeq: rawChunkSeq,
+            source: "content_think",
+            mergeMode: reasoningMergeMode,
+            suppressed: !merged.delta,
+            emitted: summarizeDebugText(merged.delta),
+            buffer: summarizeDebugText(reasoningBuffer),
+          });
+          if (merged.delta) {
+            yield { type: "reasoning_delta", content: merged.delta };
+          }
         }
         const remaining = delta.content.replace(/<think>[\s\S]*?<\/think>/, "");
         const cleaned = textFilter.push(remaining);
@@ -396,7 +472,6 @@ export async function* translateOpenAIStream(
       }
     }
 
-    const finishReason = chunk.choices?.[0]?.finish_reason;
     if (finishReason === "tool_calls") {
       yield* flushToolCalls();
     }
@@ -436,5 +511,15 @@ function mergeToolArgumentDelta(current: string, incoming: string, mode: ToolArg
   }
 
   debugToolArgs({ stage: "merge", branch: mode === "delta" ? "delta-append" : "snapshot-fallback-concat", current, incoming, args: current + incoming, delta: incoming });
+  return { args: current + incoming, delta: incoming };
+}
+
+function mergeStreamingText(current: string, incoming: string, mode: ToolArgsMergeMode): { args: string; delta: string } {
+  if (!current) return { args: incoming, delta: incoming };
+  if (!incoming) return { args: current, delta: "" };
+  if (mode === "snapshot") {
+    if (incoming === current) return { args: current, delta: "" };
+    if (incoming.startsWith(current)) return { args: incoming, delta: incoming.slice(current.length) };
+  }
   return { args: current + incoming, delta: incoming };
 }

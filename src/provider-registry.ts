@@ -8,6 +8,7 @@
 import type { UserConfig } from "./config.js";
 import {
   BUILTIN_PROVIDERS as CATALOG_PROVIDERS,
+  getBuiltinModel,
   getBuiltinProvider,
   listBuiltinModels,
 } from "./model-catalog.js";
@@ -273,8 +274,8 @@ export function decodeModel(value: string): { providerId?: string; modelId: stri
 
 /** Strip provider prefix for concise display. */
 export function displayModel(model: string): string {
-  const { modelId } = decodeModel(model);
-  return modelId;
+  const { providerId, modelId } = decodeModel(model);
+  return providerId ? getBuiltinModel(providerId, modelId)?.name ?? modelId : modelId;
 }
 
 /** Normalize user input to provider:model format when possible. */

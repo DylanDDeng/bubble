@@ -5,7 +5,8 @@ export { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingL
 export interface ProviderRequestConfig {
   effectiveThinkingLevel: ThinkingLevel;
   reasoningEffort?: ThinkingLevel;
-  reasoningContentEcho?: "tool_calls" | "all";
+  reasoningContentEcho?: "tool_calls" | "all" | "none";
+  maxTokens?: number;
   extraBody?: Record<string, unknown>;
   omitTemperature?: boolean;
 }
@@ -13,6 +14,15 @@ export interface ProviderRequestConfig {
 const MOONSHOT_PROVIDER_IDS = new Set(["moonshot-cn", "moonshot-intl", "kimi-for-coding"]);
 const KIMI_K25_FAMILY = new Set(["kimi-k2.5", "k2.6-code-preview", "kimi-k2.6"]);
 const KIMI_THINKING_FAMILY = new Set(["kimi-k2-thinking", "kimi-k2-thinking-turbo"]);
+
+function isFireworksKimi(providerId: string, modelId: string): boolean {
+  const model = modelId.toLowerCase();
+  return providerId === "fireworks" && (
+    model.includes("kimi")
+    || model.includes("k2p6")
+    || model === "k2.6"
+  );
+}
 
 export function resolveProviderRequestConfig(
   providerId: string,
@@ -26,6 +36,14 @@ export function resolveProviderRequestConfig(
   // Keep the session/UI state, but don't send reasoning flags on this provider until the protocol is clearer.
   if (providerId === "openai-codex") {
     return { effectiveThinkingLevel };
+  }
+
+  if (isFireworksKimi(providerId, modelId)) {
+    return {
+      effectiveThinkingLevel,
+      reasoningContentEcho: "none",
+      maxTokens: 4096,
+    };
   }
 
   if (providerId === "deepseek" && (modelId === "deepseek-v4-flash" || modelId === "deepseek-v4-pro")) {

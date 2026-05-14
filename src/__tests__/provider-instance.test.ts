@@ -63,4 +63,31 @@ describe("createProviderInstance", () => {
     expect(body.stream_options).toEqual({ include_usage: true });
     expect(chunks.some((chunk) => chunk.type === "usage")).toBe(true);
   });
+
+  it("uses Fireworks Kimi request defaults", async () => {
+    let body: any;
+    createMock.mockImplementation(async (input) => {
+      body = input;
+      return fromArray([{ choices: [{ delta: {}, finish_reason: "stop" }] }]);
+    });
+
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({
+      providerId: "fireworks",
+      apiKey: "sk-test",
+      baseURL: "https://api.fireworks.ai/inference/v1",
+    });
+
+    await collect(provider.streamChat([{
+      role: "assistant",
+      content: "",
+      reasoning: "tool reasoning",
+      toolCalls: [{ id: "read:1", name: "read", arguments: "{\"path\":\"a\"}" }],
+    }], {
+      model: "accounts/fireworks/models/kimi-k2p6",
+    }));
+
+    expect(body.max_tokens).toBe(4096);
+    expect(body.messages[0].reasoning_content).toBeUndefined();
+  });
 });
