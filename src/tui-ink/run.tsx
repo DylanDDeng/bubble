@@ -1,0 +1,69 @@
+import { render } from "ink";
+import React from "react";
+import type { Agent } from "../agent.js";
+import type { CliArgs } from "../cli.js";
+import type { SessionManager } from "../session.js";
+import type { Provider } from "../types.js";
+import type { ProviderRegistry } from "../provider-registry.js";
+import type { SkillRegistry } from "../skills/registry.js";
+import { App, type ApprovalHandlerRef, type PlanHandlerRef } from "./app.js";
+import type { BashAllowlist } from "../approval/session-cache.js";
+import type { SettingsManager } from "../permissions/settings.js";
+import type { McpManager } from "../mcp/manager.js";
+import type { LspService } from "../lsp/index.js";
+import type { QuestionController } from "../question/index.js";
+import type { MemoryScope } from "../memory/index.js";
+
+export interface RunTuiOptions {
+  sessionManager?: SessionManager;
+  createProvider?: (providerId: string, apiKey: string, baseURL: string) => Provider;
+  registry?: ProviderRegistry;
+  skillRegistry?: SkillRegistry;
+  planHandlerRef?: PlanHandlerRef;
+  approvalHandlerRef?: ApprovalHandlerRef;
+  questionController?: QuestionController;
+  bashAllowlist?: BashAllowlist;
+  settingsManager?: SettingsManager;
+  lspService?: LspService;
+  mcpManager?: McpManager;
+  theme?: Record<string, string>;
+  flushMemory?: () => Promise<void>;
+  runMemoryCompaction?: () => Promise<string>;
+  runMemorySummary?: (scope?: MemoryScope) => Promise<string>;
+  runMemoryRefresh?: (scope?: MemoryScope) => Promise<string>;
+  bypassEnabled?: boolean;
+}
+
+export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions = {}) {
+  await new Promise<void>((resolve) => {
+    let resolved = false;
+    const instance = render(
+      <App
+        agent={agent}
+        args={args}
+        sessionManager={options.sessionManager}
+        createProvider={options.createProvider}
+        registry={options.registry}
+        skillRegistry={options.skillRegistry}
+        planHandlerRef={options.planHandlerRef}
+        approvalHandlerRef={options.approvalHandlerRef}
+        questionController={options.questionController}
+        bashAllowlist={options.bashAllowlist}
+        settingsManager={options.settingsManager}
+        lspService={options.lspService}
+        mcpManager={options.mcpManager}
+        flushMemory={options.flushMemory}
+        runMemoryCompaction={options.runMemoryCompaction}
+        runMemorySummary={options.runMemorySummary}
+        runMemoryRefresh={options.runMemoryRefresh}
+        bypassEnabled={options.bypassEnabled}
+        onExit={() => {
+          if (resolved) return;
+          resolved = true;
+          instance.unmount();
+          resolve();
+        }}
+      />,
+    );
+  });
+}

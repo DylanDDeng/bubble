@@ -360,8 +360,10 @@ async function main() {
       return;
     }
 
-    // Interactive mode: OpenTUI uses Bun native FFI, matching opencode's TUI stack.
-    const { runTui } = await import("./tui/run.js");
+    const tuiRuntime = process.env.BUBBLE_TUI === "opentui" ? "opentui" : "ink";
+    const { runTui } = tuiRuntime === "opentui"
+      ? await import("./tui/run.js")
+      : await import("./tui-ink/run.js");
     await runTui(agent, args, {
       sessionManager,
       createProvider,
