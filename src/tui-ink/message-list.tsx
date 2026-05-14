@@ -227,7 +227,7 @@ function UserMessageBlock({ content, terminalColumns }: { content: string; termi
     .flatMap((line) => wrapByVisualWidth(line, contentWidth));
 
   return (
-    <Box marginBottom={1} flexDirection="column">
+    <Box flexDirection="column">
       {wrappedLines.map((line, index) => (
         <Box key={index}>
           <Text color={theme.userRail}>▌ </Text>

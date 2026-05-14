@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Box, Static, Text, useApp, useInput } from "ink";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Box, Text, useApp, useInput } from "ink";
 import { AgentAbortError, type Agent } from "../agent.js";
 import type { CliArgs } from "../cli.js";
 import type { SessionManager } from "../session.js";
@@ -846,42 +846,29 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       })()
     : null;
 
-  const welcomeItems = useMemo(
-    () =>
-      // Only meta reminders (deferred-tools, mode transitions) at this point
-      // shouldn't count as "the user has started a conversation" — those are
-      // harness-injected and should not hide the banner.
-      agent.messages.some((m) => m.role === "user" && !(m as any).isMeta)
-        ? []
-        : [{
-            key: "welcome",
-            greeting: "Welcome to Bubble",
-            modelLabel: agent.model ? displayModel(agent.model) : undefined,
-            cwd: friendlyCwd(args.cwd),
-            tips: buildTips(agent, safeRegistry),
-            recentSessions: getRecentSessions(args.cwd, 3),
-          }],
-    // Snapshot once at mount — Static commits this to scrollback.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
-  );
+  const showWelcome =
+    messages.length === 0 &&
+    !streamingContent &&
+    !streamingReasoning &&
+    streamingTools.length === 0 &&
+    !pickerMode &&
+    !pendingPlan &&
+    !pendingApproval &&
+    !pendingQuestion;
 
   return (
     <Box flexDirection="column" height="100%">
-      <Static items={welcomeItems}>
-        {(item) => (
+      <Box flexDirection="column" flexGrow={1} padding={1}>
+        {showWelcome && (
           <WelcomeBanner
-            key={item.key}
             terminalColumns={terminalColumns}
-            greeting={item.greeting}
-            modelLabel={item.modelLabel}
-            cwd={item.cwd}
-            tips={item.tips}
-            recentSessions={item.recentSessions}
+            greeting="Welcome to Bubble"
+            modelLabel={agent.model ? displayModel(agent.model) : undefined}
+            cwd={friendlyCwd(args.cwd)}
+            tips={buildTips(agent, safeRegistry)}
+            recentSessions={getRecentSessions(args.cwd, 3)}
           />
         )}
-      </Static>
-      <Box flexDirection="column" flexGrow={1} padding={1}>
         <MessageList
           messages={messages}
           streamingContent={streamingContent}
