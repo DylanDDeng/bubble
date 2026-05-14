@@ -91,6 +91,9 @@ export class SessionLog {
   getTodos(): Todo[] {
     for (let i = this.entries.length - 1; i >= 0; i--) {
       const entry = this.entries[i];
+      if (entry.type === "marker" && entry.kind === "conversation_clear") {
+        return [];
+      }
       if (entry.type === "todos_snapshot") {
         return entry.todos.map((todo) => ({ ...todo }));
       }
@@ -113,6 +116,7 @@ export class SessionLog {
   toMessages(): Message[] {
     const messages: Message[] = [];
     let latestSummaryIndex = -1;
+    let latestClearIndex = -1;
 
     for (let index = this.entries.length - 1; index >= 0; index--) {
       if (this.entries[index].type === "summary") {
@@ -121,7 +125,15 @@ export class SessionLog {
       }
     }
 
-    if (latestSummaryIndex >= 0) {
+    for (let index = this.entries.length - 1; index >= 0; index--) {
+      const entry = this.entries[index];
+      if (entry.type === "marker" && entry.kind === "conversation_clear") {
+        latestClearIndex = index;
+        break;
+      }
+    }
+
+    if (latestSummaryIndex > latestClearIndex) {
       const summary = this.entries[latestSummaryIndex] as SessionSummaryEntry;
       messages.push({
         role: "system",
@@ -129,7 +141,10 @@ export class SessionLog {
       });
     }
 
-    const startIndex = latestSummaryIndex >= 0 ? latestSummaryIndex + 1 : 0;
+    const startIndex = Math.max(
+      latestSummaryIndex > latestClearIndex ? latestSummaryIndex + 1 : 0,
+      latestClearIndex + 1,
+    );
     for (let index = startIndex; index < this.entries.length; index++) {
       const entry = this.entries[index];
       switch (entry.type) {

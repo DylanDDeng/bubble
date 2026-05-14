@@ -326,9 +326,12 @@ const builtinSlashCommandEntries: SlashCommand[] = [
     name: "clear",
     description: "Clear the current conversation history",
     async handler(args, ctx) {
+      ctx.agent.messages = ctx.agent.messages.filter((m) => m.role === "system" || m.role === "meta");
+      ctx.sessionManager?.appendMarker("conversation_clear", "");
+      if (ctx.agent.getTodos().length > 0) {
+        ctx.agent.setTodos([]);
+      }
       ctx.clearMessages();
-      ctx.agent.messages = ctx.agent.messages.filter((m) => m.role === "system");
-      return "Conversation cleared.";
     },
   },
   {

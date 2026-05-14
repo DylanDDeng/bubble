@@ -382,6 +382,72 @@ describe("slash commands", () => {
     expect(result.result).toContain("Exited plan mode");
   });
 
+  it("/clear resets agent context, todos, display history, and records a session boundary", async () => {
+    let todos = [
+      { content: "a", activeForm: "doing a", status: "in_progress" },
+    ];
+    const appendMarker = vi.fn();
+    const clearMessages = vi.fn();
+    const ctx = createContext({
+      clearMessages,
+      agent: {
+        messages: [
+          { role: "system", content: "system prompt" },
+          { role: "meta", kind: "system-reminder", content: "tool reminder" },
+          { role: "user", content: "old prompt" },
+          { role: "assistant", content: "old answer" },
+        ],
+        getTodos: () => todos,
+        setTodos: (next: any[]) => {
+          todos = next;
+        },
+      } as any,
+      sessionManager: {
+        appendMarker,
+      } as any,
+    });
+
+    const result = await slashRegistry.execute("/clear", ctx);
+
+    expect(result.handled).toBe(true);
+    expect(result.result).toBeUndefined();
+    expect(ctx.agent.messages).toEqual([
+      { role: "system", content: "system prompt" },
+      { role: "meta", kind: "system-reminder", content: "tool reminder" },
+    ]);
+    expect(todos).toEqual([]);
+    expect(appendMarker).toHaveBeenCalledWith("conversation_clear", "");
+    expect(clearMessages).toHaveBeenCalledTimes(1);
+  });
+
+  it("/clear clears agent context before touching the TUI", async () => {
+    const appendMarker = vi.fn();
+    const ctx = createContext({
+      clearMessages: vi.fn(() => {
+        throw new Error("render failed");
+      }),
+      agent: {
+        messages: [
+          { role: "system", content: "system prompt" },
+          { role: "user", content: "old prompt" },
+        ],
+        getTodos: () => [],
+        setTodos: vi.fn(),
+      } as any,
+      sessionManager: {
+        appendMarker,
+      } as any,
+    });
+
+    const result = await slashRegistry.execute("/clear", ctx);
+
+    expect(result.result).toContain("render failed");
+    expect(ctx.agent.messages).toEqual([
+      { role: "system", content: "system prompt" },
+    ]);
+    expect(appendMarker).toHaveBeenCalledWith("conversation_clear", "");
+  });
+
   it("/todos lists items; /todos clear empties the list", async () => {
     let todos = [
       { content: "a", activeForm: "doing a", status: "in_progress" },

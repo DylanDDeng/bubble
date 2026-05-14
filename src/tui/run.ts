@@ -521,6 +521,7 @@ function OpenTuiApp(props: {
   let transcriptScrollInitialized = false;
   let rootBox: BoxRenderable | undefined;
   let sidebarShell: BoxRenderable | undefined;
+  let homeSurfaceShell: BoxRenderable | undefined;
   let transcriptHost: BoxRenderable | undefined;
   const transcriptState: TranscriptState = {
     entries: [],
@@ -1779,6 +1780,7 @@ function OpenTuiApp(props: {
     const homeActive = isHomeSurfaceActive(streamingDisplay);
     setSessionActive(!homeActive);
     const questionActive = !!pendingQuestion();
+    if (homeSurfaceShell) homeSurfaceShell.visible = homeActive;
     if (homeComposerShell) homeComposerShell.visible = homeActive && !questionActive;
     if (sessionComposerShell) sessionComposerShell.visible = !homeActive && !questionActive;
     syncSidebarChrome();
@@ -1891,7 +1893,6 @@ function OpenTuiApp(props: {
       cwd: props.args.cwd,
       width: contentWidth(),
       tip: homeTip,
-      renderHome: renderHomeSurface,
       plan: pendingPlan()?.plan,
       selectedOption: approvalOptionIdx(),
       showThinking: showThinking(),
@@ -2872,7 +2873,11 @@ function OpenTuiApp(props: {
     streamingDisplay = undefined;
     promptHistory = [];
     resetPromptHistoryBrowse();
+    transcriptState.expandedCompactions.clear();
+    transcriptState.expandedWrites.clear();
+    transcriptState.defaultWritesExpanded = false;
     redrawTranscript(undefined, []);
+    syncPromptSurfaces(true);
   };
 
   async function submitPrompt() {
@@ -4053,6 +4058,11 @@ function OpenTuiApp(props: {
   function renderHomeSurface() {
     const homeHeight = Math.max(16, dimensions().height - 4);
     return h("box", {
+      ref: (ref: BoxRenderable) => {
+        homeSurfaceShell = ref;
+        ref.visible = isHomeSurfaceActive(streamingDisplay);
+      },
+      visible: isHomeSurfaceActive(streamingDisplay),
       height: homeHeight,
       flexDirection: "column",
       alignItems: "center",
@@ -4926,6 +4936,7 @@ function OpenTuiApp(props: {
         minHeight: 0,
       },
       h("box", { height: 1 }),
+      renderHomeSurface(),
       h("box", {
         ref: (ref: BoxRenderable) => {
           const isNewHost = transcriptHost !== ref;
@@ -5477,20 +5488,7 @@ function updateTranscriptHost(
   const nextEntries: TranscriptEntry[] = [];
 
   if (!visibleMessages.length && !options?.plan) {
-    const key = `home:${options?.cwd ?? ""}:${options?.tip ?? ""}:${options?.renderHome ? "prompt" : "static"}`;
-    const previous = state.entries[0];
-    if (previous?.key !== key) {
-      clearTranscriptEntries(host, state);
-      const node = (options?.renderHome
-        ? options.renderHome()
-        : renderHomeState({
-          width: options?.width ?? 80,
-          cwd: options?.cwd ?? "",
-          tip: options?.tip ?? "",
-        })) as Renderable;
-      host.add(node);
-      state.entries = [{ key, signature: key, node, refs: {} }];
-    }
+    clearTranscriptEntries(host, state);
     host.requestRender();
     return;
   }
@@ -7007,7 +7005,6 @@ type TranscriptOptions = {
   cwd: string;
   width: number;
   tip?: string;
-  renderHome?: () => ReturnType<typeof h>;
   plan?: string;
   selectedOption?: number;
   showThinking?: boolean;

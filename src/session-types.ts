@@ -7,7 +7,13 @@ export interface SessionMetadata {
   cwd?: string;
 }
 
-export type SessionMarkerKind = "model_switch" | "provider_switch" | "thinking_level_switch" | "skill_activated" | "mode_switch";
+export type SessionMarkerKind =
+  | "model_switch"
+  | "provider_switch"
+  | "thinking_level_switch"
+  | "skill_activated"
+  | "mode_switch"
+  | "conversation_clear";
 
 interface BaseSessionLogEntry {
   id: string;

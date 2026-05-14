@@ -135,6 +135,35 @@ describe("SessionManager", () => {
     expect(JSON.parse(line).kind).toBe("thinking_level_switch");
   });
 
+  it("restores only messages after a conversation clear marker", () => {
+    const file = join(tmpDir, "clear-marker.jsonl");
+    const sm = new SessionManager(file);
+    sm.appendMessage({ role: "user", content: "old task" });
+    sm.appendMessage({ role: "assistant", content: "old answer" });
+    sm.appendMarker("conversation_clear", "");
+    sm.appendMessage({ role: "user", content: "new task" });
+
+    const messages = sm.getMessages();
+    expect(messages).toHaveLength(1);
+    expect(messages[0].role).toBe("user");
+    expect((messages[0] as any).content).toBe("new task");
+  });
+
+  it("does not restore summaries or todos from before a conversation clear marker", () => {
+    const file = join(tmpDir, "clear-marker-summary-todos.jsonl");
+    const sm = new SessionManager(file);
+    sm.appendMessage({ role: "user", content: "old task" });
+    sm.appendMessage({ role: "assistant", content: "old answer" });
+    sm.appendCompaction("old summary");
+    sm.appendTodosSnapshot([
+      { content: "old todo", activeForm: "doing old todo", status: "pending" },
+    ]);
+    sm.appendMarker("conversation_clear", "");
+
+    expect(sm.getMessages()).toEqual([]);
+    expect(sm.getTodos()).toEqual([]);
+  });
+
   it("can resume the latest prior session explicitly", () => {
     const first = SessionManager.create(tmpDir, "resume-a.jsonl");
     first.appendMessage({ role: "user", content: "older" });
