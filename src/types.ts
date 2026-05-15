@@ -328,7 +328,7 @@ export type AgentEvent =
   | { type: "tool_start"; id: string; name: string; args: Record<string, any> }
   | { type: "tool_update"; id: string; name: string; update: ToolUpdate }
   | { type: "tool_end"; id: string; name: string; result: ToolResult }
-  | { type: "turn_end"; usage?: TokenUsage }
+  | { type: "turn_end"; usage?: TokenUsage; willContinue?: boolean }
   | { type: "context_recovered"; droppedMessages: number; reason: "overflow" }
   | { type: "mode_changed"; mode: PermissionMode }
   | { type: "todos_updated"; todos: Todo[] }

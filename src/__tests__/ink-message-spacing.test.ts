@@ -1,5 +1,6 @@
+import { Writable } from "node:stream";
 import React from "react";
-import { renderToString } from "ink";
+import { render, renderToString } from "ink";
 import { describe, expect, it } from "vitest";
 import { MessageList } from "../tui-ink/message-list.js";
 import type { DisplayMessage, DisplayMessagePart } from "../tui-ink/display-history.js";
@@ -7,18 +8,45 @@ import type { DisplayMessage, DisplayMessagePart } from "../tui-ink/display-hist
 const terminalColumns = 90;
 
 function renderLines(messages: DisplayMessage[], streamingParts: DisplayMessagePart[] = []): string[] {
-  return renderToString(
-    React.createElement(MessageList, {
-      messages,
-      streamingContent: "",
-      streamingReasoning: "",
-      streamingTools: [],
-      streamingParts,
-      terminalColumns,
-      verboseTrace: false,
-    }),
-    { columns: terminalColumns },
-  ).split("\n");
+  return renderToString(renderMessageList(messages, terminalColumns, streamingParts), { columns: terminalColumns })
+    .split("\n");
+}
+
+function renderMessageList(
+  messages: DisplayMessage[],
+  columns: number,
+  streamingParts: DisplayMessagePart[] = [],
+): React.ReactElement {
+  return React.createElement(MessageList, {
+    messages,
+    streamingContent: "",
+    streamingReasoning: "",
+    streamingTools: [],
+    streamingParts,
+    terminalColumns: columns,
+    verboseTrace: false,
+  });
+}
+
+class CaptureStream extends Writable {
+  columns: number;
+  rows = 40;
+  isTTY = false;
+  output = "";
+
+  constructor(columns: number) {
+    super();
+    this.columns = columns;
+  }
+
+  _write(chunk: unknown, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+    this.output += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+    callback();
+  }
+}
+
+function countOccurrences(text: string, needle: string): number {
+  return text.split(needle).length - 1;
 }
 
 describe("Ink message spacing", () => {
@@ -67,6 +95,32 @@ describe("Ink message spacing", () => {
     expect(lines[0]).toContain("What is this project doing?");
     expect(lines[1]).toBe("");
     expect(lines[2]).toContain("List Directory 2 files");
+  });
+
+  it("does not replay static history when terminal columns change", async () => {
+    const stdout = new CaptureStream(90);
+    const stderr = new CaptureStream(90);
+    const sentinel: DisplayMessage = {
+      key: "resize-user",
+      role: "user",
+      content: "Resize replay sentinel",
+    };
+
+    const instance = render(renderMessageList([sentinel], 90), {
+      stdout: stdout as any,
+      stderr: stderr as any,
+      interactive: false,
+      patchConsole: false,
+      exitOnCtrlC: false,
+    });
+    await instance.waitUntilRenderFlush();
+
+    stdout.columns = 72;
+    instance.rerender(renderMessageList([sentinel], 72));
+    await instance.waitUntilRenderFlush();
+    instance.unmount();
+
+    expect(countOccurrences(stdout.output, "Resize replay sentinel")).toBe(1);
   });
 
   it("shows completed edit diffs inline with a 20-line default preview", () => {

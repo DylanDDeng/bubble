@@ -624,7 +624,7 @@ export class Agent {
         });
         flushGovernorReminders();
 
-        yield { type: "turn_end", usage: turnUsage };
+        yield { type: "turn_end", usage: turnUsage, willContinue: true };
 
         // Auto-continue: if we have tool results, the LLM needs to respond to them.
         // Emitting the turn boundary keeps UI renderers aligned with the persisted
@@ -642,8 +642,9 @@ export class Agent {
         flushReminders: flushGovernorReminders,
       });
       flushGovernorReminders();
-      yield { type: "turn_end", usage: turnUsage };
-      if ((hookState as any).forceContinuationReason) {
+      const willContinue = !!(hookState as any).forceContinuationReason;
+      yield { type: "turn_end", usage: turnUsage, willContinue };
+      if (willContinue) {
         delete (hookState as any).forceContinuationReason;
         continue;
       }

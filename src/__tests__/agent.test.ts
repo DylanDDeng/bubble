@@ -248,6 +248,9 @@ describe("Agent", () => {
       "turn_end",
       "agent_end",
     ]);
+    expect(events
+      .filter((event): event is Extract<AgentEvent, { type: "turn_end" }> => event.type === "turn_end")
+      .map((event) => event.willContinue ?? false)).toEqual([true, false]);
   });
 
   it("reports unknown tool error", async () => {

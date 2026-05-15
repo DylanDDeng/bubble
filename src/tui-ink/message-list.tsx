@@ -40,7 +40,7 @@ interface MessageListProps {
 
 type StaticItem =
   | { kind: "welcome"; key: string }
-  | { kind: "message"; key: string; message: DisplayMessage };
+  | { kind: "message"; key: string; message: DisplayMessage; showExpandHint: boolean };
 
 export function MessageList({
   messages,
@@ -60,33 +60,30 @@ export function MessageList({
     streamingTools.length > 0 ||
     streamingParts.length > 0
   );
-  // Split the message history so the trailing message — which can still be
-  // mutated by a subsequent turn_end merging more content — stays in a normal
-  // <Box>, while everything before it is committed to ink's <Static> region.
-  // Static items render once into the terminal scrollback, so streaming
-  // updates don't trigger a re-paint of older messages and the user's native
-  // terminal scrollback works as expected. It is keyed by terminal width so
-  // resize clears can repopulate scrollback with newly-wrapped history.
-  const lastIndex = messages.length - 1;
-  const frozen = lastIndex >= 0 ? messages.slice(0, lastIndex) : [];
-  const live = lastIndex >= 0 ? messages[lastIndex] : undefined;
-
+  // Committed messages enter ink's <Static> region immediately and never move
+  // between a live <Box> and Static. Moving the same message across those
+  // regions writes it into terminal scrollback twice. Mutable assistant output
+  // stays in StreamingMessage until the agent reports a final turn_end. Keep
+  // the Static instance identity stable across terminal resizes; remounting it
+  // would replay all previously-written scrollback items.
   const staticItems: StaticItem[] = [];
   if (welcomeBanner) {
     staticItems.push({ kind: "welcome", key: "welcome" });
   }
-  for (let i = 0; i < frozen.length; i++) {
-    const msg = frozen[i]!;
+  const lastMessageIndex = messages.length - 1;
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i]!;
     staticItems.push({
       kind: "message",
-      key: msg.key ?? `frozen-${i}`,
+      key: msg.key ?? `message-${i}`,
       message: msg,
+      showExpandHint: !hasStreaming && i === lastMessageIndex,
     });
   }
 
   return (
     <Box flexDirection="column">
-      <Static key={`static-${terminalColumns}`} items={staticItems}>
+      <Static items={staticItems}>
         {(item) => {
           if (item.kind === "welcome") {
             return <React.Fragment key={item.key}>{welcomeBanner}</React.Fragment>;
@@ -97,23 +94,12 @@ export function MessageList({
               message={item.message}
               terminalColumns={terminalColumns}
               verboseTrace={verboseTrace}
-              // Older messages don't anchor the expand hint — only the tail does.
-              showExpandHint={false}
-              nowTick={undefined}
+              showExpandHint={item.showExpandHint}
+              nowTick={item.showExpandHint ? nowTick : undefined}
             />
           );
         }}
       </Static>
-      {live && (
-        <MessageItem
-          key={live.key ?? "live"}
-          message={live}
-          terminalColumns={terminalColumns}
-          verboseTrace={verboseTrace}
-          showExpandHint={!hasStreaming}
-          nowTick={nowTick}
-        />
-      )}
       {hasStreaming && (
         <StreamingMessage
           content={streamingContent}
@@ -636,17 +622,23 @@ function ReasoningTraceBlock({ reasoning }: { reasoning: string }) {
 
 function UserMessageBlock({ content, terminalColumns }: { content: string; terminalColumns: number }) {
   const horizontalRoom = Math.max(20, terminalColumns - 4);
-  const contentWidth = Math.max(1, horizontalRoom - 2);
+  const maxBubbleTextWidth = Math.max(1, horizontalRoom - 4);
   const wrappedLines = content
     .split("\n")
-    .flatMap((line) => wrapByVisualWidth(line, contentWidth));
+    .flatMap((line) => wrapByVisualWidth(line, maxBubbleTextWidth));
+  const bubbleTextWidth = Math.min(
+    maxBubbleTextWidth,
+    Math.max(8, ...wrappedLines.map((line) => visualWidth(line))),
+  );
 
   return (
     <Box flexDirection="column">
       {wrappedLines.map((line, index) => (
         <Box key={index}>
           <Text color={theme.userRail}>▌ </Text>
-          <Text color={theme.userMessageText}>{line || " "}</Text>
+          <Text backgroundColor={theme.userMessageBg} color={theme.userMessageText}>
+            {` ${padVisual(line || " ", bubbleTextWidth)} `}
+          </Text>
         </Box>
       ))}
     </Box>

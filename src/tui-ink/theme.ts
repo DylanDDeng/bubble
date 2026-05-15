@@ -32,10 +32,10 @@ export const theme = {
   traceCommand: "#59BCE8",
   tracePending: "yellow",
 
-  // Message surfaces — user input is rendered as a left rail rather than a
-  // full-width filled block, so most terminals (light or dark) stay readable.
+  // Message surfaces — user input uses a subtle fill plus a left rail so it is
+  // visually separate from assistant/tool trace output without becoming noisy.
   userMessageBorder: "#8A7FC6",
-  userMessageBg: "#2a2a34", // retained for callers still wanting fill
+  userMessageBg: "#2a2a34",
   userMessageText: "#f3f3f7",
   userRail: "#8A7FC6",
 

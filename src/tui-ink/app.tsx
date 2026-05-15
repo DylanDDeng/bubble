@@ -650,6 +650,47 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         const syncStreamingParts = () => {
           setStreamingParts(snapshotDisplayParts(assistantParts));
         };
+        const hasAssistantOutput = () => (
+          !!assistantContent ||
+          !!assistantReasoning ||
+          toolCalls.length > 0 ||
+          assistantParts.length > 0
+        );
+        const commitAssistantMessage = () => {
+          if (!hasAssistantOutput()) return;
+
+          const currentParts = snapshotDisplayParts(assistantParts);
+          const currentToolCalls = [...toolCalls];
+          const partContent = assistantContent || contentFromParts(currentParts);
+          const partToolCalls = currentToolCalls.length > 0
+            ? currentToolCalls
+            : toolCallsFromParts(currentParts);
+          const msg: DisplayMessage = {
+            key: nextDisplayMessageKey("asst"),
+            role: "assistant",
+            content: partContent,
+          };
+          if (assistantReasoning) {
+            msg.reasoning = assistantReasoning;
+          }
+          if (partToolCalls.length > 0) {
+            msg.toolCalls = partToolCalls;
+          }
+          if (currentParts.length > 0) {
+            msg.parts = currentParts;
+          }
+          updateDisplayMessages((prev) => [...prev, msg]);
+        };
+        const clearAssistantStream = () => {
+          setStreamingContent("");
+          setStreamingReasoning("");
+          setStreamingTools([]);
+          setStreamingParts([]);
+          assistantContent = "";
+          assistantReasoning = "";
+          toolCalls.length = 0;
+          assistantParts.length = 0;
+        };
 
         try {
           for await (const event of agent.run(actualInput, args.cwd, { abortSignal: abortController.signal })) {
@@ -752,59 +793,18 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
                     completion: totals.completion + event.usage!.completionTokens,
                   }));
                 }
-                const currentContent = assistantContent;
-                const currentReasoning = assistantReasoning;
-                const currentToolCalls = [...toolCalls];
-                const currentParts = snapshotDisplayParts(assistantParts);
-                updateDisplayMessages((prev) => {
-                  const last = prev[prev.length - 1];
-                  if (last?.role === "assistant") {
-                    const mergedParts = [...(last.parts ?? []), ...currentParts];
-                    const merged: DisplayMessage = {
-                      ...last,
-                      reasoning: currentReasoning || last.reasoning,
-                      content:
-                        last.content && currentContent
-                          ? last.content + "\n" + currentContent
-                          : last.content + currentContent,
-                      toolCalls: [...(last.toolCalls || []), ...currentToolCalls],
-                      parts: mergedParts.length > 0 ? mergedParts : last.parts,
-                    };
-                    return [...prev.slice(0, -1), merged];
-                  }
-                  const partContent = currentContent || contentFromParts(currentParts);
-                  const partToolCalls = currentToolCalls.length > 0
-                    ? currentToolCalls
-                    : toolCallsFromParts(currentParts);
-                  const msg: DisplayMessage = {
-                    key: nextDisplayMessageKey("asst"),
-                    role: "assistant",
-                    content: partContent,
-                  };
-                  if (currentReasoning) {
-                    msg.reasoning = currentReasoning;
-                  }
-                  if (partToolCalls.length > 0) {
-                    msg.toolCalls = partToolCalls;
-                  }
-                  if (currentParts.length > 0) {
-                    msg.parts = currentParts;
-                  }
-                  return [...prev, msg];
-                });
-                setStreamingContent("");
-                setStreamingReasoning("");
-                setStreamingTools([]);
-                setStreamingParts([]);
-                assistantContent = "";
-                assistantReasoning = "";
-                toolCalls.length = 0;
-                assistantParts.length = 0;
+                if (event.willContinue) {
+                  syncStreamingParts();
+                  break;
+                }
+                commitAssistantMessage();
+                clearAssistantStream();
                 break;
               }
             }
           }
         } catch (err: any) {
+          commitAssistantMessage();
           if (err instanceof AgentAbortError || err?.name === "AbortError") {
             updateDisplayMessages((prev) => [
               ...prev,
