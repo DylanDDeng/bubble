@@ -143,6 +143,18 @@ export function shouldSubmitExactSlashSuggestion(input: string, suggestionName?:
   return input.trim() === `/${suggestionName}`;
 }
 
+export function resolveSlashEnterAction(
+  input: string,
+  suggestions: Array<{ name: string }>,
+  selectedIndex: number,
+): { kind: "submit" } | { kind: "complete"; text: string } | { kind: "none" } {
+  if (suggestions.some((item) => shouldSubmitExactSlashSuggestion(input, item.name))) {
+    return { kind: "submit" };
+  }
+  const suggestion = suggestions[selectedIndex];
+  return suggestion ? { kind: "complete", text: `/${suggestion.name} ` } : { kind: "none" };
+}
+
 export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, terminalColumns, cwd }: InputBoxProps) {
   const width = terminalColumns;
 
@@ -359,19 +371,49 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
     setSelectedIndex(0);
   };
 
+  const submitInput = (submittedText: string) => {
+    if (submittedText.trim().length === 0 && attachments.length === 0) return;
+    onSubmit({ text: submittedText, images: attachments });
+    setText("");
+    setCursor(0);
+    setSelectedIndex(0);
+    setAttachments([]);
+  };
+
+  const applySlashEnterAction = (submittedText: string) => {
+    const action = resolveSlashEnterAction(submittedText, slashSuggestions, selectedIndex);
+    if (action.kind === "submit") {
+      submitInput(submittedText);
+      return true;
+    }
+    if (action.kind === "complete") {
+      setText(action.text);
+      setCursor(action.text.length);
+      setSelectedIndex(0);
+      return true;
+    }
+    return false;
+  };
+
   useInput((input, key) => {
     if (disabled) return;
 
     if (input && /[\r\n]/.test(input) && !key.shift && !key.ctrl && !key.meta) {
       const beforeReturn = input.split(/[\r\n]/)[0] ?? "";
       const nextText = text.slice(0, cursor) + beforeReturn + text.slice(cursor);
-      if (nextText.trim().length > 0 || attachments.length > 0) {
-        onSubmit({ text: nextText, images: attachments });
-        setText("");
-        setCursor(0);
-        setSelectedIndex(0);
-        setAttachments([]);
+      if (showSuggestions) {
+        if (mode === "slash" && navigable && applySlashEnterAction(nextText)) {
+          return;
+        }
+        if (mode === "file") {
+          if (navigable) {
+            const suggestion = fileSuggestions[selectedIndex];
+            if (suggestion) applyFileSuggestion(suggestion.path);
+          }
+          return;
+        }
       }
+      submitInput(nextText);
       return;
     }
 
@@ -391,23 +433,15 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
       }
       if (key.return || key.tab) {
         if (mode === "slash" && navigable) {
-          const suggestion = slashSuggestions[selectedIndex];
-          const exactSuggestion = slashSuggestions.find((item) =>
-            shouldSubmitExactSlashSuggestion(text, item.name),
-          );
-          if (key.return && exactSuggestion) {
-            onSubmit({ text, images: attachments });
-            setText("");
-            setCursor(0);
-            setSelectedIndex(0);
-            setAttachments([]);
-            return;
-          }
-          if (suggestion) {
-            const newText = `/${suggestion.name} `;
-            setText(newText);
-            setCursor(newText.length);
-            setSelectedIndex(0);
+          if (key.return) applySlashEnterAction(text);
+          if (key.tab) {
+            const suggestion = slashSuggestions[selectedIndex];
+            if (suggestion) {
+              const newText = `/${suggestion.name} `;
+              setText(newText);
+              setCursor(newText.length);
+              setSelectedIndex(0);
+            }
           }
           return;
         }
@@ -432,12 +466,7 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
         // A paste is still mid-flight — dropping this Enter avoids submitting
         // an input state that doesn't yet include the paste.
         if (pastePendingRef.current) return;
-        if (text.trim().length === 0 && attachments.length === 0) return;
-        onSubmit({ text, images: attachments });
-        setText("");
-        setCursor(0);
-        setSelectedIndex(0);
-        setAttachments([]);
+        submitInput(text);
       }
       return;
     }

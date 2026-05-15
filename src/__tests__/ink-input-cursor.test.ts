@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { needsCursorRowCompensation, shouldSubmitExactSlashSuggestion } from "../tui-ink/input-box.js";
+import {
+  needsCursorRowCompensation,
+  resolveSlashEnterAction,
+  shouldSubmitExactSlashSuggestion,
+} from "../tui-ink/input-box.js";
 
 describe("Ink input cursor row compensation", () => {
   it("compensates fullscreen frames where Ink omits the trailing newline", () => {
@@ -25,5 +29,24 @@ describe("Ink input slash command submission", () => {
     expect(shouldSubmitExactSlashSuggestion("/qui", "quit")).toBe(false);
     expect(shouldSubmitExactSlashSuggestion("/quit now", "quit")).toBe(false);
     expect(shouldSubmitExactSlashSuggestion("/quit", "quickstart")).toBe(false);
+  });
+
+  it("completes partial slash commands on Enter", () => {
+    const suggestions = [{ name: "help" }, { name: "provider" }];
+
+    expect(resolveSlashEnterAction("/", suggestions, 0)).toEqual({
+      kind: "complete",
+      text: "/help ",
+    });
+    expect(resolveSlashEnterAction("/prov", suggestions, 1)).toEqual({
+      kind: "complete",
+      text: "/provider ",
+    });
+  });
+
+  it("submits exact slash commands on Enter even when suggestions are visible", () => {
+    expect(resolveSlashEnterAction("/provider", [{ name: "provider" }], 0)).toEqual({
+      kind: "submit",
+    });
   });
 });
