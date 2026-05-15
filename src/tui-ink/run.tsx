@@ -35,35 +35,34 @@ export interface RunTuiOptions {
 }
 
 export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions = {}) {
-  await new Promise<void>((resolve) => {
-    let resolved = false;
-    const instance = render(
-      <App
-        agent={agent}
-        args={args}
-        sessionManager={options.sessionManager}
-        createProvider={options.createProvider}
-        registry={options.registry}
-        skillRegistry={options.skillRegistry}
-        planHandlerRef={options.planHandlerRef}
-        approvalHandlerRef={options.approvalHandlerRef}
-        questionController={options.questionController}
-        bashAllowlist={options.bashAllowlist}
-        settingsManager={options.settingsManager}
-        lspService={options.lspService}
-        mcpManager={options.mcpManager}
-        flushMemory={options.flushMemory}
-        runMemoryCompaction={options.runMemoryCompaction}
-        runMemorySummary={options.runMemorySummary}
-        runMemoryRefresh={options.runMemoryRefresh}
-        bypassEnabled={options.bypassEnabled}
-        onExit={() => {
-          if (resolved) return;
-          resolved = true;
-          instance.unmount();
-          resolve();
-        }}
-      />,
-    );
-  });
+  const instance = render(
+    <App
+      agent={agent}
+      args={args}
+      sessionManager={options.sessionManager}
+      createProvider={options.createProvider}
+      registry={options.registry}
+      skillRegistry={options.skillRegistry}
+      planHandlerRef={options.planHandlerRef}
+      approvalHandlerRef={options.approvalHandlerRef}
+      questionController={options.questionController}
+      bashAllowlist={options.bashAllowlist}
+      settingsManager={options.settingsManager}
+      lspService={options.lspService}
+      mcpManager={options.mcpManager}
+      flushMemory={options.flushMemory}
+      runMemoryCompaction={options.runMemoryCompaction}
+      runMemorySummary={options.runMemorySummary}
+      runMemoryRefresh={options.runMemoryRefresh}
+      bypassEnabled={options.bypassEnabled}
+      onExit={() => {
+        // The app already called useApp().exit() inside requestExit, which
+        // triggers Ink's own unmount + TTY restore. waitUntilExit() below is
+        // the canonical signal that we're done — we deliberately do *not*
+        // call instance.unmount() again here to avoid double-teardown
+        // warnings on React 19.
+      }}
+    />,
+  );
+  await instance.waitUntilExit();
 }

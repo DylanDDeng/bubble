@@ -254,24 +254,57 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   const requestExit = useCallback(() => {
     if (exitRequestedRef.current) return;
     exitRequestedRef.current = true;
-    void (async () => {
+
+    // Cancel any in-flight agent run first so its tools / network calls
+    // don't keep emitting text after Ink unmounts and corrupt the
+    // restored shell prompt.
+    if (activeAbortRef.current) {
       try {
-        await flushMemory?.();
+        activeAbortRef.current.abort(new AgentAbortError("Exiting Bubble."));
       } catch {
-        // Memory extraction is best-effort and must not trap terminal exit.
-      } finally {
-        exit();
-        if (process.stdin.isTTY) {
-          try {
-            process.stdin.setRawMode(false);
-          } catch {
-            // ignore terminal cleanup failures during shutdown
-          }
-        }
-        process.stdin.pause();
-        process.stdin.unref?.();
-        onExit?.();
+        // ignore — abort is best effort during shutdown
       }
+      activeAbortRef.current = null;
+    }
+
+    void (async () => {
+      let flushError: unknown = null;
+      if (flushMemory) {
+        // Bound the flush so a stuck LLM/network call cannot trap the TUI.
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            flushMemory(),
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(
+                () => reject(new Error("flushMemory timed out after 3s")),
+                3000,
+              );
+            }),
+          ]);
+        } catch (err) {
+          flushError = err;
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      }
+
+      // Hand off to Ink. Ink's render instance owns TTY teardown (raw mode,
+      // cursor, alt-screen); doing it ourselves here races with that and
+      // leaves the terminal in odd states. run.tsx awaits waitUntilExit()
+      // and then main.ts handles the rest.
+      exit();
+
+      // Surface flush failures *after* Ink has restored the screen so the
+      // warning lands on the real shell instead of being clobbered.
+      if (flushError) {
+        const message = flushError instanceof Error ? flushError.message : String(flushError);
+        process.nextTick(() => {
+          process.stderr.write(`warning: failed to flush memory on exit: ${message}\n`);
+        });
+      }
+
+      onExit?.();
     })();
   }, [exit, flushMemory, onExit]);
 
@@ -795,6 +828,12 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       // Slash commands and skill invocations drop any attached images —
       // they're meant for pure command routing.
       if (input.startsWith("/")) {
+        // Fast-path `/quit` and `/exit` before slash-registry / skill
+        // resolution. This guarantees a literal "/quit" always exits even if
+        // a skill or alias of the same name is later registered. The
+        // canonical handler still lives in slash-commands/commands.ts so
+        // `/help` and the slash menu can list it; both paths end up calling
+        // requestExit().
         if (/^\/(?:quit|exit)\s*$/.test(input.trim())) {
           requestExit();
           return;
