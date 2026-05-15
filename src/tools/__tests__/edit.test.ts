@@ -24,6 +24,14 @@ describe("edit tool", () => {
     expect(result.isError).toBeUndefined();
     expect(result.content).toContain("Edited");
     expect(result.content).toContain("42");
+    expect(result.metadata).toMatchObject({
+      kind: "edit",
+      path: file,
+      addedLines: 1,
+      removedLines: 1,
+    });
+    expect(result.metadata?.diff).toContain("-const x = 1;");
+    expect(result.metadata?.diff).toContain("+const x = 42;");
   });
 
   it("applies multiple replacements simultaneously", async () => {

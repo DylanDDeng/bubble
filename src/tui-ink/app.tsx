@@ -134,6 +134,7 @@ function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] 
             args,
             result: toolResult ? (toolResult as any).content as string : undefined,
             isError: toolResult ? (toolResult as any).content?.startsWith?.("Error:") : false,
+            metadata: toolResult ? (toolResult as any).metadata : undefined,
           });
         }
       }
@@ -729,6 +730,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
                 if (tc) {
                   tc.result = event.result.content;
                   tc.isError = event.result.isError;
+                  tc.metadata = event.result.metadata;
                   setStreamingTools([...toolCalls]);
                   syncStreamingParts();
                 }

@@ -4,7 +4,8 @@ import { theme } from "./theme.js";
 import { highlightCode, inferLang } from "./code-highlight.js";
 import { MarkdownContent } from "./markdown.js";
 import type { DisplayMessage, DisplayMessagePart, DisplayToolCall } from "./display-history.js";
-import { buildTraceGroups, formatElapsed, traceGroupLabel, type TraceGroup } from "./trace-groups.js";
+import { buildTraceGroups, formatElapsed, formatTracePath, traceGroupLabel, type TraceGroup } from "./trace-groups.js";
+import { EDIT_COLLAPSED_DIFF_LINES, formatEditSuccessSummary, getEditDiffDetails } from "./edit-diff.js";
 
 /**
  * Hint surfaced when the user can interrupt the currently-running pending tool
@@ -473,6 +474,20 @@ function TraceGroupBlock({
 }) {
   const waiting = isTraceGroupWaitingForApproval(group, pendingApproval);
   const status = traceGroupStatus(group, waiting, nowTick);
+  const editTool = group.kind === "edit" && group.raw.length === 1 ? group.raw[0] : undefined;
+  const editDetails = editTool && !group.pending && !group.hasError ? getEditDiffDetails(editTool) : null;
+  if (editTool && editDetails) {
+    return (
+      <EditTraceBlock
+        tool={editTool}
+        details={editDetails}
+        terminalColumns={terminalColumns}
+        compactTop={compactTop}
+        status={status}
+      />
+    );
+  }
+
   const titleColor = group.hasError ? theme.error : theme.traceAction;
   const detailColor = group.hasError ? theme.error : theme.traceDetail;
   const commandWidth = Math.max(14, terminalColumns - group.title.length - 16);
@@ -510,6 +525,48 @@ function TraceGroupBlock({
           </Text>
         </Box>
       )}
+    </Box>
+  );
+}
+
+function EditTraceBlock({
+  tool,
+  details,
+  terminalColumns,
+  compactTop,
+  status,
+}: {
+  tool: DisplayToolCall;
+  details: NonNullable<ReturnType<typeof getEditDiffDetails>>;
+  terminalColumns: number;
+  compactTop: boolean;
+  status: { text: string; color: string } | null;
+}) {
+  const path = formatTracePath(details.path ?? tool.args.path ?? "");
+  const pathWidth = Math.max(14, terminalColumns - 12);
+  return (
+    <Box flexDirection="column" marginLeft={2} marginTop={compactTop ? 0 : 1}>
+      <Box>
+        <Text bold color={theme.traceAction}>Edit</Text>
+        {path && (
+          <>
+            <Text> </Text>
+            <Text color={theme.traceCommand}>{truncateVisual(path, pathWidth)}</Text>
+          </>
+        )}
+        {status && <Text color={status.color}> {status.text}</Text>}
+      </Box>
+      <Box marginLeft={2}>
+        <Text color={theme.traceDetail}>⎿  </Text>
+        <Text color={theme.success}>{formatEditSuccessSummary(details)}</Text>
+      </Box>
+      <DiffBlock
+        diff={details.diff}
+        terminalColumns={terminalColumns}
+        maxLines={EDIT_COLLAPSED_DIFF_LINES}
+        verbose={false}
+        showExpandHint={true}
+      />
     </Box>
   );
 }
@@ -630,25 +687,6 @@ function toolGlyph(name: string): string {
   return TOOL_GLYPHS[name] ?? "●";
 }
 
-function extractDiffBody(result: string): string | null {
-  const idx = result.indexOf("\nDiff:\n");
-  if (idx === -1) return null;
-  return result.slice(idx + "\nDiff:\n".length);
-}
-
-function parseDiffStats(result: string): { added: number; removed: number } | null {
-  const body = extractDiffBody(result);
-  if (!body) return null;
-  let added = 0;
-  let removed = 0;
-  for (const line of body.split("\n")) {
-    if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("@@")) continue;
-    if (line.startsWith("+")) added++;
-    else if (line.startsWith("-")) removed++;
-  }
-  return { added, removed };
-}
-
 function getToolHeader(toolCall: DisplayToolCall): string | undefined {
   const args = toolCall.args || {};
   const trunc = (s: string, n = 50) => (s.length > n ? s.slice(0, n) + "..." : s);
@@ -693,9 +731,7 @@ function summarizeToolResult(tc: DisplayToolCall): string {
       return "Wrote file";
     }
     case "edit": {
-      const stats = parseDiffStats(raw);
-      if (stats) return `+${stats.added} -${stats.removed} lines`;
-      return "Patched file";
+      return formatEditSuccessSummary(getEditDiffDetails(tc));
     }
     case "bash":
       return lineCount > 0 ? `${p(lineCount, "line", "lines")} output` : "Done";
@@ -795,9 +831,11 @@ function ToolCallDisplay({
   } else {
     summary = summarizeToolResult(toolCall);
     if (toolCall.isError) summaryColor = theme.error;
+    else if (toolCall.name === "edit" && toolCall.result !== undefined) summaryColor = theme.success;
   }
 
-  const isEditDiff = toolCall.name === "edit" && !toolCall.isError && toolCall.result !== undefined;
+  const editDetails = getEditDiffDetails(toolCall);
+  const isEditDiff = editDetails !== null && toolCall.result !== undefined;
   // Only show the file preview once the tool actually executed. During the
   // streaming-args phase, args.content is incomplete and re-rendering the
   // entire body per delta both looks chaotic and breaks on partial escapes.
@@ -822,7 +860,7 @@ function ToolCallDisplay({
       )}
       {isEditDiff && (
         <DiffBlock
-          result={toolCall.result!}
+          diff={editDetails!.diff}
           terminalColumns={terminalColumns}
           maxLines={maxLines}
           verbose={verbose}
@@ -933,7 +971,9 @@ function parseDiffLines(body: string): DiffLine[] {
   const result: DiffLine[] = [];
   let oldNum = 0;
   let newNum = 0;
-  for (const raw of body.split("\n")) {
+  const rawLines = body.split("\n");
+  if (rawLines[rawLines.length - 1] === "") rawLines.pop();
+  for (const raw of rawLines) {
     if (
       raw.startsWith("+++") ||
       raw.startsWith("---") ||
@@ -966,21 +1006,19 @@ function parseDiffLines(body: string): DiffLine[] {
 }
 
 function DiffBlock({
-  result,
+  diff,
   terminalColumns,
   maxLines,
   verbose,
   showExpandHint,
 }: {
-  result: string;
+  diff: string;
   terminalColumns: number;
   maxLines: number;
   verbose: boolean;
   showExpandHint: boolean;
 }) {
-  const body = extractDiffBody(result);
-  if (!body) return null;
-  const lines = parseDiffLines(body);
+  const lines = parseDiffLines(diff);
   const shown = lines.slice(0, maxLines);
   const remaining = Math.max(0, lines.length - maxLines);
 
@@ -1046,10 +1084,10 @@ function buildDigest(toolCalls: DisplayToolCall[]): string | null {
   for (const tc of toolCalls) {
     if (tc.isError || !tc.result) continue;
     if (tc.name === "edit") {
-      const stats = parseDiffStats(tc.result);
-      if (stats) {
-        added += stats.added;
-        removed += stats.removed;
+      const details = getEditDiffDetails(tc);
+      if (details) {
+        added += details.added;
+        removed += details.removed;
       }
       if (tc.args.path) paths.add(String(tc.args.path));
       edits += 1;

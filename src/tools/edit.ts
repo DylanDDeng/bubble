@@ -10,6 +10,7 @@ import { resolve } from "node:path";
 import { createTwoFilesPatch } from "diff";
 import { gateToolAction } from "../approval/tool-helper.js";
 import type { ApprovalController } from "../approval/types.js";
+import { countUnifiedDiffChanges } from "../diff-stats.js";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
 import { formatDiagnosticBlocks, type LspService } from "../lsp/index.js";
 import { applyEditsToContent, EditApplyError, formatEditMatchNotes } from "./edit-apply.js";
@@ -82,6 +83,7 @@ export function createEditTool(cwd: string, approval?: ApprovalController, lsp?:
         }
 
         const diff = createTwoFilesPatch(filePath, filePath, original, applied.content, "original", "modified", { context: 3 });
+        const diffStats = countUnifiedDiffChanges(diff);
 
         // Gate on the approval controller BEFORE persisting the change.
         const gate = await gateToolAction(approval, {
@@ -126,6 +128,9 @@ export function createEditTool(cwd: string, approval?: ApprovalController, lsp?:
           metadata: {
             kind: "edit",
             path: filePath,
+            diff,
+            addedLines: diffStats.added,
+            removedLines: diffStats.removed,
           },
         };
       });

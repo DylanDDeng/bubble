@@ -130,6 +130,9 @@ export interface ToolResultMetadata {
   searchFamily?: string;
   reason?: string;
   arbiterNote?: string;
+  diff?: string;
+  addedLines?: number;
+  removedLines?: number;
   [key: string]: unknown;
 }
 

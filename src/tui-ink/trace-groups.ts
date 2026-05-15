@@ -1,5 +1,6 @@
 import os from "node:os";
 import type { DisplayToolCall } from "./display-history.js";
+import { getEditDiffDetails } from "./edit-diff.js";
 
 export type TraceGroupKind =
   | "list"
@@ -130,7 +131,7 @@ function classifyTool(toolCall: DisplayToolCall): TraceClassifier {
     case "bash":
       return { kind: "execute", title: "Execute", bucketKey: `execute:${toolCall.id}`, groupable: false };
     case "edit":
-      return { kind: "edit", title: "Edit", bucketKey: "edit", groupable: true };
+      return { kind: "edit", title: "Edit", bucketKey: `edit:${toolCall.id}`, groupable: false };
     case "write":
       return { kind: "write", title: "Write", bucketKey: "write", groupable: true };
     default:
@@ -301,10 +302,8 @@ function buildMutationGroup(
   const items = raw
     .map((tool) => {
       const path = formatTracePath(tool.args.path ?? "", options.homeDir);
-      const stats = tool.name === "edit" ? parseDiffStats(tool.result) : null;
-      const suffix = stats && (stats.added || stats.removed)
-        ? ` (+${stats.added} -${stats.removed})`
-        : "";
+      const details = tool.name === "edit" ? getEditDiffDetails(tool) : null;
+      const suffix = details ? ` ${formatCompactEditStats(details.added, details.removed)}` : "";
       return path ? `${path}${suffix}` : "";
     })
     .filter(Boolean);
@@ -400,16 +399,9 @@ function toolHeader(tool: DisplayToolCall, homeDir: string): string | undefined 
   return undefined;
 }
 
-function parseDiffStats(result: string | undefined): { added: number; removed: number } | null {
-  if (!result) return null;
-  const idx = result.indexOf("\nDiff:\n");
-  if (idx === -1) return null;
-  let added = 0;
-  let removed = 0;
-  for (const line of result.slice(idx + "\nDiff:\n".length).split("\n")) {
-    if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("@@")) continue;
-    if (line.startsWith("+")) added++;
-    else if (line.startsWith("-")) removed++;
-  }
-  return { added, removed };
+function formatCompactEditStats(added: number, removed: number): string {
+  const parts: string[] = [];
+  if (added > 0) parts.push(`+${added}`);
+  if (removed > 0) parts.push(`-${removed}`);
+  return parts.length > 0 ? `(${parts.join(" ")})` : "";
 }
