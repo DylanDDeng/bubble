@@ -155,6 +155,38 @@ export function resolveSlashEnterAction(
   return suggestion ? { kind: "complete", text: `/${suggestion.name} ` } : { kind: "none" };
 }
 
+export type InkEnterIntent = "none" | "newline" | "submit";
+
+const KITTY_RETURN_PRIVATE_USE = String.fromCodePoint(57345);
+
+export function isInkModifiedEnterInput(input: string): boolean {
+  const normalized = input.startsWith("\x1b") ? input.slice(1) : input;
+  return normalized === KITTY_RETURN_PRIVATE_USE
+    || /^\[(?:13|57345)(?::\d+){0,2};[2-9]\d*(?::[12])?u$/.test(normalized)
+    || /^\[27;[2-9]\d*(?::[12])?;(?:13|57345)~$/.test(normalized);
+}
+
+export function resolveInkEnterIntent(
+  input: string,
+  key: { return?: boolean; shift?: boolean; ctrl?: boolean; meta?: boolean; eventType?: string },
+): InkEnterIntent {
+  if (key.eventType === "release") return "none";
+  const hasReturnInput = !!input && /[\r\n]/.test(input);
+  if (isInkModifiedEnterInput(input)) return "newline";
+  const isEnter = hasReturnInput || !!key.return;
+  if (!isEnter) return "none";
+  if (key.shift || key.ctrl || key.meta) return "newline";
+  return "submit";
+}
+
+export function insertNewlineAtCursor(text: string, cursor: number) {
+  const clampedCursor = Math.max(0, Math.min(text.length, cursor));
+  return {
+    text: `${text.slice(0, clampedCursor)}\n${text.slice(clampedCursor)}`,
+    cursor: clampedCursor + 1,
+  };
+}
+
 export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, terminalColumns, cwd }: InputBoxProps) {
   const width = terminalColumns;
 
@@ -397,8 +429,31 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
 
   useInput((input, key) => {
     if (disabled) return;
+    if (process.env.BUBBLE_KEY_DEBUG) {
+      try {
+        appendFileSync(
+          "/tmp/bubble-key.log",
+          JSON.stringify({
+            t: new Date().toISOString(),
+            input,
+            inputCodes: [...input].map((ch) => ch.codePointAt(0)),
+            key,
+          }) + "\n",
+        );
+      } catch {}
+    }
 
-    if (input && /[\r\n]/.test(input) && !key.shift && !key.ctrl && !key.meta) {
+    const enterIntent = resolveInkEnterIntent(input, key);
+
+    if (enterIntent === "newline") {
+      const next = insertNewlineAtCursor(text, cursor);
+      setText(next.text);
+      setCursor(next.cursor);
+      setSelectedIndex(0);
+      return;
+    }
+
+    if (enterIntent === "submit" && input && /[\r\n]/.test(input)) {
       const beforeReturn = input.split(/[\r\n]/)[0] ?? "";
       const nextText = text.slice(0, cursor) + beforeReturn + text.slice(cursor);
       if (showSuggestions) {
@@ -456,18 +511,11 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
       }
     }
 
-    if (key.return) {
-      if (key.shift || key.ctrl || key.meta) {
-        const before = text.slice(0, cursor);
-        const after = text.slice(cursor);
-        setText(before + "\n" + after);
-        setCursor(cursor + 1);
-      } else {
-        // A paste is still mid-flight — dropping this Enter avoids submitting
-        // an input state that doesn't yet include the paste.
-        if (pastePendingRef.current) return;
-        submitInput(text);
-      }
+    if (enterIntent === "submit") {
+      // A paste is still mid-flight — dropping this Enter avoids submitting
+      // an input state that doesn't yet include the paste.
+      if (pastePendingRef.current) return;
+      submitInput(text);
       return;
     }
 

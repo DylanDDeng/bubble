@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  insertNewlineAtCursor,
+  isInkModifiedEnterInput,
   needsCursorRowCompensation,
+  resolveInkEnterIntent,
   resolveSlashEnterAction,
   shouldSubmitExactSlashSuggestion,
 } from "../tui-ink/input-box.js";
@@ -48,5 +51,39 @@ describe("Ink input slash command submission", () => {
     expect(resolveSlashEnterAction("/provider", [{ name: "provider" }], 0)).toEqual({
       kind: "submit",
     });
+  });
+});
+
+describe("Ink input Enter handling", () => {
+  it("treats modified Enter as newline before submit/autocomplete handling", () => {
+    expect(resolveInkEnterIntent("", { return: true, shift: true })).toBe("newline");
+    expect(resolveInkEnterIntent("", { return: true, ctrl: true })).toBe("newline");
+    expect(resolveInkEnterIntent("\r", { shift: true })).toBe("newline");
+    expect(resolveInkEnterIntent("\n", { meta: true })).toBe("newline");
+    expect(resolveInkEnterIntent(String.fromCodePoint(57345), { shift: true })).toBe("newline");
+    expect(resolveInkEnterIntent("[27;2;13~", {})).toBe("newline");
+    expect(resolveInkEnterIntent("\x1b[13;2u", {})).toBe("newline");
+  });
+
+  it("treats unmodified Enter as submit", () => {
+    expect(resolveInkEnterIntent("", { return: true })).toBe("submit");
+    expect(resolveInkEnterIntent("\r", {})).toBe("submit");
+    expect(resolveInkEnterIntent("x", {})).toBe("none");
+    expect(resolveInkEnterIntent("X", { shift: true })).toBe("none");
+    expect(resolveInkEnterIntent("\r", { return: true, shift: true, eventType: "release" })).toBe("none");
+  });
+
+  it("inserts a newline at the cursor without dropping surrounding text", () => {
+    expect(insertNewlineAtCursor("hello", 2)).toEqual({ text: "he\nllo", cursor: 3 });
+    expect(insertNewlineAtCursor("hello", -1)).toEqual({ text: "\nhello", cursor: 1 });
+    expect(insertNewlineAtCursor("hello", 99)).toEqual({ text: "hello\n", cursor: 6 });
+  });
+
+  it("detects Ink's raw modified Enter fallback forms", () => {
+    expect(isInkModifiedEnterInput("[57345;2u")).toBe(true);
+    expect(isInkModifiedEnterInput("\x1b[13;2:1u")).toBe(true);
+    expect(isInkModifiedEnterInput("[27;5;13~")).toBe(true);
+    expect(isInkModifiedEnterInput("[13u")).toBe(false);
+    expect(isInkModifiedEnterInput("x")).toBe(false);
   });
 });

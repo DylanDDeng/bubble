@@ -63,6 +63,12 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
         // warnings on React 19.
       }}
     />,
+    {
+      kittyKeyboard: {
+        mode: "enabled",
+        flags: ["disambiguateEscapeCodes"],
+      },
+    },
   );
   await instance.waitUntilExit();
   // zsh's PROMPT_SP prints a reverse-video `%` if the previous program left
