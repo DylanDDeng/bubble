@@ -65,4 +65,11 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
     />,
   );
   await instance.waitUntilExit();
+  // zsh's PROMPT_SP prints a reverse-video `%` if the previous program left
+  // the cursor mid-line. Ink's interactive teardown (log-update.done) doesn't
+  // emit a trailing newline, so mirror Ink's non-interactive branch and align
+  // the cursor to column 0 before handing control back to the shell.
+  if (process.stdout.isTTY) {
+    process.stdout.write("\n");
+  }
 }
