@@ -309,6 +309,12 @@ function buildMutationGroup(
     .filter(Boolean);
   const { shown, omitted } = take(items, options.maxItems);
   const count = items.length || raw.length;
+  const errorPreview = hasError
+    ? raw
+      .filter((tool) => tool.isError)
+      .flatMap((tool) => resultLines(tool.result).map((line) => formatTracePath(line, options.homeDir)))
+      .slice(0, options.maxPreviewLines)
+    : [];
   return {
     kind: classifier.kind,
     title: classifier.title,
@@ -316,7 +322,7 @@ function buildMutationGroup(
     count,
     noun: plural(count, "file", "files"),
     items: shown,
-    previewLines: [],
+    previewLines: errorPreview,
     omitted,
     pending,
     hasError,

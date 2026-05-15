@@ -87,7 +87,7 @@ describe("createProviderInstance", () => {
       model: "accounts/fireworks/models/kimi-k2p6",
     }));
 
-    expect(body.max_tokens).toBe(4096);
+    expect(body.max_tokens).toBe(32768);
     expect(body.parallel_tool_calls).toBeUndefined();
     expect(body.messages[0].reasoning_content).toBeUndefined();
   });

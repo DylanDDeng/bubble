@@ -113,6 +113,29 @@ describe("Ink trace groups", () => {
     });
   });
 
+  it("surfaces mutation error details in compact trace groups", () => {
+    const groups = buildTraceGroups([
+      tool(
+        "write",
+        {},
+        "Error: The arguments for \"write\" failed to parse as JSON, indicating the tool call was truncated.",
+        { isError: true },
+      ),
+    ], { homeDir });
+
+    expect(groups[0]).toMatchObject({
+      kind: "write",
+      title: "Write",
+      count: 1,
+      noun: "file",
+      items: [],
+      previewLines: [
+        "Error: The arguments for \"write\" failed to parse as JSON, indicating the tool call was truncated.",
+      ],
+      hasError: true,
+    });
+  });
+
   it("formats home-relative paths consistently", () => {
     expect(formatTracePath("/Users/tester/project/a.ts", homeDir)).toBe("~/project/a.ts");
     expect(formatTracePath("/tmp/a.ts", homeDir)).toBe("/tmp/a.ts");

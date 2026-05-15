@@ -15,6 +15,7 @@ export interface ProviderRequestConfig {
 const MOONSHOT_PROVIDER_IDS = new Set(["moonshot-cn", "moonshot-intl", "kimi-for-coding"]);
 const KIMI_K25_FAMILY = new Set(["kimi-k2.5", "k2.6-code-preview", "kimi-k2.6"]);
 const KIMI_THINKING_FAMILY = new Set(["kimi-k2-thinking", "kimi-k2-thinking-turbo"]);
+const KIMI_K26_DEFAULT_MAX_TOKENS = 32768;
 
 function isFireworksKimi(providerId: string, modelId: string): boolean {
   const model = modelId.toLowerCase();
@@ -44,7 +45,7 @@ export function resolveProviderRequestConfig(
       effectiveThinkingLevel,
       reasoningContentEcho: "none",
       parallelToolCalls: false,
-      maxTokens: 4096,
+      maxTokens: KIMI_K26_DEFAULT_MAX_TOKENS,
     };
   }
 

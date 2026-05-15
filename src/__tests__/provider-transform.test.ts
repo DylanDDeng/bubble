@@ -70,7 +70,7 @@ describe("provider transform", () => {
     expect(config.effectiveThinkingLevel).toBe("off");
     expect(config.reasoningContentEcho).toBe("none");
     expect(config.parallelToolCalls).toBe(false);
-    expect(config.maxTokens).toBe(4096);
+    expect(config.maxTokens).toBe(32768);
   });
 
   it("does not disable parallel tool calls outside Fireworks Kimi", () => {
