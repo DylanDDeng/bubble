@@ -24,15 +24,66 @@ interface WelcomeVisibilityInput {
 const require = createRequire(import.meta.url);
 const PACKAGE_VERSION = readPackageVersion();
 
-const BUBBLE_LOGO = [
-  "████   █   █  ███   ███   █     ████",
-  "█   █  █   █  █  █  █  █  █     █   ",
-  "████   █   █  ███   ███   █     ███ ",
-  "█   █  █   █  █  █  █  █  █     █   ",
-  "████    ███   ███   ███   ████  ████",
+const BUBBLE_LOGO_LETTERS = [
+  [
+    "██████ ",
+    "██   ██",
+    "██   ██",
+    "██████ ",
+    "██   ██",
+    "██   ██",
+    "██████ ",
+  ],
+  [
+    "██   ██",
+    "██   ██",
+    "██   ██",
+    "██   ██",
+    "██   ██",
+    "██   ██",
+    " █████ ",
+  ],
+  [
+    "██████ ",
+    "██   ██",
+    "██   ██",
+    "██████ ",
+    "██   ██",
+    "██   ██",
+    "██████ ",
+  ],
+  [
+    "██████ ",
+    "██   ██",
+    "██   ██",
+    "██████ ",
+    "██   ██",
+    "██   ██",
+    "██████ ",
+  ],
+  [
+    "██     ",
+    "██     ",
+    "██     ",
+    "██     ",
+    "██     ",
+    "██     ",
+    "███████",
+  ],
+  [
+    "███████",
+    "██     ",
+    "██     ",
+    "██████ ",
+    "██     ",
+    "██     ",
+    "███████",
+  ],
 ];
 
-const COMPACT_LOGO = ["BUBBLE"];
+const LOGO_COLORS = ["#f3f3f7", "#f3f3f7", "#d8c7ff", "#d8c7ff", "#a9c7ff", "#a9c7ff"];
+const COMPACT_LOGO = ["B", "U", "B", "B", "L", "E"];
+const WIDE_LOGO_MIN_WIDTH = 52;
 
 export function shouldShowWelcomeBanner({
   startedWithVisibleHistory,
@@ -53,7 +104,7 @@ export function WelcomeBanner({
   hasAgentsFile = false,
 }: WelcomeBannerProps) {
   const effectiveWidth = Math.max(20, Math.min(terminalColumns - 2, 118));
-  const logo = effectiveWidth >= 48 ? BUBBLE_LOGO : COMPACT_LOGO;
+  const useWideLogo = effectiveWidth >= WIDE_LOGO_MIN_WIDTH;
   const actionableTips = tips
     .filter((item) => !item.startsWith("Ready with") && item.trim().length > 0)
     .slice(0, 2);
@@ -65,13 +116,13 @@ export function WelcomeBanner({
   return (
     <Box width={effectiveWidth} flexDirection="column" alignItems="center" marginBottom={1}>
       <Box flexDirection="column" alignItems="center">
-        {logo.map((line, index) => (
-          <Text key={`${index}-${line}`} bold color={theme.userMessageText}>
-            {line}
-          </Text>
-        ))}
+        {useWideLogo
+          ? BUBBLE_LOGO_LETTERS[0]!.map((_, rowIndex) => (
+            <LogoRow key={`logo-row-${rowIndex}`} rowIndex={rowIndex} />
+          ))
+          : <CompactLogo />}
       </Box>
-      <Box marginTop={1}>
+      <Box marginTop={2}>
         <Text bold color={theme.muted}>{PACKAGE_VERSION}</Text>
       </Box>
       <Box marginTop={1}>
@@ -93,6 +144,33 @@ export function WelcomeBanner({
         <Text color={theme.muted}>  </Text>
         <StatusItem label="AGENTS.md" ok={hasAgentsFile} />
       </Box>
+    </Box>
+  );
+}
+
+function LogoRow({ rowIndex }: { rowIndex: number }) {
+  return (
+    <Box>
+      {BUBBLE_LOGO_LETTERS.map((letter, index) => (
+        <React.Fragment key={`${index}-${rowIndex}`}>
+          <Text bold color={LOGO_COLORS[index]}>
+            {letter[rowIndex]}
+          </Text>
+          {index < BUBBLE_LOGO_LETTERS.length - 1 && <Text> </Text>}
+        </React.Fragment>
+      ))}
+    </Box>
+  );
+}
+
+function CompactLogo() {
+  return (
+    <Box>
+      {COMPACT_LOGO.map((letter, index) => (
+        <Text key={`${letter}-${index}`} bold color={LOGO_COLORS[index]}>
+          {letter}
+        </Text>
+      ))}
     </Box>
   );
 }
