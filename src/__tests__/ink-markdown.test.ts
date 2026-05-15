@@ -33,6 +33,30 @@ describe("Ink markdown renderer parsing", () => {
     ]);
   });
 
+  it("preserves cells containing emoji and CJK without truncating them", () => {
+    const blocks = parseMarkdownBlocks([
+      "| 类别 | 文件 |",
+      "| --- | --- |",
+      "| 🎮 游戏 | tetris_game.py |",
+      "| 🎉 节日 | 儿童节、圣诞节、端午节 |",
+      "| 🏙️ 场景 | 上海、四合院 |",
+      "| 📦 工具 | About Bubble、Claude Code |",
+    ].join("\n"));
+
+    expect(blocks).toEqual([
+      {
+        type: "table",
+        headers: ["类别", "文件"],
+        rows: [
+          ["🎮 游戏", "tetris_game.py"],
+          ["🎉 节日", "儿童节、圣诞节、端午节"],
+          ["🏙️ 场景", "上海、四合院"],
+          ["📦 工具", "About Bubble、Claude Code"],
+        ],
+      },
+    ]);
+  });
+
   it("parses table rows without splitting escaped pipes or code span pipes", () => {
     const blocks = parseMarkdownBlocks([
       "| Name | Value |",

@@ -695,14 +695,15 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
                   <Text>
                     {i === selectedIndex ? (
                       <>
-                        <Text bold>{` ${cmd.name.padEnd(16)} `}</Text>
-                        <Text color={theme.muted}>[{cmd.type}]</Text>
+                        <Text color={theme.accent} bold>{"❯ "}</Text>
+                        <Text color={theme.accent} bold>{cmd.name.padEnd(16)}</Text>
+                        <Text color={theme.muted}> [{cmd.type}]</Text>
                         <Text dimColor> {cmd.description}</Text>
                       </>
                     ) : (
                       <>
-                        <Text>{`  ${cmd.name.padEnd(16)} `}</Text>
-                        <Text color={theme.muted}>[{cmd.type}]</Text>
+                        <Text color={theme.muted}>{`  ${cmd.name.padEnd(16)}`}</Text>
+                        <Text dimColor> [{cmd.type}]</Text>
                         <Text dimColor> {cmd.description}</Text>
                       </>
                     )}

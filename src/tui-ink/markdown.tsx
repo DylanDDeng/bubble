@@ -5,9 +5,25 @@
 
 import React from "react";
 import { Box, Text } from "ink";
+import stringWidth from "string-width";
 import { useTerminalSize } from "./use-terminal-size.js";
 import { theme } from "./theme.js";
 import { highlightCode } from "./code-highlight.js";
+
+const graphemeSegmenter =
+  typeof Intl !== "undefined" && typeof (Intl as any).Segmenter === "function"
+    ? new (Intl as any).Segmenter(undefined, { granularity: "grapheme" })
+    : null;
+
+function splitGraphemes(text: string): string[] {
+  if (!text) return [];
+  if (graphemeSegmenter) {
+    const out: string[] = [];
+    for (const { segment } of graphemeSegmenter.segment(text)) out.push(segment);
+    return out;
+  }
+  return Array.from(text);
+}
 
 export type MarkdownBlock =
   | { type: "paragraph"; lines: string[] }
@@ -153,9 +169,13 @@ function normalizeTableRow(row: string[], colCount: number): string[] {
 }
 
 function visualWidth(str: string): number {
-  let width = 0;
-  for (const char of str) width += charVisualWidth(char);
-  return width;
+  if (!str) return 0;
+  return stringWidth(str);
+}
+
+function graphemeWidth(grapheme: string): number {
+  if (!grapheme) return 0;
+  return stringWidth(grapheme);
 }
 
 // Inline formatting: bold, italic, inline code
@@ -331,9 +351,20 @@ function CodeBlock({ lang, lines }: { lang: string; lines: string[] }) {
   );
 }
 
-function TableBlock({ headers, rows }: { headers: string[]; rows: string[][] }) {
+function TableBlock({
+  headers,
+  rows,
+  maxWidth,
+}: {
+  headers: string[];
+  rows: string[][];
+  maxWidth?: number;
+}) {
   const { columns: termWidth } = useTerminalSize();
   const colCount = headers.length;
+  // Reserve a buffer so the table fits even when wrapped inside an indented
+  // box (e.g. the timeline gutter contributes marginLeft + "⛬  " = 5 cells).
+  const budget = Math.max(20, (maxWidth ?? termWidth) - 8);
 
   const maxWidths = headers.map((h, i) => {
     let max = visualWidth(inlinePlainText(h));
@@ -345,11 +376,12 @@ function TableBlock({ headers, rows }: { headers: string[]; rows: string[][] }) 
   });
 
   const totalInnerWidth = maxWidths.reduce((a, b) => a + b, 0);
-  const totalWidth = totalInnerWidth + colCount * 3 + 1; // " │ " separators + outer edges
+  const separatorsWidth = colCount * 3 + 1; // " │ " separators + outer edges
+  const totalWidth = totalInnerWidth + separatorsWidth;
 
   let widths = [...maxWidths];
-  if (totalWidth > termWidth - 4) {
-    const available = Math.max(termWidth - 4 - (colCount * 3 + 1), colCount * 4);
+  if (totalWidth > budget) {
+    const available = Math.max(budget - separatorsWidth, colCount * 4);
     const ratio = totalInnerWidth > 0 ? available / totalInnerWidth : 1;
     widths = maxWidths.map((w) => Math.max(4, Math.floor(w * ratio)));
   }
@@ -358,12 +390,12 @@ function TableBlock({ headers, rows }: { headers: string[]; rows: string[][] }) 
   const mid = "├" + widths.map((w) => "─".repeat(w + 2)).join("┼") + "┤";
   const bot = "└" + widths.map((w) => "─".repeat(w + 2)).join("┴") + "┘";
 
-  const renderRow = (cells: string[], isHeader = false) => (
-    <Text>
+  const renderRow = (cells: string[], keyPrefix: string, isHeader = false) => (
+    <Text key={keyPrefix}>
       {"│ "}
       {cells.map((c, i) => (
         <React.Fragment key={i}>
-          {renderTableCell(c, widths[i] ?? 4, isHeader, `cell-${i}`)}
+          {renderTableCell(c, widths[i] ?? 4, isHeader, `${keyPrefix}-cell-${i}`)}
           {i < colCount - 1 ? " │ " : " │"}
         </React.Fragment>
       ))}
@@ -373,11 +405,9 @@ function TableBlock({ headers, rows }: { headers: string[]; rows: string[][] }) 
   return (
     <Box flexDirection="column" marginY={1}>
       <Text>{top}</Text>
-      {renderRow(headers, true)}
+      {renderRow(headers, "header", true)}
       <Text>{mid}</Text>
-      {rows.map((row, ri) => (
-        <Box key={ri}>{renderRow(row)}</Box>
-      ))}
+      {rows.map((row, ri) => renderRow(row, `row-${ri}`))}
       <Text>{bot}</Text>
     </Box>
   );
@@ -417,14 +447,15 @@ function truncateInlineSegments(
   let used = 0;
   for (const segment of segments) {
     let text = "";
-    for (const char of segment.text) {
-      const charWidth = charVisualWidth(char);
-      if (used + charWidth > target) {
+    for (const grapheme of splitGraphemes(segment.text)) {
+      const gWidth = graphemeWidth(grapheme);
+      if (used + gWidth > target) {
+        if (text) appendInlineSegment(output, text, segment);
         appendInlineSegment(output, "…", {});
         return output;
       }
-      text += char;
-      used += charWidth;
+      text += grapheme;
+      used += gWidth;
     }
     appendInlineSegment(output, text, segment);
   }
@@ -434,20 +465,6 @@ function truncateInlineSegments(
 
 function inlineSegmentsWidth(segments: MarkdownInlineSegment[]): number {
   return segments.reduce((sum, segment) => sum + visualWidth(segment.text), 0);
-}
-
-function charVisualWidth(char: string): number {
-  const code = char.codePointAt(0) || 0;
-  if (
-    (code >= 0x4e00 && code <= 0x9fff) || // CJK Unified Ideographs
-    (code >= 0x3000 && code <= 0x303f) || // CJK Symbols and Punctuation
-    (code >= 0xff00 && code <= 0xffef) || // Halfwidth and Fullwidth Forms
-    (code >= 0x3040 && code <= 0x309f) || // Hiragana
-    (code >= 0x30a0 && code <= 0x30ff) // Katakana
-  ) {
-    return 2;
-  }
-  return 1;
 }
 
 function HeadingBlock({ level, text }: { level: number; text: string }) {
@@ -467,7 +484,13 @@ function HeadingBlock({ level, text }: { level: number; text: string }) {
   );
 }
 
-export function MarkdownContent({ content }: { content: string }) {
+export function MarkdownContent({
+  content,
+  maxWidth,
+}: {
+  content: string;
+  maxWidth?: number;
+}) {
   const blocks = React.useMemo(() => parseMarkdownBlocks(content), [content]);
 
   return (
@@ -477,7 +500,9 @@ export function MarkdownContent({ content }: { content: string }) {
           return <CodeBlock key={i} lang={block.lang} lines={block.lines} />;
         }
         if (block.type === "table") {
-          return <TableBlock key={i} headers={block.headers} rows={block.rows} />;
+          return (
+            <TableBlock key={i} headers={block.headers} rows={block.rows} maxWidth={maxWidth} />
+          );
         }
         if (block.type === "heading") {
           return <HeadingBlock key={i} level={block.level} text={block.text} />;

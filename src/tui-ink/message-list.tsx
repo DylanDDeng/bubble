@@ -64,7 +64,8 @@ export function MessageList({
   // <Box>, while everything before it is committed to ink's <Static> region.
   // Static items render once into the terminal scrollback, so streaming
   // updates don't trigger a re-paint of older messages and the user's native
-  // terminal scrollback works as expected.
+  // terminal scrollback works as expected. It is keyed by terminal width so
+  // resize clears can repopulate scrollback with newly-wrapped history.
   const lastIndex = messages.length - 1;
   const frozen = lastIndex >= 0 ? messages.slice(0, lastIndex) : [];
   const live = lastIndex >= 0 ? messages[lastIndex] : undefined;
@@ -84,7 +85,7 @@ export function MessageList({
 
   return (
     <Box flexDirection="column">
-      <Static items={staticItems}>
+      <Static key={`static-${terminalColumns}`} items={staticItems}>
         {(item) => {
           if (item.kind === "welcome") {
             return <React.Fragment key={item.key}>{welcomeBanner}</React.Fragment>;
@@ -266,7 +267,14 @@ function MessageParts({
     <Box flexDirection="column">
       {parts.map((part, idx) => {
         if (part.type === "text") {
-          return <TimelineText key={`text-${idx}`} content={part.content} compactTop={idx === 0} />;
+          return (
+            <TimelineText
+              key={`text-${idx}`}
+              content={part.content}
+              compactTop={idx === 0}
+              terminalColumns={terminalColumns}
+            />
+          );
         }
         return (
           <ToolsPart
@@ -286,13 +294,25 @@ function MessageParts({
   );
 }
 
-function TimelineText({ content, compactTop }: { content: string; compactTop: boolean }) {
+function TimelineText({
+  content,
+  compactTop,
+  terminalColumns,
+}: {
+  content: string;
+  compactTop: boolean;
+  terminalColumns?: number;
+}) {
   if (!content.trim()) return null;
+  // marginLeft (2) + "⛬  " glyph (3 visual cells) = 5 cells consumed by the
+  // timeline gutter; pass the remaining width so wide blocks like tables size
+  // themselves against the actual content area instead of the raw terminal.
+  const available = terminalColumns ? Math.max(20, terminalColumns - 5) : undefined;
   return (
     <Box marginLeft={2} marginTop={compactTop ? 0 : 1}>
       <Text color={theme.agent}>⛬  </Text>
       <Box flexDirection="column" flexGrow={1}>
-        <MarkdownContent content={content.trim()} />
+        <MarkdownContent content={content.trim()} maxWidth={available} />
       </Box>
     </Box>
   );
