@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { StreamChunk } from "../types.js";
+import type { StreamChunk, ToolDefinition } from "../types.js";
 
 const { createMock } = vi.hoisted(() => ({
   createMock: vi.fn(),
@@ -88,6 +88,58 @@ describe("createProviderInstance", () => {
     }));
 
     expect(body.max_tokens).toBe(4096);
+    expect(body.parallel_tool_calls).toBeUndefined();
     expect(body.messages[0].reasoning_content).toBeUndefined();
+  });
+
+  it("disables parallel tool calls only for Fireworks Kimi when tools are available", async () => {
+    const tool: ToolDefinition = {
+      name: "read",
+      description: "Read a file",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+      },
+    };
+
+    let fireworksBody: any;
+    createMock.mockImplementation(async (input) => {
+      fireworksBody = input;
+      return fromArray([{ choices: [{ delta: {}, finish_reason: "stop" }] }]);
+    });
+
+    const { createProviderInstance } = await import("../provider.js");
+    const fireworks = createProviderInstance({
+      providerId: "fireworks",
+      apiKey: "sk-test",
+      baseURL: "https://api.fireworks.ai/inference/v1",
+    });
+
+    await collect(fireworks.streamChat([{ role: "user", content: "hi" }], {
+      model: "accounts/fireworks/models/kimi-k2p6",
+      tools: [tool],
+    }));
+
+    expect(fireworksBody.parallel_tool_calls).toBe(false);
+
+    let openaiBody: any;
+    createMock.mockImplementation(async (input) => {
+      openaiBody = input;
+      return fromArray([{ choices: [{ delta: {}, finish_reason: "stop" }] }]);
+    });
+
+    const openai = createProviderInstance({
+      providerId: "openai",
+      apiKey: "sk-test",
+      baseURL: "https://api.openai.com/v1",
+    });
+
+    await collect(openai.streamChat([{ role: "user", content: "hi" }], {
+      model: "gpt-4o",
+      tools: [tool],
+    }));
+
+    expect(openaiBody.parallel_tool_calls).toBeUndefined();
   });
 });

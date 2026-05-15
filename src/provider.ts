@@ -142,6 +142,10 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
       Object.assign(body, requestConfig.extraBody);
     }
 
+    if (tools && tools.length > 0 && requestConfig.parallelToolCalls !== undefined) {
+      body.parallel_tool_calls = requestConfig.parallelToolCalls;
+    }
+
     if (requestConfig.maxTokens !== undefined) {
       body.max_tokens = requestConfig.maxTokens;
     }

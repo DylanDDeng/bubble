@@ -69,6 +69,17 @@ describe("provider transform", () => {
 
     expect(config.effectiveThinkingLevel).toBe("off");
     expect(config.reasoningContentEcho).toBe("none");
+    expect(config.parallelToolCalls).toBe(false);
     expect(config.maxTokens).toBe(4096);
+  });
+
+  it("does not disable parallel tool calls outside Fireworks Kimi", () => {
+    const moonshot = resolveProviderRequestConfig("moonshot-cn", "kimi-k2.6", "off");
+    const fireworksOther = resolveProviderRequestConfig("fireworks", "accounts/fireworks/models/llama-v3p1-405b-instruct", "off");
+    const openai = resolveProviderRequestConfig("openai", "gpt-4o", "off");
+
+    expect(moonshot.parallelToolCalls).toBeUndefined();
+    expect(fireworksOther.parallelToolCalls).toBeUndefined();
+    expect(openai.parallelToolCalls).toBeUndefined();
   });
 });

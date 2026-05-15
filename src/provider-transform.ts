@@ -6,6 +6,7 @@ export interface ProviderRequestConfig {
   effectiveThinkingLevel: ThinkingLevel;
   reasoningEffort?: ThinkingLevel;
   reasoningContentEcho?: "tool_calls" | "all" | "none";
+  parallelToolCalls?: boolean;
   maxTokens?: number;
   extraBody?: Record<string, unknown>;
   omitTemperature?: boolean;
@@ -42,6 +43,7 @@ export function resolveProviderRequestConfig(
     return {
       effectiveThinkingLevel,
       reasoningContentEcho: "none",
+      parallelToolCalls: false,
       maxTokens: 4096,
     };
   }
