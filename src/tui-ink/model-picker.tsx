@@ -2,8 +2,9 @@ import React, { useState, useEffect, useMemo } from "react";
 import { Box, Text, useInput, usePaste, useStdout } from "ink";
 import { theme } from "./theme.js";
 import { ProviderRegistry, encodeModel, decodeModel, displayModel, isUserVisibleProvider, type ModelInfo } from "../provider-registry.js";
+import { listBuiltinModels } from "../model-catalog.js";
 
-interface Option {
+export interface ModelPickerOption {
   id: string;
   label: string;
   group: string;
@@ -23,36 +24,51 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
   const termHeight = stdout?.rows || 24;
   const maxVisible = Math.max(5, termHeight - 10);
 
-  const [rawOptions, setRawOptions] = useState<Option[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [rawOptions, setRawOptions] = useState<ModelPickerOption[]>(() =>
+    buildLocalModelOptions(registry, current, recent)
+  );
+  const [refreshing, setRefreshing] = useState(false);
   const [query, setQuery] = useState("");
-  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [selectedIndex, setSelectedIndex] = useState(() =>
+    preferredModelIndex(buildLocalModelOptions(registry, current, recent), current)
+  );
 
   useEffect(() => {
     let cancelled = false;
-    async function load() {
+    const localOptions = buildLocalModelOptions(registry, current, recent);
+    setRawOptions(localOptions);
+    setSelectedIndex(preferredModelIndex(localOptions, current));
+
+    async function refreshRemote() {
       const enabled = registry.getEnabled();
-      const opts: Option[] = [];
+      const opts: ModelPickerOption[] = [];
       const seen = new Set<string>();
 
       // Recent first
       for (const m of recent.slice(0, 5)) {
-        if (seen.has(m)) continue;
-        seen.add(m);
         const { providerId } = decodeModel(m);
         const provider = enabled.find((p) => p.id === providerId);
-        opts.push({ id: m, label: displayModel(m), group: "Recent", providerBadge: provider?.name || providerId || "" });
+        appendModelOption(opts, seen, {
+          id: m,
+          label: displayModel(m),
+          group: "Recent",
+          providerBadge: provider?.name || providerId || "",
+        });
       }
 
-      // Per-provider models (flattened list)
-      for (const provider of enabled.filter((item) => isUserVisibleProvider(item.id))) {
-        const models = await registry.listModels(provider);
+      const visibleProviders = enabled.filter((item) => isUserVisibleProvider(item.id));
+      const discovered = await Promise.all(visibleProviders.map(async (provider) => {
+        try {
+          return { provider, models: await registry.listModels(provider) };
+        } catch {
+          return { provider, models: localModelsForProvider(registry, provider) };
+        }
+      }));
+
+      for (const { provider, models } of discovered) {
         for (const m of models) {
-          const fullId = encodeModel(m.providerId, m.id);
-          if (seen.has(fullId)) continue;
-          seen.add(fullId);
-          opts.push({
-            id: fullId,
+          appendModelOption(opts, seen, {
+            id: encodeModel(m.providerId, m.id),
             label: m.name,
             group: provider.name,
             providerBadge: provider.name,
@@ -68,12 +84,15 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
 
       if (!cancelled) {
         setRawOptions(opts);
-        const idx = opts.findIndex((o) => o.id === current);
-        setSelectedIndex(idx >= 0 ? idx : 0);
-        setLoading(false);
+        setSelectedIndex((index) => {
+          const currentIndex = preferredModelIndex(opts, current);
+          return index === preferredModelIndex(localOptions, current) ? currentIndex : Math.min(index, Math.max(0, opts.length - 1));
+        });
+        setRefreshing(false);
       }
     }
-    load();
+    setRefreshing(true);
+    void refreshRemote();
     return () => {
       cancelled = true;
     };
@@ -137,38 +156,109 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
         </Text>
       </Box>
       <Text color={theme.muted}>↑/↓ navigate, Enter select, Esc cancel, Backspace clear</Text>
-      {loading && <Text color={theme.muted}>Loading models...</Text>}
-      {!loading && (
-        <Box flexDirection="column" marginTop={1}>
-          {options.length === 0 && (
-            <Text color={theme.muted}>No models match "{query}"</Text>
-          )}
-          {visible.map((opt, i) => {
-            const actualIndex = start + i;
-            const isSelected = actualIndex === selectedIndex;
-            return (
-              <Box key={opt.id}>
-                <Text color={isSelected ? theme.accent : undefined}>
-                  {isSelected ? "> " : "  "}
-                  {opt.label}
+      {refreshing && <Text color={theme.muted}>Refreshing remote model list...</Text>}
+      <Box flexDirection="column" marginTop={1}>
+        {options.length === 0 && (
+          <Text color={theme.muted}>No models match "{query}"</Text>
+        )}
+        {visible.map((opt, i) => {
+          const actualIndex = start + i;
+          const isSelected = actualIndex === selectedIndex;
+          return (
+            <Box key={opt.id}>
+              <Text color={isSelected ? theme.accent : undefined}>
+                {isSelected ? "> " : "  "}
+                {opt.label}
+              </Text>
+              <Box marginLeft={1}>
+                <Text color={theme.muted} dimColor>
+                  {opt.providerBadge}
                 </Text>
-                <Box marginLeft={1}>
-                  <Text color={theme.muted} dimColor>
-                    {opt.providerBadge}
-                  </Text>
-                </Box>
-                {opt.id === current && (
-                  <Box marginLeft={1}>
-                    <Text color={theme.accent}>●</Text>
-                  </Box>
-                )}
               </Box>
-            );
-          })}
-        </Box>
-      )}
+              {opt.id === current && (
+                <Box marginLeft={1}>
+                  <Text color={theme.accent}>●</Text>
+                </Box>
+              )}
+            </Box>
+          );
+        })}
+      </Box>
     </Box>
   );
+}
+
+export function buildLocalModelOptions(
+  registry: ProviderRegistry,
+  current: string,
+  recent: string[],
+): ModelPickerOption[] {
+  const enabled = registry.getEnabled();
+  const opts: ModelPickerOption[] = [];
+  const seen = new Set<string>();
+
+  for (const model of recent.slice(0, 5)) {
+    const { providerId } = decodeModel(model);
+    const provider = enabled.find((item) => item.id === providerId);
+    appendModelOption(opts, seen, {
+      id: model,
+      label: displayModel(model),
+      group: "Recent",
+      providerBadge: provider?.name || providerId || "",
+    });
+  }
+
+  for (const provider of enabled.filter((item) => isUserVisibleProvider(item.id))) {
+    for (const model of localModelsForProvider(registry, provider)) {
+      appendModelOption(opts, seen, {
+        id: encodeModel(model.providerId, model.id),
+        label: model.name,
+        group: provider.name,
+        providerBadge: provider.name,
+      });
+    }
+  }
+
+  if (current && !seen.has(current)) {
+    const { providerId } = decodeModel(current);
+    const provider = enabled.find((item) => item.id === providerId);
+    opts.unshift({
+      id: current,
+      label: displayModel(current),
+      group: "Current",
+      providerBadge: provider?.name || providerId || "",
+    });
+  }
+
+  return opts;
+}
+
+function localModelsForProvider(registry: ProviderRegistry, provider: ReturnType<ProviderRegistry["getEnabled"]>[number]): ModelInfo[] {
+  const customModels = registry.getModelConfig().getCustomModels(provider.id);
+  if (customModels.length > 0) return customModels;
+  const builtinProviderId = provider.id === "openai" && provider.authType === "oauth"
+    ? "openai-codex"
+    : provider.id;
+  return listBuiltinModels(builtinProviderId).map((model) => ({
+    id: model.id,
+    name: model.name,
+    providerId: provider.id,
+  }));
+}
+
+function appendModelOption(
+  options: ModelPickerOption[],
+  seen: Set<string>,
+  option: ModelPickerOption,
+): void {
+  if (seen.has(option.id)) return;
+  seen.add(option.id);
+  options.push(option);
+}
+
+function preferredModelIndex(options: ModelPickerOption[], current: string): number {
+  const idx = options.findIndex((option) => option.id === current);
+  return idx >= 0 ? idx : 0;
 }
 
 export interface ProviderPickerProps {
