@@ -15,12 +15,10 @@ describe("Ink welcome banner", () => {
     expect(shouldShowWelcomeBanner({
       messages: [],
       startedWithVisibleHistory: false,
-      hasOverlay: false,
     })).toBe(true);
     expect(shouldShowWelcomeBanner({
       messages: [firstUser],
       startedWithVisibleHistory: false,
-      hasOverlay: false,
     })).toBe(true);
   });
 
@@ -44,11 +42,10 @@ describe("Ink welcome banner", () => {
     expect(shouldShowWelcomeBanner({
       messages: [firstUser, firstAssistant, secondUser],
       startedWithVisibleHistory: false,
-      hasOverlay: false,
     })).toBe(true);
   });
 
-  it("hides for restored history and overlays", () => {
+  it("hides for restored history", () => {
     const firstUser: DisplayMessage = {
       key: "user-1",
       role: "user",
@@ -58,13 +55,18 @@ describe("Ink welcome banner", () => {
     expect(shouldShowWelcomeBanner({
       messages: [firstUser],
       startedWithVisibleHistory: true,
-      hasOverlay: false,
     })).toBe(false);
+  });
+
+  it("stays visible across overlay open/close so Static does not replay it", () => {
+    // Regression: when a picker opens, an earlier version flipped this to
+    // false via `hasOverlay`. Removing the banner from MessageList's
+    // staticItems shrank the Static items list, which made ink replay the
+    // banner into scrollback a second time when the picker closed.
     expect(shouldShowWelcomeBanner({
-      messages: [firstUser],
+      messages: [],
       startedWithVisibleHistory: false,
-      hasOverlay: true,
-    })).toBe(false);
+    })).toBe(true);
   });
 
   it("renders the compact DROID-like header information", () => {

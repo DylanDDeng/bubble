@@ -18,7 +18,6 @@ interface WelcomeBannerProps {
 interface WelcomeVisibilityInput {
   messages: Pick<DisplayMessage, "role" | "syntheticKind">[];
   startedWithVisibleHistory: boolean;
-  hasOverlay: boolean;
 }
 
 const require = createRequire(import.meta.url);
@@ -87,9 +86,12 @@ const WIDE_LOGO_MIN_WIDTH = 52;
 
 export function shouldShowWelcomeBanner({
   startedWithVisibleHistory,
-  hasOverlay,
 }: WelcomeVisibilityInput): boolean {
-  if (startedWithVisibleHistory || hasOverlay) return false;
+  // Banner is committed to Static scrollback once at session start. Flipping
+  // this flag back to false (e.g. when a picker opens) shrinks the Static
+  // items list — when the items grow back, ink replays the banner a second
+  // time into scrollback. Keep visibility decided purely by initial history.
+  if (startedWithVisibleHistory) return false;
   return true;
 }
 

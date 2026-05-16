@@ -148,14 +148,16 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
 
 
   return (
-    <Box flexDirection="column" marginY={1}>
+    <Box
+      flexDirection="column"
+      marginY={1}
+      paddingX={1}
+      borderStyle="round"
+      borderColor={theme.borderActive}
+    >
       <Text bold color={theme.accent}>Select Model</Text>
-      <Box borderStyle="round" borderColor={theme.borderActive} paddingX={1}>
-        <Text color={query ? undefined : theme.muted}>
-          {query || "Type to search..."}
-        </Text>
-      </Box>
-      <Text color={theme.muted}>↑/↓ navigate, Enter select, Esc cancel, Backspace clear</Text>
+      <SearchField query={query} placeholder="Type to search models..." />
+      <Text color={theme.muted}>↑/↓ navigate · Enter select · Esc cancel · Backspace clear</Text>
       {refreshing && <Text color={theme.muted}>Refreshing remote model list...</Text>}
       <Box flexDirection="column" marginTop={1}>
         {options.length === 0 && (
@@ -184,6 +186,22 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
           );
         })}
       </Box>
+    </Box>
+  );
+}
+
+function SearchField({ query, placeholder }: { query: string; placeholder: string }) {
+  const [cursorVisible, setCursorVisible] = useState(true);
+  useEffect(() => {
+    const t = setInterval(() => setCursorVisible((v) => !v), 500);
+    return () => clearInterval(t);
+  }, []);
+  return (
+    <Box marginTop={1} marginBottom={1}>
+      <Text color={theme.accent}>{"❯ "}</Text>
+      <Text>{query}</Text>
+      <Text color={theme.accent} inverse={cursorVisible}> </Text>
+      {!query && <Text color={theme.muted} dimColor> {placeholder}</Text>}
     </Box>
   );
 }
@@ -318,9 +336,15 @@ export function ProviderPicker({ providers, current, onSelect, onCancel, title }
   const visible = providers.slice(start, start + maxVisible);
 
   return (
-    <Box flexDirection="column" marginY={1}>
+    <Box
+      flexDirection="column"
+      marginY={1}
+      paddingX={1}
+      borderStyle="round"
+      borderColor={theme.borderActive}
+    >
       <Text bold color={theme.accent}>{title || "Select Provider"}</Text>
-      <Text color={theme.muted}>↑/↓ to navigate, Enter to select, Esc to cancel</Text>
+      <Text color={theme.muted}>↑/↓ navigate · Enter select · Esc cancel · type letter to jump</Text>
       <Box flexDirection="column" marginTop={1}>
         {visible.map((p, i) => {
           const actualIndex = start + i;
@@ -377,12 +401,16 @@ export function KeyPicker({ providerName, onSubmit, onCancel }: KeyPickerProps) 
   });
 
   return (
-    <Box flexDirection="column" marginY={1}>
+    <Box
+      flexDirection="column"
+      marginY={1}
+      paddingX={1}
+      borderStyle="round"
+      borderColor={theme.borderActive}
+    >
       <Text bold color={theme.accent}>Enter API Key for {providerName}</Text>
-      <Text color={theme.muted}>Paste or type the key, then press Enter. Esc to cancel.</Text>
-      <Box marginTop={1} borderStyle="round" borderColor={theme.borderActive} paddingX={1}>
-        <Text>{value.replace(/./g, "*") || " "}</Text>
-      </Box>
+      <Text color={theme.muted}>Paste or type the key · Enter to submit · Esc to cancel</Text>
+      <SearchField query={value.replace(/./g, "*")} placeholder="Paste your key here..." />
     </Box>
   );
 }
@@ -447,14 +475,16 @@ export function SkillPicker({ skills, onSelect, onCancel }: SkillPickerProps) {
   const visible = options.slice(start, start + maxVisible);
 
   return (
-    <Box flexDirection="column" marginY={1}>
+    <Box
+      flexDirection="column"
+      marginY={1}
+      paddingX={1}
+      borderStyle="round"
+      borderColor={theme.borderActive}
+    >
       <Text bold color={theme.accent}>Select Skill</Text>
-      <Box borderStyle="round" borderColor={theme.borderActive} paddingX={1}>
-        <Text color={query ? undefined : theme.muted}>
-          {query || "Type to search..."}
-        </Text>
-      </Box>
-      <Text color={theme.muted}>↑/↓ navigate, Enter load, Esc cancel, Backspace clear</Text>
+      <SearchField query={query} placeholder="Type to search skills..." />
+      <Text color={theme.muted}>↑/↓ navigate · Enter load · Esc cancel · Backspace clear</Text>
       <Box flexDirection="column" marginTop={1}>
         {options.length === 0 && (
           <Text color={theme.muted}>No skills match "{query}"</Text>

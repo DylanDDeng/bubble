@@ -922,11 +922,9 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       })()
     : null;
 
-  const hasBlockingOverlay = !!pickerMode || !!pendingPlan || !!pendingApproval || !!pendingQuestion;
   const showWelcome = shouldShowWelcomeBanner({
     messages,
     startedWithVisibleHistory: startedWithVisibleHistoryRef.current,
-    hasOverlay: hasBlockingOverlay,
   });
   const mcpStates = mcpManager?.getStates() ?? [];
   const mcpConnectedCount = mcpStates.filter((state) => state.status.kind === "connected").length;
@@ -1130,9 +1128,11 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           />
         </Box>
       )}
-      <Box paddingX={1} paddingBottom={1} flexShrink={0}>
-        <InputBox onSubmit={handleSubmit} disabled={isRunning || !!pickerMode || !!pendingPlan || !!pendingApproval || !!pendingQuestion} skillRegistry={safeSkillRegistry} terminalColumns={terminalColumns} cwd={args.cwd} />
-      </Box>
+      {!pickerMode && (
+        <Box paddingX={1} paddingBottom={1} flexShrink={0}>
+          <InputBox onSubmit={handleSubmit} disabled={isRunning || !!pendingPlan || !!pendingApproval || !!pendingQuestion} skillRegistry={safeSkillRegistry} terminalColumns={terminalColumns} cwd={args.cwd} />
+        </Box>
+      )}
       <FooterBar
         data={buildFooterData({
           cwd: args.cwd,
