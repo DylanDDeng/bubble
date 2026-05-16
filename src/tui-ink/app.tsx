@@ -413,7 +413,6 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         activeAbortRef.current.abort(new AgentAbortError("Agent run cancelled by user."));
         return;
       }
-      requestExit();
     }
   });
 
