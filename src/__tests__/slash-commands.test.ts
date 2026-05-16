@@ -212,6 +212,46 @@ describe("slash commands", () => {
     expect(ctx.openPicker).toHaveBeenCalledWith("skill");
   });
 
+  it("/context shows usage breakdown", async () => {
+    const ctx = createContext({
+      agent: {
+        model: "openai:gpt-4o",
+        providerId: "openai",
+        thinking: "off",
+        setSystemPrompt: vi.fn(),
+        setProvider: vi.fn(),
+        getContextUsageSnapshot: () => ({
+          providerId: "openai",
+          modelId: "gpt-4o",
+          contextWindow: 128000,
+          usedTokens: 3000,
+          freeTokens: 125000,
+          buckets: {
+            systemPrompt: { label: "System prompt", tokens: 1000, detail: "1 system message" },
+            tools: { label: "Tools", tokens: 800, detail: "2 active tools" },
+            skills: { label: "Skills", tokens: 700, detail: "3 advertised skills" },
+            deferredTools: { label: "Deferred/MCP", tokens: 200, detail: "1 deferred tool name in reminder" },
+            other: { label: "Other", tokens: 500, detail: "2 conversation/meta/tool messages" },
+          },
+          toolCount: 2,
+          deferredToolCount: 1,
+          skillCount: 3,
+          messageCount: 3,
+        }),
+      } as any,
+    });
+
+    const result = await slashRegistry.execute("/context", ctx);
+
+    expect(result.handled).toBe(true);
+    expect(result.result).toContain("Free space:");
+    expect(result.result).toContain("System prompt");
+    expect(result.result).toContain("Tools");
+    expect(result.result).toContain("Skills");
+    expect(result.result).toContain("Deferred/MCP");
+    expect(result.result).toContain("Other");
+  });
+
   it("loads a skill explicitly via /skill", async () => {
     const appendMarker = vi.fn();
     const ctx = createContext({

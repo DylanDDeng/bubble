@@ -7,6 +7,7 @@ import { compactMessages } from "./context/compact.js";
 import { randomUUID } from "node:crypto";
 import { compactMessagesWithLLM } from "./context/compact-llm.js";
 import { getContextBudget } from "./context/budget.js";
+import { buildContextUsageSnapshot, type ContextUsageSnapshot } from "./context/usage.js";
 import { isContextOverflowError } from "./context/overflow.js";
 import { projectMessages } from "./context/projector.js";
 import { aggressivePruneMessages } from "./context/prune.js";
@@ -154,10 +155,27 @@ export class Agent {
     return [...this.tools.values()].filter((t) => t.deferred);
   }
 
+  getContextUsageSnapshot(): ContextUsageSnapshot {
+    return buildContextUsageSnapshot({
+      providerId: this.providerId,
+      modelId: this.apiModel,
+      messages: this.messages,
+      toolEntries: this.getActiveToolEntries(),
+      deferredToolEntries: this.listDeferredTools(),
+      skills: this.skillSummaries,
+    });
+  }
+
   /** Whether a given tool is deferred and not yet unlocked. */
   isDeferredAndLocked(name: string): boolean {
     const tool = this.tools.get(name);
     return !!tool?.deferred && !this.unlockedDeferred.has(name);
+  }
+
+  private getActiveToolEntries(): ToolRegistryEntry[] {
+    return [...this.tools.values()]
+      .filter((tool) => !tool.deferred || this.unlockedDeferred.has(tool.name))
+      .filter((tool) => this._mode === "plan" || tool.name !== "exit_plan_mode");
   }
 
   injectSystemReminder(content: string): void {

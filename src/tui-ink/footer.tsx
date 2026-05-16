@@ -10,12 +10,6 @@ export interface FooterUsageTotals {
   completion: number;
 }
 
-export interface FooterBudget {
-  estimatedTokens: number;
-  contextWindow?: number;
-  percent?: number;
-}
-
 export interface FooterData {
   cwd: string;
   providerId: string;
@@ -24,24 +18,7 @@ export interface FooterData {
   showThinking: boolean;
   mode?: PermissionMode;
   usageTotals: FooterUsageTotals;
-  budget?: FooterBudget;
   verboseTrace?: boolean;
-}
-
-const BAR_WIDTH = 10;
-
-function budgetColor(percent: number): string {
-  if (percent >= 90) return theme.contextCrit;
-  if (percent >= 70) return theme.contextWarn;
-  return theme.contextOk;
-}
-
-function renderBar(percent: number): { filled: string; empty: string; color: string } {
-  const clamped = Math.max(0, Math.min(100, percent));
-  const filledCount = Math.round((clamped / 100) * BAR_WIDTH);
-  const filled = "█".repeat(filledCount);
-  const empty = "░".repeat(BAR_WIDTH - filledCount);
-  return { filled, empty, color: budgetColor(clamped) };
 }
 
 export function FooterBar({ data }: { data: FooterData }) {
@@ -57,17 +34,6 @@ export function FooterBar({ data }: { data: FooterData }) {
     : "";
   const traceText = data.verboseTrace ? " • ⌃O details:on" : " • ⌃O details";
 
-  const bar =
-    data.budget?.contextWindow && data.budget.percent !== undefined
-      ? renderBar(data.budget.percent)
-      : null;
-  const percentText =
-    data.budget?.contextWindow && data.budget.percent !== undefined
-      ? `${data.budget.percent.toFixed(1)}%`
-      : data.budget?.estimatedTokens
-        ? `~${formatTokens(data.budget.estimatedTokens)}`
-        : "";
-
   return (
     <Box paddingX={1} flexShrink={0}>
       <Text color={theme.muted}>{formatCwd(data.cwd)}</Text>
@@ -77,22 +43,6 @@ export function FooterBar({ data }: { data: FooterData }) {
           <Text color={theme.muted} dimColor>
             {usageText}
           </Text>
-        </>
-      )}
-      {bar && (
-        <>
-          <Text color={theme.muted}>  </Text>
-          <Text color={bar.color}>{bar.filled}</Text>
-          <Text color={theme.muted} dimColor>
-            {bar.empty}
-          </Text>
-          <Text color={bar.color}> {percentText}</Text>
-        </>
-      )}
-      {!bar && percentText && (
-        <>
-          <Text color={theme.muted}>  </Text>
-          <Text color={theme.muted}>{percentText}</Text>
         </>
       )}
       <ModeBadge mode={data.mode} />

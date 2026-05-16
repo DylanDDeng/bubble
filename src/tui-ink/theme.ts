@@ -45,10 +45,6 @@ export const theme = {
   diffAddFg: "#9CDCFE",
   diffRemoveFg: "#F48771",
 
-  // Context budget bar thresholds
-  contextOk: "gray",
-  contextWarn: "yellow",
-  contextCrit: "red",
 } as const;
 
 export type ThemeColor = (typeof theme)[keyof typeof theme];

@@ -27,8 +27,6 @@ import { BUILTIN_PROVIDERS, ProviderRegistry, displayModel, isUserVisibleProvide
 import { buildSystemPrompt } from "../system-prompt.js";
 import type { ThinkingLevel } from "../types.js";
 import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingLevel } from "../provider-transform.js";
-import { projectMessages } from "../context/projector.js";
-import { getContextBudget } from "../context/budget.js";
 import { FooterBar, buildFooterData } from "./footer.js";
 import { SkillRegistry } from "../skills/registry.js";
 import { parseSkillInvocation } from "../skills/invocation.js";
@@ -1145,11 +1143,6 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           showThinking: getAvailableThinkingLevels(agent.providerId, agent.apiModel).length > 2,
           mode: permissionMode,
           usageTotals,
-          budget: getContextBudget(
-            agent.providerId || safeRegistry.getDefault()?.id || "unknown",
-            agent.apiModel,
-            projectMessages(agent.messages, { mode: "pruned" }),
-          ),
           verboseTrace,
         })}
       />

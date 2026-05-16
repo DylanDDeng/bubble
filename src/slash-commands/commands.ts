@@ -1,4 +1,5 @@
 import { UserConfig, maskKey } from "../config.js";
+import { formatContextUsage } from "../context/usage.js";
 import { formatDiagnostics } from "../lsp/index.js";
 import { normalizeNameForMCP } from "../mcp/name.js";
 import { parseRule } from "../permissions/rule.js";
@@ -92,6 +93,34 @@ function syncSystemPrompt(ctx: Parameters<SlashCommand["handler"]>[1], model: st
     skills: ctx.skillRegistry.summaries(),
     memoryPrompt: buildMemoryPrompt(ctx.cwd),
   }));
+}
+
+function formatMcpContextStatus(ctx: SlashCommandContext): string {
+  const states = ctx.mcpManager?.getStates() ?? [];
+  const lines = ["MCP"];
+  if (!ctx.mcpManager || states.length === 0) {
+    lines.push("- No MCP servers configured for this session.");
+    lines.push("- Context impact: none.");
+    return lines.join("\n");
+  }
+
+  for (const state of states) {
+    if (state.status.kind === "connected") {
+      lines.push(
+        `- ${state.name} (${state.scope}): connected · ${state.status.tools.length} deferred tool${state.status.tools.length === 1 ? "" : "s"} · ${state.status.prompts.length} prompt${state.status.prompts.length === 1 ? "" : "s"}`,
+      );
+      continue;
+    }
+    if (state.status.kind === "failed") {
+      lines.push(`- ${state.name} (${state.scope}): failed · ${state.status.error}`);
+      continue;
+    }
+    lines.push(`- ${state.name} (${state.scope}): ${state.status.kind}`);
+  }
+
+  lines.push("- Context impact: MCP tool schemas are deferred. The prompt pays only a small deferred-tool reminder until tool_search unlocks a tool; unlocked MCP schemas then count under Tools.");
+  lines.push("- MCP prompts are slash commands; they do not enter context until invoked.");
+  return lines.join("\n");
 }
 
 function switchToProviderModel(
@@ -313,6 +342,13 @@ const builtinSlashCommandEntries: SlashCommand[] = [
     description: "Inspect and maintain Bubble's automatic persistent memory. Usage: /memory [status|search|compact|summarize|refresh|reset]",
     async handler(args, ctx) {
       return handleMemoryCommand(args, ctx);
+    },
+  },
+  {
+    name: "context",
+    description: "Show current context window usage and breakdown",
+    async handler(args, ctx) {
+      return `${formatContextUsage(ctx.agent.getContextUsageSnapshot())}\n\n${formatMcpContextStatus(ctx)}`;
     },
   },
   {

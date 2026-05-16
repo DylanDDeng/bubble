@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { estimateContextTokens, getContextBudget } from "../context/budget.js";
+import { buildContextUsageSnapshot, formatContextUsage } from "../context/usage.js";
+import { buildDeferredToolsReminder } from "../prompt/reminders.js";
+import { formatSkillsPrompt } from "../skills/format.js";
 import type { Message } from "../types.js";
 
 describe("context budget", () => {
@@ -62,5 +65,54 @@ describe("context budget", () => {
     });
     expect(budget.estimatedTokens).toBeGreaterThan(245_000);
     expect(budget.shouldCompact).toBe(true);
+  });
+
+  it("splits context usage into system, tools, skills, and other buckets", () => {
+    const skills = [{ name: "repo-review", description: "Review code carefully", source: "project" as const }];
+    const messages: Message[] = [
+      { role: "system", content: `Base system prompt\n\n${formatSkillsPrompt(skills)}` },
+      { role: "meta", kind: "system-reminder", content: buildDeferredToolsReminder(["mcp__arxiv__search"]) },
+      { role: "user", content: "please inspect the repo" },
+      { role: "assistant", content: "I'll take a look." },
+    ];
+
+    const snapshot = buildContextUsageSnapshot({
+      providerId: "openai",
+      modelId: "gpt-4o",
+      messages,
+      toolEntries: [
+        {
+          name: "read",
+          description: "Read a file",
+          parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+          execute: async () => ({ content: "" }),
+        },
+      ],
+      deferredToolEntries: [
+        {
+          name: "mcp__arxiv__search",
+          description: "[MCP:arxiv] Search papers",
+          parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+          execute: async () => ({ content: "" }),
+          deferred: true,
+        },
+      ],
+      skills,
+    });
+
+    expect(snapshot.contextWindow).toBe(128000);
+    expect(snapshot.buckets.systemPrompt.tokens).toBeGreaterThan(0);
+    expect(snapshot.buckets.tools.tokens).toBeGreaterThan(0);
+    expect(snapshot.buckets.skills.tokens).toBeGreaterThan(0);
+    expect(snapshot.buckets.deferredTools.tokens).toBeGreaterThan(0);
+    expect(snapshot.buckets.other.tokens).toBeGreaterThan(0);
+    expect(snapshot.usedTokens).toBe(
+      snapshot.buckets.systemPrompt.tokens
+      + snapshot.buckets.tools.tokens
+      + snapshot.buckets.skills.tokens
+      + snapshot.buckets.deferredTools.tokens
+      + snapshot.buckets.other.tokens,
+    );
+    expect(formatContextUsage(snapshot)).toContain("Free space:");
   });
 });

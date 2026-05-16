@@ -95,7 +95,7 @@ function shouldTriggerCompact(estimatedTokens: number, contextWindow?: number): 
   return estimatedTokens >= threshold;
 }
 
-function estimateTextTokens(text: string): number {
+export function estimateTextTokens(text: string): number {
   if (!text) {
     return 0;
   }
