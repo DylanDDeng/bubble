@@ -78,6 +78,13 @@ describe("agent profiles", () => {
     expect(nickname).not.toBe(profile.name);
   });
 
+  it("does not impose hard turn limits on builtin lifecycle subagents", () => {
+    const profiles = discoverAgentProfiles("/tmp", "user").profiles.filter((profile) => profile.source === "builtin");
+
+    expect(profiles.length).toBeGreaterThan(0);
+    expect(profiles.every((profile) => profile.maxTurns === undefined)).toBe(true);
+  });
+
   it("filters tools by profile, effect, approval, and recursive subagent denylist", () => {
     const profile = findAgentProfile(discoverAgentProfiles("/tmp", "user").profiles, "builtin:general_readonly")!;
     const selected = selectToolsForAgentProfile([

@@ -47,6 +47,34 @@ describe("read tool", () => {
     expect(result.content).toContain("Cannot read file");
   });
 
+  it("suggests similar files when a requested file is missing", async () => {
+    writeFileSync(join(tmpDir, "tetris_game.py"), "print('game')", "utf-8");
+    writeFileSync(join(tmpDir, "tetris.html"), "<canvas></canvas>", "utf-8");
+
+    const tool = createReadTool(tmpDir);
+    const result = await tool.execute({ path: "tetris.py" }, { cwd: tmpDir });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("Cannot read file");
+    expect(result.content).toContain("Did you mean one of these?");
+    expect(result.content).toContain(join(tmpDir, "tetris_game.py"));
+    expect(result.content).toContain(join(tmpDir, "tetris.html"));
+    expect(result.content.indexOf("tetris_game.py")).toBeLessThan(result.content.indexOf("tetris.html"));
+  });
+
+  it("suggests the cwd-local path when an absolute path drops the project directory", async () => {
+    const fileName = `bubble-dropped-cwd-${process.pid}-${Date.now()}.txt`;
+    const existing = join(tmpDir, fileName);
+    const missing = join(tmpdir(), fileName);
+    writeFileSync(existing, "under cwd", "utf-8");
+
+    const tool = createReadTool(tmpDir);
+    const result = await tool.execute({ path: missing }, { cwd: tmpDir });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain(`Did you mean ${existing}?`);
+  });
+
   it("expands home-directory paths before resolving", async () => {
     const fileName = `.bubble-read-home-${process.pid}-${Date.now()}.txt`;
     const file = join(homedir(), fileName);

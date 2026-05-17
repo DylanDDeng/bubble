@@ -474,8 +474,9 @@ function TraceGroupBlock({
     );
   }
 
-  const titleColor = group.hasError ? theme.error : theme.traceAction;
-  const detailColor = group.hasError ? theme.error : theme.traceDetail;
+  const allErrored = group.hasError && group.errorCount >= group.raw.length && !group.pending;
+  const titleColor = allErrored ? theme.error : theme.traceAction;
+  const detailColor = allErrored ? theme.error : theme.traceDetail;
   const commandWidth = Math.max(14, terminalColumns - group.title.length - 16);
   const detailWidth = Math.max(20, terminalColumns - 8);
   const detailLines = group.previewLines.length > 0 ? group.previewLines : group.items;
@@ -500,6 +501,16 @@ function TraceGroupBlock({
             <Box key={index} marginLeft={index === 0 ? 0 : 2}>
               {index === 0 && <Text color={theme.traceDetail}>↳ </Text>}
               <Text color={detailColor}>{truncateVisual(line, detailWidth - (index === 0 ? 2 : 0))}</Text>
+            </Box>
+          ))}
+        </Box>
+      )}
+      {group.errorLines.length > 0 && (
+        <Box flexDirection="column" marginLeft={2}>
+          {group.errorLines.map((line, index) => (
+            <Box key={`error-${index}`} marginLeft={index === 0 ? 0 : 2}>
+              {index === 0 && <Text color={theme.traceDetail}>↳ </Text>}
+              <Text color={theme.error}>{truncateVisual(line, detailWidth - (index === 0 ? 2 : 0))}</Text>
             </Box>
           ))}
         </Box>
@@ -567,7 +578,10 @@ function traceGroupStatus(
     const elapsed = formatElapsed(group.startedAt, nowTick);
     return { text: elapsed ? `running · ${elapsed}` : "running", color: theme.tracePending };
   }
-  if (group.hasError) return { text: "error", color: theme.error };
+  if (group.hasError) {
+    const count = group.errorCount || 1;
+    return { text: count === 1 ? "1 error" : `${count} errors`, color: theme.error };
+  }
   return null;
 }
 

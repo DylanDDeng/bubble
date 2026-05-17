@@ -37,6 +37,35 @@ describe("Ink trace groups", () => {
     expect(groups.map((group) => group.title)).toEqual(["Read", "Search", "Read"]);
   });
 
+  it("keeps partial read failures visible without marking every read as failed", () => {
+    const groups = buildTraceGroups([
+      tool("read", { path: "/Users/tester/project/about-bubble.html" }, "ok"),
+      tool("read", { path: "/Users/tester/project/about-bubble.html" }, "ok"),
+      tool("read", { path: "/Users/tester/project/deepseek-v4.html" }, "ok"),
+      tool(
+        "read",
+        { path: "/Users/tester/project/tetris.py" },
+        "Error: Cannot read file: /Users/tester/project/tetris.py",
+        { isError: true },
+      ),
+    ], { homeDir });
+
+    expect(groups[0]).toMatchObject({
+      kind: "read",
+      title: "Read",
+      count: 3,
+      noun: "files",
+      items: [
+        "~/project/about-bubble.html",
+        "~/project/deepseek-v4.html",
+        "~/project/tetris.py",
+      ],
+      errorCount: 1,
+      errorLines: ["Error: Cannot read file: ~/project/tetris.py"],
+      hasError: true,
+    });
+  });
+
   it("renames simple glob calls as list directory summaries", () => {
     const groups = buildTraceGroups([
       tool("glob", { pattern: "*" }, "a.html\nb.html\nsubdir"),

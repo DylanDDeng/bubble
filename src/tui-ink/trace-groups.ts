@@ -20,9 +20,11 @@ export interface TraceGroup {
   command?: string;
   items: string[];
   previewLines: string[];
+  errorLines: string[];
   omitted: number;
   pending: boolean;
   hasError: boolean;
+  errorCount: number;
   startedAt?: number;
 }
 
@@ -156,21 +158,22 @@ function buildTraceGroup(
     .filter((value): value is number => typeof value === "number")
     .sort((a, b) => a - b)[0];
   const hasError = raw.some((tool) => !!tool.isError);
+  const errorCount = raw.filter((tool) => !!tool.isError).length;
 
   switch (classifier.kind) {
     case "list":
-      return buildListGroup(classifier, raw, options, pending, startedAt, hasError);
+      return buildListGroup(classifier, raw, options, pending, startedAt, hasError, errorCount);
     case "read":
-      return buildPathGroup(classifier, raw, options, pending, startedAt, hasError, "files");
+      return buildPathGroup(classifier, raw, options, pending, startedAt, hasError, errorCount, "files");
     case "search":
-      return buildSearchGroup(classifier, raw, options, pending, startedAt, hasError);
+      return buildSearchGroup(classifier, raw, options, pending, startedAt, hasError, errorCount);
     case "execute":
-      return buildExecuteGroup(classifier, raw[0]!, options, pending, startedAt, hasError);
+      return buildExecuteGroup(classifier, raw[0]!, options, pending, startedAt, hasError, errorCount);
     case "edit":
     case "write":
-      return buildMutationGroup(classifier, raw, options, pending, startedAt, hasError);
+      return buildMutationGroup(classifier, raw, options, pending, startedAt, hasError, errorCount);
     default:
-      return buildOtherGroup(classifier, raw, options, pending, startedAt, hasError);
+      return buildOtherGroup(classifier, raw, options, pending, startedAt, hasError, errorCount);
   }
 }
 
@@ -181,6 +184,7 @@ function buildListGroup(
   pending: boolean,
   startedAt: number | undefined,
   hasError: boolean,
+  errorCount: number,
 ): TraceGroup {
   const resultItems = raw.flatMap((tool) => resultLines(tool.result).map((line) => formatTracePath(line, options.homeDir)));
   const fallbackItems = raw
@@ -200,9 +204,11 @@ function buildListGroup(
     noun,
     items: shown,
     previewLines: [],
+    errorLines: collectErrorLines(raw, options),
     omitted,
     pending,
     hasError,
+    errorCount,
     startedAt,
   };
 }
@@ -214,11 +220,12 @@ function buildPathGroup(
   pending: boolean,
   startedAt: number | undefined,
   hasError: boolean,
+  errorCount: number,
   nounBase: string,
 ): TraceGroup {
-  const items = raw
+  const items = unique(raw
     .map((tool) => formatTracePath(tool.args.path ?? tool.args.file ?? "", options.homeDir))
-    .filter(Boolean);
+    .filter(Boolean));
   const { shown, omitted } = take(items, options.maxItems);
   const count = items.length || raw.length;
   return {
@@ -229,9 +236,11 @@ function buildPathGroup(
     noun: plural(count, nounBase.slice(0, -1), nounBase),
     items: shown,
     previewLines: [],
+    errorLines: collectErrorLines(raw, options),
     omitted,
     pending,
     hasError,
+    errorCount,
     startedAt,
   };
 }
@@ -243,6 +252,7 @@ function buildSearchGroup(
   pending: boolean,
   startedAt: number | undefined,
   hasError: boolean,
+  errorCount: number,
 ): TraceGroup {
   const items = raw.map((tool) => {
     const pattern = String(tool.args.pattern ?? tool.args.query ?? "").trim();
@@ -260,9 +270,11 @@ function buildSearchGroup(
     noun: plural(count, "search", "searches"),
     items: shown,
     previewLines: [],
+    errorLines: collectErrorLines(raw, options),
     omitted,
     pending,
     hasError,
+    errorCount,
     startedAt,
   };
 }
@@ -274,6 +286,7 @@ function buildExecuteGroup(
   pending: boolean,
   startedAt: number | undefined,
   hasError: boolean,
+  errorCount: number,
 ): TraceGroup {
   const lines = resultLines(tool.result).map((line) => formatTracePath(line, options.homeDir));
   const { shown, omitted } = take(lines, options.maxPreviewLines);
@@ -284,9 +297,11 @@ function buildExecuteGroup(
     command: normalizeCommand(tool.args.command ?? ""),
     items: [],
     previewLines: shown,
+    errorLines: [],
     omitted,
     pending,
     hasError,
+    errorCount,
     startedAt,
   };
 }
@@ -298,6 +313,7 @@ function buildMutationGroup(
   pending: boolean,
   startedAt: number | undefined,
   hasError: boolean,
+  errorCount: number,
 ): TraceGroup {
   const items = raw
     .map((tool) => {
@@ -323,9 +339,11 @@ function buildMutationGroup(
     noun: plural(count, "file", "files"),
     items: shown,
     previewLines: errorPreview,
+    errorLines: [],
     omitted,
     pending,
     hasError,
+    errorCount,
     startedAt,
   };
 }
@@ -337,6 +355,7 @@ function buildOtherGroup(
   pending: boolean,
   startedAt: number | undefined,
   hasError: boolean,
+  errorCount: number,
 ): TraceGroup {
   const tool = raw[0]!;
   const header = toolHeader(tool, options.homeDir);
@@ -350,9 +369,11 @@ function buildOtherGroup(
     noun: header ? undefined : plural(raw.length, "call", "calls"),
     items: header ? [header] : [],
     previewLines: shown,
+    errorLines: [],
     omitted,
     pending,
     hasError,
+    errorCount,
     startedAt,
   };
 }
@@ -378,6 +399,23 @@ function resultLines(result: string | undefined): string[] {
 function take(items: string[], max: number): { shown: string[]; omitted: number } {
   const shown = items.slice(0, max);
   return { shown, omitted: Math.max(0, items.length - shown.length) };
+}
+
+function unique(items: string[]): string[] {
+  return [...new Set(items)];
+}
+
+function collectErrorLines(raw: DisplayToolCall[], options: Required<TraceGroupOptions>): string[] {
+  return raw
+    .filter((tool) => tool.isError)
+    .flatMap((tool) => resultLines(tool.result).map((line) => formatTraceLine(line, options.homeDir)))
+    .slice(0, options.maxPreviewLines);
+}
+
+function formatTraceLine(value: unknown, homeDir: string): string {
+  const text = String(value ?? "").trimEnd();
+  if (!homeDir) return text;
+  return text.split(homeDir + "/").join("~/").split(homeDir).join("~");
 }
 
 function plural(count: number, singular: string, pluralValue: string): string {

@@ -151,7 +151,6 @@ export function builtinAgentProfiles(): AgentProfile[] {
         include: [...policy.allowedTools],
         exclude: [],
       },
-      maxTurns: policy.maxTurns,
       approval: "fail",
       nicknameCandidates: DEFAULT_NICKNAME_CANDIDATES,
       prompt: policy.reminder,
@@ -175,7 +174,6 @@ export function builtinAgentProfiles(): AgentProfile[] {
       include,
       exclude: [],
     },
-    maxTurns: 8,
     approval: "fail",
     nicknameCandidates: DEFAULT_NICKNAME_CANDIDATES,
     prompt,
@@ -203,7 +201,7 @@ export function builtinAgentProfiles(): AgentProfile[] {
     ),
     roleProfile(
       "worker",
-      "Bounded implementation worker subagent",
+      "Implementation-planning worker subagent",
       [
         "You are a worker subagent. In this Phase 1 runtime you are read-only, so you must not modify files.",
         "Analyze the assigned implementation slice, identify exact files to change, and return a concrete patch plan or findings.",

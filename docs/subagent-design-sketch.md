@@ -65,7 +65,6 @@ tools:
   preset: readonly
   include: []
   exclude: []
-maxTurns: 6
 approval: fail
 nicknameCandidates:
   - Scout
@@ -87,6 +86,8 @@ interface AgentProfile {
   mode: "readonly" | "write_patch" | "write_worktree";
   model?: string | "inherit";
   tools: AgentProfileTools;
+  // Optional only for explicitly bounded custom profiles. Built-in lifecycle
+  // profiles omit this and use model-driven completion.
   maxTurns?: number;
   approval: "fail" | "disabled";
   nicknameCandidates?: string[];
@@ -342,6 +343,9 @@ Rules:
 
 - Parent and all child agents share the same ledger.
 - There is no hidden per-child token hard budget.
+- Built-in lifecycle subagents do not have a default hard turn limit; they run
+  until the model returns a final response, the user cancels, the parent closes
+  them, or the shared runtime budget is exhausted.
 - If a configured shared limit is exhausted, the ledger aborts in-flight parent
   and child calls through the shared signal.
 - Child provider calls receive a signal composed from parent abort and explicit
@@ -374,7 +378,7 @@ All children receive a composed abort signal:
 
 1. Parent run abort signal.
 2. Budget ledger abort signal.
-3. Per-child timeout or cancellation signal.
+3. Explicit child cancellation signal.
 
 When the user presses Ctrl-C:
 

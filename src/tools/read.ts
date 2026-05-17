@@ -2,8 +2,9 @@
  * Read tool - read file contents with truncation, dedup, and auto-pagination.
  */
 
-import { constants } from "node:fs";
-import { access, readFile, stat } from "node:fs/promises";
+import { constants, type Dirent } from "node:fs";
+import { access, readFile, readdir, stat } from "node:fs/promises";
+import { basename, dirname, extname, join, relative } from "node:path";
 import type { ApprovalController } from "../approval/types.js";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
 import { isSensitivePath } from "./sensitive-paths.js";
@@ -71,8 +72,11 @@ export function createReadTool(cwd: string, approval?: ApprovalController, lsp?:
 
       try {
         await access(filePath, constants.R_OK);
-      } catch {
-        return { content: `Error: Cannot read file: ${filePath}`, isError: true };
+      } catch (error: any) {
+        return {
+          content: await readFileNotFoundMessage(filePath, cwd, error),
+          isError: true,
+        };
       }
 
       const argOffset = typeof args.offset === "number" ? args.offset : undefined;
@@ -192,4 +196,127 @@ export function createReadTool(cwd: string, approval?: ApprovalController, lsp?:
       };
     },
   };
+}
+
+async function readFileNotFoundMessage(filePath: string, cwd: string, error: any): Promise<string> {
+  const message = [`Error: Cannot read file: ${filePath}`];
+  const code = typeof error?.code === "string" ? error.code : undefined;
+  if (code && code !== "ENOENT" && code !== "ENOTDIR") return message[0]!;
+
+  const suggestions = await suggestReadPaths(filePath, cwd);
+  if (suggestions.length === 1) {
+    message.push(`Did you mean ${suggestions[0]}?`);
+  } else if (suggestions.length > 1) {
+    message.push("Did you mean one of these?");
+    message.push(...suggestions.map((suggestion) => `- ${suggestion}`));
+  }
+  return message.join("\n");
+}
+
+async function suggestReadPaths(filePath: string, cwd: string): Promise<string[]> {
+  const suggestions = new Set<string>();
+  const underCwd = await suggestPathUnderCwd(filePath, cwd);
+  if (underCwd) suggestions.add(underCwd);
+
+  for (const suggestion of await suggestSimilarFiles(filePath)) {
+    suggestions.add(suggestion);
+  }
+
+  return [...suggestions].slice(0, 5);
+}
+
+async function suggestPathUnderCwd(filePath: string, cwd: string): Promise<string | undefined> {
+  const parent = dirname(cwd);
+  const parentPrefix = parent.endsWith("/") ? parent : `${parent}/`;
+  if (!filePath.startsWith(parentPrefix) || filePath === cwd || filePath.startsWith(`${cwd}/`)) {
+    return undefined;
+  }
+
+  const candidate = join(cwd, relative(parent, filePath));
+  try {
+    const stats = await stat(candidate);
+    return stats.isFile() ? candidate : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function suggestSimilarFiles(filePath: string): Promise<string[]> {
+  const dir = dirname(filePath);
+  const target = basename(filePath);
+  let entries: Dirent[];
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  return entries
+    .filter((entry) => entry.isFile() || entry.isSymbolicLink())
+    .map((entry) => {
+      const score = similarFileScore(target, entry.name);
+      return score === undefined ? undefined : { path: join(dir, entry.name), score };
+    })
+    .filter((entry): entry is { path: string; score: number } => entry !== undefined)
+    .sort((a, b) => a.score - b.score || a.path.length - b.path.length || a.path.localeCompare(b.path))
+    .map((entry) => entry.path)
+    .slice(0, 5);
+}
+
+function similarFileScore(target: string, candidate: string): number | undefined {
+  if (candidate === target) return undefined;
+
+  const targetExt = extname(target).toLowerCase();
+  const candidateExt = extname(candidate).toLowerCase();
+  const targetStem = basename(target, targetExt).toLowerCase();
+  const candidateStem = basename(candidate, candidateExt).toLowerCase();
+
+  if (!targetStem || !candidateStem) return undefined;
+
+  if (
+    candidateExt === targetExt &&
+    (candidateStem.startsWith(`${targetStem}_`) || candidateStem.startsWith(`${targetStem}-`))
+  ) {
+    return 0;
+  }
+  if (candidateExt === targetExt && (candidateStem.startsWith(targetStem) || targetStem.startsWith(candidateStem))) {
+    return 5;
+  }
+  if (candidateStem === targetStem) {
+    return 10;
+  }
+  if (candidateStem.includes(targetStem) || targetStem.includes(candidateStem)) {
+    return candidateExt === targetExt ? 15 : 20;
+  }
+
+  const distance = levenshteinDistance(targetStem, candidateStem, 3);
+  if (distance <= 2) {
+    return (candidateExt === targetExt ? 30 : 35) + distance;
+  }
+
+  return undefined;
+}
+
+function levenshteinDistance(a: string, b: string, maxDistance: number): number {
+  if (Math.abs(a.length - b.length) > maxDistance) return maxDistance + 1;
+  let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+
+  for (let i = 1; i <= a.length; i++) {
+    const current = [i];
+    let rowMin = current[0]!;
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      const value = Math.min(
+        previous[j]! + 1,
+        current[j - 1]! + 1,
+        previous[j - 1]! + cost,
+      );
+      current[j] = value;
+      rowMin = Math.min(rowMin, value);
+    }
+    if (rowMin > maxDistance) return maxDistance + 1;
+    previous = current;
+  }
+
+  return previous[b.length]!;
 }

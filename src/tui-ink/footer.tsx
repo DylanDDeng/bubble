@@ -32,7 +32,6 @@ export function FooterBar({ data }: { data: FooterData }) {
       ? ` • ⌃R ${data.thinkingLevel}`
       : " • ⌃R off"
     : "";
-  const traceText = data.verboseTrace ? " • ⌃O details:on" : " • ⌃O details";
 
   return (
     <Box paddingX={1} flexShrink={0}>
@@ -52,7 +51,6 @@ export function FooterBar({ data }: { data: FooterData }) {
       <Text color={theme.toolName}>{data.model}</Text>
       <Text color={theme.muted} dimColor>
         {thinkingText}
-        {traceText}
       </Text>
     </Box>
   );

@@ -11,7 +11,6 @@ export interface SubtaskPolicy {
   allowedTools: string[];
   reminder: string;
   resultStatus: ToolResultStatus;
-  maxTurns?: number;
   taskBudget?: { total: number };
 }
 
@@ -26,7 +25,6 @@ const POLICY_MAP: Record<SubtaskType, SubtaskPolicy> = {
       "- Return a concise summary of what you found and where.",
     ].join("\n"),
     resultStatus: "success",
-    maxTurns: 6,
     taskBudget: { total: 180_000 },
   },
   security_investigation: {
@@ -39,7 +37,6 @@ const POLICY_MAP: Record<SubtaskType, SubtaskPolicy> = {
       "- Do not loop on broad keyword search; summarize evidence and uncertainty.",
     ].join("\n"),
     resultStatus: "success",
-    maxTurns: 8,
     taskBudget: { total: 220_000 },
   },
   evidence_correlation: {
@@ -52,7 +49,6 @@ const POLICY_MAP: Record<SubtaskType, SubtaskPolicy> = {
       "- Produce a reasoning-focused summary that states what the evidence supports.",
     ].join("\n"),
     resultStatus: "success",
-    maxTurns: 4,
     taskBudget: { total: 120_000 },
   },
   general_readonly: {
@@ -64,7 +60,6 @@ const POLICY_MAP: Record<SubtaskType, SubtaskPolicy> = {
       "- Keep the scope tightly bounded and summarize findings concisely.",
     ].join("\n"),
     resultStatus: "success",
-    maxTurns: 6,
     taskBudget: { total: 180_000 },
   },
 };
