@@ -684,6 +684,19 @@ const TOOL_GLYPHS: Record<string, string> = {
   skill: "★",
 };
 
+interface SubagentDisplay {
+  subAgentId?: string;
+  agentName?: string;
+  nickname?: string;
+  status?: string;
+  category?: string;
+  profileSource?: string;
+  task?: string;
+  summary?: string;
+  toolNotes?: string[];
+  error?: string;
+}
+
 function displayToolName(name: string): string {
   if (TOOL_DISPLAY_NAMES[name]) return TOOL_DISPLAY_NAMES[name];
   return name.charAt(0).toUpperCase() + name.slice(1);
@@ -754,6 +767,62 @@ function summarizeToolResult(tc: DisplayToolCall): string {
   }
 }
 
+function subagentsFrom(toolCall: DisplayToolCall): SubagentDisplay[] {
+  const raw = toolCall.metadata?.subagents;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((item): item is SubagentDisplay => typeof item === "object" && item !== null);
+}
+
+function latestSubagentNote(subagent: SubagentDisplay): string {
+  const note = subagent.error
+    || subagent.toolNotes?.filter(Boolean).at(-1)
+    || subagent.summary
+    || subagent.task
+    || "";
+  return note.replace(/\r\n/g, "\n").split("\n").map((line) => line.trim()).find(Boolean) ?? "";
+}
+
+function subagentLabel(subagent: SubagentDisplay): string {
+  return subagent.nickname ?? subagent.agentName ?? "subagent";
+}
+
+function subagentRole(subagent: SubagentDisplay): string {
+  return [subagent.agentName, subagent.category ? `/${subagent.category}` : ""].join("") || "default";
+}
+
+function subagentStatusColor(status: string | undefined): string {
+  if (status === "completed") return theme.success;
+  if (status === "failed" || status === "blocked" || status === "cancelled") return theme.error;
+  if (status === "queued") return theme.muted;
+  return theme.toolPending;
+}
+
+function subagentSummary(subagents: SubagentDisplay[]): string {
+  if (subagents.length === 0) return "no subagents";
+  const counts = new Map<string, number>();
+  for (const subagent of subagents) {
+    const status = subagent.status ?? "running";
+    counts.set(status, (counts.get(status) ?? 0) + 1);
+  }
+  const order = ["running", "queued", "completed", "blocked", "failed", "cancelled"];
+  return order
+    .filter((status) => counts.has(status))
+    .map((status) => `${counts.get(status)} ${status}`)
+    .join("  ");
+}
+
+function sortSubagents(subagents: SubagentDisplay[]): SubagentDisplay[] {
+  const rank: Record<string, number> = {
+    running: 0,
+    blocked: 1,
+    failed: 2,
+    queued: 3,
+    cancelled: 4,
+    completed: 5,
+  };
+  return [...subagents].sort((a, b) => (rank[a.status ?? "running"] ?? 9) - (rank[b.status ?? "running"] ?? 9));
+}
+
 const COLLAPSED_PREVIEW_LINES = 10;
 const EXPANDED_PREVIEW_LINES = 50;
 
@@ -776,6 +845,17 @@ function ToolCallDisplay({
   compactTop?: boolean;
   nowTick?: number;
 }) {
+  if (toolCall.metadata?.kind === "subagent") {
+    return (
+      <SubagentToolDisplay
+        toolCall={toolCall}
+        verbose={verbose}
+        terminalColumns={terminalColumns}
+        compactTop={compactTop}
+      />
+    );
+  }
+
   // Show raw output immediately, then upgrade to highlighted ANSI when shiki
   // resolves. Avoids a noticeable "flash" where the line jumps from empty/raw
   // to colorized after a tick.
@@ -888,6 +968,63 @@ function ToolCallDisplay({
           verbose={verbose}
           showExpandHint={showExpandHint}
         />
+      )}
+    </Box>
+  );
+}
+
+function SubagentToolDisplay({
+  toolCall,
+  verbose,
+  terminalColumns,
+  compactTop,
+}: {
+  toolCall: DisplayToolCall;
+  verbose: boolean;
+  terminalColumns: number;
+  compactTop: boolean;
+}) {
+  const subagents = subagentsFrom(toolCall);
+  const hasError = toolCall.isError || subagents.some((subagent) => (
+    subagent.status === "failed" || subagent.status === "blocked" || subagent.status === "cancelled"
+  ));
+  const bulletColor = hasError ? theme.error : toolCall.result === undefined ? theme.toolPending : theme.user;
+  const detailWidth = Math.max(24, terminalColumns - 10);
+  const rows = verbose ? sortSubagents(subagents) : sortSubagents(subagents).slice(0, 4);
+  const omitted = Math.max(0, subagents.length - rows.length);
+
+  return (
+    <Box flexDirection="column" marginLeft={2} marginTop={compactTop ? 0 : 1}>
+      <Box>
+        <Text color={bulletColor}>↳ </Text>
+        <Text bold color={theme.toolName}>Subagents</Text>
+        {subagents.length > 0 && <Text color={theme.muted}> {subagentSummary(subagents)}</Text>}
+      </Box>
+      {rows.length > 0 && (
+        <Box flexDirection="column" marginLeft={2}>
+          {rows.map((subagent, index) => {
+            const status = subagent.status ?? "running";
+            const label = padVisual(truncateVisual(subagentLabel(subagent), 10), 10);
+            const role = padVisual(truncateVisual(subagentRole(subagent), 18), 18);
+            const note = truncateVisual(latestSubagentNote(subagent), detailWidth - 34);
+            return (
+              <Box key={subagent.subAgentId ?? `${subagentLabel(subagent)}-${index}`}>
+                <Text color={subagentStatusColor(status)}>{label}</Text>
+                <Text color={theme.traceAction}> {role}</Text>
+                <Text color={subagentStatusColor(status)}> {padVisual(status, 9)}</Text>
+                {note && <Text color={subagent.error ? theme.error : theme.traceDetail}> {note}</Text>}
+              </Box>
+            );
+          })}
+          {omitted > 0 && (
+            <Text color={theme.muted}>... {omitted} more, Ctrl+O to view</Text>
+          )}
+        </Box>
+      )}
+      {subagents.length === 0 && toolCall.result && (
+        <Box marginLeft={2}>
+          <Text color={hasError ? theme.error : theme.muted}>{summarizeToolResult(toolCall)}</Text>
+        </Box>
       )}
     </Box>
   );

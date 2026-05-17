@@ -3,7 +3,7 @@ import { Box, Text, useApp, useInput } from "ink";
 import { AgentAbortError, type Agent } from "../agent.js";
 import type { CliArgs } from "../cli.js";
 import type { SessionManager } from "../session.js";
-import type { AgentEvent, ContentPart, PermissionMode, Message, PlanDecision, Provider, Todo } from "../types.js";
+import type { AgentEvent, ContentPart, PermissionMode, Message, PlanDecision, Provider, Todo, ToolResultMetadata } from "../types.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import { UserConfig, maskKey } from "../config.js";
 import { InputBox, type SubmitPayload } from "./input-box.js";
@@ -187,6 +187,38 @@ function parsePartialArgs(
     }
   }
   return result;
+}
+
+function mergeToolMetadata(
+  current: ToolResultMetadata | undefined,
+  incoming: ToolResultMetadata | undefined,
+): ToolResultMetadata | undefined {
+  if (!incoming) return current;
+  if (current?.kind !== "subagent" || incoming.kind !== "subagent") {
+    return incoming;
+  }
+
+  const currentSubagents = Array.isArray(current.subagents) ? current.subagents : [];
+  const incomingSubagents = Array.isArray(incoming.subagents) ? incoming.subagents : [];
+  const byId = new Map<string, unknown>();
+  for (const item of currentSubagents) {
+    const subAgentId = typeof item === "object" && item !== null && "subAgentId" in item
+      ? String((item as Record<string, unknown>).subAgentId)
+      : "";
+    byId.set(subAgentId || `current:${byId.size}`, item);
+  }
+  for (const item of incomingSubagents) {
+    const subAgentId = typeof item === "object" && item !== null && "subAgentId" in item
+      ? String((item as Record<string, unknown>).subAgentId)
+      : "";
+    byId.set(subAgentId || `incoming:${byId.size}`, item);
+  }
+
+  return {
+    ...current,
+    ...incoming,
+    subagents: [...byId.values()],
+  };
 }
 
 /**
@@ -769,6 +801,21 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
                   tc.result = event.result.content;
                   tc.isError = event.result.isError;
                   tc.metadata = event.result.metadata;
+                  setStreamingTools([...toolCalls]);
+                  syncStreamingParts();
+                }
+                break;
+              }
+              case "tool_update": {
+                const tc = toolCalls.find((t) => t.id === event.id);
+                if (tc) {
+                  tc.metadata = mergeToolMetadata(tc.metadata, event.update.metadata);
+                  if (event.update.message) {
+                    tc.result = event.update.message;
+                  }
+                  tc.isError = event.update.status === "failed"
+                    || event.update.status === "blocked"
+                    || event.update.status === "cancelled";
                   setStreamingTools([...toolCalls]);
                   syncStreamingParts();
                 }

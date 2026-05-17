@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { getBubbleHome } from "../bubble-home.js";
 import type { ToolRegistryEntry, ToolResultStatus, TokenUsage } from "../types.js";
 import { randomInt } from "node:crypto";
+import type { ResolvedSubagentRoute } from "./categories.js";
 import { getSubtaskPolicy, type SubtaskType } from "./subtask-policy.js";
 
 export type AgentProfileSource = "user" | "project" | "builtin";
@@ -23,6 +24,7 @@ export interface AgentProfile {
   filePath?: string;
   mode: AgentProfileMode;
   model?: string | "inherit";
+  category?: string;
   tools: AgentProfileTools;
   maxTurns?: number;
   approval: AgentProfileApproval;
@@ -37,6 +39,8 @@ export interface SubagentRunResult {
   nickname?: string;
   status: "completed" | "failed" | "blocked" | "cancelled";
   profileSource: AgentProfileSource;
+  category?: string;
+  route?: ResolvedSubagentRoute;
   task: string;
   summary: string;
   toolNotes: string[];
@@ -384,6 +388,7 @@ function parseAgentProfileFile(raw: string, source: AgentProfileSource, filePath
     filePath,
     mode: modeValue(frontmatter.mode),
     model: stringValue(frontmatter.model) || "inherit",
+    category: stringValue(frontmatter.category),
     tools: toolsValue(frontmatter.tools),
     maxTurns: numberValue(frontmatter.maxTurns),
     approval: approvalValue(frontmatter.approval),

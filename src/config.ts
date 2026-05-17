@@ -7,6 +7,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getBubbleHome } from "./bubble-home.js";
+import { sanitizeAgentCategories, type AgentCategoriesConfig } from "./agent/categories.js";
 import type { ProviderProfile } from "./provider-registry.js";
 import type { ThinkingLevel } from "./types.js";
 
@@ -53,6 +54,7 @@ export interface UserConfigData {
   apiKey?: string;
   providers?: ProviderProfile[];
   defaultProvider?: string;
+  agentCategories?: AgentCategoriesConfig;
 }
 
 export class UserConfig {
@@ -74,6 +76,7 @@ export class UserConfig {
         recentModels: sanitizeRecentModels(parsed.recentModels),
         providers: sanitizeProviders(parsed.providers),
         defaultProvider: sanitizeDefaultProvider(parsed.defaultProvider),
+        agentCategories: sanitizeAgentCategories(parsed.agentCategories),
       };
     } catch {
       this.data = {};
@@ -171,6 +174,10 @@ export class UserConfig {
   setTheme(theme: Record<string, string>) {
     this.data.theme = { ...theme };
     this.save();
+  }
+
+  getAgentCategories(): AgentCategoriesConfig {
+    return sanitizeAgentCategories(this.data.agentCategories);
   }
 }
 

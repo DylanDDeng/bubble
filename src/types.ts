@@ -152,6 +152,8 @@ export interface ToolUpdate {
   subAgentId: string;
   agentName: string;
   nickname?: string;
+  category?: string;
+  route?: import("./agent/categories.js").ResolvedSubagentRoute;
   status: "queued" | "running" | "completed" | "failed" | "blocked" | "cancelled";
   childEvent?: AgentEvent;
   summaryDelta?: string;
@@ -185,6 +187,8 @@ export interface ToolContext {
         runId: string;
         subAgentId: string;
         parentToolCallId: string;
+        category?: string;
+        route?: import("./agent/categories.js").ResolvedSubagentRoute;
         approval?: "fail" | "disabled";
         emitUpdate?: (update: ToolUpdate) => void;
         description?: string;
@@ -199,6 +203,8 @@ export interface ToolContext {
       options: {
         profile: import("./agent/profiles.js").AgentProfile;
         parentToolCallId: string;
+        category?: string;
+        route?: import("./agent/categories.js").ResolvedSubagentRoute;
         approval?: "fail" | "disabled";
         description?: string;
         abortSignal?: AbortSignal;

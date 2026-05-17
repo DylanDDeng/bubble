@@ -67,4 +67,32 @@ describe("UserConfig", () => {
       toolError: "#ff0000",
     });
   });
+
+  it("loads sanitized subagent category overrides", () => {
+    process.env.BUBBLE_HOME = root;
+    writeFileSync(
+      join(root, "config.json"),
+      JSON.stringify({
+        agentCategories: {
+          Review: {
+            model: "openai:gpt-5.4",
+            thinkingLevel: "high",
+            maxConcurrent: 2.9,
+            ignored: true,
+          },
+          broken: "skip",
+        },
+      }, null, 2),
+    );
+
+    const config = new UserConfig();
+
+    expect(config.getAgentCategories()).toEqual({
+      review: {
+        model: "openai:gpt-5.4",
+        thinkingLevel: "high",
+        maxConcurrent: 2,
+      },
+    });
+  });
 });

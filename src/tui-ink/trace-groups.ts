@@ -9,6 +9,7 @@ export type TraceGroupKind =
   | "execute"
   | "edit"
   | "write"
+  | "subagent"
   | "other";
 
 export interface TraceGroup {
@@ -115,6 +116,10 @@ export function traceGroupLabel(group: TraceGroup): string {
 }
 
 function classifyTool(toolCall: DisplayToolCall): TraceClassifier {
+  if (toolCall.metadata?.kind === "subagent") {
+    return { kind: "subagent", title: "Subagents", bucketKey: `subagent:${toolCall.id}`, groupable: false };
+  }
+
   switch (toolCall.name) {
     case "glob": {
       const pattern = String(toolCall.args.pattern ?? "");
@@ -172,6 +177,8 @@ function buildTraceGroup(
     case "edit":
     case "write":
       return buildMutationGroup(classifier, raw, options, pending, startedAt, hasError, errorCount);
+    case "subagent":
+      return buildSubagentGroup(classifier, raw[0]!, options, pending, startedAt);
     default:
       return buildOtherGroup(classifier, raw, options, pending, startedAt, hasError, errorCount);
   }
@@ -348,6 +355,49 @@ function buildMutationGroup(
   };
 }
 
+interface SubagentTraceItem {
+  subAgentId?: string;
+  agentName?: string;
+  nickname?: string;
+  status?: string;
+  category?: string;
+  task?: string;
+  summary?: string;
+  toolNotes?: string[];
+  error?: string;
+}
+
+function buildSubagentGroup(
+  classifier: TraceClassifier,
+  tool: DisplayToolCall,
+  options: Required<TraceGroupOptions>,
+  pending: boolean,
+  startedAt: number | undefined,
+): TraceGroup {
+  const subagents = subagentsFromMetadata(tool);
+  const rows = subagents.length > 0
+    ? subagents.map(formatSubagentRow)
+    : resultLines(tool.result).map((line) => formatTracePath(line, options.homeDir));
+  const { shown, omitted } = take(rows, options.maxPreviewLines);
+  const errorCount = subagents.filter(isFailedSubagent).length + (tool.isError ? 1 : 0);
+
+  return {
+    kind: "subagent",
+    title: classifier.title,
+    raw: [tool],
+    count: subagents.length || 1,
+    noun: plural(subagents.length || 1, "agent", "agents"),
+    items: [],
+    previewLines: shown,
+    errorLines: [],
+    omitted,
+    pending: pending || subagents.some((subagent) => ["queued", "running"].includes(subagent.status ?? "running")),
+    hasError: !!tool.isError || errorCount > 0,
+    errorCount,
+    startedAt,
+  };
+}
+
 function buildOtherGroup(
   classifier: TraceClassifier,
   raw: DisplayToolCall[],
@@ -376,6 +426,28 @@ function buildOtherGroup(
     errorCount,
     startedAt,
   };
+}
+
+function subagentsFromMetadata(tool: DisplayToolCall): SubagentTraceItem[] {
+  const raw = tool.metadata?.subagents;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((item): item is SubagentTraceItem => typeof item === "object" && item !== null);
+}
+
+function formatSubagentRow(subagent: SubagentTraceItem): string {
+  const label = subagent.nickname || subagent.agentName || subagent.subAgentId || "subagent";
+  const role = [subagent.agentName, subagent.category ? `/${subagent.category}` : ""].join("") || "default";
+  const status = subagent.status || "running";
+  const note = subagent.error
+    || subagent.toolNotes?.filter(Boolean).at(-1)
+    || subagent.summary
+    || subagent.task
+    || "";
+  return [label, `(${role})`, status, note].filter(Boolean).join(" ");
+}
+
+function isFailedSubagent(subagent: SubagentTraceItem): boolean {
+  return subagent.status === "failed" || subagent.status === "blocked" || subagent.status === "cancelled";
 }
 
 function isToolPending(tool: DisplayToolCall): boolean {

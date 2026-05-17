@@ -15,6 +15,7 @@ import { buildDeferredToolsReminder, buildToolFreezeReminder, isPermissionModeRe
 import type { AgentEvent, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ThinkingLevel, Todo, TokenUsage, ToolDefinition, ToolResult, ToolRegistryEntry, ToolUpdate } from "./types.js";
 import { HookBus, type TurnHooks } from "./orchestrator/hooks.js";
 import { createDefaultHooks } from "./orchestrator/default-hooks.js";
+import { resolveSameProviderModelRoute, resolveSubagentRoute, type AgentCategoriesConfig, type ResolvedSubagentRoute } from "./agent/categories.js";
 import { getSubtaskPolicy, type SubtaskType } from "./agent/subtask-policy.js";
 import { BudgetLedger, composeAbortSignals } from "./agent/budget-ledger.js";
 import { assignAgentNickname, builtinAgentProfiles, mergeUsage, selectToolsForAgentProfile, validateAgentProfileTools, type AgentProfile, type SubagentRunResult } from "./agent/profiles.js";
@@ -64,6 +65,7 @@ export interface AgentOptions {
   skills?: SkillSummary[];
   memoryPrompt?: string;
   fileStateTracker?: FileStateTracker;
+  agentCategories?: AgentCategoriesConfig;
 }
 
 export class Agent {
@@ -92,6 +94,7 @@ export class Agent {
   private skillSummaries: SkillSummary[];
   private memoryPrompt?: string;
   private fileStateTracker?: FileStateTracker;
+  private agentCategories: AgentCategoriesConfig;
   private subagentThreads: Map<string, SubagentThreadRecord> = new Map();
   private pendingSubagentUpdates: PendingSubagentToolUpdate[] = [];
   private lastInputTokens: number | null = null;
@@ -118,6 +121,7 @@ export class Agent {
     this.skillSummaries = options.skills ?? [];
     this.memoryPrompt = options.memoryPrompt;
     this.fileStateTracker = options.fileStateTracker;
+    this.agentCategories = options.agentCategories ?? {};
 
     if (options.systemPrompt) {
       this.messages.push({ role: "system", content: options.systemPrompt });
@@ -731,6 +735,7 @@ export class Agent {
       runId: randomUUID(),
       subAgentId: randomUUID(),
       parentToolCallId: "task",
+      route: this.resolveRouteForSubagent(profile, undefined),
       description: options?.description,
     });
     const lines = [
@@ -766,6 +771,8 @@ export class Agent {
       runId: string;
       subAgentId: string;
       parentToolCallId: string;
+      category?: string;
+      route?: ResolvedSubagentRoute;
       approval?: "fail" | "disabled";
       emitUpdate?: (update: ToolUpdate) => void;
       description?: string;
@@ -782,6 +789,7 @@ export class Agent {
       parentToolCallId: options.parentToolCallId,
       parentToolName: "subagent",
       nickname: options.nickname,
+      route: options.route ?? this.resolveRouteForSubagent(options.profile, options.category),
     });
     await this.runSubagentThread(record, input, cwd, {
       approval: options.approval ?? options.profile.approval,
@@ -798,6 +806,8 @@ export class Agent {
     options: {
       profile: AgentProfile;
       parentToolCallId: string;
+      category?: string;
+      route?: ResolvedSubagentRoute;
       approval?: "fail" | "disabled";
       description?: string;
       abortSignal?: AbortSignal;
@@ -809,6 +819,7 @@ export class Agent {
       task: typeof input === "string" ? input : "(multimodal task)",
       parentToolCallId: options.parentToolCallId,
       parentToolName: "spawn_agent",
+      route: options.route ?? this.resolveRouteForSubagent(options.profile, options.category),
     });
     this.subagentThreads.set(record.agentId, record);
     this.queueSubagentUpdate(record, "queued", undefined, `Queued ${record.nickname} (${record.profile.name})`);
@@ -910,6 +921,32 @@ export class Agent {
     return [...this.subagentThreads.values()].map(snapshotSubagentThread);
   }
 
+  private resolveRouteForSubagent(profile: AgentProfile, category: string | undefined): ResolvedSubagentRoute {
+    const parentRoute = {
+      providerId: this.providerId,
+      model: this.apiModel,
+      thinkingLevel: this.thinkingLevel,
+    };
+    const resolved = resolveSubagentRoute(category ?? profile.category, {
+      ...parentRoute,
+    }, this.agentCategories);
+    if ("error" in resolved) {
+      throw new Error(resolved.error);
+    }
+    if (profile.model && profile.model !== "inherit") {
+      const model = resolveSameProviderModelRoute(profile.model, parentRoute.providerId);
+      if ("error" in model) throw new Error(model.error);
+      if (model.model !== "inherit") {
+        return {
+          ...resolved.route,
+          model: model.model,
+          inherited: false,
+        };
+      }
+    }
+    return resolved.route;
+  }
+
   private createSubagentThreadRecord(options: {
     profile: AgentProfile;
     task: string;
@@ -918,6 +955,7 @@ export class Agent {
     parentToolCallId: string;
     parentToolName: string;
     nickname?: string;
+    route?: ResolvedSubagentRoute;
   }): SubagentThreadRecord {
     const now = Date.now();
     const nickname = options.nickname ?? assignAgentNickname(options.profile, this.activeSubagentNicknames());
@@ -926,6 +964,8 @@ export class Agent {
       runId: options.runId ?? randomUUID(),
       nickname,
       profile: options.profile,
+      category: options.route?.category,
+      route: options.route,
       parentToolCallId: options.parentToolCallId,
       parentToolName: options.parentToolName,
       status: "queued",
@@ -1102,12 +1142,18 @@ export class Agent {
     forkContext?: boolean,
   ): NonNullable<SubagentThreadRecord["agent"]> {
     const childToolNames = tools.map((tool) => tool.name);
+    const route = record.route ?? {
+      providerId: this.providerId,
+      model: this.apiModel,
+      thinkingLevel: this.thinkingLevel,
+      inherited: true,
+    };
     const childSystemPrompt = buildSystemPrompt({
       agentName: "Bubble",
-      configuredProvider: this.providerId || "none",
-      configuredModel: this.model || "none",
-      configuredModelId: this.model || "none",
-      thinkingLevel: this.thinkingLevel,
+      configuredProvider: route.providerId || "none",
+      configuredModel: route.model || "none",
+      configuredModelId: route.providerId && route.model ? `${route.providerId}:${route.model}` : route.model || "none",
+      thinkingLevel: route.thinkingLevel,
       mode: "plan",
       workingDir: cwd,
       tools: childToolNames,
@@ -1122,17 +1168,18 @@ export class Agent {
     });
     const subAgent = new Agent({
       provider: this.provider,
-      providerId: this.providerId,
-      model: record.profile.model && record.profile.model !== "inherit" ? record.profile.model : this.model,
+      providerId: route.providerId,
+      model: route.model,
       tools,
       temperature: this.temperature,
-      thinkingLevel: this.thinkingLevel,
+      thinkingLevel: route.thinkingLevel,
       mode: "plan",
       maxTurns: record.profile.maxTurns,
       budgetLedger: this.budgetLedger,
       budgetSource: { runId: record.runId, subAgentId: record.agentId },
       systemPrompt: childSystemPrompt,
       hooks: this.hookDefinitions,
+      agentCategories: this.agentCategories,
     });
     if (forkContext) {
       subAgent.messages = this.forkMessagesForSubagent(childSystemPrompt);
@@ -1169,6 +1216,8 @@ export class Agent {
       subAgentId: record.agentId,
       agentName: record.profile.name,
       nickname: record.nickname,
+      category: record.category,
+      route: record.route,
       status,
       childEvent: event,
       summaryDelta: event?.type === "text_delta" ? event.content : undefined,
@@ -1182,6 +1231,8 @@ export class Agent {
           subAgentId: record.agentId,
           agentName: record.profile.name,
           nickname: record.nickname,
+          category: record.category,
+          route: record.route,
           status,
           profileSource: record.profile.source,
           task: record.task,

@@ -169,6 +169,33 @@ describe("Ink trace groups", () => {
     expect(formatTracePath("/Users/tester/project/a.ts", homeDir)).toBe("~/project/a.ts");
     expect(formatTracePath("/tmp/a.ts", homeDir)).toBe("/tmp/a.ts");
   });
+
+  it("summarizes subagent metadata for compact Ink traces", () => {
+    const groups = buildTraceGroups([
+      tool("spawn_agent", { message: "review this" }, "Running Ada", {
+        metadata: {
+          kind: "subagent",
+          subagents: [{
+            subAgentId: "child_1",
+            agentName: "explorer",
+            nickname: "Ada",
+            category: "review",
+            status: "running",
+            toolNotes: ["grep: 3 matches"],
+          }],
+        },
+      }),
+    ], { homeDir });
+
+    expect(groups[0]).toMatchObject({
+      kind: "subagent",
+      title: "Subagents",
+      count: 1,
+      noun: "agent",
+      previewLines: ["Ada (explorer/review) running grep: 3 matches"],
+      pending: true,
+    });
+  });
 });
 
 let toolCounter = 0;

@@ -269,6 +269,7 @@ async function main() {
     skills: skillSummaries,
     memoryPrompt,
     fileStateTracker,
+    agentCategories: userConfig.getAgentCategories(),
   });
   agentRef = agent;
   if (sessionManager) {

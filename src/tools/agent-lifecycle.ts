@@ -22,6 +22,7 @@ export function createSpawnAgentTool(): ToolRegistryEntry {
       properties: {
         agent_type: { type: "string", description: "Subagent profile or role name. Defaults to default." },
         agent: { type: "string", description: "Alias for agent_type." },
+        category: { type: "string", description: "Optional semantic category for model/thinking routing, such as quick, deep, explore, review, frontend, or writing." },
         message: { type: "string", description: "Initial task for the subagent." },
         task: { type: "string", description: "Alias for message." },
         fork_context: { type: "boolean", description: "When true, copy recent parent conversation into the child thread." },
@@ -61,6 +62,7 @@ export function createSpawnAgentTool(): ToolRegistryEntry {
         const snapshot = await ctx.agent.spawnSubAgent(message, ctx.cwd, {
           profile: resolved.profile,
           parentToolCallId: ctx.toolCall?.id ?? snapshotFallbackId(),
+          category: stringArg(args.category),
           approval: parseApproval(args.approval),
           abortSignal: ctx.abortSignal,
           forkContext: args.fork_context === true,
@@ -300,6 +302,9 @@ function formatSnapshot(snapshot: SubagentThreadSnapshot): string[] {
     `status: ${snapshot.status}`,
     `task: ${snapshot.task}`,
   ];
+  if (snapshot.category) {
+    lines.splice(3, 0, `category: ${snapshot.category}`);
+  }
   if (snapshot.summary) {
     lines.push("", "Summary:", snapshot.summary);
   } else if (snapshot.status === "completed") {
@@ -321,6 +326,8 @@ function snapshotToMetadata(snapshot: SubagentThreadSnapshot): Record<string, un
     nickname: snapshot.nickname,
     status: snapshot.status === "closed" ? "cancelled" : snapshot.status,
     profileSource: snapshot.profileSource,
+    category: snapshot.category,
+    route: snapshot.route,
     task: snapshot.task,
     summary: snapshot.summary,
     toolNotes: snapshot.toolNotes,

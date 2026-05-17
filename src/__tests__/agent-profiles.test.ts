@@ -36,6 +36,7 @@ describe("agent profiles", () => {
       "name: scout",
       "description: Scout files",
       "mode: readonly",
+      "category: explore",
       "tools:",
       "  preset: explicit",
       "  include:",
@@ -61,6 +62,7 @@ describe("agent profiles", () => {
     expect(profile?.tools.preset).toBe("explicit");
     expect(profile?.tools.include).toEqual(["read", "grep", "edit", "subagent"]);
     expect(profile?.tools.exclude).toEqual(["grep"]);
+    expect(profile?.category).toBe("explore");
     expect(profile?.maxTurns).toBe(3);
     expect(profile?.nicknameCandidates).toEqual(["Scout", "Surveyor"]);
   });

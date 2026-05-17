@@ -13,6 +13,8 @@ function snapshot(overrides: Partial<SubagentThreadSnapshot> = {}): SubagentThre
     status: "completed",
     task: "inspect",
     summary: "done",
+    category: undefined,
+    route: undefined,
     toolNotes: [],
     createdAt: 1,
     updatedAt: 2,
@@ -52,6 +54,42 @@ describe("agent lifecycle tools", () => {
     expect(result.content).toContain("agent_id: agent_1");
     expect(result.metadata?.subagents).toEqual([
       expect.objectContaining({ nickname: "Ada", agentName: "explorer" }),
+    ]);
+  });
+
+  it("passes category into spawned subagents and exposes it in metadata", async () => {
+    const tool = createSpawnAgentTool();
+    const result = await tool.execute(
+      { message: "review this", category: "review" },
+      {
+        cwd: "/tmp",
+        toolCall: { id: "spawn_1", name: "spawn_agent" },
+        agent: {
+          runSubtask: async () => ({ content: "unused" }),
+          spawnSubAgent: async (_input, _cwd, options) => {
+            expect(options.category).toBe("review");
+            return snapshot({
+              status: "queued",
+              category: "review",
+              route: {
+                category: "review",
+                providerId: "openai",
+                model: "gpt-5.4",
+                thinkingLevel: "high",
+                inherited: false,
+              },
+            });
+          },
+        },
+      },
+    );
+
+    expect(result.status).toBe("success");
+    expect(result.metadata?.subagents).toEqual([
+      expect.objectContaining({
+        category: "review",
+        route: expect.objectContaining({ model: "gpt-5.4", thinkingLevel: "high" }),
+      }),
     ]);
   });
 

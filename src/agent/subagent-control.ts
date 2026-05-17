@@ -1,4 +1,5 @@
 import type { AgentProfile, AgentProfileSource, SubagentRunResult } from "./profiles.js";
+import type { ResolvedSubagentRoute } from "./categories.js";
 import type { AgentEvent, ContentPart, Message, ToolUpdate } from "../types.js";
 
 export type SubagentThreadStatus =
@@ -16,6 +17,8 @@ export interface SubagentThreadSnapshot {
   nickname: string;
   agentName: string;
   profileSource: AgentProfileSource;
+  category?: string;
+  route?: ResolvedSubagentRoute;
   status: SubagentThreadStatus;
   task: string;
   summary: string;
@@ -31,6 +34,8 @@ export interface SubagentThreadRecord {
   runId: string;
   nickname: string;
   profile: AgentProfile;
+  category?: string;
+  route?: ResolvedSubagentRoute;
   parentToolCallId: string;
   parentToolName: string;
   status: SubagentThreadStatus;
@@ -65,6 +70,8 @@ export function snapshotSubagentThread(record: SubagentThreadRecord): SubagentTh
     nickname: record.nickname,
     agentName: record.profile.name,
     profileSource: record.profile.source,
+    category: record.category,
+    route: record.route,
     status: record.status,
     task: record.task,
     summary: record.summary,
@@ -90,6 +97,8 @@ export function subagentResultFromThread(record: SubagentThreadRecord): Subagent
     nickname: record.nickname,
     status,
     profileSource: record.profile.source,
+    category: record.category,
+    route: record.route,
     task: record.task,
     summary: record.summary,
     toolNotes: [...record.toolNotes],

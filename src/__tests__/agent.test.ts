@@ -770,6 +770,95 @@ describe("Agent", () => {
     expect(system).toContain("Use selected context.");
   });
 
+  it("applies resolved category routes to child agent model, thinking level, prompt, and result metadata", async () => {
+    const calls: Array<{ model: string; thinkingLevel?: string; system: string }> = [];
+    const provider: Provider = {
+      async *streamChat(messages, options) {
+        calls.push({
+          model: options.model,
+          thinkingLevel: options.thinkingLevel,
+          system: messages.find((message) => message.role === "system")?.content ?? "",
+        });
+        yield { type: "text", content: "review complete" };
+      },
+      async complete() {
+        return "ok";
+      },
+    };
+    const profile: AgentProfile = {
+      name: "reviewer",
+      description: "Review child",
+      source: "user",
+      mode: "readonly",
+      model: "inherit",
+      category: "review",
+      tools: { preset: "none" },
+      approval: "fail",
+      prompt: "Review carefully.",
+    };
+    const agent = new Agent({
+      provider,
+      providerId: "openai",
+      model: "gpt-4o",
+      thinkingLevel: "medium",
+      tools: [],
+      systemPrompt: "parent system",
+      agentCategories: {
+        review: { model: "gpt-5.4", thinkingLevel: "high" },
+      },
+    });
+
+    const result = await agent.runSubAgent("inspect", "/tmp", {
+      profile,
+      runId: "run-review",
+      subAgentId: "child-review",
+      parentToolCallId: "parent",
+    });
+
+    expect(calls[0]).toMatchObject({ model: "gpt-5.4", thinkingLevel: "high" });
+    expect(calls[0].system).toContain("openai:gpt-5.4");
+    expect(calls[0].system).toContain("Review carefully.");
+    expect(result).toMatchObject({
+      status: "completed",
+      category: "review",
+      route: {
+        category: "review",
+        providerId: "openai",
+        model: "gpt-5.4",
+        thinkingLevel: "high",
+        inherited: false,
+      },
+    });
+  });
+
+  it("rejects cross-provider subagent model routes until provider factory support exists", async () => {
+    const provider = createMockProvider([]);
+    const profile: AgentProfile = {
+      name: "cross-provider",
+      description: "Cross provider",
+      source: "user",
+      mode: "readonly",
+      model: "anthropic:claude-sonnet-4.5",
+      tools: { preset: "none" },
+      approval: "fail",
+      prompt: "Return briefly.",
+    };
+    const agent = new Agent({
+      provider,
+      providerId: "openai",
+      model: "gpt-4o",
+      tools: [],
+      systemPrompt: "system",
+    });
+
+    await expect(agent.runSubAgent("inspect", "/tmp", {
+      profile,
+      runId: "run-cross",
+      subAgentId: "child-cross",
+      parentToolCallId: "parent",
+    })).rejects.toThrow(/Cross-provider subagent routing/);
+  });
+
   it("does not cancel a subagent from a hidden per-child token budget", async () => {
     const provider: Provider = {
       async *streamChat() {
