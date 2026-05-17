@@ -3,10 +3,10 @@
  */
 
 import { execFile } from "node:child_process";
-import { resolve } from "node:path";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
 import { isSensitivePath } from "./sensitive-paths.js";
 import { analyzeToolIntent } from "../agent/tool-intent.js";
+import { resolveToolPath } from "./path-utils.js";
 
 const MAX_MATCHES = 100;
 
@@ -26,7 +26,7 @@ export function createGrepTool(cwd: string): ToolRegistryEntry {
       required: ["pattern"],
     },
     async execute(args): Promise<ToolResult> {
-      const searchPath = args.path ? resolve(cwd, args.path) : cwd;
+      const searchPath = args.path ? resolveToolPath(cwd, args.path) : cwd;
       const pattern = String(args.pattern);
       const intent = analyzeToolIntent({
         name: "grep",

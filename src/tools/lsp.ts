@@ -1,10 +1,10 @@
 import { access } from "node:fs/promises";
 import { constants } from "node:fs";
-import { resolve } from "node:path";
 import { gateToolAction } from "../approval/tool-helper.js";
 import type { ApprovalController } from "../approval/types.js";
 import { getLspService, type LspService } from "../lsp/index.js";
 import type { ToolRegistryEntry } from "../types.js";
+import { resolveToolPath } from "./path-utils.js";
 
 const OPERATIONS = [
   "goToDefinition",
@@ -49,7 +49,7 @@ export function createLspTool(
         return { content: `Error: Unsupported LSP operation: ${args.operation}`, isError: true };
       }
 
-      const file = resolve(cwd, String(args.filePath));
+      const file = resolveToolPath(cwd, args.filePath);
       try {
         await access(file, constants.R_OK);
       } catch {

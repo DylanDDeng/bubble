@@ -6,7 +6,6 @@
 
 import { constants } from "node:fs";
 import { access, readFile, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
 import { createTwoFilesPatch } from "diff";
 import { gateToolAction } from "../approval/tool-helper.js";
 import type { ApprovalController } from "../approval/types.js";
@@ -16,6 +15,7 @@ import { formatDiagnosticBlocks, type LspService } from "../lsp/index.js";
 import { applyEditsToContent, EditApplyError, formatEditMatchNotes } from "./edit-apply.js";
 import { withFileMutationQueue } from "./file-mutation-queue.js";
 import { isWithinWorkspace, type FileStateTracker } from "./file-state.js";
+import { resolveToolPath } from "./path-utils.js";
 
 export interface EditArgs {
   path: string;
@@ -49,7 +49,7 @@ export function createEditTool(cwd: string, approval?: ApprovalController, lsp?:
       required: ["path", "edits"],
     },
     async execute(args): Promise<ToolResult> {
-      const filePath = resolve(cwd, args.path);
+      const filePath = resolveToolPath(cwd, args.path);
 
       if (!isWithinWorkspace(cwd, filePath)) {
         return {

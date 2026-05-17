@@ -3,7 +3,7 @@
  */
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname } from "node:path";
 import { createTwoFilesPatch } from "diff";
 import { gateToolAction } from "../approval/tool-helper.js";
 import type { ApprovalController } from "../approval/types.js";
@@ -11,6 +11,7 @@ import type { ToolRegistryEntry, ToolResult } from "../types.js";
 import { formatDiagnosticBlocks, type LspService } from "../lsp/index.js";
 import { isWithinWorkspace, type FileStateTracker } from "./file-state.js";
 import { withFileMutationQueue } from "./file-mutation-queue.js";
+import { resolveToolPath } from "./path-utils.js";
 
 export interface WriteToolOptions {
   /** If true, existing files require overwrite=true plus a fresh agent-observed version. */
@@ -43,7 +44,7 @@ export function createWriteTool(
       required: ["path", "content"],
     },
     async execute(args): Promise<ToolResult> {
-      const filePath = resolve(cwd, args.path);
+      const filePath = resolveToolPath(cwd, args.path);
       const overwrite = args.overwrite === true;
 
       if (!isWithinWorkspace(cwd, filePath)) {

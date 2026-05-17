@@ -4,12 +4,12 @@
 
 import { constants } from "node:fs";
 import { access, readFile, stat } from "node:fs/promises";
-import { resolve } from "node:path";
 import type { ApprovalController } from "../approval/types.js";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
 import { isSensitivePath } from "./sensitive-paths.js";
 import type { LspService } from "../lsp/index.js";
 import type { FileStateTracker, ReadHistoryEntry } from "./file-state.js";
+import { resolveToolPath } from "./path-utils.js";
 
 const MAX_LINES = 2500;
 const MAX_BYTES = 256 * 1024;
@@ -44,7 +44,7 @@ export function createReadTool(cwd: string, approval?: ApprovalController, lsp?:
       required: ["path"],
     },
     async execute(args): Promise<ToolResult> {
-      const filePath = resolve(cwd, args.path);
+      const filePath = resolveToolPath(cwd, args.path);
 
       if (isSensitivePath(filePath)) {
         return {

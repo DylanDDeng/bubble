@@ -1,5 +1,5 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ApprovalController } from "../../approval/types.js";
@@ -45,6 +45,23 @@ describe("read tool", () => {
 
     expect(result.isError).toBe(true);
     expect(result.content).toContain("Cannot read file");
+  });
+
+  it("expands home-directory paths before resolving", async () => {
+    const fileName = `.bubble-read-home-${process.pid}-${Date.now()}.txt`;
+    const file = join(homedir(), fileName);
+    writeFileSync(file, "home visible", "utf-8");
+
+    try {
+      const tool = createReadTool(tmpDir);
+      const result = await tool.execute({ path: `~/${fileName}` }, { cwd: tmpDir });
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content).toBe("home visible");
+      expect(result.metadata?.path).toBe(file);
+    } finally {
+      rmSync(file, { force: true });
+    }
   });
 
   it("deny rule blocks reads before touching disk", async () => {

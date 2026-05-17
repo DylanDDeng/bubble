@@ -7,6 +7,7 @@ import { relative, resolve } from "node:path";
 import picomatch from "picomatch";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
 import { isSensitivePath } from "./sensitive-paths.js";
+import { resolveToolPath } from "./path-utils.js";
 
 const MAX_RESULTS = 100;
 const DEFAULT_IGNORES = new Set([
@@ -35,7 +36,7 @@ export function createGlobTool(cwd: string): ToolRegistryEntry {
       required: ["pattern"],
     },
     async execute(args, ctx): Promise<ToolResult> {
-      const root = resolve(cwd, typeof args.path === "string" && args.path.trim() ? args.path : ".");
+      const root = resolveToolPath(cwd, typeof args.path === "string" && args.path.trim() ? args.path : ".");
       const pattern = String(args.pattern || "").trim();
       if (!pattern) {
         return { content: "Error: glob pattern is required", isError: true, status: "command_error" };
