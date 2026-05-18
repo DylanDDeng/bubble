@@ -259,6 +259,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   const themeResolved: ResolvedTheme = themeMode === "auto" ? autoResolved : themeMode;
   const { exit } = useApp();
   const [messages, setMessages] = useState<DisplayMessage[]>(() => compactDisplayMessages(reconstructDisplayMessages(agent.messages)));
+  const [clearEpoch, setClearEpoch] = useState(0);
   const [isRunning, setIsRunning] = useState(false);
   const [streamingContent, setStreamingContent] = useState("");
   const [streamingReasoning, setStreamingReasoning] = useState("");
@@ -499,6 +500,12 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
 
   const clearMessages = useCallback(() => {
     setMessages([]);
+    // Ink's <Static> writes items into terminal scrollback and never removes
+    // them — emptying the React state alone leaves the old output visible.
+    // Wipe screen + scrollback (xterm \x1b[3J) and bump the epoch below so
+    // Static remounts with a fresh internal cursor.
+    process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
+    setClearEpoch((n) => n + 1);
   }, []);
 
   const openPicker = useCallback((mode: "model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill", providerId?: string) => {
@@ -1048,6 +1055,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     <Box flexDirection="column" height="100%">
       <Box flexDirection="column" flexGrow={1} padding={1}>
         <MessageList
+          key={clearEpoch}
           messages={messages}
           streamingContent={streamingContent}
           streamingReasoning={streamingReasoning}
