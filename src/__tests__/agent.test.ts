@@ -670,6 +670,60 @@ describe("Agent", () => {
     expect(events.indexOf(update)).toBeLessThan(events.indexOf(end));
   });
 
+  it("injects current subagent lifecycle truth before continuing after lifecycle tools", async () => {
+    const captured: Message[][] = [];
+    const provider: Provider = {
+      async *streamChat(messages) {
+        captured.push(messages);
+        if (captured.length === 1) {
+          yield { type: "tool_call", id: "spawn_1", name: "spawn_agent", arguments: "{}", isStart: true, isEnd: true };
+          yield { type: "done" };
+          return;
+        }
+        yield { type: "text", content: "done" };
+      },
+      async complete() {
+        return "ok";
+      },
+    };
+    const lifecycleTool: ToolRegistryEntry = {
+      name: "spawn_agent",
+      readOnly: true,
+      effect: "read",
+      description: "",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return {
+          content: "Spawned Ada",
+          metadata: {
+            kind: "subagent",
+            subagents: [
+              { subAgentId: "agent_1", agentName: "explorer", nickname: "Ada", status: "queued" },
+              { subAgentId: "agent_1", agentName: "explorer", nickname: "Ada", status: "completed" },
+              { subAgentId: "agent_2", agentName: "explorer", nickname: "Grace", status: "completed" },
+            ],
+          },
+        };
+      },
+    };
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [lifecycleTool],
+      systemPrompt: "system",
+    });
+
+    await collectEvents(agent, "spawn children", "/tmp");
+
+    const lifecycleReminder = captured[1].find((message) => (
+      message.role === "system" && message.content.includes("Subagent lifecycle truth")
+    ));
+    expect(lifecycleReminder?.content).toContain("Unique subagents currently tracked: 2.");
+    expect(lifecycleReminder?.content).toContain("completed=2");
+    expect(lifecycleReminder?.content).toContain("do not count repeated spawn_agent/wait_agent tool calls");
+    expect(lifecycleReminder?.content).toContain("call wait_agent before user-facing progress narration");
+  });
+
   it("propagates parent abort signals into subagent provider calls", async () => {
     const controller = new AbortController();
     let providerSawSignal = false;

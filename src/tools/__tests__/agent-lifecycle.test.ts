@@ -52,6 +52,8 @@ describe("agent lifecycle tools", () => {
     expect(result.status).toBe("success");
     expect(result.content).toContain("Spawned Ada (explorer)");
     expect(result.content).toContain("agent_id: agent_1");
+    expect(result.content).toContain("wait_agent for agent_1 before reporting");
+    expect(result.content).toContain("same agent_id are updates");
     expect(result.metadata?.subagents).toEqual([
       expect.objectContaining({ nickname: "Ada", agentName: "explorer" }),
     ]);

@@ -13,6 +13,7 @@ import { reminderForTaskType } from "../prompt/task-reminders.js";
 import { formatCoverageSummary, resolveWorkflowPhase } from "./workflow.js";
 import type { TurnHookState, TurnHooks } from "./hooks.js";
 import type { ParsedToolCall, ToolResult } from "../types.js";
+import { buildSubagentLifecycleReminder } from "../agent/subagent-lifecycle-reminder.js";
 
 export function createDefaultHooks(): TurnHooks[] {
   return [
@@ -135,6 +136,13 @@ export function createDefaultHooks(): TurnHooks[] {
         }
       },
       beforeContinuation(ctx) {
+        if (hasSubagentLifecycleActivity(ctx.toolCalls, ctx.toolResults)) {
+          const reminder = buildSubagentLifecycleReminder(ctx.agent.listSubAgents(), ctx.toolResults);
+          if (reminder) {
+            ctx.queueReminder(reminder);
+          }
+        }
+
         if (ctx.state.taskType === "security_investigation" && ctx.state.evidenceTracker?.isCoreCoverageComplete()) {
           ctx.requestTextOnlyTurn(
             "Core security investigation evidence has been collected. Summarize the findings instead of continuing with more tool calls.",
@@ -161,6 +169,22 @@ function isCodeWriteResult(_toolCall: ParsedToolCall, result: ToolResult): boole
     return false;
   }
   return result.metadata?.kind === "write" || result.metadata?.kind === "edit";
+}
+
+function hasSubagentLifecycleActivity(
+  toolCalls: Array<ParsedToolCall & { arbiterNote?: string }>,
+  toolResults: ToolResult[],
+): boolean {
+  return toolCalls.some((toolCall) => isSubagentLifecycleTool(toolCall.name))
+    || toolResults.some((result) => result.metadata?.kind === "subagent");
+}
+
+function isSubagentLifecycleTool(name: string): boolean {
+  return name === "spawn_agent"
+    || name === "wait_agent"
+    || name === "send_input"
+    || name === "close_agent"
+    || name === "task";
 }
 
 function hashEditCall(toolCall: ParsedToolCall): string {

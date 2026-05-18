@@ -71,7 +71,8 @@ export function createSpawnAgentTool(): ToolRegistryEntry {
           `Spawned ${snapshot.nickname} (${snapshot.agentName})`,
           `agent_id: ${snapshot.agentId}`,
           `status: ${snapshot.status}`,
-          `next: call wait_agent for ${snapshot.agentId} to collect the delegated result`,
+          `next: call wait_agent for ${snapshot.agentId} before reporting this subagent's current status or final result`,
+          "counting: this spawn result creates one unique subagent; later wait_agent results for the same agent_id are updates, not additional subagents",
         ]);
       } catch (error: any) {
         return toolError("spawn_agent", error);
