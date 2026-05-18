@@ -81,7 +81,12 @@ interface AppProps {
   runMemoryRefresh?: (scope?: MemoryScope) => Promise<string>;
   /** Whether the bypassPermissions mode is reachable via Shift+Tab cycling. */
   bypassEnabled?: boolean;
-  onExit?: () => void;
+  onExit?: (summary: ExitSummary) => void;
+}
+
+export interface ExitSummary {
+  /** Wall-clock duration of the session, in milliseconds. */
+  wallMs: number;
 }
 
 function buildTips(agent: Agent, registry: ProviderRegistry): string[] {
@@ -279,6 +284,12 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   const { columns: terminalColumns } = useTerminalSize();
   const activeAbortRef = useRef<AbortController | null>(null);
   const exitRequestedRef = useRef(false);
+  const sessionStartRef = useRef<number>(Date.now());
+  // Set true the moment /quit is invoked so we can hide dynamic UI (composer,
+  // waiting indicator, footer) before Ink snapshots its final frame into the
+  // shell scrollback. Without this, the last visible "> " input row stays
+  // glued to the bottom of the terminal after exit.
+  const [isExiting, setIsExiting] = useState(false);
   // 1Hz tick used to refresh elapsed counters on in-progress tool rows and
   // on the WaitingIndicator. Only ticks while the agent is running so we
   // don't churn renders at idle.
@@ -304,6 +315,10 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   const requestExit = useCallback(() => {
     if (exitRequestedRef.current) return;
     exitRequestedRef.current = true;
+    // Drop the composer / waiting indicator / footer from the React tree
+    // *before* we tell Ink to exit, so Ink's final log-update snapshot
+    // doesn't leave an empty "> " row behind in the shell scrollback.
+    setIsExiting(true);
 
     // Cancel any in-flight agent run first so its tools / network calls
     // don't keep emitting text after Ink unmounts and corrupt the
@@ -318,6 +333,13 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     }
 
     void (async () => {
+      // Yield once so React can commit the `isExiting=true` render
+      // (which strips the composer/footer) before we hand control to
+      // Ink's teardown. Without this, on the no-flushMemory path the
+      // exit() below races the next React commit and Ink snapshots the
+      // pre-exit frame with the composer still visible.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
       let flushError: unknown = null;
       if (flushMemory) {
         // Bound the flush so a stuck LLM/network call cannot trap the TUI.
@@ -354,7 +376,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         });
       }
 
-      onExit?.();
+      onExit?.({ wallMs: Date.now() - sessionStartRef.current });
     })();
   }, [exit, flushMemory, onExit]);
 
@@ -1195,7 +1217,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           />
         </Box>
       )}
-      {isRunning && !pickerMode && !pendingPlan && !pendingApproval && !pendingQuestion && (
+      {!isExiting && isRunning && !pickerMode && !pendingPlan && !pendingApproval && !pendingQuestion && (
         <Box paddingX={1} paddingBottom={1} flexShrink={0}>
           <WaitingIndicator
             tools={streamingTools}
@@ -1207,23 +1229,25 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           />
         </Box>
       )}
-      {!pickerMode && (
+      {!isExiting && !pickerMode && (
         <Box paddingBottom={1} flexShrink={0}>
           <InputBox onSubmit={handleSubmit} disabled={isRunning || !!pendingPlan || !!pendingApproval || !!pendingQuestion} skillRegistry={safeSkillRegistry} terminalColumns={terminalColumns} cwd={args.cwd} />
         </Box>
       )}
-      <FooterBar
-        data={buildFooterData({
-          cwd: args.cwd,
-          providerId: agent.providerId || safeRegistry.getDefault()?.id || "unknown",
-          model: displayModel(agent.model) || "no model",
-          thinkingLevel,
-          showThinking: getAvailableThinkingLevels(agent.providerId, agent.apiModel).length > 2,
-          mode: permissionMode,
-          usageTotals,
-          verboseTrace,
-        })}
-      />
+      {!isExiting && (
+        <FooterBar
+          data={buildFooterData({
+            cwd: args.cwd,
+            providerId: agent.providerId || safeRegistry.getDefault()?.id || "unknown",
+            model: displayModel(agent.model) || "no model",
+            thinkingLevel,
+            showThinking: getAvailableThinkingLevels(agent.providerId, agent.apiModel).length > 2,
+            mode: permissionMode,
+            usageTotals,
+            verboseTrace,
+          })}
+        />
+      )}
     </Box>
     </ThemeProvider>
   );

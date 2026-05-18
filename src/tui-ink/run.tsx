@@ -1,12 +1,13 @@
 import { render } from "ink";
 import React from "react";
+import chalk from "chalk";
 import type { Agent } from "../agent.js";
 import type { CliArgs } from "../cli.js";
 import type { SessionManager } from "../session.js";
 import type { Provider } from "../types.js";
 import type { ProviderRegistry } from "../provider-registry.js";
 import type { SkillRegistry } from "../skills/registry.js";
-import { App, type ApprovalHandlerRef, type PlanHandlerRef } from "./app.js";
+import { App, type ApprovalHandlerRef, type ExitSummary, type PlanHandlerRef } from "./app.js";
 import type { BashAllowlist } from "../approval/session-cache.js";
 import type { SettingsManager } from "../permissions/settings.js";
 import type { McpManager } from "../mcp/manager.js";
@@ -39,6 +40,7 @@ export interface RunTuiOptions {
 }
 
 export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions = {}) {
+  let exitSummary: ExitSummary | undefined;
   const instance = render(
     <App
       agent={agent}
@@ -63,12 +65,14 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
       runMemorySummary={options.runMemorySummary}
       runMemoryRefresh={options.runMemoryRefresh}
       bypassEnabled={options.bypassEnabled}
-      onExit={() => {
+      onExit={(summary) => {
         // The app already called useApp().exit() inside requestExit, which
         // triggers Ink's own unmount + TTY restore. waitUntilExit() below is
         // the canonical signal that we're done — we deliberately do *not*
         // call instance.unmount() again here to avoid double-teardown
-        // warnings on React 19.
+        // warnings on React 19. We capture the summary and render it after
+        // teardown so it lands in the real shell scrollback (Claude-Code style).
+        exitSummary = summary;
       }}
     />,
     {
@@ -85,5 +89,24 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
   // the cursor to column 0 before handing control back to the shell.
   if (process.stdout.isTTY) {
     process.stdout.write("\n");
+    if (exitSummary) {
+      process.stdout.write(formatExitSummary(exitSummary) + "\n");
+    }
   }
+}
+
+function formatExitSummary(summary: ExitSummary): string {
+  const label = "Total duration (wall):";
+  return chalk.dim(`${label} ${formatWallMs(summary.wallMs)}`);
+}
+
+function formatWallMs(ms: number): string {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) return `${minutes}m ${seconds}s`;
+  const hours = Math.floor(minutes / 60);
+  const minutesRest = minutes % 60;
+  return `${hours}h ${minutesRest}m ${seconds}s`;
 }
