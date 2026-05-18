@@ -885,7 +885,85 @@ describe("Agent", () => {
     });
   });
 
-  it("rejects cross-provider subagent model routes until provider factory support exists", async () => {
+  it("routes cross-provider subagents through the configured provider factory", async () => {
+    const parentProvider: Provider = {
+      async *streamChat() {
+        throw new Error("parent provider should not run cross-provider child");
+      },
+      async complete() {
+        return "parent";
+      },
+    };
+    const childCalls: Array<{ model: string; thinkingLevel?: string; system: string }> = [];
+    const childProvider: Provider = {
+      async *streamChat(messages, options) {
+        childCalls.push({
+          model: options.model,
+          thinkingLevel: options.thinkingLevel,
+          system: messages.find((message) => message.role === "system")?.content ?? "",
+        });
+        yield { type: "text", content: "cross provider done" };
+      },
+      async complete() {
+        return "child";
+      },
+    };
+    const profile: AgentProfile = {
+      name: "cross-provider",
+      description: "Cross provider",
+      source: "user",
+      mode: "readonly",
+      model: "inherit",
+      category: "review",
+      tools: { preset: "none" },
+      approval: "fail",
+      prompt: "Return briefly.",
+    };
+    const agent = new Agent({
+      provider: parentProvider,
+      providerId: "deepseek",
+      model: "deepseek-v4-flash",
+      tools: [],
+      systemPrompt: "system",
+      thinkingLevel: "low",
+      agentCategories: {
+        review: { model: "openai:gpt-5.4", thinkingLevel: "high" },
+      },
+      providerFactory: async (route) => {
+        expect(route.providerId).toBe("openai");
+        expect(route.model).toBe("gpt-5.4");
+        return childProvider;
+      },
+    });
+
+    const result = await agent.runSubAgent("inspect", "/tmp", {
+      profile,
+      runId: "run-cross",
+      subAgentId: "child-cross",
+      parentToolCallId: "parent",
+    });
+
+    expect(childCalls).toEqual([
+      expect.objectContaining({
+        model: "gpt-5.4",
+        thinkingLevel: "high",
+        system: expect.stringContaining("openai:gpt-5.4"),
+      }),
+    ]);
+    expect(result).toMatchObject({
+      status: "completed",
+      category: "review",
+      route: {
+        category: "review",
+        providerId: "openai",
+        model: "gpt-5.4",
+        thinkingLevel: "high",
+        inherited: false,
+      },
+    });
+  });
+
+  it("blocks cross-provider subagent routes when no provider factory is configured", async () => {
     const provider = createMockProvider([]);
     const profile: AgentProfile = {
       name: "cross-provider",
@@ -905,12 +983,16 @@ describe("Agent", () => {
       systemPrompt: "system",
     });
 
-    await expect(agent.runSubAgent("inspect", "/tmp", {
+    const result = await agent.runSubAgent("inspect", "/tmp", {
       profile,
       runId: "run-cross",
       subAgentId: "child-cross",
       parentToolCallId: "parent",
-    })).rejects.toThrow(/Cross-provider subagent routing/);
+    });
+
+    expect(result.status).toBe("blocked");
+    expect(result.error).toContain('requires provider "anthropic"');
+    expect(result.error).toContain("no provider factory");
   });
 
   it("does not cancel a subagent from a hidden per-child token budget", async () => {

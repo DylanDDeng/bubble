@@ -203,8 +203,9 @@ interface SubagentRouteResolver {
 }
 ```
 
-Phase A can ship same-provider categories first, then add cross-provider routing
-after the provider factory is injected into `Agent`.
+Phase A shipped same-provider categories first. Cross-provider routing requires
+a provider factory injected into `Agent`; without one, a child route that names a
+different provider must be blocked before any provider call is made.
 
 Phase A route application must update all three execution surfaces:
 
@@ -215,8 +216,9 @@ Phase A route application must update all three execution surfaces:
   results, and TUI updates.
 
 If a category resolves to a different provider than the active parent provider,
-Phase A blocks the spawn with a clear error. Cross-provider execution starts
-only after a provider factory is available inside the subagent runtime.
+the subagent runtime must create a provider instance for the child route instead
+of reusing the parent provider. If that provider is not configured, the child is
+blocked with a clear error.
 
 ## Background Scheduler
 
@@ -516,8 +518,9 @@ Phase A should end with:
 - Unknown categories return a clear blocked/error result.
 - Category defaults can override model and thinking level only when they stay on
   the active provider.
-- Cross-provider category routes are detected and blocked with a message that a
-  provider factory is required.
+- Cross-provider category routes are either executed through the configured
+  provider factory or blocked with a message that the target provider is not
+  configured.
 - Existing `agent_type` behavior remains unchanged when no category is passed.
 
 Required Phase A tests:

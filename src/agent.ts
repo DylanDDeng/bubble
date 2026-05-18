@@ -15,7 +15,7 @@ import { buildDeferredToolsReminder, buildToolFreezeReminder, isPermissionModeRe
 import type { AgentEvent, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ThinkingLevel, Todo, TokenUsage, ToolDefinition, ToolResult, ToolRegistryEntry, ToolUpdate } from "./types.js";
 import { HookBus, type TurnHooks } from "./orchestrator/hooks.js";
 import { createDefaultHooks } from "./orchestrator/default-hooks.js";
-import { resolveSameProviderModelRoute, resolveSubagentRoute, type AgentCategoriesConfig, type ResolvedSubagentRoute } from "./agent/categories.js";
+import { resolveModelRoute, resolveSubagentRoute, type AgentCategoriesConfig, type ResolvedSubagentRoute } from "./agent/categories.js";
 import { getSubtaskPolicy, type SubtaskType } from "./agent/subtask-policy.js";
 import { BudgetLedger, composeAbortSignals } from "./agent/budget-ledger.js";
 import { assignAgentNickname, builtinAgentProfiles, mergeUsage, selectToolsForAgentProfile, validateAgentProfileTools, type AgentProfile, type SubagentRunResult } from "./agent/profiles.js";
@@ -66,6 +66,7 @@ export interface AgentOptions {
   memoryPrompt?: string;
   fileStateTracker?: FileStateTracker;
   agentCategories?: AgentCategoriesConfig;
+  providerFactory?: (route: ResolvedSubagentRoute) => Provider | Promise<Provider>;
 }
 
 export class Agent {
@@ -95,6 +96,7 @@ export class Agent {
   private memoryPrompt?: string;
   private fileStateTracker?: FileStateTracker;
   private agentCategories: AgentCategoriesConfig;
+  private providerFactory?: (route: ResolvedSubagentRoute) => Provider | Promise<Provider>;
   private subagentThreads: Map<string, SubagentThreadRecord> = new Map();
   private pendingSubagentUpdates: PendingSubagentToolUpdate[] = [];
   private lastInputTokens: number | null = null;
@@ -122,6 +124,7 @@ export class Agent {
     this.memoryPrompt = options.memoryPrompt;
     this.fileStateTracker = options.fileStateTracker;
     this.agentCategories = options.agentCategories ?? {};
+    this.providerFactory = options.providerFactory;
 
     if (options.systemPrompt) {
       this.messages.push({ role: "system", content: options.systemPrompt });
@@ -934,11 +937,11 @@ export class Agent {
       throw new Error(resolved.error);
     }
     if (profile.model && profile.model !== "inherit") {
-      const model = resolveSameProviderModelRoute(profile.model, parentRoute.providerId);
-      if ("error" in model) throw new Error(model.error);
+      const model = resolveModelRoute(profile.model, parentRoute.providerId);
       if (model.model !== "inherit") {
         return {
           ...resolved.route,
+          providerId: model.providerId,
           model: model.model,
           inherited: false,
         };
@@ -1016,9 +1019,19 @@ export class Agent {
     }
 
     const tools = selectToolsForAgentProfile(allTools, record.profile, options.approval);
-    const subAgent = options.reuseAgent && record.agent
-      ? record.agent
-      : this.createSubAgentInstance(record, tools, cwd, options.forkContext);
+    let subAgent: NonNullable<SubagentThreadRecord["agent"]>;
+    try {
+      subAgent = options.reuseAgent && record.agent
+        ? record.agent
+        : await this.createSubAgentInstance(record, tools, cwd, options.forkContext);
+    } catch (error: any) {
+      record.status = "blocked";
+      record.error = error?.message || String(error);
+      record.updatedAt = Date.now();
+      emit("blocked", undefined, record.error);
+      this.notifySubagentWaiters(record);
+      return;
+    }
     record.agent = subAgent;
     record.status = "running";
     record.updatedAt = Date.now();
@@ -1135,12 +1148,12 @@ export class Agent {
     }
   }
 
-  private createSubAgentInstance(
+  private async createSubAgentInstance(
     record: SubagentThreadRecord,
     tools: ToolRegistryEntry[],
     cwd: string,
     forkContext?: boolean,
-  ): NonNullable<SubagentThreadRecord["agent"]> {
+  ): Promise<NonNullable<SubagentThreadRecord["agent"]>> {
     const childToolNames = tools.map((tool) => tool.name);
     const route = record.route ?? {
       providerId: this.providerId,
@@ -1148,6 +1161,7 @@ export class Agent {
       thinkingLevel: this.thinkingLevel,
       inherited: true,
     };
+    const provider = await this.resolveProviderForRoute(route);
     const childSystemPrompt = buildSystemPrompt({
       agentName: "Bubble",
       configuredProvider: route.providerId || "none",
@@ -1167,7 +1181,7 @@ export class Agent {
       ].filter(Boolean).join("\n\n"),
     });
     const subAgent = new Agent({
-      provider: this.provider,
+      provider,
       providerId: route.providerId,
       model: route.model,
       tools,
@@ -1180,11 +1194,25 @@ export class Agent {
       systemPrompt: childSystemPrompt,
       hooks: this.hookDefinitions,
       agentCategories: this.agentCategories,
+      providerFactory: this.providerFactory,
     });
     if (forkContext) {
       subAgent.messages = this.forkMessagesForSubagent(childSystemPrompt);
     }
     return subAgent;
+  }
+
+  private async resolveProviderForRoute(route: ResolvedSubagentRoute): Promise<Provider> {
+    if (!route.providerId || route.providerId === this.providerId) {
+      return this.provider;
+    }
+    if (!this.providerFactory) {
+      throw new Error([
+        `Subagent route requires provider "${route.providerId}" for model "${route.model}",`,
+        `but the parent agent only has provider "${this.providerId || "none"}" and no provider factory is configured.`,
+      ].join(" "));
+    }
+    return this.providerFactory(route);
   }
 
   private forkMessagesForSubagent(childSystemPrompt: string): Message[] {

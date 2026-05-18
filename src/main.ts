@@ -75,6 +75,20 @@ async function main() {
     : createUnavailableProvider(unavailableProviderMessage);
   const createProvider = (providerId: string, apiKey: string, baseURL: string) =>
     createProviderInstance({ providerId, apiKey, baseURL, thinkingLevel: args.thinkingLevel });
+  const createProviderForRoute = async (route: { providerId: string; model: string }) => {
+    const providerId = route.providerId;
+    if (!providerId) {
+      throw new Error(`Subagent route for model "${route.model}" did not include a provider.`);
+    }
+    if (registry.supportsOAuth(providerId) && registry.getAuthStorage().has(providerId)) {
+      await registry.prepareProvider(providerId);
+    }
+    const target = registry.getConfigured().find((item) => item.id === providerId);
+    if (!target?.enabled || !target.apiKey) {
+      throw new Error(`Subagent route requires provider "${providerId}", but it is not configured or has no active credentials.`);
+    }
+    return createProvider(providerId, target.apiKey, target.baseURL);
+  };
 
   let agentRef: Agent | undefined;
   const todoStore = {
@@ -270,6 +284,7 @@ async function main() {
     memoryPrompt,
     fileStateTracker,
     agentCategories: userConfig.getAgentCategories(),
+    providerFactory: createProviderForRoute,
   });
   agentRef = agent;
   if (sessionManager) {

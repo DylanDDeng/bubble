@@ -23,6 +23,11 @@ export type CategoryResolution =
   | { route: ResolvedSubagentRoute }
   | { error: string };
 
+export interface ResolvedModelSelection {
+  providerId: string;
+  model: string | "inherit";
+}
+
 const THINKING_LEVELS = new Set<ThinkingLevel>([
   "off",
   "minimal",
@@ -96,20 +101,11 @@ export function resolveSubagentRoute(
   }
 
   const modelSelection = parseModelSelection(config.model, parent.providerId);
-  if (modelSelection.providerId !== parent.providerId) {
-    return {
-      error: [
-        `Subagent category "${normalizedCategory}" resolves to provider "${modelSelection.providerId}",`,
-        `but the active provider is "${parent.providerId || "none"}".`,
-        "Cross-provider subagent routing requires a provider factory and is not available in Phase A.",
-      ].join(" "),
-    };
-  }
 
   return {
     route: {
       category: normalizedCategory,
-      providerId: parent.providerId,
+      providerId: modelSelection.providerId,
       model: modelSelection.model === "inherit" ? parent.model : modelSelection.model,
       thinkingLevel: config.thinkingLevel ?? parent.thinkingLevel,
       inherited: modelSelection.model === "inherit" && config.thinkingLevel === undefined,
@@ -117,32 +113,29 @@ export function resolveSubagentRoute(
   };
 }
 
+export function resolveModelRoute(
+  model: string | undefined,
+  parentProviderId: string,
+): ResolvedModelSelection {
+  return parseModelSelection(model, parentProviderId);
+}
+
 export function resolveSameProviderModelRoute(
   model: string | undefined,
   parentProviderId: string,
-): { model: string | "inherit" } | { error: string } {
-  const modelSelection = parseModelSelection(model, parentProviderId);
-  if (modelSelection.providerId !== parentProviderId) {
-    return {
-      error: [
-        `Subagent model "${model}" resolves to provider "${modelSelection.providerId}",`,
-        `but the active provider is "${parentProviderId || "none"}".`,
-        "Cross-provider subagent routing requires a provider factory and is not available in Phase A.",
-      ].join(" "),
-    };
-  }
-  return { model: modelSelection.model };
+): { model: string | "inherit" } {
+  return { model: parseModelSelection(model, parentProviderId).model };
 }
 
 export function normalizeCategoryName(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim().toLowerCase() : undefined;
 }
 
-function parseModelSelection(model: string | undefined, parentProviderId: string): { providerId: string; model: string | "inherit" } {
+function parseModelSelection(model: string | undefined, parentProviderId: string): ResolvedModelSelection {
   if (!model || model === "inherit") return { providerId: parentProviderId, model: "inherit" };
   if (model.includes(":")) {
     const [providerId, ...rest] = model.split(":");
-    return { providerId, model: rest.join(":") };
+    return { providerId: providerId || parentProviderId, model: rest.join(":") };
   }
   return { providerId: parentProviderId, model };
 }

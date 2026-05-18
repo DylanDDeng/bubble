@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   mergeAgentCategories,
+  resolveModelRoute,
   resolveSameProviderModelRoute,
   resolveSubagentRoute,
   sanitizeAgentCategories,
@@ -60,13 +61,25 @@ describe("agent categories", () => {
     });
   });
 
-  it("blocks cross-provider category and profile model routes in Phase A", () => {
-    const category = resolveSubagentRoute("review", parent, {
+  it("resolves cross-provider category and profile model routes for the provider factory", () => {
+    expect(resolveSubagentRoute("review", parent, {
       review: { model: "anthropic:claude-sonnet-4.5" },
+    })).toEqual({
+      route: {
+        category: "review",
+        providerId: "anthropic",
+        model: "claude-sonnet-4.5",
+        thinkingLevel: "high",
+        inherited: false,
+      },
     });
-    expect("error" in category ? category.error : "").toContain("Cross-provider subagent routing");
 
-    const model = resolveSameProviderModelRoute("anthropic:claude-sonnet-4.5", parent.providerId);
-    expect("error" in model ? model.error : "").toContain("Cross-provider subagent routing");
+    expect(resolveModelRoute("anthropic:claude-sonnet-4.5", parent.providerId)).toEqual({
+      providerId: "anthropic",
+      model: "claude-sonnet-4.5",
+    });
+    expect(resolveSameProviderModelRoute("anthropic:claude-sonnet-4.5", parent.providerId)).toEqual({
+      model: "claude-sonnet-4.5",
+    });
   });
 });
