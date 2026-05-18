@@ -1,6 +1,7 @@
 import os from "node:os";
 import type { DisplayToolCall } from "./display-history.js";
 import { getEditDiffDetails } from "./edit-diff.js";
+import { formatSubagentRoute, type SubagentRouteLike } from "../agent/subagent-route-format.js";
 
 export type TraceGroupKind =
   | "list"
@@ -361,6 +362,7 @@ interface SubagentTraceItem {
   nickname?: string;
   status?: string;
   category?: string;
+  route?: SubagentRouteLike;
   task?: string;
   summary?: string;
   toolNotes?: string[];
@@ -437,13 +439,15 @@ function subagentsFromMetadata(tool: DisplayToolCall): SubagentTraceItem[] {
 function formatSubagentRow(subagent: SubagentTraceItem): string {
   const label = subagent.nickname || subagent.agentName || subagent.subAgentId || "subagent";
   const role = [subagent.agentName, subagent.category ? `/${subagent.category}` : ""].join("") || "default";
+  const route = formatSubagentRoute(subagent.route);
+  const descriptor = route ? `${role} @ ${route}` : role;
   const status = subagent.status || "running";
   const note = subagent.error
     || subagent.toolNotes?.filter(Boolean).at(-1)
     || subagent.summary
     || subagent.task
     || "";
-  return [label, `(${role})`, status, note].filter(Boolean).join(" ");
+  return [label, `(${descriptor})`, status, note].filter(Boolean).join(" ");
 }
 
 function isFailedSubagent(subagent: SubagentTraceItem): boolean {

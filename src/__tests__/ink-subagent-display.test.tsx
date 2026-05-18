@@ -17,6 +17,13 @@ describe("Ink subagent display", () => {
         agentName: "explorer",
         nickname: "Ada",
         category: "review",
+        route: {
+          category: "review",
+          providerId: "openai",
+          model: "gpt-5.5",
+          thinkingLevel: "high",
+          inherited: false,
+        },
         status: "running",
         task: "review this",
         toolNotes: ["grep: 3 matches"],
@@ -49,6 +56,7 @@ describe("Ink subagent display", () => {
 
     expect(output).toContain("Subagents");
     expect(output).toContain("explorer/review");
+    expect(output).toContain("openai:gpt-5.5");
     expect(output).toContain("running");
     expect(output).toContain("grep: 3 matches");
   });
@@ -57,6 +65,8 @@ describe("Ink subagent display", () => {
     const output = render(false);
 
     expect(output).toContain("Subagents");
-    expect(output).toContain("Ada (explorer/review) running grep: 3 matches");
+    expect(output).toContain("openai:gpt-5.5");
+    expect(output).toContain("running");
+    expect(output).toContain("grep: 3 matches");
   });
 });

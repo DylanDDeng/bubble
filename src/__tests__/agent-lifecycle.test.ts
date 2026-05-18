@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { Agent } from "../agent.js";
 import { discoverAgentProfiles, findAgentProfile } from "../agent/profiles.js";
-import type { Provider, StreamChunk, ToolRegistryEntry } from "../types.js";
+import { createSpawnAgentTool } from "../tools/agent-lifecycle.js";
+import type { Provider, StreamChunk, ToolContext, ToolRegistryEntry } from "../types.js";
 
 function providerFromTurns(turns: StreamChunk[][]): Provider {
   let index = 0;
@@ -20,6 +21,55 @@ function providerFromTurns(turns: StreamChunk[][]): Provider {
 }
 
 describe("subagent lifecycle", () => {
+  it("shows the resolved provider/model route in the spawn result", async () => {
+    const spawnTool = createSpawnAgentTool();
+    const ctx: ToolContext = {
+      cwd: "/tmp",
+      toolCall: { id: "spawn_1", name: "spawn_agent" },
+      agent: {
+        async runSubtask() {
+          return { content: "unused" };
+        },
+        async spawnSubAgent(input, _cwd, options) {
+          return {
+            agentId: "child_1",
+            runId: "run_1",
+            nickname: "Ada",
+            agentName: options.profile.name,
+            profileSource: options.profile.source,
+            category: options.category,
+            route: {
+              category: "review",
+              providerId: "openai",
+              model: "gpt-5.5",
+              thinkingLevel: "high",
+              inherited: false,
+            },
+            status: "queued",
+            task: typeof input === "string" ? input : "inspect",
+            summary: "",
+            toolNotes: [],
+            createdAt: 1,
+            updatedAt: 1,
+          };
+        },
+      },
+    };
+    const result = await spawnTool.execute(
+      { message: "inspect", category: "review" },
+      ctx,
+    );
+    const metadata = result.metadata as { subagents?: Array<{ route?: unknown }> } | undefined;
+
+    expect(result.content).toContain("Spawned Ada (default/review)");
+    expect(result.content).toContain("route: openai:gpt-5.5 (thinking: high)");
+    expect(metadata?.subagents?.[0]?.route).toMatchObject({
+      providerId: "openai",
+      model: "gpt-5.5",
+      thinkingLevel: "high",
+    });
+  });
+
   it("spawns a Codex-style child thread with a random nickname and waits for completion", async () => {
     const profile = findAgentProfile(discoverAgentProfiles("/tmp", "user").profiles, "default")!;
     const agent = new Agent({

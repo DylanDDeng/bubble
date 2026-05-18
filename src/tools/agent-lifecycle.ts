@@ -1,6 +1,7 @@
 import type { AgentProfile, AgentProfileApproval, AgentProfileScope } from "../agent/profiles.js";
 import { discoverAgentProfiles, findAgentProfile } from "../agent/profiles.js";
 import type { SubagentThreadSnapshot } from "../agent/subagent-control.js";
+import { formatSubagentRoute } from "../agent/subagent-route-format.js";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
 
 type LifecycleToolName = "spawn_agent" | "wait_agent" | "send_input" | "close_agent";
@@ -68,9 +69,10 @@ export function createSpawnAgentTool(): ToolRegistryEntry {
           forkContext: args.fork_context === true,
         });
         return formatLifecycleResult("spawn_agent", [snapshot], [
-          `Spawned ${snapshot.nickname} (${snapshot.agentName})`,
+          `Spawned ${snapshot.nickname} (${formatSnapshotRole(snapshot)})`,
           `agent_id: ${snapshot.agentId}`,
           `status: ${snapshot.status}`,
+          ...formatRouteLines(snapshot),
           `next: call wait_agent for ${snapshot.agentId} before reporting this subagent's current status or final result`,
           "counting: this spawn result creates one unique subagent; later wait_agent results for the same agent_id are updates, not additional subagents",
         ]);
@@ -296,16 +298,17 @@ function isFinalSnapshotStatus(status: SubagentThreadSnapshot["status"]): boolea
 }
 
 function formatSnapshot(snapshot: SubagentThreadSnapshot): string[] {
-  const label = `${snapshot.nickname} (${snapshot.agentName})`;
+  const label = `${snapshot.nickname} (${formatSnapshotRole(snapshot)})`;
   const lines = [
     `## ${label}`,
     `agent_id: ${snapshot.agentId}`,
     `status: ${snapshot.status}`,
-    `task: ${snapshot.task}`,
   ];
   if (snapshot.category) {
-    lines.splice(3, 0, `category: ${snapshot.category}`);
+    lines.push(`category: ${snapshot.category}`);
   }
+  lines.push(...formatRouteLines(snapshot));
+  lines.push(`task: ${snapshot.task}`);
   if (snapshot.summary) {
     lines.push("", "Summary:", snapshot.summary);
   } else if (snapshot.status === "completed") {
@@ -318,6 +321,15 @@ function formatSnapshot(snapshot: SubagentThreadSnapshot): string[] {
     lines.push("", `Error: ${snapshot.error}`);
   }
   return lines;
+}
+
+function formatSnapshotRole(snapshot: SubagentThreadSnapshot): string {
+  return [snapshot.agentName, snapshot.category ? `/${snapshot.category}` : ""].join("") || "default";
+}
+
+function formatRouteLines(snapshot: SubagentThreadSnapshot): string[] {
+  const route = formatSubagentRoute(snapshot.route, { includeThinking: true });
+  return route ? [`route: ${route}`] : [];
 }
 
 function snapshotToMetadata(snapshot: SubagentThreadSnapshot): Record<string, unknown> {

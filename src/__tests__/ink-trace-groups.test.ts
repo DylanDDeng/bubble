@@ -180,6 +180,13 @@ describe("Ink trace groups", () => {
             agentName: "explorer",
             nickname: "Ada",
             category: "review",
+            route: {
+              category: "review",
+              providerId: "openai",
+              model: "gpt-5.5",
+              thinkingLevel: "high",
+              inherited: false,
+            },
             status: "running",
             toolNotes: ["grep: 3 matches"],
           }],
@@ -192,7 +199,7 @@ describe("Ink trace groups", () => {
       title: "Subagents",
       count: 1,
       noun: "agent",
-      previewLines: ["Ada (explorer/review) running grep: 3 matches"],
+      previewLines: ["Ada (explorer/review @ openai:gpt-5.5) running grep: 3 matches"],
       pending: true,
     });
   });

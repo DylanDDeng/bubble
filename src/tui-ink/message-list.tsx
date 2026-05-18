@@ -6,6 +6,7 @@ import { MarkdownContent } from "./markdown.js";
 import type { DisplayMessage, DisplayMessagePart, DisplayToolCall } from "./display-history.js";
 import { buildTraceGroups, formatElapsed, formatTracePath, traceGroupLabel, type TraceGroup } from "./trace-groups.js";
 import { EDIT_COLLAPSED_DIFF_LINES, formatEditSuccessSummary, getEditDiffDetails } from "./edit-diff.js";
+import { formatSubagentRoute, type SubagentRouteLike } from "../agent/subagent-route-format.js";
 
 /**
  * Hint surfaced when the user can interrupt the currently-running pending tool
@@ -690,6 +691,7 @@ interface SubagentDisplay {
   nickname?: string;
   status?: string;
   category?: string;
+  route?: SubagentRouteLike;
   profileSource?: string;
   task?: string;
   summary?: string;
@@ -788,6 +790,12 @@ function subagentLabel(subagent: SubagentDisplay): string {
 
 function subagentRole(subagent: SubagentDisplay): string {
   return [subagent.agentName, subagent.category ? `/${subagent.category}` : ""].join("") || "default";
+}
+
+function subagentDescriptor(subagent: SubagentDisplay, includeThinking = false): string {
+  const route = formatSubagentRoute(subagent.route, { includeThinking });
+  const role = subagentRole(subagent);
+  return route ? `${role} @ ${route}` : role;
 }
 
 function subagentStatusColor(status: string | undefined): string {
@@ -1005,12 +1013,19 @@ function SubagentToolDisplay({
           {rows.map((subagent, index) => {
             const status = subagent.status ?? "running";
             const label = padVisual(truncateVisual(subagentLabel(subagent), 10), 10);
-            const role = padVisual(truncateVisual(subagentRole(subagent), 18), 18);
-            const note = truncateVisual(latestSubagentNote(subagent), detailWidth - 34);
+            const descriptorWidth = verbose ? 42 : 32;
+            const descriptor = padVisual(
+              truncateVisual(subagentDescriptor(subagent), descriptorWidth),
+              descriptorWidth,
+            );
+            const note = truncateVisual(
+              latestSubagentNote(subagent),
+              Math.max(12, detailWidth - 16 - descriptorWidth - 10),
+            );
             return (
               <Box key={subagent.subAgentId ?? `${subagentLabel(subagent)}-${index}`}>
                 <Text color={subagentStatusColor(status)}>{label}</Text>
-                <Text color={theme.traceAction}> {role}</Text>
+                <Text color={theme.traceAction}> {descriptor}</Text>
                 <Text color={subagentStatusColor(status)}> {padVisual(status, 9)}</Text>
                 {note && <Text color={subagent.error ? theme.error : theme.traceDetail}> {note}</Text>}
               </Box>
