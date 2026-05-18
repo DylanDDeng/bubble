@@ -1176,7 +1176,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         </Box>
       )}
       {!pickerMode && (
-        <Box paddingX={1} paddingBottom={1} flexShrink={0}>
+        <Box paddingBottom={1} flexShrink={0}>
           <InputBox onSubmit={handleSubmit} disabled={isRunning || !!pendingPlan || !!pendingApproval || !!pendingQuestion} skillRegistry={safeSkillRegistry} terminalColumns={terminalColumns} cwd={args.cwd} />
         </Box>
       )}

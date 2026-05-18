@@ -15,6 +15,11 @@ export const theme = {
   border: "gray",
   borderActive: "cyan",
   inputBorder: "#8A7FC6",
+  inputBorderDisabled: "#4a4754",
+  inputBg: "#1c1c24",
+  inputBgDisabled: "#161620",
+  inputText: "#f3f3f7",
+  inputPlaceholder: "#6c6a78",
   muted: "gray",
   dim: "gray",
 

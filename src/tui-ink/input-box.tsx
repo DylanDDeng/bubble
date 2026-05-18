@@ -29,10 +29,10 @@ interface InputBoxProps {
   cwd: string;
 }
 
-const MIN_VISIBLE_LINES = 1;
-const MAX_VISIBLE_LINES = 5;
+const MIN_VISIBLE_LINES = 3;
+const MAX_VISIBLE_LINES = 6;
 const PADDING_X = 1;
-const PROMPT = "> ";
+const PROMPT = " > ";
 const MAX_VISIBLE_SUGGESTIONS = 8;
 
 export function needsCursorRowCompensation(
@@ -606,14 +606,29 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
     );
   }
 
-  const displayedLines: { text: string; visualIdx: number }[] = [];
-  for (let i = 0; i < visibleLines; i++) {
+  type DisplayedInputLine =
+    | { kind: "pad"; key: string }
+    | { kind: "content"; text: string; visualIdx: number };
+
+  const displayedLines: DisplayedInputLine[] = [];
+  const topPadLines = totalLines < visibleLines
+    ? Math.floor((visibleLines - totalLines) / 2)
+    : 0;
+  for (let i = 0; i < topPadLines; i++) {
+    displayedLines.push({ kind: "pad", key: `top-${i}` });
+  }
+  const contentLineCount = Math.min(totalLines, visibleLines - topPadLines);
+  for (let i = 0; i < contentLineCount; i++) {
     const visualIdx = scrollOffset + i;
     const vl = visualLines[visualIdx];
     displayedLines.push({
+      kind: "content",
       text: vl ? vl.text : "",
       visualIdx,
     });
+  }
+  while (displayedLines.length < visibleLines) {
+    displayedLines.push({ kind: "pad", key: `bottom-${displayedLines.length}` });
   }
 
   const hasMoreAbove = scrollOffset > 0;
@@ -715,13 +730,13 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
   });
   // Reference cursorTick so the effect re-runs on the forced render pass.
   void cursorTick;
-  const borderChar = "─";
-  const topBorder = hasMoreAbove
-    ? `─── ↑ ${scrollOffset} more ${borderChar.repeat(Math.max(0, contentWidth - 14 - scrollOffset.toString().length))}`
-    : borderChar.repeat(contentWidth);
-  const bottomBorder = hasMoreBelow
-    ? `─── ↓ ${totalLines - scrollOffset - visibleLines} more ${borderChar.repeat(Math.max(0, contentWidth - 16 - (totalLines - scrollOffset - visibleLines).toString().length))}`
-    : borderChar.repeat(contentWidth);
+  const inputBg = disabled ? theme.inputBgDisabled : theme.inputBg;
+  const moreBelow = totalLines - scrollOffset - visibleLines;
+
+  const filledLine = (value: string) => {
+    const visibleWidth = stringWidth(value);
+    return value + " ".repeat(Math.max(0, contentWidth - visibleWidth));
+  };
 
   return (
     <Box flexDirection="column">
@@ -738,12 +753,26 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
           })}
         </Box>
       )}
-      <Text color={theme.inputBorder}>{topBorder.slice(0, contentWidth)}</Text>
       <Box flexDirection="column" paddingX={PADDING_X}>
-        {displayedLines.map(({ text: line, visualIdx }) => {
-          const displayLine = line.length === 0 ? " " : line;
+        {hasMoreAbove && (
+          <Text backgroundColor={inputBg} color={theme.muted} dimColor>
+            {filledLine(` ↑ ${scrollOffset} more`)}
+          </Text>
+        )}
+        {displayedLines.map((row) => {
+          if (row.kind === "pad") {
+            return (
+              <Text key={row.key} backgroundColor={inputBg}>
+                {" ".repeat(contentWidth)}
+              </Text>
+            );
+          }
+          const { text: line, visualIdx } = row;
+          const lineText = line.length === 0 ? " " : line;
           const isFirst = visualIdx === 0;
           const isCursorLine = visualIdx === cursorVisualRow;
+          const prompt = isFirst ? PROMPT : " ".repeat(PROMPT.length);
+          const fill = " ".repeat(Math.max(0, lineWidth - stringWidth(lineText)));
           return (
             <Box
               key={visualIdx}
@@ -757,40 +786,34 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
                   : undefined
               }
             >
-              {isFirst ? (
-                <Text color={theme.accent}>{PROMPT}</Text>
-              ) : (
-                <Text>{" ".repeat(PROMPT.length)}</Text>
-              )}
-              <Text>{displayLine}</Text>
+              <Text backgroundColor={inputBg} color={isFirst ? theme.accent : theme.inputText}>
+                {prompt}
+              </Text>
+              <Text backgroundColor={inputBg} color={theme.inputText}>{lineText}</Text>
+              <Text backgroundColor={inputBg}>{fill}</Text>
             </Box>
           );
         })}
+        {hasMoreBelow && (
+          <Text backgroundColor={inputBg} color={theme.muted} dimColor>
+            {filledLine(` ↓ ${moreBelow} more`)}
+          </Text>
+        )}
       </Box>
-      <Text color={theme.inputBorder}>{bottomBorder.slice(0, contentWidth)}</Text>
       {showSuggestions && mode === "slash" && (
-        <Box flexDirection="column" marginTop={1}>
+        <Box flexDirection="column" marginTop={1} paddingLeft={4}>
           {slashSuggestions
             .slice(suggestionOffset, suggestionOffset + MAX_VISIBLE_SUGGESTIONS)
             .map((cmd, visibleIndex) => {
               const i = suggestionOffset + visibleIndex;
+              const label = `/${cmd.name}`.padEnd(17);
+              const isSelected = i === selectedIndex;
               return (
                 <Box key={cmd.name} height={1}>
                   <Text>
-                    {i === selectedIndex ? (
-                      <>
-                        <Text color={theme.accent} bold>{"❯ "}</Text>
-                        <Text color={theme.accent} bold>{cmd.name.padEnd(16)}</Text>
-                        <Text color={theme.muted}> [{cmd.type}]</Text>
-                        <Text dimColor> {cmd.description}</Text>
-                      </>
-                    ) : (
-                      <>
-                        <Text color={theme.muted}>{`  ${cmd.name.padEnd(16)}`}</Text>
-                        <Text dimColor> [{cmd.type}]</Text>
-                        <Text dimColor> {cmd.description}</Text>
-                      </>
-                    )}
+                    <Text color={isSelected ? theme.accent : theme.muted} bold={isSelected}>{label}</Text>
+                    <Text color={theme.muted}> [{cmd.type}]</Text>
+                    <Text dimColor> {cmd.description}</Text>
                   </Text>
                 </Box>
               );

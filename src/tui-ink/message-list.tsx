@@ -636,15 +636,12 @@ function ReasoningTraceBlock({ reasoning }: { reasoning: string }) {
 }
 
 function UserMessageBlock({ content, terminalColumns }: { content: string; terminalColumns: number }) {
-  const horizontalRoom = Math.max(20, terminalColumns - 4);
-  const maxBubbleTextWidth = Math.max(1, horizontalRoom - 4);
+  // Rail (▌ + space) takes 2 cols; reserve 2 cols inside the fill for left/right gutters.
+  const horizontalRoom = Math.max(20, terminalColumns - 2);
+  const bubbleTextWidth = Math.max(1, horizontalRoom - 2);
   const wrappedLines = content
     .split("\n")
-    .flatMap((line) => wrapByVisualWidth(line, maxBubbleTextWidth));
-  const bubbleTextWidth = Math.min(
-    maxBubbleTextWidth,
-    Math.max(8, ...wrappedLines.map((line) => visualWidth(line))),
-  );
+    .flatMap((line) => wrapByVisualWidth(line, bubbleTextWidth));
 
   return (
     <Box flexDirection="column">
