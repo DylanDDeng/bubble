@@ -1,0 +1,242 @@
+// LLM-driven context compaction.
+//
+// When the budget says we're approaching the context window, ask the model to
+// produce a handoff summary of the conversation so far. Replace the bulky middle
+// of history with that summary while keeping the initial system context and the
+// user's latest ask intact. Architecturally this mirrors Codex CLI's approach
+// (codex-rs/core/src/compact.rs + templates/compact/prompt.md): trust the model
+// to pick what matters instead of writing a template.
+//
+// Failure modes are explicit: returns { compacted: false, reason } so the
+// caller can fall back to algorithmic compaction without an exception.
+
+import type { Message, Provider, ProviderMessage, ToolCall } from "../types.js";
+import { estimateContextTokens } from "./budget.js";
+
+export const LLM_COMPACTION_PROMPT = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
+
+Include:
+- Current progress and key decisions made
+- Important context, constraints, or user preferences
+- What remains to be done (clear next steps)
+- Any critical data, examples, or references needed to continue
+
+Be concise, structured, and focused on helping the next LLM seamlessly continue the work.`;
+
+export const LLM_SUMMARY_PREFIX = `Another language model previously worked on this task and produced this handoff summary. Build on what's already done; avoid re-running the same investigation. Summary:`;
+
+export interface LLMCompactOptions {
+  provider: Provider;
+  modelId: string;
+  /** Compactor model call must complete within this token-cost ceiling. */
+  maxInputTokens?: number;
+  /** Number of trailing (assistant + tool-results) groups in the current turn to keep verbatim. */
+  keepRecentGroups?: number;
+  abortSignal?: AbortSignal;
+}
+
+export interface LLMCompactResult {
+  compacted: boolean;
+  summary?: string;
+  messages?: Message[];
+  reason?: string;
+}
+
+export async function compactWithLLM(
+  messages: Message[],
+  options: LLMCompactOptions,
+): Promise<LLMCompactResult> {
+  const { provider, modelId, abortSignal } = options;
+  const maxInputTokens = options.maxInputTokens ?? 100_000;
+  const keepRecentGroups = options.keepRecentGroups ?? 2;
+
+  const preserved = messages.filter((m) => m.role === "system" || m.role === "meta");
+  const body = messages.filter((m) => m.role !== "system" && m.role !== "meta");
+
+  let lastUserIndex = -1;
+  for (let i = body.length - 1; i >= 0; i--) {
+    if (body[i].role === "user") {
+      lastUserIndex = i;
+      break;
+    }
+  }
+  if (lastUserIndex < 0) {
+    return { compacted: false, reason: "no user message in history" };
+  }
+
+  // Pivot the body around the last user message:
+  //   priorTurns:   everything from earlier user turns (multi-turn case)
+  //   lastUser:     the user's current ask (always kept verbatim)
+  //   currentTurn:  the assistant + tool groups produced in response so far
+  const priorTurns = body.slice(0, lastUserIndex);
+  const lastUser = body[lastUserIndex];
+  const currentTurn = body.slice(lastUserIndex + 1);
+
+  // Split currentTurn into (assistant + its tool results) groups so we can
+  // keep the most recent K verbatim and evict the older ones.
+  type Group = { assistant: Message; toolResults: Message[] };
+  const groups: Group[] = [];
+  let active: Group | null = null;
+  for (const msg of currentTurn) {
+    if (msg.role === "assistant") {
+      if (active) groups.push(active);
+      active = { assistant: msg, toolResults: [] };
+    } else if (msg.role === "tool" && active) {
+      active.toolResults.push(msg);
+    }
+  }
+  if (active) groups.push(active);
+
+  const keptGroupCount = Math.min(keepRecentGroups, groups.length);
+  const evictedGroups = groups.slice(0, groups.length - keptGroupCount);
+  const keptGroups = groups.slice(groups.length - keptGroupCount);
+
+  // What we'll send to the model to summarize: prior turns + the older groups
+  // in the current turn (everything we're about to evict).
+  const toSummarize: Message[] = [
+    ...priorTurns,
+    ...evictedGroups.flatMap((g) => [g.assistant, ...g.toolResults]),
+  ];
+
+  if (toSummarize.length === 0) {
+    return { compacted: false, reason: "nothing to evict" };
+  }
+
+  const trimmedHistory = trimToFitTokenBudget(toSummarize, maxInputTokens);
+  const historyText = serializeHistoryAsText(trimmedHistory);
+
+  const summaryInput: ProviderMessage[] = [
+    { role: "system", content: LLM_COMPACTION_PROMPT },
+    { role: "user", content: historyText },
+  ];
+
+  let summaryText: string;
+  try {
+    summaryText = await provider.complete(summaryInput, {
+      model: modelId,
+      temperature: 0.2,
+      abortSignal,
+    });
+  } catch (err) {
+    return { compacted: false, reason: `compactor call failed: ${(err as Error).message}` };
+  }
+
+  if (!summaryText || summaryText.trim().length === 0) {
+    return { compacted: false, reason: "compactor returned empty summary" };
+  }
+
+  // New history shape (prefix-cache-friendly: preserved system+meta stay at the
+  // absolute prefix unchanged; summary is injected after as a user-role envelope
+  // so it can't pollute the cacheable system-prompt prefix):
+  //
+  //   [...preserved system+meta]                       ← stable prefix
+  //   user: "<SUMMARY_PREFIX>\n<summary>"               ← evicted history compressed
+  //   user: <original last user message>                ← the current ask
+  //   [...kept current-turn (assistant + tool) groups]  ← recent tool work
+  const flatKept: Message[] = [];
+  for (const g of keptGroups) {
+    flatKept.push(cloneMessage(g.assistant));
+    for (const t of g.toolResults) flatKept.push(cloneMessage(t));
+  }
+
+  const compacted: Message[] = [
+    ...preserved.map(cloneMessage),
+    {
+      role: "user",
+      content: `${LLM_SUMMARY_PREFIX}\n${summaryText.trim()}`,
+    },
+    cloneMessage(lastUser),
+    ...flatKept,
+  ];
+
+  return {
+    compacted: true,
+    summary: summaryText,
+    messages: compacted,
+  };
+}
+
+function trimToFitTokenBudget(messages: Message[], maxTokens: number): Message[] {
+  // Drop from the front (oldest first) until estimate fits. Front-trim matches
+  // Codex's pattern and preserves the most recent context the user cares about.
+  let working = [...messages];
+  while (working.length > 0 && estimateContextTokens(working) > maxTokens) {
+    working = working.slice(1);
+  }
+  return working;
+}
+
+function serializeHistoryAsText(messages: Message[]): string {
+  const lines: string[] = [];
+  const toolNameByCallId = new Map<string, string>();
+
+  for (const msg of messages) {
+    switch (msg.role) {
+      case "user": {
+        const text = typeof msg.content === "string"
+          ? msg.content
+          : msg.content.filter((p) => p.type === "text").map((p) => (p as { text: string }).text).join(" ");
+        lines.push(`USER: ${text}`);
+        break;
+      }
+      case "assistant": {
+        if (msg.content.trim()) {
+          lines.push(`ASSISTANT: ${msg.content}`);
+        }
+        if (msg.toolCalls && msg.toolCalls.length > 0) {
+          for (const tc of msg.toolCalls) {
+            toolNameByCallId.set(tc.id, tc.name);
+            lines.push(`TOOL_CALL[${tc.name}]: ${summarizeToolCallArgs(tc)}`);
+          }
+        }
+        break;
+      }
+      case "tool": {
+        const name = toolNameByCallId.get(msg.toolCallId) ?? "tool";
+        lines.push(`TOOL_RESULT[${name}]: ${truncateInline(msg.content, 1500)}`);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  return lines.join("\n\n");
+}
+
+function summarizeToolCallArgs(tc: ToolCall): string {
+  try {
+    const parsed = JSON.parse(tc.arguments || "{}") as Record<string, unknown>;
+    const pairs = Object.entries(parsed)
+      .filter(([, v]) => typeof v === "string" || typeof v === "number" || typeof v === "boolean")
+      .map(([k, v]) => `${k}=${JSON.stringify(v).slice(0, 200)}`);
+    return pairs.join(" ") || "(no args)";
+  } catch {
+    return truncateInline(tc.arguments || "", 200);
+  }
+}
+
+function truncateInline(text: string, max: number): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= max) return normalized;
+  return `${normalized.slice(0, max - 3)}...`;
+}
+
+function cloneMessage(message: Message): Message {
+  if (message.role === "assistant") {
+    return {
+      ...message,
+      toolCalls: message.toolCalls?.map((toolCall) => ({ ...toolCall })),
+    };
+  }
+  if (message.role === "user" && Array.isArray(message.content)) {
+    return {
+      ...message,
+      content: message.content.map((part) => ({
+        ...part,
+        ...(part.type === "image_url" ? { image_url: { ...part.image_url } } : {}),
+      })),
+    };
+  }
+  return { ...message };
+}

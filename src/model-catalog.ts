@@ -13,6 +13,13 @@ export interface BuiltinModelDefinition {
   providerId: string;
   reasoningLevels: ReasoningEffort[];
   contextWindow?: number;
+  /**
+   * Server-declared cap on per-tool-output tokens. When set, the agent must
+   * truncate each tool result to this token budget before adding it to history
+   * — otherwise the server's input window is exceeded by raw tool dumps.
+   * (For codex models this comes from the API's `truncation_policy.limit`.)
+   */
+  toolOutputTokenLimit?: number;
 }
 
 export const BUILTIN_PROVIDERS: BuiltinProviderDefinition[] = [
@@ -136,4 +143,8 @@ export function getBuiltinProvider(providerId: string): BuiltinProviderDefinitio
 
 export function getModelContextWindow(providerId: string, modelId: string): number | undefined {
   return getBuiltinModel(providerId, modelId)?.contextWindow;
+}
+
+export function getToolOutputTokenLimit(providerId: string, modelId: string): number | undefined {
+  return getBuiltinModel(providerId, modelId)?.toolOutputTokenLimit;
 }

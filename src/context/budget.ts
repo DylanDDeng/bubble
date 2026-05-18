@@ -7,6 +7,13 @@ export const AUTOCOMPACT_BUFFER_TOKENS = 13_000;
 export const PRUNE_BUFFER_TOKENS = 50_000;
 export const MIN_WINDOW_FOR_RESERVE = 40_000;
 
+// Safety margins applied to estimator-derived token counts. The estimator can
+// undercount on dense / CJK / tool-payload content; treating its output as a
+// hard floor means we'd routinely overshoot the real server-side count. These
+// multipliers bias the budget decision toward earlier compaction.
+const TAIL_SAFETY_MARGIN = 1.15;     // applied to estimated tail when anchored
+const FIRST_TURN_SAFETY_MARGIN = 1.25; // applied when there's no anchor yet
+
 export interface ContextBudget {
   estimatedTokens: number;
   contextWindow?: number;
@@ -72,9 +79,15 @@ export function getContextBudget(
 
 function computeEstimatedTokens(providerId: string, messages: Message[], options: ContextBudgetOptions): number {
   if (options.usageAnchorTokens !== undefined && options.tailMessages) {
-    return options.usageAnchorTokens + estimateContextTokens(options.tailMessages, providerId);
+    // Anchor is authoritative (server-reported input tokens from the last
+    // response). Tail goes through our estimator and may undercount on dense /
+    // tool-output content, so we inflate it by a small margin before adding.
+    const tailEstimate = estimateContextTokens(options.tailMessages, providerId);
+    return options.usageAnchorTokens + Math.ceil(tailEstimate * TAIL_SAFETY_MARGIN);
   }
-  return estimateContextTokens(messages, providerId);
+  // First turn (or anchor lost): there's no server-reported baseline at all,
+  // so apply a larger safety margin to the pure estimate.
+  return Math.ceil(estimateContextTokens(messages, providerId) * FIRST_TURN_SAFETY_MARGIN);
 }
 
 function shouldTriggerPrune(estimatedTokens: number, contextWindow?: number): boolean {

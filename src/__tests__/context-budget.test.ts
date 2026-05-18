@@ -37,14 +37,17 @@ describe("context budget", () => {
   });
 
   it("uses fixed-reserve threshold on a large window", () => {
-    // 272k - 20k output - 13k buffer = 239k compact threshold
-    // 272k - 20k output - 50k buffer = 202k prune threshold
-    const smallMessages: Message[] = [{ role: "user", content: "x".repeat(800_000) }]; // ~200k tokens
-    const budgetSmall = getContextBudget("openai-codex", "gpt-5.4", smallMessages);
-    expect(budgetSmall.shouldCompact).toBe(false);
-    expect(budgetSmall.shouldPrune).toBe(false);
+    // gpt-5.4 window 272k: compact threshold = 272k - 20k - 13k = 239k;
+    // prune threshold = 272k - 20k - 50k = 202k.
+    // No anchor → first-turn 1.25x safety margin applies to the estimate.
+    // 500_000 chars → 125k heuristic → 156k after margin → under both thresholds.
+    const safeMessages: Message[] = [{ role: "user", content: "x".repeat(500_000) }];
+    const budgetSafe = getContextBudget("openai-codex", "gpt-5.4", safeMessages);
+    expect(budgetSafe.shouldCompact).toBe(false);
+    expect(budgetSafe.shouldPrune).toBe(false);
 
-    const bigMessages: Message[] = [{ role: "user", content: "x".repeat(1_000_000) }]; // ~250k tokens
+    // 1_000_000 chars → 250k heuristic → 313k after margin → both trip.
+    const bigMessages: Message[] = [{ role: "user", content: "x".repeat(1_000_000) }];
     const budgetBig = getContextBudget("openai-codex", "gpt-5.4", bigMessages);
     expect(budgetBig.shouldCompact).toBe(true);
     expect(budgetBig.shouldPrune).toBe(true);

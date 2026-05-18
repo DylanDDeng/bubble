@@ -11,6 +11,14 @@ export interface ProjectionOptions {
   anchorMessageCount?: number;
 }
 
+// Prefix-cache invariant: every projected output starts with the concatenation
+// of (in order) system + meta messages from the input, followed by the
+// conversational body. Compactors (compactMessages, compactCurrentTurnToolGroups,
+// compactMessagesWithLLM, compactWithLLM) MUST preserve every existing
+// system/meta message in its original position so the cacheable prefix
+// stays byte-identical across turns where compaction didn't fire. Inserting
+// new dynamic content (summaries, etc.) AFTER system+meta is safe; inserting
+// it within or before them is not.
 export function projectMessages(messages: Message[], options: ProjectionOptions = {}): ProviderMessage[] {
   const mode = options.mode ?? "full";
   const projectedBody: ProviderMessage[] = [];

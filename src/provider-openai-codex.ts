@@ -9,6 +9,8 @@ export interface CodexModelDescriptor {
   reasoningLevels?: ReasoningEffort[];
   visibility?: string;
   minimalClientVersion?: string;
+  /** Server-declared per-tool-output token cap (truncation_policy.limit when mode=tokens). */
+  toolOutputTokenLimit?: number;
 }
 
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
@@ -499,6 +501,14 @@ function extractCodexModelDescriptors(payload: unknown): CodexModelDescriptor[] 
         }
       }
       desc.reasoningLevels = REASONING_EFFORTS.filter((e) => efforts.has(e));
+    }
+
+    const truncPolicy = record.truncation_policy as Record<string, unknown> | undefined;
+    if (truncPolicy && truncPolicy.mode === "tokens") {
+      const limit = truncPolicy.limit;
+      if (typeof limit === "number" && limit > 0) {
+        desc.toolOutputTokenLimit = limit;
+      }
     }
 
     return desc;

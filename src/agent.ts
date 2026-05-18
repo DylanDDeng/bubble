@@ -11,6 +11,7 @@ import { buildContextUsageSnapshot, type ContextUsageSnapshot } from "./context/
 import { isContextOverflowError } from "./context/overflow.js";
 import { projectMessages } from "./context/projector.js";
 import { aggressivePruneMessages } from "./context/prune.js";
+import { truncateToolOutputForModel } from "./context/tool-output-truncate.js";
 import { buildDeferredToolsReminder, buildToolFreezeReminder, isPermissionModeReminder, reminderForMode } from "./prompt/reminders.js";
 import type { AgentEvent, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ThinkingLevel, Todo, TokenUsage, ToolDefinition, ToolResult, ToolRegistryEntry, ToolUpdate } from "./types.js";
 import { HookBus, type TurnHooks } from "./orchestrator/hooks.js";
@@ -401,6 +402,13 @@ export class Agent {
           parameters: t.parameters,
         }));
 
+      // LLM-driven compaction runs ahead of projector's algorithmic passes. If
+      // it succeeds, this.messages is replaced with [preserved system+meta] +
+      // [LLM summary] + [last user msg], and the projector becomes a no-op for
+      // budget. If it fails (network error, etc.), the projector's existing
+      // algorithmic fallback still kicks in.
+      await this.maybeCompactWithLLM();
+
       try {
         const projectedMessages = projectMessages(this.messages, {
           mode: "budgeted",
@@ -613,10 +621,18 @@ export class Agent {
               result = next;
             },
           });
+          // Honor the model's server-declared per-tool-output token cap (e.g.
+          // gpt-5.5 reports 10000). Without this, 4-5 large file reads in a row
+          // blow past the input window even though our local estimate looks fine.
+          const truncatedOutput = truncateToolOutputForModel(
+            result.content,
+            this.providerId,
+            this.apiModel,
+          );
           this.appendMessage({
             role: "tool",
             toolCallId: tc.id,
-            content: result.content,
+            content: truncatedOutput.content,
             metadata: result.metadata,
             isError: result.isError,
           });
@@ -710,6 +726,22 @@ export class Agent {
       return before - this.messages.length;
     }
 
+    // Single-turn capable LLM compactor. compactMessagesWithLLM above no-ops
+    // when there's only one user turn (the "single huge prompt with many tool
+    // calls" case), so try the turn-internal compactor before giving up.
+    const { compactWithLLM } = await import("./context/llm-compactor.js");
+    const singleTurnResult = await compactWithLLM(this.messages, {
+      provider: this.provider,
+      modelId: this.apiModel,
+    });
+    if (singleTurnResult.compacted && singleTurnResult.messages) {
+      this.messages = singleTurnResult.messages;
+      this.lastInputTokens = null;
+      this.lastAnchorMessageCount = null;
+      this.fileStateTracker?.invalidateReadHistory();
+      return before - this.messages.length;
+    }
+
     const fallback = compactMessages(this.messages, { keepRecentTurns });
     if (fallback.compacted && fallback.messages) {
       this.messages = fallback.messages;
@@ -718,11 +750,57 @@ export class Agent {
       this.fileStateTracker?.invalidateReadHistory();
       return before - this.messages.length;
     }
+
+    // Codex-style last-resort: drop the single oldest non-protected message
+    // and let the retry loop try again. Cheap, but eventually narrows even an
+    // intractable single-turn overflow.
+    const oldestIdx = this.messages.findIndex(
+      (m) => m.role !== "system" && m.role !== "meta",
+    );
+    if (oldestIdx >= 0 && oldestIdx < this.messages.length - 1) {
+      this.messages = [
+        ...this.messages.slice(0, oldestIdx),
+        ...this.messages.slice(oldestIdx + 1),
+      ];
+      this.lastInputTokens = null;
+      this.lastAnchorMessageCount = null;
+      this.fileStateTracker?.invalidateReadHistory();
+      return before - this.messages.length;
+    }
+
     return 0;
   }
 
   compactResidentHistory(): void {
     this.maybeCompactResidentHistory();
+  }
+
+  private async maybeCompactWithLLM(): Promise<void> {
+    if (!this.providerId || !this.apiModel) return;
+    if (this.messages.length === 0) return;
+
+    const tail = this.lastAnchorMessageCount !== null
+      ? this.messages.slice(this.lastAnchorMessageCount)
+      : undefined;
+    const budget = getContextBudget(this.providerId, this.apiModel, this.messages, {
+      usageAnchorTokens: this.lastInputTokens ?? undefined,
+      tailMessages: tail,
+    });
+    if (!budget.shouldCompact) return;
+
+    const { compactWithLLM } = await import("./context/llm-compactor.js");
+    const result = await compactWithLLM(this.messages, {
+      provider: this.provider,
+      modelId: this.apiModel,
+    });
+    if (result.compacted && result.messages) {
+      this.messages = result.messages;
+      this.lastInputTokens = null;
+      this.lastAnchorMessageCount = null;
+      this.fileStateTracker?.invalidateReadHistory();
+    }
+    // If LLM compaction failed for any reason, leave this.messages alone —
+    // the projector's algorithmic budgeted-mode passes will still try.
   }
 
   async runSubtask(

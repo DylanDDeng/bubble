@@ -248,6 +248,7 @@ export class ProviderRegistry {
               providerId: "openai-codex",
               reasoningLevels: d.reasoningLevels ?? catalogEntry?.reasoningLevels ?? ["off"],
               contextWindow: d.contextWindow ?? catalogEntry?.contextWindow,
+              toolOutputTokenLimit: d.toolOutputTokenLimit ?? catalogEntry?.toolOutputTokenLimit,
             });
           }
           return visible.map((d) => ({
