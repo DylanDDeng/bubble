@@ -325,8 +325,15 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
     };
 
     // Strip orphaned focus-event tails that can appear if focus reporting
-    // splits across the paste boundary.
-    const clean = pasted.replace(/\x1b\[I$/, "").replace(/\x1b\[O$/, "");
+    // splits across the paste boundary. Bracketed paste also delivers line
+    // breaks as bare CR on many terminals; left as-is, those CRs survive into
+    // the rendered Text and the terminal interprets them as "return to column
+    // 0", visually overwriting earlier characters even though the underlying
+    // state still holds the full paste.
+    const clean = pasted
+      .replace(/\x1b\[I$/, "")
+      .replace(/\x1b\[O$/, "")
+      .replace(/\r\n?/g, "\n");
 
     // Empty paste on macOS usually means "Cmd+V with an image on the clipboard".
     if (clean.length === 0) {
