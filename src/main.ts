@@ -377,10 +377,8 @@ async function main() {
     }
 
     const tuiRuntime = process.env.BUBBLE_TUI === "opentui" ? "opentui" : "ink";
-    const { runTui } = tuiRuntime === "opentui"
-      ? await import("./tui/run.js")
-      : await import("./tui-ink/run.js");
-    await runTui(agent, args, {
+    const themeConfig = userConfig.getTheme();
+    const commonOptions = {
       sessionManager,
       createProvider,
       registry,
@@ -392,12 +390,34 @@ async function main() {
       settingsManager,
       lspService,
       mcpManager,
-      theme: userConfig.getTheme(),
       flushMemory,
       runMemoryCompaction,
       runMemorySummary,
       runMemoryRefresh,
-    });
+    };
+    if (tuiRuntime === "opentui") {
+      const { runTui } = await import("./tui/run.js");
+      await runTui(agent, args, {
+        ...commonOptions,
+        theme: themeConfig.overrides,
+      });
+    } else {
+      // Probe the terminal background BEFORE Ink takes over stdin. OSC 11
+      // needs raw mode, and once Ink owns stdin the reply never reaches us.
+      let detectedTheme: "light" | "dark" = "dark";
+      if (themeConfig.mode === "auto") {
+        const { detectTerminalTheme } = await import("./tui-ink/detect-theme.js");
+        detectedTheme = await detectTerminalTheme();
+      }
+      const { runTui } = await import("./tui-ink/run.js");
+      await runTui(agent, args, {
+        ...commonOptions,
+        themeMode: themeConfig.mode,
+        themeOverrides: themeConfig.overrides,
+        detectedTheme,
+        onThemeModeChange: (mode) => userConfig.setThemeMode(mode),
+      });
+    }
   } finally {
     await shutdownRuntime();
   }

@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { theme } from "../theme.js";
+import { useTheme } from "../theme.js";
 import { parseDiffHunks, type DiffHunk } from "../../approval/diff-hunks.js";
 
 interface DiffViewProps {
@@ -12,6 +12,7 @@ interface DiffViewProps {
 const DEFAULT_MAX_LINES = 40;
 
 export function DiffView({ diff, maxLines = DEFAULT_MAX_LINES }: DiffViewProps) {
+  const theme = useTheme();
   const hunks = parseDiffHunks(diff);
   if (hunks.length === 0) {
     return (

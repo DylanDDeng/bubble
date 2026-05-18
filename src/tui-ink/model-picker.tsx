@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { Box, Text, useInput, usePaste, useStdout } from "ink";
-import { theme } from "./theme.js";
+import { useTheme } from "./theme.js";
 import { ProviderRegistry, encodeModel, decodeModel, displayModel, isUserVisibleProvider, type ModelInfo } from "../provider-registry.js";
 import { listBuiltinModels } from "../model-catalog.js";
 
@@ -20,6 +20,7 @@ export interface ModelPickerProps {
 }
 
 export function ModelPicker({ registry, current, recent, onSelect, onCancel }: ModelPickerProps) {
+  const theme = useTheme();
   const { stdout } = useStdout();
   const termHeight = stdout?.rows || 24;
   const maxVisible = Math.max(5, termHeight - 10);
@@ -191,6 +192,7 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
 }
 
 function SearchField({ query, placeholder }: { query: string; placeholder: string }) {
+  const theme = useTheme();
   const [cursorVisible, setCursorVisible] = useState(true);
   useEffect(() => {
     const t = setInterval(() => setCursorVisible((v) => !v), 500);
@@ -288,6 +290,7 @@ export interface ProviderPickerProps {
 }
 
 export function ProviderPicker({ providers, current, onSelect, onCancel, title }: ProviderPickerProps) {
+  const theme = useTheme();
   const { stdout } = useStdout();
   const termHeight = stdout?.rows || 24;
   const maxVisible = Math.max(5, termHeight - 8);
@@ -372,6 +375,7 @@ export interface KeyPickerProps {
 }
 
 export function KeyPicker({ providerName, onSubmit, onCancel }: KeyPickerProps) {
+  const theme = useTheme();
   const [value, setValue] = useState("");
 
   useInput((input, key) => {
@@ -422,6 +426,7 @@ export interface SkillPickerProps {
 }
 
 export function SkillPicker({ skills, onSelect, onCancel }: SkillPickerProps) {
+  const theme = useTheme();
   const { stdout } = useStdout();
   const termHeight = stdout?.rows || 24;
   const maxVisible = Math.max(5, termHeight - 8);

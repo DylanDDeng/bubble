@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Static, Text } from "ink";
-import { theme } from "./theme.js";
+import { useTheme, type Theme } from "./theme.js";
 import { highlightCode, inferLang } from "./code-highlight.js";
 import { MarkdownContent } from "./markdown.js";
 import type { DisplayMessage, DisplayMessagePart, DisplayToolCall } from "./display-history.js";
@@ -130,6 +130,7 @@ function MessageItem({
   showExpandHint: boolean;
   nowTick?: number;
 }) {
+  const theme = useTheme();
   if (message.role === "user") {
     return <UserMessageBlock content={message.content} terminalColumns={terminalColumns} />;
   }
@@ -291,6 +292,7 @@ function TimelineText({
   compactTop: boolean;
   terminalColumns?: number;
 }) {
+  const theme = useTheme();
   if (!content.trim()) return null;
   // marginLeft (2) + "⛬  " glyph (3 visual cells) = 5 cells consumed by the
   // timeline gutter; pass the remaining width so wide blocks like tables size
@@ -432,6 +434,7 @@ function TraceActivityLine({
   nowTick?: number;
   terminalColumns: number;
 }) {
+  const theme = useTheme();
   const waiting = isTraceGroupWaitingForApproval(group, pendingApproval);
   const elapsed = formatElapsed(group.startedAt, nowTick);
   const labelWidth = Math.max(20, terminalColumns - 26);
@@ -459,8 +462,9 @@ function TraceGroupBlock({
   compactTop: boolean;
   nowTick?: number;
 }) {
+  const theme = useTheme();
   const waiting = isTraceGroupWaitingForApproval(group, pendingApproval);
-  const status = traceGroupStatus(group, waiting, nowTick);
+  const status = traceGroupStatus(group, waiting, theme, nowTick);
   const editTool = group.kind === "edit" && group.raw.length === 1 ? group.raw[0] : undefined;
   const editDetails = editTool && !group.pending && !group.hasError ? getEditDiffDetails(editTool) : null;
   if (editTool && editDetails) {
@@ -540,6 +544,7 @@ function EditTraceBlock({
   compactTop: boolean;
   status: { text: string; color: string } | null;
 }) {
+  const theme = useTheme();
   const path = formatTracePath(details.path ?? tool.args.path ?? "");
   const pathWidth = Math.max(14, terminalColumns - 12);
   return (
@@ -572,6 +577,7 @@ function EditTraceBlock({
 function traceGroupStatus(
   group: TraceGroup,
   waitingApproval: boolean,
+  theme: Theme,
   nowTick?: number,
 ): { text: string; color: string } | null {
   if (waitingApproval) return { text: "waiting for approval", color: theme.warning };
@@ -617,6 +623,7 @@ function approvalMatchesTool(hint: PendingApprovalHint, tc: DisplayToolCall): bo
 }
 
 function ReasoningTraceBlock({ reasoning }: { reasoning: string }) {
+  const theme = useTheme();
   const lines = React.useMemo(
     () => reasoning.split("\n").filter((l) => l.trim() !== ""),
     [reasoning],
@@ -636,6 +643,7 @@ function ReasoningTraceBlock({ reasoning }: { reasoning: string }) {
 }
 
 function UserMessageBlock({ content, terminalColumns }: { content: string; terminalColumns: number }) {
+  const theme = useTheme();
   // Rail (▌ + space) takes 2 cols; reserve 2 cols inside the fill for left/right gutters.
   const horizontalRoom = Math.max(20, terminalColumns - 2);
   const bubbleTextWidth = Math.max(1, horizontalRoom - 2);
@@ -795,7 +803,7 @@ function subagentDescriptor(subagent: SubagentDisplay, includeThinking = false):
   return route ? `${role} @ ${route}` : role;
 }
 
-function subagentStatusColor(status: string | undefined): string {
+function subagentStatusColor(status: string | undefined, theme: Theme): string {
   if (status === "completed") return theme.success;
   if (status === "failed" || status === "blocked" || status === "cancelled") return theme.error;
   if (status === "queued") return theme.muted;
@@ -850,6 +858,7 @@ function ToolCallDisplay({
   compactTop?: boolean;
   nowTick?: number;
 }) {
+  const theme = useTheme();
   if (toolCall.metadata?.kind === "subagent") {
     return (
       <SubagentToolDisplay
@@ -989,6 +998,7 @@ function SubagentToolDisplay({
   terminalColumns: number;
   compactTop: boolean;
 }) {
+  const theme = useTheme();
   const subagents = subagentsFrom(toolCall);
   const hasError = toolCall.isError || subagents.some((subagent) => (
     subagent.status === "failed" || subagent.status === "blocked" || subagent.status === "cancelled"
@@ -1021,9 +1031,9 @@ function SubagentToolDisplay({
             );
             return (
               <Box key={subagent.subAgentId ?? `${subagentLabel(subagent)}-${index}`}>
-                <Text color={subagentStatusColor(status)}>{label}</Text>
+                <Text color={subagentStatusColor(status, theme)}>{label}</Text>
                 <Text color={theme.traceAction}> {descriptor}</Text>
-                <Text color={subagentStatusColor(status)}> {padVisual(status, 9)}</Text>
+                <Text color={subagentStatusColor(status, theme)}> {padVisual(status, 9)}</Text>
                 {note && <Text color={subagent.error ? theme.error : theme.traceDetail}> {note}</Text>}
               </Box>
             );
@@ -1042,7 +1052,16 @@ function SubagentToolDisplay({
   );
 }
 
-function renderTruncationHint(remaining: number, verbose: boolean, showExpandHint: boolean): React.ReactNode {
+function TruncationHint({
+  remaining,
+  verbose,
+  showExpandHint,
+}: {
+  remaining: number;
+  verbose: boolean;
+  showExpandHint: boolean;
+}): React.ReactNode {
+  const theme = useTheme();
   if (remaining <= 0) return null;
   const noun = `line${remaining === 1 ? "" : "s"}`;
   if (verbose) {
@@ -1071,6 +1090,7 @@ function OutputPreview({
   verbose: boolean;
   showExpandHint: boolean;
 }) {
+  const theme = useTheme();
   const lines = text.split("\n");
   const shown = lines.slice(0, maxLines);
   const remaining = Math.max(0, lines.length - maxLines);
@@ -1083,7 +1103,7 @@ function OutputPreview({
           <Text>{line}</Text>
         </Box>
       ))}
-      {renderTruncationHint(remaining, verbose, showExpandHint)}
+      <TruncationHint remaining={remaining} verbose={verbose} showExpandHint={showExpandHint} />
     </Box>
   );
 }
@@ -1099,6 +1119,7 @@ function WritePreview({
   verbose: boolean;
   showExpandHint: boolean;
 }) {
+  const theme = useTheme();
   const lines = content.split("\n");
   const shown = lines.slice(0, maxLines);
   const remaining = Math.max(0, lines.length - maxLines);
@@ -1111,7 +1132,7 @@ function WritePreview({
           <Text>{line}</Text>
         </Box>
       ))}
-      {renderTruncationHint(remaining, verbose, showExpandHint)}
+      <TruncationHint remaining={remaining} verbose={verbose} showExpandHint={showExpandHint} />
     </Box>
   );
 }
@@ -1173,6 +1194,7 @@ function DiffBlock({
   verbose: boolean;
   showExpandHint: boolean;
 }) {
+  const theme = useTheme();
   const lines = parseDiffLines(diff);
   const shown = lines.slice(0, maxLines);
   const remaining = Math.max(0, lines.length - maxLines);
@@ -1209,7 +1231,7 @@ function DiffBlock({
           </Text>
         );
       })}
-      {renderTruncationHint(remaining, verbose, showExpandHint)}
+      <TruncationHint remaining={remaining} verbose={verbose} showExpandHint={showExpandHint} />
     </Box>
   );
 }
@@ -1219,6 +1241,7 @@ function DiffBlock({
  * Surfaces only when there is at least one file-mutating tool call.
  */
 function TurnDigest({ toolCalls }: { toolCalls: DisplayToolCall[] }) {
+  const theme = useTheme();
   const digest = React.useMemo(() => buildDigest(toolCalls), [toolCalls]);
   if (!digest) return null;
   return (

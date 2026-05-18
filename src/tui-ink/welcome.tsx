@@ -1,7 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { createRequire } from "node:module";
-import { theme } from "./theme.js";
+import { useTheme, type Theme } from "./theme.js";
 import type { DisplayMessage } from "./display-history.js";
 
 interface WelcomeBannerProps {
@@ -80,7 +80,20 @@ const BUBBLE_LOGO_LETTERS = [
   ],
 ];
 
-const LOGO_COLORS = ["#f3f3f7", "#f3f3f7", "#d8c7ff", "#d8c7ff", "#a9c7ff", "#a9c7ff"];
+/**
+ * Derive a 6-step logo gradient from the active theme tokens so the banner
+ * stays readable on both dark and light backgrounds.
+ */
+function logoColors(theme: Theme): string[] {
+  return [
+    theme.userMessageText,
+    theme.userMessageText,
+    theme.inputBorder,
+    theme.inputBorder,
+    theme.traceCommand,
+    theme.traceCommand,
+  ];
+}
 const COMPACT_LOGO = ["B", "U", "B", "B", "L", "E"];
 const WIDE_LOGO_MIN_WIDTH = 52;
 
@@ -105,6 +118,7 @@ export function WelcomeBanner({
   mcpTotalCount = 0,
   hasAgentsFile = false,
 }: WelcomeBannerProps) {
+  const theme = useTheme();
   const effectiveWidth = Math.max(20, Math.min(terminalColumns - 2, 118));
   const useWideLogo = effectiveWidth >= WIDE_LOGO_MIN_WIDTH;
   const actionableTips = tips
@@ -151,11 +165,13 @@ export function WelcomeBanner({
 }
 
 function LogoRow({ rowIndex }: { rowIndex: number }) {
+  const theme = useTheme();
+  const colors = logoColors(theme);
   return (
     <Box>
       {BUBBLE_LOGO_LETTERS.map((letter, index) => (
         <React.Fragment key={`${index}-${rowIndex}`}>
-          <Text bold color={LOGO_COLORS[index]}>
+          <Text bold color={colors[index]}>
             {letter[rowIndex]}
           </Text>
           {index < BUBBLE_LOGO_LETTERS.length - 1 && <Text> </Text>}
@@ -166,10 +182,12 @@ function LogoRow({ rowIndex }: { rowIndex: number }) {
 }
 
 function CompactLogo() {
+  const theme = useTheme();
+  const colors = logoColors(theme);
   return (
     <Box>
       {COMPACT_LOGO.map((letter, index) => (
-        <Text key={`${letter}-${index}`} bold color={LOGO_COLORS[index]}>
+        <Text key={`${letter}-${index}`} bold color={colors[index]}>
           {letter}
         </Text>
       ))}
@@ -188,6 +206,7 @@ function StatusItem({
   total?: number;
   ok: boolean;
 }) {
+  const theme = useTheme();
   const countText = count === undefined
     ? ""
     : total !== undefined && total > count

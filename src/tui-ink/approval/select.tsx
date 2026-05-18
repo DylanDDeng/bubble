@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Box, Text, useInput } from "ink";
-import { theme } from "../theme.js";
+import { useTheme } from "../theme.js";
 
 export interface ApprovalOption {
   /** Stable identifier returned to the parent. */
@@ -45,6 +45,7 @@ export function ApprovalSelect({
   hint,
   initialIndex = 0,
 }: ApprovalSelectProps) {
+  const theme = useTheme();
   const [focusIndex, setFocusIndex] = useState(
     Math.max(0, Math.min(initialIndex, options.length - 1)),
   );

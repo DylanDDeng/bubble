@@ -4,7 +4,7 @@ import stringWidth from "string-width";
 import { appendFileSync } from "node:fs";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import type { SkillRegistry } from "../skills/registry.js";
-import { theme } from "./theme.js";
+import { useTheme } from "./theme.js";
 import { filterFileSuggestions, findAtContext, listProjectFiles } from "./file-mentions.js";
 import {
   ingestClipboardImage,
@@ -188,6 +188,7 @@ export function insertNewlineAtCursor(text: string, cursor: number) {
 }
 
 export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, terminalColumns, cwd }: InputBoxProps) {
+  const theme = useTheme();
   const width = terminalColumns;
 
   const [text, setText] = useState("");

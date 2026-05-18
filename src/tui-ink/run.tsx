@@ -13,6 +13,7 @@ import type { McpManager } from "../mcp/manager.js";
 import type { LspService } from "../lsp/index.js";
 import type { QuestionController } from "../question/index.js";
 import type { MemoryScope } from "../memory/index.js";
+import type { ResolvedTheme, ThemeMode } from "./theme.js";
 
 export interface RunTuiOptions {
   sessionManager?: SessionManager;
@@ -26,7 +27,10 @@ export interface RunTuiOptions {
   settingsManager?: SettingsManager;
   lspService?: LspService;
   mcpManager?: McpManager;
-  theme?: Record<string, string>;
+  themeMode?: ThemeMode;
+  themeOverrides?: Record<string, string>;
+  detectedTheme?: ResolvedTheme;
+  onThemeModeChange?: (mode: ThemeMode) => void;
   flushMemory?: () => Promise<void>;
   runMemoryCompaction?: () => Promise<string>;
   runMemorySummary?: (scope?: MemoryScope) => Promise<string>;
@@ -50,6 +54,10 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
       settingsManager={options.settingsManager}
       lspService={options.lspService}
       mcpManager={options.mcpManager}
+      themeMode={options.themeMode}
+      themeOverrides={options.themeOverrides}
+      detectedTheme={options.detectedTheme}
+      onThemeModeChange={options.onThemeModeChange}
       flushMemory={options.flushMemory}
       runMemoryCompaction={options.runMemoryCompaction}
       runMemorySummary={options.runMemorySummary}

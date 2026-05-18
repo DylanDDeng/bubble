@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { theme } from "../theme.js";
+import { useTheme } from "../theme.js";
 import { ApprovalSelect, type ApprovalOption } from "./select.js";
 import { DiffView } from "./diff-view.js";
 import type { ApprovalDecision, ApprovalRequest } from "../../approval/types.js";
@@ -23,6 +23,7 @@ export function ApprovalDialog({
   onDecision,
   onAllowBashPrefix,
 }: ApprovalDialogProps) {
+  const theme = useTheme();
   const options = buildOptions(request);
 
   const onSubmit = (id: string, extras: { feedback?: string; editedValue?: string }) => {
@@ -150,6 +151,7 @@ function RequestPreview({ request }: { request: ApprovalRequest }) {
 }
 
 function BashPreview({ command, cwd }: { command: string; cwd: string }) {
+  const theme = useTheme();
   const danger = classifyBashDanger(command);
   return (
     <Box flexDirection="column">
@@ -173,6 +175,7 @@ function BashPreview({ command, cwd }: { command: string; cwd: string }) {
 const MAX_WRITE_PREVIEW_LINES = 20;
 
 function WritePreview({ path, content }: { path: string; content: string }) {
+  const theme = useTheme();
   const lines = content.split("\n");
   const shown = lines.slice(0, MAX_WRITE_PREVIEW_LINES);
   const overflow = lines.length - shown.length;

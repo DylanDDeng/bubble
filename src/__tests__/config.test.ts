@@ -48,7 +48,7 @@ describe("UserConfig", () => {
     expect(restored.getDefaultThinkingLevel()).toBe("high");
   });
 
-  it("loads theme overrides", () => {
+  it("migrates legacy flat theme overrides into the dark mode bucket", () => {
     process.env.BUBBLE_HOME = root;
     writeFileSync(
       join(root, "config.json"),
@@ -63,9 +63,53 @@ describe("UserConfig", () => {
 
     const config = new UserConfig();
     expect(config.getTheme()).toEqual({
+      mode: "dark",
+      overrides: {
+        messageUserText: "#ffffff",
+        toolError: "#ff0000",
+      },
+    });
+    expect(config.getThemeOverrides()).toEqual({
       messageUserText: "#ffffff",
       toolError: "#ff0000",
     });
+  });
+
+  it("loads explicit theme mode + overrides", () => {
+    process.env.BUBBLE_HOME = root;
+    writeFileSync(
+      join(root, "config.json"),
+      JSON.stringify({
+        theme: {
+          mode: "light",
+          overrides: { accent: "#123456" },
+        },
+      }, null, 2),
+    );
+
+    const config = new UserConfig();
+    expect(config.getThemeMode()).toBe("light");
+    expect(config.getThemeOverrides()).toEqual({ accent: "#123456" });
+  });
+
+  it("accepts a bare theme-mode string", () => {
+    process.env.BUBBLE_HOME = root;
+    writeFileSync(
+      join(root, "config.json"),
+      JSON.stringify({ theme: "light" }, null, 2),
+    );
+
+    const config = new UserConfig();
+    expect(config.getThemeMode()).toBe("light");
+    expect(config.getThemeOverrides()).toEqual({});
+  });
+
+  it("defaults theme mode to auto when missing", () => {
+    process.env.BUBBLE_HOME = root;
+    writeFileSync(join(root, "config.json"), JSON.stringify({}, null, 2));
+
+    const config = new UserConfig();
+    expect(config.getThemeMode()).toBe("auto");
   });
 
   it("loads sanitized subagent category overrides", () => {

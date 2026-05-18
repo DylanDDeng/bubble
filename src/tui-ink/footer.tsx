@@ -1,7 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { homedir } from "node:os";
-import { theme } from "./theme.js";
+import { useTheme, type Theme } from "./theme.js";
 import type { PermissionMode } from "../types.js";
 import { PERMISSION_MODE_INFO } from "../permission/mode.js";
 
@@ -22,6 +22,7 @@ export interface FooterData {
 }
 
 export function FooterBar({ data }: { data: FooterData }) {
+  const theme = useTheme();
   const usageText =
     data.usageTotals.prompt || data.usageTotals.completion
       ? `↑${formatTokens(data.usageTotals.prompt)} ↓${formatTokens(data.usageTotals.completion)}`
@@ -57,9 +58,10 @@ export function FooterBar({ data }: { data: FooterData }) {
 }
 
 function ModeBadge({ mode }: { mode?: PermissionMode }) {
+  const theme = useTheme();
   if (!mode || mode === "default") return null;
   const info = PERMISSION_MODE_INFO[mode];
-  const color = theme[info.color] ?? theme.muted;
+  const color = (theme as unknown as Record<string, string>)[info.color] ?? theme.muted;
   const symbol = info.symbol ? `${info.symbol} ` : "";
   return (
     <>

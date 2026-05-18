@@ -359,6 +359,30 @@ const builtinSlashCommandEntries: SlashCommand[] = [
     },
   },
   {
+    name: "theme",
+    description: "Switch the color theme. Usage: /theme [auto|light|dark]",
+    async handler(args, ctx) {
+      if (!ctx.setThemeMode || !ctx.getThemeMode || !ctx.getResolvedTheme) {
+        return "Theme switching is only available inside the TUI.";
+      }
+      const arg = args.trim().toLowerCase();
+      if (!arg) {
+        const order = ["auto", "light", "dark"] as const;
+        const current = ctx.getThemeMode();
+        const next = order[(order.indexOf(current) + 1) % order.length]!;
+        ctx.setThemeMode(next);
+        const resolved = next === "auto" ? ctx.getResolvedTheme() : next;
+        return `Theme: ${next}${next === "auto" ? ` (resolved to ${resolved})` : ""}`;
+      }
+      if (arg !== "auto" && arg !== "light" && arg !== "dark") {
+        return "Usage: /theme [auto|light|dark]";
+      }
+      ctx.setThemeMode(arg);
+      const resolved = arg === "auto" ? ctx.getResolvedTheme() : arg;
+      return `Theme set to ${arg}${arg === "auto" ? ` (resolved to ${resolved})` : ""}.`;
+    },
+  },
+  {
     name: "clear",
     description: "Clear the current conversation history",
     async handler(args, ctx) {

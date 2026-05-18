@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import type { QuestionAnswer, QuestionRequest } from "../question/index.js";
-import { theme } from "./theme.js";
+import { useTheme } from "./theme.js";
 
 interface QuestionDialogProps {
   request: QuestionRequest;
@@ -10,6 +10,7 @@ interface QuestionDialogProps {
 }
 
 export function QuestionDialog({ request, onSubmit, onCancel }: QuestionDialogProps) {
+  const theme = useTheme();
   const [index, setIndex] = useState(0);
   const [selected, setSelected] = useState(0);
   const [custom, setCustom] = useState("");

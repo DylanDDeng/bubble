@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Box, Text, useInput } from "ink";
-import { theme } from "./theme.js";
+import { useTheme } from "./theme.js";
 import { MarkdownContent } from "./markdown.js";
 
 interface PlanConfirmProps {
@@ -12,6 +12,7 @@ interface PlanConfirmProps {
 type Stage = "view" | "edit";
 
 export function PlanConfirm({ initialPlan, onApprove, onReject }: PlanConfirmProps) {
+  const theme = useTheme();
   const [stage, setStage] = useState<Stage>("view");
   const [draft, setDraft] = useState(initialPlan);
   const [cursor, setCursor] = useState(initialPlan.length);

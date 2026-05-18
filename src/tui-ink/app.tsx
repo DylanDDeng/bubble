@@ -21,7 +21,7 @@ import {
   toolCallsFromParts,
 } from "./display-history.js";
 import type { PendingApprovalHint } from "./message-list.js";
-import { theme } from "./theme.js";
+import { paletteFor, ThemeProvider, useTheme, type ResolvedTheme, type Theme, type ThemeMode } from "./theme.js";
 import { ModelPicker, ProviderPicker, KeyPicker, SkillPicker } from "./model-picker.js";
 import { BUILTIN_PROVIDERS, ProviderRegistry, displayModel, isUserVisibleProvider } from "../provider-registry.js";
 import { buildSystemPrompt } from "../system-prompt.js";
@@ -71,6 +71,10 @@ interface AppProps {
   settingsManager?: SettingsManager;
   lspService?: LspService;
   mcpManager?: McpManager;
+  themeMode?: ThemeMode;
+  themeOverrides?: Record<string, string>;
+  detectedTheme?: ResolvedTheme;
+  onThemeModeChange?: (mode: ThemeMode) => void;
   flushMemory?: () => Promise<void>;
   runMemoryCompaction?: () => Promise<string>;
   runMemorySummary?: (scope?: MemoryScope) => Promise<string>;
@@ -232,7 +236,22 @@ function withMessageKey(message: DisplayMessage): DisplayMessage {
   return { ...message, key: nextDisplayMessageKey(prefix) };
 }
 
-export function App({ agent, args, sessionManager, createProvider, registry, skillRegistry, planHandlerRef, approvalHandlerRef, questionController, bashAllowlist, settingsManager, lspService, mcpManager, flushMemory, runMemoryCompaction, runMemorySummary, runMemoryRefresh, bypassEnabled, onExit }: AppProps) {
+export function App({ agent, args, sessionManager, createProvider, registry, skillRegistry, planHandlerRef, approvalHandlerRef, questionController, bashAllowlist, settingsManager, lspService, mcpManager, themeMode: initialThemeMode, themeOverrides, detectedTheme, onThemeModeChange, flushMemory, runMemoryCompaction, runMemorySummary, runMemoryRefresh, bypassEnabled, onExit }: AppProps) {
+  const [themeMode, setThemeMode] = useState<ThemeMode>(initialThemeMode ?? "auto");
+  // `detectedTheme` is captured once at startup in main.ts. We keep it in state
+  // so future re-detection (e.g. if a user runs `/theme auto` after switching
+  // their terminal) is possible without re-mounting the app. For now it never
+  // changes after first render.
+  const [autoResolved] = useState<ResolvedTheme>(detectedTheme ?? "dark");
+  const palette = useMemo<Theme>(() => {
+    const resolved: ResolvedTheme = themeMode === "auto" ? autoResolved : themeMode;
+    return paletteFor(resolved, themeOverrides);
+  }, [themeMode, autoResolved, themeOverrides]);
+  const applyThemeMode = useCallback((mode: ThemeMode) => {
+    setThemeMode(mode);
+    onThemeModeChange?.(mode);
+  }, [onThemeModeChange]);
+  const themeResolved: ResolvedTheme = themeMode === "auto" ? autoResolved : themeMode;
   const { exit } = useApp();
   const [messages, setMessages] = useState<DisplayMessage[]>(() => compactDisplayMessages(reconstructDisplayMessages(agent.messages)));
   const [isRunning, setIsRunning] = useState(false);
@@ -572,6 +591,9 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       runMemoryCompaction,
       runMemorySummary,
       runMemoryRefresh,
+      getThemeMode: () => themeMode,
+      getResolvedTheme: () => themeResolved,
+      setThemeMode: applyThemeMode,
     });
     if (handled && result) {
       addMessage("assistant", result);
@@ -602,6 +624,9 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       runMemoryCompaction,
       runMemorySummary,
       runMemoryRefresh,
+      getThemeMode: () => themeMode,
+      getResolvedTheme: () => themeResolved,
+      setThemeMode: applyThemeMode,
     });
     if (handled && result) {
       addMessage("assistant", result);
@@ -912,6 +937,9 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           runMemoryCompaction,
           runMemorySummary,
           runMemoryRefresh,
+          getThemeMode: () => themeMode,
+          getResolvedTheme: () => themeResolved,
+          setThemeMode: applyThemeMode,
         });
         if (handled) {
           if (agent.mode !== permissionMode) {
@@ -994,6 +1022,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   ) : null;
 
   return (
+    <ThemeProvider value={palette}>
     <Box flexDirection="column" height="100%">
       <Box flexDirection="column" flexGrow={1} padding={1}>
         <MessageList
@@ -1104,6 +1133,9 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
                 runMemoryCompaction,
                 runMemorySummary,
                 runMemoryRefresh,
+                getThemeMode: () => themeMode,
+                getResolvedTheme: () => themeResolved,
+                setThemeMode: applyThemeMode,
               });
               if (handled && result) addMessage("assistant", result);
             }}
@@ -1193,6 +1225,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         })}
       />
     </Box>
+    </ThemeProvider>
   );
 }
 
@@ -1277,6 +1310,7 @@ function WaitingIndicator({
   runStartedAt,
   nowTick,
 }: WaitingIndicatorProps) {
+  const theme = useTheme();
   const [frameIndex, setFrameIndex] = useState(0);
   const [idlePhrase, setIdlePhrase] = useState(() => GENERIC_PHRASES[0]);
 

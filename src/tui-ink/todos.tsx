@@ -1,7 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import type { Todo } from "../types.js";
-import { theme } from "./theme.js";
+import { useTheme, type Theme } from "./theme.js";
 
 interface TodosPanelProps {
   todos: Todo[];
@@ -11,6 +11,7 @@ interface TodosPanelProps {
 const MAX_ROWS = 8;
 
 export function TodosPanel({ todos, terminalColumns }: TodosPanelProps) {
+  const theme = useTheme();
   if (todos.length === 0) {
     return null;
   }
@@ -54,7 +55,8 @@ function selectVisibleRows(todos: Todo[]): Todo[] {
 }
 
 function TodoRow({ todo, maxWidth }: { todo: Todo; maxWidth: number }) {
-  const { glyph, color, dim, label } = statusStyle(todo);
+  const theme = useTheme();
+  const { glyph, color, dim, label } = statusStyle(todo, theme);
   const text = label || todo.content;
   const trimmed = text.length > maxWidth - 4 ? text.slice(0, maxWidth - 5) + "…" : text;
   return (
@@ -66,7 +68,7 @@ function TodoRow({ todo, maxWidth }: { todo: Todo; maxWidth: number }) {
   );
 }
 
-function statusStyle(todo: Todo): { glyph: string; color: string; dim: boolean; label: string } {
+function statusStyle(todo: Todo, theme: Theme): { glyph: string; color: string; dim: boolean; label: string } {
   if (todo.status === "completed") {
     return { glyph: "✔", color: theme.muted, dim: true, label: todo.content };
   }

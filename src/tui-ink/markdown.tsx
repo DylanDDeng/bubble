@@ -7,7 +7,7 @@ import React from "react";
 import { Box, Text } from "ink";
 import stringWidth from "string-width";
 import { useTerminalSize } from "./use-terminal-size.js";
-import { theme } from "./theme.js";
+import { useTheme } from "./theme.js";
 import { highlightCode } from "./code-highlight.js";
 
 const graphemeSegmenter =
@@ -317,6 +317,7 @@ function InlineText({ text }: { text: string }) {
 }
 
 function CodeBlock({ lang, lines }: { lang: string; lines: string[] }) {
+  const theme = useTheme();
   const [highlighted, setHighlighted] = React.useState<string[] | null>(null);
 
   React.useEffect(() => {
@@ -468,6 +469,7 @@ function inlineSegmentsWidth(segments: MarkdownInlineSegment[]): number {
 }
 
 function HeadingBlock({ level, text }: { level: number; text: string }) {
+  const theme = useTheme();
   const props: any = { bold: true };
   if (level === 1) {
     props.underline = true;

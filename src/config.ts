@@ -45,16 +45,67 @@ function sanitizeDefaultProvider(providerId?: string): string | undefined {
   return isHiddenProviderId(providerId) ? undefined : providerId;
 }
 
+export type ThemeMode = "auto" | "light" | "dark";
+
+export interface ThemeConfig {
+  mode: ThemeMode;
+  overrides?: Record<string, string>;
+}
+
 export interface UserConfigData {
   defaultModel?: string;
   defaultThinkingLevel?: ThinkingLevel;
   skillPaths?: string[];
-  theme?: Record<string, string>;
+  /**
+   * Three shapes are accepted on disk so we can evolve without breaking
+   * existing configs:
+   *   - `"auto" | "light" | "dark"` — mode only
+   *   - `{ mode, overrides? }` — mode + optional per-key palette overrides
+   *   - `Record<string, string>` (legacy) — treated as `{ mode: "dark", overrides }`
+   *     so users who customized colors before light-mode existed keep their
+   *     palette and stay on dark, which was the only palette at the time.
+   */
+  theme?: ThemeMode | ThemeConfig | Record<string, string>;
   recentModels?: string[];
   apiKey?: string;
   providers?: ProviderProfile[];
   defaultProvider?: string;
   agentCategories?: AgentCategoriesConfig;
+}
+
+function sanitizeTheme(
+  value: UserConfigData["theme"],
+): ThemeConfig | undefined {
+  if (value == null) return undefined;
+  if (typeof value === "string") {
+    return value === "auto" || value === "light" || value === "dark"
+      ? { mode: value }
+      : undefined;
+  }
+  if (typeof value !== "object" || Array.isArray(value)) return undefined;
+  // Discriminate the new `{ mode, overrides }` shape from the legacy
+  // `Record<string, string>` shape. A legacy config has no `mode` key.
+  const maybeNew = value as Partial<ThemeConfig> & Record<string, unknown>;
+  if (typeof maybeNew.mode === "string") {
+    const mode = maybeNew.mode;
+    if (mode !== "auto" && mode !== "light" && mode !== "dark") return undefined;
+    const overrides = isStringMap(maybeNew.overrides) ? maybeNew.overrides : undefined;
+    return overrides ? { mode, overrides } : { mode };
+  }
+  const overrides = pickStringEntries(value as Record<string, unknown>);
+  if (Object.keys(overrides).length === 0) return undefined;
+  return { mode: "dark", overrides };
+}
+
+function isStringMap(value: unknown): value is Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return Object.values(value).every((entry) => typeof entry === "string");
+}
+
+function pickStringEntries(value: Record<string, unknown>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, v]) => typeof v === "string"),
+  ) as Record<string, string>;
 }
 
 export class UserConfig {
@@ -77,6 +128,7 @@ export class UserConfig {
         providers: sanitizeProviders(parsed.providers),
         defaultProvider: sanitizeDefaultProvider(parsed.defaultProvider),
         agentCategories: sanitizeAgentCategories(parsed.agentCategories),
+        theme: sanitizeTheme(parsed.theme),
       };
     } catch {
       this.data = {};
@@ -163,16 +215,32 @@ export class UserConfig {
     this.save();
   }
 
-  getTheme(): Record<string, string> {
-    const theme = this.data.theme;
-    if (!theme || typeof theme !== "object" || Array.isArray(theme)) return {};
-    return Object.fromEntries(
-      Object.entries(theme).filter(([, value]) => typeof value === "string"),
-    );
+  getTheme(): ThemeConfig {
+    const theme = sanitizeTheme(this.data.theme);
+    return theme ?? { mode: "auto" };
   }
 
-  setTheme(theme: Record<string, string>) {
-    this.data.theme = { ...theme };
+  getThemeMode(): ThemeMode {
+    return this.getTheme().mode;
+  }
+
+  getThemeOverrides(): Record<string, string> {
+    return this.getTheme().overrides ?? {};
+  }
+
+  setThemeMode(mode: ThemeMode) {
+    const current = this.getTheme();
+    this.data.theme = current.overrides
+      ? { mode, overrides: current.overrides }
+      : { mode };
+    this.save();
+  }
+
+  setThemeOverrides(overrides: Record<string, string>) {
+    const current = this.getTheme();
+    this.data.theme = Object.keys(overrides).length === 0
+      ? { mode: current.mode }
+      : { mode: current.mode, overrides: { ...overrides } };
     this.save();
   }
 

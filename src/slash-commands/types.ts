@@ -8,6 +8,7 @@ import type { SettingsManager } from "../permissions/settings.js";
 import type { McpManager } from "../mcp/manager.js";
 import type { LspService } from "../lsp/index.js";
 import type { MemoryScope } from "../memory/index.js";
+import type { ThemeMode } from "../config.js";
 
 export interface SlashCommandContext {
   agent: Agent;
@@ -28,6 +29,12 @@ export interface SlashCommandContext {
   runMemoryCompaction?: () => Promise<string>;
   runMemorySummary?: (scope?: MemoryScope) => Promise<string>;
   runMemoryRefresh?: (scope?: MemoryScope) => Promise<string>;
+  /** Get the current theme mode (auto/light/dark) — undefined when running in non-TUI contexts. */
+  getThemeMode?: () => ThemeMode;
+  /** Get the resolved active theme (always light or dark) — undefined when running in non-TUI contexts. */
+  getResolvedTheme?: () => "light" | "dark";
+  /** Persist a new theme mode AND apply it to the running TUI. */
+  setThemeMode?: (mode: ThemeMode) => void;
 }
 
 /**
