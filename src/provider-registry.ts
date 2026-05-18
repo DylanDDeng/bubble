@@ -11,6 +11,7 @@ import {
   getBuiltinModel,
   getBuiltinProvider,
   listBuiltinModels,
+  registerDynamicModelMetadata,
 } from "./model-catalog.js";
 import { ModelConfig } from "./model-config.js";
 import { AuthStorage } from "./oauth/index.js";
@@ -233,12 +234,27 @@ export class ProviderRegistry {
 
     if (provider.id === "openai" && provider.authType === "oauth" && provider.apiKey) {
       try {
-        const models = await fetchOpenAICodexModels({
+        const descriptors = await fetchOpenAICodexModels({
           baseURL: provider.baseURL,
           accessToken: provider.apiKey,
         });
-        if (models.length > 0) {
-          return models.map((id) => ({ id, name: id, providerId: provider.id }));
+        const visible = descriptors.filter((d) => d.visibility !== "hide");
+        if (visible.length > 0) {
+          for (const d of visible) {
+            const catalogEntry = getBuiltinModel("openai-codex", d.id);
+            registerDynamicModelMetadata({
+              id: d.id,
+              name: d.displayName || catalogEntry?.name || d.id,
+              providerId: "openai-codex",
+              reasoningLevels: d.reasoningLevels ?? catalogEntry?.reasoningLevels ?? ["off"],
+              contextWindow: d.contextWindow ?? catalogEntry?.contextWindow,
+            });
+          }
+          return visible.map((d) => ({
+            id: d.id,
+            name: d.displayName || d.id,
+            providerId: provider.id,
+          }));
         }
       } catch {
         // fall through to static

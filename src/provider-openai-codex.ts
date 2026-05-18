@@ -1,10 +1,22 @@
-import type { Provider, ProviderMessage, StreamChunk, ThinkingLevel, ToolDefinition } from "./types.js";
+import type { Provider, ProviderMessage, ReasoningEffort, StreamChunk, ThinkingLevel, ToolDefinition } from "./types.js";
 import { listBuiltinModels } from "./model-catalog.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
 
+export interface CodexModelDescriptor {
+  id: string;
+  displayName?: string;
+  contextWindow?: number;
+  reasoningLevels?: ReasoningEffort[];
+  visibility?: string;
+  minimalClientVersion?: string;
+}
+
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const OPENAI_BETA_RESPONSES = "responses=experimental";
-const CODEX_CLIENT_VERSION = "0.121.0";
+// OpenAI gates new codex models server-side by client_version (each model carries a
+// `minimal_client_version`). Track a recent real Codex CLI release; override via env
+// when OpenAI lifts the gate again before we cut a new release.
+const CODEX_CLIENT_VERSION = process.env.BUBBLE_CODEX_CLIENT_VERSION?.trim() || "0.150.0";
 const MODEL_DISCOVERY_PATHS = [
   `/codex/models?client_version=${CODEX_CLIENT_VERSION}`,
   "/models",
@@ -239,7 +251,7 @@ export function createOpenAICodexProvider(options: {
 export async function fetchOpenAICodexModels(options: {
   baseURL: string;
   accessToken: string;
-}): Promise<string[]> {
+}): Promise<CodexModelDescriptor[]> {
   const accountId = extractChatGptAccountId(options.accessToken);
   if (!accountId) {
     return [];
@@ -259,9 +271,9 @@ export async function fetchOpenAICodexModels(options: {
     if (!response?.ok) continue;
 
     const payload = await response.json().catch(() => undefined);
-    const ids = extractModelIds(payload);
-    if (ids.length > 0) {
-      return sortCodexModelIds(ids);
+    const descriptors = extractCodexModelDescriptors(payload);
+    if (descriptors.length > 0) {
+      return sortCodexModelDescriptors(descriptors);
     }
   }
 
@@ -443,16 +455,53 @@ function resolveRelativeUrl(baseURL: string, path: string): string {
   return `${normalized}${path}`;
 }
 
-function extractModelIds(payload: unknown): string[] {
-  const ids: string[] = [];
+const REASONING_EFFORTS: readonly ReasoningEffort[] = [
+  "off", "minimal", "low", "medium", "high", "xhigh", "max",
+];
+
+function extractCodexModelDescriptors(payload: unknown): CodexModelDescriptor[] {
+  const out: CodexModelDescriptor[] = [];
   const seen = new Set<string>();
 
-  const maybeAdd = (value: unknown) => {
-    if (typeof value !== "string") return;
-    if (!/^gpt-|^codex-/i.test(value)) return;
-    if (seen.has(value)) return;
-    seen.add(value);
-    ids.push(value);
+  const isCodexId = (value: unknown): value is string =>
+    typeof value === "string" && /^gpt-|^codex-/i.test(value);
+
+  const pickId = (record: Record<string, unknown>): string | undefined => {
+    for (const key of ["slug", "id", "model_slug", "model"]) {
+      const v = record[key];
+      if (isCodexId(v)) return v;
+    }
+    return undefined;
+  };
+
+  const buildDescriptor = (record: Record<string, unknown>, id: string): CodexModelDescriptor => {
+    const desc: CodexModelDescriptor = { id };
+
+    const displayName = record.display_name;
+    if (typeof displayName === "string" && displayName) desc.displayName = displayName;
+
+    const ctx = record.context_window;
+    if (typeof ctx === "number" && ctx > 0) desc.contextWindow = ctx;
+
+    const visibility = record.visibility;
+    if (typeof visibility === "string") desc.visibility = visibility;
+
+    const minVer = record.minimal_client_version;
+    if (typeof minVer === "string") desc.minimalClientVersion = minVer;
+
+    const levels = record.supported_reasoning_levels;
+    if (Array.isArray(levels)) {
+      const efforts = new Set<ReasoningEffort>(["off"]);
+      for (const level of levels) {
+        const effort = (level as Record<string, unknown> | null | undefined)?.effort;
+        if (typeof effort === "string" && (REASONING_EFFORTS as readonly string[]).includes(effort)) {
+          efforts.add(effort as ReasoningEffort);
+        }
+      }
+      desc.reasoningLevels = REASONING_EFFORTS.filter((e) => efforts.has(e));
+    }
+
+    return desc;
   };
 
   const visit = (value: unknown) => {
@@ -460,35 +509,44 @@ function extractModelIds(payload: unknown): string[] {
       for (const item of value) visit(item);
       return;
     }
-    if (!value || typeof value !== "object") {
-      maybeAdd(value);
-      return;
-    }
+    if (!value || typeof value !== "object") return;
 
     const record = value as Record<string, unknown>;
-    maybeAdd(record.id);
-    maybeAdd(record.slug);
-    maybeAdd(record.model);
-    maybeAdd(record.model_slug);
+    const id = pickId(record);
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      out.push(buildDescriptor(record, id));
+    }
 
     for (const child of Object.values(record)) {
-      if (child !== record.id && child !== record.slug && child !== record.model && child !== record.model_slug) {
-        visit(child);
-      }
+      if (child && typeof child === "object") visit(child);
     }
   };
 
   visit(payload);
-  return ids;
+  return out;
 }
 
-function sortCodexModelIds(ids: string[]): string[] {
-  const preferredModels = getOpenAICodexFallbackModels();
-  const preferred = new Map<string, number>(preferredModels.map((id, index) => [id, index]));
-  return [...ids].sort((left, right) => {
-    const leftRank = preferred.get(left) ?? Number.MAX_SAFE_INTEGER;
-    const rightRank = preferred.get(right) ?? Number.MAX_SAFE_INTEGER;
+// Extracts the family version from a codex slug (e.g. "gpt-5.5-codex" → 5005).
+// Used so models from a newer family float to the top even before the static
+// catalog knows about them.
+function parseCodexFamilyRank(id: string): number {
+  const match = id.match(/(\d+)\.(\d+)/);
+  if (!match) return 0;
+  return parseInt(match[1], 10) * 1000 + parseInt(match[2], 10);
+}
+
+export function sortCodexModelDescriptors(descriptors: CodexModelDescriptor[]): CodexModelDescriptor[] {
+  const preferred = new Map<string, number>(
+    getOpenAICodexFallbackModels().map((id, index) => [id, index]),
+  );
+  return [...descriptors].sort((left, right) => {
+    const leftFamily = parseCodexFamilyRank(left.id);
+    const rightFamily = parseCodexFamilyRank(right.id);
+    if (leftFamily !== rightFamily) return rightFamily - leftFamily;
+    const leftRank = preferred.get(left.id) ?? Number.MAX_SAFE_INTEGER;
+    const rightRank = preferred.get(right.id) ?? Number.MAX_SAFE_INTEGER;
     if (leftRank !== rightRank) return leftRank - rightRank;
-    return left.localeCompare(right);
+    return left.id.localeCompare(right.id);
   });
 }

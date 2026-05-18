@@ -1,5 +1,5 @@
 import { getContextBudget } from "./budget.js";
-import { compactMessages } from "./compact.js";
+import { compactCurrentTurnToolGroups, compactMessages } from "./compact.js";
 import { pruneMessages } from "./prune.js";
 import type { AssistantMessage, Message, MetaMessage, ProviderMessage, SystemMessage, ToolMessage } from "../types.js";
 
@@ -73,20 +73,27 @@ export function projectMessages(messages: Message[], options: ProjectionOptions 
       return pruned;
     }
 
-    const compacted = compactMessages(pruned, { keepRecentTurns: 2 });
-    if (!compacted.compacted || !compacted.messages) {
-      return pruned;
+    // Escalating compaction: turn-level passes first, then sub-turn (single-turn
+    // bloat from many tool calls) as a finer-grained fallback. Each step only
+    // advances `working` if compaction actually fired, and re-checks the budget
+    // before deciding to escalate further.
+    let working: Message[] = pruned;
+
+    const passes: Array<() => Message[] | undefined> = [
+      () => compactMessages(working, { keepRecentTurns: 2 }).messages,
+      () => compactMessages(working, { keepRecentTurns: 1 }).messages,
+      () => compactCurrentTurnToolGroups(working, { keepRecentGroups: 2 }).messages,
+      () => compactCurrentTurnToolGroups(working, { keepRecentGroups: 1 }).messages,
+    ];
+
+    for (const pass of passes) {
+      const next = pass();
+      if (next) working = next;
+      const after = getContextBudget(options.providerId, options.modelId, working);
+      if (!after.shouldCompact) break;
     }
 
-    const compactedMessages = compacted.messages as ProviderMessage[];
-    const afterFirstPass = getContextBudget(options.providerId, options.modelId, compactedMessages);
-    if (!afterFirstPass.shouldCompact) {
-      return repairToolCallChains(compactedMessages);
-    }
-
-    const tighter = compactMessages(pruned, { keepRecentTurns: 1 });
-    const finalMessages = (tighter.compacted && tighter.messages ? tighter.messages : compactedMessages) as ProviderMessage[];
-    return repairToolCallChains(finalMessages);
+    return repairToolCallChains(working as ProviderMessage[]);
   }
 
   return repaired;

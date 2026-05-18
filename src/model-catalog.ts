@@ -108,7 +108,22 @@ export function listBuiltinModels(providerId: string): BuiltinModelDefinition[] 
   return BUILTIN_MODELS.filter((model) => model.providerId === providerId);
 }
 
+// Runtime overlay populated from provider-side discovery (e.g. ChatGPT codex /models).
+// Looked up before the static catalog so newly-released models work without a code change.
+const dynamicOverlay = new Map<string, BuiltinModelDefinition>();
+
+function overlayKey(providerId: string, modelId: string): string {
+  return `${providerId}:${modelId}`;
+}
+
+export function registerDynamicModelMetadata(model: BuiltinModelDefinition): void {
+  dynamicOverlay.set(overlayKey(model.providerId, model.id), model);
+}
+
 export function getBuiltinModel(providerId: string, modelId: string): BuiltinModelDefinition | undefined {
+  const overlayHit = dynamicOverlay.get(overlayKey(providerId, modelId))
+    || (providerId === "openai" ? dynamicOverlay.get(overlayKey("openai-codex", modelId)) : undefined);
+  if (overlayHit) return overlayHit;
   return BUILTIN_MODELS.find((model) => model.providerId === providerId && model.id === modelId)
     || (providerId === "openai"
       ? BUILTIN_MODELS.find((model) => model.providerId === "openai-codex" && model.id === modelId)

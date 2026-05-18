@@ -50,11 +50,11 @@ export function buildContextUsageSnapshot(input: {
   const systemContent = systemMessages.map((message) => message.content).join("\n\n");
   const skillsPrompt = formatSkillsPrompt(input.skills);
   const skillsInSystemPrompt = !!skillsPrompt && systemContent.includes(skillsPrompt);
-  const skillsTokens = skillsInSystemPrompt ? estimateTextTokens(skillsPrompt) : 0;
-  const systemPromptTokens = Math.max(0, estimateTextTokens(systemContent) - skillsTokens);
-  const toolsTokens = estimateToolEntriesTokens(input.toolEntries);
-  const deferredToolsTokens = estimateDeferredToolsReminderTokens(deferredToolEntries);
-  const rawOtherTokens = otherMessages.reduce((sum, message) => sum + estimateMessageTokens(message), 0);
+  const skillsTokens = skillsInSystemPrompt ? estimateTextTokens(skillsPrompt, input.providerId) : 0;
+  const systemPromptTokens = Math.max(0, estimateTextTokens(systemContent, input.providerId) - skillsTokens);
+  const toolsTokens = estimateToolEntriesTokens(input.toolEntries, input.providerId);
+  const deferredToolsTokens = estimateDeferredToolsReminderTokens(deferredToolEntries, input.providerId);
+  const rawOtherTokens = otherMessages.reduce((sum, message) => sum + estimateMessageTokens(message, input.providerId), 0);
   const otherTokens = Math.max(0, rawOtherTokens - deferredToolsTokens);
   const usedTokens = systemPromptTokens + toolsTokens + skillsTokens + deferredToolsTokens + otherTokens;
   const contextWindow = getModelContextWindow(input.providerId, input.modelId);
@@ -142,20 +142,20 @@ export function formatContextUsage(snapshot: ContextUsageSnapshot): string {
   return lines.join("\n");
 }
 
-function estimateToolEntriesTokens(entries: ToolRegistryEntry[]): number {
+function estimateToolEntriesTokens(entries: ToolRegistryEntry[], providerId: string): number {
   return entries.reduce((sum, entry) => {
     const payload = JSON.stringify({
       name: entry.name,
       description: entry.description,
       parameters: entry.parameters,
     });
-    return sum + estimateTextTokens(payload) + 8;
+    return sum + estimateTextTokens(payload, providerId) + 8;
   }, 0);
 }
 
-function estimateDeferredToolsReminderTokens(entries: ToolRegistryEntry[]): number {
+function estimateDeferredToolsReminderTokens(entries: ToolRegistryEntry[], providerId: string): number {
   if (entries.length === 0) return 0;
-  return estimateTextTokens(buildDeferredToolsReminder(entries.map((entry) => entry.name)));
+  return estimateTextTokens(buildDeferredToolsReminder(entries.map((entry) => entry.name)), providerId);
 }
 
 function buildSegmentedBar(
