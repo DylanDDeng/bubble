@@ -283,6 +283,25 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   const [verboseTrace, setVerboseTrace] = useState(false);
   const startedWithVisibleHistoryRef = useRef(messages.some((message) => message.syntheticKind !== "ui_summary"));
   const { columns: terminalColumns } = useTerminalSize();
+  // When the terminal width changes mid-session (e.g. the user toggles an IDE
+  // side-panel), every full-width ANSI bg run already written into scrollback
+  // by <Static> stays at the old width. The terminal then wraps those rows on
+  // the new width and leaves residual coloured stripes underneath. Ink can't
+  // reach scrollback to repaint. So on width change, we wipe screen +
+  // scrollback and bump `clearEpoch` so <Static> remounts and replays every
+  // committed message at the new width. Cost: a single flicker per resize and
+  // any pre-session shell scrollback is also cleared. Skip the initial mount.
+  const previousColumnsRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (previousColumnsRef.current === null) {
+      previousColumnsRef.current = terminalColumns;
+      return;
+    }
+    if (previousColumnsRef.current === terminalColumns) return;
+    previousColumnsRef.current = terminalColumns;
+    process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
+    setClearEpoch((n) => n + 1);
+  }, [terminalColumns]);
   const activeAbortRef = useRef<AbortController | null>(null);
   const exitRequestedRef = useRef(false);
   const sessionStartRef = useRef<number>(Date.now());
@@ -1052,8 +1071,8 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
 
   return (
     <ThemeProvider value={palette}>
-    <Box flexDirection="column" height="100%">
-      <Box flexDirection="column" flexGrow={1} padding={1}>
+    <Box flexDirection="column">
+      <Box flexDirection="column" padding={1}>
         <MessageList
           key={clearEpoch}
           messages={messages}
