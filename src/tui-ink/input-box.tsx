@@ -857,7 +857,7 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
                 <Box key={cmd.name} height={1}>
                   <Text>
                     <Text color={isSelected ? theme.accent : theme.muted} bold={isSelected}>{label}</Text>
-                    <Text color={theme.muted}> [{cmd.type}]</Text>
+                    {cmd.type === "skill" && <Text color={theme.muted}> [skill]</Text>}
                     <Text dimColor> {cmd.description}</Text>
                   </Text>
                 </Box>
