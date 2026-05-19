@@ -5,7 +5,10 @@
 
 import { createHighlighter } from "shiki";
 
+type Highlighter = Awaited<ReturnType<typeof createHighlighter>>;
+
 let highlighterPromise: ReturnType<typeof createHighlighter> | null = null;
+let highlighterReady: Highlighter | null = null;
 
 function getHighlighter() {
   if (!highlighterPromise) {
@@ -31,9 +34,18 @@ function getHighlighter() {
         "tsx",
         "yaml",
       ],
+    }).then((h) => {
+      highlighterReady = h;
+      return h;
     });
   }
   return highlighterPromise;
+}
+
+// Fire-and-forget warmup so synchronous callers can use highlightCodeSync once
+// shiki has finished loading. Safe to call multiple times.
+export function warmHighlighter(): void {
+  getHighlighter().catch(() => {});
 }
 
 function hexToAnsiFg(hex?: string): string {
@@ -57,12 +69,32 @@ function tokensToAnsi(tokens: Array<Array<{ content: string; color?: string }>>)
   return lines.join("\n");
 }
 
-export async function highlightCode(code: string, lang: string): Promise<string> {
-  const h = await getHighlighter();
+function runHighlight(h: Highlighter, code: string, lang: string): string {
   const loaded = h.getLoadedLanguages();
   const safeLang = loaded.includes(lang as any) ? lang : "text";
   const { tokens } = h.codeToTokens(code, { lang: safeLang as any, theme: "github-dark" });
   return tokensToAnsi(tokens);
+}
+
+export async function highlightCode(code: string, lang: string): Promise<string> {
+  const h = await getHighlighter();
+  return runHighlight(h, code, lang);
+}
+
+// Synchronous variant that returns null when shiki hasn't finished loading yet.
+// Used by code paths that render into Ink's <Static> (which only paints once)
+// so the first frame can already carry highlighted output.
+export function highlightCodeSync(code: string, lang: string): string | null {
+  if (!highlighterReady) {
+    // Ensure warmup is in flight for future renders.
+    warmHighlighter();
+    return null;
+  }
+  try {
+    return runHighlight(highlighterReady, code, lang);
+  } catch {
+    return null;
+  }
 }
 
 const LANG_MAP: Record<string, string> = {

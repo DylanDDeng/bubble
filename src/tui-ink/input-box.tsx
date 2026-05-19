@@ -14,6 +14,12 @@ import {
   splitPastedPaths,
   type ImageAttachment,
 } from "./image-paste.js";
+import {
+  appendHistoryEntry,
+  loadHistorySync,
+  pushHistoryEntry,
+  stepHistory,
+} from "./input-history.js";
 
 export interface SubmitPayload {
   text: string;
@@ -196,6 +202,9 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [projectFiles, setProjectFiles] = useState<string[] | null>(null);
   const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
+  const [history, setHistory] = useState<string[]>(() => loadHistorySync());
+  const [historyIndex, setHistoryIndex] = useState<number | null>(null);
+  const historyDraftRef = useRef<string>("");
   const loadingFilesRef = useRef(false);
   // Paste and the keystrokes that follow can arrive inside the same stdin chunk
   // and dispatch within one discreteUpdates batch. If the Enter that a user
@@ -414,10 +423,19 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
   const submitInput = (submittedText: string) => {
     if (submittedText.trim().length === 0 && attachments.length === 0) return;
     onSubmit({ text: submittedText, images: attachments });
+    if (submittedText.trim().length > 0) {
+      const nextHistory = pushHistoryEntry(history, submittedText);
+      if (nextHistory !== history) {
+        setHistory(nextHistory);
+        appendHistoryEntry(submittedText);
+      }
+    }
     setText("");
     setCursor(0);
     setSelectedIndex(0);
     setAttachments([]);
+    setHistoryIndex(null);
+    historyDraftRef.current = "";
   };
 
   const applySlashEnterAction = (submittedText: string) => {
@@ -555,12 +573,38 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
     if (key.upArrow) {
       if (cursorVisualRow > 0) {
         setCursor(visualToCursor(visualLines, cursorVisualRow - 1, cursorVisualCol));
+        return;
+      }
+      const result = stepHistory(
+        { history, index: historyIndex, draft: historyDraftRef.current },
+        "up",
+        text,
+      );
+      if (result.changed) {
+        setText(result.text);
+        setCursor(result.text.length);
+        setHistoryIndex(result.index);
+        historyDraftRef.current = result.draft;
+        setSelectedIndex(0);
       }
       return;
     }
     if (key.downArrow) {
       if (cursorVisualRow < visualLines.length - 1) {
         setCursor(visualToCursor(visualLines, cursorVisualRow + 1, cursorVisualCol));
+        return;
+      }
+      const result = stepHistory(
+        { history, index: historyIndex, draft: historyDraftRef.current },
+        "down",
+        text,
+      );
+      if (result.changed) {
+        setText(result.text);
+        setCursor(result.text.length);
+        setHistoryIndex(result.index);
+        historyDraftRef.current = result.draft;
+        setSelectedIndex(0);
       }
       return;
     }

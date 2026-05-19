@@ -8,7 +8,7 @@ import { Box, Text } from "ink";
 import stringWidth from "string-width";
 import { useTerminalSize } from "./use-terminal-size.js";
 import { useTheme } from "./theme.js";
-import { highlightCode } from "./code-highlight.js";
+import { highlightCode, highlightCodeSync } from "./code-highlight.js";
 
 const graphemeSegmenter =
   typeof Intl !== "undefined" && typeof (Intl as any).Segmenter === "function"
@@ -318,23 +318,31 @@ function InlineText({ text }: { text: string }) {
 
 function CodeBlock({ lang, lines }: { lang: string; lines: string[] }) {
   const theme = useTheme();
-  const [highlighted, setHighlighted] = React.useState<string[] | null>(null);
+  // Lazy init: try sync highlight when shiki is already warm so the very first
+  // paint carries highlighted output. This matters because MessageList renders
+  // committed messages inside Ink's <Static>, which only paints each item once
+  // — anything we ship via setState in useEffect lands too late to appear in
+  // scrollback. Fall back to raw lines if shiki hasn't loaded yet.
+  const [highlighted, setHighlighted] = React.useState<string[]>(() => {
+    const code = lines.join("\n");
+    if (!code) return lines;
+    const sync = highlightCodeSync(code, lang || "text");
+    return sync ? sync.split("\n") : lines;
+  });
+  const upgraded = React.useRef(highlighted !== lines);
 
   React.useEffect(() => {
+    if (upgraded.current) return;
     let cancelled = false;
-    async function run() {
-      const code = lines.join("\n");
-      if (!code) return;
-      try {
-        const ansi = await highlightCode(code, lang || "text");
-        if (!cancelled) setHighlighted(ansi.split("\n"));
-      } catch {
-        if (!cancelled) setHighlighted(lines);
-      }
-    }
-    // Show plain text immediately while highlighting loads
-    setHighlighted(lines);
-    run();
+    const code = lines.join("\n");
+    if (!code) return;
+    highlightCode(code, lang || "text")
+      .then((ansi) => {
+        if (cancelled) return;
+        upgraded.current = true;
+        setHighlighted(ansi.split("\n"));
+      })
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -344,7 +352,7 @@ function CodeBlock({ lang, lines }: { lang: string; lines: string[] }) {
     <Box flexDirection="column" marginY={1}>
       {lang && <Text color={theme.muted}>{lang}</Text>}
       <Box flexDirection="column">
-        {highlighted?.map((line, i) => (
+        {highlighted.map((line, i) => (
           <Text key={i}>{line || " "}</Text>
         ))}
       </Box>

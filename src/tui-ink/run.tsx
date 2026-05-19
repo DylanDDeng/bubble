@@ -8,6 +8,7 @@ import type { Provider } from "../types.js";
 import type { ProviderRegistry } from "../provider-registry.js";
 import type { SkillRegistry } from "../skills/registry.js";
 import { App, type ApprovalHandlerRef, type ExitSummary, type PlanHandlerRef } from "./app.js";
+import { warmHighlighter } from "./code-highlight.js";
 import type { BashAllowlist } from "../approval/session-cache.js";
 import type { SettingsManager } from "../permissions/settings.js";
 import type { McpManager } from "../mcp/manager.js";
@@ -40,6 +41,10 @@ export interface RunTuiOptions {
 }
 
 export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions = {}) {
+  // Kick off shiki load before the first code block reaches <Static>. Fire and
+  // forget — CodeBlock's lazy init falls back to raw lines if this isn't ready
+  // yet, so callers don't need to await it.
+  warmHighlighter();
   let exitSummary: ExitSummary | undefined;
   const instance = render(
     <App
