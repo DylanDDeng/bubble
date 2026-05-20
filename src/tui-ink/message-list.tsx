@@ -1,5 +1,5 @@
 import React from "react";
-import { Box, Static, Text } from "ink";
+import { Box, Static, Text, measureElement, useInput, type DOMElement } from "ink";
 import { useTheme, type Theme } from "./theme.js";
 import { highlightCode, inferLang } from "./code-highlight.js";
 import { MarkdownContent } from "./markdown.js";
@@ -7,6 +7,13 @@ import type { DisplayMessage, DisplayMessagePart, DisplayToolCall } from "./disp
 import { buildTraceGroups, formatElapsed, formatTracePath, traceGroupLabel, type TraceGroup } from "./trace-groups.js";
 import { EDIT_COLLAPSED_DIFF_LINES, formatEditSuccessSummary, getEditDiffDetails } from "./edit-diff.js";
 import { formatSubagentRoute, type SubagentRouteLike } from "../agent/subagent-route-format.js";
+import {
+  pageViewportRows,
+  scrollViewportByRows,
+  syncViewportAfterLayout,
+  type ViewportMetrics,
+  type ViewportScrollState,
+} from "./viewport-scroll.js";
 
 /**
  * Hint surfaced when the user can interrupt the currently-running pending tool
@@ -31,6 +38,20 @@ interface MessageListProps {
   /** Animation tick used to refresh in-progress elapsed counters. */
   nowTick?: number;
   /**
+   * "normal": Ink <Static> writes committed messages straight into terminal
+   * scrollback (one paint each, no re-render on keystroke). Composer flows
+   * naturally below; scroll-back uses the host terminal.
+   *
+   * "fullscreen": expects the parent to mount this inside <AlternateScreen>
+   * + a height-constrained Box. We render all messages in a managed viewport
+   * with PageUp/PageDown scrolling. No Static (the alt buffer has no
+   * scrollback to commit to) and MessageItem is memoized to keep keystroke
+   * re-renders cheap.
+   */
+  mode?: "normal" | "fullscreen";
+  /** Whether PageUp/PageDown should consume input (fullscreen mode only). */
+  scrollEnabled?: boolean;
+  /**
    * Optional banner rendered as the first item of the scrollback Static
    * stream. Committed to scrollback once on initial mount so it doesn't
    * float between older messages and the live tail as the conversation
@@ -43,7 +64,14 @@ type StaticItem =
   | { kind: "welcome"; key: string }
   | { kind: "message"; key: string; message: DisplayMessage; showExpandHint: boolean };
 
-export function MessageList({
+export function MessageList(props: MessageListProps) {
+  if (props.mode === "fullscreen") {
+    return <FullscreenMessageList {...props} />;
+  }
+  return <NormalMessageList {...props} />;
+}
+
+function NormalMessageList({
   messages,
   streamingContent,
   streamingReasoning,
@@ -90,7 +118,7 @@ export function MessageList({
             return <React.Fragment key={item.key}>{welcomeBanner}</React.Fragment>;
           }
           return (
-            <MessageItem
+            <MemoMessageItem
               key={item.key}
               message={item.message}
               terminalColumns={terminalColumns}
@@ -113,6 +141,143 @@ export function MessageList({
           nowTick={nowTick}
         />
       )}
+    </Box>
+  );
+}
+
+function FullscreenMessageList({
+  messages,
+  streamingContent,
+  streamingReasoning,
+  streamingTools,
+  streamingParts,
+  terminalColumns,
+  verboseTrace,
+  pendingApproval,
+  nowTick,
+  scrollEnabled = true,
+  welcomeBanner,
+}: MessageListProps) {
+  // Defer the messages array under streaming so the composer keystroke path
+  // doesn't get stuck reconciling the entire message tree on every char.
+  // Outside streaming the messages array is stable, so this is a no-op then.
+  const deferredMessages = React.useDeferredValue(messages);
+  const hasStreaming = !!(
+    streamingContent ||
+    streamingReasoning ||
+    streamingTools.length > 0 ||
+    streamingParts.length > 0
+  );
+
+  const viewportRef = React.useRef<DOMElement | null>(null);
+  const contentRef = React.useRef<DOMElement | null>(null);
+  const [metrics, setMetrics] = React.useState<ViewportMetrics>({
+    contentRows: 0,
+    viewportRows: 0,
+  });
+  const [scroll, setScroll] = React.useState<ViewportScrollState>({
+    scrollTop: 0,
+    followTail: true,
+  });
+
+  // measureElement is the only reliable way to know "how tall did Ink lay
+  // this out as," but it forces a render to have happened first. Limit when
+  // we re-measure by depending only on the inputs that can change layout
+  // height: messages, streaming buffers, terminal size, verbose toggle.
+  // Without these deps the effect ran every render (including keystrokes),
+  // and the resulting setMetrics→setScroll loop is what produced the cursor
+  // jitter reported on the prior WIP.
+  React.useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    const content = contentRef.current;
+    if (!viewport || !content) return;
+
+    const next: ViewportMetrics = {
+      viewportRows: measureElement(viewport).height,
+      contentRows: measureElement(content).height,
+    };
+    setMetrics((prev) => (
+      prev.viewportRows === next.viewportRows && prev.contentRows === next.contentRows
+        ? prev
+        : next
+    ));
+    setScroll((prev) => {
+      const synced = syncViewportAfterLayout(prev, next);
+      return prev.scrollTop === synced.scrollTop && prev.followTail === synced.followTail
+        ? prev
+        : synced;
+    });
+  }, [
+    deferredMessages,
+    streamingContent,
+    streamingReasoning,
+    streamingTools,
+    streamingParts,
+    terminalColumns,
+    verboseTrace,
+    welcomeBanner,
+  ]);
+
+  useInput((_input, key) => {
+    if (!key.pageUp && !key.pageDown && !(key.ctrl && key.end)) return;
+    setScroll((prev) => {
+      if (key.ctrl && key.end) {
+        return {
+          scrollTop: Math.max(0, metrics.contentRows - metrics.viewportRows),
+          followTail: true,
+        };
+      }
+      const pageRows = pageViewportRows(metrics);
+      return scrollViewportByRows(prev, metrics, key.pageUp ? -pageRows : pageRows);
+    });
+  }, { isActive: scrollEnabled });
+
+  const lastMessageIndex = deferredMessages.length - 1;
+  const maxScroll = Math.max(0, metrics.contentRows - metrics.viewportRows);
+  const scrollTop = Math.max(0, Math.min(scroll.scrollTop, maxScroll));
+
+  return (
+    <Box
+      ref={(el: DOMElement | null) => {
+        viewportRef.current = el;
+      }}
+      flexDirection="column"
+      flexGrow={1}
+      flexShrink={1}
+      minHeight={0}
+      overflow="hidden"
+    >
+      <Box
+        ref={(el: DOMElement | null) => {
+          contentRef.current = el;
+        }}
+        flexDirection="column"
+        marginTop={scrollTop > 0 ? -scrollTop : 0}
+      >
+        {welcomeBanner && <React.Fragment key="welcome">{welcomeBanner}</React.Fragment>}
+        {deferredMessages.map((msg, i) => (
+          <MemoMessageItem
+            key={msg.key ?? `message-${i}`}
+            message={msg}
+            terminalColumns={terminalColumns}
+            verboseTrace={verboseTrace}
+            showExpandHint={!hasStreaming && i === lastMessageIndex}
+            nowTick={!hasStreaming && i === lastMessageIndex ? nowTick : undefined}
+          />
+        ))}
+        {hasStreaming && (
+          <StreamingMessage
+            content={streamingContent}
+            reasoning={streamingReasoning}
+            tools={streamingTools}
+            parts={streamingParts}
+            terminalColumns={terminalColumns}
+            verboseTrace={verboseTrace}
+            pendingApproval={pendingApproval}
+            nowTick={nowTick}
+          />
+        )}
+      </Box>
     </Box>
   );
 }
@@ -183,6 +348,13 @@ function MessageItem({
     </Box>
   );
 }
+
+// Memoized form of MessageItem. Used by both modes so that, when MessageList
+// is part of a re-rendering parent (fullscreen viewport on every keystroke,
+// or rare normal-mode resize replays), each row only re-renders if its own
+// inputs changed. nowTick is only passed for the showExpandHint row, so the
+// other rows hit the memo cache.
+const MemoMessageItem = React.memo(MessageItem);
 
 function StreamingMessage({
   content,
