@@ -123,24 +123,6 @@ describe("Ink message spacing", () => {
     expect(countOccurrences(stdout.output, "Resize replay sentinel")).toBe(1);
   });
 
-  it("renders in fullscreen mode without throwing and includes message content", () => {
-    const out = renderToString(
-      React.createElement(MessageList, {
-        messages: [user],
-        streamingContent: "",
-        streamingReasoning: "",
-        streamingTools: [],
-        streamingParts: [],
-        terminalColumns,
-        verboseTrace: false,
-        mode: "fullscreen",
-      }),
-      { columns: terminalColumns },
-    );
-
-    expect(out).toContain("What is this project doing?");
-  });
-
   it("shows completed edit diffs inline with a 20-line default preview", () => {
     const diff = [
       "--- a.ts\toriginal",

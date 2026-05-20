@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
-import { AlternateScreen } from "./alternate-screen.js";
 import { AgentAbortError, type Agent } from "../agent.js";
 import type { CliArgs } from "../cli.js";
 import type { SessionManager } from "../session.js";
@@ -282,15 +281,16 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | null>(null);
   const [keyProviderId, setKeyProviderId] = useState<string | null>(null);
   const [verboseTrace, setVerboseTrace] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(true);
   const startedWithVisibleHistoryRef = useRef(messages.some((message) => message.syntheticKind !== "ui_summary"));
-  const { columns: terminalColumns, rows: terminalRows } = useTerminalSize();
-  // Normal mode: width change leaves residual ANSI bg stripes from rows already
-  // committed to scrollback by <Static>, since Ink can't reach scrollback to
-  // repaint. Wipe screen + scrollback and remount Static (via clearEpoch) so it
-  // replays each message at the new width. Fullscreen mode owns its alt buffer
-  // and re-lays out on resize natively, so the wipe is unnecessary and would
-  // discard the live frame.
+  const { columns: terminalColumns } = useTerminalSize();
+  // When the terminal width changes mid-session (e.g. the user toggles an IDE
+  // side-panel), every full-width ANSI bg run already written into scrollback
+  // by <Static> stays at the old width. The terminal then wraps those rows on
+  // the new width and leaves residual coloured stripes underneath. Ink can't
+  // reach scrollback to repaint. So on width change, we wipe screen +
+  // scrollback and bump `clearEpoch` so <Static> remounts and replays every
+  // committed message at the new width. Cost: a single flicker per resize and
+  // any pre-session shell scrollback is also cleared. Skip the initial mount.
   const previousColumnsRef = useRef<number | null>(null);
   useEffect(() => {
     if (previousColumnsRef.current === null) {
@@ -299,10 +299,9 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     }
     if (previousColumnsRef.current === terminalColumns) return;
     previousColumnsRef.current = terminalColumns;
-    if (isFullscreen) return;
     process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
     setClearEpoch((n) => n + 1);
-  }, [terminalColumns, isFullscreen]);
+  }, [terminalColumns]);
   const activeAbortRef = useRef<AbortController | null>(null);
   const exitRequestedRef = useRef(false);
   const sessionStartRef = useRef<number>(Date.now());
@@ -471,15 +470,6 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       return;
     }
 
-    // Ctrl+F: toggle fullscreen. Fullscreen mounts an xterm alt-screen
-    // buffer so messages live in a managed viewport (PageUp/PageDown to
-    // scroll, composer pinned at the bottom). Toggling back drops the alt
-    // buffer and restores natural-flow + native terminal scrollback.
-    if (key.ctrl && input === "f" && !pickerMode) {
-      setIsFullscreen((v) => !v);
-      return;
-    }
-
     // Ctrl+R: cycle thinking level (formerly Shift+Tab)
     if (key.ctrl && input === "r" && !pickerMode) {
       const modelParts = agent.model.includes(":")
@@ -529,14 +519,13 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
 
   const clearMessages = useCallback(() => {
     setMessages([]);
-    if (isFullscreen) return;
     // Ink's <Static> writes items into terminal scrollback and never removes
     // them — emptying the React state alone leaves the old output visible.
     // Wipe screen + scrollback (xterm \x1b[3J) and bump the epoch below so
     // Static remounts with a fresh internal cursor.
     process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
     setClearEpoch((n) => n + 1);
-  }, [isFullscreen]);
+  }, []);
 
   const openPicker = useCallback((mode: "model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill", providerId?: string) => {
     if (mode === "key") {
@@ -1080,26 +1069,23 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     />
   ) : null;
 
-  const messageListNode = (
-    <MessageList
-      key={clearEpoch}
-      mode={isFullscreen ? "fullscreen" : "normal"}
-      scrollEnabled={isFullscreen && !pickerMode && !pendingPlan && !pendingApproval && !pendingQuestion}
-      messages={messages}
-      streamingContent={streamingContent}
-      streamingReasoning={streamingReasoning}
-      streamingTools={streamingTools}
-      streamingParts={streamingParts}
-      terminalColumns={terminalColumns}
-      verboseTrace={verboseTrace}
-      pendingApproval={approvalHint}
-      nowTick={nowTick}
-      welcomeBanner={welcomeBannerNode}
-    />
-  );
-
-  const pickerNodes = (
-    <>
+  return (
+    <ThemeProvider value={palette}>
+    <Box flexDirection="column">
+      <Box flexDirection="column" padding={1}>
+        <MessageList
+          key={clearEpoch}
+          messages={messages}
+          streamingContent={streamingContent}
+          streamingReasoning={streamingReasoning}
+          streamingTools={streamingTools}
+          streamingParts={streamingParts}
+          terminalColumns={terminalColumns}
+          verboseTrace={verboseTrace}
+          pendingApproval={approvalHint}
+          nowTick={nowTick}
+          welcomeBanner={welcomeBannerNode}
+        />
         {pickerMode === "model" && (
           <ModelPicker
             registry={safeRegistry}
@@ -1205,11 +1191,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
             onCancel={() => setPickerMode(null)}
           />
         )}
-    </>
-  );
-
-  const bottomNodes = (
-    <>
+      </Box>
       {todos.length > 0 && !pickerMode && !pendingPlan && !pendingQuestion && (
         <Box paddingX={1} flexShrink={0}>
           <TodosPanel todos={todos} terminalColumns={terminalColumns} />
@@ -1293,53 +1275,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           })}
         />
       )}
-    </>
-  );
-
-  // Normal mode: natural flow. MessageList uses <Static> and writes committed
-  // messages straight into terminal scrollback. Composer flows right under the
-  // last message — no height constraint, no in-app scroll. Matches Claude
-  // Code's non-fullscreen layout.
-  if (!isFullscreen) {
-    return (
-      <ThemeProvider value={palette}>
-        <Box flexDirection="column">
-          <Box flexDirection="column" padding={1}>
-            {messageListNode}
-            {pickerNodes}
-          </Box>
-          {bottomNodes}
-        </Box>
-      </ThemeProvider>
-    );
-  }
-
-  // Fullscreen mode: alt screen + height-constrained root. Top region grows
-  // to fill the leftover space (and the message viewport inside it owns the
-  // PageUp/PageDown scroll); bottom region is pinned and never shrinks.
-  // Without the height constraint on the root, flexGrow has no ceiling and
-  // the layout collapses to content height (= same gap bug as the prior WIP).
-  return (
-    <ThemeProvider value={palette}>
-      <AlternateScreen>
-        <Box height={terminalRows} flexDirection="column" overflow="hidden">
-          <Box
-            flexDirection="column"
-            flexGrow={1}
-            flexShrink={1}
-            minHeight={0}
-            overflow="hidden"
-            paddingX={1}
-            paddingTop={1}
-          >
-            {messageListNode}
-            {pickerNodes}
-          </Box>
-          <Box flexDirection="column" flexShrink={0}>
-            {bottomNodes}
-          </Box>
-        </Box>
-      </AlternateScreen>
+    </Box>
     </ThemeProvider>
   );
 }
