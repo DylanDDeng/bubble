@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   insertNewlineAtCursor,
   isInkModifiedEnterInput,
+  isCtrlCInput,
   needsCursorRowCompensation,
   resolveInkEnterIntent,
   resolveSlashEnterAction,
@@ -85,5 +86,15 @@ describe("Ink input Enter handling", () => {
     expect(isInkModifiedEnterInput("[27;5;13~")).toBe(true);
     expect(isInkModifiedEnterInput("[13u")).toBe(false);
     expect(isInkModifiedEnterInput("x")).toBe(false);
+  });
+});
+
+describe("Ink Ctrl+C handling", () => {
+  it("recognizes Ctrl+C from Ink key metadata and raw ETX input", () => {
+    expect(isCtrlCInput("c", { ctrl: true })).toBe(true);
+    expect(isCtrlCInput("C", { ctrl: true })).toBe(true);
+    expect(isCtrlCInput("\x03", {})).toBe(true);
+    expect(isCtrlCInput("c", {})).toBe(false);
+    expect(isCtrlCInput("x", { ctrl: true })).toBe(false);
   });
 });

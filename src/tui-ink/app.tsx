@@ -6,7 +6,7 @@ import type { SessionManager } from "../session.js";
 import type { AgentEvent, ContentPart, PermissionMode, Message, PlanDecision, Provider, Todo, ToolResultMetadata } from "../types.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import { UserConfig, maskKey } from "../config.js";
-import { InputBox, type SubmitPayload } from "./input-box.js";
+import { InputBox, isCtrlCInput, type SubmitPayload } from "./input-box.js";
 import { MessageList } from "./message-list.js";
 import {
   appendTextPart,
@@ -547,6 +547,11 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   );
 
   useInput((input, key) => {
+    if (isCtrlCInput(input, key)) {
+      requestExit();
+      return;
+    }
+
     if (pendingPlan || pendingApproval || pendingQuestion) return;
     if (hasTerminalMouseSequence(input)) return;
 

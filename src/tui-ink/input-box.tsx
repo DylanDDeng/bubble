@@ -61,6 +61,10 @@ export function needsCursorRowCompensation(
   return isFullscreen || wasOverflowing || (isOverflowing && hadPreviousFrame) || isLeavingFullscreen;
 }
 
+export function isCtrlCInput(input: string, key: { ctrl?: boolean }): boolean {
+  return input === "\x03" || (key.ctrl === true && input.toLowerCase() === "c");
+}
+
 type VisualLine = {
   /** Segment of the source line that fits on this visual row. */
   text: string;
@@ -461,6 +465,7 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
     }
     input = strippedInput;
     if (disabled) return;
+    if (isCtrlCInput(input, key)) return;
     if (process.env.BUBBLE_KEY_DEBUG) {
       try {
         appendFileSync(

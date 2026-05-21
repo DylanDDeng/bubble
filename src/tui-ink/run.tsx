@@ -81,6 +81,11 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
       }}
     />,
     {
+      // Bubble owns Ctrl+C so it can route both raw ETX and kitty keyboard
+      // Ctrl+C through App.requestExit(). Ink's default only exits reliably
+      // for raw "\x03"; with kitty keyboard it can swallow the parsed
+      // ctrl+c event before our useInput handlers see it.
+      exitOnCtrlC: false,
       kittyKeyboard: {
         mode: "enabled",
         flags: ["disambiguateEscapeCodes"],
