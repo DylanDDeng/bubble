@@ -100,10 +100,8 @@ const WIDE_LOGO_MIN_WIDTH = 52;
 export function shouldShowWelcomeBanner({
   startedWithVisibleHistory,
 }: WelcomeVisibilityInput): boolean {
-  // Banner is committed to Static scrollback once at session start. Flipping
-  // this flag back to false (e.g. when a picker opens) shrinks the Static
-  // items list — when the items grow back, ink replays the banner a second
-  // time into scrollback. Keep visibility decided purely by initial history.
+  // Keep banner visibility tied to the initial history, not transient overlays,
+  // so opening and closing a picker does not move it in the transcript.
   if (startedWithVisibleHistory) return false;
   return true;
 }

@@ -81,9 +81,8 @@ export async function highlightCode(code: string, lang: string): Promise<string>
   return runHighlight(h, code, lang);
 }
 
-// Synchronous variant that returns null when shiki hasn't finished loading yet.
-// Used by code paths that render into Ink's <Static> (which only paints once)
-// so the first frame can already carry highlighted output.
+// Synchronous variant that returns null when shiki hasn't finished loading yet,
+// so the first transcript frame can already carry highlighted output when warm.
 export function highlightCodeSync(code: string, lang: string): string | null {
   if (!highlighterReady) {
     // Ensure warmup is in flight for future renders.

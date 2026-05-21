@@ -30,16 +30,11 @@ interface MessageListProps {
   pendingApproval?: PendingApprovalHint | null;
   /** Animation tick used to refresh in-progress elapsed counters. */
   nowTick?: number;
-  /**
-   * Optional banner rendered as the first item of the scrollback Static
-   * stream. Committed to scrollback once on initial mount so it doesn't
-   * float between older messages and the live tail as the conversation
-   * progresses.
-   */
+  /** Optional banner rendered as the first item in the app-controlled transcript. */
   welcomeBanner?: React.ReactNode;
 }
 
-type StaticItem =
+type MessageListItem =
   | { kind: "welcome"; key: string }
   | { kind: "message"; key: string; message: DisplayMessage; showExpandHint: boolean };
 
@@ -61,13 +56,7 @@ export function MessageList({
     streamingTools.length > 0 ||
     streamingParts.length > 0
   );
-  // Committed messages enter ink's <Static> region immediately and never move
-  // between a live <Box> and Static. Moving the same message across those
-  // regions writes it into terminal scrollback twice. Mutable assistant output
-  // stays in StreamingMessage until the agent reports a final turn_end. Keep
-  // the Static instance identity stable across terminal resizes; remounting it
-  // would replay all previously-written scrollback items.
-  const staticItems: StaticItem[] = [];
+  const staticItems: MessageListItem[] = [];
   if (welcomeBanner) {
     staticItems.push({ kind: "welcome", key: "welcome" });
   }
@@ -83,7 +72,7 @@ export function MessageList({
   }
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" flexShrink={0}>
       <Static items={staticItems}>
         {(item) => {
           if (item.kind === "welcome") {
@@ -482,24 +471,21 @@ function TraceGroupBlock({
   const allErrored = group.hasError && group.errorCount >= group.raw.length && !group.pending;
   const titleColor = allErrored ? theme.error : theme.traceAction;
   const detailColor = allErrored ? theme.error : theme.traceDetail;
-  const commandWidth = Math.max(14, terminalColumns - group.title.length - 16);
+  const commandWidth = Math.max(14, terminalColumns - group.title.length - 20);
   const detailWidth = Math.max(20, terminalColumns - 8);
   const detailLines = group.previewLines.length > 0 ? group.previewLines : group.items;
 
   return (
     <Box flexDirection="column" marginLeft={2} marginTop={compactTop ? 0 : 1}>
-      <Box>
+      <Text>
         <Text bold color={titleColor}>{group.title}</Text>
         {group.command ? (
-          <>
-            <Text> </Text>
-            <Text color={theme.traceCommand}>{truncateVisual(group.command, commandWidth)}</Text>
-          </>
+          <Text color={theme.traceCommand}> {truncateVisual(group.command, commandWidth)}</Text>
         ) : group.count !== undefined && group.noun ? (
           <Text color={theme.traceCount}> {group.count} {group.noun}</Text>
         ) : null}
         {status && <Text color={status.color}> {status.text}</Text>}
-      </Box>
+      </Text>
       {detailLines.length > 0 && (
         <Box flexDirection="column" marginLeft={2}>
           {detailLines.map((line, index) => (
@@ -549,16 +535,11 @@ function EditTraceBlock({
   const pathWidth = Math.max(14, terminalColumns - 12);
   return (
     <Box flexDirection="column" marginLeft={2} marginTop={compactTop ? 0 : 1}>
-      <Box>
+      <Text>
         <Text bold color={theme.traceAction}>Edit</Text>
-        {path && (
-          <>
-            <Text> </Text>
-            <Text color={theme.traceCommand}>{truncateVisual(path, pathWidth)}</Text>
-          </>
-        )}
+        {path && <Text color={theme.traceCommand}> {truncateVisual(path, pathWidth)}</Text>}
         {status && <Text color={status.color}> {status.text}</Text>}
-      </Box>
+      </Text>
       <Box marginLeft={2}>
         <Text color={theme.traceDetail}>⎿  </Text>
         <Text color={theme.success}>{formatEditSuccessSummary(details)}</Text>
@@ -644,9 +625,11 @@ function ReasoningTraceBlock({ reasoning }: { reasoning: string }) {
 
 function UserMessageBlock({ content, terminalColumns }: { content: string; terminalColumns: number }) {
   const theme = useTheme();
-  // Rail (▌ + space) takes 2 cols; reserve 2 cols inside the fill for left/right gutters.
+  // Rail and its right gutter must share the bubble background; otherwise the
+  // terminal background shows up as a dark seam between rail and message.
+  const railWidth = 2;
   const horizontalRoom = Math.max(20, terminalColumns - 2);
-  const bubbleTextWidth = Math.max(1, horizontalRoom - 2);
+  const bubbleTextWidth = Math.max(1, horizontalRoom - railWidth - 2);
   const wrappedLines = content
     .split("\n")
     .flatMap((line) => wrapByVisualWidth(line, bubbleTextWidth));
@@ -655,7 +638,9 @@ function UserMessageBlock({ content, terminalColumns }: { content: string; termi
     <Box flexDirection="column">
       {wrappedLines.map((line, index) => (
         <Box key={index}>
-          <Text color={theme.userRail}>▌ </Text>
+          <Text backgroundColor={theme.userMessageBg} color={theme.userRail}>
+            {index === 0 ? "▌ " : "  "}
+          </Text>
           <Text backgroundColor={theme.userMessageBg} color={theme.userMessageText}>
             {` ${padVisual(line || " ", bubbleTextWidth)} `}
           </Text>

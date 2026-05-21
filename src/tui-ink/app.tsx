@@ -45,6 +45,7 @@ import type { LspService } from "../lsp/index.js";
 import type { QuestionAnswer, QuestionController, QuestionRequest } from "../question/index.js";
 import type { MemoryScope } from "../memory/index.js";
 import { QuestionDialog } from "./question-dialog.js";
+import { hasTerminalMouseSequence } from "./terminal-mouse.js";
 import os from "node:os";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -241,6 +242,83 @@ function withMessageKey(message: DisplayMessage): DisplayMessage {
   return { ...message, key: nextDisplayMessageKey(prefix) };
 }
 
+const STREAMING_STATIC_FLUSH_MIN_CHARS = 5000;
+const STREAMING_STATIC_FLUSH_TARGET_CHARS = 3600;
+const STREAMING_STATIC_FLUSH_MIN_TAIL = 700;
+
+function findStreamingStaticFlushIndex(content: string): number {
+  if (content.length < STREAMING_STATIC_FLUSH_MIN_CHARS) return -1;
+  const upper = Math.min(
+    STREAMING_STATIC_FLUSH_TARGET_CHARS,
+    content.length - STREAMING_STATIC_FLUSH_MIN_TAIL,
+  );
+  if (upper <= 0) return -1;
+  const search = content.slice(0, upper);
+  const paragraphBreak = search.lastIndexOf("\n\n");
+  if (paragraphBreak >= STREAMING_STATIC_FLUSH_TARGET_CHARS / 2) {
+    return paragraphBreak + 2;
+  }
+  const lineBreak = search.lastIndexOf("\n");
+  if (lineBreak >= STREAMING_STATIC_FLUSH_TARGET_CHARS / 2) {
+    return lineBreak + 1;
+  }
+  return -1;
+}
+
+function cloneDisplayPart(part: DisplayMessagePart): DisplayMessagePart {
+  if (part.type === "text") {
+    return { type: "text", content: part.content };
+  }
+  return {
+    type: "tools",
+    toolCalls: part.toolCalls.map((toolCall) => ({
+      ...toolCall,
+      args: { ...toolCall.args },
+    })),
+  };
+}
+
+function splitDisplayPartsAtTextOffset(
+  parts: DisplayMessagePart[],
+  offset: number,
+): { flushedParts: DisplayMessagePart[]; remainingParts: DisplayMessagePart[] } {
+  const flushedParts: DisplayMessagePart[] = [];
+  const remainingParts: DisplayMessagePart[] = [];
+  let remainingOffset = Math.max(0, offset);
+  let reachedTail = false;
+
+  for (const part of parts) {
+    if (part.type === "text") {
+      if (!reachedTail && remainingOffset >= part.content.length) {
+        if (part.content) flushedParts.push(cloneDisplayPart(part));
+        remainingOffset -= part.content.length;
+        continue;
+      }
+      if (!reachedTail && remainingOffset > 0) {
+        const head = part.content.slice(0, remainingOffset);
+        const tail = part.content.slice(remainingOffset);
+        if (head) flushedParts.push({ type: "text", content: head });
+        if (tail) remainingParts.push({ type: "text", content: tail });
+        remainingOffset = 0;
+        reachedTail = true;
+        continue;
+      }
+      remainingParts.push(cloneDisplayPart(part));
+      reachedTail = true;
+      continue;
+    }
+
+    if (!reachedTail && remainingOffset > 0) {
+      flushedParts.push(cloneDisplayPart(part));
+    } else {
+      remainingParts.push(cloneDisplayPart(part));
+      reachedTail = true;
+    }
+  }
+
+  return { flushedParts, remainingParts };
+}
+
 export function App({ agent, args, sessionManager, createProvider, registry, skillRegistry, planHandlerRef, approvalHandlerRef, questionController, bashAllowlist, settingsManager, lspService, mcpManager, themeMode: initialThemeMode, themeOverrides, detectedTheme, onThemeModeChange, flushMemory, runMemoryCompaction, runMemorySummary, runMemoryRefresh, bypassEnabled, onExit }: AppProps) {
   const [themeMode, setThemeMode] = useState<ThemeMode>(initialThemeMode ?? "auto");
   // `detectedTheme` is captured once at startup in main.ts. We keep it in state
@@ -283,28 +361,33 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   const [verboseTrace, setVerboseTrace] = useState(false);
   const startedWithVisibleHistoryRef = useRef(messages.some((message) => message.syntheticKind !== "ui_summary"));
   const { columns: terminalColumns } = useTerminalSize();
-  // When the terminal width changes mid-session (e.g. the user toggles an IDE
-  // side-panel), every full-width ANSI bg run already written into scrollback
-  // by <Static> stays at the old width. The terminal then wraps those rows on
-  // the new width and leaves residual coloured stripes underneath. Ink can't
-  // reach scrollback to repaint. So on width change, we wipe screen +
-  // scrollback and bump `clearEpoch` so <Static> remounts and replays every
-  // committed message at the new width. Cost: a single flicker per resize and
-  // any pre-session shell scrollback is also cleared. Skip the initial mount.
-  const previousColumnsRef = useRef<number | null>(null);
-  useEffect(() => {
-    if (previousColumnsRef.current === null) {
-      previousColumnsRef.current = terminalColumns;
-      return;
-    }
-    if (previousColumnsRef.current === terminalColumns) return;
-    previousColumnsRef.current = terminalColumns;
-    process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
-    setClearEpoch((n) => n + 1);
-  }, [terminalColumns]);
+  const showWelcome = shouldShowWelcomeBanner({
+    messages,
+    startedWithVisibleHistory: startedWithVisibleHistoryRef.current,
+  });
   const activeAbortRef = useRef<AbortController | null>(null);
   const exitRequestedRef = useRef(false);
   const sessionStartRef = useRef<number>(Date.now());
+  const previousTerminalColumnsRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (previousTerminalColumnsRef.current === null) {
+      previousTerminalColumnsRef.current = terminalColumns;
+      return;
+    }
+    if (previousTerminalColumnsRef.current === terminalColumns) return;
+    previousTerminalColumnsRef.current = terminalColumns;
+
+    // This follows Gemini CLI's normal terminal-buffer strategy: after a
+    // resize, the previous live Ink frame may have wrapped at the old width,
+    // so cursor-up based repaint can leave stale progress frames behind.
+    // Debounce resize storms, then clear and replay Static at the settled width.
+    const timer = setTimeout(() => {
+      if (exitRequestedRef.current) return;
+      process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
+      setClearEpoch((epoch) => epoch + 1);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [terminalColumns]);
   // Set true the moment /quit is invoked so we can hide dynamic UI (composer,
   // waiting indicator, footer) before Ink snapshots its final frame into the
   // shell scrollback. Without this, the last visible "> " input row stays
@@ -465,6 +548,8 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
 
   useInput((input, key) => {
     if (pendingPlan || pendingApproval || pendingQuestion) return;
+    if (hasTerminalMouseSequence(input)) return;
+
     if (key.ctrl && input === "o" && !pickerMode) {
       setVerboseTrace((v) => !v);
       return;
@@ -518,13 +603,11 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   }, [updateDisplayMessages]);
 
   const clearMessages = useCallback(() => {
-    setMessages([]);
-    // Ink's <Static> writes items into terminal scrollback and never removes
-    // them — emptying the React state alone leaves the old output visible.
-    // Wipe screen + scrollback (xterm \x1b[3J) and bump the epoch below so
-    // Static remounts with a fresh internal cursor.
+    // Static history is already written to terminal scrollback, so clearing
+    // React state alone would leave old rows visible.
     process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
-    setClearEpoch((n) => n + 1);
+    setMessages([]);
+    setClearEpoch((epoch) => epoch + 1);
   }, []);
 
   const openPicker = useCallback((mode: "model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill", providerId?: string) => {
@@ -793,6 +876,45 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           toolCalls.length = 0;
           assistantParts.length = 0;
         };
+        const flushAssistantStaticChunk = (): boolean => {
+          if (toolCalls.some((toolCall) => toolCall.result === undefined)) {
+            return false;
+          }
+          const splitIndex = findStreamingStaticFlushIndex(assistantContent);
+          if (splitIndex <= 0) return false;
+
+          const { flushedParts, remainingParts } = splitDisplayPartsAtTextOffset(assistantParts, splitIndex);
+          const flushedContent = contentFromParts(flushedParts);
+          const flushedToolCalls = toolCallsFromParts(flushedParts);
+          if (!flushedContent && flushedToolCalls.length === 0) return false;
+
+          const msg: DisplayMessage = {
+            key: nextDisplayMessageKey("asst"),
+            role: "assistant",
+            content: flushedContent,
+          };
+          if (assistantReasoning) {
+            msg.reasoning = assistantReasoning;
+            assistantReasoning = "";
+            setStreamingReasoning("");
+          }
+          if (flushedToolCalls.length > 0) {
+            msg.toolCalls = flushedToolCalls;
+          }
+          if (flushedParts.length > 0) {
+            msg.parts = flushedParts;
+          }
+          updateDisplayMessages((prev) => [...prev, msg]);
+
+          assistantParts.splice(0, assistantParts.length, ...remainingParts);
+          assistantContent = contentFromParts(assistantParts);
+          const remainingToolCalls = toolCallsFromParts(assistantParts);
+          toolCalls.splice(0, toolCalls.length, ...remainingToolCalls);
+          setStreamingContent(assistantContent);
+          setStreamingTools([...toolCalls]);
+          syncStreamingParts();
+          return true;
+        };
 
         try {
           for await (const event of agent.run(actualInput, args.cwd, { abortSignal: abortController.signal })) {
@@ -800,8 +922,10 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
               case "text_delta":
                 assistantContent += event.content;
                 appendTextPart(assistantParts, event.content);
-                setStreamingContent(assistantContent);
-                syncStreamingParts();
+                if (!flushAssistantStaticChunk()) {
+                  setStreamingContent(assistantContent);
+                  syncStreamingParts();
+                }
                 break;
               case "reasoning_delta":
                 assistantReasoning += event.content;
@@ -1045,10 +1169,6 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       })()
     : null;
 
-  const showWelcome = shouldShowWelcomeBanner({
-    messages,
-    startedWithVisibleHistory: startedWithVisibleHistoryRef.current,
-  });
   const mcpStates = mcpManager?.getStates() ?? [];
   const mcpConnectedCount = mcpStates.filter((state) => state.status.kind === "connected").length;
   const hasAgentsFile = useMemo(
@@ -1071,21 +1191,21 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
 
   return (
     <ThemeProvider value={palette}>
-    <Box flexDirection="column">
-      <Box flexDirection="column" padding={1}>
-        <MessageList
-          key={clearEpoch}
-          messages={messages}
-          streamingContent={streamingContent}
-          streamingReasoning={streamingReasoning}
-          streamingTools={streamingTools}
-          streamingParts={streamingParts}
-          terminalColumns={terminalColumns}
-          verboseTrace={verboseTrace}
-          pendingApproval={approvalHint}
-          nowTick={nowTick}
-          welcomeBanner={welcomeBannerNode}
-        />
+      <Box flexDirection="column" flexShrink={0}>
+        <Box flexDirection="column" paddingX={1} paddingTop={1} flexShrink={0}>
+          <MessageList
+            key={clearEpoch}
+            messages={messages}
+            streamingContent={streamingContent}
+            streamingReasoning={streamingReasoning}
+            streamingTools={streamingTools}
+            streamingParts={streamingParts}
+            terminalColumns={terminalColumns}
+            verboseTrace={verboseTrace}
+            pendingApproval={approvalHint}
+            nowTick={nowTick}
+            welcomeBanner={welcomeBannerNode}
+          />
         {pickerMode === "model" && (
           <ModelPicker
             registry={safeRegistry}
@@ -1262,18 +1382,20 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         </Box>
       )}
       {!isExiting && (
-        <FooterBar
-          data={buildFooterData({
-            cwd: args.cwd,
-            providerId: agent.providerId || safeRegistry.getDefault()?.id || "unknown",
-            model: displayModel(agent.model) || "no model",
-            thinkingLevel,
-            showThinking: getAvailableThinkingLevels(agent.providerId, agent.apiModel).length > 2,
-            mode: permissionMode,
-            usageTotals,
-            verboseTrace,
-          })}
-        />
+        <Box flexShrink={0}>
+          <FooterBar
+            data={buildFooterData({
+              cwd: args.cwd,
+              providerId: agent.providerId || safeRegistry.getDefault()?.id || "unknown",
+              model: displayModel(agent.model) || "no model",
+              thinkingLevel,
+              showThinking: getAvailableThinkingLevels(agent.providerId, agent.apiModel).length > 2,
+              mode: permissionMode,
+              usageTotals,
+              verboseTrace,
+            })}
+          />
+        </Box>
       )}
     </Box>
     </ThemeProvider>

@@ -58,11 +58,10 @@ describe("Ink welcome banner", () => {
     })).toBe(false);
   });
 
-  it("stays visible across overlay open/close so Static does not replay it", () => {
+  it("stays visible across overlay open/close", () => {
     // Regression: when a picker opens, an earlier version flipped this to
-    // false via `hasOverlay`. Removing the banner from MessageList's
-    // staticItems shrank the Static items list, which made ink replay the
-    // banner into scrollback a second time when the picker closed.
+    // false via `hasOverlay`, moving the banner relative to transcript items
+    // when the picker closed.
     expect(shouldShowWelcomeBanner({
       messages: [],
       startedWithVisibleHistory: false,

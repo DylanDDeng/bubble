@@ -1,6 +1,5 @@
-import { Writable } from "node:stream";
 import React from "react";
-import { render, renderToString } from "ink";
+import { renderToString } from "ink";
 import { describe, expect, it } from "vitest";
 import { MessageList } from "../tui-ink/message-list.js";
 import type { DisplayMessage, DisplayMessagePart } from "../tui-ink/display-history.js";
@@ -26,27 +25,6 @@ function renderMessageList(
     terminalColumns: columns,
     verboseTrace: false,
   });
-}
-
-class CaptureStream extends Writable {
-  columns: number;
-  rows = 40;
-  isTTY = false;
-  output = "";
-
-  constructor(columns: number) {
-    super();
-    this.columns = columns;
-  }
-
-  _write(chunk: unknown, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
-    this.output += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
-    callback();
-  }
-}
-
-function countOccurrences(text: string, needle: string): number {
-  return text.split(needle).length - 1;
 }
 
 describe("Ink message spacing", () => {
@@ -77,8 +55,46 @@ describe("Ink message spacing", () => {
     const lines = renderLines([user], [toolsPart]);
 
     expect(lines[0]).toContain("What is this project doing?");
+    expect(lines[0]).toContain("▌");
     expect(lines[1]).toBe("");
     expect(lines[2]).toContain("List Directory 2 files");
+  });
+
+  it("renders sent user messages with a continuous rail and bubble fill", () => {
+    const output = renderLines([{ key: "short-user", role: "user", content: "你好啊" }]).join("\n");
+
+    expect(output).toContain("▌  你好啊");
+  });
+
+  it("keeps tool trace titles visible beside long commands", () => {
+    const output = renderLines([
+      {
+        key: "assistant-tools",
+        role: "assistant",
+        content: "",
+        parts: [{
+          type: "tools",
+          toolCalls: [
+            {
+              id: "bash-1",
+              name: "bash",
+              args: { command: "cd /Users/chengshengdeng/coworker && find src -type f | head -120" },
+              result: "src/electron/main.ts\nsrc/renderer/App.tsx",
+            },
+            {
+              id: "glob-1",
+              name: "glob",
+              args: { pattern: "*.ts" },
+              result: "src/electron/main.ts\nsrc/renderer/App.tsx",
+            },
+          ],
+        }],
+      },
+    ]).join("\n");
+
+    expect(output).toContain("Execute");
+    expect(output).toContain("find src -type f");
+    expect(output).toContain("Find Files");
   });
 
   it("keeps the same top spacing after the assistant turn is finalized", () => {
@@ -95,32 +111,6 @@ describe("Ink message spacing", () => {
     expect(lines[0]).toContain("What is this project doing?");
     expect(lines[1]).toBe("");
     expect(lines[2]).toContain("List Directory 2 files");
-  });
-
-  it("does not replay static history when terminal columns change", async () => {
-    const stdout = new CaptureStream(90);
-    const stderr = new CaptureStream(90);
-    const sentinel: DisplayMessage = {
-      key: "resize-user",
-      role: "user",
-      content: "Resize replay sentinel",
-    };
-
-    const instance = render(renderMessageList([sentinel], 90), {
-      stdout: stdout as any,
-      stderr: stderr as any,
-      interactive: false,
-      patchConsole: false,
-      exitOnCtrlC: false,
-    });
-    await instance.waitUntilRenderFlush();
-
-    stdout.columns = 72;
-    instance.rerender(renderMessageList([sentinel], 72));
-    await instance.waitUntilRenderFlush();
-    instance.unmount();
-
-    expect(countOccurrences(stdout.output, "Resize replay sentinel")).toBe(1);
   });
 
   it("shows completed edit diffs inline with a 20-line default preview", () => {
@@ -167,5 +157,31 @@ describe("Ink message spacing", () => {
     expect(output).not.toContain("added 20");
     expect(output).toContain("+3 lines");
     expect(output).toContain("ctrl+o to expand");
+  });
+
+  it("keeps committed history renderable for terminal scrollback", () => {
+    const messages: DisplayMessage[] = Array.from({ length: 100 }, (_, index) => ({
+      key: `msg-${index}`,
+      role: index % 2 === 0 ? "user" : "assistant",
+      content: `window-message-${index}`,
+    }));
+
+    const output = renderToString(
+      React.createElement(MessageList, {
+        messages,
+        streamingContent: "",
+        streamingReasoning: "",
+        streamingTools: [],
+        streamingParts: [],
+        terminalColumns,
+        verboseTrace: false,
+      }),
+      { columns: terminalColumns },
+    );
+
+    expect(output).toContain("window-message-0");
+    expect(output).toContain("window-message-60");
+    expect(output).toContain("window-message-99");
+    expect(output).not.toContain("hidden");
   });
 });

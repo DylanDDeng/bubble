@@ -20,6 +20,7 @@ import {
   pushHistoryEntry,
   stepHistory,
 } from "./input-history.js";
+import { stripTerminalMouseSequences } from "./terminal-mouse.js";
 
 export interface SubmitPayload {
   text: string;
@@ -454,6 +455,11 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
   };
 
   useInput((input, key) => {
+    const strippedInput = stripTerminalMouseSequences(input);
+    if (strippedInput !== input && !strippedInput) {
+      return;
+    }
+    input = strippedInput;
     if (disabled) return;
     if (process.env.BUBBLE_KEY_DEBUG) {
       try {

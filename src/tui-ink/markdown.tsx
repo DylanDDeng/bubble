@@ -319,10 +319,8 @@ function InlineText({ text }: { text: string }) {
 function CodeBlock({ lang, lines }: { lang: string; lines: string[] }) {
   const theme = useTheme();
   // Lazy init: try sync highlight when shiki is already warm so the very first
-  // paint carries highlighted output. This matters because MessageList renders
-  // committed messages inside Ink's <Static>, which only paints each item once
-  // — anything we ship via setState in useEffect lands too late to appear in
-  // scrollback. Fall back to raw lines if shiki hasn't loaded yet.
+  // paint carries highlighted output. Fall back to raw lines if shiki hasn't
+  // loaded yet; useEffect will refresh the mounted transcript item later.
   const [highlighted, setHighlighted] = React.useState<string[]>(() => {
     const code = lines.join("\n");
     if (!code) return lines;

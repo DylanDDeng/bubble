@@ -91,6 +91,20 @@ describe("Ink display history parts", () => {
     const recent = compacted.at(-1)!;
     expect(recent.parts).toEqual(messages.at(-1)!.parts);
   });
+
+  it("keeps all display messages available for app-level scrolling", () => {
+    const messages: DisplayMessage[] = Array.from({ length: 100 }, (_, index) => ({
+      key: `msg-${index}`,
+      role: index % 2 === 0 ? "user" : "assistant",
+      content: `message ${index} ${"x".repeat(200)}`,
+    }));
+
+    const compacted = compactDisplayMessages(messages);
+
+    expect(compacted).toHaveLength(100);
+    expect(compacted[0].syntheticKind).toBeUndefined();
+    expect(compacted.at(-1)?.content).toBe(messages.at(-1)?.content);
+  });
 });
 
 function tool(

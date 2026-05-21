@@ -41,7 +41,7 @@ export interface RunTuiOptions {
 }
 
 export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions = {}) {
-  // Kick off shiki load before the first code block reaches <Static>. Fire and
+  // Kick off shiki load before the first code block is rendered. Fire and
   // forget — CodeBlock's lazy init falls back to raw lines if this isn't ready
   // yet, so callers don't need to await it.
   warmHighlighter();
