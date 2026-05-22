@@ -106,7 +106,7 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
 }
 
 function formatExitSummary(summary: ExitSummary): string {
-  const label = "Total duration (wall):";
+  const label = "Total duration:";
   return chalk.dim(`${label} ${formatWallMs(summary.wallMs)}`);
 }
 

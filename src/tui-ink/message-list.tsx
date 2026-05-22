@@ -4,7 +4,7 @@ import { useTheme, type Theme } from "./theme.js";
 import { highlightCode, inferLang } from "./code-highlight.js";
 import { MarkdownContent } from "./markdown.js";
 import type { DisplayMessage, DisplayMessagePart, DisplayToolCall } from "./display-history.js";
-import { buildTraceGroups, formatElapsed, formatTracePath, traceGroupLabel, type TraceGroup } from "./trace-groups.js";
+import { buildTraceGroups, formatTracePath, traceGroupLabel, type TraceGroup } from "./trace-groups.js";
 import { EDIT_COLLAPSED_DIFF_LINES, formatEditSuccessSummary, getEditDiffDetails } from "./edit-diff.js";
 import { formatSubagentRoute, type SubagentRouteLike } from "../agent/subagent-route-format.js";
 
@@ -168,6 +168,9 @@ function MessageItem({
       )}
       {verboseTrace && message.toolCalls && message.toolCalls.length > 0 && (
         <TurnDigest toolCalls={message.toolCalls} />
+      )}
+      {message.taskElapsedMs !== undefined && (
+        <TaskDurationLine elapsedMs={message.taskElapsedMs} />
       )}
     </Box>
   );
@@ -425,7 +428,7 @@ function TraceActivityLine({
 }) {
   const theme = useTheme();
   const waiting = isTraceGroupWaitingForApproval(group, pendingApproval);
-  const elapsed = formatElapsed(group.startedAt, nowTick);
+  void nowTick;
   const labelWidth = Math.max(20, terminalColumns - 26);
   const label = truncateVisual(traceGroupLabel(group), labelWidth);
   return (
@@ -433,7 +436,6 @@ function TraceActivityLine({
       <Text color={waiting ? theme.warning : theme.tracePending}>● </Text>
       <Text color={theme.traceDetail}>{waiting ? "Waiting for approval" : "Working on"} </Text>
       <Text color={theme.traceAction}>{label}</Text>
-      {elapsed && <Text color={theme.traceDetail}> · {elapsed}</Text>}
     </Box>
   );
 }
@@ -563,8 +565,8 @@ function traceGroupStatus(
 ): { text: string; color: string } | null {
   if (waitingApproval) return { text: "waiting for approval", color: theme.warning };
   if (group.pending) {
-    const elapsed = formatElapsed(group.startedAt, nowTick);
-    return { text: elapsed ? `running · ${elapsed}` : "running", color: theme.tracePending };
+    void nowTick;
+    return { text: "running", color: theme.tracePending };
   }
   if (group.hasError) {
     const count = group.errorCount || 1;
@@ -902,16 +904,16 @@ function ToolCallDisplay({
         ? theme.toolPending
         : theme.user;
   const name = displayToolName(toolCall.name);
-  // Compose summary: pending tools get an elapsed counter; waiting-for-approval
-  // gets an explicit badge so the trail survives the dialog closing.
+  // Compose summary: pending tools stay compact; waiting-for-approval gets an
+  // explicit badge so the trail survives the dialog closing.
   let summary: string;
   let summaryColor: string = theme.muted;
   if (waitingApproval) {
     summary = "⏸ waiting for approval";
     summaryColor = theme.warning;
   } else if (toolCall.result === undefined && toolCall.startedAt) {
-    const elapsedSec = Math.max(0, Math.floor(((nowTick ?? Date.now()) - toolCall.startedAt) / 1000));
-    summary = elapsedSec > 0 ? `running · ${elapsedSec}s` : "running";
+    void nowTick;
+    summary = "running";
     summaryColor = theme.toolPending;
   } else {
     summary = summarizeToolResult(toolCall);
@@ -1238,6 +1240,17 @@ function TurnDigest({ toolCalls }: { toolCalls: DisplayToolCall[] }) {
   );
 }
 
+function TaskDurationLine({ elapsedMs }: { elapsedMs: number }) {
+  const theme = useTheme();
+  return (
+    <Box marginLeft={2} marginTop={1}>
+      <Text color={theme.muted} dimColor>
+        Task duration: {formatDuration(elapsedMs)}
+      </Text>
+    </Box>
+  );
+}
+
 function buildDigest(toolCalls: DisplayToolCall[]): string | null {
   const paths = new Set<string>();
   let added = 0;
@@ -1273,6 +1286,21 @@ function buildDigest(toolCalls: DisplayToolCall[]): string | null {
       ? ` (${added ? `+${added}` : ""}${added && removed ? " " : ""}${removed ? `-${removed}` : ""})`
       : "";
   return `↳ ${verb} ${paths.size} file${paths.size === 1 ? "" : "s"}${stats} — ${pathDisplay}`;
+}
+
+function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "0s";
+  if (ms < 1000) return `${Math.max(1, Math.round(ms))}ms`;
+  const seconds = ms / 1000;
+  if (seconds < 10) return `${seconds.toFixed(1)}s`;
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  let minutes = Math.floor(seconds / 60);
+  let remSec = Math.round(seconds - minutes * 60);
+  if (remSec >= 60) {
+    minutes += Math.floor(remSec / 60);
+    remSec %= 60;
+  }
+  return remSec === 0 ? `${minutes}m` : `${minutes}m ${remSec}s`;
 }
 
 function truncateVisual(str: string, maxWidth: number): string {

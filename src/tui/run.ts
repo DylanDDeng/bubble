@@ -40,6 +40,7 @@ import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { AgentAbortError, type Agent } from "../agent.js";
 import { debugReasoningStream, summarizeDebugText } from "../reasoning-debug.js";
 import type { CliArgs } from "../cli.js";
+import type { ThemeMode } from "../config.js";
 import type { SessionManager } from "../session.js";
 import type { ContentPart, Message, PermissionMode, PlanDecision, Provider, ThinkingLevel, Todo, TokenUsage, ToolResultMetadata } from "../types.js";
 import type { ProviderRegistry } from "../provider-registry.js";
@@ -53,7 +54,17 @@ import { registry as slashRegistry } from "../slash-commands/index.js";
 import { sourceRank } from "../slash-commands/unified.js";
 import { sidebarMcpRowsFromStates, renderMcpRowMarker, type SidebarMcpRow } from "./sidebar-mcp.js";
 import { expandAtMentions, filterFileSuggestions, findAtContext, listProjectFiles } from "./file-mentions.js";
-import { compactDisplayMessages, type DisplayMessage, type DisplayToolCall } from "./display-history.js";
+import {
+  appendTextPart,
+  appendToolPart,
+  compactDisplayMessages,
+  contentFromParts,
+  snapshotDisplayParts,
+  type DisplayMessage,
+  type DisplayMessagePart,
+  type DisplayToolCall,
+  toolCallsFromParts,
+} from "./display-history.js";
 import { createMarkdownSyntaxStyle, createSubtleMarkdownSyntaxStyle } from "./markdown-theme.js";
 import { markdownInlineSegments, type MarkdownInlineSegment } from "./markdown-inline.js";
 import { hashString } from "./render-signature.js";
@@ -88,6 +99,9 @@ import {
 } from "./prompt-keybindings.js";
 import { keyNameFromEvent, keyNameFromSequence } from "./global-key-router.js";
 import { EscapeConfirmationGate } from "./escape-confirmation.js";
+import type { ResolvedTheme } from "./detect-theme.js";
+import { appendHistoryEntry, loadHistorySync, pushHistoryEntry } from "./input-history.js";
+import { buildTraceGroups, traceGroupLabel, type TraceGroup } from "./trace-groups.js";
 
 export interface PlanHandlerRef {
   current?: (plan: string) => Promise<PlanDecision>;
@@ -109,6 +123,11 @@ export interface RunTuiOptions {
   settingsManager?: SettingsManager;
   lspService?: LspService;
   mcpManager?: McpManager;
+  themeMode?: ThemeMode;
+  themeOverrides?: Record<string, string>;
+  detectedTheme?: ResolvedTheme;
+  onThemeModeChange?: (mode: ThemeMode) => void;
+  /** Legacy dark-palette overrides. Prefer themeOverrides for new callers. */
   theme?: Record<string, string>;
   flushMemory?: () => Promise<void>;
   runMemoryCompaction?: () => Promise<string>;
@@ -180,6 +199,49 @@ const DEFAULT_THEME = {
   diffHighlightRemoved: "#ff8b96",
 };
 
+const LIGHT_THEME: typeof DEFAULT_THEME = {
+  primary: "#8B4A00",
+  accent: "#6B5FB8",
+  secondary: "#0E5A85",
+  info: "#1A5FA0",
+  text: "#1f2328",
+  textMuted: "#6b7280",
+  background: "#fafafa",
+  backgroundPanel: "#f1f3f5",
+  backgroundElement: "#e8ecf2",
+  border: "#c3c8d0",
+  borderSubtle: "#d8dde5",
+  error: "#b42318",
+  warning: "#9A6500",
+  success: "#146c2e",
+  messageUserText: "#1f2328",
+  messageUserBorder: "#6B5FB8",
+  messageAssistantText: "#1f2328",
+  messageAssistantAccent: "#8B4A00",
+  messageThinkingText: "#57606a",
+  messageThinkingContentText: "#6b7280",
+  messageThinkingBorder: "#d8dde5",
+  toolText: "#374151",
+  toolPending: "#9A6500",
+  toolSuccess: "#146c2e",
+  toolError: "#b42318",
+  toolShell: "#0E5A85",
+  toolRead: "#6B5FB8",
+  toolWrite: "#8B4A00",
+  toolSearch: "#1A5FA0",
+  diffAdded: "#146c2e",
+  diffRemoved: "#b42318",
+  diffContext: "#4b5563",
+  diffAddedBg: "#dff7df",
+  diffRemovedBg: "#fde3e3",
+  diffContextBg: "#eef1f4",
+  diffLineNumber: "#6b7280",
+  diffAddedLineNumberBg: "#caefca",
+  diffRemovedLineNumberBg: "#f8cccc",
+  diffHighlightAdded: "#0f5f28",
+  diffHighlightRemoved: "#9f1f18",
+};
+
 const LOCAL_SLASH_COMMANDS = [
   {
     name: "thinking",
@@ -188,6 +250,22 @@ const LOCAL_SLASH_COMMANDS = [
   {
     name: "toggle-thinking",
     description: "Toggle thinking block visibility",
+  },
+  {
+    name: "trace",
+    description: "Toggle verbose trace output",
+  },
+  {
+    name: "verbose",
+    description: "Toggle verbose trace output",
+  },
+  {
+    name: "debug",
+    description: "Toggle verbose trace output",
+  },
+  {
+    name: "write-previews",
+    description: "Toggle write preview expansion",
   },
 ] as const;
 
@@ -361,18 +439,25 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
     let subtleSyntaxStyle: SyntaxStyle | undefined;
     let rawGlobalKeyHandler: RawGlobalKeyHandler | undefined;
     let rawMouseSelectionHandler: RawMouseSelectionHandler | undefined;
+    const sessionStartedAt = Date.now();
     const exit = () => {
       try {
         renderer?.destroy();
       } finally {
         syntaxStyle?.destroy();
         subtleSyntaxStyle?.destroy();
+        if (process.stdout.isTTY) {
+          process.stdout.write(`\nTotal duration: ${formatDuration(Date.now() - sessionStartedAt)}\n`);
+        }
         resolve();
       }
     };
 
     try {
-      theme = resolveTheme(options.theme);
+      theme = resolveTheme({
+        mode: resolvedThemeMode(options.themeMode, options.detectedTheme),
+        overrides: options.themeOverrides ?? options.theme,
+      });
       syntaxStyle = createMarkdownSyntaxStyle(theme);
       subtleSyntaxStyle = createSubtleMarkdownSyntaxStyle(theme);
       renderer = await createCliRenderer({
@@ -412,9 +497,13 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
   });
 }
 
-function resolveTheme(overrides?: Record<string, string>) {
-  if (!overrides) return DEFAULT_THEME;
-  const next = { ...DEFAULT_THEME };
+function resolveTheme(options?: {
+  mode?: ResolvedTheme;
+  overrides?: Record<string, string>;
+}) {
+  const next = { ...(options?.mode === "light" ? LIGHT_THEME : DEFAULT_THEME) };
+  const overrides = options?.overrides;
+  if (!overrides) return next;
   for (const [key, value] of Object.entries(overrides)) {
     if (!(key in next)) continue;
     if (!isColorValue(value)) continue;
@@ -423,11 +512,37 @@ function resolveTheme(overrides?: Record<string, string>) {
   return next;
 }
 
+function resolvedThemeMode(mode: ThemeMode | undefined, detectedTheme: ResolvedTheme | undefined): ResolvedTheme {
+  if (mode === "light" || mode === "dark") return mode;
+  return detectedTheme ?? "dark";
+}
+
 function isColorValue(value: string) {
   return /^#[0-9a-fA-F]{6}$/.test(value)
     || /^#[0-9a-fA-F]{8}$/.test(value)
     || value === "transparent"
     || value === "none";
+}
+
+function initialPromptHistory(displayMessages: DisplayMessage[]): string[] {
+  let history = loadHistorySync();
+  for (const message of displayMessages) {
+    if (message.role !== "user" || message.content === "(multimedia)") continue;
+    history = pushHistoryEntry(history, message.content);
+  }
+  return history.slice(-PROMPT_HISTORY_LIMIT);
+}
+
+function annotateLastTaskDuration(messages: DisplayMessage[], elapsedMs: number): DisplayMessage[] {
+  if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) return messages;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (!message || message.role !== "assistant") continue;
+    const next = messages.slice();
+    next[index] = { ...message, taskElapsedMs: elapsedMs };
+    return next;
+  }
+  return messages;
 }
 
 function OpenTuiApp(props: {
@@ -444,12 +559,43 @@ function OpenTuiApp(props: {
   const dimensions = useTerminalDimensions();
   const registry = props.options.registry!;
   const skills = props.options.skillRegistry!;
+  let activeThemeMode: ThemeMode = props.options.themeMode ?? "dark";
+  const autoResolvedTheme: ResolvedTheme = props.options.detectedTheme ?? "dark";
+  const activeThemeOverrides = () => props.options.themeOverrides ?? props.options.theme;
+  const getActiveResolvedTheme = () => resolvedThemeMode(activeThemeMode, autoResolvedTheme);
+  const applyThemeMode = (mode: ThemeMode) => {
+    activeThemeMode = mode;
+    props.options.onThemeModeChange?.(mode);
+    theme = resolveTheme({
+      mode: getActiveResolvedTheme(),
+      overrides: activeThemeOverrides(),
+    });
+    syncPromptSurfaces(false);
+    syncModelChrome();
+    syncModeChrome();
+    syncTraceChrome();
+    redrawTranscript();
+    redrawDock();
+    redrawProviderDialog();
+    redrawApprovalPanel();
+    redrawQuestionPanel();
+    setSidebarTick((tick) => tick + 1);
+    renderer.requestRender();
+  };
   let exitRequested = false;
-  async function requestExit() {
+  async function requestExit(options: { direct?: boolean } = {}) {
     if (exitRequested) return;
     exitRequested = true;
+    if (activeRun && !activeRun.abortController.signal.aborted) {
+      activeRun.abortController.abort(new AgentAbortError("Exiting Bubble."));
+      activeRun = undefined;
+      clearRunningCancelHint();
+      setRunningState(false);
+    }
     try {
-      await props.options.flushMemory?.();
+      if (!options.direct) {
+        await props.options.flushMemory?.();
+      }
     } catch {
       // Memory extraction is best-effort and must not trap the TUI on exit.
     } finally {
@@ -461,10 +607,7 @@ function OpenTuiApp(props: {
   const homeTip = HOME_TIPS[Math.floor(Math.random() * HOME_TIPS.length)] ?? HOME_TIPS[0]!;
   const homePrompt = HOME_PROMPTS[Math.floor(Math.random() * HOME_PROMPTS.length)] ?? HOME_PROMPTS[0]!;
   let promptText = "";
-  let promptHistory = displayMessages
-    .filter((message) => message.role === "user" && message.content !== "(multimedia)")
-    .map((message) => message.content)
-    .slice(-PROMPT_HISTORY_LIMIT);
+  let promptHistory = initialPromptHistory(displayMessages);
   let nextImageAttachmentIndex = nextImageLabelIndex(displayMessages);
   const pendingImageAttachments = new Map<string, ImageAttachment>();
   let composerImageResolutionSeq = 0;
@@ -477,7 +620,8 @@ function OpenTuiApp(props: {
   const runningCancelGate = new EscapeConfirmationGate(ESC_CANCEL_CONFIRM_WINDOW_MS);
   const [runningCancelHint, setRunningCancelHint] = createSignal("");
   let runningCancelHintTimer: ReturnType<typeof setTimeout> | undefined;
-  const [showThinking, setShowThinking] = createSignal(true);
+  const [showThinking, setShowThinking] = createSignal(false);
+  const [verboseTrace, setVerboseTrace] = createSignal(false);
   let streamingDisplay: DisplayMessage | undefined;
   let sidebarLspSyncTimer: ReturnType<typeof setInterval> | undefined;
   const [todos, setTodos] = createSignal<Todo[]>(props.agent.getTodos());
@@ -588,6 +732,7 @@ function OpenTuiApp(props: {
   const promptModeLabels = new Set<TextRenderable>();
   const promptModelLabels = new Set<TextRenderable>();
   let footerModeBadge: TextRenderable | undefined;
+  let footerTraceBadge: TextRenderable | undefined;
   let sidebarTokenText: TextRenderable | undefined;
   let sidebarPercentText: TextRenderable | undefined;
   let sidebarGaugeText: TextRenderable | undefined;
@@ -631,9 +776,12 @@ function OpenTuiApp(props: {
   function rememberPromptHistory(input: string) {
     const value = input.trimEnd();
     if (!value.trim()) return;
-    promptHistory.push(value);
-    if (promptHistory.length > PROMPT_HISTORY_LIMIT) {
-      promptHistory = promptHistory.slice(-PROMPT_HISTORY_LIMIT);
+    const nextHistory = pushHistoryEntry(promptHistory, value);
+    if (nextHistory !== promptHistory) {
+      appendHistoryEntry(value);
+      promptHistory = nextHistory.length > PROMPT_HISTORY_LIMIT
+        ? nextHistory.slice(-PROMPT_HISTORY_LIMIT)
+        : nextHistory;
     }
     resetPromptHistoryBrowse();
   }
@@ -995,6 +1143,8 @@ function OpenTuiApp(props: {
   const promptModeTitle = () => mode() === "plan" ? "Plan" : "Build";
   const promptModeBadge = () => promptModeBadgeContent(mode());
   const footerModeText = () => footerPermissionModeText(mode());
+  const effectiveShowThinking = () => showThinking() || verboseTrace();
+  const footerTraceText = () => footerTraceModeText(verboseTrace());
 
   function syncModeChrome() {
     if (uiDisposed) return;
@@ -1007,6 +1157,15 @@ function OpenTuiApp(props: {
     }
     safeRequestRender(homeComposerShell);
     safeRequestRender(sessionComposerShell);
+    safeRequestRender(rootBox);
+  }
+
+  function syncTraceChrome() {
+    if (uiDisposed) return;
+    if (footerTraceBadge) {
+      footerTraceBadge.fg = verboseTrace() ? theme.warning : theme.textMuted;
+      if (!safeSetText(footerTraceBadge, footerTraceText())) footerTraceBadge = undefined;
+    }
     safeRequestRender(rootBox);
   }
 
@@ -1038,6 +1197,13 @@ function OpenTuiApp(props: {
     if (uiDisposed) return;
     footerModeBadge = ref;
     if (!safeSetText(ref, footerModeText())) footerModeBadge = undefined;
+  };
+
+  const registerFooterTraceBadge = (ref: TextRenderable) => {
+    if (uiDisposed) return;
+    footerTraceBadge = ref;
+    ref.fg = verboseTrace() ? theme.warning : theme.textMuted;
+    if (!safeSetText(ref, footerTraceText())) footerTraceBadge = undefined;
   };
 
   const cycleMode = () => {
@@ -1776,7 +1942,7 @@ function OpenTuiApp(props: {
   }
 
   function hasTranscriptMessages(extra?: DisplayMessage) {
-    return currentTranscriptMessages(extra).some((message) => hasRenderableMessage(message, showThinking()));
+    return currentTranscriptMessages(extra).some((message) => hasRenderableMessage(message, effectiveShowThinking()));
   }
 
   function isHomeSurfaceActive(extra?: DisplayMessage) {
@@ -1785,13 +1951,15 @@ function OpenTuiApp(props: {
 
   function syncPromptSurfaces(focus = false) {
     const homeActive = isHomeSurfaceActive(streamingDisplay);
-    setSessionActive(!homeActive);
+    const nextSessionActive = !homeActive;
+    const surfaceChanged = sessionActive() !== nextSessionActive;
+    setSessionActive(nextSessionActive);
     const questionActive = !!pendingQuestion();
     if (homeSurfaceShell) homeSurfaceShell.visible = homeActive;
     if (homeComposerShell) homeComposerShell.visible = homeActive && !questionActive;
     if (sessionComposerShell) sessionComposerShell.visible = !homeActive && !questionActive;
     syncSidebarChrome();
-    if (focus) setTimeout(() => activePrompt()?.focus(), 0);
+    if (focus || surfaceChanged) setTimeout(() => activePrompt()?.focus(), 0);
     rootBox?.requestRender();
   }
 
@@ -1891,6 +2059,25 @@ function OpenTuiApp(props: {
     event.stopPropagation?.();
   }
 
+  function isCtrlCSequence(sequence?: string) {
+    return sequence === "\x03";
+  }
+
+  function isCtrlCEvent(event: any) {
+    const name = keyNameFromEvent(event);
+    return isCtrlCSequence(event?.raw)
+      || isCtrlCSequence(event?.sequence)
+      || isCtrlCSequence(event?.input)
+      || (event?.ctrl === true && name === "c");
+  }
+
+  function routeCtrlCExit(event?: any) {
+    if (event && !isCtrlCEvent(event)) return false;
+    void requestExit({ direct: true });
+    if (event) preventGlobalKey(event);
+    return true;
+  }
+
   function routeRunningCancel(name: string, event?: any) {
     if (name !== "escape") return false;
     if (!activeRun || activeRun.abortController.signal.aborted) return false;
@@ -1905,6 +2092,10 @@ function OpenTuiApp(props: {
   }
 
   function routeGlobalRawSequence(sequence: string) {
+    if (isCtrlCSequence(sequence)) {
+      void requestExit({ direct: true });
+      return true;
+    }
     const name = keyNameFromSequence(sequence);
     if (routeModalRawSequence(sequence)) return true;
     if (routeRunningCancel(name)) return true;
@@ -1913,11 +2104,8 @@ function OpenTuiApp(props: {
   }
 
   function routeGlobalKeyEvent(event: any) {
+    if (routeCtrlCExit(event)) return true;
     const name = keyNameFromEvent(event);
-    if (event.ctrl && name === "c") {
-      void requestExit();
-      return true;
-    }
     if (routeModalKey(event)) return true;
     if (routeRunningCancel(name, event)) return true;
     // Ctrl+Shift+M opens the MCP reconnect picker. Shift is required because
@@ -1933,7 +2121,7 @@ function OpenTuiApp(props: {
       return true;
     }
     if (event.ctrl && name === "o" && !picker) {
-      toggleVisibleWriteBlocks();
+      toggleVerboseTrace();
       event.preventDefault?.();
       return true;
     }
@@ -1953,7 +2141,8 @@ function OpenTuiApp(props: {
       tip: homeTip,
       plan: pendingPlan()?.plan,
       selectedOption: approvalOptionIdx(),
-      showThinking: showThinking(),
+      showThinking: effectiveShowThinking(),
+      verboseTrace: verboseTrace(),
       onToggleWrite: (key: string) => {
         if (transcriptState.expandedWrites.has(key)) {
           transcriptState.expandedWrites.delete(key);
@@ -1986,6 +2175,16 @@ function OpenTuiApp(props: {
     redrawTranscript();
   }
 
+  function toggleVerboseTrace() {
+    setVerboseTrace((prev) => {
+      const next = !prev;
+      setNotice(next ? "Verbose trace visible" : "Compact trace visible");
+      return next;
+    });
+    syncTraceChrome();
+    redrawTranscript();
+  }
+
   function toggleVisibleWriteBlocks() {
     const keys = collectVisibleWriteKeys();
     if (!keys.length) {
@@ -2004,7 +2203,7 @@ function OpenTuiApp(props: {
 
   function collectVisibleWriteKeys() {
     const messages = currentTranscriptMessages(streamingDisplay)
-      .filter((message) => hasRenderableMessage(message, showThinking()));
+      .filter((message) => hasRenderableMessage(message, effectiveShowThinking()));
     const keys: string[] = [];
     for (const [index, message] of messages.entries()) {
       const messageKey = transcriptMessageKey(message, index);
@@ -3381,6 +3580,14 @@ function OpenTuiApp(props: {
       toggleThinkingVisibility();
       return true;
     }
+    if (/^\/(?:trace|verbose|debug)(?:\s|$)/.test(input.trim())) {
+      toggleVerboseTrace();
+      return true;
+    }
+    if (/^\/write-previews(?:\s|$)/.test(input.trim())) {
+      toggleVisibleWriteBlocks();
+      return true;
+    }
 
     const wasHomeSurfaceActive = isHomeSurfaceActive();
     const { handled, result, inject } = await slashRegistry.execute(input, {
@@ -3406,6 +3613,9 @@ function OpenTuiApp(props: {
       runMemoryCompaction: props.options.runMemoryCompaction,
       runMemorySummary: props.options.runMemorySummary,
       runMemoryRefresh: props.options.runMemoryRefresh,
+      getThemeMode: () => activeThemeMode,
+      getResolvedTheme: getActiveResolvedTheme,
+      setThemeMode: applyThemeMode,
     });
     if (!handled) return false;
     if (uiDisposed) return true;
@@ -3814,12 +4024,13 @@ function OpenTuiApp(props: {
     displayMessages = nextMessages;
     streamingDisplay = undefined;
     redrawTranscript(undefined, nextMessages);
+    const taskStartedAt = Date.now();
     const run = beginAgentRun();
 
     let assistantContent = "";
     let assistantReasoning = "";
     const toolCalls: DisplayToolCall[] = [];
-    let currentTurnHasToolCall = false;
+    const assistantParts: DisplayMessagePart[] = [];
     let turnStartedAt: number | undefined;
     let runError: string | undefined;
     let runCancelled = false;
@@ -3829,15 +4040,20 @@ function OpenTuiApp(props: {
     // thrashing OpenTUI's layout or re-parsing markdown per token.
     let pendingStreamingRedrawTimer: ReturnType<typeof setTimeout> | undefined;
     const STREAMING_REDRAW_INTERVAL_MS = 60;
-    const buildStreamingDisplay = (status?: DisplayMessage["status"]): DisplayMessage => ({
-      role: "assistant",
-      content: "",
-      reasoning: assistantReasoning || undefined,
-      toolCalls: toolCalls.length ? [...toolCalls] : undefined,
-      status,
-      streaming: true,
-      turnStartedAt,
-    });
+    const buildStreamingDisplay = (status?: DisplayMessage["status"]): DisplayMessage => {
+      const currentParts = snapshotDisplayParts(assistantParts);
+      const partContent = assistantContent || contentFromParts(currentParts);
+      return {
+        role: "assistant",
+        content: partContent,
+        reasoning: assistantReasoning || undefined,
+        toolCalls: toolCalls.length ? [...toolCalls] : undefined,
+        parts: currentParts.length ? currentParts : undefined,
+        status,
+        streaming: true,
+        turnStartedAt,
+      };
+    };
     const flushStreamingRedraw = () => {
       if (pendingStreamingRedrawTimer === undefined) return;
       clearTimeout(pendingStreamingRedrawTimer);
@@ -3854,7 +4070,7 @@ function OpenTuiApp(props: {
           assistantContent = "";
           assistantReasoning = "";
           toolCalls.length = 0;
-          currentTurnHasToolCall = false;
+          assistantParts.length = 0;
           turnStartedAt = Date.now();
           redrawTranscript({
             role: "assistant",
@@ -3865,6 +4081,8 @@ function OpenTuiApp(props: {
           });
         } else if (event.type === "text_delta") {
           assistantContent += event.content;
+          appendTextPart(assistantParts, event.content);
+          scheduleStreamingRedraw();
         } else if (event.type === "reasoning_delta") {
           debugReasoningStream({
             stage: "ui_append",
@@ -3877,30 +4095,23 @@ function OpenTuiApp(props: {
           assistantReasoning += event.content;
           scheduleStreamingRedraw();
         } else if (event.type === "tool_call_start") {
-          currentTurnHasToolCall = true;
           // Insert a streaming placeholder so the user sees feedback the moment
           // the model commits to a tool call, instead of waiting for the args
           // JSON to fully stream + parse.
           if (!toolCalls.find((item) => item.id === event.id)) {
-            toolCalls.push({
+            const toolCall: DisplayToolCall = {
               id: event.id,
               name: event.name,
               args: {},
               rawArguments: "",
               streamingArgs: true,
               status: "pending",
-            });
+            };
+            toolCalls.push(toolCall);
+            appendToolPart(assistantParts, toolCall);
           }
-          redrawTranscript({
-            role: "assistant",
-            content: "",
-            reasoning: assistantReasoning || undefined,
-            toolCalls: [...toolCalls],
-            streaming: true,
-            turnStartedAt,
-          });
+          redrawTranscript(buildStreamingDisplay());
         } else if (event.type === "tool_call_delta") {
-          currentTurnHasToolCall = true;
           const existing = toolCalls.find((item) => item.id === event.id);
           if (existing) {
             existing.name = event.name || existing.name;
@@ -3914,9 +4125,8 @@ function OpenTuiApp(props: {
             scheduleStreamingRedraw();
           }
         } else if (event.type === "tool_call_end") {
-          currentTurnHasToolCall = true;
+          // The placeholder is already visible; tool_start will swap in canonical args.
         } else if (event.type === "tool_start") {
-          currentTurnHasToolCall = true;
           flushStreamingRedraw();
           const now = Date.now();
           const existing = toolCalls.find((item) => item.id === event.id);
@@ -3928,19 +4138,20 @@ function OpenTuiApp(props: {
             existing.status = "running";
             existing.startedAt = existing.startedAt ?? now;
           } else {
-            toolCalls.push({ id: event.id, name: event.name, args: event.args, status: "running", startedAt: now });
+            const toolCall: DisplayToolCall = {
+              id: event.id,
+              name: event.name,
+              args: event.args,
+              status: "running",
+              startedAt: now,
+            };
+            toolCalls.push(toolCall);
+            appendToolPart(assistantParts, toolCall);
           }
           if (event.name === "question") {
             scheduleQuestionSync();
           }
-          redrawTranscript({
-            role: "assistant",
-            content: "",
-            reasoning: assistantReasoning || undefined,
-            toolCalls: [...toolCalls],
-            streaming: true,
-            turnStartedAt,
-          });
+          redrawTranscript(buildStreamingDisplay());
         } else if (event.type === "tool_end") {
           const call = toolCalls.find((item) => item.id === event.id);
           if (call) {
@@ -3949,14 +4160,7 @@ function OpenTuiApp(props: {
             call.metadata = event.result.metadata;
             call.status = event.result.isError ? "error" : "completed";
             call.completedAt = Date.now();
-            redrawTranscript({
-              role: "assistant",
-              content: currentTurnHasToolCall ? "" : assistantContent,
-              reasoning: assistantReasoning || undefined,
-              toolCalls: [...toolCalls],
-              streaming: true,
-              turnStartedAt,
-            });
+            redrawTranscript(buildStreamingDisplay());
           }
           if (event.name === "question") {
             syncFirstPendingQuestion();
@@ -3976,14 +4180,7 @@ function OpenTuiApp(props: {
                 : "running";
             call.isError = call.status === "error";
             if (finished && call.completedAt === undefined) call.completedAt = Date.now();
-            redrawTranscript({
-              role: "assistant",
-              content: currentTurnHasToolCall ? "" : assistantContent,
-              reasoning: assistantReasoning || undefined,
-              toolCalls: [...toolCalls],
-              streaming: true,
-              turnStartedAt,
-            });
+            redrawTranscript(buildStreamingDisplay());
           }
         } else if (event.type === "todos_updated") {
           setTodos(event.todos);
@@ -4013,11 +4210,17 @@ function OpenTuiApp(props: {
             }));
           }
           bumpSidebar();
+          const currentParts = snapshotDisplayParts(assistantParts);
+          const finalContent = assistantContent || contentFromParts(currentParts);
+          const finalToolCalls = toolCalls.length > 0
+            ? [...toolCalls]
+            : toolCallsFromParts(currentParts);
           const assistantMessage: DisplayMessage = {
             role: "assistant",
-            content: currentTurnHasToolCall ? "" : assistantContent,
+            content: finalContent,
             reasoning: assistantReasoning || undefined,
-            toolCalls: toolCalls.length ? [...toolCalls] : undefined,
+            toolCalls: finalToolCalls.length ? finalToolCalls : undefined,
+            parts: currentParts.length ? currentParts : undefined,
             turnStartedAt,
             turnCompletedAt: Date.now(),
             turnUsage: event.usage,
@@ -4030,6 +4233,7 @@ function OpenTuiApp(props: {
           assistantContent = "";
           assistantReasoning = "";
           toolCalls.length = 0;
+          assistantParts.length = 0;
           turnStartedAt = undefined;
           streamingDisplay = undefined;
         }
@@ -4058,6 +4262,7 @@ function OpenTuiApp(props: {
         if (!notice()) setNotice("Agent run cancelled");
         redrawTranscript();
       } else {
+        displayMessages = annotateLastTaskDuration(displayMessages, Date.now() - taskStartedAt);
         redrawTranscript();
       }
       redrawDock();
@@ -4068,6 +4273,7 @@ function OpenTuiApp(props: {
   }
 
   function promptUiKeyDown(event: any) {
+    if (routeCtrlCExit(event)) return true;
     const modalOwner = activeModalKeyOwner();
     if (modalOwner) {
       if (routeModalKey(event) || shouldModalSwallowUnhandledKey(modalOwner)) {
@@ -5235,6 +5441,8 @@ function OpenTuiApp(props: {
       running: isRunning,
       registerScanner: registerPromptScanner,
       registerModeBadge: registerFooterModeBadge,
+      traceVerbose: verboseTrace,
+      registerTraceBadge: registerFooterTraceBadge,
     }),
     renderProviderDialog(),
     renderNoticeOverlay(),
@@ -5402,6 +5610,7 @@ function renderMessage(
   syntaxStyle: SyntaxStyle,
   subtleSyntaxStyle: SyntaxStyle,
   showThinking = true,
+  verboseTrace = false,
   width = 80,
 ) {
   if (message.role === "user") return renderUserMessage(message, index);
@@ -5410,7 +5619,7 @@ function renderMessage(
       h("text", { fg: theme.error, wrapMode: "word" }, message.content),
     );
   }
-  return renderAssistantMessage(message, syntaxStyle, subtleSyntaxStyle, showThinking, width);
+  return renderAssistantMessage(message, syntaxStyle, subtleSyntaxStyle, showThinking, verboseTrace, width);
 }
 
 function renderUserMessage(message: DisplayMessage, index: number) {
@@ -5427,7 +5636,14 @@ function renderUserMessage(message: DisplayMessage, index: number) {
   );
 }
 
-function renderAssistantMessage(message: DisplayMessage, syntaxStyle: SyntaxStyle, subtleSyntaxStyle: SyntaxStyle, showThinking = true, width = 80) {
+function renderAssistantMessage(
+  message: DisplayMessage,
+  syntaxStyle: SyntaxStyle,
+  subtleSyntaxStyle: SyntaxStyle,
+  showThinking = true,
+  verboseTrace = false,
+  width = 80,
+) {
   const modelSwitch = parseModelSwitchMessage(message.content);
   if (modelSwitch && !message.reasoning?.trim() && !(message.toolCalls?.length)) {
     return renderModelSwitchMessage(modelSwitch);
@@ -5435,7 +5651,9 @@ function renderAssistantMessage(message: DisplayMessage, syntaxStyle: SyntaxStyl
 
   const children: Child[] = [];
   const visibleReasoning = showThinking ? message.reasoning?.trim() : "";
-  if (message.status && !visibleReasoning && !message.content.trim() && !(message.toolCalls?.length)) {
+  const parts = message.parts ?? [];
+  const hasParts = parts.length > 0;
+  if (message.status && !visibleReasoning && !message.content.trim() && !(message.toolCalls?.length) && !hasParts) {
     children.push(h("box", { paddingLeft: 3, marginTop: 1, flexShrink: 0 },
       h("text", { fg: theme.messageThinkingText }, assistantStatusLabel(message)),
     ));
@@ -5456,23 +5674,31 @@ function renderAssistantMessage(message: DisplayMessage, syntaxStyle: SyntaxStyl
       }),
     ));
   }
-  const toolCalls = message.toolCalls ?? [];
-  for (const tool of toolCalls) children.push(renderTool(tool, syntaxStyle, width));
   const trimmedContent = message.content.trim();
-  if (trimmedContent && toolCalls.length > 0) {
-    children.push(h("box", { paddingLeft: 3, marginTop: 1, flexShrink: 0 },
-      h("text", { content: answerDividerStyledText(), wrapMode: "none" }),
-    ));
+  if (hasParts) {
+    renderAssistantMessageParts(children, parts, syntaxStyle, verboseTrace, width, message.streaming === true);
+  } else {
+    const toolCalls = message.toolCalls ?? [];
+    if (verboseTrace) {
+      for (const tool of toolCalls) children.push(renderTool(tool, syntaxStyle, width));
+    } else {
+      for (const group of buildTraceGroups(toolCalls)) children.push(renderTraceGroup(group, syntaxStyle, width));
+    }
+    if (trimmedContent && toolCalls.length > 0) {
+      children.push(h("box", { paddingLeft: 3, marginTop: 1, flexShrink: 0 },
+        h("text", { content: answerDividerStyledText(), wrapMode: "none" }),
+      ));
+    }
+    if (trimmedContent) {
+      children.push(h("box", { paddingLeft: 3, marginTop: 1, flexDirection: "column", flexShrink: 0 },
+        renderMarkdownContent(trimmedContent, syntaxStyle, {
+          streaming: message.streaming === true,
+          fg: theme.messageAssistantText,
+        }),
+      ));
+    }
   }
-  if (trimmedContent) {
-    children.push(h("box", { paddingLeft: 3, marginTop: 1, flexDirection: "column", flexShrink: 0 },
-      renderMarkdownContent(trimmedContent, syntaxStyle, {
-        streaming: message.streaming === true,
-        fg: theme.messageAssistantText,
-      }),
-    ));
-  }
-  if (message.streaming === true && trimmedContent) {
+  if (message.streaming === true && (trimmedContent || lastPartHasText(parts))) {
     children.push(h("box", { paddingLeft: 3, flexShrink: 0 },
       h("text", { fg: theme.primary, wrapMode: "none" }, "▌"),
     ));
@@ -5485,6 +5711,45 @@ function renderAssistantMessage(message: DisplayMessage, syntaxStyle: SyntaxStyl
   }
   if (!children.length) return null;
   return h("box", { flexDirection: "column", flexShrink: 0 }, children);
+}
+
+function renderAssistantMessageParts(
+  children: Child[],
+  parts: DisplayMessagePart[],
+  syntaxStyle: SyntaxStyle,
+  verboseTrace: boolean,
+  width: number,
+  streaming: boolean,
+) {
+  for (const part of parts) {
+    if (part.type === "text") {
+      const content = part.content.trim();
+      if (!content) continue;
+      children.push(h("box", {
+        paddingLeft: 3,
+        marginTop: 1,
+        flexDirection: "column",
+        flexShrink: 0,
+      },
+        renderMarkdownContent(content, syntaxStyle, {
+          streaming,
+          fg: theme.messageAssistantText,
+        }),
+      ));
+      continue;
+    }
+
+    if (verboseTrace) {
+      for (const tool of part.toolCalls) children.push(renderTool(tool, syntaxStyle, width));
+    } else {
+      for (const group of buildTraceGroups(part.toolCalls)) children.push(renderTraceGroup(group, syntaxStyle, width));
+    }
+  }
+}
+
+function lastPartHasText(parts: DisplayMessagePart[]): boolean {
+  const last = parts[parts.length - 1];
+  return last?.type === "text" && !!last.content.trim();
 }
 
 function parseModelSwitchMessage(content: string) {
@@ -5554,6 +5819,7 @@ function updateTranscriptHost(
   subtleSyntaxStyle: SyntaxStyle,
 ) {
   const showThinking = options?.showThinking ?? true;
+  const verboseTrace = options?.verboseTrace ?? false;
   const visibleMessages = messages.filter((message) => hasRenderableMessage(message, showThinking));
   const ctx = host.ctx;
   const nextEntries: TranscriptEntry[] = [];
@@ -5582,6 +5848,7 @@ function updateTranscriptHost(
         expandedWrites: state.expandedWrites,
         width: options?.width ?? 80,
         onToggleWrite: options?.onToggleWrite,
+        verboseTrace,
       });
       nextEntries.push(previous);
       continue;
@@ -5602,6 +5869,7 @@ function updateTranscriptHost(
       signature,
       showThinking,
       options?.width ?? 80,
+      verboseTrace,
       compactionExpanded,
       state.expandedWrites,
       options?.onToggleCompaction,
@@ -5662,6 +5930,8 @@ type TranscriptEntry = {
     reasoningStreaming?: boolean;
     reasoningPlainText?: TextRenderable;
     reasoningMarkdown?: MarkdownRenderable;
+    partsBox?: BoxRenderable;
+    partEntries?: Map<string, PartEntryRef>;
     toolsBox?: BoxRenderable;
     toolEntries?: Map<string, ToolEntryRef>;
     answerDividerBox?: BoxRenderable;
@@ -5683,6 +5953,20 @@ type ToolEntryRef = {
   signature: string;
   node: Renderable;
 };
+
+type PartEntryRef =
+  | {
+      kind: "text";
+      signature: string;
+      node: BoxRenderable;
+      markdown: MarkdownRenderable;
+    }
+  | {
+      kind: "tools";
+      signature: string;
+      node: BoxRenderable;
+      toolEntries: Map<string, ToolEntryRef>;
+    };
 
 function clearTranscriptEntries(host: BoxRenderable, state: TranscriptState) {
   for (const entry of state.entries) {
@@ -5725,6 +6009,7 @@ function updateMessageEntry(
     expandedWrites: Set<string>;
     width: number;
     onToggleWrite?: (key: string) => void;
+    verboseTrace?: boolean;
   },
 ) {
   if (message.role === "user") {
@@ -5763,12 +6048,15 @@ function updateAssistantEntry(
     expandedWrites: Set<string>;
     width: number;
     onToggleWrite?: (key: string) => void;
+    verboseTrace?: boolean;
   },
 ) {
   const content = message.content.trim();
   const visibleReasoning = showThinking ? message.reasoning?.trim() ?? "" : "";
   const tools = message.toolCalls ?? [];
-  const showStatus = !!message.status && !visibleReasoning && !content && tools.length === 0;
+  const parts = message.parts ?? [];
+  const hasParts = parts.length > 0;
+  const showStatus = !!message.status && !visibleReasoning && !content && tools.length === 0 && !hasParts;
 
   if (entry.refs.statusText) {
     entry.refs.statusText.content = showStatus ? assistantStatusLabel(message) : "";
@@ -5805,9 +6093,15 @@ function updateAssistantEntry(
   if (entry.refs.reasoningBox) {
     entry.refs.reasoningBox.visible = !!visibleReasoning;
   }
-  updateAssistantToolEntries(entry, tools, options);
+  if (entry.refs.partsBox) {
+    entry.refs.partsBox.visible = hasParts;
+  }
+  if (hasParts) {
+    updateAssistantPartEntries(entry, parts, options, message.streaming === true);
+  }
+  updateAssistantToolEntries(entry, hasParts ? [] : tools, options);
   if (entry.refs.answerDividerBox) {
-    const showDivider = tools.length > 0 && !!content;
+    const showDivider = !hasParts && tools.length > 0 && !!content;
     entry.refs.answerDividerBox.visible = showDivider;
     if (entry.refs.answerDividerText) {
       entry.refs.answerDividerText.content = showDivider
@@ -5819,10 +6113,10 @@ function updateAssistantEntry(
     syncMarkdownRenderable(entry.refs.contentMarkdown, content, message.streaming === true);
   }
   if (entry.refs.contentBox) {
-    entry.refs.contentBox.visible = !!content;
+    entry.refs.contentBox.visible = !hasParts && !!content;
   }
   if (entry.refs.contentCursorBox) {
-    const cursorActive = message.streaming === true && !!content;
+    const cursorActive = message.streaming === true && (hasParts ? lastPartHasText(parts) : !!content);
     entry.refs.contentCursorBox.visible = cursorActive;
     if (entry.refs.contentCursorText) entry.refs.contentCursorText.content = cursorActive ? "▌" : "";
   }
@@ -5842,6 +6136,99 @@ function syncMarkdownRenderable(markdown: MarkdownRenderable, content: string, s
   markdown.clearCache();
 }
 
+function updateAssistantPartEntries(
+  entry: TranscriptEntry,
+  parts: DisplayMessagePart[],
+  options: {
+    syntaxStyle: SyntaxStyle;
+    expandedWrites: Set<string>;
+    width: number;
+    onToggleWrite?: (key: string) => void;
+    verboseTrace?: boolean;
+  },
+  streaming: boolean,
+) {
+  const partsBox = entry.refs.partsBox;
+  if (!partsBox) return;
+
+  const previousEntries = entry.refs.partEntries ?? new Map<string, PartEntryRef>();
+  const nextEntries = new Map<string, PartEntryRef>();
+
+  parts.forEach((part, index) => {
+    const key = `part:${index}:${part.type}`;
+    const previous = previousEntries.get(key);
+
+    if (part.type === "text") {
+      const content = part.content.trim();
+      let ref: Extract<PartEntryRef, { kind: "text" }>;
+      if (previous?.kind === "text") {
+        ref = previous;
+      } else {
+        if (previous) {
+          partsBox.remove(previous.node.id);
+          previous.node.destroyRecursively();
+        }
+        const markdown = createMarkdown(partsBox.ctx, content, options.syntaxStyle, {
+          streaming,
+          fg: theme.messageAssistantText,
+        });
+        const node = createBox(partsBox.ctx, {
+          paddingLeft: 3,
+          marginTop: 1,
+          flexDirection: "column",
+          flexShrink: 0,
+          visible: !!content,
+        }, [markdown]);
+        partsBox.add(node, index);
+        ref = { kind: "text", signature: "text", node, markdown };
+      }
+      syncMarkdownRenderable(ref.markdown, content, streaming);
+      ref.node.visible = !!content;
+      nextEntries.set(key, ref);
+      return;
+    }
+
+    let ref: Extract<PartEntryRef, { kind: "tools" }>;
+    if (previous?.kind === "tools") {
+      ref = previous;
+    } else {
+      if (previous) {
+        partsBox.remove(previous.node.id);
+        previous.node.destroyRecursively();
+      }
+      const node = createBox(partsBox.ctx, {
+        flexDirection: "column",
+        flexShrink: 0,
+        visible: part.toolCalls.length > 0,
+      });
+      partsBox.add(node, index);
+      ref = { kind: "tools", signature: "tools", node, toolEntries: new Map() };
+    }
+
+    const toolHost: TranscriptEntry = {
+      key: entry.key,
+      signature: entry.signature,
+      node: ref.node,
+      refs: {
+        toolsBox: ref.node,
+        toolEntries: ref.toolEntries,
+      },
+    };
+    updateAssistantToolEntries(toolHost, part.toolCalls, options);
+    ref.toolEntries = toolHost.refs.toolEntries ?? new Map();
+    ref.node.visible = part.toolCalls.length > 0;
+    nextEntries.set(key, ref);
+  });
+
+  for (const [id, previous] of previousEntries.entries()) {
+    if (nextEntries.has(id)) continue;
+    partsBox.remove(previous.node.id);
+    previous.node.destroyRecursively();
+  }
+
+  entry.refs.partEntries = nextEntries;
+}
+
 function updateAssistantToolEntries(
   entry: TranscriptEntry,
   tools: DisplayToolCall[],
@@ -5850,6 +6237,7 @@ function updateAssistantToolEntries(
     expandedWrites: Set<string>;
     width: number;
     onToggleWrite?: (key: string) => void;
+    verboseTrace?: boolean;
   },
 ) {
   const toolsBox = entry.refs.toolsBox;
@@ -5859,13 +6247,17 @@ function updateAssistantToolEntries(
   const previousEntries = entry.refs.toolEntries ?? new Map<string, ToolEntryRef>();
   const nextEntries = new Map<string, ToolEntryRef>();
 
-  tools.forEach((tool, index) => {
-    const toolKey = writeToolKey(entry.key, tool);
-    const writeExpanded = options.expandedWrites.has(toolKey);
-    const signature = toolRenderableSignature(tool, writeExpanded);
-    const previous = previousEntries.get(tool.id);
+  const items = options.verboseTrace
+    ? tools.map((tool) => ({ kind: "tool" as const, key: `tool:${tool.id}`, tool }))
+    : buildTraceGroups(tools).map((group) => ({ kind: "group" as const, key: traceGroupKey(group), group }));
+
+  items.forEach((item, index) => {
+    const signature = item.kind === "tool"
+      ? toolRenderableSignature(item.tool, options.expandedWrites.has(writeToolKey(entry.key, item.tool)))
+      : traceGroupRenderableSignature(item.group);
+    const previous = previousEntries.get(item.key);
     if (previous?.signature === signature) {
-      nextEntries.set(tool.id, previous);
+      nextEntries.set(item.key, previous);
       return;
     }
 
@@ -5873,16 +6265,11 @@ function updateAssistantToolEntries(
       toolsBox.remove(previous.node.id);
       previous.node.destroyRecursively();
     }
-    const node = createToolRenderable(
-      toolsBox.ctx,
-      tool,
-      options.syntaxStyle,
-      options.width,
-      writeExpanded,
-      isWritePreviewTool(tool) ? () => options.onToggleWrite?.(toolKey) : undefined,
-    );
+    const node = item.kind === "tool"
+      ? createRawToolEntryRenderable(toolsBox.ctx, entry.key, item.tool, options)
+      : createTraceGroupRenderable(toolsBox.ctx, item.group, options.syntaxStyle, options.width);
     toolsBox.add(node, index);
-    nextEntries.set(tool.id, { signature, node });
+    nextEntries.set(item.key, { signature, node });
   });
 
   for (const [id, previous] of previousEntries.entries()) {
@@ -5892,6 +6279,181 @@ function updateAssistantToolEntries(
   }
 
   entry.refs.toolEntries = nextEntries;
+}
+
+function createRawToolEntryRenderable(
+  ctx: RenderContext,
+  messageKey: string,
+  tool: DisplayToolCall,
+  options: {
+    syntaxStyle: SyntaxStyle;
+    expandedWrites: Set<string>;
+    width: number;
+    onToggleWrite?: (key: string) => void;
+  },
+) {
+  const toolKey = writeToolKey(messageKey, tool);
+  const writeExpanded = options.expandedWrites.has(toolKey);
+  return createToolRenderable(
+    ctx,
+    tool,
+    options.syntaxStyle,
+    options.width,
+    writeExpanded,
+    isWritePreviewTool(tool) ? () => options.onToggleWrite?.(toolKey) : undefined,
+  );
+}
+
+function createTraceGroupRenderable(ctx: RenderContext, group: TraceGroup, syntaxStyle: SyntaxStyle, width = 80) {
+  const rawTool = group.raw.length === 1 ? group.raw[0] as unknown as DisplayToolCall : undefined;
+  if (rawTool && shouldRenderTraceGroupAsRawTool(rawTool)) {
+    return createToolRenderable(ctx, rawTool, syntaxStyle, width, false);
+  }
+
+  const detailLines = traceGroupDetailLines(group);
+  const status = traceGroupStatus(group);
+  const detailColor = traceGroupDetailColor(group);
+  const detailWidth = Math.max(20, width - 10);
+  const children: Array<Renderable | null | undefined> = [
+    createText(ctx, traceGroupHeaderStyledText(group, width), { wrapMode: "none" }),
+  ];
+
+  if (detailLines.length > 0) {
+    children.push(createBox(ctx, {
+      paddingLeft: 2,
+      flexDirection: "column",
+      flexShrink: 0,
+    }, detailLines.map((line, index) =>
+      createText(ctx, `${index === 0 ? "↳ " : "  "}${truncate(line, detailWidth)}`, {
+        fg: detailColor,
+        wrapMode: "word",
+      }),
+    )));
+  }
+
+  if (group.errorLines.length > 0) {
+    children.push(createBox(ctx, {
+      paddingLeft: 2,
+      flexDirection: "column",
+      flexShrink: 0,
+    }, group.errorLines.map((line, index) =>
+      createText(ctx, `${index === 0 ? "↳ " : "  "}${truncate(line, detailWidth)}`, {
+        fg: theme.toolError,
+        wrapMode: "word",
+      }),
+    )));
+  }
+
+  if (group.omitted > 0) {
+    children.push(createText(ctx, `  ... ${group.omitted} more, Ctrl+O to view`, {
+      fg: theme.textMuted,
+      wrapMode: "word",
+    }));
+  }
+
+  return createBox(ctx, {
+    paddingLeft: 3,
+    marginTop: 1,
+    flexDirection: "column",
+    flexShrink: 0,
+  }, children);
+}
+
+function shouldRenderTraceGroupAsRawTool(tool: DisplayToolCall) {
+  return tool.name === "question" || tool.name === "todo_write" || tool.name === "edit";
+}
+
+function traceGroupDetailLines(group: TraceGroup) {
+  return group.previewLines.length > 0 ? group.previewLines : group.items;
+}
+
+function traceGroupStatus(group: TraceGroup): { text: string; color: string } | null {
+  if (group.hasError) {
+    const count = group.errorCount || 1;
+    return { text: count === 1 ? "1 error" : `${count} errors`, color: theme.toolError };
+  }
+  return null;
+}
+
+function traceGroupDetailColor(group: TraceGroup) {
+  const allErrored = group.hasError && group.errorCount >= group.raw.length && !group.pending;
+  return allErrored ? theme.toolError : theme.toolText;
+}
+
+function traceGroupHeaderStyledText(group: TraceGroup, width = 80): StyledText {
+  const allErrored = group.hasError && group.errorCount >= group.raw.length && !group.pending;
+  const titleColor = allErrored ? theme.toolError : traceGroupTitleColor(group);
+  const status = traceGroupStatus(group);
+  const commandWidth = Math.max(14, width - group.title.length - 20);
+  if (group.pending) {
+    return new StyledText([
+      fg(theme.toolPending)("● "),
+      fg(theme.textMuted)("Working on "),
+      fg(titleColor)(truncate(traceGroupCompactLabel(group), Math.max(20, width - 18))),
+    ]);
+  }
+  const chunks: StyledText["chunks"] = [
+    fg(titleColor)(bold(group.title)),
+  ];
+  if (group.command) {
+    chunks.push(fg(theme.toolText)(` ${truncate(group.command, commandWidth)}`));
+  } else if (group.count !== undefined && group.noun) {
+    chunks.push(fg(theme.textMuted)(` ${group.count} ${group.noun}`));
+  }
+  if (status) {
+    chunks.push(fg(status.color)(` ${status.text}`));
+  }
+  return new StyledText(chunks);
+}
+
+function traceGroupCompactLabel(group: TraceGroup) {
+  if (group.command) return `${group.title} ${group.command}`;
+  if (group.count !== undefined && group.noun) return `${group.title} ${group.count} ${group.noun}`;
+  return group.title;
+}
+
+function traceGroupTitleColor(group: TraceGroup) {
+  switch (group.kind) {
+    case "read": return theme.toolRead;
+    case "search": return theme.toolSearch;
+    case "write": return theme.toolWrite;
+    case "execute": return theme.toolShell;
+    case "edit": return theme.toolWrite;
+    case "subagent": return theme.accent;
+    case "list": return theme.secondary;
+    default: return theme.toolText;
+  }
+}
+
+function traceGroupKey(group: TraceGroup) {
+  return `group:${group.kind}:${group.raw.map((tool) => tool.id).join(":")}`;
+}
+
+function traceGroupRenderableSignature(group: TraceGroup) {
+  return [
+    traceGroupKey(group),
+    group.pending ? "pending" : "settled",
+    group.hasError ? `error:${group.errorCount}` : "ok",
+    group.count ?? "",
+    group.noun ?? "",
+    group.command ?? "",
+    group.omitted,
+    hashString(stableStringify(group.items)),
+    hashString(stableStringify(group.previewLines)),
+    hashString(stableStringify(group.errorLines)),
+    hashString(stableStringify(group.raw.map((rawTool) => {
+      const tool = rawTool as unknown as DisplayToolCall;
+      return [
+        tool.id,
+        tool.name,
+        tool.status ?? (tool.result === undefined ? "pending" : "completed"),
+        tool.isError ? "error" : "ok",
+        stableStringify(tool.args),
+        tool.result ?? "",
+        stableStringify(tool.metadata ?? null),
+      ];
+    }))),
+  ].join(":");
 }
 
 function toolRenderableSignature(tool: DisplayToolCall, writeExpanded: boolean) {
@@ -6206,6 +6768,7 @@ function createMessageEntry(
   signature: string,
   showThinking = true,
   width = 80,
+  verboseTrace = false,
   compactionExpanded = false,
   expandedWrites: Set<string> = new Set(),
   onToggleCompaction?: (key: string) => void,
@@ -6214,7 +6777,7 @@ function createMessageEntry(
   if (message.role === "user") return createUserEntry(ctx, message, index, key, signature);
   if (message.role === "error") return createErrorEntry(ctx, message, key, signature);
   if (message.syntheticKind === "ui_compact_card") return createCompactionCardEntry(ctx, message, key, signature, compactionExpanded, onToggleCompaction);
-  return createAssistantEntry(ctx, message, syntaxStyle, subtleSyntaxStyle, key, signature, showThinking, width, expandedWrites, onToggleWrite);
+  return createAssistantEntry(ctx, message, syntaxStyle, subtleSyntaxStyle, key, signature, showThinking, width, verboseTrace, expandedWrites, onToggleWrite);
 }
 
 function createUserEntry(ctx: RenderContext, message: DisplayMessage, index: number, key: string, signature: string): TranscriptEntry {
@@ -6271,6 +6834,7 @@ function createAssistantEntry(
   signature: string,
   showThinking = true,
   width = 80,
+  verboseTrace = false,
   expandedWrites: Set<string> = new Set(),
   onToggleWrite?: (key: string) => void,
 ): TranscriptEntry | null {
@@ -6284,7 +6848,9 @@ function createAssistantEntry(
   const visibleReasoning = showThinking ? message.reasoning?.trim() : "";
   const content = message.content.trim();
   const tools = message.toolCalls ?? [];
-  const showStatus = !!message.status && !visibleReasoning && !content && tools.length === 0;
+  const parts = message.parts ?? [];
+  const hasParts = parts.length > 0;
+  const showStatus = !!message.status && !visibleReasoning && !content && tools.length === 0 && !hasParts;
 
   const status = createText(ctx, assistantStatusLabel(message), {
     fg: theme.messageThinkingText,
@@ -6341,16 +6907,25 @@ function createAssistantEntry(
   refs.reasoningBox = reasoningBox;
   children.push(reasoningBox);
 
+  const partsBox = createBox(ctx, {
+    flexDirection: "column",
+    flexShrink: 0,
+    visible: hasParts,
+  });
+  refs.partsBox = partsBox;
+  refs.partEntries = new Map();
+  children.push(partsBox);
+
   const toolsBox = createBox(ctx, {
     flexDirection: "column",
     flexShrink: 0,
-    visible: tools.length > 0,
+    visible: !hasParts && tools.length > 0,
   });
   refs.toolsBox = toolsBox;
   refs.toolEntries = new Map();
   children.push(toolsBox);
 
-  const showAnswerDivider = tools.length > 0 && !!content;
+  const showAnswerDivider = !hasParts && tools.length > 0 && !!content;
   const answerDividerText = createText(ctx, showAnswerDivider ? answerDividerStyledText() : new StyledText([fg(theme.textMuted)("")]), { wrapMode: "none" });
   refs.answerDividerText = answerDividerText;
   const answerDividerBox = createBox(ctx, {
@@ -6372,12 +6947,12 @@ function createAssistantEntry(
     marginTop: 1,
     flexDirection: "column",
     flexShrink: 0,
-    visible: !!content,
+    visible: !hasParts && !!content,
   }, [contentMarkdown]);
   refs.contentBox = contentBox;
   children.push(contentBox);
 
-  const cursorActive = message.streaming === true && !!content;
+  const cursorActive = message.streaming === true && (hasParts ? lastPartHasText(parts) : !!content);
   const contentCursorText = createText(ctx, "▌", { fg: theme.primary, wrapMode: "none" });
   refs.contentCursorText = contentCursorText;
   const contentCursorBox = createBox(ctx, {
@@ -6406,12 +6981,22 @@ function createAssistantEntry(
     node: createBox(ctx, { flexDirection: "column", flexShrink: 0 }, children),
     refs,
   };
-  updateAssistantToolEntries(entry, tools, {
+  updateAssistantToolEntries(entry, hasParts ? [] : tools, {
     syntaxStyle,
     expandedWrites,
     width,
     onToggleWrite,
+    verboseTrace,
   });
+  if (hasParts) {
+    updateAssistantPartEntries(entry, parts, {
+      syntaxStyle,
+      expandedWrites,
+      width,
+      onToggleWrite,
+      verboseTrace,
+    }, message.streaming === true);
+  }
   return entry;
 }
 
@@ -6672,6 +7257,48 @@ function createPlanRenderable(ctx: RenderContext, plan: string) {
   ]);
 }
 
+function renderTraceGroup(group: TraceGroup, syntaxStyle: SyntaxStyle, width = 80) {
+  const rawTool = group.raw.length === 1 ? group.raw[0] as unknown as DisplayToolCall : undefined;
+  if (rawTool && shouldRenderTraceGroupAsRawTool(rawTool)) {
+    return renderTool(rawTool, syntaxStyle, width);
+  }
+
+  const detailLines = traceGroupDetailLines(group);
+  const status = traceGroupStatus(group);
+  const detailColor = traceGroupDetailColor(group);
+  const detailWidth = Math.max(20, width - 10);
+
+  return h("box", { paddingLeft: 3, marginTop: 1, flexDirection: "column", flexShrink: 0 },
+    h("text", {
+      content: traceGroupHeaderStyledText(group, width),
+      wrapMode: "none",
+    }),
+    detailLines.length > 0
+      ? h("box", { paddingLeft: 2, flexDirection: "column", flexShrink: 0 },
+        detailLines.map((line, index) =>
+          h("text", {
+            fg: detailColor,
+            wrapMode: "word",
+          }, `${index === 0 ? "↳ " : "  "}${truncate(line, detailWidth)}`),
+        ),
+      )
+      : null,
+    group.errorLines.length > 0
+      ? h("box", { paddingLeft: 2, flexDirection: "column", flexShrink: 0 },
+        group.errorLines.map((line, index) =>
+          h("text", {
+            fg: theme.toolError,
+            wrapMode: "word",
+          }, `${index === 0 ? "↳ " : "  "}${truncate(line, detailWidth)}`),
+        ),
+      )
+      : null,
+    group.omitted > 0
+      ? h("text", { fg: theme.textMuted, wrapMode: "word" }, `  ... ${group.omitted} more, Ctrl+O to view`)
+      : null,
+  );
+}
+
 function renderTool(tool: DisplayToolCall, syntaxStyle: SyntaxStyle, width = 80) {
   if (tool.name === "question") {
     return renderQuestionTool(tool);
@@ -6705,9 +7332,9 @@ function renderTool(tool: DisplayToolCall, syntaxStyle: SyntaxStyle, width = 80)
         h("text", { fg: theme.textMuted }, `└ ${summary}`),
         preview ? renderCodeBlockContent(preview.content, toolPath(tool), syntaxStyle) : null,
         preview && preview.omittedLines > 0
-          ? h("text", { fg: theme.textMuted }, `... +${preview.omittedLines} lines (ctrl+o to expand)`)
+          ? h("text", { fg: theme.textMuted }, `... +${preview.omittedLines} lines (click or /write-previews to expand)`)
           : preview && preview.omittedChars > 0
-            ? h("text", { fg: theme.textMuted }, `... +${preview.omittedChars} chars (ctrl+o to expand)`)
+            ? h("text", { fg: theme.textMuted }, `... +${preview.omittedChars} chars (click or /write-previews to expand)`)
             : null,
       ),
     );
@@ -6788,6 +7415,8 @@ function renderFooter(input: {
   running: () => boolean;
   registerScanner: (sync: PromptScannerSync) => () => void;
   registerModeBadge?: (ref: TextRenderable) => void;
+  traceVerbose?: () => boolean;
+  registerTraceBadge?: (ref: TextRenderable) => void;
 }) {
   return h("box", { flexShrink: 0, height: 1, paddingLeft: 1, paddingRight: 1, flexDirection: "row" },
     h("text", { fg: theme.border }, "─ "),
@@ -6802,6 +7431,10 @@ function renderFooter(input: {
       fg: permissionModeColor(input.mode()),
       ref: input.registerModeBadge,
     }, footerPermissionModeText(input.mode())),
+    h("text", {
+      fg: input.traceVerbose?.() ? theme.warning : theme.textMuted,
+      ref: input.registerTraceBadge,
+    }, footerTraceModeText(input.traceVerbose?.() === true)),
     h("box", { flexGrow: 1 }),
   );
 }
@@ -7079,6 +7712,7 @@ type TranscriptOptions = {
   plan?: string;
   selectedOption?: number;
   showThinking?: boolean;
+  verboseTrace?: boolean;
   onToggleCompaction?: (key: string) => void;
   onToggleWrite?: (key: string) => void;
 };
@@ -7090,23 +7724,25 @@ function renderTranscript(
   subtleSyntaxStyle: SyntaxStyle,
 ) {
   const showThinking = options?.showThinking ?? true;
+  const verboseTrace = options?.verboseTrace ?? false;
   const visibleMessages = messages.filter((message) => hasRenderableMessage(message, showThinking));
   if (!visibleMessages.length) return null;
   const items = visibleMessages.map((message, index) =>
-    renderMessage(message, index, syntaxStyle, subtleSyntaxStyle, showThinking, options?.width ?? 80)
+    renderMessage(message, index, syntaxStyle, subtleSyntaxStyle, showThinking, verboseTrace, options?.width ?? 80)
   );
   if (options?.plan) items.push(renderPlanPrompt(options.plan));
   return items;
 }
 
-function renderSessionMessages(messages: DisplayMessage[], syntaxStyle: SyntaxStyle, subtleSyntaxStyle: SyntaxStyle, showThinking = true) {
+function renderSessionMessages(messages: DisplayMessage[], syntaxStyle: SyntaxStyle, subtleSyntaxStyle: SyntaxStyle, showThinking = true, verboseTrace = false) {
   const visibleMessages = messages.filter((message) => hasRenderableMessage(message, showThinking));
   if (!visibleMessages.length) return null;
-  return visibleMessages.map((message, index) => renderMessage(message, index, syntaxStyle, subtleSyntaxStyle, showThinking));
+  return visibleMessages.map((message, index) => renderMessage(message, index, syntaxStyle, subtleSyntaxStyle, showThinking, verboseTrace));
 }
 
 function formatTranscript(messages: DisplayMessage[], options?: TranscriptOptions): StyledText {
   const showThinking = options?.showThinking ?? true;
+  const verboseTrace = options?.verboseTrace ?? false;
   const visibleMessages = messages.filter((message) => hasRenderableMessage(message, showThinking));
   const chunks: StyledText["chunks"] = [];
   const append = (content: string, color = theme.text) => {
@@ -7142,33 +7778,32 @@ function formatTranscript(messages: DisplayMessage[], options?: TranscriptOption
       append("│  ", theme.messageThinkingBorder);
       appendLine(truncate(formatThinkingMarkdown(visibleReasoning), 500), theme.messageThinkingContentText);
     }
-    if (message.status && !visibleReasoning && !message.content.trim() && !(message.toolCalls?.length)) {
+    if (message.status && !visibleReasoning && !message.content.trim() && !(message.toolCalls?.length) && !(message.parts?.length)) {
       appendBlank();
       append("   ", theme.borderSubtle);
       appendLine(assistantStatusLabel(message), theme.messageThinkingText);
     }
-    for (const tool of message.toolCalls ?? []) {
-      appendBlank();
-      const icon = tool.name === "bash" ? "$" : tool.name === "edit" || tool.name === "write" ? "✎" : "●";
-      const color = toolColor(tool);
-      append(`   ${icon} `, color);
-      append(displayToolName(tool.name), color);
-      const header = toolHeader(tool);
-      if (header) append(` ${header}`, theme.toolText);
-      appendLine("");
-      append("     ", theme.borderSubtle);
-      appendLine(summarizeToolResult(tool), tool.isError ? theme.toolError : theme.textMuted);
-      const preview = toolPreview(tool);
-      if (preview) {
-        for (const line of preview.lines) {
-          append("     ", theme.borderSubtle);
-          appendLine(line, theme.toolText);
+    const parts = message.parts ?? [];
+    if (parts.length > 0) {
+      for (const part of parts) {
+        if (part.type === "text") {
+          appendAssistantTextTranscript(chunks, part.content);
+          continue;
         }
-        if (preview.omitted > 0) {
-          append("     ", theme.borderSubtle);
-          appendLine(`+ ${preview.omitted} more`, theme.textMuted);
+        if (verboseTrace) {
+          for (const tool of part.toolCalls) appendRawToolTranscript(chunks, tool);
+        } else {
+          for (const group of buildTraceGroups(part.toolCalls)) appendTraceGroupTranscript(chunks, group);
         }
       }
+      continue;
+    }
+    if (verboseTrace) {
+      for (const tool of message.toolCalls ?? []) {
+        appendRawToolTranscript(chunks, tool);
+      }
+    } else {
+      for (const group of buildTraceGroups(message.toolCalls ?? [])) appendTraceGroupTranscript(chunks, group);
     }
     if (message.content.trim()) {
       const modelSwitch = parseModelSwitchMessage(message.content);
@@ -7180,15 +7815,89 @@ function formatTranscript(messages: DisplayMessage[], options?: TranscriptOption
         appendLine(modelSwitch, theme.primary);
         continue;
       }
-      appendBlank();
-      for (const line of message.content.trim().split(/\r?\n/)) {
-        append("   ", theme.borderSubtle);
-        appendLine(line || " ", theme.messageAssistantText);
-      }
+      appendAssistantTextTranscript(chunks, message.content);
     }
   }
   if (options?.plan) appendPlanTranscript(chunks, options.plan, options.selectedOption ?? 0);
   return new StyledText(chunks);
+}
+
+function appendAssistantTextTranscript(chunks: StyledText["chunks"], content: string) {
+  const trimmed = content.trim();
+  if (!trimmed) return;
+  chunks.push(fg(theme.text)("\n"));
+  for (const line of trimmed.split(/\r?\n/)) {
+    chunks.push(fg(theme.borderSubtle)("   "));
+    chunks.push(fg(theme.messageAssistantText)(`${line || " "}\n`));
+  }
+}
+
+function appendRawToolTranscript(chunks: StyledText["chunks"], tool: DisplayToolCall) {
+  const append = (content: string, color = theme.text) => {
+    if (content) chunks.push(fg(color)(content));
+  };
+  const appendLine = (content = "", color = theme.text) => {
+    append(`${content}\n`, color);
+  };
+
+  appendLine("");
+  const icon = tool.name === "bash" ? "$" : tool.name === "edit" || tool.name === "write" ? "✎" : "●";
+  const color = toolColor(tool);
+  append(`   ${icon} `, color);
+  append(displayToolName(tool.name), color);
+  const header = toolHeader(tool);
+  if (header) append(` ${header}`, theme.toolText);
+  appendLine("");
+  append("     ", theme.borderSubtle);
+  appendLine(summarizeToolResult(tool), tool.isError ? theme.toolError : theme.textMuted);
+  const preview = toolPreview(tool);
+  if (preview) {
+    for (const line of preview.lines) {
+      append("     ", theme.borderSubtle);
+      appendLine(line, theme.toolText);
+    }
+    if (preview.omitted > 0) {
+      append("     ", theme.borderSubtle);
+      appendLine(`+ ${preview.omitted} more`, theme.textMuted);
+    }
+  }
+}
+
+function appendTraceGroupTranscript(chunks: StyledText["chunks"], group: TraceGroup) {
+  const rawTool = group.raw.length === 1 ? group.raw[0] as unknown as DisplayToolCall : undefined;
+  if (rawTool && shouldRenderTraceGroupAsRawTool(rawTool)) {
+    appendRawToolTranscript(chunks, rawTool);
+    return;
+  }
+
+  const append = (content: string, color = theme.text) => {
+    if (content) chunks.push(fg(color)(content));
+  };
+  const appendLine = (content = "", color = theme.text) => {
+    append(`${content}\n`, color);
+  };
+
+  appendLine("");
+  append("   ", theme.borderSubtle);
+  append(traceGroupLabel(group), traceGroupTitleColor(group));
+  const status = traceGroupStatus(group);
+  if (status) append(` ${status.text}`, status.color);
+  appendLine("");
+  if (group.pending) return;
+  const detailLines = traceGroupDetailLines(group);
+  const detailColor = traceGroupDetailColor(group);
+  for (const [index, line] of detailLines.entries()) {
+    append("     ", theme.borderSubtle);
+    appendLine(`${index === 0 ? "↳ " : "  "}${line}`, detailColor);
+  }
+  for (const [index, line] of group.errorLines.entries()) {
+    append("     ", theme.borderSubtle);
+    appendLine(`${index === 0 ? "↳ " : "  "}${line}`, theme.toolError);
+  }
+  if (group.omitted > 0) {
+    append("     ", theme.borderSubtle);
+    appendLine(`... ${group.omitted} more, Ctrl+O to view`, theme.textMuted);
+  }
 }
 
 function renderHomeState(input: { width: number; cwd: string; tip: string }) {
@@ -7217,6 +7926,7 @@ function hasRenderableMessage(message: DisplayMessage, showThinking = true) {
   if (message.status) return true;
   if (showThinking && message.reasoning?.trim()) return true;
   if (message.content.trim()) return true;
+  if ((message.parts?.length ?? 0) > 0) return true;
   return (message.toolCalls?.length ?? 0) > 0;
 }
 
@@ -7352,6 +8062,10 @@ function footerPermissionModeText(mode: PermissionMode) {
   if (mode === "default") return "  mode: build · shift+tab plan";
   if (mode === "plan") return "  mode: plan · shift+tab bypass";
   return `  mode: ${info.shortTitle} · shift+tab build`;
+}
+
+function footerTraceModeText(verbose: boolean) {
+  return verbose ? "  trace: verbose · ctrl+o compact" : "  trace: compact · ctrl+o verbose";
 }
 
 function permissionModeColor(mode: PermissionMode) {
@@ -7575,9 +8289,8 @@ function isToolFinished(tool: DisplayToolCall): boolean {
 
 function assistantStatusLabel(message: DisplayMessage): string {
   if (message.status === "responding") return "Responding...";
-  const elapsed = formatDuration(reasoningElapsedMs(message));
-  if (message.streaming) return elapsed ? `Thinking ${elapsed}...` : "Thinking...";
-  return elapsed ? `Thought for ${elapsed}` : "Thinking";
+  if (message.streaming) return "Thinking...";
+  return "Thinking";
 }
 
 function buildContextGauge(percent: number, barWidth: number): string {
@@ -7606,10 +8319,8 @@ function formatContextRemaining(value: number) {
 }
 
 function thinkingLabelContent(streaming = false, elapsedMs?: number): StyledText {
-  const elapsed = formatDuration(elapsedMs);
-  const label = streaming
-    ? (elapsed ? `Thinking ${elapsed}...` : "Thinking...")
-    : (elapsed ? `Thought for ${elapsed}` : "Thought");
+  void elapsedMs;
+  const label = streaming ? "Thinking..." : "Thought";
   return new StyledText([
     fg(theme.messageThinkingText)(italic(label)),
   ]);
@@ -7628,7 +8339,7 @@ function formatDuration(ms?: number): string {
     minutes += Math.floor(remSec / 60);
     remSec = remSec % 60;
   }
-  return remSec === 0 ? `${minutes}m` : `${minutes}m${remSec}s`;
+  return remSec === 0 ? `${minutes}m` : `${minutes}m ${remSec}s`;
 }
 
 function reasoningElapsedMs(message: DisplayMessage): number | undefined {
@@ -7654,17 +8365,8 @@ function turnElapsedMs(message: DisplayMessage): number | undefined {
 }
 
 function formatTurnSummary(message: DisplayMessage): string | undefined {
-  const parts: string[] = [];
-  const elapsed = turnElapsedMs(message);
-  if (elapsed !== undefined) parts.push(formatDuration(elapsed));
-  const usage = message.turnUsage;
-  if (usage) {
-    if (usage.promptTokens) parts.push(`${formatCompactNumber(usage.promptTokens)}↑`);
-    if (usage.completionTokens) parts.push(`${formatCompactNumber(usage.completionTokens)}↓`);
-    if (usage.reasoningTokens) parts.push(`${formatCompactNumber(usage.reasoningTokens)}◇`);
-  }
-  if (!parts.length) return undefined;
-  return `· ${parts.join(" · ")}`;
+  if (message.taskElapsedMs === undefined) return undefined;
+  return `Task duration: ${formatDuration(message.taskElapsedMs)}`;
 }
 
 function truncate(value: string, max: number) {

@@ -393,12 +393,11 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   // shell scrollback. Without this, the last visible "> " input row stays
   // glued to the bottom of the terminal after exit.
   const [isExiting, setIsExiting] = useState(false);
-  // 1Hz tick used to refresh elapsed counters on in-progress tool rows and
-  // on the WaitingIndicator. Only ticks while the agent is running so we
-  // don't churn renders at idle.
+  // 1Hz tick keeps the composer activity indicator animated while the agent is
+  // running without churning renders at idle.
   const [nowTick, setNowTick] = useState<number>(() => Date.now());
-  // Timestamp of when the current agent run started — drives elapsed display
-  // on the WaitingIndicator.
+  // Timestamp of when the current agent run started. Used only for the final
+  // per-task duration summary.
   const runStartRef = useRef<number | null>(null);
   // Mark the moment the run started; flips back to null in the finally block.
   useEffect(() => {
@@ -846,7 +845,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           toolCalls.length > 0 ||
           assistantParts.length > 0
         );
-        const commitAssistantMessage = () => {
+        const commitAssistantMessage = (taskElapsedMs?: number) => {
           if (!hasAssistantOutput()) return;
 
           const currentParts = snapshotDisplayParts(assistantParts);
@@ -868,6 +867,9 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           }
           if (currentParts.length > 0) {
             msg.parts = currentParts;
+          }
+          if (taskElapsedMs !== undefined && Number.isFinite(taskElapsedMs) && taskElapsedMs > 0) {
+            msg.taskElapsedMs = taskElapsedMs;
           }
           updateDisplayMessages((prev) => [...prev, msg]);
         };
@@ -1043,7 +1045,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
                   syncStreamingParts();
                   break;
                 }
-                commitAssistantMessage();
+                commitAssistantMessage(runStartRef.current ? Date.now() - runStartRef.current : undefined);
                 clearAssistantStream();
                 break;
               }
@@ -1376,7 +1378,6 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
             hasStreamingText={streamingContent.length > 0}
             hasStreamingReasoning={streamingReasoning.length > 0}
             streamedChars={streamingContent.length + streamingReasoning.length}
-            runStartedAt={runStartRef.current ?? undefined}
             nowTick={nowTick}
           />
         </Box>
@@ -1476,7 +1477,6 @@ interface WaitingIndicatorProps {
   hasStreamingText: boolean;
   hasStreamingReasoning: boolean;
   streamedChars: number;
-  runStartedAt?: number;
   nowTick: number;
 }
 
@@ -1485,9 +1485,9 @@ function WaitingIndicator({
   hasStreamingText,
   hasStreamingReasoning,
   streamedChars,
-  runStartedAt,
   nowTick,
 }: WaitingIndicatorProps) {
+  void nowTick;
   const theme = useTheme();
   const [frameIndex, setFrameIndex] = useState(0);
   const [idlePhrase, setIdlePhrase] = useState(() => GENERIC_PHRASES[0]);
@@ -1534,10 +1534,6 @@ function WaitingIndicator({
     phrase = idlePhrase;
   }
 
-  const elapsedSec = runStartedAt
-    ? Math.max(0, Math.floor((nowTick - runStartedAt) / 1000))
-    : 0;
-  const elapsedText = elapsedSec > 0 ? `${elapsedSec}s` : "0s";
   const tokenText = streamedChars > 0 ? `↓${formatTokensApprox(streamedChars)} tok` : "";
 
   return (
@@ -1545,8 +1541,7 @@ function WaitingIndicator({
       <Text color={theme.accent}>{SPINNER_FRAMES[frameIndex]}</Text>
       <Text color={theme.muted}> {phrase} </Text>
       <Text color={theme.muted} dimColor>
-        ({elapsedText}
-        {tokenText ? ` · ${tokenText}` : ""} · esc·esc to interrupt)
+        ({tokenText ? `${tokenText} · ` : ""}esc·esc to interrupt)
       </Text>
     </Box>
   );

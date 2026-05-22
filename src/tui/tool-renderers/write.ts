@@ -50,11 +50,11 @@ function renderWriteTool({ ctx, tool, syntaxStyle, writeExpanded, onToggleWrite,
     ? helpers.summarizeToolResult(tool)
     : `${helpers.isToolFinished(tool) ? "Prepared" : "Writing"} ${writeLineCount} line${writeLineCount === 1 ? "" : "s"} to ${helpers.toolPath(tool) ?? "file"}`;
   const hint = preview && preview.omittedLines > 0
-    ? `... +${preview.omittedLines} lines (${writeExpanded ? "ctrl+o to collapse" : "ctrl+o to expand"})`
+    ? `... +${preview.omittedLines} lines (${writeExpanded ? "click or /write-previews to collapse" : "click or /write-previews to expand"})`
     : preview && preview.omittedChars > 0
-      ? `... +${preview.omittedChars} chars (${writeExpanded ? "ctrl+o to collapse" : "ctrl+o to expand"})`
+      ? `... +${preview.omittedChars} chars (${writeExpanded ? "click or /write-previews to collapse" : "click or /write-previews to expand"})`
       : preview && writeExpanded
-        ? "(ctrl+o to collapse)"
+        ? "(click or /write-previews to collapse)"
         : "";
 
   return helpers.createBox(ctx, {

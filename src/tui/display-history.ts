@@ -14,6 +14,7 @@ export interface DisplayMessage {
   content: string;
   reasoning?: string;
   toolCalls?: DisplayToolCall[];
+  parts?: DisplayMessagePart[];
   status?: "thinking" | "responding";
   streaming?: boolean;
   syntheticKind?: "ui_compact_card";
@@ -22,6 +23,19 @@ export interface DisplayMessage {
   turnStartedAt?: number;
   turnCompletedAt?: number;
   turnUsage?: TokenUsage;
+  taskElapsedMs?: number;
+}
+
+export type DisplayMessagePart = DisplayTextPart | DisplayToolsPart;
+
+export interface DisplayTextPart {
+  type: "text";
+  content: string;
+}
+
+export interface DisplayToolsPart {
+  type: "tools";
+  toolCalls: DisplayToolCall[];
 }
 
 export interface DisplayToolCall {
@@ -38,6 +52,48 @@ export interface DisplayToolCall {
   metadata?: ToolResultMetadata;
   startedAt?: number;
   completedAt?: number;
+}
+
+export function appendTextPart(parts: DisplayMessagePart[], content: string): void {
+  if (!content) return;
+  const last = parts[parts.length - 1];
+  if (last?.type === "text") {
+    last.content += content;
+  } else {
+    parts.push({ type: "text", content });
+  }
+}
+
+export function appendToolPart(parts: DisplayMessagePart[], toolCall: DisplayToolCall): void {
+  const last = parts[parts.length - 1];
+  if (last?.type === "tools") {
+    last.toolCalls.push(toolCall);
+  } else {
+    parts.push({ type: "tools", toolCalls: [toolCall] });
+  }
+}
+
+export function snapshotDisplayParts(parts: DisplayMessagePart[]): DisplayMessagePart[] {
+  return parts.map((part) => {
+    if (part.type === "text") {
+      return { ...part };
+    }
+    return {
+      type: "tools",
+      toolCalls: part.toolCalls.map(cloneToolCall),
+    };
+  });
+}
+
+export function contentFromParts(parts: DisplayMessagePart[]): string {
+  return parts
+    .filter((part): part is DisplayTextPart => part.type === "text")
+    .map((part) => part.content)
+    .join("");
+}
+
+export function toolCallsFromParts(parts: DisplayMessagePart[]): DisplayToolCall[] {
+  return parts.flatMap((part) => part.type === "tools" ? part.toolCalls : []);
 }
 
 const MAX_VISIBLE_MESSAGES = 80;
@@ -300,12 +356,37 @@ function compactDisplayMessage(message: DisplayMessage): DisplayMessage {
     reasoning: message.reasoning
       ? truncateText(message.reasoning, MAX_OLD_REASONING_CHARS)
       : message.reasoning,
-    toolCalls: message.toolCalls?.map((toolCall) => ({
-      ...toolCall,
-      result: toolCall.result
-        ? truncateText(toolCall.result, MAX_OLD_TOOL_RESULT_CHARS)
-        : toolCall.result,
-    })),
+    toolCalls: message.toolCalls?.map(compactToolCall),
+    parts: message.parts?.map(compactDisplayPart),
+  };
+}
+
+function cloneToolCall(toolCall: DisplayToolCall): DisplayToolCall {
+  return {
+    ...toolCall,
+    args: { ...toolCall.args },
+  };
+}
+
+function compactDisplayPart(part: DisplayMessagePart): DisplayMessagePart {
+  if (part.type === "text") {
+    return {
+      ...part,
+      content: truncateText(part.content, MAX_OLD_CONTENT_CHARS),
+    };
+  }
+  return {
+    type: "tools",
+    toolCalls: part.toolCalls.map(compactToolCall),
+  };
+}
+
+function compactToolCall(toolCall: DisplayToolCall): DisplayToolCall {
+  return {
+    ...toolCall,
+    result: toolCall.result
+      ? truncateText(toolCall.result, MAX_OLD_TOOL_RESULT_CHARS)
+      : toolCall.result,
   };
 }
 

@@ -10,6 +10,7 @@ export interface DisplayMessage {
   parts?: DisplayMessagePart[];
   syntheticKind?: "ui_summary";
   hiddenCount?: number;
+  taskElapsedMs?: number;
 }
 
 export type DisplayMessagePart = DisplayTextPart | DisplayToolsPart;
