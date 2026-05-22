@@ -639,8 +639,25 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
   const previousViewportRowsRef = useRef<number | null>(null);
   const previousInputFrameSignatureRef = useRef<string | null>(null);
   const previousRowCompensationRef = useRef(0);
+  const lastWidthRef = useRef<number | null>(null);
   const { setCursorPosition } = useCursor();
   const { stdout } = useStdout();
+
+  // After a terminal resize the previous-frame refs reference a layout that no
+  // longer exists; carrying them forward makes `needsCursorRowCompensation`
+  // compare new yoga heights against stale ones and offsets the cursor by a
+  // row. Reset to a "no previous frame" state so the next layout effect treats
+  // the new width as a fresh start.
+  useLayoutEffect(() => {
+    if (lastWidthRef.current !== null && lastWidthRef.current !== width) {
+      previousOutputHeightRef.current = null;
+      previousViewportRowsRef.current = null;
+      previousInputFrameSignatureRef.current = null;
+      previousRowCompensationRef.current = 0;
+      lastCursorRef.current = null;
+    }
+    lastWidthRef.current = width;
+  }, [width]);
 
   const contentWidth = Math.max(1, width - PADDING_X * 2);
   const lineWidth = Math.max(1, contentWidth - PROMPT.length);

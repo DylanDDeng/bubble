@@ -480,18 +480,32 @@ function TraceGroupBlock({
   const commandWidth = Math.max(14, terminalColumns - group.title.length - 20);
   const detailWidth = Math.max(20, terminalColumns - 8);
   const detailLines = group.previewLines.length > 0 ? group.previewLines : group.items;
+  // When a bash command is too long to fit on the title line, drop it onto its
+  // own indented rows so narrow splits keep the full command visible instead of
+  // silently truncating mid-flag.
+  const commandFitsInline = !group.command || visualWidth(group.command) <= commandWidth;
+  const wrappedCommandLines = group.command && !commandFitsInline
+    ? wrapByVisualWidth(group.command, Math.max(10, detailWidth - 2))
+    : null;
 
   return (
     <Box flexDirection="column" marginLeft={2} marginTop={compactTop ? 0 : 1}>
       <Text>
         <Text bold color={titleColor}>{group.title}</Text>
-        {group.command ? (
-          <Text color={theme.traceCommand}> {truncateVisual(group.command, commandWidth)}</Text>
-        ) : group.count !== undefined && group.noun ? (
+        {group.command && commandFitsInline ? (
+          <Text color={theme.traceCommand}> {group.command}</Text>
+        ) : !group.command && group.count !== undefined && group.noun ? (
           <Text color={theme.traceCount}> {group.count} {group.noun}</Text>
         ) : null}
         {status && <Text color={status.color}> {status.text}</Text>}
       </Text>
+      {wrappedCommandLines && (
+        <Box flexDirection="column" marginLeft={2}>
+          {wrappedCommandLines.map((seg, idx) => (
+            <Text key={`cmd-${idx}`} color={theme.traceCommand}>{seg}</Text>
+          ))}
+        </Box>
+      )}
       {detailLines.length > 0 && (
         <Box flexDirection="column" marginLeft={2}>
           {detailLines.map((line, index) => (
@@ -1222,9 +1236,11 @@ function DiffBlock({
   const bandWidth = Math.max(10, terminalColumns - 7);
   const contentWidth = Math.max(1, bandWidth - prefixWidth);
 
+  const blankPrefix = " ".repeat(prefixWidth);
+
   return (
     <Box flexDirection="column" marginLeft={leftMargin}>
-      {shown.map((line, i) => {
+      {shown.flatMap((line, i) => {
         const bg =
           line.type === "add"
             ? theme.diffAdd
@@ -1233,14 +1249,21 @@ function DiffBlock({
               : undefined;
         const sign = line.type === "add" ? "+" : line.type === "remove" ? "-" : " ";
         const numStr = String(line.num).padStart(numWidth, " ");
-        const truncated = truncateVisual(line.content, contentWidth);
-        const padded = padVisual(truncated, contentWidth);
-        const lineText = ` ${numStr} ${sign} ${padded}`;
-        return (
-          <Text key={i} backgroundColor={bg} color={theme.userMessageText}>
-            {lineText}
-          </Text>
-        );
+        // Soft-wrap long lines at the terminal-derived content width so narrow
+        // splits still show the full content. Continuation rows reuse the same
+        // background but blank out the gutter (no line number, no +/-) so a
+        // reader can tell at a glance which rows belong to the same logical
+        // diff line.
+        const segments = wrapByVisualWidth(line.content, contentWidth);
+        return segments.map((segment, segIdx) => {
+          const padded = padVisual(segment, contentWidth);
+          const prefix = segIdx === 0 ? ` ${numStr} ${sign} ` : blankPrefix;
+          return (
+            <Text key={`${i}-${segIdx}`} backgroundColor={bg} color={theme.userMessageText}>
+              {`${prefix}${padded}`}
+            </Text>
+          );
+        });
       })}
       <TruncationHint remaining={remaining} verbose={verbose} showExpandHint={showExpandHint} />
     </Box>
