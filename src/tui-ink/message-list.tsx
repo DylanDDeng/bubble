@@ -132,6 +132,10 @@ function MessageItem({
     );
   }
 
+  if (message.syntheticKind === "ui_compact_summary") {
+    return <CompactionSummaryBlock message={message} />;
+  }
+
   const hasVisibleAssistantContent =
     !!message.content ||
     (message.toolCalls?.length ?? 0) > 0 ||
@@ -621,6 +625,26 @@ function ReasoningTraceBlock({ reasoning }: { reasoning: string }) {
           {line}
         </Text>
       ))}
+    </Box>
+  );
+}
+
+function CompactionSummaryBlock({ message }: { message: DisplayMessage }) {
+  const theme = useTheme();
+  const status = message.content.replace(/^✓\s*/, "").trim() || "Session compacted";
+  const summary = message.compactionSummary?.trim();
+  return (
+    <Box marginTop={1} marginBottom={1} flexDirection="column">
+      <Box flexDirection="row">
+        <Text color={theme.success} bold>✓ </Text>
+        <Text color={theme.accent} bold>Compaction</Text>
+        <Text color={theme.muted}>  ·  {status}</Text>
+      </Box>
+      {summary && (
+        <Box marginTop={1} paddingLeft={3} flexDirection="column">
+          <MarkdownContent content={summary} />
+        </Box>
+      )}
     </Box>
   );
 }

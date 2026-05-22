@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { formatRelativeTime, getRecentSessions, truncatePreview } from "../tui/recent-activity.js";
+import { formatRelativeTime, getRecentSessions, truncatePreview } from "../tui-ink/recent-activity.js";
 
 describe("formatRelativeTime", () => {
   const now = Date.UTC(2026, 3, 18, 12, 0, 0);

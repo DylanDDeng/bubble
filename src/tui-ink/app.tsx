@@ -13,6 +13,7 @@ import {
   appendToolPart,
   compactDisplayMessages,
   contentFromParts,
+  latestCompactionSummary,
   nextDisplayMessageKey,
   snapshotDisplayParts,
   type DisplayMessage,
@@ -1125,7 +1126,23 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
             setPermissionMode(agent.mode);
           }
           if (result) {
-            addMessage("assistant", result);
+            // `/compact` rewrites agent.messages, so the Ink transcript needs to
+            // be rebuilt from the new agent state before appending the summary
+            // card; otherwise the pre-compaction history would keep rendering.
+            if (result.startsWith("✓ Compaction complete")) {
+              const summary = latestCompactionSummary(agent.messages);
+              updateDisplayMessages(() => [
+                ...reconstructDisplayMessages(agent.messages),
+                {
+                  role: "assistant",
+                  content: result,
+                  syntheticKind: "ui_compact_summary",
+                  compactionSummary: summary,
+                },
+              ]);
+            } else {
+              addMessage("assistant", result);
+            }
           }
           if (inject) {
             await runAgentInput(inject, input);

@@ -851,6 +851,7 @@ const builtinSlashCommandEntries: SlashCommand[] = [
         ...(systemMessage ? [systemMessage] : []),
         ...ctx.sessionManager.getMessages(),
       ];
+      ctx.agent.resetContextUsageAnchor();
 
       const dropped = result.droppedEntries ?? 0;
       return `✓ Compaction complete · ${dropped} log entr${dropped === 1 ? "y" : "ies"} summarized`;

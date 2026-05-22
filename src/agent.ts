@@ -174,6 +174,12 @@ export class Agent {
     });
   }
 
+  resetContextUsageAnchor(): void {
+    this.lastInputTokens = null;
+    this.lastAnchorMessageCount = null;
+    this.fileStateTracker?.invalidateReadHistory();
+  }
+
   /** Whether a given tool is deferred and not yet unlocked. */
   isDeferredAndLocked(name: string): boolean {
     const tool = this.tools.get(name);

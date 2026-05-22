@@ -7,7 +7,7 @@ import {
   filterFileSuggestions,
   findAtContext,
   invalidateFileListCache,
-} from "../tui/file-mentions.js";
+} from "../tui-ink/file-mentions.js";
 
 describe("findAtContext", () => {
   it("returns null when no @ before cursor", () => {

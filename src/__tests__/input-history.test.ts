@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pushHistoryEntry, stepHistory } from "../tui/input-history.js";
+import { pushHistoryEntry, stepHistory } from "../tui-ink/input-history.js";
 
 describe("input history navigation", () => {
   const history = ["first", "second", "third"];

@@ -314,6 +314,7 @@ describe("slash commands", () => {
 
   it("/compact rebuilds agent history without clearing the TUI first", async () => {
     const clearMessages = vi.fn();
+    const resetContextUsageAnchor = vi.fn();
     const ctx = createContext({
       clearMessages,
       agent: {
@@ -321,6 +322,7 @@ describe("slash commands", () => {
           { role: "system", content: "system prompt" },
           { role: "user", content: "old prompt" },
         ],
+        resetContextUsageAnchor,
       } as any,
       sessionManager: {
         compact: vi.fn(() => ({ compacted: true, droppedEntries: 2 })),
@@ -343,6 +345,7 @@ describe("slash commands", () => {
       { role: "user", content: "recent prompt" },
       { role: "assistant", content: "recent answer" },
     ]);
+    expect(resetContextUsageAnchor).toHaveBeenCalledTimes(1);
   });
 
   it("/memory summarize and refresh delegate to Codex-style memory handlers", async () => {

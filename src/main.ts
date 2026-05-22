@@ -381,10 +381,9 @@ async function main() {
     if (themeConfig.mode === "auto") {
       // Probe before either TUI runtime owns stdin. OSC 11 needs raw mode, and
       // runtime renderers can consume the reply before startup code sees it.
-      const { detectTerminalTheme } = await import("./tui/detect-theme.js");
+      const { detectTerminalTheme } = await import("./tui-ink/detect-theme.js");
       detectedTheme = await detectTerminalTheme();
     }
-    const tuiRuntime = process.env.BUBBLE_TUI === "opentui" ? "opentui" : "ink";
     const commonOptions = {
       sessionManager,
       createProvider,
@@ -402,25 +401,14 @@ async function main() {
       runMemorySummary,
       runMemoryRefresh,
     };
-    if (tuiRuntime === "opentui") {
-      const { runTui } = await import("./tui/run.js");
-      await runTui(agent, args, {
-        ...commonOptions,
-        themeMode: themeConfig.mode,
-        themeOverrides: themeConfig.overrides,
-        detectedTheme,
-        onThemeModeChange: (mode) => userConfig.setThemeMode(mode),
-      });
-    } else {
-      const { runTui } = await import("./tui-ink/run.js");
-      await runTui(agent, args, {
-        ...commonOptions,
-        themeMode: themeConfig.mode,
-        themeOverrides: themeConfig.overrides,
-        detectedTheme,
-        onThemeModeChange: (mode) => userConfig.setThemeMode(mode),
-      });
-    }
+    const { runTui } = await import("./tui-ink/run.js");
+    await runTui(agent, args, {
+      ...commonOptions,
+      themeMode: themeConfig.mode,
+      themeOverrides: themeConfig.overrides,
+      detectedTheme,
+      onThemeModeChange: (mode) => userConfig.setThemeMode(mode),
+    });
   } finally {
     await shutdownRuntime();
   }
