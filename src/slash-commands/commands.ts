@@ -857,6 +857,16 @@ const builtinSlashCommandEntries: SlashCommand[] = [
       return `✓ Compaction complete · ${dropped} log entr${dropped === 1 ? "y" : "ies"} summarized`;
     },
   },
+  {
+    name: "feedback",
+    description: "Send feedback or report a bug to Bubble developers",
+    async handler(args, ctx) {
+      if (!ctx.openFeedback) {
+        return "Feedback is only available in interactive TUI mode.";
+      }
+      ctx.openFeedback(args ?? "");
+    },
+  },
 ];
 
 /**

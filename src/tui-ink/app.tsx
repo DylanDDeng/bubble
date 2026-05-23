@@ -46,6 +46,8 @@ import type { LspService } from "../lsp/index.js";
 import type { QuestionAnswer, QuestionController, QuestionRequest } from "../question/index.js";
 import type { MemoryScope } from "../memory/index.js";
 import { QuestionDialog } from "./question-dialog.js";
+import { FeedbackDialog } from "./feedback-dialog.js";
+import { collectFeedback } from "../feedback/collect.js";
 import { hasTerminalMouseSequence } from "./terminal-mouse.js";
 import os from "node:os";
 import { existsSync } from "node:fs";
@@ -357,6 +359,10 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     resolve: (decision: ApprovalDecision) => void;
   } | null>(null);
   const [pendingQuestion, setPendingQuestion] = useState<QuestionRequest | null>(null);
+  const [pendingFeedback, setPendingFeedback] = useState<{
+    base: Omit<import("../feedback/types.js").FeedbackPayload, "description">;
+    initialDescription: string;
+  } | null>(null);
   const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | null>(null);
   const [keyProviderId, setKeyProviderId] = useState<string | null>(null);
   const [verboseTrace, setVerboseTrace] = useState(false);
@@ -552,7 +558,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       return;
     }
 
-    if (pendingPlan || pendingApproval || pendingQuestion) return;
+    if (pendingPlan || pendingApproval || pendingQuestion || pendingFeedback) return;
     if (hasTerminalMouseSequence(input)) return;
 
     if (key.ctrl && input === "o" && !pickerMode) {
@@ -621,6 +627,12 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     }
     setPickerMode(mode);
   }, []);
+
+  const openFeedback = useCallback((initialDescription: string) => {
+    const base = collectFeedback(agent, { description: "" });
+    const { description: _drop, ...rest } = base;
+    setPendingFeedback({ base: rest, initialDescription });
+  }, [agent]);
 
   const handleModelSelect = useCallback((model: string) => {
     const run = async () => {
@@ -717,6 +729,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         throw new Error("Provider creation not available");
       }) as any),
       openPicker,
+      openFeedback,
       registry: safeRegistry,
       skillRegistry: safeSkillRegistry!,
       bashAllowlist,
@@ -750,6 +763,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         throw new Error("Provider creation not available");
       }) as any),
       openPicker,
+      openFeedback,
       registry: safeRegistry,
       skillRegistry: safeSkillRegistry!,
       bashAllowlist,
@@ -1107,6 +1121,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
             throw new Error("Provider creation not available");
           }) as any),
           openPicker,
+          openFeedback,
           registry: safeRegistry,
           skillRegistry: safeSkillRegistry!,
           bashAllowlist,
@@ -1316,6 +1331,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
                   throw new Error("Provider creation not available");
                 }) as any),
                 openPicker,
+                openFeedback,
                 registry: safeRegistry,
                 skillRegistry: safeSkillRegistry,
                 bashAllowlist,
@@ -1373,7 +1389,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           />
         </Box>
       )}
-      {pendingQuestion && !pickerMode && !pendingPlan && !pendingApproval && (
+      {pendingQuestion && !pickerMode && !pendingPlan && !pendingApproval && !pendingFeedback && (
         <Box paddingX={1} flexShrink={0}>
           <QuestionDialog
             request={pendingQuestion}
@@ -1388,7 +1404,23 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           />
         </Box>
       )}
-      {!isExiting && isRunning && !pickerMode && !pendingPlan && !pendingApproval && !pendingQuestion && (
+      {pendingFeedback && !pickerMode && !pendingPlan && !pendingApproval && !pendingQuestion && (
+        <Box paddingX={1} flexShrink={0}>
+          <FeedbackDialog
+            base={pendingFeedback.base}
+            initialDescription={pendingFeedback.initialDescription}
+            onDismiss={() => setPendingFeedback(null)}
+            onResult={(result) => {
+              if (result.kind === "success") {
+                addMessage("assistant", `Feedback submitted: ${result.url}`);
+              } else if (result.kind === "error") {
+                addMessage("error", `Feedback failed: ${result.message}`);
+              }
+            }}
+          />
+        </Box>
+      )}
+      {!isExiting && isRunning && !pickerMode && !pendingPlan && !pendingApproval && !pendingQuestion && !pendingFeedback && (
         <Box paddingX={1} paddingBottom={1} flexShrink={0}>
           <WaitingIndicator
             tools={streamingTools}
@@ -1401,7 +1433,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       )}
       {!isExiting && !pickerMode && (
         <Box paddingBottom={1} flexShrink={0}>
-          <InputBox onSubmit={handleSubmit} disabled={isRunning || !!pendingPlan || !!pendingApproval || !!pendingQuestion} skillRegistry={safeSkillRegistry} terminalColumns={terminalColumns} cwd={args.cwd} />
+          <InputBox onSubmit={handleSubmit} disabled={isRunning || !!pendingPlan || !!pendingApproval || !!pendingQuestion || !!pendingFeedback} skillRegistry={safeSkillRegistry} terminalColumns={terminalColumns} cwd={args.cwd} />
         </Box>
       )}
       {!isExiting && (

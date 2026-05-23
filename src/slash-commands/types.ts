@@ -35,6 +35,8 @@ export interface SlashCommandContext {
   getResolvedTheme?: () => "light" | "dark";
   /** Persist a new theme mode AND apply it to the running TUI. */
   setThemeMode?: (mode: ThemeMode) => void;
+  /** Open the feedback dialog. `initialDescription` prefills the description field. */
+  openFeedback?: (initialDescription: string) => void;
 }
 
 /**

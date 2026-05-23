@@ -1,0 +1,15 @@
+name = "bubble-feedback"
+main = "src/index.ts"
+compatibility_date = "2025-01-15"
+
+# Non-secret config. Secrets (GITHUB_TOKEN, CLIENT_SECRET) are set via
+# `wrangler secret put` and never live in this file.
+[vars]
+FEEDBACK_REPO = "DylanDDeng/bubble"
+
+# Rate-limit counter store. The id below is a placeholder — replace with the
+# real namespace id after running:
+#   wrangler kv namespace create RATE_KV
+[[kv_namespaces]]
+binding = "RATE_KV"
+id = "40daa3fe53ae42278fc965409128df8c"
