@@ -20,6 +20,7 @@ import {
 } from "../memory/index.js";
 import type { SlashCommand, SlashCommandContext } from "./types.js";
 import type { UnifiedCommand } from "./unified.js";
+import { feishuCommand } from "./feishu.js";
 
 const VALID_SCOPES: SettingsScope[] = ["user", "project", "local"];
 const VALID_LISTS: RuleList[] = ["allow", "deny"];
@@ -867,6 +868,7 @@ const builtinSlashCommandEntries: SlashCommand[] = [
       ctx.openFeedback(args ?? "");
     },
   },
+  feishuCommand,
 ];
 
 /**

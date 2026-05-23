@@ -5,7 +5,10 @@
 import type { PermissionMode, ThinkingLevel } from "./types.js";
 import { isThinkingLevel } from "./variant/thinking-level.js";
 
+export type CliCommand = "default" | "serve";
+
 export interface CliArgs {
+  command: CliCommand;
   model?: string;
   cwd: string;
   apiKey?: string;
@@ -15,14 +18,32 @@ export interface CliArgs {
   prompt?: string;
   thinkingLevel?: ThinkingLevel;
   mode?: PermissionMode;
+  /** `serve` subcommand: which host to run. */
+  serveHost?: "feishu";
+  /** `serve` subcommand: force wizard. */
+  setup?: boolean;
+  /** `serve` subcommand: kill stale instance (non-interactive). */
+  killOld?: boolean;
+  /** `serve` subcommand: connect then exit. */
+  dryRun?: boolean;
 }
 
 export function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {
+    command: "default",
     cwd: process.cwd(),
   };
 
-  for (let i = 0; i < argv.length; i++) {
+  // Subcommand detection: first non-flag argv item.
+  let startIndex = 0;
+  if (argv.length > 0 && !argv[0]!.startsWith("-")) {
+    if (argv[0] === "serve") {
+      args.command = "serve";
+      startIndex = 1;
+    }
+  }
+
+  for (let i = startIndex; i < argv.length; i++) {
     const arg = argv[i];
     switch (arg) {
       case "--model":
@@ -67,6 +88,18 @@ export function parseArgs(argv: string[]): CliArgs {
       case "--dangerously-skip-permissions":
         args.mode = "bypassPermissions";
         break;
+      case "--feishu":
+        args.serveHost = "feishu";
+        break;
+      case "--setup":
+        args.setup = true;
+        break;
+      case "--kill-old":
+        args.killOld = true;
+        break;
+      case "--dry-run":
+        args.dryRun = true;
+        break;
       default:
         if (!arg.startsWith("-") && !args.prompt) {
           args.prompt = arg;
@@ -80,9 +113,11 @@ export function parseArgs(argv: string[]): CliArgs {
 
 export function printHelp() {
   console.log(`
-Usage: bubble [options] [prompt]
+Usage:
+  bubble [options] [prompt]              Start interactive TUI
+  bubble serve --feishu [options]        Run as a Feishu bot host
 
-Options:
+Options (default):
   -m, --model <model>      Model to use
   --cwd <dir>              Working directory (default: current)
   -k, --api-key <key>      API key for the active provider
@@ -95,5 +130,10 @@ Options:
                            Enable bypass mode (auto-approve EVERY tool; disables all safety prompts)
   -p, --print              Non-interactive mode (single prompt)
   -h, --help               Show this help
+
+Options (serve --feishu):
+  --setup                  Force the wizard (scan QR + bind first scope)
+  --kill-old               Kill any conflicting bubble instance for the same App ID
+  --dry-run                Connect once, then exit (smoke test)
 `);
 }

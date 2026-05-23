@@ -24,6 +24,7 @@ import {
 import type { PendingApprovalHint } from "./message-list.js";
 import { paletteFor, ThemeProvider, useTheme, type ResolvedTheme, type Theme, type ThemeMode } from "./theme.js";
 import { ModelPicker, ProviderPicker, KeyPicker, SkillPicker } from "./model-picker.js";
+import { FeishuSetupPicker } from "./feishu-setup-picker.js";
 import { BUILTIN_PROVIDERS, ProviderRegistry, displayModel, isUserVisibleProvider } from "../provider-registry.js";
 import { buildSystemPrompt } from "../system-prompt.js";
 import type { ThinkingLevel } from "../types.js";
@@ -363,7 +364,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     base: Omit<import("../feedback/types.js").FeedbackPayload, "description">;
     initialDescription: string;
   } | null>(null);
-  const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | null>(null);
+  const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | "feishu-setup" | null>(null);
   const [keyProviderId, setKeyProviderId] = useState<string | null>(null);
   const [verboseTrace, setVerboseTrace] = useState(false);
   const startedWithVisibleHistoryRef = useRef(messages.some((message) => message.syntheticKind !== "ui_summary"));
@@ -621,7 +622,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     setClearEpoch((epoch) => epoch + 1);
   }, []);
 
-  const openPicker = useCallback((mode: "model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill", providerId?: string) => {
+  const openPicker = useCallback((mode: "model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | "feishu-setup", providerId?: string) => {
     if (mode === "key") {
       setKeyProviderId(providerId ?? null);
     }
@@ -1349,6 +1350,18 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
               if (handled && result) addMessage("assistant", result);
             }}
             onCancel={() => setPickerMode(null)}
+          />
+        )}
+        {pickerMode === "feishu-setup" && (
+          <FeishuSetupPicker
+            onComplete={(summary) => {
+              setPickerMode(null);
+              addMessage("assistant", summary);
+            }}
+            onCancel={() => {
+              setPickerMode(null);
+              addMessage("assistant", "已取消 Feishu setup。");
+            }}
           />
         )}
       </Box>

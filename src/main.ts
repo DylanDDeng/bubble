@@ -44,6 +44,20 @@ async function main() {
     process.exit(0);
   }
 
+  if (args.command === "serve") {
+    if (args.serveHost !== "feishu") {
+      console.error(chalk.red("Usage: bubble serve --feishu [--setup | --kill-old | --dry-run]"));
+      process.exit(2);
+    }
+    const { serveFeishu } = await import("./feishu/index.js");
+    await serveFeishu({
+      setup: args.setup,
+      killOld: args.killOld,
+      dryRun: args.dryRun,
+    });
+    return;
+  }
+
   const userConfig = new UserConfig();
   const registry = new ProviderRegistry(userConfig);
   const skillRegistry = new SkillRegistry({
