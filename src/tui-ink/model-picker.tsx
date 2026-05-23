@@ -28,7 +28,6 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
   const [rawOptions, setRawOptions] = useState<ModelPickerOption[]>(() =>
     buildLocalModelOptions(registry, current, recent)
   );
-  const [refreshing, setRefreshing] = useState(false);
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(() =>
     preferredModelIndex(buildLocalModelOptions(registry, current, recent), current)
@@ -89,10 +88,8 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
           const currentIndex = preferredModelIndex(opts, current);
           return index === preferredModelIndex(localOptions, current) ? currentIndex : Math.min(index, Math.max(0, opts.length - 1));
         });
-        setRefreshing(false);
       }
     }
-    setRefreshing(true);
     void refreshRemote();
     return () => {
       cancelled = true;
@@ -159,7 +156,6 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
       <Text bold color={theme.accent}>Select Model</Text>
       <SearchField query={query} placeholder="Type to search models..." />
       <Text color={theme.muted}>↑/↓ navigate · Enter select · Esc cancel · Backspace clear</Text>
-      {refreshing && <Text color={theme.muted}>Refreshing remote model list...</Text>}
       <Box flexDirection="column" marginTop={1}>
         {options.length === 0 && (
           <Text color={theme.muted}>No models match "{query}"</Text>
