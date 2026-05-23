@@ -118,6 +118,95 @@ export function parseMarkdownBlocks(text: string): MarkdownBlock[] {
   return blocks;
 }
 
+/**
+ * Return the byte offset where the LAST markdown block begins in `text`.
+ *
+ * Used by the streaming renderer to split incoming content into a "stable
+ * prefix" (everything before the in-flight block — already-closed blocks)
+ * and an "unstable suffix" (the block currently being typed by the model).
+ * Mirrors parseMarkdownBlocks's lexing rules so the boundary it produces is
+ * compatible with how MarkdownContent will later parse the prefix.
+ *
+ * Returns `text.length` when no blocks are present (empty / whitespace-only
+ * input), and `0` when the entire text is a single in-flight block.
+ */
+export function findLastBlockStart(text: string): number {
+  if (text.length === 0) return 0;
+  const lines = text.split("\n");
+  // `split("\n")` on "abc\n" yields ["abc", ""]; on "abc" yields ["abc"]. The
+  // trailing newline only contributes a length-1 separator for every line
+  // except the final element produced by split.
+  const lineLengthWithSeparator = (idx: number): number => {
+    const len = lines[idx].length;
+    return idx < lines.length - 1 ? len + 1 : len;
+  };
+
+  let i = 0;
+  let offset = 0;
+  let lastBlockStart = text.length;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // Code block (fenced). Unclosed fences extend through EOF — that's exactly
+    // what we want for streaming, since marked-lexer-style "single token until
+    // close" keeps the in-flight code in the unstable suffix.
+    if (line.startsWith("```")) {
+      lastBlockStart = offset;
+      offset += lineLengthWithSeparator(i);
+      i++;
+      while (i < lines.length && !lines[i].startsWith("```")) {
+        offset += lineLengthWithSeparator(i);
+        i++;
+      }
+      if (i < lines.length) {
+        offset += lineLengthWithSeparator(i);
+        i++;
+      }
+      continue;
+    }
+
+    // Table — same shape as parseMarkdownBlocks: consume consecutive `|` lines.
+    if (line.trim().startsWith("|")) {
+      lastBlockStart = offset;
+      while (i < lines.length && lines[i].trim().startsWith("|")) {
+        offset += lineLengthWithSeparator(i);
+        i++;
+      }
+      continue;
+    }
+
+    // Heading.
+    if (/^#{1,6}\s+/.test(line)) {
+      lastBlockStart = offset;
+      offset += lineLengthWithSeparator(i);
+      i++;
+      continue;
+    }
+
+    // Blank line — does not start a block; just advances the offset.
+    if (line.trim() === "") {
+      offset += lineLengthWithSeparator(i);
+      i++;
+      continue;
+    }
+
+    // Paragraph — runs until blank line or start of another block.
+    lastBlockStart = offset;
+    while (
+      i < lines.length &&
+      lines[i].trim() !== "" &&
+      !lines[i].startsWith("```") &&
+      !lines[i].trim().startsWith("|")
+    ) {
+      offset += lineLengthWithSeparator(i);
+      i++;
+    }
+  }
+
+  return lastBlockStart;
+}
+
 function parseTableRow(line: string): string[] {
   let body = line.trim();
   if (body.startsWith("|")) body = body.slice(1);
@@ -488,6 +577,52 @@ function HeadingBlock({ level, text }: { level: number; text: string }) {
   return (
     <Box marginTop={1} marginBottom={1}>
       <Text {...props}>{text}</Text>
+    </Box>
+  );
+}
+
+/**
+ * Streaming-aware wrapper around `MarkdownContent`.
+ *
+ * On every render, splits the incoming `content` into a stable prefix
+ * (everything before the in-flight block) and an unstable suffix (the block
+ * currently being typed). The two halves are rendered as two separate
+ * `MarkdownContent` instances; the stable one uses the same `content` prop
+ * across deltas, so its internal `useMemo([content])` short-circuits and
+ * does NOT re-parse on each token — which is the whole point. Only the
+ * shorter unstable suffix re-parses per delta.
+ *
+ * The boundary advances monotonically (the prefix only grows). A defensive
+ * reset handles the rare case where `content` is replaced wholesale (e.g.,
+ * the user re-enters a turn).
+ */
+export function StreamingMarkdown({
+  content,
+  maxWidth,
+}: {
+  content: string;
+  maxWidth?: number;
+}) {
+  const stablePrefixRef = React.useRef("");
+
+  if (!content.startsWith(stablePrefixRef.current)) {
+    stablePrefixRef.current = "";
+  }
+
+  const boundary = stablePrefixRef.current.length;
+  const tail = content.substring(boundary);
+  const advance = findLastBlockStart(tail);
+  if (advance > 0) {
+    stablePrefixRef.current = content.substring(0, boundary + advance);
+  }
+
+  const stablePrefix = stablePrefixRef.current;
+  const unstableSuffix = content.substring(stablePrefix.length);
+
+  return (
+    <Box flexDirection="column">
+      {stablePrefix && <MarkdownContent content={stablePrefix} maxWidth={maxWidth} />}
+      {unstableSuffix && <MarkdownContent content={unstableSuffix} maxWidth={maxWidth} />}
     </Box>
   );
 }

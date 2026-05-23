@@ -2,7 +2,7 @@ import React from "react";
 import { Box, Static, Text } from "ink";
 import { useTheme, type Theme } from "./theme.js";
 import { highlightCode, inferLang } from "./code-highlight.js";
-import { MarkdownContent } from "./markdown.js";
+import { MarkdownContent, StreamingMarkdown } from "./markdown.js";
 import type { DisplayMessage, DisplayMessagePart, DisplayToolCall } from "./display-history.js";
 import { buildTraceGroups, formatTracePath, traceGroupLabel, type TraceGroup } from "./trace-groups.js";
 import { EDIT_COLLAPSED_DIFF_LINES, formatEditSuccessSummary, getEditDiffDetails } from "./edit-diff.js";
@@ -223,6 +223,7 @@ function StreamingMessage({
             showExpandHint
             nowTick={nowTick}
             showActivity
+            streaming
           />
         </Box>
       )}
@@ -238,6 +239,7 @@ function MessageParts({
   showExpandHint,
   nowTick,
   showActivity = false,
+  streaming = false,
 }: {
   parts: DisplayMessagePart[];
   terminalColumns: number;
@@ -246,8 +248,10 @@ function MessageParts({
   showExpandHint: boolean;
   nowTick?: number;
   showActivity?: boolean;
+  streaming?: boolean;
 }) {
   const lastToolsPartIndex = findLastToolsPartIndex(parts);
+  const lastTextPartIndex = findLastTextPartIndex(parts);
   return (
     <Box flexDirection="column">
       {parts.map((part, idx) => {
@@ -258,6 +262,7 @@ function MessageParts({
               content={part.content}
               compactTop={idx === 0}
               terminalColumns={terminalColumns}
+              streaming={streaming && idx === lastTextPartIndex}
             />
           );
         }
@@ -279,14 +284,28 @@ function MessageParts({
   );
 }
 
+function findLastTextPartIndex(parts: DisplayMessagePart[]): number {
+  for (let i = parts.length - 1; i >= 0; i--) {
+    if (parts[i]?.type === "text") return i;
+  }
+  return -1;
+}
+
 function TimelineText({
   content,
   compactTop,
   terminalColumns,
+  streaming = false,
 }: {
   content: string;
   compactTop: boolean;
   terminalColumns?: number;
+  /**
+   * When true, this text is the in-flight tail of an active stream — render it
+   * via `StreamingMarkdown` so already-closed blocks (tables, code fences,
+   * etc.) commit to a memoized prefix and stop re-parsing on every token.
+   */
+  streaming?: boolean;
 }) {
   const theme = useTheme();
   if (!content.trim()) return null;
@@ -294,11 +313,16 @@ function TimelineText({
   // timeline gutter; pass the remaining width so wide blocks like tables size
   // themselves against the actual content area instead of the raw terminal.
   const available = terminalColumns ? Math.max(20, terminalColumns - 5) : undefined;
+  const trimmed = content.trim();
   return (
     <Box marginLeft={2} marginTop={compactTop ? 0 : 1}>
       <Text color={theme.agent}>⛬  </Text>
       <Box flexDirection="column" flexGrow={1}>
-        <MarkdownContent content={content.trim()} maxWidth={available} />
+        {streaming ? (
+          <StreamingMarkdown content={trimmed} maxWidth={available} />
+        ) : (
+          <MarkdownContent content={trimmed} maxWidth={available} />
+        )}
       </Box>
     </Box>
   );
