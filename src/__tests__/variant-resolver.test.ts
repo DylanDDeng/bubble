@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getModelContextWindow } from "../model-catalog.js";
+import { getBuiltinProvider, getModelContextWindow, listBuiltinModels } from "../model-catalog.js";
 import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingLevel } from "../variant/variant-resolver.js";
 import { getNextThinkingLevel } from "../variant/thinking-level.js";
 
@@ -29,5 +29,18 @@ describe("variant resolver", () => {
   it("cycles through only supported levels", () => {
     expect(getNextThinkingLevel("medium", ["off", "medium", "high"])).toBe("high");
     expect(getNextThinkingLevel("high", ["off", "medium", "high"])).toBe("off");
+  });
+
+  it("includes Alibaba DashScope qwen models", () => {
+    expect(getBuiltinProvider("alibaba")).toMatchObject({
+      baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    });
+    expect(listBuiltinModels("alibaba").map((model) => model.id)).toEqual([
+      "qwen3.6-plus",
+      "qwen3.7-max",
+    ]);
+    expect(getAvailableThinkingLevels("alibaba", "qwen3.7-max")).toEqual(["off"]);
+    expect(getModelContextWindow("alibaba", "qwen3.6-plus")).toBe(1048576);
+    expect(getModelContextWindow("alibaba", "qwen3.7-max")).toBe(1048576);
   });
 });
