@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { Box, Text, useInput, usePaste, useStdout } from "ink";
+import stringWidth from "string-width";
 import { useTheme } from "./theme.js";
 import { ProviderRegistry, encodeModel, decodeModel, displayModel, isUserVisibleProvider, type ModelInfo } from "../provider-registry.js";
 import { listBuiltinModels } from "../model-catalog.js";
@@ -9,6 +10,84 @@ export interface ModelPickerOption {
   label: string;
   group: string;
   providerBadge: string;
+}
+
+export type PickerKeyAction = "up" | "down" | "enter" | "escape" | "backspace" | "delete";
+
+export function resolvePickerKeyAction(
+  input: string,
+  key: {
+    upArrow?: boolean;
+    downArrow?: boolean;
+    return?: boolean;
+    escape?: boolean;
+    backspace?: boolean;
+    delete?: boolean;
+  },
+): PickerKeyAction | undefined {
+  if (key.escape) return "escape";
+  if (key.return) return "enter";
+  if (key.upArrow) return "up";
+  if (key.downArrow) return "down";
+  if (key.backspace) return "backspace";
+  if (key.delete) return "delete";
+
+  const sequence = normalizeEscapeSequence(input);
+  if (/^(?:O|\[[\d;:]*)A$/.test(sequence)) return "up";
+  if (/^(?:O|\[[\d;:]*)B$/.test(sequence)) return "down";
+
+  return undefined;
+}
+
+export function isPrintablePickerInput(input: string): boolean {
+  if (!input) return false;
+  if (input.startsWith("\x1b")) return false;
+  if (isRawEscapeTail(input)) return false;
+  return !/[\x00-\x1f\x7f]/.test(input);
+}
+
+export function truncateVisual(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) return "";
+  if (stringWidth(text) <= maxWidth) return text;
+  if (maxWidth === 1) return "…";
+
+  let out = "";
+  let width = 0;
+  for (const ch of text) {
+    const chWidth = stringWidth(ch);
+    if (width + chWidth > maxWidth - 1) break;
+    out += ch;
+    width += chWidth;
+  }
+  return `${out}…`;
+}
+
+export function padVisual(text: string, width: number): string {
+  return `${text}${" ".repeat(Math.max(0, width - stringWidth(text)))}`;
+}
+
+export function formatSkillPickerRow(
+  skill: { name: string; description?: string },
+  options: { selected: boolean; width: number },
+): string {
+  const width = Math.max(12, options.width);
+  const marker = options.selected ? "> " : "  ";
+  const nameBudget = Math.max(8, Math.min(28, Math.floor(width * 0.35)));
+  const name = truncateVisual(skill.name, nameBudget);
+  const nameCell = padVisual(name, nameBudget);
+  const description = (skill.description ?? "").replace(/\s+/g, " ").trim();
+  const row = description
+    ? `${marker}${nameCell}  ${description}`
+    : `${marker}${nameCell}`;
+  return padVisual(truncateVisual(row, width), width);
+}
+
+function normalizeEscapeSequence(input: string): string {
+  return input.startsWith("\x1b") ? input.slice(1) : input;
+}
+
+function isRawEscapeTail(input: string): boolean {
+  return /^(?:O[ABCDHF]|\[[\d;:]*[A-Za-z~])$/.test(input);
 }
 
 export interface ModelPickerProps {
@@ -105,24 +184,25 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
   }, [rawOptions, query]);
 
   useInput((input, key) => {
-    if (key.escape) {
+    const action = resolvePickerKeyAction(input, key);
+    if (action === "escape") {
       onCancel();
       return;
     }
-    if (key.return) {
+    if (action === "enter") {
       const opt = options[selectedIndex];
       if (opt) onSelect(opt.id);
       return;
     }
-    if (key.upArrow) {
+    if (action === "up") {
       setSelectedIndex((i) => Math.max(0, i - 1));
       return;
     }
-    if (key.downArrow) {
+    if (action === "down") {
       setSelectedIndex((i) => Math.min(options.length - 1, i + 1));
       return;
     }
-    if (key.backspace || key.delete) {
+    if (action === "backspace" || action === "delete") {
       setQuery((q) => {
         const next = q.slice(0, -1);
         setSelectedIndex(0);
@@ -130,7 +210,7 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
       });
       return;
     }
-    if (input && !key.ctrl && !key.meta) {
+    if (isPrintablePickerInput(input) && !key.ctrl && !key.meta) {
       setQuery((q) => {
         const next = q + input;
         setSelectedIndex(0);
@@ -297,24 +377,25 @@ export function ProviderPicker({ providers, current, onSelect, onCancel, title }
   });
 
   useInput((input, key) => {
-    if (key.escape) {
+    const action = resolvePickerKeyAction(input, key);
+    if (action === "escape") {
       onCancel();
       return;
     }
-    if (key.return) {
+    if (action === "enter") {
       const p = providers[selectedIndex];
       if (p) onSelect(p.id);
       return;
     }
-    if (key.upArrow) {
+    if (action === "up") {
       setSelectedIndex((i) => Math.max(0, i - 1));
       return;
     }
-    if (key.downArrow) {
+    if (action === "down") {
       setSelectedIndex((i) => Math.min(providers.length - 1, i + 1));
       return;
     }
-    if (input && input.length === 1 && /[a-z]/i.test(input)) {
+    if (isPrintablePickerInput(input) && input.length === 1 && /[a-z]/i.test(input)) {
       const char = input.toLowerCase();
       for (let i = selectedIndex + 1; i < providers.length; i++) {
         if (providers[i].name.toLowerCase().startsWith(char)) {
@@ -375,19 +456,20 @@ export function KeyPicker({ providerName, onSubmit, onCancel }: KeyPickerProps) 
   const [value, setValue] = useState("");
 
   useInput((input, key) => {
-    if (key.escape) {
+    const action = resolvePickerKeyAction(input, key);
+    if (action === "escape") {
       onCancel();
       return;
     }
-    if (key.return) {
+    if (action === "enter") {
       if (value.trim()) onSubmit(value.trim());
       return;
     }
-    if (key.backspace || key.delete) {
+    if (action === "backspace" || action === "delete") {
       setValue((v) => v.slice(0, -1));
       return;
     }
-    if (input && !key.ctrl && !key.meta) {
+    if (isPrintablePickerInput(input) && !key.ctrl && !key.meta) {
       setValue((v) => v + input);
     }
   });
@@ -425,7 +507,9 @@ export function SkillPicker({ skills, onSelect, onCancel }: SkillPickerProps) {
   const theme = useTheme();
   const { stdout } = useStdout();
   const termHeight = stdout?.rows || 24;
+  const terminalColumns = stdout?.columns || 80;
   const maxVisible = Math.max(5, termHeight - 8);
+  const rowWidth = Math.max(36, Math.min(96, terminalColumns - 6));
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
 
@@ -438,24 +522,25 @@ export function SkillPicker({ skills, onSelect, onCancel }: SkillPickerProps) {
   }, [query, skills]);
 
   useInput((input, key) => {
-    if (key.escape) {
+    const action = resolvePickerKeyAction(input, key);
+    if (action === "escape") {
       onCancel();
       return;
     }
-    if (key.return) {
+    if (action === "enter") {
       const skill = options[selectedIndex];
       if (skill) onSelect(skill.name);
       return;
     }
-    if (key.upArrow) {
+    if (action === "up") {
       setSelectedIndex((i) => Math.max(0, i - 1));
       return;
     }
-    if (key.downArrow) {
+    if (action === "down") {
       setSelectedIndex((i) => Math.min(Math.max(0, options.length - 1), i + 1));
       return;
     }
-    if (key.backspace || key.delete) {
+    if (action === "backspace" || action === "delete") {
       setQuery((q) => {
         const next = q.slice(0, -1);
         setSelectedIndex(0);
@@ -463,7 +548,7 @@ export function SkillPicker({ skills, onSelect, onCancel }: SkillPickerProps) {
       });
       return;
     }
-    if (input && !key.ctrl && !key.meta) {
+    if (isPrintablePickerInput(input) && !key.ctrl && !key.meta) {
       setQuery((q) => {
         const next = q + input;
         setSelectedIndex(0);
@@ -472,7 +557,8 @@ export function SkillPicker({ skills, onSelect, onCancel }: SkillPickerProps) {
     }
   });
 
-  const start = Math.max(0, Math.min(selectedIndex, options.length - maxVisible));
+  const maxStart = Math.max(0, options.length - maxVisible);
+  const start = Math.max(0, Math.min(maxStart, selectedIndex - Math.floor(maxVisible / 2)));
   const visible = options.slice(start, start + maxVisible);
 
   return (
@@ -493,17 +579,12 @@ export function SkillPicker({ skills, onSelect, onCancel }: SkillPickerProps) {
         {visible.map((skill, i) => {
           const actualIndex = start + i;
           const isSelected = actualIndex === selectedIndex;
+          const row = formatSkillPickerRow(skill, { selected: isSelected, width: rowWidth });
           return (
-            <Box key={skill.name} flexDirection="column">
-              <Text color={isSelected ? theme.accent : undefined}>
-                {isSelected ? "> " : "  "}
-                {skill.name}
+            <Box key={skill.name}>
+              <Text inverse={isSelected} color={isSelected ? theme.accent : undefined} bold={isSelected}>
+                {row}
               </Text>
-              {skill.description && (
-                <Box marginLeft={2}>
-                  <Text color={theme.muted} dimColor>{skill.description}</Text>
-                </Box>
-              )}
             </Box>
           );
         })}

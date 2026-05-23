@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ProviderProfile, ProviderRegistry } from "../provider-registry.js";
-import { buildLocalModelOptions } from "../tui-ink/model-picker.js";
+import {
+  buildLocalModelOptions,
+  formatSkillPickerRow,
+  isPrintablePickerInput,
+  resolvePickerKeyAction,
+  truncateVisual,
+} from "../tui-ink/model-picker.js";
 
 describe("Ink model picker", () => {
   it("builds initial options from local metadata without remote model discovery", () => {
@@ -25,6 +31,41 @@ describe("Ink model picker", () => {
     expect(options.map((option) => option.id)).toContain("deepseek:deepseek-v4-pro");
     expect(options.map((option) => option.id)).toContain("openai:gpt-5.4");
     expect(options.map((option) => option.id)).toContain("fireworks:accounts/fireworks/models/kimi-k2p6");
+  });
+
+  it("normalizes raw arrow sequences for picker navigation", () => {
+    expect(resolvePickerKeyAction("", { upArrow: true })).toBe("up");
+    expect(resolvePickerKeyAction("\x1b[A", {})).toBe("up");
+    expect(resolvePickerKeyAction("[B", {})).toBe("down");
+    expect(resolvePickerKeyAction("\x1b[1;5A", {})).toBe("up");
+    expect(resolvePickerKeyAction("OB", {})).toBe("down");
+  });
+
+  it("does not treat terminal control sequences as searchable picker text", () => {
+    expect(isPrintablePickerInput("p")).toBe(true);
+    expect(isPrintablePickerInput("podcast")).toBe(true);
+    expect(isPrintablePickerInput("\x1b[A")).toBe(false);
+    expect(isPrintablePickerInput("[B")).toBe(false);
+    expect(isPrintablePickerInput("OB")).toBe(false);
+  });
+
+  it("formats skill picker rows as fixed-height truncated rows", () => {
+    const row = formatSkillPickerRow(
+      {
+        name: "agent-browser",
+        description: "Browser automation CLI for AI agents. Use when the user needs to interact with websites.",
+      },
+      { selected: true, width: 48 },
+    );
+
+    expect(row).toHaveLength(48);
+    expect(row).toContain("> agent-browser");
+    expect(row.endsWith("…") || row.endsWith(" ")).toBe(true);
+    expect(row).not.toContain("\n");
+  });
+
+  it("truncates visual text with wide characters", () => {
+    expect(truncateVisual("文章打分和优化", 6)).toBe("文章…");
   });
 });
 
