@@ -28,14 +28,14 @@ describe("memory", () => {
     const paths = getMemoryPaths(cwd);
     mkdirSync(paths.globalRoot, { recursive: true });
     writeFileSync(paths.globalAgents, "Use concise answers.\n", "utf-8");
-    writeFileSync(paths.globalSummary, "# Bubble Memory Summary\n\n- This repo uses OpenTUI.\n", "utf-8");
+    writeFileSync(paths.globalSummary, "# Bubble Memory Summary\n\n- This repo uses React Ink.\n", "utf-8");
 
     const prompt = buildMemoryPrompt(cwd);
     expect(prompt).toContain("Global AGENTS.md");
     expect(prompt).toContain("Use concise answers.");
     expect(prompt).toContain("## Persistent Memory");
     expect(prompt).toContain("memory_summary.md");
-    expect(prompt).toContain("This repo uses OpenTUI.");
+    expect(prompt).toContain("This repo uses React Ink.");
     expect(prompt).toContain("<oai-mem-citation>");
   });
 

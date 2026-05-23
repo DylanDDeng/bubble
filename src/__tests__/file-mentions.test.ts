@@ -46,8 +46,8 @@ describe("findAtContext", () => {
 describe("filterFileSuggestions", () => {
   const files = [
     "src/agent.ts",
-    "src/tui/run.ts",
-    "src/tui/file-mentions.ts",
+    "src/tui-ink/run.tsx",
+    "src/tui-ink/file-mentions.ts",
     "src/tools/bash.ts",
     "README.md",
     "package.json",
@@ -60,14 +60,14 @@ describe("filterFileSuggestions", () => {
 
   it("ranks basename prefix match above path substring match", () => {
     const result = filterFileSuggestions(files, "run");
-    expect(result[0].path).toBe("src/tui/run.ts");
+    expect(result[0].path).toBe("src/tui-ink/run.tsx");
   });
 
   it("matches by path prefix", () => {
-    const result = filterFileSuggestions(files, "src/tui");
+    const result = filterFileSuggestions(files, "src/tui-ink");
     const paths = result.map((r) => r.path);
-    expect(paths).toContain("src/tui/run.ts");
-    expect(paths).toContain("src/tui/file-mentions.ts");
+    expect(paths).toContain("src/tui-ink/run.tsx");
+    expect(paths).toContain("src/tui-ink/file-mentions.ts");
   });
 
   it("returns empty when no match", () => {
