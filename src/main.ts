@@ -34,6 +34,7 @@ import {
   runMemoryStartupPipeline,
   startMemoryStartupTask,
 } from "./memory/index.js";
+import { basename } from "node:path";
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -179,11 +180,45 @@ async function main() {
 
   // Session management:
   // - default: always start a fresh session
-  // - --resume: explicitly restore the latest or a named session
-  let sessionManager = args.resume
-    ? SessionManager.resume(args.cwd, args.sessionName)
-    : undefined;
-  let resumedExistingSession = !!sessionManager;
+  // - --resume --session <name>: restore the named session
+  // - --resume (no name): show interactive picker
+  let sessionManager: SessionManager | undefined;
+  let resumedExistingSession = false;
+  // Resolved before any Ink render so picker and main TUI share the same value
+  // and we only run OSC 11 once.
+  let preResolvedTheme: import("./tui-ink/detect-theme.js").ResolvedTheme | undefined;
+
+  if (args.resume && !args.sessionName) {
+    const currentSessions = SessionManager.summarizeSessionsForCwd(args.cwd);
+    const allSessions = SessionManager.listAllSessions();
+    if (currentSessions.length === 0 && allSessions.length === 0) {
+      console.log(chalk.dim("No previous sessions found — starting a fresh one."));
+    } else {
+      const themeConfig = userConfig.getTheme();
+      if (themeConfig.mode === "auto") {
+        const { detectTerminalTheme } = await import("./tui-ink/detect-theme.js");
+        preResolvedTheme = await detectTerminalTheme();
+      } else {
+        preResolvedTheme = themeConfig.mode;
+      }
+      const { runSessionPicker } = await import("./tui-ink/run-session-picker.js");
+      const picked = await runSessionPicker({
+        currentCwd: args.cwd,
+        currentSessions,
+        allSessions,
+        resolvedTheme: preResolvedTheme,
+        themeOverrides: themeConfig.overrides,
+      });
+      if (picked) {
+        sessionManager = new SessionManager(picked);
+        resumedExistingSession = true;
+      }
+    }
+  } else if (args.resume) {
+    sessionManager = SessionManager.resume(args.cwd, args.sessionName);
+    resumedExistingSession = !!sessionManager;
+  }
+
   if (!sessionManager) {
     sessionManager = args.sessionName && !args.resume
       ? SessionManager.create(args.cwd, args.sessionName)
@@ -378,11 +413,15 @@ async function main() {
 
     const themeConfig = userConfig.getTheme();
     let detectedTheme: "light" | "dark" = "dark";
-    if (themeConfig.mode === "auto") {
+    if (preResolvedTheme) {
+      detectedTheme = preResolvedTheme;
+    } else if (themeConfig.mode === "auto") {
       // Probe before either TUI runtime owns stdin. OSC 11 needs raw mode, and
       // runtime renderers can consume the reply before startup code sees it.
       const { detectTerminalTheme } = await import("./tui-ink/detect-theme.js");
       detectedTheme = await detectTerminalTheme();
+    } else {
+      detectedTheme = themeConfig.mode;
     }
     const commonOptions = {
       sessionManager,
@@ -409,6 +448,11 @@ async function main() {
       detectedTheme,
       onThemeModeChange: (mode) => userConfig.setThemeMode(mode),
     });
+
+    if (sessionManager) {
+      const sessionName = basename(sessionManager.getSessionFile());
+      console.log(chalk.dim(`To resume: bubble --resume   (or --resume --session ${sessionName})`));
+    }
   } finally {
     await shutdownRuntime();
   }

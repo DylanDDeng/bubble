@@ -2,13 +2,23 @@
  * Session Manager - Append-only JSONL persistence over a structured session log.
  */
 
-import { mkdirSync, appendFileSync, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { mkdirSync, appendFileSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { getBubbleHome } from "./bubble-home.js";
 import { compactSessionEntries, type CompactOptions, type CompactResult } from "./context/compact.js";
 import type { Message, Todo } from "./types.js";
 import { SessionLog } from "./session-log.js";
 import type { SessionLogEntry, SessionMarkerKind, SessionMetadata } from "./session-types.js";
+
+export interface SessionSummary {
+  file: string;
+  name: string;
+  cwd?: string;
+  cwdLabel: string;
+  firstUserMessage: string;
+  messageCount: number;
+  mtime: number;
+}
 
 export type { SessionLogEntry, SessionMarkerKind, SessionMetadata } from "./session-types.js";
 
@@ -54,6 +64,38 @@ export class SessionManager {
     const sessionsDir = getSessionsDir(cwd);
     if (!existsSync(sessionsDir)) return [];
     return readdirSync(sessionsDir).filter((file) => file.endsWith(".jsonl"));
+  }
+
+  static summarizeSessionsForCwd(cwd: string): SessionSummary[] {
+    const dir = getSessionsDir(cwd);
+    if (!existsSync(dir)) return [];
+    const summaries: SessionSummary[] = [];
+    for (const file of readdirSync(dir)) {
+      if (!file.endsWith(".jsonl")) continue;
+      const summary = summarizeSessionFile(join(dir, file), basename(dir));
+      if (summary) summaries.push(summary);
+    }
+    return summaries.sort((a, b) => b.mtime - a.mtime);
+  }
+
+  static listAllSessions(): SessionSummary[] {
+    const root = join(getBubbleHome(), "sessions");
+    if (!existsSync(root)) return [];
+    const summaries: SessionSummary[] = [];
+    for (const cwdDir of readdirSync(root)) {
+      const dir = join(root, cwdDir);
+      try {
+        if (!statSync(dir).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      for (const file of readdirSync(dir)) {
+        if (!file.endsWith(".jsonl")) continue;
+        const summary = summarizeSessionFile(join(dir, file), cwdDir);
+        if (summary) summaries.push(summary);
+      }
+    }
+    return summaries.sort((a, b) => b.mtime - a.mtime);
   }
 
   private load() {
@@ -165,4 +207,53 @@ export function getSessionsDir(cwd: string): string {
 
 function resolveSessionFile(cwd: string, sessionName: string): string {
   return join(getSessionsDir(cwd), sessionName);
+}
+
+function summarizeSessionFile(file: string, cwdDir: string): SessionSummary | undefined {
+  let stat;
+  try {
+    stat = statSync(file);
+  } catch {
+    return undefined;
+  }
+  let content: string;
+  try {
+    content = readFileSync(file, "utf-8");
+  } catch {
+    return undefined;
+  }
+  const lines = content.split("\n").filter((line) => line.trim() !== "");
+  if (lines.length === 0) return undefined;
+
+  const log = new SessionLog();
+  log.load(lines);
+  const metadata = log.getMetadata();
+  const messages = log.toMessages();
+
+  const firstUser = messages.find((m) => m.role === "user");
+  let firstUserText = "";
+  if (firstUser) {
+    firstUserText = typeof firstUser.content === "string"
+      ? firstUser.content
+      : firstUser.content.map((part) => part.type === "text" ? part.text : "").join("");
+  }
+  const snippet = firstUserText.trim().replace(/\s+/g, " ").slice(0, 80);
+
+  return {
+    file,
+    name: basename(file).replace(/\.jsonl$/, ""),
+    cwd: metadata.cwd,
+    cwdLabel: metadata.cwd ?? decodeCwdDir(cwdDir),
+    firstUserMessage: snippet || "(no user message)",
+    messageCount: messages.length,
+    mtime: stat.mtimeMs,
+  };
+}
+
+function decodeCwdDir(safe: string): string {
+  // safeCwd is cwd.replace(/[/\\:]/g, "_") — not perfectly reversible because we
+  // can't tell underscores apart from path separators. For typical absolute
+  // Unix paths this still produces a readable approximation.
+  if (safe.startsWith("_")) return "/" + safe.slice(1).replace(/_/g, "/");
+  return safe.replace(/_/g, "/");
 }
