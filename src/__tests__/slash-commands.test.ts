@@ -24,7 +24,12 @@ function createContext(overrides: Partial<SlashCommandContext> = {}): SlashComma
     registry: {
       getEnabled: () => [],
     } as any,
-    skillRegistry: new SkillRegistry({ cwd: "/tmp" }),
+    skillRegistry: new SkillRegistry({
+      cwd: "/tmp",
+      bubbleHome: join(tmpdir(), `bubble-empty-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`),
+      agentsHome: join(tmpdir(), `agents-empty-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`),
+      claudeHome: join(tmpdir(), `claude-empty-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`),
+    }),
     ...overrides,
   };
 }
@@ -44,7 +49,12 @@ tags:
 Read the repo carefully before proposing changes.
 `,
   );
-  return new SkillRegistry({ cwd, bubbleHome: join(root, "home"), agentsHome: join(root, "agents") });
+  return new SkillRegistry({
+    cwd,
+    bubbleHome: join(root, "home"),
+    agentsHome: join(root, "agents"),
+    claudeHome: join(root, "claude"),
+  });
 }
 
 describe("slash commands", () => {

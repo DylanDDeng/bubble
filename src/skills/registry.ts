@@ -8,6 +8,7 @@ export interface SkillRegistryOptions {
   cwd?: string;
   bubbleHome?: string;
   agentsHome?: string;
+  claudeHome?: string;
   skillPaths?: string[];
 }
 
@@ -19,9 +20,11 @@ export class SkillRegistry {
     const cwd = options.cwd ?? process.cwd();
     const bubbleHome = options.bubbleHome ?? getBubbleHome();
     const agentsHome = options.agentsHome ?? join(homedir(), ".agents");
+    const claudeHome = options.claudeHome ?? join(homedir(), ".claude");
     const roots = [
       { path: join(bubbleHome, "skills"), source: "user" as const },
       { path: join(agentsHome, "skills"), source: "user" as const },
+      { path: join(claudeHome, "skills"), source: "user" as const },
       { path: join(cwd, ".bubble", "skills"), source: "project" as const },
       ...(options.skillPaths ?? []).map((path) => ({ path, source: "configured" as const })),
     ];

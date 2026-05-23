@@ -18,7 +18,12 @@ description: Turn a source into a Chinese podcast script.
 Use this skill for podcast generation workflows.
 `,
   );
-  return new SkillRegistry({ cwd, bubbleHome: join(root, "home") });
+  return new SkillRegistry({
+    cwd,
+    bubbleHome: join(root, "home"),
+    agentsHome: join(root, "agents"),
+    claudeHome: join(root, "claude"),
+  });
 }
 
 describe("skill invocation parsing", () => {

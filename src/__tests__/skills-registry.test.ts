@@ -55,13 +55,39 @@ Use this skill for UI cleanup.
 `,
     );
 
-    const registry = new SkillRegistry({ cwd, bubbleHome, agentsHome });
+    const registry = new SkillRegistry({ cwd, bubbleHome, agentsHome, claudeHome: join(root, "claude") });
     const summaries = registry.summaries();
 
     expect(summaries).toHaveLength(3);
     expect(summaries.map((skill) => skill.name)).toEqual(["frontend-refine", "podcast", "repo-review"]);
     expect(summaries.find((skill) => skill.name === "repo-review")?.tags).toEqual(["review", "architecture"]);
     expect(summaries.find((skill) => skill.name === "podcast")?.tags).toEqual(["audio"]);
+  });
+
+  it("discovers skills from ~/.claude/skills for Claude Code compatibility", () => {
+    const root = makeTempRoot("claude-home");
+    const claudeHome = join(root, "claude");
+    const cwd = join(root, "project");
+
+    mkdirSync(join(claudeHome, "skills", "claude-skill"), { recursive: true });
+    writeFileSync(
+      join(claudeHome, "skills", "claude-skill", "SKILL.md"),
+      `---
+description: A skill installed by Claude Code.
+---
+
+Use this skill via the Claude Code skills directory.
+`,
+    );
+
+    const registry = new SkillRegistry({
+      cwd,
+      bubbleHome: join(root, "bubble"),
+      agentsHome: join(root, "agents"),
+      claudeHome,
+    });
+
+    expect(registry.summaries().map((skill) => skill.name)).toEqual(["claude-skill"]);
   });
 
   it("hides skills marked disable-model-invocation from prompt summaries", () => {
@@ -80,7 +106,12 @@ Do not expose this to the model.
 `,
     );
 
-    const registry = new SkillRegistry({ cwd, bubbleHome: join(root, "home"), agentsHome });
+    const registry = new SkillRegistry({
+      cwd,
+      bubbleHome: join(root, "home"),
+      agentsHome,
+      claudeHome: join(root, "claude"),
+    });
     expect(registry.all()).toHaveLength(1);
     expect(registry.summaries()).toHaveLength(0);
   });
