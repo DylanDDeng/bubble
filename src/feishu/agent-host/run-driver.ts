@@ -205,7 +205,8 @@ export class RunDriver {
       maxBytesPerElement: this.opts.maxBytesPerElement,
       maxBytesPerCard: this.opts.maxBytesPerCard,
     };
-    const renderOpts = { budget: budgetOpts, runToken };
+    const collapsible = process.env.BUBBLE_FEISHU_NO_COLLAPSIBLE !== "1";
+    const renderOpts = { budget: budgetOpts, runToken, collapsible };
 
     const initialCard = renderCard(runState, renderOpts);
 

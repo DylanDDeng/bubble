@@ -3,7 +3,7 @@
  *
  * Schema reference:
  *   - top-level: { config, header, elements }
- *   - element tags: 'markdown' | 'div' | 'hr' | 'note' | 'action'
+ *   - element tags: 'markdown' | 'div' | 'hr' | 'note' | 'action' | 'collapsible_panel'
  *   - card config MUST include `update_multi: true` to be patch-able
  *
  * The `LarkChannel.stream({ card: { initial, producer } })` path consumes
@@ -51,13 +51,21 @@ export interface RenderOptions {
   showStopButton?: boolean;
   /** Opaque token to identify this run for button callbacks. */
   runToken?: string;
+  /**
+   * Use `collapsible_panel` elements to hide thinking + finished tool detail.
+   * Default true. Set false if your Feishu card host doesn't render the
+   * `collapsible_panel` tag — completed tools fall back to a chip + one-line
+   * result preview, and thinking falls back to a compact status note.
+   */
+  collapsible?: boolean;
 }
 
 export function renderCard(state: RunState, opts: RenderOptions): object {
   applyCardBudget(state, opts.budget);
 
   const showStop = opts.showStopButton !== false && state.status === "running";
-  const elements = buildElements(state, showStop, opts.runToken);
+  const useCollapsible = opts.collapsible !== false;
+  const elements = buildElements(state, showStop, opts.runToken, useCollapsible);
 
   return {
     config: { update_multi: true, wide_screen_mode: true },
@@ -75,7 +83,12 @@ function buildHeaderTitle(state: RunState): string {
   return `${icon} ${title} · ${state.scope.displayName}`;
 }
 
-function buildElements(state: RunState, showStop: boolean, runToken: string | undefined): object[] {
+function buildElements(
+  state: RunState,
+  showStop: boolean,
+  runToken: string | undefined,
+  useCollapsible: boolean,
+): object[] {
   const elements: object[] = [];
 
   // Top note: cwd + mode badges
@@ -104,23 +117,69 @@ function buildElements(state: RunState, showStop: boolean, runToken: string | un
           content: escapeMarkdownContent(block.text) + (block.streaming ? " ▌" : ""),
         });
         break;
-      case "thinking":
-        elements.push({
-          tag: "markdown",
-          content: `> _💭 思考_\n> ${quoteLines(block.text)}${block.streaming ? " ▌" : ""}`,
-        });
+      case "thinking": {
+        if (!block.text.trim()) break;
+        if (!useCollapsible) {
+          // Fallback: omit body, just hint that thinking happened/is happening.
+          elements.push({
+            tag: "note",
+            elements: [{
+              tag: "plain_text",
+              content: block.streaming ? "💭 思考中…" : "💭 思考已折叠",
+            }],
+          });
+          break;
+        }
+        const title = block.streaming ? "💭 思考中…" : "💭 思考过程";
+        elements.push(
+          collapsiblePanel(title, [
+            {
+              tag: "markdown",
+              content: `> ${quoteLines(block.text)}${block.streaming ? " ▌" : ""}`,
+            },
+          ]),
+        );
         break;
+      }
       case "tool": {
         const icon = TOOL_ICON[block.status];
-        const head = `**${icon} ${block.name}**`;
-        const argsLine = block.argsPreview ? `\n\`${escapeInlineCode(block.argsPreview)}\`` : "";
-        const resultLine = block.resultPreview
-          ? `\n\n${escapeMarkdownContent(block.resultPreview)}`
-          : "";
-        elements.push({
-          tag: "markdown",
-          content: head + argsLine + resultLine,
-        });
+        if (block.status === "running") {
+          // In-flight: keep visible so the user can see what's happening now.
+          const head = `**${icon} ${block.name}**`;
+          const argsLine = block.argsPreview ? `\n\`${escapeInlineCode(block.argsPreview)}\`` : "";
+          elements.push({ tag: "markdown", content: head + argsLine });
+        } else {
+          // Completed: chip header, full args (only if truncated in title) +
+          // result tucked into a collapsible panel.
+          const CHIP_ARGS_LIMIT = 60;
+          const chipTitle = buildToolChipTitle(icon, block.name, block.argsPreview, CHIP_ARGS_LIMIT);
+          if (!useCollapsible) {
+            // Fallback: chip title + one-line result preview, no expansion.
+            const oneLineResult = block.resultPreview
+              ? `\n${truncate(block.resultPreview.replace(/\s+/g, " ").trim(), 160)}`
+              : "";
+            elements.push({ tag: "markdown", content: chipTitle + oneLineResult });
+            break;
+          }
+          const detail: object[] = [];
+          if (block.argsPreview && block.argsPreview.length > CHIP_ARGS_LIMIT) {
+            detail.push({
+              tag: "markdown",
+              content: `**args:** \`${escapeInlineCode(block.argsPreview)}\``,
+            });
+          }
+          if (block.resultPreview) {
+            detail.push({
+              tag: "markdown",
+              content: escapeMarkdownContent(block.resultPreview),
+            });
+          }
+          if (detail.length === 0) {
+            elements.push({ tag: "markdown", content: chipTitle });
+          } else {
+            elements.push(collapsiblePanel(chipTitle, detail));
+          }
+        }
         break;
       }
     }
@@ -159,6 +218,34 @@ function buildElements(state: RunState, showStop: boolean, runToken: string | un
   }
 
   return elements;
+}
+
+function collapsiblePanel(headerMarkdown: string, elements: object[]): object {
+  return {
+    tag: "collapsible_panel",
+    expanded: false,
+    background_color: "grey-100",
+    header: {
+      title: { tag: "markdown", content: headerMarkdown },
+      vertical_align: "center",
+      padding: "4px 0px 4px 8px",
+      icon: {
+        tag: "standard_icon",
+        token: "down-small-ccm_outlined",
+        size: "16px 16px",
+      },
+      icon_position: "right",
+      icon_expanded_angle: -180,
+    },
+    elements,
+  };
+}
+
+function buildToolChipTitle(icon: string, name: string, argsPreview: string, limit: number): string {
+  const head = `**${icon} ${name}**`;
+  if (!argsPreview) return head;
+  const inline = truncate(argsPreview, limit);
+  return `${head} · \`${escapeInlineCode(inline)}\``;
 }
 
 function escapeMarkdownContent(text: string): string {
