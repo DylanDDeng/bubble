@@ -5,4 +5,6 @@ dist/
 .env
 doc/
 .aegis/
+.claude/
+.factory/
 *.tgz
