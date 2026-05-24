@@ -365,6 +365,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     initialDescription: string;
   } | null>(null);
   const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | "feishu-setup" | null>(null);
+  const [cursorResetEpoch, setCursorResetEpoch] = useState(0);
   const [keyProviderId, setKeyProviderId] = useState<string | null>(null);
   const [verboseTrace, setVerboseTrace] = useState(false);
   const startedWithVisibleHistoryRef = useRef(messages.some((message) => message.syntheticKind !== "ui_summary"));
@@ -629,6 +630,11 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     setPickerMode(mode);
   }, []);
 
+  const closePicker = useCallback(() => {
+    setPickerMode(null);
+    setCursorResetEpoch((epoch) => epoch + 1);
+  }, []);
+
   const openFeedback = useCallback((initialDescription: string) => {
     const base = collectFeedback(agent, { description: "" });
     const { description: _drop, ...rest } = base;
@@ -647,7 +653,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       const provider = safeRegistry.getConfigured().find((item) => item.id === providerId);
       if (!provider?.apiKey || !createProvider) {
         addMessage("error", `Provider ${providerId} is not configured or has no active credentials.`);
-        setPickerMode(null);
+        closePicker();
         return;
       }
 
@@ -672,11 +678,11 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       sessionManager?.setMetadata({ model, thinkingLevel: agent.thinking, reasoningEffort: agent.thinking });
       sessionManager?.appendMarker("model_switch", model);
       addMessage("assistant", `Model switched to ${displayModel(model)}.`);
-      setPickerMode(null);
+      closePicker();
     };
 
     void run();
-  }, [agent, addMessage, sessionManager, userConfig, safeRegistry, createProvider]);
+  }, [agent, addMessage, closePicker, sessionManager, userConfig, safeRegistry, createProvider]);
 
   const handleProviderSelect = useCallback(async (providerId: string) => {
     await safeRegistry.prepareProvider(providerId);
@@ -685,7 +691,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     const builtin = BUILTIN_PROVIDERS.find((x) => x.id === providerId);
     if (!p && !builtin) {
       addMessage("error", `Provider ${providerId} not found.`);
-      setPickerMode(null);
+      closePicker();
       return;
     }
     if (!p?.apiKey) {
@@ -701,23 +707,23 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     agent.setProvider(createProvider!(providerId, p.apiKey, p.baseURL));
     agent.providerId = providerId;
     addMessage("assistant", `Switched to provider ${p.name}. Use /model to pick a model.`);
-    setPickerMode(null);
-  }, [addMessage, agent, createProvider, safeRegistry]);
+    closePicker();
+  }, [addMessage, agent, closePicker, createProvider, safeRegistry]);
 
   const handleProviderAddSelect = useCallback((providerId: string) => {
     const ok = safeRegistry.addProvider(providerId, "");
     if (!ok) {
       addMessage("error", `Provider ${providerId} could not be added.`);
-      setPickerMode(null);
+      closePicker();
       return;
     }
     safeRegistry.setDefault(providerId);
     setKeyProviderId(providerId);
     setPickerMode("key");
-  }, [addMessage, safeRegistry]);
+  }, [addMessage, closePicker, safeRegistry]);
 
   const handleLoginProviderSelect = useCallback(async (providerId: string) => {
-    setPickerMode(null);
+    closePicker();
     const command = `/login ${providerId}`;
       const { handled, result } = await slashRegistry.execute(command, {
         agent,
@@ -748,10 +754,10 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     if (handled && result) {
       addMessage("assistant", result);
     }
-  }, [agent, addMessage, clearMessages, createProvider, exit, openPicker, safeRegistry, sessionManager]);
+  }, [agent, addMessage, clearMessages, closePicker, createProvider, exit, openPicker, safeRegistry, sessionManager]);
 
   const handleLogoutProviderSelect = useCallback(async (providerId: string) => {
-    setPickerMode(null);
+    closePicker();
     const command = `/logout ${providerId}`;
       const { handled, result } = await slashRegistry.execute(command, {
         agent,
@@ -782,13 +788,13 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     if (handled && result) {
       addMessage("assistant", result);
     }
-  }, [agent, addMessage, clearMessages, createProvider, exit, openPicker, safeRegistry, sessionManager]);
+  }, [agent, addMessage, clearMessages, closePicker, createProvider, exit, openPicker, safeRegistry, sessionManager]);
 
   const handleKeySubmit = useCallback((key: string) => {
     const targetId = keyProviderId || safeRegistry.getDefault()?.id;
     if (!targetId) {
       addMessage("error", "No provider selected.");
-      setPickerMode(null);
+      closePicker();
       setKeyProviderId(null);
       return;
     }
@@ -799,9 +805,9 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       agent.providerId = targetId;
     }
     addMessage("assistant", `API key updated for ${p?.name || targetId} to ${maskKey(key)}.`);
-    setPickerMode(null);
+    closePicker();
     setKeyProviderId(null);
-  }, [addMessage, agent, createProvider, keyProviderId, safeRegistry]);
+  }, [addMessage, agent, closePicker, createProvider, keyProviderId, safeRegistry]);
 
   const handleSubmit = useCallback(
     async (payload: SubmitPayload | string) => {
@@ -1252,7 +1258,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
             current={agent.model}
             recent={userConfig.getRecentModels()}
             onSelect={handleModelSelect}
-            onCancel={() => setPickerMode(null)}
+            onCancel={closePicker}
           />
         )}
         {pickerMode === "provider" && (
@@ -1267,10 +1273,10 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
                   name: `${p.name} [${configuredLabel}]`,
                   enabled: true,
                 };
-              })}
+            })}
             current={currentProviderId}
             onSelect={handleProviderSelect}
-            onCancel={() => setPickerMode(null)}
+            onCancel={closePicker}
           />
         )}
         {pickerMode === "provider-add" && (
@@ -1280,7 +1286,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
               .map((p) => ({ id: p.id, name: p.name, enabled: true }))}
             current={currentProviderId}
             onSelect={handleProviderAddSelect}
-            onCancel={() => setPickerMode(null)}
+            onCancel={closePicker}
             title="Add Provider"
           />
         )}
@@ -1291,7 +1297,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
               .map((p) => ({ id: p.id, name: p.name, enabled: true }))}
             current={currentProviderId}
             onSelect={handleLoginProviderSelect}
-            onCancel={() => setPickerMode(null)}
+            onCancel={closePicker}
             title="Select Login Provider"
           />
         )}
@@ -1302,7 +1308,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
               .map((p) => ({ id: p.id, name: p.name, enabled: true }))}
             current={currentProviderId}
             onSelect={handleLogoutProviderSelect}
-            onCancel={() => setPickerMode(null)}
+            onCancel={closePicker}
             title="Select Logout Provider"
           />
         )}
@@ -1311,7 +1317,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
             providerName={keyTarget.name}
             onSubmit={handleKeySubmit}
             onCancel={() => {
-              setPickerMode(null);
+              closePicker();
               setKeyProviderId(null);
             }}
           />
@@ -1320,7 +1326,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           <SkillPicker
             skills={safeSkillRegistry.summaries()}
             onSelect={async (name) => {
-              setPickerMode(null);
+              closePicker();
               const { handled, result } = await slashRegistry.execute(`/skill ${name}`, {
                 agent,
                 addMessage,
@@ -1349,17 +1355,17 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
               });
               if (handled && result) addMessage("assistant", result);
             }}
-            onCancel={() => setPickerMode(null)}
+            onCancel={closePicker}
           />
         )}
         {pickerMode === "feishu-setup" && (
           <FeishuSetupPicker
             onComplete={(summary) => {
-              setPickerMode(null);
+              closePicker();
               addMessage("assistant", summary);
             }}
             onCancel={() => {
-              setPickerMode(null);
+              closePicker();
               addMessage("assistant", "已取消 Feishu setup。");
             }}
           />
@@ -1446,7 +1452,14 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       )}
       {!isExiting && !pickerMode && (
         <Box paddingBottom={1} flexShrink={0}>
-          <InputBox onSubmit={handleSubmit} disabled={isRunning || !!pendingPlan || !!pendingApproval || !!pendingQuestion || !!pendingFeedback} skillRegistry={safeSkillRegistry} terminalColumns={terminalColumns} cwd={args.cwd} />
+          <InputBox
+            onSubmit={handleSubmit}
+            disabled={isRunning || !!pendingPlan || !!pendingApproval || !!pendingQuestion || !!pendingFeedback}
+            cursorResetEpoch={cursorResetEpoch}
+            skillRegistry={safeSkillRegistry}
+            terminalColumns={terminalColumns}
+            cwd={args.cwd}
+          />
         </Box>
       )}
       {!isExiting && (

@@ -4,6 +4,7 @@ import {
   isInkModifiedEnterInput,
   isCtrlCInput,
   needsCursorRowCompensation,
+  resolveCursorRowCompensation,
   resolveInkEnterIntent,
   resolveSlashEnterAction,
   shouldSubmitExactSlashSuggestion,
@@ -23,6 +24,28 @@ describe("Ink input cursor row compensation", () => {
   it("compensates the clear/sync frame after an overflowing response shrinks", () => {
     expect(needsCursorRowCompensation(20, 24, 30)).toBe(true);
     expect(needsCursorRowCompensation(20, 24, 24)).toBe(true);
+  });
+
+  it("forces one compensation frame after picker close cursor reset", () => {
+    expect(resolveCursorRowCompensation({
+      sameRenderedFrame: false,
+      previousRowCompensation: 0,
+      forceRowCompensation: true,
+      nextOutputHeight: 6,
+      viewportRows: 24,
+      previousOutputHeight: null,
+    })).toBe(1);
+  });
+
+  it("keeps existing compensation while the rendered input frame is unchanged", () => {
+    expect(resolveCursorRowCompensation({
+      sameRenderedFrame: true,
+      previousRowCompensation: 1,
+      forceRowCompensation: false,
+      nextOutputHeight: 6,
+      viewportRows: 24,
+      previousOutputHeight: 6,
+    })).toBe(1);
   });
 });
 

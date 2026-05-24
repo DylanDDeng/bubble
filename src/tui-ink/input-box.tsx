@@ -31,6 +31,7 @@ interface InputBoxProps {
   onSubmit: (payload: SubmitPayload) => void;
   onPasteNotice?: (notice: string) => void;
   disabled?: boolean;
+  cursorResetEpoch?: number;
   skillRegistry?: SkillRegistry;
   terminalColumns: number;
   cwd: string;
@@ -59,6 +60,23 @@ export function needsCursorRowCompensation(
   // overflowing viewport. buildCursorSuffix still assumes the cursor starts one
   // line below the output, so pass y+1 in those cases.
   return isFullscreen || wasOverflowing || (isOverflowing && hadPreviousFrame) || isLeavingFullscreen;
+}
+
+export function resolveCursorRowCompensation(input: {
+  sameRenderedFrame: boolean;
+  previousRowCompensation: number;
+  forceRowCompensation: boolean;
+  nextOutputHeight: number;
+  viewportRows: number;
+  previousOutputHeight: number | null;
+}): number {
+  if (input.sameRenderedFrame) return input.previousRowCompensation;
+  if (input.forceRowCompensation) return 1;
+  return needsCursorRowCompensation(
+    input.nextOutputHeight,
+    input.viewportRows,
+    input.previousOutputHeight,
+  ) ? 1 : 0;
 }
 
 export function isCtrlCInput(input: string, key: { ctrl?: boolean }): boolean {
@@ -198,7 +216,7 @@ export function insertNewlineAtCursor(text: string, cursor: number) {
   };
 }
 
-export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, terminalColumns, cwd }: InputBoxProps) {
+export function InputBox({ onSubmit, onPasteNotice, disabled, cursorResetEpoch = 0, skillRegistry, terminalColumns, cwd }: InputBoxProps) {
   const theme = useTheme();
   const width = terminalColumns;
 
@@ -639,9 +657,28 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
   const previousViewportRowsRef = useRef<number | null>(null);
   const previousInputFrameSignatureRef = useRef<string | null>(null);
   const previousRowCompensationRef = useRef(0);
+  const forceNextRowCompensationRef = useRef(false);
+  const lastCursorResetEpochRef = useRef<number | null>(null);
   const lastWidthRef = useRef<number | null>(null);
   const { setCursorPosition } = useCursor();
   const { stdout } = useStdout();
+  const [cursorTick, setCursorTick] = useState(0);
+
+  useLayoutEffect(() => {
+    const isInitialMount = lastCursorResetEpochRef.current === null;
+    const shouldReset = !isInitialMount || cursorResetEpoch > 0;
+    lastCursorResetEpochRef.current = cursorResetEpoch;
+    if (!shouldReset) return;
+
+    previousOutputHeightRef.current = null;
+    previousViewportRowsRef.current = null;
+    previousInputFrameSignatureRef.current = null;
+    previousRowCompensationRef.current = 0;
+    forceNextRowCompensationRef.current = true;
+    lastCursorRef.current = null;
+    setCursorPosition(undefined);
+    setCursorTick((t) => t + 1);
+  }, [cursorResetEpoch, setCursorPosition]);
 
   // After a terminal resize the previous-frame refs reference a layout that no
   // longer exists; carrying them forward makes `needsCursorRowCompensation`
@@ -728,7 +765,6 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
   // user can't type. Keeping the real cursor visible in the input makes it
   // flicker every time streaming output above it re-lays out the frame, so
   // we hide it entirely until input is active again.
-  const [cursorTick, setCursorTick] = useState(0);
   useLayoutEffect(() => {
     let node: DOMElement | undefined = cursorLineRef.current ?? undefined;
     if (!node?.yogaNode) {
@@ -765,9 +801,16 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, skillRegistry, ter
       previousOutputHeight === rootHeight &&
       previousViewportRowsRef.current === viewportRows &&
       previousInputFrameSignatureRef.current === inputFrameSignature;
-    const rowCompensation = sameRenderedFrame
-      ? previousRowCompensationRef.current
-      : needsCursorRowCompensation(rootHeight, viewportRows, previousOutputHeight) ? 1 : 0;
+    const forceRowCompensation = forceNextRowCompensationRef.current;
+    const rowCompensation = resolveCursorRowCompensation({
+      sameRenderedFrame,
+      previousRowCompensation: previousRowCompensationRef.current,
+      forceRowCompensation,
+      nextOutputHeight: rootHeight,
+      viewportRows,
+      previousOutputHeight,
+    });
+    forceNextRowCompensationRef.current = false;
     previousOutputHeightRef.current = rootHeight;
     previousViewportRowsRef.current = viewportRows;
     previousInputFrameSignatureRef.current = inputFrameSignature;
