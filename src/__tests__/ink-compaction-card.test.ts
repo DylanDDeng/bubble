@@ -35,8 +35,10 @@ describe("Ink compaction summary card", () => {
     const output = renderLines([card]).join("\n");
 
     expect(output).toContain("✓");
-    expect(output).toContain("Compaction");
-    expect(output).toContain("Compaction complete · 4 log entries summarized");
+    expect(output).toContain("Compaction checkpoint");
+    expect(output).toContain("4 log entries summarized");
+    expect(output).toContain("Preserved context summary");
+    expect(output).not.toContain("Compaction complete · Compaction complete");
     expect(output).toContain("Recent work");
     expect(output).toContain("Refactored auth");
     expect(output).toContain("Fixed retry logic");
@@ -52,8 +54,8 @@ describe("Ink compaction summary card", () => {
 
     const output = renderLines([card]).join("\n");
 
-    expect(output).toContain("Compaction");
-    expect(output).toContain("Compaction complete");
+    expect(output).toContain("Compaction checkpoint");
+    expect(output).toContain("Session compacted");
     // No summary body to render — the card collapses to its header line.
     expect(output).not.toContain("Refactored");
   });

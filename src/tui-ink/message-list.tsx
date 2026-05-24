@@ -669,18 +669,29 @@ function ReasoningTraceBlock({ reasoning }: { reasoning: string }) {
 
 function CompactionSummaryBlock({ message }: { message: DisplayMessage }) {
   const theme = useTheme();
-  const status = message.content.replace(/^✓\s*/, "").trim() || "Session compacted";
+  const rawStatus = message.content.replace(/^✓\s*/, "").trim();
+  const status = rawStatus.replace(/^Compaction complete\s*(?:·\s*)?/i, "").trim() || "Session compacted";
   const summary = message.compactionSummary?.trim();
   return (
-    <Box marginTop={1} marginBottom={1} flexDirection="column">
+    <Box
+      marginTop={1}
+      marginBottom={1}
+      paddingX={1}
+      flexDirection="column"
+      borderStyle="round"
+      borderColor={theme.borderActive}
+    >
       <Box flexDirection="row">
         <Text color={theme.success} bold>✓ </Text>
-        <Text color={theme.accent} bold>Compaction</Text>
-        <Text color={theme.muted}>  ·  {status}</Text>
+        <Text color={theme.accent} bold>Compaction checkpoint</Text>
+        <Text color={theme.muted}> · {status}</Text>
       </Box>
       {summary && (
-        <Box marginTop={1} paddingLeft={3} flexDirection="column">
-          <MarkdownContent content={summary} />
+        <Box marginTop={1} flexDirection="column">
+          <Text color={theme.muted} dimColor>Preserved context summary</Text>
+          <Box paddingLeft={2} flexDirection="column">
+            <MarkdownContent content={summary} />
+          </Box>
         </Box>
       )}
     </Box>
