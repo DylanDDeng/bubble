@@ -70,7 +70,7 @@ export class SlashCommandRegistry {
       if (skill) {
         return {
           handled: true,
-          result: `Skill "${skill.meta.name}": ${skill.meta.description}\nUse /${skill.meta.name} <your request> to run with this skill, or /skill ${skill.meta.name} to inspect it.`,
+          result: `Skill "${skill.meta.name}": ${skill.meta.description}\nUse /${skill.meta.name} <your request> to run with this skill, or /skills to choose from the picker.`,
         };
       }
       return {

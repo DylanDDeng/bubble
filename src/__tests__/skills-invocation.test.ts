@@ -36,18 +36,10 @@ describe("skill invocation parsing", () => {
     expect(parsed?.actualPrompt).toContain('Use the skill tool to load the "podcast" skill');
   });
 
-  it("parses /skill <skill-name> <task>", () => {
-    const registry = createRegistry();
-    const parsed = parseSkillInvocation("/skill podcast 请把这个链接做成播客稿", registry);
-
-    expect(parsed?.skill.meta.name).toBe("podcast");
-    expect(parsed?.task).toBe("请把这个链接做成播客稿");
-  });
-
   it("does not parse bare skill inspection commands", () => {
     const registry = createRegistry();
     expect(parseSkillInvocation("/podcast", registry)).toBeUndefined();
     expect(parseSkillInvocation("/skill podcast", registry)).toBeUndefined();
+    expect(parseSkillInvocation("/skill podcast 请把这个链接做成播客稿", registry)).toBeUndefined();
   });
 });
-

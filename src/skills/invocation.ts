@@ -14,22 +14,6 @@ export function parseSkillInvocation(input: string, registry: SkillRegistry): Sk
   const withoutSlash = trimmed.slice(1).trim();
   if (!withoutSlash) return undefined;
 
-  if (withoutSlash.startsWith("skill ")) {
-    const rest = withoutSlash.slice("skill ".length).trim();
-    const firstSpace = rest.indexOf(" ");
-    if (firstSpace === -1) return undefined;
-    const skillName = rest.slice(0, firstSpace).trim();
-    const task = rest.slice(firstSpace + 1).trim();
-    if (!skillName || !task) return undefined;
-    const skill = registry.get(skillName);
-    if (!skill) return undefined;
-    return {
-      skill,
-      task,
-      actualPrompt: buildSkillExecutionPrompt(skill, task),
-    };
-  }
-
   const firstSpace = withoutSlash.indexOf(" ");
   if (firstSpace === -1) return undefined;
   const skillName = withoutSlash.slice(0, firstSpace).trim();
@@ -54,4 +38,3 @@ function buildSkillExecutionPrompt(skill: SkillRecord, task: string): string {
     task,
   ].join("\n");
 }
-

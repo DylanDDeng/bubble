@@ -7,7 +7,6 @@ import type { RuleList, SettingsScope } from "../permissions/settings.js";
 import { encodeModel, decodeModel, displayModel, BUILTIN_PROVIDERS, isUserVisibleProvider } from "../provider-registry.js";
 import { getAvailableThinkingLevels, normalizeThinkingLevel } from "../provider-transform.js";
 import { buildSystemPrompt } from "../system-prompt.js";
-import { formatLoadedSkill } from "../tools/skill.js";
 import type { ThinkingLevel } from "../types.js";
 import { isThinkingLevel } from "../variant/thinking-level.js";
 import {
@@ -303,27 +302,6 @@ const builtinSlashCommandEntries: SlashCommand[] = [
     description: "Open the searchable skills picker",
     async handler(args, ctx) {
       ctx.openPicker("skill");
-    },
-  },
-  {
-    name: "skill",
-    description: "Load a skill explicitly. Usage: /skill <name>",
-    async handler(args, ctx) {
-      const name = args.trim();
-      if (!name) {
-        return "Usage: /skill <name>";
-      }
-
-      const skill = ctx.skillRegistry.get(name);
-      if (!skill) {
-        const available = ctx.skillRegistry.summaries().map((item) => item.name).join(", ");
-        return available
-          ? `Unknown skill "${name}". Available skills: ${available}`
-          : `Unknown skill "${name}". No skills are currently available.`;
-      }
-
-      ctx.sessionManager?.appendMarker("skill_activated", skill.meta.name);
-      return formatLoadedSkill(skill);
     },
   },
   {

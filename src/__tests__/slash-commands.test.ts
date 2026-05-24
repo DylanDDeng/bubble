@@ -262,21 +262,6 @@ describe("slash commands", () => {
     expect(result.result).toContain("Other");
   });
 
-  it("loads a skill explicitly via /skill", async () => {
-    const appendMarker = vi.fn();
-    const ctx = createContext({
-      skillRegistry: createSkillRegistryFixture(),
-      sessionManager: {
-        appendMarker,
-      } as any,
-    });
-
-    const result = await slashRegistry.execute("/skill repo-review", ctx);
-    expect(result.handled).toBe(true);
-    expect(result.result).toContain("Skill: repo-review");
-    expect(appendMarker).toHaveBeenCalledWith("skill_activated", "repo-review");
-  });
-
   it("/memory disables manual add and searches automatic memory workspace", async () => {
     const originalBubbleHome = process.env.BUBBLE_HOME;
     const root = join(tmpdir(), `bubble-memory-slash-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
