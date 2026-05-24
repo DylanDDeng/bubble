@@ -366,6 +366,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   } | null>(null);
   const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | "feishu-setup" | null>(null);
   const [cursorResetEpoch, setCursorResetEpoch] = useState(0);
+  const [composerDraft, setComposerDraft] = useState<{ text: string; epoch: number } | null>(null);
   const [keyProviderId, setKeyProviderId] = useState<string | null>(null);
   const [verboseTrace, setVerboseTrace] = useState(false);
   const startedWithVisibleHistoryRef = useRef(messages.some((message) => message.syntheticKind !== "ui_summary"));
@@ -633,6 +634,17 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   const closePicker = useCallback(() => {
     setPickerMode(null);
     setCursorResetEpoch((epoch) => epoch + 1);
+  }, []);
+
+  const fillComposer = useCallback((text: string) => {
+    setComposerDraft((current) => ({
+      text,
+      epoch: (current?.epoch ?? 0) + 1,
+    }));
+  }, []);
+
+  const clearComposerDraft = useCallback(() => {
+    setComposerDraft(null);
   }, []);
 
   const openFeedback = useCallback((initialDescription: string) => {
@@ -1325,35 +1337,9 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         {pickerMode === "skill" && (
           <SkillPicker
             skills={safeSkillRegistry.summaries()}
-            onSelect={async (name) => {
+            onSelect={(name) => {
+              fillComposer(`/${name} `);
               closePicker();
-              const { handled, result } = await slashRegistry.execute(`/skill ${name}`, {
-                agent,
-                addMessage,
-                clearMessages,
-                cwd: args.cwd,
-                exit: () => { requestExit(); },
-                sessionManager,
-                createProvider: createProvider ?? ((() => {
-                  throw new Error("Provider creation not available");
-                }) as any),
-                openPicker,
-                openFeedback,
-                registry: safeRegistry,
-                skillRegistry: safeSkillRegistry,
-                bashAllowlist,
-                settingsManager,
-                lspService,
-                mcpManager,
-                flushMemory,
-                runMemoryCompaction,
-                runMemorySummary,
-                runMemoryRefresh,
-                getThemeMode: () => themeMode,
-                getResolvedTheme: () => themeResolved,
-                setThemeMode: applyThemeMode,
-              });
-              if (handled && result) addMessage("assistant", result);
             }}
             onCancel={closePicker}
           />
@@ -1456,6 +1442,9 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
             onSubmit={handleSubmit}
             disabled={isRunning || !!pendingPlan || !!pendingApproval || !!pendingQuestion || !!pendingFeedback}
             cursorResetEpoch={cursorResetEpoch}
+            draftText={composerDraft?.text}
+            draftEpoch={composerDraft?.epoch}
+            onDraftApplied={clearComposerDraft}
             skillRegistry={safeSkillRegistry}
             terminalColumns={terminalColumns}
             cwd={args.cwd}

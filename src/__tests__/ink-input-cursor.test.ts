@@ -26,22 +26,20 @@ describe("Ink input cursor row compensation", () => {
     expect(needsCursorRowCompensation(20, 24, 24)).toBe(true);
   });
 
-  it("forces one compensation frame after picker close cursor reset", () => {
+  it("does not compensate ordinary frames after picker close cursor reset", () => {
     expect(resolveCursorRowCompensation({
       sameRenderedFrame: false,
       previousRowCompensation: 0,
-      forceRowCompensation: true,
       nextOutputHeight: 6,
       viewportRows: 24,
       previousOutputHeight: null,
-    })).toBe(1);
+    })).toBe(0);
   });
 
   it("keeps existing compensation while the rendered input frame is unchanged", () => {
     expect(resolveCursorRowCompensation({
       sameRenderedFrame: true,
       previousRowCompensation: 1,
-      forceRowCompensation: false,
       nextOutputHeight: 6,
       viewportRows: 24,
       previousOutputHeight: 6,

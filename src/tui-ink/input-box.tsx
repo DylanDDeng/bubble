@@ -32,6 +32,9 @@ interface InputBoxProps {
   onPasteNotice?: (notice: string) => void;
   disabled?: boolean;
   cursorResetEpoch?: number;
+  draftText?: string;
+  draftEpoch?: number;
+  onDraftApplied?: () => void;
   skillRegistry?: SkillRegistry;
   terminalColumns: number;
   cwd: string;
@@ -65,13 +68,11 @@ export function needsCursorRowCompensation(
 export function resolveCursorRowCompensation(input: {
   sameRenderedFrame: boolean;
   previousRowCompensation: number;
-  forceRowCompensation: boolean;
   nextOutputHeight: number;
   viewportRows: number;
   previousOutputHeight: number | null;
 }): number {
   if (input.sameRenderedFrame) return input.previousRowCompensation;
-  if (input.forceRowCompensation) return 1;
   return needsCursorRowCompensation(
     input.nextOutputHeight,
     input.viewportRows,
@@ -216,7 +217,18 @@ export function insertNewlineAtCursor(text: string, cursor: number) {
   };
 }
 
-export function InputBox({ onSubmit, onPasteNotice, disabled, cursorResetEpoch = 0, skillRegistry, terminalColumns, cwd }: InputBoxProps) {
+export function InputBox({
+  onSubmit,
+  onPasteNotice,
+  disabled,
+  cursorResetEpoch = 0,
+  draftText,
+  draftEpoch = 0,
+  onDraftApplied,
+  skillRegistry,
+  terminalColumns,
+  cwd,
+}: InputBoxProps) {
   const theme = useTheme();
   const width = terminalColumns;
 
@@ -657,8 +669,8 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, cursorResetEpoch =
   const previousViewportRowsRef = useRef<number | null>(null);
   const previousInputFrameSignatureRef = useRef<string | null>(null);
   const previousRowCompensationRef = useRef(0);
-  const forceNextRowCompensationRef = useRef(false);
   const lastCursorResetEpochRef = useRef<number | null>(null);
+  const lastDraftEpochRef = useRef<number | null>(null);
   const lastWidthRef = useRef<number | null>(null);
   const { setCursorPosition } = useCursor();
   const { stdout } = useStdout();
@@ -674,11 +686,23 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, cursorResetEpoch =
     previousViewportRowsRef.current = null;
     previousInputFrameSignatureRef.current = null;
     previousRowCompensationRef.current = 0;
-    forceNextRowCompensationRef.current = true;
     lastCursorRef.current = null;
     setCursorPosition(undefined);
     setCursorTick((t) => t + 1);
   }, [cursorResetEpoch, setCursorPosition]);
+
+  useLayoutEffect(() => {
+    if (lastDraftEpochRef.current === draftEpoch) return;
+    lastDraftEpochRef.current = draftEpoch;
+    if (!draftText) return;
+
+    setText(draftText);
+    setCursor(draftText.length);
+    setSelectedIndex(0);
+    setHistoryIndex(null);
+    historyDraftRef.current = "";
+    onDraftApplied?.();
+  }, [draftEpoch, draftText, onDraftApplied]);
 
   // After a terminal resize the previous-frame refs reference a layout that no
   // longer exists; carrying them forward makes `needsCursorRowCompensation`
@@ -801,16 +825,13 @@ export function InputBox({ onSubmit, onPasteNotice, disabled, cursorResetEpoch =
       previousOutputHeight === rootHeight &&
       previousViewportRowsRef.current === viewportRows &&
       previousInputFrameSignatureRef.current === inputFrameSignature;
-    const forceRowCompensation = forceNextRowCompensationRef.current;
     const rowCompensation = resolveCursorRowCompensation({
       sameRenderedFrame,
       previousRowCompensation: previousRowCompensationRef.current,
-      forceRowCompensation,
       nextOutputHeight: rootHeight,
       viewportRows,
       previousOutputHeight,
     });
-    forceNextRowCompensationRef.current = false;
     previousOutputHeightRef.current = rootHeight;
     previousViewportRowsRef.current = viewportRows;
     previousInputFrameSignatureRef.current = inputFrameSignature;
