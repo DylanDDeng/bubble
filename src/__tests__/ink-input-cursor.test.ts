@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  createPastedContentMarker,
+  expandPastedContentMarkers,
   insertNewlineAtCursor,
   isInkModifiedEnterInput,
   isCtrlCInput,
@@ -7,6 +9,7 @@ import {
   resolveCursorRowCompensation,
   resolveInkEnterIntent,
   resolveSlashEnterAction,
+  shouldCollapsePastedContent,
   shouldSubmitExactSlashSuggestion,
 } from "../tui-ink/input-box.js";
 
@@ -117,5 +120,59 @@ describe("Ink Ctrl+C handling", () => {
     expect(isCtrlCInput("\x03", {})).toBe(true);
     expect(isCtrlCInput("c", {})).toBe(false);
     expect(isCtrlCInput("x", { ctrl: true })).toBe(false);
+  });
+});
+
+describe("Ink long paste placeholders", () => {
+  it("collapses long text by character count or line count", () => {
+    expect(shouldCollapsePastedContent("x".repeat(999))).toBe(false);
+    expect(shouldCollapsePastedContent("x".repeat(1000))).toBe(true);
+    expect(shouldCollapsePastedContent(Array.from({ length: 19 }, () => "x").join("\n"))).toBe(false);
+    expect(shouldCollapsePastedContent(Array.from({ length: 20 }, () => "x").join("\n"))).toBe(true);
+  });
+
+  it("creates the visible pasted content marker", () => {
+    expect(createPastedContentMarker("hello")).toBe("[Pasted Content 5 chars]");
+  });
+
+  it("expands markers back to pasted content before submit", () => {
+    const content = "long pasted body";
+    const marker = createPastedContentMarker(content);
+
+    expect(expandPastedContentMarkers(`Summarize:\n${marker}`, [
+      { marker, content },
+    ])).toBe(`Summarize:\n${content}`);
+  });
+
+  it("does not submit deleted pasted content", () => {
+    const content = "deleted body";
+    const marker = createPastedContentMarker(content);
+
+    expect(expandPastedContentMarkers("Summarize:", [
+      { marker, content },
+    ])).toBe("Summarize:");
+  });
+
+  it("expands multiple pasted markers in order", () => {
+    const first = "first pasted body";
+    const second = "second pasted body";
+    const firstMarker = createPastedContentMarker(first);
+    const secondMarker = createPastedContentMarker(second);
+
+    expect(expandPastedContentMarkers(`${firstMarker}\n---\n${secondMarker}`, [
+      { marker: firstMarker, content: first },
+      { marker: secondMarker, content: second },
+    ])).toBe(`${first}\n---\n${second}`);
+  });
+
+  it("expands duplicate markers without re-scanning inserted content", () => {
+    const first = "same length one";
+    const second = "same length two";
+    const marker = createPastedContentMarker(first);
+
+    expect(expandPastedContentMarkers(`${marker}\n${marker}`, [
+      { marker, content: first },
+      { marker, content: second },
+    ])).toBe(`${first}\n${second}`);
   });
 });

@@ -6,7 +6,13 @@ import type { SessionManager } from "../session.js";
 import type { AgentEvent, ContentPart, PermissionMode, Message, PlanDecision, Provider, Todo, ToolResultMetadata } from "../types.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import { UserConfig, maskKey } from "../config.js";
-import { InputBox, isCtrlCInput, type SubmitPayload } from "./input-box.js";
+import {
+  createPastedContentMarker,
+  InputBox,
+  isCtrlCInput,
+  shouldCollapsePastedContent,
+  type SubmitPayload,
+} from "./input-box.js";
 import { MessageList } from "./message-list.js";
 import {
   appendTextPart,
@@ -125,7 +131,9 @@ function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] 
       result.push({
         key: nextDisplayMessageKey("user"),
         role: "user",
-        content: typeof m.content === "string" ? m.content : "(multimedia)",
+        content: typeof m.content === "string"
+          ? (shouldCollapsePastedContent(m.content) ? createPastedContentMarker(m.content) : m.content)
+          : "(multimedia)",
       });
     } else if (m.role === "assistant") {
       const toolCalls: DisplayToolCall[] = [];
@@ -826,6 +834,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       const normalized: SubmitPayload =
         typeof payload === "string" ? { text: payload, images: [] } : payload;
       const input = normalized.text;
+      const displayInput = normalized.displayText ?? input;
       const images = normalized.images;
       if (!input.trim() && images.length === 0) return;
 
@@ -1111,7 +1120,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
 
       // Slash commands and skill invocations drop any attached images —
       // they're meant for pure command routing.
-      if (input.startsWith("/")) {
+      if (displayInput.startsWith("/")) {
         // Fast-path `/quit` and `/exit` before slash-registry / skill
         // resolution. This guarantees a literal "/quit" always exits even if
         // a skill or alias of the same name is later registered. The
@@ -1125,7 +1134,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
 
         const skillInvocation = parseSkillInvocation(input, safeSkillRegistry);
         if (skillInvocation) {
-          await runAgentInput(skillInvocation.actualPrompt, input);
+          await runAgentInput(skillInvocation.actualPrompt, displayInput);
           return;
         }
 
@@ -1179,7 +1188,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
             }
           }
           if (inject) {
-            await runAgentInput(inject, input);
+            await runAgentInput(inject, displayInput);
           }
           return;
         }
@@ -1202,7 +1211,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         : expansion.text;
       await runAgentInput(
         agentInput,
-        input,
+        displayInput,
         images.map((img) => ({ filename: img.filename, bytes: img.bytes })),
       );
     },

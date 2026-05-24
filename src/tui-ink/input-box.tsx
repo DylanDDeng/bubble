@@ -23,7 +23,10 @@ import {
 import { stripTerminalMouseSequences } from "./terminal-mouse.js";
 
 export interface SubmitPayload {
+  /** Fully-expanded text sent to the agent. */
   text: string;
+  /** Text shown in the composer/transcript when it differs from the real text. */
+  displayText?: string;
   images: ImageAttachment[];
 }
 
@@ -45,6 +48,13 @@ const MAX_VISIBLE_LINES = 6;
 const PADDING_X = 1;
 const PROMPT = " > ";
 const MAX_VISIBLE_SUGGESTIONS = 8;
+const LONG_PASTE_CHAR_THRESHOLD = 1000;
+const LONG_PASTE_LINE_THRESHOLD = 20;
+
+export interface PastedContentReference {
+  marker: string;
+  content: string;
+}
 
 export function needsCursorRowCompensation(
   nextOutputHeight: number,
@@ -217,6 +227,48 @@ export function insertNewlineAtCursor(text: string, cursor: number) {
   };
 }
 
+export function shouldCollapsePastedContent(text: string): boolean {
+  if (text.length >= LONG_PASTE_CHAR_THRESHOLD) return true;
+  return text.split("\n").length >= LONG_PASTE_LINE_THRESHOLD;
+}
+
+export function createPastedContentMarker(content: string): string {
+  return `[Pasted Content ${content.length} chars]`;
+}
+
+export function expandPastedContentMarkers(
+  displayText: string,
+  references: PastedContentReference[],
+): string {
+  if (references.length === 0 || displayText.length === 0) return displayText;
+
+  let expanded = "";
+  let index = 0;
+  const used = new Set<number>();
+  while (index < displayText.length) {
+    let matched = -1;
+    for (let i = 0; i < references.length; i++) {
+      const ref = references[i]!;
+      if (!used.has(i) && displayText.startsWith(ref.marker, index)) {
+        matched = i;
+        break;
+      }
+    }
+
+    if (matched >= 0) {
+      const ref = references[matched]!;
+      expanded += ref.content;
+      index += ref.marker.length;
+      used.add(matched);
+      continue;
+    }
+
+    expanded += displayText[index];
+    index += 1;
+  }
+  return expanded;
+}
+
 export function InputBox({
   onSubmit,
   onPasteNotice,
@@ -237,6 +289,7 @@ export function InputBox({
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [projectFiles, setProjectFiles] = useState<string[] | null>(null);
   const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
+  const [pastedContentRefs, setPastedContentRefs] = useState<PastedContentReference[]>([]);
   const [history, setHistory] = useState<string[]>(() => loadHistorySync());
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   const historyDraftRef = useRef<string>("");
@@ -398,7 +451,13 @@ export function InputBox({
 
     if (imageTokens.length === 0) {
       // Plain text paste — insert into the input at the cursor.
-      insertTextAtCursor(clean);
+      if (shouldCollapsePastedContent(clean)) {
+        const marker = createPastedContentMarker(clean);
+        setPastedContentRefs((prev) => [...prev, { marker, content: clean }]);
+        insertTextAtCursor(marker);
+      } else {
+        insertTextAtCursor(clean);
+      }
       clearPending();
       return;
     }
@@ -456,19 +515,27 @@ export function InputBox({
   };
 
   const submitInput = (submittedText: string) => {
-    if (submittedText.trim().length === 0 && attachments.length === 0) return;
-    onSubmit({ text: submittedText, images: attachments });
-    if (submittedText.trim().length > 0) {
-      const nextHistory = pushHistoryEntry(history, submittedText);
+    const expandedText = expandPastedContentMarkers(submittedText, pastedContentRefs);
+    if (expandedText.trim().length === 0 && attachments.length === 0) return;
+    onSubmit({
+      text: expandedText,
+      displayText: expandedText === submittedText ? undefined : submittedText,
+      images: attachments,
+    });
+    // A collapsed marker cannot be safely replayed from history once its
+    // in-memory paste reference is gone; skip those entries instead.
+    if (expandedText.trim().length > 0 && expandedText === submittedText) {
+      const nextHistory = pushHistoryEntry(history, expandedText);
       if (nextHistory !== history) {
         setHistory(nextHistory);
-        appendHistoryEntry(submittedText);
+        appendHistoryEntry(expandedText);
       }
     }
     setText("");
     setCursor(0);
     setSelectedIndex(0);
     setAttachments([]);
+    setPastedContentRefs([]);
     setHistoryIndex(null);
     historyDraftRef.current = "";
   };
@@ -627,6 +694,7 @@ export function InputBox({
         setHistoryIndex(result.index);
         historyDraftRef.current = result.draft;
         setSelectedIndex(0);
+        setPastedContentRefs([]);
       }
       return;
     }
@@ -646,6 +714,7 @@ export function InputBox({
         setHistoryIndex(result.index);
         historyDraftRef.current = result.draft;
         setSelectedIndex(0);
+        setPastedContentRefs([]);
       }
       return;
     }
@@ -699,6 +768,7 @@ export function InputBox({
     setText(draftText);
     setCursor(draftText.length);
     setSelectedIndex(0);
+    setPastedContentRefs([]);
     setHistoryIndex(null);
     historyDraftRef.current = "";
     onDraftApplied?.();
