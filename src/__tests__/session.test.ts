@@ -141,6 +141,18 @@ describe("SessionManager", () => {
     });
   });
 
+  it("creates and reuses a persistent prompt cache key", () => {
+    const file = join(tmpDir, "prompt-cache-key.jsonl");
+    const sm1 = new SessionManager(file);
+    const key = sm1.getOrCreatePromptCacheKey();
+
+    expect(key).toMatch(/^[0-9a-f-]{36}$/);
+    expect(sm1.getOrCreatePromptCacheKey()).toBe(key);
+
+    const sm2 = new SessionManager(file);
+    expect(sm2.getOrCreatePromptCacheKey()).toBe(key);
+  });
+
   it("clears generated title metadata", () => {
     const file = join(tmpDir, "metadata-clear-title.jsonl");
     const sm = new SessionManager(file);

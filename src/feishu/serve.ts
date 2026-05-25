@@ -108,14 +108,14 @@ export async function serveFeishu(opts: ServeFeishuOptions = {}): Promise<void> 
   if (mcpLoaded.servers.length > 0) {
     await mcpManager.start();
   }
-  const createProvider = (providerId: string, apiKey: string, baseURL: string) =>
-    createProviderInstance({ providerId, apiKey, baseURL });
-  const createProviderForRoute = async (route: { providerId: string; model: string }) => {
+  const createProvider = (providerId: string, apiKey: string, baseURL: string, promptCacheKey?: string) =>
+    createProviderInstance({ providerId, apiKey, baseURL, promptCacheKey });
+  const createProviderForRoute = async (route: { providerId: string; model: string }, promptCacheKey?: string) => {
     const target = providerRegistry.getConfigured().find((p) => p.id === route.providerId);
     if (!target?.apiKey) {
       throw new Error(`Subagent route requires provider "${route.providerId}", not configured.`);
     }
-    return createProvider(route.providerId, target.apiKey, target.baseURL);
+    return createProvider(route.providerId, target.apiKey, target.baseURL, promptCacheKey);
   };
   const deps: FeishuRuntimeDeps = {
     settingsManager,

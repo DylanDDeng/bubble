@@ -81,16 +81,25 @@ async function main() {
   const defaultProvider = registry.getDefault();
   const unavailableProviderMessage = "No provider configured. Use /login for ChatGPT or /provider --add <id> before sending a prompt.";
 
+  let sessionPromptCacheKey: string | undefined;
+
   const provider = defaultProvider
     ? createProviderInstance({
         providerId: defaultProvider.id,
         apiKey: defaultProvider.apiKey,
         baseURL: defaultProvider.baseURL,
         thinkingLevel: args.thinkingLevel,
+        promptCacheKey: sessionPromptCacheKey,
       })
     : createUnavailableProvider(unavailableProviderMessage);
   const createProvider = (providerId: string, apiKey: string, baseURL: string) =>
-    createProviderInstance({ providerId, apiKey, baseURL, thinkingLevel: args.thinkingLevel });
+    createProviderInstance({
+      providerId,
+      apiKey,
+      baseURL,
+      thinkingLevel: args.thinkingLevel,
+      promptCacheKey: sessionPromptCacheKey,
+    });
   const createProviderForRoute = async (route: { providerId: string; model: string }) => {
     const providerId = route.providerId;
     if (!providerId) {
@@ -240,6 +249,7 @@ async function main() {
       : SessionManager.createFresh(args.cwd);
     resumedExistingSession = false;
   }
+  sessionPromptCacheKey = sessionManager.getOrCreatePromptCacheKey();
 
   // Model resolution:
   // 1. Session metadata  2. User-configured default model  3. CLI flag

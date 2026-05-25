@@ -9,6 +9,7 @@ export interface SessionMetadata {
   titleSource?: "llm" | "manual";
   titleUpdatedAt?: number;
   titleUserMessageId?: string;
+  promptCacheKey?: string;
 }
 
 export type SessionMarkerKind =

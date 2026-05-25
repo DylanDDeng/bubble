@@ -1,4 +1,5 @@
-import type { Provider, ProviderMessage, ReasoningEffort, StreamChunk, ThinkingLevel, ToolDefinition } from "./types.js";
+import { createHash } from "node:crypto";
+import type { Provider, ProviderMessage, ReasoningEffort, StreamChunk, ThinkingLevel, TokenUsage, ToolDefinition } from "./types.js";
 import { listBuiltinModels } from "./model-catalog.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
 
@@ -56,6 +57,7 @@ export function createOpenAICodexProvider(options: {
   apiKey: string;
   baseURL: string;
   thinkingLevel?: ThinkingLevel;
+  promptCacheKey?: string;
 }): Provider {
   const sessionId = globalThis.crypto?.randomUUID?.() ?? `bubble_${Date.now()}`;
 
@@ -83,6 +85,8 @@ export function createOpenAICodexProvider(options: {
           tools: chatOptions.tools,
           reasoningEffort: requestConfig.reasoningEffort,
           sessionId,
+          providerId: options.providerId,
+          promptCacheKey: options.promptCacheKey,
         })
       ),
     });
@@ -212,14 +216,7 @@ export function createOpenAICodexProvider(options: {
         if (usage) {
           yield {
             type: "usage",
-            usage: {
-              promptTokens: typeof usage.input_tokens === "number" ? usage.input_tokens : 0,
-              completionTokens: typeof usage.output_tokens === "number" ? usage.output_tokens : 0,
-              reasoningTokens: typeof usage.output_tokens_details?.reasoning_tokens === "number"
-                ? usage.output_tokens_details.reasoning_tokens
-                : undefined,
-              totalTokens: typeof usage.total_tokens === "number" ? usage.total_tokens : undefined,
-            },
+            usage: normalizeOpenAICodexUsage(usage),
           };
         }
         continue;
@@ -248,6 +245,37 @@ export function createOpenAICodexProvider(options: {
   }
 
   return { streamChat, complete };
+}
+
+export function normalizeOpenAICodexUsage(usage: any): TokenUsage {
+  const promptTokens = typeof usage?.input_tokens === "number" ? usage.input_tokens : 0;
+  const cachedTokens = typeof usage?.input_tokens_details?.cached_tokens === "number"
+    ? usage.input_tokens_details.cached_tokens
+    : undefined;
+
+  return {
+    promptTokens,
+    completionTokens: typeof usage?.output_tokens === "number" ? usage.output_tokens : 0,
+    promptCacheHitTokens: cachedTokens,
+    promptCacheMissTokens: cachedTokens !== undefined ? Math.max(0, promptTokens - cachedTokens) : undefined,
+    reasoningTokens: typeof usage?.output_tokens_details?.reasoning_tokens === "number"
+      ? usage.output_tokens_details.reasoning_tokens
+      : undefined,
+    totalTokens: typeof usage?.total_tokens === "number" ? usage.total_tokens : undefined,
+  };
+}
+
+export function buildOpenAICodexPromptCacheKey(input: {
+  seed?: string;
+  providerId?: string;
+  model: string;
+}): string | undefined {
+  const seed = input.seed?.trim();
+  if (!seed) return undefined;
+
+  return createHash("sha256")
+    .update(`bubble:${input.providerId || "openai-codex"}:${input.model}:${seed}`)
+    .digest("hex");
 }
 
 export async function fetchOpenAICodexModels(options: {
@@ -289,6 +317,8 @@ function buildRequestBody(
     tools?: ToolDefinition[];
     reasoningEffort?: ThinkingLevel;
     sessionId?: string;
+    providerId?: string;
+    promptCacheKey?: string;
   }
 ) {
   const instructions = messages
@@ -304,7 +334,11 @@ function buildRequestBody(
     instructions: instructions || undefined,
     input,
     include: ["reasoning.encrypted_content"],
-    prompt_cache_key: options.sessionId,
+    prompt_cache_key: buildOpenAICodexPromptCacheKey({
+      seed: options.promptCacheKey ?? options.sessionId,
+      providerId: options.providerId,
+      model: options.model,
+    }),
     tool_choice: "auto",
     parallel_tool_calls: true,
     text: { verbosity: "medium" },

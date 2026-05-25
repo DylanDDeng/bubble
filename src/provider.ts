@@ -77,6 +77,8 @@ export interface ProviderInstanceOptions {
   baseURL: string;
   /** Requested thinking level */
   thinkingLevel?: ThinkingLevel;
+  /** Stable per-session seed for provider prompt caches. */
+  promptCacheKey?: string;
 }
 
 export function createUnavailableProvider(message: string): Provider {

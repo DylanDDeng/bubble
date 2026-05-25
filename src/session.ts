@@ -2,6 +2,7 @@
  * Session Manager - Append-only JSONL persistence over a structured session log.
  */
 
+import { randomUUID } from "node:crypto";
 import { mkdirSync, appendFileSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { getBubbleHome } from "./bubble-home.js";
@@ -133,6 +134,15 @@ export class SessionManager {
 
   getMetadata(): SessionMetadata {
     return this.log.getMetadata();
+  }
+
+  getOrCreatePromptCacheKey(): string {
+    const existing = this.log.getMetadata().promptCacheKey;
+    if (existing) return existing;
+
+    const promptCacheKey = randomUUID();
+    this.updateMetadata({ promptCacheKey });
+    return promptCacheKey;
   }
 
   setMetadata(metadata: SessionMetadata) {

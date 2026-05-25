@@ -25,8 +25,8 @@ export interface FeishuRuntimeDeps {
   /** Live MCP tool source; tools list includes MCP entries. */
   mcpManager: McpManager;
   /** Factory used by main provider + subagent routes. */
-  createProvider: (providerId: string, apiKey: string, baseURL: string) => Provider;
-  createProviderForRoute: (route: { providerId: string; model: string }) => Promise<Provider>;
+  createProvider: (providerId: string, apiKey: string, baseURL: string, promptCacheKey?: string) => Provider;
+  createProviderForRoute: (route: { providerId: string; model: string }, promptCacheKey?: string) => Promise<Provider>;
   /** Resolved owner open_id (from config.app.ownerOpenId). */
   ownerOpenId: string;
 }

@@ -119,7 +119,8 @@ export class RunDriver {
     });
     tools.push(...this.opts.deps.mcpManager.getToolEntries());
 
-    const { provider, providerId, model } = await this.resolveProvider(session);
+    const promptCacheKey = session.manager.getOrCreatePromptCacheKey();
+    const { provider, providerId, model } = await this.resolveProvider(session, promptCacheKey);
     const skills = this.opts.deps.skillRegistry.summaries();
     const memoryPrompt = buildMemoryPrompt(session.cwd);
     const thinkingLevel = this.opts.deps.userConfig.getDefaultThinkingLevel()
@@ -172,7 +173,7 @@ export class RunDriver {
       memoryPrompt,
       fileStateTracker,
       agentCategories: this.opts.deps.userConfig.getAgentCategories(),
-      providerFactory: this.opts.deps.createProviderForRoute,
+      providerFactory: (route) => this.opts.deps.createProviderForRoute(route, promptCacheKey),
     });
     sessionTitleUpdater = createSessionTitleUpdater({
       sessionManager: session.manager,
@@ -283,7 +284,7 @@ export class RunDriver {
     }
   }
 
-  private async resolveProvider(session: { cwd: string }): Promise<{ provider: import("../../types.js").Provider; providerId: string; model: string }> {
+  private async resolveProvider(session: { cwd: string }, promptCacheKey: string): Promise<{ provider: import("../../types.js").Provider; providerId: string; model: string }> {
     const registry = this.opts.deps.providerRegistry;
     const userConfig = this.opts.deps.userConfig;
 
@@ -312,7 +313,12 @@ export class RunDriver {
     const activeModel = effectiveModelId
       ? encodeModel(activeProviderId, effectiveModelId)
       : "";
-    const provider = this.opts.deps.createProvider(activeProviderId, target.apiKey, target.baseURL);
+    const provider = this.opts.deps.createProvider(
+      activeProviderId,
+      target.apiKey,
+      target.baseURL,
+      promptCacheKey,
+    );
     return { provider, providerId: activeProviderId, model: activeModel };
   }
 }
