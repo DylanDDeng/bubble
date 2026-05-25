@@ -214,7 +214,14 @@ function StreamingMessage({
         </Box>
       )}
       {visibleParts.length > 0 && (
-        <Box marginTop={1} marginBottom={1} flexDirection="column">
+        // marginTop intentionally 0: this Box only mounts on the first non-empty
+        // streaming frame, so a marginTop=1 here would visibly insert a blank
+        // line under the user message right at that moment (the "spinner sits
+        // close, then content appears with a sudden gap, then spinner slides
+        // down" effect users perceive as flicker on the DOM xterm renderer).
+        // marginBottom=1 stays so streamed text doesn't collide with the
+        // WaitingIndicator rendered below.
+        <Box marginTop={0} marginBottom={1} flexDirection="column">
           <MessageParts
             parts={visibleParts}
             terminalColumns={terminalColumns}

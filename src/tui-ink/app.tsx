@@ -254,9 +254,38 @@ function withMessageKey(message: DisplayMessage): DisplayMessage {
   return { ...message, key: nextDisplayMessageKey(prefix) };
 }
 
-const STREAMING_STATIC_FLUSH_MIN_CHARS = 5000;
-const STREAMING_STATIC_FLUSH_TARGET_CHARS = 3600;
-const STREAMING_STATIC_FLUSH_MIN_TAIL = 700;
+// Keep the live (non-Static) region small so non-GPU terminals (xterm.js DOM
+// renderer, ssh into a basic terminal, tmux without GPU) don't flicker when
+// Ink re-reconciles the streaming block on every token. Flushing earlier and
+// in smaller chunks shifts most of the answer into terminal scrollback, where
+// it's a one-time write that doesn't get re-rendered.
+const STREAMING_STATIC_FLUSH_MIN_CHARS = 600;
+const STREAMING_STATIC_FLUSH_TARGET_CHARS = 400;
+const STREAMING_STATIC_FLUSH_MIN_TAIL = 120;
+
+/**
+ * True iff `prefix` ends inside an open ```/~~~ fenced code block. Splitting
+ * the streaming buffer at such a point would let the flushed half render
+ * without its closing fence — `MarkdownContent` would then treat the body as
+ * plain prose and the trailing half would render as an isolated code block
+ * with no opener. Fence delimiters of different families don't close each
+ * other (a `~~~` inside a ``` block is just text). We use a permissive
+ * "line starts with three or more of the same char" rule, ignoring the info
+ * string — that's enough to spot when we're mid-block.
+ */
+function endsInsideUnclosedCodeFence(prefix: string): boolean {
+  let openMarker: "`" | "~" | null = null;
+  for (const rawLine of prefix.split("\n")) {
+    const line = rawLine.replace(/^ {0,3}/, "");
+    if (openMarker === null) {
+      if (line.startsWith("```")) openMarker = "`";
+      else if (line.startsWith("~~~")) openMarker = "~";
+    } else if (line.startsWith(openMarker.repeat(3))) {
+      openMarker = null;
+    }
+  }
+  return openMarker !== null;
+}
 
 function findStreamingStaticFlushIndex(content: string): number {
   if (content.length < STREAMING_STATIC_FLUSH_MIN_CHARS) return -1;
@@ -268,12 +297,20 @@ function findStreamingStaticFlushIndex(content: string): number {
   const search = content.slice(0, upper);
   const paragraphBreak = search.lastIndexOf("\n\n");
   if (paragraphBreak >= STREAMING_STATIC_FLUSH_TARGET_CHARS / 2) {
-    return paragraphBreak + 2;
+    const splitIndex = paragraphBreak + 2;
+    if (!endsInsideUnclosedCodeFence(content.slice(0, splitIndex))) {
+      return splitIndex;
+    }
   }
   const lineBreak = search.lastIndexOf("\n");
   if (lineBreak >= STREAMING_STATIC_FLUSH_TARGET_CHARS / 2) {
-    return lineBreak + 1;
+    const splitIndex = lineBreak + 1;
+    if (!endsInsideUnclosedCodeFence(content.slice(0, splitIndex))) {
+      return splitIndex;
+    }
   }
+  // Inside an open code fence: hold off flushing until the closing fence
+  // arrives. The live region grows a bit, but Markdown rendering stays correct.
   return -1;
 }
 
