@@ -286,7 +286,6 @@ async function main() {
     mode: initialMode,
     workingDir: args.cwd,
     tools: tools.map((tool) => tool.name),
-    skills: skillSummaries,
     memoryPrompt,
   });
   const budgetLedger = new BudgetLedger();

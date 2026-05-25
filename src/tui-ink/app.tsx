@@ -557,7 +557,6 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         thinkingLevel: overrides?.thinkingLevel ?? agent.thinking,
         mode: overrides?.mode ?? agent.mode,
         workingDir: args.cwd,
-        skills: safeSkillRegistry?.summaries() ?? [],
       }));
     },
     [agent, args.cwd, safeRegistry, safeSkillRegistry],
@@ -691,7 +690,6 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         configuredModelId: model,
         thinkingLevel: agent.thinking,
         workingDir: args.cwd,
-        skills: safeSkillRegistry?.summaries() ?? [],
       }));
       userConfig.pushRecentModel(model);
       setThinkingLevel(agent.thinking);

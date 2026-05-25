@@ -90,7 +90,6 @@ function syncSystemPrompt(ctx: Parameters<SlashCommand["handler"]>[1], model: st
     configuredModelId: model,
     thinkingLevel: ctx.agent.thinking,
     workingDir: ctx.cwd,
-    skills: ctx.skillRegistry.summaries(),
     memoryPrompt: buildMemoryPrompt(ctx.cwd),
   }));
 }

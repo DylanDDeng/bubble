@@ -9,7 +9,6 @@ import { buildGptProviderPrompt } from "./provider-prompts/gpt.js";
 import { buildKimiProviderPrompt } from "./provider-prompts/kimi.js";
 import { buildEnvironmentPrompt, defaultToolNames, type EnvironmentPromptOptions } from "./environment.js";
 import { buildRuntimePrompt } from "./runtime.js";
-import { buildSkillsPrompt } from "./skills.js";
 import type { SkillSummary } from "../skills/types.js";
 
 export interface ComposeSystemPromptOptions extends EnvironmentPromptOptions {
@@ -39,7 +38,6 @@ export function composeSystemPrompt(options: ComposeSystemPromptOptions = {}): s
     mode: options.mode,
     guidelines: buildGuidelines(options.tools ?? defaultToolNames, options.guidelines ?? []),
   });
-  const skillsPrompt = buildSkillsPrompt(options.skills ?? []);
 
   return [
     providerPrompt,
@@ -47,7 +45,6 @@ export function composeSystemPrompt(options: ComposeSystemPromptOptions = {}): s
     runtimePrompt,
     options.agentProfilePrompt,
     options.memoryPrompt,
-    skillsPrompt,
   ].filter(Boolean).join("\n\n");
 }
 
@@ -105,6 +102,10 @@ function buildGuidelines(tools: string[], extraGuidelines: string[]): string[] {
 
   if (tools.includes("question")) {
     add("When the user is explicitly discussing, brainstorming, or shaping an approach instead of asking for immediate execution, use the question tool for targeted clarification or preference choices when it would materially improve the discussion; do not use it for generic permission-to-proceed questions");
+  }
+
+  if (tools.includes("skill_search") && tools.includes("skill")) {
+    add("Skills may provide specialized workflows. When a task appears to match a specialized workflow, call skill_search to find relevant skills, then call skill with the exact name to load the selected skill before applying it");
   }
 
   if (tools.includes("todo_write")) {

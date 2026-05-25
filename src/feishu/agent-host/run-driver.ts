@@ -133,7 +133,6 @@ export class RunDriver {
       mode: initialMode,
       workingDir: session.cwd,
       tools: tools.map((t) => t.name),
-      skills,
       memoryPrompt,
     });
     const budgetLedger = new BudgetLedger();

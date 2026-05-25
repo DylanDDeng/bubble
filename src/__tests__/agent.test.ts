@@ -769,7 +769,7 @@ describe("Agent", () => {
     expect(result.error).toBe("stop child");
   });
 
-  it("adds skill and memory prompt context to subagents only when selected tools need it", async () => {
+  it("adds memory prompt context to subagents without advertising skill summaries", async () => {
     const captured: Message[][] = [];
     const provider: Provider = {
       async *streamChat(messages) {
@@ -819,7 +819,7 @@ describe("Agent", () => {
     });
 
     const system = captured[0].find((message) => message.role === "system")?.content ?? "";
-    expect(system).toContain("debug-skill");
+    expect(system).not.toContain("debug-skill");
     expect(system).toContain("Memory context visible");
     expect(system).toContain("Use selected context.");
   });

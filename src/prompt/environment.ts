@@ -25,6 +25,7 @@ export const defaultToolSnippets: Record<string, string> = {
   send_input: "Send follow-up input to an existing subagent thread",
   close_agent: "Close or cancel a spawned subagent thread",
   question: "Ask the user structured questions when clarification or preference choices would materially improve the work",
+  skill_search: "Search available skills by name, description, tags, and source",
   skill: "Load a named skill with specialized instructions and bundled resources",
   todo_write: "Plan and track multi-step work. Mark each task completed as soon as it is done — do not batch.",
 };
@@ -44,6 +45,7 @@ export const defaultToolNames = [
   "send_input",
   "close_agent",
   "question",
+  "skill_search",
   "skill",
   "todo_write",
 ];

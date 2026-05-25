@@ -50,6 +50,6 @@ Read the repo carefully before proposing changes.
 
     expect(result.isError).toBe(true);
     expect(result.content).toContain('Unknown skill "missing-skill"');
+    expect(result.content).toContain("Use skill_search");
   });
 });
-

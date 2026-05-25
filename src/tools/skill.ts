@@ -48,11 +48,8 @@ export function createSkillTool(registry: SkillRegistry): ToolRegistryEntry {
 
       const skill = registry.get(name);
       if (!skill) {
-        const available = registry.summaries().map((item) => item.name).join(", ");
         return {
-          content: available
-            ? `Error: Unknown skill "${name}". Available skills: ${available}`
-            : `Error: Unknown skill "${name}". No skills are currently available.`,
+          content: `Error: Unknown skill "${name}". Use skill_search to find available skills, then retry with the exact skill name.`,
           isError: true,
         };
       }
