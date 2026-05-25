@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { Box, Text, useInput, usePaste, useStdout } from "ink";
-import stringWidth from "string-width";
 import { useTheme } from "./theme.js";
 import { ProviderRegistry, encodeModel, decodeModel, displayModel, isUserVisibleProvider, type ModelInfo } from "../provider-registry.js";
 import { listBuiltinModels } from "../model-catalog.js";
+import { padVisual, truncateVisual } from "../text-display.js";
+
+export { padVisual, truncateVisual } from "../text-display.js";
 
 export interface ModelPickerOption {
   id: string;
@@ -44,26 +46,6 @@ export function isPrintablePickerInput(input: string): boolean {
   if (input.startsWith("\x1b")) return false;
   if (isRawEscapeTail(input)) return false;
   return !/[\x00-\x1f\x7f]/.test(input);
-}
-
-export function truncateVisual(text: string, maxWidth: number): string {
-  if (maxWidth <= 0) return "";
-  if (stringWidth(text) <= maxWidth) return text;
-  if (maxWidth === 1) return "…";
-
-  let out = "";
-  let width = 0;
-  for (const ch of text) {
-    const chWidth = stringWidth(ch);
-    if (width + chWidth > maxWidth - 1) break;
-    out += ch;
-    width += chWidth;
-  }
-  return `${out}…`;
-}
-
-export function padVisual(text: string, width: number): string {
-  return `${text}${" ".repeat(Math.max(0, width - stringWidth(text)))}`;
 }
 
 export function formatSkillPickerRow(

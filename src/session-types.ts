@@ -5,6 +5,10 @@ export interface SessionMetadata {
   thinkingLevel?: ThinkingLevel;
   reasoningEffort?: ThinkingLevel;
   cwd?: string;
+  title?: string;
+  titleSource?: "llm" | "manual";
+  titleUpdatedAt?: number;
+  titleUserMessageId?: string;
 }
 
 export type SessionMarkerKind =

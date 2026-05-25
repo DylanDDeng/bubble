@@ -49,7 +49,7 @@ export class SessionBinder {
     // Persist metadata immediately so the on-disk file exists from this point
     // on — otherwise openOrBootstrap() on the next call would see the pointer
     // but no file and re-bootstrap, losing the pointer.
-    manager.setMetadata({ cwd });
+    manager.updateMetadata({ cwd });
     const entry: SessionEntry = {
       sessionFile: manager.getSessionFile(),
       cwd,

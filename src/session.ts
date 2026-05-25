@@ -9,12 +9,16 @@ import { compactSessionEntries, type CompactOptions, type CompactResult } from "
 import type { Message, Todo } from "./types.js";
 import { SessionLog } from "./session-log.js";
 import type { SessionLogEntry, SessionMarkerKind, SessionMetadata } from "./session-types.js";
+import { normalizeSingleLine, truncateVisual } from "./text-display.js";
+import { deterministicTitleFromUserContent } from "./session-title.js";
 
 export interface SessionSummary {
   file: string;
   name: string;
   cwd?: string;
   cwdLabel: string;
+  title: string;
+  preview: string;
   firstUserMessage: string;
   messageCount: number;
   mtime: number;
@@ -136,6 +140,24 @@ export class SessionManager {
     this.rewrite(nextEntries);
   }
 
+  updateMetadata(patch: Partial<SessionMetadata>) {
+    this.setMetadata({
+      ...this.log.getMetadata(),
+      ...dropUndefined(patch),
+    });
+  }
+
+  clearTitleMetadata() {
+    const {
+      title: _title,
+      titleSource: _titleSource,
+      titleUpdatedAt: _titleUpdatedAt,
+      titleUserMessageId: _titleUserMessageId,
+      ...metadata
+    } = this.log.getMetadata();
+    this.setMetadata(metadata);
+  }
+
   appendMessage(message: Message) {
     const entries = this.log.appendMessage(message);
     this.persist(entries);
@@ -228,23 +250,25 @@ function summarizeSessionFile(file: string, cwdDir: string): SessionSummary | un
   const log = new SessionLog();
   log.load(lines);
   const metadata = log.getMetadata();
+  const entries = log.list();
   const messages = log.toMessages();
 
-  const firstUser = messages.find((m) => m.role === "user");
-  let firstUserText = "";
-  if (firstUser) {
-    firstUserText = typeof firstUser.content === "string"
-      ? firstUser.content
-      : firstUser.content.map((part) => part.type === "text" ? part.text : "").join("");
-  }
-  const snippet = firstUserText.trim().replace(/\s+/g, " ").slice(0, 80);
+  const firstUserEntry = firstUserEntryAfterLatestClear(entries);
+  const firstUserText = firstUserEntry ? messageText(firstUserEntry.message) : "";
+  const preview = firstUserText
+    ? sessionPreviewFromText(firstUserText)
+    : (messages.length > 0 ? "No user message" : "No messages");
+  const title = usableStoredTitle(metadata, entries)
+    ?? (firstUserEntry ? deterministicTitleFromUserContent(firstUserEntry.message.content) : (messages.length > 0 ? "Assistant-only session" : "Empty session"));
 
   return {
     file,
     name: basename(file).replace(/\.jsonl$/, ""),
     cwd: metadata.cwd,
     cwdLabel: metadata.cwd ?? decodeCwdDir(cwdDir),
-    firstUserMessage: snippet || "(no user message)",
+    title,
+    preview,
+    firstUserMessage: preview,
     messageCount: messages.length,
     mtime: stat.mtimeMs,
   };
@@ -256,4 +280,46 @@ function decodeCwdDir(safe: string): string {
   // Unix paths this still produces a readable approximation.
   if (safe.startsWith("_")) return "/" + safe.slice(1).replace(/_/g, "/");
   return safe.replace(/_/g, "/");
+}
+
+function dropUndefined<T extends object>(value: T): Partial<T> {
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)) as Partial<T>;
+}
+
+function firstUserEntryAfterLatestClear(entries: SessionLogEntry[]) {
+  const startIndex = latestClearIndex(entries) + 1;
+  for (let i = startIndex; i < entries.length; i++) {
+    const entry = entries[i];
+    if (entry.type === "user_message") return entry;
+  }
+  return undefined;
+}
+
+function latestClearIndex(entries: SessionLogEntry[]): number {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry.type === "marker" && entry.kind === "conversation_clear") return i;
+  }
+  return -1;
+}
+
+function usableStoredTitle(metadata: SessionMetadata, entries: SessionLogEntry[]): string | undefined {
+  const title = normalizeSingleLine(metadata.title ?? "");
+  if (!title) return undefined;
+  if (!metadata.titleUserMessageId) return title;
+
+  const anchorIndex = entries.findIndex((entry) => entry.id === metadata.titleUserMessageId);
+  if (anchorIndex < 0) return undefined;
+  if (anchorIndex <= latestClearIndex(entries)) return undefined;
+  return title;
+}
+
+function messageText(message: Message): string {
+  if (message.role !== "user") return "";
+  if (typeof message.content === "string") return message.content;
+  return message.content.map((part) => part.type === "text" ? part.text : "").join("\n");
+}
+
+function sessionPreviewFromText(text: string): string {
+  return truncateVisual(normalizeSingleLine(text), 100) || "No user message";
 }

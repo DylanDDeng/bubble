@@ -235,7 +235,7 @@ register({
       const lines = ["最近 session：", ""];
       for (const s of recent) {
         const stamp = new Date(s.mtime).toISOString().slice(0, 19).replace("T", " ");
-        lines.push(`- \`${s.name}\` · ${stamp} · ${s.messageCount} msgs · ${s.firstUserMessage.slice(0, 50)}`);
+        lines.push(`- \`${s.name}\` · ${stamp} · ${s.messageCount} msgs · ${s.title.slice(0, 50)}`);
       }
       lines.push("");
       lines.push("用 `/resume <name>` 恢复。");
@@ -284,6 +284,7 @@ register({
     }
     const opened = ctx.sessionBinder.openOrBootstrap(input.scopeKey, entry.cwd, entry.permissionMode);
     opened.manager.appendMarker("conversation_clear", String(Date.now()));
+    opened.manager.clearTitleMetadata();
     await ctx.channel.send(input.chatId, { text: "🧹 已插入清除标记。下次发消息从空上下文开始。" });
   },
 });

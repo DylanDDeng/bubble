@@ -25,6 +25,7 @@ import { createAllTools, type PlanController } from "../../tools/index.js";
 import { displayModel, encodeModel, decodeModel } from "../../provider-registry.js";
 import { buildMemoryPrompt, recordMemoryCitations } from "../../memory/index.js";
 import { getDefaultThinkingLevel } from "../../provider-transform.js";
+import { createSessionTitleUpdater, type SessionTitleUpdater } from "../../session-title.js";
 import type { AgentEvent, Message, PermissionMode, PlanDecision } from "../../types.js";
 import type { SessionManager } from "../../session.js";
 import { applyCardBudget } from "../card/budget.js";
@@ -136,6 +137,7 @@ export class RunDriver {
       memoryPrompt,
     });
     const budgetLedger = new BudgetLedger();
+    let sessionTitleUpdater: SessionTitleUpdater | undefined;
     const agent = new Agent({
       provider,
       providerId,
@@ -150,6 +152,7 @@ export class RunDriver {
       onMessageAppend: (message: Message) => {
         if (message.role === "system" || message.role === "meta") return;
         session.manager.appendMessage(message);
+        sessionTitleUpdater?.handlePersistedMessage(message);
         if (message.role === "assistant") {
           recordMemoryCitations(session.cwd, message.content);
         }
@@ -171,9 +174,13 @@ export class RunDriver {
       agentCategories: this.opts.deps.userConfig.getAgentCategories(),
       providerFactory: this.opts.deps.createProviderForRoute,
     });
+    sessionTitleUpdater = createSessionTitleUpdater({
+      sessionManager: session.manager,
+      complete: (messages, completeOptions) => agent.complete(messages, completeOptions),
+    });
     agentRef = agent;
     agentForPlan = agent;
-    session.manager.setMetadata({
+    session.manager.updateMetadata({
       ...(agent.model ? { model: agent.model } : {}),
       cwd: session.cwd,
       thinkingLevel: agent.thinking,

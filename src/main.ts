@@ -13,6 +13,7 @@ import { createProviderInstance, createUnavailableProvider } from "./provider.js
 import { getDefaultThinkingLevel } from "./provider-transform.js";
 import { ProviderRegistry, displayModel, encodeModel, decodeModel } from "./provider-registry.js";
 import { SessionManager } from "./session.js";
+import { createSessionTitleUpdater, type SessionTitleUpdater } from "./session-title.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { SkillRegistry } from "./skills/registry.js";
 import { createAllTools, type PlanController, type ToolSearchController } from "./tools/index.js";
@@ -289,6 +290,7 @@ async function main() {
     memoryPrompt,
   });
   const budgetLedger = new BudgetLedger();
+  let sessionTitleUpdater: SessionTitleUpdater | undefined;
   const agent = new Agent({
     provider: activeProvider
       ? createProvider(activeProviderId, activeProvider.apiKey, activeProvider.baseURL)
@@ -309,6 +311,7 @@ async function main() {
       // they will be re-injected as needed on resume based on the current mode.
       if (message.role === "meta") return;
       sessionManager.appendMessage(message);
+      sessionTitleUpdater?.handlePersistedMessage(message);
       if (message.role === "assistant") {
         recordMemoryCitations(args.cwd, message.content);
       }
@@ -336,7 +339,13 @@ async function main() {
   });
   agentRef = agent;
   if (sessionManager) {
-    sessionManager.setMetadata({
+    sessionTitleUpdater = createSessionTitleUpdater({
+      sessionManager,
+      complete: (messages, completeOptions) => agent.complete(messages, completeOptions),
+    });
+  }
+  if (sessionManager) {
+    sessionManager.updateMetadata({
       ...(agent.model ? { model: agent.model } : {}),
       cwd: args.cwd,
       thinkingLevel: agent.thinking,

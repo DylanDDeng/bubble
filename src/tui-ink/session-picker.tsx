@@ -3,6 +3,7 @@ import { Box, Text, useInput, useStdout } from "ink";
 import { useTheme } from "./theme.js";
 import { formatRelativeTime } from "./recent-activity.js";
 import type { SessionSummary } from "../session.js";
+import { padVisual, truncateVisual } from "../text-display.js";
 
 export type SessionPickerMode = "current" | "all";
 
@@ -24,6 +25,7 @@ export function SessionPicker({ currentCwd, currentSessions, allSessions, onSele
   const theme = useTheme();
   const { stdout } = useStdout();
   const termHeight = stdout?.rows || 24;
+  const termWidth = stdout?.columns || 80;
   const maxVisible = Math.max(6, termHeight - 10);
 
   const [mode, setMode] = useState<SessionPickerMode>("current");
@@ -106,14 +108,15 @@ export function SessionPicker({ currentCwd, currentSessions, allSessions, onSele
           }
           const session = row.session!;
           const isSelected = actualIndex === selectedRowIndex;
-          const time = formatRelativeTime(session.mtime).padEnd(9);
+          const time = padVisual(formatRelativeTime(session.mtime), 9);
+          const titleWidth = Math.max(20, Math.min(80, termWidth - 30));
           return (
             <Box key={session.file}>
               <Text color={isSelected ? theme.accent : undefined}>
                 {isSelected ? "> " : "  "}
                 {time}
                 {"  "}
-                {truncate(session.firstUserMessage, 60)}
+                {padVisual(truncateVisual(session.title, titleWidth), titleWidth)}
               </Text>
               <Box marginLeft={1}>
                 <Text color={theme.muted} dimColor>
@@ -170,9 +173,4 @@ function clampWindowStart(rows: Row[], selectedRowIndex: number, maxVisible: num
   let start = Math.max(0, selectedRowIndex - half);
   if (start + maxVisible > rows.length) start = rows.length - maxVisible;
   return Math.max(0, start);
-}
-
-function truncate(text: string, max: number): string {
-  if (text.length <= max) return text.padEnd(max);
-  return text.slice(0, max - 1) + "…";
 }

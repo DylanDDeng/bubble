@@ -591,7 +591,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       rebuildSystemPrompt({ thinkingLevel: nextLevel });
       userConfig.setDefaultThinkingLevel(nextLevel);
       setThinkingLevel(nextLevel);
-      sessionManager?.setMetadata({ model: agent.model, thinkingLevel: nextLevel, reasoningEffort: nextLevel });
+      sessionManager?.updateMetadata({ model: agent.model, thinkingLevel: nextLevel, reasoningEffort: nextLevel });
       sessionManager?.appendMarker("thinking_level_switch", nextLevel);
       return;
     }
@@ -693,7 +693,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       }));
       userConfig.pushRecentModel(model);
       setThinkingLevel(agent.thinking);
-      sessionManager?.setMetadata({ model, thinkingLevel: agent.thinking, reasoningEffort: agent.thinking });
+      sessionManager?.updateMetadata({ model, thinkingLevel: agent.thinking, reasoningEffort: agent.thinking });
       sessionManager?.appendMarker("model_switch", model);
       addMessage("assistant", `Model switched to ${displayModel(model)}.`);
       closePicker();

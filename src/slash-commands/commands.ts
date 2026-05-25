@@ -76,7 +76,7 @@ function persistSelectedModel(model: string, ctx: Parameters<SlashCommand["handl
   userConfig.setDefaultThinkingLevel(ctx.agent.thinking);
   userConfig.pushRecentModel(model);
   if (ctx.sessionManager) {
-    ctx.sessionManager.setMetadata({ model, thinkingLevel: ctx.agent.thinking, reasoningEffort: ctx.agent.thinking });
+    ctx.sessionManager.updateMetadata({ model, thinkingLevel: ctx.agent.thinking, reasoningEffort: ctx.agent.thinking });
     ctx.sessionManager.appendMarker("model_switch", model);
   }
 }
@@ -366,6 +366,7 @@ const builtinSlashCommandEntries: SlashCommand[] = [
     async handler(args, ctx) {
       ctx.agent.messages = ctx.agent.messages.filter((m) => m.role === "system" || m.role === "meta");
       ctx.sessionManager?.appendMarker("conversation_clear", "");
+      ctx.sessionManager?.clearTitleMetadata?.();
       if (ctx.agent.getTodos().length > 0) {
         ctx.agent.setTodos([]);
       }

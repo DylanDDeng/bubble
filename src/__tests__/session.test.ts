@@ -125,6 +125,42 @@ describe("SessionManager", () => {
     expect(sm.getMetadata().thinkingLevel).toBe("high");
   });
 
+  it("merges metadata updates without dropping session titles", () => {
+    const file = join(tmpDir, "metadata-merge-title.jsonl");
+    const sm = new SessionManager(file);
+    sm.setMetadata({ cwd: "/tmp/project", title: "Fix resume titles", titleSource: "llm" });
+
+    sm.updateMetadata({ model: "openai:gpt-5.4", thinkingLevel: "high" });
+
+    expect(sm.getMetadata()).toMatchObject({
+      cwd: "/tmp/project",
+      title: "Fix resume titles",
+      titleSource: "llm",
+      model: "openai:gpt-5.4",
+      thinkingLevel: "high",
+    });
+  });
+
+  it("clears generated title metadata", () => {
+    const file = join(tmpDir, "metadata-clear-title.jsonl");
+    const sm = new SessionManager(file);
+    sm.setMetadata({
+      cwd: "/tmp/project",
+      title: "Old topic",
+      titleSource: "llm",
+      titleUpdatedAt: 123,
+      titleUserMessageId: "entry-1",
+    });
+
+    sm.clearTitleMetadata();
+
+    expect(sm.getMetadata().cwd).toBe("/tmp/project");
+    expect(sm.getMetadata().title).toBeUndefined();
+    expect(sm.getMetadata().titleSource).toBeUndefined();
+    expect(sm.getMetadata().titleUpdatedAt).toBeUndefined();
+    expect(sm.getMetadata().titleUserMessageId).toBeUndefined();
+  });
+
   it("persists structured markers", () => {
     const file = join(tmpDir, "marker.jsonl");
     const sm = new SessionManager(file);
@@ -133,6 +169,48 @@ describe("SessionManager", () => {
     const line = readFileSync(file, "utf-8").trim();
     expect(JSON.parse(line).type).toBe("marker");
     expect(JSON.parse(line).kind).toBe("thinking_level_switch");
+  });
+
+  it("summarizes sessions with stored titles", () => {
+    const cwd = join(tmpDir, "resume-title-project");
+    const sm = SessionManager.create(cwd, "stored-title.jsonl");
+    sm.updateMetadata({ cwd, title: "Resume picker title polish", titleSource: "llm" });
+    sm.appendMessage({ role: "user", content: "please make resume sessions easier to scan" });
+
+    const [summary] = SessionManager.summarizeSessionsForCwd(cwd);
+
+    expect(summary.title).toBe("Resume picker title polish");
+    expect(summary.preview).toBe("please make resume sessions easier to scan");
+  });
+
+  it("falls back to a pasted-content title for very long first messages", () => {
+    const cwd = join(tmpDir, "resume-long-paste-project");
+    const sm = SessionManager.create(cwd, "long-paste.jsonl");
+    sm.updateMetadata({ cwd });
+    sm.appendMessage({ role: "user", content: "x".repeat(1200) });
+
+    const [summary] = SessionManager.summarizeSessionsForCwd(cwd);
+
+    expect(summary.title).toBe("[Pasted Content 1200 chars]");
+  });
+
+  it("ignores generated titles anchored before a conversation clear marker", () => {
+    const cwd = join(tmpDir, "resume-cleared-title-project");
+    const sm = SessionManager.create(cwd, "cleared-title.jsonl");
+    sm.updateMetadata({ cwd });
+    sm.appendMessage({ role: "user", content: "old topic" });
+    const firstUserId = sm.getEntries().find((entry) => entry.type === "user_message")!.id;
+    sm.updateMetadata({
+      title: "Old generated title",
+      titleSource: "llm",
+      titleUserMessageId: firstUserId,
+    });
+    sm.appendMarker("conversation_clear", "");
+    sm.appendMessage({ role: "user", content: "new topic after clear" });
+
+    const [summary] = SessionManager.summarizeSessionsForCwd(cwd);
+
+    expect(summary.title).toBe("new topic after clear");
   });
 
   it("restores only messages after a conversation clear marker", () => {
