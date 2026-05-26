@@ -67,6 +67,16 @@ describe("slash commands", () => {
     expect(ctx.openPicker).toHaveBeenCalledWith("model");
   });
 
+  it("opens the feedback dialog with the provided description", async () => {
+    const openFeedback = vi.fn();
+    const ctx = createContext({ openFeedback });
+    const result = await slashRegistry.execute("/feedback cursor jumps after submit", ctx);
+
+    expect(result.handled).toBe(true);
+    expect(result.result).toBeUndefined();
+    expect(openFeedback).toHaveBeenCalledWith("cursor jumps after submit");
+  });
+
   it("/quit only requests TUI exit and does not force process.exit", async () => {
     vi.useFakeTimers();
     const processExit = vi.spyOn(process, "exit").mockImplementation((() => undefined as never));

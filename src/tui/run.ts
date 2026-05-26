@@ -82,6 +82,9 @@ import type { McpManager } from "../mcp/manager.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
 import type { QuestionAnswer, QuestionController, QuestionPrompt, QuestionRequest } from "../question/index.js";
 import type { MemoryScope } from "../memory/index.js";
+import { collectFeedback } from "../feedback/collect.js";
+import { submitFeedback, FeedbackSubmitError } from "../feedback/submit.js";
+import type { FeedbackPayload } from "../feedback/types.js";
 import { createFrames } from "./opencode-spinner.js";
 import { copyTextToClipboard } from "./clipboard.js";
 import { readGitSidebarState, type SidebarFileChange, type SidebarGitState } from "./sidebar-state.js";
@@ -147,7 +150,7 @@ type RawGlobalKeyHandler = (sequence: string) => boolean;
 type RawMouseSelectionHandler = (event: { type: string; button: number; x: number; y: number }) => void;
 type CopyToastVariant = "info" | "success" | "warning" | "error";
 type CopyToastState = { title?: string; message: string; variant: CopyToastVariant };
-type ModalKeyOwner = "approval" | "question" | "provider" | "picker";
+type ModalKeyOwner = "approval" | "question" | "feedback" | "provider" | "picker";
 
 const treeSitterClient = getTreeSitterClient();
 const PROMPT_HISTORY_LIMIT = 100;
@@ -370,6 +373,16 @@ type QuestionPanelState = {
   answers: QuestionAnswer[];
   custom: string[];
   editing: boolean;
+};
+type FeedbackPanelState = {
+  base: Omit<FeedbackPayload, "description">;
+  description: string;
+  stage: "edit" | "submitting" | "done";
+  showPreview: boolean;
+  status?: string;
+  result?:
+    | { kind: "success"; url: string; number: number }
+    | { kind: "error"; message: string };
 };
 type ProviderDialogRow =
   | { type: "category"; label: string }
@@ -662,6 +675,7 @@ function OpenTuiApp(props: {
     resolve: (decision: ApprovalDecision) => void;
   }>();
   const [pendingQuestion, setPendingQuestion] = createSignal<QuestionPanelState>();
+  const [pendingFeedback, setPendingFeedback] = createSignal<FeedbackPanelState>();
   const questionSyncTimers = new Set<ReturnType<typeof setTimeout>>();
   let pendingApprovalRef: { request: ApprovalRequest; resolve: (decision: ApprovalDecision) => void } | undefined;
   const PLAN_OPTIONS = ["Approve", "Reject"] as const;
@@ -717,6 +731,13 @@ function OpenTuiApp(props: {
   let questionFooterSelect: TextRenderable | undefined;
   let questionFooterEnter: TextRenderable | undefined;
   let questionFooterEsc: TextRenderable | undefined;
+  let feedbackRoot: BoxRenderable | undefined;
+  let feedbackInput: TextareaRenderable | undefined;
+  let feedbackMetaText: TextRenderable | undefined;
+  let feedbackStatusText: TextRenderable | undefined;
+  let feedbackPreviewShell: BoxRenderable | undefined;
+  let feedbackPreviewText: TextRenderable | undefined;
+  let feedbackFooterText: TextRenderable | undefined;
   let pickerFrame: BoxRenderable | undefined;
   let selectList: SelectRenderable | undefined;
   const inlinePickerRows: Array<BoxRenderable | undefined> = [];
@@ -843,6 +864,7 @@ function OpenTuiApp(props: {
     sessionPromptRef?.blur();
     questionCustomInput?.blur();
     providerDialogInput?.blur();
+    feedbackInput?.blur();
   }
 
   function focusApprovalPanel() {
@@ -856,6 +878,18 @@ function OpenTuiApp(props: {
       const state = pendingQuestion();
       if (!state || state.editing) return;
       questionRoot?.focus();
+    }, 0);
+  }
+
+  function focusFeedbackPanel() {
+    setTimeout(() => {
+      const state = pendingFeedback();
+      if (!state) return;
+      if (state.stage === "edit") {
+        feedbackInput?.focus();
+        return;
+      }
+      feedbackRoot?.focus();
     }, 0);
   }
 
@@ -978,7 +1012,7 @@ function OpenTuiApp(props: {
     return !!event.shift;
   };
 
-  const canInsertPromptNewline = () => !isRunning() && !pendingApproval() && !pendingPlan() && !pendingQuestion();
+  const canInsertPromptNewline = () => !isRunning() && !pendingApproval() && !pendingPlan() && !pendingQuestion() && !pendingFeedback();
 
   const sidebarFits = () => dimensions().width > SESSION_SIDEBAR_WIDTH + 40;
   const sidebarVisible = () => {
@@ -1812,9 +1846,133 @@ function OpenTuiApp(props: {
     return false;
   }
 
+  function openFeedback(initialDescription: string) {
+    const base = collectFeedback(props.agent, { description: "" });
+    const { description: _description, ...rest } = base;
+    picker = undefined;
+    providerDialog = undefined;
+    redrawProviderDialog();
+    setPendingFeedback({
+      base: rest,
+      description: initialDescription.trim(),
+      stage: "edit",
+      showPreview: false,
+    });
+    syncFeedbackUI(true);
+  }
+
+  function updateFeedbackState(updater: (state: FeedbackPanelState) => FeedbackPanelState | undefined, focus = false) {
+    setPendingFeedback((current) => current ? updater(current) : undefined);
+    syncFeedbackUI(focus);
+  }
+
+  function closeFeedback() {
+    setPendingFeedback(undefined);
+    syncFeedbackUI(false);
+    restorePromptAfterModal();
+  }
+
+  function syncFeedbackUI(focus = false) {
+    redrawFeedbackPanel();
+    syncPromptSurfaces();
+    redrawDock();
+    rootBox?.requestRender();
+    scrollbox?.requestRender();
+    if (focus || pendingFeedback()) focusFeedbackPanel();
+  }
+
+  function feedbackTranscriptStats(base: Omit<FeedbackPayload, "description">) {
+    const totalChars = base.transcript.reduce((sum, item) => sum + item.content.length, 0);
+    return { count: base.transcript.length, totalChars };
+  }
+
+  function formatFeedbackPreviewText(base: Omit<FeedbackPayload, "description">) {
+    const transcript = base.transcript.length
+      ? base.transcript.map((message) => `[${message.role}]\n${message.content}`).join("\n\n")
+      : "No transcript messages included.";
+    const recentError = base.recentError ? `\n\n[recent error]\n${base.recentError}` : "";
+    return truncate(`${transcript}${recentError}`, 6000);
+  }
+
+  async function submitFeedbackPanel() {
+    const state = pendingFeedback();
+    if (!state || state.stage !== "edit") return;
+    const description = (feedbackInput?.plainText ?? state.description).trim();
+    if (!description && state.base.transcript.length === 0) {
+      updateFeedbackState((current) => ({
+        ...current,
+        description,
+        status: "Describe the issue before submitting.",
+      }), true);
+      return;
+    }
+
+    setPendingFeedback({ ...state, description, stage: "submitting", status: undefined });
+    syncFeedbackUI();
+    try {
+      const result = await submitFeedback({ ...state.base, description });
+      setPendingFeedback({
+        ...state,
+        description,
+        stage: "done",
+        result: { kind: "success", url: result.url, number: result.number },
+      });
+      addMessage("assistant", `Feedback submitted: ${result.url}`);
+    } catch (err) {
+      const message = err instanceof FeedbackSubmitError
+        ? err.message
+        : err instanceof Error
+          ? err.message
+          : String(err);
+      setPendingFeedback({
+        ...state,
+        description,
+        stage: "done",
+        result: { kind: "error", message },
+      });
+      addMessage("error", `Feedback failed: ${message}`);
+    }
+    syncFeedbackUI();
+  }
+
+  function handleFeedbackKey(event: any) {
+    const state = pendingFeedback();
+    if (!state) return false;
+    const name = keyNameFromEvent(event);
+
+    if (state.stage === "submitting") return true;
+
+    if (state.stage === "done") {
+      if (name === "enter" || name === "escape" || event.input === " ") {
+        closeFeedback();
+      }
+      return true;
+    }
+
+    if (name === "escape") {
+      closeFeedback();
+      return true;
+    }
+    if (name === "tab") {
+      updateFeedbackState((current) => ({
+        ...current,
+        description: feedbackInput?.plainText ?? current.description,
+        showPreview: !current.showPreview,
+        status: undefined,
+      }), true);
+      return true;
+    }
+    if (event.ctrl && (name === "d" || name === "s")) {
+      void submitFeedbackPanel();
+      return true;
+    }
+    return false;
+  }
+
   function activeModalKeyOwner(): ModalKeyOwner | undefined {
     if (pendingApproval() || pendingPlan()) return "approval";
     if (pendingQuestion()) return "question";
+    if (pendingFeedback()) return "feedback";
     if (providerDialog) return "provider";
     if (picker) return "picker";
     return undefined;
@@ -1828,6 +1986,8 @@ function OpenTuiApp(props: {
         return handleApprovalKey(event);
       case "question":
         return handleQuestionKey(event);
+      case "feedback":
+        return handleFeedbackKey(event);
       case "provider":
         return handleProviderDialogKey(event);
       case "picker":
@@ -1841,6 +2001,7 @@ function OpenTuiApp(props: {
       const state = pendingQuestion();
       return !state?.editing || isQuestionConfirmTab(state);
     }
+    if (owner === "feedback") return pendingFeedback()?.stage !== "edit";
     return false;
   }
 
@@ -1979,7 +2140,7 @@ function OpenTuiApp(props: {
   }
 
   function isHomeSurfaceActive(extra?: DisplayMessage) {
-    return !hasTranscriptMessages(extra) && !pendingPlan() && !pendingQuestion();
+    return !hasTranscriptMessages(extra) && !pendingPlan() && !pendingQuestion() && !pendingFeedback();
   }
 
   function syncPromptSurfaces(focus = false) {
@@ -1987,10 +2148,10 @@ function OpenTuiApp(props: {
     const nextSessionActive = !homeActive;
     const surfaceChanged = sessionActive() !== nextSessionActive;
     setSessionActive(nextSessionActive);
-    const questionActive = !!pendingQuestion();
+    const modalComposerHidden = !!pendingQuestion() || !!pendingFeedback();
     if (homeSurfaceShell) homeSurfaceShell.visible = homeActive;
-    if (homeComposerShell) homeComposerShell.visible = homeActive && !questionActive;
-    if (sessionComposerShell) sessionComposerShell.visible = !homeActive && !questionActive;
+    if (homeComposerShell) homeComposerShell.visible = homeActive && !modalComposerHidden;
+    if (sessionComposerShell) sessionComposerShell.visible = !homeActive && !modalComposerHidden;
     syncSidebarChrome();
     if (focus || surfaceChanged) setTimeout(() => activePrompt()?.focus(), 0);
     rootBox?.requestRender();
@@ -2908,6 +3069,56 @@ function OpenTuiApp(props: {
     questionCustomInput?.requestRender();
   }
 
+  function redrawFeedbackPanel() {
+    if (!feedbackRoot) return;
+    const state = pendingFeedback();
+    if (!state) {
+      feedbackRoot.visible = false;
+      feedbackRoot.requestRender();
+      return;
+    }
+
+    const stats = feedbackTranscriptStats(state.base);
+    feedbackRoot.visible = true;
+    feedbackRoot.height = Math.min(
+      Math.max(12, state.showPreview ? 20 : 13),
+      Math.max(10, dimensions().height - 5),
+    );
+
+    if (feedbackInput) {
+      feedbackInput.visible = state.stage === "edit";
+      if (feedbackInput.plainText !== state.description) feedbackInput.setText(state.description);
+    }
+    if (feedbackMetaText) {
+      feedbackMetaText.content = `Includes v${state.base.version} · ${state.base.platform}/${state.base.arch} · ${state.base.provider}/${state.base.model} · ${stats.count} messages (${stats.totalChars} chars, redacted)`;
+    }
+    if (feedbackPreviewShell) feedbackPreviewShell.visible = state.showPreview && state.stage === "edit";
+    if (feedbackPreviewText) feedbackPreviewText.content = state.showPreview ? formatFeedbackPreviewText(state.base) : "";
+    if (feedbackStatusText) {
+      const result = state.result;
+      feedbackStatusText.visible = !!state.status || state.stage !== "edit";
+      feedbackStatusText.fg = result?.kind === "error" ? theme.error : result?.kind === "success" ? theme.success : state.status ? theme.warning : theme.textMuted;
+      feedbackStatusText.content =
+        state.stage === "submitting"
+          ? "Sending feedback..."
+          : result?.kind === "success"
+            ? `Feedback submitted. Issue #${result.number}: ${result.url}`
+            : result?.kind === "error"
+              ? `Feedback failed: ${result.message}`
+              : state.status ?? "";
+    }
+    if (feedbackFooterText) {
+      feedbackFooterText.content = state.stage === "done"
+        ? "enter dismiss · esc dismiss"
+        : state.stage === "submitting"
+          ? "submitting..."
+          : `ctrl+d submit · tab ${state.showPreview ? "hide" : "view"} payload · enter newline · esc cancel`;
+    }
+
+    feedbackRoot.requestRender();
+    feedbackInput?.requestRender();
+  }
+
   function redrawApprovalPanel() {
     if (!approvalRoot) return;
     const approval = pendingApproval();
@@ -3053,6 +3264,11 @@ function OpenTuiApp(props: {
     pendingPlan();
     pendingApproval();
     forceApprovalUI();
+  });
+
+  createEffect(() => {
+    pendingFeedback();
+    syncFeedbackUI();
   });
 
   function updatePickerFromMouse(event: any, confirm = false) {
@@ -3651,6 +3867,7 @@ function OpenTuiApp(props: {
       setThemeMode: applyThemeMode,
       toggleSidebar,
       setSidebarMode: applySidebarMode,
+      openFeedback,
     });
     if (!handled) return false;
     if (uiDisposed) return true;
@@ -4331,7 +4548,7 @@ function OpenTuiApp(props: {
     return h("box", {
       ref: (ref: BoxRenderable) => {
         sessionComposerShell = ref;
-        ref.visible = !isHomeSurfaceActive(streamingDisplay) && !pendingQuestion();
+        ref.visible = !isHomeSurfaceActive(streamingDisplay) && !pendingQuestion() && !pendingFeedback();
       },
       width: "100%",
       paddingLeft: 2,
@@ -4349,7 +4566,7 @@ function OpenTuiApp(props: {
         onKeyDown: handlePickerKey,
         onUiKeyDown: promptUiKeyDown,
         getText: readPromptText,
-        disabled: () => isRunning() && !pendingApproval() && !pendingPlan() && !pendingQuestion(),
+        disabled: () => (isRunning() && !pendingApproval() && !pendingPlan() && !pendingQuestion()) || !!pendingFeedback(),
         mode,
         registerModeLabel: registerPromptModeLabel,
         registerModelLabel: registerPromptModelLabel,
@@ -4359,6 +4576,7 @@ function OpenTuiApp(props: {
           const approvalState = pendingApproval();
           if (approvalState) return "Press Enter to approve or Esc to reject";
           if (pendingQuestion()) return "Answer the question below";
+          if (pendingFeedback()) return "Describe feedback below";
           const plan = pendingPlan();
           if (plan) return "Press Enter to approve plan or Esc to reject";
           return `Ask anything... "${homePrompt}"`;
@@ -4391,7 +4609,7 @@ function OpenTuiApp(props: {
       h("box", {
         ref: (ref: BoxRenderable) => {
           homeComposerShell = ref;
-          ref.visible = isHomeSurfaceActive(streamingDisplay) && !pendingQuestion();
+          ref.visible = isHomeSurfaceActive(streamingDisplay) && !pendingQuestion() && !pendingFeedback();
         },
         width: "100%",
         maxWidth: 75,
@@ -4413,7 +4631,7 @@ function OpenTuiApp(props: {
         onKeyDown: handlePickerKey,
         onUiKeyDown: promptUiKeyDown,
         getText: readPromptText,
-        disabled: () => isRunning() && !pendingApproval() && !pendingPlan() && !pendingQuestion(),
+        disabled: () => (isRunning() && !pendingApproval() && !pendingPlan() && !pendingQuestion()) || !!pendingFeedback(),
         mode,
         registerModeLabel: registerPromptModeLabel,
         registerModelLabel: registerPromptModelLabel,
@@ -4423,6 +4641,7 @@ function OpenTuiApp(props: {
           const approvalState = pendingApproval();
           if (approvalState) return "Press Enter to approve or Esc to reject";
           if (pendingQuestion()) return "Answer the question below";
+          if (pendingFeedback()) return "Describe feedback below";
           const plan = pendingPlan();
           if (plan) return "Press Enter to approve plan or Esc to reject";
           return `Ask anything... "${homePrompt}"`;
@@ -4581,6 +4800,132 @@ function OpenTuiApp(props: {
     h("text", { ref: (ref: TextRenderable) => { questionFooterSelect = ref; }, fg: theme.textMuted, content: "↑↓ select" }),
     h("text", { ref: (ref: TextRenderable) => { questionFooterEnter = ref; }, fg: theme.textMuted, content: "enter submit" }),
     h("text", { ref: (ref: TextRenderable) => { questionFooterEsc = ref; }, fg: theme.textMuted, content: "esc dismiss" }),
+    ));
+  }
+
+  function renderFeedbackPanelHost() {
+    return h("box", {
+      ref: (ref: BoxRenderable) => { feedbackRoot = ref; },
+      visible: !!pendingFeedback(),
+      focusable: true,
+      onKeyDown: (event: any) => {
+        if (handleFeedbackKey(event)) {
+          event.preventDefault?.();
+          event.stopPropagation?.();
+          return true;
+        }
+        return false;
+      },
+      position: "absolute",
+      left: 2,
+      right: 2,
+      bottom: 4,
+      zIndex: 210,
+      backgroundColor: theme.backgroundPanel,
+      border: ["left"],
+      borderColor: theme.info,
+      flexDirection: "column",
+    },
+    h("box", {
+      gap: 1,
+      paddingLeft: 2,
+      paddingRight: 3,
+      paddingTop: 1,
+      paddingBottom: 1,
+      flexDirection: "column",
+      flexGrow: 1,
+    },
+    h("box", { flexDirection: "row", gap: 1, flexShrink: 0 },
+      h("text", { fg: theme.info }, "◆"),
+      h("text", { fg: theme.text, content: "Send feedback" }),
+    ),
+    h("text", {
+      fg: theme.warning,
+      wrapMode: "word",
+      content: "Creates a public GitHub issue at DylanDDeng/bubble. Review before sending.",
+    }),
+    h("textarea", {
+      ref: (ref: TextareaRenderable) => { feedbackInput = ref; },
+      placeholder: "Describe what happened",
+      placeholderColor: theme.textMuted,
+      textColor: theme.text,
+      focusedTextColor: theme.text,
+      backgroundColor: theme.backgroundElement,
+      focusedBackgroundColor: theme.backgroundElement,
+      cursorColor: theme.primary,
+      minHeight: 3,
+      maxHeight: 6,
+      keyBindings: PROMPT_TEXTAREA_KEYBINDINGS,
+      onContentChange: () => {
+        const value = feedbackInput?.plainText ?? "";
+        updateFeedbackState((current) => ({
+          ...current,
+          description: value,
+          status: undefined,
+        }));
+      },
+      onKeyDown: (event: any) => {
+        if (handleFeedbackKey(event)) {
+          event.preventDefault?.();
+          event.stopPropagation?.();
+          return true;
+        }
+        setTimeout(() => {
+          const value = feedbackInput?.plainText ?? "";
+          updateFeedbackState((current) => ({
+            ...current,
+            description: value,
+            status: undefined,
+          }));
+        }, 0);
+        return false;
+      },
+    }),
+    h("text", {
+      ref: (ref: TextRenderable) => { feedbackMetaText = ref; },
+      fg: theme.textMuted,
+      wrapMode: "word",
+      content: "",
+    }),
+    h("box", {
+      ref: (ref: BoxRenderable) => { feedbackPreviewShell = ref; },
+      visible: false,
+      border: ["left"],
+      borderColor: theme.borderSubtle,
+      paddingLeft: 1,
+      flexGrow: 1,
+      minHeight: 0,
+    },
+    h("scrollbox", { height: 5, flexGrow: 1, minHeight: 0 },
+      h("text", {
+        ref: (ref: TextRenderable) => { feedbackPreviewText = ref; },
+        fg: theme.textMuted,
+        wrapMode: "word",
+        content: "",
+      }),
+    ),
+    ),
+    h("text", {
+      ref: (ref: TextRenderable) => { feedbackStatusText = ref; },
+      fg: theme.textMuted,
+      wrapMode: "word",
+      visible: false,
+      content: "",
+    }),
+    ),
+    h("box", {
+      flexDirection: "row",
+      flexShrink: 0,
+      paddingLeft: 2,
+      paddingRight: 3,
+      paddingBottom: 1,
+      backgroundColor: theme.backgroundElement,
+    },
+    h("text", {
+      ref: (ref: TextRenderable) => { feedbackFooterText = ref; },
+      fg: theme.textMuted,
+      content: "ctrl+d submit · tab view payload · enter newline · esc cancel",
+    }),
     ));
   }
 
@@ -5271,6 +5616,7 @@ function OpenTuiApp(props: {
         fg: notice().startsWith("✓") ? theme.success : notice().startsWith("✗") ? theme.error : theme.warning,
       }, notice()) : null,
       renderQuestionPanelHost(),
+      renderFeedbackPanelHost(),
       h("box", {
         ref: (ref: BoxRenderable) => { approvalRoot = ref; },
         visible: !!approval,
