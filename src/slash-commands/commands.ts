@@ -17,7 +17,7 @@ import {
   searchMemory,
   type MemoryScope,
 } from "../memory/index.js";
-import type { SidebarCommandState, SlashCommand, SlashCommandContext } from "./types.js";
+import type { SlashCommand, SlashCommandContext } from "./types.js";
 import type { UnifiedCommand } from "./unified.js";
 import { feishuCommand } from "./feishu.js";
 
@@ -295,18 +295,6 @@ function parseKeyArgs(args: string, ctx: Parameters<SlashCommand["handler"]>[1])
   return { provider: ctx.registry.getDefault(), apiKey: trimmed };
 }
 
-function formatSidebarCommandResult(state: SidebarCommandState) {
-  if (!state.active) {
-    if (state.mode === "expanded") return "Sidebar will expand when the session view opens.";
-    if (state.mode === "collapsed") return "Sidebar will stay collapsed when the session view opens.";
-    return "Sidebar returned to auto mode.";
-  }
-  if (state.mode === "auto") {
-    return state.visible ? "Sidebar auto mode: expanded." : "Sidebar auto mode: collapsed.";
-  }
-  return state.visible ? "Sidebar expanded." : "Sidebar collapsed.";
-}
-
 const builtinSlashCommandEntries: SlashCommand[] = [
   {
     name: "skills",
@@ -382,16 +370,20 @@ const builtinSlashCommandEntries: SlashCommand[] = [
 
       const arg = args.trim().toLowerCase();
       if (!arg) {
-        return formatSidebarCommandResult(ctx.toggleSidebar());
+        ctx.toggleSidebar();
+        return;
       }
       if (["open", "show", "expand", "expanded", "on"].includes(arg)) {
-        return formatSidebarCommandResult(ctx.setSidebarMode("expanded"));
+        ctx.setSidebarMode("expanded");
+        return;
       }
       if (["close", "hide", "collapse", "collapsed", "off"].includes(arg)) {
-        return formatSidebarCommandResult(ctx.setSidebarMode("collapsed"));
+        ctx.setSidebarMode("collapsed");
+        return;
       }
       if (arg === "auto") {
-        return formatSidebarCommandResult(ctx.setSidebarMode("auto"));
+        ctx.setSidebarMode("auto");
+        return;
       }
       return "Usage: /sidebar [open|close|auto]";
     },

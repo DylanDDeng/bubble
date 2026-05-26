@@ -432,7 +432,7 @@ describe("slash commands", () => {
     const result = await slashRegistry.execute("/sidebar", ctx);
 
     expect(result.handled).toBe(true);
-    expect(result.result).toBe("Sidebar collapsed.");
+    expect(result.result).toBeUndefined();
     expect(toggleSidebar).toHaveBeenCalledTimes(1);
     expect(setSidebarMode).not.toHaveBeenCalled();
   });
@@ -446,9 +446,9 @@ describe("slash commands", () => {
     }));
     const ctx = createContext({ toggleSidebar, setSidebarMode });
 
-    expect((await slashRegistry.execute("/sidebar open", ctx)).result).toBe("Sidebar expanded.");
-    expect((await slashRegistry.execute("/sidebar close", ctx)).result).toBe("Sidebar collapsed.");
-    expect((await slashRegistry.execute("/sidebar auto", ctx)).result).toBe("Sidebar auto mode: expanded.");
+    expect((await slashRegistry.execute("/sidebar open", ctx)).result).toBeUndefined();
+    expect((await slashRegistry.execute("/sidebar close", ctx)).result).toBeUndefined();
+    expect((await slashRegistry.execute("/sidebar auto", ctx)).result).toBeUndefined();
     expect(setSidebarMode).toHaveBeenNthCalledWith(1, "expanded");
     expect(setSidebarMode).toHaveBeenNthCalledWith(2, "collapsed");
     expect(setSidebarMode).toHaveBeenNthCalledWith(3, "auto");
