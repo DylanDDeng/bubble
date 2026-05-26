@@ -531,18 +531,21 @@ function printOpenTuiExitSummary(
     ? {
         markMuted: chalk.hex("#8C8C8C"),
         markStrong: chalk.hex("#1C1C1C"),
+        markBrand: chalk.hex("#8B4A00"),
         label: chalk.hex("#6F7377"),
         value: chalk.hex("#171717").bold,
       }
     : {
         markMuted: chalk.hex("#9CA3AF"),
         markStrong: chalk.hex("#F4F4F5"),
+        markBrand: chalk.hex("#F5A742"),
         label: chalk.hex("#808080"),
         value: chalk.hex("#EEEEEE").bold,
       };
   const label = (value: string) => colors.label(value.padEnd(10));
   const logoColor = (tone: BubbleWordmarkTone) => {
     switch (tone) {
+      case "brand": return colors.markBrand;
       case "ink": return colors.markStrong;
       case "stone": return colors.markMuted;
       case "soft": return colors.label;

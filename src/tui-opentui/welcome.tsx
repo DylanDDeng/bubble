@@ -3,6 +3,13 @@ import React from "react";
 import { createRequire } from "node:module";
 import { useTheme, type Theme } from "./theme.js";
 import type { DisplayMessage } from "./display-history.js";
+import {
+  BUBBLE_COMPACT_WORDMARK,
+  BUBBLE_WORDMARK,
+  bubbleWordmarkMaxWidth,
+  type BubbleWordmarkLine,
+  type BubbleWordmarkTone,
+} from "../tui/wordmark.js";
 
 interface WelcomeBannerProps {
   terminalColumns: number;
@@ -28,29 +35,7 @@ interface WelcomeVisibilityInput {
 const require = createRequire(import.meta.url);
 const PACKAGE_VERSION = readPackageVersion();
 
-/**
- * Bi-tone block logo, opencode-style. Left word "BUB" rendered in textMuted,
- * right word "BLE" rendered in text + bold. Same 4-row block-letter form as
- * opencode's "open/code" but with Bubble's word split.
- *
- * Shadow characters `_`, `^`, `~` are part of the letterform — they render
- * in the same color as the body, just create the optical shadow effect.
- */
-const LOGO_LEFT = [
-  "█▀▀▄ █__█ █▀▀▄",
-  "█__█ █__█ █__█",
-  "█▀▀▄ █__█ █▀▀▄",
-  "▀▀▀  ▀▀▀▀ ▀▀▀",
-];
-const LOGO_RIGHT = [
-  "█▀▀▄ █___ █▀▀▀",
-  "█__█ █___ █▀▀ ",
-  "█▀▀▄ █___ █___",
-  "▀▀▀  ▀▀▀▀ ▀▀▀▀",
-];
-
-const COMPACT_LOGO = "◉ BUBBLE";
-const WIDE_LOGO_MIN_WIDTH = 36;
+const WIDE_LOGO_MIN_WIDTH = bubbleWordmarkMaxWidth(BUBBLE_WORDMARK) + 4;
 
 export function shouldShowWelcomeBanner({
   messages,
@@ -85,18 +70,15 @@ export function WelcomeBanner({
 
   return (
     <box style={{ flexDirection: "column", marginBottom: 1 }}>
-      {/* Logo: bi-tone block letters or compact single-line fallback. */}
+      {/* Logo: thin brand wordmark or compact single-line fallback. */}
       {useWideLogo ? (
         <box style={{ flexDirection: "column" }}>
-          {LOGO_LEFT.map((line, i) => (
-            <box key={`logo-row-${i}`} style={{ flexDirection: "row", gap: 1 }}>
-              <text fg={theme.textMuted} content={line} />
-              <text fg={theme.text} attributes={1} content={LOGO_RIGHT[i] ?? ""} />
-            </box>
+          {BUBBLE_WORDMARK.map((line, i) => (
+            <LogoRow key={`logo-row-${i}`} line={line} theme={theme} />
           ))}
         </box>
       ) : (
-        <text fg={theme.brand} attributes={1} content={COMPACT_LOGO} />
+        <LogoRow line={BUBBLE_COMPACT_WORDMARK[0] ?? { text: "bubble βrain", tone: "ink" }} theme={theme} />
       )}
 
       {/* Metadata rows, opencode-style: padded label + bold value. */}
@@ -112,6 +94,40 @@ export function WelcomeBanner({
       </box>
     </box>
   );
+}
+
+function LogoRow({ line, theme }: { line: BubbleWordmarkLine; theme: Theme }) {
+  if (!line.segments) {
+    return (
+      <text
+        fg={logoColor(theme, line.tone ?? "caption")}
+        attributes={1}
+        content={line.text ?? ""}
+      />
+    );
+  }
+  return (
+    <box style={{ flexDirection: "row" }}>
+      {line.segments.map((segment, index) => (
+        <text
+          key={`${index}-${segment.text}`}
+          fg={logoColor(theme, segment.tone)}
+          attributes={1}
+          content={segment.text}
+        />
+      ))}
+    </box>
+  );
+}
+
+function logoColor(theme: Theme, tone: BubbleWordmarkTone): string {
+  switch (tone) {
+    case "brand": return theme.warning;
+    case "ink": return theme.text;
+    case "stone": return theme.textMuted;
+    case "soft": return theme.textDim;
+    case "caption": return theme.textMuted;
+  }
 }
 
 export function HomeSurface({

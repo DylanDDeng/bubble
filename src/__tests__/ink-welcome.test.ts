@@ -68,7 +68,7 @@ describe("Ink welcome banner", () => {
     })).toBe(true);
   });
 
-  it("renders the compact DROID-like header information", () => {
+  it("renders the thin brand header information", () => {
     const output = renderToString(
       React.createElement(WelcomeBanner, {
         terminalColumns: 100,
@@ -83,7 +83,7 @@ describe("Ink welcome banner", () => {
       { columns: 100 },
     );
 
-    expect(output).toContain("████");
+    expect(output).toContain("╭─╮");
     expect(output).toContain("TIP:");
     expect(output).toContain("Skills (78)");
     expect(output).toContain("MCPs (1)");

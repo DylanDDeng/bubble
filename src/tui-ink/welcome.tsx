@@ -3,6 +3,14 @@ import { Box, Text } from "ink";
 import { createRequire } from "node:module";
 import { useTheme, type Theme } from "./theme.js";
 import type { DisplayMessage } from "./display-history.js";
+import {
+  BUBBLE_COMPACT_WORDMARK,
+  BUBBLE_WORDMARK,
+  bubbleWordmarkLineText,
+  bubbleWordmarkMaxWidth,
+  type BubbleWordmarkLine,
+  type BubbleWordmarkTone,
+} from "../tui/wordmark.js";
 
 interface WelcomeBannerProps {
   terminalColumns: number;
@@ -23,79 +31,7 @@ interface WelcomeVisibilityInput {
 const require = createRequire(import.meta.url);
 const PACKAGE_VERSION = readPackageVersion();
 
-const BUBBLE_LOGO_LETTERS = [
-  [
-    "██████ ",
-    "██   ██",
-    "██   ██",
-    "██████ ",
-    "██   ██",
-    "██   ██",
-    "██████ ",
-  ],
-  [
-    "██   ██",
-    "██   ██",
-    "██   ██",
-    "██   ██",
-    "██   ██",
-    "██   ██",
-    " █████ ",
-  ],
-  [
-    "██████ ",
-    "██   ██",
-    "██   ██",
-    "██████ ",
-    "██   ██",
-    "██   ██",
-    "██████ ",
-  ],
-  [
-    "██████ ",
-    "██   ██",
-    "██   ██",
-    "██████ ",
-    "██   ██",
-    "██   ██",
-    "██████ ",
-  ],
-  [
-    "██     ",
-    "██     ",
-    "██     ",
-    "██     ",
-    "██     ",
-    "██     ",
-    "███████",
-  ],
-  [
-    "███████",
-    "██     ",
-    "██     ",
-    "██████ ",
-    "██     ",
-    "██     ",
-    "███████",
-  ],
-];
-
-/**
- * Derive a 6-step logo gradient from the active theme tokens so the banner
- * stays readable on both dark and light backgrounds.
- */
-function logoColors(theme: Theme): string[] {
-  return [
-    theme.userMessageText,
-    theme.userMessageText,
-    theme.inputBorder,
-    theme.inputBorder,
-    theme.traceCommand,
-    theme.traceCommand,
-  ];
-}
-const COMPACT_LOGO = ["B", "U", "B", "B", "L", "E"];
-const WIDE_LOGO_MIN_WIDTH = 52;
+const WIDE_LOGO_MIN_WIDTH = bubbleWordmarkMaxWidth(BUBBLE_WORDMARK) + 4;
 
 export function shouldShowWelcomeBanner({
   startedWithVisibleHistory,
@@ -131,8 +67,8 @@ export function WelcomeBanner({
     <Box width={effectiveWidth} flexDirection="column" alignItems="center" marginBottom={1}>
       <Box flexDirection="column" alignItems="center">
         {useWideLogo
-          ? BUBBLE_LOGO_LETTERS[0]!.map((_, rowIndex) => (
-            <LogoRow key={`logo-row-${rowIndex}`} rowIndex={rowIndex} />
+          ? BUBBLE_WORDMARK.map((line, rowIndex) => (
+            <LogoRow key={`logo-row-${rowIndex}`} line={line} />
           ))
           : <CompactLogo />}
       </Box>
@@ -162,17 +98,18 @@ export function WelcomeBanner({
   );
 }
 
-function LogoRow({ rowIndex }: { rowIndex: number }) {
+function LogoRow({ line }: { line: BubbleWordmarkLine }) {
   const theme = useTheme();
-  const colors = logoColors(theme);
+  if (!line.segments) {
+    return <Text bold color={logoColor(theme, line.tone ?? "caption")}>{line.text ?? ""}</Text>;
+  }
   return (
     <Box>
-      {BUBBLE_LOGO_LETTERS.map((letter, index) => (
-        <React.Fragment key={`${index}-${rowIndex}`}>
-          <Text bold color={colors[index]}>
-            {letter[rowIndex]}
+      {line.segments.map((segment, index) => (
+        <React.Fragment key={`${index}-${segment.text}`}>
+          <Text bold color={logoColor(theme, segment.tone)}>
+            {segment.text}
           </Text>
-          {index < BUBBLE_LOGO_LETTERS.length - 1 && <Text> </Text>}
         </React.Fragment>
       ))}
     </Box>
@@ -181,16 +118,29 @@ function LogoRow({ rowIndex }: { rowIndex: number }) {
 
 function CompactLogo() {
   const theme = useTheme();
-  const colors = logoColors(theme);
+  const line = BUBBLE_COMPACT_WORDMARK[0];
+  if (!line?.segments) {
+    return <Text bold color={theme.warning}>{bubbleWordmarkLineText(line ?? { text: "" })}</Text>;
+  }
   return (
     <Box>
-      {COMPACT_LOGO.map((letter, index) => (
-        <Text key={`${letter}-${index}`} bold color={colors[index]}>
-          {letter}
+      {line.segments.map((segment, index) => (
+        <Text key={`${segment.text}-${index}`} bold color={logoColor(theme, segment.tone)}>
+          {segment.text}
         </Text>
       ))}
     </Box>
   );
+}
+
+function logoColor(theme: Theme, tone: BubbleWordmarkTone): string {
+  switch (tone) {
+    case "brand": return theme.warning;
+    case "ink": return theme.userMessageText;
+    case "stone": return theme.muted;
+    case "soft": return theme.dim;
+    case "caption": return theme.muted;
+  }
 }
 
 function StatusItem({

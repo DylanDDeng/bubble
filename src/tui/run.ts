@@ -298,6 +298,7 @@ const QUESTION_PANEL_MIN_HEIGHT = 9;
 
 function homeLogoColor(tone: BubbleWordmarkTone) {
   switch (tone) {
+    case "brand": return theme.warning;
     case "ink": return theme.text;
     case "stone": return theme.textMuted;
     case "soft": return theme.borderSubtle;
