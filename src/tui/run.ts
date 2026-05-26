@@ -104,6 +104,12 @@ import type { ResolvedTheme } from "./detect-theme.js";
 import { appendHistoryEntry, loadHistorySync, pushHistoryEntry } from "./input-history.js";
 import { buildTraceGroups, traceGroupLabel, type TraceGroup } from "./trace-groups.js";
 import { sessionDisplayName } from "./session-display.js";
+import {
+  bubbleWordmarkForWidth,
+  bubbleWordmarkLineText,
+  type BubbleWordmarkLine,
+  type BubbleWordmarkTone,
+} from "./wordmark.js";
 
 export interface PlanHandlerRef {
   current?: (plan: string) => Promise<PlanDecision>;
@@ -290,33 +296,29 @@ const QUESTION_MAX_OPTIONS = 10;
 const QUESTION_MAX_CONFIRM_ROWS = 3;
 const QUESTION_PANEL_MIN_HEIGHT = 9;
 
-type HomeLogoLine = { text: string; tone: "primary" | "warning" | "accent" | "secondary" | "textMuted" };
-const HOME_LOGO: HomeLogoLine[] = [
-  { text: " /\\___/\\ ", tone: "primary" },
-  { text: "( ◕   ◕ )", tone: "primary" },
-  { text: "( ◡ ω ◡ )", tone: "warning" },
-  { text: " (\")_(\") ", tone: "warning" },
-  { text: "", tone: "primary" },
-  { text: "·  ◌   ○   ◯  ·", tone: "textMuted" },
-  { text: "", tone: "primary" },
-  { text: "██████╗ ██╗   ██╗██████╗ ██████╗ ██╗     ███████╗", tone: "primary" },
-  { text: "██╔══██╗██║   ██║██╔══██╗██╔══██╗██║     ██╔════╝", tone: "primary" },
-  { text: "██████╔╝██║   ██║██████╔╝██████╔╝██║     █████╗  ", tone: "warning" },
-  { text: "██╔══██╗██║   ██║██╔══██╗██╔══██╗██║     ██╔══╝  ", tone: "warning" },
-  { text: "██████╔╝╚██████╔╝██████╔╝██████╔╝███████╗███████╗", tone: "accent" },
-  { text: "╚═════╝  ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝╚══════╝", tone: "accent" },
-  { text: "", tone: "primary" },
-  { text: "── your bubble coding companion ──", tone: "secondary" },
-];
-
-function homeLogoColor(tone: HomeLogoLine["tone"]) {
+function homeLogoColor(tone: BubbleWordmarkTone) {
   switch (tone) {
-    case "primary": return theme.primary;
-    case "warning": return theme.warning;
-    case "accent": return theme.accent;
-    case "secondary": return theme.secondary;
-    case "textMuted": return theme.textMuted;
+    case "ink": return theme.text;
+    case "stone": return theme.textMuted;
+    case "soft": return theme.borderSubtle;
+    case "caption": return theme.textMuted;
   }
+}
+
+function renderHomeLogoLine(line: BubbleWordmarkLine, width?: number) {
+  const text = bubbleWordmarkLineText(line) || " ";
+  const pad = width === undefined ? "" : " ".repeat(Math.max(0, Math.floor((width - text.length) / 2)));
+  if (!line.segments) {
+    return h("text", { fg: homeLogoColor(line.tone ?? "caption"), wrapMode: "none" }, `${pad}${text}`);
+  }
+  const chunks = [];
+  if (pad) chunks.push(fg(theme.text)(pad));
+  for (const segment of line.segments) {
+    chunks.push(fg(homeLogoColor(segment.tone))(segment.text));
+  }
+  return h("text", { wrapMode: "none" },
+    new StyledText(chunks),
+  );
 }
 
 const HOME_TIPS = [
@@ -441,7 +443,6 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
     let subtleSyntaxStyle: SyntaxStyle | undefined;
     let rawGlobalKeyHandler: RawGlobalKeyHandler | undefined;
     let rawMouseSelectionHandler: RawMouseSelectionHandler | undefined;
-    const sessionStartedAt = Date.now();
     const exit = () => {
       try {
         renderer?.destroy();
@@ -449,7 +450,7 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
         syntaxStyle?.destroy();
         subtleSyntaxStyle?.destroy();
         if (process.stdout.isTTY) {
-          process.stdout.write(`\nTotal duration: ${formatDuration(Date.now() - sessionStartedAt)}\n`);
+          process.stdout.write("\n");
         }
         resolve();
       }
@@ -4367,6 +4368,7 @@ function OpenTuiApp(props: {
 
   function renderHomeSurface() {
     const homeHeight = Math.max(16, dimensions().height - 4);
+    const logoLines = bubbleWordmarkForWidth(dimensions().width);
     return h("box", {
       ref: (ref: BoxRenderable) => {
         homeSurfaceShell = ref;
@@ -4382,7 +4384,7 @@ function OpenTuiApp(props: {
     },
     [
       h("box", { flexShrink: 0, flexDirection: "column", alignItems: "center" },
-        ...HOME_LOGO.map((line) => h("text", { fg: homeLogoColor(line.tone) }, line.text || " ")),
+        ...logoLines.map((line) => renderHomeLogoLine(line)),
       ),
       h("box", { height: 1, minHeight: 0, flexShrink: 1 }),
       h("box", {
@@ -7942,6 +7944,7 @@ function appendTraceGroupTranscript(chunks: StyledText["chunks"], group: TraceGr
 function renderHomeState(input: { width: number; cwd: string; tip: string }) {
   const width = Math.max(20, input.width);
   const cwd = input.cwd ? shortCwd(input.cwd) : "";
+  const logoLines = bubbleWordmarkForWidth(width);
   return h("box", {
     flexGrow: 1,
     minHeight: 0,
@@ -7952,7 +7955,7 @@ function renderHomeState(input: { width: number; cwd: string; tip: string }) {
   h("box", { flexDirection: "column", flexShrink: 0, width: "100%" },
     h("text", { fg: theme.text }, ""),
     h("text", { fg: theme.text }, ""),
-    ...HOME_LOGO.map((line) => h("text", { fg: homeLogoColor(line.tone) }, centerLine(line.text || " ", width))),
+    ...logoLines.map((line) => renderHomeLogoLine(line, width)),
     h("text", { fg: theme.text }, ""),
     h("text", { fg: theme.warning }, centerLine(`● Tip  ${input.tip}`, width)),
     cwd ? h("text", { fg: theme.textMuted }, centerLine(`  ${cwd}`, width)) : null,

@@ -36,6 +36,8 @@ import {
   startMemoryStartupTask,
 } from "./memory/index.js";
 import { basename } from "node:path";
+import { normalizeSingleLine, truncateVisual } from "./text-display.js";
+import { BUBBLE_WORDMARK, type BubbleWordmarkTone } from "./tui/wordmark.js";
 
 type TuiRuntime = "opentui" | "ink";
 type TerminalTheme = "light" | "dark";
@@ -500,12 +502,64 @@ async function main() {
     });
 
     if (sessionManager) {
-      const sessionName = basename(sessionManager.getSessionFile());
-      console.log(chalk.dim(`To resume: bubble --resume   (or --resume --session ${sessionName})`));
+      if (tuiRuntime === "opentui") {
+        printOpenTuiExitSummary(sessionManager, {
+          resumed: resumedExistingSession,
+          theme: detectedTheme,
+        });
+      } else {
+        const sessionName = basename(sessionManager.getSessionFile());
+        console.log(chalk.dim(`To resume: bubble --resume   (or --resume --session ${sessionName})`));
+      }
     }
   } finally {
     await shutdownRuntime();
   }
+}
+
+function printOpenTuiExitSummary(
+  sessionManager: SessionManager,
+  options: { resumed: boolean; theme: TerminalTheme },
+) {
+  if (!process.stdout.isTTY) return;
+  const sessionName = basename(sessionManager.getSessionFile());
+  const sessionId = sessionName.replace(/\.jsonl$/, "");
+  const title = truncateVisual(normalizeSingleLine(sessionManager.getMetadata().title ?? ""), 64);
+  const sessionLabel = title || `${options.resumed ? "Session" : "New session"} - ${sessionId}`;
+  const continueCommand = `bubble --resume --session ${sessionName}`;
+  const colors = options.theme === "light"
+    ? {
+        markMuted: chalk.hex("#8C8C8C"),
+        markStrong: chalk.hex("#1C1C1C"),
+        label: chalk.hex("#6F7377"),
+        value: chalk.hex("#171717").bold,
+      }
+    : {
+        markMuted: chalk.hex("#9CA3AF"),
+        markStrong: chalk.hex("#F4F4F5"),
+        label: chalk.hex("#808080"),
+        value: chalk.hex("#EEEEEE").bold,
+      };
+  const label = (value: string) => colors.label(value.padEnd(10));
+  const logoColor = (tone: BubbleWordmarkTone) => {
+    switch (tone) {
+      case "ink": return colors.markStrong;
+      case "stone": return colors.markMuted;
+      case "soft": return colors.label;
+      case "caption": return colors.label;
+    }
+  };
+
+  for (const line of BUBBLE_WORDMARK) {
+    if (line.segments) {
+      console.log(line.segments.map((segment) => logoColor(segment.tone)(segment.text)).join(""));
+    } else {
+      console.log(logoColor(line.tone ?? "caption")(line.text ?? ""));
+    }
+  }
+  console.log();
+  console.log(`${label("Session")}${colors.value(sessionLabel)}`);
+  console.log(`${label("Continue")}${colors.value(continueCommand)}`);
 }
 
 async function readPipedStdin(): Promise<string | undefined> {
