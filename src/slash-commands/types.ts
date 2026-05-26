@@ -10,6 +10,14 @@ import type { LspService } from "../lsp/index.js";
 import type { MemoryScope } from "../memory/index.js";
 import type { ThemeMode } from "../config.js";
 
+export type SidebarMode = "auto" | "expanded" | "collapsed";
+
+export interface SidebarCommandState {
+  mode: SidebarMode;
+  visible: boolean;
+  active: boolean;
+}
+
 export interface SlashCommandContext {
   agent: Agent;
   addMessage: (role: "user" | "assistant" | "error", content: string) => void;
@@ -35,6 +43,10 @@ export interface SlashCommandContext {
   getResolvedTheme?: () => "light" | "dark";
   /** Persist a new theme mode AND apply it to the running TUI. */
   setThemeMode?: (mode: ThemeMode) => void;
+  /** Toggle the right session sidebar in the running TUI. */
+  toggleSidebar?: () => SidebarCommandState;
+  /** Set the right session sidebar mode in the running TUI. */
+  setSidebarMode?: (mode: SidebarMode) => SidebarCommandState;
   /** Open the feedback dialog. `initialDescription` prefills the description field. */
   openFeedback?: (initialDescription: string) => void;
 }

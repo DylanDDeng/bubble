@@ -51,6 +51,7 @@ import { getAvailableThinkingLevels } from "../provider-transform.js";
 import type { SkillRegistry } from "../skills/registry.js";
 import { parseSkillInvocation } from "../skills/invocation.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
+import type { SidebarCommandState, SidebarMode } from "../slash-commands/types.js";
 import { sourceRank } from "../slash-commands/unified.js";
 import { sidebarMcpRowsFromStates, renderMcpRowMarker, type SidebarMcpRow } from "./sidebar-mcp.js";
 import { expandAtMentions, filterFileSuggestions, findAtContext, listProjectFiles } from "./file-mentions.js";
@@ -102,6 +103,7 @@ import { EscapeConfirmationGate } from "./escape-confirmation.js";
 import type { ResolvedTheme } from "./detect-theme.js";
 import { appendHistoryEntry, loadHistorySync, pushHistoryEntry } from "./input-history.js";
 import { buildTraceGroups, traceGroupLabel, type TraceGroup } from "./trace-groups.js";
+import { sessionDisplayName } from "./session-display.js";
 
 export interface PlanHandlerRef {
   current?: (plan: string) => Promise<PlanDecision>;
@@ -631,6 +633,7 @@ function OpenTuiApp(props: {
   let copyToastRoot: BoxRenderable | undefined;
   let copyToastText: TextRenderable | undefined;
   const [sessionActive, setSessionActive] = createSignal(false);
+  const [sidebarMode, setSidebarModeState] = createSignal<SidebarMode>("auto");
   const [sidebarTick, setSidebarTick] = createSignal(0);
   // Sidebar MCP section collapsed state. Persisted across sidebarTick bumps,
   // only reset on actual mount. Collapse toggle exposed when > 2 servers.
@@ -975,7 +978,14 @@ function OpenTuiApp(props: {
 
   const canInsertPromptNewline = () => !isRunning() && !pendingApproval() && !pendingPlan() && !pendingQuestion();
 
-  const sidebarVisible = () => sessionActive() && dimensions().width > SESSION_SIDEBAR_AUTO_WIDTH;
+  const sidebarFits = () => dimensions().width > SESSION_SIDEBAR_WIDTH + 40;
+  const sidebarVisible = () => {
+    if (!sessionActive()) return false;
+    const preference = sidebarMode();
+    if (preference === "collapsed") return false;
+    if (preference === "expanded") return sidebarFits();
+    return dimensions().width > SESSION_SIDEBAR_AUTO_WIDTH;
+  };
   const contentWidth = () => Math.max(20, dimensions().width - (sidebarVisible() ? SESSION_SIDEBAR_WIDTH : 0) - 4);
   const bumpSidebar = () => {
     setSidebarTick((value) => value + 1);
@@ -1002,6 +1012,27 @@ function OpenTuiApp(props: {
       sidebarShell.requestRender();
     }
     rootBox?.requestRender();
+  }
+
+  function currentSidebarCommandState(): SidebarCommandState {
+    return {
+      mode: sidebarMode(),
+      visible: sidebarVisible(),
+      active: sessionActive(),
+    };
+  }
+
+  function applySidebarMode(next: SidebarMode): SidebarCommandState {
+    setSidebarModeState(next);
+    syncSidebarChrome();
+    renderTranscriptNow(streamingDisplay, displayMessages);
+    redrawDock();
+    renderer.requestRender();
+    return currentSidebarCommandState();
+  }
+
+  function toggleSidebar(): SidebarCommandState {
+    return applySidebarMode(sidebarVisible() ? "collapsed" : "expanded");
   }
 
   function setSidebarText(ref: TextRenderable | undefined, content: string) {
@@ -2411,7 +2442,7 @@ function OpenTuiApp(props: {
     providerDialogRoot.height = dimensions().height;
     providerDialogRoot.left = 0;
     providerDialogRoot.top = 0;
-    providerDialogRoot.backgroundColor = RGBA.fromInts(0, 0, 0, 150);
+    providerDialogRoot.backgroundColor = modalBackdropColor();
     if (providerDialogPanel) {
       providerDialogPanel.visible = true;
       providerDialogPanel.width = width;
@@ -3616,6 +3647,8 @@ function OpenTuiApp(props: {
       getThemeMode: () => activeThemeMode,
       getResolvedTheme: getActiveResolvedTheme,
       setThemeMode: applyThemeMode,
+      toggleSidebar,
+      setSidebarMode: applySidebarMode,
     });
     if (!handled) return false;
     if (uiDisposed) return true;
@@ -4672,7 +4705,7 @@ function OpenTuiApp(props: {
       width: "100%",
       height: "100%",
       zIndex: 3000,
-      backgroundColor: RGBA.fromInts(0, 0, 0, 150),
+      backgroundColor: modalBackdropColor(),
       flexDirection: "column",
       onMouseUp: () => closeProviderDialog(),
       onMouseScroll: updateProviderDialogFromScroll,
@@ -8036,14 +8069,28 @@ function getApprovalPanelMeta(request: ApprovalRequest) {
   };
 }
 
-function contrastText(color: string) {
+function colorLuminance(color: string) {
   const hex = color.replace("#", "");
   const normalized = hex.length === 8 ? hex.slice(0, 6) : hex;
-  if (normalized.length !== 6) return theme.text;
+  if (normalized.length !== 6) return undefined;
   const r = Number.parseInt(normalized.slice(0, 2), 16);
   const g = Number.parseInt(normalized.slice(2, 4), 16);
   const b = Number.parseInt(normalized.slice(4, 6), 16);
-  const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+  return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+
+function isLightTheme() {
+  const luminance = colorLuminance(theme.background);
+  return luminance !== undefined && luminance > 160;
+}
+
+function modalBackdropColor() {
+  return isLightTheme() ? theme.backgroundElement : RGBA.fromInts(0, 0, 0, 150);
+}
+
+function contrastText(color: string) {
+  const luminance = colorLuminance(color);
+  if (luminance === undefined) return theme.text;
   return luminance > 160 ? "#111827" : "#F8FAFC";
 }
 
@@ -8377,13 +8424,6 @@ function formatTurnSummary(message: DisplayMessage): string | undefined {
 
 function truncate(value: string, max: number) {
   return value.length > max ? value.slice(0, Math.max(1, max - 1)).trimEnd() + "…" : value;
-}
-
-function sessionDisplayName(sessionManager?: SessionManager) {
-  const file = sessionManager?.getSessionFile();
-  if (!file) return "Session";
-  const name = file.split(/[\\/]/).pop() || "Session";
-  return name.replace(/\.jsonl$/, "");
 }
 
 function formatCompactNumber(value: number) {
