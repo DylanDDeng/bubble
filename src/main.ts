@@ -39,12 +39,7 @@ import { basename } from "node:path";
 import { normalizeSingleLine, truncateVisual } from "./text-display.js";
 import { BUBBLE_WORDMARK, type BubbleWordmarkTone } from "./tui/wordmark.js";
 
-type TuiRuntime = "opentui" | "ink";
 type TerminalTheme = "light" | "dark";
-
-function resolveTuiRuntime(value: string | undefined): TuiRuntime {
-  return value?.trim().toLowerCase() === "ink" ? "ink" : "opentui";
-}
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -75,7 +70,6 @@ async function main() {
     skillPaths: userConfig.getSkillPaths(),
   });
   const printMode = args.print || !!args.prompt;
-  const tuiRuntime = resolveTuiRuntime(process.env.BUBBLE_TUI);
 
   // Resolve configured providers only; do not auto-inject OpenRouter as a startup default.
   const providers = registry.getConfigured();
@@ -230,16 +224,12 @@ async function main() {
     } else {
       const themeConfig = userConfig.getTheme();
       if (themeConfig.mode === "auto") {
-        const { detectTerminalTheme } = tuiRuntime === "ink"
-          ? await import("./tui-ink/detect-theme.js")
-          : await import("./tui/detect-theme.js");
+        const { detectTerminalTheme } = await import("./tui/detect-theme.js");
         preResolvedTheme = await detectTerminalTheme();
       } else {
         preResolvedTheme = themeConfig.mode;
       }
-      const { runSessionPicker } = tuiRuntime === "ink"
-        ? await import("./tui-ink/run-session-picker.js")
-        : await import("./tui-opentui/run-session-picker.js");
+      const { runSessionPicker } = await import("./tui-opentui/run-session-picker.js");
       const picked = await runSessionPicker({
         currentCwd: args.cwd,
         currentSessions,
@@ -462,11 +452,9 @@ async function main() {
     if (preResolvedTheme) {
       detectedTheme = preResolvedTheme;
     } else if (themeConfig.mode === "auto") {
-      // Probe before either TUI runtime owns stdin. OSC 11 needs raw mode, and
-      // runtime renderers can consume the reply before startup code sees it.
-      const { detectTerminalTheme } = tuiRuntime === "ink"
-        ? await import("./tui-ink/detect-theme.js")
-        : await import("./tui/detect-theme.js");
+      // Probe before OpenTUI owns stdin. OSC 11 needs raw mode, and the
+      // runtime renderer can consume the reply before startup code sees it.
+      const { detectTerminalTheme } = await import("./tui/detect-theme.js");
       detectedTheme = await detectTerminalTheme();
     } else {
       detectedTheme = themeConfig.mode;
@@ -488,11 +476,7 @@ async function main() {
       runMemorySummary,
       runMemoryRefresh,
     };
-    // OpenTUI is the default runtime. Set BUBBLE_TUI=ink to use the legacy
-    // renderer while OpenTUI parity is being verified.
-    const { runTui } = tuiRuntime === "ink"
-      ? await import("./tui-ink/run.js")
-      : await import("./tui/run.js");
+    const { runTui } = await import("./tui/run.js");
     await runTui(agent, args, {
       ...commonOptions,
       themeMode: themeConfig.mode,
@@ -502,15 +486,10 @@ async function main() {
     });
 
     if (sessionManager) {
-      if (tuiRuntime === "opentui") {
-        printOpenTuiExitSummary(sessionManager, {
-          resumed: resumedExistingSession,
-          theme: detectedTheme,
-        });
-      } else {
-        const sessionName = basename(sessionManager.getSessionFile());
-        console.log(chalk.dim(`To resume: bubble --resume   (or --resume --session ${sessionName})`));
-      }
+      printOpenTuiExitSummary(sessionManager, {
+        resumed: resumedExistingSession,
+        theme: detectedTheme,
+      });
     }
   } finally {
     await shutdownRuntime();

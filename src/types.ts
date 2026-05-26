@@ -320,6 +320,19 @@ export interface Provider {
   complete(messages: ProviderMessage[], options?: { model?: string; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal }): Promise<string>;
 }
 
+export interface AgentRunInput {
+  id: string;
+  content: string;
+  submittedAt?: number;
+}
+
+export interface AgentInputController {
+  drainPendingInputs(): AgentRunInput[];
+  pendingInputCount(): number;
+}
+
+export type AgentInputRejectedReason = "no_continuation";
+
 // ============================================================================
 // Agent Events
 // ============================================================================
@@ -336,6 +349,9 @@ export type AgentEvent =
   | { type: "tool_end"; id: string; name: string; result: ToolResult }
   | { type: "turn_end"; usage?: TokenUsage; willContinue?: boolean }
   | { type: "context_recovered"; droppedMessages: number; reason: "overflow" }
+  | { type: "input_pending_changed"; pending: number }
+  | { type: "input_applied"; id: string; content: string; target: "current_turn" }
+  | { type: "input_rejected"; id: string; content: string; reason: AgentInputRejectedReason; target: "next_turn" }
   | { type: "mode_changed"; mode: PermissionMode }
   | { type: "todos_updated"; todos: Todo[] }
   | { type: "agent_end" };

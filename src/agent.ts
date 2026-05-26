@@ -13,7 +13,7 @@ import { projectMessages } from "./context/projector.js";
 import { aggressivePruneMessages } from "./context/prune.js";
 import { truncateToolOutputForModel } from "./context/tool-output-truncate.js";
 import { buildDeferredToolsReminder, buildToolFreezeReminder, isPermissionModeReminder, reminderForMode } from "./prompt/reminders.js";
-import type { AgentEvent, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ThinkingLevel, Todo, TokenUsage, ToolDefinition, ToolResult, ToolRegistryEntry, ToolUpdate } from "./types.js";
+import type { AgentEvent, AgentInputController, AgentRunInput, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ThinkingLevel, Todo, TokenUsage, ToolDefinition, ToolResult, ToolRegistryEntry, ToolUpdate } from "./types.js";
 import { HookBus, type TurnHooks } from "./orchestrator/hooks.js";
 import { createDefaultHooks } from "./orchestrator/default-hooks.js";
 import { resolveModelRoute, resolveSubagentRoute, type AgentCategoriesConfig, type ResolvedSubagentRoute } from "./agent/categories.js";
@@ -68,6 +68,11 @@ export interface AgentOptions {
   fileStateTracker?: FileStateTracker;
   agentCategories?: AgentCategoriesConfig;
   providerFactory?: (route: ResolvedSubagentRoute) => Provider | Promise<Provider>;
+}
+
+export interface AgentRunOptions {
+  abortSignal?: AbortSignal;
+  inputController?: AgentInputController;
 }
 
 export class Agent {
@@ -308,9 +313,10 @@ export class Agent {
   async *run(
     userInput: string | ContentPart[],
     cwd: string,
-    options: { abortSignal?: AbortSignal } = {},
+    options: AgentRunOptions = {},
   ): AsyncIterable<AgentEvent> {
     const abortSignal = composeAbortSignals([options.abortSignal, this.budgetLedger?.signal]);
+    const inputController = options.inputController;
     throwIfAborted(abortSignal);
     const hookBus = new HookBus();
     for (const hooks of createDefaultHooks()) {
@@ -323,6 +329,37 @@ export class Agent {
     const reminderQueue: string[] = [];
     const queueReminder = (reminder: string) => {
       reminderQueue.push(reminder);
+    };
+    const pendingInputCount = () => inputController?.pendingInputCount() ?? 0;
+    const applyPendingInputs = (): AgentEvent[] => {
+      const pendingInputs = inputController?.drainPendingInputs() ?? [];
+      if (pendingInputs.length === 0) return [];
+      for (const input of pendingInputs) {
+        this.appendMessage({ role: "user", content: input.content });
+      }
+      return [
+        ...pendingInputs.map((input): AgentEvent => ({
+          type: "input_applied",
+          id: input.id,
+          content: input.content,
+          target: "current_turn",
+        })),
+        { type: "input_pending_changed", pending: pendingInputCount() },
+      ];
+    };
+    const rejectPendingInputs = (reason: "no_continuation"): AgentEvent[] => {
+      const pendingInputs: AgentRunInput[] = inputController?.drainPendingInputs() ?? [];
+      if (pendingInputs.length === 0) return [];
+      return [
+        ...pendingInputs.map((input): AgentEvent => ({
+          type: "input_rejected",
+          id: input.id,
+          content: input.content,
+          reason,
+          target: "next_turn",
+        })),
+        { type: "input_pending_changed", pending: pendingInputCount() },
+      ];
     };
     const flushGovernorReminders = () => {
       for (const reminder of reminderQueue.splice(0, reminderQueue.length)) {
@@ -352,6 +389,7 @@ export class Agent {
       throwIfAborted(abortSignal);
       flushGovernorReminders();
       for (const update of this.drainSubagentToolUpdates()) yield update;
+      for (const event of applyPendingInputs()) yield event;
       yield { type: "turn_start" };
       step += 1;
       (hookState as any).turnCount = step;
@@ -695,6 +733,7 @@ export class Agent {
         delete (hookState as any).forceContinuationReason;
         continue;
       }
+      for (const event of rejectPendingInputs("no_continuation")) yield event;
       break;
     }
 

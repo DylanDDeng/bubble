@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { Agent, AgentAbortError } from "../agent.js";
+import { Agent, AgentAbortError, type AgentRunOptions } from "../agent.js";
 import { BudgetLedger } from "../agent/budget-ledger.js";
+import { AgentRunInputQueue } from "../agent/input-controller.js";
 import type { AgentProfile } from "../agent/profiles.js";
 import type { AgentEvent, Message, Provider, StreamChunk, ToolRegistryEntry } from "../types.js";
 import { createTaskTool } from "../tools/task.js";
@@ -20,10 +21,10 @@ function createMockProvider(chunks: StreamChunk[][]): Provider {
   };
 }
 
-function collectEvents(agent: Agent, input: string, cwd: string): Promise<AgentEvent[]> {
+function collectEvents(agent: Agent, input: string, cwd: string, options?: AgentRunOptions): Promise<AgentEvent[]> {
   const events: AgentEvent[] = [];
   return (async () => {
-    for await (const event of agent.run(input, cwd)) {
+    for await (const event of agent.run(input, cwd, options)) {
       events.push(event);
     }
     return events;
@@ -251,6 +252,130 @@ describe("Agent", () => {
     expect(events
       .filter((event): event is Extract<AgentEvent, { type: "turn_end" }> => event.type === "turn_end")
       .map((event) => event.willContinue ?? false)).toEqual([true, false]);
+  });
+
+  it("rejects pending boundary input when the response has no continuation", async () => {
+    const inputQueue = new AgentRunInputQueue("test-steer");
+    const provider: Provider = {
+      async *streamChat() {
+        inputQueue.enqueue("follow-up detail");
+        yield { type: "text", content: "Done" };
+        yield { type: "done" };
+      },
+      async complete() {
+        return "mock completion";
+      },
+    };
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [] });
+    const events: AgentEvent[] = [];
+
+    for await (const event of agent.run("Hi", "/tmp", { inputController: inputQueue })) {
+      events.push(event);
+    }
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "input_rejected",
+      content: "follow-up detail",
+      reason: "no_continuation",
+      target: "next_turn",
+    }));
+    expect(hasUserText(agent.messages, "follow-up detail")).toBe(false);
+  });
+
+  it("applies boundary input before the next provider call after tool continuation", async () => {
+    const inputQueue = new AgentRunInputQueue("test-steer");
+    const providerCalls: any[][] = [];
+    let callIndex = 0;
+    const provider: Provider = {
+      async *streamChat(messages) {
+        providerCalls.push(messages as any[]);
+        if (callIndex++ === 0) {
+          yield { type: "tool_call", id: "tc_1", name: "steer_tool", arguments: "{}", isStart: true, isEnd: true };
+          yield { type: "done" };
+          return;
+        }
+        yield { type: "text", content: "Done" };
+        yield { type: "done" };
+      },
+      async complete() {
+        return "mock completion";
+      },
+    };
+    const steerTool: ToolRegistryEntry = {
+      name: "steer_tool",
+      description: "",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        inputQueue.enqueue("include the queued detail");
+        return { content: "tool ok" };
+      },
+    };
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [steerTool] });
+    const events: AgentEvent[] = [];
+
+    for await (const event of agent.run("Call tool", "/tmp", { inputController: inputQueue })) {
+      events.push(event);
+    }
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "input_applied",
+      content: "include the queued detail",
+      target: "current_turn",
+    }));
+    expect(providerCalls).toHaveLength(2);
+    const secondCall = providerCalls[1]!;
+    const toolIndex = secondCall.findIndex((message) => message.role === "tool");
+    const steerIndex = secondCall.findIndex((message) => (
+      message.role === "user"
+      && typeof message.content === "string"
+      && message.content.includes("include the queued detail")
+    ));
+    expect(toolIndex).toBeGreaterThanOrEqual(0);
+    expect(steerIndex).toBeGreaterThan(toolIndex);
+
+    const eventTypes = events.map((event) => event.type);
+    const firstTurnEnd = eventTypes.indexOf("turn_end");
+    const applied = eventTypes.indexOf("input_applied");
+    const secondTurnStart = eventTypes.indexOf("turn_start", firstTurnEnd + 1);
+    expect(applied).toBeGreaterThan(firstTurnEnd);
+    expect(applied).toBeLessThan(secondTurnStart);
+  });
+
+  it("applies boundary input after every tool result in a multi-tool turn", async () => {
+    const inputQueue = new AgentRunInputQueue("test-steer");
+    let executionCount = 0;
+    const multiTool: ToolRegistryEntry = {
+      name: "multi_tool",
+      description: "",
+      parameters: { type: "object", properties: { value: { type: "string" } } },
+      async execute() {
+        executionCount += 1;
+        if (executionCount === 1) inputQueue.enqueue("after both tools");
+        return { content: `tool ${executionCount} ok` };
+      },
+    };
+    const provider = createMockProvider([
+      [
+        { type: "tool_call", id: "tc_1", name: "multi_tool", arguments: '{"value":"1"}', isStart: true, isEnd: true },
+        { type: "tool_call", id: "tc_2", name: "multi_tool", arguments: '{"value":"2"}', isStart: true, isEnd: true },
+        { type: "done" },
+      ],
+      [{ type: "text", content: "Done" }, { type: "done" }],
+    ]);
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [multiTool] });
+
+    await collectEvents(agent, "Call both tools", "/tmp", { inputController: inputQueue });
+
+    const steerIndex = agent.messages.findIndex((message) => (
+      message.role === "user"
+      && typeof message.content === "string"
+      && message.content.includes("after both tools")
+    ));
+    const toolIndexes = agent.messages
+      .map((message, index) => message.role === "tool" ? index : -1)
+      .filter((index) => index >= 0);
+    expect(toolIndexes).toHaveLength(2);
+    expect(steerIndex).toBeGreaterThan(Math.max(...toolIndexes));
   });
 
   it("reports unknown tool error", async () => {

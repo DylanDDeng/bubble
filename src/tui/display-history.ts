@@ -12,6 +12,8 @@ export interface CompactionMeta {
 export interface DisplayMessage {
   role: "user" | "assistant" | "error";
   content: string;
+  clientId?: string;
+  queued?: boolean;
   reasoning?: string;
   toolCalls?: DisplayToolCall[];
   parts?: DisplayMessagePart[];

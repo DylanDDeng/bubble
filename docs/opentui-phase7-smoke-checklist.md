@@ -1,13 +1,11 @@
 # OpenTUI Phase 7 Smoke Checklist
 
-Phase 7 makes the restored OpenTUI/Solid runtime the default TUI while keeping
-the legacy Ink runtime available behind `BUBBLE_TUI=ink`.
+Phase 7 makes the restored OpenTUI/Solid runtime the only launched TUI.
 
 ## Build gates
 
 - `npm run build`
 - `./dist/bin.js --help`
-- `BUBBLE_TUI=ink ./dist/bin.js --help`
 
 `dist/main.js` is a Bun entrypoint. Use `./dist/bin.js` for the packaged CLI
 path, or `bun dist/main.js` when running the main module directly.
@@ -22,7 +20,7 @@ Run:
 
 Check:
 
-- The app starts without setting `BUBBLE_TUI`.
+- The app starts in OpenTUI.
 - A fresh empty session opens on the centered Home surface, not directly in the transcript view.
 - Typing a prompt updates the input box.
 - `Shift+Enter` inserts a newline.
@@ -34,20 +32,6 @@ Check:
 - A command that requests approval shows the approval prompt.
 - A question-tool request shows the question prompt.
 - `--resume` with no `--session` opens the OpenTUI session picker.
-
-## Ink fallback
-
-Run:
-
-```sh
-BUBBLE_TUI=ink ./dist/bin.js
-```
-
-Check:
-
-- The legacy Ink UI starts.
-- `--resume` with no `--session` opens the Ink session picker.
-- `/quit` exits cleanly.
 
 ## Lockfile and migration cleanup
 

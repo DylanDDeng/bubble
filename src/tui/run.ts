@@ -37,7 +37,13 @@ import {
   useTerminalDimensions,
 } from "@opentui/solid";
 import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
+import { registerApp } from "@larksuiteoapi/node-sdk";
+import qrTerminal from "qrcode-terminal";
+import { existsSync, statSync } from "node:fs";
+import { basename, isAbsolute, resolve as resolvePath } from "node:path";
+import { homedir } from "node:os";
 import { AgentAbortError, type Agent } from "../agent.js";
+import { AgentRunInputQueue } from "../agent/input-controller.js";
 import { debugReasoningStream, summarizeDebugText } from "../reasoning-debug.js";
 import type { CliArgs } from "../cli.js";
 import type { ThemeMode } from "../config.js";
@@ -90,6 +96,7 @@ import { copyTextToClipboard } from "./clipboard.js";
 import { readGitSidebarState, type SidebarFileChange, type SidebarGitState } from "./sidebar-state.js";
 import {
   buildImageContentPartsFromLabels,
+  extractImagePathTokens,
   imageAttachmentLabelPattern,
   resolveComposerImagePaths,
   resolveImageInput,
@@ -113,6 +120,9 @@ import {
   type BubbleWordmarkLine,
   type BubbleWordmarkTone,
 } from "./wordmark.js";
+import { bootstrapConfig } from "../feishu/config.js";
+import { ScopeRegistry } from "../feishu/scope/scope-registry.js";
+import type { ScopeConfig } from "../feishu/types.js";
 
 export interface PlanHandlerRef {
   current?: (plan: string) => Promise<PlanDecision>;
@@ -150,13 +160,14 @@ type RawGlobalKeyHandler = (sequence: string) => boolean;
 type RawMouseSelectionHandler = (event: { type: string; button: number; x: number; y: number }) => void;
 type CopyToastVariant = "info" | "success" | "warning" | "error";
 type CopyToastState = { title?: string; message: string; variant: CopyToastVariant };
-type ModalKeyOwner = "approval" | "question" | "feedback" | "provider" | "picker";
-type TranscriptRenderOptions = { scroll?: "latest-user-top" };
+type ModalKeyOwner = "approval" | "question" | "feedback" | "provider" | "feishu" | "picker";
+type QueuedComposerInput = { input: string; displayId?: string };
+type PendingSteerInput = { id: string; input: string; displayId: string };
+type ActiveAgentRun = { id: number; abortController: AbortController; inputController: AgentRunInputQueue };
 
 const treeSitterClient = getTreeSitterClient();
 const PROMPT_HISTORY_LIMIT = 100;
 const ESC_CANCEL_CONFIRM_WINDOW_MS = 1800;
-const TRANSCRIPT_TURN_TOP_PADDING = 1;
 
 const PROVIDER_PRIORITY = new Map<string, number>([
   ["openai", 0],
@@ -300,6 +311,7 @@ const QUESTION_MAX_TABS = 4;
 const QUESTION_MAX_OPTIONS = 10;
 const QUESTION_MAX_CONFIRM_ROWS = 3;
 const QUESTION_PANEL_MIN_HEIGHT = 9;
+const FEISHU_SETUP_EMPTY_VALUES: FeishuSetupValues = { chatId: "", cwd: "", displayName: "" };
 
 function homeLogoColor(tone: BubbleWordmarkTone) {
   switch (tone) {
@@ -386,6 +398,14 @@ type FeedbackPanelState = {
     | { kind: "success"; url: string; number: number }
     | { kind: "error"; message: string };
 };
+type FeishuSetupField = "chatId" | "cwd" | "displayName";
+type FeishuSetupValues = Record<FeishuSetupField, string>;
+type FeishuSetupStage =
+  | { kind: "registering" }
+  | { kind: "qr_shown"; url: string; ascii: string; status: string }
+  | { kind: "credentialed"; ownerOpenId: string }
+  | { kind: "binding"; ownerOpenId: string; field: FeishuSetupField; values: FeishuSetupValues; error?: string }
+  | { kind: "error"; message: string };
 type ProviderDialogRow =
   | { type: "category"; label: string }
   | { type: "empty"; label: string; detail?: string }
@@ -598,6 +618,7 @@ function OpenTuiApp(props: {
     redrawProviderDialog();
     redrawApprovalPanel();
     redrawQuestionPanel();
+    redrawFeishuSetupPanel();
     setSidebarTick((tick) => tick + 1);
     renderer.requestRender();
   };
@@ -623,6 +644,7 @@ function OpenTuiApp(props: {
   }
 
   let displayMessages = reconstructDisplayMessages(props.agent.messages);
+  let queuedDisplayMessages: DisplayMessage[] = [];
   const homeTip = HOME_TIPS[Math.floor(Math.random() * HOME_TIPS.length)] ?? HOME_TIPS[0]!;
   const homePrompt = HOME_PROMPTS[Math.floor(Math.random() * HOME_PROMPTS.length)] ?? HOME_PROMPTS[0]!;
   let promptText = "";
@@ -634,8 +656,16 @@ function OpenTuiApp(props: {
   let promptHistoryIndex: number | undefined;
   let promptHistoryDraft = "";
   const [isRunning, setIsRunning] = createSignal(false);
-  let activeRun: { id: number; abortController: AbortController } | undefined;
+  let activeRun: ActiveAgentRun | undefined;
   let nextRunId = 0;
+  let nextQueuedDisplayId = 0;
+  let pendingSteerInputs: PendingSteerInput[] = [];
+  let rejectedSteerInputs: QueuedComposerInput[] = [];
+  let queuedComposerInputs: QueuedComposerInput[] = [];
+  let queuedInputDrainTimer: ReturnType<typeof setTimeout> | undefined;
+  let drainingQueuedInput = false;
+  const [queuedInputCount, setQueuedInputCount] = createSignal(0);
+  const [pendingSteerCount, setPendingSteerCount] = createSignal(0);
   const runningCancelGate = new EscapeConfirmationGate(ESC_CANCEL_CONFIRM_WINDOW_MS);
   const [runningCancelHint, setRunningCancelHint] = createSignal("");
   let runningCancelHintTimer: ReturnType<typeof setTimeout> | undefined;
@@ -678,7 +708,9 @@ function OpenTuiApp(props: {
   }>();
   const [pendingQuestion, setPendingQuestion] = createSignal<QuestionPanelState>();
   const [pendingFeedback, setPendingFeedback] = createSignal<FeedbackPanelState>();
+  const [pendingFeishuSetup, setPendingFeishuSetup] = createSignal<FeishuSetupStage>();
   const questionSyncTimers = new Set<ReturnType<typeof setTimeout>>();
+  let feishuSetupAbortController: AbortController | undefined;
   let pendingApprovalRef: { request: ApprovalRequest; resolve: (decision: ApprovalDecision) => void } | undefined;
   const PLAN_OPTIONS = ["Approve", "Reject"] as const;
   const [approvalOptionIdx, setApprovalOptionIdx] = createSignal(0);
@@ -690,13 +722,10 @@ function OpenTuiApp(props: {
   let scrollbox: ScrollBoxRenderable | undefined;
   let transcriptScrollFollowing = true;
   let transcriptScrollInitialized = false;
-  let transcriptTurnAnchorActive = false;
-  let transcriptTurnAnchorSerial = 0;
   let rootBox: BoxRenderable | undefined;
   let sidebarShell: BoxRenderable | undefined;
   let homeSurfaceShell: BoxRenderable | undefined;
   let transcriptHost: BoxRenderable | undefined;
-  let transcriptAnchorSpacer: BoxRenderable | undefined;
   const transcriptState: TranscriptState = {
     entries: [],
     expandedCompactions: new Set(),
@@ -743,6 +772,15 @@ function OpenTuiApp(props: {
   let feedbackPreviewShell: BoxRenderable | undefined;
   let feedbackPreviewText: TextRenderable | undefined;
   let feedbackFooterText: TextRenderable | undefined;
+  let feishuSetupRoot: BoxRenderable | undefined;
+  let feishuSetupPanel: BoxRenderable | undefined;
+  let feishuSetupTitle: TextRenderable | undefined;
+  let feishuSetupHint: TextRenderable | undefined;
+  let feishuSetupBodyScroll: ScrollBoxRenderable | undefined;
+  let feishuSetupBodyText: TextRenderable | undefined;
+  let feishuSetupInputShell: BoxRenderable | undefined;
+  let feishuSetupInput: InputRenderable | undefined;
+  let feishuSetupFooterText: TextRenderable | undefined;
   let pickerFrame: BoxRenderable | undefined;
   let selectList: SelectRenderable | undefined;
   const inlinePickerRows: Array<BoxRenderable | undefined> = [];
@@ -870,6 +908,7 @@ function OpenTuiApp(props: {
     questionCustomInput?.blur();
     providerDialogInput?.blur();
     feedbackInput?.blur();
+    feishuSetupInput?.blur();
   }
 
   function focusApprovalPanel() {
@@ -898,6 +937,18 @@ function OpenTuiApp(props: {
     }, 0);
   }
 
+  function focusFeishuSetupPanel() {
+    setTimeout(() => {
+      const state = pendingFeishuSetup();
+      if (!state) return;
+      if (state.kind === "binding") {
+        feishuSetupInput?.focus();
+        return;
+      }
+      feishuSetupRoot?.focus();
+    }, 0);
+  }
+
   function restorePromptAfterModal() {
     setTimeout(() => {
       if (!activeModalKeyOwner()) activePrompt()?.focus();
@@ -913,6 +964,8 @@ function OpenTuiApp(props: {
     uiDisposed = true;
     if (copyToastClearTimer) clearTimeout(copyToastClearTimer);
     if (runningCancelHintTimer) clearTimeout(runningCancelHintTimer);
+    if (queuedInputDrainTimer) clearTimeout(queuedInputDrainTimer);
+    feishuSetupAbortController?.abort();
     promptModeLabels.clear();
     promptModelLabels.clear();
     footerModeBadge = undefined;
@@ -1017,7 +1070,7 @@ function OpenTuiApp(props: {
     return !!event.shift;
   };
 
-  const canInsertPromptNewline = () => !isRunning() && !pendingApproval() && !pendingPlan() && !pendingQuestion() && !pendingFeedback();
+  const canInsertPromptNewline = () => !pendingApproval() && !pendingPlan() && !pendingQuestion() && !pendingFeedback() && !pendingFeishuSetup();
 
   const sidebarFits = () => dimensions().width > SESSION_SIDEBAR_WIDTH + 40;
   const sidebarVisible = () => {
@@ -1279,7 +1332,7 @@ function OpenTuiApp(props: {
   };
 
   const cycleMode = () => {
-    if (picker || pendingPlan()) return false;
+    if (picker || pendingPlan() || isRunning()) return false;
     const next = getNextPermissionMode(props.agent.mode);
     props.agent.setMode(next);
     setMode(next);
@@ -1572,7 +1625,6 @@ function OpenTuiApp(props: {
   }
 
   function scrollTranscriptToBottom() {
-    clearTranscriptTurnAnchor();
     if (!scrollbox) return;
     scrollbox.scrollTo(scrollbox.scrollHeight);
     transcriptScrollFollowing = true;
@@ -1581,7 +1633,7 @@ function OpenTuiApp(props: {
 
   function scheduleTranscriptScrollAfterUpdate(shouldFollow: boolean, delay = 50) {
     setTimeout(() => {
-      if (!scrollbox || transcriptTurnAnchorActive) return;
+      if (!scrollbox) return;
       if (shouldFollow && transcriptScrollFollowing) {
         scrollTranscriptToBottom();
       } else {
@@ -1590,78 +1642,7 @@ function OpenTuiApp(props: {
     }, delay);
   }
 
-  // A fresh user turn starts as the last transcript item, so it needs trailing
-  // space before it can be aligned with the top of the scroll viewport.
-  function transcriptAnchorSpacerHeight() {
-    if (!transcriptTurnAnchorActive) return 0;
-    const viewportHeight = scrollbox?.viewport.height ?? Math.max(1, dimensions().height - 8);
-    return Math.max(1, viewportHeight);
-  }
-
-  function syncTranscriptAnchorSpacer() {
-    if (!transcriptAnchorSpacer) return;
-    const height = transcriptAnchorSpacerHeight();
-    transcriptAnchorSpacer.height = height;
-    transcriptAnchorSpacer.visible = height > 0;
-    safeRequestRender(transcriptAnchorSpacer);
-  }
-
-  function activateTranscriptTurnAnchor() {
-    transcriptTurnAnchorActive = true;
-    transcriptTurnAnchorSerial++;
-    transcriptScrollFollowing = false;
-    transcriptScrollInitialized = true;
-    syncTranscriptAnchorSpacer();
-  }
-
-  function clearTranscriptTurnAnchor() {
-    if (!transcriptTurnAnchorActive) return;
-    transcriptTurnAnchorActive = false;
-    transcriptTurnAnchorSerial++;
-    syncTranscriptAnchorSpacer();
-  }
-
-  function latestVisibleUserTurn(messages: DisplayMessage[]) {
-    const visibleMessages = messages.filter((message) => hasRenderableMessage(message, effectiveShowThinking()));
-    const end = transcriptState.entries[visibleMessages.length - 1];
-    if (!end) return undefined;
-    for (let index = visibleMessages.length - 1; index >= 0; index--) {
-      if (visibleMessages[index]?.role !== "user") continue;
-      const start = transcriptState.entries[index];
-      if (!start) return undefined;
-      return { start, end };
-    }
-    return undefined;
-  }
-
-  function scrollAnchoredTurn(messages: DisplayMessage[]) {
-    if (!scrollbox) return;
-    const turn = latestVisibleUserTurn(messages);
-    if (!turn) return;
-    const viewportHeight = Math.max(1, scrollbox.viewport.height);
-    const turnHeight = Math.max(1, (turn.end.node.y + turn.end.node.height) - turn.start.node.y);
-    const topPadding = Math.min(TRANSCRIPT_TURN_TOP_PADDING, Math.max(0, viewportHeight - 1));
-    const viewportBottom = scrollbox.viewport.y + viewportHeight;
-    const turnBottom = turn.end.node.y + turn.end.node.height;
-    const delta = turnHeight > viewportHeight
-      ? turnBottom - viewportBottom
-      : turn.start.node.y - (scrollbox.viewport.y + topPadding);
-    scrollbox.scrollTo(Math.max(0, scrollbox.scrollTop + delta));
-    transcriptScrollFollowing = false;
-    transcriptScrollInitialized = true;
-    safeRequestRender(scrollbox);
-  }
-
-  function scheduleAnchoredTurnScroll(messages: DisplayMessage[], serial = transcriptTurnAnchorSerial, delay = 50) {
-    setTimeout(() => {
-      if (!transcriptTurnAnchorActive || serial !== transcriptTurnAnchorSerial) return;
-      syncTranscriptAnchorSpacer();
-      scrollAnchoredTurn(messages);
-    }, delay);
-  }
-
   function handleTranscriptMouseScroll() {
-    clearTranscriptTurnAnchor();
     setTimeout(updateTranscriptScrollFollowingFromPosition, 0);
   }
 
@@ -1947,6 +1928,7 @@ function OpenTuiApp(props: {
     setPendingFeedback(undefined);
     syncFeedbackUI(false);
     restorePromptAfterModal();
+    if (queuedInputCount() > 0) scheduleQueuedInputDrain();
   }
 
   function syncFeedbackUI(focus = false) {
@@ -2046,11 +2028,255 @@ function OpenTuiApp(props: {
     return false;
   }
 
+  function openFeishuSetup() {
+    picker = undefined;
+    providerDialog = undefined;
+    redrawProviderDialog();
+    feishuSetupAbortController?.abort();
+    const controller = new AbortController();
+    feishuSetupAbortController = controller;
+    setPendingFeishuSetup({ kind: "registering" });
+    syncFeishuSetupUI(true);
+    void runFeishuSetupRegistration(controller);
+  }
+
+  async function runFeishuSetupRegistration(controller: AbortController) {
+    const isActive = () => !uiDisposed && !controller.signal.aborted && feishuSetupAbortController === controller;
+    try {
+      const result = await registerApp({
+        signal: controller.signal,
+        onQRCodeReady: (info) => {
+          if (!isActive()) return;
+          qrTerminal.generate(info.url, { small: true }, (ascii: string) => {
+            if (!isActive()) return;
+            setPendingFeishuSetup({
+              kind: "qr_shown",
+              url: info.url,
+              ascii,
+              status: "等待扫码...",
+            });
+            syncFeishuSetupUI();
+          });
+        },
+        onStatusChange: (info) => {
+          if (!isActive()) return;
+          setPendingFeishuSetup((current) => {
+            if (!current || current.kind !== "qr_shown") return current;
+            return { ...current, status: feishuSetupStatusLabel(info.status) };
+          });
+          syncFeishuSetupUI();
+        },
+      });
+      if (!isActive()) return;
+      const ownerOpenId = result.user_info?.open_id;
+      if (!ownerOpenId) {
+        setPendingFeishuSetup({ kind: "error", message: "授权成功但没拿到 owner open_id，无法继续。" });
+        syncFeishuSetupUI(true);
+        return;
+      }
+      try {
+        bootstrapConfig({
+          appId: result.client_id,
+          appSecret: result.client_secret,
+          ownerOpenId,
+        });
+      } catch (err) {
+        setPendingFeishuSetup({ kind: "error", message: `保存 config 失败：${(err as Error).message}` });
+        syncFeishuSetupUI(true);
+        return;
+      }
+      setPendingFeishuSetup({ kind: "credentialed", ownerOpenId });
+      syncFeishuSetupUI(true);
+    } catch (err) {
+      if (!isActive()) return;
+      setPendingFeishuSetup({ kind: "error", message: (err as Error).message || "扫码注册失败" });
+      syncFeishuSetupUI(true);
+    }
+  }
+
+  function feishuSetupStatusLabel(status: string) {
+    if (status === "polling") return "等待扫码...";
+    if (status === "slow_down") return "轮询变慢中...仍在等待";
+    if (status === "domain_switched") return "已切换域名";
+    return status;
+  }
+
+  function syncFeishuSetupUI(focus = false) {
+    redrawFeishuSetupPanel();
+    syncPromptSurfaces();
+    redrawDock();
+    rootBox?.requestRender();
+    scrollbox?.requestRender();
+    if (focus || pendingFeishuSetup()) focusFeishuSetupPanel();
+  }
+
+  function closeFeishuSetup(message?: string) {
+    feishuSetupAbortController?.abort();
+    feishuSetupAbortController = undefined;
+    setPendingFeishuSetup(undefined);
+    redrawFeishuSetupPanel();
+    syncPromptSurfaces(true);
+    redrawDock();
+    restorePromptAfterModal();
+    if (message) addMessage("assistant", message);
+    if (queuedInputCount() > 0) scheduleQueuedInputDrain();
+  }
+
+  function skipFeishuSetupBinding(ownerOpenId: string) {
+    closeFeishuSetup(
+      `✅ 应用已注册并保存到 ~/.bubble/feishu/。owner: ${ownerOpenId}\n(已跳过 chat 绑定 — 稍后可以编辑 ~/.bubble/feishu/scopes.json 添加)`,
+    );
+  }
+
+  function startFeishuSetupBinding(ownerOpenId: string) {
+    setPendingFeishuSetup({
+      kind: "binding",
+      ownerOpenId,
+      field: "chatId",
+      values: { ...FEISHU_SETUP_EMPTY_VALUES },
+    });
+    syncFeishuSetupUI(true);
+  }
+
+  function updateFeishuSetupInput(value: string) {
+    setPendingFeishuSetup((current) => {
+      if (!current || current.kind !== "binding") return current;
+      return {
+        ...current,
+        values: { ...current.values, [current.field]: value },
+        error: undefined,
+      };
+    });
+    redrawFeishuSetupPanel();
+  }
+
+  function submitFeishuSetupField() {
+    const state = pendingFeishuSetup();
+    if (!state || state.kind !== "binding") return false;
+    const value = state.values[state.field];
+
+    if (state.field === "chatId") {
+      if (!value.trim()) {
+        setPendingFeishuSetup({ ...state, error: "Chat ID 不能为空（oc_...）" });
+        syncFeishuSetupUI(true);
+        return true;
+      }
+      setPendingFeishuSetup({ ...state, field: "cwd", error: undefined });
+      syncFeishuSetupUI(true);
+      return true;
+    }
+
+    if (state.field === "cwd") {
+      const expanded = expandFeishuSetupPath(value.trim());
+      if (!isAbsolute(expanded)) {
+        setPendingFeishuSetup({ ...state, error: "cwd 必须是绝对路径或 ~/..." });
+        syncFeishuSetupUI(true);
+        return true;
+      }
+      try {
+        if (!existsSync(expanded) || !statSync(expanded).isDirectory()) {
+          setPendingFeishuSetup({ ...state, error: `路径不存在或不是目录：${expanded}` });
+          syncFeishuSetupUI(true);
+          return true;
+        }
+      } catch (err) {
+        setPendingFeishuSetup({ ...state, error: `无法读取路径：${(err as Error).message}` });
+        syncFeishuSetupUI(true);
+        return true;
+      }
+      setPendingFeishuSetup({
+        ...state,
+        field: "displayName",
+        values: {
+          ...state.values,
+          cwd: expanded,
+          displayName: state.values.displayName || basename(expanded),
+        },
+        error: undefined,
+      });
+      syncFeishuSetupUI(true);
+      return true;
+    }
+
+    const displayName = value.trim() || basename(state.values.cwd);
+    try {
+      const registry = ScopeRegistry.load();
+      const scope: ScopeConfig = {
+        cwd: state.values.cwd,
+        displayName,
+        allowedUsers: [state.ownerOpenId],
+        admins: [state.ownerOpenId],
+        defaultPermissionMode: "default",
+        model: null,
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+      };
+      registry.upsert(state.values.chatId.trim(), scope);
+    } catch (err) {
+      setPendingFeishuSetup({ ...state, error: `保存 scope 失败：${(err as Error).message}` });
+      syncFeishuSetupUI(true);
+      return true;
+    }
+    closeFeishuSetup(
+      `✅ 已注册应用并绑定第一个 chat：\n  chat: ${state.values.chatId.trim()}\n  cwd:  ${state.values.cwd}\n现在可以 /feishu start 启动服务。`,
+    );
+    return true;
+  }
+
+  function handleFeishuSetupKey(event: any) {
+    const state = pendingFeishuSetup();
+    if (!state) return false;
+    const name = keyNameFromEvent(event);
+
+    if (name === "escape") {
+      if (state.kind === "credentialed") {
+        skipFeishuSetupBinding(state.ownerOpenId);
+      } else if (state.kind === "binding") {
+        closeFeishuSetup(
+          `✅ 应用已注册。owner: ${state.ownerOpenId}\n(已跳过 chat 绑定 — 稍后可以 /feishu setup 重来或编辑 scopes.json)`,
+        );
+      } else {
+        closeFeishuSetup("已取消 Feishu setup。");
+      }
+      event.preventDefault?.();
+      event.stopPropagation?.();
+      return true;
+    }
+
+    if (name === "return" || name === "enter") {
+      if (state.kind === "credentialed") {
+        startFeishuSetupBinding(state.ownerOpenId);
+      } else if (state.kind === "binding") {
+        submitFeishuSetupField();
+      } else if (state.kind === "error") {
+        closeFeishuSetup("已取消 Feishu setup。");
+      }
+      event.preventDefault?.();
+      event.stopPropagation?.();
+      return true;
+    }
+
+    if (state.kind === "binding" && name === "tab" && state.field === "displayName") {
+      updateFeishuSetupInput(basename(state.values.cwd));
+      event.preventDefault?.();
+      event.stopPropagation?.();
+      return true;
+    }
+
+    return false;
+  }
+
+  function expandFeishuSetupPath(path: string) {
+    if (path === "~" || path.startsWith("~/")) return homedir() + path.slice(1);
+    return resolvePath(path);
+  }
+
   function activeModalKeyOwner(): ModalKeyOwner | undefined {
     if (pendingApproval() || pendingPlan()) return "approval";
     if (pendingQuestion()) return "question";
     if (pendingFeedback()) return "feedback";
     if (providerDialog) return "provider";
+    if (pendingFeishuSetup()) return "feishu";
     if (picker) return "picker";
     return undefined;
   }
@@ -2067,6 +2293,8 @@ function OpenTuiApp(props: {
         return handleFeedbackKey(event);
       case "provider":
         return handleProviderDialogKey(event);
+      case "feishu":
+        return handleFeishuSetupKey(event);
       case "picker":
         return handlePickerKey(event);
     }
@@ -2079,6 +2307,7 @@ function OpenTuiApp(props: {
       return !state?.editing || isQuestionConfirmTab(state);
     }
     if (owner === "feedback") return pendingFeedback()?.stage !== "edit";
+    if (owner === "feishu") return pendingFeishuSetup()?.kind !== "binding";
     return false;
   }
 
@@ -2209,7 +2438,11 @@ function OpenTuiApp(props: {
   }, {});
 
   function currentTranscriptMessages(extra?: DisplayMessage) {
-    return compactDisplayMessages(extra ? [...displayMessages, extra] : displayMessages);
+    return compactDisplayMessages([
+      ...displayMessages,
+      ...(extra ? [extra] : []),
+      ...queuedDisplayMessages,
+    ]);
   }
 
   function hasTranscriptMessages(extra?: DisplayMessage) {
@@ -2217,7 +2450,7 @@ function OpenTuiApp(props: {
   }
 
   function isHomeSurfaceActive(extra?: DisplayMessage) {
-    return !hasTranscriptMessages(extra) && !pendingPlan() && !pendingQuestion() && !pendingFeedback();
+    return !hasTranscriptMessages(extra) && !pendingPlan() && !pendingQuestion() && !pendingFeedback() && !pendingFeishuSetup();
   }
 
   function syncPromptSurfaces(focus = false) {
@@ -2225,7 +2458,7 @@ function OpenTuiApp(props: {
     const nextSessionActive = !homeActive;
     const surfaceChanged = sessionActive() !== nextSessionActive;
     setSessionActive(nextSessionActive);
-    const modalComposerHidden = !!pendingQuestion() || !!pendingFeedback();
+    const modalComposerHidden = !!pendingQuestion() || !!pendingFeedback() || !!pendingFeishuSetup();
     if (homeSurfaceShell) homeSurfaceShell.visible = homeActive;
     if (homeComposerShell) homeComposerShell.visible = homeActive && !modalComposerHidden;
     if (sessionComposerShell) sessionComposerShell.visible = !homeActive && !modalComposerHidden;
@@ -2262,15 +2495,21 @@ function OpenTuiApp(props: {
 
   function beginAgentRun() {
     clearRunningCancelHint();
-    const run = { id: ++nextRunId, abortController: new AbortController() };
+    const run: ActiveAgentRun = {
+      id: ++nextRunId,
+      abortController: new AbortController(),
+      inputController: new AgentRunInputQueue(`run-${nextRunId}`),
+    };
     activeRun = run;
+    clearPendingSteerInputs();
     setRunningState(true);
     return run;
   }
 
-  function finishAgentRun(run: { id: number; abortController: AbortController }) {
+  function finishAgentRun(run: ActiveAgentRun) {
     if (activeRun?.id === run.id) activeRun = undefined;
     clearRunningCancelHint();
+    clearPendingSteerInputs();
     setRunningState(false);
   }
 
@@ -2281,6 +2520,196 @@ function OpenTuiApp(props: {
     } catch {
       // Render hints are best-effort and must not interfere with cancellation.
     }
+  }
+
+  function syncPendingSteerInputCount() {
+    setPendingSteerCount(pendingSteerInputs.length);
+    requestComposerRender();
+  }
+
+  function syncQueuedComposerInputCount() {
+    setQueuedInputCount(rejectedSteerInputs.length + queuedComposerInputs.length);
+    requestComposerRender();
+  }
+
+  function queuedInputLabel(count = queuedInputCount()) {
+    return `${count} queued message${count === 1 ? "" : "s"}`;
+  }
+
+  function redrawTranscriptWithQueuedDisplays() {
+    redrawTranscript(streamingDisplay, displayMessages);
+  }
+
+  function addQueuedUserDisplay(input: string) {
+    const displayId = `queued-${++nextQueuedDisplayId}`;
+    queuedDisplayMessages = [
+      ...queuedDisplayMessages,
+      { role: "user", content: input, clientId: displayId, queued: true },
+    ];
+    redrawTranscriptWithQueuedDisplays();
+    return displayId;
+  }
+
+  function updateQueuedUserDisplay(displayId: string, queued: boolean) {
+    let changed = false;
+    const update = (message: DisplayMessage): DisplayMessage => {
+      if (message.clientId !== displayId) return message;
+      changed = true;
+      return { ...message, queued };
+    };
+    displayMessages = displayMessages.map(update);
+    queuedDisplayMessages = queuedDisplayMessages.map(update);
+    if (changed) redrawTranscriptWithQueuedDisplays();
+    return changed;
+  }
+
+  function promoteQueuedUserDisplay(displayId?: string, fallbackContent?: string) {
+    if (!displayId) return false;
+    const index = queuedDisplayMessages.findIndex((message) => message.clientId === displayId);
+    if (index === -1) {
+      return updateQueuedUserDisplay(displayId, false);
+    }
+    const message = queuedDisplayMessages[index]!;
+    queuedDisplayMessages = queuedDisplayMessages.filter((_, itemIndex) => itemIndex !== index);
+    displayMessages = [...displayMessages, { ...message, content: message.content || fallbackContent || " ", queued: false }];
+    redrawTranscriptWithQueuedDisplays();
+    return true;
+  }
+
+  function promptStatusText() {
+    const cancelHint = runningCancelHint();
+    if (cancelHint) return cancelHint;
+    const queued = queuedInputCount();
+    const pendingSteers = pendingSteerCount();
+    if (isRunning()) {
+      const status: string[] = [];
+      if (pendingSteers > 0) status.push(`${pendingSteers} pending steer${pendingSteers === 1 ? "" : "s"}`);
+      if (queued > 0) status.push(queuedInputLabel(queued));
+      status.push("Enter steer");
+      status.push("Tab queue");
+      status.push("Esc stop");
+      return status.join(" · ");
+    }
+    return queued > 0 ? `${queuedInputLabel(queued)} · starting next` : "";
+  }
+
+  function queueComposerInput(input: string, options: { notice?: string | false; displayId?: string; showInTranscript?: boolean } = {}) {
+    const displayId = options.displayId ?? (options.showInTranscript ? addQueuedUserDisplay(input) : undefined);
+    queuedComposerInputs.push({ input, displayId });
+    syncQueuedComposerInputCount();
+    if (options.notice !== false) setNotice(options.notice ?? `Queued next message (${queuedInputCount()})`);
+    if (!isRunning()) scheduleQueuedInputDrain();
+  }
+
+  function requeueRejectedSteer(input: string, displayId?: string) {
+    const queuedDisplayId = displayId ?? addQueuedUserDisplay(input);
+    updateQueuedUserDisplay(queuedDisplayId, true);
+    rejectedSteerInputs.push({ input, displayId: queuedDisplayId });
+    syncQueuedComposerInputCount();
+    if (!isRunning()) scheduleQueuedInputDrain();
+  }
+
+  function clearQueuedComposerInputs() {
+    if (queuedInputDrainTimer) {
+      clearTimeout(queuedInputDrainTimer);
+      queuedInputDrainTimer = undefined;
+    }
+    if (rejectedSteerInputs.length === 0 && queuedComposerInputs.length === 0) return;
+    rejectedSteerInputs = [];
+    queuedComposerInputs = [];
+    queuedDisplayMessages = [];
+    syncQueuedComposerInputCount();
+    redrawTranscriptWithQueuedDisplays();
+  }
+
+  function clearPendingSteerInputs() {
+    pendingSteerInputs = [];
+    setPendingSteerCount(0);
+    requestComposerRender();
+  }
+
+  function removePendingSteerInput(id: string) {
+    const removed = pendingSteerInputs.find((item) => item.id === id);
+    const next = pendingSteerInputs.filter((item) => item.id !== id);
+    if (next.length === pendingSteerInputs.length) return removed;
+    pendingSteerInputs = next;
+    syncPendingSteerInputCount();
+    return removed;
+  }
+
+  function scheduleQueuedInputDrain(delay = 0) {
+    if (uiDisposed || queuedInputDrainTimer) return;
+    queuedInputDrainTimer = setTimeout(() => {
+      queuedInputDrainTimer = undefined;
+      void drainQueuedInput();
+    }, delay);
+  }
+
+  async function drainQueuedInput() {
+    if (
+      uiDisposed
+      || drainingQueuedInput
+      || isRunning()
+      || pendingApproval()
+      || pendingPlan()
+      || pendingQuestion()
+      || pendingFeedback()
+      || providerDialog
+      || picker
+    ) {
+      return;
+    }
+    const next = rejectedSteerInputs.shift() ?? queuedComposerInputs.shift();
+    if (!next) {
+      syncQueuedComposerInputCount();
+      return;
+    }
+    syncQueuedComposerInputCount();
+    drainingQueuedInput = true;
+    promoteQueuedUserDisplay(next.displayId, next.input);
+    const remaining = queuedInputCount();
+    setNotice(remaining > 0 ? `Running queued message (${remaining} left)` : "Running queued message");
+    try {
+      await handleInput(next.input, { displayId: next.displayId });
+    } finally {
+      drainingQueuedInput = false;
+      if (queuedInputCount() > 0) scheduleQueuedInputDrain();
+    }
+  }
+
+  function isBoundarySteerEligible(input: string) {
+    const trimmed = input.trim();
+    if (!trimmed) return false;
+    if (trimmed.startsWith("/")) return false;
+    if (trimmed.includes("@")) return false;
+    if (imageAttachmentLabelPattern().test(trimmed)) return false;
+    if (extractImagePathTokens(trimmed).length > 0) return false;
+    return true;
+  }
+
+  function submitBoundarySteer(input: string) {
+    const run = activeRun;
+    if (!run || run.abortController.signal.aborted) {
+      queueComposerInput(input, { showInTranscript: true });
+      return;
+    }
+    const displayId = addQueuedUserDisplay(input);
+    const pendingInput = run.inputController.enqueue(input);
+    pendingSteerInputs.push({ id: pendingInput.id, input, displayId });
+    syncPendingSteerInputCount();
+    setNotice("Steer pending for next model call");
+  }
+
+  function queuePromptFromComposer(options: { clearPicker?: boolean; notice?: string | false } = {}) {
+    const raw = readPromptText() || promptText;
+    const input = (raw || promptText).trimEnd();
+    if (!input.trim()) return false;
+    activePrompt()?.clear();
+    promptText = "";
+    resetPromptHistoryBrowse();
+    if (options.clearPicker && picker) closePicker();
+    queueComposerInput(input, { notice: options.notice, showInTranscript: isRunning() });
+    return true;
   }
 
   function clearRunningCancelHint() {
@@ -2362,14 +2791,24 @@ function OpenTuiApp(props: {
     return true;
   }
 
+  function routeRunningQueue(name: string, event?: any) {
+    if (name !== "tab" || event?.shift) return false;
+    if (!isRunning() || activeModalKeyOwner()) return false;
+    queuePromptFromComposer({ notice: "Queued next message" });
+    if (event) preventGlobalKey(event);
+    return true;
+  }
+
   function routeGlobalRawSequence(sequence: string) {
     if (isCtrlCSequence(sequence)) {
       void requestExit({ direct: true });
       return true;
     }
     const name = keyNameFromSequence(sequence);
+    const modalName = modalKeyNameFromSequence(sequence);
     if (routeModalRawSequence(sequence)) return true;
     if (routeRunningCancel(name)) return true;
+    if (routeRunningQueue(modalName)) return true;
     if (cycleModeFromRawSequence(sequence)) return true;
     return false;
   }
@@ -2379,6 +2818,7 @@ function OpenTuiApp(props: {
     const name = keyNameFromEvent(event);
     if (routeModalKey(event)) return true;
     if (routeRunningCancel(name, event)) return true;
+    if (routeRunningQueue(name, event)) return true;
     // Ctrl+Shift+M opens the MCP reconnect picker. Shift is required because
     // bare Ctrl+M is Enter on most terminals (historical TTY mapping).
     if (event.ctrl && event.shift && name === "m") {
@@ -2496,42 +2936,33 @@ function OpenTuiApp(props: {
   function redrawTranscript(
     extra?: DisplayMessage,
     baseMessages = displayMessages,
-    options: TranscriptRenderOptions = {},
   ) {
     streamingDisplay = extra;
-    renderTranscriptNow(streamingDisplay, baseMessages, options);
+    renderTranscriptNow(streamingDisplay, baseMessages);
   }
 
-  function renderTranscriptNow(extra?: DisplayMessage, baseMessages = displayMessages, options: TranscriptRenderOptions = {}) {
-    const shouldAnchorLatestUser = options.scroll === "latest-user-top" || transcriptTurnAnchorActive;
-    if (options.scroll === "latest-user-top") activateTranscriptTurnAnchor();
-    const shouldFollow = shouldAnchorLatestUser ? false : shouldFollowTranscriptBeforeUpdate();
-    const nextMessages = compactDisplayMessages(extra ? [...baseMessages, extra] : baseMessages);
-    syncTranscriptAnchorSpacer();
+  function renderTranscriptNow(extra?: DisplayMessage, baseMessages = displayMessages) {
+    const shouldFollow = shouldFollowTranscriptBeforeUpdate();
+    const nextMessages = compactDisplayMessages([
+      ...baseMessages,
+      ...(extra ? [extra] : []),
+      ...queuedDisplayMessages,
+    ]);
     syncSessionMessages(nextMessages);
     rootBox?.requestRender();
     scrollbox?.requestRender();
-    if (shouldAnchorLatestUser) {
-      scheduleAnchoredTurnScroll(nextMessages);
-    } else {
-      scheduleTranscriptScrollAfterUpdate(shouldFollow);
-    }
+    scheduleTranscriptScrollAfterUpdate(shouldFollow);
   }
 
   createEffect(() => {
-    const shouldAnchorLatestUser = transcriptTurnAnchorActive;
-    const shouldFollow = shouldAnchorLatestUser ? false : shouldFollowTranscriptBeforeUpdate();
+    const shouldFollow = shouldFollowTranscriptBeforeUpdate();
     dimensions();
     sessionActive();
     syncSidebarChrome();
     redrawQuestionPanel();
-    syncTranscriptAnchorSpacer();
+    redrawFeishuSetupPanel();
     scrollbox?.requestRender();
-    if (shouldAnchorLatestUser) {
-      scheduleAnchoredTurnScroll(currentTranscriptMessages(streamingDisplay));
-    } else {
-      scheduleTranscriptScrollAfterUpdate(shouldFollow);
-    }
+    scheduleTranscriptScrollAfterUpdate(shouldFollow);
   });
 
   function redrawDock() {
@@ -2614,6 +3045,7 @@ function OpenTuiApp(props: {
     providerDialogPanel && (providerDialogPanel.visible = false);
     providerDialogRoot?.requestRender();
     setTimeout(() => activePrompt()?.focus(), 0);
+    if (queuedInputCount() > 0) scheduleQueuedInputDrain();
   }
 
   function providerDialogItemsFor(step: ProviderDialogStep, providerId?: string) {
@@ -3210,6 +3642,164 @@ function OpenTuiApp(props: {
     feedbackInput?.requestRender();
   }
 
+  function redrawFeishuSetupPanel() {
+    if (!feishuSetupRoot) return;
+    const state = pendingFeishuSetup();
+    if (!state) {
+      feishuSetupRoot.visible = false;
+      feishuSetupPanel && (feishuSetupPanel.visible = false);
+      feishuSetupInput?.blur();
+      feishuSetupRoot.requestRender();
+      return;
+    }
+
+    const width = Math.max(52, Math.min(78, dimensions().width - 4));
+    const height = feishuSetupPanelHeight(state);
+    feishuSetupRoot.visible = true;
+    feishuSetupRoot.width = dimensions().width;
+    feishuSetupRoot.height = dimensions().height;
+    feishuSetupRoot.left = 0;
+    feishuSetupRoot.top = 0;
+    feishuSetupRoot.backgroundColor = modalBackdropColor();
+    if (feishuSetupPanel) {
+      feishuSetupPanel.visible = true;
+      feishuSetupPanel.width = width;
+      feishuSetupPanel.height = height;
+      feishuSetupPanel.left = Math.max(0, Math.floor((dimensions().width - width) / 2));
+      feishuSetupPanel.top = Math.max(0, Math.floor((dimensions().height - height) / 3));
+      feishuSetupPanel.backgroundColor = theme.backgroundPanel;
+      feishuSetupPanel.borderColor = theme.info;
+      feishuSetupPanel.requestRender();
+    }
+    if (feishuSetupTitle) feishuSetupTitle.content = "Feishu Setup Wizard";
+    if (feishuSetupHint) feishuSetupHint.content = feishuSetupHintText(state);
+    if (feishuSetupBodyText) {
+      feishuSetupBodyText.content = feishuSetupBodyTextFor(state);
+      feishuSetupBodyText.fg = state.kind === "error" ? theme.error : theme.text;
+    }
+    if (feishuSetupBodyScroll) {
+      feishuSetupBodyScroll.height = Math.max(3, height - (state.kind === "binding" ? 8 : 6));
+      feishuSetupBodyScroll.requestRender();
+    }
+    const binding = state.kind === "binding" ? state : undefined;
+    if (feishuSetupInputShell) feishuSetupInputShell.visible = !!binding;
+    if (feishuSetupInput) {
+      feishuSetupInput.visible = !!binding;
+      if (binding) {
+        feishuSetupInput.placeholder = feishuSetupFieldPlaceholder(binding.field);
+        feishuSetupInput.value = binding.values[binding.field];
+      } else {
+        feishuSetupInput.value = "";
+      }
+      feishuSetupInput.requestRender();
+    }
+    if (feishuSetupFooterText) feishuSetupFooterText.content = feishuSetupFooterTextFor(state);
+    feishuSetupRoot.requestRender();
+  }
+
+  function feishuSetupPanelHeight(stage: FeishuSetupStage) {
+    const desired = stage.kind === "qr_shown" ? 32 : stage.kind === "binding" ? 16 : 12;
+    return Math.max(10, Math.min(desired, Math.max(10, dimensions().height - 3)));
+  }
+
+  function feishuSetupHintText(stage: FeishuSetupStage) {
+    switch (stage.kind) {
+      case "registering": return "Esc 取消";
+      case "qr_shown": return "用手机飞书扫码 · Esc 取消";
+      case "credentialed": return "Enter 绑定第一个 chat · Esc 跳过";
+      case "binding": return "输入后 Enter 下一步 · Esc 跳过绑定";
+      case "error": return "Enter 关闭";
+    }
+  }
+
+  function feishuSetupFooterTextFor(stage: FeishuSetupStage) {
+    switch (stage.kind) {
+      case "registering": return "esc cancel";
+      case "qr_shown": return "scan in Feishu mobile · esc cancel";
+      case "credentialed": return "enter bind first chat · esc skip";
+      case "binding": return stage.field === "displayName"
+        ? "enter save · tab use default · esc skip"
+        : "enter next · esc skip";
+      case "error": return "enter close · esc close";
+    }
+  }
+
+  function feishuSetupBodyTextFor(stage: FeishuSetupStage) {
+    switch (stage.kind) {
+      case "registering":
+        return "正在向飞书申请注册码...";
+      case "qr_shown":
+        return [
+          stage.status,
+          "",
+          stage.ascii.trimEnd(),
+          "",
+          "扫不到？也可以浏览器打开：",
+          stage.url,
+        ].join("\n");
+      case "credentialed":
+        return [
+          "✅ 注册成功",
+          `owner open_id: ${stage.ownerOpenId}`,
+          "",
+          "已写入 ~/.bubble/feishu/config.json + secrets.enc（加密）。",
+          "下一步：把一个飞书 chat 绑定到本地目录？",
+        ].join("\n");
+      case "binding":
+        return feishuSetupBindingBody(stage);
+      case "error":
+        return [
+          `❌ ${stage.message}`,
+          "",
+          "按 Enter 关闭。可以稍后再 /feishu setup 重试。",
+        ].join("\n");
+    }
+  }
+
+  function feishuSetupBindingBody(stage: Extract<FeishuSetupStage, { kind: "binding" }>) {
+    const fields: FeishuSetupField[] = ["chatId", "cwd", "displayName"];
+    const lines: string[] = [];
+    for (const field of fields) {
+      const active = stage.field === field;
+      const done = !active && feishuSetupFieldIndex(stage.field) > feishuSetupFieldIndex(field);
+      const marker = active ? "›" : done ? "✓" : " ";
+      const value = stage.values[field] || (active ? "(editing below)" : "");
+      lines.push(`${marker} ${feishuSetupFieldLabel(field)}: ${value}`);
+      if (active) {
+        lines.push(`  ${feishuSetupFieldHelp(field)}`);
+      }
+    }
+    if (stage.error) {
+      lines.push("");
+      lines.push(stage.error);
+    }
+    return lines.join("\n");
+  }
+
+  function feishuSetupFieldIndex(field: FeishuSetupField) {
+    if (field === "chatId") return 0;
+    if (field === "cwd") return 1;
+    return 2;
+  }
+
+  function feishuSetupFieldLabel(field: FeishuSetupField) {
+    if (field === "chatId") return "Chat ID";
+    if (field === "cwd") return "本地 cwd";
+    return "显示名";
+  }
+
+  function feishuSetupFieldPlaceholder(field: FeishuSetupField) {
+    if (field === "chatId") return "oc_...";
+    if (field === "cwd") return `${homedir()}/projects/my-app`;
+    return "可空，默认目录名";
+  }
+
+  function feishuSetupFieldHelp(field: FeishuSetupField) {
+    if (field === "chatId") return "飞书 chat 的 oc_ 开头 ID；不知道的话可以 Esc 跳过，先 /feishu start 后用 /feishu discover 获取。";
+    if (field === "cwd") return "绝对路径或 ~/...，必须是已经存在的本地目录。";
+    return "出现在飞书卡片顶栏的短标签；可空。";
+  }
+
   function redrawApprovalPanel() {
     if (!approvalRoot) return;
     const approval = pendingApproval();
@@ -3457,6 +4047,7 @@ function OpenTuiApp(props: {
     picker = undefined;
     redrawDock();
     setTimeout(() => activePrompt()?.focus(), 0);
+    if (queuedInputCount() > 0) scheduleQueuedInputDrain();
   }
 
   const addMessage = (role: DisplayMessage["role"], content: string) => {
@@ -3470,7 +4061,7 @@ function OpenTuiApp(props: {
     streamingDisplay = undefined;
     promptHistory = [];
     resetPromptHistoryBrowse();
-    clearTranscriptTurnAnchor();
+    clearQueuedComposerInputs();
     transcriptState.expandedCompactions.clear();
     transcriptState.expandedWrites.clear();
     transcriptState.defaultWritesExpanded = false;
@@ -3492,7 +4083,31 @@ function OpenTuiApp(props: {
       resolvePendingPlanSelection(plan);
       return;
     }
-    if (isRunning()) return;
+    if (isRunning()) {
+      if (picker?.kind === "select" && picker.mode === "slash") {
+        const item = picker.items[picker.index];
+        if (item) {
+          activePrompt()?.clear();
+          promptText = "";
+          closePicker();
+          queueComposerInput(item.command, { notice: "Queued command for next turn", showInTranscript: true });
+        }
+        return;
+      }
+      const raw = readPromptText() || promptText;
+      const input = (raw || promptText).trimEnd();
+      if (!input.trim()) return;
+      activePrompt()?.clear();
+      promptText = "";
+      resetPromptHistoryBrowse();
+      if (picker) closePicker();
+      if (isBoundarySteerEligible(input)) {
+        submitBoundarySteer(input);
+      } else {
+        queueComposerInput(input, { notice: "Queued unsupported steer for next turn", showInTranscript: true });
+      }
+      return;
+    }
     if (picker?.kind === "select" && picker.mode === "slash") {
       const item = picker.items[picker.index];
       if (item) await runPickerItem(item);
@@ -3879,11 +4494,11 @@ function OpenTuiApp(props: {
     return expandedParts;
   }
 
-  async function handleInput(input: string) {
+  async function handleInput(input: string, options: { displayId?: string } = {}) {
     setNotice("");
     const labeledInput = buildImageContentPartsFromLabels(input, pendingImageAttachments);
     if (labeledInput.actualInput) {
-      await runAgentInput(await expandTextParts(labeledInput.actualInput), labeledInput.displayInput);
+      await runAgentInput(await expandTextParts(labeledInput.actualInput), labeledInput.displayInput, options);
       for (const label of labeledInput.usedLabels) pendingImageAttachments.delete(label);
       return;
     }
@@ -3892,7 +4507,7 @@ function OpenTuiApp(props: {
     for (const error of imageInput.errors) addMessage("error", `Skipped image: ${error}`);
 
     if (imageInput.attachments.length > 0) {
-      await runAgentInput(await expandTextParts(imageInput.actualInput as ContentPart[]), imageInput.displayInput);
+      await runAgentInput(await expandTextParts(imageInput.actualInput as ContentPart[]), imageInput.displayInput, options);
       nextImageAttachmentIndex += imageInput.attachments.length;
       return;
     }
@@ -3902,21 +4517,21 @@ function OpenTuiApp(props: {
     if (input.startsWith("/")) {
       const skillInvocation = parseSkillInvocation(input, skills);
       if (skillInvocation) {
-        await runAgentInput(skillInvocation.actualPrompt, input);
+        await runAgentInput(skillInvocation.actualPrompt, input, options);
         return;
       }
 
-      const handled = await executeSlash(input);
+      const handled = await executeSlash(input, options);
       if (handled) return;
     }
 
     const expansion = await expandAtMentions(input, props.args.cwd);
     if (expansion.missing.length) addMessage("error", `Could not resolve @mention: ${expansion.missing.join(", ")}`);
     for (const skipped of expansion.skipped) addMessage("error", `Skipped @${skipped.path}: ${skipped.reason}`);
-    await runAgentInput(expansion.text, input);
+    await runAgentInput(expansion.text, input, options);
   }
 
-  async function executeSlash(input: string) {
+  async function executeSlash(input: string, options: { displayId?: string } = {}) {
     if (/^\/(?:thinking|toggle-thinking)(?:\s|$)/.test(input.trim())) {
       toggleThinkingVisibility();
       return true;
@@ -3987,13 +4602,13 @@ function OpenTuiApp(props: {
         }
       }
     }
-    if (inject) await runAgentInput(inject, input);
+    if (inject) await runAgentInput(inject, input, options);
     return true;
   }
 
   async function openPicker(kind: PickerMode, providerId?: string) {
     if (kind === "feishu-setup") {
-      addMessage("assistant", "Feishu setup wizard is not available in the restored OpenTUI runtime yet. Run `bubble serve --feishu --setup` from a shell.");
+      openFeishuSetup();
       return;
     }
     if (kind === "model") {
@@ -4355,7 +4970,7 @@ function OpenTuiApp(props: {
     return "Paste provider API key";
   }
 
-  async function runAgentInput(actualInput: string | ContentPart[], displayInput: string) {
+  async function runAgentInput(actualInput: string | ContentPart[], displayInput: string, options: { displayId?: string } = {}) {
     const activeProviderId = props.agent.providerId || registry.getDefault()?.id;
     const hasActiveProvider = !!activeProviderId && registry.getEnabled().some((provider) => provider.id === activeProviderId);
     if (!hasActiveProvider) {
@@ -4368,10 +4983,13 @@ function OpenTuiApp(props: {
     }
 
     rememberPromptHistory(displayInput);
-    const nextMessages = [...displayMessages, { role: "user" as const, content: displayInput }];
-    displayMessages = nextMessages;
+    const reusedQueuedDisplay = promoteQueuedUserDisplay(options.displayId, displayInput);
+    const nextMessages = reusedQueuedDisplay
+      ? displayMessages
+      : [...displayMessages, { role: "user" as const, content: displayInput }];
+    if (!reusedQueuedDisplay) displayMessages = nextMessages;
     streamingDisplay = undefined;
-    redrawTranscript(undefined, nextMessages, { scroll: "latest-user-top" });
+    redrawTranscript(undefined, nextMessages);
     const taskStartedAt = Date.now();
     const run = beginAgentRun();
 
@@ -4413,7 +5031,10 @@ function OpenTuiApp(props: {
       pendingStreamingRedrawTimer = setTimeout(flushStreamingRedraw, STREAMING_REDRAW_INTERVAL_MS);
     };
     try {
-      for await (const event of props.agent.run(actualInput, props.args.cwd, { abortSignal: run.abortController.signal })) {
+      for await (const event of props.agent.run(actualInput, props.args.cwd, {
+        abortSignal: run.abortController.signal,
+        inputController: run.inputController,
+      })) {
         if (event.type === "turn_start") {
           assistantContent = "";
           assistantReasoning = "";
@@ -4538,6 +5159,18 @@ function OpenTuiApp(props: {
           setMode(event.mode);
           syncModeChrome();
           bumpSidebar();
+        } else if (event.type === "input_pending_changed") {
+          if (event.pending === 0) clearPendingSteerInputs();
+          else setPendingSteerCount(event.pending);
+          requestComposerRender();
+        } else if (event.type === "input_applied") {
+          const pendingSteer = removePendingSteerInput(event.id);
+          promoteQueuedUserDisplay(pendingSteer?.displayId, event.content);
+          setNotice("Steer applied to current run");
+        } else if (event.type === "input_rejected") {
+          const pendingSteer = removePendingSteerInput(event.id);
+          requeueRejectedSteer(event.content, pendingSteer?.displayId);
+          setNotice("Steer moved to next turn");
         } else if (event.type === "turn_end") {
           if (pendingStreamingRedrawTimer !== undefined) {
             clearTimeout(pendingStreamingRedrawTimer);
@@ -4599,6 +5232,10 @@ function OpenTuiApp(props: {
       pendingApprovalRef = undefined;
       setPendingApproval(undefined);
       setApprovalOptionIdx(0);
+      for (const pendingInput of run.inputController.clear()) {
+        const pendingSteer = removePendingSteerInput(pendingInput.id);
+        requeueRejectedSteer(pendingInput.content, pendingSteer?.displayId);
+      }
       finishAgentRun(run);
       streamingDisplay = undefined;
       if (runError) {
@@ -4617,6 +5254,7 @@ function OpenTuiApp(props: {
       refreshGitSidebar();
       syncSidebarLsp();
       setTimeout(() => activePrompt()?.focus(), 0);
+      if (queuedInputCount() > 0) scheduleQueuedInputDrain();
     }
   }
 
@@ -4631,6 +5269,7 @@ function OpenTuiApp(props: {
       }
     }
     if (routeRunningCancel(keyNameFromEvent(event), event)) return true;
+    if (routeRunningQueue(keyNameFromEvent(event), event)) return true;
     if (cycleModeFromKey(event)) return true;
     if (handlePromptHistoryKey(event)) return true;
     return false;
@@ -4640,13 +5279,13 @@ function OpenTuiApp(props: {
     return h("box", {
       ref: (ref: BoxRenderable) => {
         sessionComposerShell = ref;
-        ref.visible = !isHomeSurfaceActive(streamingDisplay) && !pendingQuestion() && !pendingFeedback();
+        ref.visible = !isHomeSurfaceActive(streamingDisplay) && !pendingQuestion() && !pendingFeedback() && !pendingFeishuSetup();
       },
       width: "100%",
       paddingLeft: 2,
       paddingRight: 2,
       flexShrink: 0,
-      visible: !isHomeSurfaceActive(streamingDisplay) && !pendingQuestion(),
+      visible: !isHomeSurfaceActive(streamingDisplay) && !pendingQuestion() && !pendingFeishuSetup(),
     },
       renderPrompt({
         ref: (ref) => { sessionPromptRef = ref; },
@@ -4658,12 +5297,13 @@ function OpenTuiApp(props: {
         onKeyDown: handlePickerKey,
         onUiKeyDown: promptUiKeyDown,
         getText: readPromptText,
-        disabled: () => (isRunning() && !pendingApproval() && !pendingPlan() && !pendingQuestion()) || !!pendingFeedback(),
+        disabled: () => !!pendingFeedback(),
         mode,
         registerModeLabel: registerPromptModeLabel,
         registerModelLabel: registerPromptModelLabel,
         model: promptModelTitle,
-        interruptHint: runningCancelHint,
+        interruptHint: promptStatusText,
+        tabHint: () => isRunning() ? "queue" : "mode",
         placeholder: () => {
           const approvalState = pendingApproval();
           if (approvalState) return "Press Enter to approve or Esc to reject";
@@ -4671,6 +5311,7 @@ function OpenTuiApp(props: {
           if (pendingFeedback()) return "Describe feedback below";
           const plan = pendingPlan();
           if (plan) return "Press Enter to approve plan or Esc to reject";
+          if (isRunning()) return "Steer current run...";
           return `Ask anything... "${homePrompt}"`;
         },
       }),
@@ -4701,14 +5342,14 @@ function OpenTuiApp(props: {
       h("box", {
         ref: (ref: BoxRenderable) => {
           homeComposerShell = ref;
-          ref.visible = isHomeSurfaceActive(streamingDisplay) && !pendingQuestion() && !pendingFeedback();
+          ref.visible = isHomeSurfaceActive(streamingDisplay) && !pendingQuestion() && !pendingFeedback() && !pendingFeishuSetup();
         },
         width: "100%",
         maxWidth: 75,
         zIndex: 1000,
         paddingTop: 1,
         flexShrink: 0,
-        visible: isHomeSurfaceActive(streamingDisplay) && !pendingQuestion(),
+        visible: isHomeSurfaceActive(streamingDisplay) && !pendingQuestion() && !pendingFeishuSetup(),
       },
       renderPrompt({
         ref: (ref) => {
@@ -4723,12 +5364,13 @@ function OpenTuiApp(props: {
         onKeyDown: handlePickerKey,
         onUiKeyDown: promptUiKeyDown,
         getText: readPromptText,
-        disabled: () => (isRunning() && !pendingApproval() && !pendingPlan() && !pendingQuestion()) || !!pendingFeedback(),
+        disabled: () => !!pendingFeedback(),
         mode,
         registerModeLabel: registerPromptModeLabel,
         registerModelLabel: registerPromptModelLabel,
         model: promptModelTitle,
-        interruptHint: runningCancelHint,
+        interruptHint: promptStatusText,
+        tabHint: () => isRunning() ? "queue" : "mode",
         placeholder: () => {
           const approvalState = pendingApproval();
           if (approvalState) return "Press Enter to approve or Esc to reject";
@@ -4736,6 +5378,7 @@ function OpenTuiApp(props: {
           if (pendingFeedback()) return "Describe feedback below";
           const plan = pendingPlan();
           if (plan) return "Press Enter to approve plan or Esc to reject";
+          if (isRunning()) return "Steer current run...";
           return `Ask anything... "${homePrompt}"`;
         },
       }),
@@ -5019,6 +5662,126 @@ function OpenTuiApp(props: {
       content: "ctrl+d submit · tab view payload · enter newline · esc cancel",
     }),
     ));
+  }
+
+  function renderFeishuSetupPanel() {
+    return h("box", {
+      ref: (ref: BoxRenderable) => {
+        feishuSetupRoot = ref;
+        redrawFeishuSetupPanel();
+      },
+      visible: false,
+      focusable: true,
+      position: "absolute",
+      left: 0,
+      top: 0,
+      width: "100%",
+      height: "100%",
+      zIndex: 3100,
+      backgroundColor: modalBackdropColor(),
+      flexDirection: "column",
+      onKeyDown: (event: any) => {
+        if (handleFeishuSetupKey(event)) return true;
+        return false;
+      },
+    },
+    h("box", {
+      ref: (ref: BoxRenderable) => {
+        feishuSetupPanel = ref;
+        redrawFeishuSetupPanel();
+      },
+      visible: false,
+      position: "absolute",
+      width: 72,
+      height: 12,
+      backgroundColor: theme.backgroundPanel,
+      border: true,
+      borderColor: theme.info,
+      flexDirection: "column",
+      paddingLeft: 2,
+      paddingRight: 2,
+      paddingTop: 1,
+      paddingBottom: 1,
+      gap: 1,
+      onMouseUp: (event: any) => {
+        event.stopPropagation?.();
+      },
+    },
+    [
+      h("box", {
+        flexDirection: "row",
+        justifyContent: "space-between",
+        flexShrink: 0,
+      },
+      h("text", {
+        ref: (ref: TextRenderable) => { feishuSetupTitle = ref; },
+        fg: theme.text,
+        content: "Feishu Setup Wizard",
+      }),
+      h("text", {
+        fg: theme.textMuted,
+        content: "esc",
+        onMouseUp: () => {
+          handleFeishuSetupKey({
+            name: "escape",
+            preventDefault() {},
+            stopPropagation() {},
+          });
+        },
+      })),
+      h("text", {
+        ref: (ref: TextRenderable) => { feishuSetupHint = ref; },
+        fg: theme.textMuted,
+        content: "",
+        flexShrink: 0,
+      }),
+      h("scrollbox", {
+        ref: (ref: ScrollBoxRenderable) => { feishuSetupBodyScroll = ref; },
+        flexGrow: 1,
+        minHeight: 0,
+        height: 5,
+      },
+      h("text", {
+        ref: (ref: TextRenderable) => { feishuSetupBodyText = ref; },
+        fg: theme.text,
+        wrapMode: "word",
+        content: "",
+      })),
+      h("box", {
+        ref: (ref: BoxRenderable) => { feishuSetupInputShell = ref; },
+        visible: false,
+        flexShrink: 0,
+      },
+      h("input", {
+        ref: (ref: InputRenderable) => { feishuSetupInput = ref; },
+        width: "100%",
+        value: "",
+        placeholder: "",
+        fg: theme.text,
+        backgroundColor: theme.backgroundElement,
+        focusedBackgroundColor: theme.backgroundElement,
+        cursorColor: theme.primary,
+        placeholderColor: theme.textMuted,
+        onInput: (value: string) => updateFeishuSetupInput(value),
+        onKeyDown: (event: any) => {
+          if (handleFeishuSetupKey(event)) return true;
+          return false;
+        },
+        onSubmit: () => {
+          submitFeishuSetupField();
+        },
+      })),
+      h("box", {
+        flexDirection: "row",
+        flexShrink: 0,
+        paddingTop: 1,
+      },
+      h("text", {
+        ref: (ref: TextRenderable) => { feishuSetupFooterText = ref; },
+        fg: theme.textMuted,
+        content: "",
+      })),
+    ]));
   }
 
   function renderQuestionOptionHost(index: number) {
@@ -5695,27 +6458,11 @@ function OpenTuiApp(props: {
           if (isNewHost) transcriptState.entries = [];
           updateTranscriptHost(ref, transcriptState, currentTranscriptMessages(streamingDisplay), transcriptOptions(), props.syntaxStyle, props.subtleSyntaxStyle);
           syncPromptSurfaces(isNewHost);
-          if (isNewHost) {
-            if (transcriptTurnAnchorActive) {
-              scheduleAnchoredTurnScroll(currentTranscriptMessages(streamingDisplay), transcriptTurnAnchorSerial, 0);
-            } else {
-              scheduleTranscriptScrollAfterUpdate(transcriptScrollFollowing, 0);
-            }
-          }
+          if (isNewHost) scheduleTranscriptScrollAfterUpdate(transcriptScrollFollowing, 0);
         },
         flexDirection: "column",
         flexShrink: 0,
         width: "100%",
-      }),
-      h("box", {
-        ref: (ref: BoxRenderable) => {
-          transcriptAnchorSpacer = ref;
-          syncTranscriptAnchorSpacer();
-        },
-        flexShrink: 0,
-        width: "100%",
-        height: 0,
-        visible: false,
       }),
       ),
       todos().length ? renderTodos(todos()) : null,
@@ -5939,6 +6686,7 @@ function OpenTuiApp(props: {
       registerTraceBadge: registerFooterTraceBadge,
     }),
     renderProviderDialog(),
+    renderFeishuSetupPanel(),
     renderNoticeOverlay(),
   ]);
 }
@@ -5959,6 +6707,7 @@ function renderPrompt(input: {
   registerModelLabel?: (ref: TextRenderable) => void;
   model: () => string;
   interruptHint: () => string;
+  tabHint: () => string;
   placeholder: () => string;
 }) {
   const transparentBackground = "#00000000";
@@ -6012,11 +6761,11 @@ function renderPrompt(input: {
       ),
     ),
     h("box", { width: "100%", flexDirection: "row", justifyContent: "space-between" },
-      () => input.disabled() && input.interruptHint()
-        ? h("text", { fg: theme.warning }, input.interruptHint())
+      () => input.interruptHint()
+        ? h("text", { fg: input.interruptHint().startsWith("Press Esc") ? theme.warning : theme.textMuted }, input.interruptHint())
         : h("text", { fg: theme.textMuted }, ""),
       h("box", { flexDirection: "row", gap: 2 },
-        h("text", { fg: theme.text }, "tab ", h("span", { fg: theme.textMuted }, "mode")),
+        h("text", { fg: theme.text }, "tab ", h("span", { fg: theme.textMuted }, input.tabHint())),
         h("text", { fg: theme.text }, "ctrl+p ", h("span", { fg: theme.textMuted }, "commands")),
       ),
     ),
@@ -6119,6 +6868,17 @@ function renderMessage(
 }
 
 function renderUserMessage(message: DisplayMessage, index: number) {
+  const userChildren: Child[] = [
+    h("text", { fg: theme.messageUserText, wrapMode: "word" }, message.content || " "),
+  ];
+  if (message.queued) {
+    userChildren.push(
+      h("box", { paddingTop: 1 },
+        h("text", { fg: theme.textMuted },
+          h("span", { bg: theme.primary, fg: theme.background, bold: true }, " QUEUED ")),
+      ),
+    );
+  }
   return h("box", {
     border: ["left"],
     borderColor: theme.primary,
@@ -6126,8 +6886,8 @@ function renderUserMessage(message: DisplayMessage, index: number) {
     backgroundColor: theme.backgroundPanel,
     flexShrink: 0,
   },
-    h("box", { paddingTop: 1, paddingBottom: 1, paddingLeft: 2, backgroundColor: theme.backgroundPanel, flexShrink: 0 },
-      h("text", { fg: theme.messageUserText, wrapMode: "word" }, message.content || " "),
+    h("box", { paddingTop: 1, paddingBottom: 1, paddingLeft: 2, backgroundColor: theme.backgroundPanel, flexShrink: 0, flexDirection: "column" },
+      ...userChildren,
     ),
   );
 }
@@ -6416,8 +7176,10 @@ type TranscriptEntry = {
   key: string;
   signature: string;
   node: Renderable;
-  refs: {
-    userText?: TextRenderable;
+	refs: {
+	    userText?: TextRenderable;
+	    userQueuedBox?: BoxRenderable;
+	    userQueuedText?: TextRenderable;
     errorText?: TextRenderable;
     statusText?: TextRenderable;
     statusBox?: BoxRenderable;
@@ -6510,6 +7272,8 @@ function updateMessageEntry(
 ) {
   if (message.role === "user") {
     if (entry.refs.userText) entry.refs.userText.content = message.content || " ";
+    if (entry.refs.userQueuedBox) entry.refs.userQueuedBox.visible = message.queued === true;
+    if (entry.refs.userQueuedText) entry.refs.userQueuedText.content = message.queued ? " QUEUED " : "";
     return;
   }
   if (message.role === "error") {
@@ -7283,6 +8047,16 @@ function createUserEntry(ctx: RenderContext, message: DisplayMessage, index: num
     wrapMode: "word",
   });
   refs.userText = text;
+  const queuedText = createText(ctx, message.queued ? " QUEUED " : "", {
+    fg: theme.background,
+    bg: theme.primary,
+  });
+  refs.userQueuedText = queuedText;
+  const queuedBox = createBox(ctx, {
+    paddingTop: 1,
+    visible: message.queued === true,
+  }, [queuedText]);
+  refs.userQueuedBox = queuedBox;
   const node = createBox(ctx, {
     border: ["left"],
     borderColor: theme.primary,
@@ -7296,7 +8070,8 @@ function createUserEntry(ctx: RenderContext, message: DisplayMessage, index: num
       paddingLeft: 2,
       backgroundColor: theme.backgroundPanel,
       flexShrink: 0,
-    }, [text]),
+      flexDirection: "column",
+    }, [text, queuedBox]),
   ]);
   return { key, signature, node, refs };
 }
