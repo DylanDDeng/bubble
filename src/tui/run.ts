@@ -151,10 +151,12 @@ type RawMouseSelectionHandler = (event: { type: string; button: number; x: numbe
 type CopyToastVariant = "info" | "success" | "warning" | "error";
 type CopyToastState = { title?: string; message: string; variant: CopyToastVariant };
 type ModalKeyOwner = "approval" | "question" | "feedback" | "provider" | "picker";
+type TranscriptRenderOptions = { scroll?: "latest-user-top" };
 
 const treeSitterClient = getTreeSitterClient();
 const PROMPT_HISTORY_LIMIT = 100;
 const ESC_CANCEL_CONFIRM_WINDOW_MS = 1800;
+const TRANSCRIPT_TURN_TOP_PADDING = 1;
 
 const PROVIDER_PRIORITY = new Map<string, number>([
   ["openai", 0],
@@ -688,10 +690,13 @@ function OpenTuiApp(props: {
   let scrollbox: ScrollBoxRenderable | undefined;
   let transcriptScrollFollowing = true;
   let transcriptScrollInitialized = false;
+  let transcriptTurnAnchorActive = false;
+  let transcriptTurnAnchorSerial = 0;
   let rootBox: BoxRenderable | undefined;
   let sidebarShell: BoxRenderable | undefined;
   let homeSurfaceShell: BoxRenderable | undefined;
   let transcriptHost: BoxRenderable | undefined;
+  let transcriptAnchorSpacer: BoxRenderable | undefined;
   const transcriptState: TranscriptState = {
     entries: [],
     expandedCompactions: new Set(),
@@ -1567,6 +1572,7 @@ function OpenTuiApp(props: {
   }
 
   function scrollTranscriptToBottom() {
+    clearTranscriptTurnAnchor();
     if (!scrollbox) return;
     scrollbox.scrollTo(scrollbox.scrollHeight);
     transcriptScrollFollowing = true;
@@ -1575,7 +1581,7 @@ function OpenTuiApp(props: {
 
   function scheduleTranscriptScrollAfterUpdate(shouldFollow: boolean, delay = 50) {
     setTimeout(() => {
-      if (!scrollbox) return;
+      if (!scrollbox || transcriptTurnAnchorActive) return;
       if (shouldFollow && transcriptScrollFollowing) {
         scrollTranscriptToBottom();
       } else {
@@ -1584,7 +1590,78 @@ function OpenTuiApp(props: {
     }, delay);
   }
 
+  // A fresh user turn starts as the last transcript item, so it needs trailing
+  // space before it can be aligned with the top of the scroll viewport.
+  function transcriptAnchorSpacerHeight() {
+    if (!transcriptTurnAnchorActive) return 0;
+    const viewportHeight = scrollbox?.viewport.height ?? Math.max(1, dimensions().height - 8);
+    return Math.max(1, viewportHeight);
+  }
+
+  function syncTranscriptAnchorSpacer() {
+    if (!transcriptAnchorSpacer) return;
+    const height = transcriptAnchorSpacerHeight();
+    transcriptAnchorSpacer.height = height;
+    transcriptAnchorSpacer.visible = height > 0;
+    safeRequestRender(transcriptAnchorSpacer);
+  }
+
+  function activateTranscriptTurnAnchor() {
+    transcriptTurnAnchorActive = true;
+    transcriptTurnAnchorSerial++;
+    transcriptScrollFollowing = false;
+    transcriptScrollInitialized = true;
+    syncTranscriptAnchorSpacer();
+  }
+
+  function clearTranscriptTurnAnchor() {
+    if (!transcriptTurnAnchorActive) return;
+    transcriptTurnAnchorActive = false;
+    transcriptTurnAnchorSerial++;
+    syncTranscriptAnchorSpacer();
+  }
+
+  function latestVisibleUserTurn(messages: DisplayMessage[]) {
+    const visibleMessages = messages.filter((message) => hasRenderableMessage(message, effectiveShowThinking()));
+    const end = transcriptState.entries[visibleMessages.length - 1];
+    if (!end) return undefined;
+    for (let index = visibleMessages.length - 1; index >= 0; index--) {
+      if (visibleMessages[index]?.role !== "user") continue;
+      const start = transcriptState.entries[index];
+      if (!start) return undefined;
+      return { start, end };
+    }
+    return undefined;
+  }
+
+  function scrollAnchoredTurn(messages: DisplayMessage[]) {
+    if (!scrollbox) return;
+    const turn = latestVisibleUserTurn(messages);
+    if (!turn) return;
+    const viewportHeight = Math.max(1, scrollbox.viewport.height);
+    const turnHeight = Math.max(1, (turn.end.node.y + turn.end.node.height) - turn.start.node.y);
+    const topPadding = Math.min(TRANSCRIPT_TURN_TOP_PADDING, Math.max(0, viewportHeight - 1));
+    const viewportBottom = scrollbox.viewport.y + viewportHeight;
+    const turnBottom = turn.end.node.y + turn.end.node.height;
+    const delta = turnHeight > viewportHeight
+      ? turnBottom - viewportBottom
+      : turn.start.node.y - (scrollbox.viewport.y + topPadding);
+    scrollbox.scrollTo(Math.max(0, scrollbox.scrollTop + delta));
+    transcriptScrollFollowing = false;
+    transcriptScrollInitialized = true;
+    safeRequestRender(scrollbox);
+  }
+
+  function scheduleAnchoredTurnScroll(messages: DisplayMessage[], serial = transcriptTurnAnchorSerial, delay = 50) {
+    setTimeout(() => {
+      if (!transcriptTurnAnchorActive || serial !== transcriptTurnAnchorSerial) return;
+      syncTranscriptAnchorSpacer();
+      scrollAnchoredTurn(messages);
+    }, delay);
+  }
+
   function handleTranscriptMouseScroll() {
+    clearTranscriptTurnAnchor();
     setTimeout(updateTranscriptScrollFollowingFromPosition, 0);
   }
 
@@ -2419,28 +2496,42 @@ function OpenTuiApp(props: {
   function redrawTranscript(
     extra?: DisplayMessage,
     baseMessages = displayMessages,
+    options: TranscriptRenderOptions = {},
   ) {
     streamingDisplay = extra;
-    renderTranscriptNow(streamingDisplay, baseMessages);
+    renderTranscriptNow(streamingDisplay, baseMessages, options);
   }
 
-  function renderTranscriptNow(extra?: DisplayMessage, baseMessages = displayMessages) {
-    const shouldFollow = shouldFollowTranscriptBeforeUpdate();
+  function renderTranscriptNow(extra?: DisplayMessage, baseMessages = displayMessages, options: TranscriptRenderOptions = {}) {
+    const shouldAnchorLatestUser = options.scroll === "latest-user-top" || transcriptTurnAnchorActive;
+    if (options.scroll === "latest-user-top") activateTranscriptTurnAnchor();
+    const shouldFollow = shouldAnchorLatestUser ? false : shouldFollowTranscriptBeforeUpdate();
     const nextMessages = compactDisplayMessages(extra ? [...baseMessages, extra] : baseMessages);
+    syncTranscriptAnchorSpacer();
     syncSessionMessages(nextMessages);
     rootBox?.requestRender();
     scrollbox?.requestRender();
-    scheduleTranscriptScrollAfterUpdate(shouldFollow);
+    if (shouldAnchorLatestUser) {
+      scheduleAnchoredTurnScroll(nextMessages);
+    } else {
+      scheduleTranscriptScrollAfterUpdate(shouldFollow);
+    }
   }
 
   createEffect(() => {
-    const shouldFollow = shouldFollowTranscriptBeforeUpdate();
+    const shouldAnchorLatestUser = transcriptTurnAnchorActive;
+    const shouldFollow = shouldAnchorLatestUser ? false : shouldFollowTranscriptBeforeUpdate();
     dimensions();
     sessionActive();
     syncSidebarChrome();
     redrawQuestionPanel();
+    syncTranscriptAnchorSpacer();
     scrollbox?.requestRender();
-    scheduleTranscriptScrollAfterUpdate(shouldFollow);
+    if (shouldAnchorLatestUser) {
+      scheduleAnchoredTurnScroll(currentTranscriptMessages(streamingDisplay));
+    } else {
+      scheduleTranscriptScrollAfterUpdate(shouldFollow);
+    }
   });
 
   function redrawDock() {
@@ -3379,6 +3470,7 @@ function OpenTuiApp(props: {
     streamingDisplay = undefined;
     promptHistory = [];
     resetPromptHistoryBrowse();
+    clearTranscriptTurnAnchor();
     transcriptState.expandedCompactions.clear();
     transcriptState.expandedWrites.clear();
     transcriptState.defaultWritesExpanded = false;
@@ -4279,7 +4371,7 @@ function OpenTuiApp(props: {
     const nextMessages = [...displayMessages, { role: "user" as const, content: displayInput }];
     displayMessages = nextMessages;
     streamingDisplay = undefined;
-    redrawTranscript(undefined, nextMessages);
+    redrawTranscript(undefined, nextMessages, { scroll: "latest-user-top" });
     const taskStartedAt = Date.now();
     const run = beginAgentRun();
 
@@ -5603,11 +5695,27 @@ function OpenTuiApp(props: {
           if (isNewHost) transcriptState.entries = [];
           updateTranscriptHost(ref, transcriptState, currentTranscriptMessages(streamingDisplay), transcriptOptions(), props.syntaxStyle, props.subtleSyntaxStyle);
           syncPromptSurfaces(isNewHost);
-          if (isNewHost) scheduleTranscriptScrollAfterUpdate(transcriptScrollFollowing, 0);
+          if (isNewHost) {
+            if (transcriptTurnAnchorActive) {
+              scheduleAnchoredTurnScroll(currentTranscriptMessages(streamingDisplay), transcriptTurnAnchorSerial, 0);
+            } else {
+              scheduleTranscriptScrollAfterUpdate(transcriptScrollFollowing, 0);
+            }
+          }
         },
         flexDirection: "column",
         flexShrink: 0,
         width: "100%",
+      }),
+      h("box", {
+        ref: (ref: BoxRenderable) => {
+          transcriptAnchorSpacer = ref;
+          syncTranscriptAnchorSpacer();
+        },
+        flexShrink: 0,
+        width: "100%",
+        height: 0,
+        visible: false,
       }),
       ),
       todos().length ? renderTodos(todos()) : null,
@@ -5853,9 +5961,11 @@ function renderPrompt(input: {
   interruptHint: () => string;
   placeholder: () => string;
 }) {
+  const transparentBackground = "#00000000";
+
   return h("box", { flexDirection: "column", flexShrink: 0, marginTop: 1 },
-    h("box", { border: ["left"], borderColor: theme.primary, backgroundColor: theme.backgroundElement },
-      h("box", { flexDirection: "column", paddingLeft: 2, paddingRight: 2, paddingTop: 1, paddingBottom: 1, backgroundColor: theme.backgroundElement },
+    h("box", { width: "100%", border: true, borderColor: theme.border, backgroundColor: transparentBackground },
+      h("box", { flexDirection: "column", paddingLeft: 2, paddingRight: 2, paddingTop: 1, paddingBottom: 1, backgroundColor: transparentBackground },
         h("textarea", {
           ref: input.ref,
           focused: input.focused,
@@ -5863,8 +5973,8 @@ function renderPrompt(input: {
           placeholderColor: theme.textMuted,
           textColor: theme.text,
           focusedTextColor: theme.text,
-          backgroundColor: theme.backgroundElement,
-          focusedBackgroundColor: theme.backgroundElement,
+          backgroundColor: transparentBackground,
+          focusedBackgroundColor: transparentBackground,
           minHeight: 1,
           maxHeight: 6,
           onContentChange: () => input.onContentChange(input.getText()),
