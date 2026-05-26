@@ -51,13 +51,12 @@ describe("Ink message spacing", () => {
     content: "This is a static HTML playground.",
   };
 
-  it("keeps a stable blank row before the first streaming tool trace", () => {
+  it("keeps the first streaming tool trace tight under the user turn", () => {
     const lines = renderLines([user], [toolsPart]);
 
     expect(lines[0]).toContain("What is this project doing?");
     expect(lines[0]).toContain("▌");
-    expect(lines[1]).toBe("");
-    expect(lines[2]).toContain("List Directory 2 files");
+    expect(lines[1]).toContain("List Directory 2 files");
   });
 
   it("renders sent user messages with a continuous rail and bubble fill", () => {

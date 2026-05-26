@@ -105,57 +105,51 @@ export const darkTheme: Theme = {
 };
 
 /**
- * Light palette. Two ground rules drove the color choices:
- *   1. Named ANSI colors that render OK on both backgrounds (red/green/blue)
- *      are kept by name so the user's terminal palette overrides remain
- *      effective.
- *   2. Specific hex values are used wherever the dark palette assumed a dark
- *      background (notably accent/code/trace colors and message bubbles).
- *      Each hex was picked to clear WCAG AA contrast (4.5:1) against a near-
- *      white background (#fafafa) or, when applicable, against the explicit
- *      surface color in the same palette (e.g. diffAddFg vs diffAdd).
+ * Light palette aligned with the restored OpenTUI runtime: paper-neutral
+ * surfaces, blue focus/user rails, warm command accent, and semantic tool
+ * colors tuned for readable contrast on a light terminal background.
  */
 export const lightTheme: Theme = {
-  user: "green",
-  agent: "blue",
-  error: "red",
-  warning: "#9A6500", // ANSI yellow is invisible on white — go to dark amber.
-  success: "green",
+  user: "#356FD2",
+  agent: "#171717",
+  error: "#B62633",
+  warning: "#8B4A00",
+  success: "#2F7D4A",
 
-  accent: "#0E5A85", // dark teal — replaces "cyan" which washes out on white.
-  border: "gray",
-  borderActive: "#0E5A85",
-  inputBorder: "#6B5FB8",
-  inputBorderDisabled: "#c5c3d0",
-  inputBg: "#eeeef6",
-  inputBgDisabled: "#e2e2ec",
-  inputText: "#1c1c24",
-  inputPlaceholder: "#7a7886",
-  muted: "gray",
-  dim: "gray",
+  accent: "#8B4A00",
+  border: "#B9BDB8",
+  borderActive: "#356FD2",
+  inputBorder: "#356FD2",
+  inputBorderDisabled: "#D7DAD4",
+  inputBg: "#F1F3F0",
+  inputBgDisabled: "#E6E8E3",
+  inputText: "#171717",
+  inputPlaceholder: "#6F7377",
+  muted: "#6F7377",
+  dim: "#8B9094",
 
-  thinking: "magenta",
-  thinkingDim: "gray",
-  toolName: "#0E5A85",
-  toolResult: "gray",
-  toolError: "red",
-  toolPending: "#9A6500",
-  code: "#9A6500",
-  traceAction: "#B85A20",
-  traceCount: "#5a5a5a",
-  traceDetail: "gray",
-  traceCommand: "#1A5FA0",
-  tracePending: "#9A6500",
+  thinking: "#5F666D",
+  thinkingDim: "#8B9094",
+  toolName: "#495057",
+  toolResult: "#171717",
+  toolError: "#B62633",
+  toolPending: "#8B4A00",
+  code: "#2F7D4A",
+  traceAction: "#8B4A00",
+  traceCount: "#6F7377",
+  traceDetail: "#8B9094",
+  traceCommand: "#257E8A",
+  tracePending: "#8B4A00",
 
-  userMessageBorder: "#6B5FB8",
-  userMessageBg: "#e8e6f4",
-  userMessageText: "#1c1c24",
-  userRail: "#6B5FB8",
+  userMessageBorder: "#356FD2",
+  userMessageBg: "#F1F3F0",
+  userMessageText: "#234B93",
+  userRail: "#356FD2",
 
-  diffAdd: "#d4f4d4",
-  diffRemove: "#f4d4d4",
-  diffAddFg: "#1c1c24",
-  diffRemoveFg: "#1c1c24",
+  diffAdd: "#D7E8D8",
+  diffRemove: "#F7DADC",
+  diffAddFg: "#173D2D",
+  diffRemoveFg: "#5D1922",
 };
 
 const ThemeContext = createContext<Theme>(darkTheme);
