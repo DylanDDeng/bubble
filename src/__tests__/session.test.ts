@@ -39,6 +39,29 @@ describe("SessionManager", () => {
     expect(messages[1].role).toBe("assistant");
   });
 
+  it("persists interrupted assistant message errors", () => {
+    const file = join(tmpDir, "interrupted-assistant.jsonl");
+    const sm1 = new SessionManager(file);
+    sm1.appendMessage({
+      role: "assistant",
+      content: "Interrupted by user.",
+      error: {
+        name: "MessageAbortedError",
+        message: "Assistant response was interrupted by the user.",
+        aborted: true,
+      },
+    });
+
+    const raw = JSON.parse(readFileSync(file, "utf-8").trim());
+    expect(raw.message.error).toMatchObject({ name: "MessageAbortedError", aborted: true });
+
+    const sm2 = new SessionManager(file);
+    expect(sm2.getMessages()[0]).toMatchObject({
+      role: "assistant",
+      error: { name: "MessageAbortedError", aborted: true },
+    });
+  });
+
   it("persists todos snapshots and returns the latest on reload", () => {
     const file = join(tmpDir, "todos.jsonl");
     const sm1 = new SessionManager(file);

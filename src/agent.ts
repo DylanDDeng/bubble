@@ -50,6 +50,8 @@ const EMPTY_ASSISTANT_RECOVERY_REMINDER =
   "Do not put the final answer only in hidden reasoning.";
 const EMPTY_ASSISTANT_FALLBACK =
   "The model returned no user-visible response. Please retry, or switch models if this keeps happening.";
+const INTERRUPTED_ASSISTANT_CONTENT =
+  "Interrupted by user. The prior request was stopped and should not be resumed unless the user asks.";
 
 export class AgentAbortError extends Error {
   constructor(message = "Agent run cancelled.") {
@@ -425,8 +427,11 @@ export class Agent {
       await stopAutoServersForSession(this.sessionID);
     };
 
+    let currentAssistantMsg: Extract<Message, { role: "assistant" }> | undefined;
+    let currentAssistantAppended = false;
+
     try {
-    while (true) {
+      while (true) {
       throwIfAborted(abortSignal);
       flushGovernorReminders();
       for (const update of this.drainSubagentToolUpdates()) yield emit(update);
@@ -459,6 +464,8 @@ export class Agent {
       const streamingToolCalls = new Map<string, { id: string; name: string; args: string; argsCorrupt?: boolean }>();
       let turnUsage: TokenUsage | undefined;
       let assistantAppended = false;
+      currentAssistantMsg = assistantMsg;
+      currentAssistantAppended = false;
 
       let toolEntries = Array.from(this.tools.values())
         .filter((t) => !t.deferred || this.unlockedDeferred.has(t.name));
@@ -632,6 +639,7 @@ export class Agent {
 
         this.appendMessage(assistantMsg);
         assistantAppended = true;
+        currentAssistantAppended = true;
       } catch (error) {
         traceEvent("provider_stream_error", {
           error: summarizeTraceError(error),
@@ -867,9 +875,26 @@ export class Agent {
       break;
     }
 
-    for (const update of this.drainSubagentToolUpdates()) yield emit(update);
-    await stopOwnedAutoServers();
-    yield emit({ type: "agent_end" });
+      for (const update of this.drainSubagentToolUpdates()) yield emit(update);
+      await stopOwnedAutoServers();
+      yield emit({ type: "agent_end" });
+    } catch (error) {
+      if (isAbortError(error, abortSignal)) {
+        const appendedBoundary = this.appendInterruptedAssistantBoundary(
+          currentAssistantMsg,
+          currentAssistantAppended,
+        );
+        const clearedTodos = this.clearTodosAfterInterruptedRun();
+        traceEvent("agent_run_interrupted", {
+          appendedBoundary,
+          clearedTodos,
+          messageCount: this.messages.length,
+        }, traceContext);
+        if (clearedTodos) {
+          yield emit({ type: "todos_updated", todos: this.getTodos() });
+        }
+      }
+      throw error;
     } finally {
       await stopOwnedAutoServers();
       traceEvent("agent_run_end", {
@@ -1643,6 +1668,39 @@ export class Agent {
     this.onMessageAppend?.(message);
   }
 
+  private appendInterruptedAssistantBoundary(
+    currentAssistant: Extract<Message, { role: "assistant" }> | undefined,
+    currentAssistantAppended: boolean,
+  ): boolean {
+    const last = lastProviderMessage(this.messages);
+    if (last?.role === "assistant" && last.error?.aborted) {
+      return false;
+    }
+
+    const partialText = !currentAssistantAppended ? currentAssistant?.content.trim() : "";
+    const content = partialText
+      ? `${partialText}\n\n${INTERRUPTED_ASSISTANT_CONTENT}`
+      : INTERRUPTED_ASSISTANT_CONTENT;
+
+    this.appendMessage({
+      role: "assistant",
+      content,
+      reasoning: !currentAssistantAppended ? currentAssistant?.reasoning : undefined,
+      error: {
+        name: "MessageAbortedError",
+        message: "Assistant response was interrupted by the user.",
+        aborted: true,
+      },
+    });
+    return true;
+  }
+
+  private clearTodosAfterInterruptedRun(): boolean {
+    if (this._todos.length === 0) return false;
+    this.setTodos([]);
+    return true;
+  }
+
   private async executeTool(
     toolCall: ParsedToolCall,
     cwd: string,
@@ -1788,6 +1846,21 @@ function throwIfAborted(signal?: AbortSignal): void {
   const reason = signal.reason;
   if (reason instanceof Error) throw reason;
   throw new AgentAbortError(typeof reason === "string" ? reason : undefined);
+}
+
+function isAbortError(error: unknown, signal?: AbortSignal): boolean {
+  return error instanceof AgentAbortError
+    || (error instanceof Error && error.name === "AbortError")
+    || signal?.aborted === true;
+}
+
+function lastProviderMessage(messages: Message[]): Message | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role === "system" || message.role === "meta") continue;
+    return message;
+  }
+  return undefined;
 }
 
 function cancelledToolResult(toolName: string): ToolResult {

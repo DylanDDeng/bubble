@@ -30,6 +30,11 @@ export interface AssistantMessage {
   content: string;
   reasoning?: string;
   toolCalls?: ToolCall[];
+  error?: {
+    name: string;
+    message: string;
+    aborted?: boolean;
+  };
 }
 
 export interface ToolMessage {

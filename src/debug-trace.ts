@@ -135,6 +135,7 @@ export function summarizeTraceMessage(message: Message): Record<string, unknown>
       role: message.role,
       content: summarizeTraceText(message.content),
       reasoning: summarizeTraceText(message.reasoning ?? ""),
+      error: message.error,
       toolCalls: message.toolCalls?.map((call) => ({
         id: call.id,
         name: call.name,

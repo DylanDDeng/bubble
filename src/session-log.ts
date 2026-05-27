@@ -225,6 +225,7 @@ function normalizeMessageToEntries(message: Message, id: string, timestamp: numb
           role: "assistant",
           content: message.content,
           reasoning: message.reasoning,
+          error: message.error,
         },
         timestamp,
       };

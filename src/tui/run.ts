@@ -2570,6 +2570,17 @@ function OpenTuiApp(props: {
     return changed;
   }
 
+  function removeQueuedUserDisplay(displayId?: string) {
+    if (!displayId) return false;
+    const beforeDisplayCount = displayMessages.length;
+    const beforeQueuedCount = queuedDisplayMessages.length;
+    displayMessages = displayMessages.filter((message) => message.clientId !== displayId);
+    queuedDisplayMessages = queuedDisplayMessages.filter((message) => message.clientId !== displayId);
+    const changed = displayMessages.length !== beforeDisplayCount || queuedDisplayMessages.length !== beforeQueuedCount;
+    if (changed) redrawTranscriptWithQueuedDisplays();
+    return changed;
+  }
+
   function promoteQueuedUserDisplay(displayId?: string, fallbackContent?: string) {
     if (!displayId) return false;
     const index = queuedDisplayMessages.findIndex((message) => message.clientId === displayId);
@@ -5326,6 +5337,10 @@ function OpenTuiApp(props: {
       }, { surface: "tui" });
       for (const pendingInput of run.inputController.clear()) {
         const pendingSteer = removePendingSteerInput(pendingInput.id);
+        if (runCancelled) {
+          removeQueuedUserDisplay(pendingSteer?.displayId);
+          continue;
+        }
         requeueRejectedSteer(pendingInput.content, pendingSteer?.displayId);
       }
       finishAgentRun(run);
@@ -5337,6 +5352,7 @@ function OpenTuiApp(props: {
         redrawTranscript(undefined, nextMessages);
       } else if (runCancelled) {
         if (!notice()) setNotice("Agent run cancelled");
+        displayMessages = reconstructDisplayMessages(props.agent.messages);
         redrawTranscript();
       } else {
         displayMessages = annotateLastTaskDuration(displayMessages, Date.now() - taskStartedAt);

@@ -335,6 +335,7 @@ function entriesToMessages(entries: SessionLogEntry[]): Message[] {
           role: "assistant",
           content: entry.message.content,
           reasoning: entry.message.reasoning,
+          error: entry.message.error,
         });
         break;
       case "tool_call": {
