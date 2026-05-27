@@ -3,7 +3,11 @@ export interface EditOperation {
   newText: string;
 }
 
-export type EditMatchMode = "exact" | "normalized-line";
+export type EditMatchMode = "exact" | "normalized-line" | "markdown-table" | "single-line-whitespace";
+
+export interface EditApplyOptions {
+  path?: string;
+}
 
 export interface EditMatchInfo {
   editIndex: number;
@@ -112,6 +116,11 @@ function normalizedOldNonBlankLines(oldText: string): string[] {
     .filter((line) => line.trim().length > 0);
 }
 
+function singleNonBlankOldLine(oldText: string): string | undefined {
+  const lines = normalizedOldNonBlankLines(oldText);
+  return lines.length === 1 ? lines[0] : undefined;
+}
+
 function findNormalizedLineMatches(content: string, oldText: string): Array<{ start: number; end: number }> {
   const contentLines = splitLines(content);
   const searchable = nonBlankLines(contentLines);
@@ -131,6 +140,88 @@ function findNormalizedLineMatches(content: string, oldText: string): Array<{ st
       const first = contentLines[searchable[i].lineIndex];
       const last = contentLines[searchable[i + oldLines.length - 1].lineIndex];
       matches.push({ start: first.start, end: last.endNoNewline });
+    }
+  }
+  return matches;
+}
+
+function splitMarkdownTableCells(line: string): string[] | undefined {
+  const normalized = normalizeLineForMatch(line).trim();
+  if (!normalized.startsWith("|") || !normalized.endsWith("|")) return undefined;
+
+  const parts: string[] = [];
+  let current = "";
+  let escaped = false;
+  for (const char of normalized) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      current += char;
+      escaped = true;
+      continue;
+    }
+    if (char === "|") {
+      parts.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  parts.push(current);
+
+  if (parts.length < 4 || parts[0] !== "" || parts[parts.length - 1] !== "") return undefined;
+  const cells = parts.slice(1, -1).map((cell) => cell.trim());
+  return cells.length >= 2 ? cells : undefined;
+}
+
+function sameCells(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((cell, index) => cell === b[index]);
+}
+
+function findMarkdownTableMatches(content: string, oldText: string): Array<{ start: number; end: number }> {
+  const oldLine = singleNonBlankOldLine(oldText);
+  if (!oldLine) return [];
+  const oldCells = splitMarkdownTableCells(oldLine);
+  if (!oldCells) return [];
+
+  const matches: Array<{ start: number; end: number }> = [];
+  for (const line of splitLines(content)) {
+    const cells = splitMarkdownTableCells(line.text);
+    if (cells && sameCells(cells, oldCells)) {
+      matches.push({ start: line.start, end: line.endNoNewline });
+    }
+  }
+  return matches;
+}
+
+function collapseInlineWhitespace(text: string): string {
+  return normalizeLineForMatch(text).trim().replace(/[ \t]+/g, " ");
+}
+
+function isDocumentLikePath(path: string | undefined): boolean {
+  return !!path && /\.(?:md|mdx|markdown|txt|rst|adoc)$/i.test(path);
+}
+
+function findSingleLineWhitespaceMatches(
+  content: string,
+  oldText: string,
+  options: EditApplyOptions | undefined,
+): Array<{ start: number; end: number }> {
+  if (!isDocumentLikePath(options?.path)) return [];
+
+  const oldLine = singleNonBlankOldLine(oldText);
+  if (!oldLine) return [];
+  const normalizedOld = collapseInlineWhitespace(oldLine);
+  if (normalizedOld.length === 0) return [];
+
+  const matches: Array<{ start: number; end: number }> = [];
+  for (const line of splitLines(content)) {
+    const collapsed = collapseInlineWhitespace(line.text);
+    if (collapsed === normalizedOld && line.text !== oldLine) {
+      matches.push({ start: line.start, end: line.endNoNewline });
     }
   }
   return matches;
@@ -160,7 +251,13 @@ function findBestLineHint(content: string, oldText: string): string | undefined 
   return `Closest line-based candidate starts near line ${startLine} and matched ${best.score}/${oldLines.length} non-blank lines.`;
 }
 
-function matchEdit(content: string, edit: EditOperation, index: number, total: number): EditMatchInfo {
+function matchEdit(
+  content: string,
+  edit: EditOperation,
+  index: number,
+  total: number,
+  options?: EditApplyOptions,
+): EditMatchInfo {
   if (edit.oldText.length === 0) {
     throw new EditApplyError(total === 1 ? "Error: oldText must not be empty." : `Error: edits[${index}].oldText must not be empty.`);
   }
@@ -215,6 +312,40 @@ function matchEdit(content: string, edit: EditOperation, index: number, total: n
     );
   }
 
+  const markdownTableMatches = findMarkdownTableMatches(content, oldText);
+  if (markdownTableMatches.length === 1) {
+    return {
+      editIndex: index,
+      mode: "markdown-table",
+      start: markdownTableMatches[0].start,
+      end: markdownTableMatches[0].end,
+    };
+  }
+  if (markdownTableMatches.length > 1) {
+    throw new EditApplyError(
+      total === 1
+        ? `Error: oldText matched ${markdownTableMatches.length} markdown table rows in file. Provide more surrounding context.`
+        : `Error: edits[${index}].oldText matched ${markdownTableMatches.length} markdown table rows in file. Provide more surrounding context.`,
+    );
+  }
+
+  const whitespaceMatches = findSingleLineWhitespaceMatches(content, oldText, options);
+  if (whitespaceMatches.length === 1) {
+    return {
+      editIndex: index,
+      mode: "single-line-whitespace",
+      start: whitespaceMatches[0].start,
+      end: whitespaceMatches[0].end,
+    };
+  }
+  if (whitespaceMatches.length > 1) {
+    throw new EditApplyError(
+      total === 1
+        ? `Error: oldText matched ${whitespaceMatches.length} whitespace-normalized lines in file. Provide more surrounding context.`
+        : `Error: edits[${index}].oldText matched ${whitespaceMatches.length} whitespace-normalized lines in file. Provide more surrounding context.`,
+    );
+  }
+
   const hint = findBestLineHint(content, oldText);
   const hintSuffix = hint ? `\n${hint}` : "";
   const recovery = [
@@ -245,7 +376,7 @@ function assertNoOverlaps(matches: EditMatchInfo[]): void {
   }
 }
 
-export function applyEditsToContent(rawContent: string, edits: EditOperation[]): AppliedEditResult {
+export function applyEditsToContent(rawContent: string, edits: EditOperation[], options?: EditApplyOptions): AppliedEditResult {
   if (!Array.isArray(edits) || edits.length === 0) {
     throw new EditApplyError("Error: No edits provided");
   }
@@ -258,7 +389,7 @@ export function applyEditsToContent(rawContent: string, edits: EditOperation[]):
     newText: normalizeToLF(edit.newText),
   }));
 
-  const matches = normalizedEdits.map((edit, index) => matchEdit(normalizedOriginal, edit, index, normalizedEdits.length));
+  const matches = normalizedEdits.map((edit, index) => matchEdit(normalizedOriginal, edit, index, normalizedEdits.length, options));
   assertNoOverlaps(matches);
 
   const byDescendingStart = [...matches].sort((a, b) => b.start - a.start);

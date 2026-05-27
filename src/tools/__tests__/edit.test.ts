@@ -186,6 +186,95 @@ describe("edit tool", () => {
     expect(readFileSync(file, "utf-8")).toContain("color: #777;");
   });
 
+  it("matches markdown table rows when only alignment spaces differ", async () => {
+    const file = join(tmpDir, "table.md");
+    writeFileSync(
+      file,
+      "| Layer  | Choice                         |\n| ------ | ------------------------------ |\n| 框架   | Next.js 14 (App Router)        |\n",
+      "utf-8",
+    );
+
+    const tool = createEditTool(tmpDir);
+    const result = await tool.execute(
+      {
+        path: "table.md",
+        edits: [
+          {
+            oldText: "| 框架 | Next.js 14 (App Router) |",
+            newText: "| 框架 | Next.js 16 (App Router) |",
+          },
+        ],
+      },
+      { cwd: tmpDir },
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(result.content).toContain("normalized line matching");
+    expect(readFileSync(file, "utf-8")).toContain("| 框架 | Next.js 16 (App Router) |");
+  });
+
+  it("rejects ambiguous markdown table alignment matches", async () => {
+    const file = join(tmpDir, "ambiguous-table.md");
+    writeFileSync(
+      file,
+      "| Name  | Value |\n| ----- | ----- |\n| 框架   | Next.js 14 (App Router)        |\n| 框架     | Next.js 14 (App Router)      |\n",
+      "utf-8",
+    );
+
+    const tool = createEditTool(tmpDir);
+    const result = await tool.execute(
+      {
+        path: "ambiguous-table.md",
+        edits: [
+          {
+            oldText: "| 框架 | Next.js 14 (App Router) |",
+            newText: "| 框架 | Next.js 16 (App Router) |",
+          },
+        ],
+      },
+      { cwd: tmpDir },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("matched 2 markdown table rows");
+    expect(readFileSync(file, "utf-8")).toContain("Next.js 14");
+  });
+
+  it("matches single document lines when only inline whitespace differs", async () => {
+    const file = join(tmpDir, "notes.md");
+    writeFileSync(file, "Status:   ready    now\n", "utf-8");
+
+    const tool = createEditTool(tmpDir);
+    const result = await tool.execute(
+      {
+        path: "notes.md",
+        edits: [{ oldText: "Status: ready now", newText: "Status: shipped now" }],
+      },
+      { cwd: tmpDir },
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(readFileSync(file, "utf-8")).toBe("Status: shipped now\n");
+  });
+
+  it("does not whitespace-normalize single-line matches in code files", async () => {
+    const file = join(tmpDir, "code.ts");
+    writeFileSync(file, "const label = \"Status:   ready    now\";\n", "utf-8");
+
+    const tool = createEditTool(tmpDir);
+    const result = await tool.execute(
+      {
+        path: "code.ts",
+        edits: [{ oldText: "const label = \"Status: ready now\";", newText: "const label = \"Status: shipped now\";" }],
+      },
+      { cwd: tmpDir },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("not found");
+    expect(readFileSync(file, "utf-8")).toBe("const label = \"Status:   ready    now\";\n");
+  });
+
   it("rejects ambiguous normalized line matches", async () => {
     const file = join(tmpDir, "ambiguous.css");
     writeFileSync(file, ".item {\n  color: red;\n}\n\n.item {\n  color: red;\n}\n", "utf-8");

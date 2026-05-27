@@ -74,7 +74,7 @@ export function createEditTool(cwd: string, approval?: ApprovalController, lsp?:
         const original = await readFile(filePath, "utf-8");
         let applied;
         try {
-          applied = applyEditsToContent(original, args.edits);
+          applied = applyEditsToContent(original, args.edits, { path: filePath });
         } catch (err) {
           if (err instanceof EditApplyError) {
             return { content: err.message, isError: true, status: err.status };
