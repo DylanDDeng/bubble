@@ -33,6 +33,8 @@ function approvalRequestLabel(req: ApprovalRequest): string {
       return `Edit to ${req.path}`;
     case "write":
       return `${req.fileExists ? "Overwrite" : "Write"} to ${req.path}`;
+    case "patch":
+      return `Patch to ${req.path}`;
     case "bash":
       return `Bash command \`${req.command}\``;
     case "lsp":

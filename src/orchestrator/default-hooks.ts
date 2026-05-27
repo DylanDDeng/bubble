@@ -90,7 +90,7 @@ export function createDefaultHooks(): TurnHooks[] {
         // failed twice in a row, models — especially thinking-heavy ones —
         // can spiral on "identical content" / "not found" errors. Nudge them
         // to change strategy.
-        if ((ctx.toolCall.name === "edit" || ctx.toolCall.name === "write") && ctx.result.isError) {
+        if (isMutationTool(ctx.toolCall.name) && ctx.result.isError) {
           const hash = hashEditCall(ctx.toolCall);
           const history: string[] = ctx.state.recentEditFailures ?? (ctx.state.recentEditFailures = []);
           history.push(hash);
@@ -104,7 +104,7 @@ export function createDefaultHooks(): TurnHooks[] {
               `Last failure: ${ctx.toolCall.name} on the same target with identical arguments. ${summary}`,
             ));
           }
-        } else if ((ctx.toolCall.name === "edit" || ctx.toolCall.name === "write") && !ctx.result.isError) {
+        } else if (isMutationTool(ctx.toolCall.name) && !ctx.result.isError) {
           // Successful mutation resets the dedup state so a later, unrelated
           // failure won't fire the reminder spuriously.
           ctx.state.recentEditFailures = [];
@@ -165,10 +165,14 @@ function markCodeChanged(state: TurnHookState): void {
 }
 
 function isCodeWriteResult(_toolCall: ParsedToolCall, result: ToolResult): boolean {
-  if (result.isError || result.status === "blocked" || result.status === "command_error") {
+  if (result.isError || result.status === "blocked" || result.status === "cancelled" || result.status === "command_error") {
     return false;
   }
-  return result.metadata?.kind === "write" || result.metadata?.kind === "edit";
+  return result.metadata?.kind === "write" || result.metadata?.kind === "edit" || result.metadata?.kind === "patch";
+}
+
+function isMutationTool(name: string): boolean {
+  return name === "edit" || name === "write" || name === "apply_patch";
 }
 
 function hasSubagentLifecycleActivity(

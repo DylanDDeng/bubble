@@ -118,10 +118,11 @@ export type ToolResultStatus =
   | "partial"
   | "timeout"
   | "blocked"
+  | "cancelled"
   | "command_error";
 
 export interface ToolResultMetadata {
-  kind?: "search" | "read" | "write" | "edit" | "shell" | "web" | "security" | "lsp" | "question" | "subagent";
+  kind?: "search" | "read" | "write" | "edit" | "patch" | "shell" | "server" | "web" | "security" | "lsp" | "question" | "subagent";
   path?: string;
   pattern?: string;
   matches?: number;

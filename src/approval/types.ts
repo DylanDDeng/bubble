@@ -26,6 +26,17 @@ export interface WriteApprovalRequest {
   fileExists: boolean;
 }
 
+export interface PatchApprovalRequest {
+  type: "patch";
+  /** Human-readable path summary for compact UIs. */
+  path: string;
+  /** All absolute paths touched by the patch. */
+  paths: string[];
+  files: Array<{ path: string; kind: "add" | "update" | "delete" }>;
+  /** Combined unified diff for all file changes. */
+  diff: string;
+}
+
 export interface BashApprovalRequest {
   type: "bash";
   command: string;
@@ -41,6 +52,7 @@ export interface LspApprovalRequest {
 export type ApprovalRequest =
   | EditApprovalRequest
   | WriteApprovalRequest
+  | PatchApprovalRequest
   | BashApprovalRequest
   | LspApprovalRequest;
 

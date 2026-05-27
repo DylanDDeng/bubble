@@ -1288,6 +1288,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         const r = pendingApproval.request;
         if (r.type === "bash") return { toolName: "bash" as const, command: r.command };
         if (r.type === "edit") return { toolName: "edit" as const, path: r.path };
+        if (r.type === "patch") return { toolName: "edit" as const, path: r.paths[0] ?? r.path };
         if (r.type === "write") return { toolName: "write" as const, path: r.path };
         return null;
       })()

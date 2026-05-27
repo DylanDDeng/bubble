@@ -12,7 +12,7 @@ export interface EditDiffDetails {
 }
 
 export function getEditDiffDetails(tool: DisplayToolCall): EditDiffDetails | null {
-  if (tool.name !== "edit" || tool.isError) return null;
+  if ((tool.name !== "edit" && tool.name !== "apply_patch") || tool.isError) return null;
 
   const metadata = tool.metadata;
   const metadataDiff = readMetadataString(metadata, "diff");
@@ -23,9 +23,15 @@ export function getEditDiffDetails(tool: DisplayToolCall): EditDiffDetails | nul
   const added = readMetadataNumber(metadata, "addedLines") ?? counted.added;
   const removed = readMetadataNumber(metadata, "removedLines") ?? counted.removed;
   const path = readMetadataString(metadata, "path")
+    ?? readFirstMetadataPath(metadata)
     ?? (typeof tool.args.path === "string" ? tool.args.path : undefined);
 
   return { diff, added, removed, path };
+}
+
+function readFirstMetadataPath(metadata: ToolResultMetadata | undefined): string | undefined {
+  const value = metadata?.paths;
+  return Array.isArray(value) && typeof value[0] === "string" ? value[0] : undefined;
 }
 
 export function formatEditSuccessSummary(details: EditDiffDetails | null): string {

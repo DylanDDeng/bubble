@@ -38,6 +38,12 @@ import {
 import { basename } from "node:path";
 import { normalizeSingleLine, truncateVisual } from "./text-display.js";
 import { BUBBLE_WORDMARK, type BubbleWordmarkTone } from "./tui/wordmark.js";
+import {
+  configureDebugTrace,
+  summarizeAgentEventForTrace,
+  summarizeTraceMessage,
+  traceEvent,
+} from "./debug-trace.js";
 
 type TerminalTheme = "light" | "dark";
 
@@ -303,6 +309,25 @@ async function main() {
     tools: tools.map((tool) => tool.name),
     memoryPrompt,
   });
+  const traceInfo = configureDebugTrace({
+    cwd: args.cwd,
+    sessionFile: sessionManager?.getSessionFile(),
+    provider: activeProviderId || "none",
+    model: activeModel || "none",
+    renderer: printMode ? "print" : "opentui-core",
+  });
+  if (traceInfo.enabled) {
+    traceEvent("run_start", {
+      tracePath: traceInfo.path,
+      rawEnabled: traceInfo.rawEnabled,
+      resumed: resumedExistingSession,
+      printMode,
+      mode: initialMode,
+      thinkingLevel: initialThinkingLevel,
+      tools: tools.length,
+      cwd: args.cwd,
+    });
+  }
   const budgetLedger = new BudgetLedger();
   let sessionTitleUpdater: SessionTitleUpdater | undefined;
   const agent = new Agent({
@@ -325,6 +350,9 @@ async function main() {
       // they will be re-injected as needed on resume based on the current mode.
       if (message.role === "meta") return;
       sessionManager.appendMessage(message);
+      traceEvent("session_message_persisted", {
+        message: summarizeTraceMessage(message),
+      });
       sessionTitleUpdater?.handlePersistedMessage(message);
       if (message.role === "assistant") {
         recordMemoryCitations(args.cwd, message.content);
@@ -433,6 +461,7 @@ async function main() {
       }
 
       for await (const event of agent.run(prompt, args.cwd)) {
+        traceEvent("print_agent_event", summarizeAgentEventForTrace(event));
         if (event.type === "text_delta") {
           process.stdout.write(event.content);
         } else if (event.type === "tool_start") {
@@ -492,7 +521,9 @@ async function main() {
       });
     }
   } finally {
+    traceEvent("run_shutdown_start");
     await shutdownRuntime();
+    traceEvent("run_shutdown_end");
   }
 }
 

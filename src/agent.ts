@@ -26,6 +26,15 @@ import { isOnlyProviderProtocolArtifacts, stripProviderProtocolArtifacts } from 
 import { debugReasoningStream, summarizeDebugText } from "./reasoning-debug.js";
 import type { SkillSummary } from "./skills/types.js";
 import type { FileStateTracker } from "./tools/file-state.js";
+import { stopAutoServersForSession } from "./tools/server-manager.js";
+import {
+  summarizeAgentEventForTrace,
+  summarizeTraceError,
+  summarizeTraceMessage,
+  summarizeTraceToolResult,
+  summarizeTraceValue,
+  traceEvent,
+} from "./debug-trace.js";
 
 const MAX_CONSECUTIVE_OVERFLOW_RECOVERIES = 3;
 const RESIDENT_HISTORY_KEEP_RECENT_TURNS = 3;
@@ -34,6 +43,13 @@ const RESIDENT_HISTORY_CHAR_SOFT_LIMIT = 256 * 1024;
 const RESIDENT_HISTORY_CHAR_HARD_LIMIT = 512 * 1024;
 const RESIDENT_HISTORY_HEAP_SOFT_LIMIT = 512 * 1024 * 1024;
 const RESIDENT_HISTORY_HEAP_HARD_LIMIT = 768 * 1024 * 1024;
+const MAX_EMPTY_ASSISTANT_RECOVERIES = 1;
+const EMPTY_ASSISTANT_RECOVERY_REMINDER =
+  "The previous model response contained no user-visible assistant content and no tool calls. " +
+  "Respond now with a concise, user-visible answer, or call an available tool if more work is required. " +
+  "Do not put the final answer only in hidden reasoning.";
+const EMPTY_ASSISTANT_FALLBACK =
+  "The model returned no user-visible response. Please retry, or switch models if this keeps happening.";
 
 export class AgentAbortError extends Error {
   constructor(message = "Agent run cancelled.") {
@@ -317,6 +333,23 @@ export class Agent {
   ): AsyncIterable<AgentEvent> {
     const abortSignal = composeAbortSignals([options.abortSignal, this.budgetLedger?.signal]);
     const inputController = options.inputController;
+    const traceContext = {
+      cwd,
+      sessionFile: this.sessionID,
+      provider: this._providerId || "none",
+      model: this.apiModel || "none",
+    };
+    const emit = (event: AgentEvent): AgentEvent => {
+      traceEvent("agent_event", summarizeAgentEventForTrace(event), traceContext);
+      return event;
+    };
+    traceEvent("agent_run_start", {
+      input: summarizeTraceValue(userInput),
+      mode: this._mode,
+      messageCount: this.messages.length,
+      toolCount: this.tools.size,
+      deferredUnlocked: this.unlockedDeferred.size,
+    }, traceContext);
     throwIfAborted(abortSignal);
     const hookBus = new HookBus();
     for (const hooks of createDefaultHooks()) {
@@ -369,7 +402,7 @@ export class Agent {
 
     if (this._todos.length > 0 && this._todos.every((t) => t.status === "completed")) {
       this.setTodos([]);
-      yield { type: "todos_updated", todos: [] };
+      yield emit({ type: "todos_updated", todos: [] });
     }
     this.appendMessage({ role: "user", content: userInput });
     await hookBus.runBeforeTurn({
@@ -383,14 +416,22 @@ export class Agent {
     flushGovernorReminders();
 
     let consecutiveOverflowRecoveries = 0;
+    let consecutiveEmptyAssistantRecoveries = 0;
     let step = 0;
+    let autoServersStopped = false;
+    const stopOwnedAutoServers = async () => {
+      if (autoServersStopped) return;
+      autoServersStopped = true;
+      await stopAutoServersForSession(this.sessionID);
+    };
 
+    try {
     while (true) {
       throwIfAborted(abortSignal);
       flushGovernorReminders();
-      for (const update of this.drainSubagentToolUpdates()) yield update;
-      for (const event of applyPendingInputs()) yield event;
-      yield { type: "turn_start" };
+      for (const update of this.drainSubagentToolUpdates()) yield emit(update);
+      for (const event of applyPendingInputs()) yield emit(event);
+      yield emit({ type: "turn_start" });
       step += 1;
       (hookState as any).turnCount = step;
       if (this.taskBudget) {
@@ -461,6 +502,17 @@ export class Agent {
           usageAnchorTokens: this.lastInputTokens ?? undefined,
           anchorMessageCount: this.lastAnchorMessageCount ?? undefined,
         });
+        const providerStartedAt = Date.now();
+        let streamTextChars = 0;
+        let streamReasoningChars = 0;
+        let streamToolCallDeltas = 0;
+        traceEvent("provider_stream_start", {
+          residentMessageCount: this.messages.length,
+          projectedMessageCount: projectedMessages.length,
+          toolCount: toolDefinitions.length,
+          thinkingLevel: this.thinkingLevel,
+          mode: this._mode,
+        }, traceContext);
         const stream = this.provider.streamChat(projectedMessages, {
           model: this.apiModel,
           tools: toolDefinitions,
@@ -474,7 +526,8 @@ export class Agent {
           switch (chunk.type) {
             case "text":
               assistantMsg.content += chunk.content;
-              yield { type: "text_delta", content: chunk.content };
+              streamTextChars += chunk.content.length;
+              yield emit({ type: "text_delta", content: chunk.content });
               break;
             case "reasoning_delta":
               debugReasoningStream({
@@ -487,13 +540,14 @@ export class Agent {
                 afterLength: (assistantMsg.reasoning?.length ?? 0) + chunk.content.length,
               });
               assistantMsg.reasoning = (assistantMsg.reasoning || "") + chunk.content;
-              yield { type: "reasoning_delta", content: chunk.content };
+              streamReasoningChars += chunk.content.length;
+              yield emit({ type: "reasoning_delta", content: chunk.content });
               break;
 
             case "tool_call":
               if (chunk.isStart) {
                 streamingToolCalls.set(chunk.id, { id: chunk.id, name: chunk.name, args: "" });
-                yield { type: "tool_call_start", id: chunk.id, name: chunk.name };
+                yield emit({ type: "tool_call_start", id: chunk.id, name: chunk.name });
               }
               if (!streamingToolCalls.has(chunk.id)) {
                 streamingToolCalls.set(chunk.id, { id: chunk.id, name: chunk.name, args: "" });
@@ -509,13 +563,14 @@ export class Agent {
                   currentToolCall.argsCorrupt = true;
                 }
                 if (chunk.arguments) {
-                  yield {
+                  streamToolCallDeltas += 1;
+                  yield emit({
                     type: "tool_call_delta",
                     id: currentToolCall.id,
                     name: currentToolCall.name,
                     argumentsDelta: chunk.arguments,
                     arguments: currentToolCall.args,
-                  };
+                  });
                 }
               }
               if (chunk.isEnd && currentToolCall) {
@@ -525,12 +580,12 @@ export class Agent {
                   arguments: currentToolCall.args,
                   ...(currentToolCall.argsCorrupt ? { argsCorrupt: true } : {}),
                 });
-                yield {
+                yield emit({
                   type: "tool_call_end",
                   id: currentToolCall.id,
                   name: currentToolCall.name,
                   arguments: currentToolCall.args,
-                };
+                });
                 streamingToolCalls.delete(chunk.id);
               }
               break;
@@ -548,13 +603,39 @@ export class Agent {
               }
               break;
           }
-          for (const update of this.drainSubagentToolUpdates()) yield update;
+          for (const update of this.drainSubagentToolUpdates()) yield emit(update);
         }
+        traceEvent("provider_stream_end", {
+          elapsedMs: Date.now() - providerStartedAt,
+          textChars: streamTextChars,
+          reasoningChars: streamReasoningChars,
+          toolCallDeltas: streamToolCallDeltas,
+          toolCalls: assistantMsg.toolCalls?.length ?? 0,
+          usage: turnUsage,
+        }, traceContext);
 
         throwIfAborted(abortSignal);
+        const assistantHasContent = assistantMsg.content.trim().length > 0;
+        const assistantHasToolCalls = !!assistantMsg.toolCalls && assistantMsg.toolCalls.length > 0;
+        if (!assistantHasContent && !assistantHasToolCalls) {
+          if (consecutiveEmptyAssistantRecoveries < MAX_EMPTY_ASSISTANT_RECOVERIES) {
+            consecutiveEmptyAssistantRecoveries += 1;
+            this.injectSystemReminder(EMPTY_ASSISTANT_RECOVERY_REMINDER);
+            yield emit({ type: "turn_end", usage: turnUsage, willContinue: true });
+            continue;
+          }
+
+          assistantMsg.content = EMPTY_ASSISTANT_FALLBACK;
+          assistantMsg.reasoning = "";
+          yield emit({ type: "text_delta", content: assistantMsg.content });
+        }
+
         this.appendMessage(assistantMsg);
         assistantAppended = true;
       } catch (error) {
+        traceEvent("provider_stream_error", {
+          error: summarizeTraceError(error),
+        }, traceContext);
         if (assistantAppended) {
           throw error;
         }
@@ -566,11 +647,12 @@ export class Agent {
         }
         const droppedMessages = await this.recoverFromOverflow(consecutiveOverflowRecoveries);
         consecutiveOverflowRecoveries += 1;
-        yield { type: "context_recovered", droppedMessages, reason: "overflow" };
+        yield emit({ type: "context_recovered", droppedMessages, reason: "overflow" });
         continue;
       }
 
       consecutiveOverflowRecoveries = 0;
+      consecutiveEmptyAssistantRecoveries = 0;
 
       // Execute tools if any
       if (assistantMsg.toolCalls && assistantMsg.toolCalls.length > 0) {
@@ -589,8 +671,25 @@ export class Agent {
         }
 
         const executedResults: ToolResult[] = [];
+        const appendCancelledToolMessages = (startIndex: number) => {
+          for (let pendingIndex = startIndex; pendingIndex < parsedCalls.length; pendingIndex++) {
+            const pending = parsedCalls[pendingIndex];
+            const pendingResult = cancelledToolResult(pending.name);
+            this.appendMessage({
+              role: "tool",
+              toolCallId: pending.id,
+              content: pendingResult.content,
+              metadata: pendingResult.metadata,
+              isError: pendingResult.isError,
+            });
+            executedResults.push(pendingResult);
+          }
+        };
         for (let index = 0; index < parsedCalls.length; index++) {
-          throwIfAborted(abortSignal);
+          if (abortSignal?.aborted) {
+            appendCancelledToolMessages(index);
+            throwIfAborted(abortSignal);
+          }
           let tc = parsedCalls[index];
           let blockedResult: ToolResult | undefined;
           await hookBus.runBeforeToolCall({
@@ -615,7 +714,14 @@ export class Agent {
             arguments: tc.arguments,
           };
           flushGovernorReminders();
-          yield { type: "tool_start", id: tc.id, name: tc.name, args: tc.parsedArgs };
+          const toolStartedAt = Date.now();
+          traceEvent("tool_execute_start", {
+            id: tc.id,
+            name: tc.name,
+            args: summarizeTraceValue(tc.parsedArgs),
+            argsCorrupt: tc.argsCorrupt,
+          }, traceContext);
+          yield emit({ type: "tool_start", id: tc.id, name: tc.name, args: tc.parsedArgs });
           const todosVersionBefore = this._todosVersion;
           const modeVersionBefore = this._modeVersion;
           const updateQueue = createUpdateQueue<ToolUpdate>();
@@ -625,6 +731,7 @@ export class Agent {
           } else {
             const toolExecution = this.executeTool(tc, cwd, abortSignal, (update) => updateQueue.push(update));
             let settled = false;
+            let cancelledByAbort = false;
             let resolved: ToolResult | undefined;
             let rejected: unknown;
             void toolExecution
@@ -641,17 +748,24 @@ export class Agent {
 
             while (!settled || updateQueue.hasItems()) {
               for (const update of updateQueue.drain()) {
-                yield { type: "tool_update", id: tc.id, name: tc.name, update };
+                yield emit({ type: "tool_update", id: tc.id, name: tc.name, update });
               }
-              for (const update of this.drainSubagentToolUpdates()) yield update;
+              for (const update of this.drainSubagentToolUpdates()) yield emit(update);
               if (!settled) {
-                await updateQueue.wait();
+                const waitStatus = await updateQueue.wait(abortSignal);
+                if (waitStatus === "aborted" && !settled) {
+                  cancelledByAbort = true;
+                  break;
+                }
               }
             }
-            if (rejected) throw rejected;
-            result = resolved ?? { content: `Error: Tool "${tc.name}" returned no result`, isError: true };
+            if (cancelledByAbort) {
+              result = cancelledToolResult(tc.name);
+            } else {
+              if (rejected) throw rejected;
+              result = resolved ?? { content: `Error: Tool "${tc.name}" returned no result`, isError: true };
+            }
           }
-          throwIfAborted(abortSignal);
           await hookBus.runAfterToolCall({
             agent: this,
             cwd,
@@ -673,6 +787,18 @@ export class Agent {
             this.providerId,
             this.apiModel,
           );
+          traceEvent("tool_execute_end", {
+            id: tc.id,
+            name: tc.name,
+            elapsedMs: Date.now() - toolStartedAt,
+            result: summarizeTraceToolResult(result),
+            outputTruncation: {
+              truncated: truncatedOutput.truncated,
+              originalTokens: truncatedOutput.originalTokens,
+              finalTokens: truncatedOutput.finalTokens,
+              limit: truncatedOutput.limit,
+            },
+          }, traceContext);
           this.appendMessage({
             role: "tool",
             toolCallId: tc.id,
@@ -684,13 +810,17 @@ export class Agent {
           flushGovernorReminders();
           this.onToolResult?.(tc.name, result);
           executedResults.push(result);
-          yield { type: "tool_end", id: tc.id, name: tc.name, result };
-          for (const update of this.drainSubagentToolUpdates()) yield update;
+          yield emit({ type: "tool_end", id: tc.id, name: tc.name, result });
+          for (const update of this.drainSubagentToolUpdates()) yield emit(update);
           if (this._todosVersion !== todosVersionBefore) {
-            yield { type: "todos_updated", todos: this.getTodos() };
+            yield emit({ type: "todos_updated", todos: this.getTodos() });
           }
           if (this._modeVersion !== modeVersionBefore) {
-            yield { type: "mode_changed", mode: this._mode };
+            yield emit({ type: "mode_changed", mode: this._mode });
+          }
+          if (abortSignal?.aborted) {
+            appendCancelledToolMessages(index + 1);
+            throwIfAborted(abortSignal);
           }
         }
 
@@ -709,7 +839,7 @@ export class Agent {
         });
         flushGovernorReminders();
 
-        yield { type: "turn_end", usage: turnUsage, willContinue: true };
+        yield emit({ type: "turn_end", usage: turnUsage, willContinue: true });
 
         // Auto-continue: if we have tool results, the LLM needs to respond to them.
         // Emitting the turn boundary keeps UI renderers aligned with the persisted
@@ -728,17 +858,24 @@ export class Agent {
       });
       flushGovernorReminders();
       const willContinue = !!(hookState as any).forceContinuationReason;
-      yield { type: "turn_end", usage: turnUsage, willContinue };
+      yield emit({ type: "turn_end", usage: turnUsage, willContinue });
       if (willContinue) {
         delete (hookState as any).forceContinuationReason;
         continue;
       }
-      for (const event of rejectPendingInputs("no_continuation")) yield event;
+      for (const event of rejectPendingInputs("no_continuation")) yield emit(event);
       break;
     }
 
-    for (const update of this.drainSubagentToolUpdates()) yield update;
-    yield { type: "agent_end" };
+    for (const update of this.drainSubagentToolUpdates()) yield emit(update);
+    await stopOwnedAutoServers();
+    yield emit({ type: "agent_end" });
+    } finally {
+      await stopOwnedAutoServers();
+      traceEvent("agent_run_end", {
+        messageCount: this.messages.length,
+      }, traceContext);
+    }
   }
 
   private async recoverFromOverflow(attempt: number): Promise<number> {
@@ -1495,6 +1632,14 @@ export class Agent {
 
   private appendMessage(message: Message) {
     this.messages.push(message);
+    traceEvent("agent_message_append", {
+      message: summarizeTraceMessage(message),
+      messageCount: this.messages.length,
+    }, {
+      sessionFile: this.sessionID,
+      provider: this._providerId || "none",
+      model: this.apiModel || "none",
+    });
     this.onMessageAppend?.(message);
   }
 
@@ -1645,9 +1790,19 @@ function throwIfAborted(signal?: AbortSignal): void {
   throw new AgentAbortError(typeof reason === "string" ? reason : undefined);
 }
 
+function cancelledToolResult(toolName: string): ToolResult {
+  return {
+    content: `Tool "${toolName}" was cancelled.`,
+    isError: true,
+    status: "cancelled",
+    metadata: { reason: "cancelled" },
+  };
+}
+
 function createUpdateQueue<T>() {
   const items: T[] = [];
-  let waiter: (() => void) | undefined;
+  let waiter: ((status: "woken" | "aborted") => void) | undefined;
+  let abortCleanup: (() => void) | undefined;
   return {
     push(item: T) {
       items.push(item);
@@ -1659,16 +1814,33 @@ function createUpdateQueue<T>() {
     hasItems(): boolean {
       return items.length > 0;
     },
-    wait(): Promise<void> {
-      if (items.length > 0) return Promise.resolve();
+    wait(signal?: AbortSignal): Promise<"woken" | "aborted"> {
+      if (items.length > 0) return Promise.resolve("woken");
+      if (signal?.aborted) return Promise.resolve("aborted");
       return new Promise((resolve) => {
+        abortCleanup?.();
+        abortCleanup = undefined;
+        const finish = (status: "woken" | "aborted") => {
+          if (waiter !== resolve) return;
+          waiter = undefined;
+          abortCleanup?.();
+          abortCleanup = undefined;
+          resolve(status);
+        };
+        if (signal) {
+          const onAbort = () => finish("aborted");
+          signal.addEventListener("abort", onAbort, { once: true });
+          abortCleanup = () => signal.removeEventListener("abort", onAbort);
+        }
         waiter = resolve;
       });
     },
     wake() {
       const resolve = waiter;
       waiter = undefined;
-      resolve?.();
+      abortCleanup?.();
+      abortCleanup = undefined;
+      resolve?.("woken");
     },
   };
 }

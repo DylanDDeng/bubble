@@ -3,7 +3,7 @@ import { Agent, AgentAbortError, type AgentRunOptions } from "../agent.js";
 import { BudgetLedger } from "../agent/budget-ledger.js";
 import { AgentRunInputQueue } from "../agent/input-controller.js";
 import type { AgentProfile } from "../agent/profiles.js";
-import type { AgentEvent, Message, Provider, StreamChunk, ToolRegistryEntry } from "../types.js";
+import type { AgentEvent, Message, Provider, StreamChunk, ToolRegistryEntry, ToolResult } from "../types.js";
 import { createTaskTool } from "../tools/task.js";
 
 function createMockProvider(chunks: StreamChunk[][]): Provider {
@@ -84,6 +84,57 @@ describe("Agent", () => {
     expect(agent.messages).toHaveLength(2); // user + assistant (no system prompt in this test)
   });
 
+  it("retries a reasoning-only assistant turn instead of appending invalid history", async () => {
+    const providerCalls: any[][] = [];
+    let callIndex = 0;
+    const provider: Provider = {
+      async *streamChat(messages) {
+        providerCalls.push(messages as any[]);
+        if (callIndex++ === 0) {
+          yield { type: "reasoning_delta", content: "This should have been visible." };
+          yield { type: "done" };
+          return;
+        }
+        yield { type: "text", content: "Visible retry answer." };
+        yield { type: "done" };
+      },
+      async complete() {
+        return "mock completion";
+      },
+    };
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [] });
+    const events = await collectEvents(agent, "Hi", "/tmp");
+
+    expect(providerCalls).toHaveLength(2);
+    expect(providerCalls[1]?.some((message) => message.role === "assistant")).toBe(false);
+    expect(providerCalls[1]?.some((message) => (
+      message.role === "system"
+      && message.content.includes("no user-visible assistant content")
+    ))).toBe(true);
+    expect(events.some((event) => event.type === "text_delta" && event.content === "Visible retry answer.")).toBe(true);
+    expect(agent.messages.filter((message) => message.role === "assistant")).toEqual([
+      { role: "assistant", content: "Visible retry answer.", reasoning: "", toolCalls: [] },
+    ]);
+  });
+
+  it("emits a visible fallback when empty assistant recovery fails", async () => {
+    const provider = createMockProvider([
+      [{ type: "reasoning_delta", content: "hidden only once" }, { type: "done" }],
+      [{ type: "reasoning_delta", content: "hidden only twice" }, { type: "done" }],
+    ]);
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [] });
+    const events = await collectEvents(agent, "Hi", "/tmp");
+
+    expect(events).toContainEqual({
+      type: "text_delta",
+      content: "The model returned no user-visible response. Please retry, or switch models if this keeps happening.",
+    });
+    const assistantMessages = agent.messages.filter((message) => message.role === "assistant");
+    expect(assistantMessages).toHaveLength(1);
+    expect(assistantMessages[0]?.content).toContain("no user-visible response");
+    expect(assistantMessages[0]?.reasoning).toBe("");
+  });
+
   it("aborts a running model stream without appending partial assistant output", async () => {
     const controller = new AbortController();
     const provider: Provider = {
@@ -109,6 +160,45 @@ describe("Agent", () => {
     expect(events.some((event) => event.type === "text_delta" && event.content === "partial")).toBe(true);
     expect(events.some((event) => event.type === "text_delta" && event.content === "late")).toBe(false);
     expect(agent.messages).toEqual([{ role: "user", content: "Hi" }]);
+  });
+
+  it("terminalizes a never-settling tool when the run is aborted", async () => {
+    const controller = new AbortController();
+    const provider = createMockProvider([
+      [
+        { type: "tool_call", id: "tc_never", name: "never_tool", arguments: "{}", isStart: true, isEnd: true },
+        { type: "tool_call", id: "tc_later", name: "later_tool", arguments: "{}", isStart: true, isEnd: true },
+        { type: "done" },
+      ],
+    ]);
+    const neverTool: ToolRegistryEntry = {
+      name: "never_tool",
+      description: "",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return await new Promise<ToolResult>(() => {});
+      },
+    };
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [neverTool] });
+    const events: AgentEvent[] = [];
+    const run = (async () => {
+      for await (const event of agent.run("Call never tool", "/tmp", { abortSignal: controller.signal })) {
+        events.push(event);
+      }
+    })();
+
+    await waitFor(() => events.some((event) => event.type === "tool_start" && event.name === "never_tool"));
+    controller.abort(new AgentAbortError("stop"));
+
+    await expect(run).rejects.toThrow(AgentAbortError);
+    const toolEnd = events.find((event) => event.type === "tool_end") as Extract<AgentEvent, { type: "tool_end" }>;
+    expect(toolEnd.result.status).toBe("cancelled");
+    expect(toolEnd.result.isError).toBe(true);
+    const toolMessages = agent.messages.filter((message) => message.role === "tool");
+    expect(toolMessages).toHaveLength(2);
+    expect(toolMessages.map((message) => message.toolCallId)).toEqual(["tc_never", "tc_later"]);
+    expect(toolMessages[0]?.metadata?.reason).toBe("cancelled");
+    expect(toolMessages[1]?.metadata?.reason).toBe("cancelled");
   });
 
   it("auto-continues after a tool call", async () => {
@@ -1800,3 +1890,13 @@ describe("Agent", () => {
     expect(callCount).toBe(4); // initial + 3 retries
   });
 });
+
+async function waitFor(assertion: () => boolean, timeoutMs = 1000): Promise<void> {
+  const started = Date.now();
+  while (!assertion()) {
+    if (Date.now() - started > timeoutMs) {
+      throw new Error("Timed out waiting for condition");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}

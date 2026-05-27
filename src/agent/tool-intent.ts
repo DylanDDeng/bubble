@@ -93,6 +93,7 @@ export function analyzeToolIntent(toolCall: Pick<ParsedToolCall, "name" | "parse
     case "write":
       return { family: "write" };
     case "edit":
+    case "apply_patch":
       return { family: "edit" };
     case "web_search":
     case "web_fetch":

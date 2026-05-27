@@ -248,7 +248,7 @@ function isSuccessfulWriteIntent(intent: ReturnType<typeof analyzeToolIntent>, r
   if (result.isError || result.status === "blocked" || result.status === "command_error") {
     return false;
   }
-  return intent.family === "write" || intent.family === "edit" || result.metadata?.kind === "write" || result.metadata?.kind === "edit";
+  return intent.family === "write" || intent.family === "edit" || result.metadata?.kind === "write" || result.metadata?.kind === "edit" || result.metadata?.kind === "patch";
 }
 
 function inferProgress(intent: ReturnType<typeof analyzeToolIntent>, result: ToolResult): boolean {
