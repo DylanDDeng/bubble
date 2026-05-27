@@ -110,6 +110,12 @@ describe("edit tool", () => {
 
     expect(result.isError).toBe(true);
     expect(result.content).toContain("not found");
+    expect(result.status).toBe("no_match");
+    expect(result.metadata).toMatchObject({
+      kind: "edit",
+      path: file,
+      reason: "no_match",
+    });
   });
 
   it("returns error when oldText appears multiple times", async () => {
@@ -184,6 +190,86 @@ describe("edit tool", () => {
     expect(result.isError).toBeUndefined();
     expect(result.content).toContain("normalized line matching");
     expect(readFileSync(file, "utf-8")).toContain("color: #777;");
+  });
+
+  it("matches when oldText has extra leading and trailing newlines", async () => {
+    const file = join(tmpDir, "extra-newlines.ts");
+    writeFileSync(file, "function hello() {\n  return 'world';\n}\n", "utf-8");
+
+    const tool = createEditTool(tmpDir);
+    const result = await tool.execute(
+      {
+        path: "extra-newlines.ts",
+        edits: [{
+          oldText: "\nfunction hello() {\n  return 'world';\n}\n",
+          newText: "function hello() {\n  return 'bubble';\n}",
+        }],
+      },
+      { cwd: tmpDir },
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(readFileSync(file, "utf-8")).toBe("function hello() {\n  return 'bubble';\n}\n");
+  });
+
+  it("matches over-escaped newline sequences in oldText", async () => {
+    const file = join(tmpDir, "escaped-newline.txt");
+    writeFileSync(file, "label = \"hello\nworld\"\n", "utf-8");
+
+    const tool = createEditTool(tmpDir);
+    const result = await tool.execute(
+      {
+        path: "escaped-newline.txt",
+        edits: [{
+          oldText: "label = \"hello\\nworld\"",
+          newText: "label = \"hello\nbubble\"",
+        }],
+      },
+      { cwd: tmpDir },
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(readFileSync(file, "utf-8")).toBe("label = \"hello\nbubble\"\n");
+  });
+
+  it("matches over-escaped unicode sequences in oldText", async () => {
+    const file = join(tmpDir, "escaped-unicode.txt");
+    writeFileSync(file, "when \"\u000c\" then :ctrl_l\n", "utf-8");
+
+    const tool = createEditTool(tmpDir);
+    const result = await tool.execute(
+      {
+        path: "escaped-unicode.txt",
+        edits: [{
+          oldText: "when \"\\u000C\" then :ctrl_l",
+          newText: "when \"\u000c\" then :ctrl_l # form-feed",
+        }],
+      },
+      { cwd: tmpDir },
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(readFileSync(file, "utf-8")).toContain("# form-feed");
+  });
+
+  it("matches code blocks when only leading indentation differs", async () => {
+    const file = join(tmpDir, "indent.ts");
+    writeFileSync(file, "function run() {\n    doWork();\n}\n", "utf-8");
+
+    const tool = createEditTool(tmpDir);
+    const result = await tool.execute(
+      {
+        path: "indent.ts",
+        edits: [{
+          oldText: "function run() {\n\tdoWork();\n}",
+          newText: "function run() {\n    doBetterWork();\n}",
+        }],
+      },
+      { cwd: tmpDir },
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(readFileSync(file, "utf-8")).toBe("function run() {\n    doBetterWork();\n}\n");
   });
 
   it("matches markdown table rows when only alignment spaces differ", async () => {

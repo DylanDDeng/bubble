@@ -201,23 +201,22 @@ Treat the task output as a bounded subtask result:
 // model to decide when verification is meaningful; we follow that.
 
 /**
- * Fired when the same edit/write tool call (identical tool name + args) has
- * just failed for the second time in a row. Models — especially thinking-heavy
- * ones — can otherwise spiral on `No changes made: identical content` or
- * `oldText not found` because their internal reasoning convinces them they
- * are typing the change correctly even though the JSON args arrive identical.
- * This nudge forces a strategy change.
+ * Fired when a file mutation failure suggests the model may be relying on stale
+ * local memory instead of the current file bytes. Models — especially
+ * thinking-heavy ones — can otherwise spiral on `No changes made: identical
+ * content` or `oldText not found` because their internal reasoning convinces
+ * them they are typing the change correctly.
  */
 export function buildEditRetryEscalationReminder(reason: string): string {
   return wrapInSystemReminder(`
-The same edit/write call has failed twice with identical arguments.
+A file mutation just failed in a way that usually means your local view of the file is stale or the edit anchor is wrong.
 
 ${reason}
 
-Stop retrying the same call. Pick one of:
+Stop retrying from memory. Pick one of:
 - Re-read the target file and compare the actual bytes to your intended oldText / newText. Trailing whitespace, unicode lookalikes, or off-by-one boundaries are common causes.
 - If you intended to add a single character (e.g. fixing a 5-digit hex color to 6 digits), confirm that your newText string actually contains the added character before sending again.
-- Use the write tool with overwrite=true and the full new content instead of edit — useful when the change spans many lines or the diff anchor is ambiguous. Existing files must be read or modified in this session before full-file replacement.
+- Use the write tool with the full new content instead of edit — useful when the change spans many lines or the diff anchor is ambiguous.
 - If you cannot determine the cause, ask the user for clarification.
 `);
 }

@@ -1892,17 +1892,21 @@ function sanitizeSubagentSummary(value: string): string {
 }
 
 function needsExplicitFinalSummary(record: SubagentThreadRecord, executedAnyTool: boolean): boolean {
-  // If the subagent actually invoked any tool, always solicit an explicit final
-  // summary. We cannot tell from the stream alone whether a tool-free trailing
-  // turn was the real answer or mid-thought narration ("Let me try X next:").
-  // Asking the model to restate its findings is cheap and yields predictable,
-  // clean output. (Profile-validation notes in `toolNotes` do not count as
-  // actual tool executions.)
-  if (executedAnyTool) return true;
-  if (!record.summary) return false;
+  if (!record.summary) return executedAnyTool;
   if (isOnlyProviderProtocolArtifacts(record.summary)) return true;
   if (/<\/?[｜|][^<>]*>/.test(record.summary)) return true;
-  return false;
+  if (!executedAnyTool) return false;
+  if (record.summary === EMPTY_ASSISTANT_FALLBACK) return true;
+  return isLikelyIntermediateSubagentSummary(record.summary);
+}
+
+function isLikelyIntermediateSubagentSummary(value: string): boolean {
+  const normalized = value.trim().replace(/\s+/g, " ").toLowerCase();
+  if (!normalized) return false;
+  if (/^(let me|i'll|i will|i need to|i should|i'm going to|now i'll|now i will)\b/.test(normalized)) {
+    return true;
+  }
+  return /:\s*$/.test(normalized) && /\b(read|inspect|check|look|search|try|open)\b/.test(normalized);
 }
 
 function summarizeSubagentToolEnd(event: { name: string; result: ToolResult }): string {

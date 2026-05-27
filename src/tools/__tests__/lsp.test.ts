@@ -107,7 +107,7 @@ describe("lsp tool", () => {
   it("reports diagnostics after write when an LSP service is provided", async () => {
     const dir = mkdtempSync(join(tmpdir(), "bubble-lsp-write-"));
     const file = join(dir, "bad.ts");
-    const tool = createWriteTool(dir, { refuseOverwrite: false }, undefined, fakeLsp({
+    const tool = createWriteTool(dir, {}, undefined, fakeLsp({
       diagnostics: () => ({
         [file]: [{
           message: "Type 'string' is not assignable to type 'number'.",

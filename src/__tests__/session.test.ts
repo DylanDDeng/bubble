@@ -293,6 +293,29 @@ describe("SessionManager", () => {
     expect((restored[0] as any).content).toContain("Previous conversation summary:");
   });
 
+  it("keeps generated entry ids unique after compaction", () => {
+    const file = join(tmpDir, "compact-ids.jsonl");
+    const sm = new SessionManager(file);
+    sm.appendMessage({ role: "user", content: "task one" });
+    sm.appendMessage({ role: "assistant", content: "reply one" });
+    sm.appendMessage({ role: "user", content: "task two" });
+    sm.appendMessage({ role: "assistant", content: "reply two" });
+    sm.appendMessage({ role: "user", content: "task three" });
+    sm.appendMessage({ role: "assistant", content: "reply three" });
+
+    const result = sm.compact({ keepRecentTurns: 2 });
+    expect(result.compacted).toBe(true);
+
+    sm.appendMessage({ role: "user", content: "task four" });
+    sm.appendMessage({ role: "assistant", content: "reply four" });
+
+    const ids = readFileSync(file, "utf-8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line).id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
   it("auto-compacts very long sessions while appending messages", () => {
     const file = join(tmpDir, "auto-compact.jsonl");
     const sm = new SessionManager(file);

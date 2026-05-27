@@ -70,7 +70,7 @@ export function createAllTools(
     createReadTool(cwd, approval, lsp, fileState),
     createBashTool(cwd, approval, fileState),
     ...createManagedServerTools(cwd, approval),
-    createWriteTool(cwd, { refuseOverwrite: true }, approval, lsp, fileState),
+    createWriteTool(cwd, {}, approval, lsp, fileState),
     createEditTool(cwd, approval, lsp, fileState),
     createApplyPatchTool(cwd, approval, lsp, fileState),
     createGlobTool(cwd),

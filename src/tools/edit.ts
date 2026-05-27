@@ -28,7 +28,7 @@ export function createEditTool(cwd: string, approval?: ApprovalController, lsp?:
     effect: "write_direct",
     requiresApproval: true,
     description:
-      "Apply targeted string replacements to a file. Prefer exact oldText. The tool can tolerate line ending, trailing whitespace, Unicode punctuation/space, and blank-line differences only when the target is unique.",
+      "Apply targeted string replacements to a file. Prefer exact oldText copied from a recent read. The tool can tolerate common AI formatting mistakes such as extra leading/trailing whitespace, over-escaped sequences, line ending differences, indentation differences, trailing whitespace, Unicode punctuation/space, and blank-line differences when the target is unique.",
     parameters: {
       type: "object",
       properties: {
@@ -77,7 +77,16 @@ export function createEditTool(cwd: string, approval?: ApprovalController, lsp?:
           applied = applyEditsToContent(original, args.edits, { path: filePath });
         } catch (err) {
           if (err instanceof EditApplyError) {
-            return { content: err.message, isError: true, status: err.status };
+            return {
+              content: err.message,
+              isError: true,
+              status: err.status,
+              metadata: {
+                kind: "edit",
+                path: filePath,
+                reason: err.status,
+              },
+            };
           }
           throw err;
         }

@@ -266,7 +266,13 @@ function isSessionLogEntry(entry: SessionLogEntry | LegacySessionEntry): entry i
 }
 
 function nextEntryId(entries: SessionLogEntry[]): string {
-  return `${entries.length + 1}`;
+  let max = 0;
+  for (const entry of entries) {
+    const match = /^(\d+)/.exec(entry.id);
+    if (!match) continue;
+    max = Math.max(max, Number(match[1]));
+  }
+  return `${max + 1}`;
 }
 
 function cloneMessage(message: Message): Message {

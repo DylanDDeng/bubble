@@ -1,5 +1,5 @@
 /**
- * Write tool - create files or safely replace full file contents.
+ * Write tool - create files or replace full file contents.
  */
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -13,14 +13,11 @@ import { isWithinWorkspace, type FileStateTracker } from "./file-state.js";
 import { withFileMutationQueue } from "./file-mutation-queue.js";
 import { resolveToolPath } from "./path-utils.js";
 
-export interface WriteToolOptions {
-  /** If true, existing files require overwrite=true plus a fresh agent-observed version. */
-  refuseOverwrite?: boolean;
-}
+export type WriteToolOptions = Record<string, never>;
 
 export function createWriteTool(
   cwd: string,
-  options: WriteToolOptions = {},
+  _options: WriteToolOptions = {},
   approval?: ApprovalController,
   lsp?: LspService,
   fileState?: FileStateTracker,
@@ -30,22 +27,17 @@ export function createWriteTool(
     effect: "write_direct",
     requiresApproval: true,
     description:
-      "Write a file to disk. Creates parent directories if needed. For an existing file, use overwrite=true only for full-file replacement after the file has been read or modified in this session; use edit for small targeted changes.",
+      "Write content to a file. Creates parent directories as needed. If the file already exists, this replaces the full file; use edit for small targeted changes.",
     parameters: {
       type: "object",
       properties: {
         path: { type: "string", description: "Path to the file (relative or absolute)" },
         content: { type: "string", description: "File contents" },
-        overwrite: {
-          type: "boolean",
-          description: "Set true only for full-file replacement of an existing file. Existing files must have been read or modified in this session.",
-        },
       },
       required: ["path", "content"],
     },
     async execute(args): Promise<ToolResult> {
       const filePath = resolveToolPath(cwd, args.path);
-      const overwrite = args.overwrite === true;
 
       if (!isWithinWorkspace(cwd, filePath)) {
         return {
@@ -70,33 +62,6 @@ export function createWriteTool(
           // New file.
         }
 
-        if (existed && options.refuseOverwrite && !overwrite) {
-          return {
-            content:
-              `Error: File already exists: ${filePath}.\n\n`
-              + "For small targeted changes, use edit.\n"
-              + "For a full-file replacement, call write again with overwrite=true. Existing files must be read or modified in this session before they can be safely overwritten.\n"
-              + "Do not delete and recreate the file just to overwrite it.",
-            isError: true,
-          };
-        }
-
-        if (existed && overwrite && options.refuseOverwrite) {
-          if (!fileState) {
-            return {
-              content:
-                `Error: Cannot safely overwrite ${filePath} because file-state tracking is unavailable. `
-                + "Read the file first in this agent session, then retry the full-file replacement.",
-              isError: true,
-              status: "blocked",
-            };
-          }
-          const freshness = await fileState.checkFresh(filePath);
-          if (!freshness.ok) {
-            return staleOverwriteResult(filePath, freshness.reason);
-          }
-        }
-
         const diff = createTwoFilesPatch(filePath, filePath, oldContent, args.content, "original", "modified", { context: 3 });
 
         const gate = await gateToolAction(approval, {
@@ -108,11 +73,9 @@ export function createWriteTool(
         });
         if (!gate.approved) return gate.result;
 
-        if (existed && overwrite && options.refuseOverwrite && fileState) {
-          const freshness = await fileState.checkFresh(filePath);
-          if (!freshness.ok) {
-            return staleOverwriteResult(filePath, freshness.reason);
-          }
+        const changed = await changedSincePreview(filePath, existed, oldContent);
+        if (changed) {
+          return changedDuringApprovalResult(filePath, changed);
         }
 
         try {
@@ -136,7 +99,7 @@ export function createWriteTool(
             metadata: {
               kind: "write",
               path: filePath,
-              overwrite,
+              fileExists: existed,
             },
           };
         } catch (err: any) {
@@ -147,13 +110,22 @@ export function createWriteTool(
   };
 }
 
-function staleOverwriteResult(filePath: string, reason: "unobserved" | "missing" | "changed"): ToolResult {
-  if (reason === "unobserved") {
+async function changedSincePreview(filePath: string, existed: boolean, oldContent: string): Promise<"changed" | "missing" | "created" | undefined> {
+  try {
+    const latest = await readFile(filePath, "utf-8");
+    if (!existed) return "created";
+    return latest === oldContent ? undefined : "changed";
+  } catch {
+    return existed ? "missing" : undefined;
+  }
+}
+
+function changedDuringApprovalResult(filePath: string, reason: "changed" | "missing" | "created"): ToolResult {
+  if (reason === "changed") {
     return {
       content:
-        `Error: Cannot safely overwrite existing file: ${filePath}.\n\n`
-        + "This file has not been read or modified in this agent session. Read it first, then retry write with overwrite=true.\n"
-        + "For small targeted changes, use edit. Do not delete and recreate the file just to overwrite it.",
+        `Error: Cannot safely write ${filePath} because it changed while approval was pending.\n\n`
+        + "Re-read the file and retry the write against the latest content.",
       isError: true,
       status: "blocked",
       metadata: {
@@ -163,11 +135,11 @@ function staleOverwriteResult(filePath: string, reason: "unobserved" | "missing"
       },
     };
   }
-  if (reason === "changed") {
+  if (reason === "created") {
     return {
       content:
-        `Error: Cannot safely overwrite ${filePath} because it changed since the last read/write/edit in this agent session.\n\n`
-        + "Re-read the file to pick up the latest content, then retry write with overwrite=true if a full-file replacement is still intended.",
+        `Error: Cannot safely write ${filePath} because it was created while approval was pending.\n\n`
+        + "Re-read the file and retry the write against the latest content.",
       isError: true,
       status: "blocked",
       metadata: {
@@ -179,7 +151,7 @@ function staleOverwriteResult(filePath: string, reason: "unobserved" | "missing"
   }
   return {
     content:
-      `Error: Cannot safely overwrite ${filePath} because it is missing now.\n\n`
+      `Error: Cannot safely write ${filePath} because it is missing now.\n\n`
       + "Check the path before retrying.",
     isError: true,
     status: "blocked",
