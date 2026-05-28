@@ -166,6 +166,8 @@ export interface RunTuiOptions {
   runMemoryCompaction?: () => Promise<string>;
   runMemorySummary?: (scope?: MemoryScope) => Promise<string>;
   runMemoryRefresh?: (scope?: MemoryScope) => Promise<string>;
+  /** One-line "update available" notice shown on the home screen, if any. */
+  updateNotice?: string;
 }
 
 type RawGlobalKeyHandler = (sequence: string) => boolean;
@@ -5754,6 +5756,10 @@ function OpenTuiApp(props: {
       h("box", { flexShrink: 0, flexDirection: "column", alignItems: "center" },
         ...logoLines.map((line) => renderHomeLogoLine(line)),
       ),
+      ...(props.options.updateNotice
+        ? [h("box", { flexShrink: 0, flexDirection: "column", alignItems: "center", paddingTop: 1 },
+            h("text", { fg: theme.accent, content: props.options.updateNotice }))]
+        : []),
       h("box", { height: 1, minHeight: 0, flexShrink: 1 }),
       h("box", {
         ref: (ref: BoxRenderable) => {

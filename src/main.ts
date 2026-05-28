@@ -55,6 +55,18 @@ async function main() {
     process.exit(0);
   }
 
+  if (process.argv.includes("-v") || process.argv.includes("--version")) {
+    const { getCurrentVersion } = await import("./update/index.js");
+    console.log(`v${getCurrentVersion()}`);
+    process.exit(0);
+  }
+
+  if (args.command === "update") {
+    const { runUpdateCommand } = await import("./update/index.js");
+    const code = await runUpdateCommand({ checkOnly: args.checkOnly });
+    process.exit(code);
+  }
+
   if (args.command === "serve") {
     if (args.serveHost !== "feishu") {
       console.error(chalk.red("Usage: bubble serve --feishu [--setup | --kill-old | --dry-run]"));
@@ -507,6 +519,8 @@ async function main() {
       runMemorySummary,
       runMemoryRefresh,
     };
+    const { getStartupUpdateNotice } = await import("./update/index.js");
+    const updateNotice = await getStartupUpdateNotice();
     const { runTui } = await import("./tui/run.js");
     await runTui(agent, args, {
       ...commonOptions,
@@ -514,6 +528,7 @@ async function main() {
       themeOverrides: themeConfig.overrides,
       detectedTheme,
       onThemeModeChange: (mode) => userConfig.setThemeMode(mode),
+      updateNotice: updateNotice ?? undefined,
     });
 
     if (sessionManager) {
