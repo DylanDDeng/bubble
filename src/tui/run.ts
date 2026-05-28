@@ -1339,7 +1339,7 @@ function OpenTuiApp(props: {
     if (!safeSetText(ref, promptModeBadge())) promptModeLabels.delete(ref);
   };
 
-  const promptModelTitle = () => displayModel(props.agent.model) || "no model";
+  const promptModelTitle = () => displayModelWithThinking(props.agent.model, props.agent.thinking) || "no model";
 
   const syncModelChrome = () => {
     if (uiDisposed) return;
@@ -9340,17 +9340,28 @@ function pickerTitle(kind: Exclude<PickerMode, "key">, providerId?: string) {
 }
 
 function getModelPickerReasoningLevels(providerId: string, modelId: string): ThinkingLevel[] {
-  if (providerId !== "deepseek" || (modelId !== "deepseek-v4-flash" && modelId !== "deepseek-v4-pro")) {
-    return [];
-  }
-  return getAvailableThinkingLevels(providerId, modelId);
+  // Only expand into one picker row per effort for models that genuinely have a
+  // reasoning-effort spectrum: OpenAI's reasoning models (codex gpt-5.x:
+  // off/minimal/low/medium/high/xhigh) and DeepSeek's v4 models. Other providers
+  // (e.g. GLM, Moonshot/Kimi) only have a thinking on/off toggle, not an effort
+  // control, so they stay as a single row.
+  const isOpenAIReasoning = providerId === "openai" || providerId === "openai-codex";
+  const isDeepseekReasoning =
+    providerId === "deepseek" && (modelId === "deepseek-v4-flash" || modelId === "deepseek-v4-pro");
+  if (!isOpenAIReasoning && !isDeepseekReasoning) return [];
+  const levels = getAvailableThinkingLevels(providerId, modelId);
+  // gpt-4o and friends report only ["off"] — keep those as a single row too.
+  return levels.length > 1 ? levels : [];
 }
 
 function displayModelWithThinking(model: string, thinkingLevel: ThinkingLevel): string {
   if (!model) return "";
   const { providerId, modelId } = decodeModel(model);
   if (!providerId) return displayModel(model);
-  const levels = getAvailableThinkingLevels(providerId, modelId);
+  // Use the same scoping as the picker: only models with a real reasoning-effort
+  // spectrum (OpenAI codex gpt-5.x, deepseek v4) get the "(level)" suffix. The
+  // on/off thinking toggle on GLM / Moonshot(Kimi) is not an effort control.
+  const levels = getModelPickerReasoningLevels(providerId, modelId);
   if (levels.length > 1 && thinkingLevel !== "off") {
     return `${displayModel(model)} (${thinkingLevel})`;
   }
