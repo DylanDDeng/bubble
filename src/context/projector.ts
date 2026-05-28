@@ -11,29 +11,40 @@ export interface ProjectionOptions {
   anchorMessageCount?: number;
 }
 
-// Prefix-cache invariant: every projected output starts with the concatenation
-// of (in order) system + meta messages from the input, followed by the
-// conversational body. Compactors (compactMessages, compactCurrentTurnToolGroups,
-// compactMessagesWithLLM, compactWithLLM) MUST preserve every existing
-// system/meta message in its original position so the cacheable prefix
-// stays byte-identical across turns where compaction didn't fire. Inserting
-// new dynamic content (summaries, etc.) AFTER system+meta is safe; inserting
-// it within or before them is not.
+// Prefix-cache invariant: only the leading static system prompt is promoted to
+// the first provider message. Runtime meta reminders stay in the conversational
+// body at their original relative position, so a new per-turn reminder does not
+// rewrite the cacheable prefix before the existing history.
 export function projectMessages(messages: Message[], options: ProjectionOptions = {}): ProviderMessage[] {
   const mode = options.mode ?? "full";
   const projectedBody: ProviderMessage[] = [];
   const systemContext: string[] = [];
+  let inLeadingSystemPrefix = true;
 
   for (const message of messages) {
-    if (message.role === "system") {
+    if (message.role === "system" && inLeadingSystemPrefix) {
       systemContext.push(message.content);
       continue;
     }
 
     if (message.role === "meta") {
+      inLeadingSystemPrefix = false;
       if (message.includeInLlm !== false) {
-        systemContext.push(formatMetaMessage(message));
+        projectedBody.push({
+          role: "user",
+          content: formatMetaMessage(message),
+        });
       }
+      continue;
+    }
+
+    inLeadingSystemPrefix = false;
+
+    if (message.role === "system") {
+      projectedBody.push({
+        role: "user",
+        content: formatRuntimeSystemMessage(message),
+      });
       continue;
     }
 
@@ -193,6 +204,10 @@ function formatMetaMessage(message: MetaMessage): string {
     default:
       return `Runtime context:\n${message.content}`;
   }
+}
+
+function formatRuntimeSystemMessage(message: SystemMessage): string {
+  return `Runtime context:\n${message.content}`;
 }
 
 function cloneMessage(message: ProviderMessage): ProviderMessage {

@@ -58,6 +58,14 @@ function hasUserText(messages: Message[], text: string): boolean {
   ));
 }
 
+function hasModelContext(messages: Message[], text: string): boolean {
+  return messages.some((message) => (
+    (message.role === "system" || message.role === "user")
+    && typeof message.content === "string"
+    && message.content.includes(text)
+  ));
+}
+
 describe("Agent", () => {
   const dummyTool: ToolRegistryEntry = {
     name: "dummy",
@@ -705,7 +713,7 @@ describe("Agent", () => {
     const repeatedRead = events.find((event) => event.type === "tool_end" && event.id === "read_2") as any;
     expect(repeatedRead.result.status).toBe("success");
     expect(toolNamesByCall[2]).toEqual(["read", "edit", "write", "bash", "lsp"]);
-    expect(hasSystemContext(captured[2], "exact file range was already read")).toBe(true);
+    expect(hasModelContext(captured[2], "exact file range was already read")).toBe(true);
   });
 
   it("supports task subtasks and injects a post-task summary reminder", async () => {
@@ -750,8 +758,8 @@ describe("Agent", () => {
     const toolEnd = events.find((event) => event.type === "tool_end") as any;
     expect(toolEnd.result.content).toContain("Subtask summary:");
     expect(toolEnd.result.content).toContain("Subtask type: general_readonly");
-    expect(hasSystemContext(captured[2], "Summarize the task tool output above and continue with your task.")).toBe(true);
-    expect(hasUserText(captured[2], "Summarize the task tool output above and continue with your task.")).toBe(false);
+    expect(hasModelContext(captured[2], "Summarize the task tool output above and continue with your task.")).toBe(true);
+    expect(hasUserText(captured[2], "Summarize the task tool output above and continue with your task.")).toBe(true);
   });
 
   it("emits live tool_update events from tools", async () => {
@@ -841,7 +849,9 @@ describe("Agent", () => {
     await collectEvents(agent, "spawn children", "/tmp");
 
     const lifecycleReminder = captured[1].find((message) => (
-      message.role === "system" && message.content.includes("Subagent lifecycle truth")
+      (message.role === "system" || message.role === "user")
+      && typeof message.content === "string"
+      && message.content.includes("Subagent lifecycle truth")
     ));
     expect(lifecycleReminder?.content).toContain("Unique subagents currently tracked: 2.");
     expect(lifecycleReminder?.content).toContain("completed=2");
@@ -1215,7 +1225,7 @@ describe("Agent", () => {
 
     const events = await collectEvents(agent, "Do something", "/tmp");
     expect(events.some((event) => event.type === "text_delta" && event.content === "Final without tools.")).toBe(true);
-    expect(hasSystemContext(captured[0], "CRITICAL - MAXIMUM STEPS REACHED")).toBe(true);
+    expect(hasModelContext(captured[0], "CRITICAL - MAXIMUM STEPS REACHED")).toBe(true);
   });
 
   it("uses task budget exhaustion to force a text-only follow-up turn", async () => {
@@ -1249,7 +1259,7 @@ describe("Agent", () => {
 
     const events = await collectEvents(agent, "Call dummy", "/tmp");
     expect(events.some((event) => event.type === "text_delta" && event.content === "Budget summary.")).toBe(true);
-    expect(hasSystemContext(captured[1], "task budget")).toBe(true);
+    expect(hasModelContext(captured[1], "task budget")).toBe(true);
   });
 
   it("auto-compacts oversized history before sending it to the provider", async () => {
@@ -1307,8 +1317,8 @@ describe("Agent", () => {
     });
 
     await collectEvents(agent, "Find where API keys are stored and whether they can leak", "/tmp");
-    expect(hasSystemContext(captured[0], "Security/configuration investigation workflow is active")).toBe(true);
-    expect(hasSystemContext(captured[0], "Workflow phase: investigate")).toBe(true);
+    expect(hasModelContext(captured[0], "Security/configuration investigation workflow is active")).toBe(true);
+    expect(hasModelContext(captured[0], "Workflow phase: investigate")).toBe(true);
   });
 
   it("shrinks resident history after a long tool-heavy run", async () => {
