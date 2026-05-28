@@ -9,6 +9,7 @@ import { getAvailableThinkingLevels, normalizeThinkingLevel } from "../provider-
 import { buildSystemPrompt } from "../system-prompt.js";
 import type { ThinkingLevel } from "../types.js";
 import { isThinkingLevel } from "../variant/thinking-level.js";
+import { collectUsageStatsBundle, formatStatsText } from "../stats/usage.js";
 import {
   buildMemoryPrompt,
   getMemoryStatus,
@@ -862,6 +863,17 @@ const builtinSlashCommandEntries: SlashCommand[] = [
 
       const dropped = result.droppedEntries ?? 0;
       return `✓ Compaction complete · ${dropped} log entr${dropped === 1 ? "y" : "ies"} summarized`;
+    },
+  },
+  {
+    name: "stats",
+    description: "Show recent model usage statistics",
+    async handler(_args, ctx) {
+      if (ctx.openStats) {
+        ctx.openStats();
+        return;
+      }
+      return formatStatsText(collectUsageStatsBundle());
     },
   },
   {

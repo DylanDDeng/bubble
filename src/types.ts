@@ -30,6 +30,11 @@ export interface AssistantMessage {
   content: string;
   reasoning?: string;
   toolCalls?: ToolCall[];
+  /** Model metadata captured for local usage statistics. */
+  model?: string;
+  providerId?: string;
+  modelId?: string;
+  usage?: TokenUsage;
 }
 
 export interface ToolMessage {

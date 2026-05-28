@@ -54,6 +54,7 @@ import { BUILTIN_PROVIDERS, decodeModel, displayModel, isUserVisibleProvider } f
 import { listBuiltinModels } from "../model-catalog.js";
 import { calculateUsageCost } from "../model-pricing.js";
 import { getAvailableThinkingLevels } from "../provider-transform.js";
+import { collectUsageStatsBundle, formatStatsPanelBody, type StatsRange, type UsageStats, type UsageStatsBundle } from "../stats/usage.js";
 import type { SkillRegistry } from "../skills/registry.js";
 import { parseSkillInvocation } from "../skills/invocation.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
@@ -160,7 +161,7 @@ type RawGlobalKeyHandler = (sequence: string) => boolean;
 type RawMouseSelectionHandler = (event: { type: string; button: number; x: number; y: number }) => void;
 type CopyToastVariant = "info" | "success" | "warning" | "error";
 type CopyToastState = { title?: string; message: string; variant: CopyToastVariant };
-type ModalKeyOwner = "approval" | "question" | "feedback" | "provider" | "feishu" | "picker";
+type ModalKeyOwner = "approval" | "question" | "feedback" | "stats" | "provider" | "feishu" | "picker";
 type QueuedComposerInput = { input: string; displayId?: string };
 type PendingSteerInput = { id: string; input: string; displayId: string };
 type ActiveAgentRun = { id: number; abortController: AbortController; inputController: AgentRunInputQueue };
@@ -379,6 +380,10 @@ type ProviderDialogState = {
   index: number;
   apiKey: string;
   error?: string;
+};
+type StatsPanelState = {
+  range: StatsRange;
+  bundle: UsageStatsBundle;
 };
 type QuestionPanelState = {
   request: QuestionRequest;
@@ -618,6 +623,7 @@ function OpenTuiApp(props: {
     redrawProviderDialog();
     redrawApprovalPanel();
     redrawQuestionPanel();
+    redrawStatsPanel();
     redrawFeishuSetupPanel();
     setSidebarTick((tick) => tick + 1);
     renderer.requestRender();
@@ -709,6 +715,7 @@ function OpenTuiApp(props: {
   const [pendingQuestion, setPendingQuestion] = createSignal<QuestionPanelState>();
   const [pendingFeedback, setPendingFeedback] = createSignal<FeedbackPanelState>();
   const [pendingFeishuSetup, setPendingFeishuSetup] = createSignal<FeishuSetupStage>();
+  let statsPanel: StatsPanelState | undefined;
   const questionSyncTimers = new Set<ReturnType<typeof setTimeout>>();
   let feishuSetupAbortController: AbortController | undefined;
   let pendingApprovalRef: { request: ApprovalRequest; resolve: (decision: ApprovalDecision) => void } | undefined;
@@ -772,6 +779,17 @@ function OpenTuiApp(props: {
   let feedbackPreviewShell: BoxRenderable | undefined;
   let feedbackPreviewText: TextRenderable | undefined;
   let feedbackFooterText: TextRenderable | undefined;
+  let statsRoot: BoxRenderable | undefined;
+  let statsPanelBox: BoxRenderable | undefined;
+  let statsTitle: TextRenderable | undefined;
+  let statsEsc: TextRenderable | undefined;
+  let statsTab7Box: BoxRenderable | undefined;
+  let statsTab30Box: BoxRenderable | undefined;
+  let statsTab7Text: TextRenderable | undefined;
+  let statsTab30Text: TextRenderable | undefined;
+  let statsBodyScroll: ScrollBoxRenderable | undefined;
+  let statsBodyText: TextRenderable | undefined;
+  let statsFooterText: TextRenderable | undefined;
   let feishuSetupRoot: BoxRenderable | undefined;
   let feishuSetupPanel: BoxRenderable | undefined;
   let feishuSetupTitle: TextRenderable | undefined;
@@ -937,6 +955,12 @@ function OpenTuiApp(props: {
     }, 0);
   }
 
+  function focusStatsPanel() {
+    setTimeout(() => {
+      if (statsPanel) statsRoot?.focus();
+    }, 0);
+  }
+
   function focusFeishuSetupPanel() {
     setTimeout(() => {
       const state = pendingFeishuSetup();
@@ -1070,7 +1094,7 @@ function OpenTuiApp(props: {
     return !!event.shift;
   };
 
-  const canInsertPromptNewline = () => !pendingApproval() && !pendingPlan() && !pendingQuestion() && !pendingFeedback() && !pendingFeishuSetup();
+  const canInsertPromptNewline = () => !pendingApproval() && !pendingPlan() && !pendingQuestion() && !pendingFeedback() && !statsPanel && !pendingFeishuSetup();
 
   const sidebarFits = () => dimensions().width > SESSION_SIDEBAR_WIDTH + 40;
   const sidebarVisible = () => {
@@ -2028,6 +2052,72 @@ function OpenTuiApp(props: {
     return false;
   }
 
+  function openStatsPanel() {
+    picker = undefined;
+    providerDialog = undefined;
+    redrawProviderDialog();
+    statsPanel = {
+      range: "30d",
+      bundle: collectUsageStatsBundle(),
+    };
+    activePrompt()?.clear();
+    activePrompt()?.blur();
+    promptText = "";
+    syncStatsUI(true);
+  }
+
+  function closeStatsPanel() {
+    statsPanel = undefined;
+    syncStatsUI(false);
+    restorePromptAfterModal();
+    if (queuedInputCount() > 0) scheduleQueuedInputDrain();
+  }
+
+  function syncStatsUI(focus = false) {
+    redrawStatsPanel();
+    syncPromptSurfaces();
+    redrawDock();
+    rootBox?.requestRender();
+    scrollbox?.requestRender();
+    if (focus || statsPanel) focusStatsPanel();
+  }
+
+  function setStatsRange(range: StatsRange) {
+    if (!statsPanel || statsPanel.range === range) return;
+    statsPanel = { ...statsPanel, range };
+    redrawStatsPanel();
+  }
+
+  function handleStatsKey(event: any) {
+    if (!statsPanel) return false;
+    const name = keyNameFromEvent(event);
+    if (name === "escape") {
+      closeStatsPanel();
+      event.preventDefault?.();
+      event.stopPropagation?.();
+      return true;
+    }
+    if (name === "left" || name === "h") {
+      setStatsRange("7d");
+      event.preventDefault?.();
+      event.stopPropagation?.();
+      return true;
+    }
+    if (name === "right" || name === "l") {
+      setStatsRange("30d");
+      event.preventDefault?.();
+      event.stopPropagation?.();
+      return true;
+    }
+    if (name === "tab") {
+      setStatsRange(statsPanel.range === "30d" ? "7d" : "30d");
+      event.preventDefault?.();
+      event.stopPropagation?.();
+      return true;
+    }
+    return true;
+  }
+
   function openFeishuSetup() {
     picker = undefined;
     providerDialog = undefined;
@@ -2275,6 +2365,7 @@ function OpenTuiApp(props: {
     if (pendingApproval() || pendingPlan()) return "approval";
     if (pendingQuestion()) return "question";
     if (pendingFeedback()) return "feedback";
+    if (statsPanel) return "stats";
     if (providerDialog) return "provider";
     if (pendingFeishuSetup()) return "feishu";
     if (picker) return "picker";
@@ -2291,6 +2382,8 @@ function OpenTuiApp(props: {
         return handleQuestionKey(event);
       case "feedback":
         return handleFeedbackKey(event);
+      case "stats":
+        return handleStatsKey(event);
       case "provider":
         return handleProviderDialogKey(event);
       case "feishu":
@@ -2307,6 +2400,7 @@ function OpenTuiApp(props: {
       return !state?.editing || isQuestionConfirmTab(state);
     }
     if (owner === "feedback") return pendingFeedback()?.stage !== "edit";
+    if (owner === "stats") return true;
     if (owner === "feishu") return pendingFeishuSetup()?.kind !== "binding";
     return false;
   }
@@ -2450,7 +2544,7 @@ function OpenTuiApp(props: {
   }
 
   function isHomeSurfaceActive(extra?: DisplayMessage) {
-    return !hasTranscriptMessages(extra) && !pendingPlan() && !pendingQuestion() && !pendingFeedback() && !pendingFeishuSetup();
+    return !hasTranscriptMessages(extra) && !pendingPlan() && !pendingQuestion() && !pendingFeedback() && !statsPanel && !pendingFeishuSetup();
   }
 
   function syncPromptSurfaces(focus = false) {
@@ -2458,7 +2552,7 @@ function OpenTuiApp(props: {
     const nextSessionActive = !homeActive;
     const surfaceChanged = sessionActive() !== nextSessionActive;
     setSessionActive(nextSessionActive);
-    const modalComposerHidden = !!pendingQuestion() || !!pendingFeedback() || !!pendingFeishuSetup();
+    const modalComposerHidden = !!pendingQuestion() || !!pendingFeedback() || !!statsPanel || !!pendingFeishuSetup();
     if (homeSurfaceShell) homeSurfaceShell.visible = homeActive;
     if (homeComposerShell) homeComposerShell.visible = homeActive && !modalComposerHidden;
     if (sessionComposerShell) sessionComposerShell.visible = !homeActive && !modalComposerHidden;
@@ -2654,6 +2748,7 @@ function OpenTuiApp(props: {
       || pendingPlan()
       || pendingQuestion()
       || pendingFeedback()
+      || statsPanel
       || providerDialog
       || picker
     ) {
@@ -2960,6 +3055,7 @@ function OpenTuiApp(props: {
     sessionActive();
     syncSidebarChrome();
     redrawQuestionPanel();
+    redrawStatsPanel();
     redrawFeishuSetupPanel();
     scrollbox?.requestRender();
     scheduleTranscriptScrollAfterUpdate(shouldFollow);
@@ -3640,6 +3736,142 @@ function OpenTuiApp(props: {
 
     feedbackRoot.requestRender();
     feedbackInput?.requestRender();
+  }
+
+  function redrawStatsPanel() {
+    if (!statsRoot) return;
+    const state = statsPanel;
+    if (!state) {
+      statsRoot.visible = false;
+      statsPanelBox && (statsPanelBox.visible = false);
+      statsRoot.requestRender();
+      return;
+    }
+
+    const terminalWidth = dimensions().width;
+    const terminalHeight = dimensions().height;
+    const width = Math.max(56, Math.min(84, terminalWidth - 4));
+    const bodyWidth = Math.max(48, width - 8);
+    const stats = state.bundle.ranges[state.range];
+    const body = formatStatsPanelBody(stats, bodyWidth);
+    const bodyLines = body.split("\n");
+    const height = Math.min(
+      Math.max(22, bodyLines.length + 7),
+      Math.max(18, terminalHeight - 4),
+    );
+    const bodyHeight = Math.max(8, height - 8);
+
+    statsRoot.visible = true;
+    statsRoot.width = terminalWidth;
+    statsRoot.height = terminalHeight;
+    statsRoot.left = 0;
+    statsRoot.top = 0;
+    statsRoot.backgroundColor = modalBackdropColor();
+
+    if (statsPanelBox) {
+      statsPanelBox.visible = true;
+      statsPanelBox.width = width;
+      statsPanelBox.height = height;
+      statsPanelBox.left = Math.max(0, Math.floor((terminalWidth - width) / 2));
+      statsPanelBox.top = Math.max(0, Math.floor((terminalHeight - height) / 3));
+      statsPanelBox.backgroundColor = theme.backgroundPanel;
+      statsPanelBox.borderColor = theme.backgroundPanel;
+    }
+    if (statsTitle) statsTitle.content = "Stats";
+    if (statsEsc) statsEsc.content = "esc";
+    syncStatsTab(statsTab7Box, statsTab7Text, state.range === "7d", "7 days");
+    syncStatsTab(statsTab30Box, statsTab30Text, state.range === "30d", "30 days");
+    if (statsBodyText) {
+      statsBodyText.content = statsPanelBodyStyledText(stats, bodyWidth);
+      statsBodyText.width = bodyWidth;
+    }
+    if (statsBodyScroll) {
+      statsBodyScroll.width = bodyWidth;
+      statsBodyScroll.height = bodyHeight;
+      statsBodyScroll.requestRender();
+    }
+    if (statsFooterText) {
+      statsFooterText.content = statsFooterHint(state.range);
+      statsFooterText.width = bodyWidth;
+      statsFooterText.bg = theme.backgroundPanel;
+    }
+
+    statsPanelBox?.requestRender();
+    statsRoot.requestRender();
+  }
+
+  function statsFooterHint(range: StatsRange) {
+    return `left/right:range|tab:toggle|esc:close|view:${range}`;
+  }
+
+  function statsPanelBodyStyledText(stats: UsageStats, width: number): StyledText {
+    const chunks = [];
+    const lines = formatStatsPanelBody(stats, width).split("\n");
+    for (let index = 0; index < lines.length; index += 1) {
+      appendStatsPanelLine(chunks, lines[index]);
+      if (index < lines.length - 1) chunks.push(fg(theme.text)("\n"));
+    }
+    return new StyledText(chunks);
+  }
+
+  function appendStatsPanelLine(chunks: any[], line: string) {
+    if (isStatsHeatmapWeekdayLine(line)) {
+      chunks.push(fg(theme.text)(line.slice(0, 5)));
+      appendStatsHeatmapDots(chunks, line.slice(5));
+      return;
+    }
+    if (line.trim() === "Less . o O @ More") {
+      appendStatsHeatmapLegend(chunks, line.length - line.trimStart().length);
+      return;
+    }
+    chunks.push(fg(theme.text)(line));
+  }
+
+  function isStatsHeatmapWeekdayLine(line: string) {
+    return /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)  /.test(line);
+  }
+
+  function appendStatsHeatmapDots(chunks: any[], text: string) {
+    const colors = statsHeatmapDotColors();
+    const colorByLevel: Record<string, string> = {
+      ".": colors[0],
+      o: colors[1],
+      O: colors[2],
+      "@": colors[3],
+    };
+    for (const char of text) {
+      const color = colorByLevel[char];
+      chunks.push(color ? fg(color)("•") : fg(theme.text)(char));
+    }
+  }
+
+  function appendStatsHeatmapLegend(chunks: any[], indent: number) {
+    const colors = statsHeatmapDotColors();
+    chunks.push(fg(theme.textMuted)(`${" ".repeat(indent)}Less `));
+    colors.forEach((color, index) => {
+      if (index > 0) chunks.push(fg(theme.textMuted)(" "));
+      chunks.push(fg(color)("•"));
+    });
+    chunks.push(fg(theme.textMuted)(" More"));
+  }
+
+  function statsHeatmapDotColors(): [string, string, string, string] {
+    return isLightTheme()
+      ? ["#D9B98E", "#BE7D37", "#A56218", theme.warning]
+      : ["#6B471D", "#9D6728", "#D18830", theme.warning];
+  }
+
+  function syncStatsTab(
+    box: BoxRenderable | undefined,
+    text: TextRenderable | undefined,
+    active: boolean,
+    label: string,
+  ) {
+    if (box) box.backgroundColor = active ? theme.primary : theme.backgroundElement;
+    if (text) {
+      text.content = label;
+      text.fg = active ? contrastText(theme.primary) : theme.textMuted;
+    }
   }
 
   function redrawFeishuSetupPanel() {
@@ -4575,6 +4807,7 @@ function OpenTuiApp(props: {
       toggleSidebar,
       setSidebarMode: applySidebarMode,
       openFeedback,
+      openStats: openStatsPanel,
     });
     if (!handled) return false;
     if (uiDisposed) return true;
@@ -5279,13 +5512,13 @@ function OpenTuiApp(props: {
     return h("box", {
       ref: (ref: BoxRenderable) => {
         sessionComposerShell = ref;
-        ref.visible = !isHomeSurfaceActive(streamingDisplay) && !pendingQuestion() && !pendingFeedback() && !pendingFeishuSetup();
+          ref.visible = !isHomeSurfaceActive(streamingDisplay) && !pendingQuestion() && !pendingFeedback() && !statsPanel && !pendingFeishuSetup();
       },
       width: "100%",
       paddingLeft: 2,
       paddingRight: 2,
       flexShrink: 0,
-      visible: !isHomeSurfaceActive(streamingDisplay) && !pendingQuestion() && !pendingFeishuSetup(),
+      visible: !isHomeSurfaceActive(streamingDisplay) && !pendingQuestion() && !statsPanel && !pendingFeishuSetup(),
     },
       renderPrompt({
         ref: (ref) => { sessionPromptRef = ref; },
@@ -5297,7 +5530,7 @@ function OpenTuiApp(props: {
         onKeyDown: handlePickerKey,
         onUiKeyDown: promptUiKeyDown,
         getText: readPromptText,
-        disabled: () => !!pendingFeedback(),
+        disabled: () => !!pendingFeedback() || !!statsPanel,
         mode,
         registerModeLabel: registerPromptModeLabel,
         registerModelLabel: registerPromptModelLabel,
@@ -5309,6 +5542,7 @@ function OpenTuiApp(props: {
           if (approvalState) return "Press Enter to approve or Esc to reject";
           if (pendingQuestion()) return "Answer the question below";
           if (pendingFeedback()) return "Describe feedback below";
+          if (statsPanel) return "Stats panel is open";
           const plan = pendingPlan();
           if (plan) return "Press Enter to approve plan or Esc to reject";
           if (isRunning()) return "Steer current run...";
@@ -5342,14 +5576,14 @@ function OpenTuiApp(props: {
       h("box", {
         ref: (ref: BoxRenderable) => {
           homeComposerShell = ref;
-          ref.visible = isHomeSurfaceActive(streamingDisplay) && !pendingQuestion() && !pendingFeedback() && !pendingFeishuSetup();
+          ref.visible = isHomeSurfaceActive(streamingDisplay) && !pendingQuestion() && !pendingFeedback() && !statsPanel && !pendingFeishuSetup();
         },
         width: "100%",
         maxWidth: 75,
         zIndex: 1000,
         paddingTop: 1,
         flexShrink: 0,
-        visible: isHomeSurfaceActive(streamingDisplay) && !pendingQuestion() && !pendingFeishuSetup(),
+        visible: isHomeSurfaceActive(streamingDisplay) && !pendingQuestion() && !statsPanel && !pendingFeishuSetup(),
       },
       renderPrompt({
         ref: (ref) => {
@@ -5364,7 +5598,7 @@ function OpenTuiApp(props: {
         onKeyDown: handlePickerKey,
         onUiKeyDown: promptUiKeyDown,
         getText: readPromptText,
-        disabled: () => !!pendingFeedback(),
+        disabled: () => !!pendingFeedback() || !!statsPanel,
         mode,
         registerModeLabel: registerPromptModeLabel,
         registerModelLabel: registerPromptModelLabel,
@@ -5376,6 +5610,7 @@ function OpenTuiApp(props: {
           if (approvalState) return "Press Enter to approve or Esc to reject";
           if (pendingQuestion()) return "Answer the question below";
           if (pendingFeedback()) return "Describe feedback below";
+          if (statsPanel) return "Stats panel is open";
           const plan = pendingPlan();
           if (plan) return "Press Enter to approve plan or Esc to reject";
           if (isRunning()) return "Steer current run...";
@@ -5662,6 +5897,143 @@ function OpenTuiApp(props: {
       content: "ctrl+d submit · tab view payload · enter newline · esc cancel",
     }),
     ));
+  }
+
+  function renderStatsPanel() {
+    return h("box", {
+      ref: (ref: BoxRenderable) => {
+        statsRoot = ref;
+        redrawStatsPanel();
+      },
+      visible: false,
+      focusable: true,
+      position: "absolute",
+      left: 0,
+      top: 0,
+      width: "100%",
+      height: "100%",
+      zIndex: 3050,
+      backgroundColor: modalBackdropColor(),
+      flexDirection: "column",
+      onKeyDown: (event: any) => {
+        if (handleStatsKey(event)) {
+          event.preventDefault?.();
+          event.stopPropagation?.();
+          return true;
+        }
+        return false;
+      },
+      onMouseUp: () => closeStatsPanel(),
+    },
+    h("box", {
+      ref: (ref: BoxRenderable) => {
+        statsPanelBox = ref;
+        redrawStatsPanel();
+      },
+      visible: false,
+      position: "absolute",
+      width: 76,
+      height: 24,
+      backgroundColor: theme.backgroundPanel,
+      flexDirection: "column",
+      paddingTop: 1,
+      onMouseUp: (event: any) => {
+        event.stopPropagation?.();
+      },
+    },
+    [
+      h("box", {
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "space-between",
+        paddingLeft: 4,
+        paddingRight: 4,
+        flexShrink: 0,
+      },
+      h("text", {
+        ref: (ref: TextRenderable) => { statsTitle = ref; },
+        fg: theme.text,
+        content: "Stats",
+      }),
+      h("text", {
+        ref: (ref: TextRenderable) => { statsEsc = ref; },
+        fg: theme.textMuted,
+        content: "esc",
+        onMouseUp: () => closeStatsPanel(),
+      })),
+      h("box", {
+        flexDirection: "row",
+        gap: 1,
+        paddingLeft: 4,
+        paddingRight: 4,
+        paddingTop: 1,
+        flexShrink: 0,
+      },
+      h("box", {
+        ref: (ref: BoxRenderable) => { statsTab7Box = ref; },
+        paddingLeft: 1,
+        paddingRight: 1,
+        backgroundColor: theme.backgroundElement,
+        onMouseUp: () => setStatsRange("7d"),
+      },
+      h("text", {
+        ref: (ref: TextRenderable) => { statsTab7Text = ref; },
+        fg: theme.textMuted,
+        content: "7 days",
+      })),
+      h("box", {
+        ref: (ref: BoxRenderable) => { statsTab30Box = ref; },
+        paddingLeft: 1,
+        paddingRight: 1,
+        backgroundColor: theme.primary,
+        onMouseUp: () => setStatsRange("30d"),
+      },
+      h("text", {
+        ref: (ref: TextRenderable) => { statsTab30Text = ref; },
+        fg: contrastText(theme.primary),
+        content: "30 days",
+      }))),
+      h("box", {
+        paddingLeft: 4,
+        paddingRight: 4,
+        paddingTop: 1,
+        flexGrow: 1,
+        minHeight: 0,
+      },
+      h("scrollbox", {
+        ref: (ref: ScrollBoxRenderable) => { statsBodyScroll = ref; },
+        flexGrow: 1,
+        minHeight: 0,
+        height: 14,
+        onMouseScroll: (event: any) => {
+          event.stopPropagation?.();
+        },
+      },
+      h("text", {
+        ref: (ref: TextRenderable) => { statsBodyText = ref; },
+        fg: theme.text,
+        wrapMode: "none",
+        content: "",
+      }))),
+      h("box", {
+        flexDirection: "row",
+        justifyContent: "space-between",
+        paddingLeft: 4,
+        paddingRight: 4,
+        paddingTop: 1,
+        paddingBottom: 1,
+        flexShrink: 0,
+        backgroundColor: theme.backgroundPanel,
+      },
+      h("text", {
+        ref: (ref: TextRenderable) => { statsFooterText = ref; },
+        fg: theme.textMuted,
+        bg: theme.backgroundPanel,
+        wrapMode: "none",
+        truncate: true,
+        content: "left/right:range|tab:toggle|esc:close|view:30d",
+      })),
+    ]));
   }
 
   function renderFeishuSetupPanel() {
@@ -6686,6 +7058,7 @@ function OpenTuiApp(props: {
       registerTraceBadge: registerFooterTraceBadge,
     }),
     renderProviderDialog(),
+    renderStatsPanel(),
     renderFeishuSetupPanel(),
     renderNoticeOverlay(),
   ]);

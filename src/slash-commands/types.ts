@@ -49,6 +49,8 @@ export interface SlashCommandContext {
   setSidebarMode?: (mode: SidebarMode) => SidebarCommandState;
   /** Open the feedback dialog. `initialDescription` prefills the description field. */
   openFeedback?: (initialDescription: string) => void;
+  /** Open the interactive usage stats panel. */
+  openStats?: () => void;
 }
 
 /**

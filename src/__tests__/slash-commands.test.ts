@@ -77,6 +77,16 @@ describe("slash commands", () => {
     expect(openFeedback).toHaveBeenCalledWith("cursor jumps after submit");
   });
 
+  it("opens the stats panel from /stats", async () => {
+    const openStats = vi.fn();
+    const ctx = createContext({ openStats });
+    const result = await slashRegistry.execute("/stats", ctx);
+
+    expect(result.handled).toBe(true);
+    expect(result.result).toBeUndefined();
+    expect(openStats).toHaveBeenCalledTimes(1);
+  });
+
   it("/quit only requests TUI exit and does not force process.exit", async () => {
     vi.useFakeTimers();
     const processExit = vi.spyOn(process, "exit").mockImplementation((() => undefined as never));

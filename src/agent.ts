@@ -413,6 +413,9 @@ export class Agent {
         content: "",
         reasoning: "",
         toolCalls: [],
+        model: this._model,
+        providerId: this.providerId,
+        modelId: this.apiModel,
       };
 
       const streamingToolCalls = new Map<string, { id: string; name: string; args: string; argsCorrupt?: boolean }>();
@@ -537,6 +540,7 @@ export class Agent {
 
             case "usage":
               turnUsage = chunk.usage;
+              assistantMsg.usage = chunk.usage;
               this.budgetLedger?.recordUsage(chunk.usage, this.budgetSource);
               this.lastInputTokens = chunk.usage.promptTokens;
               this.lastAnchorMessageCount = this.messages.length;
