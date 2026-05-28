@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   appendTextPart,
   appendToolPart,
-  compactDisplayMessages,
+  compactDisplayMessages as compactInkDisplayMessages,
   contentFromParts,
   snapshotDisplayParts,
   toolCallsFromParts,
@@ -10,6 +10,9 @@ import {
   type DisplayMessagePart,
   type DisplayToolCall,
 } from "../tui-ink/display-history.js";
+import { compactDisplayMessages as compactLegacyDisplayMessages } from "../tui/display-history.js";
+import { compactDisplayMessages as compactOpenTuiDisplayMessages } from "../tui-opentui/display-history.js";
+import { isWritePreviewTool } from "../tui/tool-renderers/write-preview.js";
 
 describe("Ink display history parts", () => {
   it("preserves assistant text/tool timeline order", () => {
@@ -62,7 +65,14 @@ describe("Ink display history parts", () => {
     ]);
   });
 
-  it("compacts old part text and tool results", () => {
+  it("compacts old part text and collapses tool result bodies", () => {
+    const diff = [
+      "--- a/file-0.ts",
+      "+++ b/file-0.ts",
+      "@@ -1 +1 @@",
+      "-old",
+      "+new",
+    ].join("\n");
     const messages: DisplayMessage[] = Array.from({ length: 30 }, (_, index) => ({
       role: "assistant",
       content: `assistant ${index} ${"x".repeat(1800)}`,
@@ -71,25 +81,62 @@ describe("Ink display history parts", () => {
         {
           type: "tools",
           toolCalls: [
-            tool("read", { path: `file-${index}.ts` }, `result ${index}\n${"z".repeat(2400)}`),
+            tool("edit", { path: `file-${index}.ts` }, `Edited file\n\nDiff:\n${diff}\n${"z".repeat(2400)}`, {
+              metadata: { kind: "edit", path: `file-${index}.ts`, diff },
+            }),
           ],
         },
       ],
     }));
 
-    const compacted = compactDisplayMessages(messages);
+    const compacted = compactInkDisplayMessages(messages);
 
     const oldText = compacted[0].parts?.find((part) => part.type === "text");
     const oldTools = compacted[0].parts?.find((part) => part.type === "tools");
     expect(oldText?.type === "text" ? oldText.content.length : 0).toBeLessThan(
       messages[0].parts?.[0].type === "text" ? messages[0].parts[0].content.length : Infinity,
     );
-    expect(oldTools?.type === "tools" ? oldTools.toolCalls[0].result?.length : 0).toBeLessThan(
-      messages[0].parts?.[1].type === "tools" ? messages[0].parts[1].toolCalls[0].result?.length ?? Infinity : Infinity,
-    );
+    const oldTool = oldTools?.type === "tools" ? oldTools.toolCalls[0] : undefined;
+    expect(oldTool?.result).toBeUndefined();
+    expect(oldTool?.resultCollapsed).toBe(true);
+    expect(oldTool?.metadata?.diff).toBe(diff);
+    expect(JSON.stringify(oldTool)).not.toContain("✂");
+    expect(JSON.stringify(oldTool)).not.toContain("chars omitted for UI");
 
     const recent = compacted.at(-1)!;
     expect(recent.parts).toEqual(messages.at(-1)!.parts);
+  });
+
+  const displayHistoryCompactors: Array<[string, (messages: any[]) => any[]]> = [
+    ["legacy", compactLegacyDisplayMessages],
+    ["opentui", compactOpenTuiDisplayMessages],
+    ["ink", compactInkDisplayMessages],
+  ];
+
+  it.each(displayHistoryCompactors)("collapses old tool result bodies for %s display history", (_name, compact) => {
+    const messages = Array.from({ length: 30 }, (_, index) => ({
+      role: "assistant" as const,
+      content: `assistant ${index}`,
+      toolCalls: [
+        tool("read", { path: `file-${index}.ts` }, `line ${index}\n${"z".repeat(2400)}`),
+      ],
+    }));
+
+    const compacted = compact(messages);
+
+    expect(compacted[0].toolCalls?.[0].result).toBeUndefined();
+    expect(compacted[0].toolCalls?.[0].resultCollapsed).toBe(true);
+    expect(JSON.stringify(compacted[0].toolCalls?.[0])).not.toContain("✂");
+    expect(compacted.at(-1)?.toolCalls?.[0].result).toBe(messages.at(-1)?.toolCalls[0].result);
+    expect(compacted.at(-1)?.toolCalls?.[0].resultCollapsed).toBeUndefined();
+  });
+
+  it("does not render collapsed write tools through the write-preview renderer", () => {
+    const collapsedWrite = tool("write", { path: "a.ts", content: "x".repeat(1000) }, undefined, {
+      resultCollapsed: true,
+    });
+
+    expect(isWritePreviewTool(collapsedWrite)).toBe(false);
   });
 
   it("keeps all display messages available for app-level scrolling", () => {
@@ -99,7 +146,7 @@ describe("Ink display history parts", () => {
       content: `message ${index} ${"x".repeat(200)}`,
     }));
 
-    const compacted = compactDisplayMessages(messages);
+    const compacted = compactInkDisplayMessages(messages);
 
     expect(compacted).toHaveLength(100);
     expect(compacted[0].syntheticKind).toBeUndefined();

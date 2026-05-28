@@ -50,6 +50,7 @@ export interface DisplayToolCall {
   streamingNewlineCount?: number;
   status?: "pending" | "running" | "completed" | "error";
   result?: string;
+  resultCollapsed?: boolean;
   isError?: boolean;
   metadata?: ToolResultMetadata;
   startedAt?: number;
@@ -102,7 +103,6 @@ const MAX_VISIBLE_MESSAGES = 80;
 const FULL_DETAIL_WINDOW = 24;
 const MAX_OLD_CONTENT_CHARS = 1200;
 const MAX_OLD_REASONING_CHARS = 600;
-const MAX_OLD_TOOL_RESULT_CHARS = 800;
 
 const COMPACTION_SUMMARY_ITEMS = 6;
 const COMPACTION_FILE_LIMIT = 8;
@@ -384,11 +384,14 @@ function compactDisplayPart(part: DisplayMessagePart): DisplayMessagePart {
 }
 
 function compactToolCall(toolCall: DisplayToolCall): DisplayToolCall {
+  if (toolCall.result === undefined) {
+    return toolCall;
+  }
+
   return {
     ...toolCall,
-    result: toolCall.result
-      ? truncateText(toolCall.result, MAX_OLD_TOOL_RESULT_CHARS)
-      : toolCall.result,
+    result: undefined,
+    resultCollapsed: true,
   };
 }
 

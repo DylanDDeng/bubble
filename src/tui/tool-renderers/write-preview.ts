@@ -4,6 +4,7 @@ const WRITE_PREVIEW_LINE_LIMIT = 10;
 export const WRITE_PREVIEW_CHAR_LIMIT = 5000;
 
 export function isWritePreviewTool(tool: DisplayToolCall): tool is DisplayToolCall & { args: { content?: string } } {
+  if (tool.resultCollapsed) return false;
   if (tool.isError) return false;
   if (tool.name !== "write") return false;
   if (typeof tool.args?.content === "string") return true;

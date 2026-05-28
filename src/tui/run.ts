@@ -8136,8 +8136,9 @@ function traceGroupRenderableSignature(group: TraceGroup) {
       return [
         tool.id,
         tool.name,
-        tool.status ?? (tool.result === undefined ? "pending" : "completed"),
+        tool.status ?? (tool.result === undefined && !tool.resultCollapsed ? "pending" : "completed"),
         tool.isError ? "error" : "ok",
+        tool.resultCollapsed ? "collapsed" : "expanded",
         stableStringify(tool.args),
         tool.result ?? "",
         stableStringify(tool.metadata ?? null),
@@ -8150,8 +8151,9 @@ function toolRenderableSignature(tool: DisplayToolCall, writeExpanded: boolean) 
   return [
     tool.id,
     tool.name,
-    tool.status ?? (tool.result === undefined ? "pending" : "completed"),
+    tool.status ?? (tool.result === undefined && !tool.resultCollapsed ? "pending" : "completed"),
     tool.isError ? "error" : "ok",
+    tool.resultCollapsed ? "collapsed" : "expanded",
     tool.streamingArgs ? "streaming-args" : "args-complete",
     writeExpanded ? "expanded" : "collapsed",
     hashString(stableStringify(tool.args)),
@@ -9042,7 +9044,7 @@ function renderTool(tool: DisplayToolCall, syntaxStyle: SyntaxStyle, width = 80)
   const icon = toolStateIcon(tool);
   const color = toolColor(tool);
   const diff = extractToolDiff(tool);
-  if (diff && !tool.isError && tool.name === "edit") {
+  if (diff && !tool.resultCollapsed && !tool.isError && tool.name === "edit") {
     return h("box", { paddingLeft: 3, marginTop: 1, flexDirection: "column", flexShrink: 0 },
       h("text", { fg: color },
         `${icon} ${displayToolName(tool.name)}${toolHeader(tool) ? ` ${toolHeader(tool)}` : ""}`,
@@ -9052,7 +9054,7 @@ function renderTool(tool: DisplayToolCall, syntaxStyle: SyntaxStyle, width = 80)
       ),
     );
   }
-  if (isWritePreviewTool(tool)) {
+  if (!tool.resultCollapsed && isWritePreviewTool(tool)) {
     const hasContent = typeof tool.args.content === "string";
     const contentStr = hasContent ? String(tool.args.content) : "";
     const preview = hasContent ? formatWritePreview(contentStr, false) : null;
@@ -9888,7 +9890,18 @@ function toolPath(tool: DisplayToolCall): string | undefined {
 }
 
 function extractToolDiff(tool: DisplayToolCall): string | undefined {
+  if (tool.resultCollapsed) return undefined;
+  if (typeof tool.metadata?.diff === "string" && tool.metadata.diff.trim().length > 0) {
+    return tool.metadata.diff.trim();
+  }
   if (!tool.result) return undefined;
+  if (
+    tool.result.includes("✂") ||
+    tool.result.includes("chars truncated") ||
+    tool.result.includes("chars omitted for UI")
+  ) {
+    return undefined;
+  }
   const marker = "\n\nDiff:\n";
   const index = tool.result.indexOf(marker);
   if (index === -1) return undefined;
@@ -10037,7 +10050,7 @@ function formatQuestionAnswer(answer?: ReadonlyArray<string>) {
 }
 
 function isToolFinished(tool: DisplayToolCall): boolean {
-  return tool.status === "completed" || tool.status === "error" || tool.result !== undefined;
+  return tool.status === "completed" || tool.status === "error" || tool.resultCollapsed === true || tool.result !== undefined;
 }
 
 function assistantStatusLabel(message: DisplayMessage): string {

@@ -455,7 +455,7 @@ function isFailedSubagent(subagent: SubagentTraceItem): boolean {
 }
 
 function isToolPending(tool: DisplayToolCall): boolean {
-  return tool.result === undefined;
+  return tool.result === undefined && tool.resultCollapsed !== true;
 }
 
 function isDirectoryLikeGlob(pattern: string): boolean {

@@ -263,7 +263,7 @@ function ToolCard({
   verboseTrace: boolean;
   theme: Theme;
 }) {
-  const pending = tool.result === undefined;
+  const pending = isToolPending(tool);
   const error = tool.isError;
   const target = describeToolTarget(tool);
   const headerColor = pending ? theme.toolPending : error ? theme.toolError : theme.textMuted;
@@ -280,12 +280,16 @@ function ToolCard({
         {!pending && tool.result && verboseTrace && (
           <ToolResultPreview result={tool.result} error={error} terminalColumns={terminalColumns} theme={theme} />
         )}
-        {editDetails && editDetails.diff && (
+        {!tool.resultCollapsed && editDetails && editDetails.diff && (
           <EditDiffPreview diff={editDetails.diff} theme={theme} />
         )}
       </box>
     </box>
   );
+}
+
+function isToolPending(tool: DisplayToolCall): boolean {
+  return tool.result === undefined && tool.resultCollapsed !== true;
 }
 
 function describeToolTarget(tool: DisplayToolCall): string {

@@ -373,12 +373,12 @@ function ToolsPart({
     <Box flexDirection="column">
       {toolCalls.map((tc, idx) => {
         const isWaitingApproval =
-          tc.result === undefined && !!pendingApproval && approvalMatchesTool(pendingApproval, tc);
+          isToolPending(tc) && !!pendingApproval && approvalMatchesTool(pendingApproval, tc);
         return (
           <ToolCallDisplay
             key={tc.id}
             toolCall={tc}
-            isStreaming={tc.result === undefined}
+            isStreaming={isToolPending(tc)}
             verbose={verboseTrace}
             terminalColumns={terminalColumns}
             showExpandHint={showExpandHint && idx === lastIdx}
@@ -642,7 +642,7 @@ function isTraceGroupWaitingForApproval(
   pendingApproval?: PendingApprovalHint | null,
 ): boolean {
   return !!pendingApproval && group.raw.some(
-    (tool) => tool.result === undefined && approvalMatchesTool(pendingApproval, tool),
+    (tool) => isToolPending(tool) && approvalMatchesTool(pendingApproval, tool),
   );
 }
 
@@ -652,6 +652,10 @@ function approvalMatchesTool(hint: PendingApprovalHint, tc: DisplayToolCall): bo
     return !hint.command || hint.command === tc.args.command;
   }
   return !hint.path || hint.path === tc.args.path;
+}
+
+function isToolPending(tool: DisplayToolCall): boolean {
+  return tool.result === undefined && tool.resultCollapsed !== true;
 }
 
 function ReasoningTraceBlock({ reasoning }: { reasoning: string }) {
@@ -804,6 +808,7 @@ function getToolHeader(toolCall: DisplayToolCall): string | undefined {
 }
 
 function summarizeToolResult(tc: DisplayToolCall): string {
+  if (tc.resultCollapsed) return tc.isError ? "error output collapsed" : "result collapsed";
   if (tc.result === undefined) return "pending";
   const raw = tc.result.replace(/\r\n/g, "\n");
   if (tc.isError) {
@@ -991,7 +996,7 @@ function ToolCallDisplay({
   if (waitingApproval) {
     summary = "⏸ waiting for approval";
     summaryColor = theme.warning;
-  } else if (toolCall.result === undefined && toolCall.startedAt) {
+  } else if (isToolPending(toolCall) && toolCall.startedAt) {
     void nowTick;
     summary = "running";
     summaryColor = theme.toolPending;
@@ -1002,11 +1007,12 @@ function ToolCallDisplay({
   }
 
   const editDetails = getEditDiffDetails(toolCall);
-  const isEditDiff = editDetails !== null && toolCall.result !== undefined;
+  const isEditDiff = editDetails !== null && toolCall.result !== undefined && !toolCall.resultCollapsed;
+  const showSummary = !toolCall.resultCollapsed || waitingApproval;
   // Only show the file preview once the tool actually executed. During the
   // streaming-args phase, args.content is incomplete and re-rendering the
   // entire body per delta both looks chaotic and breaks on partial escapes.
-  const isWritePreview = toolCall.name === "write" && !toolCall.isError && toolCall.result !== undefined;
+  const isWritePreview = toolCall.name === "write" && !toolCall.isError && toolCall.result !== undefined && !toolCall.resultCollapsed;
 
   return (
     <Box flexDirection="column" marginLeft={2} marginTop={compactTop ? 0 : 1}>
@@ -1015,9 +1021,11 @@ function ToolCallDisplay({
         <Text bold color={theme.toolName}>{name}</Text>
         {header && <Text color={theme.muted}>({header})</Text>}
       </Box>
-      <Box marginLeft={2}>
-        <Text color={summaryColor}>⎿  {summary}</Text>
-      </Box>
+      {showSummary && (
+        <Box marginLeft={2}>
+          <Text color={summaryColor}>⎿  {summary}</Text>
+        </Box>
+      )}
       {toolCall.isError && toolCall.result && (
         <Box marginLeft={4} flexDirection="column">
           {toolCall.result.replace(/\r\n/g, "\n").split("\n").slice(0, 6).map((line, i) => (
@@ -1070,7 +1078,7 @@ function SubagentToolDisplay({
   const hasError = toolCall.isError || subagents.some((subagent) => (
     subagent.status === "failed" || subagent.status === "blocked" || subagent.status === "cancelled"
   ));
-  const bulletColor = hasError ? theme.error : toolCall.result === undefined ? theme.toolPending : theme.user;
+  const bulletColor = hasError ? theme.error : isToolPending(toolCall) ? theme.toolPending : theme.user;
   const detailWidth = Math.max(24, terminalColumns - 10);
   const rows = verbose ? sortSubagents(subagents) : sortSubagents(subagents).slice(0, 4);
   const omitted = Math.max(0, subagents.length - rows.length);

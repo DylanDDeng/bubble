@@ -38,6 +38,7 @@ export interface DisplayToolCall {
    */
   rawArguments?: string;
   result?: string;
+  resultCollapsed?: boolean;
   isError?: boolean;
   metadata?: ToolResultMetadata;
   /** Set when the tool_start event was received. Used to render elapsed time. */
@@ -95,7 +96,6 @@ export function toolCallsFromParts(parts: DisplayMessagePart[]): DisplayToolCall
 const FULL_DETAIL_WINDOW = 24;
 const MAX_OLD_CONTENT_CHARS = 1200;
 const MAX_OLD_REASONING_CHARS = 600;
-const MAX_OLD_TOOL_RESULT_CHARS = 800;
 
 export function compactDisplayMessages(messages: DisplayMessage[]): DisplayMessage[] {
   if (messages.length === 0) {
@@ -157,11 +157,14 @@ function compactDisplayPart(part: DisplayMessagePart): DisplayMessagePart {
 }
 
 function compactToolCall(toolCall: DisplayToolCall): DisplayToolCall {
+  if (toolCall.result === undefined) {
+    return toolCall;
+  }
+
   return {
     ...toolCall,
-    result: toolCall.result
-      ? truncateText(toolCall.result, MAX_OLD_TOOL_RESULT_CHARS)
-      : toolCall.result,
+    result: undefined,
+    resultCollapsed: true,
   };
 }
 
