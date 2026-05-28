@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { composeSystemPrompt } from "../prompt/compose.js";
 import { createAllTools } from "../tools/index.js";
 import { toChatCompletionsMessage } from "../provider.js";
-import type { ProviderMessage, ToolDefinition } from "../types.js";
+import { projectMessages } from "../context/projector.js";
+import type { Message, ProviderMessage, ToolDefinition } from "../types.js";
 
 // Companion to deepseek-cache-prefix.test.ts.
 //
@@ -56,6 +57,17 @@ function serializeRequestPrefix(
       { role: "system", content: systemPrompt },
       ...history.map((m) => toChatCompletionsMessage(m, DEEPSEEK_ECHO)),
     ],
+    tools: toOpenAiTools(tools),
+    tool_choice: "auto",
+  });
+}
+
+function serializeProjectedRequest(
+  tools: ToolDefinition[],
+  messages: ProviderMessage[],
+): string {
+  return JSON.stringify({
+    messages: messages.map((m) => toChatCompletionsMessage(m, DEEPSEEK_ECHO)),
     tools: toOpenAiTools(tools),
     tool_choice: "auto",
   });
@@ -162,5 +174,36 @@ describe("DeepSeek cache prefix — system prompt + tools", () => {
 
     expect(serializeRequestPrefix(turn2Prompt, tools, history))
       .toBe(serializeRequestPrefix(turn1Prompt, tools, history));
+  });
+
+  it("new runtime reminders append near the active turn instead of rewriting the cached prefix", () => {
+    const tools = createAllTools("/repo");
+    const systemPrompt = composeSystemPrompt(STABLE_PROMPT_OPTIONS);
+    const turn1Messages: Message[] = [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: "Find references to FooBar" },
+      { role: "meta", kind: "system-reminder", content: "Debugging workflow: find the failing boundary." },
+    ];
+    const turn1Projected = projectMessages(turn1Messages);
+    const turn1Body = serializeProjectedRequest(tools, turn1Projected);
+
+    const turn2Messages: Message[] = [
+      ...turn1Messages,
+      { role: "assistant", content: "Found one reference." },
+      { role: "user", content: "Open it and explain" },
+      { role: "meta", kind: "system-reminder", content: "Code explanation workflow: answer directly." },
+    ];
+    const turn2Projected = projectMessages(turn2Messages);
+    const turn2PrefixBody = serializeProjectedRequest(
+      tools,
+      turn2Projected.slice(0, turn1Projected.length),
+    );
+
+    expect(turn2PrefixBody).toBe(turn1Body);
+    expect(turn2Projected[0]).toEqual({ role: "system", content: systemPrompt });
+    expect(turn2Projected.at(-1)).toEqual({
+      role: "user",
+      content: "Runtime reminder:\nCode explanation workflow: answer directly.",
+    });
   });
 });

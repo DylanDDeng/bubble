@@ -143,7 +143,7 @@ describe("projectMessages", () => {
     expect(synth.toolCallId).toBe("edit:6");
   });
 
-  it("projects runtime meta into system context instead of user messages", () => {
+  it("projects runtime meta in place instead of merging it into the leading system prompt", () => {
     const out = projectMessages([
       { role: "system", content: "base" },
       { role: "user", content: "go" },
@@ -151,8 +151,23 @@ describe("projectMessages", () => {
     ]);
 
     expect(out).toEqual([
-      { role: "system", content: "base\n\nRuntime reminder:\nPlan mode is now ACTIVE." },
+      { role: "system", content: "base" },
       { role: "user", content: "go" },
+      { role: "user", content: "Runtime reminder:\nPlan mode is now ACTIVE." },
+    ]);
+  });
+
+  it("keeps later system context out of the leading system prompt", () => {
+    const out = projectMessages([
+      { role: "system", content: "base" },
+      { role: "user", content: "go" },
+      { role: "system", content: "Previous conversation summary:\nold work" },
+    ]);
+
+    expect(out).toEqual([
+      { role: "system", content: "base" },
+      { role: "user", content: "go" },
+      { role: "user", content: "Runtime context:\nPrevious conversation summary:\nold work" },
     ]);
   });
 
