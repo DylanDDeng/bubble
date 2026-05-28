@@ -5,7 +5,7 @@
 import type { PermissionMode, ThinkingLevel } from "./types.js";
 import { isThinkingLevel } from "./variant/thinking-level.js";
 
-export type CliCommand = "default" | "serve";
+export type CliCommand = "default" | "serve" | "update";
 
 export interface CliArgs {
   command: CliCommand;
@@ -26,6 +26,8 @@ export interface CliArgs {
   killOld?: boolean;
   /** `serve` subcommand: connect then exit. */
   dryRun?: boolean;
+  /** `update` subcommand: only report whether an update exists, don't install. */
+  checkOnly?: boolean;
 }
 
 export function parseArgs(argv: string[]): CliArgs {
@@ -39,6 +41,9 @@ export function parseArgs(argv: string[]): CliArgs {
   if (argv.length > 0 && !argv[0]!.startsWith("-")) {
     if (argv[0] === "serve") {
       args.command = "serve";
+      startIndex = 1;
+    } else if (argv[0] === "update" || argv[0] === "upgrade") {
+      args.command = "update";
       startIndex = 1;
     }
   }
@@ -100,6 +105,9 @@ export function parseArgs(argv: string[]): CliArgs {
       case "--dry-run":
         args.dryRun = true;
         break;
+      case "--check":
+        args.checkOnly = true;
+        break;
       default:
         if (!arg.startsWith("-") && !args.prompt) {
           args.prompt = arg;
@@ -115,6 +123,7 @@ export function printHelp() {
   console.log(`
 Usage:
   bubble [options] [prompt]              Start interactive TUI
+  bubble update [--check]                Update to the latest version (alias: upgrade)
   bubble serve --feishu [options]        Run as a Feishu bot host
 
 Options (default):
@@ -129,7 +138,11 @@ Options (default):
   --dangerously-skip-permissions
                            Enable bypass mode (auto-approve EVERY tool; disables all safety prompts)
   -p, --print              Non-interactive mode (single prompt)
+  -v, --version            Print the installed version and exit
   -h, --help               Show this help
+
+Options (update):
+  --check                  Only report whether a newer version exists
 
 Options (serve --feishu):
   --setup                  Force the wizard (scan QR + bind first scope)
