@@ -318,7 +318,7 @@ const PROMPT_SCANNER_IDLE_FRAMES = ["        "];
 const PROMPT_SCANNER_INTERVAL_MS = 80;
 const SESSION_SIDEBAR_WIDTH = 42;
 const SESSION_SIDEBAR_AUTO_WIDTH = 120;
-const PROVIDER_DIALOG_ROWS = 11;
+const PROVIDER_DIALOG_ROWS = 13;
 const QUESTION_MAX_TABS = 4;
 const QUESTION_MAX_OPTIONS = 10;
 const QUESTION_MAX_CONFIRM_ROWS = 3;
@@ -3341,7 +3341,7 @@ function OpenTuiApp(props: {
       return;
     }
 
-    const width = Math.max(48, Math.min(60, dimensions().width - 2));
+    const width = Math.max(56, Math.min(76, dimensions().width - 4));
     const height = PROVIDER_DIALOG_ROWS + 7;
     providerDialogRoot.visible = true;
     providerDialogRoot.width = dimensions().width;
@@ -6457,7 +6457,7 @@ function OpenTuiApp(props: {
       },
       visible: false,
       position: "absolute",
-      width: 60,
+      width: 76,
       height: PROVIDER_DIALOG_ROWS + 7,
       backgroundColor: theme.backgroundPanel,
       flexDirection: "column",
