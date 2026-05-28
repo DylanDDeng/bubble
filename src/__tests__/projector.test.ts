@@ -168,4 +168,33 @@ describe("projectMessages", () => {
       { role: "user", content: "go" },
     ]);
   });
+
+  it("drops reasoning-only assistant messages because provider history requires content or tool calls", () => {
+    const out = projectMessages([
+      { role: "system", content: "base" },
+      { role: "user", content: "go" },
+      { role: "assistant", content: "", reasoning: "thinking without a visible answer" },
+      { role: "assistant", content: "visible answer", reasoning: "kept with content" },
+      {
+        role: "assistant",
+        content: "",
+        reasoning: "kept with tool call",
+        toolCalls: [{ id: "read:1", name: "read", arguments: "{}" }],
+      },
+      { role: "tool", toolCallId: "read:1", content: "ok" },
+    ]);
+
+    expect(out).toEqual([
+      { role: "system", content: "base" },
+      { role: "user", content: "go" },
+      { role: "assistant", content: "visible answer", reasoning: "kept with content" },
+      {
+        role: "assistant",
+        content: "",
+        reasoning: "kept with tool call",
+        toolCalls: [{ id: "read:1", name: "read", arguments: "{}" }],
+      },
+      { role: "tool", toolCallId: "read:1", content: "ok" },
+    ]);
+  });
 });

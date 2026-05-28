@@ -13,7 +13,21 @@ function queueKey(filePath: string): string {
 }
 
 export async function withFileMutationQueue<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
-  const key = queueKey(filePath);
+  return withQueueKey(queueKey(filePath), fn);
+}
+
+export async function withFileMutationQueues<T>(filePaths: string[], fn: () => Promise<T>): Promise<T> {
+  const keys = [...new Set(filePaths.map(queueKey))].sort();
+
+  const run = (index: number): Promise<T> => {
+    if (index >= keys.length) return fn();
+    return withQueueKey(keys[index], () => run(index + 1));
+  };
+
+  return run(0);
+}
+
+async function withQueueKey<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const current = queues.get(key) ?? Promise.resolve();
 
   let release!: () => void;

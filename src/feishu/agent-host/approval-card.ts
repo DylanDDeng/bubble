@@ -41,6 +41,15 @@ export function formatApprovalRequest(req: ApprovalRequest): ApprovalSummary {
           `\n**diff:**\n\`\`\`diff\n${truncate(req.diff, DIFF_PREVIEW_MAX)}\n\`\`\``,
         ].join("\n"),
       };
+    case "patch":
+      return {
+        title: "应用补丁",
+        body: [
+          `**files:** ${req.paths.length}`,
+          `**path:** \`${truncate(req.path, PATH_PREVIEW_MAX)}\``,
+          `\n**diff:**\n\`\`\`diff\n${truncate(req.diff, DIFF_PREVIEW_MAX)}\n\`\`\``,
+        ].join("\n"),
+      };
     case "lsp":
       return {
         title: `LSP 操作 (${req.operation})`,

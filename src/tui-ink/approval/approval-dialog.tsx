@@ -95,7 +95,7 @@ function buildOptions(request: ApprovalRequest): ApprovalOption[] {
     ];
   }
 
-  // edit / write
+  // edit / write / patch
   return [
     { id: "yes", label: "Yes", allowAmend: true, amendPlaceholder: "and tell Claude what to do next" },
     {
@@ -112,6 +112,8 @@ function dialogTitle(req: ApprovalRequest): string {
   switch (req.type) {
     case "edit":
       return "Edit file";
+    case "patch":
+      return "Apply patch";
     case "write":
       return req.fileExists ? "Overwrite file" : "Create file";
     case "bash":
@@ -125,6 +127,8 @@ function dialogQuestion(req: ApprovalRequest): string {
   switch (req.type) {
     case "edit":
       return `Do you want to make this edit to ${basename(req.path)}?`;
+    case "patch":
+      return `Do you want to apply this patch to ${req.paths.length} file${req.paths.length === 1 ? "" : "s"}?`;
     case "write":
       return `Do you want to ${req.fileExists ? "overwrite" : "create"} ${basename(req.path)}?`;
     case "bash":
@@ -144,6 +148,8 @@ function RequestPreview({ request }: { request: ApprovalRequest }) {
     case "bash":
       return <BashPreview command={request.command} cwd={request.cwd} />;
     case "edit":
+      return <DiffView diff={request.diff} />;
+    case "patch":
       return <DiffView diff={request.diff} />;
     case "write":
       return <WritePreview path={request.path} content={request.content} />;

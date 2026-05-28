@@ -16,6 +16,16 @@ function makeController(mode: PermissionMode, handler?: (req: ApprovalRequest) =
 
 const EDIT_REQ: ApprovalRequest = { type: "edit", path: "/tmp/f.ts", diff: "diff", fileExists: true };
 const WRITE_REQ: ApprovalRequest = { type: "write", path: "/tmp/new.ts", content: "hi", fileExists: false };
+const PATCH_REQ: ApprovalRequest = {
+  type: "patch",
+  path: "/tmp/bubble-test/src/a.ts (+1 more)",
+  paths: ["/tmp/bubble-test/src/a.ts", "/tmp/bubble-test/generated/new.ts"],
+  files: [
+    { path: "/tmp/bubble-test/src/a.ts", kind: "update" },
+    { path: "/tmp/bubble-test/generated/new.ts", kind: "add" },
+  ],
+  diff: "diff",
+};
 const BASH_REQ: ApprovalRequest = { type: "bash", command: "ls", cwd: "/tmp" };
 const LSP_REQ: ApprovalRequest = { type: "lsp", path: "/tmp/bubble-test/src/a.ts", operation: "hover" };
 
@@ -24,10 +34,11 @@ describe("PermissionAwareApprovalController", () => {
     const c = makeController("bypassPermissions");
     expect(await c.request(EDIT_REQ)).toEqual({ action: "approve" });
     expect(await c.request(WRITE_REQ)).toEqual({ action: "approve" });
+    expect(await c.request(PATCH_REQ)).toEqual({ action: "approve" });
     expect(await c.request(BASH_REQ)).toEqual({ action: "approve" });
   });
 
-  it("auto-approves edit/write in default Build mode but still asks for bash", async () => {
+  it("auto-approves edit/write/patch in default Build mode but still asks for bash", async () => {
     const handler = vi.fn(async () => ({ action: "approve" }) as ApprovalDecision);
     const handlerRef = { current: handler };
     const c = new PermissionAwareApprovalController({
@@ -38,6 +49,7 @@ describe("PermissionAwareApprovalController", () => {
 
     expect(await c.request(EDIT_REQ)).toEqual({ action: "approve" });
     expect(await c.request(WRITE_REQ)).toEqual({ action: "approve" });
+    expect(await c.request(PATCH_REQ)).toEqual({ action: "approve" });
     expect(handler).not.toHaveBeenCalled();
 
     expect(await c.request(BASH_REQ)).toEqual({ action: "approve" });
@@ -174,6 +186,20 @@ describe("PermissionAwareApprovalController", () => {
     });
     expect(blocked.action).toBe("reject");
     expect(blocked.feedback).toContain("Write(/etc/**)");
+  });
+
+  it("deny rule checks every patch file using Edit/Write semantics", async () => {
+    const handler = vi.fn(async () => ({ action: "approve" }) as ApprovalDecision);
+    const c = new PermissionAwareApprovalController({
+      getMode: () => "default",
+      handlerRef: { current: handler },
+      cwd: "/tmp/bubble-test",
+      getRuleSet: () => buildRuleSet([], ["Write(./generated/**)"]),
+    });
+    const blocked = await c.request(PATCH_REQ);
+    expect(blocked.action).toBe("reject");
+    expect(blocked.feedback).toContain("Write(./generated/**)");
+    expect(handler).not.toHaveBeenCalled();
   });
 
   it("reads mode lazily so mode changes take effect on the next request", async () => {

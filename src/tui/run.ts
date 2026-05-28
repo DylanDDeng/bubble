@@ -45,6 +45,12 @@ import { homedir } from "node:os";
 import { AgentAbortError, type Agent } from "../agent.js";
 import { AgentRunInputQueue } from "../agent/input-controller.js";
 import { debugReasoningStream, summarizeDebugText } from "../reasoning-debug.js";
+import {
+  summarizeAgentEventForTrace,
+  summarizeTraceError,
+  summarizeTraceValue,
+  traceEvent,
+} from "../debug-trace.js";
 import type { CliArgs } from "../cli.js";
 import type { ThemeMode } from "../config.js";
 import type { SessionManager } from "../session.js";
@@ -1441,6 +1447,7 @@ function OpenTuiApp(props: {
     switch (request.type) {
       case "bash": return "Bash";
       case "edit": return "Edit";
+      case "patch": return "Patch";
       case "write": return "Write";
       case "lsp": return "Lsp";
     }
@@ -2664,6 +2671,17 @@ function OpenTuiApp(props: {
     return changed;
   }
 
+  function removeQueuedUserDisplay(displayId?: string) {
+    if (!displayId) return false;
+    const beforeDisplayCount = displayMessages.length;
+    const beforeQueuedCount = queuedDisplayMessages.length;
+    displayMessages = displayMessages.filter((message) => message.clientId !== displayId);
+    queuedDisplayMessages = queuedDisplayMessages.filter((message) => message.clientId !== displayId);
+    const changed = displayMessages.length !== beforeDisplayCount || queuedDisplayMessages.length !== beforeQueuedCount;
+    if (changed) redrawTranscriptWithQueuedDisplays();
+    return changed;
+  }
+
   function promoteQueuedUserDisplay(displayId?: string, fallbackContent?: string) {
     if (!displayId) return false;
     const index = queuedDisplayMessages.findIndex((message) => message.clientId === displayId);
@@ -2849,6 +2867,10 @@ function OpenTuiApp(props: {
 
   function cancelActiveAgentRun() {
     if (!activeRun || activeRun.abortController.signal.aborted) return false;
+    traceEvent("tui_running_cancel", {
+      runId: activeRun.id,
+      pendingQueuedInputs: queuedInputCount(),
+    }, { surface: "tui" });
     clearRunningCancelHint();
     activeRun.abortController.abort(new AgentAbortError("Agent run cancelled by user."));
     setNotice("Agent run cancelled");
@@ -2884,6 +2906,7 @@ function OpenTuiApp(props: {
     if (name !== "escape") return false;
     if (!activeRun || activeRun.abortController.signal.aborted) return false;
     const shouldCancel = armRunningCancelHint(activeRun);
+    traceKeyRoute(event ? "key" : "raw", name, !shouldCancel ? "armed_cancel" : "confirm_cancel");
     if (!shouldCancel) {
       if (event) preventGlobalKey(event);
       return true;
@@ -2897,28 +2920,71 @@ function OpenTuiApp(props: {
     if (name !== "tab" || event?.shift) return false;
     if (!isRunning() || activeModalKeyOwner()) return false;
     queuePromptFromComposer({ notice: "Queued next message" });
+    traceKeyRoute(event ? "key" : "raw", name, "queued_next_message");
     if (event) preventGlobalKey(event);
     return true;
+  }
+
+  function traceKeyRoute(source: "raw" | "key", name: string, result: string) {
+    const shouldTrace = result !== "unhandled"
+      || name === "escape"
+      || name === "enter"
+      || name === "tab"
+      || name === "up"
+      || name === "down"
+      || name === "left"
+      || name === "right"
+      || name === "ctrl-c"
+      || !!activeModalKeyOwner()
+      || isRunning();
+    if (!shouldTrace) return;
+    traceEvent("tui_key_route", {
+      source,
+      key: name,
+      result,
+      modalOwner: activeModalKeyOwner(),
+      running: isRunning(),
+      activeRunId: activeRun?.id,
+      pendingApproval: !!pendingApproval(),
+      pendingPlan: !!pendingPlan(),
+      pendingQuestion: !!pendingQuestion(),
+      providerDialog: !!providerDialog,
+      picker: !!picker,
+    }, { surface: "tui" });
   }
 
   function routeGlobalRawSequence(sequence: string) {
     if (isCtrlCSequence(sequence)) {
       void requestExit({ direct: true });
+      traceKeyRoute("raw", "ctrl-c", "exit");
       return true;
     }
     const name = keyNameFromSequence(sequence);
     const modalName = modalKeyNameFromSequence(sequence);
-    if (routeModalRawSequence(sequence)) return true;
+    if (routeModalRawSequence(sequence)) {
+      traceKeyRoute("raw", modalName || name, "modal");
+      return true;
+    }
     if (routeRunningCancel(name)) return true;
     if (routeRunningQueue(modalName)) return true;
-    if (cycleModeFromRawSequence(sequence)) return true;
+    if (cycleModeFromRawSequence(sequence)) {
+      traceKeyRoute("raw", name, "mode_cycle");
+      return true;
+    }
+    traceKeyRoute("raw", name, "unhandled");
     return false;
   }
 
   function routeGlobalKeyEvent(event: any) {
-    if (routeCtrlCExit(event)) return true;
+    if (routeCtrlCExit(event)) {
+      traceKeyRoute("key", "ctrl-c", "exit");
+      return true;
+    }
     const name = keyNameFromEvent(event);
-    if (routeModalKey(event)) return true;
+    if (routeModalKey(event)) {
+      traceKeyRoute("key", name, "modal");
+      return true;
+    }
     if (routeRunningCancel(name, event)) return true;
     if (routeRunningQueue(name, event)) return true;
     // Ctrl+Shift+M opens the MCP reconnect picker. Shift is required because
@@ -2926,24 +2992,32 @@ function OpenTuiApp(props: {
     if (event.ctrl && event.shift && name === "m") {
       openMcpReconnectPicker();
       event.preventDefault?.();
+      traceKeyRoute("key", name, "mcp_picker");
       return true;
     }
     if (event.ctrl && name === "t" && !picker) {
       toggleThinkingVisibility();
       event.preventDefault?.();
+      traceKeyRoute("key", name, "toggle_thinking");
       return true;
     }
     if (event.ctrl && name === "o" && !picker) {
       toggleVerboseTrace();
       event.preventDefault?.();
+      traceKeyRoute("key", name, "toggle_verbose_trace");
       return true;
     }
-    if (cycleModeFromKey(event)) return true;
+    if (cycleModeFromKey(event)) {
+      traceKeyRoute("key", name, "mode_cycle");
+      return true;
+    }
     if (event.ctrl && name === "p" && !picker && !isRunning()) {
       openCommandPalette();
       event.preventDefault?.();
+      traceKeyRoute("key", name, "command_palette");
       return true;
     }
+    traceKeyRoute("key", name, "unhandled");
     return false;
   }
 
@@ -5282,6 +5356,15 @@ function OpenTuiApp(props: {
     redrawTranscript(undefined, nextMessages);
     const taskStartedAt = Date.now();
     const run = beginAgentRun();
+    traceEvent("tui_agent_run_begin", {
+      runId: run.id,
+      input: summarizeTraceValue(actualInput),
+      displayInput: summarizeTraceValue(displayInput),
+      displayMessages: displayMessages.length,
+      queuedInputs: queuedInputCount(),
+      provider: activeProviderId,
+      model: props.agent.apiModel,
+    }, { surface: "tui" });
 
     let assistantContent = "";
     let assistantReasoning = "";
@@ -5325,6 +5408,14 @@ function OpenTuiApp(props: {
         abortSignal: run.abortController.signal,
         inputController: run.inputController,
       })) {
+        traceEvent("tui_agent_event", {
+          runId: run.id,
+          event: summarizeAgentEventForTrace(event),
+          displayMessages: displayMessages.length,
+          streamingChars: assistantContent.length,
+          reasoningChars: assistantReasoning.length,
+          toolCount: toolCalls.length,
+        }, { surface: "tui" });
         if (event.type === "turn_start") {
           assistantContent = "";
           assistantReasoning = "";
@@ -5514,6 +5605,11 @@ function OpenTuiApp(props: {
       if (!runCancelled) {
         runError = error?.message || String(error);
       }
+      traceEvent("tui_agent_run_error", {
+        runId: run.id,
+        cancelled: runCancelled,
+        error: summarizeTraceError(error),
+      }, { surface: "tui" });
     } finally {
       if (pendingStreamingRedrawTimer !== undefined) {
         clearTimeout(pendingStreamingRedrawTimer);
@@ -5522,8 +5618,19 @@ function OpenTuiApp(props: {
       pendingApprovalRef = undefined;
       setPendingApproval(undefined);
       setApprovalOptionIdx(0);
+      traceEvent("tui_agent_run_end", {
+        runId: run.id,
+        cancelled: runCancelled,
+        error: runError,
+        displayMessages: displayMessages.length,
+        queuedInputs: queuedInputCount(),
+      }, { surface: "tui" });
       for (const pendingInput of run.inputController.clear()) {
         const pendingSteer = removePendingSteerInput(pendingInput.id);
+        if (runCancelled) {
+          removeQueuedUserDisplay(pendingSteer?.displayId);
+          continue;
+        }
         requeueRejectedSteer(pendingInput.content, pendingSteer?.displayId);
       }
       finishAgentRun(run);
@@ -5535,6 +5642,7 @@ function OpenTuiApp(props: {
         redrawTranscript(undefined, nextMessages);
       } else if (runCancelled) {
         if (!notice()) setNotice("Agent run cancelled");
+        displayMessages = reconstructDisplayMessages(props.agent.messages);
         redrawTranscript();
       } else {
         displayMessages = annotateLastTaskDuration(displayMessages, Date.now() - taskStartedAt);
@@ -8050,7 +8158,7 @@ function createTraceGroupRenderable(ctx: RenderContext, group: TraceGroup, synta
 }
 
 function shouldRenderTraceGroupAsRawTool(tool: DisplayToolCall) {
-  return tool.name === "question" || tool.name === "todo_write" || tool.name === "edit";
+  return tool.name === "question" || tool.name === "todo_write" || tool.name === "edit" || tool.name === "apply_patch";
 }
 
 function traceGroupDetailLines(group: TraceGroup) {
@@ -9044,7 +9152,7 @@ function renderTool(tool: DisplayToolCall, syntaxStyle: SyntaxStyle, width = 80)
   const icon = toolStateIcon(tool);
   const color = toolColor(tool);
   const diff = extractToolDiff(tool);
-  if (diff && !tool.resultCollapsed && !tool.isError && tool.name === "edit") {
+  if (diff && !tool.resultCollapsed && !tool.isError && (tool.name === "edit" || tool.name === "apply_patch")) {
     return h("box", { paddingLeft: 3, marginTop: 1, flexDirection: "column", flexShrink: 0 },
       h("text", { fg: color },
         `${icon} ${displayToolName(tool.name)}${toolHeader(tool) ? ` ${toolHeader(tool)}` : ""}`,
@@ -9581,7 +9689,7 @@ function appendRawToolTranscript(chunks: StyledText["chunks"], tool: DisplayTool
   };
 
   appendLine("");
-  const icon = tool.name === "bash" ? "$" : tool.name === "edit" || tool.name === "write" ? "✎" : "●";
+  const icon = tool.name === "bash" ? "$" : tool.name === "edit" || tool.name === "write" || tool.name === "apply_patch" ? "✎" : "●";
   const color = toolColor(tool);
   append(`   ${icon} `, color);
   append(displayToolName(tool.name), color);
@@ -9759,6 +9867,19 @@ function getApprovalPanelMeta(request: ApprovalRequest) {
     };
   }
 
+  if (request.type === "patch") {
+    return {
+      icon: "→",
+      title: `Patch ${path}`,
+      subtitle: `${request.paths.length} file${request.paths.length === 1 ? "" : "s"}`,
+      preview: request.diff || "No diff provided",
+      previewHeight: 10,
+      previewColor: request.diff ? theme.toolText : theme.textMuted,
+      diff: request.diff,
+      path: request.paths[0] ?? request.path,
+    };
+  }
+
   return {
     icon: "→",
     title: `Write ${path}`,
@@ -9839,7 +9960,7 @@ function toolColor(tool: DisplayToolCall) {
   if (!isToolFinished(tool)) return theme.toolPending;
   if (tool.name === "bash") return theme.toolShell;
   if (tool.name === "read") return theme.toolRead;
-  if (tool.name === "write" || tool.name === "edit") return theme.toolWrite;
+  if (tool.name === "write" || tool.name === "edit" || tool.name === "apply_patch") return theme.toolWrite;
   if (tool.name === "grep" || tool.name === "glob" || tool.name === "web_search" || tool.name === "web_fetch") return theme.toolSearch;
   return theme.toolSuccess;
 }
@@ -9849,6 +9970,7 @@ function displayToolName(name: string): string {
     read: "Read",
     write: "Write",
     edit: "Edit",
+    apply_patch: "Patch",
     bash: "Shell",
     grep: "Grep",
     glob: "Glob",
@@ -9880,12 +10002,15 @@ function toolHeader(tool: DisplayToolCall): string {
     const agentId = args.agent_id ?? (Array.isArray(args.agent_ids) ? `${args.agent_ids.length} agents` : undefined);
     return agentId ? `(${truncate(String(agentId), 64)})` : "";
   }
-  const value = args.path ?? args.command ?? args.pattern ?? args.url ?? args.query;
+  const value = args.path ?? args.command ?? args.pattern ?? args.url ?? args.query ?? toolPath(tool);
   return value ? `(${truncate(String(value).replace(/\n/g, " "), 64)})` : "";
 }
 
 function toolPath(tool: DisplayToolCall): string | undefined {
-  const value = tool.args?.path ?? tool.args?.filePath;
+  const value = tool.args?.path
+    ?? tool.args?.filePath
+    ?? tool.metadata?.path
+    ?? (Array.isArray(tool.metadata?.paths) ? tool.metadata.paths[0] : undefined);
   return typeof value === "string" ? value : undefined;
 }
 
@@ -9952,7 +10077,7 @@ function summarizeToolResult(tool: DisplayToolCall): string {
   const lines = result.replace(/\r\n/g, "\n").split("\n").filter((line) => line.trim()).length;
   const matches = typeof tool.metadata?.matches === "number" ? tool.metadata.matches : undefined;
   if (tool.name === "read") return "";
-  if (tool.name === "edit") return "patched file";
+  if (tool.name === "edit" || tool.name === "apply_patch") return "patched file";
   if (tool.name === "write") return "wrote file";
   if (tool.name === "grep" || tool.name === "glob") {
     if (matches !== undefined) return `${matches} match${matches === 1 ? "" : "es"}`;
@@ -9972,7 +10097,7 @@ function toolStateIcon(tool: DisplayToolCall): string {
     return "◌";
   }
   if (tool.name === "bash") return "$";
-  if (tool.name === "edit") return "✎";
+  if (tool.name === "edit" || tool.name === "apply_patch") return "✎";
   if (tool.name === "write") return "✎";
   if (tool.name === "read") return "▤";
   if (tool.name === "grep" || tool.name === "glob") return "⌕";

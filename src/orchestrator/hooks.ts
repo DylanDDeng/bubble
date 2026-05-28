@@ -17,6 +17,7 @@ export interface TurnHookState {
   codeChanged?: boolean;
   smallTaskHintSent?: boolean;
   recentEditFailures?: string[];
+  editNoMatchReminderPaths?: string[];
   editRetryReminderSent?: boolean;
   recentReadPaths?: string[];
   redundantReadReminded?: Set<string>;

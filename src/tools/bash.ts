@@ -13,6 +13,11 @@ import { referencesSensitivePath } from "./sensitive-paths.js";
 import type { FileStateTracker } from "./file-state.js";
 
 const MAX_OUTPUT = 50 * 1024;
+const POST_EXIT_STDIO_GRACE_MS = 150;
+const FORCE_KILL_AFTER_MS = 750;
+const ABORT_SETTLE_AFTER_MS = 1500;
+
+type TerminalKind = "exit" | "error" | "timeout" | "cancelled";
 
 export function createBashTool(cwd: string, approval?: ApprovalController, _fileState?: FileStateTracker): ToolRegistryEntry {
   return {
@@ -20,7 +25,7 @@ export function createBashTool(cwd: string, approval?: ApprovalController, _file
     effect: "unknown",
     requiresApproval: true,
     description:
-      "Execute a bash command in the working directory. Use timeout for long-running commands.",
+      "Execute a bounded bash command in the working directory. Use timeout for long-running commands. For persistent dev servers or watchers such as npm run dev, next dev, vite, or webpack --watch, use start_server instead of backgrounding a bash command.",
     parameters: {
       type: "object",
       properties: {
@@ -62,53 +67,107 @@ export function createBashTool(cwd: string, approval?: ApprovalController, _file
           cwd,
           stdio: ["ignore", "pipe", "pipe"],
           env: process.env,
+          detached: platform() !== "win32",
+          windowsHide: true,
         });
 
         let stdout = "";
         let stderr = "";
-        let timedOut = false;
-        let aborted = false;
+        let stdoutTruncated = false;
+        let stderrTruncated = false;
+        let stdoutEnded = child.stdout === null;
+        let stderrEnded = child.stderr === null;
+        let exitCode: number | null = null;
+        let terminal: TerminalKind | undefined;
+        let terminalError: Error | undefined;
+        let resolved = false;
+        let timeoutHandle: NodeJS.Timeout | undefined;
+        let forceKillHandle: NodeJS.Timeout | undefined;
+        let settleHandle: NodeJS.Timeout | undefined;
+        let postExitHandle: NodeJS.Timeout | undefined;
 
-        const abortChild = () => {
-          if (aborted) return;
-          aborted = true;
-          child.kill("SIGTERM");
-          setTimeout(() => child.kill("SIGKILL"), 5000);
+        const appendOutput = (target: "stdout" | "stderr", data: Buffer) => {
+          const current = target === "stdout" ? stdout : stderr;
+          const truncated = target === "stdout" ? stdoutTruncated : stderrTruncated;
+          if (truncated) return;
+
+          const next = current + data.toString();
+          if (Buffer.byteLength(next, "utf-8") <= MAX_OUTPUT) {
+            if (target === "stdout") stdout = next;
+            else stderr = next;
+            return;
+          }
+
+          const capped = Buffer.from(next, "utf-8").subarray(0, MAX_OUTPUT).toString("utf-8");
+          if (target === "stdout") {
+            stdout = capped;
+            stdoutTruncated = true;
+          } else {
+            stderr = capped;
+            stderrTruncated = true;
+          }
         };
 
-        const timeoutHandle = setTimeout(() => {
-          timedOut = true;
-          abortChild();
-        }, timeoutSec * 1000);
-        if (ctx.abortSignal?.aborted) abortChild();
-        ctx.abortSignal?.addEventListener("abort", abortChild, { once: true });
-
-        child.stdout?.on("data", (data) => {
-          stdout += data.toString();
-        });
-        child.stderr?.on("data", (data) => {
-          stderr += data.toString();
-        });
-
-        child.on("error", (err) => {
-          clearTimeout(timeoutHandle);
-          ctx.abortSignal?.removeEventListener("abort", abortChild);
-          resolve({ content: `Error: ${err.message}`, isError: true });
-        });
-
-        child.on("close", (code) => {
-          clearTimeout(timeoutHandle);
-          ctx.abortSignal?.removeEventListener("abort", abortChild);
-
+        const buildOutput = (suffix?: string): string => {
           let output = "";
           if (stdout) output += `stdout:\n${stdout}\n`;
           if (stderr) output += `stderr:\n${stderr}\n`;
           if (output === "") output = "(no output)\n";
+          if (stdoutTruncated || stderrTruncated) {
+            output += "\n[Output truncated]";
+          }
 
-          if (timedOut) {
-            output += `[Command timed out after ${timeoutSec}s]`;
+          if (Buffer.byteLength(output, "utf-8") > MAX_OUTPUT) {
+            output = Buffer.from(output, "utf-8").subarray(0, MAX_OUTPUT).toString("utf-8");
+            output += "\n[Output truncated]";
+          }
+          if (suffix) output += `${output.endsWith("\n") ? "" : "\n"}${suffix}`;
+          return output.trim();
+        };
+
+        const cleanup = () => {
+          if (timeoutHandle) clearTimeout(timeoutHandle);
+          if (forceKillHandle) clearTimeout(forceKillHandle);
+          if (settleHandle) clearTimeout(settleHandle);
+          if (postExitHandle) clearTimeout(postExitHandle);
+          ctx.abortSignal?.removeEventListener("abort", abortChild);
+          child.stdout?.removeListener("data", onStdoutData);
+          child.stderr?.removeListener("data", onStderrData);
+          child.stdout?.removeListener("end", onStdoutEnd);
+          child.stdout?.removeListener("close", onStdoutEnd);
+          child.stderr?.removeListener("end", onStderrEnd);
+          child.stderr?.removeListener("close", onStderrEnd);
+          child.removeListener("error", onError);
+          child.removeListener("exit", onExit);
+          child.removeListener("close", onClose);
+        };
+
+        const destroyStreams = () => {
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+        };
+
+        const cleanupBackgroundGroup = () => {
+          if (!child.pid || terminal !== "exit") return;
+          killProcessTree(child.pid, "SIGTERM");
+          setTimeout(() => killProcessTree(child.pid!, "SIGKILL"), FORCE_KILL_AFTER_MS).unref?.();
+        };
+
+        const finish = () => {
+          if (resolved) return;
+          resolved = true;
+          cleanup();
+          cleanupBackgroundGroup();
+          destroyStreams();
+
+          if (terminal === "error") {
+            resolve({ content: `Error: ${terminalError?.message ?? "Failed to start command"}`, isError: true });
+            return;
+          }
+
+          if (terminal === "timeout") {
             resolve({
-              content: output.trim(),
+              content: buildOutput(`[Command timed out after ${timeoutSec}s]`),
               isError: true,
               status: "timeout",
               metadata: {
@@ -120,12 +179,11 @@ export function createBashTool(cwd: string, approval?: ApprovalController, _file
             return;
           }
 
-          if (aborted || ctx.abortSignal?.aborted) {
-            output += "[Command cancelled]";
+          if (terminal === "cancelled") {
             resolve({
-              content: output.trim(),
+              content: buildOutput("[Command cancelled]"),
               isError: true,
-              status: "blocked",
+              status: "cancelled",
               metadata: {
                 kind: parsedSearch ? "search" : parsedRead ? "read" : "shell",
                 pattern: parsedSearch?.pattern,
@@ -136,13 +194,8 @@ export function createBashTool(cwd: string, approval?: ApprovalController, _file
             return;
           }
 
-          if (Buffer.byteLength(output, "utf-8") > MAX_OUTPUT) {
-            output = Buffer.from(output, "utf-8").subarray(0, MAX_OUTPUT).toString("utf-8");
-            output += "\n[Output truncated]";
-          }
-
-          const normalizedOutput = output.trim();
-          if (parsedSearch && code === 1 && !stderr.trim()) {
+          const normalizedOutput = buildOutput();
+          if (parsedSearch && exitCode === 1 && !stderr.trim()) {
             resolve({
               content: normalizedOutput === "(no output)" ? "stdout:\n(no matches)" : normalizedOutput,
               isError: false,
@@ -158,7 +211,7 @@ export function createBashTool(cwd: string, approval?: ApprovalController, _file
             return;
           }
 
-          const isError = code !== 0;
+          const isError = exitCode !== 0;
           resolve({
             content: normalizedOutput,
             isError,
@@ -171,10 +224,111 @@ export function createBashTool(cwd: string, approval?: ApprovalController, _file
               matches: parsedSearch ? countSearchMatches(stdout) : undefined,
             },
           });
-        });
+        };
+
+        const maybeFinishAfterExit = () => {
+          if (terminal !== "exit" && terminal !== "timeout" && terminal !== "cancelled") return;
+          if (stdoutEnded && stderrEnded) {
+            finish();
+            return;
+          }
+          if (!postExitHandle) {
+            postExitHandle = setTimeout(finish, POST_EXIT_STDIO_GRACE_MS);
+          }
+        };
+
+        const abortChild = () => {
+          if (resolved || terminal) return;
+          terminal = "cancelled";
+          if (child.pid) {
+            killProcessTree(child.pid, "SIGTERM");
+            forceKillHandle = setTimeout(() => {
+              if (child.pid) killProcessTree(child.pid, "SIGKILL");
+            }, FORCE_KILL_AFTER_MS);
+          }
+          settleHandle = setTimeout(finish, ABORT_SETTLE_AFTER_MS);
+        };
+
+        const timeoutChild = () => {
+          if (resolved || terminal) return;
+          terminal = "timeout";
+          if (child.pid) {
+            killProcessTree(child.pid, "SIGTERM");
+            forceKillHandle = setTimeout(() => {
+              if (child.pid) killProcessTree(child.pid, "SIGKILL");
+            }, FORCE_KILL_AFTER_MS);
+          }
+          settleHandle = setTimeout(finish, ABORT_SETTLE_AFTER_MS);
+        };
+
+        const onStdoutData = (data: Buffer) => appendOutput("stdout", data);
+        const onStderrData = (data: Buffer) => appendOutput("stderr", data);
+        const onStdoutEnd = () => {
+          stdoutEnded = true;
+          maybeFinishAfterExit();
+        };
+        const onStderrEnd = () => {
+          stderrEnded = true;
+          maybeFinishAfterExit();
+        };
+        const onError = (err: Error) => {
+          if (!terminal) {
+            terminal = "error";
+            terminalError = err;
+          }
+          finish();
+        };
+        const onExit = (code: number | null) => {
+          exitCode = code;
+          if (!terminal) terminal = "exit";
+          maybeFinishAfterExit();
+        };
+        const onClose = (code: number | null) => {
+          exitCode = code;
+          if (!terminal) terminal = "exit";
+          finish();
+        };
+
+        timeoutHandle = setTimeout(timeoutChild, timeoutSec * 1000);
+        if (ctx.abortSignal?.aborted) abortChild();
+        ctx.abortSignal?.addEventListener("abort", abortChild, { once: true });
+
+        child.stdout?.on("data", onStdoutData);
+        child.stderr?.on("data", onStderrData);
+        child.stdout?.once("end", onStdoutEnd);
+        child.stdout?.once("close", onStdoutEnd);
+        child.stderr?.once("end", onStderrEnd);
+        child.stderr?.once("close", onStderrEnd);
+        child.once("error", onError);
+        child.once("exit", onExit);
+        child.once("close", onClose);
       });
     },
   };
+}
+
+function killProcessTree(pid: number, signal: NodeJS.Signals): void {
+  if (platform() === "win32") {
+    try {
+      spawn("taskkill", ["/pid", String(pid), "/f", "/t"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+    } catch {
+      // Process may already be gone or taskkill may be unavailable.
+    }
+    return;
+  }
+
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    try {
+      process.kill(pid, signal);
+    } catch {
+      // Process already exited.
+    }
+  }
 }
 
 function countSearchMatches(stdout: string): number {

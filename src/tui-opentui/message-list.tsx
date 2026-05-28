@@ -269,7 +269,7 @@ function ToolCard({
   const headerColor = pending ? theme.toolPending : error ? theme.toolError : theme.textMuted;
   const titleText = target ? `${tool.name}  ${target}` : tool.name;
 
-  const editDetails = (tool.name === "edit" || tool.name === "multiedit" || tool.name === "write")
+  const editDetails = (tool.name === "edit" || tool.name === "apply_patch" || tool.name === "multiedit" || tool.name === "write")
     ? getEditDiffDetails(tool)
     : null;
 

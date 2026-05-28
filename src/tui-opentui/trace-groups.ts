@@ -325,8 +325,8 @@ function buildMutationGroup(
 ): TraceGroup {
   const items = raw
     .map((tool) => {
-      const path = formatTracePath(tool.args.path ?? "", options.homeDir);
-      const details = tool.name === "edit" ? getEditDiffDetails(tool) : null;
+      const path = formatTracePath(tool.args.path ?? firstMetadataPath(tool) ?? "", options.homeDir);
+      const details = tool.name === "edit" || tool.name === "apply_patch" ? getEditDiffDetails(tool) : null;
       const suffix = details ? ` ${formatCompactEditStats(details.added, details.removed)}` : "";
       return path ? `${path}${suffix}` : "";
     })
@@ -537,7 +537,14 @@ function toolHeader(tool: DisplayToolCall, homeDir: string): string | undefined 
       return formatTracePath(value, homeDir);
     }
   }
+  const path = firstMetadataPath(tool);
+  if (path) return formatTracePath(path, homeDir);
   return undefined;
+}
+
+function firstMetadataPath(tool: DisplayToolCall): string | undefined {
+  const paths = tool.metadata?.paths;
+  return Array.isArray(paths) && typeof paths[0] === "string" ? paths[0] : undefined;
 }
 
 function formatCompactEditStats(added: number, removed: number): string {

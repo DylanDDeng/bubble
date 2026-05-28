@@ -3,7 +3,18 @@ export interface EditOperation {
   newText: string;
 }
 
-export type EditMatchMode = "exact" | "normalized-line";
+export type EditMatchMode =
+  | "exact"
+  | "trimmed"
+  | "unescaped"
+  | "normalized-line"
+  | "smart-line"
+  | "markdown-table"
+  | "single-line-whitespace";
+
+export interface EditApplyOptions {
+  path?: string;
+}
 
 export interface EditMatchInfo {
   editIndex: number;
@@ -42,6 +53,11 @@ interface NonBlankLine {
   normalized: string;
 }
 
+interface TextCandidate {
+  text: string;
+  mode: EditMatchMode;
+}
+
 function detectLineEnding(content: string): "\n" | "\r\n" {
   const crlf = content.indexOf("\r\n");
   const lf = content.indexOf("\n");
@@ -56,6 +72,40 @@ function normalizeToLF(text: string): string {
   return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
+function unescapeOverEscaped(text: string): string {
+  return text
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_match, hex: string) => String.fromCodePoint(Number.parseInt(hex, 16)))
+    .replace(/\\n/g, "\n")
+    .replace(/\\t/g, "\t")
+    .replace(/\\r/g, "\r")
+    .replace(/\\f/g, "\f")
+    .replace(/\\b/g, "\b")
+    .replace(/\\v/g, "\v")
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, "\\");
+}
+
+function addTextCandidate(candidates: TextCandidate[], seen: Set<string>, text: string, mode: EditMatchMode): void {
+  if (text.length === 0 || seen.has(text)) return;
+  seen.add(text);
+  candidates.push({ text, mode });
+}
+
+function generateTextCandidates(oldText: string): TextCandidate[] {
+  const candidates: TextCandidate[] = [];
+  const seen = new Set<string>();
+  const trimmed = oldText.trim();
+  const unescaped = normalizeToLF(unescapeOverEscaped(oldText));
+  const unescapedTrimmed = normalizeToLF(unescapeOverEscaped(trimmed));
+
+  addTextCandidate(candidates, seen, oldText, "exact");
+  addTextCandidate(candidates, seen, trimmed, "trimmed");
+  addTextCandidate(candidates, seen, unescaped, "unescaped");
+  addTextCandidate(candidates, seen, unescapedTrimmed, "unescaped");
+
+  return candidates;
+}
+
 function restoreLineEndings(text: string, lineEnding: "\n" | "\r\n"): string {
   return lineEnding === "\r\n" ? text.replace(/\n/g, "\r\n") : text;
 }
@@ -68,6 +118,10 @@ function normalizeLineForMatch(line: string): string {
     .replace(/[\u201C\u201D\u201E\u201F]/g, '"')
     .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, "-")
     .replace(/[\u00A0\u2002-\u200A\u202F\u205F\u3000]/g, " ");
+}
+
+function normalizeLeadingWhitespaceForMatch(line: string): string {
+  return normalizeLineForMatch(line).replace(/^\s+/, " ");
 }
 
 function findAllOccurrences(content: string, needle: string): number[] {
@@ -112,6 +166,11 @@ function normalizedOldNonBlankLines(oldText: string): string[] {
     .filter((line) => line.trim().length > 0);
 }
 
+function singleNonBlankOldLine(oldText: string): string | undefined {
+  const lines = normalizedOldNonBlankLines(oldText);
+  return lines.length === 1 ? lines[0] : undefined;
+}
+
 function findNormalizedLineMatches(content: string, oldText: string): Array<{ start: number; end: number }> {
   const contentLines = splitLines(content);
   const searchable = nonBlankLines(contentLines);
@@ -131,6 +190,112 @@ function findNormalizedLineMatches(content: string, oldText: string): Array<{ st
       const first = contentLines[searchable[i].lineIndex];
       const last = contentLines[searchable[i + oldLines.length - 1].lineIndex];
       matches.push({ start: first.start, end: last.endNoNewline });
+    }
+  }
+  return matches;
+}
+
+function findSmartLineMatches(content: string, oldText: string): Array<{ start: number; end: number }> {
+  const contentLines = splitLines(content);
+  const oldLines = splitLines(oldText).map((line) => normalizeLeadingWhitespaceForMatch(line.text));
+  if (oldLines.length === 0 || oldLines.every((line) => line.length === 0)) return [];
+
+  const matches: Array<{ start: number; end: number }> = [];
+  for (let i = 0; i <= contentLines.length - oldLines.length; i++) {
+    let matched = true;
+    for (let j = 0; j < oldLines.length; j++) {
+      const actual = normalizeLeadingWhitespaceForMatch(contentLines[i + j].text);
+      if (actual !== oldLines[j]) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) {
+      const first = contentLines[i];
+      const last = contentLines[i + oldLines.length - 1];
+      matches.push({ start: first.start, end: last.endNoNewline });
+    }
+  }
+  return matches;
+}
+
+function splitMarkdownTableCells(line: string): string[] | undefined {
+  const normalized = normalizeLineForMatch(line).trim();
+  if (!normalized.startsWith("|") || !normalized.endsWith("|")) return undefined;
+
+  const parts: string[] = [];
+  let current = "";
+  let escaped = false;
+  for (const char of normalized) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      current += char;
+      escaped = true;
+      continue;
+    }
+    if (char === "|") {
+      parts.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  parts.push(current);
+
+  if (parts.length < 4 || parts[0] !== "" || parts[parts.length - 1] !== "") return undefined;
+  const cells = parts.slice(1, -1).map((cell) => cell.trim());
+  return cells.length >= 2 ? cells : undefined;
+}
+
+function sameCells(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((cell, index) => cell === b[index]);
+}
+
+function findMarkdownTableMatches(content: string, oldText: string): Array<{ start: number; end: number }> {
+  const oldLine = singleNonBlankOldLine(oldText);
+  if (!oldLine) return [];
+  const oldCells = splitMarkdownTableCells(oldLine);
+  if (!oldCells) return [];
+
+  const matches: Array<{ start: number; end: number }> = [];
+  for (const line of splitLines(content)) {
+    const cells = splitMarkdownTableCells(line.text);
+    if (cells && sameCells(cells, oldCells)) {
+      matches.push({ start: line.start, end: line.endNoNewline });
+    }
+  }
+  return matches;
+}
+
+function collapseInlineWhitespace(text: string): string {
+  return normalizeLineForMatch(text).trim().replace(/[ \t]+/g, " ");
+}
+
+function isDocumentLikePath(path: string | undefined): boolean {
+  return !!path && /\.(?:md|mdx|markdown|txt|rst|adoc)$/i.test(path);
+}
+
+function findSingleLineWhitespaceMatches(
+  content: string,
+  oldText: string,
+  options: EditApplyOptions | undefined,
+): Array<{ start: number; end: number }> {
+  if (!isDocumentLikePath(options?.path)) return [];
+
+  const oldLine = singleNonBlankOldLine(oldText);
+  if (!oldLine) return [];
+  const normalizedOld = collapseInlineWhitespace(oldLine);
+  if (normalizedOld.length === 0) return [];
+
+  const matches: Array<{ start: number; end: number }> = [];
+  for (const line of splitLines(content)) {
+    const collapsed = collapseInlineWhitespace(line.text);
+    if (collapsed === normalizedOld && line.text !== oldLine) {
+      matches.push({ start: line.start, end: line.endNoNewline });
     }
   }
   return matches;
@@ -160,7 +325,13 @@ function findBestLineHint(content: string, oldText: string): string | undefined 
   return `Closest line-based candidate starts near line ${startLine} and matched ${best.score}/${oldLines.length} non-blank lines.`;
 }
 
-function matchEdit(content: string, edit: EditOperation, index: number, total: number): EditMatchInfo {
+function matchEdit(
+  content: string,
+  edit: EditOperation,
+  index: number,
+  total: number,
+  options?: EditApplyOptions,
+): EditMatchInfo {
   if (edit.oldText.length === 0) {
     throw new EditApplyError(total === 1 ? "Error: oldText must not be empty." : `Error: edits[${index}].oldText must not be empty.`);
   }
@@ -175,44 +346,110 @@ function matchEdit(content: string, edit: EditOperation, index: number, total: n
         "",
         "Common causes and how to escape:",
         "- Your tokenizer may be folding repeated characters into a single token (hex colors like '#ec489' vs '#ec4899', repeated digits, etc.). The two strings feel different in your head but serialize to identical bytes.",
-        "- Use the write tool with overwrite=true and the full new content for full-file replacements that hinge on a single repeated character or trailing digit.",
+        "- Use the write tool with the full new content for full-file replacements that hinge on a single repeated character or trailing digit.",
         "- Or re-read the file with the read tool, then copy the exact bytes you want to replace before retrying.",
       ].join("\n"),
     );
   }
 
   const oldText = normalizeToLF(edit.oldText);
-  const exact = findAllOccurrences(content, oldText);
-  if (exact.length === 1) {
-    return { editIndex: index, mode: "exact", start: exact[0], end: exact[0] + oldText.length };
-  }
-  if (exact.length > 1) {
-    const recovery = [
-      "",
-      "Extend oldText with more surrounding context (the lines immediately before/after) until it uniquely identifies the intended span.",
-    ].join("\n");
-    throw new EditApplyError(
-      total === 1
-        ? `Error: oldText appears ${exact.length} times in file. Must be unique: "${summarizeOldText(oldText)}"${recovery}`
-        : `Error: edits[${index}].oldText appears ${exact.length} times in file. Must be unique: "${summarizeOldText(oldText)}"${recovery}`,
-    );
+  const candidates = generateTextCandidates(oldText);
+
+  for (const candidate of candidates) {
+    const exact = findAllOccurrences(content, candidate.text);
+    if (exact.length === 1) {
+      return { editIndex: index, mode: candidate.mode, start: exact[0], end: exact[0] + candidate.text.length };
+    }
+    if (exact.length > 1) {
+      const recovery = [
+        "",
+        "Extend oldText with more surrounding context (the lines immediately before/after) until it uniquely identifies the intended span.",
+      ].join("\n");
+      const duplicateReason = candidate.mode === "exact"
+        ? `appears ${exact.length} times in file`
+        : `matched ${exact.length} times after ${candidate.mode} matching`;
+      throw new EditApplyError(
+        total === 1
+          ? `Error: oldText ${duplicateReason}. Must be unique: "${summarizeOldText(oldText)}"${recovery}`
+          : `Error: edits[${index}].oldText ${duplicateReason}. Must be unique: "${summarizeOldText(oldText)}"${recovery}`,
+      );
+    }
   }
 
-  const normalizedLineMatches = findNormalizedLineMatches(content, oldText);
-  if (normalizedLineMatches.length === 1) {
-    return {
-      editIndex: index,
-      mode: "normalized-line",
-      start: normalizedLineMatches[0].start,
-      end: normalizedLineMatches[0].end,
-    };
+  for (const candidate of candidates) {
+    const normalizedLineMatches = findNormalizedLineMatches(content, candidate.text);
+    if (normalizedLineMatches.length === 1) {
+      return {
+        editIndex: index,
+        mode: candidate.mode === "exact" ? "normalized-line" : candidate.mode,
+        start: normalizedLineMatches[0].start,
+        end: normalizedLineMatches[0].end,
+      };
+    }
+    if (normalizedLineMatches.length > 1) {
+      throw new EditApplyError(
+        total === 1
+          ? `Error: oldText matched ${normalizedLineMatches.length} normalized line blocks in file. Provide more surrounding context.`
+          : `Error: edits[${index}].oldText matched ${normalizedLineMatches.length} normalized line blocks in file. Provide more surrounding context.`,
+      );
+    }
   }
-  if (normalizedLineMatches.length > 1) {
-    throw new EditApplyError(
-      total === 1
-        ? `Error: oldText matched ${normalizedLineMatches.length} normalized line blocks in file. Provide more surrounding context.`
-        : `Error: edits[${index}].oldText matched ${normalizedLineMatches.length} normalized line blocks in file. Provide more surrounding context.`,
-    );
+
+  for (const candidate of candidates) {
+    const markdownTableMatches = findMarkdownTableMatches(content, candidate.text);
+    if (markdownTableMatches.length === 1) {
+      return {
+        editIndex: index,
+        mode: "markdown-table",
+        start: markdownTableMatches[0].start,
+        end: markdownTableMatches[0].end,
+      };
+    }
+    if (markdownTableMatches.length > 1) {
+      throw new EditApplyError(
+        total === 1
+          ? `Error: oldText matched ${markdownTableMatches.length} markdown table rows in file. Provide more surrounding context.`
+          : `Error: edits[${index}].oldText matched ${markdownTableMatches.length} markdown table rows in file. Provide more surrounding context.`,
+      );
+    }
+  }
+
+  for (const candidate of candidates) {
+    const whitespaceMatches = findSingleLineWhitespaceMatches(content, candidate.text, options);
+    if (whitespaceMatches.length === 1) {
+      return {
+        editIndex: index,
+        mode: "single-line-whitespace",
+        start: whitespaceMatches[0].start,
+        end: whitespaceMatches[0].end,
+      };
+    }
+    if (whitespaceMatches.length > 1) {
+      throw new EditApplyError(
+        total === 1
+          ? `Error: oldText matched ${whitespaceMatches.length} whitespace-normalized lines in file. Provide more surrounding context.`
+          : `Error: edits[${index}].oldText matched ${whitespaceMatches.length} whitespace-normalized lines in file. Provide more surrounding context.`,
+      );
+    }
+  }
+
+  for (const candidate of candidates) {
+    const smartLineMatches = findSmartLineMatches(content, candidate.text);
+    if (smartLineMatches.length === 1) {
+      return {
+        editIndex: index,
+        mode: "smart-line",
+        start: smartLineMatches[0].start,
+        end: smartLineMatches[0].end,
+      };
+    }
+    if (smartLineMatches.length > 1) {
+      throw new EditApplyError(
+        total === 1
+          ? `Error: oldText matched ${smartLineMatches.length} indentation-normalized line blocks in file. Provide more surrounding context.`
+          : `Error: edits[${index}].oldText matched ${smartLineMatches.length} indentation-normalized line blocks in file. Provide more surrounding context.`,
+      );
+    }
   }
 
   const hint = findBestLineHint(content, oldText);
@@ -222,7 +459,7 @@ function matchEdit(content: string, edit: EditOperation, index: number, total: n
     "How to recover:",
     "- Re-read the file with the read tool to see its current bytes; the file may have been changed by a prior edit this turn.",
     "- Shorten oldText to a smaller unique anchor and try again. Long multi-line anchors are fragile to whitespace and indentation.",
-    "- If many lines need to change, use the write tool with overwrite=true and the full new content instead of stacking edits.",
+    "- If many lines need to change, use the write tool with the full new content instead of stacking edits.",
   ].join("\n");
   throw new EditApplyError(
     total === 1
@@ -245,7 +482,7 @@ function assertNoOverlaps(matches: EditMatchInfo[]): void {
   }
 }
 
-export function applyEditsToContent(rawContent: string, edits: EditOperation[]): AppliedEditResult {
+export function applyEditsToContent(rawContent: string, edits: EditOperation[], options?: EditApplyOptions): AppliedEditResult {
   if (!Array.isArray(edits) || edits.length === 0) {
     throw new EditApplyError("Error: No edits provided");
   }
@@ -258,7 +495,7 @@ export function applyEditsToContent(rawContent: string, edits: EditOperation[]):
     newText: normalizeToLF(edit.newText),
   }));
 
-  const matches = normalizedEdits.map((edit, index) => matchEdit(normalizedOriginal, edit, index, normalizedEdits.length));
+  const matches = normalizedEdits.map((edit, index) => matchEdit(normalizedOriginal, edit, index, normalizedEdits.length, options));
   assertNoOverlaps(matches);
 
   const byDescendingStart = [...matches].sort((a, b) => b.start - a.start);
@@ -276,7 +513,7 @@ export function applyEditsToContent(rawContent: string, edits: EditOperation[]):
         "Common causes and how to escape:",
         "- oldText and newText are byte-identical. Verify newText actually contains the intended change (a missing trailing char like turning '#ec489' into '#ec4899' is a frequent culprit).",
         "- The file already contains newText. Re-read the file to confirm the current state before editing again.",
-        "- For wholesale rewrites, use the write tool with overwrite=true and the full new content instead.",
+        "- For wholesale rewrites, use the write tool with the full new content instead.",
       ].join("\n"),
     );
   }

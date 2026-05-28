@@ -1132,10 +1132,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         } catch (err: any) {
           commitAssistantMessage();
           if (err instanceof AgentAbortError || err?.name === "AbortError") {
-            updateDisplayMessages((prev) => [
-              ...prev,
-              withMessageKey({ role: "assistant", content: "Cancelled." }),
-            ]);
+            updateDisplayMessages(() => reconstructDisplayMessages(agent.messages));
           } else {
             updateDisplayMessages((prev) => [
               ...prev,

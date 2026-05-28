@@ -15,7 +15,7 @@ function renderFallbackTool({ ctx, tool, syntaxStyle, width, helpers }: ToolRend
   const diff = helpers.extractToolDiff(tool);
   const isError = tool.isError === true || tool.status === "error";
 
-  if (diff && !isError && tool.name === "edit") {
+  if (diff && !isError && (tool.name === "edit" || tool.name === "apply_patch")) {
     return helpers.createBox(ctx, {
       paddingLeft: 3,
       marginTop: 1,

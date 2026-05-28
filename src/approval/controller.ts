@@ -54,8 +54,7 @@ export class PermissionAwareApprovalController implements ApprovalController {
   }
 
   async request(req: ApprovalRequest): Promise<ApprovalDecision> {
-    const query = this.requestToQuery(req);
-    const ruleResult = this.checkRules(query);
+    const ruleResult = this.checkRequestRules(req);
 
     if (ruleResult.decision === "deny") {
       return {
@@ -70,7 +69,7 @@ export class PermissionAwareApprovalController implements ApprovalController {
       return { action: "approve" };
     }
 
-    if (mode === "default" && (req.type === "edit" || req.type === "write")) {
+    if (mode === "default" && (req.type === "edit" || req.type === "write" || req.type === "patch")) {
       return { action: "approve" };
     }
 
@@ -110,8 +109,26 @@ export class PermissionAwareApprovalController implements ApprovalController {
         return { tool: "Write", path: req.path, cwd: this.options.cwd };
       case "edit":
         return { tool: "Edit", path: req.path, cwd: this.options.cwd };
+      case "patch":
+        return { tool: "Edit", path: req.path, cwd: this.options.cwd };
       case "lsp":
         return { tool: "Lsp", path: req.path, cwd: this.options.cwd };
     }
+  }
+
+  private checkRequestRules(req: ApprovalRequest): PermissionCheckResult {
+    if (req.type !== "patch") return this.checkRules(this.requestToQuery(req));
+
+    const perFile = req.files.map((file) => this.checkRules({
+      tool: file.kind === "add" ? "Write" : "Edit",
+      path: file.path,
+      cwd: this.options.cwd,
+    }));
+    const denied = perFile.find((result) => result.decision === "deny");
+    if (denied) return denied;
+    if (perFile.length > 0 && perFile.every((result) => result.decision === "allow")) {
+      return { decision: "allow", rule: perFile[0].rule };
+    }
+    return { decision: "ask" };
   }
 }

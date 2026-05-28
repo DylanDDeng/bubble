@@ -86,11 +86,20 @@ export function createDefaultHooks(): TurnHooks[] {
         }
         ctx.state.evidenceTracker?.observe(ctx.toolCall, ctx.result);
         ctx.state.governor?.afterToolResult(ctx.toolCall, ctx.result);
-        // Edit/write retry-escalation: if the same tool with the same args
-        // failed twice in a row, models — especially thinking-heavy ones —
-        // can spiral on "identical content" / "not found" errors. Nudge them
-        // to change strategy.
-        if ((ctx.toolCall.name === "edit" || ctx.toolCall.name === "write") && ctx.result.isError) {
+        // Edit/write retry-escalation: models can spiral on "identical content"
+        // or "not found" errors. Nudge them to re-ground or switch strategy.
+        if (isMutationTool(ctx.toolCall.name) && ctx.result.isError) {
+          if (ctx.toolCall.name === "edit" && ctx.result.status === "no_match" && ctx.result.metadata?.kind === "edit") {
+            const path = typeof ctx.result.metadata.path === "string" ? ctx.result.metadata.path : "";
+            const reminded = ctx.state.editNoMatchReminderPaths ?? (ctx.state.editNoMatchReminderPaths = []);
+            if (path && !reminded.includes(path)) {
+              reminded.push(path);
+              const summary = ctx.result.content.split("\n")[0] || "";
+              ctx.queueReminder(buildEditRetryEscalationReminder(
+                `Edit oldText did not match ${path}. ${summary}`,
+              ));
+            }
+          }
           const hash = hashEditCall(ctx.toolCall);
           const history: string[] = ctx.state.recentEditFailures ?? (ctx.state.recentEditFailures = []);
           history.push(hash);
@@ -104,10 +113,11 @@ export function createDefaultHooks(): TurnHooks[] {
               `Last failure: ${ctx.toolCall.name} on the same target with identical arguments. ${summary}`,
             ));
           }
-        } else if ((ctx.toolCall.name === "edit" || ctx.toolCall.name === "write") && !ctx.result.isError) {
+        } else if (isMutationTool(ctx.toolCall.name) && !ctx.result.isError) {
           // Successful mutation resets the dedup state so a later, unrelated
           // failure won't fire the reminder spuriously.
           ctx.state.recentEditFailures = [];
+          ctx.state.editNoMatchReminderPaths = [];
           ctx.state.editRetryReminderSent = false;
         }
         // Redundant-Read detection moved into the read tool itself: it now
@@ -165,10 +175,14 @@ function markCodeChanged(state: TurnHookState): void {
 }
 
 function isCodeWriteResult(_toolCall: ParsedToolCall, result: ToolResult): boolean {
-  if (result.isError || result.status === "blocked" || result.status === "command_error") {
+  if (result.isError || result.status === "blocked" || result.status === "cancelled" || result.status === "command_error") {
     return false;
   }
-  return result.metadata?.kind === "write" || result.metadata?.kind === "edit";
+  return result.metadata?.kind === "write" || result.metadata?.kind === "edit" || result.metadata?.kind === "patch";
+}
+
+function isMutationTool(name: string): boolean {
+  return name === "edit" || name === "write" || name === "apply_patch";
 }
 
 function hasSubagentLifecycleActivity(

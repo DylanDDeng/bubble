@@ -180,9 +180,12 @@ export function repairToolCallChains(messages: ProviderMessage[]): ProviderMessa
 
 function isEmptyAssistantMessage(message: AssistantMessage): boolean {
   const hasContent = message.content.trim().length > 0;
-  const hasReasoning = (message.reasoning ?? "").trim().length > 0;
   const hasToolCalls = !!message.toolCalls && message.toolCalls.length > 0;
-  return !hasContent && !hasReasoning && !hasToolCalls;
+  // Reasoning-only assistant messages are not valid ChatCompletions history:
+  // providers require assistant history to contain user-visible content or
+  // tool_calls. Keep reasoning attached to real assistant/tool-call messages,
+  // but drop standalone thinking-only turns before provider projection.
+  return !hasContent && !hasToolCalls;
 }
 
 function formatMetaMessage(message: MetaMessage): string {
