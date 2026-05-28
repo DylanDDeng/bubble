@@ -563,6 +563,14 @@ export class Agent {
           throw error;
         }
         if (!isContextOverflowError(error)) {
+          if (!isAbortLikeError(error, abortSignal) && shouldAppendModelInterruptedBoundary(this.messages)) {
+            this.appendMessage(createModelInterruptedMessage(error, {
+              model: this._model,
+              providerId: this.providerId,
+              modelId: this.apiModel,
+            }));
+            assistantAppended = true;
+          }
           throw error;
         }
         if (consecutiveOverflowRecoveries >= MAX_CONSECUTIVE_OVERFLOW_RECOVERIES) {
@@ -1647,6 +1655,40 @@ function throwIfAborted(signal?: AbortSignal): void {
   const reason = signal.reason;
   if (reason instanceof Error) throw reason;
   throw new AgentAbortError(typeof reason === "string" ? reason : undefined);
+}
+
+function isAbortLikeError(error: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true;
+  if (error instanceof AgentAbortError) return true;
+  if (error instanceof DOMException && error.name === "AbortError") return true;
+  if (typeof error === "object" && error !== null && (error as { name?: unknown }).name === "AbortError") return true;
+  return false;
+}
+
+function shouldAppendModelInterruptedBoundary(messages: Message[]): boolean {
+  return messages.at(-1)?.role === "tool";
+}
+
+function createModelInterruptedMessage(
+  error: unknown,
+  metadata: { model: string; providerId: string; modelId: string },
+): Extract<Message, { role: "assistant" }> {
+  return {
+    role: "assistant",
+    content: `[model request interrupted before a final answer was produced: ${summarizeInterruptError(error)}]`,
+    model: metadata.model,
+    providerId: metadata.providerId,
+    modelId: metadata.modelId,
+  };
+}
+
+function summarizeInterruptError(error: unknown): string {
+  const message = error instanceof Error
+    ? error.message
+    : typeof error === "string"
+      ? error
+      : String(error);
+  return message.replace(/\s+/g, " ").trim().slice(0, 240) || "unknown error";
 }
 
 function createUpdateQueue<T>() {

@@ -149,11 +149,16 @@ describe("provider-openai-codex", () => {
     }
 
     const body = JSON.parse(String(requestInits[0].body));
+    const headers = new Headers(requestInits[0].headers);
     expect(body.prompt_cache_key).toBe(buildOpenAICodexPromptCacheKey({
       seed: "session-secret",
       providerId: "openai-codex",
       model: "gpt-5.4",
     }));
+    expect(headers.get("session_id")).toBeTruthy();
+    expect(headers.get("session_id")).not.toBe("session-secret");
+    expect(headers.get("session-id")).toBeNull();
+    expect(headers.get("x-session-affinity")).toBeNull();
     expect(chunks).toContainEqual({
       type: "usage",
       usage: {
@@ -274,6 +279,106 @@ describe("provider-openai-codex", () => {
 
     expect(refreshCredentials).toHaveBeenCalledTimes(1);
     expect(authHeaders).toEqual([`Bearer ${oldToken}`, `Bearer ${newToken}`]);
+  });
+
+  it("retries a transient transport failure before any SSE event is parsed", async () => {
+    const token = makeAccessToken("account-123");
+    const fetchMock = vi.fn(async () => {
+      if (fetchMock.mock.calls.length === 1) {
+        throw new Error("The socket connection was closed unexpectedly.");
+      }
+      return makeSseResponse();
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = createOpenAICodexProvider({
+      providerId: "openai-codex",
+      apiKey: token,
+      baseURL: "https://chatgpt.com/backend-api",
+    });
+
+    const chunks = await collectStream(provider.streamChat([{ role: "user", content: "hi" }], { model: "gpt-5.5" }));
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(chunks).toContainEqual({ type: "done" });
+  });
+
+  it("retries when the SSE body errors before a parsed event", async () => {
+    const token = makeAccessToken("account-123");
+    const fetchMock = vi.fn(async () => {
+      if (fetchMock.mock.calls.length === 1) {
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.error(new Error("fetch failed: UND_ERR_SOCKET"));
+          },
+        }), { status: 200 });
+      }
+      return makeSseResponse();
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = createOpenAICodexProvider({
+      providerId: "openai-codex",
+      apiKey: token,
+      baseURL: "https://chatgpt.com/backend-api",
+    });
+
+    await collectStream(provider.streamChat([{ role: "user", content: "hi" }], { model: "gpt-5.5" }));
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry transport failures after any SSE event is parsed", async () => {
+    const token = makeAccessToken("account-123");
+    const encoder = new TextEncoder();
+    let emitted = false;
+    const fetchMock = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+          type: "response.output_text.delta",
+          delta: "started",
+        })}\n\n`));
+        emitted = true;
+      },
+      pull(controller) {
+        if (emitted) {
+          controller.error(new Error("The socket connection was closed unexpectedly."));
+        }
+      },
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = createOpenAICodexProvider({
+      providerId: "openai-codex",
+      apiKey: token,
+      baseURL: "https://chatgpt.com/backend-api",
+    });
+
+    await expect(collectStream(provider.streamChat([{ role: "user", content: "hi" }], { model: "gpt-5.5" })))
+      .rejects.toThrow(/socket connection/i);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry transport failures when the request has been aborted", async () => {
+    const token = makeAccessToken("account-123");
+    const controller = new AbortController();
+    controller.abort(new DOMException("Aborted", "AbortError"));
+    const fetchMock = vi.fn(async () => {
+      throw new Error("The socket connection was closed unexpectedly.");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = createOpenAICodexProvider({
+      providerId: "openai-codex",
+      apiKey: token,
+      baseURL: "https://chatgpt.com/backend-api",
+    });
+
+    await expect(collectStream(provider.streamChat(
+      [{ role: "user", content: "hi" }],
+      { model: "gpt-5.5", abortSignal: controller.signal },
+    ))).rejects.toThrow(/socket connection/i);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("sorts models by family version desc, floating new families above catalog entries", () => {

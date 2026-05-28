@@ -18,6 +18,8 @@ export interface CodexModelDescriptor {
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const OPENAI_BETA_RESPONSES = "responses=experimental";
 const TOKEN_REFRESH_GRACE_MS = 5 * 60 * 1000;
+const CODEX_TRANSPORT_MAX_RETRIES = 2;
+const CODEX_TRANSPORT_RETRY_BASE_DELAY_MS = 250;
 // OpenAI gates new codex models server-side by client_version (each model carries a
 // `minimal_client_version`). Track a recent real Codex CLI release; override via env
 // when OpenAI lifts the gate again before we cut a new release.
@@ -117,158 +119,176 @@ export function createOpenAICodexProvider(options: {
 
     const sendRequest = async (forceRefresh = false) => {
       const { accessToken, accountId } = await resolveRequestAuth(forceRefresh);
-      return fetch(resolveCodexUrl(options.baseURL), {
-        method: "POST",
-        headers: buildSseHeaders(accessToken, accountId, sessionId),
+      return fetch(resolveCodexUrl(options.baseURL), buildCodexRequestInit({
+        accessToken,
+        accountId,
+        sessionId,
         signal: chatOptions.abortSignal,
         body,
-      });
+      }));
     };
 
-    let response = await sendRequest();
-
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => "");
-      if (response.status === 401 && options.auth && isTokenExpiredError(errorText)) {
-        response = await sendRequest(true);
-      } else {
-        throw new Error(`${response.status} status code${errorText ? `: ${errorText}` : " (no body)"}`);
-      }
-    }
-
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => "");
-      throw new Error(`${response.status} status code${errorText ? `: ${errorText}` : " (no body)"}`);
-    }
-
-    let currentToolCall:
-      | {
-          id: string;
-          name: string;
-          args: string;
-          started: boolean;
-        }
-      | undefined;
-
-    for await (const event of parseSse(response)) {
-      const type = typeof event.type === "string" ? event.type : undefined;
-      if (!type) continue;
-
-      if (type === "error") {
-        const message = typeof event.message === "string" ? event.message : JSON.stringify(event);
-        throw new Error(message);
-      }
-
-      if (type === "response.failed") {
-        const message = typeof (event.response as any)?.error?.message === "string"
-          ? (event.response as any).error.message
-          : "Codex response failed";
-        throw new Error(message);
-      }
-
-      if (type === "response.output_item.added") {
-        const item = (event as any).item;
-        if (item?.type === "function_call" && typeof item.call_id === "string" && typeof item.name === "string") {
-          currentToolCall = {
-            id: item.call_id,
-            name: item.name,
-            args: typeof item.arguments === "string" ? item.arguments : "",
-            started: true,
-          };
-          yield {
-            type: "tool_call",
-            id: currentToolCall.id,
-            name: currentToolCall.name,
-            arguments: "",
-            isStart: true,
-            isEnd: false,
-          };
-        }
-        continue;
-      }
-
-      if (type === "response.output_text.delta" || type === "response.refusal.delta") {
-        const delta = typeof (event as any).delta === "string" ? (event as any).delta : "";
-        if (delta) {
-          yield { type: "text", content: delta };
-        }
-        continue;
-      }
-
-      if (type === "response.reasoning_summary_text.delta") {
-        const delta = typeof (event as any).delta === "string" ? (event as any).delta : "";
-        if (delta) {
-          yield { type: "reasoning_delta", content: delta };
-        }
-        continue;
-      }
-
-      if (type === "response.function_call_arguments.delta" && currentToolCall) {
-        const delta = typeof (event as any).delta === "string" ? (event as any).delta : "";
-        if (delta) {
-          currentToolCall.args += delta;
-          yield {
-            type: "tool_call",
-            id: currentToolCall.id,
-            name: currentToolCall.name,
-            arguments: delta,
-            isStart: false,
-            isEnd: false,
-          };
-        }
-        continue;
-      }
-
-      if (type === "response.function_call_arguments.done" && currentToolCall) {
-        const finalArgs = typeof (event as any).arguments === "string" ? (event as any).arguments : currentToolCall.args;
-        if (finalArgs.startsWith(currentToolCall.args)) {
-          const tail = finalArgs.slice(currentToolCall.args.length);
-          if (tail) {
-            currentToolCall.args = finalArgs;
-            yield {
-              type: "tool_call",
-              id: currentToolCall.id,
-              name: currentToolCall.name,
-              arguments: tail,
-              isStart: false,
-              isEnd: false,
-            };
+    for (let attempt = 0; ; attempt++) {
+      let sawParsedSseEvent = false;
+      let currentToolCall:
+        | {
+            id: string;
+            name: string;
+            args: string;
+            started: boolean;
           }
-        } else {
-          currentToolCall.args = finalArgs;
-        }
-        continue;
-      }
+        | undefined;
 
-      if (type === "response.output_item.done" && currentToolCall) {
-        const item = (event as any).item;
-        if (item?.type === "function_call" && item.call_id === currentToolCall.id) {
-          yield {
-            type: "tool_call",
-            id: currentToolCall.id,
-            name: currentToolCall.name,
-            arguments: "",
-            isStart: false,
-            isEnd: true,
-          };
-          currentToolCall = undefined;
-        }
-        continue;
-      }
+      try {
+        let response = await sendRequest();
 
-      if (type === "response.completed" || type === "response.done" || type === "response.incomplete") {
-        const usage = (event as any).response?.usage;
-        if (usage) {
-          yield {
-            type: "usage",
-            usage: normalizeOpenAICodexUsage(usage),
-          };
+        if (!response.ok) {
+          const errorText = await response.text().catch(() => "");
+          if (response.status === 401 && options.auth && isTokenExpiredError(errorText)) {
+            response = await sendRequest(true);
+          } else {
+            throw new Error(`${response.status} status code${errorText ? `: ${errorText}` : " (no body)"}`);
+          }
         }
-        continue;
+
+        if (!response.ok) {
+          const errorText = await response.text().catch(() => "");
+          throw new Error(`${response.status} status code${errorText ? `: ${errorText}` : " (no body)"}`);
+        }
+
+        for await (const event of parseSse(response)) {
+          sawParsedSseEvent = true;
+          const type = typeof event.type === "string" ? event.type : undefined;
+          if (!type) continue;
+
+          if (type === "error") {
+            const message = typeof event.message === "string" ? event.message : JSON.stringify(event);
+            throw new Error(message);
+          }
+
+          if (type === "response.failed") {
+            const message = typeof (event.response as any)?.error?.message === "string"
+              ? (event.response as any).error.message
+              : "Codex response failed";
+            throw new Error(message);
+          }
+
+          if (type === "response.output_item.added") {
+            const item = (event as any).item;
+            if (item?.type === "function_call" && typeof item.call_id === "string" && typeof item.name === "string") {
+              currentToolCall = {
+                id: item.call_id,
+                name: item.name,
+                args: typeof item.arguments === "string" ? item.arguments : "",
+                started: true,
+              };
+              yield {
+                type: "tool_call",
+                id: currentToolCall.id,
+                name: currentToolCall.name,
+                arguments: "",
+                isStart: true,
+                isEnd: false,
+              };
+            }
+            continue;
+          }
+
+          if (type === "response.output_text.delta" || type === "response.refusal.delta") {
+            const delta = typeof (event as any).delta === "string" ? (event as any).delta : "";
+            if (delta) {
+              yield { type: "text", content: delta };
+            }
+            continue;
+          }
+
+          if (type === "response.reasoning_summary_text.delta") {
+            const delta = typeof (event as any).delta === "string" ? (event as any).delta : "";
+            if (delta) {
+              yield { type: "reasoning_delta", content: delta };
+            }
+            continue;
+          }
+
+          if (type === "response.function_call_arguments.delta" && currentToolCall) {
+            const delta = typeof (event as any).delta === "string" ? (event as any).delta : "";
+            if (delta) {
+              currentToolCall.args += delta;
+              yield {
+                type: "tool_call",
+                id: currentToolCall.id,
+                name: currentToolCall.name,
+                arguments: delta,
+                isStart: false,
+                isEnd: false,
+              };
+            }
+            continue;
+          }
+
+          if (type === "response.function_call_arguments.done" && currentToolCall) {
+            const finalArgs = typeof (event as any).arguments === "string" ? (event as any).arguments : currentToolCall.args;
+            if (finalArgs.startsWith(currentToolCall.args)) {
+              const tail = finalArgs.slice(currentToolCall.args.length);
+              if (tail) {
+                currentToolCall.args = finalArgs;
+                yield {
+                  type: "tool_call",
+                  id: currentToolCall.id,
+                  name: currentToolCall.name,
+                  arguments: tail,
+                  isStart: false,
+                  isEnd: false,
+                };
+              }
+            } else {
+              currentToolCall.args = finalArgs;
+            }
+            continue;
+          }
+
+          if (type === "response.output_item.done" && currentToolCall) {
+            const item = (event as any).item;
+            if (item?.type === "function_call" && item.call_id === currentToolCall.id) {
+              yield {
+                type: "tool_call",
+                id: currentToolCall.id,
+                name: currentToolCall.name,
+                arguments: "",
+                isStart: false,
+                isEnd: true,
+              };
+              currentToolCall = undefined;
+            }
+            continue;
+          }
+
+          if (type === "response.completed" || type === "response.done" || type === "response.incomplete") {
+            const usage = (event as any).response?.usage;
+            if (usage) {
+              yield {
+                type: "usage",
+                usage: normalizeOpenAICodexUsage(usage),
+              };
+            }
+            continue;
+          }
+        }
+
+        yield { type: "done" };
+        return;
+      } catch (error) {
+        if (!shouldRetryCodexTransportError({
+          error,
+          attempt,
+          sawParsedSseEvent,
+          signal: chatOptions.abortSignal,
+        })) {
+          throw error;
+        }
+        await sleepBeforeCodexRetry(codexRetryDelayMs(attempt), chatOptions.abortSignal);
       }
     }
-
-    yield { type: "done" };
   }
 
   async function complete(
@@ -502,6 +522,100 @@ async function* parseSse(response: Response): AsyncIterable<Record<string, unkno
       // Ignore cleanup errors.
     }
   }
+}
+
+function buildCodexRequestInit(options: {
+  accessToken: string;
+  accountId: string;
+  sessionId: string;
+  signal?: AbortSignal;
+  body: string;
+}): RequestInit {
+  const init: RequestInit & { verbose?: boolean } = {
+    method: "POST",
+    headers: buildSseHeaders(options.accessToken, options.accountId, options.sessionId),
+    signal: options.signal,
+    body: options.body,
+    keepalive: false,
+  };
+  if (/^(1|true|yes)$/i.test(process.env.BUBBLE_CODEX_FETCH_VERBOSE ?? "")) {
+    init.verbose = true;
+  }
+  return init;
+}
+
+function shouldRetryCodexTransportError(input: {
+  error: unknown;
+  attempt: number;
+  sawParsedSseEvent: boolean;
+  signal?: AbortSignal;
+}): boolean {
+  if (input.signal?.aborted) return false;
+  if (input.sawParsedSseEvent) return false;
+  if (input.attempt >= CODEX_TRANSPORT_MAX_RETRIES) return false;
+  return isTransientCodexTransportError(input.error);
+}
+
+function isTransientCodexTransportError(error: unknown): boolean {
+  const text = errorMessageChain(error).join("\n");
+  if (/\bAbortError\b/i.test(text)) return false;
+  return [
+    /The socket connection was closed unexpectedly/i,
+    /\bConnectionClosed\b/i,
+    /\bECONNRESET\b/i,
+    /\bUND_ERR_SOCKET\b/i,
+    /\bEPIPE\b/i,
+    /socket hang up/i,
+    /fetch failed/i,
+  ].some((pattern) => pattern.test(text));
+}
+
+function errorMessageChain(error: unknown): string[] {
+  const messages: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; current && depth < 6; depth++) {
+    if (current instanceof Error) {
+      messages.push(current.name, current.message);
+      current = (current as Error & { cause?: unknown }).cause;
+      continue;
+    }
+    if (typeof current === "object") {
+      const record = current as Record<string, unknown>;
+      for (const key of ["name", "code", "message"]) {
+        if (typeof record[key] === "string") messages.push(record[key]);
+      }
+      current = record.cause;
+      continue;
+    }
+    messages.push(String(current));
+    break;
+  }
+  return messages;
+}
+
+function codexRetryDelayMs(attempt: number): number {
+  return CODEX_TRANSPORT_RETRY_BASE_DELAY_MS * Math.pow(3, attempt);
+}
+
+function sleepBeforeCodexRetry(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(toAbortError(signal));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", onAbort);
+      reject(toAbortError(signal));
+    };
+    const timeout = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function toAbortError(signal?: AbortSignal): Error {
+  if (signal?.reason instanceof Error) return signal.reason;
+  return new DOMException(typeof signal?.reason === "string" ? signal.reason : "Aborted", "AbortError");
 }
 
 function buildBaseHeaders(

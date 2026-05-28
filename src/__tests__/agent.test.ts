@@ -1368,6 +1368,45 @@ describe("Agent", () => {
     const agent = new Agent({ provider, model: "gpt-4o", tools: [] });
     await expect(collectEvents(agent, "hi", "/tmp")).rejects.toThrow(/401/);
     expect(callCount).toBe(1);
+    expect(agent.messages).toEqual([{ role: "user", content: "hi" }]);
+  });
+
+  it("records an interrupted assistant boundary when continuation fails after a tool result", async () => {
+    let callCount = 0;
+    const provider: Provider = {
+      async *streamChat() {
+        callCount += 1;
+        if (callCount === 1) {
+          yield { type: "tool_call", id: "tc_1", name: "dummy", arguments: "", isStart: true, isEnd: false };
+          yield { type: "tool_call", id: "tc_1", name: "dummy", arguments: '{"value":"42"}', isStart: false, isEnd: true };
+          yield { type: "done" };
+          return;
+        }
+        throw new Error("The socket connection was closed unexpectedly.");
+      },
+      async complete() {
+        return "";
+      },
+    };
+    const agent = new Agent({
+      provider,
+      providerId: "openai",
+      model: "openai:gpt-5.5",
+      tools: [dummyTool],
+    });
+
+    await expect(collectEvents(agent, "Call dummy", "/tmp")).rejects.toThrow(/socket connection/i);
+
+    expect(callCount).toBe(2);
+    expect(agent.messages.map((message) => message.role)).toEqual(["user", "assistant", "tool", "assistant"]);
+    const boundary = agent.messages.at(-1);
+    expect(boundary).toMatchObject({
+      role: "assistant",
+      providerId: "openai",
+      modelId: "gpt-5.5",
+    });
+    expect((boundary as any).content).toContain("model request interrupted before a final answer was produced");
+    expect((boundary as any).toolCalls).toBeUndefined();
   });
 
   it("recovers from context overflow and retries", async () => {
@@ -1400,6 +1439,10 @@ describe("Agent", () => {
     const events = await collectEvents(agent, "latest", "/tmp");
     expect(events.some((e) => e.type === "context_recovered")).toBe(true);
     expect(events.some((e) => e.type === "text_delta" && e.content === "recovered")).toBe(true);
+    expect(agent.messages.some((message) => (
+      message.role === "assistant"
+      && message.content.includes("model request interrupted before a final answer was produced")
+    ))).toBe(false);
     expect(callCount).toBe(2);
   });
 

@@ -99,6 +99,27 @@ describe("SessionManager", () => {
     expect((restored[1] as any).content).toBe("hi");
   });
 
+  it("keeps interrupted assistant boundaries after tool results when restoring messages", () => {
+    const file = join(tmpDir, "interrupted-tool-turn.jsonl");
+    const sm = new SessionManager(file);
+    sm.appendMessage({ role: "user", content: "list files" });
+    sm.appendMessage({
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "call_1", name: "bash", arguments: "{\"command\":\"ls\"}" }],
+    });
+    sm.appendMessage({ role: "tool", toolCallId: "call_1", content: "package.json" });
+    sm.appendMessage({
+      role: "assistant",
+      content: "[model request interrupted before a final answer was produced: socket closed]",
+    });
+
+    const restored = sm.getMessages();
+    expect(restored.map((message) => message.role)).toEqual(["user", "assistant", "tool", "assistant"]);
+    expect((restored.at(-1) as any).content).toContain("model request interrupted");
+    expect((restored.at(-1) as any).toolCalls).toBeUndefined();
+  });
+
   it("ignores corrupted jsonl lines gracefully", () => {
     const file = join(tmpDir, "corrupt.jsonl");
     writeFileSync(file, '{"type":"message","data":{"role":"user"}}\nthis is not json\n', "utf-8");
