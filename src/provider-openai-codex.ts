@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Provider, ProviderMessage, ReasoningEffort, StreamChunk, ThinkingLevel, TokenUsage, ToolDefinition } from "./types.js";
+import type { OAuthCredentials } from "./oauth/types.js";
 import { listBuiltinModels } from "./model-catalog.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
 
@@ -16,6 +17,7 @@ export interface CodexModelDescriptor {
 
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const OPENAI_BETA_RESPONSES = "responses=experimental";
+const TOKEN_REFRESH_GRACE_MS = 5 * 60 * 1000;
 // OpenAI gates new codex models server-side by client_version (each model carries a
 // `minimal_client_version`). Track a recent real Codex CLI release; override via env
 // when OpenAI lifts the gate again before we cut a new release.
@@ -32,6 +34,12 @@ export function isOpenAICodexBaseUrl(baseURL: string): boolean {
 
 export function getOpenAICodexFallbackModels(): string[] {
   return listBuiltinModels("openai-codex").map((model) => model.id);
+}
+
+export interface OpenAICodexAuthAdapter {
+  getCredentials: () => OAuthCredentials | undefined | Promise<OAuthCredentials | undefined>;
+  refreshCredentials: (current?: OAuthCredentials) => Promise<OAuthCredentials>;
+  isExpired?: (credentials: OAuthCredentials, graceMs: number) => boolean;
 }
 
 export function extractChatGptAccountId(accessToken: string): string | undefined {
@@ -58,8 +66,34 @@ export function createOpenAICodexProvider(options: {
   baseURL: string;
   thinkingLevel?: ThinkingLevel;
   promptCacheKey?: string;
+  auth?: OpenAICodexAuthAdapter;
 }): Provider {
   const sessionId = globalThis.crypto?.randomUUID?.() ?? `bubble_${Date.now()}`;
+  let refreshPromise: Promise<OAuthCredentials> | undefined;
+
+  async function resolveRequestAuth(forceRefresh = false): Promise<{ accessToken: string; accountId: string }> {
+    let credentials = await options.auth?.getCredentials();
+    if (credentials && options.auth) {
+      const expired = options.auth.isExpired
+        ? options.auth.isExpired(credentials, TOKEN_REFRESH_GRACE_MS)
+        : Date.now() >= credentials.expiresAt - TOKEN_REFRESH_GRACE_MS;
+      if ((forceRefresh || !credentials.accessToken || expired) && credentials.refreshToken) {
+        if (!refreshPromise) {
+          refreshPromise = options.auth.refreshCredentials(credentials).finally(() => {
+            refreshPromise = undefined;
+          });
+        }
+        credentials = await refreshPromise;
+      }
+    }
+
+    const accessToken = credentials?.accessToken || options.apiKey;
+    const accountId = credentials?.accountId || extractChatGptAccountId(accessToken);
+    if (!accountId) {
+      throw new Error("Failed to extract chatgpt_account_id from ChatGPT OAuth token.");
+    }
+    return { accessToken, accountId };
+  }
 
   async function* streamChat(
     messages: ProviderMessage[],
@@ -70,26 +104,37 @@ export function createOpenAICodexProvider(options: {
       chatOptions.model,
       chatOptions.thinkingLevel ?? options.thinkingLevel ?? "off",
     );
-    const accountId = extractChatGptAccountId(options.apiKey);
-    if (!accountId) {
-      throw new Error("Failed to extract chatgpt_account_id from ChatGPT OAuth token.");
-    }
+    const body = JSON.stringify(
+      buildRequestBody(messages, {
+        model: chatOptions.model,
+        tools: chatOptions.tools,
+        reasoningEffort: requestConfig.reasoningEffort,
+        sessionId,
+        providerId: options.providerId,
+        promptCacheKey: options.promptCacheKey,
+      })
+    );
 
-    const response = await fetch(resolveCodexUrl(options.baseURL), {
-      method: "POST",
-      headers: buildSseHeaders(options.apiKey, accountId, sessionId),
-      signal: chatOptions.abortSignal,
-      body: JSON.stringify(
-        buildRequestBody(messages, {
-          model: chatOptions.model,
-          tools: chatOptions.tools,
-          reasoningEffort: requestConfig.reasoningEffort,
-          sessionId,
-          providerId: options.providerId,
-          promptCacheKey: options.promptCacheKey,
-        })
-      ),
-    });
+    const sendRequest = async (forceRefresh = false) => {
+      const { accessToken, accountId } = await resolveRequestAuth(forceRefresh);
+      return fetch(resolveCodexUrl(options.baseURL), {
+        method: "POST",
+        headers: buildSseHeaders(accessToken, accountId, sessionId),
+        signal: chatOptions.abortSignal,
+        body,
+      });
+    };
+
+    let response = await sendRequest();
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      if (response.status === 401 && options.auth && isTokenExpiredError(errorText)) {
+        response = await sendRequest(true);
+      } else {
+        throw new Error(`${response.status} status code${errorText ? `: ${errorText}` : " (no body)"}`);
+      }
+    }
 
     if (!response.ok) {
       const errorText = await response.text().catch(() => "");
@@ -232,7 +277,7 @@ export function createOpenAICodexProvider(options: {
   ): Promise<string> {
     let content = "";
     for await (const chunk of streamChat(messages, {
-      model: chatOptions?.model ?? "gpt-5.4",
+      model: chatOptions?.model ?? "gpt-5.5",
       temperature: chatOptions?.temperature,
       thinkingLevel: chatOptions?.thinkingLevel,
       abortSignal: chatOptions?.abortSignal,
@@ -245,6 +290,10 @@ export function createOpenAICodexProvider(options: {
   }
 
   return { streamChat, complete };
+}
+
+function isTokenExpiredError(errorText: string): boolean {
+  return /token_expired|session expired/i.test(errorText);
 }
 
 export function normalizeOpenAICodexUsage(usage: any): TokenUsage {

@@ -15,8 +15,9 @@ import {
 } from "./model-catalog.js";
 import { ModelConfig } from "./model-config.js";
 import { AuthStorage } from "./oauth/index.js";
-import { fetchOpenAICodexModels } from "./provider-openai-codex.js";
+import { fetchOpenAICodexModels, type OpenAICodexAuthAdapter } from "./provider-openai-codex.js";
 import { refreshOpenAICodex } from "./oauth/openai-codex.js";
+import type { OAuthCredentials } from "./oauth/types.js";
 
 export interface ProviderProfile {
   id: string;
@@ -66,10 +67,54 @@ export class ProviderRegistry {
   }
 
   private resolveOAuthAuthKey(providerId: string): string {
-    if (providerId === "openai" && !this.authStorage.has("openai") && this.authStorage.has("openai-codex")) {
-      return "openai-codex";
+    if (providerId === "openai" || providerId === "openai-codex") {
+      if (this.authStorage.has("openai")) return "openai";
+      if (this.authStorage.has("openai-codex")) return "openai-codex";
     }
     return providerId;
+  }
+
+  createOpenAICodexAuthAdapter(providerId: string): OpenAICodexAuthAdapter | undefined {
+    if (providerId !== "openai" && providerId !== "openai-codex") return undefined;
+    if (!this.authStorage.has(this.resolveOAuthAuthKey(providerId))) return undefined;
+
+    const readCredentials = (): OAuthCredentials | undefined =>
+      this.authStorage.get(this.resolveOAuthAuthKey(providerId));
+
+    let refreshPromise: Promise<OAuthCredentials> | undefined;
+    return {
+      getCredentials: readCredentials,
+      isExpired: (_credentials, graceMs) =>
+        this.authStorage.isExpired(this.resolveOAuthAuthKey(providerId), graceMs),
+      refreshCredentials: async () => {
+        if (!refreshPromise) {
+          refreshPromise = (async () => {
+            const authKey = this.resolveOAuthAuthKey(providerId);
+            const current = this.authStorage.get(authKey);
+            if (!current?.refreshToken) {
+              throw new Error(`OpenAI OAuth credentials for ${providerId} are missing a refresh token.`);
+            }
+            const refreshed = await refreshOpenAICodex(current.refreshToken);
+            const next: OAuthCredentials = {
+              type: "oauth",
+              accessToken: refreshed.accessToken,
+              refreshToken: refreshed.refreshToken,
+              expiresAt: refreshed.expiresAt,
+              idToken: refreshed.idToken || current.idToken,
+              accountId: refreshed.accountId || current.accountId,
+            };
+            this.authStorage.set("openai", next);
+            if (authKey !== "openai") {
+              this.authStorage.set(authKey, next);
+            }
+            return next;
+          })().finally(() => {
+            refreshPromise = undefined;
+          });
+        }
+        return refreshPromise;
+      },
+    };
   }
 
   getDefaultModel(providerId: string, authType: ProviderProfile["authType"] = "api"): string | undefined {
@@ -85,18 +130,22 @@ export class ProviderRegistry {
 
   async prepareProvider(providerId: string): Promise<void> {
     const authKey = this.resolveOAuthAuthKey(providerId);
-    if (providerId === "openai" && this.authStorage.isExpired(authKey)) {
+    if ((providerId === "openai" || providerId === "openai-codex") && this.authStorage.isExpired(authKey)) {
       const creds = this.authStorage.get(authKey);
       if (creds?.refreshToken) {
         const refreshed = await refreshOpenAICodex(creds.refreshToken);
-        this.authStorage.set("openai", {
+        const next: OAuthCredentials = {
           type: "oauth",
           accessToken: refreshed.accessToken,
           refreshToken: refreshed.refreshToken,
           expiresAt: refreshed.expiresAt,
-          idToken: refreshed.idToken,
-          accountId: refreshed.accountId,
-        });
+          idToken: refreshed.idToken || creds.idToken,
+          accountId: refreshed.accountId || creds.accountId,
+        };
+        this.authStorage.set("openai", next);
+        if (authKey !== "openai") {
+          this.authStorage.set(authKey, next);
+        }
       }
     }
   }
@@ -234,9 +283,11 @@ export class ProviderRegistry {
 
     if (provider.id === "openai" && provider.authType === "oauth" && provider.apiKey) {
       try {
+        await this.prepareProvider(provider.id);
+        const currentProvider = this.getConfigured().find((p) => p.id === provider.id) || provider;
         const descriptors = await fetchOpenAICodexModels({
-          baseURL: provider.baseURL,
-          accessToken: provider.apiKey,
+          baseURL: currentProvider.baseURL,
+          accessToken: currentProvider.apiKey,
         });
         const visible = descriptors.filter((d) => d.visibility !== "hide");
         if (visible.length > 0) {

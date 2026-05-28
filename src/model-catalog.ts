@@ -51,6 +51,7 @@ const TOGGLE_THINKING_LEVELS: ReasoningEffort[] = ["off", "medium"];
 const DEEPSEEK_V4_LEVELS: ReasoningEffort[] = ["high", "max"];
 
 export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
+  { id: "gpt-5.5", name: "gpt-5.5", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000, toolOutputTokenLimit: 10000 },
   { id: "gpt-5.4", name: "gpt-5.4", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000 },
   { id: "gpt-5.4-mini", name: "gpt-5.4-mini", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000 },
   { id: "gpt-5.3-codex", name: "gpt-5.3-codex", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000 },

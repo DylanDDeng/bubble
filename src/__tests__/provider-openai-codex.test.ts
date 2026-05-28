@@ -8,9 +8,46 @@ import {
   normalizeOpenAICodexUsage,
   sortCodexModelDescriptors,
 } from "../provider-openai-codex.js";
+import type { OAuthCredentials } from "../oauth/types.js";
 
 function encodePayload(payload: object): string {
   return Buffer.from(JSON.stringify(payload), "utf-8").toString("base64url");
+}
+
+function makeAccessToken(accountId: string): string {
+  return `header.${encodePayload({
+    "https://api.openai.com/auth": {
+      chatgpt_account_id: accountId,
+    },
+  })}.sig`;
+}
+
+function makeSseResponse(): Response {
+  const encoder = new TextEncoder();
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+        type: "response.completed",
+        response: {
+          usage: {
+            input_tokens: 1,
+            output_tokens: 1,
+            total_tokens: 2,
+          },
+        },
+      })}\n\n`));
+      controller.close();
+    },
+  });
+  return new Response(body, { status: 200 });
+}
+
+async function collectStream<T>(stream: AsyncIterable<T>): Promise<T[]> {
+  const chunks: T[] = [];
+  for await (const chunk of stream) {
+    chunks.push(chunk);
+  }
+  return chunks;
 }
 
 describe("provider-openai-codex", () => {
@@ -25,17 +62,13 @@ describe("provider-openai-codex", () => {
   });
 
   it("extracts the chatgpt account id from the access token", () => {
-    const token = `header.${encodePayload({
-      "https://api.openai.com/auth": {
-        chatgpt_account_id: "account-123",
-      },
-    })}.sig`;
+    const token = makeAccessToken("account-123");
 
     expect(extractChatGptAccountId(token)).toBe("account-123");
   });
 
   it("returns the latest fallback model first", () => {
-    expect(getOpenAICodexFallbackModels()[0]).toBe("gpt-5.4");
+    expect(getOpenAICodexFallbackModels()[0]).toBe("gpt-5.5");
   });
 
   it("maps Responses cached input tokens into prompt cache usage", () => {
@@ -79,11 +112,7 @@ describe("provider-openai-codex", () => {
   });
 
   it("sends the persistent prompt cache key and forwards cached usage from streams", async () => {
-    const token = `header.${encodePayload({
-      "https://api.openai.com/auth": {
-        chatgpt_account_id: "account-123",
-      },
-    })}.sig`;
+    const token = makeAccessToken("account-123");
     const encoder = new TextEncoder();
     const responseBody = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -138,19 +167,137 @@ describe("provider-openai-codex", () => {
     });
   });
 
+  it("refreshes OAuth credentials before Codex requests and deduplicates concurrent refreshes", async () => {
+    const oldToken = makeAccessToken("account-old");
+    const newToken = makeAccessToken("account-new");
+    let credentials: OAuthCredentials = {
+      type: "oauth",
+      accessToken: oldToken,
+      refreshToken: "refresh-old",
+      expiresAt: Date.now() + 1000,
+      accountId: "account-old",
+    };
+    let resolveRefresh: (() => void) | undefined;
+    const refreshReady = new Promise<void>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    const refreshCredentials = vi.fn(async () => {
+      await refreshReady;
+      credentials = {
+        type: "oauth",
+        accessToken: newToken,
+        refreshToken: "refresh-new",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        accountId: "account-new",
+      };
+      return credentials;
+    });
+    const authHeaders: string[] = [];
+    const accountHeaders: string[] = [];
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      authHeaders.push(headers.get("Authorization") || "");
+      accountHeaders.push(headers.get("ChatGPT-Account-Id") || "");
+      return makeSseResponse();
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = createOpenAICodexProvider({
+      providerId: "openai-codex",
+      apiKey: oldToken,
+      baseURL: "https://chatgpt.com/backend-api",
+      auth: {
+        getCredentials: () => credentials,
+        refreshCredentials,
+      },
+    });
+
+    const first = collectStream(provider.streamChat([{ role: "user", content: "hi" }], { model: "gpt-5.5" }));
+    const second = collectStream(provider.streamChat([{ role: "user", content: "hi" }], { model: "gpt-5.5" }));
+
+    await waitFor(() => refreshCredentials.mock.calls.length === 1);
+    resolveRefresh?.();
+    await Promise.all([first, second]);
+
+    expect(refreshCredentials).toHaveBeenCalledTimes(1);
+    expect(authHeaders).toEqual([`Bearer ${newToken}`, `Bearer ${newToken}`]);
+    expect(accountHeaders).toEqual(["account-new", "account-new"]);
+  });
+
+  it("forces refresh and retries once when Codex returns token_expired", async () => {
+    const oldToken = makeAccessToken("account-old");
+    const newToken = makeAccessToken("account-new");
+    let credentials: OAuthCredentials = {
+      type: "oauth",
+      accessToken: oldToken,
+      refreshToken: "refresh-old",
+      expiresAt: Date.now() + 60 * 60 * 1000,
+      accountId: "account-old",
+    };
+    const refreshCredentials = vi.fn(async () => {
+      credentials = {
+        type: "oauth",
+        accessToken: newToken,
+        refreshToken: "refresh-new",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        accountId: "account-new",
+      };
+      return credentials;
+    });
+    const authHeaders: string[] = [];
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      authHeaders.push(headers.get("Authorization") || "");
+      if (authHeaders.length === 1) {
+        return new Response(JSON.stringify({
+          detail: {
+            code: "token_expired",
+            message: "Your ChatGPT session expired before this request finished.",
+          },
+        }), { status: 401 });
+      }
+      return makeSseResponse();
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = createOpenAICodexProvider({
+      providerId: "openai-codex",
+      apiKey: oldToken,
+      baseURL: "https://chatgpt.com/backend-api",
+      auth: {
+        getCredentials: () => credentials,
+        refreshCredentials,
+      },
+    });
+
+    await collectStream(provider.streamChat([{ role: "user", content: "hi" }], { model: "gpt-5.5" }));
+
+    expect(refreshCredentials).toHaveBeenCalledTimes(1);
+    expect(authHeaders).toEqual([`Bearer ${oldToken}`, `Bearer ${newToken}`]);
+  });
+
   it("sorts models by family version desc, floating new families above catalog entries", () => {
-    // shuffled input; gpt-5.5 isn't in the static catalog yet
+    // shuffled input; gpt-5.6 represents a newly returned family before the
+    // static fallback catalog has been updated.
     const sorted = sortCodexModelDescriptors([
       { id: "gpt-5.4-mini" },
       { id: "gpt-5.2" },
       { id: "gpt-5.4" },
-      { id: "gpt-5.5" },
+      { id: "gpt-5.6" },
       { id: "gpt-5.3-codex" },
     ]).map((d) => d.id);
 
-    expect(sorted[0]).toBe("gpt-5.5");
+    expect(sorted[0]).toBe("gpt-5.6");
     expect(sorted.indexOf("gpt-5.4")).toBeLessThan(sorted.indexOf("gpt-5.4-mini"));
     expect(sorted.indexOf("gpt-5.4-mini")).toBeLessThan(sorted.indexOf("gpt-5.3-codex"));
     expect(sorted[sorted.length - 1]).toBe("gpt-5.2");
   });
 });
+
+async function waitFor(predicate: () => boolean) {
+  const started = Date.now();
+  while (!predicate()) {
+    if (Date.now() - started > 1000) throw new Error("timed out waiting for condition");
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+}

@@ -94,6 +94,7 @@ async function main() {
         baseURL: defaultProvider.baseURL,
         thinkingLevel: args.thinkingLevel,
         promptCacheKey: sessionPromptCacheKey,
+        openAICodexAuth: registry.createOpenAICodexAuthAdapter(defaultProvider.id),
       })
     : createUnavailableProvider(unavailableProviderMessage);
   const createProvider = (providerId: string, apiKey: string, baseURL: string) =>
@@ -103,6 +104,7 @@ async function main() {
       baseURL,
       thinkingLevel: args.thinkingLevel,
       promptCacheKey: sessionPromptCacheKey,
+      openAICodexAuth: registry.createOpenAICodexAuthAdapter(providerId),
     });
   const createProviderForRoute = async (route: { providerId: string; model: string }) => {
     const providerId = route.providerId;

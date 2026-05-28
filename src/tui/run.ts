@@ -51,7 +51,6 @@ import type { SessionManager } from "../session.js";
 import type { ContentPart, Message, PermissionMode, PlanDecision, Provider, ThinkingLevel, Todo, TokenUsage, ToolResultMetadata } from "../types.js";
 import type { ProviderRegistry } from "../provider-registry.js";
 import { BUILTIN_PROVIDERS, decodeModel, displayModel, isUserVisibleProvider } from "../provider-registry.js";
-import { listBuiltinModels } from "../model-catalog.js";
 import { calculateUsageCost } from "../model-pricing.js";
 import { getAvailableThinkingLevels } from "../provider-transform.js";
 import { collectUsageStatsBundle, formatStatsPanelBody, type StatsRange, type UsageStats, type UsageStatsBundle } from "../stats/usage.js";
@@ -78,6 +77,12 @@ import { markdownInlineSegments, type MarkdownInlineSegment } from "./markdown-i
 import { hashString } from "./render-signature.js";
 import { findToolRenderer } from "./tool-renderers/registry.js";
 import { writeToolKey } from "./tool-renderers/write.js";
+import {
+  discoverModelProviderGroups,
+  getVisibleModelProviders,
+  localModelsForProvider,
+  type ModelProviderGroup,
+} from "./model-picker-data.js";
 import { formatWritePreview, isWritePreviewTool } from "./tool-renderers/write-preview.js";
 import { extractStreamingArgsHint } from "./streaming-tool-args.js";
 import { getNextPermissionMode, PERMISSION_MODE_INFO } from "../permission/mode.js";
@@ -723,6 +728,8 @@ function OpenTuiApp(props: {
   const [approvalOptionIdx, setApprovalOptionIdx] = createSignal(0);
   let picker: PickerState | undefined;
   let providerDialog: ProviderDialogState | undefined;
+  let providerDialogModelItems: { key: string; items: PickerItem[] } | undefined;
+  let providerDialogModelRefreshId = 0;
   let previousPickerForKey: Extract<PickerState, { kind: "select" }> | undefined;
   let homePromptRef: TextareaRenderable | undefined;
   let sessionPromptRef: TextareaRenderable | undefined;
@@ -3118,6 +3125,12 @@ function OpenTuiApp(props: {
   }
 
   function openProviderDialog(step: ProviderDialogStep = "providers", providerId?: string) {
+    if (step === "models") {
+      providerDialogModelItems = undefined;
+    } else {
+      providerDialogModelRefreshId++;
+      providerDialogModelItems = undefined;
+    }
     const items = providerDialogItemsFor(step, providerId);
     picker = undefined;
     providerDialog = {
@@ -3133,10 +3146,15 @@ function OpenTuiApp(props: {
     redrawDock();
     redrawProviderDialog();
     setTimeout(() => providerDialogInput?.focus(), 0);
+    if (step === "models") {
+      void refreshProviderDialogModelItems(providerId, items);
+    }
   }
 
   function closeProviderDialog() {
     providerDialog = undefined;
+    providerDialogModelRefreshId++;
+    providerDialogModelItems = undefined;
     providerDialogRoot && (providerDialogRoot.visible = false);
     providerDialogPanel && (providerDialogPanel.visible = false);
     providerDialogRoot?.requestRender();
@@ -3149,6 +3167,9 @@ function OpenTuiApp(props: {
     if (step === "auth") return providerId ? buildPickerItems("provider-auth", providerId) : [];
     if (step === "skills") return buildSkillItems();
     if (step === "models") {
+      if (providerDialogModelItems?.key === modelPickerCacheKey(providerId)) {
+        return providerDialogModelItems.items;
+      }
       const modelItems = buildPickerItems("model", providerId);
       if (modelItems.length || providerId) return modelItems;
       return buildProviderConnectItems()
@@ -3157,6 +3178,35 @@ function OpenTuiApp(props: {
         .map((item) => ({ ...item, category: "Popular providers" }));
     }
     return [];
+  }
+
+  function modelPickerCacheKey(providerId?: string): string {
+    return providerId || "__all__";
+  }
+
+  async function refreshProviderDialogModelItems(providerId: string | undefined, localItems: PickerItem[]) {
+    const refreshId = ++providerDialogModelRefreshId;
+    const cacheKey = modelPickerCacheKey(providerId);
+    const localPreferredIndex = preferredPickerIndex("model", localItems);
+
+    try {
+      const remoteItems = await buildRemoteModelPickerItems(providerId);
+      if (refreshId !== providerDialogModelRefreshId) return;
+      if (remoteItems.length === 0) return;
+
+      const state = providerDialog;
+      if (!state || state.step !== "models" || modelPickerCacheKey(state.providerId) !== cacheKey) return;
+
+      providerDialogModelItems = { key: cacheKey, items: remoteItems };
+      const remotePreferredIndex = preferredPickerIndex("model", remoteItems);
+      const nextIndex = state.index === localPreferredIndex
+        ? remotePreferredIndex
+        : Math.min(state.index, Math.max(0, remoteItems.length - 1));
+      providerDialog = { ...state, index: nextIndex };
+      redrawProviderDialog();
+    } catch {
+      // Keep the already-rendered local catalog when remote model discovery fails.
+    }
   }
 
   function providerDialogFilteredItems(state = providerDialog) {
@@ -4978,64 +5028,71 @@ function OpenTuiApp(props: {
     }
   }
 
+  function buildLocalModelPickerItems(providerId?: string): PickerItem[] {
+    const groups = getVisibleModelProviders(registry, providerId).map((provider) => ({
+      provider,
+      models: localModelsForProvider(registry, provider),
+    }));
+    return buildModelPickerItemsFromGroups(groups, providerId);
+  }
+
+  async function buildRemoteModelPickerItems(providerId?: string): Promise<PickerItem[]> {
+    const groups = await discoverModelProviderGroups(registry, providerId);
+    return buildModelPickerItemsFromGroups(groups, providerId);
+  }
+
+  function buildModelPickerItemsFromGroups(groups: ModelProviderGroup[], providerId?: string): PickerItem[] {
+    const items: PickerItem[] = [];
+    for (const { provider, models } of groups) {
+      for (const model of models) {
+        const reasoningLevels = getModelPickerReasoningLevels(provider.id, model.id);
+        if (reasoningLevels.length > 0) {
+          for (const level of reasoningLevels) {
+            const isCurrent = props.agent.model === `${provider.id}:${model.id}` && props.agent.thinking === level;
+            items.push({
+              label: `${model.name} (${level})`,
+              detail: isCurrent ? "(current)" : undefined,
+              value: `${provider.id}:${model.id}`,
+              command: `/model ${provider.id}:${model.id} --reasoning-effort ${level}`,
+              category: provider.name,
+              gutter: isCurrent ? "●" : undefined,
+            });
+          }
+          continue;
+        }
+
+        const isCurrent = props.agent.model === `${provider.id}:${model.id}`;
+        items.push({
+          label: model.name,
+          detail: isCurrent ? "(current)" : undefined,
+          value: `${provider.id}:${model.id}`,
+          command: `/model ${provider.id}:${model.id}`,
+          category: provider.name,
+          gutter: isCurrent ? "●" : undefined,
+        });
+      }
+    }
+
+    const currentModel = props.agent.model;
+    if (!providerId && currentModel && !items.some((item) => item.value === currentModel)) {
+      items.unshift({
+        label: displayModel(currentModel),
+        detail: "(current)",
+        value: currentModel,
+        command: `/model ${currentModel}`,
+        category: "Recent",
+        gutter: "●",
+      });
+    }
+    return items;
+  }
+
   function buildPickerItems(kind: Exclude<PickerMode, "key">, providerId?: string): PickerItem[] {
     if (kind === "slash") return [];
     if (kind === "mcp-reconnect") return buildMcpReconnectItems();
     if (kind === "skill") return buildSkillItems();
     if (kind === "model") {
-      const items: PickerItem[] = [];
-      for (const provider of registry.getEnabled()) {
-        if (providerId && provider.id !== providerId) continue;
-        const customModels = registry.getModelConfig().getCustomModels(provider.id);
-        const builtinProviderId = provider.id === "openai" && provider.authType === "oauth"
-          ? "openai-codex"
-          : provider.id;
-        const models = customModels.length > 0
-          ? customModels
-          : listBuiltinModels(builtinProviderId).map((model) => ({
-            id: model.id,
-            name: model.name,
-            providerId: provider.id,
-          }));
-        for (const model of models) {
-          const reasoningLevels = getModelPickerReasoningLevels(provider.id, model.id);
-          if (reasoningLevels.length > 0) {
-            for (const level of reasoningLevels) {
-              const isCurrent = props.agent.model === `${provider.id}:${model.id}` && props.agent.thinking === level;
-              items.push({
-                label: `${model.name} (${level})`,
-                detail: isCurrent ? "(current)" : undefined,
-                value: `${provider.id}:${model.id}`,
-                command: `/model ${provider.id}:${model.id} --reasoning-effort ${level}`,
-                category: provider.name,
-                gutter: isCurrent ? "●" : undefined,
-              });
-            }
-            continue;
-          }
-          const isCurrent = props.agent.model === `${provider.id}:${model.id}`;
-          items.push({
-            label: model.name,
-            detail: isCurrent ? "(current)" : undefined,
-            value: `${provider.id}:${model.id}`,
-            command: `/model ${provider.id}:${model.id}`,
-            category: provider.name,
-            gutter: isCurrent ? "●" : undefined,
-          });
-        }
-      }
-      const currentModel = props.agent.model;
-      if (!providerId && currentModel && !items.some((item) => item.value === currentModel)) {
-        items.unshift({
-          label: displayModel(currentModel),
-          detail: "(current)",
-          value: currentModel,
-          command: `/model ${currentModel}`,
-          category: "Recent",
-          gutter: "●",
-        });
-      }
-      return items;
+      return buildLocalModelPickerItems(providerId);
     }
 
     if (kind === "provider") {
@@ -8240,15 +8297,50 @@ function createMarkdownList(
     flexShrink: 0,
   }, items.map((item: any, index: number) => {
     const marker = ordered ? `${start + index}. ` : "• ";
-    return createText(ctx, new StyledText([
-      fg(theme.textMuted)(marker),
-      ...markdownInlineToStyledText(markdownTokenInlineTokens(item), palette, item.text ?? "").chunks,
-    ]), {
-      fg: defaultFg,
-      wrapMode: "word",
-      flexShrink: 0,
-    });
+    return createMarkdownListItem(ctx, item, marker, palette, defaultFg);
   }));
+}
+
+function createMarkdownListItem(
+  ctx: RenderContext,
+  item: any,
+  marker: string,
+  palette: SemanticMarkdownPalette,
+  defaultFg: string,
+) {
+  const tokens = Array.isArray(item?.tokens) ? item.tokens : [];
+  const inlineTokens = tokens.filter((child: any) => !isMarkdownListToken(child));
+  const nestedLists = tokens.filter(isMarkdownListToken);
+  const fallback = tokens.length > 0 ? "" : (item?.text ?? "");
+  const children: Renderable[] = [];
+
+  const line = markdownInlineToStyledText(inlineTokens, palette, fallback);
+  children.push(createText(ctx, new StyledText([
+    fg(theme.textMuted)(marker),
+    ...line.chunks,
+  ]), {
+    fg: defaultFg,
+    wrapMode: "word",
+    flexShrink: 0,
+  }));
+
+  for (const nestedList of nestedLists) {
+    const nested = createMarkdownList(ctx, nestedList, palette, defaultFg);
+    if (!nested) continue;
+    children.push(createBox(ctx, {
+      flexDirection: "column",
+      flexShrink: 0,
+      paddingLeft: Math.max(2, marker.length),
+    }, [nested]));
+  }
+
+  return children.length === 1
+    ? children[0]
+    : createBox(ctx, { flexDirection: "column", flexShrink: 0 }, children);
+}
+
+function isMarkdownListToken(token: any): boolean {
+  return token?.type === "list";
 }
 
 function markdownTokenInlineTokens(token: any): any[] | undefined {

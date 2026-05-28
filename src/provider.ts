@@ -6,7 +6,7 @@
 
 import OpenAI from "openai";
 import { appendFileSync } from "node:fs";
-import { createOpenAICodexProvider, isOpenAICodexBaseUrl } from "./provider-openai-codex.js";
+import { createOpenAICodexProvider, isOpenAICodexBaseUrl, type OpenAICodexAuthAdapter } from "./provider-openai-codex.js";
 import { createProviderProtocolArtifactFilter } from "./provider-artifacts.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
 import { debugReasoningStream, summarizeDebugText } from "./reasoning-debug.js";
@@ -79,6 +79,8 @@ export interface ProviderInstanceOptions {
   thinkingLevel?: ThinkingLevel;
   /** Stable per-session seed for provider prompt caches. */
   promptCacheKey?: string;
+  /** Dynamic OAuth access-token loader/refresh hook for ChatGPT Codex requests. */
+  openAICodexAuth?: OpenAICodexAuthAdapter;
 }
 
 export function createUnavailableProvider(message: string): Provider {
@@ -95,7 +97,11 @@ export function createUnavailableProvider(message: string): Provider {
 
 export function createProviderInstance(options: ProviderInstanceOptions): Provider {
   if (isOpenAICodexBaseUrl(options.baseURL)) {
-    return createOpenAICodexProvider({ ...options, providerId: options.providerId || "openai-codex" });
+    return createOpenAICodexProvider({
+      ...options,
+      providerId: options.providerId || "openai-codex",
+      auth: options.openAICodexAuth,
+    });
   }
 
   const client = new OpenAI({
