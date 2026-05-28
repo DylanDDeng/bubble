@@ -3283,21 +3283,38 @@ function OpenTuiApp(props: {
     }
   }
 
+  function providerDialogMatchScore(item: PickerItem, query: string): number {
+    const label = (item.label || "").toLowerCase();
+    const value = (item.value || "").toLowerCase();
+    const haystack = [
+      item.label,
+      item.detail,
+      item.value,
+      item.category,
+      item.footer,
+    ].filter(Boolean).join(" ").toLowerCase();
+    if (label.startsWith(query)) return 100;
+    if (label.includes(query)) return 80;
+    if (value.includes(query)) return 60;
+    if (haystack.includes(query)) return 40;
+    // Fuzzy (subsequence) match is a last resort, and only against label+value
+    // so long provider descriptions (e.g. "platform.moonshot.cn") don't produce
+    // spurious hits like "gpt" matching "kimi-k2-thinking".
+    if (fuzzyMatch(`${label} ${value}`, query)) return 20;
+    return 0;
+  }
+
   function providerDialogFilteredItems(state = providerDialog) {
     if (!state || state.step === "key") return [];
     const items = providerDialogItemsFor(state.step, state.providerId);
     const query = state.query.trim().toLowerCase();
     if (!query) return items;
-    return items.filter((item) => {
-      const haystack = [
-        item.label,
-        item.detail,
-        item.value,
-        item.category,
-        item.footer,
-      ].filter(Boolean).join(" ").toLowerCase();
-      return haystack.includes(query) || fuzzyMatch(haystack, query);
-    });
+    const scored = items
+      .map((item, order) => ({ item, order, score: providerDialogMatchScore(item, query) }))
+      .filter((entry) => entry.score > 0);
+    // Stable sort by score desc, preserving original catalog order within a tier.
+    scored.sort((a, b) => b.score - a.score || a.order - b.order);
+    return scored.map((entry) => entry.item);
   }
 
   function providerDialogVisibleRows(state = providerDialog): ProviderDialogRow[] {
@@ -6511,14 +6528,10 @@ function OpenTuiApp(props: {
             if (state.step === "key") {
               providerDialog = { ...state, apiKey: value, error: undefined };
             } else {
+              const query = value.trim().toLowerCase();
               const items = providerDialogItemsFor(state.step, state.providerId).filter((item) => {
-                const query = value.trim().toLowerCase();
                 if (!query) return true;
-                const haystack = [item.label, item.detail, item.value, item.category, item.footer]
-                  .filter(Boolean)
-                  .join(" ")
-                  .toLowerCase();
-                return haystack.includes(query) || fuzzyMatch(haystack, query);
+                return providerDialogMatchScore(item, query) > 0;
               });
               providerDialog = {
                 ...state,
