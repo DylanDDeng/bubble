@@ -7592,7 +7592,7 @@ function renderMarkdownContent(
     bg: theme.background,
     width: "100%",
     tableOptions: {
-      widthMode: "full",
+      widthMode: "content",
       columnFitter: "balanced",
       wrapMode: "word",
       cellPadding: 1,
@@ -8347,7 +8347,7 @@ function createMarkdown(
     width: "100%",
     flexShrink: 0,
     tableOptions: {
-      widthMode: "full",
+      widthMode: "content",
       columnFitter: "balanced",
       wrapMode: "word",
       cellPadding: 1,
