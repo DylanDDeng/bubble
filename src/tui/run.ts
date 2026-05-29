@@ -9183,7 +9183,7 @@ function renderTool(tool: DisplayToolCall, syntaxStyle: SyntaxStyle, width = 80)
       h("text", { fg: color },
         `${icon} ${displayToolName(tool.name)}${toolHeader(tool) ? ` ${toolHeader(tool)}` : ""}`,
       ),
-      h("box", { paddingLeft: 1, marginTop: 1, border: ["left"], borderColor: theme.borderSubtle, flexDirection: "column", flexShrink: 0 },
+      h("box", { paddingLeft: 1, marginTop: 1, border: ["left"], borderColor: theme.borderSubtle, flexDirection: "column", flexShrink: 0, backgroundColor: theme.diffContextBg },
         renderDiffContent(diff, toolPath(tool), syntaxStyle, width),
       ),
     );
@@ -10051,10 +10051,18 @@ function toolPath(tool: DisplayToolCall): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+// Strip only leading/trailing newlines — NOT a full .trim(). A blank context
+// line in a unified diff is a single space (" "); plain .trim() would delete a
+// trailing blank context line, leaving the hunk body shorter than its @@ header
+// count and breaking the diff parser ("Added line count did not match").
+function stripDiffEdgeNewlines(diff: string): string {
+  return diff.replace(/^\n+/, "").replace(/\n+$/, "");
+}
+
 function extractToolDiff(tool: DisplayToolCall): string | undefined {
   if (tool.resultCollapsed) return undefined;
   if (typeof tool.metadata?.diff === "string" && tool.metadata.diff.trim().length > 0) {
-    return tool.metadata.diff.trim();
+    return stripDiffEdgeNewlines(tool.metadata.diff);
   }
   if (!tool.result) return undefined;
   if (
@@ -10070,11 +10078,15 @@ function extractToolDiff(tool: DisplayToolCall): string | undefined {
   const rawDiff = tool.result.slice(index + marker.length);
   const diagnosticsIndex = rawDiff.search(/\n\nLSP diagnostics in /);
   const diff = diagnosticsIndex === -1 ? rawDiff : rawDiff.slice(0, diagnosticsIndex);
-  return diff.trim().length > 0 ? diff : undefined;
+  return diff.trim().length > 0 ? stripDiffEdgeNewlines(diff) : undefined;
 }
 
-function diffViewMode(width = 80): "unified" | "split" {
-  return width > 120 ? "split" : "unified";
+function diffViewMode(_width = 80): "unified" | "split" {
+  // Always unified: split view pads the shorter side with empty filler rows that
+  // OpenTUI's DiffRenderable leaves uncolored, which shows up as bright white
+  // blocks in light mode. Unified view has no filler rows — every line is
+  // add/remove/context and gets a background — so the edit area stays uniform.
+  return "unified";
 }
 
 function filetype(filePath?: string): string | undefined {
