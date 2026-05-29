@@ -7952,7 +7952,12 @@ function syncMarkdownRenderable(markdown: MarkdownRenderable, content: string, s
   if (markdown.content === content && markdown.streaming === streaming) return;
   markdown.content = content;
   markdown.streaming = streaming;
-  markdown.clearCache();
+  // While streaming, let OpenTUI's incremental markdown/code-block rendering do
+  // its job — clearing the parse cache every delta forces the (syntax-
+  // highlighted) code blocks to be rebuilt and re-highlighted on every token,
+  // which is the source of the visible flicker on streamed code blocks. Clear
+  // the cache only once streaming ends, to fully reparse the finalized content.
+  if (!streaming) markdown.clearCache();
 }
 
 function updateAssistantPartEntries(
