@@ -59,6 +59,7 @@ import type { ProviderRegistry } from "../provider-registry.js";
 import { BUILTIN_PROVIDERS, decodeModel, displayModel, isUserVisibleProvider } from "../provider-registry.js";
 import { calculateUsageCost } from "../model-pricing.js";
 import { getAvailableThinkingLevels } from "../provider-transform.js";
+import { getCurrentVersion } from "../update/index.js";
 import { collectUsageStatsBundle, formatStatsPanelBody, type StatsRange, type UsageStats, type UsageStatsBundle } from "../stats/usage.js";
 import type { SkillRegistry } from "../skills/registry.js";
 import { parseSkillInvocation } from "../skills/invocation.js";
@@ -5756,8 +5757,11 @@ function OpenTuiApp(props: {
       h("box", { flexShrink: 0, flexDirection: "column", alignItems: "center" },
         ...logoLines.map((line) => renderHomeLogoLine(line)),
       ),
+      h("box", { flexShrink: 0, flexDirection: "column", alignItems: "center", paddingTop: 1 },
+        h("text", { fg: theme.textMuted, content: `v${getCurrentVersion()}` }),
+      ),
       ...(props.options.updateNotice
-        ? [h("box", { flexShrink: 0, flexDirection: "column", alignItems: "center", paddingTop: 1 },
+        ? [h("box", { flexShrink: 0, flexDirection: "column", alignItems: "center" },
             h("text", { fg: theme.accent, content: props.options.updateNotice }))]
         : []),
       h("box", { height: 1, minHeight: 0, flexShrink: 1 }),
