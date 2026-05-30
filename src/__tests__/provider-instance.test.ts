@@ -92,6 +92,35 @@ describe("createProviderInstance", () => {
     expect(body.messages[0].reasoning_content).toBeUndefined();
   });
 
+  it("uses StepFun Step Plan reasoning effort request shape", async () => {
+    let body: any;
+    createMock.mockImplementation(async (input) => {
+      body = input;
+      return fromArray([{ choices: [{ delta: {}, finish_reason: "stop" }] }]);
+    });
+
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({
+      providerId: "stepfun",
+      apiKey: "sk-test",
+      baseURL: "https://api.stepfun.com/step_plan/v1",
+    });
+
+    await collect(provider.streamChat([{
+      role: "assistant",
+      content: "",
+      reasoning: "tool reasoning",
+      toolCalls: [{ id: "read:1", name: "read", arguments: "{\"path\":\"a\"}" }],
+    }], {
+      model: "step-3.7-flash",
+      thinkingLevel: "high",
+    }));
+
+    expect(body.reasoning_effort).toBe("high");
+    expect(body.reasoning).toBeUndefined();
+    expect(body.messages[0].reasoning_content).toBeUndefined();
+  });
+
   it("disables parallel tool calls only for Fireworks Kimi when tools are available", async () => {
     const tool: ToolDefinition = {
       name: "read",
