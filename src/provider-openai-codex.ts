@@ -567,6 +567,12 @@ function isTransientCodexTransportError(error: unknown): boolean {
     /\bEPIPE\b/i,
     /socket hang up/i,
     /fetch failed/i,
+    /unknown certificate verification error/i,
+    /certificate (?:verify|verification) (?:failed|error)/i,
+    /unable to verify (?:the )?(?:first )?certificate/i,
+    /UNABLE_TO_(?:VERIFY_LEAF_SIGNATURE|GET_ISSUER_CERT_LOCALLY)/i,
+    /SELF_SIGNED_CERT_IN_CHAIN/i,
+    /CERT_(?:HAS_EXPIRED|UNTRUSTED|INVALID)/i,
   ].some((pattern) => pattern.test(text));
 }
 
