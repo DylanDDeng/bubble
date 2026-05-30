@@ -62,6 +62,30 @@ Bubble stores user configuration, sessions, permissions, skills, and memory unde
 
 In the app, use `/login` or provider commands to configure model access.
 
+### ChatGPT Network Configuration
+
+ChatGPT OAuth and GPT/Codex requests respect standard proxy variables:
+
+```bash
+export HTTPS_PROXY=http://proxy.example.com:8080
+export HTTP_PROXY=http://proxy.example.com:8080
+export NO_PROXY=localhost,127.0.0.1
+```
+
+If your network uses a corporate or custom HTTPS CA, start Bubble with:
+
+```bash
+NODE_EXTRA_CA_CERTS=/absolute/path/to/ca.pem bubble
+```
+
+You can also use `BUBBLE_EXTRA_CA_CERTS` for Bubble's ChatGPT requests:
+
+```bash
+BUBBLE_EXTRA_CA_CERTS=/absolute/path/to/ca.pem bubble
+```
+
+Do not disable TLS verification with `NODE_TLS_REJECT_UNAUTHORIZED=0`.
+
 ## Memory
 
 Bubble maintains persistent memory automatically from prior sessions. Useful commands:
