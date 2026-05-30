@@ -4,6 +4,7 @@ import { useTheme, type Theme } from "./theme.js";
 import { MarkdownContent, StreamingMarkdown } from "./markdown.js";
 import type { DisplayMessage, DisplayMessagePart, DisplayToolCall } from "./display-history.js";
 import { EDIT_COLLAPSED_DIFF_LINES, getEditDiffDetails } from "./edit-diff.js";
+import { sanitizeInternalReminderBlocks } from "../agent/internal-reminder-sanitizer.js";
 
 export interface PendingApprovalHint {
   toolName: "edit" | "write" | "bash";
@@ -101,16 +102,17 @@ function MessageItem({
     return <CompactionSummaryBlock message={message} theme={theme} />;
   }
 
+  const visibleReasoning = sanitizeInternalReminderBlocks(message.reasoning ?? "").trim();
   const hasVisible =
     !!message.content ||
     (message.toolCalls?.length ?? 0) > 0 ||
     (message.parts?.length ?? 0) > 0 ||
-    (!!message.reasoning && verboseTrace);
+    (!!visibleReasoning && verboseTrace);
   if (!hasVisible) return null;
 
   return (
     <box style={{ marginTop: 1, marginBottom: 1, flexDirection: "column" }}>
-      {message.reasoning && verboseTrace && <ReasoningBlock reasoning={message.reasoning} theme={theme} />}
+      {visibleReasoning && verboseTrace && <ReasoningBlock reasoning={visibleReasoning} theme={theme} />}
       {message.parts && message.parts.length > 0 ? (
         <MessageParts parts={message.parts} terminalColumns={terminalColumns} verboseTrace={verboseTrace} theme={theme} />
       ) : (
@@ -139,10 +141,11 @@ function StreamingMessage({
   verboseTrace: boolean;
 }) {
   const theme = useTheme();
+  const visibleReasoning = sanitizeInternalReminderBlocks(reasoning).trim();
   const visibleParts = parts.length > 0 ? parts : fallbackStreamingParts(content, tools);
   return (
     <box style={{ flexDirection: "column", marginTop: 1 }}>
-      {reasoning && verboseTrace && <ReasoningBlock reasoning={reasoning} theme={theme} />}
+      {visibleReasoning && verboseTrace && <ReasoningBlock reasoning={visibleReasoning} theme={theme} />}
       {visibleParts.length > 0 && (
         <MessageParts parts={visibleParts} terminalColumns={terminalColumns} verboseTrace={verboseTrace} streaming theme={theme} />
       )}

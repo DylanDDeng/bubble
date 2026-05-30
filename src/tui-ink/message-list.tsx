@@ -7,6 +7,7 @@ import type { DisplayMessage, DisplayMessagePart, DisplayToolCall } from "./disp
 import { buildTraceGroups, formatTracePath, traceGroupLabel, type TraceGroup } from "./trace-groups.js";
 import { EDIT_COLLAPSED_DIFF_LINES, formatEditSuccessSummary, getEditDiffDetails } from "./edit-diff.js";
 import { formatSubagentRoute, type SubagentRouteLike } from "../agent/subagent-route-format.js";
+import { sanitizeInternalReminderBlocks } from "../agent/internal-reminder-sanitizer.js";
 
 /**
  * Hint surfaced when the user can interrupt the currently-running pending tool
@@ -136,16 +137,17 @@ function MessageItem({
     return <CompactionSummaryBlock message={message} />;
   }
 
+  const visibleReasoning = sanitizeInternalReminderBlocks(message.reasoning ?? "").trim();
   const hasVisibleAssistantContent =
     !!message.content ||
     (message.toolCalls?.length ?? 0) > 0 ||
     (message.parts?.length ?? 0) > 0 ||
-    (!!message.reasoning && verboseTrace);
+    (!!visibleReasoning && verboseTrace);
   if (!hasVisibleAssistantContent) return null;
 
   return (
     <Box marginTop={1} marginBottom={1} flexDirection="column">
-      {message.reasoning && verboseTrace && <ReasoningTraceBlock reasoning={message.reasoning} />}
+      {visibleReasoning && verboseTrace && <ReasoningTraceBlock reasoning={visibleReasoning} />}
       {message.parts && message.parts.length > 0 ? (
         <MessageParts
           parts={message.parts}
@@ -202,15 +204,16 @@ function StreamingMessage({
   const deferredContent = React.useDeferredValue(content);
   const deferredReasoning = React.useDeferredValue(reasoning);
   const deferredParts = React.useDeferredValue(parts);
+  const visibleReasoning = sanitizeInternalReminderBlocks(deferredReasoning).trim();
   const visibleParts = deferredParts.length > 0
     ? deferredParts
     : fallbackStreamingParts(deferredContent, tools);
 
   return (
     <Box flexDirection="column">
-      {deferredReasoning && verboseTrace && (
+      {visibleReasoning && verboseTrace && (
         <Box marginTop={1} flexDirection="column">
-          <ReasoningTraceBlock reasoning={deferredReasoning} />
+          <ReasoningTraceBlock reasoning={visibleReasoning} />
         </Box>
       )}
       {visibleParts.length > 0 && (

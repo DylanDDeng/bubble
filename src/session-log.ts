@@ -1,3 +1,4 @@
+import { sanitizeInternalReminderBlocks } from "./agent/internal-reminder-sanitizer.js";
 import type { AssistantMessage, Message, Todo } from "./types.js";
 import type {
   LegacySessionEntry,
@@ -224,7 +225,9 @@ function normalizeMessageToEntries(message: Message, id: string, timestamp: numb
         message: {
           role: "assistant",
           content: message.content,
-          reasoning: message.reasoning,
+          reasoning: message.reasoning !== undefined
+            ? sanitizeInternalReminderBlocks(message.reasoning)
+            : undefined,
           model: message.model,
           providerId: message.providerId,
           modelId: message.modelId,

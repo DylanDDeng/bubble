@@ -92,6 +92,33 @@ describe("Agent", () => {
     expect(agent.messages).toHaveLength(2); // user + assistant (no system prompt in this test)
   });
 
+  it("sanitizes internal runtime reminders from streamed reasoning before events and history", async () => {
+    const provider = createMockProvider([
+      [
+        { type: "reasoning_delta", content: "normal before Runtime " },
+        { type: "reasoning_delta", content: "reminder:\nRepository orientation workflow:\n" },
+        { type: "reasoning_delta", content: "- Start with the repo purpose and main execution paths.\n" },
+        { type: "reasoning_delta", content: "- Inspect README/package metadata plus core runtime files before summarizing.\n" },
+        { type: "reasoning_delta", content: "- Keep the first pass read-only unless the user asks for changes or runtime verification. normal after" },
+        { type: "text", content: "Done." },
+        { type: "done" },
+      ],
+    ]);
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [] });
+    const events = await collectEvents(agent, "Hi", "/tmp");
+    const reasoningText = events
+      .filter((event): event is Extract<AgentEvent, { type: "reasoning_delta" }> => event.type === "reasoning_delta")
+      .map((event) => event.content)
+      .join("");
+    const assistant = agent.messages.find((message) => message.role === "assistant");
+
+    expect(reasoningText).toContain("normal before");
+    expect(reasoningText).toContain("normal after");
+    expect(reasoningText).not.toContain("Runtime reminder");
+    expect(reasoningText).not.toContain("Repository orientation workflow");
+    expect(assistant?.role === "assistant" ? assistant.reasoning : "").toBe(reasoningText);
+  });
+
   it("retries a reasoning-only assistant turn instead of appending invalid history", async () => {
     const providerCalls: any[][] = [];
     let callIndex = 0;
@@ -117,7 +144,7 @@ describe("Agent", () => {
     expect(providerCalls[1]?.some((message) => message.role === "assistant")).toBe(false);
     expect(providerCalls[1]?.some((message) => (
       message.role === "user"
-      && message.content.includes("Runtime reminder:")
+      && message.content.includes("<bubble_internal_reminder")
       && message.content.includes("no user-visible assistant content")
     ))).toBe(true);
     expect(events.some((event) => event.type === "text_delta" && event.content === "Visible retry answer.")).toBe(true);
