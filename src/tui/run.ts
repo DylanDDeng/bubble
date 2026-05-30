@@ -46,6 +46,7 @@ import { AgentAbortError, type Agent } from "../agent.js";
 import { AgentRunInputQueue } from "../agent/input-controller.js";
 import { debugReasoningStream, summarizeDebugText } from "../reasoning-debug.js";
 import { isHiddenToolMetadata } from "../agent/discovery-barrier.js";
+import { sanitizeInternalReminderBlocks } from "../agent/internal-reminder-sanitizer.js";
 import {
   summarizeAgentEventForTrace,
   summarizeTraceError,
@@ -7464,13 +7465,15 @@ function renderAssistantMessage(
   verboseTrace = false,
   width = 80,
 ) {
+  const visibleReasoning = showThinking
+    ? sanitizeInternalReminderBlocks(message.reasoning ?? "").trim()
+    : "";
   const modelSwitch = parseModelSwitchMessage(message.content);
-  if (modelSwitch && !message.reasoning?.trim() && !(message.toolCalls?.length)) {
+  if (modelSwitch && !visibleReasoning && !(message.toolCalls?.length)) {
     return renderModelSwitchMessage(modelSwitch);
   }
 
   const children: Child[] = [];
-  const visibleReasoning = showThinking ? message.reasoning?.trim() : "";
   const parts = message.parts ?? [];
   const hasParts = parts.length > 0;
   if (message.status && !visibleReasoning && !message.content.trim() && !(message.toolCalls?.length) && !hasParts) {

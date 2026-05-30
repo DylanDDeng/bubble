@@ -203,7 +203,7 @@ describe("DeepSeek cache prefix — system prompt + tools", () => {
     expect(turn2Projected[0]).toEqual({ role: "system", content: systemPrompt });
     expect(turn2Projected.at(-1)).toEqual({
       role: "user",
-      content: "Runtime reminder:\nCode explanation workflow: answer directly.",
+      content: "<bubble_internal_reminder kind=\"system-reminder\">\nCode explanation workflow: answer directly.\n</bubble_internal_reminder>",
     });
   });
 });

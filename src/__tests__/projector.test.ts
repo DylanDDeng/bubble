@@ -153,7 +153,10 @@ describe("projectMessages", () => {
     expect(out).toEqual([
       { role: "system", content: "base" },
       { role: "user", content: "go" },
-      { role: "user", content: "Runtime reminder:\nPlan mode is now ACTIVE." },
+      {
+        role: "user",
+        content: "<bubble_internal_reminder kind=\"system-reminder\">\nPlan mode is now ACTIVE.\n</bubble_internal_reminder>",
+      },
     ]);
   });
 
@@ -167,7 +170,10 @@ describe("projectMessages", () => {
     expect(out).toEqual([
       { role: "system", content: "base" },
       { role: "user", content: "go" },
-      { role: "user", content: "Runtime context:\nPrevious conversation summary:\nold work" },
+      {
+        role: "user",
+        content: "<bubble_internal_context kind=\"runtime-system\">\nPrevious conversation summary:\nold work\n</bubble_internal_context>",
+      },
     ]);
   });
 

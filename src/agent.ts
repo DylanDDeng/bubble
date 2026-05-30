@@ -22,6 +22,7 @@ import { BudgetLedger, composeAbortSignals } from "./agent/budget-ledger.js";
 import { assignAgentNickname, builtinAgentProfiles, mergeUsage, selectToolsForAgentProfile, validateAgentProfileTools, type AgentProfile, type SubagentRunResult } from "./agent/profiles.js";
 import { snapshotSubagentThread, subagentResultFromThread, type PendingSubagentToolUpdate, type SubagentThreadRecord, type SubagentThreadSnapshot } from "./agent/subagent-control.js";
 import { isHiddenToolResult } from "./agent/discovery-barrier.js";
+import { createStreamingInternalReminderSanitizer, sanitizeInternalReminderBlocks } from "./agent/internal-reminder-sanitizer.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { isOnlyProviderProtocolArtifacts, stripProviderProtocolArtifacts } from "./provider-artifacts.js";
 import { debugReasoningStream, summarizeDebugText } from "./reasoning-debug.js";
@@ -466,6 +467,7 @@ export class Agent {
       };
 
       const streamingToolCalls = new Map<string, { id: string; name: string; args: string; argsCorrupt?: boolean }>();
+      const reasoningSanitizer = createStreamingInternalReminderSanitizer();
       let turnUsage: TokenUsage | undefined;
       let assistantAppended = false;
       currentAssistantMsg = assistantMsg;
@@ -543,18 +545,23 @@ export class Agent {
               yield emit({ type: "text_delta", content: chunk.content });
               break;
             case "reasoning_delta":
-              debugReasoningStream({
-                stage: "agent_receive",
-                providerId: this._providerId,
-                modelId: this.apiModel,
-                turnStep: step,
-                beforeLength: assistantMsg.reasoning?.length ?? 0,
-                delta: summarizeDebugText(chunk.content),
-                afterLength: (assistantMsg.reasoning?.length ?? 0) + chunk.content.length,
-              });
-              assistantMsg.reasoning = (assistantMsg.reasoning || "") + chunk.content;
-              streamReasoningChars += chunk.content.length;
-              yield emit({ type: "reasoning_delta", content: chunk.content });
+              {
+                const sanitizedDelta = reasoningSanitizer.push(chunk.content);
+                if (sanitizedDelta) {
+                  debugReasoningStream({
+                    stage: "agent_receive",
+                    providerId: this._providerId,
+                    modelId: this.apiModel,
+                    turnStep: step,
+                    beforeLength: assistantMsg.reasoning?.length ?? 0,
+                    delta: summarizeDebugText(sanitizedDelta),
+                    afterLength: (assistantMsg.reasoning?.length ?? 0) + sanitizedDelta.length,
+                  });
+                  assistantMsg.reasoning = (assistantMsg.reasoning || "") + sanitizedDelta;
+                  streamReasoningChars += sanitizedDelta.length;
+                  yield emit({ type: "reasoning_delta", content: sanitizedDelta });
+                }
+              }
               break;
 
             case "tool_call":
@@ -630,6 +637,21 @@ export class Agent {
               break;
           }
           for (const update of this.drainSubagentToolUpdates()) yield emit(update);
+        }
+        const flushedReasoning = reasoningSanitizer.flush();
+        if (flushedReasoning) {
+          debugReasoningStream({
+            stage: "agent_receive_flush",
+            providerId: this._providerId,
+            modelId: this.apiModel,
+            turnStep: step,
+            beforeLength: assistantMsg.reasoning?.length ?? 0,
+            delta: summarizeDebugText(flushedReasoning),
+            afterLength: (assistantMsg.reasoning?.length ?? 0) + flushedReasoning.length,
+          });
+          assistantMsg.reasoning = (assistantMsg.reasoning || "") + flushedReasoning;
+          streamReasoningChars += flushedReasoning.length;
+          yield emit({ type: "reasoning_delta", content: flushedReasoning });
         }
         traceEvent("provider_stream_end", {
           elapsedMs: Date.now() - providerStartedAt,
@@ -1738,6 +1760,9 @@ export class Agent {
   }
 
   private appendMessage(message: Message) {
+    if (message.role === "assistant" && message.reasoning) {
+      message.reasoning = sanitizeInternalReminderBlocks(message.reasoning);
+    }
     this.messages.push(message);
     traceEvent("agent_message_append", {
       message: summarizeTraceMessage(message),
