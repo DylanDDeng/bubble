@@ -3,6 +3,7 @@ import type { Provider, ProviderMessage, ReasoningEffort, StreamChunk, ThinkingL
 import type { OAuthCredentials } from "./oauth/types.js";
 import { listBuiltinModels } from "./model-catalog.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
+import { chatGptFetch, type ChatGptFetch } from "./network/chatgpt-transport.js";
 
 export interface CodexModelDescriptor {
   id: string;
@@ -69,8 +70,10 @@ export function createOpenAICodexProvider(options: {
   thinkingLevel?: ThinkingLevel;
   promptCacheKey?: string;
   auth?: OpenAICodexAuthAdapter;
+  fetch?: ChatGptFetch;
 }): Provider {
   const sessionId = globalThis.crypto?.randomUUID?.() ?? `bubble_${Date.now()}`;
+  const fetchImpl = options.fetch ?? chatGptFetch;
   let refreshPromise: Promise<OAuthCredentials> | undefined;
 
   async function resolveRequestAuth(forceRefresh = false): Promise<{ accessToken: string; accountId: string }> {
@@ -119,7 +122,7 @@ export function createOpenAICodexProvider(options: {
 
     const sendRequest = async (forceRefresh = false) => {
       const { accessToken, accountId } = await resolveRequestAuth(forceRefresh);
-      return fetch(resolveCodexUrl(options.baseURL), buildCodexRequestInit({
+      return fetchImpl(resolveCodexUrl(options.baseURL), buildCodexRequestInit({
         accessToken,
         accountId,
         sessionId,
@@ -350,14 +353,16 @@ export function buildOpenAICodexPromptCacheKey(input: {
 export async function fetchOpenAICodexModels(options: {
   baseURL: string;
   accessToken: string;
+  fetch?: ChatGptFetch;
 }): Promise<CodexModelDescriptor[]> {
   const accountId = extractChatGptAccountId(options.accessToken);
   if (!accountId) {
     return [];
   }
+  const fetchImpl = options.fetch ?? chatGptFetch;
 
   for (const path of MODEL_DISCOVERY_PATHS) {
-    const response = await fetch(resolveRelativeUrl(options.baseURL, path), {
+    const response = await fetchImpl(resolveRelativeUrl(options.baseURL, path), {
       method: "GET",
       headers: buildBaseHeaders(
         options.accessToken,

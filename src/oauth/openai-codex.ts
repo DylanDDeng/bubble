@@ -6,6 +6,7 @@ import { createServer } from "node:http";
 import { exec } from "node:child_process";
 import { randomBytes, createHash } from "node:crypto";
 import type { OAuthTokens } from "./types.js";
+import { chatGptFetch, type ChatGptFetch } from "../network/chatgpt-transport.js";
 
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const AUTH_URL = "https://auth.openai.com/oauth/authorize";
@@ -116,7 +117,11 @@ export interface OpenAICodexLoginCallbacks {
   onStatus: (message: string) => void;
 }
 
-export async function loginOpenAICodex(callbacks?: OpenAICodexLoginCallbacks): Promise<OAuthTokens> {
+export async function loginOpenAICodex(
+  callbacks?: OpenAICodexLoginCallbacks,
+  options: { fetch?: ChatGptFetch } = {},
+): Promise<OAuthTokens> {
+  const fetchImpl = options.fetch ?? chatGptFetch;
   callbacks?.onStatus("Starting OpenAI Codex OAuth login...");
 
   const pkce = generatePKCE();
@@ -150,7 +155,7 @@ export async function loginOpenAICodex(callbacks?: OpenAICodexLoginCallbacks): P
   }
 
   callbacks?.onStatus("Exchanging authorization code for tokens...");
-  const response = await fetch(TOKEN_URL, {
+  const response = await fetchImpl(TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
@@ -188,8 +193,12 @@ export async function loginOpenAICodex(callbacks?: OpenAICodexLoginCallbacks): P
   };
 }
 
-export async function refreshOpenAICodex(refreshToken: string): Promise<OAuthTokens> {
-  const response = await fetch(TOKEN_URL, {
+export async function refreshOpenAICodex(
+  refreshToken: string,
+  options: { fetch?: ChatGptFetch } = {},
+): Promise<OAuthTokens> {
+  const fetchImpl = options.fetch ?? chatGptFetch;
+  const response = await fetchImpl(TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
