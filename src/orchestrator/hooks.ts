@@ -3,11 +3,13 @@ import type { ContentPart, ParsedToolCall, ToolRegistryEntry, ToolResult } from 
 import type { TaskType } from "../agent/task-classifier.js";
 import type { ExecutionGovernor } from "../agent/execution-governor.js";
 import type { EvidenceTracker } from "../agent/evidence-tracker.js";
+import type { DiscoveryBarrier } from "../agent/discovery-barrier.js";
 import type { WorkflowPhase } from "./workflow.js";
 
 export interface TurnHookState {
   taskType?: TaskType;
   governor?: ExecutionGovernor;
+  discoveryBarrier?: DiscoveryBarrier;
   evidenceTracker?: EvidenceTracker;
   workflowPhase?: WorkflowPhase;
   workflowKey?: string;

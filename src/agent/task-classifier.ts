@@ -68,9 +68,18 @@ const EXPLANATION_PATTERNS = [
 
 const ORIENTATION_PATTERNS = [
   /\bwhat is this project\b/i,
+  /\bwhat is this (repo|repository)\b/i,
   /\borient/i,
   /\boverview\b/i,
-  /这个项目.*(干嘛|做什么)|看下这个项目|项目.*概览/i,
+  /\b(repo|repository|project) overview\b/i,
+  /这个项目.*(干嘛|做什么)|这项目.*(干嘛|做什么)|这个\s*repo.*(干嘛|做什么)|看下(这个|这)?项目|项目.*概览|快速了解.*项目/i,
+];
+
+const CONCRETE_ORIENTATION_EXCLUSIONS = [
+  /项目[中里内]\s*[,，]?\s*\S{2,}/i,
+  /帮我.*(实现|开发|改|加|调整|优化|修复)/i,
+  /(实现|开发|改一下|加一个|调整|优化|修复|支持|报错|失败|不对|有问题|bug|commit|push)/i,
+  /(?:\.[a-z][\w-]*|\b[A-Z]{2,}\b)/,
 ];
 
 const PRODUCT_PATTERNS = [
@@ -102,16 +111,16 @@ export function classifyTask(input: string | ContentPart[]): TaskType {
     return "debugging";
   }
 
-  if (ORIENTATION_PATTERNS.some((pattern) => pattern.test(text))) {
+  if (IMPLEMENTATION_PATTERNS.some((pattern) => pattern.test(text))) {
+    return "implementation";
+  }
+
+  if (isLikelyRepoOrientation(text)) {
     return "repo_orientation";
   }
 
   if (EXPLANATION_PATTERNS.some((pattern) => pattern.test(text))) {
     return "code_explanation";
-  }
-
-  if (IMPLEMENTATION_PATTERNS.some((pattern) => pattern.test(text))) {
-    return "implementation";
   }
 
   if (PRODUCT_PATTERNS.some((pattern) => pattern.test(text))) {
@@ -123,4 +132,17 @@ export function classifyTask(input: string | ContentPart[]): TaskType {
   }
 
   return "general";
+}
+
+function isLikelyRepoOrientation(text: string): boolean {
+  const normalized = text.trim().replace(/\s+/g, " ");
+  if (!ORIENTATION_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return false;
+  }
+
+  if (CONCRETE_ORIENTATION_EXCLUSIONS.some((pattern) => pattern.test(normalized))) {
+    return false;
+  }
+
+  return normalized.length <= 80;
 }

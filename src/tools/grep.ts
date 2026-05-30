@@ -3,6 +3,7 @@
  */
 
 import { execFile } from "node:child_process";
+import { resolve as resolvePath } from "node:path";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
 import { isSensitivePath } from "./sensitive-paths.js";
 import { analyzeToolIntent } from "../agent/tool-intent.js";
@@ -64,6 +65,7 @@ export function createGrepTool(cwd: string): ToolRegistryEntry {
           // rg returns exit code 1 when no matches found, which is not an error for us
           const lines = stdout.split("\n").filter((l) => l.trim() !== "");
           const matches: string[] = [];
+          const matchedPaths = new Set<string>();
 
           for (const line of lines) {
             try {
@@ -72,6 +74,9 @@ export function createGrepTool(cwd: string): ToolRegistryEntry {
                 const path = obj.data.path.text;
                 const lineNum = obj.data.line_number;
                 const text = obj.data.lines.text?.trim() ?? "";
+                if (typeof path === "string" && path.trim()) {
+                  matchedPaths.add(resolvePath(cwd, path));
+                }
                 matches.push(`${path}:${lineNum}: ${text}`);
               }
             } catch {
@@ -91,6 +96,7 @@ export function createGrepTool(cwd: string): ToolRegistryEntry {
                 truncated: false,
                 searchSignature: intent.search?.signature,
                 searchFamily: intent.search?.familyKey,
+                paths: [],
               },
             });
             return;
@@ -112,6 +118,7 @@ export function createGrepTool(cwd: string): ToolRegistryEntry {
               truncated,
               searchSignature: intent.search?.signature,
               searchFamily: intent.search?.familyKey,
+              paths: [...matchedPaths],
             },
           });
         });

@@ -807,6 +807,67 @@ describe("Agent", () => {
     expect(toolEnd.result.content).toBe("blocked by custom hook");
   });
 
+  it("hides speculative repo-orientation reads that were not discovered", async () => {
+    const provider = createMockProvider([
+      [
+        { type: "tool_call", id: "read_hugo", name: "read", arguments: "{\"path\":\"hugo.yaml\"}", isStart: true, isEnd: true },
+        { type: "tool_call", id: "glob_root", name: "glob", arguments: "{\"pattern\":\"*\"}", isStart: true, isEnd: true },
+        { type: "tool_call", id: "read_readme", name: "read", arguments: "{\"path\":\"README.md\"}", isStart: true, isEnd: true },
+        { type: "done" },
+      ],
+      [{ type: "text", content: "Astro project." }, { type: "done" }],
+    ]);
+    const readExecutions: string[] = [];
+    const globTool: ToolRegistryEntry = {
+      name: "glob",
+      readOnly: true,
+      description: "",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return {
+          content: "README.md\npackage.json",
+          status: "success",
+          metadata: {
+            kind: "search",
+            path: "/repo",
+            pattern: "*",
+            matches: 2,
+            paths: ["/repo/README.md", "/repo/package.json"],
+          },
+        };
+      },
+    };
+    const readTool: ToolRegistryEntry = {
+      name: "read",
+      readOnly: true,
+      description: "",
+      parameters: { type: "object", properties: {} },
+      async execute(args) {
+        readExecutions.push(String(args.path));
+        return {
+          content: `${args.path} contents`,
+          status: "success",
+          metadata: { kind: "read", path: `/repo/${args.path}` },
+        };
+      },
+    };
+
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [readTool, globTool] });
+    const events = await collectEvents(agent, "看下这个项目在干嘛呢", "/repo");
+
+    expect(readExecutions).toEqual(["README.md"]);
+    expect(JSON.stringify(events)).not.toContain("hugo.yaml");
+    expect(events
+      .filter((event): event is Extract<AgentEvent, { type: "tool_start" }> => event.type === "tool_start")
+      .map((event) => event.name)).toEqual(["glob", "read"]);
+    const hiddenToolMessage = agent.messages.find((message) => (
+      message.role === "tool" && message.toolCallId === "read_hugo"
+    )) as Extract<Message, { role: "tool" }> | undefined;
+    expect(hiddenToolMessage?.metadata?.reason).toBe("speculative_read_blocked");
+    expect(hiddenToolMessage?.metadata?.hiddenFromTranscript).toBe(true);
+    expect(hiddenToolMessage?.content).toContain("Do not infer");
+  });
+
   it("keeps exploration tools available after repeated implementation reads", async () => {
     const toolNamesByCall: string[][] = [];
     const captured: Message[][] = [];

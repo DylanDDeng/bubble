@@ -14,13 +14,14 @@ import { aggressivePruneMessages } from "./context/prune.js";
 import { truncateToolOutputForModel } from "./context/tool-output-truncate.js";
 import { buildDeferredToolsReminder, buildToolFreezeReminder, isPermissionModeReminder, reminderForMode } from "./prompt/reminders.js";
 import type { AgentEvent, AgentInputController, AgentRunInput, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ThinkingLevel, Todo, TokenUsage, ToolDefinition, ToolResult, ToolRegistryEntry, ToolUpdate } from "./types.js";
-import { HookBus, type TurnHooks } from "./orchestrator/hooks.js";
+import { HookBus, type TurnHooks, type TurnHookState } from "./orchestrator/hooks.js";
 import { createDefaultHooks } from "./orchestrator/default-hooks.js";
 import { resolveModelRoute, resolveSubagentRoute, type AgentCategoriesConfig, type ResolvedSubagentRoute } from "./agent/categories.js";
 import { getSubtaskPolicy, type SubtaskType } from "./agent/subtask-policy.js";
 import { BudgetLedger, composeAbortSignals } from "./agent/budget-ledger.js";
 import { assignAgentNickname, builtinAgentProfiles, mergeUsage, selectToolsForAgentProfile, validateAgentProfileTools, type AgentProfile, type SubagentRunResult } from "./agent/profiles.js";
 import { snapshotSubagentThread, subagentResultFromThread, type PendingSubagentToolUpdate, type SubagentThreadRecord, type SubagentThreadSnapshot } from "./agent/subagent-control.js";
+import { isHiddenToolResult } from "./agent/discovery-barrier.js";
 import { createStreamingInternalReminderSanitizer, sanitizeInternalReminderBlocks } from "./agent/internal-reminder-sanitizer.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { isOnlyProviderProtocolArtifacts, stripProviderProtocolArtifacts } from "./provider-artifacts.js";
@@ -361,7 +362,7 @@ export class Agent {
     for (const hooks of this.hookDefinitions) {
       hookBus.register(hooks);
     }
-    const hookState = {};
+    const hookState: TurnHookState = {};
     const reminderQueue: string[] = [];
     const queueReminder = (reminder: string) => {
       reminderQueue.push(reminder);
@@ -506,6 +507,8 @@ export class Agent {
       // algorithmic fallback still kicks in.
       await this.maybeCompactWithLLM();
 
+      const bufferedStreamingToolCallIds = new Set<string>();
+      const discoveryBarrier = hookState.discoveryBarrier;
       try {
         const projectedMessages = projectMessages(this.messages, {
           mode: "budgeted",
@@ -562,9 +565,17 @@ export class Agent {
               break;
 
             case "tool_call":
+              if (
+                discoveryBarrier?.isEnabled()
+                && (bufferedStreamingToolCallIds.has(chunk.id) || discoveryBarrier.shouldBufferStreamingToolCall(chunk.name))
+              ) {
+                bufferedStreamingToolCallIds.add(chunk.id);
+              }
               if (chunk.isStart) {
                 streamingToolCalls.set(chunk.id, { id: chunk.id, name: chunk.name, args: "" });
-                yield emit({ type: "tool_call_start", id: chunk.id, name: chunk.name });
+                if (!bufferedStreamingToolCallIds.has(chunk.id)) {
+                  yield emit({ type: "tool_call_start", id: chunk.id, name: chunk.name });
+                }
               }
               if (!streamingToolCalls.has(chunk.id)) {
                 streamingToolCalls.set(chunk.id, { id: chunk.id, name: chunk.name, args: "" });
@@ -581,13 +592,15 @@ export class Agent {
                 }
                 if (chunk.arguments) {
                   streamToolCallDeltas += 1;
-                  yield emit({
-                    type: "tool_call_delta",
-                    id: currentToolCall.id,
-                    name: currentToolCall.name,
-                    argumentsDelta: chunk.arguments,
-                    arguments: currentToolCall.args,
-                  });
+                  if (!bufferedStreamingToolCallIds.has(chunk.id)) {
+                    yield emit({
+                      type: "tool_call_delta",
+                      id: currentToolCall.id,
+                      name: currentToolCall.name,
+                      argumentsDelta: chunk.arguments,
+                      arguments: currentToolCall.args,
+                    });
+                  }
                 }
               }
               if (chunk.isEnd && currentToolCall) {
@@ -597,12 +610,14 @@ export class Agent {
                   arguments: currentToolCall.args,
                   ...(currentToolCall.argsCorrupt ? { argsCorrupt: true } : {}),
                 });
-                yield emit({
-                  type: "tool_call_end",
-                  id: currentToolCall.id,
-                  name: currentToolCall.name,
-                  arguments: currentToolCall.args,
-                });
+                if (!bufferedStreamingToolCallIds.has(chunk.id)) {
+                  yield emit({
+                    type: "tool_call_end",
+                    id: currentToolCall.id,
+                    name: currentToolCall.name,
+                    arguments: currentToolCall.args,
+                  });
+                }
                 streamingToolCalls.delete(chunk.id);
               }
               break;
@@ -711,6 +726,16 @@ export class Agent {
             parsedCalls.push({ ...tc, parsedArgs: {}, argsCorrupt: true });
           }
         }
+        const orderedCalls = hookState.discoveryBarrier?.orderToolCalls(parsedCalls) ?? parsedCalls;
+        if (orderedCalls !== parsedCalls) {
+          parsedCalls.splice(0, parsedCalls.length, ...orderedCalls);
+          assistantMsg.toolCalls = parsedCalls.map((tc) => ({
+            id: tc.id,
+            name: tc.name,
+            arguments: tc.arguments,
+            ...(tc.argsCorrupt ? { argsCorrupt: true } : {}),
+          }));
+        }
 
         const executedResults: ToolResult[] = [];
         const appendCancelledToolMessages = (startIndex: number) => {
@@ -756,6 +781,51 @@ export class Agent {
             arguments: tc.arguments,
           };
           flushGovernorReminders();
+          if (bufferedStreamingToolCallIds.has(tc.id) && !isHiddenToolResult(blockedResult)) {
+            yield emit({ type: "tool_call_start", id: tc.id, name: tc.name });
+            if (tc.arguments) {
+              yield emit({
+                type: "tool_call_delta",
+                id: tc.id,
+                name: tc.name,
+                argumentsDelta: tc.arguments,
+                arguments: tc.arguments,
+              });
+            }
+            yield emit({ type: "tool_call_end", id: tc.id, name: tc.name, arguments: tc.arguments });
+          }
+          if (isHiddenToolResult(blockedResult)) {
+            let result = blockedResult;
+            await hookBus.runAfterToolCall({
+              agent: this,
+              cwd,
+              input: userInput,
+              state: hookState,
+              queueReminder,
+              flushReminders: flushGovernorReminders,
+              toolCall: tc,
+              result,
+              replaceResult: (next) => {
+                result = next;
+              },
+            });
+            traceEvent("speculative_read_blocked", {
+              id: tc.id,
+              name: tc.name,
+              args: summarizeTraceValue(tc.parsedArgs),
+              result: summarizeTraceToolResult(result),
+            }, traceContext);
+            this.appendMessage({
+              role: "tool",
+              toolCallId: tc.id,
+              content: result.content,
+              metadata: result.metadata,
+              isError: result.isError,
+            });
+            executedResults.push(result);
+            flushGovernorReminders();
+            continue;
+          }
           const toolStartedAt = Date.now();
           traceEvent("tool_execute_start", {
             id: tc.id,

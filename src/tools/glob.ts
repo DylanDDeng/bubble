@@ -72,6 +72,7 @@ export function createGlobTool(cwd: string): ToolRegistryEntry {
 
       files.sort((a, b) => b.mtimeMs - a.mtimeMs || a.path.localeCompare(b.path));
       const matches = files.slice(0, MAX_RESULTS).map((item) => item.path);
+      const absoluteMatches = matches.map((item) => resolve(root, item));
       const wasTruncated = truncated.value || files.length > MAX_RESULTS;
 
       if (matches.length === 0) {
@@ -86,6 +87,7 @@ export function createGlobTool(cwd: string): ToolRegistryEntry {
             truncated: false,
             searchSignature: `glob:${root}:${pattern}`,
             searchFamily: `glob:${pattern}`,
+            paths: [],
           },
         };
       }
@@ -101,6 +103,7 @@ export function createGlobTool(cwd: string): ToolRegistryEntry {
           truncated: wasTruncated,
           searchSignature: `glob:${root}:${pattern}`,
           searchFamily: `glob:${pattern}`,
+          paths: absoluteMatches,
         },
       };
     },

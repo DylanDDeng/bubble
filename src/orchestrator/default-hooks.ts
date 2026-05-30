@@ -2,6 +2,7 @@ import { classifyTask } from "../agent/task-classifier.js";
 import { classifyTaskSize } from "../agent/task-size.js";
 import { EvidenceTracker } from "../agent/evidence-tracker.js";
 import { ExecutionGovernor } from "../agent/execution-governor.js";
+import { DiscoveryBarrier } from "../agent/discovery-barrier.js";
 import { arbitrateToolCall } from "../agent/tool-arbiter.js";
 import {
   buildEditRetryEscalationReminder,
@@ -22,6 +23,11 @@ export function createDefaultHooks(): TurnHooks[] {
         const taskType = classifyTask(ctx.input);
         ctx.state.taskType = taskType;
         ctx.state.governor = new ExecutionGovernor(taskType);
+        ctx.state.discoveryBarrier = new DiscoveryBarrier({
+          cwd: ctx.cwd,
+          input: ctx.input,
+          enabled: taskType === "repo_orientation",
+        });
         const taskReminder = reminderForTaskType(taskType);
         if (taskReminder) {
           ctx.queueReminder(taskReminder);
@@ -71,8 +77,11 @@ export function createDefaultHooks(): TurnHooks[] {
     {
       beforeToolCall(ctx) {
         const arbitration = arbitrateToolCall(ctx.toolCall);
-        ctx.replaceToolCall({ ...arbitration.toolCall, ...(arbitration.note ? { arbiterNote: arbitration.note } : {}) });
-        ctx.state.governor?.beforeToolCall(ctx.toolCall);
+        const toolCall = { ...arbitration.toolCall, ...(arbitration.note ? { arbiterNote: arbitration.note } : {}) };
+        ctx.replaceToolCall(toolCall);
+        ctx.state.governor?.beforeToolCall(toolCall);
+        const blockedResult = ctx.state.discoveryBarrier?.beforeToolCall(toolCall);
+        if (blockedResult) ctx.blockToolCall(blockedResult);
       },
       afterToolCall(ctx) {
         if (ctx.toolCall.arbiterNote) {
@@ -86,6 +95,7 @@ export function createDefaultHooks(): TurnHooks[] {
         }
         ctx.state.evidenceTracker?.observe(ctx.toolCall, ctx.result);
         ctx.state.governor?.afterToolResult(ctx.toolCall, ctx.result);
+        ctx.state.discoveryBarrier?.afterToolCall(ctx.toolCall, ctx.result);
         // Edit/write retry-escalation: models can spiral on "identical content"
         // or "not found" errors. Nudge them to re-ground or switch strategy.
         if (isMutationTool(ctx.toolCall.name) && ctx.result.isError) {
