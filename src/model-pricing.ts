@@ -1,9 +1,11 @@
 import type { TokenUsage } from "./types.js";
 
+export type PricingCurrency = "USD" | "CNY";
+
 export interface ModelPricing {
   providerId: string;
   modelId: string;
-  currency: "USD";
+  currency: PricingCurrency;
   inputCacheHitPerMillion: number;
   inputCacheMissPerMillion: number;
   outputPerMillion: number;
@@ -16,7 +18,7 @@ export interface ModelPricing {
 }
 
 export interface UsageCost {
-  currency: "USD";
+  currency: PricingCurrency;
   cost: number;
   estimated: boolean;
 }
@@ -43,6 +45,14 @@ export const MODEL_PRICING: ModelPricing[] = [
       inputCacheMissPerMillion: 1.74,
       outputPerMillion: 3.48,
     },
+  },
+  {
+    providerId: "stepfun",
+    modelId: "step-3.7-flash",
+    currency: "CNY",
+    inputCacheHitPerMillion: 0.27,
+    inputCacheMissPerMillion: 1.35,
+    outputPerMillion: 8.1,
   },
 ];
 

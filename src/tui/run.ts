@@ -195,6 +195,7 @@ const PROVIDER_PRIORITY = new Map<string, number>([
   ["zai", 5],
   ["zai-coding-plan", 6],
   ["kimi-for-coding", 7],
+  ["stepfun", 8],
 ]);
 
 const DEFAULT_THEME = {
@@ -5343,6 +5344,7 @@ function OpenTuiApp(props: {
       "zhipuai-coding-plan": "Coding Plan",
       "zai-coding-plan": "Coding Plan",
       "kimi-for-coding": "Coding Plan",
+      stepfun: "Step Plan API key",
       local: "OpenAI-compatible local endpoint",
     };
     return descriptions[providerId] ?? "API key";
@@ -6980,7 +6982,7 @@ function OpenTuiApp(props: {
       completionTokens: usage.completionTokens,
       reasoningTokens: usage.reasoningTokens,
       turns: usage.turns,
-      costText: cost ? `${formatCurrency(cost.cost)} spent${cost.estimated ? " est." : ""}` : "cost unavailable",
+      costText: cost ? `${formatCurrency(cost.cost, cost.currency)} spent${cost.estimated ? " est." : ""}` : "cost unavailable",
     };
   }
 
@@ -9355,13 +9357,15 @@ function pickerTitle(kind: Exclude<PickerMode, "key">, providerId?: string) {
 function getModelPickerReasoningLevels(providerId: string, modelId: string): ThinkingLevel[] {
   // Only expand into one picker row per effort for models that genuinely have a
   // reasoning-effort spectrum: OpenAI's reasoning models (codex gpt-5.x:
-  // off/minimal/low/medium/high/xhigh) and DeepSeek's v4 models. Other providers
+  // off/minimal/low/medium/high/xhigh), DeepSeek's v4 models, and StepFun
+  // Step Plan models. Other providers
   // (e.g. GLM, Moonshot/Kimi) only have a thinking on/off toggle, not an effort
   // control, so they stay as a single row.
   const isOpenAIReasoning = providerId === "openai" || providerId === "openai-codex";
   const isDeepseekReasoning =
     providerId === "deepseek" && (modelId === "deepseek-v4-flash" || modelId === "deepseek-v4-pro");
-  if (!isOpenAIReasoning && !isDeepseekReasoning) return [];
+  const isStepFunReasoning = providerId === "stepfun";
+  if (!isOpenAIReasoning && !isDeepseekReasoning && !isStepFunReasoning) return [];
   const levels = getAvailableThinkingLevels(providerId, modelId);
   // gpt-4o and friends report only ["off"] — keep those as a single row too.
   return levels.length > 1 ? levels : [];
@@ -9372,8 +9376,9 @@ function displayModelWithThinking(model: string, thinkingLevel: ThinkingLevel): 
   const { providerId, modelId } = decodeModel(model);
   if (!providerId) return displayModel(model);
   // Use the same scoping as the picker: only models with a real reasoning-effort
-  // spectrum (OpenAI codex gpt-5.x, deepseek v4) get the "(level)" suffix. The
-  // on/off thinking toggle on GLM / Moonshot(Kimi) is not an effort control.
+  // spectrum (OpenAI codex gpt-5.x, deepseek v4, StepFun Step Plan) get the
+  // "(level)" suffix. The on/off thinking toggle on GLM / Moonshot(Kimi) is
+  // not an effort control.
   const levels = getModelPickerReasoningLevels(providerId, modelId);
   if (levels.length > 1 && thinkingLevel !== "off") {
     return `${displayModel(model)} (${thinkingLevel})`;
@@ -10328,10 +10333,10 @@ function formatCompactNumber(value: number) {
   return String(value);
 }
 
-function formatCurrency(value: number) {
-  if (value < 0.0001) return "$0.0000";
-  if (value < 1) return `$${value.toFixed(4)}`;
-  return `$${value.toFixed(2)}`;
+function formatCurrency(value: number, currency: "USD" | "CNY" = "USD") {
+  if (value < 0.0001) return currency === "USD" ? "$0.0000" : "CNY 0.0000";
+  const amount = value < 1 ? value.toFixed(4) : value.toFixed(2);
+  return currency === "USD" ? `$${amount}` : `CNY ${amount}`;
 }
 
 function sidebarStatusColor(kind: string) {

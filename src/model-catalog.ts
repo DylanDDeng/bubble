@@ -33,6 +33,7 @@ export const BUILTIN_PROVIDERS: BuiltinProviderDefinition[] = [
   { id: "zai", name: "Z.AI", baseURL: "https://api.z.ai/api/paas/v4" },
   { id: "zai-coding-plan", name: "Z.AI Coding Plan", baseURL: "https://api.z.ai/api/coding/paas/v4" },
   { id: "alibaba", name: "Alibaba DashScope", baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1" },
+  { id: "stepfun", name: "StepFun Step Plan", baseURL: "https://api.stepfun.com/step_plan/v1" },
   { id: "moonshot-cn", name: "Moonshot (国内 platform.moonshot.cn)", baseURL: "https://api.moonshot.cn/v1" },
   { id: "moonshot-intl", name: "Moonshot (海外 platform.moonshot.ai)", baseURL: "https://api.moonshot.ai/v1" },
   { id: "kimi-for-coding", name: "Kimi for Coding", baseURL: "https://api.kimi.com/coding/v1" },
@@ -49,6 +50,7 @@ const GPT51_CODEX_MINI_LEVELS: ReasoningEffort[] = ["off", "medium", "high"];
 const OPENAI_CHAT_LEVELS: ReasoningEffort[] = ["off"];
 const TOGGLE_THINKING_LEVELS: ReasoningEffort[] = ["off", "medium"];
 const DEEPSEEK_V4_LEVELS: ReasoningEffort[] = ["high", "max"];
+const STEPFUN_REASONING_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high"];
 
 export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "gpt-5.5", name: "gpt-5.5", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000, toolOutputTokenLimit: 10000 },
@@ -87,6 +89,10 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "glm-4.6", name: "GLM-4.6", providerId: "zai-coding-plan", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
   { id: "qwen3.6-plus", name: "Qwen3.6 Plus", providerId: "alibaba", reasoningLevels: ["off"], contextWindow: 1048576 },
   { id: "qwen3.7-max", name: "Qwen3.7 Max", providerId: "alibaba", reasoningLevels: ["off"], contextWindow: 1048576 },
+  { id: "step-3.7-flash", name: "Step 3.7 Flash", providerId: "stepfun", reasoningLevels: STEPFUN_REASONING_LEVELS, contextWindow: 256000 },
+  { id: "step-3.5-flash-2603", name: "Step 3.5 Flash 2603", providerId: "stepfun", reasoningLevels: STEPFUN_REASONING_LEVELS },
+  { id: "step-3.5-flash", name: "Step 3.5 Flash", providerId: "stepfun", reasoningLevels: STEPFUN_REASONING_LEVELS },
+  { id: "step-router-v1", name: "Step Router V1", providerId: "stepfun", reasoningLevels: STEPFUN_REASONING_LEVELS },
   { id: "kimi-k2.6", name: "Kimi K2.6", providerId: "moonshot-cn", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
   { id: "k2.6-code-preview", name: "Kimi K2.6 Code Preview", providerId: "moonshot-cn", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
   { id: "kimi-k2.5", name: "Kimi K2.5", providerId: "moonshot-cn", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },

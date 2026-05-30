@@ -43,4 +43,19 @@ describe("variant resolver", () => {
     expect(getModelContextWindow("alibaba", "qwen3.6-plus")).toBe(1048576);
     expect(getModelContextWindow("alibaba", "qwen3.7-max")).toBe(1048576);
   });
+
+  it("includes StepFun Step Plan reasoning models", () => {
+    expect(getBuiltinProvider("stepfun")).toMatchObject({
+      baseURL: "https://api.stepfun.com/step_plan/v1",
+    });
+    expect(listBuiltinModels("stepfun").map((model) => model.id)).toEqual([
+      "step-3.7-flash",
+      "step-3.5-flash-2603",
+      "step-3.5-flash",
+      "step-router-v1",
+    ]);
+    expect(getAvailableThinkingLevels("stepfun", "step-3.7-flash")).toEqual(["off", "low", "medium", "high"]);
+    expect(getDefaultThinkingLevel("stepfun", "step-3.7-flash")).toBe("medium");
+    expect(getModelContextWindow("stepfun", "step-3.7-flash")).toBe(256000);
+  });
 });

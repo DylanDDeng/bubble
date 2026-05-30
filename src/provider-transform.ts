@@ -60,6 +60,16 @@ export function resolveProviderRequestConfig(
     };
   }
 
+  if (providerId === "stepfun") {
+    return {
+      effectiveThinkingLevel,
+      reasoningContentEcho: "none",
+      extraBody: effectiveThinkingLevel === "off"
+        ? undefined
+        : { reasoning_effort: effectiveThinkingLevel },
+    };
+  }
+
   // Zhipu/Z.AI OpenAI-compatible endpoints expose reasoning via a provider-specific
   // `thinking` block rather than OpenAI's `reasoning_effort` shape.
   if (

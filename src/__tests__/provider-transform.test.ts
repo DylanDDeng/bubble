@@ -64,6 +64,17 @@ describe("provider transform", () => {
     });
   });
 
+  it("emits StepFun Step Plan reasoning effort fields", () => {
+    const high = resolveProviderRequestConfig("stepfun", "step-3.7-flash", "high");
+    const off = resolveProviderRequestConfig("stepfun", "step-3.5-flash", "off");
+
+    expect(high.effectiveThinkingLevel).toBe("high");
+    expect(high.reasoningEffort).toBeUndefined();
+    expect(high.reasoningContentEcho).toBe("none");
+    expect(high.extraBody).toEqual({ reasoning_effort: "high" });
+    expect(off.extraBody).toBeUndefined();
+  });
+
   it("uses Fireworks Kimi agent defaults", () => {
     const config = resolveProviderRequestConfig("fireworks", "accounts/fireworks/models/kimi-k2p6", "off");
 

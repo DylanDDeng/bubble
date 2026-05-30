@@ -16,6 +16,15 @@ describe("model pricing", () => {
     });
   });
 
+  it("contains StepFun step-3.7-flash CNY pricing", () => {
+    expect(getModelPricing("stepfun", "step-3.7-flash")).toMatchObject({
+      currency: "CNY",
+      inputCacheHitPerMillion: 0.27,
+      inputCacheMissPerMillion: 1.35,
+      outputPerMillion: 8.1,
+    });
+  });
+
   it("calculates DeepSeek cache-aware cost", () => {
     const result = calculateUsageCost("deepseek", "deepseek-v4-pro", {
       promptTokens: 1_000_000,
@@ -39,5 +48,20 @@ describe("model pricing", () => {
     expect(result?.currency).toBe("USD");
     expect(result?.estimated).toBe(true);
     expect(result?.cost).toBeCloseTo(0.42);
+  });
+
+  it("calculates StepFun cache-aware CNY cost", () => {
+    const result = calculateUsageCost("stepfun", "step-3.7-flash", {
+      promptTokens: 1_000_000,
+      promptCacheHitTokens: 250_000,
+      promptCacheMissTokens: 750_000,
+      completionTokens: 500_000,
+    });
+
+    expect(result).toEqual({
+      currency: "CNY",
+      cost: 0.25 * 0.27 + 0.75 * 1.35 + 0.5 * 8.1,
+      estimated: false,
+    });
   });
 });

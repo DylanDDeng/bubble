@@ -9,6 +9,7 @@ describe("provider registry", () => {
   it("uses built-in display names for encoded models", () => {
     expect(displayModel("fireworks:accounts/fireworks/models/kimi-k2p6")).toBe("Kimi-K2.6");
     expect(displayModel("alibaba:qwen3.7-max")).toBe("Qwen3.7 Max");
+    expect(displayModel("stepfun:step-3.7-flash")).toBe("Step 3.7 Flash");
   });
 
   it("prefers user-visible providers over hidden openrouter defaults", () => {

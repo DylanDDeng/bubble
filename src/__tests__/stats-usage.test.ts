@@ -143,6 +143,41 @@ describe("usage stats", () => {
     expect(text).not.toContain("cost unavailable");
   });
 
+  it("formats StepFun tracked cost in CNY", () => {
+    const root = tempSessionsRoot();
+    writeSession(root, "usage", [
+      {
+        id: "1",
+        type: "assistant_message",
+        timestamp: ts("2026-05-28"),
+        message: {
+          role: "assistant",
+          content: "recent",
+          model: "stepfun:step-3.7-flash",
+          providerId: "stepfun",
+          modelId: "step-3.7-flash",
+          usage: {
+            promptTokens: 1_000_000,
+            promptCacheHitTokens: 250_000,
+            promptCacheMissTokens: 750_000,
+            completionTokens: 500_000,
+          },
+        },
+      },
+    ]);
+
+    const stats = collectUsageStatsBundle({
+      now: new Date("2026-05-28T18:00:00"),
+      sessionsRoot: root,
+    }).ranges["30d"];
+    const text = formatStatsPanelBody(stats);
+
+    expect(stats.models[0].costCurrency).toBe("CNY");
+    expect(stats.trackedCostCurrency).toBe("CNY");
+    expect(stats.trackedCosts?.CNY).toBeCloseTo(5.13);
+    expect(text).toContain("CNY 5.13");
+  });
+
   it("keeps panel rows within the requested body width", () => {
     const root = tempSessionsRoot();
     writeSession(root, "usage", [

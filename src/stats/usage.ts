@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { getBubbleHome } from "../bubble-home.js";
 import { calculateUsageCost } from "../model-pricing.js";
+import type { PricingCurrency } from "../model-pricing.js";
 import { decodeModel } from "../provider-registry.js";
 import type { SessionMetadata } from "../session-types.js";
 import type { TokenUsage } from "../types.js";
@@ -33,6 +34,7 @@ export interface ModelUsageStats {
   reasoningTokens: number;
   totalTokens: number;
   cost?: number;
+  costCurrency?: PricingCurrency;
 }
 
 export interface UsageStats {
@@ -44,7 +46,9 @@ export interface UsageStats {
   heatmap: HeatmapColumn[];
   models: ModelUsageStats[];
   totalTokens: number;
+  trackedCosts?: Partial<Record<PricingCurrency, number>>;
   trackedCost?: number;
+  trackedCostCurrency?: PricingCurrency;
   activeDays: number;
   sessionsScanned: number;
   sessionsWithoutTokenData: number;
@@ -151,9 +155,16 @@ export function formatCompactNumber(value: number): string {
 }
 
 export function formatCurrency(value: number): string {
-  if (value >= 1) return `$${value.toFixed(2)}`;
-  if (value >= 0.01) return `$${value.toFixed(3)}`;
-  return `$${value.toFixed(4)}`;
+  return formatCurrencyFor(value, "USD");
+}
+
+function formatCurrencyFor(value: number, currency: PricingCurrency): string {
+  const amount = value >= 1
+    ? value.toFixed(2)
+    : value >= 0.01
+      ? value.toFixed(3)
+      : value.toFixed(4);
+  return currency === "USD" ? `$${amount}` : `CNY ${amount}`;
 }
 
 function createAccumulator(range: StatsRange, days: number, now: Date): RangeAccumulator {
@@ -241,7 +252,11 @@ function finalizeAccumulator(accumulator: RangeAccumulator): UsageStats {
     .filter((model) => model.totalTokens > 0)
     .sort((a, b) => b.totalTokens - a.totalTokens);
   const totalTokens = models.reduce((sum, model) => sum + model.totalTokens, 0);
-  const trackedCost = models.reduce((sum, model) => sum + (model.cost ?? 0), 0);
+  const trackedCosts = aggregateCosts(models);
+  const trackedCostEntries = trackedCosts
+    ? (Object.entries(trackedCosts) as Array<[PricingCurrency, number]>)
+    : [];
+  const trackedCostEntry = trackedCostEntries.length === 1 ? trackedCostEntries[0] : undefined;
   return {
     range: accumulator.range,
     days: accumulator.days,
@@ -251,7 +266,9 @@ function finalizeAccumulator(accumulator: RangeAccumulator): UsageStats {
     heatmap: buildHeatmap(daily),
     models,
     totalTokens,
-    trackedCost: trackedCost > 0 ? trackedCost : undefined,
+    trackedCosts,
+    trackedCost: trackedCostEntry ? trackedCostEntry[1] : undefined,
+    trackedCostCurrency: trackedCostEntry ? trackedCostEntry[0] : undefined,
     activeDays: daily.filter((day) => day.active).length,
     sessionsScanned: accumulator.sessionsScanned,
     sessionsWithoutTokenData: accumulator.sessionsWithoutTokenData,
@@ -292,7 +309,10 @@ function addModelUsage(
 
   if (providerId && modelId) {
     const cost = calculateUsageCost(providerId, modelId, usage);
-    if (cost) existing.cost = (existing.cost ?? 0) + cost.cost;
+    if (cost) {
+      existing.cost = (existing.cost ?? 0) + cost.cost;
+      existing.costCurrency = cost.currency;
+    }
   }
 
   accumulator.modelUsage.set(key, existing);
@@ -367,7 +387,9 @@ function formatModelUsageLines(stats: UsageStats, width: number): string[] {
     const percentText = `${Math.round(percent * 100)}%`.padStart(4, " ");
     const tokenText = formatCompactNumber(model.totalTokens).padStart(6, " ");
     const turnsText = `${model.turns}t`.padStart(4, " ");
-    const costText = showCost ? ` ${(model.cost !== undefined ? formatCurrency(model.cost) : "").padStart(7, " ")}` : "";
+    const costText = showCost
+      ? ` ${(model.cost !== undefined ? formatCurrencyFor(model.cost, model.costCurrency ?? "USD") : "").padStart(7, " ")}`
+      : "";
     return `  ${truncate(model.displayName, labelWidth).padEnd(labelWidth, " ")} ${bar} ${percentText} ${tokenText} ${turnsText}${costText}`.trimEnd();
   });
   if (stats.models.length > MAX_MODEL_ROWS) {
@@ -384,12 +406,36 @@ function formatSummaryLines(stats: UsageStats, width: number): string[] {
   if (favorite) {
     lines.push(`  Favorite model ${truncate(favorite, Math.max(12, width - 17))}`);
   }
-  if (stats.trackedCost !== undefined) lines.push(`  Tracked cost ${formatCurrency(stats.trackedCost)}`);
+  const trackedCostText = formatTrackedCosts(stats);
+  if (trackedCostText) lines.push(`  Tracked cost ${trackedCostText}`);
   lines.push(`  Sessions scanned ${stats.sessionsScanned}`);
   if (stats.sessionsWithoutTokenData > 0) {
     lines.push(`  Sessions without token data ${stats.sessionsWithoutTokenData}`);
   }
   return lines;
+}
+
+function aggregateCosts(models: ModelUsageStats[]): Partial<Record<PricingCurrency, number>> | undefined {
+  const totals: Partial<Record<PricingCurrency, number>> = {};
+  for (const model of models) {
+    if (model.cost === undefined) continue;
+    const currency = model.costCurrency ?? "USD";
+    totals[currency] = (totals[currency] ?? 0) + model.cost;
+  }
+  return Object.keys(totals).length > 0 ? totals : undefined;
+}
+
+function formatTrackedCosts(stats: UsageStats): string | undefined {
+  if (stats.trackedCosts) {
+    const parts = (Object.entries(stats.trackedCosts) as Array<[PricingCurrency, number]>)
+      .filter(([, value]) => value > 0)
+      .map(([currency, value]) => formatCurrencyFor(value, currency));
+    return parts.length > 0 ? parts.join(" + ") : undefined;
+  }
+  if (stats.trackedCost !== undefined) {
+    return formatCurrencyFor(stats.trackedCost, stats.trackedCostCurrency ?? "USD");
+  }
+  return undefined;
 }
 
 function heatmapCell(day: DailyUsage | undefined, maxTokens: number): string {
