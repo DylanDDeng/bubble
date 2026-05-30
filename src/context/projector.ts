@@ -1,6 +1,7 @@
 import { getContextBudget } from "./budget.js";
 import { compactCurrentTurnToolGroups, compactMessages } from "./compact.js";
 import { pruneMessages } from "./prune.js";
+import { formatInternalContextBlock, formatInternalReminderBlock } from "../agent/internal-reminder-sanitizer.js";
 import type { AssistantMessage, Message, MetaMessage, ProviderMessage, SystemMessage, ToolMessage } from "../types.js";
 
 export interface ProjectionOptions {
@@ -202,15 +203,15 @@ function isEmptyAssistantMessage(message: AssistantMessage): boolean {
 function formatMetaMessage(message: MetaMessage): string {
   switch (message.kind) {
     case "system-reminder":
-      return `Runtime reminder:\n${message.content}`;
+      return formatInternalReminderBlock(message.kind, message.content);
     case "runtime-context":
     default:
-      return `Runtime context:\n${message.content}`;
+      return formatInternalContextBlock(message.kind, message.content);
   }
 }
 
 function formatRuntimeSystemMessage(message: SystemMessage): string {
-  return `Runtime context:\n${message.content}`;
+  return formatInternalContextBlock("runtime-system", message.content);
 }
 
 function cloneMessage(message: ProviderMessage): ProviderMessage {

@@ -1,9 +1,13 @@
 import { createHash } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { sanitizeInternalReminderBlocks } from "./agent/internal-reminder-sanitizer.js";
 
 const DEBUG_PATH = process.env.BUBBLE_DEBUG_REASONING_STREAM?.trim();
 const INCLUDE_PREVIEW = process.env.BUBBLE_DEBUG_REASONING_PREVIEW !== "0";
+const INCLUDE_RAW_PREVIEW = ["1", "true", "yes", "on"].includes(
+  process.env.BUBBLE_DEBUG_REASONING_RAW?.trim().toLowerCase() ?? "",
+);
 const PREVIEW_CHARS = 180;
 
 let sequence = 0;
@@ -20,7 +24,8 @@ export function summarizeDebugText(value: unknown): DebugTextSummary | undefined
   const hash = createHash("sha256").update(value).digest("hex").slice(0, 16);
   const summary: DebugTextSummary = { length: value.length, hash };
   if (INCLUDE_PREVIEW) {
-    summary.preview = value.replace(/\s+/g, " ").slice(0, PREVIEW_CHARS);
+    const previewValue = INCLUDE_RAW_PREVIEW ? value : sanitizeInternalReminderBlocks(value);
+    summary.preview = previewValue.replace(/\s+/g, " ").slice(0, PREVIEW_CHARS);
   }
   return summary;
 }
