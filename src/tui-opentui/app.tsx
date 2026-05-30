@@ -2,6 +2,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useKeyboard, useRenderer } from "@opentui/react";
 import { AgentAbortError, type Agent } from "../agent.js";
+import { isHiddenToolMetadata } from "../agent/discovery-barrier.js";
 type RendererLike = ReturnType<typeof useRenderer>;
 import type { CliArgs } from "../cli.js";
 import type { SessionManager } from "../session.js";
@@ -163,6 +164,7 @@ function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] 
           const toolResult = agentMessages.find(
             (tm) => tm.role === "tool" && (tm as any).toolCallId === tc.id
           );
+          if (isHiddenToolMetadata(toolResult ? (toolResult as any).metadata : undefined)) continue;
           toolCalls.push({
             id: tc.id,
             name: tc.name,

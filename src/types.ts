@@ -132,7 +132,7 @@ export type ToolResultStatus =
   | "command_error";
 
 export interface ToolResultMetadata {
-  kind?: "search" | "read" | "write" | "edit" | "patch" | "shell" | "server" | "web" | "security" | "lsp" | "question" | "subagent";
+  kind?: "search" | "read" | "write" | "edit" | "patch" | "shell" | "server" | "web" | "security" | "lsp" | "question" | "subagent" | "internal";
   path?: string;
   pattern?: string;
   matches?: number;

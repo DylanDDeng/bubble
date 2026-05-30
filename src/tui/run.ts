@@ -45,6 +45,7 @@ import { homedir } from "node:os";
 import { AgentAbortError, type Agent } from "../agent.js";
 import { AgentRunInputQueue } from "../agent/input-controller.js";
 import { debugReasoningStream, summarizeDebugText } from "../reasoning-debug.js";
+import { isHiddenToolMetadata } from "../agent/discovery-barrier.js";
 import {
   summarizeAgentEventForTrace,
   summarizeTraceError,
@@ -9572,6 +9573,7 @@ function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] 
         args = JSON.parse(tc.arguments || "{}") as Record<string, any>;
       } catch {}
       const toolResult = agentMessages.find((candidate) => candidate.role === "tool" && (candidate as any).toolCallId === tc.id);
+      if (isHiddenToolMetadata(toolResult ? (toolResult as any).metadata : undefined)) continue;
       toolCalls.push({
         id: tc.id,
         name: tc.name,

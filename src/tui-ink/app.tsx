@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
 import { AgentAbortError, type Agent } from "../agent.js";
+import { isHiddenToolMetadata } from "../agent/discovery-barrier.js";
 import type { CliArgs } from "../cli.js";
 import type { SessionManager } from "../session.js";
 import type { AgentEvent, ContentPart, PermissionMode, Message, PlanDecision, Provider, Todo, ToolResultMetadata } from "../types.js";
@@ -148,6 +149,7 @@ function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] 
           const toolResult = agentMessages.find(
             (tm) => tm.role === "tool" && (tm as any).toolCallId === tc.id
           );
+          if (isHiddenToolMetadata(toolResult ? (toolResult as any).metadata : undefined)) continue;
           toolCalls.push({
             id: tc.id,
             name: tc.name,
