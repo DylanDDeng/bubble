@@ -4,6 +4,7 @@ import {
   formatInternalReminderBlock,
   sanitizeInternalReminderBlocks,
 } from "../agent/internal-reminder-sanitizer.js";
+import { buildLoopWarningReminder } from "../prompt/reminders.js";
 
 describe("internal reminder sanitizer", () => {
   it("removes structured internal reminder blocks", () => {
@@ -53,6 +54,18 @@ Rules while in plan mode:
 - On rejection, remain in plan mode and iterate.
  after`;
 
+    expect(sanitizeInternalReminderBlocks(input)).toBe("before  after");
+  });
+
+  it("removes reworded loop reminders by structured tag rather than content", () => {
+    const reminder = buildLoopWarningReminder("This task has already used many search steps.");
+    const input = [
+      "before ",
+      formatInternalReminderBlock("system-reminder", reminder),
+      " after",
+    ].join("");
+
+    expect(reminder).not.toContain("Tool loop warning");
     expect(sanitizeInternalReminderBlocks(input)).toBe("before  after");
   });
 });
