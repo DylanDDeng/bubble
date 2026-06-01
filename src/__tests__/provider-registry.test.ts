@@ -11,6 +11,8 @@ describe("provider registry", () => {
     expect(displayModel("alibaba:qwen3.7-max")).toBe("Qwen3.7 Max");
     expect(displayModel("stepfun:step-3.7-flash")).toBe("Step 3.7 Flash");
     expect(displayModel("minimax:MiniMax-M3")).toBe("MiniMax M3");
+    expect(displayModel("minimax-anthropic:MiniMax-M3")).toBe("MiniMax M3");
+    expect(displayModel("anthropic:claude-sonnet-4-6")).toBe("Claude Sonnet 4.6");
   });
 
   it("prefers user-visible providers over hidden openrouter defaults", () => {
@@ -47,5 +49,36 @@ describe("provider registry", () => {
 
     const registry = new ProviderRegistry(config);
     expect(registry.getDefault()?.id).toBe("openai");
+  });
+
+  it("overlays built-in protocol metadata onto configured providers", () => {
+    const providers = [
+      {
+        id: "anthropic",
+        name: "Anthropic",
+        baseURL: "https://api.anthropic.com",
+        apiKey: "sk-ant",
+        enabled: true,
+        authType: "api",
+      },
+    ];
+    const config = {
+      getProviders: () => providers.slice(),
+      setProviders: () => undefined,
+      getDefaultProvider: () => "anthropic",
+      setDefaultProvider: () => undefined,
+      getApiKey: () => undefined,
+      setApiKey: () => undefined,
+      getDefaultModel: () => undefined,
+      setDefaultModel: () => undefined,
+      getRecentModels: () => [],
+      pushRecentModel: () => undefined,
+    } as any;
+
+    const registry = new ProviderRegistry(config);
+    expect(registry.getDefault()).toMatchObject({
+      id: "anthropic",
+      protocol: "anthropic-messages",
+    });
   });
 });

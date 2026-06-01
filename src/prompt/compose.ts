@@ -59,7 +59,7 @@ function buildProviderPrompt(
   const model = rawModel.includes(":") ? rawModel.split(":").slice(1).join(":") : rawModel;
   const lowerModel = model.toLowerCase();
 
-  if (provider === "anthropic" || model.startsWith("claude")) {
+  if (provider === "anthropic" || provider.endsWith("-anthropic") || model.startsWith("claude")) {
     return buildAnthropicProviderPrompt(agentName);
   }
   if (provider === "google" || model.startsWith("gemini")) {

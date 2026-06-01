@@ -6,10 +6,12 @@
 
 import OpenAI from "openai";
 import { appendFileSync } from "node:fs";
+import { createAnthropicMessagesProvider } from "./provider-anthropic.js";
 import { createOpenAICodexProvider, isOpenAICodexBaseUrl, type OpenAICodexAuthAdapter } from "./provider-openai-codex.js";
 import { createProviderProtocolArtifactFilter } from "./provider-artifacts.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
 import { debugReasoningStream, summarizeDebugText } from "./reasoning-debug.js";
+import type { ProviderProtocol } from "./model-catalog.js";
 import type { Provider, ProviderMessage, StreamChunk, ThinkingLevel, ToolDefinition } from "./types.js";
 
 // Diagnostic logger for tool-args byte-loss investigation. Activate with
@@ -89,6 +91,7 @@ export interface ProviderInstanceOptions {
   thinkingLevel?: ThinkingLevel;
   /** Stable per-session seed for provider prompt caches. */
   promptCacheKey?: string;
+  protocol?: ProviderProtocol;
   /** Dynamic OAuth access-token loader/refresh hook for ChatGPT Codex requests. */
   openAICodexAuth?: OpenAICodexAuthAdapter;
 }
@@ -106,6 +109,10 @@ export function createUnavailableProvider(message: string): Provider {
 }
 
 export function createProviderInstance(options: ProviderInstanceOptions): Provider {
+  if (resolveProviderProtocol(options) === "anthropic-messages") {
+    return createAnthropicMessagesProvider(options);
+  }
+
   if (isOpenAICodexBaseUrl(options.baseURL)) {
     return createOpenAICodexProvider({
       ...options,
@@ -221,6 +228,20 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
   }
 
   return { streamChat, complete };
+}
+
+function resolveProviderProtocol(options: ProviderInstanceOptions): ProviderProtocol {
+  if (options.protocol) return options.protocol;
+  const providerId = (options.providerId || "").toLowerCase();
+  const baseURL = options.baseURL.toLowerCase();
+  if (
+    providerId === "anthropic"
+    || providerId.endsWith("-anthropic")
+    || baseURL.includes("/anthropic")
+  ) {
+    return "anthropic-messages";
+  }
+  return "openai-chat";
 }
 
 // Some providers (notably Fireworks-hosted Kimi) stream tool-call arguments

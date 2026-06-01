@@ -8,6 +8,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import type { ProviderProtocol } from "./model-catalog.js";
 import type { ModelInfo } from "./provider-registry.js";
 
 const MODELS_PATH = join(homedir(), ".bubble", "models.json");
@@ -15,6 +16,7 @@ const MODELS_PATH = join(homedir(), ".bubble", "models.json");
 export interface ProviderModelConfig {
   baseURL?: string;
   apiKey?: string;
+  protocol?: ProviderProtocol;
   models?: Array<{ id: string; name?: string }>;
 }
 
@@ -76,5 +78,9 @@ export class ModelConfig {
 
   getBaseURL(providerId: string): string | undefined {
     return this.data?.providers?.[providerId]?.baseURL;
+  }
+
+  getProtocol(providerId: string): ProviderProtocol | undefined {
+    return this.data?.providers?.[providerId]?.protocol;
   }
 }

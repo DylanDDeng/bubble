@@ -63,6 +63,10 @@ describe("variant resolver", () => {
     expect(getBuiltinProvider("minimax")).toMatchObject({
       baseURL: "https://api.minimaxi.com/v1",
     });
+    expect(getBuiltinProvider("minimax-anthropic")).toMatchObject({
+      baseURL: "https://api.minimaxi.com/anthropic",
+      protocol: "anthropic-messages",
+    });
     expect(listBuiltinModels("minimax").map((model) => model.id)).toEqual([
       "MiniMax-M3",
       "MiniMax-M2.7",
@@ -72,10 +76,38 @@ describe("variant resolver", () => {
       "MiniMax-M2.1",
       "MiniMax-M2.1-highspeed",
       "MiniMax-M2",
+      "M2-her",
     ]);
     expect(getAvailableThinkingLevels("minimax", "MiniMax-M3")).toEqual(["off", "medium"]);
     expect(getDefaultThinkingLevel("minimax", "MiniMax-M3")).toBe("medium");
     expect(getModelContextWindow("minimax", "MiniMax-M3")).toBe(1000000);
     expect(getModelContextWindow("minimax", "MiniMax-M2.7")).toBe(204800);
+    expect(getModelContextWindow("minimax", "M2-her")).toBe(64000);
+    expect(listBuiltinModels("minimax-anthropic").map((model) => model.id)).toEqual([
+      "MiniMax-M3",
+      "MiniMax-M2.7",
+      "MiniMax-M2.7-highspeed",
+      "MiniMax-M2.5",
+      "MiniMax-M2.5-highspeed",
+      "MiniMax-M2.1",
+      "MiniMax-M2.1-highspeed",
+      "MiniMax-M2",
+      "M2-her",
+    ]);
+  });
+
+  it("includes Anthropic Messages models", () => {
+    expect(getBuiltinProvider("anthropic")).toMatchObject({
+      baseURL: "https://api.anthropic.com",
+      protocol: "anthropic-messages",
+    });
+    expect(listBuiltinModels("anthropic").map((model) => model.id)).toEqual([
+      "claude-opus-4-8",
+      "claude-sonnet-4-6",
+      "claude-haiku-4-5-20251001",
+    ]);
+    expect(getAvailableThinkingLevels("anthropic", "claude-opus-4-8")).toEqual(["off", "medium"]);
+    expect(getDefaultThinkingLevel("anthropic", "claude-opus-4-8")).toBe("medium");
+    expect(getModelContextWindow("anthropic", "claude-opus-4-8")).toBe(1000000);
   });
 });

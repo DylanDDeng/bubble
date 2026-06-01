@@ -12,6 +12,7 @@ import {
   getBuiltinProvider,
   listBuiltinModels,
   registerDynamicModelMetadata,
+  type ProviderProtocol,
 } from "./model-catalog.js";
 import { ModelConfig } from "./model-config.js";
 import { AuthStorage } from "./oauth/index.js";
@@ -26,6 +27,7 @@ export interface ProviderProfile {
   apiKey: string;
   enabled: boolean;
   authType?: "api" | "oauth";
+  protocol?: ProviderProtocol;
 }
 
 export interface ModelInfo {
@@ -167,11 +169,18 @@ export class ProviderRegistry {
           apiKey: cfg.apiKey || "",
           enabled: true,
           authType: "api",
+          protocol: cfg.protocol || builtin?.protocol,
         };
       });
     } else {
       // 2. Fall back to config.json providers (interactive TUI style)
-      providers = this.config.getProviders();
+      providers = this.config.getProviders().map((provider) => {
+        const builtin = getBuiltinProvider(provider.id);
+        return {
+          ...provider,
+          protocol: provider.protocol || builtin?.protocol,
+        };
+      });
     }
 
     // 3. Inject OAuth access tokens
