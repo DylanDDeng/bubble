@@ -12,6 +12,7 @@ import {
   getBuiltinProvider,
   listBuiltinModels,
   registerDynamicModelMetadata,
+  type ProviderProtocol,
 } from "./model-catalog.js";
 import { ModelConfig } from "./model-config.js";
 import { AuthStorage } from "./oauth/index.js";
@@ -26,6 +27,7 @@ export interface ProviderProfile {
   apiKey: string;
   enabled: boolean;
   authType?: "api" | "oauth";
+  protocol?: ProviderProtocol;
 }
 
 export interface ModelInfo {
@@ -36,7 +38,7 @@ export interface ModelInfo {
 
 export const BUILTIN_PROVIDERS = CATALOG_PROVIDERS;
 export const USER_VISIBLE_PROVIDER_IDS = BUILTIN_PROVIDERS
-  .filter((provider) => provider.id !== "openrouter" && provider.id !== "openai-codex")
+  .filter((provider) => !provider.hidden && provider.id !== "openrouter" && provider.id !== "openai-codex")
   .map((provider) => provider.id);
 
 export function isUserVisibleProvider(providerId: string): boolean {
@@ -160,18 +162,26 @@ export class ProviderRegistry {
       providers = keys.map((id) => {
         const builtin = getBuiltinProvider(id);
         const cfg = modelsJsonProviders[id];
+        const baseURL = cfg.baseURL || builtin?.baseURL || "";
         return {
           id,
           name: builtin?.name || id,
-          baseURL: cfg.baseURL || builtin?.baseURL || "",
+          baseURL,
           apiKey: cfg.apiKey || "",
           enabled: true,
           authType: "api",
+          protocol: resolveConfiguredProtocol(id, baseURL, cfg.protocol),
         };
       });
     } else {
       // 2. Fall back to config.json providers (interactive TUI style)
-      providers = this.config.getProviders();
+      providers = this.config.getProviders().map((provider) => {
+        const builtin = getBuiltinProvider(provider.id);
+        return {
+          ...provider,
+          protocol: resolveConfiguredProtocol(provider.id, provider.baseURL, provider.protocol),
+        };
+      });
     }
 
     // 3. Inject OAuth access tokens
@@ -324,6 +334,24 @@ export class ProviderRegistry {
       providerId: provider.id,
     }));
   }
+}
+
+function resolveConfiguredProtocol(providerId: string, baseURL: string, explicitProtocol?: ProviderProtocol): ProviderProtocol | undefined {
+  if (explicitProtocol) return explicitProtocol;
+  const builtin = getBuiltinProvider(providerId);
+  if (!builtin?.protocol) return undefined;
+  const normalizedBaseURL = normalizeBaseURL(baseURL);
+  if (!normalizedBaseURL || normalizedBaseURL === normalizeBaseURL(builtin.baseURL)) {
+    return builtin.protocol;
+  }
+  if (normalizedBaseURL.includes("/anthropic")) {
+    return "anthropic-messages";
+  }
+  return undefined;
+}
+
+function normalizeBaseURL(baseURL: string): string {
+  return baseURL.trim().replace(/\/+$/, "").toLowerCase();
 }
 
 /** Encode a model selection as "providerId:modelId". */

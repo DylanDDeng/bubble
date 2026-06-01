@@ -121,6 +121,44 @@ describe("createProviderInstance", () => {
     expect(body.messages[0].reasoning_content).toBeUndefined();
   });
 
+  it("uses MiniMax OpenAI-compatible interleaved thinking request shape", async () => {
+    let body: any;
+    createMock.mockImplementation(async (input) => {
+      body = input;
+      return fromArray([{ choices: [{ delta: {}, finish_reason: "stop" }] }]);
+    });
+
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({
+      providerId: "minimax-openai",
+      apiKey: "sk-test",
+      baseURL: "https://api.minimaxi.com/v1",
+    });
+
+    await collect(provider.streamChat([{
+      role: "assistant",
+      content: "",
+      reasoning: "tool reasoning",
+      toolCalls: [{ id: "read:1", name: "read", arguments: "{\"path\":\"a\"}" }],
+    }], {
+      model: "MiniMax-M3",
+      thinkingLevel: "medium",
+    }));
+
+    expect(body.stream_options).toEqual({ include_usage: true });
+    expect(body.reasoning_split).toBe(true);
+    expect(body.thinking).toEqual({ type: "adaptive" });
+    expect(body.reasoning).toBeUndefined();
+    expect(body.messages[0].reasoning_details).toEqual([{
+      type: "reasoning.text",
+      id: "reasoning-text-1",
+      format: "MiniMax-response-v1",
+      index: 0,
+      text: "tool reasoning",
+    }]);
+    expect(body.messages[0].reasoning_content).toBeUndefined();
+  });
+
   it("disables parallel tool calls only for Fireworks Kimi when tools are available", async () => {
     const tool: ToolDefinition = {
       name: "read",

@@ -5,7 +5,7 @@ export { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingL
 export interface ProviderRequestConfig {
   effectiveThinkingLevel: ThinkingLevel;
   reasoningEffort?: ThinkingLevel;
-  reasoningContentEcho?: "tool_calls" | "all" | "none";
+  reasoningContentEcho?: "tool_calls" | "all" | "none" | "minimax";
   parallelToolCalls?: boolean;
   maxTokens?: number;
   extraBody?: Record<string, unknown>;
@@ -16,6 +16,7 @@ const MOONSHOT_PROVIDER_IDS = new Set(["moonshot-cn", "moonshot-intl", "kimi-for
 const KIMI_K25_FAMILY = new Set(["kimi-k2.5", "k2.6-code-preview", "kimi-k2.6"]);
 const KIMI_THINKING_FAMILY = new Set(["kimi-k2-thinking", "kimi-k2-thinking-turbo"]);
 const KIMI_K26_DEFAULT_MAX_TOKENS = 32768;
+const MINIMAX_M3_FAMILY = new Set(["MiniMax-M3"]);
 
 function isFireworksKimi(providerId: string, modelId: string): boolean {
   const model = modelId.toLowerCase();
@@ -67,6 +68,20 @@ export function resolveProviderRequestConfig(
       extraBody: effectiveThinkingLevel === "off"
         ? undefined
         : { reasoning_effort: effectiveThinkingLevel },
+    };
+  }
+
+  if (providerId === "minimax" || providerId === "minimax-openai") {
+    const extraBody: Record<string, unknown> = { reasoning_split: true };
+    if (MINIMAX_M3_FAMILY.has(modelId)) {
+      extraBody.thinking = {
+        type: effectiveThinkingLevel === "off" ? "disabled" : "adaptive",
+      };
+    }
+    return {
+      effectiveThinkingLevel,
+      reasoningContentEcho: "minimax",
+      extraBody,
     };
   }
 

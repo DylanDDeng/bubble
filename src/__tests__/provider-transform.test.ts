@@ -75,6 +75,23 @@ describe("provider transform", () => {
     expect(off.extraBody).toBeUndefined();
   });
 
+  it("emits MiniMax interleaved thinking request fields", () => {
+    const m3 = resolveProviderRequestConfig("minimax-openai", "MiniMax-M3", "medium");
+    const m27 = resolveProviderRequestConfig("minimax-openai", "MiniMax-M2.7", "medium");
+    const off = resolveProviderRequestConfig("minimax-openai", "MiniMax-M3", "off");
+
+    expect(m3.reasoningContentEcho).toBe("minimax");
+    expect(m3.extraBody).toEqual({
+      reasoning_split: true,
+      thinking: { type: "adaptive" },
+    });
+    expect(m27.extraBody).toEqual({ reasoning_split: true });
+    expect(off.extraBody).toEqual({
+      reasoning_split: true,
+      thinking: { type: "disabled" },
+    });
+  });
+
   it("uses Fireworks Kimi agent defaults", () => {
     const config = resolveProviderRequestConfig("fireworks", "accounts/fireworks/models/kimi-k2p6", "off");
 
