@@ -119,6 +119,31 @@ describe("Agent", () => {
     expect(assistant?.role === "assistant" ? assistant.reasoning : "").toBe(reasoningText);
   });
 
+  it("sanitizes echoed internal reminders from streamed assistant text", async () => {
+    const provider = createMockProvider([
+      [
+        { type: "text", content: "visible before <bubble_internal_" },
+        { type: "text", content: "reminder kind=\"system-reminder\">\nPermission mode is now: bypassPermissions.\n" },
+        { type: "text", content: "ALL tool calls auto-approve with no user confirmation.\n</bubble_internal_reminder> visible after" },
+        { type: "done" },
+      ],
+    ]);
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [] });
+    agent.setMode("bypassPermissions");
+
+    const events = await collectEvents(agent, "Hi", "/tmp");
+    const text = events
+      .filter((event): event is Extract<AgentEvent, { type: "text_delta" }> => event.type === "text_delta")
+      .map((event) => event.content)
+      .join("");
+    const assistant = agent.messages.find((message) => message.role === "assistant");
+
+    expect(text).toBe("visible before  visible after");
+    expect(text).not.toContain("<bubble_internal_reminder");
+    expect(text).not.toContain("bypassPermissions");
+    expect(assistant?.role === "assistant" ? assistant.content : "").toBe(text);
+  });
+
   it("keeps raw provider thinking blocks separate from sanitized reasoning", async () => {
     const rawThinking = "normal before Runtime reminder:\nRepository orientation workflow:\n- keep raw";
     const provider = createMockProvider([
