@@ -7,6 +7,7 @@ export interface BuiltinProviderDefinition {
   name: string;
   baseURL: string;
   protocol?: ProviderProtocol;
+  hidden?: boolean;
   supportsOAuth?: boolean;
 }
 
@@ -37,8 +38,9 @@ export const BUILTIN_PROVIDERS: BuiltinProviderDefinition[] = [
   { id: "zai", name: "Z.AI", baseURL: "https://api.z.ai/api/paas/v4" },
   { id: "zai-coding-plan", name: "Z.AI Coding Plan", baseURL: "https://api.z.ai/api/coding/paas/v4" },
   { id: "alibaba", name: "Alibaba DashScope", baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1" },
-  { id: "minimax", name: "MiniMax", baseURL: "https://api.minimaxi.com/v1" },
-  { id: "minimax-anthropic", name: "MiniMax (Anthropic)", baseURL: "https://api.minimaxi.com/anthropic", protocol: "anthropic-messages" },
+  { id: "minimax", name: "MiniMax Token Plan", baseURL: "https://api.minimaxi.com/anthropic", protocol: "anthropic-messages" },
+  { id: "minimax-openai", name: "MiniMax (OpenAI Compatible)", baseURL: "https://api.minimaxi.com/v1" },
+  { id: "minimax-anthropic", name: "MiniMax (Anthropic Compatible)", baseURL: "https://api.minimaxi.com/anthropic", protocol: "anthropic-messages", hidden: true },
   { id: "stepfun", name: "StepFun Step Plan", baseURL: "https://api.stepfun.com/step_plan/v1" },
   { id: "moonshot-cn", name: "Moonshot (国内 platform.moonshot.cn)", baseURL: "https://api.moonshot.cn/v1" },
   { id: "moonshot-intl", name: "Moonshot (海外 platform.moonshot.ai)", baseURL: "https://api.moonshot.ai/v1" },
@@ -112,6 +114,15 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "MiniMax-M2.1-highspeed", name: "MiniMax M2.1 Highspeed", providerId: "minimax", reasoningLevels: MINIMAX_REASONING_LEVELS, contextWindow: 204800 },
   { id: "MiniMax-M2", name: "MiniMax M2", providerId: "minimax", reasoningLevels: MINIMAX_REASONING_LEVELS, contextWindow: 204800 },
   { id: "M2-her", name: "M2-her", providerId: "minimax", reasoningLevels: ["off"], contextWindow: 64000 },
+  { id: "MiniMax-M3", name: "MiniMax M3", providerId: "minimax-openai", reasoningLevels: MINIMAX_M3_REASONING_LEVELS, contextWindow: 1000000 },
+  { id: "MiniMax-M2.7", name: "MiniMax M2.7", providerId: "minimax-openai", reasoningLevels: MINIMAX_REASONING_LEVELS, contextWindow: 204800 },
+  { id: "MiniMax-M2.7-highspeed", name: "MiniMax M2.7 Highspeed", providerId: "minimax-openai", reasoningLevels: MINIMAX_REASONING_LEVELS, contextWindow: 204800 },
+  { id: "MiniMax-M2.5", name: "MiniMax M2.5", providerId: "minimax-openai", reasoningLevels: MINIMAX_REASONING_LEVELS, contextWindow: 204800 },
+  { id: "MiniMax-M2.5-highspeed", name: "MiniMax M2.5 Highspeed", providerId: "minimax-openai", reasoningLevels: MINIMAX_REASONING_LEVELS, contextWindow: 204800 },
+  { id: "MiniMax-M2.1", name: "MiniMax M2.1", providerId: "minimax-openai", reasoningLevels: MINIMAX_REASONING_LEVELS, contextWindow: 204800 },
+  { id: "MiniMax-M2.1-highspeed", name: "MiniMax M2.1 Highspeed", providerId: "minimax-openai", reasoningLevels: MINIMAX_REASONING_LEVELS, contextWindow: 204800 },
+  { id: "MiniMax-M2", name: "MiniMax M2", providerId: "minimax-openai", reasoningLevels: MINIMAX_REASONING_LEVELS, contextWindow: 204800 },
+  { id: "M2-her", name: "M2-her", providerId: "minimax-openai", reasoningLevels: ["off"], contextWindow: 64000 },
   { id: "MiniMax-M3", name: "MiniMax M3", providerId: "minimax-anthropic", reasoningLevels: MINIMAX_M3_REASONING_LEVELS, contextWindow: 1000000 },
   { id: "MiniMax-M2.7", name: "MiniMax M2.7", providerId: "minimax-anthropic", reasoningLevels: MINIMAX_REASONING_LEVELS, contextWindow: 204800 },
   { id: "MiniMax-M2.7-highspeed", name: "MiniMax M2.7 Highspeed", providerId: "minimax-anthropic", reasoningLevels: MINIMAX_REASONING_LEVELS, contextWindow: 204800 },

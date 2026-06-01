@@ -76,9 +76,9 @@ describe("provider transform", () => {
   });
 
   it("emits MiniMax interleaved thinking request fields", () => {
-    const m3 = resolveProviderRequestConfig("minimax", "MiniMax-M3", "medium");
-    const m27 = resolveProviderRequestConfig("minimax", "MiniMax-M2.7", "medium");
-    const off = resolveProviderRequestConfig("minimax", "MiniMax-M3", "off");
+    const m3 = resolveProviderRequestConfig("minimax-openai", "MiniMax-M3", "medium");
+    const m27 = resolveProviderRequestConfig("minimax-openai", "MiniMax-M2.7", "medium");
+    const off = resolveProviderRequestConfig("minimax-openai", "MiniMax-M3", "off");
 
     expect(m3.reasoningContentEcho).toBe("minimax");
     expect(m3.extraBody).toEqual({

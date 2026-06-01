@@ -71,7 +71,7 @@ export function resolveProviderRequestConfig(
     };
   }
 
-  if (providerId === "minimax") {
+  if (providerId === "minimax" || providerId === "minimax-openai") {
     const extraBody: Record<string, unknown> = { reasoning_split: true };
     if (MINIMAX_M3_FAMILY.has(modelId)) {
       extraBody.thinking = {

@@ -130,7 +130,7 @@ describe("createProviderInstance", () => {
 
     const { createProviderInstance } = await import("../provider.js");
     const provider = createProviderInstance({
-      providerId: "minimax",
+      providerId: "minimax-openai",
       apiKey: "sk-test",
       baseURL: "https://api.minimaxi.com/v1",
     });

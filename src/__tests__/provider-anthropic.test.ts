@@ -43,7 +43,7 @@ describe("provider-anthropic", () => {
 
   it("converts Bubble history into Anthropic Messages blocks", () => {
     const body = buildAnthropicRequest({
-      providerId: "minimax-anthropic",
+      providerId: "minimax",
       apiKey: "sk-test",
       baseURL: "https://api.minimaxi.com/anthropic",
       thinkingLevel: "medium",
@@ -147,7 +147,7 @@ describe("provider-anthropic", () => {
     }));
 
     const provider = createProviderInstance({
-      providerId: "minimax-anthropic",
+      providerId: "minimax",
       apiKey: "sk-test",
       baseURL: "https://api.minimaxi.com/anthropic",
       protocol: "anthropic-messages",

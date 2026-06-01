@@ -156,7 +156,7 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
       stream: true,
     };
     // DeepSeek and MiniMax only emit final usage in streaming mode when this flag is set.
-    if (options.providerId === "deepseek" || options.providerId === "minimax") {
+    if (options.providerId === "deepseek" || isMiniMaxOpenAICompatible(options)) {
       body.stream_options = { include_usage: true };
     }
     if (!requestConfig.omitTemperature) {
@@ -242,6 +242,15 @@ function resolveProviderProtocol(options: ProviderInstanceOptions): ProviderProt
     return "anthropic-messages";
   }
   return "openai-chat";
+}
+
+function isMiniMaxOpenAICompatible(options: Pick<ProviderInstanceOptions, "providerId" | "baseURL">): boolean {
+  const providerId = (options.providerId || "").toLowerCase();
+  const baseURL = options.baseURL.toLowerCase();
+  return providerId === "minimax-openai"
+    || (providerId === "minimax" && !baseURL.includes("/anthropic"))
+    || baseURL.includes("api.minimaxi.com/v1")
+    || baseURL.includes("api.minimax.io/v1");
 }
 
 // Some providers (notably Fireworks-hosted Kimi) stream tool-call arguments

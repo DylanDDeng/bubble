@@ -61,11 +61,12 @@ describe("variant resolver", () => {
 
   it("includes MiniMax agent models", () => {
     expect(getBuiltinProvider("minimax")).toMatchObject({
-      baseURL: "https://api.minimaxi.com/v1",
-    });
-    expect(getBuiltinProvider("minimax-anthropic")).toMatchObject({
+      name: "MiniMax Token Plan",
       baseURL: "https://api.minimaxi.com/anthropic",
       protocol: "anthropic-messages",
+    });
+    expect(getBuiltinProvider("minimax-openai")).toMatchObject({
+      baseURL: "https://api.minimaxi.com/v1",
     });
     expect(listBuiltinModels("minimax").map((model) => model.id)).toEqual([
       "MiniMax-M3",
@@ -83,7 +84,7 @@ describe("variant resolver", () => {
     expect(getModelContextWindow("minimax", "MiniMax-M3")).toBe(1000000);
     expect(getModelContextWindow("minimax", "MiniMax-M2.7")).toBe(204800);
     expect(getModelContextWindow("minimax", "M2-her")).toBe(64000);
-    expect(listBuiltinModels("minimax-anthropic").map((model) => model.id)).toEqual([
+    expect(listBuiltinModels("minimax-openai").map((model) => model.id)).toEqual([
       "MiniMax-M3",
       "MiniMax-M2.7",
       "MiniMax-M2.7-highspeed",

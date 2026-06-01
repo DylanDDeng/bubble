@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ProviderRegistry, displayModel, normalizeModel } from "../provider-registry.js";
+import { ProviderRegistry, displayModel, isUserVisibleProvider, normalizeModel } from "../provider-registry.js";
 
 describe("provider registry", () => {
   it("normalizes provider-less models to openai by default", () => {
@@ -11,8 +11,14 @@ describe("provider registry", () => {
     expect(displayModel("alibaba:qwen3.7-max")).toBe("Qwen3.7 Max");
     expect(displayModel("stepfun:step-3.7-flash")).toBe("Step 3.7 Flash");
     expect(displayModel("minimax:MiniMax-M3")).toBe("MiniMax M3");
-    expect(displayModel("minimax-anthropic:MiniMax-M3")).toBe("MiniMax M3");
+    expect(displayModel("minimax-openai:MiniMax-M3")).toBe("MiniMax M3");
     expect(displayModel("anthropic:claude-sonnet-4-6")).toBe("Claude Sonnet 4.6");
+  });
+
+  it("uses MiniMax Token Plan as the visible MiniMax provider", () => {
+    expect(isUserVisibleProvider("minimax")).toBe(true);
+    expect(isUserVisibleProvider("minimax-openai")).toBe(true);
+    expect(isUserVisibleProvider("minimax-anthropic")).toBe(false);
   });
 
   it("prefers user-visible providers over hidden openrouter defaults", () => {
@@ -80,5 +86,37 @@ describe("provider registry", () => {
       id: "anthropic",
       protocol: "anthropic-messages",
     });
+  });
+
+  it("does not force Anthropic protocol onto MiniMax OpenAI-compatible overrides", () => {
+    const providers = [
+      {
+        id: "minimax",
+        name: "MiniMax",
+        baseURL: "https://api.minimaxi.com/v1",
+        apiKey: "sk-cp",
+        enabled: true,
+        authType: "api",
+      },
+    ];
+    const config = {
+      getProviders: () => providers.slice(),
+      setProviders: () => undefined,
+      getDefaultProvider: () => "minimax",
+      setDefaultProvider: () => undefined,
+      getApiKey: () => undefined,
+      setApiKey: () => undefined,
+      getDefaultModel: () => undefined,
+      setDefaultModel: () => undefined,
+      getRecentModels: () => [],
+      pushRecentModel: () => undefined,
+    } as any;
+
+    const registry = new ProviderRegistry(config);
+    expect(registry.getDefault()).toMatchObject({
+      id: "minimax",
+      baseURL: "https://api.minimaxi.com/v1",
+    });
+    expect(registry.getDefault()?.protocol).toBeUndefined();
   });
 });
