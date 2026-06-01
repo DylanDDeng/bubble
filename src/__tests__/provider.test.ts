@@ -120,6 +120,30 @@ describe("toChatCompletionsMessage", () => {
       }],
     });
   });
+
+  it("echoes MiniMax reasoning details when configured", () => {
+    expect(toChatCompletionsMessage({
+      role: "assistant",
+      content: "",
+      reasoning: "used tool",
+      toolCalls: [{ id: "read:1", name: "read", arguments: "{\"path\":\"a\"}" }],
+    }, { reasoningContentEcho: "minimax" })).toEqual({
+      role: "assistant",
+      content: null,
+      reasoning_details: [{
+        type: "reasoning.text",
+        id: "reasoning-text-1",
+        format: "MiniMax-response-v1",
+        index: 0,
+        text: "used tool",
+      }],
+      tool_calls: [{
+        id: "read:1",
+        type: "function",
+        function: { name: "read", arguments: "{\"path\":\"a\"}" },
+      }],
+    });
+  });
 });
 
 describe("translateOpenAIStream", () => {
@@ -229,6 +253,37 @@ describe("translateOpenAIStream", () => {
     ]), { reasoningMergeMode: "snapshot" }));
 
     expect(chunks.filter((c) => c.type === "reasoning_delta").map((c: any) => c.content).join("")).toBe("I need to inspect");
+  });
+
+  it("deduplicates MiniMax cumulative text and reasoning details while streaming", async () => {
+    const chunks = await collect(translateOpenAIStream(fromArray([
+      { choices: [{ delta: { reasoning_details: [{ text: "I need" }] } }] },
+      { choices: [{ delta: { reasoning_details: [{ text: "I need to inspect" }] } }] },
+      { choices: [{ delta: { content: "hello" } }] },
+      { choices: [{ delta: { content: "hello world" } }] },
+      {
+        choices: [{ delta: {}, finish_reason: "stop" }],
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 20,
+          total_tokens: 120,
+          prompt_tokens_details: { cached_tokens: 40 },
+        },
+      },
+    ]), {
+      textMergeMode: "snapshot",
+      reasoningMergeMode: "snapshot",
+    }));
+
+    expect(chunks.filter((c) => c.type === "reasoning_delta").map((c: any) => c.content).join("")).toBe("I need to inspect");
+    expect(chunks.filter((c) => c.type === "text").map((c: any) => c.content).join("")).toBe("hello world");
+    expect(chunks.find((c): c is Extract<StreamChunk, { type: "usage" }> => c.type === "usage")?.usage).toMatchObject({
+      promptTokens: 100,
+      completionTokens: 20,
+      promptCacheHitTokens: 40,
+      promptCacheMissTokens: 60,
+      totalTokens: 120,
+    });
   });
 
   it("deduplicates embedded think content followed by a dedicated reasoning snapshot", async () => {

@@ -58,4 +58,24 @@ describe("variant resolver", () => {
     expect(getDefaultThinkingLevel("stepfun", "step-3.7-flash")).toBe("medium");
     expect(getModelContextWindow("stepfun", "step-3.7-flash")).toBe(256000);
   });
+
+  it("includes MiniMax agent models", () => {
+    expect(getBuiltinProvider("minimax")).toMatchObject({
+      baseURL: "https://api.minimaxi.com/v1",
+    });
+    expect(listBuiltinModels("minimax").map((model) => model.id)).toEqual([
+      "MiniMax-M3",
+      "MiniMax-M2.7",
+      "MiniMax-M2.7-highspeed",
+      "MiniMax-M2.5",
+      "MiniMax-M2.5-highspeed",
+      "MiniMax-M2.1",
+      "MiniMax-M2.1-highspeed",
+      "MiniMax-M2",
+    ]);
+    expect(getAvailableThinkingLevels("minimax", "MiniMax-M3")).toEqual(["off", "medium"]);
+    expect(getDefaultThinkingLevel("minimax", "MiniMax-M3")).toBe("medium");
+    expect(getModelContextWindow("minimax", "MiniMax-M3")).toBe(1000000);
+    expect(getModelContextWindow("minimax", "MiniMax-M2.7")).toBe(204800);
+  });
 });

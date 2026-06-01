@@ -26,12 +26,13 @@ function debugToolArgs(event: Record<string, unknown>): void {
   }
 }
 
-type ReasoningContentEcho = "tool_calls" | "all" | "none";
+type ReasoningContentEcho = "tool_calls" | "all" | "none" | "minimax";
 export type ToolArgsMergeMode = "delta" | "snapshot";
 
 export interface TranslateOpenAIStreamOptions {
   toolArgsMergeMode?: ToolArgsMergeMode;
   reasoningMergeMode?: ToolArgsMergeMode;
+  textMergeMode?: ToolArgsMergeMode;
   debugProviderId?: string;
   debugModelId?: string;
 }
@@ -50,6 +51,15 @@ export function toChatCompletionsMessage(
       // DeepSeek thinking mode requires every assistant message to echo the
       // provider field, even when the original value is an empty string.
       out.reasoning_content = message.reasoning ?? "";
+    }
+    if (reasoningContentEcho === "minimax" && message.reasoning) {
+      out.reasoning_details = [{
+        type: "reasoning.text",
+        id: "reasoning-text-1",
+        format: "MiniMax-response-v1",
+        index: 0,
+        text: message.reasoning,
+      }];
     }
     if (message.toolCalls && message.toolCalls.length > 0) {
       out.tool_calls = message.toolCalls.map((tc) => ({
@@ -138,8 +148,8 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
       tool_choice: tools && tools.length > 0 ? "auto" : undefined,
       stream: true,
     };
-    // DeepSeek only emits final usage in streaming mode when this flag is set.
-    if (options.providerId === "deepseek") {
+    // DeepSeek and MiniMax only emit final usage in streaming mode when this flag is set.
+    if (options.providerId === "deepseek" || options.providerId === "minimax") {
       body.stream_options = { include_usage: true };
     }
     if (!requestConfig.omitTemperature) {
@@ -169,6 +179,7 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
     yield* translateOpenAIStream(stream, {
       toolArgsMergeMode: resolveToolArgsMergeMode(options.providerId || "", options.baseURL),
       reasoningMergeMode: resolveReasoningMergeMode(options.providerId || "", options.baseURL),
+      textMergeMode: resolveTextMergeMode(options.providerId || "", options.baseURL),
       debugProviderId: options.providerId || "",
       debugModelId: chatOptions.model,
     });
@@ -274,6 +285,14 @@ function resolveReasoningMergeMode(providerId: string, baseURL: string): ToolArg
   const id = providerId.toLowerCase();
   const url = baseURL.toLowerCase();
   if (id === "fireworks" || url.includes("fireworks.ai")) return "snapshot";
+  if (id === "minimax" || url.includes("api.minimaxi.com") || url.includes("api.minimax.io")) return "snapshot";
+  return "delta";
+}
+
+function resolveTextMergeMode(providerId: string, baseURL: string): ToolArgsMergeMode {
+  const id = providerId.toLowerCase();
+  const url = baseURL.toLowerCase();
+  if (id === "minimax" || url.includes("api.minimaxi.com") || url.includes("api.minimax.io")) return "snapshot";
   return "delta";
 }
 
@@ -313,7 +332,9 @@ export async function* translateOpenAIStream(
   const textFilter = createProviderProtocolArtifactFilter();
   const toolArgsMergeMode = options.toolArgsMergeMode ?? "delta";
   const reasoningMergeMode = options.reasoningMergeMode ?? "delta";
+  const textMergeMode = options.textMergeMode ?? "delta";
   let reasoningBuffer = "";
+  let textBuffer = "";
   let rawChunkSeq = 0;
   // DeepSeek (and some inference re-hosts) sometimes deliver reasoning twice:
   // once via a dedicated `reasoning_content` / `thinking` field, and again
@@ -375,6 +396,7 @@ export async function* translateOpenAIStream(
       reasoning: summarizeDebugText((delta as any)?.reasoning),
       thinking: summarizeDebugText((delta as any)?.thinking),
       reasoningContent: summarizeDebugText((delta as any)?.reasoning_content),
+      reasoningDetails: summarizeDebugText(extractReasoningDetailsText((delta as any)?.reasoning_details)),
     });
 
     if (usage) {
@@ -383,8 +405,16 @@ export async function* translateOpenAIStream(
         usage: {
           promptTokens: typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : 0,
           completionTokens: typeof usage.completion_tokens === "number" ? usage.completion_tokens : 0,
-          promptCacheHitTokens: typeof usage.prompt_cache_hit_tokens === "number" ? usage.prompt_cache_hit_tokens : undefined,
-          promptCacheMissTokens: typeof usage.prompt_cache_miss_tokens === "number" ? usage.prompt_cache_miss_tokens : undefined,
+          promptCacheHitTokens: typeof usage.prompt_cache_hit_tokens === "number"
+            ? usage.prompt_cache_hit_tokens
+            : typeof usage.prompt_tokens_details?.cached_tokens === "number"
+              ? usage.prompt_tokens_details.cached_tokens
+              : undefined,
+          promptCacheMissTokens: typeof usage.prompt_cache_miss_tokens === "number"
+            ? usage.prompt_cache_miss_tokens
+            : typeof usage.prompt_tokens_details?.cached_tokens === "number" && typeof usage.prompt_tokens === "number"
+              ? Math.max(0, usage.prompt_tokens - usage.prompt_tokens_details.cached_tokens)
+              : undefined,
           reasoningTokens: typeof usage.completion_tokens_details?.reasoning_tokens === "number"
             ? usage.completion_tokens_details.reasoning_tokens
             : undefined,
@@ -393,14 +423,21 @@ export async function* translateOpenAIStream(
       };
     }
 
-    const reasoningField = (delta as any)?.reasoning !== undefined
+    const reasoningDetails = extractReasoningDetailsText((delta as any)?.reasoning_details);
+    const reasoningField = reasoningDetails !== undefined
+      ? "reasoning_details"
+      : (delta as any)?.reasoning !== undefined
       ? "reasoning"
       : (delta as any)?.thinking !== undefined
         ? "thinking"
         : (delta as any)?.reasoning_content !== undefined
           ? "reasoning_content"
           : undefined;
-    const reasoning = reasoningField ? (delta as any)[reasoningField] : undefined;
+    const reasoning = reasoningDetails !== undefined
+      ? reasoningDetails
+      : reasoningField
+        ? (delta as any)[reasoningField]
+        : undefined;
     if (reasoning) {
       hasDedicatedReasoningChannel = true;
       const merged = mergeStreamingText(reasoningBuffer, reasoning, reasoningMergeMode);
@@ -422,35 +459,40 @@ export async function* translateOpenAIStream(
     }
 
     if (delta?.content) {
-      const thinkMatch = delta.content.match(/<think>([\s\S]*?)<\/think>/);
-      if (thinkMatch) {
-        if (thinkMatch[1] && !hasDedicatedReasoningChannel) {
-          const merged = mergeStreamingText(reasoningBuffer, thinkMatch[1], reasoningMergeMode);
-          reasoningBuffer = merged.args;
-          debugReasoningStream({
-            stage: "provider_emit",
-            providerId: options.debugProviderId,
-            modelId: options.debugModelId,
-            chunkSeq: rawChunkSeq,
-            source: "content_think",
-            mergeMode: reasoningMergeMode,
-            suppressed: !merged.delta,
-            emitted: summarizeDebugText(merged.delta),
-            buffer: summarizeDebugText(reasoningBuffer),
-          });
-          if (merged.delta) {
-            yield { type: "reasoning_delta", content: merged.delta };
+      const mergedContent = mergeStreamingText(textBuffer, delta.content, textMergeMode);
+      textBuffer = mergedContent.args;
+      const content = mergedContent.delta;
+      if (content) {
+        const thinkMatch = content.match(/<think>([\s\S]*?)<\/think>/);
+        if (thinkMatch) {
+          if (thinkMatch[1] && !hasDedicatedReasoningChannel) {
+            const merged = mergeStreamingText(reasoningBuffer, thinkMatch[1], reasoningMergeMode);
+            reasoningBuffer = merged.args;
+            debugReasoningStream({
+              stage: "provider_emit",
+              providerId: options.debugProviderId,
+              modelId: options.debugModelId,
+              chunkSeq: rawChunkSeq,
+              source: "content_think",
+              mergeMode: reasoningMergeMode,
+              suppressed: !merged.delta,
+              emitted: summarizeDebugText(merged.delta),
+              buffer: summarizeDebugText(reasoningBuffer),
+            });
+            if (merged.delta) {
+              yield { type: "reasoning_delta", content: merged.delta };
+            }
           }
-        }
-        const remaining = delta.content.replace(/<think>[\s\S]*?<\/think>/, "");
-        const cleaned = textFilter.push(remaining);
-        if (cleaned) {
-          yield { type: "text", content: cleaned };
-        }
-      } else {
-        const cleaned = textFilter.push(delta.content);
-        if (cleaned) {
-          yield { type: "text", content: cleaned };
+          const remaining = content.replace(/<think>[\s\S]*?<\/think>/, "");
+          const cleaned = textFilter.push(remaining);
+          if (cleaned) {
+            yield { type: "text", content: cleaned };
+          }
+        } else {
+          const cleaned = textFilter.push(content);
+          if (cleaned) {
+            yield { type: "text", content: cleaned };
+          }
         }
       }
     }
@@ -494,6 +536,18 @@ export async function* translateOpenAIStream(
     yield { type: "text", content: remainingText };
   }
   yield* flushToolCalls();
+}
+
+function extractReasoningDetailsText(value: unknown): string | undefined {
+  if (!value) return undefined;
+  const details = Array.isArray(value) ? value : [value];
+  const parts = details.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const record = item as Record<string, unknown>;
+    const text = record.text ?? record.thinking ?? record.content;
+    return typeof text === "string" ? [text] : [];
+  });
+  return parts.length > 0 ? parts.join("") : undefined;
 }
 
 function mergeToolArgumentDelta(current: string, incoming: string, mode: ToolArgsMergeMode): { args: string; delta: string } {
