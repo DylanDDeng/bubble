@@ -6,14 +6,14 @@
 import { compactMessages } from "./context/compact.js";
 import { randomUUID } from "node:crypto";
 import { compactMessagesWithLLM } from "./context/compact-llm.js";
-import { getContextBudget } from "./context/budget.js";
+import { estimateContextTokens, getContextBudget } from "./context/budget.js";
 import { buildContextUsageSnapshot, type ContextUsageSnapshot } from "./context/usage.js";
 import { isContextOverflowError } from "./context/overflow.js";
 import { projectMessages } from "./context/projector.js";
 import { aggressivePruneMessages } from "./context/prune.js";
 import { truncateToolOutputForModel } from "./context/tool-output-truncate.js";
 import { buildDeferredToolsReminder, buildToolFreezeReminder, isPermissionModeReminder, reminderForMode } from "./prompt/reminders.js";
-import type { AgentEvent, AgentInputController, AgentRunInput, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ThinkingLevel, Todo, TokenUsage, ToolDefinition, ToolResult, ToolRegistryEntry, ToolUpdate } from "./types.js";
+import type { AgentEvent, AgentInputController, AgentRunInput, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ProviderMessage, ProviderRawContentBlock, ThinkingLevel, Todo, TokenUsage, ToolDefinition, ToolResult, ToolRegistryEntry, ToolUpdate } from "./types.js";
 import { HookBus, type TurnHooks, type TurnHookState } from "./orchestrator/hooks.js";
 import { createDefaultHooks } from "./orchestrator/default-hooks.js";
 import { resolveModelRoute, resolveSubagentRoute, type AgentCategoriesConfig, type ResolvedSubagentRoute } from "./agent/categories.js";
@@ -527,6 +527,7 @@ export class Agent {
           toolCount: toolDefinitions.length,
           thinkingLevel: this.thinkingLevel,
           mode: this._mode,
+          requestFingerprint: buildProviderRequestFingerprint(projectedMessages, toolDefinitions, this.providerId),
         }, traceContext);
         const stream = this.provider.streamChat(projectedMessages, {
           model: this.apiModel,
@@ -562,6 +563,10 @@ export class Agent {
                   yield emit({ type: "reasoning_delta", content: sanitizedDelta });
                 }
               }
+              break;
+
+            case "provider_content_block":
+              appendProviderContentBlock(assistantMsg, chunk.provider, chunk.block);
               break;
 
             case "tool_call":
@@ -1946,6 +1951,85 @@ function estimateResidentChars(messages: Message[]): number {
   }
 
   return total;
+}
+
+function appendProviderContentBlock(
+  message: Extract<Message, { role: "assistant" }>,
+  provider: "anthropic",
+  block: ProviderRawContentBlock,
+): void {
+  if (provider !== "anthropic") return;
+  const current = message.providerMetadata?.anthropic?.contentBlocks ?? [];
+  message.providerMetadata = {
+    ...message.providerMetadata,
+    anthropic: {
+      ...message.providerMetadata?.anthropic,
+      contentBlocks: [...current, cloneProviderRawContentBlock(block)],
+    },
+  };
+}
+
+function buildProviderRequestFingerprint(
+  messages: ProviderMessage[],
+  tools: ToolDefinition[],
+  providerId: string,
+): Record<string, unknown> {
+  const roleCounts: Record<string, number> = {};
+  let contentChars = 0;
+  let reasoningChars = 0;
+  let toolResultChars = 0;
+  let maxToolResultChars = 0;
+  let assistantToolCalls = 0;
+  let rawAnthropicBlocks = 0;
+  let rawAnthropicThinkingBlocks = 0;
+  let rawAnthropicSignatureChars = 0;
+
+  for (const message of messages) {
+    roleCounts[message.role] = (roleCounts[message.role] ?? 0) + 1;
+    if (message.role === "assistant") {
+      contentChars += message.content.length;
+      reasoningChars += message.reasoning?.length ?? 0;
+      assistantToolCalls += message.toolCalls?.length ?? 0;
+      const blocks = message.providerMetadata?.anthropic?.contentBlocks ?? [];
+      rawAnthropicBlocks += blocks.length;
+      for (const block of blocks) {
+        if (block.type === "thinking" || block.type === "redacted_thinking") {
+          rawAnthropicThinkingBlocks += 1;
+        }
+        if (typeof block.signature === "string") {
+          rawAnthropicSignatureChars += block.signature.length;
+        }
+      }
+    } else if (message.role === "tool") {
+      toolResultChars += message.content.length;
+      maxToolResultChars = Math.max(maxToolResultChars, message.content.length);
+    } else if (message.role === "user") {
+      contentChars += typeof message.content === "string"
+        ? message.content.length
+        : message.content.reduce((sum, part) => sum + (part.type === "text" ? part.text.length : part.image_url.url.length), 0);
+    } else {
+      contentChars += message.content.length;
+    }
+  }
+
+  return {
+    roleCounts,
+    estimatedTokens: estimateContextTokens(messages as Message[], providerId),
+    projectedJsonBytes: Buffer.byteLength(JSON.stringify(messages), "utf8"),
+    toolSchemaJsonBytes: Buffer.byteLength(JSON.stringify(tools), "utf8"),
+    contentChars,
+    reasoningChars,
+    toolResultChars,
+    maxToolResultChars,
+    assistantToolCalls,
+    rawAnthropicBlocks,
+    rawAnthropicThinkingBlocks,
+    rawAnthropicSignatureChars,
+  };
+}
+
+function cloneProviderRawContentBlock(block: ProviderRawContentBlock): ProviderRawContentBlock {
+  return JSON.parse(JSON.stringify(block)) as ProviderRawContentBlock;
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

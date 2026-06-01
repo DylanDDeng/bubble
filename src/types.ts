@@ -20,6 +20,14 @@ export type ContentPart = TextContent | ImageContent;
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type ReasoningEffort = ThinkingLevel;
 
+export type ProviderRawContentBlock = Record<string, unknown> & { type: string };
+
+export interface AssistantProviderMetadata {
+  anthropic?: {
+    contentBlocks?: ProviderRawContentBlock[];
+  };
+}
+
 export interface UserMessage {
   role: "user";
   content: string | ContentPart[];
@@ -30,6 +38,7 @@ export interface AssistantMessage {
   content: string;
   reasoning?: string;
   toolCalls?: ToolCall[];
+  providerMetadata?: AssistantProviderMetadata;
   /** Model metadata captured for local usage statistics. */
   model?: string;
   providerId?: string;
@@ -304,6 +313,7 @@ export interface Todo {
 export type StreamChunk =
   | { type: "text"; content: string }
   | { type: "reasoning_delta"; content: string }
+  | { type: "provider_content_block"; provider: "anthropic"; block: ProviderRawContentBlock }
   | { type: "tool_call"; id: string; name: string; arguments: string; isStart: boolean; isEnd: boolean; argumentsFull?: string; argumentsCorrupt?: boolean }
   | { type: "usage"; usage: TokenUsage }
   | { type: "done" };

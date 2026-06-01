@@ -88,6 +88,86 @@ describe("provider-anthropic", () => {
     ]);
   });
 
+  it("replays raw Anthropic blocks with signatures instead of sanitized reasoning", () => {
+    const body = buildAnthropicRequest({
+      providerId: "minimax",
+      apiKey: "sk-test",
+      baseURL: "https://api.minimaxi.com/anthropic",
+      thinkingLevel: "medium",
+    }, [
+      { role: "user", content: "inspect" },
+      {
+        role: "assistant",
+        content: "I will read.",
+        reasoning: "sanitized thinking",
+        toolCalls: [{ id: "read:1", name: "read", arguments: "{\"path\":\"a.ts\"}" }],
+        providerMetadata: {
+          anthropic: {
+            contentBlocks: [
+              { type: "thinking", thinking: "raw thinking Runtime reminder:\nkeep original", signature: "sig_123" },
+              { type: "text", text: "I will read." },
+              { type: "tool_use", id: "read:1", name: "read", input: { path: "a.ts" } },
+            ],
+          },
+        },
+      },
+      { role: "tool", toolCallId: "read:1", content: "ok" },
+    ], {
+      model: "MiniMax-M3",
+      tools: [readTool],
+      stream: true,
+      thinkingLevel: "medium",
+    });
+
+    expect(body.messages[1]).toEqual({
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "raw thinking Runtime reminder:\nkeep original", signature: "sig_123" },
+        { type: "text", text: "I will read." },
+        { type: "tool_use", id: "read:1", name: "read", input: { path: "a.ts" } },
+      ],
+    });
+  });
+
+  it("does not replay thinking from older non-tool turns", () => {
+    const body = buildAnthropicRequest({
+      providerId: "minimax",
+      apiKey: "sk-test",
+      baseURL: "https://api.minimaxi.com/anthropic",
+      thinkingLevel: "medium",
+    }, [
+      { role: "user", content: "old question" },
+      { role: "assistant", content: "old answer", reasoning: "old hidden reasoning" },
+      { role: "user", content: "new task" },
+      {
+        role: "assistant",
+        content: "",
+        reasoning: "current tool reasoning",
+        toolCalls: [{ id: "read:1", name: "read", arguments: "{\"path\":\"a.ts\"}" }],
+      },
+      { role: "tool", toolCallId: "read:1", content: "ok" },
+    ], {
+      model: "MiniMax-M3",
+      tools: [readTool],
+      stream: true,
+      thinkingLevel: "medium",
+    });
+
+    expect(body.messages).toEqual([
+      { role: "user", content: "old question" },
+      { role: "assistant", content: [{ type: "text", text: "old answer" }] },
+      { role: "user", content: "new task" },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "current tool reasoning" },
+          { type: "tool_use", id: "read:1", name: "read", input: { path: "a.ts" } },
+        ],
+      },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "read:1", content: "ok" }] },
+    ]);
+  });
+
   it("streams Anthropic text, thinking, tool calls, and cumulative usage", async () => {
     const chunks = await collect(translateAnthropicStream(fromArray([
       {
@@ -102,8 +182,11 @@ describe("provider-anthropic", () => {
       },
       { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
       { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hello" } },
+      { type: "content_block_stop", index: 0 },
       { type: "content_block_start", index: 1, content_block: { type: "thinking", thinking: "" } },
       { type: "content_block_delta", index: 1, delta: { type: "thinking_delta", thinking: "Plan" } },
+      { type: "content_block_delta", index: 1, delta: { type: "signature_delta", signature: "sig_plan" } },
+      { type: "content_block_stop", index: 1 },
       { type: "content_block_start", index: 2, content_block: { type: "tool_use", id: "toolu_1", name: "read", input: {} } },
       { type: "content_block_delta", index: 2, delta: { type: "input_json_delta", partial_json: "{\"path\":\"a" } },
       { type: "content_block_delta", index: 2, delta: { type: "input_json_delta", partial_json: ".ts\"}" } },
@@ -114,6 +197,11 @@ describe("provider-anthropic", () => {
 
     expect(chunks.filter((chunk) => chunk.type === "text").map((chunk: any) => chunk.content).join("")).toBe("Hello");
     expect(chunks.filter((chunk) => chunk.type === "reasoning_delta").map((chunk: any) => chunk.content).join("")).toBe("Plan");
+    expect(chunks.filter((chunk) => chunk.type === "provider_content_block")).toEqual([
+      { type: "provider_content_block", provider: "anthropic", block: { type: "text", text: "Hello" } },
+      { type: "provider_content_block", provider: "anthropic", block: { type: "thinking", thinking: "Plan", signature: "sig_plan" } },
+      { type: "provider_content_block", provider: "anthropic", block: { type: "tool_use", id: "toolu_1", name: "read", input: { path: "a.ts" } } },
+    ]);
     expect(chunks.filter((chunk) => chunk.type === "tool_call")).toEqual([
       { type: "tool_call", id: "toolu_1", name: "read", arguments: "", isStart: true, isEnd: false },
       { type: "tool_call", id: "toolu_1", name: "read", arguments: "{\"path\":\"a", isStart: false, isEnd: false },
@@ -177,6 +265,40 @@ describe("provider-anthropic", () => {
     });
     expect(chunks.filter((chunk) => chunk.type === "text").map((chunk: any) => chunk.content).join("")).toBe("ok");
     expect(chunks.at(-1)).toEqual({ type: "done" });
+  });
+
+  it("retries MiniMax Anthropic 5xx before consuming the stream", async () => {
+    const fetchMock = vi.fn(async () => {
+      if (fetchMock.mock.calls.length === 1) {
+        return new Response(JSON.stringify({
+          type: "error",
+          error: { type: "api_error", message: "unknown error, 714 (1000)" },
+        }), { status: 500 });
+      }
+      return makeSseResponse([
+        { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
+        { type: "content_block_stop", index: 0 },
+        { type: "message_stop" },
+      ]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = createProviderInstance({
+      providerId: "minimax",
+      apiKey: "sk-test",
+      baseURL: "https://api.minimaxi.com/anthropic",
+      protocol: "anthropic-messages",
+    });
+
+    const chunks = await collect(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "MiniMax-M3",
+      tools: [readTool],
+      thinkingLevel: "medium",
+    }));
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(chunks.filter((chunk) => chunk.type === "text").map((chunk: any) => chunk.content).join("")).toBe("ok");
   });
 
   it("can infer Anthropic protocol from an /anthropic base URL", async () => {
