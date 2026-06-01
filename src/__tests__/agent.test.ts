@@ -119,6 +119,29 @@ describe("Agent", () => {
     expect(assistant?.role === "assistant" ? assistant.reasoning : "").toBe(reasoningText);
   });
 
+  it("keeps raw provider thinking blocks separate from sanitized reasoning", async () => {
+    const rawThinking = "normal before Runtime reminder:\nRepository orientation workflow:\n- keep raw";
+    const provider = createMockProvider([
+      [
+        { type: "reasoning_delta", content: rawThinking },
+        { type: "provider_content_block", provider: "anthropic", block: { type: "thinking", thinking: rawThinking, signature: "sig_raw" } },
+        { type: "provider_content_block", provider: "anthropic", block: { type: "text", text: "Done." } },
+        { type: "text", content: "Done." },
+        { type: "done" },
+      ],
+    ]);
+    const agent = new Agent({ provider, model: "minimax:MiniMax-M3", tools: [] });
+    await collectEvents(agent, "Hi", "/tmp");
+
+    const assistant = agent.messages.find((message) => message.role === "assistant") as any;
+    expect(assistant.reasoning).not.toContain("Repository orientation workflow");
+    expect(assistant.providerMetadata.anthropic.contentBlocks[0]).toEqual({
+      type: "thinking",
+      thinking: rawThinking,
+      signature: "sig_raw",
+    });
+  });
+
   it("retries a reasoning-only assistant turn instead of appending invalid history", async () => {
     const providerCalls: any[][] = [];
     let callIndex = 0;

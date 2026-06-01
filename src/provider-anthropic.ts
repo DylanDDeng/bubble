@@ -1,5 +1,5 @@
 import { getAvailableThinkingLevels, normalizeThinkingLevel } from "./provider-transform.js";
-import type { ContentPart, Provider, ProviderMessage, StreamChunk, ThinkingLevel, ToolDefinition, TokenUsage } from "./types.js";
+import type { ContentPart, Provider, ProviderMessage, ProviderRawContentBlock, StreamChunk, ThinkingLevel, ToolDefinition, TokenUsage } from "./types.js";
 
 const ANTHROPIC_VERSION = "2023-06-01";
 const DEFAULT_MAX_TOKENS = 8192;
@@ -26,7 +26,8 @@ interface AnthropicRequest {
 type AnthropicContentBlock =
   | { type: "text"; text: string }
   | { type: "image"; source: { type: "url"; url: string } | { type: "base64"; media_type: string; data: string } }
-  | { type: "thinking"; thinking: string }
+  | { type: "thinking"; thinking: string; signature?: string }
+  | { type: "redacted_thinking"; data: string }
   | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
   | { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean };
 
@@ -48,6 +49,10 @@ interface AnthropicStreamBlockState {
   args: string;
   started: boolean;
   input?: Record<string, unknown>;
+  raw: ProviderRawContentBlock;
+  text: string;
+  thinking: string;
+  signature: string;
 }
 
 export function createAnthropicMessagesProvider(options: AnthropicProviderOptions): Provider {
@@ -63,13 +68,13 @@ export function createAnthropicMessagesProvider(options: AnthropicProviderOption
       stream: true,
     });
 
-    const response = await fetch(resolveAnthropicMessagesUrl(options.baseURL), {
+    const response = await fetchAnthropicResponseWithRetry(options, {
+      url: resolveAnthropicMessagesUrl(options.baseURL),
+      stream: true,
       method: "POST",
-      headers: buildAnthropicHeaders(options, true),
       body: JSON.stringify(body),
       signal: chatOptions.abortSignal,
     });
-    await assertAnthropicResponseOk(response);
 
     yield* translateAnthropicStream(readSseEvents(response));
     yield { type: "done" };
@@ -86,13 +91,13 @@ export function createAnthropicMessagesProvider(options: AnthropicProviderOption
       stream: false,
     });
 
-    const response = await fetch(resolveAnthropicMessagesUrl(options.baseURL), {
+    const response = await fetchAnthropicResponseWithRetry(options, {
+      url: resolveAnthropicMessagesUrl(options.baseURL),
+      stream: false,
       method: "POST",
-      headers: buildAnthropicHeaders(options, false),
       body: JSON.stringify(body),
       signal: chatOptions?.abortSignal,
     });
-    await assertAnthropicResponseOk(response);
     const data = await response.json() as { content?: Array<Record<string, unknown>> };
     return extractAnthropicText(data.content).join("");
   }
@@ -148,8 +153,10 @@ export function toAnthropicMessages(
 ): { system: string; messages: AnthropicMessage[] } {
   const system: string[] = [];
   const out: AnthropicMessage[] = [];
+  const thinkingReplayIndexes = getThinkingReplayIndexes(messages, echoThinking);
 
-  for (const message of messages) {
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index];
     if (message.role === "system") {
       system.push(message.content);
       continue;
@@ -169,21 +176,7 @@ export function toAnthropicMessages(
     }
 
     if (message.role === "assistant") {
-      const content: AnthropicContentBlock[] = [];
-      if (echoThinking && message.reasoning?.trim()) {
-        content.push({ type: "thinking", thinking: message.reasoning });
-      }
-      if (message.content.trim()) {
-        content.push({ type: "text", text: message.content });
-      }
-      for (const toolCall of message.toolCalls ?? []) {
-        content.push({
-          type: "tool_use",
-          id: toolCall.id,
-          name: toolCall.name,
-          input: parseToolInput(toolCall.arguments),
-        });
-      }
+      const content = buildAssistantAnthropicBlocks(message, thinkingReplayIndexes.has(index));
       if (content.length > 0) {
         pushAnthropicMessage(out, { role: "assistant", content });
       }
@@ -199,6 +192,85 @@ export function toAnthropicMessages(
   }
 
   return { system: system.join("\n\n"), messages: out };
+}
+
+function buildAssistantAnthropicBlocks(message: Extract<ProviderMessage, { role: "assistant" }>, includeThinking: boolean): AnthropicContentBlock[] {
+  const rawBlocks = message.providerMetadata?.anthropic?.contentBlocks;
+  if (rawBlocks && rawBlocks.length > 0) {
+    const blocks = rawBlocks
+      .filter(isReplayableAssistantContentBlock)
+      .filter((block) => includeThinking || !isThinkingContentBlock(block))
+      .map((block) => cloneAnthropicContentBlock(block));
+    if (blocks.length > 0) {
+      return blocks;
+    }
+  }
+
+  const content: AnthropicContentBlock[] = [];
+  if (includeThinking && message.reasoning?.trim()) {
+    content.push({ type: "thinking", thinking: message.reasoning });
+  }
+  if (message.content.trim()) {
+    content.push({ type: "text", text: message.content });
+  }
+  for (const toolCall of message.toolCalls ?? []) {
+    content.push({
+      type: "tool_use",
+      id: toolCall.id,
+      name: toolCall.name,
+      input: parseToolInput(toolCall.arguments),
+    });
+  }
+  return content;
+}
+
+function getThinkingReplayIndexes(messages: ProviderMessage[], echoThinking: boolean): Set<number> {
+  const indexes = new Set<number>();
+  if (!echoThinking) return indexes;
+
+  let lastUserIndex = -1;
+  for (let index = 0; index < messages.length; index++) {
+    if (messages[index].role === "user") {
+      lastUserIndex = index;
+    }
+  }
+
+  for (let index = Math.max(0, lastUserIndex + 1); index < messages.length; index++) {
+    const message = messages[index];
+    if (message.role === "assistant" && assistantHasToolUse(message)) {
+      indexes.add(index);
+    }
+  }
+
+  return indexes;
+}
+
+function assistantHasToolUse(message: Extract<ProviderMessage, { role: "assistant" }>): boolean {
+  if (message.toolCalls && message.toolCalls.length > 0) return true;
+  return message.providerMetadata?.anthropic?.contentBlocks?.some((block) => block.type === "tool_use") ?? false;
+}
+
+function isThinkingContentBlock(block: ProviderRawContentBlock): boolean {
+  return block.type === "thinking" || block.type === "redacted_thinking";
+}
+
+function isReplayableAssistantContentBlock(block: ProviderRawContentBlock): boolean {
+  switch (block.type) {
+    case "text":
+      return typeof block.text === "string";
+    case "thinking":
+      return typeof block.thinking === "string";
+    case "redacted_thinking":
+      return typeof block.data === "string";
+    case "tool_use":
+      return typeof block.id === "string" && typeof block.name === "string" && isObjectRecord(block.input);
+    default:
+      return false;
+  }
+}
+
+function cloneAnthropicContentBlock(block: ProviderRawContentBlock): AnthropicContentBlock {
+  return JSON.parse(JSON.stringify(block)) as AnthropicContentBlock;
 }
 
 export async function* translateAnthropicStream(events: AsyncIterable<Record<string, unknown>>): AsyncIterable<StreamChunk> {
@@ -225,6 +297,7 @@ export async function* translateAnthropicStream(events: AsyncIterable<Record<str
       const index = typeof event.index === "number" ? event.index : 0;
       const block = event.content_block as Record<string, unknown> | undefined;
       const blockType = typeof block?.type === "string" ? block.type : "";
+      const raw = cloneProviderBlock(block, blockType);
       const state: AnthropicStreamBlockState = {
         type: blockType,
         id: typeof block?.id === "string" ? block.id : undefined,
@@ -232,6 +305,10 @@ export async function* translateAnthropicStream(events: AsyncIterable<Record<str
         args: "",
         started: false,
         input: isObjectRecord(block?.input) ? block.input : undefined,
+        raw,
+        text: typeof block?.text === "string" ? block.text : "",
+        thinking: typeof block?.thinking === "string" ? block.thinking : "",
+        signature: typeof block?.signature === "string" ? block.signature : "",
       };
       blocks.set(index, state);
       if (blockType === "text" && typeof block?.text === "string" && block.text) {
@@ -252,9 +329,20 @@ export async function* translateAnthropicStream(events: AsyncIterable<Record<str
       const delta = event.delta as Record<string, unknown> | undefined;
       const deltaType = typeof delta?.type === "string" ? delta.type : "";
       if (deltaType === "text_delta" && typeof delta?.text === "string" && delta.text) {
+        if (state) {
+          state.text += delta.text;
+          state.raw.text = state.text;
+        }
         yield { type: "text", content: delta.text };
       } else if (deltaType === "thinking_delta" && typeof delta?.thinking === "string" && delta.thinking) {
+        if (state) {
+          state.thinking += delta.thinking;
+          state.raw.thinking = state.thinking;
+        }
         yield { type: "reasoning_delta", content: delta.thinking };
+      } else if (deltaType === "signature_delta" && typeof delta?.signature === "string" && state) {
+        state.signature += delta.signature;
+        state.raw.signature = state.signature;
       } else if (deltaType === "input_json_delta" && state?.id && state.name && typeof delta?.partial_json === "string") {
         state.args += delta.partial_json;
         if (!state.started) {
@@ -273,6 +361,8 @@ export async function* translateAnthropicStream(events: AsyncIterable<Record<str
       blocks.delete(index);
       if (state?.type === "tool_use" && state.id && state.name) {
         const finalArgs = state.args || JSON.stringify(state.input ?? {});
+        state.raw.input = parseToolInput(normalizeToolArgs(finalArgs));
+        yield { type: "provider_content_block", provider: "anthropic", block: state.raw };
         yield {
           type: "tool_call",
           id: state.id,
@@ -282,6 +372,9 @@ export async function* translateAnthropicStream(events: AsyncIterable<Record<str
           isStart: false,
           isEnd: true,
         };
+      } else if (state && isReplayableAssistantContentBlock(state.raw)) {
+        finalizeRawContentBlock(state);
+        yield { type: "provider_content_block", provider: "anthropic", block: state.raw };
       }
     }
   }
@@ -317,6 +410,42 @@ export async function* readSseEvents(response: Response): AsyncIterable<Record<s
   }
 }
 
+async function fetchAnthropicResponseWithRetry(
+  options: AnthropicProviderOptions,
+  request: {
+    url: string;
+    stream: boolean;
+    method: "POST";
+    body: string;
+    signal?: AbortSignal;
+  },
+): Promise<Response> {
+  const maxAttempts = shouldRetryMiniMaxAnthropic(options) ? 2 : 1;
+  let lastError: Error | undefined;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const response = await fetch(request.url, {
+      method: request.method,
+      headers: buildAnthropicHeaders(options, request.stream),
+      body: request.body,
+      signal: request.signal,
+    });
+    if (response.ok) return response;
+
+    const detail = await readAnthropicErrorDetail(response);
+    const error = new Error(`Anthropic Messages API error ${response.status}: ${detail || response.statusText}`);
+    lastError = error;
+
+    if (attempt >= maxAttempts || !isRetryableMiniMaxAnthropicError(response.status, detail)) {
+      throw error;
+    }
+
+    await sleepBeforeRetry(getAnthropicRetryDelayMs(), request.signal);
+  }
+
+  throw lastError ?? new Error("Anthropic Messages API request failed");
+}
+
 function resolveAnthropicMessagesUrl(baseURL: string): string {
   const normalized = baseURL.trim().replace(/\/+$/, "");
   if (normalized.endsWith("/v1/messages")) return normalized;
@@ -337,15 +466,52 @@ function buildAnthropicHeaders(options: AnthropicProviderOptions, stream: boolea
   return headers;
 }
 
-async function assertAnthropicResponseOk(response: Response): Promise<void> {
-  if (response.ok) return;
-  let detail = "";
+async function readAnthropicErrorDetail(response: Response): Promise<string> {
   try {
-    detail = await response.text();
+    return await response.text();
   } catch {
-    detail = response.statusText;
+    return response.statusText;
   }
-  throw new Error(`Anthropic Messages API error ${response.status}: ${detail || response.statusText}`);
+}
+
+function shouldRetryMiniMaxAnthropic(options: AnthropicProviderOptions): boolean {
+  const providerId = (options.providerId || "").toLowerCase();
+  const baseURL = options.baseURL.toLowerCase();
+  return providerId.startsWith("minimax") || baseURL.includes("api.minimaxi.com") || baseURL.includes("api.minimax.io");
+}
+
+function isRetryableMiniMaxAnthropicError(status: number, detail: string): boolean {
+  return status === 500
+    || status === 502
+    || status === 503
+    || status === 504
+    || detail.includes("714 (1000)");
+}
+
+function getAnthropicRetryDelayMs(): number {
+  if (process.env.NODE_ENV === "test") return 0;
+  return 800 + Math.floor(Math.random() * 700);
+}
+
+function sleepBeforeRetry(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(toAbortError(signal));
+  }
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timeout);
+      reject(toAbortError(signal));
+    }, { once: true });
+  });
+}
+
+function toAbortError(signal?: AbortSignal): Error {
+  const reason = signal?.reason;
+  if (reason instanceof Error) return reason;
+  const error = new Error("Anthropic request retry aborted.");
+  error.name = "AbortError";
+  return error;
 }
 
 function parseSseEvent(raw: string): Record<string, unknown> | undefined {
@@ -360,6 +526,24 @@ function parseSseEvent(raw: string): Record<string, unknown> | undefined {
   const data = dataLines.join("\n");
   if (!data || data === "[DONE]") return undefined;
   return JSON.parse(data) as Record<string, unknown>;
+}
+
+function cloneProviderBlock(block: Record<string, unknown> | undefined, fallbackType: string): ProviderRawContentBlock {
+  const type = typeof block?.type === "string" && block.type ? block.type : fallbackType || "unknown";
+  const clone = block ? JSON.parse(JSON.stringify(block)) as Record<string, unknown> : {};
+  clone.type = type;
+  return clone as ProviderRawContentBlock;
+}
+
+function finalizeRawContentBlock(state: AnthropicStreamBlockState): void {
+  if (state.type === "text") {
+    state.raw.text = state.text;
+  } else if (state.type === "thinking") {
+    state.raw.thinking = state.thinking;
+    if (state.signature) {
+      state.raw.signature = state.signature;
+    }
+  }
 }
 
 function contentPartsToAnthropicBlocks(parts: ContentPart[]): AnthropicContentBlock[] {

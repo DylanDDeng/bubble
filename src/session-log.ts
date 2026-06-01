@@ -233,6 +233,7 @@ function normalizeMessageToEntries(message: Message, id: string, timestamp: numb
           modelId: message.modelId,
           usage: message.usage,
           error: message.error,
+          providerMetadata: cloneProviderMetadata(message.providerMetadata),
         },
         timestamp,
       };
@@ -288,6 +289,7 @@ function cloneMessage(message: Message): Message {
     return {
       ...message,
       toolCalls: message.toolCalls?.map((toolCall) => ({ ...toolCall })),
+      providerMetadata: cloneProviderMetadata(message.providerMetadata),
     };
   }
 
@@ -302,6 +304,11 @@ function cloneMessage(message: Message): Message {
   }
 
   return { ...message };
+}
+
+function cloneProviderMetadata<T>(metadata: T | undefined): T | undefined {
+  if (metadata === undefined) return undefined;
+  return JSON.parse(JSON.stringify(metadata)) as T;
 }
 
 function pruneIncompleteTail(messages: Message[]): Message[] {

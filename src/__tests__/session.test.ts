@@ -62,6 +62,34 @@ describe("SessionManager", () => {
     });
   });
 
+  it("persists raw provider metadata without sanitizing it as display reasoning", () => {
+    const file = join(tmpDir, "provider-metadata.jsonl");
+    const sm1 = new SessionManager(file);
+    const rawThinking = "normal before Runtime reminder:\nRepository orientation workflow:\n- keep raw signature text";
+    sm1.appendMessage({
+      role: "assistant",
+      content: "Done.",
+      reasoning: rawThinking,
+      providerMetadata: {
+        anthropic: {
+          contentBlocks: [
+            { type: "thinking", thinking: rawThinking, signature: "sig_raw" },
+            { type: "text", text: "Done." },
+          ],
+        },
+      },
+    });
+
+    const raw = JSON.parse(readFileSync(file, "utf-8").trim());
+    expect(raw.message.reasoning).not.toContain("Repository orientation workflow");
+    expect(raw.message.providerMetadata.anthropic.contentBlocks[0].thinking).toContain("Repository orientation workflow");
+    expect(raw.message.providerMetadata.anthropic.contentBlocks[0].signature).toBe("sig_raw");
+
+    const sm2 = new SessionManager(file);
+    const restored = sm2.getMessages()[0] as any;
+    expect(restored.providerMetadata.anthropic.contentBlocks[0].thinking).toContain("Repository orientation workflow");
+  });
+
   it("persists todos snapshots and returns the latest on reload", () => {
     const file = join(tmpDir, "todos.jsonl");
     const sm1 = new SessionManager(file);

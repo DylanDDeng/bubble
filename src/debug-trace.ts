@@ -136,6 +136,7 @@ export function summarizeTraceMessage(message: Message): Record<string, unknown>
       content: summarizeTraceText(message.content),
       reasoning: summarizeTraceText(message.reasoning ?? ""),
       error: message.error,
+      providerMetadata: summarizeAssistantProviderMetadata(message),
       toolCalls: message.toolCalls?.map((call) => ({
         id: call.id,
         name: call.name,
@@ -163,6 +164,19 @@ export function summarizeTraceMessage(message: Message): Record<string, unknown>
     role: message.role,
     kind: "kind" in message ? message.kind : undefined,
     content: summarizeTraceText(message.content),
+  };
+}
+
+function summarizeAssistantProviderMetadata(message: Extract<Message, { role: "assistant" }>): Record<string, unknown> | undefined {
+  const blocks = message.providerMetadata?.anthropic?.contentBlocks;
+  if (!blocks || blocks.length === 0) return undefined;
+  return {
+    anthropic: {
+      contentBlocks: blocks.length,
+      thinkingBlocks: blocks.filter((block) => block.type === "thinking" || block.type === "redacted_thinking").length,
+      signatureChars: blocks.reduce((sum, block) => sum + (typeof block.signature === "string" ? block.signature.length : 0), 0),
+      types: blocks.map((block) => block.type).slice(0, 32),
+    },
   };
 }
 

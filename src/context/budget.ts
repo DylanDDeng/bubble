@@ -1,5 +1,5 @@
 import { getModelContextWindow } from "../model-catalog.js";
-import type { Message } from "../types.js";
+import type { AssistantProviderMetadata, Message } from "../types.js";
 import { getTokenEstimator } from "./token-estimator.js";
 
 export const OUTPUT_RESERVE_TOKENS = 20_000;
@@ -39,6 +39,7 @@ export function estimateMessageTokens(message: Message, providerId?: string): nu
     case "assistant":
       return estimate(message.content)
         + estimate(message.reasoning ?? "")
+        + estimateProviderMetadataOverhead(message.providerMetadata, providerId)
         + (message.toolCalls?.reduce((sum, toolCall) => sum + estimate(toolCall.arguments) + 12, 0) ?? 0)
         + 8;
     case "user":
@@ -52,6 +53,21 @@ export function estimateMessageTokens(message: Message, providerId?: string): nu
         return sum + 256;
       }, 8);
   }
+}
+
+function estimateProviderMetadataOverhead(
+  metadata: AssistantProviderMetadata | undefined,
+  providerId?: string,
+): number {
+  const blocks = metadata?.anthropic?.contentBlocks;
+  if (!blocks || blocks.length === 0) return 0;
+  const estimate = (text: string) => estimateTextTokens(text, providerId);
+  return blocks.reduce((sum, block) => {
+    let overhead = 0;
+    if (typeof block.signature === "string") overhead += estimate(block.signature);
+    if (block.type === "redacted_thinking" && typeof block.data === "string") overhead += estimate(block.data);
+    return sum + overhead;
+  }, 0);
 }
 
 export function estimateContextTokens(messages: Message[], providerId?: string): number {
