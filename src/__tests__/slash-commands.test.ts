@@ -231,6 +231,62 @@ describe("slash commands", () => {
     }
   });
 
+  it("/model hides default thinking level in the switch confirmation", async () => {
+    const originalBubbleHome = process.env.BUBBLE_HOME;
+    const root = join(tmpdir(), `bubble-model-label-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    mkdirSync(root, { recursive: true });
+    process.env.BUBBLE_HOME = root;
+
+    try {
+      const ctx = createContext({
+        agent: {
+          model: "openai:gpt-4o",
+          providerId: "openai",
+          thinking: "medium",
+          setSystemPrompt: vi.fn(),
+          setProvider: vi.fn(),
+        } as any,
+        createProvider: vi.fn(() => ({ streamChat: vi.fn(), complete: vi.fn() })) as any,
+        registry: {
+          getDefault: () => ({
+            id: "minimax",
+            name: "MiniMax Token Plan",
+            baseURL: "https://api.minimaxi.com/anthropic",
+            apiKey: "sk-cp",
+            enabled: true,
+          }),
+          getConfigured: () => [
+            {
+              id: "minimax",
+              name: "MiniMax Token Plan",
+              baseURL: "https://api.minimaxi.com/anthropic",
+              apiKey: "sk-cp",
+              enabled: true,
+            },
+            {
+              id: "deepseek",
+              name: "DeepSeek",
+              baseURL: "https://api.deepseek.com",
+              apiKey: "sk-deepseek",
+              enabled: true,
+            },
+          ],
+          getModelConfig: () => ({ hasProvider: () => false }),
+          prepareProvider: vi.fn(),
+        } as any,
+      });
+
+      let result = await slashRegistry.execute("/model minimax:MiniMax-M3", ctx);
+      expect(result.result).toBe("Model switched to MiniMax M3.");
+
+      result = await slashRegistry.execute("/model deepseek:deepseek-v4-pro --reasoning-effort max", ctx);
+      expect(result.result).toBe("Model switched to deepseek-v4-pro (max).");
+    } finally {
+      if (originalBubbleHome === undefined) delete process.env.BUBBLE_HOME;
+      else process.env.BUBBLE_HOME = originalBubbleHome;
+    }
+  });
+
   it("opens the skill picker from /skills", async () => {
     const ctx = createContext({
       skillRegistry: createSkillRegistryFixture(),

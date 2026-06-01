@@ -5,7 +5,7 @@ import { normalizeNameForMCP } from "../mcp/name.js";
 import { parseRule } from "../permissions/rule.js";
 import type { RuleList, SettingsScope } from "../permissions/settings.js";
 import { encodeModel, decodeModel, displayModel, BUILTIN_PROVIDERS, isUserVisibleProvider } from "../provider-registry.js";
-import { getAvailableThinkingLevels, normalizeThinkingLevel } from "../provider-transform.js";
+import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingLevel } from "../provider-transform.js";
 import { buildSystemPrompt } from "../system-prompt.js";
 import type { ThinkingLevel } from "../types.js";
 import { isThinkingLevel } from "../variant/thinking-level.js";
@@ -173,7 +173,9 @@ function parseModelArgs(args: string): { model?: string; thinkingLevel?: Thinkin
 
 function displaySelectedModel(model: string, thinkingLevel: ThinkingLevel): string {
   const label = displayModel(model);
-  return thinkingLevel === "off" ? label : `${label} (${thinkingLevel})`;
+  const { providerId, modelId } = decodeModel(model);
+  const defaultLevel = providerId ? getDefaultThinkingLevel(providerId, modelId) : "off";
+  return thinkingLevel === "off" || thinkingLevel === defaultLevel ? label : `${label} (${thinkingLevel})`;
 }
 
 function parseMemoryScopeArgs(args: string): { scope: MemoryScope; rest: string; error?: string } {
