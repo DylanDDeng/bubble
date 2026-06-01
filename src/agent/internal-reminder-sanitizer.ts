@@ -1,3 +1,5 @@
+import type { AssistantProviderMetadata } from "../types.js";
+
 const INTERNAL_TAG_PREFIX = "<bubble_internal_";
 const INTERNAL_TAG_NAMES = ["reminder", "context"] as const;
 const LEGACY_RUNTIME_MARKERS = [
@@ -39,6 +41,36 @@ export function sanitizeInternalReminderBlocks(text: string): string {
   if (!text) return text;
   const sanitizer = createStreamingInternalReminderSanitizer();
   return sanitizer.push(text) + sanitizer.flush();
+}
+
+export function sanitizeAssistantProviderMetadata(
+  metadata: AssistantProviderMetadata | undefined,
+): AssistantProviderMetadata | undefined {
+  const anthropic = metadata?.anthropic;
+  const blocks = anthropic?.contentBlocks;
+  if (!metadata || !anthropic || !blocks?.length) return metadata;
+
+  let changed = false;
+  const sanitizedBlocks = blocks.map((block) => {
+    if (block.type !== "text" || typeof block.text !== "string") {
+      return block;
+    }
+    const sanitizedText = sanitizeInternalReminderBlocks(block.text);
+    if (sanitizedText === block.text) {
+      return block;
+    }
+    changed = true;
+    return { ...block, text: sanitizedText };
+  });
+
+  if (!changed) return metadata;
+  return {
+    ...metadata,
+    anthropic: {
+      ...anthropic,
+      contentBlocks: sanitizedBlocks,
+    },
+  };
 }
 
 export function createStreamingInternalReminderSanitizer() {

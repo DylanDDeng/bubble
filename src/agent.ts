@@ -22,7 +22,7 @@ import { BudgetLedger, composeAbortSignals } from "./agent/budget-ledger.js";
 import { assignAgentNickname, builtinAgentProfiles, mergeUsage, selectToolsForAgentProfile, validateAgentProfileTools, type AgentProfile, type SubagentRunResult } from "./agent/profiles.js";
 import { snapshotSubagentThread, subagentResultFromThread, type PendingSubagentToolUpdate, type SubagentThreadRecord, type SubagentThreadSnapshot } from "./agent/subagent-control.js";
 import { isHiddenToolResult } from "./agent/discovery-barrier.js";
-import { createStreamingInternalReminderSanitizer, sanitizeInternalReminderBlocks } from "./agent/internal-reminder-sanitizer.js";
+import { createStreamingInternalReminderSanitizer, sanitizeAssistantProviderMetadata, sanitizeInternalReminderBlocks } from "./agent/internal-reminder-sanitizer.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { isOnlyProviderProtocolArtifacts, stripProviderProtocolArtifacts } from "./provider-artifacts.js";
 import { debugReasoningStream, summarizeDebugText } from "./reasoning-debug.js";
@@ -467,6 +467,7 @@ export class Agent {
       };
 
       const streamingToolCalls = new Map<string, { id: string; name: string; args: string; argsCorrupt?: boolean }>();
+      const textSanitizer = createStreamingInternalReminderSanitizer();
       const reasoningSanitizer = createStreamingInternalReminderSanitizer();
       let turnUsage: TokenUsage | undefined;
       let assistantAppended = false;
@@ -541,9 +542,14 @@ export class Agent {
           throwIfAborted(abortSignal);
           switch (chunk.type) {
             case "text":
-              assistantMsg.content += chunk.content;
-              streamTextChars += chunk.content.length;
-              yield emit({ type: "text_delta", content: chunk.content });
+              {
+                const sanitizedDelta = textSanitizer.push(chunk.content);
+                if (sanitizedDelta) {
+                  assistantMsg.content += sanitizedDelta;
+                  streamTextChars += sanitizedDelta.length;
+                  yield emit({ type: "text_delta", content: sanitizedDelta });
+                }
+              }
               break;
             case "reasoning_delta":
               {
@@ -643,6 +649,13 @@ export class Agent {
           }
           for (const update of this.drainSubagentToolUpdates()) yield emit(update);
         }
+        const flushedText = textSanitizer.flush();
+        if (flushedText) {
+          assistantMsg.content += flushedText;
+          streamTextChars += flushedText.length;
+          yield emit({ type: "text_delta", content: flushedText });
+        }
+
         const flushedReasoning = reasoningSanitizer.flush();
         if (flushedReasoning) {
           debugReasoningStream({
@@ -1765,8 +1778,14 @@ export class Agent {
   }
 
   private appendMessage(message: Message) {
+    if (message.role === "assistant" && message.content) {
+      message.content = sanitizeInternalReminderBlocks(message.content);
+    }
     if (message.role === "assistant" && message.reasoning) {
       message.reasoning = sanitizeInternalReminderBlocks(message.reasoning);
+    }
+    if (message.role === "assistant" && message.providerMetadata) {
+      message.providerMetadata = sanitizeAssistantProviderMetadata(message.providerMetadata);
     }
     this.messages.push(message);
     traceEvent("agent_message_append", {
