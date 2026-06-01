@@ -98,12 +98,12 @@ Stop once these categories are covered. Do not keep repeating near-identical sea
 
 export function buildLoopWarningReminder(reason: string): string {
   return wrapInSystemReminder(`
-Tool loop warning.
+Further broad exploration is low value unless there is a concrete remaining evidence gap.
 
 ${reason}
 
-Do not repeat near-identical reads or searches unless you are changing the path or testing a genuinely new hypothesis.
-If current evidence is sufficient, summarize your findings now.
+Do not repeat near-identical reads or searches unless the path or hypothesis is materially different.
+If current evidence is sufficient, answer with the findings.
 `);
 }
 
