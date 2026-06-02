@@ -15,6 +15,15 @@ import { resolveToolPath } from "./path-utils.js";
 
 export type WriteToolOptions = Record<string, never>;
 
+function prepareWriteArguments(input: Record<string, any>): Record<string, any> {
+  if (!input || typeof input !== "object") return input;
+  const args: Record<string, any> = { ...input };
+  if (typeof args.file_path === "string" && typeof args.path !== "string") {
+    args.path = args.file_path;
+  }
+  return args;
+}
+
 export function createWriteTool(
   cwd: string,
   _options: WriteToolOptions = {},
@@ -28,6 +37,10 @@ export function createWriteTool(
     requiresApproval: true,
     description:
       "Write content to a file. Creates parent directories as needed. If the file already exists, this replaces the full file; use edit for small targeted changes.",
+    promptSnippet: "Create new files or intentionally rewrite complete files",
+    promptGuidelines: [
+      "Use write only for new files, generated files, or intentional complete rewrites. Use edit for targeted changes to existing files.",
+    ],
     parameters: {
       type: "object",
       properties: {
@@ -36,6 +49,7 @@ export function createWriteTool(
       },
       required: ["path", "content"],
     },
+    prepareArguments: prepareWriteArguments,
     async execute(args): Promise<ToolResult> {
       const filePath = resolveToolPath(cwd, args.path);
 

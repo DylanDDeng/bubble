@@ -14,7 +14,6 @@ export const defaultToolSnippets: Record<string, string> = {
   read: "Read the contents of a file",
   bash: "Execute a bash command",
   edit: "Apply targeted string replacements to a file",
-  apply_patch: "Apply a structured patch for multi-file or larger code changes",
   write: "Write a new file or overwrite an existing one",
   glob: "Find files by glob pattern without using bash",
   grep: "Search file contents using regex",
@@ -36,7 +35,6 @@ export const defaultToolNames = [
   "glob",
   "bash",
   "edit",
-  "apply_patch",
   "write",
   "grep",
   "lsp",
@@ -59,7 +57,7 @@ export function buildEnvironmentPrompt(options: EnvironmentPromptOptions = {}): 
   const workingDir = options.workingDir ?? cwd().replace(/\\/g, "/");
   const currentDate = options.currentDate ?? new Date().toISOString().slice(0, 10);
   const tools = options.tools ?? defaultToolNames;
-  const snippets = options.toolSnippets ?? defaultToolSnippets;
+  const snippets = { ...defaultToolSnippets, ...(options.toolSnippets ?? {}) };
 
   const visibleTools = tools.filter((name) => snippets[name]);
   const toolList = visibleTools.length > 0

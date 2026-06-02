@@ -84,6 +84,9 @@ function persistSelectedModel(model: string, ctx: Parameters<SlashCommand["handl
 
 function syncSystemPrompt(ctx: Parameters<SlashCommand["handler"]>[1], model: string) {
   const { providerId, modelId } = decodeModel(model);
+  const toolPromptOptions = typeof ctx.agent.getSystemPromptToolOptions === "function"
+    ? ctx.agent.getSystemPromptToolOptions()
+    : {};
   ctx.agent.setSystemPrompt(buildSystemPrompt({
     agentName: "Bubble",
     configuredProvider: providerId,
@@ -91,6 +94,7 @@ function syncSystemPrompt(ctx: Parameters<SlashCommand["handler"]>[1], model: st
     configuredModelId: model,
     thinkingLevel: ctx.agent.thinking,
     workingDir: ctx.cwd,
+    ...toolPromptOptions,
     memoryPrompt: buildMemoryPrompt(ctx.cwd),
   }));
 }

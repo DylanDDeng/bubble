@@ -7,7 +7,7 @@ export { createBashTool } from "./bash.js";
 export { createManagedServerTools } from "./server.js";
 export { createWriteTool } from "./write.js";
 export { createEditTool } from "./edit.js";
-export { createApplyPatchTool } from "./apply-patch.js";
+export { buildToolPromptOptions } from "./prompt-metadata.js";
 export { createGlobTool } from "./glob.js";
 export { createGrepTool } from "./grep.js";
 export { createLspTool } from "./lsp.js";
@@ -28,7 +28,6 @@ import type { SkillRegistry } from "../skills/registry.js";
 import { createBashTool } from "./bash.js";
 import { createManagedServerTools } from "./server.js";
 import { createEditTool } from "./edit.js";
-import { createApplyPatchTool } from "./apply-patch.js";
 import { createExitPlanModeTool, type PlanController } from "./exit-plan-mode.js";
 import { createGlobTool } from "./glob.js";
 import { createGrepTool } from "./grep.js";
@@ -72,7 +71,6 @@ export function createAllTools(
     ...createManagedServerTools(cwd, approval),
     createWriteTool(cwd, {}, approval, lsp, fileState),
     createEditTool(cwd, approval, lsp, fileState),
-    createApplyPatchTool(cwd, approval, lsp, fileState),
     createGlobTool(cwd),
     createGrepTool(cwd),
     createLspTool(cwd, lsp, approval),

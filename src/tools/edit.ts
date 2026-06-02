@@ -22,13 +22,70 @@ export interface EditArgs {
   edits: Array<{ oldText: string; newText: string }>;
 }
 
+function prepareEditArguments(input: Record<string, any>): Record<string, any> {
+  if (!input || typeof input !== "object") return input;
+  const args: Record<string, any> = { ...input };
+
+  if (typeof args.file_path === "string" && typeof args.path !== "string") {
+    args.path = args.file_path;
+  }
+
+  if (typeof args.edits === "string") {
+    try {
+      const parsed = JSON.parse(args.edits);
+      if (Array.isArray(parsed)) args.edits = parsed;
+    } catch {
+      // Keep the original value so validation surfaces the problem.
+    }
+  }
+
+  if (Array.isArray(args.edits)) {
+    args.edits = args.edits.map((edit) => {
+      if (!edit || typeof edit !== "object") return edit;
+      const normalized = { ...edit };
+      if (typeof normalized.oldText !== "string") {
+        normalized.oldText = firstString(edit.old_text, edit.oldString, edit.old_string);
+      }
+      if (typeof normalized.newText !== "string") {
+        normalized.newText = firstString(edit.new_text, edit.newString, edit.new_string);
+      }
+      return normalized;
+    });
+  }
+
+  if (!Array.isArray(args.edits)) {
+    const oldText = firstString(args.oldText, args.old_text, args.oldString, args.old_string);
+    const newText = firstString(args.newText, args.new_text, args.newString, args.new_string);
+    if (typeof oldText === "string" && typeof newText === "string") {
+      args.edits = [{ oldText, newText }];
+    }
+  }
+
+  return args;
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string") return value;
+  }
+  return undefined;
+}
+
 export function createEditTool(cwd: string, approval?: ApprovalController, lsp?: LspService, fileState?: FileStateTracker): ToolRegistryEntry {
   return {
     name: "edit",
     effect: "write_direct",
     requiresApproval: true,
     description:
-      "Apply targeted string replacements to a file. Prefer exact oldText copied from a recent read. The tool can tolerate common AI formatting mistakes such as extra leading/trailing whitespace, over-escaped sequences, line ending differences, indentation differences, trailing whitespace, Unicode punctuation/space, and blank-line differences when the target is unique.",
+      "Edit a single file using targeted text replacements. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.",
+    promptSnippet:
+      "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+    promptGuidelines: [
+      "Use edit for precise changes; edits[].oldText should be copied from a recent read and must identify a unique target.",
+      "When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls.",
+      "Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit.",
+      "Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.",
+    ],
     parameters: {
       type: "object",
       properties: {
@@ -48,7 +105,28 @@ export function createEditTool(cwd: string, approval?: ApprovalController, lsp?:
       },
       required: ["path", "edits"],
     },
+    prepareArguments: prepareEditArguments,
     async execute(args): Promise<ToolResult> {
+      if (!Array.isArray(args.edits)) {
+        return {
+          content: "Error: edit requires edits to be an array of { oldText, newText } replacements.",
+          isError: true,
+          status: "blocked",
+          metadata: { kind: "edit", reason: "invalid_args" },
+        };
+      }
+      for (let index = 0; index < args.edits.length; index++) {
+        const edit = args.edits[index];
+        if (!edit || typeof edit !== "object" || typeof edit.oldText !== "string" || typeof edit.newText !== "string") {
+          return {
+            content: `Error: edit requires edits[${index}] to contain string oldText and newText fields.`,
+            isError: true,
+            status: "blocked",
+            metadata: { kind: "edit", reason: "invalid_args", index },
+          };
+        }
+      }
+
       const filePath = resolveToolPath(cwd, args.path);
 
       if (!isWithinWorkspace(cwd, filePath)) {
