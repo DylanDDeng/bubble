@@ -21,7 +21,7 @@ import type { ApprovalDecision, ApprovalRequest } from "../../approval/types.js"
 import { getLspService } from "../../lsp/index.js";
 import { buildSystemPrompt } from "../../system-prompt.js";
 import { FileStateTracker } from "../../tools/file-state.js";
-import { createAllTools, type PlanController } from "../../tools/index.js";
+import { buildToolPromptOptions, createAllTools, type PlanController } from "../../tools/index.js";
 import { displayModel, encodeModel, decodeModel } from "../../provider-registry.js";
 import { buildMemoryPrompt, recordMemoryCitations } from "../../memory/index.js";
 import { getDefaultThinkingLevel } from "../../provider-transform.js";
@@ -134,7 +134,7 @@ export class RunDriver {
       thinkingLevel,
       mode: initialMode,
       workingDir: session.cwd,
-      tools: tools.map((t) => t.name),
+      ...buildToolPromptOptions(tools.filter((tool) => !tool.deferred)),
       memoryPrompt,
     });
     const budgetLedger = new BudgetLedger();

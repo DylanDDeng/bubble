@@ -34,6 +34,79 @@ describe("edit tool", () => {
     expect(result.metadata?.diff).toContain("+const x = 42;");
   });
 
+  it("normalizes legacy top-level oldText/newText arguments", async () => {
+    const file = join(tmpDir, "legacy-top-level.ts");
+    writeFileSync(file, "const value = 1;\n", "utf-8");
+
+    const tool = createEditTool(tmpDir);
+    const args = tool.prepareArguments?.({
+      path: "legacy-top-level.ts",
+      oldText: "const value = 1;",
+      newText: "const value = 2;",
+    });
+    const result = await tool.execute(args ?? {}, { cwd: tmpDir });
+
+    expect(result.isError).toBeUndefined();
+    expect(readFileSync(file, "utf-8")).toBe("const value = 2;\n");
+  });
+
+  it("normalizes provider variants for edits arguments", async () => {
+    const file = join(tmpDir, "provider-variants.ts");
+    writeFileSync(file, "const label = 'old';\n", "utf-8");
+
+    const tool = createEditTool(tmpDir);
+    const args = tool.prepareArguments?.({
+      file_path: "provider-variants.ts",
+      edits: JSON.stringify([{ old_string: "const label = 'old';", new_string: "const label = 'new';" }]),
+    });
+    const result = await tool.execute(args ?? {}, { cwd: tmpDir });
+
+    expect(result.isError).toBeUndefined();
+    expect(readFileSync(file, "utf-8")).toBe("const label = 'new';\n");
+  });
+
+  it("does not append legacy top-level replacements when edits already exists", async () => {
+    const file = join(tmpDir, "mixed-legacy.ts");
+    writeFileSync(file, "const first = 1;\nconst second = 2;\n", "utf-8");
+
+    const tool = createEditTool(tmpDir);
+    const args = tool.prepareArguments?.({
+      path: "mixed-legacy.ts",
+      edits: [{ oldText: "const first = 1;", newText: "const first = 10;" }],
+      oldText: "const second = 2;",
+      newText: "const second = 20;",
+    });
+    const result = await tool.execute(args ?? {}, { cwd: tmpDir });
+
+    expect(result.isError).toBeUndefined();
+    expect(readFileSync(file, "utf-8")).toBe("const first = 10;\nconst second = 2;\n");
+  });
+
+  it("returns a clear error when edits is not an array", async () => {
+    const tool = createEditTool(tmpDir);
+    const result = await tool.execute(
+      { path: "sample.ts", edits: "{\"oldText\":\"x\",\"newText\":\"y\"}" },
+      { cwd: tmpDir },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.status).toBe("blocked");
+    expect(result.content).toContain("edits to be an array");
+  });
+
+  it("returns a clear error when an edit item is malformed", async () => {
+    const tool = createEditTool(tmpDir);
+    const result = await tool.execute(
+      { path: "sample.ts", edits: [{ oldText: "const x = 1;" }] },
+      { cwd: tmpDir },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.status).toBe("blocked");
+    expect(result.content).toContain("edits[0]");
+    expect(result.content).toContain("oldText and newText");
+  });
+
   it("applies multiple replacements simultaneously", async () => {
     const file = join(tmpDir, "multi.ts");
     writeFileSync(file, "a\nb\nc", "utf-8");

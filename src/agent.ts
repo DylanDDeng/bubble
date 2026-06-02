@@ -28,6 +28,7 @@ import { isOnlyProviderProtocolArtifacts, stripProviderProtocolArtifacts } from 
 import { debugReasoningStream, summarizeDebugText } from "./reasoning-debug.js";
 import type { SkillSummary } from "./skills/types.js";
 import type { FileStateTracker } from "./tools/file-state.js";
+import { buildToolPromptOptions } from "./tools/prompt-metadata.js";
 import { stopAutoServersForSession } from "./tools/server-manager.js";
 import {
   summarizeAgentEventForTrace,
@@ -186,6 +187,10 @@ export class Agent {
   /** All deferred tools in this session (for tool_search to inspect). */
   listDeferredTools(): ToolRegistryEntry[] {
     return [...this.tools.values()].filter((t) => t.deferred);
+  }
+
+  getSystemPromptToolOptions(): Pick<import("./system-prompt.js").SystemPromptOptions, "tools" | "toolSnippets" | "guidelines"> {
+    return buildToolPromptOptions(this.getActiveToolEntries());
   }
 
   getContextUsageSnapshot(): ContextUsageSnapshot {
@@ -1577,7 +1582,7 @@ export class Agent {
       thinkingLevel: route.thinkingLevel,
       mode: "plan",
       workingDir: cwd,
-      tools: childToolNames,
+      ...buildToolPromptOptions(tools),
       memoryPrompt: childToolNames.some((name) => name === "memory_search" || name === "memory_read_summary")
         ? this.memoryPrompt
         : undefined,
@@ -1885,7 +1890,23 @@ export class Agent {
       };
     }
 
-    const missingRequired = findMissingRequiredArgs(tool.parameters, toolCall.parsedArgs);
+    let preparedArgs = toolCall.parsedArgs;
+    if (tool.prepareArguments) {
+      try {
+        preparedArgs = tool.prepareArguments(preparedArgs);
+      } catch (err) {
+        return {
+          content:
+            `Error: Tool "${toolCall.name}" arguments could not be normalized before execution: ` +
+            `${err instanceof Error ? err.message : String(err)}. Re-issue the call with valid arguments.`,
+          isError: true,
+          status: "blocked",
+          metadata: { kind: "security", reason: "args_prepare_failed" },
+        };
+      }
+    }
+
+    const missingRequired = findMissingRequiredArgs(tool.parameters, preparedArgs);
     if (missingRequired.length > 0) {
       return {
         content:
@@ -1898,7 +1919,7 @@ export class Agent {
     }
 
     try {
-      return await tool.execute(toolCall.parsedArgs, {
+      return await tool.execute(preparedArgs, {
         cwd,
         sessionID: this.sessionID,
         abortSignal,

@@ -192,7 +192,7 @@ function isCodeWriteResult(_toolCall: ParsedToolCall, result: ToolResult): boole
 }
 
 function isMutationTool(name: string): boolean {
-  return name === "edit" || name === "write" || name === "apply_patch";
+  return name === "edit" || name === "write";
 }
 
 function hasSubagentLifecycleActivity(

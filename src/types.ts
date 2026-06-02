@@ -255,6 +255,12 @@ export interface ToolContext {
 
 export interface ToolRegistryEntry extends ToolDefinition {
   execute: ToolExecutor;
+  /** Optional one-line summary for the Available tools section. */
+  promptSnippet?: string;
+  /** Optional tool-specific rules appended to the system prompt when this tool is active. */
+  promptGuidelines?: string[];
+  /** Optional compatibility shim for provider-specific argument shapes. */
+  prepareArguments?: (args: Record<string, any>) => Record<string, any>;
   /** Whether this tool is allowed in plan mode. Defaults to false (treated as write-capable). */
   readOnly?: boolean;
   /** Capability classification used by subagent profiles. Defaults to "unknown". */

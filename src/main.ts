@@ -16,7 +16,7 @@ import { SessionManager } from "./session.js";
 import { createSessionTitleUpdater, type SessionTitleUpdater } from "./session-title.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { SkillRegistry } from "./skills/registry.js";
-import { createAllTools, type PlanController, type ToolSearchController } from "./tools/index.js";
+import { buildToolPromptOptions, createAllTools, type PlanController, type ToolSearchController } from "./tools/index.js";
 import { FileStateTracker } from "./tools/file-state.js";
 import { PermissionAwareApprovalController } from "./approval/controller.js";
 import { BashAllowlist } from "./approval/session-cache.js";
@@ -322,7 +322,7 @@ async function main() {
     thinkingLevel: initialThinkingLevel,
     mode: initialMode,
     workingDir: args.cwd,
-    tools: tools.map((tool) => tool.name),
+    ...buildToolPromptOptions(tools.filter((tool) => !tool.deferred)),
     memoryPrompt,
   });
   const traceInfo = configureDebugTrace({
