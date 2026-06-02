@@ -3,11 +3,11 @@
  */
 
 import { readdir, stat } from "node:fs/promises";
-import { relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import picomatch from "picomatch";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
 import { isSensitivePath } from "./sensitive-paths.js";
-import { resolveToolPath } from "./path-utils.js";
+import { expandHomePath, resolveToolPath } from "./path-utils.js";
 
 const MAX_RESULTS = 100;
 const DEFAULT_IGNORES = new Set([
@@ -36,11 +36,17 @@ export function createGlobTool(cwd: string): ToolRegistryEntry {
       required: ["pattern"],
     },
     async execute(args, ctx): Promise<ToolResult> {
-      const root = resolveToolPath(cwd, typeof args.path === "string" && args.path.trim() ? args.path : ".");
-      const pattern = String(args.pattern || "").trim();
-      if (!pattern) {
+      const requestedRoot = resolveToolPath(cwd, typeof args.path === "string" && args.path.trim() ? args.path : ".");
+      const originalPattern = String(args.pattern || "").trim();
+      if (!originalPattern) {
         return { content: "Error: glob pattern is required", isError: true, status: "command_error" };
       }
+      const normalized = normalizeGlobSearch(requestedRoot, originalPattern);
+      if (normalized.error) {
+        return normalized.error;
+      }
+
+      const { root, pattern, normalizedPattern } = normalized;
 
       if (isSensitivePath(root)) {
         return {
@@ -50,7 +56,9 @@ export function createGlobTool(cwd: string): ToolRegistryEntry {
           metadata: {
             kind: "security",
             path: root,
-            pattern,
+            pattern: normalizedPattern,
+            originalPattern,
+            normalizedPattern,
             reason: "Sensitive credential storage is not searchable from general-purpose tasks.",
           },
         };
@@ -82,11 +90,13 @@ export function createGlobTool(cwd: string): ToolRegistryEntry {
           metadata: {
             kind: "search",
             path: root,
-            pattern,
+            pattern: normalizedPattern,
+            originalPattern,
+            normalizedPattern,
             matches: 0,
             truncated: false,
-            searchSignature: `glob:${root}:${pattern}`,
-            searchFamily: `glob:${pattern}`,
+            searchSignature: `glob:${root}:${normalizedPattern}`,
+            searchFamily: `glob:${normalizedPattern}`,
             paths: [],
           },
         };
@@ -98,16 +108,80 @@ export function createGlobTool(cwd: string): ToolRegistryEntry {
         metadata: {
           kind: "search",
           path: root,
-          pattern,
+          pattern: normalizedPattern,
+          originalPattern,
+          normalizedPattern,
           matches: matches.length,
           truncated: wasTruncated,
-          searchSignature: `glob:${root}:${pattern}`,
-          searchFamily: `glob:${pattern}`,
+          searchSignature: `glob:${root}:${normalizedPattern}`,
+          searchFamily: `glob:${normalizedPattern}`,
           paths: absoluteMatches,
         },
       };
     },
   };
+}
+
+type NormalizedGlobSearch =
+  | { root: string; pattern: string; normalizedPattern: string; error?: undefined }
+  | { error: ToolResult };
+
+function normalizeGlobSearch(requestedRoot: string, originalPattern: string): NormalizedGlobSearch {
+  const expandedPattern = expandGlobPatternHome(originalPattern);
+  const scan = picomatch.scan(expandedPattern);
+  const prefix = scan.prefix ?? "";
+
+  if (!isAbsolute(scan.base)) {
+    if (escapesSearchRoot(scan.base)) {
+      return {
+        error: {
+          content: `Error: Glob pattern must stay within the search path: ${originalPattern}`,
+          isError: true,
+          status: "command_error",
+          metadata: {
+            kind: "search",
+            path: requestedRoot,
+            pattern: originalPattern,
+            originalPattern,
+            normalizedPattern: originalPattern,
+            reason: "pattern_outside_search_path",
+          },
+        },
+      };
+    }
+    return { root: requestedRoot, pattern: originalPattern, normalizedPattern: originalPattern };
+  }
+
+  const absoluteBase = resolve(scan.base);
+  const patternRoot = scan.isGlob ? absoluteBase : dirname(absoluteBase);
+  const patternBody = scan.isGlob ? scan.glob : basename(absoluteBase);
+  const normalizedRoot = isWithinSearchRoot(requestedRoot, patternRoot) ? requestedRoot : patternRoot;
+  const relativeBase = toPosix(relative(normalizedRoot, patternRoot));
+  const normalizedBody = [relativeBase, patternBody].filter(Boolean).join("/");
+  const normalizedPattern = `${prefix}${normalizedBody}`;
+
+  return {
+    root: normalizedRoot,
+    pattern: normalizedPattern,
+    normalizedPattern,
+  };
+}
+
+function expandGlobPatternHome(pattern: string): string {
+  if (pattern.startsWith("!")) {
+    return `!${expandHomePath(pattern.slice(1))}`;
+  }
+  return expandHomePath(pattern);
+}
+
+function escapesSearchRoot(base: string): boolean {
+  const normalized = toPosix(base);
+  return normalized === ".." || normalized.startsWith("../");
+}
+
+function isWithinSearchRoot(root: string, target: string): boolean {
+  const rel = relative(root, target);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
 async function walk(
@@ -134,6 +208,9 @@ async function walk(
     }
 
     const absolute = resolve(dir, entry.name);
+    if (isSensitivePath(absolute)) {
+      continue;
+    }
     const rel = toPosix(relative(root, absolute));
     if (entry.isDirectory()) {
       await walk(root, absolute, matcher, files, truncated, abortSignal);
