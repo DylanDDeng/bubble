@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { reminderForMode } from "../prompt/reminders.js";
 import { buildSystemPrompt } from "../system-prompt.js";
+import { createEditTool } from "../tools/edit.js";
+import { createAllTools } from "../tools/index.js";
+import { buildToolPromptOptions } from "../tools/prompt-metadata.js";
 
 describe("system prompt", () => {
   it("includes provider-specific codex guidance and runtime context", () => {
@@ -56,6 +59,31 @@ describe("system prompt", () => {
     expect(prompt).toContain("- write: Create new files or intentionally rewrite complete files");
     expect(prompt).toContain("Each edits[].oldText is matched against the original file");
     expect(prompt).not.toContain("apply_patch");
+  });
+
+  it("includes edit guidance without nearby-merge or hard batching pressure", () => {
+    const prompt = buildSystemPrompt({
+      configuredProvider: "openai",
+      configuredModel: "gpt-5.4",
+      ...buildToolPromptOptions([createEditTool("/tmp/project")]),
+    });
+
+    expect(prompt).toContain("Make precise file edits with exact text replacement, including multiple disjoint edits in one call");
+    expect(prompt).toContain("each edits[].oldText must be copied verbatim from a fresh read");
+    expect(prompt).toContain("Use separate smaller edit calls after re-reading");
+    expect(prompt).toContain("merge only truly overlapping targets");
+    expect(prompt).not.toContain("nearby lines");
+    expect(prompt).not.toContain("Merge nearby changes");
+    expect(prompt).not.toContain("instead of multiple edit calls");
+    expect(prompt).not.toContain("apply_patch");
+  });
+
+  it("does not expose apply_patch as a callable tool", () => {
+    const toolNames = createAllTools("/tmp/project").map((tool) => tool.name);
+
+    expect(toolNames).toContain("edit");
+    expect(toolNames).toContain("write");
+    expect(toolNames).not.toContain("apply_patch");
   });
 
   it("keeps the system prompt identical across agent modes (cache-friendly)", () => {
