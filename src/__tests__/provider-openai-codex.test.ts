@@ -6,6 +6,7 @@ import {
   getOpenAICodexFallbackModels,
   isOpenAICodexBaseUrl,
   normalizeOpenAICodexUsage,
+  resetOpenAICodexTransportStateForTests,
   sortCodexModelDescriptors,
 } from "../provider-openai-codex.js";
 import type { OAuthCredentials } from "../oauth/types.js";
@@ -50,9 +51,53 @@ async function collectStream<T>(stream: AsyncIterable<T>): Promise<T[]> {
   return chunks;
 }
 
+type FakeWebSocketEvent = "open" | "message" | "error" | "close";
+
+class FakeWebSocket {
+  static instances: FakeWebSocket[] = [];
+  readonly listeners = new Map<FakeWebSocketEvent, Set<(event: any) => void>>();
+  readonly sent: string[] = [];
+  readonly url: string | URL;
+  readonly options: unknown;
+
+  constructor(url: string | URL, options?: unknown) {
+    this.url = url;
+    this.options = options;
+    FakeWebSocket.instances.push(this);
+    queueMicrotask(() => this.emit("open", {}));
+  }
+
+  addEventListener(type: FakeWebSocketEvent, listener: (event: any) => void) {
+    const listeners = this.listeners.get(type) ?? new Set();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  removeEventListener(type: FakeWebSocketEvent, listener: (event: any) => void) {
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  send(data: string) {
+    this.sent.push(data);
+  }
+
+  close() {
+    // Test doubles emit close explicitly when needed.
+  }
+
+  emit(type: FakeWebSocketEvent, event: any) {
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener(event);
+    }
+  }
+}
+
 describe("provider-openai-codex", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.useRealTimers();
+    FakeWebSocket.instances = [];
+    resetOpenAICodexTransportStateForTests();
   });
 
   it("recognizes the ChatGPT Codex backend base URL", () => {
@@ -155,9 +200,11 @@ describe("provider-openai-codex", () => {
       providerId: "openai-codex",
       model: "gpt-5.4",
     }));
-    expect(headers.get("session_id")).toBeTruthy();
-    expect(headers.get("session_id")).not.toBe("session-secret");
-    expect(headers.get("session-id")).toBeNull();
+    expect(headers.get("session-id")).toBeTruthy();
+    expect(headers.get("session-id")).not.toBe("session-secret");
+    expect(headers.get("x-client-request-id")).toBeTruthy();
+    expect(headers.get("x-client-request-id")).not.toBe(headers.get("session-id"));
+    expect(headers.get("session_id")).toBeNull();
     expect(headers.get("x-session-affinity")).toBeNull();
     expect(chunks).toContainEqual({
       type: "usage",
@@ -303,13 +350,10 @@ describe("provider-openai-codex", () => {
     expect(chunks).toContainEqual({ type: "done" });
   });
 
-  it("retries a certificate verification failure before any SSE event is parsed", async () => {
+  it("does not retry certificate verification failures", async () => {
     const token = makeAccessToken("account-123");
     const fetchMock = vi.fn(async () => {
-      if (fetchMock.mock.calls.length === 1) {
-        throw new Error("unknown certificate verification error");
-      }
-      return makeSseResponse();
+      throw new Error("unknown certificate verification error");
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -319,10 +363,9 @@ describe("provider-openai-codex", () => {
       baseURL: "https://chatgpt.com/backend-api",
     });
 
-    const chunks = await collectStream(provider.streamChat([{ role: "user", content: "hi" }], { model: "gpt-5.5" }));
-
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(chunks).toContainEqual({ type: "done" });
+    await expect(collectStream(provider.streamChat([{ role: "user", content: "hi" }], { model: "gpt-5.5" })))
+      .rejects.toThrow(/TLS certificate verification failed/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("retries when the SSE body errors before a parsed event", async () => {
@@ -399,8 +442,89 @@ describe("provider-openai-codex", () => {
     await expect(collectStream(provider.streamChat(
       [{ role: "user", content: "hi" }],
       { model: "gpt-5.5", abortSignal: controller.signal },
-    ))).rejects.toThrow(/socket connection/i);
+    ))).rejects.toThrow(/Aborted/);
+    expect(fetchMock).toHaveBeenCalledTimes(0);
+  });
+
+  it("falls back from WebSocket to SSE before the first response event and keeps the session on SSE", async () => {
+    const token = makeAccessToken("account-123");
+    class AckThenCloseWebSocket extends FakeWebSocket {
+      override send(data: string) {
+        super.send(data);
+        queueMicrotask(() => {
+          this.emit("message", { data: JSON.stringify({ type: "session.ack" }) });
+          this.emit("close", { code: 1006, reason: "early close" });
+        });
+      }
+    }
+    vi.stubGlobal("WebSocket", AckThenCloseWebSocket);
+    const fetchMock = vi.fn(async () => makeSseResponse());
+
+    const provider = createOpenAICodexProvider({
+      providerId: "openai-codex",
+      apiKey: token,
+      baseURL: "https://chatgpt.com/backend-api",
+      fetch: fetchMock,
+      transport: "auto",
+    });
+
+    const first = await collectStream(provider.streamChat([{ role: "user", content: "hi" }], { model: "gpt-5.5" }));
+    const second = await collectStream(provider.streamChat([{ role: "user", content: "again" }], { model: "gpt-5.5" }));
+
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(first).toContainEqual({ type: "done" });
+    expect(second).toContainEqual({ type: "done" });
+  });
+
+  it("does not fall back from WebSocket after a response event has started", async () => {
+    const token = makeAccessToken("account-123");
+    class ResponseThenCloseWebSocket extends FakeWebSocket {
+      override send(data: string) {
+        super.send(data);
+        queueMicrotask(() => {
+          this.emit("message", { data: JSON.stringify({ type: "response.output_text.delta", delta: "started" }) });
+          this.emit("close", { code: 1006, reason: "after response" });
+        });
+      }
+    }
+    vi.stubGlobal("WebSocket", ResponseThenCloseWebSocket);
+    const fetchMock = vi.fn(async () => makeSseResponse());
+
+    const provider = createOpenAICodexProvider({
+      providerId: "openai-codex",
+      apiKey: token,
+      baseURL: "https://chatgpt.com/backend-api",
+      fetch: fetchMock,
+      transport: "auto",
+    });
+
+    await expect(collectStream(provider.streamChat([{ role: "user", content: "hi" }], { model: "gpt-5.5" })))
+      .rejects.toThrow(/WebSocket closed/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("falls back from WebSocket to SSE on first response event timeout", async () => {
+    vi.useFakeTimers();
+    const token = makeAccessToken("account-123");
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const fetchMock = vi.fn(async () => makeSseResponse());
+
+    const provider = createOpenAICodexProvider({
+      providerId: "openai-codex",
+      apiKey: token,
+      baseURL: "https://chatgpt.com/backend-api",
+      fetch: fetchMock,
+      transport: "auto",
+    });
+
+    const streamPromise = collectStream(provider.streamChat([{ role: "user", content: "hi" }], { model: "gpt-5.5" }));
+    await vi.advanceTimersByTimeAsync(10_000);
+    const chunks = await streamPromise;
+
+    expect(FakeWebSocket.instances).toHaveLength(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(chunks).toContainEqual({ type: "done" });
   });
 
   it("sorts models by family version desc, floating new families above catalog entries", () => {

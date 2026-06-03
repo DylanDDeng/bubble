@@ -302,6 +302,120 @@ function parseKeyArgs(args: string, ctx: Parameters<SlashCommand["handler"]>[1])
   return { provider: ctx.registry.getDefault(), apiKey: trimmed };
 }
 
+function parseLoginArgs(args: string): {
+  providerId: string;
+  mode: "browser" | "device" | "manual";
+  authorizationInput?: string;
+  codeVerifier?: string;
+  redirectUri?: string;
+  callbackHost?: string;
+  callbackBindHost?: string;
+  callbackPort?: number;
+  error?: string;
+} {
+  const tokens = args.trim().split(/\s+/).filter(Boolean);
+  let providerId = "openai";
+  let mode: "browser" | "device" | "manual" = "browser";
+  let authorizationInput: string | undefined;
+  let codeVerifier: string | undefined;
+  let redirectUri: string | undefined;
+  let callbackHost: string | undefined;
+  let callbackBindHost: string | undefined;
+  let callbackPort: number | undefined;
+
+  let index = 0;
+  if (tokens[0] && !tokens[0].startsWith("--")) {
+    providerId = tokens[0];
+    index = 1;
+  }
+
+  const readValue = (flag: string) => {
+    const value = tokens[++index];
+    if (!value) {
+      return { error: `Missing value for ${flag}.` };
+    }
+    return { value };
+  };
+
+  for (; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token === "--browser") {
+      mode = "browser";
+      continue;
+    }
+    if (token === "--device" || token === "--device-code") {
+      mode = "device";
+      continue;
+    }
+    if (token === "--manual") {
+      mode = "manual";
+      continue;
+    }
+    if (token === "--code" || token === "--authorization-code" || token === "--redirect-url") {
+      const parsed = readValue(token);
+      if (parsed.error) return { providerId, mode, error: parsed.error };
+      authorizationInput = parsed.value;
+      mode = "manual";
+      continue;
+    }
+    if (token === "--code-verifier") {
+      const parsed = readValue(token);
+      if (parsed.error) return { providerId, mode, error: parsed.error };
+      codeVerifier = parsed.value;
+      mode = "manual";
+      continue;
+    }
+    if (token === "--redirect-uri") {
+      const parsed = readValue(token);
+      if (parsed.error) return { providerId, mode, error: parsed.error };
+      redirectUri = parsed.value;
+      continue;
+    }
+    if (token === "--callback-host") {
+      const parsed = readValue(token);
+      if (parsed.error) return { providerId, mode, error: parsed.error };
+      callbackHost = parsed.value;
+      continue;
+    }
+    if (token === "--bind-host" || token === "--callback-bind-host") {
+      const parsed = readValue(token);
+      if (parsed.error) return { providerId, mode, error: parsed.error };
+      callbackBindHost = parsed.value;
+      continue;
+    }
+    if (token === "--callback-port") {
+      const parsed = readValue(token);
+      if (parsed.error) return { providerId, mode, error: parsed.error };
+      const port = Number(parsed.value);
+      if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+        return { providerId, mode, error: `Invalid callback port "${parsed.value}".` };
+      }
+      callbackPort = port;
+      continue;
+    }
+    return { providerId, mode, error: `Unexpected login argument "${token}".` };
+  }
+
+  if (mode === "manual" && (!authorizationInput || !codeVerifier)) {
+    return {
+      providerId,
+      mode,
+      error: "Manual login requires --code <authorization-code-or-redirect-url> and --code-verifier <verifier>.",
+    };
+  }
+
+  return {
+    providerId,
+    mode,
+    authorizationInput,
+    codeVerifier,
+    redirectUri,
+    callbackHost,
+    callbackBindHost,
+    callbackPort,
+  };
+}
+
 const builtinSlashCommandEntries: SlashCommand[] = [
   {
     name: "skills",
@@ -484,9 +598,11 @@ const builtinSlashCommandEntries: SlashCommand[] = [
   },
   {
     name: "login",
-    description: "OAuth login for supported providers. Usage: /login [openai]",
+    description: "OAuth login for supported providers. Usage: /login [openai] [--device|--browser] [--callback-host <host>]",
     async handler(args, ctx) {
-      const providerId = args?.trim() || "openai";
+      const parsedArgs = parseLoginArgs(args ?? "");
+      if (parsedArgs.error) return parsedArgs.error;
+      const providerId = parsedArgs.providerId;
       if (!providerId) {
         ctx.openPicker("login");
         return;
@@ -497,6 +613,18 @@ const builtinSlashCommandEntries: SlashCommand[] = [
       const { loginOpenAICodex } = await import("../oauth/openai-codex.js");
       const tokens = await loginOpenAICodex({
         onStatus: (msg) => ctx.addMessage("assistant", msg),
+        onDeviceCode: (info) => ctx.addMessage(
+          "assistant",
+          `Open ${info.verificationUri} and enter code ${info.userCode}. The code expires in ${Math.round(info.expiresInSeconds / 60)} minutes.`,
+        ),
+      }, {
+        mode: parsedArgs.mode,
+        authorizationInput: parsedArgs.authorizationInput,
+        codeVerifier: parsedArgs.codeVerifier,
+        redirectUri: parsedArgs.redirectUri,
+        callbackHost: parsedArgs.callbackHost,
+        callbackBindHost: parsedArgs.callbackBindHost,
+        callbackPort: parsedArgs.callbackPort,
       });
       ctx.registry.getAuthStorage().set(providerId, {
         type: "oauth",

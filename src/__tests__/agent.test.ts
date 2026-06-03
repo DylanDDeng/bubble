@@ -92,6 +92,88 @@ describe("Agent", () => {
     expect(agent.messages).toHaveLength(2); // user + assistant (no system prompt in this test)
   });
 
+  it("auto-retries transient provider failures before any output", async () => {
+    let calls = 0;
+    const provider: Provider = {
+      async *streamChat() {
+        calls += 1;
+        if (calls === 1) {
+          throw new Error("fetch failed: UND_ERR_SOCKET");
+        }
+        yield { type: "text", content: "Recovered." };
+        yield { type: "done" };
+      },
+      async complete() {
+        return "mock completion";
+      },
+    };
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [] });
+
+    const events = await collectEvents(agent, "Hi", "/tmp");
+
+    expect(calls).toBe(2);
+    expect(events).toContainEqual(expect.objectContaining({ type: "auto_retry_start", attempt: 1 }));
+    expect(events).toContainEqual(expect.objectContaining({ type: "auto_retry_end", attempt: 1, success: true }));
+    expect(agent.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+    expect(agent.messages.some((message) => message.role === "assistant" && (message as any).error)).toBe(false);
+  });
+
+  it("does not auto-retry TLS certificate failures", async () => {
+    let calls = 0;
+    const provider: Provider = {
+      async *streamChat() {
+        calls += 1;
+        throw new Error("unknown certificate verification error");
+      },
+      async complete() {
+        return "mock completion";
+      },
+    };
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [] });
+    const events: AgentEvent[] = [];
+
+    await expect(async () => {
+      for await (const event of agent.run("Hi", "/tmp")) {
+        events.push(event);
+      }
+    }).rejects.toThrow(/certificate verification/i);
+
+    expect(calls).toBe(1);
+    expect(events.some((event) => event.type === "auto_retry_start")).toBe(false);
+    expect(agent.messages.map((message) => message.role)).toEqual(["user"]);
+  });
+
+  it("auto-retries a transient continuation failure after tool results without appending an interrupted boundary", async () => {
+    let calls = 0;
+    const provider: Provider = {
+      async *streamChat() {
+        calls += 1;
+        if (calls === 1) {
+          yield { type: "tool_call", id: "tc_1", name: "dummy", arguments: '{"value":"42"}', isStart: true, isEnd: true };
+          yield { type: "done" };
+          return;
+        }
+        if (calls === 2) {
+          throw new Error("The socket connection was closed unexpectedly.");
+        }
+        yield { type: "text", content: "Final answer." };
+        yield { type: "done" };
+      },
+      async complete() {
+        return "mock completion";
+      },
+    };
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [dummyTool] });
+
+    const events = await collectEvents(agent, "Call dummy", "/tmp");
+
+    expect(calls).toBe(3);
+    expect(events).toContainEqual(expect.objectContaining({ type: "auto_retry_start", attempt: 1 }));
+    expect(events).toContainEqual(expect.objectContaining({ type: "auto_retry_end", attempt: 1, success: true }));
+    expect(agent.messages.map((message) => message.role)).toEqual(["user", "assistant", "tool", "assistant"]);
+    expect(agent.messages.filter((message) => message.role === "assistant" && (message as any).error)).toHaveLength(0);
+  });
+
   it("sanitizes internal runtime reminders from streamed reasoning before events and history", async () => {
     const provider = createMockProvider([
       [
@@ -1647,7 +1729,7 @@ describe("Agent", () => {
           yield { type: "done" };
           return;
         }
-        throw new Error("The socket connection was closed unexpectedly.");
+        throw new Error("401 unauthorized");
       },
       async complete() {
         return "";
@@ -1660,7 +1742,7 @@ describe("Agent", () => {
       tools: [dummyTool],
     });
 
-    await expect(collectEvents(agent, "Call dummy", "/tmp")).rejects.toThrow(/socket connection/i);
+    await expect(collectEvents(agent, "Call dummy", "/tmp")).rejects.toThrow(/401/);
 
     expect(callCount).toBe(2);
     expect(agent.messages.map((message) => message.role)).toEqual(["user", "assistant", "tool", "assistant"]);
