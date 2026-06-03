@@ -1,6 +1,7 @@
 import type { AssistantProviderMetadata } from "../types.js";
 
 const INTERNAL_TAG_PREFIX = "<bubble_internal_";
+const MEMORY_CITATION_TAG = "<oai-mem-citation";
 const INTERNAL_TAG_NAMES = ["reminder", "context"] as const;
 const LEGACY_RUNTIME_MARKERS = [
   "Runtime reminder:\n",
@@ -8,6 +9,7 @@ const LEGACY_RUNTIME_MARKERS = [
 ];
 const STREAM_MARKERS = [
   INTERNAL_TAG_PREFIX,
+  MEMORY_CITATION_TAG,
   ...LEGACY_RUNTIME_MARKERS,
 ];
 
@@ -140,6 +142,10 @@ function consumeInternalBlockAtStart(text: string, final: boolean): { consume?: 
     return consumeStructuredInternalBlock(text, final);
   }
 
+  if (text.startsWith(MEMORY_CITATION_TAG)) {
+    return consumeMemoryCitationBlock(text, final);
+  }
+
   if (text.startsWith("Runtime reminder:\n")) {
     return consumeLegacyRuntimeReminder(text, final);
   }
@@ -149,6 +155,23 @@ function consumeInternalBlockAtStart(text: string, final: boolean): { consume?: 
   }
 
   return undefined;
+}
+
+function consumeMemoryCitationBlock(text: string, final: boolean): { consume?: number; hold?: boolean } | undefined {
+  const openMatch = text.match(/^<oai-mem-citation\b[^>]*>/);
+  if (!openMatch) {
+    return isPrefixOf(MEMORY_CITATION_TAG, text)
+      ? final ? { consume: text.length } : { hold: true }
+      : undefined;
+  }
+
+  const closeTag = "</oai-mem-citation>";
+  const closeIndex = text.indexOf(closeTag, openMatch[0].length);
+  if (closeIndex < 0) {
+    return final ? { consume: text.length } : { hold: true };
+  }
+
+  return { consume: consumeTrailingLineBreaks(text, closeIndex + closeTag.length) };
 }
 
 function consumeStructuredInternalBlock(text: string, final: boolean): { consume?: number; hold?: boolean } | undefined {

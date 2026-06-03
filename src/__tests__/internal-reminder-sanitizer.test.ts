@@ -17,6 +17,31 @@ describe("internal reminder sanitizer", () => {
     expect(sanitizeInternalReminderBlocks(input)).toBe("before  after");
   });
 
+  it("removes memory citation blocks", () => {
+    const input = [
+      "before\n",
+      "<oai-mem-citation>\n",
+      "<citation_entries>\n",
+      "/Users/example/.bubble/memories/MEMORY.md:1-2|note=[used memory]\n",
+      "</citation_entries>\n",
+      "<rollout_ids>\n",
+      "</rollout_ids>\n",
+      "</oai-mem-citation>\n",
+      "after",
+    ].join("");
+
+    expect(sanitizeInternalReminderBlocks(input)).toBe("before\nafter");
+  });
+
+  it("holds split memory citation blocks while streaming", () => {
+    const sanitizer = createStreamingInternalReminderSanitizer();
+
+    expect(sanitizer.push("done\n<oai-mem-")).toBe("done\n");
+    expect(sanitizer.push("citation>\n/Users/example/file.md\n")).toBe("");
+    expect(sanitizer.push("</oai-mem-citation>\nnext")).toBe("next");
+    expect(sanitizer.flush()).toBe("");
+  });
+
   it("holds split structured tag blocks while streaming", () => {
     const sanitizer = createStreamingInternalReminderSanitizer();
 

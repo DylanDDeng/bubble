@@ -36,7 +36,8 @@ describe("memory", () => {
     expect(prompt).toContain("## Persistent Memory");
     expect(prompt).toContain("memory_summary.md");
     expect(prompt).toContain("This repo uses React Ink.");
-    expect(prompt).toContain("<oai-mem-citation>");
+    expect(prompt).toContain("Use memory quietly");
+    expect(prompt).not.toContain("cite the memory files");
   });
 
   it("runs phase 1 over historical session rollouts and stores DB-backed stage outputs", async () => {
