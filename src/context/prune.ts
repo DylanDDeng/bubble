@@ -1,10 +1,12 @@
-import type { AssistantMessage, Message, ToolCall, ToolMessage } from "../types.js";
+import type { Message, ToolMessage } from "../types.js";
 
 const PRUNEABLE_TOOLS = new Set([
   "read", "bash", "grep", "web_search", "web_fetch", "edit", "write", "glob",
 ]);
 const TOOL_RESULT_KEEP_COUNT = 2;
 const MIN_PRUNE_LENGTH = 240;
+const CACHE_STABLE_PROJECTION_KEY = "cacheStableProjection";
+const CACHE_STABLE_FULL_PROJECTION = "full";
 
 export function pruneMessages<T extends Message>(messages: T[]): T[] {
   const toolNameByCallId = new Map<string, string>();
@@ -23,6 +25,10 @@ export function pruneMessages<T extends Message>(messages: T[]): T[] {
     }
 
     if (message.role !== "tool") {
+      continue;
+    }
+
+    if (isCacheStableFullToolResult(message)) {
       continue;
     }
 
@@ -63,6 +69,29 @@ export function pruneMessages<T extends Message>(messages: T[]): T[] {
   });
 }
 
+export function markStableCurrentToolResultsForCache(messages: Message[]): void {
+  const protectedToolCallIds = collectProtectedToolCallIds(messages);
+  if (protectedToolCallIds.size === 0) return;
+
+  const toolNameByCallId = new Map<string, string>();
+  for (const message of messages) {
+    if (message.role !== "assistant" || !message.toolCalls) continue;
+    for (const toolCall of message.toolCalls) {
+      toolNameByCallId.set(toolCall.id, toolCall.name);
+    }
+  }
+
+  for (const message of messages) {
+    if (message.role !== "tool" || !protectedToolCallIds.has(message.toolCallId)) continue;
+    const toolName = toolNameByCallId.get(message.toolCallId);
+    if (!toolName || !shouldPruneToolResult(toolName, message.content)) continue;
+    message.metadata = {
+      ...message.metadata,
+      [CACHE_STABLE_PROJECTION_KEY]: CACHE_STABLE_FULL_PROJECTION,
+    };
+  }
+}
+
 function shouldPruneToolResult(toolName: string, content: string): boolean {
   if (!PRUNEABLE_TOOLS.has(toolName)) {
     return false;
@@ -81,6 +110,10 @@ function shouldPruneToolResult(toolName: string, content: string): boolean {
 
 function summarizePrunedToolResult(toolName: string, content: string): string {
   return `[${toolName} output omitted to control context size; original length ${content.length} chars]`;
+}
+
+function isCacheStableFullToolResult(message: ToolMessage): boolean {
+  return message.metadata?.[CACHE_STABLE_PROJECTION_KEY] === CACHE_STABLE_FULL_PROJECTION;
 }
 
 /**

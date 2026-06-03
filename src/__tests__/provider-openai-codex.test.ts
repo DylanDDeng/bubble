@@ -9,6 +9,7 @@ import {
   sortCodexModelDescriptors,
 } from "../provider-openai-codex.js";
 import type { OAuthCredentials } from "../oauth/types.js";
+import type { ToolDefinition } from "../types.js";
 
 function encodePayload(payload: object): string {
   return Buffer.from(JSON.stringify(payload), "utf-8").toString("base64url");
@@ -170,6 +171,41 @@ describe("provider-openai-codex", () => {
         totalTokens: 110,
       },
     });
+  });
+
+  it("preserves Codex tools while disabling tool calls", async () => {
+    const token = makeAccessToken("account-123");
+    const requestInits: RequestInit[] = [];
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestInits.push(init ?? {});
+      return makeSseResponse();
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const readTool: ToolDefinition = {
+      name: "read",
+      description: "Read a file",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+      },
+    };
+    const provider = createOpenAICodexProvider({
+      providerId: "openai-codex",
+      apiKey: token,
+      baseURL: "https://chatgpt.com/backend-api",
+    });
+
+    await collectStream(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "gpt-5.4",
+      tools: [readTool],
+      toolChoice: "none",
+    }));
+
+    const body = JSON.parse(String(requestInits[0].body));
+    expect(body.tools?.map((tool: any) => tool.name)).toEqual(["read"]);
+    expect(body.tool_choice).toBe("none");
   });
 
   it("refreshes OAuth credentials before Codex requests and deduplicates concurrent refreshes", async () => {

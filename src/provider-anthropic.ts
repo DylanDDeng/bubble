@@ -1,8 +1,19 @@
 import { getAvailableThinkingLevels, normalizeThinkingLevel } from "./provider-transform.js";
-import type { ContentPart, Provider, ProviderMessage, ProviderRawContentBlock, StreamChunk, ThinkingLevel, ToolDefinition, TokenUsage } from "./types.js";
+import type { ContentPart, Provider, ProviderMessage, ProviderRawContentBlock, StreamChunk, ThinkingLevel, ToolChoiceMode, ToolDefinition, TokenUsage } from "./types.js";
 
 const ANTHROPIC_VERSION = "2023-06-01";
 const DEFAULT_MAX_TOKENS = 8192;
+const ANTHROPIC_PROMPT_CACHE_CONTROL = { type: "ephemeral" } as const;
+const MINIMAX_PROMPT_CACHE_MODELS = new Set([
+  "minimax-m2.7",
+  "minimax-m2.7-highspeed",
+  "minimax-m2.5",
+  "minimax-m2.5-highspeed",
+  "minimax-m2.1",
+  "minimax-m2.1-highspeed",
+  "minimax-m2",
+  "m2-her",
+]);
 
 export interface AnthropicProviderOptions {
   providerId?: string;
@@ -15,12 +26,20 @@ interface AnthropicRequest {
   model: string;
   max_tokens: number;
   messages: AnthropicMessage[];
-  system?: string;
+  system?: string | AnthropicSystemBlock[];
   tools?: AnthropicTool[];
-  tool_choice?: { type: "auto" | "any" };
+  tool_choice?: { type: "auto" | "any" | "none" };
   stream?: boolean;
   temperature?: number;
   thinking?: { type: "adaptive" };
+}
+
+type AnthropicCacheControl = typeof ANTHROPIC_PROMPT_CACHE_CONTROL;
+
+interface AnthropicSystemBlock {
+  type: "text";
+  text: string;
+  cache_control?: AnthropicCacheControl;
 }
 
 type AnthropicContentBlock =
@@ -40,6 +59,7 @@ interface AnthropicTool {
   name: string;
   description: string;
   input_schema: ToolDefinition["parameters"];
+  cache_control?: AnthropicCacheControl;
 }
 
 interface AnthropicStreamBlockState {
@@ -58,11 +78,12 @@ interface AnthropicStreamBlockState {
 export function createAnthropicMessagesProvider(options: AnthropicProviderOptions): Provider {
   async function* streamChat(
     messages: ProviderMessage[],
-    chatOptions: { model: string; tools?: ToolDefinition[]; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal },
+    chatOptions: { model: string; tools?: ToolDefinition[]; toolChoice?: ToolChoiceMode; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal },
   ): AsyncIterable<StreamChunk> {
     const body = buildAnthropicRequest(options, messages, {
       model: chatOptions.model,
       tools: chatOptions.tools,
+      toolChoice: chatOptions.toolChoice,
       temperature: chatOptions.temperature,
       thinkingLevel: chatOptions.thinkingLevel,
       stream: true,
@@ -111,25 +132,33 @@ export function buildAnthropicRequest(
   chatOptions: {
     model: string;
     tools?: ToolDefinition[];
+    toolChoice?: ToolChoiceMode;
     temperature?: number;
     thinkingLevel?: ThinkingLevel;
     stream?: boolean;
   },
 ): AnthropicRequest {
   const { system, messages: anthropicMessages } = toAnthropicMessages(messages, shouldEchoThinking(options.providerId));
-  const tools = chatOptions.tools?.map((tool) => ({
+  const enablePromptCache = supportsAnthropicPromptCache(options, chatOptions.model);
+  const tools: AnthropicTool[] | undefined = chatOptions.tools?.map((tool) => ({
     name: tool.name,
     description: tool.description,
     input_schema: tool.parameters,
   }));
+  if (enablePromptCache && tools && tools.length > 0) {
+    tools[tools.length - 1] = {
+      ...tools[tools.length - 1],
+      cache_control: ANTHROPIC_PROMPT_CACHE_CONTROL,
+    };
+  }
 
   const body: AnthropicRequest = {
     model: chatOptions.model,
     max_tokens: DEFAULT_MAX_TOKENS,
-    system: system || undefined,
+    system: buildAnthropicSystem(system, enablePromptCache),
     messages: anthropicMessages,
     tools: tools && tools.length > 0 ? tools : undefined,
-    tool_choice: tools && tools.length > 0 ? { type: "auto" } : undefined,
+    tool_choice: tools && tools.length > 0 ? { type: chatOptions.toolChoice ?? "auto" } : undefined,
     stream: chatOptions.stream || undefined,
   };
   if (typeof chatOptions.temperature === "number") {
@@ -145,6 +174,23 @@ export function buildAnthropicRequest(
   }
 
   return body;
+}
+
+function buildAnthropicSystem(system: string, enablePromptCache: boolean): AnthropicRequest["system"] {
+  if (!system) return undefined;
+  if (!enablePromptCache) return system;
+  return [{ type: "text", text: system, cache_control: ANTHROPIC_PROMPT_CACHE_CONTROL }];
+}
+
+export function supportsAnthropicPromptCache(options: AnthropicProviderOptions, model: string): boolean {
+  const providerId = (options.providerId ?? "").toLowerCase();
+  if (providerId === "anthropic" || isOfficialAnthropicBaseUrl(options.baseURL)) {
+    return true;
+  }
+  if (!isMiniMaxAnthropicEndpoint(options)) {
+    return false;
+  }
+  return MINIMAX_PROMPT_CACHE_MODELS.has(model.toLowerCase());
 }
 
 export function toAnthropicMessages(
@@ -627,6 +673,7 @@ function mergeAnthropicUsage(current: TokenUsage | undefined, raw: unknown): Tok
   let promptTokens = current?.promptTokens ?? 0;
   let promptCacheHitTokens = current?.promptCacheHitTokens;
   let promptCacheMissTokens = current?.promptCacheMissTokens;
+  let cacheCreationTokens = current?.cacheCreationTokens;
   if (hasPromptUsage) {
     const inputTokens = rawInput ?? promptCacheMissTokens ?? promptTokens;
     const cacheRead = rawCacheRead ?? promptCacheHitTokens ?? 0;
@@ -634,6 +681,7 @@ function mergeAnthropicUsage(current: TokenUsage | undefined, raw: unknown): Tok
     promptTokens = inputTokens + cacheRead + cacheCreation;
     promptCacheHitTokens = cacheRead;
     promptCacheMissTokens = inputTokens + cacheCreation;
+    cacheCreationTokens = cacheCreation;
   }
 
   return {
@@ -641,6 +689,7 @@ function mergeAnthropicUsage(current: TokenUsage | undefined, raw: unknown): Tok
     completionTokens: outputTokens,
     promptCacheHitTokens,
     promptCacheMissTokens,
+    cacheCreationTokens,
     totalTokens: promptTokens + outputTokens,
   };
 }
@@ -651,6 +700,19 @@ function shouldEchoThinking(providerId?: string): boolean {
 
 function shouldSendBearerAuth(options: AnthropicProviderOptions): boolean {
   return !isOfficialAnthropicBaseUrl(options.baseURL) || options.providerId?.startsWith("minimax") === true;
+}
+
+function isMiniMaxAnthropicEndpoint(options: AnthropicProviderOptions): boolean {
+  const providerId = (options.providerId ?? "").toLowerCase();
+  if (providerId !== "minimax" && providerId !== "minimax-anthropic") return false;
+  try {
+    const url = new URL(options.baseURL);
+    const host = url.hostname.toLowerCase();
+    const path = url.pathname.toLowerCase();
+    return (host === "api.minimax.io" || host === "api.minimaxi.com") && path.includes("/anthropic");
+  } catch {
+    return false;
+  }
 }
 
 function isOfficialAnthropicBaseUrl(baseURL: string): boolean {

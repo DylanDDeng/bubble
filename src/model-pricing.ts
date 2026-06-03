@@ -66,7 +66,8 @@ export function calculateUsageCost(providerId: string, modelId: string, usage: T
 
   const hasCacheBreakdown =
     typeof usage.promptCacheHitTokens === "number"
-    || typeof usage.promptCacheMissTokens === "number";
+    || typeof usage.promptCacheMissTokens === "number"
+    || typeof usage.cacheCreationTokens === "number";
   const hit = usage.promptCacheHitTokens ?? 0;
   const miss = hasCacheBreakdown
     ? usage.promptCacheMissTokens ?? Math.max(0, usage.promptTokens - hit)

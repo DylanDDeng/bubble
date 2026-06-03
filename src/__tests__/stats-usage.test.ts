@@ -160,6 +160,7 @@ describe("usage stats", () => {
             promptTokens: 1_000_000,
             promptCacheHitTokens: 250_000,
             promptCacheMissTokens: 750_000,
+            cacheCreationTokens: 100_000,
             completionTokens: 500_000,
           },
         },
@@ -175,6 +176,8 @@ describe("usage stats", () => {
     expect(stats.models[0].costCurrency).toBe("CNY");
     expect(stats.trackedCostCurrency).toBe("CNY");
     expect(stats.trackedCosts?.CNY).toBeCloseTo(5.13);
+    expect(stats.models[0].cacheCreationTokens).toBe(100_000);
+    expect(text).toContain("Prompt cache 250k read · 100k create · 650k miss · 25% hit");
     expect(text).toContain("CNY 5.13");
   });
 

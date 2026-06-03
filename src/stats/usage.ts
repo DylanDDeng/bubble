@@ -31,6 +31,7 @@ export interface ModelUsageStats {
   completionTokens: number;
   promptCacheHitTokens: number;
   promptCacheMissTokens: number;
+  cacheCreationTokens: number;
   reasoningTokens: number;
   totalTokens: number;
   cost?: number;
@@ -295,6 +296,7 @@ function addModelUsage(
     completionTokens: 0,
     promptCacheHitTokens: 0,
     promptCacheMissTokens: 0,
+    cacheCreationTokens: 0,
     reasoningTokens: 0,
     totalTokens: 0,
   };
@@ -304,6 +306,7 @@ function addModelUsage(
   existing.completionTokens += usage.completionTokens;
   existing.promptCacheHitTokens += usage.promptCacheHitTokens ?? 0;
   existing.promptCacheMissTokens += usage.promptCacheMissTokens ?? 0;
+  existing.cacheCreationTokens += usage.cacheCreationTokens ?? 0;
   existing.reasoningTokens += usage.reasoningTokens ?? 0;
   existing.totalTokens += tokenTotal(usage);
 
@@ -406,6 +409,8 @@ function formatSummaryLines(stats: UsageStats, width: number): string[] {
   if (favorite) {
     lines.push(`  Favorite model ${truncate(favorite, Math.max(12, width - 17))}`);
   }
+  const cacheSummary = formatCacheSummary(stats.models);
+  if (cacheSummary) lines.push(`  ${cacheSummary}`);
   const trackedCostText = formatTrackedCosts(stats);
   if (trackedCostText) lines.push(`  Tracked cost ${trackedCostText}`);
   lines.push(`  Sessions scanned ${stats.sessionsScanned}`);
@@ -413,6 +418,17 @@ function formatSummaryLines(stats: UsageStats, width: number): string[] {
     lines.push(`  Sessions without token data ${stats.sessionsWithoutTokenData}`);
   }
   return lines;
+}
+
+function formatCacheSummary(models: ModelUsageStats[]): string | undefined {
+  const read = models.reduce((sum, model) => sum + model.promptCacheHitTokens, 0);
+  const create = models.reduce((sum, model) => sum + model.cacheCreationTokens, 0);
+  const missWithCreate = models.reduce((sum, model) => sum + model.promptCacheMissTokens, 0);
+  const miss = Math.max(0, missWithCreate - create);
+  const observed = read + create + miss;
+  if (observed === 0) return undefined;
+  const hitRate = Math.round((read / observed) * 100);
+  return `Prompt cache ${formatCompactNumber(read)} read · ${formatCompactNumber(create)} create · ${formatCompactNumber(miss)} miss · ${hitRate}% hit`;
 }
 
 function aggregateCosts(models: ModelUsageStats[]): Partial<Record<PricingCurrency, number>> | undefined {
@@ -475,14 +491,23 @@ function resolveEntryModel(
 function normalizeUsage(raw: unknown): TokenUsage | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const value = raw as Record<string, unknown>;
-  const promptTokens = numberValue(value.promptTokens) ?? numberValue(value.input_tokens);
+  const rawInputTokens = numberValue(value.input_tokens);
+  const cacheReadTokens = numberValue(value.promptCacheHitTokens) ?? numberValue(value.cache_read_input_tokens);
+  const cacheCreationTokens = numberValue(value.cacheCreationTokens) ?? numberValue(value.cache_creation_input_tokens);
+  const promptTokens = numberValue(value.promptTokens)
+    ?? (rawInputTokens !== undefined
+      ? rawInputTokens + (cacheReadTokens ?? 0) + (cacheCreationTokens ?? 0)
+      : undefined);
   const completionTokens = numberValue(value.completionTokens) ?? numberValue(value.output_tokens);
   if (promptTokens === undefined || completionTokens === undefined) return undefined;
   return {
     promptTokens,
     completionTokens,
-    promptCacheHitTokens: numberValue(value.promptCacheHitTokens) ?? numberValue(value.cache_read_input_tokens),
-    promptCacheMissTokens: numberValue(value.promptCacheMissTokens) ?? numberValue(value.cache_creation_input_tokens),
+    promptCacheHitTokens: cacheReadTokens,
+    promptCacheMissTokens: numberValue(value.promptCacheMissTokens)
+      ?? numberValue(value.cache_miss_input_tokens)
+      ?? (rawInputTokens !== undefined ? rawInputTokens + (cacheCreationTokens ?? 0) : undefined),
+    cacheCreationTokens,
     reasoningTokens: numberValue(value.reasoningTokens),
     totalTokens: numberValue(value.totalTokens) ?? numberValue(value.total_tokens),
   };
