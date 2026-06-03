@@ -438,7 +438,7 @@ export class Agent {
     let currentAssistantAppended = false;
 
     try {
-      while (true) {
+      turnLoop: while (true) {
       throwIfAborted(abortSignal);
       flushGovernorReminders();
       for (const update of this.drainSubagentToolUpdates()) yield emit(update);
@@ -461,22 +461,11 @@ export class Agent {
         this.injectSystemReminder(buildToolFreezeReminder(forceTextOnlyReason));
       }
 
-      const assistantMsg: Extract<Message, { role: "assistant" }> = {
-        role: "assistant",
-        content: "",
-        reasoning: "",
-        toolCalls: [],
-        model: this._model,
-        providerId: this.providerId,
-        modelId: this.apiModel,
-      };
-
-      const streamingToolCalls = new Map<string, { id: string; name: string; args: string; argsCorrupt?: boolean }>();
-      const textSanitizer = createStreamingInternalReminderSanitizer();
-      const reasoningSanitizer = createStreamingInternalReminderSanitizer();
+      let assistantMsg: Extract<Message, { role: "assistant" }> = this.createAssistantMessage();
+      let bufferedStreamingToolCallIds = new Set<string>();
       let turnUsage: TokenUsage | undefined;
       let assistantAppended = false;
-      currentAssistantMsg = assistantMsg;
+      currentAssistantMsg = undefined;
       currentAssistantAppended = false;
 
       let toolEntries = Array.from(this.tools.values())
@@ -513,222 +502,290 @@ export class Agent {
       // algorithmic fallback still kicks in.
       await this.maybeCompactWithLLM();
 
-      const bufferedStreamingToolCallIds = new Set<string>();
       const discoveryBarrier = hookState.discoveryBarrier;
-      try {
-        const projectedMessages = projectMessages(this.messages, {
-          mode: "budgeted",
-          providerId: this.providerId,
-          modelId: this.apiModel,
-          usageAnchorTokens: this.lastInputTokens ?? undefined,
-          anchorMessageCount: this.lastAnchorMessageCount ?? undefined,
-        });
-        const providerStartedAt = Date.now();
+      let providerAutoRetryAttempt = 0;
+      let pendingAutoRetryAttempt: number | undefined;
+      providerAttemptLoop: while (true) {
+        const attemptAssistantMsg = this.createAssistantMessage();
+        const attemptStreamingToolCalls = new Map<string, { id: string; name: string; args: string; argsCorrupt?: boolean }>();
+        const attemptBufferedStreamingToolCallIds = new Set<string>();
+        const textSanitizer = createStreamingInternalReminderSanitizer();
+        const reasoningSanitizer = createStreamingInternalReminderSanitizer();
+        let attemptTurnUsage: TokenUsage | undefined;
         let streamTextChars = 0;
         let streamReasoningChars = 0;
         let streamToolCallDeltas = 0;
-        traceEvent("provider_stream_start", {
-          residentMessageCount: this.messages.length,
-          projectedMessageCount: projectedMessages.length,
-          toolCount: toolDefinitions.length,
-          thinkingLevel: this.thinkingLevel,
-          mode: this._mode,
-          requestFingerprint: buildProviderRequestFingerprint(projectedMessages, toolDefinitions, this.providerId),
-        }, traceContext);
-        const stream = this.provider.streamChat(projectedMessages, {
-          model: this.apiModel,
-          tools: toolDefinitions,
-          temperature: this.temperature,
-          thinkingLevel: this.thinkingLevel,
-          abortSignal,
-        });
+        currentAssistantMsg = attemptAssistantMsg;
+        currentAssistantAppended = false;
 
-        for await (const chunk of stream) {
-          throwIfAborted(abortSignal);
-          switch (chunk.type) {
-            case "text":
-              {
-                const sanitizedDelta = textSanitizer.push(chunk.content);
-                if (sanitizedDelta) {
-                  assistantMsg.content += sanitizedDelta;
-                  streamTextChars += sanitizedDelta.length;
-                  yield emit({ type: "text_delta", content: sanitizedDelta });
-                }
-              }
-              break;
-            case "reasoning_delta":
-              {
-                const sanitizedDelta = reasoningSanitizer.push(chunk.content);
-                if (sanitizedDelta) {
-                  debugReasoningStream({
-                    stage: "agent_receive",
-                    providerId: this._providerId,
-                    modelId: this.apiModel,
-                    turnStep: step,
-                    beforeLength: assistantMsg.reasoning?.length ?? 0,
-                    delta: summarizeDebugText(sanitizedDelta),
-                    afterLength: (assistantMsg.reasoning?.length ?? 0) + sanitizedDelta.length,
-                  });
-                  assistantMsg.reasoning = (assistantMsg.reasoning || "") + sanitizedDelta;
-                  streamReasoningChars += sanitizedDelta.length;
-                  yield emit({ type: "reasoning_delta", content: sanitizedDelta });
-                }
-              }
-              break;
+        try {
+          const projectedMessages = projectMessages(this.messages, {
+            mode: "budgeted",
+            providerId: this.providerId,
+            modelId: this.apiModel,
+            usageAnchorTokens: this.lastInputTokens ?? undefined,
+            anchorMessageCount: this.lastAnchorMessageCount ?? undefined,
+          });
+          const providerStartedAt = Date.now();
+          traceEvent("provider_stream_start", {
+            residentMessageCount: this.messages.length,
+            projectedMessageCount: projectedMessages.length,
+            toolCount: toolDefinitions.length,
+            thinkingLevel: this.thinkingLevel,
+            mode: this._mode,
+            requestFingerprint: buildProviderRequestFingerprint(projectedMessages, toolDefinitions, this.providerId),
+          }, traceContext);
+          const stream = this.provider.streamChat(projectedMessages, {
+            model: this.apiModel,
+            tools: toolDefinitions,
+            temperature: this.temperature,
+            thinkingLevel: this.thinkingLevel,
+            abortSignal,
+          });
 
-            case "provider_content_block":
-              appendProviderContentBlock(assistantMsg, chunk.provider, chunk.block);
-              break;
-
-            case "tool_call":
-              if (
-                discoveryBarrier?.isEnabled()
-                && (bufferedStreamingToolCallIds.has(chunk.id) || discoveryBarrier.shouldBufferStreamingToolCall(chunk.name))
-              ) {
-                bufferedStreamingToolCallIds.add(chunk.id);
-              }
-              if (chunk.isStart) {
-                streamingToolCalls.set(chunk.id, { id: chunk.id, name: chunk.name, args: "" });
-                if (!bufferedStreamingToolCallIds.has(chunk.id)) {
-                  yield emit({ type: "tool_call_start", id: chunk.id, name: chunk.name });
-                }
-              }
-              if (!streamingToolCalls.has(chunk.id)) {
-                streamingToolCalls.set(chunk.id, { id: chunk.id, name: chunk.name, args: "" });
-              }
-              const currentToolCall = streamingToolCalls.get(chunk.id);
-              if (currentToolCall) {
-                currentToolCall.name = chunk.name || currentToolCall.name;
-                currentToolCall.args += chunk.arguments;
-                if (chunk.argumentsFull !== undefined) {
-                  currentToolCall.args = chunk.argumentsFull;
-                }
-                if (chunk.argumentsCorrupt) {
-                  currentToolCall.argsCorrupt = true;
-                }
-                if (chunk.arguments) {
-                  streamToolCallDeltas += 1;
-                  if (!bufferedStreamingToolCallIds.has(chunk.id)) {
-                    yield emit({
-                      type: "tool_call_delta",
-                      id: currentToolCall.id,
-                      name: currentToolCall.name,
-                      argumentsDelta: chunk.arguments,
-                      arguments: currentToolCall.args,
-                    });
+          for await (const chunk of stream) {
+            throwIfAborted(abortSignal);
+            switch (chunk.type) {
+              case "text":
+                {
+                  const sanitizedDelta = textSanitizer.push(chunk.content);
+                  if (sanitizedDelta) {
+                    attemptAssistantMsg.content += sanitizedDelta;
+                    streamTextChars += sanitizedDelta.length;
+                    yield emit({ type: "text_delta", content: sanitizedDelta });
                   }
                 }
-              }
-              if (chunk.isEnd && currentToolCall) {
-                assistantMsg.toolCalls!.push({
-                  id: currentToolCall.id,
-                  name: currentToolCall.name,
-                  arguments: currentToolCall.args,
-                  ...(currentToolCall.argsCorrupt ? { argsCorrupt: true } : {}),
-                });
-                if (!bufferedStreamingToolCallIds.has(chunk.id)) {
-                  yield emit({
-                    type: "tool_call_end",
+                break;
+
+              case "reasoning_delta":
+                {
+                  const sanitizedDelta = reasoningSanitizer.push(chunk.content);
+                  if (sanitizedDelta) {
+                    debugReasoningStream({
+                      stage: "agent_receive",
+                      providerId: this._providerId,
+                      modelId: this.apiModel,
+                      turnStep: step,
+                      beforeLength: attemptAssistantMsg.reasoning?.length ?? 0,
+                      delta: summarizeDebugText(sanitizedDelta),
+                      afterLength: (attemptAssistantMsg.reasoning?.length ?? 0) + sanitizedDelta.length,
+                    });
+                    attemptAssistantMsg.reasoning = (attemptAssistantMsg.reasoning || "") + sanitizedDelta;
+                    streamReasoningChars += sanitizedDelta.length;
+                    yield emit({ type: "reasoning_delta", content: sanitizedDelta });
+                  }
+                }
+                break;
+
+              case "provider_content_block":
+                appendProviderContentBlock(attemptAssistantMsg, chunk.provider, chunk.block);
+                break;
+
+              case "tool_call":
+                if (
+                  discoveryBarrier?.isEnabled()
+                  && (attemptBufferedStreamingToolCallIds.has(chunk.id) || discoveryBarrier.shouldBufferStreamingToolCall(chunk.name))
+                ) {
+                  attemptBufferedStreamingToolCallIds.add(chunk.id);
+                }
+                if (chunk.isStart) {
+                  attemptStreamingToolCalls.set(chunk.id, { id: chunk.id, name: chunk.name, args: "" });
+                  if (!attemptBufferedStreamingToolCallIds.has(chunk.id)) {
+                    yield emit({ type: "tool_call_start", id: chunk.id, name: chunk.name });
+                  }
+                }
+                if (!attemptStreamingToolCalls.has(chunk.id)) {
+                  attemptStreamingToolCalls.set(chunk.id, { id: chunk.id, name: chunk.name, args: "" });
+                }
+                const currentToolCall = attemptStreamingToolCalls.get(chunk.id);
+                if (currentToolCall) {
+                  currentToolCall.name = chunk.name || currentToolCall.name;
+                  currentToolCall.args += chunk.arguments;
+                  if (chunk.argumentsFull !== undefined) {
+                    currentToolCall.args = chunk.argumentsFull;
+                  }
+                  if (chunk.argumentsCorrupt) {
+                    currentToolCall.argsCorrupt = true;
+                  }
+                  if (chunk.arguments) {
+                    streamToolCallDeltas += 1;
+                    if (!attemptBufferedStreamingToolCallIds.has(chunk.id)) {
+                      yield emit({
+                        type: "tool_call_delta",
+                        id: currentToolCall.id,
+                        name: currentToolCall.name,
+                        argumentsDelta: chunk.arguments,
+                        arguments: currentToolCall.args,
+                      });
+                    }
+                  }
+                }
+                if (chunk.isEnd && currentToolCall) {
+                  attemptAssistantMsg.toolCalls!.push({
                     id: currentToolCall.id,
                     name: currentToolCall.name,
                     arguments: currentToolCall.args,
+                    ...(currentToolCall.argsCorrupt ? { argsCorrupt: true } : {}),
                   });
+                  if (!attemptBufferedStreamingToolCallIds.has(chunk.id)) {
+                    yield emit({
+                      type: "tool_call_end",
+                      id: currentToolCall.id,
+                      name: currentToolCall.name,
+                      arguments: currentToolCall.args,
+                    });
+                  }
+                  attemptStreamingToolCalls.delete(chunk.id);
                 }
-                streamingToolCalls.delete(chunk.id);
-              }
-              break;
+                break;
 
-            case "usage":
-              turnUsage = chunk.usage;
-              assistantMsg.usage = chunk.usage;
-              this.budgetLedger?.recordUsage(chunk.usage, this.budgetSource);
-              this.lastInputTokens = chunk.usage.promptTokens;
-              this.lastAnchorMessageCount = this.messages.length;
-              if ((hookState as any).taskBudget) {
-                (hookState as any).taskBudget.spent += chunk.usage.promptTokens + chunk.usage.completionTokens;
-                if ((hookState as any).taskBudget.spent >= (hookState as any).taskBudget.total) {
-                  (hookState as any).forceTextOnlyReason = "The configured task budget for this agent has been exhausted.";
+              case "usage":
+                attemptTurnUsage = chunk.usage;
+                attemptAssistantMsg.usage = chunk.usage;
+                this.budgetLedger?.recordUsage(chunk.usage, this.budgetSource);
+                this.lastInputTokens = chunk.usage.promptTokens;
+                this.lastAnchorMessageCount = this.messages.length;
+                if ((hookState as any).taskBudget) {
+                  (hookState as any).taskBudget.spent += chunk.usage.promptTokens + chunk.usage.completionTokens;
+                  if ((hookState as any).taskBudget.spent >= (hookState as any).taskBudget.total) {
+                    (hookState as any).forceTextOnlyReason = "The configured task budget for this agent has been exhausted.";
+                  }
                 }
-              }
-              break;
-          }
-          for (const update of this.drainSubagentToolUpdates()) yield emit(update);
-        }
-        const flushedText = textSanitizer.flush();
-        if (flushedText) {
-          assistantMsg.content += flushedText;
-          streamTextChars += flushedText.length;
-          yield emit({ type: "text_delta", content: flushedText });
-        }
-
-        const flushedReasoning = reasoningSanitizer.flush();
-        if (flushedReasoning) {
-          debugReasoningStream({
-            stage: "agent_receive_flush",
-            providerId: this._providerId,
-            modelId: this.apiModel,
-            turnStep: step,
-            beforeLength: assistantMsg.reasoning?.length ?? 0,
-            delta: summarizeDebugText(flushedReasoning),
-            afterLength: (assistantMsg.reasoning?.length ?? 0) + flushedReasoning.length,
-          });
-          assistantMsg.reasoning = (assistantMsg.reasoning || "") + flushedReasoning;
-          streamReasoningChars += flushedReasoning.length;
-          yield emit({ type: "reasoning_delta", content: flushedReasoning });
-        }
-        traceEvent("provider_stream_end", {
-          elapsedMs: Date.now() - providerStartedAt,
-          textChars: streamTextChars,
-          reasoningChars: streamReasoningChars,
-          toolCallDeltas: streamToolCallDeltas,
-          toolCalls: assistantMsg.toolCalls?.length ?? 0,
-          usage: turnUsage,
-        }, traceContext);
-
-        throwIfAborted(abortSignal);
-        const assistantHasContent = assistantMsg.content.trim().length > 0;
-        const assistantHasToolCalls = !!assistantMsg.toolCalls && assistantMsg.toolCalls.length > 0;
-        if (!assistantHasContent && !assistantHasToolCalls) {
-          if (consecutiveEmptyAssistantRecoveries < MAX_EMPTY_ASSISTANT_RECOVERIES) {
-            consecutiveEmptyAssistantRecoveries += 1;
-            this.injectSystemReminder(EMPTY_ASSISTANT_RECOVERY_REMINDER);
-            yield emit({ type: "turn_end", usage: turnUsage, willContinue: true });
-            continue;
+                break;
+            }
+            for (const update of this.drainSubagentToolUpdates()) yield emit(update);
           }
 
-          assistantMsg.content = EMPTY_ASSISTANT_FALLBACK;
-          assistantMsg.reasoning = "";
-          yield emit({ type: "text_delta", content: assistantMsg.content });
-        }
+          const flushedText = textSanitizer.flush();
+          if (flushedText) {
+            attemptAssistantMsg.content += flushedText;
+            streamTextChars += flushedText.length;
+            yield emit({ type: "text_delta", content: flushedText });
+          }
 
-        this.appendMessage(assistantMsg);
-        assistantAppended = true;
-        currentAssistantAppended = true;
-      } catch (error) {
-        traceEvent("provider_stream_error", {
-          error: summarizeTraceError(error),
-        }, traceContext);
-        if (assistantAppended) {
-          throw error;
-        }
-        if (!isContextOverflowError(error)) {
-          if (!isAbortLikeError(error, abortSignal) && shouldAppendModelInterruptedBoundary(this.messages)) {
-            this.appendMessage(createModelInterruptedMessage(error, {
-              model: this._model,
-              providerId: this.providerId,
+          const flushedReasoning = reasoningSanitizer.flush();
+          if (flushedReasoning) {
+            debugReasoningStream({
+              stage: "agent_receive_flush",
+              providerId: this._providerId,
               modelId: this.apiModel,
-            }));
-            assistantAppended = true;
+              turnStep: step,
+              beforeLength: attemptAssistantMsg.reasoning?.length ?? 0,
+              delta: summarizeDebugText(flushedReasoning),
+              afterLength: (attemptAssistantMsg.reasoning?.length ?? 0) + flushedReasoning.length,
+            });
+            attemptAssistantMsg.reasoning = (attemptAssistantMsg.reasoning || "") + flushedReasoning;
+            streamReasoningChars += flushedReasoning.length;
+            yield emit({ type: "reasoning_delta", content: flushedReasoning });
           }
-          throw error;
+          traceEvent("provider_stream_end", {
+            elapsedMs: Date.now() - providerStartedAt,
+            textChars: streamTextChars,
+            reasoningChars: streamReasoningChars,
+            toolCallDeltas: streamToolCallDeltas,
+            toolCalls: attemptAssistantMsg.toolCalls?.length ?? 0,
+            usage: attemptTurnUsage,
+          }, traceContext);
+
+          throwIfAborted(abortSignal);
+          if (pendingAutoRetryAttempt !== undefined) {
+            yield emit({
+              type: "auto_retry_end",
+              success: true,
+              attempt: pendingAutoRetryAttempt,
+            });
+            pendingAutoRetryAttempt = undefined;
+          }
+          const assistantHasContent = attemptAssistantMsg.content.trim().length > 0;
+          const assistantHasToolCalls = !!attemptAssistantMsg.toolCalls && attemptAssistantMsg.toolCalls.length > 0;
+          if (!assistantHasContent && !assistantHasToolCalls) {
+            if (consecutiveEmptyAssistantRecoveries < MAX_EMPTY_ASSISTANT_RECOVERIES) {
+              consecutiveEmptyAssistantRecoveries += 1;
+              this.injectSystemReminder(EMPTY_ASSISTANT_RECOVERY_REMINDER);
+              yield emit({ type: "turn_end", usage: attemptTurnUsage, willContinue: true });
+              continue turnLoop;
+            }
+
+            attemptAssistantMsg.content = EMPTY_ASSISTANT_FALLBACK;
+            attemptAssistantMsg.reasoning = "";
+            yield emit({ type: "text_delta", content: attemptAssistantMsg.content });
+          }
+
+          assistantMsg = attemptAssistantMsg;
+          bufferedStreamingToolCallIds = attemptBufferedStreamingToolCallIds;
+          turnUsage = attemptTurnUsage;
+          this.appendMessage(assistantMsg);
+          assistantAppended = true;
+          currentAssistantMsg = assistantMsg;
+          currentAssistantAppended = true;
+          break providerAttemptLoop;
+        } catch (error) {
+          traceEvent("provider_stream_error", {
+            error: summarizeTraceError(error),
+          }, traceContext);
+          if (assistantAppended) {
+            throw error;
+          }
+          if (!isContextOverflowError(error)) {
+            const providerAttemptHadOutput = streamTextChars > 0
+              || streamReasoningChars > 0
+              || streamToolCallDeltas > 0
+              || attemptStreamingToolCalls.size > 0
+              || (attemptAssistantMsg.toolCalls?.length ?? 0) > 0
+              || attemptTurnUsage !== undefined;
+            if (shouldRetryProviderError({
+              error,
+              attempt: providerAutoRetryAttempt,
+              hadOutput: providerAttemptHadOutput,
+              signal: abortSignal,
+            })) {
+              providerAutoRetryAttempt += 1;
+              pendingAutoRetryAttempt = providerAutoRetryAttempt;
+              const delayMs = providerAutoRetryDelayMs(providerAutoRetryAttempt);
+              traceEvent("provider_auto_retry_start", {
+                attempt: providerAutoRetryAttempt,
+                maxAttempts: providerAutoRetryMaxAttempts(),
+                delayMs,
+                error: summarizeTraceError(error),
+                hadOutput: providerAttemptHadOutput,
+              }, traceContext);
+              yield emit({
+                type: "auto_retry_start",
+                attempt: providerAutoRetryAttempt,
+                maxAttempts: providerAutoRetryMaxAttempts(),
+                delayMs,
+                errorMessage: summarizeInterruptError(error),
+              });
+              await sleepBeforeProviderAutoRetry(delayMs, abortSignal);
+              continue providerAttemptLoop;
+            }
+            if (pendingAutoRetryAttempt !== undefined) {
+              yield emit({
+                type: "auto_retry_end",
+                success: false,
+                attempt: pendingAutoRetryAttempt,
+                finalError: summarizeInterruptError(error),
+              });
+              pendingAutoRetryAttempt = undefined;
+            }
+            if (!isAbortLikeError(error, abortSignal) && shouldAppendModelInterruptedBoundary(this.messages)) {
+              this.appendMessage(createModelInterruptedMessage(error, {
+                model: this._model,
+                providerId: this.providerId,
+                modelId: this.apiModel,
+              }));
+              assistantAppended = true;
+            }
+            throw error;
+          }
+          if (consecutiveOverflowRecoveries >= MAX_CONSECUTIVE_OVERFLOW_RECOVERIES) {
+            throw error;
+          }
+          const droppedMessages = await this.recoverFromOverflow(consecutiveOverflowRecoveries);
+          consecutiveOverflowRecoveries += 1;
+          yield emit({ type: "context_recovered", droppedMessages, reason: "overflow" });
+          continue turnLoop;
         }
-        if (consecutiveOverflowRecoveries >= MAX_CONSECUTIVE_OVERFLOW_RECOVERIES) {
-          throw error;
-        }
-        const droppedMessages = await this.recoverFromOverflow(consecutiveOverflowRecoveries);
-        consecutiveOverflowRecoveries += 1;
-        yield emit({ type: "context_recovered", droppedMessages, reason: "overflow" });
-        continue;
       }
 
       consecutiveOverflowRecoveries = 0;
@@ -1028,6 +1085,18 @@ export class Agent {
         messageCount: this.messages.length,
       }, traceContext);
     }
+  }
+
+  private createAssistantMessage(): Extract<Message, { role: "assistant" }> {
+    return {
+      role: "assistant",
+      content: "",
+      reasoning: "",
+      toolCalls: [],
+      model: this._model,
+      providerId: this.providerId,
+      modelId: this.apiModel,
+    };
   }
 
   private async recoverFromOverflow(attempt: number): Promise<number> {
@@ -2089,6 +2158,79 @@ function isAbortLikeError(error: unknown, signal?: AbortSignal): boolean {
 
 function isAbortError(error: unknown, signal?: AbortSignal): boolean {
   return isAbortLikeError(error, signal);
+}
+
+function shouldRetryProviderError(input: {
+  error: unknown;
+  attempt: number;
+  hadOutput: boolean;
+  signal?: AbortSignal;
+}): boolean {
+  if (input.signal?.aborted) return false;
+  if (input.hadOutput) return false;
+  if (input.attempt >= providerAutoRetryMaxAttempts()) return false;
+  const text = errorMessageChain(input.error).join("\n");
+  if (isNonRetryableProviderErrorText(text)) return false;
+  return isRetryableProviderErrorText(text);
+}
+
+function providerAutoRetryMaxAttempts(): number {
+  const raw = Number(process.env.BUBBLE_AGENT_AUTO_RETRY_MAX ?? 3);
+  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 3;
+}
+
+function providerAutoRetryDelayMs(attempt: number): number {
+  const defaultBase = process.env.NODE_ENV === "test" ? 1 : 2000;
+  const raw = Number(process.env.BUBBLE_AGENT_AUTO_RETRY_BASE_MS ?? defaultBase);
+  const base = Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : defaultBase;
+  return base * 2 ** Math.max(0, attempt - 1);
+}
+
+function isRetryableProviderErrorText(text: string): boolean {
+  return /overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|network_error|connection.?error|connection.?refused|connection.?lost|socket connection was closed unexpectedly|websocket.?closed|websocket.?error|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|stream ended before message_stop|http2 request did not get a response|timed? out|timeout|terminated|retry delay/i.test(text);
+}
+
+function isNonRetryableProviderErrorText(text: string): boolean {
+  return /\bAbortError\b|AgentAbortError|Request was aborted|cancelled by user|context_length_exceeded|context window|prompt too long|401|403|unauthori[sz]ed|forbidden|invalid auth|invalid api key|permission denied|quota|billing|insufficient_quota|usage limit|usage_limit|certificate|unable to verify|self[- ]signed|UNABLE_TO_|SELF_SIGNED_CERT|CERT_/i.test(text);
+}
+
+async function sleepBeforeProviderAutoRetry(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throwIfAborted(signal);
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", onAbort);
+      reject(signal?.reason instanceof Error ? signal.reason : new AgentAbortError("Retry cancelled."));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function errorMessageChain(error: unknown): string[] {
+  const messages: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; current && depth < 8; depth++) {
+    if (current instanceof Error) {
+      messages.push(current.name, current.message);
+      current = (current as Error & { cause?: unknown }).cause;
+      continue;
+    }
+    if (typeof current === "object") {
+      const record = current as Record<string, unknown>;
+      for (const key of ["name", "code", "message"]) {
+        if (typeof record[key] === "string") messages.push(record[key]);
+      }
+      current = record.cause;
+      continue;
+    }
+    messages.push(String(current));
+    break;
+  }
+  return messages;
 }
 
 function shouldAppendModelInterruptedBoundary(messages: Message[]): boolean {

@@ -3,7 +3,15 @@ import type { Provider, ProviderMessage, ReasoningEffort, StreamChunk, ThinkingL
 import type { OAuthCredentials } from "./oauth/types.js";
 import { listBuiltinModels } from "./model-catalog.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
-import { chatGptFetch, type ChatGptFetch } from "./network/chatgpt-transport.js";
+import {
+  chatGptFetch,
+  classifyChatGptNetworkError,
+  getChatGptProxyForUrl,
+  getChatGptNetworkDiagnostics,
+  hasChatGptProxyEnv,
+  type ChatGptFetch,
+} from "./network/chatgpt-transport.js";
+import { summarizeTraceError, traceEvent } from "./debug-trace.js";
 
 export interface CodexModelDescriptor {
   id: string;
@@ -18,9 +26,12 @@ export interface CodexModelDescriptor {
 
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const OPENAI_BETA_RESPONSES = "responses=experimental";
+const OPENAI_BETA_RESPONSES_WEBSOCKETS = "responses_websockets=2026-02-06";
 const TOKEN_REFRESH_GRACE_MS = 5 * 60 * 1000;
 const CODEX_TRANSPORT_MAX_RETRIES = 2;
 const CODEX_TRANSPORT_RETRY_BASE_DELAY_MS = 250;
+const CODEX_SSE_HEADER_TIMEOUT_MS = 10_000;
+const CODEX_WEBSOCKET_CONNECT_TIMEOUT_MS = 15_000;
 // OpenAI gates new codex models server-side by client_version (each model carries a
 // `minimal_client_version`). Track a recent real Codex CLI release; override via env
 // when OpenAI lifts the gate again before we cut a new release.
@@ -29,6 +40,8 @@ const MODEL_DISCOVERY_PATHS = [
   `/codex/models?client_version=${CODEX_CLIENT_VERSION}`,
   "/models",
 ];
+
+export type OpenAICodexTransport = "auto" | "sse" | "websocket";
 
 export function isOpenAICodexBaseUrl(baseURL: string): boolean {
   const normalized = baseURL.trim().replace(/\/+$/, "");
@@ -71,8 +84,9 @@ export function createOpenAICodexProvider(options: {
   promptCacheKey?: string;
   auth?: OpenAICodexAuthAdapter;
   fetch?: ChatGptFetch;
+  transport?: OpenAICodexTransport;
 }): Provider {
-  const sessionId = globalThis.crypto?.randomUUID?.() ?? `bubble_${Date.now()}`;
+  const sessionId = createCodexSessionId();
   const fetchImpl = options.fetch ?? chatGptFetch;
   let refreshPromise: Promise<OAuthCredentials> | undefined;
 
@@ -109,188 +123,178 @@ export function createOpenAICodexProvider(options: {
       chatOptions.model,
       chatOptions.thinkingLevel ?? options.thinkingLevel ?? "off",
     );
-    const body = JSON.stringify(
-      buildRequestBody(messages, {
-        model: chatOptions.model,
-        tools: chatOptions.tools,
-        reasoningEffort: requestConfig.reasoningEffort,
-        sessionId,
-        providerId: options.providerId,
-        promptCacheKey: options.promptCacheKey,
-      })
-    );
+    const requestBody = buildRequestBody(messages, {
+      model: chatOptions.model,
+      tools: chatOptions.tools,
+      reasoningEffort: requestConfig.reasoningEffort,
+      sessionId,
+      providerId: options.providerId,
+      promptCacheKey: options.promptCacheKey,
+    });
+    const body = JSON.stringify(requestBody);
+    const requestId = createCodexRequestId();
+    const requestedTransport = resolveOpenAICodexTransport(options.transport);
+    let activeTransport = initialCodexTransport(requestedTransport, sessionId);
+    let sseAttempt = 0;
 
-    const sendRequest = async (forceRefresh = false) => {
-      const { accessToken, accountId } = await resolveRequestAuth(forceRefresh);
-      return fetchImpl(resolveCodexUrl(options.baseURL), buildCodexRequestInit({
-        accessToken,
-        accountId,
-        sessionId,
-        signal: chatOptions.abortSignal,
-        body,
-      }));
-    };
-
-    for (let attempt = 0; ; attempt++) {
-      let sawParsedSseEvent = false;
-      let currentToolCall:
-        | {
-            id: string;
-            name: string;
-            args: string;
-            started: boolean;
-          }
-        | undefined;
-
+    for (;;) {
+      let sawTransportEvent = false;
+      let sawResponseEvent = false;
+      const toolCallState: CodexToolCallState = {};
       try {
-        let response = await sendRequest();
+        const events = activeTransport === "websocket"
+          ? streamWebSocketEvents({
+              requestBody,
+              baseURL: options.baseURL,
+              sessionId,
+              requestId,
+              signal: chatOptions.abortSignal,
+              resolveAuth: resolveRequestAuth,
+            })
+          : streamSseEvents({
+              body,
+              baseURL: options.baseURL,
+              sessionId,
+              requestId,
+              signal: chatOptions.abortSignal,
+              fetchImpl,
+              resolveAuth: resolveRequestAuth,
+            });
 
-        if (!response.ok) {
-          const errorText = await response.text().catch(() => "");
-          if (response.status === 401 && options.auth && isTokenExpiredError(errorText)) {
-            response = await sendRequest(true);
-          } else {
-            throw new Error(`${response.status} status code${errorText ? `: ${errorText}` : " (no body)"}`);
+        for await (const event of events) {
+          sawTransportEvent = true;
+          if (isCodexResponseEvent(event)) {
+            sawResponseEvent = true;
           }
-        }
-
-        if (!response.ok) {
-          const errorText = await response.text().catch(() => "");
-          throw new Error(`${response.status} status code${errorText ? `: ${errorText}` : " (no body)"}`);
-        }
-
-        for await (const event of parseSse(response)) {
-          sawParsedSseEvent = true;
-          const type = typeof event.type === "string" ? event.type : undefined;
-          if (!type) continue;
-
-          if (type === "error") {
-            const message = typeof event.message === "string" ? event.message : JSON.stringify(event);
-            throw new Error(message);
-          }
-
-          if (type === "response.failed") {
-            const message = typeof (event.response as any)?.error?.message === "string"
-              ? (event.response as any).error.message
-              : "Codex response failed";
-            throw new Error(message);
-          }
-
-          if (type === "response.output_item.added") {
-            const item = (event as any).item;
-            if (item?.type === "function_call" && typeof item.call_id === "string" && typeof item.name === "string") {
-              currentToolCall = {
-                id: item.call_id,
-                name: item.name,
-                args: typeof item.arguments === "string" ? item.arguments : "",
-                started: true,
-              };
-              yield {
-                type: "tool_call",
-                id: currentToolCall.id,
-                name: currentToolCall.name,
-                arguments: "",
-                isStart: true,
-                isEnd: false,
-              };
-            }
-            continue;
-          }
-
-          if (type === "response.output_text.delta" || type === "response.refusal.delta") {
-            const delta = typeof (event as any).delta === "string" ? (event as any).delta : "";
-            if (delta) {
-              yield { type: "text", content: delta };
-            }
-            continue;
-          }
-
-          if (type === "response.reasoning_summary_text.delta") {
-            const delta = typeof (event as any).delta === "string" ? (event as any).delta : "";
-            if (delta) {
-              yield { type: "reasoning_delta", content: delta };
-            }
-            continue;
-          }
-
-          if (type === "response.function_call_arguments.delta" && currentToolCall) {
-            const delta = typeof (event as any).delta === "string" ? (event as any).delta : "";
-            if (delta) {
-              currentToolCall.args += delta;
-              yield {
-                type: "tool_call",
-                id: currentToolCall.id,
-                name: currentToolCall.name,
-                arguments: delta,
-                isStart: false,
-                isEnd: false,
-              };
-            }
-            continue;
-          }
-
-          if (type === "response.function_call_arguments.done" && currentToolCall) {
-            const finalArgs = typeof (event as any).arguments === "string" ? (event as any).arguments : currentToolCall.args;
-            if (finalArgs.startsWith(currentToolCall.args)) {
-              const tail = finalArgs.slice(currentToolCall.args.length);
-              if (tail) {
-                currentToolCall.args = finalArgs;
-                yield {
-                  type: "tool_call",
-                  id: currentToolCall.id,
-                  name: currentToolCall.name,
-                  arguments: tail,
-                  isStart: false,
-                  isEnd: false,
-                };
-              }
-            } else {
-              currentToolCall.args = finalArgs;
-            }
-            continue;
-          }
-
-          if (type === "response.output_item.done" && currentToolCall) {
-            const item = (event as any).item;
-            if (item?.type === "function_call" && item.call_id === currentToolCall.id) {
-              yield {
-                type: "tool_call",
-                id: currentToolCall.id,
-                name: currentToolCall.name,
-                arguments: "",
-                isStart: false,
-                isEnd: true,
-              };
-              currentToolCall = undefined;
-            }
-            continue;
-          }
-
-          if (type === "response.completed" || type === "response.done" || type === "response.incomplete") {
-            const usage = (event as any).response?.usage;
-            if (usage) {
-              yield {
-                type: "usage",
-                usage: normalizeOpenAICodexUsage(usage),
-              };
-            }
-            continue;
+          for (const chunk of translateCodexEvent(event, toolCallState)) {
+            yield chunk;
           }
         }
 
         yield { type: "done" };
         return;
       } catch (error) {
-        if (!shouldRetryCodexTransportError({
+        if (shouldFallbackCodexWebSocket({
           error,
-          attempt,
-          sawParsedSseEvent,
+          requestedTransport,
+          activeTransport,
+          sawResponseEvent,
           signal: chatOptions.abortSignal,
         })) {
-          throw error;
+          recordWebSocketSseFallback(sessionId, error);
+          traceCodexTransportFailure({
+            error,
+            model: chatOptions.model,
+            transport: activeTransport,
+            fallbackTransport: "sse",
+            phase: "before_message_stream_start",
+            url: resolveCodexWebSocketUrl(options.baseURL),
+          });
+          activeTransport = "sse";
+          continue;
         }
-        await sleepBeforeCodexRetry(codexRetryDelayMs(attempt), chatOptions.abortSignal);
+
+        if (activeTransport === "sse" && shouldRetryCodexTransportError({
+          error,
+          attempt: sseAttempt,
+          sawParsedSseEvent: sawTransportEvent,
+          signal: chatOptions.abortSignal,
+        })) {
+          const delayMs = codexRetryDelayMs(sseAttempt);
+          traceEvent("provider_transport_retry", {
+            providerId: options.providerId ?? "openai-codex",
+            model: chatOptions.model,
+            transport: activeTransport,
+            attempt: sseAttempt + 1,
+            maxRetries: CODEX_TRANSPORT_MAX_RETRIES,
+            delayMs,
+            failureKind: classifyChatGptNetworkError(error),
+            network: getChatGptNetworkDiagnostics(resolveCodexUrl(options.baseURL)),
+            error: summarizeTraceError(error),
+          });
+          sseAttempt += 1;
+          await sleepBeforeCodexRetry(delayMs, chatOptions.abortSignal);
+          continue;
+        }
+
+        traceCodexTransportFailure({
+          error,
+          model: chatOptions.model,
+          transport: activeTransport,
+          phase: sawResponseEvent ? "after_message_stream_start" : "before_message_stream_start",
+          url: activeTransport === "websocket" ? resolveCodexWebSocketUrl(options.baseURL) : resolveCodexUrl(options.baseURL),
+        });
+        throw error;
       }
+    }
+  }
+
+  async function* streamSseEvents(input: {
+    body: string;
+    baseURL: string;
+    sessionId: string;
+    requestId: string;
+    signal?: AbortSignal;
+    fetchImpl: ChatGptFetch;
+    resolveAuth: (forceRefresh?: boolean) => Promise<{ accessToken: string; accountId: string }>;
+  }): AsyncIterable<Record<string, unknown>> {
+    const sendRequest = async (forceRefresh = false) => {
+      const { accessToken, accountId } = await input.resolveAuth(forceRefresh);
+      const url = resolveCodexUrl(input.baseURL);
+      return fetchWithSseHeaderTimeout(input.fetchImpl, url, buildCodexRequestInit({
+        accessToken,
+        accountId,
+        sessionId: input.sessionId,
+        requestId: input.requestId,
+        signal: input.signal,
+        body: input.body,
+      }));
+    };
+
+    let response = await sendRequest();
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      if (response.status === 401 && options.auth && isTokenExpiredError(errorText)) {
+        response = await sendRequest(true);
+      } else {
+        throw new CodexApiError(`${response.status} status code${errorText ? `: ${errorText}` : " (no body)"}`, {
+          status: response.status,
+          payload: errorText,
+        });
+      }
+    }
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      throw new CodexApiError(`${response.status} status code${errorText ? `: ${errorText}` : " (no body)"}`, {
+        status: response.status,
+        payload: errorText,
+      });
+    }
+
+    yield* parseSse(response, input.signal);
+  }
+
+  async function* streamWebSocketEvents(input: {
+    requestBody: Record<string, unknown>;
+    baseURL: string;
+    sessionId: string;
+    requestId: string;
+    signal?: AbortSignal;
+    resolveAuth: (forceRefresh?: boolean) => Promise<{ accessToken: string; accountId: string }>;
+  }): AsyncIterable<Record<string, unknown>> {
+    const { accessToken, accountId } = await input.resolveAuth(false);
+    const socket = await connectCodexWebSocket(
+      resolveCodexWebSocketUrl(input.baseURL),
+      buildWebSocketHeaders(accessToken, accountId, input.sessionId, input.requestId),
+      input.signal,
+    );
+    try {
+      socket.send(JSON.stringify({ type: "response.create", ...input.requestBody }));
+      yield* parseWebSocket(socket, input.signal, CODEX_SSE_HEADER_TIMEOUT_MS);
+    } finally {
+      closeWebSocketSilently(socket);
     }
   }
 
@@ -337,6 +341,156 @@ export function normalizeOpenAICodexUsage(usage: any): TokenUsage {
   };
 }
 
+class CodexApiError extends Error {
+  readonly status?: number;
+  readonly code?: string;
+  readonly payload?: unknown;
+
+  constructor(message: string, options: { status?: number; code?: string; payload?: unknown; cause?: unknown } = {}) {
+    super(message, { cause: options.cause });
+    this.name = "CodexApiError";
+    this.status = options.status;
+    this.code = options.code;
+    this.payload = options.payload;
+  }
+}
+
+class CodexProtocolError extends Error {
+  readonly payload?: unknown;
+
+  constructor(message: string, options: { payload?: unknown; cause?: unknown } = {}) {
+    super(message, { cause: options.cause });
+    this.name = "CodexProtocolError";
+    this.payload = options.payload;
+  }
+}
+
+interface CodexToolCallState {
+  currentToolCall?: {
+    id: string;
+    name: string;
+    args: string;
+  };
+}
+
+function* translateCodexEvent(event: Record<string, unknown>, state: CodexToolCallState): Iterable<StreamChunk> {
+  const type = typeof event.type === "string" ? event.type : undefined;
+  if (!type) return;
+
+  if (type === "error") {
+    const code = typeof event.code === "string" ? event.code : undefined;
+    const message = typeof event.message === "string" ? event.message : JSON.stringify(event);
+    throw new CodexApiError(message || code || "Codex error", { code, payload: event });
+  }
+
+  if (type === "response.failed") {
+    const response = event.response as { error?: { code?: string; message?: string } } | undefined;
+    const code = response?.error?.code;
+    const message = response?.error?.message;
+    throw new CodexApiError(message || "Codex response failed", { code, payload: event });
+  }
+
+  if (type === "response.output_item.added") {
+    const item = (event as any).item;
+    if (item?.type === "function_call" && typeof item.call_id === "string" && typeof item.name === "string") {
+      state.currentToolCall = {
+        id: item.call_id,
+        name: item.name,
+        args: typeof item.arguments === "string" ? item.arguments : "",
+      };
+      yield {
+        type: "tool_call",
+        id: state.currentToolCall.id,
+        name: state.currentToolCall.name,
+        arguments: "",
+        isStart: true,
+        isEnd: false,
+      };
+    }
+    return;
+  }
+
+  if (type === "response.output_text.delta" || type === "response.refusal.delta") {
+    const delta = typeof (event as any).delta === "string" ? (event as any).delta : "";
+    if (delta) yield { type: "text", content: delta };
+    return;
+  }
+
+  if (type === "response.reasoning_summary_text.delta") {
+    const delta = typeof (event as any).delta === "string" ? (event as any).delta : "";
+    if (delta) yield { type: "reasoning_delta", content: delta };
+    return;
+  }
+
+  if (type === "response.function_call_arguments.delta" && state.currentToolCall) {
+    const delta = typeof (event as any).delta === "string" ? (event as any).delta : "";
+    if (delta) {
+      state.currentToolCall.args += delta;
+      yield {
+        type: "tool_call",
+        id: state.currentToolCall.id,
+        name: state.currentToolCall.name,
+        arguments: delta,
+        isStart: false,
+        isEnd: false,
+      };
+    }
+    return;
+  }
+
+  if (type === "response.function_call_arguments.done" && state.currentToolCall) {
+    const finalArgs = typeof (event as any).arguments === "string" ? (event as any).arguments : state.currentToolCall.args;
+    if (finalArgs.startsWith(state.currentToolCall.args)) {
+      const tail = finalArgs.slice(state.currentToolCall.args.length);
+      if (tail) {
+        state.currentToolCall.args = finalArgs;
+        yield {
+          type: "tool_call",
+          id: state.currentToolCall.id,
+          name: state.currentToolCall.name,
+          arguments: tail,
+          isStart: false,
+          isEnd: false,
+        };
+      }
+    } else {
+      state.currentToolCall.args = finalArgs;
+    }
+    return;
+  }
+
+  if (type === "response.output_item.done" && state.currentToolCall) {
+    const item = (event as any).item;
+    if (item?.type === "function_call" && item.call_id === state.currentToolCall.id) {
+      yield {
+        type: "tool_call",
+        id: state.currentToolCall.id,
+        name: state.currentToolCall.name,
+        arguments: "",
+        isStart: false,
+        isEnd: true,
+      };
+      state.currentToolCall = undefined;
+    }
+    return;
+  }
+
+  if (type === "response.completed" || type === "response.done" || type === "response.incomplete") {
+    const usage = (event as any).response?.usage;
+    if (usage) {
+      yield {
+        type: "usage",
+        usage: normalizeOpenAICodexUsage(usage),
+      };
+    }
+  }
+}
+
+function isCodexResponseEvent(event: Record<string, unknown>): boolean {
+  const type = typeof event.type === "string" ? event.type : "";
+  return type.startsWith("response.");
+}
+
 export function buildOpenAICodexPromptCacheKey(input: {
   seed?: string;
   providerId?: string;
@@ -367,7 +521,8 @@ export async function fetchOpenAICodexModels(options: {
       headers: buildBaseHeaders(
         options.accessToken,
         accountId,
-        globalThis.crypto?.randomUUID?.() ?? `bubble_${Date.now()}`,
+        createCodexSessionId(),
+        createCodexRequestId(),
         { accept: "application/json" },
       ),
     }).catch(() => undefined);
@@ -484,16 +639,22 @@ function convertMessage(message: ProviderMessage): Array<Record<string, unknown>
   }];
 }
 
-async function* parseSse(response: Response): AsyncIterable<Record<string, unknown>> {
+async function* parseSse(response: Response, signal?: AbortSignal): AsyncIterable<Record<string, unknown>> {
   if (!response.body) return;
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  const onAbort = () => {
+    void reader.cancel().catch(() => {});
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
 
   try {
     while (true) {
+      if (signal?.aborted) throw toAbortError(signal);
       const { done, value } = await reader.read();
+      if (signal?.aborted) throw toAbortError(signal);
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
 
@@ -512,8 +673,11 @@ async function* parseSse(response: Response): AsyncIterable<Record<string, unkno
         if (data && data !== "[DONE]") {
           try {
             yield JSON.parse(data) as Record<string, unknown>;
-          } catch {
-            // Ignore malformed events.
+          } catch (cause) {
+            throw new CodexProtocolError(`Invalid Codex SSE JSON: ${cause instanceof Error ? cause.message : String(cause)}`, {
+              payload: data,
+              cause,
+            });
           }
         }
 
@@ -521,6 +685,7 @@ async function* parseSse(response: Response): AsyncIterable<Record<string, unkno
       }
     }
   } finally {
+    signal?.removeEventListener("abort", onAbort);
     try {
       await reader.cancel();
     } catch {
@@ -529,16 +694,401 @@ async function* parseSse(response: Response): AsyncIterable<Record<string, unkno
   }
 }
 
+type WebSocketEventType = "open" | "message" | "error" | "close";
+type WebSocketListener = (event: unknown) => void;
+
+interface CodexWebSocketLike {
+  close(code?: number, reason?: string): void;
+  send(data: string): void;
+  addEventListener(type: WebSocketEventType, listener: WebSocketListener): void;
+  removeEventListener(type: WebSocketEventType, listener: WebSocketListener): void;
+}
+
+type CodexWebSocketConstructor = new (
+  url: string | URL,
+  options?: string | string[] | Record<string, unknown>,
+) => CodexWebSocketLike;
+
+class WebSocketCloseError extends Error {
+  readonly code?: number;
+  readonly reason?: string;
+
+  constructor(message: string, options: { code?: number; reason?: string } = {}) {
+    super(message);
+    this.name = "WebSocketCloseError";
+    this.code = options.code;
+    this.reason = options.reason;
+  }
+}
+
+const websocketSseFallbackSessions = new Set<string>();
+
+export function resetOpenAICodexTransportStateForTests(): void {
+  websocketSseFallbackSessions.clear();
+  cachedWebSocketConstructor = null;
+}
+
+let cachedWebSocketConstructor: CodexWebSocketConstructor | null = null;
+
+async function getWebSocketConstructor(): Promise<CodexWebSocketConstructor | null> {
+  if (cachedWebSocketConstructor) return cachedWebSocketConstructor;
+  const baseCtor = (globalThis as { WebSocket?: unknown }).WebSocket;
+  if (typeof baseCtor !== "function") return null;
+
+  if (isBunRuntime() && hasChatGptProxyEnv()) {
+    const proxyModule = await import("proxy-from-env");
+    const getProxyForUrl = (proxyModule as { getProxyForUrl: (url: string) => string }).getProxyForUrl;
+    const BaseWebSocket = baseCtor as CodexWebSocketConstructor;
+    cachedWebSocketConstructor = class extends (BaseWebSocket as any) {
+      constructor(url: string | URL, options?: string | string[] | Record<string, unknown>) {
+        const target = url.toString();
+        const proxyTarget = target.replace(/^wss:/, "https:").replace(/^ws:/, "http:");
+        const proxy = getProxyForUrl(proxyTarget) || getChatGptProxyForUrl(proxyTarget);
+        const normalizedOptions = typeof options === "string" || Array.isArray(options)
+          ? { protocols: options }
+          : { ...(options ?? {}) };
+        super(url, { ...normalizedOptions, ...(proxy ? { proxy } : {}) });
+      }
+    } as CodexWebSocketConstructor;
+    return cachedWebSocketConstructor;
+  }
+
+  cachedWebSocketConstructor = baseCtor as CodexWebSocketConstructor;
+  return cachedWebSocketConstructor;
+}
+
+async function connectCodexWebSocket(
+  url: string,
+  headers: Headers,
+  signal?: AbortSignal,
+  connectTimeoutMs = CODEX_WEBSOCKET_CONNECT_TIMEOUT_MS,
+): Promise<CodexWebSocketLike> {
+  const WebSocketCtor = await getWebSocketConstructor();
+  if (!WebSocketCtor) throw new Error("WebSocket transport is not available in this runtime");
+
+  return new Promise<CodexWebSocketLike>((resolve, reject) => {
+    let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let socket: CodexWebSocketLike;
+
+    try {
+      socket = new WebSocketCtor(url, { headers: headersToRecord(headers) });
+    } catch (error) {
+      reject(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
+
+    const cleanup = () => {
+      if (timeout) clearTimeout(timeout);
+      socket.removeEventListener("open", onOpen);
+      socket.removeEventListener("error", onError);
+      socket.removeEventListener("close", onClose);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const fail = (error: Error, closeReason?: string) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (closeReason) closeWebSocketSilently(socket, 1000, closeReason);
+      reject(error);
+    };
+    const onOpen = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(socket);
+    };
+    const onError = (event: unknown) => fail(extractWebSocketError(event));
+    const onClose = (event: unknown) => fail(extractWebSocketCloseError(event));
+    const onAbort = () => fail(toAbortError(signal), "aborted");
+
+    socket.addEventListener("open", onOpen);
+    socket.addEventListener("error", onError);
+    socket.addEventListener("close", onClose);
+    signal?.addEventListener("abort", onAbort);
+
+    if (connectTimeoutMs > 0) {
+      timeout = setTimeout(() => {
+        fail(new Error(`WebSocket connect timeout after ${connectTimeoutMs}ms`), "connect_timeout");
+      }, connectTimeoutMs);
+    }
+    if (signal?.aborted) onAbort();
+  });
+}
+
+async function* parseWebSocket(
+  socket: CodexWebSocketLike,
+  signal?: AbortSignal,
+  firstEventTimeoutMs = CODEX_SSE_HEADER_TIMEOUT_MS,
+): AsyncIterable<Record<string, unknown>> {
+  const queue: Record<string, unknown>[] = [];
+  let pending: (() => void) | undefined;
+  let done = false;
+  let failed: Error | undefined;
+  let sawCompletion = false;
+  let sawResponseEvent = false;
+
+  const wake = () => {
+    const resolve = pending;
+    pending = undefined;
+    resolve?.();
+  };
+  const onMessage = (event: unknown) => {
+    void (async () => {
+      let text: string | null = null;
+      try {
+        if (!event || typeof event !== "object" || !("data" in event)) return;
+        text = await decodeWebSocketData((event as { data?: unknown }).data);
+        if (!text) return;
+        const parsed = JSON.parse(text) as Record<string, unknown>;
+        const type = typeof parsed.type === "string" ? parsed.type : "";
+        if (isCodexResponseEvent(parsed)) {
+          sawResponseEvent = true;
+        }
+        if (type === "response.completed" || type === "response.done" || type === "response.incomplete") {
+          sawCompletion = true;
+          done = true;
+        }
+        queue.push(parsed);
+        wake();
+      } catch (cause) {
+        failed = new CodexProtocolError(`Invalid Codex WebSocket JSON: ${cause instanceof Error ? cause.message : String(cause)}`, {
+          payload: text,
+          cause,
+        });
+        done = true;
+        wake();
+      }
+    })();
+  };
+  const onError = (event: unknown) => {
+    failed = extractWebSocketError(event);
+    done = true;
+    wake();
+  };
+  const onClose = (event: unknown) => {
+    if (!sawCompletion && !failed) failed = extractWebSocketCloseError(event);
+    done = true;
+    wake();
+  };
+  const onAbort = () => {
+    failed = toAbortError(signal);
+    done = true;
+    wake();
+  };
+
+  socket.addEventListener("message", onMessage);
+  socket.addEventListener("error", onError);
+  socket.addEventListener("close", onClose);
+  signal?.addEventListener("abort", onAbort);
+
+  try {
+    while (true) {
+      if (signal?.aborted) throw toAbortError(signal);
+      if (queue.length > 0) {
+        yield queue.shift()!;
+        continue;
+      }
+      if (done) break;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      await new Promise<void>((resolve) => {
+        pending = resolve;
+        if (!sawResponseEvent && firstEventTimeoutMs > 0) {
+          timeout = setTimeout(() => {
+            failed = new Error(`WebSocket first response event timeout after ${firstEventTimeoutMs}ms`);
+            done = true;
+            closeWebSocketSilently(socket, 1000, "first_response_event_timeout");
+            wake();
+          }, firstEventTimeoutMs);
+        }
+      }).finally(() => {
+        if (timeout) clearTimeout(timeout);
+      });
+    }
+    if (failed) throw failed;
+    if (!sawCompletion) throw new Error("WebSocket stream closed before response.completed");
+  } finally {
+    socket.removeEventListener("message", onMessage);
+    socket.removeEventListener("error", onError);
+    socket.removeEventListener("close", onClose);
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+
+function closeWebSocketSilently(socket: CodexWebSocketLike, code = 1000, reason = "done"): void {
+  try {
+    socket.close(code, reason);
+  } catch {
+    // Ignore cleanup errors.
+  }
+}
+
+function extractWebSocketError(event: unknown): Error {
+  if (event && typeof event === "object") {
+    const nested = (event as { error?: unknown }).error;
+    if (nested instanceof Error) return nested;
+    const message = (event as { message?: unknown }).message;
+    if (typeof message === "string" && message) return new Error(message);
+  }
+  return new Error("WebSocket error");
+}
+
+function extractWebSocketCloseError(event: unknown): Error {
+  if (event && typeof event === "object") {
+    const code = (event as { code?: unknown }).code;
+    const reason = (event as { reason?: unknown }).reason;
+    const codeText = typeof code === "number" ? ` ${code}` : "";
+    const reasonText = typeof reason === "string" && reason ? ` ${reason}` : "";
+    return new WebSocketCloseError(`WebSocket closed${codeText}${reasonText}`.trim(), {
+      code: typeof code === "number" ? code : undefined,
+      reason: typeof reason === "string" && reason ? reason : undefined,
+    });
+  }
+  return new Error("WebSocket closed");
+}
+
+async function decodeWebSocketData(data: unknown): Promise<string | null> {
+  if (typeof data === "string") return data;
+  if (data instanceof ArrayBuffer) return new TextDecoder().decode(new Uint8Array(data));
+  if (ArrayBuffer.isView(data)) {
+    const view = data as ArrayBufferView;
+    return new TextDecoder().decode(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
+  }
+  if (data && typeof data === "object" && "arrayBuffer" in data) {
+    const blobLike = data as { arrayBuffer: () => Promise<ArrayBuffer> };
+    return new TextDecoder().decode(new Uint8Array(await blobLike.arrayBuffer()));
+  }
+  return null;
+}
+
+function headersToRecord(headers: Headers): Record<string, string> {
+  const out: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    out[key] = value;
+  });
+  return out;
+}
+
+function isBunRuntime(): boolean {
+  return typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
+}
+
+function resolveOpenAICodexTransport(configured?: OpenAICodexTransport): OpenAICodexTransport {
+  const raw = configured ?? process.env.BUBBLE_CODEX_TRANSPORT?.trim() as OpenAICodexTransport | undefined;
+  if (raw === "auto" || raw === "sse" || raw === "websocket") return raw;
+  if (process.env.NODE_ENV === "test") return "sse";
+  return "auto";
+}
+
+function initialCodexTransport(requested: OpenAICodexTransport, sessionId: string): "sse" | "websocket" {
+  if (requested === "sse") return "sse";
+  if (isWebSocketSseFallbackActive(sessionId)) return "sse";
+  return "websocket";
+}
+
+function isWebSocketSseFallbackActive(sessionId: string | undefined): boolean {
+  return !!sessionId && websocketSseFallbackSessions.has(sessionId);
+}
+
+function recordWebSocketSseFallback(sessionId: string | undefined, error: unknown): void {
+  if (!sessionId) return;
+  websocketSseFallbackSessions.add(sessionId);
+  traceEvent("provider_transport_session_fallback", {
+    providerId: "openai-codex",
+    sessionIdHash: createHash("sha256").update(sessionId).digest("hex").slice(0, 16),
+    fallbackTransport: "sse",
+    error: summarizeTraceError(error),
+  });
+}
+
+function shouldFallbackCodexWebSocket(input: {
+  error: unknown;
+  requestedTransport: OpenAICodexTransport;
+  activeTransport: "sse" | "websocket";
+  sawResponseEvent: boolean;
+  signal?: AbortSignal;
+}): boolean {
+  if (input.activeTransport !== "websocket") return false;
+  if (input.requestedTransport === "sse") return false;
+  if (input.signal?.aborted) return false;
+  if (input.sawResponseEvent) return false;
+  if (isCodexNonTransportError(input.error)) return false;
+  return true;
+}
+
+function isCodexNonTransportError(error: unknown): boolean {
+  return error instanceof CodexApiError || error instanceof CodexProtocolError;
+}
+
+function traceCodexTransportFailure(input: {
+  error: unknown;
+  model: string;
+  transport: "sse" | "websocket";
+  fallbackTransport?: "sse";
+  phase: "before_message_stream_start" | "after_message_stream_start";
+  url: string;
+}): void {
+  if (isCodexNonTransportError(input.error)) return;
+  const failureKind = classifyChatGptNetworkError(input.error) ?? (/websocket/i.test(errorMessageChain(input.error).join("\n")) ? "websocket" : undefined);
+  if (!failureKind && input.transport !== "websocket") return;
+  traceEvent("provider_transport_failure", {
+    providerId: "openai-codex",
+    model: input.model,
+    transport: input.transport,
+    fallbackTransport: input.fallbackTransport,
+    phase: input.phase,
+    failureKind,
+    network: getChatGptNetworkDiagnostics(input.url),
+    error: summarizeTraceError(input.error),
+  });
+}
+
+async function fetchWithSseHeaderTimeout(
+  fetchImpl: ChatGptFetch,
+  input: RequestInfo | URL,
+  init: RequestInit,
+): Promise<Response> {
+  const requestSignal = init.signal ?? undefined;
+  const controller = new AbortController();
+  const timeoutError = new Error(`Codex SSE response headers timed out after ${CODEX_SSE_HEADER_TIMEOUT_MS}ms`);
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  const abortPromise = new Promise<Response>((_resolve, reject) => {
+    onAbort = () => {
+      const error = toAbortError(requestSignal);
+      controller.abort(error);
+      reject(error);
+    };
+    requestSignal?.addEventListener("abort", onAbort, { once: true });
+  });
+  const timeoutPromise = new Promise<Response>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      controller.abort(timeoutError);
+      reject(timeoutError);
+    }, CODEX_SSE_HEADER_TIMEOUT_MS);
+  });
+
+  try {
+    if (requestSignal?.aborted) throw toAbortError(requestSignal);
+    const fetchPromise = fetchImpl(input, { ...init, signal: controller.signal });
+    return await Promise.race([fetchPromise, timeoutPromise, abortPromise]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    if (onAbort) requestSignal?.removeEventListener("abort", onAbort);
+  }
+}
+
 function buildCodexRequestInit(options: {
   accessToken: string;
   accountId: string;
   sessionId: string;
+  requestId: string;
   signal?: AbortSignal;
   body: string;
 }): RequestInit {
   const init: RequestInit & { verbose?: boolean } = {
     method: "POST",
-    headers: buildSseHeaders(options.accessToken, options.accountId, options.sessionId),
+    headers: buildSseHeaders(options.accessToken, options.accountId, options.sessionId, options.requestId),
     signal: options.signal,
     body: options.body,
     keepalive: false,
@@ -562,23 +1112,11 @@ function shouldRetryCodexTransportError(input: {
 }
 
 function isTransientCodexTransportError(error: unknown): boolean {
-  const text = errorMessageChain(error).join("\n");
-  if (/\bAbortError\b/i.test(text)) return false;
-  return [
-    /The socket connection was closed unexpectedly/i,
-    /\bConnectionClosed\b/i,
-    /\bECONNRESET\b/i,
-    /\bUND_ERR_SOCKET\b/i,
-    /\bEPIPE\b/i,
-    /socket hang up/i,
-    /fetch failed/i,
-    /unknown certificate verification error/i,
-    /certificate (?:verify|verification) (?:failed|error)/i,
-    /unable to verify (?:the )?(?:first )?certificate/i,
-    /UNABLE_TO_(?:VERIFY_LEAF_SIGNATURE|GET_ISSUER_CERT_LOCALLY)/i,
-    /SELF_SIGNED_CERT_IN_CHAIN/i,
-    /CERT_(?:HAS_EXPIRED|UNTRUSTED|INVALID)/i,
-  ].some((pattern) => pattern.test(text));
+  if (isCodexNonTransportError(error)) return false;
+  const kind = classifyChatGptNetworkError(error);
+  if (!kind || kind === "abort") return false;
+  if (kind === "tls_certificate") return false;
+  return true;
 }
 
 function errorMessageChain(error: unknown): string[] {
@@ -633,6 +1171,7 @@ function buildBaseHeaders(
   accessToken: string,
   accountId: string,
   sessionId: string,
+  requestId: string,
   extraHeaders?: Record<string, string>
 ): Headers {
   const headers = new Headers(extraHeaders);
@@ -640,16 +1179,27 @@ function buildBaseHeaders(
   headers.set("ChatGPT-Account-Id", accountId);
   headers.set("originator", "bubble");
   headers.set("User-Agent", "bubble");
-  headers.set("session_id", sessionId);
+  headers.set("session-id", sessionId);
+  headers.set("x-client-request-id", requestId);
   return headers;
 }
 
-function buildSseHeaders(accessToken: string, accountId: string, sessionId: string): Headers {
-  const headers = buildBaseHeaders(accessToken, accountId, sessionId, {
+function buildSseHeaders(accessToken: string, accountId: string, sessionId: string, requestId: string): Headers {
+  const headers = buildBaseHeaders(accessToken, accountId, sessionId, requestId, {
     accept: "text/event-stream",
     "content-type": "application/json",
   });
   headers.set("OpenAI-Beta", OPENAI_BETA_RESPONSES);
+  return headers;
+}
+
+function buildWebSocketHeaders(accessToken: string, accountId: string, sessionId: string, requestId: string): Headers {
+  const headers = buildBaseHeaders(accessToken, accountId, sessionId, requestId);
+  headers.delete("accept");
+  headers.delete("content-type");
+  headers.delete("OpenAI-Beta");
+  headers.delete("openai-beta");
+  headers.set("OpenAI-Beta", OPENAI_BETA_RESPONSES_WEBSOCKETS);
   return headers;
 }
 
@@ -658,6 +1208,21 @@ function resolveCodexUrl(baseURL: string): string {
   if (normalized.endsWith("/codex/responses")) return normalized;
   if (normalized.endsWith("/codex")) return `${normalized}/responses`;
   return `${normalized}/codex/responses`;
+}
+
+function resolveCodexWebSocketUrl(baseURL: string): string {
+  const url = new URL(resolveCodexUrl(baseURL));
+  if (url.protocol === "https:") url.protocol = "wss:";
+  if (url.protocol === "http:") url.protocol = "ws:";
+  return url.toString();
+}
+
+function createCodexRequestId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `bubble_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function createCodexSessionId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `bubble_session_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function resolveRelativeUrl(baseURL: string, path: string): string {

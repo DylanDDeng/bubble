@@ -375,6 +375,8 @@ export type AgentEvent =
   | { type: "tool_update"; id: string; name: string; update: ToolUpdate }
   | { type: "tool_end"; id: string; name: string; result: ToolResult }
   | { type: "turn_end"; usage?: TokenUsage; willContinue?: boolean }
+  | { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
+  | { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
   | { type: "context_recovered"; droppedMessages: number; reason: "overflow" }
   | { type: "input_pending_changed"; pending: number }
   | { type: "input_applied"; id: string; content: string; target: "current_turn" }
