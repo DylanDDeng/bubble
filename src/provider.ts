@@ -12,7 +12,7 @@ import { createProviderProtocolArtifactFilter } from "./provider-artifacts.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
 import { debugReasoningStream, summarizeDebugText } from "./reasoning-debug.js";
 import type { ProviderProtocol } from "./model-catalog.js";
-import type { Provider, ProviderMessage, StreamChunk, ThinkingLevel, ToolDefinition } from "./types.js";
+import type { Provider, ProviderMessage, StreamChunk, ThinkingLevel, ToolChoiceMode, ToolDefinition } from "./types.js";
 
 // Diagnostic logger for tool-args byte-loss investigation. Activate with
 //   BUBBLE_DEBUG_TOOL_ARGS=/path/to/log.jsonl   (any writable path)
@@ -130,7 +130,7 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
 
   async function* streamChat(
     messages: ProviderMessage[],
-    chatOptions: { model: string; tools?: ToolDefinition[]; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal }
+    chatOptions: { model: string; tools?: ToolDefinition[]; toolChoice?: ToolChoiceMode; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal }
   ): AsyncIterable<StreamChunk> {
     const requestConfig = resolveProviderRequestConfig(
       options.providerId || "",
@@ -152,7 +152,7 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
         reasoningContentEcho: requestConfig.reasoningContentEcho ?? "tool_calls",
       })),
       tools: tools && tools.length > 0 ? tools : undefined,
-      tool_choice: tools && tools.length > 0 ? "auto" : undefined,
+      tool_choice: tools && tools.length > 0 ? chatOptions.toolChoice ?? "auto" : undefined,
       stream: true,
     };
     // DeepSeek and MiniMax only emit final usage in streaming mode when this flag is set.

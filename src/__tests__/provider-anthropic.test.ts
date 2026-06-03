@@ -88,6 +88,114 @@ describe("provider-anthropic", () => {
     ]);
   });
 
+  it("adds Anthropic prompt cache controls for official Anthropic requests", () => {
+    const body = buildAnthropicRequest({
+      providerId: "anthropic",
+      apiKey: "sk-test",
+      baseURL: "https://api.anthropic.com",
+    }, [
+      { role: "system", content: "system prompt" },
+      { role: "user", content: "hi" },
+    ], {
+      model: "claude-sonnet-4-6",
+      tools: [readTool],
+      stream: true,
+    });
+
+    expect(body.system).toEqual([
+      { type: "text", text: "system prompt", cache_control: { type: "ephemeral" } },
+    ]);
+    expect(body.tools).toEqual([{
+      name: "read",
+      description: "Read a file",
+      input_schema: readTool.parameters,
+      cache_control: { type: "ephemeral" },
+    }]);
+  });
+
+  it("adds Anthropic prompt cache controls for MiniMax Anthropic M2 models only", () => {
+    const minimaxM2Body = buildAnthropicRequest({
+      providerId: "minimax",
+      apiKey: "sk-test",
+      baseURL: "https://api.minimaxi.com/anthropic",
+    }, [
+      { role: "system", content: "system prompt" },
+      { role: "user", content: "hi" },
+    ], {
+      model: "MiniMax-M2.7",
+      tools: [readTool],
+      stream: true,
+    });
+
+    expect(minimaxM2Body.system).toEqual([
+      { type: "text", text: "system prompt", cache_control: { type: "ephemeral" } },
+    ]);
+    expect(minimaxM2Body.tools?.at(-1)).toMatchObject({
+      name: "read",
+      cache_control: { type: "ephemeral" },
+    });
+
+    const minimaxM3Body = buildAnthropicRequest({
+      providerId: "minimax",
+      apiKey: "sk-test",
+      baseURL: "https://api.minimaxi.com/anthropic",
+    }, [
+      { role: "system", content: "system prompt" },
+      { role: "user", content: "hi" },
+    ], {
+      model: "MiniMax-M3",
+      tools: [readTool],
+      stream: true,
+    });
+
+    expect(minimaxM3Body.system).toBe("system prompt");
+    expect(minimaxM3Body.tools?.at(-1)).toEqual({
+      name: "read",
+      description: "Read a file",
+      input_schema: readTool.parameters,
+    });
+  });
+
+  it("does not add Anthropic prompt cache controls for unknown compatible providers", () => {
+    const body = buildAnthropicRequest({
+      providerId: "custom-anthropic",
+      apiKey: "sk-test",
+      baseURL: "https://gateway.example.com/anthropic",
+    }, [
+      { role: "system", content: "system prompt" },
+      { role: "user", content: "hi" },
+    ], {
+      model: "claude-sonnet-4-6",
+      tools: [readTool],
+      stream: true,
+    });
+
+    expect(body.system).toBe("system prompt");
+    expect(body.tools?.at(-1)).toEqual({
+      name: "read",
+      description: "Read a file",
+      input_schema: readTool.parameters,
+    });
+  });
+
+  it("preserves Anthropic tools while disabling tool calls with tool_choice none", () => {
+    const body = buildAnthropicRequest({
+      providerId: "anthropic",
+      apiKey: "sk-test",
+      baseURL: "https://api.anthropic.com",
+    }, [
+      { role: "user", content: "hi" },
+    ], {
+      model: "claude-sonnet-4-6",
+      tools: [readTool],
+      toolChoice: "none",
+      stream: true,
+    });
+
+    expect(body.tools?.map((tool) => tool.name)).toEqual(["read"]);
+    expect(body.tool_choice).toEqual({ type: "none" });
+  });
+
   it("replays raw Anthropic blocks with signatures instead of sanitized reasoning", () => {
     const body = buildAnthropicRequest({
       providerId: "minimax",
@@ -177,6 +285,7 @@ describe("provider-anthropic", () => {
             input_tokens: 100,
             output_tokens: 1,
             cache_read_input_tokens: 40,
+            cache_creation_input_tokens: 20,
           },
         },
       },
@@ -211,11 +320,12 @@ describe("provider-anthropic", () => {
     expect(chunks.filter((chunk) => chunk.type === "usage").at(-1)).toEqual({
       type: "usage",
       usage: {
-        promptTokens: 140,
+        promptTokens: 160,
         completionTokens: 12,
         promptCacheHitTokens: 40,
-        promptCacheMissTokens: 100,
-        totalTokens: 152,
+        promptCacheMissTokens: 120,
+        cacheCreationTokens: 20,
+        totalTokens: 172,
       },
     });
   });

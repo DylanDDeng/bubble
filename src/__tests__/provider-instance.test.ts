@@ -64,6 +64,39 @@ describe("createProviderInstance", () => {
     expect(chunks.some((chunk) => chunk.type === "usage")).toBe(true);
   });
 
+  it("preserves OpenAI-compatible tools while disabling tool calls", async () => {
+    let body: any;
+    createMock.mockImplementation(async (input) => {
+      body = input;
+      return fromArray([{ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }]);
+    });
+
+    const readTool: ToolDefinition = {
+      name: "read",
+      description: "Read a file",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+      },
+    };
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({
+      providerId: "openai",
+      apiKey: "sk-test",
+      baseURL: "https://api.openai.com/v1",
+    });
+
+    await collect(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "gpt-4o",
+      tools: [readTool],
+      toolChoice: "none",
+    }));
+
+    expect(body.tools?.map((tool: any) => tool.function.name)).toEqual(["read"]);
+    expect(body.tool_choice).toBe("none");
+  });
+
   it("uses Fireworks Kimi request defaults", async () => {
     let body: any;
     createMock.mockImplementation(async (input) => {

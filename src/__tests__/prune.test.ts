@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { aggressivePruneMessages, pruneMessages } from "../context/prune.js";
+import { aggressivePruneMessages, markStableCurrentToolResultsForCache, pruneMessages } from "../context/prune.js";
 import type { Message } from "../types.js";
 
 function longText(label: string): string {
@@ -55,6 +55,46 @@ describe("pruneMessages", () => {
     const pruned = pruneMessages(messages);
     expect((pruned[1] as any).content).toBe(messages[1].content);
     expect((pruned[3] as any).content).toBe(messages[3].content);
+  });
+
+  it("keeps a full tool result stable after it has been sent in the active frontier", () => {
+    const messages: Message[] = [
+      { role: "user", content: "read files" },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "call_1", name: "read", arguments: "{\"file\":\"a.ts\"}" }],
+      },
+      { role: "tool", toolCallId: "call_1", content: longText("file a") },
+    ];
+
+    markStableCurrentToolResultsForCache(messages);
+    messages.push(
+      { role: "assistant", content: "read a" },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "call_2", name: "read", arguments: "{\"file\":\"b.ts\"}" }],
+      },
+      { role: "tool", toolCallId: "call_2", content: longText("file b") },
+      { role: "assistant", content: "read b" },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "call_3", name: "read", arguments: "{\"file\":\"c.ts\"}" }],
+      },
+      { role: "tool", toolCallId: "call_3", content: longText("file c") },
+      { role: "assistant", content: "read c" },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "call_4", name: "read", arguments: "{\"file\":\"d.ts\"}" }],
+      },
+      { role: "tool", toolCallId: "call_4", content: longText("file d") },
+    );
+
+    const pruned = pruneMessages(messages);
+    expect((pruned[2] as any).content).toBe(messages[2].content);
   });
 });
 
