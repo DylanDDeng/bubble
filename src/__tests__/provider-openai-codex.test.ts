@@ -361,6 +361,28 @@ describe("provider-openai-codex", () => {
     expect(chunks).toContainEqual({ type: "done" });
   });
 
+  it("retries Bun connection failures before any SSE event is parsed", async () => {
+    const token = makeAccessToken("account-123");
+    const fetchMock = vi.fn(async () => {
+      if (fetchMock.mock.calls.length === 1) {
+        throw new Error("Unable to connect. Is the computer able to access the url?");
+      }
+      return makeSseResponse();
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = createOpenAICodexProvider({
+      providerId: "openai-codex",
+      apiKey: token,
+      baseURL: "https://chatgpt.com/backend-api",
+    });
+
+    const chunks = await collectStream(provider.streamChat([{ role: "user", content: "hi" }], { model: "gpt-5.5" }));
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(chunks).toContainEqual({ type: "done" });
+  });
+
   it("retries when the SSE body errors before a parsed event", async () => {
     const token = makeAccessToken("account-123");
     const fetchMock = vi.fn(async () => {

@@ -221,6 +221,7 @@ function isChatGptNetworkErrorText(text: string): boolean {
     /\bEPIPE\b/i,
     /\bUND_ERR_/i,
     /socket hang up/i,
+    /Unable to connect\. Is the computer able to access the url\?/i,
     /certificate/i,
     /unable to verify/i,
     /self[- ]signed/i,

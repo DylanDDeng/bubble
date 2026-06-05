@@ -21,6 +21,18 @@ import {
   stepHistory,
 } from "./input-history.js";
 import { stripTerminalMouseSequences } from "./terminal-mouse.js";
+export {
+  createPastedContentMarker,
+  expandPastedContentMarkers,
+  shouldCollapsePastedContent,
+  type PastedContentReference,
+} from "../tui/paste-placeholder.js";
+import {
+  createPastedContentMarker,
+  expandPastedContentMarkers,
+  shouldCollapsePastedContent,
+  type PastedContentReference,
+} from "../tui/paste-placeholder.js";
 
 export interface SubmitPayload {
   /** Fully-expanded text sent to the agent. */
@@ -48,13 +60,6 @@ const MAX_VISIBLE_LINES = 6;
 const PADDING_X = 1;
 const PROMPT = " > ";
 const MAX_VISIBLE_SUGGESTIONS = 8;
-const LONG_PASTE_CHAR_THRESHOLD = 1000;
-const LONG_PASTE_LINE_THRESHOLD = 20;
-
-export interface PastedContentReference {
-  marker: string;
-  content: string;
-}
 
 export function needsCursorRowCompensation(
   nextOutputHeight: number,
@@ -227,48 +232,6 @@ export function insertNewlineAtCursor(text: string, cursor: number) {
   };
 }
 
-export function shouldCollapsePastedContent(text: string): boolean {
-  if (text.length >= LONG_PASTE_CHAR_THRESHOLD) return true;
-  return text.split("\n").length >= LONG_PASTE_LINE_THRESHOLD;
-}
-
-export function createPastedContentMarker(content: string): string {
-  return `[Pasted Content ${content.length} chars]`;
-}
-
-export function expandPastedContentMarkers(
-  displayText: string,
-  references: PastedContentReference[],
-): string {
-  if (references.length === 0 || displayText.length === 0) return displayText;
-
-  let expanded = "";
-  let index = 0;
-  const used = new Set<number>();
-  while (index < displayText.length) {
-    let matched = -1;
-    for (let i = 0; i < references.length; i++) {
-      const ref = references[i]!;
-      if (!used.has(i) && displayText.startsWith(ref.marker, index)) {
-        matched = i;
-        break;
-      }
-    }
-
-    if (matched >= 0) {
-      const ref = references[matched]!;
-      expanded += ref.content;
-      index += ref.marker.length;
-      used.add(matched);
-      continue;
-    }
-
-    expanded += displayText[index];
-    index += 1;
-  }
-  return expanded;
-}
-
 export function InputBox({
   onSubmit,
   onPasteNotice,
@@ -294,6 +257,7 @@ export function InputBox({
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   const historyDraftRef = useRef<string>("");
   const loadingFilesRef = useRef(false);
+  const nextPastedContentIndexRef = useRef(1);
   // Paste and the keystrokes that follow can arrive inside the same stdin chunk
   // and dispatch within one discreteUpdates batch. If the Enter that a user
   // typed after a paste fires before React commits the paste-driven setState,
@@ -452,7 +416,7 @@ export function InputBox({
     if (imageTokens.length === 0) {
       // Plain text paste — insert into the input at the cursor.
       if (shouldCollapsePastedContent(clean)) {
-        const marker = createPastedContentMarker(clean);
+        const marker = createPastedContentMarker(clean, nextPastedContentIndexRef.current++);
         setPastedContentRefs((prev) => [...prev, { marker, content: clean }]);
         insertTextAtCursor(marker);
       } else {
@@ -536,6 +500,7 @@ export function InputBox({
     setSelectedIndex(0);
     setAttachments([]);
     setPastedContentRefs([]);
+    nextPastedContentIndexRef.current = 1;
     setHistoryIndex(null);
     historyDraftRef.current = "";
   };
@@ -695,6 +660,7 @@ export function InputBox({
         historyDraftRef.current = result.draft;
         setSelectedIndex(0);
         setPastedContentRefs([]);
+        nextPastedContentIndexRef.current = 1;
       }
       return;
     }
@@ -715,6 +681,7 @@ export function InputBox({
         historyDraftRef.current = result.draft;
         setSelectedIndex(0);
         setPastedContentRefs([]);
+        nextPastedContentIndexRef.current = 1;
       }
       return;
     }
@@ -769,6 +736,7 @@ export function InputBox({
     setCursor(draftText.length);
     setSelectedIndex(0);
     setPastedContentRefs([]);
+    nextPastedContentIndexRef.current = 1;
     setHistoryIndex(null);
     historyDraftRef.current = "";
     onDraftApplied?.();

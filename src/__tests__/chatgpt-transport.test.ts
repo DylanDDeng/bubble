@@ -70,6 +70,17 @@ describe("chatgpt transport", () => {
     expect(error.message).toContain("NODE_TLS_REJECT_UNAUTHORIZED=0");
   });
 
+  it("adds actionable guidance to Bun connection failures", () => {
+    const error = normalizeChatGptNetworkError(
+      new Error("Unable to connect. Is the computer able to access the url?"),
+      {},
+    );
+
+    expect(error.message).toContain("ChatGPT connection failed before Bubble received a response");
+    expect(error.message).toContain("proxy or network transport failure");
+    expect(error.message).toContain("HTTPS_PROXY");
+  });
+
   it("preserves non-network errors unchanged", () => {
     const original = new Error("invalid request body");
 

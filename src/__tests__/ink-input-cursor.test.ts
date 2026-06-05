@@ -131,8 +131,9 @@ describe("Ink long paste placeholders", () => {
     expect(shouldCollapsePastedContent(Array.from({ length: 20 }, () => "x").join("\n"))).toBe(true);
   });
 
-  it("creates the visible pasted content marker", () => {
-    expect(createPastedContentMarker("hello")).toBe("[Pasted Content 5 chars]");
+  it("creates the visible pasted text marker", () => {
+    expect(createPastedContentMarker("hello")).toBe("[Pasted text #1 +5 chars]");
+    expect(createPastedContentMarker("a\nb\nc", 2)).toBe("[Pasted text #2 +3 lines]");
   });
 
   it("expands markers back to pasted content before submit", () => {
@@ -156,8 +157,8 @@ describe("Ink long paste placeholders", () => {
   it("expands multiple pasted markers in order", () => {
     const first = "first pasted body";
     const second = "second pasted body";
-    const firstMarker = createPastedContentMarker(first);
-    const secondMarker = createPastedContentMarker(second);
+    const firstMarker = createPastedContentMarker(first, 1);
+    const secondMarker = createPastedContentMarker(second, 2);
 
     expect(expandPastedContentMarkers(`${firstMarker}\n---\n${secondMarker}`, [
       { marker: firstMarker, content: first },
