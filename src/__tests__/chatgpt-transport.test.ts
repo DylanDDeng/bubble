@@ -6,6 +6,7 @@ import {
   createChatGptDispatcher,
   createChatGptFetch,
   normalizeChatGptNetworkError,
+  parseMacSystemProxyForUrl,
 } from "../network/chatgpt-transport.js";
 
 describe("chatgpt transport", () => {
@@ -18,7 +19,7 @@ describe("chatgpt transport", () => {
       expect((init as RequestInit & { dispatcher?: unknown })?.dispatcher).toBeUndefined();
       return new Response("ok");
     });
-    const fetch = createChatGptFetch({ fetch: fetchMock, env: {} });
+    const fetch = createChatGptFetch({ fetch: fetchMock, env: { BUBBLE_DISABLE_SYSTEM_PROXY: "1" } });
 
     await expect(fetch("https://chatgpt.com/backend-api/test")).resolves.toBeInstanceOf(Response);
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -51,6 +52,43 @@ describe("chatgpt transport", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("parses the macOS HTTPS system proxy", () => {
+    const output = `
+<dictionary> {
+  ExceptionsList : <array> {
+    0 : 127.0.0.1
+    1 : localhost
+    2 : *.local
+  }
+  HTTPEnable : 1
+  HTTPPort : 7897
+  HTTPProxy : 127.0.0.1
+  HTTPSEnable : 1
+  HTTPSPort : 7897
+  HTTPSProxy : 127.0.0.1
+}
+`;
+
+    expect(parseMacSystemProxyForUrl(output, new URL("https://chatgpt.com/backend-api"))).toBe("http://127.0.0.1:7897");
+  });
+
+  it("respects macOS proxy exceptions", () => {
+    const output = `
+<dictionary> {
+  ExceptionsList : <array> {
+    0 : *.local
+    1 : localhost
+  }
+  HTTPSEnable : 1
+  HTTPSPort : 7897
+  HTTPSProxy : 127.0.0.1
+}
+`;
+
+    expect(parseMacSystemProxyForUrl(output, new URL("https://api.local/test"))).toBeUndefined();
+    expect(parseMacSystemProxyForUrl(output, new URL("https://chatgpt.com/backend-api"))).toBe("http://127.0.0.1:7897");
   });
 
   it("reports invalid custom CA paths clearly", () => {
