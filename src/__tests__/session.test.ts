@@ -308,7 +308,7 @@ describe("SessionManager", () => {
 
     const [summary] = SessionManager.summarizeSessionsForCwd(cwd);
 
-    expect(summary.title).toBe("[Pasted Content 1200 chars]");
+    expect(summary.title).toBe("[Pasted text #1 +1200 chars]");
   });
 
   it("ignores generated titles anchored before a conversation clear marker", () => {

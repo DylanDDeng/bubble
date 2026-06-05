@@ -26,6 +26,16 @@ import {
   loadHistorySync,
   stepHistory,
 } from "./input-history.js";
+export {
+  createPastedContentMarker,
+  shouldCollapsePastedContent,
+} from "../tui/paste-placeholder.js";
+import {
+  createPastedContentMarker,
+  expandPastedContentMarkers,
+  shouldCollapsePastedContent,
+  type PastedContentReference,
+} from "../tui/paste-placeholder.js";
 
 export interface SubmitPayload {
   text: string;
@@ -47,21 +57,7 @@ interface InputBoxProps {
 }
 
 const PROMPT = " > ";
-const LONG_PASTE_CHAR_THRESHOLD = 1000;
-const LONG_PASTE_LINE_THRESHOLD = 20;
 const MAX_VISIBLE_SUGGESTIONS = 8;
-
-export function shouldCollapsePastedContent(text: string): boolean {
-  if (text.length >= LONG_PASTE_CHAR_THRESHOLD) return true;
-  const lines = text.split("\n").length;
-  return lines >= LONG_PASTE_LINE_THRESHOLD;
-}
-
-export function createPastedContentMarker(content: string): string {
-  const lineCount = content.split("\n").length;
-  const wordCount = content.trim().split(/\s+/).length;
-  return `[Pasted ${lineCount} lines · ${wordCount} words]`;
-}
 
 export function isCtrlCInput(input: string, key: { ctrl?: boolean }): boolean {
   return input === "\x03" || (key.ctrl === true && input.toLowerCase() === "c");
@@ -89,7 +85,7 @@ export function InputBox({
   const [buffer, setBuffer] = useState("");
   const [cursor, setCursor] = useState(0);
   const [images, setImages] = useState<ImageAttachment[]>([]);
-  const [pastedRefs, setPastedRefs] = useState<Map<string, string>>(new Map());
+  const [pastedRefs, setPastedRefs] = useState<PastedContentReference[]>([]);
   const [history] = useState(() => loadHistorySync());
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
@@ -108,6 +104,7 @@ export function InputBox({
   const suggestionIndexRef = useRef(suggestionIndex);
   const suggestionKindRef = useRef(suggestionKind);
   const historyIndexRef = useRef(historyIndex);
+  const nextPastedContentIndexRef = useRef(1);
   bufferRef.current = buffer;
   cursorRef.current = cursor;
   imagesRef.current = images;
@@ -123,7 +120,8 @@ export function InputBox({
     setBuffer("");
     setCursor(0);
     setImages([]);
-    setPastedRefs(new Map());
+    setPastedRefs([]);
+    nextPastedContentIndexRef.current = 1;
     setSuggestions([]);
     setSuggestionKind(null);
     setHistoryIndex(null);
@@ -134,6 +132,8 @@ export function InputBox({
     if (draftText === undefined || draftEpoch === undefined) return;
     setBuffer(draftText);
     setCursor(draftText.length);
+    setPastedRefs([]);
+    nextPastedContentIndexRef.current = 1;
     onDraftApplied?.();
   }, [draftText, draftEpoch, onDraftApplied]);
 
@@ -221,10 +221,7 @@ export function InputBox({
     const imgs = imagesRef.current;
     const refs = pastedRefsRef.current;
     if (!b.trim() && imgs.length === 0) return;
-    let expanded = b;
-    for (const [marker, content] of refs) {
-      expanded = expanded.split(marker).join(content);
-    }
+    const expanded = expandPastedContentMarkers(b, refs);
     const payload: SubmitPayload = {
       text: expanded,
       displayText: expanded !== b ? b : undefined,
@@ -235,7 +232,8 @@ export function InputBox({
     setBuffer("");
     setCursor(0);
     setImages([]);
-    setPastedRefs(new Map());
+    setPastedRefs([]);
+    nextPastedContentIndexRef.current = 1;
     setSuggestions([]);
     setSuggestionKind(null);
     setHistoryIndex(null);
@@ -262,12 +260,8 @@ export function InputBox({
     }
     // Plain text: collapse if long, otherwise insert at cursor.
     if (shouldCollapsePastedContent(text)) {
-      const marker = createPastedContentMarker(text);
-      setPastedRefs((prev) => {
-        const next = new Map(prev);
-        next.set(marker, text);
-        return next;
-      });
+      const marker = createPastedContentMarker(text, nextPastedContentIndexRef.current++);
+      setPastedRefs((prev) => [...prev, { marker, content: text }]);
       insertAtCursor(marker);
     } else {
       insertAtCursor(text);
@@ -355,6 +349,8 @@ export function InputBox({
           setBuffer(next.text);
           setCursor(next.text.length);
           setHistoryIndex(next.index);
+          setPastedRefs([]);
+          nextPastedContentIndexRef.current = 1;
         }
         return;
       }
@@ -372,6 +368,8 @@ export function InputBox({
         setBuffer(next.text);
         setCursor(next.text.length);
         setHistoryIndex(next.index);
+        setPastedRefs([]);
+        nextPastedContentIndexRef.current = 1;
         return;
       }
       const lineEnd = b.indexOf("\n", c);

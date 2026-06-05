@@ -574,6 +574,7 @@ function isTransientCodexTransportError(error: unknown): boolean {
     /\bEPIPE\b/i,
     /socket hang up/i,
     /fetch failed/i,
+    /Unable to connect\. Is the computer able to access the url\?/i,
     /unknown certificate verification error/i,
     /certificate (?:verify|verification) (?:failed|error)/i,
     /unable to verify (?:the )?(?:first )?certificate/i,
