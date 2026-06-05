@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { delimiter } from "node:path";
 import { rootCertificates } from "node:tls";
@@ -32,10 +33,9 @@ export function getChatGptFetch(env: NodeJS.ProcessEnv = process.env): ChatGptFe
 export function createChatGptFetch(options: ChatGptFetchOptions = {}): ChatGptFetch {
   const env = options.env ?? process.env;
   const fetchImpl = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const dispatcher = createChatGptDispatcher(env);
 
   return async (input, init) => {
-    const requestInit = withChatGptNetworkOptions(input, init, env, dispatcher);
+    const requestInit = withChatGptNetworkOptions(input, init, env);
     try {
       return await fetchImpl(input, requestInit);
     } catch (error) {
@@ -50,8 +50,8 @@ export function createChatGptDispatcher(
 ): Dispatcher | undefined {
   if (isBunRuntime()) return undefined;
   const ca = loadExtraCaCertificates(env);
-  if (!hasProxyEnv(env) && ca.length === 0) return undefined;
   const proxy = input ? nodeProxyForUrl(input, env) : defaultNodeProxy(env);
+  if (!proxy && ca.length === 0) return undefined;
   const caOptions = ca.length > 0 ? { ca: [...rootCertificates, ...ca] } : undefined;
 
   if (proxy) {
@@ -100,6 +100,8 @@ export function normalizeChatGptNetworkError(error: unknown, env: NodeJS.Process
       : "This looks like a proxy or network transport failure.",
     hasProxyEnv(env)
       ? "Bubble is using proxy environment variables for ChatGPT requests. Make sure NO_PROXY includes localhost,127.0.0.1."
+      : hasMacSystemProxy(env)
+        ? "Bubble detected the macOS system proxy for ChatGPT requests. If it is stale, restart your proxy client or set BUBBLE_DISABLE_SYSTEM_PROXY=1 and configure HTTPS_PROXY explicitly."
       : "If your network requires a proxy, set HTTPS_PROXY or HTTP_PROXY, and set NO_PROXY=localhost,127.0.0.1.",
     "Do not disable TLS verification with NODE_TLS_REJECT_UNAUTHORIZED=0.",
     `Original error: ${firstMeaningfulErrorMessage(error) || "unknown network error"}`,
@@ -109,7 +111,16 @@ export function normalizeChatGptNetworkError(error: unknown, env: NodeJS.Process
 }
 
 function hasProxyEnv(env: NodeJS.ProcessEnv): boolean {
-  return Boolean(env.HTTPS_PROXY || env.https_proxy || env.HTTP_PROXY || env.http_proxy || env.ALL_PROXY || env.all_proxy);
+  return Boolean(
+    env.BUBBLE_CHATGPT_PROXY ||
+    env.bubble_chatgpt_proxy ||
+    env.HTTPS_PROXY ||
+    env.https_proxy ||
+    env.HTTP_PROXY ||
+    env.http_proxy ||
+    env.ALL_PROXY ||
+    env.all_proxy
+  );
 }
 
 function isBunRuntime(): boolean {
@@ -117,24 +128,126 @@ function isBunRuntime(): boolean {
 }
 
 function bunProxyForUrl(input: RequestInfo | URL, env: NodeJS.ProcessEnv): string | undefined {
-  const url = urlFromInput(input);
-  if (!url || shouldBypassProxy(url, env)) return undefined;
-  const allProxy = env.ALL_PROXY ?? env.all_proxy;
-  if (url.protocol === "https:") return env.HTTPS_PROXY ?? env.https_proxy ?? allProxy;
-  if (url.protocol === "http:") return env.HTTP_PROXY ?? env.http_proxy ?? allProxy;
-  return undefined;
+  return proxyForUrl(input, env);
 }
 
 function nodeProxyForUrl(input: RequestInfo | URL, env: NodeJS.ProcessEnv): string | undefined {
+  return proxyForUrl(input, env);
+}
+
+function proxyForUrl(input: RequestInfo | URL, env: NodeJS.ProcessEnv): string | undefined {
   const url = urlFromInput(input);
   if (!url || shouldBypassProxy(url, env)) return undefined;
-  if (url.protocol === "https:") return env.HTTPS_PROXY ?? env.https_proxy ?? env.ALL_PROXY ?? env.all_proxy;
-  if (url.protocol === "http:") return env.HTTP_PROXY ?? env.http_proxy ?? env.ALL_PROXY ?? env.all_proxy;
-  return defaultNodeProxy(env);
+  const explicit = explicitProxyForUrl(url, env);
+  return explicit ?? macSystemProxyForUrl(url, env);
 }
 
 function defaultNodeProxy(env: NodeJS.ProcessEnv): string | undefined {
-  return env.HTTPS_PROXY ?? env.https_proxy ?? env.HTTP_PROXY ?? env.http_proxy ?? env.ALL_PROXY ?? env.all_proxy;
+  return (
+    env.BUBBLE_CHATGPT_PROXY ??
+    env.bubble_chatgpt_proxy ??
+    env.HTTPS_PROXY ??
+    env.https_proxy ??
+    env.HTTP_PROXY ??
+    env.http_proxy ??
+    env.ALL_PROXY ??
+    env.all_proxy ??
+    macSystemProxyForUrl(new URL("https://chatgpt.com/"), env)
+  );
+}
+
+function explicitProxyForUrl(url: URL, env: NodeJS.ProcessEnv): string | undefined {
+  const chatGptProxy = env.BUBBLE_CHATGPT_PROXY ?? env.bubble_chatgpt_proxy;
+  if (chatGptProxy) return chatGptProxy;
+  const allProxy = env.ALL_PROXY ?? env.all_proxy;
+  if (url.protocol === "https:") return env.HTTPS_PROXY ?? env.https_proxy ?? allProxy;
+  if (url.protocol === "http:") return env.HTTP_PROXY ?? env.http_proxy ?? allProxy;
+  return allProxy;
+}
+
+function hasMacSystemProxy(env: NodeJS.ProcessEnv): boolean {
+  return Boolean(macSystemProxyForUrl(new URL("https://chatgpt.com/"), env));
+}
+
+function macSystemProxyForUrl(url: URL, env: NodeJS.ProcessEnv): string | undefined {
+  if (process.platform !== "darwin" || truthyEnv(env.BUBBLE_DISABLE_SYSTEM_PROXY)) return undefined;
+  const output = readMacSystemProxy();
+  return output ? parseMacSystemProxyForUrl(output, url) : undefined;
+}
+
+export function parseMacSystemProxyForUrl(output: string, url: URL): string | undefined {
+  if (macProxyExceptionMatches(output, url.hostname, url.port)) return undefined;
+  const values = parseScutilProxyValues(output);
+  if (url.protocol === "https:") {
+    return formatMacProxy(values.HTTPSEnable, values.HTTPSProxy, values.HTTPSPort);
+  }
+  if (url.protocol === "http:") {
+    return formatMacProxy(values.HTTPEnable, values.HTTPProxy, values.HTTPPort);
+  }
+  return undefined;
+}
+
+function parseScutilProxyValues(output: string): Record<string, string> {
+  const values: Record<string, string> = {};
+  for (const line of output.split(/\r?\n/)) {
+    const match = line.match(/^\s*([A-Za-z]+(?:Enable|Proxy|Port))\s*:\s*(.+?)\s*$/);
+    if (match) values[match[1]] = match[2];
+  }
+  return values;
+}
+
+function formatMacProxy(enabled: string | undefined, host: string | undefined, port: string | undefined): string | undefined {
+  if (enabled !== "1" || !host || !port) return undefined;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(host)) return host;
+  const normalizedHost = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  return `http://${normalizedHost}:${port}`;
+}
+
+function macProxyExceptionMatches(output: string, hostname: string, port: string): boolean {
+  const exceptions = parseMacProxyExceptions(output);
+  return exceptions.some((entry) => noProxyEntryMatches(entry.toLowerCase(), hostname.toLowerCase(), port));
+}
+
+function parseMacProxyExceptions(output: string): string[] {
+  const exceptions: string[] = [];
+  let inExceptions = false;
+  for (const line of output.split(/\r?\n/)) {
+    if (line.includes("ExceptionsList")) {
+      inExceptions = true;
+      continue;
+    }
+    if (!inExceptions) continue;
+    if (/^\s*}\s*$/.test(line)) break;
+    const match = line.match(/^\s*\d+\s*:\s*(.+?)\s*$/);
+    if (match) exceptions.push(match[1].trim());
+  }
+  return exceptions;
+}
+
+let cachedMacSystemProxy: { checkedAtMs: number; output: string | undefined } | undefined;
+
+function readMacSystemProxy(): string | undefined {
+  const now = Date.now();
+  if (cachedMacSystemProxy && now - cachedMacSystemProxy.checkedAtMs < 5_000) {
+    return cachedMacSystemProxy.output;
+  }
+
+  let output: string | undefined;
+  try {
+    output = execFileSync("scutil", ["--proxy"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 1_000,
+    });
+  } catch {
+    output = undefined;
+  }
+  cachedMacSystemProxy = { checkedAtMs: now, output };
+  return output;
+}
+
+function truthyEnv(value: string | undefined): boolean {
+  return /^(1|true|yes|on)$/i.test(value?.trim() ?? "");
 }
 
 function bunExtraCaFiles(env: NodeJS.ProcessEnv): unknown[] {
@@ -202,6 +315,9 @@ function networkEnvSignature(env: NodeJS.ProcessEnv): string {
     env.https_proxy,
     env.ALL_PROXY,
     env.all_proxy,
+    env.BUBBLE_CHATGPT_PROXY,
+    env.bubble_chatgpt_proxy,
+    env.BUBBLE_DISABLE_SYSTEM_PROXY,
     env.NO_PROXY,
     env.no_proxy,
     env.NODE_EXTRA_CA_CERTS,
