@@ -85,6 +85,7 @@ import {
   type DisplayToolCall,
   toolCallsFromParts,
 } from "./display-history.js";
+import { sanitizeDisplayMessage, sanitizeDisplayMessages } from "./display-sanitizer.js";
 import { createMarkdownSyntaxStyle, createSubtleMarkdownSyntaxStyle } from "./markdown-theme.js";
 import { markdownInlineSegments, type MarkdownInlineSegment } from "./markdown-inline.js";
 import { hashString } from "./render-signature.js";
@@ -5440,7 +5441,7 @@ function OpenTuiApp(props: {
     const buildStreamingDisplay = (status?: DisplayMessage["status"]): DisplayMessage => {
       const currentParts = snapshotDisplayParts(assistantParts);
       const partContent = assistantContent || contentFromParts(currentParts);
-      return {
+      return sanitizeDisplayMessage({
         role: "assistant",
         content: partContent,
         reasoning: assistantReasoning || undefined,
@@ -5449,7 +5450,7 @@ function OpenTuiApp(props: {
         status,
         streaming: true,
         turnStartedAt,
-      };
+      });
     };
     const flushStreamingRedraw = () => {
       if (pendingStreamingRedrawTimer === undefined) return;
@@ -5647,20 +5648,21 @@ function OpenTuiApp(props: {
           }
           bumpSidebar();
           const currentParts = snapshotDisplayParts(assistantParts);
-          const finalContent = assistantContent || contentFromParts(currentParts);
+          const finalContent = sanitizeInternalReminderBlocks(assistantContent || contentFromParts(currentParts));
+          const finalReasoning = sanitizeInternalReasoningText(assistantReasoning);
           const finalToolCalls = toolCalls.length > 0
             ? [...toolCalls]
             : toolCallsFromParts(currentParts);
-          const assistantMessage: DisplayMessage = {
+          const assistantMessage = sanitizeDisplayMessage({
             role: "assistant",
             content: finalContent,
-            reasoning: assistantReasoning || undefined,
+            reasoning: finalReasoning || undefined,
             toolCalls: finalToolCalls.length ? finalToolCalls : undefined,
             parts: currentParts.length ? currentParts : undefined,
             turnStartedAt,
             turnCompletedAt: Date.now(),
             turnUsage: event.usage,
-          };
+          });
           const nextMessages = hasRenderableMessage(assistantMessage)
             ? [...displayMessages, assistantMessage]
             : displayMessages;
@@ -7515,6 +7517,7 @@ function renderAssistantMessage(
   verboseTrace = false,
   width = 80,
 ) {
+  message = sanitizeDisplayMessage(message);
   const visibleReasoning = showThinking
     ? sanitizeInternalReasoningText(message.reasoning ?? "").trim()
     : "";
@@ -7694,7 +7697,7 @@ function updateTranscriptHost(
 ) {
   const showThinking = options?.showThinking ?? true;
   const verboseTrace = options?.verboseTrace ?? false;
-  const visibleMessages = messages.filter((message) => hasRenderableMessage(message, showThinking));
+  const visibleMessages = sanitizeDisplayMessages(messages).filter((message) => hasRenderableMessage(message, showThinking));
   const ctx = host.ctx;
   const nextEntries: TranscriptEntry[] = [];
 
@@ -7860,6 +7863,7 @@ function transcriptMessageSignature(
   message: DisplayMessage,
   compactionExpanded = false,
 ) {
+  message = sanitizeDisplayMessage(message);
   if (message.role !== "assistant") return message.role;
   if (message.syntheticKind === "ui_compact_card") {
     return `compaction:${compactionExpanded ? "expanded" : "collapsed"}:${message.compactionMeta?.turns ?? 0}`;
@@ -7929,6 +7933,7 @@ function updateAssistantEntry(
     verboseTrace?: boolean;
   },
 ) {
+  message = sanitizeDisplayMessage(message);
   const content = message.content.trim();
   const visibleReasoning = showThinking ? message.reasoning?.trim() ?? "" : "";
   const tools = message.toolCalls ?? [];
@@ -8042,7 +8047,7 @@ function updateAssistantPartEntries(
     const previous = previousEntries.get(key);
 
     if (part.type === "text") {
-      const content = part.content.trim();
+      const content = sanitizeInternalReminderBlocks(part.content).trim();
       let ref: Extract<PartEntryRef, { kind: "text" }>;
       if (previous?.kind === "text") {
         ref = previous;
@@ -8769,6 +8774,7 @@ function createAssistantEntry(
   expandedWrites: Set<string> = new Set(),
   onToggleWrite?: (key: string) => void,
 ): TranscriptEntry | null {
+  message = sanitizeDisplayMessage(message);
   const modelSwitch = parseModelSwitchMessage(message.content);
   if (modelSwitch && !message.reasoning?.trim() && !(message.toolCalls?.length)) {
     return createModelSwitchEntry(ctx, modelSwitch, key, signature);
@@ -9683,7 +9689,7 @@ function renderTranscript(
 }
 
 function renderSessionMessages(messages: DisplayMessage[], syntaxStyle: SyntaxStyle, subtleSyntaxStyle: SyntaxStyle, showThinking = true, verboseTrace = false) {
-  const visibleMessages = messages.filter((message) => hasRenderableMessage(message, showThinking));
+  const visibleMessages = sanitizeDisplayMessages(messages).filter((message) => hasRenderableMessage(message, showThinking));
   if (!visibleMessages.length) return null;
   return visibleMessages.map((message, index) => renderMessage(message, index, syntaxStyle, subtleSyntaxStyle, showThinking, verboseTrace));
 }
@@ -9691,7 +9697,7 @@ function renderSessionMessages(messages: DisplayMessage[], syntaxStyle: SyntaxSt
 function formatTranscript(messages: DisplayMessage[], options?: TranscriptOptions): StyledText {
   const showThinking = options?.showThinking ?? true;
   const verboseTrace = options?.verboseTrace ?? false;
-  const visibleMessages = messages.filter((message) => hasRenderableMessage(message, showThinking));
+  const visibleMessages = sanitizeDisplayMessages(messages).filter((message) => hasRenderableMessage(message, showThinking));
   const chunks: StyledText["chunks"] = [];
   const append = (content: string, color = theme.text) => {
     if (content) chunks.push(fg(color)(content));
@@ -9870,6 +9876,7 @@ function renderHomeState(input: { width: number; cwd: string; tip: string }) {
 }
 
 function hasRenderableMessage(message: DisplayMessage, showThinking = true) {
+  message = sanitizeDisplayMessage(message);
   if (message.role === "error") return !!message.content.trim();
   if (message.role === "user") return !!message.content.trim();
   if (message.status) return true;
