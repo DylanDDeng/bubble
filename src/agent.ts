@@ -22,7 +22,12 @@ import { BudgetLedger, composeAbortSignals } from "./agent/budget-ledger.js";
 import { assignAgentNickname, builtinAgentProfiles, mergeUsage, selectToolsForAgentProfile, validateAgentProfileTools, type AgentProfile, type SubagentRunResult } from "./agent/profiles.js";
 import { snapshotSubagentThread, subagentResultFromThread, type PendingSubagentToolUpdate, type SubagentThreadRecord, type SubagentThreadSnapshot } from "./agent/subagent-control.js";
 import { isHiddenToolResult } from "./agent/discovery-barrier.js";
-import { createStreamingInternalReminderSanitizer, sanitizeAssistantProviderMetadata, sanitizeInternalReminderBlocks } from "./agent/internal-reminder-sanitizer.js";
+import {
+  createStreamingInternalReminderSanitizer,
+  sanitizeAssistantProviderMetadata,
+  sanitizeInternalReasoningText,
+  sanitizeInternalReminderBlocks,
+} from "./agent/internal-reminder-sanitizer.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { isOnlyProviderProtocolArtifacts, stripProviderProtocolArtifacts } from "./provider-artifacts.js";
 import { debugReasoningStream, summarizeDebugText } from "./reasoning-debug.js";
@@ -1787,7 +1792,7 @@ export class Agent {
       message.content = sanitizeInternalReminderBlocks(message.content);
     }
     if (message.role === "assistant" && message.reasoning) {
-      message.reasoning = sanitizeInternalReminderBlocks(message.reasoning);
+      message.reasoning = sanitizeInternalReasoningText(message.reasoning);
     }
     if (message.role === "assistant" && message.providerMetadata) {
       message.providerMetadata = sanitizeAssistantProviderMetadata(message.providerMetadata);

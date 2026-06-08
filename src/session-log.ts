@@ -1,4 +1,8 @@
-import { sanitizeAssistantProviderMetadata, sanitizeInternalReminderBlocks } from "./agent/internal-reminder-sanitizer.js";
+import {
+  sanitizeAssistantProviderMetadata,
+  sanitizeInternalReasoningText,
+  sanitizeInternalReminderBlocks,
+} from "./agent/internal-reminder-sanitizer.js";
 import type { AssistantMessage, Message, Todo } from "./types.js";
 import type {
   LegacySessionEntry,
@@ -158,7 +162,7 @@ export class SessionLog {
             role: "assistant",
             content: sanitizeInternalReminderBlocks(entry.message.content),
             reasoning: entry.message.reasoning !== undefined
-              ? sanitizeInternalReminderBlocks(entry.message.reasoning)
+              ? sanitizeInternalReasoningText(entry.message.reasoning)
               : undefined,
             providerMetadata: sanitizeAssistantProviderMetadata(cloneProviderMetadata(entry.message.providerMetadata)),
           });
@@ -231,7 +235,7 @@ function normalizeMessageToEntries(message: Message, id: string, timestamp: numb
           role: "assistant",
           content: sanitizeInternalReminderBlocks(message.content),
           reasoning: message.reasoning !== undefined
-            ? sanitizeInternalReminderBlocks(message.reasoning)
+            ? sanitizeInternalReasoningText(message.reasoning)
             : undefined,
           model: message.model,
           providerId: message.providerId,

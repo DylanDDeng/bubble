@@ -45,6 +45,15 @@ export function sanitizeInternalReminderBlocks(text: string): string {
   return sanitizer.push(text) + sanitizer.flush();
 }
 
+export function sanitizeInternalReasoningText(text: string): string {
+  const withoutBlocks = sanitizeInternalReminderBlocks(text);
+  if (!withoutBlocks) return withoutBlocks;
+  return withoutBlocks
+    .split(/\n{2,}/)
+    .filter((paragraph) => !containsInternalReminderReference(paragraph))
+    .join("\n\n");
+}
+
 export function sanitizeAssistantProviderMetadata(
   metadata: AssistantProviderMetadata | undefined,
 ): AssistantProviderMetadata | undefined {
@@ -136,6 +145,26 @@ function formatInternalBlock(type: "reminder" | "context", kind: string, content
   const safeKind = kind.replace(/[^a-zA-Z0-9_-]/g, "-");
   return `<bubble_internal_${type} kind="${safeKind}">\n${content}\n</bubble_internal_${type}>`;
 }
+
+function containsInternalReminderReference(text: string): boolean {
+  return INTERNAL_REASONING_REFERENCE_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+const INTERNAL_REASONING_REFERENCE_PATTERNS = [
+  /<bubble_internal_(?:reminder|context)\b/i,
+  /\bsystem\s+reminder\b/i,
+  /\bruntime\s+reminder\b/i,
+  /\bsystem\s+prompt\b/i,
+  /The following deferred tools are available via tool_search/i,
+  /Known deferred tools/i,
+  /\bdeferred tools\b/i,
+  /\bmcp__[a-z0-9_]+/i,
+  /\bMCP\s+arxiv\s+tools\b/i,
+  /\barxiv\s+MCP\s+tools\b/i,
+  /Subagent lifecycle truth/i,
+  /Count unique agent_id values only/i,
+  /Do not describe a subagent as running or still working/i,
+];
 
 function consumeInternalBlockAtStart(text: string, final: boolean): { consume?: number; hold?: boolean } | undefined {
   if (text.startsWith(INTERNAL_TAG_PREFIX)) {

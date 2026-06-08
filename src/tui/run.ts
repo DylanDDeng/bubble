@@ -46,7 +46,11 @@ import { AgentAbortError, type Agent } from "../agent.js";
 import { AgentRunInputQueue } from "../agent/input-controller.js";
 import { debugReasoningStream, summarizeDebugText } from "../reasoning-debug.js";
 import { isHiddenToolMetadata } from "../agent/discovery-barrier.js";
-import { sanitizeInternalReminderBlocks } from "../agent/internal-reminder-sanitizer.js";
+import {
+  createStreamingInternalReminderSanitizer,
+  sanitizeInternalReasoningText,
+  sanitizeInternalReminderBlocks,
+} from "../agent/internal-reminder-sanitizer.js";
 import {
   summarizeAgentEventForTrace,
   summarizeTraceError,
@@ -1611,7 +1615,7 @@ function OpenTuiApp(props: {
     redrawDock();
     redrawApprovalPanel();
     if (approval || plan) focusApprovalPanel();
-    redrawTranscript();
+    redrawTranscript(streamingDisplay, displayMessages, { forceFollow: !!approval });
   };
 
   function questionStateFromRequest(request: QuestionRequest): QuestionPanelState {
@@ -3135,13 +3139,22 @@ function OpenTuiApp(props: {
   function redrawTranscript(
     extra?: DisplayMessage,
     baseMessages = displayMessages,
+    options: { forceFollow?: boolean } = {},
   ) {
     streamingDisplay = extra;
-    renderTranscriptNow(streamingDisplay, baseMessages);
+    renderTranscriptNow(streamingDisplay, baseMessages, options);
   }
 
-  function renderTranscriptNow(extra?: DisplayMessage, baseMessages = displayMessages) {
-    const shouldFollow = shouldFollowTranscriptBeforeUpdate();
+  function renderTranscriptNow(
+    extra?: DisplayMessage,
+    baseMessages = displayMessages,
+    options: { forceFollow?: boolean } = {},
+  ) {
+    const shouldFollow = options.forceFollow ? true : shouldFollowTranscriptBeforeUpdate();
+    if (options.forceFollow) {
+      transcriptScrollFollowing = true;
+      transcriptScrollInitialized = true;
+    }
     const nextMessages = compactDisplayMessages([
       ...baseMessages,
       ...(extra ? [extra] : []),
@@ -5411,6 +5424,8 @@ function OpenTuiApp(props: {
 
     let assistantContent = "";
     let assistantReasoning = "";
+    let textDisplaySanitizer = createStreamingInternalReminderSanitizer();
+    let reasoningDisplaySanitizer = createStreamingInternalReminderSanitizer();
     const toolCalls: DisplayToolCall[] = [];
     const assistantParts: DisplayMessagePart[] = [];
     let turnStartedAt: number | undefined;
@@ -5462,6 +5477,8 @@ function OpenTuiApp(props: {
         if (event.type === "turn_start") {
           assistantContent = "";
           assistantReasoning = "";
+          textDisplaySanitizer = createStreamingInternalReminderSanitizer();
+          reasoningDisplaySanitizer = createStreamingInternalReminderSanitizer();
           toolCalls.length = 0;
           assistantParts.length = 0;
           turnStartedAt = Date.now();
@@ -5473,19 +5490,24 @@ function OpenTuiApp(props: {
             turnStartedAt,
           });
         } else if (event.type === "text_delta") {
-          assistantContent += event.content;
-          appendTextPart(assistantParts, event.content);
-          scheduleStreamingRedraw();
+          const content = textDisplaySanitizer.push(event.content);
+          if (content) {
+            assistantContent += content;
+            appendTextPart(assistantParts, content);
+            scheduleStreamingRedraw();
+          }
         } else if (event.type === "reasoning_delta") {
+          const content = reasoningDisplaySanitizer.push(event.content);
+          if (!content) continue;
           debugReasoningStream({
             stage: "ui_append",
             providerId: props.agent.providerId,
             modelId: props.agent.apiModel,
             beforeLength: assistantReasoning.length,
-            delta: summarizeDebugText(event.content),
-            afterLength: assistantReasoning.length + event.content.length,
+            delta: summarizeDebugText(content),
+            afterLength: assistantReasoning.length + content.length,
           });
-          assistantReasoning += event.content;
+          assistantReasoning += content;
           scheduleStreamingRedraw();
         } else if (event.type === "tool_call_start") {
           // Insert a streaming placeholder so the user sees feedback the moment
@@ -5599,6 +5621,15 @@ function OpenTuiApp(props: {
           if (pendingStreamingRedrawTimer !== undefined) {
             clearTimeout(pendingStreamingRedrawTimer);
             pendingStreamingRedrawTimer = undefined;
+          }
+          const flushedText = textDisplaySanitizer.flush();
+          if (flushedText) {
+            assistantContent += flushedText;
+            appendTextPart(assistantParts, flushedText);
+          }
+          const flushedReasoning = reasoningDisplaySanitizer.flush();
+          if (flushedReasoning) {
+            assistantReasoning += flushedReasoning;
           }
           if (event.usage) {
             setSidebarUsage((current) => ({
@@ -7062,11 +7093,9 @@ function OpenTuiApp(props: {
         visible: !!approval,
         focusable: true,
         onKeyDown: handleApprovalKey,
-        position: "absolute",
-        left: 2,
-        right: 2,
-        bottom: 4,
-        zIndex: 200,
+        width: "100%",
+        flexShrink: 0,
+        marginTop: 1,
         backgroundColor: theme.backgroundPanel,
         border: ["left"],
         borderColor: theme.warning,
@@ -7487,9 +7516,10 @@ function renderAssistantMessage(
   width = 80,
 ) {
   const visibleReasoning = showThinking
-    ? sanitizeInternalReminderBlocks(message.reasoning ?? "").trim()
+    ? sanitizeInternalReasoningText(message.reasoning ?? "").trim()
     : "";
-  const modelSwitch = parseModelSwitchMessage(message.content);
+  const sanitizedContent = sanitizeInternalReminderBlocks(message.content);
+  const modelSwitch = parseModelSwitchMessage(sanitizedContent);
   if (modelSwitch && !visibleReasoning && !(message.toolCalls?.length)) {
     return renderModelSwitchMessage(modelSwitch);
   }
@@ -7497,7 +7527,8 @@ function renderAssistantMessage(
   const children: Child[] = [];
   const parts = message.parts ?? [];
   const hasParts = parts.length > 0;
-  if (message.status && !visibleReasoning && !message.content.trim() && !(message.toolCalls?.length) && !hasParts) {
+  const trimmedContent = sanitizedContent.trim();
+  if (message.status && !visibleReasoning && !trimmedContent && !(message.toolCalls?.length) && !hasParts) {
     children.push(h("box", { paddingLeft: 3, marginTop: 1, flexShrink: 0 },
       h("text", { fg: theme.messageThinkingText }, assistantStatusLabel(message)),
     ));
@@ -7518,7 +7549,6 @@ function renderAssistantMessage(
       }),
     ));
   }
-  const trimmedContent = message.content.trim();
   if (hasParts) {
     renderAssistantMessageParts(children, parts, syntaxStyle, verboseTrace, width, message.streaming === true);
   } else {
@@ -7567,7 +7597,7 @@ function renderAssistantMessageParts(
 ) {
   for (const part of parts) {
     if (part.type === "text") {
-      const content = part.content.trim();
+      const content = sanitizeInternalReminderBlocks(part.content).trim();
       if (!content) continue;
       children.push(h("box", {
         paddingLeft: 3,
@@ -7593,7 +7623,7 @@ function renderAssistantMessageParts(
 
 function lastPartHasText(parts: DisplayMessagePart[]): boolean {
   const last = parts[parts.length - 1];
-  return last?.type === "text" && !!last.content.trim();
+  return last?.type === "text" && !!sanitizeInternalReminderBlocks(last.content).trim();
 }
 
 function parseModelSwitchMessage(content: string) {
