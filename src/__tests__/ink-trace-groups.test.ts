@@ -80,6 +80,26 @@ describe("Ink trace groups", () => {
     });
   });
 
+  it("does not count empty glob results as files", () => {
+    const groups = buildTraceGroups([
+      tool("glob", { pattern: "**/*.ts" }, "No files found.", {
+        metadata: { kind: "search", matches: 0, paths: [] },
+      }),
+      tool("glob", { pattern: "**/*.js" }, "No files found.", {
+        metadata: { kind: "search", matches: 0, paths: [] },
+      }),
+    ], { homeDir });
+
+    expect(groups[0]).toMatchObject({
+      kind: "list",
+      title: "Find Files",
+      count: 0,
+      noun: "files",
+      items: [],
+    });
+    expect(traceGroupLabel(groups[0]!)).toBe("Find Files 0 files");
+  });
+
   it("summarizes grep calls by search pattern and scope", () => {
     const groups = buildTraceGroups([
       tool("grep", { pattern: "<title>", path: "/Users/tester/project" }, "a.html:1:<title>A</title>"),
