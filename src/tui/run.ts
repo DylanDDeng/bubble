@@ -1124,6 +1124,23 @@ function OpenTuiApp(props: {
     return dimensions().width > SESSION_SIDEBAR_AUTO_WIDTH;
   };
   const contentWidth = () => Math.max(20, dimensions().width - (sidebarVisible() ? SESSION_SIDEBAR_WIDTH : 0) - 4);
+  const liveTerminalDimensions = () => {
+    const reactive = dimensions();
+    // Some terminal split-pane flows leave OpenTUI's resize signal stale. Node's
+    // TTY size is sampled on demand, so use it for modal geometry when present.
+    const stdoutWidth = process.stdout.columns;
+    const stdoutHeight = process.stdout.rows;
+    const width = Number.isFinite(stdoutWidth) && stdoutWidth && stdoutWidth > 0
+      ? stdoutWidth
+      : reactive.width;
+    const height = Number.isFinite(stdoutHeight) && stdoutHeight && stdoutHeight > 0
+      ? stdoutHeight
+      : reactive.height;
+    return {
+      width: Math.max(1, Math.floor(width)),
+      height: Math.max(1, Math.floor(height)),
+    };
+  };
   const bumpSidebar = () => {
     setSidebarTick((value) => value + 1);
     syncSidebarContext();
@@ -3143,6 +3160,7 @@ function OpenTuiApp(props: {
     syncSidebarChrome();
     redrawQuestionPanel();
     redrawStatsPanel();
+    redrawProviderDialog();
     redrawFeishuSetupPanel();
     scrollbox?.requestRender();
     scheduleTranscriptScrollAfterUpdate(shouldFollow);
@@ -3364,11 +3382,12 @@ function OpenTuiApp(props: {
       return;
     }
 
-    const width = Math.max(56, Math.min(76, dimensions().width - 4));
+    const terminal = liveTerminalDimensions();
+    const width = Math.max(56, Math.min(76, terminal.width - 4));
     const height = PROVIDER_DIALOG_ROWS + 7;
     providerDialogRoot.visible = true;
-    providerDialogRoot.width = dimensions().width;
-    providerDialogRoot.height = dimensions().height;
+    providerDialogRoot.width = terminal.width;
+    providerDialogRoot.height = terminal.height;
     providerDialogRoot.left = 0;
     providerDialogRoot.top = 0;
     providerDialogRoot.backgroundColor = modalBackdropColor();
@@ -3376,8 +3395,8 @@ function OpenTuiApp(props: {
       providerDialogPanel.visible = true;
       providerDialogPanel.width = width;
       providerDialogPanel.height = height;
-      providerDialogPanel.left = Math.max(0, Math.floor((dimensions().width - width) / 2));
-      providerDialogPanel.top = Math.max(0, Math.floor(dimensions().height / 4));
+      providerDialogPanel.left = Math.max(0, Math.floor((terminal.width - width) / 2));
+      providerDialogPanel.top = Math.max(0, Math.floor(terminal.height / 4));
       providerDialogPanel.backgroundColor = theme.backgroundPanel;
       providerDialogPanel.borderColor = theme.backgroundPanel;
       providerDialogPanel.requestRender();
