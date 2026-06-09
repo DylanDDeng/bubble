@@ -4906,7 +4906,9 @@ function OpenTuiApp(props: {
       }
       const expansion = await expandAtMentions(part.text, props.args.cwd);
       if (expansion.missing.length) addMessage("error", `Could not resolve @mention: ${expansion.missing.join(", ")}`);
-      for (const skipped of expansion.skipped) addMessage("error", `Skipped @${skipped.path}: ${skipped.reason}`);
+      for (const skipped of expansion.skipped) {
+        if (skipped.reason !== "too large") addMessage("error", `Skipped @${skipped.path}: ${skipped.reason}`);
+      }
       expandedParts.push({ type: "text", text: expansion.text });
     }
     return expandedParts;
@@ -4945,7 +4947,9 @@ function OpenTuiApp(props: {
 
     const expansion = await expandAtMentions(input, props.args.cwd);
     if (expansion.missing.length) addMessage("error", `Could not resolve @mention: ${expansion.missing.join(", ")}`);
-    for (const skipped of expansion.skipped) addMessage("error", `Skipped @${skipped.path}: ${skipped.reason}`);
+    for (const skipped of expansion.skipped) {
+      if (skipped.reason !== "too large") addMessage("error", `Skipped @${skipped.path}: ${skipped.reason}`);
+    }
     await runAgentInput(expansion.text, input, options);
   }
 

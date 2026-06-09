@@ -1259,7 +1259,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         addMessage("error", `Could not resolve @mention: ${expansion.missing.join(", ")}`);
       }
       for (const skip of expansion.skipped) {
-        addMessage("error", `Skipped @${skip.path}: ${skip.reason}`);
+        if (skip.reason !== "too large") addMessage("error", `Skipped @${skip.path}: ${skip.reason}`);
       }
       const agentInput: string | ContentPart[] = images.length > 0
         ? [
