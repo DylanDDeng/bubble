@@ -330,6 +330,9 @@ const PROMPT_SCANNER_INTERVAL_MS = 80;
 const SESSION_SIDEBAR_WIDTH = 42;
 const SESSION_SIDEBAR_AUTO_WIDTH = 120;
 const PROVIDER_DIALOG_ROWS = 13;
+const PROVIDER_DIALOG_MIN_WIDTH = 56;
+const PROVIDER_DIALOG_MAX_WIDTH = 84;
+const PROVIDER_DIALOG_ROW_RESERVED_WIDTH = 10;
 const QUESTION_MAX_TABS = 4;
 const QUESTION_MAX_OPTIONS = 10;
 const QUESTION_MAX_CONFIRM_ROWS = 3;
@@ -3397,8 +3400,9 @@ function OpenTuiApp(props: {
     }
 
     const terminal = liveTerminalDimensions();
-    const width = Math.max(56, Math.min(76, terminal.width - 4));
+    const width = providerDialogPanelWidth(terminal.width);
     const height = PROVIDER_DIALOG_ROWS + 7;
+    const columnWidths = providerDialogColumnWidths(state, width);
     providerDialogRoot.visible = true;
     providerDialogRoot.width = terminal.width;
     providerDialogRoot.height = terminal.height;
@@ -3472,20 +3476,20 @@ function OpenTuiApp(props: {
           gutter.fg = active ? activeText : providerDialogGutterColor(row.item.gutter ?? (isCurrentModelItem(row.item) ? "●" : undefined));
         }
         if (label) {
-          label.content = truncate(row.item.label, providerDialogLabelWidth(state));
+          label.content = truncate(row.item.label, columnWidths.label);
           label.fg = active ? activeText : isCurrentModelItem(row.item) ? theme.primary : theme.text;
         }
         if (detail) {
           const detailText = state.query.trim() && state.step === "models"
             ? row.item.category ?? row.item.detail ?? ""
             : row.item.detail ?? "";
-          detail.width = providerDialogDetailWidth(state);
-          detail.content = truncate(detailText, providerDialogDetailWidth(state));
+          detail.width = columnWidths.detail;
+          detail.content = truncate(detailText, columnWidths.detail);
           detail.fg = active ? activeText : theme.textMuted;
         }
         if (footer) {
-          footer.width = providerDialogFooterWidth(state);
-          footer.content = row.item.footer ?? "";
+          footer.width = columnWidths.footer;
+          footer.content = truncate(row.item.footer ?? "", columnWidths.footer);
           footer.fg = active ? activeText : theme.textMuted;
         }
       }
@@ -3527,16 +3531,18 @@ function OpenTuiApp(props: {
     return theme.textMuted;
   }
 
-  function providerDialogLabelWidth(state: ProviderDialogState) {
-    return state.step === "skills" ? 22 : 37;
+  function providerDialogPanelWidth(terminalWidth: number) {
+    return Math.max(PROVIDER_DIALOG_MIN_WIDTH, Math.min(PROVIDER_DIALOG_MAX_WIDTH, terminalWidth - 4));
   }
 
-  function providerDialogDetailWidth(state: ProviderDialogState) {
-    return state.step === "skills" ? 26 : 16;
-  }
-
-  function providerDialogFooterWidth(state: ProviderDialogState) {
-    return state.step === "skills" ? 9 : 8;
+  function providerDialogColumnWidths(state: ProviderDialogState, panelWidth: number) {
+    const contentWidth = Math.max(24, panelWidth - PROVIDER_DIALOG_ROW_RESERVED_WIDTH);
+    const footer = state.step === "skills" ? 10 : state.step === "providers" ? 9 : 8;
+    const minLabel = state.step === "skills" ? 18 : 24;
+    const desiredDetail = state.step === "skills" ? 30 : state.step === "providers" ? 24 : 16;
+    const detail = Math.max(8, Math.min(desiredDetail, contentWidth - footer - minLabel));
+    const label = Math.max(8, contentWidth - detail - footer);
+    return { label, detail, footer };
   }
 
   function isCurrentModelItem(item: PickerItem) {
