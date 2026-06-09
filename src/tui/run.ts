@@ -751,7 +751,6 @@ function OpenTuiApp(props: {
   let providerDialogModelItems: { key: string; items: PickerItem[] } | undefined;
   let providerDialogModelRefreshId = 0;
   let previousPickerForKey: Extract<PickerState, { kind: "select" }> | undefined;
-  let homePromptRef: TextareaRenderable | undefined;
   let sessionPromptRef: TextareaRenderable | undefined;
   let scrollbox: ScrollBoxRenderable | undefined;
   let transcriptScrollFollowing = true;
@@ -767,7 +766,6 @@ function OpenTuiApp(props: {
     defaultWritesExpanded: false,
   };
   let dock: TextRenderable | undefined;
-  let homeComposerShell: BoxRenderable | undefined;
   let sessionComposerShell: BoxRenderable | undefined;
   const promptScannerSyncs = new Set<PromptScannerSync>();
   let approvalRoot: BoxRenderable | undefined;
@@ -868,10 +866,7 @@ function OpenTuiApp(props: {
   const sidebarFileDeletions: Array<TextRenderable | undefined> = [];
   let sidebarFileSection: BoxRenderable | undefined;
 
-  const activePrompt = () =>
-    isHomeSurfaceActive()
-      ? homePromptRef ?? sessionPromptRef
-      : sessionPromptRef ?? homePromptRef;
+  const activePrompt = () => sessionPromptRef;
 
   function setPromptText(value: string) {
     promptText = value;
@@ -948,7 +943,6 @@ function OpenTuiApp(props: {
   }
 
   function blurInputsForModal() {
-    homePromptRef?.blur();
     sessionPromptRef?.blur();
     questionCustomInput?.blur();
     providerDialogInput?.blur();
@@ -1006,10 +1000,7 @@ function OpenTuiApp(props: {
     }, 0);
   }
 
-  const activeComposerShell = () =>
-    isHomeSurfaceActive()
-      ? homeComposerShell ?? sessionComposerShell
-      : sessionComposerShell ?? homeComposerShell;
+  const activeComposerShell = () => sessionComposerShell;
 
   onCleanup(() => {
     uiDisposed = true;
@@ -1348,7 +1339,6 @@ function OpenTuiApp(props: {
       footerModeBadge.fg = permissionModeColor(mode());
       if (!safeSetText(footerModeBadge, footerModeText())) footerModeBadge = undefined;
     }
-    safeRequestRender(homeComposerShell);
     safeRequestRender(sessionComposerShell);
     safeRequestRender(rootBox);
   }
@@ -1375,7 +1365,6 @@ function OpenTuiApp(props: {
     for (const label of [...promptModelLabels]) {
       if (!safeSetText(label, promptModelTitle())) promptModelLabels.delete(label);
     }
-    safeRequestRender(homeComposerShell);
     safeRequestRender(sessionComposerShell);
     safeRequestRender(rootBox);
   };
@@ -2592,15 +2581,17 @@ function OpenTuiApp(props: {
     return !hasTranscriptMessages(extra) && !pendingPlan() && !pendingQuestion() && !pendingFeedback() && !statsPanel && !pendingFeishuSetup();
   }
 
+  function isComposerHiddenByModal() {
+    return !!pendingQuestion() || !!pendingFeedback() || !!statsPanel || !!pendingFeishuSetup();
+  }
+
   function syncPromptSurfaces(focus = false) {
     const homeActive = isHomeSurfaceActive(streamingDisplay);
     const nextSessionActive = !homeActive;
     const surfaceChanged = sessionActive() !== nextSessionActive;
     setSessionActive(nextSessionActive);
-    const modalComposerHidden = !!pendingQuestion() || !!pendingFeedback() || !!statsPanel || !!pendingFeishuSetup();
     if (homeSurfaceShell) homeSurfaceShell.visible = homeActive;
-    if (homeComposerShell) homeComposerShell.visible = homeActive && !modalComposerHidden;
-    if (sessionComposerShell) sessionComposerShell.visible = !homeActive && !modalComposerHidden;
+    if (sessionComposerShell) sessionComposerShell.visible = !isComposerHiddenByModal();
     syncSidebarChrome();
     if (focus || surfaceChanged) setTimeout(() => activePrompt()?.focus(), 0);
     rootBox?.requestRender();
@@ -2624,7 +2615,6 @@ function OpenTuiApp(props: {
       }
     }
     try {
-      homeComposerShell?.requestRender();
       sessionComposerShell?.requestRender();
       rootBox?.requestRender();
     } catch {
@@ -5763,17 +5753,17 @@ function OpenTuiApp(props: {
     return h("box", {
       ref: (ref: BoxRenderable) => {
         sessionComposerShell = ref;
-          ref.visible = !isHomeSurfaceActive(streamingDisplay) && !pendingQuestion() && !pendingFeedback() && !statsPanel && !pendingFeishuSetup();
+        ref.visible = !isComposerHiddenByModal();
       },
       width: "100%",
       paddingLeft: 2,
       paddingRight: 2,
       flexShrink: 0,
-      visible: !isHomeSurfaceActive(streamingDisplay) && !pendingQuestion() && !statsPanel && !pendingFeishuSetup(),
+      visible: !isComposerHiddenByModal(),
     },
       renderPrompt({
         ref: (ref) => { sessionPromptRef = ref; },
-        focused: !isHomeSurfaceActive(streamingDisplay),
+        focused: !isComposerHiddenByModal(),
         onSubmit: submitPrompt,
         isFallbackNewlineKey: isTrackedShiftReturn,
         onFallbackNewline: () => canInsertPromptNewline() && (activePrompt()?.newLine() ?? false),
@@ -5804,7 +5794,6 @@ function OpenTuiApp(props: {
   }
 
   function renderHomeSurface() {
-    const homeHeight = Math.max(16, dimensions().height - 4);
     const logoLines = bubbleWordmarkForWidth(dimensions().width);
     return h("box", {
       ref: (ref: BoxRenderable) => {
@@ -5812,7 +5801,8 @@ function OpenTuiApp(props: {
         ref.visible = isHomeSurfaceActive(streamingDisplay);
       },
       visible: isHomeSurfaceActive(streamingDisplay),
-      height: homeHeight,
+      height: "100%",
+      minHeight: 0,
       flexDirection: "column",
       alignItems: "center",
       justifyContent: "center",
@@ -5830,52 +5820,6 @@ function OpenTuiApp(props: {
         ? [h("box", { flexShrink: 0, flexDirection: "column", alignItems: "center" },
             h("text", { fg: theme.accent, content: props.options.updateNotice }))]
         : []),
-      h("box", { height: 1, minHeight: 0, flexShrink: 1 }),
-      h("box", {
-        ref: (ref: BoxRenderable) => {
-          homeComposerShell = ref;
-          ref.visible = isHomeSurfaceActive(streamingDisplay) && !pendingQuestion() && !pendingFeedback() && !statsPanel && !pendingFeishuSetup();
-        },
-        width: "100%",
-        maxWidth: 75,
-        zIndex: 1000,
-        paddingTop: 1,
-        flexShrink: 0,
-        visible: isHomeSurfaceActive(streamingDisplay) && !pendingQuestion() && !statsPanel && !pendingFeishuSetup(),
-      },
-      renderPrompt({
-        ref: (ref) => {
-          homePromptRef = ref;
-          if (isHomeSurfaceActive(streamingDisplay)) setTimeout(() => ref.focus(), 0);
-        },
-        focused: isHomeSurfaceActive(streamingDisplay),
-        onSubmit: submitPrompt,
-        isFallbackNewlineKey: isTrackedShiftReturn,
-        onFallbackNewline: () => canInsertPromptNewline() && (activePrompt()?.newLine() ?? false),
-        onContentChange: onPromptContentChange,
-        onKeyDown: handlePickerKey,
-        onUiKeyDown: promptUiKeyDown,
-        getText: readPromptText,
-        disabled: () => !!pendingFeedback() || !!statsPanel,
-        mode,
-        registerModeLabel: registerPromptModeLabel,
-        registerModelLabel: registerPromptModelLabel,
-        model: promptModelTitle,
-        interruptHint: promptStatusText,
-        tabHint: () => isRunning() ? "queue" : "mode",
-        placeholder: () => {
-          const approvalState = pendingApproval();
-          if (approvalState) return "Press Enter to approve or Esc to reject";
-          if (pendingQuestion()) return "Answer the question below";
-          if (pendingFeedback()) return "Describe feedback below";
-          if (statsPanel) return "Stats panel is open";
-          const plan = pendingPlan();
-          if (plan) return "Press Enter to approve plan or Esc to reject";
-          if (isRunning()) return "Steer current run...";
-          return `Ask anything... "${homePrompt}"`;
-        },
-      }),
-      ),
     ]);
   }
 
