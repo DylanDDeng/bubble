@@ -9,11 +9,13 @@ export interface CompactionMeta {
   compactedAt: number;
 }
 
+export type UserInputStatus = "queued" | "pending_steer";
+
 export interface DisplayMessage {
   role: "user" | "assistant" | "error";
   content: string;
   clientId?: string;
-  queued?: boolean;
+  inputStatus?: UserInputStatus;
   reasoning?: string;
   toolCalls?: DisplayToolCall[];
   parts?: DisplayMessagePart[];
@@ -55,6 +57,23 @@ export interface DisplayToolCall {
   metadata?: ToolResultMetadata;
   startedAt?: number;
   completedAt?: number;
+}
+
+export function userInputStatusBadgeLabel(status?: UserInputStatus): string | undefined {
+  switch (status) {
+    case "queued":
+      return "QUEUED";
+    case "pending_steer":
+      return "STEER";
+    default:
+      return undefined;
+  }
+}
+
+export function setUserInputStatus(message: DisplayMessage, inputStatus?: UserInputStatus): DisplayMessage {
+  if (inputStatus) return { ...message, inputStatus };
+  const { inputStatus: _inputStatus, ...rest } = message;
+  return rest;
 }
 
 export function appendTextPart(parts: DisplayMessagePart[], content: string): void {

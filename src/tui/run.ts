@@ -75,11 +75,14 @@ import {
   appendToolPart,
   compactDisplayMessages,
   contentFromParts,
+  setUserInputStatus,
   snapshotDisplayParts,
   type DisplayMessage,
   type DisplayMessagePart,
   type DisplayToolCall,
+  type UserInputStatus,
   toolCallsFromParts,
+  userInputStatusBadgeLabel,
 } from "./display-history.js";
 import { createMarkdownSyntaxStyle, createSubtleMarkdownSyntaxStyle } from "./markdown-theme.js";
 import { markdownInlineSegments, type MarkdownInlineSegment } from "./markdown-inline.js";
@@ -2658,22 +2661,30 @@ function OpenTuiApp(props: {
     redrawTranscript(streamingDisplay, displayMessages);
   }
 
-  function addQueuedUserDisplay(input: string) {
+  function addUserInputStatusDisplay(input: string, inputStatus: UserInputStatus) {
     const displayId = `queued-${++nextQueuedDisplayId}`;
     queuedDisplayMessages = [
       ...queuedDisplayMessages,
-      { role: "user", content: input, clientId: displayId, queued: true },
+      { role: "user", content: input, clientId: displayId, inputStatus },
     ];
     redrawTranscriptWithQueuedDisplays();
     return displayId;
   }
 
-  function updateQueuedUserDisplay(displayId: string, queued: boolean) {
+  function addQueuedUserDisplay(input: string) {
+    return addUserInputStatusDisplay(input, "queued");
+  }
+
+  function addPendingSteerUserDisplay(input: string) {
+    return addUserInputStatusDisplay(input, "pending_steer");
+  }
+
+  function updateUserInputDisplayStatus(displayId: string, inputStatus?: UserInputStatus) {
     let changed = false;
     const update = (message: DisplayMessage): DisplayMessage => {
       if (message.clientId !== displayId) return message;
       changed = true;
-      return { ...message, queued };
+      return setUserInputStatus(message, inputStatus);
     };
     displayMessages = displayMessages.map(update);
     queuedDisplayMessages = queuedDisplayMessages.map(update);
@@ -2696,11 +2707,14 @@ function OpenTuiApp(props: {
     if (!displayId) return false;
     const index = queuedDisplayMessages.findIndex((message) => message.clientId === displayId);
     if (index === -1) {
-      return updateQueuedUserDisplay(displayId, false);
+      return updateUserInputDisplayStatus(displayId);
     }
     const message = queuedDisplayMessages[index]!;
     queuedDisplayMessages = queuedDisplayMessages.filter((_, itemIndex) => itemIndex !== index);
-    displayMessages = [...displayMessages, { ...message, content: message.content || fallbackContent || " ", queued: false }];
+    displayMessages = [
+      ...displayMessages,
+      setUserInputStatus({ ...message, content: message.content || fallbackContent || " " }),
+    ];
     redrawTranscriptWithQueuedDisplays();
     return true;
   }
@@ -2732,7 +2746,7 @@ function OpenTuiApp(props: {
 
   function requeueRejectedSteer(input: string, displayId?: string) {
     const queuedDisplayId = displayId ?? addQueuedUserDisplay(input);
-    updateQueuedUserDisplay(queuedDisplayId, true);
+    updateUserInputDisplayStatus(queuedDisplayId, "queued");
     rejectedSteerInputs.push({ input, displayId: queuedDisplayId });
     syncQueuedComposerInputCount();
     if (!isRunning()) scheduleQueuedInputDrain();
@@ -2823,7 +2837,7 @@ function OpenTuiApp(props: {
       queueComposerInput(input, { showInTranscript: true });
       return;
     }
-    const displayId = addQueuedUserDisplay(input);
+    const displayId = addPendingSteerUserDisplay(input);
     const pendingInput = run.inputController.enqueue(input);
     pendingSteerInputs.push({ id: pendingInput.id, input, displayId });
     syncPendingSteerInputCount();
@@ -7462,11 +7476,12 @@ function renderUserMessage(message: DisplayMessage, index: number) {
   const userChildren: Child[] = [
     h("text", { fg: theme.messageUserText, wrapMode: "word" }, message.content || " "),
   ];
-  if (message.queued) {
+  const inputBadge = userInputStatusBadgeLabel(message.inputStatus);
+  if (inputBadge) {
     userChildren.push(
       h("box", { paddingTop: 1 },
         h("text", { fg: theme.textMuted },
-          h("span", { bg: theme.primary, fg: theme.background, bold: true }, " QUEUED ")),
+          h("span", { bg: theme.primary, fg: theme.background, bold: true }, ` ${inputBadge} `)),
       ),
     );
   }
@@ -7864,9 +7879,10 @@ function updateMessageEntry(
   },
 ) {
   if (message.role === "user") {
+    const inputBadge = userInputStatusBadgeLabel(message.inputStatus);
     if (entry.refs.userText) entry.refs.userText.content = message.content || " ";
-    if (entry.refs.userQueuedBox) entry.refs.userQueuedBox.visible = message.queued === true;
-    if (entry.refs.userQueuedText) entry.refs.userQueuedText.content = message.queued ? " QUEUED " : "";
+    if (entry.refs.userQueuedBox) entry.refs.userQueuedBox.visible = !!inputBadge;
+    if (entry.refs.userQueuedText) entry.refs.userQueuedText.content = inputBadge ? ` ${inputBadge} ` : "";
     return;
   }
   if (message.role === "error") {
@@ -8682,14 +8698,15 @@ function createUserEntry(ctx: RenderContext, message: DisplayMessage, index: num
     wrapMode: "word",
   });
   refs.userText = text;
-  const queuedText = createText(ctx, message.queued ? " QUEUED " : "", {
+  const inputBadge = userInputStatusBadgeLabel(message.inputStatus);
+  const queuedText = createText(ctx, inputBadge ? ` ${inputBadge} ` : "", {
     fg: theme.background,
     bg: theme.primary,
   });
   refs.userQueuedText = queuedText;
   const queuedBox = createBox(ctx, {
     paddingTop: 1,
-    visible: message.queued === true,
+    visible: !!inputBadge,
   }, [queuedText]);
   refs.userQueuedBox = queuedBox;
   const node = createBox(ctx, {
