@@ -117,7 +117,14 @@ export function normalizeChatGptNetworkError(error: unknown, env: NodeJS.Process
 }
 
 function hasProxyEnv(env: NodeJS.ProcessEnv): boolean {
-  return Boolean(env.HTTPS_PROXY || env.https_proxy || env.HTTP_PROXY || env.http_proxy || env.ALL_PROXY || env.all_proxy);
+  return Boolean(
+    env.BUBBLE_CHATGPT_PROXY || env.bubble_chatgpt_proxy
+    || env.HTTPS_PROXY || env.https_proxy || env.HTTP_PROXY || env.http_proxy || env.ALL_PROXY || env.all_proxy,
+  );
+}
+
+function chatGptProxyOverride(env: NodeJS.ProcessEnv): string | undefined {
+  return env.BUBBLE_CHATGPT_PROXY ?? env.bubble_chatgpt_proxy;
 }
 
 function isBunRuntime(): boolean {
@@ -127,6 +134,8 @@ function isBunRuntime(): boolean {
 function bunProxyForUrl(input: RequestInfo | URL, env: NodeJS.ProcessEnv): string | undefined {
   const url = urlFromInput(input);
   if (!url || shouldBypassProxy(url, env)) return undefined;
+  const override = chatGptProxyOverride(env);
+  if (override) return override;
   const allProxy = env.ALL_PROXY ?? env.all_proxy;
   if (url.protocol === "https:") return env.HTTPS_PROXY ?? env.https_proxy ?? allProxy ?? getSystemProxyForUrl(url, env);
   if (url.protocol === "http:") return env.HTTP_PROXY ?? env.http_proxy ?? allProxy ?? getSystemProxyForUrl(url, env);
@@ -136,13 +145,16 @@ function bunProxyForUrl(input: RequestInfo | URL, env: NodeJS.ProcessEnv): strin
 function nodeProxyForUrl(input: RequestInfo | URL, env: NodeJS.ProcessEnv): string | undefined {
   const url = urlFromInput(input);
   if (!url || shouldBypassProxy(url, env)) return undefined;
+  const override = chatGptProxyOverride(env);
+  if (override) return override;
   if (url.protocol === "https:") return env.HTTPS_PROXY ?? env.https_proxy ?? env.ALL_PROXY ?? env.all_proxy ?? getSystemProxyForUrl(url, env);
   if (url.protocol === "http:") return env.HTTP_PROXY ?? env.http_proxy ?? env.ALL_PROXY ?? env.all_proxy ?? getSystemProxyForUrl(url, env);
   return defaultNodeProxy(env);
 }
 
 function defaultNodeProxy(env: NodeJS.ProcessEnv): string | undefined {
-  return env.HTTPS_PROXY ?? env.https_proxy ?? env.HTTP_PROXY ?? env.http_proxy ?? env.ALL_PROXY ?? env.all_proxy
+  return chatGptProxyOverride(env)
+    ?? env.HTTPS_PROXY ?? env.https_proxy ?? env.HTTP_PROXY ?? env.http_proxy ?? env.ALL_PROXY ?? env.all_proxy
     ?? getSystemProxyForUrl(new URL("https://system-proxy-default.invalid/"), env);
 }
 
@@ -205,6 +217,8 @@ function extraCaCertificatePaths(env: NodeJS.ProcessEnv): string[] {
 
 function networkEnvSignature(env: NodeJS.ProcessEnv): string {
   return [
+    env.BUBBLE_CHATGPT_PROXY,
+    env.bubble_chatgpt_proxy,
     env.HTTP_PROXY,
     env.http_proxy,
     env.HTTPS_PROXY,

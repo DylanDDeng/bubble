@@ -1461,7 +1461,8 @@ describe("Agent", () => {
     const provider: Provider = {
       async *streamChat(messages, options) {
         captured.push(messages);
-        expect(options.tools).toEqual([]);
+        expect(options.tools?.map((tool) => tool.name)).toEqual(["dummy"]);
+        expect(options.toolChoice).toBe("none");
         yield { type: "text", content: "Final without tools." };
         yield { type: "done" };
       },
@@ -1495,7 +1496,8 @@ describe("Agent", () => {
           yield { type: "done" };
           return;
         }
-        expect(options.tools).toEqual([]);
+        expect(options.tools?.map((tool) => tool.name)).toEqual(["dummy"]);
+        expect(options.toolChoice).toBe("none");
         yield { type: "text", content: "Budget summary." };
         yield { type: "done" };
       },
@@ -1897,7 +1899,7 @@ describe("Agent", () => {
       expect(toolEnd.result.content).toBe("wrote");
     });
 
-    it("only exposes exit_plan_mode to the model while plan mode is active", async () => {
+    it("keeps exit_plan_mode in the model tool list across permission modes", async () => {
       const exitPlanTool: ToolRegistryEntry = {
         name: "exit_plan_mode",
         readOnly: true,
@@ -1937,8 +1939,8 @@ describe("Agent", () => {
         mode: "plan",
       }), "go", "/tmp");
 
-      expect(seenByMode.default).toEqual(["read"]);
-      expect(seenByMode.bypass).toEqual(["read"]);
+      expect(seenByMode.default).toEqual(["read", "exit_plan_mode"]);
+      expect(seenByMode.bypass).toEqual(["read", "exit_plan_mode"]);
       expect(seenByMode.plan).toEqual(["read", "exit_plan_mode"]);
     });
 
@@ -2046,7 +2048,7 @@ describe("Agent", () => {
       expect((metaMessages[0] as any).content).toContain("Plan mode is now ACTIVE");
     });
 
-    it("replaces the mode runtime reminder on mode transitions", () => {
+    it("appends mode runtime reminders on mode transitions", () => {
       const agent = new Agent({
         provider: createMockProvider([]),
         model: "gpt-4o",
@@ -2062,12 +2064,16 @@ describe("Agent", () => {
 
       agent.setMode("default");
       metas = agent.messages.filter((m) => m.role === "meta");
-      expect(metas).toHaveLength(1);
-      expect((metas[0] as any).content).not.toContain("Plan mode is now ACTIVE");
-      expect((metas[0] as any).content).toContain("Permission mode is now: default");
+      expect(metas).toHaveLength(2);
+      expect((metas[0] as any).content).toContain("Plan mode is now ACTIVE");
+      expect((metas[1] as any).content).toContain("Permission mode is now: default");
+
+      agent.injectModeReminder();
+      metas = agent.messages.filter((m) => m.role === "meta");
+      expect(metas).toHaveLength(2);
     });
 
-    it("keeps only the current mode reminder after plan to bypass", () => {
+    it("keeps prior mode reminders while appending the latest mode reminder", () => {
       const agent = new Agent({
         provider: createMockProvider([]),
         model: "gpt-4o",
@@ -2079,9 +2085,9 @@ describe("Agent", () => {
       agent.setMode("bypassPermissions");
 
       const metas = agent.messages.filter((m) => m.role === "meta");
-      expect(metas).toHaveLength(1);
-      expect((metas[0] as any).content).toContain("bypassPermissions");
-      expect((metas[0] as any).content).not.toContain("Plan mode is now ACTIVE");
+      expect(metas).toHaveLength(2);
+      expect((metas[0] as any).content).toContain("Plan mode is now ACTIVE");
+      expect((metas[1] as any).content).toContain("bypassPermissions");
     });
 
     it("injects a bypass reminder when switching to bypassPermissions", () => {

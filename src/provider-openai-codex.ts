@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Provider, ProviderMessage, ReasoningEffort, StreamChunk, ThinkingLevel, TokenUsage, ToolDefinition } from "./types.js";
+import type { Provider, ProviderMessage, ReasoningEffort, StreamChunk, ThinkingLevel, TokenUsage, ToolChoiceMode, ToolDefinition } from "./types.js";
 import type { OAuthCredentials } from "./oauth/types.js";
 import { listBuiltinModels } from "./model-catalog.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
@@ -107,7 +107,7 @@ export function createOpenAICodexProvider(options: {
 
   async function* streamChat(
     messages: ProviderMessage[],
-    chatOptions: { model: string; tools?: ToolDefinition[]; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal }
+    chatOptions: { model: string; tools?: ToolDefinition[]; toolChoice?: ToolChoiceMode; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal }
   ): AsyncIterable<StreamChunk> {
     const requestConfig = resolveProviderRequestConfig(
       "openai-codex",
@@ -118,6 +118,7 @@ export function createOpenAICodexProvider(options: {
       buildRequestBody(messages, {
         model: chatOptions.model,
         tools: chatOptions.tools,
+        toolChoice: chatOptions.toolChoice,
         reasoningEffort: requestConfig.reasoningEffort,
         sessionId,
         providerId: options.providerId,
@@ -406,6 +407,7 @@ function buildRequestBody(
   options: {
     model: string;
     tools?: ToolDefinition[];
+    toolChoice?: ToolChoiceMode;
     reasoningEffort?: ThinkingLevel;
     sessionId?: string;
     providerId?: string;
@@ -430,7 +432,7 @@ function buildRequestBody(
       providerId: options.providerId,
       model: options.model,
     }),
-    tool_choice: "auto",
+    tool_choice: options.tools && options.tools.length > 0 ? options.toolChoice ?? "auto" : undefined,
     parallel_tool_calls: true,
     text: { verbosity: "medium" },
   };

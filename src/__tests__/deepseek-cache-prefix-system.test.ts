@@ -3,6 +3,7 @@ import { composeSystemPrompt } from "../prompt/compose.js";
 import { createAllTools } from "../tools/index.js";
 import { toChatCompletionsMessage } from "../provider.js";
 import { projectMessages } from "../context/projector.js";
+import { reminderForMode } from "../prompt/reminders.js";
 import type { Message, ProviderMessage, ToolDefinition } from "../types.js";
 
 // Companion to deepseek-cache-prefix.test.ts.
@@ -71,6 +72,10 @@ function serializeProjectedRequest(
     tools: toOpenAiTools(tools),
     tool_choice: "auto",
   });
+}
+
+function utf8Bytes(value: string): number {
+  return Buffer.byteLength(value, "utf8");
 }
 
 describe("DeepSeek cache prefix — system prompt + tools", () => {
@@ -205,5 +210,60 @@ describe("DeepSeek cache prefix — system prompt + tools", () => {
       role: "user",
       content: "<bubble_internal_reminder kind=\"system-reminder\">\nCode explanation workflow: answer directly.\n</bubble_internal_reminder>",
     });
+  });
+
+  it("mode reminder append preserves the exact previously serialized bytes", () => {
+    const turn1Messages: Message[] = [
+      { role: "system", content: "stable system" },
+      { role: "user", content: "start" },
+      { role: "meta", kind: "system-reminder", content: reminderForMode("plan") },
+    ];
+    const turn1Projected = projectMessages(turn1Messages);
+    const turn1Json = JSON.stringify(turn1Projected);
+
+    const turn2Projected = projectMessages([
+      ...turn1Messages,
+      { role: "assistant", content: "ok" },
+      { role: "user", content: "continue" },
+      { role: "meta", kind: "system-reminder", content: reminderForMode("default") },
+    ]);
+    const turn2PrefixJson = JSON.stringify(turn2Projected.slice(0, turn1Projected.length));
+
+    expect(turn2PrefixJson).toBe(turn1Json);
+    expect(utf8Bytes(turn1Json)).toBe(1194);
+  });
+
+  it("tools schema bytes stay pinned when a text-only turn uses tool_choice none", () => {
+    const tools: ToolDefinition[] = [
+      {
+        name: "read",
+        description: "Read",
+        parameters: {
+          type: "object",
+          properties: { path: { type: "string" } },
+          required: ["path"],
+        },
+      },
+      {
+        name: "exit_plan_mode",
+        description: "Exit plan",
+        parameters: { type: "object", properties: {}, required: [] },
+      },
+    ];
+    const serializedTools = JSON.stringify(toOpenAiTools(tools));
+    const autoBody = JSON.stringify({
+      messages: [{ role: "user", content: "hi" }],
+      tools: toOpenAiTools(tools),
+      tool_choice: "auto",
+    });
+    const noneBody = JSON.stringify({
+      messages: [{ role: "user", content: "hi" }],
+      tools: toOpenAiTools(tools),
+      tool_choice: "none",
+    });
+
+    expect(serializedTools).toBe(JSON.stringify(JSON.parse(autoBody).tools));
+    expect(serializedTools).toBe(JSON.stringify(JSON.parse(noneBody).tools));
+    expect(utf8Bytes(serializedTools)).toBe(304);
   });
 });

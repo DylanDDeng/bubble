@@ -386,6 +386,7 @@ type SidebarUsageState = {
   completionTokens: number;
   promptCacheHitTokens: number;
   promptCacheMissTokens: number;
+  cacheCreationTokens: number;
   reasoningTokens: number;
   turns: number;
 };
@@ -729,6 +730,7 @@ function OpenTuiApp(props: {
     completionTokens: 0,
     promptCacheHitTokens: 0,
     promptCacheMissTokens: 0,
+    cacheCreationTokens: 0,
     reasoningTokens: 0,
     turns: 0,
   });
@@ -855,6 +857,7 @@ function OpenTuiApp(props: {
   let sidebarGaugeText: TextRenderable | undefined;
   let sidebarGaugeLabelText: TextRenderable | undefined;
   let sidebarUsageText: TextRenderable | undefined;
+  let sidebarCacheText: TextRenderable | undefined;
   let sidebarReasoningText: TextRenderable | undefined;
   let sidebarCostText: TextRenderable | undefined;
   let sidebarLspSummaryText: TextRenderable | undefined;
@@ -1215,6 +1218,7 @@ function OpenTuiApp(props: {
     setSidebarText(sidebarUsageText, context.turns > 0
       ? `${formatCompactNumber(context.promptTokens)} in · ${formatCompactNumber(context.completionTokens)} out`
       : "usage pending");
+    setSidebarText(sidebarCacheText, context.cacheText);
     setSidebarText(sidebarReasoningText, context.reasoningTokens > 0
       ? `${formatCompactNumber(context.reasoningTokens)} reasoning`
       : "");
@@ -5669,6 +5673,7 @@ function OpenTuiApp(props: {
                 event.usage!.promptCacheMissTokens
                   ?? (event.usage!.promptCacheHitTokens === undefined ? event.usage!.promptTokens : 0)
               ),
+              cacheCreationTokens: current.cacheCreationTokens + (event.usage!.cacheCreationTokens ?? 0),
               reasoningTokens: current.reasoningTokens + (event.usage!.reasoningTokens ?? 0),
               turns: current.turns + 1,
             }));
@@ -6736,6 +6741,13 @@ function OpenTuiApp(props: {
             h("text", {
               fg: theme.textMuted,
               ref: (ref: TextRenderable) => {
+                sidebarCacheText = ref;
+                ref.content = context.cacheText;
+              },
+            }),
+            h("text", {
+              fg: theme.textMuted,
+              ref: (ref: TextRenderable) => {
                 sidebarReasoningText = ref;
                 ref.content = context.reasoningTokens > 0
                   ? `${formatCompactNumber(context.reasoningTokens)} reasoning`
@@ -7003,16 +7015,28 @@ function OpenTuiApp(props: {
       completionTokens: usage.completionTokens,
       promptCacheHitTokens: usage.promptCacheHitTokens,
       promptCacheMissTokens: usage.promptCacheMissTokens,
+      cacheCreationTokens: usage.cacheCreationTokens,
       reasoningTokens: usage.reasoningTokens,
       totalTokens: usage.promptTokens + usage.completionTokens,
     };
     const cost = providerId && modelId ? calculateUsageCost(providerId, modelId, tokenUsage) : undefined;
+    const cacheReadTokens = usage.promptCacheHitTokens;
+    const cacheCreateTokens = usage.cacheCreationTokens;
+    const cacheMissTokens = Math.max(0, usage.promptCacheMissTokens - cacheCreateTokens);
+    const cacheObservedTokens = cacheReadTokens + cacheCreateTokens + cacheMissTokens;
+    const cacheHitRate = cacheObservedTokens > 0
+      ? Math.round((cacheReadTokens / cacheObservedTokens) * 100)
+      : 0;
+    const cacheText = cacheObservedTokens > 0
+      ? `cache ${formatCompactNumber(cacheReadTokens)} read · ${formatCompactNumber(cacheCreateTokens)} create · ${formatCompactNumber(cacheMissTokens)} miss · ${cacheHitRate}% hit`
+      : "";
     return {
       tokens: contextTokens,
       percent: contextPercent,
       remainingTokens,
       promptTokens: usage.promptTokens,
       completionTokens: usage.completionTokens,
+      cacheText,
       reasoningTokens: usage.reasoningTokens,
       turns: usage.turns,
       costText: cost ? `${formatCurrency(cost.cost, cost.currency)} spent${cost.estimated ? " est." : ""}` : "cost unavailable",

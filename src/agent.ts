@@ -16,9 +16,9 @@ import {
   sleepBeforeRetry,
 } from "./network/retry.js";
 import { projectMessages } from "./context/projector.js";
-import { aggressivePruneMessages } from "./context/prune.js";
+import { aggressivePruneMessages, markStableCurrentToolResultsForCache } from "./context/prune.js";
 import { truncateToolOutputForModel } from "./context/tool-output-truncate.js";
-import { buildDeferredToolsReminder, buildToolFreezeReminder, isPermissionModeReminder, reminderForMode } from "./prompt/reminders.js";
+import { buildDeferredToolsReminder, buildToolFreezeReminder, reminderForMode } from "./prompt/reminders.js";
 import type { AgentEvent, AgentInputController, AgentRunInput, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ProviderMessage, ProviderRawContentBlock, ThinkingLevel, Todo, TokenUsage, ToolDefinition, ToolResult, ToolRegistryEntry, ToolUpdate } from "./types.js";
 import { HookBus, type TurnHooks, type TurnHookState } from "./orchestrator/hooks.js";
 import type { ExternalHookController } from "./hooks/controller.js";
@@ -63,7 +63,6 @@ const RESIDENT_HISTORY_KEEP_RECENT_TURNS = 3;
 const RESIDENT_HISTORY_MESSAGE_LIMIT = 160;
 const RESIDENT_HISTORY_CHAR_SOFT_LIMIT = 256 * 1024;
 const RESIDENT_HISTORY_CHAR_HARD_LIMIT = 512 * 1024;
-const RESIDENT_HISTORY_HEAP_SOFT_LIMIT = 512 * 1024 * 1024;
 const RESIDENT_HISTORY_HEAP_HARD_LIMIT = 768 * 1024 * 1024;
 const MAX_EMPTY_ASSISTANT_RECOVERIES = 1;
 const EMPTY_ASSISTANT_RECOVERY_REMINDER =
@@ -315,8 +314,7 @@ export class Agent {
 
   private getActiveToolEntries(): ToolRegistryEntry[] {
     return [...this.tools.values()]
-      .filter((tool) => !tool.deferred || this.unlockedDeferred.has(tool.name))
-      .filter((tool) => this._mode === "plan" || tool.name !== "exit_plan_mode");
+      .filter((tool) => !tool.deferred || this.unlockedDeferred.has(tool.name));
   }
 
   injectSystemReminder(content: string): void {
@@ -324,12 +322,16 @@ export class Agent {
   }
 
   injectModeReminder(): void {
-    this.messages = this.messages.filter((message) => !(
-      message.role === "meta"
-      && message.kind === "system-reminder"
-      && isPermissionModeReminder(message.content)
-    ));
-    this.injectSystemReminder(reminderForMode(this._mode));
+    const reminder = reminderForMode(this._mode);
+    const last = this.messages.at(-1);
+    if (
+      last?.role === "meta"
+      && last.kind === "system-reminder"
+      && last.content === reminder
+    ) {
+      return;
+    }
+    this.injectSystemReminder(reminder);
   }
 
   get model(): string {
@@ -660,11 +662,9 @@ export class Agent {
       }, abortSignal);
       for (const event of preModelHook.events) yield emit(event);
       this.injectHookModelContext(preModelHook.result);
-      if (this._mode !== "plan") {
-        toolEntries = toolEntries.filter((t) => t.name !== "exit_plan_mode");
-      }
       flushGovernorReminders();
-      const toolDefinitions: ToolDefinition[] = (((hookState as any).forceTextOnlyReason ? [] : toolEntries))
+      const textOnly = !!(hookState as any).forceTextOnlyReason;
+      const toolDefinitions: ToolDefinition[] = toolEntries
         .map((t) => ({
           name: t.name,
           description: t.description,
@@ -681,6 +681,7 @@ export class Agent {
       const bufferedStreamingToolCallIds = new Set<string>();
       const discoveryBarrier = hookState.discoveryBarrier;
       try {
+        markStableCurrentToolResultsForCache(this.messages);
         const projectedMessages = projectMessages(this.messages, {
           mode: "budgeted",
           providerId: this.providerId,
@@ -698,11 +699,17 @@ export class Agent {
           toolCount: toolDefinitions.length,
           thinkingLevel: this.thinkingLevel,
           mode: this._mode,
-          requestFingerprint: buildProviderRequestFingerprint(projectedMessages, toolDefinitions, this.providerId),
+          requestFingerprint: buildProviderRequestFingerprint(
+            projectedMessages,
+            toolDefinitions,
+            this.providerId,
+            toolDefinitions.length > 0 ? (textOnly ? "none" : "auto") : undefined,
+          ),
         }, traceContext);
         const stream = this.provider.streamChat(projectedMessages, {
           model: this.apiModel,
           tools: toolDefinitions,
+          toolChoice: toolDefinitions.length > 0 ? (textOnly ? "none" : "auto") : undefined,
           temperature: this.temperature,
           thinkingLevel: this.thinkingLevel,
           abortSignal,
@@ -2068,8 +2075,7 @@ export class Agent {
       || heapUsed >= RESIDENT_HISTORY_HEAP_HARD_LIMIT;
     const shouldCompact = !!budget?.shouldCompact
       || candidate.length >= RESIDENT_HISTORY_MESSAGE_LIMIT
-      || residentChars >= RESIDENT_HISTORY_CHAR_SOFT_LIMIT
-      || heapUsed >= RESIDENT_HISTORY_HEAP_SOFT_LIMIT;
+      || residentChars >= RESIDENT_HISTORY_CHAR_SOFT_LIMIT;
 
     if (shouldAggressivelyPrune) {
       candidate = aggressivePruneMessages(candidate);
@@ -2327,6 +2333,7 @@ function buildProviderRequestFingerprint(
   messages: ProviderMessage[],
   tools: ToolDefinition[],
   providerId: string,
+  toolChoice?: string,
 ): Record<string, unknown> {
   const roleCounts: Record<string, number> = {};
   let contentChars = 0;
@@ -2366,11 +2373,25 @@ function buildProviderRequestFingerprint(
     }
   }
 
+  const systemMessages = messages.filter((message) => message.role === "system");
+  const bodyMessages = messages.filter((message) => message.role !== "system");
+  const systemJsonBytes = Buffer.byteLength(JSON.stringify(systemMessages), "utf8");
+  const bodyJsonBytes = Buffer.byteLength(JSON.stringify(bodyMessages), "utf8");
+  const toolSchemaJsonBytes = Buffer.byteLength(JSON.stringify(tools), "utf8");
+
   return {
     roleCounts,
     estimatedTokens: estimateContextTokens(messages as Message[], providerId),
     projectedJsonBytes: Buffer.byteLength(JSON.stringify(messages), "utf8"),
-    toolSchemaJsonBytes: Buffer.byteLength(JSON.stringify(tools), "utf8"),
+    systemJsonBytes,
+    bodyJsonBytes,
+    toolSchemaJsonBytes,
+    staticPrefixJsonBytes: Buffer.byteLength(JSON.stringify({
+      system: systemMessages,
+      tools,
+      tool_choice: toolChoice,
+    }), "utf8"),
+    toolChoice,
     contentChars,
     reasoningChars,
     toolResultChars,

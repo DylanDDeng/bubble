@@ -231,6 +231,7 @@ function mergeUsage(prev: TokenUsage | undefined, next: TokenUsage): TokenUsage 
     completionTokens: prev.completionTokens + (next.completionTokens ?? 0),
     promptCacheHitTokens: (prev.promptCacheHitTokens ?? 0) + (next.promptCacheHitTokens ?? 0),
     promptCacheMissTokens: (prev.promptCacheMissTokens ?? 0) + (next.promptCacheMissTokens ?? 0),
+    cacheCreationTokens: (prev.cacheCreationTokens ?? 0) + (next.cacheCreationTokens ?? 0),
     reasoningTokens: (prev.reasoningTokens ?? 0) + (next.reasoningTokens ?? 0),
     totalTokens: (prev.totalTokens ?? 0) + (next.totalTokens ?? 0),
   };

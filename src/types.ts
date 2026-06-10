@@ -107,6 +107,8 @@ export interface ToolDefinition {
   parameters: ToolSchema;
 }
 
+export type ToolChoiceMode = "auto" | "none";
+
 export interface ToolCall {
   id: string;
   name: string;
@@ -329,6 +331,7 @@ export interface TokenUsage {
   completionTokens: number;
   promptCacheHitTokens?: number;
   promptCacheMissTokens?: number;
+  cacheCreationTokens?: number;
   reasoningTokens?: number;
   totalTokens?: number;
 }
@@ -339,6 +342,7 @@ export interface Provider {
     options: {
       model: string;
       tools?: ToolDefinition[];
+      toolChoice?: ToolChoiceMode;
       temperature?: number;
       thinkingLevel?: ThinkingLevel;
       abortSignal?: AbortSignal;
