@@ -372,6 +372,9 @@ export type AgentEvent =
   | { type: "turn_start" }
   | { type: "text_delta"; content: string }
   | { type: "reasoning_delta"; content: string }
+  | { type: "hook_start"; eventName: string; hookId: string; source: string }
+  | { type: "hook_end"; eventName: string; hookId: string; source: string; elapsedMs: number; decision: "allow" | "deny"; reason?: string }
+  | { type: "hook_error"; eventName: string; hookId: string; source: string; elapsedMs?: number; decision?: "allow" | "deny"; reason?: string; error: string }
   | { type: "tool_call_start"; id: string; name: string }
   | { type: "tool_call_delta"; id: string; name: string; argumentsDelta: string; arguments: string }
   | { type: "tool_call_end"; id: string; name: string; arguments: string }

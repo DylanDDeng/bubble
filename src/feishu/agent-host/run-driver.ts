@@ -19,6 +19,7 @@ import { PermissionAwareApprovalController } from "../../approval/controller.js"
 import { BashAllowlist } from "../../approval/session-cache.js";
 import type { ApprovalDecision, ApprovalRequest } from "../../approval/types.js";
 import { getLspService } from "../../lsp/index.js";
+import { ExternalHookController } from "../../hooks/index.js";
 import { buildSystemPrompt } from "../../system-prompt.js";
 import { FileStateTracker } from "../../tools/file-state.js";
 import { buildToolPromptOptions, createAllTools, type PlanController } from "../../tools/index.js";
@@ -75,6 +76,7 @@ export class RunDriver {
       req.scope.cwd,
       req.scope.defaultPermissionMode,
     );
+    const hookController = new ExternalHookController({ cwd: session.cwd });
 
     // 2. Build approval controller wired to FeishuApprovalUI
     const bashAllowlist = new BashAllowlist();
@@ -88,6 +90,7 @@ export class RunDriver {
       bashAllowlist,
       cwd: session.cwd,
       getRuleSet: () => this.opts.deps.settingsManager.getMerged().ruleSet,
+      externalHooks: hookController,
     });
 
     // 3. Build tools + Agent
@@ -174,6 +177,7 @@ export class RunDriver {
       fileStateTracker,
       agentCategories: this.opts.deps.userConfig.getAgentCategories(),
       providerFactory: (route) => this.opts.deps.createProviderForRoute(route, promptCacheKey),
+      externalHooks: hookController,
     });
     sessionTitleUpdater = createSessionTitleUpdater({
       sessionManager: session.manager,
@@ -186,6 +190,18 @@ export class RunDriver {
       cwd: session.cwd,
       thinkingLevel: agent.thinking,
       reasoningEffort: agent.thinking,
+    });
+    await hookController.runEvent({
+      eventName: "SessionStart",
+      cwd: session.cwd,
+      sessionId: session.manager.getSessionFile(),
+      agentRole: "driver",
+      target: "feishu",
+      payload: {
+        chatId: req.chatId,
+        providerId,
+        model,
+      },
     });
 
     // Restore prior history into the running Agent instance.
@@ -279,6 +295,18 @@ export class RunDriver {
       }
     } finally {
       clearInterval(watchdog);
+      await hookController.runEvent({
+        eventName: "SessionEnd",
+        cwd: session.cwd,
+        sessionId: session.manager.getSessionFile(),
+        agentRole: "driver",
+        target: "feishu",
+        payload: {
+          chatId: req.chatId,
+          providerId: agent.providerId,
+          model: agent.apiModel,
+        },
+      });
       // Cancel any pending approval prompts attached to this run.
       this.opts.approvalUI.cancelForChat(req.chatId, "Run ended");
     }
