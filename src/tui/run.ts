@@ -215,6 +215,8 @@ const DEFAULT_THEME = {
   info: "#56b6c2",
   text: "#eeeeee",
   textMuted: "#808080",
+  selectionBg: "#3D5066",
+  selectionFg: "#eeeeee",
   background: "#0a0a0a",
   backgroundPanel: "#141414",
   backgroundElement: "#1e1e1e",
@@ -258,6 +260,8 @@ const LIGHT_THEME: typeof DEFAULT_THEME = {
   info: "#257E8A",
   text: "#171717",
   textMuted: "#6F7377",
+  selectionBg: "#B9D4F7",
+  selectionFg: "#171717",
   background: "#FCFCFA",
   backgroundPanel: "#F6F6F3",
   backgroundElement: "#ECEDEA",
@@ -466,6 +470,8 @@ type PickerState =
       after?: { mode: "model"; providerId: string };
     };
 
+const SELECTABLE_TEXT_TAGS = new Set<string | ((props: any) => any)>(["text", "textarea", "code", "markdown", "diff", "input"]);
+
 function h(tag: string | ((props: any) => any), props?: Record<string, any> | null, ...children: Child[]) {
   const allProps = props ?? {};
   const childList = children.length > 0 ? children : allProps.children !== undefined ? [allProps.children] : [];
@@ -477,10 +483,54 @@ function h(tag: string | ((props: any) => any), props?: Record<string, any> | nu
   }
   const element = createElement(tag);
   const { children: _children, ...rest } = allProps;
+  // Without explicit selection colors OpenTUI inverts fg/bg; with our
+  // transparent backgrounds that degrades to black-on-black on light themes.
+  if (SELECTABLE_TEXT_TAGS.has(tag)) {
+    if (rest.selectionBg === undefined) rest.selectionBg = theme.selectionBg;
+    if (rest.selectionFg === undefined) rest.selectionFg = theme.selectionFg;
+  }
   spread(element, rest, false);
   if (childList.length === 1) insert(element, childList[0]);
   else if (childList.length > 1) insert(element, childList);
   return element;
+}
+
+// OpenTUI hardcodes updateCursor=true for mouse-driven selection, so dragging
+// a selection yanks the editor cursor to the drag focus. Keep plain clicks
+// (empty selection) positioning the cursor and keyboard selection intact, but
+// freeze the cursor while a real range is being dragged.
+function preserveCursorOnMouseSelection(ref: TextareaRenderable | undefined): void {
+  const editor = (ref as any)?.editorView;
+  if (!editor || editor.__bubbleSelectionCursorPatch) return;
+  editor.__bubbleSelectionCursorPatch = true;
+  for (const method of ["setLocalSelection", "updateLocalSelection"]) {
+    const original = editor[method]?.bind(editor);
+    if (!original) continue;
+    editor[method] = (
+      anchorX: number,
+      anchorY: number,
+      focusX: number,
+      focusY: number,
+      bg?: unknown,
+      fg?: unknown,
+      updateCursor?: boolean,
+      followCursor?: boolean,
+    ) => {
+      const keyboardDriven = (ref as any)?._keyboardSelectionActive === true;
+      const emptySelection = anchorX === focusX && anchorY === focusY;
+      const allowCursorMove = keyboardDriven || emptySelection;
+      return original(
+        anchorX,
+        anchorY,
+        focusX,
+        focusY,
+        bg,
+        fg,
+        allowCursorMove ? updateCursor : false,
+        allowCursorMove ? followCursor : false,
+      );
+    };
+  }
 }
 
 function isDestroyedRenderable(ref: Renderable | undefined): boolean {
@@ -5939,7 +5989,10 @@ function OpenTuiApp(props: {
       flexShrink: 0,
     },
     h("textarea", {
-      ref: (ref: TextareaRenderable) => { questionCustomInput = ref; },
+      ref: (ref: TextareaRenderable) => {
+        preserveCursorOnMouseSelection(ref);
+        questionCustomInput = ref;
+      },
       placeholder: "Type your own answer",
       placeholderColor: theme.textMuted,
       textColor: theme.text,
@@ -6049,7 +6102,10 @@ function OpenTuiApp(props: {
       content: "Creates a public GitHub issue at DylanDDeng/bubble. Review before sending.",
     }),
     h("textarea", {
-      ref: (ref: TextareaRenderable) => { feedbackInput = ref; },
+      ref: (ref: TextareaRenderable) => {
+        preserveCursorOnMouseSelection(ref);
+        feedbackInput = ref;
+      },
       placeholder: "Describe what happened",
       placeholderColor: theme.textMuted,
       textColor: theme.text,
@@ -7338,7 +7394,10 @@ function renderPrompt(input: {
     h("box", { width: "100%", border: true, borderColor: theme.border, backgroundColor: transparentBackground },
       h("box", { flexDirection: "column", paddingLeft: 2, paddingRight: 2, paddingTop: 1, paddingBottom: 1, backgroundColor: transparentBackground },
         h("textarea", {
-          ref: input.ref,
+          ref: (ref: TextareaRenderable) => {
+            preserveCursorOnMouseSelection(ref);
+            input.ref(ref);
+          },
           focused: input.focused,
           placeholder: input.placeholder(),
           placeholderColor: theme.textMuted,
@@ -7346,6 +7405,7 @@ function renderPrompt(input: {
           focusedTextColor: theme.text,
           backgroundColor: transparentBackground,
           focusedBackgroundColor: transparentBackground,
+          cursorColor: theme.primary,
           minHeight: 1,
           maxHeight: 6,
           onContentChange: () => input.onContentChange(input.getText()),
