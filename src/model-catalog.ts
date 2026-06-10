@@ -61,6 +61,7 @@ const DEEPSEEK_V4_LEVELS: ReasoningEffort[] = ["high", "max"];
 const STEPFUN_REASONING_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high"];
 const MINIMAX_M3_REASONING_LEVELS: ReasoningEffort[] = ["off", "medium"];
 const MINIMAX_REASONING_LEVELS: ReasoningEffort[] = ["medium"];
+const ANTHROPIC_ALWAYS_ADAPTIVE_LEVELS: ReasoningEffort[] = ["medium"];
 const ANTHROPIC_ADAPTIVE_LEVELS: ReasoningEffort[] = ["off", "medium"];
 const ANTHROPIC_CHAT_LEVELS: ReasoningEffort[] = ["off"];
 
@@ -82,6 +83,7 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "o1-mini", name: "o1-mini", providerId: "openai", reasoningLevels: ["off", "low", "medium", "high"], contextWindow: 128000 },
   { id: "gpt-4-turbo", name: "gpt-4-turbo", providerId: "openai", reasoningLevels: OPENAI_CHAT_LEVELS, contextWindow: 128000 },
 
+  { id: "claude-fable-5", name: "Claude Fable 5", providerId: "anthropic", reasoningLevels: ANTHROPIC_ALWAYS_ADAPTIVE_LEVELS, contextWindow: 1000000 },
   { id: "claude-opus-4-8", name: "Claude Opus 4.8", providerId: "anthropic", reasoningLevels: ANTHROPIC_ADAPTIVE_LEVELS, contextWindow: 1000000 },
   { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", providerId: "anthropic", reasoningLevels: ANTHROPIC_ADAPTIVE_LEVELS, contextWindow: 1000000 },
   { id: "claude-haiku-4-5-20251001", name: "Claude Haiku 4.5", providerId: "anthropic", reasoningLevels: ANTHROPIC_CHAT_LEVELS, contextWindow: 200000 },

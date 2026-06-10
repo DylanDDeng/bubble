@@ -1,9 +1,8 @@
 import type { SessionManager, SessionLogEntry } from "./session.js";
 import { normalizeSingleLine, truncateVisual } from "./text-display.js";
+import { createPastedContentMarker, shouldCollapsePastedContent } from "./tui/paste-placeholder.js";
 import type { ContentPart, Message, ProviderMessage, ThinkingLevel } from "./types.js";
 
-const LONG_PASTE_CHAR_THRESHOLD = 1000;
-const LONG_PASTE_LINE_THRESHOLD = 20;
 const TITLE_INPUT_MAX_CHARS = 4000;
 const TITLE_MAX_WIDTH = 80;
 
@@ -90,10 +89,8 @@ export function cleanGeneratedTitle(raw: string): string {
 export function deterministicTitleFromUserContent(content: string | ContentPart[]): string {
   const text = userContentText(content);
   if (!text) return "User message";
-  const charCount = text.length;
-  const lineCount = text.split(/\r?\n/).length;
-  if (charCount > LONG_PASTE_CHAR_THRESHOLD || lineCount > LONG_PASTE_LINE_THRESHOLD) {
-    return `[Pasted Content ${charCount} chars]`;
+  if (shouldCollapsePastedContent(text)) {
+    return createPastedContentMarker(text);
   }
   return truncateVisual(normalizeSingleLine(text), TITLE_MAX_WIDTH) || "User message";
 }

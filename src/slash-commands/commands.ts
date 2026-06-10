@@ -7,6 +7,7 @@ import type { RuleList, SettingsScope } from "../permissions/settings.js";
 import { encodeModel, decodeModel, displayModel, BUILTIN_PROVIDERS, isUserVisibleProvider } from "../provider-registry.js";
 import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingLevel } from "../provider-transform.js";
 import { buildSystemPrompt } from "../system-prompt.js";
+import { HOOK_EVENT_NAMES, isHookEventName } from "../hooks/index.js";
 import type { ThinkingLevel } from "../types.js";
 import { isThinkingLevel } from "../variant/thinking-level.js";
 import { collectUsageStatsBundle, formatStatsText } from "../stats/usage.js";
@@ -69,6 +70,53 @@ function handlePermissionsMutation(
   const removed = ctx.settingsManager.removeRule(scope, list, rule);
   if (!removed) return `Rule not found in ${scope} ${list}: ${rule}`;
   return `Removed from ${scope} ${list}: ${rule}`;
+}
+
+async function handleHooksCommand(args: string, ctx: SlashCommandContext): Promise<string> {
+  const hooks = ctx.hookController;
+  if (!hooks) return "Hooks controller is not attached to this session.";
+  const tokens = args.trim().split(/\s+/).filter(Boolean);
+  const sub = tokens[0] ?? "status";
+
+  if (sub === "status" || sub === "list" || sub === "") {
+    return hooks.status();
+  }
+
+  if (sub === "reload") {
+    hooks.reload();
+    return `Reloaded hooks.\n\n${hooks.status()}`;
+  }
+
+  if (sub === "trust" && tokens[1] === "project") {
+    return hooks.trustProject();
+  }
+
+  if (sub === "untrust" && tokens[1] === "project") {
+    return hooks.untrustProject();
+  }
+
+  if (sub === "test") {
+    const event = tokens[1];
+    if (!isHookEventName(event)) {
+      return `Usage: /hooks test <event> [target]\nEvents: ${HOOK_EVENT_NAMES.join(", ")}`;
+    }
+    return hooks.test(event, tokens.slice(2).join(" ") || undefined);
+  }
+
+  if (sub === "explain") {
+    const event = tokens[1];
+    if (!isHookEventName(event)) {
+      return `Usage: /hooks explain <event>\nEvents: ${HOOK_EVENT_NAMES.join(", ")}`;
+    }
+    return hooks.explain(event);
+  }
+
+  if (sub === "logs") {
+    const limit = Number(tokens[1] ?? 20);
+    return hooks.logs(Number.isFinite(limit) ? limit : 20);
+  }
+
+  return "Usage: /hooks [status|reload|trust project|untrust project|test <event> [target]|explain <event>|logs [limit]]";
 }
 
 function persistSelectedModel(model: string, ctx: Parameters<SlashCommand["handler"]>[1]) {
@@ -733,6 +781,13 @@ const builtinSlashCommandEntries: SlashCommand[] = [
     },
   },
   {
+    name: "hooks",
+    description: "Inspect and manage lifecycle hooks. Usage: /hooks [status|trust project|test <event>]",
+    async handler(args, ctx) {
+      return handleHooksCommand(args, ctx);
+    },
+  },
+  {
     name: "lsp",
     description: "Inspect or restart language servers. Usage: /lsp [status|diagnostics|restart]",
     async handler(args, ctx) {
@@ -855,8 +910,34 @@ const builtinSlashCommandEntries: SlashCommand[] = [
         return "Compaction requires session persistence. Start an interactive session first.";
       }
 
+      const preHook = await ctx.hookController?.runEvent({
+        eventName: "PreCompact",
+        cwd: ctx.cwd,
+        sessionId: ctx.sessionManager.getSessionFile(),
+        agentRole: "driver",
+        target: "manual",
+        payload: {
+          kind: "manual",
+          messageCount: ctx.agent.messages.length,
+        },
+      });
+      if (preHook?.decision === "deny") {
+        return preHook.reason ?? `Compaction blocked by hook ${preHook.sourceHookId ?? "<unknown>"}.`;
+      }
+
       const result = ctx.sessionManager.compact();
       if (!result.compacted) {
+        await ctx.hookController?.runEvent({
+          eventName: "PostCompact",
+          cwd: ctx.cwd,
+          sessionId: ctx.sessionManager.getSessionFile(),
+          agentRole: "driver",
+          target: "manual",
+          payload: {
+            kind: "manual",
+            compacted: false,
+          },
+        });
         return "Session is already compact enough.";
       }
 
@@ -868,6 +949,18 @@ const builtinSlashCommandEntries: SlashCommand[] = [
       ctx.agent.resetContextUsageAnchor();
 
       const dropped = result.droppedEntries ?? 0;
+      await ctx.hookController?.runEvent({
+        eventName: "PostCompact",
+        cwd: ctx.cwd,
+        sessionId: ctx.sessionManager.getSessionFile(),
+        agentRole: "driver",
+        target: "manual",
+        payload: {
+          kind: "manual",
+          compacted: true,
+          droppedEntries: dropped,
+        },
+      });
       return `✓ Compaction complete · ${dropped} log entr${dropped === 1 ? "y" : "ies"} summarized`;
     },
   },

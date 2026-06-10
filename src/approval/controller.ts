@@ -5,6 +5,8 @@ import type {
   PermissionRuleSet,
 } from "../permissions/types.js";
 import type { PermissionMode } from "../types.js";
+import type { ExternalHookController } from "../hooks/controller.js";
+import { truncateHookText } from "../hooks/index.js";
 import type { BashAllowlist } from "./session-cache.js";
 import type { ApprovalController, ApprovalDecision, ApprovalRequest } from "./types.js";
 
@@ -27,6 +29,9 @@ export interface ApprovalControllerOptions {
    * /permissions take effect immediately. Omit to disable rule-based gating.
    */
   getRuleSet?: () => PermissionRuleSet;
+  /** External lifecycle hooks may observe or reject pending permission requests. */
+  externalHooks?: ExternalHookController;
+  sessionId?: string;
 }
 
 /**
@@ -55,50 +60,58 @@ export class PermissionAwareApprovalController implements ApprovalController {
 
   async request(req: ApprovalRequest): Promise<ApprovalDecision> {
     const ruleResult = this.checkRequestRules(req);
+    const finalize = async (decision: ApprovalDecision): Promise<ApprovalDecision> => {
+      await this.runPermissionResultHook(req, decision);
+      return decision;
+    };
 
     if (ruleResult.decision === "deny") {
-      return {
+      return finalize({
         action: "reject",
         feedback: `Blocked by deny rule: ${ruleResult.rule?.source ?? "<unknown>"}`,
-      };
+      });
     }
 
     const mode = this.options.getMode();
+    const hookDecision = await this.runPermissionRequestHook(req, mode, ruleResult.decision);
+    if (hookDecision.action === "reject") {
+      return finalize(hookDecision);
+    }
 
     if (mode === "bypassPermissions") {
-      return { action: "approve" };
+      return finalize({ action: "approve" });
     }
 
     if (mode === "default" && (req.type === "edit" || req.type === "write" || req.type === "patch")) {
-      return { action: "approve" };
+      return finalize({ action: "approve" });
     }
 
     if (mode === "plan") {
-      return {
+      return finalize({
         action: "reject",
         feedback:
           "Plan mode is active. Do not call destructive tools directly — propose your changes via exit_plan_mode and wait for user approval.",
-      };
+      });
     }
 
     if (ruleResult.decision === "allow") {
-      return { action: "approve" };
+      return finalize({ action: "approve" });
     }
 
     // Session-scoped allowlist: previously-approved bash prefixes skip the prompt.
     if (req.type === "bash" && this.options.bashAllowlist?.matches(req.command)) {
-      return { action: "approve" };
+      return finalize({ action: "approve" });
     }
 
     const handler = this.options.handlerRef.current;
     if (!handler) {
-      return {
+      return finalize({
         action: "reject",
         feedback: "No interactive UI is available to approve this tool call.",
-      };
+      });
     }
 
-    return handler(req);
+    return finalize(await handler(req));
   }
 
   private requestToQuery(req: ApprovalRequest): PermissionQuery {
@@ -130,5 +143,96 @@ export class PermissionAwareApprovalController implements ApprovalController {
       return { decision: "allow", rule: perFile[0].rule };
     }
     return { decision: "ask" };
+  }
+
+  private async runPermissionRequestHook(
+    req: ApprovalRequest,
+    mode: PermissionMode,
+    ruleDecision: PermissionCheckResult["decision"],
+  ): Promise<ApprovalDecision> {
+    const hooks = this.options.externalHooks;
+    if (!hooks) return { action: "approve" };
+    try {
+      const result = await hooks.runEvent({
+        eventName: "PermissionRequest",
+        cwd: this.options.cwd,
+        sessionId: this.options.sessionId,
+        agentRole: "driver",
+        target: approvalTarget(req),
+        payload: {
+          request: summarizeApprovalRequest(req),
+          mode,
+          ruleDecision,
+        },
+        fullPayload: { permissionRequest: req },
+      });
+      if (result.decision === "deny") {
+        return {
+          action: "reject",
+          feedback: result.reason ?? `Blocked by hook ${result.sourceHookId ?? "<unknown>"}.`,
+        };
+      }
+    } catch {
+      // Hook failures are handled by the hook controller policy and must not
+      // crash approval handling.
+    }
+    return { action: "approve" };
+  }
+
+  private async runPermissionResultHook(
+    req: ApprovalRequest,
+    decision: ApprovalDecision,
+  ): Promise<void> {
+    const hooks = this.options.externalHooks;
+    if (!hooks) return;
+    try {
+      await hooks.runEvent({
+        eventName: "PermissionResult",
+        cwd: this.options.cwd,
+        sessionId: this.options.sessionId,
+        agentRole: "driver",
+        target: approvalTarget(req),
+        payload: {
+          request: summarizeApprovalRequest(req),
+          decision: decision.action,
+          feedback: decision.feedback ? truncateHookText(decision.feedback, 500) : undefined,
+        },
+        fullPayload: {
+          permissionRequest: req,
+          permissionDecision: decision,
+        },
+      });
+    } catch {
+      // Observe-only.
+    }
+  }
+}
+
+function approvalTarget(req: ApprovalRequest): string {
+  switch (req.type) {
+    case "bash":
+      return "Bash";
+    case "write":
+      return "Write";
+    case "edit":
+    case "patch":
+      return "Edit";
+    case "lsp":
+      return "Lsp";
+  }
+}
+
+function summarizeApprovalRequest(req: ApprovalRequest): Record<string, unknown> {
+  switch (req.type) {
+    case "bash":
+      return { type: req.type, commandPreview: truncateHookText(req.command, 500), cwd: req.cwd };
+    case "write":
+      return { type: req.type, path: req.path, fileExists: req.fileExists, contentLength: req.content.length };
+    case "edit":
+      return { type: req.type, path: req.path, fileExists: req.fileExists, diffLength: req.diff.length };
+    case "patch":
+      return { type: req.type, path: req.path, paths: req.paths, files: req.files, diffLength: req.diff.length };
+    case "lsp":
+      return { type: req.type, path: req.path, operation: req.operation };
   }
 }

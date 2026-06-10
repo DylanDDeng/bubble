@@ -9,6 +9,7 @@ import type { McpManager } from "../mcp/manager.js";
 import type { LspService } from "../lsp/index.js";
 import type { MemoryScope } from "../memory/index.js";
 import type { ThemeMode } from "../config.js";
+import type { ExternalHookController } from "../hooks/controller.js";
 
 export type SidebarMode = "auto" | "expanded" | "collapsed";
 
@@ -31,6 +32,7 @@ export interface SlashCommandContext {
   skillRegistry: SkillRegistry;
   bashAllowlist?: BashAllowlist;
   settingsManager?: SettingsManager;
+  hookController?: ExternalHookController;
   mcpManager?: McpManager;
   lspService?: LspService;
   flushMemory?: () => Promise<void>;

@@ -2,6 +2,15 @@ import { describe, expect, it } from "vitest";
 import { calculateUsageCost, getModelPricing } from "../model-pricing.js";
 
 describe("model pricing", () => {
+  it("contains Claude Fable 5 USD pricing", () => {
+    expect(getModelPricing("anthropic", "claude-fable-5")).toMatchObject({
+      currency: "USD",
+      inputCacheHitPerMillion: 10,
+      inputCacheMissPerMillion: 10,
+      outputPerMillion: 50,
+    });
+  });
+
   it("contains current DeepSeek v4 pricing", () => {
     expect(getModelPricing("deepseek", "deepseek-v4-flash")).toMatchObject({
       inputCacheHitPerMillion: 0.028,

@@ -1,0 +1,673 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bubble · 系统架构图解</title>
+<style>
+  :root{
+    --bg:#F7F6F2;
+    --card:#FFFFFF;
+    --ink:#17170F;
+    --muted:#6E6E66;
+    --faint:#9A9A90;
+    --line:#E7E5DC;
+    --line-strong:#D8D6CB;
+    --accent:#2E6B5E;
+    --accent-ink:#1F4E44;
+    --accent-soft:#E8F0ED;
+    --amber:#B0813A;
+    --amber-soft:#FBF1DE;
+    --rose:#B0522F;
+    --rose-soft:#FBEAE3;
+    --blue:#36506E;
+    --blue-soft:#E6EDF5;
+    --code-bg:#1B1C1A;
+    --code-line:#2C2E2B;
+    --code-ink:#E6E6E0;
+    --code-dim:#8C8F88;
+    --code-accent:#7FD1B9;
+    --code-amber:#E2B470;
+    --code-pink:#D98C9A;
+    --radius:16px;
+    --maxw:1080px;
+    --serif:"Songti SC","Noto Serif SC",Georgia,serif;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Noto Sans SC","Hiragino Sans GB",sans-serif;
+    --mono:"SF Mono","JetBrains Mono","Fira Code",ui-monospace,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  html{scroll-behavior:smooth;}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.75;
+    -webkit-font-smoothing:antialiased;font-feature-settings:"kern" 1;}
+  ::selection{background:var(--accent-soft);color:var(--accent-ink);}
+
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 32px;}
+  section{padding:96px 0;border-top:1px solid var(--line);}
+  @media(max-width:720px){.wrap{padding:0 20px;}section{padding:64px 0;}}
+
+  /* nav */
+  nav.top{position:sticky;top:0;z-index:50;background:rgba(247,246,242,.82);
+    backdrop-filter:saturate(180%) blur(14px);-webkit-backdrop-filter:saturate(180%) blur(14px);
+    border-bottom:1px solid var(--line);}
+  nav.top .inner{max-width:var(--maxw);margin:0 auto;padding:0 32px;height:60px;
+    display:flex;align-items:center;justify-content:space-between;}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:600;letter-spacing:.2px;}
+  .brand .dot{width:11px;height:11px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 4px var(--accent-soft);}
+  .brand .v{color:var(--faint);font-size:12px;font-family:var(--mono);font-weight:400;}
+  nav.top .links{display:flex;gap:24px;font-size:14px;}
+  nav.top .links a{color:var(--muted);text-decoration:none;transition:color .2s;}
+  nav.top .links a:hover{color:var(--ink);}
+  @media(max-width:860px){nav.top .links{display:none;}}
+
+  /* hero */
+  header.hero{padding:110px 0 90px;border-top:none;text-align:center;}
+  .eyebrow{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);font-size:12.5px;
+    letter-spacing:1.5px;text-transform:uppercase;color:var(--accent-ink);background:var(--accent-soft);
+    padding:6px 13px;border-radius:100px;margin-bottom:28px;}
+  h1.title{font-family:var(--serif);font-size:clamp(38px,6vw,70px);line-height:1.1;font-weight:600;
+    letter-spacing:-.5px;margin-bottom:24px;}
+  h1.title .hl{color:var(--accent);}
+  .lede{font-size:clamp(16px,2vw,20px);color:var(--muted);max-width:640px;margin:0 auto;line-height:1.8;}
+
+  /* section heads */
+  .sec-label{font-family:var(--mono);font-size:12.5px;letter-spacing:2px;color:var(--accent);
+    text-transform:uppercase;margin-bottom:16px;}
+  h2{font-family:var(--serif);font-size:clamp(27px,3.5vw,40px);font-weight:600;letter-spacing:-.3px;
+    line-height:1.2;margin-bottom:18px;}
+  .sec-intro{font-size:17px;color:var(--muted);max-width:700px;margin-bottom:44px;}
+
+  /* analogy callout */
+  .analogy{display:flex;gap:16px;background:linear-gradient(180deg,#F3F8F6,#FFFFFF);
+    border:1px solid var(--accent-soft);border-left:4px solid var(--accent);border-radius:12px;
+    padding:20px 22px;margin:28px 0;}
+  .analogy .em{font-size:22px;line-height:1.3;flex-shrink:0;}
+  .analogy .tx{font-size:15px;color:var(--accent-ink);}
+  .analogy .tx b{font-weight:600;}
+
+  /* generic cards */
+  .grid{display:grid;gap:20px;}
+  .grid.c2{grid-template-columns:repeat(2,1fr);}
+  .grid.c3{grid-template-columns:repeat(3,1fr);}
+  .grid.c4{grid-template-columns:repeat(4,1fr);}
+  @media(max-width:860px){.grid.c3,.grid.c4{grid-template-columns:repeat(2,1fr);}}
+  @media(max-width:560px){.grid.c2,.grid.c3,.grid.c4{grid-template-columns:1fr;}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:26px;
+    transition:transform .25s,box-shadow .25s,border-color .25s;}
+  .card:hover{transform:translateY(-3px);box-shadow:0 14px 38px -22px rgba(30,40,30,.4);border-color:var(--line-strong);}
+  .card .ic{width:40px;height:40px;border-radius:11px;background:var(--accent-soft);display:flex;
+    align-items:center;justify-content:center;margin-bottom:16px;font-size:19px;color:var(--accent-ink);}
+  .card h3{font-size:17px;font-weight:600;margin-bottom:8px;letter-spacing:-.1px;}
+  .card p{font-size:14.5px;color:var(--muted);line-height:1.68;}
+  .card code{font-family:var(--mono);font-size:12.5px;background:#F1F0EA;padding:1px 6px;border-radius:5px;color:var(--accent-ink);}
+
+  /* ====== ANIMATION: Loop ring ====== */
+  .stage{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+    padding:36px;display:flex;align-items:center;justify-content:center;}
+  .ring-wrap{position:relative;width:380px;max-width:100%;}
+  .ring-wrap svg{width:100%;height:auto;display:block;overflow:visible;}
+  .ring-node{position:absolute;transform:translate(-50%,-50%);text-align:center;width:120px;}
+  .ring-node .bubble{width:62px;height:62px;border-radius:50%;margin:0 auto 8px;background:var(--card);
+    border:2px solid var(--line-strong);display:flex;align-items:center;justify-content:center;font-size:26px;
+    transition:all .4s;}
+  .ring-node .lbl{font-size:13px;font-weight:600;color:var(--muted);transition:color .4s;}
+  .ring-node.lit .bubble{border-color:var(--accent);background:var(--accent-soft);transform:scale(1.12);
+    box-shadow:0 0 0 6px rgba(46,107,94,.08);}
+  .ring-node.lit .lbl{color:var(--accent-ink);}
+  .ring-center{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;width:130px;}
+  .ring-center .t{font-family:var(--serif);font-size:15px;color:var(--ink);font-weight:600;}
+  .ring-center .s{font-size:11.5px;color:var(--faint);font-family:var(--mono);margin-top:2px;}
+
+  /* ====== ANIMATION: Tool-call relay ====== */
+  .relay{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:40px 32px 32px;}
+  .relay-track{position:relative;height:150px;margin:0 auto;max-width:760px;}
+  .relay-line{position:absolute;top:46px;left:6%;right:6%;height:3px;background:var(--line-strong);border-radius:2px;}
+  .relay-line .fill{position:absolute;top:0;left:0;height:100%;width:0;background:var(--accent);border-radius:2px;
+    transition:width .85s ease;}
+  .station{position:absolute;top:46px;transform:translate(-50%,-50%);text-align:center;width:96px;}
+  .station .node{width:52px;height:52px;border-radius:14px;margin:0 auto 10px;background:var(--card);
+    border:2px solid var(--line-strong);display:flex;align-items:center;justify-content:center;font-size:22px;
+    transition:all .4s;position:relative;z-index:2;}
+  .station .cap{font-size:12.5px;color:var(--faint);font-weight:600;transition:color .4s;line-height:1.35;}
+  .station.active .node{border-color:var(--accent);background:var(--accent-soft);transform:scale(1.12);
+    box-shadow:0 0 0 6px rgba(46,107,94,.1);}
+  .station.active .cap{color:var(--accent-ink);}
+  .station.done .node{border-color:var(--accent);}
+  .packet{position:absolute;top:46px;width:34px;height:34px;border-radius:9px;transform:translate(-50%,-50%) scale(0);
+    display:flex;align-items:center;justify-content:center;font-size:16px;z-index:5;
+    transition:left .8s cubic-bezier(.55,0,.45,1),transform .35s,background .3s;
+    background:var(--accent);color:#fff;box-shadow:0 6px 18px -6px rgba(46,107,94,.7);}
+  .packet.show{transform:translate(-50%,-50%) scale(1);}
+  .packet.result{background:var(--amber);box-shadow:0 6px 18px -6px rgba(176,129,58,.7);}
+  .relay-caption{text-align:center;margin-top:14px;min-height:52px;}
+  .relay-caption .step{font-family:var(--mono);font-size:12px;color:var(--accent);letter-spacing:1px;}
+  .relay-caption .desc{font-size:15.5px;color:var(--ink);margin-top:4px;font-weight:500;}
+  .relay-ctl{display:flex;justify-content:center;gap:12px;margin-top:22px;}
+  .btn{font-family:var(--sans);font-size:13.5px;border:1px solid var(--line-strong);background:var(--card);
+    color:var(--muted);padding:8px 18px;border-radius:100px;cursor:pointer;transition:all .2s;}
+  .btn:hover{border-color:var(--accent);color:var(--accent-ink);}
+  .btn.primary{background:var(--accent);color:#fff;border-color:var(--accent);}
+  .btn.primary:hover{background:var(--accent-ink);color:#fff;}
+  @media(max-width:600px){
+    .station{width:64px;}.station .cap{font-size:11px;}.station .node{width:44px;height:44px;font-size:18px;}
+    .relay-track{height:140px;}
+  }
+
+  /* ====== ANIMATION: streaming terminal ====== */
+  .term{background:var(--code-bg);border-radius:var(--radius);overflow:hidden;border:1px solid #000;
+    box-shadow:0 18px 50px -28px rgba(20,30,20,.6);}
+  .term .bar{display:flex;align-items:center;gap:7px;padding:13px 18px;border-bottom:1px solid var(--code-line);}
+  .term .bar .d{width:11px;height:11px;border-radius:50%;}
+  .term .bar .r{background:#E06C5E;}.term .bar .y{background:#E2B470;}.term .bar .g{background:#7FD1B9;}
+  .term .bar .fname{margin-left:10px;font-family:var(--mono);font-size:12px;color:var(--code-dim);}
+  .term .body{padding:22px;font-family:var(--mono);font-size:13.5px;line-height:1.9;color:var(--code-ink);min-height:230px;}
+  .term .ln{white-space:pre-wrap;}
+  .term .u{color:#9BB8E8;}
+  .term .a{color:var(--code-ink);}
+  .term .tool{color:var(--code-accent);}
+  .term .dim{color:var(--code-dim);}
+  .term .ok{color:var(--code-accent);}
+  .term .cursor{display:inline-block;width:8px;height:16px;background:var(--code-accent);vertical-align:-2px;
+    animation:blink 1s steps(1) infinite;margin-left:2px;}
+  @keyframes blink{50%{opacity:0;}}
+  .term .toolcard{display:inline-block;background:rgba(127,209,185,.1);border:1px solid rgba(127,209,185,.3);
+    border-radius:7px;padding:2px 10px;margin:2px 0;}
+
+  /* ====== ANIMATION: context pruning ====== */
+  .ctx-demo{display:flex;flex-direction:column;gap:9px;background:var(--card);border:1px solid var(--line);
+    border-radius:var(--radius);padding:24px;}
+  .msg{border:1px solid var(--line);border-radius:10px;padding:12px 16px;display:flex;align-items:center;gap:12px;
+    transition:all .6s ease;overflow:hidden;}
+  .msg .role{font-family:var(--mono);font-size:11px;padding:3px 9px;border-radius:6px;flex-shrink:0;white-space:nowrap;}
+  .msg .role.sys{background:var(--blue-soft);color:var(--blue);}
+  .msg .role.usr{background:var(--accent-soft);color:var(--accent-ink);}
+  .msg .role.ast{background:#F1F0EA;color:var(--muted);}
+  .msg .role.tool{background:var(--amber-soft);color:var(--amber);}
+  .msg .txt{font-size:13.5px;color:var(--muted);}
+  .msg .full{display:block;}
+  .msg .sum{display:none;font-size:12.5px;color:var(--faint);font-style:italic;}
+  .msg.pinned{border-color:var(--blue-soft);}
+  .msg.pruned{background:var(--bg);opacity:.7;padding:7px 16px;}
+  .msg.pruned .full{display:none;}
+  .msg.pruned .sum{display:block;}
+  .msg.pruned .role.tool{background:#EFEDE6;color:var(--faint);}
+  .ctx-tag{position:absolute;right:14px;}
+
+  /* converge */
+  .converge{display:flex;align-items:center;justify-content:center;gap:0;flex-wrap:wrap;}
+  .conv-col{display:flex;flex-direction:column;gap:8px;}
+  .conv-box{font-family:var(--mono);font-size:12.5px;background:var(--card);border:1px solid var(--line-strong);
+    border-radius:9px;padding:9px 14px;color:var(--muted);position:relative;overflow:hidden;}
+  .conv-box .spark{position:absolute;left:-30%;top:0;width:30%;height:100%;
+    background:linear-gradient(90deg,transparent,rgba(46,107,94,.18),transparent);animation:sweep 2.6s linear infinite;}
+  @keyframes sweep{to{left:130%;}}
+  .conv-arr{color:var(--accent);font-size:22px;padding:0 18px;}
+  .conv-out{font-family:var(--mono);font-size:12.5px;background:var(--code-bg);color:var(--code-accent);border-radius:9px;padding:12px 16px;}
+  @media(max-width:600px){.conv-arr{transform:rotate(90deg);padding:10px 0;}.converge{flex-direction:column;}}
+
+  /* layered stack */
+  .stack{display:flex;flex-direction:column;gap:11px;}
+  .layer{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 22px;position:relative;overflow:hidden;}
+  .layer::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--accent);opacity:.5;}
+  .layer.accent{background:linear-gradient(180deg,#F3F8F6,#FFFFFF);}
+  .layer.accent::before{opacity:1;width:5px;}
+  .layer .lh{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:5px;}
+  .layer .lh .n{font-family:var(--mono);font-size:12px;color:var(--faint);}
+  .layer .lh h4{font-size:15.5px;font-weight:600;}
+  .layer .lh .tag{font-family:var(--mono);font-size:11px;color:var(--accent-ink);background:var(--accent-soft);padding:2px 9px;border-radius:100px;}
+  .layer p{font-size:13.5px;color:var(--muted);}
+  .layer .mods{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;}
+  .layer .mods span{font-family:var(--mono);font-size:11px;color:var(--muted);border:1px solid var(--line-strong);border-radius:6px;padding:3px 9px;background:var(--bg);}
+
+  /* tools table */
+  .grp-h{font-family:var(--mono);font-size:12px;color:var(--accent);letter-spacing:1px;text-transform:uppercase;margin:32px 0 12px;}
+  .grp-h:first-child{margin-top:0;}
+  .tbl-wrap{border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:var(--card);}
+  table{width:100%;border-collapse:collapse;}
+  th,td{text-align:left;padding:12px 18px;font-size:13.5px;border-bottom:1px solid var(--line);}
+  th{font-family:var(--mono);font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:var(--faint);font-weight:500;background:var(--bg);}
+  tr:last-child td{border-bottom:none;}
+  td .tn{font-family:var(--mono);font-size:13px;color:var(--accent-ink);font-weight:500;}
+  td.cnt{color:var(--muted);}
+  .badge{display:inline-block;font-family:var(--mono);font-size:11px;padding:2px 8px;border-radius:5px;}
+  .badge.ro{background:var(--accent-soft);color:var(--accent-ink);}
+  .badge.wr{background:var(--rose-soft);color:var(--rose);}
+  .badge.ap{background:var(--amber-soft);color:var(--amber);}
+
+  /* modes */
+  .modes{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;}
+  @media(max-width:760px){.modes{grid-template-columns:1fr;}}
+  .mode{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:24px;}
+  .mode .tag{font-family:var(--mono);font-size:13px;font-weight:600;padding:5px 11px;border-radius:7px;display:inline-block;margin-bottom:14px;}
+  .mode.def .tag{background:var(--accent-soft);color:var(--accent-ink);}
+  .mode.plan .tag{background:var(--blue-soft);color:var(--blue);}
+  .mode.bypass .tag{background:var(--rose-soft);color:var(--rose);}
+  .mode p{font-size:14px;color:var(--muted);}
+  .mode .det{font-size:13px;color:var(--faint);margin-top:12px;border-top:1px solid var(--line);padding-top:12px;}
+
+  /* footer */
+  footer{border-top:1px solid var(--line);padding:46px 0 60px;}
+  footer .inner{max-width:var(--maxw);margin:0 auto;padding:0 32px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:18px;}
+  footer .fl{font-family:var(--serif);font-size:18px;}
+  footer .fr{font-size:13px;color:var(--faint);font-family:var(--mono);}
+
+  /* reveal */
+  .reveal{opacity:0;transform:translateY(18px);transition:opacity .7s,transform .7s;}
+  .reveal.in{opacity:1;transform:none;}
+  @media(prefers-reduced-motion:reduce){.reveal{opacity:1;transform:none;}}
+</style>
+</head>
+<body>
+
+<nav class="top">
+  <div class="inner">
+    <div class="brand"><span class="dot"></span>Bubble <span class="v">v0.0.17</span></div>
+    <div class="links">
+      <a href="#what">是什么</a>
+      <a href="#loop">工作循环</a>
+      <a href="#toolflow">工具调用</a>
+      <a href="#stream">流式输出</a>
+      <a href="#context">记忆管理</a>
+      <a href="#provider">模型适配</a>
+      <a href="#permission">安全闸门</a>
+      <a href="#tools">工具清单</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <span class="eyebrow">● 系统架构 · 图解版</span>
+    <h1 class="title">用大白话 + 动画，<br>看懂 <span class="hl">Bubble</span> 怎么干活</h1>
+    <p class="lede">Bubble 是一个会自己动手的「编码助手」。它能读代码、改文件、跑命令、上网查资料——但每一步都在你掌控之中。下面我们一步步看它脑子里到底发生了什么。</p>
+  </div>
+</header>
+
+<!-- WHAT -->
+<section id="what">
+  <div class="wrap">
+    <div class="sec-label">01 — 它到底是什么</div>
+    <h2>一个会用工具的助手</h2>
+    <p class="sec-intro">普通聊天 AI 只会「说」，Bubble 还会「做」。你给它一句话，它会自己思考要不要动手、用哪个工具、做完看结果、再决定下一步——就像一个能上手的同事，而不只是个问答机器人。</p>
+
+    <div class="analogy">
+      <span class="em">🧑‍🔧</span>
+      <div class="tx"><b>打个比方：</b>把 Bubble 想成一位新来的得力工程师。你说「帮我把版本号升级一下」，他不会只回你一句话，而是<b>先翻开文件看看</b>、<b>动手改</b>、<b>跑一遍测试</b>，遇到要动真格的操作（删文件、跑命令）还会<b>先问你一声</b>。这一整套「想—做—看—再想」的能力，就是 Agent。</div>
+    </div>
+
+    <div class="grid c3" style="margin-top:8px">
+      <div class="card reveal"><div class="ic">💬</div><h3>听懂你说的话</h3><p>把你的需求和整个对话历史交给大模型，让它理解当前要解决什么。</p></div>
+      <div class="card reveal"><div class="ic">🛠️</div><h3>自己动手用工具</h3><p>读写文件、执行命令、搜索代码、上网查资料……23 个内置工具随取随用。</p></div>
+      <div class="card reveal"><div class="ic">🔁</div><h3>看结果再继续</h3><p>每用完一个工具，就把结果喂回模型，循环往复，直到把事情真正办成。</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- LOOP -->
+<section id="loop">
+  <div class="wrap">
+    <div class="sec-label">02 — 工作循环</div>
+    <h2>它脑子里的「转圈圈」</h2>
+    <p class="sec-intro">Bubble 干活不是一锤子买卖，而是不停地转圈：思考 → 动手 → 看结果 → 再思考。下面这个圈会一直转，亮起来的就是它当前在做的事。一旦不再需要工具，它就跳出循环、给你最终答复。</p>
+
+    <div class="stage reveal">
+      <div class="ring-wrap">
+        <svg viewBox="0 0 400 400">
+          <path id="ringPath" d="M200,60 A140,140 0 1,1 199.9,60" fill="none" stroke="#E7E5DC" stroke-width="2.5" stroke-dasharray="2 7" stroke-linecap="round"/>
+          <circle r="7" fill="#2E6B5E">
+            <animateMotion dur="9s" repeatCount="indefinite" rotate="auto">
+              <mpath href="#ringPath"/>
+            </animateMotion>
+          </circle>
+        </svg>
+        <div class="ring-center">
+          <div class="t">回合循环</div>
+          <div class="s">turn loop</div>
+        </div>
+        <div class="ring-node n0" style="left:50%;top:0;">
+          <div class="bubble">💭</div><div class="lbl">① 理解需求</div>
+        </div>
+        <div class="ring-node n1" style="left:100%;top:50%;">
+          <div class="bubble">🛠️</div><div class="lbl">② 调用工具</div>
+        </div>
+        <div class="ring-node n2" style="left:50%;top:100%;">
+          <div class="bubble">📋</div><div class="lbl">③ 拿到结果</div>
+        </div>
+        <div class="ring-node n3" style="left:0;top:50%;">
+          <div class="bubble">✅</div><div class="lbl">④ 继续或收尾</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid c4" style="margin-top:28px">
+      <div class="card reveal"><div class="ic">①</div><h3>理解需求</h3><p>把对话历史交给模型，让它判断该做什么、要不要用工具。</p></div>
+      <div class="card reveal"><div class="ic">②</div><h3>调用工具</h3><p>模型说「我要读这个文件」，内核就去执行（敏感操作先审批）。</p></div>
+      <div class="card reveal"><div class="ic">③</div><h3>拿到结果</h3><p>工具输出被写回对话，作为下一轮模型思考的新线索。</p></div>
+      <div class="card reveal"><div class="ic">④</div><h3>继续或收尾</h3><p>还需要工具就再转一圈；不需要了就给出最终答复，结束。</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- TOOL FLOW -->
+<section id="toolflow">
+  <div class="wrap">
+    <div class="sec-label">03 — 工具调用流转 ★</div>
+    <h2>一次工具调用的「接力赛」</h2>
+    <p class="sec-intro">这是整个系统最核心的一环。关键点是：<b>模型自己不动手</b>，它只是「下单」说要用某个工具，由内核当「调度员」去解析、审批、执行，再把结果送回模型。点下面的按钮，看这个包裹怎么一站站传递。</p>
+
+    <div class="analogy">
+      <span class="em">📦</span>
+      <div class="tx"><b>打个比方：</b>就像点外卖。模型是「下单的人」，它只负责说「我要一份读文件」；然后订单经过<b>核对（解析校验）→ 你点确认（审批）→ 厨房出餐（执行）</b>，最后<b>外卖（结果）送回</b>到模型手里。模型尝一口，再决定要不要继续点下一单。</div>
+    </div>
+
+    <div class="relay reveal">
+      <div class="relay-track">
+        <div class="relay-line"><div class="fill" id="relayFill"></div></div>
+        <div class="station" id="st0" style="left:8%"><div class="node">🧠</div><div class="cap">模型下单</div></div>
+        <div class="station" id="st1" style="left:36%"><div class="node">🔍</div><div class="cap">解析校验</div></div>
+        <div class="station" id="st2" style="left:64%"><div class="node">🛡️</div><div class="cap">权限审批</div></div>
+        <div class="station" id="st3" style="left:92%"><div class="node">⚙️</div><div class="cap">执行工具</div></div>
+        <div class="packet" id="packet" style="left:8%">📦</div>
+      </div>
+      <div class="relay-caption">
+        <div class="step" id="relayStep">准备就绪</div>
+        <div class="desc" id="relayDesc">点击「播放」看一次完整的工具调用流转</div>
+      </div>
+      <div class="relay-ctl">
+        <button class="btn primary" id="relayPlay">▶ 播放</button>
+        <button class="btn" id="relayStepBtn">下一步 →</button>
+      </div>
+    </div>
+
+    <div class="grid c2" style="margin-top:28px">
+      <div class="card reveal"><div class="ic">🔍</div><h3>解析校验</h3><p>模型的请求是边生成边流出的碎片，内核先把参数拼完整、做 JSON 解析，再检查必填项是否齐全、有没有损坏。</p></div>
+      <div class="card reveal"><div class="ic">🛡️</div><h3>权限审批</h3><p>写文件、跑命令这类「有后果」的操作要过闸门：按规则自动放行、直接拒绝，或弹窗 / 飞书卡片让你拍板。</p></div>
+      <div class="card reveal"><div class="ic">⚙️</div><h3>执行工具</h3><p>带上工作目录、取消信号、进度回调等「上下文」真正跑起来；长任务还会实时上报进度。</p></div>
+      <div class="card reveal"><div class="ic">📋</div><h3>结果回流</h3><p>结果按长度截断后写回对话历史，标好「属于哪次调用」，下一轮模型就能看到它继续推理。</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- STREAM -->
+<section id="stream">
+  <div class="wrap">
+    <div class="sec-label">04 — 流式输出</div>
+    <h2>为什么字是一个个蹦出来的</h2>
+    <p class="sec-intro">你会发现 Bubble 的回答是实时「流」出来的，而不是憋很久一次性甩给你。文字、思考过程、工具调用全都被切成小碎片（事件）即时推送，所以你能边看边等，体验顺滑。下面是一段真实交互的还原：</p>
+
+    <div class="term reveal">
+      <div class="bar"><span class="d r"></span><span class="d y"></span><span class="d g"></span><span class="fname">bubble — 实时流式演示</span></div>
+      <div class="body" id="term"></div>
+    </div>
+
+    <div class="analogy">
+      <span class="em">🌊</span>
+      <div class="tx"><b>一句话总结：</b>整个系统就是一条「事件流水线」。模型每吐一点内容、每发起一次工具调用、每跑完一步，都会发出一个<b>事件</b>；终端界面和飞书机器人只管「订阅」这些事件并画出来——所以同一个内核能同时驱动多种界面。</div>
+    </div>
+  </div>
+</section>
+
+<!-- CONTEXT -->
+<section id="context">
+  <div class="wrap">
+    <div class="sec-label">05 — 记忆管理</div>
+    <h2>对话越聊越长，怎么办？</h2>
+    <p class="sec-intro">模型的「记忆」（上下文窗口）是有限的，但对话会越积越多。Bubble 会自动「整理书桌」：把很久以前那些又长又占地方的工具结果<b>折叠成一句摘要</b>，腾出空间给新内容，同时保留关键信息。看下面——旧的工具结果会自动收起来。</p>
+
+    <div class="ctx-demo reveal" id="ctxDemo">
+      <div class="msg pinned"><span class="role sys">系统</span><span class="txt">你是一个编码助手…（始终保留）</span></div>
+      <div class="msg" data-tool><span class="role usr">用户</span><span class="txt">帮我重构一下登录模块</span></div>
+      <div class="msg" data-tool>
+        <span class="role tool">工具</span>
+        <span class="txt"><span class="full">read · auth/login.ts —— 返回了 320 行完整文件内容……</span><span class="sum">📄 已折叠：读取了 auth/login.ts（320 行）</span></span>
+      </div>
+      <div class="msg" data-tool>
+        <span class="role tool">工具</span>
+        <span class="txt"><span class="full">grep · "login" —— 命中 18 处，分布在 9 个文件……</span><span class="sum">📄 已折叠：grep 命中 18 处</span></span>
+      </div>
+      <div class="msg"><span class="role ast">助手</span><span class="txt">我先看完这两处再动手……</span></div>
+      <div class="msg"><span class="role usr">用户</span><span class="txt">好的，顺便加上错误提示</span></div>
+    </div>
+
+    <div class="grid c4" style="margin-top:28px">
+      <div class="card reveal"><div class="ic">📌</div><h3>投影</h3><p>每轮重新挑选「这次发给模型的内容」，系统提示等始终保留。</p></div>
+      <div class="card reveal"><div class="ic">✂️</div><h3>裁剪</h3><p>旧的读取 / 搜索结果只留最近几条完整版，其余换成摘要。</p></div>
+      <div class="card reveal"><div class="ic">🗜️</div><h3>压缩</h3><p>实在太长时，让模型把早期对话总结成一段，节省大量空间。</p></div>
+      <div class="card reveal"><div class="ic">📊</div><h3>预算</h3><p>实时算账：还剩多少额度、要给回答留多少空间、何时该整理。</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- PROVIDER -->
+<section id="provider">
+  <div class="wrap">
+    <div class="sec-label">06 — 模型适配</div>
+    <h2>想换哪个大模型都行</h2>
+    <p class="sec-intro">Claude、GPT、DeepSeek……各家模型的接口五花八门。Bubble 在中间加了一层「翻译官」，把它们统统翻译成内部统一的格式。所以对核心逻辑来说，背后是谁家的模型并不重要——随时可换。</p>
+
+    <div class="stage reveal" style="padding:40px 24px">
+      <div class="converge">
+        <div class="conv-col">
+          <div class="conv-box"><span class="spark"></span>Anthropic Claude</div>
+          <div class="conv-box"><span class="spark"></span>OpenAI / DeepSeek</div>
+          <div class="conv-box"><span class="spark"></span>ChatGPT Codex</div>
+        </div>
+        <span class="conv-arr">→</span>
+        <div class="conv-box" style="border-style:dashed">统一翻译层 · Provider</div>
+        <span class="conv-arr">→</span>
+        <div class="conv-out">同一种数据流 · StreamChunk</div>
+      </div>
+    </div>
+
+    <div class="analogy">
+      <span class="em">🔌</span>
+      <div class="tx"><b>打个比方：</b>就像各国插头不一样，但你有一个「万能转接头」。无论插上哪家模型，转出来的电压（数据格式）都一样，核心电器（Agent 内核）完全不用改。</div>
+    </div>
+  </div>
+</section>
+
+<!-- PERMISSION -->
+<section id="permission">
+  <div class="wrap">
+    <div class="sec-label">07 — 安全闸门</div>
+    <h2>谁来踩刹车？</h2>
+    <p class="sec-intro">让 AI 自己跑命令、改文件听起来有点吓人。Bubble 用三种「档位」把控制权交还给你：从「凡事先问」到「全自动放行」，按场景自由切换。无论哪档，明确禁止的操作（deny 规则）永远优先拦截。</p>
+    <div class="modes">
+      <div class="mode def reveal">
+        <span class="tag">default · 默认</span>
+        <p>日常档。改代码自动放行；但跑命令这类敏感操作会按规则询问你。</p>
+        <div class="det">👍 适合大多数开发场景</div>
+      </div>
+      <div class="mode plan reveal">
+        <span class="tag">plan · 规划</span>
+        <p>只看不动手。它只会读和查，先把方案写给你，你点头了才真正执行。</p>
+        <div class="det">🧭 想先听方案、不想它乱改时用</div>
+      </div>
+      <div class="mode bypass reveal">
+        <span class="tag">bypass · 放行</span>
+        <p>全自动，不打扰你。需要专门的命令行开关才能开启。</p>
+        <div class="det">🤖 自动化脚本 / 受信环境专用</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- LAYERS -->
+<section id="layers">
+  <div class="wrap">
+    <div class="sec-label">08 — 架构分层</div>
+    <h2>拆开看，它由这几层搭成</h2>
+    <p class="sec-intro">如果你是工程师，这是它的「骨架图」。从你输入的那一刻，数据自上而下流过这些层，各司其职、互不干扰。</p>
+    <div class="stack">
+      <div class="layer reveal"><div class="lh"><span class="n">L1</span><h4>界面层</h4><span class="tag">入口</span></div><p>接收输入、画出实时画面。终端和飞书机器人共用一个内核。</p><div class="mods"><span>tui · 终端界面</span><span>feishu · 飞书机器人</span></div></div>
+      <div class="layer reveal"><div class="lh"><span class="n">L2</span><h4>会话层</h4><span class="tag">存档</span></div><p>把每条消息记进文件，支持断点续聊、查看历史。</p><div class="mods"><span>SessionManager</span><span>JSONL 存档</span></div></div>
+      <div class="layer accent reveal"><div class="lh"><span class="n">L3</span><h4>Agent 内核</h4><span class="tag">大脑</span></div><p>驱动「转圈圈」：调模型、解析工具调用、执行、回写、判断是否继续。</p><div class="mods"><span>agent.ts</span><span>run() 循环</span><span>executeTool()</span></div></div>
+      <div class="layer reveal"><div class="lh"><span class="n">L4</span><h4>记忆治理</h4><span class="tag">整理</span></div><p>裁剪、压缩、投影、算账，保证对话永远塞得进窗口。</p><div class="mods"><span>prune</span><span>compact</span><span>budget</span></div></div>
+      <div class="layer reveal"><div class="lh"><span class="n">L5</span><h4>模型适配</h4><span class="tag">翻译</span></div><p>统一接口屏蔽各家模型差异，输出同一种数据流。</p><div class="mods"><span>provider-anthropic</span><span>provider-openai-codex</span></div></div>
+      <div class="layer reveal"><div class="lh"><span class="n">L6</span><h4>工具层</h4><span class="tag">双手</span></div><p>读写、执行、检索、子任务、联网、记忆，外加 MCP 扩展工具。</p><div class="mods"><span>tools/ · 23 个内置</span><span>mcp/ 扩展</span></div></div>
+      <div class="layer reveal"><div class="lh"><span class="n">L7</span><h4>旁路系统</h4><span class="tag">后勤</span></div><p>权限审批、用量统计与成本、长期记忆、子 Agent 调度。</p><div class="mods"><span>approval</span><span>stats</span><span>memory</span></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- TOOLS -->
+<section id="tools">
+  <div class="wrap">
+    <div class="sec-label">09 — 工具清单</div>
+    <h2>它都有哪些「工具」</h2>
+    <p class="sec-intro">这是 Bubble 的全套「双手」。标签里：<span class="badge ro">只读</span> 表示安全、规划模式也能用；<span class="badge wr">写</span> 会改动你的东西；<span class="badge ap">审批</span> 表示动手前要过你这关。</p>
+
+    <div class="grp-h">📁 读写文件</div>
+    <div class="tbl-wrap"><table>
+      <tr><th style="width:150px">工具</th><th style="width:140px">属性</th><th>用途（大白话）</th></tr>
+      <tr><td><span class="tn">read</span></td><td><span class="badge ro">只读</span></td><td class="cnt">翻开文件看内容</td></tr>
+      <tr><td><span class="tn">write</span></td><td><span class="badge wr">写</span> <span class="badge ap">审批</span></td><td class="cnt">新建或整篇覆盖文件</td></tr>
+      <tr><td><span class="tn">edit</span></td><td><span class="badge wr">写</span> <span class="badge ap">审批</span></td><td class="cnt">精准替换某段文字，最安全的改法</td></tr>
+      <tr><td><span class="tn">glob</span></td><td><span class="badge ro">只读</span></td><td class="cnt">按文件名规律找文件</td></tr>
+      <tr><td><span class="tn">grep</span></td><td><span class="badge ro">只读</span></td><td class="cnt">在代码里全局搜关键词</td></tr>
+    </table></div>
+
+    <div class="grp-h">⚡ 执行与服务</div>
+    <div class="tbl-wrap"><table>
+      <tr><th style="width:150px">工具</th><th style="width:140px">属性</th><th>用途（大白话）</th></tr>
+      <tr><td><span class="tn">bash</span></td><td><span class="badge wr">写</span> <span class="badge ap">审批</span></td><td class="cnt">跑终端命令，带超时保护</td></tr>
+      <tr><td><span class="tn">start_server</span></td><td><span class="badge wr">写</span> <span class="badge ap">审批</span></td><td class="cnt">启动本地开发服务器</td></tr>
+      <tr><td><span class="tn">stop_server</span></td><td><span class="badge ro">只读</span></td><td class="cnt">关掉服务器</td></tr>
+      <tr><td><span class="tn">server_status / server_logs</span></td><td><span class="badge ro">只读</span></td><td class="cnt">看服务器起没起、看日志</td></tr>
+    </table></div>
+
+    <div class="grp-h">🤝 协作 · 检索 · 联网</div>
+    <div class="tbl-wrap"><table>
+      <tr><th style="width:150px">工具</th><th style="width:140px">属性</th><th>用途（大白话）</th></tr>
+      <tr><td><span class="tn">spawn_agent / wait_agent</span></td><td><span class="badge ro">只读</span></td><td class="cnt">派一个「分身」去后台干活并等它完成</td></tr>
+      <tr><td><span class="tn">send_input / close_agent</span></td><td><span class="badge ro">只读</span></td><td class="cnt">给分身发指令 / 让它收工</td></tr>
+      <tr><td><span class="tn">tool_search / skill_search</span></td><td><span class="badge ro">只读</span></td><td class="cnt">按需查找并解锁更多工具 / 技能</td></tr>
+      <tr><td><span class="tn">skill</span></td><td><span class="badge ro">只读</span></td><td class="cnt">加载某个专项技能</td></tr>
+      <tr><td><span class="tn">question</span></td><td><span class="badge ro">只读</span> <span class="badge ap">审批</span></td><td class="cnt">反过来向你提问</td></tr>
+      <tr><td><span class="tn">todo_write</span></td><td><span class="badge ro">只读</span></td><td class="cnt">列待办、管理任务清单</td></tr>
+      <tr><td><span class="tn">exit_plan_mode</span></td><td><span class="badge ro">只读</span></td><td class="cnt">把方案交给你审批</td></tr>
+      <tr><td><span class="tn">web_search / web_fetch</span></td><td><span class="badge ro">只读</span></td><td class="cnt">上网搜索、抓取网页内容</td></tr>
+      <tr><td><span class="tn">memory_search / memory_read_summary</span></td><td><span class="badge ro">只读</span></td><td class="cnt">翻查长期记忆</td></tr>
+      <tr><td><span class="tn">lsp</span></td><td><span class="badge ap">审批</span></td><td class="cnt">像 IDE 一样做代码诊断与重构</td></tr>
+    </table></div>
+  </div>
+</section>
+
+<footer>
+  <div class="inner">
+    <div class="fl">Bubble · 系统架构图解</div>
+    <div class="fr">@bubblebrain-ai/bubble · 图解版</div>
+  </div>
+</footer>
+
+<script>
+/* ---------- scroll reveal ---------- */
+const io = new IntersectionObserver((es)=>{
+  es.forEach((e,i)=>{ if(e.isIntersecting){ setTimeout(()=>e.target.classList.add('in'),(i%6)*60); io.unobserve(e.target);} });
+},{threshold:.12,rootMargin:"0px 0px -40px 0px"});
+document.querySelectorAll('.reveal').forEach(el=>io.observe(el));
+
+/* ---------- nav highlight ---------- */
+const navLinks=[...document.querySelectorAll('nav.top .links a')];
+const map=new Map(navLinks.map(a=>[a.getAttribute('href').slice(1),a]));
+const so=new IntersectionObserver((es)=>{es.forEach(e=>{const a=map.get(e.target.id);
+  if(a&&e.isIntersecting){navLinks.forEach(l=>l.style.color='');a.style.color='var(--ink)';}});},{threshold:.4});
+document.querySelectorAll('section[id]').forEach(s=>{if(map.has(s.id))so.observe(s);});
+
+/* ---------- loop ring: light nodes in sync with traveling dot ---------- */
+(function(){
+  const nodes=['n0','n1','n2','n3'].map(c=>document.querySelector('.ring-node.'+c));
+  let i=0;
+  setInterval(()=>{ nodes.forEach(n=>n.classList.remove('lit')); nodes[i].classList.add('lit'); i=(i+1)%4; },2250);
+  nodes[0].classList.add('lit');
+})();
+
+/* ---------- tool-call relay ---------- */
+(function(){
+  const pos=[8,36,64,92];
+  const packet=document.getElementById('packet');
+  const fill=document.getElementById('relayFill');
+  const sts=[0,1,2,3].map(i=>document.getElementById('st'+i));
+  const stepEl=document.getElementById('relayStep');
+  const descEl=document.getElementById('relayDesc');
+  const steps=[
+    {p:0,step:"① 下单 · tool_call",desc:"模型说：我要调用一个工具",result:false,fill:0},
+    {p:1,step:"② 解析校验",desc:"拼接参数、JSON 解析、检查必填项",result:false,fill:33},
+    {p:2,step:"③ 权限审批",desc:"敏感操作过闸门：放行 / 拒绝 / 问你",result:false,fill:66},
+    {p:3,step:"④ 执行工具 · tool_start",desc:"带上上下文真正跑起来，得到结果",result:false,fill:100},
+    {p:0,step:"⑤ 结果回流 · tool_end",desc:"结果写回对话，送回模型继续推理",result:true,fill:100},
+  ];
+  let idx=-1, timer=null;
+  function render(){
+    const s=steps[idx];
+    packet.style.left=pos[s.p]+'%';
+    packet.classList.add('show');
+    packet.classList.toggle('result',s.result);
+    packet.textContent=s.result?'📋':'📦';
+    fill.style.width=s.result?'100%':(s.fill+'%');
+    sts.forEach((el,k)=>{
+      el.classList.toggle('active',k===s.p && !s.result);
+      el.classList.toggle('done',(k<=s.p && !s.result));
+    });
+    if(s.result){ sts.forEach(el=>el.classList.remove('active')); sts[0].classList.add('active'); }
+    stepEl.textContent=s.step;
+    descEl.textContent=s.desc;
+  }
+  function next(){ idx=(idx+1)%steps.length; if(idx===0 && timer){/*loop pause*/} render(); }
+  function reset(){ idx=-1; packet.classList.remove('show'); fill.style.width='0'; sts.forEach(el=>el.classList.remove('active','done'));
+    stepEl.textContent="准备就绪"; descEl.textContent="点击「播放」看一次完整的工具调用流转"; packet.style.left='8%'; }
+  document.getElementById('relayStepBtn').onclick=()=>{ if(timer){clearInterval(timer);timer=null;document.getElementById('relayPlay').textContent='▶ 播放';} next(); };
+  document.getElementById('relayPlay').onclick=function(){
+    if(timer){ clearInterval(timer); timer=null; this.textContent='▶ 播放'; return; }
+    this.textContent='⏸ 暂停';
+    if(idx>=steps.length-1||idx<0){ idx=-1; }
+    next();
+    timer=setInterval(next,1900);
+  };
+  // autostart when scrolled into view
+  const relayObs=new IntersectionObserver((es)=>{es.forEach(e=>{ if(e.isIntersecting && idx<0){
+    document.getElementById('relayPlay').click(); relayObs.disconnect(); }});},{threshold:.5});
+  relayObs.observe(document.querySelector('.relay'));
+})();
+
+/* ---------- streaming terminal typewriter ---------- */
+(function(){
+  const term=document.getElementById('term');
+  const script=[
+    {cls:'u',  t:'你：帮我看看 package.json 里的版本号\n'},
+    {cls:'a',  t:'\n助手：好的，我先读取这个文件 '},
+    {cls:'dim',t:'…\n'},
+    {cls:'tool',t:'  ⚙ read · package.json\n',card:true},
+    {cls:'ok', t:'  ✓ 已读取 42 行\n'},
+    {cls:'a',  t:'\n当前版本号是 ',},
+    {cls:'ok', t:'0.0.17',},
+    {cls:'a',  t:'，需要我帮你升级吗？',},
+  ];
+  let si=0,ci=0,cur=null;
+  const cursor=document.createElement('span');cursor.className='cursor';
+  function tick(){
+    if(si>=script.length){ // finished — hold then restart
+      setTimeout(()=>{ term.innerHTML=''; si=0;ci=0;cur=null; tick(); },2600); return;
+    }
+    const seg=script[si];
+    if(ci===0){ cur=document.createElement('span'); cur.className='ln '+seg.cls; if(seg.card) cur.classList.add('toolcard'); term.appendChild(cur); term.appendChild(cursor);}
+    cur.textContent=seg.t.slice(0,ci+1);
+    term.appendChild(cursor);
+    ci++;
+    if(ci>=seg.t.length){ si++; ci=0; setTimeout(tick, seg.cls==='dim'?260:90); }
+    else setTimeout(tick, 22+Math.floor(((si*7+ci*13)%18)));
+  }
+  const tObs=new IntersectionObserver((es)=>{es.forEach(e=>{ if(e.isIntersecting){ tick(); tObs.disconnect(); }});},{threshold:.4});
+  tObs.observe(term);
+})();
+
+/* ---------- context pruning demo ---------- */
+(function(){
+  const demo=document.getElementById('ctxDemo');
+  const tools=[...demo.querySelectorAll('.msg[data-tool] .role.tool')].map(r=>r.closest('.msg'));
+  let on=false;
+  setInterval(()=>{ on=!on; tools.forEach((m,i)=> setTimeout(()=> m.classList.toggle('pruned',on), i*250)); },3200);
+})();
+</script>
+
+</body>
+</html>
