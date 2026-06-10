@@ -46,7 +46,11 @@ import { AgentAbortError, type Agent } from "../agent.js";
 import { AgentRunInputQueue } from "../agent/input-controller.js";
 import { debugReasoningStream, summarizeDebugText } from "../reasoning-debug.js";
 import { isHiddenToolMetadata } from "../agent/discovery-barrier.js";
-import { sanitizeInternalReminderBlocks } from "../agent/internal-reminder-sanitizer.js";
+import {
+  createStreamingInternalReminderSanitizer,
+  sanitizeInternalReasoningText,
+  sanitizeInternalReminderBlocks,
+} from "../agent/internal-reminder-sanitizer.js";
 import {
   summarizeAgentEventForTrace,
   summarizeTraceError,
@@ -85,6 +89,7 @@ import {
   toolCallsFromParts,
   userInputStatusBadgeLabel,
 } from "./display-history.js";
+import { sanitizeDisplayMessage, sanitizeDisplayMessages } from "./display-sanitizer.js";
 import { createMarkdownSyntaxStyle, createSubtleMarkdownSyntaxStyle } from "./markdown-theme.js";
 import { markdownInlineSegments, type MarkdownInlineSegment } from "./markdown-inline.js";
 import { hashString } from "./render-signature.js";
@@ -330,6 +335,9 @@ const PROMPT_SCANNER_INTERVAL_MS = 80;
 const SESSION_SIDEBAR_WIDTH = 42;
 const SESSION_SIDEBAR_AUTO_WIDTH = 120;
 const PROVIDER_DIALOG_ROWS = 13;
+const PROVIDER_DIALOG_MIN_WIDTH = 56;
+const PROVIDER_DIALOG_MAX_WIDTH = 84;
+const PROVIDER_DIALOG_ROW_RESERVED_WIDTH = 10;
 const QUESTION_MAX_TABS = 4;
 const QUESTION_MAX_OPTIONS = 10;
 const QUESTION_MAX_CONFIRM_ROWS = 3;
@@ -709,7 +717,7 @@ function OpenTuiApp(props: {
   let copyToastRoot: BoxRenderable | undefined;
   let copyToastText: TextRenderable | undefined;
   const [sessionActive, setSessionActive] = createSignal(false);
-  const [sidebarMode, setSidebarModeState] = createSignal<SidebarMode>("auto");
+  const [sidebarMode, setSidebarModeState] = createSignal<SidebarMode>("collapsed");
   const [sidebarTick, setSidebarTick] = createSignal(0);
   // Sidebar MCP section collapsed state. Persisted across sidebarTick bumps,
   // only reset on actual mount. Collapse toggle exposed when > 2 servers.
@@ -750,7 +758,6 @@ function OpenTuiApp(props: {
   let providerDialogModelItems: { key: string; items: PickerItem[] } | undefined;
   let providerDialogModelRefreshId = 0;
   let previousPickerForKey: Extract<PickerState, { kind: "select" }> | undefined;
-  let homePromptRef: TextareaRenderable | undefined;
   let sessionPromptRef: TextareaRenderable | undefined;
   let scrollbox: ScrollBoxRenderable | undefined;
   let transcriptScrollFollowing = true;
@@ -766,7 +773,6 @@ function OpenTuiApp(props: {
     defaultWritesExpanded: false,
   };
   let dock: TextRenderable | undefined;
-  let homeComposerShell: BoxRenderable | undefined;
   let sessionComposerShell: BoxRenderable | undefined;
   const promptScannerSyncs = new Set<PromptScannerSync>();
   let approvalRoot: BoxRenderable | undefined;
@@ -868,10 +874,7 @@ function OpenTuiApp(props: {
   const sidebarFileDeletions: Array<TextRenderable | undefined> = [];
   let sidebarFileSection: BoxRenderable | undefined;
 
-  const activePrompt = () =>
-    isHomeSurfaceActive()
-      ? homePromptRef ?? sessionPromptRef
-      : sessionPromptRef ?? homePromptRef;
+  const activePrompt = () => sessionPromptRef;
 
   function setPromptText(value: string) {
     promptText = value;
@@ -948,7 +951,6 @@ function OpenTuiApp(props: {
   }
 
   function blurInputsForModal() {
-    homePromptRef?.blur();
     sessionPromptRef?.blur();
     questionCustomInput?.blur();
     providerDialogInput?.blur();
@@ -1006,10 +1008,7 @@ function OpenTuiApp(props: {
     }, 0);
   }
 
-  const activeComposerShell = () =>
-    isHomeSurfaceActive()
-      ? homeComposerShell ?? sessionComposerShell
-      : sessionComposerShell ?? homeComposerShell;
+  const activeComposerShell = () => sessionComposerShell;
 
   onCleanup(() => {
     uiDisposed = true;
@@ -1132,6 +1131,23 @@ function OpenTuiApp(props: {
     return dimensions().width > SESSION_SIDEBAR_AUTO_WIDTH;
   };
   const contentWidth = () => Math.max(20, dimensions().width - (sidebarVisible() ? SESSION_SIDEBAR_WIDTH : 0) - 4);
+  const liveTerminalDimensions = () => {
+    const reactive = dimensions();
+    // Some terminal split-pane flows leave OpenTUI's resize signal stale. Node's
+    // TTY size is sampled on demand, so use it for modal geometry when present.
+    const stdoutWidth = process.stdout.columns;
+    const stdoutHeight = process.stdout.rows;
+    const width = Number.isFinite(stdoutWidth) && stdoutWidth && stdoutWidth > 0
+      ? stdoutWidth
+      : reactive.width;
+    const height = Number.isFinite(stdoutHeight) && stdoutHeight && stdoutHeight > 0
+      ? stdoutHeight
+      : reactive.height;
+    return {
+      width: Math.max(1, Math.floor(width)),
+      height: Math.max(1, Math.floor(height)),
+    };
+  };
   const bumpSidebar = () => {
     setSidebarTick((value) => value + 1);
     syncSidebarContext();
@@ -1332,7 +1348,6 @@ function OpenTuiApp(props: {
       footerModeBadge.fg = permissionModeColor(mode());
       if (!safeSetText(footerModeBadge, footerModeText())) footerModeBadge = undefined;
     }
-    safeRequestRender(homeComposerShell);
     safeRequestRender(sessionComposerShell);
     safeRequestRender(rootBox);
   }
@@ -1359,7 +1374,6 @@ function OpenTuiApp(props: {
     for (const label of [...promptModelLabels]) {
       if (!safeSetText(label, promptModelTitle())) promptModelLabels.delete(label);
     }
-    safeRequestRender(homeComposerShell);
     safeRequestRender(sessionComposerShell);
     safeRequestRender(rootBox);
   };
@@ -1603,7 +1617,7 @@ function OpenTuiApp(props: {
     redrawDock();
     redrawApprovalPanel();
     if (approval || plan) focusApprovalPanel();
-    redrawTranscript();
+    redrawTranscript(streamingDisplay, displayMessages, { forceFollow: !!approval });
   };
 
   function questionStateFromRequest(request: QuestionRequest): QuestionPanelState {
@@ -2576,15 +2590,17 @@ function OpenTuiApp(props: {
     return !hasTranscriptMessages(extra) && !pendingPlan() && !pendingQuestion() && !pendingFeedback() && !statsPanel && !pendingFeishuSetup();
   }
 
+  function isComposerHiddenByModal() {
+    return !!pendingQuestion() || !!pendingFeedback() || !!statsPanel || !!pendingFeishuSetup();
+  }
+
   function syncPromptSurfaces(focus = false) {
     const homeActive = isHomeSurfaceActive(streamingDisplay);
     const nextSessionActive = !homeActive;
     const surfaceChanged = sessionActive() !== nextSessionActive;
     setSessionActive(nextSessionActive);
-    const modalComposerHidden = !!pendingQuestion() || !!pendingFeedback() || !!statsPanel || !!pendingFeishuSetup();
     if (homeSurfaceShell) homeSurfaceShell.visible = homeActive;
-    if (homeComposerShell) homeComposerShell.visible = homeActive && !modalComposerHidden;
-    if (sessionComposerShell) sessionComposerShell.visible = !homeActive && !modalComposerHidden;
+    if (sessionComposerShell) sessionComposerShell.visible = !isComposerHiddenByModal();
     syncSidebarChrome();
     if (focus || surfaceChanged) setTimeout(() => activePrompt()?.focus(), 0);
     rootBox?.requestRender();
@@ -2608,7 +2624,6 @@ function OpenTuiApp(props: {
       }
     }
     try {
-      homeComposerShell?.requestRender();
       sessionComposerShell?.requestRender();
       rootBox?.requestRender();
     } catch {
@@ -3138,13 +3153,22 @@ function OpenTuiApp(props: {
   function redrawTranscript(
     extra?: DisplayMessage,
     baseMessages = displayMessages,
+    options: { forceFollow?: boolean } = {},
   ) {
     streamingDisplay = extra;
-    renderTranscriptNow(streamingDisplay, baseMessages);
+    renderTranscriptNow(streamingDisplay, baseMessages, options);
   }
 
-  function renderTranscriptNow(extra?: DisplayMessage, baseMessages = displayMessages) {
-    const shouldFollow = shouldFollowTranscriptBeforeUpdate();
+  function renderTranscriptNow(
+    extra?: DisplayMessage,
+    baseMessages = displayMessages,
+    options: { forceFollow?: boolean } = {},
+  ) {
+    const shouldFollow = options.forceFollow ? true : shouldFollowTranscriptBeforeUpdate();
+    if (options.forceFollow) {
+      transcriptScrollFollowing = true;
+      transcriptScrollInitialized = true;
+    }
     const nextMessages = compactDisplayMessages([
       ...baseMessages,
       ...(extra ? [extra] : []),
@@ -3163,6 +3187,7 @@ function OpenTuiApp(props: {
     syncSidebarChrome();
     redrawQuestionPanel();
     redrawStatsPanel();
+    redrawProviderDialog();
     redrawFeishuSetupPanel();
     scrollbox?.requestRender();
     scheduleTranscriptScrollAfterUpdate(shouldFollow);
@@ -3384,11 +3409,13 @@ function OpenTuiApp(props: {
       return;
     }
 
-    const width = Math.max(56, Math.min(76, dimensions().width - 4));
+    const terminal = liveTerminalDimensions();
+    const width = providerDialogPanelWidth(terminal.width);
     const height = PROVIDER_DIALOG_ROWS + 7;
+    const columnWidths = providerDialogColumnWidths(state, width);
     providerDialogRoot.visible = true;
-    providerDialogRoot.width = dimensions().width;
-    providerDialogRoot.height = dimensions().height;
+    providerDialogRoot.width = terminal.width;
+    providerDialogRoot.height = terminal.height;
     providerDialogRoot.left = 0;
     providerDialogRoot.top = 0;
     providerDialogRoot.backgroundColor = modalBackdropColor();
@@ -3396,8 +3423,8 @@ function OpenTuiApp(props: {
       providerDialogPanel.visible = true;
       providerDialogPanel.width = width;
       providerDialogPanel.height = height;
-      providerDialogPanel.left = Math.max(0, Math.floor((dimensions().width - width) / 2));
-      providerDialogPanel.top = Math.max(0, Math.floor(dimensions().height / 4));
+      providerDialogPanel.left = Math.max(0, Math.floor((terminal.width - width) / 2));
+      providerDialogPanel.top = Math.max(0, Math.floor(terminal.height / 4));
       providerDialogPanel.backgroundColor = theme.backgroundPanel;
       providerDialogPanel.borderColor = theme.backgroundPanel;
       providerDialogPanel.requestRender();
@@ -3459,20 +3486,20 @@ function OpenTuiApp(props: {
           gutter.fg = active ? activeText : providerDialogGutterColor(row.item.gutter ?? (isCurrentModelItem(row.item) ? "●" : undefined));
         }
         if (label) {
-          label.content = truncate(row.item.label, providerDialogLabelWidth(state));
+          label.content = truncate(row.item.label, columnWidths.label);
           label.fg = active ? activeText : isCurrentModelItem(row.item) ? theme.primary : theme.text;
         }
         if (detail) {
           const detailText = state.query.trim() && state.step === "models"
             ? row.item.category ?? row.item.detail ?? ""
             : row.item.detail ?? "";
-          detail.width = providerDialogDetailWidth(state);
-          detail.content = truncate(detailText, providerDialogDetailWidth(state));
+          detail.width = columnWidths.detail;
+          detail.content = truncate(detailText, columnWidths.detail);
           detail.fg = active ? activeText : theme.textMuted;
         }
         if (footer) {
-          footer.width = providerDialogFooterWidth(state);
-          footer.content = row.item.footer ?? "";
+          footer.width = columnWidths.footer;
+          footer.content = truncate(row.item.footer ?? "", columnWidths.footer);
           footer.fg = active ? activeText : theme.textMuted;
         }
       }
@@ -3514,16 +3541,18 @@ function OpenTuiApp(props: {
     return theme.textMuted;
   }
 
-  function providerDialogLabelWidth(state: ProviderDialogState) {
-    return state.step === "skills" ? 22 : 37;
+  function providerDialogPanelWidth(terminalWidth: number) {
+    return Math.max(PROVIDER_DIALOG_MIN_WIDTH, Math.min(PROVIDER_DIALOG_MAX_WIDTH, terminalWidth - 4));
   }
 
-  function providerDialogDetailWidth(state: ProviderDialogState) {
-    return state.step === "skills" ? 26 : 16;
-  }
-
-  function providerDialogFooterWidth(state: ProviderDialogState) {
-    return state.step === "skills" ? 9 : 8;
+  function providerDialogColumnWidths(state: ProviderDialogState, panelWidth: number) {
+    const contentWidth = Math.max(24, panelWidth - PROVIDER_DIALOG_ROW_RESERVED_WIDTH);
+    const footer = state.step === "skills" ? 10 : state.step === "providers" ? 9 : 8;
+    const minLabel = state.step === "skills" ? 18 : 24;
+    const desiredDetail = state.step === "skills" ? 30 : state.step === "providers" ? 24 : 16;
+    const detail = Math.max(8, Math.min(desiredDetail, contentWidth - footer - minLabel));
+    const label = Math.max(8, contentWidth - detail - footer);
+    return { label, detail, footer };
   }
 
   function isCurrentModelItem(item: PickerItem) {
@@ -4887,7 +4916,9 @@ function OpenTuiApp(props: {
       }
       const expansion = await expandAtMentions(part.text, props.args.cwd);
       if (expansion.missing.length) addMessage("error", `Could not resolve @mention: ${expansion.missing.join(", ")}`);
-      for (const skipped of expansion.skipped) addMessage("error", `Skipped @${skipped.path}: ${skipped.reason}`);
+      for (const skipped of expansion.skipped) {
+        if (skipped.reason !== "too large") addMessage("error", `Skipped @${skipped.path}: ${skipped.reason}`);
+      }
       expandedParts.push({ type: "text", text: expansion.text });
     }
     return expandedParts;
@@ -4926,7 +4957,9 @@ function OpenTuiApp(props: {
 
     const expansion = await expandAtMentions(input, props.args.cwd);
     if (expansion.missing.length) addMessage("error", `Could not resolve @mention: ${expansion.missing.join(", ")}`);
-    for (const skipped of expansion.skipped) addMessage("error", `Skipped @${skipped.path}: ${skipped.reason}`);
+    for (const skipped of expansion.skipped) {
+      if (skipped.reason !== "too large") addMessage("error", `Skipped @${skipped.path}: ${skipped.reason}`);
+    }
     await runAgentInput(expansion.text, input, options);
   }
 
@@ -5413,6 +5446,8 @@ function OpenTuiApp(props: {
 
     let assistantContent = "";
     let assistantReasoning = "";
+    let textDisplaySanitizer = createStreamingInternalReminderSanitizer();
+    let reasoningDisplaySanitizer = createStreamingInternalReminderSanitizer();
     const toolCalls: DisplayToolCall[] = [];
     const assistantParts: DisplayMessagePart[] = [];
     let turnStartedAt: number | undefined;
@@ -5427,7 +5462,7 @@ function OpenTuiApp(props: {
     const buildStreamingDisplay = (status?: DisplayMessage["status"]): DisplayMessage => {
       const currentParts = snapshotDisplayParts(assistantParts);
       const partContent = assistantContent || contentFromParts(currentParts);
-      return {
+      return sanitizeDisplayMessage({
         role: "assistant",
         content: partContent,
         reasoning: assistantReasoning || undefined,
@@ -5436,7 +5471,7 @@ function OpenTuiApp(props: {
         status,
         streaming: true,
         turnStartedAt,
-      };
+      });
     };
     const flushStreamingRedraw = () => {
       if (pendingStreamingRedrawTimer === undefined) return;
@@ -5464,6 +5499,8 @@ function OpenTuiApp(props: {
         if (event.type === "turn_start") {
           assistantContent = "";
           assistantReasoning = "";
+          textDisplaySanitizer = createStreamingInternalReminderSanitizer();
+          reasoningDisplaySanitizer = createStreamingInternalReminderSanitizer();
           toolCalls.length = 0;
           assistantParts.length = 0;
           turnStartedAt = Date.now();
@@ -5475,19 +5512,24 @@ function OpenTuiApp(props: {
             turnStartedAt,
           });
         } else if (event.type === "text_delta") {
-          assistantContent += event.content;
-          appendTextPart(assistantParts, event.content);
-          scheduleStreamingRedraw();
+          const content = textDisplaySanitizer.push(event.content);
+          if (content) {
+            assistantContent += content;
+            appendTextPart(assistantParts, content);
+            scheduleStreamingRedraw();
+          }
         } else if (event.type === "reasoning_delta") {
+          const content = reasoningDisplaySanitizer.push(event.content);
+          if (!content) continue;
           debugReasoningStream({
             stage: "ui_append",
             providerId: props.agent.providerId,
             modelId: props.agent.apiModel,
             beforeLength: assistantReasoning.length,
-            delta: summarizeDebugText(event.content),
-            afterLength: assistantReasoning.length + event.content.length,
+            delta: summarizeDebugText(content),
+            afterLength: assistantReasoning.length + content.length,
           });
-          assistantReasoning += event.content;
+          assistantReasoning += content;
           scheduleStreamingRedraw();
         } else if (event.type === "hook_start") {
           setNotice(`Hook ${event.eventName}: ${event.hookId}`);
@@ -5497,6 +5539,8 @@ function OpenTuiApp(props: {
           }
         } else if (event.type === "hook_error") {
           setNotice(`Hook ${event.hookId} error: ${event.error}`);
+        } else if (event.type === "provider_retry") {
+          setNotice(`Connection interrupted — retrying (${event.attempt}/${event.maxAttempts})…`);
         } else if (event.type === "tool_call_start") {
           // Insert a streaming placeholder so the user sees feedback the moment
           // the model commits to a tool call, instead of waiting for the args
@@ -5610,6 +5654,15 @@ function OpenTuiApp(props: {
             clearTimeout(pendingStreamingRedrawTimer);
             pendingStreamingRedrawTimer = undefined;
           }
+          const flushedText = textDisplaySanitizer.flush();
+          if (flushedText) {
+            assistantContent += flushedText;
+            appendTextPart(assistantParts, flushedText);
+          }
+          const flushedReasoning = reasoningDisplaySanitizer.flush();
+          if (flushedReasoning) {
+            assistantReasoning += flushedReasoning;
+          }
           if (event.usage) {
             setSidebarUsage((current) => ({
               contextTokens: event.usage!.promptTokens || current.contextTokens,
@@ -5627,20 +5680,21 @@ function OpenTuiApp(props: {
           }
           bumpSidebar();
           const currentParts = snapshotDisplayParts(assistantParts);
-          const finalContent = assistantContent || contentFromParts(currentParts);
+          const finalContent = sanitizeInternalReminderBlocks(assistantContent || contentFromParts(currentParts));
+          const finalReasoning = sanitizeInternalReasoningText(assistantReasoning);
           const finalToolCalls = toolCalls.length > 0
             ? [...toolCalls]
             : toolCallsFromParts(currentParts);
-          const assistantMessage: DisplayMessage = {
+          const assistantMessage = sanitizeDisplayMessage({
             role: "assistant",
             content: finalContent,
-            reasoning: assistantReasoning || undefined,
+            reasoning: finalReasoning || undefined,
             toolCalls: finalToolCalls.length ? finalToolCalls : undefined,
             parts: currentParts.length ? currentParts : undefined,
             turnStartedAt,
             turnCompletedAt: Date.now(),
             turnUsage: event.usage,
-          };
+          });
           const nextMessages = hasRenderableMessage(assistantMessage)
             ? [...displayMessages, assistantMessage]
             : displayMessages;
@@ -5731,17 +5785,17 @@ function OpenTuiApp(props: {
     return h("box", {
       ref: (ref: BoxRenderable) => {
         sessionComposerShell = ref;
-          ref.visible = !isHomeSurfaceActive(streamingDisplay) && !pendingQuestion() && !pendingFeedback() && !statsPanel && !pendingFeishuSetup();
+        ref.visible = !isComposerHiddenByModal();
       },
       width: "100%",
       paddingLeft: 2,
       paddingRight: 2,
       flexShrink: 0,
-      visible: !isHomeSurfaceActive(streamingDisplay) && !pendingQuestion() && !statsPanel && !pendingFeishuSetup(),
+      visible: !isComposerHiddenByModal(),
     },
       renderPrompt({
         ref: (ref) => { sessionPromptRef = ref; },
-        focused: !isHomeSurfaceActive(streamingDisplay),
+        focused: !isComposerHiddenByModal(),
         onSubmit: submitPrompt,
         isFallbackNewlineKey: isTrackedShiftReturn,
         onFallbackNewline: () => canInsertPromptNewline() && (activePrompt()?.newLine() ?? false),
@@ -5772,7 +5826,6 @@ function OpenTuiApp(props: {
   }
 
   function renderHomeSurface() {
-    const homeHeight = Math.max(16, dimensions().height - 4);
     const logoLines = bubbleWordmarkForWidth(dimensions().width);
     return h("box", {
       ref: (ref: BoxRenderable) => {
@@ -5780,7 +5833,8 @@ function OpenTuiApp(props: {
         ref.visible = isHomeSurfaceActive(streamingDisplay);
       },
       visible: isHomeSurfaceActive(streamingDisplay),
-      height: homeHeight,
+      height: "100%",
+      minHeight: 0,
       flexDirection: "column",
       alignItems: "center",
       justifyContent: "center",
@@ -5798,52 +5852,6 @@ function OpenTuiApp(props: {
         ? [h("box", { flexShrink: 0, flexDirection: "column", alignItems: "center" },
             h("text", { fg: theme.accent, content: props.options.updateNotice }))]
         : []),
-      h("box", { height: 1, minHeight: 0, flexShrink: 1 }),
-      h("box", {
-        ref: (ref: BoxRenderable) => {
-          homeComposerShell = ref;
-          ref.visible = isHomeSurfaceActive(streamingDisplay) && !pendingQuestion() && !pendingFeedback() && !statsPanel && !pendingFeishuSetup();
-        },
-        width: "100%",
-        maxWidth: 75,
-        zIndex: 1000,
-        paddingTop: 1,
-        flexShrink: 0,
-        visible: isHomeSurfaceActive(streamingDisplay) && !pendingQuestion() && !statsPanel && !pendingFeishuSetup(),
-      },
-      renderPrompt({
-        ref: (ref) => {
-          homePromptRef = ref;
-          if (isHomeSurfaceActive(streamingDisplay)) setTimeout(() => ref.focus(), 0);
-        },
-        focused: isHomeSurfaceActive(streamingDisplay),
-        onSubmit: submitPrompt,
-        isFallbackNewlineKey: isTrackedShiftReturn,
-        onFallbackNewline: () => canInsertPromptNewline() && (activePrompt()?.newLine() ?? false),
-        onContentChange: onPromptContentChange,
-        onKeyDown: handlePickerKey,
-        onUiKeyDown: promptUiKeyDown,
-        getText: readPromptText,
-        disabled: () => !!pendingFeedback() || !!statsPanel,
-        mode,
-        registerModeLabel: registerPromptModeLabel,
-        registerModelLabel: registerPromptModelLabel,
-        model: promptModelTitle,
-        interruptHint: promptStatusText,
-        tabHint: () => isRunning() ? "queue" : "mode",
-        placeholder: () => {
-          const approvalState = pendingApproval();
-          if (approvalState) return "Press Enter to approve or Esc to reject";
-          if (pendingQuestion()) return "Answer the question below";
-          if (pendingFeedback()) return "Describe feedback below";
-          if (statsPanel) return "Stats panel is open";
-          const plan = pendingPlan();
-          if (plan) return "Press Enter to approve plan or Esc to reject";
-          if (isRunning()) return "Steer current run...";
-          return `Ask anything... "${homePrompt}"`;
-        },
-      }),
-      ),
     ]);
   }
 
@@ -7092,11 +7100,9 @@ function OpenTuiApp(props: {
         visible: !!approval,
         focusable: true,
         onKeyDown: handleApprovalKey,
-        position: "absolute",
-        left: 2,
-        right: 2,
-        bottom: 4,
-        zIndex: 200,
+        width: "100%",
+        flexShrink: 0,
+        marginTop: 1,
         backgroundColor: theme.backgroundPanel,
         border: ["left"],
         borderColor: theme.warning,
@@ -7517,10 +7523,12 @@ function renderAssistantMessage(
   verboseTrace = false,
   width = 80,
 ) {
+  message = sanitizeDisplayMessage(message);
   const visibleReasoning = showThinking
-    ? sanitizeInternalReminderBlocks(message.reasoning ?? "").trim()
+    ? sanitizeInternalReasoningText(message.reasoning ?? "").trim()
     : "";
-  const modelSwitch = parseModelSwitchMessage(message.content);
+  const sanitizedContent = sanitizeInternalReminderBlocks(message.content);
+  const modelSwitch = parseModelSwitchMessage(sanitizedContent);
   if (modelSwitch && !visibleReasoning && !(message.toolCalls?.length)) {
     return renderModelSwitchMessage(modelSwitch);
   }
@@ -7528,7 +7536,8 @@ function renderAssistantMessage(
   const children: Child[] = [];
   const parts = message.parts ?? [];
   const hasParts = parts.length > 0;
-  if (message.status && !visibleReasoning && !message.content.trim() && !(message.toolCalls?.length) && !hasParts) {
+  const trimmedContent = sanitizedContent.trim();
+  if (message.status && !visibleReasoning && !trimmedContent && !(message.toolCalls?.length) && !hasParts) {
     children.push(h("box", { paddingLeft: 3, marginTop: 1, flexShrink: 0 },
       h("text", { fg: theme.messageThinkingText }, assistantStatusLabel(message)),
     ));
@@ -7549,7 +7558,6 @@ function renderAssistantMessage(
       }),
     ));
   }
-  const trimmedContent = message.content.trim();
   if (hasParts) {
     renderAssistantMessageParts(children, parts, syntaxStyle, verboseTrace, width, message.streaming === true);
   } else {
@@ -7598,7 +7606,7 @@ function renderAssistantMessageParts(
 ) {
   for (const part of parts) {
     if (part.type === "text") {
-      const content = part.content.trim();
+      const content = sanitizeInternalReminderBlocks(part.content).trim();
       if (!content) continue;
       children.push(h("box", {
         paddingLeft: 3,
@@ -7624,7 +7632,7 @@ function renderAssistantMessageParts(
 
 function lastPartHasText(parts: DisplayMessagePart[]): boolean {
   const last = parts[parts.length - 1];
-  return last?.type === "text" && !!last.content.trim();
+  return last?.type === "text" && !!sanitizeInternalReminderBlocks(last.content).trim();
 }
 
 function parseModelSwitchMessage(content: string) {
@@ -7695,7 +7703,7 @@ function updateTranscriptHost(
 ) {
   const showThinking = options?.showThinking ?? true;
   const verboseTrace = options?.verboseTrace ?? false;
-  const visibleMessages = messages.filter((message) => hasRenderableMessage(message, showThinking));
+  const visibleMessages = sanitizeDisplayMessages(messages).filter((message) => hasRenderableMessage(message, showThinking));
   const ctx = host.ctx;
   const nextEntries: TranscriptEntry[] = [];
 
@@ -7861,6 +7869,7 @@ function transcriptMessageSignature(
   message: DisplayMessage,
   compactionExpanded = false,
 ) {
+  message = sanitizeDisplayMessage(message);
   if (message.role !== "assistant") return message.role;
   if (message.syntheticKind === "ui_compact_card") {
     return `compaction:${compactionExpanded ? "expanded" : "collapsed"}:${message.compactionMeta?.turns ?? 0}`;
@@ -7931,6 +7940,7 @@ function updateAssistantEntry(
     verboseTrace?: boolean;
   },
 ) {
+  message = sanitizeDisplayMessage(message);
   const content = message.content.trim();
   const visibleReasoning = showThinking ? message.reasoning?.trim() ?? "" : "";
   const tools = message.toolCalls ?? [];
@@ -8044,7 +8054,7 @@ function updateAssistantPartEntries(
     const previous = previousEntries.get(key);
 
     if (part.type === "text") {
-      const content = part.content.trim();
+      const content = sanitizeInternalReminderBlocks(part.content).trim();
       let ref: Extract<PartEntryRef, { kind: "text" }>;
       if (previous?.kind === "text") {
         ref = previous;
@@ -8772,6 +8782,7 @@ function createAssistantEntry(
   expandedWrites: Set<string> = new Set(),
   onToggleWrite?: (key: string) => void,
 ): TranscriptEntry | null {
+  message = sanitizeDisplayMessage(message);
   const modelSwitch = parseModelSwitchMessage(message.content);
   if (modelSwitch && !message.reasoning?.trim() && !(message.toolCalls?.length)) {
     return createModelSwitchEntry(ctx, modelSwitch, key, signature);
@@ -9686,7 +9697,7 @@ function renderTranscript(
 }
 
 function renderSessionMessages(messages: DisplayMessage[], syntaxStyle: SyntaxStyle, subtleSyntaxStyle: SyntaxStyle, showThinking = true, verboseTrace = false) {
-  const visibleMessages = messages.filter((message) => hasRenderableMessage(message, showThinking));
+  const visibleMessages = sanitizeDisplayMessages(messages).filter((message) => hasRenderableMessage(message, showThinking));
   if (!visibleMessages.length) return null;
   return visibleMessages.map((message, index) => renderMessage(message, index, syntaxStyle, subtleSyntaxStyle, showThinking, verboseTrace));
 }
@@ -9694,7 +9705,7 @@ function renderSessionMessages(messages: DisplayMessage[], syntaxStyle: SyntaxSt
 function formatTranscript(messages: DisplayMessage[], options?: TranscriptOptions): StyledText {
   const showThinking = options?.showThinking ?? true;
   const verboseTrace = options?.verboseTrace ?? false;
-  const visibleMessages = messages.filter((message) => hasRenderableMessage(message, showThinking));
+  const visibleMessages = sanitizeDisplayMessages(messages).filter((message) => hasRenderableMessage(message, showThinking));
   const chunks: StyledText["chunks"] = [];
   const append = (content: string, color = theme.text) => {
     if (content) chunks.push(fg(color)(content));
@@ -9873,6 +9884,7 @@ function renderHomeState(input: { width: number; cwd: string; tip: string }) {
 }
 
 function hasRenderableMessage(message: DisplayMessage, showThinking = true) {
+  message = sanitizeDisplayMessage(message);
   if (message.role === "error") return !!message.content.trim();
   if (message.role === "user") return !!message.content.trim();
   if (message.status) return true;

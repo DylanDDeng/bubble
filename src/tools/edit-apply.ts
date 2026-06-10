@@ -1,3 +1,5 @@
+import { isSensitivePath } from "./sensitive-paths.js";
+
 export interface EditOperation {
   oldText: string;
   newText: string;
@@ -57,6 +59,18 @@ interface TextCandidate {
   text: string;
   mode: EditMatchMode;
 }
+
+interface BestLineHint {
+  startLine: number;
+  score: number;
+  total: number;
+  lineIndex: number;
+  tieCount: number;
+}
+
+const CANDIDATE_EXCERPT_CONTEXT_LINES = 3;
+const CANDIDATE_EXCERPT_MAX_LINES = 8;
+const CANDIDATE_EXCERPT_MAX_CHARS = 1200;
 
 function detectLineEnding(content: string): "\n" | "\r\n" {
   const crlf = content.indexOf("\r\n");
@@ -306,23 +320,82 @@ function summarizeOldText(oldText: string): string {
   return firstLine.length > 80 ? `${firstLine.slice(0, 80)}...` : firstLine;
 }
 
-function findBestLineHint(content: string, oldText: string): string | undefined {
+function findBestLineHint(content: string, oldText: string): BestLineHint | undefined {
   const oldLines = normalizedOldNonBlankLines(oldText);
   if (oldLines.length === 0) return undefined;
   const contentLines = nonBlankLines(splitLines(content));
 
   let best: { index: number; score: number } | undefined;
+  let tieCount = 0;
   for (let i = 0; i < contentLines.length; i++) {
     let score = 0;
     for (let j = 0; j < oldLines.length && i + j < contentLines.length; j++) {
       if (contentLines[i + j].normalized === oldLines[j]) score++;
     }
-    if (!best || score > best.score) best = { index: i, score };
+    if (!best || score > best.score) {
+      best = { index: i, score };
+      tieCount = 1;
+    } else if (score === best.score) {
+      tieCount++;
+    }
   }
 
   if (!best || best.score === 0) return undefined;
   const startLine = contentLines[best.index].lineIndex + 1;
-  return `Closest line-based candidate starts near line ${startLine} and matched ${best.score}/${oldLines.length} non-blank lines.`;
+  return {
+    startLine,
+    score: best.score,
+    total: oldLines.length,
+    lineIndex: contentLines[best.index].lineIndex,
+    tieCount,
+  };
+}
+
+function isHighConfidenceLineHint(hint: BestLineHint): boolean {
+  return hint.score >= 2 && hint.score / hint.total >= 0.5 && hint.tieCount === 1;
+}
+
+function formatLineHint(hint: BestLineHint): string {
+  if (hint.tieCount > 1) {
+    return `Closest ambiguous line-based candidate starts near line ${hint.startLine} and matched ${hint.score}/${hint.total} non-blank lines, but ${hint.tieCount} candidates tied. Current bytes were not included because the candidate may be unrelated.`;
+  }
+  if (!isHighConfidenceLineHint(hint)) {
+    return `Closest low-confidence line-based candidate starts near line ${hint.startLine} and matched ${hint.score}/${hint.total} non-blank lines. Current bytes were not included because the candidate may be unrelated.`;
+  }
+  return `Closest line-based candidate starts near line ${hint.startLine} and matched ${hint.score}/${hint.total} non-blank lines.`;
+}
+
+function formatFence(content: string): string {
+  let fence = "```";
+  while (content.includes(fence)) fence += "`";
+  return `${fence}\n${content}\n${fence}`;
+}
+
+function truncateExcerpt(excerpt: string): string {
+  if (excerpt.length <= CANDIDATE_EXCERPT_MAX_CHARS) return excerpt;
+  const marker = "\n...[truncated current candidate excerpt]";
+  return excerpt.slice(0, Math.max(0, CANDIDATE_EXCERPT_MAX_CHARS - marker.length)) + marker;
+}
+
+function formatCandidateExcerpt(content: string, hint: BestLineHint): string {
+  const lines = splitLines(content);
+  const startLineIndex = Math.max(0, hint.lineIndex - CANDIDATE_EXCERPT_CONTEXT_LINES);
+  const requestedEnd = Math.min(lines.length, hint.lineIndex + CANDIDATE_EXCERPT_CONTEXT_LINES + 1);
+  const endLineIndex = Math.min(requestedEnd, startLineIndex + CANDIDATE_EXCERPT_MAX_LINES);
+  const excerpt = truncateExcerpt(lines.slice(startLineIndex, endLineIndex).map((line) => line.text).join("\n"));
+  return [
+    `Current candidate excerpt (high confidence, current file lines ${startLineIndex + 1}-${endLineIndex}, not guaranteed target):`,
+    formatFence(excerpt),
+  ].join("\n");
+}
+
+function formatBestLineHint(content: string, hint: BestLineHint, options?: EditApplyOptions): string {
+  const lineHint = formatLineHint(hint);
+  if (!isHighConfidenceLineHint(hint)) return lineHint;
+  if (options?.path && isSensitivePath(options.path)) {
+    return `${lineHint}\nCurrent bytes were not included because this path is blocked by the sensitive-path read policy.`;
+  }
+  return `${lineHint}\n\n${formatCandidateExcerpt(content, hint)}`;
 }
 
 function matchEdit(
@@ -453,7 +526,7 @@ function matchEdit(
   }
 
   const hint = findBestLineHint(content, oldText);
-  const hintSuffix = hint ? `\n${hint}` : "";
+  const hintSuffix = hint ? `\n${formatBestLineHint(content, hint, options)}` : "";
   const recovery = [
     "",
     "How to recover:",

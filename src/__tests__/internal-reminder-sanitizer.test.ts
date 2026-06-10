@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   createStreamingInternalReminderSanitizer,
   formatInternalReminderBlock,
+  sanitizeInternalReasoningText,
   sanitizeInternalReminderBlocks,
 } from "../agent/internal-reminder-sanitizer.js";
 import { buildLoopWarningReminder } from "../prompt/reminders.js";
@@ -15,6 +16,31 @@ describe("internal reminder sanitizer", () => {
     ].join("");
 
     expect(sanitizeInternalReminderBlocks(input)).toBe("before  after");
+  });
+
+  it("removes memory citation blocks", () => {
+    const input = [
+      "before\n",
+      "<oai-mem-citation>\n",
+      "<citation_entries>\n",
+      "/Users/example/.bubble/memories/MEMORY.md:1-2|note=[used memory]\n",
+      "</citation_entries>\n",
+      "<rollout_ids>\n",
+      "</rollout_ids>\n",
+      "</oai-mem-citation>\n",
+      "after",
+    ].join("");
+
+    expect(sanitizeInternalReminderBlocks(input)).toBe("before\nafter");
+  });
+
+  it("holds split memory citation blocks while streaming", () => {
+    const sanitizer = createStreamingInternalReminderSanitizer();
+
+    expect(sanitizer.push("done\n<oai-mem-")).toBe("done\n");
+    expect(sanitizer.push("citation>\n/Users/example/file.md\n")).toBe("");
+    expect(sanitizer.push("</oai-mem-citation>\nnext")).toBe("next");
+    expect(sanitizer.flush()).toBe("");
   });
 
   it("holds split structured tag blocks while streaming", () => {
@@ -67,5 +93,32 @@ Rules while in plan mode:
 
     expect(reminder).not.toContain("Tool loop warning");
     expect(sanitizeInternalReminderBlocks(input)).toBe("before  after");
+  });
+
+  it("removes reasoning paragraphs that expose deferred tool reminders", () => {
+    const input = [
+      "normal before",
+      "",
+      "Actually, the system reminder at the top mentions:\n",
+      "> The following deferred tools are available via tool_search. Their schemas are NOT loaded.",
+      "",
+      "normal after",
+    ].join("\n");
+
+    expect(sanitizeInternalReasoningText(input)).toBe("normal before\n\nnormal after");
+  });
+
+  it("removes reasoning paragraphs that expose subagent lifecycle reminders", () => {
+    const input = [
+      "normal before",
+      "",
+      "Subagent lifecycle truth:",
+      "- Unique subagents currently tracked: 1.",
+      "- Count unique agent_id values only.",
+      "",
+      "normal after",
+    ].join("\n");
+
+    expect(sanitizeInternalReasoningText(input)).toBe("normal before\n\nnormal after");
   });
 });

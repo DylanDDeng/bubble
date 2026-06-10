@@ -25,6 +25,14 @@ export interface UsageCost {
 
 export const MODEL_PRICING: ModelPricing[] = [
   {
+    providerId: "anthropic",
+    modelId: "claude-fable-5",
+    currency: "USD",
+    inputCacheHitPerMillion: 10,
+    inputCacheMissPerMillion: 10,
+    outputPerMillion: 50,
+  },
+  {
     providerId: "deepseek",
     modelId: "deepseek-v4-flash",
     currency: "USD",

@@ -123,6 +123,33 @@ describe("SessionManager", () => {
     expect(restored.content).not.toContain("bubble_internal_reminder");
   });
 
+  it("sanitizes memory citations from assistant content before persistence and restore", () => {
+    const file = join(tmpDir, "assistant-memory-citation-sanitize.jsonl");
+    const sm1 = new SessionManager(file);
+    sm1.appendMessage({
+      role: "assistant",
+      content: [
+        "Done.\n\n",
+        "<oai-mem-citation>\n",
+        "<citation_entries>\n",
+        "/Users/example/.bubble/memories/MEMORY.md:1-2|note=[used memory]\n",
+        "</citation_entries>\n",
+        "<rollout_ids>\n",
+        "</rollout_ids>\n",
+        "</oai-mem-citation>",
+      ].join(""),
+    });
+
+    const raw = JSON.parse(readFileSync(file, "utf-8").trim());
+    expect(raw.message.content).toBe("Done.\n\n");
+    expect(raw.message.content).not.toContain("oai-mem-citation");
+
+    const sm2 = new SessionManager(file);
+    const restored = sm2.getMessages()[0] as any;
+    expect(restored.content).toBe("Done.\n\n");
+    expect(restored.content).not.toContain("oai-mem-citation");
+  });
+
   it("persists todos snapshots and returns the latest on reload", () => {
     const file = join(tmpDir, "todos.jsonl");
     const sm1 = new SessionManager(file);

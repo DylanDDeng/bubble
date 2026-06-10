@@ -4,6 +4,17 @@ import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createEditTool } from "../edit.js";
 
+function extractCurrentCandidateExcerpt(content: string): string {
+  const headerIndex = content.indexOf("Current candidate excerpt");
+  expect(headerIndex).toBeGreaterThanOrEqual(0);
+  const fenceStart = content.indexOf("```", headerIndex);
+  expect(fenceStart).toBeGreaterThanOrEqual(0);
+  const excerptStart = fenceStart + "```\n".length;
+  const fenceEnd = content.indexOf("\n```", excerptStart);
+  expect(fenceEnd).toBeGreaterThanOrEqual(0);
+  return content.slice(excerptStart, fenceEnd);
+}
+
 describe("edit tool", () => {
   const tmpDir = join(tmpdir(), "bubble-test-edit-" + Date.now());
   mkdirSync(tmpDir, { recursive: true });
@@ -128,6 +139,40 @@ describe("edit tool", () => {
     expect(result.content).toContain("C");
   });
 
+  it("allows adjacent but non-overlapping edit entries", async () => {
+    const file = join(tmpDir, "adjacent.ts");
+    writeFileSync(file, "alpha\nbeta\n", "utf-8");
+
+    const tool = createEditTool(tmpDir);
+    const result = await tool.execute(
+      {
+        path: "adjacent.ts",
+        edits: [
+          { oldText: "alpha\n", newText: "ALPHA\n" },
+          { oldText: "beta", newText: "BETA" },
+        ],
+      },
+      { cwd: tmpDir },
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(readFileSync(file, "utf-8")).toBe("ALPHA\nBETA\n");
+  });
+
+  it("exposes edit guidance without hard batching pressure", () => {
+    const tool = createEditTool(tmpDir);
+    const promptText = [tool.description, tool.promptSnippet, ...(tool.promptGuidelines ?? [])].join("\n");
+
+    expect(tool.promptSnippet).toContain("multiple disjoint edits in one call");
+    expect(promptText).toContain("copied verbatim from a fresh read");
+    expect(promptText).toContain("Do not reconstruct oldText from memory, stale reads, or similar code elsewhere.");
+    expect(promptText).toContain("Use separate smaller edit calls after re-reading");
+    expect(promptText).toContain("merge only truly overlapping targets");
+    expect(promptText).not.toContain("nearby lines");
+    expect(promptText).not.toContain("Merge nearby changes");
+    expect(promptText).not.toContain("instead of multiple edit calls");
+  });
+
   it("rejects an edit whose oldText equals newText byte-for-byte", async () => {
     const file = join(tmpDir, "no-op.ts");
     writeFileSync(file, "const color = '#ec489';\n", "utf-8");
@@ -189,6 +234,153 @@ describe("edit tool", () => {
       path: file,
       reason: "no_match",
     });
+  });
+
+  it("includes a bounded current candidate excerpt for high-confidence no_match hints", async () => {
+    const file = join(tmpDir, "missing-high-confidence.ts");
+    writeFileSync(
+      file,
+      [
+        "before",
+        "line one stable",
+        `line two current ${"x".repeat(1400)}`,
+        "line three stable",
+        "after",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    const tool = createEditTool(tmpDir);
+    const result = await tool.execute(
+      {
+        path: "missing-high-confidence.ts",
+        edits: [{ oldText: "line one stable\nline two stale\nline three stable", newText: "replacement" }],
+      },
+      { cwd: tmpDir },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.status).toBe("no_match");
+    expect(result.content).toContain("Closest line-based candidate starts near line 2 and matched 2/3 non-blank lines.");
+    expect(result.content).toContain("Current candidate excerpt (high confidence, current file lines 1-5, not guaranteed target):");
+    expect(result.content).toContain("line two current");
+    expect(result.content).toContain("...[truncated current candidate excerpt]");
+    expect(result.content).not.toContain("2: line one stable");
+    const excerpt = extractCurrentCandidateExcerpt(result.content);
+    expect(excerpt.length).toBeLessThanOrEqual(1200);
+    expect(excerpt.split("\n").length).toBeLessThanOrEqual(8);
+  });
+
+  it("does not include current bytes for low-confidence no_match hints", async () => {
+    const file = join(tmpDir, "missing-low-confidence.ts");
+    writeFileSync(file, "alpha\ncurrent beta\n", "utf-8");
+
+    const tool = createEditTool(tmpDir);
+    const result = await tool.execute(
+      {
+        path: "missing-low-confidence.ts",
+        edits: [{ oldText: "alpha\nmissing beta", newText: "replacement" }],
+      },
+      { cwd: tmpDir },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("Closest low-confidence line-based candidate starts near line 1 and matched 1/2 non-blank lines.");
+    expect(result.content).toContain("Current bytes were not included because the candidate may be unrelated.");
+    expect(result.content).not.toContain("Current candidate excerpt");
+    expect(result.content).not.toContain("current beta");
+  });
+
+  it("includes current bytes at the 2/4 no_match confidence boundary", async () => {
+    const file = join(tmpDir, "missing-confidence-2-of-4.ts");
+    writeFileSync(file, "alpha\ncurrent beta\ngamma\ncurrent delta\n", "utf-8");
+
+    const tool = createEditTool(tmpDir);
+    const result = await tool.execute(
+      {
+        path: "missing-confidence-2-of-4.ts",
+        edits: [{ oldText: "alpha\nstale beta\ngamma\nstale delta", newText: "replacement" }],
+      },
+      { cwd: tmpDir },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("Closest line-based candidate starts near line 1 and matched 2/4 non-blank lines.");
+    expect(result.content).toContain("Current candidate excerpt");
+    expect(result.content).toContain("current beta");
+  });
+
+  it("does not include current bytes below the 2/5 no_match confidence boundary", async () => {
+    const file = join(tmpDir, "missing-confidence-2-of-5.ts");
+    writeFileSync(file, "alpha\ncurrent beta\ngamma\ncurrent delta\ncurrent epsilon\n", "utf-8");
+
+    const tool = createEditTool(tmpDir);
+    const result = await tool.execute(
+      {
+        path: "missing-confidence-2-of-5.ts",
+        edits: [{ oldText: "alpha\nstale beta\ngamma\nstale delta\nstale epsilon", newText: "replacement" }],
+      },
+      { cwd: tmpDir },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("Closest low-confidence line-based candidate starts near line 1 and matched 2/5 non-blank lines.");
+    expect(result.content).not.toContain("Current candidate excerpt");
+    expect(result.content).not.toContain("current beta");
+  });
+
+  it("does not include current bytes when multiple best line hints tie", async () => {
+    const file = join(tmpDir, "missing-tied-candidates.ts");
+    writeFileSync(
+      file,
+      "alpha\ncurrent one\nomega\nalpha\ncurrent two\nomega\n",
+      "utf-8",
+    );
+
+    const tool = createEditTool(tmpDir);
+    const result = await tool.execute(
+      {
+        path: "missing-tied-candidates.ts",
+        edits: [{ oldText: "alpha\nmissing\nomega", newText: "replacement" }],
+      },
+      { cwd: tmpDir },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("Closest ambiguous line-based candidate starts near line 1 and matched 2/3 non-blank lines, but 2 candidates tied.");
+    expect(result.content).toContain("Current bytes were not included because the candidate may be unrelated.");
+    expect(result.content).not.toContain("Current candidate excerpt");
+    expect(result.content).not.toContain("current one");
+    expect(result.content).not.toContain("current two");
+  });
+
+  it("does not leak current bytes from sensitive paths in no_match hints", async () => {
+    const sensitiveRoot = join(tmpDir, "bubble-home-edit");
+    mkdirSync(sensitiveRoot, { recursive: true });
+    const previous = process.env.BUBBLE_HOME;
+    process.env.BUBBLE_HOME = sensitiveRoot;
+    try {
+      const file = join(sensitiveRoot, "config.json");
+      writeFileSync(file, "public line\nsecret = super-secret-token\nstable tail\n", "utf-8");
+
+      const tool = createEditTool(sensitiveRoot);
+      const result = await tool.execute(
+        {
+          path: "config.json",
+          edits: [{ oldText: "public line\nstale secret\nstable tail", newText: "replacement" }],
+        },
+        { cwd: sensitiveRoot },
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain("Closest line-based candidate starts near line 1 and matched 2/3 non-blank lines.");
+      expect(result.content).toContain("Current bytes were not included because this path is blocked by the sensitive-path read policy.");
+      expect(result.content).not.toContain("Current candidate excerpt");
+      expect(result.content).not.toContain("super-secret-token");
+    } finally {
+      if (previous === undefined) delete process.env.BUBBLE_HOME;
+      else process.env.BUBBLE_HOME = previous;
+    }
   });
 
   it("returns error when oldText appears multiple times", async () => {

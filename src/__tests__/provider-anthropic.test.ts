@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildAnthropicRequest, translateAnthropicStream } from "../provider-anthropic.js";
+import { buildAnthropicRequest, resolveAnthropicMaxTokens, translateAnthropicStream } from "../provider-anthropic.js";
 import { createProviderInstance } from "../provider.js";
 import type { StreamChunk, ToolDefinition } from "../types.js";
 
@@ -21,6 +21,33 @@ function makeSseResponse(events: object[]): Response {
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
       }
       controller.close();
+    },
+  });
+  return new Response(body, { status: 200 });
+}
+
+function makeFailingSseResponse(error: Error): Response {
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      controller.error(error);
+    },
+  });
+  return new Response(body, { status: 200 });
+}
+
+function makeSseResponseThenFail(events: object[], error: Error): Response {
+  const encoder = new TextEncoder();
+  let sent = false;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (sent) {
+        controller.error(error);
+        return;
+      }
+      for (const event of events) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+      }
+      sent = true;
     },
   });
   return new Response(body, { status: 200 });
@@ -86,6 +113,108 @@ describe("provider-anthropic", () => {
         content: [{ type: "tool_result", tool_use_id: "read:1", content: "ok" }],
       },
     ]);
+  });
+
+  it("omits unsupported sampling controls for official Anthropic Opus 4.7+ models", () => {
+    const body = buildAnthropicRequest({
+      providerId: "anthropic",
+      apiKey: "sk-ant-test",
+      baseURL: "https://api.anthropic.com",
+    }, [
+      { role: "user", content: "hi" },
+    ], {
+      model: "claude-opus-4-8",
+      temperature: 0.2,
+      thinkingLevel: "off",
+      stream: true,
+    });
+
+    expect(body).not.toHaveProperty("temperature");
+    expect(body).not.toHaveProperty("thinking");
+    expect(body.max_tokens).toBe(128000);
+  });
+
+  it("always sends Anthropic max_tokens using provider model caps", () => {
+    const officialOptions = {
+      providerId: "anthropic",
+      apiKey: "sk-ant-test",
+      baseURL: "https://api.anthropic.com",
+    };
+    const compatibleOptions = {
+      providerId: "minimax",
+      apiKey: "sk-test",
+      baseURL: "https://api.minimaxi.com/anthropic",
+    };
+
+    expect(resolveAnthropicMaxTokens(officialOptions, "claude-opus-4-8")).toBe(128000);
+    expect(resolveAnthropicMaxTokens(officialOptions, "claude-opus-4-6")).toBe(128000);
+    expect(resolveAnthropicMaxTokens(officialOptions, "claude-fable-5")).toBe(128000);
+    expect(resolveAnthropicMaxTokens(officialOptions, "claude-sonnet-4-6")).toBe(64000);
+    expect(resolveAnthropicMaxTokens(officialOptions, "claude-haiku-4-5-20251001")).toBe(64000);
+    expect(resolveAnthropicMaxTokens(compatibleOptions, "MiniMax-M3")).toBe(8192);
+
+    const body = buildAnthropicRequest(officialOptions, [
+      { role: "user", content: "hi" },
+    ], {
+      model: "claude-sonnet-4-6",
+      stream: true,
+    });
+    expect(body).toHaveProperty("max_tokens", 64000);
+  });
+
+  it("forces adaptive thinking for Claude Fable 5", () => {
+    const body = buildAnthropicRequest({
+      providerId: "anthropic",
+      apiKey: "sk-ant-test",
+      baseURL: "https://api.anthropic.com",
+    }, [
+      { role: "user", content: "hi" },
+    ], {
+      model: "claude-fable-5",
+      temperature: 0.2,
+      thinkingLevel: "off",
+      stream: true,
+    });
+
+    expect(body.max_tokens).toBe(128000);
+    expect(body.thinking).toEqual({ type: "adaptive" });
+    expect(body).not.toHaveProperty("temperature");
+  });
+
+  it("omits temperature for official Anthropic extended thinking requests", () => {
+    const body = buildAnthropicRequest({
+      providerId: "anthropic",
+      apiKey: "sk-ant-test",
+      baseURL: "https://api.anthropic.com",
+    }, [
+      { role: "user", content: "hi" },
+    ], {
+      model: "claude-sonnet-4-6",
+      temperature: 0.2,
+      thinkingLevel: "medium",
+      stream: true,
+    });
+
+    expect(body).not.toHaveProperty("temperature");
+    expect(body.thinking).toEqual({ type: "adaptive" });
+  });
+
+  it("keeps temperature for Anthropic-compatible providers", () => {
+    const body = buildAnthropicRequest({
+      providerId: "minimax",
+      apiKey: "sk-test",
+      baseURL: "https://api.minimaxi.com/anthropic",
+    }, [
+      { role: "user", content: "hi" },
+    ], {
+      model: "MiniMax-M3",
+      temperature: 0.2,
+      thinkingLevel: "medium",
+      stream: true,
+    });
+
+    expect(body.temperature).toBe(0.2);
+    expect(body.thinking).toEqual({ type: "adaptive" });
   });
 
   it("adds Anthropic prompt cache controls for official Anthropic requests", () => {
@@ -409,6 +538,204 @@ describe("provider-anthropic", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(chunks.filter((chunk) => chunk.type === "text").map((chunk: any) => chunk.content).join("")).toBe("ok");
+  });
+
+  it("retries official Anthropic transport failures before receiving a response", async () => {
+    const fetchMock = vi.fn(async () => {
+      if (fetchMock.mock.calls.length === 1) {
+        throw new Error("The socket connection was closed unexpectedly");
+      }
+      return makeSseResponse([
+        { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
+        { type: "message_stop" },
+      ]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = createProviderInstance({
+      providerId: "anthropic",
+      apiKey: "sk-ant-test",
+      baseURL: "https://api.anthropic.com",
+      protocol: "anthropic-messages",
+    });
+
+    const chunks = await collect(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "claude-opus-4-8",
+    }));
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(chunks.filter((chunk) => chunk.type === "text").map((chunk: any) => chunk.content).join("")).toBe("ok");
+  });
+
+  it("retries official Anthropic stream body failures before the first SSE event", async () => {
+    const fetchMock = vi.fn(async () => {
+      if (fetchMock.mock.calls.length === 1) {
+        return makeFailingSseResponse(new Error("unknown certificate verification error"));
+      }
+      return makeSseResponse([
+        { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
+        { type: "message_stop" },
+      ]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = createProviderInstance({
+      providerId: "anthropic",
+      apiKey: "sk-ant-test",
+      baseURL: "https://api.anthropic.com",
+      protocol: "anthropic-messages",
+    });
+
+    const chunks = await collect(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "claude-opus-4-8",
+    }));
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(chunks.filter((chunk) => chunk.type === "text").map((chunk: any) => chunk.content).join("")).toBe("ok");
+  });
+
+  it("retries official Anthropic 529 overloaded responses", async () => {
+    const fetchMock = vi.fn(async () => {
+      if (fetchMock.mock.calls.length === 1) {
+        return new Response(JSON.stringify({
+          type: "error",
+          error: { type: "overloaded_error", message: "Overloaded" },
+        }), { status: 529 });
+      }
+      return makeSseResponse([
+        { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
+        { type: "message_stop" },
+      ]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = createProviderInstance({
+      providerId: "anthropic",
+      apiKey: "sk-ant-test",
+      baseURL: "https://api.anthropic.com",
+      protocol: "anthropic-messages",
+    });
+
+    const chunks = await collect(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "claude-opus-4-8",
+    }));
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(chunks.filter((chunk) => chunk.type === "text").map((chunk: any) => chunk.content).join("")).toBe("ok");
+  });
+
+  it("retries official Anthropic 429 responses and respects retry-after", async () => {
+    const fetchMock = vi.fn(async () => {
+      if (fetchMock.mock.calls.length === 1) {
+        return new Response(JSON.stringify({
+          type: "error",
+          error: { type: "rate_limit_error", message: "Rate limited" },
+        }), { status: 429, headers: { "retry-after": "0" } });
+      }
+      return makeSseResponse([
+        { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
+        { type: "message_stop" },
+      ]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = createProviderInstance({
+      providerId: "anthropic",
+      apiKey: "sk-ant-test",
+      baseURL: "https://api.anthropic.com",
+      protocol: "anthropic-messages",
+    });
+
+    const chunks = await collect(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "claude-opus-4-8",
+    }));
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(chunks.filter((chunk) => chunk.type === "text").map((chunk: any) => chunk.content).join("")).toBe("ok");
+  });
+
+  it("does not retry official Anthropic 400 responses", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      type: "error",
+      error: { type: "invalid_request_error", message: "bad request" },
+    }), { status: 400 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = createProviderInstance({
+      providerId: "anthropic",
+      apiKey: "sk-ant-test",
+      baseURL: "https://api.anthropic.com",
+      protocol: "anthropic-messages",
+    });
+
+    await expect(collect(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "claude-opus-4-8",
+    }))).rejects.toThrow(/Anthropic Messages API error 400/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks mid-stream failures as stream interruptions for the agent loop", async () => {
+    const fetchMock = vi.fn(async () => makeSseResponseThenFail([
+      { type: "message_start", message: { usage: { input_tokens: 1, output_tokens: 0 } } },
+    ], new Error("The socket connection was closed unexpectedly")));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = createProviderInstance({
+      providerId: "anthropic",
+      apiKey: "sk-ant-test",
+      baseURL: "https://api.anthropic.com",
+      protocol: "anthropic-messages",
+    });
+
+    await expect(collect(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "claude-opus-4-8",
+    }))).rejects.toMatchObject({ name: "ProviderStreamInterruptedError" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry official Anthropic stream body failures after an SSE event is parsed", async () => {
+    const fetchMock = vi.fn(async () => makeSseResponseThenFail([
+      { type: "message_start", message: { usage: { input_tokens: 1, output_tokens: 0 } } },
+    ], new Error("The socket connection was closed unexpectedly")));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = createProviderInstance({
+      providerId: "anthropic",
+      apiKey: "sk-ant-test",
+      baseURL: "https://api.anthropic.com",
+      protocol: "anthropic-messages",
+    });
+
+    await expect(collect(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "claude-opus-4-8",
+    }))).rejects.toThrow(/Anthropic connection failed/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry official Anthropic transport failures when aborted", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("cancelled"));
+    const fetchMock = vi.fn(async () => {
+      throw new Error("The socket connection was closed unexpectedly");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = createProviderInstance({
+      providerId: "anthropic",
+      apiKey: "sk-ant-test",
+      baseURL: "https://api.anthropic.com",
+      protocol: "anthropic-messages",
+    });
+
+    await expect(collect(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "claude-opus-4-8",
+      abortSignal: controller.signal,
+    }))).rejects.toThrow(/Anthropic connection failed/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("can infer Anthropic protocol from an /anthropic base URL", async () => {

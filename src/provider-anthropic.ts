@@ -1,8 +1,19 @@
 import { getAvailableThinkingLevels, normalizeThinkingLevel } from "./provider-transform.js";
+import { isProviderTransportError, normalizeProviderNetworkError, providerFetch } from "./network/provider-transport.js";
+import {
+  computeRetryDelayMs,
+  getProviderMaxRetries,
+  isRetryableHttpStatus,
+  ProviderStreamInterruptedError,
+  retryAfterMsFromResponse,
+  sleepBeforeRetry,
+} from "./network/retry.js";
 import type { ContentPart, Provider, ProviderMessage, ProviderRawContentBlock, StreamChunk, ThinkingLevel, ToolChoiceMode, ToolDefinition, TokenUsage } from "./types.js";
 
 const ANTHROPIC_VERSION = "2023-06-01";
 const DEFAULT_MAX_TOKENS = 8192;
+const ANTHROPIC_OPUS_LONG_OUTPUT_MAX_TOKENS = 128000;
+const ANTHROPIC_LONG_OUTPUT_MAX_TOKENS = 64000;
 const ANTHROPIC_PROMPT_CACHE_CONTROL = { type: "ephemeral" } as const;
 const MINIMAX_PROMPT_CACHE_MODELS = new Set([
   "minimax-m2.7",
@@ -89,7 +100,7 @@ export function createAnthropicMessagesProvider(options: AnthropicProviderOption
       stream: true,
     });
 
-    const response = await fetchAnthropicResponseWithRetry(options, {
+    const events = streamAnthropicEventsWithRetry(options, {
       url: resolveAnthropicMessagesUrl(options.baseURL),
       stream: true,
       method: "POST",
@@ -97,7 +108,7 @@ export function createAnthropicMessagesProvider(options: AnthropicProviderOption
       signal: chatOptions.abortSignal,
     });
 
-    yield* translateAnthropicStream(readSseEvents(response));
+    yield* translateAnthropicStream(events);
     yield { type: "done" };
   }
 
@@ -152,28 +163,48 @@ export function buildAnthropicRequest(
     };
   }
 
+  const effectiveThinkingLevel = normalizeThinkingLevel(
+    chatOptions.thinkingLevel ?? options.thinkingLevel ?? "off",
+    getAvailableThinkingLevels(options.providerId || "", chatOptions.model),
+  );
+
   const body: AnthropicRequest = {
     model: chatOptions.model,
-    max_tokens: DEFAULT_MAX_TOKENS,
+    max_tokens: resolveAnthropicMaxTokens(options, chatOptions.model),
     system: buildAnthropicSystem(system, enablePromptCache),
     messages: anthropicMessages,
     tools: tools && tools.length > 0 ? tools : undefined,
     tool_choice: tools && tools.length > 0 ? { type: chatOptions.toolChoice ?? "auto" } : undefined,
     stream: chatOptions.stream || undefined,
   };
-  if (typeof chatOptions.temperature === "number") {
+  if (
+    typeof chatOptions.temperature === "number"
+    && shouldSendTemperature(options, chatOptions.model, effectiveThinkingLevel)
+  ) {
     body.temperature = chatOptions.temperature;
   }
 
-  const effectiveThinkingLevel = normalizeThinkingLevel(
-    chatOptions.thinkingLevel ?? options.thinkingLevel ?? "off",
-    getAvailableThinkingLevels(options.providerId || "", chatOptions.model),
-  );
   if (effectiveThinkingLevel !== "off") {
     body.thinking = { type: "adaptive" };
   }
 
   return body;
+}
+
+export function resolveAnthropicMaxTokens(options: AnthropicProviderOptions, model: string): number {
+  if (!isOfficialAnthropicBaseUrl(options.baseURL)) {
+    return DEFAULT_MAX_TOKENS;
+  }
+
+  if (isFableModelWith128kOutput(model) || isOpusModelWith128kOutput(model)) {
+    return ANTHROPIC_OPUS_LONG_OUTPUT_MAX_TOKENS;
+  }
+
+  if (isSonnetOrHaikuModelWith64kOutput(model)) {
+    return ANTHROPIC_LONG_OUTPUT_MAX_TOKENS;
+  }
+
+  return DEFAULT_MAX_TOKENS;
 }
 
 function buildAnthropicSystem(system: string, enablePromptCache: boolean): AnthropicRequest["system"] {
@@ -456,6 +487,49 @@ export async function* readSseEvents(response: Response): AsyncIterable<Record<s
   }
 }
 
+async function* streamAnthropicEventsWithRetry(
+  options: AnthropicProviderOptions,
+  request: {
+    url: string;
+    stream: true;
+    method: "POST";
+    body: string;
+    signal?: AbortSignal;
+  },
+): AsyncIterable<Record<string, unknown>> {
+  const maxRetries = getProviderMaxRetries();
+
+  for (let attempt = 0; ; attempt++) {
+    // Connection-level failures and retryable HTTP statuses are retried
+    // inside fetchAnthropicResponseWithRetry; an error thrown from it has
+    // already exhausted its budget, so it propagates without another loop.
+    const response = await fetchAnthropicResponseWithRetry(options, request);
+
+    let sawSseEvent = false;
+    try {
+      for await (const event of readSseEvents(response)) {
+        sawSseEvent = true;
+        yield event;
+      }
+      return;
+    } catch (error) {
+      const normalized = normalizeAnthropicTransportError(error, request.url);
+      if (sawSseEvent) {
+        // Partial content already surfaced — only the agent loop can discard
+        // the half-built assistant message and safely re-issue the request.
+        if (!request.signal?.aborted && isProviderTransportError(error)) {
+          throw new ProviderStreamInterruptedError(normalized.message, { cause: normalized });
+        }
+        throw normalized;
+      }
+      if (request.signal?.aborted || attempt >= maxRetries || !isProviderTransportError(error)) {
+        throw normalized;
+      }
+      await sleepBeforeRetry(computeRetryDelayMs(attempt + 1), request.signal);
+    }
+  }
+}
+
 async function fetchAnthropicResponseWithRetry(
   options: AnthropicProviderOptions,
   request: {
@@ -466,30 +540,43 @@ async function fetchAnthropicResponseWithRetry(
     signal?: AbortSignal;
   },
 ): Promise<Response> {
-  const maxAttempts = shouldRetryMiniMaxAnthropic(options) ? 2 : 1;
-  let lastError: Error | undefined;
+  const maxRetries = getProviderMaxRetries();
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const response = await fetch(request.url, {
-      method: request.method,
-      headers: buildAnthropicHeaders(options, request.stream),
-      body: request.body,
-      signal: request.signal,
-    });
+  for (let attempt = 0; ; attempt++) {
+    let response: Response;
+    try {
+      response = await providerFetch(request.url, {
+        method: request.method,
+        headers: buildAnthropicHeaders(options, request.stream),
+        body: request.body,
+        signal: request.signal,
+        keepalive: false,
+      }, {
+        providerName: "Anthropic",
+        verboseEnvVar: "BUBBLE_ANTHROPIC_FETCH_VERBOSE",
+      });
+    } catch (error) {
+      // No response received, so the request is safe to re-issue.
+      if (request.signal?.aborted || attempt >= maxRetries || !isProviderTransportError(error)) {
+        throw normalizeAnthropicTransportError(error, request.url);
+      }
+      await sleepBeforeRetry(computeRetryDelayMs(attempt + 1), request.signal);
+      continue;
+    }
     if (response.ok) return response;
 
     const detail = await readAnthropicErrorDetail(response);
     const error = new Error(`Anthropic Messages API error ${response.status}: ${detail || response.statusText}`);
-    lastError = error;
 
-    if (attempt >= maxAttempts || !isRetryableMiniMaxAnthropicError(response.status, detail)) {
+    if (request.signal?.aborted || attempt >= maxRetries || !isRetryableAnthropicHttpError(response.status, detail)) {
       throw error;
     }
 
-    await sleepBeforeRetry(getAnthropicRetryDelayMs(), request.signal);
+    await sleepBeforeRetry(
+      computeRetryDelayMs(attempt + 1, { retryAfterMs: retryAfterMsFromResponse(response) }),
+      request.signal,
+    );
   }
-
-  throw lastError ?? new Error("Anthropic Messages API request failed");
 }
 
 function resolveAnthropicMessagesUrl(baseURL: string): string {
@@ -520,44 +607,19 @@ async function readAnthropicErrorDetail(response: Response): Promise<string> {
   }
 }
 
-function shouldRetryMiniMaxAnthropic(options: AnthropicProviderOptions): boolean {
-  const providerId = (options.providerId || "").toLowerCase();
-  const baseURL = options.baseURL.toLowerCase();
-  return providerId.startsWith("minimax") || baseURL.includes("api.minimaxi.com") || baseURL.includes("api.minimax.io");
-}
-
-function isRetryableMiniMaxAnthropicError(status: number, detail: string): boolean {
-  return status === 500
-    || status === 502
-    || status === 503
-    || status === 504
-    || detail.includes("714 (1000)");
-}
-
-function getAnthropicRetryDelayMs(): number {
-  if (process.env.NODE_ENV === "test") return 0;
-  return 800 + Math.floor(Math.random() * 700);
-}
-
-function sleepBeforeRetry(ms: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) {
-    return Promise.reject(toAbortError(signal));
+function normalizeAnthropicTransportError(error: unknown, url: string): Error {
+  if (!isProviderTransportError(error)) {
+    return error instanceof Error ? error : new Error(String(error));
   }
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => {
-      clearTimeout(timeout);
-      reject(toAbortError(signal));
-    }, { once: true });
+  return normalizeProviderNetworkError(error, {
+    providerName: "Anthropic",
+    input: url,
   });
 }
 
-function toAbortError(signal?: AbortSignal): Error {
-  const reason = signal?.reason;
-  if (reason instanceof Error) return reason;
-  const error = new Error("Anthropic request retry aborted.");
-  error.name = "AbortError";
-  return error;
+function isRetryableAnthropicHttpError(status: number, detail: string): boolean {
+  // "714 (1000)" is a transient MiniMax backend error surfaced as a 500.
+  return isRetryableHttpStatus(status) || detail.includes("714 (1000)");
 }
 
 function parseSseEvent(raw: string): Record<string, unknown> | undefined {
@@ -700,6 +762,45 @@ function shouldEchoThinking(providerId?: string): boolean {
 
 function shouldSendBearerAuth(options: AnthropicProviderOptions): boolean {
   return !isOfficialAnthropicBaseUrl(options.baseURL) || options.providerId?.startsWith("minimax") === true;
+}
+
+function shouldSendTemperature(options: AnthropicProviderOptions, model: string, thinkingLevel: ThinkingLevel): boolean {
+  if (!isOfficialAnthropicBaseUrl(options.baseURL)) return true;
+  if (thinkingLevel !== "off") return false;
+  return !isOpusModelWithoutSamplingControls(model);
+}
+
+function isOpusModelWith128kOutput(model: string): boolean {
+  return isClaudeFamilyVersionAtLeast(model, "opus", 4, 6);
+}
+
+function isFableModelWith128kOutput(model: string): boolean {
+  return model.toLowerCase().startsWith("claude-fable-5");
+}
+
+function isSonnetOrHaikuModelWith64kOutput(model: string): boolean {
+  const normalized = model.toLowerCase();
+  return normalized.startsWith("claude-sonnet-4-6")
+    || normalized.startsWith("claude-haiku-4-5");
+}
+
+function isOpusModelWithoutSamplingControls(model: string): boolean {
+  return isClaudeFamilyVersionAtLeast(model, "opus", 4, 7);
+}
+
+function isClaudeFamilyVersionAtLeast(model: string, family: string, minMajor: number, minMinor: number): boolean {
+  const normalized = model.toLowerCase();
+  if (!normalized.startsWith(`claude-${family}-`)) return false;
+
+  const [, , majorSegment, minorSegment] = normalized.split("-");
+  const major = Number(majorSegment);
+  if (!Number.isFinite(major)) return false;
+  if (major > minMajor) return true;
+  if (major < minMajor) return false;
+
+  if (!minorSegment || minorSegment.length > 2) return false;
+  const minor = Number(minorSegment);
+  return Number.isFinite(minor) && minor >= minMinor;
 }
 
 function isMiniMaxAnthropicEndpoint(options: AnthropicProviderOptions): boolean {

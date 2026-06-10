@@ -9,6 +9,12 @@ import { compactMessagesWithLLM } from "./context/compact-llm.js";
 import { estimateContextTokens, getContextBudget } from "./context/budget.js";
 import { buildContextUsageSnapshot, type ContextUsageSnapshot } from "./context/usage.js";
 import { isContextOverflowError } from "./context/overflow.js";
+import {
+  computeRetryDelayMs,
+  isProviderStreamInterruption,
+  MAX_STREAM_INTERRUPTION_RETRIES,
+  sleepBeforeRetry,
+} from "./network/retry.js";
 import { projectMessages } from "./context/projector.js";
 import { aggressivePruneMessages, markStableCurrentToolResultsForCache } from "./context/prune.js";
 import { truncateToolOutputForModel } from "./context/tool-output-truncate.js";
@@ -30,7 +36,12 @@ import { BudgetLedger, composeAbortSignals } from "./agent/budget-ledger.js";
 import { assignAgentNickname, builtinAgentProfiles, mergeUsage, selectToolsForAgentProfile, validateAgentProfileTools, type AgentProfile, type SubagentRunResult } from "./agent/profiles.js";
 import { snapshotSubagentThread, subagentResultFromThread, type PendingSubagentToolUpdate, type SubagentThreadRecord, type SubagentThreadSnapshot } from "./agent/subagent-control.js";
 import { isHiddenToolResult } from "./agent/discovery-barrier.js";
-import { createStreamingInternalReminderSanitizer, sanitizeAssistantProviderMetadata, sanitizeInternalReminderBlocks } from "./agent/internal-reminder-sanitizer.js";
+import {
+  createStreamingInternalReminderSanitizer,
+  sanitizeAssistantProviderMetadata,
+  sanitizeInternalReasoningText,
+  sanitizeInternalReminderBlocks,
+} from "./agent/internal-reminder-sanitizer.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { isOnlyProviderProtocolArtifacts, stripProviderProtocolArtifacts } from "./provider-artifacts.js";
 import { debugReasoningStream, summarizeDebugText } from "./reasoning-debug.js";
@@ -565,6 +576,7 @@ export class Agent {
 
     let consecutiveOverflowRecoveries = 0;
     let consecutiveEmptyAssistantRecoveries = 0;
+    let consecutiveStreamInterruptionRetries = 0;
     let step = 0;
     let autoServersStopped = false;
     const stopOwnedAutoServers = async () => {
@@ -871,6 +883,28 @@ export class Agent {
         if (assistantAppended) {
           throw error;
         }
+        if (
+          isProviderStreamInterruption(error)
+          && !isAbortLikeError(error, abortSignal)
+          && consecutiveStreamInterruptionRetries < MAX_STREAM_INTERRUPTION_RETRIES
+        ) {
+          // The provider stream died after partial content. The half-built
+          // assistantMsg was never appended to this.messages, and the next
+          // turn_start resets the streaming display, so re-issuing the whole
+          // request is safe.
+          consecutiveStreamInterruptionRetries += 1;
+          yield emit({
+            type: "provider_retry",
+            attempt: consecutiveStreamInterruptionRetries,
+            maxAttempts: MAX_STREAM_INTERRUPTION_RETRIES,
+            reason: "Provider stream interrupted mid-response.",
+          });
+          await sleepBeforeRetry(
+            computeRetryDelayMs(consecutiveStreamInterruptionRetries),
+            abortSignal,
+          ).catch(() => undefined);
+          continue;
+        }
         if (!isContextOverflowError(error)) {
           if (!isAbortLikeError(error, abortSignal) && shouldAppendModelInterruptedBoundary(this.messages)) {
             this.appendMessage(createModelInterruptedMessage(error, {
@@ -893,6 +927,7 @@ export class Agent {
 
       consecutiveOverflowRecoveries = 0;
       consecutiveEmptyAssistantRecoveries = 0;
+      consecutiveStreamInterruptionRetries = 0;
 
       // Execute tools if any
       if (assistantMsg.toolCalls && assistantMsg.toolCalls.length > 0) {
@@ -2072,7 +2107,7 @@ export class Agent {
       message.content = sanitizeInternalReminderBlocks(message.content);
     }
     if (message.role === "assistant" && message.reasoning) {
-      message.reasoning = sanitizeInternalReminderBlocks(message.reasoning);
+      message.reasoning = sanitizeInternalReasoningText(message.reasoning);
     }
     if (message.role === "assistant" && message.providerMetadata) {
       message.providerMetadata = sanitizeAssistantProviderMetadata(message.providerMetadata);

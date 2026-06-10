@@ -103,10 +103,16 @@ describe("variant resolver", () => {
       protocol: "anthropic-messages",
     });
     expect(listBuiltinModels("anthropic").map((model) => model.id)).toEqual([
+      "claude-fable-5",
       "claude-opus-4-8",
       "claude-sonnet-4-6",
       "claude-haiku-4-5-20251001",
     ]);
+    expect(listBuiltinModels("anthropic").some((model) => model.id === "claude-mythos-5")).toBe(false);
+    expect(getAvailableThinkingLevels("anthropic", "claude-fable-5")).toEqual(["medium"]);
+    expect(getDefaultThinkingLevel("anthropic", "claude-fable-5")).toBe("medium");
+    expect(normalizeThinkingLevel("off", getAvailableThinkingLevels("anthropic", "claude-fable-5"))).toBe("medium");
+    expect(getModelContextWindow("anthropic", "claude-fable-5")).toBe(1000000);
     expect(getAvailableThinkingLevels("anthropic", "claude-opus-4-8")).toEqual(["off", "medium"]);
     expect(getDefaultThinkingLevel("anthropic", "claude-opus-4-8")).toBe("medium");
     expect(getModelContextWindow("anthropic", "claude-opus-4-8")).toBe(1000000);

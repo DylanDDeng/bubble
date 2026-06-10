@@ -194,15 +194,17 @@ function buildListGroup(
   hasError: boolean,
   errorCount: number,
 ): TraceGroup {
-  const resultItems = raw.flatMap((tool) => resultLines(tool.result).map((line) => formatTracePath(line, options.homeDir)));
+  const matchCount = listMatchCount(raw);
+  const resultItems = raw.flatMap((tool) => listResultItems(tool, options.homeDir));
   const fallbackItems = raw
     .map((tool) => String(tool.args.pattern ?? tool.args.path ?? "").trim())
     .filter(Boolean)
     .map((item) => formatTracePath(item, options.homeDir));
-  const sourceItems = resultItems.length > 0 ? resultItems : fallbackItems;
+  const hasResultData = matchCount !== undefined || resultItems.length > 0 || raw.some((tool) => isEmptyListResult(tool.result));
+  const sourceItems = hasResultData ? resultItems : fallbackItems;
   const { shown, omitted } = take(sourceItems, options.maxItems);
-  const count = resultItems.length > 0 ? resultItems.length : sourceItems.length || raw.length;
-  const noun = resultItems.length > 0 ? plural(count, "file", "files") : plural(count, "search", "searches");
+  const count = matchCount ?? (hasResultData ? resultItems.length : sourceItems.length || raw.length);
+  const noun = hasResultData ? plural(count, "file", "files") : plural(count, "search", "searches");
 
   return {
     kind: "list",
@@ -219,6 +221,43 @@ function buildListGroup(
     errorCount,
     startedAt,
   };
+}
+
+function listResultItems(tool: DisplayToolCall, homeDir: string): string[] {
+  const metadataPaths = Array.isArray(tool.metadata?.paths)
+    ? tool.metadata.paths.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  if (metadataPaths.length > 0 || typeof tool.metadata?.matches === "number") {
+    return metadataPaths.map((line) => formatTracePath(line, homeDir));
+  }
+  return resultLines(tool.result)
+    .filter(isListResultLine)
+    .map((line) => formatTracePath(line, homeDir));
+}
+
+function listMatchCount(raw: DisplayToolCall[]): number | undefined {
+  let count = 0;
+  let sawMetadata = false;
+  for (const tool of raw) {
+    const matches = tool.metadata?.matches;
+    if (typeof matches === "number" && Number.isFinite(matches)) {
+      count += Math.max(0, matches);
+      sawMetadata = true;
+    }
+  }
+  return sawMetadata ? count : undefined;
+}
+
+function isEmptyListResult(result: string | undefined): boolean {
+  if (result === undefined) return false;
+  const lines = resultLines(result);
+  return lines.length > 0 && lines.every((line) => !isListResultLine(line));
+}
+
+function isListResultLine(line: string): boolean {
+  const normalized = line.trim();
+  return !/^No files found\.?$/i.test(normalized)
+    && !/^\[More than \d+ files, output truncated\]$/i.test(normalized);
 }
 
 function buildPathGroup(

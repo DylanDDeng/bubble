@@ -12,6 +12,7 @@ describe("provider registry", () => {
     expect(displayModel("stepfun:step-3.7-flash")).toBe("Step 3.7 Flash");
     expect(displayModel("minimax:MiniMax-M3")).toBe("MiniMax M3");
     expect(displayModel("minimax-openai:MiniMax-M3")).toBe("MiniMax M3");
+    expect(displayModel("anthropic:claude-fable-5")).toBe("Claude Fable 5");
     expect(displayModel("anthropic:claude-sonnet-4-6")).toBe("Claude Sonnet 4.6");
   });
 

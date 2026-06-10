@@ -1,6 +1,7 @@
 import type { AssistantProviderMetadata } from "../types.js";
 
 const INTERNAL_TAG_PREFIX = "<bubble_internal_";
+const MEMORY_CITATION_TAG = "<oai-mem-citation";
 const INTERNAL_TAG_NAMES = ["reminder", "context"] as const;
 const LEGACY_RUNTIME_MARKERS = [
   "Runtime reminder:\n",
@@ -8,6 +9,7 @@ const LEGACY_RUNTIME_MARKERS = [
 ];
 const STREAM_MARKERS = [
   INTERNAL_TAG_PREFIX,
+  MEMORY_CITATION_TAG,
   ...LEGACY_RUNTIME_MARKERS,
 ];
 
@@ -41,6 +43,15 @@ export function sanitizeInternalReminderBlocks(text: string): string {
   if (!text) return text;
   const sanitizer = createStreamingInternalReminderSanitizer();
   return sanitizer.push(text) + sanitizer.flush();
+}
+
+export function sanitizeInternalReasoningText(text: string): string {
+  const withoutBlocks = sanitizeInternalReminderBlocks(text);
+  if (!withoutBlocks) return withoutBlocks;
+  return withoutBlocks
+    .split(/\n{2,}/)
+    .filter((paragraph) => !containsInternalReminderReference(paragraph))
+    .join("\n\n");
 }
 
 export function sanitizeAssistantProviderMetadata(
@@ -135,9 +146,33 @@ function formatInternalBlock(type: "reminder" | "context", kind: string, content
   return `<bubble_internal_${type} kind="${safeKind}">\n${content}\n</bubble_internal_${type}>`;
 }
 
+function containsInternalReminderReference(text: string): boolean {
+  return INTERNAL_REASONING_REFERENCE_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+const INTERNAL_REASONING_REFERENCE_PATTERNS = [
+  /<bubble_internal_(?:reminder|context)\b/i,
+  /\bsystem\s+reminder\b/i,
+  /\bruntime\s+reminder\b/i,
+  /\bsystem\s+prompt\b/i,
+  /The following deferred tools are available via tool_search/i,
+  /Known deferred tools/i,
+  /\bdeferred tools\b/i,
+  /\bmcp__[a-z0-9_]+/i,
+  /\bMCP\s+arxiv\s+tools\b/i,
+  /\barxiv\s+MCP\s+tools\b/i,
+  /Subagent lifecycle truth/i,
+  /Count unique agent_id values only/i,
+  /Do not describe a subagent as running or still working/i,
+];
+
 function consumeInternalBlockAtStart(text: string, final: boolean): { consume?: number; hold?: boolean } | undefined {
   if (text.startsWith(INTERNAL_TAG_PREFIX)) {
     return consumeStructuredInternalBlock(text, final);
+  }
+
+  if (text.startsWith(MEMORY_CITATION_TAG)) {
+    return consumeMemoryCitationBlock(text, final);
   }
 
   if (text.startsWith("Runtime reminder:\n")) {
@@ -149,6 +184,23 @@ function consumeInternalBlockAtStart(text: string, final: boolean): { consume?: 
   }
 
   return undefined;
+}
+
+function consumeMemoryCitationBlock(text: string, final: boolean): { consume?: number; hold?: boolean } | undefined {
+  const openMatch = text.match(/^<oai-mem-citation\b[^>]*>/);
+  if (!openMatch) {
+    return isPrefixOf(MEMORY_CITATION_TAG, text)
+      ? final ? { consume: text.length } : { hold: true }
+      : undefined;
+  }
+
+  const closeTag = "</oai-mem-citation>";
+  const closeIndex = text.indexOf(closeTag, openMatch[0].length);
+  if (closeIndex < 0) {
+    return final ? { consume: text.length } : { hold: true };
+  }
+
+  return { consume: consumeTrailingLineBreaks(text, closeIndex + closeTag.length) };
 }
 
 function consumeStructuredInternalBlock(text: string, final: boolean): { consume?: number; hold?: boolean } | undefined {
