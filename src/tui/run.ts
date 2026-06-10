@@ -127,6 +127,12 @@ import {
   type ImageAttachment,
 } from "./image-paste.js";
 import {
+  createPastedContentMarker,
+  decodePastedBytes,
+  expandPastedContentMarkers,
+  shouldCollapsePastedContent,
+} from "./paste-placeholder.js";
+import {
   isModeCycleKeyEvent,
   isModeCycleSequence,
   isModifiedEnterSequence,
@@ -738,6 +744,11 @@ function OpenTuiApp(props: {
   let promptHistory = initialPromptHistory(displayMessages);
   let nextImageAttachmentIndex = nextImageLabelIndex(displayMessages);
   const pendingImageAttachments = new Map<string, ImageAttachment>();
+  // Long pastes are collapsed to "[Pasted text #N +M lines]" in the composer
+  // and expanded back to the full content when the message is submitted,
+  // mirroring how image attachments use "[Image #N]" labels.
+  const pendingPastedTexts = new Map<string, string>();
+  let nextPastedTextIndex = 1;
   let composerImageResolutionSeq = 0;
   let applyingComposerImageReplacement = false;
   let promptHistoryIndex: number | undefined;
@@ -2904,9 +2915,12 @@ function OpenTuiApp(props: {
       queueComposerInput(input, { showInTranscript: true });
       return;
     }
-    const displayId = addPendingSteerUserDisplay(input);
-    const pendingInput = run.inputController.enqueue(input);
-    pendingSteerInputs.push({ id: pendingInput.id, input, displayId });
+    // Expand here because steer inputs bypass handleInput; keep the expanded
+    // text in the record so a rejected steer requeues without stale markers.
+    const expandedInput = expandComposerPastedTexts(input);
+    const displayId = addPendingSteerUserDisplay(expandedInput);
+    const pendingInput = run.inputController.enqueue(expandedInput);
+    pendingSteerInputs.push({ id: pendingInput.id, input: expandedInput, displayId });
     syncPendingSteerInputCount();
     setNotice("Steer pending for next model call");
   }
@@ -4957,6 +4971,28 @@ function OpenTuiApp(props: {
     }
   }
 
+  // Replaces pasted-text markers with their full content. Runs after @mention
+  // expansion so mention-like tokens inside pasted content stay literal.
+  // References stay registered for the whole session so prompt-history recall
+  // and requeued drafts containing a marker expand again on resend.
+  function expandComposerPastedTexts(text: string): string {
+    if (pendingPastedTexts.size === 0 || !text.includes("[Pasted text #")) return text;
+    const references = [...pendingPastedTexts.entries()].map(([marker, content]) => ({ marker, content }));
+    return expandPastedContentMarkers(text, references);
+  }
+
+  function handleComposerPaste(event: { bytes?: unknown; text?: unknown; preventDefault?: () => void }) {
+    const text = typeof event.text === "string" ? event.text : decodePastedBytes(event.bytes);
+    if (!text || !shouldCollapsePastedContent(text)) return;
+    event.preventDefault?.();
+    const marker = createPastedContentMarker(text, nextPastedTextIndex);
+    nextPastedTextIndex += 1;
+    pendingPastedTexts.set(marker, text);
+    const prompt = activePrompt();
+    prompt?.insertText(marker);
+    onPromptContentChange(readPromptText());
+  }
+
   async function expandTextParts(parts: ContentPart[]): Promise<ContentPart[]> {
     const expandedParts: ContentPart[] = [];
     for (const part of parts) {
@@ -4969,7 +5005,7 @@ function OpenTuiApp(props: {
       for (const skipped of expansion.skipped) {
         if (skipped.reason !== "too large") addMessage("error", `Skipped @${skipped.path}: ${skipped.reason}`);
       }
-      expandedParts.push({ type: "text", text: expansion.text });
+      expandedParts.push({ type: "text", text: expandComposerPastedTexts(expansion.text) });
     }
     return expandedParts;
   }
@@ -4997,7 +5033,7 @@ function OpenTuiApp(props: {
     if (input.startsWith("/")) {
       const skillInvocation = parseSkillInvocation(input, skills);
       if (skillInvocation) {
-        await runAgentInput(skillInvocation.actualPrompt, input, options);
+        await runAgentInput(expandComposerPastedTexts(skillInvocation.actualPrompt), input, options);
         return;
       }
 
@@ -5010,7 +5046,7 @@ function OpenTuiApp(props: {
     for (const skipped of expansion.skipped) {
       if (skipped.reason !== "too large") addMessage("error", `Skipped @${skipped.path}: ${skipped.reason}`);
     }
-    await runAgentInput(expansion.text, input, options);
+    await runAgentInput(expandComposerPastedTexts(expansion.text), input, options);
   }
 
   async function executeSlash(input: string, options: { displayId?: string } = {}) {
@@ -5475,10 +5511,13 @@ function OpenTuiApp(props: {
     }
 
     rememberPromptHistory(displayInput);
-    const reusedQueuedDisplay = promoteQueuedUserDisplay(options.displayId, displayInput);
+    // History keeps the short marker (it expands again on resend); the
+    // transcript shows the full pasted content once the message is sent.
+    const displayContent = expandComposerPastedTexts(displayInput);
+    const reusedQueuedDisplay = promoteQueuedUserDisplay(options.displayId, displayContent);
     const nextMessages = reusedQueuedDisplay
       ? displayMessages
-      : [...displayMessages, { role: "user" as const, content: displayInput }];
+      : [...displayMessages, { role: "user" as const, content: displayContent }];
     if (!reusedQueuedDisplay) displayMessages = nextMessages;
     streamingDisplay = undefined;
     redrawTranscript(undefined, nextMessages);
@@ -5860,6 +5899,7 @@ function OpenTuiApp(props: {
         model: promptModelTitle,
         interruptHint: promptStatusText,
         tabHint: () => isRunning() ? "queue" : "mode",
+        onPaste: handleComposerPaste,
         placeholder: () => {
           const approvalState = pendingApproval();
           if (approvalState) return "Press Enter to approve or Esc to reject";
@@ -7387,6 +7427,7 @@ function renderPrompt(input: {
   interruptHint: () => string;
   tabHint: () => string;
   placeholder: () => string;
+  onPaste?: (event: any) => void;
 }) {
   const transparentBackground = "#00000000";
 
@@ -7408,6 +7449,7 @@ function renderPrompt(input: {
           cursorColor: theme.primary,
           minHeight: 1,
           maxHeight: 6,
+          ...(input.onPaste ? { onPaste: input.onPaste } : {}),
           onContentChange: () => input.onContentChange(input.getText()),
           keyBindings: PROMPT_TEXTAREA_KEYBINDINGS,
           onKeyDown: (event: any) => {

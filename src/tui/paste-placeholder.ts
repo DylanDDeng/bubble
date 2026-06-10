@@ -24,6 +24,12 @@ export function createPastedContentMarker(content: string, index = 1): string {
   return `[Pasted text #${safeIndex} +${size}]`;
 }
 
+export function decodePastedBytes(bytes: unknown): string {
+  if (typeof bytes === "string") return bytes;
+  if (bytes instanceof Uint8Array) return new TextDecoder().decode(bytes);
+  return "";
+}
+
 export function expandPastedContentMarkers(
   displayText: string,
   references: PastedContentReference[],
