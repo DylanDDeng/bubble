@@ -208,6 +208,10 @@ export function summarizeAgentEventForTrace(event: AgentEvent): Record<string, u
     case "text_delta":
     case "reasoning_delta":
       return { type: event.type, content: summarizeTraceText(event.content) };
+    case "hook_start":
+    case "hook_end":
+    case "hook_error":
+      return { ...event };
     case "tool_call_start":
       return { type: event.type, id: event.id, name: event.name };
     case "tool_call_delta":

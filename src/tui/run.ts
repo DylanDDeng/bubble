@@ -55,6 +55,7 @@ import {
 } from "../debug-trace.js";
 import type { CliArgs } from "../cli.js";
 import type { ThemeMode } from "../config.js";
+import type { ExternalHookController } from "../hooks/controller.js";
 import type { SessionManager } from "../session.js";
 import type { ContentPart, Message, PermissionMode, PlanDecision, Provider, ThinkingLevel, Todo, TokenUsage, ToolResultMetadata } from "../types.js";
 import type { ProviderRegistry } from "../provider-registry.js";
@@ -160,6 +161,7 @@ export interface RunTuiOptions {
   questionController?: QuestionController;
   bashAllowlist?: BashAllowlist;
   settingsManager?: SettingsManager;
+  hookController?: ExternalHookController;
   lspService?: LspService;
   mcpManager?: McpManager;
   themeMode?: ThemeMode;
@@ -4960,6 +4962,7 @@ function OpenTuiApp(props: {
       skillRegistry: skills,
       bashAllowlist: props.options.bashAllowlist,
       settingsManager: props.options.settingsManager,
+      hookController: props.options.hookController,
       mcpManager: props.options.mcpManager,
       lspService,
       flushMemory: props.options.flushMemory,
@@ -5486,6 +5489,14 @@ function OpenTuiApp(props: {
           });
           assistantReasoning += event.content;
           scheduleStreamingRedraw();
+        } else if (event.type === "hook_start") {
+          setNotice(`Hook ${event.eventName}: ${event.hookId}`);
+        } else if (event.type === "hook_end") {
+          if (event.decision === "deny") {
+            setNotice(event.reason ?? `Hook ${event.hookId} denied ${event.eventName}`);
+          }
+        } else if (event.type === "hook_error") {
+          setNotice(`Hook ${event.hookId} error: ${event.error}`);
         } else if (event.type === "tool_call_start") {
           // Insert a streaming placeholder so the user sees feedback the moment
           // the model commits to a tool call, instead of waiting for the args

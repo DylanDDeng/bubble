@@ -15,6 +15,14 @@ import { truncateToolOutputForModel } from "./context/tool-output-truncate.js";
 import { buildDeferredToolsReminder, buildToolFreezeReminder, reminderForMode } from "./prompt/reminders.js";
 import type { AgentEvent, AgentInputController, AgentRunInput, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ProviderMessage, ProviderRawContentBlock, ThinkingLevel, Todo, TokenUsage, ToolDefinition, ToolResult, ToolRegistryEntry, ToolUpdate } from "./types.js";
 import { HookBus, type TurnHooks, type TurnHookState } from "./orchestrator/hooks.js";
+import type { ExternalHookController } from "./hooks/controller.js";
+import {
+  normalizeHookInput,
+  truncateHookText,
+  type HookCombinedResult,
+  type HookProgressEvent,
+  type HookRunRequest,
+} from "./hooks/index.js";
 import { createDefaultHooks } from "./orchestrator/default-hooks.js";
 import { resolveModelRoute, resolveSubagentRoute, type AgentCategoriesConfig, type ResolvedSubagentRoute } from "./agent/categories.js";
 import { getSubtaskPolicy, type SubtaskType } from "./agent/subtask-policy.js";
@@ -55,6 +63,39 @@ const EMPTY_ASSISTANT_FALLBACK =
 const INTERRUPTED_ASSISTANT_CONTENT =
   "Interrupted by user. The prior request was stopped and should not be resumed unless the user asks.";
 
+function agentEventFromHookProgress(event: HookProgressEvent): AgentEvent {
+  const source = `${event.source.scope}:${event.source.index}`;
+  if (event.type === "hook_start") {
+    return {
+      type: "hook_start",
+      eventName: event.eventName,
+      hookId: event.hookId,
+      source,
+    };
+  }
+  if (event.type === "hook_end") {
+    return {
+      type: "hook_end",
+      eventName: event.eventName,
+      hookId: event.hookId,
+      source,
+      elapsedMs: event.elapsedMs ?? 0,
+      decision: event.decision ?? "allow",
+      reason: event.reason,
+    };
+  }
+  return {
+    type: "hook_error",
+    eventName: event.eventName,
+    hookId: event.hookId,
+    source,
+    elapsedMs: event.elapsedMs,
+    decision: event.decision,
+    reason: event.reason,
+    error: event.error ?? "Hook failed.",
+  };
+}
+
 export class AgentAbortError extends Error {
   constructor(message = "Agent run cancelled.") {
     super(message);
@@ -81,6 +122,9 @@ export interface AgentOptions {
   onTodosUpdate?: (todos: Todo[]) => void;
   onModeUpdate?: (mode: PermissionMode) => void;
   hooks?: TurnHooks[];
+  externalHooks?: ExternalHookController;
+  agentRole?: "parent" | "subagent";
+  subAgentId?: string;
   budgetLedger?: BudgetLedger;
   budgetSource?: { runId: string; subAgentId?: string };
   skills?: SkillSummary[];
@@ -114,6 +158,9 @@ export class Agent {
   private onMessageAppend?: (message: Message) => void;
   private onToolResult?: (toolName: string, result: ToolResult) => void;
   private hookDefinitions: TurnHooks[];
+  private externalHooks?: ExternalHookController;
+  private agentRole: "parent" | "subagent";
+  private subAgentId?: string;
   private maxTurns?: number;
   private taskBudget?: { total: number };
   private budgetLedger?: BudgetLedger;
@@ -142,6 +189,9 @@ export class Agent {
     this.onTodosUpdate = options.onTodosUpdate;
     this.onModeUpdate = options.onModeUpdate;
     this.hookDefinitions = options.hooks ?? [];
+    this.externalHooks = options.externalHooks;
+    this.agentRole = options.agentRole ?? "parent";
+    this.subAgentId = options.subAgentId;
     this.maxTurns = options.maxTurns ?? options.steps;
     this.taskBudget = options.taskBudget;
     this.budgetLedger = options.budgetLedger;
@@ -173,6 +223,42 @@ export class Agent {
       .map((t) => t.name);
     if (deferredNames.length > 0) {
       this.injectSystemReminder(buildDeferredToolsReminder(deferredNames));
+    }
+  }
+
+  private async runExternalHook(
+    request: HookRunRequest,
+    abortSignal?: AbortSignal,
+  ): Promise<{ result: HookCombinedResult; events: AgentEvent[] }> {
+    const events: AgentEvent[] = [];
+    if (!this.externalHooks) {
+      return {
+        result: {
+          eventName: request.eventName,
+          decision: "allow",
+          modelContext: [],
+          results: [],
+          diagnostics: [],
+          matched: 0,
+        },
+        events,
+      };
+    }
+    const result = await this.externalHooks.runEvent({
+      agentRole: this.agentRole,
+      subAgentId: this.subAgentId,
+      sessionId: this.sessionID,
+      ...request,
+    }, {
+      abortSignal,
+      onProgress: (event) => events.push(agentEventFromHookProgress(event)),
+    });
+    return { result, events };
+  }
+
+  private injectHookModelContext(result: HookCombinedResult): void {
+    for (const context of result.modelContext) {
+      this.injectSystemReminder(`[Hook ${result.eventName}] ${context}`);
     }
   }
 
@@ -350,6 +436,7 @@ export class Agent {
       provider: this._providerId || "none",
       model: this.apiModel || "none",
     };
+    const runId = randomUUID();
     const emit = (event: AgentEvent): AgentEvent => {
       traceEvent("agent_event", summarizeAgentEventForTrace(event), traceContext);
       return event;
@@ -375,35 +462,66 @@ export class Agent {
       reminderQueue.push(reminder);
     };
     const pendingInputCount = () => inputController?.pendingInputCount() ?? 0;
-    const applyPendingInputs = (): AgentEvent[] => {
+    const applyPendingInputs = async (): Promise<AgentEvent[]> => {
       const pendingInputs = inputController?.drainPendingInputs() ?? [];
       if (pendingInputs.length === 0) return [];
+      const events: AgentEvent[] = [];
       for (const input of pendingInputs) {
+        const hook = await this.runExternalHook({
+          eventName: "SteerInputApplied",
+          cwd,
+          runId,
+          target: "current_turn",
+          payload: {
+            id: input.id,
+            target: "current_turn",
+            ...normalizeHookInput(input.content),
+          },
+          fullPayload: { prompt: input.content },
+        }, abortSignal);
+        events.push(...hook.events);
+        this.injectHookModelContext(hook.result);
         this.appendMessage({ role: "user", content: input.content });
-      }
-      return [
-        ...pendingInputs.map((input): AgentEvent => ({
+        events.push({
           type: "input_applied",
           id: input.id,
           content: input.content,
           target: "current_turn",
-        })),
-        { type: "input_pending_changed", pending: pendingInputCount() },
-      ];
+        });
+      }
+      events.push({ type: "input_pending_changed", pending: pendingInputCount() });
+      return events;
     };
-    const rejectPendingInputs = (reason: "no_continuation"): AgentEvent[] => {
+    const rejectPendingInputs = async (reason: "no_continuation"): Promise<AgentEvent[]> => {
       const pendingInputs: AgentRunInput[] = inputController?.drainPendingInputs() ?? [];
       if (pendingInputs.length === 0) return [];
-      return [
-        ...pendingInputs.map((input): AgentEvent => ({
+      const events: AgentEvent[] = [];
+      for (const input of pendingInputs) {
+        const hook = await this.runExternalHook({
+          eventName: "QueuedInputRejected",
+          cwd,
+          runId,
+          target: "next_turn",
+          payload: {
+            id: input.id,
+            reason,
+            target: "next_turn",
+            ...normalizeHookInput(input.content),
+          },
+          fullPayload: { prompt: input.content },
+        }, abortSignal);
+        events.push(...hook.events);
+        this.injectHookModelContext(hook.result);
+        events.push({
           type: "input_rejected",
           id: input.id,
           content: input.content,
           reason,
           target: "next_turn",
-        })),
-        { type: "input_pending_changed", pending: pendingInputCount() },
-      ];
+        });
+      }
+      events.push({ type: "input_pending_changed", pending: pendingInputCount() });
+      return events;
     };
     const flushGovernorReminders = () => {
       for (const reminder of reminderQueue.splice(0, reminderQueue.length)) {
@@ -415,6 +533,25 @@ export class Agent {
       this.setTodos([]);
       yield emit({ type: "todos_updated", todos: [] });
     }
+    const promptHook = await this.runExternalHook({
+      eventName: "UserPromptSubmit",
+      cwd,
+      runId,
+      target: typeof userInput === "string" ? userInput : "content_parts",
+      payload: normalizeHookInput(userInput),
+      fullPayload: { prompt: userInput },
+    }, abortSignal);
+    for (const event of promptHook.events) yield emit(event);
+    if (promptHook.result.decision === "deny") {
+      const message = promptHook.result.reason
+        ?? `Prompt blocked by hook ${promptHook.result.sourceHookId ?? "<unknown>"}.`;
+      yield emit({ type: "turn_start" });
+      yield emit({ type: "text_delta", content: message });
+      yield emit({ type: "turn_end", willContinue: false });
+      yield emit({ type: "agent_end" });
+      return;
+    }
+    this.injectHookModelContext(promptHook.result);
     this.appendMessage({ role: "user", content: userInput });
     await hookBus.runBeforeTurn({
       agent: this,
@@ -444,7 +581,7 @@ export class Agent {
       throwIfAborted(abortSignal);
       flushGovernorReminders();
       for (const update of this.drainSubagentToolUpdates()) yield emit(update);
-      for (const event of applyPendingInputs()) yield emit(event);
+      for (const event of await applyPendingInputs()) yield emit(event);
       yield emit({ type: "turn_start" });
       step += 1;
       (hookState as any).turnCount = step;
@@ -497,6 +634,22 @@ export class Agent {
       };
       await hookBus.runBeforeModelCall(beforeModelCallCtx);
       toolEntries = beforeModelCallCtx.toolEntries;
+      const preModelHook = await this.runExternalHook({
+        eventName: "PreModelCall",
+        cwd,
+        runId,
+        target: this.apiModel,
+        payload: {
+          providerId: this.providerId,
+          model: this.apiModel,
+          mode: this._mode,
+          toolCount: toolEntries.length,
+          ...normalizeHookInput(userInput),
+        },
+        fullPayload: { prompt: userInput },
+      }, abortSignal);
+      for (const event of preModelHook.events) yield emit(event);
+      this.injectHookModelContext(preModelHook.result);
       flushGovernorReminders();
       const textOnly = !!(hookState as any).forceTextOnlyReason;
       const toolDefinitions: ToolDefinition[] = toolEntries
@@ -805,6 +958,36 @@ export class Agent {
               blockedResult = result;
             },
           });
+          const preToolHook = await this.runExternalHook({
+            eventName: "PreToolUse",
+            cwd,
+            runId,
+            target: tc.name,
+            payload: {
+              id: tc.id,
+              name: tc.name,
+              argsPreview: truncateHookText(tc.arguments, 1000),
+            },
+            fullPayload: {
+              toolArgs: tc.parsedArgs,
+              toolArguments: tc.arguments,
+            },
+          }, abortSignal);
+          for (const event of preToolHook.events) yield emit(event);
+          this.injectHookModelContext(preToolHook.result);
+          if (preToolHook.result.decision === "deny") {
+            blockedResult = {
+              content: preToolHook.result.reason
+                ?? `Tool call blocked by hook ${preToolHook.result.sourceHookId ?? "<unknown>"}.`,
+              isError: true,
+              metadata: {
+                hook: {
+                  eventName: "PreToolUse",
+                  hookId: preToolHook.result.sourceHookId,
+                },
+              },
+            };
+          }
           assistantMsg.toolCalls[index] = {
             id: tc.id,
             name: tc.name,
@@ -839,6 +1022,26 @@ export class Agent {
                 result = next;
               },
             });
+            const postToolHook = await this.runExternalHook({
+              eventName: result.isError ? "PostToolUseFailure" : "PostToolUse",
+              cwd,
+              runId,
+              target: tc.name,
+              payload: {
+                id: tc.id,
+                name: tc.name,
+                argsPreview: truncateHookText(tc.arguments, 1000),
+                resultPreview: truncateHookText(result.content, 1000),
+                isError: result.isError === true,
+              },
+              fullPayload: {
+                toolArgs: tc.parsedArgs,
+                toolArguments: tc.arguments,
+                toolResult: result,
+              },
+            }, abortSignal);
+            for (const event of postToolHook.events) yield emit(event);
+            this.injectHookModelContext(postToolHook.result);
             traceEvent("speculative_read_blocked", {
               id: tc.id,
               name: tc.name,
@@ -921,6 +1124,26 @@ export class Agent {
               result = next;
             },
           });
+          const postToolHook = await this.runExternalHook({
+            eventName: result.isError ? "PostToolUseFailure" : "PostToolUse",
+            cwd,
+            runId,
+            target: tc.name,
+            payload: {
+              id: tc.id,
+              name: tc.name,
+              argsPreview: truncateHookText(tc.arguments, 1000),
+              resultPreview: truncateHookText(result.content, 1000),
+              isError: result.isError === true,
+            },
+            fullPayload: {
+              toolArgs: tc.parsedArgs,
+              toolArguments: tc.arguments,
+              toolResult: result,
+            },
+          }, abortSignal);
+          for (const event of postToolHook.events) yield emit(event);
+          this.injectHookModelContext(postToolHook.result);
           // Honor the model's server-declared per-tool-output token cap (e.g.
           // gpt-5.5 reports 10000). Without this, 4-5 large file reads in a row
           // blow past the input window even though our local estimate looks fine.
@@ -999,13 +1222,27 @@ export class Agent {
         flushReminders: flushGovernorReminders,
       });
       flushGovernorReminders();
+      const stopHook = await this.runExternalHook({
+        eventName: "Stop",
+        cwd,
+        runId,
+        target: "turn",
+        payload: {
+          providerId: this.providerId,
+          model: this.apiModel,
+          mode: this._mode,
+          assistantChars: assistantMsg.content.length,
+          toolCalls: assistantMsg.toolCalls?.length ?? 0,
+        },
+      }, abortSignal);
+      for (const event of stopHook.events) yield emit(event);
       const willContinue = !!(hookState as any).forceContinuationReason;
       yield emit({ type: "turn_end", usage: turnUsage, willContinue });
       if (willContinue) {
         delete (hookState as any).forceContinuationReason;
         continue;
       }
-      for (const event of rejectPendingInputs("no_continuation")) yield emit(event);
+      for (const event of await rejectPendingInputs("no_continuation")) yield emit(event);
       break;
     }
 
@@ -1027,6 +1264,17 @@ export class Agent {
         if (clearedTodos) {
           yield emit({ type: "todos_updated", todos: this.getTodos() });
         }
+      } else {
+        const stopFailureHook = await this.runExternalHook({
+          eventName: "StopFailure",
+          cwd,
+          runId,
+          target: "run_error",
+          payload: {
+            error: summarizeTraceError(error),
+          },
+        }, abortSignal);
+        for (const event of stopFailureHook.events) yield emit(event);
       }
       throw error;
     } finally {
@@ -1421,6 +1669,29 @@ export class Agent {
         this.pendingSubagentUpdates.push({ id: record.parentToolCallId, name: record.parentToolName, update });
       }
     };
+    const runSubagentLifecycleHook = async (
+      eventName: "SubagentStart" | "SubagentStop",
+      status?: string,
+      error?: string,
+    ) => {
+      try {
+        await this.runExternalHook({
+          eventName,
+          cwd,
+          runId: record.runId,
+          target: record.profile.name,
+          payload: {
+            agentId: record.agentId,
+            nickname: record.nickname,
+            profile: record.profile.name,
+            status,
+            error,
+          },
+        }, options.abortSignal);
+      } catch {
+        // Subagent lifecycle hooks are observe-only; never fail the subagent.
+      }
+    };
 
     const allTools = [...this.tools.values()];
     const diagnostics = validateAgentProfileTools(allTools, record.profile, options.approval);
@@ -1432,6 +1703,7 @@ export class Agent {
       record.status = "blocked";
       record.error = blockingDiagnostics.map((diagnostic) => diagnostic.message).join("\n");
       record.updatedAt = Date.now();
+      await runSubagentLifecycleHook("SubagentStop", record.status, record.error);
       emit("blocked", undefined, record.error);
       this.notifySubagentWaiters(record);
       return;
@@ -1447,6 +1719,7 @@ export class Agent {
       record.status = "blocked";
       record.error = error?.message || String(error);
       record.updatedAt = Date.now();
+      await runSubagentLifecycleHook("SubagentStop", record.status, record.error);
       emit("blocked", undefined, record.error);
       this.notifySubagentWaiters(record);
       return;
@@ -1454,6 +1727,7 @@ export class Agent {
     record.agent = subAgent;
     record.status = "running";
     record.updatedAt = Date.now();
+    await runSubagentLifecycleHook("SubagentStart", record.status);
     emit("running", undefined, `Running ${record.nickname} (${record.profile.name})...`);
     let turnSummaryBuffer = "";
     let turnHadToolCall = false;
@@ -1502,6 +1776,7 @@ export class Agent {
       record.summary = sanitizeSubagentSummary(record.summary);
       record.error = error?.message || String(error);
       record.updatedAt = Date.now();
+      await runSubagentLifecycleHook("SubagentStop", record.status, record.error);
       emit(record.status, undefined, record.error);
       this.notifySubagentWaiters(record);
       return;
@@ -1515,6 +1790,7 @@ export class Agent {
     record.status = "completed";
     record.summary = sanitizeSubagentSummary(record.summary);
     record.updatedAt = Date.now();
+    await runSubagentLifecycleHook("SubagentStop", record.status);
     emit("completed", undefined, record.summary || `${record.nickname} completed`);
     this.notifySubagentWaiters(record);
   }
@@ -1611,6 +1887,9 @@ export class Agent {
       budgetSource: { runId: record.runId, subAgentId: record.agentId },
       systemPrompt: childSystemPrompt,
       hooks: this.hookDefinitions,
+      externalHooks: this.externalHooks,
+      agentRole: "subagent",
+      subAgentId: record.agentId,
       agentCategories: this.agentCategories,
       providerFactory: this.providerFactory,
     });

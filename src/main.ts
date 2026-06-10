@@ -23,6 +23,7 @@ import { PermissionAwareApprovalController } from "./approval/controller.js";
 import { BashAllowlist } from "./approval/session-cache.js";
 import type { ApprovalDecision, ApprovalRequest } from "./approval/types.js";
 import { SettingsManager } from "./permissions/settings.js";
+import { ExternalHookController } from "./hooks/index.js";
 import { getLspService } from "./lsp/index.js";
 import { loadMcpConfig } from "./mcp/config.js";
 import { McpManager } from "./mcp/manager.js";
@@ -168,12 +169,17 @@ async function main() {
   for (const d of settingsManager.getMerged().diagnostics) {
     console.error(chalk.yellow(`[settings:${d.scope}] ${d.path}: ${d.message}`));
   }
+  const hookController = new ExternalHookController({ cwd: args.cwd });
+  for (const d of hookController.getConfig().diagnostics) {
+    console.error(chalk.yellow(`[hooks:${d.scope}] ${d.path}: ${d.message}`));
+  }
   const approvalController = new PermissionAwareApprovalController({
     getMode: () => agentRef?.mode ?? "default",
     handlerRef: approvalHandlerRef,
     bashAllowlist,
     cwd: args.cwd,
     getRuleSet: () => settingsManager.getMerged().ruleSet,
+    externalHooks: hookController,
   });
   const toolSearchController: ToolSearchController = {
     listDeferred: () => agentRef?.listDeferredTools() ?? [],
@@ -396,6 +402,7 @@ async function main() {
     fileStateTracker,
     agentCategories: userConfig.getAgentCategories(),
     providerFactory: createProviderForRoute,
+    externalHooks: hookController,
   });
   agentRef = agent;
   if (sessionManager) {
@@ -412,12 +419,36 @@ async function main() {
       reasoningEffort: agent.thinking,
     });
   }
+  await hookController.runEvent({
+    eventName: "SessionStart",
+    cwd: args.cwd,
+    sessionId: sessionManager?.getSessionFile(),
+    agentRole: "driver",
+    target: "session",
+    payload: {
+      resumed: resumedExistingSession,
+      printMode,
+      providerId: agent.providerId,
+      model: agent.apiModel,
+    },
+  });
 
   const flushMemory = async () => {
     // Codex-style memory runs at startup over historical rollouts. Exit should
     // not perform an ad-hoc extraction of the just-finished session.
   };
   const shutdownRuntime = async () => {
+    await hookController.runEvent({
+      eventName: "SessionEnd",
+      cwd: args.cwd,
+      sessionId: sessionManager?.getSessionFile(),
+      agentRole: "driver",
+      target: "session",
+      payload: {
+        providerId: agent.providerId,
+        model: agent.apiModel,
+      },
+    });
     const results = await Promise.allSettled([
       flushMemory(),
       shutdownMcp(),
@@ -518,6 +549,7 @@ async function main() {
       settingsManager,
       lspService,
       mcpManager,
+      hookController,
       flushMemory,
       runMemoryCompaction,
       runMemorySummary,
