@@ -4,6 +4,13 @@ import type { OAuthCredentials } from "./oauth/types.js";
 import { listBuiltinModels } from "./model-catalog.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
 import { chatGptFetch, type ChatGptFetch } from "./network/chatgpt-transport.js";
+import {
+  computeRetryDelayMs,
+  getProviderMaxRetries,
+  isRetryableHttpStatus,
+  ProviderStreamInterruptedError,
+  sleepBeforeRetry,
+} from "./network/retry.js";
 
 export interface CodexModelDescriptor {
   id: string;
@@ -19,8 +26,6 @@ export interface CodexModelDescriptor {
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const OPENAI_BETA_RESPONSES = "responses=experimental";
 const TOKEN_REFRESH_GRACE_MS = 5 * 60 * 1000;
-const CODEX_TRANSPORT_MAX_RETRIES = 2;
-const CODEX_TRANSPORT_RETRY_BASE_DELAY_MS = 250;
 // OpenAI gates new codex models server-side by client_version (each model carries a
 // `minimal_client_version`). Track a recent real Codex CLI release; override via env
 // when OpenAI lifts the gate again before we cut a new release.
@@ -281,6 +286,18 @@ export function createOpenAICodexProvider(options: {
         yield { type: "done" };
         return;
       } catch (error) {
+        if (
+          sawParsedSseEvent
+          && !chatOptions.abortSignal?.aborted
+          && isTransientCodexTransportError(error)
+        ) {
+          // Partial content already surfaced — the agent loop discards the
+          // half-built assistant message and re-issues the whole request.
+          throw new ProviderStreamInterruptedError(
+            error instanceof Error ? error.message : String(error),
+            { cause: error },
+          );
+        }
         if (!shouldRetryCodexTransportError({
           error,
           attempt,
@@ -289,7 +306,7 @@ export function createOpenAICodexProvider(options: {
         })) {
           throw error;
         }
-        await sleepBeforeCodexRetry(codexRetryDelayMs(attempt), chatOptions.abortSignal);
+        await sleepBeforeRetry(computeRetryDelayMs(attempt + 1), chatOptions.abortSignal);
       }
     }
   }
@@ -557,8 +574,15 @@ function shouldRetryCodexTransportError(input: {
 }): boolean {
   if (input.signal?.aborted) return false;
   if (input.sawParsedSseEvent) return false;
-  if (input.attempt >= CODEX_TRANSPORT_MAX_RETRIES) return false;
-  return isTransientCodexTransportError(input.error);
+  if (input.attempt >= getProviderMaxRetries()) return false;
+  return isTransientCodexTransportError(input.error) || isRetryableCodexHttpError(input.error);
+}
+
+function isRetryableCodexHttpError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const match = error.message.match(/^(\d{3}) status code/);
+  if (!match) return false;
+  return isRetryableHttpStatus(Number(match[1]));
 }
 
 function isTransientCodexTransportError(error: unknown): boolean {
@@ -572,6 +596,7 @@ function isTransientCodexTransportError(error: unknown): boolean {
     /\bEPIPE\b/i,
     /socket hang up/i,
     /fetch failed/i,
+    /Unable to connect\. Is the computer able to access the url\?/i,
     /unknown certificate verification error/i,
     /certificate (?:verify|verification) (?:failed|error)/i,
     /unable to verify (?:the )?(?:first )?certificate/i,
@@ -602,31 +627,6 @@ function errorMessageChain(error: unknown): string[] {
     break;
   }
   return messages;
-}
-
-function codexRetryDelayMs(attempt: number): number {
-  return CODEX_TRANSPORT_RETRY_BASE_DELAY_MS * Math.pow(3, attempt);
-}
-
-function sleepBeforeCodexRetry(ms: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) return Promise.reject(toAbortError(signal));
-  return new Promise((resolve, reject) => {
-    const onAbort = () => {
-      clearTimeout(timeout);
-      signal?.removeEventListener("abort", onAbort);
-      reject(toAbortError(signal));
-    };
-    const timeout = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
-function toAbortError(signal?: AbortSignal): Error {
-  if (signal?.reason instanceof Error) return signal.reason;
-  return new DOMException(typeof signal?.reason === "string" ? signal.reason : "Aborted", "AbortError");
 }
 
 function buildBaseHeaders(

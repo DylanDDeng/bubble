@@ -1,14 +1,26 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createChatGptDispatcher,
   createChatGptFetch,
   normalizeChatGptNetworkError,
 } from "../network/chatgpt-transport.js";
+import { getSystemProxyForUrl } from "../network/system-proxy.js";
+
+vi.mock("../network/system-proxy.js", () => ({
+  getSystemProxyForUrl: vi.fn(() => undefined),
+}));
+
+const getSystemProxyForUrlMock = vi.mocked(getSystemProxyForUrl);
 
 describe("chatgpt transport", () => {
+  beforeEach(() => {
+    getSystemProxyForUrlMock.mockReset();
+    getSystemProxyForUrlMock.mockReturnValue(undefined);
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -41,6 +53,19 @@ describe("chatgpt transport", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("falls back to the macOS system proxy when no proxy env is set", async () => {
+    getSystemProxyForUrlMock.mockReturnValue("http://127.0.0.1:7897");
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect((init as RequestInit & { dispatcher?: unknown })?.dispatcher).toBeTruthy();
+      return new Response("ok");
+    });
+    const fetch = createChatGptFetch({ fetch: fetchMock, env: {} });
+
+    await fetch("https://chatgpt.com/backend-api/test");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(getSystemProxyForUrlMock).toHaveBeenCalled();
+  });
+
   it("creates a dispatcher when custom CA env is configured", () => {
     const dir = mkdtempSync(join(tmpdir(), "bubble-ca-"));
     try {
@@ -68,6 +93,17 @@ describe("chatgpt transport", () => {
     expect(error.message).toContain("NODE_EXTRA_CA_CERTS");
     expect(error.message).toContain("HTTPS_PROXY");
     expect(error.message).toContain("NODE_TLS_REJECT_UNAUTHORIZED=0");
+  });
+
+  it("adds actionable guidance to Bun connection failures", () => {
+    const error = normalizeChatGptNetworkError(
+      new Error("Unable to connect. Is the computer able to access the url?"),
+      {},
+    );
+
+    expect(error.message).toContain("ChatGPT connection failed before Bubble received a response");
+    expect(error.message).toContain("proxy or network transport failure");
+    expect(error.message).toContain("HTTPS_PROXY");
   });
 
   it("preserves non-network errors unchanged", () => {

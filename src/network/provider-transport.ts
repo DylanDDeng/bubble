@@ -4,53 +4,55 @@ import { rootCertificates } from "node:tls";
 import { Agent, ProxyAgent, type Dispatcher } from "undici";
 import { getSystemProxyForUrl } from "./system-proxy.js";
 
-export type ChatGptFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+export type ProviderFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
-export interface ChatGptFetchOptions {
-  fetch?: ChatGptFetch;
+export interface ProviderFetchOptions {
+  providerName: string;
+  fetch?: ProviderFetch;
   env?: NodeJS.ProcessEnv;
+  verboseEnvVar?: string;
 }
 
-type RequestInitWithDispatcher = RequestInit & { dispatcher?: Dispatcher };
+type RequestInitWithProviderOptions = RequestInit & {
+  dispatcher?: Dispatcher;
+  proxy?: string;
+  tls?: { ca?: unknown[] };
+  verbose?: boolean;
+};
 
-let cachedDefaultFetch: { signature: string; fetch: ChatGptFetch } | undefined;
-
-export function chatGptFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-  return getChatGptFetch()(input, init);
+export function providerFetch(input: RequestInfo | URL, init: RequestInit | undefined, options: ProviderFetchOptions): Promise<Response> {
+  return createProviderFetch(options)(input, init);
 }
 
-export function getChatGptFetch(env: NodeJS.ProcessEnv = process.env): ChatGptFetch {
-  const signature = networkEnvSignature(env);
-  if (!cachedDefaultFetch || cachedDefaultFetch.signature !== signature) {
-    cachedDefaultFetch = {
-      signature,
-      fetch: createChatGptFetch({ env }),
-    };
-  }
-  return cachedDefaultFetch.fetch;
-}
-
-export function createChatGptFetch(options: ChatGptFetchOptions = {}): ChatGptFetch {
+export function createProviderFetch(options: ProviderFetchOptions): ProviderFetch {
   const env = options.env ?? process.env;
   const fetchImpl = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const dispatcher = createChatGptDispatcher(env);
 
   return async (input, init) => {
-    const requestInit = withChatGptNetworkOptions(input, init, env, dispatcher);
     try {
+      const requestInit = withProviderNetworkOptions(input, init, {
+        env,
+        providerName: options.providerName,
+        verboseEnvVar: options.verboseEnvVar,
+      });
       return await fetchImpl(input, requestInit);
     } catch (error) {
-      throw normalizeChatGptNetworkError(error, env);
+      throw normalizeProviderNetworkError(error, {
+        providerName: options.providerName,
+        input,
+        env,
+      });
     }
   };
 }
 
-export function createChatGptDispatcher(
+export function createProviderDispatcher(
   env: NodeJS.ProcessEnv = process.env,
   input?: RequestInfo | URL,
+  providerName = "provider",
 ): Dispatcher | undefined {
   if (isBunRuntime()) return undefined;
-  const ca = loadExtraCaCertificates(env);
+  const ca = loadExtraCaCertificates(env, providerName);
   const proxy = input ? nodeProxyForUrl(input, env) : defaultNodeProxy(env);
   if (!proxy && ca.length === 0) return undefined;
   const caOptions = ca.length > 0 ? { ca: [...rootCertificates, ...ca] } : undefined;
@@ -65,59 +67,94 @@ export function createChatGptDispatcher(
   return caOptions ? new Agent({ connect: caOptions }) : undefined;
 }
 
-export function withChatGptNetworkOptions(
+export function withProviderNetworkOptions(
   input: RequestInfo | URL,
   init: RequestInit | undefined,
-  env: NodeJS.ProcessEnv = process.env,
-  dispatcher = createChatGptDispatcher(env, input),
-): RequestInitWithDispatcher {
-  const next = { ...(init ?? {}) } as RequestInitWithDispatcher & {
-    proxy?: string;
-    tls?: { ca?: unknown[] };
-  };
+  options: {
+    env?: NodeJS.ProcessEnv;
+    providerName?: string;
+    verboseEnvVar?: string;
+  } = {},
+): RequestInitWithProviderOptions {
+  const env = options.env ?? process.env;
+  const providerName = options.providerName ?? "provider";
+  const next = { ...(init ?? {}) } as RequestInitWithProviderOptions;
 
   if (isBunRuntime()) {
     const proxy = bunProxyForUrl(input, env);
     if (proxy) next.proxy = proxy;
     const ca = bunExtraCaFiles(env);
     if (ca.length > 0) next.tls = { ...(next.tls ?? {}), ca };
-    return next;
+  } else {
+    const dispatcher = createProviderDispatcher(env, input, providerName);
+    if (dispatcher) next.dispatcher = dispatcher;
   }
 
-  if (dispatcher) next.dispatcher = dispatcher;
+  if (shouldEnableFetchVerbose(env, options.verboseEnvVar)) {
+    next.verbose = true;
+  }
+
   return next;
 }
 
-export function normalizeChatGptNetworkError(error: unknown, env: NodeJS.ProcessEnv = process.env): Error {
-  // Already normalized — wrapping again would nest "Original error:" messages.
+export function normalizeProviderNetworkError(
+  error: unknown,
+  options: {
+    providerName: string;
+    input?: RequestInfo | URL;
+    env?: NodeJS.ProcessEnv;
+  },
+): Error {
+  const env = options.env ?? process.env;
+  // Already normalized (e.g. by createProviderFetch) — wrapping again would
+  // nest "Original error:" messages.
   if (error instanceof Error && error.message.includes("connection failed before Bubble received a response")) {
     return error;
   }
   const text = errorMessageChain(error).join("\n");
-  if (!isChatGptNetworkErrorText(text)) {
+  if (!isProviderNetworkErrorText(text)) {
     return error instanceof Error ? error : new Error(String(error));
   }
 
-  const systemProxy = hasProxyEnv(env) ? undefined : getSystemProxyForUrl(new URL("https://chatgpt.com/"), env);
+  const origin = originFromInput(options.input);
+  const providerLabel = options.providerName || "provider";
+  const systemProxy = hasProxyEnv(env) ? undefined : getSystemProxyForUrl(options.input ? urlFromInput(options.input) : undefined, env);
   const message = [
-    "ChatGPT connection failed before Bubble received a response.",
+    `${providerLabel} connection failed before Bubble received a response.`,
+    origin ? `Target origin: ${origin}.` : undefined,
     isCertificateErrorText(text)
       ? "TLS certificate verification failed. If you are on a corporate proxy, VPN, or HTTPS inspection network, start Bubble with NODE_EXTRA_CA_CERTS=/absolute/path/to/ca.pem or BUBBLE_EXTRA_CA_CERTS=/absolute/path/to/ca.pem."
       : "This looks like a proxy or network transport failure.",
     hasProxyEnv(env)
-      ? "Bubble is using proxy environment variables for ChatGPT requests. Make sure NO_PROXY includes localhost,127.0.0.1."
+      ? "Bubble is using proxy environment variables for provider requests. Make sure NO_PROXY includes localhost,127.0.0.1 and any direct-connect hosts."
       : systemProxy
         ? `Bubble is routing this request through the OS system proxy at ${systemProxy} (detected automatically). Check that the proxy app is running and healthy, or set BUBBLE_SYSTEM_PROXY=0 to disable system proxy detection.`
         : "If your network requires a proxy, set HTTPS_PROXY or HTTP_PROXY, and set NO_PROXY=localhost,127.0.0.1.",
+    hasCustomCaEnv(env)
+      ? "A custom CA environment variable is configured."
+      : "No custom CA environment variable is configured.",
     "Do not disable TLS verification with NODE_TLS_REJECT_UNAUTHORIZED=0.",
     `Original error: ${firstMeaningfulErrorMessage(error) || "unknown network error"}`,
-  ].join(" ");
+  ].filter(Boolean).join(" ");
 
   return new Error(message, { cause: error });
 }
 
+export function isProviderTransportError(error: unknown): boolean {
+  return isProviderNetworkErrorText(errorMessageChain(error).join("\n"));
+}
+
+export function shouldEnableFetchVerbose(env: NodeJS.ProcessEnv = process.env, providerVerboseEnvVar?: string): boolean {
+  const providerValue = providerVerboseEnvVar ? env[providerVerboseEnvVar] : undefined;
+  return isTruthyEnv(providerValue) || isTruthyEnv(env.BUBBLE_PROVIDER_FETCH_VERBOSE);
+}
+
 function hasProxyEnv(env: NodeJS.ProcessEnv): boolean {
   return Boolean(env.HTTPS_PROXY || env.https_proxy || env.HTTP_PROXY || env.http_proxy || env.ALL_PROXY || env.all_proxy);
+}
+
+function hasCustomCaEnv(env: NodeJS.ProcessEnv): boolean {
+  return Boolean(env.NODE_EXTRA_CA_CERTS?.trim() || env.BUBBLE_EXTRA_CA_CERTS?.trim());
 }
 
 function isBunRuntime(): boolean {
@@ -138,7 +175,7 @@ function nodeProxyForUrl(input: RequestInfo | URL, env: NodeJS.ProcessEnv): stri
   if (!url || shouldBypassProxy(url, env)) return undefined;
   if (url.protocol === "https:") return env.HTTPS_PROXY ?? env.https_proxy ?? env.ALL_PROXY ?? env.all_proxy ?? getSystemProxyForUrl(url, env);
   if (url.protocol === "http:") return env.HTTP_PROXY ?? env.http_proxy ?? env.ALL_PROXY ?? env.all_proxy ?? getSystemProxyForUrl(url, env);
-  return defaultNodeProxy(env);
+  return undefined;
 }
 
 function defaultNodeProxy(env: NodeJS.ProcessEnv): string | undefined {
@@ -157,6 +194,11 @@ function urlFromInput(input: RequestInfo | URL): URL | undefined {
   if (typeof input === "string") return URL.canParse(input) ? new URL(input) : undefined;
   const url = (input as Request).url;
   return URL.canParse(url) ? new URL(url) : undefined;
+}
+
+function originFromInput(input: RequestInfo | URL | undefined): string | undefined {
+  if (!input) return undefined;
+  return urlFromInput(input)?.origin;
 }
 
 function shouldBypassProxy(url: URL, env: NodeJS.ProcessEnv): boolean {
@@ -180,13 +222,13 @@ function noProxyEntryMatches(entry: string, hostname: string, port: string): boo
   return false;
 }
 
-function loadExtraCaCertificates(env: NodeJS.ProcessEnv): string[] {
+function loadExtraCaCertificates(env: NodeJS.ProcessEnv, providerName: string): string[] {
   const paths = extraCaCertificatePaths(env);
   return paths.map((path) => {
     try {
       return readFileSync(path, "utf-8");
     } catch (error) {
-      throw new Error(`Failed to read ChatGPT custom CA certificate at ${path}. Check NODE_EXTRA_CA_CERTS or BUBBLE_EXTRA_CA_CERTS.`, {
+      throw new Error(`Failed to read ${providerName} custom CA certificate at ${path}. Check NODE_EXTRA_CA_CERTS or BUBBLE_EXTRA_CA_CERTS.`, {
         cause: error,
       });
     }
@@ -203,25 +245,7 @@ function extraCaCertificatePaths(env: NodeJS.ProcessEnv): string[] {
   return nodeValue ? [nodeValue] : [];
 }
 
-function networkEnvSignature(env: NodeJS.ProcessEnv): string {
-  return [
-    env.HTTP_PROXY,
-    env.http_proxy,
-    env.HTTPS_PROXY,
-    env.https_proxy,
-    env.ALL_PROXY,
-    env.all_proxy,
-    env.NO_PROXY,
-    env.no_proxy,
-    env.NODE_EXTRA_CA_CERTS,
-    env.BUBBLE_EXTRA_CA_CERTS,
-    // Invalidate the cached fetch when the user toggles the OS proxy
-    // (e.g. turning Clash system proxy on/off mid-session).
-    getSystemProxyForUrl(new URL("https://chatgpt.com/"), env),
-  ].join("\0");
-}
-
-function isChatGptNetworkErrorText(text: string): boolean {
+function isProviderNetworkErrorText(text: string): boolean {
   return [
     /fetch failed/i,
     /network.*failed/i,
@@ -278,4 +302,8 @@ function errorMessageChain(error: unknown): string[] {
     break;
   }
   return messages;
+}
+
+function isTruthyEnv(value: string | undefined): boolean {
+  return /^(1|true|yes)$/i.test(value ?? "");
 }
