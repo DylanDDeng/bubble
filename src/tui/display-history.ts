@@ -3,7 +3,6 @@ import type { ToolResultMetadata, TokenUsage } from "../types.js";
 export interface CompactionMeta {
   turns: number;
   messages: number;
-  tokensSaved: number;
   summarySections: Array<{ label: string; content: string }>;
   contextWindow?: number;
   compactedAt: number;
@@ -120,14 +119,18 @@ export function toolCallsFromParts(parts: DisplayMessagePart[]): DisplayToolCall
 
 const MAX_VISIBLE_MESSAGES = 80;
 const FULL_DETAIL_WINDOW = 24;
-const MAX_OLD_CONTENT_CHARS = 1200;
-const MAX_OLD_REASONING_CHARS = 600;
 
 const COMPACTION_SUMMARY_ITEMS = 6;
 const COMPACTION_FILE_LIMIT = 8;
 
 const TOOL_PATH_KEYS = ["file", "path", "paths", "filePath"] as const;
 
+// Display-history folding policy: message text is NEVER rewritten or truncated.
+// Visible messages keep their content verbatim (older ones only collapse bulky
+// tool-result bodies, which the UI can re-expand). When history exceeds
+// MAX_VISIBLE_MESSAGES, the entire older span is folded behind a single summary
+// card — mirroring how mainstream coding agents present compacted history —
+// instead of clipping individual messages mid-sentence.
 export function compactDisplayMessages(messages: DisplayMessage[]): DisplayMessage[] {
   if (messages.length === 0) {
     return messages;
@@ -135,7 +138,6 @@ export function compactDisplayMessages(messages: DisplayMessage[]): DisplayMessa
 
   let hiddenCount = 0;
   let accumulatedTurns = 0;
-  let accumulatedTokens = 0;
   const summarySections: Array<{ label: string; content: string }> = [];
 
   const withoutSynthetic = messages.filter((message) => {
@@ -145,7 +147,6 @@ export function compactDisplayMessages(messages: DisplayMessage[]): DisplayMessa
     hiddenCount += message.hiddenCount ?? 0;
     if (message.compactionMeta) {
       accumulatedTurns += message.compactionMeta.turns;
-      accumulatedTokens += message.compactionMeta.tokensSaved;
       for (const section of message.compactionMeta.summarySections) {
         summarySections.push(section);
       }
@@ -155,6 +156,7 @@ export function compactDisplayMessages(messages: DisplayMessage[]): DisplayMessa
 
   const overflow = Math.max(0, withoutSynthetic.length - MAX_VISIBLE_MESSAGES);
   hiddenCount += overflow;
+  const hiddenMessages = overflow > 0 ? withoutSynthetic.slice(0, overflow) : [];
   const visible = overflow > 0 ? withoutSynthetic.slice(overflow) : withoutSynthetic;
   const detailStart = Math.max(0, visible.length - FULL_DETAIL_WINDOW);
 
@@ -162,19 +164,17 @@ export function compactDisplayMessages(messages: DisplayMessage[]): DisplayMessa
     if (message.syntheticKind === "ui_compact_card") {
       return message;
     }
-    return index < detailStart ? compactDisplayMessage(message) : message;
+    return index < detailStart ? collapseToolResults(message) : message;
   });
 
   if (hiddenCount === 0) {
     return compacted;
   }
 
-  const truncatedMessages = visible.slice(0, Math.max(1, detailStart));
   const extractedMeta = extractCompactionMeta(
-    truncatedMessages,
+    hiddenMessages,
     hiddenCount,
     accumulatedTurns,
-    accumulatedTokens,
     summarySections,
   );
 
@@ -182,30 +182,22 @@ export function compactDisplayMessages(messages: DisplayMessage[]): DisplayMessa
 }
 
 function extractCompactionMeta(
-  truncatedMessages: DisplayMessage[],
+  hiddenMessages: DisplayMessage[],
   hiddenCount: number,
   previousTurns: number,
-  previousTokens: number,
   previousSections: Array<{ label: string; content: string }>,
 ): CompactionMeta {
-  const turnsInBatch = countUserTurns(truncatedMessages);
+  const turnsInBatch = countUserTurns(hiddenMessages);
   const totalTurns = previousTurns + turnsInBatch;
-
-  const messagesInBatch = truncatedMessages.length;
-  const totalMessages = hiddenCount;
-
-  const estimatedTokens = estimateTokenSavings(truncatedMessages);
-  const totalTokens = previousTokens + estimatedTokens;
 
   const sections: Array<{ label: string; content: string }> = [
     ...previousSections,
-    ...extractSummarySections(truncatedMessages),
+    ...extractSummarySections(hiddenMessages),
   ];
 
   return {
     turns: totalTurns,
-    messages: totalMessages,
-    tokensSaved: totalTokens > 0 ? totalTokens : estimatedTokens,
+    messages: hiddenCount,
     summarySections: mergeSummarySections(sections, COMPACTION_SUMMARY_ITEMS),
     compactedAt: Date.now(),
   };
@@ -213,19 +205,6 @@ function extractCompactionMeta(
 
 function countUserTurns(messages: DisplayMessage[]): number {
   return messages.filter((message) => message.role === "user").length;
-}
-
-function estimateTokenSavings(messages: DisplayMessage[]): number {
-  let chars = 0;
-  for (const message of messages) {
-    chars += message.content.length;
-    chars += (message.reasoning?.length ?? 0);
-    for (const tool of message.toolCalls ?? []) {
-      chars += (tool.result?.length ?? 0);
-      chars += JSON.stringify(tool.args).length;
-    }
-  }
-  return Math.ceil(chars / 4);
 }
 
 function extractSummarySections(messages: DisplayMessage[]): Array<{ label: string; content: string }> {
@@ -329,12 +308,6 @@ function mergeSummarySections(
 }
 
 function buildCompactCard(meta: CompactionMeta): DisplayMessage {
-  const formatNum = (n: number): string => {
-    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-    return String(n);
-  };
-
   const parts: string[] = [];
 
   if (meta.turns > 0) {
@@ -342,9 +315,6 @@ function buildCompactCard(meta: CompactionMeta): DisplayMessage {
   }
   if (meta.messages > 0) {
     parts.push(`${meta.messages} message${meta.messages === 1 ? "" : "s"}`);
-  }
-  if (meta.tokensSaved > 0) {
-    parts.push(`~${formatNum(meta.tokensSaved)} tokens`);
   }
 
   const statsLine = parts.length > 0 ? `┃ ${parts.join(" · ")}` : "";
@@ -366,17 +336,16 @@ function buildCompactCard(meta: CompactionMeta): DisplayMessage {
   };
 }
 
-function compactDisplayMessage(message: DisplayMessage): DisplayMessage {
+// Collapses bulky tool-result bodies on older messages while leaving the
+// message text (content, reasoning) verbatim — never truncate what the user
+// or the assistant actually said.
+function collapseToolResults(message: DisplayMessage): DisplayMessage {
   if (message.syntheticKind === "ui_compact_card") {
     return message;
   }
 
   return {
     ...message,
-    content: truncateText(message.content, MAX_OLD_CONTENT_CHARS),
-    reasoning: message.reasoning
-      ? truncateText(message.reasoning, MAX_OLD_REASONING_CHARS)
-      : message.reasoning,
     toolCalls: message.toolCalls?.map(compactToolCall),
     parts: message.parts?.map(compactDisplayPart),
   };
@@ -391,10 +360,7 @@ function cloneToolCall(toolCall: DisplayToolCall): DisplayToolCall {
 
 function compactDisplayPart(part: DisplayMessagePart): DisplayMessagePart {
   if (part.type === "text") {
-    return {
-      ...part,
-      content: truncateText(part.content, MAX_OLD_CONTENT_CHARS),
-    };
+    return part;
   }
   return {
     type: "tools",
@@ -412,18 +378,6 @@ function compactToolCall(toolCall: DisplayToolCall): DisplayToolCall {
     result: undefined,
     resultCollapsed: true,
   };
-}
-
-export function truncateText(value: string, maxChars: number): string {
-  if (value.length <= maxChars) {
-    return value;
-  }
-
-  const head = Math.max(1, Math.floor(maxChars * 0.7));
-  const tail = Math.max(1, maxChars - head - 32);
-  const omitted = value.length - head - tail;
-  const separator = "─".repeat(12);
-  return `${value.slice(0, head)}\n${separator} ✂ ${omitted} chars truncated ${separator}\n${value.slice(-tail)}`;
 }
 
 function shorten(text: string, maxChars: number): string {

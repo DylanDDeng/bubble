@@ -9067,7 +9067,7 @@ function createCompactionCardEntry(
   const statsParts: string[] = [];
   if (meta?.turns) statsParts.push(`${meta.turns} turn${meta.turns === 1 ? "" : "s"}`);
   if (meta?.messages) statsParts.push(`${meta.messages} message${meta.messages === 1 ? "" : "s"}`);
-  const statsLine = statsParts.length > 0 ? statsParts.join(" · ") : "Compacted";
+  const statsLine = statsParts.length > 0 ? `${statsParts.join(" · ")} collapsed` : "Collapsed";
 
   const children: Renderable[] = [];
 
@@ -9078,8 +9078,8 @@ function createCompactionCardEntry(
     alignItems: "center",
   }, [
     createText(ctx, new StyledText([
-      fg(theme.info)(bold("◈ Context Compacted")),
-    ]), { width: 20 }),
+      fg(theme.info)(bold("◈ Earlier Conversation")),
+    ]), { width: 23 }),
     createText(ctx, new StyledText([
       fg(theme.textMuted)(`─ ${statsLine}`),
     ])),

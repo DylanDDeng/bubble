@@ -10,7 +10,10 @@ import {
   type DisplayMessagePart,
   type DisplayToolCall,
 } from "../tui-ink/display-history.js";
-import { compactDisplayMessages as compactLegacyDisplayMessages } from "../tui/display-history.js";
+import {
+  compactDisplayMessages as compactLegacyDisplayMessages,
+  type DisplayMessage as LegacyDisplayMessage,
+} from "../tui/display-history.js";
 import { compactDisplayMessages as compactOpenTuiDisplayMessages } from "../tui-opentui/display-history.js";
 import { isWritePreviewTool } from "../tui/tool-renderers/write-preview.js";
 
@@ -129,6 +132,47 @@ describe("Ink display history parts", () => {
     expect(JSON.stringify(compacted[0].toolCalls?.[0])).not.toContain("✂");
     expect(compacted.at(-1)?.toolCalls?.[0].result).toBe(messages.at(-1)?.toolCalls[0].result);
     expect(compacted.at(-1)?.toolCalls?.[0].resultCollapsed).toBeUndefined();
+  });
+
+  it("never truncates message text in the live OpenTUI display history", () => {
+    const longPrompt = `请使用 Three.js 开发一个 3D 网页。${"要求很多很多。".repeat(400)}`;
+    const messages: LegacyDisplayMessage[] = [
+      { role: "user", content: longPrompt },
+      ...Array.from({ length: 40 }, (_, index) => ({
+        role: "assistant" as const,
+        content: `assistant ${index} ${"x".repeat(3000)}`,
+        reasoning: `thinking ${index} ${"r".repeat(2000)}`,
+      })),
+    ];
+
+    const compacted = compactLegacyDisplayMessages(messages);
+
+    expect(compacted[0].content).toBe(longPrompt);
+    expect(compacted[1].content).toBe(messages[1].content);
+    expect(compacted[1].reasoning).toBe(messages[1].reasoning);
+    expect(JSON.stringify(compacted)).not.toContain("✂");
+  });
+
+  it("folds overflow history behind a single summary card in the live OpenTUI display history", () => {
+    const messages = Array.from({ length: 100 }, (_, index) => ({
+      role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+      content: `message ${index} ${"x".repeat(500)}`,
+    }));
+
+    const compacted = compactLegacyDisplayMessages(messages);
+
+    const card = compacted[0];
+    expect(card.syntheticKind).toBe("ui_compact_card");
+    expect(card.hiddenCount).toBe(20);
+    expect(card.compactionMeta?.messages).toBe(20);
+    expect(card.compactionMeta?.turns).toBe(10);
+    expect(card.content).not.toContain("tokens");
+
+    const visible = compacted.slice(1);
+    expect(visible).toHaveLength(80);
+    expect(visible[0].content).toBe(messages[20].content);
+    expect(visible.at(-1)?.content).toBe(messages.at(-1)?.content);
+    expect(JSON.stringify(visible)).not.toContain("✂");
   });
 
   it("does not render collapsed write tools through the write-preview renderer", () => {
