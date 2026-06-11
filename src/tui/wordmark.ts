@@ -16,15 +16,16 @@ interface BubbleWordmarkGlyph {
   lines: string[];
 }
 
+// Pixel-style glyphs: each cell is a half-block "pixel" (█ ▀ ▄), giving the
+// wordmark an 8-bit look while staying one terminal row per line.
 const LEAD_B: BubbleWordmarkGlyph = {
   tone: "brand",
   lines: [
-    "│   ",
-    "│   ",
-    "├─╮ ",
-    "│ │ ",
-    "│ │ ",
-    "╰─╯ ",
+    "█   ",
+    "█   ",
+    "█▀█ ",
+    "█ █ ",
+    "█▄█ ",
     "    ",
   ],
 };
@@ -32,12 +33,11 @@ const LEAD_B: BubbleWordmarkGlyph = {
 const LOWER_B: BubbleWordmarkGlyph = {
   tone: "ink",
   lines: [
-    "│   ",
-    "│   ",
-    "├─╮ ",
-    "│ │ ",
-    "│ │ ",
-    "╰─╯ ",
+    "█   ",
+    "█   ",
+    "█▀█ ",
+    "█ █ ",
+    "█▄█ ",
     "    ",
   ],
 };
@@ -48,22 +48,20 @@ const GLYPHS: Record<string, BubbleWordmarkGlyph> = {
     lines: [
       "    ",
       "    ",
-      "╷ ╷ ",
-      "│ │ ",
-      "│ │ ",
-      "╰─╯ ",
+      "█ █ ",
+      "█ █ ",
+      "█▄█ ",
       "    ",
     ],
   },
   l: {
     tone: "ink",
     lines: [
-      "│  ",
-      "│  ",
-      "│  ",
-      "│  ",
-      "│  ",
-      "╰─ ",
+      "█  ",
+      "█  ",
+      "█  ",
+      "█  ",
+      "█▄ ",
       "   ",
     ],
   },
@@ -72,23 +70,21 @@ const GLYPHS: Record<string, BubbleWordmarkGlyph> = {
     lines: [
       "    ",
       "    ",
-      "╭─╮ ",
-      "├─┤ ",
-      "│   ",
-      "╰─╯ ",
+      "█▀█ ",
+      "█▀▀ ",
+      "█▄▄ ",
       "    ",
     ],
   },
   beta: {
     tone: "brand",
     lines: [
-      "╭─╮ ",
-      "│ │ ",
-      "├─╯ ",
-      "├─╮ ",
-      "│ │ ",
-      "├─╯ ",
-      "│   ",
+      "█▀▀▄ ",
+      "█  █ ",
+      "█▀▀▄ ",
+      "█  █ ",
+      "█▄▄▀ ",
+      "█    ",
     ],
   },
   r: {
@@ -96,10 +92,9 @@ const GLYPHS: Record<string, BubbleWordmarkGlyph> = {
     lines: [
       "    ",
       "    ",
-      "╭─╮ ",
-      "│   ",
-      "│   ",
-      "│   ",
+      "█▀▀ ",
+      "█   ",
+      "█   ",
       "    ",
     ],
   },
@@ -108,22 +103,20 @@ const GLYPHS: Record<string, BubbleWordmarkGlyph> = {
     lines: [
       "    ",
       "    ",
-      "╭─╮ ",
-      "│ │ ",
-      "├─┤ ",
-      "│ │ ",
+      "▀▀█ ",
+      "█▀█ ",
+      "█▄█ ",
       "    ",
     ],
   },
   i: {
     tone: "ink",
     lines: [
-      "• ",
       "  ",
-      "│ ",
-      "│ ",
-      "│ ",
-      "╰ ",
+      "▀ ",
+      "█ ",
+      "█ ",
+      "█ ",
       "  ",
     ],
   },
@@ -132,10 +125,9 @@ const GLYPHS: Record<string, BubbleWordmarkGlyph> = {
     lines: [
       "    ",
       "    ",
-      "╭─╮ ",
-      "│ │ ",
-      "│ │ ",
-      "│ │ ",
+      "█▀█ ",
+      "█ █ ",
+      "█ █ ",
       "    ",
     ],
   },
@@ -148,12 +140,11 @@ const GLYPHS: Record<string, BubbleWordmarkGlyph> = {
       "  ",
       "  ",
       "  ",
-      "  ",
     ],
   },
 };
 
-export const BUBBLE_WORDMARK: BubbleWordmarkLine[] = buildWordmark([
+const WORDMARK_GLYPHS: readonly BubbleWordmarkGlyph[] = [
   LEAD_B,
   GLYPHS.u,
   LOWER_B,
@@ -166,7 +157,18 @@ export const BUBBLE_WORDMARK: BubbleWordmarkLine[] = buildWordmark([
   GLYPHS.a,
   GLYPHS.i,
   GLYPHS.n,
-]);
+];
+
+export const BUBBLE_WORDMARK: BubbleWordmarkLine[] = buildWordmark(WORDMARK_GLYPHS);
+
+// Each pixel doubled horizontally: terminal cells are ~2:1 tall, so 2-char
+// pixels render square and the wordmark reads much larger.
+export const BUBBLE_WORDMARK_LARGE: BubbleWordmarkLine[] = buildWordmark(
+  WORDMARK_GLYPHS.map((glyph) => ({
+    tone: glyph.tone,
+    lines: glyph.lines.map((line) => line.split("").map((ch) => ch + ch).join("")),
+  })),
+);
 
 export const BUBBLE_COMPACT_WORDMARK: BubbleWordmarkLine[] = [
   {
@@ -200,5 +202,7 @@ export function bubbleWordmarkMaxWidth(lines = BUBBLE_WORDMARK) {
 }
 
 export function bubbleWordmarkForWidth(width: number) {
-  return width < bubbleWordmarkMaxWidth() + 4 ? BUBBLE_COMPACT_WORDMARK : BUBBLE_WORDMARK;
+  if (width >= bubbleWordmarkMaxWidth(BUBBLE_WORDMARK_LARGE) + 4) return BUBBLE_WORDMARK_LARGE;
+  if (width >= bubbleWordmarkMaxWidth() + 4) return BUBBLE_WORDMARK;
+  return BUBBLE_COMPACT_WORDMARK;
 }

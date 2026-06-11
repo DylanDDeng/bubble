@@ -83,7 +83,7 @@ describe("Ink welcome banner", () => {
       { columns: 100 },
     );
 
-    expect(output).toContain("╭─╮");
+    expect(output).toContain("█▀█");
     expect(output).toContain("TIP:");
     expect(output).toContain("Skills (78)");
     expect(output).toContain("MCPs (1)");
