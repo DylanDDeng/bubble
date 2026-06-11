@@ -150,6 +150,7 @@ import {
   type BubbleWordmarkLine,
   type BubbleWordmarkTone,
 } from "./wordmark.js";
+import { resolveTranscriptScroll } from "./transcript-scroll.js";
 import { bootstrapConfig } from "../feishu/config.js";
 import { ScopeRegistry } from "../feishu/scope/scope-registry.js";
 import type { ScopeConfig } from "../feishu/types.js";
@@ -823,6 +824,10 @@ function OpenTuiApp(props: {
   let scrollbox: ScrollBoxRenderable | undefined;
   let transcriptScrollFollowing = true;
   let transcriptScrollInitialized = false;
+  // Set by forceFollow renders (user sends, approvals). Survives intervening
+  // streaming redraws that recompute follow state from the (still-unscrolled)
+  // position before the deferred scroll runs; cleared on user mouse scroll.
+  let transcriptForceScrollPending = false;
   let rootBox: BoxRenderable | undefined;
   let sidebarShell: BoxRenderable | undefined;
   let homeSurfaceShell: BoxRenderable | undefined;
@@ -1762,7 +1767,13 @@ function OpenTuiApp(props: {
   function scheduleTranscriptScrollAfterUpdate(shouldFollow: boolean, delay = 50) {
     setTimeout(() => {
       if (!scrollbox) return;
-      if (shouldFollow && transcriptScrollFollowing) {
+      const action = resolveTranscriptScroll({
+        forcePending: transcriptForceScrollPending,
+        shouldFollow,
+        following: transcriptScrollFollowing,
+      });
+      if (action === "scroll-bottom") {
+        transcriptForceScrollPending = false;
         scrollTranscriptToBottom();
       } else {
         updateTranscriptScrollFollowingFromPosition();
@@ -1771,6 +1782,7 @@ function OpenTuiApp(props: {
   }
 
   function handleTranscriptMouseScroll() {
+    transcriptForceScrollPending = false;
     setTimeout(updateTranscriptScrollFollowingFromPosition, 0);
   }
 
@@ -2735,8 +2747,8 @@ function OpenTuiApp(props: {
     return `${count} queued message${count === 1 ? "" : "s"}`;
   }
 
-  function redrawTranscriptWithQueuedDisplays() {
-    redrawTranscript(streamingDisplay, displayMessages);
+  function redrawTranscriptWithQueuedDisplays(options: { forceFollow?: boolean } = {}) {
+    redrawTranscript(streamingDisplay, displayMessages, options);
   }
 
   function addUserInputStatusDisplay(input: string, inputStatus: UserInputStatus) {
@@ -2745,7 +2757,9 @@ function OpenTuiApp(props: {
       ...queuedDisplayMessages,
       { role: "user", content: input, clientId: displayId, inputStatus },
     ];
-    redrawTranscriptWithQueuedDisplays();
+    // Sending a message is explicit user intent to look at the newest turn:
+    // snap to the bottom even if the transcript was scrolled up.
+    redrawTranscriptWithQueuedDisplays({ forceFollow: true });
     return displayId;
   }
 
@@ -3232,6 +3246,7 @@ function OpenTuiApp(props: {
     if (options.forceFollow) {
       transcriptScrollFollowing = true;
       transcriptScrollInitialized = true;
+      transcriptForceScrollPending = true;
     }
     const nextMessages = compactDisplayMessages([
       ...baseMessages,
@@ -5520,7 +5535,9 @@ function OpenTuiApp(props: {
       : [...displayMessages, { role: "user" as const, content: displayContent }];
     if (!reusedQueuedDisplay) displayMessages = nextMessages;
     streamingDisplay = undefined;
-    redrawTranscript(undefined, nextMessages);
+    // The user just sent this message — re-engage bottom-follow so the new
+    // turn is visible even if they had scrolled up to read earlier history.
+    redrawTranscript(undefined, nextMessages, { forceFollow: true });
     const taskStartedAt = Date.now();
     const run = beginAgentRun();
     traceEvent("tui_agent_run_begin", {
