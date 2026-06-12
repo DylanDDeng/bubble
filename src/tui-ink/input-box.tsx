@@ -105,6 +105,33 @@ export function isCtrlCInput(input: string, key: { ctrl?: boolean }): boolean {
   return input === "\x03" || (key.ctrl === true && input.toLowerCase() === "c");
 }
 
+/**
+ * Split a composer line around the cursor so the cell under it can render as
+ * an inverse-video software cursor. The visible cursor must not depend on the
+ * real terminal cursor: Ink only re-arms its one-shot cursor escape when the
+ * component owning useCursor re-commits, so frames produced by other
+ * components' local state (the waiting spinner, viewport scrolling) hide the
+ * hardware cursor for most of an agent run. Drawing the cell ourselves keeps
+ * the cursor visible on every frame; the real (mostly hidden) cursor is still
+ * positioned for IME anchoring.
+ */
+export function splitLineAtCursor(
+  lineText: string,
+  charOffset: number,
+): { before: string; at: string; after: string } {
+  const offset = Math.max(0, Math.min(charOffset, lineText.length));
+  if (offset >= lineText.length) {
+    return { before: lineText, at: " ", after: "" };
+  }
+  const codePoint = lineText.codePointAt(offset)!;
+  const length = codePoint > 0xffff ? 2 : 1;
+  return {
+    before: lineText.slice(0, offset),
+    at: lineText.slice(offset, offset + length),
+    after: lineText.slice(offset + length),
+  };
+}
+
 type VisualLine = {
   /** Segment of the source line that fits on this visual row. */
   text: string;
@@ -980,7 +1007,13 @@ export function InputBox({
           const isFirst = visualIdx === 0;
           const isCursorLine = visualIdx === cursorVisualRow;
           const prompt = isFirst ? PROMPT : " ".repeat(PROMPT.length);
-          const fill = " ".repeat(Math.max(0, lineWidth - stringWidth(lineText)));
+          const cursorSegments = isCursorLine && !disabled
+            ? splitLineAtCursor(lineText, cursor - (visualLines[cursorVisualRow]?.absStart ?? 0))
+            : null;
+          const renderedLine = cursorSegments
+            ? cursorSegments.before + cursorSegments.at + cursorSegments.after
+            : lineText;
+          const fill = " ".repeat(Math.max(0, lineWidth - stringWidth(renderedLine)));
           return (
             <Box
               key={visualIdx}
@@ -997,7 +1030,19 @@ export function InputBox({
               <Text backgroundColor={inputBg} color={isFirst ? theme.accent : theme.inputText}>
                 {prompt}
               </Text>
-              <Text backgroundColor={inputBg} color={theme.inputText}>{lineText}</Text>
+              {cursorSegments ? (
+                <>
+                  {cursorSegments.before && (
+                    <Text backgroundColor={inputBg} color={theme.inputText}>{cursorSegments.before}</Text>
+                  )}
+                  <Text backgroundColor={theme.inputText} color={inputBg}>{cursorSegments.at}</Text>
+                  {cursorSegments.after && (
+                    <Text backgroundColor={inputBg} color={theme.inputText}>{cursorSegments.after}</Text>
+                  )}
+                </>
+              ) : (
+                <Text backgroundColor={inputBg} color={theme.inputText}>{lineText}</Text>
+              )}
               <Text backgroundColor={inputBg}>{fill}</Text>
             </Box>
           );

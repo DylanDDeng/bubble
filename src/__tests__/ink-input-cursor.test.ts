@@ -11,6 +11,7 @@ import {
   resolveSlashEnterAction,
   shouldCollapsePastedContent,
   shouldSubmitExactSlashSuggestion,
+  splitLineAtCursor,
 } from "../tui-ink/input-box.js";
 
 describe("Ink input cursor row compensation", () => {
@@ -175,5 +176,27 @@ describe("Ink long paste placeholders", () => {
       { marker, content: first },
       { marker, content: second },
     ])).toBe(`${first}\n${second}`);
+  });
+});
+
+describe("software cursor cell", () => {
+  it("splits the line around the character under the cursor", () => {
+    expect(splitLineAtCursor("hello", 1)).toEqual({ before: "h", at: "e", after: "llo" });
+    expect(splitLineAtCursor("hello", 0)).toEqual({ before: "", at: "h", after: "ello" });
+  });
+
+  it("renders a space cell when the cursor sits at end of line", () => {
+    expect(splitLineAtCursor("hi", 2)).toEqual({ before: "hi", at: " ", after: "" });
+    expect(splitLineAtCursor(" ", 0)).toEqual({ before: "", at: " ", after: "" });
+  });
+
+  it("keeps surrogate pairs whole under the cursor", () => {
+    expect(splitLineAtCursor("a😀b", 1)).toEqual({ before: "a", at: "😀", after: "b" });
+    expect(splitLineAtCursor("中文字", 1)).toEqual({ before: "中", at: "文", after: "字" });
+  });
+
+  it("clamps offsets outside the line", () => {
+    expect(splitLineAtCursor("hi", 99)).toEqual({ before: "hi", at: " ", after: "" });
+    expect(splitLineAtCursor("hi", -1)).toEqual({ before: "", at: "h", after: "i" });
   });
 });
