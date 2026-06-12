@@ -7,6 +7,7 @@ import type { SkillRegistry } from "../skills/registry.js";
 import { useTheme } from "./theme.js";
 import { filterFileSuggestions, findAtContext, listProjectFiles } from "./file-mentions.js";
 import {
+  bareImageFilenameFromPaste,
   ingestClipboardImage,
   ingestImagePath,
   isImageFilePath,
@@ -44,6 +45,11 @@ export interface SubmitPayload {
 
 interface InputBoxProps {
   onSubmit: (payload: SubmitPayload) => void;
+  /**
+   * When set (agent running), Tab queues the composer content for the next
+   * turn instead of its idle-time behavior.
+   */
+  onQueue?: (payload: SubmitPayload) => void;
   onPasteNotice?: (notice: string) => void;
   disabled?: boolean;
   cursorResetEpoch?: number;
@@ -234,6 +240,7 @@ export function insertNewlineAtCursor(text: string, cursor: number) {
 
 export function InputBox({
   onSubmit,
+  onQueue,
   onPasteNotice,
   disabled,
   cursorResetEpoch = 0,
@@ -407,6 +414,20 @@ export function InputBox({
       return;
     }
 
+    // Copying an image file in Finder pastes only the file's NAME while the
+    // real bits stay on the system clipboard — attach from there. If the
+    // clipboard turns out to hold no image, it was just text: insert it
+    // quietly.
+    const bareName = bareImageFilenameFromPaste(clean);
+    if (bareName && process.platform === "darwin") {
+      void tryClipboardImage()
+        .then((attached) => {
+          if (!attached) insertTextAtCursor(clean);
+        })
+        .finally(clearPending);
+      return;
+    }
+
     // Look for image paths inside the paste (drag-and-drop from Finder/
     // Nautilus/Explorer). Multi-selection can arrive newline- or
     // space-separated.
@@ -478,10 +499,11 @@ export function InputBox({
     setSelectedIndex(0);
   };
 
-  const submitInput = (submittedText: string) => {
+  const submitInput = (submittedText: string, target: "submit" | "queue" = "submit") => {
     const expandedText = expandPastedContentMarkers(submittedText, pastedContentRefs);
     if (expandedText.trim().length === 0 && attachments.length === 0) return;
-    onSubmit({
+    const deliver = target === "queue" && onQueue ? onQueue : onSubmit;
+    deliver({
       text: expandedText,
       displayText: expandedText === submittedText ? undefined : submittedText,
       images: attachments,
@@ -608,6 +630,14 @@ export function InputBox({
           return;
         }
       }
+    }
+
+    // While the agent runs, Tab queues the composer content for the next
+    // turn (Enter steers — handled by the app-level submit routing).
+    if (key.tab && !key.shift && onQueue && !showSuggestions) {
+      if (pastePendingRef.current) return;
+      submitInput(text, "queue");
+      return;
     }
 
     if (enterIntent === "submit") {
@@ -852,7 +882,10 @@ export function InputBox({
       node = node.parentNode;
     }
     const rootHeight = lastNode?.yogaNode?.getComputedHeight() ?? 0;
-    const viewportRows = stdout.rows ?? process.stdout.rows ?? 24;
+    // `||` on purpose: some ptys (and Bun on a detached tty) report rows as 0,
+    // which `??` would happily accept — and `rootHeight >= 0` then flags every
+    // frame as fullscreen, forcing a bogus +1 row compensation.
+    const viewportRows = stdout.rows || process.stdout.rows || 24;
     const previousOutputHeight = previousOutputHeightRef.current;
     // After a clear/sync frame, Ink's physical terminal cursor remains on the
     // last rendered row even though log-update records an output string with a

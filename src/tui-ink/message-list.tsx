@@ -1,10 +1,23 @@
 import React from "react";
-import { Box, Static, Text } from "ink";
+import { Box, Text } from "ink";
 import { useTheme, type Theme } from "./theme.js";
 import { highlightCode, inferLang } from "./code-highlight.js";
 import { MarkdownContent, StreamingMarkdown } from "./markdown.js";
-import type { DisplayMessage, DisplayMessagePart, DisplayToolCall } from "./display-history.js";
-import { buildTraceGroups, formatTracePath, traceGroupLabel, type TraceGroup } from "./trace-groups.js";
+import {
+  userInputStatusBadgeLabel,
+  type DisplayMessage,
+  type DisplayMessagePart,
+  type DisplayToolCall,
+  type UserInputStatus,
+} from "./display-history.js";
+import {
+  buildTraceGroups,
+  executeCommandBlock,
+  formatTracePath,
+  shouldInlineExecuteCommand,
+  traceGroupLabel,
+  type TraceGroup,
+} from "./trace-groups.js";
 import { EDIT_COLLAPSED_DIFF_LINES, formatEditSuccessSummary, getEditDiffDetails } from "./edit-diff.js";
 import { formatSubagentRoute, type SubagentRouteLike } from "../agent/subagent-route-format.js";
 import { sanitizeInternalReminderBlocks } from "../agent/internal-reminder-sanitizer.js";
@@ -34,6 +47,8 @@ interface MessageListProps {
   /** Optional banner rendered as the first item in the app-controlled transcript. */
   welcomeBanner?: React.ReactNode;
 }
+
+const EXECUTE_COMMAND_BLOCK_MAX_LINES = 4;
 
 type MessageListItem =
   | { kind: "welcome"; key: string }
@@ -74,23 +89,21 @@ export function MessageList({
 
   return (
     <Box flexDirection="column" flexShrink={0}>
-      <Static items={staticItems}>
-        {(item) => {
-          if (item.kind === "welcome") {
-            return <React.Fragment key={item.key}>{welcomeBanner}</React.Fragment>;
-          }
-          return (
-            <MessageItem
-              key={item.key}
-              message={item.message}
-              terminalColumns={terminalColumns}
-              verboseTrace={verboseTrace}
-              showExpandHint={item.showExpandHint}
-              nowTick={item.showExpandHint ? nowTick : undefined}
-            />
-          );
-        }}
-      </Static>
+      {staticItems.map((item) => {
+        if (item.kind === "welcome") {
+          return <React.Fragment key={item.key}>{welcomeBanner}</React.Fragment>;
+        }
+        return (
+          <MessageItem
+            key={item.key}
+            message={item.message}
+            terminalColumns={terminalColumns}
+            verboseTrace={verboseTrace}
+            showExpandHint={item.showExpandHint}
+            nowTick={item.showExpandHint ? nowTick : undefined}
+          />
+        );
+      })}
       {hasStreaming && (
         <StreamingMessage
           content={streamingContent}
@@ -107,7 +120,12 @@ export function MessageList({
   );
 }
 
-function MessageItem({
+// Memoized: with no <Static> region, every transcript row re-renders on each
+// state change unless its props are referentially stable. Message objects are
+// append-only (compaction reuses already-compacted instances), keys are
+// stable, and nowTick is only threaded to the last row, so memo hits for all
+// settled history rows.
+const MessageItem = React.memo(function MessageItem({
   message,
   terminalColumns,
   verboseTrace,
@@ -122,7 +140,13 @@ function MessageItem({
 }) {
   const theme = useTheme();
   if (message.role === "user") {
-    return <UserMessageBlock content={message.content} terminalColumns={terminalColumns} />;
+    return (
+      <UserMessageBlock
+        content={message.content}
+        terminalColumns={terminalColumns}
+        inputStatus={message.inputStatus}
+      />
+    );
   }
 
   if (message.role === "error") {
@@ -135,6 +159,15 @@ function MessageItem({
 
   if (message.syntheticKind === "ui_compact_summary") {
     return <CompactionSummaryBlock message={message} />;
+  }
+
+  if (message.syntheticKind === "ui_interrupt") {
+    return (
+      <Box marginBottom={1}>
+        <Text color={theme.error}>⏹ </Text>
+        <Text color={theme.muted} dimColor>{message.content || "Interrupted by user"}</Text>
+      </Box>
+    );
   }
 
   const visibleReasoning = sanitizeInternalReminderBlocks(message.reasoning ?? "").trim();
@@ -180,7 +213,7 @@ function MessageItem({
       )}
     </Box>
   );
-}
+});
 
 function StreamingMessage({
   content,
@@ -217,14 +250,12 @@ function StreamingMessage({
         </Box>
       )}
       {visibleParts.length > 0 && (
-        // marginTop intentionally 0: this Box only mounts on the first non-empty
-        // streaming frame, so a marginTop=1 here would visibly insert a blank
-        // line under the user message right at that moment (the "spinner sits
-        // close, then content appears with a sudden gap, then spinner slides
-        // down" effect users perceive as flicker on the DOM xterm renderer).
-        // marginBottom=1 stays so streamed text doesn't collide with the
-        // WaitingIndicator rendered below.
-        <Box marginTop={0} marginBottom={1} flexDirection="column">
+        // marginTop=1 matches the committed MessageItem layout exactly, so the
+        // gap under the user message is identical while streaming and after the
+        // turn commits — no spacing jump at finalize time. (The old marginTop=0
+        // was a flicker mitigation for the main-screen <Static> renderer; the
+        // alt-screen viewport repaints frames atomically, so it's obsolete.)
+        <Box marginTop={1} marginBottom={1} flexDirection="column">
           <MessageParts
             parts={visibleParts}
             terminalColumns={terminalColumns}
@@ -514,30 +545,47 @@ function TraceGroupBlock({
   const commandWidth = Math.max(14, terminalColumns - group.title.length - 20);
   const detailWidth = Math.max(20, terminalColumns - 8);
   const detailLines = group.previewLines.length > 0 ? group.previewLines : group.items;
-  // When a bash command is too long to fit on the title line, drop it onto its
-  // own indented rows so narrow splits keep the full command visible instead of
-  // silently truncating mid-flag.
-  const commandFitsInline = !group.command || visualWidth(group.command) <= commandWidth;
-  const wrappedCommandLines = group.command && !commandFitsInline
-    ? wrapByVisualWidth(group.command, Math.max(10, detailWidth - 2))
+  // A model-provided bash description owns the header slot; the command then
+  // always renders as a block below. Without one, single-line commands that
+  // fit stay inline; anything longer becomes a wrapped block preserving the
+  // command's own line structure — commands are never clipped mid-line.
+  const showDescription = group.kind === "execute" && !!group.description;
+  const inlineCommand = !showDescription && group.command
+    ? (group.kind === "execute"
+        ? (shouldInlineExecuteCommand(group, commandWidth) ? group.command : undefined)
+        : (visualWidth(group.command) <= commandWidth ? group.command : undefined))
+    : undefined;
+  const commandBlock = group.command && !inlineCommand
+    ? (group.kind === "execute"
+        ? executeCommandBlock(group, EXECUTE_COMMAND_BLOCK_MAX_LINES)
+        : { lines: [group.command], omitted: 0 })
     : null;
 
   return (
     <Box flexDirection="column" marginLeft={2} marginTop={compactTop ? 0 : 1}>
       <Text>
         <Text bold color={titleColor}>{group.title}</Text>
-        {group.command && commandFitsInline ? (
-          <Text color={theme.traceCommand}> {group.command}</Text>
+        {showDescription ? (
+          <Text color={theme.traceDetail}> {truncateVisual(group.description!, commandWidth)}</Text>
+        ) : inlineCommand ? (
+          <Text color={theme.traceCommand}> {inlineCommand}</Text>
         ) : !group.command && group.count !== undefined && group.noun ? (
           <Text color={theme.traceCount}> {group.count} {group.noun}</Text>
         ) : null}
         {status && <Text color={status.color}> {status.text}</Text>}
       </Text>
-      {wrappedCommandLines && (
+      {commandBlock && commandBlock.lines.length > 0 && (
         <Box flexDirection="column" marginLeft={2}>
-          {wrappedCommandLines.map((seg, idx) => (
-            <Text key={`cmd-${idx}`} color={theme.traceCommand}>{seg}</Text>
-          ))}
+          {commandBlock.lines.flatMap((line, idx) =>
+            wrapByVisualWidth(line || " ", Math.max(10, detailWidth - 2)).map((seg, segIdx) => (
+              <Text key={`cmd-${idx}-${segIdx}`} color={theme.traceCommand}>{seg}</Text>
+            )),
+          )}
+          {commandBlock.omitted > 0 && (
+            <Text color={theme.traceDetail}>
+              … {commandBlock.omitted} more line{commandBlock.omitted === 1 ? "" : "s"}
+            </Text>
+          )}
         </Box>
       )}
       {detailLines.length > 0 && (
@@ -712,8 +760,17 @@ function CompactionSummaryBlock({ message }: { message: DisplayMessage }) {
   );
 }
 
-function UserMessageBlock({ content, terminalColumns }: { content: string; terminalColumns: number }) {
+function UserMessageBlock({
+  content,
+  terminalColumns,
+  inputStatus,
+}: {
+  content: string;
+  terminalColumns: number;
+  inputStatus?: UserInputStatus;
+}) {
   const theme = useTheme();
+  const badge = userInputStatusBadgeLabel(inputStatus);
   // Rail and its right gutter must share the bubble background; otherwise the
   // terminal background shows up as a dark seam between rail and message.
   const railWidth = 2;
@@ -725,6 +782,16 @@ function UserMessageBlock({ content, terminalColumns }: { content: string; termi
 
   return (
     <Box flexDirection="column">
+      {badge && (
+        <Box>
+          <Text bold color={inputStatus === "pending_steer" ? theme.warning : theme.muted}>
+            {` ${badge} `}
+          </Text>
+          <Text color={theme.dim}>
+            {inputStatus === "pending_steer" ? "applies at the next model call" : "runs after this turn"}
+          </Text>
+        </Box>
+      )}
       {wrappedLines.map((line, index) => (
         <Box key={index}>
           <Text backgroundColor={theme.userMessageBg} color={theme.userRail}>

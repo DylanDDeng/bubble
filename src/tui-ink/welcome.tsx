@@ -4,10 +4,7 @@ import { createRequire } from "node:module";
 import { useTheme, type Theme } from "./theme.js";
 import type { DisplayMessage } from "./display-history.js";
 import {
-  BUBBLE_COMPACT_WORDMARK,
-  BUBBLE_WORDMARK,
-  bubbleWordmarkLineText,
-  bubbleWordmarkMaxWidth,
+  bubbleWordmarkForWidth,
   type BubbleWordmarkLine,
   type BubbleWordmarkTone,
 } from "../tui/wordmark.js";
@@ -21,6 +18,8 @@ interface WelcomeBannerProps {
   mcpConnectedCount?: number;
   mcpTotalCount?: number;
   hasAgentsFile?: boolean;
+  /** One-line "update available" notice shown under the version. */
+  updateNotice?: string;
 }
 
 interface WelcomeVisibilityInput {
@@ -30,8 +29,6 @@ interface WelcomeVisibilityInput {
 
 const require = createRequire(import.meta.url);
 const PACKAGE_VERSION = readPackageVersion();
-
-const WIDE_LOGO_MIN_WIDTH = bubbleWordmarkMaxWidth(BUBBLE_WORDMARK) + 4;
 
 export function shouldShowWelcomeBanner({
   startedWithVisibleHistory,
@@ -51,10 +48,13 @@ export function WelcomeBanner({
   mcpConnectedCount = 0,
   mcpTotalCount = 0,
   hasAgentsFile = false,
+  updateNotice,
 }: WelcomeBannerProps) {
   const theme = useTheme();
   const effectiveWidth = Math.max(20, Math.min(terminalColumns - 2, 118));
-  const useWideLogo = effectiveWidth >= WIDE_LOGO_MIN_WIDTH;
+  // Adaptive sizing: large pixel logo on wide terminals, standard, then the
+  // single-line compact mark — same thresholds as the OpenTUI home screen.
+  const logoLines = bubbleWordmarkForWidth(effectiveWidth);
   const actionableTips = tips
     .filter((item) => !item.startsWith("Ready with") && item.trim().length > 0)
     .slice(0, 2);
@@ -66,15 +66,18 @@ export function WelcomeBanner({
   return (
     <Box width={effectiveWidth} flexDirection="column" alignItems="center" marginBottom={1}>
       <Box flexDirection="column" alignItems="center">
-        {useWideLogo
-          ? BUBBLE_WORDMARK.map((line, rowIndex) => (
-            <LogoRow key={`logo-row-${rowIndex}`} line={line} />
-          ))
-          : <CompactLogo />}
+        {logoLines.map((line, rowIndex) => (
+          <LogoRow key={`logo-row-${rowIndex}`} line={line} />
+        ))}
       </Box>
       <Box marginTop={2}>
         <Text bold color={theme.muted}>{PACKAGE_VERSION}</Text>
       </Box>
+      {updateNotice && (
+        <Box>
+          <Text color={theme.accent}>{updateNotice}</Text>
+        </Box>
+      )}
       <Box marginTop={1}>
         <Text bold color={theme.userMessageText}>TIP: </Text>
         <Text bold color={theme.userMessageText}>{tip}</Text>
@@ -111,23 +114,6 @@ function LogoRow({ line }: { line: BubbleWordmarkLine }) {
             {segment.text}
           </Text>
         </React.Fragment>
-      ))}
-    </Box>
-  );
-}
-
-function CompactLogo() {
-  const theme = useTheme();
-  const line = BUBBLE_COMPACT_WORDMARK[0];
-  if (!line?.segments) {
-    return <Text bold color={theme.warning}>{bubbleWordmarkLineText(line ?? { text: "" })}</Text>;
-  }
-  return (
-    <Box>
-      {line.segments.map((segment, index) => (
-        <Text key={`${segment.text}-${index}`} bold color={logoColor(theme, segment.tone)}>
-          {segment.text}
-        </Text>
       ))}
     </Box>
   );

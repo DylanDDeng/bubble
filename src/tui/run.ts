@@ -42,7 +42,7 @@ import qrTerminal from "qrcode-terminal";
 import { existsSync, statSync } from "node:fs";
 import { basename, isAbsolute, resolve as resolvePath } from "node:path";
 import { homedir } from "node:os";
-import { AgentAbortError, type Agent } from "../agent.js";
+import { AgentAbortError, INTERRUPTED_ASSISTANT_CONTENT, type Agent } from "../agent.js";
 import { AgentRunInputQueue } from "../agent/input-controller.js";
 import { debugReasoningStream, summarizeDebugText } from "../reasoning-debug.js";
 import { isHiddenToolMetadata } from "../agent/discovery-barrier.js";
@@ -9907,9 +9907,21 @@ function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] 
           : "pending",
       });
     }
+    // The aborted-assistant interruption note is model-facing bookkeeping —
+    // strip it so it never renders as something the assistant "said".
+    const interrupted = (message as { error?: { aborted?: boolean } }).error?.aborted === true;
+    let content = message.content;
+    if (interrupted) {
+      content = content === INTERRUPTED_ASSISTANT_CONTENT
+        ? ""
+        : content.endsWith(`\n\n${INTERRUPTED_ASSISTANT_CONTENT}`)
+          ? content.slice(0, -`\n\n${INTERRUPTED_ASSISTANT_CONTENT}`.length)
+          : content;
+      if (!content && !message.reasoning && toolCalls.length === 0) continue;
+    }
     result.push({
       role: "assistant",
-      content: message.content,
+      content,
       reasoning: message.reasoning || undefined,
       toolCalls: toolCalls.length ? toolCalls : undefined,
     });

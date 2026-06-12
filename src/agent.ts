@@ -71,7 +71,11 @@ const EMPTY_ASSISTANT_RECOVERY_REMINDER =
   "Do not put the final answer only in hidden reasoning.";
 const EMPTY_ASSISTANT_FALLBACK =
   "The model returned no user-visible response. Please retry, or switch models if this keeps happening.";
-const INTERRUPTED_ASSISTANT_CONTENT =
+// Model-facing interruption boundary. Persisted into the transcript so the
+// next turn sees an explicit stop instead of a dangling request — but it must
+// never render in the UI as if the assistant said it (the TUIs strip it and
+// show their own interrupt indicator instead).
+export const INTERRUPTED_ASSISTANT_CONTENT =
   "Interrupted by user. The prior request was stopped and should not be resumed unless the user asks.";
 
 function agentEventFromHookProgress(event: HookProgressEvent): AgentEvent {

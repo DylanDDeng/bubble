@@ -19,6 +19,8 @@ export interface FooterData {
   mode?: PermissionMode;
   usageTotals: FooterUsageTotals;
   verboseTrace?: boolean;
+  /** Context window fill (0-100). Replaces the OpenTUI sidebar gauge. */
+  contextPercent?: number;
 }
 
 export function FooterBar({ data }: { data: FooterData }) {
@@ -45,6 +47,7 @@ export function FooterBar({ data }: { data: FooterData }) {
           </Text>
         </>
       )}
+      <ContextGauge percent={data.contextPercent} />
       <ModeBadge mode={data.mode} />
       <Box flexGrow={1} />
       <Text color={theme.muted}>{data.providerId}</Text>
@@ -54,6 +57,21 @@ export function FooterBar({ data }: { data: FooterData }) {
         {thinkingText}
       </Text>
     </Box>
+  );
+}
+
+// Same alert thresholds as the OpenTUI sidebar gauge: ≥80% error, ≥60% warning.
+function ContextGauge({ percent }: { percent?: number }) {
+  const theme = useTheme();
+  if (percent === undefined) return null;
+  const color = percent >= 80 ? theme.error : percent >= 60 ? theme.warning : theme.muted;
+  return (
+    <>
+      <Text color={theme.muted}>  </Text>
+      <Text color={color} dimColor={percent < 60}>
+        ctx {percent}%
+      </Text>
+    </>
   );
 }
 

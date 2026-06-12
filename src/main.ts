@@ -47,6 +47,10 @@ import {
   traceEvent,
 } from "./debug-trace.js";
 
+// The Ink renderer is the default; BUBBLE_TUI=opentui is a one-release escape
+// hatch back to the legacy OpenTUI implementation while the migration settles.
+const USE_OPENTUI = process.env.BUBBLE_TUI === "opentui";
+
 type TerminalTheme = "light" | "dark";
 
 async function main() {
@@ -258,7 +262,9 @@ async function main() {
       } else {
         preResolvedTheme = themeConfig.mode;
       }
-      const { runSessionPicker } = await import("./tui-opentui/run-session-picker.js");
+      const { runSessionPicker } = USE_OPENTUI
+        ? await import("./tui-opentui/run-session-picker.js")
+        : await import("./tui-ink/run-session-picker.js");
       const picked = await runSessionPicker({
         currentCwd: args.cwd,
         currentSessions,
@@ -338,7 +344,7 @@ async function main() {
     sessionFile: sessionManager?.getSessionFile(),
     provider: activeProviderId || "none",
     model: activeModel || "none",
-    renderer: printMode ? "print" : "opentui-core",
+    renderer: printMode ? "print" : USE_OPENTUI ? "opentui-core" : "ink",
   });
   if (traceInfo.enabled) {
     traceEvent("run_start", {
@@ -557,20 +563,37 @@ async function main() {
     };
     const { getStartupUpdateNotice } = await import("./update/index.js");
     const updateNotice = await getStartupUpdateNotice();
-    const { runTui } = await import("./tui/run.js");
-    await runTui(agent, args, {
-      ...commonOptions,
-      themeMode: themeConfig.mode,
-      themeOverrides: themeConfig.overrides,
-      detectedTheme,
-      onThemeModeChange: (mode) => userConfig.setThemeMode(mode),
-      updateNotice: updateNotice ?? undefined,
-    });
+    // Two explicit branches (not a dynamic ternary import) so TypeScript
+    // checks each renderer's RunTuiOptions shape independently.
+    let exitWallMs: number | undefined;
+    if (USE_OPENTUI) {
+      const { runTui } = await import("./tui/run.js");
+      await runTui(agent, args, {
+        ...commonOptions,
+        themeMode: themeConfig.mode,
+        themeOverrides: themeConfig.overrides,
+        detectedTheme,
+        onThemeModeChange: (mode) => userConfig.setThemeMode(mode),
+        updateNotice: updateNotice ?? undefined,
+      });
+    } else {
+      const { runTui } = await import("./tui-ink/run.js");
+      const summary = await runTui(agent, args, {
+        ...commonOptions,
+        themeMode: themeConfig.mode,
+        themeOverrides: themeConfig.overrides,
+        detectedTheme,
+        onThemeModeChange: (mode) => userConfig.setThemeMode(mode),
+        updateNotice: updateNotice ?? undefined,
+      });
+      exitWallMs = summary?.wallMs;
+    }
 
     if (sessionManager) {
-      printOpenTuiExitSummary(sessionManager, {
+      printExitSummary(sessionManager, {
         resumed: resumedExistingSession,
         theme: detectedTheme,
+        wallMs: exitWallMs,
       });
     }
   } finally {
@@ -580,9 +603,9 @@ async function main() {
   }
 }
 
-function printOpenTuiExitSummary(
+function printExitSummary(
   sessionManager: SessionManager,
-  options: { resumed: boolean; theme: TerminalTheme },
+  options: { resumed: boolean; theme: TerminalTheme; wallMs?: number },
 ) {
   if (!process.stdout.isTTY) return;
   const sessionName = basename(sessionManager.getSessionFile());
@@ -626,6 +649,20 @@ function printOpenTuiExitSummary(
   console.log();
   console.log(`${label("Session")}${colors.value(sessionLabel)}`);
   console.log(`${label("Continue")}${colors.value(continueCommand)}`);
+  if (options.wallMs !== undefined) {
+    console.log(`${label("Duration")}${colors.value(formatWallDuration(options.wallMs))}`);
+  }
+}
+
+function formatWallDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) return `${minutes}m ${seconds}s`;
+  const hours = Math.floor(minutes / 60);
+  const minutesRest = minutes % 60;
+  return `${hours}h ${minutesRest}m ${seconds}s`;
 }
 
 async function readPipedStdin(): Promise<string | undefined> {

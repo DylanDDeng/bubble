@@ -83,7 +83,9 @@ describe("Ink welcome banner", () => {
       { columns: 100 },
     );
 
-    expect(output).toContain("█▀█");
+    // Adaptive sizing: at 100 columns the banner renders the large
+    // pixel-block wordmark (dd65dfb parity).
+    expect(output).toContain("██▀▀██");
     expect(output).toContain("TIP:");
     expect(output).toContain("Skills (78)");
     expect(output).toContain("MCPs (1)");
