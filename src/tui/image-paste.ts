@@ -111,6 +111,16 @@ export function imageAttachmentLabel(att: ImageAttachment, index: number): strin
   return `image#${index}${imageExtension(att)}`;
 }
 
+/**
+ * Label for an image path before ingestion runs. Matches what
+ * imageAttachmentLabel produces for the same file, so a label inserted at
+ * paste time stays a valid key once the attachment is registered.
+ */
+export function imageLabelForPath(rawPath: string, index: number): string {
+  const ext = path.extname(unescapeShell(rawPath.trim())).toLowerCase() || ".png";
+  return `image#${index}${ext}`;
+}
+
 export function imageAttachmentReference(att: ImageAttachment, index: number): string {
   return `[${imageAttachmentLabel(att, index)}]`;
 }
@@ -204,6 +214,29 @@ export function splitPastedPaths(pasted: string): string[] {
     }
   }
   return out;
+}
+
+/**
+ * True when a pasted blob consists solely of image file paths (drag from
+ * Finder, or a terminal that converts clipboard images to temp-file paths).
+ */
+export function isImagePathPaste(pasted: string): boolean {
+  const pieces = splitPastedPaths(pasted);
+  return pieces.length > 0 && pieces.every((piece) => isImageFilePath(piece));
+}
+
+/**
+ * Bare image filename with no directory, e.g. "Screenshot ... AM.png".
+ * Copying an image file in Finder puts only the file's NAME in the
+ * clipboard's plain-text flavor — the actual bits arrive as a file-url or
+ * image flavor that must be read from the clipboard separately.
+ */
+export function bareImageFilenameFromPaste(pasted: string): string | null {
+  const s = pasted.trim();
+  if (!s || s.length > 255) return null;
+  if (/[\n\r/\\]/.test(s)) return null;
+  if (!IMAGE_EXT.test(s)) return null;
+  return s;
 }
 
 function mediaTypeFromExt(p: string): string {
@@ -453,12 +486,40 @@ export async function ingestImagePath(p: string): Promise<{ attachment?: ImageAt
 }
 
 export async function ingestClipboardImage(): Promise<{ attachment?: ImageAttachment; error?: string }> {
+  // A file reference wins over bitmap flavors: for a copied FILE, coercing
+  // the clipboard to PNGf yields the file's generic ICON, not the image.
+  const filePath = await getClipboardFilePath();
+  if (filePath) {
+    if (isImageFilePath(filePath)) return ingestImagePath(filePath);
+    return { error: `clipboard file is not an image: ${filePath}` };
+  }
   const raw = await getImageFromClipboard();
   if (!raw) return { error: "clipboard has no image" };
   const sized = await maybeResizeImage(raw);
   const validation = validateImageSize(sized);
   if (!validation.ok) return { error: validation.reason };
   return { attachment: sized };
+}
+
+async function getClipboardFilePath(): Promise<string | null> {
+  if (process.platform !== "darwin") return null;
+  try {
+    // Probe first — AppleScript happily coerces plain TEXT into a file URL,
+    // so only trust «class furl» when the clipboard really carries one.
+    const probe = await execFileAsync("osascript", ["-e", "clipboard info for «class furl»"], {
+      timeout: 5000,
+    });
+    if (!String(probe.stdout).includes("furl")) return null;
+    const result = await execFileAsync(
+      "osascript",
+      ["-e", "POSIX path of (the clipboard as «class furl»)"],
+      { timeout: 5000 },
+    );
+    const p = String(result.stdout).trim();
+    return p || null;
+  } catch {
+    return null;
+  }
 }
 
 export async function resolveImageInput(input: string, options: { labelStart?: number } = {}): Promise<ImageInputResolution> {

@@ -120,8 +120,14 @@ import { copyTextToClipboard } from "./clipboard.js";
 import { readGitSidebarState, type SidebarFileChange, type SidebarGitState } from "./sidebar-state.js";
 import {
   buildImageContentPartsFromLabels,
+  bareImageFilenameFromPaste,
   extractImagePathTokens,
   imageAttachmentLabelPattern,
+  imageLabelForPath,
+  ingestClipboardImage,
+  ingestImagePath,
+  isImagePathPaste,
+  splitPastedPaths,
   resolveComposerImagePaths,
   resolveImageInput,
   type ImageAttachment,
@@ -745,6 +751,10 @@ function OpenTuiApp(props: {
   let promptHistory = initialPromptHistory(displayMessages);
   let nextImageAttachmentIndex = nextImageLabelIndex(displayMessages);
   const pendingImageAttachments = new Map<string, ImageAttachment>();
+  // Image-path pastes insert their [image#N] label immediately and ingest the
+  // file in the background; sends await these so a quick Enter can't outrun
+  // attachment registration.
+  const pendingImageIngestions = new Set<Promise<void>>();
   // Long pastes are collapsed to "[Pasted text #N +M lines]" in the composer
   // and expanded back to the full content when the message is submitted,
   // mirroring how image attachments use "[Image #N]" labels.
@@ -4996,9 +5006,52 @@ function OpenTuiApp(props: {
     return expandPastedContentMarkers(text, references);
   }
 
+  // Inserts [image#N] labels at the cursor, padding with spaces when the
+  // paste lands glued to surrounding text. Returns false when no prompt is
+  // mounted (the caller should leave the paste alone).
+  function insertComposerImageLabels(event: { preventDefault?: () => void }, labels: string[]): boolean {
+    const prompt = activePrompt();
+    if (!prompt) return false;
+    event.preventDefault?.();
+    const current = prompt.plainText ?? "";
+    const offset = Math.min(Math.max(prompt.cursorOffset ?? current.length, 0), current.length);
+    const needsLead = offset > 0 && !/\s/.test(current[offset - 1] ?? "");
+    const needsTrail = offset < current.length && !/\s/.test(current[offset] ?? "");
+    const joined = labels.map((label) => `[${label}]`).join(" ");
+    prompt.insertText(`${needsLead ? " " : ""}${joined}${needsTrail ? " " : ""}`);
+    onPromptContentChange(readPromptText());
+    return true;
+  }
+
   function handleComposerPaste(event: { bytes?: unknown; text?: unknown; preventDefault?: () => void }) {
     const text = typeof event.text === "string" ? event.text : decodePastedBytes(event.bytes);
-    if (!text || !shouldCollapsePastedContent(text)) return;
+    if (isImagePathPaste(text)) {
+      // Insert the final [image#N] label at paste time and ingest the file in
+      // the background. Inserting the raw path and swapping it later flashes
+      // the path and resets the cursor (setPromptText jumps it to the end).
+      const entries = splitPastedPaths(text).map((rawPath) => ({
+        rawPath,
+        label: imageLabelForPath(rawPath, nextImageAttachmentIndex),
+      }));
+      if (!insertComposerImageLabels(event, entries.map((entry) => entry.label))) return;
+      nextImageAttachmentIndex += entries.length;
+      trackImagePathIngestion(entries);
+      return;
+    }
+    // Copying an image file in Finder pastes only the file's NAME; Cmd+V of
+    // raw image data pastes nothing at all. Both leave the real bits on the
+    // system clipboard, so attach from there.
+    const bareName = bareImageFilenameFromPaste(text);
+    if (bareName || !text.trim()) {
+      const label = bareName
+        ? imageLabelForPath(bareName, nextImageAttachmentIndex)
+        : `image#${nextImageAttachmentIndex}.png`;
+      if (!insertComposerImageLabels(event, [label])) return;
+      nextImageAttachmentIndex += 1;
+      trackClipboardImageIngestion(label, text);
+      return;
+    }
+    if (!shouldCollapsePastedContent(text)) return;
     event.preventDefault?.();
     const marker = createPastedContentMarker(text, nextPastedTextIndex);
     nextPastedTextIndex += 1;
@@ -5006,6 +5059,62 @@ function OpenTuiApp(props: {
     const prompt = activePrompt();
     prompt?.insertText(marker);
     onPromptContentChange(readPromptText());
+  }
+
+  function trackImageIngestion(task: Promise<void>) {
+    pendingImageIngestions.add(task);
+    void task.finally(() => pendingImageIngestions.delete(task));
+  }
+
+  function trackImagePathIngestion(entries: Array<{ rawPath: string; label: string }>) {
+    trackImageIngestion((async () => {
+      for (const { rawPath, label } of entries) {
+        const result = await ingestImagePath(rawPath);
+        if (result.attachment) {
+          pendingImageAttachments.set(label, result.attachment);
+        } else {
+          addMessage("error", `Skipped image: ${rawPath}: ${result.error ?? "could not attach image"}`);
+          replaceComposerImageLabel(label, "");
+        }
+      }
+    })());
+  }
+
+  function trackClipboardImageIngestion(label: string, originalText: string) {
+    trackImageIngestion((async () => {
+      const result = await ingestClipboardImage();
+      if (result.attachment) {
+        pendingImageAttachments.set(label, result.attachment);
+        return;
+      }
+      const restored = originalText.trim();
+      // A filename-looking text paste with no image on the clipboard is just
+      // text — restore it quietly. Only an empty paste (Cmd+V of image data)
+      // warrants an error, since there is nothing to restore.
+      if (!restored) addMessage("error", `Could not attach image from clipboard: ${result.error ?? "unknown error"}`);
+      replaceComposerImageLabel(label, restored);
+    })());
+  }
+
+  // Swaps a failed image label for its replacement (or drops it) without
+  // moving the cursor relative to the surrounding text.
+  function replaceComposerImageLabel(label: string, replacement: string) {
+    const prompt = activePrompt();
+    const current = prompt?.plainText ?? promptText;
+    const token = `[${label}]`;
+    const start = current.indexOf(token);
+    if (start < 0) return;
+    let end = start + token.length;
+    if (!replacement && current[end] === " ") end += 1;
+    const next = current.slice(0, start) + replacement + current.slice(end);
+    if (prompt) {
+      const cursor = Math.min(Math.max(prompt.cursorOffset ?? next.length, 0), current.length);
+      prompt.setText(next);
+      prompt.cursorOffset = cursor <= start
+        ? cursor
+        : Math.min(next.length, Math.max(start + replacement.length, cursor - (end - start) + replacement.length));
+    }
+    onPromptContentChange(next);
   }
 
   async function expandTextParts(parts: ContentPart[]): Promise<ContentPart[]> {
@@ -5027,6 +5136,7 @@ function OpenTuiApp(props: {
 
   async function handleInput(input: string, options: { displayId?: string } = {}) {
     setNotice("");
+    if (pendingImageIngestions.size > 0) await Promise.all([...pendingImageIngestions]);
     const labeledInput = buildImageContentPartsFromLabels(input, pendingImageAttachments);
     if (labeledInput.actualInput) {
       await runAgentInput(await expandTextParts(labeledInput.actualInput), labeledInput.displayInput, options);
