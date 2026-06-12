@@ -55,6 +55,15 @@ export function formatApprovalRequest(req: ApprovalRequest): ApprovalSummary {
         title: `LSP 操作 (${req.operation})`,
         body: `**path:** \`${truncate(req.path, PATH_PREVIEW_MAX)}\``,
       };
+    case "agent_profile":
+      return {
+        title: `使用项目 agent profile "${req.name}"`,
+        body: [
+          `**path:** \`${truncate(req.path, PATH_PREVIEW_MAX)}\``,
+          `\n**prompt preview:**\n\`\`\`\n${truncate(req.promptPreview, CONTENT_PREVIEW_MAX)}\n\`\`\``,
+          "\n该 profile 来自仓库本地 `.bubble/agents`，其 prompt 会驱动一个子代理。仅在信任该仓库时批准。",
+        ].join("\n"),
+      };
   }
 }
 

@@ -11,6 +11,7 @@ import { createOpenAICodexProvider, isOpenAICodexBaseUrl, type OpenAICodexAuthAd
 import { createProviderProtocolArtifactFilter } from "./provider-artifacts.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
 import { debugReasoningStream, summarizeDebugText } from "./reasoning-debug.js";
+import { RateLimitError, type RateLimitPolicy } from "./network/errors.js";
 import type { ProviderProtocol } from "./model-catalog.js";
 import type { Provider, ProviderMessage, StreamChunk, ThinkingLevel, ToolChoiceMode, ToolDefinition } from "./types.js";
 
@@ -130,7 +131,7 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
 
   async function* streamChat(
     messages: ProviderMessage[],
-    chatOptions: { model: string; tools?: ToolDefinition[]; toolChoice?: ToolChoiceMode; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal }
+    chatOptions: { model: string; tools?: ToolDefinition[]; toolChoice?: ToolChoiceMode; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal; rateLimitPolicy?: RateLimitPolicy }
   ): AsyncIterable<StreamChunk> {
     const requestConfig = resolveProviderRequestConfig(
       options.providerId || "",
@@ -179,9 +180,27 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
       body.reasoning = { enabled: true };
     }
 
-    const stream = (await client.chat.completions.create(body as any, {
-      signal: chatOptions.abortSignal,
-    } as any)) as any;
+    // Rate-limit contract (design §4.5): "defer" disables the SDK's own
+    // retries so the caller is the single 429 backoff layer; either policy
+    // surfaces a final 429 as a typed RateLimitError instead of a string.
+    let stream: any;
+    try {
+      stream = (await client.chat.completions.create(body as any, {
+        signal: chatOptions.abortSignal,
+        ...(chatOptions.rateLimitPolicy === "defer" ? { maxRetries: 0 } : {}),
+      } as any)) as any;
+    } catch (error: any) {
+      if (error?.status === 429) {
+        const retryAfterHeader = error?.headers?.["retry-after"];
+        const retryAfterSeconds = Number(retryAfterHeader);
+        throw new RateLimitError(error?.message || "Rate limited (429)", {
+          status: 429,
+          retryAfterMs: Number.isFinite(retryAfterSeconds) ? Math.round(retryAfterSeconds * 1000) : undefined,
+          cause: error,
+        });
+      }
+      throw error;
+    }
 
     yield* translateOpenAIStream(stream, {
       toolArgsMergeMode: resolveToolArgsMergeMode(options.providerId || "", options.baseURL),

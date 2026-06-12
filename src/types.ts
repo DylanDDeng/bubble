@@ -251,6 +251,19 @@ export interface ToolContext {
     ) => Promise<import("./agent/subagent-control.js").SubagentThreadSnapshot>;
     closeSubAgent?: (agentId: string) => Promise<import("./agent/subagent-control.js").SubagentThreadSnapshot>;
     listSubAgents?: () => import("./agent/subagent-control.js").SubagentThreadSnapshot[];
+    runAgentTeam?: (
+      cwd: string,
+      options: {
+        profile: import("./agent/profiles.js").AgentProfile;
+        category?: string;
+        promptTemplate: string;
+        items: string[];
+        parentToolCallId: string;
+        emitUpdate?: (update: ToolUpdate) => void;
+        abortSignal?: AbortSignal;
+        approval?: "fail" | "disabled";
+      },
+    ) => Promise<import("./agent/subagent-control.js").SubagentThreadSnapshot[]>;
   };
   emitUpdate?: (update: ToolUpdate) => void;
 }
@@ -346,6 +359,13 @@ export interface Provider {
       temperature?: number;
       thinkingLevel?: ThinkingLevel;
       abortSignal?: AbortSignal;
+      /**
+       * How the transport treats HTTP 429 (design doc §4.5). "handle"
+       * (default): retry inside the transport. "defer": throw a typed
+       * RateLimitError immediately so the caller owns the backoff — used by
+       * subagent routes where the scheduler is the single 429 backoff layer.
+       */
+      rateLimitPolicy?: import("./network/errors.js").RateLimitPolicy;
     }
   ): AsyncIterable<StreamChunk>;
   complete(messages: ProviderMessage[], options?: { model?: string; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal }): Promise<string>;

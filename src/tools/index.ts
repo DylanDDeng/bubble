@@ -85,7 +85,7 @@ export function createAllTools(
     createWebFetchTool(approval),
     createMemorySearchTool(cwd),
     createMemoryReadSummaryTool(cwd),
-    ...createAgentLifecycleTools(),
+    ...createAgentLifecycleTools({ cwd, approval }),
     ...(options.questionController ? [createQuestionTool(options.questionController)] : []),
     ...(skillRegistry ? [createSkillSearchTool(skillRegistry), createSkillTool(skillRegistry)] : []),
     ...(options.todoStore ? [createTodoTool(options.todoStore)] : []),

@@ -49,12 +49,30 @@ export interface LspApprovalRequest {
   operation: string;
 }
 
+/**
+ * Trust gate for project-local agent profiles (.bubble/agents). The user —
+ * not the model — decides whether a repository's profile prompt may drive a
+ * subagent; approvals are remembered per content hash for the session.
+ */
+export interface AgentProfileApprovalRequest {
+  type: "agent_profile";
+  /** Profile name as referenced by spawn_agent. */
+  name: string;
+  /** Absolute path of the profile file inside the repository. */
+  path: string;
+  /** Content hash; a changed file re-prompts. */
+  contentHash: string;
+  /** First lines of the profile prompt so the user can judge it. */
+  promptPreview: string;
+}
+
 export type ApprovalRequest =
   | EditApprovalRequest
   | WriteApprovalRequest
   | PatchApprovalRequest
   | BashApprovalRequest
-  | LspApprovalRequest;
+  | LspApprovalRequest
+  | AgentProfileApprovalRequest;
 
 export type ApprovalDecision =
   | { action: "approve"; feedback?: string }

@@ -1,7 +1,22 @@
 import type { TaskType } from "../agent/task-classifier.js";
 import { wrapInSystemReminder } from "./reminders.js";
 
-export function reminderForTaskType(taskType: TaskType): string | undefined {
+export interface TaskReminderOptions {
+  /** Whether this agent has the delegation tools (parent agents only). */
+  canDelegate?: boolean;
+}
+
+/**
+ * Delegation nudge for exploration-shaped tasks: injected at the decision
+ * point (start of turn), where it carries far more weight for weakly
+ * delegating models than the session-start system prompt. Task-type gating
+ * keeps it away from ordinary implementation/debugging turns, so it cannot
+ * amplify over-delegation.
+ */
+const DELEGATION_NUDGE =
+  "- If answering needs scanning many files and only the conclusion matters, delegate to a background subagent (spawn_agent); when it is the same read-only question over several independent items, fan out with agent_team.";
+
+export function reminderForTaskType(taskType: TaskType, options: TaskReminderOptions = {}): string | undefined {
   switch (taskType) {
     case "debugging":
       return wrapInSystemReminder(`
@@ -41,7 +56,7 @@ Repository orientation workflow:
 - Start with the repo purpose and main execution paths.
 - Inspect README/package metadata plus core runtime files before summarizing.
 - Keep the first pass read-only unless the user asks for changes or runtime verification.
-`);
+${options.canDelegate ? `${DELEGATION_NUDGE}\n` : ""}`);
     case "product_discussion":
       return wrapInSystemReminder(`
 Product discussion workflow:

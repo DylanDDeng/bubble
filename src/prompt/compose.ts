@@ -7,6 +7,7 @@ import { buildGeminiProviderPrompt } from "./provider-prompts/gemini.js";
 import { buildGlmProviderPrompt } from "./provider-prompts/glm.js";
 import { buildGptProviderPrompt } from "./provider-prompts/gpt.js";
 import { buildKimiProviderPrompt } from "./provider-prompts/kimi.js";
+import { buildDelegationPolicyPrompt } from "./delegation.js";
 import { buildEnvironmentPrompt, defaultToolNames, type EnvironmentPromptOptions } from "./environment.js";
 import { buildRuntimePrompt } from "./runtime.js";
 import type { SkillSummary } from "../skills/types.js";
@@ -38,11 +39,13 @@ export function composeSystemPrompt(options: ComposeSystemPromptOptions = {}): s
     mode: options.mode,
     guidelines: buildGuidelines(options.tools ?? defaultToolNames, options.guidelines ?? []),
   });
+  const delegationPrompt = buildDelegationPolicyPrompt(options.tools ?? defaultToolNames);
 
   return [
     providerPrompt,
     environmentPrompt,
     runtimePrompt,
+    delegationPrompt,
     options.agentProfilePrompt,
     options.memoryPrompt,
   ].filter(Boolean).join("\n\n");

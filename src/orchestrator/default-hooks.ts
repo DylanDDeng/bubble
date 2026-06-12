@@ -28,7 +28,11 @@ export function createDefaultHooks(): TurnHooks[] {
           input: ctx.input,
           enabled: taskType === "repo_orientation",
         });
-        const taskReminder = reminderForTaskType(taskType);
+        const taskReminder = reminderForTaskType(taskType, {
+          // Only parent agents carry the delegation tools; the nudge must
+          // never reach a child that cannot spawn anything.
+          canDelegate: ctx.agent.hasToolAvailable("spawn_agent"),
+        });
         if (taskReminder) {
           ctx.queueReminder(taskReminder);
         }

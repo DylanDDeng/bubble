@@ -86,7 +86,9 @@ export class PermissionAwareApprovalController implements ApprovalController {
       return finalize({ action: "approve" });
     }
 
-    if (mode === "plan") {
+    // Project profile trust is a user decision, not a destructive action:
+    // spawn_agent is legal in plan mode, so the gate prompts there too.
+    if (mode === "plan" && req.type !== "agent_profile") {
       return finalize({
         action: "reject",
         feedback:
@@ -126,6 +128,8 @@ export class PermissionAwareApprovalController implements ApprovalController {
         return { tool: "Edit", path: req.path, cwd: this.options.cwd };
       case "lsp":
         return { tool: "Lsp", path: req.path, cwd: this.options.cwd };
+      case "agent_profile":
+        return { tool: "AgentProfile" };
     }
   }
 
@@ -219,6 +223,8 @@ function approvalTarget(req: ApprovalRequest): string {
       return "Edit";
     case "lsp":
       return "Lsp";
+    case "agent_profile":
+      return "AgentProfile";
   }
 }
 
@@ -234,5 +240,7 @@ function summarizeApprovalRequest(req: ApprovalRequest): Record<string, unknown>
       return { type: req.type, path: req.path, paths: req.paths, files: req.files, diffLength: req.diff.length };
     case "lsp":
       return { type: req.type, path: req.path, operation: req.operation };
+    case "agent_profile":
+      return { type: req.type, name: req.name, path: req.path, contentHash: req.contentHash };
   }
 }

@@ -30,11 +30,19 @@ import {
   type HookRunRequest,
 } from "./hooks/index.js";
 import { createDefaultHooks } from "./orchestrator/default-hooks.js";
-import { resolveModelRoute, resolveSubagentRoute, type AgentCategoriesConfig, type ResolvedSubagentRoute } from "./agent/categories.js";
+import { mergeAgentCategories, resolveModelRoute, resolveSubagentRoute, type AgentCategoriesConfig, type ResolvedSubagentRoute } from "./agent/categories.js";
 import { getSubtaskPolicy, type SubtaskType } from "./agent/subtask-policy.js";
-import { BudgetLedger, composeAbortSignals } from "./agent/budget-ledger.js";
+import { BudgetLedger, childHardCap, composeAbortSignals, computeChildTokenCap, DEFAULT_CHILD_TOKEN_CAP, PARENT_POOL_RESERVE_RATIO } from "./agent/budget-ledger.js";
 import { assignAgentNickname, builtinAgentProfiles, mergeUsage, selectToolsForAgentProfile, validateAgentProfileTools, type AgentProfile, type SubagentRunResult } from "./agent/profiles.js";
-import { snapshotSubagentThread, subagentResultFromThread, type PendingSubagentToolUpdate, type SubagentThreadRecord, type SubagentThreadSnapshot } from "./agent/subagent-control.js";
+import { snapshotSubagentThread, subagentResultFromThread, type PendingSubagentToolUpdate, type SubagentFinalReason, type SubagentThreadRecord, type SubagentThreadSnapshot } from "./agent/subagent-control.js";
+import { SubagentStore } from "./agent/subagent-store.js";
+import { SubagentScheduler, type SubagentRunOutcome } from "./agent/subagent-scheduler.js";
+import { ChildRunner, classifySubagentAbortReason, type ChildRunOptions } from "./agent/child-runner.js";
+import { ResultIntegrator } from "./agent/result-integrator.js";
+import { AgentAbortError, EMPTY_ASSISTANT_FALLBACK, SubagentAbortError } from "./agent/abort-errors.js";
+import { createSubagentWorktree, finalizeSubagentWorktree } from "./agent/worktree.js";
+import { createWorktreeChildTools } from "./tools/child-tools.js";
+import { type RateLimitPolicy } from "./network/errors.js";
 import { isHiddenToolResult } from "./agent/discovery-barrier.js";
 import {
   createStreamingInternalReminderSanitizer,
@@ -69,8 +77,7 @@ const EMPTY_ASSISTANT_RECOVERY_REMINDER =
   "The previous model response contained no user-visible assistant content and no tool calls. " +
   "Respond now with a concise, user-visible answer, or call an available tool if more work is required. " +
   "Do not put the final answer only in hidden reasoning.";
-const EMPTY_ASSISTANT_FALLBACK =
-  "The model returned no user-visible response. Please retry, or switch models if this keeps happening.";
+export { AgentAbortError, SubagentAbortError } from "./agent/abort-errors.js";
 // Model-facing interruption boundary. Persisted into the transcript so the
 // next turn sees an explicit stop instead of a dangling request — but it must
 // never render in the UI as if the assistant said it (the TUIs strip it and
@@ -111,11 +118,19 @@ function agentEventFromHookProgress(event: HookProgressEvent): AgentEvent {
   };
 }
 
-export class AgentAbortError extends Error {
-  constructor(message = "Agent run cancelled.") {
-    super(message);
-    this.name = "AgentAbortError";
-  }
+/** Runtime tuning for the subagent scheduler and per-child budgets. */
+export interface AgentSubagentRuntimeConfig {
+  maxActiveSubagents?: number;
+  childTokenCap?: number;
+  launchBurst?: number;
+  launchIntervalMs?: number;
+  rateLimitMaxAttempts?: number;
+  rateLimitBackoffMs?: number[];
+  /**
+   * Directory for persisted child state (design §7). Defaults to
+   * `<session>.subagents` next to the session file when a session exists.
+   */
+  persistDir?: string;
 }
 
 export interface AgentOptions {
@@ -147,11 +162,20 @@ export interface AgentOptions {
   fileStateTracker?: FileStateTracker;
   agentCategories?: AgentCategoriesConfig;
   providerFactory?: (route: ResolvedSubagentRoute) => Provider | Promise<Provider>;
+  subagents?: AgentSubagentRuntimeConfig;
+  /** Subagent routes use "defer" so the scheduler is the single 429 backoff layer (design §4.5). */
+  rateLimitPolicy?: RateLimitPolicy;
 }
 
 export interface AgentRunOptions {
   abortSignal?: AbortSignal;
   inputController?: AgentInputController;
+  /**
+   * Internal: re-enter the loop without appending the input as a new user
+   * message. Used by the subagent scheduler's rate-limit re-entry so a child
+   * history contains exactly one copy of its input (design doc §4.5).
+   */
+  resumeWithoutInput?: boolean;
 }
 
 export class Agent {
@@ -185,7 +209,12 @@ export class Agent {
   private fileStateTracker?: FileStateTracker;
   private agentCategories: AgentCategoriesConfig;
   private providerFactory?: (route: ResolvedSubagentRoute) => Provider | Promise<Provider>;
-  private subagentThreads: Map<string, SubagentThreadRecord> = new Map();
+  private readonly subagentStore: SubagentStore;
+  private readonly subagentScheduler: SubagentScheduler;
+  private readonly childRunner: ChildRunner;
+  private readonly resultIntegrator = new ResultIntegrator();
+  private subagentsConfig: AgentSubagentRuntimeConfig;
+  private readonly rateLimitPolicy?: RateLimitPolicy;
   private pendingSubagentUpdates: PendingSubagentToolUpdate[] = [];
   private lastInputTokens: number | null = null;
   private lastAnchorMessageCount: number | null = null;
@@ -216,6 +245,47 @@ export class Agent {
     this.fileStateTracker = options.fileStateTracker;
     this.agentCategories = options.agentCategories ?? {};
     this.providerFactory = options.providerFactory;
+    this.subagentsConfig = options.subagents ?? {};
+    this.rateLimitPolicy = options.rateLimitPolicy;
+    // Children persist next to the session file so a later process can
+    // resume them via send_input (design §7). Child agents themselves
+    // (agentRole "subagent") never persist children — no recursion exists.
+    const persistDir = this.agentRole === "parent"
+      ? this.subagentsConfig.persistDir
+        ?? (this.sessionID?.endsWith(".jsonl") ? this.sessionID.replace(/\.jsonl$/, ".subagents") : undefined)
+      : undefined;
+    this.subagentStore = new SubagentStore(persistDir);
+    this.subagentStore.loadPersisted();
+    this.subagentScheduler = new SubagentScheduler({
+      maxActiveSubagents: this.subagentsConfig.maxActiveSubagents,
+      launchBurst: this.subagentsConfig.launchBurst,
+      launchIntervalMs: this.subagentsConfig.launchIntervalMs,
+      rateLimitMaxAttempts: this.subagentsConfig.rateLimitMaxAttempts,
+      rateLimitBackoffMs: this.subagentsConfig.rateLimitBackoffMs,
+      getCategoryLimit: (category) => mergeAgentCategories(this.agentCategories)[category]?.maxConcurrent,
+    });
+    this.childRunner = new ChildRunner({
+      allTools: () => [...this.tools.values()],
+      budgetLedger: () => this.budgetLedger,
+      emit: (record, options, status, event, message) => this.emitSubagentLifecycle(record, options, status, event, message),
+      runLifecycleHook: (record, cwd, eventName, status, error, abortSignal) =>
+        this.runSubagentLifecycleHookFor(record, cwd, eventName, status, error, abortSignal),
+      finalizeBlocked: (record, error, options) => this.finalizeSubagentBlocked(record, error, options),
+      createInstance: (record, tools, cwd, forkContext) => this.createSubAgentInstance(record, tools, cwd, forkContext),
+      notifyWaiters: (record) => this.subagentStore.notifyWaiters(record),
+      onFinal: (record, options) => {
+        if (record.worktree) {
+          // Inspect and clean up the worktree: unchanged → removed; changed →
+          // kept for the parent to review, with a diff stat in the handoff (§8).
+          finalizeSubagentWorktree(record.worktree);
+          if (record.worktree.changed) {
+            record.toolNotes.push(`worktree: changes left in ${record.worktree.path} — review the diff before applying`);
+          }
+        }
+        this.subagentStore.persist(record);
+        this.maybeEnqueueIngestion(record, options);
+      },
+    });
 
     if (options.systemPrompt) {
       this.messages.push({ role: "system", content: options.systemPrompt });
@@ -275,6 +345,11 @@ export class Agent {
     for (const context of result.modelContext) {
       this.injectSystemReminder(`[Hook ${result.eventName}] ${context}`);
     }
+  }
+
+  /** Whether a tool is registered on this agent (e.g. delegation tools on parents). */
+  hasToolAvailable(name: string): boolean {
+    return this.tools.has(name);
   }
 
   /** Unlock a list of deferred tools so they're included in subsequent turns. */
@@ -548,26 +623,28 @@ export class Agent {
       this.setTodos([]);
       yield emit({ type: "todos_updated", todos: [] });
     }
-    const promptHook = await this.runExternalHook({
-      eventName: "UserPromptSubmit",
-      cwd,
-      runId,
-      target: typeof userInput === "string" ? userInput : "content_parts",
-      payload: normalizeHookInput(userInput),
-      fullPayload: { prompt: userInput },
-    }, abortSignal);
-    for (const event of promptHook.events) yield emit(event);
-    if (promptHook.result.decision === "deny") {
-      const message = promptHook.result.reason
-        ?? `Prompt blocked by hook ${promptHook.result.sourceHookId ?? "<unknown>"}.`;
-      yield emit({ type: "turn_start" });
-      yield emit({ type: "text_delta", content: message });
-      yield emit({ type: "turn_end", willContinue: false });
-      yield emit({ type: "agent_end" });
-      return;
+    if (!options.resumeWithoutInput) {
+      const promptHook = await this.runExternalHook({
+        eventName: "UserPromptSubmit",
+        cwd,
+        runId,
+        target: typeof userInput === "string" ? userInput : "content_parts",
+        payload: normalizeHookInput(userInput),
+        fullPayload: { prompt: userInput },
+      }, abortSignal);
+      for (const event of promptHook.events) yield emit(event);
+      if (promptHook.result.decision === "deny") {
+        const message = promptHook.result.reason
+          ?? `Prompt blocked by hook ${promptHook.result.sourceHookId ?? "<unknown>"}.`;
+        yield emit({ type: "turn_start" });
+        yield emit({ type: "text_delta", content: message });
+        yield emit({ type: "turn_end", willContinue: false });
+        yield emit({ type: "agent_end" });
+        return;
+      }
+      this.injectHookModelContext(promptHook.result);
+      this.appendMessage({ role: "user", content: userInput });
     }
-    this.injectHookModelContext(promptHook.result);
-    this.appendMessage({ role: "user", content: userInput });
     await hookBus.runBeforeTurn({
       agent: this,
       cwd,
@@ -596,6 +673,9 @@ export class Agent {
       while (true) {
       throwIfAborted(abortSignal);
       flushGovernorReminders();
+      // Background child completions surface before the next inference turn
+      // without requiring a wait_agent call (design §5).
+      this.flushSubagentIngestions();
       for (const update of this.drainSubagentToolUpdates()) yield emit(update);
       for (const event of await applyPendingInputs()) yield emit(event);
       yield emit({ type: "turn_start" });
@@ -717,6 +797,7 @@ export class Agent {
           temperature: this.temperature,
           thinkingLevel: this.thinkingLevel,
           abortSignal,
+          rateLimitPolicy: this.rateLimitPolicy,
         });
 
         for await (const chunk of stream) {
@@ -981,6 +1062,19 @@ export class Agent {
           }
           let tc = parsedCalls[index];
           let blockedResult: ToolResult | undefined;
+          // agent_team must be the only tool call in its response (design
+          // §1.2): concurrent calls race the scheduler and the aggregated
+          // reply; the rejection teaches the model how to re-issue.
+          if (tc.name === "agent_team" && parsedCalls.length > 1) {
+            blockedResult = {
+              content: [
+                "agent_team must be the only tool call in your response.",
+                "Re-issue agent_team alone — one call, nothing else in the same message — and run any other tools or additional teams sequentially after it returns.",
+              ].join(" "),
+              isError: true,
+              status: "blocked",
+            };
+          }
           await hookBus.runBeforeToolCall({
             agent: this,
             cwd,
@@ -1500,12 +1594,20 @@ export class Agent {
       nickname: options.nickname,
       route: options.route ?? this.resolveRouteForSubagent(options.profile, options.category),
     });
-    await this.runSubagentThread(record, input, cwd, {
-      approval: options.approval ?? options.profile.approval,
+    this.subagentStore.set(record);
+    const approval = options.approval ?? options.profile.approval;
+    const admissionError = this.admitSubagentProfile(record, approval);
+    if (admissionError) {
+      this.finalizeSubagentBlocked(record, admissionError, { directEmit: options.emitUpdate });
+      return subagentResultFromThread(record);
+    }
+    record.promise = this.dispatchSubagentRun(record, input, cwd, {
+      approval,
       abortSignal: options.abortSignal,
       forkContext: options.forkContext,
       directEmit: options.emitUpdate,
     });
+    await record.promise;
     return subagentResultFromThread(record);
   }
 
@@ -1530,23 +1632,34 @@ export class Agent {
       parentToolName: "spawn_agent",
       route: options.route ?? this.resolveRouteForSubagent(options.profile, options.category),
     });
-    this.subagentThreads.set(record.agentId, record);
+    this.subagentStore.set(record);
+    const approval = options.approval ?? record.profile.approval;
+    // Admission validation runs before queueing (design §4.2): a request that
+    // would block never consumes a queue slot.
+    const admissionError = this.admitSubagentProfile(record, approval);
+    if (admissionError) {
+      this.finalizeSubagentBlocked(record, admissionError, { queueUpdates: true });
+      return this.snapshotSubagent(record);
+    }
     this.queueSubagentUpdate(record, "queued", undefined, `Queued ${record.nickname} (${record.profile.name})`);
-    record.promise = this.runSubagentThread(record, input, cwd, {
-      approval: options.approval ?? record.profile.approval,
+    record.promise = this.dispatchSubagentRun(record, input, cwd, {
+      approval,
       abortSignal: options.abortSignal,
       forkContext: options.forkContext,
       queueUpdates: true,
     });
-    void record.promise.finally(() => this.notifySubagentWaiters(record));
-    return snapshotSubagentThread(record);
+    void record.promise.finally(() => this.subagentStore.notifyWaiters(record));
+    return this.snapshotSubagent(record);
   }
 
   async waitSubAgents(options: { agentIds?: string[]; timeoutMs?: number } = {}): Promise<SubagentThreadSnapshot[]> {
     const targets = this.resolveSubagentTargets(options.agentIds);
     if (targets.length === 0) return [];
     const completed = targets.filter((record) => isFinalSubagentStatus(record.status));
-    if (completed.length > 0) return completed.map(snapshotSubagentThread);
+    if (completed.length > 0) {
+      for (const record of completed) this.subagentStore.markDelivered(record.agentId);
+      return completed.map((record) => this.snapshotSubagent(record));
+    }
 
     const timeoutMs = normalizeWaitTimeout(options.timeoutMs);
     let waiter: (() => void) | undefined;
@@ -1567,7 +1680,8 @@ export class Agent {
     ]);
 
     const finished = targets.filter((record) => isFinalSubagentStatus(record.status));
-    return (finished.length > 0 ? finished : targets).map(snapshotSubagentThread);
+    for (const record of finished) this.subagentStore.markDelivered(record.agentId);
+    return (finished.length > 0 ? finished : targets).map((record) => this.snapshotSubagent(record));
   }
 
   async sendSubAgentInput(
@@ -1576,7 +1690,7 @@ export class Agent {
     cwd: string,
     options: { interrupt?: boolean; parentToolCallId?: string; abortSignal?: AbortSignal } = {},
   ): Promise<SubagentThreadSnapshot> {
-    const record = this.subagentThreads.get(agentId);
+    const record = this.subagentStore.get(agentId);
     if (!record) {
       throw new Error(`Unknown subagent: ${agentId}`);
     }
@@ -1584,7 +1698,7 @@ export class Agent {
       if (!options.interrupt) {
         throw new Error(`Subagent ${agentId} is still running. Call wait_agent first or pass interrupt:true.`);
       }
-      record.abortController.abort(new AgentAbortError(`Subagent ${agentId} interrupted.`));
+      record.abortController.abort(new SubagentAbortError(`Subagent ${agentId} interrupted.`, "interrupt"));
       await record.promise?.catch(() => undefined);
       record.abortController = new AbortController();
     }
@@ -1599,35 +1713,267 @@ export class Agent {
     record.toolNotes = [];
     record.usage = undefined;
     record.error = undefined;
+    record.finalReason = undefined;
+    record.deliveredAt = undefined;
     record.updatedAt = Date.now();
-    record.promise = this.runSubagentThread(record, input, cwd, {
+    // A send_input restart is a launch like any other: it goes through the
+    // scheduler's dispatch point and is subject to the same admission limits
+    // (design §4.1) — batch-resuming team members cannot bypass concurrency caps.
+    record.promise = this.dispatchSubagentRun(record, input, cwd, {
       approval: record.profile.approval,
       abortSignal: options.abortSignal,
       queueUpdates: true,
       reuseAgent: true,
     });
-    void record.promise.finally(() => this.notifySubagentWaiters(record));
-    return snapshotSubagentThread(record);
+    void record.promise.finally(() => this.subagentStore.notifyWaiters(record));
+    return this.snapshotSubagent(record);
   }
 
   async closeSubAgent(agentId: string): Promise<SubagentThreadSnapshot> {
-    const record = this.subagentThreads.get(agentId);
+    const record = this.subagentStore.get(agentId);
     if (!record) {
       throw new Error(`Unknown subagent: ${agentId}`);
     }
     if (!isFinalSubagentStatus(record.status)) {
-      record.abortController.abort(new AgentAbortError(`Subagent ${agentId} closed.`));
+      record.abortController.abort(new SubagentAbortError(`Subagent ${agentId} closed.`, "user_close"));
       await record.promise?.catch(() => undefined);
     }
     record.status = "closed";
+    record.finalReason = record.finalReason ?? "cancelled_user";
     record.updatedAt = Date.now();
     this.queueSubagentUpdate(record, "cancelled", undefined, `${record.nickname} closed`);
-    this.notifySubagentWaiters(record);
-    return snapshotSubagentThread(record);
+    this.subagentStore.persist(record);
+    this.subagentStore.notifyWaiters(record);
+    return this.snapshotSubagent(record);
   }
 
   listSubAgents(): SubagentThreadSnapshot[] {
-    return [...this.subagentThreads.values()].map(snapshotSubagentThread);
+    return this.subagentStore.values().map((record) => this.snapshotSubagent(record));
+  }
+
+  /**
+   * Homogeneous map fan-out (design §1.2): one profile, one template, N items.
+   * Every member goes through the same admission and the same scheduler
+   * dispatch as spawn_agent; the tool blocks until all members are final.
+   */
+  async runAgentTeam(
+    cwd: string,
+    options: {
+      profile: AgentProfile;
+      category?: string;
+      promptTemplate: string;
+      items: string[];
+      parentToolCallId: string;
+      emitUpdate?: (update: ToolUpdate) => void;
+      abortSignal?: AbortSignal;
+      approval?: "fail" | "disabled";
+    },
+  ): Promise<SubagentThreadSnapshot[]> {
+    // Team budget pre-check (§6): items × per-member cap must fit in what
+    // remains of a limited pool after the parent's reserve. On limit-free
+    // hosts the only bound is the items cap enforced by the tool.
+    const limit = this.budgetLedger?.poolLimit;
+    if (this.budgetLedger && limit !== undefined) {
+      const reserve = Math.floor(limit * PARENT_POOL_RESERVE_RATIO);
+      const available = Math.max(0, (this.budgetLedger.remaining() ?? 0) - reserve);
+      const memberCap = Math.min(
+        this.subagentsConfig.childTokenCap ?? DEFAULT_CHILD_TOKEN_CAP,
+        options.profile.maxTokens ?? Number.POSITIVE_INFINITY,
+      );
+      const affordable = Math.floor(available / memberCap);
+      if (options.items.length > affordable) {
+        throw new Error([
+          `agent_team rejected: the remaining token budget affords at most ${affordable} member${affordable === 1 ? "" : "s"}`,
+          `but ${options.items.length} were requested. Reduce items or run smaller batches sequentially.`,
+        ].join(" "));
+      }
+    }
+
+    const approval = options.approval ?? options.profile.approval;
+    const route = this.resolveRouteForSubagent(options.profile, options.category);
+    const records = options.items.map((item) => this.createSubagentThreadRecord({
+      profile: options.profile,
+      task: options.promptTemplate.split("{{item}}").join(item),
+      parentToolCallId: options.parentToolCallId,
+      parentToolName: "agent_team",
+      route,
+    }));
+
+    const promises = records.map((record) => {
+      this.subagentStore.set(record);
+      const admissionError = this.admitSubagentProfile(record, approval);
+      if (admissionError) {
+        this.finalizeSubagentBlocked(record, admissionError, { directEmit: options.emitUpdate });
+        return Promise.resolve();
+      }
+      // Member events flow through the team tool's own emitUpdate
+      // (directEmit): while a foreground tool runs, the parent loop blocks in
+      // updateQueue.wait and the queued channel is not drained until the tool
+      // settles — queueUpdates would freeze the TUI for the whole team (§1.2).
+      record.promise = this.dispatchSubagentRun(record, record.task, cwd, {
+        approval,
+        abortSignal: options.abortSignal,
+        directEmit: options.emitUpdate,
+      });
+      void record.promise.finally(() => this.subagentStore.notifyWaiters(record));
+      return record.promise;
+    });
+
+    await Promise.all(promises);
+    // The aggregated reply carries every member's full summary.
+    for (const record of records) this.subagentStore.markDelivered(record.agentId);
+    return records.map((record) => this.snapshotSubagent(record));
+  }
+
+  /** Marks a child's full summary as delivered to parent context (design §3.3). */
+  markSubagentDelivered(agentId: string): void {
+    this.subagentStore.markDelivered(agentId);
+  }
+
+  private snapshotSubagent(record: SubagentThreadRecord): SubagentThreadSnapshot {
+    const snapshot = snapshotSubagentThread(record);
+    if (record.status === "queued") {
+      const queuePosition = this.subagentScheduler.queuePosition(record.agentId);
+      if (queuePosition !== undefined) return { ...snapshot, queuePosition };
+    }
+    return snapshot;
+  }
+
+  /** Returns the blocking diagnostic message when the profile cannot run, else undefined. */
+  private admitSubagentProfile(record: SubagentThreadRecord, approval: "fail" | "disabled"): string | undefined {
+    const diagnostics = validateAgentProfileTools([...this.tools.values()], record.profile, approval);
+    const blocking = diagnostics.filter((diagnostic) => diagnostic.severity === "error");
+    if (blocking.length === 0) return undefined;
+    return blocking.map((diagnostic) => diagnostic.message).join("\n");
+  }
+
+  /**
+   * Background children (queueUpdates) get their results ingested before the
+   * parent's next inference turn (design §5); foreground children (team,
+   * legacy task) deliver through their tool result instead.
+   */
+  private maybeEnqueueIngestion(
+    record: SubagentThreadRecord,
+    options: { queueUpdates?: boolean },
+  ): void {
+    if (options.queueUpdates) {
+      this.resultIntegrator.enqueue(record.agentId);
+    }
+  }
+
+  private flushSubagentIngestions(): void {
+    if (!this.resultIntegrator.hasPending()) return;
+    for (const notice of this.resultIntegrator.drainNotices(this.subagentStore)) {
+      this.injectSystemReminder(notice);
+    }
+  }
+
+  private finalizeSubagentBlocked(
+    record: SubagentThreadRecord,
+    error: string,
+    emitOptions: { directEmit?: (update: ToolUpdate) => void; queueUpdates?: boolean },
+  ): void {
+    record.status = "blocked";
+    record.finalReason = "blocked";
+    record.error = error;
+    record.updatedAt = Date.now();
+    this.emitSubagentLifecycle(record, emitOptions, "blocked", undefined, error);
+    this.subagentStore.persist(record);
+    this.subagentStore.notifyWaiters(record);
+  }
+
+  private dispatchSubagentRun(
+    record: SubagentThreadRecord,
+    input: string | ContentPart[],
+    cwd: string,
+    options: {
+      approval: "fail" | "disabled";
+      abortSignal?: AbortSignal;
+      forkContext?: boolean;
+      directEmit?: (update: ToolUpdate) => void;
+      queueUpdates?: boolean;
+      reuseAgent?: boolean;
+    },
+  ): Promise<void> {
+    record.status = "queued";
+    record.updatedAt = Date.now();
+    record.tokenCap = computeChildTokenCap({
+      ledger: this.budgetLedger,
+      subAgentId: record.agentId,
+      activeChildren: this.subagentScheduler.activeCount(),
+      configCap: this.subagentsConfig.childTokenCap,
+      profileMaxTokens: record.profile.maxTokens,
+    });
+    const queueSignal = composeAbortSignals([options.abortSignal, record.abortController.signal]);
+    return this.subagentScheduler.dispatch({
+      agentId: record.agentId,
+      category: record.category,
+      signal: queueSignal,
+      run: (ctx) => this.runSubagentThread(record, input, cwd, { ...options, attempt: ctx.attempt }),
+      onCancelledWhileQueued: (reason) => {
+        record.status = "cancelled";
+        record.finalReason = classifySubagentAbortReason(reason, options.abortSignal, this.budgetLedger);
+        record.error = reason instanceof Error ? reason.message : reason ? String(reason) : "Cancelled while queued.";
+        record.updatedAt = Date.now();
+        // The run never started, so no SubagentStart fired and no SubagentStop follows.
+        this.emitSubagentLifecycle(record, options, "cancelled", undefined, record.error);
+        this.subagentStore.persist(record);
+        this.subagentStore.notifyWaiters(record);
+        this.maybeEnqueueIngestion(record, options);
+      },
+      onRateLimitExhausted: (attempts) => {
+        record.status = "failed";
+        record.finalReason = "rate_limited_exhausted";
+        record.error = `Provider rate limit persisted after ${attempts} attempts.`;
+        record.updatedAt = Date.now();
+        void this.runSubagentLifecycleHookFor(record, cwd, "SubagentStop", record.status, record.error);
+        this.emitSubagentLifecycle(record, options, "failed", undefined, record.error);
+        this.subagentStore.persist(record);
+        this.subagentStore.notifyWaiters(record);
+        this.maybeEnqueueIngestion(record, options);
+      },
+    });
+  }
+
+  private emitSubagentLifecycle(
+    record: SubagentThreadRecord,
+    options: { directEmit?: (update: ToolUpdate) => void; queueUpdates?: boolean },
+    status: ToolUpdate["status"],
+    event?: AgentEvent,
+    message?: string,
+  ): void {
+    const update = this.buildSubagentUpdate(record, status, event, message);
+    options.directEmit?.(update);
+    if (options.queueUpdates) {
+      this.pendingSubagentUpdates.push({ id: record.parentToolCallId, name: record.parentToolName, update });
+    }
+  }
+
+  private async runSubagentLifecycleHookFor(
+    record: SubagentThreadRecord,
+    cwd: string,
+    eventName: "SubagentStart" | "SubagentStop",
+    status?: string,
+    error?: string,
+    abortSignal?: AbortSignal,
+  ): Promise<void> {
+    try {
+      await this.runExternalHook({
+        eventName,
+        cwd,
+        runId: record.runId,
+        target: record.profile.name,
+        payload: {
+          agentId: record.agentId,
+          nickname: record.nickname,
+          profile: record.profile.name,
+          status,
+          error,
+        },
+      }, abortSignal);
+    } catch {
+      // Subagent lifecycle hooks are observe-only; never fail the subagent.
+    }
   }
 
   private resolveRouteForSubagent(profile: AgentProfile, category: string | undefined): ResolvedSubagentRoute {
@@ -1688,198 +2034,13 @@ export class Agent {
     };
   }
 
-  private async runSubagentThread(
+  private runSubagentThread(
     record: SubagentThreadRecord,
     input: string | ContentPart[],
     cwd: string,
-    options: {
-      approval: "fail" | "disabled";
-      abortSignal?: AbortSignal;
-      forkContext?: boolean;
-      directEmit?: (update: ToolUpdate) => void;
-      queueUpdates?: boolean;
-      reuseAgent?: boolean;
-    },
-  ): Promise<void> {
-    const emit = (status: ToolUpdate["status"], event?: AgentEvent, message?: string) => {
-      const update = this.buildSubagentUpdate(record, status, event, message);
-      options.directEmit?.(update);
-      if (options.queueUpdates) {
-        this.pendingSubagentUpdates.push({ id: record.parentToolCallId, name: record.parentToolName, update });
-      }
-    };
-    const runSubagentLifecycleHook = async (
-      eventName: "SubagentStart" | "SubagentStop",
-      status?: string,
-      error?: string,
-    ) => {
-      try {
-        await this.runExternalHook({
-          eventName,
-          cwd,
-          runId: record.runId,
-          target: record.profile.name,
-          payload: {
-            agentId: record.agentId,
-            nickname: record.nickname,
-            profile: record.profile.name,
-            status,
-            error,
-          },
-        }, options.abortSignal);
-      } catch {
-        // Subagent lifecycle hooks are observe-only; never fail the subagent.
-      }
-    };
-
-    const allTools = [...this.tools.values()];
-    const diagnostics = validateAgentProfileTools(allTools, record.profile, options.approval);
-    const blockingDiagnostics = diagnostics.filter((diagnostic) => diagnostic.severity === "error");
-    for (const diagnostic of diagnostics.filter((item) => item.severity === "warning")) {
-      record.toolNotes.push(`profile: ${diagnostic.message}`);
-    }
-    if (blockingDiagnostics.length > 0) {
-      record.status = "blocked";
-      record.error = blockingDiagnostics.map((diagnostic) => diagnostic.message).join("\n");
-      record.updatedAt = Date.now();
-      await runSubagentLifecycleHook("SubagentStop", record.status, record.error);
-      emit("blocked", undefined, record.error);
-      this.notifySubagentWaiters(record);
-      return;
-    }
-
-    const tools = selectToolsForAgentProfile(allTools, record.profile, options.approval);
-    let subAgent: NonNullable<SubagentThreadRecord["agent"]>;
-    try {
-      subAgent = options.reuseAgent && record.agent
-        ? record.agent
-        : await this.createSubAgentInstance(record, tools, cwd, options.forkContext);
-    } catch (error: any) {
-      record.status = "blocked";
-      record.error = error?.message || String(error);
-      record.updatedAt = Date.now();
-      await runSubagentLifecycleHook("SubagentStop", record.status, record.error);
-      emit("blocked", undefined, record.error);
-      this.notifySubagentWaiters(record);
-      return;
-    }
-    record.agent = subAgent;
-    record.status = "running";
-    record.updatedAt = Date.now();
-    await runSubagentLifecycleHook("SubagentStart", record.status);
-    emit("running", undefined, `Running ${record.nickname} (${record.profile.name})...`);
-    let turnSummaryBuffer = "";
-    let turnHadToolCall = false;
-    let executedAnyTool = false;
-
-    try {
-      const childAbortSignal = composeAbortSignals([
-        options.abortSignal,
-        record.abortController.signal,
-      ]);
-      for await (const event of subAgent.run(input, cwd, { abortSignal: childAbortSignal })) {
-        if (event.type === "text_delta") {
-          turnSummaryBuffer += event.content;
-        }
-        if (
-          event.type === "tool_call_start"
-          || event.type === "tool_call_delta"
-          || event.type === "tool_call_end"
-          || event.type === "tool_start"
-        ) {
-          turnHadToolCall = true;
-        }
-        if (event.type === "tool_end") {
-          executedAnyTool = true;
-          record.toolNotes.push(`${event.name}: ${summarizeSubagentToolEnd(event)}`);
-        }
-        if (event.type === "turn_end" && event.usage) {
-          record.usage = mergeUsage(record.usage, event.usage);
-        }
-        if (event.type === "turn_end") {
-          const turnSummary = stripProviderProtocolArtifacts(turnSummaryBuffer).trim();
-          if (!turnHadToolCall && turnSummary) {
-            // Only the latest tool-free assistant turn is a candidate for the summary;
-            // earlier ones are intermediate "I'll do X next" reasoning, not the final answer.
-            record.summary = turnSummary;
-          }
-          turnSummaryBuffer = "";
-          turnHadToolCall = false;
-        }
-        record.updatedAt = Date.now();
-        emit("running", event);
-      }
-    } catch (error: any) {
-      const cancelled = error instanceof AgentAbortError || error?.name === "AbortError";
-      record.status = cancelled ? "cancelled" : "failed";
-      record.summary = sanitizeSubagentSummary(record.summary);
-      record.error = error?.message || String(error);
-      record.updatedAt = Date.now();
-      await runSubagentLifecycleHook("SubagentStop", record.status, record.error);
-      emit(record.status, undefined, record.error);
-      this.notifySubagentWaiters(record);
-      return;
-    }
-
-    record.summary = sanitizeSubagentSummary(record.summary);
-    if (needsExplicitFinalSummary(record, executedAnyTool)) {
-      await this.runSubagentFinalSummaryTurn(record, subAgent, cwd, options.abortSignal, emit);
-    }
-
-    record.status = "completed";
-    record.summary = sanitizeSubagentSummary(record.summary);
-    record.updatedAt = Date.now();
-    await runSubagentLifecycleHook("SubagentStop", record.status);
-    emit("completed", undefined, record.summary || `${record.nickname} completed`);
-    this.notifySubagentWaiters(record);
-  }
-
-  private async runSubagentFinalSummaryTurn(
-    record: SubagentThreadRecord,
-    subAgent: NonNullable<SubagentThreadRecord["agent"]>,
-    cwd: string,
-    abortSignal: AbortSignal | undefined,
-    emit: (status: ToolUpdate["status"], event?: AgentEvent, message?: string) => void,
-  ): Promise<void> {
-    const prompt = [
-      "Produce the final subagent summary now.",
-      "Do not call tools. Do not announce next steps or plans.",
-      "Use the evidence already gathered in this child thread.",
-      "Return concise findings with concrete file paths and explicit uncertainty.",
-      "Your entire response will be returned to the parent as the subagent's answer.",
-    ].join("\n");
-    subAgent.injectSystemReminder([
-      "Subagent final-summary mode is active.",
-      "Do not call tools. Do not announce next steps.",
-      "Use only the evidence already gathered in this child thread.",
-      "Return the final concise summary as your complete response.",
-    ].join("\n"));
-    let finalBuffer = "";
-    let finalHadToolCall = false;
-    const finalAbortSignal = composeAbortSignals([abortSignal, record.abortController.signal]);
-
-    for await (const event of subAgent.run(prompt, cwd, { abortSignal: finalAbortSignal })) {
-      if (event.type === "text_delta") {
-        finalBuffer += event.content;
-      }
-      if (
-        event.type === "tool_call_start"
-        || event.type === "tool_call_delta"
-        || event.type === "tool_call_end"
-        || event.type === "tool_start"
-      ) {
-        finalHadToolCall = true;
-      }
-      if (event.type === "turn_end" && event.usage) {
-        record.usage = mergeUsage(record.usage, event.usage);
-      }
-      emit("running", event);
-    }
-
-    const finalSummary = sanitizeSubagentSummary(finalBuffer);
-    if (!finalHadToolCall && finalSummary) {
-      record.summary = finalSummary;
-    }
+    options: ChildRunOptions,
+  ): Promise<SubagentRunOutcome> {
+    return this.childRunner.run(record, input, cwd, options);
   }
 
   private async createSubAgentInstance(
@@ -1888,6 +2049,19 @@ export class Agent {
     cwd: string,
     forkContext?: boolean,
   ): Promise<NonNullable<SubagentThreadRecord["agent"]>> {
+    let childCwd = cwd;
+    let childMode: PermissionMode = "plan";
+    if (record.profile.mode === "write_worktree") {
+      // Write children work in a runtime-allocated worktree with fresh tool
+      // instances bound to it (design §8): the parent tree is never touched,
+      // and the tools' own workspace fence enforces containment in code.
+      if (!record.worktree) {
+        record.worktree = createSubagentWorktree(cwd, record.agentId);
+      }
+      childCwd = record.worktree.path;
+      childMode = "default";
+      tools = createWorktreeChildTools(childCwd, record.profile.tools.include);
+    }
     const childToolNames = tools.map((tool) => tool.name);
     const route = record.route ?? {
       providerId: this.providerId,
@@ -1902,14 +2076,21 @@ export class Agent {
       configuredModel: route.model || "none",
       configuredModelId: route.providerId && route.model ? `${route.providerId}:${route.model}` : route.model || "none",
       thinkingLevel: route.thinkingLevel,
-      mode: "plan",
-      workingDir: cwd,
+      mode: childMode,
+      workingDir: childCwd,
       ...buildToolPromptOptions(tools),
       memoryPrompt: childToolNames.some((name) => name === "memory_search" || name === "memory_read_summary")
         ? this.memoryPrompt
         : undefined,
       agentProfilePrompt: [
         `You are subagent ${record.nickname}. Your agent profile is ${record.profile.name}.`,
+        record.profile.mode === "write_worktree"
+          ? [
+            "You work inside an isolated git worktree; the parent reviews your diff after you finish.",
+            "Make your changes, verify them (run tests where possible), and end with a handoff that lists the files you changed and how you verified them.",
+            "Do not commit, push, or touch anything outside this worktree.",
+          ].join(" ")
+          : "",
         record.profile.prompt,
       ].filter(Boolean).join("\n\n"),
     });
@@ -1920,7 +2101,7 @@ export class Agent {
       tools,
       temperature: this.temperature,
       thinkingLevel: route.thinkingLevel,
-      mode: "plan",
+      mode: childMode,
       maxTurns: record.profile.maxTurns,
       budgetLedger: this.budgetLedger,
       budgetSource: { runId: record.runId, subAgentId: record.agentId },
@@ -1931,8 +2112,17 @@ export class Agent {
       subAgentId: record.agentId,
       agentCategories: this.agentCategories,
       providerFactory: this.providerFactory,
+      // The scheduler owns 429 backoff for children; the transport must not
+      // stack its own retries on top (design §4.5).
+      rateLimitPolicy: "defer",
     });
-    if (forkContext) {
+    if (record.messages && record.messages.length > 0) {
+      // Cross-restart resume (design §7): rebuild the child from its
+      // persisted history — including its original system prompt — so
+      // send_input continues with context intact.
+      subAgent.messages = record.messages.map((message) => ({ ...message }));
+      record.messages = undefined;
+    } else if (forkContext) {
       subAgent.messages = this.forkMessagesForSubagent(childSystemPrompt);
     }
     return subAgent;
@@ -2033,28 +2223,20 @@ export class Agent {
   }
 
   private activeSubagentNicknames(): string[] {
-    return [...this.subagentThreads.values()]
-      .filter((record) => !isFinalSubagentStatus(record.status))
-      .map((record) => record.nickname);
+    return this.subagentStore.active().map((record) => record.nickname);
   }
 
   private resolveSubagentTargets(agentIds?: string[]): SubagentThreadRecord[] {
     if (!agentIds || agentIds.length === 0) {
-      return [...this.subagentThreads.values()].filter((record) => record.status !== "closed");
+      return this.subagentStore.values().filter((record) => record.status !== "closed");
     }
     return agentIds.map((id) => {
-      const record = this.subagentThreads.get(id);
+      const record = this.subagentStore.get(id);
       if (!record) {
         throw new Error(`Unknown subagent: ${id}`);
       }
       return record;
     });
-  }
-
-  private notifySubagentWaiters(record: SubagentThreadRecord): void {
-    for (const waiter of record.waiters) {
-      waiter();
-    }
   }
 
   private maybeCompactResidentHistory(): void {
@@ -2559,62 +2741,16 @@ function isSubagentLifecycleTool(name: string): boolean {
     || name === "spawn_agent"
     || name === "wait_agent"
     || name === "send_input"
-    || name === "close_agent";
+    || name === "close_agent"
+    || name === "list_agents"
+    || name === "agent_team";
 }
 
-function sanitizeSubagentSummary(value: string): string {
-  return stripProviderProtocolArtifacts(value).trim();
-}
 
-function needsExplicitFinalSummary(record: SubagentThreadRecord, executedAnyTool: boolean): boolean {
-  if (!record.summary) return executedAnyTool;
-  if (isOnlyProviderProtocolArtifacts(record.summary)) return true;
-  if (/<\/?[｜|][^<>]*>/.test(record.summary)) return true;
-  if (!executedAnyTool) return false;
-  if (record.summary === EMPTY_ASSISTANT_FALLBACK) return true;
-  return isLikelyIntermediateSubagentSummary(record.summary);
-}
 
-function isLikelyIntermediateSubagentSummary(value: string): boolean {
-  const normalized = value.trim().replace(/\s+/g, " ").toLowerCase();
-  if (!normalized) return false;
-  if (/^(let me|i'll|i will|i need to|i should|i'm going to|now i'll|now i will)\b/.test(normalized)) {
-    return true;
-  }
-  return /:\s*$/.test(normalized) && /\b(read|inspect|check|look|search|try|open)\b/.test(normalized);
-}
 
-function summarizeSubagentToolEnd(event: { name: string; result: ToolResult }): string {
-  const metadata = (event.result.metadata ?? {}) as Record<string, unknown>;
-  const reason = readString(metadata.reason);
-  if (reason) return reason;
-  const summary = readString(metadata.summary);
-  if (summary) return summary;
-  if (event.result.isError) {
-    const firstLine = event.result.content.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
-    return firstLine ? truncateForNote(firstLine) : "failed";
-  }
-  const matches = readNumber(metadata.matches);
-  const pattern = readString(metadata.pattern);
-  const path = readString(metadata.path);
-  if (matches !== undefined) {
-    const target = pattern ? ` for ${pattern}` : "";
-    const within = path ? ` in ${path}` : "";
-    return `${matches} match${matches === 1 ? "" : "es"}${target}${within}`;
-  }
-  const kind = readString(metadata.kind);
-  if (path) return kind ? `${kind} ${path}` : path;
-  return event.result.status ?? "completed";
-}
 
-function readString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
 
-function readNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
 
-function truncateForNote(value: string, max = 200): string {
-  return value.length <= max ? value : `${value.slice(0, max - 3)}...`;
-}
+
+

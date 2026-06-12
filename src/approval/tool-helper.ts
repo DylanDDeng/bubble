@@ -39,5 +39,7 @@ function approvalRequestLabel(req: ApprovalRequest): string {
       return `Bash command \`${req.command}\``;
     case "lsp":
       return `LSP ${req.operation} on ${req.path}`;
+    case "agent_profile":
+      return `Project agent profile "${req.name}"`;
   }
 }

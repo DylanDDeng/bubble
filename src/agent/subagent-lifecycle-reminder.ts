@@ -9,7 +9,11 @@ interface LifecycleSubagent {
   status?: string;
   summary?: string;
   error?: string;
+  /** Set when the full summary already reached parent context (design §3.3). */
+  delivered?: boolean;
 }
+
+const FINAL_STATUSES = new Set(["completed", "failed", "blocked", "cancelled", "closed"]);
 
 const STATUS_ORDER = ["queued", "running", "completed", "blocked", "failed", "cancelled", "closed"];
 
@@ -17,7 +21,11 @@ export function buildSubagentLifecycleReminder(
   snapshots: SubagentThreadSnapshot[],
   toolResults: ToolResult[],
 ): string | undefined {
-  const subagents = collectUniqueSubagents(snapshots, toolResults);
+  // Closed children whose result already reached parent context carry no
+  // remaining information — pruning them keeps the reminder from growing by
+  // one line per finished child forever (design §3.3).
+  const subagents = collectUniqueSubagents(snapshots, toolResults)
+    .filter((subagent) => !(subagent.status === "closed" && subagent.delivered));
   if (subagents.length === 0) return undefined;
 
   const counts = statusCounts(subagents);
@@ -58,6 +66,7 @@ function collectUniqueSubagents(
       status: snapshot.status,
       summary: snapshot.summary,
       error: snapshot.error,
+      delivered: snapshot.deliveredAt !== undefined,
     });
   }
   return [...byId.values()].sort((a, b) => a.agentId.localeCompare(b.agentId));
@@ -109,7 +118,10 @@ function formatSubagentLine(subagent: LifecycleSubagent): string {
   const label = subagent.nickname || subagent.agentName || subagent.agentId;
   const role = [subagent.agentName, subagent.category ? `/${subagent.category}` : ""].join("") || "default";
   const status = subagent.status || "unknown";
-  const note = subagent.error || subagent.summary;
+  // A delivered final result already reached parent context in full — repeat
+  // only the id and status, never the summary again (design §3.3).
+  const demoted = subagent.delivered && !!subagent.status && FINAL_STATUSES.has(subagent.status);
+  const note = demoted ? undefined : subagent.error || subagent.summary;
   const suffix = note ? `; note=${truncateForReminder(oneLine(note))}` : "";
   return `  - ${label} (${role}) agent_id=${subagent.agentId} status=${status}${suffix}`;
 }

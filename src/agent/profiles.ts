@@ -27,6 +27,8 @@ export interface AgentProfile {
   category?: string;
   tools: AgentProfileTools;
   maxTurns?: number;
+  /** Optional per-child token cap declared by the profile (may only lower the runtime default). */
+  maxTokens?: number;
   approval: AgentProfileApproval;
   nicknameCandidates?: string[];
   prompt: string;
@@ -77,7 +79,16 @@ const READONLY_PRESET = [
   "todo_write",
 ];
 
-const SUBAGENT_DENY_TOOLS = new Set(["subagent", "task", "spawn_agent", "wait_agent", "send_input", "close_agent"]);
+const SUBAGENT_DENY_TOOLS = new Set([
+  "subagent",
+  "task",
+  "spawn_agent",
+  "wait_agent",
+  "send_input",
+  "close_agent",
+  "list_agents",
+  "agent_team",
+]);
 
 const DEFAULT_NICKNAME_CANDIDATES = [
   "Ada",
@@ -240,6 +251,17 @@ export function assignAgentNickname(profile: AgentProfile, activeNicknames: Iter
   return pool[randomInt(pool.length)];
 }
 
+/**
+ * Tool-effect gate as a function of the profile's mode (design §8): readonly
+ * children keep the read-only fence; write_worktree children may edit, write,
+ * and run bash — inside their isolated worktree, never the parent tree.
+ */
+export function allowedToolEffectsForMode(mode: AgentProfileMode): Set<string> {
+  return mode === "write_worktree"
+    ? new Set(["read", "write_direct", "write_patch", "unknown"])
+    : new Set(["read"]);
+}
+
 export function selectToolsForAgentProfile(
   tools: ToolRegistryEntry[],
   profile: AgentProfile,
@@ -268,13 +290,14 @@ export function validateAgentProfileTools(
 ): AgentProfileDiagnostic[] {
   const available = new Map(tools.map((tool) => [tool.name, tool]));
   const explicitInclude = new Set(profile.tools.include ?? []);
+  const allowedEffects = allowedToolEffectsForMode(profile.mode);
   const diagnostics: AgentProfileDiagnostic[] = [];
   for (const name of requestedToolNames(profile)) {
     if (SUBAGENT_DENY_TOOLS.has(name)) {
       diagnostics.push({
         severity: "error",
         toolName: name,
-        message: `Tool "${name}" is not allowed inside subagents because recursive delegation is disabled in Phase 1.`,
+        message: `Tool "${name}" is not allowed inside subagents because recursive delegation is disabled.`,
       });
       continue;
     }
@@ -292,13 +315,14 @@ export function validateAgentProfileTools(
     }
 
     const effect = tool.effect ?? "unknown";
-    if (effect !== "read") {
+    if (!allowedEffects.has(effect)) {
       diagnostics.push({
         severity: "error",
         toolName: name,
-        message: `Tool "${name}" has effect "${effect}" and cannot run in Phase 1 read-only subagents.`,
+        message: `Tool "${name}" has effect "${effect}" and cannot run in ${profile.mode} subagents.`,
       });
-    } else if (approval === "disabled" && tool.requiresApproval) {
+    } else if (profile.mode === "readonly" && approval === "disabled" && tool.requiresApproval) {
+      // write_worktree children use the worktree approval policy instead.
       diagnostics.push({
         severity: "warning",
         toolName: name,
@@ -391,6 +415,7 @@ function parseAgentProfileFile(raw: string, source: AgentProfileSource, filePath
     category: stringValue(frontmatter.category),
     tools: toolsValue(frontmatter.tools),
     maxTurns: numberValue(frontmatter.maxTurns),
+    maxTokens: numberValue(frontmatter.maxTokens),
     approval: approvalValue(frontmatter.approval),
     nicknameCandidates: stringArray(frontmatter.nicknameCandidates) ?? stringArray(frontmatter.nicknames),
     prompt: parsed.body.trim(),

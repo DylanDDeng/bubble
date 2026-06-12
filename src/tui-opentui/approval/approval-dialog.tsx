@@ -130,6 +130,8 @@ function dialogTitle(req: ApprovalRequest): string {
       return "Bash command";
     case "lsp":
       return "Language server operation";
+    case "agent_profile":
+      return "Project agent profile";
   }
 }
 
@@ -145,6 +147,8 @@ function dialogQuestion(req: ApprovalRequest): string {
       return "Do you want to proceed?";
     case "lsp":
       return `Do you want to run ${req.operation} on ${basename(req.path)}?`;
+    case "agent_profile":
+      return `Trust the repository profile "${req.name}" to drive a subagent? It is remembered for this session until the file changes.`;
   }
 }
 
@@ -163,7 +167,24 @@ function RequestPreview({ request }: { request: ApprovalRequest }) {
       return <DiffView diff={request.diff} />;
     case "write":
       return <WritePreview path={request.path} content={request.content} />;
+    case "agent_profile":
+      return <AgentProfilePreview path={request.path} promptPreview={request.promptPreview} />;
   }
+}
+
+function AgentProfilePreview({ path, promptPreview }: { path: string; promptPreview: string }) {
+  const theme = useTheme();
+  return (
+    <box style={{ flexDirection: "column" }}>
+      <text fg={theme.muted}>{compressHome(path)}</text>
+      <text>{promptPreview}</text>
+      <box style={{ marginTop: 1 }}>
+        <text fg={theme.warning}>
+          This prompt comes from the repository's .bubble/agents and will drive a subagent.
+        </text>
+      </box>
+    </box>
+  );
 }
 
 function BashPreview({ command, cwd }: { command: string; cwd: string }) {

@@ -410,6 +410,7 @@ async function main() {
     memoryPrompt,
     fileStateTracker,
     agentCategories: userConfig.getAgentCategories(),
+    subagents: userConfig.getSubagents(),
     providerFactory: createProviderForRoute,
     externalHooks: hookController,
   });

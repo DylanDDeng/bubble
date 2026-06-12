@@ -1,4 +1,5 @@
 import { getAvailableThinkingLevels, normalizeThinkingLevel } from "./provider-transform.js";
+import { RateLimitError, type RateLimitPolicy } from "./network/errors.js";
 import { isProviderTransportError, normalizeProviderNetworkError, providerFetch } from "./network/provider-transport.js";
 import {
   computeRetryDelayMs,
@@ -89,7 +90,7 @@ interface AnthropicStreamBlockState {
 export function createAnthropicMessagesProvider(options: AnthropicProviderOptions): Provider {
   async function* streamChat(
     messages: ProviderMessage[],
-    chatOptions: { model: string; tools?: ToolDefinition[]; toolChoice?: ToolChoiceMode; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal },
+    chatOptions: { model: string; tools?: ToolDefinition[]; toolChoice?: ToolChoiceMode; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal; rateLimitPolicy?: RateLimitPolicy },
   ): AsyncIterable<StreamChunk> {
     const body = buildAnthropicRequest(options, messages, {
       model: chatOptions.model,
@@ -106,6 +107,7 @@ export function createAnthropicMessagesProvider(options: AnthropicProviderOption
       method: "POST",
       body: JSON.stringify(body),
       signal: chatOptions.abortSignal,
+      rateLimitPolicy: chatOptions.rateLimitPolicy,
     });
 
     yield* translateAnthropicStream(events);
@@ -495,6 +497,7 @@ async function* streamAnthropicEventsWithRetry(
     method: "POST";
     body: string;
     signal?: AbortSignal;
+    rateLimitPolicy?: RateLimitPolicy;
   },
 ): AsyncIterable<Record<string, unknown>> {
   const maxRetries = getProviderMaxRetries();
@@ -538,6 +541,7 @@ async function fetchAnthropicResponseWithRetry(
     method: "POST";
     body: string;
     signal?: AbortSignal;
+    rateLimitPolicy?: RateLimitPolicy;
   },
 ): Promise<Response> {
   const maxRetries = getProviderMaxRetries();
@@ -566,6 +570,29 @@ async function fetchAnthropicResponseWithRetry(
     if (response.ok) return response;
 
     const detail = await readAnthropicErrorDetail(response);
+
+    // Rate-limit contract (design §4.5): under "defer" the transport performs
+    // no 429 backoff and throws the typed error immediately; under "handle"
+    // an exhausted 429 retry budget still surfaces as the typed error so the
+    // caller can recognize it without string matching.
+    if (response.status === 429) {
+      const retryAfterMs = retryAfterMsFromResponse(response);
+      if (request.rateLimitPolicy === "defer") {
+        throw new RateLimitError(`Anthropic Messages API rate limited (429): ${detail || response.statusText}`, {
+          status: 429,
+          retryAfterMs,
+        });
+      }
+      if (request.signal?.aborted || attempt >= maxRetries) {
+        throw new RateLimitError(`Anthropic Messages API rate limited (429) after ${attempt + 1} attempts: ${detail || response.statusText}`, {
+          status: 429,
+          retryAfterMs,
+        });
+      }
+      await sleepBeforeRetry(computeRetryDelayMs(attempt + 1, { retryAfterMs }), request.signal);
+      continue;
+    }
+
     const error = new Error(`Anthropic Messages API error ${response.status}: ${detail || response.statusText}`);
 
     if (request.signal?.aborted || attempt >= maxRetries || !isRetryableAnthropicHttpError(response.status, detail)) {

@@ -10331,6 +10331,18 @@ function getApprovalPanelMeta(request: ApprovalRequest) {
     };
   }
 
+  if (request.type === "agent_profile") {
+    return {
+      icon: "@",
+      title: `Trust project agent profile "${request.name}"`,
+      subtitle: "from .bubble/agents — its prompt will drive a subagent",
+      preview: `${shortCwd(request.path)}\n${request.promptPreview}`,
+      previewHeight: 8,
+      previewColor: theme.toolText,
+      path: request.path,
+    };
+  }
+
   const path = shortCwd(request.path);
   if (request.type === "edit") {
     return {
@@ -10448,6 +10460,8 @@ function displayToolName(name: string): string {
     wait_agent: "WaitAgent",
     send_input: "SendInput",
     close_agent: "CloseAgent",
+    list_agents: "ListAgents",
+    agent_team: "AgentTeam",
     task: "Task",
     todo: "Todo",
     question: "Questions",
@@ -10468,6 +10482,12 @@ function toolHeader(tool: DisplayToolCall): string {
   if (tool.name === "wait_agent" || tool.name === "send_input" || tool.name === "close_agent") {
     const agentId = args.agent_id ?? (Array.isArray(args.agent_ids) ? `${args.agent_ids.length} agents` : undefined);
     return agentId ? `(${truncate(String(agentId), 64)})` : "";
+  }
+  if (tool.name === "agent_team") {
+    const items = Array.isArray(args.items) ? `${args.items.length} items` : "";
+    const description = typeof args.description === "string" ? args.description : "";
+    const label = [description, items].filter(Boolean).join(", ");
+    return label ? `(${truncate(label, 64)})` : "";
   }
   const value = args.path ?? args.command ?? args.pattern ?? args.url ?? args.query ?? toolPath(tool);
   return value ? `(${truncate(String(value).replace(/\n/g, " "), 64)})` : "";

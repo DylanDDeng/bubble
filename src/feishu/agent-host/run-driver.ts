@@ -177,6 +177,7 @@ export class RunDriver {
       memoryPrompt,
       fileStateTracker,
       agentCategories: this.opts.deps.userConfig.getAgentCategories(),
+      subagents: this.opts.deps.userConfig.getSubagents(),
       providerFactory: (route) => this.opts.deps.createProviderForRoute(route, promptCacheKey),
       externalHooks: hookController,
     });
