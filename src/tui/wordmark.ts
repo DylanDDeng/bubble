@@ -42,6 +42,30 @@ const LOWER_B: BubbleWordmarkGlyph = {
   ],
 };
 
+// Pixel cat mascot, drawn on the same half-block pixel grid as the letters:
+// pointy ears, 2x2-pixel eyes, tiny mouth, round chin (10x14 pixels). It is
+// stacked above the wordmark (icon-over-name lockup) rather than inlined, so
+// its solid fill doesn't compete with the thin letter strokes.
+const CAT_LINES: readonly string[] = [
+  " █▄    ▄█ ",
+  " ███▄▄███ ",
+  "██████████",
+  "█  ████  █",
+  "████▀▀████",
+  "██████████",
+  " ▀██████▀ ",
+];
+
+export const BUBBLE_CAT: BubbleWordmarkLine[] = CAT_LINES.map((text) => ({
+  text,
+  tone: "brand",
+}));
+
+export const BUBBLE_CAT_LARGE: BubbleWordmarkLine[] = CAT_LINES.map((text) => ({
+  text: text.split("").map((ch) => ch + ch).join(""),
+  tone: "brand",
+}));
+
 const GLYPHS: Record<string, BubbleWordmarkGlyph> = {
   u: {
     tone: "ink",
@@ -201,8 +225,17 @@ export function bubbleWordmarkMaxWidth(lines = BUBBLE_WORDMARK) {
   return Math.max(...lines.map((line) => bubbleWordmarkLineText(line).length));
 }
 
+const LOGO_GAP: BubbleWordmarkLine = { text: "", tone: "caption" };
+
+// Icon-over-name lockup: pixel cat centered above the wordmark. Both render
+// sites center every line independently, which is what stacks the cat over
+// the text without any per-line padding here.
 export function bubbleWordmarkForWidth(width: number) {
-  if (width >= bubbleWordmarkMaxWidth(BUBBLE_WORDMARK_LARGE) + 4) return BUBBLE_WORDMARK_LARGE;
-  if (width >= bubbleWordmarkMaxWidth() + 4) return BUBBLE_WORDMARK;
+  if (width >= bubbleWordmarkMaxWidth(BUBBLE_WORDMARK_LARGE) + 4) {
+    return [...BUBBLE_CAT_LARGE, LOGO_GAP, ...BUBBLE_WORDMARK_LARGE];
+  }
+  if (width >= bubbleWordmarkMaxWidth() + 4) {
+    return [...BUBBLE_CAT, LOGO_GAP, ...BUBBLE_WORDMARK];
+  }
   return BUBBLE_COMPACT_WORDMARK;
 }
