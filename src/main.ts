@@ -47,9 +47,10 @@ import {
   traceEvent,
 } from "./debug-trace.js";
 
-// The Ink renderer is the default; BUBBLE_TUI=opentui is a one-release escape
-// hatch back to the legacy OpenTUI implementation while the migration settles.
-const USE_OPENTUI = process.env.BUBBLE_TUI === "opentui";
+// OpenTUI is the default renderer. The React Ink implementation (alt-screen
+// viewport, src/tui-ink) is feature-complete but still maturing — opt in with
+// BUBBLE_TUI=ink.
+const USE_OPENTUI = process.env.BUBBLE_TUI !== "ink";
 
 type TerminalTheme = "light" | "dark";
 
