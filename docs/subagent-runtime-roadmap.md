@@ -1,5 +1,10 @@
 # Bubble Subagent Runtime Roadmap
 
+> **Superseded:** the planning sections of this document are superseded by
+> [`subagent-runtime-design.md`](./subagent-runtime-design.md) (review-hardened
+> design, 2026-06-12). This file is kept for the original decision record and
+> baseline notes.
+
 ## Decision
 
 Build a stronger subagent runtime before building a visible multi-agent team
