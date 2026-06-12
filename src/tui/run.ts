@@ -1455,7 +1455,13 @@ function OpenTuiApp(props: {
   };
 
   const cycleMode = () => {
-    if (picker || pendingPlan() || isRunning()) return false;
+    // Mode switching is intentionally allowed while the agent is running:
+    // Agent.setMode() is safe mid-run and the approval controller reads the
+    // live mode on every request, so flipping to bypass (or into plan) takes
+    // effect from the very next tool call — no need to wait for the turn to
+    // finish. Only pickers and the plan-approval dialog still block it,
+    // because those surfaces own the keyboard.
+    if (picker || pendingPlan()) return false;
     const next = getNextPermissionMode(props.agent.mode);
     props.agent.setMode(next);
     setMode(next);
