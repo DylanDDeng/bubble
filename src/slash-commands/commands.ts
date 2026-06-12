@@ -457,6 +457,98 @@ const builtinSlashCommandEntries: SlashCommand[] = [
     },
   },
   {
+    name: "rewind",
+    description: "Rewind conversation and/or file edits to before an earlier message. Usage: /rewind [n] [--code|--chat]",
+    async handler(args, ctx) {
+      const session = ctx.sessionManager;
+      if (!session) {
+        return "Rewind requires an active session.";
+      }
+      const turns = session.listUserTurns();
+      if (turns.length === 0) {
+        return "Nothing to rewind: no user messages in this session.";
+      }
+
+      const tokens = args.trim().split(/\s+/).filter(Boolean);
+      const flags = tokens.filter((token) => token.startsWith("--"));
+      const positional = tokens.filter((token) => !token.startsWith("--"));
+      const checkpoints = session.getCheckpoints();
+
+      if (positional.length === 0) {
+        if (ctx.openRewindPicker) {
+          ctx.openRewindPicker();
+          return;
+        }
+        const lines = ["Rewind points (oldest first):", ""];
+        turns.forEach((turn, index) => {
+          const time = new Date(turn.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+          const files = checkpoints.filesTouchedAt(turn.id).length;
+          const fileNote = files > 0 ? `  [${files} file${files === 1 ? "" : "s"} changed]` : "";
+          lines.push(`  ${index + 1}. ${time}  ${turn.preview}${fileNote}`);
+        });
+        lines.push(
+          "",
+          "Usage:",
+          "  /rewind <n>         restore conversation AND files to just before message n",
+          "  /rewind <n> --chat  conversation only",
+          "  /rewind <n> --code  files only",
+          "",
+          "Note: only edits made by the edit/write tools are tracked; changes from",
+          "bash commands are not. Checkpoints complement git, they don't replace it.",
+        );
+        return lines.join("\n");
+      }
+
+      const n = Number(positional[0]);
+      if (!Number.isInteger(n) || n < 1 || n > turns.length) {
+        return `Invalid rewind point "${positional[0]}". Run /rewind to list points (1-${turns.length}).`;
+      }
+      const target = turns[n - 1];
+      const codeOnly = flags.includes("--code");
+      const chatOnly = flags.includes("--chat") || flags.includes("--conversation");
+      if (codeOnly && chatOnly) {
+        return "Pick at most one of --code / --chat.";
+      }
+
+      // The "⏪" prefix is recognized by the TUIs: they rebuild the visible
+      // transcript from the rewound agent.messages before showing this text.
+      const lines: string[] = [
+        codeOnly
+          ? `Files restored to just before: ${target.preview}`
+          : `⏪ Rewound to before: ${target.preview}`,
+      ];
+
+      if (!chatOnly) {
+        const restore = await checkpoints.restoreTo(target.id);
+        const touched = restore.restored.length + restore.deleted.length;
+        if (touched === 0 && restore.failed.length === 0) {
+          lines.push("Files: no tracked edits to undo.");
+        } else {
+          for (const file of restore.restored) lines.push(`Restored ${file}`);
+          for (const file of restore.deleted) lines.push(`Deleted ${file} (created after this point)`);
+          for (const file of restore.failed) lines.push(`FAILED to restore ${file}`);
+        }
+      }
+
+      if (!codeOnly) {
+        session.rewindToEntry(target.id);
+        const head = ctx.agent.messages.filter((m) => m.role === "system" || m.role === "meta");
+        ctx.agent.messages = [...head, ...session.getMessages()];
+        ctx.agent.setTodos(session.getTodos());
+        ctx.agent.resetContextUsageAnchor();
+
+        if (ctx.fillComposer) {
+          // Put the rewound message back into the input box for re-editing.
+          ctx.fillComposer(target.text);
+        } else {
+          lines.push("", "Rewound message (copy to re-edit):", target.text);
+        }
+      }
+
+      return lines.join("\n");
+    },
+  },
+  {
     name: "session",
     description: "Show current session information",
     async handler(args, ctx) {

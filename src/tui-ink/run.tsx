@@ -1,6 +1,5 @@
 import { render } from "ink";
 import React from "react";
-import chalk from "chalk";
 import type { Agent } from "../agent.js";
 import type { CliArgs } from "../cli.js";
 import type { SessionManager } from "../session.js";
@@ -8,6 +7,14 @@ import type { Provider } from "../types.js";
 import type { ProviderRegistry } from "../provider-registry.js";
 import type { SkillRegistry } from "../skills/registry.js";
 import { App, type ApprovalHandlerRef, type ExitSummary, type PlanHandlerRef } from "./app.js";
+import { MOUSE_REPORTING_DISABLE } from "./terminal-mouse.js";
+
+// DECSET 1007: terminals translate the mouse wheel into Up/Down arrow keys
+// while the alternate screen is active. Mouse reporting stays OFF on purpose
+// so plain drag-select and copy keep their native terminal behavior; the
+// composer classifies wheel-synthesized arrows vs real key presses.
+const ALTERNATE_SCROLL_ENABLE = "\x1b[?1007h";
+const ALTERNATE_SCROLL_DISABLE = "\x1b[?1007l";
 import { warmHighlighter } from "./code-highlight.js";
 import type { BashAllowlist } from "../approval/session-cache.js";
 import type { SettingsManager } from "../permissions/settings.js";
@@ -15,6 +22,7 @@ import type { McpManager } from "../mcp/manager.js";
 import type { LspService } from "../lsp/index.js";
 import type { QuestionController } from "../question/index.js";
 import type { MemoryScope } from "../memory/index.js";
+import type { ExternalHookController } from "../hooks/controller.js";
 import type { ResolvedTheme, ThemeMode } from "./theme.js";
 
 export interface RunTuiOptions {
@@ -38,14 +46,56 @@ export interface RunTuiOptions {
   runMemorySummary?: (scope?: MemoryScope) => Promise<string>;
   runMemoryRefresh?: (scope?: MemoryScope) => Promise<string>;
   bypassEnabled?: boolean;
+  /** One-line "update available" notice rendered under the welcome banner version. */
+  updateNotice?: string;
+  /** External lifecycle hooks, threaded into slash-command execution. */
+  hookController?: ExternalHookController;
 }
 
-export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions = {}) {
+/**
+ * Best-effort terminal restore for abnormal exits. DECSET mouse modes are
+ * global terminal state — if the process dies without disabling them, the
+ * user's shell receives \x1b[<35;… garbage on every mouse move. The alt-screen
+ * and cursor writes are defensive duplicates of Ink's own teardown (idempotent
+ * when Ink already ran; load-bearing when it didn't).
+ */
+function restoreTerminal() {
+  if (!process.stdout.isTTY) return;
+  try {
+    process.stdout.write(
+      ALTERNATE_SCROLL_DISABLE + MOUSE_REPORTING_DISABLE + "\x1b[?1049l\x1b[?25h",
+    );
+  } catch {
+    // stdout may already be destroyed during shutdown
+  }
+}
+
+export async function runTui(
+  agent: Agent,
+  args: CliArgs,
+  options: RunTuiOptions = {},
+): Promise<ExitSummary | undefined> {
   // Kick off shiki load before the first code block is rendered. Fire and
   // forget — CodeBlock's lazy init falls back to raw lines if this isn't ready
   // yet, so callers don't need to await it.
   warmHighlighter();
   let exitSummary: ExitSummary | undefined;
+  const onFatalError = (err: unknown) => {
+    restoreTerminal();
+    const detail = err instanceof Error ? err.stack ?? err.message : String(err);
+    try {
+      process.stderr.write(`${detail}\n`);
+    } catch {
+      // nothing left to report to
+    }
+    process.exit(1);
+  };
+  const onSigterm = () => {
+    restoreTerminal();
+    process.exit(143);
+  };
+  process.on("uncaughtException", onFatalError);
+  process.on("SIGTERM", onSigterm);
   const instance = render(
     <App
       agent={agent}
@@ -70,6 +120,8 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
       runMemorySummary={options.runMemorySummary}
       runMemoryRefresh={options.runMemoryRefresh}
       bypassEnabled={options.bypassEnabled}
+      updateNotice={options.updateNotice}
+      hookController={options.hookController}
       onExit={(summary) => {
         // The app already called useApp().exit() inside requestExit, which
         // triggers Ink's own unmount + TTY restore. waitUntilExit() below is
@@ -88,35 +140,44 @@ export async function runTui(agent: Agent, args: CliArgs, options: RunTuiOptions
       exitOnCtrlC: false,
       kittyKeyboard: {
         mode: "enabled",
-        flags: ["disambiguateEscapeCodes"],
+        // reportEventTypes lets the composer tell real arrow-key presses
+        // (kitty-enhanced, carry eventType) apart from the bare arrow
+        // sequences terminals synthesize for wheel scrolling in alternate
+        // screen — see the classifier in input-box.tsx.
+        flags: ["disambiguateEscapeCodes", "reportEventTypes"],
       },
+      // The whole point of the Ink migration: render into the 1049 alternate
+      // screen so streaming repaints never touch the user's shell scrollback.
+      // Ink degrades this to false automatically when stdout is not a TTY.
+      alternateScreen: true,
     },
   );
-  await instance.waitUntilExit();
+  // Enable alternate-scroll after render() so it follows alt-screen entry:
+  // the wheel arrives as Up/Down arrows, while plain drag-select and copy
+  // keep their native terminal behavior (no mouse reporting).
+  if (process.stdout.isTTY) {
+    process.stdout.write(ALTERNATE_SCROLL_ENABLE);
+  }
+  try {
+    await instance.waitUntilExit();
+  } finally {
+    // Reset scroll translation before anything is printed to the primary
+    // screen; Ink has already left the alt screen by the time
+    // waitUntilExit() resolves.
+    if (process.stdout.isTTY) {
+      process.stdout.write(ALTERNATE_SCROLL_DISABLE);
+    }
+    process.off("uncaughtException", onFatalError);
+    process.off("SIGTERM", onSigterm);
+  }
   // zsh's PROMPT_SP prints a reverse-video `%` if the previous program left
   // the cursor mid-line. Ink's interactive teardown (log-update.done) doesn't
   // emit a trailing newline, so mirror Ink's non-interactive branch and align
   // the cursor to column 0 before handing control back to the shell.
   if (process.stdout.isTTY) {
     process.stdout.write("\n");
-    if (exitSummary) {
-      process.stdout.write(formatExitSummary(exitSummary) + "\n");
-    }
   }
-}
-
-function formatExitSummary(summary: ExitSummary): string {
-  const label = "Total duration:";
-  return chalk.dim(`${label} ${formatWallMs(summary.wallMs)}`);
-}
-
-function formatWallMs(ms: number): string {
-  const totalSeconds = Math.max(0, Math.round(ms / 1000));
-  if (totalSeconds < 60) return `${totalSeconds}s`;
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  if (minutes < 60) return `${minutes}m ${seconds}s`;
-  const hours = Math.floor(minutes / 60);
-  const minutesRest = minutes % 60;
-  return `${hours}h ${minutesRest}m ${seconds}s`;
+  // The exit summary is printed by main.ts (single print site, after the alt
+  // screen has been left, so it lands in the real shell scrollback).
+  return exitSummary;
 }

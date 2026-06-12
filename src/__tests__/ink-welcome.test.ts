@@ -72,21 +72,28 @@ describe("Ink welcome banner", () => {
     const output = renderToString(
       React.createElement(WelcomeBanner, {
         terminalColumns: 100,
-        modelLabel: "deepseek-v4-flash",
-        cwd: "~/test-glm-5",
         tips: ["Ready with deepseek-v4-flash", "Type @ to reference a file", "Type / for commands and skills"],
-        skillsCount: 78,
-        mcpConnectedCount: 1,
-        mcpTotalCount: 1,
-        hasAgentsFile: false,
+        cwd: "~/coworker",
+        providerId: "openai",
+        modelLabel: "gpt-5.5",
+        thinkingLabel: "xhigh",
       }),
       { columns: 100 },
     );
 
-    expect(output).toContain("█▀█");
+    // Adaptive sizing: at 100 columns the banner renders the large
+    // pixel-block wordmark (dd65dfb parity).
+    expect(output).toContain("██▀▀██");
     expect(output).toContain("TIP:");
-    expect(output).toContain("Skills (78)");
-    expect(output).toContain("MCPs (1)");
-    expect(output).toContain("AGENTS.md");
+    // Path and provider/model render under the banner: path and the
+    // provider · model group are separated by a gap, and the thinking level
+    // stays attached to the model as one unit.
+    expect(output).toContain("~/coworker");
+    expect(output).toContain("openai · gpt-5.5 xhigh");
+    // Keyboard hints and Skills/MCPs/AGENTS.md status chrome stay removed.
+    expect(output).not.toContain("shift+tab");
+    expect(output).not.toContain("Skills");
+    expect(output).not.toContain("MCPs");
+    expect(output).not.toContain("AGENTS.md");
   });
 });

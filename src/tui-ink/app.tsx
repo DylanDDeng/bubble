@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
-import { AgentAbortError, type Agent } from "../agent.js";
+import { AgentAbortError, INTERRUPTED_ASSISTANT_CONTENT, type Agent } from "../agent.js";
 import { isHiddenToolMetadata } from "../agent/discovery-barrier.js";
 import type { CliArgs } from "../cli.js";
 import type { SessionManager } from "../session.js";
@@ -22,12 +22,16 @@ import {
   contentFromParts,
   latestCompactionSummary,
   nextDisplayMessageKey,
+  setUserInputStatus,
   snapshotDisplayParts,
+  stripInterruptedAssistantMarker,
   type DisplayMessage,
   type DisplayMessagePart,
   type DisplayToolCall,
+  type UserInputStatus,
   toolCallsFromParts,
 } from "./display-history.js";
+import { AgentRunInputQueue } from "../agent/input-controller.js";
 import type { PendingApprovalHint } from "./message-list.js";
 import { paletteFor, ThemeProvider, useTheme, type ResolvedTheme, type Theme, type ThemeMode } from "./theme.js";
 import { ModelPicker, ProviderPicker, KeyPicker, SkillPicker } from "./model-picker.js";
@@ -55,11 +59,11 @@ import type { QuestionAnswer, QuestionController, QuestionRequest } from "../que
 import type { MemoryScope } from "../memory/index.js";
 import { QuestionDialog } from "./question-dialog.js";
 import { FeedbackDialog } from "./feedback-dialog.js";
+import type { ExternalHookController } from "../hooks/controller.js";
 import { collectFeedback } from "../feedback/collect.js";
 import { hasTerminalMouseSequence } from "./terminal-mouse.js";
+import { TranscriptViewport, type TranscriptViewportHandle } from "./transcript-viewport.js";
 import os from "node:os";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
 
 export interface PlanHandlerRef {
   current?: (plan: string) => Promise<PlanDecision>;
@@ -93,6 +97,8 @@ interface AppProps {
   runMemoryRefresh?: (scope?: MemoryScope) => Promise<string>;
   /** Whether the bypassPermissions mode is reachable via Shift+Tab cycling. */
   bypassEnabled?: boolean;
+  updateNotice?: string;
+  hookController?: ExternalHookController;
   onExit?: (summary: ExitSummary) => void;
 }
 
@@ -160,13 +166,31 @@ function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] 
           });
         }
       }
-      result.push({
-        key: nextDisplayMessageKey("asst"),
-        role: "assistant",
-        content: m.content,
-        reasoning: m.reasoning || undefined,
-        toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-      });
+      // An aborted assistant message carries the model-facing interruption
+      // note in its content. Render only what the assistant actually said
+      // (partial streamed text, if any) plus a dedicated interrupt row —
+      // never the note itself, which reads like a leaked system prompt.
+      const interrupted = (m as { error?: { aborted?: boolean } }).error?.aborted === true;
+      const content = interrupted
+        ? stripInterruptedAssistantMarker(m.content, INTERRUPTED_ASSISTANT_CONTENT)
+        : m.content;
+      if (content || m.reasoning || toolCalls.length > 0) {
+        result.push({
+          key: nextDisplayMessageKey("asst"),
+          role: "assistant",
+          content,
+          reasoning: m.reasoning || undefined,
+          toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+        });
+      }
+      if (interrupted) {
+        result.push({
+          key: nextDisplayMessageKey("asst"),
+          role: "assistant",
+          content: "Interrupted by user",
+          syntheticKind: "ui_interrupt",
+        });
+      }
     }
   }
   return result;
@@ -256,121 +280,14 @@ function withMessageKey(message: DisplayMessage): DisplayMessage {
   return { ...message, key: nextDisplayMessageKey(prefix) };
 }
 
-// Keep the live (non-Static) region small so non-GPU terminals (xterm.js DOM
-// renderer, ssh into a basic terminal, tmux without GPU) don't flicker when
-// Ink re-reconciles the streaming block on every token. Flushing earlier and
-// in smaller chunks shifts most of the answer into terminal scrollback, where
-// it's a one-time write that doesn't get re-rendered.
-const STREAMING_STATIC_FLUSH_MIN_CHARS = 600;
-const STREAMING_STATIC_FLUSH_TARGET_CHARS = 400;
-const STREAMING_STATIC_FLUSH_MIN_TAIL = 120;
+// Batch streaming text deltas before committing them to React state. Without
+// <Static>, every commit re-renders the full-screen frame; per-token commits
+// would make Yoga re-lay-out the transcript for every few bytes of output.
+// 40ms keeps perceived latency invisible while capping layout work at 25fps.
+const STREAMING_FLUSH_INTERVAL_MS = 40;
 
-/**
- * True iff `prefix` ends inside an open ```/~~~ fenced code block. Splitting
- * the streaming buffer at such a point would let the flushed half render
- * without its closing fence — `MarkdownContent` would then treat the body as
- * plain prose and the trailing half would render as an isolated code block
- * with no opener. Fence delimiters of different families don't close each
- * other (a `~~~` inside a ``` block is just text). We use a permissive
- * "line starts with three or more of the same char" rule, ignoring the info
- * string — that's enough to spot when we're mid-block.
- */
-function endsInsideUnclosedCodeFence(prefix: string): boolean {
-  let openMarker: "`" | "~" | null = null;
-  for (const rawLine of prefix.split("\n")) {
-    const line = rawLine.replace(/^ {0,3}/, "");
-    if (openMarker === null) {
-      if (line.startsWith("```")) openMarker = "`";
-      else if (line.startsWith("~~~")) openMarker = "~";
-    } else if (line.startsWith(openMarker.repeat(3))) {
-      openMarker = null;
-    }
-  }
-  return openMarker !== null;
-}
 
-function findStreamingStaticFlushIndex(content: string): number {
-  if (content.length < STREAMING_STATIC_FLUSH_MIN_CHARS) return -1;
-  const upper = Math.min(
-    STREAMING_STATIC_FLUSH_TARGET_CHARS,
-    content.length - STREAMING_STATIC_FLUSH_MIN_TAIL,
-  );
-  if (upper <= 0) return -1;
-  const search = content.slice(0, upper);
-  const paragraphBreak = search.lastIndexOf("\n\n");
-  if (paragraphBreak >= STREAMING_STATIC_FLUSH_TARGET_CHARS / 2) {
-    const splitIndex = paragraphBreak + 2;
-    if (!endsInsideUnclosedCodeFence(content.slice(0, splitIndex))) {
-      return splitIndex;
-    }
-  }
-  const lineBreak = search.lastIndexOf("\n");
-  if (lineBreak >= STREAMING_STATIC_FLUSH_TARGET_CHARS / 2) {
-    const splitIndex = lineBreak + 1;
-    if (!endsInsideUnclosedCodeFence(content.slice(0, splitIndex))) {
-      return splitIndex;
-    }
-  }
-  // Inside an open code fence: hold off flushing until the closing fence
-  // arrives. The live region grows a bit, but Markdown rendering stays correct.
-  return -1;
-}
-
-function cloneDisplayPart(part: DisplayMessagePart): DisplayMessagePart {
-  if (part.type === "text") {
-    return { type: "text", content: part.content };
-  }
-  return {
-    type: "tools",
-    toolCalls: part.toolCalls.map((toolCall) => ({
-      ...toolCall,
-      args: { ...toolCall.args },
-    })),
-  };
-}
-
-function splitDisplayPartsAtTextOffset(
-  parts: DisplayMessagePart[],
-  offset: number,
-): { flushedParts: DisplayMessagePart[]; remainingParts: DisplayMessagePart[] } {
-  const flushedParts: DisplayMessagePart[] = [];
-  const remainingParts: DisplayMessagePart[] = [];
-  let remainingOffset = Math.max(0, offset);
-  let reachedTail = false;
-
-  for (const part of parts) {
-    if (part.type === "text") {
-      if (!reachedTail && remainingOffset >= part.content.length) {
-        if (part.content) flushedParts.push(cloneDisplayPart(part));
-        remainingOffset -= part.content.length;
-        continue;
-      }
-      if (!reachedTail && remainingOffset > 0) {
-        const head = part.content.slice(0, remainingOffset);
-        const tail = part.content.slice(remainingOffset);
-        if (head) flushedParts.push({ type: "text", content: head });
-        if (tail) remainingParts.push({ type: "text", content: tail });
-        remainingOffset = 0;
-        reachedTail = true;
-        continue;
-      }
-      remainingParts.push(cloneDisplayPart(part));
-      reachedTail = true;
-      continue;
-    }
-
-    if (!reachedTail && remainingOffset > 0) {
-      flushedParts.push(cloneDisplayPart(part));
-    } else {
-      remainingParts.push(cloneDisplayPart(part));
-      reachedTail = true;
-    }
-  }
-
-  return { flushedParts, remainingParts };
-}
-
-export function App({ agent, args, sessionManager, createProvider, registry, skillRegistry, planHandlerRef, approvalHandlerRef, questionController, bashAllowlist, settingsManager, lspService, mcpManager, themeMode: initialThemeMode, themeOverrides, detectedTheme, onThemeModeChange, flushMemory, runMemoryCompaction, runMemorySummary, runMemoryRefresh, bypassEnabled, onExit }: AppProps) {
+export function App({ agent, args, sessionManager, createProvider, registry, skillRegistry, planHandlerRef, approvalHandlerRef, questionController, bashAllowlist, settingsManager, lspService, mcpManager, themeMode: initialThemeMode, themeOverrides, detectedTheme, onThemeModeChange, flushMemory, runMemoryCompaction, runMemorySummary, runMemoryRefresh, bypassEnabled, updateNotice, hookController, onExit }: AppProps) {
   const [themeMode, setThemeMode] = useState<ThemeMode>(initialThemeMode ?? "auto");
   // `detectedTheme` is captured once at startup in main.ts. We keep it in state
   // so future re-detection (e.g. if a user runs `/theme auto` after switching
@@ -388,13 +305,11 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   const themeResolved: ResolvedTheme = themeMode === "auto" ? autoResolved : themeMode;
   const { exit } = useApp();
   const [messages, setMessages] = useState<DisplayMessage[]>(() => compactDisplayMessages(reconstructDisplayMessages(agent.messages)));
-  const [clearEpoch, setClearEpoch] = useState(0);
   const [isRunning, setIsRunning] = useState(false);
   const [streamingContent, setStreamingContent] = useState("");
   const [streamingReasoning, setStreamingReasoning] = useState("");
   const [streamingTools, setStreamingTools] = useState<DisplayToolCall[]>([]);
   const [streamingParts, setStreamingParts] = useState<DisplayMessagePart[]>([]);
-  const [usageTotals, setUsageTotals] = useState({ prompt: 0, completion: 0 });
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(agent.thinking);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(agent.mode);
   const [todos, setTodos] = useState<Todo[]>(() => agent.getTodos());
@@ -417,7 +332,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   const [keyProviderId, setKeyProviderId] = useState<string | null>(null);
   const [verboseTrace, setVerboseTrace] = useState(false);
   const startedWithVisibleHistoryRef = useRef(messages.some((message) => message.syntheticKind !== "ui_summary"));
-  const { columns: terminalColumns } = useTerminalSize();
+  const { columns: terminalColumns, rows: terminalRows } = useTerminalSize();
   const showWelcome = shouldShowWelcomeBanner({
     messages,
     startedWithVisibleHistory: startedWithVisibleHistoryRef.current,
@@ -425,26 +340,17 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   const activeAbortRef = useRef<AbortController | null>(null);
   const exitRequestedRef = useRef(false);
   const sessionStartRef = useRef<number>(Date.now());
-  const previousTerminalColumnsRef = useRef<number | null>(null);
-  useEffect(() => {
-    if (previousTerminalColumnsRef.current === null) {
-      previousTerminalColumnsRef.current = terminalColumns;
-      return;
-    }
-    if (previousTerminalColumnsRef.current === terminalColumns) return;
-    previousTerminalColumnsRef.current = terminalColumns;
-
-    // This follows Gemini CLI's normal terminal-buffer strategy: after a
-    // resize, the previous live Ink frame may have wrapped at the old width,
-    // so cursor-up based repaint can leave stale progress frames behind.
-    // Debounce resize storms, then clear and replay Static at the settled width.
-    const timer = setTimeout(() => {
-      if (exitRequestedRef.current) return;
-      process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
-      setClearEpoch((epoch) => epoch + 1);
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [terminalColumns]);
+  const viewportRef = useRef<TranscriptViewportHandle | null>(null);
+  // Steer/queue while the agent runs (parity with the OpenTUI composer):
+  // Enter steers the current run via the agent's input controller; Tab (or an
+  // ineligible input) queues for the next turn. Both render placeholder user
+  // rows whose badge tracks the input's lifecycle.
+  const inputControllerRef = useRef<AgentRunInputQueue | null>(null);
+  const pendingSteersRef = useRef(new Map<string, { displayKey: string }>());
+  const queuedInputsRef = useRef<Array<{ payload: SubmitPayload; displayKey?: string }>>([]);
+  const [pendingSteerCount, setPendingSteerCount] = useState(0);
+  const [queuedCount, setQueuedCount] = useState(0);
+  const nextRunIdRef = useRef(0);
   // Set true the moment /quit is invoked so we can hide dynamic UI (composer,
   // waiting indicator, footer) before Ink snapshots its final frame into the
   // shell scrollback. Without this, the last visible "> " input row stays
@@ -582,6 +488,15 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     return unsubscribe;
   }, [questionController]);
 
+  // An approval or question demands the user's attention: re-engage
+  // bottom-follow even if they had scrolled up (second force trigger
+  // documented in transcript-scroll.ts).
+  useEffect(() => {
+    if (pendingApproval || pendingQuestion) {
+      viewportRef.current?.forceScrollToBottom();
+    }
+  }, [pendingApproval, pendingQuestion]);
+
   const rebuildSystemPrompt = useCallback(
     (overrides?: { thinkingLevel?: ThinkingLevel; mode?: PermissionMode }) => {
       const modelParts = agent.model.includes(":")
@@ -608,8 +523,22 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       return;
     }
 
-    if (pendingPlan || pendingApproval || pendingQuestion || pendingFeedback) return;
+    // Mouse reporting is off (native drag-select/copy works directly), so no
+    // SGR wheel events arrive — wheel scrolling reaches the app as Up/Down
+    // arrows via the terminal's alternate-scroll mode, classified in the
+    // composer. Defensively drop any stray mouse report bytes.
     if (hasTerminalMouseSequence(input)) return;
+
+    if (!pickerMode && key.pageUp) {
+      viewportRef.current?.scrollPage("up");
+      return;
+    }
+    if (!pickerMode && key.pageDown) {
+      viewportRef.current?.scrollPage("down");
+      return;
+    }
+
+    if (pendingPlan || pendingApproval || pendingQuestion || pendingFeedback) return;
 
     if (key.ctrl && input === "o" && !pickerMode) {
       setVerboseTrace((v) => !v);
@@ -664,12 +593,37 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   }, [updateDisplayMessages]);
 
   const clearMessages = useCallback(() => {
-    // Static history is already written to terminal scrollback, so clearing
-    // React state alone would leave old rows visible.
-    process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
+    // The transcript lives entirely in React state now (alt-screen viewport,
+    // no terminal scrollback) — clearing state clears the screen. Writing
+    // \x1b[2J here would just flash a black frame before the next paint.
     setMessages([]);
-    setClearEpoch((epoch) => epoch + 1);
   }, []);
+
+  // Render a placeholder user row for input waiting to enter the run.
+  const addStatusUserMessage = useCallback((content: string, status: UserInputStatus): string => {
+    const key = nextDisplayMessageKey("user");
+    updateDisplayMessages((prev) => [...prev, { key, role: "user", content, inputStatus: status }]);
+    viewportRef.current?.forceScrollToBottom();
+    return key;
+  }, [updateDisplayMessages]);
+
+  const queueInput = useCallback((payload: SubmitPayload) => {
+    const displayKey = addStatusUserMessage(payload.displayText ?? payload.text, "queued");
+    queuedInputsRef.current.push({ payload, displayKey });
+    setQueuedCount(queuedInputsRef.current.length);
+  }, [addStatusUserMessage]);
+
+  const submitSteer = useCallback((payload: SubmitPayload) => {
+    const controller = inputControllerRef.current;
+    if (!controller) {
+      queueInput(payload);
+      return;
+    }
+    const displayKey = addStatusUserMessage(payload.displayText ?? payload.text, "pending_steer");
+    const pending = controller.enqueue(payload.text);
+    pendingSteersRef.current.set(pending.id, { displayKey });
+    setPendingSteerCount(pendingSteersRef.current.size);
+  }, [addStatusUserMessage, queueInput]);
 
   const openPicker = useCallback((mode: "model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | "feishu-setup", providerId?: string) => {
     if (mode === "key") {
@@ -802,6 +756,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       settingsManager,
       lspService,
       mcpManager,
+      hookController,
       flushMemory,
       runMemoryCompaction,
       runMemorySummary,
@@ -836,6 +791,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       settingsManager,
       lspService,
       mcpManager,
+      hookController,
       flushMemory,
       runMemoryCompaction,
       runMemorySummary,
@@ -877,6 +833,27 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       const images = normalized.images;
       if (!input.trim() && images.length === 0) return;
 
+      // Agent already running: route the submit into the live run instead of
+      // starting a new one. Plain prose steers the current turn; slash
+      // commands, @-mentions and image payloads queue for the next turn
+      // (mirrors the OpenTUI boundary-steer eligibility rules).
+      if (activeAbortRef.current) {
+        if (/^\/(?:quit|exit)\s*$/.test(input.trim())) {
+          requestExit();
+          return;
+        }
+        const steerEligible =
+          !displayInput.trim().startsWith("/") &&
+          !input.includes("@") &&
+          images.length === 0;
+        if (steerEligible) {
+          submitSteer(normalized);
+        } else {
+          queueInput(normalized);
+        }
+        return;
+      }
+
       const runAgentInput = async (
         actualInput: string | ContentPart[],
         displayInput: string,
@@ -904,6 +881,9 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           ...prev,
           withMessageKey({ role: "user", content: displayContent }),
         ]);
+        // Sending is an explicit "watch the newest turn" intent: snap the
+        // transcript back to the bottom even if the user had scrolled up.
+        viewportRef.current?.forceScrollToBottom();
         setIsRunning(true);
         runStartRef.current = Date.now();
         setStreamingContent("");
@@ -917,9 +897,30 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         const assistantParts: DisplayMessagePart[] = [];
         const abortController = new AbortController();
         activeAbortRef.current = abortController;
+        const inputController = new AgentRunInputQueue(`run-${++nextRunIdRef.current}`);
+        inputControllerRef.current = inputController;
 
         const syncStreamingParts = () => {
           setStreamingParts(snapshotDisplayParts(assistantParts));
+        };
+        // Text/reasoning deltas arrive far faster than the screen needs to
+        // update; batch them so the full-frame re-render runs at most every
+        // STREAMING_FLUSH_INTERVAL_MS. Tool events stay immediate.
+        let streamingFlushTimer: ReturnType<typeof setTimeout> | null = null;
+        const cancelStreamingFlush = () => {
+          if (streamingFlushTimer !== null) {
+            clearTimeout(streamingFlushTimer);
+            streamingFlushTimer = null;
+          }
+        };
+        const scheduleStreamingFlush = () => {
+          if (streamingFlushTimer !== null) return;
+          streamingFlushTimer = setTimeout(() => {
+            streamingFlushTimer = null;
+            setStreamingContent(assistantContent);
+            setStreamingReasoning(assistantReasoning);
+            syncStreamingParts();
+          }, STREAMING_FLUSH_INTERVAL_MS);
         };
         const hasAssistantOutput = () => (
           !!assistantContent ||
@@ -956,6 +957,9 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           updateDisplayMessages((prev) => [...prev, msg]);
         };
         const clearAssistantStream = () => {
+          // A timer firing after this reset would resurrect the just-committed
+          // text as a phantom streaming block — cancel before clearing.
+          cancelStreamingFlush();
           setStreamingContent("");
           setStreamingReasoning("");
           setStreamingTools([]);
@@ -965,60 +969,21 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           toolCalls.length = 0;
           assistantParts.length = 0;
         };
-        const flushAssistantStaticChunk = (): boolean => {
-          if (toolCalls.some((toolCall) => toolCall.result === undefined)) {
-            return false;
-          }
-          const splitIndex = findStreamingStaticFlushIndex(assistantContent);
-          if (splitIndex <= 0) return false;
-
-          const { flushedParts, remainingParts } = splitDisplayPartsAtTextOffset(assistantParts, splitIndex);
-          const flushedContent = contentFromParts(flushedParts);
-          const flushedToolCalls = toolCallsFromParts(flushedParts);
-          if (!flushedContent && flushedToolCalls.length === 0) return false;
-
-          const msg: DisplayMessage = {
-            key: nextDisplayMessageKey("asst"),
-            role: "assistant",
-            content: flushedContent,
-          };
-          if (assistantReasoning) {
-            msg.reasoning = assistantReasoning;
-            assistantReasoning = "";
-            setStreamingReasoning("");
-          }
-          if (flushedToolCalls.length > 0) {
-            msg.toolCalls = flushedToolCalls;
-          }
-          if (flushedParts.length > 0) {
-            msg.parts = flushedParts;
-          }
-          updateDisplayMessages((prev) => [...prev, msg]);
-
-          assistantParts.splice(0, assistantParts.length, ...remainingParts);
-          assistantContent = contentFromParts(assistantParts);
-          const remainingToolCalls = toolCallsFromParts(assistantParts);
-          toolCalls.splice(0, toolCalls.length, ...remainingToolCalls);
-          setStreamingContent(assistantContent);
-          setStreamingTools([...toolCalls]);
-          syncStreamingParts();
-          return true;
-        };
 
         try {
-          for await (const event of agent.run(actualInput, args.cwd, { abortSignal: abortController.signal })) {
+          for await (const event of agent.run(actualInput, args.cwd, {
+            abortSignal: abortController.signal,
+            inputController,
+          })) {
             switch (event.type) {
               case "text_delta":
                 assistantContent += event.content;
                 appendTextPart(assistantParts, event.content);
-                if (!flushAssistantStaticChunk()) {
-                  setStreamingContent(assistantContent);
-                  syncStreamingParts();
-                }
+                scheduleStreamingFlush();
                 break;
               case "reasoning_delta":
                 assistantReasoning += event.content;
-                setStreamingReasoning(assistantReasoning);
+                scheduleStreamingFlush();
                 break;
               case "tool_call_start": {
                 // The LLM has begun emitting this tool call. Args are still
@@ -1116,13 +1081,45 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
                 sessionManager?.appendMarker("mode_switch", event.mode);
                 break;
               }
-              case "turn_end": {
-                if (event.usage) {
-                  setUsageTotals((totals) => ({
-                    prompt: totals.prompt + event.usage!.promptTokens,
-                    completion: totals.completion + event.usage!.completionTokens,
-                  }));
+              case "input_applied": {
+                // The steer joined the current turn — its placeholder row
+                // becomes a regular user message (badge cleared).
+                const steer = pendingSteersRef.current.get(event.id);
+                if (steer) {
+                  pendingSteersRef.current.delete(event.id);
+                  setPendingSteerCount(pendingSteersRef.current.size);
+                  updateDisplayMessages((prev) => prev.map((message) =>
+                    message.key === steer.displayKey ? setUserInputStatus(message) : message,
+                  ));
                 }
+                break;
+              }
+              case "input_rejected": {
+                // No model continuation left in this run: the steer moves to
+                // the next turn's queue, badge flips to QUEUED.
+                const steer = pendingSteersRef.current.get(event.id);
+                if (steer) {
+                  pendingSteersRef.current.delete(event.id);
+                  setPendingSteerCount(pendingSteersRef.current.size);
+                  updateDisplayMessages((prev) => prev.map((message) =>
+                    message.key === steer.displayKey ? setUserInputStatus(message, "queued") : message,
+                  ));
+                  queuedInputsRef.current.push({
+                    payload: { text: event.content, images: [] },
+                    displayKey: steer.displayKey,
+                  });
+                  setQueuedCount(queuedInputsRef.current.length);
+                }
+                break;
+              }
+              case "input_pending_changed": {
+                if (event.pending === 0 && pendingSteersRef.current.size > 0) {
+                  pendingSteersRef.current.clear();
+                }
+                setPendingSteerCount(event.pending === 0 ? 0 : event.pending);
+                break;
+              }
+              case "turn_end": {
                 if (event.willContinue) {
                   syncStreamingParts();
                   break;
@@ -1144,6 +1141,33 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
             ]);
           }
         } finally {
+          cancelStreamingFlush();
+          // Leftover steers that never reached a model-call boundary: drop
+          // them on cancel (the user asked the run to stop); requeue them for
+          // the next turn on a normal end (mirrors the OpenTUI run teardown).
+          const cancelled = abortController.signal.aborted;
+          for (const leftover of inputController.clear()) {
+            const steer = pendingSteersRef.current.get(leftover.id);
+            pendingSteersRef.current.delete(leftover.id);
+            if (cancelled) {
+              if (steer) {
+                updateDisplayMessages((prev) => prev.filter((message) => message.key !== steer.displayKey));
+              }
+              continue;
+            }
+            if (steer) {
+              updateDisplayMessages((prev) => prev.map((message) =>
+                message.key === steer.displayKey ? setUserInputStatus(message, "queued") : message,
+              ));
+            }
+            queuedInputsRef.current.push({
+              payload: { text: leftover.content, images: [] },
+              displayKey: steer?.displayKey,
+            });
+          }
+          setPendingSteerCount(0);
+          setQueuedCount(queuedInputsRef.current.length);
+          if (inputControllerRef.current === inputController) inputControllerRef.current = null;
           if (activeAbortRef.current === abortController) activeAbortRef.current = null;
           setIsRunning(false);
           runStartRef.current = null;
@@ -1186,12 +1210,14 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           }) as any),
           openPicker,
           openFeedback,
+          fillComposer,
           registry: safeRegistry,
           skillRegistry: safeSkillRegistry!,
           bashAllowlist,
           settingsManager,
           lspService,
           mcpManager,
+          hookController,
           flushMemory,
           runMemoryCompaction,
           runMemorySummary,
@@ -1218,6 +1244,13 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
                   syntheticKind: "ui_compact_summary",
                   compactionSummary: summary,
                 },
+              ]);
+            } else if (result.startsWith("⏪")) {
+              // /rewind truncated agent.messages — rebuild the transcript from
+              // the rewound state before appending the summary.
+              updateDisplayMessages(() => [
+                ...reconstructDisplayMessages(agent.messages),
+                { role: "assistant", content: result },
               ]);
             } else {
               addMessage("assistant", result);
@@ -1251,8 +1284,30 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         images.map((img) => ({ filename: img.filename, bytes: img.bytes })),
       );
     },
-    [addMessage, agent, args.cwd, openPicker, createProvider, safeRegistry, safeSkillRegistry, updateDisplayMessages]
+    [addMessage, agent, args.cwd, openPicker, createProvider, fillComposer, safeRegistry, safeSkillRegistry, updateDisplayMessages, queueInput, submitSteer, requestExit]
   );
+
+  // Drain the queue once the run ends and no modal needs the user first.
+  // The placeholder row is removed right before resubmitting — handleSubmit
+  // renders the message again as a regular user row.
+  const drainQueuedInput = useCallback(() => {
+    if (activeAbortRef.current) return;
+    if (pendingPlan || pendingApproval || pendingQuestion || pendingFeedback || pickerMode) return;
+    const next = queuedInputsRef.current.shift();
+    if (!next) return;
+    setQueuedCount(queuedInputsRef.current.length);
+    if (next.displayKey) {
+      updateDisplayMessages((prev) => prev.filter((message) => message.key !== next.displayKey));
+    }
+    void handleSubmit(next.payload);
+  }, [pendingPlan, pendingApproval, pendingQuestion, pendingFeedback, pickerMode, updateDisplayMessages, handleSubmit]);
+
+  useEffect(() => {
+    if (isRunning || queuedCount === 0) return;
+    if (pendingPlan || pendingApproval || pendingQuestion || pendingFeedback || pickerMode) return;
+    const timer = setTimeout(drainQueuedInput, 0);
+    return () => clearTimeout(timer);
+  }, [isRunning, queuedCount, pendingPlan, pendingApproval, pendingQuestion, pendingFeedback, pickerMode, drainQueuedInput]);
 
   const currentProviderId = agent.providerId || safeRegistry.getDefault()?.id;
   const keyTarget = keyProviderId
@@ -1272,136 +1327,159 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       })()
     : null;
 
-  const mcpStates = mcpManager?.getStates() ?? [];
-  const mcpConnectedCount = mcpStates.filter((state) => state.status.kind === "connected").length;
-  const hasAgentsFile = useMemo(
-    () => existsSync(join(args.cwd, "AGENTS.md")) || existsSync(join(args.cwd, ".bubble", "AGENTS.md")),
-    [args.cwd],
-  );
-
+  const showThinkingLabel = getAvailableThinkingLevels(agent.providerId, agent.apiModel).length > 2
+    && thinkingLevel
+    && thinkingLevel !== "off";
   const welcomeBannerNode = showWelcome ? (
     <WelcomeBanner
       terminalColumns={terminalColumns}
-      modelLabel={agent.model ? displayModel(agent.model) : undefined}
-      cwd={friendlyCwd(args.cwd)}
       tips={buildTips(agent, safeRegistry)}
-      skillsCount={safeSkillRegistry.summaries().length}
-      mcpConnectedCount={mcpConnectedCount}
-      mcpTotalCount={mcpStates.length}
-      hasAgentsFile={hasAgentsFile}
+      updateNotice={updateNotice}
+      cwd={friendlyCwd(args.cwd)}
+      providerId={agent.providerId || safeRegistry.getDefault()?.id}
+      modelLabel={agent.model ? displayModel(agent.model) : undefined}
+      thinkingLabel={showThinkingLabel ? thinkingLevel : undefined}
     />
   ) : null;
 
+  // One row shorter than the terminal on purpose. A frame that exactly fills
+  // the screen makes Ink omit the trailing newline ("fullscreen" mode), and
+  // Ink's cursor-only repositioning (buildReturnToBottom) miscalculates by one
+  // row for such frames — the composer cursor lands one row above the prompt
+  // after any cursor-only update (e.g. restoreLastOutput following an external
+  // stdout write). Keeping every frame below viewport height keeps all of
+  // Ink's cursor paths on the consistent trailing-newline math.
+  const frameRows = Math.max(4, terminalRows - 1);
+
   return (
     <ThemeProvider value={palette}>
-      <Box flexDirection="column" flexShrink={0}>
-        <Box flexDirection="column" paddingX={1} paddingTop={1} flexShrink={0}>
-          <MessageList
-            key={clearEpoch}
-            messages={messages}
-            streamingContent={streamingContent}
-            streamingReasoning={streamingReasoning}
-            streamingTools={streamingTools}
-            streamingParts={streamingParts}
-            terminalColumns={terminalColumns}
-            verboseTrace={verboseTrace}
-            pendingApproval={approvalHint}
-            nowTick={nowTick}
-            welcomeBanner={welcomeBannerNode}
-          />
+      <Box flexDirection="column" width={terminalColumns} height={frameRows}>
+        <TranscriptViewport ref={viewportRef}>
+          <Box flexDirection="column" paddingX={1} paddingTop={1} flexShrink={0}>
+            <MessageList
+              messages={messages}
+              streamingContent={streamingContent}
+              streamingReasoning={streamingReasoning}
+              streamingTools={streamingTools}
+              streamingParts={streamingParts}
+              terminalColumns={terminalColumns}
+              verboseTrace={verboseTrace}
+              pendingApproval={approvalHint}
+              nowTick={nowTick}
+              welcomeBanner={welcomeBannerNode}
+            />
+          </Box>
+        </TranscriptViewport>
+        {/* Pickers live in the fixed bottom stack (not the scrollable
+            transcript) so they can never be scrolled out of view. */}
         {pickerMode === "model" && (
-          <ModelPicker
-            registry={safeRegistry}
-            current={agent.model}
-            recent={userConfig.getRecentModels()}
-            onSelect={handleModelSelect}
-            onCancel={closePicker}
-          />
+          <Box paddingX={1} flexShrink={0}>
+            <ModelPicker
+              registry={safeRegistry}
+              current={agent.model}
+              recent={userConfig.getRecentModels()}
+              onSelect={handleModelSelect}
+              onCancel={closePicker}
+            />
+          </Box>
         )}
         {pickerMode === "provider" && (
-          <ProviderPicker
-            providers={BUILTIN_PROVIDERS
-              .filter((p) => isUserVisibleProvider(p.id))
-              .map((p) => {
-                const configured = safeRegistry.getConfigured().find((item) => item.id === p.id);
-                const configuredLabel = configured?.apiKey ? "configured" : "needs key";
-                return {
-                  id: p.id,
-                  name: `${p.name} [${configuredLabel}]`,
-                  enabled: true,
-                };
-            })}
-            current={currentProviderId}
-            onSelect={handleProviderSelect}
-            onCancel={closePicker}
-          />
+          <Box paddingX={1} flexShrink={0}>
+            <ProviderPicker
+              providers={BUILTIN_PROVIDERS
+                .filter((p) => isUserVisibleProvider(p.id))
+                .map((p) => {
+                  const configured = safeRegistry.getConfigured().find((item) => item.id === p.id);
+                  const configuredLabel = configured?.apiKey ? "configured" : "needs key";
+                  return {
+                    id: p.id,
+                    name: `${p.name} [${configuredLabel}]`,
+                    enabled: true,
+                  };
+              })}
+              current={currentProviderId}
+              onSelect={handleProviderSelect}
+              onCancel={closePicker}
+            />
+          </Box>
         )}
         {pickerMode === "provider-add" && (
-          <ProviderPicker
-            providers={BUILTIN_PROVIDERS
-              .filter((p) => isUserVisibleProvider(p.id))
-              .map((p) => ({ id: p.id, name: p.name, enabled: true }))}
-            current={currentProviderId}
-            onSelect={handleProviderAddSelect}
-            onCancel={closePicker}
-            title="Add Provider"
-          />
+          <Box paddingX={1} flexShrink={0}>
+            <ProviderPicker
+              providers={BUILTIN_PROVIDERS
+                .filter((p) => isUserVisibleProvider(p.id))
+                .map((p) => ({ id: p.id, name: p.name, enabled: true }))}
+              current={currentProviderId}
+              onSelect={handleProviderAddSelect}
+              onCancel={closePicker}
+              title="Add Provider"
+            />
+          </Box>
         )}
         {pickerMode === "login" && (
-          <ProviderPicker
-            providers={BUILTIN_PROVIDERS
-              .filter((p) => isUserVisibleProvider(p.id) && safeRegistry.supportsOAuth(p.id))
-              .map((p) => ({ id: p.id, name: p.name, enabled: true }))}
-            current={currentProviderId}
-            onSelect={handleLoginProviderSelect}
-            onCancel={closePicker}
-            title="Select Login Provider"
-          />
+          <Box paddingX={1} flexShrink={0}>
+            <ProviderPicker
+              providers={BUILTIN_PROVIDERS
+                .filter((p) => isUserVisibleProvider(p.id) && safeRegistry.supportsOAuth(p.id))
+                .map((p) => ({ id: p.id, name: p.name, enabled: true }))}
+              current={currentProviderId}
+              onSelect={handleLoginProviderSelect}
+              onCancel={closePicker}
+              title="Select Login Provider"
+            />
+          </Box>
         )}
         {pickerMode === "logout" && (
-          <ProviderPicker
-            providers={safeRegistry.getConfigured()
-              .filter((p) => safeRegistry.getAuthStorage().has(p.id))
-              .map((p) => ({ id: p.id, name: p.name, enabled: true }))}
-            current={currentProviderId}
-            onSelect={handleLogoutProviderSelect}
-            onCancel={closePicker}
-            title="Select Logout Provider"
-          />
+          <Box paddingX={1} flexShrink={0}>
+            <ProviderPicker
+              providers={safeRegistry.getConfigured()
+                .filter((p) => safeRegistry.getAuthStorage().has(p.id))
+                .map((p) => ({ id: p.id, name: p.name, enabled: true }))}
+              current={currentProviderId}
+              onSelect={handleLogoutProviderSelect}
+              onCancel={closePicker}
+              title="Select Logout Provider"
+            />
+          </Box>
         )}
         {pickerMode === "key" && keyTarget && (
-          <KeyPicker
-            providerName={keyTarget.name}
-            onSubmit={handleKeySubmit}
-            onCancel={() => {
-              closePicker();
-              setKeyProviderId(null);
-            }}
-          />
+          <Box paddingX={1} flexShrink={0}>
+            <KeyPicker
+              providerName={keyTarget.name}
+              onSubmit={handleKeySubmit}
+              onCancel={() => {
+                closePicker();
+                setKeyProviderId(null);
+              }}
+            />
+          </Box>
         )}
         {pickerMode === "skill" && (
-          <SkillPicker
-            skills={safeSkillRegistry.summaries()}
-            onSelect={(name) => {
-              fillComposer(`/${name} `);
-              closePicker();
-            }}
-            onCancel={closePicker}
-          />
+          <Box paddingX={1} flexShrink={0}>
+            <SkillPicker
+              skills={safeSkillRegistry.summaries()}
+              onSelect={(name) => {
+                fillComposer(`/${name} `);
+                closePicker();
+              }}
+              onCancel={closePicker}
+            />
+          </Box>
         )}
         {pickerMode === "feishu-setup" && (
-          <FeishuSetupPicker
-            onComplete={(summary) => {
-              closePicker();
-              addMessage("assistant", summary);
-            }}
-            onCancel={() => {
-              closePicker();
-              addMessage("assistant", "已取消 Feishu setup。");
-            }}
-          />
+          <Box paddingX={1} flexShrink={0}>
+            <FeishuSetupPicker
+              onComplete={(summary) => {
+                closePicker();
+                addMessage("assistant", summary);
+              }}
+              onCancel={() => {
+                closePicker();
+                addMessage("assistant", "已取消 Feishu setup。");
+              }}
+            />
+          </Box>
         )}
-      </Box>
       {todos.length > 0 && !pickerMode && !pendingPlan && !pendingQuestion && (
         <Box paddingX={1} flexShrink={0}>
           <TodosPanel todos={todos} terminalColumns={terminalColumns} />
@@ -1478,6 +1556,8 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
             hasStreamingReasoning={streamingReasoning.length > 0}
             streamedChars={streamingContent.length + streamingReasoning.length}
             nowTick={nowTick}
+            pendingSteerCount={pendingSteerCount}
+            queuedCount={queuedCount}
           />
         </Box>
       )}
@@ -1485,7 +1565,11 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         <Box paddingBottom={1} flexShrink={0}>
           <InputBox
             onSubmit={handleSubmit}
-            disabled={isRunning || !!pendingPlan || !!pendingApproval || !!pendingQuestion || !!pendingFeedback}
+            onQueue={isRunning ? queueInput : undefined}
+            onWheelScroll={(direction, lines) => {
+              viewportRef.current?.scrollBy(direction === "up" ? -lines : lines);
+            }}
+            disabled={!!pendingPlan || !!pendingApproval || !!pendingQuestion || !!pendingFeedback}
             cursorResetEpoch={cursorResetEpoch}
             draftText={composerDraft?.text}
             draftEpoch={composerDraft?.epoch}
@@ -1498,18 +1582,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       )}
       {!isExiting && (
         <Box flexShrink={0}>
-          <FooterBar
-            data={buildFooterData({
-              cwd: args.cwd,
-              providerId: agent.providerId || safeRegistry.getDefault()?.id || "unknown",
-              model: displayModel(agent.model) || "no model",
-              thinkingLevel,
-              showThinking: getAvailableThinkingLevels(agent.providerId, agent.apiModel).length > 2,
-              mode: permissionMode,
-              usageTotals,
-              verboseTrace,
-            })}
-          />
+          <FooterBar data={buildFooterData({ mode: permissionMode })} />
         </Box>
       )}
     </Box>
@@ -1587,6 +1660,8 @@ interface WaitingIndicatorProps {
   hasStreamingReasoning: boolean;
   streamedChars: number;
   nowTick: number;
+  pendingSteerCount?: number;
+  queuedCount?: number;
 }
 
 function WaitingIndicator({
@@ -1595,6 +1670,8 @@ function WaitingIndicator({
   hasStreamingReasoning,
   streamedChars,
   nowTick,
+  pendingSteerCount = 0,
+  queuedCount = 0,
 }: WaitingIndicatorProps) {
   void nowTick;
   const theme = useTheme();
@@ -1644,13 +1721,18 @@ function WaitingIndicator({
   }
 
   const tokenText = streamedChars > 0 ? `↓${formatTokensApprox(streamedChars)} tok` : "";
+  const hintParts: string[] = [];
+  if (tokenText) hintParts.push(tokenText);
+  if (pendingSteerCount > 0) hintParts.push(`${pendingSteerCount} pending steer${pendingSteerCount === 1 ? "" : "s"}`);
+  if (queuedCount > 0) hintParts.push(`${queuedCount} queued`);
+  hintParts.push("enter steer", "tab queue", "esc stop");
 
   return (
     <Box>
       <Text color={theme.accent}>{SPINNER_FRAMES[frameIndex]}</Text>
       <Text color={theme.muted}> {phrase} </Text>
       <Text color={theme.muted} dimColor>
-        ({tokenText ? `${tokenText} · ` : ""}esc·esc to interrupt)
+        ({hintParts.join(" · ")})
       </Text>
     </Box>
   );

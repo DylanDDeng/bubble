@@ -4,24 +4,25 @@ import { describe, expect, it } from "vitest";
 import { FooterBar } from "../tui-ink/footer.js";
 
 describe("Ink footer", () => {
-  it("keeps the model at the right edge without trace details chrome", () => {
+  it("renders nothing in the default permission mode", () => {
     const output = renderToString(
-      React.createElement(FooterBar, {
-        data: {
-          cwd: "/tmp/project",
-          providerId: "deepseek",
-          model: "deepseek-v4-flash",
-          thinkingLevel: "off",
-          showThinking: false,
-          usageTotals: { prompt: 0, completion: 0 },
-          verboseTrace: true,
-        },
-      }),
+      React.createElement(FooterBar, { data: { mode: "default" } }),
       { columns: 100 },
     );
 
-    expect(output).toContain("deepseek");
-    expect(output).toContain("deepseek-v4-flash");
-    expect(output).not.toContain("details");
+    expect(output.trim()).toBe("");
+  });
+
+  it("shows only the permission-mode badge for non-default modes", () => {
+    const output = renderToString(
+      React.createElement(FooterBar, { data: { mode: "plan" } }),
+      { columns: 100 },
+    );
+
+    expect(output).toContain("on");
+    expect(output).toContain("⇧⇥");
+    // Path / provider / model chrome lives in the welcome banner now.
+    expect(output).not.toContain("ctx ");
+    expect(output).not.toContain("•");
   });
 });

@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, appendFileSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { getBubbleHome } from "./bubble-home.js";
+import { CheckpointStore } from "./checkpoints.js";
 import { compactSessionEntries, type CompactOptions, type CompactResult } from "./context/compact.js";
 import type { Message, Todo } from "./types.js";
 import { SessionLog } from "./session-log.js";
@@ -27,12 +28,30 @@ export interface SessionSummary {
 
 export type { SessionLogEntry, SessionMarkerKind, SessionMetadata } from "./session-types.js";
 
+export interface UserTurn {
+  /** Session log entry id of the user message that starts the turn. */
+  id: string;
+  /** Single-line preview of the user message. */
+  preview: string;
+  /** Full text of the user message. */
+  text: string;
+  timestamp: number;
+}
+
+export interface RewindResult {
+  /** Number of log entries removed. */
+  removedEntries: number;
+  /** Full text of the user message the session was rewound to (for re-editing). */
+  targetText: string;
+}
+
 const AUTO_COMPACT_ENTRY_THRESHOLD = 180;
 const AUTO_COMPACT_KEEP_RECENT_TURNS = 3;
 
 export class SessionManager {
   private sessionFile: string;
   private log = new SessionLog();
+  private checkpoints?: CheckpointStore;
 
   constructor(sessionFile: string) {
     this.sessionFile = sessionFile;
@@ -204,6 +223,81 @@ export class SessionManager {
 
   getMessages(): Message[] {
     return this.log.toMessages();
+  }
+
+  /**
+   * Pre-edit file snapshot store for this session, used by /rewind.
+   * Lives next to the session JSONL as `<session>.checkpoints/`.
+   */
+  getCheckpoints(): CheckpointStore {
+    if (!this.checkpoints) {
+      this.checkpoints = new CheckpointStore(
+        this.sessionFile.replace(/\.jsonl$/, "") + ".checkpoints",
+        () => this.lastUserEntryId(),
+      );
+    }
+    return this.checkpoints;
+  }
+
+  /** Entry id of the most recent user message, or "0" before the first one. */
+  lastUserEntryId(): string {
+    const entries = this.log.list();
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i];
+      if (entry.type === "user_message") return entry.id;
+    }
+    return "0";
+  }
+
+  /** User messages after the latest /clear, oldest first — the valid rewind anchors. */
+  listUserTurns(): UserTurn[] {
+    const entries = this.log.list();
+    let start = 0;
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i];
+      if (entry.type === "marker" && entry.kind === "conversation_clear") {
+        start = i + 1;
+        break;
+      }
+    }
+
+    const turns: UserTurn[] = [];
+    for (let i = start; i < entries.length; i++) {
+      const entry = entries[i];
+      if (entry.type !== "user_message") continue;
+      const text = messageText(entry.message);
+      turns.push({
+        id: entry.id,
+        text,
+        preview: truncateVisual(normalizeSingleLine(text), 80) || "(empty message)",
+        timestamp: entry.timestamp,
+      });
+    }
+    return turns;
+  }
+
+  /**
+   * Truncate the session to just before the user message with the given
+   * entry id. Returns undefined when the id does not name a user message.
+   */
+  rewindToEntry(entryId: string): RewindResult | undefined {
+    const entries = this.log.list();
+    const index = entries.findIndex((entry) => entry.id === entryId && entry.type === "user_message");
+    if (index < 0) return undefined;
+
+    const target = entries[index];
+    const removed = entries.slice(index);
+    this.rewrite(entries.slice(0, index));
+
+    const metadata = this.log.getMetadata();
+    if (metadata.titleUserMessageId && removed.some((entry) => entry.id === metadata.titleUserMessageId)) {
+      this.clearTitleMetadata();
+    }
+
+    return {
+      removedEntries: removed.length,
+      targetText: target.type === "user_message" ? messageText(target.message) : "",
+    };
   }
 
   getEntries(): SessionLogEntry[] {

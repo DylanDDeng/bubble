@@ -7,6 +7,7 @@ import type { SkillRegistry } from "../skills/registry.js";
 import { useTheme } from "./theme.js";
 import { filterFileSuggestions, findAtContext, listProjectFiles } from "./file-mentions.js";
 import {
+  bareImageFilenameFromPaste,
   ingestClipboardImage,
   ingestImagePath,
   isImageFilePath,
@@ -44,6 +45,16 @@ export interface SubmitPayload {
 
 interface InputBoxProps {
   onSubmit: (payload: SubmitPayload) => void;
+  /**
+   * When set (agent running), Tab queues the composer content for the next
+   * turn instead of its idle-time behavior.
+   */
+  onQueue?: (payload: SubmitPayload) => void;
+  /**
+   * Receives scroll intent when Up/Down arrows are classified as synthetic
+   * wheel events (terminal alternate-scroll) rather than keyboard presses.
+   */
+  onWheelScroll?: (direction: "up" | "down", lines: number) => void;
   onPasteNotice?: (notice: string) => void;
   disabled?: boolean;
   cursorResetEpoch?: number;
@@ -97,6 +108,33 @@ export function resolveCursorRowCompensation(input: {
 
 export function isCtrlCInput(input: string, key: { ctrl?: boolean }): boolean {
   return input === "\x03" || (key.ctrl === true && input.toLowerCase() === "c");
+}
+
+/**
+ * Split a composer line around the cursor so the cell under it can render as
+ * an inverse-video software cursor. The visible cursor must not depend on the
+ * real terminal cursor: Ink only re-arms its one-shot cursor escape when the
+ * component owning useCursor re-commits, so frames produced by other
+ * components' local state (the waiting spinner, viewport scrolling) hide the
+ * hardware cursor for most of an agent run. Drawing the cell ourselves keeps
+ * the cursor visible on every frame; the real (mostly hidden) cursor is still
+ * positioned for IME anchoring.
+ */
+export function splitLineAtCursor(
+  lineText: string,
+  charOffset: number,
+): { before: string; at: string; after: string } {
+  const offset = Math.max(0, Math.min(charOffset, lineText.length));
+  if (offset >= lineText.length) {
+    return { before: lineText, at: " ", after: "" };
+  }
+  const codePoint = lineText.codePointAt(offset)!;
+  const length = codePoint > 0xffff ? 2 : 1;
+  return {
+    before: lineText.slice(0, offset),
+    at: lineText.slice(offset, offset + length),
+    after: lineText.slice(offset + length),
+  };
 }
 
 type VisualLine = {
@@ -234,6 +272,8 @@ export function insertNewlineAtCursor(text: string, cursor: number) {
 
 export function InputBox({
   onSubmit,
+  onQueue,
+  onWheelScroll,
   onPasteNotice,
   disabled,
   cursorResetEpoch = 0,
@@ -407,6 +447,20 @@ export function InputBox({
       return;
     }
 
+    // Copying an image file in Finder pastes only the file's NAME while the
+    // real bits stay on the system clipboard — attach from there. If the
+    // clipboard turns out to hold no image, it was just text: insert it
+    // quietly.
+    const bareName = bareImageFilenameFromPaste(clean);
+    if (bareName && process.platform === "darwin") {
+      void tryClipboardImage()
+        .then((attached) => {
+          if (!attached) insertTextAtCursor(clean);
+        })
+        .finally(clearPending);
+      return;
+    }
+
     // Look for image paths inside the paste (drag-and-drop from Finder/
     // Nautilus/Explorer). Multi-selection can arrive newline- or
     // space-separated.
@@ -478,10 +532,11 @@ export function InputBox({
     setSelectedIndex(0);
   };
 
-  const submitInput = (submittedText: string) => {
+  const submitInput = (submittedText: string, target: "submit" | "queue" = "submit") => {
     const expandedText = expandPastedContentMarkers(submittedText, pastedContentRefs);
     if (expandedText.trim().length === 0 && attachments.length === 0) return;
-    onSubmit({
+    const deliver = target === "queue" && onQueue ? onQueue : onSubmit;
+    deliver({
       text: expandedText,
       displayText: expandedText === submittedText ? undefined : submittedText,
       images: attachments,
@@ -610,6 +665,14 @@ export function InputBox({
       }
     }
 
+    // While the agent runs, Tab queues the composer content for the next
+    // turn (Enter steers — handled by the app-level submit routing).
+    if (key.tab && !key.shift && onQueue && !showSuggestions) {
+      if (pastePendingRef.current) return;
+      submitInput(text, "queue");
+      return;
+    }
+
     if (enterIntent === "submit") {
       // A paste is still mid-flight — dropping this Enter avoids submitting
       // an input state that doesn't yet include the paste.
@@ -643,54 +706,22 @@ export function InputBox({
       setSelectedIndex(0);
       return;
     }
-    if (key.upArrow) {
-      if (cursorVisualRow > 0) {
-        setCursor(visualToCursor(visualLines, cursorVisualRow - 1, cursorVisualCol));
-        return;
-      }
-      const result = stepHistory(
-        { history, index: historyIndex, draft: historyDraftRef.current },
-        "up",
-        text,
-      );
-      if (result.changed) {
-        setText(result.text);
-        setCursor(result.text.length);
-        setHistoryIndex(result.index);
-        historyDraftRef.current = result.draft;
-        setSelectedIndex(0);
-        setPastedContentRefs([]);
-        nextPastedContentIndexRef.current = 1;
-      }
-      return;
-    }
-    if (key.downArrow) {
-      if (cursorVisualRow < visualLines.length - 1) {
-        setCursor(visualToCursor(visualLines, cursorVisualRow + 1, cursorVisualCol));
-        return;
-      }
-      const result = stepHistory(
-        { history, index: historyIndex, draft: historyDraftRef.current },
-        "down",
-        text,
-      );
-      if (result.changed) {
-        setText(result.text);
-        setCursor(result.text.length);
-        setHistoryIndex(result.index);
-        historyDraftRef.current = result.draft;
-        setSelectedIndex(0);
-        setPastedContentRefs([]);
-        nextPastedContentIndexRef.current = 1;
-      }
+    if (key.upArrow || key.downArrow) {
+      classifyVerticalArrow(key.upArrow ? "up" : "down", key.eventType);
       return;
     }
 
+    // Ctrl/meta chords are app-level shortcuts (Ctrl+S selection mode,
+    // Ctrl+O trace, Ctrl+R thinking, …) — never type their letter. Raw C0
+    // control bytes (kitty protocol off) are equally not text.
+    if (key.ctrl || key.meta) return;
     if (input) {
+      const printable = input.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
+      if (!printable) return;
       const before = text.slice(0, cursor);
       const after = text.slice(cursor);
-      setText(before + input + after);
-      setCursor(cursor + input.length);
+      setText(before + printable + after);
+      setCursor(cursor + printable.length);
       setSelectedIndex(0);
     }
   });
@@ -766,6 +797,109 @@ export function InputBox({
     [text, lineWidth],
   );
   const { row: cursorVisualRow, col: cursorVisualCol } = cursorToVisual(visualLines, cursor);
+
+  // ---- Wheel-vs-keyboard classification for Up/Down arrows ----
+  //
+  // With mouse reporting off (so native drag-select/copy works), terminals
+  // translate the wheel into Up/Down arrow keys while in the alternate
+  // screen. Those synthetic arrows must scroll the transcript, not move the
+  // composer cursor or browse history. Three signals, in priority order:
+  //   1. kitty keyboard protocol: real key presses carry `eventType`;
+  //      synthetic wheel arrows are bare legacy sequences. Once one enhanced
+  //      arrow is seen, bare arrows are classified as wheel with no delay.
+  //   2. burst heuristic (non-kitty terminals): a wheel notch delivers
+  //      several arrows within a few ms; a keypress delivers one. The first
+  //      arrow is briefly deferred to see whether siblings follow.
+  //   3. wheel session: shortly after a wheel burst, single arrows continue
+  //      to scroll, so slow trackpad scrolling doesn't fall back to history.
+  const performVerticalArrowRef = useRef<(direction: "up" | "down") => void>(() => {});
+  performVerticalArrowRef.current = (direction) => {
+    if (direction === "up") {
+      if (cursorVisualRow > 0) {
+        setCursor(visualToCursor(visualLines, cursorVisualRow - 1, cursorVisualCol));
+        return;
+      }
+    } else {
+      if (cursorVisualRow < visualLines.length - 1) {
+        setCursor(visualToCursor(visualLines, cursorVisualRow + 1, cursorVisualCol));
+        return;
+      }
+    }
+    const result = stepHistory(
+      { history, index: historyIndex, draft: historyDraftRef.current },
+      direction,
+      text,
+    );
+    if (result.changed) {
+      setText(result.text);
+      setCursor(result.text.length);
+      setHistoryIndex(result.index);
+      historyDraftRef.current = result.draft;
+      setSelectedIndex(0);
+      setPastedContentRefs([]);
+      nextPastedContentIndexRef.current = 1;
+    }
+  };
+  const kittyArrowsSeenRef = useRef(false);
+  const arrowBurstRef = useRef<{
+    direction: "up" | "down";
+    count: number;
+    timer: ReturnType<typeof setTimeout>;
+  } | null>(null);
+  const lastWheelFlushRef = useRef(0);
+  const ARROW_BURST_WINDOW_MS = 20;
+  const WHEEL_SESSION_MS = 300;
+  const flushArrowBurst = (burst: { direction: "up" | "down"; count: number }) => {
+    if (burst.count > 1 && onWheelScroll) {
+      lastWheelFlushRef.current = Date.now();
+      onWheelScroll(burst.direction, burst.count);
+    } else {
+      performVerticalArrowRef.current(burst.direction);
+    }
+  };
+  const classifyVerticalArrow = (direction: "up" | "down", eventType?: string) => {
+    if (eventType) {
+      kittyArrowsSeenRef.current = true;
+      performVerticalArrowRef.current(direction);
+      return;
+    }
+    if (!onWheelScroll) {
+      performVerticalArrowRef.current(direction);
+      return;
+    }
+    if (kittyArrowsSeenRef.current) {
+      lastWheelFlushRef.current = Date.now();
+      onWheelScroll(direction, 1);
+      return;
+    }
+    const pending = arrowBurstRef.current;
+    if (pending) {
+      if (pending.direction === direction) {
+        pending.count += 1;
+        return;
+      }
+      clearTimeout(pending.timer);
+      arrowBurstRef.current = null;
+      flushArrowBurst(pending);
+    }
+    if (Date.now() - lastWheelFlushRef.current < WHEEL_SESSION_MS) {
+      lastWheelFlushRef.current = Date.now();
+      onWheelScroll(direction, 1);
+      return;
+    }
+    const burst = {
+      direction,
+      count: 1,
+      timer: setTimeout(() => {
+        arrowBurstRef.current = null;
+        flushArrowBurst(burst);
+      }, ARROW_BURST_WINDOW_MS),
+    };
+    arrowBurstRef.current = burst;
+  };
+  useEffect(() => () => {
+    if (arrowBurstRef.current) clearTimeout(arrowBurstRef.current.timer);
+  }, []);
 
   const totalLines = Math.max(visualLines.length, 1);
   const visibleLines = Math.min(Math.max(totalLines, MIN_VISIBLE_LINES), MAX_VISIBLE_LINES);
@@ -852,7 +986,10 @@ export function InputBox({
       node = node.parentNode;
     }
     const rootHeight = lastNode?.yogaNode?.getComputedHeight() ?? 0;
-    const viewportRows = stdout.rows ?? process.stdout.rows ?? 24;
+    // `||` on purpose: some ptys (and Bun on a detached tty) report rows as 0,
+    // which `??` would happily accept — and `rootHeight >= 0` then flags every
+    // frame as fullscreen, forcing a bogus +1 row compensation.
+    const viewportRows = stdout.rows || process.stdout.rows || 24;
     const previousOutputHeight = previousOutputHeightRef.current;
     // After a clear/sync frame, Ink's physical terminal cursor remains on the
     // last rendered row even though log-update records an output string with a
@@ -947,7 +1084,13 @@ export function InputBox({
           const isFirst = visualIdx === 0;
           const isCursorLine = visualIdx === cursorVisualRow;
           const prompt = isFirst ? PROMPT : " ".repeat(PROMPT.length);
-          const fill = " ".repeat(Math.max(0, lineWidth - stringWidth(lineText)));
+          const cursorSegments = isCursorLine && !disabled
+            ? splitLineAtCursor(lineText, cursor - (visualLines[cursorVisualRow]?.absStart ?? 0))
+            : null;
+          const renderedLine = cursorSegments
+            ? cursorSegments.before + cursorSegments.at + cursorSegments.after
+            : lineText;
+          const fill = " ".repeat(Math.max(0, lineWidth - stringWidth(renderedLine)));
           return (
             <Box
               key={visualIdx}
@@ -964,7 +1107,19 @@ export function InputBox({
               <Text backgroundColor={inputBg} color={isFirst ? theme.accent : theme.inputText}>
                 {prompt}
               </Text>
-              <Text backgroundColor={inputBg} color={theme.inputText}>{lineText}</Text>
+              {cursorSegments ? (
+                <>
+                  {cursorSegments.before && (
+                    <Text backgroundColor={inputBg} color={theme.inputText}>{cursorSegments.before}</Text>
+                  )}
+                  <Text backgroundColor={theme.inputText} color={inputBg}>{cursorSegments.at}</Text>
+                  {cursorSegments.after && (
+                    <Text backgroundColor={inputBg} color={theme.inputText}>{cursorSegments.after}</Text>
+                  )}
+                </>
+              ) : (
+                <Text backgroundColor={inputBg} color={theme.inputText}>{lineText}</Text>
+              )}
               <Text backgroundColor={inputBg}>{fill}</Text>
             </Box>
           );

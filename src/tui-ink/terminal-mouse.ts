@@ -1,3 +1,8 @@
+// Bubble does NOT enable mouse reporting — plain drag-select and copy keep
+// their native terminal behavior. This disable sequence is written
+// defensively on teardown in case a previous crash left reporting on.
+export const MOUSE_REPORTING_DISABLE = "\x1b[?1006l\x1b[?1000l";
+
 const SGR_MOUSE_SEQUENCE_RE = /\x1b?\[?<\d+;\d+;\d+[mM]/g;
 const SGR_MOUSE_WHEEL_RE = /\x1b?\[?<(\d+);\d+;\d+([mM])/g;
 

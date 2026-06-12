@@ -5,6 +5,7 @@ import {
   compactDisplayMessages as compactInkDisplayMessages,
   contentFromParts,
   snapshotDisplayParts,
+  stripInterruptedAssistantMarker,
   toolCallsFromParts,
   type DisplayMessage,
   type DisplayMessagePart,
@@ -68,7 +69,7 @@ describe("Ink display history parts", () => {
     ]);
   });
 
-  it("compacts old part text and collapses tool result bodies", () => {
+  it("keeps old part text verbatim and collapses tool result bodies", () => {
     const diff = [
       "--- a/file-0.ts",
       "+++ b/file-0.ts",
@@ -96,8 +97,10 @@ describe("Ink display history parts", () => {
 
     const oldText = compacted[0].parts?.find((part) => part.type === "text");
     const oldTools = compacted[0].parts?.find((part) => part.type === "tools");
-    expect(oldText?.type === "text" ? oldText.content.length : 0).toBeLessThan(
-      messages[0].parts?.[0].type === "text" ? messages[0].parts[0].content.length : Infinity,
+    // a1aeb19 parity: what the assistant said is never rewritten — only bulky
+    // tool-result bodies collapse on old messages.
+    expect(oldText?.type === "text" ? oldText.content : "").toBe(
+      messages[0].parts?.[0].type === "text" ? messages[0].parts[0].content : "",
     );
     const oldTool = oldTools?.type === "tools" ? oldTools.toolCalls[0] : undefined;
     expect(oldTool?.result).toBeUndefined();
@@ -181,6 +184,19 @@ describe("Ink display history parts", () => {
     });
 
     expect(isWritePreviewTool(collapsedWrite)).toBe(false);
+  });
+
+  it("strips the model-facing interruption note from aborted assistant content", () => {
+    const marker =
+      "Interrupted by user. The prior request was stopped and should not be resumed unless the user asks.";
+
+    // Marker-only content (interrupt before any streamed text) → nothing left.
+    expect(stripInterruptedAssistantMarker(marker, marker)).toBe("");
+    // Partial streamed text survives; only the appended note goes away.
+    expect(stripInterruptedAssistantMarker(`I was saying…\n\n${marker}`, marker)).toBe("I was saying…");
+    // Unrelated content is untouched, even if it mentions interruptions.
+    expect(stripInterruptedAssistantMarker("All done.", marker)).toBe("All done.");
+    expect(stripInterruptedAssistantMarker(`${marker} trailing`, marker)).toBe(`${marker} trailing`);
   });
 
   it("keeps all display messages available for app-level scrolling", () => {

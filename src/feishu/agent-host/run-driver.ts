@@ -117,6 +117,7 @@ export class RunDriver {
       approvalController,
       lspService,
       fileStateTracker,
+      checkpoints: () => session.manager.getCheckpoints(),
       // questionController intentionally omitted — Feishu v1 doesn't surface
       // the question tool to the agent.
     });

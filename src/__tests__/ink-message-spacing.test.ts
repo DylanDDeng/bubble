@@ -51,12 +51,15 @@ describe("Ink message spacing", () => {
     content: "This is a static HTML playground.",
   };
 
-  it("keeps the first streaming tool trace tight under the user turn", () => {
+  it("gives the first streaming tool trace the same gap as a committed turn", () => {
     const lines = renderLines([user], [toolsPart]);
 
     expect(lines[0]).toContain("What is this project doing?");
     expect(lines[0]).toContain("▌");
-    expect(lines[1]).toContain("List Directory 2 files");
+    // Same blank line as after finalize — spacing must not jump when the
+    // streaming block commits into a regular assistant message.
+    expect(lines[1]).toBe("");
+    expect(lines[2]).toContain("List Directory 2 files");
   });
 
   it("renders sent user messages with a continuous rail and bubble fill", () => {
