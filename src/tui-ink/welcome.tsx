@@ -14,6 +14,12 @@ interface WelcomeBannerProps {
   tips: string[];
   /** One-line "update available" notice shown under the version. */
   updateNotice?: string;
+  /** Friendly working directory (~ collapsed). */
+  cwd?: string;
+  providerId?: string;
+  modelLabel?: string;
+  /** Active thinking level, rendered as part of the model unit (e.g. "xhigh"). */
+  thinkingLabel?: string;
 }
 
 interface WelcomeVisibilityInput {
@@ -37,6 +43,10 @@ export function WelcomeBanner({
   terminalColumns,
   tips,
   updateNotice,
+  cwd,
+  providerId,
+  modelLabel,
+  thinkingLabel,
 }: WelcomeBannerProps) {
   const theme = useTheme();
   const effectiveWidth = Math.max(20, Math.min(terminalColumns - 2, 118));
@@ -69,6 +79,19 @@ export function WelcomeBanner({
         <Text bold color={theme.userMessageText}>TIP: </Text>
         <Text bold color={theme.userMessageText}>{tip}</Text>
       </Box>
+      {(cwd || modelLabel) && (
+        <Box marginTop={1}>
+          {cwd && <Text color={theme.muted}>{cwd}</Text>}
+          {cwd && (providerId || modelLabel) && <Text>{"    "}</Text>}
+          {providerId && <Text color={theme.muted} dimColor>{providerId} · </Text>}
+          {modelLabel && (
+            <Text bold color={theme.toolName}>
+              {modelLabel}
+              {thinkingLabel ? ` ${thinkingLabel}` : ""}
+            </Text>
+          )}
+        </Box>
+      )}
     </Box>
   );
 }

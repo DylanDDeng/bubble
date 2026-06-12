@@ -63,6 +63,7 @@ import type { ExternalHookController } from "../hooks/controller.js";
 import { collectFeedback } from "../feedback/collect.js";
 import { hasTerminalMouseSequence, parseTerminalMouseWheel } from "./terminal-mouse.js";
 import { TranscriptViewport, type TranscriptViewportHandle } from "./transcript-viewport.js";
+import os from "node:os";
 
 export interface PlanHandlerRef {
   current?: (plan: string) => Promise<PlanDecision>;
@@ -119,6 +120,13 @@ function buildTips(agent: Agent, registry: ProviderRegistry): string[] {
   tips.push("Type @ to reference a file");
   tips.push("Type / for commands and skills");
   return tips;
+}
+
+function friendlyCwd(cwd: string): string {
+  const home = os.homedir();
+  if (cwd === home) return "~";
+  if (cwd.startsWith(home + "/")) return "~" + cwd.slice(home.length);
+  return cwd;
 }
 
 function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] {
@@ -1320,11 +1328,18 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       })()
     : null;
 
+  const showThinkingLabel = getAvailableThinkingLevels(agent.providerId, agent.apiModel).length > 2
+    && thinkingLevel
+    && thinkingLevel !== "off";
   const welcomeBannerNode = showWelcome ? (
     <WelcomeBanner
       terminalColumns={terminalColumns}
       tips={buildTips(agent, safeRegistry)}
       updateNotice={updateNotice}
+      cwd={friendlyCwd(args.cwd)}
+      providerId={agent.providerId || safeRegistry.getDefault()?.id}
+      modelLabel={agent.model ? displayModel(agent.model) : undefined}
+      thinkingLabel={showThinkingLabel ? thinkingLevel : undefined}
     />
   ) : null;
 
@@ -1565,17 +1580,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       )}
       {!isExiting && (
         <Box flexShrink={0}>
-          <FooterBar
-            data={buildFooterData({
-              cwd: args.cwd,
-              providerId: agent.providerId || safeRegistry.getDefault()?.id || "unknown",
-              model: displayModel(agent.model) || "no model",
-              thinkingLevel,
-              showThinking: getAvailableThinkingLevels(agent.providerId, agent.apiModel).length > 2,
-              mode: permissionMode,
-              verboseTrace,
-            })}
-          />
+          <FooterBar data={buildFooterData({ mode: permissionMode })} />
         </Box>
       )}
     </Box>
