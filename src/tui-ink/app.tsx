@@ -61,7 +61,7 @@ import { QuestionDialog } from "./question-dialog.js";
 import { FeedbackDialog } from "./feedback-dialog.js";
 import type { ExternalHookController } from "../hooks/controller.js";
 import { collectFeedback } from "../feedback/collect.js";
-import { hasTerminalMouseSequence, parseTerminalMouseWheel, setMouseReporting } from "./terminal-mouse.js";
+import { hasTerminalMouseSequence } from "./terminal-mouse.js";
 import { TranscriptViewport, type TranscriptViewportHandle } from "./transcript-viewport.js";
 import os from "node:os";
 
@@ -286,8 +286,6 @@ function withMessageKey(message: DisplayMessage): DisplayMessage {
 // 40ms keeps perceived latency invisible while capping layout work at 25fps.
 const STREAMING_FLUSH_INTERVAL_MS = 40;
 
-// Lines moved per mouse wheel detent, matching common terminal conventions.
-const WHEEL_SCROLL_LINES = 3;
 
 export function App({ agent, args, sessionManager, createProvider, registry, skillRegistry, planHandlerRef, approvalHandlerRef, questionController, bashAllowlist, settingsManager, lspService, mcpManager, themeMode: initialThemeMode, themeOverrides, detectedTheme, onThemeModeChange, flushMemory, runMemoryCompaction, runMemorySummary, runMemoryRefresh, bypassEnabled, updateNotice, hookController, onExit }: AppProps) {
   const [themeMode, setThemeMode] = useState<ThemeMode>(initialThemeMode ?? "auto");
@@ -329,19 +327,6 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     initialDescription: string;
   } | null>(null);
   const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | "feishu-setup" | null>(null);
-  // While SGR mouse reporting is on (wheel scrolling), terminals route drags
-  // to the app instead of doing native text selection. Selection mode (Ctrl+S)
-  // temporarily turns reporting off so plain drag-select/copy works; keyboard
-  // scrolling (PgUp/PgDn) stays available.
-  const [mouseSelectionMode, setMouseSelectionMode] = useState(false);
-  const mouseSelectionModeRef = useRef(false);
-  const toggleMouseSelectionMode = useCallback((next?: boolean) => {
-    const target = next ?? !mouseSelectionModeRef.current;
-    if (target === mouseSelectionModeRef.current) return;
-    mouseSelectionModeRef.current = target;
-    setMouseReporting(!target);
-    setMouseSelectionMode(target);
-  }, []);
   const [cursorResetEpoch, setCursorResetEpoch] = useState(0);
   const [composerDraft, setComposerDraft] = useState<{ text: string; epoch: number } | null>(null);
   const [keyProviderId, setKeyProviderId] = useState<string | null>(null);
@@ -538,17 +523,10 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       return;
     }
 
-    // Mouse wheel scrolls the transcript viewport. Handled before the
-    // pending-dialog gate so the user can review history while an approval
-    // or question is waiting. Any other mouse report is consumed here so it
-    // never reaches text handlers below.
-    const wheel = parseTerminalMouseWheel(input);
-    if (wheel.length > 0) {
-      for (const direction of wheel) {
-        viewportRef.current?.scrollBy(direction === "up" ? -WHEEL_SCROLL_LINES : WHEEL_SCROLL_LINES);
-      }
-      return;
-    }
+    // Mouse reporting is off (native drag-select/copy works directly), so no
+    // SGR wheel events arrive — wheel scrolling reaches the app as Up/Down
+    // arrows via the terminal's alternate-scroll mode, classified in the
+    // composer. Defensively drop any stray mouse report bytes.
     if (hasTerminalMouseSequence(input)) return;
 
     if (!pickerMode && key.pageUp) {
@@ -557,18 +535,6 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     }
     if (!pickerMode && key.pageDown) {
       viewportRef.current?.scrollPage("down");
-      return;
-    }
-
-    // Ctrl+S toggles text-selection mode (native drag-select while mouse
-    // reporting is off). Available even while a dialog is pending so users
-    // can copy text out of approval prompts and tool output.
-    if (!pickerMode && key.ctrl && input === "s") {
-      toggleMouseSelectionMode();
-      return;
-    }
-    if (key.escape && mouseSelectionMode) {
-      toggleMouseSelectionMode(false);
       return;
     }
 
@@ -1574,14 +1540,6 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           />
         </Box>
       )}
-      {!isExiting && mouseSelectionMode && (
-        <Box paddingX={1} flexShrink={0}>
-          <Text bold color={palette.warning}>SELECT </Text>
-          <Text color={palette.muted} dimColor>
-            drag to select text, ⌘C to copy · Ctrl+S or Esc to resume scrolling
-          </Text>
-        </Box>
-      )}
       {!isExiting && isRunning && !pickerMode && !pendingPlan && !pendingApproval && !pendingQuestion && !pendingFeedback && (
         <Box paddingX={1} paddingBottom={1} flexShrink={0}>
           <WaitingIndicator
@@ -1600,6 +1558,9 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           <InputBox
             onSubmit={handleSubmit}
             onQueue={isRunning ? queueInput : undefined}
+            onWheelScroll={(direction, lines) => {
+              viewportRef.current?.scrollBy(direction === "up" ? -lines : lines);
+            }}
             disabled={!!pendingPlan || !!pendingApproval || !!pendingQuestion || !!pendingFeedback}
             cursorResetEpoch={cursorResetEpoch}
             draftText={composerDraft?.text}

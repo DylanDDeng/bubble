@@ -7,7 +7,14 @@ import type { Provider } from "../types.js";
 import type { ProviderRegistry } from "../provider-registry.js";
 import type { SkillRegistry } from "../skills/registry.js";
 import { App, type ApprovalHandlerRef, type ExitSummary, type PlanHandlerRef } from "./app.js";
-import { MOUSE_REPORTING_DISABLE, MOUSE_REPORTING_ENABLE } from "./terminal-mouse.js";
+import { MOUSE_REPORTING_DISABLE } from "./terminal-mouse.js";
+
+// DECSET 1007: terminals translate the mouse wheel into Up/Down arrow keys
+// while the alternate screen is active. Mouse reporting stays OFF on purpose
+// so plain drag-select and copy keep their native terminal behavior; the
+// composer classifies wheel-synthesized arrows vs real key presses.
+const ALTERNATE_SCROLL_ENABLE = "\x1b[?1007h";
+const ALTERNATE_SCROLL_DISABLE = "\x1b[?1007l";
 import { warmHighlighter } from "./code-highlight.js";
 import type { BashAllowlist } from "../approval/session-cache.js";
 import type { SettingsManager } from "../permissions/settings.js";
@@ -55,7 +62,9 @@ export interface RunTuiOptions {
 function restoreTerminal() {
   if (!process.stdout.isTTY) return;
   try {
-    process.stdout.write(MOUSE_REPORTING_DISABLE + "\x1b[?1049l\x1b[?25h");
+    process.stdout.write(
+      ALTERNATE_SCROLL_DISABLE + MOUSE_REPORTING_DISABLE + "\x1b[?1049l\x1b[?25h",
+    );
   } catch {
     // stdout may already be destroyed during shutdown
   }
@@ -131,7 +140,11 @@ export async function runTui(
       exitOnCtrlC: false,
       kittyKeyboard: {
         mode: "enabled",
-        flags: ["disambiguateEscapeCodes"],
+        // reportEventTypes lets the composer tell real arrow-key presses
+        // (kitty-enhanced, carry eventType) apart from the bare arrow
+        // sequences terminals synthesize for wheel scrolling in alternate
+        // screen — see the classifier in input-box.tsx.
+        flags: ["disambiguateEscapeCodes", "reportEventTypes"],
       },
       // The whole point of the Ink migration: render into the 1049 alternate
       // screen so streaming repaints never touch the user's shell scrollback.
@@ -139,19 +152,20 @@ export async function runTui(
       alternateScreen: true,
     },
   );
-  // Enable mouse reporting after render() so it follows alt-screen entry.
-  // Wheel events scroll the transcript; plain drag-selection becomes
-  // Shift+drag (standard terminal convention while mouse reporting is on).
+  // Enable alternate-scroll after render() so it follows alt-screen entry:
+  // the wheel arrives as Up/Down arrows, while plain drag-select and copy
+  // keep their native terminal behavior (no mouse reporting).
   if (process.stdout.isTTY) {
-    process.stdout.write(MOUSE_REPORTING_ENABLE);
+    process.stdout.write(ALTERNATE_SCROLL_ENABLE);
   }
   try {
     await instance.waitUntilExit();
   } finally {
-    // Mouse off before anything is printed to the primary screen; Ink has
-    // already left the alt screen by the time waitUntilExit() resolves.
+    // Reset scroll translation before anything is printed to the primary
+    // screen; Ink has already left the alt screen by the time
+    // waitUntilExit() resolves.
     if (process.stdout.isTTY) {
-      process.stdout.write(MOUSE_REPORTING_DISABLE);
+      process.stdout.write(ALTERNATE_SCROLL_DISABLE);
     }
     process.off("uncaughtException", onFatalError);
     process.off("SIGTERM", onSigterm);
