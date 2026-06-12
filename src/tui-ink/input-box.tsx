@@ -743,11 +743,17 @@ export function InputBox({
       return;
     }
 
+    // Ctrl/meta chords are app-level shortcuts (Ctrl+S selection mode,
+    // Ctrl+O trace, Ctrl+R thinking, …) — never type their letter. Raw C0
+    // control bytes (kitty protocol off) are equally not text.
+    if (key.ctrl || key.meta) return;
     if (input) {
+      const printable = input.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
+      if (!printable) return;
       const before = text.slice(0, cursor);
       const after = text.slice(cursor);
-      setText(before + input + after);
-      setCursor(cursor + input.length);
+      setText(before + printable + after);
+      setCursor(cursor + printable.length);
       setSelectedIndex(0);
     }
   });

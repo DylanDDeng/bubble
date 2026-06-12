@@ -61,7 +61,7 @@ import { QuestionDialog } from "./question-dialog.js";
 import { FeedbackDialog } from "./feedback-dialog.js";
 import type { ExternalHookController } from "../hooks/controller.js";
 import { collectFeedback } from "../feedback/collect.js";
-import { hasTerminalMouseSequence, parseTerminalMouseWheel } from "./terminal-mouse.js";
+import { hasTerminalMouseSequence, parseTerminalMouseWheel, setMouseReporting } from "./terminal-mouse.js";
 import { TranscriptViewport, type TranscriptViewportHandle } from "./transcript-viewport.js";
 import os from "node:os";
 
@@ -329,6 +329,19 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     initialDescription: string;
   } | null>(null);
   const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | "feishu-setup" | null>(null);
+  // While SGR mouse reporting is on (wheel scrolling), terminals route drags
+  // to the app instead of doing native text selection. Selection mode (Ctrl+S)
+  // temporarily turns reporting off so plain drag-select/copy works; keyboard
+  // scrolling (PgUp/PgDn) stays available.
+  const [mouseSelectionMode, setMouseSelectionMode] = useState(false);
+  const mouseSelectionModeRef = useRef(false);
+  const toggleMouseSelectionMode = useCallback((next?: boolean) => {
+    const target = next ?? !mouseSelectionModeRef.current;
+    if (target === mouseSelectionModeRef.current) return;
+    mouseSelectionModeRef.current = target;
+    setMouseReporting(!target);
+    setMouseSelectionMode(target);
+  }, []);
   const [cursorResetEpoch, setCursorResetEpoch] = useState(0);
   const [composerDraft, setComposerDraft] = useState<{ text: string; epoch: number } | null>(null);
   const [keyProviderId, setKeyProviderId] = useState<string | null>(null);
@@ -544,6 +557,18 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     }
     if (!pickerMode && key.pageDown) {
       viewportRef.current?.scrollPage("down");
+      return;
+    }
+
+    // Ctrl+S toggles text-selection mode (native drag-select while mouse
+    // reporting is off). Available even while a dialog is pending so users
+    // can copy text out of approval prompts and tool output.
+    if (!pickerMode && key.ctrl && input === "s") {
+      toggleMouseSelectionMode();
+      return;
+    }
+    if (key.escape && mouseSelectionMode) {
+      toggleMouseSelectionMode(false);
       return;
     }
 
@@ -1547,6 +1572,14 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
               }
             }}
           />
+        </Box>
+      )}
+      {!isExiting && mouseSelectionMode && (
+        <Box paddingX={1} flexShrink={0}>
+          <Text bold color={palette.warning}>SELECT </Text>
+          <Text color={palette.muted} dimColor>
+            drag to select text, ⌘C to copy · Ctrl+S or Esc to resume scrolling
+          </Text>
         </Box>
       )}
       {!isExiting && isRunning && !pickerMode && !pendingPlan && !pendingApproval && !pendingQuestion && !pendingFeedback && (

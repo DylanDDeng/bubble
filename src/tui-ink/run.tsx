@@ -7,6 +7,7 @@ import type { Provider } from "../types.js";
 import type { ProviderRegistry } from "../provider-registry.js";
 import type { SkillRegistry } from "../skills/registry.js";
 import { App, type ApprovalHandlerRef, type ExitSummary, type PlanHandlerRef } from "./app.js";
+import { MOUSE_REPORTING_DISABLE, MOUSE_REPORTING_ENABLE } from "./terminal-mouse.js";
 import { warmHighlighter } from "./code-highlight.js";
 import type { BashAllowlist } from "../approval/session-cache.js";
 import type { SettingsManager } from "../permissions/settings.js";
@@ -43,12 +44,6 @@ export interface RunTuiOptions {
   /** External lifecycle hooks, threaded into slash-command execution. */
   hookController?: ExternalHookController;
 }
-
-// SGR mouse reporting (button tracking + SGR encoding) so wheel events reach
-// useInput as parseable \x1b[<64;…M sequences. Ink owns the alt screen and
-// kitty keyboard lifecycles; mouse reporting is ours to enable and restore.
-const MOUSE_REPORTING_ENABLE = "\x1b[?1000h\x1b[?1006h";
-const MOUSE_REPORTING_DISABLE = "\x1b[?1006l\x1b[?1000l";
 
 /**
  * Best-effort terminal restore for abnormal exits. DECSET mouse modes are
