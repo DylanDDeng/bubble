@@ -13,7 +13,6 @@ describe("Ink footer", () => {
           model: "deepseek-v4-flash",
           thinkingLevel: "off",
           showThinking: false,
-          usageTotals: { prompt: 0, completion: 0 },
           verboseTrace: true,
         },
       }),
@@ -25,7 +24,7 @@ describe("Ink footer", () => {
     expect(output).not.toContain("details");
   });
 
-  it("shows the context gauge when a percent is available", () => {
+  it("stays free of token usage and context gauge chrome", () => {
     const output = renderToString(
       React.createElement(FooterBar, {
         data: {
@@ -34,31 +33,13 @@ describe("Ink footer", () => {
           model: "deepseek-v4-flash",
           thinkingLevel: "off",
           showThinking: false,
-          usageTotals: { prompt: 1200, completion: 300 },
-          contextPercent: 42,
-        },
-      }),
-      { columns: 100 },
-    );
-
-    expect(output).toContain("ctx 42%");
-  });
-
-  it("omits the context gauge when no window is known", () => {
-    const output = renderToString(
-      React.createElement(FooterBar, {
-        data: {
-          cwd: "/tmp/project",
-          providerId: "deepseek",
-          model: "deepseek-v4-flash",
-          thinkingLevel: "off",
-          showThinking: false,
-          usageTotals: { prompt: 0, completion: 0 },
         },
       }),
       { columns: 100 },
     );
 
     expect(output).not.toContain("ctx ");
+    expect(output).not.toContain("↑");
+    expect(output).not.toContain("↓");
   });
 });

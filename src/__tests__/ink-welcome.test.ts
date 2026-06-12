@@ -72,13 +72,7 @@ describe("Ink welcome banner", () => {
     const output = renderToString(
       React.createElement(WelcomeBanner, {
         terminalColumns: 100,
-        modelLabel: "deepseek-v4-flash",
-        cwd: "~/test-glm-5",
         tips: ["Ready with deepseek-v4-flash", "Type @ to reference a file", "Type / for commands and skills"],
-        skillsCount: 78,
-        mcpConnectedCount: 1,
-        mcpTotalCount: 1,
-        hasAgentsFile: false,
       }),
       { columns: 100 },
     );
@@ -87,8 +81,11 @@ describe("Ink welcome banner", () => {
     // pixel-block wordmark (dd65dfb parity).
     expect(output).toContain("██▀▀██");
     expect(output).toContain("TIP:");
-    expect(output).toContain("Skills (78)");
-    expect(output).toContain("MCPs (1)");
-    expect(output).toContain("AGENTS.md");
+    // Keyboard hints, model · cwd, and Skills/MCPs/AGENTS.md status chrome
+    // were removed from the banner on purpose — keep it minimal.
+    expect(output).not.toContain("shift+tab");
+    expect(output).not.toContain("Skills");
+    expect(output).not.toContain("MCPs");
+    expect(output).not.toContain("AGENTS.md");
   });
 });

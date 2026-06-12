@@ -63,10 +63,6 @@ import type { ExternalHookController } from "../hooks/controller.js";
 import { collectFeedback } from "../feedback/collect.js";
 import { hasTerminalMouseSequence, parseTerminalMouseWheel } from "./terminal-mouse.js";
 import { TranscriptViewport, type TranscriptViewportHandle } from "./transcript-viewport.js";
-import { getContextBudget } from "../context/budget.js";
-import os from "node:os";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
 
 export interface PlanHandlerRef {
   current?: (plan: string) => Promise<PlanDecision>;
@@ -123,13 +119,6 @@ function buildTips(agent: Agent, registry: ProviderRegistry): string[] {
   tips.push("Type @ to reference a file");
   tips.push("Type / for commands and skills");
   return tips;
-}
-
-function friendlyCwd(cwd: string): string {
-  const home = os.homedir();
-  if (cwd === home) return "~";
-  if (cwd.startsWith(home + "/")) return "~" + cwd.slice(home.length);
-  return cwd;
 }
 
 function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] {
@@ -315,22 +304,6 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   const [streamingReasoning, setStreamingReasoning] = useState("");
   const [streamingTools, setStreamingTools] = useState<DisplayToolCall[]>([]);
   const [streamingParts, setStreamingParts] = useState<DisplayMessagePart[]>([]);
-  const [usageTotals, setUsageTotals] = useState({ prompt: 0, completion: 0 });
-  // Context-window fill for the footer gauge (sidebar replacement). Token
-  // estimation walks every message, so this is only recomputed at turn
-  // boundaries — never per render.
-  const computeContextPercent = useCallback((anchorTokens?: number): number | undefined => {
-    const providerId = agent.providerId || (agent.model.includes(":") ? agent.model.split(":")[0] : "");
-    const modelId = agent.apiModel || agent.model;
-    if (!providerId || !modelId) return undefined;
-    const budget = getContextBudget(providerId, modelId, agent.messages);
-    const tokens = anchorTokens || budget.estimatedTokens;
-    if (budget.contextWindow) {
-      return Math.min(100, Math.round((tokens / budget.contextWindow) * 100));
-    }
-    return budget.percent !== undefined ? Math.round(budget.percent) : undefined;
-  }, [agent]);
-  const [contextPercent, setContextPercent] = useState<number | undefined>(() => computeContextPercent());
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(agent.thinking);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(agent.mode);
   const [todos, setTodos] = useState<Todo[]>(() => agent.getTodos());
@@ -1148,15 +1121,6 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
                 break;
               }
               case "turn_end": {
-                if (event.usage) {
-                  setUsageTotals((totals) => ({
-                    prompt: totals.prompt + event.usage!.promptTokens,
-                    completion: totals.completion + event.usage!.completionTokens,
-                  }));
-                }
-                // Server-reported prompt tokens are the authoritative context
-                // size of the call that just finished.
-                setContextPercent(computeContextPercent(event.usage?.promptTokens));
                 if (event.willContinue) {
                   syncStreamingParts();
                   break;
@@ -1356,23 +1320,10 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       })()
     : null;
 
-  const mcpStates = mcpManager?.getStates() ?? [];
-  const mcpConnectedCount = mcpStates.filter((state) => state.status.kind === "connected").length;
-  const hasAgentsFile = useMemo(
-    () => existsSync(join(args.cwd, "AGENTS.md")) || existsSync(join(args.cwd, ".bubble", "AGENTS.md")),
-    [args.cwd],
-  );
-
   const welcomeBannerNode = showWelcome ? (
     <WelcomeBanner
       terminalColumns={terminalColumns}
-      modelLabel={agent.model ? displayModel(agent.model) : undefined}
-      cwd={friendlyCwd(args.cwd)}
       tips={buildTips(agent, safeRegistry)}
-      skillsCount={safeSkillRegistry.summaries().length}
-      mcpConnectedCount={mcpConnectedCount}
-      mcpTotalCount={mcpStates.length}
-      hasAgentsFile={hasAgentsFile}
       updateNotice={updateNotice}
     />
   ) : null;
@@ -1622,9 +1573,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
               thinkingLevel,
               showThinking: getAvailableThinkingLevels(agent.providerId, agent.apiModel).length > 2,
               mode: permissionMode,
-              usageTotals,
               verboseTrace,
-              contextPercent,
             })}
           />
         </Box>
