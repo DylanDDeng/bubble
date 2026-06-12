@@ -200,6 +200,8 @@ async function main() {
     toolSearchController,
     lspService,
     fileStateTracker,
+    // Lazy: sessionManager is resolved after tools are created.
+    checkpoints: () => sessionManager?.getCheckpoints(),
   });
 
   // Bring up MCP servers (if any). Failures are captured per-server and never

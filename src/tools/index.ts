@@ -45,6 +45,7 @@ import { createWriteTool } from "./write.js";
 import { createQuestionTool } from "./question.js";
 import { createMemoryReadSummaryTool, createMemorySearchTool } from "./memory.js";
 import type { QuestionController } from "../question/index.js";
+import type { CheckpointStore } from "../checkpoints.js";
 import { FileStateTracker } from "./file-state.js";
 
 export interface CreateAllToolsOptions {
@@ -55,6 +56,12 @@ export interface CreateAllToolsOptions {
   toolSearchController?: ToolSearchController;
   lspService?: LspService;
   fileStateTracker?: FileStateTracker;
+  /**
+   * Lazy accessor for the session's checkpoint store (the session manager may
+   * not exist yet when tools are created). Used by edit/write to snapshot
+   * files before mutating them so /rewind can restore.
+   */
+  checkpoints?: () => CheckpointStore | undefined;
 }
 
 export function createAllTools(
@@ -69,8 +76,8 @@ export function createAllTools(
     createReadTool(cwd, approval, lsp, fileState),
     createBashTool(cwd, approval, fileState),
     ...createManagedServerTools(cwd, approval),
-    createWriteTool(cwd, {}, approval, lsp, fileState),
-    createEditTool(cwd, approval, lsp, fileState),
+    createWriteTool(cwd, {}, approval, lsp, fileState, options.checkpoints),
+    createEditTool(cwd, approval, lsp, fileState, options.checkpoints),
     createGlobTool(cwd),
     createGrepTool(cwd),
     createLspTool(cwd, lsp, approval),

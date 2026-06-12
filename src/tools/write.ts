@@ -7,6 +7,7 @@ import { dirname } from "node:path";
 import { createTwoFilesPatch } from "diff";
 import { gateToolAction } from "../approval/tool-helper.js";
 import type { ApprovalController } from "../approval/types.js";
+import type { CheckpointStore } from "../checkpoints.js";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
 import { formatDiagnosticBlocks, type LspService } from "../lsp/index.js";
 import { isWithinWorkspace, type FileStateTracker } from "./file-state.js";
@@ -30,6 +31,7 @@ export function createWriteTool(
   approval?: ApprovalController,
   lsp?: LspService,
   fileState?: FileStateTracker,
+  checkpoints?: () => CheckpointStore | undefined,
 ): ToolRegistryEntry {
   return {
     name: "write",
@@ -93,6 +95,7 @@ export function createWriteTool(
         }
 
         try {
+          await checkpoints?.()?.captureBefore(filePath, existed ? oldContent : null);
           await mkdir(dirname(filePath), { recursive: true });
           await writeFile(filePath, args.content, "utf-8");
           await fileState?.observe(filePath, "write", args.content).catch(() => undefined);

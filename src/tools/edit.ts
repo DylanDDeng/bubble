@@ -9,6 +9,7 @@ import { access, readFile, writeFile } from "node:fs/promises";
 import { createTwoFilesPatch } from "diff";
 import { gateToolAction } from "../approval/tool-helper.js";
 import type { ApprovalController } from "../approval/types.js";
+import type { CheckpointStore } from "../checkpoints.js";
 import { countUnifiedDiffChanges } from "../diff-stats.js";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
 import { formatDiagnosticBlocks, type LspService } from "../lsp/index.js";
@@ -71,7 +72,13 @@ function firstString(...values: unknown[]): string | undefined {
   return undefined;
 }
 
-export function createEditTool(cwd: string, approval?: ApprovalController, lsp?: LspService, fileState?: FileStateTracker): ToolRegistryEntry {
+export function createEditTool(
+  cwd: string,
+  approval?: ApprovalController,
+  lsp?: LspService,
+  fileState?: FileStateTracker,
+  checkpoints?: () => CheckpointStore | undefined,
+): ToolRegistryEntry {
   return {
     name: "edit",
     effect: "write_direct",
@@ -197,6 +204,7 @@ export function createEditTool(cwd: string, approval?: ApprovalController, lsp?:
           };
         }
 
+        await checkpoints?.()?.captureBefore(filePath, original);
         await writeFile(filePath, applied.content, "utf-8");
         await fileState?.observe(filePath, "edit", applied.content).catch(() => undefined);
 

@@ -1210,6 +1210,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           }) as any),
           openPicker,
           openFeedback,
+          fillComposer,
           registry: safeRegistry,
           skillRegistry: safeSkillRegistry!,
           bashAllowlist,
@@ -1244,6 +1245,13 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
                   compactionSummary: summary,
                 },
               ]);
+            } else if (result.startsWith("⏪")) {
+              // /rewind truncated agent.messages — rebuild the transcript from
+              // the rewound state before appending the summary.
+              updateDisplayMessages(() => [
+                ...reconstructDisplayMessages(agent.messages),
+                { role: "assistant", content: result },
+              ]);
             } else {
               addMessage("assistant", result);
             }
@@ -1276,7 +1284,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         images.map((img) => ({ filename: img.filename, bytes: img.bytes })),
       );
     },
-    [addMessage, agent, args.cwd, openPicker, createProvider, safeRegistry, safeSkillRegistry, updateDisplayMessages, queueInput, submitSteer, requestExit]
+    [addMessage, agent, args.cwd, openPicker, createProvider, fillComposer, safeRegistry, safeSkillRegistry, updateDisplayMessages, queueInput, submitSteer, requestExit]
   );
 
   // Drain the queue once the run ends and no modal needs the user first.

@@ -426,9 +426,10 @@ type PickerItem = {
   gutter?: string;
   footer?: string;
 };
-type ProviderDialogStep = "providers" | "auth" | "key" | "models" | "skills";
+type ProviderDialogStep = "providers" | "auth" | "key" | "models" | "skills" | "rewind" | "rewind-action";
 type ProviderDialogState = {
   step: ProviderDialogStep;
+  /** Provider id for provider/model steps; the selected turn number for "rewind-action". */
   providerId?: string;
   query: string;
   index: number;
@@ -3331,7 +3332,12 @@ function OpenTuiApp(props: {
       step,
       providerId,
       query: "",
-      index: step === "models" ? preferredPickerIndex("model", items) : 0,
+      index: step === "models"
+        ? preferredPickerIndex("model", items)
+        // "(current)" sits at the bottom of the rewind list and is the safe default.
+        : step === "rewind"
+          ? Math.max(0, items.length - 1)
+          : 0,
       apiKey: "",
     };
     activePrompt()?.clear();
@@ -3360,6 +3366,8 @@ function OpenTuiApp(props: {
     if (step === "providers") return buildProviderConnectItems();
     if (step === "auth") return providerId ? buildPickerItems("provider-auth", providerId) : [];
     if (step === "skills") return buildSkillItems();
+    if (step === "rewind") return buildRewindPickerItems();
+    if (step === "rewind-action") return buildRewindActionItems(providerId);
     if (step === "models") {
       if (providerDialogModelItems?.key === modelPickerCacheKey(providerId)) {
         return providerDialogModelItems.items;
@@ -3583,6 +3591,8 @@ function OpenTuiApp(props: {
   function providerDialogTitleFor(state: ProviderDialogState) {
     if (state.step === "providers") return "Connect a provider";
     if (state.step === "skills") return "Select skill";
+    if (state.step === "rewind") return "Rewind — restore to the point before…";
+    if (state.step === "rewind-action") return "Rewind — what to restore?";
     const provider = providerDisplayName(state.providerId);
     if (state.step === "auth") return `${provider} auth method`;
     if (state.step === "key") return `${provider} API key`;
@@ -3599,6 +3609,8 @@ function OpenTuiApp(props: {
       return `↑/↓ move · enter select · esc close${connect}${count}`;
     }
     if (state.step === "skills") return `↑/↓ move · enter insert · esc close${count}`;
+    if (state.step === "rewind") return `↑/↓ move · enter continue · esc cancel${count}`;
+    if (state.step === "rewind-action") return "↑/↓ move · enter confirm · esc back";
     const escLabel = state.step === "providers" ? "esc close" : "esc back";
     return `↑/↓ move · enter select · ${escLabel}${count}`;
   }
@@ -3618,7 +3630,15 @@ function OpenTuiApp(props: {
     const contentWidth = Math.max(24, panelWidth - PROVIDER_DIALOG_ROW_RESERVED_WIDTH);
     const footer = state.step === "skills" ? 10 : state.step === "providers" ? 9 : 8;
     const minLabel = state.step === "skills" ? 18 : 24;
-    const desiredDetail = state.step === "skills" ? 30 : state.step === "providers" ? 24 : 16;
+    const desiredDetail = state.step === "skills"
+      ? 30
+      : state.step === "providers"
+        ? 24
+        : state.step === "rewind-action"
+          ? 40
+          : state.step === "rewind"
+            ? 18
+            : 16;
     const detail = Math.max(8, Math.min(desiredDetail, contentWidth - footer - minLabel));
     const label = Math.max(8, contentWidth - detail - footer);
     return { label, detail, footer };
@@ -3682,8 +3702,8 @@ function OpenTuiApp(props: {
         openProviderDialog("providers");
       } else if (state.step === "key") {
         openProviderDialog(state.providerId && registry.supportsOAuth(state.providerId) ? "auth" : "providers", state.providerId);
-      } else if (state.step === "models" || state.step === "skills") {
-        closeProviderDialog();
+      } else if (state.step === "rewind-action") {
+        openProviderDialog("rewind");
       } else {
         closeProviderDialog();
       }
@@ -3811,6 +3831,22 @@ function OpenTuiApp(props: {
         openProviderDialog("models", item.after.providerId);
         return;
       }
+      closeProviderDialog();
+      await executeSlash(item.command);
+      return;
+    }
+
+    if (state.step === "rewind") {
+      if (!item.value) {
+        // "(current)" — keep everything as is.
+        closeProviderDialog();
+        return;
+      }
+      openProviderDialog("rewind-action", item.value);
+      return;
+    }
+
+    if (state.step === "rewind-action") {
       closeProviderDialog();
       await executeSlash(item.command);
       return;
@@ -5182,6 +5218,14 @@ function OpenTuiApp(props: {
       openPicker: (kind, providerId) => {
         void openPicker(kind, providerId);
       },
+      openRewindPicker: () => {
+        openProviderDialog("rewind");
+      },
+      fillComposer: (text) => {
+        resetPromptHistoryBrowse();
+        setPromptText(text);
+        redrawDock();
+      },
       registry,
       skillRegistry: skills,
       bashAllowlist: props.options.bashAllowlist,
@@ -5222,6 +5266,12 @@ function OpenTuiApp(props: {
           streamingDisplay = undefined;
           redrawTranscript(undefined, displayMessages);
           setTimeout(() => setNotice(""), 4000);
+        } else if (result.startsWith("⏪")) {
+          // /rewind truncated agent.messages — rebuild the transcript from the
+          // rewound state before appending the summary.
+          displayMessages = reconstructDisplayMessages(props.agent.messages);
+          streamingDisplay = undefined;
+          addMessage("assistant", result);
         } else {
           addMessage("assistant", result);
         }
@@ -5495,6 +5545,48 @@ function OpenTuiApp(props: {
         value: provider.id,
         command: `/logout ${provider.id}`,
       }));
+  }
+
+  function buildRewindPickerItems(): PickerItem[] {
+    const session = props.options.sessionManager;
+    if (!session) return [];
+    const checkpoints = session.getCheckpoints();
+    const items: PickerItem[] = session.listUserTurns().map((turn, index) => {
+      const files = checkpoints.filesTouchedAt(turn.id).length;
+      return {
+        label: turn.preview,
+        detail: files > 0 ? `${files} file${files === 1 ? "" : "s"} changed` : "No code changes",
+        value: String(index + 1),
+        command: `/rewind ${index + 1}`,
+      };
+    });
+    // Selecting "(current)" keeps everything as is — mirrors Claude Code.
+    items.push({ label: "(current)", value: "", command: "" });
+    return items;
+  }
+
+  function buildRewindActionItems(turnNumber?: string): PickerItem[] {
+    if (!turnNumber) return [];
+    return [
+      {
+        label: "Restore conversation and code",
+        detail: "Rewind the chat and undo tracked file edits",
+        value: turnNumber,
+        command: `/rewind ${turnNumber}`,
+      },
+      {
+        label: "Restore conversation only",
+        detail: "Keep file changes on disk",
+        value: turnNumber,
+        command: `/rewind ${turnNumber} --chat`,
+      },
+      {
+        label: "Restore code only",
+        detail: "Undo tracked file edits, keep the conversation",
+        value: turnNumber,
+        command: `/rewind ${turnNumber} --code`,
+      },
+    ];
   }
 
   function buildSkillItems(): PickerItem[] {
