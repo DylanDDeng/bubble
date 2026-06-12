@@ -148,7 +148,13 @@ import { keyNameFromEvent, keyNameFromSequence } from "./global-key-router.js";
 import { EscapeConfirmationGate } from "./escape-confirmation.js";
 import type { ResolvedTheme } from "./detect-theme.js";
 import { appendHistoryEntry, loadHistorySync, pushHistoryEntry } from "./input-history.js";
-import { buildTraceGroups, traceGroupLabel, type TraceGroup } from "./trace-groups.js";
+import {
+  buildTraceGroups,
+  executeCommandBlock,
+  shouldInlineExecuteCommand,
+  traceGroupLabel,
+  type TraceGroup,
+} from "./trace-groups.js";
 import { sessionDisplayName } from "./session-display.js";
 import {
   bubbleWordmarkForWidth,
@@ -926,8 +932,6 @@ function OpenTuiApp(props: {
   const providerDialogFooters: Array<TextRenderable | undefined> = [];
   const promptModeLabels = new Set<TextRenderable>();
   const promptModelLabels = new Set<TextRenderable>();
-  let footerModeBadge: TextRenderable | undefined;
-  let footerTraceBadge: TextRenderable | undefined;
   let sidebarTokenText: TextRenderable | undefined;
   let sidebarPercentText: TextRenderable | undefined;
   let sidebarGaugeText: TextRenderable | undefined;
@@ -1094,7 +1098,6 @@ function OpenTuiApp(props: {
     feishuSetupAbortController?.abort();
     promptModeLabels.clear();
     promptModelLabels.clear();
-    footerModeBadge = undefined;
   });
 
   function showCopyToast(toast: CopyToastState, ttl = 2200) {
@@ -1411,18 +1414,12 @@ function OpenTuiApp(props: {
 
   const promptModeTitle = () => mode() === "plan" ? "Plan" : "Build";
   const promptModeBadge = () => promptModeBadgeContent(mode());
-  const footerModeText = () => footerPermissionModeText(mode());
   const effectiveShowThinking = () => showThinking() || verboseTrace();
-  const footerTraceText = () => footerTraceModeText(verboseTrace());
 
   function syncModeChrome() {
     if (uiDisposed) return;
     for (const label of [...promptModeLabels]) {
       if (!safeSetText(label, promptModeBadge())) promptModeLabels.delete(label);
-    }
-    if (footerModeBadge) {
-      footerModeBadge.fg = permissionModeColor(mode());
-      if (!safeSetText(footerModeBadge, footerModeText())) footerModeBadge = undefined;
     }
     safeRequestRender(sessionComposerShell);
     safeRequestRender(rootBox);
@@ -1430,10 +1427,6 @@ function OpenTuiApp(props: {
 
   function syncTraceChrome() {
     if (uiDisposed) return;
-    if (footerTraceBadge) {
-      footerTraceBadge.fg = verboseTrace() ? theme.warning : theme.textMuted;
-      if (!safeSetText(footerTraceBadge, footerTraceText())) footerTraceBadge = undefined;
-    }
     safeRequestRender(rootBox);
   }
 
@@ -1458,19 +1451,6 @@ function OpenTuiApp(props: {
     if (uiDisposed) return;
     promptModelLabels.add(ref);
     if (!safeSetText(ref, promptModelTitle())) promptModelLabels.delete(ref);
-  };
-
-  const registerFooterModeBadge = (ref: TextRenderable) => {
-    if (uiDisposed) return;
-    footerModeBadge = ref;
-    if (!safeSetText(ref, footerModeText())) footerModeBadge = undefined;
-  };
-
-  const registerFooterTraceBadge = (ref: TextRenderable) => {
-    if (uiDisposed) return;
-    footerTraceBadge = ref;
-    ref.fg = verboseTrace() ? theme.warning : theme.textMuted;
-    if (!safeSetText(ref, footerTraceText())) footerTraceBadge = undefined;
   };
 
   const cycleMode = () => {
@@ -7522,12 +7502,8 @@ function OpenTuiApp(props: {
     ]),
     renderFooter({
       cwd: props.args.cwd,
-      mode,
       running: isRunning,
       registerScanner: registerPromptScanner,
-      registerModeBadge: registerFooterModeBadge,
-      traceVerbose: verboseTrace,
-      registerTraceBadge: registerFooterTraceBadge,
     }),
     renderProviderDialog(),
     renderStatsPanel(),
@@ -8442,6 +8418,28 @@ function createTraceGroupRenderable(ctx: RenderContext, group: TraceGroup, synta
     createText(ctx, traceGroupHeaderStyledText(group, width), { wrapMode: "none" }),
   ];
 
+  const commandBlock = executeCommandBlockFor(group, width);
+  if (commandBlock) {
+    children.push(createBox(ctx, {
+      paddingLeft: 2,
+      flexDirection: "column",
+      flexShrink: 0,
+    }, [
+      ...commandBlock.lines.map((line, index) =>
+        createText(ctx, `${index === 0 ? "$ " : "  "}${line}`, {
+          fg: theme.toolText,
+          wrapMode: "word",
+        }),
+      ),
+      commandBlock.omitted > 0
+        ? createText(ctx, `... +${commandBlock.omitted} lines, Ctrl+O to view`, {
+            fg: theme.textMuted,
+            wrapMode: "word",
+          })
+        : null,
+    ].filter((node): node is NonNullable<typeof node> => !!node)));
+  }
+
   if (detailLines.length > 0) {
     children.push(createBox(ctx, {
       paddingLeft: 2,
@@ -8491,6 +8489,21 @@ function traceGroupDetailLines(group: TraceGroup) {
   return group.previewLines.length > 0 ? group.previewLines : group.items;
 }
 
+const EXECUTE_COMMAND_BLOCK_MAX_LINES = 4;
+
+function executeInlineBudget(group: TraceGroup, width: number): number {
+  return Math.max(14, width - group.title.length - 20);
+}
+
+// Returns the wrapped command block for execute groups, or null when the
+// command is short enough to live inline in the header (nothing clipped).
+function executeCommandBlockFor(group: TraceGroup, width: number): { lines: string[]; omitted: number } | null {
+  if (group.kind !== "execute") return null;
+  if (shouldInlineExecuteCommand(group, executeInlineBudget(group, width))) return null;
+  const block = executeCommandBlock(group, EXECUTE_COMMAND_BLOCK_MAX_LINES);
+  return block.lines.length > 0 ? block : null;
+}
+
 function traceGroupStatus(group: TraceGroup): { text: string; color: string } | null {
   if (group.hasError) {
     const count = group.errorCount || 1;
@@ -8519,8 +8532,14 @@ function traceGroupHeaderStyledText(group: TraceGroup, width = 80): StyledText {
   const chunks: StyledText["chunks"] = [
     fg(titleColor)(bold(group.title)),
   ];
-  if (group.command) {
-    chunks.push(fg(theme.toolText)(` ${truncate(group.command, commandWidth)}`));
+  if (group.kind === "execute" && group.description) {
+    chunks.push(fg(theme.toolText)(` ${truncate(group.description, commandWidth)}`));
+  } else if (group.command) {
+    // Execute commands only render inline when they fit whole; longer ones
+    // move to the wrapped command block below instead of being clipped here.
+    if (group.kind !== "execute" || shouldInlineExecuteCommand(group, commandWidth)) {
+      chunks.push(fg(theme.toolText)(` ${truncate(group.command, commandWidth)}`));
+    }
   } else if (group.count !== undefined && group.noun) {
     chunks.push(fg(theme.textMuted)(` ${group.count} ${group.noun}`));
   }
@@ -8531,6 +8550,7 @@ function traceGroupHeaderStyledText(group: TraceGroup, width = 80): StyledText {
 }
 
 function traceGroupCompactLabel(group: TraceGroup) {
+  if (group.description) return `${group.title} ${group.description}`;
   if (group.command) return `${group.title} ${group.command}`;
   if (group.count !== undefined && group.noun) return `${group.title} ${group.count} ${group.noun}`;
   return group.title;
@@ -8561,6 +8581,8 @@ function traceGroupRenderableSignature(group: TraceGroup) {
     group.count ?? "",
     group.noun ?? "",
     group.command ?? "",
+    group.description ?? "",
+    hashString(stableStringify(group.commandLines ?? [])),
     group.omitted,
     hashString(stableStringify(group.items)),
     hashString(stableStringify(group.previewLines)),
@@ -9441,12 +9463,23 @@ function renderTraceGroup(group: TraceGroup, syntaxStyle: SyntaxStyle, width = 8
   const status = traceGroupStatus(group);
   const detailColor = traceGroupDetailColor(group);
   const detailWidth = Math.max(20, width - 10);
+  const commandBlock = executeCommandBlockFor(group, width);
 
   return h("box", { paddingLeft: 3, marginTop: 1, flexDirection: "column", flexShrink: 0 },
     h("text", {
       content: traceGroupHeaderStyledText(group, width),
       wrapMode: "none",
     }),
+    commandBlock
+      ? h("box", { paddingLeft: 2, flexDirection: "column", flexShrink: 0 },
+        ...commandBlock.lines.map((line, index) =>
+          h("text", { fg: theme.toolText, wrapMode: "word" }, `${index === 0 ? "$ " : "  "}${line}`),
+        ),
+        commandBlock.omitted > 0
+          ? h("text", { fg: theme.textMuted, wrapMode: "word" }, `... +${commandBlock.omitted} lines, Ctrl+O to view`)
+          : null,
+      )
+      : null,
     detailLines.length > 0
       ? h("box", { paddingLeft: 2, flexDirection: "column", flexShrink: 0 },
         detailLines.map((line, index) =>
@@ -9585,12 +9618,8 @@ function renderTodos(todos: Todo[]) {
 
 function renderFooter(input: {
   cwd: string;
-  mode: () => PermissionMode;
   running: () => boolean;
   registerScanner: (sync: PromptScannerSync) => () => void;
-  registerModeBadge?: (ref: TextRenderable) => void;
-  traceVerbose?: () => boolean;
-  registerTraceBadge?: (ref: TextRenderable) => void;
 }) {
   return h("box", { flexShrink: 0, height: 1, paddingLeft: 1, paddingRight: 1, flexDirection: "row" },
     h("text", { fg: theme.border }, "─ "),
@@ -9601,14 +9630,6 @@ function renderFooter(input: {
       idleFg: theme.textMuted,
       runningFg: theme.primary,
     }),
-    h("text", {
-      fg: permissionModeColor(input.mode()),
-      ref: input.registerModeBadge,
-    }, footerPermissionModeText(input.mode())),
-    h("text", {
-      fg: input.traceVerbose?.() ? theme.warning : theme.textMuted,
-      ref: input.registerTraceBadge,
-    }, footerTraceModeText(input.traceVerbose?.() === true)),
     h("box", { flexGrow: 1 }),
   );
 }
@@ -10075,6 +10096,15 @@ function appendTraceGroupTranscript(chunks: StyledText["chunks"], group: TraceGr
   if (status) append(` ${status.text}`, status.color);
   appendLine("");
   if (group.pending) return;
+  // Verbose mode shows the full command with its original line structure
+  // whenever the header line alone doesn't already carry it verbatim.
+  const commandLines = group.commandLines ?? [];
+  if (group.kind === "execute" && (group.description || commandLines.length > 1)) {
+    for (const [index, line] of commandLines.entries()) {
+      append("     ", theme.borderSubtle);
+      appendLine(`${index === 0 ? "$ " : "  "}${line}`, theme.toolText);
+    }
+  }
   const detailLines = traceGroupDetailLines(group);
   const detailColor = traceGroupDetailColor(group);
   for (const [index, line] of detailLines.entries()) {
@@ -10275,17 +10305,6 @@ function permissionModeBadgeLabel(mode: PermissionMode) {
     case "plan": return "Plan";
     case "bypassPermissions": return "Bypass";
   }
-}
-
-function footerPermissionModeText(mode: PermissionMode) {
-  const info = PERMISSION_MODE_INFO[mode];
-  if (mode === "default") return "  mode: build · shift+tab plan";
-  if (mode === "plan") return "  mode: plan · shift+tab bypass";
-  return `  mode: ${info.shortTitle} · shift+tab build`;
-}
-
-function footerTraceModeText(verbose: boolean) {
-  return verbose ? "  trace: verbose · ctrl+o compact" : "  trace: compact · ctrl+o verbose";
 }
 
 function permissionModeColor(mode: PermissionMode) {

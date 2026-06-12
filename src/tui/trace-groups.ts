@@ -20,6 +20,10 @@ export interface TraceGroup {
   count?: number;
   noun?: string;
   command?: string;
+  /** Model-provided one-line summary of what the command does (bash `description` arg). */
+  description?: string;
+  /** Original command split into lines, line breaks preserved (execute groups only). */
+  commandLines?: string[];
   items: string[];
   previewLines: string[];
   errorLines: string[];
@@ -111,9 +115,34 @@ export function formatElapsed(startedAt: number | undefined, now = Date.now()): 
 }
 
 export function traceGroupLabel(group: TraceGroup): string {
+  if (group.description) return `${group.title} ${group.description}`;
   if (group.command) return `${group.title} ${group.command}`;
   if (group.count !== undefined && group.noun) return `${group.title} ${group.count} ${group.noun}`;
   return group.title;
+}
+
+/**
+ * An execute command is shown inline in the header only when nothing is lost:
+ * no description competing for the slot, a single logical line, and it fits
+ * the width budget. Otherwise the full command renders as a wrapped block
+ * below the header — commands are never clipped mid-line.
+ */
+export function shouldInlineExecuteCommand(group: TraceGroup, widthBudget: number): boolean {
+  if (group.kind !== "execute" || !group.command) return false;
+  if (group.description) return false;
+  const lines = group.commandLines ?? [];
+  if (lines.length > 1) return false;
+  return group.command.length <= widthBudget;
+}
+
+/** Visible command-block lines for compact rendering, capped at `maxLines`. */
+export function executeCommandBlock(
+  group: TraceGroup,
+  maxLines: number,
+): { lines: string[]; omitted: number } {
+  const lines = group.commandLines ?? [];
+  const shown = lines.slice(0, maxLines);
+  return { lines: shown, omitted: Math.max(0, lines.length - shown.length) };
 }
 
 function classifyTool(toolCall: DisplayToolCall): TraceClassifier {
@@ -337,11 +366,15 @@ function buildExecuteGroup(
 ): TraceGroup {
   const lines = resultLines(tool.result).map((line) => formatTracePath(line, options.homeDir));
   const { shown, omitted } = take(lines, options.maxPreviewLines);
+  const rawCommand = String(tool.args.command ?? tool.args.cmd ?? commandFromRawArguments(tool.rawArguments) ?? "");
+  const description = String(tool.args.description ?? "").trim() || undefined;
   return {
     kind: "execute",
     title: classifier.title,
     raw: [tool],
-    command: normalizeCommand(tool.args.command ?? tool.args.cmd ?? commandFromRawArguments(tool.rawArguments)),
+    command: normalizeCommand(rawCommand),
+    description,
+    commandLines: commandLinesOf(rawCommand),
     items: [],
     previewLines: shown,
     errorLines: [],
@@ -540,6 +573,18 @@ function plural(count: number, singular: string, pluralValue: string): string {
 function normalizeCommand(value: unknown): string {
   const command = String(value ?? "").replace(/\s+/g, " ").trim();
   return command;
+}
+
+// Preserves the command's own line structure (heredocs, && chains the model
+// formatted across lines); only trims trailing whitespace and outer blank lines.
+function commandLinesOf(rawCommand: string): string[] {
+  const lines = rawCommand
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.trimEnd());
+  while (lines.length > 0 && lines[0]!.trim() === "") lines.shift();
+  while (lines.length > 0 && lines[lines.length - 1]!.trim() === "") lines.pop();
+  return lines;
 }
 
 function commandFromRawArguments(rawArguments: string | undefined): string {

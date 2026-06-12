@@ -30,6 +30,10 @@ export function createBashTool(cwd: string, approval?: ApprovalController, _file
       type: "object",
       properties: {
         command: { type: "string", description: "Bash command to execute" },
+        description: {
+          type: "string",
+          description: "One short sentence (5-10 words) describing what this command does, shown to the user in the UI. Write it in the same language the user is conversing in.",
+        },
         timeout: { type: "number", description: "Timeout in seconds (optional)" },
       },
       required: ["command"],
