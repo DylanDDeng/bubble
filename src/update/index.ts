@@ -19,7 +19,9 @@ const require = createRequire(import.meta.url);
 
 export const PACKAGE_NAME = "@bubblebrain-ai/bubble";
 const REGISTRY_URL = `https://registry.npmjs.org/${PACKAGE_NAME}/latest`;
-const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // once a day
+// Throttle for the startup registry check. Short on purpose: with frequent
+// releases, a long TTL means users only learn about a new version a day late.
+const REFRESH_THROTTLE_MS = 30 * 60 * 1000;
 
 export function getCurrentVersion(): string {
   try {
@@ -239,32 +241,59 @@ async function writeCache(cache: UpdateCache): Promise<void> {
   }
 }
 
-async function refreshCacheInBackground(now: number): Promise<void> {
-  const latest = await fetchLatestVersion(4000);
-  if (latest) {
-    await writeCache({ lastCheck: now, latest });
-  }
+function formatUpdateNotice(current: string, latest: string): string {
+  return `Update available: v${current} → v${latest} · run \`bubble update\``;
+}
+
+export interface StartupUpdateCheck {
+  /** Notice derived from the local cache — available immediately, no network. */
+  notice: string | null;
+  /**
+   * Resolves once the background registry check completes: a notice string
+   * when it finds a version newer than both the running one and the cached
+   * `notice`, otherwise null. Never rejects.
+   */
+  refreshed: Promise<string | null>;
 }
 
 /**
- * Returns a one-line "update available" notice if the cached latest version is
- * newer than the running one. Reads only a local cache file (fast, no network
- * on the hot path); a stale cache triggers a fire-and-forget refresh so the
- * next launch is accurate. Never throws.
+ * Startup "update available" check. The immediate `notice` comes from the
+ * local cache file (fast, no network on the hot path). A registry refresh
+ * always runs in the background (throttled to once per 30 minutes) so a
+ * release published since the last launch surfaces in the *current* session
+ * via `refreshed`, instead of only after the cache TTL plus another restart.
+ * Never throws.
  */
-export async function getStartupUpdateNotice(): Promise<string | null> {
+export async function startStartupUpdateCheck(): Promise<StartupUpdateCheck> {
   try {
     const current = getCurrentVersion();
     const now = Date.now();
     const cache = await readCache();
-    if (!cache || now - cache.lastCheck > CHECK_INTERVAL_MS) {
-      void refreshCacheInBackground(now);
-    }
-    if (cache && compareVersions(cache.latest, current) > 0) {
-      return `Update available: v${current} → v${cache.latest} · run \`bubble update\``;
-    }
-    return null;
+    const notice = cache && compareVersions(cache.latest, current) > 0
+      ? formatUpdateNotice(current, cache.latest)
+      : null;
+    const refreshed = (async (): Promise<string | null> => {
+      try {
+        if (cache && now - cache.lastCheck < REFRESH_THROTTLE_MS) return null;
+        const latest = await fetchLatestVersion(4000);
+        if (!latest) return null;
+        await writeCache({ lastCheck: now, latest });
+        if (compareVersions(latest, current) <= 0) return null;
+        // The cache already surfaced this version in `notice` — stay quiet.
+        if (notice && cache && compareVersions(latest, cache.latest) <= 0) return null;
+        return formatUpdateNotice(current, latest);
+      } catch {
+        return null;
+      }
+    })();
+    return { notice, refreshed };
   } catch {
-    return null;
+    return { notice: null, refreshed: Promise.resolve(null) };
   }
+}
+
+/** Cache-only variant of {@link startStartupUpdateCheck} (still refreshes in the background). */
+export async function getStartupUpdateNotice(): Promise<string | null> {
+  const check = await startStartupUpdateCheck();
+  return check.notice;
 }

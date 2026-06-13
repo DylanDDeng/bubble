@@ -598,8 +598,9 @@ async function main() {
       runMemorySummary,
       runMemoryRefresh,
     };
-    const { getStartupUpdateNotice } = await import("./update/index.js");
-    const updateNotice = await getStartupUpdateNotice();
+    const { startStartupUpdateCheck } = await import("./update/index.js");
+    const updateCheck = await startStartupUpdateCheck();
+    const updateNotice = updateCheck.notice;
     // Two explicit branches (not a dynamic ternary import) so TypeScript
     // checks each renderer's RunTuiOptions shape independently.
     let exitWallMs: number | undefined;
@@ -612,6 +613,7 @@ async function main() {
         detectedTheme,
         onThemeModeChange: (mode) => userConfig.setThemeMode(mode),
         updateNotice: updateNotice ?? undefined,
+        updateNoticeRefresh: updateCheck.refreshed,
       });
     } else {
       const { runTui } = await import("./tui-ink/run.js");
