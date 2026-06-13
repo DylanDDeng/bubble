@@ -62,17 +62,38 @@ export function sanitizeAssistantProviderMetadata(
   if (!metadata || !anthropic || !blocks?.length) return metadata;
 
   let changed = false;
-  const sanitizedBlocks = blocks.map((block) => {
-    if (block.type !== "text" || typeof block.text !== "string") {
-      return block;
+  const sanitizedBlocks: typeof blocks = [];
+  for (const block of blocks) {
+    // Plaintext text blocks are unsigned, so rewriting them in place is safe.
+    if (block.type === "text" && typeof block.text === "string") {
+      const sanitizedText = sanitizeInternalReminderBlocks(block.text);
+      if (sanitizedText !== block.text) {
+        changed = true;
+        sanitizedBlocks.push({ ...block, text: sanitizedText });
+      } else {
+        sanitizedBlocks.push(block);
+      }
+      continue;
     }
-    const sanitizedText = sanitizeInternalReminderBlocks(block.text);
-    if (sanitizedText === block.text) {
-      return block;
+
+    // Extended-thinking blocks carry an Anthropic signature over their exact
+    // text; rewriting the text would invalidate the signature and the API
+    // would reject the replayed block. So when a thinking block's text carries
+    // internal markup (e.g. an echoed system reminder), DROP the whole block
+    // rather than mutate it. Thinking text is never user-visible — the display
+    // path renders message.reasoning, not contentBlocks — so dropping loses
+    // nothing on screen; it only keeps the verbatim reminder out of the
+    // persisted metadata and the Anthropic replay payload. redacted_thinking
+    // holds encrypted `data` (no plaintext field) and cannot carry a reminder.
+    if (block.type === "thinking" && typeof block.thinking === "string") {
+      if (sanitizeInternalReminderBlocks(block.thinking) !== block.thinking) {
+        changed = true;
+        continue;
+      }
     }
-    changed = true;
-    return { ...block, text: sanitizedText };
-  });
+
+    sanitizedBlocks.push(block);
+  }
 
   if (!changed) return metadata;
   return {

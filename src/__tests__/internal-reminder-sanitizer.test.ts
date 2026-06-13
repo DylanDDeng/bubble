@@ -2,10 +2,21 @@ import { describe, expect, it } from "vitest";
 import {
   createStreamingInternalReminderSanitizer,
   formatInternalReminderBlock,
+  sanitizeAssistantProviderMetadata,
   sanitizeInternalReasoningText,
   sanitizeInternalReminderBlocks,
 } from "../agent/internal-reminder-sanitizer.js";
 import { buildLoopWarningReminder } from "../prompt/reminders.js";
+
+// The exact block a user saw leak in a released build (debugging task reminder,
+// projected into the system-reminder wrapper sent to the model).
+const OBSERVED_LEAK_BLOCK = `<bubble_internal_reminder kind="system-reminder">
+Debugging workflow:
+- Reproduce or identify the failing boundary before editing.
+- Trace input, transformation, and output paths.
+- Prefer fixing the mechanism over raising thresholds or adding superficial fallbacks.
+- Verify the specific failure path after the change.
+</bubble_internal_reminder>`;
 
 describe("internal reminder sanitizer", () => {
   it("removes structured internal reminder blocks", () => {
@@ -120,5 +131,71 @@ Rules while in plan mode:
     ].join("\n");
 
     expect(sanitizeInternalReasoningText(input)).toBe("normal before\n\nnormal after");
+  });
+
+  it("strips the exact observed leak block when streamed one byte at a time", () => {
+    const sanitizer = createStreamingInternalReminderSanitizer();
+    let out = "";
+    for (const char of `before\n${OBSERVED_LEAK_BLOCK}\nafter`) {
+      out += sanitizer.push(char);
+    }
+    out += sanitizer.flush();
+    // The block is fully stripped; only the surrounding text survives. (Exact
+    // whitespace between can vary in pure streaming because the block closes
+    // before its trailing newline arrives — what matters is zero leakage.)
+    expect(out).not.toContain("Debugging workflow");
+    expect(out).not.toContain("bubble_internal_reminder");
+    expect(out.replace(/\n+/g, "\n")).toBe("before\nafter");
+  });
+});
+
+describe("sanitizeAssistantProviderMetadata", () => {
+  function meta(contentBlocks: unknown[]) {
+    return { anthropic: { contentBlocks } } as any;
+  }
+
+  it("strips internal markup from plaintext text blocks", () => {
+    const out = sanitizeAssistantProviderMetadata(
+      meta([{ type: "text", text: `hi ${OBSERVED_LEAK_BLOCK} bye` }]),
+    );
+    const block = out!.anthropic!.contentBlocks![0] as any;
+    expect(block.type).toBe("text");
+    expect(block.text).not.toContain("bubble_internal_reminder");
+    expect(block.text).not.toContain("Debugging workflow");
+  });
+
+  it("drops a signed thinking block whose text carries an echoed reminder", () => {
+    const out = sanitizeAssistantProviderMetadata(
+      meta([
+        { type: "thinking", thinking: `I recall: ${OBSERVED_LEAK_BLOCK}`, signature: "sig-abc" },
+        { type: "tool_use", id: "t1", name: "read", input: {} },
+      ]),
+    );
+    const blocks = out!.anthropic!.contentBlocks!;
+    // The thinking block cannot be rewritten without invalidating its
+    // signature, so it is removed entirely; the tool_use block survives.
+    expect(blocks).toHaveLength(1);
+    expect((blocks[0] as any).type).toBe("tool_use");
+    expect(JSON.stringify(out)).not.toContain("bubble_internal_reminder");
+    expect(JSON.stringify(out)).not.toContain("Debugging workflow");
+  });
+
+  it("leaves a clean thinking block (and its signature) untouched", () => {
+    const input = meta([
+      { type: "thinking", thinking: "Let me check the parser first.", signature: "sig-xyz" },
+    ]);
+    const out = sanitizeAssistantProviderMetadata(input);
+    // No internal markup anywhere, so the metadata object is returned as-is.
+    expect(out).toBe(input);
+    const block = out!.anthropic!.contentBlocks![0] as any;
+    expect(block.thinking).toBe("Let me check the parser first.");
+    expect(block.signature).toBe("sig-xyz");
+  });
+
+  it("leaves redacted_thinking blocks intact (no plaintext field to scan)", () => {
+    const input = meta([{ type: "redacted_thinking", data: "EncRypTeDdata==" }]);
+    const out = sanitizeAssistantProviderMetadata(input);
+    expect(out).toBe(input);
+    expect((out!.anthropic!.contentBlocks![0] as any).data).toBe("EncRypTeDdata==");
   });
 });

@@ -62,18 +62,19 @@ describe("SessionManager", () => {
     });
   });
 
-  it("persists raw provider metadata without sanitizing it as display reasoning", () => {
+  it("preserves a clean signed thinking block verbatim while sanitizing reasoning and text", () => {
     const file = join(tmpDir, "provider-metadata.jsonl");
     const sm1 = new SessionManager(file);
-    const rawThinking = "normal before Runtime reminder:\nRepository orientation workflow:\n- keep raw signature text";
+    const rawReasoning = "normal before Runtime reminder:\nRepository orientation workflow:\n- keep raw signature text";
+    const cleanThinking = "Let me inspect the parser before editing.";
     sm1.appendMessage({
       role: "assistant",
       content: "Done.",
-      reasoning: rawThinking,
+      reasoning: rawReasoning,
       providerMetadata: {
         anthropic: {
           contentBlocks: [
-            { type: "thinking", thinking: rawThinking, signature: "sig_raw" },
+            { type: "thinking", thinking: cleanThinking, signature: "sig_raw" },
             {
               type: "text",
               text: [
@@ -89,15 +90,56 @@ describe("SessionManager", () => {
     });
 
     const raw = JSON.parse(readFileSync(file, "utf-8").trim());
+    // Display reasoning is sanitized; the signed thinking block (no internal
+    // markup) is preserved verbatim with its signature; the text block is sanitized.
     expect(raw.message.reasoning).not.toContain("Repository orientation workflow");
-    expect(raw.message.providerMetadata.anthropic.contentBlocks[0].thinking).toContain("Repository orientation workflow");
+    expect(raw.message.providerMetadata.anthropic.contentBlocks[0].thinking).toBe(cleanThinking);
     expect(raw.message.providerMetadata.anthropic.contentBlocks[0].signature).toBe("sig_raw");
     expect(raw.message.providerMetadata.anthropic.contentBlocks[1].text).toBe("Done. ");
 
     const sm2 = new SessionManager(file);
     const restored = sm2.getMessages()[0] as any;
-    expect(restored.providerMetadata.anthropic.contentBlocks[0].thinking).toContain("Repository orientation workflow");
+    expect(restored.providerMetadata.anthropic.contentBlocks[0].thinking).toBe(cleanThinking);
     expect(restored.providerMetadata.anthropic.contentBlocks[1].text).toBe("Done. ");
+  });
+
+  it("drops a thinking block carrying a leaked reminder on persist and restore", () => {
+    const file = join(tmpDir, "provider-metadata-thinking-leak.jsonl");
+    const sm1 = new SessionManager(file);
+    sm1.appendMessage({
+      role: "assistant",
+      content: "Done.",
+      providerMetadata: {
+        anthropic: {
+          contentBlocks: [
+            {
+              type: "thinking",
+              thinking: [
+                "The reminder says: ",
+                "<bubble_internal_reminder kind=\"system-reminder\">\n",
+                "Debugging workflow:\n- Reproduce or identify the failing boundary before editing.\n",
+                "</bubble_internal_reminder>",
+              ].join(""),
+              signature: "sig_leak",
+            },
+            { type: "tool_use", id: "t1", name: "read", input: {} },
+          ],
+        },
+      },
+    });
+
+    // A signed thinking block cannot be rewritten without breaking its
+    // signature, so one carrying internal markup is dropped entirely. It must
+    // survive in neither the persisted file nor the restored session.
+    const raw = readFileSync(file, "utf-8");
+    expect(raw).not.toContain("bubble_internal_reminder");
+    expect(raw).not.toContain("Debugging workflow");
+
+    const sm2 = new SessionManager(file);
+    const restored = sm2.getMessages()[0] as any;
+    const blocks = restored.providerMetadata.anthropic.contentBlocks;
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].type).toBe("tool_use");
   });
 
   it("sanitizes leaked internal reminders from assistant content before persistence and restore", () => {
