@@ -1,5 +1,14 @@
-import { describe, expect, it } from "vitest";
-import { compareVersions, upgradeCommandFor, PACKAGE_NAME } from "../update/index.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import {
+  compareVersions,
+  getCurrentVersion,
+  startStartupUpdateCheck,
+  upgradeCommandFor,
+  PACKAGE_NAME,
+} from "../update/index.js";
 
 describe("compareVersions", () => {
   it("orders numeric cores", () => {
@@ -35,5 +44,99 @@ describe("upgradeCommandFor", () => {
   it("defaults unknown to npm and returns null for homebrew", () => {
     expect(upgradeCommandFor("unknown")).toEqual({ cmd: "npm", args: ["install", "-g", spec] });
     expect(upgradeCommandFor("homebrew")).toBeNull();
+  });
+});
+
+describe("startStartupUpdateCheck", () => {
+  const previousHome = process.env.BUBBLE_HOME;
+  const current = getCurrentVersion();
+
+  function setupHome(cache?: { lastCheck: number; latest: string }): string {
+    const home = join(tmpdir(), `bubble-update-check-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    mkdirSync(home, { recursive: true });
+    if (cache) writeFileSync(join(home, "update-check.json"), JSON.stringify(cache));
+    process.env.BUBBLE_HOME = home;
+    return home;
+  }
+
+  function stubRegistry(version: string | null) {
+    const fetchMock = vi.fn(async () => {
+      if (version === null) throw new Error("network down");
+      return { ok: true, json: async () => ({ version }) } as unknown as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    if (previousHome === undefined) delete process.env.BUBBLE_HOME;
+    else process.env.BUBBLE_HOME = previousHome;
+  });
+
+  it("returns an immediate notice from a cache that already knows a newer version", async () => {
+    setupHome({ lastCheck: Date.now(), latest: "99.0.0" });
+    const fetchMock = stubRegistry("99.0.0");
+
+    const check = await startStartupUpdateCheck();
+
+    expect(check.notice).toContain(`v${current} → v99.0.0`);
+    // Fresh cache: the throttle suppresses the network refresh entirely.
+    expect(await check.refreshed).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a release published since the last launch in the same session", async () => {
+    const home = setupHome(); // no cache at all
+    const fetchMock = stubRegistry("99.0.0");
+
+    const check = await startStartupUpdateCheck();
+
+    expect(check.notice).toBeNull();
+    expect(await check.refreshed).toContain(`v${current} → v99.0.0`);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const written = JSON.parse(readFileSync(join(home, "update-check.json"), "utf8"));
+    expect(written.latest).toBe("99.0.0");
+  });
+
+  it("refreshes a stale cache and notifies when the registry has something newer", async () => {
+    setupHome({ lastCheck: Date.now() - 60 * 60 * 1000, latest: current });
+    stubRegistry("99.0.0");
+
+    const check = await startStartupUpdateCheck();
+
+    expect(check.notice).toBeNull();
+    expect(await check.refreshed).toContain("v99.0.0");
+  });
+
+  it("does not repeat a notice the cache already surfaced", async () => {
+    setupHome({ lastCheck: Date.now() - 60 * 60 * 1000, latest: "99.0.0" });
+    stubRegistry("99.0.0");
+
+    const check = await startStartupUpdateCheck();
+
+    expect(check.notice).toContain("v99.0.0");
+    expect(await check.refreshed).toBeNull();
+  });
+
+  it("stays quiet when the registry is unreachable", async () => {
+    const home = setupHome();
+    stubRegistry(null);
+
+    const check = await startStartupUpdateCheck();
+
+    expect(check.notice).toBeNull();
+    expect(await check.refreshed).toBeNull();
+    expect(existsSync(join(home, "update-check.json"))).toBe(false);
+  });
+
+  it("stays quiet when already on the latest version", async () => {
+    setupHome();
+    stubRegistry(current);
+
+    const check = await startStartupUpdateCheck();
+
+    expect(check.notice).toBeNull();
+    expect(await check.refreshed).toBeNull();
   });
 });

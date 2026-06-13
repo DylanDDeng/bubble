@@ -202,6 +202,12 @@ export interface RunTuiOptions {
   /** One-line "update available" notice shown on the home screen, if any. */
   updateNotice?: string;
   /**
+   * Background registry check started before the TUI. Resolves with a late
+   * "update available" notice (or null); the TUI surfaces it live — on the
+   * home screen when still there, otherwise as a composer notice.
+   */
+  updateNoticeRefresh?: Promise<string | null>;
+  /**
    * Swap the active session in place (driven by the /session picker).
    * Rebinds persistence to the picked session file and replaces the agent's
    * message history; the TUI rebuilds its transcript from the result.
@@ -855,6 +861,9 @@ function OpenTuiApp(props: {
   let rootBox: BoxRenderable | undefined;
   let sidebarShell: BoxRenderable | undefined;
   let homeSurfaceShell: BoxRenderable | undefined;
+  let homeUpdateNotice = props.options.updateNotice;
+  let homeUpdateNoticeBox: BoxRenderable | undefined;
+  let homeUpdateNoticeText: TextRenderable | undefined;
   let transcriptHost: BoxRenderable | undefined;
   const transcriptState: TranscriptState = {
     entries: [],
@@ -6211,12 +6220,46 @@ function OpenTuiApp(props: {
       h("box", { flexShrink: 0, flexDirection: "column", alignItems: "center", paddingTop: 1 },
         h("text", { fg: theme.textMuted, content: `v${getCurrentVersion()}` }),
       ),
-      ...(props.options.updateNotice
-        ? [h("box", { flexShrink: 0, flexDirection: "column", alignItems: "center" },
-            h("text", { fg: theme.accent, content: props.options.updateNotice }))]
-        : []),
+      // Always mounted so a late registry check can reveal it mid-session.
+      h("box", {
+        ref: (ref: BoxRenderable) => {
+          homeUpdateNoticeBox = ref;
+          ref.visible = !!homeUpdateNotice;
+        },
+        visible: !!homeUpdateNotice,
+        flexShrink: 0,
+        flexDirection: "column",
+        alignItems: "center",
+      },
+      h("text", {
+        ref: (ref: TextRenderable) => { homeUpdateNoticeText = ref; },
+        fg: theme.accent,
+        content: homeUpdateNotice ?? "",
+      })),
     ]);
   }
+
+  function watchUpdateNoticeRefresh() {
+    const refresh = props.options.updateNoticeRefresh;
+    if (!refresh) return;
+    refresh.then((notice) => {
+      if (!notice || uiDisposed) return;
+      homeUpdateNotice = notice;
+      if (homeUpdateNoticeText) homeUpdateNoticeText.content = notice;
+      if (homeUpdateNoticeBox) homeUpdateNoticeBox.visible = true;
+      // Already chatting (or resumed straight into a transcript): the home
+      // banner is hidden, so surface the nudge as a transcript line instead.
+      // (Not setNotice: the notice() row in renderSessionView is evaluated
+      // once at initial render and never materializes afterwards.)
+      if (!isHomeSurfaceActive(streamingDisplay)) addMessage("assistant", notice);
+      rootBox?.requestRender();
+    }).catch(() => {
+      // The check is best-effort; never disturb the session over it.
+    });
+  }
+  // Component body, not onMount: the onMount callback never fires under the
+  // current @opentui/solid runtime, so anything registered there is dead code.
+  watchUpdateNoticeRefresh();
 
   function renderQuestionPanelHost() {
     return h("box", {
