@@ -144,12 +144,12 @@ describe("Agent", () => {
     expect(assistant?.role === "assistant" ? assistant.content : "").toBe(text);
   });
 
-  it("keeps raw provider thinking blocks separate from sanitized reasoning", async () => {
-    const rawThinking = "normal before Runtime reminder:\nRepository orientation workflow:\n- keep raw";
+  it("preserves a clean signed thinking block while sanitizing reasoning", async () => {
+    const cleanThinking = "Let me inspect the parser before editing.";
     const provider = createMockProvider([
       [
-        { type: "reasoning_delta", content: rawThinking },
-        { type: "provider_content_block", provider: "anthropic", block: { type: "thinking", thinking: rawThinking, signature: "sig_raw" } },
+        { type: "reasoning_delta", content: "normal before Runtime reminder:\nRepository orientation workflow:\n- keep raw" },
+        { type: "provider_content_block", provider: "anthropic", block: { type: "thinking", thinking: cleanThinking, signature: "sig_raw" } },
         { type: "provider_content_block", provider: "anthropic", block: { type: "text", text: "Done." } },
         { type: "text", content: "Done." },
         { type: "done" },
@@ -162,9 +162,42 @@ describe("Agent", () => {
     expect(assistant.reasoning).not.toContain("Repository orientation workflow");
     expect(assistant.providerMetadata.anthropic.contentBlocks[0]).toEqual({
       type: "thinking",
-      thinking: rawThinking,
+      thinking: cleanThinking,
       signature: "sig_raw",
     });
+  });
+
+  it("drops a provider thinking block that carries an echoed internal reminder", async () => {
+    const leakedThinking = [
+      "The reminder says: ",
+      "<bubble_internal_reminder kind=\"system-reminder\">\n",
+      "Debugging workflow:\n- Reproduce or identify the failing boundary before editing.\n",
+      "</bubble_internal_reminder>",
+    ].join("");
+    const provider = createMockProvider([
+      [
+        { type: "reasoning_delta", content: leakedThinking },
+        { type: "provider_content_block", provider: "anthropic", block: { type: "thinking", thinking: leakedThinking, signature: "sig_leak" } },
+        { type: "provider_content_block", provider: "anthropic", block: { type: "text", text: "Done." } },
+        { type: "text", content: "Done." },
+        { type: "done" },
+      ],
+    ]);
+    const agent = new Agent({ provider, model: "minimax:MiniMax-M3", tools: [] });
+    const events = await collectEvents(agent, "Hi", "/tmp");
+
+    const assistant = agent.messages.find((message) => message.role === "assistant") as any;
+    // The signed thinking block carrying the reminder is dropped (cannot be
+    // rewritten without breaking its signature); only the text block remains.
+    const blocks = assistant.providerMetadata.anthropic.contentBlocks;
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toEqual({ type: "text", text: "Done." });
+    expect(JSON.stringify(assistant)).not.toContain("bubble_internal_reminder");
+    expect(JSON.stringify(assistant)).not.toContain("Debugging workflow");
+    // And nothing reminder-shaped reached the user-visible event stream.
+    const visible = events.filter((e) => e.type === "text_delta" || e.type === "reasoning_delta").map((e: any) => e.content).join("");
+    expect(visible).not.toContain("bubble_internal_reminder");
+    expect(visible).not.toContain("Debugging workflow");
   });
 
   it("retries a reasoning-only assistant turn instead of appending invalid history", async () => {
