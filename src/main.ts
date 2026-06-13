@@ -547,8 +547,41 @@ async function main() {
     } else {
       detectedTheme = themeConfig.mode;
     }
+    // In-place session switch for the /session picker: rebind every closure
+    // that persists to the session (onMessageAppend, markers, title updater)
+    // by reassigning the outer `sessionManager`, then replace the agent's
+    // history the same way startup resume does.
+    const switchSession = (sessionFile: string): { manager: SessionManager } | { error: string } => {
+      try {
+        const next = new SessionManager(sessionFile);
+        const history = next.getMessages();
+        sessionManager = next;
+        sessionPromptCacheKey = next.getOrCreatePromptCacheKey();
+        sessionTitleUpdater = createSessionTitleUpdater({
+          sessionManager: next,
+          complete: (messages, completeOptions) => agent.complete(messages, completeOptions),
+        });
+        next.updateMetadata({
+          ...(agent.model ? { model: agent.model } : {}),
+          cwd: args.cwd,
+          thinkingLevel: agent.thinking,
+          reasoningEffort: agent.thinking,
+        });
+        // Keep the live system/meta head (mode reminders survive the switch),
+        // mirroring the /rewind history-replacement pattern.
+        const head = agent.messages.filter((m) => m.role === "system" || m.role === "meta");
+        agent.messages = [...head, ...history];
+        agent.setTodos(next.getTodos());
+        agent.resetContextUsageAnchor();
+        return { manager: next };
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    };
+
     const commonOptions = {
       sessionManager,
+      switchSession,
       createProvider,
       registry,
       skillRegistry,

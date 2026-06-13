@@ -822,3 +822,79 @@ describe("slash commands", () => {
     expect(result.result).toContain('Use /repo-review <your request> to run with this skill');
   });
 });
+
+describe("/session", () => {
+  async function withSessionFixture(run: (fixture: { cwd: string }) => Promise<void>) {
+    const previousHome = process.env.BUBBLE_HOME;
+    const root = join(tmpdir(), `bubble-session-cmd-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    process.env.BUBBLE_HOME = root;
+    try {
+      await run({ cwd: join(root, "project") });
+    } finally {
+      if (previousHome === undefined) delete process.env.BUBBLE_HOME;
+      else process.env.BUBBLE_HOME = previousHome;
+    }
+  }
+
+  it("opens the session picker when the host provides one", async () => {
+    const openSessionPicker = vi.fn();
+    const ctx = createContext({ openSessionPicker });
+
+    const result = await slashRegistry.execute("/session", ctx);
+
+    expect(result.handled).toBe(true);
+    expect(result.result).toBeUndefined();
+    expect(openSessionPicker).toHaveBeenCalled();
+  });
+
+  it("falls back to a text listing when no picker is available", async () => {
+    await withSessionFixture(async ({ cwd }) => {
+      const { SessionManager } = await import("../session.js");
+      const session = SessionManager.create(cwd, "2026-06-13T08-00-00-000Z.jsonl");
+      session.setMetadata({ cwd, title: "Refactor the parser" });
+      session.appendMessage({ role: "user", content: "refactor the parser please" });
+
+      const ctx = createContext({ cwd });
+      const result = await slashRegistry.execute("/session", ctx);
+
+      expect(result.handled).toBe(true);
+      expect(result.result).toContain("Recent sessions:");
+      expect(result.result).toContain("Refactor the parser");
+      expect(result.result).toContain("bubble --resume --session");
+    });
+  });
+
+  it("marks the active session in /session --list", async () => {
+    await withSessionFixture(async ({ cwd }) => {
+      const { SessionManager } = await import("../session.js");
+      const current = SessionManager.create(cwd, "2026-06-13T09-00-00-000Z.jsonl");
+      current.setMetadata({ cwd, title: "Active conversation" });
+      current.appendMessage({ role: "user", content: "hello" });
+
+      const ctx = createContext({ cwd, sessionManager: current });
+      const result = await slashRegistry.execute("/session --list", ctx);
+
+      expect(result.handled).toBe(true);
+      expect(result.result).toContain("Active conversation");
+      expect(result.result).toContain("(current)");
+    });
+  });
+
+  it("reports when the project has no sessions yet", async () => {
+    await withSessionFixture(async ({ cwd }) => {
+      const ctx = createContext({ cwd });
+      const result = await slashRegistry.execute("/session", ctx);
+
+      expect(result.handled).toBe(true);
+      expect(result.result).toBe("No sessions recorded for this project yet.");
+    });
+  });
+
+  it("rejects unknown arguments with a usage hint", async () => {
+    const ctx = createContext();
+    const result = await slashRegistry.execute("/session bogus", ctx);
+
+    expect(result.handled).toBe(true);
+    expect(result.result).toContain("Usage: /session");
+  });
+});

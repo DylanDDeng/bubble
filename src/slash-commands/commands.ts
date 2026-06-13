@@ -6,7 +6,10 @@ import { parseRule } from "../permissions/rule.js";
 import type { RuleList, SettingsScope } from "../permissions/settings.js";
 import { encodeModel, decodeModel, displayModel, BUILTIN_PROVIDERS, isUserVisibleProvider } from "../provider-registry.js";
 import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingLevel } from "../provider-transform.js";
+import { SessionManager } from "../session.js";
 import { buildSystemPrompt } from "../system-prompt.js";
+import { normalizeSingleLine } from "../text-display.js";
+import { formatRelativeTime } from "../tui/recent-activity.js";
 import { HOOK_EVENT_NAMES, isHookEventName } from "../hooks/index.js";
 import type { ThinkingLevel } from "../types.js";
 import { isThinkingLevel } from "../variant/thinking-level.js";
@@ -550,9 +553,34 @@ const builtinSlashCommandEntries: SlashCommand[] = [
   },
   {
     name: "session",
-    description: "Show current session information",
+    description: "Browse recent sessions and resume one. /session to pick, /session --list to print",
     async handler(args, ctx) {
-      return `Session info not implemented yet.`;
+      const flag = args.trim();
+      if (flag && flag !== "--list") {
+        return "Usage: /session (open the session picker) or /session --list";
+      }
+      if (!flag && ctx.openSessionPicker) {
+        ctx.openSessionPicker();
+        return;
+      }
+
+      const summaries = SessionManager.summarizeSessionsForCwd(ctx.cwd);
+      if (summaries.length === 0) {
+        return "No sessions recorded for this project yet.";
+      }
+      const activeFile = ctx.sessionManager?.getSessionFile();
+      const lines = ["Recent sessions:"];
+      for (const summary of summaries.slice(0, 15)) {
+        const current = summary.file === activeFile ? " (current)" : "";
+        const title = normalizeSingleLine(summary.title || summary.preview || summary.name);
+        const count = `${summary.messageCount} message${summary.messageCount === 1 ? "" : "s"}`;
+        lines.push(`- ${title} — ${count}, ${formatRelativeTime(summary.mtime)} (${summary.name})${current}`);
+      }
+      if (summaries.length > 15) {
+        lines.push(`- … and ${summaries.length - 15} more`);
+      }
+      lines.push("", "Resume one with: bubble --resume --session <name>");
+      return lines.join("\n");
     },
   },
   {

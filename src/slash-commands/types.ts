@@ -53,6 +53,8 @@ export interface SlashCommandContext {
   openFeedback?: (initialDescription: string) => void;
   /** Open the interactive rewind picker. When absent, /rewind falls back to a text listing. */
   openRewindPicker?: () => void;
+  /** Open the interactive session picker. When absent, /session falls back to a text listing. */
+  openSessionPicker?: () => void;
   /** Replace the composer/input box content (e.g. /rewind restores the rewound message for re-editing). */
   fillComposer?: (text: string) => void;
   /** Open the interactive usage stats panel. */

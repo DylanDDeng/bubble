@@ -60,7 +60,8 @@ import {
 import type { CliArgs } from "../cli.js";
 import type { ThemeMode } from "../config.js";
 import type { ExternalHookController } from "../hooks/controller.js";
-import type { SessionManager } from "../session.js";
+import { SessionManager } from "../session.js";
+import { buildSessionPickerEntries, preferredSessionPickerIndex } from "./session-picker-data.js";
 import type { ContentPart, Message, PermissionMode, PlanDecision, Provider, ThinkingLevel, Todo, TokenUsage, ToolResultMetadata } from "../types.js";
 import type { ProviderRegistry } from "../provider-registry.js";
 import { BUILTIN_PROVIDERS, decodeModel, displayModel, isUserVisibleProvider } from "../provider-registry.js";
@@ -200,6 +201,12 @@ export interface RunTuiOptions {
   runMemoryRefresh?: (scope?: MemoryScope) => Promise<string>;
   /** One-line "update available" notice shown on the home screen, if any. */
   updateNotice?: string;
+  /**
+   * Swap the active session in place (driven by the /session picker).
+   * Rebinds persistence to the picked session file and replaces the agent's
+   * message history; the TUI rebuilds its transcript from the result.
+   */
+  switchSession?: (sessionFile: string) => { manager: SessionManager } | { error: string };
 }
 
 type RawGlobalKeyHandler = (sequence: string) => boolean;
@@ -426,7 +433,7 @@ type PickerItem = {
   gutter?: string;
   footer?: string;
 };
-type ProviderDialogStep = "providers" | "auth" | "key" | "models" | "skills" | "rewind" | "rewind-action";
+type ProviderDialogStep = "providers" | "auth" | "key" | "models" | "skills" | "rewind" | "rewind-action" | "sessions";
 type ProviderDialogState = {
   step: ProviderDialogStep;
   /** Provider id for provider/model steps; the selected turn number for "rewind-action". */
@@ -3343,7 +3350,10 @@ function OpenTuiApp(props: {
         // "(current)" sits at the bottom of the rewind list and is the safe default.
         : step === "rewind"
           ? Math.max(0, items.length - 1)
-          : 0,
+          // Sessions: start on the most recent conversation that is not the active one.
+          : step === "sessions"
+            ? preferredSessionPickerIndex(items)
+            : 0,
       apiKey: "",
     };
     activePrompt()?.clear();
@@ -3374,6 +3384,7 @@ function OpenTuiApp(props: {
     if (step === "skills") return buildSkillItems();
     if (step === "rewind") return buildRewindPickerItems();
     if (step === "rewind-action") return buildRewindActionItems(providerId);
+    if (step === "sessions") return buildSessionPickerItems();
     if (step === "models") {
       if (providerDialogModelItems?.key === modelPickerCacheKey(providerId)) {
         return providerDialogModelItems.items;
@@ -3599,6 +3610,7 @@ function OpenTuiApp(props: {
     if (state.step === "skills") return "Select skill";
     if (state.step === "rewind") return "Rewind — restore to the point before…";
     if (state.step === "rewind-action") return "Rewind — what to restore?";
+    if (state.step === "sessions") return "Resume a session";
     const provider = providerDisplayName(state.providerId);
     if (state.step === "auth") return `${provider} auth method`;
     if (state.step === "key") return `${provider} API key`;
@@ -3617,6 +3629,7 @@ function OpenTuiApp(props: {
     if (state.step === "skills") return `↑/↓ move · enter insert · esc close${count}`;
     if (state.step === "rewind") return `↑/↓ move · enter continue · esc cancel${count}`;
     if (state.step === "rewind-action") return "↑/↓ move · enter confirm · esc back";
+    if (state.step === "sessions") return `↑/↓ move · enter resume · esc close${count}`;
     const escLabel = state.step === "providers" ? "esc close" : "esc back";
     return `↑/↓ move · enter select · ${escLabel}${count}`;
   }
@@ -3634,7 +3647,7 @@ function OpenTuiApp(props: {
 
   function providerDialogColumnWidths(state: ProviderDialogState, panelWidth: number) {
     const contentWidth = Math.max(24, panelWidth - PROVIDER_DIALOG_ROW_RESERVED_WIDTH);
-    const footer = state.step === "skills" ? 10 : state.step === "providers" ? 9 : 8;
+    const footer = state.step === "skills" || state.step === "sessions" ? 10 : state.step === "providers" ? 9 : 8;
     const minLabel = state.step === "skills" ? 18 : 24;
     const desiredDetail = state.step === "skills"
       ? 30
@@ -3644,7 +3657,9 @@ function OpenTuiApp(props: {
           ? 40
           : state.step === "rewind"
             ? 18
-            : 16;
+            : state.step === "sessions"
+              ? 14
+              : 16;
     const detail = Math.max(8, Math.min(desiredDetail, contentWidth - footer - minLabel));
     const label = Math.max(8, contentWidth - detail - footer);
     return { label, detail, footer };
@@ -3849,6 +3864,16 @@ function OpenTuiApp(props: {
         return;
       }
       openProviderDialog("rewind-action", item.value);
+      return;
+    }
+
+    if (state.step === "sessions") {
+      closeProviderDialog();
+      if (!item.value || item.value === props.options.sessionManager?.getSessionFile()) {
+        // Selecting the active session keeps everything as is.
+        return;
+      }
+      await switchToSession(item.value);
       return;
     }
 
@@ -5227,6 +5252,9 @@ function OpenTuiApp(props: {
       openRewindPicker: () => {
         openProviderDialog("rewind");
       },
+      openSessionPicker: () => {
+        openProviderDialog("sessions");
+      },
       fillComposer: (text) => {
         resetPromptHistoryBrowse();
         setPromptText(text);
@@ -5569,6 +5597,46 @@ function OpenTuiApp(props: {
     // Selecting "(current)" keeps everything as is — mirrors Claude Code.
     items.push({ label: "(current)", value: "", command: "" });
     return items;
+  }
+
+  function buildSessionPickerItems(): PickerItem[] {
+    const activeFile = props.options.sessionManager?.getSessionFile();
+    const summaries = SessionManager.summarizeSessionsForCwd(props.args.cwd);
+    return buildSessionPickerEntries(summaries, activeFile).map((entry) => ({
+      label: entry.label,
+      detail: entry.detail,
+      value: entry.value,
+      command: "",
+      footer: entry.footer,
+      gutter: entry.gutter,
+    }));
+  }
+
+  async function switchToSession(sessionFile: string) {
+    const switchSession = props.options.switchSession;
+    if (!switchSession) {
+      addMessage("error", "Session switching is not available in this mode.");
+      return;
+    }
+    if (isRunning()) {
+      setNotice("Stop the current run before switching sessions.");
+      return;
+    }
+    const result = switchSession(sessionFile);
+    if ("error" in result) {
+      addMessage("error", `Failed to switch session: ${result.error}`);
+      return;
+    }
+    props.options.sessionManager = result.manager;
+    // Same rebuild path as /rewind: the agent history was replaced wholesale,
+    // so reconstruct the transcript from it instead of patching the display.
+    displayMessages = reconstructDisplayMessages(props.agent.messages);
+    streamingDisplay = undefined;
+    redrawTranscript(undefined, displayMessages);
+    syncTodosFromAgent();
+    bumpSidebar();
+    syncPromptSurfaces(true);
+    addMessage("assistant", `⤷ Resumed session: ${sessionDisplayName(result.manager)}`);
   }
 
   function buildRewindActionItems(turnNumber?: string): PickerItem[] {
