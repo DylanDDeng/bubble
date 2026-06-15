@@ -2,6 +2,7 @@ import os from "node:os";
 import type { DisplayToolCall } from "./display-history.js";
 import { getEditDiffDetails } from "./edit-diff.js";
 import { formatSubagentRoute, type SubagentRouteLike } from "../agent/subagent-route-format.js";
+import { mcpInfoFromString } from "../mcp/name.js";
 
 export type TraceGroupKind =
   | "list"
@@ -171,13 +172,18 @@ function classifyTool(toolCall: DisplayToolCall): TraceClassifier {
       return { kind: "edit", title: "Edit", bucketKey: `edit:${toolCall.id}`, groupable: false };
     case "write":
       return { kind: "write", title: "Write", bucketKey: "write", groupable: true };
-    default:
+    default: {
+      const mcp = mcpInfoFromString(toolCall.name);
+      const title = mcp
+        ? `${mcp.serverName.toUpperCase()}: ${mcp.toolName}`
+        : displayToolName(toolCall.name);
       return {
         kind: "other",
-        title: displayToolName(toolCall.name),
+        title,
         bucketKey: `${toolCall.name}:${toolCall.id}`,
         groupable: false,
       };
+    }
   }
 }
 
@@ -482,15 +488,23 @@ function buildOtherGroup(
   errorCount: number,
 ): TraceGroup {
   const tool = raw[0]!;
-  const header = toolHeader(tool, options.homeDir);
+  const mcp = mcpInfoFromString(tool.name);
+  // MCP tools carry arbitrary args, so render them as `key: value` pairs inline
+  // (via the `command` slot) instead of the path-based header used for builtins.
+  const header = mcp ? undefined : toolHeader(tool, options.homeDir);
+  const argsLabel = mcp ? mcpArgsLabel(tool.args) : "";
+  // Suppress the "N calls" fallback for MCP tools — the title already names the
+  // tool, and args (when present) ride alongside it.
+  const hasInline = mcp || !!header;
   const preview = resultLines(tool.result).map((line) => formatTracePath(line, options.homeDir));
   const { shown, omitted } = take(preview, options.maxPreviewLines);
   return {
     kind: "other",
     title: classifier.title,
     raw,
-    count: header ? undefined : raw.length,
-    noun: header ? undefined : plural(raw.length, "call", "calls"),
+    command: argsLabel || undefined,
+    count: hasInline ? undefined : raw.length,
+    noun: hasInline ? undefined : plural(raw.length, "call", "calls"),
     items: header ? [header] : [],
     previewLines: shown,
     errorLines: [],
@@ -611,6 +625,27 @@ function commandFromRawArguments(rawArguments: string | undefined): string {
 function displayToolName(name: string): string {
   if (!name) return "Tool";
   return name.charAt(0).toUpperCase() + name.slice(1).replace(/_/g, " ");
+}
+
+/** Compact `key: value, key: value` rendering of an MCP tool's arguments. */
+function mcpArgsLabel(args: Record<string, unknown> | undefined): string {
+  if (!args || typeof args !== "object") return "";
+  return Object.entries(args)
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => `${key}: ${formatMcpArgValue(value)}`)
+    .join(", ");
+}
+
+function formatMcpArgValue(value: unknown): string {
+  if (typeof value === "string") return JSON.stringify(value);
+  if (value === null || typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 function toolHeader(tool: DisplayToolCall, homeDir: string): string | undefined {
