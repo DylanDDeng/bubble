@@ -57,6 +57,9 @@ const GPT51_CODEX_MAX_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high
 const GPT51_CODEX_MINI_LEVELS: ReasoningEffort[] = ["off", "medium", "high"];
 const OPENAI_CHAT_LEVELS: ReasoningEffort[] = ["off"];
 const TOGGLE_THINKING_LEVELS: ReasoningEffort[] = ["off", "medium"];
+// kimi-k2.7-code only supports thinking mode (disabling it errors), so "off" is
+// not offered — the model is always in its thinking variant.
+const KIMI_THINKING_ONLY_LEVELS: ReasoningEffort[] = ["medium"];
 const DEEPSEEK_V4_LEVELS: ReasoningEffort[] = ["high", "max"];
 const STEPFUN_REASONING_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high"];
 const MINIMAX_M3_REASONING_LEVELS: ReasoningEffort[] = ["off", "medium"];
@@ -138,18 +141,21 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "step-3.5-flash-2603", name: "Step 3.5 Flash 2603", providerId: "stepfun", reasoningLevels: STEPFUN_REASONING_LEVELS },
   { id: "step-3.5-flash", name: "Step 3.5 Flash", providerId: "stepfun", reasoningLevels: STEPFUN_REASONING_LEVELS },
   { id: "step-router-v1", name: "Step Router V1", providerId: "stepfun", reasoningLevels: STEPFUN_REASONING_LEVELS },
+  { id: "kimi-k2.7-code", name: "Kimi K2.7 Code", providerId: "moonshot-cn", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
   { id: "kimi-k2.6", name: "Kimi K2.6", providerId: "moonshot-cn", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
   { id: "k2.6-code-preview", name: "Kimi K2.6 Code Preview", providerId: "moonshot-cn", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
   { id: "kimi-k2.5", name: "Kimi K2.5", providerId: "moonshot-cn", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
   { id: "kimi-k2-turbo-preview", name: "Kimi K2 Turbo", providerId: "moonshot-cn", reasoningLevels: ["off"], contextWindow: 256000 },
   { id: "kimi-k2-0905-preview", name: "Kimi K2 0905", providerId: "moonshot-cn", reasoningLevels: ["off"], contextWindow: 256000 },
   { id: "kimi-k2-thinking", name: "Kimi K2 Thinking", providerId: "moonshot-cn", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
+  { id: "kimi-k2.7-code", name: "Kimi K2.7 Code", providerId: "moonshot-intl", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
   { id: "kimi-k2.6", name: "Kimi K2.6", providerId: "moonshot-intl", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
   { id: "k2.6-code-preview", name: "Kimi K2.6 Code Preview", providerId: "moonshot-intl", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
   { id: "kimi-k2.5", name: "Kimi K2.5", providerId: "moonshot-intl", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
   { id: "kimi-k2-turbo-preview", name: "Kimi K2 Turbo", providerId: "moonshot-intl", reasoningLevels: ["off"], contextWindow: 256000 },
   { id: "kimi-k2-0905-preview", name: "Kimi K2 0905", providerId: "moonshot-intl", reasoningLevels: ["off"], contextWindow: 256000 },
   { id: "kimi-k2-thinking", name: "Kimi K2 Thinking", providerId: "moonshot-intl", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
+  { id: "kimi-k2.7-code", name: "Kimi K2.7 Code", providerId: "kimi-for-coding", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
   { id: "kimi-k2.6", name: "Kimi K2.6", providerId: "kimi-for-coding", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
   { id: "k2.6-code-preview", name: "Kimi K2.6 Code Preview", providerId: "kimi-for-coding", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
   { id: "kimi-k2-turbo-preview", name: "Kimi K2 Turbo", providerId: "kimi-for-coding", reasoningLevels: ["off"], contextWindow: 256000 },

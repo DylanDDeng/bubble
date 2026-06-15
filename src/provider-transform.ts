@@ -13,6 +13,7 @@ export interface ProviderRequestConfig {
 }
 
 const MOONSHOT_PROVIDER_IDS = new Set(["moonshot-cn", "moonshot-intl", "kimi-for-coding"]);
+const KIMI_K27_FAMILY = new Set(["kimi-k2.7-code"]);
 const KIMI_K25_FAMILY = new Set(["kimi-k2.5", "k2.6-code-preview", "kimi-k2.6"]);
 const KIMI_THINKING_FAMILY = new Set(["kimi-k2-thinking", "kimi-k2-thinking-turbo"]);
 const KIMI_K26_DEFAULT_MAX_TOKENS = 32768;
@@ -107,6 +108,19 @@ export function resolveProviderRequestConfig(
   // temperature/top_p/n/penalties and exposes thinking via extra_body.thinking;
   // kimi-k2-thinking family locks temperature=1.
   if (MOONSHOT_PROVIDER_IDS.has(providerId)) {
+    // kimi-k2.7-code is thinking-only: temperature is locked to 1.0 server-side
+    // (any explicit value errors), thinking can never be disabled, and
+    // reasoning_content must be echoed back on tool-call turns.
+    if (KIMI_K27_FAMILY.has(modelId)) {
+      return {
+        effectiveThinkingLevel,
+        omitTemperature: true,
+        reasoningContentEcho: "tool_calls",
+        extraBody: {
+          thinking: { type: "enabled" },
+        },
+      };
+    }
     if (KIMI_K25_FAMILY.has(modelId)) {
       return {
         effectiveThinkingLevel,
