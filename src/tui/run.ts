@@ -272,6 +272,7 @@ const DEFAULT_THEME = {
   toolRead: "#9d7cd8",
   toolWrite: "#f5a742",
   toolSearch: "#5c9cf5",
+  toolMcp: "#d479c9",
   diffAdded: "#7fd88f",
   diffRemoved: "#e06c75",
   diffContext: "#a6acb8",
@@ -317,6 +318,7 @@ const LIGHT_THEME: typeof DEFAULT_THEME = {
   toolRead: "#6F55AE",
   toolWrite: "#8B4A00",
   toolSearch: "#356FD2",
+  toolMcp: "#A03595",
   diffAdded: "#1E725C",
   diffRemoved: "#B62633",
   diffContext: "#6F7377",
@@ -8676,7 +8678,7 @@ function createTraceGroupRenderable(ctx: RenderContext, group: TraceGroup, synta
   }
 
   if (group.omitted > 0) {
-    children.push(createText(ctx, `  ... ${group.omitted} more, Ctrl+O to view`, {
+    children.push(createText(ctx, traceGroupOmittedLabel(group), {
       fg: theme.textMuted,
       wrapMode: "word",
     }));
@@ -8696,6 +8698,16 @@ function shouldRenderTraceGroupAsRawTool(tool: DisplayToolCall) {
 
 function traceGroupDetailLines(group: TraceGroup) {
   return group.previewLines.length > 0 ? group.previewLines : group.items;
+}
+
+// Overflow hint under a trace group. Line-based details (tool output) read as
+// "N more lines"; item-based details (file lists) stay as "N more".
+function traceGroupOmittedLabel(group: TraceGroup): string {
+  if (group.previewLines.length > 0) {
+    const noun = group.omitted === 1 ? "line" : "lines";
+    return `  ... ${group.omitted} more ${noun}, Ctrl+O to expand`;
+  }
+  return `  ... ${group.omitted} more, Ctrl+O to expand`;
 }
 
 const EXECUTE_COMMAND_BLOCK_MAX_LINES = 4;
@@ -8774,8 +8786,14 @@ function traceGroupTitleColor(group: TraceGroup) {
     case "edit": return theme.toolWrite;
     case "subagent": return theme.accent;
     case "list": return theme.secondary;
-    default: return theme.toolText;
+    default: return isMcpTraceGroup(group) ? theme.toolMcp : theme.toolText;
   }
+}
+
+// An "other" group whose single tool is an MCP call (`mcp__<server>__<tool>`).
+function isMcpTraceGroup(group: TraceGroup): boolean {
+  const name = group.raw[0]?.name;
+  return typeof name === "string" && name.startsWith("mcp__");
 }
 
 function traceGroupKey(group: TraceGroup) {
@@ -9710,7 +9728,7 @@ function renderTraceGroup(group: TraceGroup, syntaxStyle: SyntaxStyle, width = 8
       )
       : null,
     group.omitted > 0
-      ? h("text", { fg: theme.textMuted, wrapMode: "word" }, `  ... ${group.omitted} more, Ctrl+O to view`)
+      ? h("text", { fg: theme.textMuted, wrapMode: "word" }, traceGroupOmittedLabel(group))
       : null,
   );
 }
