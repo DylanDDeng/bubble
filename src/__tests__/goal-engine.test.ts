@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shouldContinueGoal, stopReasonNotice, GOAL_MAX_AUTO_TURNS } from "../goal/engine.js";
+import { shouldContinueGoal, stopReasonNotice } from "../goal/engine.js";
 import type { GoalState } from "../goal/store.js";
 
 function goal(overrides: Partial<GoalState> = {}): GoalState {
@@ -16,15 +16,18 @@ function goal(overrides: Partial<GoalState> = {}): GoalState {
 }
 
 describe("shouldContinueGoal", () => {
-  it("continues an active goal under budget and cap", () => {
-    expect(shouldContinueGoal({ goal: goal(), autoTurns: 0 })).toEqual({ continue: true });
+  it("continues an active goal indefinitely under budget (no turn cap)", () => {
+    expect(shouldContinueGoal({ goal: goal() })).toEqual({ continue: true });
+    // No matter how many turns have elapsed, an active under-budget goal continues.
+    expect(shouldContinueGoal({ goal: goal({ turnsSpent: 9999 }) })).toEqual({ continue: true });
   });
 
   it("stops when there is no goal", () => {
     expect(shouldContinueGoal({ goal: null })).toEqual({ continue: false, reason: "no_goal" });
   });
 
-  it("stops on cancellation and queued user input before checking status", () => {
+  it("stops on provider error, cancellation, and queued input before status", () => {
+    expect(shouldContinueGoal({ goal: goal(), errored: true })).toEqual({ continue: false, reason: "error" });
     expect(shouldContinueGoal({ goal: goal(), cancelled: true })).toEqual({ continue: false, reason: "cancelled" });
     expect(shouldContinueGoal({ goal: goal(), queuedInputs: 1 })).toEqual({ continue: false, reason: "user_input" });
   });
@@ -44,20 +47,14 @@ describe("shouldContinueGoal", () => {
     expect(shouldContinueGoal({ goal: goal({ tokenBudget: 100, tokensUsed: 99 }) })).toEqual({ continue: true });
   });
 
-  it("stops when the auto-continuation cap is reached", () => {
-    expect(shouldContinueGoal({ goal: goal(), autoTurns: GOAL_MAX_AUTO_TURNS })).toEqual({
-      continue: false,
-      reason: "cap",
-    });
-    expect(shouldContinueGoal({ goal: goal(), autoTurns: 2, cap: 2 }).reason).toBe("cap");
-  });
 });
 
 describe("stopReasonNotice", () => {
   it("returns a message for actionable stop reasons and empty for none", () => {
     expect(stopReasonNotice("complete")).toMatch(/complete/i);
     expect(stopReasonNotice("budget")).toMatch(/budget/i);
-    expect(stopReasonNotice("cap")).toMatch(/limit/i);
+    expect(stopReasonNotice("error")).toMatch(/provider/i);
+    expect(stopReasonNotice("cancelled")).toMatch(/interrupted/i);
     expect(stopReasonNotice("no_goal")).toBe("");
     expect(stopReasonNotice(undefined)).toBe("");
   });

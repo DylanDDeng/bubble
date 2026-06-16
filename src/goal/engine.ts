@@ -4,19 +4,24 @@
  * Kept out of the TUI so the stop conditions can be unit-tested directly. The
  * TUI calls shouldContinueGoal() after each goal turn finishes and either fires
  * another turn or stops with the returned reason.
+ *
+ * The agent decides when the work is done — there is intentionally NO turn-count
+ * cap (unlike a fixed iteration limit). The loop only stops when:
+ *   - the model marks the goal complete/blocked (via update_goal),
+ *   - the user pauses/clears it,
+ *   - the run is interrupted or the provider errors (out of quota, network, …),
+ *   - or a user-set token budget is exhausted.
+ * Otherwise it keeps going.
  */
 
 import type { GoalState } from "./store.js";
-
-/** Safety cap on consecutive automatic continuations before the loop pauses. */
-export const GOAL_MAX_AUTO_TURNS = 40;
 
 export type GoalStopReason =
   | "complete"
   | "blocked"
   | "paused"
   | "budget"
-  | "cap"
+  | "error"
   | "cancelled"
   | "user_input"
   | "no_goal";
@@ -25,11 +30,10 @@ export interface ContinueDecisionInput {
   goal: GoalState | null;
   /** The last run was interrupted/cancelled by the user. */
   cancelled?: boolean;
+  /** The last run failed with a provider/run error (quota, network, API). */
+  errored?: boolean;
   /** Number of user inputs queued to run next (a real message preempts the goal). */
   queuedInputs?: number;
-  /** Consecutive automatic continuations already taken this streak. */
-  autoTurns?: number;
-  cap?: number;
 }
 
 export interface ContinueDecision {
@@ -40,6 +44,7 @@ export interface ContinueDecision {
 export function shouldContinueGoal(input: ContinueDecisionInput): ContinueDecision {
   const { goal } = input;
   if (!goal) return { continue: false, reason: "no_goal" };
+  if (input.errored) return { continue: false, reason: "error" };
   if (input.cancelled) return { continue: false, reason: "cancelled" };
   if ((input.queuedInputs ?? 0) > 0) return { continue: false, reason: "user_input" };
 
@@ -56,12 +61,11 @@ export function shouldContinueGoal(input: ContinueDecisionInput): ContinueDecisi
       break;
   }
 
+  // Only an explicit, user-set token budget bounds the loop; with no budget it
+  // runs until the model finishes, the user stops it, or the provider errors.
   if (goal.tokenBudget !== undefined && goal.tokensUsed >= goal.tokenBudget) {
     return { continue: false, reason: "budget" };
   }
-
-  const cap = input.cap ?? GOAL_MAX_AUTO_TURNS;
-  if ((input.autoTurns ?? 0) >= cap) return { continue: false, reason: "cap" };
 
   return { continue: true };
 }
@@ -77,8 +81,8 @@ export function stopReasonNotice(reason: GoalStopReason | undefined): string {
       return "Goal paused — /goal resume to continue.";
     case "budget":
       return "Goal hit its token budget — /goal resume to continue.";
-    case "cap":
-      return "Goal reached the auto-continuation limit — /goal resume to continue.";
+    case "error":
+      return "Goal paused — the provider errored. Fix it, then /goal resume.";
     case "cancelled":
       return "Goal paused (interrupted) — /goal resume to continue.";
     case "user_input":

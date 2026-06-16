@@ -823,7 +823,6 @@ function OpenTuiApp(props: {
   // counter, and a flag to suppress persistence while loading from the session.
   const goalStore = props.options.goalStore;
   const [goalLine, setGoalLine] = createSignal("");
-  let goalAutoTurns = 0;
   let goalPersistSuspended = false;
   if (goalStore) {
     goalStore.onChange((goal) => {
@@ -5855,10 +5854,9 @@ function OpenTuiApp(props: {
 
     // Goal continuation turns are "hidden": their input is an internal context
     // block (stripped from the model echo) and must not render a user bubble or
-    // pollute prompt history. A real user message resets the auto-continue streak.
+    // pollute prompt history.
     const isGoalRun = !!options.goalRun;
     if (!options.hidden) {
-      if (!isGoalRun) goalAutoTurns = 0;
       rememberPromptHistory(displayInput);
       // History keeps the short marker (it expands again on resend); the
       // transcript shows the full pasted content once the message is sent.
@@ -6208,7 +6206,7 @@ function OpenTuiApp(props: {
       syncSidebarLsp();
       setTimeout(() => activePrompt()?.focus(), 0);
       if (queuedInputCount() > 0) scheduleQueuedInputDrain();
-      maybeContinueGoal({ runCancelled, isGoalRun, runTokens: goalRunTokens });
+      maybeContinueGoal({ runCancelled, runErrored: !!runError, isGoalRun, runTokens: goalRunTokens });
     }
   }
 
@@ -6217,15 +6215,18 @@ function OpenTuiApp(props: {
    * accounts the goal turn, decides whether to auto-continue, and either fires
    * the next hidden continuation turn or stops with an explanatory notice.
    */
-  function maybeContinueGoal(input: { runCancelled: boolean; isGoalRun: boolean; runTokens: number }) {
+  function maybeContinueGoal(input: { runCancelled: boolean; runErrored: boolean; isGoalRun: boolean; runTokens: number }) {
     if (!goalStore) return;
     const current = goalStore.snapshot();
     if (!current) return;
 
-    if (input.runCancelled) {
+    // User interrupt or a provider/run error (out of quota, network down, API
+    // failure) stops the autonomous loop. Pause an active goal so it never
+    // silently retries into a broken provider; the user fixes it and resumes.
+    if (input.runCancelled || input.runErrored) {
       if (current.status === "active") {
         goalStore.pause();
-        setNotice(stopReasonNotice("cancelled"));
+        setNotice(stopReasonNotice(input.runErrored ? "error" : "cancelled"));
       }
       return;
     }
@@ -6237,22 +6238,15 @@ function OpenTuiApp(props: {
     }
 
     const goal = goalStore.snapshot()!;
-    const decision = shouldContinueGoal({
-      goal,
-      cancelled: false,
-      queuedInputs: queuedInputCount(),
-      autoTurns: goalAutoTurns,
-    });
+    const decision = shouldContinueGoal({ goal, queuedInputs: queuedInputCount() });
 
     if (decision.continue) {
-      goalAutoTurns += 1;
       const text = formatInternalContextBlock("goal", continuationPrompt(goal));
       // Start the next turn after this run has fully unwound.
       queueMicrotask(() => { void runAgentInput(text, "", { hidden: true, goalRun: true }); });
       return;
     }
 
-    goalAutoTurns = 0;
     if (decision.reason === "budget" && goal.status === "active") {
       goalStore.markBudgetLimited();
     }
@@ -6294,21 +6288,18 @@ function OpenTuiApp(props: {
       case "clear": {
         if (!existing) { setNotice("No active goal to clear"); return; }
         goalStore.clear();
-        goalAutoTurns = 0;
         setNotice("Goal cleared");
         return;
       }
       case "pause": {
         if (!existing) { setNotice("No active goal to pause"); return; }
         goalStore.pause();
-        goalAutoTurns = 0;
         setNotice("Goal paused — /goal resume to continue");
         return;
       }
       case "resume": {
         if (!existing) { setNotice("No goal to resume. Set one with /goal <objective>"); return; }
         const resumed = goalStore.resume();
-        goalAutoTurns = 0;
         if (resumed?.status === "active") {
           setNotice("Goal resumed");
           kickGoalTurn(formatInternalContextBlock("goal", continuationPrompt(resumed)));
@@ -6326,7 +6317,6 @@ function OpenTuiApp(props: {
       }
       case "set": {
         const goal = goalStore.set(command.objective!, { tokenBudget: command.tokenBudget });
-        goalAutoTurns = 0;
         const budgetNote = goal.tokenBudget !== undefined ? ` (budget ${goal.tokenBudget} tok)` : "";
         setNotice(`Goal set${budgetNote} — working autonomously. /goal pause to stop.`);
         // Show the objective as the user's message; the model receives the
