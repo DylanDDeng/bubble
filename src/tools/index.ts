@@ -47,6 +47,8 @@ import { createMemoryReadSummaryTool, createMemorySearchTool } from "./memory.js
 import type { QuestionController } from "../question/index.js";
 import type { CheckpointStore } from "../checkpoints.js";
 import { FileStateTracker } from "./file-state.js";
+import { createGoalTools } from "../goal/tools.js";
+import type { GoalStore } from "../goal/store.js";
 
 export interface CreateAllToolsOptions {
   todoStore?: TodoStore;
@@ -62,6 +64,8 @@ export interface CreateAllToolsOptions {
    * files before mutating them so /rewind can restore.
    */
   checkpoints?: () => CheckpointStore | undefined;
+  /** Shared goal state; when present, registers the get_goal/update_goal tools. */
+  goalStore?: GoalStore;
 }
 
 export function createAllTools(
@@ -91,5 +95,6 @@ export function createAllTools(
     ...(options.todoStore ? [createTodoTool(options.todoStore)] : []),
     ...(options.planController ? [createExitPlanModeTool(options.planController)] : []),
     ...(options.toolSearchController ? [createToolSearchTool(options.toolSearchController)] : []),
+    ...(options.goalStore ? createGoalTools(options.goalStore) : []),
   ];
 }

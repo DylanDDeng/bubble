@@ -110,6 +110,12 @@ import { getLspService, type LspService, type LspStatus } from "../lsp/index.js"
 import { inferBashPrefix, type BashAllowlist } from "../approval/session-cache.js";
 import type { SettingsManager } from "../permissions/settings.js";
 import type { McpManager } from "../mcp/manager.js";
+import type { GoalStore, GoalState } from "../goal/store.js";
+import { parseGoalCommand } from "../goal/command.js";
+import { continuationPrompt, initialPrompt } from "../goal/prompts.js";
+import { shouldContinueGoal, stopReasonNotice } from "../goal/engine.js";
+import { goalSummaryText, goalIndicatorLine } from "../goal/format.js";
+import { formatInternalContextBlock } from "../agent/internal-reminder-sanitizer.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
 import type { QuestionAnswer, QuestionController, QuestionPrompt, QuestionRequest } from "../question/index.js";
 import type { MemoryScope } from "../memory/index.js";
@@ -189,6 +195,7 @@ export interface RunTuiOptions {
   hookController?: ExternalHookController;
   lspService?: LspService;
   mcpManager?: McpManager;
+  goalStore?: GoalStore;
   themeMode?: ThemeMode;
   themeOverrides?: Record<string, string>;
   detectedTheme?: ResolvedTheme;
@@ -340,6 +347,10 @@ const LOCAL_SLASH_COMMANDS = [
   {
     name: "toggle-thinking",
     description: "Toggle thinking block visibility",
+  },
+  {
+    name: "goal",
+    description: "Set/manage an autonomous goal (/goal <objective>|clear|pause|resume|edit)",
   },
   {
     name: "trace",
@@ -807,6 +818,28 @@ function OpenTuiApp(props: {
   const [todos, setTodos] = createSignal<Todo[]>(props.agent.getTodos());
   const [mode, setMode] = createSignal<PermissionMode>(props.agent.mode);
   const [notice, setNotice] = createSignal("");
+  // Autonomous-goal feature: shared store (also backs the get_goal/update_goal
+  // tools), a reactive indicator line, the consecutive auto-continuation
+  // counter, and a flag to suppress persistence while loading from the session.
+  const goalStore = props.options.goalStore;
+  const [goalLine, setGoalLine] = createSignal("");
+  let goalAutoTurns = 0;
+  let goalPersistSuspended = false;
+  if (goalStore) {
+    goalStore.onChange((goal) => {
+      setGoalLine(goal ? goalIndicatorLine(goal) : "");
+      syncSidebarGoal();
+      if (!goalPersistSuspended) persistGoal(goal);
+    });
+    const persisted = props.options.sessionManager?.getMetadata().goal;
+    if (persisted) {
+      goalPersistSuspended = true;
+      // Resume-safety: a loaded active goal is parked as paused so it never
+      // silently resumes (and spends tokens) on session load. /goal resume runs it.
+      goalStore.loadFrom(persisted.status === "active" ? { ...persisted, status: "paused" } : persisted);
+      goalPersistSuspended = false;
+    }
+  }
   let copyToastClearTimer: ReturnType<typeof setTimeout> | undefined;
   let copyToastRoot: BoxRenderable | undefined;
   let copyToastText: TextRenderable | undefined;
@@ -967,6 +1000,8 @@ function OpenTuiApp(props: {
   const sidebarTodoRows: Array<BoxRenderable | undefined> = [];
   const sidebarTodoMarkers: Array<TextRenderable | undefined> = [];
   const sidebarTodoLabels: Array<TextRenderable | undefined> = [];
+  let sidebarGoalSection: BoxRenderable | undefined;
+  let sidebarGoalText: TextRenderable | undefined;
   const sidebarFileRows: Array<BoxRenderable | undefined> = [];
   const sidebarFileLabels: Array<TextRenderable | undefined> = [];
   const sidebarFileAdditions: Array<TextRenderable | undefined> = [];
@@ -1261,6 +1296,28 @@ function OpenTuiApp(props: {
     setGitState(readGitSidebarState(props.args.cwd));
     syncSidebarFiles();
     bumpSidebar();
+  }
+
+  function syncSidebarGoal() {
+    const line = goalLine();
+    if (sidebarGoalSection) sidebarGoalSection.visible = !!line;
+    if (sidebarGoalText) {
+      sidebarGoalText.content = line || "";
+      sidebarGoalText.requestRender();
+    }
+    sidebarShell?.requestRender();
+    rootBox?.requestRender();
+  }
+
+  function persistGoal(goal: GoalState | null) {
+    const sessionManager = props.options.sessionManager;
+    if (!sessionManager) return;
+    try {
+      const metadata = sessionManager.getMetadata();
+      sessionManager.setMetadata({ ...metadata, goal: goal ?? undefined });
+    } catch {
+      // Persistence is best-effort; never break the run loop over it.
+    }
   }
 
   function syncSidebarChrome() {
@@ -5237,6 +5294,10 @@ function OpenTuiApp(props: {
       toggleThinkingVisibility();
       return true;
     }
+    if (/^\/goal(?:\s|$)/.test(input.trim())) {
+      await handleGoalCommand(input);
+      return true;
+    }
     if (/^\/(?:trace|verbose|debug)(?:\s|$)/.test(input.trim())) {
       toggleVerboseTrace();
       return true;
@@ -5780,7 +5841,7 @@ function OpenTuiApp(props: {
     return "Paste provider API key";
   }
 
-  async function runAgentInput(actualInput: string | ContentPart[], displayInput: string, options: { displayId?: string } = {}) {
+  async function runAgentInput(actualInput: string | ContentPart[], displayInput: string, options: { displayId?: string; hidden?: boolean; goalRun?: boolean } = {}) {
     const activeProviderId = props.agent.providerId || registry.getDefault()?.id;
     const hasActiveProvider = !!activeProviderId && registry.getEnabled().some((provider) => provider.id === activeProviderId);
     if (!hasActiveProvider) {
@@ -5792,19 +5853,30 @@ function OpenTuiApp(props: {
       return;
     }
 
-    rememberPromptHistory(displayInput);
-    // History keeps the short marker (it expands again on resend); the
-    // transcript shows the full pasted content once the message is sent.
-    const displayContent = expandComposerPastedTexts(displayInput);
-    const reusedQueuedDisplay = promoteQueuedUserDisplay(options.displayId, displayContent);
-    const nextMessages = reusedQueuedDisplay
-      ? displayMessages
-      : [...displayMessages, { role: "user" as const, content: displayContent }];
-    if (!reusedQueuedDisplay) displayMessages = nextMessages;
-    streamingDisplay = undefined;
-    // The user just sent this message — re-engage bottom-follow so the new
-    // turn is visible even if they had scrolled up to read earlier history.
-    redrawTranscript(undefined, nextMessages, { forceFollow: true });
+    // Goal continuation turns are "hidden": their input is an internal context
+    // block (stripped from the model echo) and must not render a user bubble or
+    // pollute prompt history. A real user message resets the auto-continue streak.
+    const isGoalRun = !!options.goalRun;
+    if (!options.hidden) {
+      if (!isGoalRun) goalAutoTurns = 0;
+      rememberPromptHistory(displayInput);
+      // History keeps the short marker (it expands again on resend); the
+      // transcript shows the full pasted content once the message is sent.
+      const displayContent = expandComposerPastedTexts(displayInput);
+      const reusedQueuedDisplay = promoteQueuedUserDisplay(options.displayId, displayContent);
+      const nextMessages = reusedQueuedDisplay
+        ? displayMessages
+        : [...displayMessages, { role: "user" as const, content: displayContent }];
+      if (!reusedQueuedDisplay) displayMessages = nextMessages;
+      streamingDisplay = undefined;
+      // The user just sent this message — re-engage bottom-follow so the new
+      // turn is visible even if they had scrolled up to read earlier history.
+      redrawTranscript(undefined, nextMessages, { forceFollow: true });
+    } else {
+      streamingDisplay = undefined;
+      redrawTranscript(undefined, displayMessages, { forceFollow: true });
+    }
+    let goalRunTokens = 0;
     const taskStartedAt = Date.now();
     const run = beginAgentRun();
     traceEvent("tui_agent_run_begin", {
@@ -6050,6 +6122,8 @@ function OpenTuiApp(props: {
               reasoningTokens: current.reasoningTokens + (event.usage!.reasoningTokens ?? 0),
               turns: current.turns + 1,
             }));
+            // Accumulate billed tokens (input + output) toward the goal budget.
+            goalRunTokens += (event.usage.promptTokens || 0) + (event.usage.completionTokens || 0);
           }
           bumpSidebar();
           const currentParts = snapshotDisplayParts(assistantParts);
@@ -6134,6 +6208,132 @@ function OpenTuiApp(props: {
       syncSidebarLsp();
       setTimeout(() => activePrompt()?.focus(), 0);
       if (queuedInputCount() > 0) scheduleQueuedInputDrain();
+      maybeContinueGoal({ runCancelled, isGoalRun, runTokens: goalRunTokens });
+    }
+  }
+
+  /**
+   * Drives the autonomous goal loop. Called after every agent run finishes:
+   * accounts the goal turn, decides whether to auto-continue, and either fires
+   * the next hidden continuation turn or stops with an explanatory notice.
+   */
+  function maybeContinueGoal(input: { runCancelled: boolean; isGoalRun: boolean; runTokens: number }) {
+    if (!goalStore) return;
+    const current = goalStore.snapshot();
+    if (!current) return;
+
+    if (input.runCancelled) {
+      if (current.status === "active") {
+        goalStore.pause();
+        setNotice(stopReasonNotice("cancelled"));
+      }
+      return;
+    }
+
+    // Account the goal turn that just finished (token spend + turn count).
+    if (input.isGoalRun) {
+      if (input.runTokens > 0) goalStore.addTokens(input.runTokens);
+      goalStore.incrementTurn();
+    }
+
+    const goal = goalStore.snapshot()!;
+    const decision = shouldContinueGoal({
+      goal,
+      cancelled: false,
+      queuedInputs: queuedInputCount(),
+      autoTurns: goalAutoTurns,
+    });
+
+    if (decision.continue) {
+      goalAutoTurns += 1;
+      const text = formatInternalContextBlock("goal", continuationPrompt(goal));
+      // Start the next turn after this run has fully unwound.
+      queueMicrotask(() => { void runAgentInput(text, "", { hidden: true, goalRun: true }); });
+      return;
+    }
+
+    goalAutoTurns = 0;
+    if (decision.reason === "budget" && goal.status === "active") {
+      goalStore.markBudgetLimited();
+    }
+    const note = stopReasonNotice(decision.reason);
+    if (note) setNotice(note);
+  }
+
+  // Starts a goal turn unless a run is already in flight (which will continue
+  // the goal when it finishes). When `displayInput` is given (the initial /goal
+  // set), the objective renders as a visible message so the user sees what they
+  // asked for; otherwise the turn is hidden (silent auto-continuation/resume).
+  function kickGoalTurn(prompt: string, displayInput?: string) {
+    if (isRunning()) return;
+    queueMicrotask(() => {
+      void runAgentInput(prompt, displayInput ?? "", { hidden: displayInput === undefined, goalRun: true });
+    });
+  }
+
+  async function handleGoalCommand(input: string) {
+    if (!goalStore) {
+      setNotice("Goals are not available in this session");
+      return;
+    }
+    const command = parseGoalCommand(input);
+    if (command.error) {
+      addMessage("error", command.error);
+      return;
+    }
+    const existing = goalStore.snapshot();
+    switch (command.kind) {
+      case "show": {
+        if (!existing) {
+          setNotice("No active goal. Set one with /goal <objective>");
+        } else {
+          setNotice(goalSummaryText(existing));
+        }
+        return;
+      }
+      case "clear": {
+        if (!existing) { setNotice("No active goal to clear"); return; }
+        goalStore.clear();
+        goalAutoTurns = 0;
+        setNotice("Goal cleared");
+        return;
+      }
+      case "pause": {
+        if (!existing) { setNotice("No active goal to pause"); return; }
+        goalStore.pause();
+        goalAutoTurns = 0;
+        setNotice("Goal paused — /goal resume to continue");
+        return;
+      }
+      case "resume": {
+        if (!existing) { setNotice("No goal to resume. Set one with /goal <objective>"); return; }
+        const resumed = goalStore.resume();
+        goalAutoTurns = 0;
+        if (resumed?.status === "active") {
+          setNotice("Goal resumed");
+          kickGoalTurn(formatInternalContextBlock("goal", continuationPrompt(resumed)));
+        } else {
+          setNotice("Goal cannot be resumed (already complete)");
+        }
+        return;
+      }
+      case "edit": {
+        if (!existing) { setNotice("No active goal to edit. Set one with /goal <objective>"); return; }
+        goalStore.edit(command.objective!);
+        if (command.tokenBudget !== undefined) goalStore.setBudget(command.tokenBudget);
+        setNotice(`Goal updated: ${truncate(goalStore.snapshot()!.objective, 60)}`);
+        return;
+      }
+      case "set": {
+        const goal = goalStore.set(command.objective!, { tokenBudget: command.tokenBudget });
+        goalAutoTurns = 0;
+        const budgetNote = goal.tokenBudget !== undefined ? ` (budget ${goal.tokenBudget} tok)` : "";
+        setNotice(`Goal set${budgetNote} — working autonomously. /goal pause to stop.`);
+        // Show the objective as the user's message; the model receives the
+        // (hidden) initial goal prompt as the actual turn input.
+        kickGoalTurn(formatInternalContextBlock("goal", initialPrompt(goal)), goal.objective);
+        return;
+      }
     }
   }
 
@@ -7112,6 +7312,7 @@ function OpenTuiApp(props: {
       h("scrollbox", { flexGrow: 1, minHeight: 0 },
         h("box", { flexDirection: "column", gap: 1, paddingRight: 1 },
           renderSidebarTitle(),
+          renderSidebarGoal(),
           renderSidebarSection("Context", [
             h("text", {
               fg: theme.textMuted,
@@ -7312,6 +7513,29 @@ function OpenTuiApp(props: {
         );
       }),
     ]);
+  }
+
+  function renderSidebarGoal() {
+    const line = goalLine();
+    return h("box", {
+      flexDirection: "column",
+      flexShrink: 0,
+      visible: !!line,
+      ref: (ref: BoxRenderable) => {
+        sidebarGoalSection = ref;
+        syncSidebarGoal();
+      },
+    },
+      h("text", { fg: theme.text }, "Goal"),
+      h("text", {
+        fg: theme.accent,
+        wrapMode: "word",
+        ref: (ref: TextRenderable) => {
+          sidebarGoalText = ref;
+          ref.content = goalLine() || "";
+        },
+      }),
+    );
   }
 
   function renderSidebarTodos(todos: Todo[]) {
