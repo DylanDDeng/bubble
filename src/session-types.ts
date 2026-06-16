@@ -1,4 +1,5 @@
 import type { AssistantMessage, Message, ThinkingLevel, Todo, ToolCall, ToolMessage, UserMessage } from "./types.js";
+import type { GoalState } from "./goal/store.js";
 
 export interface SessionMetadata {
   model?: string;
@@ -10,6 +11,8 @@ export interface SessionMetadata {
   titleUpdatedAt?: number;
   titleUserMessageId?: string;
   promptCacheKey?: string;
+  /** Persisted autonomous goal (see src/goal). Survives /session resume. */
+  goal?: GoalState;
 }
 
 export type SessionMarkerKind =

@@ -37,6 +37,8 @@ export interface RunTuiOptions {
   settingsManager?: SettingsManager;
   lspService?: LspService;
   mcpManager?: McpManager;
+  /** Accepted for compatibility with the shared options bag; the goal feature is OpenTUI-only. */
+  goalStore?: import("../goal/store.js").GoalStore;
   themeMode?: ThemeMode;
   themeOverrides?: Record<string, string>;
   detectedTheme?: ResolvedTheme;

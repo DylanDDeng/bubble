@@ -19,6 +19,7 @@ import { buildSystemPrompt } from "./system-prompt.js";
 import { SkillRegistry } from "./skills/registry.js";
 import { buildToolPromptOptions, createAllTools, type PlanController, type ToolSearchController } from "./tools/index.js";
 import { FileStateTracker } from "./tools/file-state.js";
+import { GoalStore } from "./goal/store.js";
 import { PermissionAwareApprovalController } from "./approval/controller.js";
 import { BashAllowlist } from "./approval/session-cache.js";
 import type { ApprovalDecision, ApprovalRequest } from "./approval/types.js";
@@ -192,6 +193,9 @@ async function main() {
   };
   const lspService = getLspService(args.cwd, settingsManager.getMerged().lsp);
   const fileStateTracker = new FileStateTracker(args.cwd);
+  // Shared between the goal tools (model-facing get_goal/update_goal) and the
+  // TUI's auto-continuation engine / status-line indicator.
+  const goalStore = new GoalStore();
   const tools = createAllTools(args.cwd, skillRegistry, {
     todoStore,
     planController,
@@ -200,6 +204,7 @@ async function main() {
     toolSearchController,
     lspService,
     fileStateTracker,
+    goalStore,
     // Lazy: sessionManager is resolved after tools are created.
     checkpoints: () => sessionManager?.getCheckpoints(),
   });
@@ -592,6 +597,7 @@ async function main() {
       settingsManager,
       lspService,
       mcpManager,
+      goalStore,
       hookController,
       flushMemory,
       runMemoryCompaction,
