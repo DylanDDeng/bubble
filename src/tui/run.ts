@@ -338,10 +338,6 @@ const LOCAL_SLASH_COMMANDS = [
     description: "Toggle thinking block visibility",
   },
   {
-    name: "toggle-thinking",
-    description: "Toggle thinking block visibility",
-  },
-  {
     name: "trace",
     description: "Toggle verbose trace output",
   },
@@ -5233,7 +5229,7 @@ function OpenTuiApp(props: {
   }
 
   async function executeSlash(input: string, options: { displayId?: string } = {}) {
-    if (/^\/(?:thinking|toggle-thinking)(?:\s|$)/.test(input.trim())) {
+    if (/^\/thinking(?:\s|$)/.test(input.trim())) {
       toggleThinkingVisibility();
       return true;
     }
