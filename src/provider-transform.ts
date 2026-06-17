@@ -91,6 +91,23 @@ export function resolveProviderRequestConfig(
   if (
     ["zhipuai", "zhipuai-coding-plan", "zai", "zai-coding-plan"].includes(providerId)
   ) {
+    // GLM-5.2 is the only GLM that also accepts `reasoning_effort` (we expose
+    // high/max, which map 1:1 onto the API enum). "off" disables thinking via
+    // `thinking: {type: "disabled"}` — otherwise the server default (thinking
+    // on, effort max) would make "off" a no-op. The effort field rides inside
+    // the body alongside `thinking`, so it goes in extraBody, not the
+    // OpenRouter-style `reasoningEffort` config field.
+    if (modelId === "glm-5.2") {
+      return {
+        effectiveThinkingLevel,
+        extraBody: effectiveThinkingLevel === "off"
+          ? { thinking: { type: "disabled" } }
+          : {
+              thinking: { type: "enabled", clear_thinking: false },
+              reasoning_effort: effectiveThinkingLevel,
+            },
+      };
+    }
     return {
       effectiveThinkingLevel,
       extraBody: effectiveThinkingLevel === "off"

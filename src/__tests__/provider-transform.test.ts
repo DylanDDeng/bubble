@@ -41,6 +41,36 @@ describe("provider transform", () => {
     expect(config.extraBody).toBeUndefined();
   });
 
+  it("emits GLM-5.2 reasoning_effort (high/max) alongside the thinking block", () => {
+    const max = resolveProviderRequestConfig("zhipuai", "glm-5.2", "max");
+    const high = resolveProviderRequestConfig("zai-coding-plan", "glm-5.2", "high");
+
+    expect(max.reasoningEffort).toBeUndefined();
+    expect(max.extraBody).toEqual({
+      thinking: { type: "enabled", clear_thinking: false },
+      reasoning_effort: "max",
+    });
+    expect(high.extraBody).toEqual({
+      thinking: { type: "enabled", clear_thinking: false },
+      reasoning_effort: "high",
+    });
+  });
+
+  it("disables GLM-5.2 thinking when level is off (no effort sent)", () => {
+    const config = resolveProviderRequestConfig("zhipuai", "glm-5.2", "off");
+    expect(config.effectiveThinkingLevel).toBe("off");
+    expect(config.extraBody).toEqual({ thinking: { type: "disabled" } });
+  });
+
+  it("clamps unsupported GLM-5.2 levels down to nearest supported (off)", () => {
+    // clampThinkingLevel walks downward; with off/high/max supported, "low"
+    // and "medium" land on "off".
+    expect(resolveProviderRequestConfig("zhipuai", "glm-5.2", "low").effectiveThinkingLevel).toBe("off");
+    expect(resolveProviderRequestConfig("zhipuai", "glm-5.2", "medium").effectiveThinkingLevel).toBe("off");
+    // xhigh sits between high and max → clamps down to high.
+    expect(resolveProviderRequestConfig("zhipuai", "glm-5.2", "xhigh").effectiveThinkingLevel).toBe("high");
+  });
+
   it("keeps unsupported providers at UI-only thinking state", () => {
     const config = resolveProviderRequestConfig("deepseek", "unknown-model", "high");
     expect(config.effectiveThinkingLevel).toBe("off");

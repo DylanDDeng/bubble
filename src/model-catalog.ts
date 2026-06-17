@@ -57,6 +57,13 @@ const GPT51_CODEX_MAX_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high
 const GPT51_CODEX_MINI_LEVELS: ReasoningEffort[] = ["off", "medium", "high"];
 const OPENAI_CHAT_LEVELS: ReasoningEffort[] = ["off"];
 const TOGGLE_THINKING_LEVELS: ReasoningEffort[] = ["off", "medium"];
+// GLM-5.2 is the first GLM to accept OpenAI-style `reasoning_effort`. The API
+// enum is none/minimal/low/medium/high/xhigh/max; we expose high and max (the
+// two effort tiers worth offering a coding agent) plus "off", which disables
+// thinking outright via `thinking: {type: "disabled"}`. Order matters: "high"
+// is first so it is the default (getDefaultThinkingLevel falls back to levels[0]
+// when "medium" is absent), since GLM-5.2 is a thinking-on-by-default model.
+const GLM_5_2_LEVELS: ReasoningEffort[] = ["high", "max", "off"];
 // kimi-k2.7-code only supports thinking mode (disabling it errors), so "off" is
 // not offered — the model is always in its thinking variant.
 const KIMI_THINKING_ONLY_LEVELS: ReasoningEffort[] = ["medium"];
@@ -96,15 +103,19 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "gemini-2.5-pro-preview-03-25", name: "gemini-2.5-pro-preview-03-25", providerId: "google", reasoningLevels: ["off", "low", "high"], contextWindow: 128000 },
   { id: "gemini-2.0-flash-001", name: "gemini-2.0-flash-001", providerId: "google", reasoningLevels: ["off"], contextWindow: 128000 },
   { id: "gemini-1.5-pro-latest", name: "gemini-1.5-pro-latest", providerId: "google", reasoningLevels: ["off"], contextWindow: 128000 },
+  { id: "glm-5.2", name: "GLM-5.2", providerId: "zhipuai", reasoningLevels: GLM_5_2_LEVELS, contextWindow: 1000000 },
   { id: "glm-5.1", name: "GLM-5.1", providerId: "zhipuai", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
   { id: "glm-4.7", name: "GLM-4.7", providerId: "zhipuai", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
   { id: "glm-4.6", name: "GLM-4.6", providerId: "zhipuai", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
+  { id: "glm-5.2", name: "GLM-5.2", providerId: "zhipuai-coding-plan", reasoningLevels: GLM_5_2_LEVELS, contextWindow: 1000000 },
   { id: "glm-5.1", name: "GLM-5.1", providerId: "zhipuai-coding-plan", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
   { id: "glm-4.7", name: "GLM-4.7", providerId: "zhipuai-coding-plan", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
   { id: "glm-4.6", name: "GLM-4.6", providerId: "zhipuai-coding-plan", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
+  { id: "glm-5.2", name: "GLM-5.2", providerId: "zai", reasoningLevels: GLM_5_2_LEVELS, contextWindow: 1000000 },
   { id: "glm-5.1", name: "GLM-5.1", providerId: "zai", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
   { id: "glm-4.7", name: "GLM-4.7", providerId: "zai", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
   { id: "glm-4.6", name: "GLM-4.6", providerId: "zai", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
+  { id: "glm-5.2", name: "GLM-5.2", providerId: "zai-coding-plan", reasoningLevels: GLM_5_2_LEVELS, contextWindow: 1000000 },
   { id: "glm-5-turbo", name: "GLM-5-Turbo", providerId: "zai-coding-plan", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
   { id: "glm-4.7", name: "GLM-4.7", providerId: "zai-coding-plan", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
   { id: "glm-4.6", name: "GLM-4.6", providerId: "zai-coding-plan", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
