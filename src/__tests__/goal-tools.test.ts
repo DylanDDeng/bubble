@@ -36,7 +36,7 @@ describe("goal tools", () => {
     expect((await updateGoal.execute({ status: "complete" }, ctx)).isError).toBe(true);
   });
 
-  it("update_goal marks complete and reports usage", async () => {
+  it("update_goal marks complete without reporting a (necessarily stale) token figure", async () => {
     const store = new GoalStore();
     store.set("x", { tokenBudget: 1000 });
     store.addTokens(640);
@@ -44,7 +44,10 @@ describe("goal tools", () => {
     const res = await updateGoal.execute({ status: "complete" }, ctx);
     expect(res.isError).toBeFalsy();
     expect(store.snapshot()!.status).toBe("complete");
-    expect(res.content).toMatch(/640\/1000/);
+    expect(res.content).toBe("Goal marked complete.");
+    // The current turn's tokens aren't accounted until turn_end (after tools
+    // run), so the tool must not claim a token total — the harness reports it.
+    expect(res.content).not.toMatch(/\d/);
   });
 
   it("update_goal marks blocked", async () => {

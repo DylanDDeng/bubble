@@ -55,11 +55,10 @@ export function createGoalTools(store: GoalStore): ToolRegistryEntry[] {
       const status = String(args.status ?? "").toLowerCase();
       if (status === "complete") {
         store.markComplete();
-        const budgetNote =
-          goal.tokenBudget !== undefined
-            ? ` Final token usage: ${goal.tokensUsed}/${goal.tokenBudget}.`
-            : ` Tokens used: ${goal.tokensUsed}.`;
-        return { content: `Goal marked complete.${budgetNote}` };
+        // The current turn's token usage is only reported at turn_end (after
+        // tools run), so goal.tokensUsed is necessarily stale here. The harness
+        // reports the accurate final total to the user once the run settles.
+        return { content: "Goal marked complete." };
       }
       if (status === "blocked") {
         store.markBlocked();

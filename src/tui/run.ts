@@ -114,7 +114,7 @@ import type { GoalStore, GoalState } from "../goal/store.js";
 import { parseGoalCommand } from "../goal/command.js";
 import { continuationPrompt, initialPrompt } from "../goal/prompts.js";
 import { shouldContinueGoal, stopReasonNotice } from "../goal/engine.js";
-import { goalSummaryText, goalIndicatorLine } from "../goal/format.js";
+import { goalSummaryText, goalIndicatorLine, goalCompleteNotice } from "../goal/format.js";
 import { formatInternalContextBlock } from "../agent/internal-reminder-sanitizer.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
 import type { QuestionAnswer, QuestionController, QuestionPrompt, QuestionRequest } from "../question/index.js";
@@ -6250,6 +6250,12 @@ function OpenTuiApp(props: {
     if (decision.reason === "budget" && goal.status === "active") {
       goalStore.markBudgetLimited();
     }
+    // tokensUsed is now accurate (addTokens ran above), so the completion notice
+    // carries the real final spend — which update_goal could not report mid-run.
+    if (decision.reason === "complete") {
+      setNotice(goalCompleteNotice(goal));
+      return;
+    }
     const note = stopReasonNotice(decision.reason);
     if (note) setNotice(note);
   }
@@ -6319,9 +6325,10 @@ function OpenTuiApp(props: {
         const goal = goalStore.set(command.objective!, { tokenBudget: command.tokenBudget });
         const budgetNote = goal.tokenBudget !== undefined ? ` (budget ${goal.tokenBudget} tok)` : "";
         setNotice(`Goal set${budgetNote} — working autonomously. /goal pause to stop.`);
-        // Show the objective as the user's message; the model receives the
-        // (hidden) initial goal prompt as the actual turn input.
-        kickGoalTurn(formatInternalContextBlock("goal", initialPrompt(goal)), goal.objective);
+        // Echo the full `/goal …` command the user typed as their visible
+        // message (so the transcript and prompt history reflect the invocation);
+        // the model receives the (hidden) initial goal prompt as the turn input.
+        kickGoalTurn(formatInternalContextBlock("goal", initialPrompt(goal)), input.trim());
         return;
       }
     }

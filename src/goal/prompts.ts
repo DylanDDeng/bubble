@@ -32,7 +32,7 @@ Before deciding the goal is achieved, treat completion as unproven and verify it
 - Derive concrete requirements from the objective and any referenced files, plans, specs, issues, or user instructions. Preserve the original scope; do not redefine success around the work that already exists.
 - For every explicit requirement, named artifact, command, test, gate, and deliverable, identify the authoritative evidence that would prove it, then inspect the relevant current-state sources (files, command output, test results, runtime behavior).
 - Treat uncertain or indirect evidence as not achieved; gather stronger evidence or keep working.
-Only mark the goal complete when current evidence proves every requirement is satisfied and no required work remains. If the objective is achieved, call update_goal with status "complete". If it has a token budget, report the final consumed token budget to the user after update_goal succeeds.
+Only mark the goal complete when current evidence proves every requirement is satisfied and no required work remains. If the objective is achieved, call update_goal with status "complete"; the harness reports the final token usage to the user, so you do not need to.
 
 Blocked audit:
 - Do not call update_goal with status "blocked" the first time a blocker appears.

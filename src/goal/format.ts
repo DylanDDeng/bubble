@@ -57,6 +57,20 @@ export function goalSummaryText(goal: GoalState): string {
   return parts.join(" ");
 }
 
+/**
+ * Terminal notice shown when a goal finishes, with the accurate final token
+ * spend. Call only after the finishing run's tokens have been accounted (the
+ * update_goal tool can't report this — see goal/tools.ts).
+ */
+export function goalCompleteNotice(goal: GoalState): string {
+  const tokens =
+    goal.tokenBudget !== undefined
+      ? `${formatTokensCompact(goal.tokensUsed)}/${formatTokensCompact(goal.tokenBudget)} tok`
+      : `${formatTokensCompact(goal.tokensUsed)} tok`;
+  const turns = `${goal.turnsSpent} ${goal.turnsSpent === 1 ? "turn" : "turns"}`;
+  return `Goal complete — ${tokens} used over ${turns}.`;
+}
+
 /** Compact single-line indicator for the status line / sidebar. */
 export function goalIndicatorLine(goal: GoalState, maxObjective = 48): string {
   const segments = [`goal: ${goalStatusLabel(goal.status)}`, `${goal.turnsSpent} turns`];
