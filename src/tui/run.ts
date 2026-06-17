@@ -10111,15 +10111,19 @@ function pickerTitle(kind: Exclude<PickerMode, "key">, providerId?: string) {
 function getModelPickerReasoningLevels(providerId: string, modelId: string): ThinkingLevel[] {
   // Only expand into one picker row per effort for models that genuinely have a
   // reasoning-effort spectrum: OpenAI's reasoning models (codex gpt-5.x:
-  // off/minimal/low/medium/high/xhigh), DeepSeek's v4 models, and StepFun
-  // Step Plan models. Other providers
-  // (e.g. GLM, Moonshot/Kimi) only have a thinking on/off toggle, not an effort
-  // control, so they stay as a single row.
+  // off/minimal/low/medium/high/xhigh), DeepSeek's v4 models, StepFun
+  // Step Plan models, and GLM-5.2 (the only GLM that accepts `reasoning_effort`:
+  // none/minimal/low/medium/high/xhigh/max). Other providers — including older
+  // GLM (5.1/4.7/4.6/5-turbo) and Moonshot/Kimi — only have a thinking on/off
+  // toggle, not an effort control, so they stay as a single row.
   const isOpenAIReasoning = providerId === "openai" || providerId === "openai-codex";
   const isDeepseekReasoning =
     providerId === "deepseek" && (modelId === "deepseek-v4-flash" || modelId === "deepseek-v4-pro");
   const isStepFunReasoning = providerId === "stepfun";
-  if (!isOpenAIReasoning && !isDeepseekReasoning && !isStepFunReasoning) return [];
+  const isGlm52Reasoning =
+    ["zhipuai", "zhipuai-coding-plan", "zai", "zai-coding-plan"].includes(providerId)
+    && modelId === "glm-5.2";
+  if (!isOpenAIReasoning && !isDeepseekReasoning && !isStepFunReasoning && !isGlm52Reasoning) return [];
   const levels = getAvailableThinkingLevels(providerId, modelId);
   // gpt-4o and friends report only ["off"] — keep those as a single row too.
   return levels.length > 1 ? levels : [];
@@ -10130,9 +10134,9 @@ function displayModelWithThinking(model: string, thinkingLevel: ThinkingLevel): 
   const { providerId, modelId } = decodeModel(model);
   if (!providerId) return displayModel(model);
   // Use the same scoping as the picker: only models with a real reasoning-effort
-  // spectrum (OpenAI codex gpt-5.x, deepseek v4, StepFun Step Plan) get the
-  // "(level)" suffix. The on/off thinking toggle on GLM / Moonshot(Kimi) is
-  // not an effort control.
+  // spectrum (OpenAI codex gpt-5.x, deepseek v4, StepFun Step Plan, GLM-5.2) get
+  // the "(level)" suffix. The on/off thinking toggle on older GLM / Moonshot(Kimi)
+  // is not an effort control.
   const levels = getModelPickerReasoningLevels(providerId, modelId);
   if (levels.length > 1 && thinkingLevel !== "off") {
     return `${displayModel(model)} (${thinkingLevel})`;
