@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { INK_LOCAL_SLASH_COMMANDS } from "../tui-ink/app.js";
+import { createInkAppElement } from "../tui-ink/run.js";
+import { GoalStore } from "../goal/store.js";
 
 describe("Ink goal command integration", () => {
   it("exposes /goal as a local Ink slash command", () => {
@@ -19,5 +21,17 @@ describe("Ink goal command integration", () => {
       "debug",
       "write-previews",
     ]);
+  });
+
+  it("passes the shared goal store from the Ink runner into the App", () => {
+    const goalStore = new GoalStore();
+    const element = createInkAppElement(
+      {} as any,
+      { cwd: "/tmp/project" } as any,
+      { goalStore },
+      () => {},
+    );
+
+    expect((element.props as any).goalStore).toBe(goalStore);
   });
 });

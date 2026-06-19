@@ -57,6 +57,46 @@ export interface RunTuiOptions {
   hookController?: ExternalHookController;
 }
 
+export function createInkAppElement(
+  agent: Agent,
+  args: CliArgs,
+  options: RunTuiOptions,
+  onExit: (summary: ExitSummary) => void,
+): React.ReactElement {
+  return (
+    <App
+      agent={agent}
+      args={args}
+      sessionManager={options.sessionManager}
+      switchSession={options.switchSession}
+      createProvider={options.createProvider}
+      registry={options.registry}
+      skillRegistry={options.skillRegistry}
+      planHandlerRef={options.planHandlerRef}
+      approvalHandlerRef={options.approvalHandlerRef}
+      questionController={options.questionController}
+      bashAllowlist={options.bashAllowlist}
+      settingsManager={options.settingsManager}
+      lspService={options.lspService}
+      mcpManager={options.mcpManager}
+      goalStore={options.goalStore}
+      themeMode={options.themeMode}
+      themeOverrides={options.themeOverrides}
+      detectedTheme={options.detectedTheme}
+      onThemeModeChange={options.onThemeModeChange}
+      flushMemory={options.flushMemory}
+      runMemoryCompaction={options.runMemoryCompaction}
+      runMemorySummary={options.runMemorySummary}
+      runMemoryRefresh={options.runMemoryRefresh}
+      bypassEnabled={options.bypassEnabled}
+      updateNotice={options.updateNotice}
+      updateNoticeRefresh={options.updateNoticeRefresh}
+      hookController={options.hookController}
+      onExit={onExit}
+    />
+  );
+}
+
 /**
  * Best-effort terminal restore for abnormal exits. DECSET mouse modes are
  * global terminal state — if the process dies without disabling them, the
@@ -102,43 +142,15 @@ export async function runTui(
   process.on("uncaughtException", onFatalError);
   process.on("SIGTERM", onSigterm);
   const instance = render(
-    <App
-      agent={agent}
-      args={args}
-      sessionManager={options.sessionManager}
-      switchSession={options.switchSession}
-      createProvider={options.createProvider}
-      registry={options.registry}
-      skillRegistry={options.skillRegistry}
-      planHandlerRef={options.planHandlerRef}
-      approvalHandlerRef={options.approvalHandlerRef}
-      questionController={options.questionController}
-      bashAllowlist={options.bashAllowlist}
-      settingsManager={options.settingsManager}
-      lspService={options.lspService}
-      mcpManager={options.mcpManager}
-      themeMode={options.themeMode}
-      themeOverrides={options.themeOverrides}
-      detectedTheme={options.detectedTheme}
-      onThemeModeChange={options.onThemeModeChange}
-      flushMemory={options.flushMemory}
-      runMemoryCompaction={options.runMemoryCompaction}
-      runMemorySummary={options.runMemorySummary}
-      runMemoryRefresh={options.runMemoryRefresh}
-      bypassEnabled={options.bypassEnabled}
-      updateNotice={options.updateNotice}
-      updateNoticeRefresh={options.updateNoticeRefresh}
-      hookController={options.hookController}
-      onExit={(summary) => {
-        // The app already called useApp().exit() inside requestExit, which
-        // triggers Ink's own unmount + TTY restore. waitUntilExit() below is
-        // the canonical signal that we're done — we deliberately do *not*
-        // call instance.unmount() again here to avoid double-teardown
-        // warnings on React 19. We capture the summary and render it after
-        // teardown so it lands in the real shell scrollback (Claude-Code style).
-        exitSummary = summary;
-      }}
-    />,
+    createInkAppElement(agent, args, options, (summary) => {
+      // The app already called useApp().exit() inside requestExit, which
+      // triggers Ink's own unmount + TTY restore. waitUntilExit() below is
+      // the canonical signal that we're done — we deliberately do *not*
+      // call instance.unmount() again here to avoid double-teardown
+      // warnings on React 19. We capture the summary and render it after
+      // teardown so it lands in the real shell scrollback (Claude-Code style).
+      exitSummary = summary;
+    }),
     {
       // Bubble owns Ctrl+C so it can route both raw ETX and kitty keyboard
       // Ctrl+C through App.requestExit(). Ink's default only exits reliably
