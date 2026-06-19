@@ -34,6 +34,20 @@ function trimZero(value: number): string {
 }
 
 function tokensPart(goal: GoalState): string | undefined {
+  const untracked = goal.untrackedTokenTurns ?? 0;
+  if (untracked > 0) {
+    const turns = `${untracked} ${untracked === 1 ? "turn" : "turns"}`;
+    if (goal.tokensUsed > 0) {
+      const budget = goal.tokenBudget !== undefined
+        ? `/${formatTokensCompact(goal.tokenBudget)}`
+        : "";
+      return `${formatTokensCompact(goal.tokensUsed)}${budget} tok tracked; usage unavailable for ${turns}`;
+    }
+    if (goal.tokenBudget !== undefined) {
+      return `usage unavailable for ${turns}; budget ${formatTokensCompact(goal.tokenBudget)} tok`;
+    }
+    return `usage unavailable for ${turns}`;
+  }
   if (goal.tokenBudget !== undefined) {
     return `${formatTokensCompact(goal.tokensUsed)}/${formatTokensCompact(goal.tokenBudget)} tok`;
   }
@@ -63,12 +77,28 @@ export function goalSummaryText(goal: GoalState): string {
  * update_goal tool can't report this — see goal/tools.ts).
  */
 export function goalCompleteNotice(goal: GoalState): string {
-  const tokens =
-    goal.tokenBudget !== undefined
-      ? `${formatTokensCompact(goal.tokensUsed)}/${formatTokensCompact(goal.tokenBudget)} tok`
-      : `${formatTokensCompact(goal.tokensUsed)} tok`;
+  const tokens = completionTokenUsagePhrase(goal);
   const turns = `${goal.turnsSpent} ${goal.turnsSpent === 1 ? "turn" : "turns"}`;
-  return `Goal complete — ${tokens} used over ${turns}.`;
+  return `Goal complete — ${tokens} over ${turns}.`;
+}
+
+function completionTokenUsagePhrase(goal: GoalState): string {
+  const untracked = goal.untrackedTokenTurns ?? 0;
+  if (untracked > 0) {
+    if (goal.tokensUsed > 0) {
+      const budget = goal.tokenBudget !== undefined
+        ? `/${formatTokensCompact(goal.tokenBudget)}`
+        : "";
+      return `${formatTokensCompact(goal.tokensUsed)}${budget} tok used, plus unavailable usage`;
+    }
+    if (goal.tokenBudget !== undefined) {
+      return `token usage unavailable (budget ${formatTokensCompact(goal.tokenBudget)} tok)`;
+    }
+    return "token usage unavailable";
+  }
+  return goal.tokenBudget !== undefined
+    ? `${formatTokensCompact(goal.tokensUsed)}/${formatTokensCompact(goal.tokenBudget)} tok used`
+    : `${formatTokensCompact(goal.tokensUsed)} tok used`;
 }
 
 /** Compact single-line indicator for the status line / sidebar. */

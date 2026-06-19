@@ -74,6 +74,7 @@ import { parseGoalCommand } from "../goal/command.js";
 import { continuationPrompt, initialPrompt } from "../goal/prompts.js";
 import { shouldContinueGoal, stopReasonNotice } from "../goal/engine.js";
 import { goalCompleteNotice, goalIndicatorLine, goalSummaryText } from "../goal/format.js";
+import { tokenUsageTotal } from "../goal/usage.js";
 import { formatInternalContextBlock } from "../agent/internal-reminder-sanitizer.js";
 import { collectUsageStatsBundle, formatStatsPanelBody, rangeLabel, type StatsRange, type UsageStatsBundle } from "../stats/usage.js";
 import os from "node:os";
@@ -1150,6 +1151,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         let assistantContent = "";
         let assistantReasoning = "";
         let goalRunTokens = 0;
+        let goalRunUsageReported = false;
         let runCancelled = false;
         let runErrored = false;
         const toolCalls: DisplayToolCall[] = [];
@@ -1381,7 +1383,8 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
               }
               case "turn_end": {
                 if (event.usage) {
-                  goalRunTokens += (event.usage.promptTokens || 0) + (event.usage.completionTokens || 0);
+                  goalRunUsageReported = true;
+                  goalRunTokens += tokenUsageTotal(event.usage);
                 }
                 if (event.willContinue) {
                   syncStreamingParts();
@@ -1446,6 +1449,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
             runErrored,
             isGoalRun: !!runOptions.goalRun,
             runTokens: goalRunTokens,
+            usageReported: goalRunUsageReported,
           });
         }
       };
@@ -1460,7 +1464,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         });
       };
 
-      function maybeContinueGoal(input: { runCancelled: boolean; runErrored: boolean; isGoalRun: boolean; runTokens: number }) {
+      function maybeContinueGoal(input: { runCancelled: boolean; runErrored: boolean; isGoalRun: boolean; runTokens: number; usageReported: boolean }) {
         if (!goalStore || exitRequestedRef.current) return;
         const current = goalStore.snapshot();
         if (!current) return;
@@ -1474,7 +1478,11 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         }
 
         if (input.isGoalRun) {
-          if (input.runTokens > 0) goalStore.addTokens(input.runTokens);
+          if (input.usageReported) {
+            if (input.runTokens > 0) goalStore.addTokens(input.runTokens);
+          } else {
+            goalStore.markTokenUsageUnavailable();
+          }
           goalStore.incrementTurn();
         }
 

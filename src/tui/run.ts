@@ -115,6 +115,7 @@ import { parseGoalCommand } from "../goal/command.js";
 import { continuationPrompt, initialPrompt } from "../goal/prompts.js";
 import { shouldContinueGoal, stopReasonNotice } from "../goal/engine.js";
 import { goalSummaryText, goalIndicatorLine, goalCompleteNotice } from "../goal/format.js";
+import { tokenUsageTotal } from "../goal/usage.js";
 import { formatInternalContextBlock } from "../agent/internal-reminder-sanitizer.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
 import type { QuestionAnswer, QuestionController, QuestionPrompt, QuestionRequest } from "../question/index.js";
@@ -5875,6 +5876,7 @@ function OpenTuiApp(props: {
       redrawTranscript(undefined, displayMessages, { forceFollow: true });
     }
     let goalRunTokens = 0;
+    let goalRunUsageReported = false;
     const taskStartedAt = Date.now();
     const run = beginAgentRun();
     traceEvent("tui_agent_run_begin", {
@@ -6121,7 +6123,8 @@ function OpenTuiApp(props: {
               turns: current.turns + 1,
             }));
             // Accumulate billed tokens (input + output) toward the goal budget.
-            goalRunTokens += (event.usage.promptTokens || 0) + (event.usage.completionTokens || 0);
+            goalRunUsageReported = true;
+            goalRunTokens += tokenUsageTotal(event.usage);
           }
           bumpSidebar();
           const currentParts = snapshotDisplayParts(assistantParts);
@@ -6206,7 +6209,13 @@ function OpenTuiApp(props: {
       syncSidebarLsp();
       setTimeout(() => activePrompt()?.focus(), 0);
       if (queuedInputCount() > 0) scheduleQueuedInputDrain();
-      maybeContinueGoal({ runCancelled, runErrored: !!runError, isGoalRun, runTokens: goalRunTokens });
+      maybeContinueGoal({
+        runCancelled,
+        runErrored: !!runError,
+        isGoalRun,
+        runTokens: goalRunTokens,
+        usageReported: goalRunUsageReported,
+      });
     }
   }
 
@@ -6215,7 +6224,7 @@ function OpenTuiApp(props: {
    * accounts the goal turn, decides whether to auto-continue, and either fires
    * the next hidden continuation turn or stops with an explanatory notice.
    */
-  function maybeContinueGoal(input: { runCancelled: boolean; runErrored: boolean; isGoalRun: boolean; runTokens: number }) {
+  function maybeContinueGoal(input: { runCancelled: boolean; runErrored: boolean; isGoalRun: boolean; runTokens: number; usageReported: boolean }) {
     if (!goalStore) return;
     const current = goalStore.snapshot();
     if (!current) return;
@@ -6233,7 +6242,11 @@ function OpenTuiApp(props: {
 
     // Account the goal turn that just finished (token spend + turn count).
     if (input.isGoalRun) {
-      if (input.runTokens > 0) goalStore.addTokens(input.runTokens);
+      if (input.usageReported) {
+        if (input.runTokens > 0) goalStore.addTokens(input.runTokens);
+      } else {
+        goalStore.markTokenUsageUnavailable();
+      }
       goalStore.incrementTurn();
     }
 

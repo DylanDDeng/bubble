@@ -156,8 +156,10 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
       tool_choice: tools && tools.length > 0 ? chatOptions.toolChoice ?? "auto" : undefined,
       stream: true,
     };
-    // DeepSeek and MiniMax only emit final usage in streaming mode when this flag is set.
-    if (options.providerId === "deepseek" || isMiniMaxOpenAICompatible(options)) {
+    // Several OpenAI-compatible streaming APIs only emit final usage when this
+    // flag is set. Without it, downstream goal/stat accounting can only report
+    // "usage unavailable".
+    if (shouldRequestStreamUsage(options)) {
       body.stream_options = { include_usage: true };
     }
     if (!requestConfig.omitTemperature) {
@@ -270,6 +272,19 @@ function isMiniMaxOpenAICompatible(options: Pick<ProviderInstanceOptions, "provi
     || (providerId === "minimax" && !baseURL.includes("/anthropic"))
     || baseURL.includes("api.minimaxi.com/v1")
     || baseURL.includes("api.minimax.io/v1");
+}
+
+function shouldRequestStreamUsage(options: Pick<ProviderInstanceOptions, "providerId" | "baseURL">): boolean {
+  const providerId = (options.providerId || "").toLowerCase();
+  return providerId === "openai"
+    || providerId === "deepseek"
+    || providerId === "moonshot-cn"
+    || providerId === "moonshot-intl"
+    || providerId === "zhipuai"
+    || providerId === "zhipuai-coding-plan"
+    || providerId === "zai"
+    || providerId === "zai-coding-plan"
+    || isMiniMaxOpenAICompatible(options);
 }
 
 // Some providers (notably Fireworks-hosted Kimi) stream tool-call arguments
@@ -431,9 +446,10 @@ export async function* translateOpenAIStream(
 
   for await (const chunk of stream) {
     rawChunkSeq += 1;
-    const delta = chunk.choices?.[0]?.delta;
-    const usage = (chunk as any).usage;
-    const finishReason = chunk.choices?.[0]?.finish_reason;
+    const choice = chunk.choices?.[0];
+    const delta = choice?.delta;
+    const usage = (chunk as any).usage ?? choice?.usage;
+    const finishReason = choice?.finish_reason;
 
     debugReasoningStream({
       stage: "provider_raw",
