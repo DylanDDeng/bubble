@@ -9,8 +9,11 @@ import {
   resolveCursorRowCompensation,
   resolveInkEnterIntent,
   resolveSlashEnterAction,
+  resolveSlashCommandHighlightRange,
+  resolveVerticalArrowIntent,
   shouldCollapsePastedContent,
   shouldSubmitExactSlashSuggestion,
+  splitComposerTextSegments,
   splitLineAtCursor,
 } from "../tui-ink/input-box.js";
 
@@ -78,6 +81,33 @@ describe("Ink input slash command submission", () => {
       kind: "submit",
     });
   });
+
+  it("highlights only known slash command tokens at the start of the composer", () => {
+    expect(resolveSlashCommandHighlightRange("/model deepseek", ["model"])).toEqual({
+      start: 0,
+      end: 6,
+    });
+    expect(resolveSlashCommandHighlightRange("/podcast 写稿", ["podcast"])).toEqual({
+      start: 0,
+      end: 8,
+    });
+    expect(resolveSlashCommandHighlightRange("/unknown arg", ["model"])).toBeNull();
+    expect(resolveSlashCommandHighlightRange("please /model", ["model"])).toBeNull();
+  });
+
+  it("splits highlighted slash commands around the cursor cell", () => {
+    expect(splitComposerTextSegments({
+      text: "/model ",
+      absStart: 0,
+      highlight: { start: 0, end: 6 },
+      cursorOffset: 3,
+    })).toEqual([
+      { kind: "command", text: "/mo" },
+      { kind: "cursor", text: "d" },
+      { kind: "command", text: "el" },
+      { kind: "normal", text: " " },
+    ]);
+  });
 });
 
 describe("Ink input Enter handling", () => {
@@ -111,6 +141,20 @@ describe("Ink input Enter handling", () => {
     expect(isInkModifiedEnterInput("[27;5;13~")).toBe(true);
     expect(isInkModifiedEnterInput("[13u")).toBe(false);
     expect(isInkModifiedEnterInput("x")).toBe(false);
+  });
+});
+
+describe("Ink vertical arrow handling", () => {
+  it("treats bare alternate-screen arrows as transcript scroll when scrolling is available", () => {
+    expect(resolveVerticalArrowIntent({ hasWheelScroll: true })).toBe("transcript");
+  });
+
+  it("keeps kitty keyboard arrows in composer/history handling", () => {
+    expect(resolveVerticalArrowIntent({ eventType: "press", hasWheelScroll: true })).toBe("composer");
+  });
+
+  it("falls back to composer/history handling when no transcript scroll handler exists", () => {
+    expect(resolveVerticalArrowIntent({ hasWheelScroll: false })).toBe("composer");
   });
 });
 

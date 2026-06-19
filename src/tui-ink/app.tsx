@@ -66,6 +66,12 @@ import { collectFeedback } from "../feedback/collect.js";
 import { isKeyReleaseEvent } from "./key-events.js";
 import { hasTerminalMouseSequence } from "./terminal-mouse.js";
 import { decideStartingSubmitFingerprint, submitPayloadFingerprint } from "./submit-dedupe.js";
+import {
+  isQueuedInputForCurrentSession,
+  queuedAndPendingDisplayKeys,
+  type PendingSteerMeta,
+  type QueuedInput,
+} from "./input-queue.js";
 import { TranscriptViewport, type TranscriptViewportHandle } from "./transcript-viewport.js";
 import { SessionPicker } from "./session-picker.js";
 import { sessionDisplayName } from "../tui/session-display.js";
@@ -406,8 +412,8 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   // ineligible input) queues for the next turn. Both render placeholder user
   // rows whose badge tracks the input's lifecycle.
   const inputControllerRef = useRef<AgentRunInputQueue | null>(null);
-  const pendingSteersRef = useRef(new Map<string, { displayKey: string }>());
-  const queuedInputsRef = useRef<Array<{ payload: SubmitPayload; displayKey?: string }>>([]);
+  const pendingSteersRef = useRef(new Map<string, PendingSteerMeta>());
+  const queuedInputsRef = useRef<QueuedInput[]>([]);
   const [pendingSteerCount, setPendingSteerCount] = useState(0);
   const [queuedCount, setQueuedCount] = useState(0);
   const startingSubmitFingerprintRef = useRef<string | null>(null);
@@ -748,11 +754,13 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     return key;
   }, [updateDisplayMessages]);
 
+  const currentSessionFile = useCallback(() => sessionManager?.getSessionFile(), [sessionManager]);
+
   const queueInput = useCallback((payload: SubmitPayload) => {
     const displayKey = addStatusUserMessage(payload.displayText ?? payload.text, "queued");
-    queuedInputsRef.current.push({ payload, displayKey });
+    queuedInputsRef.current.push({ payload, displayKey, sessionFile: currentSessionFile() });
     setQueuedCount(queuedInputsRef.current.length);
-  }, [addStatusUserMessage]);
+  }, [addStatusUserMessage, currentSessionFile]);
 
   const submitSteer = useCallback((payload: SubmitPayload) => {
     const controller = inputControllerRef.current;
@@ -762,9 +770,9 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     }
     const displayKey = addStatusUserMessage(payload.displayText ?? payload.text, "pending_steer");
     const pending = controller.enqueue(payload.text);
-    pendingSteersRef.current.set(pending.id, { displayKey });
+    pendingSteersRef.current.set(pending.id, { displayKey, sessionFile: currentSessionFile() });
     setPendingSteerCount(pendingSteersRef.current.size);
-  }, [addStatusUserMessage, queueInput]);
+  }, [addStatusUserMessage, currentSessionFile, queueInput]);
 
   const openPicker = useCallback((mode: "model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | "session" | "rewind" | "feishu-setup", providerId?: string) => {
     if (mode === "key") {
@@ -869,15 +877,26 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
       closePicker();
       return;
     }
+    const queuedDisplayKeys = queuedAndPendingDisplayKeys(
+      queuedInputsRef.current,
+      pendingSteersRef.current.values(),
+    );
+    queuedInputsRef.current = [];
+    pendingSteersRef.current.clear();
+    inputControllerRef.current = null;
+    setQueuedCount(0);
+    setPendingSteerCount(0);
+    setStartingSubmit(null);
+    clearComposerDraft();
     setSessionManager(result.manager);
     setTodos(agent.getTodos());
     updateDisplayMessages(() => [
-      ...reconstructDisplayMessages(agent.messages),
+      ...reconstructDisplayMessages(agent.messages).filter((message) => !queuedDisplayKeys.has(message.key ?? "")),
       withMessageKey({ role: "assistant", content: `⤷ Resumed session: ${sessionDisplayName(result.manager)}` }),
     ]);
     viewportRef.current?.forceScrollToBottom();
     closePicker();
-  }, [addMessage, agent, closePicker, switchSession, updateDisplayMessages]);
+  }, [addMessage, agent, clearComposerDraft, closePicker, setStartingSubmit, switchSession, updateDisplayMessages]);
 
   const handleModelSelect = useCallback((model: string) => {
     const run = async () => {
@@ -1106,6 +1125,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         attachedImages: { filename?: string; bytes: number }[] = [],
         runOptions: { hidden?: boolean; goalRun?: boolean } = {},
       ) => {
+        const runSessionFile = currentSessionFile();
         const activeProviderId = agent.providerId || safeRegistry.getDefault()?.id;
         const hasActiveProvider = !!activeProviderId && safeRegistry.getEnabled().some((provider) => provider.id === activeProviderId);
         if (!hasActiveProvider) {
@@ -1369,6 +1389,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
                   queuedInputsRef.current.push({
                     payload: { text: event.content, images: [] },
                     displayKey: steer.displayKey,
+                    sessionFile: steer.sessionFile ?? runSessionFile,
                   });
                   setQueuedCount(queuedInputsRef.current.length);
                 }
@@ -1432,6 +1453,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
             queuedInputsRef.current.push({
               payload: { text: leftover.content, images: [] },
               displayKey: steer?.displayKey,
+              sessionFile: steer?.sessionFile ?? runSessionFile,
             });
           }
           setPendingSteerCount(0);
@@ -1712,7 +1734,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         }
       }
     },
-    [addMessage, agent, args.cwd, openPicker, openSessionPicker, openRewindPicker, openStatsPanel, createProvider, fillComposer, safeRegistry, safeSkillRegistry, updateDisplayMessages, queueInput, submitSteer, requestExit, toggleSidebar, applySidebarMode, setStartingSubmit]
+    [addMessage, agent, args.cwd, openPicker, openSessionPicker, openRewindPicker, openStatsPanel, createProvider, currentSessionFile, fillComposer, safeRegistry, safeSkillRegistry, updateDisplayMessages, queueInput, submitSteer, requestExit, toggleSidebar, applySidebarMode, setStartingSubmit]
   );
 
   // Drain the queue once the run ends and no modal needs the user first.
@@ -1728,8 +1750,9 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     if (next.displayKey) {
       updateDisplayMessages((prev) => prev.filter((message) => message.key !== next.displayKey));
     }
+    if (!isQueuedInputForCurrentSession(next, currentSessionFile())) return;
     void handleSubmit(next.payload);
-  }, [pendingPlan, pendingApproval, pendingQuestion, pendingFeedback, pickerMode, statsPanel, updateDisplayMessages, handleSubmit]);
+  }, [pendingPlan, pendingApproval, pendingQuestion, pendingFeedback, pickerMode, statsPanel, currentSessionFile, updateDisplayMessages, handleSubmit]);
 
   useEffect(() => {
     if (isRunning || queuedCount === 0) return;

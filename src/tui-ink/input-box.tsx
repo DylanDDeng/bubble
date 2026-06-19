@@ -224,6 +224,76 @@ interface SlashSuggestion {
   description: string;
 }
 
+export interface TextHighlightRange {
+  start: number;
+  end: number;
+}
+
+export type ComposerTextSegmentKind = "normal" | "command" | "cursor";
+
+export interface ComposerTextSegment {
+  kind: ComposerTextSegmentKind;
+  text: string;
+}
+
+export function resolveSlashCommandHighlightRange(
+  input: string,
+  commandNames: Iterable<string>,
+): TextHighlightRange | null {
+  if (!input.startsWith("/")) return null;
+  const match = /^\/([^\s]+)/.exec(input);
+  if (!match) return null;
+  const commandName = match[1]?.toLowerCase();
+  if (!commandName) return null;
+  for (const name of commandNames) {
+    if (name.toLowerCase() === commandName) {
+      return { start: 0, end: match[0].length };
+    }
+  }
+  return null;
+}
+
+function splitHighlightedText(
+  text: string,
+  absStart: number,
+  highlight: TextHighlightRange | null,
+): ComposerTextSegment[] {
+  if (!text) return [];
+  if (!highlight) return [{ kind: "normal", text }];
+  const start = Math.max(0, highlight.start - absStart);
+  const end = Math.min(text.length, highlight.end - absStart);
+  if (start >= end) return [{ kind: "normal", text }];
+  const segments: ComposerTextSegment[] = [];
+  if (start > 0) segments.push({ kind: "normal", text: text.slice(0, start) });
+  segments.push({ kind: "command", text: text.slice(start, end) });
+  if (end < text.length) segments.push({ kind: "normal", text: text.slice(end) });
+  return segments;
+}
+
+export function splitComposerTextSegments(input: {
+  text: string;
+  absStart: number;
+  highlight: TextHighlightRange | null;
+  cursorOffset?: number;
+}): ComposerTextSegment[] {
+  if (input.cursorOffset === undefined) {
+    return splitHighlightedText(input.text, input.absStart, input.highlight);
+  }
+
+  const cursorOffset = Math.max(0, Math.min(input.text.length, input.cursorOffset));
+  const cursorSegments = splitLineAtCursor(input.text, cursorOffset);
+  const cursorConsumesSource = cursorOffset < input.text.length;
+  return [
+    ...splitHighlightedText(cursorSegments.before, input.absStart, input.highlight),
+    { kind: "cursor" as const, text: cursorSegments.at },
+    ...splitHighlightedText(
+      cursorSegments.after,
+      input.absStart + cursorOffset + (cursorConsumesSource ? cursorSegments.at.length : 0),
+      input.highlight,
+    ),
+  ];
+}
+
 export function shouldSubmitExactSlashSuggestion(input: string, suggestionName?: string): boolean {
   if (!suggestionName) return false;
   return input.trim() === `/${suggestionName}`;
@@ -263,6 +333,16 @@ export function resolveInkEnterIntent(
   if (!isEnter) return "none";
   if (key.shift || key.ctrl || key.meta) return "newline";
   return "submit";
+}
+
+export type VerticalArrowIntent = "composer" | "transcript";
+
+export function resolveVerticalArrowIntent(input: {
+  eventType?: string;
+  hasWheelScroll: boolean;
+}): VerticalArrowIntent {
+  if (input.eventType) return "composer";
+  return input.hasWheelScroll ? "transcript" : "composer";
 }
 
 export function insertNewlineAtCursor(text: string, cursor: number) {
@@ -363,6 +443,19 @@ export function InputBox({
     const all = [...commandSuggestions, ...skillSuggestions];
     return all.filter((item) => item.name.toLowerCase().startsWith(slashPrefix));
   }, [isSlashContext, slashPrefix, skillRegistry, localSlashCommands]);
+
+  const knownSlashCommandNames = useMemo(() => {
+    const names = new Set<string>();
+    for (const command of localSlashCommands) names.add(command.name);
+    for (const command of slashRegistry.list()) names.add(command.name);
+    for (const skill of skillRegistry?.summaries() ?? []) names.add(skill.name);
+    return names;
+  }, [skillRegistry, localSlashCommands]);
+
+  const slashCommandHighlight = useMemo(
+    () => resolveSlashCommandHighlightRange(text, knownSlashCommandNames),
+    [text, knownSlashCommandNames],
+  );
 
   const fileSuggestions = useMemo(() => {
     if (!atContext || !projectFiles) return [];
@@ -824,17 +917,13 @@ export function InputBox({
   // ---- Wheel-vs-keyboard classification for Up/Down arrows ----
   //
   // With mouse reporting off (so native drag-select/copy works), terminals
-  // translate the wheel into Up/Down arrow keys while in the alternate
-  // screen. Those synthetic arrows must scroll the transcript, not move the
-  // composer cursor or browse history. Three signals, in priority order:
-  //   1. kitty keyboard protocol: real key presses carry `eventType`;
-  //      synthetic wheel arrows are bare legacy sequences. Once one enhanced
-  //      arrow is seen, bare arrows are classified as wheel with no delay.
-  //   2. burst heuristic (non-kitty terminals): a wheel notch delivers
-  //      several arrows within a few ms; a keypress delivers one. The first
-  //      arrow is briefly deferred to see whether siblings follow.
-  //   3. wheel session: shortly after a wheel burst, single arrows continue
-  //      to scroll, so slow trackpad scrolling doesn't fall back to history.
+  // translate the wheel into bare Up/Down arrow keys while in the alternate
+  // screen. Treat those bare arrows as transcript scroll whenever the app
+  // provides a scroll handler. Real keyboard arrows in kitty keyboard mode
+  // carry eventType and keep composer/history behavior. This deliberately
+  // avoids a timer-based "single arrow might be keyboard" guess: a single
+  // wheel notch after submit can otherwise recall global input history into
+  // an empty composer after the run finishes.
   const performVerticalArrowRef = useRef<(direction: "up" | "down") => void>(() => {});
   performVerticalArrowRef.current = (direction) => {
     if (direction === "up") {
@@ -863,66 +952,17 @@ export function InputBox({
       nextPastedContentIndexRef.current = 1;
     }
   };
-  const kittyArrowsSeenRef = useRef(false);
-  const arrowBurstRef = useRef<{
-    direction: "up" | "down";
-    count: number;
-    timer: ReturnType<typeof setTimeout>;
-  } | null>(null);
-  const lastWheelFlushRef = useRef(0);
-  const ARROW_BURST_WINDOW_MS = 20;
-  const WHEEL_SESSION_MS = 300;
-  const flushArrowBurst = (burst: { direction: "up" | "down"; count: number }) => {
-    if (burst.count > 1 && onWheelScroll) {
-      lastWheelFlushRef.current = Date.now();
-      onWheelScroll(burst.direction, burst.count);
-    } else {
-      performVerticalArrowRef.current(burst.direction);
-    }
-  };
   const classifyVerticalArrow = (direction: "up" | "down", eventType?: string) => {
-    if (eventType) {
-      kittyArrowsSeenRef.current = true;
+    const intent = resolveVerticalArrowIntent({
+      eventType,
+      hasWheelScroll: !!onWheelScroll,
+    });
+    if (intent === "composer") {
       performVerticalArrowRef.current(direction);
       return;
     }
-    if (!onWheelScroll) {
-      performVerticalArrowRef.current(direction);
-      return;
-    }
-    if (kittyArrowsSeenRef.current) {
-      lastWheelFlushRef.current = Date.now();
-      onWheelScroll(direction, 1);
-      return;
-    }
-    const pending = arrowBurstRef.current;
-    if (pending) {
-      if (pending.direction === direction) {
-        pending.count += 1;
-        return;
-      }
-      clearTimeout(pending.timer);
-      arrowBurstRef.current = null;
-      flushArrowBurst(pending);
-    }
-    if (Date.now() - lastWheelFlushRef.current < WHEEL_SESSION_MS) {
-      lastWheelFlushRef.current = Date.now();
-      onWheelScroll(direction, 1);
-      return;
-    }
-    const burst = {
-      direction,
-      count: 1,
-      timer: setTimeout(() => {
-        arrowBurstRef.current = null;
-        flushArrowBurst(burst);
-      }, ARROW_BURST_WINDOW_MS),
-    };
-    arrowBurstRef.current = burst;
+    onWheelScroll?.(direction, 1);
   };
-  useEffect(() => () => {
-    if (arrowBurstRef.current) clearTimeout(arrowBurstRef.current.timer);
-  }, []);
 
   const totalLines = Math.max(visualLines.length, 1);
   const visibleLines = Math.min(Math.max(totalLines, MIN_VISIBLE_LINES), MAX_VISIBLE_LINES);
@@ -1103,16 +1143,20 @@ export function InputBox({
             );
           }
           const { text: line, visualIdx } = row;
+          const visualLine = visualLines[visualIdx];
           const lineText = line.length === 0 ? " " : line;
           const isFirst = visualIdx === 0;
           const isCursorLine = visualIdx === cursorVisualRow;
           const prompt = isFirst ? PROMPT : " ".repeat(PROMPT.length);
-          const cursorSegments = isCursorLine && !disabled
-            ? splitLineAtCursor(lineText, cursor - (visualLines[cursorVisualRow]?.absStart ?? 0))
-            : null;
-          const renderedLine = cursorSegments
-            ? cursorSegments.before + cursorSegments.at + cursorSegments.after
-            : lineText;
+          const renderedSegments = splitComposerTextSegments({
+            text: lineText,
+            absStart: visualLine?.absStart ?? 0,
+            highlight: slashCommandHighlight,
+            cursorOffset: isCursorLine && !disabled
+              ? cursor - (visualLines[cursorVisualRow]?.absStart ?? 0)
+              : undefined,
+          });
+          const renderedLine = renderedSegments.map((segment) => segment.text).join("");
           const fill = " ".repeat(Math.max(0, lineWidth - stringWidth(renderedLine)));
           return (
             <Box
@@ -1130,19 +1174,25 @@ export function InputBox({
               <Text backgroundColor={inputBg} color={isFirst ? theme.accent : theme.inputText}>
                 {prompt}
               </Text>
-              {cursorSegments ? (
-                <>
-                  {cursorSegments.before && (
-                    <Text backgroundColor={inputBg} color={theme.inputText}>{cursorSegments.before}</Text>
-                  )}
-                  <Text backgroundColor={theme.inputText} color={inputBg}>{cursorSegments.at}</Text>
-                  {cursorSegments.after && (
-                    <Text backgroundColor={inputBg} color={theme.inputText}>{cursorSegments.after}</Text>
-                  )}
-                </>
-              ) : (
-                <Text backgroundColor={inputBg} color={theme.inputText}>{lineText}</Text>
-              )}
+              {renderedSegments.map((segment, index) => {
+                if (segment.kind === "cursor") {
+                  return (
+                    <Text key={index} backgroundColor={theme.inputText} color={inputBg}>
+                      {segment.text}
+                    </Text>
+                  );
+                }
+                return (
+                  <Text
+                    key={index}
+                    backgroundColor={inputBg}
+                    color={segment.kind === "command" ? theme.accent : theme.inputText}
+                    bold={segment.kind === "command"}
+                  >
+                    {segment.text}
+                  </Text>
+                );
+              })}
               <Text backgroundColor={inputBg}>{fill}</Text>
             </Box>
           );
