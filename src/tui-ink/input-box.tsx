@@ -23,6 +23,7 @@ import {
 } from "./input-history.js";
 import { isKeyReleaseEvent } from "./key-events.js";
 import { stripTerminalMouseSequences } from "./terminal-mouse.js";
+import { submitPayloadFingerprint } from "./submit-dedupe.js";
 export {
   createPastedContentMarker,
   expandPastedContentMarkers,
@@ -299,6 +300,7 @@ export function InputBox({
   const [history, setHistory] = useState<string[]>(() => loadHistorySync());
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   const historyDraftRef = useRef<string>("");
+  const submittedPayloadFingerprintRef = useRef<string | null>(null);
   const loadingFilesRef = useRef(false);
   const nextPastedContentIndexRef = useRef(1);
   // Paste and the keystrokes that follow can arrive inside the same stdin chunk
@@ -546,11 +548,15 @@ export function InputBox({
     const expandedText = expandPastedContentMarkers(submittedText, pastedContentRefs);
     if (expandedText.trim().length === 0 && attachments.length === 0) return;
     const deliver = target === "queue" && onQueue ? onQueue : onSubmit;
-    deliver({
+    const payload = {
       text: expandedText,
       displayText: expandedText === submittedText ? undefined : submittedText,
       images: attachments,
-    });
+    };
+    const fingerprint = submitPayloadFingerprint(payload);
+    if (submittedPayloadFingerprintRef.current === fingerprint) return;
+    submittedPayloadFingerprintRef.current = fingerprint;
+    deliver(payload);
     // A collapsed marker cannot be safely replayed from history once its
     // in-memory paste reference is gone; skip those entries instead.
     if (expandedText.trim().length > 0 && expandedText === submittedText) {
@@ -783,6 +789,12 @@ export function InputBox({
     historyDraftRef.current = "";
     onDraftApplied?.();
   }, [draftEpoch, draftText, onDraftApplied]);
+
+  useEffect(() => {
+    if (text || attachments.length > 0) {
+      submittedPayloadFingerprintRef.current = null;
+    }
+  }, [text, attachments.length]);
 
   // After a terminal resize the previous-frame refs reference a layout that no
   // longer exists; carrying them forward makes `needsCursorRowCompensation`

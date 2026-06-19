@@ -65,6 +65,7 @@ import type { SidebarCommandState, SidebarMode } from "../slash-commands/types.j
 import { collectFeedback } from "../feedback/collect.js";
 import { isKeyReleaseEvent } from "./key-events.js";
 import { hasTerminalMouseSequence } from "./terminal-mouse.js";
+import { decideStartingSubmitFingerprint, submitPayloadFingerprint } from "./submit-dedupe.js";
 import { TranscriptViewport, type TranscriptViewportHandle } from "./transcript-viewport.js";
 import { SessionPicker } from "./session-picker.js";
 import { sessionDisplayName } from "../tui/session-display.js";
@@ -408,6 +409,8 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   const queuedInputsRef = useRef<Array<{ payload: SubmitPayload; displayKey?: string }>>([]);
   const [pendingSteerCount, setPendingSteerCount] = useState(0);
   const [queuedCount, setQueuedCount] = useState(0);
+  const startingSubmitFingerprintRef = useRef<string | null>(null);
+  const [startingSubmitFingerprint, setStartingSubmitFingerprint] = useState<string | null>(null);
   const nextRunIdRef = useRef(0);
   // Set true the moment /quit is invoked so we can hide dynamic UI (composer,
   // waiting indicator, footer) before Ink snapshots its final frame into the
@@ -786,6 +789,11 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     setComposerDraft(null);
   }, []);
 
+  const setStartingSubmit = useCallback((fingerprint: string | null) => {
+    startingSubmitFingerprintRef.current = fingerprint;
+    setStartingSubmitFingerprint(fingerprint);
+  }, []);
+
   const openFeedback = useCallback((initialDescription: string) => {
     const base = collectFeedback(agent, { description: "" });
     const { description: _drop, ...rest } = base;
@@ -1078,6 +1086,19 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         return;
       }
 
+      const submitFingerprint = submitPayloadFingerprint(normalized);
+      const startingDecision = decideStartingSubmitFingerprint(
+        startingSubmitFingerprintRef.current,
+        submitFingerprint,
+      );
+      if (startingDecision === "ignore") return;
+      if (startingDecision === "queue") {
+        queueInput(normalized);
+        return;
+      }
+
+      setStartingSubmit(submitFingerprint);
+      try {
       const runAgentInput = async (
         actualInput: string | ContentPart[],
         displayInput: string,
@@ -1135,6 +1156,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         const assistantParts: DisplayMessagePart[] = [];
         const abortController = new AbortController();
         activeAbortRef.current = abortController;
+        setStartingSubmit(null);
         const inputController = new AgentRunInputQueue(`run-${++nextRunIdRef.current}`);
         inputControllerRef.current = inputController;
 
@@ -1676,8 +1698,13 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         displayInput,
         images.map((img) => ({ filename: img.filename, bytes: img.bytes })),
       );
+      } finally {
+        if (startingSubmitFingerprintRef.current === submitFingerprint) {
+          setStartingSubmit(null);
+        }
+      }
     },
-    [addMessage, agent, args.cwd, openPicker, openSessionPicker, openRewindPicker, openStatsPanel, createProvider, fillComposer, safeRegistry, safeSkillRegistry, updateDisplayMessages, queueInput, submitSteer, requestExit, toggleSidebar, applySidebarMode]
+    [addMessage, agent, args.cwd, openPicker, openSessionPicker, openRewindPicker, openStatsPanel, createProvider, fillComposer, safeRegistry, safeSkillRegistry, updateDisplayMessages, queueInput, submitSteer, requestExit, toggleSidebar, applySidebarMode, setStartingSubmit]
   );
 
   // Drain the queue once the run ends and no modal needs the user first.
@@ -1685,6 +1712,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   // renders the message again as a regular user row.
   const drainQueuedInput = useCallback(() => {
     if (activeAbortRef.current) return;
+    if (startingSubmitFingerprintRef.current) return;
     if (pendingPlan || pendingApproval || pendingQuestion || pendingFeedback || pickerMode || statsPanel) return;
     const next = queuedInputsRef.current.shift();
     if (!next) return;
@@ -1697,10 +1725,11 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
 
   useEffect(() => {
     if (isRunning || queuedCount === 0) return;
+    if (startingSubmitFingerprint) return;
     if (pendingPlan || pendingApproval || pendingQuestion || pendingFeedback || pickerMode || statsPanel) return;
     const timer = setTimeout(drainQueuedInput, 0);
     return () => clearTimeout(timer);
-  }, [isRunning, queuedCount, pendingPlan, pendingApproval, pendingQuestion, pendingFeedback, pickerMode, statsPanel, drainQueuedInput]);
+  }, [isRunning, queuedCount, startingSubmitFingerprint, pendingPlan, pendingApproval, pendingQuestion, pendingFeedback, pickerMode, statsPanel, drainQueuedInput]);
 
   const currentProviderId = agent.providerId || safeRegistry.getDefault()?.id;
   const keyTarget = keyProviderId

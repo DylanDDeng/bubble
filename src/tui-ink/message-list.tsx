@@ -372,14 +372,14 @@ function TimelineText({
 }) {
   const theme = useTheme();
   if (!content.trim()) return null;
-  // marginLeft (2) + "⛬  " glyph (3 visual cells) = 5 cells consumed by the
+  // marginLeft (2) + "●  " marker (3 visual cells) = 5 cells consumed by the
   // timeline gutter; pass the remaining width so wide blocks like tables size
   // themselves against the actual content area instead of the raw terminal.
   const available = terminalColumns ? Math.max(20, terminalColumns - 5) : undefined;
   const trimmed = content.trim();
   return (
     <Box marginLeft={2} marginTop={compactTop ? 0 : 1}>
-      <Text color={theme.agent}>⛬  </Text>
+      <Text color={theme.agent}>●  </Text>
       <Box flexDirection="column" flexGrow={1}>
         {streaming ? (
           <StreamingMarkdown content={trimmed} maxWidth={available} />
