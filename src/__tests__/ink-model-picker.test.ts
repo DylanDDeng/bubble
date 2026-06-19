@@ -47,6 +47,9 @@ describe("Ink model picker", () => {
     expect(isPrintablePickerInput("\x1b[A")).toBe(false);
     expect(isPrintablePickerInput("[B")).toBe(false);
     expect(isPrintablePickerInput("OB")).toBe(false);
+    expect(isPrintablePickerInput("\x1b[<64;12;5M")).toBe(false);
+    expect(isPrintablePickerInput("[<64;12;5M")).toBe(false);
+    expect(isPrintablePickerInput(`\x1b[M${String.fromCharCode(64 + 32)}!!`)).toBe(false);
   });
 
   it("formats skill picker rows as fixed-height truncated rows", () => {

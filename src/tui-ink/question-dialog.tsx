@@ -3,6 +3,7 @@ import { Box, Text, useInput } from "ink";
 import type { QuestionAnswer, QuestionRequest } from "../question/index.js";
 import { isKeyReleaseEvent } from "./key-events.js";
 import { useTheme } from "./theme.js";
+import { stripTerminalMouseSequences } from "./terminal-mouse.js";
 
 interface QuestionDialogProps {
   request: QuestionRequest;
@@ -62,6 +63,11 @@ export function QuestionDialog({ request, onSubmit, onCancel }: QuestionDialogPr
 
   useInput((input, key) => {
     if (isKeyReleaseEvent(key)) return;
+    const strippedMouseInput = stripTerminalMouseSequences(input);
+    if (strippedMouseInput !== input) {
+      if (!strippedMouseInput) return;
+      input = strippedMouseInput;
+    }
     if (key.escape) {
       onCancel();
       return;

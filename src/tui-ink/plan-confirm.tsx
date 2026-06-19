@@ -3,6 +3,7 @@ import { Box, Text, useInput } from "ink";
 import { isKeyReleaseEvent } from "./key-events.js";
 import { useTheme } from "./theme.js";
 import { MarkdownContent } from "./markdown.js";
+import { stripTerminalMouseSequences } from "./terminal-mouse.js";
 
 interface PlanConfirmProps {
   initialPlan: string;
@@ -20,6 +21,11 @@ export function PlanConfirm({ initialPlan, onApprove, onReject }: PlanConfirmPro
 
   useInput((input, key) => {
     if (isKeyReleaseEvent(key)) return;
+    const strippedMouseInput = stripTerminalMouseSequences(input);
+    if (strippedMouseInput !== input) {
+      if (!strippedMouseInput) return;
+      input = strippedMouseInput;
+    }
     if (stage === "view") {
       if (key.escape || input === "n" || input === "N") {
         onReject();

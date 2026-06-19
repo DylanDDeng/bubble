@@ -52,11 +52,6 @@ interface InputBoxProps {
    * turn instead of its idle-time behavior.
    */
   onQueue?: (payload: SubmitPayload) => void;
-  /**
-   * Receives scroll intent when Up/Down arrows are classified as synthetic
-   * wheel events (terminal alternate-scroll) rather than keyboard presses.
-   */
-  onWheelScroll?: (direction: "up" | "down", lines: number) => void;
   onPasteNotice?: (notice: string) => void;
   disabled?: boolean;
   cursorResetEpoch?: number;
@@ -335,16 +330,6 @@ export function resolveInkEnterIntent(
   return "submit";
 }
 
-export type VerticalArrowIntent = "composer" | "transcript";
-
-export function resolveVerticalArrowIntent(input: {
-  eventType?: string;
-  hasWheelScroll: boolean;
-}): VerticalArrowIntent {
-  if (input.eventType) return "composer";
-  return input.hasWheelScroll ? "transcript" : "composer";
-}
-
 export function insertNewlineAtCursor(text: string, cursor: number) {
   const clampedCursor = Math.max(0, Math.min(text.length, cursor));
   return {
@@ -356,7 +341,6 @@ export function insertNewlineAtCursor(text: string, cursor: number) {
 export function InputBox({
   onSubmit,
   onQueue,
-  onWheelScroll,
   onPasteNotice,
   disabled,
   cursorResetEpoch = 0,
@@ -817,7 +801,7 @@ export function InputBox({
       return;
     }
     if (key.upArrow || key.downArrow) {
-      classifyVerticalArrow(key.upArrow ? "up" : "down", key.eventType);
+      classifyVerticalArrow(key.upArrow ? "up" : "down");
       return;
     }
 
@@ -916,14 +900,9 @@ export function InputBox({
 
   // ---- Wheel-vs-keyboard classification for Up/Down arrows ----
   //
-  // With mouse reporting off (so native drag-select/copy works), terminals
-  // translate the wheel into bare Up/Down arrow keys while in the alternate
-  // screen. Treat those bare arrows as transcript scroll whenever the app
-  // provides a scroll handler. Real keyboard arrows in kitty keyboard mode
-  // carry eventType and keep composer/history behavior. This deliberately
-  // avoids a timer-based "single arrow might be keyboard" guess: a single
-  // wheel notch after submit can otherwise recall global input history into
-  // an empty composer after the run finishes.
+  // Wheel events are handled as SGR mouse reports at the app boundary. Up/Down
+  // reaching the composer are keyboard navigation again: move within multiline
+  // input first, then browse prompt history at the top/bottom edge.
   const performVerticalArrowRef = useRef<(direction: "up" | "down") => void>(() => {});
   performVerticalArrowRef.current = (direction) => {
     if (direction === "up") {
@@ -952,16 +931,8 @@ export function InputBox({
       nextPastedContentIndexRef.current = 1;
     }
   };
-  const classifyVerticalArrow = (direction: "up" | "down", eventType?: string) => {
-    const intent = resolveVerticalArrowIntent({
-      eventType,
-      hasWheelScroll: !!onWheelScroll,
-    });
-    if (intent === "composer") {
-      performVerticalArrowRef.current(direction);
-      return;
-    }
-    onWheelScroll?.(direction, 1);
+  const classifyVerticalArrow = (direction: "up" | "down") => {
+    performVerticalArrowRef.current(direction);
   };
 
   const totalLines = Math.max(visualLines.length, 1);

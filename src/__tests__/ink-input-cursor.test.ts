@@ -10,7 +10,6 @@ import {
   resolveInkEnterIntent,
   resolveSlashEnterAction,
   resolveSlashCommandHighlightRange,
-  resolveVerticalArrowIntent,
   shouldCollapsePastedContent,
   shouldSubmitExactSlashSuggestion,
   splitComposerTextSegments,
@@ -141,20 +140,6 @@ describe("Ink input Enter handling", () => {
     expect(isInkModifiedEnterInput("[27;5;13~")).toBe(true);
     expect(isInkModifiedEnterInput("[13u")).toBe(false);
     expect(isInkModifiedEnterInput("x")).toBe(false);
-  });
-});
-
-describe("Ink vertical arrow handling", () => {
-  it("treats bare alternate-screen arrows as transcript scroll when scrolling is available", () => {
-    expect(resolveVerticalArrowIntent({ hasWheelScroll: true })).toBe("transcript");
-  });
-
-  it("keeps kitty keyboard arrows in composer/history handling", () => {
-    expect(resolveVerticalArrowIntent({ eventType: "press", hasWheelScroll: true })).toBe("composer");
-  });
-
-  it("falls back to composer/history handling when no transcript scroll handler exists", () => {
-    expect(resolveVerticalArrowIntent({ hasWheelScroll: false })).toBe("composer");
   });
 });
 

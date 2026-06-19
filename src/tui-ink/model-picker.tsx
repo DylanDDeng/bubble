@@ -5,6 +5,7 @@ import { useTheme } from "./theme.js";
 import { ProviderRegistry, encodeModel, decodeModel, displayModel, isUserVisibleProvider, type ModelInfo } from "../provider-registry.js";
 import { listBuiltinModels } from "../model-catalog.js";
 import { padVisual, truncateVisual } from "../text-display.js";
+import { hasTerminalMouseSequence } from "./terminal-mouse.js";
 
 export { padVisual, truncateVisual } from "../text-display.js";
 
@@ -44,6 +45,7 @@ export function resolvePickerKeyAction(
 
 export function isPrintablePickerInput(input: string): boolean {
   if (!input) return false;
+  if (hasTerminalMouseSequence(input)) return false;
   if (input.startsWith("\x1b")) return false;
   if (isRawEscapeTail(input)) return false;
   return !/[\x00-\x1f\x7f]/.test(input);

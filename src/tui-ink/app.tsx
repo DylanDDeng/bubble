@@ -64,7 +64,8 @@ import type { ExternalHookController } from "../hooks/controller.js";
 import type { SidebarCommandState, SidebarMode } from "../slash-commands/types.js";
 import { collectFeedback } from "../feedback/collect.js";
 import { isKeyReleaseEvent } from "./key-events.js";
-import { hasTerminalMouseSequence } from "./terminal-mouse.js";
+import { sanitizeTerminalMouseInput, transcriptScrollLinesFromMouseInput } from "./terminal-mouse.js";
+import { transcriptPageScrollDirection } from "./transcript-input.js";
 import { decideStartingSubmitFingerprint, submitPayloadFingerprint } from "./submit-dedupe.js";
 import {
   isQueuedInputForCurrentSession,
@@ -630,18 +631,21 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
       return;
     }
 
-    // Mouse reporting is off (native drag-select/copy works directly), so no
-    // SGR wheel events arrive — wheel scrolling reaches the app as Up/Down
-    // arrows via the terminal's alternate-scroll mode, classified in the
-    // composer. Defensively drop any stray mouse report bytes.
-    if (hasTerminalMouseSequence(input)) return;
-
-    if (!pickerMode && key.pageUp) {
-      viewportRef.current?.scrollPage("up");
-      return;
+    const overlayActive = !!(pickerMode || pendingPlan || pendingApproval || pendingQuestion || pendingFeedback || statsPanel);
+    const mouseInput = sanitizeTerminalMouseInput(input);
+    if (mouseInput.wheelDirections.length > 0) {
+      for (const lines of transcriptScrollLinesFromMouseInput(mouseInput, { overlayActive })) {
+        viewportRef.current?.scrollBy(lines);
+      }
     }
-    if (!pickerMode && key.pageDown) {
-      viewportRef.current?.scrollPage("down");
+    if (mouseInput.hasMouse) {
+      if (!mouseInput.strippedInput) return;
+      input = mouseInput.strippedInput;
+    }
+
+    const pageScrollDirection = transcriptPageScrollDirection(key, { overlayActive });
+    if (pageScrollDirection) {
+      viewportRef.current?.scrollPage(pageScrollDirection);
       return;
     }
 
@@ -2100,9 +2104,6 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
           <InputBox
             onSubmit={handleSubmit}
             onQueue={isRunning ? queueInput : undefined}
-            onWheelScroll={(direction, lines) => {
-              viewportRef.current?.scrollBy(direction === "up" ? -lines : lines);
-            }}
             disabled={!!pendingPlan || !!pendingApproval || !!pendingQuestion || !!pendingFeedback || !!statsPanel}
             cursorResetEpoch={cursorResetEpoch}
             draftText={composerDraft?.text}
