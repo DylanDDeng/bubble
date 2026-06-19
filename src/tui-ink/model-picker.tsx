@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { Box, Text, useInput, usePaste, useStdout } from "ink";
+import { isKeyReleaseEvent } from "./key-events.js";
 import { useTheme } from "./theme.js";
 import { ProviderRegistry, encodeModel, decodeModel, displayModel, isUserVisibleProvider, type ModelInfo } from "../provider-registry.js";
 import { listBuiltinModels } from "../model-catalog.js";
@@ -166,6 +167,7 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
   }, [rawOptions, query]);
 
   useInput((input, key) => {
+    if (isKeyReleaseEvent(key)) return;
     const action = resolvePickerKeyAction(input, key);
     if (action === "escape") {
       onCancel();
@@ -359,6 +361,7 @@ export function ProviderPicker({ providers, current, onSelect, onCancel, title }
   });
 
   useInput((input, key) => {
+    if (isKeyReleaseEvent(key)) return;
     const action = resolvePickerKeyAction(input, key);
     if (action === "escape") {
       onCancel();
@@ -438,6 +441,7 @@ export function KeyPicker({ providerName, onSubmit, onCancel }: KeyPickerProps) 
   const [value, setValue] = useState("");
 
   useInput((input, key) => {
+    if (isKeyReleaseEvent(key)) return;
     const action = resolvePickerKeyAction(input, key);
     if (action === "escape") {
       onCancel();
@@ -504,6 +508,7 @@ export function SkillPicker({ skills, onSelect, onCancel }: SkillPickerProps) {
   }, [query, skills]);
 
   useInput((input, key) => {
+    if (isKeyReleaseEvent(key)) return;
     const action = resolvePickerKeyAction(input, key);
     if (action === "escape") {
       onCancel();

@@ -35,9 +35,10 @@ export interface RunTuiOptions {
   questionController?: QuestionController;
   bashAllowlist?: BashAllowlist;
   settingsManager?: SettingsManager;
+  switchSession?: (sessionFile: string) => { manager: SessionManager } | { error: string };
   lspService?: LspService;
   mcpManager?: McpManager;
-  /** Accepted for compatibility with the shared options bag; the goal feature is OpenTUI-only. */
+  /** Shared with the model-facing goal tools and the Ink auto-continuation loop. */
   goalStore?: import("../goal/store.js").GoalStore;
   themeMode?: ThemeMode;
   themeOverrides?: Record<string, string>;
@@ -50,6 +51,8 @@ export interface RunTuiOptions {
   bypassEnabled?: boolean;
   /** One-line "update available" notice rendered under the welcome banner version. */
   updateNotice?: string;
+  /** Late update notice refresh surfaced after startup without restarting Ink. */
+  updateNoticeRefresh?: Promise<string | null>;
   /** External lifecycle hooks, threaded into slash-command execution. */
   hookController?: ExternalHookController;
 }
@@ -103,6 +106,7 @@ export async function runTui(
       agent={agent}
       args={args}
       sessionManager={options.sessionManager}
+      switchSession={options.switchSession}
       createProvider={options.createProvider}
       registry={options.registry}
       skillRegistry={options.skillRegistry}
@@ -123,6 +127,7 @@ export async function runTui(
       runMemoryRefresh={options.runMemoryRefresh}
       bypassEnabled={options.bypassEnabled}
       updateNotice={options.updateNotice}
+      updateNoticeRefresh={options.updateNoticeRefresh}
       hookController={options.hookController}
       onExit={(summary) => {
         // The app already called useApp().exit() inside requestExit, which

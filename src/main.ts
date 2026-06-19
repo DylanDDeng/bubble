@@ -47,11 +47,12 @@ import {
   summarizeTraceMessage,
   traceEvent,
 } from "./debug-trace.js";
+import { shouldUseOpenTuiRenderer } from "./tui/renderer-choice.js";
 
-// OpenTUI is the default renderer. The React Ink implementation (alt-screen
-// viewport, src/tui-ink) is feature-complete but still maturing — opt in with
-// BUBBLE_TUI=ink.
-const USE_OPENTUI = process.env.BUBBLE_TUI !== "ink";
+// React Ink is the default renderer. It runs in the terminal alternate screen
+// to avoid scrollback churn/flicker during streaming; keep OpenTUI available
+// as an explicit fallback while the migration settles.
+const USE_OPENTUI = shouldUseOpenTuiRenderer();
 
 type TerminalTheme = "light" | "dark";
 
@@ -630,6 +631,7 @@ async function main() {
         detectedTheme,
         onThemeModeChange: (mode) => userConfig.setThemeMode(mode),
         updateNotice: updateNotice ?? undefined,
+        updateNoticeRefresh: updateCheck.refreshed,
       });
       exitWallMs = summary?.wallMs;
     }

@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { Box, Text, useInput } from "ink";
+import { isKeyReleaseEvent } from "./key-events.js";
 import { useTheme } from "./theme.js";
 import type { FeedbackPayload, SubmitResult } from "../feedback/types.js";
 import { submitFeedback, FeedbackSubmitError } from "../feedback/submit.js";
@@ -63,6 +64,7 @@ export function FeedbackDialog({ base, initialDescription, onDismiss, onResult }
   };
 
   useInput((input, key) => {
+    if (isKeyReleaseEvent(key)) return;
     if (stage === "submitting") return;
 
     if (stage === "done") {

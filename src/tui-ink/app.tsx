@@ -3,7 +3,7 @@ import { Box, Text, useApp, useInput } from "ink";
 import { AgentAbortError, INTERRUPTED_ASSISTANT_CONTENT, type Agent } from "../agent.js";
 import { isHiddenToolMetadata } from "../agent/discovery-barrier.js";
 import type { CliArgs } from "../cli.js";
-import type { SessionManager } from "../session.js";
+import { SessionManager, type UserTurn } from "../session.js";
 import type { AgentEvent, ContentPart, PermissionMode, Message, PlanDecision, Provider, Todo, ToolResultMetadata } from "../types.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import { UserConfig, maskKey } from "../config.js";
@@ -34,7 +34,7 @@ import {
 import { AgentRunInputQueue } from "../agent/input-controller.js";
 import type { PendingApprovalHint } from "./message-list.js";
 import { paletteFor, ThemeProvider, useTheme, type ResolvedTheme, type Theme, type ThemeMode } from "./theme.js";
-import { ModelPicker, ProviderPicker, KeyPicker, SkillPicker } from "./model-picker.js";
+import { isPrintablePickerInput, ModelPicker, ProviderPicker, KeyPicker, SkillPicker } from "./model-picker.js";
 import { FeishuSetupPicker } from "./feishu-setup-picker.js";
 import { BUILTIN_PROVIDERS, ProviderRegistry, displayModel, isUserVisibleProvider } from "../provider-registry.js";
 import { buildSystemPrompt } from "../system-prompt.js";
@@ -54,15 +54,27 @@ import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
 import type { BashAllowlist } from "../approval/session-cache.js";
 import type { SettingsManager } from "../permissions/settings.js";
 import type { McpManager } from "../mcp/manager.js";
-import type { LspService } from "../lsp/index.js";
+import type { McpServerState } from "../mcp/types.js";
+import type { LspService, LspStatus } from "../lsp/index.js";
 import type { QuestionAnswer, QuestionController, QuestionRequest } from "../question/index.js";
 import type { MemoryScope } from "../memory/index.js";
 import { QuestionDialog } from "./question-dialog.js";
 import { FeedbackDialog } from "./feedback-dialog.js";
 import type { ExternalHookController } from "../hooks/controller.js";
+import type { SidebarCommandState, SidebarMode } from "../slash-commands/types.js";
 import { collectFeedback } from "../feedback/collect.js";
+import { isKeyReleaseEvent } from "./key-events.js";
 import { hasTerminalMouseSequence } from "./terminal-mouse.js";
 import { TranscriptViewport, type TranscriptViewportHandle } from "./transcript-viewport.js";
+import { SessionPicker } from "./session-picker.js";
+import { sessionDisplayName } from "../tui/session-display.js";
+import type { GoalStore, GoalState } from "../goal/store.js";
+import { parseGoalCommand } from "../goal/command.js";
+import { continuationPrompt, initialPrompt } from "../goal/prompts.js";
+import { shouldContinueGoal, stopReasonNotice } from "../goal/engine.js";
+import { goalCompleteNotice, goalIndicatorLine, goalSummaryText } from "../goal/format.js";
+import { formatInternalContextBlock } from "../agent/internal-reminder-sanitizer.js";
+import { collectUsageStatsBundle, formatStatsPanelBody, rangeLabel, type StatsRange, type UsageStatsBundle } from "../stats/usage.js";
 import os from "node:os";
 
 export interface PlanHandlerRef {
@@ -77,6 +89,7 @@ interface AppProps {
   agent: Agent;
   args: CliArgs;
   sessionManager?: SessionManager;
+  switchSession?: (sessionFile: string) => { manager: SessionManager } | { error: string };
   createProvider?: (providerId: string, apiKey: string, baseURL: string) => Provider;
   registry?: ProviderRegistry;
   skillRegistry?: SkillRegistry;
@@ -95,9 +108,11 @@ interface AppProps {
   runMemoryCompaction?: () => Promise<string>;
   runMemorySummary?: (scope?: MemoryScope) => Promise<string>;
   runMemoryRefresh?: (scope?: MemoryScope) => Promise<string>;
+  goalStore?: GoalStore;
   /** Whether the bypassPermissions mode is reachable via Shift+Tab cycling. */
   bypassEnabled?: boolean;
   updateNotice?: string;
+  updateNoticeRefresh?: Promise<string | null>;
   hookController?: ExternalHookController;
   onExit?: (summary: ExitSummary) => void;
 }
@@ -127,6 +142,11 @@ function friendlyCwd(cwd: string): string {
   if (cwd === home) return "~";
   if (cwd.startsWith(home + "/")) return "~" + cwd.slice(home.length);
   return cwd;
+}
+
+function truncate(value: string, max: number) {
+  if (value.length <= max) return value;
+  return `${value.slice(0, Math.max(0, max - 1))}…`;
 }
 
 function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] {
@@ -286,8 +306,39 @@ function withMessageKey(message: DisplayMessage): DisplayMessage {
 // 40ms keeps perceived latency invisible while capping layout work at 25fps.
 const STREAMING_FLUSH_INTERVAL_MS = 40;
 
+export const INK_LOCAL_SLASH_COMMANDS = [
+  {
+    name: "thinking",
+    description: "Toggle thinking block visibility",
+  },
+  {
+    name: "toggle-thinking",
+    description: "Toggle thinking block visibility",
+  },
+  {
+    name: "goal",
+    description: "Set/manage an autonomous goal (/goal <objective>|clear|pause|resume|edit)",
+  },
+  {
+    name: "trace",
+    description: "Toggle verbose trace output",
+  },
+  {
+    name: "verbose",
+    description: "Toggle verbose trace output",
+  },
+  {
+    name: "debug",
+    description: "Toggle verbose trace output",
+  },
+  {
+    name: "write-previews",
+    description: "Toggle write preview expansion",
+  },
+] as const;
 
-export function App({ agent, args, sessionManager, createProvider, registry, skillRegistry, planHandlerRef, approvalHandlerRef, questionController, bashAllowlist, settingsManager, lspService, mcpManager, themeMode: initialThemeMode, themeOverrides, detectedTheme, onThemeModeChange, flushMemory, runMemoryCompaction, runMemorySummary, runMemoryRefresh, bypassEnabled, updateNotice, hookController, onExit }: AppProps) {
+export function App({ agent, args, sessionManager: initialSessionManager, switchSession, createProvider, registry, skillRegistry, planHandlerRef, approvalHandlerRef, questionController, bashAllowlist, settingsManager, lspService, mcpManager, themeMode: initialThemeMode, themeOverrides, detectedTheme, onThemeModeChange, flushMemory, runMemoryCompaction, runMemorySummary, runMemoryRefresh, goalStore, bypassEnabled, updateNotice, updateNoticeRefresh, hookController, onExit }: AppProps) {
+  const [sessionManager, setSessionManager] = useState(initialSessionManager);
   const [themeMode, setThemeMode] = useState<ThemeMode>(initialThemeMode ?? "auto");
   // `detectedTheme` is captured once at startup in main.ts. We keep it in state
   // so future re-detection (e.g. if a user runs `/theme auto` after switching
@@ -313,6 +364,8 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(agent.thinking);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(agent.mode);
   const [todos, setTodos] = useState<Todo[]>(() => agent.getTodos());
+  const [goalLine, setGoalLine] = useState("");
+  const [currentUpdateNotice, setCurrentUpdateNotice] = useState(updateNotice);
   const [pendingPlan, setPendingPlan] = useState<{
     plan: string;
     resolve: (decision: PlanDecision) => void;
@@ -326,17 +379,22 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     base: Omit<import("../feedback/types.js").FeedbackPayload, "description">;
     initialDescription: string;
   } | null>(null);
-  const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | "feishu-setup" | null>(null);
+  const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | "session" | "rewind" | "slash" | "mcp-reconnect" | "feishu-setup" | null>(null);
+  const [statsPanel, setStatsPanel] = useState<{ range: StatsRange; bundle: UsageStatsBundle } | null>(null);
   const [cursorResetEpoch, setCursorResetEpoch] = useState(0);
   const [composerDraft, setComposerDraft] = useState<{ text: string; epoch: number } | null>(null);
   const [keyProviderId, setKeyProviderId] = useState<string | null>(null);
+  const [showThinking, setShowThinking] = useState(false);
+  const [expandedToolOutput, setExpandedToolOutput] = useState(false);
   const [verboseTrace, setVerboseTrace] = useState(false);
+  const [sidebarMode, setSidebarMode] = useState<SidebarMode>("collapsed");
   const startedWithVisibleHistoryRef = useRef(messages.some((message) => message.syntheticKind !== "ui_summary"));
   const { columns: terminalColumns, rows: terminalRows } = useTerminalSize();
   const showWelcome = shouldShowWelcomeBanner({
     messages,
     startedWithVisibleHistory: startedWithVisibleHistoryRef.current,
   });
+  const showWelcomeRef = useRef(showWelcome);
   const activeAbortRef = useRef<AbortController | null>(null);
   const exitRequestedRef = useRef(false);
   const sessionStartRef = useRef<number>(Date.now());
@@ -376,6 +434,44 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     cwd: args.cwd,
     skillPaths: userConfig.getSkillPaths(),
   });
+
+  useEffect(() => {
+    setCurrentUpdateNotice(updateNotice);
+  }, [updateNotice]);
+
+  useEffect(() => {
+    showWelcomeRef.current = showWelcome;
+  }, [showWelcome]);
+
+  useEffect(() => {
+    if (!goalStore) return;
+    let persistSuspended = false;
+    const persistGoal = (goal: GoalState | null) => {
+      if (!sessionManager) return;
+      try {
+        const metadata = sessionManager.getMetadata();
+        sessionManager.setMetadata({ ...metadata, goal: goal ?? undefined });
+      } catch {
+        // Goal persistence is best-effort; never break the run loop over it.
+      }
+    };
+    const unsubscribe = goalStore.onChange((goal) => {
+      setGoalLine(goal ? goalIndicatorLine(goal) : "");
+      if (!persistSuspended) persistGoal(goal);
+    });
+    const persisted = sessionManager?.getMetadata().goal;
+    if (persisted) {
+      persistSuspended = true;
+      goalStore.loadFrom(persisted.status === "active" ? { ...persisted, status: "paused" } : persisted);
+      persistSuspended = false;
+    } else {
+      persistSuspended = true;
+      goalStore.loadFrom(undefined);
+      persistSuspended = false;
+      setGoalLine("");
+    }
+    return unsubscribe;
+  }, [goalStore, sessionManager]);
 
   const requestExit = useCallback(() => {
     if (exitRequestedRef.current) return;
@@ -518,6 +614,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   );
 
   useInput((input, key) => {
+    if (isKeyReleaseEvent(key)) return;
     if (isCtrlCInput(input, key)) {
       requestExit();
       return;
@@ -538,7 +635,32 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       return;
     }
 
-    if (pendingPlan || pendingApproval || pendingQuestion || pendingFeedback) return;
+    if (pendingPlan || pendingApproval || pendingQuestion || pendingFeedback || statsPanel) return;
+
+    if (key.ctrl && input.toLowerCase() === "p" && !pickerMode && !activeAbortRef.current) {
+      setStatsPanel(null);
+      setPickerMode("slash");
+      return;
+    }
+
+    if (key.ctrl && key.shift && input.toLowerCase() === "m" && !pickerMode) {
+      if (!mcpManager || mcpManager.getStates().length === 0) {
+        addMessage("assistant", "No MCP servers configured.");
+      } else {
+        setStatsPanel(null);
+        setPickerMode("mcp-reconnect");
+      }
+      return;
+    }
+
+    if (key.ctrl && input.toLowerCase() === "t" && !pickerMode) {
+      setShowThinking((current) => {
+        const next = !current;
+        addMessage("assistant", next ? "Thinking blocks visible" : "Thinking blocks hidden");
+        return next;
+      });
+      return;
+    }
 
     if (key.ctrl && input === "o" && !pickerMode) {
       setVerboseTrace((v) => !v);
@@ -592,6 +714,21 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     updateDisplayMessages((prev) => [...prev, withMessageKey({ role, content })]);
   }, [updateDisplayMessages]);
 
+  useEffect(() => {
+    if (!updateNoticeRefresh) return;
+    let cancelled = false;
+    updateNoticeRefresh.then((notice) => {
+      if (cancelled || !notice) return;
+      setCurrentUpdateNotice(notice);
+      if (!showWelcomeRef.current) addMessage("assistant", notice);
+    }).catch(() => {
+      // Best-effort update checks should never disturb the session.
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [addMessage, updateNoticeRefresh]);
+
   const clearMessages = useCallback(() => {
     // The transcript lives entirely in React state now (alt-screen viewport,
     // no terminal scrollback) — clearing state clears the screen. Writing
@@ -625,10 +762,11 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     setPendingSteerCount(pendingSteersRef.current.size);
   }, [addStatusUserMessage, queueInput]);
 
-  const openPicker = useCallback((mode: "model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | "feishu-setup", providerId?: string) => {
+  const openPicker = useCallback((mode: "model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | "session" | "rewind" | "feishu-setup", providerId?: string) => {
     if (mode === "key") {
       setKeyProviderId(providerId ?? null);
     }
+    setStatsPanel(null);
     setPickerMode(mode);
   }, []);
 
@@ -653,6 +791,84 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     const { description: _drop, ...rest } = base;
     setPendingFeedback({ base: rest, initialDescription });
   }, [agent]);
+
+  const sidebarFits = terminalColumns > 120;
+  const sidebarVisible = sidebarMode === "expanded" ? sidebarFits : sidebarMode === "auto" && sidebarFits;
+  const currentSidebarCommandState = useCallback((mode: SidebarMode = sidebarMode): SidebarCommandState => {
+    const visible = mode === "expanded" ? sidebarFits : mode === "auto" && sidebarFits;
+    return { mode, visible, active: visible };
+  }, [sidebarFits, sidebarMode]);
+  const toggleSidebar = useCallback((): SidebarCommandState => {
+    const next: SidebarMode = sidebarVisible ? "collapsed" : "expanded";
+    setSidebarMode(next);
+    return currentSidebarCommandState(next);
+  }, [currentSidebarCommandState, sidebarVisible]);
+  const applySidebarMode = useCallback((mode: SidebarMode): SidebarCommandState => {
+    setSidebarMode(mode);
+    return currentSidebarCommandState(mode);
+  }, [currentSidebarCommandState]);
+
+  const openSessionPicker = useCallback(() => {
+    if (activeAbortRef.current) {
+      addMessage("error", "Stop the current run before switching sessions.");
+      return;
+    }
+    setStatsPanel(null);
+    setPickerMode("session");
+  }, [addMessage]);
+
+  const openRewindPicker = useCallback(() => {
+    if (!sessionManager) {
+      addMessage("error", "Rewind requires an active session.");
+      return;
+    }
+    if (activeAbortRef.current) {
+      addMessage("error", "Stop the current run before rewinding.");
+      return;
+    }
+    setStatsPanel(null);
+    setPickerMode("rewind");
+  }, [addMessage, sessionManager]);
+
+  const openStatsPanel = useCallback(() => {
+    setPickerMode(null);
+    setStatsPanel({
+      range: "30d",
+      bundle: collectUsageStatsBundle(),
+    });
+  }, []);
+
+  const closeStatsPanel = useCallback(() => {
+    setStatsPanel(null);
+    setCursorResetEpoch((epoch) => epoch + 1);
+  }, []);
+
+  const handleSessionSelect = useCallback((sessionFile: string) => {
+    if (!switchSession) {
+      addMessage("error", "Session switching is not available in this mode.");
+      closePicker();
+      return;
+    }
+    if (activeAbortRef.current) {
+      addMessage("error", "Stop the current run before switching sessions.");
+      closePicker();
+      return;
+    }
+    const result = switchSession(sessionFile);
+    if ("error" in result) {
+      addMessage("error", `Failed to switch session: ${result.error}`);
+      closePicker();
+      return;
+    }
+    setSessionManager(result.manager);
+    setTodos(agent.getTodos());
+    updateDisplayMessages(() => [
+      ...reconstructDisplayMessages(agent.messages),
+      withMessageKey({ role: "assistant", content: `⤷ Resumed session: ${sessionDisplayName(result.manager)}` }),
+    ]);
+    viewportRef.current?.forceScrollToBottom();
+    closePicker();
+  }, [addMessage, agent, closePicker, switchSession, updateDisplayMessages]);
 
   const handleModelSelect = useCallback((model: string) => {
     const run = async () => {
@@ -749,7 +965,10 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         throw new Error("Provider creation not available");
       }) as any),
       openPicker,
+      openSessionPicker,
+      openRewindPicker,
       openFeedback,
+      fillComposer,
       registry: safeRegistry,
       skillRegistry: safeSkillRegistry!,
       bashAllowlist,
@@ -764,11 +983,12 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       getThemeMode: () => themeMode,
       getResolvedTheme: () => themeResolved,
       setThemeMode: applyThemeMode,
+      openStats: openStatsPanel,
     });
     if (handled && result) {
       addMessage("assistant", result);
     }
-  }, [agent, addMessage, clearMessages, closePicker, createProvider, exit, openPicker, safeRegistry, sessionManager]);
+  }, [agent, addMessage, clearMessages, closePicker, createProvider, exit, fillComposer, openPicker, openSessionPicker, openRewindPicker, openStatsPanel, safeRegistry, sessionManager]);
 
   const handleLogoutProviderSelect = useCallback(async (providerId: string) => {
     closePicker();
@@ -784,7 +1004,10 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         throw new Error("Provider creation not available");
       }) as any),
       openPicker,
+      openSessionPicker,
+      openRewindPicker,
       openFeedback,
+      fillComposer,
       registry: safeRegistry,
       skillRegistry: safeSkillRegistry!,
       bashAllowlist,
@@ -799,11 +1022,12 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       getThemeMode: () => themeMode,
       getResolvedTheme: () => themeResolved,
       setThemeMode: applyThemeMode,
+      openStats: openStatsPanel,
     });
     if (handled && result) {
       addMessage("assistant", result);
     }
-  }, [agent, addMessage, clearMessages, closePicker, createProvider, exit, openPicker, safeRegistry, sessionManager]);
+  }, [agent, addMessage, clearMessages, closePicker, createProvider, exit, fillComposer, openPicker, openSessionPicker, openRewindPicker, openStatsPanel, safeRegistry, sessionManager]);
 
   const handleKeySubmit = useCallback((key: string) => {
     const targetId = keyProviderId || safeRegistry.getDefault()?.id;
@@ -858,15 +1082,24 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         actualInput: string | ContentPart[],
         displayInput: string,
         attachedImages: { filename?: string; bytes: number }[] = [],
+        runOptions: { hidden?: boolean; goalRun?: boolean } = {},
       ) => {
         const activeProviderId = agent.providerId || safeRegistry.getDefault()?.id;
         const hasActiveProvider = !!activeProviderId && safeRegistry.getEnabled().some((provider) => provider.id === activeProviderId);
         if (!hasActiveProvider) {
           addMessage("error", "No provider configured. Use /login for ChatGPT or /provider --add <id> before sending a prompt.");
+          if (runOptions.goalRun && goalStore?.snapshot()?.status === "active") {
+            goalStore.pause();
+            addMessage("assistant", stopReasonNotice("error"));
+          }
           return;
         }
         if (!agent.model) {
           addMessage("error", "No model selected. Use /model after /login or provider setup.");
+          if (runOptions.goalRun && goalStore?.snapshot()?.status === "active") {
+            goalStore.pause();
+            addMessage("assistant", stopReasonNotice("error"));
+          }
           return;
         }
 
@@ -877,13 +1110,15 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
               )
               .join(" ")}`
           : displayInput;
-        updateDisplayMessages((prev) => [
-          ...prev,
-          withMessageKey({ role: "user", content: displayContent }),
-        ]);
-        // Sending is an explicit "watch the newest turn" intent: snap the
-        // transcript back to the bottom even if the user had scrolled up.
-        viewportRef.current?.forceScrollToBottom();
+        if (!runOptions.hidden) {
+          updateDisplayMessages((prev) => [
+            ...prev,
+            withMessageKey({ role: "user", content: displayContent }),
+          ]);
+          // Sending is an explicit "watch the newest turn" intent: snap the
+          // transcript back to the bottom even if the user had scrolled up.
+          viewportRef.current?.forceScrollToBottom();
+        }
         setIsRunning(true);
         runStartRef.current = Date.now();
         setStreamingContent("");
@@ -893,6 +1128,9 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
 
         let assistantContent = "";
         let assistantReasoning = "";
+        let goalRunTokens = 0;
+        let runCancelled = false;
+        let runErrored = false;
         const toolCalls: DisplayToolCall[] = [];
         const assistantParts: DisplayMessagePart[] = [];
         const abortController = new AbortController();
@@ -1120,6 +1358,9 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
                 break;
               }
               case "turn_end": {
+                if (event.usage) {
+                  goalRunTokens += (event.usage.promptTokens || 0) + (event.usage.completionTokens || 0);
+                }
                 if (event.willContinue) {
                   syncStreamingParts();
                   break;
@@ -1133,8 +1374,10 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         } catch (err: any) {
           commitAssistantMessage();
           if (err instanceof AgentAbortError || err?.name === "AbortError") {
+            runCancelled = true;
             updateDisplayMessages(() => reconstructDisplayMessages(agent.messages));
           } else {
+            runErrored = true;
             updateDisplayMessages((prev) => [
               ...prev,
               withMessageKey({ role: "error", content: err.message }),
@@ -1146,6 +1389,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           // them on cancel (the user asked the run to stop); requeue them for
           // the next turn on a normal end (mirrors the OpenTUI run teardown).
           const cancelled = abortController.signal.aborted;
+          if (cancelled) runCancelled = true;
           for (const leftover of inputController.clear()) {
             const steer = pendingSteersRef.current.get(leftover.id);
             pendingSteersRef.current.delete(leftover.id);
@@ -1175,6 +1419,118 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           setStreamingReasoning("");
           setStreamingTools([]);
           setStreamingParts([]);
+          maybeContinueGoal({
+            runCancelled,
+            runErrored,
+            isGoalRun: !!runOptions.goalRun,
+            runTokens: goalRunTokens,
+          });
+        }
+      };
+
+      const kickGoalTurn = (prompt: string, visibleInput?: string) => {
+        if (activeAbortRef.current) return;
+        queueMicrotask(() => {
+          void runAgentInput(prompt, visibleInput ?? "", [], {
+            hidden: visibleInput === undefined,
+            goalRun: true,
+          });
+        });
+      };
+
+      function maybeContinueGoal(input: { runCancelled: boolean; runErrored: boolean; isGoalRun: boolean; runTokens: number }) {
+        if (!goalStore || exitRequestedRef.current) return;
+        const current = goalStore.snapshot();
+        if (!current) return;
+
+        if (input.runCancelled || input.runErrored) {
+          if (current.status === "active") {
+            goalStore.pause();
+            addMessage("assistant", stopReasonNotice(input.runErrored ? "error" : "cancelled"));
+          }
+          return;
+        }
+
+        if (input.isGoalRun) {
+          if (input.runTokens > 0) goalStore.addTokens(input.runTokens);
+          goalStore.incrementTurn();
+        }
+
+        const goal = goalStore.snapshot()!;
+        const decision = shouldContinueGoal({
+          goal,
+          queuedInputs: queuedInputsRef.current.length,
+        });
+
+        if (decision.continue) {
+          kickGoalTurn(formatInternalContextBlock("goal", continuationPrompt(goal)));
+          return;
+        }
+
+        if (decision.reason === "budget" && goal.status === "active") {
+          goalStore.markBudgetLimited();
+        }
+        if (decision.reason === "complete") {
+          addMessage("assistant", goalCompleteNotice(goal));
+          return;
+        }
+        const note = stopReasonNotice(decision.reason);
+        if (note) addMessage("assistant", note);
+      }
+
+      const handleGoalCommand = async (goalInput: string) => {
+        if (!goalStore) {
+          addMessage("error", "Goals are not available in this session.");
+          return;
+        }
+        const command = parseGoalCommand(goalInput);
+        if (command.error) {
+          addMessage("error", command.error);
+          return;
+        }
+        const existing = goalStore.snapshot();
+        switch (command.kind) {
+          case "show": {
+            addMessage("assistant", existing ? goalSummaryText(existing) : "No active goal. Set one with /goal <objective>");
+            return;
+          }
+          case "clear": {
+            if (!existing) { addMessage("assistant", "No active goal to clear"); return; }
+            goalStore.clear();
+            addMessage("assistant", "Goal cleared");
+            return;
+          }
+          case "pause": {
+            if (!existing) { addMessage("assistant", "No active goal to pause"); return; }
+            goalStore.pause();
+            addMessage("assistant", "Goal paused — /goal resume to continue");
+            return;
+          }
+          case "resume": {
+            if (!existing) { addMessage("assistant", "No goal to resume. Set one with /goal <objective>"); return; }
+            const resumed = goalStore.resume();
+            if (resumed?.status === "active") {
+              addMessage("assistant", "Goal resumed");
+              kickGoalTurn(formatInternalContextBlock("goal", continuationPrompt(resumed)));
+            } else {
+              addMessage("assistant", "Goal cannot be resumed (already complete)");
+            }
+            return;
+          }
+          case "edit": {
+            if (!existing) { addMessage("assistant", "No active goal to edit. Set one with /goal <objective>"); return; }
+            goalStore.edit(command.objective!);
+            if (command.tokenBudget !== undefined) goalStore.setBudget(command.tokenBudget);
+            addMessage("assistant", `Goal updated: ${truncate(goalStore.snapshot()!.objective, 60)}`);
+            return;
+          }
+          case "set": {
+            const goal = goalStore.set(command.objective!, { tokenBudget: command.tokenBudget });
+            const budgetNote = goal.tokenBudget !== undefined ? ` (budget ${goal.tokenBudget} tok)` : "";
+            addMessage("assistant", `Goal set${budgetNote} — working autonomously. /goal pause to stop.`);
+            kickGoalTurn(formatInternalContextBlock("goal", initialPrompt(goal)), goalInput.trim());
+            return;
+          }
         }
       };
 
@@ -1189,6 +1545,38 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         // requestExit().
         if (/^\/(?:quit|exit)\s*$/.test(input.trim())) {
           requestExit();
+          return;
+        }
+
+        if (/^\/(?:thinking|toggle-thinking)(?:\s|$)/.test(input.trim())) {
+          setShowThinking((current) => {
+            const next = !current;
+            addMessage("assistant", next ? "Thinking blocks visible" : "Thinking blocks hidden");
+            return next;
+          });
+          return;
+        }
+
+        if (/^\/(?:trace|verbose|debug)(?:\s|$)/.test(input.trim())) {
+          setVerboseTrace((current) => {
+            const next = !current;
+            addMessage("assistant", next ? "Verbose trace visible" : "Compact trace visible");
+            return next;
+          });
+          return;
+        }
+
+        if (/^\/write-previews(?:\s|$)/.test(input.trim())) {
+          setExpandedToolOutput((current) => {
+            const next = !current;
+            addMessage("assistant", next ? "Write previews expanded" : "Write previews collapsed");
+            return next;
+          });
+          return;
+        }
+
+        if (/^\/goal(?:\s|$)/.test(input.trim())) {
+          await handleGoalCommand(input);
           return;
         }
 
@@ -1209,6 +1597,8 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
             throw new Error("Provider creation not available");
           }) as any),
           openPicker,
+          openSessionPicker,
+          openRewindPicker,
           openFeedback,
           fillComposer,
           registry: safeRegistry,
@@ -1225,6 +1615,9 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           getThemeMode: () => themeMode,
           getResolvedTheme: () => themeResolved,
           setThemeMode: applyThemeMode,
+          toggleSidebar,
+          setSidebarMode: applySidebarMode,
+          openStats: openStatsPanel,
         });
         if (handled) {
           if (agent.mode !== permissionMode) {
@@ -1284,7 +1677,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         images.map((img) => ({ filename: img.filename, bytes: img.bytes })),
       );
     },
-    [addMessage, agent, args.cwd, openPicker, createProvider, fillComposer, safeRegistry, safeSkillRegistry, updateDisplayMessages, queueInput, submitSteer, requestExit]
+    [addMessage, agent, args.cwd, openPicker, openSessionPicker, openRewindPicker, openStatsPanel, createProvider, fillComposer, safeRegistry, safeSkillRegistry, updateDisplayMessages, queueInput, submitSteer, requestExit, toggleSidebar, applySidebarMode]
   );
 
   // Drain the queue once the run ends and no modal needs the user first.
@@ -1292,7 +1685,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   // renders the message again as a regular user row.
   const drainQueuedInput = useCallback(() => {
     if (activeAbortRef.current) return;
-    if (pendingPlan || pendingApproval || pendingQuestion || pendingFeedback || pickerMode) return;
+    if (pendingPlan || pendingApproval || pendingQuestion || pendingFeedback || pickerMode || statsPanel) return;
     const next = queuedInputsRef.current.shift();
     if (!next) return;
     setQueuedCount(queuedInputsRef.current.length);
@@ -1300,14 +1693,14 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       updateDisplayMessages((prev) => prev.filter((message) => message.key !== next.displayKey));
     }
     void handleSubmit(next.payload);
-  }, [pendingPlan, pendingApproval, pendingQuestion, pendingFeedback, pickerMode, updateDisplayMessages, handleSubmit]);
+  }, [pendingPlan, pendingApproval, pendingQuestion, pendingFeedback, pickerMode, statsPanel, updateDisplayMessages, handleSubmit]);
 
   useEffect(() => {
     if (isRunning || queuedCount === 0) return;
-    if (pendingPlan || pendingApproval || pendingQuestion || pendingFeedback || pickerMode) return;
+    if (pendingPlan || pendingApproval || pendingQuestion || pendingFeedback || pickerMode || statsPanel) return;
     const timer = setTimeout(drainQueuedInput, 0);
     return () => clearTimeout(timer);
-  }, [isRunning, queuedCount, pendingPlan, pendingApproval, pendingQuestion, pendingFeedback, pickerMode, drainQueuedInput]);
+  }, [isRunning, queuedCount, pendingPlan, pendingApproval, pendingQuestion, pendingFeedback, pickerMode, statsPanel, drainQueuedInput]);
 
   const currentProviderId = agent.providerId || safeRegistry.getDefault()?.id;
   const keyTarget = keyProviderId
@@ -1334,13 +1727,21 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     <WelcomeBanner
       terminalColumns={terminalColumns}
       tips={buildTips(agent, safeRegistry)}
-      updateNotice={updateNotice}
+      updateNotice={currentUpdateNotice}
       cwd={friendlyCwd(args.cwd)}
       providerId={agent.providerId || safeRegistry.getDefault()?.id}
       modelLabel={agent.model ? displayModel(agent.model) : undefined}
       thinkingLabel={showThinkingLabel ? thinkingLevel : undefined}
     />
   ) : null;
+  const commandPaletteItems = useMemo(
+    () => buildCommandPaletteItems(safeSkillRegistry),
+    [safeSkillRegistry],
+  );
+  const mcpReconnectItems = useMemo(
+    () => buildMcpReconnectItems(mcpManager),
+    [mcpManager],
+  );
 
   // One row shorter than the terminal on purpose. A frame that exactly fills
   // the screen makes Ink omit the trailing newline ("fullscreen" mode), and
@@ -1350,10 +1751,13 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
   // stdout write). Keeping every frame below viewport height keeps all of
   // Ink's cursor paths on the consistent trailing-newline math.
   const frameRows = Math.max(4, terminalRows - 1);
+  const sidebarWidth = sidebarVisible ? Math.min(42, Math.max(28, Math.floor(terminalColumns * 0.34))) : 0;
+  const mainWidth = Math.max(40, terminalColumns - sidebarWidth);
 
   return (
     <ThemeProvider value={palette}>
-      <Box flexDirection="column" width={terminalColumns} height={frameRows}>
+      <Box flexDirection="row" width={terminalColumns} height={frameRows}>
+      <Box flexDirection="column" width={mainWidth} height={frameRows}>
         <TranscriptViewport ref={viewportRef}>
           <Box flexDirection="column" paddingX={1} paddingTop={1} flexShrink={0}>
             <MessageList
@@ -1362,7 +1766,9 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
               streamingReasoning={streamingReasoning}
               streamingTools={streamingTools}
               streamingParts={streamingParts}
-              terminalColumns={terminalColumns}
+              terminalColumns={mainWidth}
+              showThinking={showThinking}
+              expandedToolOutput={expandedToolOutput}
               verboseTrace={verboseTrace}
               pendingApproval={approvalHint}
               nowTick={nowTick}
@@ -1466,6 +1872,63 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
             />
           </Box>
         )}
+        {pickerMode === "slash" && (
+          <Box paddingX={1} flexShrink={0}>
+            <CommandPalette
+              items={commandPaletteItems}
+              terminalColumns={mainWidth}
+              terminalRows={terminalRows}
+              onSelect={(item) => {
+                closePicker();
+                if (item.action === "insert-skill") {
+                  fillComposer(`/${item.value} `);
+                } else {
+                  void handleSubmit(item.command);
+                }
+              }}
+              onCancel={closePicker}
+            />
+          </Box>
+        )}
+        {pickerMode === "mcp-reconnect" && (
+          <Box paddingX={1} flexShrink={0}>
+            <McpReconnectPicker
+              items={mcpReconnectItems}
+              terminalColumns={mainWidth}
+              terminalRows={terminalRows}
+              onSelect={(item) => {
+                closePicker();
+                void handleSubmit(item.command);
+              }}
+              onCancel={closePicker}
+            />
+          </Box>
+        )}
+        {pickerMode === "session" && (
+          <Box paddingX={1} flexShrink={0}>
+            <SessionPicker
+              currentCwd={args.cwd}
+              currentSessions={SessionManager.summarizeSessionsForCwd(args.cwd)}
+              allSessions={SessionManager.listAllSessions()}
+              onSelect={handleSessionSelect}
+              onCancel={closePicker}
+            />
+          </Box>
+        )}
+        {pickerMode === "rewind" && sessionManager && (
+          <Box paddingX={1} flexShrink={0}>
+            <RewindPicker
+              sessionManager={sessionManager}
+              terminalColumns={mainWidth}
+              terminalRows={terminalRows}
+              onSelect={(command) => {
+                closePicker();
+                void handleSubmit(command);
+              }}
+              onCancel={closePicker}
+            />
+          </Box>
+        )}
         {pickerMode === "feishu-setup" && (
           <Box paddingX={1} flexShrink={0}>
             <FeishuSetupPicker
@@ -1480,12 +1943,23 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
             />
           </Box>
         )}
-      {todos.length > 0 && !pickerMode && !pendingPlan && !pendingQuestion && (
+      {statsPanel && !pickerMode && (
+        <Box paddingX={1} flexShrink={0}>
+          <StatsPanel
+            panel={statsPanel}
+            terminalColumns={mainWidth}
+            terminalRows={terminalRows}
+            onRangeChange={(range) => setStatsPanel((current) => current ? { ...current, range } : current)}
+            onCancel={closeStatsPanel}
+          />
+        </Box>
+      )}
+      {todos.length > 0 && !pickerMode && !statsPanel && !pendingPlan && !pendingQuestion && (
         <Box paddingX={1} flexShrink={0}>
           <TodosPanel todos={todos} terminalColumns={terminalColumns} />
         </Box>
       )}
-      {pendingPlan && !pickerMode && !pendingQuestion && (
+      {pendingPlan && !pickerMode && !statsPanel && !pendingQuestion && (
         <Box paddingX={1} flexShrink={0}>
           <PlanConfirm
             initialPlan={pendingPlan.plan}
@@ -1502,7 +1976,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           />
         </Box>
       )}
-      {pendingApproval && !pickerMode && !pendingPlan && !pendingQuestion && (
+      {pendingApproval && !pickerMode && !statsPanel && !pendingPlan && !pendingQuestion && (
         <Box paddingX={1} flexShrink={0}>
           <ApprovalDialog
             request={pendingApproval.request}
@@ -1517,7 +1991,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           />
         </Box>
       )}
-      {pendingQuestion && !pickerMode && !pendingPlan && !pendingApproval && !pendingFeedback && (
+      {pendingQuestion && !pickerMode && !statsPanel && !pendingPlan && !pendingApproval && !pendingFeedback && (
         <Box paddingX={1} flexShrink={0}>
           <QuestionDialog
             request={pendingQuestion}
@@ -1532,7 +2006,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           />
         </Box>
       )}
-      {pendingFeedback && !pickerMode && !pendingPlan && !pendingApproval && !pendingQuestion && (
+      {pendingFeedback && !pickerMode && !statsPanel && !pendingPlan && !pendingApproval && !pendingQuestion && (
         <Box paddingX={1} flexShrink={0}>
           <FeedbackDialog
             base={pendingFeedback.base}
@@ -1548,7 +2022,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           />
         </Box>
       )}
-      {!isExiting && isRunning && !pickerMode && !pendingPlan && !pendingApproval && !pendingQuestion && !pendingFeedback && (
+      {!isExiting && isRunning && !pickerMode && !statsPanel && !pendingPlan && !pendingApproval && !pendingQuestion && !pendingFeedback && (
         <Box paddingX={1} paddingBottom={1} flexShrink={0}>
           <WaitingIndicator
             tools={streamingTools}
@@ -1561,7 +2035,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           />
         </Box>
       )}
-      {!isExiting && !pickerMode && (
+      {!isExiting && !pickerMode && !statsPanel && (
         <Box paddingBottom={1} flexShrink={0}>
           <InputBox
             onSubmit={handleSubmit}
@@ -1569,24 +2043,727 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
             onWheelScroll={(direction, lines) => {
               viewportRef.current?.scrollBy(direction === "up" ? -lines : lines);
             }}
-            disabled={!!pendingPlan || !!pendingApproval || !!pendingQuestion || !!pendingFeedback}
+            disabled={!!pendingPlan || !!pendingApproval || !!pendingQuestion || !!pendingFeedback || !!statsPanel}
             cursorResetEpoch={cursorResetEpoch}
             draftText={composerDraft?.text}
             draftEpoch={composerDraft?.epoch}
             onDraftApplied={clearComposerDraft}
             skillRegistry={safeSkillRegistry}
-            terminalColumns={terminalColumns}
+            localSlashCommands={[...INK_LOCAL_SLASH_COMMANDS]}
+            terminalColumns={mainWidth}
             cwd={args.cwd}
           />
         </Box>
       )}
       {!isExiting && (
         <Box flexShrink={0}>
-          <FooterBar data={buildFooterData({ mode: permissionMode })} />
+          <FooterBar data={buildFooterData({ mode: permissionMode, goalLine })} />
         </Box>
+      )}
+      </Box>
+      {sidebarVisible && (
+        <InkSidebar
+          width={sidebarWidth}
+          agent={agent}
+          sessionManager={sessionManager}
+          cwd={args.cwd}
+          mode={permissionMode}
+          goalLine={goalLine}
+          todos={todos}
+          mcpManager={mcpManager}
+          lspService={lspService}
+        />
       )}
     </Box>
     </ThemeProvider>
+  );
+}
+
+interface PaletteItem {
+  label: string;
+  detail: string;
+  value: string;
+  command: string;
+  action?: "insert-skill";
+}
+
+function buildCommandPaletteItems(skillRegistry: SkillRegistry): PaletteItem[] {
+  const items = new Map<string, PaletteItem>();
+  const add = (item: PaletteItem) => {
+    const key = `${item.action ?? "command"}:${item.value}`;
+    if (!items.has(key)) items.set(key, item);
+  };
+
+  for (const command of INK_LOCAL_SLASH_COMMANDS) {
+    add({
+      label: `/${command.name}`,
+      detail: command.description,
+      value: command.name,
+      command: `/${command.name}`,
+    });
+  }
+  for (const command of slashRegistry.list()) {
+    const source = command.source === "mcp" ? " :mcp" : "";
+    const sourceLabel = command.sourceLabel ? `[${command.sourceLabel}] ` : "";
+    add({
+      label: `/${command.name}${source}`,
+      detail: `${sourceLabel}${command.description}`,
+      value: command.name,
+      command: `/${command.name}`,
+    });
+  }
+  for (const skill of skillRegistry.summaries()) {
+    add({
+      label: `/${skill.name} :skill`,
+      detail: `[${skill.source}] ${skill.description}`,
+      value: skill.name,
+      command: `/${skill.name}`,
+      action: "insert-skill",
+    });
+  }
+
+  return [...items.values()];
+}
+
+function buildMcpReconnectItems(mcpManager?: McpManager): PaletteItem[] {
+  return (mcpManager?.getStates() ?? []).map((state) => {
+    let detail: string;
+    if (state.status.kind === "connected") {
+      const tools = state.status.tools.length;
+      const prompts = state.status.prompts.length;
+      detail = `connected · ${tools} tool${tools === 1 ? "" : "s"} · ${prompts} prompt${prompts === 1 ? "" : "s"}`;
+    } else if (state.status.kind === "failed") {
+      detail = `failed · ${state.status.error}`;
+    } else {
+      detail = "disabled";
+    }
+    return {
+      label: state.name,
+      detail,
+      value: state.name,
+      command: `/mcp reconnect ${state.name}`,
+    };
+  });
+}
+
+function CommandPalette({
+  items,
+  terminalColumns,
+  terminalRows,
+  onSelect,
+  onCancel,
+}: {
+  items: PaletteItem[];
+  terminalColumns: number;
+  terminalRows: number;
+  onSelect: (item: PaletteItem) => void;
+  onCancel: () => void;
+}) {
+  return (
+    <PalettePicker
+      title="Commands"
+      hint="Type to filter · Up/Down choose · Enter run · Esc cancel"
+      emptyText="No commands found."
+      items={items}
+      terminalColumns={terminalColumns}
+      terminalRows={terminalRows}
+      searchable
+      onSelect={onSelect}
+      onCancel={onCancel}
+    />
+  );
+}
+
+function McpReconnectPicker({
+  items,
+  terminalColumns,
+  terminalRows,
+  onSelect,
+  onCancel,
+}: {
+  items: PaletteItem[];
+  terminalColumns: number;
+  terminalRows: number;
+  onSelect: (item: PaletteItem) => void;
+  onCancel: () => void;
+}) {
+  return (
+    <PalettePicker
+      title="MCP servers"
+      hint="Up/Down choose · Enter or r reconnect · Esc cancel"
+      emptyText="No MCP servers configured."
+      items={items}
+      terminalColumns={terminalColumns}
+      terminalRows={terminalRows}
+      reconnectAlias
+      onSelect={onSelect}
+      onCancel={onCancel}
+    />
+  );
+}
+
+function PalettePicker({
+  title,
+  hint,
+  emptyText,
+  items,
+  terminalColumns,
+  terminalRows,
+  searchable = false,
+  reconnectAlias = false,
+  onSelect,
+  onCancel,
+}: {
+  title: string;
+  hint: string;
+  emptyText: string;
+  items: PaletteItem[];
+  terminalColumns: number;
+  terminalRows: number;
+  searchable?: boolean;
+  reconnectAlias?: boolean;
+  onSelect: (item: PaletteItem) => void;
+  onCancel: () => void;
+}) {
+  const theme = useTheme();
+  const [query, setQuery] = useState("");
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const maxVisible = Math.max(5, Math.min(12, terminalRows - 10));
+  const filtered = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return items;
+    return items.filter((item) =>
+      item.label.toLowerCase().includes(needle) ||
+      item.detail.toLowerCase().includes(needle) ||
+      item.value.toLowerCase().includes(needle)
+    );
+  }, [items, query]);
+
+  useEffect(() => {
+    setSelectedIndex((current) => Math.min(Math.max(0, filtered.length - 1), current));
+  }, [filtered.length]);
+
+  useInput((input, key) => {
+    if (isKeyReleaseEvent(key)) return;
+    if (key.escape) {
+      onCancel();
+      return;
+    }
+    if (key.return || (reconnectAlias && input.toLowerCase() === "r")) {
+      const item = filtered[selectedIndex];
+      if (item) onSelect(item);
+      return;
+    }
+    if (key.upArrow) {
+      setSelectedIndex((index) => Math.max(0, index - 1));
+      return;
+    }
+    if (key.downArrow) {
+      setSelectedIndex((index) => Math.min(Math.max(0, filtered.length - 1), index + 1));
+      return;
+    }
+    if (key.pageUp) {
+      setSelectedIndex((index) => Math.max(0, index - maxVisible));
+      return;
+    }
+    if (key.pageDown) {
+      setSelectedIndex((index) => Math.min(Math.max(0, filtered.length - 1), index + maxVisible));
+      return;
+    }
+    if (!searchable) return;
+    if (key.backspace || key.delete) {
+      setQuery((current) => current.slice(0, -1));
+      return;
+    }
+    if (isPrintablePickerInput(input) && !key.ctrl && !key.meta) {
+      setQuery((current) => current + input);
+    }
+  });
+
+  const start = clampWindowStartForIndex(filtered.length, selectedIndex, maxVisible);
+  const visible = filtered.slice(start, start + maxVisible);
+  const labelWidth = Math.max(18, Math.min(36, Math.floor(terminalColumns * 0.32)));
+  const detailWidth = Math.max(20, terminalColumns - labelWidth - 10);
+
+  return (
+    <Box
+      flexDirection="column"
+      marginY={1}
+      paddingX={1}
+      borderStyle="round"
+      borderColor={theme.borderActive}
+    >
+      <Text bold color={theme.accent}>{title}</Text>
+      {searchable && (
+        <Text color={theme.muted}>
+          Filter: <Text color={theme.userMessageText}>{query || " "}</Text>
+        </Text>
+      )}
+      <Text color={theme.muted}>{hint}</Text>
+      <Box flexDirection="column" marginTop={1}>
+        {filtered.length === 0 && <Text color={theme.muted}>{emptyText}</Text>}
+        {visible.map((item, offset) => {
+          const actualIndex = start + offset;
+          const selected = actualIndex === selectedIndex;
+          return (
+            <Box key={`${item.action ?? "command"}-${item.value}`}>
+              <Text color={selected ? theme.accent : undefined}>
+                {selected ? "> " : "  "}
+                {truncate(item.label, labelWidth)}
+              </Text>
+              <Text color={theme.muted}> {truncate(item.detail, detailWidth)}</Text>
+            </Box>
+          );
+        })}
+      </Box>
+    </Box>
+  );
+}
+
+type RewindScope = "all" | "chat" | "code";
+
+const REWIND_SCOPE_ORDER: RewindScope[] = ["all", "chat", "code"];
+const REWIND_SCOPE_LABEL: Record<RewindScope, string> = {
+  all: "chat + files",
+  chat: "chat only",
+  code: "files only",
+};
+
+function rewindCommand(turnIndex: number, scope: RewindScope): string {
+  const base = `/rewind ${turnIndex + 1}`;
+  if (scope === "chat") return `${base} --chat`;
+  if (scope === "code") return `${base} --code`;
+  return base;
+}
+
+function cycleRewindScope(scope: RewindScope, direction: 1 | -1): RewindScope {
+  const index = REWIND_SCOPE_ORDER.indexOf(scope);
+  return REWIND_SCOPE_ORDER[
+    (index + direction + REWIND_SCOPE_ORDER.length) % REWIND_SCOPE_ORDER.length
+  ]!;
+}
+
+function RewindPicker({
+  sessionManager,
+  terminalColumns,
+  terminalRows,
+  onSelect,
+  onCancel,
+}: {
+  sessionManager: SessionManager;
+  terminalColumns: number;
+  terminalRows: number;
+  onSelect: (command: string) => void;
+  onCancel: () => void;
+}) {
+  const theme = useTheme();
+  const turns = useMemo(() => sessionManager.listUserTurns(), [sessionManager]);
+  const checkpoints = useMemo(() => sessionManager.getCheckpoints(), [sessionManager]);
+  const fileCounts = useMemo(() => {
+    const entries = checkpoints.listEntries();
+    const byTurn = new Map<string, Set<string>>();
+    for (const entry of entries) {
+      const files = byTurn.get(entry.turn);
+      if (files) files.add(entry.path);
+      else byTurn.set(entry.turn, new Set([entry.path]));
+    }
+    return new Map(turns.map((turn) => [turn.id, byTurn.get(turn.id)?.size ?? 0]));
+  }, [checkpoints, turns]);
+  const [selectedIndex, setSelectedIndex] = useState(() => Math.max(0, turns.length - 1));
+  const [scope, setScope] = useState<RewindScope>("all");
+  const maxVisible = Math.max(4, Math.min(10, terminalRows - 10));
+
+  useEffect(() => {
+    setSelectedIndex((current) => Math.min(Math.max(0, turns.length - 1), current));
+  }, [turns.length]);
+
+  useInput((input, key) => {
+    if (isKeyReleaseEvent(key)) return;
+    if (key.escape) {
+      onCancel();
+      return;
+    }
+    if (key.return) {
+      if (turns[selectedIndex]) onSelect(rewindCommand(selectedIndex, scope));
+      return;
+    }
+    if (key.upArrow) {
+      setSelectedIndex((index) => Math.max(0, index - 1));
+      return;
+    }
+    if (key.downArrow) {
+      setSelectedIndex((index) => Math.min(Math.max(0, turns.length - 1), index + 1));
+      return;
+    }
+    if (key.pageUp) {
+      setSelectedIndex((index) => Math.max(0, index - maxVisible));
+      return;
+    }
+    if (key.pageDown) {
+      setSelectedIndex((index) => Math.min(Math.max(0, turns.length - 1), index + maxVisible));
+      return;
+    }
+    if (key.tab || key.rightArrow || input === "l") {
+      setScope((current) => cycleRewindScope(current, 1));
+      return;
+    }
+    if (key.leftArrow || input === "h") {
+      setScope((current) => cycleRewindScope(current, -1));
+    }
+  });
+
+  const start = clampWindowStartForIndex(turns.length, selectedIndex, maxVisible);
+  const visibleTurns = turns.slice(start, start + maxVisible);
+  const previewWidth = Math.max(18, Math.min(76, terminalColumns - 34));
+
+  return (
+    <Box
+      flexDirection="column"
+      marginY={1}
+      paddingX={1}
+      borderStyle="round"
+      borderColor={theme.borderActive}
+    >
+      <Text bold color={theme.accent}>Rewind</Text>
+      <Text color={theme.muted}>
+        Restore: <Text color={theme.accent}>{REWIND_SCOPE_LABEL[scope]}</Text>
+        {"  ·  "}
+        {turns.length} point{turns.length === 1 ? "" : "s"}
+      </Text>
+      <Text color={theme.muted}>Up/Down choose · Left/Right scope · Enter rewind · Esc cancel</Text>
+      <Box flexDirection="column" marginTop={1}>
+        {turns.length === 0 && <Text color={theme.muted}>Nothing to rewind: no user messages in this session.</Text>}
+        {visibleTurns.map((turn, offset) => {
+          const actualIndex = start + offset;
+          const isSelected = actualIndex === selectedIndex;
+          const touched = fileCounts.get(turn.id) ?? 0;
+          return (
+            <RewindRow
+              key={turn.id}
+              turn={turn}
+              turnNumber={actualIndex + 1}
+              selected={isSelected}
+              fileCount={touched}
+              previewWidth={previewWidth}
+            />
+          );
+        })}
+      </Box>
+    </Box>
+  );
+}
+
+function RewindRow({
+  turn,
+  turnNumber,
+  selected,
+  fileCount,
+  previewWidth,
+}: {
+  turn: UserTurn;
+  turnNumber: number;
+  selected: boolean;
+  fileCount: number;
+  previewWidth: number;
+}) {
+  const theme = useTheme();
+  const time = new Date(turn.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const fileNote = fileCount > 0 ? ` · ${fileCount} file${fileCount === 1 ? "" : "s"}` : "";
+  return (
+    <Box>
+      <Text color={selected ? theme.accent : undefined}>
+        {selected ? "> " : "  "}
+        {String(turnNumber).padStart(2, " ")} {time} {truncate(turn.preview, previewWidth)}
+      </Text>
+      <Text color={theme.muted}>{fileNote}</Text>
+    </Box>
+  );
+}
+
+function clampWindowStartForIndex(total: number, selectedIndex: number, maxVisible: number): number {
+  if (total <= maxVisible) return 0;
+  const half = Math.floor(maxVisible / 2);
+  let start = Math.max(0, selectedIndex - half);
+  if (start + maxVisible > total) start = total - maxVisible;
+  return Math.max(0, start);
+}
+
+function StatsPanel({
+  panel,
+  terminalColumns,
+  terminalRows,
+  onRangeChange,
+  onCancel,
+}: {
+  panel: { range: StatsRange; bundle: UsageStatsBundle };
+  terminalColumns: number;
+  terminalRows: number;
+  onRangeChange: (range: StatsRange) => void;
+  onCancel: () => void;
+}) {
+  const theme = useTheme();
+  const [scroll, setScroll] = useState(0);
+  const bodyWidth = Math.max(48, Math.min(92, terminalColumns - 6));
+  const lines = useMemo(
+    () => formatStatsPanelBody(panel.bundle.ranges[panel.range], bodyWidth).split("\n"),
+    [bodyWidth, panel.bundle, panel.range],
+  );
+  const maxVisible = Math.max(5, Math.min(16, terminalRows - 10));
+  const maxScroll = Math.max(0, lines.length - maxVisible);
+
+  useEffect(() => {
+    setScroll(0);
+  }, [panel.range]);
+
+  useEffect(() => {
+    setScroll((current) => Math.min(current, maxScroll));
+  }, [maxScroll]);
+
+  useInput((input, key) => {
+    if (isKeyReleaseEvent(key)) return;
+    if (key.escape) {
+      onCancel();
+      return;
+    }
+    if (key.tab) {
+      onRangeChange(panel.range === "30d" ? "7d" : "30d");
+      return;
+    }
+    if (key.leftArrow || input === "h") {
+      onRangeChange("7d");
+      return;
+    }
+    if (key.rightArrow || input === "l") {
+      onRangeChange("30d");
+      return;
+    }
+    if (key.upArrow) {
+      setScroll((current) => Math.max(0, current - 1));
+      return;
+    }
+    if (key.downArrow) {
+      setScroll((current) => Math.min(maxScroll, current + 1));
+      return;
+    }
+    if (key.pageUp) {
+      setScroll((current) => Math.max(0, current - maxVisible));
+      return;
+    }
+    if (key.pageDown) {
+      setScroll((current) => Math.min(maxScroll, current + maxVisible));
+    }
+  });
+
+  const visible = lines.slice(scroll, scroll + maxVisible);
+  const generatedAt = panel.bundle.generatedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+  return (
+    <Box
+      flexDirection="column"
+      marginY={1}
+      paddingX={1}
+      borderStyle="round"
+      borderColor={theme.borderActive}
+    >
+      <Text bold color={theme.accent}>Stats</Text>
+      <Text color={theme.muted}>
+        {rangeLabel(panel.range)} · generated {generatedAt}
+      </Text>
+      <Text color={theme.muted}>Left/Right range · Up/Down scroll · Tab toggle · Esc close</Text>
+      <Box flexDirection="column" marginTop={1}>
+        {visible.map((line, index) => {
+          const key = `${scroll + index}-${line}`;
+          const heading = line === "Activity" || line === "Model usage" || line === "Summary";
+          return (
+            <Text key={key} color={heading ? theme.accent : undefined} bold={heading}>
+              {line || " "}
+            </Text>
+          );
+        })}
+      </Box>
+      {maxScroll > 0 && (
+        <Text color={theme.muted}>
+          {scroll + 1}-{Math.min(lines.length, scroll + maxVisible)} of {lines.length}
+        </Text>
+      )}
+    </Box>
+  );
+}
+
+interface InkSidebarProps {
+  width: number;
+  agent: Agent;
+  sessionManager?: SessionManager;
+  cwd: string;
+  mode: PermissionMode;
+  goalLine: string;
+  todos: Todo[];
+  mcpManager?: McpManager;
+  lspService?: LspService;
+}
+
+interface StatusCount {
+  connected: number;
+  starting: number;
+  failed: number;
+  disabled: number;
+}
+
+function summarizeMcpStates(states: McpServerState[]): StatusCount & { tools: number } {
+  const summary = { connected: 0, starting: 0, failed: 0, disabled: 0, tools: 0 };
+  for (const state of states) {
+    if (state.status.kind === "connected") {
+      summary.connected += 1;
+      summary.tools += state.status.tools.length;
+    } else if (state.status.kind === "failed") {
+      summary.failed += 1;
+    } else {
+      summary.disabled += 1;
+    }
+  }
+  return summary;
+}
+
+function summarizeLspStatuses(statuses: LspStatus[]): StatusCount {
+  const summary = { connected: 0, starting: 0, failed: 0, disabled: 0 };
+  for (const status of statuses) {
+    if (status.status === "connected") summary.connected += 1;
+    else if (status.status === "starting") summary.starting += 1;
+    else summary.failed += 1;
+  }
+  return summary;
+}
+
+function formatStatusCount(summary: StatusCount): string {
+  const parts: string[] = [];
+  if (summary.connected > 0) parts.push(`${summary.connected} up`);
+  if (summary.starting > 0) parts.push(`${summary.starting} starting`);
+  if (summary.failed > 0) parts.push(`${summary.failed} failed`);
+  if (summary.disabled > 0) parts.push(`${summary.disabled} disabled`);
+  return parts.join(" · ") || "none";
+}
+
+function SidebarSection({ title, children }: { title: string; children: React.ReactNode }) {
+  const theme = useTheme();
+  return (
+    <Box flexDirection="column" marginBottom={1}>
+      <Text color={theme.accent} bold>{title}</Text>
+      {children}
+    </Box>
+  );
+}
+
+function SidebarRow({
+  label,
+  value,
+  color,
+}: {
+  label: string;
+  value: string;
+  color?: string;
+}) {
+  const theme = useTheme();
+  return (
+    <Box>
+      <Text color={theme.muted}>{label}: </Text>
+      <Text color={color ?? theme.userMessageText}>{value}</Text>
+    </Box>
+  );
+}
+
+function InkSidebar({
+  width,
+  agent,
+  sessionManager,
+  cwd,
+  mode,
+  goalLine,
+  todos,
+  mcpManager,
+  lspService,
+}: InkSidebarProps) {
+  const theme = useTheme();
+  const innerWidth = Math.max(12, width - 4);
+  const todoCounts = todos.reduce(
+    (acc, todo) => {
+      acc[todo.status] = (acc[todo.status] ?? 0) + 1;
+      return acc;
+    },
+    {} as Record<Todo["status"], number>,
+  );
+  const todoSummary = todos.length === 0
+    ? "none"
+    : [
+        todoCounts.in_progress ? `${todoCounts.in_progress} active` : "",
+        todoCounts.pending ? `${todoCounts.pending} pending` : "",
+        todoCounts.completed ? `${todoCounts.completed} done` : "",
+      ].filter(Boolean).join(" · ");
+  const mcpStates = mcpManager?.getStates() ?? [];
+  const mcpSummary = summarizeMcpStates(mcpStates);
+  const lspSummary = lspService?.isDisabled()
+    ? { connected: 0, starting: 0, failed: 0, disabled: 1 }
+    : summarizeLspStatuses(lspService?.status() ?? []);
+  const latestMcpFailure = mcpStates.find((state) => state.status.kind === "failed");
+  const latestLspFailure = lspService?.status().find((status) => status.status === "error");
+  const sessionTitle = truncate(sessionDisplayName(sessionManager), innerWidth);
+  const modelLabel = agent.model ? displayModel(agent.model) : "not selected";
+  const route = agent.providerId
+    ? `${agent.providerId}/${modelLabel}`
+    : modelLabel;
+
+  return (
+    <Box
+      flexDirection="column"
+      width={width}
+      height="100%"
+      borderStyle="single"
+      borderColor={theme.border}
+      paddingX={1}
+      paddingY={1}
+      flexShrink={0}
+    >
+      <Text color={theme.borderActive} bold>Session</Text>
+      <Text color={theme.userMessageText}>{sessionTitle}</Text>
+      <Text color={theme.muted}>{truncate(friendlyCwd(cwd), innerWidth)}</Text>
+
+      <Box marginTop={1} flexDirection="column">
+        <SidebarSection title="Runtime">
+          <SidebarRow label="model" value={truncate(route, innerWidth - 7)} />
+          <SidebarRow label="mode" value={mode} color={mode === "bypassPermissions" ? theme.warning : theme.userMessageText} />
+          <SidebarRow label="thinking" value={agent.thinking || "off"} />
+        </SidebarSection>
+
+        {goalLine && (
+          <SidebarSection title="Goal">
+            <Text color={theme.userMessageText}>{truncate(goalLine, innerWidth)}</Text>
+          </SidebarSection>
+        )}
+
+        <SidebarSection title="Todos">
+          <Text color={todos.length > 0 ? theme.userMessageText : theme.muted}>
+            {truncate(todoSummary, innerWidth)}
+          </Text>
+        </SidebarSection>
+
+        <SidebarSection title="MCP">
+          <Text color={mcpSummary.failed > 0 ? theme.warning : theme.userMessageText}>
+            {truncate(`${formatStatusCount(mcpSummary)}${mcpSummary.tools > 0 ? ` · ${mcpSummary.tools} tools` : ""}`, innerWidth)}
+          </Text>
+          {latestMcpFailure?.status.kind === "failed" && (
+            <Text color={theme.muted}>{truncate(latestMcpFailure.status.error, innerWidth)}</Text>
+          )}
+        </SidebarSection>
+
+        <SidebarSection title="LSP">
+          <Text color={lspSummary.failed > 0 ? theme.warning : theme.userMessageText}>
+            {truncate(formatStatusCount(lspSummary), innerWidth)}
+          </Text>
+          {latestLspFailure?.message && (
+            <Text color={theme.muted}>{truncate(latestLspFailure.message, innerWidth)}</Text>
+          )}
+        </SidebarSection>
+      </Box>
+    </Box>
   );
 }
 

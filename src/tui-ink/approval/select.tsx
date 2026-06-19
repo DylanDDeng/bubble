@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { Box, Text, useInput } from "ink";
+import { isKeyReleaseEvent } from "../key-events.js";
 import { useTheme } from "../theme.js";
 
 export interface ApprovalOption {
@@ -67,6 +68,7 @@ export function ApprovalSelect({
   const currentValue = focused?.editableValue ? editedValues[focused.id] ?? "" : "";
 
   useInput((input, key) => {
+    if (isKeyReleaseEvent(key)) return;
     if (amending) {
       if (key.escape) {
         setAmending(false);

@@ -21,6 +21,7 @@ import {
   pushHistoryEntry,
   stepHistory,
 } from "./input-history.js";
+import { isKeyReleaseEvent } from "./key-events.js";
 import { stripTerminalMouseSequences } from "./terminal-mouse.js";
 export {
   createPastedContentMarker,
@@ -62,6 +63,7 @@ interface InputBoxProps {
   draftEpoch?: number;
   onDraftApplied?: () => void;
   skillRegistry?: SkillRegistry;
+  localSlashCommands?: Array<{ name: string; description: string }>;
   terminalColumns: number;
   cwd: string;
 }
@@ -281,6 +283,7 @@ export function InputBox({
   draftEpoch = 0,
   onDraftApplied,
   skillRegistry,
+  localSlashCommands = [],
   terminalColumns,
   cwd,
 }: InputBoxProps) {
@@ -338,7 +341,14 @@ export function InputBox({
 
   const slashSuggestions = useMemo(() => {
     if (!isSlashContext) return [];
-    const commandSuggestions: SlashSuggestion[] = slashRegistry.list().map((command) => ({
+    const commands = new Map<string, { name: string; description: string }>();
+    for (const command of localSlashCommands) {
+      commands.set(command.name, command);
+    }
+    for (const command of slashRegistry.list()) {
+      if (!commands.has(command.name)) commands.set(command.name, command);
+    }
+    const commandSuggestions: SlashSuggestion[] = [...commands.values()].map((command) => ({
       type: "command",
       name: command.name,
       description: command.description,
@@ -350,7 +360,7 @@ export function InputBox({
     }));
     const all = [...commandSuggestions, ...skillSuggestions];
     return all.filter((item) => item.name.toLowerCase().startsWith(slashPrefix));
-  }, [isSlashContext, slashPrefix, skillRegistry]);
+  }, [isSlashContext, slashPrefix, skillRegistry, localSlashCommands]);
 
   const fileSuggestions = useMemo(() => {
     if (!atContext || !projectFiles) return [];
@@ -576,6 +586,7 @@ export function InputBox({
   };
 
   useInput((input, key) => {
+    if (isKeyReleaseEvent(key)) return;
     const strippedInput = stripTerminalMouseSequences(input);
     if (strippedInput !== input && !strippedInput) {
       return;

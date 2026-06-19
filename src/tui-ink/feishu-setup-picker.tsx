@@ -5,6 +5,7 @@ import { existsSync, statSync } from "node:fs";
 import { isAbsolute, resolve as resolvePath, basename } from "node:path";
 import { homedir } from "node:os";
 import { registerApp } from "@larksuiteoapi/node-sdk";
+import { isKeyReleaseEvent } from "./key-events.js";
 import { useTheme } from "./theme.js";
 import { bootstrapConfig } from "../feishu/config.js";
 import { ScopeRegistry } from "../feishu/scope/scope-registry.js";
@@ -117,6 +118,7 @@ export function FeishuSetupPicker({ onComplete, onCancel }: FeishuSetupPickerPro
   };
 
   useInput((input, key) => {
+    if (isKeyReleaseEvent(key)) return;
     if (key.escape) {
       // Esc at any stage = cancel/skip.
       if (stage.kind === "credentialed") {

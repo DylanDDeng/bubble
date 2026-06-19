@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { Box, Text, useInput } from "ink";
+import { isKeyReleaseEvent } from "./key-events.js";
 import { useTheme } from "./theme.js";
 import { MarkdownContent } from "./markdown.js";
 
@@ -18,6 +19,7 @@ export function PlanConfirm({ initialPlan, onApprove, onReject }: PlanConfirmPro
   const [cursor, setCursor] = useState(initialPlan.length);
 
   useInput((input, key) => {
+    if (isKeyReleaseEvent(key)) return;
     if (stage === "view") {
       if (key.escape || input === "n" || input === "N") {
         onReject();

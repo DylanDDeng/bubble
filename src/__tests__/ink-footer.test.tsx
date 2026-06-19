@@ -13,6 +13,16 @@ describe("Ink footer", () => {
     expect(output.trim()).toBe("");
   });
 
+  it("renders the goal indicator even in the default permission mode", () => {
+    const output = renderToString(
+      React.createElement(FooterBar, { data: { mode: "default", goalLine: "goal: active · ship it" } }),
+      { columns: 100 },
+    );
+
+    expect(output).toContain("goal: active");
+    expect(output).not.toContain("⇧⇥");
+  });
+
   it("shows only the permission-mode badge for non-default modes", () => {
     const output = renderToString(
       React.createElement(FooterBar, { data: { mode: "plan" } }),

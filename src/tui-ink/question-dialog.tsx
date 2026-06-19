@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import type { QuestionAnswer, QuestionRequest } from "../question/index.js";
+import { isKeyReleaseEvent } from "./key-events.js";
 import { useTheme } from "./theme.js";
 
 interface QuestionDialogProps {
@@ -60,6 +61,7 @@ export function QuestionDialog({ request, onSubmit, onCancel }: QuestionDialogPr
   };
 
   useInput((input, key) => {
+    if (isKeyReleaseEvent(key)) return;
     if (key.escape) {
       onCancel();
       return;

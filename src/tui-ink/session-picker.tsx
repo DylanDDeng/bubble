@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { Box, Text, useInput, useStdout } from "ink";
+import { isKeyReleaseEvent } from "./key-events.js";
 import { useTheme } from "./theme.js";
 import { formatRelativeTime } from "./recent-activity.js";
 import type { SessionSummary } from "../session.js";
@@ -43,6 +44,7 @@ export function SessionPicker({ currentCwd, currentSessions, allSessions, onSele
   const selectedRowIndex = sessionRowIndices[clampedIdx] ?? -1;
 
   useInput((input, key) => {
+    if (isKeyReleaseEvent(key)) return;
     if (key.escape) {
       onCancel();
       return;
