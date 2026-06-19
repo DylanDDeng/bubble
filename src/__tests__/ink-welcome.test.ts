@@ -1,7 +1,7 @@
 import React from "react";
 import { renderToString } from "ink";
 import { describe, expect, it } from "vitest";
-import { WelcomeBanner, shouldShowWelcomeBanner } from "../tui-ink/welcome.js";
+import { WelcomeBanner, formatModelLine, shouldShowWelcomeBanner } from "../tui-ink/welcome.js";
 import type { DisplayMessage } from "../tui-ink/display-history.js";
 
 describe("Ink welcome banner", () => {
@@ -68,7 +68,7 @@ describe("Ink welcome banner", () => {
     })).toBe(true);
   });
 
-  it("renders the thin brand header information", () => {
+  it("renders a compact Claude Code-style brand header", () => {
     const output = renderToString(
       React.createElement(WelcomeBanner, {
         terminalColumns: 100,
@@ -81,19 +81,25 @@ describe("Ink welcome banner", () => {
       { columns: 100 },
     );
 
-    // Adaptive sizing: at 100 columns the banner renders the large
-    // pixel-block wordmark (dd65dfb parity).
-    expect(output).toContain("██▀▀██");
-    expect(output).toContain("TIP:");
-    // Path and provider/model render under the banner: path and the
-    // provider · model group are separated by a gap, and the thinking level
-    // stays attached to the model as one unit.
+    expect(output).toContain("Bubble");
+    expect(output).toContain("v0.0.");
+    expect(output).toContain("gpt-5.5 with xhigh effort · openai");
     expect(output).toContain("~/coworker");
-    expect(output).toContain("openai · gpt-5.5 xhigh");
-    // Keyboard hints and Skills/MCPs/AGENTS.md status chrome stay removed.
+    expect(output).toContain("██████");
+    expect(output).not.toContain("██▀▀██");
+    expect(output).not.toContain("TIP:");
     expect(output).not.toContain("shift+tab");
     expect(output).not.toContain("Skills");
     expect(output).not.toContain("MCPs");
     expect(output).not.toContain("AGENTS.md");
+  });
+
+  it("formats the compact model line", () => {
+    expect(formatModelLine({
+      tips: [],
+      providerId: "anthropic",
+      modelLabel: "Opus 4.8 (1M context)",
+      thinkingLabel: "high",
+    })).toBe("Opus 4.8 (1M context) with high effort · anthropic");
   });
 });
