@@ -100,6 +100,40 @@ describe("Ink model switching", () => {
     expect(sessionManager.appendMarker).toHaveBeenCalledWith("model_switch", "openai:gpt-5.5");
   });
 
+  it("uses an explicitly selected thinking level from the model picker", async () => {
+    const a = agent({ thinking: "medium" });
+    const createProvider = vi.fn(() => fakeProvider);
+    const setThinkingLevel = vi.fn();
+
+    const nextLevel = await switchAgentModel({
+      model: "deepseek:deepseek-v4-pro",
+      thinkingLevel: "max",
+      agent: a,
+      registry: registry({
+        getConfigured: () => [provider({
+          id: "deepseek",
+          name: "DeepSeek",
+          baseURL: "https://api.deepseek.com",
+        })],
+        getDefault: () => provider({
+          id: "deepseek",
+          name: "DeepSeek",
+          baseURL: "https://api.deepseek.com",
+        }),
+      }),
+      createProvider,
+      workingDir: "/repo",
+      systemPromptOptions: {},
+      rememberModel: vi.fn(),
+      setThinkingLevel,
+    });
+
+    expect(nextLevel).toBe("max");
+    expect(a.thinking).toBe("max");
+    expect(setThinkingLevel).toHaveBeenCalledWith("max");
+    expect(createProvider).toHaveBeenCalledWith("deepseek", "token", "https://api.deepseek.com");
+  });
+
   it("does not mutate the agent when provider preparation fails", async () => {
     const a = agent({ thinking: "high" as ThinkingLevel });
     const createProvider = vi.fn(() => fakeProvider);

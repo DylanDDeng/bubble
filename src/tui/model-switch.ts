@@ -30,6 +30,7 @@ export interface SwitchAgentModelOptions {
   createProvider: ((providerId: string, apiKey: string, baseURL: string) => Provider) | undefined;
   workingDir: string;
   systemPromptOptions: Omit<SystemPromptOptions, "agentName" | "configuredProvider" | "configuredModel" | "configuredModelId" | "thinkingLevel" | "workingDir">;
+  thinkingLevel?: ThinkingLevel;
   rememberModel(model: string): void;
   setThinkingLevel(level: ThinkingLevel): void;
   sessionManager?: ModelSwitchSession;
@@ -75,7 +76,7 @@ export async function switchAgentModel(options: SwitchAgentModelOptions): Promis
   }
 
   const nextThinkingLevel = normalizeThinkingLevel(
-    options.agent.thinking || getDefaultThinkingLevel(providerId, modelId),
+    (options.thinkingLevel ?? options.agent.thinking) || getDefaultThinkingLevel(providerId, modelId),
     getAvailableThinkingLevels(providerId, modelId),
   );
   const nextProvider = options.createProvider(providerId, provider.apiKey, provider.baseURL);

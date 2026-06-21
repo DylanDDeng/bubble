@@ -930,7 +930,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     closePicker();
   }, [addMessage, agent, clearComposerDraft, closePicker, setStartingSubmit, switchSession, updateDisplayMessages]);
 
-  const handleModelSelect = useCallback((model: string) => {
+  const handleModelSelect = useCallback((model: string, selectedThinkingLevel?: ThinkingLevel) => {
     const run = async () => {
       const nextThinkingLevel = await switchAgentModel({
         model,
@@ -939,11 +939,15 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         createProvider,
         workingDir: args.cwd,
         systemPromptOptions: agent.getSystemPromptToolOptions(),
+        thinkingLevel: selectedThinkingLevel,
         rememberModel: (nextModel) => userConfig.pushRecentModel(nextModel),
         setThinkingLevel,
         sessionManager,
       });
-      addMessage("assistant", `Model switched to ${displayModel(model)}.`);
+      const effortNote = nextThinkingLevel && nextThinkingLevel !== "off"
+        ? ` with ${nextThinkingLevel} effort`
+        : "";
+      addMessage("assistant", `Model switched to ${displayModel(model)}${effortNote}.`);
       closePicker();
       return nextThinkingLevel;
     };
@@ -1864,6 +1868,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
             <ModelPicker
               registry={safeRegistry}
               current={agent.model}
+              currentThinkingLevel={thinkingLevel}
               recent={userConfig.getRecentModels()}
               onSelect={handleModelSelect}
               onCancel={closePicker}
