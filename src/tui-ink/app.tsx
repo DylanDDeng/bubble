@@ -21,6 +21,7 @@ import {
   compactDisplayMessages,
   contentFromParts,
   latestCompactionSummary,
+  moveStatusMessageToEnd,
   nextDisplayMessageKey,
   setUserInputStatus,
   snapshotDisplayParts,
@@ -1382,15 +1383,15 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
                 break;
               }
               case "input_applied": {
-                // The steer joined the current turn — its placeholder row
-                // becomes a regular user message (badge cleared).
+                // The steer joined the current turn at the next model-call
+                // boundary. Move it after the just-finished tool/assistant
+                // turn instead of clearing the badge in its original
+                // placeholder position.
                 const steer = pendingSteersRef.current.get(event.id);
                 if (steer) {
                   pendingSteersRef.current.delete(event.id);
                   setPendingSteerCount(pendingSteersRef.current.size);
-                  updateDisplayMessages((prev) => prev.map((message) =>
-                    message.key === steer.displayKey ? setUserInputStatus(message) : message,
-                  ));
+                  updateDisplayMessages((prev) => moveStatusMessageToEnd(prev, steer.displayKey));
                 }
                 break;
               }
@@ -1426,7 +1427,8 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
                   goalRunTokens += tokenUsageTotal(event.usage);
                 }
                 if (event.willContinue) {
-                  syncStreamingParts();
+                  commitAssistantMessage();
+                  clearAssistantStream();
                   break;
                 }
                 commitAssistantMessage(runStartRef.current ? Date.now() - runStartRef.current : undefined);

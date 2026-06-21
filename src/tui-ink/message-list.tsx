@@ -55,7 +55,13 @@ const EXECUTE_COMMAND_BLOCK_MAX_LINES = 4;
 
 type MessageListItem =
   | { kind: "welcome"; key: string }
-  | { kind: "message"; key: string; message: DisplayMessage; showExpandHint: boolean };
+  | {
+      kind: "message";
+      key: string;
+      message: DisplayMessage;
+      showExpandHint: boolean;
+      separateFromPrevious: boolean;
+    };
 
 export function MessageList({
   messages,
@@ -71,24 +77,29 @@ export function MessageList({
   nowTick,
   welcomeBanner,
 }: MessageListProps) {
+  const theme = useTheme();
   const hasStreaming = !!(
     streamingContent ||
     streamingReasoning ||
     streamingTools.length > 0 ||
     streamingParts.length > 0
   );
+  const regularMessages = messages.filter((message) => !message.inputStatus);
+  const pendingSteerMessages = messages.filter((message) => message.inputStatus === "pending_steer");
+  const queuedInputMessages = messages.filter((message) => message.inputStatus === "queued");
   const staticItems: MessageListItem[] = [];
   if (welcomeBanner) {
     staticItems.push({ kind: "welcome", key: "welcome" });
   }
-  const lastMessageIndex = messages.length - 1;
-  for (let i = 0; i < messages.length; i++) {
-    const msg = messages[i]!;
+  const lastMessageIndex = regularMessages.length - 1;
+  for (let i = 0; i < regularMessages.length; i++) {
+    const msg = regularMessages[i]!;
     staticItems.push({
       kind: "message",
       key: msg.key ?? `message-${i}`,
       message: msg,
       showExpandHint: !hasStreaming && i === lastMessageIndex,
+      separateFromPrevious: msg.role === "user" && regularMessages[i - 1]?.role === "user",
     });
   }
 
@@ -107,6 +118,7 @@ export function MessageList({
             expandedToolOutput={expandedToolOutput}
             verboseTrace={verboseTrace}
             showExpandHint={item.showExpandHint}
+            separateFromPrevious={item.separateFromPrevious}
             nowTick={item.showExpandHint ? nowTick : undefined}
           />
         );
@@ -125,6 +137,24 @@ export function MessageList({
           nowTick={nowTick}
         />
       )}
+      {pendingSteerMessages.length > 0 && (
+        <PendingInputMessagesBlock
+          messages={pendingSteerMessages}
+          terminalColumns={terminalColumns}
+          title="Messages to steer at next model call"
+          hint="applies before the next provider request"
+          bulletColor={theme.warning}
+        />
+      )}
+      {queuedInputMessages.length > 0 && (
+        <PendingInputMessagesBlock
+          messages={queuedInputMessages}
+          terminalColumns={terminalColumns}
+          title="Messages queued for next turn"
+          hint="runs after the current answer"
+          bulletColor={theme.muted}
+        />
+      )}
     </Box>
   );
 }
@@ -141,6 +171,7 @@ const MessageItem = React.memo(function MessageItem({
   expandedToolOutput,
   verboseTrace,
   showExpandHint,
+  separateFromPrevious,
   nowTick,
 }: {
   message: DisplayMessage;
@@ -149,6 +180,7 @@ const MessageItem = React.memo(function MessageItem({
   expandedToolOutput: boolean;
   verboseTrace: boolean;
   showExpandHint: boolean;
+  separateFromPrevious: boolean;
   nowTick?: number;
 }) {
   const theme = useTheme();
@@ -158,6 +190,7 @@ const MessageItem = React.memo(function MessageItem({
         content={message.content}
         terminalColumns={terminalColumns}
         inputStatus={message.inputStatus}
+        separateFromPrevious={separateFromPrevious}
       />
     );
   }
@@ -790,10 +823,12 @@ function UserMessageBlock({
   content,
   terminalColumns,
   inputStatus,
+  separateFromPrevious = false,
 }: {
   content: string;
   terminalColumns: number;
   inputStatus?: UserInputStatus;
+  separateFromPrevious?: boolean;
 }) {
   const theme = useTheme();
   const badge = userInputStatusBadgeLabel(inputStatus);
@@ -807,7 +842,7 @@ function UserMessageBlock({
     .flatMap((line) => wrapByVisualWidth(line, bubbleTextWidth));
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" marginTop={separateFromPrevious ? 1 : 0}>
       {badge && (
         <Box>
           <Text bold color={inputStatus === "pending_steer" ? theme.warning : theme.muted}>
@@ -833,6 +868,51 @@ function UserMessageBlock({
           <Text color={theme.muted}>{`  ${line}`}</Text>
         </Box>
       ))}
+    </Box>
+  );
+}
+
+function PendingInputMessagesBlock({
+  messages,
+  terminalColumns,
+  title,
+  hint,
+  bulletColor,
+}: {
+  messages: DisplayMessage[];
+  terminalColumns: number;
+  title: string;
+  hint: string;
+  bulletColor: string;
+}) {
+  const theme = useTheme();
+  const contentWidth = Math.max(20, terminalColumns - 5);
+
+  return (
+    <Box marginTop={1} flexDirection="column">
+      <Box>
+        <Text color={bulletColor}>• </Text>
+        <Text bold color={theme.inputText}>{title} </Text>
+        <Text color={theme.dim}>({hint})</Text>
+      </Box>
+      {messages.flatMap((message, messageIndex) => {
+        const { bodyLines, referenceLines } = splitImageDisplayContent(message.content || " ");
+        const wrappedBody = bodyLines.flatMap((line) =>
+          wrapByVisualWidth(line || " ", contentWidth),
+        );
+        const bodyRows = wrappedBody.map((line, lineIndex) => (
+          <Box key={`body-${message.key ?? messageIndex}-${lineIndex}`} marginLeft={2}>
+            <Text color={theme.dim}>{lineIndex === 0 ? "↳ " : "  "}</Text>
+            <Text color={theme.inputText}>{line}</Text>
+          </Box>
+        ));
+        const attachmentRows = referenceLines.map((line, lineIndex) => (
+          <Box key={`attachment-${message.key ?? messageIndex}-${lineIndex}`} marginLeft={2}>
+            <Text color={theme.dim}>  {line}</Text>
+          </Box>
+        ));
+        return [...bodyRows, ...attachmentRows];
+      })}
     </Box>
   );
 }

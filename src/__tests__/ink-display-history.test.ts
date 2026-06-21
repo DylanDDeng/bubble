@@ -4,6 +4,7 @@ import {
   appendToolPart,
   compactDisplayMessages as compactInkDisplayMessages,
   contentFromParts,
+  moveStatusMessageToEnd,
   snapshotDisplayParts,
   stripInterruptedAssistantMarker,
   toolCallsFromParts,
@@ -66,6 +67,28 @@ describe("Ink display history parts", () => {
 
     expect(snapshot).toEqual([
       { type: "tools", toolCalls: [tool("read", { path: "a.ts" }, undefined, { id: read.id })] },
+    ]);
+  });
+
+  it("moves an applied steer placeholder after the committed assistant turn", () => {
+    const messages: DisplayMessage[] = [
+      { key: "first-user", role: "user", content: "first" },
+      { key: "steer", role: "user", content: "steer", inputStatus: "pending_steer" },
+      {
+        key: "tool-turn",
+        role: "assistant",
+        content: "",
+        parts: [{ type: "tools", toolCalls: [tool("bash", { command: "ls" }, "ok")] }],
+      },
+    ];
+
+    expect(moveStatusMessageToEnd(messages, "steer").map((message) => ({
+      key: message.key,
+      inputStatus: message.inputStatus,
+    }))).toEqual([
+      { key: "first-user", inputStatus: undefined },
+      { key: "tool-turn", inputStatus: undefined },
+      { key: "steer", inputStatus: undefined },
     ]);
   });
 
