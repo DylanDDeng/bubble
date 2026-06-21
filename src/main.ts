@@ -8,7 +8,7 @@ import chalk from "chalk";
 import { Agent } from "./agent.js";
 import { BudgetLedger } from "./agent/budget-ledger.js";
 import { parseArgs, printHelp } from "./cli.js";
-import { UserConfig } from "./config.js";
+import { effectiveThemeModeForTerminal, shouldProbeTerminalTheme, UserConfig } from "./config.js";
 import { createProviderInstance, createUnavailableProvider } from "./provider.js";
 import { resolveConfiguredModel } from "./model-selection.js";
 import { getDefaultThinkingLevel } from "./provider-transform.js";
@@ -265,12 +265,14 @@ async function main() {
       console.log(chalk.dim("No previous sessions found — starting a fresh one."));
     } else {
       const themeConfig = userConfig.getTheme();
-      if (themeConfig.mode === "auto") {
+      if (shouldProbeTerminalTheme(themeConfig)) {
         const { detectTerminalTheme } = await import("./tui/detect-theme.js");
         preResolvedTheme = await detectTerminalTheme();
       } else {
-        preResolvedTheme = themeConfig.mode;
+        preResolvedTheme = themeConfig.mode === "light" ? "light" : "dark";
       }
+      const pickerThemeMode = effectiveThemeModeForTerminal(themeConfig, preResolvedTheme);
+      const pickerResolvedTheme = pickerThemeMode === "auto" ? preResolvedTheme : pickerThemeMode;
       const { runSessionPicker } = USE_OPENTUI
         ? await import("./tui-opentui/run-session-picker.js")
         : await import("./tui-ink/run-session-picker.js");
@@ -278,7 +280,7 @@ async function main() {
         currentCwd: args.cwd,
         currentSessions,
         allSessions,
-        resolvedTheme: preResolvedTheme,
+        resolvedTheme: pickerResolvedTheme,
         themeOverrides: themeConfig.overrides,
       });
       if (picked) {
@@ -545,14 +547,15 @@ async function main() {
     let detectedTheme: "light" | "dark" = "dark";
     if (preResolvedTheme) {
       detectedTheme = preResolvedTheme;
-    } else if (themeConfig.mode === "auto") {
+    } else if (shouldProbeTerminalTheme(themeConfig)) {
       // Probe before OpenTUI owns stdin. OSC 11 needs raw mode, and the
       // runtime renderer can consume the reply before startup code sees it.
       const { detectTerminalTheme } = await import("./tui/detect-theme.js");
       detectedTheme = await detectTerminalTheme();
     } else {
-      detectedTheme = themeConfig.mode;
+      detectedTheme = themeConfig.mode === "light" ? "light" : "dark";
     }
+    const effectiveThemeMode = effectiveThemeModeForTerminal(themeConfig, detectedTheme);
     // In-place session switch for the /session picker: rebind every closure
     // that persists to the session (onMessageAppend, markers, title updater)
     // by reassigning the outer `sessionManager`, then replace the agent's
@@ -615,7 +618,7 @@ async function main() {
       const { runTui } = await import("./tui/run.js");
       await runTui(agent, args, {
         ...commonOptions,
-        themeMode: themeConfig.mode,
+        themeMode: effectiveThemeMode,
         themeOverrides: themeConfig.overrides,
         detectedTheme,
         onThemeModeChange: (mode) => userConfig.setThemeMode(mode),
@@ -626,7 +629,7 @@ async function main() {
       const { runTui } = await import("./tui-ink/run.js");
       const summary = await runTui(agent, args, {
         ...commonOptions,
-        themeMode: themeConfig.mode,
+        themeMode: effectiveThemeMode,
         themeOverrides: themeConfig.overrides,
         detectedTheme,
         onThemeModeChange: (mode) => userConfig.setThemeMode(mode),

@@ -7,13 +7,11 @@ import type { Provider } from "../types.js";
 import type { ProviderRegistry } from "../provider-registry.js";
 import type { SkillRegistry } from "../skills/registry.js";
 import { App, type ApprovalHandlerRef, type ExitSummary, type PlanHandlerRef } from "./app.js";
-import { MOUSE_REPORTING_DISABLE, MOUSE_REPORTING_ENABLE } from "./terminal-mouse.js";
-
-// DECSET 1007: terminals translate the mouse wheel into Up/Down arrow keys
-// while the alternate screen is active. Keep it disabled for Ink: keyboard
-// arrows must remain prompt-history keys, while wheel scrolling is handled via
-// SGR mouse reports.
-const ALTERNATE_SCROLL_DISABLE = "\x1b[?1007l";
+import {
+  ALTERNATE_SCROLL_DISABLE,
+  MOUSE_REPORTING_DISABLE,
+  MOUSE_REPORTING_ENABLE,
+} from "./terminal-mouse.js";
 import { warmHighlighter } from "./code-highlight.js";
 import type { BashAllowlist } from "../approval/session-cache.js";
 import type { SettingsManager } from "../permissions/settings.js";
@@ -158,8 +156,7 @@ export async function runTui(
       exitOnCtrlC: false,
       kittyKeyboard: {
         mode: "enabled",
-        // reportEventTypes keeps release events out of text input. Wheel
-        // scrolling is separated below through terminal mouse reporting.
+        // reportEventTypes keeps release events out of text input.
         flags: ["disambiguateEscapeCodes", "reportEventTypes"],
       },
       // The whole point of the Ink migration: render into the 1049 alternate
@@ -170,7 +167,7 @@ export async function runTui(
   );
   // Keep alternate-scroll disabled so wheel events do not alias keyboard
   // arrows. Enable SGR mouse reporting after alt-screen entry so wheel events
-  // still scroll the transcript through a separate input channel.
+  // scroll the transcript through a distinct input channel.
   if (process.stdout.isTTY) {
     process.stdout.write(ALTERNATE_SCROLL_DISABLE + MOUSE_REPORTING_ENABLE);
   }

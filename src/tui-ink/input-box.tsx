@@ -17,9 +17,11 @@ import {
 } from "./image-paste.js";
 import {
   appendHistoryEntry,
-  loadHistorySync,
+  loadHistoryEntriesSync,
   pushHistoryEntry,
   stepHistory,
+  type HistoryEntry,
+  type HistoryScope,
 } from "./input-history.js";
 import { isKeyReleaseEvent } from "./key-events.js";
 import { stripTerminalMouseSequences } from "./terminal-mouse.js";
@@ -36,6 +38,7 @@ import {
   shouldCollapsePastedContent,
   type PastedContentReference,
 } from "../tui/paste-placeholder.js";
+import { imageDisplayLabel } from "../tui/image-display.js";
 
 export interface SubmitPayload {
   /** Fully-expanded text sent to the agent. */
@@ -43,6 +46,8 @@ export interface SubmitPayload {
   /** Text shown in the composer/transcript when it differs from the real text. */
   displayText?: string;
   images: ImageAttachment[];
+  /** First UI-only [Image #N] label reserved for this submitted payload. */
+  imageDisplayStart?: number;
 }
 
 interface InputBoxProps {
@@ -62,10 +67,13 @@ interface InputBoxProps {
   localSlashCommands?: Array<{ name: string; description: string }>;
   terminalColumns: number;
   cwd: string;
+  sessionFile?: string;
+  nextImageLabelStart?: number;
 }
 
 const MIN_VISIBLE_LINES = 3;
 const MAX_VISIBLE_LINES = 6;
+const CURSOR_BLINK_INTERVAL_MS = 530;
 const PADDING_X = 1;
 const PROMPT = " > ";
 const MAX_VISIBLE_SUGGESTIONS = 8;
@@ -108,15 +116,48 @@ export function isCtrlCInput(input: string, key: { ctrl?: boolean }): boolean {
   return input === "\x03" || (key.ctrl === true && input.toLowerCase() === "c");
 }
 
+export function shouldUseLineComposerFrame(_background: string): boolean {
+  return true;
+}
+
+export function composerVerticalArrowDirection(key: {
+  upArrow?: boolean;
+  downArrow?: boolean;
+  eventType?: string;
+}): "up" | "down" | undefined {
+  if (key.upArrow) return "up";
+  if (key.downArrow) return "down";
+  return undefined;
+}
+
+export function resolveSoftwareCursorCellStyle(input: {
+  visible: boolean;
+  cursorBackground: string;
+  cursorForeground: string;
+  textColor: string;
+  rowBackground?: string;
+}): { backgroundColor?: string; color: string } {
+  if (input.visible) {
+    return {
+      backgroundColor: input.cursorBackground,
+      color: input.cursorForeground,
+    };
+  }
+  return {
+    backgroundColor: input.rowBackground,
+    color: input.textColor,
+  };
+}
+
 /**
  * Split a composer line around the cursor so the cell under it can render as
  * an inverse-video software cursor. The visible cursor must not depend on the
  * real terminal cursor: Ink only re-arms its one-shot cursor escape when the
  * component owning useCursor re-commits, so frames produced by other
  * components' local state (the waiting spinner, viewport scrolling) hide the
- * hardware cursor for most of an agent run. Drawing the cell ourselves keeps
- * the cursor visible on every frame; the real (mostly hidden) cursor is still
- * positioned for IME anchoring.
+ * hardware cursor for most of an agent run. Drawing and blinking the cell
+ * ourselves keeps it visible while preserving normal typing feedback; the real
+ * cursor is still positioned for IME anchoring.
  */
 export function splitLineAtCursor(
   lineText: string,
@@ -351,19 +392,25 @@ export function InputBox({
   localSlashCommands = [],
   terminalColumns,
   cwd,
+  sessionFile,
+  nextImageLabelStart = 1,
 }: InputBoxProps) {
   const theme = useTheme();
   const width = terminalColumns;
+  const historyScope = useMemo<HistoryScope>(() => ({ sessionFile, cwd }), [sessionFile, cwd]);
 
   const [text, setText] = useState("");
   const [cursor, setCursor] = useState(0);
+  const [softwareCursorVisible, setSoftwareCursorVisible] = useState(true);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [projectFiles, setProjectFiles] = useState<string[] | null>(null);
   const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
+  const [imageLabelStartOverride, setImageLabelStartOverride] = useState<number | null>(null);
   const [pastedContentRefs, setPastedContentRefs] = useState<PastedContentReference[]>([]);
-  const [history, setHistory] = useState<string[]>(() => loadHistorySync());
+  const [history, setHistory] = useState<HistoryEntry[]>(() => loadHistoryEntriesSync({ scope: historyScope }));
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
-  const historyDraftRef = useRef<string>("");
+  const historyDraftRef = useRef<string | HistoryEntry>("");
+  const historyScopeRef = useRef(historyScope);
   const submittedPayloadFingerprintRef = useRef<string | null>(null);
   const loadingFilesRef = useRef(false);
   const nextPastedContentIndexRef = useRef(1);
@@ -374,6 +421,19 @@ export function InputBox({
   // This ref flips synchronously at paste-start and clears after the paste
   // commit has been flushed — useInput's Enter handler bails while it's set.
   const pastePendingRef = useRef(false);
+
+  historyScopeRef.current = historyScope;
+
+  const ensureImageLabelStart = React.useCallback(() => {
+    setImageLabelStartOverride((current) => current ?? nextImageLabelStart);
+  }, [nextImageLabelStart]);
+
+  useEffect(() => {
+    setHistory(loadHistoryEntriesSync({ scope: historyScope }));
+    setHistoryIndex(null);
+    setImageLabelStartOverride(null);
+    historyDraftRef.current = "";
+  }, [historyScope]);
 
   const isSlashContext = text.startsWith("/") && cursor > 0 && !text.includes("\n");
   const slashPrefix = isSlashContext ? text.slice(1).toLowerCase() : "";
@@ -392,18 +452,28 @@ export function InputBox({
     );
   }, [atContext, cwd, projectFiles]);
 
-  // Request a steady (non-blinking) block cursor via DECSCUSR while this
-  // component is mounted. Terminals default to a blinking cursor, which is
-  // distracting in an input that you'd glance away from. Restore the
-  // terminal default on unmount so the user's shell isn't left with our
-  // choice sticking around.
+  // Request a blinking block cursor via DECSCUSR while this component is
+  // mounted. The software cursor below does the visible blinking in Ink frames,
+  // while the real cursor remains useful for IME anchoring.
   useEffect(() => {
     if (!process.stdout.isTTY) return;
-    process.stdout.write("\x1b[2 q"); // steady block
+    process.stdout.write("\x1b[1 q"); // blinking block
     return () => {
       process.stdout.write("\x1b[0 q"); // reset to terminal default
     };
   }, []);
+
+  useEffect(() => {
+    if (disabled) {
+      setSoftwareCursorVisible(false);
+      return;
+    }
+    setSoftwareCursorVisible(true);
+    const timer = setInterval(() => {
+      setSoftwareCursorVisible((visible) => !visible);
+    }, CURSOR_BLINK_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [disabled]);
 
   const slashSuggestions = useMemo(() => {
     if (!isSlashContext) return [];
@@ -479,8 +549,9 @@ export function InputBox({
   );
 
   const addAttachment = React.useCallback((att: ImageAttachment) => {
+    ensureImageLabelStart();
     setAttachments((prev) => [...prev, att]);
-  }, []);
+  }, [ensureImageLabelStart]);
 
   const notice = React.useCallback(
     (msg: string) => {
@@ -629,6 +700,7 @@ export function InputBox({
       text: expandedText,
       displayText: expandedText === submittedText ? undefined : submittedText,
       images: attachments,
+      imageDisplayStart: attachments.length > 0 ? (imageLabelStartOverride ?? nextImageLabelStart) : undefined,
     };
     const fingerprint = submitPayloadFingerprint(payload);
     if (submittedPayloadFingerprintRef.current === fingerprint) return;
@@ -636,17 +708,25 @@ export function InputBox({
     deliver(payload);
     // A collapsed marker cannot be safely replayed from history once its
     // in-memory paste reference is gone; skip those entries instead.
-    if (expandedText.trim().length > 0 && expandedText === submittedText) {
-      const nextHistory = pushHistoryEntry(history, expandedText);
-      if (nextHistory !== history) {
-        setHistory(nextHistory);
-        appendHistoryEntry(expandedText);
-      }
+    if (expandedText === submittedText && (expandedText.trim().length > 0 || attachments.length > 0)) {
+      const historyEntry: HistoryEntry = {
+        text: expandedText,
+        images: attachments,
+        ...(attachments.length > 0 ? { imageDisplayStart: imageLabelStartOverride ?? nextImageLabelStart } : {}),
+      };
+      setHistory((current) => {
+        const nextHistory = pushHistoryEntry(current, historyEntry);
+        if (nextHistory !== current) {
+          appendHistoryEntry(historyEntry, { scope: historyScopeRef.current });
+        }
+        return nextHistory;
+      });
     }
     setText("");
     setCursor(0);
     setSelectedIndex(0);
     setAttachments([]);
+    setImageLabelStartOverride(null);
     setPastedContentRefs([]);
     nextPastedContentIndexRef.current = 1;
     setHistoryIndex(null);
@@ -720,13 +800,15 @@ export function InputBox({
       return;
     }
 
+    const composerArrowDirection = composerVerticalArrowDirection(key);
+
     // Autocomplete navigation
     if (showSuggestions) {
-      if (navigable && key.upArrow) {
+      if (navigable && composerArrowDirection === "up") {
         setSelectedIndex((i) => (i - 1 + activeCount) % activeCount);
         return;
       }
-      if (navigable && key.downArrow) {
+      if (navigable && composerArrowDirection === "down") {
         setSelectedIndex((i) => (i + 1) % activeCount);
         return;
       }
@@ -785,7 +867,11 @@ export function InputBox({
       } else if (attachments.length > 0) {
         // Backspace at position 0 drops the most recent attachment so users
         // can undo a misfired paste without submitting the message.
-        setAttachments((prev) => prev.slice(0, -1));
+        setAttachments((prev) => {
+          const next = prev.slice(0, -1);
+          if (next.length === 0) setImageLabelStartOverride(null);
+          return next;
+        });
       }
       return;
     }
@@ -801,7 +887,9 @@ export function InputBox({
       return;
     }
     if (key.upArrow || key.downArrow) {
-      classifyVerticalArrow(key.upArrow ? "up" : "down");
+      if (composerArrowDirection) {
+        classifyVerticalArrow(composerArrowDirection);
+      }
       return;
     }
 
@@ -860,6 +948,8 @@ export function InputBox({
     setText(draftText);
     setCursor(draftText.length);
     setSelectedIndex(0);
+    setAttachments([]);
+    setImageLabelStartOverride(null);
     setPastedContentRefs([]);
     nextPastedContentIndexRef.current = 1;
     setHistoryIndex(null);
@@ -891,39 +981,54 @@ export function InputBox({
 
   const contentWidth = Math.max(1, width - PADDING_X * 2);
   const lineWidth = Math.max(1, contentWidth - PROMPT.length);
+  const imageLabelStart = imageLabelStartOverride ?? nextImageLabelStart;
+  const attachmentLabels = useMemo(
+    () => attachments.map((_, index) => imageDisplayLabel(imageLabelStart + index)),
+    [attachments, imageLabelStart],
+  );
+  const imageInlinePrefix = attachmentLabels.length > 0 ? `${attachmentLabels.join(" ")} ` : "";
+  const displayText = imageInlinePrefix + text;
+  const displayCursor = cursor + imageInlinePrefix.length;
+  const displayCursorToSourceCursor = (value: number) =>
+    Math.max(0, Math.min(text.length, value - imageInlinePrefix.length));
+
+  useEffect(() => {
+    if (!disabled) setSoftwareCursorVisible(true);
+  }, [disabled, displayCursor, displayText]);
 
   const visualLines = useMemo(
-    () => computeVisualLines(text, lineWidth),
-    [text, lineWidth],
+    () => computeVisualLines(displayText, lineWidth),
+    [displayText, lineWidth],
   );
-  const { row: cursorVisualRow, col: cursorVisualCol } = cursorToVisual(visualLines, cursor);
+  const { row: cursorVisualRow, col: cursorVisualCol } = cursorToVisual(visualLines, displayCursor);
 
   // ---- Wheel-vs-keyboard classification for Up/Down arrows ----
   //
-  // Wheel events are handled as SGR mouse reports at the app boundary. Up/Down
-  // reaching the composer are keyboard navigation again: move within multiline
-  // input first, then browse prompt history at the top/bottom edge.
+  // Up/Down reaching the composer are keyboard navigation: move within
+  // multiline input first, then browse prompt history at the top/bottom edge.
   const performVerticalArrowRef = useRef<(direction: "up" | "down") => void>(() => {});
   performVerticalArrowRef.current = (direction) => {
     if (direction === "up") {
       if (cursorVisualRow > 0) {
-        setCursor(visualToCursor(visualLines, cursorVisualRow - 1, cursorVisualCol));
+        setCursor(displayCursorToSourceCursor(visualToCursor(visualLines, cursorVisualRow - 1, cursorVisualCol)));
         return;
       }
     } else {
       if (cursorVisualRow < visualLines.length - 1) {
-        setCursor(visualToCursor(visualLines, cursorVisualRow + 1, cursorVisualCol));
+        setCursor(displayCursorToSourceCursor(visualToCursor(visualLines, cursorVisualRow + 1, cursorVisualCol)));
         return;
       }
     }
     const result = stepHistory(
       { history, index: historyIndex, draft: historyDraftRef.current },
       direction,
-      text,
+      { text, images: attachments },
     );
     if (result.changed) {
       setText(result.text);
       setCursor(result.text.length);
+      setAttachments(result.images ?? []);
+      setImageLabelStartOverride(result.imageDisplayStart ?? null);
       setHistoryIndex(result.index);
       historyDraftRef.current = result.draft;
       setSelectedIndex(0);
@@ -935,8 +1040,10 @@ export function InputBox({
     performVerticalArrowRef.current(direction);
   };
 
+  const lineFrame = shouldUseLineComposerFrame(theme.background);
+  const minVisibleLines = lineFrame ? 1 : MIN_VISIBLE_LINES;
   const totalLines = Math.max(visualLines.length, 1);
-  const visibleLines = Math.min(Math.max(totalLines, MIN_VISIBLE_LINES), MAX_VISIBLE_LINES);
+  const visibleLines = Math.min(Math.max(totalLines, minVisibleLines), MAX_VISIBLE_LINES);
 
   let scrollOffset = 0;
   if (totalLines > visibleLines) {
@@ -976,6 +1083,7 @@ export function InputBox({
   const inputFrameSignature = [
     disabled ? "disabled" : "active",
     text,
+    imageInlinePrefix,
     scrollOffset.toString(),
     visibleLines.toString(),
     attachments.map((att) => `${att.filename ?? "clipboard"}:${att.bytes}`).join(","),
@@ -1077,6 +1185,15 @@ export function InputBox({
   // Reference cursorTick so the effect re-runs on the forced render pass.
   void cursorTick;
   const inputBg = disabled ? theme.inputBgDisabled : theme.inputBg;
+  const rowBg = lineFrame ? undefined : inputBg;
+  const cursorFg = lineFrame ? theme.background : inputBg;
+  const cursorCellStyle = resolveSoftwareCursorCellStyle({
+    visible: softwareCursorVisible,
+    cursorBackground: theme.inputText,
+    cursorForeground: cursorFg,
+    textColor: theme.inputText,
+    rowBackground: rowBg,
+  });
   const moreBelow = totalLines - scrollOffset - visibleLines;
 
   const filledLine = (value: string) => {
@@ -1086,29 +1203,21 @@ export function InputBox({
 
   return (
     <Box flexDirection="column">
-      {attachments.length > 0 && (
-        <Box flexDirection="row" flexWrap="wrap" paddingX={PADDING_X} marginBottom={0}>
-          {attachments.map((att, i) => {
-            const label = att.filename || "clipboard";
-            const kb = Math.max(1, Math.round(att.bytes / 1024));
-            return (
-              <Box key={i} marginRight={1}>
-                <Text color={theme.accent}>{`[img${attachments.length > 1 ? ` ${i + 1}` : ""}: ${label} · ${kb}KB]`}</Text>
-              </Box>
-            );
-          })}
+      {lineFrame && (
+        <Box paddingX={PADDING_X}>
+          <Text color={theme.border}>{"─".repeat(contentWidth)}</Text>
         </Box>
       )}
       <Box flexDirection="column" paddingX={PADDING_X}>
         {hasMoreAbove && (
-          <Text backgroundColor={inputBg} color={theme.muted} dimColor>
+          <Text backgroundColor={rowBg} color={theme.muted} dimColor>
             {filledLine(` ↑ ${scrollOffset} more`)}
           </Text>
         )}
         {displayedLines.map((row) => {
           if (row.kind === "pad") {
             return (
-              <Text key={row.key} backgroundColor={inputBg}>
+              <Text key={row.key} backgroundColor={rowBg}>
                 {" ".repeat(contentWidth)}
               </Text>
             );
@@ -1119,12 +1228,13 @@ export function InputBox({
           const isFirst = visualIdx === 0;
           const isCursorLine = visualIdx === cursorVisualRow;
           const prompt = isFirst ? PROMPT : " ".repeat(PROMPT.length);
+          const highlight = imageInlinePrefix ? null : slashCommandHighlight;
           const renderedSegments = splitComposerTextSegments({
             text: lineText,
             absStart: visualLine?.absStart ?? 0,
-            highlight: slashCommandHighlight,
+            highlight,
             cursorOffset: isCursorLine && !disabled
-              ? cursor - (visualLines[cursorVisualRow]?.absStart ?? 0)
+              ? displayCursor - (visualLines[cursorVisualRow]?.absStart ?? 0)
               : undefined,
           });
           const renderedLine = renderedSegments.map((segment) => segment.text).join("");
@@ -1142,13 +1252,13 @@ export function InputBox({
                   : undefined
               }
             >
-              <Text backgroundColor={inputBg} color={isFirst ? theme.accent : theme.inputText}>
+              <Text backgroundColor={rowBg} color={isFirst ? theme.accent : theme.inputText}>
                 {prompt}
               </Text>
               {renderedSegments.map((segment, index) => {
                 if (segment.kind === "cursor") {
                   return (
-                    <Text key={index} backgroundColor={theme.inputText} color={inputBg}>
+                    <Text key={index} backgroundColor={cursorCellStyle.backgroundColor} color={cursorCellStyle.color}>
                       {segment.text}
                     </Text>
                   );
@@ -1156,7 +1266,7 @@ export function InputBox({
                 return (
                   <Text
                     key={index}
-                    backgroundColor={inputBg}
+                    backgroundColor={rowBg}
                     color={segment.kind === "command" ? theme.accent : theme.inputText}
                     bold={segment.kind === "command"}
                   >
@@ -1164,16 +1274,21 @@ export function InputBox({
                   </Text>
                 );
               })}
-              <Text backgroundColor={inputBg}>{fill}</Text>
+              <Text backgroundColor={rowBg}>{fill}</Text>
             </Box>
           );
         })}
         {hasMoreBelow && (
-          <Text backgroundColor={inputBg} color={theme.muted} dimColor>
+          <Text backgroundColor={rowBg} color={theme.muted} dimColor>
             {filledLine(` ↓ ${moreBelow} more`)}
           </Text>
         )}
       </Box>
+      {lineFrame && (
+        <Box paddingX={PADDING_X}>
+          <Text color={theme.border}>{"─".repeat(contentWidth)}</Text>
+        </Box>
+      )}
       {showSuggestions && mode === "slash" && (
         <Box flexDirection="column" marginTop={1} paddingLeft={4}>
           {slashSuggestions

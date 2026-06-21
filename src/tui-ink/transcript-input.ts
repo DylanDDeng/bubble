@@ -1,7 +1,12 @@
 export type TranscriptPageScrollDirection = "up" | "down";
 
+export interface TranscriptKeyEvent {
+  pageUp?: boolean;
+  pageDown?: boolean;
+}
+
 export function transcriptPageScrollDirection(
-  key: { pageUp?: boolean; pageDown?: boolean },
+  key: TranscriptKeyEvent,
   options: { overlayActive: boolean },
 ): TranscriptPageScrollDirection | undefined {
   if (options.overlayActive) return undefined;

@@ -174,8 +174,8 @@ export const lightTheme: Theme = {
   borderActive: "#356FD2",
   inputBorder: "#356FD2",
   inputBorderDisabled: "#D7DAD4",
-  inputBg: "#F1F3F0",
-  inputBgDisabled: "#E6E8E3",
+  inputBg: "#FCFCFA",
+  inputBgDisabled: "#F6F6F3",
   inputText: "#171717",
   inputPlaceholder: "#6F7377",
   muted: "#6F7377",
@@ -221,8 +221,8 @@ export const lightTheme: Theme = {
   text:               "#171717",
   textMuted:          "#6F7377",
   textDim:            "#8B9094",
-  surface:            "#F1F3F0",
-  shade:              "#E6E8E3",
+  surface:            "#FCFCFA",
+  shade:              "#F6F6F3",
 };
 
 const ThemeContext = createContext<Theme>(darkTheme);

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  ALTERNATE_SCROLL_DISABLE,
+  ALTERNATE_SCROLL_ENABLE,
   hasTerminalMouseSequence,
   MOUSE_REPORTING_DISABLE,
   MOUSE_REPORTING_ENABLE,
@@ -10,6 +12,13 @@ import {
 } from "../tui-ink/terminal-mouse.js";
 
 describe("Ink terminal mouse parsing", () => {
+  it("keeps alternate-scroll disabled when mouse reporting handles wheel input", () => {
+    expect(ALTERNATE_SCROLL_ENABLE).toBe("\x1b[?1007h");
+    expect(ALTERNATE_SCROLL_DISABLE).toBe("\x1b[?1007l");
+    expect(MOUSE_REPORTING_ENABLE).toContain("\x1b[?1000h");
+    expect(MOUSE_REPORTING_ENABLE).toContain("\x1b[?1006h");
+  });
+
   it("parses SGR wheel events", () => {
     expect(parseTerminalMouseWheel("\x1b[<64;12;5M\x1b[<65;12;6M")).toEqual(["up", "down"]);
   });
@@ -25,11 +34,11 @@ describe("Ink terminal mouse parsing", () => {
     expect(parseTerminalMouseWheel(`${wheelUp}${wheelDown}`)).toEqual(["up", "down"]);
   });
 
-  it("enables SGR mouse reporting without alternate-scroll key aliasing", () => {
-    expect(MOUSE_REPORTING_ENABLE).toContain("\x1b[?1000h");
-    expect(MOUSE_REPORTING_ENABLE).toContain("\x1b[?1006h");
+  it("disables common terminal mouse reporting modes defensively", () => {
     expect(MOUSE_REPORTING_DISABLE).toContain("\x1b[?1000l");
+    expect(MOUSE_REPORTING_DISABLE).toContain("\x1b[?1005l");
     expect(MOUSE_REPORTING_DISABLE).toContain("\x1b[?1006l");
+    expect(MOUSE_REPORTING_DISABLE).toContain("\x1b[?1015l");
   });
 
   it("strips mouse sequences before they reach the prompt buffer", () => {

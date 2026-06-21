@@ -37,7 +37,7 @@ import { FeishuSetupPicker } from "./feishu-setup-picker.js";
 import { BUILTIN_PROVIDERS, ProviderRegistry, displayModel, isUserVisibleProvider } from "../provider-registry.js";
 import { buildSystemPrompt } from "../system-prompt.js";
 import type { ThinkingLevel } from "../types.js";
-import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingLevel } from "../provider-transform.js";
+import { getAvailableThinkingLevels, normalizeThinkingLevel } from "../provider-transform.js";
 import { FooterBar, buildFooterData } from "./footer.js";
 import { SkillRegistry } from "../skills/registry.js";
 import { parseSkillInvocation } from "../skills/invocation.js";
@@ -58,6 +58,8 @@ import type { MemoryScope } from "../memory/index.js";
 import { QuestionDialog } from "./question-dialog.js";
 import { FeedbackDialog } from "./feedback-dialog.js";
 import { collectFeedback } from "../feedback/collect.js";
+import { errorMessage, formatModelSwitchError, switchAgentModel } from "../tui/model-switch.js";
+import { formatImageUserDisplayText, nextImageDisplayLabelStart } from "../tui/image-display.js";
 // OpenTUI handles mouse selection natively via useSelectionHandler; no need
 // to filter escape-sequence noise out of stdin like we did in the Ink path.
 import os from "node:os";
@@ -410,6 +412,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     }
   }, [renderer]);
   const [messages, setMessages] = useState<DisplayMessage[]>(() => compactDisplayMessages(reconstructDisplayMessages(agent.messages)));
+  const nextImageDisplayLabelStartRef = useRef(nextImageDisplayLabelStart(messages));
   const [clearEpoch, setClearEpoch] = useState(0);
   const [isRunning, setIsRunning] = useState(false);
   const [streamingContent, setStreamingContent] = useState("");
@@ -685,6 +688,20 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
     updateDisplayMessages((prev) => [...prev, withMessageKey({ role, content })]);
   }, [updateDisplayMessages]);
 
+  const prepareSubmitDisplay = useCallback((payload: SubmitPayload): SubmitPayload => {
+    if (payload.images.length === 0) return payload;
+    if (payload.imageDisplayStart !== undefined) {
+      nextImageDisplayLabelStartRef.current = Math.max(
+        nextImageDisplayLabelStartRef.current,
+        payload.imageDisplayStart + payload.images.length,
+      );
+      return payload;
+    }
+    const imageDisplayStart = nextImageDisplayLabelStartRef.current;
+    nextImageDisplayLabelStartRef.current += payload.images.length;
+    return { ...payload, imageDisplayStart };
+  }, []);
+
   const clearMessages = useCallback(() => {
     // Static history is already written to terminal scrollback, so clearing
     // React state alone would leave old rows visible.
@@ -724,71 +741,58 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
 
   const handleModelSelect = useCallback((model: string) => {
     const run = async () => {
-      agent.model = model;
-      const decoded = model.includes(":")
-        ? model.split(":")
-        : [agent.providerId || safeRegistry.getDefault()?.id || "openai", model];
-      const providerId = decoded[0];
-
-      await safeRegistry.prepareProvider(providerId);
-      const provider = safeRegistry.getConfigured().find((item) => item.id === providerId);
-      if (!provider?.apiKey || !createProvider) {
-        addMessage("error", `Provider ${providerId} is not configured or has no active credentials.`);
-        closePicker();
-        return;
-      }
-
-      const modelId = model.includes(":") ? model.split(":").slice(1).join(":") : model;
-      agent.thinking = normalizeThinkingLevel(
-        agent.thinking || getDefaultThinkingLevel(providerId, modelId),
-        getAvailableThinkingLevels(providerId, modelId),
-      );
-      agent.setProvider(createProvider(providerId, provider.apiKey, provider.baseURL));
-      agent.providerId = providerId;
-      agent.setSystemPrompt(buildSystemPrompt({
-        agentName: "Bubble",
-        configuredProvider: providerId,
-        configuredModel: displayModel(model),
-        configuredModelId: model,
-        thinkingLevel: agent.thinking,
+      await switchAgentModel({
+        model,
+        agent,
+        registry: safeRegistry,
+        createProvider,
         workingDir: args.cwd,
-        ...agent.getSystemPromptToolOptions(),
-      }));
-      userConfig.pushRecentModel(model);
-      setThinkingLevel(agent.thinking);
-      sessionManager?.updateMetadata({ model, thinkingLevel: agent.thinking, reasoningEffort: agent.thinking });
-      sessionManager?.appendMarker("model_switch", model);
+        systemPromptOptions: agent.getSystemPromptToolOptions(),
+        rememberModel: (nextModel) => userConfig.pushRecentModel(nextModel),
+        setThinkingLevel,
+        sessionManager,
+      });
       addMessage("assistant", `Model switched to ${displayModel(model)}.`);
       closePicker();
     };
 
-    void run();
+    void run().catch((error) => {
+      addMessage("error", formatModelSwitchError(model, error));
+      closePicker();
+    });
   }, [agent, addMessage, closePicker, sessionManager, userConfig, safeRegistry, createProvider]);
 
-  const handleProviderSelect = useCallback(async (providerId: string) => {
-    await safeRegistry.prepareProvider(providerId);
-    const configured = safeRegistry.getConfigured();
-    const p = configured.find((x) => x.id === providerId);
-    const builtin = BUILTIN_PROVIDERS.find((x) => x.id === providerId);
-    if (!p && !builtin) {
-      addMessage("error", `Provider ${providerId} not found.`);
-      closePicker();
-      return;
-    }
-    if (!p?.apiKey) {
-      if (!p && builtin) {
-        safeRegistry.addProvider(providerId, "");
+  const handleProviderSelect = useCallback((providerId: string) => {
+    const run = async () => {
+      await safeRegistry.prepareProvider(providerId);
+      const configured = safeRegistry.getConfigured();
+      const p = configured.find((x) => x.id === providerId);
+      const builtin = BUILTIN_PROVIDERS.find((x) => x.id === providerId);
+      if (!p && !builtin) {
+        addMessage("error", `Provider ${providerId} not found.`);
+        closePicker();
+        return;
+      }
+      if (!p?.apiKey) {
+        if (!p && builtin) {
+          safeRegistry.addProvider(providerId, "");
+        }
+        safeRegistry.setDefault(providerId);
+        setKeyProviderId(providerId);
+        setPickerMode("key");
+        return;
       }
       safeRegistry.setDefault(providerId);
-      setKeyProviderId(providerId);
-      setPickerMode("key");
-      return;
-    }
-    safeRegistry.setDefault(providerId);
-    agent.setProvider(createProvider!(providerId, p.apiKey, p.baseURL));
-    agent.providerId = providerId;
-    addMessage("assistant", `Switched to provider ${p.name}. Use /model to pick a model.`);
-    closePicker();
+      agent.setProvider(createProvider!(providerId, p.apiKey, p.baseURL));
+      agent.providerId = providerId;
+      addMessage("assistant", `Switched to provider ${p.name}. Use /model to pick a model.`);
+      closePicker();
+    };
+
+    void run().catch((error) => {
+      addMessage("error", `Failed to switch provider ${providerId}: ${errorMessage(error)}`);
+      closePicker();
+    });
   }, [addMessage, agent, closePicker, createProvider, safeRegistry]);
 
   const handleProviderAddSelect = useCallback((providerId: string) => {
@@ -892,12 +896,13 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
 
   const handleSubmit = useCallback(
     async (payload: SubmitPayload | string) => {
-      const normalized: SubmitPayload =
+      const initialPayload: SubmitPayload =
         typeof payload === "string" ? { text: payload, images: [] } : payload;
+      if (!initialPayload.text.trim() && initialPayload.images.length === 0) return;
+      const normalized = prepareSubmitDisplay(initialPayload);
       const input = normalized.text;
       const displayInput = normalized.displayText ?? input;
       const images = normalized.images;
-      if (!input.trim() && images.length === 0) return;
 
       const runAgentInput = async (
         actualInput: string | ContentPart[],
@@ -915,13 +920,11 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
           return;
         }
 
-        const displayContent = attachedImages.length > 0
-          ? `${displayInput}${displayInput ? "\n" : ""}${attachedImages
-              .map((img, i) =>
-                `[image${attachedImages.length > 1 ? ` ${i + 1}` : ""}: ${img.filename ?? "clipboard"} · ${Math.max(1, Math.round(img.bytes / 1024))}KB]`,
-              )
-              .join(" ")}`
-          : displayInput;
+        const displayContent = formatImageUserDisplayText(
+          displayInput,
+          attachedImages.length,
+          normalized.imageDisplayStart,
+        );
         updateDisplayMessages((prev) => [
           ...prev,
           withMessageKey({ role: "user", content: displayContent }),
@@ -1276,7 +1279,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         images.map((img) => ({ filename: img.filename, bytes: img.bytes })),
       );
     },
-    [addMessage, agent, args.cwd, openPicker, createProvider, safeRegistry, safeSkillRegistry, updateDisplayMessages]
+    [addMessage, agent, args.cwd, openPicker, createProvider, prepareSubmitDisplay, safeRegistry, safeSkillRegistry, updateDisplayMessages]
   );
 
   const currentProviderId = agent.providerId || safeRegistry.getDefault()?.id;
@@ -1358,6 +1361,8 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
       skillRegistry={safeSkillRegistry}
       terminalColumns={terminalColumns}
       cwd={args.cwd}
+      sessionFile={sessionManager?.getSessionFile()}
+      nextImageLabelStart={nextImageDisplayLabelStartRef.current}
     />
   );
 

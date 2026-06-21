@@ -21,6 +21,7 @@ import {
 import { EDIT_COLLAPSED_DIFF_LINES, formatEditSuccessSummary, getEditDiffDetails } from "./edit-diff.js";
 import { formatSubagentRoute, type SubagentRouteLike } from "../agent/subagent-route-format.js";
 import { sanitizeInternalReminderBlocks } from "../agent/internal-reminder-sanitizer.js";
+import { splitImageDisplayContent } from "../tui/image-display.js";
 
 /**
  * Hint surfaced when the user can interrupt the currently-running pending tool
@@ -801,8 +802,8 @@ function UserMessageBlock({
   const railWidth = 2;
   const horizontalRoom = Math.max(20, terminalColumns - 2);
   const bubbleTextWidth = Math.max(1, horizontalRoom - railWidth - 2);
-  const wrappedLines = content
-    .split("\n")
+  const { bodyLines, referenceLines } = splitImageDisplayContent(content);
+  const wrappedLines = bodyLines
     .flatMap((line) => wrapByVisualWidth(line, bubbleTextWidth));
 
   return (
@@ -825,6 +826,11 @@ function UserMessageBlock({
           <Text backgroundColor={theme.userMessageBg} color={theme.userMessageText}>
             {` ${padVisual(line || " ", bubbleTextWidth)} `}
           </Text>
+        </Box>
+      ))}
+      {referenceLines.map((line, index) => (
+        <Box key={`attachment-${index}`}>
+          <Text color={theme.muted}>{`  ${line}`}</Text>
         </Box>
       ))}
     </Box>

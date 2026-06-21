@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  composerVerticalArrowDirection,
   createPastedContentMarker,
   expandPastedContentMarkers,
   insertNewlineAtCursor,
   isInkModifiedEnterInput,
   isCtrlCInput,
   needsCursorRowCompensation,
+  resolveSoftwareCursorCellStyle,
   resolveCursorRowCompensation,
   resolveInkEnterIntent,
   resolveSlashEnterAction,
@@ -50,6 +52,15 @@ describe("Ink input cursor row compensation", () => {
       viewportRows: 24,
       previousOutputHeight: 6,
     })).toBe(1);
+  });
+});
+
+describe("Ink composer vertical arrows", () => {
+  it("treats ordinary arrows as composer navigation", () => {
+    expect(composerVerticalArrowDirection({ upArrow: true })).toBe("up");
+    expect(composerVerticalArrowDirection({ downArrow: true })).toBe("down");
+    expect(composerVerticalArrowDirection({ upArrow: true, eventType: "press" })).toBe("up");
+    expect(composerVerticalArrowDirection({ downArrow: true, eventType: "repeat" })).toBe("down");
   });
 });
 
@@ -227,5 +238,23 @@ describe("software cursor cell", () => {
   it("clamps offsets outside the line", () => {
     expect(splitLineAtCursor("hi", 99)).toEqual({ before: "hi", at: " ", after: "" });
     expect(splitLineAtCursor("hi", -1)).toEqual({ before: "", at: "h", after: "i" });
+  });
+
+  it("uses inverse colors while visible and normal colors while hidden", () => {
+    expect(resolveSoftwareCursorCellStyle({
+      visible: true,
+      cursorBackground: "text",
+      cursorForeground: "surface",
+      textColor: "text",
+      rowBackground: "surface",
+    })).toEqual({ backgroundColor: "text", color: "surface" });
+
+    expect(resolveSoftwareCursorCellStyle({
+      visible: false,
+      cursorBackground: "text",
+      cursorForeground: "surface",
+      textColor: "text",
+      rowBackground: "surface",
+    })).toEqual({ backgroundColor: "surface", color: "text" });
   });
 });

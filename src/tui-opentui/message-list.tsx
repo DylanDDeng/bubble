@@ -5,6 +5,7 @@ import { MarkdownContent, StreamingMarkdown } from "./markdown.js";
 import type { DisplayMessage, DisplayMessagePart, DisplayToolCall } from "./display-history.js";
 import { EDIT_COLLAPSED_DIFF_LINES, getEditDiffDetails } from "./edit-diff.js";
 import { sanitizeInternalReminderBlocks } from "../agent/internal-reminder-sanitizer.js";
+import { splitImageDisplayContent } from "../tui/image-display.js";
 
 export interface PendingApprovalHint {
   toolName: "edit" | "write" | "bash";
@@ -193,15 +194,22 @@ function MessageParts({
  * or background — flows in scrollback as raw colored text. opencode pattern.
  */
 function UserMessageBlock({ content, theme }: { content: string; theme: Theme }) {
-  const lines = content.split("\n");
+  const { bodyLines, referenceLines } = splitImageDisplayContent(content);
+  const lines = [
+    ...bodyLines.map((line, index) => ({ kind: "body" as const, line, index })),
+    ...referenceLines.map((line, index) => ({ kind: "reference" as const, line, index })),
+  ];
   return (
     <box style={{ marginTop: 1, marginBottom: 1, flexDirection: "column" }}>
-      {lines.map((line, i) => (
-        <text key={`u-${i}`} fg={theme.userMessageText}>
-          {i === 0 ? "› " : "  "}
-          {line || " "}
-        </text>
-      ))}
+      {lines.map((item, i) => {
+        const attachment = item.kind === "reference";
+        return (
+          <text key={`u-${item.kind}-${item.index}`} fg={attachment ? theme.textMuted : theme.userMessageText}>
+            {attachment ? "  " : i === 0 ? "› " : "  "}
+            {item.line || " "}
+          </text>
+        );
+      })}
     </box>
   );
 }

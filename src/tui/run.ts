@@ -7978,10 +7978,12 @@ function renderPrompt(input: {
   onPaste?: (event: any) => void;
 }) {
   const transparentBackground = "#00000000";
+  const promptBackground = transparentBackground;
+  const promptBorder = ["top", "bottom"];
 
   return h("box", { flexDirection: "column", flexShrink: 0, marginTop: 1 },
-    h("box", { width: "100%", border: true, borderColor: theme.border, backgroundColor: transparentBackground },
-      h("box", { flexDirection: "column", paddingLeft: 2, paddingRight: 2, paddingTop: 1, paddingBottom: 1, backgroundColor: transparentBackground },
+    h("box", { width: "100%", border: promptBorder, borderColor: theme.border, backgroundColor: promptBackground },
+      h("box", { flexDirection: "column", paddingLeft: 2, paddingRight: 2, paddingTop: 0, paddingBottom: 0, backgroundColor: promptBackground },
         h("textarea", {
           ref: (ref: TextareaRenderable) => {
             preserveCursorOnMouseSelection(ref);
@@ -7992,8 +7994,9 @@ function renderPrompt(input: {
           placeholderColor: theme.textMuted,
           textColor: theme.text,
           focusedTextColor: theme.text,
-          backgroundColor: transparentBackground,
-          focusedBackgroundColor: transparentBackground,
+          backgroundColor: promptBackground,
+          focusedBackgroundColor: promptBackground,
+          attributes: TextAttributes.NONE,
           cursorColor: theme.primary,
           minHeight: 1,
           maxHeight: 6,

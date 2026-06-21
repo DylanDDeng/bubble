@@ -23,8 +23,11 @@ import {
 } from "./image-paste.js";
 import {
   appendHistoryEntry,
-  loadHistorySync,
+  loadHistoryEntriesSync,
+  pushHistoryEntry,
   stepHistory,
+  type HistoryEntry,
+  type HistoryScope,
 } from "./input-history.js";
 export {
   createPastedContentMarker,
@@ -36,11 +39,17 @@ import {
   shouldCollapsePastedContent,
   type PastedContentReference,
 } from "../tui/paste-placeholder.js";
+import { imageDisplayLabel } from "../tui/image-display.js";
+
+function shouldUseLineComposerFrame(_background: string): boolean {
+  return true;
+}
 
 export interface SubmitPayload {
   text: string;
   displayText?: string;
   images: ImageAttachment[];
+  imageDisplayStart?: number;
 }
 
 interface InputBoxProps {
@@ -54,6 +63,8 @@ interface InputBoxProps {
   skillRegistry?: SkillRegistry;
   terminalColumns: number;
   cwd: string;
+  sessionFile?: string;
+  nextImageLabelStart?: number;
 }
 
 const PROMPT = " > ";
@@ -80,13 +91,17 @@ export function InputBox({
   skillRegistry,
   terminalColumns,
   cwd,
+  sessionFile,
+  nextImageLabelStart = 1,
 }: InputBoxProps) {
   const theme = useTheme();
+  const historyScope = useMemo<HistoryScope>(() => ({ sessionFile, cwd }), [sessionFile, cwd]);
   const [buffer, setBuffer] = useState("");
   const [cursor, setCursor] = useState(0);
   const [images, setImages] = useState<ImageAttachment[]>([]);
+  const [imageLabelStartOverride, setImageLabelStartOverride] = useState<number | null>(null);
   const [pastedRefs, setPastedRefs] = useState<PastedContentReference[]>([]);
-  const [history] = useState(() => loadHistorySync());
+  const [history, setHistory] = useState<HistoryEntry[]>(() => loadHistoryEntriesSync({ scope: historyScope }));
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [suggestionIndex, setSuggestionIndex] = useState(0);
@@ -104,6 +119,10 @@ export function InputBox({
   const suggestionIndexRef = useRef(suggestionIndex);
   const suggestionKindRef = useRef(suggestionKind);
   const historyIndexRef = useRef(historyIndex);
+  const historyDraftRef = useRef<string | HistoryEntry>("");
+  const historyScopeRef = useRef(historyScope);
+  const imageLabelStartOverrideRef = useRef(imageLabelStartOverride);
+  const nextImageLabelStartRef = useRef(nextImageLabelStart);
   const nextPastedContentIndexRef = useRef(1);
   bufferRef.current = buffer;
   cursorRef.current = cursor;
@@ -113,6 +132,18 @@ export function InputBox({
   suggestionIndexRef.current = suggestionIndex;
   suggestionKindRef.current = suggestionKind;
   historyIndexRef.current = historyIndex;
+  historyScopeRef.current = historyScope;
+  imageLabelStartOverrideRef.current = imageLabelStartOverride;
+  nextImageLabelStartRef.current = nextImageLabelStart;
+
+  useEffect(() => {
+    const nextHistory = loadHistoryEntriesSync({ scope: historyScope });
+    setHistory(nextHistory);
+    setHistoryIndex(null);
+    setImageLabelStartOverride(null);
+    historyDraftRef.current = "";
+    historyIndexRef.current = null;
+  }, [historyScope]);
 
   // Reset cursor / buffer on epoch bump from app (used after /clear, etc).
   useEffect(() => {
@@ -120,11 +151,13 @@ export function InputBox({
     setBuffer("");
     setCursor(0);
     setImages([]);
+    setImageLabelStartOverride(null);
     setPastedRefs([]);
     nextPastedContentIndexRef.current = 1;
     setSuggestions([]);
     setSuggestionKind(null);
     setHistoryIndex(null);
+    historyDraftRef.current = "";
   }, [cursorResetEpoch]);
 
   // Accept draft text fill from outside (e.g. skill picker → composer).
@@ -132,8 +165,12 @@ export function InputBox({
     if (draftText === undefined || draftEpoch === undefined) return;
     setBuffer(draftText);
     setCursor(draftText.length);
+    setImages([]);
+    setImageLabelStartOverride(null);
     setPastedRefs([]);
     nextPastedContentIndexRef.current = 1;
+    setHistoryIndex(null);
+    historyDraftRef.current = "";
     onDraftApplied?.();
   }, [draftText, draftEpoch, onDraftApplied]);
 
@@ -222,21 +259,40 @@ export function InputBox({
     const refs = pastedRefsRef.current;
     if (!b.trim() && imgs.length === 0) return;
     const expanded = expandPastedContentMarkers(b, refs);
+    const imageDisplayStart = imgs.length > 0
+      ? (imageLabelStartOverrideRef.current ?? nextImageLabelStartRef.current)
+      : undefined;
     const payload: SubmitPayload = {
       text: expanded,
       displayText: expanded !== b ? b : undefined,
       images: imgs,
+      imageDisplayStart,
     };
-    if (expanded.trim()) appendHistoryEntry(expanded);
+    if (expanded.trim() || imgs.length > 0) {
+      const historyEntry: HistoryEntry = {
+        text: expanded,
+        images: imgs,
+        ...(imageDisplayStart !== undefined ? { imageDisplayStart } : {}),
+      };
+      setHistory((current) => {
+        const nextHistory = pushHistoryEntry(current, historyEntry);
+        if (nextHistory !== current) {
+          appendHistoryEntry(historyEntry, { scope: historyScopeRef.current });
+        }
+        return nextHistory;
+      });
+    }
     onSubmit(payload);
     setBuffer("");
     setCursor(0);
     setImages([]);
+    setImageLabelStartOverride(null);
     setPastedRefs([]);
     nextPastedContentIndexRef.current = 1;
     setSuggestions([]);
     setSuggestionKind(null);
     setHistoryIndex(null);
+    historyDraftRef.current = "";
   }, [onSubmit]);
 
   usePaste((event) => {
@@ -252,6 +308,7 @@ export function InputBox({
           if (r.attachment) attachments.push(r.attachment);
         }
         if (attachments.length > 0) {
+          setImageLabelStartOverride((current) => current ?? nextImageLabelStartRef.current);
           setImages((prev) => [...prev, ...attachments]);
           onPasteNotice?.(`Attached ${attachments.length} image${attachments.length === 1 ? "" : "s"}`);
         }
@@ -344,11 +401,18 @@ export function InputBox({
     }
     if (key.name === "up") {
       if (hIndex !== null || b === "") {
-        const next = stepHistory({ history, index: hIndex, draft: "" }, "up", b);
+        const next = stepHistory(
+          { history, index: hIndex, draft: historyDraftRef.current },
+          "up",
+          { text: b, images: imagesRef.current },
+        );
         if (next.changed) {
           setBuffer(next.text);
           setCursor(next.text.length);
+          setImages(next.images ?? []);
+          setImageLabelStartOverride(next.imageDisplayStart ?? null);
           setHistoryIndex(next.index);
+          historyDraftRef.current = next.draft;
           setPastedRefs([]);
           nextPastedContentIndexRef.current = 1;
         }
@@ -364,10 +428,17 @@ export function InputBox({
     }
     if (key.name === "down") {
       if (hIndex !== null) {
-        const next = stepHistory({ history, index: hIndex, draft: "" }, "down", b);
+        const next = stepHistory(
+          { history, index: hIndex, draft: historyDraftRef.current },
+          "down",
+          { text: b, images: imagesRef.current },
+        );
         setBuffer(next.text);
         setCursor(next.text.length);
+        setImages(next.images ?? []);
+        setImageLabelStartOverride(next.imageDisplayStart ?? null);
         setHistoryIndex(next.index);
+        historyDraftRef.current = next.draft;
         setPastedRefs([]);
         nextPastedContentIndexRef.current = 1;
         return;
@@ -418,19 +489,25 @@ export function InputBox({
     }
   });
 
-  const lines = buffer.split("\n");
+  const imageLabelStart = imageLabelStartOverride ?? nextImageLabelStart;
+  const imageLabels = images.map((_, index) => imageDisplayLabel(imageLabelStart + index));
+  const imageInlinePrefix = imageLabels.length > 0 ? `${imageLabels.join(" ")} ` : "";
+  const displayBuffer = imageInlinePrefix + buffer;
+  const displayCursor = cursor + imageInlinePrefix.length;
+  const lines = displayBuffer.split("\n");
   const placeholderActive = buffer === "" && images.length === 0;
   const railColor = disabled ? theme.inputBorderDisabled : theme.accent;
   const surfaceBg = disabled ? theme.shade : theme.surface;
+  const lineFrame = shouldUseLineComposerFrame(theme.background);
 
   // Cursor position in visual lines.
   const cursorRow = (() => {
-    const before = buffer.slice(0, cursor);
+    const before = displayBuffer.slice(0, displayCursor);
     return before.split("\n").length - 1;
   })();
   const cursorCol = (() => {
-    const lastNl = buffer.lastIndexOf("\n", cursor - 1);
-    return cursor - lastNl - 1;
+    const lastNl = displayBuffer.lastIndexOf("\n", displayCursor - 1);
+    return displayCursor - lastNl - 1;
   })();
 
   return (
@@ -447,33 +524,28 @@ export function InputBox({
           ))}
         </box>
       )}
-      {images.length > 0 && (
-        <box style={{ paddingLeft: 3, marginBottom: 0 }}>
-          <text fg={theme.accent} content={`${images.length} image${images.length === 1 ? "" : "s"} attached`} />
-        </box>
-      )}
-      {/* opencode-style composer: heavy left rail in accent, surface fill,
-          no top/right/bottom border, terminated at the bottom with ╹. */}
+      {/* Dark mode keeps the filled rail composer; light mode uses two compact
+          horizontal rules with no vertical padding between them. */}
       {React.createElement(
         "box" as any,
         {
           style: {
             flexShrink: 0,
-            backgroundColor: surfaceBg,
+            backgroundColor: lineFrame ? "transparent" : surfaceBg,
             flexDirection: "column",
-            paddingTop: 1,
-            paddingBottom: 1,
+            paddingTop: lineFrame ? 0 : 1,
+            paddingBottom: lineFrame ? 0 : 1,
             paddingLeft: 2,
             paddingRight: 2,
           },
-          border: ["left"],
-          borderColor: railColor,
+          border: lineFrame ? ["top", "bottom"] : ["left"],
+          borderColor: lineFrame ? theme.border : railColor,
           customBorderChars: {
             topLeft: "",
             topRight: "",
             bottomLeft: "╹",
             bottomRight: "",
-            horizontal: " ",
+            horizontal: lineFrame ? "─" : " ",
             vertical: "┃",
             topT: "",
             bottomT: "",

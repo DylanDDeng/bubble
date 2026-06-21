@@ -1,7 +1,14 @@
+// DECSET 1007 makes terminals translate wheel gestures into Up/Down arrows
+// while the alternate screen is active. Keep it disabled in Ink; otherwise
+// terminals without kitty event metadata make wheel and keyboard arrows
+// indistinguishable.
+export const ALTERNATE_SCROLL_ENABLE = "\x1b[?1007h";
+export const ALTERNATE_SCROLL_DISABLE = "\x1b[?1007l";
+
 // Use normal mouse tracking + SGR encoding so wheel events reach the app as
-// mouse reports instead of being translated into indistinguishable Up/Down
-// keypresses by terminal alternate-scroll mode.
+// mouse reports instead of being translated into keyboard arrows.
 export const MOUSE_REPORTING_ENABLE = "\x1b[?1000h\x1b[?1006h";
+
 // Disable every common tracking mode defensively in case a crash or another
 // renderer left the terminal in a reporting state.
 export const MOUSE_REPORTING_DISABLE = "\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1005l\x1b[?1006l\x1b[?1015l";

@@ -39,7 +39,7 @@ import { FeishuSetupPicker } from "./feishu-setup-picker.js";
 import { BUILTIN_PROVIDERS, ProviderRegistry, displayModel, isUserVisibleProvider } from "../provider-registry.js";
 import { buildSystemPrompt } from "../system-prompt.js";
 import type { ThinkingLevel } from "../types.js";
-import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingLevel } from "../provider-transform.js";
+import { getAvailableThinkingLevels, normalizeThinkingLevel } from "../provider-transform.js";
 import { FooterBar, buildFooterData } from "./footer.js";
 import { SkillRegistry } from "../skills/registry.js";
 import { parseSkillInvocation } from "../skills/invocation.js";
@@ -64,6 +64,8 @@ import type { ExternalHookController } from "../hooks/controller.js";
 import type { SidebarCommandState, SidebarMode } from "../slash-commands/types.js";
 import { collectFeedback } from "../feedback/collect.js";
 import { isKeyReleaseEvent } from "./key-events.js";
+import { errorMessage, formatModelSwitchError, switchAgentModel } from "../tui/model-switch.js";
+import { formatImageUserDisplayText, nextImageDisplayLabelStart } from "../tui/image-display.js";
 import { sanitizeTerminalMouseInput, transcriptScrollLinesFromMouseInput } from "./terminal-mouse.js";
 import { transcriptPageScrollDirection } from "./transcript-input.js";
 import { decideStartingSubmitFingerprint, submitPayloadFingerprint } from "./submit-dedupe.js";
@@ -365,6 +367,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   const themeResolved: ResolvedTheme = themeMode === "auto" ? autoResolved : themeMode;
   const { exit } = useApp();
   const [messages, setMessages] = useState<DisplayMessage[]>(() => compactDisplayMessages(reconstructDisplayMessages(agent.messages)));
+  const nextImageDisplayLabelStartRef = useRef(nextImageDisplayLabelStart(messages));
   const [isRunning, setIsRunning] = useState(false);
   const [streamingContent, setStreamingContent] = useState("");
   const [streamingReasoning, setStreamingReasoning] = useState("");
@@ -758,13 +761,36 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     return key;
   }, [updateDisplayMessages]);
 
+  const prepareSubmitDisplay = useCallback((payload: SubmitPayload): SubmitPayload => {
+    if (payload.images.length === 0) return payload;
+    if (payload.imageDisplayStart !== undefined) {
+      nextImageDisplayLabelStartRef.current = Math.max(
+        nextImageDisplayLabelStartRef.current,
+        payload.imageDisplayStart + payload.images.length,
+      );
+      return payload;
+    }
+    const imageDisplayStart = nextImageDisplayLabelStartRef.current;
+    nextImageDisplayLabelStartRef.current += payload.images.length;
+    return { ...payload, imageDisplayStart };
+  }, []);
+
+  const submitDisplayText = useCallback((payload: SubmitPayload): string => (
+    formatImageUserDisplayText(
+      payload.displayText ?? payload.text,
+      payload.images.length,
+      payload.imageDisplayStart,
+    )
+  ), []);
+
   const currentSessionFile = useCallback(() => sessionManager?.getSessionFile(), [sessionManager]);
 
   const queueInput = useCallback((payload: SubmitPayload) => {
-    const displayKey = addStatusUserMessage(payload.displayText ?? payload.text, "queued");
-    queuedInputsRef.current.push({ payload, displayKey, sessionFile: currentSessionFile() });
+    const preparedPayload = prepareSubmitDisplay(payload);
+    const displayKey = addStatusUserMessage(submitDisplayText(preparedPayload), "queued");
+    queuedInputsRef.current.push({ payload: preparedPayload, displayKey, sessionFile: currentSessionFile() });
     setQueuedCount(queuedInputsRef.current.length);
-  }, [addStatusUserMessage, currentSessionFile]);
+  }, [addStatusUserMessage, currentSessionFile, prepareSubmitDisplay, submitDisplayText]);
 
   const submitSteer = useCallback((payload: SubmitPayload) => {
     const controller = inputControllerRef.current;
@@ -772,11 +798,12 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
       queueInput(payload);
       return;
     }
-    const displayKey = addStatusUserMessage(payload.displayText ?? payload.text, "pending_steer");
-    const pending = controller.enqueue(payload.text);
+    const preparedPayload = prepareSubmitDisplay(payload);
+    const displayKey = addStatusUserMessage(submitDisplayText(preparedPayload), "pending_steer");
+    const pending = controller.enqueue(preparedPayload.text);
     pendingSteersRef.current.set(pending.id, { displayKey, sessionFile: currentSessionFile() });
     setPendingSteerCount(pendingSteersRef.current.size);
-  }, [addStatusUserMessage, currentSessionFile, queueInput]);
+  }, [addStatusUserMessage, currentSessionFile, prepareSubmitDisplay, queueInput, submitDisplayText]);
 
   const openPicker = useCallback((mode: "model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | "session" | "rewind" | "feishu-setup", providerId?: string) => {
     if (mode === "key") {
@@ -904,71 +931,59 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
 
   const handleModelSelect = useCallback((model: string) => {
     const run = async () => {
-      agent.model = model;
-      const decoded = model.includes(":")
-        ? model.split(":")
-        : [agent.providerId || safeRegistry.getDefault()?.id || "openai", model];
-      const providerId = decoded[0];
+      const nextThinkingLevel = await switchAgentModel({
+        model,
+        agent,
+        registry: safeRegistry,
+        createProvider,
+        workingDir: args.cwd,
+        systemPromptOptions: agent.getSystemPromptToolOptions(),
+        rememberModel: (nextModel) => userConfig.pushRecentModel(nextModel),
+        setThinkingLevel,
+        sessionManager,
+      });
+      addMessage("assistant", `Model switched to ${displayModel(model)}.`);
+      closePicker();
+      return nextThinkingLevel;
+    };
 
+    void run().catch((error) => {
+      addMessage("error", formatModelSwitchError(model, error));
+      closePicker();
+    });
+  }, [agent, addMessage, closePicker, sessionManager, userConfig, safeRegistry, createProvider]);
+
+  const handleProviderSelect = useCallback((providerId: string) => {
+    const run = async () => {
       await safeRegistry.prepareProvider(providerId);
-      const provider = safeRegistry.getConfigured().find((item) => item.id === providerId);
-      if (!provider?.apiKey || !createProvider) {
-        addMessage("error", `Provider ${providerId} is not configured or has no active credentials.`);
+      const configured = safeRegistry.getConfigured();
+      const p = configured.find((x) => x.id === providerId);
+      const builtin = BUILTIN_PROVIDERS.find((x) => x.id === providerId);
+      if (!p && !builtin) {
+        addMessage("error", `Provider ${providerId} not found.`);
         closePicker();
         return;
       }
-
-      const modelId = model.includes(":") ? model.split(":").slice(1).join(":") : model;
-      agent.thinking = normalizeThinkingLevel(
-        agent.thinking || getDefaultThinkingLevel(providerId, modelId),
-        getAvailableThinkingLevels(providerId, modelId),
-      );
-      agent.setProvider(createProvider(providerId, provider.apiKey, provider.baseURL));
+      if (!p?.apiKey) {
+        if (!p && builtin) {
+          safeRegistry.addProvider(providerId, "");
+        }
+        safeRegistry.setDefault(providerId);
+        setKeyProviderId(providerId);
+        setPickerMode("key");
+        return;
+      }
+      safeRegistry.setDefault(providerId);
+      agent.setProvider(createProvider!(providerId, p.apiKey, p.baseURL));
       agent.providerId = providerId;
-      agent.setSystemPrompt(buildSystemPrompt({
-        agentName: "Bubble",
-        configuredProvider: providerId,
-        configuredModel: displayModel(model),
-        configuredModelId: model,
-        thinkingLevel: agent.thinking,
-        workingDir: args.cwd,
-        ...agent.getSystemPromptToolOptions(),
-      }));
-      userConfig.pushRecentModel(model);
-      setThinkingLevel(agent.thinking);
-      sessionManager?.updateMetadata({ model, thinkingLevel: agent.thinking, reasoningEffort: agent.thinking });
-      sessionManager?.appendMarker("model_switch", model);
-      addMessage("assistant", `Model switched to ${displayModel(model)}.`);
+      addMessage("assistant", `Switched to provider ${p.name}. Use /model to pick a model.`);
       closePicker();
     };
 
-    void run();
-  }, [agent, addMessage, closePicker, sessionManager, userConfig, safeRegistry, createProvider]);
-
-  const handleProviderSelect = useCallback(async (providerId: string) => {
-    await safeRegistry.prepareProvider(providerId);
-    const configured = safeRegistry.getConfigured();
-    const p = configured.find((x) => x.id === providerId);
-    const builtin = BUILTIN_PROVIDERS.find((x) => x.id === providerId);
-    if (!p && !builtin) {
-      addMessage("error", `Provider ${providerId} not found.`);
+    void run().catch((error) => {
+      addMessage("error", `Failed to switch provider ${providerId}: ${errorMessage(error)}`);
       closePicker();
-      return;
-    }
-    if (!p?.apiKey) {
-      if (!p && builtin) {
-        safeRegistry.addProvider(providerId, "");
-      }
-      safeRegistry.setDefault(providerId);
-      setKeyProviderId(providerId);
-      setPickerMode("key");
-      return;
-    }
-    safeRegistry.setDefault(providerId);
-    agent.setProvider(createProvider!(providerId, p.apiKey, p.baseURL));
-    agent.providerId = providerId;
-    addMessage("assistant", `Switched to provider ${p.name}. Use /model to pick a model.`);
-    closePicker();
+    });
   }, [addMessage, agent, closePicker, createProvider, safeRegistry]);
 
   const handleProviderAddSelect = useCallback((providerId: string) => {
@@ -1082,11 +1097,11 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
 
   const handleSubmit = useCallback(
     async (payload: SubmitPayload | string) => {
-      const normalized: SubmitPayload =
+      const initialPayload: SubmitPayload =
         typeof payload === "string" ? { text: payload, images: [] } : payload;
-      const input = normalized.text;
-      const displayInput = normalized.displayText ?? input;
-      const images = normalized.images;
+      const input = initialPayload.text;
+      const displayInput = initialPayload.displayText ?? input;
+      const images = initialPayload.images;
       if (!input.trim() && images.length === 0) return;
 
       // Agent already running: route the submit into the live run instead of
@@ -1103,31 +1118,32 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
           !input.includes("@") &&
           images.length === 0;
         if (steerEligible) {
-          submitSteer(normalized);
+          submitSteer(initialPayload);
         } else {
-          queueInput(normalized);
+          queueInput(initialPayload);
         }
         return;
       }
 
-      const submitFingerprint = submitPayloadFingerprint(normalized);
+      const submitFingerprint = submitPayloadFingerprint(initialPayload);
       const startingDecision = decideStartingSubmitFingerprint(
         startingSubmitFingerprintRef.current,
         submitFingerprint,
       );
       if (startingDecision === "ignore") return;
       if (startingDecision === "queue") {
-        queueInput(normalized);
+        queueInput(initialPayload);
         return;
       }
 
+      const normalized = prepareSubmitDisplay(initialPayload);
       setStartingSubmit(submitFingerprint);
       try {
       const runAgentInput = async (
         actualInput: string | ContentPart[],
         displayInput: string,
         attachedImages: { filename?: string; bytes: number }[] = [],
-        runOptions: { hidden?: boolean; goalRun?: boolean } = {},
+        runOptions: { hidden?: boolean; goalRun?: boolean; imageDisplayStart?: number } = {},
       ) => {
         const runSessionFile = currentSessionFile();
         const activeProviderId = agent.providerId || safeRegistry.getDefault()?.id;
@@ -1149,13 +1165,11 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
           return;
         }
 
-        const displayContent = attachedImages.length > 0
-          ? `${displayInput}${displayInput ? "\n" : ""}${attachedImages
-              .map((img, i) =>
-                `[image${attachedImages.length > 1 ? ` ${i + 1}` : ""}: ${img.filename ?? "clipboard"} · ${Math.max(1, Math.round(img.bytes / 1024))}KB]`,
-              )
-              .join(" ")}`
-          : displayInput;
+        const displayContent = formatImageUserDisplayText(
+          displayInput,
+          attachedImages.length,
+          runOptions.imageDisplayStart,
+        );
         if (!runOptions.hidden) {
           updateDisplayMessages((prev) => [
             ...prev,
@@ -1731,6 +1745,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         agentInput,
         displayInput,
         images.map((img) => ({ filename: img.filename, bytes: img.bytes })),
+        { imageDisplayStart: normalized.imageDisplayStart },
       );
       } finally {
         if (startingSubmitFingerprintRef.current === submitFingerprint) {
@@ -1738,7 +1753,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         }
       }
     },
-    [addMessage, agent, args.cwd, openPicker, openSessionPicker, openRewindPicker, openStatsPanel, createProvider, currentSessionFile, fillComposer, safeRegistry, safeSkillRegistry, updateDisplayMessages, queueInput, submitSteer, requestExit, toggleSidebar, applySidebarMode, setStartingSubmit]
+    [addMessage, agent, args.cwd, openPicker, openSessionPicker, openRewindPicker, openStatsPanel, createProvider, currentSessionFile, fillComposer, prepareSubmitDisplay, safeRegistry, safeSkillRegistry, updateDisplayMessages, queueInput, submitSteer, requestExit, toggleSidebar, applySidebarMode, setStartingSubmit]
   );
 
   // Drain the queue once the run ends and no modal needs the user first.
@@ -1820,7 +1835,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
 
   return (
     <ThemeProvider value={palette}>
-      <Box flexDirection="row" width={terminalColumns} height={frameRows}>
+      <Box flexDirection="row" width={terminalColumns} height={frameRows} backgroundColor={palette.background}>
       <Box flexDirection="column" width={mainWidth} height={frameRows}>
         <TranscriptViewport ref={viewportRef}>
           <Box flexDirection="column" paddingX={1} paddingTop={1} flexShrink={0}>
@@ -2113,6 +2128,8 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
             localSlashCommands={[...INK_LOCAL_SLASH_COMMANDS]}
             terminalColumns={mainWidth}
             cwd={args.cwd}
+            sessionFile={currentSessionFile()}
+            nextImageLabelStart={nextImageDisplayLabelStartRef.current}
           />
         </Box>
       )}

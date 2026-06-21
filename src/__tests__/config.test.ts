@@ -2,7 +2,11 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
-import { UserConfig } from "../config.js";
+import {
+  effectiveThemeModeForTerminal,
+  shouldProbeTerminalTheme,
+  UserConfig,
+} from "../config.js";
 
 describe("UserConfig", () => {
   const root = join(tmpdir(), `bubble-config-test-${Date.now()}`);
@@ -101,6 +105,7 @@ describe("UserConfig", () => {
 
     const config = new UserConfig();
     expect(config.getThemeMode()).toBe("light");
+    expect(config.getTheme()).toEqual({ mode: "light", explicit: true });
     expect(config.getThemeOverrides()).toEqual({});
   });
 
@@ -110,6 +115,31 @@ describe("UserConfig", () => {
 
     const config = new UserConfig();
     expect(config.getThemeMode()).toBe("auto");
+  });
+
+  it("treats legacy bare dark theme as terminal-auto on light terminals", () => {
+    const legacy = { mode: "dark" as const };
+
+    expect(shouldProbeTerminalTheme(legacy)).toBe(true);
+    expect(effectiveThemeModeForTerminal(legacy, "light")).toBe("auto");
+    expect(effectiveThemeModeForTerminal(legacy, "dark")).toBe("dark");
+  });
+
+  it("preserves explicitly selected dark theme", () => {
+    const explicit = { mode: "dark" as const, explicit: true };
+
+    expect(shouldProbeTerminalTheme(explicit)).toBe(false);
+    expect(effectiveThemeModeForTerminal(explicit, "light")).toBe("dark");
+  });
+
+  it("marks theme mode changes explicit", () => {
+    process.env.BUBBLE_HOME = root;
+    writeFileSync(join(root, "config.json"), JSON.stringify({}, null, 2));
+
+    const config = new UserConfig();
+    config.setThemeMode("dark");
+
+    expect(config.getTheme()).toEqual({ mode: "dark", explicit: true });
   });
 
   it("loads sanitized subagent category overrides", () => {

@@ -22,6 +22,7 @@ export interface Theme {
   success: string;
 
   // UI chrome
+  background: string;
   accent: string;
   border: string;
   borderActive: string;
@@ -68,6 +69,7 @@ export const darkTheme: Theme = {
   warning: "yellow",
   success: "green",
 
+  background: "#0a0a0a",
   accent: "cyan",
   border: "gray",
   borderActive: "cyan",
@@ -116,13 +118,14 @@ export const lightTheme: Theme = {
   warning: "#8B4A00",
   success: "#2F7D4A",
 
+  background: "#FCFCFA",
   accent: "#8B4A00",
   border: "#B9BDB8",
   borderActive: "#356FD2",
   inputBorder: "#356FD2",
   inputBorderDisabled: "#D7DAD4",
-  inputBg: "#F1F3F0",
-  inputBgDisabled: "#E6E8E3",
+  inputBg: "#FCFCFA",
+  inputBgDisabled: "#F6F6F3",
   inputText: "#171717",
   inputPlaceholder: "#6F7377",
   muted: "#6F7377",
