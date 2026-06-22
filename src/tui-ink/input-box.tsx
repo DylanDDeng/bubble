@@ -120,6 +120,10 @@ export function shouldUseLineComposerFrame(_background: string): boolean {
   return true;
 }
 
+export function shouldUseHardwareComposerCursor(env: Record<string, string | undefined> = process.env): boolean {
+  return env.BUBBLE_HARDWARE_CURSOR === "1";
+}
+
 export function composerVerticalArrowDirection(key: {
   upArrow?: boolean;
   downArrow?: boolean;
@@ -379,6 +383,97 @@ export function insertNewlineAtCursor(text: string, cursor: number) {
   };
 }
 
+export function previousWordBoundary(text: string, cursor: number): number {
+  const clampedCursor = Math.max(0, Math.min(text.length, cursor));
+  if (clampedCursor === 0) return 0;
+  let index = clampedCursor - 1;
+  while (index > 0 && /\s/.test(text[index]!)) index--;
+  while (index > 0 && !/\s/.test(text[index - 1]!)) index--;
+  return index;
+}
+
+export function nextWordBoundary(text: string, cursor: number): number {
+  const clampedCursor = Math.max(0, Math.min(text.length, cursor));
+  if (clampedCursor === text.length) return text.length;
+  let index = clampedCursor;
+  while (index < text.length && /\s/.test(text[index]!)) index++;
+  while (index < text.length && !/\s/.test(text[index]!)) index++;
+  return index;
+}
+
+export function lineStartBoundary(text: string, cursor: number): number {
+  const clampedCursor = Math.max(0, Math.min(text.length, cursor));
+  return text.lastIndexOf("\n", clampedCursor - 1) + 1;
+}
+
+export function lineEndBoundary(text: string, cursor: number): number {
+  const clampedCursor = Math.max(0, Math.min(text.length, cursor));
+  const lineEnd = text.indexOf("\n", clampedCursor);
+  return lineEnd === -1 ? text.length : lineEnd;
+}
+
+export function deleteToLineStart(text: string, cursor: number): { text: string; cursor: number } {
+  const clampedCursor = Math.max(0, Math.min(text.length, cursor));
+  const lineStart = lineStartBoundary(text, clampedCursor);
+  return {
+    text: text.slice(0, lineStart) + text.slice(clampedCursor),
+    cursor: lineStart,
+  };
+}
+
+export function deleteToLineEnd(text: string, cursor: number): { text: string; cursor: number } {
+  const clampedCursor = Math.max(0, Math.min(text.length, cursor));
+  const lineEnd = lineEndBoundary(text, clampedCursor);
+  return {
+    text: text.slice(0, clampedCursor) + text.slice(lineEnd),
+    cursor: clampedCursor,
+  };
+}
+
+export function deleteAtCursor(text: string, cursor: number): { text: string; cursor: number } {
+  const clampedCursor = Math.max(0, Math.min(text.length, cursor));
+  if (clampedCursor >= text.length) return { text, cursor: clampedCursor };
+  return {
+    text: text.slice(0, clampedCursor) + text.slice(clampedCursor + 1),
+    cursor: clampedCursor,
+  };
+}
+
+export type ComposerEditAction =
+  | "word-left"
+  | "word-right"
+  | "line-start"
+  | "line-end"
+  | "delete-line-start"
+  | "delete-line-end";
+
+export function resolveComposerEditAction(
+  input: string,
+  key: {
+    ctrl?: boolean;
+    meta?: boolean;
+    leftArrow?: boolean;
+    rightArrow?: boolean;
+    home?: boolean;
+    end?: boolean;
+  },
+): ComposerEditAction | null {
+  if (key.home) return "line-start";
+  if (key.end) return "line-end";
+
+  const wordModifier = key.ctrl || key.meta;
+  if (wordModifier && key.leftArrow) return "word-left";
+  if (wordModifier && key.rightArrow) return "word-right";
+
+  const lowerInput = input.toLowerCase();
+  if ((key.ctrl && lowerInput === "a") || input === "\x01") return "line-start";
+  if ((key.ctrl && lowerInput === "e") || input === "\x05") return "line-end";
+  if ((key.ctrl && lowerInput === "u") || input === "\x15") return "delete-line-start";
+  if ((key.ctrl && lowerInput === "k") || input === "\x0b") return "delete-line-end";
+
+  return null;
+}
+
 export function InputBox({
   onSubmit,
   onQueue,
@@ -398,6 +493,7 @@ export function InputBox({
   const theme = useTheme();
   const width = terminalColumns;
   const historyScope = useMemo<HistoryScope>(() => ({ sessionFile, cwd }), [sessionFile, cwd]);
+  const hardwareCursorEnabled = shouldUseHardwareComposerCursor();
 
   const [text, setText] = useState("");
   const [cursor, setCursor] = useState(0);
@@ -452,28 +548,17 @@ export function InputBox({
     );
   }, [atContext, cwd, projectFiles]);
 
-  // Request a blinking block cursor via DECSCUSR while this component is
-  // mounted. The software cursor below does the visible blinking in Ink frames,
-  // while the real cursor remains useful for IME anchoring.
+  // The rendered inverse-video cell below is the visible cursor. Keep Ink's
+  // terminal cursor hidden by default so it can't race the software cursor; the
+  // hardware cursor can be enabled for IME diagnostics with BUBBLE_HARDWARE_CURSOR=1.
   useEffect(() => {
+    if (!hardwareCursorEnabled) return;
     if (!process.stdout.isTTY) return;
     process.stdout.write("\x1b[1 q"); // blinking block
     return () => {
       process.stdout.write("\x1b[0 q"); // reset to terminal default
     };
-  }, []);
-
-  useEffect(() => {
-    if (disabled) {
-      setSoftwareCursorVisible(false);
-      return;
-    }
-    setSoftwareCursorVisible(true);
-    const timer = setInterval(() => {
-      setSoftwareCursorVisible((visible) => !visible);
-    }, CURSOR_BLINK_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [disabled]);
+  }, [hardwareCursorEnabled]);
 
   const slashSuggestions = useMemo(() => {
     if (!isSlashContext) return [];
@@ -857,7 +942,30 @@ export function InputBox({
       return;
     }
 
-    if (key.backspace || key.delete) {
+    const editAction = resolveComposerEditAction(input, key);
+    if (editAction) {
+      if (editAction === "word-left") {
+        setCursor(previousWordBoundary(text, cursor));
+      } else if (editAction === "word-right") {
+        setCursor(nextWordBoundary(text, cursor));
+      } else if (editAction === "line-start") {
+        setCursor(lineStartBoundary(text, cursor));
+      } else if (editAction === "line-end") {
+        setCursor(lineEndBoundary(text, cursor));
+      } else if (editAction === "delete-line-start") {
+        const next = deleteToLineStart(text, cursor);
+        setText(next.text);
+        setCursor(next.cursor);
+      } else {
+        const next = deleteToLineEnd(text, cursor);
+        setText(next.text);
+        setCursor(next.cursor);
+      }
+      setSelectedIndex(0);
+      return;
+    }
+
+    if (key.backspace) {
       if (cursor > 0) {
         const before = text.slice(0, cursor - 1);
         const after = text.slice(cursor);
@@ -872,6 +980,16 @@ export function InputBox({
           if (next.length === 0) setImageLabelStartOverride(null);
           return next;
         });
+      }
+      return;
+    }
+
+    if (key.delete) {
+      if (cursor < text.length) {
+        const next = deleteAtCursor(text, cursor);
+        setText(next.text);
+        setCursor(next.cursor);
+        setSelectedIndex(0);
       }
       return;
     }
@@ -993,7 +1111,15 @@ export function InputBox({
     Math.max(0, Math.min(text.length, value - imageInlinePrefix.length));
 
   useEffect(() => {
-    if (!disabled) setSoftwareCursorVisible(true);
+    if (disabled) {
+      setSoftwareCursorVisible(false);
+      return;
+    }
+    setSoftwareCursorVisible(true);
+    const timer = setInterval(() => {
+      setSoftwareCursorVisible((visible) => !visible);
+    }, CURSOR_BLINK_INTERVAL_MS);
+    return () => clearInterval(timer);
   }, [disabled, displayCursor, displayText]);
 
   const visualLines = useMemo(
@@ -1104,6 +1230,13 @@ export function InputBox({
   // flicker every time streaming output above it re-lays out the frame, so
   // we hide it entirely until input is active again.
   useLayoutEffect(() => {
+    if (!hardwareCursorEnabled) {
+      if (lastCursorRef.current !== null) {
+        lastCursorRef.current = null;
+      }
+      setCursorPosition(undefined);
+      return;
+    }
     let node: DOMElement | undefined = cursorLineRef.current ?? undefined;
     if (!node?.yogaNode) {
       if (disabled && lastCursorRef.current !== null) {
