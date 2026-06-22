@@ -412,7 +412,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   const exitRequestedRef = useRef(false);
   const sessionStartRef = useRef<number>(Date.now());
   const viewportRef = useRef<TranscriptViewportHandle | null>(null);
-  // Steer/queue while the agent runs (parity with the OpenTUI composer):
+  // Steer/queue while the agent runs:
   // Enter steers the current run via the agent's input controller; Tab (or an
   // ineligible input) queues for the next turn. Both render placeholder user
   // rows whose badge tracks the input's lifecycle.
@@ -1111,8 +1111,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
 
       // Agent already running: route the submit into the live run instead of
       // starting a new one. Plain prose steers the current turn; slash
-      // commands, @-mentions and image payloads queue for the next turn
-      // (mirrors the OpenTUI boundary-steer eligibility rules).
+      // commands, @-mentions and image payloads queue for the next turn.
       if (activeAbortRef.current) {
         if (/^\/(?:quit|exit)\s*$/.test(input.trim())) {
           requestExit();
@@ -1457,7 +1456,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
           cancelStreamingFlush();
           // Leftover steers that never reached a model-call boundary: drop
           // them on cancel (the user asked the run to stop); requeue them for
-          // the next turn on a normal end (mirrors the OpenTUI run teardown).
+          // the next turn on a normal end.
           const cancelled = abortController.signal.aborted;
           if (cancelled) runCancelled = true;
           for (const leftover of inputController.clear()) {

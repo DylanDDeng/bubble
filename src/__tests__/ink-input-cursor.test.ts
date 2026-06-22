@@ -82,7 +82,7 @@ describe("Ink composer hardware cursor", () => {
 });
 
 describe("Ink composer edit shortcuts", () => {
-  it("moves across words like the OpenTUI composer", () => {
+  it("moves across words like a terminal composer", () => {
     const text = "alpha beta gamma";
 
     expect(previousWordBoundary(text, text.length)).toBe(11);

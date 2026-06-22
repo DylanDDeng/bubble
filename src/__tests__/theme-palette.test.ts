@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { shouldUseLineComposerFrame } from "../tui-ink/input-box.js";
 import { darkTheme as inkDarkTheme, lightTheme as inkLightTheme } from "../tui-ink/theme.js";
-import { darkTheme as openTuiDarkTheme, lightTheme as openTuiLightTheme } from "../tui-opentui/theme.js";
 
 function luminance(hex: string): number {
   const match = /^#([0-9a-f]{6})$/i.exec(hex);
@@ -21,15 +20,8 @@ describe("TUI theme palettes", () => {
     expect(luminance(inkLightTheme.inputBgDisabled)).toBeGreaterThan(0.9);
   });
 
-  it("keeps the OpenTUI light composer surface light and aligned with the page", () => {
-    expect(openTuiLightTheme.surface).toBe(openTuiLightTheme.inputBg);
-    expect(luminance(openTuiLightTheme.surface)).toBeGreaterThan(0.9);
-    expect(luminance(openTuiLightTheme.shade)).toBeGreaterThan(0.9);
-  });
-
-  it("keeps dark composer surfaces dark for true dark mode", () => {
+  it("keeps the dark composer surface dark for true dark mode", () => {
     expect(luminance(inkDarkTheme.inputBg)).toBeLessThan(0.05);
-    expect(luminance(openTuiDarkTheme.surface)).toBeLessThan(0.05);
   });
 
   it("uses the compact two-line composer frame for both light and dark backgrounds", () => {

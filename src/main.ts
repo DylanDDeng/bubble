@@ -47,12 +47,6 @@ import {
   summarizeTraceMessage,
   traceEvent,
 } from "./debug-trace.js";
-import { shouldUseOpenTuiRenderer } from "./tui/renderer-choice.js";
-
-// React Ink is the default renderer. It runs in the terminal alternate screen
-// to avoid scrollback churn/flicker during streaming; keep OpenTUI available
-// as an explicit fallback while the migration settles.
-const USE_OPENTUI = shouldUseOpenTuiRenderer();
 
 type TerminalTheme = "light" | "dark";
 
@@ -273,9 +267,7 @@ async function main() {
       }
       const pickerThemeMode = effectiveThemeModeForTerminal(themeConfig, preResolvedTheme);
       const pickerResolvedTheme = pickerThemeMode === "auto" ? preResolvedTheme : pickerThemeMode;
-      const { runSessionPicker } = USE_OPENTUI
-        ? await import("./tui-opentui/run-session-picker.js")
-        : await import("./tui-ink/run-session-picker.js");
+      const { runSessionPicker } = await import("./tui-ink/run-session-picker.js");
       const picked = await runSessionPicker({
         currentCwd: args.cwd,
         currentSessions,
@@ -355,7 +347,7 @@ async function main() {
     sessionFile: sessionManager?.getSessionFile(),
     provider: activeProviderId || "none",
     model: activeModel || "none",
-    renderer: printMode ? "print" : USE_OPENTUI ? "opentui-core" : "ink",
+    renderer: printMode ? "print" : "ink",
   });
   if (traceInfo.enabled) {
     traceEvent("run_start", {
@@ -548,7 +540,7 @@ async function main() {
     if (preResolvedTheme) {
       detectedTheme = preResolvedTheme;
     } else if (shouldProbeTerminalTheme(themeConfig)) {
-      // Probe before OpenTUI owns stdin. OSC 11 needs raw mode, and the
+      // Probe before the renderer owns stdin. OSC 11 needs raw mode, and the
       // runtime renderer can consume the reply before startup code sees it.
       const { detectTerminalTheme } = await import("./tui/detect-theme.js");
       detectedTheme = await detectTerminalTheme();
@@ -611,33 +603,17 @@ async function main() {
     const { startStartupUpdateCheck } = await import("./update/index.js");
     const updateCheck = await startStartupUpdateCheck();
     const updateNotice = updateCheck.notice;
-    // Two explicit branches (not a dynamic ternary import) so TypeScript
-    // checks each renderer's RunTuiOptions shape independently.
-    let exitWallMs: number | undefined;
-    if (USE_OPENTUI) {
-      const { runTui } = await import("./tui/run.js");
-      await runTui(agent, args, {
-        ...commonOptions,
-        themeMode: effectiveThemeMode,
-        themeOverrides: themeConfig.overrides,
-        detectedTheme,
-        onThemeModeChange: (mode) => userConfig.setThemeMode(mode),
-        updateNotice: updateNotice ?? undefined,
-        updateNoticeRefresh: updateCheck.refreshed,
-      });
-    } else {
-      const { runTui } = await import("./tui-ink/run.js");
-      const summary = await runTui(agent, args, {
-        ...commonOptions,
-        themeMode: effectiveThemeMode,
-        themeOverrides: themeConfig.overrides,
-        detectedTheme,
-        onThemeModeChange: (mode) => userConfig.setThemeMode(mode),
-        updateNotice: updateNotice ?? undefined,
-        updateNoticeRefresh: updateCheck.refreshed,
-      });
-      exitWallMs = summary?.wallMs;
-    }
+    const { runTui } = await import("./tui-ink/run.js");
+    const summary = await runTui(agent, args, {
+      ...commonOptions,
+      themeMode: effectiveThemeMode,
+      themeOverrides: themeConfig.overrides,
+      detectedTheme,
+      onThemeModeChange: (mode) => userConfig.setThemeMode(mode),
+      updateNotice: updateNotice ?? undefined,
+      updateNoticeRefresh: updateCheck.refreshed,
+    });
+    const exitWallMs = summary?.wallMs;
 
     if (sessionManager) {
       printExitSummary(sessionManager, {

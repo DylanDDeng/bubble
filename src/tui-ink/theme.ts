@@ -107,9 +107,9 @@ export const darkTheme: Theme = {
 };
 
 /**
- * Light palette aligned with the restored OpenTUI runtime: paper-neutral
- * surfaces, blue focus/user rails, warm command accent, and semantic tool
- * colors tuned for readable contrast on a light terminal background.
+ * Light palette tuned for paper-neutral surfaces, blue focus/user rails, warm
+ * command accent, and semantic tool colors with readable contrast on a light
+ * terminal background.
  */
 export const lightTheme: Theme = {
   user: "#356FD2",

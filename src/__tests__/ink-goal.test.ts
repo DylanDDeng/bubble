@@ -11,7 +11,7 @@ describe("Ink goal command integration", () => {
     });
   });
 
-  it("exposes OpenTUI-local display commands in the Ink slash palette", () => {
+  it("exposes local display commands in the Ink slash palette", () => {
     expect(INK_LOCAL_SLASH_COMMANDS.map((command) => command.name)).toEqual([
       "thinking",
       "toggle-thinking",
