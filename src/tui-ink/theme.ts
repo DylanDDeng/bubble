@@ -25,6 +25,9 @@ export interface Theme {
   accent: string;
   border: string;
   borderActive: string;
+  background: string;
+  backgroundPanel: string;
+  backgroundElement: string;
   inputBorder: string;
   inputBorderDisabled: string;
   inputBg: string;
@@ -71,6 +74,9 @@ export const darkTheme: Theme = {
   accent: "cyan",
   border: "gray",
   borderActive: "cyan",
+  background: "#0A0A0A",
+  backgroundPanel: "#141414",
+  backgroundElement: "#1c1c24",
   inputBorder: "#8A7FC6",
   inputBorderDisabled: "#4a4754",
   inputBg: "#1c1c24",
@@ -119,6 +125,9 @@ export const lightTheme: Theme = {
   accent: "#8B4A00",
   border: "#B9BDB8",
   borderActive: "#356FD2",
+  background: "#FCFCFA",
+  backgroundPanel: "#F6F6F3",
+  backgroundElement: "#ECEDEA",
   inputBorder: "#356FD2",
   inputBorderDisabled: "#D7DAD4",
   inputBg: "#F1F3F0",

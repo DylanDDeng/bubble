@@ -1051,7 +1051,7 @@ export function InputBox({
   };
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" width={width} backgroundColor={theme.background}>
       {attachments.length > 0 && (
         <Box flexDirection="row" flexWrap="wrap" paddingX={PADDING_X} marginBottom={0}>
           {attachments.map((att, i) => {
@@ -1065,7 +1065,7 @@ export function InputBox({
           })}
         </Box>
       )}
-      <Box flexDirection="column" paddingX={PADDING_X}>
+      <Box flexDirection="column" paddingX={PADDING_X} width={width} backgroundColor={inputBg}>
         {hasMoreAbove && (
           <Text backgroundColor={inputBg} color={theme.muted} dimColor>
             {filledLine(` ↑ ${scrollOffset} more`)}
@@ -1096,6 +1096,7 @@ export function InputBox({
               key={visualIdx}
               height={1}
               overflow="hidden"
+              backgroundColor={inputBg}
               ref={
                 isCursorLine
                   ? (el: DOMElement | null) => {

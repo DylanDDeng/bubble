@@ -1353,7 +1353,12 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
 
   return (
     <ThemeProvider value={palette}>
-      <Box flexDirection="column" width={terminalColumns} height={frameRows}>
+      <Box
+        flexDirection="column"
+        width={terminalColumns}
+        height={frameRows}
+        backgroundColor={palette.background}
+      >
         <TranscriptViewport ref={viewportRef}>
           <Box flexDirection="column" paddingX={1} paddingTop={1} flexShrink={0}>
             <MessageList
@@ -1549,7 +1554,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         </Box>
       )}
       {!isExiting && isRunning && !pickerMode && !pendingPlan && !pendingApproval && !pendingQuestion && !pendingFeedback && (
-        <Box paddingX={1} paddingBottom={1} flexShrink={0}>
+        <Box paddingX={1} paddingBottom={1} flexShrink={0} backgroundColor={palette.background}>
           <WaitingIndicator
             tools={streamingTools}
             hasStreamingText={streamingContent.length > 0}
@@ -1562,7 +1567,7 @@ export function App({ agent, args, sessionManager, createProvider, registry, ski
         </Box>
       )}
       {!isExiting && !pickerMode && (
-        <Box paddingBottom={1} flexShrink={0}>
+        <Box paddingBottom={1} flexShrink={0} backgroundColor={palette.background}>
           <InputBox
             onSubmit={handleSubmit}
             onQueue={isRunning ? queueInput : undefined}
