@@ -1,16 +1,29 @@
 import { describe, expect, it } from "vitest";
 import {
+  composerVerticalArrowDirection,
   createPastedContentMarker,
+  deleteAtCursor,
+  deleteToLineEnd,
+  deleteToLineStart,
   expandPastedContentMarkers,
   insertNewlineAtCursor,
   isInkModifiedEnterInput,
   isCtrlCInput,
+  lineEndBoundary,
+  lineStartBoundary,
   needsCursorRowCompensation,
+  nextWordBoundary,
+  previousWordBoundary,
+  resolveComposerEditAction,
+  resolveSoftwareCursorCellStyle,
   resolveCursorRowCompensation,
   resolveInkEnterIntent,
   resolveSlashEnterAction,
+  resolveSlashCommandHighlightRange,
   shouldCollapsePastedContent,
+  shouldUseHardwareComposerCursor,
   shouldSubmitExactSlashSuggestion,
+  splitComposerTextSegments,
   splitLineAtCursor,
 } from "../tui-ink/input-box.js";
 
@@ -51,6 +64,74 @@ describe("Ink input cursor row compensation", () => {
   });
 });
 
+describe("Ink composer vertical arrows", () => {
+  it("treats ordinary arrows as composer navigation", () => {
+    expect(composerVerticalArrowDirection({ upArrow: true })).toBe("up");
+    expect(composerVerticalArrowDirection({ downArrow: true })).toBe("down");
+    expect(composerVerticalArrowDirection({ upArrow: true, eventType: "press" })).toBe("up");
+    expect(composerVerticalArrowDirection({ downArrow: true, eventType: "repeat" })).toBe("down");
+  });
+});
+
+describe("Ink composer hardware cursor", () => {
+  it("keeps the terminal cursor opt-in so the software cursor is the only default visible cursor", () => {
+    expect(shouldUseHardwareComposerCursor({})).toBe(false);
+    expect(shouldUseHardwareComposerCursor({ BUBBLE_HARDWARE_CURSOR: "0" })).toBe(false);
+    expect(shouldUseHardwareComposerCursor({ BUBBLE_HARDWARE_CURSOR: "1" })).toBe(true);
+  });
+});
+
+describe("Ink composer edit shortcuts", () => {
+  it("moves across words like a terminal composer", () => {
+    const text = "alpha beta gamma";
+
+    expect(previousWordBoundary(text, text.length)).toBe(11);
+    expect(previousWordBoundary(text, 11)).toBe(6);
+    expect(previousWordBoundary(text, 0)).toBe(0);
+    expect(nextWordBoundary(text, 0)).toBe(5);
+    expect(nextWordBoundary(text, 5)).toBe(10);
+    expect(nextWordBoundary(text, text.length)).toBe(text.length);
+  });
+
+  it("finds current line boundaries in multiline composer text", () => {
+    const text = "one\ntwo three\nfour";
+
+    expect(lineStartBoundary(text, 8)).toBe(4);
+    expect(lineEndBoundary(text, 8)).toBe(13);
+    expect(lineStartBoundary(text, -10)).toBe(0);
+    expect(lineEndBoundary(text, 999)).toBe(text.length);
+  });
+
+  it("deletes to the current line start or end without crossing newlines", () => {
+    const text = "one\ntwo three\nfour";
+
+    expect(deleteToLineStart(text, 8)).toEqual({ text: "one\nthree\nfour", cursor: 4 });
+    expect(deleteToLineEnd(text, 8)).toEqual({ text: "one\ntwo \nfour", cursor: 8 });
+  });
+
+  it("deletes the character at the cursor for the Delete key", () => {
+    expect(deleteAtCursor("abcd", 1)).toEqual({ text: "acd", cursor: 1 });
+    expect(deleteAtCursor("abcd", 99)).toEqual({ text: "abcd", cursor: 4 });
+    expect(deleteAtCursor("abcd", -1)).toEqual({ text: "bcd", cursor: 0 });
+  });
+
+  it("resolves Ctrl, Home/End, and modified arrow editor actions", () => {
+    expect(resolveComposerEditAction("", { home: true })).toBe("line-start");
+    expect(resolveComposerEditAction("", { end: true })).toBe("line-end");
+    expect(resolveComposerEditAction("", { ctrl: true, leftArrow: true })).toBe("word-left");
+    expect(resolveComposerEditAction("", { meta: true, rightArrow: true })).toBe("word-right");
+    expect(resolveComposerEditAction("a", { ctrl: true })).toBe("line-start");
+    expect(resolveComposerEditAction("\x01", {})).toBe("line-start");
+    expect(resolveComposerEditAction("e", { ctrl: true })).toBe("line-end");
+    expect(resolveComposerEditAction("\x05", {})).toBe("line-end");
+    expect(resolveComposerEditAction("u", { ctrl: true })).toBe("delete-line-start");
+    expect(resolveComposerEditAction("\x15", {})).toBe("delete-line-start");
+    expect(resolveComposerEditAction("k", { ctrl: true })).toBe("delete-line-end");
+    expect(resolveComposerEditAction("\x0b", {})).toBe("delete-line-end");
+    expect(resolveComposerEditAction("r", { ctrl: true })).toBeNull();
+  });
+});
+
 describe("Ink input slash command submission", () => {
   it("submits exact slash commands on Enter instead of autocompleting them", () => {
     expect(shouldSubmitExactSlashSuggestion("/quit", "quit")).toBe(true);
@@ -77,6 +158,33 @@ describe("Ink input slash command submission", () => {
     expect(resolveSlashEnterAction("/provider", [{ name: "provider" }], 0)).toEqual({
       kind: "submit",
     });
+  });
+
+  it("highlights only known slash command tokens at the start of the composer", () => {
+    expect(resolveSlashCommandHighlightRange("/model deepseek", ["model"])).toEqual({
+      start: 0,
+      end: 6,
+    });
+    expect(resolveSlashCommandHighlightRange("/podcast 写稿", ["podcast"])).toEqual({
+      start: 0,
+      end: 8,
+    });
+    expect(resolveSlashCommandHighlightRange("/unknown arg", ["model"])).toBeNull();
+    expect(resolveSlashCommandHighlightRange("please /model", ["model"])).toBeNull();
+  });
+
+  it("splits highlighted slash commands around the cursor cell", () => {
+    expect(splitComposerTextSegments({
+      text: "/model ",
+      absStart: 0,
+      highlight: { start: 0, end: 6 },
+      cursorOffset: 3,
+    })).toEqual([
+      { kind: "command", text: "/mo" },
+      { kind: "cursor", text: "d" },
+      { kind: "command", text: "el" },
+      { kind: "normal", text: " " },
+    ]);
   });
 });
 
@@ -198,5 +306,23 @@ describe("software cursor cell", () => {
   it("clamps offsets outside the line", () => {
     expect(splitLineAtCursor("hi", 99)).toEqual({ before: "hi", at: " ", after: "" });
     expect(splitLineAtCursor("hi", -1)).toEqual({ before: "", at: "h", after: "i" });
+  });
+
+  it("uses inverse colors while visible and normal colors while hidden", () => {
+    expect(resolveSoftwareCursorCellStyle({
+      visible: true,
+      cursorBackground: "text",
+      cursorForeground: "surface",
+      textColor: "text",
+      rowBackground: "surface",
+    })).toEqual({ backgroundColor: "text", color: "surface" });
+
+    expect(resolveSoftwareCursorCellStyle({
+      visible: false,
+      cursorBackground: "text",
+      cursorForeground: "surface",
+      textColor: "text",
+      rowBackground: "surface",
+    })).toEqual({ backgroundColor: "surface", color: "text" });
   });
 });

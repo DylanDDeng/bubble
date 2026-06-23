@@ -50,6 +50,7 @@ export type ThemeMode = "auto" | "light" | "dark";
 export interface ThemeConfig {
   mode: ThemeMode;
   overrides?: Record<string, string>;
+  explicit?: boolean;
 }
 
 export interface UserConfigData {
@@ -100,7 +101,7 @@ function sanitizeTheme(
   if (value == null) return undefined;
   if (typeof value === "string") {
     return value === "auto" || value === "light" || value === "dark"
-      ? { mode: value }
+      ? { mode: value, explicit: true }
       : undefined;
   }
   if (typeof value !== "object" || Array.isArray(value)) return undefined;
@@ -111,7 +112,12 @@ function sanitizeTheme(
     const mode = maybeNew.mode;
     if (mode !== "auto" && mode !== "light" && mode !== "dark") return undefined;
     const overrides = isStringMap(maybeNew.overrides) ? maybeNew.overrides : undefined;
-    return overrides ? { mode, overrides } : { mode };
+    const explicit = maybeNew.explicit === true ? true : undefined;
+    return {
+      mode,
+      ...(overrides ? { overrides } : {}),
+      ...(explicit ? { explicit } : {}),
+    };
   }
   const overrides = pickStringEntries(value as Record<string, unknown>);
   if (Object.keys(overrides).length === 0) return undefined;
@@ -253,16 +259,16 @@ export class UserConfig {
   setThemeMode(mode: ThemeMode) {
     const current = this.getTheme();
     this.data.theme = current.overrides
-      ? { mode, overrides: current.overrides }
-      : { mode };
+      ? { mode, overrides: current.overrides, explicit: true }
+      : { mode, explicit: true };
     this.save();
   }
 
   setThemeOverrides(overrides: Record<string, string>) {
     const current = this.getTheme();
     this.data.theme = Object.keys(overrides).length === 0
-      ? { mode: current.mode }
-      : { mode: current.mode, overrides: { ...overrides } };
+      ? { mode: current.mode, ...(current.explicit ? { explicit: true } : {}) }
+      : { mode: current.mode, overrides: { ...overrides }, ...(current.explicit ? { explicit: true } : {}) };
     this.save();
   }
 
@@ -273,6 +279,22 @@ export class UserConfig {
   getSubagents(): SubagentsUserConfig {
     return sanitizeSubagentsConfig(this.data.subagents) ?? {};
   }
+}
+
+export function shouldProbeTerminalTheme(config: ThemeConfig): boolean {
+  return config.mode === "auto" || isLegacyBareDarkTheme(config);
+}
+
+export function effectiveThemeModeForTerminal(
+  config: ThemeConfig,
+  detectedTheme: Exclude<ThemeMode, "auto">,
+): ThemeMode {
+  if (isLegacyBareDarkTheme(config) && detectedTheme === "light") return "auto";
+  return config.mode;
+}
+
+function isLegacyBareDarkTheme(config: ThemeConfig): boolean {
+  return config.mode === "dark" && config.explicit !== true && !config.overrides;
 }
 
 /** Mask an API key for safe display. */

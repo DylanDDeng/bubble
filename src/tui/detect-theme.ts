@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+
 export type ResolvedTheme = "light" | "dark";
 
 export async function detectTerminalTheme(
@@ -10,6 +12,9 @@ export async function detectTerminalTheme(
     const fromOsc = await queryOsc11(timeoutMs);
     if (fromOsc) return fromOsc;
   }
+
+  const fromOs = detectOsAppearanceTheme();
+  if (fromOs) return fromOs;
 
   return "dark";
 }
@@ -91,4 +96,23 @@ function relativeLuminance(r: number, g: number, b: number): number {
   const channel = (c: number) =>
     c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
   return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+}
+
+function detectOsAppearanceTheme(): ResolvedTheme | null {
+  if (process.platform !== "darwin") return null;
+  try {
+    const output = execFileSync("/usr/bin/defaults", ["read", "-g", "AppleInterfaceStyle"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 100,
+    });
+    return themeFromMacOsAppearance(output);
+  } catch {
+    // On macOS the key is absent in Light mode, and `defaults read` exits 1.
+    return "light";
+  }
+}
+
+export function themeFromMacOsAppearance(output: string | null | undefined): ResolvedTheme {
+  return output?.trim().toLowerCase() === "dark" ? "dark" : "light";
 }

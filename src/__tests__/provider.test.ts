@@ -430,6 +430,34 @@ describe("translateOpenAIStream", () => {
     });
   });
 
+  it("forwards Kimi choice-level streaming usage", async () => {
+    const chunks = await collect(translateOpenAIStream(fromArray([
+      {
+        choices: [{
+          delta: {},
+          finish_reason: "stop",
+          usage: {
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            total_tokens: 120,
+          },
+        }],
+      },
+    ])));
+
+    expect(chunks).toContainEqual({
+      type: "usage",
+      usage: {
+        promptTokens: 100,
+        promptCacheHitTokens: undefined,
+        promptCacheMissTokens: undefined,
+        completionTokens: 20,
+        totalTokens: 120,
+        reasoningTokens: undefined,
+      },
+    });
+  });
+
   it("flushes pending tool calls if the stream ends without finish_reason=tool_calls", async () => {
     const chunks = await collect(translateOpenAIStream(fromArray([
       { choices: [{ delta: { tool_calls: [{ index: 0, id: "write:1", function: { name: "write", arguments: "{}" } }] } }] },

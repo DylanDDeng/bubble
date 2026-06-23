@@ -21,6 +21,7 @@ import {
 import { EDIT_COLLAPSED_DIFF_LINES, formatEditSuccessSummary, getEditDiffDetails } from "./edit-diff.js";
 import { formatSubagentRoute, type SubagentRouteLike } from "../agent/subagent-route-format.js";
 import { sanitizeInternalReminderBlocks } from "../agent/internal-reminder-sanitizer.js";
+import { splitImageDisplayContent } from "../tui/image-display.js";
 
 /**
  * Hint surfaced when the user can interrupt the currently-running pending tool
@@ -40,6 +41,8 @@ interface MessageListProps {
   streamingTools: DisplayToolCall[];
   streamingParts: DisplayMessagePart[];
   terminalColumns: number;
+  showThinking?: boolean;
+  expandedToolOutput?: boolean;
   verboseTrace: boolean;
   pendingApproval?: PendingApprovalHint | null;
   /** Animation tick used to refresh in-progress elapsed counters. */
@@ -52,7 +55,13 @@ const EXECUTE_COMMAND_BLOCK_MAX_LINES = 4;
 
 type MessageListItem =
   | { kind: "welcome"; key: string }
-  | { kind: "message"; key: string; message: DisplayMessage; showExpandHint: boolean };
+  | {
+      kind: "message";
+      key: string;
+      message: DisplayMessage;
+      showExpandHint: boolean;
+      separateFromPrevious: boolean;
+    };
 
 export function MessageList({
   messages,
@@ -61,29 +70,36 @@ export function MessageList({
   streamingTools,
   streamingParts,
   terminalColumns,
+  showThinking = false,
+  expandedToolOutput = false,
   verboseTrace,
   pendingApproval,
   nowTick,
   welcomeBanner,
 }: MessageListProps) {
+  const theme = useTheme();
   const hasStreaming = !!(
     streamingContent ||
     streamingReasoning ||
     streamingTools.length > 0 ||
     streamingParts.length > 0
   );
+  const regularMessages = messages.filter((message) => !message.inputStatus);
+  const pendingSteerMessages = messages.filter((message) => message.inputStatus === "pending_steer");
+  const queuedInputMessages = messages.filter((message) => message.inputStatus === "queued");
   const staticItems: MessageListItem[] = [];
   if (welcomeBanner) {
     staticItems.push({ kind: "welcome", key: "welcome" });
   }
-  const lastMessageIndex = messages.length - 1;
-  for (let i = 0; i < messages.length; i++) {
-    const msg = messages[i]!;
+  const lastMessageIndex = regularMessages.length - 1;
+  for (let i = 0; i < regularMessages.length; i++) {
+    const msg = regularMessages[i]!;
     staticItems.push({
       kind: "message",
       key: msg.key ?? `message-${i}`,
       message: msg,
       showExpandHint: !hasStreaming && i === lastMessageIndex,
+      separateFromPrevious: msg.role === "user" && regularMessages[i - 1]?.role === "user",
     });
   }
 
@@ -98,8 +114,11 @@ export function MessageList({
             key={item.key}
             message={item.message}
             terminalColumns={terminalColumns}
+            showThinking={showThinking}
+            expandedToolOutput={expandedToolOutput}
             verboseTrace={verboseTrace}
             showExpandHint={item.showExpandHint}
+            separateFromPrevious={item.separateFromPrevious}
             nowTick={item.showExpandHint ? nowTick : undefined}
           />
         );
@@ -111,9 +130,29 @@ export function MessageList({
           tools={streamingTools}
           parts={streamingParts}
           terminalColumns={terminalColumns}
+          showThinking={showThinking}
+          expandedToolOutput={expandedToolOutput}
           verboseTrace={verboseTrace}
           pendingApproval={pendingApproval}
           nowTick={nowTick}
+        />
+      )}
+      {pendingSteerMessages.length > 0 && (
+        <PendingInputMessagesBlock
+          messages={pendingSteerMessages}
+          terminalColumns={terminalColumns}
+          title="Messages to steer at next model call"
+          hint="applies before the next provider request"
+          bulletColor={theme.warning}
+        />
+      )}
+      {queuedInputMessages.length > 0 && (
+        <PendingInputMessagesBlock
+          messages={queuedInputMessages}
+          terminalColumns={terminalColumns}
+          title="Messages queued for next turn"
+          hint="runs after the current answer"
+          bulletColor={theme.muted}
         />
       )}
     </Box>
@@ -128,14 +167,20 @@ export function MessageList({
 const MessageItem = React.memo(function MessageItem({
   message,
   terminalColumns,
+  showThinking,
+  expandedToolOutput,
   verboseTrace,
   showExpandHint,
+  separateFromPrevious,
   nowTick,
 }: {
   message: DisplayMessage;
   terminalColumns: number;
+  showThinking: boolean;
+  expandedToolOutput: boolean;
   verboseTrace: boolean;
   showExpandHint: boolean;
+  separateFromPrevious: boolean;
   nowTick?: number;
 }) {
   const theme = useTheme();
@@ -145,6 +190,7 @@ const MessageItem = React.memo(function MessageItem({
         content={message.content}
         terminalColumns={terminalColumns}
         inputStatus={message.inputStatus}
+        separateFromPrevious={separateFromPrevious}
       />
     );
   }
@@ -175,16 +221,17 @@ const MessageItem = React.memo(function MessageItem({
     !!message.content ||
     (message.toolCalls?.length ?? 0) > 0 ||
     (message.parts?.length ?? 0) > 0 ||
-    (!!visibleReasoning && verboseTrace);
+    (!!visibleReasoning && (showThinking || verboseTrace));
   if (!hasVisibleAssistantContent) return null;
 
   return (
     <Box marginTop={1} marginBottom={1} flexDirection="column">
-      {visibleReasoning && verboseTrace && <ReasoningTraceBlock reasoning={visibleReasoning} />}
+      {visibleReasoning && (showThinking || verboseTrace) && <ReasoningTraceBlock reasoning={visibleReasoning} />}
       {message.parts && message.parts.length > 0 ? (
         <MessageParts
           parts={message.parts}
           terminalColumns={terminalColumns}
+          expandedToolOutput={expandedToolOutput}
           verboseTrace={verboseTrace}
           pendingApproval={undefined}
           showExpandHint={showExpandHint}
@@ -196,6 +243,7 @@ const MessageItem = React.memo(function MessageItem({
             <ToolsPart
               toolCalls={message.toolCalls}
               terminalColumns={terminalColumns}
+              expandedToolOutput={expandedToolOutput}
               verboseTrace={verboseTrace}
               pendingApproval={undefined}
               showExpandHint={showExpandHint}
@@ -221,6 +269,8 @@ function StreamingMessage({
   tools,
   parts,
   terminalColumns,
+  showThinking,
+  expandedToolOutput,
   verboseTrace,
   pendingApproval,
   nowTick,
@@ -230,6 +280,8 @@ function StreamingMessage({
   tools: DisplayToolCall[];
   parts: DisplayMessagePart[];
   terminalColumns: number;
+  showThinking: boolean;
+  expandedToolOutput: boolean;
   verboseTrace: boolean;
   pendingApproval?: PendingApprovalHint | null;
   nowTick?: number;
@@ -244,7 +296,7 @@ function StreamingMessage({
 
   return (
     <Box flexDirection="column">
-      {visibleReasoning && verboseTrace && (
+      {visibleReasoning && (showThinking || verboseTrace) && (
         <Box marginTop={1} flexDirection="column">
           <ReasoningTraceBlock reasoning={visibleReasoning} />
         </Box>
@@ -259,6 +311,7 @@ function StreamingMessage({
           <MessageParts
             parts={visibleParts}
             terminalColumns={terminalColumns}
+            expandedToolOutput={expandedToolOutput}
             verboseTrace={verboseTrace}
             pendingApproval={pendingApproval}
             showExpandHint
@@ -275,6 +328,7 @@ function StreamingMessage({
 function MessageParts({
   parts,
   terminalColumns,
+  expandedToolOutput,
   verboseTrace,
   pendingApproval,
   showExpandHint,
@@ -284,6 +338,7 @@ function MessageParts({
 }: {
   parts: DisplayMessagePart[];
   terminalColumns: number;
+  expandedToolOutput: boolean;
   verboseTrace: boolean;
   pendingApproval?: PendingApprovalHint | null;
   showExpandHint: boolean;
@@ -312,6 +367,7 @@ function MessageParts({
             key={`tools-${idx}`}
             toolCalls={part.toolCalls}
             terminalColumns={terminalColumns}
+            expandedToolOutput={expandedToolOutput}
             verboseTrace={verboseTrace}
             pendingApproval={pendingApproval}
             showExpandHint={showExpandHint && idx === lastToolsPartIndex}
@@ -350,14 +406,14 @@ function TimelineText({
 }) {
   const theme = useTheme();
   if (!content.trim()) return null;
-  // marginLeft (2) + "⛬  " glyph (3 visual cells) = 5 cells consumed by the
+  // marginLeft (2) + "●  " marker (3 visual cells) = 5 cells consumed by the
   // timeline gutter; pass the remaining width so wide blocks like tables size
   // themselves against the actual content area instead of the raw terminal.
   const available = terminalColumns ? Math.max(20, terminalColumns - 5) : undefined;
   const trimmed = content.trim();
   return (
     <Box marginLeft={2} marginTop={compactTop ? 0 : 1}>
-      <Text color={theme.agent}>⛬  </Text>
+      <Text color={theme.agent}>●  </Text>
       <Box flexDirection="column" flexGrow={1}>
         {streaming ? (
           <StreamingMarkdown content={trimmed} maxWidth={available} />
@@ -372,6 +428,7 @@ function TimelineText({
 function ToolsPart({
   toolCalls,
   terminalColumns,
+  expandedToolOutput,
   verboseTrace,
   pendingApproval,
   showExpandHint,
@@ -381,6 +438,7 @@ function ToolsPart({
 }: {
   toolCalls: DisplayToolCall[];
   terminalColumns: number;
+  expandedToolOutput: boolean;
   verboseTrace: boolean;
   pendingApproval?: PendingApprovalHint | null;
   showExpandHint: boolean;
@@ -389,7 +447,8 @@ function ToolsPart({
   showActivity?: boolean;
 }) {
   if (toolCalls.length === 0) return null;
-  if (!verboseTrace) {
+  const expandTools = verboseTrace || expandedToolOutput;
+  if (!expandTools) {
     return (
       <TraceGroupList
         toolCalls={toolCalls}
@@ -413,7 +472,7 @@ function ToolsPart({
             key={tc.id}
             toolCall={tc}
             isStreaming={isToolPending(tc)}
-            verbose={verboseTrace}
+            verbose={expandTools}
             terminalColumns={terminalColumns}
             showExpandHint={showExpandHint && idx === lastIdx}
             waitingApproval={isWaitingApproval}
@@ -764,10 +823,12 @@ function UserMessageBlock({
   content,
   terminalColumns,
   inputStatus,
+  separateFromPrevious = false,
 }: {
   content: string;
   terminalColumns: number;
   inputStatus?: UserInputStatus;
+  separateFromPrevious?: boolean;
 }) {
   const theme = useTheme();
   const badge = userInputStatusBadgeLabel(inputStatus);
@@ -776,12 +837,12 @@ function UserMessageBlock({
   const railWidth = 2;
   const horizontalRoom = Math.max(20, terminalColumns - 2);
   const bubbleTextWidth = Math.max(1, horizontalRoom - railWidth - 2);
-  const wrappedLines = content
-    .split("\n")
+  const { bodyLines, referenceLines } = splitImageDisplayContent(content);
+  const wrappedLines = bodyLines
     .flatMap((line) => wrapByVisualWidth(line, bubbleTextWidth));
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" marginTop={separateFromPrevious ? 1 : 0}>
       {badge && (
         <Box>
           <Text bold color={inputStatus === "pending_steer" ? theme.warning : theme.muted}>
@@ -802,6 +863,56 @@ function UserMessageBlock({
           </Text>
         </Box>
       ))}
+      {referenceLines.map((line, index) => (
+        <Box key={`attachment-${index}`}>
+          <Text color={theme.muted}>{`  ${line}`}</Text>
+        </Box>
+      ))}
+    </Box>
+  );
+}
+
+function PendingInputMessagesBlock({
+  messages,
+  terminalColumns,
+  title,
+  hint,
+  bulletColor,
+}: {
+  messages: DisplayMessage[];
+  terminalColumns: number;
+  title: string;
+  hint: string;
+  bulletColor: string;
+}) {
+  const theme = useTheme();
+  const contentWidth = Math.max(20, terminalColumns - 5);
+
+  return (
+    <Box marginTop={1} flexDirection="column">
+      <Box>
+        <Text color={bulletColor}>• </Text>
+        <Text bold color={theme.inputText}>{title} </Text>
+        <Text color={theme.dim}>({hint})</Text>
+      </Box>
+      {messages.flatMap((message, messageIndex) => {
+        const { bodyLines, referenceLines } = splitImageDisplayContent(message.content || " ");
+        const wrappedBody = bodyLines.flatMap((line) =>
+          wrapByVisualWidth(line || " ", contentWidth),
+        );
+        const bodyRows = wrappedBody.map((line, lineIndex) => (
+          <Box key={`body-${message.key ?? messageIndex}-${lineIndex}`} marginLeft={2}>
+            <Text color={theme.dim}>{lineIndex === 0 ? "↳ " : "  "}</Text>
+            <Text color={theme.inputText}>{line}</Text>
+          </Box>
+        ));
+        const attachmentRows = referenceLines.map((line, lineIndex) => (
+          <Box key={`attachment-${message.key ?? messageIndex}-${lineIndex}`} marginLeft={2}>
+            <Text color={theme.dim}>  {line}</Text>
+          </Box>
+        ));
+        return [...bodyRows, ...attachmentRows];
+      })}
     </Box>
   );
 }

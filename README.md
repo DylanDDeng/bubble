@@ -249,7 +249,7 @@ npm test           # run the test suite (vitest)
 npm start          # run the built agent
 ```
 
-`npm run dev` compiles and launches in one step. The TUI is built on [OpenTUI](https://github.com/anomalyco/opentui) and Solid.
+`npm run dev` compiles and launches in one step. The interactive TUI is built on React Ink.
 
 ## Feishu host (optional)
 

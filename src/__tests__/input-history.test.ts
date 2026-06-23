@@ -1,5 +1,31 @@
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { pushHistoryEntry, stepHistory } from "../tui-ink/input-history.js";
+import {
+  appendHistoryEntry,
+  loadHistoryEntriesSync,
+  loadHistorySync,
+  pushHistoryEntry,
+  stepHistory,
+  type HistoryEntry,
+  type HistoryImageAttachment,
+} from "../tui-ink/input-history.js";
+
+function tempHistoryFile(): string {
+  return join(mkdtempSync(join(tmpdir(), "bubble-history-")), "input-history.jsonl");
+}
+
+function image(name = "image.png"): HistoryImageAttachment {
+  const base64 = "aGVsbG8=";
+  return {
+    mediaType: "image/png",
+    bytes: 5,
+    base64,
+    dataUrl: `data:image/png;base64,${base64}`,
+    filename: name,
+  };
+}
 
 describe("input history navigation", () => {
   const history = ["first", "second", "third"];
@@ -59,6 +85,37 @@ describe("input history navigation", () => {
     expect(result.changed).toBe(false);
     expect(result.text).toBe("typing");
   });
+
+  it("restores images from history entries", () => {
+    const picture = image("attached.png");
+    const history: HistoryEntry[] = [
+      { text: "look at this", images: [picture], imageDisplayStart: 3 },
+    ];
+
+    const result = stepHistory({ history, index: null, draft: "" }, "up", "");
+
+    expect(result.text).toBe("look at this");
+    expect(result.images).toEqual([picture]);
+    expect(result.imageDisplayStart).toBe(3);
+  });
+
+  it("restores image drafts after walking back down past newest history", () => {
+    const draftImage = image("draft.png");
+    const result = stepHistory(
+      {
+        history: [{ text: "previous", images: [] }],
+        index: 0,
+        draft: { text: "draft", images: [draftImage], imageDisplayStart: 8 },
+      },
+      "down",
+      "previous",
+    );
+
+    expect(result.text).toBe("draft");
+    expect(result.images).toEqual([draftImage]);
+    expect(result.imageDisplayStart).toBe(8);
+    expect(result.index).toBeNull();
+  });
 });
 
 describe("pushHistoryEntry", () => {
@@ -79,5 +136,113 @@ describe("pushHistoryEntry", () => {
 
   it("keeps non-consecutive duplicates", () => {
     expect(pushHistoryEntry(["a", "b"], "a")).toEqual(["a", "b", "a"]);
+  });
+
+  it("dedupes consecutive image entries by text and image data", () => {
+    const entry: HistoryEntry = { text: "same", images: [image()] };
+    const history = [entry];
+
+    expect(pushHistoryEntry(history, { text: "same", images: [image()] })).toBe(history);
+    expect(pushHistoryEntry(history, { text: "same", images: [image("other.png")] })).not.toBe(history);
+  });
+});
+
+describe("scoped input history persistence", () => {
+  it("loads only entries from the current session", () => {
+    const filePath = tempHistoryFile();
+    writeFileSync(filePath, [
+      JSON.stringify("legacy global"),
+      JSON.stringify({ text: "session a first", sessionFile: "/sessions/a.jsonl", cwd: "/repo" }),
+      JSON.stringify({ text: "session b", sessionFile: "/sessions/b.jsonl", cwd: "/repo" }),
+      JSON.stringify({ text: "session a second", sessionFile: "/sessions/a.jsonl", cwd: "/other" }),
+      JSON.stringify({ text: "cwd only", cwd: "/repo" }),
+    ].join("\n") + "\n");
+
+    expect(loadHistorySync({
+      filePath,
+      scope: { sessionFile: "/sessions/a.jsonl", cwd: "/repo" },
+    })).toEqual(["session a first", "session a second"]);
+  });
+
+  it("excludes legacy global entries when a session scope is supplied", () => {
+    const filePath = tempHistoryFile();
+    writeFileSync(filePath, [
+      JSON.stringify("legacy global"),
+      JSON.stringify({ text: "scoped", sessionFile: "/sessions/current.jsonl" }),
+    ].join("\n") + "\n");
+
+    expect(loadHistorySync({
+      filePath,
+      scope: { sessionFile: "/sessions/current.jsonl" },
+    })).toEqual(["scoped"]);
+  });
+
+  it("keeps backward-compatible unscoped reads", () => {
+    const filePath = tempHistoryFile();
+    writeFileSync(filePath, [
+      JSON.stringify("legacy global"),
+      JSON.stringify({ text: "new scoped", sessionFile: "/sessions/current.jsonl" }),
+    ].join("\n") + "\n");
+
+    expect(loadHistorySync(filePath)).toEqual(["legacy global", "new scoped"]);
+  });
+
+  it("persists new entries with session metadata", () => {
+    const filePath = tempHistoryFile();
+
+    appendHistoryEntry("hello", {
+      filePath,
+      scope: { sessionFile: "/sessions/current.jsonl", cwd: "/repo" },
+      createdAt: "2026-06-19T00:00:00.000Z",
+    });
+
+    expect(loadHistorySync({
+      filePath,
+      scope: { sessionFile: "/sessions/current.jsonl" },
+    })).toEqual(["hello"]);
+
+    const raw = readFileSync(filePath, "utf8").trim();
+    expect(JSON.parse(raw)).toEqual({
+      text: "hello",
+      createdAt: "2026-06-19T00:00:00.000Z",
+      sessionFile: "/sessions/current.jsonl",
+      cwd: "/repo",
+    });
+  });
+
+  it("persists and restores image attachments for session history", () => {
+    const filePath = tempHistoryFile();
+    const picture = image("screenshot.png");
+
+    appendHistoryEntry({
+      text: "what is in this image",
+      images: [picture],
+      imageDisplayStart: 4,
+    }, {
+      filePath,
+      scope: { sessionFile: "/sessions/current.jsonl" },
+      createdAt: "2026-06-19T00:00:00.000Z",
+    });
+
+    expect(loadHistoryEntriesSync({
+      filePath,
+      scope: { sessionFile: "/sessions/current.jsonl" },
+    })).toEqual([
+      {
+        text: "what is in this image",
+        images: [picture],
+        imageDisplayStart: 4,
+      },
+    ]);
+
+    const raw = JSON.parse(readFileSync(filePath, "utf8").trim());
+    expect(raw.images).toEqual([{
+      mediaType: picture.mediaType,
+      bytes: picture.bytes,
+      dataUrl: picture.dataUrl,
+      filename: picture.filename,
+    }]);
+    expect(raw.images[0].base64).toBeUndefined();
+    expect(raw.imageDisplayStart).toBe(4);
   });
 });

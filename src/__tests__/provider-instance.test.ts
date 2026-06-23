@@ -64,6 +64,52 @@ describe("createProviderInstance", () => {
     expect(chunks.some((chunk) => chunk.type === "usage")).toBe(true);
   });
 
+  it.each([
+    ["openai", "https://api.openai.com/v1", "gpt-4o"],
+    ["moonshot-cn", "https://api.moonshot.cn/v1", "kimi-k2.7-code"],
+    ["moonshot-intl", "https://api.moonshot.ai/v1", "kimi-k2.7-code"],
+    ["zhipuai", "https://open.bigmodel.cn/api/paas/v4", "glm-5.2"],
+    ["zai-coding-plan", "https://api.z.ai/api/coding/paas/v4", "glm-5.2"],
+  ])("requests stream usage for %s-compatible streaming", async (providerId, baseURL, model) => {
+    let body: any;
+    createMock.mockImplementation(async (input) => {
+      body = input;
+      return fromArray([
+        {
+          usage: {
+            prompt_tokens: 12,
+            completion_tokens: 3,
+          },
+          choices: [{ delta: {} }],
+        },
+      ]);
+    });
+
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({
+      providerId,
+      apiKey: "sk-test",
+      baseURL,
+    });
+
+    const chunks = await collect(provider.streamChat([{ role: "user", content: "hi" }], {
+      model,
+    }));
+
+    expect(body.stream_options).toEqual({ include_usage: true });
+    expect(chunks).toContainEqual({
+      type: "usage",
+      usage: {
+        promptTokens: 12,
+        completionTokens: 3,
+        promptCacheHitTokens: undefined,
+        promptCacheMissTokens: undefined,
+        reasoningTokens: undefined,
+        totalTokens: undefined,
+      },
+    });
+  });
+
   it("preserves OpenAI-compatible tools while disabling tool calls", async () => {
     let body: any;
     createMock.mockImplementation(async (input) => {

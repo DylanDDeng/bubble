@@ -68,6 +68,54 @@ describe("Ink message spacing", () => {
     expect(output).toContain("▌  你好啊");
   });
 
+  it("keeps consecutive user messages visually separate after steer is applied", () => {
+    const lines = renderLines([
+      { key: "initial-user", role: "user", content: "第一条消息" },
+      { key: "applied-steer", role: "user", content: "第二条 steer" },
+    ]);
+
+    const firstIndex = lines.findIndex((line) => line.includes("第一条消息"));
+    const secondIndex = lines.findIndex((line) => line.includes("第二条 steer"));
+
+    expect(firstIndex).toBeGreaterThanOrEqual(0);
+    expect(secondIndex).toBeGreaterThan(firstIndex);
+    expect(lines.slice(firstIndex + 1, secondIndex)).toContain("");
+  });
+
+  it("renders pending steer and queued inputs as status blocks after streaming output", () => {
+    const output = renderLines([
+      user,
+      {
+        key: "pending-steer",
+        role: "user",
+        content: "还有 steer",
+        inputStatus: "pending_steer",
+      },
+      {
+        key: "queued-input",
+        role: "user",
+        content: "还有 queue",
+        inputStatus: "queued",
+      },
+    ], [textPart]).join("\n");
+
+    expect(output).toContain("This is a static HTML playground.");
+    expect(output).toContain("Messages to steer at next model call");
+    expect(output).toContain("↳ 还有 steer");
+    expect(output).toContain("Messages queued for next turn");
+    expect(output).toContain("↳ 还有 queue");
+    expect(output).not.toContain("▌  还有 queue");
+    expect(output.indexOf("This is a static HTML playground.")).toBeLessThan(
+      output.indexOf("Messages to steer at next model call"),
+    );
+    expect(output.indexOf("This is a static HTML playground.")).toBeLessThan(
+      output.indexOf("Messages queued for next turn"),
+    );
+    expect(output.indexOf("What is this project doing?")).toBeLessThan(
+      output.indexOf("Messages to steer at next model call"),
+    );
+  });
+
   it("keeps tool trace titles visible beside long commands", () => {
     const output = renderLines([
       {

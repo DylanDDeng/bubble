@@ -22,6 +22,8 @@ export interface GoalState {
   /** Optional positive token budget; auto-continuation stops once reached. */
   tokenBudget?: number;
   tokensUsed: number;
+  /** Goal turns where the provider did not report token usage. */
+  untrackedTokenTurns?: number;
   /** Number of completed goal turns (including the initial turn). */
   turnsSpent: number;
   createdAt: number;
@@ -89,6 +91,7 @@ export class GoalStore {
       status: "active",
       tokenBudget,
       tokensUsed: 0,
+      untrackedTokenTurns: 0,
       turnsSpent: 0,
       createdAt: ts,
       updatedAt: ts,
@@ -172,6 +175,13 @@ export class GoalStore {
     this.emit();
   }
 
+  markTokenUsageUnavailable(): void {
+    if (!this.goal) return;
+    this.goal.untrackedTokenTurns = (this.goal.untrackedTokenTurns ?? 0) + 1;
+    this.touch();
+    this.emit();
+  }
+
   incrementTurn(): void {
     if (!this.goal) return;
     this.goal.turnsSpent += 1;
@@ -197,7 +207,13 @@ export class GoalStore {
     if (!state || !state.objective?.trim()) {
       this.goal = null;
     } else {
-      this.goal = { ...state };
+      this.goal = {
+        ...state,
+        untrackedTokenTurns:
+          state.untrackedTokenTurns !== undefined && state.untrackedTokenTurns > 0
+            ? Math.round(state.untrackedTokenTurns)
+            : 0,
+      };
     }
     this.emit();
   }

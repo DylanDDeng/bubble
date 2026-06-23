@@ -38,6 +38,21 @@ export function setUserInputStatus(message: DisplayMessage, inputStatus?: UserIn
   return rest;
 }
 
+export function moveStatusMessageToEnd(
+  messages: DisplayMessage[],
+  key: string,
+  inputStatus?: UserInputStatus,
+): DisplayMessage[] {
+  const index = messages.findIndex((message) => message.key === key);
+  if (index === -1) return messages;
+  const message = messages[index]!;
+  return [
+    ...messages.slice(0, index),
+    ...messages.slice(index + 1),
+    setUserInputStatus(message, inputStatus),
+  ];
+}
+
 /**
  * Aborted assistant messages carry a model-facing interruption note appended
  * to their content (whole content, or a "\n\n"-joined suffix after partial

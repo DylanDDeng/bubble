@@ -4,6 +4,7 @@ import {
   appendToolPart,
   compactDisplayMessages as compactInkDisplayMessages,
   contentFromParts,
+  moveStatusMessageToEnd,
   snapshotDisplayParts,
   stripInterruptedAssistantMarker,
   toolCallsFromParts,
@@ -15,8 +16,6 @@ import {
   compactDisplayMessages as compactLegacyDisplayMessages,
   type DisplayMessage as LegacyDisplayMessage,
 } from "../tui/display-history.js";
-import { compactDisplayMessages as compactOpenTuiDisplayMessages } from "../tui-opentui/display-history.js";
-import { isWritePreviewTool } from "../tui/tool-renderers/write-preview.js";
 
 describe("Ink display history parts", () => {
   it("preserves assistant text/tool timeline order", () => {
@@ -69,6 +68,28 @@ describe("Ink display history parts", () => {
     ]);
   });
 
+  it("moves an applied steer placeholder after the committed assistant turn", () => {
+    const messages: DisplayMessage[] = [
+      { key: "first-user", role: "user", content: "first" },
+      { key: "steer", role: "user", content: "steer", inputStatus: "pending_steer" },
+      {
+        key: "tool-turn",
+        role: "assistant",
+        content: "",
+        parts: [{ type: "tools", toolCalls: [tool("bash", { command: "ls" }, "ok")] }],
+      },
+    ];
+
+    expect(moveStatusMessageToEnd(messages, "steer").map((message) => ({
+      key: message.key,
+      inputStatus: message.inputStatus,
+    }))).toEqual([
+      { key: "first-user", inputStatus: undefined },
+      { key: "tool-turn", inputStatus: undefined },
+      { key: "steer", inputStatus: undefined },
+    ]);
+  });
+
   it("keeps old part text verbatim and collapses tool result bodies", () => {
     const diff = [
       "--- a/file-0.ts",
@@ -115,7 +136,6 @@ describe("Ink display history parts", () => {
 
   const displayHistoryCompactors: Array<[string, (messages: any[]) => any[]]> = [
     ["legacy", compactLegacyDisplayMessages],
-    ["opentui", compactOpenTuiDisplayMessages],
     ["ink", compactInkDisplayMessages],
   ];
 
@@ -137,7 +157,7 @@ describe("Ink display history parts", () => {
     expect(compacted.at(-1)?.toolCalls?.[0].resultCollapsed).toBeUndefined();
   });
 
-  it("never truncates message text in the live OpenTUI display history", () => {
+  it("never truncates message text in the legacy display history", () => {
     const longPrompt = `请使用 Three.js 开发一个 3D 网页。${"要求很多很多。".repeat(400)}`;
     const messages: LegacyDisplayMessage[] = [
       { role: "user", content: longPrompt },
@@ -156,7 +176,7 @@ describe("Ink display history parts", () => {
     expect(JSON.stringify(compacted)).not.toContain("✂");
   });
 
-  it("folds overflow history behind a single summary card in the live OpenTUI display history", () => {
+  it("folds overflow history behind a single summary card in the legacy display history", () => {
     const messages = Array.from({ length: 100 }, (_, index) => ({
       role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
       content: `message ${index} ${"x".repeat(500)}`,
@@ -176,14 +196,6 @@ describe("Ink display history parts", () => {
     expect(visible[0].content).toBe(messages[20].content);
     expect(visible.at(-1)?.content).toBe(messages.at(-1)?.content);
     expect(JSON.stringify(visible)).not.toContain("✂");
-  });
-
-  it("does not render collapsed write tools through the write-preview renderer", () => {
-    const collapsedWrite = tool("write", { path: "a.ts", content: "x".repeat(1000) }, undefined, {
-      resultCollapsed: true,
-    });
-
-    expect(isWritePreviewTool(collapsedWrite)).toBe(false);
   });
 
   it("strips the model-facing interruption note from aborted assistant content", () => {

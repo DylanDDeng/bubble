@@ -51,6 +51,14 @@ describe("GoalStore", () => {
     expect(store.snapshot()!.tokensUsed).toBe(0);
   });
 
+  it("tracks goal turns whose provider usage is unavailable", () => {
+    const store = makeStore();
+    store.set("x");
+    store.markTokenUsageUnavailable();
+    store.markTokenUsageUnavailable();
+    expect(store.snapshot()!.untrackedTokenTurns).toBe(2);
+  });
+
   it("transitions pause/resume/complete/blocked/budget", () => {
     const store = makeStore();
     store.set("x");

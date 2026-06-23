@@ -8,7 +8,7 @@ import chalk from "chalk";
 import { Agent } from "./agent.js";
 import { BudgetLedger } from "./agent/budget-ledger.js";
 import { parseArgs, printHelp } from "./cli.js";
-import { UserConfig } from "./config.js";
+import { effectiveThemeModeForTerminal, shouldProbeTerminalTheme, UserConfig } from "./config.js";
 import { createProviderInstance, createUnavailableProvider } from "./provider.js";
 import { resolveConfiguredModel } from "./model-selection.js";
 import { getDefaultThinkingLevel } from "./provider-transform.js";
@@ -47,11 +47,6 @@ import {
   summarizeTraceMessage,
   traceEvent,
 } from "./debug-trace.js";
-
-// OpenTUI is the default renderer. The React Ink implementation (alt-screen
-// viewport, src/tui-ink) is feature-complete but still maturing — opt in with
-// BUBBLE_TUI=ink.
-const USE_OPENTUI = process.env.BUBBLE_TUI !== "ink";
 
 type TerminalTheme = "light" | "dark";
 
@@ -264,20 +259,20 @@ async function main() {
       console.log(chalk.dim("No previous sessions found — starting a fresh one."));
     } else {
       const themeConfig = userConfig.getTheme();
-      if (themeConfig.mode === "auto") {
+      if (shouldProbeTerminalTheme(themeConfig)) {
         const { detectTerminalTheme } = await import("./tui/detect-theme.js");
         preResolvedTheme = await detectTerminalTheme();
       } else {
-        preResolvedTheme = themeConfig.mode;
+        preResolvedTheme = themeConfig.mode === "light" ? "light" : "dark";
       }
-      const { runSessionPicker } = USE_OPENTUI
-        ? await import("./tui-opentui/run-session-picker.js")
-        : await import("./tui-ink/run-session-picker.js");
+      const pickerThemeMode = effectiveThemeModeForTerminal(themeConfig, preResolvedTheme);
+      const pickerResolvedTheme = pickerThemeMode === "auto" ? preResolvedTheme : pickerThemeMode;
+      const { runSessionPicker } = await import("./tui-ink/run-session-picker.js");
       const picked = await runSessionPicker({
         currentCwd: args.cwd,
         currentSessions,
         allSessions,
-        resolvedTheme: preResolvedTheme,
+        resolvedTheme: pickerResolvedTheme,
         themeOverrides: themeConfig.overrides,
       });
       if (picked) {
@@ -352,7 +347,7 @@ async function main() {
     sessionFile: sessionManager?.getSessionFile(),
     provider: activeProviderId || "none",
     model: activeModel || "none",
-    renderer: printMode ? "print" : USE_OPENTUI ? "opentui-core" : "ink",
+    renderer: printMode ? "print" : "ink",
   });
   if (traceInfo.enabled) {
     traceEvent("run_start", {
@@ -544,14 +539,15 @@ async function main() {
     let detectedTheme: "light" | "dark" = "dark";
     if (preResolvedTheme) {
       detectedTheme = preResolvedTheme;
-    } else if (themeConfig.mode === "auto") {
-      // Probe before OpenTUI owns stdin. OSC 11 needs raw mode, and the
+    } else if (shouldProbeTerminalTheme(themeConfig)) {
+      // Probe before the renderer owns stdin. OSC 11 needs raw mode, and the
       // runtime renderer can consume the reply before startup code sees it.
       const { detectTerminalTheme } = await import("./tui/detect-theme.js");
       detectedTheme = await detectTerminalTheme();
     } else {
-      detectedTheme = themeConfig.mode;
+      detectedTheme = themeConfig.mode === "light" ? "light" : "dark";
     }
+    const effectiveThemeMode = effectiveThemeModeForTerminal(themeConfig, detectedTheme);
     // In-place session switch for the /session picker: rebind every closure
     // that persists to the session (onMessageAppend, markers, title updater)
     // by reassigning the outer `sessionManager`, then replace the agent's
@@ -607,32 +603,17 @@ async function main() {
     const { startStartupUpdateCheck } = await import("./update/index.js");
     const updateCheck = await startStartupUpdateCheck();
     const updateNotice = updateCheck.notice;
-    // Two explicit branches (not a dynamic ternary import) so TypeScript
-    // checks each renderer's RunTuiOptions shape independently.
-    let exitWallMs: number | undefined;
-    if (USE_OPENTUI) {
-      const { runTui } = await import("./tui/run.js");
-      await runTui(agent, args, {
-        ...commonOptions,
-        themeMode: themeConfig.mode,
-        themeOverrides: themeConfig.overrides,
-        detectedTheme,
-        onThemeModeChange: (mode) => userConfig.setThemeMode(mode),
-        updateNotice: updateNotice ?? undefined,
-        updateNoticeRefresh: updateCheck.refreshed,
-      });
-    } else {
-      const { runTui } = await import("./tui-ink/run.js");
-      const summary = await runTui(agent, args, {
-        ...commonOptions,
-        themeMode: themeConfig.mode,
-        themeOverrides: themeConfig.overrides,
-        detectedTheme,
-        onThemeModeChange: (mode) => userConfig.setThemeMode(mode),
-        updateNotice: updateNotice ?? undefined,
-      });
-      exitWallMs = summary?.wallMs;
-    }
+    const { runTui } = await import("./tui-ink/run.js");
+    const summary = await runTui(agent, args, {
+      ...commonOptions,
+      themeMode: effectiveThemeMode,
+      themeOverrides: themeConfig.overrides,
+      detectedTheme,
+      onThemeModeChange: (mode) => userConfig.setThemeMode(mode),
+      updateNotice: updateNotice ?? undefined,
+      updateNoticeRefresh: updateCheck.refreshed,
+    });
+    const exitWallMs = summary?.wallMs;
 
     if (sessionManager) {
       printExitSummary(sessionManager, {

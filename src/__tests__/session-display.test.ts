@@ -5,8 +5,8 @@ import { describe, expect, it } from "vitest";
 import { SessionManager } from "../session.js";
 import { sessionDisplayName } from "../tui/session-display.js";
 
-describe("OpenTUI session display", () => {
-  const tmpDir = join(tmpdir(), "bubble-test-opentui-session-display-" + Date.now());
+describe("session display", () => {
+  const tmpDir = join(tmpdir(), "bubble-test-session-display-" + Date.now());
   mkdirSync(tmpDir, { recursive: true });
 
   it("uses stored session titles before jsonl filenames", () => {

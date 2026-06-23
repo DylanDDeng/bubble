@@ -1,9 +1,13 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { Box, Text, useInput, usePaste, useStdout } from "ink";
+import { isKeyReleaseEvent } from "./key-events.js";
 import { useTheme } from "./theme.js";
 import { ProviderRegistry, encodeModel, decodeModel, displayModel, isUserVisibleProvider, type ModelInfo } from "../provider-registry.js";
 import { listBuiltinModels } from "../model-catalog.js";
 import { padVisual, truncateVisual } from "../text-display.js";
+import { hasTerminalMouseSequence } from "./terminal-mouse.js";
+import { getAvailableThinkingLevels, normalizeThinkingLevel } from "../provider-transform.js";
+import type { ThinkingLevel } from "../types.js";
 
 export { padVisual, truncateVisual } from "../text-display.js";
 
@@ -12,7 +16,12 @@ export interface ModelPickerOption {
   label: string;
   group: string;
   providerBadge: string;
+  reasoningLevels: ThinkingLevel[];
 }
+
+type ModelPickerPhase =
+  | { kind: "model" }
+  | { kind: "effort"; model: ModelPickerOption; selectedIndex: number };
 
 export type PickerKeyAction = "up" | "down" | "enter" | "escape" | "backspace" | "delete";
 
@@ -43,6 +52,7 @@ export function resolvePickerKeyAction(
 
 export function isPrintablePickerInput(input: string): boolean {
   if (!input) return false;
+  if (hasTerminalMouseSequence(input)) return false;
   if (input.startsWith("\x1b")) return false;
   if (isRawEscapeTail(input)) return false;
   return !/[\x00-\x1f\x7f]/.test(input);
@@ -64,6 +74,119 @@ export function formatSkillPickerRow(
   return padVisual(truncateVisual(row, width), width);
 }
 
+export const MODEL_PICKER_MAX_BODY_ROWS = 10;
+export const MODEL_PICKER_CHROME_ROWS = 13;
+
+export function modelPickerBodyRows(termHeight: number): number {
+  const rows = Number.isFinite(termHeight) ? Math.floor(termHeight) : 24;
+  return Math.max(1, Math.min(MODEL_PICKER_MAX_BODY_ROWS, rows - MODEL_PICKER_CHROME_ROWS));
+}
+
+export function clampPickerIndex(index: number, length: number): number {
+  if (length <= 0) return 0;
+  return Math.max(0, Math.min(length - 1, index));
+}
+
+export function pickerWindowStart(selectedIndex: number, length: number, visibleRows: number): number {
+  const rows = Math.max(1, Math.floor(visibleRows));
+  const safeIndex = clampPickerIndex(selectedIndex, length);
+  const maxStart = Math.max(0, length - rows);
+  return Math.max(0, Math.min(maxStart, safeIndex - Math.floor(rows / 2)));
+}
+
+export function padPickerRows(rows: string[], bodyRows: number, width: number): string[] {
+  const rowCount = Math.max(1, Math.floor(bodyRows));
+  const rowWidth = Math.max(1, Math.floor(width));
+  const padded = rows.slice(0, rowCount).map((row) => padVisual(truncateVisual(row, rowWidth), rowWidth));
+  while (padded.length < rowCount) {
+    padded.push(padVisual("", rowWidth));
+  }
+  return padded;
+}
+
+export function formatReasoningLevelsLabel(levels: readonly ThinkingLevel[]): string {
+  const normalized = levels.length > 0 ? levels : ["off"];
+  return `effort ${normalized.join("/")}`;
+}
+
+export function formatModelPickerRow(
+  option: Pick<ModelPickerOption, "label" | "providerBadge" | "reasoningLevels">,
+  options: { selected: boolean; current: boolean; width: number },
+): string {
+  const width = Math.max(24, options.width);
+  const marker = options.selected ? "> " : "  ";
+  const label = option.label.replace(/\s+/g, " ").trim();
+  const provider = option.providerBadge.replace(/\s+/g, " ").trim();
+  const effort = formatReasoningLevelsLabel(option.reasoningLevels);
+  const current = options.current ? " ●" : "";
+  const providerWidth = Math.max(6, Math.min(16, Math.floor(width * 0.18)));
+  const effortWidth = Math.max(12, Math.min(30, Math.floor(width * 0.32)));
+  const labelWidth = Math.max(6, width - marker.length - providerWidth - effortWidth - 4 - current.length);
+  const row = [
+    marker,
+    padVisual(truncateVisual(label, labelWidth), labelWidth),
+    "  ",
+    padVisual(truncateVisual(provider, providerWidth), providerWidth),
+    "  ",
+    truncateVisual(effort, effortWidth),
+    current,
+  ].join("");
+  return padVisual(truncateVisual(row, width), width);
+}
+
+export function formatEffortPickerRow(
+  level: ThinkingLevel,
+  options: { selected: boolean; width: number },
+): string {
+  const width = Math.max(24, options.width);
+  const marker = options.selected ? "> " : "  ";
+  const row = `${marker}${level}  ${effortDescription(level)}`;
+  return padVisual(truncateVisual(row, width), width);
+}
+
+export function formatNoModelResultsRow(query: string, width: number): string {
+  const rowWidth = Math.max(24, width);
+  const normalizedQuery = query.replace(/\s+/g, " ").trim();
+  const row = normalizedQuery
+    ? `  No models match "${normalizedQuery}"`
+    : "  No models available";
+  return padVisual(truncateVisual(row, rowWidth), rowWidth);
+}
+
+export function preferredEffortIndex(
+  option: Pick<ModelPickerOption, "reasoningLevels">,
+  currentThinkingLevel: ThinkingLevel,
+): number {
+  const preferred = normalizeThinkingLevel(currentThinkingLevel, option.reasoningLevels);
+  const index = option.reasoningLevels.indexOf(preferred);
+  return index >= 0 ? index : 0;
+}
+
+export function shouldOpenEffortPicker(option: Pick<ModelPickerOption, "reasoningLevels">): boolean {
+  return option.reasoningLevels.length > 1;
+}
+
+function effortDescription(level: ThinkingLevel): string {
+  switch (level) {
+    case "off":
+      return "no reasoning effort";
+    case "minimal":
+      return "fastest reasoning";
+    case "low":
+      return "light reasoning";
+    case "medium":
+      return "balanced reasoning";
+    case "high":
+      return "deeper reasoning";
+    case "xhigh":
+      return "extra high reasoning";
+    case "max":
+      return "maximum provider effort";
+    default:
+      return "reasoning effort";
+  }
+}
+
 function normalizeEscapeSequence(input: string): string {
   return input.startsWith("\x1b") ? input.slice(1) : input;
 }
@@ -75,16 +198,19 @@ function isRawEscapeTail(input: string): boolean {
 export interface ModelPickerProps {
   registry: ProviderRegistry;
   current: string;
+  currentThinkingLevel: ThinkingLevel;
   recent: string[];
-  onSelect: (model: string) => void;
+  onSelect: (model: string, thinkingLevel: ThinkingLevel) => void;
   onCancel: () => void;
 }
 
-export function ModelPicker({ registry, current, recent, onSelect, onCancel }: ModelPickerProps) {
+export function ModelPicker({ registry, current, currentThinkingLevel, recent, onSelect, onCancel }: ModelPickerProps) {
   const theme = useTheme();
   const { stdout } = useStdout();
   const termHeight = stdout?.rows || 24;
-  const maxVisible = Math.max(5, termHeight - 10);
+  const terminalColumns = stdout?.columns || 80;
+  const bodyRows = modelPickerBodyRows(termHeight);
+  const rowWidth = Math.max(36, Math.min(110, terminalColumns - 6));
 
   const [rawOptions, setRawOptions] = useState<ModelPickerOption[]>(() =>
     buildLocalModelOptions(registry, current, recent)
@@ -93,6 +219,7 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
   const [selectedIndex, setSelectedIndex] = useState(() =>
     preferredModelIndex(buildLocalModelOptions(registry, current, recent), current)
   );
+  const [phase, setPhase] = useState<ModelPickerPhase>({ kind: "model" });
 
   useEffect(() => {
     let cancelled = false;
@@ -140,14 +267,22 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
       if (current && !seen.has(current)) {
         const { providerId } = decodeModel(current);
         const provider = enabled.find((p) => p.id === providerId);
-        opts.unshift({ id: current, label: displayModel(current), group: "Current", providerBadge: provider?.name || providerId || "" });
+        opts.unshift({
+          id: current,
+          label: displayModel(current),
+          group: "Current",
+          providerBadge: provider?.name || providerId || "",
+          reasoningLevels: reasoningLevelsForModel(current),
+        });
       }
 
       if (!cancelled) {
         setRawOptions(opts);
         setSelectedIndex((index) => {
           const currentIndex = preferredModelIndex(opts, current);
-          return index === preferredModelIndex(localOptions, current) ? currentIndex : Math.min(index, Math.max(0, opts.length - 1));
+          return index === preferredModelIndex(localOptions, current)
+            ? currentIndex
+            : clampPickerIndex(index, opts.length);
         });
       }
     }
@@ -166,22 +301,58 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
   }, [rawOptions, query]);
 
   useInput((input, key) => {
+    if (isKeyReleaseEvent(key)) return;
     const action = resolvePickerKeyAction(input, key);
+    if (phase.kind === "effort") {
+      const levels = phase.model.reasoningLevels;
+      if (action === "escape" || action === "backspace" || action === "delete") {
+        setPhase({ kind: "model" });
+        return;
+      }
+      if (action === "enter") {
+        onSelect(phase.model.id, levels[clampPickerIndex(phase.selectedIndex, levels.length)] ?? "off");
+        return;
+      }
+      if (action === "up") {
+        setPhase((currentPhase) => currentPhase.kind === "effort"
+          ? { ...currentPhase, selectedIndex: clampPickerIndex(currentPhase.selectedIndex - 1, levels.length) }
+          : currentPhase);
+        return;
+      }
+      if (action === "down") {
+        setPhase((currentPhase) => currentPhase.kind === "effort"
+          ? { ...currentPhase, selectedIndex: clampPickerIndex(currentPhase.selectedIndex + 1, levels.length) }
+          : currentPhase);
+        return;
+      }
+      return;
+    }
+
     if (action === "escape") {
       onCancel();
       return;
     }
     if (action === "enter") {
-      const opt = options[selectedIndex];
-      if (opt) onSelect(opt.id);
+      const opt = options[clampPickerIndex(selectedIndex, options.length)];
+      if (opt) {
+        if (shouldOpenEffortPicker(opt)) {
+          setPhase({
+            kind: "effort",
+            model: opt,
+            selectedIndex: preferredEffortIndex(opt, currentThinkingLevel),
+          });
+        } else {
+          onSelect(opt.id, opt.reasoningLevels[0] ?? "off");
+        }
+      }
       return;
     }
     if (action === "up") {
-      setSelectedIndex((i) => Math.max(0, i - 1));
+      setSelectedIndex((i) => clampPickerIndex(i - 1, options.length));
       return;
     }
     if (action === "down") {
-      setSelectedIndex((i) => Math.min(options.length - 1, i + 1));
+      setSelectedIndex((i) => clampPickerIndex(i + 1, options.length));
       return;
     }
     if (action === "backspace" || action === "delete") {
@@ -202,10 +373,33 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
     }
   });
 
-  const start = Math.max(0, Math.min(selectedIndex, options.length - maxVisible));
-  const visible = options.slice(start, start + maxVisible);
-
-
+  const safeSelectedIndex = clampPickerIndex(selectedIndex, options.length);
+  const start = pickerWindowStart(safeSelectedIndex, options.length, bodyRows);
+  const visible = options.slice(start, start + bodyRows);
+  const rawModelRows = options.length === 0
+    ? [{
+        key: "no-results",
+        row: formatNoModelResultsRow(query, rowWidth),
+        selected: false,
+      }]
+    : visible.map((opt, i) => {
+        const actualIndex = start + i;
+        const isSelected = actualIndex === safeSelectedIndex;
+        return {
+          key: opt.id,
+          row: formatModelPickerRow(opt, {
+            selected: isSelected,
+            current: opt.id === current,
+            width: rowWidth,
+          }),
+          selected: isSelected,
+        };
+      });
+  const modelRows = padPickerRows(rawModelRows.map((row) => row.row), bodyRows, rowWidth).map((row, index) => ({
+    key: rawModelRows[index]?.key ?? `blank-${index}`,
+    row,
+    selected: rawModelRows[index]?.selected ?? false,
+  }));
 
   return (
     <Box
@@ -215,53 +409,101 @@ export function ModelPicker({ registry, current, recent, onSelect, onCancel }: M
       borderStyle="round"
       borderColor={theme.borderActive}
     >
-      <Text bold color={theme.accent}>Select Model</Text>
-      <SearchField query={query} placeholder="Type to search models..." />
-      <Text color={theme.muted}>↑/↓ navigate · Enter select · Esc cancel · Backspace clear</Text>
-      <Box flexDirection="column" marginTop={1}>
-        {options.length === 0 && (
-          <Text color={theme.muted}>No models match "{query}"</Text>
-        )}
-        {visible.map((opt, i) => {
-          const actualIndex = start + i;
-          const isSelected = actualIndex === selectedIndex;
-          return (
-            <Box key={opt.id}>
-              <Text color={isSelected ? theme.accent : undefined}>
-                {isSelected ? "> " : "  "}
-                {opt.label}
-              </Text>
-              <Box marginLeft={1}>
-                <Text color={theme.muted} dimColor>
-                  {opt.providerBadge}
-                </Text>
-              </Box>
-              {opt.id === current && (
-                <Box marginLeft={1}>
-                  <Text color={theme.accent}>●</Text>
-                </Box>
-              )}
-            </Box>
-          );
-        })}
+      <Text bold color={theme.accent}>{phase.kind === "effort" ? "Select Reasoning Effort" : "Select Model"}</Text>
+      {phase.kind === "effort" ? (
+        <EffortPickerView
+          model={phase.model}
+          selectedIndex={phase.selectedIndex}
+          bodyRows={bodyRows}
+          rowWidth={rowWidth}
+        />
+      ) : (
+        <>
+          <SearchField query={query} placeholder="Type to search models..." width={rowWidth} />
+          <Text color={theme.muted}>↑/↓ navigate · Enter choose effort · Esc cancel · Backspace clear</Text>
+        </>
+      )}
+      {phase.kind === "model" && <Box flexDirection="column" height={bodyRows} overflow="hidden" marginTop={1}>
+        {modelRows.map(({ key, row, selected }) => (
+          <Box key={key} height={1} overflow="hidden">
+            <Text color={selected ? theme.accent : (key === "no-results" ? theme.muted : undefined)} bold={selected}>
+              {row}
+            </Text>
+          </Box>
+        ))}
+      </Box>}
+    </Box>
+  );
+}
+
+function EffortPickerView({
+  model,
+  selectedIndex,
+  bodyRows,
+  rowWidth,
+}: {
+  model: ModelPickerOption;
+  selectedIndex: number;
+  bodyRows: number;
+  rowWidth: number;
+}) {
+  const theme = useTheme();
+  const safeSelectedIndex = clampPickerIndex(selectedIndex, model.reasoningLevels.length);
+  const rawRows = model.reasoningLevels.map((level, index) => ({
+    key: level,
+    row: formatEffortPickerRow(level, {
+      selected: index === safeSelectedIndex,
+      width: rowWidth,
+    }),
+    selected: index === safeSelectedIndex,
+  }));
+  const effortRows = padPickerRows(rawRows.map((row) => row.row), bodyRows, rowWidth).map((row, index) => ({
+    key: rawRows[index]?.key ?? `blank-${index}`,
+    row,
+    selected: rawRows[index]?.selected ?? false,
+  }));
+  const modelDetail = padVisual(
+    truncateVisual(`${model.label} · ${model.providerBadge}`, rowWidth),
+    rowWidth,
+  );
+
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      <Box height={1} overflow="hidden">
+        <Text color={theme.muted}>{modelDetail}</Text>
+      </Box>
+      <Text color={theme.muted}>↑/↓ navigate · Enter select · Esc back</Text>
+      <Box flexDirection="column" height={bodyRows} overflow="hidden" marginTop={1}>
+        {effortRows.map(({ key, row, selected }) => (
+          <Box key={key} height={1} overflow="hidden">
+            <Text color={selected ? theme.accent : undefined} bold={selected}>
+              {row}
+            </Text>
+          </Box>
+        ))}
       </Box>
     </Box>
   );
 }
 
-function SearchField({ query, placeholder }: { query: string; placeholder: string }) {
+function SearchField({ query, placeholder, width }: { query: string; placeholder: string; width?: number }) {
   const theme = useTheme();
   const [cursorVisible, setCursorVisible] = useState(true);
   useEffect(() => {
     const t = setInterval(() => setCursorVisible((v) => !v), 500);
     return () => clearInterval(t);
   }, []);
+  const contentBudget = width ? Math.max(1, width - 3) : undefined;
+  const visibleQuery = contentBudget ? truncateVisual(query, contentBudget) : query;
+  const visiblePlaceholder = !query
+    ? (contentBudget ? truncateVisual(` ${placeholder}`, contentBudget) : ` ${placeholder}`)
+    : "";
   return (
-    <Box marginTop={1} marginBottom={1}>
+    <Box height={1} overflow="hidden" marginTop={1}>
       <Text color={theme.accent}>{"❯ "}</Text>
-      <Text>{query}</Text>
+      <Text>{visibleQuery}</Text>
       <Text color={theme.accent} inverse={cursorVisible}> </Text>
-      {!query && <Text color={theme.muted} dimColor> {placeholder}</Text>}
+      {visiblePlaceholder && <Text color={theme.muted} dimColor>{visiblePlaceholder}</Text>}
     </Box>
   );
 }
@@ -305,6 +547,7 @@ export function buildLocalModelOptions(
       label: displayModel(current),
       group: "Current",
       providerBadge: provider?.name || providerId || "",
+      reasoningLevels: reasoningLevelsForModel(current),
     });
   }
 
@@ -327,16 +570,24 @@ function localModelsForProvider(registry: ProviderRegistry, provider: ReturnType
 function appendModelOption(
   options: ModelPickerOption[],
   seen: Set<string>,
-  option: ModelPickerOption,
+  option: Omit<ModelPickerOption, "reasoningLevels"> & { reasoningLevels?: ThinkingLevel[] },
 ): void {
   if (seen.has(option.id)) return;
   seen.add(option.id);
-  options.push(option);
+  options.push({
+    ...option,
+    reasoningLevels: option.reasoningLevels ?? reasoningLevelsForModel(option.id),
+  });
 }
 
 function preferredModelIndex(options: ModelPickerOption[], current: string): number {
   const idx = options.findIndex((option) => option.id === current);
   return idx >= 0 ? idx : 0;
+}
+
+function reasoningLevelsForModel(model: string): ThinkingLevel[] {
+  const { providerId, modelId } = decodeModel(model);
+  return getAvailableThinkingLevels(providerId || "openai", modelId);
 }
 
 export interface ProviderPickerProps {
@@ -359,6 +610,7 @@ export function ProviderPicker({ providers, current, onSelect, onCancel, title }
   });
 
   useInput((input, key) => {
+    if (isKeyReleaseEvent(key)) return;
     const action = resolvePickerKeyAction(input, key);
     if (action === "escape") {
       onCancel();
@@ -438,6 +690,7 @@ export function KeyPicker({ providerName, onSubmit, onCancel }: KeyPickerProps) 
   const [value, setValue] = useState("");
 
   useInput((input, key) => {
+    if (isKeyReleaseEvent(key)) return;
     const action = resolvePickerKeyAction(input, key);
     if (action === "escape") {
       onCancel();
@@ -504,6 +757,7 @@ export function SkillPicker({ skills, onSelect, onCancel }: SkillPickerProps) {
   }, [query, skills]);
 
   useInput((input, key) => {
+    if (isKeyReleaseEvent(key)) return;
     const action = resolvePickerKeyAction(input, key);
     if (action === "escape") {
       onCancel();

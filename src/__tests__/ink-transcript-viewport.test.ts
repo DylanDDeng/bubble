@@ -21,7 +21,7 @@ describe("transcript viewport math", () => {
     expect(clampScrollTop(10, 20, 40)).toBe(0);
   });
 
-  it("treats the bottom with one line of slack, mirroring the OpenTUI scrollbox", () => {
+  it("treats the bottom with one line of slack", () => {
     expect(isAtBottom(60, 100, 40)).toBe(true);
     expect(isAtBottom(59, 100, 40)).toBe(true);
     expect(isAtBottom(58, 100, 40)).toBe(false);

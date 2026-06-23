@@ -459,7 +459,7 @@ function TableBlock({
   const { columns: termWidth } = useTerminalSize();
   const colCount = headers.length;
   // Reserve a buffer so the table fits even when wrapped inside an indented
-  // box (e.g. the timeline gutter contributes marginLeft + "⛬  " = 5 cells).
+  // box (e.g. the timeline gutter contributes marginLeft + "●  " = 5 cells).
   const budget = Math.max(20, (maxWidth ?? termWidth) - 8);
 
   const maxWidths = headers.map((h, i) => {

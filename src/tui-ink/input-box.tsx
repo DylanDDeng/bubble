@@ -17,11 +17,15 @@ import {
 } from "./image-paste.js";
 import {
   appendHistoryEntry,
-  loadHistorySync,
+  loadHistoryEntriesSync,
   pushHistoryEntry,
   stepHistory,
+  type HistoryEntry,
+  type HistoryScope,
 } from "./input-history.js";
+import { isKeyReleaseEvent } from "./key-events.js";
 import { stripTerminalMouseSequences } from "./terminal-mouse.js";
+import { submitPayloadFingerprint } from "./submit-dedupe.js";
 export {
   createPastedContentMarker,
   expandPastedContentMarkers,
@@ -34,6 +38,7 @@ import {
   shouldCollapsePastedContent,
   type PastedContentReference,
 } from "../tui/paste-placeholder.js";
+import { imageDisplayLabel } from "../tui/image-display.js";
 
 export interface SubmitPayload {
   /** Fully-expanded text sent to the agent. */
@@ -41,6 +46,8 @@ export interface SubmitPayload {
   /** Text shown in the composer/transcript when it differs from the real text. */
   displayText?: string;
   images: ImageAttachment[];
+  /** First UI-only [Image #N] label reserved for this submitted payload. */
+  imageDisplayStart?: number;
 }
 
 interface InputBoxProps {
@@ -50,11 +57,6 @@ interface InputBoxProps {
    * turn instead of its idle-time behavior.
    */
   onQueue?: (payload: SubmitPayload) => void;
-  /**
-   * Receives scroll intent when Up/Down arrows are classified as synthetic
-   * wheel events (terminal alternate-scroll) rather than keyboard presses.
-   */
-  onWheelScroll?: (direction: "up" | "down", lines: number) => void;
   onPasteNotice?: (notice: string) => void;
   disabled?: boolean;
   cursorResetEpoch?: number;
@@ -62,12 +64,16 @@ interface InputBoxProps {
   draftEpoch?: number;
   onDraftApplied?: () => void;
   skillRegistry?: SkillRegistry;
+  localSlashCommands?: Array<{ name: string; description: string }>;
   terminalColumns: number;
   cwd: string;
+  sessionFile?: string;
+  nextImageLabelStart?: number;
 }
 
 const MIN_VISIBLE_LINES = 3;
 const MAX_VISIBLE_LINES = 6;
+const CURSOR_BLINK_INTERVAL_MS = 530;
 const PADDING_X = 1;
 const PROMPT = " > ";
 const MAX_VISIBLE_SUGGESTIONS = 8;
@@ -110,15 +116,52 @@ export function isCtrlCInput(input: string, key: { ctrl?: boolean }): boolean {
   return input === "\x03" || (key.ctrl === true && input.toLowerCase() === "c");
 }
 
+export function shouldUseLineComposerFrame(_background: string): boolean {
+  return true;
+}
+
+export function shouldUseHardwareComposerCursor(env: Record<string, string | undefined> = process.env): boolean {
+  return env.BUBBLE_HARDWARE_CURSOR === "1";
+}
+
+export function composerVerticalArrowDirection(key: {
+  upArrow?: boolean;
+  downArrow?: boolean;
+  eventType?: string;
+}): "up" | "down" | undefined {
+  if (key.upArrow) return "up";
+  if (key.downArrow) return "down";
+  return undefined;
+}
+
+export function resolveSoftwareCursorCellStyle(input: {
+  visible: boolean;
+  cursorBackground: string;
+  cursorForeground: string;
+  textColor: string;
+  rowBackground?: string;
+}): { backgroundColor?: string; color: string } {
+  if (input.visible) {
+    return {
+      backgroundColor: input.cursorBackground,
+      color: input.cursorForeground,
+    };
+  }
+  return {
+    backgroundColor: input.rowBackground,
+    color: input.textColor,
+  };
+}
+
 /**
  * Split a composer line around the cursor so the cell under it can render as
  * an inverse-video software cursor. The visible cursor must not depend on the
  * real terminal cursor: Ink only re-arms its one-shot cursor escape when the
  * component owning useCursor re-commits, so frames produced by other
  * components' local state (the waiting spinner, viewport scrolling) hide the
- * hardware cursor for most of an agent run. Drawing the cell ourselves keeps
- * the cursor visible on every frame; the real (mostly hidden) cursor is still
- * positioned for IME anchoring.
+ * hardware cursor for most of an agent run. Drawing and blinking the cell
+ * ourselves keeps it visible while preserving normal typing feedback; the real
+ * cursor is still positioned for IME anchoring.
  */
 export function splitLineAtCursor(
   lineText: string,
@@ -221,6 +264,76 @@ interface SlashSuggestion {
   description: string;
 }
 
+export interface TextHighlightRange {
+  start: number;
+  end: number;
+}
+
+export type ComposerTextSegmentKind = "normal" | "command" | "cursor";
+
+export interface ComposerTextSegment {
+  kind: ComposerTextSegmentKind;
+  text: string;
+}
+
+export function resolveSlashCommandHighlightRange(
+  input: string,
+  commandNames: Iterable<string>,
+): TextHighlightRange | null {
+  if (!input.startsWith("/")) return null;
+  const match = /^\/([^\s]+)/.exec(input);
+  if (!match) return null;
+  const commandName = match[1]?.toLowerCase();
+  if (!commandName) return null;
+  for (const name of commandNames) {
+    if (name.toLowerCase() === commandName) {
+      return { start: 0, end: match[0].length };
+    }
+  }
+  return null;
+}
+
+function splitHighlightedText(
+  text: string,
+  absStart: number,
+  highlight: TextHighlightRange | null,
+): ComposerTextSegment[] {
+  if (!text) return [];
+  if (!highlight) return [{ kind: "normal", text }];
+  const start = Math.max(0, highlight.start - absStart);
+  const end = Math.min(text.length, highlight.end - absStart);
+  if (start >= end) return [{ kind: "normal", text }];
+  const segments: ComposerTextSegment[] = [];
+  if (start > 0) segments.push({ kind: "normal", text: text.slice(0, start) });
+  segments.push({ kind: "command", text: text.slice(start, end) });
+  if (end < text.length) segments.push({ kind: "normal", text: text.slice(end) });
+  return segments;
+}
+
+export function splitComposerTextSegments(input: {
+  text: string;
+  absStart: number;
+  highlight: TextHighlightRange | null;
+  cursorOffset?: number;
+}): ComposerTextSegment[] {
+  if (input.cursorOffset === undefined) {
+    return splitHighlightedText(input.text, input.absStart, input.highlight);
+  }
+
+  const cursorOffset = Math.max(0, Math.min(input.text.length, input.cursorOffset));
+  const cursorSegments = splitLineAtCursor(input.text, cursorOffset);
+  const cursorConsumesSource = cursorOffset < input.text.length;
+  return [
+    ...splitHighlightedText(cursorSegments.before, input.absStart, input.highlight),
+    { kind: "cursor" as const, text: cursorSegments.at },
+    ...splitHighlightedText(
+      cursorSegments.after,
+      input.absStart + cursorOffset + (cursorConsumesSource ? cursorSegments.at.length : 0),
+      input.highlight,
+    ),
+  ];
+}
+
 export function shouldSubmitExactSlashSuggestion(input: string, suggestionName?: string): boolean {
   if (!suggestionName) return false;
   return input.trim() === `/${suggestionName}`;
@@ -270,10 +383,100 @@ export function insertNewlineAtCursor(text: string, cursor: number) {
   };
 }
 
+export function previousWordBoundary(text: string, cursor: number): number {
+  const clampedCursor = Math.max(0, Math.min(text.length, cursor));
+  if (clampedCursor === 0) return 0;
+  let index = clampedCursor - 1;
+  while (index > 0 && /\s/.test(text[index]!)) index--;
+  while (index > 0 && !/\s/.test(text[index - 1]!)) index--;
+  return index;
+}
+
+export function nextWordBoundary(text: string, cursor: number): number {
+  const clampedCursor = Math.max(0, Math.min(text.length, cursor));
+  if (clampedCursor === text.length) return text.length;
+  let index = clampedCursor;
+  while (index < text.length && /\s/.test(text[index]!)) index++;
+  while (index < text.length && !/\s/.test(text[index]!)) index++;
+  return index;
+}
+
+export function lineStartBoundary(text: string, cursor: number): number {
+  const clampedCursor = Math.max(0, Math.min(text.length, cursor));
+  return text.lastIndexOf("\n", clampedCursor - 1) + 1;
+}
+
+export function lineEndBoundary(text: string, cursor: number): number {
+  const clampedCursor = Math.max(0, Math.min(text.length, cursor));
+  const lineEnd = text.indexOf("\n", clampedCursor);
+  return lineEnd === -1 ? text.length : lineEnd;
+}
+
+export function deleteToLineStart(text: string, cursor: number): { text: string; cursor: number } {
+  const clampedCursor = Math.max(0, Math.min(text.length, cursor));
+  const lineStart = lineStartBoundary(text, clampedCursor);
+  return {
+    text: text.slice(0, lineStart) + text.slice(clampedCursor),
+    cursor: lineStart,
+  };
+}
+
+export function deleteToLineEnd(text: string, cursor: number): { text: string; cursor: number } {
+  const clampedCursor = Math.max(0, Math.min(text.length, cursor));
+  const lineEnd = lineEndBoundary(text, clampedCursor);
+  return {
+    text: text.slice(0, clampedCursor) + text.slice(lineEnd),
+    cursor: clampedCursor,
+  };
+}
+
+export function deleteAtCursor(text: string, cursor: number): { text: string; cursor: number } {
+  const clampedCursor = Math.max(0, Math.min(text.length, cursor));
+  if (clampedCursor >= text.length) return { text, cursor: clampedCursor };
+  return {
+    text: text.slice(0, clampedCursor) + text.slice(clampedCursor + 1),
+    cursor: clampedCursor,
+  };
+}
+
+export type ComposerEditAction =
+  | "word-left"
+  | "word-right"
+  | "line-start"
+  | "line-end"
+  | "delete-line-start"
+  | "delete-line-end";
+
+export function resolveComposerEditAction(
+  input: string,
+  key: {
+    ctrl?: boolean;
+    meta?: boolean;
+    leftArrow?: boolean;
+    rightArrow?: boolean;
+    home?: boolean;
+    end?: boolean;
+  },
+): ComposerEditAction | null {
+  if (key.home) return "line-start";
+  if (key.end) return "line-end";
+
+  const wordModifier = key.ctrl || key.meta;
+  if (wordModifier && key.leftArrow) return "word-left";
+  if (wordModifier && key.rightArrow) return "word-right";
+
+  const lowerInput = input.toLowerCase();
+  if ((key.ctrl && lowerInput === "a") || input === "\x01") return "line-start";
+  if ((key.ctrl && lowerInput === "e") || input === "\x05") return "line-end";
+  if ((key.ctrl && lowerInput === "u") || input === "\x15") return "delete-line-start";
+  if ((key.ctrl && lowerInput === "k") || input === "\x0b") return "delete-line-end";
+
+  return null;
+}
+
 export function InputBox({
   onSubmit,
   onQueue,
-  onWheelScroll,
   onPasteNotice,
   disabled,
   cursorResetEpoch = 0,
@@ -281,21 +484,30 @@ export function InputBox({
   draftEpoch = 0,
   onDraftApplied,
   skillRegistry,
+  localSlashCommands = [],
   terminalColumns,
   cwd,
+  sessionFile,
+  nextImageLabelStart = 1,
 }: InputBoxProps) {
   const theme = useTheme();
   const width = terminalColumns;
+  const historyScope = useMemo<HistoryScope>(() => ({ sessionFile, cwd }), [sessionFile, cwd]);
+  const hardwareCursorEnabled = shouldUseHardwareComposerCursor();
 
   const [text, setText] = useState("");
   const [cursor, setCursor] = useState(0);
+  const [softwareCursorVisible, setSoftwareCursorVisible] = useState(true);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [projectFiles, setProjectFiles] = useState<string[] | null>(null);
   const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
+  const [imageLabelStartOverride, setImageLabelStartOverride] = useState<number | null>(null);
   const [pastedContentRefs, setPastedContentRefs] = useState<PastedContentReference[]>([]);
-  const [history, setHistory] = useState<string[]>(() => loadHistorySync());
+  const [history, setHistory] = useState<HistoryEntry[]>(() => loadHistoryEntriesSync({ scope: historyScope }));
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
-  const historyDraftRef = useRef<string>("");
+  const historyDraftRef = useRef<string | HistoryEntry>("");
+  const historyScopeRef = useRef(historyScope);
+  const submittedPayloadFingerprintRef = useRef<string | null>(null);
   const loadingFilesRef = useRef(false);
   const nextPastedContentIndexRef = useRef(1);
   // Paste and the keystrokes that follow can arrive inside the same stdin chunk
@@ -305,6 +517,19 @@ export function InputBox({
   // This ref flips synchronously at paste-start and clears after the paste
   // commit has been flushed — useInput's Enter handler bails while it's set.
   const pastePendingRef = useRef(false);
+
+  historyScopeRef.current = historyScope;
+
+  const ensureImageLabelStart = React.useCallback(() => {
+    setImageLabelStartOverride((current) => current ?? nextImageLabelStart);
+  }, [nextImageLabelStart]);
+
+  useEffect(() => {
+    setHistory(loadHistoryEntriesSync({ scope: historyScope }));
+    setHistoryIndex(null);
+    setImageLabelStartOverride(null);
+    historyDraftRef.current = "";
+  }, [historyScope]);
 
   const isSlashContext = text.startsWith("/") && cursor > 0 && !text.includes("\n");
   const slashPrefix = isSlashContext ? text.slice(1).toLowerCase() : "";
@@ -323,22 +548,28 @@ export function InputBox({
     );
   }, [atContext, cwd, projectFiles]);
 
-  // Request a steady (non-blinking) block cursor via DECSCUSR while this
-  // component is mounted. Terminals default to a blinking cursor, which is
-  // distracting in an input that you'd glance away from. Restore the
-  // terminal default on unmount so the user's shell isn't left with our
-  // choice sticking around.
+  // The rendered inverse-video cell below is the visible cursor. Keep Ink's
+  // terminal cursor hidden by default so it can't race the software cursor; the
+  // hardware cursor can be enabled for IME diagnostics with BUBBLE_HARDWARE_CURSOR=1.
   useEffect(() => {
+    if (!hardwareCursorEnabled) return;
     if (!process.stdout.isTTY) return;
-    process.stdout.write("\x1b[2 q"); // steady block
+    process.stdout.write("\x1b[1 q"); // blinking block
     return () => {
       process.stdout.write("\x1b[0 q"); // reset to terminal default
     };
-  }, []);
+  }, [hardwareCursorEnabled]);
 
   const slashSuggestions = useMemo(() => {
     if (!isSlashContext) return [];
-    const commandSuggestions: SlashSuggestion[] = slashRegistry.list().map((command) => ({
+    const commands = new Map<string, { name: string; description: string }>();
+    for (const command of localSlashCommands) {
+      commands.set(command.name, command);
+    }
+    for (const command of slashRegistry.list()) {
+      if (!commands.has(command.name)) commands.set(command.name, command);
+    }
+    const commandSuggestions: SlashSuggestion[] = [...commands.values()].map((command) => ({
       type: "command",
       name: command.name,
       description: command.description,
@@ -350,7 +581,20 @@ export function InputBox({
     }));
     const all = [...commandSuggestions, ...skillSuggestions];
     return all.filter((item) => item.name.toLowerCase().startsWith(slashPrefix));
-  }, [isSlashContext, slashPrefix, skillRegistry]);
+  }, [isSlashContext, slashPrefix, skillRegistry, localSlashCommands]);
+
+  const knownSlashCommandNames = useMemo(() => {
+    const names = new Set<string>();
+    for (const command of localSlashCommands) names.add(command.name);
+    for (const command of slashRegistry.list()) names.add(command.name);
+    for (const skill of skillRegistry?.summaries() ?? []) names.add(skill.name);
+    return names;
+  }, [skillRegistry, localSlashCommands]);
+
+  const slashCommandHighlight = useMemo(
+    () => resolveSlashCommandHighlightRange(text, knownSlashCommandNames),
+    [text, knownSlashCommandNames],
+  );
 
   const fileSuggestions = useMemo(() => {
     if (!atContext || !projectFiles) return [];
@@ -390,8 +634,9 @@ export function InputBox({
   );
 
   const addAttachment = React.useCallback((att: ImageAttachment) => {
+    ensureImageLabelStart();
     setAttachments((prev) => [...prev, att]);
-  }, []);
+  }, [ensureImageLabelStart]);
 
   const notice = React.useCallback(
     (msg: string) => {
@@ -536,24 +781,37 @@ export function InputBox({
     const expandedText = expandPastedContentMarkers(submittedText, pastedContentRefs);
     if (expandedText.trim().length === 0 && attachments.length === 0) return;
     const deliver = target === "queue" && onQueue ? onQueue : onSubmit;
-    deliver({
+    const payload = {
       text: expandedText,
       displayText: expandedText === submittedText ? undefined : submittedText,
       images: attachments,
-    });
+      imageDisplayStart: attachments.length > 0 ? (imageLabelStartOverride ?? nextImageLabelStart) : undefined,
+    };
+    const fingerprint = submitPayloadFingerprint(payload);
+    if (submittedPayloadFingerprintRef.current === fingerprint) return;
+    submittedPayloadFingerprintRef.current = fingerprint;
+    deliver(payload);
     // A collapsed marker cannot be safely replayed from history once its
     // in-memory paste reference is gone; skip those entries instead.
-    if (expandedText.trim().length > 0 && expandedText === submittedText) {
-      const nextHistory = pushHistoryEntry(history, expandedText);
-      if (nextHistory !== history) {
-        setHistory(nextHistory);
-        appendHistoryEntry(expandedText);
-      }
+    if (expandedText === submittedText && (expandedText.trim().length > 0 || attachments.length > 0)) {
+      const historyEntry: HistoryEntry = {
+        text: expandedText,
+        images: attachments,
+        ...(attachments.length > 0 ? { imageDisplayStart: imageLabelStartOverride ?? nextImageLabelStart } : {}),
+      };
+      setHistory((current) => {
+        const nextHistory = pushHistoryEntry(current, historyEntry);
+        if (nextHistory !== current) {
+          appendHistoryEntry(historyEntry, { scope: historyScopeRef.current });
+        }
+        return nextHistory;
+      });
     }
     setText("");
     setCursor(0);
     setSelectedIndex(0);
     setAttachments([]);
+    setImageLabelStartOverride(null);
     setPastedContentRefs([]);
     nextPastedContentIndexRef.current = 1;
     setHistoryIndex(null);
@@ -576,6 +834,7 @@ export function InputBox({
   };
 
   useInput((input, key) => {
+    if (isKeyReleaseEvent(key)) return;
     const strippedInput = stripTerminalMouseSequences(input);
     if (strippedInput !== input && !strippedInput) {
       return;
@@ -626,13 +885,15 @@ export function InputBox({
       return;
     }
 
+    const composerArrowDirection = composerVerticalArrowDirection(key);
+
     // Autocomplete navigation
     if (showSuggestions) {
-      if (navigable && key.upArrow) {
+      if (navigable && composerArrowDirection === "up") {
         setSelectedIndex((i) => (i - 1 + activeCount) % activeCount);
         return;
       }
-      if (navigable && key.downArrow) {
+      if (navigable && composerArrowDirection === "down") {
         setSelectedIndex((i) => (i + 1) % activeCount);
         return;
       }
@@ -681,7 +942,30 @@ export function InputBox({
       return;
     }
 
-    if (key.backspace || key.delete) {
+    const editAction = resolveComposerEditAction(input, key);
+    if (editAction) {
+      if (editAction === "word-left") {
+        setCursor(previousWordBoundary(text, cursor));
+      } else if (editAction === "word-right") {
+        setCursor(nextWordBoundary(text, cursor));
+      } else if (editAction === "line-start") {
+        setCursor(lineStartBoundary(text, cursor));
+      } else if (editAction === "line-end") {
+        setCursor(lineEndBoundary(text, cursor));
+      } else if (editAction === "delete-line-start") {
+        const next = deleteToLineStart(text, cursor);
+        setText(next.text);
+        setCursor(next.cursor);
+      } else {
+        const next = deleteToLineEnd(text, cursor);
+        setText(next.text);
+        setCursor(next.cursor);
+      }
+      setSelectedIndex(0);
+      return;
+    }
+
+    if (key.backspace) {
       if (cursor > 0) {
         const before = text.slice(0, cursor - 1);
         const after = text.slice(cursor);
@@ -691,7 +975,21 @@ export function InputBox({
       } else if (attachments.length > 0) {
         // Backspace at position 0 drops the most recent attachment so users
         // can undo a misfired paste without submitting the message.
-        setAttachments((prev) => prev.slice(0, -1));
+        setAttachments((prev) => {
+          const next = prev.slice(0, -1);
+          if (next.length === 0) setImageLabelStartOverride(null);
+          return next;
+        });
+      }
+      return;
+    }
+
+    if (key.delete) {
+      if (cursor < text.length) {
+        const next = deleteAtCursor(text, cursor);
+        setText(next.text);
+        setCursor(next.cursor);
+        setSelectedIndex(0);
       }
       return;
     }
@@ -707,7 +1005,9 @@ export function InputBox({
       return;
     }
     if (key.upArrow || key.downArrow) {
-      classifyVerticalArrow(key.upArrow ? "up" : "down", key.eventType);
+      if (composerArrowDirection) {
+        classifyVerticalArrow(composerArrowDirection);
+      }
       return;
     }
 
@@ -766,12 +1066,20 @@ export function InputBox({
     setText(draftText);
     setCursor(draftText.length);
     setSelectedIndex(0);
+    setAttachments([]);
+    setImageLabelStartOverride(null);
     setPastedContentRefs([]);
     nextPastedContentIndexRef.current = 1;
     setHistoryIndex(null);
     historyDraftRef.current = "";
     onDraftApplied?.();
   }, [draftEpoch, draftText, onDraftApplied]);
+
+  useEffect(() => {
+    if (text || attachments.length > 0) {
+      submittedPayloadFingerprintRef.current = null;
+    }
+  }, [text, attachments.length]);
 
   // After a terminal resize the previous-frame refs reference a layout that no
   // longer exists; carrying them forward makes `needsCursorRowCompensation`
@@ -791,48 +1099,62 @@ export function InputBox({
 
   const contentWidth = Math.max(1, width - PADDING_X * 2);
   const lineWidth = Math.max(1, contentWidth - PROMPT.length);
+  const imageLabelStart = imageLabelStartOverride ?? nextImageLabelStart;
+  const attachmentLabels = useMemo(
+    () => attachments.map((_, index) => imageDisplayLabel(imageLabelStart + index)),
+    [attachments, imageLabelStart],
+  );
+  const imageInlinePrefix = attachmentLabels.length > 0 ? `${attachmentLabels.join(" ")} ` : "";
+  const displayText = imageInlinePrefix + text;
+  const displayCursor = cursor + imageInlinePrefix.length;
+  const displayCursorToSourceCursor = (value: number) =>
+    Math.max(0, Math.min(text.length, value - imageInlinePrefix.length));
+
+  useEffect(() => {
+    if (disabled) {
+      setSoftwareCursorVisible(false);
+      return;
+    }
+    setSoftwareCursorVisible(true);
+    const timer = setInterval(() => {
+      setSoftwareCursorVisible((visible) => !visible);
+    }, CURSOR_BLINK_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [disabled, displayCursor, displayText]);
 
   const visualLines = useMemo(
-    () => computeVisualLines(text, lineWidth),
-    [text, lineWidth],
+    () => computeVisualLines(displayText, lineWidth),
+    [displayText, lineWidth],
   );
-  const { row: cursorVisualRow, col: cursorVisualCol } = cursorToVisual(visualLines, cursor);
+  const { row: cursorVisualRow, col: cursorVisualCol } = cursorToVisual(visualLines, displayCursor);
 
   // ---- Wheel-vs-keyboard classification for Up/Down arrows ----
   //
-  // With mouse reporting off (so native drag-select/copy works), terminals
-  // translate the wheel into Up/Down arrow keys while in the alternate
-  // screen. Those synthetic arrows must scroll the transcript, not move the
-  // composer cursor or browse history. Three signals, in priority order:
-  //   1. kitty keyboard protocol: real key presses carry `eventType`;
-  //      synthetic wheel arrows are bare legacy sequences. Once one enhanced
-  //      arrow is seen, bare arrows are classified as wheel with no delay.
-  //   2. burst heuristic (non-kitty terminals): a wheel notch delivers
-  //      several arrows within a few ms; a keypress delivers one. The first
-  //      arrow is briefly deferred to see whether siblings follow.
-  //   3. wheel session: shortly after a wheel burst, single arrows continue
-  //      to scroll, so slow trackpad scrolling doesn't fall back to history.
+  // Up/Down reaching the composer are keyboard navigation: move within
+  // multiline input first, then browse prompt history at the top/bottom edge.
   const performVerticalArrowRef = useRef<(direction: "up" | "down") => void>(() => {});
   performVerticalArrowRef.current = (direction) => {
     if (direction === "up") {
       if (cursorVisualRow > 0) {
-        setCursor(visualToCursor(visualLines, cursorVisualRow - 1, cursorVisualCol));
+        setCursor(displayCursorToSourceCursor(visualToCursor(visualLines, cursorVisualRow - 1, cursorVisualCol)));
         return;
       }
     } else {
       if (cursorVisualRow < visualLines.length - 1) {
-        setCursor(visualToCursor(visualLines, cursorVisualRow + 1, cursorVisualCol));
+        setCursor(displayCursorToSourceCursor(visualToCursor(visualLines, cursorVisualRow + 1, cursorVisualCol)));
         return;
       }
     }
     const result = stepHistory(
       { history, index: historyIndex, draft: historyDraftRef.current },
       direction,
-      text,
+      { text, images: attachments },
     );
     if (result.changed) {
       setText(result.text);
       setCursor(result.text.length);
+      setAttachments(result.images ?? []);
+      setImageLabelStartOverride(result.imageDisplayStart ?? null);
       setHistoryIndex(result.index);
       historyDraftRef.current = result.draft;
       setSelectedIndex(0);
@@ -840,69 +1162,14 @@ export function InputBox({
       nextPastedContentIndexRef.current = 1;
     }
   };
-  const kittyArrowsSeenRef = useRef(false);
-  const arrowBurstRef = useRef<{
-    direction: "up" | "down";
-    count: number;
-    timer: ReturnType<typeof setTimeout>;
-  } | null>(null);
-  const lastWheelFlushRef = useRef(0);
-  const ARROW_BURST_WINDOW_MS = 20;
-  const WHEEL_SESSION_MS = 300;
-  const flushArrowBurst = (burst: { direction: "up" | "down"; count: number }) => {
-    if (burst.count > 1 && onWheelScroll) {
-      lastWheelFlushRef.current = Date.now();
-      onWheelScroll(burst.direction, burst.count);
-    } else {
-      performVerticalArrowRef.current(burst.direction);
-    }
+  const classifyVerticalArrow = (direction: "up" | "down") => {
+    performVerticalArrowRef.current(direction);
   };
-  const classifyVerticalArrow = (direction: "up" | "down", eventType?: string) => {
-    if (eventType) {
-      kittyArrowsSeenRef.current = true;
-      performVerticalArrowRef.current(direction);
-      return;
-    }
-    if (!onWheelScroll) {
-      performVerticalArrowRef.current(direction);
-      return;
-    }
-    if (kittyArrowsSeenRef.current) {
-      lastWheelFlushRef.current = Date.now();
-      onWheelScroll(direction, 1);
-      return;
-    }
-    const pending = arrowBurstRef.current;
-    if (pending) {
-      if (pending.direction === direction) {
-        pending.count += 1;
-        return;
-      }
-      clearTimeout(pending.timer);
-      arrowBurstRef.current = null;
-      flushArrowBurst(pending);
-    }
-    if (Date.now() - lastWheelFlushRef.current < WHEEL_SESSION_MS) {
-      lastWheelFlushRef.current = Date.now();
-      onWheelScroll(direction, 1);
-      return;
-    }
-    const burst = {
-      direction,
-      count: 1,
-      timer: setTimeout(() => {
-        arrowBurstRef.current = null;
-        flushArrowBurst(burst);
-      }, ARROW_BURST_WINDOW_MS),
-    };
-    arrowBurstRef.current = burst;
-  };
-  useEffect(() => () => {
-    if (arrowBurstRef.current) clearTimeout(arrowBurstRef.current.timer);
-  }, []);
 
+  const lineFrame = shouldUseLineComposerFrame(theme.background);
+  const minVisibleLines = lineFrame ? 1 : MIN_VISIBLE_LINES;
   const totalLines = Math.max(visualLines.length, 1);
-  const visibleLines = Math.min(Math.max(totalLines, MIN_VISIBLE_LINES), MAX_VISIBLE_LINES);
+  const visibleLines = Math.min(Math.max(totalLines, minVisibleLines), MAX_VISIBLE_LINES);
 
   let scrollOffset = 0;
   if (totalLines > visibleLines) {
@@ -942,6 +1209,7 @@ export function InputBox({
   const inputFrameSignature = [
     disabled ? "disabled" : "active",
     text,
+    imageInlinePrefix,
     scrollOffset.toString(),
     visibleLines.toString(),
     attachments.map((att) => `${att.filename ?? "clipboard"}:${att.bytes}`).join(","),
@@ -962,6 +1230,13 @@ export function InputBox({
   // flicker every time streaming output above it re-lays out the frame, so
   // we hide it entirely until input is active again.
   useLayoutEffect(() => {
+    if (!hardwareCursorEnabled) {
+      if (lastCursorRef.current !== null) {
+        lastCursorRef.current = null;
+      }
+      setCursorPosition(undefined);
+      return;
+    }
     let node: DOMElement | undefined = cursorLineRef.current ?? undefined;
     if (!node?.yogaNode) {
       if (disabled && lastCursorRef.current !== null) {
@@ -1043,6 +1318,15 @@ export function InputBox({
   // Reference cursorTick so the effect re-runs on the forced render pass.
   void cursorTick;
   const inputBg = disabled ? theme.inputBgDisabled : theme.inputBg;
+  const rowBg = lineFrame ? undefined : inputBg;
+  const cursorFg = lineFrame ? theme.background : inputBg;
+  const cursorCellStyle = resolveSoftwareCursorCellStyle({
+    visible: softwareCursorVisible,
+    cursorBackground: theme.inputText,
+    cursorForeground: cursorFg,
+    textColor: theme.inputText,
+    rowBackground: rowBg,
+  });
   const moreBelow = totalLines - scrollOffset - visibleLines;
 
   const filledLine = (value: string) => {
@@ -1052,44 +1336,41 @@ export function InputBox({
 
   return (
     <Box flexDirection="column" width={width} backgroundColor={theme.background}>
-      {attachments.length > 0 && (
-        <Box flexDirection="row" flexWrap="wrap" paddingX={PADDING_X} marginBottom={0}>
-          {attachments.map((att, i) => {
-            const label = att.filename || "clipboard";
-            const kb = Math.max(1, Math.round(att.bytes / 1024));
-            return (
-              <Box key={i} marginRight={1}>
-                <Text color={theme.accent}>{`[img${attachments.length > 1 ? ` ${i + 1}` : ""}: ${label} · ${kb}KB]`}</Text>
-              </Box>
-            );
-          })}
+      {lineFrame && (
+        <Box paddingX={PADDING_X}>
+          <Text color={theme.border}>{"─".repeat(contentWidth)}</Text>
         </Box>
       )}
       <Box flexDirection="column" paddingX={PADDING_X} width={width} backgroundColor={inputBg}>
         {hasMoreAbove && (
-          <Text backgroundColor={inputBg} color={theme.muted} dimColor>
+          <Text backgroundColor={rowBg} color={theme.muted} dimColor>
             {filledLine(` ↑ ${scrollOffset} more`)}
           </Text>
         )}
         {displayedLines.map((row) => {
           if (row.kind === "pad") {
             return (
-              <Text key={row.key} backgroundColor={inputBg}>
+              <Text key={row.key} backgroundColor={rowBg}>
                 {" ".repeat(contentWidth)}
               </Text>
             );
           }
           const { text: line, visualIdx } = row;
+          const visualLine = visualLines[visualIdx];
           const lineText = line.length === 0 ? " " : line;
           const isFirst = visualIdx === 0;
           const isCursorLine = visualIdx === cursorVisualRow;
           const prompt = isFirst ? PROMPT : " ".repeat(PROMPT.length);
-          const cursorSegments = isCursorLine && !disabled
-            ? splitLineAtCursor(lineText, cursor - (visualLines[cursorVisualRow]?.absStart ?? 0))
-            : null;
-          const renderedLine = cursorSegments
-            ? cursorSegments.before + cursorSegments.at + cursorSegments.after
-            : lineText;
+          const highlight = imageInlinePrefix ? null : slashCommandHighlight;
+          const renderedSegments = splitComposerTextSegments({
+            text: lineText,
+            absStart: visualLine?.absStart ?? 0,
+            highlight,
+            cursorOffset: isCursorLine && !disabled
+              ? displayCursor - (visualLines[cursorVisualRow]?.absStart ?? 0)
+              : undefined,
+          });
+          const renderedLine = renderedSegments.map((segment) => segment.text).join("");
           const fill = " ".repeat(Math.max(0, lineWidth - stringWidth(renderedLine)));
           return (
             <Box
@@ -1105,32 +1386,43 @@ export function InputBox({
                   : undefined
               }
             >
-              <Text backgroundColor={inputBg} color={isFirst ? theme.accent : theme.inputText}>
+              <Text backgroundColor={rowBg} color={isFirst ? theme.accent : theme.inputText}>
                 {prompt}
               </Text>
-              {cursorSegments ? (
-                <>
-                  {cursorSegments.before && (
-                    <Text backgroundColor={inputBg} color={theme.inputText}>{cursorSegments.before}</Text>
-                  )}
-                  <Text backgroundColor={theme.inputText} color={inputBg}>{cursorSegments.at}</Text>
-                  {cursorSegments.after && (
-                    <Text backgroundColor={inputBg} color={theme.inputText}>{cursorSegments.after}</Text>
-                  )}
-                </>
-              ) : (
-                <Text backgroundColor={inputBg} color={theme.inputText}>{lineText}</Text>
-              )}
-              <Text backgroundColor={inputBg}>{fill}</Text>
+              {renderedSegments.map((segment, index) => {
+                if (segment.kind === "cursor") {
+                  return (
+                    <Text key={index} backgroundColor={cursorCellStyle.backgroundColor} color={cursorCellStyle.color}>
+                      {segment.text}
+                    </Text>
+                  );
+                }
+                return (
+                  <Text
+                    key={index}
+                    backgroundColor={rowBg}
+                    color={segment.kind === "command" ? theme.accent : theme.inputText}
+                    bold={segment.kind === "command"}
+                  >
+                    {segment.text}
+                  </Text>
+                );
+              })}
+              <Text backgroundColor={rowBg}>{fill}</Text>
             </Box>
           );
         })}
         {hasMoreBelow && (
-          <Text backgroundColor={inputBg} color={theme.muted} dimColor>
+          <Text backgroundColor={rowBg} color={theme.muted} dimColor>
             {filledLine(` ↓ ${moreBelow} more`)}
           </Text>
         )}
       </Box>
+      {lineFrame && (
+        <Box paddingX={PADDING_X}>
+          <Text color={theme.border}>{"─".repeat(contentWidth)}</Text>
+        </Box>
+      )}
       {showSuggestions && mode === "slash" && (
         <Box flexDirection="column" marginTop={1} paddingLeft={4}>
           {slashSuggestions

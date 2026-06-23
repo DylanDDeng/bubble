@@ -22,10 +22,10 @@ export interface Theme {
   success: string;
 
   // UI chrome
+  background: string;
   accent: string;
   border: string;
   borderActive: string;
-  background: string;
   backgroundPanel: string;
   backgroundElement: string;
   inputBorder: string;
@@ -71,10 +71,10 @@ export const darkTheme: Theme = {
   warning: "yellow",
   success: "green",
 
+  background: "#0A0A0A",
   accent: "cyan",
   border: "gray",
   borderActive: "cyan",
-  background: "#0A0A0A",
   backgroundPanel: "#141414",
   backgroundElement: "#1c1c24",
   inputBorder: "#8A7FC6",
@@ -111,9 +111,9 @@ export const darkTheme: Theme = {
 };
 
 /**
- * Light palette aligned with the restored OpenTUI runtime: paper-neutral
- * surfaces, blue focus/user rails, warm command accent, and semantic tool
- * colors tuned for readable contrast on a light terminal background.
+ * Light palette tuned for paper-neutral surfaces, blue focus/user rails, warm
+ * command accent, and semantic tool colors with readable contrast on a light
+ * terminal background.
  */
 export const lightTheme: Theme = {
   user: "#356FD2",
@@ -122,16 +122,16 @@ export const lightTheme: Theme = {
   warning: "#8B4A00",
   success: "#2F7D4A",
 
+  background: "#FCFCFA",
   accent: "#8B4A00",
   border: "#B9BDB8",
   borderActive: "#356FD2",
-  background: "#FCFCFA",
   backgroundPanel: "#F6F6F3",
   backgroundElement: "#ECEDEA",
   inputBorder: "#356FD2",
   inputBorderDisabled: "#D7DAD4",
   inputBg: "#F1F3F0",
-  inputBgDisabled: "#E6E8E3",
+  inputBgDisabled: "#F6F6F3",
   inputText: "#171717",
   inputPlaceholder: "#6F7377",
   muted: "#6F7377",

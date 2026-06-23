@@ -1,6 +1,8 @@
 import React, { useState } from "react";
 import { Box, Text, useInput } from "ink";
+import { isKeyReleaseEvent } from "../key-events.js";
 import { useTheme } from "../theme.js";
+import { stripTerminalMouseSequences } from "../terminal-mouse.js";
 
 export interface ApprovalOption {
   /** Stable identifier returned to the parent. */
@@ -67,6 +69,12 @@ export function ApprovalSelect({
   const currentValue = focused?.editableValue ? editedValues[focused.id] ?? "" : "";
 
   useInput((input, key) => {
+    if (isKeyReleaseEvent(key)) return;
+    const strippedMouseInput = stripTerminalMouseSequences(input);
+    if (strippedMouseInput !== input) {
+      if (!strippedMouseInput) return;
+      input = strippedMouseInput;
+    }
     if (amending) {
       if (key.escape) {
         setAmending(false);

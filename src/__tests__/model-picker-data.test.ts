@@ -21,7 +21,7 @@ function registryStub(overrides: Record<string, unknown> = {}) {
   } as any;
 }
 
-describe("OpenTUI model picker data", () => {
+describe("model picker data", () => {
   it("uses the OpenAI Codex fallback catalog for ChatGPT OAuth providers", () => {
     const models = localModelsForProvider(registryStub(), openaiOAuthProvider);
 

@@ -28,4 +28,26 @@ describe("goalCompleteNotice", () => {
     })!;
     expect(goalCompleteNotice(g)).toBe("Goal complete — 45.2K/200K tok used over 1 turn.");
   });
+
+  it("does not report zero tokens when provider usage is unavailable", () => {
+    const g = goal((s) => {
+      s.set("x");
+      s.markTokenUsageUnavailable();
+      s.incrementTurn();
+    })!;
+    expect(goalCompleteNotice(g)).toBe("Goal complete — token usage unavailable over 1 turn.");
+  });
+
+  it("reports tracked tokens and unavailable usage gaps together", () => {
+    const g = goal((s) => {
+      s.set("x", { tokenBudget: 200_000 });
+      s.addTokens(45_200);
+      s.markTokenUsageUnavailable();
+      s.incrementTurn();
+      s.incrementTurn();
+    })!;
+    expect(goalCompleteNotice(g)).toBe(
+      "Goal complete — 45.2K/200K tok used, plus unavailable usage over 2 turns.",
+    );
+  });
 });

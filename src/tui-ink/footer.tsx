@@ -6,6 +6,7 @@ import { PERMISSION_MODE_INFO } from "../permission/mode.js";
 
 export interface FooterData {
   mode?: PermissionMode;
+  goalLine?: string;
 }
 
 /**
@@ -14,11 +15,23 @@ export interface FooterData {
  * (zero rows) in the default mode.
  */
 export function FooterBar({ data }: { data: FooterData }) {
-  if (!data.mode || data.mode === "default") return null;
+  const showMode = !!data.mode && data.mode !== "default";
+  const goalLine = data.goalLine?.trim();
+  if (!showMode && !goalLine) return null;
   return (
-    <Box paddingX={1} flexShrink={0}>
-      <ModeBadge mode={data.mode} />
+    <Box paddingX={1} flexShrink={0} flexDirection="column">
+      {goalLine && <GoalBadge line={goalLine} />}
+      {showMode && <ModeBadge mode={data.mode} />}
     </Box>
+  );
+}
+
+function GoalBadge({ line }: { line: string }) {
+  const theme = useTheme();
+  return (
+    <Text color={theme.muted}>
+      {line}
+    </Text>
   );
 }
 
