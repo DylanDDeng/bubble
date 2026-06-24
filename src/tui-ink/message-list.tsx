@@ -323,8 +323,11 @@ const MessageItem = React.memo(function MessageItem({
   }
 
   const visibleReasoning = sanitizeInternalReminderBlocks(message.reasoning ?? "").trim();
+  // Same defense as reasoning: strip any internal reminder markup the model
+  // echoed back into its visible answer so it never reaches the transcript.
+  const visibleContent = sanitizeInternalReminderBlocks(message.content ?? "");
   const hasVisibleAssistantContent =
-    !!message.content ||
+    !!visibleContent.trim() ||
     (message.toolCalls?.length ?? 0) > 0 ||
     (message.parts?.length ?? 0) > 0 ||
     (!!visibleReasoning && (showThinking || verboseTrace));
@@ -356,7 +359,7 @@ const MessageItem = React.memo(function MessageItem({
               nowTick={nowTick}
             />
           )}
-          {message.content && <MarkdownContent content={message.content} />}
+          {visibleContent.trim() && <MarkdownContent content={visibleContent} />}
         </>
       )}
       {verboseTrace && message.toolCalls && message.toolCalls.length > 0 && (
@@ -511,12 +514,18 @@ function TimelineText({
   streaming?: boolean;
 }) {
   const theme = useTheme();
-  if (!content.trim()) return null;
+  // Strip any internal reminder/context markup the model echoed back into its
+  // visible text — the reasoning path already does this. Without it, a model
+  // that parrots a <bubble_internal_*> block (e.g. an injected system reminder)
+  // leaks it straight into the transcript. The streaming sanitizer also holds a
+  // half-typed block until it closes, so partial markup never flashes.
+  const visible = sanitizeInternalReminderBlocks(content);
+  if (!visible.trim()) return null;
   // marginLeft (2) + "●  " marker (3 visual cells) = 5 cells consumed by the
   // timeline gutter; pass the remaining width so wide blocks like tables size
   // themselves against the actual content area instead of the raw terminal.
   const available = terminalColumns ? Math.max(20, terminalColumns - 5) : undefined;
-  const trimmed = content.trim();
+  const trimmed = visible.trim();
   return (
     <Box marginLeft={2} marginTop={compactTop ? 0 : 1}>
       <Text color={theme.agent}>●  </Text>
