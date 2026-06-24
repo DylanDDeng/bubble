@@ -112,7 +112,7 @@ function buildGuidelines(tools: string[], extraGuidelines: string[]): string[] {
   }
 
   if (tools.includes("todo_write")) {
-    add("Use todo_write to plan any task that needs three or more concrete steps before you start. Mark each item completed as soon as it is done; do not batch updates");
+    add("Default to just doing the work. Reach for todo_write only when tracking progress would genuinely help — multi-phase work with real dependencies, a long task spanning several areas, an explicit user request, or steps you discover mid-task. Don't make a list to pad a task you could just do; when in doubt, skip it. Mark each item completed as soon as it is done; do not batch updates");
   }
 
   for (const item of extraGuidelines) {

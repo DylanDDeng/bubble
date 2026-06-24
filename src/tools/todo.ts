@@ -21,50 +21,33 @@ export function createTodoTool(store: TodoStore): ToolRegistryEntry {
 
 ## When to use
 
-Use this tool proactively when any of these apply:
-1. Complex multi-step work — 3 or more distinct steps or file locations
-2. Non-trivial tasks requiring planning or coordination across multiple operations
-3. The user explicitly asks for a todo list
-4. The user provides a list of things to do (numbered, comma-separated, bulleted)
-5. New instructions arrive mid-session — capture them as todos before starting
-6. Starting work on a task — mark it in_progress BEFORE beginning. Only one item may be in_progress at a time
-7. Finishing a task — mark it completed immediately, don't batch completions
+Default to just doing the work. Reach for a list only when actively tracking progress would genuinely help you or the user follow it — never to pad simple work with filler steps or to state the obvious. When in doubt, skip the list and do the task; a list you never meaningfully update is just noise.
 
-## When NOT to use
+A list earns its place when:
+- The task is non-trivial and spans many actions across several areas of the codebase
+- There are non-obvious phases or dependencies you must hold in mind to avoid losing track (a plain read → edit → test sequence does not count)
+- The work is ambiguous and benefits from outlining the goals up front
+- The user asked for several distinct things in one prompt, or gave a numbered/bulleted list
+- The user explicitly asked for a todo list (aka TODOs)
+- You discover extra steps mid-task and intend to finish them before yielding
 
-Skip this tool when:
-1. There is a single, straightforward task
-2. The task is trivial and tracking provides no organizational benefit
-3. The work can be completed in fewer than 3 trivial steps
-4. The request is purely conversational or informational
+## Quality bar
 
-If there is only one trivial task, just do it — don't create a todo first.
+If you do make a list, make a good one: meaningful, logically ordered steps that are easy to verify as you go.
 
-## Examples
+Good — distinct, verifiable steps for genuinely multi-part work:
+1. Add CSS variables for the color palette
+2. Add the toggle with localStorage state
+3. Refactor components to use the variables
+4. Verify every view for readability
 
-<example>
-User: Add a dark mode toggle to the settings page, then run tests and build.
-Assistant: *creates a 5-item todo: toggle UI, theme state, CSS tokens, update components, run tests + build*
-<reasoning>Multiple distinct steps across UI, state, styles, and verification. User explicitly asked for tests + build.</reasoning>
-</example>
+Good — scope a search uncovers makes the list worth it:
+"Rename getCwd across the project" → grep finds 15 call sites in 8 files → one item per file so none are missed.
 
-<example>
-User: Rename getCwd to getCurrentWorkingDirectory across the project.
-Assistant: *greps, finds 15 call sites across 8 files, creates a per-file todo list*
-<reasoning>Scope discovered via grep shows many locations; a todo ensures each file is tracked and none are missed.</reasoning>
-</example>
+Bad — padding a task you could just do; do NOT create a list for this:
+"Fix the typo in the README title" → 1. Find typo  2. Open file  3. Fix it  4. Save. That is one edit — just make it.
 
-<example>
-User: How do I print "Hello World" in Python?
-Assistant: *answers in one sentence with a snippet — no todo*
-<reasoning>Informational, one-step, no tracking benefit.</reasoning>
-</example>
-
-<example>
-User: Add a comment to calculateTotal explaining what it does.
-Assistant: *calls edit directly — no todo*
-<reasoning>Single, localized change in one file.</reasoning>
-</example>
+Bad — vague, unverifiable filler: "Make it work", "Improve the styling", "Clean things up".
 
 ## Task states
 
@@ -81,7 +64,8 @@ Each item needs:
 - Update status in real time; mark completed IMMEDIATELY on finishing.
 - Never mark completed if tests are failing, implementation is partial, errors are unresolved, or needed files are missing — keep as in_progress.
 - When blocked, add a new task describing what must be resolved.
-- Remove items that are no longer relevant; don't leave stale entries.`,
+- Remove items that are no longer relevant; don't leave stale entries.
+- Do not re-send the list when nothing meaningful has changed since the last call; update only after real progress.`,
     parameters: {
       type: "object",
       properties: {
