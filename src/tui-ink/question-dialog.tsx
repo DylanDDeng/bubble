@@ -22,19 +22,29 @@ export function QuestionDialog({ request, onSubmit, onCancel }: QuestionDialogPr
   const canUseCustom = question?.custom !== false;
   const isMultiple = question?.multiple === true;
   const totalTabs = request.questions.length;
+  // The "Custom: type to answer" row is the last navigable item (when custom is
+  // allowed), so Up/Down can reach and highlight it just like an option.
+  const customIndex = canUseCustom ? options.length : -1;
+  const navCount = options.length + (canUseCustom ? 1 : 0);
+  const isCustomSelected = canUseCustom && selected === customIndex;
 
   const currentAnswer = useMemo(() => answers[index] ?? [], [answers, index]);
 
   const commitQuestion = () => {
-    const option = options[selected]?.label;
     const customAnswer = custom.trim();
-    const nextAnswer = customAnswer
-      ? [customAnswer]
+    // Submit what is actually selected: the Custom row submits the typed text;
+    // an option row submits that option (a stale custom buffer no longer wins).
+    const nextAnswer: string[] = isCustomSelected
+      ? customAnswer
+        ? [customAnswer]
+        : []
       : isMultiple
         ? currentAnswer
-        : option
-          ? [option]
-          : [];
+        : options[selected]?.label
+          ? [options[selected]!.label]
+          : customAnswer
+            ? [customAnswer]
+            : [];
     const nextAnswers = answers.map((answer, i) => i === index ? nextAnswer : answer);
     if (index < request.questions.length - 1) {
       setAnswers(nextAnswers);
@@ -89,11 +99,22 @@ export function QuestionDialog({ request, onSubmit, onCancel }: QuestionDialogPr
       return;
     }
     if (key.downArrow) {
-      setSelected((i) => Math.min(Math.max(0, options.length - 1), i + 1));
+      setSelected((i) => Math.min(Math.max(0, navCount - 1), i + 1));
       return;
     }
-    if (key.tab || input === " ") {
-      toggleCurrentOption();
+    // Tab toggles a checkbox; only meaningful while an option row is selected.
+    if (key.tab) {
+      if (!isCustomSelected) toggleCurrentOption();
+      return;
+    }
+    if (input === " ") {
+      // Space toggles the highlighted option, but on the Custom row it types a
+      // literal space into the answer instead of swallowing the keystroke.
+      if (isCustomSelected) {
+        setCustom((value) => value + " ");
+      } else {
+        toggleCurrentOption();
+      }
       return;
     }
     if (key.return) {
@@ -104,7 +125,10 @@ export function QuestionDialog({ request, onSubmit, onCancel }: QuestionDialogPr
       setCustom((value) => value.slice(0, -1));
       return;
     }
+    // Any printable key starts/continues the custom answer and moves the
+    // highlight onto the Custom row, so typing and arrow navigation agree.
     if (canUseCustom && input && !key.ctrl && !key.meta) {
+      setSelected(customIndex);
       setCustom((value) => value + input);
     }
   });
@@ -139,14 +163,15 @@ export function QuestionDialog({ request, onSubmit, onCancel }: QuestionDialogPr
       </Box>
       {canUseCustom && (
         <Box marginTop={1}>
-          <Text color={custom ? undefined : theme.muted}>
-            Custom: {custom || "type to answer..."}
+          <Text color={isCustomSelected ? theme.accent : custom ? undefined : theme.muted}>
+            {isCustomSelected ? "> " : "  "}
+            Custom: {custom || "type to answer…"}
           </Text>
         </Box>
       )}
       <Box marginTop={1}>
         <Text color={theme.muted}>
-          ↑↓ choose · Tab/Space toggle · Enter submit · Esc dismiss
+          ↑↓ choose · {isMultiple ? "Space toggle · " : ""}type for Custom · Enter submit · Esc dismiss
         </Text>
       </Box>
     </Box>
