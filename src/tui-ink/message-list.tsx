@@ -962,8 +962,11 @@ function UserMessageBlock({
       )}
       {wrappedLines.map((line, index) => (
         <Box key={index}>
+          {/* Draw the rail on every wrapped row so the bar spans the full
+              height of a multi-line message instead of only the first line.
+              "▌" is a left half-block, so stacked rows form one continuous bar. */}
           <Text backgroundColor={theme.userMessageBg} color={theme.userRail}>
-            {index === 0 ? "▌ " : "  "}
+            {"▌ "}
           </Text>
           <Text backgroundColor={theme.userMessageBg} color={theme.userMessageText}>
             {` ${padVisual(line || " ", bubbleTextWidth)} `}
