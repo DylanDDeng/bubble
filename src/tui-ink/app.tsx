@@ -67,8 +67,6 @@ import { collectFeedback } from "../feedback/collect.js";
 import { isKeyReleaseEvent } from "./key-events.js";
 import { errorMessage, formatModelSwitchError, switchAgentModel } from "../tui/model-switch.js";
 import { formatImageUserDisplayText, nextImageDisplayLabelStart } from "../tui/image-display.js";
-import { sanitizeTerminalMouseInput, transcriptScrollLinesFromMouseInput } from "./terminal-mouse.js";
-import { transcriptPageScrollDirection } from "./transcript-input.js";
 import { decideStartingSubmitFingerprint, submitPayloadFingerprint } from "./submit-dedupe.js";
 import {
   isQueuedInputForCurrentSession,
@@ -76,7 +74,6 @@ import {
   type PendingSteerMeta,
   type QueuedInput,
 } from "./input-queue.js";
-import { TranscriptViewport, type TranscriptViewportHandle } from "./transcript-viewport.js";
 import { SessionPicker } from "./session-picker.js";
 import { sessionDisplayName } from "../tui/session-display.js";
 import type { GoalStore, GoalState } from "../goal/store.js";
@@ -411,7 +408,11 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   const activeAbortRef = useRef<AbortController | null>(null);
   const exitRequestedRef = useRef(false);
   const sessionStartRef = useRef<number>(Date.now());
-  const viewportRef = useRef<TranscriptViewportHandle | null>(null);
+  // Bumped whenever the settled transcript is rebuilt non-monotonically
+  // (/clear, /compact, /rewind, session switch). Used as the <Static> key in
+  // MessageList so Ink discards its already-printed rows and re-prints the
+  // rebuilt list onto a freshly-cleared screen instead of appending duplicates.
+  const [staticGeneration, setStaticGeneration] = useState(0);
   // Steer/queue while the agent runs:
   // Enter steers the current run via the agent's input controller; Tab (or an
   // ineligible input) queues for the next turn. Both render placeholder user
@@ -599,15 +600,6 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     return unsubscribe;
   }, [questionController]);
 
-  // An approval or question demands the user's attention: re-engage
-  // bottom-follow even if they had scrolled up (second force trigger
-  // documented in transcript-scroll.ts).
-  useEffect(() => {
-    if (pendingApproval || pendingQuestion) {
-      viewportRef.current?.forceScrollToBottom();
-    }
-  }, [pendingApproval, pendingQuestion]);
-
   const rebuildSystemPrompt = useCallback(
     (overrides?: { thinkingLevel?: ThinkingLevel; mode?: PermissionMode }) => {
       const modelParts = agent.model.includes(":")
@@ -635,24 +627,11 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
       return;
     }
 
-    const overlayActive = !!(pickerMode || pendingPlan || pendingApproval || pendingQuestion || pendingFeedback || statsPanel);
-    const mouseInput = sanitizeTerminalMouseInput(input);
-    if (mouseInput.wheelDirections.length > 0) {
-      for (const lines of transcriptScrollLinesFromMouseInput(mouseInput, { overlayActive })) {
-        viewportRef.current?.scrollBy(lines);
-      }
-    }
-    if (mouseInput.hasMouse) {
-      if (!mouseInput.strippedInput) return;
-      input = mouseInput.strippedInput;
-    }
-
-    const pageScrollDirection = transcriptPageScrollDirection(key, { overlayActive });
-    if (pageScrollDirection) {
-      viewportRef.current?.scrollPage(pageScrollDirection);
-      return;
-    }
-
+    // Scrolling is the terminal's job now: settled rows live in native
+    // scrollback (committed via <Static>), so the wheel, tmux copy-mode, and
+    // PageUp/PageDown scroll the real terminal with no app involvement and no
+    // flicker. Bubble no longer intercepts mouse reports or page keys, which
+    // also frees the arrow keys entirely for composer history.
     if (pendingPlan || pendingApproval || pendingQuestion || pendingFeedback || statsPanel) return;
 
     if (key.ctrl && input.toLowerCase() === "p" && !pickerMode && !activeAbortRef.current) {
@@ -728,9 +707,44 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     setMessages((prev) => compactDisplayMessages(updater(prev).map(withMessageKey)));
   }, []);
 
+  // Non-append transcript rebuilds (/clear, /compact, /rewind, session switch)
+  // replace the settled list rather than extending it. The rows already
+  // committed to the terminal's native scrollback (via <Static>) cannot be
+  // un-printed, so we wipe the screen + scrollback and bump the Static key:
+  // Ink then re-prints the rebuilt list fresh instead of appending duplicates.
+  const resetTranscript = useCallback(
+    (updater: (prev: DisplayMessage[]) => DisplayMessage[]) => {
+      if (process.stdout.isTTY) {
+        process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
+      }
+      setStaticGeneration((generation) => generation + 1);
+      updateDisplayMessages(updater);
+    },
+    [updateDisplayMessages],
+  );
+
   const addMessage = useCallback((role: DisplayMessage["role"], content: string) => {
     updateDisplayMessages((prev) => [...prev, withMessageKey({ role, content })]);
   }, [updateDisplayMessages]);
+
+  // Reflow on terminal resize. ink 7.0.3 only clears its dynamic frame when the
+  // terminal NARROWS (see its resized() handler); on widen / tmux split the
+  // stale frame is left behind and the working trace duplicates into
+  // scrollback. Dedicated scrollback renderers (pi-tui) handle this by doing a
+  // full clear + re-print on ANY width/height change so content rewraps
+  // cleanly — resetTranscript does exactly that here. Debounced so a drag
+  // coalesces into one reflow instead of flashing on every resize event.
+  const didMountSizeRef = useRef(false);
+  useEffect(() => {
+    if (!didMountSizeRef.current) {
+      didMountSizeRef.current = true;
+      return;
+    }
+    const timer = setTimeout(() => {
+      resetTranscript((prev) => prev);
+    }, 80);
+    return () => clearTimeout(timer);
+  }, [terminalColumns, terminalRows, resetTranscript]);
 
   useEffect(() => {
     if (!updateNoticeRefresh) return;
@@ -748,17 +762,16 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   }, [addMessage, updateNoticeRefresh]);
 
   const clearMessages = useCallback(() => {
-    // The transcript lives entirely in React state now (alt-screen viewport,
-    // no terminal scrollback) — clearing state clears the screen. Writing
-    // \x1b[2J here would just flash a black frame before the next paint.
-    setMessages([]);
-  }, []);
+    // Settled rows live in the terminal's native scrollback now (committed via
+    // <Static>), so clearing React state is not enough — resetTranscript wipes
+    // the screen + scrollback and re-prints the (now empty) transcript.
+    resetTranscript(() => []);
+  }, [resetTranscript]);
 
   // Render a placeholder user row for input waiting to enter the run.
   const addStatusUserMessage = useCallback((content: string, status: UserInputStatus): string => {
     const key = nextDisplayMessageKey("user");
     updateDisplayMessages((prev) => [...prev, { key, role: "user", content, inputStatus: status }]);
-    viewportRef.current?.forceScrollToBottom();
     return key;
   }, [updateDisplayMessages]);
 
@@ -922,13 +935,12 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     clearComposerDraft();
     setSessionManager(result.manager);
     setTodos(agent.getTodos());
-    updateDisplayMessages(() => [
+    resetTranscript(() => [
       ...reconstructDisplayMessages(agent.messages).filter((message) => !queuedDisplayKeys.has(message.key ?? "")),
       withMessageKey({ role: "assistant", content: `⤷ Resumed session: ${sessionDisplayName(result.manager)}` }),
     ]);
-    viewportRef.current?.forceScrollToBottom();
     closePicker();
-  }, [addMessage, agent, clearComposerDraft, closePicker, setStartingSubmit, switchSession, updateDisplayMessages]);
+  }, [addMessage, agent, clearComposerDraft, closePicker, setStartingSubmit, switchSession, resetTranscript]);
 
   const handleModelSelect = useCallback((model: string, selectedThinkingLevel?: ThinkingLevel) => {
     const run = async () => {
@@ -1179,9 +1191,8 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
             ...prev,
             withMessageKey({ role: "user", content: displayContent }),
           ]);
-          // Sending is an explicit "watch the newest turn" intent: snap the
-          // transcript back to the bottom even if the user had scrolled up.
-          viewportRef.current?.forceScrollToBottom();
+          // The new user row commits to native scrollback; the terminal keeps
+          // the prompt in view, so there is no app-side "snap to bottom" to do.
         }
         setIsRunning(true);
         runStartRef.current = Date.now();
@@ -1444,7 +1455,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
           commitAssistantMessage();
           if (err instanceof AgentAbortError || err?.name === "AbortError") {
             runCancelled = true;
-            updateDisplayMessages(() => reconstructDisplayMessages(agent.messages));
+            resetTranscript(() => reconstructDisplayMessages(agent.messages));
           } else {
             runErrored = true;
             updateDisplayMessages((prev) => [
@@ -1704,7 +1715,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
             // card; otherwise the pre-compaction history would keep rendering.
             if (result.startsWith("✓ Compaction complete")) {
               const summary = latestCompactionSummary(agent.messages);
-              updateDisplayMessages(() => [
+              resetTranscript(() => [
                 ...reconstructDisplayMessages(agent.messages),
                 {
                   role: "assistant",
@@ -1716,7 +1727,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
             } else if (result.startsWith("⏪")) {
               // /rewind truncated agent.messages — rebuild the transcript from
               // the rewound state before appending the summary.
-              updateDisplayMessages(() => [
+              resetTranscript(() => [
                 ...reconstructDisplayMessages(agent.messages),
                 { role: "assistant", content: result },
               ]);
@@ -1827,39 +1838,35 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     [mcpManager],
   );
 
-  // One row shorter than the terminal on purpose. A frame that exactly fills
-  // the screen makes Ink omit the trailing newline ("fullscreen" mode), and
-  // Ink's cursor-only repositioning (buildReturnToBottom) miscalculates by one
-  // row for such frames — the composer cursor lands one row above the prompt
-  // after any cursor-only update (e.g. restoreLastOutput following an external
-  // stdout write). Keeping every frame below viewport height keeps all of
-  // Ink's cursor paths on the consistent trailing-newline math.
-  const frameRows = Math.max(4, terminalRows - 1);
+  // No fixed-height frame: settled rows flow into the terminal's native
+  // scrollback via <Static>, and only the dynamic bottom stack (streaming
+  // tail, pickers, composer, footer) occupies the live region. Letting it size
+  // to its content keeps the composer pinned just below the latest output the
+  // way ordinary shell programs do.
   const sidebarWidth = sidebarVisible ? Math.min(42, Math.max(28, Math.floor(terminalColumns * 0.34))) : 0;
   const mainWidth = Math.max(40, terminalColumns - sidebarWidth);
 
   return (
     <ThemeProvider value={palette}>
-      <Box flexDirection="row" width={terminalColumns} height={frameRows} backgroundColor={palette.background}>
-      <Box flexDirection="column" width={mainWidth} height={frameRows} backgroundColor={palette.background}>
-        <TranscriptViewport ref={viewportRef}>
-          <Box flexDirection="column" paddingX={1} paddingTop={1} flexShrink={0}>
-            <MessageList
-              messages={messages}
-              streamingContent={streamingContent}
-              streamingReasoning={streamingReasoning}
-              streamingTools={streamingTools}
-              streamingParts={streamingParts}
-              terminalColumns={mainWidth}
-              showThinking={showThinking}
-              expandedToolOutput={expandedToolOutput}
-              verboseTrace={verboseTrace}
-              pendingApproval={approvalHint}
-              nowTick={nowTick}
-              welcomeBanner={welcomeBannerNode}
-            />
-          </Box>
-        </TranscriptViewport>
+      <Box flexDirection="row" width={terminalColumns} backgroundColor={palette.background}>
+      <Box flexDirection="column" width={mainWidth} backgroundColor={palette.background}>
+        <MessageList
+          messages={messages}
+          streamingContent={streamingContent}
+          streamingReasoning={streamingReasoning}
+          streamingTools={streamingTools}
+          streamingParts={streamingParts}
+          terminalColumns={mainWidth}
+          showThinking={showThinking}
+          expandedToolOutput={expandedToolOutput}
+          verboseTrace={verboseTrace}
+          pendingApproval={approvalHint}
+          nowTick={nowTick}
+          welcomeBanner={welcomeBannerNode}
+          staticGeneration={staticGeneration}
+          paddingX={1}
+          maxStreamRows={Math.max(6, terminalRows - 10)}
+        />
         {/* Pickers live in the fixed bottom stack (not the scrollable
             transcript) so they can never be scrolled out of view. */}
         {pickerMode === "model" && (

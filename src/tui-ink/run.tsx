@@ -7,11 +7,6 @@ import type { Provider } from "../types.js";
 import type { ProviderRegistry } from "../provider-registry.js";
 import type { SkillRegistry } from "../skills/registry.js";
 import { App, type ApprovalHandlerRef, type ExitSummary, type PlanHandlerRef } from "./app.js";
-import {
-  ALTERNATE_SCROLL_DISABLE,
-  MOUSE_REPORTING_DISABLE,
-  MOUSE_REPORTING_ENABLE,
-} from "./terminal-mouse.js";
 import { warmHighlighter } from "./code-highlight.js";
 import type { BashAllowlist } from "../approval/session-cache.js";
 import type { SettingsManager } from "../permissions/settings.js";
@@ -95,18 +90,17 @@ export function createInkAppElement(
 }
 
 /**
- * Best-effort terminal restore for abnormal exits. DECSET mouse modes are
- * global terminal state — if the process dies without disabling them, the
- * user's shell receives \x1b[<35;… garbage on every mouse move. The alt-screen
- * and cursor writes are defensive duplicates of Ink's own teardown (idempotent
- * when Ink already ran; load-bearing when it didn't).
+ * Best-effort terminal restore for abnormal exits. Bubble renders into the
+ * primary screen (no alt-screen, no mouse reporting) so the transcript flows
+ * into the terminal's native scrollback — there is no global mouse/alt-screen
+ * state to undo. We only make sure the cursor is visible again, mirroring
+ * Ink's own teardown (idempotent when Ink already ran; load-bearing when it
+ * didn't).
  */
 function restoreTerminal() {
   if (!process.stdout.isTTY) return;
   try {
-    process.stdout.write(
-      ALTERNATE_SCROLL_DISABLE + MOUSE_REPORTING_DISABLE + "\x1b[?1049l\x1b[?25h",
-    );
+    process.stdout.write("\x1b[?25h");
   } catch {
     // stdout may already be destroyed during shutdown
   }
@@ -159,26 +153,18 @@ export async function runTui(
         // reportEventTypes keeps release events out of text input.
         flags: ["disambiguateEscapeCodes", "reportEventTypes"],
       },
-      // The whole point of the Ink migration: render into the 1049 alternate
-      // screen so streaming repaints never touch the user's shell scrollback.
-      // Ink degrades this to false automatically when stdout is not a TTY.
-      alternateScreen: true,
+      // Render into the primary screen (NOT the 1049 alternate screen): settled
+      // transcript rows are committed once via Ink's <Static> region so they
+      // flow into the terminal's native scrollback. That gives flicker-free
+      // native scroll + text selection + copy (and tmux copy-mode) for free,
+      // and frees the arrow keys for composer history. Only the streaming tail
+      // and the composer live in the repainting region at the bottom.
+      alternateScreen: false,
     },
   );
-  // Keep alternate-scroll disabled so wheel events do not alias keyboard
-  // arrows. Enable SGR mouse reporting after alt-screen entry so wheel events
-  // scroll the transcript through a distinct input channel.
-  if (process.stdout.isTTY) {
-    process.stdout.write(ALTERNATE_SCROLL_DISABLE + MOUSE_REPORTING_ENABLE);
-  }
   try {
     await instance.waitUntilExit();
   } finally {
-    // Reset mouse reporting before anything is printed to the primary screen;
-    // Ink has already left the alt screen by the time waitUntilExit() resolves.
-    if (process.stdout.isTTY) {
-      process.stdout.write(ALTERNATE_SCROLL_DISABLE + MOUSE_REPORTING_DISABLE);
-    }
     process.off("uncaughtException", onFatalError);
     process.off("SIGTERM", onSigterm);
   }

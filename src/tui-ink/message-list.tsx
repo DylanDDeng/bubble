@@ -1,5 +1,5 @@
 import React from "react";
-import { Box, Text } from "ink";
+import { Box, Static, Text, measureElement, type DOMElement } from "ink";
 import { useTheme, type Theme } from "./theme.js";
 import { highlightCode, inferLang } from "./code-highlight.js";
 import { MarkdownContent, StreamingMarkdown } from "./markdown.js";
@@ -49,6 +49,22 @@ interface MessageListProps {
   nowTick?: number;
   /** Optional banner rendered as the first item in the app-controlled transcript. */
   welcomeBanner?: React.ReactNode;
+  /**
+   * Bumped whenever the settled transcript is rebuilt non-monotonically
+   * (/clear, /compact, /rewind, session switch). Used as the <Static> key so
+   * Ink discards its already-printed rows and re-prints the rebuilt list onto
+   * a freshly-cleared screen instead of appending duplicates.
+   */
+  staticGeneration?: number;
+  /** Horizontal padding applied inside each committed/streaming row. */
+  paddingX?: number;
+  /**
+   * Maximum height (rows) for the live/dynamic region. The in-progress turn is
+   * clipped to this and pinned to the bottom (tail view) so the live frame
+   * never exceeds the viewport — a taller-than-pane frame breaks Ink's redraw
+   * under tmux. The full turn still lands in <Static> scrollback on commit.
+   */
+  maxStreamRows?: number;
 }
 
 const EXECUTE_COMMAND_BLOCK_MAX_LINES = 4;
@@ -76,6 +92,9 @@ export function MessageList({
   pendingApproval,
   nowTick,
   welcomeBanner,
+  staticGeneration = 0,
+  paddingX = 1,
+  maxStreamRows,
 }: MessageListProps) {
   const theme = useTheme();
   const hasStreaming = !!(
@@ -103,58 +122,145 @@ export function MessageList({
     });
   }
 
+  const hasDynamic =
+    hasStreaming || pendingSteerMessages.length > 0 || queuedInputMessages.length > 0;
+
+  // The live region must never grow taller than the viewport: a frame taller
+  // than the pane breaks Ink's in-place redraw under tmux (the cursor-up clear
+  // can't reach scrolled-off rows), leaving large blank gaps + stray glyphs.
+  // Clip it to maxStreamRows and pin to the bottom so the user sees the latest
+  // output (tail view); the full turn lands in <Static> scrollback on commit.
+  const clampDynamic = typeof maxStreamRows === "number" && maxStreamRows > 0;
+
   return (
     <Box flexDirection="column" flexShrink={0}>
-      {staticItems.map((item) => {
-        if (item.kind === "welcome") {
-          return <React.Fragment key={item.key}>{welcomeBanner}</React.Fragment>;
-        }
-        return (
-          <MessageItem
-            key={item.key}
-            message={item.message}
-            terminalColumns={terminalColumns}
-            showThinking={showThinking}
-            expandedToolOutput={expandedToolOutput}
-            verboseTrace={verboseTrace}
-            showExpandHint={item.showExpandHint}
-            separateFromPrevious={item.separateFromPrevious}
-            nowTick={item.showExpandHint ? nowTick : undefined}
-          />
-        );
-      })}
-      {hasStreaming && (
-        <StreamingMessage
-          content={streamingContent}
-          reasoning={streamingReasoning}
-          tools={streamingTools}
-          parts={streamingParts}
-          terminalColumns={terminalColumns}
-          showThinking={showThinking}
-          expandedToolOutput={expandedToolOutput}
-          verboseTrace={verboseTrace}
-          pendingApproval={pendingApproval}
-          nowTick={nowTick}
-        />
+      {/* Settled rows are committed once to the terminal's native scrollback.
+          Ink never repaints <Static> output, so scrolling up to read history
+          (or selecting/copying it) is the terminal's job — zero app repaint,
+          zero flicker. The key discards prior output on a non-monotonic
+          rebuild (see staticGeneration). */}
+      <Static items={staticItems} key={`transcript-${staticGeneration}`}>
+        {(item) => {
+          if (item.kind === "welcome") {
+            return (
+              <Box key={item.key} flexDirection="column" paddingX={paddingX}>
+                {welcomeBanner}
+              </Box>
+            );
+          }
+          return (
+            <Box key={item.key} flexDirection="column" paddingX={paddingX}>
+              <MessageItem
+                message={item.message}
+                terminalColumns={terminalColumns}
+                showThinking={showThinking}
+                expandedToolOutput={expandedToolOutput}
+                verboseTrace={verboseTrace}
+                showExpandHint={item.showExpandHint}
+                separateFromPrevious={item.separateFromPrevious}
+              />
+            </Box>
+          );
+        }}
+      </Static>
+      {/* The dynamic region: only the in-progress turn + queued/steer hints
+          live here and repaint as tokens arrive. Kept short so the repaint is
+          cheap and flicker-free even on tmux / non-GPU terminals. */}
+      {hasDynamic && (
+        <DynamicClamp maxRows={clampDynamic ? maxStreamRows : undefined} paddingX={paddingX}>
+          {hasStreaming && (
+            <StreamingMessage
+              content={streamingContent}
+              reasoning={streamingReasoning}
+              tools={streamingTools}
+              parts={streamingParts}
+              terminalColumns={terminalColumns}
+              showThinking={showThinking}
+              expandedToolOutput={expandedToolOutput}
+              verboseTrace={verboseTrace}
+              pendingApproval={pendingApproval}
+              nowTick={nowTick}
+            />
+          )}
+          {pendingSteerMessages.length > 0 && (
+            <PendingInputMessagesBlock
+              messages={pendingSteerMessages}
+              terminalColumns={terminalColumns}
+              title="Messages to steer at next model call"
+              hint="applies before the next provider request"
+              bulletColor={theme.warning}
+            />
+          )}
+          {queuedInputMessages.length > 0 && (
+            <PendingInputMessagesBlock
+              messages={queuedInputMessages}
+              terminalColumns={terminalColumns}
+              title="Messages queued for next turn"
+              hint="runs after the current answer"
+              bulletColor={theme.muted}
+            />
+          )}
+        </DynamicClamp>
       )}
-      {pendingSteerMessages.length > 0 && (
-        <PendingInputMessagesBlock
-          messages={pendingSteerMessages}
-          terminalColumns={terminalColumns}
-          title="Messages to steer at next model call"
-          hint="applies before the next provider request"
-          bulletColor={theme.warning}
-        />
-      )}
-      {queuedInputMessages.length > 0 && (
-        <PendingInputMessagesBlock
-          messages={queuedInputMessages}
-          terminalColumns={terminalColumns}
-          title="Messages queued for next turn"
-          hint="runs after the current answer"
-          bulletColor={theme.muted}
-        />
-      )}
+    </Box>
+  );
+}
+
+/**
+ * Bounds the live (in-progress turn) region to at most `maxRows` rows, pinned
+ * to the bottom so the user always sees the latest output (tail view). A live
+ * frame taller than the terminal pane breaks Ink's in-place redraw under tmux
+ * (the cursor-up clear can't reach rows that scrolled off), leaving large blank
+ * gaps and stray glyphs. We measure the natural content height and only clip
+ * when it actually exceeds `maxRows`, so short turns keep their natural height
+ * (no reserved-space gap). The full turn still lands in <Static> scrollback the
+ * moment it commits, so nothing is lost — only the live preview is windowed.
+ */
+function DynamicClamp({
+  maxRows,
+  paddingX,
+  children,
+}: {
+  maxRows?: number;
+  paddingX: number;
+  children: React.ReactNode;
+}) {
+  const innerRef = React.useRef<DOMElement | null>(null);
+  const [offset, setOffset] = React.useState(0);
+  const [clipHeight, setClipHeight] = React.useState<number | undefined>(undefined);
+
+  // Re-measure after every commit (streaming changes height with each token).
+  // useLayoutEffect runs before Ink flushes the frame to the terminal, so the
+  // clamp is applied in the same paint — avoiding a one-frame overflow flash
+  // under tmux when a turn first grows past the pane. setState bails out via
+  // Object.is when nothing moved, so the steady state does not loop.
+  React.useLayoutEffect(() => {
+    if (!maxRows || !innerRef.current) {
+      if (offset !== 0) setOffset(0);
+      if (clipHeight !== undefined) setClipHeight(undefined);
+      return;
+    }
+    const height = measureElement(innerRef.current).height;
+    if (height > maxRows) {
+      const nextOffset = -(height - maxRows);
+      if (nextOffset !== offset) setOffset(nextOffset);
+      if (clipHeight !== maxRows) setClipHeight(maxRows);
+    } else {
+      if (offset !== 0) setOffset(0);
+      if (clipHeight !== undefined) setClipHeight(undefined);
+    }
+  });
+
+  return (
+    <Box
+      flexDirection="column"
+      flexShrink={0}
+      paddingX={paddingX}
+      {...(clipHeight !== undefined ? { height: clipHeight, overflowY: "hidden" as const } : {})}
+    >
+      <Box ref={innerRef} flexDirection="column" flexShrink={0} marginTop={offset}>
+        {children}
+      </Box>
     </Box>
   );
 }
@@ -840,6 +946,7 @@ function UserMessageBlock({
   const { bodyLines, referenceLines } = splitImageDisplayContent(content);
   const wrappedLines = bodyLines
     .flatMap((line) => wrapByVisualWidth(line, bubbleTextWidth));
+  const attachmentReferenceIndent = " ".repeat(railWidth + 1);
 
   return (
     <Box flexDirection="column" marginTop={separateFromPrevious ? 1 : 0}>
@@ -865,7 +972,7 @@ function UserMessageBlock({
       ))}
       {referenceLines.map((line, index) => (
         <Box key={`attachment-${index}`}>
-          <Text color={theme.muted}>{`  ${line}`}</Text>
+          <Text color={theme.muted}>{`${attachmentReferenceIndent}${line}`}</Text>
         </Box>
       ))}
     </Box>

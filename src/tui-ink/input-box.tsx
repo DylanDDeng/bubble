@@ -120,6 +120,10 @@ export function shouldUseLineComposerFrame(_background: string): boolean {
   return true;
 }
 
+export function composerSurfaceBackground(lineFrame: boolean, background: string, inputBg: string): string {
+  return lineFrame ? background : inputBg;
+}
+
 export function shouldUseHardwareComposerCursor(env: Record<string, string | undefined> = process.env): boolean {
   return env.BUBBLE_HARDWARE_CURSOR === "1";
 }
@@ -1128,10 +1132,12 @@ export function InputBox({
   );
   const { row: cursorVisualRow, col: cursorVisualCol } = cursorToVisual(visualLines, displayCursor);
 
-  // ---- Wheel-vs-keyboard classification for Up/Down arrows ----
+  // ---- Up/Down arrow handling in the composer ----
   //
-  // Up/Down reaching the composer are keyboard navigation: move within
-  // multiline input first, then browse prompt history at the top/bottom edge.
+  // Scrolling is the terminal's job now (native scrollback), so the composer
+  // owns Up/Down unconditionally: move within multiline input first, then
+  // browse prompt history at the top edge (Up → previous sent message) or the
+  // bottom edge (Down → next message, then back to the in-progress draft).
   const performVerticalArrowRef = useRef<(direction: "up" | "down") => void>(() => {});
   performVerticalArrowRef.current = (direction) => {
     if (direction === "up") {
@@ -1318,6 +1324,7 @@ export function InputBox({
   // Reference cursorTick so the effect re-runs on the forced render pass.
   void cursorTick;
   const inputBg = disabled ? theme.inputBgDisabled : theme.inputBg;
+  const composerBg = composerSurfaceBackground(lineFrame, theme.background, inputBg);
   const rowBg = lineFrame ? undefined : inputBg;
   const cursorFg = lineFrame ? theme.background : inputBg;
   const cursorCellStyle = resolveSoftwareCursorCellStyle({
@@ -1341,7 +1348,7 @@ export function InputBox({
           <Text color={theme.border}>{"─".repeat(contentWidth)}</Text>
         </Box>
       )}
-      <Box flexDirection="column" paddingX={PADDING_X} width={width} backgroundColor={inputBg}>
+      <Box flexDirection="column" paddingX={PADDING_X} width={width} backgroundColor={composerBg}>
         {hasMoreAbove && (
           <Text backgroundColor={rowBg} color={theme.muted} dimColor>
             {filledLine(` ↑ ${scrollOffset} more`)}
@@ -1377,7 +1384,7 @@ export function InputBox({
               key={visualIdx}
               height={1}
               overflow="hidden"
-              backgroundColor={inputBg}
+              backgroundColor={composerBg}
               ref={
                 isCursorLine
                   ? (el: DOMElement | null) => {

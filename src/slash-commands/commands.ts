@@ -9,6 +9,7 @@ import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingL
 import { SessionManager } from "../session.js";
 import { buildSystemPrompt } from "../system-prompt.js";
 import { normalizeSingleLine } from "../text-display.js";
+import { copyToClipboard } from "../clipboard.js";
 import { formatRelativeTime } from "../tui/recent-activity.js";
 import { HOOK_EVENT_NAMES, isHookEventName } from "../hooks/index.js";
 import type { ThinkingLevel } from "../types.js";
@@ -457,6 +458,26 @@ const builtinSlashCommandEntries: SlashCommand[] = [
         ctx.agent.setTodos([]);
       }
       ctx.clearMessages();
+    },
+  },
+  {
+    name: "copy",
+    description: "Copy the last assistant message to the system clipboard",
+    async handler(args, ctx) {
+      const lastAssistant = [...ctx.agent.messages]
+        .reverse()
+        .find((m) => m.role === "assistant" && typeof m.content === "string" && m.content.trim().length > 0);
+      if (!lastAssistant || typeof lastAssistant.content !== "string") {
+        return "No assistant message to copy yet.";
+      }
+      const text = lastAssistant.content;
+      try {
+        await copyToClipboard(text);
+      } catch (err: any) {
+        return `Failed to copy to clipboard: ${err?.message || String(err)}`;
+      }
+      const chars = text.length;
+      return `Copied last assistant message to clipboard (${chars} character${chars === 1 ? "" : "s"}).`;
     },
   },
   {

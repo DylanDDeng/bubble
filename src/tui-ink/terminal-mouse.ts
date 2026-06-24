@@ -13,6 +13,27 @@ export const MOUSE_REPORTING_ENABLE = "\x1b[?1000h\x1b[?1006h";
 // renderer left the terminal in a reporting state.
 export const MOUSE_REPORTING_DISABLE = "\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1005l\x1b[?1006l\x1b[?1015l";
 
+function envValueEnabled(value: string | undefined): boolean {
+  if (!value) return false;
+  return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
+interface TerminalMouseEnv {
+  BUBBLE_ENABLE_MOUSE?: string;
+  BUBBLE_TUI_MOUSE?: string;
+}
+
+/**
+ * Terminal mouse reporting captures drag events before the host terminal can
+ * create a native text selection. Keep it opt-in until Bubble owns a full
+ * renderer-level selection/copy pipeline.
+ */
+export function isTerminalMouseReportingEnabled(
+  env: TerminalMouseEnv = process.env as TerminalMouseEnv,
+): boolean {
+  return envValueEnabled(env.BUBBLE_ENABLE_MOUSE) || envValueEnabled(env.BUBBLE_TUI_MOUSE);
+}
+
 const ESCAPED_MOUSE_SEQUENCE_RE = /\x1b(?:\[<(\d+);\d+;\d+([mM])|\[M([\s\S])[\s\S]{2})/g;
 const RAW_SGR_MOUSE_SEQUENCE_RE = /\[?<(\d+);\d+;\d+([mM])/g;
 const RAW_SGR_MOUSE_INPUT_RE = /^(?:\[?<\d+;\d+;\d+[mM])+$/;

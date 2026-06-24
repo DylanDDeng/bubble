@@ -3,6 +3,7 @@ import {
   ALTERNATE_SCROLL_DISABLE,
   ALTERNATE_SCROLL_ENABLE,
   hasTerminalMouseSequence,
+  isTerminalMouseReportingEnabled,
   MOUSE_REPORTING_DISABLE,
   MOUSE_REPORTING_ENABLE,
   parseTerminalMouseWheel,
@@ -17,6 +18,13 @@ describe("Ink terminal mouse parsing", () => {
     expect(ALTERNATE_SCROLL_DISABLE).toBe("\x1b[?1007l");
     expect(MOUSE_REPORTING_ENABLE).toContain("\x1b[?1000h");
     expect(MOUSE_REPORTING_ENABLE).toContain("\x1b[?1006h");
+  });
+
+  it("keeps terminal mouse reporting disabled unless explicitly enabled", () => {
+    expect(isTerminalMouseReportingEnabled({})).toBe(false);
+    expect(isTerminalMouseReportingEnabled({ BUBBLE_ENABLE_MOUSE: "0" })).toBe(false);
+    expect(isTerminalMouseReportingEnabled({ BUBBLE_ENABLE_MOUSE: "1" })).toBe(true);
+    expect(isTerminalMouseReportingEnabled({ BUBBLE_TUI_MOUSE: "true" })).toBe(true);
   });
 
   it("parses SGR wheel events", () => {
