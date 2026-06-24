@@ -69,7 +69,9 @@ Bubble ships with a catalog of built-in providers. Configure them inside the app
 | `/key <provider> <key>` | Set the API key for a provider. |
 | `/model` | Pick the active model and reasoning effort. |
 
-Built-in providers include OpenAI, Anthropic, Google, DeepSeek, Moonshot (CN and international), Kimi for Coding, Zhipu AI, Z.AI, Alibaba DashScope, MiniMax, StepFun, Groq, Together AI, Fireworks, and a `local` profile for any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, etc.).
+Built-in providers include OpenAI, Anthropic, Google, DeepSeek, Moonshot (CN and international), Kimi for Coding, Zhipu AI, Z.AI, Alibaba DashScope, Doubao (Volcengine Ark), MiniMax, StepFun, Groq, Together AI, Fireworks, and a `local` profile for any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, etc.).
+
+For Doubao Seed models on Volcengine Ark, run `/provider --add doubao` and paste your Ark API key. The built-in endpoint is `https://ark.cn-beijing.volces.com/api/v3` and uses Ark's Responses API. The model picker exposes `minimal`, `low`, `medium`, and `high`, defaulting to `high`; `minimal` disables Ark thinking, while the other levels enable it.
 
 ### Custom providers and models
 
@@ -90,7 +92,7 @@ For full control — custom base URLs, self-hosted gateways, extra models, or pi
 }
 ```
 
-`protocol` accepts `openai-chat` (default) or `anthropic-messages`. Entries in `models.json` take precedence over the built-in catalog.
+`protocol` accepts `openai-chat` (default), `anthropic-messages`, or `ark-responses`. Entries in `models.json` take precedence over the built-in catalog.
 
 ### Reasoning effort
 

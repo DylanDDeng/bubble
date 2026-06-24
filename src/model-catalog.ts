@@ -1,6 +1,6 @@
 import type { ReasoningEffort } from "./types.js";
 
-export type ProviderProtocol = "openai-chat" | "anthropic-messages";
+export type ProviderProtocol = "openai-chat" | "anthropic-messages" | "ark-responses";
 
 export interface BuiltinProviderDefinition {
   id: string;
@@ -16,6 +16,7 @@ export interface BuiltinModelDefinition {
   name: string;
   providerId: string;
   reasoningLevels: ReasoningEffort[];
+  defaultReasoningLevel?: ReasoningEffort;
   contextWindow?: number;
   /**
    * Server-declared cap on per-tool-output tokens. When set, the agent must
@@ -38,6 +39,7 @@ export const BUILTIN_PROVIDERS: BuiltinProviderDefinition[] = [
   { id: "zai", name: "Z.AI", baseURL: "https://api.z.ai/api/paas/v4" },
   { id: "zai-coding-plan", name: "Z.AI Coding Plan", baseURL: "https://api.z.ai/api/coding/paas/v4" },
   { id: "alibaba", name: "Alibaba DashScope", baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1" },
+  { id: "doubao", name: "Doubao (Volcengine Ark)", baseURL: "https://ark.cn-beijing.volces.com/api/v3", protocol: "ark-responses" },
   { id: "minimax", name: "MiniMax Token Plan", baseURL: "https://api.minimaxi.com/anthropic", protocol: "anthropic-messages" },
   { id: "minimax-openai", name: "MiniMax (OpenAI Compatible)", baseURL: "https://api.minimaxi.com/v1" },
   { id: "minimax-anthropic", name: "MiniMax (Anthropic Compatible)", baseURL: "https://api.minimaxi.com/anthropic", protocol: "anthropic-messages", hidden: true },
@@ -69,6 +71,7 @@ const GLM_5_2_LEVELS: ReasoningEffort[] = ["high", "max", "off"];
 const KIMI_THINKING_ONLY_LEVELS: ReasoningEffort[] = ["medium"];
 const DEEPSEEK_V4_LEVELS: ReasoningEffort[] = ["high", "max"];
 const STEPFUN_REASONING_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high"];
+const DOUBAO_SEED_REASONING_LEVELS: ReasoningEffort[] = ["minimal", "low", "medium", "high"];
 const MINIMAX_M3_REASONING_LEVELS: ReasoningEffort[] = ["off", "medium"];
 const MINIMAX_REASONING_LEVELS: ReasoningEffort[] = ["medium"];
 const ANTHROPIC_ALWAYS_ADAPTIVE_LEVELS: ReasoningEffort[] = ["medium"];
@@ -121,6 +124,7 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "glm-4.6", name: "GLM-4.6", providerId: "zai-coding-plan", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
   { id: "qwen3.6-plus", name: "Qwen3.6 Plus", providerId: "alibaba", reasoningLevels: ["off"], contextWindow: 1048576 },
   { id: "qwen3.7-max", name: "Qwen3.7 Max", providerId: "alibaba", reasoningLevels: ["off"], contextWindow: 1048576 },
+  { id: "doubao-seed-2-1-pro-260628", name: "Doubao Seed 2.1 Pro", providerId: "doubao", reasoningLevels: DOUBAO_SEED_REASONING_LEVELS, defaultReasoningLevel: "high" },
   { id: "MiniMax-M3", name: "MiniMax M3", providerId: "minimax", reasoningLevels: MINIMAX_M3_REASONING_LEVELS, contextWindow: 1000000 },
   { id: "MiniMax-M2.7", name: "MiniMax M2.7", providerId: "minimax", reasoningLevels: MINIMAX_REASONING_LEVELS, contextWindow: 204800 },
   { id: "MiniMax-M2.7-highspeed", name: "MiniMax M2.7 Highspeed", providerId: "minimax", reasoningLevels: MINIMAX_REASONING_LEVELS, contextWindow: 204800 },
@@ -207,6 +211,10 @@ export function getBuiltinModel(providerId: string, modelId: string): BuiltinMod
     || (providerId === "openai"
       ? BUILTIN_MODELS.find((model) => model.providerId === "openai-codex" && model.id === modelId)
       : undefined);
+}
+
+export function getModelDefaultReasoningLevel(providerId: string, modelId: string): ReasoningEffort | undefined {
+  return getBuiltinModel(providerId, modelId)?.defaultReasoningLevel;
 }
 
 export function getBuiltinProvider(providerId: string): BuiltinProviderDefinition | undefined {

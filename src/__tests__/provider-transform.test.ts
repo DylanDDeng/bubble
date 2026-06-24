@@ -105,6 +105,21 @@ describe("provider transform", () => {
     expect(off.extraBody).toBeUndefined();
   });
 
+  it("keeps Doubao Chat-compatible reasoning effort fields for explicit openai-chat overrides", () => {
+    const minimal = resolveProviderRequestConfig("doubao", "doubao-seed-2-1-pro-260628", "minimal");
+    const low = resolveProviderRequestConfig("doubao", "doubao-seed-2-1-pro-260628", "low");
+    const medium = resolveProviderRequestConfig("doubao", "doubao-seed-2-1-pro-260628", "medium");
+    const high = resolveProviderRequestConfig("doubao", "doubao-seed-2-1-pro-260628", "high");
+
+    expect(minimal.effectiveThinkingLevel).toBe("minimal");
+    expect(minimal.reasoningEffort).toBeUndefined();
+    expect(minimal.parallelToolCalls).toBe(false);
+    expect(minimal.extraBody).toEqual({ reasoning_effort: "minimal" });
+    expect(low.extraBody).toEqual({ reasoning_effort: "low" });
+    expect(medium.extraBody).toEqual({ reasoning_effort: "medium" });
+    expect(high.extraBody).toEqual({ reasoning_effort: "high" });
+  });
+
   it("emits MiniMax interleaved thinking request fields", () => {
     const m3 = resolveProviderRequestConfig("minimax-openai", "MiniMax-M3", "medium");
     const m27 = resolveProviderRequestConfig("minimax-openai", "MiniMax-M2.7", "medium");

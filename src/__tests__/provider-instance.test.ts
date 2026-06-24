@@ -27,9 +27,23 @@ async function collect(stream: AsyncIterable<StreamChunk>): Promise<StreamChunk[
   return out;
 }
 
+function makeSseResponse(events: Array<Record<string, unknown>>): Response {
+  const encoder = new TextEncoder();
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const event of events) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+      }
+      controller.close();
+    },
+  });
+  return new Response(body, { status: 200 });
+}
+
 describe("createProviderInstance", () => {
   beforeEach(() => {
     createMock.mockReset();
+    vi.unstubAllGlobals();
   });
 
   it("requests stream usage for DeepSeek so cost can be calculated", async () => {
@@ -200,6 +214,287 @@ describe("createProviderInstance", () => {
     expect(body.messages[0].reasoning_content).toBeUndefined();
   });
 
+  it("uses Volcengine Ark Responses API for Doubao", async () => {
+    const requestInits: RequestInit[] = [];
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestInits.push(init ?? {});
+      return makeSseResponse([
+        {
+          type: "response.completed",
+          response: {
+            usage: {
+              input_tokens: 10,
+              output_tokens: 5,
+              output_tokens_details: { reasoning_tokens: 2 },
+              total_tokens: 15,
+            },
+          },
+        },
+      ]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({
+      providerId: "doubao",
+      apiKey: "sk-test",
+      baseURL: "https://ark.cn-beijing.volces.com/api/v3",
+    });
+
+    await collect(provider.streamChat([{
+      role: "user",
+      content: [
+        {
+          type: "image_url",
+          image_url: { url: "https://arkdoc.tos-cn-beijing.volces.com/images/get-started/project-demo.png" },
+        },
+        {
+          type: "text",
+          text: "请根据图片实现一个短视频网站首页项目。",
+        },
+      ],
+    }], {
+      model: "doubao-seed-2-1-pro-260628",
+      thinkingLevel: "high",
+    }));
+
+    const body = JSON.parse(String(requestInits[0].body));
+    expect(fetchMock).toHaveBeenCalledWith("https://ark.cn-beijing.volces.com/api/v3/responses", expect.any(Object));
+    expect(createMock).not.toHaveBeenCalled();
+    expect(body.model).toBe("doubao-seed-2-1-pro-260628");
+    expect(body.store).toBe(false);
+    expect(body.stream).toBe(true);
+    expect(body.thinking).toEqual({ type: "enabled" });
+    expect(body.reasoning_effort).toBeUndefined();
+    expect(body.input[0].content).toEqual([
+      {
+        type: "input_image",
+        image_url: "https://arkdoc.tos-cn-beijing.volces.com/images/get-started/project-demo.png",
+      },
+      {
+        type: "input_text",
+        text: "请根据图片实现一个短视频网站首页项目。",
+      },
+    ]);
+  });
+
+  it("maps Doubao minimal reasoning to disabled Ark thinking", async () => {
+    const requestInits: RequestInit[] = [];
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestInits.push(init ?? {});
+      return makeSseResponse([{ type: "response.completed", response: {} }]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({
+      providerId: "doubao",
+      apiKey: "sk-test",
+      baseURL: "https://ark.cn-beijing.volces.com/api/v3",
+    });
+
+    await collect(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "doubao-seed-2-1-pro-260628",
+      thinkingLevel: "minimal",
+    }));
+
+    const body = JSON.parse(String(requestInits[0].body));
+    expect(body.thinking).toEqual({ type: "disabled" });
+  });
+
+  it("streams tool calls through Doubao Ark Responses API", async () => {
+    const writeTool: ToolDefinition = {
+      name: "write",
+      description: "Write a file",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          content: { type: "string" },
+        },
+        required: ["path", "content"],
+      },
+    };
+    const requestInits: RequestInit[] = [];
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestInits.push(init ?? {});
+      return makeSseResponse([
+        {
+          type: "response.output_item.added",
+          output_index: 0,
+          item: {
+            id: "fc_1",
+            type: "function_call",
+            call_id: "call_write",
+            name: "write",
+            arguments: "",
+          },
+        },
+        {
+          type: "response.function_call_arguments.delta",
+          output_index: 0,
+          delta: "{\"path\":\"index.html\",",
+        },
+        {
+          type: "response.function_call_arguments.delta",
+          output_index: 0,
+          delta: "\"content\":\"<html></html>\"}",
+        },
+        {
+          type: "response.function_call_arguments.done",
+          output_index: 0,
+          arguments: "{\"path\":\"index.html\",\"content\":\"<html></html>\"}",
+        },
+        {
+          type: "response.output_item.done",
+          output_index: 0,
+          item: {
+            id: "fc_1",
+            type: "function_call",
+            call_id: "call_write",
+            name: "write",
+            arguments: "{\"path\":\"index.html\",\"content\":\"<html></html>\"}",
+          },
+        },
+        {
+          type: "response.completed",
+          response: {
+            usage: {
+              input_tokens: 10,
+              output_tokens: 5,
+              total_tokens: 15,
+            },
+          },
+        },
+      ]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({
+      providerId: "doubao",
+      apiKey: "sk-test",
+      baseURL: "https://ark.cn-beijing.volces.com/api/v3",
+    });
+
+    const chunks = await collect(provider.streamChat([{ role: "user", content: "write a file" }], {
+      model: "doubao-seed-2-1-pro-260628",
+      thinkingLevel: "high",
+      tools: [writeTool],
+    }));
+
+    const body = JSON.parse(String(requestInits[0].body));
+    expect(body.stream).toBe(true);
+    expect(body.tools?.map((tool: any) => tool.name)).toEqual(["write"]);
+    expect(body.tools[0].parameters).toEqual(writeTool.parameters);
+    expect(body.reasoning_effort).toBeUndefined();
+
+    expect(chunks).toContainEqual({
+      type: "usage",
+      usage: {
+        promptTokens: 10,
+        completionTokens: 5,
+        promptCacheHitTokens: undefined,
+        promptCacheMissTokens: undefined,
+        reasoningTokens: undefined,
+        totalTokens: 15,
+      },
+    });
+    expect(chunks.filter((chunk) => chunk.type === "tool_call")).toEqual([
+      { type: "tool_call", id: "call_write", name: "write", arguments: "", isStart: true, isEnd: false },
+      {
+        type: "tool_call",
+        id: "call_write",
+        name: "write",
+        arguments: "{\"path\":\"index.html\",",
+        isStart: false,
+        isEnd: false,
+      },
+      {
+        type: "tool_call",
+        id: "call_write",
+        name: "write",
+        arguments: "\"content\":\"<html></html>\"}",
+        isStart: false,
+        isEnd: false,
+      },
+      {
+        type: "tool_call",
+        id: "call_write",
+        name: "write",
+        arguments: "",
+        argumentsFull: "{\"path\":\"index.html\",\"content\":\"<html></html>\"}",
+        argumentsCorrupt: undefined,
+        isStart: false,
+        isEnd: true,
+      },
+    ]);
+    expect(chunks.at(-1)).toEqual({ type: "done" });
+  });
+
+  it("marks malformed Doubao Ark Responses tool calls as corrupt", async () => {
+    const writeTool: ToolDefinition = {
+      name: "write",
+      description: "Write a file",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          content: { type: "string" },
+        },
+        required: ["path", "content"],
+      },
+    };
+
+    const fetchMock = vi.fn(async () => makeSseResponse([
+      {
+        type: "response.output_item.added",
+        output_index: 0,
+        item: {
+          id: "fc_1",
+          type: "function_call",
+          call_id: "call_write",
+          name: "write",
+          arguments: "",
+        },
+      },
+      {
+        type: "response.function_call_arguments.delta",
+        output_index: 0,
+        delta: "{\"path\":\"index.html\",\"content\":\"",
+      },
+      {
+        type: "response.incomplete",
+        response: {},
+      },
+    ]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({
+      providerId: "doubao",
+      apiKey: "sk-test",
+      baseURL: "https://ark.cn-beijing.volces.com/api/v3",
+    });
+
+    const chunks = await collect(provider.streamChat([{ role: "user", content: "write a file" }], {
+      model: "doubao-seed-2-1-pro-260628",
+      thinkingLevel: "high",
+      tools: [writeTool],
+    }));
+
+    expect(chunks.filter((chunk) => chunk.type === "tool_call").at(-1)).toEqual({
+      type: "tool_call",
+      id: "call_write",
+      name: "write",
+      arguments: "",
+      argumentsFull: "{}",
+      argumentsCorrupt: true,
+      isStart: false,
+      isEnd: true,
+    });
+  });
+
   it("uses MiniMax OpenAI-compatible interleaved thinking request shape", async () => {
     let body: any;
     createMock.mockImplementation(async (input) => {
@@ -238,7 +533,7 @@ describe("createProviderInstance", () => {
     expect(body.messages[0].reasoning_content).toBeUndefined();
   });
 
-  it("disables parallel tool calls only for Fireworks Kimi when tools are available", async () => {
+  it("disables parallel tool calls for providers that require serialized tool calls", async () => {
     const tool: ToolDefinition = {
       name: "read",
       description: "Read a file",

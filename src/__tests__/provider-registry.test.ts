@@ -12,8 +12,13 @@ describe("provider registry", () => {
     expect(displayModel("stepfun:step-3.7-flash")).toBe("Step 3.7 Flash");
     expect(displayModel("minimax:MiniMax-M3")).toBe("MiniMax M3");
     expect(displayModel("minimax-openai:MiniMax-M3")).toBe("MiniMax M3");
+    expect(displayModel("doubao:doubao-seed-2-1-pro-260628")).toBe("Doubao Seed 2.1 Pro");
     expect(displayModel("anthropic:claude-fable-5")).toBe("Claude Fable 5");
     expect(displayModel("anthropic:claude-sonnet-4-6")).toBe("Claude Sonnet 4.6");
+  });
+
+  it("shows Doubao as a user-visible provider", () => {
+    expect(isUserVisibleProvider("doubao")).toBe(true);
   });
 
   it("uses MiniMax Token Plan as the visible MiniMax provider", () => {
@@ -86,6 +91,37 @@ describe("provider registry", () => {
     expect(registry.getDefault()).toMatchObject({
       id: "anthropic",
       protocol: "anthropic-messages",
+    });
+  });
+
+  it("overlays Ark Responses protocol metadata onto configured Doubao providers", () => {
+    const providers = [
+      {
+        id: "doubao",
+        name: "Doubao",
+        baseURL: "https://ark.cn-beijing.volces.com/api/v3",
+        apiKey: "ark-key",
+        enabled: true,
+        authType: "api",
+      },
+    ];
+    const config = {
+      getProviders: () => providers.slice(),
+      setProviders: () => undefined,
+      getDefaultProvider: () => "doubao",
+      setDefaultProvider: () => undefined,
+      getApiKey: () => undefined,
+      setApiKey: () => undefined,
+      getDefaultModel: () => undefined,
+      setDefaultModel: () => undefined,
+      getRecentModels: () => [],
+      pushRecentModel: () => undefined,
+    } as any;
+
+    const registry = new ProviderRegistry(config);
+    expect(registry.getDefault()).toMatchObject({
+      id: "doubao",
+      protocol: "ark-responses",
     });
   });
 

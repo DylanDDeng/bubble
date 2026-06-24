@@ -2388,7 +2388,7 @@ export class Agent {
     if (toolCall.argsCorrupt) {
       return {
         content:
-          `Error: The arguments for "${toolCall.name}" failed to parse as JSON, indicating the tool call was truncated or malformed mid-stream. ` +
+          `Error: The arguments for "${toolCall.name}" failed to parse as JSON, indicating the provider returned truncated or malformed tool arguments. ` +
           `Re-issue the call with valid JSON arguments; do not assume the previous attempt ran.`,
         isError: true,
         status: "blocked",
@@ -2745,7 +2745,6 @@ function isSubagentLifecycleTool(name: string): boolean {
     || name === "list_agents"
     || name === "agent_team";
 }
-
 
 
 

@@ -72,6 +72,14 @@ export function resolveProviderRequestConfig(
     };
   }
 
+  if (providerId === "doubao") {
+    return {
+      effectiveThinkingLevel,
+      parallelToolCalls: false,
+      extraBody: { reasoning_effort: effectiveThinkingLevel },
+    };
+  }
+
   if (providerId === "minimax" || providerId === "minimax-openai") {
     const extraBody: Record<string, unknown> = { reasoning_split: true };
     if (MINIMAX_M3_FAMILY.has(modelId)) {

@@ -59,6 +59,24 @@ describe("variant resolver", () => {
     expect(getModelContextWindow("stepfun", "step-3.7-flash")).toBe(256000);
   });
 
+  it("includes Doubao Seed models on Volcengine Ark", () => {
+    expect(getBuiltinProvider("doubao")).toMatchObject({
+      name: "Doubao (Volcengine Ark)",
+      baseURL: "https://ark.cn-beijing.volces.com/api/v3",
+      protocol: "ark-responses",
+    });
+    expect(listBuiltinModels("doubao").map((model) => model.id)).toEqual([
+      "doubao-seed-2-1-pro-260628",
+    ]);
+    expect(getAvailableThinkingLevels("doubao", "doubao-seed-2-1-pro-260628")).toEqual([
+      "minimal",
+      "low",
+      "medium",
+      "high",
+    ]);
+    expect(getDefaultThinkingLevel("doubao", "doubao-seed-2-1-pro-260628")).toBe("high");
+  });
+
   it("includes MiniMax agent models", () => {
     expect(getBuiltinProvider("minimax")).toMatchObject({
       name: "MiniMax Token Plan",

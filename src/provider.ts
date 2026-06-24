@@ -7,6 +7,7 @@
 import OpenAI from "openai";
 import { appendFileSync } from "node:fs";
 import { createAnthropicMessagesProvider } from "./provider-anthropic.js";
+import { createArkResponsesProvider } from "./provider-ark-responses.js";
 import { createOpenAICodexProvider, isOpenAICodexBaseUrl, type OpenAICodexAuthAdapter } from "./provider-openai-codex.js";
 import { createProviderProtocolArtifactFilter } from "./provider-artifacts.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
@@ -110,8 +111,13 @@ export function createUnavailableProvider(message: string): Provider {
 }
 
 export function createProviderInstance(options: ProviderInstanceOptions): Provider {
-  if (resolveProviderProtocol(options) === "anthropic-messages") {
+  const protocol = resolveProviderProtocol(options);
+  if (protocol === "anthropic-messages") {
     return createAnthropicMessagesProvider(options);
+  }
+
+  if (protocol === "ark-responses") {
+    return createArkResponsesProvider(options);
   }
 
   if (isOpenAICodexBaseUrl(options.baseURL)) {
@@ -182,27 +188,40 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
       body.reasoning = { enabled: true };
     }
 
+    const createCompletion = async (requestBody: any): Promise<any> => {
+      try {
+        return await client.chat.completions.create(requestBody as any, {
+          signal: chatOptions.abortSignal,
+          ...(chatOptions.rateLimitPolicy === "defer" ? { maxRetries: 0 } : {}),
+        } as any);
+      } catch (error: any) {
+        if (error?.status === 429) {
+          const retryAfterHeader = error?.headers?.["retry-after"];
+          const retryAfterSeconds = Number(retryAfterHeader);
+          throw new RateLimitError(error?.message || "Rate limited (429)", {
+            status: 429,
+            retryAfterMs: Number.isFinite(retryAfterSeconds) ? Math.round(retryAfterSeconds * 1000) : undefined,
+            cause: error,
+          });
+        }
+        throw error;
+      }
+    };
+
+    if (shouldUseNonStreamingToolCalls(options, tools, chatOptions.toolChoice)) {
+      body.stream = false;
+      delete body.stream_options;
+      const response = await createCompletion(body);
+      yield* translateOpenAIFullResponse(response);
+      yield { type: "done" };
+      return;
+    }
+
     // Rate-limit contract (design §4.5): "defer" disables the SDK's own
     // retries so the caller is the single 429 backoff layer; either policy
     // surfaces a final 429 as a typed RateLimitError instead of a string.
     let stream: any;
-    try {
-      stream = (await client.chat.completions.create(body as any, {
-        signal: chatOptions.abortSignal,
-        ...(chatOptions.rateLimitPolicy === "defer" ? { maxRetries: 0 } : {}),
-      } as any)) as any;
-    } catch (error: any) {
-      if (error?.status === 429) {
-        const retryAfterHeader = error?.headers?.["retry-after"];
-        const retryAfterSeconds = Number(retryAfterHeader);
-        throw new RateLimitError(error?.message || "Rate limited (429)", {
-          status: 429,
-          retryAfterMs: Number.isFinite(retryAfterSeconds) ? Math.round(retryAfterSeconds * 1000) : undefined,
-          cause: error,
-        });
-      }
-      throw error;
-    }
+    stream = (await createCompletion(body)) as any;
 
     yield* translateOpenAIStream(stream, {
       toolArgsMergeMode: resolveToolArgsMergeMode(options.providerId || "", options.baseURL),
@@ -256,6 +275,12 @@ function resolveProviderProtocol(options: ProviderInstanceOptions): ProviderProt
   const providerId = (options.providerId || "").toLowerCase();
   const baseURL = options.baseURL.toLowerCase();
   if (
+    providerId === "doubao"
+    && baseURL.replace(/\/+$/, "") === "https://ark.cn-beijing.volces.com/api/v3"
+  ) {
+    return "ark-responses";
+  }
+  if (
     providerId === "anthropic"
     || providerId.endsWith("-anthropic")
     || baseURL.includes("/anthropic")
@@ -285,6 +310,17 @@ function shouldRequestStreamUsage(options: Pick<ProviderInstanceOptions, "provid
     || providerId === "zai"
     || providerId === "zai-coding-plan"
     || isMiniMaxOpenAICompatible(options);
+}
+
+function shouldUseNonStreamingToolCalls(
+  options: Pick<ProviderInstanceOptions, "providerId">,
+  tools: unknown[] | undefined,
+  toolChoice: ToolChoiceMode | undefined,
+): boolean {
+  return (options.providerId || "").toLowerCase() === "doubao"
+    && !!tools
+    && tools.length > 0
+    && toolChoice !== "none";
 }
 
 // Some providers (notably Fireworks-hosted Kimi) stream tool-call arguments
@@ -381,6 +417,103 @@ function extractBalancedJson(s: string, start: number): string | null {
 }
 
 /**
+ * Convert a non-streaming OpenAI-compatible chat-completions response into the
+ * same chunk protocol used by the streaming adapter. This is used for provider
+ * tool-call paths where streamed function arguments are not reliable enough to
+ * execute safely.
+ */
+export async function* translateOpenAIFullResponse(response: any): AsyncIterable<StreamChunk> {
+  const usageChunk = usageToStreamChunk(response?.usage);
+  if (usageChunk) yield usageChunk;
+
+  const choice = response?.choices?.[0];
+  const finishReason = choice?.finish_reason;
+  const truncatedByLength = finishReason === "length";
+  const message = choice?.message;
+  if (!message) return;
+
+  const reasoningDetails = extractReasoningDetailsText(message.reasoning_details);
+  const reasoning = reasoningDetails
+    ?? (typeof message.reasoning === "string" ? message.reasoning : undefined)
+    ?? (typeof message.thinking === "string" ? message.thinking : undefined)
+    ?? (typeof message.reasoning_content === "string" ? message.reasoning_content : undefined);
+  if (reasoning) {
+    yield { type: "reasoning_delta", content: reasoning };
+  }
+
+  if (typeof message.content === "string" && message.content) {
+    const textFilter = createProviderProtocolArtifactFilter();
+    const cleaned = textFilter.push(message.content) + textFilter.flush();
+    if (cleaned) {
+      yield { type: "text", content: cleaned };
+    }
+  }
+
+  const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+  for (let index = 0; index < toolCalls.length; index += 1) {
+    const toolCall = toolCalls[index];
+    const name = typeof toolCall?.function?.name === "string" ? toolCall.function.name : "";
+    if (!name) continue;
+    const id = typeof toolCall?.id === "string" && toolCall.id
+      ? toolCall.id
+      : `call_${index}`;
+    const rawArgs = typeof toolCall?.function?.arguments === "string"
+      ? toolCall.function.arguments
+      : JSON.stringify(toolCall?.function?.arguments ?? {});
+    const normalized = normalizeToolArgsDetailed(rawArgs);
+    const corrupt = normalized.corrupt || truncatedByLength;
+    debugToolArgs({
+      stage: "full-response-tool-call",
+      id,
+      name,
+      entryArgs: rawArgs,
+      finalArgs: normalized.args,
+      finishReason,
+      corrupt,
+    });
+    yield { type: "tool_call", id, name, arguments: "", isStart: true, isEnd: false };
+    if (rawArgs) {
+      yield { type: "tool_call", id, name, arguments: rawArgs, isStart: false, isEnd: false };
+    }
+    yield {
+      type: "tool_call",
+      id,
+      name,
+      arguments: "",
+      argumentsFull: normalized.args,
+      argumentsCorrupt: corrupt || undefined,
+      isStart: false,
+      isEnd: true,
+    };
+  }
+}
+
+function usageToStreamChunk(usage: any): Extract<StreamChunk, { type: "usage" }> | undefined {
+  if (!usage) return undefined;
+  return {
+    type: "usage",
+    usage: {
+      promptTokens: typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : 0,
+      completionTokens: typeof usage.completion_tokens === "number" ? usage.completion_tokens : 0,
+      promptCacheHitTokens: typeof usage.prompt_cache_hit_tokens === "number"
+        ? usage.prompt_cache_hit_tokens
+        : typeof usage.prompt_tokens_details?.cached_tokens === "number"
+          ? usage.prompt_tokens_details.cached_tokens
+          : undefined,
+      promptCacheMissTokens: typeof usage.prompt_cache_miss_tokens === "number"
+        ? usage.prompt_cache_miss_tokens
+        : typeof usage.prompt_tokens_details?.cached_tokens === "number" && typeof usage.prompt_tokens === "number"
+          ? Math.max(0, usage.prompt_tokens - usage.prompt_tokens_details.cached_tokens)
+          : undefined,
+      reasoningTokens: typeof usage.completion_tokens_details?.reasoning_tokens === "number"
+        ? usage.completion_tokens_details.reasoning_tokens
+        : undefined,
+      totalTokens: typeof usage.total_tokens === "number" ? usage.total_tokens : undefined,
+    },
+  };
+}
+
+/**
  * Convert an OpenAI-compatible chat-completions stream into our internal StreamChunk events.
  *
  * Multi-tool-call streams are tracked by `index`, but tool-call starts and
@@ -392,7 +525,7 @@ export async function* translateOpenAIStream(
   stream: AsyncIterable<any>,
   options: TranslateOpenAIStreamOptions = {},
 ): AsyncIterable<StreamChunk> {
-  const toolCalls = new Map<number, { id: string; name: string; args: string; started: boolean }>();
+  const toolCalls = new Map<number, { id: string; name: string; args: string; started: boolean; corrupt?: boolean }>();
   const textFilter = createProviderProtocolArtifactFilter();
   const toolArgsMergeMode = options.toolArgsMergeMode ?? "delta";
   const reasoningMergeMode = options.reasoningMergeMode ?? "delta";
@@ -420,14 +553,15 @@ export async function* translateOpenAIStream(
         }
       }
       const normalized = normalizeToolArgsDetailed(entry.args);
-      debugToolArgs({ stage: "flush-end", id: entry.id, name: entry.name, entryArgs: entry.args, finalArgs: normalized.args, corrupt: normalized.corrupt });
+      const corrupt = normalized.corrupt || !!entry.corrupt;
+      debugToolArgs({ stage: "flush-end", id: entry.id, name: entry.name, entryArgs: entry.args, finalArgs: normalized.args, corrupt });
       yield {
         type: "tool_call",
         id: entry.id,
         name: entry.name,
         arguments: "",
         argumentsFull: normalized.args,
-        argumentsCorrupt: normalized.corrupt || undefined,
+        argumentsCorrupt: corrupt || undefined,
         isStart: false,
         isEnd: true,
       };
@@ -435,7 +569,7 @@ export async function* translateOpenAIStream(
     toolCalls.clear();
   }
 
-  function* startToolCallIfReady(entry: { id: string; name: string; args: string; started: boolean }): Generator<StreamChunk> {
+  function* startToolCallIfReady(entry: { id: string; name: string; args: string; started: boolean; corrupt?: boolean }): Generator<StreamChunk> {
     if (entry.started || !entry.id || !entry.name) return;
     entry.started = true;
     yield { type: "tool_call", id: entry.id, name: entry.name, arguments: "", isStart: true, isEnd: false };
@@ -591,7 +725,12 @@ export async function* translateOpenAIStream(
       }
     }
 
-    if (finishReason === "tool_calls") {
+    if (finishReason === "length") {
+      for (const entry of toolCalls.values()) {
+        entry.corrupt = true;
+      }
+      yield* flushToolCalls();
+    } else if (finishReason === "tool_calls") {
       yield* flushToolCalls();
     }
   }

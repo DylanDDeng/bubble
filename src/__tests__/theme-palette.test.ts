@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shouldUseLineComposerFrame } from "../tui-ink/input-box.js";
+import { composerSurfaceBackground, shouldUseLineComposerFrame } from "../tui-ink/input-box.js";
 import { darkTheme as inkDarkTheme, lightTheme as inkLightTheme } from "../tui-ink/theme.js";
 
 function luminance(hex: string): number {
@@ -27,5 +27,13 @@ describe("TUI theme palettes", () => {
   it("uses the compact two-line composer frame for both light and dark backgrounds", () => {
     expect(shouldUseLineComposerFrame(inkLightTheme.background)).toBe(true);
     expect(shouldUseLineComposerFrame(inkDarkTheme.background)).toBe(true);
+  });
+
+  it("does not paint a filled composer row in compact line-frame mode", () => {
+    for (const theme of [inkLightTheme, inkDarkTheme]) {
+      const lineFrame = shouldUseLineComposerFrame(theme.background);
+      expect(composerSurfaceBackground(lineFrame, theme.background, theme.inputBg)).toBe(theme.background);
+      expect(composerSurfaceBackground(lineFrame, theme.background, theme.inputBg)).not.toBe(theme.inputBg);
+    }
   });
 });
