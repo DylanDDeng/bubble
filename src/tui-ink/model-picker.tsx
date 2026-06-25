@@ -104,20 +104,29 @@ export function padPickerRows(rows: string[], bodyRows: number, width: number): 
   return padded;
 }
 
-export function formatReasoningLevelsLabel(levels: readonly ThinkingLevel[]): string {
+// MiniMax models expose thinking as a binary on/off switch (the API's `thinking`
+// param is disabled|adaptive — there's no graded effort), so render the "on"
+// level as on/off instead of our internal "medium". Scoped to MiniMax only —
+// other 2-level models (e.g. GLM toggles) keep their effort labels.
+function isMiniMaxToggleModel(modelId: string): boolean {
+  return modelId.toLowerCase().includes("minimax");
+}
+
+export function formatReasoningLevelsLabel(levels: readonly ThinkingLevel[], asToggle = false): string {
   const normalized = levels.length > 0 ? levels : ["off"];
+  if (asToggle) return "thinking on/off";
   return `effort ${normalized.join("/")}`;
 }
 
 export function formatModelPickerRow(
-  option: Pick<ModelPickerOption, "label" | "providerBadge" | "reasoningLevels">,
+  option: Pick<ModelPickerOption, "id" | "label" | "providerBadge" | "reasoningLevels">,
   options: { selected: boolean; current: boolean; width: number },
 ): string {
   const width = Math.max(24, options.width);
   const marker = options.selected ? "> " : "  ";
   const label = option.label.replace(/\s+/g, " ").trim();
   const provider = option.providerBadge.replace(/\s+/g, " ").trim();
-  const effort = formatReasoningLevelsLabel(option.reasoningLevels);
+  const effort = formatReasoningLevelsLabel(option.reasoningLevels, isMiniMaxToggleModel(option.id));
   const current = options.current ? " ●" : "";
   const providerWidth = Math.max(6, Math.min(16, Math.floor(width * 0.18)));
   const effortWidth = Math.max(12, Math.min(30, Math.floor(width * 0.32)));
@@ -136,11 +145,12 @@ export function formatModelPickerRow(
 
 export function formatEffortPickerRow(
   level: ThinkingLevel,
-  options: { selected: boolean; width: number },
+  options: { selected: boolean; width: number; asToggle?: boolean },
 ): string {
   const width = Math.max(24, options.width);
   const marker = options.selected ? "> " : "  ";
-  const row = `${marker}${level}  ${effortDescription(level)}`;
+  const name = options.asToggle ? (level === "off" ? "off" : "on") : level;
+  const row = `${marker}${name}  ${effortDescription(level, options.asToggle)}`;
   return padVisual(truncateVisual(row, width), width);
 }
 
@@ -166,7 +176,8 @@ export function shouldOpenEffortPicker(option: Pick<ModelPickerOption, "reasonin
   return option.reasoningLevels.length > 1;
 }
 
-function effortDescription(level: ThinkingLevel): string {
+function effortDescription(level: ThinkingLevel, asToggle?: boolean): string {
+  if (asToggle) return level === "off" ? "thinking disabled" : "thinking enabled";
   switch (level) {
     case "off":
       return "no reasoning effort";
@@ -454,6 +465,7 @@ function EffortPickerView({
     row: formatEffortPickerRow(level, {
       selected: index === safeSelectedIndex,
       width: rowWidth,
+      asToggle: isMiniMaxToggleModel(model.id),
     }),
     selected: index === safeSelectedIndex,
   }));

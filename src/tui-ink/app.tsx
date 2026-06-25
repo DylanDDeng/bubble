@@ -956,8 +956,11 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         setThinkingLevel,
         sessionManager,
       });
+      // MiniMax thinking is a binary toggle (adaptive thinking), not a graded
+      // effort — show it as "thinking mode" rather than "medium effort".
+      const isMiniMaxModel = model.toLowerCase().includes("minimax");
       const effortNote = nextThinkingLevel && nextThinkingLevel !== "off"
-        ? ` with ${nextThinkingLevel} effort`
+        ? (isMiniMaxModel ? " in thinking mode" : ` with ${nextThinkingLevel} effort`)
         : "";
       addMessage("assistant", `Model switched to ${displayModel(model)}${effortNote}.`);
       closePicker();
@@ -1826,9 +1829,12 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
       })()
     : null;
 
-  const showThinkingLabel = getAvailableThinkingLevels(agent.providerId, agent.apiModel).length > 2
-    && thinkingLevel
-    && thinkingLevel !== "off";
+  // MiniMax has only off/on, so the graded ">2 levels" gate would hide its label;
+  // surface it too (rendered as "thinking mode" by formatModelLine).
+  const isMiniMaxProvider = (agent.providerId || "").toLowerCase().includes("minimax");
+  const showThinkingLabel = Boolean(thinkingLevel)
+    && thinkingLevel !== "off"
+    && (isMiniMaxProvider || getAvailableThinkingLevels(agent.providerId, agent.apiModel).length > 2);
   const welcomeBannerNode = showWelcome ? (
     <WelcomeBanner
       terminalColumns={terminalColumns}

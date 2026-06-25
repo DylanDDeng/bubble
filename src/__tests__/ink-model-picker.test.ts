@@ -104,6 +104,7 @@ describe("Ink model picker", () => {
   it("formats model picker rows as single fixed-width rows", () => {
     const row = formatModelPickerRow(
       {
+        id: "gpt-5.5",
         label: "GPT 5.5 Reasoning Preview Model With A Long Display Name",
         providerBadge: "OpenAI",
         reasoningLevels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
@@ -116,6 +117,26 @@ describe("Ink model picker", () => {
     expect(row).toContain("OpenAI");
     expect(row).toContain("●");
     expect(row).not.toContain("\n");
+  });
+
+  it("shows MiniMax thinking as on/off, leaving graded models as effort", () => {
+    // MiniMax: the model row reads as a toggle, and the effort picker rows show on/off.
+    const miniMaxRow = formatModelPickerRow(
+      { id: "MiniMax-M3", label: "MiniMax M3", providerBadge: "minimax", reasoningLevels: ["off", "medium"] },
+      { selected: false, current: false, width: 56 },
+    );
+    expect(miniMaxRow).toContain("thinking on/off");
+    expect(miniMaxRow).not.toContain("medium");
+
+    expect(formatEffortPickerRow("medium", { selected: true, width: 40, asToggle: true })).toContain("> on");
+    expect(formatEffortPickerRow("off", { selected: false, width: 40, asToggle: true })).toContain("off");
+
+    // A graded model (e.g. GLM toggle reuses off/medium, but isn't MiniMax) keeps effort labels.
+    const glmRow = formatModelPickerRow(
+      { id: "glm-5.1", label: "GLM-5.1", providerBadge: "zhipuai", reasoningLevels: ["off", "medium"] },
+      { selected: false, current: false, width: 56 },
+    );
+    expect(glmRow).toContain("effort off/medium");
   });
 
   it("formats effort and no-result rows with fixed viewport padding", () => {

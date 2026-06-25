@@ -102,4 +102,13 @@ describe("Ink welcome banner", () => {
       thinkingLabel: "high",
     })).toBe("Opus 4.8 (1M context) with high effort · anthropic");
   });
+
+  it("labels MiniMax thinking as a mode, not a graded effort", () => {
+    expect(formatModelLine({
+      tips: [],
+      providerId: "minimax-anthropic",
+      modelLabel: "MiniMax M3",
+      thinkingLabel: "medium",
+    })).toBe("MiniMax M3 · thinking mode");
+  });
 });

@@ -101,10 +101,18 @@ export function formatModelLine({
   tips,
 }: Pick<WelcomeBannerProps, "providerId" | "modelLabel" | "thinkingLabel" | "tips">): string {
   const parts: string[] = [];
-  if (modelLabel) parts.push(thinkingLabel ? `${modelLabel} with ${thinkingLabel} effort` : modelLabel);
+  // MiniMax thinking is a binary toggle (adaptive thinking), so label it
+  // "thinking mode" rather than "<level> effort"; and its provider id
+  // ("minimax-anthropic") is redundant with the model name, so omit it.
+  const isMiniMax = (providerId || "").toLowerCase().includes("minimax");
+  if (modelLabel) {
+    if (thinkingLabel && isMiniMax) parts.push(modelLabel, "thinking mode");
+    else if (thinkingLabel) parts.push(`${modelLabel} with ${thinkingLabel} effort`);
+    else parts.push(modelLabel);
+  }
   const readyTip = tips.find((item) => item.startsWith("Ready with"));
   if (!modelLabel && readyTip) parts.push(readyTip.replace(/^Ready with\s+/, ""));
-  if (providerId) parts.push(providerId);
+  if (providerId && !isMiniMax) parts.push(providerId);
   return parts.join(" · ");
 }
 
