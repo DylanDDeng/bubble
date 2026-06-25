@@ -1401,11 +1401,22 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
                 // boundary. Move it after the just-finished tool/assistant
                 // turn instead of clearing the badge in its original
                 // placeholder position.
+                //
+                // This move pulls the pending-steer block out of the live
+                // (dynamic) region and re-commits it elsewhere in <Static>, so
+                // the live frame SHRINKS and the block's old rows are vacated
+                // with nothing taking their place. Ink's in-place redraw leaves
+                // those rows behind under tmux (its cursor-up clear can't reach
+                // a frame that has scrolled), which is the blank gap users see
+                // after steering. A full reprint (resetTranscript) rewrites the
+                // transcript cleanly with no leftover — the same fix the resize
+                // path uses. Unlike a turn settling (content moves in place),
+                // this reorder is rare, so the reprint cost is acceptable.
                 const steer = pendingSteersRef.current.get(event.id);
                 if (steer) {
                   pendingSteersRef.current.delete(event.id);
                   setPendingSteerCount(pendingSteersRef.current.size);
-                  updateDisplayMessages((prev) => moveStatusMessageToEnd(prev, steer.displayKey));
+                  resetTranscript((prev) => moveStatusMessageToEnd(prev, steer.displayKey));
                 }
                 break;
               }
