@@ -73,7 +73,6 @@ interface InputBoxProps {
 
 const MIN_VISIBLE_LINES = 3;
 const MAX_VISIBLE_LINES = 6;
-const CURSOR_BLINK_INTERVAL_MS = 530;
 const PADDING_X = 1;
 const PROMPT = " > ";
 const MAX_VISIBLE_SUGGESTIONS = 8;
@@ -1114,17 +1113,16 @@ export function InputBox({
   const displayCursorToSourceCursor = (value: number) =>
     Math.max(0, Math.min(text.length, value - imageInlinePrefix.length));
 
+  // Steady (non-blinking) cursor on purpose. The composer lives in the live
+  // (repainting) region; a blink timer would rewrite these rows ~twice a second
+  // even at idle, and the terminal drops any in-progress text selection every
+  // time the underlying cells are rewritten — which is why composer text could
+  // not be highlighted/copied while agent answers (committed to <Static>, never
+  // repainted) could. Keeping the cursor steady leaves the idle composer frame
+  // static, so native selection works. We still hide it while disabled.
   useEffect(() => {
-    if (disabled) {
-      setSoftwareCursorVisible(false);
-      return;
-    }
-    setSoftwareCursorVisible(true);
-    const timer = setInterval(() => {
-      setSoftwareCursorVisible((visible) => !visible);
-    }, CURSOR_BLINK_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [disabled, displayCursor, displayText]);
+    setSoftwareCursorVisible(!disabled);
+  }, [disabled]);
 
   const visualLines = useMemo(
     () => computeVisualLines(displayText, lineWidth),
