@@ -15,6 +15,11 @@ const ANTHROPIC_VERSION = "2023-06-01";
 const DEFAULT_MAX_TOKENS = 8192;
 const ANTHROPIC_OPUS_LONG_OUTPUT_MAX_TOKENS = 128000;
 const ANTHROPIC_LONG_OUTPUT_MAX_TOKENS = 64000;
+// MiniMax thinking is always-on (M2.x) or default-on (M3), so the 8192 default
+// gets consumed by thinking and the turn truncates before any visible text.
+// MiniMax's docs recommend M3 128K, M2.x 64K output.
+const MINIMAX_M3_MAX_TOKENS = 128000;
+const MINIMAX_M2_MAX_TOKENS = 64000;
 const ANTHROPIC_PROMPT_CACHE_CONTROL = { type: "ephemeral" } as const;
 const MINIMAX_PROMPT_CACHE_MODELS = new Set([
   "minimax-m2.7",
@@ -232,6 +237,10 @@ export function buildAnthropicRequest(
 }
 
 export function resolveAnthropicMaxTokens(options: AnthropicProviderOptions, model: string): number {
+  // MiniMax needs a large output budget so thinking doesn't starve the answer.
+  if (isMiniMaxProvider(options)) {
+    return /m3/i.test(model) ? MINIMAX_M3_MAX_TOKENS : MINIMAX_M2_MAX_TOKENS;
+  }
   if (!isOfficialAnthropicBaseUrl(options.baseURL)) {
     return DEFAULT_MAX_TOKENS;
   }
@@ -887,4 +896,9 @@ function isOfficialAnthropicBaseUrl(baseURL: string): boolean {
   } catch {
     return false;
   }
+}
+
+function isMiniMaxProvider(options: AnthropicProviderOptions): boolean {
+  return (options.providerId || "").toLowerCase().startsWith("minimax")
+    || options.baseURL.toLowerCase().includes("minimaxi");
 }

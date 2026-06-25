@@ -151,7 +151,9 @@ describe("provider-anthropic", () => {
     expect(resolveAnthropicMaxTokens(officialOptions, "claude-fable-5")).toBe(128000);
     expect(resolveAnthropicMaxTokens(officialOptions, "claude-sonnet-4-6")).toBe(64000);
     expect(resolveAnthropicMaxTokens(officialOptions, "claude-haiku-4-5-20251001")).toBe(64000);
-    expect(resolveAnthropicMaxTokens(compatibleOptions, "MiniMax-M3")).toBe(8192);
+    expect(resolveAnthropicMaxTokens(compatibleOptions, "MiniMax-M3")).toBe(128000);
+    expect(resolveAnthropicMaxTokens(compatibleOptions, "MiniMax-M2.7")).toBe(64000);
+    expect(resolveAnthropicMaxTokens(compatibleOptions, "MiniMax-M2.7-highspeed")).toBe(64000);
 
     const body = buildAnthropicRequest(officialOptions, [
       { role: "user", content: "hi" },
@@ -526,7 +528,7 @@ describe("provider-anthropic", () => {
     });
     expect(JSON.parse(String(requestInit?.body))).toMatchObject({
       model: "MiniMax-M3",
-      max_tokens: 8192,
+      max_tokens: 128000,
       messages: [{ role: "user", content: "hi" }],
       tools: [{ name: "read" }],
       stream: true,
