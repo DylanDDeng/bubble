@@ -120,23 +120,6 @@ describe("provider transform", () => {
     expect(high.extraBody).toEqual({ reasoning_effort: "high" });
   });
 
-  it("emits MiniMax interleaved thinking request fields", () => {
-    const m3 = resolveProviderRequestConfig("minimax-openai", "MiniMax-M3", "medium");
-    const m27 = resolveProviderRequestConfig("minimax-openai", "MiniMax-M2.7", "medium");
-    const off = resolveProviderRequestConfig("minimax-openai", "MiniMax-M3", "off");
-
-    expect(m3.reasoningContentEcho).toBe("minimax");
-    expect(m3.extraBody).toEqual({
-      reasoning_split: true,
-      thinking: { type: "adaptive" },
-    });
-    expect(m27.extraBody).toEqual({ reasoning_split: true });
-    expect(off.extraBody).toEqual({
-      reasoning_split: true,
-      thinking: { type: "disabled" },
-    });
-  });
-
   it("locks kimi-k2.7-code to thinking-only with temperature omitted", () => {
     const cn = resolveProviderRequestConfig("moonshot-cn", "kimi-k2.7-code", "medium");
     const intl = resolveProviderRequestConfig("moonshot-intl", "kimi-k2.7-code", "off");

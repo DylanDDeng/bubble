@@ -11,7 +11,7 @@ describe("provider registry", () => {
     expect(displayModel("alibaba:qwen3.7-max")).toBe("Qwen3.7 Max");
     expect(displayModel("stepfun:step-3.7-flash")).toBe("Step 3.7 Flash");
     expect(displayModel("minimax:MiniMax-M3")).toBe("MiniMax M3");
-    expect(displayModel("minimax-openai:MiniMax-M3")).toBe("MiniMax M3");
+    expect(displayModel("minimax-anthropic:MiniMax-M3")).toBe("MiniMax M3");
     expect(displayModel("doubao:doubao-seed-2-1-pro-260628")).toBe("Doubao Seed 2.1 Pro");
     expect(displayModel("anthropic:claude-fable-5")).toBe("Claude Fable 5");
     expect(displayModel("anthropic:claude-sonnet-4-6")).toBe("Claude Sonnet 4.6");
@@ -21,10 +21,9 @@ describe("provider registry", () => {
     expect(isUserVisibleProvider("doubao")).toBe(true);
   });
 
-  it("uses MiniMax Token Plan as the visible MiniMax provider", () => {
+  it("exposes MiniMax Token Plan and MiniMax API as visible providers", () => {
     expect(isUserVisibleProvider("minimax")).toBe(true);
-    expect(isUserVisibleProvider("minimax-openai")).toBe(true);
-    expect(isUserVisibleProvider("minimax-anthropic")).toBe(false);
+    expect(isUserVisibleProvider("minimax-anthropic")).toBe(true);
   });
 
   it("prefers user-visible providers over hidden openrouter defaults", () => {
