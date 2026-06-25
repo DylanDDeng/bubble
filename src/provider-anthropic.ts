@@ -44,6 +44,32 @@ interface AnthropicRequest {
   stream?: boolean;
   temperature?: number;
   thinking?: { type: "adaptive" };
+  output_config?: { effort: AnthropicEffort };
+}
+
+// Anthropic's reasoning-depth control (GA, no beta header). budget_tokens is
+// removed on Opus 4.7+/Fable 5; effort is the replacement and rides in
+// output_config (NOT top-level). There is no "minimal" on the Anthropic enum.
+type AnthropicEffort = "low" | "medium" | "high" | "xhigh" | "max";
+
+function anthropicEffortForLevel(level: ThinkingLevel): AnthropicEffort | undefined {
+  switch (level) {
+    case "off":
+      return undefined;
+    case "minimal":
+    case "low":
+      return "low";
+    case "medium":
+      return "medium";
+    case "high":
+      return "high";
+    case "xhigh":
+      return "xhigh";
+    case "max":
+      return "max";
+    default:
+      return undefined;
+  }
 }
 
 type AnthropicCacheControl = typeof ANTHROPIC_PROMPT_CACHE_CONTROL;
@@ -188,6 +214,18 @@ export function buildAnthropicRequest(
 
   if (effectiveThinkingLevel !== "off") {
     body.thinking = { type: "adaptive" };
+    // Apply the selected reasoning depth via output_config.effort. Without this
+    // every thinking request silently ran at Anthropic's default (high),
+    // ignoring the chosen level. effort is an official-API feature, so only
+    // send it to the official endpoint — anthropic-compatible third parties
+    // (e.g. MiniMax) reject it. Levels are already clamped to the model's
+    // supported set, so the value is always a valid effort for this model.
+    if (isOfficialAnthropicBaseUrl(options.baseURL)) {
+      const effort = anthropicEffortForLevel(effectiveThinkingLevel);
+      if (effort) {
+        body.output_config = { effort };
+      }
+    }
   }
 
   return body;

@@ -197,6 +197,36 @@ describe("provider-anthropic", () => {
 
     expect(body).not.toHaveProperty("temperature");
     expect(body.thinking).toEqual({ type: "adaptive" });
+    // The selected reasoning level is applied via output_config.effort.
+    expect(body.output_config).toEqual({ effort: "medium" });
+  });
+
+  it("sends output_config.effort for each Anthropic effort level", () => {
+    const base = {
+      providerId: "anthropic",
+      apiKey: "sk-ant-test",
+      baseURL: "https://api.anthropic.com",
+    };
+    const effortFor = (model: string, level: "low" | "high" | "xhigh" | "max") =>
+      buildAnthropicRequest(base, [{ role: "user", content: "hi" }], {
+        model,
+        thinkingLevel: level,
+        stream: true,
+      }).output_config;
+
+    expect(effortFor("claude-opus-4-8", "xhigh")).toEqual({ effort: "xhigh" });
+    expect(effortFor("claude-opus-4-8", "max")).toEqual({ effort: "max" });
+    expect(effortFor("claude-sonnet-4-6", "high")).toEqual({ effort: "high" });
+    // Sonnet 4.6 has no xhigh — the level clamps down to high.
+    expect(effortFor("claude-sonnet-4-6", "xhigh")).toEqual({ effort: "high" });
+    // Fable 5 has thinking always on; "off" clamps up to the lowest effort.
+    expect(
+      buildAnthropicRequest(base, [{ role: "user", content: "hi" }], {
+        model: "claude-fable-5",
+        thinkingLevel: "off",
+        stream: true,
+      }).output_config,
+    ).toEqual({ effort: "low" });
   });
 
   it("keeps temperature for Anthropic-compatible providers", () => {
