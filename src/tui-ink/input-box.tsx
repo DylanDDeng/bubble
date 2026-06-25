@@ -785,8 +785,10 @@ export function InputBox({
     if (expandedText.trim().length === 0 && attachments.length === 0) return;
     const deliver = target === "queue" && onQueue ? onQueue : onSubmit;
     const payload = {
+      // The pasted-content marker is a composer-only affordance. Submit the
+      // fully-expanded text so the transcript shows what was actually sent —
+      // the agent already receives the expanded text — rather than the marker.
       text: expandedText,
-      displayText: expandedText === submittedText ? undefined : submittedText,
       images: attachments,
       imageDisplayStart: attachments.length > 0 ? (imageLabelStartOverride ?? nextImageLabelStart) : undefined,
     };

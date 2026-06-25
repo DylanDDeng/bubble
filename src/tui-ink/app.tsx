@@ -8,10 +8,8 @@ import type { AgentEvent, ContentPart, PermissionMode, Message, PlanDecision, Pr
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import { UserConfig, maskKey } from "../config.js";
 import {
-  createPastedContentMarker,
   InputBox,
   isCtrlCInput,
-  shouldCollapsePastedContent,
   type SubmitPayload,
 } from "./input-box.js";
 import { MessageList } from "./message-list.js";
@@ -167,9 +165,7 @@ function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] 
       result.push({
         key: nextDisplayMessageKey("user"),
         role: "user",
-        content: typeof m.content === "string"
-          ? (shouldCollapsePastedContent(m.content) ? createPastedContentMarker(m.content) : m.content)
-          : "(multimedia)",
+        content: typeof m.content === "string" ? m.content : "(multimedia)",
       });
     } else if (m.role === "assistant") {
       const toolCalls: DisplayToolCall[] = [];
