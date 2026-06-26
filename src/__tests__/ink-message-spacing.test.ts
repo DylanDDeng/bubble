@@ -6,8 +6,12 @@ import type { DisplayMessage, DisplayMessagePart } from "../tui-ink/display-hist
 
 const terminalColumns = 90;
 
-function renderLines(messages: DisplayMessage[], streamingParts: DisplayMessagePart[] = []): string[] {
-  return renderToString(renderMessageList(messages, terminalColumns, streamingParts), { columns: terminalColumns })
+function renderLines(
+  messages: DisplayMessage[],
+  streamingParts: DisplayMessagePart[] = [],
+  verboseTrace = false,
+): string[] {
+  return renderToString(renderMessageList(messages, terminalColumns, streamingParts, verboseTrace), { columns: terminalColumns })
     .split("\n");
 }
 
@@ -15,6 +19,7 @@ function renderMessageList(
   messages: DisplayMessage[],
   columns: number,
   streamingParts: DisplayMessagePart[] = [],
+  verboseTrace = false,
 ): React.ReactElement {
   return React.createElement(MessageList, {
     messages,
@@ -23,7 +28,7 @@ function renderMessageList(
     streamingTools: [],
     streamingParts,
     terminalColumns: columns,
-    verboseTrace: false,
+    verboseTrace,
   });
 }
 
@@ -161,6 +166,76 @@ describe("Ink message spacing", () => {
     expect(lines[0]).toContain("What is this project doing?");
     expect(lines[1]).toBe("");
     expect(lines[2]).toContain("List Directory 2 files");
+  });
+
+  it("drops an assistant turn that is only an echoed reminder, leaving no blank band", () => {
+    const reminder = '<bubble_internal_reminder kind="system-reminder">\nstay on task\n</bubble_internal_reminder>';
+    const lines = renderLines([
+      { key: "u", role: "user", content: "go" },
+      // A turn whose only text part is an echoed reminder sanitizes to empty —
+      // it must render nothing (no marginTop/marginBottom band), not a blank gap.
+      { key: "empty", role: "assistant", content: reminder, parts: [{ type: "text", content: reminder }] },
+      { key: "answer", role: "assistant", content: "现在我有完整图景。", parts: [{ type: "text", content: "现在我有完整图景。" }] },
+    ]);
+    const output = lines.join("\n");
+
+    expect(output).not.toContain("bubble_internal_reminder");
+    expect(output).not.toContain("stay on task");
+
+    const userIdx = lines.findIndex((line) => line.includes("go"));
+    const answerIdx = lines.findIndex((line) => line.includes("现在我有完整图景"));
+    expect(userIdx).toBeGreaterThanOrEqual(0);
+    expect(answerIdx).toBeGreaterThan(userIdx);
+    // The dropped empty turn must not stack extra margin rows: only the normal
+    // single inter-message blank line sits between the user line and the answer.
+    const blanksBetween = lines.slice(userIdx + 1, answerIdx).filter((line) => line.trim() === "").length;
+    expect(blanksBetween).toBeLessThanOrEqual(1);
+  });
+
+  it("does not stack a blank band across consecutive echoed-reminder turns", () => {
+    const reminder = '<bubble_internal_reminder kind="system-reminder">\nstay\n</bubble_internal_reminder>';
+    const emptyTurn = (key: string): DisplayMessage => ({
+      key,
+      role: "assistant",
+      content: reminder,
+      parts: [{ type: "text", content: reminder }],
+    });
+    const lines = renderLines([
+      { key: "u", role: "user", content: "go" },
+      emptyTurn("e1"),
+      emptyTurn("e2"),
+      emptyTurn("e3"),
+      { key: "answer", role: "assistant", content: "现在我有完整图景。", parts: [{ type: "text", content: "现在我有完整图景。" }] },
+    ]);
+
+    const userIdx = lines.findIndex((line) => line.includes("go"));
+    const answerIdx = lines.findIndex((line) => line.includes("现在我有完整图景"));
+    // Three dropped turns must add NO band — only the single inter-message gap.
+    const blanksBetween = lines.slice(userIdx + 1, answerIdx).filter((line) => line.trim() === "").length;
+    expect(blanksBetween).toBeLessThanOrEqual(1);
+  });
+
+  it("keeps the Task duration line on a finalized turn whose text sanitizes to empty", () => {
+    const reminder = '<bubble_internal_reminder kind="system-reminder">\nstay\n</bubble_internal_reminder>';
+    const output = renderLines([
+      { key: "u", role: "user", content: "go" },
+      // Finalized turn carries taskElapsedMs; the guard must mirror the JSX and
+      // still surface the duration line even though the text sanitizes away.
+      { key: "a", role: "assistant", content: reminder, parts: [{ type: "text", content: reminder }], taskElapsedMs: 5000 },
+    ]).join("\n");
+
+    expect(output).not.toContain("bubble_internal_reminder");
+    expect(output).toContain("Task duration");
+  });
+
+  it("still renders a tools-only turn in verbose mode", () => {
+    const output = renderLines([
+      { key: "a", role: "assistant", content: "", parts: [toolsPart] },
+    ], [], true).join("\n");
+
+    // A turn with real tool rows must never be dropped by the visibility guard.
+    expect(output).toContain("Glob");
+    expect(output).toContain("Found 2 files");
   });
 
   it("shows completed edit diffs inline with a 20-line default preview", () => {

@@ -326,11 +326,30 @@ const MessageItem = React.memo(function MessageItem({
   // Same defense as reasoning: strip any internal reminder markup the model
   // echoed back into its visible answer so it never reaches the transcript.
   const visibleContent = sanitizeInternalReminderBlocks(message.content ?? "");
+  // Decide visibility by what will ACTUALLY render below, not by raw array
+  // lengths. A turn whose only text part is an echoed <bubble_internal_*>
+  // reminder sanitizes to empty (TimelineText returns null), but the wrapper's
+  // marginTop/marginBottom would still emit a blank band — and long sessions
+  // inject more reminders, so consecutive empty turns stack into a large gap
+  // after the tool rows. Mirror the render: parts path → MessageParts; non-parts
+  // path → toolCalls/visibleContent; verbose adds a TurnDigest from toolCalls.
+  const hasParts = (message.parts?.length ?? 0) > 0;
+  const hasVisibleParts =
+    hasParts &&
+    (message.parts ?? []).some((part) =>
+      part.type === "tools"
+        ? part.toolCalls.length > 0
+        : sanitizeInternalReminderBlocks(part.content).trim() !== "",
+    );
+  const toolCallCount = message.toolCalls?.length ?? 0;
   const hasVisibleAssistantContent =
-    !!visibleContent.trim() ||
-    (message.toolCalls?.length ?? 0) > 0 ||
-    (message.parts?.length ?? 0) > 0 ||
-    (!!visibleReasoning && (showThinking || verboseTrace));
+    (hasParts ? hasVisibleParts : (!!visibleContent.trim() || toolCallCount > 0)) ||
+    (!!visibleReasoning && (showThinking || verboseTrace)) ||
+    // A finalized turn carries taskElapsedMs and renders a TaskDurationLine even
+    // when its text/parts are empty — mirror that so the duration isn't dropped.
+    // (The verbose TurnDigest needs no term: whenever it renders, the same
+    // toolCalls already make the turn visible via the parts/non-parts branch.)
+    message.taskElapsedMs !== undefined;
   if (!hasVisibleAssistantContent) return null;
 
   return (
