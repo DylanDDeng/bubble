@@ -1525,6 +1525,43 @@ export class Agent {
     // the projector's algorithmic budgeted-mode passes will still try.
   }
 
+  /**
+   * Stream a 9-section handoff summary of `oldMessages` from the session model.
+   * Powers the manual `/compact` command: streaming (rather than `complete()`)
+   * is what lets the TUI show live progress as the summary is produced.
+   *
+   * `onDelta` receives the full accumulated text and the latest delta on each
+   * chunk. Returns the trimmed summary, or "" if the model produced nothing
+   * (the caller falls back to heuristic compaction in that case). Throws only
+   * if the provider stream itself errors.
+   */
+  async summarizeForCompaction(
+    oldMessages: Message[],
+    onDelta?: (full: string, delta: string) => void,
+    abortSignal?: AbortSignal,
+  ): Promise<string> {
+    if (oldMessages.length === 0) return "";
+    const { buildCompactionPromptMessages } = await import("./context/compact-llm.js");
+    const promptMessages = buildCompactionPromptMessages(oldMessages);
+    const stream = this.provider.streamChat(promptMessages, {
+      model: this.apiModel,
+      temperature: 0.2,
+      thinkingLevel: "off",
+      abortSignal,
+    });
+    let full = "";
+    for await (const chunk of stream) {
+      if (chunk.type === "text" && chunk.content) {
+        full += chunk.content;
+        onDelta?.(full, chunk.content);
+      }
+    }
+    // Strip any internal reminder markup the summarizer may have reproduced from
+    // the transcript: this summary is both displayed in the compaction card and
+    // re-injected as a `Previous conversation summary` system message.
+    return sanitizeInternalReminderBlocks(full).trim();
+  }
+
   async runSubtask(
     input: string | ContentPart[],
     cwd: string,

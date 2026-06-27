@@ -7,6 +7,7 @@ import type { RuleList, SettingsScope } from "../permissions/settings.js";
 import { encodeModel, decodeModel, displayModel, BUILTIN_PROVIDERS, isUserVisibleProvider } from "../provider-registry.js";
 import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingLevel } from "../provider-transform.js";
 import { SessionManager } from "../session.js";
+import type { CompactResult } from "../context/compact.js";
 import { buildSystemPrompt } from "../system-prompt.js";
 import { normalizeSingleLine } from "../text-display.js";
 import { copyToClipboard } from "../clipboard.js";
@@ -1066,7 +1067,46 @@ const builtinSlashCommandEntries: SlashCommand[] = [
         return preHook.reason ?? `Compaction blocked by hook ${preHook.sourceHookId ?? "<unknown>"}.`;
       }
 
-      const result = ctx.sessionManager.compact();
+      // Plan first so we can report "already compact" without spending a model
+      // call, and so the LLM summarizer gets the exact set of evicted messages.
+      const plan = ctx.sessionManager.getCompactionPlan();
+      if (!plan) {
+        await ctx.hookController?.runEvent({
+          eventName: "PostCompact",
+          cwd: ctx.cwd,
+          sessionId: ctx.sessionManager.getSessionFile(),
+          agentRole: "driver",
+          target: "manual",
+          payload: { kind: "manual", compacted: false },
+        });
+        return "Session is already compact enough.";
+      }
+
+      // Stream an LLM summary for high fidelity, reporting progress to the TUI.
+      // On any failure (or empty output) fall back to the instant heuristic
+      // compaction so /compact always makes progress.
+      let result: CompactResult;
+      try {
+        ctx.compactionProgress?.({ phase: "collecting", streamedChars: 0 });
+        let summary = "";
+        try {
+          summary = await ctx.agent.summarizeForCompaction(plan.oldMessages, (full) => {
+            ctx.compactionProgress?.({ phase: "summarizing", streamedChars: full.length });
+          });
+        } catch {
+          summary = "";
+        }
+
+        if (summary) {
+          ctx.compactionProgress?.({ phase: "applying", streamedChars: summary.length });
+          result = ctx.sessionManager.applyLLMCompaction(summary);
+        } else {
+          result = ctx.sessionManager.compact();
+        }
+      } finally {
+        ctx.compactionProgress?.(null);
+      }
+
       if (!result.compacted) {
         await ctx.hookController?.runEvent({
           eventName: "PostCompact",

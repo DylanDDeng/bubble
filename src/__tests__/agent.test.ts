@@ -92,6 +92,30 @@ describe("Agent", () => {
     expect(agent.messages).toHaveLength(2); // user + assistant (no system prompt in this test)
   });
 
+  it("summarizeForCompaction streams deltas and strips leaked reminder markup", async () => {
+    const provider = createMockProvider([
+      [
+        { type: "text", content: "## Summary\n" },
+        { type: "text", content: '<bubble_internal_reminder kind="x">secret</bubble_internal_reminder>\n' },
+        { type: "text", content: "- did the work" },
+        { type: "done" },
+      ],
+    ]);
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [] });
+    const deltas: string[] = [];
+    const summary = await agent.summarizeForCompaction(
+      [{ role: "user", content: "old task" }],
+      (_full, delta) => deltas.push(delta),
+    );
+
+    // Streamed incrementally for progress…
+    expect(deltas.length).toBeGreaterThan(1);
+    // …but the returned (stored + re-injected) summary is sanitized.
+    expect(summary).not.toContain("bubble_internal_reminder");
+    expect(summary).not.toContain("secret");
+    expect(summary).toContain("did the work");
+  });
+
   it("sanitizes internal runtime reminders from streamed reasoning before events and history", async () => {
     const provider = createMockProvider([
       [

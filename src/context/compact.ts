@@ -14,12 +14,29 @@ export interface CompactResult {
   droppedEntries?: number;
 }
 
-export function compactSessionEntries(
+/**
+ * The split of a session log into (metadata, old-to-summarize, kept-verbatim)
+ * when it is large enough to compact. `compactable: false` means there aren't
+ * enough turns past the last summary to bother.
+ *
+ * Extracted so callers that supply their OWN summary (e.g. the LLM-backed
+ * manual `/compact`) can reuse the exact same turn-boundary logic instead of
+ * forking it. `compactSessionEntries` is just this plan + a heuristic summary.
+ */
+export type SessionCompactionPlan =
+  | { compactable: false }
+  | {
+      compactable: true;
+      metadataEntries: SessionLogEntry[];
+      oldEntries: SessionLogEntry[];
+      keptEntries: SessionLogEntry[];
+    };
+
+export function planSessionCompaction(
   entries: SessionLogEntry[],
   options: CompactOptions = {},
-): CompactResult {
+): SessionCompactionPlan {
   const keepRecentTurns = options.keepRecentTurns ?? 2;
-  const maxSummaryItems = options.maxSummaryItems ?? 4;
 
   const metadataEntries = entries.filter((entry) => entry.type === "metadata");
   const nonMetadataEntries = entries.filter((entry) => entry.type !== "metadata");
@@ -31,39 +48,68 @@ export function compactSessionEntries(
     .filter((index) => index >= 0);
 
   if (turnStartIndexes.length <= keepRecentTurns) {
-    return { compacted: false };
+    return { compactable: false };
   }
 
   const keepStartIndex = turnStartIndexes[Math.max(0, turnStartIndexes.length - keepRecentTurns)];
   if (keepStartIndex <= 0) {
-    return { compacted: false };
+    return { compactable: false };
   }
 
-  const oldEntries = activeEntries.slice(0, keepStartIndex);
-  const keptEntries = activeEntries.slice(keepStartIndex);
-  const summary = buildCompactionSummary(oldEntries, maxSummaryItems);
-  if (!summary) {
-    return { compacted: false };
-  }
+  return {
+    compactable: true,
+    metadataEntries,
+    oldEntries: activeEntries.slice(0, keepStartIndex),
+    keptEntries: activeEntries.slice(keepStartIndex),
+  };
+}
 
+/**
+ * Assemble the post-compaction entry list from a plan and a (possibly
+ * LLM-generated) summary string. The summary entry is keyed off the full
+ * original `entries` so its id never collides with a prior summary.
+ */
+export function buildCompactedEntries(
+  entries: SessionLogEntry[],
+  plan: Extract<SessionCompactionPlan, { compactable: true }>,
+  summary: string,
+): SessionLogEntry[] {
   const summaryEntry: SessionLogEntry = {
     id: nextSummaryId(entries),
     type: "summary",
     summary,
     timestamp: Date.now(),
   };
+  return [...plan.metadataEntries, summaryEntry, ...plan.keptEntries];
+}
 
-  const nextEntries = [
-    ...metadataEntries,
-    summaryEntry,
-    ...keptEntries,
-  ];
+/** Flatten a plan's old entries into messages for an external summarizer. */
+export function planOldMessages(
+  plan: Extract<SessionCompactionPlan, { compactable: true }>,
+): Message[] {
+  return entriesToMessages(plan.oldEntries);
+}
+
+export function compactSessionEntries(
+  entries: SessionLogEntry[],
+  options: CompactOptions = {},
+): CompactResult {
+  const maxSummaryItems = options.maxSummaryItems ?? 4;
+  const plan = planSessionCompaction(entries, options);
+  if (!plan.compactable) {
+    return { compacted: false };
+  }
+
+  const summary = buildCompactionSummary(plan.oldEntries, maxSummaryItems);
+  if (!summary) {
+    return { compacted: false };
+  }
 
   return {
     compacted: true,
     summary,
-    entries: nextEntries,
-    droppedEntries: oldEntries.length,
+    entries: buildCompactedEntries(entries, plan, summary),
+    droppedEntries: plan.oldEntries.length,
   };
 }
 

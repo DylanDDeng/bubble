@@ -383,22 +383,35 @@ describe("slash commands", () => {
     expect(runMemoryCompaction).toHaveBeenCalledTimes(1);
   });
 
-  it("/compact rebuilds agent history without clearing the TUI first", async () => {
+  it("/compact streams an LLM summary, reports progress, and rebuilds history", async () => {
     const clearMessages = vi.fn();
     const resetContextUsageAnchor = vi.fn();
+    const applyLLMCompaction = vi.fn(() => ({ compacted: true, droppedEntries: 2 }));
+    const heuristicCompact = vi.fn(() => ({ compacted: true, droppedEntries: 2 }));
+    const progress: Array<unknown> = [];
+    // Fake streaming summarizer: emits two deltas, returns the final text.
+    const summarizeForCompaction = vi.fn(async (_old: unknown, onDelta?: (full: string, d: string) => void) => {
+      onDelta?.("part one", "part one");
+      onDelta?.("part one two", " two");
+      return "LLM SUMMARY";
+    });
     const ctx = createContext({
       clearMessages,
+      compactionProgress: (p) => progress.push(p),
       agent: {
         messages: [
           { role: "system", content: "system prompt" },
           { role: "user", content: "old prompt" },
         ],
         resetContextUsageAnchor,
+        summarizeForCompaction,
       } as any,
       sessionManager: {
-        compact: vi.fn(() => ({ compacted: true, droppedEntries: 2 })),
+        getCompactionPlan: vi.fn(() => ({ oldMessages: [{ role: "user", content: "old prompt" }] })),
+        applyLLMCompaction,
+        compact: heuristicCompact,
         getMessages: vi.fn(() => [
-          { role: "system", content: "Previous conversation summary:\nold prompt" },
+          { role: "system", content: "Previous conversation summary:\nLLM SUMMARY" },
           { role: "user", content: "recent prompt" },
           { role: "assistant", content: "recent answer" },
         ]),
@@ -409,14 +422,67 @@ describe("slash commands", () => {
 
     expect(result.handled).toBe(true);
     expect(result.result).toContain("Compaction complete");
+    expect(summarizeForCompaction).toHaveBeenCalledTimes(1);
+    expect(applyLLMCompaction).toHaveBeenCalledWith("LLM SUMMARY");
+    expect(heuristicCompact).not.toHaveBeenCalled();
     expect(clearMessages).not.toHaveBeenCalled();
+    // Progress was reported during the run and cleared (null) at the end.
+    expect(progress.some((p) => (p as any)?.phase === "summarizing")).toBe(true);
+    expect(progress[progress.length - 1]).toBeNull();
     expect(ctx.agent.messages).toEqual([
       { role: "system", content: "system prompt" },
-      { role: "system", content: "Previous conversation summary:\nold prompt" },
+      { role: "system", content: "Previous conversation summary:\nLLM SUMMARY" },
       { role: "user", content: "recent prompt" },
       { role: "assistant", content: "recent answer" },
     ]);
     expect(resetContextUsageAnchor).toHaveBeenCalledTimes(1);
+  });
+
+  it("/compact falls back to heuristic compaction when the LLM summary fails", async () => {
+    const applyLLMCompaction = vi.fn();
+    const heuristicCompact = vi.fn(() => ({ compacted: true, droppedEntries: 1 }));
+    const ctx = createContext({
+      agent: {
+        messages: [{ role: "system", content: "system prompt" }],
+        resetContextUsageAnchor: vi.fn(),
+        summarizeForCompaction: vi.fn(async () => { throw new Error("model down"); }),
+      } as any,
+      sessionManager: {
+        getCompactionPlan: vi.fn(() => ({ oldMessages: [{ role: "user", content: "old" }] })),
+        applyLLMCompaction,
+        compact: heuristicCompact,
+        getMessages: vi.fn(() => [{ role: "user", content: "recent" }]),
+      } as any,
+    });
+
+    const result = await slashRegistry.execute("/compact", ctx);
+
+    expect(result.handled).toBe(true);
+    expect(result.result).toContain("Compaction complete");
+    expect(applyLLMCompaction).not.toHaveBeenCalled();
+    expect(heuristicCompact).toHaveBeenCalledTimes(1);
+  });
+
+  it("/compact reports already-compact without calling the model", async () => {
+    const summarizeForCompaction = vi.fn();
+    const ctx = createContext({
+      agent: {
+        messages: [{ role: "system", content: "system prompt" }],
+        resetContextUsageAnchor: vi.fn(),
+        summarizeForCompaction,
+      } as any,
+      sessionManager: {
+        getCompactionPlan: vi.fn(() => null),
+        applyLLMCompaction: vi.fn(),
+        compact: vi.fn(),
+        getMessages: vi.fn(() => []),
+      } as any,
+    });
+
+    const result = await slashRegistry.execute("/compact", ctx);
+
+    expect(result.result).toContain("already compact");
+    expect(summarizeForCompaction).not.toHaveBeenCalled();
   });
 
   it("/memory summarize and refresh delegate to Codex-style memory handlers", async () => {

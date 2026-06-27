@@ -46,6 +46,8 @@ import { useTerminalSize } from "./use-terminal-size.js";
 import { WelcomeBanner, shouldShowWelcomeBanner } from "./welcome.js";
 import { expandAtMentions } from "./file-mentions.js";
 import { TodosPanel } from "./todos.js";
+import { CompactionProgressCard } from "./compaction-progress.js";
+import type { CompactionProgress } from "../slash-commands/types.js";
 import { PlanConfirm } from "./plan-confirm.js";
 import { ApprovalDialog } from "./approval/approval-dialog.js";
 import { getNextPermissionMode } from "../permission/mode.js";
@@ -367,6 +369,8 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   const [streamingReasoning, setStreamingReasoning] = useState("");
   const [streamingTools, setStreamingTools] = useState<DisplayToolCall[]>([]);
   const [streamingParts, setStreamingParts] = useState<DisplayMessagePart[]>([]);
+  // Live progress for a manual `/compact` run (null when not compacting).
+  const [compaction, setCompaction] = useState<CompactionProgress | null>(null);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(agent.thinking);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(agent.mode);
   const [todos, setTodos] = useState<Todo[]>(() => agent.getTodos());
@@ -1714,6 +1718,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
           toggleSidebar,
           setSidebarMode: applySidebarMode,
           openStats: openStatsPanel,
+          compactionProgress: setCompaction,
         });
         if (handled) {
           if (agent.mode !== permissionMode) {
@@ -2125,6 +2130,11 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
               }
             }}
           />
+        </Box>
+      )}
+      {!isExiting && compaction && (
+        <Box flexShrink={0} backgroundColor={palette.background}>
+          <CompactionProgressCard progress={compaction} />
         </Box>
       )}
       {!isExiting && isRunning && !pickerMode && !statsPanel && !pendingPlan && !pendingApproval && !pendingQuestion && !pendingFeedback && (

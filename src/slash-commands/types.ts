@@ -13,6 +13,17 @@ import type { ExternalHookController } from "../hooks/controller.js";
 
 export type SidebarMode = "auto" | "expanded" | "collapsed";
 
+/**
+ * Live progress for a manual `/compact` run, pushed to the TUI so it can render
+ * a progress bar. `phase` advances collecting → summarizing → applying;
+ * `streamedChars` is the running length of the streamed summary (drives the
+ * bar's fill within the summarizing phase). Hosts without a UI omit the sink.
+ */
+export interface CompactionProgress {
+  phase: "collecting" | "summarizing" | "applying";
+  streamedChars: number;
+}
+
 export interface SidebarCommandState {
   mode: SidebarMode;
   visible: boolean;
@@ -59,6 +70,11 @@ export interface SlashCommandContext {
   fillComposer?: (text: string) => void;
   /** Open the interactive usage stats panel. */
   openStats?: () => void;
+  /**
+   * Push live compaction progress to the running TUI. Pass a progress object
+   * while compacting and `null` to clear the indicator. Absent in non-TUI hosts.
+   */
+  compactionProgress?: (progress: CompactionProgress | null) => void;
 }
 
 /**

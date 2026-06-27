@@ -17,13 +17,13 @@ export interface LLMCompactOptions extends CompactOptions {
   thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 }
 
-const COMPACT_SYSTEM_PROMPT = `You are a conversation summarizer. Your job is to produce a structured
+export const COMPACT_SYSTEM_PROMPT = `You are a conversation summarizer. Your job is to produce a structured
 summary of an earlier portion of a software-engineering assistant's
 conversation so that the assistant can continue working without the full
 history. Preserve fidelity over brevity where the user's intent, file
 paths, or decisions are concerned. Output ONLY the summary, no preamble.`;
 
-const COMPACT_INSTRUCTIONS = `Summarize the conversation above using exactly these 9 sections, each
+export const COMPACT_INSTRUCTIONS = `Summarize the conversation above using exactly these 9 sections, each
 preceded by the literal heading on its own line. If a section has no
 content, write "None".
 
@@ -100,15 +100,24 @@ export async function compactMessagesWithLLM(
   };
 }
 
-async function generateSummary(oldMessages: Message[], options: LLMCompactOptions): Promise<string> {
+/**
+ * Build the two-message prompt that asks the model for a 9-section summary of
+ * `oldMessages`. Shared by the non-streaming overflow path (`generateSummary`)
+ * and the streaming manual `/compact` path (`Agent.summarizeForCompaction`).
+ */
+export function buildCompactionPromptMessages(oldMessages: Message[]): ProviderMessage[] {
   const transcript = serializeTranscript(oldMessages);
-  const messages: ProviderMessage[] = [
+  return [
     { role: "system", content: COMPACT_SYSTEM_PROMPT },
     {
       role: "user",
       content: `Conversation to summarize:\n\n${transcript}\n\n---\n\n${COMPACT_INSTRUCTIONS}`,
     },
   ];
+}
+
+async function generateSummary(oldMessages: Message[], options: LLMCompactOptions): Promise<string> {
+  const messages = buildCompactionPromptMessages(oldMessages);
   return options.provider.complete(messages, {
     model: options.model,
     temperature: 0.2,
@@ -116,7 +125,7 @@ async function generateSummary(oldMessages: Message[], options: LLMCompactOption
   });
 }
 
-function serializeTranscript(messages: Message[]): string {
+export function serializeTranscript(messages: Message[]): string {
   const lines: string[] = [];
   for (const message of messages) {
     switch (message.role) {

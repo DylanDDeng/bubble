@@ -7,7 +7,14 @@ import { mkdirSync, appendFileSync, existsSync, readFileSync, readdirSync, statS
 import { basename, dirname, join } from "node:path";
 import { getBubbleHome } from "./bubble-home.js";
 import { CheckpointStore } from "./checkpoints.js";
-import { compactSessionEntries, type CompactOptions, type CompactResult } from "./context/compact.js";
+import {
+  buildCompactedEntries,
+  compactSessionEntries,
+  planOldMessages,
+  planSessionCompaction,
+  type CompactOptions,
+  type CompactResult,
+} from "./context/compact.js";
 import type { Message, Todo } from "./types.js";
 import { SessionLog } from "./session-log.js";
 import type { SessionLogEntry, SessionMarkerKind, SessionMetadata } from "./session-types.js";
@@ -219,6 +226,39 @@ export class SessionManager {
       this.rewrite(result.entries);
     }
     return result;
+  }
+
+  /**
+   * Inspect whether the session is large enough to compact and, if so, return
+   * the older messages an external summarizer should condense. Returns null
+   * when there isn't enough history past the last summary to bother — the
+   * caller should then report "already compact enough" without calling a model.
+   */
+  getCompactionPlan(options?: CompactOptions): { oldMessages: Message[] } | null {
+    const plan = planSessionCompaction(this.log.list(), options);
+    if (!plan.compactable) return null;
+    return { oldMessages: planOldMessages(plan) };
+  }
+
+  /**
+   * Apply a precomputed (typically LLM-generated) summary as the compaction
+   * checkpoint, rewriting the log to [metadata, summary, kept turns]. Mirrors
+   * `compact()` but skips the built-in heuristic summarizer. Returns
+   * `{ compacted: false }` if the session is no longer compactable.
+   */
+  applyLLMCompaction(summary: string, options?: CompactOptions): CompactResult {
+    const entries = this.log.list();
+    const plan = planSessionCompaction(entries, options);
+    if (!plan.compactable) return { compacted: false };
+
+    const nextEntries = buildCompactedEntries(entries, plan, summary);
+    this.rewrite(nextEntries);
+    return {
+      compacted: true,
+      summary,
+      entries: nextEntries,
+      droppedEntries: plan.oldEntries.length,
+    };
   }
 
   getMessages(): Message[] {
