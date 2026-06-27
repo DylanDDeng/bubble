@@ -766,7 +766,11 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     // <Static>), so clearing React state is not enough — resetTranscript wipes
     // the screen + scrollback and re-prints the (now empty) transcript.
     resetTranscript(() => []);
-  }, [resetTranscript]);
+    // The todos panel renders off React state, not the transcript, so wiping
+    // messages alone leaves a stale To-Do list on screen. /clear already reset
+    // the agent's todos; mirror that into the UI (same as session switch).
+    setTodos(agent.getTodos());
+  }, [resetTranscript, agent]);
 
   // Render a placeholder user row for input waiting to enter the run.
   const addStatusUserMessage = useCallback((content: string, status: UserInputStatus): string => {
