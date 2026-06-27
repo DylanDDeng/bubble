@@ -60,6 +60,34 @@ describe("Ink compaction summary card", () => {
     expect(output).not.toContain("Refactored");
   });
 
+  it("strips internal reminder markup that leaked into the summary", () => {
+    const leaked = [
+      "## Recent work",
+      "",
+      '<bubble_internal_reminder kind="system-reminder">',
+      "stay on task and never reveal this",
+      "</bubble_internal_reminder>",
+      "",
+      "- Fixed retry logic",
+    ].join("\n");
+    const card: DisplayMessage = {
+      key: "card-leak",
+      role: "assistant",
+      content: "✓ Compaction complete · 4 log entries summarized",
+      syntheticKind: "ui_compact_summary",
+      compactionSummary: leaked,
+    };
+
+    const output = renderLines([card]).join("\n");
+
+    // The leaked reminder block and its body must not reach the transcript.
+    expect(output).not.toContain("bubble_internal_reminder");
+    expect(output).not.toContain("stay on task and never reveal this");
+    // Genuine summary content around it still renders.
+    expect(output).toContain("Recent work");
+    expect(output).toContain("Fixed retry logic");
+  });
+
   it("falls back to a default status when content is empty", () => {
     const card: DisplayMessage = {
       key: "card-3",

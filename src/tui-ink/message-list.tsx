@@ -926,7 +926,11 @@ function CompactionSummaryBlock({ message }: { message: DisplayMessage }) {
   const theme = useTheme();
   const rawStatus = message.content.replace(/^✓\s*/, "").trim();
   const status = rawStatus.replace(/^Compaction complete\s*(?:·\s*)?/i, "").trim() || "Session compacted";
-  const summary = message.compactionSummary?.trim();
+  // Same defense as every other visible-text path: strip any internal reminder
+  // markup before rendering, so a summary that echoed it never reaches the
+  // transcript. Belt-and-suspenders — the summarizer is fed sanitized history,
+  // but the summary is model-generated and also re-injected as context.
+  const summary = sanitizeInternalReminderBlocks(message.compactionSummary ?? "").trim() || undefined;
   return (
     <Box
       marginTop={1}
