@@ -262,3 +262,24 @@ bubble serve --feishu --setup
 ```
 
 `--setup` runs the binding wizard, `--kill-old` replaces a conflicting instance for the same App ID, and `--dry-run` connects once and exits as a smoke test.
+
+
+## 环境变量
+
+### BUBBLE_PROVIDER_REQUEST_TIMEOUT_MS
+
+控制 LLM provider 请求的超时时间(毫秒)。
+
+- **未设置**(默认):**无超时限制**,适合 streaming API 和深度推理模型
+- **设置为正整数**(如 `300000`):强制 5 分钟超时(适合 CI 等需要 fail-fast 的场景)
+
+**默认行为**:
+
+Bubble 默认**不设置超时**。对于 streaming API,模型会持续发送 chunk,连接在完成时自然关闭。这对深度推理模型(如 GLM-5.2 max reasoning)尤其重要,因为单个请求可能需要 10+ 分钟。
+
+**仅在需要强制超时时设置**:
+
+```bash
+# CI 环境中强制 5 分钟超时
+export BUBBLE_PROVIDER_REQUEST_TIMEOUT_MS=300000
+```

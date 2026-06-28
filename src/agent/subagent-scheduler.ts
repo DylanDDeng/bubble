@@ -22,7 +22,8 @@
 
 export type SubagentRunOutcome =
   | { kind: "final" }
-  | { kind: "rate_limited"; retryAfterMs?: number };
+  | { kind: "rate_limited"; retryAfterMs?: number }
+  | { kind: "transport_retry" };
 
 export interface DispatchRequest {
   agentId: string;
@@ -35,6 +36,8 @@ export interface DispatchRequest {
   onCancelledWhileQueued: (reason: unknown) => void;
   /** Finalize the record when rate-limit retries are exhausted. */
   onRateLimitExhausted: (attempts: number) => void;
+  /** Finalize the record when transient transport retries are exhausted. */
+  onTransportRetryExhausted: (attempts: number) => void;
 }
 
 export interface SubagentSchedulerOptions {
@@ -48,6 +51,10 @@ export interface SubagentSchedulerOptions {
   rateLimitMaxAttempts?: number;
   /** Backoff per attempt when the provider gave no retry-after. Default 3s/6s/12s (0 under NODE_ENV=test). */
   rateLimitBackoffMs?: number[];
+  /** Max launches for a child hit by transient transport errors. Default 2. */
+  transportRetryMaxAttempts?: number;
+  /** Backoff per transport retry. Default 2s/4s (0 under NODE_ENV=test). */
+  transportRetryBackoffMs?: number[];
   /** AIMD: minimum spacing between capacity decreases. Default 2s. */
   aimdDecreaseIntervalMs?: number;
   /** AIMD: quiet period after which capacity grows by 1. Default 3min. */
@@ -58,6 +65,8 @@ export interface SubagentSchedulerOptions {
 interface QueueEntry {
   request: DispatchRequest;
   attempt: number;
+  /** Transport-retry launches so far (separate cap from rate-limit attempts). */
+  transportAttempt: number;
   /** Earliest time this entry may launch (rate-limit backoff). */
   notBefore: number;
   resolve: () => void;
@@ -77,6 +86,8 @@ export class SubagentScheduler {
   private readonly launchIntervalMs: number;
   private readonly rateLimitMaxAttempts: number;
   private readonly rateLimitBackoffMs: number[];
+  private readonly transportRetryMaxAttempts: number;
+  private readonly transportRetryBackoffMs: number[];
   private readonly aimdDecreaseIntervalMs: number;
   private readonly aimdIncreaseAfterMs: number;
   private readonly now: () => number;
@@ -95,6 +106,8 @@ export class SubagentScheduler {
     this.launchIntervalMs = options.launchIntervalMs ?? (TEST_ENV ? 0 : 500);
     this.rateLimitMaxAttempts = Math.max(1, options.rateLimitMaxAttempts ?? 3);
     this.rateLimitBackoffMs = options.rateLimitBackoffMs ?? (TEST_ENV ? [0, 0, 0] : [3_000, 6_000, 12_000]);
+    this.transportRetryMaxAttempts = Math.max(1, options.transportRetryMaxAttempts ?? 2);
+    this.transportRetryBackoffMs = options.transportRetryBackoffMs ?? (TEST_ENV ? [0, 0] : [2_000, 4_000]);
     this.aimdDecreaseIntervalMs = options.aimdDecreaseIntervalMs ?? 2_000;
     this.aimdIncreaseAfterMs = options.aimdIncreaseAfterMs ?? 180_000;
     this.now = options.now ?? Date.now;
@@ -107,6 +120,7 @@ export class SubagentScheduler {
       const entry: QueueEntry = {
         request,
         attempt: 0,
+        transportAttempt: 0,
         notBefore: 0,
         resolve,
       };
@@ -278,6 +292,35 @@ export class SubagentScheduler {
   private settle(entry: QueueEntry, outcome: SubagentRunOutcome): void {
     if (outcome.kind === "final") {
       entry.resolve();
+      return;
+    }
+
+    if (outcome.kind === "transport_retry") {
+      // A transient transport failure is NOT a rate-limit signal: it must not
+      // shrink AIMD capacity (no notifyRateLimited) and has its own bounded
+      // attempt budget separate from 429 retries.
+      const now = this.now();
+      entry.transportAttempt += 1;
+      if (entry.transportAttempt >= this.transportRetryMaxAttempts) {
+        entry.request.onTransportRetryExhausted(entry.transportAttempt);
+        entry.resolve();
+        return;
+      }
+      if (entry.request.signal?.aborted) {
+        entry.request.onCancelledWhileQueued(entry.request.signal.reason);
+        entry.resolve();
+        return;
+      }
+      const backoff = this.transportRetryBackoffMs[
+        Math.min(entry.transportAttempt - 1, this.transportRetryBackoffMs.length - 1)
+      ] ?? 0;
+      entry.notBefore = now + Math.max(0, backoff);
+      if (entry.request.signal) {
+        const onAbort = () => this.cancelQueuedEntry(entry, entry.request.signal?.reason);
+        entry.request.signal.addEventListener("abort", onAbort, { once: true });
+        entry.removeAbortListener = () => entry.request.signal?.removeEventListener("abort", onAbort);
+      }
+      this.queue.push(entry);
       return;
     }
 

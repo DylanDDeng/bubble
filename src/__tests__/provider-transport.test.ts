@@ -247,4 +247,23 @@ describe("provider transport", () => {
     expect(isProviderTransportError(original)).toBe(false);
     expect(isProviderTransportError(new Error("socket hang up"))).toBe(true);
   });
+
+  it("classifies request/response timeouts as transport errors", () => {
+    // Bun fetch throws this exact prose; openai-node uses a named error.
+    expect(isProviderTransportError(new Error("The operation timed out."))).toBe(true);
+    expect(isProviderTransportError(Object.assign(new Error("x"), { name: "TimeoutError" }))).toBe(true);
+    expect(isProviderTransportError(new Error("Request timed out."))).toBe(true);
+    expect(isProviderTransportError(Object.assign(new Error("y"), { name: "APIConnectionTimeoutError" }))).toBe(true);
+    // No over-match: an ordinary app-layer error is not a transport error.
+    expect(isProviderTransportError(new Error("invalid request body"))).toBe(false);
+  });
+
+  it("does NOT rewrap a plain timeout into the proxy/TLS advice message", () => {
+    // Timeout patterns live outside isProviderNetworkErrorText so a bare
+    // timeout is returned as-is, never decorated with misleading proxy advice.
+    const timeout = new Error("The operation timed out.");
+    const result = normalizeProviderNetworkError(timeout, { providerName: "zai" });
+    expect(result).toBe(timeout);
+    expect(result.message).not.toContain("connection failed before Bubble received a response");
+  });
 });

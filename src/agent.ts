@@ -126,6 +126,8 @@ export interface AgentSubagentRuntimeConfig {
   launchIntervalMs?: number;
   rateLimitMaxAttempts?: number;
   rateLimitBackoffMs?: number[];
+  transportRetryMaxAttempts?: number;
+  transportRetryBackoffMs?: number[];
   /**
    * Directory for persisted child state (design §7). Defaults to
    * `<session>.subagents` next to the session file when a session exists.
@@ -262,6 +264,8 @@ export class Agent {
       launchIntervalMs: this.subagentsConfig.launchIntervalMs,
       rateLimitMaxAttempts: this.subagentsConfig.rateLimitMaxAttempts,
       rateLimitBackoffMs: this.subagentsConfig.rateLimitBackoffMs,
+      transportRetryMaxAttempts: this.subagentsConfig.transportRetryMaxAttempts,
+      transportRetryBackoffMs: this.subagentsConfig.transportRetryBackoffMs,
       getCategoryLimit: (category) => mergeAgentCategories(this.agentCategories)[category]?.maxConcurrent,
     });
     this.childRunner = new ChildRunner({
@@ -1962,6 +1966,19 @@ export class Agent {
         record.status = "failed";
         record.finalReason = "rate_limited_exhausted";
         record.error = `Provider rate limit persisted after ${attempts} attempts.`;
+        record.updatedAt = Date.now();
+        void this.runSubagentLifecycleHookFor(record, cwd, "SubagentStop", record.status, record.error);
+        this.emitSubagentLifecycle(record, options, "failed", undefined, record.error);
+        this.subagentStore.persist(record);
+        this.subagentStore.notifyWaiters(record);
+        this.maybeEnqueueIngestion(record, options);
+      },
+      onTransportRetryExhausted: (attempts) => {
+        record.status = "failed";
+        // failed_transient stays resumable, so the parent can still send_input
+        // to recover the child with its context intact.
+        record.finalReason = "failed_transient";
+        record.error = `Provider transport error persisted after ${attempts} attempts.`;
         record.updatedAt = Date.now();
         void this.runSubagentLifecycleHookFor(record, cwd, "SubagentStop", record.status, record.error);
         this.emitSubagentLifecycle(record, options, "failed", undefined, record.error);

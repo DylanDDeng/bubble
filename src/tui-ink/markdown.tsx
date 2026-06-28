@@ -380,12 +380,11 @@ function appendInlineSegment(
   }
 }
 
-function renderInlineSegments(
-  text: string,
+function renderSegmentNodes(
+  segments: MarkdownInlineSegment[],
   keyPrefix: string,
-  style: InlineStyle = {},
 ): React.ReactNode[] {
-  return parseMarkdownInlineSegments(text, style).map((segment, index) => (
+  return segments.map((segment, index) => (
     <Text
       key={`${keyPrefix}-${index}`}
       bold={segment.bold}
@@ -397,12 +396,37 @@ function renderInlineSegments(
   ));
 }
 
+function renderInlineSegments(
+  text: string,
+  keyPrefix: string,
+  style: InlineStyle = {},
+): React.ReactNode[] {
+  return renderSegmentNodes(parseMarkdownInlineSegments(text, style), keyPrefix);
+}
+
 function inlinePlainText(text: string): string {
   return parseMarkdownInlineSegments(text).map((segment) => segment.text).join("");
 }
 
-function InlineText({ text }: { text: string }) {
-  return <Text>{renderInlineSegments(text, "inline")}</Text>;
+function InlineText({ text, maxWidth }: { text: string; maxWidth?: number }) {
+  const { columns } = useTerminalSize();
+  // Pre-wrap CJK-aware so Ink's space-only wrap-ansi can't chop "、"-joined runs
+  // mid-token. A caller-supplied maxWidth is exact (it already nets out the
+  // gutter); otherwise fall back to the terminal width minus a generous margin
+  // for borders/padding so a nested card never over-estimates and overflows —
+  // wrapping a few cells early is invisible, a mid-token chop is not.
+  const effectiveWidth = maxWidth ?? (columns ? Math.max(20, columns - 10) : undefined);
+  if (effectiveWidth === undefined) {
+    return <Text>{renderInlineSegments(text, "inline")}</Text>;
+  }
+  const wrapped = wrapInlineSegments(parseMarkdownInlineSegments(text), effectiveWidth);
+  return (
+    <>
+      {wrapped.map((segments, li) => (
+        <Text key={li}>{segments.length ? renderSegmentNodes(segments, `inline-${li}`) : " "}</Text>
+      ))}
+    </>
+  );
 }
 
 function CodeBlock({ lang, lines }: { lang: string; lines: string[] }) {
@@ -559,6 +583,117 @@ function truncateInlineSegments(
   return output;
 }
 
+interface StyledCell {
+  grapheme: string;
+  width: number;
+  style: InlineStyle;
+}
+
+/**
+ * CJK-aware line wrap over styled inline segments.
+ *
+ * Ink wraps a <Text> via wrap-ansi with `hard: true`, which treats only ASCII
+ * spaces as break opportunities. Chinese joins items with ideographic
+ * punctuation like "、" and no ASCII space, so a long run such as
+ * `A、B、ProviderSendTurnInput` is seen as ONE unbreakable word and gets chopped
+ * mid-token at the column edge (e.g. `ProviderSendTurnInpu` + `t`), and the
+ * overflow spills past the box into the terminal's own hard wrap. We instead
+ * break at ASCII spaces AND after CJK punctuation (、,。!?;:)等 — keeping ASCII
+ * identifiers whole — and hard-split only a lone token wider than the line.
+ */
+export function wrapInlineSegments(
+  segments: MarkdownInlineSegment[],
+  maxWidth: number,
+): MarkdownInlineSegment[][] {
+  if (maxWidth <= 0) return [segments];
+
+  const cells: StyledCell[] = [];
+  for (const segment of segments) {
+    const style: InlineStyle = { bold: segment.bold, italic: segment.italic, code: segment.code };
+    for (const grapheme of splitGraphemes(segment.text)) {
+      cells.push({ grapheme, width: graphemeWidth(grapheme), style });
+    }
+  }
+
+  // CJK punctuation that acts as break opportunity AFTER it (like English comma/period).
+  const isCJKPunctuation = (g: string) => /^[、,。!?;:,!?;:]$/.test(g);
+
+  // Tokenize into runs: an ASCII word (narrow non-space run), a CJK grapheme,
+  // or a space run. After tokenization, insert break markers after CJK punctuation.
+  interface Chunk { cells: StyledCell[]; width: number; breakAfter: boolean }
+  const chunks: Chunk[] = [];
+  const chunkWidth = (run: StyledCell[]) => run.reduce((sum, cell) => sum + cell.width, 0);
+  let i = 0;
+  while (i < cells.length) {
+    const cell = cells[i];
+    if (cell.grapheme === " ") {
+      const run: StyledCell[] = [];
+      while (i < cells.length && cells[i].grapheme === " ") run.push(cells[i++]);
+      chunks.push({ cells: run, width: chunkWidth(run), breakAfter: true });
+    } else if (cell.width >= 2) {
+      chunks.push({ cells: [cell], width: cell.width, breakAfter: isCJKPunctuation(cell.grapheme) });
+      i++;
+    } else {
+      const run: StyledCell[] = [];
+      while (i < cells.length && cells[i].grapheme !== " " && cells[i].width < 2) run.push(cells[i++]);
+      chunks.push({ cells: run, width: chunkWidth(run), breakAfter: false });
+    }
+  }
+
+  const lines: StyledCell[][] = [];
+  let line: StyledCell[] = [];
+  let lineWidth = 0;
+  const flush = () => { lines.push(line); line = []; lineWidth = 0; };
+
+  for (let j = 0; j < chunks.length; j++) {
+    const chunk = chunks[j];
+    const isSpace = chunk.cells[0]?.grapheme === " ";
+
+    if (isSpace) {
+      if (lineWidth === 0) continue;
+      if (lineWidth + chunk.width <= maxWidth) {
+        line.push(...chunk.cells);
+        lineWidth += chunk.width;
+      } else {
+        flush();
+      }
+      continue;
+    }
+
+    if (lineWidth + chunk.width <= maxWidth) {
+      line.push(...chunk.cells);
+      lineWidth += chunk.width;
+      if (chunk.breakAfter && j < chunks.length - 1) {
+        const nextChunk = chunks[j + 1];
+        const nextIsSpace = nextChunk.cells[0]?.grapheme === " ";
+        if (!nextIsSpace && lineWidth + nextChunk.width > maxWidth) flush();
+      }
+      continue;
+    }
+
+    if (lineWidth > 0) flush();
+
+    if (chunk.width <= maxWidth) {
+      line.push(...chunk.cells);
+      lineWidth = chunk.width;
+      continue;
+    }
+
+    for (const cell of chunk.cells) {
+      if (lineWidth + cell.width > maxWidth && lineWidth > 0) flush();
+      line.push(cell);
+      lineWidth += cell.width;
+    }
+  }
+  if (line.length > 0 || lines.length === 0) lines.push(line);
+
+  return lines.map((lineCells) => {
+    const out: MarkdownInlineSegment[] = [];
+    for (const cell of lineCells) appendInlineSegment(out, cell.grapheme, cell.style);
+    return out;
+  });
+}
+
 function inlineSegmentsWidth(segments: MarkdownInlineSegment[]): number {
   return segments.reduce((sum, segment) => sum + visualWidth(segment.text), 0);
 }
@@ -653,7 +788,7 @@ export function MarkdownContent({
         return (
           <Box key={i} flexDirection="column" marginBottom={1}>
             {block.lines.map((line, li) => (
-              <InlineText key={li} text={line} />
+              <InlineText key={li} text={line} maxWidth={maxWidth} />
             ))}
           </Box>
         );

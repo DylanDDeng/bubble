@@ -44,6 +44,30 @@ function rateLimitedProvider(turns: StreamChunk[][], failures = 1): { provider: 
   return { provider, calls: () => calls };
 }
 
+/** Provider whose first `failures` calls throw a Bun-style fetch timeout, then stream turns. */
+function timeoutThenSucceedProvider(turns: StreamChunk[][], failures = 1): { provider: Provider; calls: () => number } {
+  let calls = 0;
+  let successIndex = 0;
+  const provider: Provider = {
+    // eslint-disable-next-line require-yield
+    async *streamChat() {
+      calls += 1;
+      if (calls <= failures) {
+        // Exactly what Bun's fetch throws on a request timeout.
+        throw Object.assign(new Error("The operation timed out."), { name: "TimeoutError" });
+      }
+      const chunks = turns[successIndex++] ?? [];
+      for (const chunk of chunks) {
+        yield chunk;
+      }
+    },
+    async complete() {
+      return "complete";
+    },
+  };
+  return { provider, calls: () => calls };
+}
+
 /** Provider that blocks its first turn until released; honors abort like a real transport. */
 function gatedProvider(turns: StreamChunk[][]): { provider: Provider; release: () => void } {
   let release!: () => void;
@@ -219,6 +243,79 @@ describe("subagent runtime — rate-limit contract", () => {
     expect(done[0].status).toBe("failed");
     expect(done[0].finalReason).toBe("rate_limited_exhausted");
     expect(done[0].resumable).toBe(true);
+  });
+});
+
+describe("subagent runtime — transport-timeout contract", () => {
+  it("retries the same instance after a connection timeout, completing with one input copy", async () => {
+    const { provider, calls } = timeoutThenSucceedProvider([
+      [{ type: "text", content: LONG_SUMMARY }, { type: "done" }],
+    ]);
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [],
+      subagents: { transportRetryMaxAttempts: 2, transportRetryBackoffMs: [0, 0] },
+    });
+    const profile = defaultProfile();
+
+    const spawned = await agent.spawnSubAgent("timeout task", "/tmp", { profile, parentToolCallId: "spawn_1" });
+    const done = await agent.waitSubAgents({ agentIds: [spawned.agentId], timeoutMs: 5_000 });
+
+    expect(done[0].status).toBe("completed");
+    expect(calls()).toBe(2);
+
+    const record = (agent as any).subagentStore.get(spawned.agentId);
+    const userMessages = (record.agent.messages as Message[]).filter(
+      (message) => message.role === "user" && message.content === "timeout task",
+    );
+    expect(userMessages).toHaveLength(1);
+    // The stale "[model request interrupted...]" boundary must be stripped on requeue.
+    const interrupted = (record.agent.messages as Message[]).filter(
+      (message) => message.role === "assistant" && message.content.startsWith("[model request interrupted"),
+    );
+    expect(interrupted).toHaveLength(0);
+  });
+
+  it("finalizes failed_transient (resumable) when timeouts never clear", async () => {
+    const { provider } = timeoutThenSucceedProvider([], 99);
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [],
+      subagents: { transportRetryMaxAttempts: 2, transportRetryBackoffMs: [0, 0] },
+    });
+    const profile = defaultProfile();
+
+    const spawned = await agent.spawnSubAgent("never connects", "/tmp", { profile, parentToolCallId: "spawn_1" });
+    const done = await agent.waitSubAgents({ agentIds: [spawned.agentId], timeoutMs: 5_000 });
+
+    expect(done[0].status).toBe("failed");
+    expect(done[0].finalReason).toBe("failed_transient");
+    expect(done[0].resumable).toBe(true);
+  });
+
+  it("still hard-fails a non-transport provider error (no spurious retry)", async () => {
+    let calls = 0;
+    const provider: Provider = {
+      // eslint-disable-next-line require-yield
+      async *streamChat() {
+        calls += 1;
+        throw new Error("provider exploded");
+      },
+      async complete() {
+        return "complete";
+      },
+    };
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [] });
+    const profile = defaultProfile();
+
+    const spawned = await agent.spawnSubAgent("boom", "/tmp", { profile, parentToolCallId: "spawn_1" });
+    const done = await agent.waitSubAgents({ agentIds: [spawned.agentId], timeoutMs: 5_000 });
+
+    expect(done[0].status).toBe("failed");
+    expect(done[0].finalReason).toBe("failed_transient");
+    expect(calls).toBe(1); // not a transport error -> no requeue
   });
 });
 

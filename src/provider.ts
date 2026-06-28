@@ -128,9 +128,14 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
     });
   }
 
+  // Request timeout: default is NO TIMEOUT (safe for streaming APIs where the
+  // model sends chunks continuously). Operators can set a positive integer to
+  // enforce a ceiling if needed (e.g., for fail-fast in CI environments).
+  const timeoutMs = parsePositiveInt(process.env.BUBBLE_PROVIDER_REQUEST_TIMEOUT_MS);
   const client = new OpenAI({
     apiKey: options.apiKey,
     baseURL: options.baseURL,
+    timeout: timeoutMs ?? Number.MAX_SAFE_INTEGER,  // default: no timeout
   });
 
   const fallbackModel = "gpt-4o";
@@ -782,6 +787,12 @@ function mergeToolArgumentDelta(current: string, incoming: string, mode: ToolArg
 
   debugToolArgs({ stage: "merge", branch: mode === "delta" ? "delta-append" : "snapshot-fallback-concat", current, incoming, args: current + incoming, delta: incoming });
   return { args: current + incoming, delta: incoming };
+}
+
+function parsePositiveInt(raw: string | undefined): number | undefined {
+  if (!raw?.trim()) return undefined;
+  const value = Number(raw);
+  return Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
 function mergeStreamingText(current: string, incoming: string, mode: ToolArgsMergeMode): { args: string; delta: string } {

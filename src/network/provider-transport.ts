@@ -141,7 +141,26 @@ export function normalizeProviderNetworkError(
 }
 
 export function isProviderTransportError(error: unknown): boolean {
-  return isProviderNetworkErrorText(errorMessageChain(error).join("\n"));
+  const text = errorMessageChain(error).join("\n");
+  return isProviderNetworkErrorText(text) || isProviderTimeoutErrorText(text);
+}
+
+/**
+ * Request/response timeouts surface as prose rather than errno tokens — e.g.
+ * Bun fetch throws a DOMException named "TimeoutError" with message
+ * "The operation timed out.", and openai-node raises APIConnectionTimeoutError.
+ * These are kept OUT of isProviderNetworkErrorText on purpose: that predicate
+ * drives normalizeProviderNetworkError's proxy/TLS/CA advice, and a plain
+ * timeout must not be rewrapped into a misleading "check your proxy" message.
+ */
+export function isProviderTimeoutErrorText(text: string): boolean {
+  return [
+    /operation timed out/i,
+    /request timed out/i,
+    /\bTimeoutError\b/i,
+    /\bAPIConnectionTimeoutError\b/i,
+    /\bESOCKETTIMEDOUT\b/i,
+  ].some((pattern) => pattern.test(text));
 }
 
 export function shouldEnableFetchVerbose(env: NodeJS.ProcessEnv = process.env, providerVerboseEnvVar?: string): boolean {

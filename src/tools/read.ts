@@ -190,6 +190,9 @@ export function createReadTool(cwd: string, approval?: ApprovalController, lsp?:
         metadata: {
           kind: "read",
           path: filePath,
+          offset: effectiveOffset + 1,
+          lines: sliced.length,
+          total: totalLines,
           ...(autoAdvanceNote ? { autoAdvanced: true } : {}),
           ...(truncated ? { truncated: true } : {}),
         },

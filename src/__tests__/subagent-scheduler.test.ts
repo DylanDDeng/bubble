@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SubagentScheduler, type SubagentRunOutcome } from "../agent/subagent-scheduler.js";
+import { SubagentScheduler, type DispatchRequest, type SubagentRunOutcome } from "../agent/subagent-scheduler.js";
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -13,6 +13,16 @@ function noopCancel() {
   // queued-cancellation not expected in this test
 }
 
+// Fills the required finalize callbacks so each test only supplies what it asserts.
+function req(partial: Partial<DispatchRequest> & Pick<DispatchRequest, "agentId" | "run">): DispatchRequest {
+  return {
+    onCancelledWhileQueued: noopCancel,
+    onRateLimitExhausted: () => {},
+    onTransportRetryExhausted: () => {},
+    ...partial,
+  };
+}
+
 describe("SubagentScheduler", () => {
   it("enforces the global active cap and releases slots on completion", async () => {
     const scheduler = new SubagentScheduler({ maxActiveSubagents: 1, launchIntervalMs: 0 });
@@ -20,25 +30,21 @@ describe("SubagentScheduler", () => {
     let firstStarted = false;
     let secondStarted = false;
 
-    const first = scheduler.dispatch({
+    const first = scheduler.dispatch(req({
       agentId: "a",
       run: async () => {
         firstStarted = true;
         await firstGate.promise;
         return { kind: "final" };
       },
-      onCancelledWhileQueued: noopCancel,
-      onRateLimitExhausted: () => {},
-    });
-    const second = scheduler.dispatch({
+    }));
+    const second = scheduler.dispatch(req({
       agentId: "b",
       run: async () => {
         secondStarted = true;
         return { kind: "final" };
       },
-      onCancelledWhileQueued: noopCancel,
-      onRateLimitExhausted: () => {},
-    });
+    }));
 
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(firstStarted).toBe(true);
@@ -65,27 +71,21 @@ describe("SubagentScheduler", () => {
       return { kind: "final" };
     };
 
-    const a = scheduler.dispatch({
+    const a = scheduler.dispatch(req({
       agentId: "review-1",
       category: "review",
       run: runFor("review-1", reviewGate.promise),
-      onCancelledWhileQueued: noopCancel,
-      onRateLimitExhausted: () => {},
-    });
-    const b = scheduler.dispatch({
+    }));
+    const b = scheduler.dispatch(req({
       agentId: "review-2",
       category: "review",
       run: runFor("review-2"),
-      onCancelledWhileQueued: noopCancel,
-      onRateLimitExhausted: () => {},
-    });
-    const c = scheduler.dispatch({
+    }));
+    const c = scheduler.dispatch(req({
       agentId: "explore-1",
       category: "explore",
       run: runFor("explore-1"),
-      onCancelledWhileQueued: noopCancel,
-      onRateLimitExhausted: () => {},
-    });
+    }));
 
     await new Promise((resolve) => setTimeout(resolve, 10));
     // review-2 is queue head but its category is at capacity; explore-1 must not starve.
@@ -105,16 +105,14 @@ describe("SubagentScheduler", () => {
     let cancelledReason: unknown;
     let queuedRunStarted = false;
 
-    const first = scheduler.dispatch({
+    const first = scheduler.dispatch(req({
       agentId: "running",
       run: async () => {
         await gate.promise;
         return { kind: "final" };
       },
-      onCancelledWhileQueued: noopCancel,
-      onRateLimitExhausted: () => {},
-    });
-    const second = scheduler.dispatch({
+    }));
+    const second = scheduler.dispatch(req({
       agentId: "queued",
       signal: controller.signal,
       run: async () => {
@@ -124,8 +122,7 @@ describe("SubagentScheduler", () => {
       onCancelledWhileQueued: (reason) => {
         cancelledReason = reason;
       },
-      onRateLimitExhausted: () => {},
-    });
+    }));
 
     await new Promise((resolve) => setTimeout(resolve, 5));
     controller.abort(new Error("user closed"));
@@ -148,17 +145,16 @@ describe("SubagentScheduler", () => {
     const attempts: number[] = [];
     let exhaustedAttempts = 0;
 
-    await scheduler.dispatch({
+    await scheduler.dispatch(req({
       agentId: "limited",
       run: async ({ attempt }) => {
         attempts.push(attempt);
         return { kind: "rate_limited" };
       },
-      onCancelledWhileQueued: noopCancel,
       onRateLimitExhausted: (count) => {
         exhaustedAttempts = count;
       },
-    });
+    }));
 
     expect(attempts).toEqual([1, 2, 3]);
     expect(exhaustedAttempts).toBe(3);
@@ -173,17 +169,16 @@ describe("SubagentScheduler", () => {
     const attempts: number[] = [];
     let exhausted = false;
 
-    await scheduler.dispatch({
+    await scheduler.dispatch(req({
       agentId: "retry-ok",
       run: async ({ attempt }) => {
         attempts.push(attempt);
         return attempt < 2 ? { kind: "rate_limited" } : { kind: "final" };
       },
-      onCancelledWhileQueued: noopCancel,
       onRateLimitExhausted: () => {
         exhausted = true;
       },
-    });
+    }));
 
     expect(attempts).toEqual([1, 2]);
     expect(exhausted).toBe(false);
@@ -198,14 +193,116 @@ describe("SubagentScheduler", () => {
     });
     expect(scheduler.effectiveCapacity()).toBe(8);
 
-    await scheduler.dispatch({
+    await scheduler.dispatch(req({
       agentId: "limited",
       run: async () => ({ kind: "rate_limited" }),
-      onCancelledWhileQueued: noopCancel,
-      onRateLimitExhausted: () => {},
-    });
+    }));
 
     expect(scheduler.effectiveCapacity()).toBeLessThan(8);
     expect(scheduler.effectiveCapacity()).toBeGreaterThanOrEqual(1);
+  });
+
+  it("re-runs a transport_retry entry on its own counter and exhausts via onTransportRetryExhausted", async () => {
+    const scheduler = new SubagentScheduler({
+      maxActiveSubagents: 2,
+      launchIntervalMs: 0,
+      transportRetryMaxAttempts: 2,
+      transportRetryBackoffMs: [0, 0],
+    });
+    const attempts: number[] = [];
+    let transportExhausted = 0;
+    let rateLimitExhausted = false;
+
+    await scheduler.dispatch(req({
+      agentId: "timeout",
+      run: async ({ attempt }) => {
+        attempts.push(attempt);
+        return { kind: "transport_retry" };
+      },
+      onRateLimitExhausted: () => {
+        rateLimitExhausted = true;
+      },
+      onTransportRetryExhausted: (count) => {
+        transportExhausted = count;
+      },
+    }));
+
+    // launch attempt counter increments each re-launch (attempt>1 => resumeWithoutInput)
+    expect(attempts).toEqual([1, 2]);
+    expect(transportExhausted).toBe(2);
+    expect(rateLimitExhausted).toBe(false);
+  });
+
+  it("recovers after a transient transport error and lets a retry succeed", async () => {
+    const scheduler = new SubagentScheduler({
+      maxActiveSubagents: 2,
+      launchIntervalMs: 0,
+      transportRetryMaxAttempts: 3,
+      transportRetryBackoffMs: [0, 0, 0],
+    });
+    const attempts: number[] = [];
+    let exhausted = false;
+
+    await scheduler.dispatch(req({
+      agentId: "timeout-then-ok",
+      run: async ({ attempt }) => {
+        attempts.push(attempt);
+        return attempt < 2 ? { kind: "transport_retry" } : { kind: "final" };
+      },
+      onTransportRetryExhausted: () => {
+        exhausted = true;
+      },
+    }));
+
+    expect(attempts).toEqual([1, 2]);
+    expect(exhausted).toBe(false);
+  });
+
+  it("does NOT shrink AIMD capacity on transport retries (a timeout is not a rate-limit signal)", async () => {
+    const scheduler = new SubagentScheduler({
+      maxActiveSubagents: 8,
+      launchIntervalMs: 0,
+      transportRetryMaxAttempts: 1,
+      transportRetryBackoffMs: [0],
+    });
+    expect(scheduler.effectiveCapacity()).toBe(8);
+
+    await scheduler.dispatch(req({
+      agentId: "timeout",
+      run: async () => ({ kind: "transport_retry" }),
+    }));
+
+    expect(scheduler.effectiveCapacity()).toBe(8);
+  });
+
+  it("cancels a transport_retry entry aborted during backoff instead of re-launching", async () => {
+    const scheduler = new SubagentScheduler({
+      maxActiveSubagents: 2,
+      launchIntervalMs: 0,
+      transportRetryMaxAttempts: 5,
+      transportRetryBackoffMs: [50, 50, 50, 50, 50],
+    });
+    const controller = new AbortController();
+    const attempts: number[] = [];
+    let cancelledReason: unknown;
+
+    const run = scheduler.dispatch(req({
+      agentId: "cancel-during-backoff",
+      signal: controller.signal,
+      run: async ({ attempt }) => {
+        attempts.push(attempt);
+        return { kind: "transport_retry" };
+      },
+      onCancelledWhileQueued: (reason) => {
+        cancelledReason = reason;
+      },
+    }));
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort(new Error("user closed during backoff"));
+    await run;
+
+    expect(attempts).toEqual([1]); // re-launch never happened
+    expect((cancelledReason as Error).message).toBe("user closed during backoff");
   });
 });

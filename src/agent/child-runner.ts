@@ -13,6 +13,7 @@ import { AgentAbortError, EMPTY_ASSISTANT_FALLBACK, SubagentAbortError } from ".
 import { BudgetLedger, childHardCap, composeAbortSignals } from "./budget-ledger.js";
 import { isOnlyProviderProtocolArtifacts, stripProviderProtocolArtifacts } from "../provider-artifacts.js";
 import { isRateLimitError } from "../network/errors.js";
+import { isProviderTransportError } from "../network/provider-transport.js";
 import { mergeUsage, selectToolsForAgentProfile, validateAgentProfileTools } from "./profiles.js";
 import {
   estimateHandoffTokens,
@@ -190,6 +191,26 @@ export class ChildRunner {
         emit("queued", undefined, `Rate limited; ${record.nickname} will retry with its context intact.`);
         return { kind: "rate_limited", retryAfterMs: error.retryAfterMs };
       }
+      const abortedNow = record.abortController.signal.aborted
+        || options.abortSignal?.aborted
+        || error instanceof AgentAbortError
+        || error?.name === "AbortError";
+      if (!abortedNow && isProviderTransportError(error)) {
+        // A transient transport failure (connection error or request timeout)
+        // is recoverable: keep the agent and its context, strip any stale
+        // "[model request interrupted...]" boundary, and hand the bounded
+        // backoff to the scheduler — the same shape as the 429 requeue above.
+        // Restarting the whole logical run covers both a connection-phase
+        // timeout (thrown before any chunk) and a mid-stream one (boundary
+        // appended). The abort guard ensures a genuine user cancel is never
+        // requeued; a Bun TimeoutError (name "TimeoutError") is not an abort.
+        record.status = "queued";
+        record.summary = sanitizeSubagentSummary(record.summary);
+        record.updatedAt = Date.now();
+        stripTrailingModelInterruptedBoundary(subAgent.messages);
+        emit("queued", undefined, `Connection error; ${record.nickname} will retry with its context intact.`);
+        return { kind: "transport_retry" };
+      }
       const cancelled = error instanceof AgentAbortError || error?.name === "AbortError";
       record.status = cancelled ? "cancelled" : "failed";
       record.finalReason = cancelled
@@ -340,7 +361,7 @@ function buildChildBudgetWrapUpReminder(spentTokens: number, softCap: number): s
   ].join(" ");
 }
 
-function summarizeSubagentToolEnd(event: { name: string; result: ToolResult }): string {
+export function summarizeSubagentToolEnd(event: { name: string; result: ToolResult }): string {
   const metadata = (event.result.metadata ?? {}) as Record<string, unknown>;
   const reason = readString(metadata.reason);
   if (reason) return reason;
@@ -359,7 +380,20 @@ function summarizeSubagentToolEnd(event: { name: string; result: ToolResult }): 
     return `${matches} match${matches === 1 ? "" : "es"}${target}${within}`;
   }
   const kind = readString(metadata.kind);
-  if (path) return kind ? `${kind} ${path}` : path;
+  if (path) {
+    if (kind === "read") {
+      const offset = readNumber(metadata.offset);
+      const lines = readNumber(metadata.lines);
+      const total = readNumber(metadata.total);
+      // Show the range only for partial/paged reads so N distinct slice-reads
+      // stop collapsing into identical "read PATH" notes; a plain full read
+      // still renders as "read PATH".
+      if (offset !== undefined && lines !== undefined && (offset > 1 || (total !== undefined && lines < total))) {
+        return `read ${path} (lines ${offset}-${offset + lines - 1})`;
+      }
+    }
+    return kind ? `${kind} ${path}` : path;
+  }
   return event.result.status ?? "completed";
 }
 

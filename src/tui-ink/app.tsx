@@ -371,7 +371,18 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   const [streamingParts, setStreamingParts] = useState<DisplayMessagePart[]>([]);
   // Live progress for a manual `/compact` run (null when not compacting).
   const [compaction, setCompaction] = useState<CompactionProgress | null>(null);
-  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(agent.thinking);
+  // Normalize agent.thinking against the current model's supported levels so the
+  // banner displays the *effective* level, not a stale user-config value like
+  // "xhigh" when switching to a model that only supports ["high","max","off"].
+  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(() => {
+    const modelParts = agent.model.includes(":")
+      ? agent.model.split(":")
+      : [agent.providerId || safeRegistry.getDefault()?.id || "openai", agent.model];
+    const providerId = modelParts[0];
+    const modelId = modelParts.slice(1).join(":");
+    const availableLevels = getAvailableThinkingLevels(providerId, modelId);
+    return normalizeThinkingLevel(agent.thinking, availableLevels);
+  });
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(agent.mode);
   const [todos, setTodos] = useState<Todo[]>(() => agent.getTodos());
   const [goalLine, setGoalLine] = useState("");

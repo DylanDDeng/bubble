@@ -37,6 +37,22 @@ describe("read tool", () => {
     const result = await tool.execute({ path: "lines.txt", offset: 2, limit: 2 }, { cwd: tmpDir });
 
     expect(result.content).toBe("line2\nline3");
+    // Range metadata lets the subagent tool-note summarizer distinguish paged reads.
+    expect(result.metadata?.offset).toBe(2);
+    expect(result.metadata?.lines).toBe(2);
+    expect(result.metadata?.total).toBe(5);
+  });
+
+  it("reports a full read as offset 1 spanning every line", async () => {
+    const file = join(tmpDir, "whole.txt");
+    writeFileSync(file, "a\nb\nc", "utf-8");
+
+    const tool = createReadTool(tmpDir);
+    const result = await tool.execute({ path: "whole.txt" }, { cwd: tmpDir });
+
+    expect(result.metadata?.offset).toBe(1);
+    expect(result.metadata?.lines).toBe(3);
+    expect(result.metadata?.total).toBe(3);
   });
 
   it("returns error for non-existent file", async () => {
