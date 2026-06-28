@@ -3,6 +3,7 @@ import { Box, Static, Text, measureElement, type DOMElement } from "ink";
 import { useTheme, type Theme } from "./theme.js";
 import { highlightCode, inferLang } from "./code-highlight.js";
 import { MarkdownContent, StreamingMarkdown } from "./markdown.js";
+import { visualWidth, graphemeWidth, ambiguousIsWide } from "./width.js";
 import {
   userInputStatusBadgeLabel,
   type DisplayMessage,
@@ -540,10 +541,14 @@ function TimelineText({
   // half-typed block until it closes, so partial markup never flashes.
   const visible = sanitizeInternalReminderBlocks(content);
   if (!visible.trim()) return null;
-  // marginLeft (2) + "●  " marker (3 visual cells) = 5 cells consumed by the
-  // timeline gutter; pass the remaining width so wide blocks like tables size
-  // themselves against the actual content area instead of the raw terminal.
-  const available = terminalColumns ? Math.max(20, terminalColumns - 5) : undefined;
+  // Timeline gutter = marginLeft (2) + "●  " marker. The ● (U+25CF) is itself
+  // an ambiguous-width glyph, so the marker is 3 cells on a narrow terminal but
+  // 4 on an ambiguous-wide one — Ink lays it out as 3 either way (it measures
+  // ●=1), so on a wide terminal the first line of every message gets shoved 1
+  // cell right and would overflow. Reserve that extra cell up front so the
+  // pre-wrap never packs a line the terminal then hard-wraps.
+  const gutter = ambiguousIsWide() ? 6 : 5;
+  const available = terminalColumns ? Math.max(20, terminalColumns - gutter) : undefined;
   const trimmed = visible.trim();
   return (
     <Box marginLeft={2} marginTop={compactTop ? 0 : 1}>
@@ -1728,7 +1733,7 @@ function truncateVisual(str: string, maxWidth: number): string {
   let out = "";
   let width = 0;
   for (const char of str) {
-    const w = charVisualWidth(char);
+    const w = graphemeWidth(char);
     if (width + w > maxWidth) break;
     out += char;
     width += w;
@@ -1736,42 +1741,9 @@ function truncateVisual(str: string, maxWidth: number): string {
   return out;
 }
 
-function visualWidth(str: string): number {
-  let width = 0;
-  for (const char of str) {
-    const code = char.codePointAt(0) || 0;
-    if (
-      (code >= 0x4e00 && code <= 0x9fff) ||
-      (code >= 0x3000 && code <= 0x303f) ||
-      (code >= 0xff00 && code <= 0xffef) ||
-      (code >= 0x3040 && code <= 0x309f) ||
-      (code >= 0x30a0 && code <= 0x30ff)
-    ) {
-      width += 2;
-    } else {
-      width += 1;
-    }
-  }
-  return width;
-}
-
 function padVisual(str: string, width: number): string {
   const currentWidth = visualWidth(str);
   return str + " ".repeat(Math.max(0, width - currentWidth));
-}
-
-function charVisualWidth(char: string): number {
-  const code = char.codePointAt(0) || 0;
-  if (
-    (code >= 0x4e00 && code <= 0x9fff) ||
-    (code >= 0x3000 && code <= 0x303f) ||
-    (code >= 0xff00 && code <= 0xffef) ||
-    (code >= 0x3040 && code <= 0x309f) ||
-    (code >= 0x30a0 && code <= 0x30ff)
-  ) {
-    return 2;
-  }
-  return 1;
 }
 
 function wrapByVisualWidth(line: string, maxWidth: number): string[] {
@@ -1781,7 +1753,7 @@ function wrapByVisualWidth(line: string, maxWidth: number): string[] {
   let current = "";
   let currentWidth = 0;
   for (const char of line) {
-    const w = charVisualWidth(char);
+    const w = graphemeWidth(char);
     if (currentWidth + w > maxWidth) {
       result.push(current);
       current = char;

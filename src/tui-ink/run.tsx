@@ -115,6 +115,11 @@ export async function runTui(
   // forget — CodeBlock's lazy init falls back to raw lines if this isn't ready
   // yet, so callers don't need to await it.
   warmHighlighter();
+  // NOTE: the CSI 6n ambiguous-width probe is intentionally NOT run here. Doing
+  // raw-mode stdin I/O before Ink mounts left stdin in a state Bun's TTY compat
+  // didn't hand cleanly back to Ink, swallowing all composer keystrokes. The
+  // verdict now comes from `BUBBLE_AMBIGUOUS_WIDTH` / locale only (see width.ts);
+  // a safe Ink-mounted probe can be reintroduced later behind a flag.
   let exitSummary: ExitSummary | undefined;
   const onFatalError = (err: unknown) => {
     restoreTerminal();

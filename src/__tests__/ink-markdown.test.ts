@@ -1,5 +1,34 @@
 import { describe, expect, it } from "vitest";
-import { parseMarkdownBlocks, parseMarkdownInlineSegments } from "../tui-ink/markdown.js";
+import { parseMarkdownBlocks, parseMarkdownInlineSegments, splitListItem } from "../tui-ink/markdown.js";
+
+describe("splitListItem — hanging-indent detection", () => {
+  it("detects bullet and ordered markers with their hanging-indent width", () => {
+    expect(splitListItem("- Claude 分支：永远渲染")).toEqual({
+      prefix: "- ",
+      content: "Claude 分支：永远渲染",
+      indent: 2,
+    });
+    expect(splitListItem("1. **Hook** (useComposerAgentSelection.ts)")).toEqual({
+      prefix: "1. ",
+      content: "**Hook** (useComposerAgentSelection.ts)",
+      indent: 3,
+    });
+    expect(splitListItem("2) item")?.prefix).toBe("2) ");
+  });
+
+  it("includes leading whitespace of nested items in the indent", () => {
+    const nested = splitListItem("    - 嵌套项");
+    expect(nested?.prefix).toBe("    - ");
+    expect(nested?.indent).toBe(6);
+  });
+
+  it("ignores non-list lines (no false positives)", () => {
+    expect(splitListItem("普通段落，不是列表。")).toBeNull();
+    expect(splitListItem("1.5x 不是有序列表")).toBeNull(); // no space after marker
+    expect(splitListItem("-没有空格")).toBeNull();
+    expect(splitListItem("- ")).toBeNull(); // empty item content
+  });
+});
 
 describe("Ink markdown renderer parsing", () => {
   it("parses bold and inline code without leaking raw markers", () => {

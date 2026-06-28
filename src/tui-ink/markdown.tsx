@@ -5,7 +5,7 @@
 
 import React from "react";
 import { Box, Text } from "ink";
-import stringWidth from "string-width";
+import { visualWidth, graphemeWidth } from "./width.js";
 import { useTerminalSize } from "./use-terminal-size.js";
 import { useTheme } from "./theme.js";
 import { highlightCode, highlightCodeSync } from "./code-highlight.js";
@@ -257,15 +257,6 @@ function normalizeTableRow(row: string[], colCount: number): string[] {
   return normalized;
 }
 
-function visualWidth(str: string): number {
-  if (!str) return 0;
-  return stringWidth(str);
-}
-
-function graphemeWidth(grapheme: string): number {
-  if (!grapheme) return 0;
-  return stringWidth(grapheme);
-}
 
 // Inline formatting: bold, italic, inline code
 export function parseMarkdownInlineSegments(text: string, style: InlineStyle = {}): MarkdownInlineSegment[] {
@@ -640,13 +631,46 @@ export function wrapInlineSegments(
     }
   }
 
+  // CJK line-break rules (禁則処理 / kinsoku): a closing bracket or a trailing
+  // punctuation mark must never begin a wrapped line (避头), and an opening
+  // bracket must never end one (避尾). Otherwise a line that fills up right
+  // before "）。" pushes that lone punctuation onto the next row — the jarring
+  // orphaned "）。" at the left margin. Glue each such mark to the chunk it must
+  // stay with, so the pair wraps as one unit (and may move down together).
+  const noStartGlyph = (g: string) => /^[、，。．！？；：）)〕】｝」』》〉…―ー]$/.test(g);
+  const noEndGlyph = (g: string) => /^[（(〔【｛「『《〈]$/.test(g);
+  const soleGlyph = (c: Chunk) => (c.cells.length === 1 ? c.cells[0].grapheme : "");
+  const isSpaceChunk = (c: Chunk) => c.cells[0]?.grapheme === " ";
+
+  const glued: Chunk[] = [];
+  for (const chunk of chunks) {
+    const g = soleGlyph(chunk);
+    const prev = glued[glued.length - 1];
+    if (g && noStartGlyph(g) && prev && !isSpaceChunk(prev)) {
+      prev.cells.push(...chunk.cells);
+      prev.width += chunk.width;
+      prev.breakAfter = chunk.breakAfter; // inherit the mark's own break behavior
+    } else {
+      glued.push({ cells: [...chunk.cells], width: chunk.width, breakAfter: chunk.breakAfter });
+    }
+  }
+  for (let k = glued.length - 2; k >= 0; k--) {
+    const g = soleGlyph(glued[k]);
+    if (g && noEndGlyph(g) && !isSpaceChunk(glued[k + 1])) {
+      const next = glued[k + 1];
+      next.cells.unshift(...glued[k].cells);
+      next.width += glued[k].width;
+      glued.splice(k, 1);
+    }
+  }
+
   const lines: StyledCell[][] = [];
   let line: StyledCell[] = [];
   let lineWidth = 0;
   const flush = () => { lines.push(line); line = []; lineWidth = 0; };
 
-  for (let j = 0; j < chunks.length; j++) {
-    const chunk = chunks[j];
+  for (let j = 0; j < glued.length; j++) {
+    const chunk = glued[j];
     const isSpace = chunk.cells[0]?.grapheme === " ";
 
     if (isSpace) {
@@ -663,8 +687,8 @@ export function wrapInlineSegments(
     if (lineWidth + chunk.width <= maxWidth) {
       line.push(...chunk.cells);
       lineWidth += chunk.width;
-      if (chunk.breakAfter && j < chunks.length - 1) {
-        const nextChunk = chunks[j + 1];
+      if (chunk.breakAfter && j < glued.length - 1) {
+        const nextChunk = glued[j + 1];
         const nextIsSpace = nextChunk.cells[0]?.grapheme === " ";
         if (!nextIsSpace && lineWidth + nextChunk.width > maxWidth) flush();
       }
@@ -762,6 +786,19 @@ export function StreamingMarkdown({
   );
 }
 
+// A markdown list item: optional indent, a bullet (-, *, +) or ordered marker
+// (1. / 2)), then whitespace, then the item text. The captured prefix is
+// rendered in its own fixed column so wrapped continuation lines hang-indent
+// under the item text instead of collapsing back to the left margin.
+const LIST_ITEM_RE = /^(\s*)([-*+]|\d{1,9}[.)])(\s+)(\S.*)$/;
+
+export function splitListItem(line: string): { prefix: string; content: string; indent: number } | null {
+  const m = LIST_ITEM_RE.exec(line);
+  if (!m) return null;
+  const prefix = m[1] + m[2] + m[3];
+  return { prefix, content: m[4], indent: visualWidth(prefix) };
+}
+
 export function MarkdownContent({
   content,
   maxWidth,
@@ -787,9 +824,26 @@ export function MarkdownContent({
         }
         return (
           <Box key={i} flexDirection="column" marginBottom={1}>
-            {block.lines.map((line, li) => (
-              <InlineText key={li} text={line} maxWidth={maxWidth} />
-            ))}
+            {block.lines.map((line, li) => {
+              const item = splitListItem(line);
+              if (item) {
+                // Marker in a non-shrinking column; the item text flows in a
+                // flex column to its right so every wrapped row aligns under it.
+                const contentWidth =
+                  maxWidth !== undefined ? Math.max(4, maxWidth - item.indent) : undefined;
+                return (
+                  <Box key={li} flexDirection="row">
+                    <Box flexShrink={0}>
+                      <Text>{item.prefix}</Text>
+                    </Box>
+                    <Box flexDirection="column" flexGrow={1}>
+                      <InlineText text={item.content} maxWidth={contentWidth} />
+                    </Box>
+                  </Box>
+                );
+              }
+              return <InlineText key={li} text={line} maxWidth={maxWidth} />;
+            })}
           </Box>
         );
       })}

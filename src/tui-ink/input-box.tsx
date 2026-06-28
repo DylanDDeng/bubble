@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useCursor, useInput, usePaste, useStdout, type DOMElement } from "ink";
-import stringWidth from "string-width";
+import { visualWidth, graphemeWidth } from "./width.js";
 import { appendFileSync } from "node:fs";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import type { SkillRegistry } from "../skills/registry.js";
@@ -193,7 +193,8 @@ type VisualLine = {
 };
 
 // Break a logical line into segments that each fit within `maxWidth` display
-// columns. Uses string-width so CJK and emoji wrap correctly; empty lines
+// columns. Uses the shared terminal-aware width (./width.js) so CJK, emoji and
+// ambiguous-width chars wrap exactly as the terminal renders them; empty lines
 // still produce one empty segment so cursors on blank lines render.
 function wrapLineByWidth(line: string, maxWidth: number): string[] {
   if (line.length === 0) return [""];
@@ -201,7 +202,7 @@ function wrapLineByWidth(line: string, maxWidth: number): string[] {
   let current = "";
   let currentWidth = 0;
   for (const ch of line) {
-    const w = stringWidth(ch);
+    const w = graphemeWidth(ch);
     if (currentWidth + w > maxWidth && current.length > 0) {
       out.push(current);
       current = "";
@@ -241,7 +242,7 @@ function cursorToVisual(visualLines: VisualLine[], cursor: number): { row: numbe
   }
   const vl = visualLines[row];
   const charOffset = Math.max(0, cursor - vl.absStart);
-  return { row, col: stringWidth(vl.text.slice(0, charOffset)) };
+  return { row, col: visualWidth(vl.text.slice(0, charOffset)) };
 }
 
 // Map a (visualRow, visualCol) target back to a source-text cursor index.
@@ -253,7 +254,7 @@ function visualToCursor(visualLines: VisualLine[], row: number, col: number): nu
   let width = 0;
   let charOffset = 0;
   for (const ch of vl.text) {
-    const w = stringWidth(ch);
+    const w = graphemeWidth(ch);
     if (width + w > col) break;
     width += w;
     charOffset += ch.length;
@@ -1337,7 +1338,7 @@ export function InputBox({
   const moreBelow = totalLines - scrollOffset - visibleLines;
 
   const filledLine = (value: string) => {
-    const visibleWidth = stringWidth(value);
+    const visibleWidth = visualWidth(value);
     return value + " ".repeat(Math.max(0, contentWidth - visibleWidth));
   };
 
@@ -1378,7 +1379,7 @@ export function InputBox({
               : undefined,
           });
           const renderedLine = renderedSegments.map((segment) => segment.text).join("");
-          const fill = " ".repeat(Math.max(0, lineWidth - stringWidth(renderedLine)));
+          const fill = " ".repeat(Math.max(0, lineWidth - visualWidth(renderedLine)));
           return (
             <Box
               key={visualIdx}
