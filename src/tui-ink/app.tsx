@@ -13,6 +13,7 @@ import {
   type SubmitPayload,
 } from "./input-box.js";
 import { MessageList } from "./message-list.js";
+import { isMultiplexedTerminal } from "./terminal-env.js";
 import {
   appendTextPart,
   appendToolPart,
@@ -1434,7 +1435,14 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
                 if (steer) {
                   pendingSteersRef.current.delete(event.id);
                   setPendingSteerCount(pendingSteersRef.current.size);
-                  resetTranscript((prev) => moveStatusMessageToEnd(prev, steer.displayKey));
+                  // Moving the steer placeholder out of the live region into
+                  // <Static> is a pure append (it was never in the settled list,
+                  // only the dynamic block). Off a multiplexer Ink erases the
+                  // vacated live rows in place, so a plain append avoids the
+                  // full-screen reprint flash. Under tmux/screen the in-place
+                  // erase can't reach scrolled rows, so keep the clean reprint.
+                  const commit = isMultiplexedTerminal() ? resetTranscript : updateDisplayMessages;
+                  commit((prev) => moveStatusMessageToEnd(prev, steer.displayKey));
                 }
                 break;
               }
@@ -1484,7 +1492,23 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
           commitAssistantMessage();
           if (err instanceof AgentAbortError || err?.name === "AbortError") {
             runCancelled = true;
-            resetTranscript(() => reconstructDisplayMessages(agent.messages));
+            // commitAssistantMessage already appended the partial answer; the
+            // interrupt is otherwise a pure append (the partial + a "Interrupted"
+            // row). Off a multiplexer, append just the interrupt row so settled
+            // history is never reprinted — no flash. Under tmux/screen, fall back
+            // to the full reprint that rebuilds from the canonical agent.messages.
+            if (isMultiplexedTerminal()) {
+              resetTranscript(() => reconstructDisplayMessages(agent.messages));
+            } else {
+              updateDisplayMessages((prev) => [
+                ...prev,
+                withMessageKey({
+                  role: "assistant",
+                  content: "Interrupted by user",
+                  syntheticKind: "ui_interrupt",
+                }),
+              ]);
+            }
           } else {
             runErrored = true;
             updateDisplayMessages((prev) => [
