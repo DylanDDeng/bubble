@@ -128,14 +128,10 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
     });
   }
 
-  // Request timeout: default is NO TIMEOUT (safe for streaming APIs where the
-  // model sends chunks continuously). Operators can set a positive integer to
-  // enforce a ceiling if needed (e.g., for fail-fast in CI environments).
-  const timeoutMs = parsePositiveInt(process.env.BUBBLE_PROVIDER_REQUEST_TIMEOUT_MS);
   const client = new OpenAI({
     apiKey: options.apiKey,
     baseURL: options.baseURL,
-    timeout: timeoutMs ?? Number.MAX_SAFE_INTEGER,  // default: no timeout
+    timeout: resolveRequestTimeoutMs(process.env.BUBBLE_PROVIDER_REQUEST_TIMEOUT_MS),
   });
 
   const fallbackModel = "gpt-4o";
@@ -793,6 +789,25 @@ function parsePositiveInt(raw: string | undefined): number | undefined {
   if (!raw?.trim()) return undefined;
   const value = Number(raw);
   return Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+/** Largest value Node's 32-bit timers accept; ~24.8 days. */
+export const MAX_TIMER_MS = 2_147_483_647; // 2**31 - 1
+
+/**
+ * Resolve the provider request timeout (ms) from the operator override.
+ *
+ * Default is effectively NO TIMEOUT — safe for streaming APIs where the model
+ * sends chunks continuously. But Node's timers are 32-bit: a duration above
+ * 2**31-1 ms overflows, which makes Node print a TimeoutOverflowWarning to
+ * stderr (corrupting the Ink TUI) AND silently clamp the timeout to 1ms,
+ * aborting the request almost immediately. So we use the largest SAFE timer
+ * value as the "no timeout" sentinel — never Number.MAX_SAFE_INTEGER — and
+ * clamp any operator-supplied value into range too.
+ */
+export function resolveRequestTimeoutMs(raw: string | undefined): number {
+  const requested = parsePositiveInt(raw);
+  return Math.min(requested ?? MAX_TIMER_MS, MAX_TIMER_MS);
 }
 
 function mergeStreamingText(current: string, incoming: string, mode: ToolArgsMergeMode): { args: string; delta: string } {
