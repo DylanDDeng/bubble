@@ -226,6 +226,8 @@ export interface ToolContext {
         profile: import("./agent/profiles.js").AgentProfile;
         parentToolCallId: string;
         category?: string;
+        model?: string;
+        effort?: ThinkingLevel;
         route?: import("./agent/categories.js").ResolvedSubagentRoute;
         approval?: "fail" | "disabled";
         description?: string;
@@ -256,6 +258,8 @@ export interface ToolContext {
       options: {
         profile: import("./agent/profiles.js").AgentProfile;
         category?: string;
+        model?: string;
+        effort?: ThinkingLevel;
         promptTemplate: string;
         items: string[];
         parentToolCallId: string;
@@ -264,12 +268,43 @@ export interface ToolContext {
         approval?: "fail" | "disabled";
       },
     ) => Promise<import("./agent/subagent-control.js").SubagentThreadSnapshot[]>;
+    runAgentBatch?: (
+      cwd: string,
+      options: {
+        specs: Array<{
+          task: string;
+          profile: import("./agent/profiles.js").AgentProfile;
+          category?: string;
+          model?: string;
+          effort?: ThinkingLevel;
+          outputSchema?: unknown;
+        }>;
+        parentToolCallId: string;
+        emitUpdate?: (update: ToolUpdate) => void;
+        abortSignal?: AbortSignal;
+        approval?: "fail" | "disabled";
+      },
+    ) => Promise<import("./agent/subagent-control.js").SubagentThreadSnapshot[]>;
+    startWorkflow?: (
+      cwd: string,
+      options: { script: string; args?: unknown; title?: string; parentToolCallId: string; abortSignal?: AbortSignal },
+    ) => { runId: string; title: string };
+    waitWorkflow?: (
+      runId: string,
+      timeoutMs?: number,
+    ) => Promise<import("./agent/workflow/control.js").WorkflowRunSnapshot | undefined>;
   };
   emitUpdate?: (update: ToolUpdate) => void;
 }
 
 export interface ToolRegistryEntry extends ToolDefinition {
   execute: ToolExecutor;
+  /**
+   * Optional per-child isolation hook: returns a fresh instance with its own
+   * mutable state (e.g. a FileStateTracker) so concurrent subagents in a
+   * fan-out never share it (design v2 §2). Tools without it are shared as-is.
+   */
+  cloneForChild?: () => ToolRegistryEntry;
   /** Optional one-line summary for the Available tools section. */
   promptSnippet?: string;
   /** Optional tool-specific rules appended to the system prompt when this tool is active. */

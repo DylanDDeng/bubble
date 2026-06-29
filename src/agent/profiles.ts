@@ -88,6 +88,9 @@ const SUBAGENT_DENY_TOOLS = new Set([
   "close_agent",
   "list_agents",
   "agent_team",
+  "agent_batch",
+  "run_workflow",
+  "wait_workflow",
 ]);
 
 const DEFAULT_NICKNAME_CANDIDATES = [

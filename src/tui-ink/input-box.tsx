@@ -59,6 +59,12 @@ interface InputBoxProps {
   onQueue?: (payload: SubmitPayload) => void;
   onPasteNotice?: (notice: string) => void;
   disabled?: boolean;
+  /**
+   * Called when Down is pressed at the bottom edge with nothing newer in
+   * history — the parent uses this to move focus out of the composer (e.g. into
+   * the subagent entry), matching Claude Code's ↓-to-focus-the-task-panel.
+   */
+  onArrowDownAtBottom?: () => void;
   cursorResetEpoch?: number;
   draftText?: string;
   draftEpoch?: number;
@@ -483,6 +489,7 @@ export function InputBox({
   onQueue,
   onPasteNotice,
   disabled,
+  onArrowDownAtBottom,
   cursorResetEpoch = 0,
   draftText,
   draftEpoch = 0,
@@ -1167,6 +1174,10 @@ export function InputBox({
       setSelectedIndex(0);
       setPastedContentRefs([]);
       nextPastedContentIndexRef.current = 1;
+    } else if (direction === "down") {
+      // At the bottom edge with nothing newer in history: hand Down to the
+      // parent so focus can move into the subagent entry (Claude Code parity).
+      onArrowDownAtBottom?.();
     }
   };
   const classifyVerticalArrow = (direction: "up" | "down") => {

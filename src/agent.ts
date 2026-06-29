@@ -30,10 +30,13 @@ import {
   type HookRunRequest,
 } from "./hooks/index.js";
 import { createDefaultHooks } from "./orchestrator/default-hooks.js";
-import { mergeAgentCategories, resolveModelRoute, resolveSubagentRoute, type AgentCategoriesConfig, type ResolvedSubagentRoute } from "./agent/categories.js";
+import { mergeAgentCategories, parseThinkingLevel, resolveModelRoute, resolveSubagentRoute, type AgentCategoriesConfig, type ResolvedSubagentRoute } from "./agent/categories.js";
+import { appendOutputSchemaInstructions, buildSchemaCorrectionPrompt, validateStructuredSummary } from "./agent/structured-output.js";
+import { runWorkflow, WorkflowConcurrencyGate, type AgentDispatchResult, type WorkflowAgentSpec } from "./agent/workflow/runtime.js";
+import { buildWorkflowDeliveryNotice, type WorkflowRunRecord, type WorkflowRunSnapshot } from "./agent/workflow/control.js";
 import { getSubtaskPolicy, type SubtaskType } from "./agent/subtask-policy.js";
 import { BudgetLedger, childHardCap, composeAbortSignals, computeChildTokenCap, DEFAULT_CHILD_TOKEN_CAP, PARENT_POOL_RESERVE_RATIO } from "./agent/budget-ledger.js";
-import { assignAgentNickname, builtinAgentProfiles, mergeUsage, selectToolsForAgentProfile, validateAgentProfileTools, type AgentProfile, type SubagentRunResult } from "./agent/profiles.js";
+import { assignAgentNickname, builtinAgentProfiles, discoverAgentProfiles, findAgentProfile, mergeUsage, selectToolsForAgentProfile, validateAgentProfileTools, type AgentProfile, type SubagentRunResult } from "./agent/profiles.js";
 import { snapshotSubagentThread, subagentResultFromThread, type PendingSubagentToolUpdate, type SubagentFinalReason, type SubagentThreadRecord, type SubagentThreadSnapshot } from "./agent/subagent-control.js";
 import { SubagentStore } from "./agent/subagent-store.js";
 import { SubagentScheduler, type SubagentRunOutcome } from "./agent/subagent-scheduler.js";
@@ -41,7 +44,7 @@ import { ChildRunner, classifySubagentAbortReason, type ChildRunOptions } from "
 import { ResultIntegrator } from "./agent/result-integrator.js";
 import { AgentAbortError, EMPTY_ASSISTANT_FALLBACK, SubagentAbortError } from "./agent/abort-errors.js";
 import { createSubagentWorktree, finalizeSubagentWorktree } from "./agent/worktree.js";
-import { createWorktreeChildTools } from "./tools/child-tools.js";
+import { createWorktreeChildTools, isolateReadonlyChildFileTools } from "./tools/child-tools.js";
 import { type RateLimitPolicy } from "./network/errors.js";
 import { isHiddenToolResult } from "./agent/discovery-barrier.js";
 import {
@@ -215,6 +218,10 @@ export class Agent {
   private readonly subagentScheduler: SubagentScheduler;
   private readonly childRunner: ChildRunner;
   private readonly resultIntegrator = new ResultIntegrator();
+  /** Background dynamic-workflow runs (option C Phase 4), keyed by runId. */
+  private readonly workflowRuns = new Map<string, WorkflowRunRecord>();
+  /** runIds whose completed result should be ingested at the next turn. */
+  private readonly pendingWorkflowDeliveries = new Set<string>();
   private subagentsConfig: AgentSubagentRuntimeConfig;
   private readonly rateLimitPolicy?: RateLimitPolicy;
   private pendingSubagentUpdates: PendingSubagentToolUpdate[] = [];
@@ -286,8 +293,12 @@ export class Agent {
             record.toolNotes.push(`worktree: changes left in ${record.worktree.path} — review the diff before applying`);
           }
         }
-        this.subagentStore.persist(record);
-        this.maybeEnqueueIngestion(record, options);
+        // Workflow-internal agents are not persisted (they never re-import into
+        // the store on restart) and never ingest into parent context (option C).
+        if (!record.workflowInternal) {
+          this.subagentStore.persist(record);
+          this.maybeEnqueueIngestion(record, options);
+        }
       },
     });
 
@@ -680,6 +691,7 @@ export class Agent {
       // Background child completions surface before the next inference turn
       // without requiring a wait_agent call (design §5).
       this.flushSubagentIngestions();
+      this.flushWorkflowDeliveries();
       for (const update of this.drainSubagentToolUpdates()) yield emit(update);
       for (const event of await applyPendingInputs()) yield emit(event);
       yield emit({ type: "turn_start" });
@@ -1659,6 +1671,8 @@ export class Agent {
       profile: AgentProfile;
       parentToolCallId: string;
       category?: string;
+      model?: string;
+      effort?: ThinkingLevel;
       route?: ResolvedSubagentRoute;
       approval?: "fail" | "disabled";
       description?: string;
@@ -1671,7 +1685,7 @@ export class Agent {
       task: typeof input === "string" ? input : "(multimodal task)",
       parentToolCallId: options.parentToolCallId,
       parentToolName: "spawn_agent",
-      route: options.route ?? this.resolveRouteForSubagent(options.profile, options.category),
+      route: options.route ?? this.resolveRouteForSubagent(options.profile, options.category, { model: options.model, effort: options.effort }),
     });
     this.subagentStore.set(record);
     const approval = options.approval ?? record.profile.approval;
@@ -1789,7 +1803,9 @@ export class Agent {
   }
 
   listSubAgents(): SubagentThreadSnapshot[] {
-    return this.subagentStore.values().map((record) => this.snapshotSubagent(record));
+    return this.subagentStore.values()
+      .filter((record) => !record.workflowInternal)
+      .map((record) => this.snapshotSubagent(record));
   }
 
   /**
@@ -1802,6 +1818,8 @@ export class Agent {
     options: {
       profile: AgentProfile;
       category?: string;
+      model?: string;
+      effort?: ThinkingLevel;
       promptTemplate: string;
       items: string[];
       parentToolCallId: string;
@@ -1831,7 +1849,7 @@ export class Agent {
     }
 
     const approval = options.approval ?? options.profile.approval;
-    const route = this.resolveRouteForSubagent(options.profile, options.category);
+    const route = this.resolveRouteForSubagent(options.profile, options.category, { model: options.model, effort: options.effort });
     const records = options.items.map((item) => this.createSubagentThreadRecord({
       profile: options.profile,
       task: options.promptTemplate.split("{{item}}").join(item),
@@ -1864,6 +1882,378 @@ export class Agent {
     // The aggregated reply carries every member's full summary.
     for (const record of records) this.subagentStore.markDelivered(record.agentId);
     return records.map((record) => this.snapshotSubagent(record));
+  }
+
+  /**
+   * Heterogeneous fan-out (design v2 §1.3): N independent specs, each with its
+   * own task, profile, and per-call model/effort, dispatched concurrently as a
+   * SINGLE tool call. Unlike runAgentTeam (one template over N items), members
+   * differ. Like the team, every member goes through the same scheduler
+   * dispatch and the tool blocks until all are final, returning in spec order.
+   * Keeping fan-out inside one tool call (rather than N parallel spawn_agent
+   * tool_calls) avoids the provider parallel-tool_call bug (Kimi 400 / lost
+   * responses).
+   */
+  async runAgentBatch(
+    cwd: string,
+    options: {
+      specs: Array<{
+        task: string;
+        profile: AgentProfile;
+        category?: string;
+        model?: string;
+        effort?: ThinkingLevel;
+        outputSchema?: unknown;
+      }>;
+      parentToolCallId: string;
+      emitUpdate?: (update: ToolUpdate) => void;
+      abortSignal?: AbortSignal;
+      approval?: "fail" | "disabled";
+    },
+  ): Promise<SubagentThreadSnapshot[]> {
+    // Budget pre-check mirrors runAgentTeam: members × per-member cap must fit
+    // in what remains of a limited pool after the parent's reserve.
+    const limit = this.budgetLedger?.poolLimit;
+    if (this.budgetLedger && limit !== undefined) {
+      const reserve = Math.floor(limit * PARENT_POOL_RESERVE_RATIO);
+      const available = Math.max(0, (this.budgetLedger.remaining() ?? 0) - reserve);
+      const memberCap = this.subagentsConfig.childTokenCap ?? DEFAULT_CHILD_TOKEN_CAP;
+      const affordable = Math.floor(available / memberCap);
+      if (options.specs.length > affordable) {
+        throw new Error([
+          `agent_batch rejected: the remaining token budget affords at most ${affordable} member${affordable === 1 ? "" : "s"}`,
+          `but ${options.specs.length} were requested. Reduce specs or run smaller batches sequentially.`,
+        ].join(" "));
+      }
+    }
+
+    const records = options.specs.map((spec) => {
+      const approval = options.approval ?? spec.profile.approval;
+      const task = spec.outputSchema !== undefined
+        ? appendOutputSchemaInstructions(spec.task, spec.outputSchema)
+        : spec.task;
+      const record = this.createSubagentThreadRecord({
+        profile: spec.profile,
+        task,
+        parentToolCallId: options.parentToolCallId,
+        parentToolName: "agent_batch",
+        route: this.resolveRouteForSubagent(spec.profile, spec.category, { model: spec.model, effort: spec.effort }),
+      });
+      return { record, approval, spec };
+    });
+
+    const promises = records.map(({ record, approval }) => {
+      this.subagentStore.set(record);
+      const admissionError = this.admitSubagentProfile(record, approval);
+      if (admissionError) {
+        this.finalizeSubagentBlocked(record, admissionError, { directEmit: options.emitUpdate });
+        return Promise.resolve();
+      }
+      record.promise = this.dispatchSubagentRun(record, record.task, cwd, {
+        approval,
+        abortSignal: options.abortSignal,
+        directEmit: options.emitUpdate,
+      });
+      void record.promise.finally(() => this.subagentStore.notifyWaiters(record));
+      return record.promise;
+    });
+
+    await Promise.all(promises);
+
+    // Structured-output validation + one corrective retry (design v2 §1.2):
+    // a member whose schema'd summary does not validate gets a single
+    // send_input correction, reusing the existing resume path.
+    for (const { record, spec } of records) {
+      if (spec.outputSchema === undefined) continue;
+      if (record.status !== "completed") continue;
+      if (validateStructuredSummary(record.summary, spec.outputSchema).ok) continue;
+      const correction = buildSchemaCorrectionPrompt(spec.outputSchema, record.summary);
+      try {
+        await this.sendSubAgentInput(record.agentId, correction, cwd, { abortSignal: options.abortSignal });
+        await record.promise?.catch(() => undefined);
+      } catch {
+        // resume failed; leave the original summary and surface the mismatch below
+      }
+    }
+
+    for (const { record } of records) this.subagentStore.markDelivered(record.agentId);
+    return records.map(({ record }) => this.snapshotSubagent(record));
+  }
+
+  /**
+   * Dynamic workflow (option C): runs an LLM-authored JS orchestration script in
+   * a QuickJS sandbox. Each agent() call in the script becomes a real scheduled
+   * subagent (same route resolution, ChildRunner, scheduler, schema validation
+   * as spawn_agent), so the script expresses deterministic control flow while
+   * the runtime keeps owning concurrency/budget/retry.
+   *
+   * Foreground entry point (used by `-p`/headless and tests): awaits to
+   * completion and returns the result. Background runs go through startWorkflow.
+   */
+  async runWorkflow(
+    cwd: string,
+    options: {
+      script: string;
+      args?: unknown;
+      parentToolCallId: string;
+      emitUpdate?: (update: ToolUpdate) => void;
+      abortSignal?: AbortSignal;
+    },
+  ): Promise<{ result: { ok: true; value: unknown } | { ok: false; error: string }; agentCount: number; logs: string[]; snapshots: SubagentThreadSnapshot[] }> {
+    return this.executeWorkflow(cwd, {
+      script: options.script,
+      args: options.args,
+      parentToolCallId: options.parentToolCallId,
+      abortSignal: options.abortSignal,
+      directEmit: options.emitUpdate,
+    });
+  }
+
+  /**
+   * Starts a workflow in the BACKGROUND (option C Phase 4): returns a runId
+   * immediately; the script runs detached, its agents stream progress through
+   * the queued channel (drained at turn boundaries like spawn_agent), and its
+   * result is ingested at the next turn. Collect explicitly with waitWorkflow.
+   */
+  startWorkflow(
+    cwd: string,
+    options: { script: string; args?: unknown; title?: string; parentToolCallId: string; abortSignal?: AbortSignal },
+  ): { runId: string; title: string } {
+    const runId = randomUUID();
+    const abortController = new AbortController();
+    const composed = composeAbortSignals([options.abortSignal, abortController.signal]);
+    if (composed) {
+      composed.addEventListener("abort", () => abortController.abort(composed.reason), { once: true });
+    }
+    const record: WorkflowRunRecord = {
+      runId,
+      title: options.title ?? "workflow",
+      status: "running",
+      agentCount: 0,
+      snapshots: [],
+      logs: [],
+      abortController,
+      waiters: new Set(),
+      createdAt: Date.now(),
+      parentToolCallId: options.parentToolCallId,
+    };
+    this.workflowRuns.set(runId, record);
+    record.promise = this.executeWorkflow(cwd, {
+      script: options.script,
+      args: options.args,
+      parentToolCallId: options.parentToolCallId,
+      abortSignal: abortController.signal,
+      queueUpdates: true,
+    }).then((out) => {
+      record.agentCount = out.agentCount;
+      record.snapshots = out.snapshots;
+      record.logs = out.logs;
+      record.result = out.result;
+      record.status = out.result.ok ? "completed" : (abortController.signal.aborted ? "cancelled" : "failed");
+    }, (error: any) => {
+      record.result = { ok: false, error: error?.message || String(error) };
+      record.status = "failed";
+    }).finally(() => {
+      record.updatedAt = Date.now();
+      this.pendingWorkflowDeliveries.add(runId);
+      for (const waiter of record.waiters) waiter();
+      record.waiters.clear();
+    });
+    return { runId, title: record.title };
+  }
+
+  /** Blocks until a background workflow reaches a final state (or times out). */
+  async waitWorkflow(runId: string, timeoutMs?: number): Promise<WorkflowRunSnapshot | undefined> {
+    const record = this.workflowRuns.get(runId);
+    if (!record) return undefined;
+    if (record.status === "running") {
+      const limit = normalizeWaitTimeout(timeoutMs);
+      let waiter: (() => void) | undefined;
+      await Promise.race([
+        new Promise<void>((resolve) => { waiter = resolve; record.waiters.add(resolve); }),
+        new Promise<void>((resolve) => setTimeout(resolve, limit)),
+      ]).finally(() => { if (waiter) record.waiters.delete(waiter); });
+    }
+    if (record.status !== "running") this.pendingWorkflowDeliveries.delete(runId);
+    return this.snapshotWorkflow(record);
+  }
+
+  /** Cancels a running background workflow. */
+  closeWorkflow(runId: string): WorkflowRunSnapshot | undefined {
+    const record = this.workflowRuns.get(runId);
+    if (!record) return undefined;
+    if (record.status === "running") record.abortController.abort(new Error("workflow cancelled"));
+    return this.snapshotWorkflow(record);
+  }
+
+  listWorkflows(): WorkflowRunSnapshot[] {
+    return [...this.workflowRuns.values()].map((record) => this.snapshotWorkflow(record));
+  }
+
+  private snapshotWorkflow(record: WorkflowRunRecord): WorkflowRunSnapshot {
+    return {
+      runId: record.runId,
+      title: record.title,
+      status: record.status,
+      agentCount: record.agentCount,
+      result: record.result,
+      logs: record.logs,
+      snapshots: record.snapshots,
+    };
+  }
+
+  /** Injects completed background-workflow results before the next turn (§5 analog). */
+  private flushWorkflowDeliveries(): void {
+    if (this.pendingWorkflowDeliveries.size === 0) return;
+    for (const runId of [...this.pendingWorkflowDeliveries]) {
+      this.pendingWorkflowDeliveries.delete(runId);
+      const record = this.workflowRuns.get(runId);
+      if (!record || record.status === "running" || record.deliveredAt) continue;
+      record.deliveredAt = Date.now();
+      this.injectSystemReminder(buildWorkflowDeliveryNotice(this.snapshotWorkflow(record)));
+    }
+  }
+
+  private async executeWorkflow(
+    cwd: string,
+    options: {
+      script: string;
+      args?: unknown;
+      parentToolCallId: string;
+      abortSignal?: AbortSignal;
+      directEmit?: (update: ToolUpdate) => void;
+      queueUpdates?: boolean;
+    },
+  ): Promise<{ result: { ok: true; value: unknown } | { ok: false; error: string }; agentCount: number; logs: string[]; snapshots: SubagentThreadSnapshot[] }> {
+    const profiles = discoverAgentProfiles(cwd, "both").profiles;
+    const runRecords: SubagentThreadRecord[] = [];
+    const logs: string[] = [];
+
+    // Per-run isolation (option C review): a token ceiling that aborts only this
+    // run (never the parent) and a concurrency sub-cap below the global limit so
+    // a workflow can't starve interactive subagents.
+    const poolLimit = this.budgetLedger?.poolLimit;
+    const runTokenCeiling = poolLimit !== undefined
+      ? Math.max(1, Math.floor(poolLimit * (1 - PARENT_POOL_RESERVE_RATIO)))
+      : Number.POSITIVE_INFINITY;
+    const runSpent = (): number => runRecords.reduce((sum, r) => sum + (r.usage ? r.usage.promptTokens + r.usage.completionTokens : 0), 0);
+    const interactiveReserve = 2;
+    const globalCap = Math.max(1, this.subagentsConfig.maxActiveSubagents ?? 8);
+    const workflowConcurrency = Math.max(1, globalCap - interactiveReserve);
+    const gate = new WorkflowConcurrencyGate(workflowConcurrency);
+
+    const dispatchAgent = async (spec: WorkflowAgentSpec): Promise<AgentDispatchResult> => {
+      if (runSpent() >= runTokenCeiling) {
+        return { ok: false, error: "workflow token ceiling reached; not launching more agents" };
+      }
+      const baseProfile = findAgentProfile(profiles, spec.opts.agentType ?? "default")
+        ?? findAgentProfile(profiles, "default");
+      if (!baseProfile) return { ok: false, error: "no default subagent profile available" };
+      // Workflow agents are readonly-by-default; mode upgrades come only from the
+      // profile, never from the script (security invariant).
+      const unsupported = baseProfile.mode !== "readonly" && baseProfile.mode !== "write_worktree";
+      if (unsupported) return { ok: false, error: `profile "${baseProfile.name}" mode ${baseProfile.mode} not supported` };
+      // Default-no-network: unattended orchestration of net-capable agents is new
+      // authority in aggregate (option C review), so strip web tools unless the
+      // script opts in with agentType pointing at a profile that includes them.
+      const profile: AgentProfile = {
+        ...baseProfile,
+        tools: { ...baseProfile.tools, exclude: [...(baseProfile.tools.exclude ?? []), "web_fetch", "web_search"] },
+      };
+
+      let route: ResolvedSubagentRoute;
+      try {
+        route = this.resolveRouteForSubagent(profile, spec.opts.category, {
+          model: spec.opts.model,
+          effort: parseThinkingLevel(spec.opts.effort),
+        });
+      } catch (error: any) {
+        return { ok: false, error: error?.message || String(error) };
+      }
+
+      const baseTask = spec.opts.schema !== undefined
+        ? appendOutputSchemaInstructions(spec.prompt, spec.opts.schema)
+        : spec.prompt;
+      const record = this.createSubagentThreadRecord({
+        profile,
+        task: baseTask,
+        parentToolCallId: options.parentToolCallId,
+        parentToolName: "run_workflow",
+        route,
+        workflowInternal: true,
+      });
+      runRecords.push(record);
+      this.subagentStore.set(record);
+      const admissionError = this.admitSubagentProfile(record, profile.approval);
+      if (admissionError) {
+        this.finalizeSubagentBlocked(record, admissionError, { directEmit: options.directEmit, queueUpdates: options.queueUpdates });
+        return { ok: false, error: admissionError };
+      }
+      // Leaf-only concurrency permit (option C review M5): held ONLY around this
+      // agent's dispatch, never across parallel/pipeline composition.
+      await gate.acquire();
+      try {
+        record.promise = this.dispatchSubagentRun(record, baseTask, cwd, {
+          approval: profile.approval,
+          abortSignal: options.abortSignal,
+          directEmit: options.directEmit,
+          queueUpdates: options.queueUpdates,
+        });
+        await record.promise;
+      } finally {
+        gate.release();
+      }
+      this.subagentStore.markDelivered(record.agentId);
+
+      if (record.status !== "completed") {
+        return { ok: false, error: record.error || `agent ${record.nickname} ended: ${record.finalReason ?? record.status}` };
+      }
+      if (spec.opts.schema === undefined) {
+        return { ok: true, value: record.summary };
+      }
+      // Structured output: validate, one corrective retry, then fall back to raw.
+      let validated = validateStructuredSummary(record.summary, spec.opts.schema);
+      if (!validated.ok) {
+        try {
+          await this.sendSubAgentInput(
+            record.agentId,
+            buildSchemaCorrectionPrompt(spec.opts.schema, record.summary),
+            cwd,
+            { abortSignal: options.abortSignal },
+          );
+          await record.promise?.catch(() => undefined);
+          validated = validateStructuredSummary(record.summary, spec.opts.schema);
+        } catch {
+          // resume failed; fall through to raw summary
+        }
+      }
+      return { ok: true, value: validated.ok ? validated.value : record.summary };
+    };
+
+    const result = await runWorkflow({
+      script: options.script,
+      args: options.args,
+      dispatchAgent,
+      onLog: (message) => logs.push(message),
+      onPhase: (title) => logs.push(`— phase: ${title} —`),
+      budget: {
+        total: this.budgetLedger?.poolLimit ?? null,
+        spent: () => runRecords.reduce((sum, r) => sum + (r.usage ? r.usage.promptTokens + r.usage.completionTokens : 0), 0),
+        remaining: () => {
+          const limit = this.budgetLedger?.poolLimit;
+          if (limit === undefined) return Number.POSITIVE_INFINITY;
+          return Math.max(0, (this.budgetLedger?.remaining() ?? 0));
+        },
+      },
+      signal: options.abortSignal,
+    });
+
+    return {
+      result,
+      agentCount: runRecords.length,
+      logs,
+      snapshots: runRecords.map((record) => this.snapshotSubagent(record)),
+    };
   }
 
   /** Marks a child's full summary as delivered to parent context (design §3.3). */
@@ -2030,7 +2420,17 @@ export class Agent {
     }
   }
 
-  private resolveRouteForSubagent(profile: AgentProfile, category: string | undefined): ResolvedSubagentRoute {
+  /**
+   * Resolves a child's model route. Priority, highest first (design v2 §1.1):
+   *   call-site override (model/effort)  >  profile.model  >  category  >  inherit parent.
+   * The call-site override is what lets the model say "opus for this reviewer,
+   * haiku for these twenty scouts" per spawn/batch member at request time.
+   */
+  private resolveRouteForSubagent(
+    profile: AgentProfile,
+    category: string | undefined,
+    override?: { model?: string; effort?: ThinkingLevel },
+  ): ResolvedSubagentRoute {
     const parentRoute = {
       providerId: this.providerId,
       model: this.apiModel,
@@ -2042,18 +2442,24 @@ export class Agent {
     if ("error" in resolved) {
       throw new Error(resolved.error);
     }
+    let route = resolved.route;
     if (profile.model && profile.model !== "inherit") {
       const model = resolveModelRoute(profile.model, parentRoute.providerId);
       if (model.model !== "inherit") {
-        return {
-          ...resolved.route,
-          providerId: model.providerId,
-          model: model.model,
-          inherited: false,
-        };
+        route = { ...route, providerId: model.providerId, model: model.model, inherited: false };
       }
     }
-    return resolved.route;
+    // Call-site override beats profile and category.
+    if (override?.model) {
+      const model = resolveModelRoute(override.model, route.providerId);
+      if (model.model !== "inherit") {
+        route = { ...route, providerId: model.providerId, model: model.model, inherited: false };
+      }
+    }
+    if (override?.effort) {
+      route = { ...route, thinkingLevel: override.effort, inherited: false };
+    }
+    return route;
   }
 
   private createSubagentThreadRecord(options: {
@@ -2065,6 +2471,7 @@ export class Agent {
     parentToolName: string;
     nickname?: string;
     route?: ResolvedSubagentRoute;
+    workflowInternal?: boolean;
   }): SubagentThreadRecord {
     const now = Date.now();
     const nickname = options.nickname ?? assignAgentNickname(options.profile, this.activeSubagentNicknames());
@@ -2075,6 +2482,7 @@ export class Agent {
       profile: options.profile,
       category: options.route?.category,
       route: options.route,
+      workflowInternal: options.workflowInternal,
       parentToolCallId: options.parentToolCallId,
       parentToolName: options.parentToolName,
       status: "queued",
@@ -2115,6 +2523,11 @@ export class Agent {
       childCwd = record.worktree.path;
       childMode = "default";
       tools = createWorktreeChildTools(childCwd, record.profile.tools.include);
+    } else {
+      // Readonly children share the parent's tool instances; isolate the only
+      // one with mutable file state (read → its FileStateTracker) so concurrent
+      // fan-out members never race shared tool state (design v2 §2).
+      tools = isolateReadonlyChildFileTools(tools);
     }
     const childToolNames = tools.map((tool) => tool.name);
     const route = record.route ?? {
@@ -2282,7 +2695,7 @@ export class Agent {
 
   private resolveSubagentTargets(agentIds?: string[]): SubagentThreadRecord[] {
     if (!agentIds || agentIds.length === 0) {
-      return this.subagentStore.values().filter((record) => record.status !== "closed");
+      return this.subagentStore.values().filter((record) => record.status !== "closed" && !record.workflowInternal);
     }
     return agentIds.map((id) => {
       const record = this.subagentStore.get(id);

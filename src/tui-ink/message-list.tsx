@@ -20,7 +20,15 @@ import {
   type TraceGroup,
 } from "./trace-groups.js";
 import { EDIT_COLLAPSED_DIFF_LINES, formatEditSuccessSummary, getEditDiffDetails } from "./edit-diff.js";
-import { formatSubagentRoute, type SubagentRouteLike } from "../agent/subagent-route-format.js";
+import {
+  latestSubagentNote,
+  sortSubagents,
+  subagentDescriptor,
+  subagentLabel,
+  subagentStatusColor,
+  subagentSummary,
+  type SubagentDisplay,
+} from "./subagent-view.js";
 import { sanitizeInternalReminderBlocks } from "../agent/internal-reminder-sanitizer.js";
 import { splitImageDisplayContent } from "../tui/image-display.js";
 
@@ -1089,20 +1097,6 @@ const TOOL_GLYPHS: Record<string, string> = {
   skill: "★",
 };
 
-interface SubagentDisplay {
-  subAgentId?: string;
-  agentName?: string;
-  nickname?: string;
-  status?: string;
-  category?: string;
-  route?: SubagentRouteLike;
-  profileSource?: string;
-  task?: string;
-  summary?: string;
-  toolNotes?: string[];
-  error?: string;
-}
-
 function displayToolName(name: string): string {
   if (TOOL_DISPLAY_NAMES[name]) return TOOL_DISPLAY_NAMES[name];
   return name.charAt(0).toUpperCase() + name.slice(1);
@@ -1178,62 +1172,6 @@ function subagentsFrom(toolCall: DisplayToolCall): SubagentDisplay[] {
   const raw = toolCall.metadata?.subagents;
   if (!Array.isArray(raw)) return [];
   return raw.filter((item): item is SubagentDisplay => typeof item === "object" && item !== null);
-}
-
-function latestSubagentNote(subagent: SubagentDisplay): string {
-  const note = subagent.error
-    || subagent.toolNotes?.filter(Boolean).at(-1)
-    || subagent.summary
-    || subagent.task
-    || "";
-  return note.replace(/\r\n/g, "\n").split("\n").map((line) => line.trim()).find(Boolean) ?? "";
-}
-
-function subagentLabel(subagent: SubagentDisplay): string {
-  return subagent.nickname ?? subagent.agentName ?? "subagent";
-}
-
-function subagentRole(subagent: SubagentDisplay): string {
-  return [subagent.agentName, subagent.category ? `/${subagent.category}` : ""].join("") || "default";
-}
-
-function subagentDescriptor(subagent: SubagentDisplay, includeThinking = false): string {
-  const route = formatSubagentRoute(subagent.route, { includeThinking });
-  const role = subagentRole(subagent);
-  return route ? `${role} @ ${route}` : role;
-}
-
-function subagentStatusColor(status: string | undefined, theme: Theme): string {
-  if (status === "completed") return theme.success;
-  if (status === "failed" || status === "blocked" || status === "cancelled") return theme.error;
-  if (status === "queued") return theme.muted;
-  return theme.toolPending;
-}
-
-function subagentSummary(subagents: SubagentDisplay[]): string {
-  if (subagents.length === 0) return "no subagents";
-  const counts = new Map<string, number>();
-  for (const subagent of subagents) {
-    const status = subagent.status ?? "running";
-    counts.set(status, (counts.get(status) ?? 0) + 1);
-  }
-  const order = ["running", "queued", "completed", "blocked", "failed", "cancelled"];
-  return order
-    .filter((status) => counts.has(status))
-    .map((status) => `${counts.get(status)} ${status}`)
-    .join("  ");
-}
-
-function sortSubagents(subagents: SubagentDisplay[]): SubagentDisplay[] {
-  const rank: Record<string, number> = {
-    running: 0,
-    blocked: 1,
-    failed: 2,
-    queued: 3,
-    cancelled: 4,
-    completed: 5,
-  };
-  return [...subagents].sort((a, b) => (rank[a.status ?? "running"] ?? 9) - (rank[b.status ?? "running"] ?? 9));
 }
 
 const COLLAPSED_PREVIEW_LINES = 10;
@@ -1442,7 +1380,7 @@ function SubagentToolDisplay({
             );
           })}
           {omitted > 0 && (
-            <Text color={theme.muted}>... {omitted} more, Ctrl+O to view</Text>
+            <Text color={theme.muted}>... {omitted} more · Ctrl+O to expand · Ctrl+G to inspect traces</Text>
           )}
         </Box>
       )}

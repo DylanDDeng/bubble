@@ -95,6 +95,19 @@ const WORKTREE_TOOL_NAMES = new Set(["read", "glob", "grep", "edit", "write", "b
  * with their own FileStateTracker and the worktree approval policy. A
  * profile's tools list can narrow the set but never widen it.
  */
+/**
+ * Isolates a readonly child's mutable tool state (design v2 §2): any tool that
+ * exposes a cloneForChild hook (the standard `read`, which carries a
+ * FileStateTracker) is rebuilt as a fresh per-child instance, so concurrent
+ * members of a fan-out never share mutable tool state. Stateless tools
+ * (glob/grep, web/memory/skill/todo) and custom/mock tools without the hook are
+ * passed through unchanged. Write children get full isolation via
+ * createWorktreeChildTools instead.
+ */
+export function isolateReadonlyChildFileTools(tools: ToolRegistryEntry[]): ToolRegistryEntry[] {
+  return tools.map((tool) => (tool.cloneForChild ? tool.cloneForChild() : tool));
+}
+
 export function createWorktreeChildTools(worktreeCwd: string, include?: string[]): ToolRegistryEntry[] {
   const approval = new WorktreeApprovalController(worktreeCwd);
   const fileState = new FileStateTracker(worktreeCwd);
