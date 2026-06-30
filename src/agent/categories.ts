@@ -131,6 +131,11 @@ export function normalizeCategoryName(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim().toLowerCase() : undefined;
 }
 
+/** Parses a call-site effort/thinking override, returning undefined when invalid. */
+export function parseThinkingLevel(value: unknown): ThinkingLevel | undefined {
+  return isThinkingLevel(value) ? value : undefined;
+}
+
 function parseModelSelection(model: string | undefined, parentProviderId: string): ResolvedModelSelection {
   if (!model || model === "inherit") return { providerId: parentProviderId, model: "inherit" };
   if (model.includes(":")) {

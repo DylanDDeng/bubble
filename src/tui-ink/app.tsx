@@ -76,6 +76,8 @@ import {
   type QueuedInput,
 } from "./input-queue.js";
 import { SessionPicker } from "./session-picker.js";
+import { SubagentInspector } from "./subagent-inspector.js";
+import { collectSubagentGroups, subagentSummary } from "./subagent-view.js";
 import { sessionDisplayName } from "../tui/session-display.js";
 import type { GoalStore, GoalState } from "../goal/store.js";
 import { parseGoalCommand } from "../goal/command.js";
@@ -297,6 +299,7 @@ function mergeToolMetadata(
   };
 }
 
+
 /**
  * Coerce a freshly-constructed DisplayMessage into one that carries a stable
  * `key`. Centralizes the safety net so callers don't have to remember to call
@@ -370,6 +373,19 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   const [streamingReasoning, setStreamingReasoning] = useState("");
   const [streamingTools, setStreamingTools] = useState<DisplayToolCall[]>([]);
   const [streamingParts, setStreamingParts] = useState<DisplayMessagePart[]>([]);
+  // Live subagent groups for the Ctrl+G inspector; recomputed each render so it
+  // reflects members as their events stream into the transcript.
+  const subagentGroups = useMemo(
+    () => collectSubagentGroups(messages, streamingTools),
+    [messages, streamingTools],
+  );
+  const subagentMembers = useMemo(() => subagentGroups.flatMap((g) => g.members), [subagentGroups]);
+  // Down-arrow from the composer focuses the subagent entry line; Enter then
+  // opens the inspector, Esc/Up returns to the composer (Claude Code parity).
+  const [subagentEntryFocused, setSubagentEntryFocused] = useState(false);
+  useEffect(() => {
+    if (subagentMembers.length === 0 && subagentEntryFocused) setSubagentEntryFocused(false);
+  }, [subagentMembers.length, subagentEntryFocused]);
   // Live progress for a manual `/compact` run (null when not compacting).
   const [compaction, setCompaction] = useState<CompactionProgress | null>(null);
   // Normalize agent.thinking against the current model's supported levels so the
@@ -401,7 +417,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     base: Omit<import("../feedback/types.js").FeedbackPayload, "description">;
     initialDescription: string;
   } | null>(null);
-  const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | "session" | "rewind" | "slash" | "mcp-reconnect" | "feishu-setup" | null>(null);
+  const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | "session" | "rewind" | "slash" | "mcp-reconnect" | "feishu-setup" | "agents" | null>(null);
   const [statsPanel, setStatsPanel] = useState<{ range: StatsRange; bundle: UsageStatsBundle } | null>(null);
   const [cursorResetEpoch, setCursorResetEpoch] = useState(0);
   const [composerDraft, setComposerDraft] = useState<{ text: string; epoch: number } | null>(null);
@@ -646,6 +662,24 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     // also frees the arrow keys entirely for composer history.
     if (pendingPlan || pendingApproval || pendingQuestion || pendingFeedback || statsPanel) return;
 
+    // Subagent entry is focused (the composer is disabled): Enter opens the
+    // inspector, Up/Esc returns to the composer. Other keys just return focus.
+    if (subagentEntryFocused && !pickerMode) {
+      if (key.return) {
+        setSubagentEntryFocused(false);
+        setStatsPanel(null);
+        setPickerMode("agents");
+        return;
+      }
+      if (key.escape || key.upArrow) {
+        setSubagentEntryFocused(false);
+        return;
+      }
+      if (key.downArrow) return; // stay focused
+      setSubagentEntryFocused(false);
+      return;
+    }
+
     if (key.ctrl && input.toLowerCase() === "p" && !pickerMode && !activeAbortRef.current) {
       setStatsPanel(null);
       setPickerMode("slash");
@@ -835,7 +869,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     setPendingSteerCount(pendingSteersRef.current.size);
   }, [addStatusUserMessage, currentSessionFile, prepareSubmitDisplay, queueInput, submitDisplayText]);
 
-  const openPicker = useCallback((mode: "model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | "session" | "rewind" | "feishu-setup", providerId?: string) => {
+  const openPicker = useCallback((mode: "model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | "session" | "rewind" | "feishu-setup" | "agents", providerId?: string) => {
     if (mode === "key") {
       setKeyProviderId(providerId ?? null);
     }
@@ -2064,6 +2098,11 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
             />
           </Box>
         )}
+        {pickerMode === "agents" && (
+          <Box paddingX={1} flexShrink={0}>
+            <SubagentInspector groups={subagentGroups} onCancel={closePicker} />
+          </Box>
+        )}
         {pickerMode === "rewind" && sessionManager && (
           <Box paddingX={1} flexShrink={0}>
             <RewindPicker
@@ -2194,7 +2233,10 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
           <InputBox
             onSubmit={handleSubmit}
             onQueue={isRunning ? queueInput : undefined}
-            disabled={!!pendingPlan || !!pendingApproval || !!pendingQuestion || !!pendingFeedback || !!statsPanel}
+            onArrowDownAtBottom={() => {
+              if (subagentMembers.length > 0 && !pickerMode) setSubagentEntryFocused(true);
+            }}
+            disabled={!!pendingPlan || !!pendingApproval || !!pendingQuestion || !!pendingFeedback || !!statsPanel || subagentEntryFocused}
             cursorResetEpoch={cursorResetEpoch}
             draftText={composerDraft?.text}
             draftEpoch={composerDraft?.epoch}
@@ -2206,6 +2248,16 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
             sessionFile={currentSessionFile()}
             nextImageLabelStart={nextImageDisplayLabelStartRef.current}
           />
+        </Box>
+      )}
+      {/* Subagent entry sits BELOW the composer: pressing ↓ from the composer
+          moves focus downward into it (spatially consistent). */}
+      {!isExiting && !pickerMode && !statsPanel && !pendingPlan && !pendingApproval && !pendingQuestion && !pendingFeedback && subagentMembers.length > 0 && (
+        <Box paddingX={1} flexShrink={0} backgroundColor={palette.background}>
+          <Text bold={subagentEntryFocused} color={subagentEntryFocused ? palette.accent : palette.toolName}>{subagentEntryFocused ? "> ↳ " : "  ↳ "}</Text>
+          <Text color={subagentEntryFocused ? palette.accent : palette.muted}>
+            {subagentMembers.length} subagent{subagentMembers.length === 1 ? "" : "s"} · {subagentSummary(subagentMembers)} · </Text>
+          <Text color={palette.accent}>{subagentEntryFocused ? "Enter open · Esc back" : "↓ to inspect traces"}</Text>
         </Box>
       )}
       {!isExiting && (

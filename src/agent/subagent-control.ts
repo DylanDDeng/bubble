@@ -101,6 +101,9 @@ export interface SubagentThreadRecord {
   deliveredAt?: number;
   tokenCap?: SubagentTokenCap;
   worktree?: SubagentWorktree;
+  /** True for agents spawned inside a run_workflow: kept out of list_agents /
+   * wait_agent and not persisted (design v2 appendix; option C). */
+  workflowInternal?: boolean;
   abortController: AbortController;
   waiters: Set<() => void>;
   agent?: {

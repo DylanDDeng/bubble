@@ -9,7 +9,8 @@ import type { ApprovalController } from "../approval/types.js";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
 import { isSensitivePath } from "./sensitive-paths.js";
 import type { LspService } from "../lsp/index.js";
-import type { FileStateTracker, ReadHistoryEntry } from "./file-state.js";
+import { FileStateTracker } from "./file-state.js";
+import type { ReadHistoryEntry } from "./file-state.js";
 import { resolveToolPath } from "./path-utils.js";
 
 const MAX_LINES = 2500;
@@ -44,6 +45,11 @@ export function createReadTool(cwd: string, approval?: ApprovalController, lsp?:
       },
       required: ["path"],
     },
+    // Per-child isolation hook (design v2 §2): a concurrent subagent fan-out
+    // gets a read instance with its own FileStateTracker so members never
+    // share mutable read-history state. Custom/mock read tools omit this and
+    // are passed through unchanged.
+    cloneForChild: () => createReadTool(cwd, approval, lsp, new FileStateTracker(cwd)),
     async execute(args): Promise<ToolResult> {
       const filePath = resolveToolPath(cwd, args.path);
 
