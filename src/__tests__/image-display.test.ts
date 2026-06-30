@@ -6,7 +6,26 @@ import {
   isImageDisplayReferenceLine,
   nextImageDisplayLabelStart,
   splitImageDisplayContent,
+  stripInlineImageLabels,
 } from "../tui/image-display.js";
+
+describe("stripInlineImageLabels", () => {
+  it("removes an inline label (and its trailing space) at any position", () => {
+    expect(stripInlineImageLabels("look at [Image #1] here", ["[Image #1]"])).toBe("look at here");
+    expect(stripInlineImageLabels("[Image #1] start", ["[Image #1]"])).toBe("start");
+    expect(stripInlineImageLabels("end [Image #2]", ["[Image #2]"])).toBe("end ");
+  });
+
+  it("removes each label once, in order, leaving unrelated text intact", () => {
+    expect(stripInlineImageLabels("a [Image #1] b [Image #2] c", ["[Image #1]", "[Image #2]"]))
+      .toBe("a b c");
+  });
+
+  it("is a no-op when the labels are absent (history replay / no images)", () => {
+    expect(stripInlineImageLabels("just text", ["[Image #1]"])).toBe("just text");
+    expect(stripInlineImageLabels("hello", [])).toBe("hello");
+  });
+});
 
 describe("image display formatting", () => {
   it("renders a pasted image like the transcript attachment style", () => {

@@ -38,7 +38,7 @@ import {
   shouldCollapsePastedContent,
   type PastedContentReference,
 } from "../tui/paste-placeholder.js";
-import { imageDisplayLabel } from "../tui/image-display.js";
+import { imageDisplayLabel, stripInlineImageLabels } from "../tui/image-display.js";
 
 export interface SubmitPayload {
   /** Fully-expanded text sent to the agent. */
@@ -521,6 +521,9 @@ export function InputBox({
   const submittedPayloadFingerprintRef = useRef<string | null>(null);
   const loadingFilesRef = useRef(false);
   const nextPastedContentIndexRef = useRef(1);
+  // Kept equal to attachments.length so a synchronous multi-image paste loop
+  // assigns each image its correct (distinct) inline label index.
+  const attachmentCountRef = useRef(0);
   // Paste and the keystrokes that follow can arrive inside the same stdin chunk
   // and dispatch within one discreteUpdates batch. If the Enter that a user
   // typed after a paste fires before React commits the paste-driven setState,
@@ -645,9 +648,16 @@ export function InputBox({
   );
 
   const addAttachment = React.useCallback((att: ImageAttachment) => {
+    const base = imageLabelStartOverride ?? nextImageLabelStart;
+    const index = attachmentCountRef.current;
+    attachmentCountRef.current += 1;
+    // Place the image label inline at the cursor so the reference appears where
+    // it was pasted (not forced to the start), and moves with later edits. It is
+    // stripped from the text on submit so the model still receives clean text.
+    insertTextAtCursor(`${imageDisplayLabel(base + index)} `);
     ensureImageLabelStart();
     setAttachments((prev) => [...prev, att]);
-  }, [ensureImageLabelStart]);
+  }, [ensureImageLabelStart, insertTextAtCursor, imageLabelStartOverride, nextImageLabelStart]);
 
   const notice = React.useCallback(
     (msg: string) => {
@@ -789,14 +799,22 @@ export function InputBox({
   };
 
   const submitInput = (submittedText: string, target: "submit" | "queue" = "submit") => {
-    const expandedText = expandPastedContentMarkers(submittedText, pastedContentRefs);
+    const labelStartForSubmit = imageLabelStartOverride ?? nextImageLabelStart;
+    const inlineLabels = attachments.map((_, index) => imageDisplayLabel(labelStartForSubmit + index));
+    // Text-paste markers expand to their content (not replayable); image labels
+    // are a composer-only affordance stripped here (replayable via attachments).
+    const pasteExpanded = expandPastedContentMarkers(submittedText, pastedContentRefs);
+    const expandedText = stripInlineImageLabels(pasteExpanded, inlineLabels);
     if (expandedText.trim().length === 0 && attachments.length === 0) return;
     const deliver = target === "queue" && onQueue ? onQueue : onSubmit;
     const payload = {
       // The pasted-content marker is a composer-only affordance. Submit the
       // fully-expanded text so the transcript shows what was actually sent —
       // the agent already receives the expanded text — rather than the marker.
+      // `text` (model input) has image labels stripped; `displayText` keeps them
+      // inline at their paste position so the transcript shows the image there.
       text: expandedText,
+      ...(inlineLabels.length > 0 && pasteExpanded !== expandedText ? { displayText: pasteExpanded } : {}),
       images: attachments,
       imageDisplayStart: attachments.length > 0 ? (imageLabelStartOverride ?? nextImageLabelStart) : undefined,
     };
@@ -804,9 +822,10 @@ export function InputBox({
     if (submittedPayloadFingerprintRef.current === fingerprint) return;
     submittedPayloadFingerprintRef.current = fingerprint;
     deliver(payload);
-    // A collapsed marker cannot be safely replayed from history once its
-    // in-memory paste reference is gone; skip those entries instead.
-    if (expandedText === submittedText && (expandedText.trim().length > 0 || attachments.length > 0)) {
+    // A collapsed text-paste marker cannot be safely replayed once its
+    // in-memory reference is gone; skip those. Image-label stripping is fine to
+    // replay (the attachments are stored on the history entry).
+    if (pasteExpanded === submittedText && (expandedText.trim().length > 0 || attachments.length > 0)) {
       const historyEntry: HistoryEntry = {
         text: expandedText,
         images: attachments,
@@ -824,6 +843,7 @@ export function InputBox({
     setCursor(0);
     setSelectedIndex(0);
     setAttachments([]);
+    attachmentCountRef.current = 0;
     setImageLabelStartOverride(null);
     setPastedContentRefs([]);
     nextPastedContentIndexRef.current = 1;
@@ -993,6 +1013,7 @@ export function InputBox({
           if (next.length === 0) setImageLabelStartOverride(null);
           return next;
         });
+        attachmentCountRef.current = Math.max(0, attachmentCountRef.current - 1);
       }
       return;
     }
@@ -1080,6 +1101,7 @@ export function InputBox({
     setCursor(draftText.length);
     setSelectedIndex(0);
     setAttachments([]);
+    attachmentCountRef.current = 0;
     setImageLabelStartOverride(null);
     setPastedContentRefs([]);
     nextPastedContentIndexRef.current = 1;
@@ -1117,7 +1139,14 @@ export function InputBox({
     () => attachments.map((_, index) => imageDisplayLabel(imageLabelStart + index)),
     [attachments, imageLabelStart],
   );
-  const imageInlinePrefix = attachmentLabels.length > 0 ? `${attachmentLabels.join(" ")} ` : "";
+  // Labels are normally inline in `text` at their paste position. Only labels
+  // that are NOT present inline (e.g. attachments restored from history) fall
+  // back to a leading prefix so they stay visible.
+  const unmarkedLabels = useMemo(
+    () => attachmentLabels.filter((label) => !text.includes(label)),
+    [attachmentLabels, text],
+  );
+  const imageInlinePrefix = unmarkedLabels.length > 0 ? `${unmarkedLabels.join(" ")} ` : "";
   const displayText = imageInlinePrefix + text;
   const displayCursor = cursor + imageInlinePrefix.length;
   const displayCursorToSourceCursor = (value: number) =>
@@ -1168,6 +1197,7 @@ export function InputBox({
       setText(result.text);
       setCursor(result.text.length);
       setAttachments(result.images ?? []);
+      attachmentCountRef.current = (result.images ?? []).length;
       setImageLabelStartOverride(result.imageDisplayStart ?? null);
       setHistoryIndex(result.index);
       historyDraftRef.current = result.draft;
