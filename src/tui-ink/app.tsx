@@ -323,24 +323,8 @@ export const INK_LOCAL_SLASH_COMMANDS = [
     description: "Toggle thinking block visibility",
   },
   {
-    name: "toggle-thinking",
-    description: "Toggle thinking block visibility",
-  },
-  {
     name: "goal",
     description: "Set/manage an autonomous goal (/goal <objective>|clear|pause|resume|edit)",
-  },
-  {
-    name: "trace",
-    description: "Toggle verbose trace output",
-  },
-  {
-    name: "verbose",
-    description: "Toggle verbose trace output",
-  },
-  {
-    name: "debug",
-    description: "Toggle verbose trace output",
   },
 ] as const;
 
@@ -1716,19 +1700,10 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
           return;
         }
 
-        if (/^\/(?:thinking|toggle-thinking)(?:\s|$)/.test(input.trim())) {
+        if (/^\/thinking(?:\s|$)/.test(input.trim())) {
           setShowThinking((current) => {
             const next = !current;
             addMessage("assistant", next ? "Thinking blocks visible" : "Thinking blocks hidden");
-            return next;
-          });
-          return;
-        }
-
-        if (/^\/(?:trace|verbose|debug)(?:\s|$)/.test(input.trim())) {
-          setVerboseTrace((current) => {
-            const next = !current;
-            addMessage("assistant", next ? "Verbose trace visible" : "Compact trace visible");
             return next;
           });
           return;
