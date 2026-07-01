@@ -319,10 +319,6 @@ const STREAMING_FLUSH_INTERVAL_MS = 40;
 
 export const INK_LOCAL_SLASH_COMMANDS = [
   {
-    name: "thinking",
-    description: "Toggle thinking block visibility",
-  },
-  {
     name: "goal",
     description: "Set/manage an autonomous goal (/goal <objective>|clear|pause|resume|edit)",
   },
@@ -1697,15 +1693,6 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         // requestExit().
         if (/^\/(?:quit|exit)\s*$/.test(input.trim())) {
           requestExit();
-          return;
-        }
-
-        if (/^\/thinking(?:\s|$)/.test(input.trim())) {
-          setShowThinking((current) => {
-            const next = !current;
-            addMessage("assistant", next ? "Thinking blocks visible" : "Thinking blocks hidden");
-            return next;
-          });
           return;
         }
 

@@ -13,7 +13,6 @@ describe("Ink goal command integration", () => {
 
   it("exposes local display commands in the Ink slash palette", () => {
     expect(INK_LOCAL_SLASH_COMMANDS.map((command) => command.name)).toEqual([
-      "thinking",
       "goal",
     ]);
   });
