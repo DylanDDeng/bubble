@@ -1363,7 +1363,7 @@ function SubagentToolDisplay({
             );
           })}
           {omitted > 0 && (
-            <Text color={theme.muted}>... {omitted} more · Ctrl+O to expand · Ctrl+G to inspect traces</Text>
+            <Text color={theme.muted}>... {omitted} more · Ctrl+O to expand · ↓ then Enter to inspect traces</Text>
           )}
         </Box>
       )}

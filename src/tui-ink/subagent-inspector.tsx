@@ -1,5 +1,5 @@
 /**
- * Full-screen subagent inspector (Ctrl+G / /agents).
+ * Full-screen subagent inspector opened from the subagent entry line.
  *
  * Two-level drill-in modeled on Claude Code's workflow view: a grouped list of
  * subagents (each spawn_agent is one member; each agent_team/agent_batch is a

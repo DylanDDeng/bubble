@@ -353,8 +353,8 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   const [streamingReasoning, setStreamingReasoning] = useState("");
   const [streamingTools, setStreamingTools] = useState<DisplayToolCall[]>([]);
   const [streamingParts, setStreamingParts] = useState<DisplayMessagePart[]>([]);
-  // Live subagent groups for the Ctrl+G inspector; recomputed each render so it
-  // reflects members as their events stream into the transcript.
+  // Live subagent groups for the inspector opened from the subagent entry line;
+  // recomputed each render so it reflects members as their events stream into the transcript.
   const subagentGroups = useMemo(
     () => collectSubagentGroups(messages, streamingTools),
     [messages, streamingTools],

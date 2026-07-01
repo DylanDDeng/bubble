@@ -364,13 +364,6 @@ const builtinSlashCommandEntries: SlashCommand[] = [
     },
   },
   {
-    name: "agents",
-    description: "Inspect spawned subagents and their working traces (also Ctrl+G)",
-    async handler(_args, ctx) {
-      ctx.openPicker("agents");
-    },
-  },
-  {
     name: "help",
     description: "Show available slash commands",
     async handler(args, ctx) {
