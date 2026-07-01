@@ -19,7 +19,6 @@ describe("Ink goal command integration", () => {
       "trace",
       "verbose",
       "debug",
-      "write-previews",
     ]);
   });
 

@@ -51,7 +51,6 @@ interface MessageListProps {
   streamingParts: DisplayMessagePart[];
   terminalColumns: number;
   showThinking?: boolean;
-  expandedToolOutput?: boolean;
   verboseTrace: boolean;
   pendingApproval?: PendingApprovalHint | null;
   /** Animation tick used to refresh in-progress elapsed counters. */
@@ -96,7 +95,6 @@ export function MessageList({
   streamingParts,
   terminalColumns,
   showThinking = false,
-  expandedToolOutput = false,
   verboseTrace,
   pendingApproval,
   nowTick,
@@ -163,7 +161,6 @@ export function MessageList({
                 message={item.message}
                 terminalColumns={terminalColumns}
                 showThinking={showThinking}
-                expandedToolOutput={expandedToolOutput}
                 verboseTrace={verboseTrace}
                 showExpandHint={item.showExpandHint}
                 separateFromPrevious={item.separateFromPrevious}
@@ -185,7 +182,6 @@ export function MessageList({
               parts={streamingParts}
               terminalColumns={terminalColumns}
               showThinking={showThinking}
-              expandedToolOutput={expandedToolOutput}
               verboseTrace={verboseTrace}
               pendingApproval={pendingApproval}
               nowTick={nowTick}
@@ -283,7 +279,6 @@ const MessageItem = React.memo(function MessageItem({
   message,
   terminalColumns,
   showThinking,
-  expandedToolOutput,
   verboseTrace,
   showExpandHint,
   separateFromPrevious,
@@ -292,7 +287,6 @@ const MessageItem = React.memo(function MessageItem({
   message: DisplayMessage;
   terminalColumns: number;
   showThinking: boolean;
-  expandedToolOutput: boolean;
   verboseTrace: boolean;
   showExpandHint: boolean;
   separateFromPrevious: boolean;
@@ -368,7 +362,6 @@ const MessageItem = React.memo(function MessageItem({
         <MessageParts
           parts={message.parts}
           terminalColumns={terminalColumns}
-          expandedToolOutput={expandedToolOutput}
           verboseTrace={verboseTrace}
           pendingApproval={undefined}
           showExpandHint={showExpandHint}
@@ -380,7 +373,6 @@ const MessageItem = React.memo(function MessageItem({
             <ToolsPart
               toolCalls={message.toolCalls}
               terminalColumns={terminalColumns}
-              expandedToolOutput={expandedToolOutput}
               verboseTrace={verboseTrace}
               pendingApproval={undefined}
               showExpandHint={showExpandHint}
@@ -407,7 +399,6 @@ function StreamingMessage({
   parts,
   terminalColumns,
   showThinking,
-  expandedToolOutput,
   verboseTrace,
   pendingApproval,
   nowTick,
@@ -418,7 +409,6 @@ function StreamingMessage({
   parts: DisplayMessagePart[];
   terminalColumns: number;
   showThinking: boolean;
-  expandedToolOutput: boolean;
   verboseTrace: boolean;
   pendingApproval?: PendingApprovalHint | null;
   nowTick?: number;
@@ -448,7 +438,6 @@ function StreamingMessage({
           <MessageParts
             parts={visibleParts}
             terminalColumns={terminalColumns}
-            expandedToolOutput={expandedToolOutput}
             verboseTrace={verboseTrace}
             pendingApproval={pendingApproval}
             showExpandHint
@@ -465,7 +454,6 @@ function StreamingMessage({
 function MessageParts({
   parts,
   terminalColumns,
-  expandedToolOutput,
   verboseTrace,
   pendingApproval,
   showExpandHint,
@@ -475,7 +463,6 @@ function MessageParts({
 }: {
   parts: DisplayMessagePart[];
   terminalColumns: number;
-  expandedToolOutput: boolean;
   verboseTrace: boolean;
   pendingApproval?: PendingApprovalHint | null;
   showExpandHint: boolean;
@@ -504,7 +491,6 @@ function MessageParts({
             key={`tools-${idx}`}
             toolCalls={part.toolCalls}
             terminalColumns={terminalColumns}
-            expandedToolOutput={expandedToolOutput}
             verboseTrace={verboseTrace}
             pendingApproval={pendingApproval}
             showExpandHint={showExpandHint && idx === lastToolsPartIndex}
@@ -575,7 +561,6 @@ function TimelineText({
 function ToolsPart({
   toolCalls,
   terminalColumns,
-  expandedToolOutput,
   verboseTrace,
   pendingApproval,
   showExpandHint,
@@ -585,7 +570,6 @@ function ToolsPart({
 }: {
   toolCalls: DisplayToolCall[];
   terminalColumns: number;
-  expandedToolOutput: boolean;
   verboseTrace: boolean;
   pendingApproval?: PendingApprovalHint | null;
   showExpandHint: boolean;
@@ -594,8 +578,7 @@ function ToolsPart({
   showActivity?: boolean;
 }) {
   if (toolCalls.length === 0) return null;
-  const expandTools = verboseTrace || expandedToolOutput;
-  if (!expandTools) {
+  if (!verboseTrace) {
     return (
       <TraceGroupList
         toolCalls={toolCalls}
@@ -619,7 +602,7 @@ function ToolsPart({
             key={tc.id}
             toolCall={tc}
             isStreaming={isToolPending(tc)}
-            verbose={expandTools}
+            verbose={verboseTrace}
             terminalColumns={terminalColumns}
             showExpandHint={showExpandHint && idx === lastIdx}
             waitingApproval={isWaitingApproval}

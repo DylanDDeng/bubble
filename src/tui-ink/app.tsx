@@ -342,10 +342,6 @@ export const INK_LOCAL_SLASH_COMMANDS = [
     name: "debug",
     description: "Toggle verbose trace output",
   },
-  {
-    name: "write-previews",
-    description: "Toggle write preview expansion",
-  },
 ] as const;
 
 export function App({ agent, args, sessionManager: initialSessionManager, switchSession, createProvider, registry, skillRegistry, planHandlerRef, approvalHandlerRef, questionController, bashAllowlist, settingsManager, lspService, mcpManager, themeMode: initialThemeMode, themeOverrides, detectedTheme, onThemeModeChange, flushMemory, runMemoryCompaction, runMemorySummary, runMemoryRefresh, goalStore, bypassEnabled, updateNotice, updateNoticeRefresh, hookController, onExit }: AppProps) {
@@ -423,7 +419,6 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   const [composerDraft, setComposerDraft] = useState<{ text: string; epoch: number } | null>(null);
   const [keyProviderId, setKeyProviderId] = useState<string | null>(null);
   const [showThinking, setShowThinking] = useState(false);
-  const [expandedToolOutput, setExpandedToolOutput] = useState(false);
   const [verboseTrace, setVerboseTrace] = useState(false);
   const [sidebarMode, setSidebarMode] = useState<SidebarMode>("collapsed");
   const startedWithVisibleHistoryRef = useRef(messages.some((message) => message.syntheticKind !== "ui_summary"));
@@ -1739,15 +1734,6 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
           return;
         }
 
-        if (/^\/write-previews(?:\s|$)/.test(input.trim())) {
-          setExpandedToolOutput((current) => {
-            const next = !current;
-            addMessage("assistant", next ? "Write previews expanded" : "Write previews collapsed");
-            return next;
-          });
-          return;
-        }
-
         if (/^\/goal(?:\s|$)/.test(input.trim())) {
           await handleGoalCommand(input);
           return;
@@ -1949,7 +1935,6 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
           streamingParts={streamingParts}
           terminalColumns={mainWidth}
           showThinking={showThinking}
-          expandedToolOutput={expandedToolOutput}
           verboseTrace={verboseTrace}
           pendingApproval={approvalHint}
           nowTick={nowTick}
