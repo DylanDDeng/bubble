@@ -5,7 +5,7 @@
 
 import React from "react";
 import { Box, Text } from "ink";
-import { visualWidth, graphemeWidth } from "./width.js";
+import { ambiguousIsWide, visualWidth, graphemeWidth } from "./width.js";
 import { useTerminalSize } from "./use-terminal-size.js";
 import { useTheme } from "./theme.js";
 import { highlightCode, highlightCodeSync } from "./code-highlight.js";
@@ -476,6 +476,15 @@ function TableBlock({
   // Reserve a buffer so the table fits even when wrapped inside an indented
   // box (e.g. the timeline gutter contributes marginLeft + "●  " = 5 cells).
   const budget = Math.max(20, (maxWidth ?? termWidth) - 8);
+  // Box-drawing ─│┌┬┼… are East Asian *Ambiguous*-width: on a terminal that
+  // renders them 2 cells wide, border rows would paint at twice the width the
+  // cell rows were budgeted for (and twice what Ink itself measures), so the
+  // terminal hard-wraps them into scattered fragments. There is no way to hit
+  // odd widths with 2-cell dashes, so on such terminals draw ASCII borders —
+  // the only glyphs whose width every layer agrees on.
+  const g = ambiguousIsWide()
+    ? { h: "-", v: "|", tl: "+", tm: "+", tr: "+", ml: "+", mm: "+", mr: "+", bl: "+", bm: "+", br: "+" }
+    : { h: "─", v: "│", tl: "┌", tm: "┬", tr: "┐", ml: "├", mm: "┼", mr: "┤", bl: "└", bm: "┴", br: "┘" };
 
   const maxWidths = headers.map((h, i) => {
     let max = visualWidth(inlinePlainText(h));
@@ -495,19 +504,32 @@ function TableBlock({
     const available = Math.max(budget - separatorsWidth, colCount * 4);
     const ratio = totalInnerWidth > 0 ? available / totalInnerWidth : 1;
     widths = maxWidths.map((w) => Math.max(4, Math.floor(w * ratio)));
+    // The 4-cell floor can push the sum back above `available`; shave the
+    // overshoot off the widest columns so the row never exceeds the budget
+    // and gets hard-wrapped by the terminal.
+    let excess = widths.reduce((a, b) => a + b, 0) - available;
+    while (excess > 0) {
+      let widest = -1;
+      for (let i = 0; i < widths.length; i++) {
+        if (widths[i]! > 4 && (widest === -1 || widths[i]! > widths[widest]!)) widest = i;
+      }
+      if (widest === -1) break;
+      widths[widest]! -= 1;
+      excess -= 1;
+    }
   }
 
-  const top = "┌" + widths.map((w) => "─".repeat(w + 2)).join("┬") + "┐";
-  const mid = "├" + widths.map((w) => "─".repeat(w + 2)).join("┼") + "┤";
-  const bot = "└" + widths.map((w) => "─".repeat(w + 2)).join("┴") + "┘";
+  const top = g.tl + widths.map((w) => g.h.repeat(w + 2)).join(g.tm) + g.tr;
+  const mid = g.ml + widths.map((w) => g.h.repeat(w + 2)).join(g.mm) + g.mr;
+  const bot = g.bl + widths.map((w) => g.h.repeat(w + 2)).join(g.bm) + g.br;
 
   const renderRow = (cells: string[], keyPrefix: string, isHeader = false) => (
     <Text key={keyPrefix}>
-      {"│ "}
+      {`${g.v} `}
       {cells.map((c, i) => (
         <React.Fragment key={i}>
           {renderTableCell(c, widths[i] ?? 4, isHeader, `${keyPrefix}-cell-${i}`)}
-          {i < colCount - 1 ? " │ " : " │"}
+          {i < colCount - 1 ? ` ${g.v} ` : ` ${g.v}`}
         </React.Fragment>
       ))}
     </Text>
@@ -552,8 +574,11 @@ function truncateInlineSegments(
   width: number,
 ): MarkdownInlineSegment[] {
   if (inlineSegmentsWidth(segments) <= width) return segments;
-  if (width <= 1) return [{ text: "…" }];
-  const target = width - 1;
+  // The ellipsis is itself ambiguous-width (2 cells on an ambiguous-wide
+  // terminal) — reserve its real width or every truncated cell overflows.
+  const ellipsisWidth = graphemeWidth("…");
+  if (width <= ellipsisWidth) return [{ text: "…" }];
+  const target = width - ellipsisWidth;
   const output: MarkdownInlineSegment[] = [];
   let used = 0;
   for (const segment of segments) {
