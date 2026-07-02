@@ -112,60 +112,6 @@ describe("slash commands", () => {
     }
   });
 
-  it("/key can update an explicitly targeted provider before it is enabled", async () => {
-    const updateProviderKey = vi.fn();
-    const setDefault = vi.fn();
-    const createProvider = vi.fn(() => ({ streamChat: vi.fn(), complete: vi.fn() })) as any;
-    const setProvider = vi.fn();
-    const ctx = createContext({
-      agent: {
-        model: "zhipuai-coding-plan:glm-5.1",
-        providerId: "zhipuai-coding-plan",
-        thinking: "off",
-        setSystemPrompt: vi.fn(),
-        setProvider,
-      } as any,
-      createProvider,
-      registry: {
-        getDefault: () => ({
-          id: "zhipuai-coding-plan",
-          name: "Zhipu AI Coding Plan",
-          baseURL: "https://open.bigmodel.cn/api/coding/paas/v4",
-          apiKey: "zhipu-key",
-          enabled: true,
-        }),
-        getConfigured: () => [
-          {
-            id: "zhipuai-coding-plan",
-            name: "Zhipu AI Coding Plan",
-            baseURL: "https://open.bigmodel.cn/api/coding/paas/v4",
-            apiKey: "zhipu-key",
-            enabled: true,
-          },
-          {
-            id: "deepseek",
-            name: "DeepSeek",
-            baseURL: "https://api.deepseek.com",
-            apiKey: "",
-            enabled: true,
-          },
-        ],
-        getModelConfig: () => ({ hasProvider: () => false }),
-        updateProviderKey,
-        setDefault,
-      } as any,
-    });
-
-    const result = await slashRegistry.execute("/key deepseek sk-deepseek", ctx);
-
-    expect(result.handled).toBe(true);
-    expect(updateProviderKey).toHaveBeenCalledWith("deepseek", "sk-deepseek");
-    expect(setDefault).toHaveBeenCalledWith("deepseek");
-    expect(createProvider).toHaveBeenCalledWith("deepseek", "sk-deepseek", "https://api.deepseek.com");
-    expect(ctx.agent.providerId).toBe("deepseek");
-    expect(result.result).toContain("API key updated for DeepSeek");
-  });
-
   it("/model preserves provider keys already written to config", async () => {
     const originalBubbleHome = process.env.BUBBLE_HOME;
     const root = join(tmpdir(), `bubble-model-persist-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
@@ -626,36 +572,6 @@ describe("slash commands", () => {
       { role: "system", content: "system prompt" },
     ]);
     expect(appendMarker).toHaveBeenCalledWith("conversation_clear", "");
-  });
-
-  it("/todos lists items; /todos clear empties the list", async () => {
-    let todos = [
-      { content: "a", activeForm: "doing a", status: "in_progress" },
-      { content: "b", activeForm: "doing b", status: "pending" },
-    ];
-    const ctx = createContext({
-      agent: {
-        model: "openai:gpt-4o",
-        providerId: "openai",
-        thinking: "off",
-        getTodos: () => todos,
-        setTodos: (next: any[]) => {
-          todos = next;
-        },
-      } as any,
-    });
-
-    let result = await slashRegistry.execute("/todos", ctx);
-    expect(result.result).toContain("Todos:");
-    expect(result.result).toContain("doing a");
-    expect(result.result).toContain("b");
-
-    result = await slashRegistry.execute("/todos clear", ctx);
-    expect(result.result).toContain("Cleared 2");
-    expect(todos).toEqual([]);
-
-    result = await slashRegistry.execute("/todos clear", ctx);
-    expect(result.result).toContain("already empty");
   });
 
   it("/permissions lists the bash allowlist and /permissions clear empties it", async () => {

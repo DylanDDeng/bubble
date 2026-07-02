@@ -66,7 +66,6 @@ Bubble ships with a catalog of built-in providers. Configure them inside the app
 | --- | --- |
 | `/login` | OAuth sign-in for ChatGPT; unlocks the OpenAI Codex models without an API key. |
 | `/provider` | Open a picker to connect, switch, add, or remove a provider. |
-| `/key <provider> <key>` | Set the API key for a provider. |
 | `/model` | Pick the active model and reasoning effort. |
 
 Built-in providers include OpenAI, Anthropic, Google, DeepSeek, Moonshot (CN and international), Kimi for Coding, Zhipu AI, Z.AI, Alibaba DashScope, Doubao (Volcengine Ark), MiniMax, StepFun, Groq, Together AI, Fireworks, and a `local` profile for any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, etc.).
@@ -155,7 +154,7 @@ Rules use a simple pattern syntax, for example:
 | --- | --- |
 | `/help` | List available commands. |
 | `/model` | Switch model and reasoning effort. |
-| `/provider`, `/login`, `/logout`, `/key` | Connect and manage providers. |
+| `/provider`, `/login`, `/logout` | Connect and manage providers. |
 | `/session`, `/rewind`, `/clear` | Manage conversation history. |
 | `/skills` | Open the searchable skills picker. |
 | `/mcp` | List or reconnect MCP servers. |

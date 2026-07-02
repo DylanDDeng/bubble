@@ -1,4 +1,4 @@
-import { UserConfig, maskKey } from "../config.js";
+import { UserConfig } from "../config.js";
 import { formatContextUsage } from "../context/usage.js";
 import { formatDiagnostics } from "../lsp/index.js";
 import { normalizeNameForMCP } from "../mcp/name.js";
@@ -340,18 +340,6 @@ async function handleMemoryCommand(args: string, ctx: Parameters<SlashCommand["h
   }
 
   return "Usage: /memory [status|search|compact|summarize|refresh|reset]";
-}
-
-function parseKeyArgs(args: string, ctx: Parameters<SlashCommand["handler"]>[1]) {
-  const trimmed = args.trim();
-  const [first, ...rest] = trimmed.split(/\s+/);
-  const explicitProvider = first
-    ? ctx.registry.getConfigured().find((provider) => provider.id === first)
-    : undefined;
-  if (explicitProvider) {
-    return { provider: explicitProvider, apiKey: rest.join(" ") };
-  }
-  return { provider: ctx.registry.getDefault(), apiKey: trimmed };
 }
 
 const builtinSlashCommandEntries: SlashCommand[] = [
@@ -701,31 +689,6 @@ const builtinSlashCommandEntries: SlashCommand[] = [
     },
   },
   {
-    name: "key",
-    description: "Set API key for the current or a specific provider. Usage: /key [provider-id] <key>",
-    async handler(args, ctx) {
-      if (!args) {
-        ctx.openPicker("key");
-        return;
-      }
-      const { provider, apiKey } = parseKeyArgs(args, ctx);
-      if (!provider) {
-        return "No provider configured. Use /provider --add <id> first.";
-      }
-      if (!apiKey) {
-        return `Usage: /key ${provider.id} <key>`;
-      }
-      if (ctx.registry.getModelConfig().hasProvider(provider.id)) {
-        return `API key for ${provider.name} is managed in ~/.bubble/models.json. Please edit that file directly.`;
-      }
-      ctx.registry.updateProviderKey(provider.id, apiKey);
-      ctx.registry.setDefault(provider.id);
-      ctx.agent.setProvider(ctx.createProvider(provider.id, apiKey, provider.baseURL));
-      ctx.agent.providerId = provider.id;
-      return `API key updated for ${provider.name} to ${maskKey(apiKey)}.`;
-    },
-  },
-  {
     name: "logout",
     description: "Remove OAuth credentials for a provider. Usage: /logout [openai]",
     async handler(args, ctx) {
@@ -764,34 +727,6 @@ const builtinSlashCommandEntries: SlashCommand[] = [
       return next === "plan"
         ? "Entered plan mode. The assistant will investigate and propose a plan before making changes."
         : "Exited plan mode.";
-    },
-  },
-  {
-    name: "todos",
-    description: "Show the current todo list. Use /todos clear to reset it.",
-    async handler(args, ctx) {
-      const sub = args.trim();
-      if (sub === "clear") {
-        const previous = ctx.agent.getTodos().length;
-        if (previous === 0) {
-          return "Todo list is already empty.";
-        }
-        ctx.agent.setTodos([]);
-        return `Cleared ${previous} todo item${previous === 1 ? "" : "s"}.`;
-      }
-
-      const todos = ctx.agent.getTodos();
-      if (todos.length === 0) {
-        return "No todos yet. The assistant will create some when working on multi-step tasks.";
-      }
-      const glyph = (status: string) =>
-        status === "completed" ? "✔" : status === "in_progress" ? "▶" : "○";
-      const lines = ["Todos:"];
-      for (const todo of todos) {
-        const label = todo.status === "in_progress" ? (todo.activeForm || todo.content) : todo.content;
-        lines.push(`  ${glyph(todo.status)} ${label}`);
-      }
-      return lines.join("\n");
     },
   },
   {
