@@ -19,7 +19,14 @@ export function reduceRunState(state: RunState, event: AgentEvent): RunState {
 
   switch (event.type) {
     case "turn_start":
-      // No state change — just signals a new LLM round trip.
+      // A new LLM round trip. turn_end settles (closes) the blocks of every
+      // finished call, so anything still marked streaming here belongs to a
+      // half-built attempt the agent discarded (its stream-interruption retry
+      // re-issues the whole request). Drop it, or the retry re-streams the
+      // same opening text into the block and the card shows it twice.
+      state.blocks = state.blocks.filter(
+        (block) => !((block.kind === "text" || block.kind === "thinking") && block.streaming),
+      );
       return state;
 
     case "text_delta": {
@@ -95,6 +102,9 @@ export function reduceRunState(state: RunState, event: AgentEvent): RunState {
     }
 
     case "turn_end": {
+      // Settle this call's output so the turn_start cleanup above can tell
+      // kept content (closed here) apart from a discarded retry attempt.
+      closeStreamingBlocks(state);
       if (event.usage) {
         state.usage = mergeUsage(state.usage, event.usage);
       }

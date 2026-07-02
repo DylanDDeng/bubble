@@ -1305,6 +1305,16 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
             inputController,
           })) {
             switch (event.type) {
+              case "turn_start":
+                // A fresh provider call is starting. Everything worth keeping
+                // was committed at the preceding turn_end, so leftovers here
+                // can only be a half-built attempt the agent discarded (its
+                // stream-interruption retry re-issues the whole request and
+                // never appends the partial message — see agent.ts). Drop the
+                // stale buffer, or the retry re-streams the same opening text
+                // on top of it and the answer duplicates on screen.
+                clearAssistantStream();
+                break;
               case "text_delta":
                 assistantContent += event.content;
                 appendTextPart(assistantParts, event.content);

@@ -128,6 +128,13 @@ export class ChildRunner {
         record.abortController.signal,
       ]);
       for await (const event of subAgent.run(input, runCwd, { abortSignal: childAbortSignal, resumeWithoutInput })) {
+        if (event.type === "turn_start") {
+          // Leftovers here belong to a half-built attempt the agent discarded
+          // (stream-interruption retry re-issues the whole request); keeping
+          // them would duplicate the retried text in the turn summary.
+          turnSummaryBuffer = "";
+          turnHadToolCall = false;
+        }
         if (event.type === "text_delta") {
           turnSummaryBuffer += event.content;
         }
@@ -272,6 +279,11 @@ export class ChildRunner {
     const finalAbortSignal = composeAbortSignals([abortSignal, record.abortController.signal]);
 
     for await (const event of subAgent.run(prompt, cwd, { abortSignal: finalAbortSignal })) {
+      if (event.type === "turn_start") {
+        // Discarded stream-interruption attempt — drop its partial text so the
+        // retried response doesn't carry a duplicated prefix.
+        finalBuffer = "";
+      }
       if (event.type === "text_delta") {
         finalBuffer += event.content;
       }

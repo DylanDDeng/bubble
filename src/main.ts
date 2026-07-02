@@ -519,9 +519,21 @@ async function main() {
         process.exit(1);
       }
 
+      let printedTurnText = false;
       for await (const event of agent.run(prompt, args.cwd)) {
         traceEvent("print_agent_event", summarizeAgentEventForTrace(event));
-        if (event.type === "text_delta") {
+        if (event.type === "turn_start") {
+          printedTurnText = false;
+        } else if (event.type === "provider_retry") {
+          // The stream died mid-response and the agent re-issues the whole
+          // request. Text already on stdout cannot be un-printed, so at least
+          // separate the retried response and say what happened.
+          if (printedTurnText) process.stdout.write("\n");
+          console.error(chalk.yellow(
+            `[Stream interrupted; retrying (${event.attempt}/${event.maxAttempts}) — the partial text above is superseded by the retried response]`,
+          ));
+        } else if (event.type === "text_delta") {
+          printedTurnText = true;
           process.stdout.write(event.content);
         } else if (event.type === "tool_start") {
           console.log(chalk.cyan(`\n[Tool: ${event.name}]`));

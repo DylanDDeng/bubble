@@ -53,6 +53,37 @@ describe("run-state reducer", () => {
     expect(state.blocks[0]).toMatchObject({ kind: "tool", status: "err" });
   });
 
+  it("drops the discarded partial attempt on turn_start (stream-interruption retry)", () => {
+    const state = makeState();
+    reduceRunState(state, { type: "turn_start" });
+    reduceRunState(state, { type: "text_delta", content: "统计日期: 2026-07-02 | 数据" });
+    // Stream dies mid-response; the agent discards the partial assistant
+    // message, emits provider_retry, and re-enters the loop with turn_start.
+    reduceRunState(state, { type: "turn_start" });
+    reduceRunState(state, { type: "text_delta", content: "统计日期: 2026-07-02 | 数据范围: 完整回答" });
+    reduceRunState(state, { type: "turn_end", willContinue: false });
+
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]).toMatchObject({
+      kind: "text",
+      text: "统计日期: 2026-07-02 | 数据范围: 完整回答",
+      streaming: false,
+    });
+  });
+
+  it("keeps settled turns across turn boundaries", () => {
+    const state = makeState();
+    reduceRunState(state, { type: "turn_start" });
+    reduceRunState(state, { type: "text_delta", content: "first turn" });
+    reduceRunState(state, { type: "turn_end", willContinue: true });
+    reduceRunState(state, { type: "turn_start" });
+    reduceRunState(state, { type: "text_delta", content: "second turn" });
+
+    expect(state.blocks).toHaveLength(2);
+    expect(state.blocks[0]).toMatchObject({ kind: "text", text: "first turn", streaming: false });
+    expect(state.blocks[1]).toMatchObject({ kind: "text", text: "second turn", streaming: true });
+  });
+
   it("merges usage on turn_end", () => {
     const state = makeState();
     reduceRunState(state, {
