@@ -379,7 +379,15 @@ const MessageItem = React.memo(function MessageItem({
               nowTick={nowTick}
             />
           )}
-          {visibleContent.trim() && <MarkdownContent content={visibleContent} />}
+          {visibleContent.trim() && (
+            // Thread the real terminal width down (minus the row's paddingX
+            // inset); without it, width-aware blocks like tables fall back to
+            // a stale/default useTerminalSize and mis-budget their columns.
+            <MarkdownContent
+              content={visibleContent}
+              maxWidth={Math.max(20, terminalColumns - 4)}
+            />
+          )}
         </>
       )}
       {verboseTrace && message.toolCalls && message.toolCalls.length > 0 && (

@@ -502,38 +502,43 @@ function TableBlock({
   let widths = [...maxWidths];
   if (totalWidth > budget) {
     const available = Math.max(budget - separatorsWidth, colCount * 4);
-    const ratio = totalInnerWidth > 0 ? available / totalInnerWidth : 1;
-    widths = maxWidths.map((w) => Math.max(4, Math.floor(w * ratio)));
-    // The 4-cell floor can push the sum back above `available`; shave the
-    // overshoot off the widest columns so the row never exceeds the budget
-    // and gets hard-wrapped by the terminal.
-    let excess = widths.reduce((a, b) => a + b, 0) - available;
-    while (excess > 0) {
-      let widest = -1;
-      for (let i = 0; i < widths.length; i++) {
-        if (widths[i]! > 4 && (widest === -1 || widths[i]! > widths[widest]!)) widest = i;
-      }
-      if (widest === -1) break;
-      widths[widest]! -= 1;
-      excess -= 1;
-    }
+    widths = allocateColumnWidths(maxWidths, available);
   }
 
   const top = g.tl + widths.map((w) => g.h.repeat(w + 2)).join(g.tm) + g.tr;
   const mid = g.ml + widths.map((w) => g.h.repeat(w + 2)).join(g.mm) + g.mr;
   const bot = g.bl + widths.map((w) => g.h.repeat(w + 2)).join(g.bm) + g.br;
 
-  const renderRow = (cells: string[], keyPrefix: string, isHeader = false) => (
-    <Text key={keyPrefix}>
-      {`${g.v} `}
-      {cells.map((c, i) => (
-        <React.Fragment key={i}>
-          {renderTableCell(c, widths[i] ?? 4, isHeader, `${keyPrefix}-cell-${i}`)}
-          {i < colCount - 1 ? ` ${g.v} ` : ` ${g.v}`}
-        </React.Fragment>
-      ))}
-    </Text>
-  );
+  // A cell wider than its column wraps onto continuation lines (CJK-aware, so
+  // 、-joined user lists break cleanly); the row grows to its tallest cell.
+  const renderRow = (cells: string[], keyPrefix: string, isHeader = false) => {
+    const wrapped = cells.map((c, i) => {
+      const width = widths[i] ?? 4;
+      let lines = wrapInlineSegments(parseMarkdownInlineSegments(c, { bold: isHeader }), width);
+      if (lines.length > MAX_TABLE_CELL_LINES) {
+        lines = lines.slice(0, MAX_TABLE_CELL_LINES);
+        const last = lines[MAX_TABLE_CELL_LINES - 1]!;
+        lines[MAX_TABLE_CELL_LINES - 1] = truncateInlineSegments([...last, { text: " …" }], width);
+      }
+      return lines;
+    });
+    const height = Math.max(1, ...wrapped.map((lines) => lines.length));
+    return (
+      <Box key={keyPrefix} flexDirection="column">
+        {Array.from({ length: height }, (_, line) => (
+          <Text key={`${keyPrefix}-line-${line}`}>
+            {`${g.v} `}
+            {wrapped.map((cellLines, i) => (
+              <React.Fragment key={i}>
+                {renderCellLine(cellLines[line] ?? [], widths[i] ?? 4, `${keyPrefix}-cell-${i}-${line}`)}
+                {i < colCount - 1 ? ` ${g.v} ` : ` ${g.v}`}
+              </React.Fragment>
+            ))}
+          </Text>
+        ))}
+      </Box>
+    );
+  };
 
   return (
     <Box flexDirection="column" marginY={1}>
@@ -546,13 +551,70 @@ function TableBlock({
   );
 }
 
-function renderTableCell(
-  cell: string,
+/** Cap a pathological cell (huge blob of text) at this many wrapped lines. */
+const MAX_TABLE_CELL_LINES = 8;
+
+/**
+ * Distribute `available` inner cells across columns. Columns whose natural
+ * width already fits their fair share keep it untouched (numbers and dates
+ * never wrap); only the wider columns split the remainder proportionally and
+ * wrap their content.
+ */
+export function allocateColumnWidths(natural: number[], available: number): number[] {
+  const count = natural.length;
+  const widths = new Array<number>(count).fill(0);
+  const fixed = new Array<boolean>(count).fill(false);
+  let remaining = available;
+  let unfixed = count;
+  // Each fixed column frees slack that can fit further columns — iterate to a
+  // fixpoint. Terminates: natural sum exceeds `available` (only caller path),
+  // so at least one column always stays unfixed.
+  let changed = true;
+  while (changed && unfixed > 0) {
+    changed = false;
+    const fair = remaining / unfixed;
+    for (let i = 0; i < count; i++) {
+      if (fixed[i] || natural[i]! > fair) continue;
+      fixed[i] = true;
+      widths[i] = natural[i]!;
+      remaining -= natural[i]!;
+      unfixed -= 1;
+      changed = true;
+    }
+  }
+  if (unfixed > 0) {
+    const wideTotal = natural.reduce((sum, w, i) => sum + (fixed[i] ? 0 : w), 0);
+    let assigned = 0;
+    let lastWide = -1;
+    for (let i = 0; i < count; i++) {
+      if (fixed[i]) continue;
+      widths[i] = Math.max(4, Math.floor((remaining * natural[i]!) / wideTotal));
+      assigned += widths[i]!;
+      lastWide = i;
+    }
+    // Flooring leftovers go to the last wide column instead of being wasted.
+    if (lastWide >= 0 && assigned < remaining) widths[lastWide]! += remaining - assigned;
+  }
+  // On a very narrow budget the 4-cell floor can overshoot; shave the widest
+  // columns so the row never exceeds `available` and hard-wraps.
+  let excess = widths.reduce((a, b) => a + b, 0) - available;
+  while (excess > 0) {
+    let widest = -1;
+    for (let i = 0; i < count; i++) {
+      if (widths[i]! > 4 && (widest === -1 || widths[i]! > widths[widest]!)) widest = i;
+    }
+    if (widest === -1) break;
+    widths[widest]! -= 1;
+    excess -= 1;
+  }
+  return widths;
+}
+
+function renderCellLine(
+  segments: MarkdownInlineSegment[],
   width: number,
-  isHeader: boolean,
   keyPrefix: string,
 ): React.ReactNode[] {
-  const segments = truncateInlineSegments(parseMarkdownInlineSegments(cell, { bold: isHeader }), width);
   const padding = " ".repeat(Math.max(0, width - inlineSegmentsWidth(segments)));
   return [
     ...segments.map((segment, index) => (

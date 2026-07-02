@@ -65,6 +65,45 @@ describe("markdown table width on narrow-ambiguous terminals", () => {
   });
 });
 
+describe("markdown table cell wrapping", () => {
+  it("wraps long cells across lines instead of truncating them", () => {
+    setAmbiguousWide(false);
+    const lines = renderTable(120);
+    // The 收听用户 column is far wider than its share: its content must
+    // survive in full, wrapped across continuation lines of the same row.
+    const lastColumn = lines
+      .filter((line) => line.includes("│"))
+      .map((line) => line.split("│").at(-2) ?? "")
+      .join("")
+      .replace(/\s+/g, "");
+    expect(lastColumn).toContain("temp_2b16056d7141(2次)");
+    expect(lastColumn).toContain("user_9959afb3e5b0(2次)");
+    expect(lastColumn).toContain("瓜2(1次)");
+    expect(lines.join("\n")).not.toContain("…");
+  });
+
+  it("keeps narrow columns at natural width so numbers and dates never wrap", () => {
+    setAmbiguousWide(false);
+    const joined = renderTable(120).join("\n");
+    expect(joined).toContain("完播率");
+    expect(joined).toContain("77.6%");
+    expect(joined).toContain("2026-07-01");
+    expect(joined).toContain("世界杯前瞻");
+  });
+
+  it("pads every wrapped continuation line to the border width", () => {
+    setAmbiguousWide(false);
+    const lines = renderTable(120);
+    const borderWidth = visualWidth(
+      (lines.find((line) => line.includes("┌")) ?? "").trimEnd(),
+    );
+    expect(borderWidth).toBeGreaterThan(0);
+    for (const line of lines.filter((l) => l.includes("│"))) {
+      expect(visualWidth(line.trimEnd()), JSON.stringify(line)).toBe(borderWidth);
+    }
+  });
+});
+
 describe("markdown table on ambiguous-wide terminals", () => {
   it("draws ASCII borders whose physical width every layer agrees on", () => {
     setAmbiguousWide(true);
