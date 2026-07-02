@@ -10,6 +10,7 @@ import { UserConfig, maskKey } from "../config.js";
 import {
   InputBox,
   isCtrlCInput,
+  isCtrlLetterInput,
   type SubmitPayload,
 } from "./input-box.js";
 import { MessageList } from "./message-list.js";
@@ -652,7 +653,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
       return;
     }
 
-    if (key.ctrl && input.toLowerCase() === "p" && !pickerMode && !activeAbortRef.current) {
+    if (isCtrlLetterInput(input, key, "p") && !pickerMode && !activeAbortRef.current) {
       setStatsPanel(null);
       setPickerMode("slash");
       return;
@@ -668,7 +669,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
       return;
     }
 
-    if (key.ctrl && input.toLowerCase() === "t" && !pickerMode) {
+    if (isCtrlLetterInput(input, key, "t") && !pickerMode) {
       setShowThinking((current) => {
         const next = !current;
         addMessage("assistant", next ? "Thinking blocks visible" : "Thinking blocks hidden");
@@ -677,13 +678,13 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
       return;
     }
 
-    if (key.ctrl && input === "o" && !pickerMode) {
+    if (isCtrlLetterInput(input, key, "o") && !pickerMode) {
       setVerboseTrace((v) => !v);
       return;
     }
 
     // Ctrl+R: cycle thinking level (formerly Shift+Tab)
-    if (key.ctrl && input === "r" && !pickerMode) {
+    if (isCtrlLetterInput(input, key, "r") && !pickerMode) {
       const modelParts = agent.model.includes(":")
         ? agent.model.split(":")
         : [agent.providerId || safeRegistry.getDefault()?.id || "openai", agent.model];

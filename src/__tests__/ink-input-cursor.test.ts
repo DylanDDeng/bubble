@@ -9,6 +9,7 @@ import {
   insertNewlineAtCursor,
   isInkModifiedEnterInput,
   isCtrlCInput,
+  isCtrlLetterInput,
   lineEndBoundary,
   lineStartBoundary,
   needsCursorRowCompensation,
@@ -229,6 +230,21 @@ describe("Ink Ctrl+C handling", () => {
     expect(isCtrlCInput("\x03", {})).toBe(true);
     expect(isCtrlCInput("c", {})).toBe(false);
     expect(isCtrlCInput("x", { ctrl: true })).toBe(false);
+  });
+});
+
+describe("Ink app-level Ctrl shortcut handling", () => {
+  it("recognizes Ctrl+O from Ink key metadata and raw SI input", () => {
+    expect(isCtrlLetterInput("o", { ctrl: true }, "o")).toBe(true);
+    expect(isCtrlLetterInput("O", { ctrl: true }, "o")).toBe(true);
+    expect(isCtrlLetterInput("\x0f", {}, "o")).toBe(true);
+    expect(isCtrlLetterInput("o", {}, "o")).toBe(false);
+    expect(isCtrlLetterInput("x", { ctrl: true }, "o")).toBe(false);
+  });
+
+  it("ignores invalid shortcut letters", () => {
+    expect(isCtrlLetterInput("\x0f", {}, "oo")).toBe(false);
+    expect(isCtrlLetterInput("\x0f", {}, "1")).toBe(false);
   });
 });
 

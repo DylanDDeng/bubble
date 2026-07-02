@@ -117,8 +117,15 @@ export function resolveCursorRowCompensation(input: {
   ) ? 1 : 0;
 }
 
+export function isCtrlLetterInput(input: string, key: { ctrl?: boolean }, letter: string): boolean {
+  const normalized = letter.toLowerCase();
+  if (!/^[a-z]$/.test(normalized)) return false;
+  const rawControlInput = String.fromCharCode(normalized.charCodeAt(0) - 96);
+  return input === rawControlInput || (key.ctrl === true && input.toLowerCase() === normalized);
+}
+
 export function isCtrlCInput(input: string, key: { ctrl?: boolean }): boolean {
-  return input === "\x03" || (key.ctrl === true && input.toLowerCase() === "c");
+  return isCtrlLetterInput(input, key, "c");
 }
 
 export function shouldUseLineComposerFrame(_background: string): boolean {
