@@ -562,41 +562,6 @@ describe("slash commands", () => {
     expect(result.result).toContain("Exited plan mode");
   });
 
-  it("/sidebar toggles the TUI sidebar", async () => {
-    const toggleSidebar = vi.fn(() => ({
-      mode: "collapsed" as const,
-      visible: false,
-      active: true,
-    }));
-    const setSidebarMode = vi.fn();
-    const ctx = createContext({ toggleSidebar, setSidebarMode });
-
-    const result = await slashRegistry.execute("/sidebar", ctx);
-
-    expect(result.handled).toBe(true);
-    expect(result.result).toBeUndefined();
-    expect(toggleSidebar).toHaveBeenCalledTimes(1);
-    expect(setSidebarMode).not.toHaveBeenCalled();
-  });
-
-  it("/sidebar accepts explicit open, close, and auto modes", async () => {
-    const toggleSidebar = vi.fn();
-    const setSidebarMode = vi.fn((mode) => ({
-      mode,
-      visible: mode !== "collapsed",
-      active: true,
-    }));
-    const ctx = createContext({ toggleSidebar, setSidebarMode });
-
-    expect((await slashRegistry.execute("/sidebar open", ctx)).result).toBeUndefined();
-    expect((await slashRegistry.execute("/sidebar close", ctx)).result).toBeUndefined();
-    expect((await slashRegistry.execute("/sidebar auto", ctx)).result).toBeUndefined();
-    expect(setSidebarMode).toHaveBeenNthCalledWith(1, "expanded");
-    expect(setSidebarMode).toHaveBeenNthCalledWith(2, "collapsed");
-    expect(setSidebarMode).toHaveBeenNthCalledWith(3, "auto");
-    expect(toggleSidebar).not.toHaveBeenCalled();
-  });
-
   it("/clear resets agent context, todos, display history, and records a session boundary", async () => {
     let todos = [
       { content: "a", activeForm: "doing a", status: "in_progress" },

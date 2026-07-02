@@ -56,14 +56,12 @@ import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
 import type { BashAllowlist } from "../approval/session-cache.js";
 import type { SettingsManager } from "../permissions/settings.js";
 import type { McpManager } from "../mcp/manager.js";
-import type { McpServerState } from "../mcp/types.js";
-import type { LspService, LspStatus } from "../lsp/index.js";
+import type { LspService } from "../lsp/index.js";
 import type { QuestionAnswer, QuestionController, QuestionRequest } from "../question/index.js";
 import type { MemoryScope } from "../memory/index.js";
 import { QuestionDialog } from "./question-dialog.js";
 import { FeedbackDialog } from "./feedback-dialog.js";
 import type { ExternalHookController } from "../hooks/controller.js";
-import type { SidebarCommandState, SidebarMode } from "../slash-commands/types.js";
 import { collectFeedback } from "../feedback/collect.js";
 import { isKeyReleaseEvent } from "./key-events.js";
 import { errorMessage, formatModelSwitchError, switchAgentModel } from "../tui/model-switch.js";
@@ -400,7 +398,6 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   const [keyProviderId, setKeyProviderId] = useState<string | null>(null);
   const [showThinking, setShowThinking] = useState(false);
   const [verboseTrace, setVerboseTrace] = useState(false);
-  const [sidebarMode, setSidebarMode] = useState<SidebarMode>("collapsed");
   const startedWithVisibleHistoryRef = useRef(messages.some((message) => message.syntheticKind !== "ui_summary"));
   const { columns: terminalColumns, rows: terminalRows } = useTerminalSize();
   const showWelcome = shouldShowWelcomeBanner({
@@ -878,22 +875,6 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     const { description: _drop, ...rest } = base;
     setPendingFeedback({ base: rest, initialDescription });
   }, [agent]);
-
-  const sidebarFits = terminalColumns > 120;
-  const sidebarVisible = sidebarMode === "expanded" ? sidebarFits : sidebarMode === "auto" && sidebarFits;
-  const currentSidebarCommandState = useCallback((mode: SidebarMode = sidebarMode): SidebarCommandState => {
-    const visible = mode === "expanded" ? sidebarFits : mode === "auto" && sidebarFits;
-    return { mode, visible, active: visible };
-  }, [sidebarFits, sidebarMode]);
-  const toggleSidebar = useCallback((): SidebarCommandState => {
-    const next: SidebarMode = sidebarVisible ? "collapsed" : "expanded";
-    setSidebarMode(next);
-    return currentSidebarCommandState(next);
-  }, [currentSidebarCommandState, sidebarVisible]);
-  const applySidebarMode = useCallback((mode: SidebarMode): SidebarCommandState => {
-    setSidebarMode(mode);
-    return currentSidebarCommandState(mode);
-  }, [currentSidebarCommandState]);
 
   const openSessionPicker = useCallback(() => {
     if (activeAbortRef.current) {
@@ -1736,8 +1717,6 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
           getThemeMode: () => themeMode,
           getResolvedTheme: () => themeResolved,
           setThemeMode: applyThemeMode,
-          toggleSidebar,
-          setSidebarMode: applySidebarMode,
           openStats: openStatsPanel,
           compactionProgress: setCompaction,
         });
@@ -1805,7 +1784,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         }
       }
     },
-    [addMessage, agent, args.cwd, openPicker, openSessionPicker, openRewindPicker, openStatsPanel, createProvider, currentSessionFile, fillComposer, prepareSubmitDisplay, safeRegistry, safeSkillRegistry, updateDisplayMessages, queueInput, submitSteer, requestExit, toggleSidebar, applySidebarMode, setStartingSubmit]
+    [addMessage, agent, args.cwd, openPicker, openSessionPicker, openRewindPicker, openStatsPanel, createProvider, currentSessionFile, fillComposer, prepareSubmitDisplay, safeRegistry, safeSkillRegistry, updateDisplayMessages, queueInput, submitSteer, requestExit, setStartingSubmit]
   );
 
   // Drain the queue once the run ends and no modal needs the user first.
@@ -1882,12 +1861,10 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   // tail, pickers, composer, footer) occupies the live region. Letting it size
   // to its content keeps the composer pinned just below the latest output the
   // way ordinary shell programs do.
-  const sidebarWidth = sidebarVisible ? Math.min(42, Math.max(28, Math.floor(terminalColumns * 0.34))) : 0;
-  const mainWidth = Math.max(40, terminalColumns - sidebarWidth);
+  const mainWidth = Math.max(40, terminalColumns);
 
   return (
     <ThemeProvider value={palette}>
-      <Box flexDirection="row" width={terminalColumns} backgroundColor={palette.background}>
       <Box flexDirection="column" width={mainWidth} backgroundColor={palette.background}>
         <MessageList
           messages={messages}
@@ -2213,20 +2190,6 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         </Box>
       )}
       </Box>
-      {sidebarVisible && (
-        <InkSidebar
-          width={sidebarWidth}
-          agent={agent}
-          sessionManager={sessionManager}
-          cwd={args.cwd}
-          mode={permissionMode}
-          goalLine={goalLine}
-          todos={todos}
-          mcpManager={mcpManager}
-          lspService={lspService}
-        />
-      )}
-    </Box>
     </ThemeProvider>
   );
 }
@@ -2738,183 +2701,6 @@ function StatsPanel({
           {scroll + 1}-{Math.min(lines.length, scroll + maxVisible)} of {lines.length}
         </Text>
       )}
-    </Box>
-  );
-}
-
-interface InkSidebarProps {
-  width: number;
-  agent: Agent;
-  sessionManager?: SessionManager;
-  cwd: string;
-  mode: PermissionMode;
-  goalLine: string;
-  todos: Todo[];
-  mcpManager?: McpManager;
-  lspService?: LspService;
-}
-
-interface StatusCount {
-  connected: number;
-  starting: number;
-  failed: number;
-  disabled: number;
-}
-
-function summarizeMcpStates(states: McpServerState[]): StatusCount & { tools: number } {
-  const summary = { connected: 0, starting: 0, failed: 0, disabled: 0, tools: 0 };
-  for (const state of states) {
-    if (state.status.kind === "connected") {
-      summary.connected += 1;
-      summary.tools += state.status.tools.length;
-    } else if (state.status.kind === "failed") {
-      summary.failed += 1;
-    } else {
-      summary.disabled += 1;
-    }
-  }
-  return summary;
-}
-
-function summarizeLspStatuses(statuses: LspStatus[]): StatusCount {
-  const summary = { connected: 0, starting: 0, failed: 0, disabled: 0 };
-  for (const status of statuses) {
-    if (status.status === "connected") summary.connected += 1;
-    else if (status.status === "starting") summary.starting += 1;
-    else summary.failed += 1;
-  }
-  return summary;
-}
-
-function formatStatusCount(summary: StatusCount): string {
-  const parts: string[] = [];
-  if (summary.connected > 0) parts.push(`${summary.connected} up`);
-  if (summary.starting > 0) parts.push(`${summary.starting} starting`);
-  if (summary.failed > 0) parts.push(`${summary.failed} failed`);
-  if (summary.disabled > 0) parts.push(`${summary.disabled} disabled`);
-  return parts.join(" · ") || "none";
-}
-
-function SidebarSection({ title, children }: { title: string; children: React.ReactNode }) {
-  const theme = useTheme();
-  return (
-    <Box flexDirection="column" marginBottom={1}>
-      <Text color={theme.accent} bold>{title}</Text>
-      {children}
-    </Box>
-  );
-}
-
-function SidebarRow({
-  label,
-  value,
-  color,
-}: {
-  label: string;
-  value: string;
-  color?: string;
-}) {
-  const theme = useTheme();
-  return (
-    <Box>
-      <Text color={theme.muted}>{label}: </Text>
-      <Text color={color ?? theme.userMessageText}>{value}</Text>
-    </Box>
-  );
-}
-
-function InkSidebar({
-  width,
-  agent,
-  sessionManager,
-  cwd,
-  mode,
-  goalLine,
-  todos,
-  mcpManager,
-  lspService,
-}: InkSidebarProps) {
-  const theme = useTheme();
-  const innerWidth = Math.max(12, width - 4);
-  const todoCounts = todos.reduce(
-    (acc, todo) => {
-      acc[todo.status] = (acc[todo.status] ?? 0) + 1;
-      return acc;
-    },
-    {} as Record<Todo["status"], number>,
-  );
-  const todoSummary = todos.length === 0
-    ? "none"
-    : [
-        todoCounts.in_progress ? `${todoCounts.in_progress} active` : "",
-        todoCounts.pending ? `${todoCounts.pending} pending` : "",
-        todoCounts.completed ? `${todoCounts.completed} done` : "",
-      ].filter(Boolean).join(" · ");
-  const mcpStates = mcpManager?.getStates() ?? [];
-  const mcpSummary = summarizeMcpStates(mcpStates);
-  const lspSummary = lspService?.isDisabled()
-    ? { connected: 0, starting: 0, failed: 0, disabled: 1 }
-    : summarizeLspStatuses(lspService?.status() ?? []);
-  const latestMcpFailure = mcpStates.find((state) => state.status.kind === "failed");
-  const latestLspFailure = lspService?.status().find((status) => status.status === "error");
-  const sessionTitle = truncate(sessionDisplayName(sessionManager), innerWidth);
-  const modelLabel = agent.model ? displayModel(agent.model) : "not selected";
-  const route = agent.providerId
-    ? `${agent.providerId}/${modelLabel}`
-    : modelLabel;
-
-  return (
-    <Box
-      flexDirection="column"
-      width={width}
-      height="100%"
-      borderStyle="single"
-      borderColor={theme.border}
-      paddingX={1}
-      paddingY={1}
-      flexShrink={0}
-    >
-      <Text color={theme.borderActive} bold>Session</Text>
-      <Text color={theme.userMessageText}>{sessionTitle}</Text>
-      <Text color={theme.muted}>{truncate(friendlyCwd(cwd), innerWidth)}</Text>
-
-      <Box marginTop={1} flexDirection="column">
-        <SidebarSection title="Runtime">
-          <SidebarRow label="model" value={truncate(route, innerWidth - 7)} />
-          <SidebarRow label="mode" value={mode} color={mode === "bypassPermissions" ? theme.warning : theme.userMessageText} />
-          <SidebarRow label="thinking" value={agent.thinking || "off"} />
-        </SidebarSection>
-
-        {goalLine && (
-          <SidebarSection title="Goal">
-            <Text color={theme.userMessageText}>{truncate(goalLine, innerWidth)}</Text>
-          </SidebarSection>
-        )}
-
-        <SidebarSection title="Todos">
-          <Text color={todos.length > 0 ? theme.userMessageText : theme.muted}>
-            {truncate(todoSummary, innerWidth)}
-          </Text>
-        </SidebarSection>
-
-        <SidebarSection title="MCP">
-          <Text color={mcpSummary.failed > 0 ? theme.warning : theme.userMessageText}>
-            {truncate(`${formatStatusCount(mcpSummary)}${mcpSummary.tools > 0 ? ` · ${mcpSummary.tools} tools` : ""}`, innerWidth)}
-          </Text>
-          {latestMcpFailure?.status.kind === "failed" && (
-            <Text color={theme.muted}>{truncate(latestMcpFailure.status.error, innerWidth)}</Text>
-          )}
-        </SidebarSection>
-
-        <SidebarSection title="LSP">
-          <Text color={lspSummary.failed > 0 ? theme.warning : theme.userMessageText}>
-            {truncate(formatStatusCount(lspSummary), innerWidth)}
-          </Text>
-          {latestLspFailure?.message && (
-            <Text color={theme.muted}>{truncate(latestLspFailure.message, innerWidth)}</Text>
-          )}
-        </SidebarSection>
-      </Box>
     </Box>
   );
 }

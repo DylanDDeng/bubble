@@ -11,8 +11,6 @@ import type { MemoryScope } from "../memory/index.js";
 import type { ThemeMode } from "../config.js";
 import type { ExternalHookController } from "../hooks/controller.js";
 
-export type SidebarMode = "auto" | "expanded" | "collapsed";
-
 /**
  * Live progress for a manual `/compact` run, pushed to the TUI so it can render
  * a progress bar. `phase` advances collecting → summarizing → applying;
@@ -22,12 +20,6 @@ export type SidebarMode = "auto" | "expanded" | "collapsed";
 export interface CompactionProgress {
   phase: "collecting" | "summarizing" | "applying";
   streamedChars: number;
-}
-
-export interface SidebarCommandState {
-  mode: SidebarMode;
-  visible: boolean;
-  active: boolean;
 }
 
 export interface SlashCommandContext {
@@ -56,10 +48,6 @@ export interface SlashCommandContext {
   getResolvedTheme?: () => "light" | "dark";
   /** Persist a new theme mode AND apply it to the running TUI. */
   setThemeMode?: (mode: ThemeMode) => void;
-  /** Toggle the right session sidebar in the running TUI. */
-  toggleSidebar?: () => SidebarCommandState;
-  /** Set the right session sidebar mode in the running TUI. */
-  setSidebarMode?: (mode: SidebarMode) => SidebarCommandState;
   /** Open the feedback dialog. `initialDescription` prefills the description field. */
   openFeedback?: (initialDescription: string) => void;
   /** Open the interactive rewind picker. When absent, /rewind falls back to a text listing. */

@@ -101,7 +101,7 @@ function completionTokenUsagePhrase(goal: GoalState): string {
     : `${formatTokensCompact(goal.tokensUsed)} tok used`;
 }
 
-/** Compact single-line indicator for the status line / sidebar. */
+/** Compact single-line indicator for status surfaces. */
 export function goalIndicatorLine(goal: GoalState, maxObjective = 48): string {
   const segments = [`goal: ${goalStatusLabel(goal.status)}`, `${goal.turnsSpent} turns`];
   const tokens = tokensPart(goal);

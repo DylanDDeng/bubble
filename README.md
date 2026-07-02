@@ -163,7 +163,7 @@ Rules use a simple pattern syntax, for example:
 | `/permissions` | View or edit allow/deny rules. |
 | `/context`, `/stats`, `/compact` | Inspect context usage, model stats, and compact the session. |
 | `/lsp`, `/hooks` | Manage language servers and lifecycle hooks. |
-| `/theme`, `/sidebar` | Adjust the interface. |
+| `/theme` | Adjust the interface theme. |
 | `/feedback` | Send feedback or report a bug. |
 
 ## Non-interactive mode

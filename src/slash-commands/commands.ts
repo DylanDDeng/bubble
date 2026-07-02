@@ -421,34 +421,6 @@ const builtinSlashCommandEntries: SlashCommand[] = [
     },
   },
   {
-    name: "sidebar",
-    description: "Toggle the right sidebar. Usage: /sidebar [open|close|auto]",
-    async handler(args, ctx) {
-      if (!ctx.toggleSidebar || !ctx.setSidebarMode) {
-        return "Sidebar control is only available inside the TUI.";
-      }
-
-      const arg = args.trim().toLowerCase();
-      if (!arg) {
-        ctx.toggleSidebar();
-        return;
-      }
-      if (["open", "show", "expand", "expanded", "on"].includes(arg)) {
-        ctx.setSidebarMode("expanded");
-        return;
-      }
-      if (["close", "hide", "collapse", "collapsed", "off"].includes(arg)) {
-        ctx.setSidebarMode("collapsed");
-        return;
-      }
-      if (arg === "auto") {
-        ctx.setSidebarMode("auto");
-        return;
-      }
-      return "Usage: /sidebar [open|close|auto]";
-    },
-  },
-  {
     name: "clear",
     description: "Clear the current conversation history",
     async handler(args, ctx) {
