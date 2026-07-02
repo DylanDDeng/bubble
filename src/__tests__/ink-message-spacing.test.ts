@@ -284,6 +284,31 @@ describe("Ink message spacing", () => {
     expect(output).toContain("ctrl+o to expand");
   });
 
+  it("expands grouped read traces when verbose trace is enabled", () => {
+    const toolCalls = Array.from({ length: 8 }, (_, index) => ({
+      id: `read-${index + 1}`,
+      name: "read",
+      args: { path: `file-${index + 1}.ts` },
+      result: `content from file-${index + 1}`,
+    }));
+    const message: DisplayMessage = {
+      key: "assistant-reads",
+      role: "assistant",
+      content: "",
+      parts: [{ type: "tools", toolCalls }],
+    };
+
+    const compact = renderLines([message]).join("\n");
+    expect(compact).toContain("Read 8 files");
+    expect(compact).toContain("Ctrl+O to view");
+    expect(compact).not.toContain("content from file-8");
+
+    const expanded = renderLines([message], [], true).join("\n");
+    expect(expanded).toContain("Read(file-8.ts)");
+    expect(expanded).toContain("content from file-8");
+    expect(expanded).not.toContain("Ctrl+O to view");
+  });
+
   it("keeps committed history renderable for terminal scrollback", () => {
     const messages: DisplayMessage[] = Array.from({ length: 100 }, (_, index) => ({
       key: `msg-${index}`,

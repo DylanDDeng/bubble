@@ -414,6 +414,12 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   // MessageList so Ink discards its already-printed rows and re-prints the
   // rebuilt list onto a freshly-cleared screen instead of appending duplicates.
   const [staticGeneration, setStaticGeneration] = useState(0);
+  const reprintTranscript = useCallback(() => {
+    if (process.stdout.isTTY) {
+      process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
+    }
+    setStaticGeneration((generation) => generation + 1);
+  }, []);
   // Steer/queue while the agent runs:
   // Enter steers the current run via the agent's input controller; Tab (or an
   // ineligible input) queues for the next turn. Both render placeholder user
@@ -680,6 +686,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
 
     if (isCtrlLetterInput(input, key, "o") && !pickerMode) {
       setVerboseTrace((v) => !v);
+      reprintTranscript();
       return;
     }
 
@@ -733,13 +740,10 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   // Ink then re-prints the rebuilt list fresh instead of appending duplicates.
   const resetTranscript = useCallback(
     (updater: (prev: DisplayMessage[]) => DisplayMessage[]) => {
-      if (process.stdout.isTTY) {
-        process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
-      }
-      setStaticGeneration((generation) => generation + 1);
+      reprintTranscript();
       updateDisplayMessages(updater);
     },
-    [updateDisplayMessages],
+    [reprintTranscript, updateDisplayMessages],
   );
 
   const addMessage = useCallback((role: DisplayMessage["role"], content: string) => {
