@@ -155,6 +155,12 @@ function friendlyCwd(cwd: string): string {
   return cwd;
 }
 
+function sessionBasename(sessionFile: string | undefined): string | undefined {
+  if (!sessionFile) return undefined;
+  const base = sessionFile.split("/").pop() ?? sessionFile;
+  return base.replace(/\.jsonl$/, "");
+}
+
 function truncate(value: string, max: number) {
   if (value.length <= max) return value;
   return `${value.slice(0, Math.max(0, max - 1))}…`;
@@ -1857,6 +1863,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
       tips={buildTips(agent, safeRegistry)}
       updateNotice={currentUpdateNotice}
       cwd={friendlyCwd(args.cwd)}
+      sessionLabel={sessionBasename(currentSessionFile())}
       providerId={agent.providerId || safeRegistry.getDefault()?.id}
       modelLabel={agent.model ? displayModel(agent.model) : undefined}
       thinkingLabel={showThinkingLabel ? thinkingLevel : undefined}

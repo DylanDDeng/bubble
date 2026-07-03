@@ -24,6 +24,11 @@ export interface Theme {
   // UI chrome
   background: string;
   accent: string;
+  /** Welcome banner border. */
+  bannerBorder: string;
+  /** Welcome banner logo/title gradient endpoints (top→bottom, left→right). */
+  bannerGradientFrom: string;
+  bannerGradientTo: string;
   border: string;
   borderActive: string;
   backgroundPanel: string;
@@ -73,6 +78,9 @@ export const darkTheme: Theme = {
 
   background: "#0A0A0A",
   accent: "cyan",
+  bannerBorder: "#38bdf8",
+  bannerGradientFrom: "#67e8f9",
+  bannerGradientTo: "#a78bfa",
   border: "gray",
   borderActive: "cyan",
   backgroundPanel: "#141414",
@@ -124,6 +132,9 @@ export const lightTheme: Theme = {
 
   background: "#FCFCFA",
   accent: "#8B4A00",
+  bannerBorder: "#356FD2",
+  bannerGradientFrom: "#0E7490",
+  bannerGradientTo: "#6D28D9",
   border: "#B9BDB8",
   borderActive: "#356FD2",
   backgroundPanel: "#F6F6F3",

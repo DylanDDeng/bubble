@@ -68,12 +68,13 @@ describe("Ink welcome banner", () => {
     })).toBe(true);
   });
 
-  it("renders a compact Claude Code-style brand header", () => {
+  it("renders a boxed welcome banner with labeled info rows", () => {
     const output = renderToString(
       React.createElement(WelcomeBanner, {
         terminalColumns: 100,
         tips: ["Ready with deepseek-v4-flash", "Type @ to reference a file", "Type / for commands and skills"],
         cwd: "~/coworker",
+        sessionLabel: "2026-06-12T14-23-38-047Z",
         providerId: "openai",
         modelLabel: "gpt-5.5",
         thinkingLabel: "xhigh",
@@ -81,11 +82,19 @@ describe("Ink welcome banner", () => {
       { columns: 100 },
     );
 
-    expect(output).toContain("Bubble");
-    expect(output).toContain("v0.0.");
-    expect(output).toContain("gpt-5.5 with xhigh effort · openai");
+    expect(output).toContain("Welcome to Bubble!");
+    expect(output).toContain("I am a cat and you can send /help");
+    expect(output).toContain("Directory:");
     expect(output).toContain("~/coworker");
+    expect(output).toContain("Session:");
+    expect(output).toContain("2026-06-12T14-23-38-047Z");
+    expect(output).toContain("Model:");
+    expect(output).toContain("gpt-5.5 with xhigh effort · openai");
+    expect(output).toContain("Version:");
+    expect(output).toContain("v0.0.");
     expect(output).toContain("██████");
+    expect(output).toContain("╭");
+    expect(output).toContain("╰");
     expect(output).not.toContain("██▀▀██");
     expect(output).not.toContain("TIP:");
     expect(output).not.toContain("shift+tab");
