@@ -8,6 +8,7 @@ import OpenAI from "openai";
 import { appendFileSync } from "node:fs";
 import { createAnthropicMessagesProvider } from "./provider-anthropic.js";
 import { createArkResponsesProvider } from "./provider-ark-responses.js";
+import { createAiSdkProvider } from "./provider-ai-sdk.js";
 import { createOpenAICodexProvider, isOpenAICodexBaseUrl, type OpenAICodexAuthAdapter } from "./provider-openai-codex.js";
 import { createProviderProtocolArtifactFilter } from "./provider-artifacts.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
@@ -118,6 +119,10 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
 
   if (protocol === "ark-responses") {
     return createArkResponsesProvider(options);
+  }
+
+  if (protocol === "ai-sdk") {
+    return createAiSdkProvider(options);
   }
 
   if (isOpenAICodexBaseUrl(options.baseURL)) {

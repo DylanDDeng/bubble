@@ -16,6 +16,7 @@ import {
 } from "./model-catalog.js";
 import { ModelConfig } from "./model-config.js";
 import { AuthStorage } from "./oauth/index.js";
+import { fetchGeminiModels } from "./provider-ai-sdk.js";
 import { fetchOpenAICodexModels, type OpenAICodexAuthAdapter } from "./provider-openai-codex.js";
 import { refreshOpenAICodex } from "./oauth/openai-codex.js";
 import type { OAuthCredentials } from "./oauth/types.js";
@@ -162,7 +163,7 @@ export class ProviderRegistry {
       providers = keys.map((id) => {
         const builtin = getBuiltinProvider(id);
         const cfg = modelsJsonProviders[id];
-        const baseURL = cfg.baseURL || builtin?.baseURL || "";
+        const baseURL = upgradeLegacyBaseURL(id, cfg.baseURL || builtin?.baseURL || "", cfg.protocol);
         return {
           id,
           name: builtin?.name || id,
@@ -176,10 +177,11 @@ export class ProviderRegistry {
     } else {
       // 2. Fall back to config.json providers (interactive TUI style)
       providers = this.config.getProviders().map((provider) => {
-        const builtin = getBuiltinProvider(provider.id);
+        const baseURL = upgradeLegacyBaseURL(provider.id, provider.baseURL, provider.protocol);
         return {
           ...provider,
-          protocol: resolveConfiguredProtocol(provider.id, provider.baseURL, provider.protocol),
+          baseURL,
+          protocol: resolveConfiguredProtocol(provider.id, baseURL, provider.protocol),
         };
       });
     }
@@ -291,6 +293,31 @@ export class ProviderRegistry {
       }
     }
 
+    if (provider.id === "google" && provider.protocol === "ai-sdk" && provider.apiKey) {
+      try {
+        const descriptors = await fetchGeminiModels({
+          apiKey: provider.apiKey,
+          baseURL: provider.baseURL,
+        });
+        if (descriptors.length > 0) {
+          for (const d of descriptors) {
+            const catalogEntry = getBuiltinModel("google", d.id);
+            registerDynamicModelMetadata({
+              id: d.id,
+              name: d.name,
+              providerId: "google",
+              reasoningLevels: d.reasoningLevels,
+              defaultReasoningLevel: d.defaultReasoningLevel ?? catalogEntry?.defaultReasoningLevel,
+              contextWindow: d.contextWindow ?? catalogEntry?.contextWindow,
+            });
+          }
+          return descriptors.map((d) => ({ id: d.id, name: d.name, providerId: provider.id }));
+        }
+      } catch {
+        // fall through to static
+      }
+    }
+
     if (provider.id === "openai" && provider.authType === "oauth" && provider.apiKey) {
       try {
         await this.prepareProvider(provider.id);
@@ -334,6 +361,25 @@ export class ProviderRegistry {
       providerId: provider.id,
     }));
   }
+}
+
+/**
+ * Builtin defaults that were captured into stored profiles before a builtin's
+ * baseURL moved. Exactly these values are treated as "not customized" and
+ * follow the builtin to its new address (and thereby its new protocol);
+ * genuinely custom URLs and profiles with an explicit protocol are untouched.
+ */
+const LEGACY_BUILTIN_BASE_URLS: Record<string, string> = {
+  // google moved from the Gemini OpenAI-compat endpoint to the native API
+  // when the "ai-sdk" protocol landed.
+  google: "https://generativelanguage.googleapis.com/v1beta/openai",
+};
+
+function upgradeLegacyBaseURL(providerId: string, baseURL: string, explicitProtocol?: ProviderProtocol): string {
+  if (explicitProtocol) return baseURL;
+  const legacy = LEGACY_BUILTIN_BASE_URLS[providerId];
+  if (!legacy || normalizeBaseURL(baseURL) !== normalizeBaseURL(legacy)) return baseURL;
+  return getBuiltinProvider(providerId)?.baseURL ?? baseURL;
 }
 
 function resolveConfiguredProtocol(providerId: string, baseURL: string, explicitProtocol?: ProviderProtocol): ProviderProtocol | undefined {

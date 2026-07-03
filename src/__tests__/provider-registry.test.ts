@@ -93,6 +93,43 @@ describe("provider registry", () => {
     });
   });
 
+  it("upgrades google profiles stored with the legacy OpenAI-compat baseURL", () => {
+    const makeConfig = (baseURL: string) => ({
+      getProviders: () => [{
+        id: "google",
+        name: "Google",
+        baseURL,
+        apiKey: "g-key",
+        enabled: true,
+        authType: "api",
+      }],
+      setProviders: () => undefined,
+      getDefaultProvider: () => "google",
+      setDefaultProvider: () => undefined,
+      getApiKey: () => undefined,
+      setApiKey: () => undefined,
+      getDefaultModel: () => undefined,
+      setDefaultModel: () => undefined,
+      getRecentModels: () => [],
+      pushRecentModel: () => undefined,
+    }) as any;
+
+    // Stale profile captured from the pre-ai-sdk builtin default: follows the
+    // builtin to the native endpoint and picks up the ai-sdk protocol.
+    const legacy = new ProviderRegistry(makeConfig("https://generativelanguage.googleapis.com/v1beta/openai"));
+    expect(legacy.getDefault()).toMatchObject({
+      id: "google",
+      baseURL: "https://generativelanguage.googleapis.com/v1beta",
+      protocol: "ai-sdk",
+    });
+
+    // A genuinely custom URL stays untouched and keeps the openai-chat fallback.
+    const custom = new ProviderRegistry(makeConfig("https://my-proxy.example.com/v1beta/openai"));
+    const customProfile = custom.getDefault();
+    expect(customProfile?.baseURL).toBe("https://my-proxy.example.com/v1beta/openai");
+    expect(customProfile?.protocol).toBeUndefined();
+  });
+
   it("overlays Ark Responses protocol metadata onto configured Doubao providers", () => {
     const providers = [
       {

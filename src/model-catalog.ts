@@ -1,6 +1,6 @@
 import type { ReasoningEffort } from "./types.js";
 
-export type ProviderProtocol = "openai-chat" | "anthropic-messages" | "ark-responses";
+export type ProviderProtocol = "openai-chat" | "anthropic-messages" | "ark-responses" | "ai-sdk";
 
 export interface BuiltinProviderDefinition {
   id: string;
@@ -33,7 +33,10 @@ export const BUILTIN_PROVIDERS: BuiltinProviderDefinition[] = [
   { id: "openai-codex", name: "OpenAI Codex (ChatGPT)", baseURL: "https://chatgpt.com/backend-api" },
   { id: "anthropic", name: "Anthropic", baseURL: "https://api.anthropic.com", protocol: "anthropic-messages" },
   { id: "deepseek", name: "DeepSeek", baseURL: "https://api.deepseek.com" },
-  { id: "google", name: "Google", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai" },
+  // Native Gemini API via the AI SDK google provider. Users who configured the
+  // old OpenAI-compat endpoint can keep it by setting protocol "openai-chat"
+  // and the /openai baseURL explicitly in models.json.
+  { id: "google", name: "Google Gemini", baseURL: "https://generativelanguage.googleapis.com/v1beta", protocol: "ai-sdk" },
   { id: "zhipuai", name: "Zhipu AI", baseURL: "https://open.bigmodel.cn/api/paas/v4" },
   { id: "zhipuai-coding-plan", name: "Zhipu AI Coding Plan", baseURL: "https://open.bigmodel.cn/api/coding/paas/v4" },
   { id: "zai", name: "Z.AI", baseURL: "https://api.z.ai/api/paas/v4" },
@@ -81,6 +84,10 @@ const ANTHROPIC_OPUS_EFFORT_LEVELS: ReasoningEffort[] = ["off", "low", "medium",
 const ANTHROPIC_SONNET_EFFORT_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high", "max"];
 const ANTHROPIC_FABLE_EFFORT_LEVELS: ReasoningEffort[] = ["low", "medium", "high", "xhigh", "max"];
 const ANTHROPIC_CHAT_LEVELS: ReasoningEffort[] = ["off"];
+const GEMINI_3_LEVELS: ReasoningEffort[] = ["low", "medium", "high"];
+const GEMINI_3_FLASH_LEVELS: ReasoningEffort[] = ["minimal", "low", "medium", "high"];
+const GEMINI_25_PRO_LEVELS: ReasoningEffort[] = ["low", "medium", "high"];
+const GEMINI_25_FLASH_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high"];
 
 export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "gpt-5.5", name: "gpt-5.5", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000, toolOutputTokenLimit: 10000 },
@@ -107,9 +114,15 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
 
   { id: "deepseek-v4-flash", name: "deepseek-v4-flash", providerId: "deepseek", reasoningLevels: DEEPSEEK_V4_LEVELS, contextWindow: 1048576 },
   { id: "deepseek-v4-pro", name: "deepseek-v4-pro", providerId: "deepseek", reasoningLevels: DEEPSEEK_V4_LEVELS, contextWindow: 1048576 },
-  { id: "gemini-2.5-pro-preview-03-25", name: "gemini-2.5-pro-preview-03-25", providerId: "google", reasoningLevels: ["off", "low", "high"], contextWindow: 128000 },
-  { id: "gemini-2.0-flash-001", name: "gemini-2.0-flash-001", providerId: "google", reasoningLevels: ["off"], contextWindow: 128000 },
-  { id: "gemini-1.5-pro-latest", name: "gemini-1.5-pro-latest", providerId: "google", reasoningLevels: ["off"], contextWindow: 128000 },
+  // Offline/no-key fallback only: with an API key the registry replaces this
+  // list via fetchGeminiModels (GET /v1beta/models, newest five). Gemini 3
+  // exposes thinking_level (minimal/low/medium/high); 2.5 Pro cannot disable
+  // thinking (no "off"), 2.5 Flash can (thinkingBudget 0).
+  { id: "gemini-3.5-flash", name: "Gemini 3.5 Flash", providerId: "google", reasoningLevels: GEMINI_3_FLASH_LEVELS, contextWindow: 1048576 },
+  { id: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro", providerId: "google", reasoningLevels: GEMINI_3_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  { id: "gemini-3-flash-preview", name: "Gemini 3 Flash", providerId: "google", reasoningLevels: GEMINI_3_FLASH_LEVELS, contextWindow: 1048576 },
+  { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", providerId: "google", reasoningLevels: GEMINI_25_PRO_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", providerId: "google", reasoningLevels: GEMINI_25_FLASH_LEVELS, contextWindow: 1048576 },
   { id: "glm-5.2", name: "GLM-5.2", providerId: "zhipuai", reasoningLevels: GLM_5_2_LEVELS, contextWindow: 1000000 },
   { id: "glm-5.1", name: "GLM-5.1", providerId: "zhipuai", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
   { id: "glm-4.7", name: "GLM-4.7", providerId: "zhipuai", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },

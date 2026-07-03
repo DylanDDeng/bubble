@@ -19,7 +19,7 @@ import { projectMessages } from "./context/projector.js";
 import { aggressivePruneMessages, markStableCurrentToolResultsForCache } from "./context/prune.js";
 import { truncateToolOutputForModel } from "./context/tool-output-truncate.js";
 import { buildDeferredToolsReminder, buildToolFreezeReminder, reminderForMode } from "./prompt/reminders.js";
-import type { AgentEvent, AgentInputController, AgentRunInput, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ProviderMessage, ProviderRawContentBlock, ThinkingLevel, Todo, TokenUsage, ToolDefinition, ToolResult, ToolRegistryEntry, ToolUpdate } from "./types.js";
+import type { AgentEvent, AgentInputController, AgentRunInput, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ProviderMessage, ProviderMetadataProvider, ProviderRawContentBlock, ThinkingLevel, Todo, TokenUsage, ToolDefinition, ToolResult, ToolRegistryEntry, ToolUpdate } from "./types.js";
 import { HookBus, type TurnHooks, type TurnHookState } from "./orchestrator/hooks.js";
 import type { ExternalHookController } from "./hooks/controller.js";
 import {
@@ -2968,15 +2968,14 @@ function estimateResidentChars(messages: Message[]): number {
 
 function appendProviderContentBlock(
   message: Extract<Message, { role: "assistant" }>,
-  provider: "anthropic",
+  provider: ProviderMetadataProvider,
   block: ProviderRawContentBlock,
 ): void {
-  if (provider !== "anthropic") return;
-  const current = message.providerMetadata?.anthropic?.contentBlocks ?? [];
+  const current = message.providerMetadata?.[provider]?.contentBlocks ?? [];
   message.providerMetadata = {
     ...message.providerMetadata,
-    anthropic: {
-      ...message.providerMetadata?.anthropic,
+    [provider]: {
+      ...message.providerMetadata?.[provider],
       contentBlocks: [...current, cloneProviderRawContentBlock(block)],
     },
   };

@@ -10,7 +10,7 @@ describe("provider transform", () => {
 
   it("emits reasoning effort for openai-compatible providers", () => {
     const openai = resolveProviderRequestConfig("openai", "o1-preview", "high");
-    const google = resolveProviderRequestConfig("google", "gemini-2.5-pro-preview-03-25", "high");
+    const google = resolveProviderRequestConfig("google", "gemini-2.5-pro", "high");
 
     expect(openai.reasoningEffort).toBe("high");
     expect(google.reasoningEffort).toBe("high");

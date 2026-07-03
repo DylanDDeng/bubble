@@ -13,6 +13,8 @@ const OVERFLOW_PATTERNS: RegExp[] = [
   /prompt is too long/i,
   /maximum context length/i,
   /too many tokens/i,
+  // Gemini: "The input token count (N) exceeds the maximum number of tokens allowed (M)."
+  /input token count.*exceeds the maximum/i,
 ];
 
 export function isContextOverflowError(error: unknown): boolean {

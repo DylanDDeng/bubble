@@ -22,10 +22,21 @@ export type ReasoningEffort = ThinkingLevel;
 
 export type ProviderRawContentBlock = Record<string, unknown> & { type: string };
 
+export type ProviderMetadataProvider = "anthropic" | "google";
+
+export interface ProviderContentBlockStore {
+  contentBlocks?: ProviderRawContentBlock[];
+}
+
 export interface AssistantProviderMetadata {
-  anthropic?: {
-    contentBlocks?: ProviderRawContentBlock[];
-  };
+  anthropic?: ProviderContentBlockStore;
+  /**
+   * Gemini raw parts captured for replay: reasoning/tool-call parts carrying
+   * thoughtSignature so multi-turn thinking round-trips through our own
+   * message rebuild (the SDK's automatic replay assumes appending its
+   * response.messages verbatim, which we don't do).
+   */
+  google?: ProviderContentBlockStore;
 }
 
 export interface UserMessage {
@@ -369,7 +380,7 @@ export interface Todo {
 export type StreamChunk =
   | { type: "text"; content: string }
   | { type: "reasoning_delta"; content: string }
-  | { type: "provider_content_block"; provider: "anthropic"; block: ProviderRawContentBlock }
+  | { type: "provider_content_block"; provider: ProviderMetadataProvider; block: ProviderRawContentBlock }
   | { type: "tool_call"; id: string; name: string; arguments: string; isStart: boolean; isEnd: boolean; argumentsFull?: string; argumentsCorrupt?: boolean }
   | { type: "usage"; usage: TokenUsage }
   | { type: "done" };
