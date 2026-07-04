@@ -608,9 +608,11 @@ export interface ProviderPickerProps {
   onSelect: (providerId: string) => void;
   onCancel: () => void;
   title?: string;
+  /** Fires whenever the highlighted row changes (and once on mount) — lets callers live-preview the selection. */
+  onHighlight?: (providerId: string) => void;
 }
 
-export function ProviderPicker({ providers, current, onSelect, onCancel, title }: ProviderPickerProps) {
+export function ProviderPicker({ providers, current, onSelect, onCancel, title, onHighlight }: ProviderPickerProps) {
   const theme = useTheme();
   const { stdout } = useStdout();
   const termHeight = stdout?.rows || 24;
@@ -620,6 +622,11 @@ export function ProviderPicker({ providers, current, onSelect, onCancel, title }
     const idx = providers.findIndex((p) => p.id === current);
     return idx >= 0 ? idx : 0;
   });
+
+  useEffect(() => {
+    const p = providers[selectedIndex];
+    if (p) onHighlight?.(p.id);
+  }, [selectedIndex]);
 
   useInput((input, key) => {
     if (isKeyReleaseEvent(key)) return;

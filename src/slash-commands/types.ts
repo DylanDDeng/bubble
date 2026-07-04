@@ -30,7 +30,7 @@ export interface SlashCommandContext {
   exit: () => void;
   sessionManager?: SessionManager;
   createProvider: (providerId: string, apiKey: string, baseURL: string) => Provider;
-  openPicker: (mode: "model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | "feishu-setup", providerId?: string) => void;
+  openPicker: (mode: "model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | "theme" | "feishu-setup", providerId?: string) => void;
   registry: ProviderRegistry;
   skillRegistry: SkillRegistry;
   bashAllowlist?: BashAllowlist;

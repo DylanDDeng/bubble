@@ -345,6 +345,11 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     setThemeMode(mode);
     onThemeModeChange?.(mode);
   }, [onThemeModeChange]);
+  // Theme mode at the moment the /theme picker opened, so Esc can restore it
+  // after live-previewing other themes while navigating the picker.
+  const themeModeRef = useRef(themeMode);
+  themeModeRef.current = themeMode;
+  const themePickerRevertRef = useRef<ThemeMode>("auto");
   const themeResolved: ResolvedTheme = themeMode === "auto" ? autoResolved : themeMode;
   const { exit } = useApp();
   const [messages, setMessages] = useState<DisplayMessage[]>(() => compactDisplayMessages(reconstructDisplayMessages(agent.messages)));
@@ -398,7 +403,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     base: Omit<import("../feedback/types.js").FeedbackPayload, "description">;
     initialDescription: string;
   } | null>(null);
-  const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | "session" | "rewind" | "slash" | "mcp-reconnect" | "feishu-setup" | "agents" | null>(null);
+  const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | "theme" | "session" | "rewind" | "slash" | "mcp-reconnect" | "feishu-setup" | "agents" | null>(null);
   const [statsPanel, setStatsPanel] = useState<{ range: StatsRange; bundle: UsageStatsBundle } | null>(null);
   const [cursorResetEpoch, setCursorResetEpoch] = useState(0);
   const [composerDraft, setComposerDraft] = useState<{ text: string; epoch: number } | null>(null);
@@ -852,9 +857,12 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     setPendingSteerCount(pendingSteersRef.current.size);
   }, [addStatusUserMessage, currentSessionFile, prepareSubmitDisplay, queueInput, submitDisplayText]);
 
-  const openPicker = useCallback((mode: "model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | "session" | "rewind" | "feishu-setup" | "agents", providerId?: string) => {
+  const openPicker = useCallback((mode: "model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | "theme" | "session" | "rewind" | "feishu-setup" | "agents", providerId?: string) => {
     if (mode === "key") {
       setKeyProviderId(providerId ?? null);
+    }
+    if (mode === "theme") {
+      themePickerRevertRef.current = themeModeRef.current;
     }
     setStatsPanel(null);
     setPickerMode(mode);
@@ -989,6 +997,22 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
       closePicker();
     });
   }, [agent, addMessage, closePicker, sessionManager, userConfig, safeRegistry, createProvider]);
+
+  const handleThemeHighlight = useCallback((mode: string) => {
+    setThemeMode(mode as ThemeMode);
+  }, []);
+
+  const handleThemeSelect = useCallback((mode: string) => {
+    applyThemeMode(mode as ThemeMode);
+    const resolvedNote = mode === "auto" ? ` (resolved to ${autoResolved})` : "";
+    addMessage("assistant", `Theme set to ${mode}${resolvedNote}.`);
+    closePicker();
+  }, [addMessage, applyThemeMode, autoResolved, closePicker]);
+
+  const handleThemeCancel = useCallback(() => {
+    setThemeMode(themePickerRevertRef.current);
+    closePicker();
+  }, [closePicker]);
 
   const handleProviderSelect = useCallback((providerId: string) => {
     const run = async () => {
@@ -1998,6 +2022,22 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
                 closePicker();
               }}
               onCancel={closePicker}
+            />
+          </Box>
+        )}
+        {pickerMode === "theme" && (
+          <Box paddingX={1} flexShrink={0}>
+            <ProviderPicker
+              title="Select Theme"
+              providers={[
+                { id: "auto", name: `Auto — match terminal (${autoResolved})`, enabled: true },
+                { id: "light", name: "Light", enabled: true },
+                { id: "dark", name: "Dark", enabled: true },
+              ]}
+              current={themePickerRevertRef.current}
+              onSelect={handleThemeSelect}
+              onHighlight={handleThemeHighlight}
+              onCancel={handleThemeCancel}
             />
           </Box>
         )}

@@ -385,19 +385,15 @@ const builtinSlashCommandEntries: SlashCommand[] = [
   },
   {
     name: "theme",
-    description: "Switch the color theme. Usage: /theme [auto|light|dark]",
+    description: "Pick the color theme. Usage: /theme [auto|light|dark]",
     async handler(args, ctx) {
       if (!ctx.setThemeMode || !ctx.getThemeMode || !ctx.getResolvedTheme) {
         return "Theme switching is only available inside the TUI.";
       }
       const arg = args.trim().toLowerCase();
       if (!arg) {
-        const order = ["auto", "light", "dark"] as const;
-        const current = ctx.getThemeMode();
-        const next = order[(order.indexOf(current) + 1) % order.length]!;
-        ctx.setThemeMode(next);
-        const resolved = next === "auto" ? ctx.getResolvedTheme() : next;
-        return `Theme: ${next}${next === "auto" ? ` (resolved to ${resolved})` : ""}`;
+        ctx.openPicker("theme");
+        return;
       }
       if (arg !== "auto" && arg !== "light" && arg !== "dark") {
         return "Usage: /theme [auto|light|dark]";

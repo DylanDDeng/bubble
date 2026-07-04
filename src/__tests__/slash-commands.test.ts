@@ -67,6 +67,36 @@ describe("slash commands", () => {
     expect(ctx.openPicker).toHaveBeenCalledWith("model");
   });
 
+  it("opens the theme picker when /theme has no argument", async () => {
+    const setThemeMode = vi.fn();
+    const ctx = createContext({
+      setThemeMode,
+      getThemeMode: () => "auto",
+      getResolvedTheme: () => "dark",
+    });
+    const result = await slashRegistry.execute("/theme", ctx);
+
+    expect(result.handled).toBe(true);
+    expect(result.result).toBeUndefined();
+    expect(ctx.openPicker).toHaveBeenCalledWith("theme");
+    expect(setThemeMode).not.toHaveBeenCalled();
+  });
+
+  it("sets the theme directly when /theme has an argument", async () => {
+    const setThemeMode = vi.fn();
+    const ctx = createContext({
+      setThemeMode,
+      getThemeMode: () => "auto",
+      getResolvedTheme: () => "dark",
+    });
+    const result = await slashRegistry.execute("/theme light", ctx);
+
+    expect(result.handled).toBe(true);
+    expect(result.result).toBe("Theme set to light.");
+    expect(setThemeMode).toHaveBeenCalledWith("light");
+    expect(ctx.openPicker).not.toHaveBeenCalled();
+  });
+
   it("opens the feedback dialog with the provided description", async () => {
     const openFeedback = vi.fn();
     const ctx = createContext({ openFeedback });
