@@ -101,3 +101,43 @@ describe("workflow runtime (option C)", () => {
     expect(res.ok).toBe(false);
   });
 });
+
+describe("workflow runtime — abort with in-flight agents (QuickJS dispose safety)", () => {
+  it("aborting mid-flight disposes cleanly and does not poison the wasm module for later runs", async () => {
+    // Dispatcher whose promise settles only AFTER the abort fires — the exact
+    // shape of a user interrupt while real subagents are still tearing down.
+    // Before the fix this leaked the agents' unsettled VM deferreds; vm.dispose()
+    // then tripped JS_FreeRuntime's list_empty(&rt->gc_obj_list) assertion and
+    // Aborted the process-wide wasm module, so the NEXT workflow failed too.
+    const controller = new AbortController();
+    let releaseAgents!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseAgents = resolve; });
+    const slowDispatch = async (spec: WorkflowAgentSpec) => {
+      await gate;
+      return { ok: true as const, value: `ok:${spec.prompt}` };
+    };
+
+    const running = runWorkflow({
+      script: `const r = await parallel([() => agent("a"), () => agent("b"), () => agent("c")]); return r;`,
+      dispatchAgent: slowDispatch,
+      signal: controller.signal,
+    });
+    // Let the script start its agents, then interrupt.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    controller.abort(new Error("user interrupt"));
+    const aborted = await running;
+    expect(aborted.ok).toBe(false);
+    expect((aborted as { ok: false; error: string }).error).toContain("aborted");
+
+    // The stranded dispatches settle after disposal — must be a silent no-op.
+    releaseAgents();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // The wasm module must still be usable: a fresh workflow runs normally.
+    const second = await runWorkflow({
+      script: `const a = await agent("hello again"); return a;`,
+      dispatchAgent: fakeDispatch(),
+    });
+    expect(second).toEqual({ ok: true, value: "ok:hello again" });
+  });
+});
