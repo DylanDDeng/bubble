@@ -128,7 +128,9 @@ describe("UserConfig", () => {
   it("preserves explicitly selected dark theme", () => {
     const explicit = { mode: "dark" as const, explicit: true };
 
-    expect(shouldProbeTerminalTheme(explicit)).toBe(false);
+    // Probing still happens for forced themes: the terminal background is
+    // needed to decide whether the forced theme's canvas must be painted.
+    expect(shouldProbeTerminalTheme(explicit)).toBe(true);
     expect(effectiveThemeModeForTerminal(explicit, "light")).toBe("dark");
   });
 

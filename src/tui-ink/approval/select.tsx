@@ -149,7 +149,7 @@ export function ApprovalSelect({
               <Text color={amendText ? undefined : theme.muted}>
                 {amendText || option.amendPlaceholder || "type feedback…"}
               </Text>
-              <Text backgroundColor="white" color="black"> </Text>
+              <Text inverse> </Text>
             </Box>
           );
         }
@@ -168,7 +168,7 @@ export function ApprovalSelect({
                   {value || option.editableValue.placeholder || ""}
                 </Text>
                 {isFocused && (
-                  <Text backgroundColor="white" color="black"> </Text>
+                  <Text inverse> </Text>
                 )}
                 <Text color={isFocused ? theme.accent : theme.muted}>]</Text>
               </>

@@ -213,7 +213,7 @@ function WritePreview({ path, content }: { path: string; content: string }) {
       </Box>
       <Box flexDirection="column" marginTop={1}>
         {shown.map((line, i) => (
-          <Text key={i} color="green">
+          <Text key={i} color={theme.diffAddFg}>
             {"+ "}
             {line || " "}
           </Text>
