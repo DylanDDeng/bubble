@@ -391,8 +391,11 @@ export function createListAgentsTool(): ToolRegistryEntry {
 }
 
 
-export function createRunWorkflowTool(options: AgentLifecycleToolOptions = {}): ToolRegistryEntry {
-  void options;
+export function createRunWorkflowTool(
+  options: AgentLifecycleToolOptions = {},
+  sharedTrust?: ProjectProfileTrust,
+): ToolRegistryEntry {
+  const trust = sharedTrust ?? new ProjectProfileTrust(options.approval);
   return {
     name: "run_workflow",
     readOnly: true,
@@ -402,6 +405,7 @@ export function createRunWorkflowTool(options: AgentLifecycleToolOptions = {}): 
       "Use it for tasks that need loops, conditional fan-out, or staged pipelines over dozens of subagents whose intermediate steps should stay out of this conversation — e.g. a codebase-wide audit, a migration, or cross-checked research.",
       "The script's only capability is agent(prompt, opts?) — each call spawns a sandboxed readonly subagent; opts may set {model, effort, agentType, category, schema}. Also available: parallel(thunks), pipeline(items, ...stages), phase(title), log(msg), the global args, and budget {total, spent(), remaining()}.",
       "End the script with `return <value>`; that value (only) comes back to you. The script has no filesystem/shell/network/clock/random access. run_workflow must be the ONLY tool call in your response; it blocks until the workflow finishes.",
+      "A failed or blocked agent() resolves to null (it never throws inside parallel/pipeline): check for null slots and return which items failed alongside the results — never silently drop them.",
       "Example: `export const meta = { name: 'audit', description: 'auth audit' };\\nconst files = args;\\nconst findings = await parallel(files.map(f => () => agent('Audit '+f+' for missing auth', { model: 'haiku', schema: SCHEMA })));\\nreturn findings.filter(Boolean);`",
     ].join(" "),
     parameters: {
@@ -429,6 +433,9 @@ export function createRunWorkflowTool(options: AgentLifecycleToolOptions = {}): 
           title: stringArg(args.title),
           parentToolCallId: ctx.toolCall?.id ?? snapshotFallbackId(),
           abortSignal: ctx.abortSignal,
+          // Project-local profiles named via agent(..., {agentType}) pass the
+          // same first-use trust gate as spawn_agent (Codex review on #58).
+          ensureProfileTrusted: (profile) => trust.ensureTrusted(profile),
         });
         return {
           content: [
@@ -521,7 +528,7 @@ export function createAgentLifecycleTools(options: AgentLifecycleToolOptions = {
     createSendInputTool(),
     createCloseAgentTool(),
     createListAgentsTool(),
-    createRunWorkflowTool(options),
+    createRunWorkflowTool(options, trust),
     createWaitWorkflowTool(),
   ];
 }

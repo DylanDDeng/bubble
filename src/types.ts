@@ -266,7 +266,16 @@ export interface ToolContext {
     listSubAgents?: () => import("./agent/subagent-control.js").SubagentThreadSnapshot[];
     startWorkflow?: (
       cwd: string,
-      options: { script: string; args?: unknown; title?: string; parentToolCallId: string; abortSignal?: AbortSignal },
+      options: {
+        script: string;
+        args?: unknown;
+        title?: string;
+        parentToolCallId: string;
+        abortSignal?: AbortSignal;
+        ensureProfileTrusted?: (
+          profile: import("./agent/profiles.js").AgentProfile,
+        ) => Promise<{ content: string | unknown } | undefined>;
+      },
     ) => { runId: string; title: string };
     waitWorkflow?: (
       runId: string,

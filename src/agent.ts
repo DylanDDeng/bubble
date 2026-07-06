@@ -1076,6 +1076,19 @@ export class Agent {
           }
           let tc = parsedCalls[index];
           let blockedResult: ToolResult | undefined;
+          // run_workflow must be the only tool call in its response: it starts
+          // a background orchestration whose result lands next turn, and
+          // sibling calls racing it defeat the serialized fan-out contract.
+          if (tc.name === "run_workflow" && parsedCalls.length > 1) {
+            blockedResult = {
+              content: [
+                "run_workflow must be the only tool call in your response.",
+                "Re-issue run_workflow alone — one call, nothing else in the same message — and run other tools after it returns.",
+              ].join(" "),
+              isError: true,
+              status: "blocked",
+            };
+          }
           await hookBus.runBeforeToolCall({
             agent: this,
             cwd,
@@ -1811,6 +1824,7 @@ export class Agent {
       parentToolCallId: string;
       emitUpdate?: (update: ToolUpdate) => void;
       abortSignal?: AbortSignal;
+      ensureProfileTrusted?: (profile: AgentProfile) => Promise<{ content: string | unknown } | undefined>;
     },
   ): Promise<{ result: { ok: true; value: unknown } | { ok: false; error: string }; agentCount: number; logs: string[]; snapshots: SubagentThreadSnapshot[] }> {
     return this.executeWorkflow(cwd, {
@@ -1819,6 +1833,7 @@ export class Agent {
       parentToolCallId: options.parentToolCallId,
       abortSignal: options.abortSignal,
       directEmit: options.emitUpdate,
+      ensureProfileTrusted: options.ensureProfileTrusted,
     });
   }
 
@@ -1830,7 +1845,14 @@ export class Agent {
    */
   startWorkflow(
     cwd: string,
-    options: { script: string; args?: unknown; title?: string; parentToolCallId: string; abortSignal?: AbortSignal },
+    options: {
+      script: string;
+      args?: unknown;
+      title?: string;
+      parentToolCallId: string;
+      abortSignal?: AbortSignal;
+      ensureProfileTrusted?: (profile: AgentProfile) => Promise<{ content: string | unknown } | undefined>;
+    },
   ): { runId: string; title: string } {
     const runId = randomUUID();
     const abortController = new AbortController();
@@ -1857,6 +1879,7 @@ export class Agent {
       parentToolCallId: options.parentToolCallId,
       abortSignal: abortController.signal,
       queueUpdates: true,
+      ensureProfileTrusted: options.ensureProfileTrusted,
     }).then((out) => {
       record.agentCount = out.agentCount;
       record.snapshots = out.snapshots;
@@ -1936,6 +1959,7 @@ export class Agent {
       abortSignal?: AbortSignal;
       directEmit?: (update: ToolUpdate) => void;
       queueUpdates?: boolean;
+      ensureProfileTrusted?: (profile: AgentProfile) => Promise<{ content: string | unknown } | undefined>;
     },
   ): Promise<{ result: { ok: true; value: unknown } | { ok: false; error: string }; agentCount: number; logs: string[]; snapshots: SubagentThreadSnapshot[] }> {
     const profiles = discoverAgentProfiles(cwd, "both").profiles;
@@ -1953,6 +1977,16 @@ export class Agent {
       const baseProfile = findAgentProfile(profiles, spec.opts.agentType ?? "default")
         ?? findAgentProfile(profiles, "default");
       if (!baseProfile) return { ok: false, error: "no default subagent profile available" };
+      // Project-local profiles pass the same first-use trust gate as
+      // spawn_agent: a .bubble/agents profile must never gain a side door
+      // into execution just because a script named it (Codex review on #58).
+      if (options.ensureProfileTrusted) {
+        const blocked = await options.ensureProfileTrusted(baseProfile);
+        if (blocked) {
+          const message = typeof blocked.content === "string" ? blocked.content : `profile "${baseProfile.name}" requires user approval`;
+          return { ok: false, error: message };
+        }
+      }
       // Workflow agents are readonly-by-default; mode upgrades come only from the
       // profile, never from the script (security invariant).
       const unsupported = baseProfile.mode !== "readonly" && baseProfile.mode !== "write_worktree";

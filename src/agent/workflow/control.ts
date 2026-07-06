@@ -37,6 +37,14 @@ export interface WorkflowRunSnapshot {
 export function buildWorkflowDeliveryNotice(snapshot: WorkflowRunSnapshot): string {
   const head = `workflow "${snapshot.title}" (${snapshot.runId}) ${snapshot.status} — ${snapshot.agentCount} agent${snapshot.agentCount === 1 ? "" : "s"}.`;
   const lines: string[] = [head];
+  // Failed members surface here because agent() converts failures to null
+  // inside the script: without this line a "completed" workflow could
+  // silently omit items whose agents never delivered.
+  const failed = snapshot.snapshots.filter((agent) => agent.status !== "completed" && agent.status !== "closed");
+  if (failed.length > 0) {
+    const names = failed.map((agent) => `${agent.nickname} (${agent.status}${agent.error ? `: ${truncate(agent.error, 120)}` : ""})`).join("; ");
+    lines.push(`warning: ${failed.length} of ${snapshot.agentCount} agents did not complete — ${names}. Their agent() calls returned null; treat those items as missing, not done.`);
+  }
   if (snapshot.result?.ok) {
     const rendered = typeof snapshot.result.value === "string"
       ? snapshot.result.value

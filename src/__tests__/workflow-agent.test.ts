@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { Agent } from "../agent.js";
-import type { Provider, StreamChunk } from "../types.js";
+import { buildWorkflowDeliveryNotice } from "../agent/workflow/control.js";
+import { createAgentLifecycleTools } from "../tools/agent-lifecycle.js";
+import type { AgentEvent, Provider, StreamChunk } from "../types.js";
 
 const SUMMARY = "Workflow member handoff: concrete findings with file paths. ".repeat(3);
 
@@ -103,5 +105,131 @@ describe("Agent.runWorkflow (option C end-to-end)", () => {
       parentToolCallId: "wf4",
     });
     expect(bad.result.ok).toBe(false);
+  });
+});
+
+describe("run_workflow exclusivity", () => {
+  it("blocks run_workflow when it shares a response with other tool calls, with a teaching message", async () => {
+    const provider: Provider = (() => {
+      let turn = 0;
+      return {
+        async *streamChat(): AsyncGenerator<StreamChunk> {
+          turn += 1;
+          if (turn === 1) {
+            yield { type: "tool_call", id: "read_1", name: "read", arguments: "{}", isStart: true, isEnd: true } satisfies StreamChunk;
+            yield {
+              type: "tool_call",
+              id: "wf_1",
+              name: "run_workflow",
+              arguments: JSON.stringify({ script: "return 1;" }),
+              isStart: true,
+              isEnd: true,
+            } satisfies StreamChunk;
+            yield { type: "done" } satisfies StreamChunk;
+            return;
+          }
+          yield { type: "text", content: "done" } satisfies StreamChunk;
+          yield { type: "done" } satisfies StreamChunk;
+        },
+        async complete() {
+          return "complete";
+        },
+      };
+    })();
+
+    const readTool = {
+      name: "read",
+      readOnly: true,
+      effect: "read" as const,
+      description: "Read",
+      parameters: { type: "object" as const, properties: {} },
+      async execute() {
+        return { content: "tool result" };
+      },
+    };
+    const workflowTool = createAgentLifecycleTools({ cwd: "/tmp" }).find((tool) => tool.name === "run_workflow")!;
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [readTool, workflowTool] });
+
+    const events: AgentEvent[] = [];
+    for await (const event of agent.run("go", "/tmp")) {
+      events.push(event);
+    }
+
+    const workflowEnd = events.find(
+      (event): event is Extract<AgentEvent, { type: "tool_end" }> => event.type === "tool_end" && event.name === "run_workflow",
+    );
+    expect(workflowEnd).toBeDefined();
+    expect(workflowEnd!.result.isError).toBe(true);
+    expect(workflowEnd!.result.content).toContain("must be the only tool call");
+    const readEnd = events.find(
+      (event): event is Extract<AgentEvent, { type: "tool_end" }> => event.type === "tool_end" && event.name === "read",
+    );
+    expect(readEnd!.result.isError).toBeFalsy();
+  });
+});
+
+describe("run_workflow project-profile trust gate", () => {
+  it("blocks a workflow agent whose profile the trust gate rejects, without running it", async () => {
+    const agent = new Agent({ provider: textProvider(), model: "gpt-4o", tools: [] });
+    const out = await agent.runWorkflow("/tmp", {
+      script: `const r = await agent("audit x").catch((e) => "blocked: " + String(e));\nreturn r;`,
+      parentToolCallId: "wf_trust",
+      ensureProfileTrusted: async () => ({ content: "Blocked: profile needs the user's approval" }),
+    });
+    expect(out.result.ok).toBe(true);
+    expect(String((out.result as { ok: true; value: unknown }).value)).toContain("profile needs the user's approval");
+    expect(out.snapshots.every((snapshot) => snapshot.status !== "completed")).toBe(true);
+  });
+
+  it("the run_workflow tool wires ensureProfileTrusted into startWorkflow", async () => {
+    const workflowTool = createAgentLifecycleTools({ cwd: "/tmp" }).find((tool) => tool.name === "run_workflow")!;
+    let captured: any;
+    const ctx = {
+      cwd: "/tmp",
+      toolCall: { id: "wf_1", name: "run_workflow" },
+      agent: {
+        startWorkflow: (_cwd: string, options: any) => {
+          captured = options;
+          return { runId: "wf_x", title: "t" };
+        },
+      },
+    } as any;
+    const result = await workflowTool.execute({ script: "return 1;" }, ctx);
+    expect(result.isError).toBeFalsy();
+    expect(typeof captured.ensureProfileTrusted).toBe("function");
+  });
+});
+
+describe("workflow delivery notice", () => {
+  it("warns about members that did not complete so null slots are not read as done", () => {
+    const snapshot = {
+      runId: "wf_1",
+      title: "audit",
+      status: "completed",
+      agentCount: 2,
+      result: { ok: true, value: ["a"] },
+      logs: [],
+      snapshots: [
+        { nickname: "Ada", status: "completed" },
+        { nickname: "Bob", status: "failed", error: "provider exploded" },
+      ],
+    } as any;
+    const notice = buildWorkflowDeliveryNotice(snapshot);
+    expect(notice).toContain("1 of 2 agents did not complete");
+    expect(notice).toContain("Bob (failed: provider exploded)");
+    expect(notice).toContain("returned null");
+  });
+
+  it("emits no warning when every member completed", () => {
+    const snapshot = {
+      runId: "wf_2",
+      title: "audit",
+      status: "completed",
+      agentCount: 1,
+      result: { ok: true, value: "x" },
+      logs: [],
+      snapshots: [{ nickname: "Ada", status: "completed" }],
+    } as any;
+    expect(buildWorkflowDeliveryNotice(snapshot)).not.toContain("did not complete");
   });
 });

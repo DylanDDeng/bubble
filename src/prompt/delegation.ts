@@ -24,7 +24,8 @@ Delegate when:
   analysis (review, audit, summarize) over several independent items (files,
   modules, endpoints), or needs a staged pipeline over many subagents — use
   run_workflow with a simple script (a parallel() over the items is enough
-  for the common case).
+  for the common case; failed agent() calls resolve to null, so report which
+  items came back null instead of silently dropping them).
 - A side-investigation is independent of your current main-line work and can
   run in the background while you continue.
 
