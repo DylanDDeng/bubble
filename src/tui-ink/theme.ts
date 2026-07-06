@@ -181,6 +181,28 @@ export const lightTheme: Theme = {
   diffRemoveFg: "#B62633",
 };
 
+/** Canvas colors painted only when a forced theme mismatches the terminal. */
+const paintedCanvas: Record<ResolvedTheme, string> = {
+  dark: "#0A0A0A",
+  light: "#FCFCFA",
+};
+
+/**
+ * Decide whether the canvas needs painting. Auto mode always inherits the
+ * terminal's own background, and so does a forced theme that matches the
+ * detected terminal. A forced theme that mismatches (e.g. `/theme light`
+ * inside a dark terminal) paints its canvas, because its foregrounds are
+ * tuned for the opposite background and would otherwise be unreadable.
+ */
+export function canvasBackgroundFor(
+  mode: ThemeMode,
+  resolved: ResolvedTheme,
+  terminalTheme: ResolvedTheme,
+): string | undefined {
+  if (mode === "auto" || resolved === terminalTheme) return undefined;
+  return paintedCanvas[resolved];
+}
+
 const ThemeContext = createContext<Theme>(darkTheme);
 export const ThemeProvider = ThemeContext.Provider;
 

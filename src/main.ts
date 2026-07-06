@@ -268,12 +268,20 @@ async function main() {
       const pickerThemeMode = effectiveThemeModeForTerminal(themeConfig, preResolvedTheme);
       const pickerResolvedTheme = pickerThemeMode === "auto" ? preResolvedTheme : pickerThemeMode;
       const { runSessionPicker } = await import("./tui-ink/run-session-picker.js");
+      const { canvasBackgroundFor } = await import("./tui-ink/theme.js");
+      // Same rule as the main TUI: a forced theme mismatching the terminal
+      // paints its canvas so its foregrounds stay readable.
+      const pickerCanvas = themeConfig.overrides?.background
+        ? undefined
+        : canvasBackgroundFor(pickerThemeMode, pickerResolvedTheme, preResolvedTheme);
       const picked = await runSessionPicker({
         currentCwd: args.cwd,
         currentSessions,
         allSessions,
         resolvedTheme: pickerResolvedTheme,
-        themeOverrides: themeConfig.overrides,
+        themeOverrides: pickerCanvas
+          ? { ...themeConfig.overrides, background: pickerCanvas }
+          : themeConfig.overrides,
       });
       if (picked) {
         sessionManager = new SessionManager(picked);
