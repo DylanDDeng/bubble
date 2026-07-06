@@ -34,7 +34,7 @@ import {
 } from "./display-history.js";
 import { AgentRunInputQueue } from "../agent/input-controller.js";
 import type { PendingApprovalHint } from "./message-list.js";
-import { paletteFor, ThemeProvider, useTheme, type ResolvedTheme, type Theme, type ThemeMode } from "./theme.js";
+import { canvasBackgroundFor, paletteFor, ThemeProvider, useTheme, type ResolvedTheme, type Theme, type ThemeMode } from "./theme.js";
 import { isPrintablePickerInput, ModelPicker, ProviderPicker, KeyPicker, SkillPicker } from "./model-picker.js";
 import { FeishuSetupPicker } from "./feishu-setup-picker.js";
 import { BUILTIN_PROVIDERS, ProviderRegistry, displayModel, isUserVisibleProvider } from "../provider-registry.js";
@@ -339,7 +339,14 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   const [autoResolved] = useState<ResolvedTheme>(detectedTheme ?? "dark");
   const palette = useMemo<Theme>(() => {
     const resolved: ResolvedTheme = themeMode === "auto" ? autoResolved : themeMode;
-    return paletteFor(resolved, themeOverrides);
+    const base = paletteFor(resolved, themeOverrides);
+    // A user override wins; otherwise paint the canvas only when a forced
+    // theme mismatches the terminal it is running in.
+    if (base.background === undefined) {
+      const canvas = canvasBackgroundFor(themeMode, resolved, autoResolved);
+      if (canvas !== undefined) return { ...base, background: canvas };
+    }
+    return base;
   }, [themeMode, autoResolved, themeOverrides]);
   const applyThemeMode = useCallback((mode: ThemeMode) => {
     setThemeMode(mode);

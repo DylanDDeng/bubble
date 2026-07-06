@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { composerSurfaceBackground, shouldUseLineComposerFrame } from "../tui-ink/input-box.js";
 import { darkTheme as inkDarkTheme, lightTheme as inkLightTheme } from "../tui-ink/theme.js";
 
 function luminance(hex: string): number {
@@ -13,9 +12,13 @@ function luminance(hex: string): number {
   return 0.2126 * r! + 0.7152 * g! + 0.0722 * b!;
 }
 
+function contrastOnWhite(hex: string): number {
+  // WCAG contrast ratio against a near-white canvas (worst case for light fg).
+  return (1.0 + 0.05) / (luminance(hex) + 0.05);
+}
+
 describe("TUI theme palettes", () => {
-  it("keeps the Ink light composer surface light and distinct from the page", () => {
-    expect(inkLightTheme.inputBg).not.toBe(inkLightTheme.background);
+  it("keeps the Ink light composer surface light", () => {
     expect(luminance(inkLightTheme.inputBg)).toBeGreaterThan(0.88);
     expect(luminance(inkLightTheme.inputBgDisabled)).toBeGreaterThan(0.9);
   });
@@ -24,16 +27,23 @@ describe("TUI theme palettes", () => {
     expect(luminance(inkDarkTheme.inputBg)).toBeLessThan(0.05);
   });
 
-  it("uses the compact two-line composer frame for both light and dark backgrounds", () => {
-    expect(shouldUseLineComposerFrame(inkLightTheme.background)).toBe(true);
-    expect(shouldUseLineComposerFrame(inkDarkTheme.background)).toBe(true);
+  it("keeps light-mode foreground accents readable on light terminals", () => {
+    // Inline code and diff foregrounds render directly on the terminal
+    // background (no painted band), so they must clear WCAG AA (4.5:1)
+    // against a light canvas.
+    for (const color of [
+      inkLightTheme.inlineCode,
+      inkLightTheme.diffAddFg,
+      inkLightTheme.diffRemoveFg,
+    ]) {
+      expect(contrastOnWhite(color)).toBeGreaterThan(4.5);
+    }
   });
 
-  it("does not paint a filled composer row in compact line-frame mode", () => {
-    for (const theme of [inkLightTheme, inkDarkTheme]) {
-      const lineFrame = shouldUseLineComposerFrame(theme.background);
-      expect(composerSurfaceBackground(lineFrame, theme.background, theme.inputBg)).toBe(theme.background);
-      expect(composerSurfaceBackground(lineFrame, theme.background, theme.inputBg)).not.toBe(theme.inputBg);
-    }
+  it("keeps dark-mode diff foregrounds on the terminal's own ANSI palette", () => {
+    // Named ANSI colors track the user's terminal scheme instead of guessing
+    // hexes, which is the point of the adaptive theme.
+    expect(inkDarkTheme.diffAddFg).toBe("green");
+    expect(inkDarkTheme.diffRemoveFg).toBe("red");
   });
 });

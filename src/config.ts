@@ -281,8 +281,12 @@ export class UserConfig {
   }
 }
 
-export function shouldProbeTerminalTheme(config: ThemeConfig): boolean {
-  return config.mode === "auto" || isLegacyBareDarkTheme(config);
+export function shouldProbeTerminalTheme(_config: ThemeConfig): boolean {
+  // Always probe: even a forced theme needs the real terminal background to
+  // decide between inheriting it (theme matches the terminal) and painting
+  // its own canvas (forced theme mismatching the terminal, where the
+  // palette's foregrounds would otherwise be unreadable).
+  return true;
 }
 
 export function effectiveThemeModeForTerminal(

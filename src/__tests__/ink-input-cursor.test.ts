@@ -324,21 +324,15 @@ describe("software cursor cell", () => {
     expect(splitLineAtCursor("hi", -1)).toEqual({ before: "", at: "h", after: "i" });
   });
 
-  it("uses inverse colors while visible and normal colors while hidden", () => {
+  it("renders inverse video while visible and normal text while hidden", () => {
     expect(resolveSoftwareCursorCellStyle({
       visible: true,
-      cursorBackground: "text",
-      cursorForeground: "surface",
       textColor: "text",
-      rowBackground: "surface",
-    })).toEqual({ backgroundColor: "text", color: "surface" });
+    })).toEqual({ inverse: true, color: "text" });
 
     expect(resolveSoftwareCursorCellStyle({
       visible: false,
-      cursorBackground: "text",
-      cursorForeground: "surface",
       textColor: "text",
-      rowBackground: "surface",
-    })).toEqual({ backgroundColor: "surface", color: "text" });
+    })).toEqual({ inverse: false, color: "text" });
   });
 });
