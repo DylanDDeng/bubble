@@ -118,7 +118,6 @@ range; their semantics are pinned by unit tests *before* the move (section 9).
 finalReason?: FinalReason;     // why the run ended (section 3.1)
 resumable?: boolean;           // derived from finalReason by the runtime
 deliveredAt?: number;          // when the full summary first reached parent context
-tokenCap?: { soft: number; hard: number };  // fixed at dispatch (section 6)
 ```
 
 ## 3. Reply protocol
@@ -136,7 +135,6 @@ Every run ends with a `FinalReason` recorded in the store:
 | `blocked` | tool needed interactive approval under `approval: fail` | no | names the blocking tool and says to re-spawn with an adjusted profile/approval — **never** suggests resuming, which would deterministically hit the same block |
 | `cancelled_interrupt` | `send_input` with `interrupt: true` | yes | resume line (history is preserved by design) |
 | `cancelled_user` | `close_agent` / user abort | yes | resume line |
-| `cancelled_budget` | hard token cap hit | **no** | `budget exhausted — do not resume this child; integrate what it reported and narrow the task if needed` |
 | `cancelled_parent_abort` | parent turn aborted | yes | resume line |
 
 The formatter outputs a resume line **iff** `resumable === true`. Wait timeouts
@@ -326,45 +324,36 @@ Injection sets `deliveredAt` (section 3.3), so the lifecycle reminder
 immediately demotes the entry to a one-liner and `wait_agent` repetition is
 gated. `wait_agent` stays for blocking semantics and explicit full reads.
 
-## 6. Budget — absolute caps, turn-boundary enforcement
+## 6. Budget — accounting only, no per-child caps
 
-The shared `BudgetLedger` exists in production **without a limit** (both hosts
-construct `new BudgetLedger()` bare: `src/main.ts:364`,
-`src/feishu/agent-host/run-driver.ts:144`). Any mechanism defined as a share
-of "pool remaining" is a no-op by default. The design therefore uses absolute
-caps with the pool as an additional, optional constraint:
+**Revised 2026-07-06.** The original design shipped a default-on per-child
+token cap (soft 200k warn → hard kill, `cancelled_budget`). In practice the
+cap killed legitimate long-running children mid-flight and discarded their
+finished-but-undelivered work (the check ran only at turn boundaries, so a
+large turn could blow past the soft cap and leave less than one turn of
+headroom before the hard kill). It has been **removed entirely**: a child
+stops because its task is complete, not because it crossed a token number.
 
-- **Per-source accounting.** `recordUsage` already receives `subAgentId`; the
-  ledger now keeps per-source tallies and exposes `spentBy(source)`.
-- **Per-child cap, fixed at dispatch.**
-  `cap.soft = min(config.subagents.childTokenCap /* default 200k */, poolShare?)`
-  where `poolShare = (limit − spent − parentReserve) / (active + 1)` applies
-  only when a pool limit exists (`parentReserve` defaults to 20% of the
-  limit). The cap is computed once at dispatch and never shrinks because
-  siblings spawned later — mid-flight rules must not change.
-- **Turn-boundary checks.** Enforcement hooks at the child's `turn_end` (which
-  already carries usage, `agent.ts:1796-1798`) — not at streaming-chunk level,
-  where an abort could fire before an injected reminder is ever seen.
-  - at `soft`: inject a wrap-up system reminder (existing
-    `injectSystemReminder`); queued children get it on start instead;
-  - `hard = soft + max(2 × recentAvgTurnTokens, 20_000)` — the gap guarantees
-    at least ~2 turns between warning and kill, replacing the fixed 25% ratio
-    that could be smaller than a single turn;
-  - at `hard`: abort *that child only* (`cancelled_budget`, not resumable).
-- **Team pre-check (pool-limited hosts only).**
-  `items × childTokenCap ≤ limit − spent − parentReserve`; on rejection the
-  error states how many members currently fit. On unlimited hosts the only
-  bound is the 32-item cap. (The previous formula
-  `items × (remaining/items) ≤ remaining` was a tautology; this one is not.)
-- The model cannot set caps. Hosts/config can (`config.subagents.*`), and a
-  profile may declare a *lower* `maxTokens` for itself.
+- **A child's only resource bound is the model context window**, absorbed by
+  the same compaction pipeline the parent uses (`maybeCompactWithLLM` runs in
+  every `Agent.run` loop; children are plain `Agent` instances). This matches
+  the Claude Code / Agent SDK stance: no per-subagent token cap; graceful
+  degradation at the context limit.
+- **Per-source accounting stays.** `recordUsage` receives `subAgentId`; the
+  ledger keeps per-source tallies and exposes `spentBy(source)` for usage
+  attribution and display. `BudgetLedger` is pure bookkeeping.
+- Removed with the cap: `config.subagents.childTokenCap`, profile `maxTokens`,
+  the `cancelled_budget` final reason, the wrap-up reminder, the team/batch
+  pool-affordability pre-checks, and the workflow run token ceiling. The
+  loop backstops that remain are structural, not token-based: the scheduler's
+  concurrency limits and the tool-level items caps.
 
 ## 7. Persistence and resume (Phase 4)
 
 `SubagentStore` persists to the session directory,
 `subagents/<agentId>.json`: snapshot + compacted child message history. The
-on-disk schema includes `finalReason`, `resumable`, `deliveredAt`, and
-`tokenCap` — fields the reply protocol and dedup depend on, defined now so
+on-disk schema includes `finalReason`, `resumable`, and `deliveredAt` —
+fields the reply protocol and dedup depend on, defined now so
 Phase 4 doesn't fork the format. In-session resume works first
 (`record.agent` holds messages); cross-restart resume rebuilds the Agent
 instance from the persisted history. Child transcripts never mix into the

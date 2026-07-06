@@ -940,8 +940,6 @@ function finalGuidanceLines(snapshot: SubagentThreadSnapshot): string[] {
     case "cancelled_user":
     case "cancelled_parent_abort":
       return ["", resumeLine(snapshot.agentId)];
-    case "cancelled_budget":
-      return ["", "budget exhausted — do not resume this child; integrate what it already reported and narrow the task if more is needed"];
     case "blocked":
       return ["", "blocked: re-spawn with an adjusted profile or approval setting — resuming as-is would hit the same block"];
     case "failed_fatal":

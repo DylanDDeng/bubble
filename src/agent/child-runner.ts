@@ -10,7 +10,7 @@
  */
 
 import { AgentAbortError, EMPTY_ASSISTANT_FALLBACK, SubagentAbortError } from "./abort-errors.js";
-import { BudgetLedger, childHardCap, composeAbortSignals } from "./budget-ledger.js";
+import { composeAbortSignals } from "./budget-ledger.js";
 import { isOnlyProviderProtocolArtifacts, stripProviderProtocolArtifacts } from "../provider-artifacts.js";
 import { isRateLimitError } from "../network/errors.js";
 import { isProviderTransportError } from "../network/provider-transport.js";
@@ -38,7 +38,6 @@ export interface ChildRunOptions {
 
 export interface ChildRunnerHost {
   allTools(): ToolRegistryEntry[];
-  budgetLedger(): BudgetLedger | undefined;
   emit(record: SubagentThreadRecord, options: ChildRunOptions, status: ToolUpdate["status"], event?: AgentEvent, message?: string): void;
   runLifecycleHook(record: SubagentThreadRecord, cwd: string, eventName: "SubagentStart" | "SubagentStop", status?: string, error?: string, abortSignal?: AbortSignal): Promise<void>;
   finalizeBlocked(record: SubagentThreadRecord, error: string, options: ChildRunOptions): void;
@@ -106,13 +105,6 @@ export class ChildRunner {
     let turnSummaryBuffer = "";
     let turnHadToolCall = false;
     let executedAnyTool = false;
-    // Per-child budget enforcement happens at turn boundaries (design §6):
-    // turn_end already carries usage, and a reminder injected here is seen by
-    // the very next provider call — unlike chunk-level aborts.
-    const cap = record.tokenCap;
-    let runTokens = 0;
-    let runTurns = 0;
-    let budgetSoftWarned = false;
 
     // Re-entry after a rate limit: the input was applied on attempt 1, so the
     // child history must not gain a second copy, and any stale interruption
@@ -152,23 +144,6 @@ export class ChildRunner {
         }
         if (event.type === "turn_end" && event.usage) {
           record.usage = mergeUsage(record.usage, event.usage);
-          runTokens += event.usage.promptTokens + event.usage.completionTokens;
-          runTurns += 1;
-          if (cap) {
-            if (!budgetSoftWarned && runTokens >= cap.soft) {
-              budgetSoftWarned = true;
-              // The hard cap is fixed when the warning fires: soft + ~2 of
-              // this child's average turns (absolute floor), so the child
-              // gets a real chance to wrap up before the kill (design §6).
-              cap.hard = childHardCap(cap.soft, runTokens / Math.max(1, runTurns));
-              subAgent.injectSystemReminder(buildChildBudgetWrapUpReminder(runTokens, cap.soft));
-            } else if (budgetSoftWarned && runTokens >= cap.hard) {
-              record.abortController.abort(new SubagentAbortError(
-                `Subagent ${record.agentId} exceeded its hard token cap (${cap.hard}).`,
-                "budget",
-              ));
-            }
-          }
         }
         if (event.type === "turn_end") {
           const turnSummary = stripProviderProtocolArtifacts(turnSummaryBuffer).trim();
@@ -224,7 +199,6 @@ export class ChildRunner {
         ? classifySubagentAbortReason(
           record.abortController.signal.aborted ? record.abortController.signal.reason : error,
           options.abortSignal,
-          this.host.budgetLedger(),
         )
         : "failed_transient";
       record.summary = sanitizeSubagentSummary(record.summary);
@@ -333,7 +307,6 @@ export function needsExplicitFinalSummary(record: SubagentThreadRecord, executed
 export function classifySubagentAbortReason(
   reason: unknown,
   parentSignal: AbortSignal | undefined,
-  ledger: BudgetLedger | undefined,
 ): SubagentFinalReason {
   if (reason instanceof SubagentAbortError) {
     switch (reason.subagentReason) {
@@ -341,11 +314,8 @@ export function classifySubagentAbortReason(
         return "cancelled_interrupt";
       case "user_close":
         return "cancelled_user";
-      case "budget":
-        return "cancelled_budget";
     }
   }
-  if (ledger?.snapshot().exhausted) return "cancelled_budget";
   if (parentSignal?.aborted) return "cancelled_parent_abort";
   return "cancelled_user";
 }
@@ -363,14 +333,6 @@ export function stripTrailingModelInterruptedBoundary(messages: Message[]): void
     }
     break;
   }
-}
-
-function buildChildBudgetWrapUpReminder(spentTokens: number, softCap: number): string {
-  return [
-    `Token budget notice: this subagent has used ~${Math.round(spentTokens)} tokens, crossing its ${softCap}-token budget.`,
-    "Wrap up now: stop opening new lines of investigation and produce your complete final handoff",
-    "(findings, conclusions, unfinished items) in your next message.",
-  ].join(" ");
 }
 
 export function summarizeSubagentToolEnd(event: { name: string; result: ToolResult }): string {

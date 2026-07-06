@@ -35,7 +35,7 @@ import { appendOutputSchemaInstructions, buildSchemaCorrectionPrompt, validateSt
 import { runWorkflow, WorkflowConcurrencyGate, type AgentDispatchResult, type WorkflowAgentSpec } from "./agent/workflow/runtime.js";
 import { buildWorkflowDeliveryNotice, type WorkflowRunRecord, type WorkflowRunSnapshot } from "./agent/workflow/control.js";
 import { getSubtaskPolicy, type SubtaskType } from "./agent/subtask-policy.js";
-import { BudgetLedger, childHardCap, composeAbortSignals, computeChildTokenCap, DEFAULT_CHILD_TOKEN_CAP, PARENT_POOL_RESERVE_RATIO } from "./agent/budget-ledger.js";
+import { BudgetLedger, composeAbortSignals } from "./agent/budget-ledger.js";
 import { assignAgentNickname, builtinAgentProfiles, discoverAgentProfiles, findAgentProfile, mergeUsage, selectToolsForAgentProfile, validateAgentProfileTools, type AgentProfile, type SubagentRunResult } from "./agent/profiles.js";
 import { snapshotSubagentThread, subagentResultFromThread, type PendingSubagentToolUpdate, type SubagentFinalReason, type SubagentThreadRecord, type SubagentThreadSnapshot } from "./agent/subagent-control.js";
 import { SubagentStore } from "./agent/subagent-store.js";
@@ -121,10 +121,9 @@ function agentEventFromHookProgress(event: HookProgressEvent): AgentEvent {
   };
 }
 
-/** Runtime tuning for the subagent scheduler and per-child budgets. */
+/** Runtime tuning for the subagent scheduler. */
 export interface AgentSubagentRuntimeConfig {
   maxActiveSubagents?: number;
-  childTokenCap?: number;
   launchBurst?: number;
   launchIntervalMs?: number;
   rateLimitMaxAttempts?: number;
@@ -277,7 +276,6 @@ export class Agent {
     });
     this.childRunner = new ChildRunner({
       allTools: () => [...this.tools.values()],
-      budgetLedger: () => this.budgetLedger,
       emit: (record, options, status, event, message) => this.emitSubagentLifecycle(record, options, status, event, message),
       runLifecycleHook: (record, cwd, eventName, status, error, abortSignal) =>
         this.runSubagentLifecycleHookFor(record, cwd, eventName, status, error, abortSignal),
@@ -1828,26 +1826,6 @@ export class Agent {
       approval?: "fail" | "disabled";
     },
   ): Promise<SubagentThreadSnapshot[]> {
-    // Team budget pre-check (§6): items × per-member cap must fit in what
-    // remains of a limited pool after the parent's reserve. On limit-free
-    // hosts the only bound is the items cap enforced by the tool.
-    const limit = this.budgetLedger?.poolLimit;
-    if (this.budgetLedger && limit !== undefined) {
-      const reserve = Math.floor(limit * PARENT_POOL_RESERVE_RATIO);
-      const available = Math.max(0, (this.budgetLedger.remaining() ?? 0) - reserve);
-      const memberCap = Math.min(
-        this.subagentsConfig.childTokenCap ?? DEFAULT_CHILD_TOKEN_CAP,
-        options.profile.maxTokens ?? Number.POSITIVE_INFINITY,
-      );
-      const affordable = Math.floor(available / memberCap);
-      if (options.items.length > affordable) {
-        throw new Error([
-          `agent_team rejected: the remaining token budget affords at most ${affordable} member${affordable === 1 ? "" : "s"}`,
-          `but ${options.items.length} were requested. Reduce items or run smaller batches sequentially.`,
-        ].join(" "));
-      }
-    }
-
     const approval = options.approval ?? options.profile.approval;
     const route = this.resolveRouteForSubagent(options.profile, options.category, { model: options.model, effort: options.effort });
     const records = options.items.map((item) => this.createSubagentThreadRecord({
@@ -1911,22 +1889,6 @@ export class Agent {
       approval?: "fail" | "disabled";
     },
   ): Promise<SubagentThreadSnapshot[]> {
-    // Budget pre-check mirrors runAgentTeam: members × per-member cap must fit
-    // in what remains of a limited pool after the parent's reserve.
-    const limit = this.budgetLedger?.poolLimit;
-    if (this.budgetLedger && limit !== undefined) {
-      const reserve = Math.floor(limit * PARENT_POOL_RESERVE_RATIO);
-      const available = Math.max(0, (this.budgetLedger.remaining() ?? 0) - reserve);
-      const memberCap = this.subagentsConfig.childTokenCap ?? DEFAULT_CHILD_TOKEN_CAP;
-      const affordable = Math.floor(available / memberCap);
-      if (options.specs.length > affordable) {
-        throw new Error([
-          `agent_batch rejected: the remaining token budget affords at most ${affordable} member${affordable === 1 ? "" : "s"}`,
-          `but ${options.specs.length} were requested. Reduce specs or run smaller batches sequentially.`,
-        ].join(" "));
-      }
-    }
-
     const records = options.specs.map((spec) => {
       const approval = options.approval ?? spec.profile.approval;
       const task = spec.outputSchema !== undefined
@@ -2129,23 +2091,14 @@ export class Agent {
     const runRecords: SubagentThreadRecord[] = [];
     const logs: string[] = [];
 
-    // Per-run isolation (option C review): a token ceiling that aborts only this
-    // run (never the parent) and a concurrency sub-cap below the global limit so
-    // a workflow can't starve interactive subagents.
-    const poolLimit = this.budgetLedger?.poolLimit;
-    const runTokenCeiling = poolLimit !== undefined
-      ? Math.max(1, Math.floor(poolLimit * (1 - PARENT_POOL_RESERVE_RATIO)))
-      : Number.POSITIVE_INFINITY;
-    const runSpent = (): number => runRecords.reduce((sum, r) => sum + (r.usage ? r.usage.promptTokens + r.usage.completionTokens : 0), 0);
+    // Per-run isolation (option C review): a concurrency sub-cap below the
+    // global limit so a workflow can't starve interactive subagents.
     const interactiveReserve = 2;
     const globalCap = Math.max(1, this.subagentsConfig.maxActiveSubagents ?? 8);
     const workflowConcurrency = Math.max(1, globalCap - interactiveReserve);
     const gate = new WorkflowConcurrencyGate(workflowConcurrency);
 
     const dispatchAgent = async (spec: WorkflowAgentSpec): Promise<AgentDispatchResult> => {
-      if (runSpent() >= runTokenCeiling) {
-        return { ok: false, error: "workflow token ceiling reached; not launching more agents" };
-      }
       const baseProfile = findAgentProfile(profiles, spec.opts.agentType ?? "default")
         ?? findAgentProfile(profiles, "default");
       if (!baseProfile) return { ok: false, error: "no default subagent profile available" };
@@ -2328,13 +2281,6 @@ export class Agent {
   ): Promise<void> {
     record.status = "queued";
     record.updatedAt = Date.now();
-    record.tokenCap = computeChildTokenCap({
-      ledger: this.budgetLedger,
-      subAgentId: record.agentId,
-      activeChildren: this.subagentScheduler.activeCount(),
-      configCap: this.subagentsConfig.childTokenCap,
-      profileMaxTokens: record.profile.maxTokens,
-    });
     const queueSignal = composeAbortSignals([options.abortSignal, record.abortController.signal]);
     return this.subagentScheduler.dispatch({
       agentId: record.agentId,
@@ -2343,7 +2289,7 @@ export class Agent {
       run: (ctx) => this.runSubagentThread(record, input, cwd, { ...options, attempt: ctx.attempt }),
       onCancelledWhileQueued: (reason) => {
         record.status = "cancelled";
-        record.finalReason = classifySubagentAbortReason(reason, options.abortSignal, this.budgetLedger);
+        record.finalReason = classifySubagentAbortReason(reason, options.abortSignal);
         record.error = reason instanceof Error ? reason.message : reason ? String(reason) : "Cancelled while queued.";
         record.updatedAt = Date.now();
         // The run never started, so no SubagentStart fired and no SubagentStop follows.

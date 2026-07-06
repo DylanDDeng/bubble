@@ -78,8 +78,6 @@ export interface UserConfigData {
 export interface SubagentsUserConfig {
   /** Global cap on concurrently running children. Default 8. */
   maxActiveSubagents?: number;
-  /** Absolute per-child soft token cap. Default 200000. */
-  childTokenCap?: number;
 }
 
 function sanitizeSubagentsConfig(value: unknown): SubagentsUserConfig | undefined {
@@ -88,9 +86,6 @@ function sanitizeSubagentsConfig(value: unknown): SubagentsUserConfig | undefine
   const out: SubagentsUserConfig = {};
   if (typeof raw.maxActiveSubagents === "number" && Number.isFinite(raw.maxActiveSubagents)) {
     out.maxActiveSubagents = Math.max(1, Math.floor(raw.maxActiveSubagents));
-  }
-  if (typeof raw.childTokenCap === "number" && Number.isFinite(raw.childTokenCap)) {
-    out.childTokenCap = Math.max(1_000, Math.floor(raw.childTokenCap));
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }

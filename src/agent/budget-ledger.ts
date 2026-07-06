@@ -1,5 +1,4 @@
 import type { TokenUsage } from "../types.js";
-import type { SubagentTokenCap } from "./subagent-control.js";
 
 export interface BudgetUsageSource {
   runId: string;
@@ -16,10 +15,10 @@ const PARENT_SOURCE_KEY = "__parent__";
 
 /**
  * Shared token ledger for a parent and all of its children, with per-source
- * accounting so the runtime can enforce per-child caps (design doc §6).
- * The shared pool limit is optional — both production hosts construct the
- * ledger without one — so per-child caps must never be derived solely from
- * "pool remaining"; see computeChildTokenCap.
+ * accounting. Pure bookkeeping: children are never stopped for token usage —
+ * their only bound is the model context window, absorbed by compaction
+ * (design doc §6). The optional pool limit exists for hosts that explicitly
+ * declare one; both production hosts construct the ledger without it.
  */
 export class BudgetLedger {
   private spent = 0;
@@ -64,55 +63,6 @@ export class BudgetLedger {
       exhausted: this.limit !== undefined && this.spent >= this.limit,
     };
   }
-}
-
-/** Default absolute per-child soft cap; applies even on limit-free hosts. */
-export const DEFAULT_CHILD_TOKEN_CAP = 200_000;
-/** Share of a limited pool reserved for the parent's own turns. */
-export const PARENT_POOL_RESERVE_RATIO = 0.2;
-/** Hard cap sits at least this many tokens above the soft cap (≈ 2 turns). */
-export const CHILD_HARD_CAP_FLOOR = 20_000;
-
-/**
- * Per-child token cap, fixed at dispatch (design doc §6). The soft cap is an
- * absolute number (config default 200k) so it is effective on limit-free
- * hosts; when the pool *is* limited, the fair share of what remains after the
- * parent's reserve further bounds it. The cap never shrinks mid-run because
- * siblings spawned later.
- */
-export function computeChildTokenCap(options: {
-  ledger?: BudgetLedger;
-  subAgentId: string;
-  activeChildren: number;
-  configCap?: number;
-  profileMaxTokens?: number;
-}): SubagentTokenCap {
-  let soft = options.configCap ?? DEFAULT_CHILD_TOKEN_CAP;
-  if (options.profileMaxTokens !== undefined && options.profileMaxTokens > 0) {
-    soft = Math.min(soft, options.profileMaxTokens);
-  }
-  const limit = options.ledger?.poolLimit;
-  if (options.ledger && limit !== undefined) {
-    const reserve = Math.floor(limit * PARENT_POOL_RESERVE_RATIO);
-    const available = Math.max(0, (options.ledger.remaining() ?? 0) - reserve);
-    const share = Math.floor(available / (options.activeChildren + 1));
-    soft = Math.max(1, Math.min(soft, share));
-  }
-  return {
-    soft,
-    hard: soft + CHILD_HARD_CAP_FLOOR,
-    baseline: options.ledger?.spentBy(options.subAgentId) ?? 0,
-  };
-}
-
-/**
- * Hard cap recomputed at each turn-boundary check: at least ~2 of this
- * child's average turns above the soft cap, never below the absolute floor
- * (design doc §6 — replaces the fixed 25% ratio that could be smaller than a
- * single turn).
- */
-export function childHardCap(soft: number, avgTurnTokens: number): number {
-  return soft + Math.max(CHILD_HARD_CAP_FLOOR, Math.ceil(avgTurnTokens * 2));
 }
 
 function budgetAbortError(message: string): Error {
