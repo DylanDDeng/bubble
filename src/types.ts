@@ -264,38 +264,6 @@ export interface ToolContext {
     ) => Promise<import("./agent/subagent-control.js").SubagentThreadSnapshot>;
     closeSubAgent?: (agentId: string) => Promise<import("./agent/subagent-control.js").SubagentThreadSnapshot>;
     listSubAgents?: () => import("./agent/subagent-control.js").SubagentThreadSnapshot[];
-    runAgentTeam?: (
-      cwd: string,
-      options: {
-        profile: import("./agent/profiles.js").AgentProfile;
-        category?: string;
-        model?: string;
-        effort?: ThinkingLevel;
-        promptTemplate: string;
-        items: string[];
-        parentToolCallId: string;
-        emitUpdate?: (update: ToolUpdate) => void;
-        abortSignal?: AbortSignal;
-        approval?: "fail" | "disabled";
-      },
-    ) => Promise<import("./agent/subagent-control.js").SubagentThreadSnapshot[]>;
-    runAgentBatch?: (
-      cwd: string,
-      options: {
-        specs: Array<{
-          task: string;
-          profile: import("./agent/profiles.js").AgentProfile;
-          category?: string;
-          model?: string;
-          effort?: ThinkingLevel;
-          outputSchema?: unknown;
-        }>;
-        parentToolCallId: string;
-        emitUpdate?: (update: ToolUpdate) => void;
-        abortSignal?: AbortSignal;
-        approval?: "fail" | "disabled";
-      },
-    ) => Promise<import("./agent/subagent-control.js").SubagentThreadSnapshot[]>;
     startWorkflow?: (
       cwd: string,
       options: { script: string; args?: unknown; title?: string; parentToolCallId: string; abortSignal?: AbortSignal },

@@ -4,14 +4,10 @@ import { buildSystemPrompt } from "../system-prompt.js";
 import { buildDelegationPolicyPrompt } from "../prompt/delegation.js";
 import { reminderForTaskType } from "../prompt/task-reminders.js";
 import { discoverAgentProfiles, findAgentProfile } from "../agent/profiles.js";
-import {
-  AGENT_TEAM_MIN_ITEMS,
-  createAgentTeamTool,
-  createSpawnAgentTool,
-} from "../tools/agent-lifecycle.js";
+import { createRunWorkflowTool, createSpawnAgentTool } from "../tools/agent-lifecycle.js";
 import type { Message, Provider, StreamChunk } from "../types.js";
 
-const PARENT_TOOLS = ["read", "grep", "spawn_agent", "wait_agent", "send_input", "close_agent", "list_agents", "agent_team"];
+const PARENT_TOOLS = ["read", "grep", "spawn_agent", "wait_agent", "send_input", "close_agent", "list_agents", "run_workflow"];
 const CHILD_TOOLS = ["read", "glob", "grep", "lsp"];
 
 describe("delegation policy section (system prompt)", () => {
@@ -48,10 +44,7 @@ describe("delegation policy section (system prompt)", () => {
     expect(buildSystemPrompt({})).toContain("## Delegation policy (subagents)");
   });
 
-  it("keeps the team threshold one above the tool's hard minimum", () => {
-    // The prompt steers team use to 3+ items; the tool accepts 2 as a hard
-    // floor. If AGENT_TEAM_MIN_ITEMS changes, revisit the prompt wording.
-    expect(AGENT_TEAM_MIN_ITEMS).toBe(2);
+  it("steers fan-out to three or more items (two small items stay inline)", () => {
     expect(buildDelegationPolicyPrompt(PARENT_TOOLS)?.replace(/\s+/g, " ")).toContain("three or more independent items");
   });
 
@@ -96,10 +89,10 @@ describe("delegation wording in tool descriptions", () => {
     expect(tool.description).toContain("do not duplicate the same delegated work locally");
   });
 
-  it("agent_team scopes its proactive clause to read-only operations and keeps the exclusivity rule", () => {
-    const tool = createAgentTeamTool();
+  it("run_workflow covers fan-out over many subagents and keeps the exclusivity rule", () => {
+    const tool = createRunWorkflowTool();
 
-    expect(tool.description).toContain("Proactively use this when a task naturally splits into the same read-only operation");
+    expect(tool.description).toContain("coordinates many subagents");
     expect(tool.description).toContain("must be the ONLY tool call");
   });
 });

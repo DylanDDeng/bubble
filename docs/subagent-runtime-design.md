@@ -15,6 +15,17 @@ Supersedes the planning sections of `subagent-runtime-roadmap.md` and extends
 findings from the 2026-06-12 six-lens adversarial design review (traceability
 table at the end).
 
+> **Revision 2026-07-06 — tool surface consolidated; budget caps removed.**
+> Two decisions supersede parts of this document:
+> 1. The per-child token budget (§6) is gone — children stop when their task
+>    completes; the context window + compaction is the only resource bound.
+> 2. `agent_team` (§1.2) and `agent_batch` were **removed** in favor of a
+>    two-path surface: `spawn_agent` for a single background child, and
+>    `run_workflow` (script-driven, see `workflow-runtime-design.md`) for any
+>    fan-out or staged orchestration. Sections describing agent_team/agent_batch
+>    are kept as historical record; the scheduler/store/child-runner/reply
+>    protocol they describe still power spawn_agent and workflow children.
+
 ## Design principles
 
 1. **Parent-led, always.** One parent Bubble agent owns the user conversation,

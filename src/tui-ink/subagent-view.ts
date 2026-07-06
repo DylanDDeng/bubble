@@ -78,7 +78,9 @@ export function sortSubagents(subagents: SubagentDisplay[]): SubagentDisplay[] {
   return [...subagents].sort((a, b) => (rank[a.status ?? "running"] ?? 9) - (rank[b.status ?? "running"] ?? 9));
 }
 
-/** A spawn_agent (one member), an agent_team/agent_batch, or a run_workflow (a group of members). */
+/** A spawn_agent (one member) or a run_workflow (a group of members). The
+ * "team"/"batch" kinds survive only to render transcripts recorded before
+ * those tools were removed (2026-07-06). */
 export interface SubagentGroup {
   id: string;
   kind: "single" | "team" | "batch" | "workflow";

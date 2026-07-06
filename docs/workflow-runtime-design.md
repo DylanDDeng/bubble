@@ -13,6 +13,15 @@ schema validation+retry in batch §1.2, `isolateReadonlyChildFileTools` call §2
 `src/__tests__/orchestration-v2.test.ts` (11 cases). Full suite green
 (1306 passing), typecheck + build clean.
 
+> **Revision 2026-07-06 — surface consolidated to two paths.** `agent_team`
+> and `agent_batch` (§1.3) were removed: overlapping fan-out tools confused
+> model tool choice, and the delegation prompt only taught two of them. The
+> shipped surface is now `spawn_agent` (single child, per-call model/effort
+> §1.1 retained) + `run_workflow` (the QuickJS script runtime — the once
+> "deferred option C" is now THE fan-out path; schema validation §1.2 and
+> per-child tool isolation §2 live on in its dispatch). Per-child token caps
+> were removed the same day (see `subagent-runtime-design.md` §6).
+
 ## 0. The pivot — what "flexible like Claude Code" actually means
 
 The original goal was "dynamic workflows like Claude Code." A four-lens
