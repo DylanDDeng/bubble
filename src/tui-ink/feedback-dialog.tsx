@@ -160,7 +160,7 @@ export function FeedbackDialog({ base, initialDescription, onDismiss, onResult }
           </>
         ) : (
           <>
-            <Text color="red" bold>
+            <Text color={theme.error} bold>
               Feedback failed to submit
             </Text>
             <Box marginTop={1}>
@@ -192,7 +192,7 @@ export function FeedbackDialog({ base, initialDescription, onDismiss, onResult }
         Send feedback
       </Text>
       <Box marginTop={1}>
-        <Text color="yellow">
+        <Text color={theme.warning}>
           This creates a PUBLIC GitHub issue at DylanDDeng/bubble. Review before sending.
         </Text>
       </Box>
@@ -223,7 +223,7 @@ export function FeedbackDialog({ base, initialDescription, onDismiss, onResult }
             ))}
             {base.recentError && (
               <Box flexDirection="column" marginTop={1}>
-                <Text color="red">[recent error]</Text>
+                <Text color={theme.error}>[recent error]</Text>
                 <Text>{base.recentError}</Text>
               </Box>
             )}

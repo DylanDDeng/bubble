@@ -22,7 +22,13 @@ export interface Theme {
   success: string;
 
   // UI chrome
-  background: string;
+  /**
+   * Painted canvas color. `undefined` means "do not paint" — the terminal's
+   * own background shows through, so the app never fights the user's terminal
+   * palette (e.g. forcing pure black inside a soft-dark terminal). Users can
+   * still force a painted canvas via `theme.overrides.background` in config.
+   */
+  background: string | undefined;
   accent: string;
   /** Welcome banner border. */
   bannerBorder: string;
@@ -49,7 +55,8 @@ export interface Theme {
   toolResult: string;
   toolError: string;
   toolPending: string;
-  code: string;
+  /** Markdown inline `code` spans. */
+  inlineCode: string;
   traceAction: string;
   traceCount: string;
   traceDetail: string;
@@ -63,8 +70,10 @@ export interface Theme {
   userRail: string;
 
   // Diff
+  /** Painted band backgrounds for diff lines inside user-message cards. */
   diffAdd: string;
   diffRemove: string;
+  /** Foregrounds for +/- diff lines rendered without a painted background. */
   diffAddFg: string;
   diffRemoveFg: string;
 }
@@ -76,7 +85,7 @@ export const darkTheme: Theme = {
   warning: "yellow",
   success: "green",
 
-  background: "#0A0A0A",
+  background: undefined,
   accent: "cyan",
   bannerBorder: "#38bdf8",
   bannerGradientFrom: "#67e8f9",
@@ -100,7 +109,7 @@ export const darkTheme: Theme = {
   toolResult: "gray",
   toolError: "red",
   toolPending: "yellow",
-  code: "yellow",
+  inlineCode: "#a78bfa",
   traceAction: "#E89A6B",
   traceCount: "#c9c1bd",
   traceDetail: "gray",
@@ -114,8 +123,8 @@ export const darkTheme: Theme = {
 
   diffAdd: "#1a3d1a",
   diffRemove: "#3d1a1a",
-  diffAddFg: "#9CDCFE",
-  diffRemoveFg: "#F48771",
+  diffAddFg: "green",
+  diffRemoveFg: "red",
 };
 
 /**
@@ -130,7 +139,7 @@ export const lightTheme: Theme = {
   warning: "#8B4A00",
   success: "#2F7D4A",
 
-  background: "#FCFCFA",
+  background: undefined,
   accent: "#8B4A00",
   bannerBorder: "#356FD2",
   bannerGradientFrom: "#0E7490",
@@ -154,7 +163,7 @@ export const lightTheme: Theme = {
   toolResult: "#171717",
   toolError: "#B62633",
   toolPending: "#8B4A00",
-  code: "#2F7D4A",
+  inlineCode: "#6D28D9",
   traceAction: "#8B4A00",
   traceCount: "#6F7377",
   traceDetail: "#8B9094",
@@ -168,8 +177,8 @@ export const lightTheme: Theme = {
 
   diffAdd: "#D7E8D8",
   diffRemove: "#F7DADC",
-  diffAddFg: "#173D2D",
-  diffRemoveFg: "#5D1922",
+  diffAddFg: "#2F7D4A",
+  diffRemoveFg: "#B62633",
 };
 
 const ThemeContext = createContext<Theme>(darkTheme);

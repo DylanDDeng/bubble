@@ -255,6 +255,8 @@ interface ThemeShape {
   accent: string;
   muted: string;
   borderActive: string;
+  error: string;
+  success: string;
 }
 
 function renderBody(stage: Stage, theme: ThemeShape): React.ReactNode {
@@ -302,7 +304,7 @@ function renderBody(stage: Stage, theme: ThemeShape): React.ReactNode {
     case "error":
       return (
         <Box flexDirection="column">
-          <Text color="red">❌ {stage.message}</Text>
+          <Text color={theme.error}>❌ {stage.message}</Text>
           <Box marginTop={1}>
             <Text color={theme.muted}>按 Enter 关闭。可以稍后再 /feishu setup 重试。</Text>
           </Box>
@@ -337,7 +339,7 @@ function BindingForm({ stage, theme }: { stage: Extract<Stage, { kind: "binding"
         return (
           <Box key={field} flexDirection="column" marginBottom={isActive ? 1 : 0}>
             <Box>
-              <Text color={isActive ? theme.accent : isDone ? "green" : theme.muted}>
+              <Text color={isActive ? theme.accent : isDone ? theme.success : theme.muted}>
                 {marker}{meta.label}:
               </Text>
               <Box marginLeft={1}>
@@ -354,7 +356,7 @@ function BindingForm({ stage, theme }: { stage: Extract<Stage, { kind: "binding"
       })}
       {stage.error && (
         <Box marginTop={1}>
-          <Text color="red">{stage.error}</Text>
+          <Text color={theme.error}>{stage.error}</Text>
         </Box>
       )}
     </Box>

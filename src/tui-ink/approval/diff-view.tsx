@@ -51,7 +51,7 @@ export function DiffView({ diff, maxLines = DEFAULT_MAX_LINES }: DiffViewProps) 
         <Box key={i} flexDirection="column">
           <Text color={theme.accent}>{hunk.header}</Text>
           {shown.map((line, j) => (
-            <Text key={j} color={colorForDiffLine(line)}>
+            <Text key={j} color={colorForDiffLine(line, theme)}>
               {line || " "}
             </Text>
           ))}
@@ -67,8 +67,11 @@ export function DiffView({ diff, maxLines = DEFAULT_MAX_LINES }: DiffViewProps) 
   );
 }
 
-function colorForDiffLine(line: string): string | undefined {
-  if (line.startsWith("+")) return "green";
-  if (line.startsWith("-")) return "red";
+function colorForDiffLine(
+  line: string,
+  theme: { diffAddFg: string; diffRemoveFg: string },
+): string | undefined {
+  if (line.startsWith("+")) return theme.diffAddFg;
+  if (line.startsWith("-")) return theme.diffRemoveFg;
   return undefined;
 }

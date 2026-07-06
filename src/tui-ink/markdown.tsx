@@ -374,13 +374,14 @@ function appendInlineSegment(
 function renderSegmentNodes(
   segments: MarkdownInlineSegment[],
   keyPrefix: string,
+  codeColor: string,
 ): React.ReactNode[] {
   return segments.map((segment, index) => (
     <Text
       key={`${keyPrefix}-${index}`}
       bold={segment.bold}
       italic={segment.italic}
-      color={segment.code ? "#a78bfa" : undefined}
+      color={segment.code ? codeColor : undefined}
     >
       {segment.text}
     </Text>
@@ -390,9 +391,10 @@ function renderSegmentNodes(
 function renderInlineSegments(
   text: string,
   keyPrefix: string,
+  codeColor: string,
   style: InlineStyle = {},
 ): React.ReactNode[] {
-  return renderSegmentNodes(parseMarkdownInlineSegments(text, style), keyPrefix);
+  return renderSegmentNodes(parseMarkdownInlineSegments(text, style), keyPrefix, codeColor);
 }
 
 function inlinePlainText(text: string): string {
@@ -400,6 +402,7 @@ function inlinePlainText(text: string): string {
 }
 
 function InlineText({ text, maxWidth }: { text: string; maxWidth?: number }) {
+  const theme = useTheme();
   const { columns } = useTerminalSize();
   // Pre-wrap CJK-aware so Ink's space-only wrap-ansi can't chop "、"-joined runs
   // mid-token. A caller-supplied maxWidth is exact (it already nets out the
@@ -408,13 +411,13 @@ function InlineText({ text, maxWidth }: { text: string; maxWidth?: number }) {
   // wrapping a few cells early is invisible, a mid-token chop is not.
   const effectiveWidth = maxWidth ?? (columns ? Math.max(20, columns - 10) : undefined);
   if (effectiveWidth === undefined) {
-    return <Text>{renderInlineSegments(text, "inline")}</Text>;
+    return <Text>{renderInlineSegments(text, "inline", theme.inlineCode)}</Text>;
   }
   const wrapped = wrapInlineSegments(parseMarkdownInlineSegments(text), effectiveWidth);
   return (
     <>
       {wrapped.map((segments, li) => (
-        <Text key={li}>{segments.length ? renderSegmentNodes(segments, `inline-${li}`) : " "}</Text>
+        <Text key={li}>{segments.length ? renderSegmentNodes(segments, `inline-${li}`, theme.inlineCode) : " "}</Text>
       ))}
     </>
   );
@@ -471,6 +474,7 @@ function TableBlock({
   rows: string[][];
   maxWidth?: number;
 }) {
+  const theme = useTheme();
   const { columns: termWidth } = useTerminalSize();
   const colCount = headers.length;
   // Reserve a buffer so the table fits even when wrapped inside an indented
@@ -530,7 +534,7 @@ function TableBlock({
             {`${g.v} `}
             {wrapped.map((cellLines, i) => (
               <React.Fragment key={i}>
-                {renderCellLine(cellLines[line] ?? [], widths[i] ?? 4, `${keyPrefix}-cell-${i}-${line}`)}
+                {renderCellLine(cellLines[line] ?? [], widths[i] ?? 4, `${keyPrefix}-cell-${i}-${line}`, theme.inlineCode)}
                 {i < colCount - 1 ? ` ${g.v} ` : ` ${g.v}`}
               </React.Fragment>
             ))}
@@ -614,19 +618,11 @@ function renderCellLine(
   segments: MarkdownInlineSegment[],
   width: number,
   keyPrefix: string,
+  codeColor: string,
 ): React.ReactNode[] {
   const padding = " ".repeat(Math.max(0, width - inlineSegmentsWidth(segments)));
   return [
-    ...segments.map((segment, index) => (
-      <Text
-        key={`${keyPrefix}-${index}`}
-        bold={segment.bold}
-        italic={segment.italic}
-        color={segment.code ? "#a78bfa" : undefined}
-      >
-        {segment.text}
-      </Text>
-    )),
+    ...renderSegmentNodes(segments, keyPrefix, codeColor),
     <Text key={`${keyPrefix}-pad`}>{padding}</Text>,
   ];
 }

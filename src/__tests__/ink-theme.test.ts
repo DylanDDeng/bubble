@@ -5,12 +5,22 @@ import { InputBox } from "../tui-ink/input-box.js";
 import { ThemeProvider, lightTheme, paletteFor } from "../tui-ink/theme.js";
 
 describe("Ink light theme", () => {
-  it("uses a paper canvas and a distinct light composer surface", () => {
+  it("inherits the terminal background instead of painting a canvas", () => {
+    // A painted canvas fights terminals whose background differs from ours
+    // (pure black inside a soft-dark terminal, cream inside a white one), so
+    // both palettes leave the canvas unpainted by default.
+    expect(paletteFor("light").background).toBeUndefined();
+    expect(paletteFor("dark").background).toBeUndefined();
+  });
+
+  it("lets config overrides force a painted canvas", () => {
+    expect(paletteFor("dark", { background: "#0A0A0A" }).background).toBe("#0A0A0A");
+  });
+
+  it("keeps a distinct light composer surface", () => {
     const theme = paletteFor("light");
 
-    expect(theme.background).toBe("#FCFCFA");
     expect(theme.inputBg).toBe("#F1F3F0");
-    expect(theme.inputBg).not.toBe(theme.background);
   });
 
   it("renders the composer under the light theme", () => {

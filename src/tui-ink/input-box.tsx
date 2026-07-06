@@ -77,7 +77,6 @@ interface InputBoxProps {
   nextImageLabelStart?: number;
 }
 
-const MIN_VISIBLE_LINES = 3;
 const MAX_VISIBLE_LINES = 6;
 const PADDING_X = 1;
 const PROMPT = " > ";
@@ -128,14 +127,6 @@ export function isCtrlCInput(input: string, key: { ctrl?: boolean }): boolean {
   return isCtrlLetterInput(input, key, "c");
 }
 
-export function shouldUseLineComposerFrame(_background: string): boolean {
-  return true;
-}
-
-export function composerSurfaceBackground(lineFrame: boolean, background: string, inputBg: string): string {
-  return lineFrame ? background : inputBg;
-}
-
 export function shouldUseHardwareComposerCursor(env: Record<string, string | undefined> = process.env): boolean {
   return env.BUBBLE_HARDWARE_CURSOR === "1";
 }
@@ -152,21 +143,12 @@ export function composerVerticalArrowDirection(key: {
 
 export function resolveSoftwareCursorCellStyle(input: {
   visible: boolean;
-  cursorBackground: string;
-  cursorForeground: string;
   textColor: string;
-  rowBackground?: string;
-}): { backgroundColor?: string; color: string } {
-  if (input.visible) {
-    return {
-      backgroundColor: input.cursorBackground,
-      color: input.cursorForeground,
-    };
-  }
-  return {
-    backgroundColor: input.rowBackground,
-    color: input.textColor,
-  };
+}): { inverse: boolean; color: string } {
+  // Inverse video swaps the cell's real foreground/background at the terminal
+  // level, so the cursor block stays visible on any terminal palette without
+  // guessing a contrasting pair.
+  return { inverse: input.visible, color: input.textColor };
 }
 
 /**
@@ -1221,8 +1203,7 @@ export function InputBox({
     performVerticalArrowRef.current(direction);
   };
 
-  const lineFrame = shouldUseLineComposerFrame(theme.background);
-  const minVisibleLines = lineFrame ? 1 : MIN_VISIBLE_LINES;
+  const minVisibleLines = 1;
   const totalLines = Math.max(visualLines.length, 1);
   const visibleLines = Math.min(Math.max(totalLines, minVisibleLines), MAX_VISIBLE_LINES);
 
@@ -1372,16 +1353,9 @@ export function InputBox({
   });
   // Reference cursorTick so the effect re-runs on the forced render pass.
   void cursorTick;
-  const inputBg = disabled ? theme.inputBgDisabled : theme.inputBg;
-  const composerBg = composerSurfaceBackground(lineFrame, theme.background, inputBg);
-  const rowBg = lineFrame ? undefined : inputBg;
-  const cursorFg = lineFrame ? theme.background : inputBg;
   const cursorCellStyle = resolveSoftwareCursorCellStyle({
     visible: softwareCursorVisible,
-    cursorBackground: theme.inputText,
-    cursorForeground: cursorFg,
     textColor: theme.inputText,
-    rowBackground: rowBg,
   });
   const moreBelow = totalLines - scrollOffset - visibleLines;
 
@@ -1392,21 +1366,19 @@ export function InputBox({
 
   return (
     <Box flexDirection="column" width={width} backgroundColor={theme.background}>
-      {lineFrame && (
-        <Box paddingX={PADDING_X}>
-          <Text color={theme.border}>{"─".repeat(contentWidth)}</Text>
-        </Box>
-      )}
-      <Box flexDirection="column" paddingX={PADDING_X} width={width} backgroundColor={composerBg}>
+      <Box paddingX={PADDING_X}>
+        <Text color={theme.border}>{"─".repeat(contentWidth)}</Text>
+      </Box>
+      <Box flexDirection="column" paddingX={PADDING_X} width={width} backgroundColor={theme.background}>
         {hasMoreAbove && (
-          <Text backgroundColor={rowBg} color={theme.muted} dimColor>
+          <Text color={theme.muted} dimColor>
             {filledLine(` ↑ ${scrollOffset} more`)}
           </Text>
         )}
         {displayedLines.map((row) => {
           if (row.kind === "pad") {
             return (
-              <Text key={row.key} backgroundColor={rowBg}>
+              <Text key={row.key}>
                 {" ".repeat(contentWidth)}
               </Text>
             );
@@ -1433,7 +1405,7 @@ export function InputBox({
               key={visualIdx}
               height={1}
               overflow="hidden"
-              backgroundColor={composerBg}
+              backgroundColor={theme.background}
               ref={
                 isCursorLine
                   ? (el: DOMElement | null) => {
@@ -1442,13 +1414,13 @@ export function InputBox({
                   : undefined
               }
             >
-              <Text backgroundColor={rowBg} color={isFirst ? theme.accent : theme.inputText}>
+              <Text color={isFirst ? theme.accent : theme.inputText}>
                 {prompt}
               </Text>
               {renderedSegments.map((segment, index) => {
                 if (segment.kind === "cursor") {
                   return (
-                    <Text key={index} backgroundColor={cursorCellStyle.backgroundColor} color={cursorCellStyle.color}>
+                    <Text key={index} inverse={cursorCellStyle.inverse} color={cursorCellStyle.color}>
                       {segment.text}
                     </Text>
                   );
@@ -1456,7 +1428,6 @@ export function InputBox({
                 return (
                   <Text
                     key={index}
-                    backgroundColor={rowBg}
                     color={segment.kind === "command" ? theme.accent : theme.inputText}
                     bold={segment.kind === "command"}
                   >
@@ -1464,21 +1435,19 @@ export function InputBox({
                   </Text>
                 );
               })}
-              <Text backgroundColor={rowBg}>{fill}</Text>
+              <Text>{fill}</Text>
             </Box>
           );
         })}
         {hasMoreBelow && (
-          <Text backgroundColor={rowBg} color={theme.muted} dimColor>
+          <Text color={theme.muted} dimColor>
             {filledLine(` ↓ ${moreBelow} more`)}
           </Text>
         )}
       </Box>
-      {lineFrame && (
-        <Box paddingX={PADDING_X}>
-          <Text color={theme.border}>{"─".repeat(contentWidth)}</Text>
-        </Box>
-      )}
+      <Box paddingX={PADDING_X}>
+        <Text color={theme.border}>{"─".repeat(contentWidth)}</Text>
+      </Box>
       {showSuggestions && mode === "slash" && (
         <Box flexDirection="column" marginTop={1} paddingLeft={4}>
           {slashSuggestions
@@ -1522,7 +1491,7 @@ export function InputBox({
               return (
                 <Box key={s.path} height={1}>
                   {i === selectedIndex ? (
-                    <Text backgroundColor="white" color="black">{` ${label} `}</Text>
+                    <Text color={theme.accent} bold>{`› ${label}`}</Text>
                   ) : (
                     <Text>{`  ${label}`}</Text>
                   )}

@@ -148,7 +148,7 @@ export function PlanConfirm({ initialPlan, onApprove, onReject }: PlanConfirmPro
           return (
             <Box key={index}>
               <Text>{safe.slice(0, cursorCol)}</Text>
-              <Text backgroundColor="white" color="black">
+              <Text inverse>
                 {safe[cursorCol] || " "}
               </Text>
               <Text>{safe.slice(cursorCol + 1)}</Text>
