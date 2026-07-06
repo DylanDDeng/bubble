@@ -1977,16 +1977,6 @@ export class Agent {
       const baseProfile = findAgentProfile(profiles, spec.opts.agentType ?? "default")
         ?? findAgentProfile(profiles, "default");
       if (!baseProfile) return { ok: false, error: "no default subagent profile available" };
-      // Project-local profiles pass the same first-use trust gate as
-      // spawn_agent: a .bubble/agents profile must never gain a side door
-      // into execution just because a script named it (Codex review on #58).
-      if (options.ensureProfileTrusted) {
-        const blocked = await options.ensureProfileTrusted(baseProfile);
-        if (blocked) {
-          const message = typeof blocked.content === "string" ? blocked.content : `profile "${baseProfile.name}" requires user approval`;
-          return { ok: false, error: message };
-        }
-      }
       // Workflow agents are readonly-by-default; mode upgrades come only from the
       // profile, never from the script (security invariant).
       const unsupported = baseProfile.mode !== "readonly" && baseProfile.mode !== "write_worktree";
@@ -2022,6 +2012,19 @@ export class Agent {
       });
       runRecords.push(record);
       this.subagentStore.set(record);
+      // Project-local profiles pass the same first-use trust gate as
+      // spawn_agent: a .bubble/agents profile must never gain a side door
+      // into execution just because a script named it (Codex review on #58).
+      // Checked AFTER the record exists so a rejected member still shows up
+      // in the run's counts/snapshots as blocked instead of vanishing.
+      if (options.ensureProfileTrusted) {
+        const blocked = await options.ensureProfileTrusted(baseProfile);
+        if (blocked) {
+          const message = typeof blocked.content === "string" ? blocked.content : `profile "${baseProfile.name}" requires user approval`;
+          this.finalizeSubagentBlocked(record, message, { directEmit: options.directEmit, queueUpdates: options.queueUpdates });
+          return { ok: false, error: message };
+        }
+      }
       const admissionError = this.admitSubagentProfile(record, profile.approval);
       if (admissionError) {
         this.finalizeSubagentBlocked(record, admissionError, { directEmit: options.directEmit, queueUpdates: options.queueUpdates });
@@ -3037,7 +3040,14 @@ function isSubagentLifecycleTool(name: string): boolean {
     || name === "wait_agent"
     || name === "send_input"
     || name === "close_agent"
-    || name === "list_agents";
+    || name === "list_agents"
+    || name === "run_workflow"
+    || name === "wait_workflow"
+    // Legacy names: still present in transcripts recorded before the tools
+    // were removed (2026-07-06); forked children must not inherit their
+    // dangling tool_calls either.
+    || name === "agent_team"
+    || name === "agent_batch";
 }
 
 
