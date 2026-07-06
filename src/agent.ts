@@ -531,7 +531,7 @@ export class Agent {
     cwd: string,
     options: AgentRunOptions = {},
   ): AsyncIterable<AgentEvent> {
-    const abortSignal = composeAbortSignals([options.abortSignal, this.budgetLedger?.signal]);
+    const abortSignal = options.abortSignal;
     const inputController = options.inputController;
     const traceContext = {
       cwd,
@@ -2190,13 +2190,11 @@ export class Agent {
       onLog: (message) => logs.push(message),
       onPhase: (title) => logs.push(`— phase: ${title} —`),
       budget: {
-        total: this.budgetLedger?.poolLimit ?? null,
+        // The ledger is pure accounting (no pool limit); scripts see an
+        // unlimited budget unless a future host contract reintroduces one.
+        total: null,
         spent: () => runRecords.reduce((sum, r) => sum + (r.usage ? r.usage.promptTokens + r.usage.completionTokens : 0), 0),
-        remaining: () => {
-          const limit = this.budgetLedger?.poolLimit;
-          if (limit === undefined) return Number.POSITIVE_INFINITY;
-          return Math.max(0, (this.budgetLedger?.remaining() ?? 0));
-        },
+        remaining: () => Number.POSITIVE_INFINITY,
       },
       signal: options.abortSignal,
     });
