@@ -38,6 +38,14 @@ describe("copyToClipboard OSC 52 emission", () => {
 
   beforeEach(() => {
     writeSpy = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+    // On Linux copyToClipboard only attempts a native tool when a display
+    // server is advertised; headless CI has neither DISPLAY nor
+    // WAYLAND_DISPLAY, so no native path runs and `copied` stays false.
+    // Pin an X11 display so every platform exercises a native branch (the
+    // mocked execSync makes it succeed), keeping these tests host-agnostic.
+    process.env.DISPLAY = ":0";
+    delete process.env.WAYLAND_DISPLAY;
+    delete process.env.TERMUX_VERSION;
   });
 
   afterEach(() => {
