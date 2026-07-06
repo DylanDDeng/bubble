@@ -7,7 +7,7 @@ import { discoverAgentProfiles, findAgentProfile, type AgentProfile } from "../a
 import type { Message, Provider, StreamChunk } from "../types.js";
 
 const FIRST_SUMMARY = "First-run conclusion: the admission gate covers every launch path including restarts and team members.";
-const SECOND_SUMMARY = "Follow-up conclusion: persistence round-trips finalReason, deliveredAt, and tokenCap across restarts.";
+const SECOND_SUMMARY = "Follow-up conclusion: persistence round-trips finalReason and deliveredAt across restarts.";
 
 function defaultProfile(): AgentProfile {
   return findAgentProfile(discoverAgentProfiles("/tmp", "user").profiles, "default")!;
@@ -82,7 +82,7 @@ describe("subagent persistence and cross-restart resume (design §7)", () => {
     expect(messages.some((message) => message.role === "assistant" && message.content === FIRST_SUMMARY)).toBe(true);
   });
 
-  it("round-trips finalReason, resumable, deliveredAt, and tokenCap through the on-disk schema", async () => {
+  it("round-trips finalReason, resumable, and deliveredAt through the on-disk schema", async () => {
     const failingProvider: Provider = {
       // eslint-disable-next-line require-yield
       async *streamChat() {
@@ -96,7 +96,7 @@ describe("subagent persistence and cross-restart resume (design §7)", () => {
       provider: failingProvider,
       model: "gpt-4o",
       tools: [],
-      subagents: { persistDir, childTokenCap: 5_000 },
+      subagents: { persistDir },
     });
     const spawned = await firstAgent.spawnSubAgent("doomed", "/tmp", {
       profile: defaultProfile(),
@@ -108,7 +108,6 @@ describe("subagent persistence and cross-restart resume (design §7)", () => {
     const raw = JSON.parse(readFileSync(join(persistDir, `${spawned.agentId}.json`), "utf8"));
     expect(raw.finalReason).toBe("failed_transient");
     expect(raw.deliveredAt).toBeDefined();
-    expect(raw.tokenCap.soft).toBe(5_000);
 
     const secondAgent = new Agent({
       provider: failingProvider,
@@ -120,7 +119,6 @@ describe("subagent persistence and cross-restart resume (design §7)", () => {
     expect(reloaded.finalReason).toBe("failed_transient");
     expect(reloaded.resumable).toBe(true);
     expect(reloaded.deliveredAt).toBeDefined();
-    expect(reloaded.tokenCap?.soft).toBe(5_000);
   });
 
   it("in-memory records win over stale disk entries", async () => {

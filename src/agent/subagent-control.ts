@@ -25,7 +25,6 @@ export type SubagentFinalReason =
   | "blocked"
   | "cancelled_interrupt"
   | "cancelled_user"
-  | "cancelled_budget"
   | "cancelled_parent_abort";
 
 export function isResumableReason(reason: SubagentFinalReason): boolean {
@@ -39,19 +38,8 @@ export function isResumableReason(reason: SubagentFinalReason): boolean {
     case "completed":
     case "failed_fatal":
     case "blocked":
-    case "cancelled_budget":
       return false;
   }
-}
-
-/** Per-child token budget, fixed at dispatch time (design doc §6). */
-export interface SubagentTokenCap {
-  /** Soft cap: crossing it injects a wrap-up reminder into the child. */
-  soft: number;
-  /** Hard cap: crossing it aborts this child only. Updated at turn checks. */
-  hard: number;
-  /** Ledger tokens already attributed to this child when the run started. */
-  baseline: number;
 }
 
 export interface SubagentThreadSnapshot {
@@ -75,7 +63,6 @@ export interface SubagentThreadSnapshot {
   deliveredAt?: number;
   /** 1-based position in the scheduler queue while status is "queued". */
   queuePosition?: number;
-  tokenCap?: SubagentTokenCap;
   /** Present for write_worktree children: where the isolated checkout lives. */
   worktree?: SubagentWorktree;
 }
@@ -99,7 +86,6 @@ export interface SubagentThreadRecord {
   createdAt: number;
   updatedAt: number;
   deliveredAt?: number;
-  tokenCap?: SubagentTokenCap;
   worktree?: SubagentWorktree;
   /** True for agents spawned inside a run_workflow: kept out of list_agents /
    * wait_agent and not persisted (design v2 appendix; option C). */
@@ -141,7 +127,6 @@ export function snapshotSubagentThread(record: SubagentThreadRecord): SubagentTh
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
     deliveredAt: record.deliveredAt,
-    tokenCap: record.tokenCap ? { ...record.tokenCap } : undefined,
     worktree: record.worktree ? { ...record.worktree } : undefined,
   };
 }

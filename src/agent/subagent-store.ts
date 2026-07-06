@@ -7,7 +7,7 @@
  * Persistence (design §7): final-state children are written to
  * `<persistDir>/<agentId>.json` as snapshot + compacted message history, so a
  * later process can resume them via send_input. The on-disk schema carries
- * `finalReason` / `resumable` / `deliveredAt` / `tokenCap` — the fields the
+ * `finalReason` / `resumable` / `deliveredAt` — the fields the
  * reply protocol and delivery dedup depend on. Child transcripts never mix
  * into the parent transcript.
  */
@@ -19,7 +19,6 @@ import {
   type SubagentFinalReason,
   type SubagentThreadRecord,
   type SubagentThreadStatus,
-  type SubagentTokenCap,
 } from "./subagent-control.js";
 import type { AgentProfile } from "./profiles.js";
 import type { Message } from "../types.js";
@@ -48,7 +47,6 @@ interface PersistedSubagent {
   createdAt: number;
   updatedAt: number;
   deliveredAt?: number;
-  tokenCap?: SubagentTokenCap;
   messages?: Message[];
 }
 
@@ -126,7 +124,6 @@ export class SubagentStore {
         createdAt: record.createdAt,
         updatedAt: record.updatedAt,
         deliveredAt: record.deliveredAt,
-        tokenCap: record.tokenCap,
         messages: record.agent?.messages ?? record.messages,
       };
       writeFileSync(join(this.persistDir, `${record.agentId}.json`), JSON.stringify(payload));
@@ -173,7 +170,6 @@ export class SubagentStore {
           createdAt: parsed.createdAt,
           updatedAt: parsed.updatedAt,
           deliveredAt: parsed.deliveredAt,
-          tokenCap: parsed.tokenCap,
           abortController: new AbortController(),
           waiters: new Set(),
           messages: parsed.messages,

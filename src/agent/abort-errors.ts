@@ -11,7 +11,7 @@ export class AgentAbortError extends Error {
  * message strings.
  */
 export class SubagentAbortError extends AgentAbortError {
-  constructor(message: string, readonly subagentReason: "interrupt" | "user_close" | "budget") {
+  constructor(message: string, readonly subagentReason: "interrupt" | "user_close") {
     super(message);
     this.name = "SubagentAbortError";
   }

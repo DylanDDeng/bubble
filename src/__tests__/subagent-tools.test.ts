@@ -111,12 +111,6 @@ describe("wait_agent reply protocol (design §3.1, §3.4)", () => {
     ]));
     expect(transient.content).toContain("resume: call send_input with agent_id child_1");
 
-    const budget = await tool.execute({}, waitCtx([
-      snapshot({ status: "cancelled", finalReason: "cancelled_budget", resumable: false, error: "hard cap" }),
-    ]));
-    expect(budget.content).toContain("budget exhausted — do not resume");
-    expect(budget.content).not.toContain("resume: call send_input");
-
     const blocked = await tool.execute({}, waitCtx([
       snapshot({ status: "blocked", finalReason: "blocked", resumable: false, error: "approval required" }),
     ]));

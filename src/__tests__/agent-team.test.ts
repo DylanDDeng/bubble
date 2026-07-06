@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { Agent } from "../agent.js";
-import { BudgetLedger } from "../agent/budget-ledger.js";
 import { discoverAgentProfiles, findAgentProfile, type AgentProfile } from "../agent/profiles.js";
 import { RateLimitError } from "../network/errors.js";
 import { createAgentLifecycleTools } from "../tools/agent-lifecycle.js";
@@ -131,24 +130,6 @@ describe("agent_team runtime", () => {
     }
   });
 
-  it("rejects a team the remaining pool budget cannot afford, naming the affordable count", async () => {
-    const ledger = new BudgetLedger(100_000);
-    const agent = new Agent({
-      provider: textProvider(),
-      model: "gpt-4o",
-      tools: [],
-      budgetLedger: ledger,
-      subagents: { childTokenCap: 20_000 },
-    });
-
-    // reserve = 20k, available = 80k, per-member cap = 20k → affordable 4.
-    await expect(agent.runAgentTeam("/tmp", {
-      profile: defaultProfile(),
-      promptTemplate: "Audit {{item}}.",
-      items: ["a", "b", "c", "d", "e"],
-      parentToolCallId: "team_1",
-    })).rejects.toThrow(/at most 4 members/);
-  });
 });
 
 describe("agent_team tool", () => {

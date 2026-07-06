@@ -27,8 +27,6 @@ export interface AgentProfile {
   category?: string;
   tools: AgentProfileTools;
   maxTurns?: number;
-  /** Optional per-child token cap declared by the profile (may only lower the runtime default). */
-  maxTokens?: number;
   approval: AgentProfileApproval;
   nicknameCandidates?: string[];
   prompt: string;
@@ -418,7 +416,6 @@ function parseAgentProfileFile(raw: string, source: AgentProfileSource, filePath
     category: stringValue(frontmatter.category),
     tools: toolsValue(frontmatter.tools),
     maxTurns: numberValue(frontmatter.maxTurns),
-    maxTokens: numberValue(frontmatter.maxTokens),
     approval: approvalValue(frontmatter.approval),
     nicknameCandidates: stringArray(frontmatter.nicknameCandidates) ?? stringArray(frontmatter.nicknames),
     prompt: parsed.body.trim(),

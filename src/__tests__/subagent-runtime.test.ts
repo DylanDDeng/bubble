@@ -319,39 +319,35 @@ describe("subagent runtime — transport-timeout contract", () => {
   });
 });
 
-describe("subagent runtime — per-child budget", () => {
-  it("warns at the soft cap then aborts only that child at the hard cap on a limit-free host", async () => {
+describe("subagent runtime — no per-child token cap", () => {
+  it("lets a token-heavy child run to completion instead of budget-cancelling it", async () => {
     const usage = (promptTokens: number, completionTokens: number): StreamChunk => ({
       type: "usage",
       usage: { promptTokens, completionTokens },
     });
     const agent = new Agent({
       provider: providerFromTurns([
-        // turn 1: tool call, 1500 tokens — crosses soft cap (1000), hard becomes 21000
-        [usage(1_000, 500), { type: "tool_call", id: "r1", name: "read", arguments: "{}", isStart: true, isEnd: true }, { type: "done" }],
-        // turn 2: tool call, 20500 tokens — total 22000 ≥ hard 21000 → abort
-        [usage(20_000, 500), { type: "tool_call", id: "r2", name: "read", arguments: "{}", isStart: true, isEnd: true }, { type: "done" }],
-        // turn 3 would continue but the child is aborted before it produces output
-        [{ type: "text", content: LONG_SUMMARY }, { type: "done" }],
+        [usage(200_000, 500), { type: "tool_call", id: "r1", name: "read", arguments: "{}", isStart: true, isEnd: true }, { type: "done" }],
+        [usage(300_000, 500), { type: "tool_call", id: "r2", name: "read", arguments: "{}", isStart: true, isEnd: true }, { type: "done" }],
+        [usage(400_000, 500), { type: "text", content: LONG_SUMMARY }, { type: "done" }],
       ]),
       model: "gpt-4o",
       tools: [readTool()],
-      subagents: { childTokenCap: 1_000 },
     });
     const profile = defaultProfile();
 
-    const spawned = await agent.spawnSubAgent("budget heavy task", "/tmp", { profile, parentToolCallId: "spawn_1" });
+    const spawned = await agent.spawnSubAgent("token heavy task", "/tmp", { profile, parentToolCallId: "spawn_1" });
     const done = await agent.waitSubAgents({ agentIds: [spawned.agentId], timeoutMs: 5_000 });
 
-    expect(done[0].status).toBe("cancelled");
-    expect(done[0].finalReason).toBe("cancelled_budget");
-    expect(done[0].resumable).toBe(false);
+    expect(done[0].status).toBe("completed");
+    expect(done[0].finalReason).toBe("completed");
+    expect(done[0].summary).toBe(LONG_SUMMARY.trim());
 
     const record = (agent as any).subagentStore.get(spawned.agentId);
     const reminders = (record.agent.messages as Message[]).filter(
       (message) => message.role === "meta" && message.content.includes("Token budget notice"),
     );
-    expect(reminders.length).toBeGreaterThanOrEqual(1);
+    expect(reminders).toHaveLength(0);
   });
 });
 
