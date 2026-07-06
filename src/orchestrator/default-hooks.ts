@@ -10,7 +10,7 @@ import {
   buildTaskSummaryReminder,
   buildWorkflowPhaseReminder,
 } from "../prompt/reminders.js";
-import { reminderForTaskType } from "../prompt/task-reminders.js";
+import { orchestrationRequestReminder, reminderForTaskType } from "../prompt/task-reminders.js";
 import { formatCoverageSummary, resolveWorkflowPhase } from "./workflow.js";
 import type { TurnHookState, TurnHooks } from "./hooks.js";
 import type { ParsedToolCall, ToolResult } from "../types.js";
@@ -35,6 +35,15 @@ export function createDefaultHooks(): TurnHooks[] {
         });
         if (taskReminder) {
           ctx.queueReminder(taskReminder);
+        }
+        // User named the mechanism ("agent team" / workflow / 编排): remind at
+        // the decision turn, where it outweighs the parallel-spawns prior.
+        const orchestrationReminder = orchestrationRequestReminder(
+          ctx.input,
+          ctx.agent.hasToolAvailable("run_workflow"),
+        );
+        if (orchestrationReminder) {
+          ctx.queueReminder(orchestrationReminder);
         }
         // Small-task hint: counterweight to the default protocol's exploration
         // bias, only fires once per run on focused one-shot requests like

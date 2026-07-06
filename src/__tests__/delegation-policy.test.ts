@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Agent } from "../agent.js";
 import { buildSystemPrompt } from "../system-prompt.js";
 import { buildDelegationPolicyPrompt } from "../prompt/delegation.js";
-import { reminderForTaskType } from "../prompt/task-reminders.js";
+import { orchestrationRequestReminder, reminderForTaskType } from "../prompt/task-reminders.js";
 import { discoverAgentProfiles, findAgentProfile } from "../agent/profiles.js";
 import { createRunWorkflowTool, createSpawnAgentTool } from "../tools/agent-lifecycle.js";
 import type { Message, Provider, StreamChunk } from "../types.js";
@@ -18,7 +18,18 @@ describe("delegation policy section (system prompt)", () => {
     expect(prompt).toContain("## Delegation policy (subagents)");
     // Positive: quantified trigger (threshold 4) and team scoping.
     expect(prompt).toContain("more than four search or read operations");
-    expect(prompt).toContain("same read-only investigation or analysis");
+    expect(prompt).toContain("fans out over many independent items");
+    // The fan-out choice is taught as a judgment call with explicit criteria,
+    // not a hard rule: both paths stay legitimate, the tradeoffs decide.
+    expect(prompt).toContain("Choose by shape, not by rule");
+    expect(prompt).toContain("favor spawn_agent");
+    expect(prompt).toContain("favor a run_workflow script");
+    // The explicit-request rule must be a standalone top-of-section clause,
+    // not buried mid-bullet: a sentence hidden in a paragraph lost to the
+    // model's "agent team = parallel spawns" prior in live testing.
+    expect(prompt).toContain("Explicit requests win, before any other rule");
+    expect(prompt).toContain("an agent team");
+    expect(prompt).toContain("NOT a row of");
     // Briefing-quality guidance: a well-briefed child wastes no tokens searching for what the parent already knows.
     expect(prompt).toContain("self-contained work order");
     expect(prompt).toContain("Never outsource knowledge you already hold");
@@ -81,6 +92,7 @@ describe("delegation wording in tool descriptions", () => {
     const tool = createSpawnAgentTool();
 
     expect(tool.description).toContain("Proactively delegate multi-file investigations");
+    expect(tool.description).toContain("weigh run_workflow instead");
     expect(tool.description).toContain("unless the user explicitly asks for a subagent");
     expect(tool.description).toContain("self-contained work order");
     // The old passive framing must stay deleted.
@@ -117,5 +129,40 @@ describe("task-start delegation nudge", () => {
       expect(reminder).toBeDefined();
       expect(reminder).not.toContain("spawn_agent");
     }
+  });
+});
+
+describe("explicit orchestration request detector (harness-level)", () => {
+  it("fires on the exact live-test phrasings that prompt wording failed to route", () => {
+    const positives = [
+      "启动agent team，从性能、可玩性、代码质量三个角度评价一下 gomoku-mcts.html",
+      "run a workflow to inspect this repo",
+      "帮我编排几个子代理把这些文件都看一遍",
+      "用工作流并行评审这些 demo",
+      "fan out agents to audit every module",
+      "起一个 agent 团队来做这件事",
+    ];
+    for (const input of positives) {
+      const reminder = orchestrationRequestReminder(input, true);
+      expect(reminder, input).toBeDefined();
+      expect(reminder).toContain("ONE run_workflow call");
+      expect(reminder).toContain("Do not substitute parallel spawn_agent calls");
+    }
+  });
+
+  it("stays silent on ordinary requests and on delegation without a named mechanism", () => {
+    const negatives = [
+      "把这个目录下的 HTML demo 都看一遍，每个给点改进建议",
+      "spawn a subagent to check the scheduler",
+      "从三个角度评价一下 gomoku-mcts.html",
+      "帮我修一下这个 bug",
+    ];
+    for (const input of negatives) {
+      expect(orchestrationRequestReminder(input, true), input).toBeUndefined();
+    }
+  });
+
+  it("never fires when run_workflow is not in the tool set (child agents)", () => {
+    expect(orchestrationRequestReminder("run a workflow please", false)).toBeUndefined();
   });
 });

@@ -71,3 +71,31 @@ Product discussion workflow:
       return undefined;
   }
 }
+
+
+/**
+ * Deterministic detector for an explicit user request for a coordinated
+ * multi-agent run. Three rounds of prompt wording lost to the model's
+ * "agent team = parallel spawns" prior in live tests (opus-4.8, 2026-07-06);
+ * per the task-reminder principle above, a reminder injected at the decision
+ * turn is the lever that actually works — the harness remembers so the model
+ * does not have to.
+ */
+const ORCHESTRATION_REQUEST =
+  /\b(?:workflows?|orchestrat\w*|agent[ -]?teams?|fan[ -]?out)\b|工作流|编排|(?:智能体|代理|agent)\s*(?:团队|小队)/i;
+
+export function orchestrationRequestReminder(
+  input: string | import("../types.js").ContentPart[],
+  canRunWorkflow: boolean,
+): string | undefined {
+  if (!canRunWorkflow) return undefined;
+  const text = typeof input === "string"
+    ? input
+    : input.map((part) => ("text" in part ? String(part.text ?? "") : "")).join(" ");
+  if (!ORCHESTRATION_REQUEST.test(text)) return undefined;
+  return [
+    "- This message explicitly asks for a coordinated multi-agent run (a workflow / orchestration / agent team).",
+    "Honor it with ONE run_workflow call whose script covers the whole fan-out.",
+    "Do not substitute parallel spawn_agent calls this turn — the user named the mechanism.",
+  ].join(" ");
+}
