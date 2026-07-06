@@ -64,7 +64,11 @@ interface MessageListProps {
    * a freshly-cleared screen instead of appending duplicates.
    */
   staticGeneration?: number;
-  /** Horizontal padding applied inside each committed/streaming row. */
+  /**
+   * Horizontal padding applied inside each committed/streaming row. Wrap
+   * budgets net this out via TRANSCRIPT_ROW_PADDING (= both sides of the
+   * default of 1) — keep the two in sync if this ever changes.
+   */
   paddingX?: number;
   /**
    * Maximum height (rows) for the live/dynamic region. The in-progress turn is
@@ -76,6 +80,17 @@ interface MessageListProps {
 }
 
 const EXECUTE_COMMAND_BLOCK_MAX_LINES = 4;
+
+/**
+ * Every transcript row — each committed <Static> item and the DynamicClamp
+ * live region — wraps its content in paddingX={1}: one column of inset on
+ * EACH side. Any wrap budget derived from terminalColumns inside a row must
+ * net out these two columns. Forgetting them hands the pre-wrapper a budget
+ * two columns wider than the real room, and a dense CJK line that packs flush
+ * against that budget renders past the terminal edge — the terminal then
+ * hard-wraps the last glyph onto a stray row at column 0.
+ */
+const TRANSCRIPT_ROW_PADDING = 2;
 
 type MessageListItem =
   | { kind: "welcome"; key: string }
@@ -550,7 +565,9 @@ function TimelineText({
   // cell right and would overflow. Reserve that extra cell up front so the
   // pre-wrap never packs a line the terminal then hard-wraps.
   const gutter = ambiguousIsWide() ? 6 : 5;
-  const available = terminalColumns ? Math.max(20, terminalColumns - gutter) : undefined;
+  const available = terminalColumns
+    ? Math.max(20, terminalColumns - gutter - TRANSCRIPT_ROW_PADDING)
+    : undefined;
   const trimmed = visible.trim();
   return (
     <Box marginLeft={2} marginTop={compactTop ? 0 : 1}>
@@ -1032,7 +1049,8 @@ function PendingInputMessagesBlock({
   bulletColor: string;
 }) {
   const theme = useTheme();
-  const contentWidth = Math.max(20, terminalColumns - 5);
+  // Inset per row: marginLeft (2) + "↳ " (2) + the transcript row padding.
+  const contentWidth = Math.max(20, terminalColumns - 4 - TRANSCRIPT_ROW_PADDING);
 
   return (
     <Box marginTop={1} flexDirection="column">
