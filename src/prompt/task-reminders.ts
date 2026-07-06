@@ -14,7 +14,7 @@ export interface TaskReminderOptions {
  * amplify over-delegation.
  */
 const DELEGATION_NUDGE =
-  "- If answering needs scanning many files and only the conclusion matters, delegate to a background subagent (spawn_agent); when it is the same read-only question over several independent items, fan out with agent_team.";
+  "- If answering needs scanning many files and only the conclusion matters, delegate to a background subagent (spawn_agent); when it is the same read-only question over several independent items, fan out with a run_workflow script.";
 
 export function reminderForTaskType(taskType: TaskType, options: TaskReminderOptions = {}): string | undefined {
   switch (taskType) {

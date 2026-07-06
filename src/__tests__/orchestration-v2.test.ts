@@ -79,32 +79,6 @@ describe("v2 §1.1 — per-call model/effort override", () => {
   });
 });
 
-describe("v2 §1.3 — agent_batch heterogeneous fan-out", () => {
-  it("runs N different specs concurrently, each on its own model, returning results in spec order", async () => {
-    const agent = new Agent({ provider: textProvider(), model: "gpt-4o", tools: [] });
-    const updates: ToolUpdate[] = [];
-    const snapshots = await agent.runAgentBatch("/tmp", {
-      specs: [
-        { task: "Scout module A", profile: defaultProfile(), model: "gpt-4o-mini", effort: "low" },
-        { task: "Synthesize findings", profile: defaultProfile(), model: "gpt-4o", effort: "high" },
-      ],
-      parentToolCallId: "batch_1",
-      emitUpdate: (update) => updates.push(update),
-    });
-
-    expect(snapshots).toHaveLength(2);
-    expect(snapshots.map((s) => s.task)).toEqual(["Scout module A", "Synthesize findings"]);
-    expect(snapshots.every((s) => s.status === "completed")).toBe(true);
-    expect(snapshots[0].route?.model).toBe("gpt-4o-mini");
-    expect(snapshots[0].route?.thinkingLevel).toBe("low");
-    expect(snapshots[1].route?.model).toBe("gpt-4o");
-    expect(snapshots[1].route?.thinkingLevel).toBe("high");
-    // Member events reached the tool's own update channel; both members distinct.
-    expect(new Set(updates.map((u) => u.subAgentId)).size).toBe(2);
-    expect(snapshots.every((s) => s.deliveredAt !== undefined)).toBe(true);
-  });
-});
-
 describe("v2 §1.2 — structured output validation", () => {
   const schema = { type: "object", required: ["name", "score"], properties: { name: { type: "string" }, score: { type: "number" } } };
 
@@ -135,7 +109,7 @@ describe("v2 §1.2 — structured output validation", () => {
     expect(augmented).toContain('"required"');
   });
 
-  it("agent_batch retries once when the first summary fails the schema, then returns valid JSON", async () => {
+  it("a workflow agent() with schema retries once when the first summary fails, then returns valid JSON", async () => {
     // First response is non-JSON; the corrective send_input drives the second
     // (valid) response. A pure-text provider means no extra final-summary turn.
     const agent = new Agent({
@@ -143,12 +117,12 @@ describe("v2 §1.2 — structured output validation", () => {
       model: "gpt-4o",
       tools: [],
     });
-    const snapshots = await agent.runAgentBatch("/tmp", {
-      specs: [{ task: "Score module", profile: defaultProfile(), outputSchema: schema }],
-      parentToolCallId: "batch_schema",
+    const { result } = await agent.runWorkflow("/tmp", {
+      script: `const r = await agent("Score module", { schema: ${JSON.stringify(schema)} });\nreturn r;`,
+      parentToolCallId: "wf_schema",
     });
-    expect(snapshots).toHaveLength(1);
-    expect(validateStructuredSummary(snapshots[0].summary, schema).ok).toBe(true);
+    expect(result.ok).toBe(true);
+    expect((result as { ok: true; value: unknown }).value).toEqual({ name: "auth", score: 7 });
   });
 });
 

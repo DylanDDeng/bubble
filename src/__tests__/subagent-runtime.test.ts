@@ -432,3 +432,47 @@ describe("subagent runtime — reply protocol", () => {
     expect(done[0].status).toBe("completed");
   });
 });
+
+describe("subagent lifecycle hooks under rate limits", () => {
+  it("fires SubagentStart/Stop exactly once per logical run across 429 retries", async () => {
+    const hookEvents: string[] = [];
+    const externalHooks = {
+      runEvent: async (request: { eventName: string }) => {
+        if (request.eventName === "SubagentStart" || request.eventName === "SubagentStop") {
+          hookEvents.push(request.eventName);
+        }
+        return {
+          eventName: request.eventName,
+          decision: "allow",
+          modelContext: [],
+          results: [],
+          diagnostics: [],
+          matched: 0,
+        };
+      },
+    } as any;
+
+    let calls = 0;
+    const provider: Provider = {
+      async *streamChat() {
+        calls += 1;
+        if (calls === 1) {
+          throw new RateLimitError("429", { retryAfterMs: 0 });
+        }
+        yield { type: "text", content: LONG_SUMMARY } satisfies StreamChunk;
+        yield { type: "done" } satisfies StreamChunk;
+      },
+      async complete() {
+        return "complete";
+      },
+    };
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [], externalHooks });
+    const profile = defaultProfile();
+
+    const spawned = await agent.spawnSubAgent("task", "/tmp", { profile, parentToolCallId: "spawn_1" });
+    await agent.waitSubAgents({ agentIds: [spawned.agentId], timeoutMs: 5_000 });
+
+    expect(calls).toBe(2);
+    expect(hookEvents).toEqual(["SubagentStart", "SubagentStop"]);
+  });
+});

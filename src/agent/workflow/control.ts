@@ -34,9 +34,24 @@ export interface WorkflowRunSnapshot {
 }
 
 /** System-reminder injected at the next turn when a background workflow finishes. */
+/**
+ * Failed members must surface in EVERY channel that renders a finished
+ * workflow (delivery notice and wait_workflow): agent() converts failures to
+ * null inside the script, so without this line a "completed" workflow could
+ * silently omit items whose agents never delivered.
+ */
+export function workflowMemberWarning(snapshot: WorkflowRunSnapshot): string | undefined {
+  const failed = snapshot.snapshots.filter((agent) => agent.status !== "completed" && agent.status !== "closed");
+  if (failed.length === 0) return undefined;
+  const names = failed.map((agent) => `${agent.nickname} (${agent.status}${agent.error ? `: ${truncate(agent.error, 120)}` : ""})`).join("; ");
+  return `warning: ${failed.length} of ${snapshot.agentCount} agents did not complete — ${names}. Their agent() calls returned null; treat those items as missing, not done.`;
+}
+
 export function buildWorkflowDeliveryNotice(snapshot: WorkflowRunSnapshot): string {
   const head = `workflow "${snapshot.title}" (${snapshot.runId}) ${snapshot.status} — ${snapshot.agentCount} agent${snapshot.agentCount === 1 ? "" : "s"}.`;
   const lines: string[] = [head];
+  const warning = workflowMemberWarning(snapshot);
+  if (warning) lines.push(warning);
   if (snapshot.result?.ok) {
     const rendered = typeof snapshot.result.value === "string"
       ? snapshot.result.value

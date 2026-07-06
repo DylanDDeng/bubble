@@ -85,8 +85,6 @@ const SUBAGENT_DENY_TOOLS = new Set([
   "send_input",
   "close_agent",
   "list_agents",
-  "agent_team",
-  "agent_batch",
   "run_workflow",
   "wait_workflow",
 ]);

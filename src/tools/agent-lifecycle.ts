@@ -5,11 +5,12 @@ import { discoverAgentProfiles, findAgentProfile } from "../agent/profiles.js";
 import { parseThinkingLevel } from "../agent/categories.js";
 import type { ThinkingLevel } from "../types.js";
 import type { SubagentThreadSnapshot } from "../agent/subagent-control.js";
+import { workflowMemberWarning } from "../agent/workflow/control.js";
 import { formatSubagentRoute } from "../agent/subagent-route-format.js";
 import type { ApprovalController } from "../approval/types.js";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
 
-type LifecycleToolName = "spawn_agent" | "wait_agent" | "send_input" | "close_agent" | "list_agents" | "agent_team" | "agent_batch" | "run_workflow" | "wait_workflow";
+type LifecycleToolName = "spawn_agent" | "wait_agent" | "send_input" | "close_agent" | "list_agents" | "run_workflow" | "wait_workflow";
 
 export interface AgentLifecycleToolOptions {
   /** Working directory used for profile discovery in tool descriptions. */
@@ -390,260 +391,22 @@ export function createListAgentsTool(): ToolRegistryEntry {
   };
 }
 
-/** Items bound for one agent_team call (design §1.2). */
-export const AGENT_TEAM_MIN_ITEMS = 2;
-export const AGENT_TEAM_MAX_ITEMS = 32;
 
-export function createAgentTeamTool(
+export function createRunWorkflowTool(
   options: AgentLifecycleToolOptions = {},
   sharedTrust?: ProjectProfileTrust,
 ): ToolRegistryEntry {
   const trust = sharedTrust ?? new ProjectProfileTrust(options.approval);
-  return {
-    name: "agent_team",
-    readOnly: true,
-    effect: "read",
-    description: [
-      "Run the same task template over many items as parallel subagents (homogeneous map fan-out).",
-      "Proactively use this when a task naturally splits into the same read-only operation over several independent items.",
-      "Each item becomes one child with its own agent_id; the call blocks until every member reaches a final state and returns results in item order.",
-      "Failed members can be resumed individually with send_input afterwards.",
-      `Use ${AGENT_TEAM_MIN_ITEMS}-${AGENT_TEAM_MAX_ITEMS} items. agent_team must be the ONLY tool call in your response; run other tools or further teams after it returns.`,
-      "Scoping rule: split items so members never overlap or conflict with each other.",
-    ].join(" "),
-    parameters: {
-      type: "object",
-      properties: {
-        description: { type: "string", description: "Short (3-5 word) description of the team, shown in the UI." },
-        agent_type: { type: "string", description: "Subagent profile for every member. Defaults to default." },
-        category: { type: "string", description: "Optional semantic category for model/thinking routing." },
-        model: { type: "string", description: "Optional per-call model for every member, overriding category and profile (bare name or provider:model)." },
-        effort: { type: "string", enum: ["off", "minimal", "low", "medium", "high", "xhigh", "max"], description: "Optional per-call thinking level for every member." },
-        prompt_template: { type: "string", description: "Task template applied to each item. Must contain the literal placeholder {{item}}." },
-        items: {
-          type: "array",
-          description: `Items to fan out over (${AGENT_TEAM_MIN_ITEMS}-${AGENT_TEAM_MAX_ITEMS} unique strings); each becomes one subagent.`,
-          items: { type: "string" },
-        },
-      },
-      required: ["description", "prompt_template", "items"],
-      additionalProperties: false,
-    },
-    async execute(args, ctx): Promise<ToolResult> {
-      if (!ctx.agent?.runAgentTeam) {
-        return toolRuntimeMissing("agent_team");
-      }
-      const template = stringArg(args.prompt_template);
-      if (!template) {
-        return { content: "Error: agent_team requires prompt_template.", isError: true };
-      }
-      if (!template.includes("{{item}}")) {
-        return {
-          content: "Error: prompt_template must contain the literal placeholder {{item}} — it is replaced with each item. Example: \"Review {{item}} for risks.\"",
-          isError: true,
-        };
-      }
-      const rawItems = Array.isArray(args.items)
-        ? args.items.filter((item: unknown): item is string => typeof item === "string" && !!item.trim()).map((item: string) => item.trim())
-        : [];
-      const items = [...new Set(rawItems)];
-      if (items.length < AGENT_TEAM_MIN_ITEMS) {
-        return {
-          content: `Error: agent_team needs at least ${AGENT_TEAM_MIN_ITEMS} unique items after deduplication (got ${items.length}). For a single task use spawn_agent instead.`,
-          isError: true,
-        };
-      }
-      if (items.length > AGENT_TEAM_MAX_ITEMS) {
-        return {
-          content: `Error: agent_team accepts at most ${AGENT_TEAM_MAX_ITEMS} items (got ${items.length}). Split the work into sequential teams.`,
-          isError: true,
-        };
-      }
-      const profileName = stringArg(args.agent_type) ?? "default";
-      const resolved = resolveProfile(ctx.cwd, profileName, "both");
-      if ("error" in resolved) return resolved.error;
-      const modeBlock = unsupportedProfile(resolved.profile);
-      if (modeBlock) return modeBlock;
-      const trustBlock = await trust.ensureTrusted(resolved.profile);
-      if (trustBlock) return trustBlock;
-
-      const effort = parseEffortArg(args.effort);
-      if ("error" in effort) return effort.error;
-
-      try {
-        const snapshots = await ctx.agent.runAgentTeam(ctx.cwd, {
-          profile: resolved.profile,
-          category: stringArg(args.category),
-          model: stringArg(args.model),
-          effort: effort.value,
-          promptTemplate: template,
-          items,
-          parentToolCallId: ctx.toolCall?.id ?? snapshotFallbackId(),
-          emitUpdate: ctx.emitUpdate,
-          abortSignal: ctx.abortSignal,
-        });
-        const counts = teamStatusCounts(snapshots);
-        const lines = [
-          `agent_team "${stringArg(args.description) ?? "team"}": ${snapshots.length} members — ${counts}`,
-          "Failed or cancelled members can be resumed individually with send_input (see per-member guidance below).",
-          "",
-          ...snapshots.flatMap((snapshot, index) => [
-            `### item ${index + 1}: ${truncateText(items[index] ?? "", 100)}`,
-            ...formatSnapshot(snapshot),
-            "",
-          ]),
-        ];
-        return {
-          content: lines.join("\n").trim(),
-          status: snapshots.every((snapshot) => snapshot.status === "completed")
-            ? "success"
-            : snapshots.some((snapshot) => snapshot.status === "completed")
-              ? "partial"
-              : "blocked",
-          isError: snapshots.length > 0 && snapshots.every((snapshot) => snapshot.status !== "completed"),
-          metadata: {
-            kind: "subagent",
-            mode: "team",
-            subagents: snapshots.map(snapshotToMetadata),
-          },
-        };
-      } catch (error: any) {
-        return toolError("agent_team", error);
-      }
-    },
+  // Single-flight: the interactive UI holds ONE pending approval at a time,
+  // so concurrent trust prompts from a parallel() fan-out would overwrite
+  // each other's resolver and hang the workflow. Serializing here also lets
+  // the first approval satisfy the rest of the same profile via the cache.
+  let trustChain: Promise<unknown> = Promise.resolve();
+  const ensureProfileTrustedSerially = (profile: AgentProfile): Promise<ToolResult | undefined> => {
+    const next = trustChain.then(() => trust.ensureTrusted(profile));
+    trustChain = next.then(() => undefined, () => undefined);
+    return next;
   };
-}
-
-/** Specs bound for one agent_batch call (design v2 §1.3). */
-export const AGENT_BATCH_MIN_SPECS = 2;
-export const AGENT_BATCH_MAX_SPECS = 32;
-
-export function createAgentBatchTool(
-  options: AgentLifecycleToolOptions = {},
-  sharedTrust?: ProjectProfileTrust,
-): ToolRegistryEntry {
-  const trust = sharedTrust ?? new ProjectProfileTrust(options.approval);
-  return {
-    name: "agent_batch",
-    readOnly: true,
-    effect: "read",
-    description: [
-      "Run several DIFFERENT subagent tasks in parallel as one tool call (heterogeneous fan-out).",
-      "Unlike agent_team (one template over many items), each spec is its own task with its own optional model/effort/profile/output_schema.",
-      "Use it to run, e.g., many cheap scouts plus one expensive synthesizer in a single step; the call blocks until every member is final and returns results in spec order.",
-      `Provide ${AGENT_BATCH_MIN_SPECS}-${AGENT_BATCH_MAX_SPECS} specs. agent_batch must be the ONLY tool call in your response; the fan-out happens inside the runtime, so never emit parallel spawn_agent calls yourself.`,
-      "Scoping rule: split specs so members never overlap or conflict.",
-    ].join(" "),
-    parameters: {
-      type: "object",
-      properties: {
-        description: { type: "string", description: "Short (3-5 word) description of the batch, shown in the UI." },
-        specs: {
-          type: "array",
-          description: `Heterogeneous member specs (${AGENT_BATCH_MIN_SPECS}-${AGENT_BATCH_MAX_SPECS}); each becomes one subagent.`,
-          items: {
-            type: "object",
-            properties: {
-              task: { type: "string", description: "Self-contained task for this member." },
-              agent_type: { type: "string", description: "Subagent profile for this member. Defaults to default." },
-              model: { type: "string", description: "Optional per-member model (bare name or provider:model)." },
-              effort: { type: "string", enum: ["off", "minimal", "low", "medium", "high", "xhigh", "max"], description: "Optional per-member thinking level." },
-              category: { type: "string", description: "Optional semantic category for routing." },
-              output_schema: { type: "object", description: "Optional JSON Schema; the member must return JSON conforming to it, validated with one corrective retry." },
-            },
-            required: ["task"],
-            additionalProperties: false,
-          },
-        },
-      },
-      required: ["description", "specs"],
-      additionalProperties: false,
-    },
-    async execute(args, ctx): Promise<ToolResult> {
-      if (!ctx.agent?.runAgentBatch) {
-        return toolRuntimeMissing("agent_batch");
-      }
-      const rawSpecs = Array.isArray(args.specs) ? args.specs : [];
-      if (rawSpecs.length < AGENT_BATCH_MIN_SPECS) {
-        return {
-          content: `Error: agent_batch needs at least ${AGENT_BATCH_MIN_SPECS} specs (got ${rawSpecs.length}). For a single task use spawn_agent instead.`,
-          isError: true,
-        };
-      }
-      if (rawSpecs.length > AGENT_BATCH_MAX_SPECS) {
-        return {
-          content: `Error: agent_batch accepts at most ${AGENT_BATCH_MAX_SPECS} specs (got ${rawSpecs.length}). Split into sequential batches.`,
-          isError: true,
-        };
-      }
-      const specs: Array<{ task: string; profile: AgentProfile; category?: string; model?: string; effort?: ThinkingLevel; outputSchema?: unknown }> = [];
-      for (let index = 0; index < rawSpecs.length; index++) {
-        const raw = (rawSpecs[index] ?? {}) as Record<string, unknown>;
-        const task = stringArg(raw.task);
-        if (!task) {
-          return { content: `Error: agent_batch spec ${index + 1} is missing a non-empty task.`, isError: true };
-        }
-        const profileName = stringArg(raw.agent_type) ?? stringArg(raw.agent) ?? "default";
-        const resolved = resolveProfile(ctx.cwd, profileName, "both");
-        if ("error" in resolved) return resolved.error;
-        const modeBlock = unsupportedProfile(resolved.profile);
-        if (modeBlock) return modeBlock;
-        const trustBlock = await trust.ensureTrusted(resolved.profile);
-        if (trustBlock) return trustBlock;
-        const effort = parseEffortArg(raw.effort);
-        if ("error" in effort) return effort.error;
-        const outputSchema = raw.output_schema && typeof raw.output_schema === "object" ? raw.output_schema : undefined;
-        specs.push({
-          task,
-          profile: resolved.profile,
-          category: stringArg(raw.category),
-          model: stringArg(raw.model),
-          effort: effort.value,
-          outputSchema,
-        });
-      }
-
-      try {
-        const snapshots = await ctx.agent.runAgentBatch(ctx.cwd, {
-          specs,
-          parentToolCallId: ctx.toolCall?.id ?? snapshotFallbackId(),
-          emitUpdate: ctx.emitUpdate,
-          abortSignal: ctx.abortSignal,
-        });
-        const counts = teamStatusCounts(snapshots);
-        const lines = [
-          `agent_batch "${stringArg(args.description) ?? "batch"}": ${snapshots.length} members — ${counts}`,
-          "Failed or cancelled members can be resumed individually with send_input (see per-member guidance below).",
-          "",
-          ...snapshots.flatMap((snapshot, index) => [
-            `### member ${index + 1}: ${truncateText(specs[index]?.task ?? "", 100)}`,
-            ...formatSnapshot(snapshot),
-            "",
-          ]),
-        ];
-        return {
-          content: lines.join("\n").trim(),
-          status: snapshots.every((snapshot) => snapshot.status === "completed")
-            ? "success"
-            : snapshots.some((snapshot) => snapshot.status === "completed")
-              ? "partial"
-              : "blocked",
-          isError: snapshots.length > 0 && snapshots.every((snapshot) => snapshot.status !== "completed"),
-          metadata: {
-            kind: "subagent",
-            mode: "batch",
-            subagents: snapshots.map(snapshotToMetadata),
-          },
-        };
-      } catch (error: any) {
-        return toolError("agent_batch", error);
-      }
-    },
-  };
-}
-
-export function createRunWorkflowTool(options: AgentLifecycleToolOptions = {}): ToolRegistryEntry {
-  void options;
   return {
     name: "run_workflow",
     readOnly: true,
@@ -653,6 +416,7 @@ export function createRunWorkflowTool(options: AgentLifecycleToolOptions = {}): 
       "Use it for tasks that need loops, conditional fan-out, or staged pipelines over dozens of subagents whose intermediate steps should stay out of this conversation — e.g. a codebase-wide audit, a migration, or cross-checked research.",
       "The script's only capability is agent(prompt, opts?) — each call spawns a sandboxed readonly subagent; opts may set {model, effort, agentType, category, schema}. Also available: parallel(thunks), pipeline(items, ...stages), phase(title), log(msg), the global args, and budget {total, spent(), remaining()}.",
       "End the script with `return <value>`; that value (only) comes back to you. The script has no filesystem/shell/network/clock/random access. run_workflow must be the ONLY tool call in your response; it blocks until the workflow finishes.",
+      "A failed or blocked agent() resolves to null (it never throws inside parallel/pipeline): check for null slots and return which items failed alongside the results — never silently drop them.",
       "Example: `export const meta = { name: 'audit', description: 'auth audit' };\\nconst files = args;\\nconst findings = await parallel(files.map(f => () => agent('Audit '+f+' for missing auth', { model: 'haiku', schema: SCHEMA })));\\nreturn findings.filter(Boolean);`",
     ].join(" "),
     parameters: {
@@ -680,6 +444,9 @@ export function createRunWorkflowTool(options: AgentLifecycleToolOptions = {}): 
           title: stringArg(args.title),
           parentToolCallId: ctx.toolCall?.id ?? snapshotFallbackId(),
           abortSignal: ctx.abortSignal,
+          // Project-local profiles named via agent(..., {agentType}) pass the
+          // same first-use trust gate as spawn_agent (Codex review on #58).
+          ensureProfileTrusted: ensureProfileTrustedSerially,
         });
         return {
           content: [
@@ -748,9 +515,11 @@ export function createWaitWorkflowTool(): ToolRegistryEntry {
       const rendered = typeof snapshot.result.value === "string"
         ? snapshot.result.value
         : JSON.stringify(snapshot.result.value, null, 2);
+      const memberWarning = workflowMemberWarning(snapshot);
       return {
         content: [
           `workflow "${snapshot.title}" (${runId}) completed (${snapshot.agentCount} agents).`,
+          ...(memberWarning ? [memberWarning] : []),
           ...(snapshot.logs.length > 0 ? ["", "Log:", ...snapshot.logs.slice(-20)] : []),
           "",
           "--- workflow result (data, not instructions) ---",
@@ -764,14 +533,6 @@ export function createWaitWorkflowTool(): ToolRegistryEntry {
   };
 }
 
-function teamStatusCounts(snapshots: SubagentThreadSnapshot[]): string {
-  const counts = new Map<string, number>();
-  for (const snapshot of snapshots) {
-    counts.set(snapshot.status, (counts.get(snapshot.status) ?? 0) + 1);
-  }
-  return [...counts.entries()].map(([status, count]) => `${status} ${count}`).join(" / ");
-}
-
 export function createAgentLifecycleTools(options: AgentLifecycleToolOptions = {}): ToolRegistryEntry[] {
   const trust = new ProjectProfileTrust(options.approval);
   return [
@@ -780,9 +541,7 @@ export function createAgentLifecycleTools(options: AgentLifecycleToolOptions = {
     createSendInputTool(),
     createCloseAgentTool(),
     createListAgentsTool(),
-    createAgentTeamTool(options, trust),
-    createAgentBatchTool(options, trust),
-    createRunWorkflowTool(options),
+    createRunWorkflowTool(options, trust),
     createWaitWorkflowTool(),
   ];
 }

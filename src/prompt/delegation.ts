@@ -5,13 +5,14 @@
  * and read-only-scoped, negative clauses get equal weight — the user's hard
  * constraint is "proactive, but never delegate-everything". Gated on the
  * delegation tools being present, so child agents (whose tool sets never
- * include spawn_agent/agent_team) never see it.
+ * include spawn_agent/run_workflow) never see it.
  */
 
 const DELEGATION_POLICY = `## Delegation policy (subagents)
 
-You can delegate work to background subagents (spawn_agent) and batch
-fan-outs (agent_team). Delegate deliberately, not by default.
+You can delegate work two ways: a single background subagent (spawn_agent),
+or an orchestration script coordinating many subagents (run_workflow).
+Delegate deliberately, not by default.
 
 Delegate when:
 - An investigation will clearly require more than four search or read
@@ -21,7 +22,10 @@ Delegate when:
   independent questions.
 - The task naturally splits into the same read-only investigation or
   analysis (review, audit, summarize) over several independent items (files,
-  modules, endpoints) — use agent_team.
+  modules, endpoints), or needs a staged pipeline over many subagents — use
+  run_workflow with a simple script (a parallel() over the items is enough
+  for the common case; failed agent() calls resolve to null, so report which
+  items came back null instead of silently dropping them).
 - A side-investigation is independent of your current main-line work and can
   run in the background while you continue.
 
@@ -52,7 +56,7 @@ Do NOT delegate when:
 When in doubt about a one-off task, do it yourself. When a task is clearly
 the same read-only operation over three or more independent items — where
 each item alone would take more than a couple of tool calls — prefer
-agent_team over doing them sequentially yourself. For just two small items,
+run_workflow over doing them sequentially yourself. For just two small items,
 do them yourself with parallel tool calls.`;
 
 /**

@@ -1076,14 +1076,14 @@ export class Agent {
           }
           let tc = parsedCalls[index];
           let blockedResult: ToolResult | undefined;
-          // agent_team must be the only tool call in its response (design
-          // §1.2): concurrent calls race the scheduler and the aggregated
-          // reply; the rejection teaches the model how to re-issue.
-          if (tc.name === "agent_team" && parsedCalls.length > 1) {
+          // run_workflow must be the only tool call in its response: it starts
+          // a background orchestration whose result lands next turn, and
+          // sibling calls racing it defeat the serialized fan-out contract.
+          if (tc.name === "run_workflow" && parsedCalls.length > 1) {
             blockedResult = {
               content: [
-                "agent_team must be the only tool call in your response.",
-                "Re-issue agent_team alone — one call, nothing else in the same message — and run any other tools or additional teams sequentially after it returns.",
+                "run_workflow must be the only tool call in your response.",
+                "Re-issue run_workflow alone — one call, nothing else in the same message — and run other tools after it returns.",
               ].join(" "),
               isError: true,
               status: "blocked",
@@ -1807,142 +1807,6 @@ export class Agent {
   }
 
   /**
-   * Homogeneous map fan-out (design §1.2): one profile, one template, N items.
-   * Every member goes through the same admission and the same scheduler
-   * dispatch as spawn_agent; the tool blocks until all members are final.
-   */
-  async runAgentTeam(
-    cwd: string,
-    options: {
-      profile: AgentProfile;
-      category?: string;
-      model?: string;
-      effort?: ThinkingLevel;
-      promptTemplate: string;
-      items: string[];
-      parentToolCallId: string;
-      emitUpdate?: (update: ToolUpdate) => void;
-      abortSignal?: AbortSignal;
-      approval?: "fail" | "disabled";
-    },
-  ): Promise<SubagentThreadSnapshot[]> {
-    const approval = options.approval ?? options.profile.approval;
-    const route = this.resolveRouteForSubagent(options.profile, options.category, { model: options.model, effort: options.effort });
-    const records = options.items.map((item) => this.createSubagentThreadRecord({
-      profile: options.profile,
-      task: options.promptTemplate.split("{{item}}").join(item),
-      parentToolCallId: options.parentToolCallId,
-      parentToolName: "agent_team",
-      route,
-    }));
-
-    const promises = records.map((record) => {
-      this.subagentStore.set(record);
-      const admissionError = this.admitSubagentProfile(record, approval);
-      if (admissionError) {
-        this.finalizeSubagentBlocked(record, admissionError, { directEmit: options.emitUpdate });
-        return Promise.resolve();
-      }
-      // Member events flow through the team tool's own emitUpdate
-      // (directEmit): while a foreground tool runs, the parent loop blocks in
-      // updateQueue.wait and the queued channel is not drained until the tool
-      // settles — queueUpdates would freeze the TUI for the whole team (§1.2).
-      record.promise = this.dispatchSubagentRun(record, record.task, cwd, {
-        approval,
-        abortSignal: options.abortSignal,
-        directEmit: options.emitUpdate,
-      });
-      void record.promise.finally(() => this.subagentStore.notifyWaiters(record));
-      return record.promise;
-    });
-
-    await Promise.all(promises);
-    // The aggregated reply carries every member's full summary.
-    for (const record of records) this.subagentStore.markDelivered(record.agentId);
-    return records.map((record) => this.snapshotSubagent(record));
-  }
-
-  /**
-   * Heterogeneous fan-out (design v2 §1.3): N independent specs, each with its
-   * own task, profile, and per-call model/effort, dispatched concurrently as a
-   * SINGLE tool call. Unlike runAgentTeam (one template over N items), members
-   * differ. Like the team, every member goes through the same scheduler
-   * dispatch and the tool blocks until all are final, returning in spec order.
-   * Keeping fan-out inside one tool call (rather than N parallel spawn_agent
-   * tool_calls) avoids the provider parallel-tool_call bug (Kimi 400 / lost
-   * responses).
-   */
-  async runAgentBatch(
-    cwd: string,
-    options: {
-      specs: Array<{
-        task: string;
-        profile: AgentProfile;
-        category?: string;
-        model?: string;
-        effort?: ThinkingLevel;
-        outputSchema?: unknown;
-      }>;
-      parentToolCallId: string;
-      emitUpdate?: (update: ToolUpdate) => void;
-      abortSignal?: AbortSignal;
-      approval?: "fail" | "disabled";
-    },
-  ): Promise<SubagentThreadSnapshot[]> {
-    const records = options.specs.map((spec) => {
-      const approval = options.approval ?? spec.profile.approval;
-      const task = spec.outputSchema !== undefined
-        ? appendOutputSchemaInstructions(spec.task, spec.outputSchema)
-        : spec.task;
-      const record = this.createSubagentThreadRecord({
-        profile: spec.profile,
-        task,
-        parentToolCallId: options.parentToolCallId,
-        parentToolName: "agent_batch",
-        route: this.resolveRouteForSubagent(spec.profile, spec.category, { model: spec.model, effort: spec.effort }),
-      });
-      return { record, approval, spec };
-    });
-
-    const promises = records.map(({ record, approval }) => {
-      this.subagentStore.set(record);
-      const admissionError = this.admitSubagentProfile(record, approval);
-      if (admissionError) {
-        this.finalizeSubagentBlocked(record, admissionError, { directEmit: options.emitUpdate });
-        return Promise.resolve();
-      }
-      record.promise = this.dispatchSubagentRun(record, record.task, cwd, {
-        approval,
-        abortSignal: options.abortSignal,
-        directEmit: options.emitUpdate,
-      });
-      void record.promise.finally(() => this.subagentStore.notifyWaiters(record));
-      return record.promise;
-    });
-
-    await Promise.all(promises);
-
-    // Structured-output validation + one corrective retry (design v2 §1.2):
-    // a member whose schema'd summary does not validate gets a single
-    // send_input correction, reusing the existing resume path.
-    for (const { record, spec } of records) {
-      if (spec.outputSchema === undefined) continue;
-      if (record.status !== "completed") continue;
-      if (validateStructuredSummary(record.summary, spec.outputSchema).ok) continue;
-      const correction = buildSchemaCorrectionPrompt(spec.outputSchema, record.summary);
-      try {
-        await this.sendSubAgentInput(record.agentId, correction, cwd, { abortSignal: options.abortSignal });
-        await record.promise?.catch(() => undefined);
-      } catch {
-        // resume failed; leave the original summary and surface the mismatch below
-      }
-    }
-
-    for (const { record } of records) this.subagentStore.markDelivered(record.agentId);
-    return records.map(({ record }) => this.snapshotSubagent(record));
-  }
-
-  /**
    * Dynamic workflow (option C): runs an LLM-authored JS orchestration script in
    * a QuickJS sandbox. Each agent() call in the script becomes a real scheduled
    * subagent (same route resolution, ChildRunner, scheduler, schema validation
@@ -1960,6 +1824,7 @@ export class Agent {
       parentToolCallId: string;
       emitUpdate?: (update: ToolUpdate) => void;
       abortSignal?: AbortSignal;
+      ensureProfileTrusted?: (profile: AgentProfile) => Promise<{ content: string | unknown } | undefined>;
     },
   ): Promise<{ result: { ok: true; value: unknown } | { ok: false; error: string }; agentCount: number; logs: string[]; snapshots: SubagentThreadSnapshot[] }> {
     return this.executeWorkflow(cwd, {
@@ -1968,6 +1833,7 @@ export class Agent {
       parentToolCallId: options.parentToolCallId,
       abortSignal: options.abortSignal,
       directEmit: options.emitUpdate,
+      ensureProfileTrusted: options.ensureProfileTrusted,
     });
   }
 
@@ -1979,7 +1845,14 @@ export class Agent {
    */
   startWorkflow(
     cwd: string,
-    options: { script: string; args?: unknown; title?: string; parentToolCallId: string; abortSignal?: AbortSignal },
+    options: {
+      script: string;
+      args?: unknown;
+      title?: string;
+      parentToolCallId: string;
+      abortSignal?: AbortSignal;
+      ensureProfileTrusted?: (profile: AgentProfile) => Promise<{ content: string | unknown } | undefined>;
+    },
   ): { runId: string; title: string } {
     const runId = randomUUID();
     const abortController = new AbortController();
@@ -2006,6 +1879,7 @@ export class Agent {
       parentToolCallId: options.parentToolCallId,
       abortSignal: abortController.signal,
       queueUpdates: true,
+      ensureProfileTrusted: options.ensureProfileTrusted,
     }).then((out) => {
       record.agentCount = out.agentCount;
       record.snapshots = out.snapshots;
@@ -2085,6 +1959,7 @@ export class Agent {
       abortSignal?: AbortSignal;
       directEmit?: (update: ToolUpdate) => void;
       queueUpdates?: boolean;
+      ensureProfileTrusted?: (profile: AgentProfile) => Promise<{ content: string | unknown } | undefined>;
     },
   ): Promise<{ result: { ok: true; value: unknown } | { ok: false; error: string }; agentCount: number; logs: string[]; snapshots: SubagentThreadSnapshot[] }> {
     const profiles = discoverAgentProfiles(cwd, "both").profiles;
@@ -2137,6 +2012,19 @@ export class Agent {
       });
       runRecords.push(record);
       this.subagentStore.set(record);
+      // Project-local profiles pass the same first-use trust gate as
+      // spawn_agent: a .bubble/agents profile must never gain a side door
+      // into execution just because a script named it (Codex review on #58).
+      // Checked AFTER the record exists so a rejected member still shows up
+      // in the run's counts/snapshots as blocked instead of vanishing.
+      if (options.ensureProfileTrusted) {
+        const blocked = await options.ensureProfileTrusted(baseProfile);
+        if (blocked) {
+          const message = typeof blocked.content === "string" ? blocked.content : `profile "${baseProfile.name}" requires user approval`;
+          this.finalizeSubagentBlocked(record, message, { directEmit: options.directEmit, queueUpdates: options.queueUpdates });
+          return { ok: false, error: message };
+        }
+      }
       const admissionError = this.admitSubagentProfile(record, profile.approval);
       if (admissionError) {
         this.finalizeSubagentBlocked(record, admissionError, { directEmit: options.directEmit, queueUpdates: options.queueUpdates });
@@ -3153,7 +3041,13 @@ function isSubagentLifecycleTool(name: string): boolean {
     || name === "send_input"
     || name === "close_agent"
     || name === "list_agents"
-    || name === "agent_team";
+    || name === "run_workflow"
+    || name === "wait_workflow"
+    // Legacy names: still present in transcripts recorded before the tools
+    // were removed (2026-07-06); forked children must not inherit their
+    // dangling tool_calls either.
+    || name === "agent_team"
+    || name === "agent_batch";
 }
 
 
