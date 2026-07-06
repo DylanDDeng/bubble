@@ -13,7 +13,7 @@
  * prelude over the single host function __agent plus a few host callbacks.
  */
 
-import { getQuickJS, type QuickJSContext } from "quickjs-emscripten";
+import { getQuickJS, type QuickJSContext, type QuickJSDeferredPromise } from "quickjs-emscripten";
 
 export interface WorkflowAgentOpts {
   model?: string;
@@ -125,6 +125,12 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunWorkf
   const QuickJS = await getQuickJS();
   const vm = QuickJS.newContext();
   const pending = new Set<Promise<void>>();
+  // Deferreds for in-flight agent() calls. If the run ends while agents are
+  // still flying (user abort, stall, compute deadline), these were never
+  // settled and their VM-side handles are still alive — disposing the VM
+  // with them alive trips QuickJS's JS_FreeRuntime assertion and Aborts the
+  // (process-wide, cached) wasm module, poisoning every later workflow.
+  const liveDeferreds = new Set<QuickJSDeferredPromise>();
   const state = { disposed: false };
   let agentCount = 0;
   const maxAgents = options.maxAgents ?? DEFAULT_MAX_AGENTS;
@@ -138,7 +144,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunWorkf
   try {
     vm.unwrapResult(vm.evalCode(DETERMINISM_GATING)).dispose();
 
-    installHostFunctions(vm, options, pending, () => agentCount, () => { agentCount += 1; }, maxAgents, state);
+    installHostFunctions(vm, options, pending, () => agentCount, () => { agentCount += 1; }, maxAgents, state, liveDeferreds);
 
     // args as a deterministic injected global.
     const argsJson = JSON.stringify(options.args ?? null);
@@ -201,7 +207,13 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunWorkf
     return { ok: false, error: error?.message || String(error) };
   } finally {
     state.disposed = true;
-    vm.dispose();
+    for (const deferred of liveDeferreds) {
+      try { deferred.dispose(); } catch { /* already settled/disposed */ }
+    }
+    liveDeferreds.clear();
+    try {
+      vm.dispose();
+    } catch { /* a dispose failure must not mask the run's result */ }
   }
 }
 
@@ -219,10 +231,12 @@ function installHostFunctions(
   bumpCount: () => void,
   maxAgents: number,
   state: { disposed: boolean },
+  liveDeferreds: Set<QuickJSDeferredPromise>,
 ): void {
   vm.newFunction("__agent", (specHandle) => {
     const spec = JSON.parse(vm.getString(specHandle)) as WorkflowAgentSpec;
     const deferred = vm.newPromise();
+    liveDeferreds.add(deferred);
     // Settling the VM promise touches the context, which may have been disposed
     // if the run was aborted while host work was still in flight — guard it.
     const settle = (fn: () => void): void => {
@@ -255,7 +269,10 @@ function installHostFunctions(
       ).finally(() => { pending.delete(p); });
       pending.add(p);
     }
-    deferred.settled.then(() => { if (!state.disposed) try { vm.runtime.executePendingJobs(); } catch { /* disposed */ } });
+    deferred.settled.then(() => {
+      liveDeferreds.delete(deferred);
+      if (!state.disposed) try { vm.runtime.executePendingJobs(); } catch { /* disposed */ }
+    });
     return deferred.handle;
   }).consume((f) => vm.setProp(vm.global, "__agent", f));
 
