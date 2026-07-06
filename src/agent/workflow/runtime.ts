@@ -21,9 +21,8 @@ export interface WorkflowAgentOpts {
   category?: string;
   agentType?: string;
   schema?: unknown;
+  /** Display name for this member in progress views (wired to the record nickname). */
   label?: string;
-  phase?: string;
-  isolation?: string;
 }
 
 export interface WorkflowAgentSpec {
@@ -89,16 +88,28 @@ globalThis.agent = async (prompt, opts) => {
   const raw = await __agent(JSON.stringify({ prompt: String(prompt ?? ""), opts: opts || {} }));
   return JSON.parse(raw);
 };
-globalThis.parallel = (thunks) => Promise.all((thunks || []).map((t) => {
-  try { return Promise.resolve(t()).catch(() => null); } catch (_e) { return Promise.resolve(null); }
-}));
-globalThis.pipeline = (items, ...stages) => Promise.all((items || []).map(async (item, i) => {
-  let v = item;
-  for (const stage of stages) {
-    try { v = await stage(v, item, i); } catch (_e) { return null; }
+globalThis.parallel = (thunks) => {
+  if (!Array.isArray(thunks)) throw new TypeError("parallel() expects an array of functions");
+  if (thunks.some((t) => typeof t !== "function")) {
+    throw new TypeError("parallel() expects an array of functions, not promises. Wrap each call: () => agent(...)");
   }
-  return v;
-}));
+  return Promise.all(thunks.map((t) => {
+    try { return Promise.resolve(t()).catch(() => null); } catch (_e) { return Promise.resolve(null); }
+  }));
+};
+globalThis.pipeline = (items, ...stages) => {
+  if (!Array.isArray(items)) throw new TypeError("pipeline() expects an array as the first argument");
+  if (stages.some((s) => typeof s !== "function")) {
+    throw new TypeError("pipeline() stages must be functions: pipeline(items, item => ..., result => ...)");
+  }
+  return Promise.all(items.map(async (item, i) => {
+    let v = item;
+    for (const stage of stages) {
+      try { v = await stage(v, item, i); } catch (_e) { return null; }
+    }
+    return v;
+  }));
+};
 globalThis.phase = (t) => __phase(String(t ?? ""));
 globalThis.log = (m) => __log(String(m ?? ""));
 globalThis.budget = {
@@ -111,14 +122,57 @@ globalThis.budget = {
 /** Removes ambient nondeterminism so a run is reproducible (design §4.3). */
 const DETERMINISM_GATING = `
 delete globalThis.Date;
+Object.defineProperty(globalThis, "Date", {
+  configurable: false,
+  get() { throw new Error("Workflow scripts must be deterministic: Date.now()/new Date() are unavailable — pass timestamps in via args"); },
+});
 delete globalThis.WeakRef;
 delete globalThis.FinalizationRegistry;
-Math.random = () => { throw new Error("Math.random is disabled in workflows (nondeterministic)"); };
+Math.random = () => { throw new Error("Workflow scripts must be deterministic: Math.random() is unavailable"); };
 `;
 
 /** Turns `export const meta = …` / `export function …` into plain declarations. */
 function stripExports(script: string): string {
   return script.replace(/(^|\n)\s*export\s+(const|let|var|function|class|async)\b/g, "$1$2");
+}
+
+/** Lines injected before the script body in the wrapped source (keep in sync with buildWrappedWorkflowSource). */
+const WRAPPER_LINE_OFFSET = 2;
+
+/** The EXACT source runWorkflow executes — the syntax probe must compile this, not the raw script. */
+export function buildWrappedWorkflowSource(script: string): string {
+  return [
+    "globalThis.__wfdone = false; globalThis.__wfresult = null; globalThis.__wferror = null;",
+    "(async () => {",
+    stripExports(script),
+    "})().then(",
+    "  (r) => { globalThis.__wfresult = r === undefined ? null : r; globalThis.__wfdone = true; },",
+    "  (e) => { globalThis.__wferror = (e && e.message) ? String(e.message) : String(e); globalThis.__wfdone = true; }",
+    ");",
+  ].join("\n");
+}
+
+/**
+ * Submit-time syntax check: compiles the exact transformed source with
+ * QuickJS's compile-only flag (same engine, zero grammar divergence) so the
+ * model gets a teaching error as the immediate tool result instead of one
+ * full turn later through the background-run delivery path.
+ */
+export async function precompileWorkflowScript(script: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  const QuickJS = await getQuickJS();
+  const vm = QuickJS.newContext();
+  try {
+    const result = vm.evalCode(buildWrappedWorkflowSource(script), "workflow.js", { compileOnly: true });
+    if (result.error) {
+      const message = vm.dump(result.error);
+      result.error.dispose();
+      return { ok: false, error: `workflow script error: ${formatError(message)}` };
+    }
+    result.value.dispose();
+    return { ok: true };
+  } finally {
+    try { vm.dispose(); } catch { /* teardown must not mask the verdict */ }
+  }
 }
 
 export async function runWorkflow(options: RunWorkflowOptions): Promise<RunWorkflowResult> {
@@ -151,19 +205,10 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunWorkf
     vm.unwrapResult(vm.evalCode(`globalThis.args = ${argsJson};`)).dispose();
     vm.unwrapResult(vm.evalCode(PRELUDE)).dispose();
 
-    const body = stripExports(options.script);
-    const wrapped = [
-      "globalThis.__wfdone = false; globalThis.__wfresult = null; globalThis.__wferror = null;",
-      "(async () => {",
-      body,
-      "})().then(",
-      "  (r) => { globalThis.__wfresult = r === undefined ? null : r; globalThis.__wfdone = true; },",
-      "  (e) => { globalThis.__wferror = (e && e.message) ? String(e.message) : String(e); globalThis.__wfdone = true; }",
-      ");",
-    ].join("\n");
+    const wrapped = buildWrappedWorkflowSource(options.script);
 
     computeStart = Date.now();
-    const evalResult = vm.evalCode(wrapped);
+    const evalResult = vm.evalCode(wrapped, "workflow.js");
     if (evalResult.error) {
       const message = vm.dump(evalResult.error);
       evalResult.error.dispose();
@@ -302,7 +347,22 @@ function installHostFunctions(
 
 function formatError(value: unknown): string {
   if (value && typeof value === "object" && "message" in value) {
-    return String((value as { message: unknown }).message);
+    const obj = value as { message: unknown; stack?: unknown; lineNumber?: unknown };
+    const message = String(obj.message);
+    const line = extractScriptLine(obj);
+    return line === undefined ? message : `${message} (script line ${line})`;
   }
   return String(value);
+}
+
+/** Maps a QuickJS error location back onto the raw script's line numbering. */
+function extractScriptLine(obj: { stack?: unknown; lineNumber?: unknown }): number | undefined {
+  if (typeof obj.lineNumber === "number" && Number.isFinite(obj.lineNumber)) {
+    return Math.max(1, obj.lineNumber - WRAPPER_LINE_OFFSET);
+  }
+  if (typeof obj.stack === "string") {
+    const match = obj.stack.match(/workflow\.js:(\d+)/);
+    if (match) return Math.max(1, Number(match[1]) - WRAPPER_LINE_OFFSET);
+  }
+  return undefined;
 }

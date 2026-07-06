@@ -87,6 +87,10 @@ export interface SubagentThreadRecord {
   updatedAt: number;
   deliveredAt?: number;
   worktree?: SubagentWorktree;
+  /** True when the child was asked for schema-validated structured output:
+   * a compact JSON handoff is complete by construction, so the token-floor
+   * restate turn must not fire on it. */
+  expectsStructuredOutput?: boolean;
   /** True for agents spawned inside a run_workflow: kept out of list_agents /
    * wait_agent and not persisted (design v2 appendix; option C). */
   workflowInternal?: boolean;

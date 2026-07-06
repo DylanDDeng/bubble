@@ -2010,6 +2010,9 @@ export class Agent {
         route,
         workflowInternal: true,
       });
+      record.expectsStructuredOutput = spec.opts.schema !== undefined;
+      const memberLabel = typeof spec.opts.label === "string" ? spec.opts.label.trim().slice(0, 40) : "";
+      if (memberLabel) record.nickname = memberLabel;
       runRecords.push(record);
       this.subagentStore.set(record);
       // Project-local profiles pass the same first-use trust gate as
@@ -2053,8 +2056,11 @@ export class Agent {
         return { ok: true, value: record.summary };
       }
       // Structured output: validate, one corrective retry, then fall back to raw.
+      // The schema: log lines are the telemetry that decides whether the
+      // deferred terminate-style structured-output tool ever gets reopened.
       let validated = validateStructuredSummary(record.summary, spec.opts.schema);
       if (!validated.ok) {
+        logs.push(`schema: ${record.nickname} first output failed validation; sending one corrective retry`);
         try {
           await this.sendSubAgentInput(
             record.agentId,
@@ -2067,6 +2073,9 @@ export class Agent {
         } catch {
           // resume failed; fall through to raw summary
         }
+        logs.push(validated.ok
+          ? `schema: ${record.nickname} corrective retry produced valid output`
+          : `schema: ${record.nickname} corrective retry still invalid; returning raw summary`);
       }
       return { ok: true, value: validated.ok ? validated.value : record.summary };
     };

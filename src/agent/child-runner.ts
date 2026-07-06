@@ -300,7 +300,9 @@ export function needsExplicitFinalSummary(record: SubagentThreadRecord, executed
   if (/<\/?[｜|][^<>]*>/.test(record.summary)) return true;
   if (!executedAnyTool) return false;
   if (record.summary === EMPTY_ASSISTANT_FALLBACK) return true;
-  if (estimateHandoffTokens(record.summary) < HANDOFF_TOKEN_FLOOR) return true;
+  // A schema-bearing child's handoff is a compact JSON value; short is
+  // complete by construction, and a restate turn would risk breaking the JSON.
+  if (!record.expectsStructuredOutput && estimateHandoffTokens(record.summary) < HANDOFF_TOKEN_FLOOR) return true;
   return isIntermediateHandoff(record.summary);
 }
 

@@ -327,3 +327,66 @@ describe("run_workflow lifecycle hygiene (Codex round 2)", () => {
     expect(requests).toBe(1);
   });
 });
+
+describe("run_workflow quick-fix bundle (agent-team review rulings)", () => {
+  it("rejects a syntactically broken script at submit time, before startWorkflow", async () => {
+    const workflowTool = createAgentLifecycleTools({ cwd: "/tmp" }).find((tool) => tool.name === "run_workflow")!;
+    let started = 0;
+    const ctx = {
+      cwd: "/tmp",
+      toolCall: { id: "wf_syntax", name: "run_workflow" },
+      agent: { startWorkflow: () => { started += 1; return { runId: "r", title: "t" }; } },
+    } as any;
+    const result = await workflowTool.execute({ script: "const a = ;" }, ctx);
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("rejected before launch");
+    expect(result.content).toContain("script line 1");
+    expect(started).toBe(0);
+  });
+
+  it("wires agent() opts.label to the member nickname", async () => {
+    const agent = new Agent({ provider: textProvider(), model: "gpt-4o", tools: [] });
+    const out = await agent.runWorkflow("/tmp", {
+      script: `return await agent("inspect things", { label: "repo scout" });`,
+      parentToolCallId: "wf_label",
+    });
+    expect(out.result.ok).toBe(true);
+    expect(out.snapshots).toHaveLength(1);
+    expect(out.snapshots[0].nickname).toBe("repo scout");
+  });
+
+  it("keeps the fix-and-retry door open in the delivery notice only for failed runs", () => {
+    const base = { runId: "wf", title: "t", agentCount: 0, logs: [], snapshots: [] };
+    const failed = buildWorkflowDeliveryNotice({ ...base, status: "failed", result: { ok: false, error: "workflow script error: expecting ')' (script line 2)" } } as any);
+    expect(failed).toContain("fix it and issue a corrected run_workflow");
+    expect(failed).not.toContain("Do not re-run");
+
+    const completed = buildWorkflowDeliveryNotice({ ...base, status: "completed", result: { ok: true, value: "x" } } as any);
+    expect(completed).toContain("Do not re-run this workflow; integrate its result.");
+  });
+
+  it("schema-correction telemetry lands in the run logs", async () => {
+    const responses = ["prose, not json", '{"name":"auth","score":7}'];
+    let call = 0;
+    const provider: Provider = {
+      async *streamChat(): AsyncGenerator<StreamChunk> {
+        const content = responses[Math.min(call, responses.length - 1)];
+        call += 1;
+        yield { type: "text", content } satisfies StreamChunk;
+        yield { type: "done" } satisfies StreamChunk;
+      },
+      async complete() {
+        return "complete";
+      },
+    };
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [] });
+    const schema = { type: "object", required: ["name", "score"], properties: { name: { type: "string" }, score: { type: "number" } } };
+    const out = await agent.runWorkflow("/tmp", {
+      script: `return await agent("score it", { schema: ${JSON.stringify(schema)} });`,
+      parentToolCallId: "wf_schema_logs",
+    });
+    expect(out.result.ok).toBe(true);
+    expect(out.logs.some((line) => line.includes("failed validation; sending one corrective retry"))).toBe(true);
+    expect(out.logs.some((line) => line.includes("corrective retry produced valid output"))).toBe(true);
+  });
+});

@@ -64,7 +64,11 @@ export function buildWorkflowDeliveryNotice(snapshot: WorkflowRunSnapshot): stri
   } else if (snapshot.result && !snapshot.result.ok) {
     lines.push(`error: ${snapshot.result.error}`);
   }
-  lines.push("Do not re-run this workflow; integrate its result.");
+  if (snapshot.result && !snapshot.result.ok) {
+    lines.push("The workflow failed. If the error is in the script, fix it and issue a corrected run_workflow; do not integrate partial results as if complete.");
+  } else {
+    lines.push("Do not re-run this workflow; integrate its result.");
+  }
   return lines.join("\n");
 }
 

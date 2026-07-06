@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { runWorkflow, type WorkflowAgentSpec } from "../agent/workflow/runtime.js";
+import { precompileWorkflowScript, runWorkflow, type WorkflowAgentSpec } from "../agent/workflow/runtime.js";
 
 // Fake dispatcher: echoes "ok:<prompt>" after a small delay, or fails prompts
 // that start with "FAIL". Supports a schema by returning a structured object.
@@ -139,5 +139,67 @@ describe("workflow runtime — abort with in-flight agents (QuickJS dispose safe
       dispatchAgent: fakeDispatch(),
     });
     expect(second).toEqual({ ok: true, value: "ok:hello again" });
+  });
+});
+
+describe("workflow runtime — teaching errors (review quick-fix bundle)", () => {
+  it("parallel() with promises instead of thunks throws a teaching TypeError", async () => {
+    const res = await runWorkflow({
+      script: `return await parallel([agent("a"), agent("b")]);`,
+      dispatchAgent: fakeDispatch(),
+    });
+    expect(res.ok).toBe(false);
+    expect((res as { ok: false; error: string }).error).toContain("not promises");
+    expect((res as { ok: false; error: string }).error).toContain("() => agent(...)");
+  });
+
+  it("pipeline() with a non-function stage throws a teaching TypeError", async () => {
+    const res = await runWorkflow({
+      script: `return await pipeline(["a"], "not a function");`,
+      dispatchAgent: fakeDispatch(),
+    });
+    expect(res.ok).toBe(false);
+    expect((res as { ok: false; error: string }).error).toContain("stages must be functions");
+  });
+
+  it("Date access explains the determinism policy instead of 'not defined'", async () => {
+    const res = await runWorkflow({
+      script: `return Date.now();`,
+      dispatchAgent: fakeDispatch(),
+    });
+    expect(res.ok).toBe(false);
+    expect((res as { ok: false; error: string }).error).toContain("deterministic");
+    expect((res as { ok: false; error: string }).error).toContain("args");
+  });
+
+  it("a script syntax error reports the raw script's line number", async () => {
+    const res = await runWorkflow({
+      script: `const a = 1;\nconst b = 2;\nconst c = ;`,
+      dispatchAgent: fakeDispatch(),
+    });
+    expect(res.ok).toBe(false);
+    expect((res as { ok: false; error: string }).error).toMatch(/script line 3/);
+  });
+});
+
+describe("precompileWorkflowScript (submit-time syntax probe)", () => {
+  it("accepts a valid script, including export const meta and top-level return/await", async () => {
+    const good = await precompileWorkflowScript(
+      `export const meta = { name: 'x', description: 'y' };\nconst r = await agent("hi");\nreturn r;`,
+    );
+    expect(good).toEqual({ ok: true });
+  });
+
+  it("rejects a syntax error with the offset-corrected line number", async () => {
+    const bad = await precompileWorkflowScript(`const a = 1;\nconst b = ;`);
+    expect(bad.ok).toBe(false);
+    expect((bad as { ok: false; error: string }).error).toMatch(/script line 2/);
+  });
+
+  it("stays grammar-identical with the runtime: what the probe accepts, the runtime parses", async () => {
+    const script = `const xs = ["a","b"];\nreturn await parallel(xs.map((x) => () => agent("do " + x)));`;
+    expect(await precompileWorkflowScript(script)).toEqual({ ok: true });
+    const run = await runWorkflow({ script, dispatchAgent: fakeDispatch() });
+    expect(run.ok).toBe(true);
   });
 });

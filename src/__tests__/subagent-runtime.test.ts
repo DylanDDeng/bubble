@@ -476,3 +476,18 @@ describe("subagent lifecycle hooks under rate limits", () => {
     expect(hookEvents).toEqual(["SubagentStart", "SubagentStop"]);
   });
 });
+
+describe("handoff guard — structured-output children", () => {
+  const baseRecord = (summary: string, expectsStructuredOutput: boolean) => ({
+    summary,
+    expectsStructuredOutput,
+  }) as any;
+
+  it("exempts schema-bearing children from the token floor (compact JSON is complete by construction)", async () => {
+    const { needsExplicitFinalSummary } = await import("../agent/child-runner.js");
+    const compactJson = '{"ok":true,"score":7}';
+    expect(needsExplicitFinalSummary(baseRecord(compactJson, true), true)).toBe(false);
+    // The same short summary from an ordinary child still triggers the restate turn.
+    expect(needsExplicitFinalSummary(baseRecord(compactJson, false), true)).toBe(true);
+  });
+});

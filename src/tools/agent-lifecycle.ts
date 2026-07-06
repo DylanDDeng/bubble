@@ -6,6 +6,7 @@ import { parseThinkingLevel } from "../agent/categories.js";
 import type { ThinkingLevel } from "../types.js";
 import type { SubagentThreadSnapshot } from "../agent/subagent-control.js";
 import { workflowMemberWarning } from "../agent/workflow/control.js";
+import { precompileWorkflowScript } from "../agent/workflow/runtime.js";
 import { formatSubagentRoute } from "../agent/subagent-route-format.js";
 import type { ApprovalController } from "../approval/types.js";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
@@ -117,6 +118,7 @@ export function createSpawnAgentTool(
     "Start a child subagent in the background and return its agent_id plus random nickname.",
     "The child has an independent thread; call wait_agent later to collect its result.",
     "Proactively delegate multi-file investigations whose intermediate steps would be noise in the main conversation.",
+    "Best for helpers whose results you want to read and react to individually. For a uniform sweep over many items, or when member results should be aggregated before returning, weigh run_workflow instead. If the user asked for a workflow, an orchestration, or an agent team, that is run_workflow, not this tool.",
     "Do the work yourself when it takes only a couple of tool calls or needs conversation context — unless the user explicitly asks for a subagent, in which case spawn one.",
     "The child starts with zero context: write the task as a self-contained work order — state the goal, include known file paths or commands, and never make it rediscover knowledge you already hold.",
     "After spawning, do not duplicate the same delegated work locally; either wait for the child or do clearly non-overlapping work.",
@@ -413,10 +415,13 @@ export function createRunWorkflowTool(
     effect: "read",
     description: [
       "Run an LLM-authored JavaScript orchestration script (dynamic workflow) that coordinates many subagents with deterministic control flow.",
-      "Use it for tasks that need loops, conditional fan-out, or staged pipelines over dozens of subagents whose intermediate steps should stay out of this conversation — e.g. a codebase-wide audit, a migration, or cross-checked research.",
-      "The script's only capability is agent(prompt, opts?) — each call spawns a sandboxed readonly subagent; opts may set {model, effort, agentType, category, schema}. Also available: parallel(thunks), pipeline(items, ...stages), phase(title), log(msg), the global args, and budget {total, spent(), remaining()}.",
+      "This is THE tool whenever the user asks for a workflow, an orchestration, or an agent team — even a small one; do not substitute parallel spawn_agent calls for an explicit request.",
+      "Also use it for tasks that need loops, conditional fan-out, or staged pipelines over dozens of subagents whose intermediate steps should stay out of this conversation — e.g. a codebase-wide audit, a migration, or cross-checked research.",
+      "The script's only capability is agent(prompt, opts?) — each call spawns a sandboxed readonly subagent; opts may set {model, effort, agentType, category, schema, label}. Give each agent a short unique label. Also available: parallel(thunks), pipeline(items, ...stages), phase(title), log(msg), the global args, and budget {total, spent(), remaining()}.",
       "End the script with `return <value>`; that value (only) comes back to you. The script has no filesystem/shell/network/clock/random access. run_workflow must be the ONLY tool call in your response; it blocks until the workflow finishes.",
-      "A failed or blocked agent() resolves to null (it never throws inside parallel/pipeline): check for null slots and return which items failed alongside the results — never silently drop them.",
+      "A failed or blocked agent() resolves to null inside parallel/pipeline (a bare await agent() throws instead): check for null slots and return which items failed alongside the results — never silently drop them.",
+      "Write plain JavaScript only — no TypeScript syntax, no import/require, and no Date or Math.random (they throw; pass timestamps in via args).",
+      "parallel() takes an array of FUNCTIONS, not promises: await parallel(items.map(item => () => agent(...))). Passing promises throws a TypeError.",
       "Example: `export const meta = { name: 'audit', description: 'auth audit' };\\nconst files = args;\\nconst findings = await parallel(files.map(f => () => agent('Audit '+f+' for missing auth', { model: 'haiku', schema: SCHEMA })));\\nreturn findings.filter(Boolean);`",
     ].join(" "),
     parameters: {
@@ -436,6 +441,16 @@ export function createRunWorkflowTool(
       const script = stringArg(args.script);
       if (!script) {
         return { content: "Error: run_workflow requires a non-empty script.", isError: true };
+      }
+      // Submit-time syntax probe (same QuickJS engine, compile-only): a broken
+      // script fails HERE as the immediate tool result instead of one turn
+      // later through the background delivery path.
+      const precheck = await precompileWorkflowScript(script);
+      if (!precheck.ok) {
+        return {
+          content: `run_workflow rejected before launch: ${precheck.error}. Fix the script and re-issue run_workflow.`,
+          isError: true,
+        };
       }
       try {
         const { runId, title } = ctx.agent.startWorkflow(ctx.cwd, {
