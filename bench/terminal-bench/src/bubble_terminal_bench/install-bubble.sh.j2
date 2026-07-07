@@ -1,0 +1,29 @@
+#!/bin/bash
+set -e
+
+apt-get update
+apt-get install -y curl unzip
+
+# Node.js via nvm: bubble's launcher (bin.js) has a node shebang and npm is
+# needed for the global install.
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.2/install.sh | bash
+
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+
+nvm install 22
+node -v
+npm -v
+
+# Bun: bubble's launcher re-execs the CLI under bun and refuses to run without it.
+curl -fsSL https://bun.sh/install | bash
+export PATH="$HOME/.bun/bin:$PATH"
+bun --version
+
+{% if version %}
+npm install -g @bubblebrain-ai/bubble@{{ version }}
+{% else %}
+npm install -g @bubblebrain-ai/bubble@latest
+{% endif %}
+
+bubble -v
