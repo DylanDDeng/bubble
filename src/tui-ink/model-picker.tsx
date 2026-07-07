@@ -115,7 +115,7 @@ function isMiniMaxToggleModel(modelId: string): boolean {
 export function formatReasoningLevelsLabel(levels: readonly ThinkingLevel[], asToggle = false): string {
   const normalized = levels.length > 0 ? levels : ["off"];
   if (asToggle) return "thinking on/off";
-  return `effort ${normalized.join("/")}`;
+  return normalized.join("/");
 }
 
 export function formatModelPickerRow(

@@ -43,7 +43,7 @@ describe("Ink model picker", () => {
     expect(listModels).not.toHaveBeenCalled();
     const deepseek = options.find((option) => option.id === "deepseek:deepseek-v4-pro");
     expect(deepseek?.reasoningLevels).toEqual(["high", "max"]);
-    expect(formatReasoningLevelsLabel(deepseek?.reasoningLevels ?? [])).toBe("effort high/max");
+    expect(formatReasoningLevelsLabel(deepseek?.reasoningLevels ?? [])).toBe("high/max");
     expect(shouldOpenEffortPicker(deepseek!)).toBe(true);
     expect(preferredEffortIndex(deepseek!, "xhigh")).toBe(0);
     expect(options.map((option) => option.id)).toContain("openai:gpt-5.4");
@@ -131,12 +131,12 @@ describe("Ink model picker", () => {
     expect(formatEffortPickerRow("medium", { selected: true, width: 40, asToggle: true })).toContain("> on");
     expect(formatEffortPickerRow("off", { selected: false, width: 40, asToggle: true })).toContain("off");
 
-    // A graded model (e.g. GLM toggle reuses off/medium, but isn't MiniMax) keeps effort labels.
+    // A graded model (e.g. GLM toggle reuses off/medium, but isn't MiniMax) keeps level labels.
     const glmRow = formatModelPickerRow(
       { id: "glm-5.1", label: "GLM-5.1", providerBadge: "zhipuai", reasoningLevels: ["off", "medium"] },
       { selected: false, current: false, width: 56 },
     );
-    expect(glmRow).toContain("effort off/medium");
+    expect(glmRow).toContain("off/medium");
   });
 
   it("formats effort and no-result rows with fixed viewport padding", () => {
