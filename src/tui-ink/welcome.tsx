@@ -2,6 +2,7 @@ import { Box, Text } from "ink";
 import { createRequire } from "node:module";
 import { useTheme } from "./theme.js";
 import type { DisplayMessage } from "./display-history.js";
+import { isThinkingOnlyModel, isThinkingToggleModel } from "../provider-transform.js";
 
 interface WelcomeBannerProps {
   terminalColumns: number;
@@ -13,6 +14,7 @@ interface WelcomeBannerProps {
   /** Session identifier (session file basename). */
   sessionLabel?: string;
   providerId?: string;
+  modelId?: string;
   modelLabel?: string;
   /** Active thinking level, rendered as part of the model unit (e.g. "xhigh"). */
   thinkingLabel?: string;
@@ -73,6 +75,7 @@ export function WelcomeBanner({
   cwd,
   sessionLabel,
   providerId,
+  modelId,
   modelLabel,
   thinkingLabel,
 }: WelcomeBannerProps) {
@@ -80,6 +83,7 @@ export function WelcomeBanner({
   const effectiveWidth = Math.max(24, Math.min(terminalColumns - 2, 96));
   const modelLine = formatModelLine({
     providerId,
+    modelId,
     modelLabel,
     thinkingLabel,
     tips,
@@ -152,17 +156,20 @@ export function WelcomeBanner({
 
 export function formatModelLine({
   providerId,
+  modelId,
   modelLabel,
   thinkingLabel,
   tips,
-}: Pick<WelcomeBannerProps, "providerId" | "modelLabel" | "thinkingLabel" | "tips">): string {
+}: Pick<WelcomeBannerProps, "providerId" | "modelId" | "modelLabel" | "thinkingLabel" | "tips">): string {
   const parts: string[] = [];
-  // MiniMax thinking is a binary toggle (adaptive thinking), so label it
-  // "thinking mode" rather than "<level> effort"; and its provider id
-  // ("minimax-anthropic") is redundant with the model name, so omit it.
+  // Binary thinking toggles use an internal placeholder level, so label them
+  // "thinking mode" rather than "<level> effort". MiniMax provider ids are
+  // redundant with the model name, so omit them.
   const isMiniMax = (providerId || "").toLowerCase().includes("minimax");
+  const isThinkingToggle = isThinkingToggleModel(providerId, modelId);
+  const isThinkingOnly = isThinkingOnlyModel(providerId, modelId);
   if (modelLabel) {
-    if (thinkingLabel && isMiniMax) parts.push(modelLabel, "thinking mode");
+    if (thinkingLabel && (isThinkingToggle || isThinkingOnly)) parts.push(modelLabel, "thinking mode");
     else if (thinkingLabel) parts.push(`${modelLabel} with ${thinkingLabel} effort`);
     else parts.push(modelLabel);
   }

@@ -1,6 +1,6 @@
 import type { ThinkingLevel } from "./types.js";
 import { getAvailableThinkingLevels, normalizeThinkingLevel } from "./variant/variant-resolver.js";
-export { getAvailableThinkingLevels, getDefaultThinkingLevel, isThinkingOnlyLevels, normalizeThinkingLevel } from "./variant/variant-resolver.js";
+export { getAvailableThinkingLevels, getDefaultThinkingLevel, isThinkingOnlyLevels, isThinkingOnlyModel, isThinkingToggleModel, normalizeThinkingLevel } from "./variant/variant-resolver.js";
 
 export interface ProviderRequestConfig {
   effectiveThinkingLevel: ThinkingLevel;
@@ -13,9 +13,8 @@ export interface ProviderRequestConfig {
 }
 
 const MOONSHOT_PROVIDER_IDS = new Set(["moonshot-cn", "moonshot-intl", "kimi-for-coding"]);
-const KIMI_K27_FAMILY = new Set(["kimi-k2.7-code"]);
-const KIMI_K25_FAMILY = new Set(["kimi-k2.5", "k2.6-code-preview", "kimi-k2.6"]);
-const KIMI_THINKING_FAMILY = new Set(["kimi-k2-thinking", "kimi-k2-thinking-turbo"]);
+const KIMI_K27_FAMILY = new Set(["kimi-k2.7-code", "kimi-k2.7-code-highspeed"]);
+const KIMI_TOGGLE_THINKING_FAMILY = new Set(["kimi-k2.5", "kimi-k2.6"]);
 const KIMI_K26_DEFAULT_MAX_TOKENS = 32768;
 const MINIMAX_M3_FAMILY = new Set(["MiniMax-M3"]);
 
@@ -129,12 +128,11 @@ export function resolveProviderRequestConfig(
     };
   }
 
-  // Moonshot / Kimi: kimi-k2.5 family (incl. k2.6-code-preview, kimi-k2.6) locks
-  // temperature/top_p/n/penalties and exposes thinking via extra_body.thinking;
-  // kimi-k2-thinking family locks temperature=1.
+  // Moonshot / Kimi: K2.5/K2.6 lock temperature/top_p/n/penalties and expose
+  // thinking via extra_body.thinking.
   if (MOONSHOT_PROVIDER_IDS.has(providerId)) {
-    // kimi-k2.7-code is thinking-only: temperature is locked to 1.0 server-side
-    // (any explicit value errors), thinking can never be disabled, and
+    // Kimi K2.7 Code variants are thinking-only: temperature is locked to 1.0
+    // server-side (any explicit value errors), thinking can never be disabled, and
     // reasoning_content must be echoed back on tool-call turns.
     if (KIMI_K27_FAMILY.has(modelId)) {
       return {
@@ -146,7 +144,7 @@ export function resolveProviderRequestConfig(
         },
       };
     }
-    if (KIMI_K25_FAMILY.has(modelId)) {
+    if (KIMI_TOGGLE_THINKING_FAMILY.has(modelId)) {
       return {
         effectiveThinkingLevel,
         omitTemperature: true,
@@ -155,9 +153,6 @@ export function resolveProviderRequestConfig(
           thinking: { type: effectiveThinkingLevel === "off" ? "disabled" : "enabled" },
         },
       };
-    }
-    if (KIMI_THINKING_FAMILY.has(modelId)) {
-      return { effectiveThinkingLevel, omitTemperature: true };
     }
     return { effectiveThinkingLevel };
   }

@@ -6,7 +6,7 @@ import { ProviderRegistry, encodeModel, decodeModel, displayModel, isUserVisible
 import { listBuiltinModels } from "../model-catalog.js";
 import { padVisual, truncateVisual } from "../text-display.js";
 import { hasTerminalMouseSequence } from "./terminal-mouse.js";
-import { getAvailableThinkingLevels, isThinkingOnlyLevels, normalizeThinkingLevel } from "../provider-transform.js";
+import { getAvailableThinkingLevels, isThinkingOnlyLevels, isThinkingToggleModel, normalizeThinkingLevel } from "../provider-transform.js";
 import type { ThinkingLevel } from "../types.js";
 
 export { padVisual, truncateVisual } from "../text-display.js";
@@ -104,17 +104,14 @@ export function padPickerRows(rows: string[], bodyRows: number, width: number): 
   return padded;
 }
 
-// MiniMax models expose thinking as a binary on/off switch (the API's `thinking`
-// param is disabled|adaptive — there's no graded effort), so render the "on"
-// level as on/off instead of our internal "medium". Scoped to MiniMax only —
-// other 2-level models (e.g. GLM toggles) keep their effort labels.
-function isMiniMaxToggleModel(modelId: string): boolean {
-  return modelId.toLowerCase().includes("minimax");
+function isThinkingToggleOption(option: Pick<ModelPickerOption, "id" | "providerBadge">): boolean {
+  const decoded = decodeModel(option.id);
+  return isThinkingToggleModel(decoded.providerId || option.providerBadge, decoded.modelId);
 }
 
 export function formatReasoningLevelsLabel(levels: readonly ThinkingLevel[], asToggle = false): string {
+  if (isThinkingOnlyLevels(levels)) return "on";
   if (asToggle) return "thinking on/off";
-  if (isThinkingOnlyLevels(levels)) return "thinking";
   const normalized = levels.length > 0 ? levels : ["off"];
   return normalized.join("/");
 }
@@ -127,7 +124,7 @@ export function formatModelPickerRow(
   const marker = options.selected ? "> " : "  ";
   const label = option.label.replace(/\s+/g, " ").trim();
   const provider = option.providerBadge.replace(/\s+/g, " ").trim();
-  const effort = formatReasoningLevelsLabel(option.reasoningLevels, isMiniMaxToggleModel(option.id));
+  const effort = formatReasoningLevelsLabel(option.reasoningLevels, isThinkingToggleOption(option));
   const current = options.current ? " ●" : "";
   const providerWidth = Math.max(6, Math.min(16, Math.floor(width * 0.18)));
   const effortWidth = Math.max(12, Math.min(30, Math.floor(width * 0.32)));
@@ -412,6 +409,13 @@ export function ModelPicker({ registry, current, currentThinkingLevel, recent, o
     row,
     selected: rawModelRows[index]?.selected ?? false,
   }));
+  const highlightedOption = options[clampPickerIndex(selectedIndex, options.length)];
+  const enterAction = highlightedOption && shouldOpenEffortPicker(highlightedOption)
+    ? (isThinkingToggleOption(highlightedOption) ? "choose mode" : "choose effort")
+    : "select";
+  const effortTitle = phase.kind === "effort" && isThinkingToggleOption(phase.model)
+    ? "Select Thinking Mode"
+    : "Select Reasoning Effort";
 
   return (
     <Box
@@ -421,7 +425,7 @@ export function ModelPicker({ registry, current, currentThinkingLevel, recent, o
       borderStyle="round"
       borderColor={theme.borderActive}
     >
-      <Text bold color={theme.accent}>{phase.kind === "effort" ? "Select Reasoning Effort" : "Select Model"}</Text>
+      <Text bold color={theme.accent}>{phase.kind === "effort" ? effortTitle : "Select Model"}</Text>
       {phase.kind === "effort" ? (
         <EffortPickerView
           model={phase.model}
@@ -432,7 +436,7 @@ export function ModelPicker({ registry, current, currentThinkingLevel, recent, o
       ) : (
         <>
           <SearchField query={query} placeholder="Type to search models..." width={rowWidth} />
-          <Text color={theme.muted}>↑/↓ navigate · Enter choose effort · Esc cancel · Backspace clear</Text>
+          <Text color={theme.muted}>↑/↓ navigate · Enter {enterAction} · Esc cancel · Backspace clear</Text>
         </>
       )}
       {phase.kind === "model" && <Box flexDirection="column" height={bodyRows} overflow="hidden" marginTop={1}>
@@ -466,7 +470,7 @@ function EffortPickerView({
     row: formatEffortPickerRow(level, {
       selected: index === safeSelectedIndex,
       width: rowWidth,
-      asToggle: isMiniMaxToggleModel(model.id),
+      asToggle: isThinkingToggleOption(model),
     }),
     selected: index === safeSelectedIndex,
   }));

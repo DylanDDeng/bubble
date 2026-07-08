@@ -120,17 +120,21 @@ describe("provider transform", () => {
     expect(high.extraBody).toEqual({ reasoning_effort: "high" });
   });
 
-  it("locks kimi-k2.7-code to thinking-only with temperature omitted", () => {
+  it("locks Kimi K2.7 Code variants to thinking-only with temperature omitted", () => {
     const cn = resolveProviderRequestConfig("moonshot-cn", "kimi-k2.7-code", "medium");
     const intl = resolveProviderRequestConfig("moonshot-intl", "kimi-k2.7-code", "off");
+    const highspeed = resolveProviderRequestConfig("kimi-for-coding", "kimi-k2.7-code-highspeed", "off");
 
     // Thinking can never be disabled, so even an "off" request normalizes to medium.
     expect(cn.effectiveThinkingLevel).toBe("medium");
     expect(intl.effectiveThinkingLevel).toBe("medium");
+    expect(highspeed.effectiveThinkingLevel).toBe("medium");
     expect(cn.omitTemperature).toBe(true);
+    expect(highspeed.omitTemperature).toBe(true);
     expect(cn.reasoningContentEcho).toBe("tool_calls");
     expect(cn.extraBody).toEqual({ thinking: { type: "enabled" } });
     expect(intl.extraBody).toEqual({ thinking: { type: "enabled" } });
+    expect(highspeed.extraBody).toEqual({ thinking: { type: "enabled" } });
   });
 
   it("uses Fireworks Kimi agent defaults", () => {

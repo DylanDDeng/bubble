@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { getBuiltinProvider, getModelContextWindow, listBuiltinModels } from "../model-catalog.js";
-import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingLevel } from "../variant/variant-resolver.js";
+import { getAvailableThinkingLevels, getDefaultThinkingLevel, isThinkingOnlyModel, isThinkingToggleModel, normalizeThinkingLevel } from "../variant/variant-resolver.js";
 import { getNextThinkingLevel } from "../variant/thinking-level.js";
 
 describe("variant resolver", () => {
@@ -29,6 +29,25 @@ describe("variant resolver", () => {
   it("cycles through only supported levels", () => {
     expect(getNextThinkingLevel("medium", ["off", "medium", "high"])).toBe("high");
     expect(getNextThinkingLevel("high", ["off", "medium", "high"])).toBe("off");
+  });
+
+  it("identifies provider thinking toggles that are not real effort grades", () => {
+    expect(isThinkingToggleModel("kimi-for-coding", "kimi-k2.6")).toBe(true);
+    expect(isThinkingToggleModel("kimi-for-coding", "kimi-k2.5")).toBe(true);
+    expect(isThinkingToggleModel("zhipuai", "glm-5.1")).toBe(false);
+  });
+
+  it("aligns built-in Kimi models with the current API surface", () => {
+    expect(listBuiltinModels("kimi-for-coding").map((model) => model.id)).toEqual([
+      "kimi-k2.7-code",
+      "kimi-k2.7-code-highspeed",
+      "kimi-k2.6",
+      "kimi-k2.5",
+    ]);
+    expect(getAvailableThinkingLevels("kimi-for-coding", "kimi-k2.7-code-highspeed")).toEqual(["medium"]);
+    expect(isThinkingOnlyModel("kimi-for-coding", "kimi-k2.7-code-highspeed")).toBe(true);
+    expect(getAvailableThinkingLevels("kimi-for-coding", "kimi-k2.6")).toEqual(["off", "medium"]);
+    expect(getAvailableThinkingLevels("kimi-for-coding", "kimi-k2.5")).toEqual(["off", "medium"]);
   });
 
   it("includes Alibaba DashScope qwen models", () => {

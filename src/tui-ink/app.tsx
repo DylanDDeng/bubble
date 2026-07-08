@@ -37,10 +37,10 @@ import type { PendingApprovalHint } from "./message-list.js";
 import { canvasBackgroundFor, paletteFor, ThemeProvider, useTheme, type ResolvedTheme, type Theme, type ThemeMode } from "./theme.js";
 import { isPrintablePickerInput, ModelPicker, ProviderPicker, KeyPicker, SkillPicker } from "./model-picker.js";
 import { FeishuSetupPicker } from "./feishu-setup-picker.js";
-import { BUILTIN_PROVIDERS, ProviderRegistry, displayModel, isUserVisibleProvider } from "../provider-registry.js";
+import { BUILTIN_PROVIDERS, ProviderRegistry, decodeModel, displayModel, isUserVisibleProvider } from "../provider-registry.js";
 import { buildSystemPrompt } from "../system-prompt.js";
 import type { ThinkingLevel } from "../types.js";
-import { getAvailableThinkingLevels, isThinkingOnlyLevels, normalizeThinkingLevel } from "../provider-transform.js";
+import { getAvailableThinkingLevels, isThinkingOnlyLevels, isThinkingToggleModel, normalizeThinkingLevel } from "../provider-transform.js";
 import { FooterBar, buildFooterData } from "./footer.js";
 import { SkillRegistry } from "../skills/registry.js";
 import { parseSkillInvocation } from "../skills/invocation.js";
@@ -988,19 +988,16 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         setThinkingLevel,
         sessionManager,
       });
-      // MiniMax thinking is a binary toggle (adaptive thinking), not a graded
-      // effort — show it as "thinking mode" rather than "medium effort". Same
-      // for thinking-only models (e.g. kimi-k2.7-code), whose single always-on
-      // level is an internal placeholder, not a user-facing grade.
-      const isMiniMaxModel = model.toLowerCase().includes("minimax");
-      const switchedParts = model.includes(":")
-        ? model.split(":")
-        : [agent.providerId || safeRegistry.getDefault()?.id || "openai", model];
+      // Binary thinking toggles and thinking-only models use internal level
+      // placeholders; do not present those placeholders as real effort grades.
+      const decodedModel = decodeModel(model);
+      const switchedProviderId = decodedModel.providerId || agent.providerId || safeRegistry.getDefault()?.id || "openai";
+      const isThinkingToggle = isThinkingToggleModel(switchedProviderId, decodedModel.modelId);
       const isThinkingOnly = isThinkingOnlyLevels(
-        getAvailableThinkingLevels(switchedParts[0], switchedParts.slice(1).join(":")),
+        getAvailableThinkingLevels(switchedProviderId, decodedModel.modelId),
       );
       const effortNote = nextThinkingLevel && nextThinkingLevel !== "off"
-        ? (isMiniMaxModel || isThinkingOnly ? " in thinking mode" : ` with ${nextThinkingLevel} effort`)
+        ? (isThinkingToggle || isThinkingOnly ? " in thinking mode" : ` with ${nextThinkingLevel} effort`)
         : "";
       addMessage("assistant", `Model switched to ${displayModel(model)}${effortNote}.`);
       closePicker();
@@ -1890,12 +1887,14 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
       })()
     : null;
 
-  // MiniMax has only off/on, so the graded ">2 levels" gate would hide its label;
+  // Binary thinking toggles have only off/on, so the graded ">2 levels" gate would hide their label;
   // surface it too (rendered as "thinking mode" by formatModelLine).
-  const isMiniMaxProvider = (agent.providerId || "").toLowerCase().includes("minimax");
+  const isThinkingToggle = isThinkingToggleModel(agent.providerId, agent.apiModel);
+  const availableThinkingLevels = getAvailableThinkingLevels(agent.providerId, agent.apiModel);
+  const isThinkingOnly = isThinkingOnlyLevels(availableThinkingLevels);
   const showThinkingLabel = Boolean(thinkingLevel)
     && thinkingLevel !== "off"
-    && (isMiniMaxProvider || getAvailableThinkingLevels(agent.providerId, agent.apiModel).length > 2);
+    && (isThinkingToggle || isThinkingOnly || availableThinkingLevels.length > 2);
   const welcomeBannerNode = showWelcome ? (
     <WelcomeBanner
       terminalColumns={terminalColumns}
@@ -1904,6 +1903,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
       cwd={friendlyCwd(args.cwd)}
       sessionLabel={sessionBasename(currentSessionFile())}
       providerId={agent.providerId || safeRegistry.getDefault()?.id}
+      modelId={agent.apiModel}
       modelLabel={agent.model ? displayModel(agent.model) : undefined}
       thinkingLabel={showThinkingLabel ? thinkingLevel : undefined}
     />

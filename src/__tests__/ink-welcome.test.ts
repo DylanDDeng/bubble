@@ -116,8 +116,29 @@ describe("Ink welcome banner", () => {
     expect(formatModelLine({
       tips: [],
       providerId: "minimax-anthropic",
+      modelId: "MiniMax-M3",
       modelLabel: "MiniMax M3",
       thinkingLabel: "medium",
     })).toBe("MiniMax M3 · thinking mode");
+  });
+
+  it("labels Kimi K2.6 thinking as a mode, not medium effort", () => {
+    expect(formatModelLine({
+      tips: [],
+      providerId: "kimi-for-coding",
+      modelId: "kimi-k2.6",
+      modelLabel: "Kimi K2.6",
+      thinkingLabel: "medium",
+    })).toBe("Kimi K2.6 · thinking mode · kimi-for-coding");
+  });
+
+  it("labels Kimi K2.7 Code thinking-only models as a mode", () => {
+    expect(formatModelLine({
+      tips: [],
+      providerId: "kimi-for-coding",
+      modelId: "kimi-k2.7-code-highspeed",
+      modelLabel: "Kimi K2.7 Code Highspeed",
+      thinkingLabel: "medium",
+    })).toBe("Kimi K2.7 Code Highspeed · thinking mode · kimi-for-coding");
   });
 });

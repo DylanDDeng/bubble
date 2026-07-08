@@ -119,7 +119,7 @@ describe("Ink model picker", () => {
     expect(row).not.toContain("\n");
   });
 
-  it("shows MiniMax thinking as on/off, leaving graded models as effort", () => {
+  it("shows binary thinking toggles as on/off, leaving graded models as effort", () => {
     // MiniMax: the model row reads as a toggle, and the effort picker rows show on/off.
     const miniMaxRow = formatModelPickerRow(
       { id: "MiniMax-M3", label: "MiniMax M3", providerBadge: "minimax", reasoningLevels: ["off", "medium"] },
@@ -131,6 +131,14 @@ describe("Ink model picker", () => {
     expect(formatEffortPickerRow("medium", { selected: true, width: 40, asToggle: true })).toContain("> on");
     expect(formatEffortPickerRow("off", { selected: false, width: 40, asToggle: true })).toContain("off");
 
+    // Kimi K2.6 supports a real thinking on/off switch, not medium effort.
+    const kimiRow = formatModelPickerRow(
+      { id: "kimi-for-coding:kimi-k2.6", label: "Kimi K2.6", providerBadge: "Kimi for Coding", reasoningLevels: ["off", "medium"] },
+      { selected: false, current: false, width: 56 },
+    );
+    expect(kimiRow).toContain("thinking on/off");
+    expect(kimiRow).not.toContain("medium");
+
     // A graded model (e.g. GLM toggle reuses off/medium, but isn't MiniMax) keeps level labels.
     const glmRow = formatModelPickerRow(
       { id: "glm-5.1", label: "GLM-5.1", providerBadge: "zhipuai", reasoningLevels: ["off", "medium"] },
@@ -139,15 +147,15 @@ describe("Ink model picker", () => {
     expect(glmRow).toContain("off/medium");
   });
 
-  it("shows thinking-only models as thinking, never a placeholder grade", () => {
+  it("shows thinking-only models as on, never a placeholder grade", () => {
     // kimi-k2.7-code: thinking can't be disabled and has no grades; the internal
     // "medium" placeholder level must not leak into the picker.
-    expect(formatReasoningLevelsLabel(["medium"])).toBe("thinking");
+    expect(formatReasoningLevelsLabel(["medium"])).toBe("on");
     const kimiRow = formatModelPickerRow(
       { id: "kimi-k2.7-code", label: "Kimi K2.7 Code", providerBadge: "kimi-for-coding", reasoningLevels: ["medium"] },
-      { selected: false, current: false, width: 56 },
+      { selected: false, current: false, width: 80 },
     );
-    expect(kimiRow).toContain("thinking");
+    expect(kimiRow).toContain("on");
     expect(kimiRow).not.toContain("medium");
 
     // A single "off" level is genuinely no-thinking, not thinking-only.
