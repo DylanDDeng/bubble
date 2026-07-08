@@ -139,6 +139,21 @@ describe("Ink model picker", () => {
     expect(glmRow).toContain("off/medium");
   });
 
+  it("shows thinking-only models as thinking, never a placeholder grade", () => {
+    // kimi-k2.7-code: thinking can't be disabled and has no grades; the internal
+    // "medium" placeholder level must not leak into the picker.
+    expect(formatReasoningLevelsLabel(["medium"])).toBe("thinking");
+    const kimiRow = formatModelPickerRow(
+      { id: "kimi-k2.7-code", label: "Kimi K2.7 Code", providerBadge: "kimi-for-coding", reasoningLevels: ["medium"] },
+      { selected: false, current: false, width: 56 },
+    );
+    expect(kimiRow).toContain("thinking");
+    expect(kimiRow).not.toContain("medium");
+
+    // A single "off" level is genuinely no-thinking, not thinking-only.
+    expect(formatReasoningLevelsLabel(["off"])).toBe("off");
+  });
+
   it("formats effort and no-result rows with fixed viewport padding", () => {
     const effortRow = formatEffortPickerRow("xhigh", { selected: true, width: 36 });
     const rows = padPickerRows([

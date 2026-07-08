@@ -13,6 +13,15 @@ export function getDefaultThinkingLevel(providerId: string, modelId: string): Th
   return levels.includes("medium") ? "medium" : levels[0] || "off";
 }
 
+/**
+ * A single non-"off" level means the model is always in thinking mode with no
+ * user-facing grades (e.g. kimi-k2.7-code) — the level value is an internal
+ * placeholder and must not be shown to the user as an effort grade.
+ */
+export function isThinkingOnlyLevels(levels: readonly ThinkingLevel[]): boolean {
+  return levels.length === 1 && levels[0] !== "off";
+}
+
 export function normalizeThinkingLevel(
   level: ThinkingLevel,
   supportedLevels: readonly ThinkingLevel[],

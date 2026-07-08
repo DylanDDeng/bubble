@@ -1,6 +1,6 @@
 import type { ThinkingLevel } from "./types.js";
 import { getAvailableThinkingLevels, normalizeThinkingLevel } from "./variant/variant-resolver.js";
-export { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingLevel } from "./variant/variant-resolver.js";
+export { getAvailableThinkingLevels, getDefaultThinkingLevel, isThinkingOnlyLevels, normalizeThinkingLevel } from "./variant/variant-resolver.js";
 
 export interface ProviderRequestConfig {
   effectiveThinkingLevel: ThinkingLevel;

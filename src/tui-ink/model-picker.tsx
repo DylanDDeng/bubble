@@ -6,7 +6,7 @@ import { ProviderRegistry, encodeModel, decodeModel, displayModel, isUserVisible
 import { listBuiltinModels } from "../model-catalog.js";
 import { padVisual, truncateVisual } from "../text-display.js";
 import { hasTerminalMouseSequence } from "./terminal-mouse.js";
-import { getAvailableThinkingLevels, normalizeThinkingLevel } from "../provider-transform.js";
+import { getAvailableThinkingLevels, isThinkingOnlyLevels, normalizeThinkingLevel } from "../provider-transform.js";
 import type { ThinkingLevel } from "../types.js";
 
 export { padVisual, truncateVisual } from "../text-display.js";
@@ -113,8 +113,9 @@ function isMiniMaxToggleModel(modelId: string): boolean {
 }
 
 export function formatReasoningLevelsLabel(levels: readonly ThinkingLevel[], asToggle = false): string {
-  const normalized = levels.length > 0 ? levels : ["off"];
   if (asToggle) return "thinking on/off";
+  if (isThinkingOnlyLevels(levels)) return "thinking";
+  const normalized = levels.length > 0 ? levels : ["off"];
   return normalized.join("/");
 }
 
