@@ -4,6 +4,7 @@ import {
   resolveModelRoute,
   resolveSameProviderModelRoute,
   resolveSubagentRoute,
+  parseThinkingLevel,
   sanitizeAgentCategories,
 } from "../agent/categories.js";
 
@@ -40,6 +41,13 @@ describe("agent categories", () => {
       bad: "nope",
     })).toEqual({
       review: { model: "openai:gpt-5.4", thinkingLevel: "high", maxConcurrent: 2 },
+    });
+  });
+
+  it("accepts ultra through the canonical effort parser", () => {
+    expect(parseThinkingLevel("ultra")).toBe("ultra");
+    expect(sanitizeAgentCategories({ deep: { thinkingLevel: "ultra" } })).toEqual({
+      deep: { thinkingLevel: "ultra" },
     });
   });
 

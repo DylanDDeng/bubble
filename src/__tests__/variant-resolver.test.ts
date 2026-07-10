@@ -1,13 +1,58 @@
 import { describe, expect, it } from "vitest";
-import { getBuiltinProvider, getModelContextWindow, listBuiltinModels } from "../model-catalog.js";
-import { getAvailableThinkingLevels, getDefaultThinkingLevel, isThinkingOnlyModel, isThinkingToggleModel, normalizeThinkingLevel } from "../variant/variant-resolver.js";
-import { getNextThinkingLevel } from "../variant/thinking-level.js";
+import {
+  clearDynamicModelMetadata,
+  getBuiltinModel,
+  getBuiltinProvider,
+  getModelContextWindow,
+  getToolOutputTokenLimit,
+  listBuiltinModels,
+  registerDynamicModelMetadata,
+} from "../model-catalog.js";
+import { THINKING_LEVELS } from "../types.js";
+import { getAvailableThinkingLevels, getDefaultThinkingLevel, isThinkingOnlyModel, isThinkingToggleModel, normalizeInheritedThinkingLevel, normalizeThinkingLevel } from "../variant/variant-resolver.js";
+import { getNextThinkingLevel, isThinkingLevel } from "../variant/thinking-level.js";
 
 describe("variant resolver", () => {
   it("returns model-specific thinking levels", () => {
     expect(getAvailableThinkingLevels("openai-codex", "gpt-5.1-codex-mini")).toEqual(["off", "medium", "high"]);
     expect(getAvailableThinkingLevels("deepseek", "deepseek-v4-flash")).toEqual(["high", "max"]);
     expect(getAvailableThinkingLevels("deepseek", "deepseek-v4-pro")).toEqual(["high", "max"]);
+  });
+
+  it("uses one canonical effort order including ultra", () => {
+    expect(THINKING_LEVELS).toEqual(["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
+    expect(isThinkingLevel("ultra")).toBe(true);
+  });
+
+  it("defines the exact GPT-5.6 fallback catalog", () => {
+    expect(listBuiltinModels("openai-codex").slice(0, 3)).toEqual([
+      expect.objectContaining({
+        id: "gpt-5.6-sol",
+        reasoningLevels: ["low", "medium", "high", "xhigh", "max", "ultra"],
+        defaultReasoningLevel: "low",
+        contextWindow: 372000,
+        useResponsesLite: true,
+        toolOutputTokenLimit: 10000,
+      }),
+      expect.objectContaining({
+        id: "gpt-5.6-terra",
+        reasoningLevels: ["low", "medium", "high", "xhigh", "max", "ultra"],
+        defaultReasoningLevel: "medium",
+        contextWindow: 372000,
+        useResponsesLite: true,
+        toolOutputTokenLimit: 10000,
+      }),
+      expect.objectContaining({
+        id: "gpt-5.6-luna",
+        reasoningLevels: ["low", "medium", "high", "xhigh", "max"],
+        defaultReasoningLevel: "medium",
+        contextWindow: 372000,
+        useResponsesLite: true,
+        toolOutputTokenLimit: 10000,
+      }),
+    ]);
+    expect(getModelContextWindow("openai", "gpt-5.6-sol")).toBe(372000);
+    expect(getToolOutputTokenLimit("openai", "gpt-5.6-luna")).toBe(10000);
   });
 
   it("uses the DeepSeek v4 documented context window", () => {
@@ -24,6 +69,27 @@ describe("variant resolver", () => {
   it("clamps unsupported levels downward", () => {
     expect(normalizeThinkingLevel("xhigh", ["off", "medium", "high"])).toBe("high");
     expect(normalizeThinkingLevel("minimal", ["off", "low", "medium"])).toBe("off");
+    expect(normalizeThinkingLevel("ultra", getAvailableThinkingLevels("openai", "gpt-5.6-luna"))).toBe("max");
+    expect(normalizeThinkingLevel("ultra", getAvailableThinkingLevels("anthropic", "claude-opus-4-8"))).toBe("max");
+  });
+
+  it("uses model defaults for unsupported inherited effort", () => {
+    expect(normalizeInheritedThinkingLevel("openai", "gpt-5.6-sol", "off")).toBe("low");
+    expect(normalizeInheritedThinkingLevel("openai", "gpt-5.6-sol", "minimal")).toBe("low");
+    expect(normalizeInheritedThinkingLevel("openai", "gpt-5.6-terra", "off")).toBe("medium");
+    expect(normalizeInheritedThinkingLevel("openai", "gpt-5.6-luna", "ultra")).toBe("medium");
+  });
+
+  it("clears OpenAI aliases from dynamic metadata", () => {
+    registerDynamicModelMetadata({
+      id: "gpt-dynamic-test",
+      name: "dynamic",
+      providerId: "openai-codex",
+      reasoningLevels: ["ultra"],
+    });
+    expect(getBuiltinModel("openai", "gpt-dynamic-test")?.reasoningLevels).toEqual(["ultra"]);
+    clearDynamicModelMetadata("openai");
+    expect(getBuiltinModel("openai", "gpt-dynamic-test")).toBeUndefined();
   });
 
   it("cycles through only supported levels", () => {

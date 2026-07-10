@@ -1,4 +1,4 @@
-import type { ThinkingLevel } from "../types.js";
+import { THINKING_LEVELS, type ThinkingLevel } from "../types.js";
 
 export interface AgentCategoryConfig {
   model?: string;
@@ -27,16 +27,6 @@ export interface ResolvedModelSelection {
   providerId: string;
   model: string | "inherit";
 }
-
-const THINKING_LEVELS = new Set<ThinkingLevel>([
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-]);
 
 const BUILTIN_CATEGORIES: AgentCategoriesConfig = {
   quick: { model: "inherit", thinkingLevel: "low", maxConcurrent: 3 },
@@ -146,7 +136,7 @@ function parseModelSelection(model: string | undefined, parentProviderId: string
 }
 
 function isThinkingLevel(value: unknown): value is ThinkingLevel {
-  return typeof value === "string" && THINKING_LEVELS.has(value as ThinkingLevel);
+  return typeof value === "string" && THINKING_LEVELS.includes(value as ThinkingLevel);
 }
 
 function cloneCategories(categories: AgentCategoriesConfig): AgentCategoriesConfig {

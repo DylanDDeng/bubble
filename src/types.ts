@@ -17,7 +17,8 @@ export interface ImageContent {
 }
 
 export type ContentPart = TextContent | ImageContent;
-export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
+export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 export type ReasoningEffort = ThinkingLevel;
 
 export type ProviderRawContentBlock = Record<string, unknown> & { type: string };

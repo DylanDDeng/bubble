@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import type { Provider, ProviderMessage, ReasoningEffort, StreamChunk, ThinkingLevel, TokenUsage, ToolChoiceMode, ToolDefinition } from "./types.js";
+import { THINKING_LEVELS, type Provider, type ProviderMessage, type ReasoningEffort, type StreamChunk, type ThinkingLevel, type TokenUsage, type ToolChoiceMode, type ToolDefinition } from "./types.js";
 import type { OAuthCredentials } from "./oauth/types.js";
-import { listBuiltinModels } from "./model-catalog.js";
+import { getBuiltinModel, listBuiltinModels } from "./model-catalog.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
 import { chatGptFetch, type ChatGptFetch } from "./network/chatgpt-transport.js";
 import {
@@ -16,7 +16,10 @@ export interface CodexModelDescriptor {
   id: string;
   displayName?: string;
   contextWindow?: number;
+  useResponsesLite?: boolean;
   reasoningLevels?: ReasoningEffort[];
+  defaultReasoningLevel?: ReasoningEffort;
+  priority?: number;
   visibility?: string;
   minimalClientVersion?: string;
   /** Server-declared per-tool-output token cap (truncation_policy.limit when mode=tokens). */
@@ -114,6 +117,7 @@ export function createOpenAICodexProvider(options: {
       chatOptions.model,
       chatOptions.thinkingLevel ?? options.thinkingLevel ?? "off",
     );
+    const useResponsesLite = getBuiltinModel("openai-codex", chatOptions.model)?.useResponsesLite === true;
     const body = JSON.stringify(
       buildRequestBody(messages, {
         model: chatOptions.model,
@@ -123,6 +127,7 @@ export function createOpenAICodexProvider(options: {
         sessionId,
         providerId: options.providerId,
         promptCacheKey: options.promptCacheKey,
+        useResponsesLite,
       })
     );
 
@@ -134,6 +139,7 @@ export function createOpenAICodexProvider(options: {
         sessionId,
         signal: chatOptions.abortSignal,
         body,
+        useResponsesLite,
       }));
     };
 
@@ -373,9 +379,27 @@ export async function fetchOpenAICodexModels(options: {
   accessToken: string;
   fetch?: ChatGptFetch;
 }): Promise<CodexModelDescriptor[]> {
+  const result = await fetchOpenAICodexModelCatalog(options);
+  return result.descriptors;
+}
+
+export interface OpenAICodexModelCatalogResult {
+  descriptors: CodexModelDescriptor[];
+  status: "success" | "unavailable";
+}
+
+/**
+ * Fetches the account-scoped Codex catalog while preserving the distinction
+ * between an authoritative empty catalog and discovery being unavailable.
+ */
+export async function fetchOpenAICodexModelCatalog(options: {
+  baseURL: string;
+  accessToken: string;
+  fetch?: ChatGptFetch;
+}): Promise<OpenAICodexModelCatalogResult> {
   const accountId = extractChatGptAccountId(options.accessToken);
   if (!accountId) {
-    return [];
+    return { descriptors: [], status: "unavailable" };
   }
   const fetchImpl = options.fetch ?? chatGptFetch;
 
@@ -392,14 +416,18 @@ export async function fetchOpenAICodexModels(options: {
 
     if (!response?.ok) continue;
 
-    const payload = await response.json().catch(() => undefined);
-    const descriptors = extractCodexModelDescriptors(payload);
-    if (descriptors.length > 0) {
-      return sortCodexModelDescriptors(descriptors);
-    }
+    const parsed = await response.json()
+      .then((payload) => ({ ok: true as const, payload }))
+      .catch(() => ({ ok: false as const }));
+    if (!parsed.ok) continue;
+
+    return {
+      descriptors: sortCodexModelDescriptors(extractCodexModelDescriptors(parsed.payload)),
+      status: "success",
+    };
   }
 
-  return [];
+  return { descriptors: [], status: "unavailable" };
 }
 
 function buildRequestBody(
@@ -412,6 +440,7 @@ function buildRequestBody(
     sessionId?: string;
     providerId?: string;
     promptCacheKey?: string;
+    useResponsesLite?: boolean;
   }
 ) {
   const instructions = messages
@@ -420,11 +449,31 @@ function buildRequestBody(
     .join("\n\n");
 
   const input = messages.flatMap((message) => convertMessage(message));
+  const functionTools = (options.tools ?? []).map((tool) => ({
+    type: "function",
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.parameters,
+  }));
+  const liteFunctionTools = options.toolChoice === "none" ? [] : functionTools;
+  if (options.useResponsesLite) {
+    input.unshift({
+      type: "additional_tools",
+      role: "developer",
+      tools: liteFunctionTools,
+    });
+    if (instructions) {
+      input.splice(1, 0, {
+        role: "developer",
+        content: [{ type: "input_text", text: instructions }],
+      });
+    }
+  }
   const body: Record<string, unknown> = {
     model: options.model,
     store: false,
     stream: true,
-    instructions: instructions || undefined,
+    instructions: options.useResponsesLite ? "" : instructions || undefined,
     input,
     include: ["reasoning.encrypted_content"],
     prompt_cache_key: buildOpenAICodexPromptCacheKey({
@@ -432,18 +481,32 @@ function buildRequestBody(
       providerId: options.providerId,
       model: options.model,
     }),
-    tool_choice: options.tools && options.tools.length > 0 ? options.toolChoice ?? "auto" : undefined,
-    parallel_tool_calls: true,
+    tool_choice: options.useResponsesLite
+      ? "auto"
+      : options.tools && options.tools.length > 0 ? options.toolChoice ?? "auto" : undefined,
+    parallel_tool_calls: options.useResponsesLite ? false : true,
     text: { verbosity: "medium" },
+    client_metadata: options.useResponsesLite ? {
+      "x-codex-installation-id": options.sessionId,
+      session_id: options.sessionId,
+      thread_id: options.sessionId,
+      "x-codex-window-id": options.sessionId,
+    } : undefined,
   };
 
-  if (options.tools && options.tools.length > 0) {
-    body.tools = options.tools.map((tool) => ({
-      type: "function",
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters,
-    }));
+  if (!options.useResponsesLite && functionTools.length > 0) {
+    body.tools = functionTools;
+  }
+
+  if (options.reasoningEffort && options.reasoningEffort !== "off") {
+    // Codex exposes Ultra as a client-level preset: it keeps the session/UI
+    // state at Ultra (which enables proactive delegation) but sends Max over
+    // the Responses wire protocol. Match the official Codex client mapping.
+    const wireEffort = options.reasoningEffort === "ultra" ? "max" : options.reasoningEffort;
+    body.reasoning = {
+      effort: wireEffort,
+      ...(options.useResponsesLite ? { context: "all_turns" } : {}),
+    };
   }
 
   return body;
@@ -554,10 +617,16 @@ function buildCodexRequestInit(options: {
   sessionId: string;
   signal?: AbortSignal;
   body: string;
+  useResponsesLite?: boolean;
 }): RequestInit {
   const init: RequestInit & { verbose?: boolean } = {
     method: "POST",
-    headers: buildSseHeaders(options.accessToken, options.accountId, options.sessionId),
+    headers: buildSseHeaders(
+      options.accessToken,
+      options.accountId,
+      options.sessionId,
+      options.useResponsesLite,
+    ),
     signal: options.signal,
     body: options.body,
     keepalive: false,
@@ -640,18 +709,32 @@ function buildBaseHeaders(
   const headers = new Headers(extraHeaders);
   headers.set("Authorization", `Bearer ${accessToken}`);
   headers.set("ChatGPT-Account-Id", accountId);
-  headers.set("originator", "bubble");
-  headers.set("User-Agent", "bubble");
+  // The ChatGPT Codex backend gates newly listed models on the Codex client
+  // identity as well as client_version. Keep the official originator token and
+  // identify Bubble explicitly as a User-Agent suffix.
+  headers.set("originator", "codex_cli_rs");
+  headers.set("User-Agent", `codex_cli_rs/${CODEX_CLIENT_VERSION} (bubble)`);
   headers.set("session_id", sessionId);
   return headers;
 }
 
-function buildSseHeaders(accessToken: string, accountId: string, sessionId: string): Headers {
+function buildSseHeaders(
+  accessToken: string,
+  accountId: string,
+  sessionId: string,
+  useResponsesLite = false,
+): Headers {
   const headers = buildBaseHeaders(accessToken, accountId, sessionId, {
     accept: "text/event-stream",
     "content-type": "application/json",
   });
   headers.set("OpenAI-Beta", OPENAI_BETA_RESPONSES);
+  if (useResponsesLite) {
+    headers.set("x-openai-internal-codex-responses-lite", "true");
+    headers.set("thread_id", sessionId);
+    headers.set("x-codex-window-id", sessionId);
+    headers.set("x-codex-installation-id", sessionId);
+  }
   return headers;
 }
 
@@ -666,10 +749,6 @@ function resolveRelativeUrl(baseURL: string, path: string): string {
   const normalized = (baseURL.trim() || DEFAULT_CODEX_BASE_URL).replace(/\/+$/, "");
   return `${normalized}${path}`;
 }
-
-const REASONING_EFFORTS: readonly ReasoningEffort[] = [
-  "off", "minimal", "low", "medium", "high", "xhigh", "max",
-];
 
 function extractCodexModelDescriptors(payload: unknown): CodexModelDescriptor[] {
   const out: CodexModelDescriptor[] = [];
@@ -695,22 +774,40 @@ function extractCodexModelDescriptors(payload: unknown): CodexModelDescriptor[] 
     const ctx = record.context_window;
     if (typeof ctx === "number" && ctx > 0) desc.contextWindow = ctx;
 
+    const useResponsesLite = record.use_responses_lite;
+    if (typeof useResponsesLite === "boolean") desc.useResponsesLite = useResponsesLite;
+
     const visibility = record.visibility;
     if (typeof visibility === "string") desc.visibility = visibility;
 
     const minVer = record.minimal_client_version;
     if (typeof minVer === "string") desc.minimalClientVersion = minVer;
 
+    const priority = record.priority;
+    if (typeof priority === "number" && Number.isFinite(priority)) desc.priority = priority;
+
     const levels = record.supported_reasoning_levels;
     if (Array.isArray(levels)) {
-      const efforts = new Set<ReasoningEffort>(["off"]);
+      const efforts: ReasoningEffort[] = [];
       for (const level of levels) {
         const effort = (level as Record<string, unknown> | null | undefined)?.effort;
-        if (typeof effort === "string" && (REASONING_EFFORTS as readonly string[]).includes(effort)) {
-          efforts.add(effort as ReasoningEffort);
+        if (
+          typeof effort === "string"
+          && (THINKING_LEVELS as readonly string[]).includes(effort)
+          && !efforts.includes(effort as ReasoningEffort)
+        ) {
+          efforts.push(effort as ReasoningEffort);
         }
       }
-      desc.reasoningLevels = REASONING_EFFORTS.filter((e) => efforts.has(e));
+      desc.reasoningLevels = efforts;
+
+      const defaultLevel = record.default_reasoning_level;
+      if (
+        typeof defaultLevel === "string"
+        && efforts.includes(defaultLevel as ReasoningEffort)
+      ) {
+        desc.defaultReasoningLevel = defaultLevel as ReasoningEffort;
+      }
     }
 
     const truncPolicy = record.truncation_policy as Record<string, unknown> | undefined;
@@ -764,6 +861,9 @@ export function sortCodexModelDescriptors(descriptors: CodexModelDescriptor[]): 
     const leftFamily = parseCodexFamilyRank(left.id);
     const rightFamily = parseCodexFamilyRank(right.id);
     if (leftFamily !== rightFamily) return rightFamily - leftFamily;
+    const leftPriority = left.priority ?? Number.MAX_SAFE_INTEGER;
+    const rightPriority = right.priority ?? Number.MAX_SAFE_INTEGER;
+    if (leftPriority !== rightPriority) return leftPriority - rightPriority;
     const leftRank = preferred.get(left.id) ?? Number.MAX_SAFE_INTEGER;
     const rightRank = preferred.get(right.id) ?? Number.MAX_SAFE_INTEGER;
     if (leftRank !== rightRank) return leftRank - rightRank;

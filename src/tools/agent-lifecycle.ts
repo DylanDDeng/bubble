@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import type { AgentProfile, AgentProfileApproval, AgentProfileScope } from "../agent/profiles.js";
 import { discoverAgentProfiles, findAgentProfile } from "../agent/profiles.js";
 import { parseThinkingLevel } from "../agent/categories.js";
-import type { ThinkingLevel } from "../types.js";
+import { THINKING_LEVELS, type ThinkingLevel } from "../types.js";
 import type { SubagentThreadSnapshot } from "../agent/subagent-control.js";
 import { workflowMemberWarning } from "../agent/workflow/control.js";
 import { precompileWorkflowScript } from "../agent/workflow/runtime.js";
@@ -138,7 +138,7 @@ export function createSpawnAgentTool(
         agent: { type: "string", description: "Alias for agent_type." },
         category: { type: "string", description: "Optional semantic category for model/thinking routing, such as quick, deep, explore, review, frontend, or writing." },
         model: { type: "string", description: "Optional per-call model for this child, overriding category and profile. Bare name (e.g. claude-haiku-4-5) uses the parent provider; provider:model (e.g. anthropic:claude-opus-4-1) selects cross-provider." },
-        effort: { type: "string", enum: ["off", "minimal", "low", "medium", "high", "xhigh", "max"], description: "Optional per-call thinking level for this child, overriding category and profile." },
+        effort: { type: "string", enum: [...THINKING_LEVELS], description: "Optional per-call thinking level for this child, overriding category and profile." },
         message: { type: "string", description: "Initial task for the subagent." },
         task: { type: "string", description: "Alias for message." },
         fork_context: { type: "boolean", description: "When true, copy recent parent conversation into the child thread." },
@@ -783,7 +783,7 @@ function parseEffortArg(value: unknown): { value: ThinkingLevel | undefined } | 
   if (!parsed) {
     return {
       error: {
-        content: `Error: effort must be one of off, minimal, low, medium, high, xhigh, max (got ${JSON.stringify(value)}).`,
+        content: `Error: effort must be one of ${THINKING_LEVELS.join(", ")} (got ${JSON.stringify(value)}).`,
         isError: true,
       },
     };

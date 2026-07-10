@@ -34,7 +34,7 @@ describe("agent lifecycle tools", () => {
   it("spawn_agent defaults to the default role and returns the random nickname", async () => {
     const tool = createSpawnAgentTool();
     const result = await tool.execute(
-      { message: "inspect" },
+      { message: "inspect", effort: "ultra" },
       {
         cwd: "/tmp",
         toolCall: { id: "spawn_1", name: "spawn_agent" },
@@ -43,6 +43,7 @@ describe("agent lifecycle tools", () => {
           spawnSubAgent: async (_input, _cwd, options) => {
             expect(options.profile.name).toBe("default");
             expect(options.parentToolCallId).toBe("spawn_1");
+            expect(options.effort).toBe("ultra");
             return snapshot({ status: "running" });
           },
         },
@@ -57,6 +58,7 @@ describe("agent lifecycle tools", () => {
     expect(result.metadata?.subagents).toEqual([
       expect.objectContaining({ nickname: "Ada", agentName: "explorer" }),
     ]);
+    expect((tool.parameters.properties as any).effort.enum).toContain("ultra");
   });
 
   it("passes category into spawned subagents and exposes it in metadata", async () => {

@@ -17,4 +17,8 @@ describe("parseArgs", () => {
     expect(args.resume).toBe(true);
     expect(args.sessionName).toBe("named.jsonl");
   });
+
+  it("parses ultra as a canonical reasoning effort", () => {
+    expect(parseArgs(["--reasoning-effort", "ultra"]).thinkingLevel).toBe("ultra");
+  });
 });

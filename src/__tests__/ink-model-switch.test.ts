@@ -134,6 +134,45 @@ describe("Ink model switching", () => {
     expect(createProvider).toHaveBeenCalledWith("deepseek", "token", "https://api.deepseek.com");
   });
 
+  it("uses the target model default for unsupported inherited effort", async () => {
+    const a = agent({ thinking: "off" });
+    const setThinkingLevel = vi.fn();
+
+    const nextLevel = await switchAgentModel({
+      model: "openai:gpt-5.6-terra",
+      agent: a,
+      registry: registry(),
+      createProvider: vi.fn(() => fakeProvider),
+      workingDir: "/repo",
+      systemPromptOptions: {},
+      rememberModel: vi.fn(),
+      setThinkingLevel,
+    });
+
+    expect(nextLevel).toBe("medium");
+    expect(a.thinking).toBe("medium");
+    expect(setThinkingLevel).toHaveBeenCalledWith("medium");
+  });
+
+  it("clamps an explicit ultra choice downward when the target lacks ultra", async () => {
+    const a = agent({ thinking: "off" });
+
+    const nextLevel = await switchAgentModel({
+      model: "openai:gpt-5.6-luna",
+      thinkingLevel: "ultra",
+      agent: a,
+      registry: registry(),
+      createProvider: vi.fn(() => fakeProvider),
+      workingDir: "/repo",
+      systemPromptOptions: {},
+      rememberModel: vi.fn(),
+      setThinkingLevel: vi.fn(),
+    });
+
+    expect(nextLevel).toBe("max");
+    expect(a.thinking).toBe("max");
+  });
+
   it("does not mutate the agent when provider preparation fails", async () => {
     const a = agent({ thinking: "high" as ThinkingLevel });
     const createProvider = vi.fn(() => fakeProvider);

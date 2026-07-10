@@ -14,6 +14,7 @@ import { formatRelativeTime } from "../tui/recent-activity.js";
 import { HOOK_EVENT_NAMES, isHookEventName } from "../hooks/index.js";
 import type { ThinkingLevel } from "../types.js";
 import { isThinkingLevel } from "../variant/thinking-level.js";
+import { normalizeInheritedThinkingLevel } from "../variant/variant-resolver.js";
 import { collectUsageStatsBundle, formatStatsText } from "../stats/usage.js";
 import {
   buildMemoryPrompt,
@@ -190,10 +191,9 @@ function switchToProviderModel(
     return false;
   }
 
-  ctx.agent.thinking = normalizeThinkingLevel(
-    thinkingLevel ?? ctx.agent.thinking,
-    getAvailableThinkingLevels(providerId, modelId),
-  );
+  ctx.agent.thinking = thinkingLevel !== undefined
+    ? normalizeThinkingLevel(thinkingLevel, getAvailableThinkingLevels(providerId, modelId))
+    : normalizeInheritedThinkingLevel(providerId, modelId, ctx.agent.thinking);
   ctx.agent.setProvider(ctx.createProvider(providerId, provider.apiKey, provider.baseURL));
   ctx.agent.providerId = providerId;
   ctx.agent.model = encodeModel(providerId, modelId);

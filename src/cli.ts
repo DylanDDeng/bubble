@@ -2,7 +2,7 @@
  * CLI argument parsing.
  */
 
-import type { PermissionMode, ThinkingLevel } from "./types.js";
+import { THINKING_LEVELS, type PermissionMode, type ThinkingLevel } from "./types.js";
 import { isThinkingLevel } from "./variant/thinking-level.js";
 
 export type CliCommand = "default" | "serve" | "update";
@@ -133,7 +133,7 @@ Options (default):
   -r, --resume             Resume a previous session (latest by default)
   --session <name>         Session name to create or resume
   --reasoning              Enable reasoning mode at medium effort
-  --reasoning-effort <l>   Set reasoning effort: off|minimal|low|medium|high|xhigh|max
+  --reasoning-effort <l>   Set reasoning effort: ${THINKING_LEVELS.join("|")}
   --plan                   Start in plan mode (read-only investigation; propose before executing)
   --dangerously-skip-permissions
                            Enable bypass mode (auto-approve EVERY tool; disables all safety prompts)

@@ -18,6 +18,8 @@ export interface BuiltinModelDefinition {
   reasoningLevels: ReasoningEffort[];
   defaultReasoningLevel?: ReasoningEffort;
   contextWindow?: number;
+  /** Routes this model through the Codex Responses Lite backend when true. */
+  useResponsesLite?: boolean;
   /**
    * Server-declared cap on per-tool-output tokens. When set, the agent must
    * truncate each tool result to this token budget before adding it to history
@@ -56,6 +58,8 @@ export const BUILTIN_PROVIDERS: BuiltinProviderDefinition[] = [
 ];
 
 const ALL_OPENAI_LEVELS: ReasoningEffort[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+const GPT56_LEVELS: ReasoningEffort[] = ["low", "medium", "high", "xhigh", "max", "ultra"];
+const GPT56_LUNA_LEVELS: ReasoningEffort[] = ["low", "medium", "high", "xhigh", "max"];
 const GPT51_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high"];
 const GPT51_CODEX_MAX_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high", "xhigh"];
 const GPT51_CODEX_MINI_LEVELS: ReasoningEffort[] = ["off", "medium", "high"];
@@ -92,6 +96,9 @@ const GEMINI_25_PRO_LEVELS: ReasoningEffort[] = ["low", "medium", "high"];
 const GEMINI_25_FLASH_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high"];
 
 export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
+  { id: "gpt-5.6-sol", name: "GPT-5.6-Sol", providerId: "openai-codex", reasoningLevels: GPT56_LEVELS, defaultReasoningLevel: "low", contextWindow: 372000, useResponsesLite: true, toolOutputTokenLimit: 10000 },
+  { id: "gpt-5.6-terra", name: "GPT-5.6-Terra", providerId: "openai-codex", reasoningLevels: GPT56_LEVELS, defaultReasoningLevel: "medium", contextWindow: 372000, useResponsesLite: true, toolOutputTokenLimit: 10000 },
+  { id: "gpt-5.6-luna", name: "GPT-5.6-Luna", providerId: "openai-codex", reasoningLevels: GPT56_LUNA_LEVELS, defaultReasoningLevel: "medium", contextWindow: 372000, useResponsesLite: true, toolOutputTokenLimit: 10000 },
   { id: "gpt-5.5", name: "gpt-5.5", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000, toolOutputTokenLimit: 10000 },
   { id: "gpt-5.4", name: "gpt-5.4", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000 },
   { id: "gpt-5.4-mini", name: "gpt-5.4-mini", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000 },
@@ -191,6 +198,28 @@ function overlayKey(providerId: string, modelId: string): string {
 
 export function registerDynamicModelMetadata(model: BuiltinModelDefinition): void {
   dynamicOverlay.set(overlayKey(model.providerId, model.id), model);
+}
+
+export function clearDynamicModelMetadata(providerId: string): void {
+  const providerIds = providerId === "openai"
+    ? ["openai", "openai-codex"]
+    : [providerId];
+  for (const key of dynamicOverlay.keys()) {
+    if (providerIds.some((id) => key.startsWith(`${id}:`))) dynamicOverlay.delete(key);
+  }
+}
+
+export function replaceDynamicModelMetadata(
+  providerId: string,
+  models: readonly BuiltinModelDefinition[],
+): void {
+  clearDynamicModelMetadata(providerId);
+  const acceptedProviderIds = providerId === "openai"
+    ? new Set(["openai", "openai-codex"])
+    : new Set([providerId]);
+  for (const model of models) {
+    if (acceptedProviderIds.has(model.providerId)) registerDynamicModelMetadata(model);
+  }
 }
 
 export function getBuiltinModel(providerId: string, modelId: string): BuiltinModelDefinition | undefined {

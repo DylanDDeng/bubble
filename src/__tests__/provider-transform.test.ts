@@ -2,10 +2,34 @@ import { describe, expect, it } from "vitest";
 import { resolveProviderRequestConfig } from "../provider-transform.js";
 
 describe("provider transform", () => {
-  it("does not emit explicit reasoning for ChatGPT OAuth codex", () => {
-    const config = resolveProviderRequestConfig("openai-codex", "gpt-5.4", "high");
-    expect(config.effectiveThinkingLevel).toBe("high");
-    expect(config.reasoningEffort).toBeUndefined();
+  it("emits only supported non-off reasoning effort for ChatGPT OAuth codex", () => {
+    const high = resolveProviderRequestConfig("openai-codex", "gpt-5.6-sol", "high");
+    const ultra = resolveProviderRequestConfig("openai-codex", "gpt-5.6-sol", "ultra");
+
+    expect(high.effectiveThinkingLevel).toBe("high");
+    expect(high.reasoningEffort).toBe("high");
+    expect(ultra.effectiveThinkingLevel).toBe("ultra");
+    expect(ultra.reasoningEffort).toBe("ultra");
+  });
+
+  it("defensively falls stale Codex state back to the model default", () => {
+    const sol = resolveProviderRequestConfig("openai-codex", "gpt-5.6-sol", "off");
+    const terra = resolveProviderRequestConfig("openai-codex", "gpt-5.6-terra", "minimal");
+    const luna = resolveProviderRequestConfig("openai-codex", "gpt-5.6-luna", "ultra");
+
+    expect(sol).toMatchObject({ effectiveThinkingLevel: "low", reasoningEffort: "low" });
+    expect(terra).toMatchObject({ effectiveThinkingLevel: "medium", reasoningEffort: "medium" });
+    expect(luna).toMatchObject({ effectiveThinkingLevel: "medium", reasoningEffort: "medium" });
+  });
+
+  it("omits Codex reasoning when model capabilities are unknown or effective effort is off", () => {
+    const unknown = resolveProviderRequestConfig("openai-codex", "gpt-future-unknown", "high");
+    const legacyOff = resolveProviderRequestConfig("openai-codex", "gpt-5.4", "off");
+
+    expect(unknown.effectiveThinkingLevel).toBe("off");
+    expect(unknown.reasoningEffort).toBeUndefined();
+    expect(legacyOff.effectiveThinkingLevel).toBe("off");
+    expect(legacyOff.reasoningEffort).toBeUndefined();
   });
 
   it("emits reasoning effort for openai-compatible providers", () => {

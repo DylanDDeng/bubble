@@ -1,6 +1,7 @@
 import type { ThinkingLevel } from "./types.js";
-import { getAvailableThinkingLevels, normalizeThinkingLevel } from "./variant/variant-resolver.js";
-export { getAvailableThinkingLevels, getDefaultThinkingLevel, isThinkingOnlyLevels, isThinkingOnlyModel, isThinkingToggleModel, normalizeThinkingLevel } from "./variant/variant-resolver.js";
+import { getBuiltinModel } from "./model-catalog.js";
+import { getAvailableThinkingLevels, normalizeInheritedThinkingLevel, normalizeThinkingLevel } from "./variant/variant-resolver.js";
+export { getAvailableThinkingLevels, getDefaultThinkingLevel, isThinkingOnlyLevels, isThinkingOnlyModel, isThinkingToggleModel, normalizeInheritedThinkingLevel, normalizeThinkingLevel } from "./variant/variant-resolver.js";
 
 export interface ProviderRequestConfig {
   effectiveThinkingLevel: ThinkingLevel;
@@ -35,10 +36,23 @@ export function resolveProviderRequestConfig(
   const supportedLevels = getAvailableThinkingLevels(providerId, modelId);
   const effectiveThinkingLevel = normalizeThinkingLevel(requestedLevel, supportedLevels);
 
-  // ChatGPT OAuth via openai-codex currently rejects explicit reasoning params for this account path.
-  // Keep the session/UI state, but don't send reasoning flags on this provider until the protocol is clearer.
   if (providerId === "openai-codex") {
-    return { effectiveThinkingLevel };
+    const model = getBuiltinModel(providerId, modelId);
+    if (!model || model.reasoningLevels.length === 0) {
+      return { effectiveThinkingLevel: "off" };
+    }
+
+    // Provider serialization is the final defensive boundary. Upstream model
+    // selection validates explicit choices, while inherited stale state falls
+    // back to the model's declared default here rather than leaking an invalid
+    // effort to the ChatGPT Responses endpoint.
+    const codexThinkingLevel = normalizeInheritedThinkingLevel(providerId, modelId, requestedLevel);
+    return {
+      effectiveThinkingLevel: codexThinkingLevel,
+      reasoningEffort: codexThinkingLevel !== "off" && model.reasoningLevels.includes(codexThinkingLevel)
+        ? codexThinkingLevel
+        : undefined,
+    };
   }
 
   if (isFireworksKimi(providerId, modelId)) {

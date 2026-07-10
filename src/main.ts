@@ -11,7 +11,7 @@ import { parseArgs, printHelp } from "./cli.js";
 import { effectiveThemeModeForTerminal, shouldProbeTerminalTheme, UserConfig } from "./config.js";
 import { createProviderInstance, createUnavailableProvider } from "./provider.js";
 import { resolveConfiguredModel } from "./model-selection.js";
-import { getDefaultThinkingLevel } from "./provider-transform.js";
+import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingLevel } from "./provider-transform.js";
 import { ProviderRegistry, displayModel, encodeModel, decodeModel } from "./provider-registry.js";
 import { SessionManager } from "./session.js";
 import { createSessionTitleUpdater, type SessionTitleUpdater } from "./session-title.js";
@@ -29,6 +29,7 @@ import { getLspService } from "./lsp/index.js";
 import { loadMcpConfig } from "./mcp/config.js";
 import { McpManager } from "./mcp/manager.js";
 import type { PermissionMode, Message, PlanDecision } from "./types.js";
+import { normalizeInheritedThinkingLevel } from "./variant/variant-resolver.js";
 import { QuestionController } from "./question/index.js";
 import {
   buildMemoryPrompt,
@@ -330,11 +331,20 @@ async function main() {
     activeProviderId = "";
   }
   const initialThinkingLevel = activeModel
-    ? (sessionThinkingLevel
-      ?? args.thinkingLevel
-      ?? configuredThinkingLevel
-      ?? getDefaultThinkingLevel(activeProviderId, effectiveModelId))
-    : (sessionThinkingLevel ?? args.thinkingLevel ?? configuredThinkingLevel ?? "off");
+    ? args.thinkingLevel !== undefined
+      ? normalizeThinkingLevel(
+          args.thinkingLevel,
+          getAvailableThinkingLevels(activeProviderId, effectiveModelId),
+        )
+      : sessionThinkingLevel !== undefined
+        ? normalizeInheritedThinkingLevel(activeProviderId, effectiveModelId, sessionThinkingLevel)
+        : configuredThinkingLevel !== undefined
+          ? normalizeThinkingLevel(
+              configuredThinkingLevel,
+              getAvailableThinkingLevels(activeProviderId, effectiveModelId),
+            )
+          : getDefaultThinkingLevel(activeProviderId, effectiveModelId)
+    : (args.thinkingLevel ?? sessionThinkingLevel ?? configuredThinkingLevel ?? "off");
   const restoredTodos = sessionManager?.getTodos() ?? [];
   const initialMode: PermissionMode = args.mode ?? "default";
   const skillSummaries = skillRegistry.summaries();

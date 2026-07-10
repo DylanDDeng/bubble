@@ -95,7 +95,7 @@ For full control — custom base URLs, self-hosted gateways, extra models, or pi
 
 ### Reasoning effort
 
-Models that support it expose a reasoning-effort control: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Set it with `/model <id> --reasoning-effort <level>` in the app, or at launch with `--reasoning` (medium) or `--reasoning-effort <level>`.
+Models that support it expose a reasoning-effort control: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`. Set it with `/model <id> --reasoning-effort <level>` in the app, or at launch with `--reasoning` (medium) or `--reasoning-effort <level>`.
 
 ## Permission modes
 
@@ -191,7 +191,7 @@ Options (default):
   -r, --resume             Resume a previous session (latest by default)
   --session <name>         Session name to create or resume
   --reasoning              Enable reasoning mode at medium effort
-  --reasoning-effort <l>   Set reasoning effort: off|minimal|low|medium|high|xhigh|max
+  --reasoning-effort <l>   Set reasoning effort: off|minimal|low|medium|high|xhigh|max|ultra
   --plan                   Start in plan mode (read-only investigation; propose before executing)
   --dangerously-skip-permissions
                            Enable bypass mode (auto-approve EVERY tool; disables all safety prompts)

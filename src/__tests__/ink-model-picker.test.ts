@@ -1,24 +1,34 @@
 import React from "react";
 import { renderToString } from "ink";
 import { describe, expect, it, vi } from "vitest";
-import type { ProviderProfile, ProviderRegistry } from "../provider-registry.js";
+import type { ModelInfo, ProviderProfile, ProviderRegistry } from "../provider-registry.js";
+import type { ThinkingLevel } from "../types.js";
 import {
+  buildMergedModelOptions,
   buildLocalModelOptions,
   clampPickerIndex,
   formatEffortPickerRow,
+  formatModelDiscoveryStatus,
   formatModelPickerRow,
   formatNoModelResultsRow,
   formatReasoningLevelsLabel,
   formatSkillPickerRow,
   isPrintablePickerInput,
+  isModelOptionSelectable,
   modelPickerBodyRows,
+  modelPickerRecentKey,
   ModelPicker,
+  moveModelSelection,
   padPickerRows,
   pickerWindowStart,
   preferredEffortIndex,
+  reconcileModelPickerPhase,
+  resolveSelectedModelId,
   resolvePickerKeyAction,
   shouldOpenEffortPicker,
   truncateVisual,
+  type ModelPickerOption,
+  type ModelProviderDiscoveryState,
 } from "../tui-ink/model-picker.js";
 
 describe("Ink model picker", () => {
@@ -47,7 +57,177 @@ describe("Ink model picker", () => {
     expect(shouldOpenEffortPicker(deepseek!)).toBe(true);
     expect(preferredEffortIndex(deepseek!, "xhigh")).toBe(0);
     expect(options.map((option) => option.id)).toContain("openai:gpt-5.4");
+    const sol = options.find((option) => option.id === "openai:gpt-5.6-sol");
+    expect(sol).toMatchObject({
+      reasoningLevels: ["low", "medium", "high", "xhigh", "max", "ultra"],
+      defaultReasoningLevel: "low",
+      contextWindow: 372000,
+      toolOutputTokenLimit: 10000,
+      available: true,
+    });
     expect(options.map((option) => option.id)).toContain("fireworks:accounts/fireworks/models/kimi-k2p6");
+  });
+
+  it("treats an authoritative provider result as the catalog while preserving pinned rows", () => {
+    const openai = provider({ id: "openai", name: "OpenAI", authType: "oauth" });
+    const localModels: ModelInfo[] = [
+      model("gpt-5.6-sol", ["low", "medium"], "low"),
+      model("gpt-5.6-terra", ["low", "medium"], "medium"),
+      model("gpt-5.6-luna", ["low", "medium"], "medium"),
+      model("gpt-retired", ["off"], "off"),
+    ];
+    const discoveries = new Map<string, ModelProviderDiscoveryState>([["openai", {
+      status: "complete",
+      source: "remote",
+      authoritative: true,
+      models: [
+        {
+          ...model("gpt-5.6-sol", ["low", "medium", "high"], "medium"),
+          name: "GPT-5.6-Sol remote",
+          contextWindow: 999000,
+          toolOutputTokenLimit: 12345,
+        },
+        model("gpt-5.6-terra", ["low", "medium", "high"], "medium"),
+      ],
+    }]]);
+
+    const options = buildMergedModelOptions({
+      providers: [openai],
+      localModelsByProvider: new Map([["openai", localModels]]),
+      discoveries,
+      current: "openai:gpt-5.6-sol",
+      recent: ["openai:gpt-5.6-sol", "openai:gpt-retired"],
+    });
+
+    expect(options.map((item) => item.id)).toEqual([
+      "openai:gpt-5.6-sol",
+      "openai:gpt-retired",
+      "openai:gpt-5.6-terra",
+    ]);
+    expect(options.filter((item) => item.id === "openai:gpt-5.6-sol")).toHaveLength(1);
+    expect(options[0]).toMatchObject({
+      label: "GPT-5.6-Sol remote",
+      group: "Recent",
+      reasoningLevels: ["low", "medium", "high"],
+      defaultReasoningLevel: "medium",
+      contextWindow: 999000,
+      toolOutputTokenLimit: 12345,
+      available: true,
+    });
+    expect(options[1]).toMatchObject({ group: "Recent", available: false, pending: false });
+    expect(options.map((item) => item.id)).not.toContain("openai:gpt-5.6-luna");
+  });
+
+  it("rebuilds provider sections in provider order, independent of completion order", () => {
+    const openai = provider({ id: "openai", name: "OpenAI", authType: "oauth" });
+    const deepseek = provider({ id: "deepseek", name: "DeepSeek" });
+    const discoveries = new Map<string, ModelProviderDiscoveryState>();
+    discoveries.set("deepseek", {
+      status: "complete",
+      source: "remote",
+      authoritative: true,
+      models: [{ ...model("deepseek-v4-pro", ["high", "max"], "high"), providerId: "deepseek" }],
+    });
+    discoveries.set("openai", {
+      status: "complete",
+      source: "remote",
+      authoritative: true,
+      models: [model("gpt-5.6-sol", ["low", "medium"], "low")],
+    });
+
+    const options = buildMergedModelOptions({
+      providers: [openai, deepseek],
+      localModelsByProvider: new Map(),
+      discoveries,
+      current: "",
+      recent: [],
+    });
+
+    expect(options.map((item) => item.id)).toEqual([
+      "openai:gpt-5.6-sol",
+      "deepseek:deepseek-v4-pro",
+    ]);
+  });
+
+  it("keeps unknown recent models pending without inventing off effort", () => {
+    const openai = provider({ id: "openai", name: "OpenAI", authType: "oauth" });
+    const options = buildMergedModelOptions({
+      providers: [openai],
+      localModelsByProvider: new Map([["openai", [model("gpt-5.6-sol", ["low"], "low")]]]),
+      discoveries: new Map(),
+      current: "openai:gpt-unknown",
+      recent: ["openai:gpt-unknown"],
+    });
+
+    expect(options[0]).toMatchObject({
+      id: "openai:gpt-unknown",
+      reasoningLevels: [],
+      available: false,
+      pending: true,
+    });
+    expect(formatModelPickerRow(options[0], { selected: false, current: true, width: 64 })).toContain("checking");
+    expect(isModelOptionSelectable(options[0])).toBe(false);
+    expect(resolveSelectedModelId(options, options[0].id)).toBe("openai:gpt-5.6-sol");
+  });
+
+  it("preserves selection by model id and skips unavailable rows", () => {
+    const options = [
+      option("openai:retired", ["off"], { available: false }),
+      option("openai:gpt-a", ["low"]),
+      option("openai:gpt-b", ["low"]),
+    ];
+
+    expect(resolveSelectedModelId(options, "openai:gpt-b")).toBe("openai:gpt-b");
+    expect(resolveSelectedModelId(options, "openai:retired")).toBe("openai:gpt-a");
+    expect(moveModelSelection(options, "openai:gpt-b", -1)).toBe("openai:gpt-a");
+    expect(moveModelSelection(options, "openai:gpt-a", 1)).toBe("openai:gpt-b");
+  });
+
+  it("uses the target model default when the inherited effort is unsupported", () => {
+    const sol = option("openai:gpt-5.6-sol", ["low", "medium", "high"], { defaultReasoningLevel: "low" });
+    const terra = option("openai:gpt-5.6-terra", ["low", "medium", "high"], { defaultReasoningLevel: "medium" });
+
+    expect(preferredEffortIndex(sol, "off")).toBe(0);
+    expect(preferredEffortIndex(terra, "off")).toBe(1);
+    expect(preferredEffortIndex(terra, "high")).toBe(2);
+  });
+
+  it("synchronizes an open effort phase with authoritative metadata or backs out", () => {
+    const stale = option("openai:gpt-5.6-sol", ["low", "medium"]);
+    const fresh = option("openai:gpt-5.6-sol", ["medium", "high"], { label: "GPT-5.6-Sol" });
+    const phase = { kind: "effort" as const, model: stale, selectedIndex: 1 };
+
+    expect(reconcileModelPickerPhase(phase, [fresh], "low")).toEqual({
+      kind: "effort",
+      model: fresh,
+      selectedIndex: 0,
+    });
+    expect(reconcileModelPickerPhase(phase, [{ ...fresh, available: false }], "low")).toEqual({ kind: "model" });
+  });
+
+  it("reports refresh and partial fallback states without hiding usable models", () => {
+    const providers = [
+      provider({ id: "openai", name: "OpenAI" }),
+      provider({ id: "deepseek", name: "DeepSeek" }),
+    ];
+    const pending = new Map<string, ModelProviderDiscoveryState>([["openai", {
+      status: "pending",
+      models: [],
+      authoritative: false,
+    }]]);
+    expect(formatModelDiscoveryStatus(providers, pending)).toEqual({
+      text: "Refreshing model catalog…",
+      hasError: false,
+    });
+
+    const failed = new Map<string, ModelProviderDiscoveryState>([
+      ["openai", { status: "complete", models: [], source: "fallback", authoritative: false, error: "offline" }],
+      ["deepseek", { status: "complete", models: [], source: "static", authoritative: true }],
+    ]);
+    expect(formatModelDiscoveryStatus(providers, failed)).toEqual({
+      text: "Showing fallback models for OpenAI · Ctrl+R retry",
+      hasError: true,
+    });
   });
 
   it("normalizes raw arrow sequences for picker navigation", () => {
@@ -86,9 +266,18 @@ describe("Ink model picker", () => {
 
   it("keeps model picker body height stable across terminal sizes", () => {
     expect(modelPickerBodyRows(24)).toBe(10);
-    expect(modelPickerBodyRows(20)).toBe(7);
-    expect(modelPickerBodyRows(16)).toBe(3);
+    expect(modelPickerBodyRows(20)).toBe(6);
+    expect(modelPickerBodyRows(16)).toBe(2);
     expect(modelPickerBodyRows(8)).toBe(1);
+  });
+
+  it("keys recent dependencies by content instead of array identity", () => {
+    expect(modelPickerRecentKey(["openai:gpt-a", "openai:gpt-b"]))
+      .toBe(modelPickerRecentKey(["openai:gpt-a", "openai:gpt-b"]));
+    expect(modelPickerRecentKey(["openai:gpt-a"]))
+      .not.toBe(modelPickerRecentKey(["openai:gpt-b"]));
+    expect(modelPickerRecentKey(["a", "b", "c", "d", "e", "ignored"]))
+      .toBe(modelPickerRecentKey(["a", "b", "c", "d", "e", "different"]));
   });
 
   it("clamps picker indexes without producing negative empty-list selections", () => {
@@ -202,6 +391,37 @@ function provider(input: Partial<ProviderProfile> & Pick<ProviderProfile, "id" |
     apiKey: "sk-test",
     enabled: true,
     ...input,
+  };
+}
+
+function model(
+  id: string,
+  reasoningLevels: ThinkingLevel[],
+  defaultReasoningLevel?: ThinkingLevel,
+): ModelInfo {
+  return {
+    id,
+    name: id,
+    providerId: "openai",
+    reasoningLevels,
+    defaultReasoningLevel,
+  };
+}
+
+function option(
+  id: string,
+  reasoningLevels: ThinkingLevel[],
+  overrides: Partial<ModelPickerOption> = {},
+): ModelPickerOption {
+  return {
+    id,
+    label: id,
+    group: "OpenAI",
+    providerBadge: "OpenAI",
+    reasoningLevels,
+    available: true,
+    pending: false,
+    ...overrides,
   };
 }
 

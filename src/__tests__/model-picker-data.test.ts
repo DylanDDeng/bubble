@@ -26,7 +26,7 @@ describe("model picker data", () => {
     const models = localModelsForProvider(registryStub(), openaiOAuthProvider);
 
     expect(models[0]).toMatchObject({
-      id: "gpt-5.5",
+      id: "gpt-5.6-sol",
       providerId: "openai",
     });
   });
@@ -53,7 +53,7 @@ describe("model picker data", () => {
     }));
 
     expect(groups[0]?.models[0]).toMatchObject({
-      id: "gpt-5.5",
+      id: "gpt-5.6-sol",
       providerId: "openai",
     });
   });

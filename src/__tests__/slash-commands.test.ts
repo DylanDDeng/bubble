@@ -207,6 +207,61 @@ describe("slash commands", () => {
     }
   });
 
+  it("/model distinguishes inherited defaults from explicit downward clamping", async () => {
+    const originalBubbleHome = process.env.BUBBLE_HOME;
+    const root = join(tmpdir(), `bubble-model-source-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    mkdirSync(root, { recursive: true });
+    process.env.BUBBLE_HOME = root;
+
+    try {
+      const ctx = createContext({
+        agent: {
+          model: "openai:gpt-4o",
+          providerId: "openai",
+          thinking: "off",
+          setSystemPrompt: vi.fn(),
+          setProvider: vi.fn(),
+        } as any,
+        createProvider: vi.fn(() => ({ streamChat: vi.fn(), complete: vi.fn() })) as any,
+        registry: {
+          getDefault: () => ({
+            id: "openai",
+            name: "OpenAI",
+            baseURL: "https://chatgpt.com/backend-api",
+            apiKey: "token",
+            enabled: true,
+            authType: "oauth",
+          }),
+          getConfigured: () => [{
+            id: "openai",
+            name: "OpenAI",
+            baseURL: "https://chatgpt.com/backend-api",
+            apiKey: "token",
+            enabled: true,
+            authType: "oauth",
+          }],
+          getModelConfig: () => ({ hasProvider: () => false }),
+          prepareProvider: vi.fn(),
+        } as any,
+      });
+
+      let result = await slashRegistry.execute("/model openai:gpt-5.6-terra", ctx);
+      expect(result.result).toBe("Model switched to GPT-5.6-Terra.");
+      expect(ctx.agent.thinking).toBe("medium");
+
+      result = await slashRegistry.execute("/model openai:gpt-5.6-luna --reasoning-effort ultra", ctx);
+      expect(result.result).toBe("Model switched to GPT-5.6-Luna (max).");
+      expect(ctx.agent.thinking).toBe("max");
+
+      const saved = JSON.parse(readFileSync(join(root, "config.json"), "utf-8"));
+      expect(saved.defaultModel).toBe("openai:gpt-5.6-luna");
+      expect(saved.defaultThinkingLevel).toBe("max");
+    } finally {
+      if (originalBubbleHome === undefined) delete process.env.BUBBLE_HOME;
+      else process.env.BUBBLE_HOME = originalBubbleHome;
+    }
+  });
+
   it("/model hides default thinking level in the switch confirmation", async () => {
     const originalBubbleHome = process.env.BUBBLE_HOME;
     const root = join(tmpdir(), `bubble-model-label-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);

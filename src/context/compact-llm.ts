@@ -9,12 +9,12 @@
 
 import { compactMessages as compactMessagesHeuristic } from "./compact.js";
 import type { CompactOptions, CompactResult } from "./compact.js";
-import type { Message, Provider, ProviderMessage, ToolCall } from "../types.js";
+import type { Message, Provider, ProviderMessage, ThinkingLevel, ToolCall } from "../types.js";
 
 export interface LLMCompactOptions extends CompactOptions {
   provider: Provider;
   model: string;
-  thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  thinkingLevel?: ThinkingLevel;
 }
 
 export const COMPACT_SYSTEM_PROMPT = `You are a conversation summarizer. Your job is to produce a structured

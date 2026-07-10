@@ -31,6 +31,8 @@ import {
 } from "./hooks/index.js";
 import { createDefaultHooks } from "./orchestrator/default-hooks.js";
 import { mergeAgentCategories, parseThinkingLevel, resolveModelRoute, resolveSubagentRoute, type AgentCategoriesConfig, type ResolvedSubagentRoute } from "./agent/categories.js";
+import { getBuiltinModel } from "./model-catalog.js";
+import { getAvailableThinkingLevels, normalizeInheritedThinkingLevel, normalizeThinkingLevel } from "./variant/variant-resolver.js";
 import { appendOutputSchemaInstructions, buildSchemaCorrectionPrompt, validateStructuredSummary } from "./agent/structured-output.js";
 import { runWorkflow, WorkflowConcurrencyGate, type AgentDispatchResult, type WorkflowAgentSpec } from "./agent/workflow/runtime.js";
 import { buildWorkflowDeliveryNotice, type WorkflowRunRecord, type WorkflowRunSnapshot } from "./agent/workflow/control.js";
@@ -852,6 +854,18 @@ export class Agent {
               break;
 
             case "tool_call":
+              // `toolChoice: "none"` is a governance boundary, not merely a
+              // provider hint. Ignore any provider-side violation so a forced
+              // text-only turn can never reach the tool execution path.
+              if (textOnly) {
+                traceEvent("text_only_tool_call_ignored", {
+                  id: chunk.id,
+                  name: chunk.name,
+                  isStart: chunk.isStart,
+                  isEnd: chunk.isEnd,
+                }, traceContext);
+                break;
+              }
               if (
                 discoveryBarrier?.isEnabled()
                 && (bufferedStreamingToolCallIds.has(chunk.id) || discoveryBarrier.shouldBufferStreamingToolCall(chunk.name))
@@ -2297,8 +2311,31 @@ export class Agent {
         route = { ...route, providerId: model.providerId, model: model.model, inherited: false };
       }
     }
+    const supportedLevels = getAvailableThinkingLevels(route.providerId, route.model);
+    const modelMetadata = getBuiltinModel(route.providerId, route.model);
+    const hasTrustedEffortMetadata = !!modelMetadata
+      && modelMetadata.reasoningLevels.some((level) => level !== "off");
     if (override?.effort) {
-      route = { ...route, thinkingLevel: override.effort, inherited: false };
+      // A call-site effort is explicit user/model intent: preserve the existing
+      // value for legacy/unknown models, and downward-clamp only when the
+      // catalog declares real effort capabilities (for example Luna ultra -> max).
+      route = {
+        ...route,
+        thinkingLevel: hasTrustedEffortMetadata
+          ? normalizeThinkingLevel(override.effort, supportedLevels)
+          : override.effort,
+        inherited: false,
+      };
+    } else if (hasTrustedEffortMetadata) {
+      const categoryThinkingLevel = route.category
+        ? mergeAgentCategories(this.agentCategories)[route.category]?.thinkingLevel
+        : undefined;
+      route = {
+        ...route,
+        thinkingLevel: categoryThinkingLevel
+          ? normalizeThinkingLevel(route.thinkingLevel, supportedLevels)
+          : normalizeInheritedThinkingLevel(route.providerId, route.model, route.thinkingLevel),
+      };
     }
     return route;
   }
@@ -3058,9 +3095,6 @@ function isSubagentLifecycleTool(name: string): boolean {
     || name === "agent_team"
     || name === "agent_batch";
 }
-
-
-
 
 
 

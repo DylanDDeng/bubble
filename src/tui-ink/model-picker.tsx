@@ -1,8 +1,16 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Box, Text, useInput, usePaste, useStdout } from "ink";
 import { isKeyReleaseEvent } from "./key-events.js";
 import { useTheme } from "./theme.js";
-import { ProviderRegistry, encodeModel, decodeModel, displayModel, isUserVisibleProvider, type ModelInfo } from "../provider-registry.js";
+import {
+  ProviderRegistry,
+  encodeModel,
+  decodeModel,
+  displayModel,
+  isUserVisibleProvider,
+  type ModelDiscoverySource,
+  type ModelInfo,
+} from "../provider-registry.js";
 import { listBuiltinModels } from "../model-catalog.js";
 import { padVisual, truncateVisual } from "../text-display.js";
 import { hasTerminalMouseSequence } from "./terminal-mouse.js";
@@ -17,11 +25,24 @@ export interface ModelPickerOption {
   group: string;
   providerBadge: string;
   reasoningLevels: ThinkingLevel[];
+  defaultReasoningLevel?: ThinkingLevel;
+  contextWindow?: number;
+  toolOutputTokenLimit?: number;
+  available: boolean;
+  pending: boolean;
 }
 
-type ModelPickerPhase =
+export type ModelPickerPhase =
   | { kind: "model" }
   | { kind: "effort"; model: ModelPickerOption; selectedIndex: number };
+
+export interface ModelProviderDiscoveryState {
+  status: "pending" | "complete";
+  models: ModelInfo[];
+  source?: ModelDiscoverySource;
+  authoritative: boolean;
+  error?: string;
+}
 
 export type PickerKeyAction = "up" | "down" | "enter" | "escape" | "backspace" | "delete";
 
@@ -75,7 +96,7 @@ export function formatSkillPickerRow(
 }
 
 export const MODEL_PICKER_MAX_BODY_ROWS = 10;
-export const MODEL_PICKER_CHROME_ROWS = 13;
+export const MODEL_PICKER_CHROME_ROWS = 14;
 
 export function modelPickerBodyRows(termHeight: number): number {
   const rows = Number.isFinite(termHeight) ? Math.floor(termHeight) : 24;
@@ -104,27 +125,36 @@ export function padPickerRows(rows: string[], bodyRows: number, width: number): 
   return padded;
 }
 
+export function modelPickerRecentKey(recent: readonly string[]): string {
+  return recent.slice(0, 5).join("\u0000");
+}
+
 function isThinkingToggleOption(option: Pick<ModelPickerOption, "id" | "providerBadge">): boolean {
   const decoded = decodeModel(option.id);
   return isThinkingToggleModel(decoded.providerId || option.providerBadge, decoded.modelId);
 }
 
 export function formatReasoningLevelsLabel(levels: readonly ThinkingLevel[], asToggle = false): string {
+  if (levels.length === 0) return "checking";
   if (isThinkingOnlyLevels(levels)) return "on";
   if (asToggle) return "thinking on/off";
-  const normalized = levels.length > 0 ? levels : ["off"];
-  return normalized.join("/");
+  return levels.join("/");
 }
 
 export function formatModelPickerRow(
-  option: Pick<ModelPickerOption, "id" | "label" | "providerBadge" | "reasoningLevels">,
+  option: Pick<ModelPickerOption, "id" | "label" | "providerBadge" | "reasoningLevels">
+    & Partial<Pick<ModelPickerOption, "available" | "pending">>,
   options: { selected: boolean; current: boolean; width: number },
 ): string {
   const width = Math.max(24, options.width);
   const marker = options.selected ? "> " : "  ";
   const label = option.label.replace(/\s+/g, " ").trim();
   const provider = option.providerBadge.replace(/\s+/g, " ").trim();
-  const effort = formatReasoningLevelsLabel(option.reasoningLevels, isThinkingToggleOption(option));
+  const effort = option.pending
+    ? "checking"
+    : (option.available === false || option.reasoningLevels.length === 0)
+      ? "unavailable"
+      : formatReasoningLevelsLabel(option.reasoningLevels, isThinkingToggleOption(option));
   const current = options.current ? " ●" : "";
   const providerWidth = Math.max(6, Math.min(16, Math.floor(width * 0.18)));
   const effortWidth = Math.max(12, Math.min(30, Math.floor(width * 0.32)));
@@ -162,9 +192,15 @@ export function formatNoModelResultsRow(query: string, width: number): string {
 }
 
 export function preferredEffortIndex(
-  option: Pick<ModelPickerOption, "reasoningLevels">,
+  option: Pick<ModelPickerOption, "reasoningLevels" | "defaultReasoningLevel">,
   currentThinkingLevel: ThinkingLevel,
 ): number {
+  const currentIndex = option.reasoningLevels.indexOf(currentThinkingLevel);
+  if (currentIndex >= 0) return currentIndex;
+  if (option.defaultReasoningLevel) {
+    const defaultIndex = option.reasoningLevels.indexOf(option.defaultReasoningLevel);
+    if (defaultIndex >= 0) return defaultIndex;
+  }
   const preferred = normalizeThinkingLevel(currentThinkingLevel, option.reasoningLevels);
   const index = option.reasoningLevels.indexOf(preferred);
   return index >= 0 ? index : 0;
@@ -172,6 +208,59 @@ export function preferredEffortIndex(
 
 export function shouldOpenEffortPicker(option: Pick<ModelPickerOption, "reasoningLevels">): boolean {
   return option.reasoningLevels.length > 1;
+}
+
+export function isModelOptionSelectable(
+  option: Pick<ModelPickerOption, "available" | "pending" | "reasoningLevels">,
+): boolean {
+  return option.available && !option.pending && option.reasoningLevels.length > 0;
+}
+
+export function resolveSelectedModelId(
+  options: readonly ModelPickerOption[],
+  selectedId: string | undefined,
+): string | undefined {
+  if (selectedId) {
+    const selected = options.find((option) => option.id === selectedId);
+    if (selected && isModelOptionSelectable(selected)) return selected.id;
+  }
+  return options.find(isModelOptionSelectable)?.id;
+}
+
+export function moveModelSelection(
+  options: readonly ModelPickerOption[],
+  selectedId: string | undefined,
+  direction: -1 | 1,
+): string | undefined {
+  const selectableIndexes = options
+    .map((option, index) => isModelOptionSelectable(option) ? index : -1)
+    .filter((index) => index >= 0);
+  if (selectableIndexes.length === 0) return undefined;
+  const currentIndex = options.findIndex((option) => option.id === selectedId);
+  if (currentIndex < 0) {
+    return options[direction > 0 ? selectableIndexes[0] : selectableIndexes[selectableIndexes.length - 1]]?.id;
+  }
+  const target = direction > 0
+    ? selectableIndexes.find((index) => index > currentIndex)
+    : [...selectableIndexes].reverse().find((index) => index < currentIndex);
+  return options[target ?? currentIndex]?.id ?? selectedId;
+}
+
+export function reconcileModelPickerPhase(
+  phase: ModelPickerPhase,
+  options: readonly ModelPickerOption[],
+  currentThinkingLevel: ThinkingLevel,
+): ModelPickerPhase {
+  if (phase.kind !== "effort") return phase;
+  const latest = options.find((option) => option.id === phase.model.id);
+  if (!latest || !isModelOptionSelectable(latest)) return { kind: "model" };
+
+  const selectedLevel = phase.model.reasoningLevels[phase.selectedIndex];
+  const selectedIndex = selectedLevel && latest.reasoningLevels.includes(selectedLevel)
+    ? latest.reasoningLevels.indexOf(selectedLevel)
+    : preferredEffortIndex(latest, currentThinkingLevel);
+  if (selectedIndex === phase.selectedIndex && sameModelOptionMetadata(phase.model, latest)) return phase;
+  return { kind: "effort", model: latest, selectedIndex };
 }
 
 function effortDescription(level: ThinkingLevel, asToggle?: boolean): string {
@@ -191,6 +280,8 @@ function effortDescription(level: ThinkingLevel, asToggle?: boolean): string {
       return "extra high reasoning";
     case "max":
       return "maximum provider effort";
+    case "ultra":
+      return "maximum effort with delegation";
     default:
       return "reasoning effort";
   }
@@ -221,85 +312,90 @@ export function ModelPicker({ registry, current, currentThinkingLevel, recent, o
   const bodyRows = modelPickerBodyRows(termHeight);
   const rowWidth = Math.max(36, Math.min(110, terminalColumns - 6));
 
-  const [rawOptions, setRawOptions] = useState<ModelPickerOption[]>(() =>
-    buildLocalModelOptions(registry, current, recent)
+  const recentKey = modelPickerRecentKey(recent);
+  const enabledSnapshot = registry.getEnabled().filter((provider) => isUserVisibleProvider(provider.id));
+  const providerKey = enabledSnapshot
+    .map((provider) => [
+      provider.id,
+      provider.name,
+      provider.baseURL,
+      provider.authType ?? "",
+      provider.protocol ?? "",
+    ].join("\u0000"))
+    .join("\u0001");
+  const enabledProviders = useMemo(
+    () => registry.getEnabled().filter((provider) => isUserVisibleProvider(provider.id)),
+    [registry, providerKey],
   );
+  const localModelsByProvider = useMemo(
+    () => new Map(enabledProviders.map((provider) => [
+      provider.id,
+      localModelsForProvider(registry, provider),
+    ])),
+    [registry, providerKey],
+  );
+  const [discoveries, setDiscoveries] = useState<Map<string, ModelProviderDiscoveryState>>(() => new Map());
+  const [refreshGeneration, setRefreshGeneration] = useState(0);
+  const requestGenerationRef = useRef(0);
+  const rawOptions = useMemo(() => buildMergedModelOptions({
+    providers: enabledProviders,
+    localModelsByProvider,
+    discoveries,
+    current,
+    recent,
+  }), [enabledProviders, localModelsByProvider, discoveries, current, recentKey]);
   const [query, setQuery] = useState("");
-  const [selectedIndex, setSelectedIndex] = useState(() =>
-    preferredModelIndex(buildLocalModelOptions(registry, current, recent), current)
+  const [selectedId, setSelectedId] = useState<string | undefined>(() =>
+    resolveSelectedModelId(buildLocalModelOptions(registry, current, recent), current)
   );
   const [phase, setPhase] = useState<ModelPickerPhase>({ kind: "model" });
 
   useEffect(() => {
-    let cancelled = false;
-    const localOptions = buildLocalModelOptions(registry, current, recent);
-    setRawOptions(localOptions);
-    setSelectedIndex(preferredModelIndex(localOptions, current));
-
-    async function refreshRemote() {
-      const enabled = registry.getEnabled();
-      const opts: ModelPickerOption[] = [];
-      const seen = new Set<string>();
-
-      // Recent first
-      for (const m of recent.slice(0, 5)) {
-        const { providerId } = decodeModel(m);
-        const provider = enabled.find((p) => p.id === providerId);
-        appendModelOption(opts, seen, {
-          id: m,
-          label: displayModel(m),
-          group: "Recent",
-          providerBadge: provider?.name || providerId || "",
+    const generation = ++requestGenerationRef.current;
+    setDiscoveries((previous) => {
+      const next = new Map<string, ModelProviderDiscoveryState>();
+      for (const provider of enabledProviders) {
+        const prior = previous.get(provider.id);
+        next.set(provider.id, {
+          status: "pending",
+          models: prior?.models ?? [],
+          source: prior?.source,
+          authoritative: prior?.authoritative ?? false,
         });
       }
+      return next;
+    });
 
-      const visibleProviders = enabled.filter((item) => isUserVisibleProvider(item.id));
-      const discovered = await Promise.all(visibleProviders.map(async (provider) => {
-        try {
-          return { provider, models: await registry.listModels(provider) };
-        } catch {
-          return { provider, models: localModelsForProvider(registry, provider) };
-        }
-      }));
-
-      for (const { provider, models } of discovered) {
-        for (const m of models) {
-          appendModelOption(opts, seen, {
-            id: encodeModel(m.providerId, m.id),
-            label: m.name,
-            group: provider.name,
-            providerBadge: provider.name,
+    for (const provider of enabledProviders) {
+      void discoverModelsForPicker(registry, provider, refreshGeneration > 0)
+        .then((result) => {
+          if (requestGenerationRef.current !== generation) return;
+          setDiscoveries((previous) => {
+            const next = new Map(previous);
+            next.set(provider.id, { status: "complete", ...result });
+            return next;
           });
-        }
-      }
-
-      if (current && !seen.has(current)) {
-        const { providerId } = decodeModel(current);
-        const provider = enabled.find((p) => p.id === providerId);
-        opts.unshift({
-          id: current,
-          label: displayModel(current),
-          group: "Current",
-          providerBadge: provider?.name || providerId || "",
-          reasoningLevels: reasoningLevelsForModel(current),
+        })
+        .catch((error) => {
+          if (requestGenerationRef.current !== generation) return;
+          setDiscoveries((previous) => {
+            const next = new Map(previous);
+            next.set(provider.id, {
+              status: "complete",
+              models: localModelsByProvider.get(provider.id) ?? [],
+              source: "fallback",
+              authoritative: false,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            return next;
+          });
         });
-      }
-
-      if (!cancelled) {
-        setRawOptions(opts);
-        setSelectedIndex((index) => {
-          const currentIndex = preferredModelIndex(opts, current);
-          return index === preferredModelIndex(localOptions, current)
-            ? currentIndex
-            : clampPickerIndex(index, opts.length);
-        });
-      }
     }
-    void refreshRemote();
+
     return () => {
-      cancelled = true;
+      if (requestGenerationRef.current === generation) requestGenerationRef.current++;
     };
-  }, [registry, current, recent]);
+  }, [registry, providerKey, refreshGeneration]);
 
   const options = useMemo(() => {
     if (!query.trim()) return rawOptions;
@@ -308,6 +404,21 @@ export function ModelPicker({ registry, current, currentThinkingLevel, recent, o
       opt.label.toLowerCase().includes(q) || opt.providerBadge.toLowerCase().includes(q)
     );
   }, [rawOptions, query]);
+
+  const resolvedSelectedId = resolveSelectedModelId(options, selectedId);
+  const selectedIndex = resolvedSelectedId
+    ? options.findIndex((option) => option.id === resolvedSelectedId)
+    : -1;
+
+  useEffect(() => {
+    if (selectedId !== resolvedSelectedId) setSelectedId(resolvedSelectedId);
+  }, [selectedId, resolvedSelectedId]);
+
+  useEffect(() => {
+    setPhase((currentPhase) => reconcileModelPickerPhase(currentPhase, rawOptions, currentThinkingLevel));
+  }, [rawOptions, currentThinkingLevel]);
+
+  const discoveryStatus = formatModelDiscoveryStatus(enabledProviders, discoveries);
 
   useInput((input, key) => {
     if (isKeyReleaseEvent(key)) return;
@@ -319,7 +430,8 @@ export function ModelPicker({ registry, current, currentThinkingLevel, recent, o
         return;
       }
       if (action === "enter") {
-        onSelect(phase.model.id, levels[clampPickerIndex(phase.selectedIndex, levels.length)] ?? "off");
+        const level = levels[clampPickerIndex(phase.selectedIndex, levels.length)];
+        if (level) onSelect(phase.model.id, level);
         return;
       }
       if (action === "up") {
@@ -337,13 +449,17 @@ export function ModelPicker({ registry, current, currentThinkingLevel, recent, o
       return;
     }
 
+    if (key.ctrl && (input.toLowerCase() === "r" || input === "\x12")) {
+      setRefreshGeneration((generation) => generation + 1);
+      return;
+    }
     if (action === "escape") {
       onCancel();
       return;
     }
     if (action === "enter") {
-      const opt = options[clampPickerIndex(selectedIndex, options.length)];
-      if (opt) {
+      const opt = selectedIndex >= 0 ? options[selectedIndex] : undefined;
+      if (opt && isModelOptionSelectable(opt)) {
         if (shouldOpenEffortPicker(opt)) {
           setPhase({
             kind: "effort",
@@ -351,23 +467,24 @@ export function ModelPicker({ registry, current, currentThinkingLevel, recent, o
             selectedIndex: preferredEffortIndex(opt, currentThinkingLevel),
           });
         } else {
-          onSelect(opt.id, opt.reasoningLevels[0] ?? "off");
+          const level = opt.reasoningLevels[0];
+          if (level) onSelect(opt.id, level);
         }
       }
       return;
     }
     if (action === "up") {
-      setSelectedIndex((i) => clampPickerIndex(i - 1, options.length));
+      setSelectedId((id) => moveModelSelection(options, id, -1));
       return;
     }
     if (action === "down") {
-      setSelectedIndex((i) => clampPickerIndex(i + 1, options.length));
+      setSelectedId((id) => moveModelSelection(options, id, 1));
       return;
     }
     if (action === "backspace" || action === "delete") {
       setQuery((q) => {
         const next = q.slice(0, -1);
-        setSelectedIndex(0);
+        setSelectedId(undefined);
         return next;
       });
       return;
@@ -375,14 +492,14 @@ export function ModelPicker({ registry, current, currentThinkingLevel, recent, o
     if (isPrintablePickerInput(input) && !key.ctrl && !key.meta) {
       setQuery((q) => {
         const next = q + input;
-        setSelectedIndex(0);
+        setSelectedId(undefined);
         return next;
       });
       return;
     }
   });
 
-  const safeSelectedIndex = clampPickerIndex(selectedIndex, options.length);
+  const safeSelectedIndex = selectedIndex >= 0 ? selectedIndex : 0;
   const start = pickerWindowStart(safeSelectedIndex, options.length, bodyRows);
   const visible = options.slice(start, start + bodyRows);
   const rawModelRows = options.length === 0
@@ -393,7 +510,7 @@ export function ModelPicker({ registry, current, currentThinkingLevel, recent, o
       }]
     : visible.map((opt, i) => {
         const actualIndex = start + i;
-        const isSelected = actualIndex === safeSelectedIndex;
+        const isSelected = selectedIndex >= 0 && actualIndex === safeSelectedIndex;
         return {
           key: opt.id,
           row: formatModelPickerRow(opt, {
@@ -409,10 +526,12 @@ export function ModelPicker({ registry, current, currentThinkingLevel, recent, o
     row,
     selected: rawModelRows[index]?.selected ?? false,
   }));
-  const highlightedOption = options[clampPickerIndex(selectedIndex, options.length)];
-  const enterAction = highlightedOption && shouldOpenEffortPicker(highlightedOption)
-    ? (isThinkingToggleOption(highlightedOption) ? "choose mode" : "choose effort")
-    : "select";
+  const highlightedOption = selectedIndex >= 0 ? options[selectedIndex] : undefined;
+  const enterAction = highlightedOption
+    ? (shouldOpenEffortPicker(highlightedOption)
+      ? (isThinkingToggleOption(highlightedOption) ? "choose mode" : "choose effort")
+      : "select")
+    : "wait";
   const effortTitle = phase.kind === "effort" && isThinkingToggleOption(phase.model)
     ? "Select Thinking Mode"
     : "Select Reasoning Effort";
@@ -436,7 +555,12 @@ export function ModelPicker({ registry, current, currentThinkingLevel, recent, o
       ) : (
         <>
           <SearchField query={query} placeholder="Type to search models..." width={rowWidth} />
-          <Text color={theme.muted}>↑/↓ navigate · Enter {enterAction} · Esc cancel · Backspace clear</Text>
+          <Text color={theme.muted}>↑/↓ navigate · Enter {enterAction} · Esc cancel · Ctrl+R retry</Text>
+          <Box height={1} overflow="hidden">
+            <Text color={discoveryStatus.hasError ? theme.warning : theme.muted}>
+              {discoveryStatus.text || " "}
+            </Text>
+          </Box>
         </>
       )}
       {phase.kind === "model" && <Box flexDirection="column" height={bodyRows} overflow="hidden" marginTop={1}>
@@ -530,42 +654,55 @@ export function buildLocalModelOptions(
   current: string,
   recent: string[],
 ): ModelPickerOption[] {
-  const enabled = registry.getEnabled();
+  const providers = registry.getEnabled().filter((provider) => isUserVisibleProvider(provider.id));
+  const localModelsByProvider = new Map(providers.map((provider) => [
+    provider.id,
+    localModelsForProvider(registry, provider),
+  ]));
+  return buildMergedModelOptions({
+    providers,
+    localModelsByProvider,
+    discoveries: new Map(),
+    current,
+    recent,
+  });
+}
+
+export function buildMergedModelOptions(input: {
+  providers: ReturnType<ProviderRegistry["getEnabled"]>;
+  localModelsByProvider: ReadonlyMap<string, readonly ModelInfo[]>;
+  discoveries: ReadonlyMap<string, ModelProviderDiscoveryState>;
+  current: string;
+  recent: readonly string[];
+}): ModelPickerOption[] {
   const opts: ModelPickerOption[] = [];
   const seen = new Set<string>();
+  const recentIds = [...new Set(input.recent.slice(0, 5))];
+  const pinnedIds = currentFirstWhenNotRecent(input.current, recentIds);
 
-  for (const model of recent.slice(0, 5)) {
-    const { providerId } = decodeModel(model);
-    const provider = enabled.find((item) => item.id === providerId);
-    appendModelOption(opts, seen, {
+  for (const model of pinnedIds) {
+    const option = pinnedModelOption({
       id: model,
-      label: displayModel(model),
-      group: "Recent",
-      providerBadge: provider?.name || providerId || "",
+      group: recentIds.includes(model) ? "Recent" : "Current",
+      providers: input.providers,
+      localModelsByProvider: input.localModelsByProvider,
+      discoveries: input.discoveries,
     });
+    appendModelOption(opts, seen, option);
   }
 
-  for (const provider of enabled.filter((item) => isUserVisibleProvider(item.id))) {
-    for (const model of localModelsForProvider(registry, provider)) {
+  for (const provider of input.providers) {
+    const localModels = input.localModelsByProvider.get(provider.id) ?? [];
+    const discovery = input.discoveries.get(provider.id);
+    for (const model of effectiveProviderModels(localModels, discovery)) {
       appendModelOption(opts, seen, {
-        id: encodeModel(model.providerId, model.id),
-        label: model.name,
+        ...modelOptionMetadata(encodeModel(provider.id, model.id), model, true),
         group: provider.name,
         providerBadge: provider.name,
+        available: true,
+        pending: false,
       });
     }
-  }
-
-  if (current && !seen.has(current)) {
-    const { providerId } = decodeModel(current);
-    const provider = enabled.find((item) => item.id === providerId);
-    opts.unshift({
-      id: current,
-      label: displayModel(current),
-      group: "Current",
-      providerBadge: provider?.name || providerId || "",
-      reasoningLevels: reasoningLevelsForModel(current),
-    });
   }
 
   return opts;
@@ -581,25 +718,142 @@ function localModelsForProvider(registry: ProviderRegistry, provider: ReturnType
     id: model.id,
     name: model.name,
     providerId: provider.id,
+    reasoningLevels: model.reasoningLevels,
+    defaultReasoningLevel: model.defaultReasoningLevel,
+    contextWindow: model.contextWindow,
+    toolOutputTokenLimit: model.toolOutputTokenLimit,
   }));
 }
 
 function appendModelOption(
   options: ModelPickerOption[],
   seen: Set<string>,
-  option: Omit<ModelPickerOption, "reasoningLevels"> & { reasoningLevels?: ThinkingLevel[] },
+  option: ModelPickerOption,
 ): void {
   if (seen.has(option.id)) return;
   seen.add(option.id);
-  options.push({
-    ...option,
-    reasoningLevels: option.reasoningLevels ?? reasoningLevelsForModel(option.id),
-  });
+  options.push(option);
 }
 
-function preferredModelIndex(options: ModelPickerOption[], current: string): number {
-  const idx = options.findIndex((option) => option.id === current);
-  return idx >= 0 ? idx : 0;
+function currentFirstWhenNotRecent(current: string, recent: readonly string[]): string[] {
+  if (!current || recent.includes(current)) return [...recent];
+  return [current, ...recent];
+}
+
+function pinnedModelOption(input: {
+  id: string;
+  group: "Recent" | "Current";
+  providers: ReturnType<ProviderRegistry["getEnabled"]>;
+  localModelsByProvider: ReadonlyMap<string, readonly ModelInfo[]>;
+  discoveries: ReadonlyMap<string, ModelProviderDiscoveryState>;
+}): ModelPickerOption {
+  const { providerId, modelId } = decodeModel(input.id);
+  const provider = input.providers.find((item) => item.id === providerId);
+  if (!provider) {
+    return {
+      ...modelOptionMetadata(input.id, undefined, false),
+      group: input.group,
+      providerBadge: providerId || "",
+      available: false,
+      pending: false,
+    };
+  }
+
+  const local = input.localModelsByProvider.get(provider.id) ?? [];
+  const discovery = input.discoveries.get(provider.id);
+  const discoveredModel = discovery?.models.find((model) => model.id === modelId);
+  const localModel = local.find((model) => model.id === modelId);
+  const metadata = discoveredModel ?? localModel;
+  const hasKnownMetadata = !!metadata;
+
+  let available = hasKnownMetadata;
+  let pending = false;
+  if (!discovery || discovery.status === "pending") {
+    pending = !hasKnownMetadata;
+  } else if (discovery.authoritative) {
+    available = !!discoveredModel;
+  }
+
+  return {
+    ...modelOptionMetadata(input.id, metadata, hasKnownMetadata),
+    group: input.group,
+    providerBadge: provider.name,
+    available,
+    pending,
+  };
+}
+
+function effectiveProviderModels(
+  localModels: readonly ModelInfo[],
+  discovery: ModelProviderDiscoveryState | undefined,
+): readonly ModelInfo[] {
+  if (!discovery) return localModels;
+  if (discovery.authoritative) return discovery.models;
+  return discovery.models.length > 0 ? discovery.models : localModels;
+}
+
+function modelOptionMetadata(
+  id: string,
+  rawModel: ModelInfo | undefined,
+  known: boolean,
+): Pick<
+  ModelPickerOption,
+  "id" | "label" | "reasoningLevels" | "defaultReasoningLevel" | "contextWindow" | "toolOutputTokenLimit"
+> {
+  const model = rawModel;
+  const reasoningLevels = model?.reasoningLevels
+    ? [...model.reasoningLevels]
+    : (known ? reasoningLevelsForModel(id) : []);
+  const defaultReasoningLevel = model?.defaultReasoningLevel
+    && reasoningLevels.includes(model.defaultReasoningLevel)
+    ? model.defaultReasoningLevel
+    : undefined;
+  return {
+    id,
+    label: model?.name || displayModel(id),
+    reasoningLevels,
+    defaultReasoningLevel,
+    contextWindow: model?.contextWindow,
+    toolOutputTokenLimit: model?.toolOutputTokenLimit,
+  };
+}
+
+async function discoverModelsForPicker(
+  registry: ProviderRegistry,
+  provider: ReturnType<ProviderRegistry["getEnabled"]>[number],
+  forceRefresh: boolean,
+): Promise<Omit<ModelProviderDiscoveryState, "status">> {
+  return registry.discoverModels(provider, { forceRefresh });
+}
+
+export function formatModelDiscoveryStatus(
+  providers: readonly Pick<ReturnType<ProviderRegistry["getEnabled"]>[number], "id" | "name">[],
+  discoveries: ReadonlyMap<string, ModelProviderDiscoveryState>,
+): { text: string; hasError: boolean } {
+  if (providers.some((provider) => discoveries.get(provider.id)?.status !== "complete")) {
+    return { text: "Refreshing model catalog…", hasError: false };
+  }
+  const failed = providers.filter((provider) => discoveries.get(provider.id)?.error);
+  if (failed.length > 0) {
+    const names = failed.slice(0, 2).map((provider) => provider.name).join(", ");
+    const suffix = failed.length > 2 ? ` +${failed.length - 2}` : "";
+    return { text: `Showing fallback models for ${names}${suffix} · Ctrl+R retry`, hasError: true };
+  }
+  return { text: "", hasError: false };
+}
+
+function sameModelOptionMetadata(left: ModelPickerOption, right: ModelPickerOption): boolean {
+  return left.id === right.id
+    && left.label === right.label
+    && left.group === right.group
+    && left.providerBadge === right.providerBadge
+    && left.defaultReasoningLevel === right.defaultReasoningLevel
+    && left.contextWindow === right.contextWindow
+    && left.toolOutputTokenLimit === right.toolOutputTokenLimit
+    && left.available === right.available
+    && left.pending === right.pending
+    && left.reasoningLevels.length === right.reasoningLevels.length
+    && left.reasoningLevels.every((level, index) => level === right.reasoningLevels[index]);
 }
 
 function reasoningLevelsForModel(model: string): ThinkingLevel[] {

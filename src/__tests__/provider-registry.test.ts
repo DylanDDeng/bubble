@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest";
-import { ProviderRegistry, displayModel, isUserVisibleProvider, normalizeModel } from "../provider-registry.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ProviderRegistry, displayModel, isUserVisibleProvider, normalizeModel, type ProviderProfile } from "../provider-registry.js";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("provider registry", () => {
   it("normalizes provider-less models to openai by default", () => {
@@ -192,4 +196,108 @@ describe("provider registry", () => {
     });
     expect(registry.getDefault()?.protocol).toBeUndefined();
   });
+
+  it("deduplicates in-flight discovery and reuses the successful memory cache", async () => {
+    const registry = new ProviderRegistry(emptyConfig());
+    const provider = openRouterProfile("key-a");
+    let resolveFetch!: (response: Response) => void;
+    const fetchMock = vi.fn(() => new Promise<Response>((resolve) => {
+      resolveFetch = resolve;
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = registry.discoverModels(provider);
+    const duplicate = registry.discoverModels(provider);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    resolveFetch(jsonResponse({ data: [{ id: "model-a", name: "Model A" }] }));
+    await expect(first).resolves.toMatchObject({ source: "remote", authoritative: true });
+    await expect(duplicate).resolves.toMatchObject({ source: "remote", authoritative: true });
+
+    await expect(registry.discoverModels(provider)).resolves.toMatchObject({
+      source: "cache",
+      authoritative: true,
+      models: [{ id: "model-a", name: "Model A", providerId: "openrouter" }],
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("isolates discovery by credential identity and rejects an older generation", async () => {
+    const registry = new ProviderRegistry(emptyConfig());
+    const resolvers: Array<(response: Response) => void> = [];
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => {
+      resolvers.push(resolve);
+    })));
+
+    const oldRequest = registry.discoverModels(openRouterProfile("key-a"));
+    const newRequest = registry.discoverModels(openRouterProfile("key-b"));
+    expect(resolvers).toHaveLength(2);
+
+    resolvers[1](jsonResponse({ data: [{ id: "new-model" }] }));
+    await expect(newRequest).resolves.toMatchObject({
+      source: "remote",
+      models: [{ id: "new-model" }],
+    });
+
+    resolvers[0](jsonResponse({ data: [{ id: "stale-model" }] }));
+    await expect(oldRequest).resolves.toMatchObject({
+      source: "fallback",
+      authoritative: false,
+      error: "Model catalog changed while it was refreshing.",
+    });
+  });
+
+  it("returns an explicit fallback status and briefly caches discovery failures", async () => {
+    const registry = new ProviderRegistry(emptyConfig());
+    const provider = openRouterProfile("failing-key");
+    const fetchMock = vi.fn(async () => {
+      throw new Error("network unavailable");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(registry.discoverModels(provider)).resolves.toMatchObject({
+      source: "fallback",
+      authoritative: false,
+      error: "network unavailable",
+    });
+    await expect(registry.discoverModels(provider)).resolves.toMatchObject({
+      source: "cache",
+      authoritative: false,
+      error: "network unavailable",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });
+
+function emptyConfig() {
+  return {
+    getProviders: () => [],
+    setProviders: () => undefined,
+    getDefaultProvider: () => undefined,
+    setDefaultProvider: () => undefined,
+    getApiKey: () => undefined,
+    setApiKey: () => undefined,
+    getDefaultModel: () => undefined,
+    setDefaultModel: () => undefined,
+    getRecentModels: () => [],
+    pushRecentModel: () => undefined,
+  } as any;
+}
+
+function openRouterProfile(apiKey: string): ProviderProfile {
+  return {
+    id: "openrouter",
+    name: "OpenRouter",
+    baseURL: "https://openrouter.ai/api/v1",
+    apiKey,
+    enabled: true,
+    authType: "api",
+  };
+}
+
+function jsonResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}

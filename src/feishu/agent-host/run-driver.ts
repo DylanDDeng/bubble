@@ -25,7 +25,7 @@ import { FileStateTracker } from "../../tools/file-state.js";
 import { buildToolPromptOptions, createAllTools, type PlanController } from "../../tools/index.js";
 import { displayModel, encodeModel, decodeModel } from "../../provider-registry.js";
 import { buildMemoryPrompt, recordMemoryCitations } from "../../memory/index.js";
-import { getDefaultThinkingLevel } from "../../provider-transform.js";
+import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingLevel } from "../../provider-transform.js";
 import { createSessionTitleUpdater, type SessionTitleUpdater } from "../../session-title.js";
 import type { AgentEvent, Message, PermissionMode, PlanDecision } from "../../types.js";
 import type { SessionManager } from "../../session.js";
@@ -127,8 +127,11 @@ export class RunDriver {
     const { provider, providerId, model } = await this.resolveProvider(session, promptCacheKey);
     const skills = this.opts.deps.skillRegistry.summaries();
     const memoryPrompt = buildMemoryPrompt(session.cwd);
-    const thinkingLevel = this.opts.deps.userConfig.getDefaultThinkingLevel()
-      ?? getDefaultThinkingLevel(providerId, decodeModel(model).modelId);
+    const modelId = decodeModel(model).modelId;
+    const configuredThinkingLevel = this.opts.deps.userConfig.getDefaultThinkingLevel();
+    const thinkingLevel = configuredThinkingLevel !== undefined
+      ? normalizeThinkingLevel(configuredThinkingLevel, getAvailableThinkingLevels(providerId, modelId))
+      : getDefaultThinkingLevel(providerId, modelId);
     const initialMode = session.permissionMode;
     const systemPrompt = buildSystemPrompt({
       agentName: "Bubble",

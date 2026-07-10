@@ -2,7 +2,8 @@ import type { Provider, ThinkingLevel } from "../types.js";
 import type { ProviderProfile } from "../provider-registry.js";
 import { decodeModel, displayModel } from "../provider-registry.js";
 import { buildSystemPrompt, type SystemPromptOptions } from "../system-prompt.js";
-import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingLevel } from "../provider-transform.js";
+import { getAvailableThinkingLevels, normalizeThinkingLevel } from "../provider-transform.js";
+import { normalizeInheritedThinkingLevel } from "../variant/variant-resolver.js";
 
 export interface ModelSwitchAgent {
   model: string;
@@ -75,10 +76,9 @@ export async function switchAgentModel(options: SwitchAgentModelOptions): Promis
     throw new Error(`Provider ${providerId} is not configured or has no active credentials.`);
   }
 
-  const nextThinkingLevel = normalizeThinkingLevel(
-    (options.thinkingLevel ?? options.agent.thinking) || getDefaultThinkingLevel(providerId, modelId),
-    getAvailableThinkingLevels(providerId, modelId),
-  );
+  const nextThinkingLevel = options.thinkingLevel !== undefined
+    ? normalizeThinkingLevel(options.thinkingLevel, getAvailableThinkingLevels(providerId, modelId))
+    : normalizeInheritedThinkingLevel(providerId, modelId, options.agent.thinking);
   const nextProvider = options.createProvider(providerId, provider.apiKey, provider.baseURL);
   const nextSystemPrompt = buildSystemPrompt({
     agentName: "Bubble",

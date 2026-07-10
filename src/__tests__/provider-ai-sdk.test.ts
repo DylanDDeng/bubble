@@ -3,7 +3,7 @@ import { createAiSdkProvider, fetchGeminiModels, geminiReasoningLevels, selectLa
 import { RateLimitError } from "../network/errors.js";
 import { isProviderStreamInterruption } from "../network/retry.js";
 import type { ProviderFetch } from "../network/provider-transport.js";
-import type { ProviderMessage, StreamChunk } from "../types.js";
+import type { ProviderMessage, StreamChunk, ThinkingLevel } from "../types.js";
 
 const sse = (objs: unknown[]) => objs.map((o) => `data: ${JSON.stringify(o)}\n\n`).join("");
 
@@ -199,7 +199,7 @@ describe("ai-sdk provider stream interruption", () => {
 describe("ai-sdk provider request building", () => {
   async function captureBody(
     messages: ProviderMessage[],
-    options: { model: string; thinkingLevel?: "off" | "low" | "medium" | "high" | "xhigh" | "max" | "minimal" },
+    options: { model: string; thinkingLevel?: ThinkingLevel },
   ): Promise<Record<string, any>> {
     let body: Record<string, any> = {};
     const provider = makeProvider(async (_url, init) => {
@@ -268,6 +268,9 @@ describe("ai-sdk provider request building", () => {
   it("maps thinking levels to thinking_level on Gemini 3 and budgets on 2.5", async () => {
     const gemini3 = await captureBody(USER_MESSAGES, { model: "gemini-3-pro-preview", thinkingLevel: "max" });
     expect(gemini3.generationConfig.thinkingConfig).toEqual({ thinkingLevel: "high", includeThoughts: true });
+
+    const ultra = await captureBody(USER_MESSAGES, { model: "gemini-3-pro-preview", thinkingLevel: "ultra" });
+    expect(ultra.generationConfig.thinkingConfig).toEqual({ thinkingLevel: "high", includeThoughts: true });
 
     const gemini25 = await captureBody(USER_MESSAGES, { model: "gemini-2.5-flash", thinkingLevel: "medium" });
     expect(gemini25.generationConfig.thinkingConfig).toEqual({ thinkingBudget: 8192, includeThoughts: true });

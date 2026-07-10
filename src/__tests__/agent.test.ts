@@ -1332,6 +1332,44 @@ describe("Agent", () => {
     });
   });
 
+  it("separates explicit subagent effort clamping from inherited stale-state defaults", () => {
+    const profile: AgentProfile = {
+      name: "route-check",
+      description: "Route check",
+      source: "user",
+      mode: "readonly",
+      model: "inherit",
+      tools: { preset: "none" },
+      approval: "fail",
+      prompt: "Check the route.",
+    };
+    const agent = new Agent({
+      provider: createMockProvider([]),
+      providerId: "openai",
+      model: "gpt-5.6-sol",
+      thinkingLevel: "off",
+      tools: [],
+      systemPrompt: "system",
+    });
+    const resolveRoute = (agent as any).resolveRouteForSubagent.bind(agent) as (
+      profile: AgentProfile,
+      category: string | undefined,
+      override?: { model?: string; effort?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" },
+    ) => { model: string; thinkingLevel: string };
+
+    expect(resolveRoute(profile, undefined, {
+      model: "openai:gpt-5.6-luna",
+      effort: "ultra",
+    })).toMatchObject({ model: "gpt-5.6-luna", thinkingLevel: "max" });
+    expect(resolveRoute(profile, undefined, {
+      model: "anthropic:claude-opus-4-8",
+      effort: "ultra",
+    })).toMatchObject({ model: "claude-opus-4-8", thinkingLevel: "max" });
+    expect(resolveRoute(profile, undefined, {
+      model: "openai:gpt-5.6-terra",
+    })).toMatchObject({ model: "gpt-5.6-terra", thinkingLevel: "medium" });
+  });
+
   it("routes cross-provider subagents through the configured provider factory", async () => {
     const parentProvider: Provider = {
       async *streamChat() {
@@ -1539,6 +1577,51 @@ describe("Agent", () => {
     const events = await collectEvents(agent, "Do something", "/tmp");
     expect(events.some((event) => event.type === "text_delta" && event.content === "Final without tools.")).toBe(true);
     expect(hasModelContext(captured[0], "CRITICAL - MAXIMUM STEPS REACHED")).toBe(true);
+  });
+
+  it("does not execute provider tool calls during a forced text-only turn", async () => {
+    let providerCalls = 0;
+    let toolExecutions = 0;
+    const guardedTool: ToolRegistryEntry = {
+      ...dummyTool,
+      async execute() {
+        toolExecutions += 1;
+        return { content: "should not execute" };
+      },
+    };
+    const provider: Provider = {
+      async *streamChat(_messages, options) {
+        providerCalls += 1;
+        expect(options.tools?.map((tool) => tool.name)).toEqual(["dummy"]);
+        expect(options.toolChoice).toBe("none");
+        if (providerCalls === 1) {
+          yield { type: "tool_call", id: "forbidden_1", name: "dummy", arguments: "", isStart: true, isEnd: false };
+          yield { type: "tool_call", id: "forbidden_1", name: "dummy", arguments: "{\"value\":\"42\"}", isStart: false, isEnd: true };
+          yield { type: "done" };
+          return;
+        }
+        yield { type: "text", content: "Final without tools." };
+        yield { type: "done" };
+      },
+      async complete() {
+        return "ok";
+      },
+    };
+
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [guardedTool],
+      systemPrompt: "system",
+      maxTurns: 1,
+    });
+
+    const events = await collectEvents(agent, "Do something", "/tmp");
+    expect(providerCalls).toBe(2);
+    expect(toolExecutions).toBe(0);
+    expect(events.some((event) => event.type === "tool_call_start" || event.type === "tool_start")).toBe(false);
+    expect(events.some((event) => event.type === "text_delta" && event.content === "Final without tools.")).toBe(true);
+    expect(agent.messages.some((message) => message.role === "assistant" && message.toolCalls?.length)).toBe(false);
   });
 
   it("uses task budget exhaustion to force a text-only follow-up turn", async () => {

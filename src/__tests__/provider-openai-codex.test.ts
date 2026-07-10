@@ -3,6 +3,7 @@ import {
   buildOpenAICodexPromptCacheKey,
   createOpenAICodexProvider,
   extractChatGptAccountId,
+  fetchOpenAICodexModelCatalog,
   getOpenAICodexFallbackModels,
   isOpenAICodexBaseUrl,
   normalizeOpenAICodexUsage,
@@ -43,6 +44,63 @@ function makeSseResponse(): Response {
   return new Response(body, { status: 200 });
 }
 
+const GPT56_CATALOG_FIXTURE = {
+  models: [
+    {
+      slug: "gpt-5.6-terra",
+      display_name: "GPT-5.6-Terra",
+      priority: 2,
+      context_window: 372000,
+      use_responses_lite: true,
+      visibility: "list",
+      minimal_client_version: "0.144.0",
+      supported_reasoning_levels: [
+        { effort: "low" },
+        { effort: "medium" },
+        { effort: "high" },
+        { effort: "xhigh" },
+        { effort: "max" },
+        { effort: "ultra" },
+      ],
+      default_reasoning_level: "medium",
+      truncation_policy: { mode: "tokens", limit: 10000 },
+    },
+    {
+      slug: "gpt-5.6-luna",
+      display_name: "GPT-5.6-Luna",
+      priority: 3,
+      context_window: 372000,
+      use_responses_lite: true,
+      supported_reasoning_levels: [
+        { effort: "low" },
+        { effort: "medium" },
+        { effort: "high" },
+        { effort: "xhigh" },
+        { effort: "max" },
+      ],
+      default_reasoning_level: "medium",
+      truncation_policy: { mode: "tokens", limit: 10000 },
+    },
+    {
+      slug: "gpt-5.6-sol",
+      display_name: "GPT-5.6-Sol",
+      priority: 1,
+      context_window: 372000,
+      use_responses_lite: true,
+      supported_reasoning_levels: [
+        { effort: "low" },
+        { effort: "medium" },
+        { effort: "high" },
+        { effort: "xhigh" },
+        { effort: "max" },
+        { effort: "ultra" },
+      ],
+      default_reasoning_level: "low",
+      truncation_policy: { mode: "tokens", limit: 10000 },
+    },
+  ],
+};
+
 async function collectStream<T>(stream: AsyncIterable<T>): Promise<T[]> {
   const chunks: T[] = [];
   for await (const chunk of stream) {
@@ -69,7 +127,84 @@ describe("provider-openai-codex", () => {
   });
 
   it("returns the latest fallback model first", () => {
-    expect(getOpenAICodexFallbackModels()[0]).toBe("gpt-5.5");
+    expect(getOpenAICodexFallbackModels()[0]).toBe("gpt-5.6-sol");
+  });
+
+  it("parses the account catalog without inventing off and honors server priority", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(GPT56_CATALOG_FIXTURE), { status: 200 }));
+
+    const result = await fetchOpenAICodexModelCatalog({
+      baseURL: "https://chatgpt.com/backend-api",
+      accessToken: makeAccessToken("account-123"),
+      fetch: fetchMock,
+    });
+
+    expect(result.status).toBe("success");
+    expect(result.descriptors).toEqual([
+      expect.objectContaining({
+        id: "gpt-5.6-sol",
+        priority: 1,
+        reasoningLevels: ["low", "medium", "high", "xhigh", "max", "ultra"],
+        defaultReasoningLevel: "low",
+        contextWindow: 372000,
+        useResponsesLite: true,
+        toolOutputTokenLimit: 10000,
+      }),
+      expect.objectContaining({
+        id: "gpt-5.6-terra",
+        priority: 2,
+        reasoningLevels: ["low", "medium", "high", "xhigh", "max", "ultra"],
+        defaultReasoningLevel: "medium",
+      }),
+      expect.objectContaining({
+        id: "gpt-5.6-luna",
+        priority: 3,
+        reasoningLevels: ["low", "medium", "high", "xhigh", "max"],
+        defaultReasoningLevel: "medium",
+      }),
+    ]);
+    expect(result.descriptors.every((model) => !model.reasoningLevels?.includes("off"))).toBe(true);
+  });
+
+  it("drops invalid defaults and unknown reasoning levels without synthesizing capabilities", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      models: [{
+        slug: "gpt-5.6-luna",
+        supported_reasoning_levels: [
+          { effort: "low" },
+          { effort: "future-effort" },
+          { effort: "low" },
+        ],
+        default_reasoning_level: "ultra",
+      }],
+    }), { status: 200 }));
+
+    const result = await fetchOpenAICodexModelCatalog({
+      baseURL: "https://chatgpt.com/backend-api",
+      accessToken: makeAccessToken("account-123"),
+      fetch: fetchMock,
+    });
+
+    expect(result).toEqual({
+      status: "success",
+      descriptors: [{ id: "gpt-5.6-luna", reasoningLevels: ["low"] }],
+    });
+  });
+
+  it("distinguishes an authoritative empty catalog from unavailable discovery", async () => {
+    const successFetch = vi.fn(async () => new Response(JSON.stringify({ models: [] }), { status: 200 }));
+    const unavailableFetch = vi.fn(async () => new Response("unavailable", { status: 503 }));
+    const options = {
+      baseURL: "https://chatgpt.com/backend-api",
+      accessToken: makeAccessToken("account-123"),
+    };
+
+    await expect(fetchOpenAICodexModelCatalog({ ...options, fetch: successFetch }))
+      .resolves.toEqual({ descriptors: [], status: "success" });
+    await expect(fetchOpenAICodexModelCatalog({ ...options, fetch: unavailableFetch }))
+      .resolves.toEqual({ descriptors: [], status: "unavailable" });
+    expect(successFetch).toHaveBeenCalledTimes(1);
+    expect(unavailableFetch).toHaveBeenCalledTimes(2);
   });
 
   it("maps Responses cached input tokens into prompt cache usage", () => {
@@ -173,6 +308,72 @@ describe("provider-openai-codex", () => {
     });
   });
 
+  it("maps the Ultra client preset to Max on the wire without enabling summaries", async () => {
+    const token = makeAccessToken("account-123");
+    const requestInits: RequestInit[] = [];
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestInits.push(init ?? {});
+      return makeSseResponse();
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = createOpenAICodexProvider({
+      providerId: "openai-codex",
+      apiKey: token,
+      baseURL: "https://chatgpt.com/backend-api",
+    });
+
+    await collectStream(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "gpt-5.6-sol",
+      thinkingLevel: "ultra",
+    }));
+
+    const body = JSON.parse(String(requestInits[0].body));
+    expect(body.reasoning).toEqual({ effort: "max", context: "all_turns" });
+    expect(body.reasoning.summary).toBeUndefined();
+    expect(body.instructions).toBe("");
+    expect(body.parallel_tool_calls).toBe(false);
+    expect(body.input[0]).toEqual({ type: "additional_tools", role: "developer", tools: [] });
+    expect(body.client_metadata).toMatchObject({
+      session_id: expect.any(String),
+      thread_id: expect.any(String),
+    });
+    const headers = new Headers(requestInits[0].headers);
+    expect(headers.get("x-openai-internal-codex-responses-lite")).toBe("true");
+    expect(headers.get("thread_id")).toEqual(expect.any(String));
+    expect(headers.get("originator")).toBe("codex_cli_rs");
+    expect(headers.get("user-agent")).toMatch(/^codex_cli_rs\/\d+\.\d+\.\d+ \(bubble\)$/);
+  });
+
+  it("omits reasoning for unknown Codex capabilities and supported off state", async () => {
+    const token = makeAccessToken("account-123");
+    const requestBodies: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestBodies.push(JSON.parse(String(init?.body)));
+      return makeSseResponse();
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = createOpenAICodexProvider({
+      providerId: "openai-codex",
+      apiKey: token,
+      baseURL: "https://chatgpt.com/backend-api",
+    });
+
+    await collectStream(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "gpt-future-unknown",
+      thinkingLevel: "high",
+    }));
+    await collectStream(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "gpt-5.4",
+      thinkingLevel: "off",
+    }));
+
+    expect(requestBodies).toHaveLength(2);
+    expect(requestBodies[0].reasoning).toBeUndefined();
+    expect(requestBodies[1].reasoning).toBeUndefined();
+  });
+
   it("preserves Codex tools while disabling tool calls", async () => {
     const token = makeAccessToken("account-123");
     const requestInits: RequestInit[] = [];
@@ -206,6 +407,46 @@ describe("provider-openai-codex", () => {
     const body = JSON.parse(String(requestInits[0].body));
     expect(body.tools?.map((tool: any) => tool.name)).toEqual(["read"]);
     expect(body.tool_choice).toBe("none");
+  });
+
+  it("does not expose Responses Lite tools when tool calls are disabled", async () => {
+    const token = makeAccessToken("account-123");
+    const requestInits: RequestInit[] = [];
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestInits.push(init ?? {});
+      return makeSseResponse();
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const writeTool: ToolDefinition = {
+      name: "write",
+      description: "Write a file",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+      },
+    };
+    const provider = createOpenAICodexProvider({
+      providerId: "openai-codex",
+      apiKey: token,
+      baseURL: "https://chatgpt.com/backend-api",
+    });
+
+    await collectStream(provider.streamChat([{ role: "user", content: "summarize" }], {
+      model: "gpt-5.6-sol",
+      tools: [writeTool],
+      toolChoice: "none",
+    }));
+
+    const body = JSON.parse(String(requestInits[0].body));
+    expect(body.input[0]).toEqual({
+      type: "additional_tools",
+      role: "developer",
+      tools: [],
+    });
+    expect(body.tool_choice).toBe("auto");
+    expect(body.tools).toBeUndefined();
   });
 
   it("refreshes OAuth credentials before Codex requests and deduplicates concurrent refreshes", async () => {

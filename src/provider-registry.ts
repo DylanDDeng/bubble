@@ -5,21 +5,24 @@
  * Reads provider configuration from models.json first, then falls back to config.json.
  */
 
+import { createHash } from "node:crypto";
 import type { UserConfig } from "./config.js";
 import {
   BUILTIN_PROVIDERS as CATALOG_PROVIDERS,
+  clearDynamicModelMetadata,
   getBuiltinModel,
   getBuiltinProvider,
   listBuiltinModels,
-  registerDynamicModelMetadata,
+  replaceDynamicModelMetadata,
   type ProviderProtocol,
 } from "./model-catalog.js";
 import { ModelConfig } from "./model-config.js";
 import { AuthStorage } from "./oauth/index.js";
 import { fetchGeminiModels } from "./provider-ai-sdk.js";
-import { fetchOpenAICodexModels, type OpenAICodexAuthAdapter } from "./provider-openai-codex.js";
+import { extractChatGptAccountId, fetchOpenAICodexModelCatalog, type OpenAICodexAuthAdapter } from "./provider-openai-codex.js";
 import { refreshOpenAICodex } from "./oauth/openai-codex.js";
 import type { OAuthCredentials } from "./oauth/types.js";
+import type { ThinkingLevel } from "./types.js";
 
 export interface ProviderProfile {
   id: string;
@@ -35,7 +38,30 @@ export interface ModelInfo {
   id: string;
   name: string;
   providerId: string;
+  reasoningLevels?: ThinkingLevel[];
+  defaultReasoningLevel?: ThinkingLevel;
+  contextWindow?: number;
+  useResponsesLite?: boolean;
+  toolOutputTokenLimit?: number;
 }
+
+export type ModelDiscoverySource = "remote" | "cache" | "static" | "fallback";
+
+export interface ModelDiscoveryResult {
+  models: ModelInfo[];
+  source: ModelDiscoverySource;
+  /** True when `models` is the complete list for this provider/account. */
+  authoritative: boolean;
+  error?: string;
+}
+
+interface CachedModelDiscovery {
+  result: Omit<ModelDiscoveryResult, "source"> & { source: Exclude<ModelDiscoverySource, "cache"> };
+  expiresAt: number;
+}
+
+const MODEL_DISCOVERY_SUCCESS_TTL_MS = 60_000;
+const MODEL_DISCOVERY_FAILURE_TTL_MS = 10_000;
 
 export const BUILTIN_PROVIDERS = CATALOG_PROVIDERS;
 export const USER_VISIBLE_PROVIDER_IDS = BUILTIN_PROVIDERS
@@ -50,6 +76,9 @@ export class ProviderRegistry {
   private config: UserConfig;
   private modelConfig: ModelConfig;
   private authStorage: AuthStorage;
+  private modelDiscoveryCache = new Map<string, CachedModelDiscovery>();
+  private modelDiscoveryInFlight = new Map<string, Promise<ModelDiscoveryResult>>();
+  private modelDiscoveryGeneration = new Map<string, number>();
 
   constructor(config: UserConfig) {
     this.config = config;
@@ -271,25 +300,88 @@ export class ProviderRegistry {
   }
 
   async listModels(provider: ProviderProfile): Promise<ModelInfo[]> {
-    // 1. Custom models from models.json always take precedence
-    const customModels = this.modelConfig.getCustomModels(provider.id);
-    if (customModels.length > 0) {
-      return customModels;
+    return (await this.discoverModels(provider)).models;
+  }
+
+  async discoverModels(
+    provider: ProviderProfile,
+    options: { forceRefresh?: boolean } = {},
+  ): Promise<ModelDiscoveryResult> {
+    const key = this.modelDiscoveryKey(provider);
+    const now = Date.now();
+
+    if (!options.forceRefresh) {
+      const cached = this.modelDiscoveryCache.get(key);
+      if (cached && cached.expiresAt > now) {
+        const result: ModelDiscoveryResult = { ...cached.result, source: "cache" };
+        const current = this.getConfigured().find((item) => item.id === provider.id);
+        if (!current || this.modelDiscoveryKey(current) === key) {
+          this.applyDynamicDiscoveryMetadata(provider, result);
+        }
+        return result;
+      }
+      const inFlight = this.modelDiscoveryInFlight.get(key);
+      if (inFlight) return inFlight;
+    } else {
+      this.modelDiscoveryCache.delete(key);
+      // Do not let a superseded request's finally-handler remove this retry.
+      this.modelDiscoveryInFlight.delete(key);
     }
 
-    // 2. Built-in provider dynamic/static lists
+    const generation = (this.modelDiscoveryGeneration.get(provider.id) ?? 0) + 1;
+    this.modelDiscoveryGeneration.set(provider.id, generation);
+
+    let pending!: Promise<ModelDiscoveryResult>;
+    pending = this.performModelDiscovery(provider).then((result): ModelDiscoveryResult => {
+      if (!this.isCurrentModelDiscovery(provider, key, generation)) {
+        return {
+          models: this.localModelsForProvider(
+            this.getConfigured().find((item) => item.id === provider.id) ?? provider,
+          ),
+          source: "fallback",
+          authoritative: false,
+          error: "Model catalog changed while it was refreshing.",
+        };
+      }
+
+      this.applyDynamicDiscoveryMetadata(provider, result);
+      this.modelDiscoveryCache.set(key, {
+        result: { ...result, source: result.source === "cache" ? "remote" : result.source },
+        expiresAt: Date.now() + (result.error ? MODEL_DISCOVERY_FAILURE_TTL_MS : MODEL_DISCOVERY_SUCCESS_TTL_MS),
+      });
+      return result;
+    }).finally(() => {
+      if (this.modelDiscoveryInFlight.get(key) === pending) {
+        this.modelDiscoveryInFlight.delete(key);
+      }
+    });
+
+    this.modelDiscoveryInFlight.set(key, pending);
+    return pending;
+  }
+
+  private async performModelDiscovery(provider: ProviderProfile): Promise<ModelDiscoveryResult> {
+    const customModels = this.modelConfig.getCustomModels(provider.id);
+    if (customModels.length > 0) {
+      return { models: customModels, source: "static", authoritative: true };
+    }
+
     if (provider.id === "openrouter") {
       try {
-        const res = await fetch("https://openrouter.ai/api/v1/models");
-        const data = (await res.json()) as { data?: Array<{ id: string; name?: string }> };
-        const models = data.data || [];
-        return models.map((m) => ({
-          id: m.id,
-          name: m.name || m.id,
-          providerId: provider.id,
-        }));
-      } catch {
-        // fall through to static
+        const response = await fetch("https://openrouter.ai/api/v1/models");
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = (await response.json()) as { data?: Array<{ id: string; name?: string }> };
+        return {
+          models: (data.data ?? []).map((model) => ({
+            id: model.id,
+            name: model.name || model.id,
+            providerId: provider.id,
+          })),
+          source: "remote",
+          authoritative: true,
+        };
+      } catch (error) {
+        return this.fallbackDiscovery(provider, error);
       }
     }
 
@@ -299,68 +391,153 @@ export class ProviderRegistry {
           apiKey: provider.apiKey,
           baseURL: provider.baseURL,
         });
-        if (descriptors.length > 0) {
-          for (const d of descriptors) {
-            const catalogEntry = getBuiltinModel("google", d.id);
-            registerDynamicModelMetadata({
-              id: d.id,
-              name: d.name,
-              providerId: "google",
-              reasoningLevels: d.reasoningLevels,
-              defaultReasoningLevel: d.defaultReasoningLevel ?? catalogEntry?.defaultReasoningLevel,
-              contextWindow: d.contextWindow ?? catalogEntry?.contextWindow,
-            });
-          }
-          return descriptors.map((d) => ({ id: d.id, name: d.name, providerId: provider.id }));
-        }
-      } catch {
-        // fall through to static
+        return {
+          models: descriptors.map((descriptor) => {
+            const catalogEntry = getBuiltinModel("google", descriptor.id);
+            return {
+              id: descriptor.id,
+              name: descriptor.name,
+              providerId: provider.id,
+              reasoningLevels: descriptor.reasoningLevels,
+              defaultReasoningLevel: descriptor.defaultReasoningLevel ?? catalogEntry?.defaultReasoningLevel,
+              contextWindow: descriptor.contextWindow ?? catalogEntry?.contextWindow,
+            };
+          }),
+          source: "remote",
+          authoritative: true,
+        };
+      } catch (error) {
+        return this.fallbackDiscovery(provider, error);
       }
     }
 
     if (provider.id === "openai" && provider.authType === "oauth" && provider.apiKey) {
       try {
         await this.prepareProvider(provider.id);
-        const currentProvider = this.getConfigured().find((p) => p.id === provider.id) || provider;
-        const descriptors = await fetchOpenAICodexModels({
+        const currentProvider = this.getConfigured().find((item) => item.id === provider.id) ?? provider;
+        const catalog = await fetchOpenAICodexModelCatalog({
           baseURL: currentProvider.baseURL,
           accessToken: currentProvider.apiKey,
         });
-        const visible = descriptors.filter((d) => d.visibility !== "hide");
-        if (visible.length > 0) {
-          for (const d of visible) {
-            const catalogEntry = getBuiltinModel("openai-codex", d.id);
-            registerDynamicModelMetadata({
-              id: d.id,
-              name: d.displayName || catalogEntry?.name || d.id,
-              providerId: "openai-codex",
-              reasoningLevels: d.reasoningLevels ?? catalogEntry?.reasoningLevels ?? ["off"],
-              contextWindow: d.contextWindow ?? catalogEntry?.contextWindow,
-              toolOutputTokenLimit: d.toolOutputTokenLimit ?? catalogEntry?.toolOutputTokenLimit,
-            });
-          }
-          return visible.map((d) => ({
-            id: d.id,
-            name: d.displayName || d.id,
-            providerId: provider.id,
-          }));
+        if (catalog.status === "unavailable") {
+          throw new Error("OpenAI Codex model catalog is unavailable.");
         }
-      } catch {
-        // fall through to static
+        const visible = catalog.descriptors.filter((descriptor) => descriptor.visibility !== "hide");
+        return {
+          models: visible.map((descriptor) => {
+            const catalogEntry = getBuiltinModel("openai-codex", descriptor.id);
+            return {
+              id: descriptor.id,
+              name: descriptor.displayName || catalogEntry?.name || descriptor.id,
+              providerId: provider.id,
+              reasoningLevels: descriptor.reasoningLevels ?? catalogEntry?.reasoningLevels,
+              defaultReasoningLevel: descriptor.defaultReasoningLevel ?? catalogEntry?.defaultReasoningLevel,
+              contextWindow: descriptor.contextWindow ?? catalogEntry?.contextWindow,
+              useResponsesLite: descriptor.useResponsesLite ?? catalogEntry?.useResponsesLite,
+              toolOutputTokenLimit: descriptor.toolOutputTokenLimit ?? catalogEntry?.toolOutputTokenLimit,
+            };
+          }),
+          source: "remote",
+          authoritative: true,
+        };
+      } catch (error) {
+        return this.fallbackDiscovery(provider, error);
       }
-      return listBuiltinModels("openai-codex").map((model) => ({
-        id: model.id,
-        name: model.name,
-        providerId: provider.id,
-      }));
     }
 
-    return listBuiltinModels(provider.id).map((model) => ({
+    return {
+      models: this.localModelsForProvider(provider),
+      source: "static",
+      authoritative: true,
+    };
+  }
+
+  private fallbackDiscovery(provider: ProviderProfile, error: unknown): ModelDiscoveryResult {
+    return {
+      models: this.localModelsForProvider(provider),
+      source: "fallback",
+      authoritative: false,
+      error: modelDiscoveryError(error),
+    };
+  }
+
+  private localModelsForProvider(provider: ProviderProfile): ModelInfo[] {
+    const customModels = this.modelConfig.getCustomModels(provider.id);
+    if (customModels.length > 0) return customModels;
+    const catalogProviderId = provider.id === "openai" && provider.authType === "oauth"
+      ? "openai-codex"
+      : provider.id;
+    return listBuiltinModels(catalogProviderId).map((model) => ({
       id: model.id,
       name: model.name,
       providerId: provider.id,
+      reasoningLevels: model.reasoningLevels,
+      defaultReasoningLevel: model.defaultReasoningLevel,
+      contextWindow: model.contextWindow,
+      useResponsesLite: model.useResponsesLite,
+      toolOutputTokenLimit: model.toolOutputTokenLimit,
     }));
   }
+
+  private modelDiscoveryKey(provider: ProviderProfile): string {
+    let identity = "anonymous";
+    if (provider.id === "openai" && provider.authType === "oauth") {
+      const credentials = this.authStorage.get(this.resolveOAuthAuthKey(provider.id));
+      identity = credentials?.accountId
+        || extractChatGptAccountId(provider.apiKey)
+        || "unknown-account";
+    } else if (provider.apiKey) {
+      identity = createHash("sha256").update(provider.apiKey).digest("hex").slice(0, 16);
+    }
+    return JSON.stringify([
+      provider.id,
+      normalizeBaseURL(provider.baseURL),
+      provider.authType ?? "api",
+      provider.protocol ?? "default",
+      identity,
+    ]);
+  }
+
+  private isCurrentModelDiscovery(
+    provider: ProviderProfile,
+    key: string,
+    generation: number,
+  ): boolean {
+    if (this.modelDiscoveryGeneration.get(provider.id) !== generation) return false;
+    const current = this.getConfigured().find((item) => item.id === provider.id);
+    return !current || this.modelDiscoveryKey(current) === key;
+  }
+
+  private applyDynamicDiscoveryMetadata(provider: ProviderProfile, result: ModelDiscoveryResult): void {
+    const dynamicProviderId = provider.id === "openai" && provider.authType === "oauth"
+      ? "openai-codex"
+      : provider.id === "google" && provider.protocol === "ai-sdk"
+        ? "google"
+        : undefined;
+    if (!dynamicProviderId) return;
+
+    if (!result.authoritative) {
+      clearDynamicModelMetadata(dynamicProviderId);
+      return;
+    }
+
+    replaceDynamicModelMetadata(dynamicProviderId, result.models.map((model) => ({
+      id: model.id,
+      name: model.name,
+      providerId: dynamicProviderId,
+      // Empty means the remote model exists but declared no trusted effort metadata.
+      reasoningLevels: model.reasoningLevels ?? [],
+      defaultReasoningLevel: model.defaultReasoningLevel,
+      contextWindow: model.contextWindow,
+      useResponsesLite: model.useResponsesLite,
+      toolOutputTokenLimit: model.toolOutputTokenLimit,
+    })));
+  }
+}
+
+function modelDiscoveryError(error: unknown): string {
+  if (error instanceof Error && error.message.trim()) return error.message;
+  return "Remote model catalog is unavailable.";
 }
 
 /**

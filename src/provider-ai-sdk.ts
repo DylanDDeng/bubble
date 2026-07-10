@@ -216,7 +216,7 @@ function buildCallOptions(
 /**
  * Gemini 3 models take a graded thinking_level; 2.5-era models take a token
  * budget. "off" (budget 0) is only offered in the catalog for models that
- * accept it (2.5 Flash); xhigh/max clamp to high.
+ * accept it (2.5 Flash); xhigh/max/ultra clamp to high.
  */
 function buildGoogleThinkingOptions(
   modelId: string,
@@ -224,7 +224,7 @@ function buildGoogleThinkingOptions(
 ): Record<string, unknown> | undefined {
   if (!level) return undefined;
   if (level === "off") return { thinkingConfig: { thinkingBudget: 0 } };
-  const clamped = level === "xhigh" || level === "max" ? "high" : level;
+  const clamped = level === "xhigh" || level === "max" || level === "ultra" ? "high" : level;
   if (modelId.includes("gemini-3")) {
     return { thinkingConfig: { thinkingLevel: clamped, includeThoughts: true } };
   }

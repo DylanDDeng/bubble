@@ -48,3 +48,25 @@ export function normalizeThinkingLevel(
 ): ThinkingLevel {
   return clampThinkingLevel(level, supportedLevels);
 }
+
+/**
+ * Normalizes effort inherited from a previous model or restored session.
+ *
+ * Unlike an explicit CLI/config choice, an inherited unsupported value does
+ * not express a direction the user just chose for the target model. Prefer the
+ * target model's declared default in that case, then fall back to the canonical
+ * downward clamp for legacy models without an explicit default.
+ */
+export function normalizeInheritedThinkingLevel(
+  providerId: string,
+  modelId: string,
+  inheritedLevel: ThinkingLevel,
+): ThinkingLevel {
+  const supportedLevels = getAvailableThinkingLevels(providerId, modelId);
+  if (supportedLevels.includes(inheritedLevel)) return inheritedLevel;
+
+  const modelDefault = getModelDefaultReasoningLevel(providerId, modelId);
+  if (modelDefault && supportedLevels.includes(modelDefault)) return modelDefault;
+
+  return clampThinkingLevel(inheritedLevel, supportedLevels);
+}
