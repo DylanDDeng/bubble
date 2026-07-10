@@ -22,11 +22,20 @@ import {
   resolveSlashEnterAction,
   resolveSlashCommandHighlightRange,
   shouldCollapsePastedContent,
+  shouldDeferComposerCommitWhilePastePending,
   shouldUseHardwareComposerCursor,
   shouldSubmitExactSlashSuggestion,
   splitComposerTextSegments,
   splitLineAtCursor,
+  stepComposerHistory,
 } from "../tui-ink/input-box.js";
+import {
+  createComposerBuffer,
+  expandComposerBuffer,
+  hasActiveComposerPastes,
+  insertComposerPaste,
+  moveComposerCursor,
+} from "../tui-ink/composer-buffer.js";
 
 describe("Ink input cursor row compensation", () => {
   it("compensates fullscreen frames where Ink omits the trailing newline", () => {
@@ -190,6 +199,13 @@ describe("Ink input slash command submission", () => {
 });
 
 describe("Ink input Enter handling", () => {
+  it("defers submit and autocomplete keys while a paste operation is pending", () => {
+    expect(shouldDeferComposerCommitWhilePastePending(true, "submit", {})).toBe(true);
+    expect(shouldDeferComposerCommitWhilePastePending(true, "none", { tab: true })).toBe(true);
+    expect(shouldDeferComposerCommitWhilePastePending(true, "newline", {})).toBe(false);
+    expect(shouldDeferComposerCommitWhilePastePending(false, "submit", { tab: true })).toBe(false);
+  });
+
   it("treats modified Enter as newline before submit/autocomplete handling", () => {
     expect(resolveInkEnterIntent("", { return: true, shift: true })).toBe("newline");
     expect(resolveInkEnterIntent("", { return: true, ctrl: true })).toBe("newline");
@@ -300,6 +316,66 @@ describe("Ink long paste placeholders", () => {
       { marker, content: first },
       { marker, content: second },
     ])).toBe(`${first}\n${second}`);
+  });
+});
+
+describe("Ink atomic paste draft integration", () => {
+  it("restores a transient history draft with paste identity and its next id intact", () => {
+    let buffer = createComposerBuffer("before  after", "before ".length);
+    buffer = insertComposerPaste(buffer, "original pasted body", "[paste one]");
+    const liveDraft = {
+      buffer,
+      attachments: [{
+        base64: "aGVsbG8=",
+        mediaType: "image/png",
+        bytes: 5,
+        dataUrl: "data:image/png;base64,aGVsbG8=",
+        filename: "draft.png",
+      }],
+      imageLabelStartOverride: 4,
+      historyIndex: null,
+      draftSnapshot: null,
+    };
+
+    const browsing = stepComposerHistory(
+      liveDraft,
+      [{ text: "persisted history", images: [] }],
+      "up",
+    );
+    expect(browsing.buffer.text).toBe("persisted history");
+    expect(browsing.buffer.pastes).toEqual([]);
+    expect(browsing.draftSnapshot).not.toBeNull();
+
+    const restored = stepComposerHistory(
+      browsing,
+      [{ text: "persisted history", images: [] }],
+      "down",
+    );
+    expect(restored.buffer).not.toBe(buffer);
+    expect(restored.attachments).not.toBe(liveDraft.attachments);
+    expect(restored.historyIndex).toBeNull();
+    expect(restored.draftSnapshot).toBeNull();
+    expect(expandComposerBuffer(restored.buffer)).toBe("before original pasted body after");
+    expect(restored.buffer.cursor).toBe(buffer.cursor);
+    expect(restored.buffer.nextPasteId).toBe(2);
+    expect(restored.imageLabelStartOverride).toBe(4);
+
+    const withSecondPaste = insertComposerPaste(restored.buffer, "second", "[paste two]");
+    expect(withSecondPaste.pastes.map((paste) => paste.id)).toEqual([1, 2]);
+  });
+
+  it("loads marker-shaped persisted history as literal text without resurrecting hidden content", () => {
+    const persisted = createComposerBuffer("[Pasted text #1 +9 lines]");
+    expect(hasActiveComposerPastes(persisted)).toBe(false);
+    expect(expandComposerBuffer(persisted)).toBe("[Pasted text #1 +9 lines]");
+  });
+
+  it("combines word-boundary navigation with token-aware cursor normalization", () => {
+    let buffer = insertComposerPaste(createComposerBuffer("prefix ", 7), "body", "[paste token]");
+    buffer = moveComposerCursor(buffer, buffer.text.length, "right");
+    const target = previousWordBoundary(buffer.text, buffer.cursor);
+    const moved = moveComposerCursor(buffer, target, "left");
+    expect(moved.cursor).toBe("prefix ".length);
   });
 });
 

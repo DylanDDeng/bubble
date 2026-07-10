@@ -23,7 +23,21 @@ import {
   type HistoryEntry,
   type HistoryScope,
 } from "./input-history.js";
+import {
+  cloneComposerBuffer,
+  createComposerBuffer,
+  deleteComposerBackward,
+  deleteComposerForward,
+  expandComposerBuffer,
+  hasActiveComposerPastes,
+  insertComposerPaste,
+  insertComposerText,
+  moveComposerCursor,
+  replaceComposerRange,
+  type ComposerBuffer,
+} from "./composer-buffer.js";
 import { isKeyReleaseEvent } from "./key-events.js";
+import { PasteOperationTracker } from "./paste-operation-tracker.js";
 import { stripTerminalMouseSequences } from "./terminal-mouse.js";
 import { submitPayloadFingerprint } from "./submit-dedupe.js";
 export {
@@ -33,10 +47,7 @@ export {
   type PastedContentReference,
 } from "../tui/paste-placeholder.js";
 import {
-  createPastedContentMarker,
-  expandPastedContentMarkers,
   shouldCollapsePastedContent,
-  type PastedContentReference,
 } from "../tui/paste-placeholder.js";
 import { imageDisplayLabel, stripInlineImageLabels } from "../tui/image-display.js";
 
@@ -75,6 +86,94 @@ interface InputBoxProps {
   cwd: string;
   sessionFile?: string;
   nextImageLabelStart?: number;
+}
+
+export interface ComposerDraftSnapshot {
+  buffer: ComposerBuffer;
+  attachments: ImageAttachment[];
+  imageLabelStartOverride: number | null;
+}
+
+export function createComposerDraftSnapshot(input: ComposerDraftSnapshot): ComposerDraftSnapshot {
+  return {
+    buffer: cloneComposerBuffer(input.buffer),
+    attachments: input.attachments.map((attachment) => ({ ...attachment })),
+    imageLabelStartOverride: input.imageLabelStartOverride,
+  };
+}
+
+export interface ComposerHistoryState {
+  buffer: ComposerBuffer;
+  attachments: ImageAttachment[];
+  imageLabelStartOverride: number | null;
+  historyIndex: number | null;
+  draftSnapshot: ComposerDraftSnapshot | null;
+}
+
+export interface ComposerHistoryTransition extends ComposerHistoryState {
+  changed: boolean;
+}
+
+/**
+ * Browse persisted history without turning marker-shaped text into live paste
+ * tokens, while preserving the exact unsent draft in memory for the final
+ * Down transition back out of history.
+ */
+export function stepComposerHistory(
+  state: ComposerHistoryState,
+  history: HistoryEntry[],
+  direction: "up" | "down",
+): ComposerHistoryTransition {
+  const plainDraft: HistoryEntry = state.draftSnapshot
+    ? {
+        text: state.draftSnapshot.buffer.text,
+        images: state.draftSnapshot.attachments,
+        ...(state.draftSnapshot.imageLabelStartOverride !== null
+          ? { imageDisplayStart: state.draftSnapshot.imageLabelStartOverride }
+          : {}),
+      }
+    : { text: "", images: [] };
+  const result = stepHistory(
+    { history, index: state.historyIndex, draft: plainDraft },
+    direction,
+    {
+      text: state.buffer.text,
+      images: state.attachments,
+      ...(state.imageLabelStartOverride !== null
+        ? { imageDisplayStart: state.imageLabelStartOverride }
+        : {}),
+    },
+  );
+
+  if (!result.changed) return { ...state, changed: false };
+
+  let draftSnapshot = state.draftSnapshot;
+  if (state.historyIndex === null && result.index !== null && draftSnapshot === null) {
+    draftSnapshot = createComposerDraftSnapshot({
+      buffer: state.buffer,
+      attachments: state.attachments,
+      imageLabelStartOverride: state.imageLabelStartOverride,
+    });
+  }
+
+  if (result.index === null && draftSnapshot) {
+    const restored = createComposerDraftSnapshot(draftSnapshot);
+    return {
+      ...restored,
+      historyIndex: null,
+      draftSnapshot: null,
+      changed: true,
+    };
+  }
+
+  return {
+    buffer: createComposerBuffer(result.text),
+    attachments: (result.images ?? []).map((attachment) => ({ ...attachment })),
+    imageLabelStartOverride: result.imageDisplayStart ?? null,
+    historyIndex: result.index,
+    draftSnapshot: result.index === null ? null : draftSnapshot,
+    changed: true,
+  };
 }
 
 const MAX_VISIBLE_LINES = 6;
@@ -374,6 +473,14 @@ export function resolveInkEnterIntent(
   return "submit";
 }
 
+export function shouldDeferComposerCommitWhilePastePending(
+  hasPendingPaste: boolean,
+  enterIntent: InkEnterIntent,
+  key: { tab?: boolean },
+): boolean {
+  return hasPendingPaste && (enterIntent === "submit" || key.tab === true);
+}
+
 export function insertNewlineAtCursor(text: string, cursor: number) {
   const clampedCursor = Math.max(0, Math.min(text.length, cursor));
   return {
@@ -495,33 +602,41 @@ export function InputBox({
   const historyScope = useMemo<HistoryScope>(() => ({ sessionFile, cwd }), [sessionFile, cwd]);
   const hardwareCursorEnabled = shouldUseHardwareComposerCursor();
 
-  const [text, setText] = useState("");
-  const [cursor, setCursor] = useState(0);
+  const [composerBuffer, setComposerBuffer] = useState<ComposerBuffer>(() => createComposerBuffer());
+  const composerBufferRef = useRef(composerBuffer);
+  composerBufferRef.current = composerBuffer;
+  const updateComposerBuffer = React.useCallback(
+    (transition: (current: ComposerBuffer) => ComposerBuffer): ComposerBuffer => {
+      const next = transition(composerBufferRef.current);
+      composerBufferRef.current = next;
+      setComposerBuffer(next);
+      return next;
+    },
+    [],
+  );
+  const { text, cursor } = composerBuffer;
   const [softwareCursorVisible, setSoftwareCursorVisible] = useState(true);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [projectFiles, setProjectFiles] = useState<string[] | null>(null);
   const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
   const [imageLabelStartOverride, setImageLabelStartOverride] = useState<number | null>(null);
-  const [pastedContentRefs, setPastedContentRefs] = useState<PastedContentReference[]>([]);
   const [history, setHistory] = useState<HistoryEntry[]>(() => loadHistoryEntriesSync({ scope: historyScope }));
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
-  const historyDraftRef = useRef<string | HistoryEntry>("");
+  const historyDraftRef = useRef<ComposerDraftSnapshot | null>(null);
   const historyScopeRef = useRef(historyScope);
+  const draftIdentityEpochRef = useRef(0);
+  const pasteOperationsRef = useRef(new PasteOperationTracker());
   const submittedPayloadFingerprintRef = useRef<string | null>(null);
   const loadingFilesRef = useRef(false);
-  const nextPastedContentIndexRef = useRef(1);
   // Kept equal to attachments.length so a synchronous multi-image paste loop
   // assigns each image its correct (distinct) inline label index.
   const attachmentCountRef = useRef(0);
-  // Paste and the keystrokes that follow can arrive inside the same stdin chunk
-  // and dispatch within one discreteUpdates batch. If the Enter that a user
-  // typed after a paste fires before React commits the paste-driven setState,
-  // useInput's Enter branch reads stale `text` and submits without the paste.
-  // This ref flips synchronously at paste-start and clears after the paste
-  // commit has been flushed — useInput's Enter handler bails while it's set.
-  const pastePendingRef = useRef(false);
-
   historyScopeRef.current = historyScope;
+
+  const invalidateDraftAsyncWork = React.useCallback(() => {
+    draftIdentityEpochRef.current += 1;
+    pasteOperationsRef.current.invalidateAll();
+  }, []);
 
   const ensureImageLabelStart = React.useCallback(() => {
     setImageLabelStartOverride((current) => current ?? nextImageLabelStart);
@@ -531,8 +646,13 @@ export function InputBox({
     setHistory(loadHistoryEntriesSync({ scope: historyScope }));
     setHistoryIndex(null);
     setImageLabelStartOverride(null);
-    historyDraftRef.current = "";
-  }, [historyScope]);
+    historyDraftRef.current = null;
+    invalidateDraftAsyncWork();
+  }, [historyScope, invalidateDraftAsyncWork]);
+
+  useEffect(() => () => {
+    invalidateDraftAsyncWork();
+  }, [invalidateDraftAsyncWork]);
 
   const isSlashContext = text.startsWith("/") && cursor > 0 && !text.includes("\n");
   const slashPrefix = isSlashContext ? text.slice(1).toLowerCase() : "";
@@ -625,15 +745,9 @@ export function InputBox({
   const insertTextAtCursor = React.useCallback(
     (insertion: string) => {
       if (!insertion) return;
-      setText((prev) => {
-        const c = cursor;
-        const before = prev.slice(0, c);
-        const after = prev.slice(c);
-        return before + insertion + after;
-      });
-      setCursor((c) => c + insertion.length);
+      updateComposerBuffer((current) => insertComposerText(current, insertion));
     },
-    [cursor],
+    [updateComposerBuffer],
   );
 
   const addAttachment = React.useCallback((att: ImageAttachment) => {
@@ -659,8 +773,9 @@ export function InputBox({
   // terminal has nothing textual to deliver. Probe the clipboard; if it yields
   // an image, treat the paste as an image attachment. macOS only — Linux/Win
   // terminals don't reliably emit empty pastes on image-only clipboards.
-  const tryClipboardImage = React.useCallback(async () => {
+  const tryClipboardImage = React.useCallback(async (expectedDraftEpoch: number) => {
     const { attachment, error } = await ingestClipboardImage();
+    if (draftIdentityEpochRef.current !== expectedDraftEpoch) return false;
     if (attachment) {
       addAttachment(attachment);
       return true;
@@ -672,12 +787,13 @@ export function InputBox({
   }, [addAttachment, notice]);
 
   usePaste((pasted) => {
-    pastePendingRef.current = true;
+    const pasteOperationId = pasteOperationsRef.current.begin();
+    const pasteDraftEpoch = draftIdentityEpochRef.current;
     // Clear the ref after React has committed the paste-driven setState.
     // setTimeout with 0 runs after the current discreteUpdates batch flushes.
     const clearPending = () => {
       setTimeout(() => {
-        pastePendingRef.current = false;
+        pasteOperationsRef.current.finish(pasteOperationId);
       }, 0);
     };
 
@@ -695,7 +811,7 @@ export function InputBox({
     // Empty paste on macOS usually means "Cmd+V with an image on the clipboard".
     if (clean.length === 0) {
       if (process.platform === "darwin") {
-        void tryClipboardImage().finally(clearPending);
+        void tryClipboardImage(pasteDraftEpoch).finally(clearPending);
       } else {
         clearPending();
       }
@@ -708,9 +824,11 @@ export function InputBox({
     // quietly.
     const bareName = bareImageFilenameFromPaste(clean);
     if (bareName && process.platform === "darwin") {
-      void tryClipboardImage()
+      void tryClipboardImage(pasteDraftEpoch)
         .then((attached) => {
-          if (!attached) insertTextAtCursor(clean);
+          if (draftIdentityEpochRef.current === pasteDraftEpoch && !attached) {
+            insertTextAtCursor(clean);
+          }
         })
         .finally(clearPending);
       return;
@@ -725,9 +843,7 @@ export function InputBox({
     if (imageTokens.length === 0) {
       // Plain text paste — insert into the input at the cursor.
       if (shouldCollapsePastedContent(clean)) {
-        const marker = createPastedContentMarker(clean, nextPastedContentIndexRef.current++);
-        setPastedContentRefs((prev) => [...prev, { marker, content: clean }]);
-        insertTextAtCursor(marker);
+        updateComposerBuffer((current) => insertComposerPaste(current, clean));
       } else {
         insertTextAtCursor(clean);
       }
@@ -737,6 +853,7 @@ export function InputBox({
 
     const handle = async () => {
       const results = await Promise.all(imageTokens.map((t) => ingestImagePath(t)));
+      if (draftIdentityEpochRef.current !== pasteDraftEpoch) return;
       const successful: ImageAttachment[] = [];
       const errors: string[] = [];
       for (let i = 0; i < results.length; i++) {
@@ -756,9 +873,11 @@ export function InputBox({
         process.platform === "darwin" &&
         imageTokens.some(isScreenshotTempPath)
       ) {
-        const clipOk = await tryClipboardImage();
+        const clipOk = await tryClipboardImage(pasteDraftEpoch);
         if (clipOk) return;
       }
+
+      if (draftIdentityEpochRef.current !== pasteDraftEpoch) return;
 
       for (const att of successful) addAttachment(att);
 
@@ -778,21 +897,19 @@ export function InputBox({
 
   const applyFileSuggestion = (selectedPath: string) => {
     if (!atContext) return;
-    const before = text.slice(0, atContext.start);
-    const after = text.slice(atContext.end);
     const insert = `@${selectedPath} `;
-    const newText = before + insert + after;
-    setText(newText);
-    setCursor(before.length + insert.length);
+    updateComposerBuffer((current) =>
+      replaceComposerRange(current, atContext.start, atContext.end, insert),
+    );
     setSelectedIndex(0);
   };
 
-  const submitInput = (submittedText: string, target: "submit" | "queue" = "submit") => {
+  const submitInput = (submittedBuffer: ComposerBuffer, target: "submit" | "queue" = "submit") => {
     const labelStartForSubmit = imageLabelStartOverride ?? nextImageLabelStart;
     const inlineLabels = attachments.map((_, index) => imageDisplayLabel(labelStartForSubmit + index));
     // Text-paste markers expand to their content (not replayable); image labels
     // are a composer-only affordance stripped here (replayable via attachments).
-    const pasteExpanded = expandPastedContentMarkers(submittedText, pastedContentRefs);
+    const pasteExpanded = expandComposerBuffer(submittedBuffer);
     const expandedText = stripInlineImageLabels(pasteExpanded, inlineLabels);
     if (expandedText.trim().length === 0 && attachments.length === 0) return;
     const deliver = target === "queue" && onQueue ? onQueue : onSubmit;
@@ -814,7 +931,7 @@ export function InputBox({
     // A collapsed text-paste marker cannot be safely replayed once its
     // in-memory reference is gone; skip those. Image-label stripping is fine to
     // replay (the attachments are stored on the history entry).
-    if (pasteExpanded === submittedText && (expandedText.trim().length > 0 || attachments.length > 0)) {
+    if (!hasActiveComposerPastes(submittedBuffer) && (expandedText.trim().length > 0 || attachments.length > 0)) {
       const historyEntry: HistoryEntry = {
         text: expandedText,
         images: attachments,
@@ -828,27 +945,26 @@ export function InputBox({
         return nextHistory;
       });
     }
-    setText("");
-    setCursor(0);
+    updateComposerBuffer(() => createComposerBuffer());
     setSelectedIndex(0);
     setAttachments([]);
     attachmentCountRef.current = 0;
     setImageLabelStartOverride(null);
-    setPastedContentRefs([]);
-    nextPastedContentIndexRef.current = 1;
     setHistoryIndex(null);
-    historyDraftRef.current = "";
+    historyDraftRef.current = null;
+    invalidateDraftAsyncWork();
   };
 
-  const applySlashEnterAction = (submittedText: string) => {
-    const action = resolveSlashEnterAction(submittedText, slashSuggestions, selectedIndex);
+  const applySlashEnterAction = (submittedBuffer: ComposerBuffer) => {
+    const action = resolveSlashEnterAction(submittedBuffer.text, slashSuggestions, selectedIndex);
     if (action.kind === "submit") {
-      submitInput(submittedText);
+      submitInput(submittedBuffer);
       return true;
     }
     if (action.kind === "complete") {
-      setText(action.text);
-      setCursor(action.text.length);
+      updateComposerBuffer((current) =>
+        replaceComposerRange(current, 0, current.text.length, action.text),
+      );
       setSelectedIndex(0);
       return true;
     }
@@ -879,20 +995,25 @@ export function InputBox({
     }
 
     const enterIntent = resolveInkEnterIntent(input, key);
+    if (shouldDeferComposerCommitWhilePastePending(
+      pasteOperationsRef.current.hasPending,
+      enterIntent,
+      key,
+    )) {
+      return;
+    }
 
     if (enterIntent === "newline") {
-      const next = insertNewlineAtCursor(text, cursor);
-      setText(next.text);
-      setCursor(next.cursor);
+      updateComposerBuffer((current) => insertComposerText(current, "\n"));
       setSelectedIndex(0);
       return;
     }
 
     if (enterIntent === "submit" && input && /[\r\n]/.test(input)) {
       const beforeReturn = input.split(/[\r\n]/)[0] ?? "";
-      const nextText = text.slice(0, cursor) + beforeReturn + text.slice(cursor);
+      const nextBuffer = insertComposerText(composerBufferRef.current, beforeReturn);
       if (showSuggestions) {
-        if (mode === "slash" && navigable && applySlashEnterAction(nextText)) {
+        if (mode === "slash" && navigable && applySlashEnterAction(nextBuffer)) {
           return;
         }
         if (mode === "file") {
@@ -903,7 +1024,7 @@ export function InputBox({
           return;
         }
       }
-      submitInput(nextText);
+      submitInput(nextBuffer);
       return;
     }
 
@@ -925,13 +1046,14 @@ export function InputBox({
       }
       if (key.return || key.tab) {
         if (mode === "slash" && navigable) {
-          if (key.return) applySlashEnterAction(text);
+          if (key.return) applySlashEnterAction(composerBufferRef.current);
           if (key.tab) {
             const suggestion = slashSuggestions[selectedIndex];
             if (suggestion) {
               const newText = `/${suggestion.name} `;
-              setText(newText);
-              setCursor(newText.length);
+              updateComposerBuffer((current) =>
+                replaceComposerRange(current, 0, current.text.length, newText),
+              );
               setSelectedIndex(0);
             }
           }
@@ -951,50 +1073,69 @@ export function InputBox({
     // While the agent runs, Tab queues the composer content for the next
     // turn (Enter steers — handled by the app-level submit routing).
     if (key.tab && !key.shift && onQueue && !showSuggestions) {
-      if (pastePendingRef.current) return;
-      submitInput(text, "queue");
+      submitInput(composerBufferRef.current, "queue");
       return;
     }
 
     if (enterIntent === "submit") {
       // A paste is still mid-flight — dropping this Enter avoids submitting
       // an input state that doesn't yet include the paste.
-      if (pastePendingRef.current) return;
-      submitInput(text);
+      submitInput(composerBufferRef.current);
       return;
     }
 
     const editAction = resolveComposerEditAction(input, key);
     if (editAction) {
       if (editAction === "word-left") {
-        setCursor(previousWordBoundary(text, cursor));
+        updateComposerBuffer((current) =>
+          moveComposerCursor(
+            current,
+            previousWordBoundary(current.text, current.cursor),
+            "left",
+          ),
+        );
       } else if (editAction === "word-right") {
-        setCursor(nextWordBoundary(text, cursor));
+        updateComposerBuffer((current) =>
+          moveComposerCursor(
+            current,
+            nextWordBoundary(current.text, current.cursor),
+            "right",
+          ),
+        );
       } else if (editAction === "line-start") {
-        setCursor(lineStartBoundary(text, cursor));
+        updateComposerBuffer((current) =>
+          moveComposerCursor(current, lineStartBoundary(current.text, current.cursor), "left"),
+        );
       } else if (editAction === "line-end") {
-        setCursor(lineEndBoundary(text, cursor));
+        updateComposerBuffer((current) =>
+          moveComposerCursor(current, lineEndBoundary(current.text, current.cursor), "right"),
+        );
       } else if (editAction === "delete-line-start") {
-        const next = deleteToLineStart(text, cursor);
-        setText(next.text);
-        setCursor(next.cursor);
+        updateComposerBuffer((current) =>
+          replaceComposerRange(
+            current,
+            lineStartBoundary(current.text, current.cursor),
+            current.cursor,
+          ),
+        );
       } else {
-        const next = deleteToLineEnd(text, cursor);
-        setText(next.text);
-        setCursor(next.cursor);
+        updateComposerBuffer((current) =>
+          replaceComposerRange(
+            current,
+            current.cursor,
+            lineEndBoundary(current.text, current.cursor),
+          ),
+        );
       }
       setSelectedIndex(0);
       return;
     }
 
     if (key.backspace) {
-      if (cursor > 0) {
-        const before = text.slice(0, cursor - 1);
-        const after = text.slice(cursor);
-        setText(before + after);
-        setCursor(cursor - 1);
+      if (composerBufferRef.current.cursor > 0) {
+        updateComposerBuffer((current) => deleteComposerBackward(current));
         setSelectedIndex(0);
-      } else if (attachments.length > 0) {
+      } else if (attachmentCountRef.current > 0) {
         // Backspace at position 0 drops the most recent attachment so users
         // can undo a misfired paste without submitting the message.
         setAttachments((prev) => {
@@ -1008,22 +1149,22 @@ export function InputBox({
     }
 
     if (key.delete) {
-      if (cursor < text.length) {
-        const next = deleteAtCursor(text, cursor);
-        setText(next.text);
-        setCursor(next.cursor);
-        setSelectedIndex(0);
-      }
+      updateComposerBuffer((current) => deleteComposerForward(current));
+      setSelectedIndex(0);
       return;
     }
 
     if (key.leftArrow) {
-      setCursor(Math.max(0, cursor - 1));
+      updateComposerBuffer((current) =>
+        moveComposerCursor(current, current.cursor - 1, "left"),
+      );
       setSelectedIndex(0);
       return;
     }
     if (key.rightArrow) {
-      setCursor(Math.min(text.length, cursor + 1));
+      updateComposerBuffer((current) =>
+        moveComposerCursor(current, current.cursor + 1, "right"),
+      );
       setSelectedIndex(0);
       return;
     }
@@ -1041,10 +1182,7 @@ export function InputBox({
     if (input) {
       const printable = input.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
       if (!printable) return;
-      const before = text.slice(0, cursor);
-      const after = text.slice(cursor);
-      setText(before + printable + after);
-      setCursor(cursor + printable.length);
+      updateComposerBuffer((current) => insertComposerText(current, printable));
       setSelectedIndex(0);
     }
   });
@@ -1084,18 +1222,16 @@ export function InputBox({
   useLayoutEffect(() => {
     if (lastDraftEpochRef.current === draftEpoch) return;
     lastDraftEpochRef.current = draftEpoch;
-    if (!draftText) return;
+    if (draftText === undefined) return;
 
-    setText(draftText);
-    setCursor(draftText.length);
+    updateComposerBuffer(() => createComposerBuffer(draftText));
     setSelectedIndex(0);
     setAttachments([]);
     attachmentCountRef.current = 0;
     setImageLabelStartOverride(null);
-    setPastedContentRefs([]);
-    nextPastedContentIndexRef.current = 1;
     setHistoryIndex(null);
-    historyDraftRef.current = "";
+    historyDraftRef.current = null;
+    invalidateDraftAsyncWork();
     onDraftApplied?.();
   }, [draftEpoch, draftText, onDraftApplied]);
 
@@ -1166,33 +1302,47 @@ export function InputBox({
   // bottom edge (Down → next message, then back to the in-progress draft).
   const performVerticalArrowRef = useRef<(direction: "up" | "down") => void>(() => {});
   performVerticalArrowRef.current = (direction) => {
+    // A paste and the following key can arrive in one stdin batch. Wait for
+    // that paste transition to commit before moving or snapshotting history.
+    if (pasteOperationsRef.current.hasPending) return;
+
     if (direction === "up") {
       if (cursorVisualRow > 0) {
-        setCursor(displayCursorToSourceCursor(visualToCursor(visualLines, cursorVisualRow - 1, cursorVisualCol)));
+        const requested = displayCursorToSourceCursor(
+          visualToCursor(visualLines, cursorVisualRow - 1, cursorVisualCol),
+        );
+        updateComposerBuffer((current) => moveComposerCursor(current, requested, "nearest"));
         return;
       }
     } else {
       if (cursorVisualRow < visualLines.length - 1) {
-        setCursor(displayCursorToSourceCursor(visualToCursor(visualLines, cursorVisualRow + 1, cursorVisualCol)));
+        const requested = displayCursorToSourceCursor(
+          visualToCursor(visualLines, cursorVisualRow + 1, cursorVisualCol),
+        );
+        updateComposerBuffer((current) => moveComposerCursor(current, requested, "nearest"));
         return;
       }
     }
-    const result = stepHistory(
-      { history, index: historyIndex, draft: historyDraftRef.current },
+    const result = stepComposerHistory(
+      {
+        buffer: composerBufferRef.current,
+        attachments,
+        imageLabelStartOverride,
+        historyIndex,
+        draftSnapshot: historyDraftRef.current,
+      },
+      history,
       direction,
-      { text, images: attachments },
     );
     if (result.changed) {
-      setText(result.text);
-      setCursor(result.text.length);
-      setAttachments(result.images ?? []);
-      attachmentCountRef.current = (result.images ?? []).length;
-      setImageLabelStartOverride(result.imageDisplayStart ?? null);
-      setHistoryIndex(result.index);
-      historyDraftRef.current = result.draft;
+      updateComposerBuffer(() => result.buffer);
+      setAttachments(result.attachments);
+      attachmentCountRef.current = result.attachments.length;
+      setImageLabelStartOverride(result.imageLabelStartOverride);
+      setHistoryIndex(result.historyIndex);
+      historyDraftRef.current = result.draftSnapshot;
       setSelectedIndex(0);
-      setPastedContentRefs([]);
-      nextPastedContentIndexRef.current = 1;
+      invalidateDraftAsyncWork();
     } else if (direction === "down") {
       // At the bottom edge with nothing newer in history: hand Down to the
       // parent so focus can move into the subagent entry (Claude Code parity).
