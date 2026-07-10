@@ -10,6 +10,7 @@ import {
   isUserVisibleProvider,
   type ModelDiscoverySource,
   type ModelInfo,
+  type ProviderProfile,
 } from "../provider-registry.js";
 import { listBuiltinModels } from "../model-catalog.js";
 import { padVisual, truncateVisual } from "../text-display.js";
@@ -97,6 +98,11 @@ export function formatSkillPickerRow(
 
 export const MODEL_PICKER_MAX_BODY_ROWS = 10;
 export const MODEL_PICKER_CHROME_ROWS = 14;
+export const MODEL_PICKER_RECENT_FAMILY_LIMIT = 3;
+
+export type ModelPickerDisplayItem =
+  | { kind: "header"; key: string; label: string }
+  | { kind: "model"; key: string; option: ModelPickerOption };
 
 export function modelPickerBodyRows(termHeight: number): number {
   const rows = Number.isFinite(termHeight) ? Math.floor(termHeight) : 24;
@@ -126,7 +132,88 @@ export function padPickerRows(rows: string[], bodyRows: number, width: number): 
 }
 
 export function modelPickerRecentKey(recent: readonly string[]): string {
-  return recent.slice(0, 5).join("\u0000");
+  return recent.join("\u0000");
+}
+
+/**
+ * Returns a provider-scoped family key for model ordering.
+ *
+ * Keep this deliberately conservative: suffixes such as `mini`, `codex`,
+ * `spark`, or `highspeed` often describe distinct products rather than
+ * interchangeable siblings. The Codex Sol/Terra/Luna trio is the one family
+ * whose relationship is explicitly declared by the provider catalog.
+ */
+export function modelPickerFamilyKey(
+  provider: Pick<ProviderProfile, "id" | "authType">,
+  modelId: string,
+): string {
+  const isCodexOAuth = provider.id === "openai-codex"
+    || (provider.id === "openai" && provider.authType === "oauth");
+  if (isCodexOAuth) {
+    const match = /^(gpt-\d+(?:\.\d+)+)-(sol|terra|luna)$/i.exec(modelId);
+    if (match) return `${provider.id}:${match[1].toLowerCase()}:sol-terra-luna`;
+  }
+  return `${provider.id}:${modelId}`;
+}
+
+export function buildModelPickerDisplayItems(
+  options: readonly ModelPickerOption[],
+): ModelPickerDisplayItem[] {
+  const items: ModelPickerDisplayItem[] = [];
+  let previousGroup: string | undefined;
+  let headerIndex = 0;
+  for (const option of options) {
+    if (option.group !== previousGroup) {
+      previousGroup = option.group;
+      items.push({
+        kind: "header",
+        key: `header:${headerIndex++}:${option.group}`,
+        label: option.group,
+      });
+    }
+    items.push({ kind: "model", key: option.id, option });
+  }
+  return items;
+}
+
+export function resolveModelPickerDisplayIndex(
+  items: readonly ModelPickerDisplayItem[],
+  selectedId: string | undefined,
+): number {
+  if (selectedId) {
+    const selectedIndex = items.findIndex(
+      (item) => item.kind === "model" && item.option.id === selectedId,
+    );
+    if (selectedIndex >= 0) return selectedIndex;
+  }
+  const firstModelIndex = items.findIndex((item) => item.kind === "model");
+  return firstModelIndex >= 0 ? firstModelIndex : 0;
+}
+
+export function filterAndRankModelPickerOptions(
+  options: readonly ModelPickerOption[],
+  query: string,
+): ModelPickerOption[] {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return [...options];
+
+  return options
+    .map((option, index) => {
+      const { modelId } = decodeModel(option.id);
+      const fields = [option.label, modelId, option.id, option.providerBadge]
+        .map((value) => value.toLowerCase());
+      const rank = fields.some((value) => value === normalized)
+        ? 0
+        : fields.some((value) => value.startsWith(normalized))
+          ? 1
+          : fields.some((value) => value.includes(normalized))
+            ? 2
+            : Number.POSITIVE_INFINITY;
+      return { option, index, rank };
+    })
+    .filter((entry) => Number.isFinite(entry.rank))
+    .sort((left, right) => left.rank - right.rank || left.index - right.index)
+    .map((entry) => entry.option);
 }
 
 function isThinkingToggleOption(option: Pick<ModelPickerOption, "id" | "providerBadge">): boolean {
@@ -398,11 +485,7 @@ export function ModelPicker({ registry, current, currentThinkingLevel, recent, o
   }, [registry, providerKey, refreshGeneration]);
 
   const options = useMemo(() => {
-    if (!query.trim()) return rawOptions;
-    const q = query.toLowerCase();
-    return rawOptions.filter((opt) =>
-      opt.label.toLowerCase().includes(q) || opt.providerBadge.toLowerCase().includes(q)
-    );
+    return filterAndRankModelPickerOptions(rawOptions, query);
   }, [rawOptions, query]);
 
   const resolvedSelectedId = resolveSelectedModelId(options, selectedId);
@@ -499,32 +582,43 @@ export function ModelPicker({ registry, current, currentThinkingLevel, recent, o
     }
   });
 
-  const safeSelectedIndex = selectedIndex >= 0 ? selectedIndex : 0;
-  const start = pickerWindowStart(safeSelectedIndex, options.length, bodyRows);
-  const visible = options.slice(start, start + bodyRows);
+  const displayItems = buildModelPickerDisplayItems(options);
+  const safeSelectedDisplayIndex = resolveModelPickerDisplayIndex(displayItems, resolvedSelectedId);
+  const start = pickerWindowStart(safeSelectedDisplayIndex, displayItems.length, bodyRows);
+  const visible = displayItems.slice(start, start + bodyRows);
   const rawModelRows = options.length === 0
     ? [{
         key: "no-results",
         row: formatNoModelResultsRow(query, rowWidth),
         selected: false,
+        header: false,
       }]
-    : visible.map((opt, i) => {
-        const actualIndex = start + i;
-        const isSelected = selectedIndex >= 0 && actualIndex === safeSelectedIndex;
+    : visible.map((item) => {
+        if (item.kind === "header") {
+          return {
+            key: item.key,
+            row: padVisual(truncateVisual(`  ${item.label}`, rowWidth), rowWidth),
+            selected: false,
+            header: true,
+          };
+        }
+        const isSelected = item.option.id === resolvedSelectedId;
         return {
-          key: opt.id,
-          row: formatModelPickerRow(opt, {
+          key: item.key,
+          row: formatModelPickerRow(item.option, {
             selected: isSelected,
-            current: opt.id === current,
+            current: item.option.id === current,
             width: rowWidth,
           }),
           selected: isSelected,
+          header: false,
         };
       });
   const modelRows = padPickerRows(rawModelRows.map((row) => row.row), bodyRows, rowWidth).map((row, index) => ({
     key: rawModelRows[index]?.key ?? `blank-${index}`,
     row,
     selected: rawModelRows[index]?.selected ?? false,
+    header: rawModelRows[index]?.header ?? false,
   }));
   const highlightedOption = selectedIndex >= 0 ? options[selectedIndex] : undefined;
   const enterAction = highlightedOption
@@ -564,9 +658,12 @@ export function ModelPicker({ registry, current, currentThinkingLevel, recent, o
         </>
       )}
       {phase.kind === "model" && <Box flexDirection="column" height={bodyRows} overflow="hidden" marginTop={1}>
-        {modelRows.map(({ key, row, selected }) => (
+        {modelRows.map(({ key, row, selected, header }) => (
           <Box key={key} height={1} overflow="hidden">
-            <Text color={selected ? theme.accent : (key === "no-results" ? theme.muted : undefined)} bold={selected}>
+            <Text
+              color={selected ? theme.accent : (header || key === "no-results" ? theme.muted : undefined)}
+              bold={selected || header}
+            >
               {row}
             </Text>
           </Box>
@@ -677,24 +774,101 @@ export function buildMergedModelOptions(input: {
 }): ModelPickerOption[] {
   const opts: ModelPickerOption[] = [];
   const seen = new Set<string>();
-  const recentIds = [...new Set(input.recent.slice(0, 5))];
-  const pinnedIds = currentFirstWhenNotRecent(input.current, recentIds);
+  const providerById = new Map(input.providers.map((provider) => [provider.id, provider]));
+  const effectiveModelsByProvider = new Map(input.providers.map((provider) => {
+    const localModels = input.localModelsByProvider.get(provider.id) ?? [];
+    const discovery = input.discoveries.get(provider.id);
+    return [provider.id, effectiveProviderModels(localModels, discovery)] as const;
+  }));
+  const promotedFamilies = new Set<string>();
+  const promotedRecentProviderIds: string[] = [];
 
-  for (const model of pinnedIds) {
-    const option = pinnedModelOption({
-      id: model,
-      group: recentIds.includes(model) ? "Recent" : "Current",
+  const familyKeyForId = (id: string): string => {
+    const { providerId, modelId } = decodeModel(id);
+    const provider = providerId ? providerById.get(providerId) : undefined;
+    return provider
+      ? modelPickerFamilyKey(provider, modelId)
+      : `unknown:${id}`;
+  };
+
+  const appendPinned = (id: string, group: "Current" | "Recent") => {
+    appendModelOption(opts, seen, pinnedModelOption({
+      id,
+      group,
       providers: input.providers,
       localModelsByProvider: input.localModelsByProvider,
       discoveries: input.discoveries,
-    });
-    appendModelOption(opts, seen, option);
+    }));
+  };
+
+  const appendFamily = (seedId: string, group: "Current" | "Recent") => {
+    const { providerId, modelId } = decodeModel(seedId);
+    const provider = providerId ? providerById.get(providerId) : undefined;
+    if (!provider) {
+      appendPinned(seedId, group);
+      return;
+    }
+
+    const familyKey = modelPickerFamilyKey(provider, modelId);
+    const familyModels = (effectiveModelsByProvider.get(provider.id) ?? [])
+      .filter((model) => modelPickerFamilyKey(provider, model.id) === familyKey);
+    for (const model of familyModels) {
+      appendModelOption(opts, seen, {
+        ...modelOptionMetadata(encodeModel(provider.id, model.id), model, true),
+        group,
+        providerBadge: provider.name,
+        available: true,
+        pending: false,
+      });
+    }
+    // Keep an exact Current/Recent pin visible even when an authoritative
+    // catalog no longer contains it. It remains unavailable and never causes
+    // local siblings to be reintroduced.
+    if (!familyModels.some((model) => model.id === modelId)) appendPinned(seedId, group);
+  };
+
+  if (input.current) {
+    appendPinned(input.current, "Current");
+    const currentFamilyKey = familyKeyForId(input.current);
+    promotedFamilies.add(currentFamilyKey);
+    appendFamily(input.current, "Current");
   }
 
-  for (const provider of input.providers) {
-    const localModels = input.localModelsByProvider.get(provider.id) ?? [];
-    const discovery = input.discoveries.get(provider.id);
-    for (const model of effectiveProviderModels(localModels, discovery)) {
+  let recentFamilyCount = 0;
+  for (const recentId of [...new Set(input.recent)]) {
+    if (!recentId || recentId === input.current) continue;
+    const familyKey = familyKeyForId(recentId);
+    if (promotedFamilies.has(familyKey)) {
+      // A previously promoted family may not contain this exact Recent model
+      // in an authoritative catalog. Preserve that pin as unavailable; when
+      // it is present, exact-ID deduplication makes this a no-op.
+      appendPinned(recentId, "Recent");
+      continue;
+    }
+    promotedFamilies.add(familyKey);
+    recentFamilyCount += 1;
+    const { providerId } = decodeModel(recentId);
+    if (providerId && providerById.has(providerId) && !promotedRecentProviderIds.includes(providerId)) {
+      promotedRecentProviderIds.push(providerId);
+    }
+    appendFamily(recentId, "Recent");
+    if (recentFamilyCount >= MODEL_PICKER_RECENT_FAMILY_LIMIT) break;
+  }
+
+  const orderedProviderIds: string[] = [];
+  const addProviderId = (providerId: string | undefined) => {
+    if (providerId && providerById.has(providerId) && !orderedProviderIds.includes(providerId)) {
+      orderedProviderIds.push(providerId);
+    }
+  };
+  addProviderId(decodeModel(input.current).providerId);
+  for (const providerId of promotedRecentProviderIds) addProviderId(providerId);
+  for (const provider of input.providers) addProviderId(provider.id);
+
+  for (const providerId of orderedProviderIds) {
+    const provider = providerById.get(providerId);
+    if (!provider) continue;
+    for (const model of effectiveModelsByProvider.get(provider.id) ?? []) {
       appendModelOption(opts, seen, {
         ...modelOptionMetadata(encodeModel(provider.id, model.id), model, true),
         group: provider.name,
@@ -733,11 +907,6 @@ function appendModelOption(
   if (seen.has(option.id)) return;
   seen.add(option.id);
   options.push(option);
-}
-
-function currentFirstWhenNotRecent(current: string, recent: readonly string[]): string[] {
-  if (!current || recent.includes(current)) return [...recent];
-  return [current, ...recent];
 }
 
 function pinnedModelOption(input: {

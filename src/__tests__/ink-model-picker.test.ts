@@ -4,9 +4,11 @@ import { describe, expect, it, vi } from "vitest";
 import type { ModelInfo, ProviderProfile, ProviderRegistry } from "../provider-registry.js";
 import type { ThinkingLevel } from "../types.js";
 import {
+  buildModelPickerDisplayItems,
   buildMergedModelOptions,
   buildLocalModelOptions,
   clampPickerIndex,
+  filterAndRankModelPickerOptions,
   formatEffortPickerRow,
   formatModelDiscoveryStatus,
   formatModelPickerRow,
@@ -16,6 +18,7 @@ import {
   isPrintablePickerInput,
   isModelOptionSelectable,
   modelPickerBodyRows,
+  modelPickerFamilyKey,
   modelPickerRecentKey,
   ModelPicker,
   moveModelSelection,
@@ -23,6 +26,7 @@ import {
   pickerWindowStart,
   preferredEffortIndex,
   reconcileModelPickerPhase,
+  resolveModelPickerDisplayIndex,
   resolveSelectedModelId,
   resolvePickerKeyAction,
   shouldOpenEffortPicker,
@@ -101,21 +105,173 @@ describe("Ink model picker", () => {
 
     expect(options.map((item) => item.id)).toEqual([
       "openai:gpt-5.6-sol",
-      "openai:gpt-retired",
       "openai:gpt-5.6-terra",
+      "openai:gpt-retired",
     ]);
     expect(options.filter((item) => item.id === "openai:gpt-5.6-sol")).toHaveLength(1);
     expect(options[0]).toMatchObject({
       label: "GPT-5.6-Sol remote",
-      group: "Recent",
+      group: "Current",
       reasoningLevels: ["low", "medium", "high"],
       defaultReasoningLevel: "medium",
       contextWindow: 999000,
       toolOutputTokenLimit: 12345,
       available: true,
     });
-    expect(options[1]).toMatchObject({ group: "Recent", available: false, pending: false });
+    expect(options[1]).toMatchObject({ group: "Current", available: true, pending: false });
+    expect(options[2]).toMatchObject({ group: "Recent", available: false, pending: false });
     expect(options.map((item) => item.id)).not.toContain("openai:gpt-5.6-luna");
+  });
+
+  it("promotes a complete recent GPT-5.6 family in authoritative catalog order", () => {
+    const openai = provider({ id: "openai", name: "OpenAI", authType: "oauth" });
+    const deepseek = provider({ id: "deepseek", name: "DeepSeek" });
+    const discoveries = new Map<string, ModelProviderDiscoveryState>([["openai", {
+      status: "complete",
+      source: "remote",
+      authoritative: true,
+      models: [
+        model("gpt-5.6-sol", ["low", "medium"], "low"),
+        model("gpt-5.6-terra", ["low", "medium"], "medium"),
+        model("gpt-5.6-luna", ["low", "medium"], "medium"),
+        model("gpt-5.5", ["low", "medium"], "medium"),
+        model("gpt-5.4", ["low", "medium"], "medium"),
+      ],
+    }]]);
+
+    const options = buildMergedModelOptions({
+      providers: [openai, deepseek],
+      localModelsByProvider: new Map([
+        ["openai", []],
+        ["deepseek", [{ ...model("deepseek-v4-pro", ["high", "max"], "high"), providerId: "deepseek" }]],
+      ]),
+      discoveries,
+      current: "deepseek:deepseek-v4-pro",
+      recent: [
+        "deepseek:deepseek-v4-pro",
+        "openai:gpt-5.6-luna",
+        "openai:gpt-5.6-sol",
+        "openai:gpt-5.5",
+      ],
+    });
+
+    expect(options.map((item) => item.id)).toEqual([
+      "deepseek:deepseek-v4-pro",
+      "openai:gpt-5.6-sol",
+      "openai:gpt-5.6-terra",
+      "openai:gpt-5.6-luna",
+      "openai:gpt-5.5",
+      "openai:gpt-5.4",
+    ]);
+    expect(options.slice(1, 5).every((item) => item.group === "Recent")).toBe(true);
+    expect(options.filter((item) => item.id === "openai:gpt-5.6-luna")).toHaveLength(1);
+  });
+
+  it("limits promotion to three recent families and leaves provider order stable", () => {
+    const openai = provider({ id: "openai", name: "OpenAI", authType: "oauth" });
+    const remoteModels = [
+      model("gpt-5.3-codex", ["low"], "low"),
+      model("gpt-5.6-sol", ["low"], "low"),
+      model("gpt-5.6-terra", ["low"], "low"),
+      model("gpt-5.6-luna", ["low"], "low"),
+      model("gpt-5.5", ["low"], "low"),
+      model("gpt-5.4", ["low"], "low"),
+    ];
+    const options = buildMergedModelOptions({
+      providers: [openai],
+      localModelsByProvider: new Map([["openai", remoteModels]]),
+      discoveries: new Map([["openai", {
+        status: "complete" as const,
+        source: "remote" as const,
+        authoritative: true,
+        models: remoteModels,
+      }]]),
+      current: "",
+      recent: [
+        "openai:gpt-5.6-luna",
+        "openai:gpt-5.6-terra",
+        "openai:gpt-5.5",
+        "openai:gpt-5.4",
+        "openai:gpt-5.3-codex",
+      ],
+    });
+
+    expect(options.map((item) => item.id)).toEqual([
+      "openai:gpt-5.6-sol",
+      "openai:gpt-5.6-terra",
+      "openai:gpt-5.6-luna",
+      "openai:gpt-5.5",
+      "openai:gpt-5.4",
+      "openai:gpt-5.3-codex",
+    ]);
+    expect(options.slice(0, 5).every((item) => item.group === "Recent")).toBe(true);
+    expect(options[5].group).toBe("OpenAI");
+  });
+
+  it("does not infer GPT families for API-key providers", () => {
+    const openai = provider({ id: "openai", name: "OpenAI", authType: "api" });
+    const models = [
+      model("gpt-5.6-sol", ["low"], "low"),
+      model("gpt-5.6-terra", ["low"], "low"),
+      model("gpt-5.6-luna", ["low"], "low"),
+    ];
+    const options = buildMergedModelOptions({
+      providers: [openai],
+      localModelsByProvider: new Map([["openai", models]]),
+      discoveries: new Map(),
+      current: "",
+      recent: ["openai:gpt-5.6-luna"],
+    });
+
+    expect(options.map((item) => item.id)).toEqual([
+      "openai:gpt-5.6-luna",
+      "openai:gpt-5.6-sol",
+      "openai:gpt-5.6-terra",
+    ]);
+  });
+
+  it("never restores family siblings omitted by an authoritative catalog", () => {
+    const openai = provider({ id: "openai", name: "OpenAI", authType: "oauth" });
+    const localModels = [
+      model("gpt-5.6-sol", ["low"], "low"),
+      model("gpt-5.6-terra", ["low"], "low"),
+      model("gpt-5.6-luna", ["low"], "low"),
+    ];
+    const options = buildMergedModelOptions({
+      providers: [openai],
+      localModelsByProvider: new Map([["openai", localModels]]),
+      discoveries: new Map([["openai", {
+        status: "complete" as const,
+        source: "remote" as const,
+        authoritative: true,
+        models: [model("gpt-5.6-sol", ["low"], "low")],
+      }]]),
+      current: "openai:gpt-5.6-sol",
+      recent: ["openai:gpt-5.6-sol", "openai:gpt-5.6-luna"],
+    });
+
+    expect(options.map((item) => item.id)).toEqual([
+      "openai:gpt-5.6-sol",
+      "openai:gpt-5.6-luna",
+    ]);
+    expect(options.find((item) => item.id === "openai:gpt-5.6-luna")).toMatchObject({
+      group: "Recent",
+      available: false,
+      pending: false,
+    });
+    expect(options.map((item) => item.id)).not.toContain("openai:gpt-5.6-terra");
+  });
+
+  it("uses a conservative provider-scoped family key", () => {
+    const oauth = provider({ id: "openai", name: "OpenAI", authType: "oauth" });
+    const api = provider({ id: "openai", name: "OpenAI", authType: "api" });
+    const solFamily = modelPickerFamilyKey(oauth, "gpt-5.6-sol");
+
+    expect(modelPickerFamilyKey(oauth, "gpt-5.6-terra")).toBe(solFamily);
+    expect(modelPickerFamilyKey(oauth, "gpt-5.6-luna")).toBe(solFamily);
+    expect(modelPickerFamilyKey(oauth, "gpt-5.7-sol")).not.toBe(solFamily);
+    expect(modelPickerFamilyKey(oauth, "gpt-5.4-mini")).not.toBe(modelPickerFamilyKey(oauth, "gpt-5.4"));
+    expect(modelPickerFamilyKey(api, "gpt-5.6-sol")).not.toBe(modelPickerFamilyKey(api, "gpt-5.6-terra"));
   });
 
   it("rebuilds provider sections in provider order, independent of completion order", () => {
@@ -277,7 +433,51 @@ describe("Ink model picker", () => {
     expect(modelPickerRecentKey(["openai:gpt-a"]))
       .not.toBe(modelPickerRecentKey(["openai:gpt-b"]));
     expect(modelPickerRecentKey(["a", "b", "c", "d", "e", "ignored"]))
-      .toBe(modelPickerRecentKey(["a", "b", "c", "d", "e", "different"]));
+      .not.toBe(modelPickerRecentKey(["a", "b", "c", "d", "e", "different"]));
+  });
+
+  it("builds labeled display groups without duplicating model rows", () => {
+    const current = option("openai:gpt-5.6-sol", ["low"], { group: "Current" });
+    const terra = option("openai:gpt-5.6-terra", ["low"], { group: "Current" });
+    const recent = option("openai:gpt-5.5", ["low"], { group: "Recent" });
+    const items = buildModelPickerDisplayItems([current, terra, recent]);
+
+    expect(items.map((item) => item.kind === "header" ? `header:${item.label}` : item.option.id)).toEqual([
+      "header:Current",
+      "openai:gpt-5.6-sol",
+      "openai:gpt-5.6-terra",
+      "header:Recent",
+      "openai:gpt-5.5",
+    ]);
+  });
+
+  it("keeps a pending model visible in a one-row viewport instead of its header", () => {
+    const pending = option("openai:gpt-pending", [], {
+      group: "Current",
+      available: false,
+      pending: true,
+    });
+    const items = buildModelPickerDisplayItems([pending]);
+    const selectedId = resolveSelectedModelId([pending], pending.id);
+    const anchor = resolveModelPickerDisplayIndex(items, selectedId);
+    const start = pickerWindowStart(anchor, items.length, 1);
+    const visible = items.slice(start, start + 1);
+
+    expect(selectedId).toBeUndefined();
+    expect(visible).toHaveLength(1);
+    expect(visible[0]).toMatchObject({ kind: "model", key: pending.id });
+  });
+
+  it("ranks exact, prefix, and substring search matches", () => {
+    const contains = option("openai:contains", ["low"], { label: "My Terra Proxy" });
+    const prefix = option("openai:prefix", ["low"], { label: "Terra Preview" });
+    const exact = option("openai:exact", ["low"], { label: "Terra" });
+
+    expect(filterAndRankModelPickerOptions([contains, prefix, exact], "terra").map((item) => item.id)).toEqual([
+      "openai:exact",
+      "openai:prefix",
+      "openai:contains",
+    ]);
   });
 
   it("clamps picker indexes without producing negative empty-list selections", () => {
