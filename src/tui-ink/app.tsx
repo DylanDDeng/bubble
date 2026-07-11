@@ -2659,7 +2659,24 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         </Box>
       )}
       {!isExiting && isRunning && !pickerMode && !statsPanel && !pendingPlan && !pendingApproval && !pendingQuestion && !pendingFeedback && (
-        <Box paddingX={1} paddingBottom={1} flexShrink={0} backgroundColor={palette.background}>
+        // The streaming tail supplies its own bottom margin once it has
+        // visible output, but right after a prompt is sent the tail renders
+        // nothing and the spinner would hug the user's message bubble — give
+        // it a top gap only in that empty-tail state to avoid double spacing.
+        <Box
+          paddingX={1}
+          paddingBottom={1}
+          paddingTop={
+            streamingParts.length === 0
+              && streamingContent.length === 0
+              && streamingTools.length === 0
+              && (streamingReasoning.length === 0 || !(showThinking || verboseTrace))
+              ? 1
+              : 0
+          }
+          flexShrink={0}
+          backgroundColor={palette.background}
+        >
           <WaitingIndicator
             tools={streamingTools}
             hasStreamingText={streamingContent.length > 0}
