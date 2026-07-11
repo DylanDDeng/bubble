@@ -34,6 +34,7 @@ import { QuestionController } from "./question/index.js";
 import {
   buildMemoryPrompt,
   formatMemoryStartupResult,
+  purgeUnsafeMemorySources,
   recordMemoryCitations,
   runMemoryPhase2,
   runMemoryStartupPipeline,
@@ -48,6 +49,8 @@ import {
   summarizeTraceMessage,
   traceEvent,
 } from "./debug-trace.js";
+import { shouldRejectGrokSessionInPrintMode } from "./external-runtime/session-policy.js";
+import type { ExternalRuntimeManager } from "./external-runtime/types.js";
 
 type TerminalTheme = "light" | "dark";
 
@@ -118,6 +121,7 @@ async function main() {
         promptCacheKey: sessionPromptCacheKey,
         protocol: defaultProvider.protocol,
         openAICodexAuth: registry.createOpenAICodexAuthAdapter(defaultProvider.id),
+        grokAuth: registry.createGrokAuthAdapter(defaultProvider.id),
       })
     : createUnavailableProvider(unavailableProviderMessage);
   const createProvider = (providerId: string, apiKey: string, baseURL: string) =>
@@ -129,6 +133,7 @@ async function main() {
       promptCacheKey: sessionPromptCacheKey,
       protocol: registry.getConfigured().find((provider) => provider.id === providerId)?.protocol,
       openAICodexAuth: registry.createOpenAICodexAuthAdapter(providerId),
+      grokAuth: registry.createGrokAuthAdapter(providerId),
     });
   const createProviderForRoute = async (route: { providerId: string; model: string }) => {
     const providerId = route.providerId;
@@ -212,6 +217,7 @@ async function main() {
     console.error(chalk.yellow(`[mcp:${d.scope}] ${d.path}: ${d.message}`));
   }
   const mcpManager = new McpManager({ servers: mcpLoaded.servers });
+  let externalRuntime: ExternalRuntimeManager | undefined;
   if (mcpLoaded.servers.length > 0) {
     await mcpManager.start();
     // Only surface failures at startup. Successful connections would push the
@@ -240,8 +246,18 @@ async function main() {
       // ignore — we're exiting anyway
     }
   };
-  process.once("SIGINT", () => { void shutdownMcp().then(() => process.exit(130)); });
-  process.once("SIGTERM", () => { void shutdownMcp().then(() => process.exit(143)); });
+  const shutdownExternalRuntime = async () => {
+    try {
+      await externalRuntime?.dispose();
+    } catch {
+      // ignore — we're exiting anyway
+    }
+  };
+  const shutdownSidecars = async () => {
+    await Promise.allSettled([shutdownMcp(), shutdownExternalRuntime()]);
+  };
+  process.once("SIGINT", () => { void shutdownSidecars().then(() => process.exit(130)); });
+  process.once("SIGTERM", () => { void shutdownSidecars().then(() => process.exit(143)); });
 
   // Session management:
   // - default: always start a fresh session
@@ -348,6 +364,10 @@ async function main() {
   const restoredTodos = sessionManager?.getTodos() ?? [];
   const initialMode: PermissionMode = args.mode ?? "default";
   const skillSummaries = skillRegistry.summaries();
+  // This synchronous provenance gate must run before buildMemoryPrompt: the
+  // background startup pipeline is too late once text has entered the native
+  // provider's system prompt.
+  purgeUnsafeMemorySources(args.cwd);
   const memoryPrompt = buildMemoryPrompt(args.cwd);
   const systemPrompt = buildSystemPrompt({
     agentName: "Bubble",
@@ -466,20 +486,25 @@ async function main() {
     // not perform an ad-hoc extraction of the just-finished session.
   };
   const shutdownRuntime = async () => {
-    await hookController.runEvent({
-      eventName: "SessionEnd",
-      cwd: args.cwd,
-      sessionId: sessionManager?.getSessionFile(),
-      agentRole: "driver",
-      target: "session",
-      payload: {
-        providerId: agent.providerId,
-        model: agent.apiModel,
-      },
-    });
+    try {
+      await hookController.runEvent({
+        eventName: "SessionEnd",
+        cwd: args.cwd,
+        sessionId: sessionManager?.getSessionFile(),
+        agentRole: "driver",
+        target: "session",
+        payload: {
+          providerId: agent.providerId,
+          model: agent.apiModel,
+        },
+      });
+    } catch {
+      // Shutdown must still release child processes when a hook fails.
+    }
     const results = await Promise.allSettled([
       flushMemory(),
       shutdownMcp(),
+      shutdownExternalRuntime(),
       lspService.shutdown(),
     ]);
     for (const result of results) {
@@ -531,6 +556,16 @@ async function main() {
   try {
     // Print mode: single prompt, then exit
     if (args.print || args.prompt) {
+      if (shouldRejectGrokSessionInPrintMode(
+        sessionManager?.getMetadata().externalRuntime,
+        true,
+      )) {
+        console.error(chalk.red(
+          "Error: Grok subscription sessions are interactive. Resume this workspace session in the TUI, or start a fresh native session for --print.",
+        ));
+        process.exitCode = 1;
+        return;
+      }
       const prompt = args.prompt || (await readPipedStdin()) || "";
       if (!prompt) {
         console.error(chalk.red("Error: No prompt provided."));
@@ -586,9 +621,8 @@ async function main() {
       try {
         const next = new SessionManager(sessionFile);
         const history = next.getMessages();
-        sessionManager = next;
-        sessionPromptCacheKey = next.getOrCreatePromptCacheKey();
-        sessionTitleUpdater = createSessionTitleUpdater({
+        const nextPromptCacheKey = next.getOrCreatePromptCacheKey();
+        const nextTitleUpdater = createSessionTitleUpdater({
           sessionManager: next,
           complete: (messages, completeOptions) => agent.complete(messages, completeOptions),
         });
@@ -601,9 +635,21 @@ async function main() {
         // Keep the live system/meta head (mode reminders survive the switch),
         // mirroring the /rewind history-replacement pattern.
         const head = agent.messages.filter((m) => m.role === "system" || m.role === "meta");
-        agent.messages = [...head, ...history];
-        agent.setTodos(next.getTodos());
-        agent.resetContextUsageAnchor();
+        const nextMessages = [...head, ...history];
+        const nextTodos = next.getTodos();
+
+        // Commit only after every file read/write and reconstruction step has
+        // succeeded. Callers can safely prepare candidate sessions without a
+        // failed switch rebinding persistence or replacing the live history.
+        sessionManager = next;
+        sessionPromptCacheKey = nextPromptCacheKey;
+        sessionTitleUpdater = nextTitleUpdater;
+        agent.messages = nextMessages;
+        // These update only live in-memory/UI mirrors after the persistence
+        // commit. A best-effort callback failure must not report the switch as
+        // rolled back after the outer session binding has already changed.
+        try { agent.setTodos(nextTodos); } catch { /* candidate already committed */ }
+        try { agent.resetContextUsageAnchor(); } catch { /* derived counter only */ }
         return { manager: next };
       } catch (error) {
         return { error: error instanceof Error ? error.message : String(error) };
@@ -630,6 +676,16 @@ async function main() {
       runMemorySummary,
       runMemoryRefresh,
     };
+    // Grok Subscription is a first-class interactive provider target. Manager
+    // construction is deliberately lazy: it does not inspect, spawn, or reach
+    // the network until the user selects Grok or runs /login grok. Print,
+    // Feishu, help, and version paths return before this import.
+    const { createGrokRuntimeManager } = await import("./external-runtime/grok-runtime.js");
+    externalRuntime = createGrokRuntimeManager({
+      workspace: args.cwd,
+      approvalController,
+      getPermissionMode: () => agentRef?.mode ?? "default",
+    });
     const { startStartupUpdateCheck } = await import("./update/index.js");
     const updateCheck = await startStartupUpdateCheck();
     const updateNotice = updateCheck.notice;
@@ -642,6 +698,7 @@ async function main() {
       onThemeModeChange: (mode) => userConfig.setThemeMode(mode),
       updateNotice: updateNotice ?? undefined,
       updateNoticeRefresh: updateCheck.refreshed,
+      externalRuntime,
     });
     const exitWallMs = summary?.wallMs;
 

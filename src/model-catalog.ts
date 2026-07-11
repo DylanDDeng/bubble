@@ -33,6 +33,9 @@ export const BUILTIN_PROVIDERS: BuiltinProviderDefinition[] = [
   { id: "openrouter", name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1" },
   { id: "openai", name: "OpenAI", baseURL: "https://api.openai.com/v1", supportsOAuth: true },
   { id: "openai-codex", name: "OpenAI Codex (ChatGPT)", baseURL: "https://chatgpt.com/backend-api" },
+  // Grok subscription models via the CLI chat proxy. OAuth-only: the proxy
+  // accepts xAI session bearers (from /login grok), not api.x.ai API keys.
+  { id: "grok", name: "Grok Subscription", baseURL: "https://cli-chat-proxy.grok.com/v1", supportsOAuth: true },
   { id: "anthropic", name: "Anthropic", baseURL: "https://api.anthropic.com", protocol: "anthropic-messages" },
   { id: "deepseek", name: "DeepSeek", baseURL: "https://api.deepseek.com" },
   // Native Gemini API via the AI SDK google provider. Users who configured the
@@ -90,6 +93,9 @@ const ANTHROPIC_OPUS_EFFORT_LEVELS: ReasoningEffort[] = ["off", "low", "medium",
 const ANTHROPIC_SONNET_EFFORT_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high", "max"];
 const ANTHROPIC_FABLE_EFFORT_LEVELS: ReasoningEffort[] = ["low", "medium", "high", "xhigh", "max"];
 const ANTHROPIC_CHAT_LEVELS: ReasoningEffort[] = ["off"];
+// Grok 4.5 exposes low/medium/high effort with no "off" (thinking always on);
+// the composer model declares no effort support at all.
+const GROK_45_LEVELS: ReasoningEffort[] = ["low", "medium", "high"];
 const GEMINI_3_LEVELS: ReasoningEffort[] = ["low", "medium", "high"];
 const GEMINI_3_FLASH_LEVELS: ReasoningEffort[] = ["minimal", "low", "medium", "high"];
 const GEMINI_25_PRO_LEVELS: ReasoningEffort[] = ["low", "medium", "high"];
@@ -109,6 +115,9 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "gpt-5.1-codex-max", name: "gpt-5.1-codex-max", providerId: "openai-codex", reasoningLevels: GPT51_CODEX_MAX_LEVELS, contextWindow: 272000 },
   { id: "gpt-5.1-codex-mini", name: "gpt-5.1-codex-mini", providerId: "openai-codex", reasoningLevels: GPT51_CODEX_MINI_LEVELS, contextWindow: 272000 },
   { id: "gpt-5.1", name: "gpt-5.1", providerId: "openai-codex", reasoningLevels: GPT51_LEVELS, contextWindow: 272000 },
+
+  { id: "grok-4.5", name: "Grok 4.5", providerId: "grok", reasoningLevels: GROK_45_LEVELS, defaultReasoningLevel: "high", contextWindow: 500000 },
+  { id: "grok-composer-2.5-fast", name: "Grok Composer 2.5 Fast", providerId: "grok", reasoningLevels: OPENAI_CHAT_LEVELS, contextWindow: 200000 },
 
   { id: "gpt-4o", name: "gpt-4o", providerId: "openai", reasoningLevels: OPENAI_CHAT_LEVELS, contextWindow: 128000 },
   { id: "gpt-4o-mini", name: "gpt-4o-mini", providerId: "openai", reasoningLevels: OPENAI_CHAT_LEVELS, contextWindow: 128000 },

@@ -2,7 +2,7 @@
 
 Bubble is a terminal coding agent. It works inside a local project folder: it reads and edits files, runs commands behind configurable approval controls, searches and navigates code with language-server intelligence, browses the web, loads reusable skills, connects MCP tools, fans work out to subagents, and keeps persistent memory across sessions.
 
-It is provider-agnostic. Bring an API key for OpenAI, Anthropic, Google, DeepSeek, Moonshot/Kimi, Zhipu, Z.AI, MiniMax, Groq, Together, Fireworks, a local OpenAI-compatible endpoint, and more — or sign in to ChatGPT with OAuth and drive the Codex models directly.
+It is provider-agnostic. Bring an API key for OpenAI, Anthropic, Google, DeepSeek, Moonshot/Kimi, Zhipu, Z.AI, MiniMax, Groq, Together, Fireworks, a local OpenAI-compatible endpoint, and more; sign in to ChatGPT with OAuth; or sign in with OAuth to use a ChatGPT or Grok subscription directly.
 
 ---
 
@@ -39,10 +39,10 @@ Start Bubble in the current directory:
 bubble
 ```
 
-On first launch, connect a model:
+On first launch, connect a provider:
 
 - Run `/login` to sign in to ChatGPT (OAuth) and use the Codex models, or
-- Run `/provider` to add any other provider with an API key.
+- Run `/provider` to select Grok Subscription or add a provider with an API key.
 
 Then just type what you want done. Bubble plans, edits files, and runs commands, asking for approval where the current permission mode requires it.
 
@@ -64,9 +64,29 @@ Bubble ships with a catalog of built-in providers. Configure them inside the app
 
 | How | What it does |
 | --- | --- |
-| `/login` | OAuth sign-in for ChatGPT; unlocks the OpenAI Codex models without an API key. |
-| `/provider` | Open a picker to connect, switch, add, or remove a provider. |
+| `/login` | OAuth sign-in for ChatGPT or Grok Subscription; `/login grok` starts the Grok flow directly. |
+| `/provider` | Open a picker to connect, switch, add, or remove a provider, including Grok Subscription. |
 | `/model` | Pick the active model and reasoning effort. |
+
+### Grok Subscription Provider
+
+A Grok subscription works as a native model provider, exactly like ChatGPT
+OAuth: sign in once in the browser and the subscription models (`grok-4.5`,
+`grok-composer-2.5-fast`) drive Bubble's own agent loop — Bubble's tools,
+skills, MCP servers, subagents, memory, permission modes, and approval UI all
+apply as usual. `/model` selects the model and reasoning effort.
+
+```bash
+bubble
+# In the TUI: /login grok
+# or choose Grok Subscription from /provider
+```
+
+`/login grok` opens the xAI sign-in page in the default browser. If you have
+already signed in with the official Grok CLI, Bubble imports that login and
+skips the browser. Tokens are stored in `~/.bubble/auth.json` alongside other
+provider credentials and refresh automatically. Use `/logout grok` to remove
+this device's login.
 
 Built-in providers include OpenAI, Anthropic, Google, DeepSeek, Moonshot (CN and international), Kimi for Coding, Zhipu AI, Z.AI, Alibaba DashScope, Doubao (Volcengine Ark), MiniMax, StepFun, Groq, Together AI, Fireworks, and a `local` profile for any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, etc.).
 

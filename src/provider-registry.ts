@@ -20,7 +20,9 @@ import { ModelConfig } from "./model-config.js";
 import { AuthStorage } from "./oauth/index.js";
 import { fetchGeminiModels } from "./provider-ai-sdk.js";
 import { extractChatGptAccountId, fetchOpenAICodexModelCatalog, type OpenAICodexAuthAdapter } from "./provider-openai-codex.js";
+import type { GrokAuthAdapter } from "./provider-grok.js";
 import { refreshOpenAICodex } from "./oauth/openai-codex.js";
+import { refreshGrok } from "./oauth/grok.js";
 import type { OAuthCredentials } from "./oauth/types.js";
 import type { ThinkingLevel } from "./types.js";
 
@@ -149,6 +151,38 @@ export class ProviderRegistry {
     };
   }
 
+  createGrokAuthAdapter(providerId: string): GrokAuthAdapter | undefined {
+    if (providerId !== "grok" || !this.authStorage.has("grok")) return undefined;
+
+    let refreshPromise: Promise<OAuthCredentials> | undefined;
+    return {
+      getCredentials: () => this.authStorage.get("grok"),
+      isExpired: (_credentials, graceMs) => this.authStorage.isExpired("grok", graceMs),
+      refreshCredentials: async () => {
+        if (!refreshPromise) {
+          refreshPromise = (async () => {
+            const current = this.authStorage.get("grok");
+            if (!current?.refreshToken) {
+              throw new Error("Grok OAuth credentials are missing a refresh token. Run /login grok again.");
+            }
+            const refreshed = await refreshGrok(current.refreshToken);
+            const next: OAuthCredentials = {
+              type: "oauth",
+              accessToken: refreshed.accessToken,
+              refreshToken: refreshed.refreshToken,
+              expiresAt: refreshed.expiresAt,
+            };
+            this.authStorage.set("grok", next);
+            return next;
+          })().finally(() => {
+            refreshPromise = undefined;
+          });
+        }
+        return refreshPromise;
+      },
+    };
+  }
+
   getDefaultModel(providerId: string, authType: ProviderProfile["authType"] = "api"): string | undefined {
     const customModels = this.modelConfig.getCustomModels(providerId);
     if (customModels.length > 0) {
@@ -161,6 +195,19 @@ export class ProviderRegistry {
   }
 
   async prepareProvider(providerId: string): Promise<void> {
+    if (providerId === "grok" && this.authStorage.isExpired("grok")) {
+      const creds = this.authStorage.get("grok");
+      if (creds?.refreshToken) {
+        const refreshed = await refreshGrok(creds.refreshToken);
+        this.authStorage.set("grok", {
+          type: "oauth",
+          accessToken: refreshed.accessToken,
+          refreshToken: refreshed.refreshToken,
+          expiresAt: refreshed.expiresAt,
+        });
+      }
+      return;
+    }
     const authKey = this.resolveOAuthAuthKey(providerId);
     if ((providerId === "openai" || providerId === "openai-codex") && this.authStorage.isExpired(authKey)) {
       const creds = this.authStorage.get(authKey);

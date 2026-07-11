@@ -16,6 +16,7 @@ import type { QuestionController } from "../question/index.js";
 import type { MemoryScope } from "../memory/index.js";
 import type { ExternalHookController } from "../hooks/controller.js";
 import type { ResolvedTheme, ThemeMode } from "./theme.js";
+import type { ExternalRuntimeManager } from "../external-runtime/types.js";
 
 export interface RunTuiOptions {
   sessionManager?: SessionManager;
@@ -47,6 +48,8 @@ export interface RunTuiOptions {
   updateNoticeRefresh?: Promise<string | null>;
   /** External lifecycle hooks, threaded into slash-command execution. */
   hookController?: ExternalHookController;
+  /** Subscription-backed external agent runtime used by the interactive TUI. */
+  externalRuntime?: ExternalRuntimeManager;
 }
 
 export function createInkAppElement(
@@ -84,6 +87,7 @@ export function createInkAppElement(
       updateNotice={options.updateNotice}
       updateNoticeRefresh={options.updateNoticeRefresh}
       hookController={options.hookController}
+      externalRuntime={options.externalRuntime}
       onExit={onExit}
     />
   );

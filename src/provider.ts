@@ -10,6 +10,13 @@ import { createAnthropicMessagesProvider } from "./provider-anthropic.js";
 import { createArkResponsesProvider } from "./provider-ark-responses.js";
 import { createAiSdkProvider } from "./provider-ai-sdk.js";
 import { createOpenAICodexProvider, isOpenAICodexBaseUrl, type OpenAICodexAuthAdapter } from "./provider-openai-codex.js";
+import {
+  buildGrokSubscriptionHeaders,
+  createGrokSubscriptionFetch,
+  isGrokSubscriptionBaseUrl,
+  type GrokAuthAdapter,
+} from "./provider-grok.js";
+import { getChatGptFetch } from "./network/chatgpt-transport.js";
 import { createProviderProtocolArtifactFilter } from "./provider-artifacts.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
 import { debugReasoningStream, summarizeDebugText } from "./reasoning-debug.js";
@@ -97,6 +104,8 @@ export interface ProviderInstanceOptions {
   protocol?: ProviderProtocol;
   /** Dynamic OAuth access-token loader/refresh hook for ChatGPT Codex requests. */
   openAICodexAuth?: OpenAICodexAuthAdapter;
+  /** Dynamic OAuth access-token loader/refresh hook for Grok subscription requests. */
+  grokAuth?: GrokAuthAdapter;
 }
 
 export function createUnavailableProvider(message: string): Provider {
@@ -133,10 +142,22 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
     });
   }
 
+  // Grok subscription rides the generic chat-completions path but needs the
+  // CLI identity headers the proxy gates on, plus a fetch that keeps the
+  // short-lived OAuth bearer fresh (and proxy-aware) across long sessions.
+  const grokSubscription = options.providerId === "grok" || isGrokSubscriptionBaseUrl(options.baseURL);
   const client = new OpenAI({
     apiKey: options.apiKey,
     baseURL: options.baseURL,
     timeout: resolveRequestTimeoutMs(process.env.BUBBLE_PROVIDER_REQUEST_TIMEOUT_MS),
+    ...(grokSubscription
+      ? {
+          defaultHeaders: buildGrokSubscriptionHeaders(),
+          fetch: (options.grokAuth
+            ? createGrokSubscriptionFetch(options.grokAuth)
+            : getChatGptFetch()) as unknown as NonNullable<ConstructorParameters<typeof OpenAI>[0]>["fetch"],
+        }
+      : {}),
   });
 
   const fallbackModel = "gpt-4o";

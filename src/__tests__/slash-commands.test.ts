@@ -2,9 +2,29 @@ import { describe, expect, it, vi } from "vitest";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import type { SlashCommandContext } from "../slash-commands/types.js";
 import { SkillRegistry } from "../skills/registry.js";
+import { loginOpenAICodex } from "../oauth/openai-codex.js";
+import { importGrokCliCredentials, loginGrok } from "../oauth/grok.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+
+vi.mock("../oauth/openai-codex.js", () => ({
+  loginOpenAICodex: vi.fn(async () => ({
+    accessToken: "oauth-access",
+    refreshToken: "oauth-refresh",
+    expiresAt: Date.now() + 60_000,
+    accountId: "test-account",
+  })),
+}));
+
+vi.mock("../oauth/grok.js", () => ({
+  loginGrok: vi.fn(async () => ({
+    accessToken: "grok-access",
+    refreshToken: "grok-refresh",
+    expiresAt: Date.now() + 60_000,
+  })),
+  importGrokCliCredentials: vi.fn(() => undefined),
+}));
 
 function createContext(overrides: Partial<SlashCommandContext> = {}): SlashCommandContext {
   return {
@@ -57,7 +77,520 @@ Read the repo carefully before proposing changes.
   });
 }
 
+function createSessionStub(initialMetadata: Record<string, unknown> = {}) {
+  let metadata = { ...initialMetadata };
+  const updateMetadata = vi.fn((patch: Record<string, unknown>) => {
+    metadata = { ...metadata, ...patch };
+  });
+  const clearExternalRuntimeMetadata = vi.fn(() => {
+    const { externalRuntime: _externalRuntime, ...rest } = metadata;
+    metadata = rest;
+  });
+  return {
+    getMetadata: vi.fn(() => metadata),
+    updateMetadata,
+    clearExternalRuntimeMetadata,
+    appendMarker: vi.fn(),
+  } as any;
+}
+
+function createGrokAuthStorageStub(initialHas = false) {
+  let stored = initialHas;
+  return {
+    has: vi.fn(() => stored),
+    set: vi.fn(() => { stored = true; }),
+    remove: vi.fn(() => { stored = false; }),
+    getPath: vi.fn(() => "/tmp/auth.json"),
+  };
+}
+
+function createGrokRegistryStub(authStorage: ReturnType<typeof createGrokAuthStorageStub>, overrides: Record<string, unknown> = {}) {
+  return {
+    getEnabled: () => [],
+    getAuthStorage: () => authStorage,
+    prepareProvider: vi.fn(async () => undefined),
+    setDefault: vi.fn(),
+    getDefaultModel: vi.fn(() => "grok-4.5"),
+    getConfigured: () => [{
+      id: "grok",
+      name: "Grok Subscription",
+      enabled: true,
+      authType: "oauth",
+      apiKey: "grok-access",
+      baseURL: "https://cli-chat-proxy.grok.com/v1",
+    }],
+    ...overrides,
+  } as any;
+}
+
 describe("slash commands", () => {
+  it("/login grok runs browser OAuth, stores tokens, and switches to a grok model natively", async () => {
+    vi.mocked(loginGrok).mockClear();
+    vi.mocked(importGrokCliCredentials).mockClear();
+    const authStorage = createGrokAuthStorageStub();
+    const registry = createGrokRegistryStub(authStorage);
+    const createProvider = vi.fn(() => ({ streamChat: vi.fn(), complete: vi.fn() } as any));
+    const ctx = createContext({ registry, createProvider });
+
+    const result = await slashRegistry.execute("/login grok", ctx);
+
+    expect(result.result).toContain("Grok subscription login successful");
+    expect(vi.mocked(loginGrok)).toHaveBeenCalledTimes(1);
+    expect(authStorage.set).toHaveBeenCalledWith("grok", expect.objectContaining({
+      type: "oauth",
+      accessToken: "grok-access",
+      refreshToken: "grok-refresh",
+    }));
+    expect(registry.prepareProvider).toHaveBeenCalledWith("grok");
+    expect(registry.setDefault).toHaveBeenCalledWith("grok");
+    expect(ctx.agent.model).toBe("grok:grok-4.5");
+    expect(ctx.agent.setProvider).toHaveBeenCalledTimes(1);
+  });
+
+  it("/login grok reuses an existing Grok CLI sign-in without opening a browser", async () => {
+    vi.mocked(loginGrok).mockClear();
+    vi.mocked(importGrokCliCredentials).mockClear().mockReturnValueOnce({
+      accessToken: "cli-access",
+      refreshToken: "cli-refresh",
+      expiresAt: Date.now() + 60_000,
+    });
+    const authStorage = createGrokAuthStorageStub();
+    const registry = createGrokRegistryStub(authStorage);
+    const ctx = createContext({
+      registry,
+      createProvider: vi.fn(() => ({ streamChat: vi.fn(), complete: vi.fn() } as any)),
+    });
+
+    const result = await slashRegistry.execute("/login grok", ctx);
+
+    expect(result.result).toContain("reused your Grok CLI sign-in");
+    expect(vi.mocked(loginGrok)).not.toHaveBeenCalled();
+    expect(authStorage.set).toHaveBeenCalledWith("grok", expect.objectContaining({
+      accessToken: "cli-access",
+      refreshToken: "cli-refresh",
+    }));
+  });
+
+  it("/provider --set grok routes to the native subscription login", async () => {
+    vi.mocked(loginGrok).mockClear();
+    vi.mocked(importGrokCliCredentials).mockClear();
+    const authStorage = createGrokAuthStorageStub(true);
+    const registry = createGrokRegistryStub(authStorage);
+    const ctx = createContext({
+      registry,
+      createProvider: vi.fn(() => ({ streamChat: vi.fn(), complete: vi.fn() } as any)),
+    });
+
+    const result = await slashRegistry.execute("/provider --set grok-subscription", ctx);
+
+    expect(result.result).toContain("Grok subscription login successful");
+    // Stored credentials satisfy the login; no browser round-trip.
+    expect(vi.mocked(loginGrok)).not.toHaveBeenCalled();
+    expect(registry.setDefault).toHaveBeenCalledWith("grok");
+  });
+
+  it("repairs stored Grok credentials with one browser retry when refresh fails", async () => {
+    vi.mocked(loginGrok).mockClear();
+    vi.mocked(importGrokCliCredentials).mockClear();
+    const authStorage = createGrokAuthStorageStub(true);
+    const prepareProvider = vi.fn()
+      .mockRejectedValueOnce(new Error("Token refresh failed: 400"))
+      .mockResolvedValueOnce(undefined);
+    const registry = createGrokRegistryStub(authStorage, { prepareProvider });
+    const ctx = createContext({
+      registry,
+      createProvider: vi.fn(() => ({ streamChat: vi.fn(), complete: vi.fn() } as any)),
+    });
+
+    const result = await slashRegistry.execute("/login grok", ctx);
+
+    expect(result.result).toContain("Grok subscription login successful");
+    expect(authStorage.remove).toHaveBeenCalledWith("grok");
+    expect(vi.mocked(loginGrok)).toHaveBeenCalledTimes(1);
+    expect(prepareProvider).toHaveBeenCalledTimes(2);
+  });
+
+  it("/login grok fails without touching the session when browser OAuth is rejected", async () => {
+    vi.mocked(loginGrok).mockClear().mockRejectedValueOnce(new Error("OAuth cancelled"));
+    vi.mocked(importGrokCliCredentials).mockClear();
+    const activeSession = createSessionStub({ model: "openai:gpt-4o" });
+    const authStorage = createGrokAuthStorageStub();
+    const registry = createGrokRegistryStub(authStorage);
+    const ctx = createContext({ sessionManager: activeSession, registry });
+
+    const result = await slashRegistry.execute("/login grok", ctx);
+
+    expect(result.result).toBe("Error: OAuth cancelled");
+    expect(authStorage.set).not.toHaveBeenCalled();
+    expect(ctx.sessionManager).toBe(activeSession);
+    expect(ctx.agent.setProvider).not.toHaveBeenCalled();
+  });
+
+  it("/login grok leaves a legacy Grok runtime session only after preparation succeeds", async () => {
+    vi.mocked(loginGrok).mockClear();
+    vi.mocked(importGrokCliCredentials).mockClear();
+    const activeSession = createSessionStub({
+      externalRuntime: { id: "grok", sessionId: "grok-session-existing" },
+    });
+    const freshSession = createSessionStub();
+    const transitionToNative = vi.fn(async () => freshSession);
+    const authStorage = createGrokAuthStorageStub();
+    const registry = createGrokRegistryStub(authStorage);
+    const ctx = createContext({
+      sessionManager: activeSession,
+      transitionToNative,
+      registry,
+      createProvider: vi.fn(() => ({ streamChat: vi.fn(), complete: vi.fn() } as any)),
+    });
+
+    const result = await slashRegistry.execute("/login grok", ctx);
+
+    expect(result.result).toContain("Grok subscription login successful");
+    expect(transitionToNative).toHaveBeenCalledTimes(1);
+    expect(ctx.sessionManager).toBe(freshSession);
+  });
+
+  it("/logout grok removes the stored login and cleans up a legacy runtime session", async () => {
+    const calls: string[] = [];
+    const oldSession = createSessionStub({
+      externalRuntime: { id: "grok", sessionId: "grok-session-active" },
+    });
+    const freshSession = createSessionStub();
+    const authStorage = createGrokAuthStorageStub(true);
+    const onExternalRuntimeChange = vi.fn();
+    const externalRuntime = {
+      cancel: vi.fn(async () => { calls.push("cancel"); }),
+      dispose: vi.fn(async () => { calls.push("dispose"); }),
+      logout: vi.fn(async () => { calls.push("logout"); }),
+    } as any;
+    const ctx = createContext({
+      sessionManager: oldSession,
+      externalRuntime,
+      registry: createGrokRegistryStub(authStorage),
+      startFreshSession: vi.fn(async () => {
+        calls.push("startFreshSession");
+        return freshSession;
+      }),
+      onExternalRuntimeChange,
+    });
+
+    const result = await slashRegistry.execute("/logout grok", ctx);
+
+    expect(result.result).toContain("Started a fresh native Bubble session");
+    expect(authStorage.remove).toHaveBeenCalledWith("grok");
+    expect(calls).toEqual(["cancel", "dispose", "logout", "startFreshSession"]);
+    expect(externalRuntime.cancel).toHaveBeenCalledWith("grok-session-active");
+    expect(freshSession.clearExternalRuntimeMetadata).toHaveBeenCalledTimes(1);
+    expect(freshSession.appendMarker).toHaveBeenCalledWith("runtime_switch", "native");
+    expect(ctx.sessionManager).toBe(freshSession);
+    expect(onExternalRuntimeChange).toHaveBeenCalledWith(freshSession);
+  });
+
+  it("/logout grok from a native session removes only the stored login", async () => {
+    const nativeSession = createSessionStub({ model: "openai:gpt-5.6" });
+    const authStorage = createGrokAuthStorageStub(true);
+    const externalRuntime = {
+      logout: vi.fn(async () => undefined),
+      cancel: vi.fn(),
+      dispose: vi.fn(),
+    } as any;
+    const startFreshSession = vi.fn();
+    const onExternalRuntimeChange = vi.fn();
+    const ctx = createContext({
+      sessionManager: nativeSession,
+      externalRuntime,
+      registry: createGrokRegistryStub(authStorage),
+      startFreshSession,
+      onExternalRuntimeChange,
+    });
+
+    const result = await slashRegistry.execute("/logout grok-subscription", ctx);
+
+    expect(result.result).toContain("Only this device's local login was removed");
+    expect(authStorage.remove).toHaveBeenCalledWith("grok");
+    expect(externalRuntime.cancel).not.toHaveBeenCalled();
+    expect(externalRuntime.dispose).not.toHaveBeenCalled();
+    expect(startFreshSession).not.toHaveBeenCalled();
+    expect(onExternalRuntimeChange).not.toHaveBeenCalled();
+    expect(ctx.sessionManager).toBe(nativeSession);
+  });
+
+  it("/model in Grok mode opens the subscription model picker", async () => {
+    const transitionToNative = vi.fn();
+    const ctx = createContext({
+      sessionManager: createSessionStub({
+        externalRuntime: { id: "grok", sessionId: "grok-session-1" },
+      }),
+      transitionToNative,
+    });
+
+    const result = await slashRegistry.execute("/model", ctx);
+
+    expect(result.result).toBeUndefined();
+    expect(ctx.openPicker).toHaveBeenCalledWith("model");
+    expect(transitionToNative).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["unknown", { id: "future-runtime", sessionId: "unknown-session" }],
+    ["missing id", { sessionId: "malformed-session" }],
+    ["null id", { id: null, sessionId: "malformed-session" }],
+  ])("keeps %s external session metadata out of the native model path", async (_label, externalRuntime) => {
+    const ctx = createContext({
+      sessionManager: createSessionStub({ externalRuntime }),
+    });
+
+    const result = await slashRegistry.execute("/model", ctx);
+
+    expect(result.result).toContain("runtime");
+    expect(ctx.openPicker).not.toHaveBeenCalled();
+    expect(ctx.agent.setProvider).not.toHaveBeenCalled();
+  });
+
+  it("/help in Grok mode exposes only the constrained local surface", async () => {
+    const ctx = createContext({
+      sessionManager: createSessionStub({
+        externalRuntime: { id: "grok", sessionId: "grok-session-1" },
+      }),
+    });
+
+    const result = await slashRegistry.execute("/help", ctx);
+
+    expect(result.result).toContain("Grok Subscription · workspace tools · Bubble approvals");
+    expect(result.result).toContain("/logout grok");
+    expect(result.result).not.toContain("/memory");
+    expect(result.result).not.toContain("/permissions");
+    expect(result.result).not.toContain("/skills");
+  });
+
+  it("/model with an unusable target keeps Grok active after provider preparation fails", async () => {
+    const calls: string[] = [];
+    const activeSession = createSessionStub({
+      externalRuntime: { id: "grok", sessionId: "grok-session-1" },
+    });
+    const freshSession = createSessionStub();
+    const transitionToNative = vi.fn(async () => {
+      calls.push("transitionToNative");
+      return freshSession;
+    });
+    const ctx = createContext({
+      sessionManager: activeSession,
+      transitionToNative,
+      registry: {
+        getDefault: () => ({ id: "openai" }),
+        prepareProvider: vi.fn(async () => { calls.push("prepareProvider"); }),
+        getConfigured: () => [],
+      } as any,
+    });
+
+    const result = await slashRegistry.execute("/model openai:gpt-5.6-terra", ctx);
+
+    expect(calls).toEqual(["prepareProvider"]);
+    expect(transitionToNative).not.toHaveBeenCalled();
+    expect(ctx.sessionManager).toBe(activeSession);
+    expect(result.result).toContain("not configured or has no active credentials");
+  });
+
+  it("/provider opens without leaving or mutating the active Grok session", async () => {
+    const activeSession = createSessionStub({
+      externalRuntime: { id: "grok", sessionId: "grok-session-1" },
+    });
+    const transitionToNative = vi.fn();
+    const ctx = createContext({
+      sessionManager: activeSession,
+      transitionToNative,
+    });
+
+    const result = await slashRegistry.execute("/provider", ctx);
+
+    expect(result.result).toBeUndefined();
+    expect(transitionToNative).not.toHaveBeenCalled();
+    expect(ctx.sessionManager).toBe(activeSession);
+    expect(ctx.openPicker).toHaveBeenCalledWith("provider");
+  });
+
+  it("/provider --list includes Grok without inspecting or leaving the active session", async () => {
+    const activeSession = createSessionStub({
+      externalRuntime: { id: "grok", sessionId: "grok-session-1" },
+    });
+    const transitionToNative = vi.fn();
+    const inspect = vi.fn();
+    const ctx = createContext({
+      sessionManager: activeSession,
+      transitionToNative,
+      externalRuntime: { inspect } as any,
+      registry: {
+        getConfigured: () => [{
+          id: "openai",
+          name: "OpenAI",
+          enabled: true,
+          apiKey: "token",
+          baseURL: "https://api.openai.com/v1",
+        }],
+        getDefault: () => ({ id: "openai" }),
+        getModelConfig: () => ({ hasProvider: () => false, getLoadError: () => undefined }),
+        getAuthStorage: () => ({ has: () => false }),
+      } as any,
+    });
+
+    const result = await slashRegistry.execute("/provider --list", ctx);
+
+    expect(result.result).toContain("Grok Subscription (grok)");
+    expect(result.result).toContain("/login grok");
+    expect(transitionToNative).not.toHaveBeenCalled();
+    expect(inspect).not.toHaveBeenCalled();
+    expect(ctx.sessionManager).toBe(activeSession);
+  });
+
+  it("/provider reserves Grok add/remove aliases without mutating registry or login state", async () => {
+    const addProvider = vi.fn();
+    const removeProvider = vi.fn();
+    const setDefault = vi.fn();
+    const login = vi.fn();
+    const transitionToNative = vi.fn();
+    const ctx = createContext({
+      externalRuntime: { login } as any,
+      transitionToNative,
+      registry: { getEnabled: () => [], addProvider, removeProvider, setDefault } as any,
+    });
+
+    const add = await slashRegistry.execute("/provider --add grok", ctx);
+    const remove = await slashRegistry.execute("/provider --remove grok-subscription", ctx);
+
+    expect(add.result).toContain("built in");
+    expect(remove.result).toContain("/logout grok");
+    expect(addProvider).not.toHaveBeenCalled();
+    expect(removeProvider).not.toHaveBeenCalled();
+    expect(setDefault).not.toHaveBeenCalled();
+    expect(login).not.toHaveBeenCalled();
+    expect(transitionToNative).not.toHaveBeenCalled();
+  });
+
+  it("/login openai keeps the active Grok session when no usable model is available", async () => {
+    const mockedLogin = vi.mocked(loginOpenAICodex);
+    mockedLogin.mockClear();
+    const activeSession = createSessionStub({
+      externalRuntime: { id: "grok", sessionId: "grok-session-1" },
+    });
+    const transitionToNative = vi.fn();
+    const authStorage = { set: vi.fn(), getPath: vi.fn(() => "/tmp/auth.json") };
+    const ctx = createContext({
+      sessionManager: activeSession,
+      transitionToNative,
+      registry: {
+        supportsOAuth: () => true,
+        getAuthStorage: () => authStorage,
+        prepareProvider: vi.fn(),
+        setDefault: vi.fn(),
+        getConfigured: () => [],
+        getDefaultModel: () => undefined,
+      } as any,
+    });
+
+    const result = await slashRegistry.execute("/login openai", ctx);
+
+    expect(transitionToNative).not.toHaveBeenCalled();
+    expect(mockedLogin).toHaveBeenCalledTimes(1);
+    expect(ctx.sessionManager).toBe(activeSession);
+    expect(result.result).toContain("no default model is configured");
+  });
+
+  it("/login openai preserves the active Grok session when OAuth is cancelled", async () => {
+    const mockedLogin = vi.mocked(loginOpenAICodex);
+    mockedLogin.mockRejectedValueOnce(new Error("OAuth cancelled"));
+    const activeSession = createSessionStub({
+      externalRuntime: { id: "grok", sessionId: "grok-session-1" },
+    });
+    const transitionToNative = vi.fn();
+    const ctx = createContext({
+      sessionManager: activeSession,
+      transitionToNative,
+      registry: {
+        supportsOAuth: () => true,
+        getAuthStorage: vi.fn(),
+      } as any,
+    });
+
+    const result = await slashRegistry.execute("/login openai", ctx);
+
+    expect(result.result).toBe("Error: OAuth cancelled");
+    expect(transitionToNative).not.toHaveBeenCalled();
+    expect(ctx.sessionManager).toBe(activeSession);
+  });
+
+  it("/login openai leaves Grok only after OAuth, provider, and model preparation succeed", async () => {
+    vi.stubEnv("BUBBLE_HOME", join(tmpdir(), `bubble-login-openai-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`));
+    const calls: string[] = [];
+    const mockedLogin = vi.mocked(loginOpenAICodex);
+    mockedLogin.mockImplementationOnce(async () => {
+      calls.push("oauth");
+      return {
+        accessToken: "oauth-access",
+        refreshToken: "oauth-refresh",
+        expiresAt: Date.now() + 60_000,
+        accountId: "test-account",
+      };
+    });
+    const activeSession = createSessionStub({
+      externalRuntime: { id: "grok", sessionId: "grok-session-1" },
+    });
+    const freshSession = createSessionStub();
+    const transitionToNative = vi.fn(async () => {
+      calls.push("transitionToNative");
+      return freshSession;
+    });
+    const authStorage = {
+      set: vi.fn(() => { calls.push("saveCredentials"); }),
+      getPath: vi.fn(() => "/tmp/auth.json"),
+    };
+    const provider = {
+      id: "openai",
+      name: "OpenAI",
+      enabled: true,
+      authType: "oauth",
+      apiKey: "oauth-access",
+      baseURL: "https://chatgpt.com/backend-api",
+    };
+    const setDefault = vi.fn(() => { calls.push("setDefault"); });
+    const createProvider = vi.fn(() => {
+      calls.push("createProvider");
+      return { streamChat: vi.fn(), complete: vi.fn() } as any;
+    });
+    const ctx = createContext({
+      sessionManager: activeSession,
+      transitionToNative,
+      createProvider,
+      registry: {
+        supportsOAuth: () => true,
+        getAuthStorage: () => authStorage,
+        prepareProvider: vi.fn(async () => { calls.push("prepareProvider"); }),
+        setDefault,
+        getConfigured: () => [provider],
+        listModels: vi.fn(async () => {
+          calls.push("listModels");
+          return [{ id: "gpt-5.6-sol", name: "GPT-5.6 Sol", providerId: "openai" }];
+        }),
+        getDefaultModel: () => undefined,
+      } as any,
+    });
+
+    const result = await slashRegistry.execute("/login openai", ctx);
+    vi.unstubAllEnvs();
+
+    expect(result.result).toContain("OpenAI Codex OAuth login successful");
+    expect(calls).toEqual([
+      "oauth",
+      "saveCredentials",
+      "prepareProvider",
+      "listModels",
+      "createProvider",
+      "transitionToNative",
+      "setDefault",
+    ]);
+    expect(ctx.sessionManager).toBe(freshSession);
+    expect(ctx.agent.setProvider).toHaveBeenCalledTimes(1);
+  });
+
   it("opens the model dialog when no provider is configured so provider fallback can be shown", async () => {
     const ctx = createContext();
     const result = await slashRegistry.execute("/model", ctx);

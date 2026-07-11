@@ -116,6 +116,7 @@ export async function serveFeishu(opts: ServeFeishuOptions = {}): Promise<void> 
       promptCacheKey,
       protocol: providerRegistry.getConfigured().find((provider) => provider.id === providerId)?.protocol,
       openAICodexAuth: providerRegistry.createOpenAICodexAuthAdapter(providerId),
+      grokAuth: providerRegistry.createGrokAuthAdapter(providerId),
     });
   const createProviderForRoute = async (route: { providerId: string; model: string }, promptCacheKey?: string) => {
     const target = providerRegistry.getConfigured().find((p) => p.id === route.providerId);

@@ -12,7 +12,7 @@ import { buildSystemPrompt } from "../system-prompt.js";
 import { normalizeSingleLine } from "../text-display.js";
 import { formatRelativeTime } from "../tui/recent-activity.js";
 import { HOOK_EVENT_NAMES, isHookEventName } from "../hooks/index.js";
-import type { ThinkingLevel } from "../types.js";
+import type { Provider, ThinkingLevel } from "../types.js";
 import { isThinkingLevel } from "../variant/thinking-level.js";
 import { normalizeInheritedThinkingLevel } from "../variant/variant-resolver.js";
 import { collectUsageStatsBundle, formatStatsText } from "../stats/usage.js";
@@ -27,6 +27,12 @@ import {
 import type { SlashCommand, SlashCommandContext } from "./types.js";
 import type { UnifiedCommand } from "./unified.js";
 import { feishuCommand } from "./feishu.js";
+import { GROK_LOCAL_COMMAND_HELP } from "../external-runtime/grok-input-policy.js";
+import {
+  GROK_SUBSCRIPTION_PROVIDER_ID,
+  isGrokSubscriptionProviderId,
+} from "../external-runtime/grok-provider.js";
+import { classifyExternalRuntimeBinding } from "../external-runtime/session-policy.js";
 
 const VALID_SCOPES: SettingsScope[] = ["user", "project", "local"];
 const VALID_LISTS: RuleList[] = ["allow", "deny"];
@@ -185,6 +191,7 @@ function switchToProviderModel(
   modelId: string,
   ctx: Parameters<SlashCommand["handler"]>[1],
   thinkingLevel?: ThinkingLevel,
+  preparedProvider?: Provider,
 ) {
   const provider = ctx.registry.getConfigured().find((item) => item.id === providerId);
   if (!provider?.apiKey) {
@@ -194,7 +201,7 @@ function switchToProviderModel(
   ctx.agent.thinking = thinkingLevel !== undefined
     ? normalizeThinkingLevel(thinkingLevel, getAvailableThinkingLevels(providerId, modelId))
     : normalizeInheritedThinkingLevel(providerId, modelId, ctx.agent.thinking);
-  ctx.agent.setProvider(ctx.createProvider(providerId, provider.apiKey, provider.baseURL));
+  ctx.agent.setProvider(preparedProvider ?? ctx.createProvider(providerId, provider.apiKey, provider.baseURL));
   ctx.agent.providerId = providerId;
   ctx.agent.model = encodeModel(providerId, modelId);
   syncSystemPrompt(ctx, ctx.agent.model);
@@ -232,6 +239,138 @@ function displaySelectedModel(model: string, thinkingLevel: ThinkingLevel): stri
   const { providerId, modelId } = decodeModel(model);
   const defaultLevel = providerId ? getDefaultThinkingLevel(providerId, modelId) : "off";
   return thinkingLevel === "off" || thinkingLevel === defaultLevel ? label : `${label} (${thinkingLevel})`;
+}
+
+function getGrokSessionId(ctx: SlashCommandContext): string | undefined {
+  const binding = ctx.sessionManager?.getMetadata().externalRuntime;
+  return binding && isGrokSubscriptionProviderId(binding.id) ? binding.sessionId : undefined;
+}
+
+function isGrokSessionActive(ctx: SlashCommandContext): boolean {
+  return classifyExternalRuntimeBinding(
+    ctx.sessionManager?.getMetadata().externalRuntime,
+  ) === "grok";
+}
+
+function hasExternalRuntimeSession(ctx: SlashCommandContext): boolean {
+  return classifyExternalRuntimeBinding(
+    ctx.sessionManager?.getMetadata().externalRuntime,
+  ) !== "none";
+}
+
+async function transitionGrokSessionToNative(ctx: SlashCommandContext): Promise<void> {
+  if (!hasExternalRuntimeSession(ctx)) return;
+  if (!ctx.transitionToNative) {
+    throw new Error("Switching from Grok subscription to a native Bubble session is unavailable in this mode.");
+  }
+  const next = await ctx.transitionToNative();
+  if (!next) {
+    throw new Error("Bubble could not start a fresh native session.");
+  }
+  // Handlers below may persist provider/model metadata after the transition.
+  // Keep those writes on the new native session rather than the old Grok log.
+  ctx.sessionManager = next;
+}
+
+/**
+ * Sign in to the Grok subscription as a native model provider (like ChatGPT
+ * OAuth): browser PKCE against auth.x.ai, tokens in ~/.bubble/auth.json, and
+ * grok models served through Bubble's own agent loop. An existing Grok CLI
+ * login is imported so users who already ran `grok login` skip the browser.
+ */
+async function loginGrokSubscription(ctx: SlashCommandContext): Promise<string> {
+  const providerId = "grok";
+  const { loginGrok, importGrokCliCredentials } = await import("../oauth/grok.js");
+  const storage = ctx.registry.getAuthStorage();
+
+  const runBrowserLogin = async () => {
+    const tokens = await loginGrok({
+      onStatus: (msg) => ctx.addMessage("assistant", msg),
+    });
+    storage.set(providerId, {
+      type: "oauth",
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      expiresAt: tokens.expiresAt,
+    });
+  };
+
+  let importedExisting = false;
+  if (!storage.has(providerId)) {
+    const imported = importGrokCliCredentials();
+    if (imported) {
+      storage.set(providerId, {
+        type: "oauth",
+        accessToken: imported.accessToken,
+        refreshToken: imported.refreshToken,
+        expiresAt: imported.expiresAt,
+      });
+      importedExisting = true;
+      ctx.addMessage("assistant", "Imported the existing Grok CLI sign-in.");
+    }
+  }
+  const hadStoredLogin = storage.has(providerId);
+  if (!hadStoredLogin) {
+    await runBrowserLogin();
+  }
+
+  try {
+    await ctx.registry.prepareProvider(providerId);
+  } catch (error) {
+    // Stored/imported credentials whose refresh token was revoked get exactly
+    // one browser repair attempt; a failure right after browser login is real.
+    if (!hadStoredLogin) throw error;
+    ctx.addMessage("assistant", `Stored Grok credentials could not be refreshed (${error instanceof Error ? error.message : String(error)}). Signing in again…`);
+    storage.remove(providerId);
+    await runBrowserLogin();
+    await ctx.registry.prepareProvider(providerId);
+  }
+
+  const provider = ctx.registry.getConfigured().find((item) => item.id === providerId);
+  const defaultModel = ctx.registry.getDefaultModel(providerId, "oauth");
+  if (!provider?.apiKey || !defaultModel) {
+    return `Grok subscription login succeeded, but the provider could not be activated. Tokens saved to ${storage.getPath()}`;
+  }
+
+  // Complete every fallible preparation step before leaving a legacy
+  // Grok-runtime session; commit only after the native switch succeeds.
+  const preparedProvider = ctx.createProvider(providerId, provider.apiKey, provider.baseURL);
+  await transitionGrokSessionToNative(ctx);
+
+  const switched = switchToProviderModel(providerId, defaultModel, ctx, undefined, preparedProvider);
+  if (!switched) {
+    return `Grok subscription login succeeded, but the provider could not be activated. Tokens saved to ${storage.getPath()}`;
+  }
+  ctx.registry.setDefault(providerId);
+
+  const via = importedExisting ? " (reused your Grok CLI sign-in)" : "";
+  return `Grok subscription login successful${via}. Switched to ${displayModel(ctx.agent.model)}. Tokens saved to ${storage.getPath()}`;
+}
+
+async function logoutGrokSubscription(ctx: SlashCommandContext): Promise<string> {
+  const storage = ctx.registry.getAuthStorage();
+  const hadNativeLogin = storage.has("grok");
+  storage.remove("grok");
+
+  // Legacy cleanup: sessions bound to the old Grok ACP runtime, and the
+  // isolated CLI profile's credentials.
+  if (isGrokSessionActive(ctx) && ctx.externalRuntime && ctx.startFreshSession) {
+    await ctx.externalRuntime.cancel(getGrokSessionId(ctx)).catch(() => undefined);
+    await ctx.externalRuntime.dispose().catch(() => undefined);
+    await ctx.externalRuntime.logout().catch(() => undefined);
+    const freshSession = await ctx.startFreshSession();
+    freshSession.clearExternalRuntimeMetadata();
+    freshSession.appendMarker("runtime_switch", "native");
+    ctx.sessionManager = freshSession;
+    ctx.onExternalRuntimeChange?.(freshSession);
+    return "Grok subscription logged out. Started a fresh native Bubble session.";
+  }
+  await ctx.externalRuntime?.logout().catch(() => undefined);
+
+  if (!hadNativeLogin) {
+    return "No Grok subscription login was stored on this device.";
+  }
+  return "Grok subscription logged out. Only this device's local login was removed.";
 }
 
 function parseMemoryScopeArgs(args: string): { scope: MemoryScope; rest: string; error?: string } {
@@ -354,6 +493,18 @@ const builtinSlashCommandEntries: SlashCommand[] = [
     name: "help",
     description: "Show available slash commands",
     async handler(args, ctx) {
+      if (hasExternalRuntimeSession(ctx)) {
+        const grok = isGrokSessionActive(ctx);
+        return [
+          grok
+            ? "Grok Subscription · workspace tools · Bubble approvals"
+            : "Unsupported external runtime session · recovery-only mode",
+          "Available commands:",
+          ...GROK_LOCAL_COMMAND_HELP.map((command) => (
+            `  ${command.usage} - ${command.description}`
+          )),
+        ].join("\n");
+      }
       const { registry } = await import("./index.js");
       const lines = ["Available commands:"];
       for (const cmd of registry.list()) {
@@ -544,12 +695,13 @@ const builtinSlashCommandEntries: SlashCommand[] = [
     name: "provider",
     description: "Manage providers. /provider to switch, /provider --add [id] to add, /provider --remove <id>, /provider --set <id>",
     async handler(args, ctx) {
-      if (!args) {
+      const trimmed = args.trim();
+      if (!trimmed) {
         ctx.openPicker("provider");
         return;
       }
 
-      const parts = args.trim().split(/\s+/);
+      const parts = trimmed.split(/\s+/);
       const flag = parts[0];
       const value = parts[1];
 
@@ -557,6 +709,9 @@ const builtinSlashCommandEntries: SlashCommand[] = [
         if (!value) {
           ctx.openPicker("provider-add");
           return;
+        }
+        if (isGrokSubscriptionProviderId(value)) {
+          return "Grok Subscription is built in. Use /provider --set grok or /login grok to activate it.";
         }
 
         const builtin = BUILTIN_PROVIDERS.find((p) => p.id === value && isUserVisibleProvider(p.id));
@@ -571,6 +726,9 @@ const builtinSlashCommandEntries: SlashCommand[] = [
       }
 
       if (flag === "--remove" && value) {
+        if (isGrokSubscriptionProviderId(value)) {
+          return "Grok Subscription is built in and cannot be removed. Use /logout grok to remove its local login.";
+        }
         if (ctx.registry.getModelConfig().hasProvider(value)) {
           return `Provider ${value} is defined in ~/.bubble/models.json. Please edit that file directly.`;
         }
@@ -579,9 +737,13 @@ const builtinSlashCommandEntries: SlashCommand[] = [
       }
 
       if (flag === "--set" && value) {
+        if (isGrokSubscriptionProviderId(value)) {
+          return loginGrokSubscription(ctx);
+        }
         const providers = ctx.registry.getConfigured();
         const p = providers.find((x) => x.id === value);
         if (!p) return `Provider ${value} is not configured.`;
+        await transitionGrokSessionToNative(ctx);
         ctx.registry.setDefault(value);
         if (ctx.registry.getModelConfig().hasProvider(value)) {
           return `Default provider set to ${p.name}. Note: config is managed via ~/.bubble/models.json.`;
@@ -591,12 +753,16 @@ const builtinSlashCommandEntries: SlashCommand[] = [
 
       if (flag === "--list") {
         const providers = ctx.registry.getConfigured();
-        const lines = ["Configured providers:"];
+        const grokActive = isGrokSessionActive(ctx);
+        const lines = ["Available providers:"];
         for (const p of providers) {
-          const marker = p.id === ctx.registry.getDefault()?.id ? "* " : "  ";
+          const marker = !grokActive && p.id === ctx.registry.getDefault()?.id ? "* " : "  ";
           const source = ctx.registry.getModelConfig().hasProvider(p.id) ? " [models.json]" : "";
           const oauth = ctx.registry.getAuthStorage().has(p.id) ? " [oauth]" : "";
           lines.push(`${marker}${p.name} (${p.id}) ${p.enabled ? "" : "[disabled]"}${oauth}${source}`);
+        }
+        if (!providers.some((provider) => provider.id === "grok")) {
+          lines.push(`${grokActive ? "* " : "  "}Grok Subscription (grok) [not signed in — /login grok]`);
         }
         if (ctx.registry.getModelConfig().getLoadError()) {
           lines.push(`Warning: failed to load models.json: ${ctx.registry.getModelConfig().getLoadError()}`);
@@ -609,15 +775,18 @@ const builtinSlashCommandEntries: SlashCommand[] = [
   },
   {
     name: "login",
-    description: "OAuth login for supported providers. Usage: /login [openai]",
+    description: "Login to OpenAI OAuth or Grok Subscription. Usage: /login [openai|grok]",
     async handler(args, ctx) {
       const providerId = args?.trim() || "openai";
       if (!providerId) {
         ctx.openPicker("login");
         return;
       }
+      if (isGrokSubscriptionProviderId(providerId)) {
+        return loginGrokSubscription(ctx);
+      }
       if (!ctx.registry.supportsOAuth(providerId)) {
-        return `Unsupported OAuth provider: ${providerId}. Currently only 'openai' is supported.`;
+        return `Unsupported login provider: ${providerId}. Supported providers: 'openai' and 'grok'.`;
       }
       const { loginOpenAICodex } = await import("../oauth/openai-codex.js");
       const tokens = await loginOpenAICodex({
@@ -633,7 +802,6 @@ const builtinSlashCommandEntries: SlashCommand[] = [
       });
 
       await ctx.registry.prepareProvider(providerId);
-      ctx.registry.setDefault(providerId);
 
       const provider = ctx.registry.getConfigured().find((item) => item.id === providerId);
       const discoveredModels = provider ? await ctx.registry.listModels(provider) : [];
@@ -641,11 +809,21 @@ const builtinSlashCommandEntries: SlashCommand[] = [
       if (!defaultModel) {
         return `OpenAI Codex OAuth login succeeded, but no default model is configured for ${providerId}.`;
       }
+      if (!provider?.apiKey) {
+        return `OpenAI Codex OAuth login succeeded, but the provider could not be activated. Tokens saved to ${ctx.registry.getAuthStorage().getPath()}`;
+      }
 
-      const switched = switchToProviderModel(providerId, defaultModel, ctx);
+      // Complete every fallible OAuth/provider/model preparation step before
+      // leaving a Grok-bound session. The provider object is created once and
+      // committed only after the fresh native session switch succeeds.
+      const preparedProvider = ctx.createProvider(providerId, provider.apiKey, provider.baseURL);
+      await transitionGrokSessionToNative(ctx);
+
+      const switched = switchToProviderModel(providerId, defaultModel, ctx, undefined, preparedProvider);
       if (!switched) {
         return `OpenAI Codex OAuth login succeeded, but the provider could not be activated. Tokens saved to ${ctx.registry.getAuthStorage().getPath()}`;
       }
+      ctx.registry.setDefault(providerId);
 
       return `OpenAI Codex OAuth login successful. Switched to ${displayModel(ctx.agent.model)}. Account: ${tokens.accountId || "unknown"}. Tokens saved to ${ctx.registry.getAuthStorage().getPath()}`;
     },
@@ -655,6 +833,13 @@ const builtinSlashCommandEntries: SlashCommand[] = [
     description: "Switch model. Use /model <id> [--reasoning-effort <level>] or just /model to open picker.",
     async handler(args, ctx) {
       if (!args) {
+        if (hasExternalRuntimeSession(ctx)) {
+          if (isGrokSessionActive(ctx)) {
+            ctx.openPicker("model");
+            return;
+          }
+          return "This external runtime manages its model and reasoning settings. Bubble's model picker is unavailable until you switch to a native session.";
+        }
         if (ctx.registry.getEnabled().length === 0) {
           ctx.openPicker("model");
           return;
@@ -667,8 +852,39 @@ const builtinSlashCommandEntries: SlashCommand[] = [
         return parsed.error;
       }
       if (!parsed.model) {
+        if (hasExternalRuntimeSession(ctx)) {
+          if (isGrokSessionActive(ctx)) {
+            ctx.openPicker("model");
+            return;
+          }
+          return "This external runtime manages its model and reasoning settings. Bubble's model picker is unavailable until you switch to a native session.";
+        }
         ctx.openPicker("model");
         return;
+      }
+      const explicitModelProvider = parsed.model.includes(":") ? parsed.model.split(":", 1)[0] : undefined;
+      if (isGrokSessionActive(ctx) && (!explicitModelProvider || isGrokSubscriptionProviderId(explicitModelProvider))) {
+        if (!ctx.externalRuntime) return "Grok Subscription runtime is unavailable.";
+        const boundSessionId = getGrokSessionId(ctx);
+        if (boundSessionId) await ctx.externalRuntime.hydrateSession(boundSessionId);
+        const requestedModel = parsed.model.includes(":")
+          ? parsed.model.split(":").slice(1).join(":")
+          : parsed.model;
+        const selection = await ctx.externalRuntime.setModel(requestedModel, parsed.thinkingLevel);
+        const metadata = ctx.sessionManager?.getMetadata().externalRuntime;
+        if (metadata && isGrokSubscriptionProviderId(metadata.id)) {
+          ctx.sessionManager?.updateMetadata({
+            externalRuntime: {
+              ...metadata,
+              modelId: selection.modelId,
+              reasoningEffort: selection.reasoningEffort,
+            },
+          });
+        }
+        ctx.sessionManager?.appendMarker("model_switch", selection.modelId ?? requestedModel);
+        ctx.sessionManager?.appendMarker("thinking_level_switch", selection.reasoningEffort);
+        ctx.onExternalRuntimeChange?.(ctx.sessionManager);
+        return `Grok model switched to ${selection.modelId ?? requestedModel}${selection.reasoningEffort !== "off" ? ` (${selection.reasoningEffort})` : ""}.`;
       }
       const defaultProvider = ctx.registry.getDefault()?.id || "openai";
       const next = parsed.model.includes(":") ? parsed.model : encodeModel(defaultProvider, parsed.model);
@@ -676,22 +892,32 @@ const builtinSlashCommandEntries: SlashCommand[] = [
       const targetProviderId = providerId || defaultProvider;
 
       await ctx.registry.prepareProvider(targetProviderId);
-      const switched = switchToProviderModel(targetProviderId, modelId, ctx, parsed.thinkingLevel);
-      if (!switched) {
+      const targetProvider = ctx.registry.getConfigured().find((item) => item.id === targetProviderId);
+      if (!targetProvider?.apiKey) {
         return `Provider ${targetProviderId} is not configured or has no active credentials.`;
       }
+      const preparedProvider = ctx.createProvider(
+        targetProviderId,
+        targetProvider.apiKey,
+        targetProvider.baseURL,
+      );
+      await transitionGrokSessionToNative(ctx);
+      switchToProviderModel(targetProviderId, modelId, ctx, parsed.thinkingLevel, preparedProvider);
 
       return `Model switched to ${displaySelectedModel(next, ctx.agent.thinking)}.`;
     },
   },
   {
     name: "logout",
-    description: "Remove OAuth credentials for a provider. Usage: /logout [openai]",
+    description: "Remove local login credentials. Usage: /logout [openai|grok]",
     async handler(args, ctx) {
       const providerId = args?.trim() || "openai";
       if (!providerId) {
         ctx.openPicker("logout");
         return;
+      }
+      if (isGrokSubscriptionProviderId(providerId)) {
+        return logoutGrokSubscription(ctx);
       }
       if (!ctx.registry.getAuthStorage().has(providerId)) {
         return `No OAuth credentials found for ${providerId}.`;

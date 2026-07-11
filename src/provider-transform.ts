@@ -55,6 +55,17 @@ export function resolveProviderRequestConfig(
     };
   }
 
+  // Grok's CLI chat proxy is OpenAI-compatible; effort rides in the body as
+  // `reasoning_effort`, and reasoning arrives back as `reasoning_content`.
+  if (providerId === "grok") {
+    return {
+      effectiveThinkingLevel,
+      extraBody: effectiveThinkingLevel === "off"
+        ? undefined
+        : { reasoning_effort: effectiveThinkingLevel },
+    };
+  }
+
   if (isFireworksKimi(providerId, modelId)) {
     return {
       effectiveThinkingLevel,

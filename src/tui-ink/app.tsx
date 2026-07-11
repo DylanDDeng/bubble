@@ -3,7 +3,7 @@ import { Box, Text, useApp, useInput } from "ink";
 import { AgentAbortError, INTERRUPTED_ASSISTANT_CONTENT, type Agent } from "../agent.js";
 import { isHiddenToolMetadata } from "../agent/discovery-barrier.js";
 import type { CliArgs } from "../cli.js";
-import { SessionManager, type UserTurn } from "../session.js";
+import { SessionManager, type SessionMetadata, type UserTurn } from "../session.js";
 import type { AgentEvent, ContentPart, PermissionMode, Message, PlanDecision, Provider, Todo, ToolResultMetadata } from "../types.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import { UserConfig, maskKey } from "../config.js";
@@ -65,7 +65,7 @@ import { FeedbackDialog } from "./feedback-dialog.js";
 import type { ExternalHookController } from "../hooks/controller.js";
 import { collectFeedback } from "../feedback/collect.js";
 import { isKeyReleaseEvent } from "./key-events.js";
-import { errorMessage, formatModelSwitchError, switchAgentModel } from "../tui/model-switch.js";
+import { errorMessage, formatModelSwitchError, modelSwitchTarget, switchAgentModel } from "../tui/model-switch.js";
 import { formatImageUserDisplayText, nextImageDisplayLabelStart } from "../tui/image-display.js";
 import { decideStartingSubmitFingerprint, submitPayloadFingerprint } from "./submit-dedupe.js";
 import {
@@ -86,7 +86,24 @@ import { goalCompleteNotice, goalIndicatorLine, goalSummaryText } from "../goal/
 import { tokenUsageTotal } from "../goal/usage.js";
 import { formatInternalContextBlock } from "../agent/internal-reminder-sanitizer.js";
 import { collectUsageStatsBundle, formatStatsPanelBody, rangeLabel, type StatsRange, type UsageStatsBundle } from "../stats/usage.js";
+import type { ExternalRuntimeManager, ExternalRuntimeModel } from "../external-runtime/types.js";
+import { GrokRuntimeError } from "../external-runtime/grok-errors.js";
+import {
+  GROK_LOCAL_SLASH_COMMANDS,
+  classifyGrokInput,
+  isGrokLocalSlashCommand,
+} from "../external-runtime/grok-input-policy.js";
+import {
+  GROK_SUBSCRIPTION_PROVIDER_ID,
+  isGrokSubscriptionProviderId,
+  withGrokSubscriptionProvider,
+} from "../external-runtime/grok-provider.js";
+import {
+  classifyExternalRuntimeBinding,
+  stopExternalRuntimeForSessionSwitch,
+} from "../external-runtime/session-policy.js";
 import os from "node:os";
+import { rmSync } from "node:fs";
 
 export interface PlanHandlerRef {
   current?: (plan: string) => Promise<PlanDecision>;
@@ -125,6 +142,7 @@ interface AppProps {
   updateNotice?: string;
   updateNoticeRefresh?: Promise<string | null>;
   hookController?: ExternalHookController;
+  externalRuntime?: ExternalRuntimeManager;
   onExit?: (summary: ExitSummary) => void;
 }
 
@@ -133,8 +151,15 @@ export interface ExitSummary {
   wallMs: number;
 }
 
-function buildTips(agent: Agent, registry: ProviderRegistry): string[] {
+function buildTips(agent: Agent, registry: ProviderRegistry, grokActive = false): string[] {
   const tips: string[] = [];
+  if (grokActive) {
+    return [
+      "Grok Subscription is active with workspace tools and Bubble approvals",
+      "Use /model to choose the Grok model and reasoning effort",
+      "Use /logout grok to return to a fresh native session",
+    ];
+  }
   const hasProvider = registry.getEnabled().length > 0;
   if (!hasProvider) {
     tips.push("Run /login or /provider --add to configure a model");
@@ -329,8 +354,15 @@ export const INK_LOCAL_SLASH_COMMANDS = [
   },
 ] as const;
 
-export function App({ agent, args, sessionManager: initialSessionManager, switchSession, createProvider, registry, skillRegistry, planHandlerRef, approvalHandlerRef, questionController, bashAllowlist, settingsManager, lspService, mcpManager, themeMode: initialThemeMode, themeOverrides, detectedTheme, onThemeModeChange, flushMemory, runMemoryCompaction, runMemorySummary, runMemoryRefresh, goalStore, bypassEnabled, updateNotice, updateNoticeRefresh, hookController, onExit }: AppProps) {
+export function App({ agent, args, sessionManager: initialSessionManager, switchSession, createProvider, registry, skillRegistry, planHandlerRef, approvalHandlerRef, questionController, bashAllowlist, settingsManager, lspService, mcpManager, themeMode: initialThemeMode, themeOverrides, detectedTheme, onThemeModeChange, flushMemory, runMemoryCompaction, runMemorySummary, runMemoryRefresh, goalStore, bypassEnabled, updateNotice, updateNoticeRefresh, hookController, externalRuntime, onExit }: AppProps) {
   const [sessionManager, setSessionManager] = useState(initialSessionManager);
+  const [externalRuntimeBinding, setExternalRuntimeBinding] = useState(
+    () => initialSessionManager?.getMetadata().externalRuntime,
+  );
+  const sessionManagerRef = useRef(sessionManager);
+  sessionManagerRef.current = sessionManager;
+  const externalRuntimeBindingRef = useRef(externalRuntimeBinding);
+  externalRuntimeBindingRef.current = externalRuntimeBinding;
   const [themeMode, setThemeMode] = useState<ThemeMode>(initialThemeMode ?? "auto");
   // `detectedTheme` is captured once at startup in main.ts. We keep it in state
   // so future re-detection (e.g. if a user runs `/theme auto` after switching
@@ -410,7 +442,8 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     base: Omit<import("../feedback/types.js").FeedbackPayload, "description">;
     initialDescription: string;
   } | null>(null);
-  const [pickerMode, setPickerMode] = useState<"model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | "theme" | "session" | "rewind" | "slash" | "mcp-reconnect" | "feishu-setup" | "agents" | null>(null);
+  const [pickerMode, setPickerMode] = useState<"model" | "grok-model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | "theme" | "session" | "rewind" | "slash" | "mcp-reconnect" | "feishu-setup" | "agents" | null>(null);
+  const [grokModels, setGrokModels] = useState<ExternalRuntimeModel[]>([]);
   const [statsPanel, setStatsPanel] = useState<{ range: StatsRange; bundle: UsageStatsBundle } | null>(null);
   const [cursorResetEpoch, setCursorResetEpoch] = useState(0);
   const [composerDraft, setComposerDraft] = useState<{ text: string; epoch: number } | null>(null);
@@ -450,6 +483,9 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   const startingSubmitFingerprintRef = useRef<string | null>(null);
   const [startingSubmitFingerprint, setStartingSubmitFingerprint] = useState<string | null>(null);
   const nextRunIdRef = useRef(0);
+  // Invalidates late external-runtime events whenever the Bubble session or
+  // runtime binding changes. Native Agent events retain their existing path.
+  const externalRuntimeGenerationRef = useRef(0);
   // Set true the moment /quit is invoked so we can hide dynamic UI (composer,
   // waiting indicator, footer) before Ink snapshots its final frame into the
   // shell scrollback. Without this, the last visible "> " input row stays
@@ -475,6 +511,16 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     cwd: args.cwd,
     skillPaths: userConfig.getSkillPaths(),
   });
+  const externalRuntimeBindingKind = classifyExternalRuntimeBinding(externalRuntimeBinding);
+  const externalSessionBound = externalRuntimeBindingKind !== "none";
+  const grokSessionBound = externalRuntimeBindingKind === "grok";
+  const unsupportedExternalSessionBound = externalRuntimeBindingKind === "unsupported";
+
+  const refreshExternalRuntimeBinding = useCallback((manager?: SessionManager) => {
+    const next = (manager ?? sessionManagerRef.current)?.getMetadata().externalRuntime;
+    externalRuntimeBindingRef.current = next;
+    setExternalRuntimeBinding(next);
+  }, []);
 
   useEffect(() => {
     setCurrentUpdateNotice(updateNotice);
@@ -684,6 +730,10 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     }
 
     if (key.ctrl && key.shift && input.toLowerCase() === "m" && !pickerMode) {
+      if (externalSessionBound) {
+        addMessage("assistant", "MCP is unavailable in external runtime sessions (no Bubble workspace access).");
+        return;
+      }
       if (!mcpManager || mcpManager.getStates().length === 0) {
         addMessage("assistant", "No MCP servers configured.");
       } else {
@@ -710,6 +760,36 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
 
     // Ctrl+R: cycle thinking level (formerly Shift+Tab)
     if (isCtrlLetterInput(input, key, "r") && !pickerMode) {
+      if (externalSessionBound) {
+        if (!grokSessionBound || !externalRuntime) {
+          addMessage("assistant", "The external runtime manages its own model and reasoning settings.");
+          return;
+        }
+        const bound = externalRuntimeBindingRef.current;
+        void (bound?.sessionId
+          ? externalRuntime.hydrateSession(bound.sessionId, bound.modelId, bound.reasoningEffort)
+          : Promise.resolve()
+        ).then(async () => await externalRuntime.listModels()).then(async (models) => {
+          const current = externalRuntime.getModelSelection();
+          const model = models.find((candidate) => candidate.id === current.modelId);
+          if (!model || model.reasoningLevels.length < 2) {
+            addMessage("assistant", `${current.modelId ?? "The current Grok model"} has no alternate reasoning effort.`);
+            return;
+          }
+          const index = Math.max(0, model.reasoningLevels.indexOf(current.reasoningEffort));
+          const next = model.reasoningLevels[(index + 1) % model.reasoningLevels.length]!;
+          const selection = await externalRuntime.setModel(model.id, next);
+          const manager = sessionManagerRef.current;
+          const binding = manager?.getMetadata().externalRuntime;
+          if (manager && binding && isGrokSubscriptionProviderId(binding.id)) {
+            manager.updateMetadata({ externalRuntime: { ...binding, ...selection } });
+            manager.appendMarker("thinking_level_switch", selection.reasoningEffort);
+            refreshExternalRuntimeBinding(manager);
+          }
+          addMessage("assistant", `Grok reasoning effort set to ${selection.reasoningEffort}.`);
+        }).catch((error) => addMessage("error", `Failed to switch Grok reasoning: ${errorMessage(error)}`));
+        return;
+      }
       const modelParts = agent.model.includes(":")
         ? agent.model.split(":")
         : [agent.providerId || safeRegistry.getDefault()?.id || "openai", agent.model];
@@ -842,7 +922,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     )
   ), []);
 
-  const currentSessionFile = useCallback(() => sessionManager?.getSessionFile(), [sessionManager]);
+  const currentSessionFile = useCallback(() => sessionManagerRef.current?.getSessionFile(), []);
 
   const queueInput = useCallback((payload: SubmitPayload) => {
     const preparedPayload = prepareSubmitDisplay(payload);
@@ -865,6 +945,20 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   }, [addStatusUserMessage, currentSessionFile, prepareSubmitDisplay, queueInput, submitDisplayText]);
 
   const openPicker = useCallback((mode: "model" | "key" | "provider" | "provider-add" | "login" | "logout" | "skill" | "theme" | "session" | "rewind" | "feishu-setup" | "agents", providerId?: string) => {
+    if (mode === "model" && grokSessionBound && externalRuntime) {
+      setStatsPanel(null);
+      setGrokModels([]);
+      setPickerMode("grok-model");
+      const bound = externalRuntimeBindingRef.current;
+      void (bound?.sessionId
+        ? externalRuntime.hydrateSession(bound.sessionId, bound.modelId, bound.reasoningEffort)
+        : Promise.resolve()
+      ).then(async () => await externalRuntime.listModels()).then(setGrokModels).catch((error) => {
+        addMessage("error", `Failed to load Grok models: ${errorMessage(error)}`);
+        setPickerMode(null);
+      });
+      return;
+    }
     if (mode === "key") {
       setKeyProviderId(providerId ?? null);
     }
@@ -873,12 +967,36 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     }
     setStatsPanel(null);
     setPickerMode(mode);
-  }, []);
+  }, [addMessage, externalRuntime, grokSessionBound]);
 
   const closePicker = useCallback(() => {
     setPickerMode(null);
     setCursorResetEpoch((epoch) => epoch + 1);
   }, []);
+
+  const handleGrokModelSelect = useCallback((encoded: string) => {
+    if (!externalRuntime) return;
+    const run = async () => {
+      const parsed = JSON.parse(encoded) as { modelId: string; reasoningEffort: ThinkingLevel };
+      const boundSessionId = externalRuntimeBindingRef.current?.sessionId;
+      if (boundSessionId) await externalRuntime.hydrateSession(boundSessionId);
+      const selection = await externalRuntime.setModel(parsed.modelId, parsed.reasoningEffort);
+      const manager = sessionManagerRef.current;
+      const binding = manager?.getMetadata().externalRuntime;
+      if (manager && binding && isGrokSubscriptionProviderId(binding.id)) {
+        manager.updateMetadata({ externalRuntime: { ...binding, ...selection } });
+        manager.appendMarker("model_switch", selection.modelId ?? parsed.modelId);
+        manager.appendMarker("thinking_level_switch", selection.reasoningEffort);
+        refreshExternalRuntimeBinding(manager);
+      }
+      addMessage("assistant", `Grok model switched to ${selection.modelId ?? parsed.modelId}${selection.reasoningEffort !== "off" ? ` (${selection.reasoningEffort})` : ""}.`);
+      closePicker();
+    };
+    void run().catch((error) => {
+      addMessage("error", `Failed to switch Grok model: ${errorMessage(error)}`);
+      closePicker();
+    });
+  }, [addMessage, closePicker, externalRuntime, refreshExternalRuntimeBinding]);
 
   const fillComposer = useCallback((text: string) => {
     setComposerDraft((current) => ({
@@ -937,23 +1055,8 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     setCursorResetEpoch((epoch) => epoch + 1);
   }, []);
 
-  const handleSessionSelect = useCallback((sessionFile: string) => {
-    if (!switchSession) {
-      addMessage("error", "Session switching is not available in this mode.");
-      closePicker();
-      return;
-    }
-    if (activeAbortRef.current) {
-      addMessage("error", "Stop the current run before switching sessions.");
-      closePicker();
-      return;
-    }
-    const result = switchSession(sessionFile);
-    if ("error" in result) {
-      addMessage("error", `Failed to switch session: ${result.error}`);
-      closePicker();
-      return;
-    }
+  const applySessionSwitch = useCallback((result: { manager: SessionManager }, notice?: string) => {
+    externalRuntimeGenerationRef.current += 1;
     const queuedDisplayKeys = queuedAndPendingDisplayKeys(
       queuedInputsRef.current,
       pendingSteersRef.current.values(),
@@ -965,28 +1068,129 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     setPendingSteerCount(0);
     setStartingSubmit(null);
     clearComposerDraft();
+    sessionManagerRef.current = result.manager;
     setSessionManager(result.manager);
+    const nextExternalBinding = result.manager.getMetadata().externalRuntime;
+    externalRuntimeBindingRef.current = nextExternalBinding;
+    setExternalRuntimeBinding(nextExternalBinding);
     setTodos(agent.getTodos());
     resetTranscript(() => [
       ...reconstructDisplayMessages(agent.messages).filter((message) => !queuedDisplayKeys.has(message.key ?? "")),
-      withMessageKey({ role: "assistant", content: `⤷ Resumed session: ${sessionDisplayName(result.manager)}` }),
+      ...(notice ? [withMessageKey({ role: "assistant" as const, content: notice })] : []),
     ]);
     closePicker();
-  }, [addMessage, agent, clearComposerDraft, closePicker, setStartingSubmit, switchSession, resetTranscript]);
+    return result.manager;
+  }, [agent, clearComposerDraft, closePicker, resetTranscript, setStartingSubmit]);
+
+  const prepareFreshSession = useCallback((metadata?: Partial<SessionMetadata>): SessionManager => {
+    const fresh = SessionManager.createFresh(args.cwd);
+    try {
+      if (metadata && Object.keys(metadata).length > 0) {
+        fresh.updateMetadata(metadata);
+      }
+      return fresh;
+    } catch (error) {
+      rmSync(fresh.getSessionFile(), { force: true });
+      throw error;
+    }
+  }, [args.cwd]);
+
+  const commitFreshSession = useCallback((fresh: SessionManager): SessionManager => {
+    if (!switchSession) {
+      rmSync(fresh.getSessionFile(), { force: true });
+      throw new Error("Starting a fresh session is not available in this mode.");
+    }
+    const result = switchSession(fresh.getSessionFile());
+    if ("error" in result) {
+      rmSync(fresh.getSessionFile(), { force: true });
+      throw new Error(result.error);
+    }
+    return applySessionSwitch(result);
+  }, [applySessionSwitch, switchSession]);
+
+  const startFreshSession = useCallback(async (
+    metadata?: Partial<SessionMetadata>,
+  ): Promise<SessionManager> => {
+    return commitFreshSession(prepareFreshSession(metadata));
+  }, [commitFreshSession, prepareFreshSession]);
+
+  const transitionToNative = useCallback(async (): Promise<SessionManager | undefined> => {
+    if (!externalSessionBound) return sessionManagerRef.current;
+    const candidate = prepareFreshSession();
+    externalRuntimeGenerationRef.current += 1;
+    const boundSessionId = externalRuntimeBinding?.sessionId;
+    try {
+      // Validate/prepare the native provider before calling this function.
+      // The external sidecar must be fully stopped before the new Bubble
+      // session is committed. If commit then fails, the old binding remains
+      // authoritative and the reusable manager will lazy-load it next time.
+      await stopExternalRuntimeForSessionSwitch(externalRuntime, boundSessionId);
+      return commitFreshSession(candidate);
+    } catch (error) {
+      rmSync(candidate.getSessionFile(), { force: true });
+      throw error;
+    }
+  }, [commitFreshSession, externalRuntime, externalRuntimeBinding?.sessionId, externalSessionBound, prepareFreshSession]);
+
+  const handleSessionSelect = useCallback((sessionFile: string) => {
+    const run = async () => {
+    if (!switchSession) {
+      addMessage("error", "Session switching is not available in this mode.");
+      closePicker();
+      return;
+    }
+    if (activeAbortRef.current) {
+      addMessage("error", "Stop the current run before switching sessions.");
+      closePicker();
+      return;
+    }
+    if (externalSessionBound) {
+      externalRuntimeGenerationRef.current += 1;
+      const boundSessionId = externalRuntimeBinding?.sessionId;
+      await stopExternalRuntimeForSessionSwitch(externalRuntime, boundSessionId);
+    }
+    const result = switchSession(sessionFile);
+    if ("error" in result) {
+      addMessage("error", `Failed to switch session: ${result.error}`);
+      closePicker();
+      return;
+    }
+    applySessionSwitch(result, `⤷ Resumed session: ${sessionDisplayName(result.manager)}`);
+    };
+    void run().catch((error) => {
+      addMessage("error", `Failed to switch session: ${errorMessage(error)}`);
+      closePicker();
+    });
+  }, [activeAbortRef, addMessage, applySessionSwitch, closePicker, externalRuntime, externalRuntimeBinding?.sessionId, externalSessionBound, switchSession]);
 
   const handleModelSelect = useCallback((model: string, selectedThinkingLevel?: ThinkingLevel) => {
     const run = async () => {
+      const target = modelSwitchTarget(
+        model,
+        agent.providerId || safeRegistry.getDefault()?.id,
+      );
+      await safeRegistry.prepareProvider(target.providerId);
+      const targetProvider = safeRegistry.getConfigured().find((item) => item.id === target.providerId);
+      if (!targetProvider?.apiKey || !createProvider) {
+        throw new Error(`Provider ${target.providerId} is not configured or has no active credentials.`);
+      }
+      // Construct once as a side-effect-free preflight before stopping Grok.
+      // switchAgentModel constructs the committed instance after the fresh
+      // native session has been installed.
+      const preparedProvider = createProvider(target.providerId, targetProvider.apiKey, targetProvider.baseURL);
+      const targetSessionManager = await transitionToNative();
       const nextThinkingLevel = await switchAgentModel({
         model,
         agent,
         registry: safeRegistry,
         createProvider,
+        preparedProvider,
         workingDir: args.cwd,
         systemPromptOptions: agent.getSystemPromptToolOptions(),
         thinkingLevel: selectedThinkingLevel,
         rememberModel: (nextModel) => userConfig.pushRecentModel(nextModel),
         setThinkingLevel,
-        sessionManager,
+        sessionManager: targetSessionManager,
       });
       // Binary thinking toggles and thinking-only models use internal level
       // placeholders; do not present those placeholders as real effort grades.
@@ -1008,7 +1212,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
       addMessage("error", formatModelSwitchError(model, error));
       closePicker();
     });
-  }, [agent, addMessage, closePicker, sessionManager, userConfig, safeRegistry, createProvider]);
+  }, [agent, addMessage, closePicker, sessionManager, transitionToNative, userConfig, safeRegistry, createProvider]);
 
   const handleThemeHighlight = useCallback((mode: string) => {
     setThemeMode(mode as ThemeMode);
@@ -1026,8 +1230,89 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     closePicker();
   }, [closePicker]);
 
+  const executeProviderCommand = useCallback(async (command: string): Promise<void> => {
+    closePicker();
+    const { handled, result } = await slashRegistry.execute(command, {
+      agent,
+      addMessage,
+      clearMessages,
+      cwd: args.cwd,
+      exit: requestExit,
+      sessionManager: sessionManagerRef.current,
+      createProvider: createProvider ?? ((() => {
+        throw new Error("Provider creation not available");
+      }) as any),
+      openPicker,
+      openSessionPicker,
+      openRewindPicker,
+      openFeedback,
+      fillComposer,
+      registry: safeRegistry,
+      skillRegistry: safeSkillRegistry!,
+      bashAllowlist,
+      settingsManager,
+      lspService,
+      mcpManager,
+      hookController,
+      flushMemory,
+      runMemoryCompaction,
+      runMemorySummary,
+      runMemoryRefresh,
+      getThemeMode: () => themeMode,
+      getResolvedTheme: () => themeResolved,
+      setThemeMode: applyThemeMode,
+      openStats: openStatsPanel,
+      externalRuntime,
+      startFreshSession,
+      transitionToNative,
+      onExternalRuntimeChange: refreshExternalRuntimeBinding,
+    });
+    if (handled && result) addMessage("assistant", result);
+  }, [
+    addMessage,
+    agent,
+    applyThemeMode,
+    args.cwd,
+    bashAllowlist,
+    clearMessages,
+    closePicker,
+    createProvider,
+    externalRuntime,
+    fillComposer,
+    flushMemory,
+    hookController,
+    lspService,
+    mcpManager,
+    openFeedback,
+    openPicker,
+    openRewindPicker,
+    openSessionPicker,
+    openStatsPanel,
+    refreshExternalRuntimeBinding,
+    requestExit,
+    runMemoryCompaction,
+    runMemoryRefresh,
+    runMemorySummary,
+    safeRegistry,
+    safeSkillRegistry,
+    settingsManager,
+    startFreshSession,
+    themeMode,
+    themeResolved,
+    transitionToNative,
+  ]);
+
   const handleProviderSelect = useCallback((providerId: string) => {
     const run = async () => {
+      if (isGrokSubscriptionProviderId(providerId)) {
+        if (grokSessionBound) {
+          closePicker();
+          return;
+        }
+        await executeProviderCommand(`/provider --set ${GROK_SUBSCRIPTION_PROVIDER_ID}`);
+        return;
+      }
+
       await safeRegistry.prepareProvider(providerId);
       const configured = safeRegistry.getConfigured();
       const p = configured.find((x) => x.id === providerId);
@@ -1041,14 +1326,23 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         if (!p && builtin) {
           safeRegistry.addProvider(providerId, "");
         }
-        safeRegistry.setDefault(providerId);
         setKeyProviderId(providerId);
         setPickerMode("key");
         return;
       }
-      safeRegistry.setDefault(providerId);
-      agent.setProvider(createProvider!(providerId, p.apiKey, p.baseURL));
+
+      if (!createProvider) throw new Error("Provider creation not available");
+      // Construct the target before stopping a Grok sidecar. A bad provider
+      // configuration must leave the current external session untouched.
+      const nextProvider = createProvider(providerId, p.apiKey, p.baseURL);
+      await transitionToNative();
+      agent.setProvider(nextProvider);
       agent.providerId = providerId;
+      try {
+        safeRegistry.setDefault(providerId);
+      } catch (error) {
+        addMessage("error", `Switched providers, but could not remember the default: ${errorMessage(error)}`);
+      }
       addMessage("assistant", `Switched to provider ${p.name}. Use /model to pick a model.`);
       closePicker();
     };
@@ -1057,116 +1351,72 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
       addMessage("error", `Failed to switch provider ${providerId}: ${errorMessage(error)}`);
       closePicker();
     });
-  }, [addMessage, agent, closePicker, createProvider, safeRegistry]);
+  }, [addMessage, agent, closePicker, createProvider, executeProviderCommand, grokSessionBound, safeRegistry, transitionToNative]);
 
   const handleProviderAddSelect = useCallback((providerId: string) => {
-    const ok = safeRegistry.addProvider(providerId, "");
-    if (!ok) {
-      addMessage("error", `Provider ${providerId} could not be added.`);
+    const run = async () => {
+      if (isGrokSubscriptionProviderId(providerId)) {
+        await executeProviderCommand(`/provider --add ${GROK_SUBSCRIPTION_PROVIDER_ID}`);
+        return;
+      }
+      const ok = safeRegistry.addProvider(providerId, "");
+      if (!ok) {
+        addMessage("error", `Provider ${providerId} could not be added.`);
+        closePicker();
+        return;
+      }
+      setKeyProviderId(providerId);
+      setPickerMode("key");
+    };
+    void run().catch((error) => {
+      addMessage("error", `Failed to add provider ${providerId}: ${errorMessage(error)}`);
       closePicker();
-      return;
-    }
-    safeRegistry.setDefault(providerId);
-    setKeyProviderId(providerId);
-    setPickerMode("key");
-  }, [addMessage, closePicker, safeRegistry]);
-
-  const handleLoginProviderSelect = useCallback(async (providerId: string) => {
-    closePicker();
-    const command = `/login ${providerId}`;
-      const { handled, result } = await slashRegistry.execute(command, {
-        agent,
-        addMessage,
-        clearMessages,
-        cwd: args.cwd,
-        exit: () => { requestExit(); },
-      sessionManager,
-      createProvider: createProvider ?? ((() => {
-        throw new Error("Provider creation not available");
-      }) as any),
-      openPicker,
-      openSessionPicker,
-      openRewindPicker,
-      openFeedback,
-      fillComposer,
-      registry: safeRegistry,
-      skillRegistry: safeSkillRegistry!,
-      bashAllowlist,
-      settingsManager,
-      lspService,
-      mcpManager,
-      hookController,
-      flushMemory,
-      runMemoryCompaction,
-      runMemorySummary,
-      runMemoryRefresh,
-      getThemeMode: () => themeMode,
-      getResolvedTheme: () => themeResolved,
-      setThemeMode: applyThemeMode,
-      openStats: openStatsPanel,
     });
-    if (handled && result) {
-      addMessage("assistant", result);
-    }
-  }, [agent, addMessage, clearMessages, closePicker, createProvider, exit, fillComposer, openPicker, openSessionPicker, openRewindPicker, openStatsPanel, safeRegistry, sessionManager]);
+  }, [addMessage, closePicker, executeProviderCommand, safeRegistry]);
 
-  const handleLogoutProviderSelect = useCallback(async (providerId: string) => {
-    closePicker();
-    const command = `/logout ${providerId}`;
-      const { handled, result } = await slashRegistry.execute(command, {
-        agent,
-        addMessage,
-        clearMessages,
-        cwd: args.cwd,
-        exit: () => { requestExit(); },
-      sessionManager,
-      createProvider: createProvider ?? ((() => {
-        throw new Error("Provider creation not available");
-      }) as any),
-      openPicker,
-      openSessionPicker,
-      openRewindPicker,
-      openFeedback,
-      fillComposer,
-      registry: safeRegistry,
-      skillRegistry: safeSkillRegistry!,
-      bashAllowlist,
-      settingsManager,
-      lspService,
-      mcpManager,
-      hookController,
-      flushMemory,
-      runMemoryCompaction,
-      runMemorySummary,
-      runMemoryRefresh,
-      getThemeMode: () => themeMode,
-      getResolvedTheme: () => themeResolved,
-      setThemeMode: applyThemeMode,
-      openStats: openStatsPanel,
+  const handleLoginProviderSelect = useCallback((providerId: string) => {
+    void executeProviderCommand(`/login ${providerId}`).catch((error) => {
+      addMessage("error", `Failed to log in to ${providerId}: ${errorMessage(error)}`);
     });
-    if (handled && result) {
-      addMessage("assistant", result);
-    }
-  }, [agent, addMessage, clearMessages, closePicker, createProvider, exit, fillComposer, openPicker, openSessionPicker, openRewindPicker, openStatsPanel, safeRegistry, sessionManager]);
+  }, [addMessage, executeProviderCommand]);
+
+  const handleLogoutProviderSelect = useCallback((providerId: string) => {
+    void executeProviderCommand(`/logout ${providerId}`).catch((error) => {
+      addMessage("error", `Failed to log out of ${providerId}: ${errorMessage(error)}`);
+    });
+  }, [addMessage, executeProviderCommand]);
 
   const handleKeySubmit = useCallback((key: string) => {
-    const targetId = keyProviderId || safeRegistry.getDefault()?.id;
-    if (!targetId) {
-      addMessage("error", "No provider selected.");
+    const run = async () => {
+      const targetId = keyProviderId || safeRegistry.getDefault()?.id;
+      if (!targetId) {
+        addMessage("error", "No provider selected.");
+        closePicker();
+        setKeyProviderId(null);
+        return;
+      }
+      safeRegistry.updateProviderKey(targetId, key);
+      const p = safeRegistry.getConfigured().find((x) => x.id === targetId);
+      if (p && createProvider) {
+        const nextProvider = createProvider(targetId, key, p.baseURL);
+        await transitionToNative();
+        agent.setProvider(nextProvider);
+        agent.providerId = targetId;
+        try {
+          safeRegistry.setDefault(targetId);
+        } catch (error) {
+          addMessage("error", `API key saved, but could not remember the default: ${errorMessage(error)}`);
+        }
+      }
+      addMessage("assistant", `API key updated for ${p?.name || targetId} to ${maskKey(key)}.`);
       closePicker();
       setKeyProviderId(null);
-      return;
-    }
-    safeRegistry.updateProviderKey(targetId, key);
-    const p = safeRegistry.getConfigured().find((x) => x.id === targetId);
-    if (p && createProvider) {
-      agent.setProvider(createProvider(targetId, key, p.baseURL));
-      agent.providerId = targetId;
-    }
-    addMessage("assistant", `API key updated for ${p?.name || targetId} to ${maskKey(key)}.`);
-    closePicker();
-    setKeyProviderId(null);
-  }, [addMessage, agent, closePicker, createProvider, keyProviderId, safeRegistry]);
+    };
+    void run().catch((error) => {
+      addMessage("error", `Failed to update provider key: ${errorMessage(error)}`);
+      closePicker();
+    });
+  }, [addMessage, agent, closePicker, createProvider, keyProviderId, safeRegistry, transitionToNative]);
 
   const handleSubmit = useCallback(
     async (payload: SubmitPayload | string) => {
@@ -1185,6 +1435,13 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
           requestExit();
           return;
         }
+        if (externalSessionBound) {
+          // External ACP turns do not support Bubble's boundary steer
+          // protocol. Preserve ordering by sending every additional input to
+          // the next turn instead.
+          queueInput(initialPayload);
+          return;
+        }
         const steerEligible =
           !displayInput.trim().startsWith("/") &&
           !input.includes("@") &&
@@ -1194,6 +1451,28 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         } else {
           queueInput(initialPayload);
         }
+        return;
+      }
+
+      const grokInputDecision = externalSessionBound
+        ? classifyGrokInput({ text: input, imageCount: images.length })
+        : undefined;
+      if (grokInputDecision?.kind === "blocked") {
+        addMessage("error", grokInputDecision.message);
+        return;
+      }
+      if (grokInputDecision?.kind === "prompt" && unsupportedExternalSessionBound) {
+        addMessage(
+          "error",
+          "This session has an unsupported external runtime binding. Native tools and providers are disabled; use /session, /provider, or /model to enter a fresh native session.",
+        );
+        return;
+      }
+      if (grokInputDecision?.kind === "prompt" && grokSessionBound && !externalRuntime) {
+        addMessage(
+          "error",
+          "This session belongs to Grok Subscription, but its runtime is unavailable in this TUI. Use /model, /provider, or /session to enter a fresh native session.",
+        );
         return;
       }
 
@@ -1218,23 +1497,58 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         runOptions: { hidden?: boolean; goalRun?: boolean; imageDisplayStart?: number } = {},
       ) => {
         const runSessionFile = currentSessionFile();
-        const activeProviderId = agent.providerId || safeRegistry.getDefault()?.id;
-        const hasActiveProvider = !!activeProviderId && safeRegistry.getEnabled().some((provider) => provider.id === activeProviderId);
-        if (!hasActiveProvider) {
-          addMessage("error", "No provider configured. Use /login for ChatGPT or /provider --add <id> before sending a prompt.");
-          if (runOptions.goalRun && goalStore?.snapshot()?.status === "active") {
-            goalStore.pause();
-            addMessage("assistant", stopReasonNotice("error"));
+        const runSessionManager = sessionManagerRef.current;
+        const runExternalRuntime = isGrokSubscriptionProviderId(
+          externalRuntimeBindingRef.current?.id,
+        );
+        const externalSessionId = runExternalRuntime
+          ? externalRuntimeBindingRef.current?.sessionId
+          : undefined;
+        const externalModelId = runExternalRuntime
+          ? externalRuntimeBindingRef.current?.modelId ?? "subscription-default"
+          : undefined;
+        const externalGeneration = runExternalRuntime
+          ? ++externalRuntimeGenerationRef.current
+          : undefined;
+        const isCurrentExternalRun = () => !runExternalRuntime || (
+          externalRuntimeGenerationRef.current === externalGeneration
+          && currentSessionFile() === runSessionFile
+          && isGrokSubscriptionProviderId(externalRuntimeBindingRef.current?.id)
+          && externalRuntimeBindingRef.current?.sessionId === externalSessionId
+        );
+
+        if (runExternalRuntime) {
+          if (!externalRuntime || typeof actualInput !== "string" || !externalSessionId || !runSessionManager) {
+            addMessage("error", "Grok subscription session binding is unavailable. Start a fresh session with /login grok.");
+            return;
           }
-          return;
-        }
-        if (!agent.model) {
-          addMessage("error", "No model selected. Use /model after /login or provider setup.");
-          if (runOptions.goalRun && goalStore?.snapshot()?.status === "active") {
-            goalStore.pause();
-            addMessage("assistant", stopReasonNotice("error"));
+          const boundModelId = externalRuntimeBindingRef.current?.modelId;
+          if (boundModelId) {
+            await externalRuntime.hydrateSession(
+              externalSessionId,
+              boundModelId,
+              externalRuntimeBindingRef.current?.reasoningEffort,
+            );
           }
-          return;
+        } else {
+          const activeProviderId = agent.providerId || safeRegistry.getDefault()?.id;
+          const hasActiveProvider = !!activeProviderId && safeRegistry.getEnabled().some((provider) => provider.id === activeProviderId);
+          if (!hasActiveProvider) {
+            addMessage("error", "No provider configured. Use /login for ChatGPT or /provider --add <id> before sending a prompt.");
+            if (runOptions.goalRun && goalStore?.snapshot()?.status === "active") {
+              goalStore.pause();
+              addMessage("assistant", stopReasonNotice("error"));
+            }
+            return;
+          }
+          if (!agent.model) {
+            addMessage("error", "No model selected. Use /model after /login or provider setup.");
+            if (runOptions.goalRun && goalStore?.snapshot()?.status === "active") {
+              goalStore.pause();
+              addMessage("assistant", stopReasonNotice("error"));
+            }
+            return;
+          }
         }
 
         const displayContent = formatImageUserDisplayText(
@@ -1249,6 +1563,9 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
           ]);
           // The new user row commits to native scrollback; the terminal keeps
           // the prompt in view, so there is no app-side "snap to bottom" to do.
+        }
+        if (runExternalRuntime) {
+          runSessionManager!.appendMessage({ role: "user", content: actualInput as string });
         }
         setIsRunning(true);
         runStartRef.current = Date.now();
@@ -1300,7 +1617,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
           assistantParts.length > 0
         );
         const commitAssistantMessage = (taskElapsedMs?: number) => {
-          if (!hasAssistantOutput()) return;
+          if (!hasAssistantOutput() || !isCurrentExternalRun()) return;
 
           const currentParts = snapshotDisplayParts(assistantParts);
           const currentToolCalls = [...toolCalls];
@@ -1326,6 +1643,16 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
             msg.taskElapsedMs = taskElapsedMs;
           }
           updateDisplayMessages((prev) => [...prev, msg]);
+          if (runExternalRuntime) {
+            runSessionManager!.appendMessage({
+              role: "assistant",
+              content: partContent,
+              ...(assistantReasoning ? { reasoning: assistantReasoning } : {}),
+              providerId: "grok",
+              model: "grok-subscription",
+              modelId: externalModelId,
+            });
+          }
         };
         const clearAssistantStream = () => {
           // A timer firing after this reset would resurrect the just-committed
@@ -1342,10 +1669,38 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         };
 
         try {
-          for await (const event of agent.run(actualInput, args.cwd, {
-            abortSignal: abortController.signal,
-            inputController,
-          })) {
+          const eventStream: AsyncIterable<AgentEvent> = runExternalRuntime
+            ? externalRuntime!.run(actualInput as string, {
+                sessionId: externalSessionId,
+                signal: abortController.signal,
+                generation: externalGeneration,
+              })
+            : agent.run(actualInput, args.cwd, {
+                abortSignal: abortController.signal,
+                inputController,
+              });
+          for await (const event of eventStream) {
+            if (runExternalRuntime) {
+              if (!isCurrentExternalRun()) {
+                abortController.abort(new AgentAbortError("Stale Grok runtime generation."));
+                break;
+              }
+              if (
+                event.type !== "turn_start"
+                && event.type !== "text_delta"
+                && event.type !== "reasoning_delta"
+                && event.type !== "tool_start"
+                && event.type !== "tool_update"
+                && event.type !== "tool_end"
+                && event.type !== "turn_end"
+              ) {
+                await externalRuntime!.cancel(externalSessionId).catch(() => undefined);
+                throw new GrokRuntimeError(
+                  "policy_violation",
+                  "Grok emitted an unsupported external runtime event.",
+                );
+              }
+            }
             switch (event.type) {
               case "turn_start":
                 // A fresh provider call is starting. Everything worth keeping
@@ -1536,15 +1891,21 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
             }
           }
         } catch (err: any) {
-          commitAssistantMessage();
-          if (err instanceof AgentAbortError || err?.name === "AbortError") {
+          const staleExternalRun = runExternalRuntime && !isCurrentExternalRun();
+          if (!staleExternalRun) commitAssistantMessage();
+          const cancelledError = err instanceof AgentAbortError
+            || err?.name === "AbortError"
+            || (err instanceof GrokRuntimeError && err.code === "cancelled");
+          if (staleExternalRun) {
+            runCancelled = true;
+          } else if (cancelledError) {
             runCancelled = true;
             // commitAssistantMessage already appended the partial answer; the
             // interrupt is otherwise a pure append (the partial + a "Interrupted"
             // row). Off a multiplexer, append just the interrupt row so settled
             // history is never reprinted — no flash. Under tmux/screen, fall back
             // to the full reprint that rebuilds from the canonical agent.messages.
-            if (isMultiplexedTerminal()) {
+            if (!runExternalRuntime && isMultiplexedTerminal()) {
               resetTranscript(() => reconstructDisplayMessages(agent.messages));
             } else {
               updateDisplayMessages((prev) => [
@@ -1560,7 +1921,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
             runErrored = true;
             updateDisplayMessages((prev) => [
               ...prev,
-              withMessageKey({ role: "error", content: err.message }),
+              withMessageKey({ role: "error", content: errorMessage(err) }),
             ]);
           }
         } finally {
@@ -1570,6 +1931,23 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
           // the next turn on a normal end.
           const cancelled = abortController.signal.aborted;
           if (cancelled) runCancelled = true;
+          if (runExternalRuntime && runCancelled) {
+            // External ACP owns its own conversation state, so Bubble persists
+            // an explicit boundary for its local transcript. Without this,
+            // a partial response looks successfully completed after resume.
+            runSessionManager!.appendMessage({
+              role: "assistant",
+              content: INTERRUPTED_ASSISTANT_CONTENT,
+              error: {
+                name: "MessageAbortedError",
+                message: "Assistant response was interrupted by the user.",
+                aborted: true,
+              },
+              providerId: "grok",
+              model: "grok-subscription",
+              modelId: externalModelId,
+            });
+          }
           for (const leftover of inputController.clear()) {
             const steer = pendingSteersRef.current.get(leftover.id);
             pendingSteersRef.current.delete(leftover.id);
@@ -1590,23 +1968,30 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
               sessionFile: steer?.sessionFile ?? runSessionFile,
             });
           }
-          setPendingSteerCount(0);
-          setQueuedCount(queuedInputsRef.current.length);
+          const ownsCurrentUiGeneration = !runExternalRuntime || isCurrentExternalRun();
+          if (ownsCurrentUiGeneration) {
+            setPendingSteerCount(0);
+            setQueuedCount(queuedInputsRef.current.length);
+          }
           if (inputControllerRef.current === inputController) inputControllerRef.current = null;
           if (activeAbortRef.current === abortController) activeAbortRef.current = null;
-          setIsRunning(false);
-          runStartRef.current = null;
-          setStreamingContent("");
-          setStreamingReasoning("");
-          setStreamingTools([]);
-          setStreamingParts([]);
-          maybeContinueGoal({
-            runCancelled,
-            runErrored,
-            isGoalRun: !!runOptions.goalRun,
-            runTokens: goalRunTokens,
-            usageReported: goalRunUsageReported,
-          });
+          if (ownsCurrentUiGeneration) {
+            setIsRunning(false);
+            runStartRef.current = null;
+            setStreamingContent("");
+            setStreamingReasoning("");
+            setStreamingTools([]);
+            setStreamingParts([]);
+          }
+          if (!runExternalRuntime) {
+            maybeContinueGoal({
+              runCancelled,
+              runErrored,
+              isGoalRun: !!runOptions.goalRun,
+              runTokens: goalRunTokens,
+              usageReported: goalRunUsageReported,
+            });
+          }
         }
       };
 
@@ -1722,7 +2107,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
 
       // Slash commands and skill invocations drop any attached images —
       // they're meant for pure command routing.
-      if (displayInput.startsWith("/")) {
+      if (input.trimStart().startsWith("/")) {
         // Fast-path `/quit` and `/exit` before slash-registry / skill
         // resolution. This guarantees a literal "/quit" always exits even if
         // a skill or alias of the same name is later registered. The
@@ -1734,15 +2119,17 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
           return;
         }
 
-        if (/^\/goal(?:\s|$)/.test(input.trim())) {
-          await handleGoalCommand(input);
-          return;
-        }
+        if (!externalSessionBound) {
+          if (/^\/goal(?:\s|$)/.test(input.trim())) {
+            await handleGoalCommand(input);
+            return;
+          }
 
-        const skillInvocation = parseSkillInvocation(input, safeSkillRegistry);
-        if (skillInvocation) {
-          await runAgentInput(skillInvocation.actualPrompt, displayInput);
-          return;
+          const skillInvocation = parseSkillInvocation(input, safeSkillRegistry);
+          if (skillInvocation) {
+            await runAgentInput(skillInvocation.actualPrompt, displayInput);
+            return;
+          }
         }
 
         const { handled, result, inject } = await slashRegistry.execute(input, {
@@ -1776,6 +2163,10 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
           setThemeMode: applyThemeMode,
           openStats: openStatsPanel,
           compactionProgress: setCompaction,
+          externalRuntime,
+          startFreshSession,
+          transitionToNative,
+          onExternalRuntimeChange: refreshExternalRuntimeBinding,
         });
         if (handled) {
           if (agent.mode !== permissionMode) {
@@ -1812,6 +2203,14 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
           }
           return;
         }
+        if (externalSessionBound) {
+          addMessage("error", "That command is unavailable in this external runtime session.");
+          return;
+        }
+      }
+      if (grokSessionBound) {
+        await runAgentInput(input, displayInput);
+        return;
       }
       const expansion = await expandAtMentions(input, args.cwd);
       if (expansion.missing.length > 0) {
@@ -1841,7 +2240,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         }
       }
     },
-    [addMessage, agent, args.cwd, openPicker, openSessionPicker, openRewindPicker, openStatsPanel, createProvider, currentSessionFile, fillComposer, prepareSubmitDisplay, safeRegistry, safeSkillRegistry, updateDisplayMessages, queueInput, submitSteer, requestExit, setStartingSubmit]
+    [addMessage, agent, args.cwd, openPicker, openSessionPicker, openRewindPicker, openStatsPanel, createProvider, currentSessionFile, externalRuntime, externalRuntimeBinding, externalSessionBound, fillComposer, grokSessionBound, prepareSubmitDisplay, refreshExternalRuntimeBinding, safeRegistry, safeSkillRegistry, startFreshSession, transitionToNative, unsupportedExternalSessionBound, updateDisplayMessages, queueInput, submitSteer, requestExit, setStartingSubmit]
   );
 
   // Drain the queue once the run ends and no modal needs the user first.
@@ -1869,7 +2268,9 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     return () => clearTimeout(timer);
   }, [isRunning, queuedCount, startingSubmitFingerprint, pendingPlan, pendingApproval, pendingQuestion, pendingFeedback, pickerMode, statsPanel, drainQueuedInput]);
 
-  const currentProviderId = agent.providerId || safeRegistry.getDefault()?.id;
+  const currentProviderId = externalSessionBound
+    ? (grokSessionBound ? GROK_SUBSCRIPTION_PROVIDER_ID : undefined)
+    : agent.providerId || safeRegistry.getDefault()?.id;
   const keyTarget = keyProviderId
     ? safeRegistry.getConfigured().find((p) => p.id === keyProviderId)
     : safeRegistry.getDefault();
@@ -1898,19 +2299,25 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   const welcomeBannerNode = showWelcome ? (
     <WelcomeBanner
       terminalColumns={terminalColumns}
-      tips={buildTips(agent, safeRegistry)}
+      tips={buildTips(agent, safeRegistry, grokSessionBound)}
       updateNotice={currentUpdateNotice}
       cwd={friendlyCwd(args.cwd)}
       sessionLabel={sessionBasename(currentSessionFile())}
-      providerId={agent.providerId || safeRegistry.getDefault()?.id}
-      modelId={agent.apiModel}
-      modelLabel={agent.model ? displayModel(agent.model) : undefined}
-      thinkingLabel={showThinkingLabel ? thinkingLevel : undefined}
+      providerId={grokSessionBound ? "grok" : externalSessionBound ? undefined : agent.providerId || safeRegistry.getDefault()?.id}
+      modelId={grokSessionBound ? externalRuntimeBinding?.modelId : externalSessionBound ? undefined : agent.apiModel}
+      modelLabel={externalSessionBound
+        ? (grokSessionBound
+            ? `Grok Subscription${externalRuntimeBinding?.modelId ? ` · ${externalRuntimeBinding.modelId}` : ""}`
+            : "Unsupported external runtime · recovery-only mode")
+        : agent.model ? displayModel(agent.model) : undefined}
+      thinkingLabel={grokSessionBound
+        ? externalRuntimeBinding?.reasoningEffort
+        : !externalSessionBound && showThinkingLabel ? thinkingLevel : undefined}
     />
   ) : null;
   const commandPaletteItems = useMemo(
-    () => buildCommandPaletteItems(safeSkillRegistry),
-    [safeSkillRegistry],
+    () => buildCommandPaletteItems(safeSkillRegistry, externalSessionBound),
+    [externalSessionBound, safeSkillRegistry],
   );
   const mcpReconnectItems = useMemo(
     () => buildMcpReconnectItems(mcpManager),
@@ -1945,6 +2352,28 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         />
         {/* Pickers live in the fixed bottom stack (not the scrollable
             transcript) so they can never be scrolled out of view. */}
+        {pickerMode === "grok-model" && (
+          <Box paddingX={1} flexShrink={0}>
+            {grokModels.length === 0 ? (
+              <Text>Loading Grok subscription models…</Text>
+            ) : (
+              <ProviderPicker
+                title="Select Grok Model and Reasoning"
+                providers={grokModels.flatMap((model) => model.reasoningLevels.map((effort) => ({
+                  id: JSON.stringify({ modelId: model.id, reasoningEffort: effort }),
+                  name: `${model.name}${effort === "off" ? "" : ` · ${effort}`}`,
+                  enabled: true,
+                })))}
+                current={JSON.stringify({
+                  modelId: externalRuntimeBinding?.modelId,
+                  reasoningEffort: externalRuntimeBinding?.reasoningEffort ?? "high",
+                })}
+                onSelect={handleGrokModelSelect}
+                onCancel={closePicker}
+              />
+            )}
+          </Box>
+        )}
         {pickerMode === "model" && (
           <Box paddingX={1} flexShrink={0}>
             <ModelPicker
@@ -1960,9 +2389,10 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         {pickerMode === "provider" && (
           <Box paddingX={1} flexShrink={0}>
             <ProviderPicker
-              providers={BUILTIN_PROVIDERS
-                .filter((p) => isUserVisibleProvider(p.id))
-                .map((p) => {
+              providers={withGrokSubscriptionProvider(
+                BUILTIN_PROVIDERS
+                  .filter((p) => isUserVisibleProvider(p.id))
+                  .map((p) => {
                   const configured = safeRegistry.getConfigured().find((item) => item.id === p.id);
                   const configuredLabel = configured?.apiKey ? "configured" : "needs key";
                   return {
@@ -1970,7 +2400,8 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
                     name: `${p.name} [${configuredLabel}]`,
                     enabled: true,
                   };
-              })}
+                }),
+              )}
               current={currentProviderId}
               onSelect={handleProviderSelect}
               onCancel={closePicker}
@@ -1980,9 +2411,11 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         {pickerMode === "provider-add" && (
           <Box paddingX={1} flexShrink={0}>
             <ProviderPicker
-              providers={BUILTIN_PROVIDERS
-                .filter((p) => isUserVisibleProvider(p.id))
-                .map((p) => ({ id: p.id, name: p.name, enabled: true }))}
+              providers={withGrokSubscriptionProvider(
+                BUILTIN_PROVIDERS
+                  .filter((p) => isUserVisibleProvider(p.id))
+                  .map((p) => ({ id: p.id, name: p.name, enabled: true })),
+              )}
               current={currentProviderId}
               onSelect={handleProviderAddSelect}
               onCancel={closePicker}
@@ -1993,9 +2426,13 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         {pickerMode === "login" && (
           <Box paddingX={1} flexShrink={0}>
             <ProviderPicker
-              providers={BUILTIN_PROVIDERS
-                .filter((p) => isUserVisibleProvider(p.id) && safeRegistry.supportsOAuth(p.id))
-                .map((p) => ({ id: p.id, name: p.name, enabled: true }))}
+              providers={
+                // The native grok provider is OAuth-capable, so it appears via
+                // supportsOAuth like OpenAI — no extra hardcoded row.
+                BUILTIN_PROVIDERS
+                  .filter((p) => isUserVisibleProvider(p.id) && safeRegistry.supportsOAuth(p.id))
+                  .map((p) => ({ id: p.id, name: p.name, enabled: true }))
+              }
               current={currentProviderId}
               onSelect={handleLoginProviderSelect}
               onCancel={closePicker}
@@ -2006,9 +2443,14 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         {pickerMode === "logout" && (
           <Box paddingX={1} flexShrink={0}>
             <ProviderPicker
-              providers={safeRegistry.getConfigured()
-                .filter((p) => safeRegistry.getAuthStorage().has(p.id))
-                .map((p) => ({ id: p.id, name: p.name, enabled: true }))}
+              providers={[
+                ...safeRegistry.getConfigured()
+                  .filter((p) => safeRegistry.getAuthStorage().has(p.id))
+                  .map((p) => ({ id: p.id, name: p.name, enabled: true })),
+                ...(grokSessionBound
+                  ? [{ id: GROK_SUBSCRIPTION_PROVIDER_ID, name: "Grok Subscription [local login]", enabled: true }]
+                  : []),
+              ]}
               current={currentProviderId}
               onSelect={handleLogoutProviderSelect}
               onCancel={closePicker}
@@ -2242,8 +2684,11 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
             draftText={composerDraft?.text}
             draftEpoch={composerDraft?.epoch}
             onDraftApplied={clearComposerDraft}
-            skillRegistry={safeSkillRegistry}
-            localSlashCommands={[...INK_LOCAL_SLASH_COMMANDS]}
+            skillRegistry={externalSessionBound ? undefined : safeSkillRegistry}
+            localSlashCommands={externalSessionBound ? [] : [...INK_LOCAL_SLASH_COMMANDS]}
+            allowedSlashCommands={unsupportedExternalSessionBound ? GROK_LOCAL_SLASH_COMMANDS : undefined}
+            allowWorkspaceMentions={!unsupportedExternalSessionBound}
+            allowImageAttachments={!externalSessionBound}
             terminalColumns={mainWidth}
             cwd={args.cwd}
             sessionFile={currentSessionFile()}
@@ -2263,7 +2708,15 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
       )}
       {!isExiting && (
         <Box flexShrink={0}>
-          <FooterBar data={buildFooterData({ mode: permissionMode, goalLine })} />
+          <FooterBar data={buildFooterData({
+            mode: permissionMode,
+            goalLine: externalSessionBound ? undefined : goalLine,
+            runtimeLabel: externalSessionBound
+              ? (grokSessionBound
+                  ? `Grok Subscription${externalRuntimeBinding?.modelId ? ` · ${externalRuntimeBinding.modelId}` : ""}${externalRuntimeBinding?.reasoningEffort && externalRuntimeBinding.reasoningEffort !== "off" ? ` · ${externalRuntimeBinding.reasoningEffort}` : ""} · workspace`
+                  : "Unsupported external runtime · recovery-only")
+              : undefined,
+          })} />
         </Box>
       )}
       </Box>
@@ -2279,22 +2732,25 @@ interface PaletteItem {
   action?: "insert-skill";
 }
 
-function buildCommandPaletteItems(skillRegistry: SkillRegistry): PaletteItem[] {
+function buildCommandPaletteItems(skillRegistry: SkillRegistry, grokSessionBound = false): PaletteItem[] {
   const items = new Map<string, PaletteItem>();
   const add = (item: PaletteItem) => {
     const key = `${item.action ?? "command"}:${item.value}`;
     if (!items.has(key)) items.set(key, item);
   };
 
-  for (const command of INK_LOCAL_SLASH_COMMANDS) {
-    add({
-      label: `/${command.name}`,
-      detail: command.description,
-      value: command.name,
-      command: `/${command.name}`,
-    });
+  if (!grokSessionBound) {
+    for (const command of INK_LOCAL_SLASH_COMMANDS) {
+      add({
+        label: `/${command.name}`,
+        detail: command.description,
+        value: command.name,
+        command: `/${command.name}`,
+      });
+    }
   }
   for (const command of slashRegistry.list()) {
+    if (grokSessionBound && !isGrokLocalSlashCommand(command.name)) continue;
     const source = command.source === "mcp" ? " :mcp" : "";
     const sourceLabel = command.sourceLabel ? `[${command.sourceLabel}] ` : "";
     add({
@@ -2304,14 +2760,16 @@ function buildCommandPaletteItems(skillRegistry: SkillRegistry): PaletteItem[] {
       command: `/${command.name}`,
     });
   }
-  for (const skill of skillRegistry.summaries()) {
-    add({
-      label: `/${skill.name} :skill`,
-      detail: `[${skill.source}] ${skill.description}`,
-      value: skill.name,
-      command: `/${skill.name}`,
-      action: "insert-skill",
-    });
+  if (!grokSessionBound) {
+    for (const skill of skillRegistry.summaries()) {
+      add({
+        label: `/${skill.name} :skill`,
+        detail: `[${skill.source}] ${skill.description}`,
+        value: skill.name,
+        command: `/${skill.name}`,
+        action: "insert-skill",
+      });
+    }
   }
 
   return [...items.values()];
