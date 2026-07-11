@@ -7,3 +7,4 @@ export * from "./start.js";
 export * from "./storage.js";
 export * from "./reset.js";
 export * from "./usage.js";
+export * from "./session-policy.js";

@@ -169,6 +169,18 @@ export class MemoryDatabase {
     `).all(limit).map((row) => mapStage1(row as Record<string, unknown>));
   }
 
+  listAllStage1Outputs(): Stage1Output[] {
+    return this.db.prepare(`
+      SELECT * FROM memory_stage1_outputs
+      ORDER BY usage_count DESC, COALESCE(last_usage, generated_at) DESC, source_updated_at DESC
+    `).all().map((row) => mapStage1(row as Record<string, unknown>));
+  }
+
+  deleteStage1Output(sessionFile: string): boolean {
+    return (this.db.prepare("DELETE FROM memory_stage1_outputs WHERE session_file = ?")
+      .run(sessionFile).changes ?? 0) > 0;
+  }
+
   listPreviouslySelectedNotIn(sessionFiles: string[]): Stage1Output[] {
     if (sessionFiles.length === 0) {
       return this.db.prepare("SELECT * FROM memory_stage1_outputs WHERE selected_for_phase2 = 1")

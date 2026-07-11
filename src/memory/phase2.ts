@@ -3,7 +3,13 @@ import type { Message, ThinkingLevel } from "../types.js";
 import { MemoryDatabase, type Stage1Output } from "./db.js";
 import { getMemoryPaths } from "./paths.js";
 import { buildConsolidationMessages, parseJsonObject } from "./prompts.js";
-import { rebuildRawMemories, syncRolloutSummaries, writeConsolidatedMemory } from "./storage.js";
+import { classifyMemorySession } from "./session-policy.js";
+import {
+  clearGeneratedMemoryOutputs,
+  rebuildRawMemories,
+  syncRolloutSummaries,
+  writeConsolidatedMemory,
+} from "./storage.js";
 
 export interface Phase2Options {
   cwd: string;
@@ -40,8 +46,26 @@ export async function runMemoryPhase2(options: Phase2Options): Promise<Phase2Res
   }
 
   try {
-    const selected = db.listStage1Outputs(options.limit ?? DEFAULT_SELECTION_LIMIT);
+    const eligible: Stage1Output[] = [];
+    let clearedUnsafeArtifacts = false;
+    for (const output of db.listAllStage1Outputs()) {
+      const source = classifyMemorySession(output.sessionFile);
+      if (source.kind === "native") {
+        eligible.push(output);
+      } else {
+        if (!clearedUnsafeArtifacts) {
+          // Clear before deleting provenance rows; phase 2 will rebuild from
+          // the remaining native-only selection below.
+          clearGeneratedMemoryOutputs(options.cwd);
+          clearedUnsafeArtifacts = true;
+        }
+        db.deleteStage1Output(output.sessionFile);
+      }
+    }
+
+    const selected = eligible.slice(0, Math.max(0, options.limit ?? DEFAULT_SELECTION_LIMIT));
     if (selected.length === 0) {
+      clearGeneratedMemoryOutputs(options.cwd);
       db.finishGlobalPhase2Job(true, Date.now());
       return { status: "skipped", reason: "no stage-1 outputs", selected: 0 };
     }

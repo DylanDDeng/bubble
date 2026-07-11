@@ -63,6 +63,20 @@ export function writeConsolidatedMemory(cwd: string, input: { memoryMd: string; 
   writeFileSync(paths.globalSummary, normalizeSummaryMarkdown(input.memorySummaryMd), "utf-8");
 }
 
+export function clearGeneratedMemoryOutputs(cwd: string): void {
+  const paths = getMemoryPaths(cwd);
+  rmSync(paths.globalRawMemories, { force: true });
+  rmSync(paths.globalMemory, { force: true });
+  rmSync(paths.globalSummary, { force: true });
+  if (!existsSync(paths.globalRolloutSummaries)) return;
+
+  for (const file of readdirSync(paths.globalRolloutSummaries)) {
+    if (file.endsWith(".md")) {
+      rmSync(join(paths.globalRolloutSummaries, file), { force: true });
+    }
+  }
+}
+
 export function resetMemoryWorkspace(cwd: string): void {
   const paths = getMemoryPaths(cwd);
   rmSync(paths.globalRoot, { recursive: true, force: true });

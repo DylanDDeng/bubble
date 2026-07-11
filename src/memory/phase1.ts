@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { SessionManager, type SessionLogEntry } from "../session.js";
+import type { SessionLogEntry } from "../session.js";
 import type { Message, ThinkingLevel } from "../types.js";
 import { MemoryDatabase } from "./db.js";
 import { getBubbleHome } from "./paths.js";
 import { buildStageOneMessages, parseJsonObject } from "./prompts.js";
+import { classifyMemorySession } from "./session-policy.js";
+import { clearGeneratedMemoryOutputs } from "./storage.js";
 import { redactSecrets } from "./store.js";
 
 export interface Phase1Options {
@@ -48,11 +50,22 @@ export async function runMemoryPhase1(options: Phase1Options): Promise<Phase1Res
     const sessions = listEligibleSessionFiles(options.limit ?? DEFAULT_LIMIT);
     result.scanned = sessions.length;
     for (const sessionFile of sessions) {
+      const source = classifyMemorySession(sessionFile);
+      if (source.kind !== "native") {
+        if (db.getStage1Output(sessionFile)) {
+          // Clear before deleting the provenance row so interruption cannot
+          // leave an unsafe generated artifact that looks source-less later.
+          clearGeneratedMemoryOutputs(options.cwd);
+          db.deleteStage1Output(sessionFile);
+        }
+        result.skipped++;
+        continue;
+      }
       if (db.getThreadMemoryMode(sessionFile) === "disabled") {
         result.skipped++;
         continue;
       }
-      const session = new SessionManager(sessionFile);
+      const session = source.session;
       const sessionCwd = session.getMetadata().cwd ?? options.cwd;
       const entries = session.getEntries();
       const entryCount = entries.length;

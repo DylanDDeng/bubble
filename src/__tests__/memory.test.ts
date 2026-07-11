@@ -1,10 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildMemoryPrompt,
   getMemoryPaths,
+  purgeUnsafeMemorySources,
   MemoryDatabase,
   resetMemory,
   runMemoryPhase1,
@@ -64,6 +65,164 @@ describe("memory", () => {
     expect(outputs).toHaveLength(1);
     expect(outputs[0].rawMemory).toContain("phase 1 creates raw");
     expect(outputs[0].rolloutSlug).toBe("phase-one-memory");
+  });
+
+  it("never sends external-runtime transcripts to phase 1 and purges stale stage outputs", async () => {
+    const { cwd, home } = setupWorkspace("bubble-memory-external-phase1");
+    process.env.BUBBLE_HOME = home;
+    const session = createSession(cwd, "external-phase1.jsonl", "EXTERNAL_PRIVATE_TRANSCRIPT");
+    session.setMetadata({
+      cwd,
+      externalRuntime: { id: "grok", sessionId: "grok-session-phase1" },
+    });
+
+    const db = new MemoryDatabase(cwd);
+    db.upsertStage1Output({
+      sessionFile: session.getSessionFile(),
+      cwd,
+      entryCount: session.getEntries().length,
+      sourceUpdatedAt: new Date().toISOString(),
+      generatedAt: new Date().toISOString(),
+      rawMemory: "EXTERNAL_STALE_RAW_MEMORY",
+      rolloutSummary: "EXTERNAL_STALE_SUMMARY",
+      rolloutSlug: "external-stale",
+    });
+    db.close();
+
+    const paths = getMemoryPaths(cwd);
+    mkdirSync(paths.globalRolloutSummaries, { recursive: true });
+    writeFileSync(paths.globalRawMemories, "EXTERNAL_STALE_RAW_MEMORY\n", "utf-8");
+    writeFileSync(paths.globalMemory, "# Bubble Memory\n\nEXTERNAL_STALE_RAW_MEMORY\n", "utf-8");
+    writeFileSync(paths.globalSummary, "# Bubble Memory Summary\n\nEXTERNAL_STALE_SUMMARY\n", "utf-8");
+    writeFileSync(join(paths.globalRolloutSummaries, "external-stale.md"), "EXTERNAL_STALE_SUMMARY\n", "utf-8");
+
+    const complete = vi.fn(async () => JSON.stringify({
+      raw_memory: "must not be generated",
+      rollout_summary: "must not be generated",
+    }));
+    const result = await runMemoryPhase1({ cwd, model: "gpt-test", complete });
+    const phase2 = await runMemoryPhase2({ cwd, model: "gpt-test", complete });
+
+    const verified = new MemoryDatabase(cwd);
+    const staleOutput = verified.getStage1Output(session.getSessionFile());
+    verified.close();
+    expect(result.scanned).toBe(1);
+    expect(result.skipped).toBe(1);
+    expect(result.claimed).toBe(0);
+    expect(phase2.status).toBe("skipped");
+    expect(complete).not.toHaveBeenCalled();
+    expect(staleOutput).toBeUndefined();
+    expect(existsSync(paths.globalRawMemories)).toBe(false);
+    expect(existsSync(paths.globalMemory)).toBe(false);
+    expect(existsSync(paths.globalSummary)).toBe(false);
+    expect(readdirSync(paths.globalRolloutSummaries)).toEqual([]);
+  });
+
+  it("purges unsafe generated memory before it can be injected at startup", () => {
+    const { cwd, home } = setupWorkspace("bubble-memory-external-startup-gate");
+    process.env.BUBBLE_HOME = home;
+    const session = createSession(cwd, "external-startup.jsonl", "STARTUP_EXTERNAL_SECRET");
+    session.setMetadata({
+      cwd,
+      externalRuntime: { id: "grok", sessionId: "grok-session-startup" },
+    });
+
+    const db = new MemoryDatabase(cwd);
+    db.upsertStage1Output({
+      sessionFile: session.getSessionFile(),
+      cwd,
+      entryCount: session.getEntries().length,
+      sourceUpdatedAt: new Date().toISOString(),
+      generatedAt: new Date().toISOString(),
+      rawMemory: "STARTUP_EXTERNAL_SECRET",
+      rolloutSummary: "STARTUP_EXTERNAL_SUMMARY",
+      rolloutSlug: "external-startup",
+    });
+    db.close();
+
+    const paths = getMemoryPaths(cwd);
+    mkdirSync(paths.globalRolloutSummaries, { recursive: true });
+    writeFileSync(paths.globalMemory, "# Bubble Memory\n\nSTARTUP_EXTERNAL_SECRET\n", "utf-8");
+    writeFileSync(paths.globalSummary, "# Bubble Memory Summary\n\nSTARTUP_EXTERNAL_SUMMARY\n", "utf-8");
+    writeFileSync(paths.globalRawMemories, "STARTUP_EXTERNAL_SECRET\n", "utf-8");
+    writeFileSync(join(paths.globalRolloutSummaries, "external-startup.md"), "STARTUP_EXTERNAL_SUMMARY\n", "utf-8");
+
+    expect(purgeUnsafeMemorySources(cwd)).toBe(1);
+    expect(buildMemoryPrompt(cwd)).toBeUndefined();
+    expect(existsSync(paths.globalMemory)).toBe(false);
+    expect(existsSync(paths.globalSummary)).toBe(false);
+    expect(existsSync(paths.globalRawMemories)).toBe(false);
+    expect(readdirSync(paths.globalRolloutSummaries)).toEqual([]);
+
+    const verified = new MemoryDatabase(cwd);
+    expect(verified.getStage1Output(session.getSessionFile())).toBeUndefined();
+    verified.close();
+  });
+
+  it("filters historical external stage outputs before phase 2 native completion", async () => {
+    const { cwd, home } = setupWorkspace("bubble-memory-external-phase2");
+    process.env.BUBBLE_HOME = home;
+    const external = createSession(cwd, "external-phase2.jsonl", "EXTERNAL_PRIVATE_TRANSCRIPT");
+    external.setMetadata({
+      cwd,
+      externalRuntime: { id: "grok", sessionId: "grok-session-phase2" },
+    });
+    const native = createSession(cwd, "native-phase2.jsonl", "NATIVE_MEMORY_INPUT");
+
+    const db = new MemoryDatabase(cwd);
+    db.upsertStage1Output({
+      sessionFile: external.getSessionFile(),
+      cwd,
+      entryCount: external.getEntries().length,
+      sourceUpdatedAt: "2026-07-10T12:00:00.000Z",
+      generatedAt: "2026-07-10T12:00:00.000Z",
+      rawMemory: "EXTERNAL_PRIVATE_TRANSCRIPT",
+      rolloutSummary: "EXTERNAL_PRIVATE_SUMMARY",
+      rolloutSlug: "external-private",
+    });
+    db.upsertStage1Output({
+      sessionFile: native.getSessionFile(),
+      cwd,
+      entryCount: native.getEntries().length,
+      sourceUpdatedAt: "2026-07-10T11:00:00.000Z",
+      generatedAt: "2026-07-10T11:00:00.000Z",
+      rawMemory: "NATIVE_MEMORY_INPUT",
+      rolloutSummary: "Native memory summary.",
+      rolloutSlug: "native-memory",
+    });
+    db.markSelectedForPhase2([db.getStage1Output(external.getSessionFile())!]);
+    db.close();
+
+    const paths = getMemoryPaths(cwd);
+    mkdirSync(paths.globalRolloutSummaries, { recursive: true });
+    writeFileSync(paths.globalRawMemories, "EXTERNAL_PRIVATE_TRANSCRIPT\n", "utf-8");
+    writeFileSync(paths.globalMemory, "# Bubble Memory\n\nEXTERNAL_PRIVATE_TRANSCRIPT\n", "utf-8");
+    writeFileSync(paths.globalSummary, "# Bubble Memory Summary\n\nEXTERNAL_PRIVATE_SUMMARY\n", "utf-8");
+    writeFileSync(join(paths.globalRolloutSummaries, "stale-external.md"), "EXTERNAL_PRIVATE_SUMMARY\n", "utf-8");
+
+    const complete = vi.fn(async (messages: Parameters<Parameters<typeof runMemoryPhase2>[0]["complete"]>[0]) => {
+      const prompt = String(messages[1].content);
+      expect(prompt).toContain("NATIVE_MEMORY_INPUT");
+      expect(prompt).not.toContain("EXTERNAL_PRIVATE_TRANSCRIPT");
+      expect(prompt).not.toContain("EXTERNAL_PRIVATE_SUMMARY");
+      return JSON.stringify({
+        memory_md: "# Bubble Memory\n\n- NATIVE_MEMORY_INPUT",
+        memory_summary_md: "# Bubble Memory Summary\n\n- Native memory only.",
+      });
+    });
+    const result = await runMemoryPhase2({ cwd, model: "gpt-test", limit: 1, complete });
+
+    const verified = new MemoryDatabase(cwd);
+    const outputs = verified.listAllStage1Outputs();
+    verified.close();
+    expect(result.status).toBe("succeeded");
+    expect(result.selected).toBe(1);
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(outputs.map((output) => output.sessionFile)).toEqual([native.getSessionFile()]);
+    expect(readFileSync(paths.globalRawMemories, "utf-8")).not.toContain("EXTERNAL_PRIVATE_TRANSCRIPT");
+    expect(readFileSync(paths.globalMemory, "utf-8")).not.toContain("EXTERNAL_PRIVATE_TRANSCRIPT");
+    expect(readFileSync(paths.globalSummary, "utf-8")).not.toContain("EXTERNAL_PRIVATE_SUMMARY");
+    expect(readdirSync(paths.globalRolloutSummaries)).not.toContain("stale-external.md");
   });
 
   it("extracts global memories across project sessions from any startup cwd", async () => {
