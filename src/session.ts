@@ -194,6 +194,11 @@ export class SessionManager {
     this.setMetadata(metadata);
   }
 
+  clearExternalRuntimeMetadata() {
+    const { externalRuntime: _externalRuntime, ...metadata } = this.log.getMetadata();
+    this.setMetadata(metadata);
+  }
+
   appendMessage(message: Message) {
     const entries = this.log.appendMessage(message);
     this.persist(entries);

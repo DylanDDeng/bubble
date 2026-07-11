@@ -41,5 +41,7 @@ function approvalRequestLabel(req: ApprovalRequest): string {
       return `LSP ${req.operation} on ${req.path}`;
     case "agent_profile":
       return `Project agent profile "${req.name}"`;
+    case "external_tool":
+      return `External tool "${req.title}"`;
   }
 }

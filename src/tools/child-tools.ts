@@ -80,6 +80,8 @@ export class WorktreeApprovalController implements ApprovalController {
         return { action: "approve" };
       case "agent_profile":
         return { action: "reject", feedback: "Subagents cannot approve agent profiles." };
+      case "external_tool":
+        return { action: "reject", feedback: "Subagents cannot approve external runtime tools." };
     }
   }
 

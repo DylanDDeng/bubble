@@ -29,6 +29,8 @@ export interface SwitchAgentModelOptions {
   agent: ModelSwitchAgent;
   registry: ModelSwitchRegistry;
   createProvider: ((providerId: string, apiKey: string, baseURL: string) => Provider) | undefined;
+  /** A side-effect-free provider instance prepared before an atomic session transition. */
+  preparedProvider?: Provider;
   workingDir: string;
   systemPromptOptions: Omit<SystemPromptOptions, "agentName" | "configuredProvider" | "configuredModel" | "configuredModelId" | "thinkingLevel" | "workingDir">;
   thinkingLevel?: ThinkingLevel;
@@ -70,16 +72,19 @@ export async function switchAgentModel(options: SwitchAgentModelOptions): Promis
     options.agent.providerId || options.registry.getDefault()?.id,
   );
 
-  await options.registry.prepareProvider(providerId);
+  if (!options.preparedProvider) {
+    await options.registry.prepareProvider(providerId);
+  }
   const provider = options.registry.getConfigured().find((item) => item.id === providerId);
-  if (!provider?.apiKey || !options.createProvider) {
+  if (!provider?.apiKey || (!options.createProvider && !options.preparedProvider)) {
     throw new Error(`Provider ${providerId} is not configured or has no active credentials.`);
   }
 
   const nextThinkingLevel = options.thinkingLevel !== undefined
     ? normalizeThinkingLevel(options.thinkingLevel, getAvailableThinkingLevels(providerId, modelId))
     : normalizeInheritedThinkingLevel(providerId, modelId, options.agent.thinking);
-  const nextProvider = options.createProvider(providerId, provider.apiKey, provider.baseURL);
+  const nextProvider = options.preparedProvider
+    ?? options.createProvider!(providerId, provider.apiKey, provider.baseURL);
   const nextSystemPrompt = buildSystemPrompt({
     agentName: "Bubble",
     configuredProvider: providerId,

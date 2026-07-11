@@ -8,6 +8,7 @@ import { useTheme } from "./theme.js";
 import { filterFileSuggestions, findAtContext, listProjectFiles } from "./file-mentions.js";
 import {
   bareImageFilenameFromPaste,
+  extractImagePathTokens,
   ingestClipboardImage,
   ingestImagePath,
   isImageFilePath,
@@ -82,10 +83,25 @@ interface InputBoxProps {
   onDraftApplied?: () => void;
   skillRegistry?: SkillRegistry;
   localSlashCommands?: Array<{ name: string; description: string }>;
+  /** Restrict slash completion to commands handled locally by a constrained runtime. */
+  allowedSlashCommands?: ReadonlySet<string>;
+  /** False only for runtimes that must not enumerate or read the workspace. */
+  allowWorkspaceMentions?: boolean;
+  /** False for text-only runtimes; prevents clipboard and pasted-path image reads. */
+  allowImageAttachments?: boolean;
   terminalColumns: number;
   cwd: string;
   sessionFile?: string;
   nextImageLabelStart?: number;
+}
+
+export function resolveComposerAtContext(
+  text: string,
+  cursor: number,
+  isSlashContext: boolean,
+  allowWorkspaceMentions = true,
+) {
+  return !allowWorkspaceMentions || isSlashContext ? null : findAtContext(text, cursor);
 }
 
 export interface ComposerDraftSnapshot {
@@ -592,6 +608,9 @@ export function InputBox({
   onDraftApplied,
   skillRegistry,
   localSlashCommands = [],
+  allowedSlashCommands,
+  allowWorkspaceMentions = true,
+  allowImageAttachments = true,
   terminalColumns,
   cwd,
   sessionFile,
@@ -624,6 +643,8 @@ export function InputBox({
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   const historyDraftRef = useRef<ComposerDraftSnapshot | null>(null);
   const historyScopeRef = useRef(historyScope);
+  const historyScopeKey = `${historyScope.cwd}\0${historyScope.sessionFile ?? ""}`;
+  const previousHistoryScopeKeyRef = useRef(historyScopeKey);
   const draftIdentityEpochRef = useRef(0);
   const pasteOperationsRef = useRef(new PasteOperationTracker());
   const submittedPayloadFingerprintRef = useRef<string | null>(null);
@@ -643,12 +664,21 @@ export function InputBox({
   }, [nextImageLabelStart]);
 
   useEffect(() => {
+    const scopeChanged = previousHistoryScopeKeyRef.current !== historyScopeKey;
+    previousHistoryScopeKeyRef.current = historyScopeKey;
     setHistory(loadHistoryEntriesSync({ scope: historyScope }));
     setHistoryIndex(null);
     setImageLabelStartOverride(null);
     historyDraftRef.current = null;
+    if (scopeChanged) {
+      updateComposerBuffer(() => createComposerBuffer());
+      setAttachments([]);
+      attachmentCountRef.current = 0;
+      setProjectFiles(null);
+      loadingFilesRef.current = false;
+    }
     invalidateDraftAsyncWork();
-  }, [historyScope, invalidateDraftAsyncWork]);
+  }, [historyScope, historyScopeKey, invalidateDraftAsyncWork, updateComposerBuffer]);
 
   useEffect(() => () => {
     invalidateDraftAsyncWork();
@@ -658,8 +688,8 @@ export function InputBox({
   const slashPrefix = isSlashContext ? text.slice(1).toLowerCase() : "";
 
   const atContext = useMemo(
-    () => (isSlashContext ? null : findAtContext(text, cursor)),
-    [text, cursor, isSlashContext],
+    () => resolveComposerAtContext(text, cursor, isSlashContext, allowWorkspaceMentions),
+    [allowWorkspaceMentions, text, cursor, isSlashContext],
   );
 
   useEffect(() => {
@@ -690,6 +720,7 @@ export function InputBox({
       commands.set(command.name, command);
     }
     for (const command of slashRegistry.list()) {
+      if (allowedSlashCommands && !allowedSlashCommands.has(command.name)) continue;
       if (!commands.has(command.name)) commands.set(command.name, command);
     }
     const commandSuggestions: SlashSuggestion[] = [...commands.values()].map((command) => ({
@@ -697,22 +728,26 @@ export function InputBox({
       name: command.name,
       description: command.description,
     }));
-    const skillSuggestions: SlashSuggestion[] = (skillRegistry?.summaries() ?? []).map((skill) => ({
+    const skillSuggestions: SlashSuggestion[] = (allowedSlashCommands ? [] : (skillRegistry?.summaries() ?? [])).map((skill) => ({
       type: "skill",
       name: skill.name,
       description: skill.description,
     }));
     const all = [...commandSuggestions, ...skillSuggestions];
     return all.filter((item) => item.name.toLowerCase().startsWith(slashPrefix));
-  }, [isSlashContext, slashPrefix, skillRegistry, localSlashCommands]);
+  }, [allowedSlashCommands, isSlashContext, slashPrefix, skillRegistry, localSlashCommands]);
 
   const knownSlashCommandNames = useMemo(() => {
     const names = new Set<string>();
     for (const command of localSlashCommands) names.add(command.name);
-    for (const command of slashRegistry.list()) names.add(command.name);
-    for (const skill of skillRegistry?.summaries() ?? []) names.add(skill.name);
+    for (const command of slashRegistry.list()) {
+      if (!allowedSlashCommands || allowedSlashCommands.has(command.name)) names.add(command.name);
+    }
+    if (!allowedSlashCommands) {
+      for (const skill of skillRegistry?.summaries() ?? []) names.add(skill.name);
+    }
     return names;
-  }, [skillRegistry, localSlashCommands]);
+  }, [allowedSlashCommands, skillRegistry, localSlashCommands]);
 
   const slashCommandHighlight = useMemo(
     () => resolveSlashCommandHighlightRange(text, knownSlashCommandNames),
@@ -807,6 +842,26 @@ export function InputBox({
       .replace(/\x1b\[I$/, "")
       .replace(/\x1b\[O$/, "")
       .replace(/\r\n?/g, "\n");
+
+    if (!allowImageAttachments) {
+      // A constrained text-only runtime must not probe the clipboard or read
+      // pasted filesystem paths. Do not leak image path strings as chat text.
+      const containsImagePath = clean.length > 0 && (
+        bareImageFilenameFromPaste(clean) !== null
+        || extractImagePathTokens(clean).length > 0
+      );
+      if (clean.length === 0 || containsImagePath) {
+        notice("image attachments are disabled in this runtime session");
+      } else {
+        if (shouldCollapsePastedContent(clean)) {
+          updateComposerBuffer((current) => insertComposerPaste(current, clean));
+        } else {
+          insertTextAtCursor(clean);
+        }
+      }
+      clearPending();
+      return;
+    }
 
     // Empty paste on macOS usually means "Cmd+V with an image on the clipboard".
     if (clean.length === 0) {

@@ -1,5 +1,5 @@
 import type { Agent } from "../agent.js";
-import type { SessionManager } from "../session.js";
+import type { SessionManager, SessionMetadata } from "../session.js";
 import type { Provider } from "../types.js";
 import type { ProviderRegistry } from "../provider-registry.js";
 import type { SkillRegistry } from "../skills/registry.js";
@@ -10,6 +10,7 @@ import type { LspService } from "../lsp/index.js";
 import type { MemoryScope } from "../memory/index.js";
 import type { ThemeMode } from "../config.js";
 import type { ExternalHookController } from "../hooks/controller.js";
+import type { ExternalRuntimeManager } from "../external-runtime/types.js";
 
 /**
  * Live progress for a manual `/compact` run, pushed to the TUI so it can render
@@ -63,6 +64,18 @@ export interface SlashCommandContext {
    * while compacting and `null` to clear the indicator. Absent in non-TUI hosts.
    */
   compactionProgress?: (progress: CompactionProgress | null) => void;
+  /** External agent runtime used by Grok subscription chat. */
+  externalRuntime?: ExternalRuntimeManager;
+  /**
+   * Atomically create and bind a fresh Bubble session with optional metadata.
+   * External runtimes are session-affine, so crossing the native/external
+   * boundary never reuses history.
+   */
+  startFreshSession?: (metadata?: Partial<SessionMetadata>) => Promise<SessionManager>;
+  /** Stop the external runtime and atomically enter a fresh native session. */
+  transitionToNative?: () => Promise<SessionManager | undefined>;
+  /** Refresh TUI state after a command changes the external session binding. */
+  onExternalRuntimeChange?: (manager?: SessionManager) => void;
 }
 
 /**

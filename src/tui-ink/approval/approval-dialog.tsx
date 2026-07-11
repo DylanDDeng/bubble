@@ -122,6 +122,8 @@ function dialogTitle(req: ApprovalRequest): string {
       return "Language server operation";
     case "agent_profile":
       return "Project agent profile";
+    case "external_tool":
+      return "External tool permission";
   }
 }
 
@@ -139,6 +141,8 @@ function dialogQuestion(req: ApprovalRequest): string {
       return `Do you want to run ${req.operation} on ${basename(req.path)}?`;
     case "agent_profile":
       return `Trust the repository profile "${req.name}" to drive a subagent? It is remembered for this session until the file changes.`;
+    case "external_tool":
+      return `Do you want to allow ${req.title || req.kind || "this external tool"}?`;
   }
 }
 
@@ -159,7 +163,57 @@ function RequestPreview({ request }: { request: ApprovalRequest }) {
       return <WritePreview path={request.path} content={request.content} />;
     case "agent_profile":
       return <AgentProfilePreview path={request.path} promptPreview={request.promptPreview} />;
+    case "external_tool":
+      return <ExternalToolPreview request={request} />;
   }
+}
+
+const MAX_EXTERNAL_INPUT_CHARS = 1_200;
+
+function ExternalToolPreview({
+  request,
+}: {
+  request: Extract<ApprovalRequest, { type: "external_tool" }>;
+}) {
+  const theme = useTheme();
+  const input = formatExternalInput(request.rawInput);
+  return (
+    <Box flexDirection="column">
+      <Text bold>{request.title || "Untitled external tool"}</Text>
+      <Text color={theme.muted}>kind: {request.kind || "other"}</Text>
+      {request.locations?.map((location, index) => (
+        <Text key={`${location.path}:${location.line ?? ""}:${index}`} color={theme.muted}>
+          {compressHome(location.path)}{location.line == null ? "" : `:${location.line}`}
+        </Text>
+      ))}
+      {input !== undefined && (
+        <Box flexDirection="column" marginTop={1}>
+          <Text color={theme.muted}>Input</Text>
+          <Text>{input}</Text>
+        </Box>
+      )}
+    </Box>
+  );
+}
+
+function formatExternalInput(rawInput: unknown): string | undefined {
+  if (rawInput === undefined) return undefined;
+  let json: string;
+  try {
+    const seen = new WeakSet<object>();
+    json = JSON.stringify(rawInput, (_key, value: unknown) => {
+      if (typeof value === "bigint") return value.toString();
+      if (typeof value === "object" && value !== null) {
+        if (seen.has(value)) return "[Circular]";
+        seen.add(value);
+      }
+      return value;
+    }, 2) ?? String(rawInput);
+  } catch {
+    json = String(rawInput);
+  }
+  if (json.length <= MAX_EXTERNAL_INPUT_CHARS) return json;
+  return `${json.slice(0, MAX_EXTERNAL_INPUT_CHARS)}\n… (truncated)`;
 }
 
 function AgentProfilePreview({ path, promptPreview }: { path: string; promptPreview: string }) {

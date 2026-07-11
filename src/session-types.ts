@@ -1,6 +1,19 @@
 import type { AssistantMessage, Message, ThinkingLevel, Todo, ToolCall, ToolMessage, UserMessage } from "./types.js";
 import type { GoalState } from "./goal/store.js";
 
+export interface ExternalRuntimeSessionMetadata {
+  /** External agent runtime that owns the conversational state. */
+  id: "grok";
+  /** Opaque ACP session identifier. Never contains credentials. */
+  sessionId?: string;
+  /** Server-selected model, when the runtime reports one. */
+  modelId?: string;
+  /** Reasoning effort selected for the external runtime. */
+  reasoningEffort?: ThinkingLevel;
+  /** Exact external runtime version used to create the session. */
+  version?: string;
+}
+
 export interface SessionMetadata {
   model?: string;
   thinkingLevel?: ThinkingLevel;
@@ -13,6 +26,12 @@ export interface SessionMetadata {
   promptCacheKey?: string;
   /** Persisted autonomous goal (see src/goal). Survives /session resume. */
   goal?: GoalState;
+  /**
+   * External runtimes keep their own conversation state. Bubble persists only
+   * the opaque session binding and a UI transcript mirror; it never stores the
+   * runtime's OAuth credentials.
+   */
+  externalRuntime?: ExternalRuntimeSessionMetadata;
 }
 
 export type SessionMarkerKind =
@@ -21,6 +40,7 @@ export type SessionMarkerKind =
   | "thinking_level_switch"
   | "skill_activated"
   | "mode_switch"
+  | "runtime_switch"
   | "conversation_clear";
 
 interface BaseSessionLogEntry {

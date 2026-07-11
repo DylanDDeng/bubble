@@ -64,6 +64,27 @@ export function formatApprovalRequest(req: ApprovalRequest): ApprovalSummary {
           "\n该 profile 来自仓库本地 `.bubble/agents`，其 prompt 会驱动一个子代理。仅在信任该仓库时批准。",
         ].join("\n"),
       };
+    case "external_tool":
+      return {
+        title: `外部工具：${req.title}`,
+        body: [
+          `**kind:** \`${truncate(req.kind, 80)}\``,
+          req.locations?.length
+            ? `**paths:** ${req.locations.map((location) => `\`${truncate(location.path, PATH_PREVIEW_MAX)}\``).join(", ")}`
+            : "",
+          req.rawInput === undefined
+            ? ""
+            : `\n**input:**\n\`\`\`json\n${truncate(safeJson(req.rawInput), CONTENT_PREVIEW_MAX)}\n\`\`\``,
+        ].filter(Boolean).join("\n"),
+      };
+  }
+}
+
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return "[unserializable input]";
   }
 }
 

@@ -7,6 +7,7 @@ import { PERMISSION_MODE_INFO } from "../permission/mode.js";
 export interface FooterData {
   mode?: PermissionMode;
   goalLine?: string;
+  runtimeLabel?: string;
 }
 
 /**
@@ -17,13 +18,20 @@ export interface FooterData {
 export function FooterBar({ data }: { data: FooterData }) {
   const showMode = !!data.mode && data.mode !== "default";
   const goalLine = data.goalLine?.trim();
-  if (!showMode && !goalLine) return null;
+  const runtimeLabel = data.runtimeLabel?.trim();
+  if (!showMode && !goalLine && !runtimeLabel) return null;
   return (
     <Box paddingX={1} flexShrink={0} flexDirection="column">
       {goalLine && <GoalBadge line={goalLine} />}
+      {runtimeLabel && <RuntimeBadge label={runtimeLabel} />}
       {showMode && <ModeBadge mode={data.mode} />}
     </Box>
   );
+}
+
+function RuntimeBadge({ label }: { label: string }) {
+  const theme = useTheme();
+  return <Text color={theme.accent}>{label}</Text>;
 }
 
 function GoalBadge({ line }: { line: string }) {

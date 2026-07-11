@@ -66,13 +66,32 @@ export interface AgentProfileApprovalRequest {
   promptPreview: string;
 }
 
+/**
+ * Permission gate for a tool exposed by an external ACP runtime.
+ *
+ * Keep this structural rather than importing ACP SDK types so the approval
+ * layer remains provider-agnostic. External runtimes are responsible for
+ * copying the relevant, user-visible fields from the protocol request.
+ */
+export interface ExternalToolApprovalRequest {
+  type: "external_tool";
+  toolCallId: string;
+  /** Human-readable tool name supplied by the external runtime. */
+  title: string;
+  /** ACP tool category (for example execute, edit, read, or other). */
+  kind: string;
+  rawInput?: unknown;
+  locations?: Array<{ path: string; line?: number | null }>;
+}
+
 export type ApprovalRequest =
   | EditApprovalRequest
   | WriteApprovalRequest
   | PatchApprovalRequest
   | BashApprovalRequest
   | LspApprovalRequest
-  | AgentProfileApprovalRequest;
+  | AgentProfileApprovalRequest
+  | ExternalToolApprovalRequest;
 
 export type ApprovalDecision =
   | { action: "approve"; feedback?: string }

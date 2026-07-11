@@ -130,6 +130,17 @@ export class PermissionAwareApprovalController implements ApprovalController {
         return { tool: "Lsp", path: req.path, cwd: this.options.cwd };
       case "agent_profile":
         return { tool: "AgentProfile" };
+      case "external_tool": {
+        const command = externalCommand(req.rawInput);
+        if (req.kind === "execute" && command !== undefined) {
+          return { tool: "Bash", command };
+        }
+        const path = req.locations?.[0]?.path;
+        if ((req.kind === "edit" || req.kind === "delete" || req.kind === "move") && path) {
+          return { tool: "Edit", path, cwd: this.options.cwd };
+        }
+        return { tool: req.title.trim() || req.kind.trim() || "ExternalTool" };
+      }
     }
   }
 
@@ -225,6 +236,8 @@ function approvalTarget(req: ApprovalRequest): string {
       return "Lsp";
     case "agent_profile":
       return "AgentProfile";
+    case "external_tool":
+      return req.title.trim() || req.kind.trim() || "ExternalTool";
   }
 }
 
@@ -242,5 +255,20 @@ function summarizeApprovalRequest(req: ApprovalRequest): Record<string, unknown>
       return { type: req.type, path: req.path, operation: req.operation };
     case "agent_profile":
       return { type: req.type, name: req.name, path: req.path, contentHash: req.contentHash };
+    case "external_tool":
+      return {
+        type: req.type,
+        toolCallId: req.toolCallId,
+        title: req.title,
+        kind: req.kind,
+        locations: req.locations,
+        rawInput: req.rawInput,
+      };
   }
+}
+
+function externalCommand(rawInput: unknown): string | undefined {
+  if (typeof rawInput !== "object" || rawInput === null || Array.isArray(rawInput)) return undefined;
+  const command = (rawInput as Record<string, unknown>).command;
+  return typeof command === "string" ? command : undefined;
 }

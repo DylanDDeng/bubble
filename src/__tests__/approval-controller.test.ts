@@ -28,6 +28,13 @@ const PATCH_REQ: ApprovalRequest = {
 };
 const BASH_REQ: ApprovalRequest = { type: "bash", command: "ls", cwd: "/tmp" };
 const LSP_REQ: ApprovalRequest = { type: "lsp", path: "/tmp/bubble-test/src/a.ts", operation: "hover" };
+const EXTERNAL_REQ: ApprovalRequest = {
+  type: "external_tool",
+  toolCallId: "grok-tool-1",
+  title: "Run command",
+  kind: "execute",
+  rawInput: { command: "git status" },
+};
 
 describe("PermissionAwareApprovalController", () => {
   it("auto-approves every request in bypassPermissions", async () => {
@@ -74,6 +81,63 @@ describe("PermissionAwareApprovalController", () => {
     const result = await c.request(BASH_REQ);
     expect(result).toEqual({ action: "approve", feedback: "go" });
     expect(handler).toHaveBeenCalledWith(BASH_REQ);
+  });
+
+  it("asks for external tools in default mode when no explicit rule allows them", async () => {
+    const handler = vi.fn(async () => ({ action: "approve" }) as ApprovalDecision);
+    const c = makeController("default", handler);
+
+    expect(await c.request(EXTERNAL_REQ)).toEqual({ action: "approve" });
+    expect(handler).toHaveBeenCalledWith(EXTERNAL_REQ);
+  });
+
+  it("maps structured external execute and edit requests onto native rules", async () => {
+    const handler = vi.fn(async () => ({ action: "approve" }) as ApprovalDecision);
+    const c = new PermissionAwareApprovalController({
+      getMode: () => "default",
+      handlerRef: { current: handler },
+      cwd: "/tmp/bubble-test",
+      getRuleSet: () => buildRuleSet(
+        ["Bash(git status)"],
+        ["Edit(./secrets/**)"],
+      ),
+    });
+
+    expect((await c.request(EXTERNAL_REQ)).action).toBe("approve");
+    expect(handler).not.toHaveBeenCalled();
+
+    const blocked = await c.request({
+      type: "external_tool",
+      toolCallId: "grok-tool-2",
+      title: "Delete file",
+      kind: "delete",
+      locations: [{ path: "/tmp/bubble-test/secrets/token.txt" }],
+    });
+    expect(blocked.action).toBe("reject");
+    expect(blocked.feedback).toContain("Edit(./secrets/**)");
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the external title, then kind, for tool-level rules", async () => {
+    const c = new PermissionAwareApprovalController({
+      getMode: () => "default",
+      handlerRef: {},
+      cwd: "/tmp/bubble-test",
+      getRuleSet: () => buildRuleSet(["SearchFiles"], ["fetch"]),
+    });
+
+    expect((await c.request({
+      type: "external_tool",
+      toolCallId: "search-1",
+      title: "SearchFiles",
+      kind: "search",
+    })).action).toBe("approve");
+    expect((await c.request({
+      type: "external_tool",
+      toolCallId: "fetch-1",
+      title: " ",
+      kind: "fetch",
+    })).action).toBe("reject");
   });
 
   it("rejects safely when default mode has no UI handler attached (e.g. --print mode)", async () => {

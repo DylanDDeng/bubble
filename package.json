@@ -24,6 +24,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "1.2.1",
     "@ai-sdk/google": "^3.0.88",
     "@ai-sdk/provider": "^3.0.13",
     "@larksuiteoapi/node-sdk": "^1.65.0",

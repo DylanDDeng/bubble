@@ -35,4 +35,16 @@ describe("Ink footer", () => {
     expect(output).not.toContain("ctx ");
     expect(output).not.toContain("•");
   });
+
+  it("keeps the Grok chat-only boundary visible", () => {
+    const output = renderToString(
+      React.createElement(FooterBar, {
+        data: { runtimeLabel: "Grok subscription · chat-only · no workspace access" },
+      }),
+      { columns: 100 },
+    );
+
+    expect(output.trim()).toBe("Grok subscription · chat-only · no workspace access");
+    expect(output).not.toContain("⇧⇥");
+  });
 });
