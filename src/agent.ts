@@ -5,6 +5,9 @@
 
 import { compactMessages } from "./context/compact.js";
 import { randomUUID } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { getBubbleHome } from "./bubble-home.js";
 import { compactMessagesWithLLM } from "./context/compact-llm.js";
 import { estimateContextTokens, getContextBudget } from "./context/budget.js";
 import { buildContextUsageSnapshot, type ContextUsageSnapshot } from "./context/usage.js";
@@ -35,7 +38,7 @@ import { getBuiltinModel } from "./model-catalog.js";
 import { getAvailableThinkingLevels, normalizeInheritedThinkingLevel, normalizeThinkingLevel } from "./variant/variant-resolver.js";
 import { appendOutputSchemaInstructions, buildSchemaCorrectionPrompt, validateStructuredSummary } from "./agent/structured-output.js";
 import { runWorkflow, WorkflowConcurrencyGate, type AgentDispatchResult, type WorkflowAgentSpec } from "./agent/workflow/runtime.js";
-import { buildWorkflowDeliveryNotice, type WorkflowRunRecord, type WorkflowRunSnapshot } from "./agent/workflow/control.js";
+import { buildWorkflowDeliveryNotice, renderWorkflowResultValue, type WorkflowRunRecord, type WorkflowRunSnapshot } from "./agent/workflow/control.js";
 import { getSubtaskPolicy, type SubtaskType } from "./agent/subtask-policy.js";
 import { BudgetLedger, composeAbortSignals } from "./agent/budget-ledger.js";
 import { assignAgentNickname, builtinAgentProfiles, discoverAgentProfiles, findAgentProfile, mergeUsage, selectToolsForAgentProfile, validateAgentProfileTools, type AgentProfile, type SubagentRunResult } from "./agent/profiles.js";
@@ -1900,6 +1903,7 @@ export class Agent {
       record.logs = out.logs;
       record.result = out.result;
       record.status = out.result.ok ? "completed" : (abortController.signal.aborted ? "cancelled" : "failed");
+      if (out.result.ok) record.resultPath = persistWorkflowResult(runId, out.result.value);
     }, (error: any) => {
       record.result = { ok: false, error: error?.message || String(error) };
       record.status = "failed";
@@ -1947,6 +1951,7 @@ export class Agent {
       status: record.status,
       agentCount: record.agentCount,
       result: record.result,
+      resultPath: record.resultPath,
       logs: record.logs,
       snapshots: record.snapshots,
     };
@@ -3073,6 +3078,23 @@ function isFinalSubagentStatus(status: SubagentThreadRecord["status"]): boolean 
     || status === "blocked"
     || status === "cancelled"
     || status === "closed";
+}
+
+/**
+ * Persists the full rendered workflow result so the inline preview can stay
+ * bounded without losing data (the parent reads the file selectively when the
+ * preview was cut). A write failure only costs the pointer, never the run.
+ */
+function persistWorkflowResult(runId: string, value: unknown): string | undefined {
+  try {
+    const dir = join(getBubbleHome(), "workflows");
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, `${runId}.result.txt`);
+    writeFileSync(path, renderWorkflowResultValue(value));
+    return path;
+  } catch {
+    return undefined;
+  }
 }
 
 function normalizeWaitTimeout(value: number | undefined): number {

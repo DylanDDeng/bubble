@@ -1,9 +1,26 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Agent } from "../agent.js";
-import { buildWorkflowDeliveryNotice } from "../agent/workflow/control.js";
+import { buildWorkflowDeliveryNotice, buildWorkflowResultBlock } from "../agent/workflow/control.js";
 import { discoverAgentProfiles, findAgentProfile, type AgentProfile } from "../agent/profiles.js";
 import { createAgentLifecycleTools } from "../tools/agent-lifecycle.js";
 import type { AgentEvent, Provider, StreamChunk } from "../types.js";
+
+// Background runs persist their result under the bubble home; isolate it so
+// tests never write into the real ~/.bubble.
+const previousBubbleHome = process.env.BUBBLE_HOME;
+let testBubbleHome: string;
+beforeAll(() => {
+  testBubbleHome = mkdtempSync(join(tmpdir(), "bubble-wf-test-"));
+  process.env.BUBBLE_HOME = testBubbleHome;
+});
+afterAll(() => {
+  if (previousBubbleHome === undefined) delete process.env.BUBBLE_HOME;
+  else process.env.BUBBLE_HOME = previousBubbleHome;
+  rmSync(testBubbleHome, { recursive: true, force: true });
+});
 
 function workflowTestProfile(): AgentProfile {
   return findAgentProfile(discoverAgentProfiles("/tmp", "user").profiles, "default")!;
@@ -73,6 +90,9 @@ describe("Agent.runWorkflow (option C end-to-end)", () => {
     expect(snap?.status).toBe("completed");
     expect(snap?.result).toEqual({ ok: true, value: 2 });
     expect(snap?.agentCount).toBe(2);
+    // the full rendered result is persisted under the bubble home
+    expect(snap?.resultPath).toContain(testBubbleHome);
+    expect(readFileSync(snap!.resultPath!, "utf8")).toBe("2");
     // background workflow agents stay out of the parent subagent list
     expect(agent.listSubAgents()).toHaveLength(0);
   });
@@ -236,6 +256,44 @@ describe("workflow delivery notice", () => {
       snapshots: [{ nickname: "Ada", status: "completed" }],
     } as any;
     expect(buildWorkflowDeliveryNotice(snapshot)).not.toContain("did not complete");
+  });
+});
+
+describe("workflow result block", () => {
+  const base = {
+    runId: "wf_r",
+    title: "audit",
+    status: "completed",
+    agentCount: 1,
+    logs: [],
+    snapshots: [{ nickname: "Ada", status: "completed" }],
+  };
+
+  it("preserves line structure of results under the limit (no whitespace flattening)", () => {
+    const value = { findings: ["a", "b"] };
+    const block = buildWorkflowResultBlock({ ...base, result: { ok: true, value } } as any).join("\n");
+    expect(block).toContain(JSON.stringify(value, null, 2));
+    expect(block).not.toContain("note: preview shows");
+  });
+
+  it("cut previews point at the persisted full result and teach in-script distillation", () => {
+    const long = "line\n".repeat(4000);
+    const block = buildWorkflowResultBlock({
+      ...base,
+      result: { ok: true, value: long },
+      resultPath: "/tmp/wf_r.result.txt",
+    } as any).join("\n");
+    expect(block).toContain(`note: preview shows the first 8000 of ${long.length} chars`);
+    expect(block).toContain("Full result: /tmp/wf_r.result.txt");
+    expect(block).toContain("distill inside the script");
+    // the preview itself keeps line breaks
+    expect(block).toContain("line\nline");
+  });
+
+  it("still flags the cut when the result file write failed", () => {
+    const block = buildWorkflowResultBlock({ ...base, result: { ok: true, value: "x".repeat(9000) } } as any).join("\n");
+    expect(block).toContain("The rest was dropped");
+    expect(block).not.toContain("Full result:");
   });
 });
 
