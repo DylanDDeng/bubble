@@ -193,6 +193,193 @@ describe("run_workflow exclusivity", () => {
   });
 });
 
+describe("live subagent traces while wait_workflow blocks", () => {
+  it("yields queued subagent updates during the blocking wait, not only after it settles", async () => {
+    // Parent flow: run_workflow (background launch) -> wait_workflow (blocks
+    // ~300ms while the two children stream) -> final text. Children are told
+    // apart from the parent by their task marker in the conversation.
+    const provider: Provider = {
+      async *streamChat(messages): AsyncGenerator<StreamChunk> {
+        const transcript = JSON.stringify(messages);
+        const isParent = messages.some((m) => m.role === "user" && typeof m.content === "string" && m.content.includes("drive the workflow"));
+        if (!isParent) {
+          await new Promise((r) => setTimeout(r, 300));
+          yield { type: "text", content: SUMMARY } satisfies StreamChunk;
+          yield { type: "done" } satisfies StreamChunk;
+          return;
+        }
+        const runId = /run_id: ([0-9a-f-]{36})/.exec(transcript)?.[1];
+        if (!runId) {
+          yield {
+            type: "tool_call",
+            id: "wf_live",
+            name: "run_workflow",
+            arguments: JSON.stringify({
+              script: `export const meta = { name: 'live', description: 'live trace test' };\nreturn await parallel([() => agent("member-a"), () => agent("member-b")]);`,
+            }),
+            isStart: true,
+            isEnd: true,
+          } satisfies StreamChunk;
+          yield { type: "done" } satisfies StreamChunk;
+          return;
+        }
+        if (!transcript.includes("--- workflow result")) {
+          yield {
+            type: "tool_call",
+            id: "wait_live",
+            name: "wait_workflow",
+            arguments: JSON.stringify({ run_id: runId, timeout_ms: 10_000 }),
+            isStart: true,
+            isEnd: true,
+          } satisfies StreamChunk;
+          yield { type: "done" } satisfies StreamChunk;
+          return;
+        }
+        yield { type: "text", content: "done" } satisfies StreamChunk;
+        yield { type: "done" } satisfies StreamChunk;
+      },
+      async complete() {
+        return "complete";
+      },
+    };
+
+    const tools = createAgentLifecycleTools({ cwd: "/tmp" })
+      .filter((tool) => tool.name === "run_workflow" || tool.name === "wait_workflow");
+    const agent = new Agent({ provider, model: "gpt-4o", tools });
+
+    const events: AgentEvent[] = [];
+    for await (const event of agent.run("drive the workflow", "/tmp")) {
+      events.push(event);
+    }
+
+    const waitStart = events.findIndex((e) => e.type === "tool_start" && e.name === "wait_workflow");
+    const waitEnd = events.findIndex((e) => e.type === "tool_end" && e.name === "wait_workflow");
+    expect(waitStart).toBeGreaterThan(-1);
+    expect(waitEnd).toBeGreaterThan(waitStart);
+
+    const liveUpdates = events
+      .map((event, index) => ({ event, index }))
+      .filter(({ event, index }) =>
+        index > waitStart && index < waitEnd
+        && event.type === "tool_update"
+        && (event as Extract<AgentEvent, { type: "tool_update" }>).update.type === "subagent_update");
+    // Children complete while wait_workflow is still blocking; their lifecycle
+    // updates must surface live so the UI can show traces mid-flight.
+    expect(liveUpdates.length).toBeGreaterThan(0);
+    const completedLive = liveUpdates.some(({ event }) =>
+      (event as Extract<AgentEvent, { type: "tool_update" }>).update.status === "completed");
+    expect(completedLive).toBe(true);
+  });
+});
+
+describe("lost-wakeup guard in the tool-execution loop", () => {
+  it("an update pushed while the generator is suspended at a yield still surfaces without another wake", async () => {
+    // A slow consumer stalls after every event, so the fast child's terminal
+    // update lands while the generator is suspended at a yield — where wake()
+    // finds no parked waiter and is lost. The gated child completes ONLY after
+    // the consumer has SEEN that update; without the pre-wait re-check of
+    // pendingSubagentUpdates the run deadlocks (nothing else ever wakes the
+    // loop) and this test times out.
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+    // Released by the consumer upon SEEING the fast child's text update — at
+    // that moment the generator is provably suspended at that event's yield,
+    // so the completion push that follows lands exactly in the lost-wakeup
+    // window. No wall-clock timing involved.
+    let releaseDoneGate!: () => void;
+    const doneGate = new Promise<void>((resolve) => { releaseDoneGate = resolve; });
+    // Released when the consumer sees wait_workflow's tool_start: only after
+    // its update loop has parked can a wake be delivered-then-lost. The extra
+    // sleep after the gate lets the generator resume past the tool_start yield
+    // and actually park in updateQueue.wait().
+    let releaseTextGate!: () => void;
+    const textGate = new Promise<void>((resolve) => { releaseTextGate = resolve; });
+
+    const provider: Provider = {
+      async *streamChat(messages): AsyncGenerator<StreamChunk> {
+        const transcript = JSON.stringify(messages);
+        const isParent = messages.some((m) => m.role === "user" && typeof m.content === "string" && m.content.includes("drive the workflow"));
+        if (!isParent) {
+          if (transcript.includes("member-gated")) {
+            await gate;
+            yield { type: "text", content: SUMMARY } satisfies StreamChunk;
+            yield { type: "done" } satisfies StreamChunk;
+            return;
+          }
+          await textGate;
+          await new Promise((r) => setTimeout(r, 150));
+          yield { type: "text", content: SUMMARY } satisfies StreamChunk;
+          await doneGate;
+          yield { type: "done" } satisfies StreamChunk;
+          return;
+        }
+        const runId = /run_id: ([0-9a-f-]{36})/.exec(transcript)?.[1];
+        if (!runId) {
+          yield {
+            type: "tool_call",
+            id: "wf_gate",
+            name: "run_workflow",
+            arguments: JSON.stringify({
+              script: `export const meta = { name: 'gate', description: 'lost wakeup test' };\nreturn await parallel([() => agent("member-fast"), () => agent("member-gated")]);`,
+            }),
+            isStart: true,
+            isEnd: true,
+          } satisfies StreamChunk;
+          yield { type: "done" } satisfies StreamChunk;
+          return;
+        }
+        if (!transcript.includes("--- workflow result")) {
+          yield {
+            type: "tool_call",
+            id: "wait_gate",
+            name: "wait_workflow",
+            arguments: JSON.stringify({ run_id: runId, timeout_ms: 30_000 }),
+            isStart: true,
+            isEnd: true,
+          } satisfies StreamChunk;
+          yield { type: "done" } satisfies StreamChunk;
+          return;
+        }
+        yield { type: "text", content: "done" } satisfies StreamChunk;
+        yield { type: "done" } satisfies StreamChunk;
+      },
+      async complete() {
+        return "complete";
+      },
+    };
+
+    const tools = createAgentLifecycleTools({ cwd: "/tmp" })
+      .filter((tool) => tool.name === "run_workflow" || tool.name === "wait_workflow");
+    const agent = new Agent({ provider, model: "gpt-4o", tools });
+
+    let sawFastCompletion = false;
+    const events: AgentEvent[] = [];
+    for await (const event of agent.run("drive the workflow", "/tmp")) {
+      events.push(event);
+      if (event.type === "tool_start" && event.name === "wait_workflow") {
+        releaseTextGate();
+      }
+      if (event.type === "tool_update" && event.update.type === "subagent_update") {
+        if (event.update.summaryDelta) {
+          // The generator is suspended at THIS yield; the fast child now
+          // completes, and its terminal update's wake() finds no waiter.
+          releaseDoneGate();
+        }
+        if (!sawFastCompletion && event.update.status === "completed") {
+          sawFastCompletion = true;
+          releaseGate();
+        }
+      }
+      // Stall so the gated pushes land while the generator is suspended here.
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    expect(sawFastCompletion).toBe(true);
+    const waitEnd = events.findIndex((e) => e.type === "tool_end" && e.name === "wait_workflow");
+    expect(waitEnd).toBeGreaterThan(-1);
+  }, 20_000);
+});
+
 describe("run_workflow project-profile trust gate", () => {
   it("blocks a workflow agent whose profile the trust gate rejects, without running it", async () => {
     const agent = new Agent({ provider: textProvider(), model: "gpt-4o", tools: [] });

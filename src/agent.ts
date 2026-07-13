@@ -229,6 +229,14 @@ export class Agent {
   private subagentsConfig: AgentSubagentRuntimeConfig;
   private readonly rateLimitPolicy?: RateLimitPolicy;
   private pendingSubagentUpdates: PendingSubagentToolUpdate[] = [];
+  /**
+   * Wakers for tool-execution update loops currently awaiting updates. A
+   * blocking lifecycle tool (wait_workflow / wait_agent) produces no updates of
+   * its own, so without this wake the background children's queued lifecycle
+   * updates sit undrained until the tool settles — the UI would only show
+   * subagent traces after the whole team finished.
+   */
+  private readonly subagentUpdateWakers = new Set<() => void>();
   private lastInputTokens: number | null = null;
   private lastAnchorMessageCount: number | null = null;
 
@@ -1255,18 +1263,28 @@ export class Agent {
                 updateQueue.wake();
               });
 
-            while (!settled || updateQueue.hasItems()) {
-              for (const update of updateQueue.drain()) {
-                yield emit({ type: "tool_update", id: tc.id, name: tc.name, update });
-              }
-              for (const update of this.drainSubagentToolUpdates()) yield emit(update);
-              if (!settled) {
-                const waitStatus = await updateQueue.wait(abortSignal);
-                if (waitStatus === "aborted" && !settled) {
-                  cancelledByAbort = true;
-                  break;
+            this.subagentUpdateWakers.add(updateQueue.wake);
+            try {
+              while (!settled || updateQueue.hasItems() || this.pendingSubagentUpdates.length > 0) {
+                for (const update of updateQueue.drain()) {
+                  yield emit({ type: "tool_update", id: tc.id, name: tc.name, update });
+                }
+                for (const update of this.drainSubagentToolUpdates()) yield emit(update);
+                // A wake() that fires while this generator is suspended at a
+                // yield above finds no parked waiter and is lost (the queue has
+                // no wake latch), so re-check the subagent queue synchronously
+                // before parking — otherwise an update pushed during the yield
+                // stalls until the next unrelated wake or the tool settles.
+                if (!settled && this.pendingSubagentUpdates.length === 0) {
+                  const waitStatus = await updateQueue.wait(abortSignal);
+                  if (waitStatus === "aborted" && !settled) {
+                    cancelledByAbort = true;
+                    break;
+                  }
                 }
               }
+            } finally {
+              this.subagentUpdateWakers.delete(updateQueue.wake);
             }
             if (cancelledByAbort) {
               result = cancelledToolResult(tc.name);
@@ -2250,7 +2268,13 @@ export class Agent {
     options.directEmit?.(update);
     if (options.queueUpdates) {
       this.pendingSubagentUpdates.push({ id: record.parentToolCallId, name: record.parentToolName, update });
+      this.wakeSubagentUpdateWaiters();
     }
+  }
+
+  /** Lets a blocked tool-execution loop drain freshly queued subagent updates. */
+  private wakeSubagentUpdateWaiters(): void {
+    for (const wake of this.subagentUpdateWakers) wake();
   }
 
   private async runSubagentLifecycleHookFor(
@@ -2560,6 +2584,7 @@ export class Agent {
       name: record.parentToolName,
       update: this.buildSubagentUpdate(record, status, event, message),
     });
+    this.wakeSubagentUpdateWaiters();
   }
 
   private drainSubagentToolUpdates(): AgentEvent[] {

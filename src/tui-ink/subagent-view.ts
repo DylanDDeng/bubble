@@ -7,6 +7,7 @@
 import { formatSubagentRoute, type SubagentRouteLike } from "../agent/subagent-route-format.js";
 import type { Theme } from "./theme.js";
 import type { DisplayMessage, DisplayToolCall } from "./display-history.js";
+import type { ToolResultMetadata } from "../types.js";
 
 export interface SubagentDisplay {
   subAgentId?: string;
@@ -107,6 +108,93 @@ function memberKey(member: SubagentDisplay): string {
 }
 
 /**
+ * Merges subagent tool metadata, deduping member snapshots by subAgentId so a
+ * stream of per-child updates accumulates into one member list instead of each
+ * update replacing the last.
+ */
+export function mergeToolMetadata(
+  current: ToolResultMetadata | undefined,
+  incoming: ToolResultMetadata | undefined,
+): ToolResultMetadata | undefined {
+  if (!incoming) return current;
+  if (current?.kind !== "subagent" || incoming.kind !== "subagent") {
+    return incoming;
+  }
+
+  const currentSubagents = Array.isArray(current.subagents) ? current.subagents : [];
+  const incomingSubagents = Array.isArray(incoming.subagents) ? incoming.subagents : [];
+  const byId = new Map<string, unknown>();
+  for (const item of currentSubagents) {
+    const subAgentId = typeof item === "object" && item !== null && "subAgentId" in item
+      ? String((item as Record<string, unknown>).subAgentId)
+      : "";
+    byId.set(subAgentId || `current:${byId.size}`, item);
+  }
+  for (const item of incomingSubagents) {
+    const subAgentId = typeof item === "object" && item !== null && "subAgentId" in item
+      ? String((item as Record<string, unknown>).subAgentId)
+      : "";
+    byId.set(subAgentId || `incoming:${byId.size}`, item);
+  }
+
+  return {
+    ...current,
+    ...incoming,
+    subagents: [...byId.values()],
+  };
+}
+
+const FINAL_MEMBER_STATUSES = new Set(["completed", "failed", "blocked", "cancelled", "closed"]);
+
+/**
+ * Drops accumulator entries whose every member reached a final status: by then
+ * the authoritative snapshot lives in the settled transcript (wait_workflow /
+ * wait_agent result), so the entry is dead weight that would otherwise pile up
+ * for the life of the process. Entries with running/queued members stay — for
+ * a workflow spanning turns they are the only live view. Returns whether the
+ * map changed (callers bump their version counter on true).
+ */
+export function pruneSettledLiveSubagentTools(map: Map<string, DisplayToolCall>): boolean {
+  let changed = false;
+  for (const [id, tc] of map) {
+    const members = Array.isArray(tc.metadata?.subagents) ? tc.metadata!.subagents : [];
+    const allFinal = members.every((member) =>
+      typeof member === "object" && member !== null
+      && FINAL_MEMBER_STATUSES.has(String((member as Record<string, unknown>).status)));
+    if (allFinal) {
+      map.delete(id);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/**
+ * Accumulates a subagent tool_update whose originating tool call has already
+ * settled out of the current streaming round. The TUI clears its streaming
+ * toolCalls on every turn_start, but background children keep reporting
+ * against the launching run_workflow/spawn_agent call id across later rounds
+ * (e.g. while a wait_workflow blocks) — without this side-channel those
+ * updates are dropped and traces only appear after the whole team finishes.
+ * Entries act as synthetic tool calls feeding collectSubagentGroups.
+ * Returns true when the update was absorbed.
+ */
+export function accumulateLiveSubagentUpdate(
+  map: Map<string, DisplayToolCall>,
+  event: { id: string; name: string; metadata?: ToolResultMetadata },
+): boolean {
+  if (event.metadata?.kind !== "subagent") return false;
+  const prev = map.get(event.id);
+  const metadata = mergeToolMetadata(prev?.metadata, event.metadata);
+  if (!metadata) return false;
+  // Per-child updates carry no mode; group them under the launching workflow
+  // call rather than falling back to one single-agent group per member.
+  if (event.name === "run_workflow" && metadata.mode === undefined) metadata.mode = "workflow";
+  map.set(event.id, { id: event.id, name: event.name, args: prev?.args ?? {}, metadata });
+  return true;
+}
+
+/**
  * Collects every spawned subagent from the live transcript + streaming tools,
  * grouped by their originating tool call, for the inspector. Pure.
  *
@@ -190,5 +278,8 @@ export function collectSubagentGroups(
       kind: g.kind,
       label: g.label,
       members: g.memberKeys.map((k) => freshest.get(k)).filter((m): m is SubagentDisplay => !!m),
-    }));
+    }))
+    // A group can end up empty when a later echo of the same run (e.g. the
+    // wait_workflow result vs the live accumulator) claimed all its members.
+    .filter((group) => group.members.length > 0);
 }

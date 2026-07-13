@@ -76,7 +76,7 @@ import {
 } from "./input-queue.js";
 import { SessionPicker } from "./session-picker.js";
 import { SubagentInspector } from "./subagent-inspector.js";
-import { collectSubagentGroups, subagentSummary } from "./subagent-view.js";
+import { accumulateLiveSubagentUpdate, collectSubagentGroups, mergeToolMetadata, pruneSettledLiveSubagentTools, subagentSummary } from "./subagent-view.js";
 import { sessionDisplayName } from "../tui/session-display.js";
 import type { GoalStore, GoalState } from "../goal/store.js";
 import { parseGoalCommand } from "../goal/command.js";
@@ -297,39 +297,6 @@ function parsePartialArgs(
   return result;
 }
 
-function mergeToolMetadata(
-  current: ToolResultMetadata | undefined,
-  incoming: ToolResultMetadata | undefined,
-): ToolResultMetadata | undefined {
-  if (!incoming) return current;
-  if (current?.kind !== "subagent" || incoming.kind !== "subagent") {
-    return incoming;
-  }
-
-  const currentSubagents = Array.isArray(current.subagents) ? current.subagents : [];
-  const incomingSubagents = Array.isArray(incoming.subagents) ? incoming.subagents : [];
-  const byId = new Map<string, unknown>();
-  for (const item of currentSubagents) {
-    const subAgentId = typeof item === "object" && item !== null && "subAgentId" in item
-      ? String((item as Record<string, unknown>).subAgentId)
-      : "";
-    byId.set(subAgentId || `current:${byId.size}`, item);
-  }
-  for (const item of incomingSubagents) {
-    const subAgentId = typeof item === "object" && item !== null && "subAgentId" in item
-      ? String((item as Record<string, unknown>).subAgentId)
-      : "";
-    byId.set(subAgentId || `incoming:${byId.size}`, item);
-  }
-
-  return {
-    ...current,
-    ...incoming,
-    subagents: [...byId.values()],
-  };
-}
-
-
 /**
  * Coerce a freshly-constructed DisplayMessage into one that carries a stable
  * `key`. Centralizes the safety net so callers don't have to remember to call
@@ -398,11 +365,27 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   const [streamingReasoning, setStreamingReasoning] = useState("");
   const [streamingTools, setStreamingTools] = useState<DisplayToolCall[]>([]);
   const [streamingParts, setStreamingParts] = useState<DisplayMessagePart[]>([]);
+  // Background-child updates that outlived their launching tool call's
+  // streaming round (toolCalls is cleared on every turn_start): keyed by the
+  // launching call id, they feed the inspector as synthetic tool calls so
+  // traces stay live e.g. while a wait_workflow blocks. The version counter
+  // triggers recompute since the ref mutates in place.
+  const liveSubagentToolsRef = useRef<Map<string, DisplayToolCall>>(new Map());
+  const [liveSubagentVersion, setLiveSubagentVersion] = useState(0);
+  // Transcript-reset paths (/clear, session switch, /rewind) must drop the
+  // accumulator too, or ghost subagent groups from the wiped conversation keep
+  // feeding the entry line and inspector for the rest of the process.
+  const clearLiveSubagentTools = useCallback(() => {
+    if (liveSubagentToolsRef.current.size === 0) return;
+    liveSubagentToolsRef.current.clear();
+    setLiveSubagentVersion((version) => version + 1);
+  }, []);
   // Live subagent groups for the inspector opened from the subagent entry line;
   // recomputed each render so it reflects members as their events stream into the transcript.
   const subagentGroups = useMemo(
-    () => collectSubagentGroups(messages, streamingTools),
-    [messages, streamingTools],
+    () => collectSubagentGroups(messages, [...streamingTools, ...liveSubagentToolsRef.current.values()]),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [messages, streamingTools, liveSubagentVersion],
   );
   const subagentMembers = useMemo(() => subagentGroups.flatMap((g) => g.members), [subagentGroups]);
   // Down-arrow from the composer focuses the subagent entry line; Enter then
@@ -891,7 +874,8 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     // messages alone leaves a stale To-Do list on screen. /clear already reset
     // the agent's todos; mirror that into the UI (same as session switch).
     setTodos(agent.getTodos());
-  }, [resetTranscript, agent]);
+    clearLiveSubagentTools();
+  }, [resetTranscript, agent, clearLiveSubagentTools]);
 
   // Render a placeholder user row for input waiting to enter the run.
   const addStatusUserMessage = useCallback((content: string, status: UserInputStatus): string => {
@@ -1074,13 +1058,14 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     externalRuntimeBindingRef.current = nextExternalBinding;
     setExternalRuntimeBinding(nextExternalBinding);
     setTodos(agent.getTodos());
+    clearLiveSubagentTools();
     resetTranscript(() => [
       ...reconstructDisplayMessages(agent.messages).filter((message) => !queuedDisplayKeys.has(message.key ?? "")),
       ...(notice ? [withMessageKey({ role: "assistant" as const, content: notice })] : []),
     ]);
     closePicker();
     return result.manager;
-  }, [agent, clearComposerDraft, closePicker, resetTranscript, setStartingSubmit]);
+  }, [agent, clearComposerDraft, clearLiveSubagentTools, closePicker, resetTranscript, setStartingSubmit]);
 
   const prepareFreshSession = useCallback((metadata?: Partial<SessionMetadata>): SessionManager => {
     const fresh = SessionManager.createFresh(args.cwd);
@@ -1582,6 +1567,13 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         let runErrored = false;
         const toolCalls: DisplayToolCall[] = [];
         const assistantParts: DisplayMessagePart[] = [];
+        // Entries whose members all reached a final status are now covered by
+        // the settled transcript; drop them so the accumulator stays bounded
+        // across a long session. Running entries survive — for a workflow
+        // spanning turns they are the only live view of its members.
+        if (pruneSettledLiveSubagentTools(liveSubagentToolsRef.current)) {
+          setLiveSubagentVersion((version) => version + 1);
+        }
         const abortController = new AbortController();
         activeAbortRef.current = abortController;
         setStartingSubmit(null);
@@ -1805,6 +1797,14 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
                     || event.update.status === "cancelled";
                   setStreamingTools([...toolCalls]);
                   syncStreamingParts();
+                } else if (accumulateLiveSubagentUpdate(liveSubagentToolsRef.current, {
+                  id: event.id,
+                  name: event.name,
+                  metadata: event.update.metadata,
+                })) {
+                  // The launching call already settled out of this round's
+                  // toolCalls; absorbed into the live accumulator instead.
+                  setLiveSubagentVersion((version) => version + 1);
                 }
                 break;
               }
@@ -2189,7 +2189,9 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
               ]);
             } else if (result.startsWith("⏪")) {
               // /rewind truncated agent.messages — rebuild the transcript from
-              // the rewound state before appending the summary.
+              // the rewound state before appending the summary. Subagents
+              // rewound out of history must not linger in the live accumulator.
+              clearLiveSubagentTools();
               resetTranscript(() => [
                 ...reconstructDisplayMessages(agent.messages),
                 { role: "assistant", content: result },
