@@ -2486,7 +2486,7 @@ export class Agent {
       const targetCatalog = this.routableModelIndex?.()
         .filter((entry) => entry.providerId === route.providerId) ?? [];
       if (targetCatalog.length > 0 && !targetCatalog.some((entry) => entry.id === route.model)) {
-        const near = nearModelMatches(route.model, targetCatalog);
+        const near = nearModelMatches(route.model, targetCatalog, { mode: "truncation" });
         if (near.length > 0) {
           throw new Error(
             `Unknown model "${route.model}" for provider "${route.providerId}". Did you mean: ${near.join(", ")}?`,

@@ -21,6 +21,7 @@ import {
   buildRoutingSnapshot,
   createRoutingSnapshotAccessor,
   DEFAULT_AGENT_ROUTING,
+  nearModelMatches,
   sanitizeAgentRouting,
   type AgentRoutingConfig,
   type RoutableModelEntry,
@@ -770,5 +771,82 @@ describe("routing snapshot accessor (§1.5)", () => {
     const fast = accessor({ providerId: "anthropic", model: "claude-haiku-4-5-20251001" });
     expect(strong.parent.tier).toBe("strong");
     expect(fast.parent.tier).toBe("fast");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR-review fixes (Codex round on PR #61, design §11 v3.7)
+
+describe("routing snapshot discovery-TTL invalidation", () => {
+  it("caches while consumed discovery is fresh, rebuilds once it has expired", () => {
+    const fresh = accessorFor({
+      discovery: {
+        models: [{ id: "m-1", name: "M1", providerId: "anthropic" }],
+        source: "remote",
+        complete: true,
+        expiresAt: Date.now() + 60_000,
+        identityKey: "k",
+      } as any,
+    });
+    expect(fresh(ANTHROPIC_PARENT)).toBe(fresh(ANTHROPIC_PARENT));
+
+    // TTL expiry bumps no revision; the accessor must rebuild regardless.
+    const expired = accessorFor({
+      discovery: {
+        models: [{ id: "m-1", name: "M1", providerId: "anthropic" }],
+        source: "remote",
+        complete: true,
+        expiresAt: Date.now() - 1,
+        identityKey: "k",
+      } as any,
+    });
+    expect(expired(ANTHROPIC_PARENT)).not.toBe(expired(ANTHROPIC_PARENT));
+  });
+});
+
+describe("nearModelMatches direction modes", () => {
+  const catalog: RoutableModelEntry[] = [
+    { providerId: "openai", id: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
+  ];
+
+  it("suggest mode matches prefixes in both directions", () => {
+    expect(nearModelMatches("gpt-5.6", catalog)).toEqual(["gpt-5.6-sol"]);
+    expect(nearModelMatches("gpt-5.6-sol-20260701", catalog)).toEqual(["gpt-5.6-sol"]);
+  });
+
+  it("truncation mode never flags an input that extends a catalog id", () => {
+    // A dated/longer variant is likelier a newly released id than a typo;
+    // the hard-reject path must let the provider validate it.
+    expect(nearModelMatches("gpt-5.6", catalog, { mode: "truncation" })).toEqual(["gpt-5.6-sol"]);
+    expect(nearModelMatches("gpt-5.6-sol-20260701", catalog, { mode: "truncation" })).toEqual([]);
+  });
+});
+
+describe("routing prompt truncation wording", () => {
+  it("a truncated allowlist never claims arbitrary ids are valid", () => {
+    const customModels = Array.from({ length: 15 }, (_, i) => ({
+      id: `allowed-${String(i).padStart(2, "0")}`,
+      name: `Allowed ${i}`,
+      providerId: "anthropic",
+    }));
+    const prompt = buildModelRoutingPrompt(snapshotFor({ customModels }), { ...DEFAULT_AGENT_ROUTING });
+    expect(prompt).toContain("in the configured allowlist (not shown); ids outside the allowlist are rejected");
+    expect(prompt).toContain("Choose only from the configured allowlist");
+    expect(prompt).not.toContain("any explicit id from this provider is valid");
+  });
+
+  it("a truncated open catalog keeps the any-explicit-id wording", () => {
+    const discovery = {
+      models: Array.from({ length: 15 }, (_, i) => ({ id: `disc-${String(i).padStart(2, "0")}`, name: `D${i}`, providerId: "anthropic" })),
+      source: "remote",
+      complete: false,
+      expiresAt: Date.now() + 60_000,
+      identityKey: "k",
+    } as any;
+    const prompt = buildModelRoutingPrompt(snapshotFor({ discovery }), { ...DEFAULT_AGENT_ROUTING });
+    if (prompt.includes("… and")) {
+      expect(prompt).toContain("any explicit id from this provider is valid");
+    }
+    expect(prompt).not.toContain("Choose only from the configured allowlist");
   });
 });
