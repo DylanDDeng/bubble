@@ -165,13 +165,13 @@ export function MessageList({
         {(item) => {
           if (item.kind === "welcome") {
             return (
-              <Box key={item.key} flexDirection="column" paddingX={paddingX}>
+              <Box key={item.key} flexDirection="column" paddingX={paddingX} backgroundColor={theme.background}>
                 {welcomeBanner}
               </Box>
             );
           }
           return (
-            <Box key={item.key} flexDirection="column" paddingX={paddingX}>
+            <Box key={item.key} flexDirection="column" paddingX={paddingX} backgroundColor={theme.background}>
               <MessageItem
                 message={item.message}
                 terminalColumns={terminalColumns}
@@ -188,7 +188,7 @@ export function MessageList({
           live here and repaint as tokens arrive. Kept short so the repaint is
           cheap and flicker-free even on tmux / non-GPU terminals. */}
       {hasDynamic && (
-        <DynamicClamp maxRows={clampDynamic ? maxStreamRows : undefined} paddingX={paddingX}>
+        <DynamicClamp maxRows={clampDynamic ? maxStreamRows : undefined} paddingX={paddingX} backgroundColor={theme.background}>
           {hasStreaming && (
             <StreamingMessage
               content={streamingContent}
@@ -239,10 +239,12 @@ export function MessageList({
 function DynamicClamp({
   maxRows,
   paddingX,
+  backgroundColor,
   children,
 }: {
   maxRows?: number;
   paddingX: number;
+  backgroundColor?: string;
   children: React.ReactNode;
 }) {
   const innerRef = React.useRef<DOMElement | null>(null);
@@ -276,6 +278,7 @@ function DynamicClamp({
       flexDirection="column"
       flexShrink={0}
       paddingX={paddingX}
+      backgroundColor={backgroundColor}
       {...(clipHeight !== undefined ? { height: clipHeight, overflowY: "hidden" as const } : {})}
     >
       <Box ref={innerRef} flexDirection="column" flexShrink={0} marginTop={offset}>

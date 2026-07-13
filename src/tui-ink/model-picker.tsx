@@ -65,9 +65,15 @@ export function resolvePickerKeyAction(
   if (key.backspace) return "backspace";
   if (key.delete) return "delete";
 
+  // Batched chunks: slow ptys (web-terminal bridges, SSH, paste) can deliver
+  // several keys in ONE input event, in which case ink sets no key flags at
+  // all ("\r/quit\r" arrives with return=false). Act on the chunk's leading
+  // key instead of swallowing it — exact-match anchors would drop the whole
+  // chunk.
+  if (input.startsWith("\r") || input.startsWith("\n")) return "enter";
   const sequence = normalizeEscapeSequence(input);
-  if (/^(?:O|\[[\d;:]*)A$/.test(sequence)) return "up";
-  if (/^(?:O|\[[\d;:]*)B$/.test(sequence)) return "down";
+  if (/^(?:O|\[[\d;:]*)A/.test(sequence)) return "up";
+  if (/^(?:O|\[[\d;:]*)B/.test(sequence)) return "down";
 
   return undefined;
 }
@@ -1050,6 +1056,17 @@ export function ProviderPicker({ providers, current, onSelect, onCancel, title, 
     const idx = providers.findIndex((p) => p.id === current);
     return idx >= 0 ? idx : 0;
   });
+  // Authoritative selection lives in a ref, mutated synchronously by the
+  // input handler; state only mirrors it for display. Slow ptys (web-terminal
+  // bridges) can deliver several key events before React commits a re-render,
+  // and a state-only selection would leave the handler closure stale — Enter
+  // would then select the pre-batch highlight.
+  const selectedIndexRef = useRef(selectedIndex);
+
+  const moveSelection = (next: number) => {
+    selectedIndexRef.current = next;
+    setSelectedIndex(next);
+  };
 
   useEffect(() => {
     const p = providers[selectedIndex];
@@ -1064,29 +1081,30 @@ export function ProviderPicker({ providers, current, onSelect, onCancel, title, 
       return;
     }
     if (action === "enter") {
-      const p = providers[selectedIndex];
+      const p = providers[selectedIndexRef.current];
       if (p) onSelect(p.id);
       return;
     }
     if (action === "up") {
-      setSelectedIndex((i) => Math.max(0, i - 1));
+      moveSelection((selectedIndexRef.current - 1 + providers.length) % providers.length);
       return;
     }
     if (action === "down") {
-      setSelectedIndex((i) => Math.min(providers.length - 1, i + 1));
+      moveSelection((selectedIndexRef.current + 1) % providers.length);
       return;
     }
     if (isPrintablePickerInput(input) && input.length === 1 && /[a-z]/i.test(input)) {
       const char = input.toLowerCase();
-      for (let i = selectedIndex + 1; i < providers.length; i++) {
+      const from = selectedIndexRef.current;
+      for (let i = from + 1; i < providers.length; i++) {
         if (providers[i].name.toLowerCase().startsWith(char)) {
-          setSelectedIndex(i);
+          moveSelection(i);
           return;
         }
       }
-      for (let i = 0; i <= selectedIndex; i++) {
+      for (let i = 0; i <= from; i++) {
         if (providers[i].name.toLowerCase().startsWith(char)) {
-          setSelectedIndex(i);
+          moveSelection(i);
           return;
         }
       }
@@ -1097,12 +1115,17 @@ export function ProviderPicker({ providers, current, onSelect, onCancel, title, 
   const visible = providers.slice(start, start + maxVisible);
 
   return (
+    // backgroundColor lives on the picker's OWN root box, below its state:
+    // a canvas toggle (theme preview across a forced-theme mismatch) then
+    // reshapes only this stateless output subtree. On an ancestor wrapper it
+    // would remount the whole picker and reset selectedIndex mid-navigation.
     <Box
       flexDirection="column"
       marginY={1}
       paddingX={1}
       borderStyle="round"
       borderColor={theme.borderActive}
+      backgroundColor={theme.background}
     >
       <Text bold color={theme.accent}>{title || "Select Provider"}</Text>
       <Text color={theme.muted}>↑/↓ navigate · Enter select · Esc cancel · type letter to jump</Text>

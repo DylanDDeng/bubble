@@ -450,7 +450,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   const [staticGeneration, setStaticGeneration] = useState(0);
   const reprintTranscript = useCallback(() => {
     if (process.stdout.isTTY) {
-      process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
+      process.stdout.write("\x1b[0m\x1b[2J\x1b[3J\x1b[H");
     }
     setStaticGeneration((generation) => generation + 1);
   }, []);
@@ -2335,7 +2335,14 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
 
   return (
     <ThemeProvider value={palette}>
-      <Box flexDirection="column" width={mainWidth} backgroundColor={palette.background}>
+      {/* No backgroundColor here: ink's Box wraps its children in a
+          backgroundContext.Provider ONLY when a background is set, so toggling
+          palette.background (canvas paint on forced-theme mismatch) would change
+          the element type above <Static>, remounting it — which reprints the
+          whole transcript into scrollback and resets every picker's selection.
+          The canvas is painted per-region instead: static items in MessageList,
+          each dynamic-stack wrapper below. */}
+      <Box flexDirection="column" width={mainWidth}>
         <MessageList
           messages={messages}
           streamingContent={streamingContent}
@@ -2718,7 +2725,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
       {/* Subagent entry sits BELOW the composer: pressing ↓ from the composer
           moves focus downward into it (spatially consistent). */}
       {!isExiting && !pickerMode && !statsPanel && !pendingPlan && !pendingApproval && !pendingQuestion && !pendingFeedback && subagentMembers.length > 0 && (
-        <Box paddingX={1} flexShrink={0} backgroundColor={palette.background}>
+        <Box paddingX={1} flexShrink={0}>
           <Text bold={subagentEntryFocused} color={subagentEntryFocused ? palette.accent : palette.toolName}>{subagentEntryFocused ? "> ↳ " : "  ↳ "}</Text>
           <Text color={subagentEntryFocused ? palette.accent : palette.muted}>
             {subagentMembers.length} subagent{subagentMembers.length === 1 ? "" : "s"} · {subagentSummary(subagentMembers)} · </Text>

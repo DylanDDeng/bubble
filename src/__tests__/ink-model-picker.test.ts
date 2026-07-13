@@ -394,6 +394,16 @@ describe("Ink model picker", () => {
     expect(resolvePickerKeyAction("OB", {})).toBe("down");
   });
 
+  it("acts on the leading key of a batched input chunk instead of swallowing it", () => {
+    // Slow ptys (web-terminal bridges, SSH, paste) deliver several keys as
+    // ONE input event with no key flags set — the theme picker's Enter used
+    // to die on exactly this.
+    expect(resolvePickerKeyAction("\r/quit\r", {})).toBe("enter");
+    expect(resolvePickerKeyAction("\n", {})).toBe("enter");
+    expect(resolvePickerKeyAction("\x1b[B\x1b[B", {})).toBe("down");
+    expect(resolvePickerKeyAction("\x1b[A\r", {})).toBe("up");
+  });
+
   it("does not treat terminal control sequences as searchable picker text", () => {
     expect(isPrintablePickerInput("p")).toBe(true);
     expect(isPrintablePickerInput("podcast")).toBe(true);
