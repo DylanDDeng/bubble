@@ -4,7 +4,6 @@ import { BudgetLedger } from "../agent/budget-ledger.js";
 import { AgentRunInputQueue } from "../agent/input-controller.js";
 import type { AgentProfile } from "../agent/profiles.js";
 import type { AgentEvent, Message, Provider, StreamChunk, ToolRegistryEntry, ToolResult } from "../types.js";
-import { createTaskTool } from "../tools/task.js";
 
 function createMockProvider(chunks: StreamChunk[][]): Provider {
   let callIndex = 0;
@@ -31,9 +30,6 @@ function collectEvents(agent: Agent, input: string, cwd: string, options?: Agent
   })();
 }
 
-function createTaskToolForTest(): ToolRegistryEntry {
-  return createTaskTool();
-}
 
 function toolForAgentTest(name: string): ToolRegistryEntry {
   return {
@@ -1028,52 +1024,6 @@ describe("Agent", () => {
     expect(hasModelContext(captured[2], "exact file range was already read")).toBe(true);
   });
 
-  it("supports task subtasks and injects a post-task summary reminder", async () => {
-    const captured: Message[][] = [];
-    const provider: Provider = {
-      async *streamChat(messages) {
-        captured.push(messages);
-        if (captured.length === 1) {
-          yield { type: "tool_call", id: "outer_task", name: "task", arguments: "", isStart: true, isEnd: false };
-          yield {
-            type: "tool_call",
-            id: "outer_task",
-            name: "task",
-            arguments: "{\"prompt\":\"Check token storage\",\"description\":\"Investigate storage\"}",
-            isStart: false,
-            isEnd: true,
-          };
-          yield { type: "done" };
-          return;
-        }
-        if (captured.length === 2) {
-          yield { type: "text", content: "Subtask found config and env reads." };
-          yield { type: "done" };
-          return;
-        }
-        yield { type: "text", content: "Final answer." };
-        yield { type: "done" };
-      },
-      async complete() {
-        return "ok";
-      },
-    };
-
-    const agent = new Agent({
-      provider,
-      model: "gpt-4o",
-      tools: [dummyTool, createTaskToolForTest()],
-      systemPrompt: "system",
-    });
-
-    const events = await collectEvents(agent, "Investigate secret storage", "/tmp");
-    const toolEnd = events.find((event) => event.type === "tool_end") as any;
-    expect(toolEnd.result.content).toContain("Subtask summary:");
-    expect(toolEnd.result.content).toContain("Subtask type: general_readonly");
-    expect(hasModelContext(captured[2], "Summarize the task tool output above and continue with your task.")).toBe(true);
-    expect(hasUserText(captured[2], "Summarize the task tool output above and continue with your task.")).toBe(true);
-  });
-
   it("emits live tool_update events from tools", async () => {
     const provider = createMockProvider([
       [
@@ -1234,7 +1184,7 @@ describe("Agent", () => {
       mode: "readonly",
       tools: {
         preset: "explicit",
-        include: ["skill", "memory_search"],
+        include: ["skill", "memory"],
       },
       approval: "fail",
       prompt: "Use selected context.",
@@ -1252,7 +1202,7 @@ describe("Agent", () => {
     const agent = new Agent({
       provider,
       model: "gpt-4o",
-      tools: [tool("skill"), tool("memory_search")],
+      tools: [tool("skill"), tool("memory")],
       systemPrompt: "parent system",
       skills: [{ name: "debug-skill", description: "Debug workflow" }],
       memoryPrompt: "Memory context visible to selected agents.",

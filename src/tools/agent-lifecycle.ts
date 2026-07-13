@@ -303,6 +303,7 @@ export function createSendInputTool(): ToolRegistryEntry {
 export function createCloseAgentTool(): ToolRegistryEntry {
   return {
     name: "close_agent",
+    deferred: true,
     readOnly: true,
     effect: "read",
     description: "Close a spawned subagent only when the delegated task is cancelled, stale, or no longer needed. Running children are cancelled before closing; do not close a child just because you started doing the same delegated work locally.",
@@ -339,6 +340,7 @@ export function createCloseAgentTool(): ToolRegistryEntry {
 export function createListAgentsTool(): ToolRegistryEntry {
   return {
     name: "list_agents",
+    deferred: true,
     readOnly: true,
     effect: "read",
     description: "List this session's subagents with their current status. Use it to recall which children exist before spawning duplicates or narrating progress.",

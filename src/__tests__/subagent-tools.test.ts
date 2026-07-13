@@ -46,9 +46,6 @@ describe("list_agents", () => {
     const ctx: ToolContext = {
       cwd: "/tmp",
       agent: {
-        async runSubtask() {
-          return { content: "unused" };
-        },
         listSubAgents: () => [
           snapshot({ agentId: "a", status: "running", task: "look around" }),
           snapshot({ agentId: "b", status: "queued", queuePosition: 2, nickname: "Grace" }),
@@ -75,9 +72,6 @@ describe("spawn_agent reply protocol", () => {
       cwd: "/tmp",
       toolCall: { id: "spawn_1", name: "spawn_agent" },
       agent: {
-        async runSubtask() {
-          return { content: "unused" };
-        },
         async spawnSubAgent() {
           return snapshot({ status: "queued", queuePosition: 3 });
         },
@@ -95,9 +89,6 @@ describe("wait_agent reply protocol (design §3.1, §3.4)", () => {
     return {
       cwd: "/tmp",
       agent: {
-        async runSubtask() {
-          return { content: "unused" };
-        },
         waitSubAgents: async () => snapshots,
       },
     };
@@ -158,9 +149,6 @@ describe("project profile trust gate", () => {
       cwd: projectDir,
       toolCall: { id: "spawn_1", name: "spawn_agent" },
       agent: {
-        async runSubtask() {
-          return { content: "unused" };
-        },
         async spawnSubAgent() {
           return snapshot({ status: "queued" });
         },

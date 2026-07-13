@@ -41,7 +41,6 @@ import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeInherited
 import { appendOutputSchemaInstructions, buildSchemaCorrectionPrompt, validateStructuredSummary } from "./agent/structured-output.js";
 import { runWorkflow, WorkflowConcurrencyGate, type AgentDispatchResult, type WorkflowAgentSpec } from "./agent/workflow/runtime.js";
 import { buildWorkflowDeliveryNotice, renderWorkflowResultValue, type WorkflowRunRecord, type WorkflowRunSnapshot } from "./agent/workflow/control.js";
-import { getSubtaskPolicy, type SubtaskType } from "./agent/subtask-policy.js";
 import { BudgetLedger, composeAbortSignals } from "./agent/budget-ledger.js";
 import { assignAgentNickname, builtinAgentProfiles, discoverAgentProfiles, findAgentProfile, mergeUsage, selectToolsForAgentProfile, validateAgentProfileTools, type AgentProfile, type SubagentRunResult } from "./agent/profiles.js";
 import { snapshotSubagentThread, subagentResultFromThread, type PendingSubagentToolUpdate, type SubagentFinalReason, type SubagentThreadRecord, type SubagentThreadSnapshot } from "./agent/subagent-control.js";
@@ -365,6 +364,17 @@ export class Agent {
 
     // Advertise any deferred tools so the model knows they exist and how to
     // reach them. Keeps the per-turn tool list small; schemas load on demand.
+    this.injectDeferredToolsReminder();
+  }
+
+  /**
+   * Re-inject the deferred-tools advertisement. Hosts that reassign
+   * agent.messages (session resume, Feishu conversation rebuild) drop the
+   * constructor-injected meta reminder — without re-injection the model has
+   * no way to discover deferred tools, since they are also filtered out of
+   * the prompt's tool list.
+   */
+  injectDeferredToolsReminder(): void {
     const deferredNames = [...this.tools.values()]
       .filter((t) => t.deferred)
       .map((t) => t.name);
@@ -1673,47 +1683,6 @@ export class Agent {
     return sanitizeInternalReminderBlocks(full).trim();
   }
 
-  async runSubtask(
-    input: string | ContentPart[],
-    cwd: string,
-    options?: { subtaskType?: string; description?: string },
-  ): Promise<ToolResult> {
-    const subtaskType = options?.subtaskType as SubtaskType | undefined;
-    const profile = builtinAgentProfiles().find((item) => item.subtaskType === (subtaskType ?? "general_readonly"))
-      ?? builtinAgentProfiles().find((item) => item.subtaskType === "general_readonly")!;
-    const run = await this.runSubAgent(input, cwd, {
-      profile,
-      runId: randomUUID(),
-      subAgentId: randomUUID(),
-      parentToolCallId: "task",
-      route: this.resolveRouteForSubagent(profile, undefined),
-      description: options?.description,
-    });
-    const lines = [
-      "Note: task is deprecated. Use spawn_agent with a named profile instead.",
-      `Subtask type: ${profile.subtaskType ?? "general_readonly"}`,
-    ];
-    if (options?.description) {
-      lines.push(`Subtask description: ${options.description}`);
-    }
-    if (run.summary) {
-      lines.push("", "Subtask summary:", run.summary);
-    }
-    if (run.toolNotes.length > 0) {
-      lines.push("", "Subtask tools:", ...run.toolNotes.slice(0, 8).map((note) => `- ${note}`));
-    }
-    return {
-      content: lines.join("\n"),
-      status: getSubtaskPolicy(subtaskType).resultStatus,
-      isError: run.status !== "completed",
-      metadata: {
-        kind: "subagent",
-        reason: `Subtask (${profile.subtaskType ?? "general_readonly"}) investigation completed.`,
-        subagents: [run],
-      },
-    };
-  }
-
   async runSubAgent(
     input: string | ContentPart[],
     cwd: string,
@@ -2677,7 +2646,7 @@ export class Agent {
       mode: childMode,
       workingDir: childCwd,
       ...buildToolPromptOptions(tools),
-      memoryPrompt: childToolNames.some((name) => name === "memory_search" || name === "memory_read_summary")
+      memoryPrompt: childToolNames.some((name) => name === "memory")
         ? this.memoryPrompt
         : undefined,
       agentProfilePrompt: [
@@ -2969,7 +2938,7 @@ export class Agent {
       return {
         content:
           `Error: Tool "${toolCall.name}" is not allowed in plan mode. ` +
-          `In plan mode you may only use read-only tools (read, glob, grep, lsp, web_search, web_fetch, spawn_agent, wait_agent, send_input, close_agent, skill_search, skill, todo_write, tool_search, question, exit_plan_mode). ` +
+          `In plan mode you may only use read-only tools (read, glob, grep, web_search, web_fetch, spawn_agent, wait_agent, send_input, skill_search, skill, todo_write, tool_search, question, exit_plan_mode). ` +
           `To modify files or run commands, present your proposal and call exit_plan_mode so the user can review and approve it.`,
         isError: true,
       };

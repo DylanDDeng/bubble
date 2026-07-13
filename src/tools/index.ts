@@ -20,7 +20,7 @@ export { createTodoTool, type TodoStore } from "./todo.js";
 export { createExitPlanModeTool, type PlanController } from "./exit-plan-mode.js";
 export { createToolSearchTool, type ToolSearchController } from "./tool-search.js";
 export { createQuestionTool } from "./question.js";
-export { createMemoryReadSummaryTool, createMemorySearchTool } from "./memory.js";
+export { createMemoryTool } from "./memory.js";
 
 import type { ToolRegistryEntry } from "../types.js";
 import type { ApprovalController } from "../approval/types.js";
@@ -43,7 +43,7 @@ import { createWebFetchTool } from "./web-fetch.js";
 import { createWebSearchTool } from "./web-search.js";
 import { createWriteTool } from "./write.js";
 import { createQuestionTool } from "./question.js";
-import { createMemoryReadSummaryTool, createMemorySearchTool } from "./memory.js";
+import { createMemoryTool } from "./memory.js";
 import type { QuestionController } from "../question/index.js";
 import type { CheckpointStore } from "../checkpoints.js";
 import { FileStateTracker } from "./file-state.js";
@@ -64,7 +64,7 @@ export interface CreateAllToolsOptions {
    * files before mutating them so /rewind can restore.
    */
   checkpoints?: () => CheckpointStore | undefined;
-  /** Shared goal state; when present, registers the get_goal/update_goal tools. */
+  /** Shared goal state; when present, registers the update_goal tool. */
   goalStore?: GoalStore;
 }
 
@@ -87,14 +87,16 @@ export function createAllTools(
     createLspTool(cwd, lsp, approval),
     createWebSearchTool(),
     createWebFetchTool(approval),
-    createMemorySearchTool(cwd),
-    createMemoryReadSummaryTool(cwd),
+    createMemoryTool(cwd),
     ...createAgentLifecycleTools({ cwd, approval }),
+    // Always registered: any host can carry deferred tools (MCP entries mark
+    // themselves deferred), so every host needs the unlock path. Falls back
+    // to the executing agent when no controller is wired.
+    createToolSearchTool(options.toolSearchController),
     ...(options.questionController ? [createQuestionTool(options.questionController)] : []),
     ...(skillRegistry ? [createSkillSearchTool(skillRegistry), createSkillTool(skillRegistry)] : []),
     ...(options.todoStore ? [createTodoTool(options.todoStore)] : []),
     ...(options.planController ? [createExitPlanModeTool(options.planController)] : []),
-    ...(options.toolSearchController ? [createToolSearchTool(options.toolSearchController)] : []),
     ...(options.goalStore ? createGoalTools(options.goalStore) : []),
   ];
 }

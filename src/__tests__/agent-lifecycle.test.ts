@@ -27,9 +27,6 @@ describe("subagent lifecycle", () => {
       cwd: "/tmp",
       toolCall: { id: "spawn_1", name: "spawn_agent" },
       agent: {
-        async runSubtask() {
-          return { content: "unused" };
-        },
         async spawnSubAgent(input, _cwd, options) {
           return {
             agentId: "child_1",

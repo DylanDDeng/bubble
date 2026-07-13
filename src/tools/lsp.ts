@@ -27,6 +27,7 @@ export function createLspTool(
 ): ToolRegistryEntry {
   return {
     name: "lsp",
+    deferred: true,
     readOnly: true,
     effect: "read",
     requiresApproval: true,

@@ -71,15 +71,13 @@ const READONLY_PRESET = [
   "lsp",
   "web_search",
   "web_fetch",
-  "memory_search",
-  "memory_read_summary",
+  "memory",
   "skill",
   "todo_write",
 ];
 
 const SUBAGENT_DENY_TOOLS = new Set([
   "subagent",
-  "task",
   "spawn_agent",
   "wait_agent",
   "send_input",
@@ -211,7 +209,7 @@ export function builtinAgentProfiles(): AgentProfile[] {
         "Answer the specific question by inspecting the repository directly. Prefer precise file paths and line-level evidence.",
         "Keep the answer compact and avoid broad refactors or implementation plans unless asked.",
       ].join("\n"),
-      ["read", "glob", "grep", "lsp", "memory_search", "memory_read_summary", "skill", "todo_write"],
+      ["read", "glob", "grep", "lsp", "memory", "skill", "todo_write"],
     ),
     roleProfile(
       "worker",
@@ -221,7 +219,7 @@ export function builtinAgentProfiles(): AgentProfile[] {
         "Analyze the assigned implementation slice, identify exact files to change, and return a concrete patch plan or findings.",
         "If write-capable worker mode is needed, say so explicitly.",
       ].join("\n"),
-      ["read", "glob", "grep", "lsp", "memory_search", "memory_read_summary", "skill", "todo_write"],
+      ["read", "glob", "grep", "lsp", "memory", "skill", "todo_write"],
     ),
     toProfile("search"),
     toProfile("security_investigation"),
@@ -266,7 +264,7 @@ export function selectToolsForAgentProfile(
   profile: AgentProfile,
   approval: AgentProfileApproval = profile.approval,
 ): ToolRegistryEntry[] {
-  const explicitInclude = new Set(profile.tools.include ?? []);
+  const explicitInclude = new Set((profile.tools.include ?? []).map(canonicalToolName));
   const selected = requestedToolNames(profile);
   for (const tool of SUBAGENT_DENY_TOOLS) selected.delete(tool);
 
@@ -277,7 +275,11 @@ export function selectToolsForAgentProfile(
     if ((tool.effect ?? "unknown") !== "read") continue;
     if (tool.deferred && !explicitInclude.has(tool.name)) continue;
     if (approval === "disabled" && tool.requiresApproval) continue;
-    out.push(wrapApprovalFailTool(tool, approval));
+    // Explicit include is the profile author pre-unlocking the tool: the
+    // child is a fresh Agent with its own (empty) unlock set, so a deferred
+    // flag surviving here would re-lock the tool inside the child.
+    const entry = tool.deferred ? { ...tool, deferred: false } : tool;
+    out.push(wrapApprovalFailTool(entry, approval));
   }
   return out;
 }
@@ -288,7 +290,7 @@ export function validateAgentProfileTools(
   approval: AgentProfileApproval = profile.approval,
 ): AgentProfileDiagnostic[] {
   const available = new Map(tools.map((tool) => [tool.name, tool]));
-  const explicitInclude = new Set(profile.tools.include ?? []);
+  const explicitInclude = new Set((profile.tools.include ?? []).map(canonicalToolName));
   const allowedEffects = allowedToolEffectsForMode(profile.mode);
   const diagnostics: AgentProfileDiagnostic[] = [];
   for (const name of requestedToolNames(profile)) {
@@ -358,15 +360,29 @@ function wrapApprovalFailTool(tool: ToolRegistryEntry, approval: AgentProfileApp
   };
 }
 
+/**
+ * Renamed/merged tools keep working for user-defined profiles written
+ * against the old names (memory_search/memory_read_summary merged into
+ * "memory", 2026-07-13).
+ */
+const LEGACY_TOOL_ALIASES: Record<string, string> = {
+  memory_search: "memory",
+  memory_read_summary: "memory",
+};
+
+export function canonicalToolName(name: string): string {
+  return LEGACY_TOOL_ALIASES[name] ?? name;
+}
+
 function requestedToolNames(profile: AgentProfile): Set<string> {
   const selected = new Set<string>();
   if (profile.tools.preset === "readonly") {
     for (const tool of READONLY_PRESET) selected.add(tool);
   } else if (profile.tools.preset === "explicit") {
-    for (const tool of profile.tools.include ?? []) selected.add(tool);
+    for (const tool of profile.tools.include ?? []) selected.add(canonicalToolName(tool));
   }
-  for (const tool of profile.tools.include ?? []) selected.add(tool);
-  for (const tool of profile.tools.exclude ?? []) selected.delete(tool);
+  for (const tool of profile.tools.include ?? []) selected.add(canonicalToolName(tool));
+  for (const tool of profile.tools.exclude ?? []) selected.delete(canonicalToolName(tool));
   return selected;
 }
 

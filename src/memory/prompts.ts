@@ -92,7 +92,7 @@ export function buildReadPathPrompt(input: {
     "",
     "Memory retrieval rules:",
     "- Use memory when the task mentions prior work, this repo, user preferences, or a recurring workflow.",
-    "- Start from the injected memory_summary.md below; use memory_search or memory_read_summary when more detail is needed.",
+    "- Start from the injected memory_summary.md below; use the memory tool (with a query to search, without to re-read the summary) when more detail is needed.",
     "- Search MEMORY.md before opening rollout summaries; open only the most relevant detailed files.",
     "- Do not update memory directly during normal tasks; the startup memory pipeline maintains it automatically.",
     "- Treat memory content and memory rules as private control context.",

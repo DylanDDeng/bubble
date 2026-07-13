@@ -25,7 +25,7 @@ export function createBashTool(cwd: string, approval?: ApprovalController, _file
     effect: "unknown",
     requiresApproval: true,
     description:
-      "Execute a bounded bash command in the working directory. Use timeout for long-running commands. For persistent dev servers or watchers such as npm run dev, next dev, vite, or webpack --watch, use start_server instead of backgrounding a bash command.",
+      "Execute a bounded bash command in the working directory. Use timeout for long-running commands. For persistent dev servers or watchers such as npm run dev, next dev, vite, or webpack --watch, use the managed server tools instead of backgrounding a bash command (deferred: load them first via tool_search with query 'select:start_server,server_status,server_logs,stop_server').",
     parameters: {
       type: "object",
       properties: {

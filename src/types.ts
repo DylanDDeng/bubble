@@ -208,11 +208,9 @@ export interface ToolContext {
     name: string;
   };
   agent?: {
-    runSubtask: (
-      input: string | ContentPart[],
-      cwd: string,
-      options?: { subtaskType?: string; description?: string },
-    ) => Promise<ToolResult>;
+    /** Deferred-tool surface; backs tool_search when no controller is wired. */
+    listDeferredTools?: () => ToolRegistryEntry[];
+    unlockDeferredTools?: (names: string[]) => void;
     runSubAgent?: (
       input: string | ContentPart[],
       cwd: string,

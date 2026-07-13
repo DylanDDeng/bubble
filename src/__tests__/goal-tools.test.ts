@@ -8,27 +8,16 @@ const ctx = { cwd: "/tmp" } as ToolContext;
 function tools(store: GoalStore) {
   const list = createGoalTools(store);
   return {
-    getGoal: list.find((t) => t.name === "get_goal")!,
+    list,
     updateGoal: list.find((t) => t.name === "update_goal")!,
   };
 }
 
 describe("goal tools", () => {
-  it("registers get_goal (read-only) and update_goal", () => {
-    const { getGoal, updateGoal } = tools(new GoalStore());
-    expect(getGoal.readOnly).toBe(true);
+  it("registers only update_goal — goal state is prompt-injected, not tool-read", () => {
+    const { list, updateGoal } = tools(new GoalStore());
+    expect(list.map((t) => t.name)).toEqual(["update_goal"]);
     expect(updateGoal.parameters.properties.status.enum).toEqual(["complete", "blocked"]);
-  });
-
-  it("get_goal errors with no goal and summarizes when present", async () => {
-    const store = new GoalStore();
-    const { getGoal } = tools(store);
-    expect((await getGoal.execute({}, ctx)).isError).toBe(true);
-    store.set("Refactor auth", { tokenBudget: 1000 });
-    const res = await getGoal.execute({}, ctx);
-    expect(res.isError).toBeFalsy();
-    expect(res.content).toMatch(/Refactor auth/);
-    expect(res.content).toMatch(/active/);
   });
 
   it("update_goal errors without a goal", async () => {

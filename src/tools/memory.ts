@@ -3,10 +3,19 @@ import type { ToolRegistryEntry, ToolResult } from "../types.js";
 
 const MEMORY_SCOPE_ENUM = ["project", "global", "all"];
 
-export function createMemorySearchTool(cwd: string): ToolRegistryEntry {
+/**
+ * Single entry point to persistent memory: without a query it reads the
+ * concise memory summary, with a query it searches memory. One schema in the
+ * per-turn tool list instead of two (the read/search split cost context on
+ * every turn while both modes share this file's backing code).
+ */
+export function createMemoryTool(cwd: string): ToolRegistryEntry {
   return {
-    name: "memory_search",
-    description: "Search persistent Bubble memory for prior project facts, user preferences, workflows, decisions, and gotchas.",
+    name: "memory",
+    description:
+      "Read or search persistent Bubble memory (prior project facts, user preferences, workflows, decisions, gotchas). " +
+      "Without query, returns the concise memory summary (scope defaults to project). " +
+      "With query, searches memory entries (scope defaults to all, project memory first).",
     readOnly: true,
     effect: "read",
     parameters: {
@@ -14,26 +23,39 @@ export function createMemorySearchTool(cwd: string): ToolRegistryEntry {
       properties: {
         query: {
           type: "string",
-          description: "Search query. Use concrete terms such as file names, feature names, commands, or error text.",
+          description: "Search query. Use concrete terms such as file names, feature names, commands, or error text. Omit to read the memory summary instead.",
         },
         scope: {
           type: "string",
           enum: MEMORY_SCOPE_ENUM,
-          description: "Memory scope to search. Defaults to all, with project memory first.",
+          description: "Memory scope. Defaults to project when reading the summary, all when searching.",
         },
         limit: {
           type: "number",
-          description: "Maximum number of results to return. Defaults to 12.",
+          description: "Maximum number of search results to return. Defaults to 12. Ignored for summary reads.",
         },
       },
-      required: ["query"],
       additionalProperties: false,
     },
     async execute(args): Promise<ToolResult> {
       const query = typeof args.query === "string" ? args.query.trim() : "";
       if (!query) {
-        return { content: "query is required", isError: true, status: "no_match" };
+        const scope = parseScope(args.scope, "project");
+        const summaries = readMemorySummary(cwd, scope);
+        if (summaries.length === 0) {
+          return { content: `No ${scope} memory summary is available.`, status: "no_match" };
+        }
+        return {
+          content: summaries.map((summary) => [
+            `# ${summary.scope} memory summary`,
+            `Path: ${summary.path}`,
+            "",
+            summary.content,
+          ].join("\n")).join("\n\n---\n\n"),
+          metadata: { kind: "read", matches: summaries.length },
+        };
       }
+
       const scope = parseScope(args.scope);
       const limit = typeof args.limit === "number" && Number.isFinite(args.limit)
         ? Math.max(1, Math.min(50, Math.floor(args.limit)))
@@ -51,42 +73,6 @@ export function createMemorySearchTool(cwd: string): ToolRegistryEntry {
           ]),
         ].join("\n"),
         metadata: { kind: "search", matches: results.length },
-      };
-    },
-  };
-}
-
-export function createMemoryReadSummaryTool(cwd: string): ToolRegistryEntry {
-  return {
-    name: "memory_read_summary",
-    description: "Read the concise persistent memory summary for the current project, global scope, or both.",
-    readOnly: true,
-    effect: "read",
-    parameters: {
-      type: "object",
-      properties: {
-        scope: {
-          type: "string",
-          enum: MEMORY_SCOPE_ENUM,
-          description: "Memory scope to read. Defaults to project.",
-        },
-      },
-      additionalProperties: false,
-    },
-    async execute(args): Promise<ToolResult> {
-      const scope = parseScope(args.scope, "project");
-      const summaries = readMemorySummary(cwd, scope);
-      if (summaries.length === 0) {
-        return { content: `No ${scope} memory summary is available.`, status: "no_match" };
-      }
-      return {
-        content: summaries.map((summary) => [
-          `# ${summary.scope} memory summary`,
-          `Path: ${summary.path}`,
-          "",
-          summary.content,
-        ].join("\n")).join("\n\n---\n\n"),
-        metadata: { kind: "read", matches: summaries.length },
       };
     },
   };

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { getMemoryPaths } from "../memory/index.js";
-import { createMemoryReadSummaryTool, createMemorySearchTool } from "../tools/memory.js";
+import { createMemoryTool } from "../tools/memory.js";
 
 describe("memory tools", () => {
   const originalBubbleHome = process.env.BUBBLE_HOME;
@@ -22,7 +22,7 @@ describe("memory tools", () => {
     mkdirSync(paths.globalRoot, { recursive: true });
     writeFileSync(paths.globalMemory, "# Bubble Memory\n\n- Use memory_search for prior decisions.\n", "utf-8");
 
-    const tool = createMemorySearchTool(cwd);
+    const tool = createMemoryTool(cwd);
     const result = await tool.execute({ query: "prior decisions" }, { cwd });
 
     expect(tool.readOnly).toBe(true);
@@ -39,7 +39,7 @@ describe("memory tools", () => {
     mkdirSync(paths.globalRoot, { recursive: true });
     writeFileSync(paths.globalSummary, "# Bubble Memory Summary\n\n## Project Facts\n- Summary is available.\n", "utf-8");
 
-    const tool = createMemoryReadSummaryTool(cwd);
+    const tool = createMemoryTool(cwd);
     const result = await tool.execute({ scope: "project" }, { cwd });
 
     expect(tool.readOnly).toBe(true);
