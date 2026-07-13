@@ -35,6 +35,8 @@ export interface SystemPromptOptions {
   memoryPrompt?: string;
   /** Durable child-agent profile prompt used for subagents. */
   agentProfilePrompt?: string;
+  /** Rendered subagent model-routing menu (design §4); parents only. */
+  modelRoutingPrompt?: string;
 }
 
 export function buildSystemPrompt(options: SystemPromptOptions = {}): string {

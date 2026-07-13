@@ -34,8 +34,10 @@ import {
 } from "./hooks/index.js";
 import { createDefaultHooks } from "./orchestrator/default-hooks.js";
 import { mergeAgentCategories, parseThinkingLevel, resolveModelRoute, resolveSubagentRoute, type AgentCategoriesConfig, type ResolvedSubagentRoute } from "./agent/categories.js";
+import { DEFAULT_AGENT_ROUTING, nearModelMatches, sanitizeAgentRouting, tierContextFromSnapshot, type AgentRoutingConfig, type RoutableModelEntry, type RoutableModelIndex, type RoutingSnapshot, type RoutingSnapshotAccessor } from "./agent/routing-catalog.js";
+import { buildModelRoutingPrompt } from "./prompt/routing.js";
 import { getBuiltinModel } from "./model-catalog.js";
-import { getAvailableThinkingLevels, normalizeInheritedThinkingLevel, normalizeThinkingLevel } from "./variant/variant-resolver.js";
+import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeInheritedThinkingLevel, normalizeThinkingLevel } from "./variant/variant-resolver.js";
 import { appendOutputSchemaInstructions, buildSchemaCorrectionPrompt, validateStructuredSummary } from "./agent/structured-output.js";
 import { runWorkflow, WorkflowConcurrencyGate, type AgentDispatchResult, type WorkflowAgentSpec } from "./agent/workflow/runtime.js";
 import { buildWorkflowDeliveryNotice, renderWorkflowResultValue, type WorkflowRunRecord, type WorkflowRunSnapshot } from "./agent/workflow/control.js";
@@ -170,6 +172,23 @@ export interface AgentOptions {
   memoryPrompt?: string;
   fileStateTracker?: FileStateTracker;
   agentCategories?: AgentCategoriesConfig;
+  /**
+   * Routing config held directly on the Agent, independent of any snapshot:
+   * the cross-provider lock must hold even in hosts that wire no routing
+   * data (design §7.0).
+   */
+  agentRouting?: Partial<AgentRoutingConfig>;
+  /**
+   * Live routing-snapshot accessor (design §1.5). Host-constructed; caches by
+   * registry revision. When absent, catalog-dependent features (tier routing,
+   * menu, unknown-model validation) are simply off.
+   */
+  routingSnapshot?: RoutingSnapshotAccessor;
+  /**
+   * Cross-provider routable model index (design v3.6): powers the user-named
+   * model reminder and near-match correction of mistyped provider:model ids.
+   */
+  routableModels?: RoutableModelIndex;
   providerFactory?: (route: ResolvedSubagentRoute) => Provider | Promise<Provider>;
   subagents?: AgentSubagentRuntimeConfig;
   /** Subagent routes use "defer" so the scheduler is the single 429 backoff layer (design §4.5). */
@@ -186,6 +205,11 @@ export interface AgentRunOptions {
    */
   resumeWithoutInput?: boolean;
 }
+
+/** Detector threshold N (design §6): 1–2 strong-model children are often a
+ * deliberate deep side-investigation; at 3+ uniform defaults the odds that
+ * all need frontier capability drop sharply. Revisit against live traces. */
+const ROUTING_REMINDER_THRESHOLD = 3;
 
 export class Agent {
   messages: Message[] = [];
@@ -217,6 +241,13 @@ export class Agent {
   private memoryPrompt?: string;
   private fileStateTracker?: FileStateTracker;
   private agentCategories: AgentCategoriesConfig;
+  private agentRouting: AgentRoutingConfig;
+  private routingSnapshotAccessor?: RoutingSnapshotAccessor;
+  private routableModelIndex?: RoutableModelIndex;
+  /** Detector state (design §6): once per session, absolute defaulted count. */
+  private routingReminderFired = false;
+  private defaultedRoutingStreak = 0;
+  private pendingRoutingReminder?: string;
   private providerFactory?: (route: ResolvedSubagentRoute) => Provider | Promise<Provider>;
   private readonly subagentStore: SubagentStore;
   private readonly subagentScheduler: SubagentScheduler;
@@ -265,6 +296,11 @@ export class Agent {
     this.memoryPrompt = options.memoryPrompt;
     this.fileStateTracker = options.fileStateTracker;
     this.agentCategories = options.agentCategories ?? {};
+    this.agentRouting = options.agentRouting
+      ? sanitizeAgentRouting(options.agentRouting)
+      : { ...DEFAULT_AGENT_ROUTING };
+    this.routingSnapshotAccessor = options.routingSnapshot;
+    this.routableModelIndex = options.routableModels;
     this.providerFactory = options.providerFactory;
     this.subagentsConfig = options.subagents ?? {};
     this.rateLimitPolicy = options.rateLimitPolicy;
@@ -390,8 +426,34 @@ export class Agent {
     return [...this.tools.values()].filter((t) => t.deferred);
   }
 
-  getSystemPromptToolOptions(): Pick<import("./system-prompt.js").SystemPromptOptions, "tools" | "toolSnippets" | "guidelines"> {
-    return buildToolPromptOptions(this.getActiveToolEntries());
+  getSystemPromptToolOptions(): Pick<import("./system-prompt.js").SystemPromptOptions, "tools" | "toolSnippets" | "guidelines" | "modelRoutingPrompt"> {
+    return {
+      ...buildToolPromptOptions(this.getActiveToolEntries()),
+      // Rendered through the live accessor (design §1.5), so every host-
+      // triggered prompt rebuild picks up the current catalog.
+      modelRoutingPrompt: this.buildModelRoutingPromptSection(),
+    };
+  }
+
+  /** Current routing menu (design §4); undefined when no accessor is wired. */
+  buildModelRoutingPromptSection(): string | undefined {
+    const snapshot = this.currentRoutingSnapshot();
+    if (!snapshot) return undefined;
+    return buildModelRoutingPrompt(snapshot, this.agentRouting);
+  }
+
+  /**
+   * Routing menu rendered for a prospective parent route — used by model-
+   * switch transactions to build the NEXT prompt before mutating the agent
+   * (design §1.5).
+   */
+  renderModelRoutingPromptFor(parent: { providerId: string; model: string }): string | undefined {
+    if (!this.routingSnapshotAccessor) return undefined;
+    try {
+      return buildModelRoutingPrompt(this.routingSnapshotAccessor(parent), this.agentRouting);
+    } catch {
+      return undefined;
+    }
   }
 
   getContextUsageSnapshot(): ContextUsageSnapshot {
@@ -1713,13 +1775,20 @@ export class Agent {
       forkContext?: boolean;
     },
   ): Promise<SubagentThreadSnapshot> {
+    const route = options.route
+      ?? this.resolveRouteForSubagent(options.profile, options.category, { model: options.model, effort: options.effort });
+    // Early validation (design §7): throws reach the model as a tool error it
+    // can correct this turn, instead of a late provider-factory failure.
+    const routeNote = this.validateRouteForDispatch(route);
+    this.noteRoutingDispatch(route);
     const record = this.createSubagentThreadRecord({
       profile: options.profile,
       task: typeof input === "string" ? input : "(multimodal task)",
       parentToolCallId: options.parentToolCallId,
       parentToolName: "spawn_agent",
-      route: options.route ?? this.resolveRouteForSubagent(options.profile, options.category, { model: options.model, effort: options.effort }),
+      route,
     });
+    if (routeNote) record.toolNotes.push(routeNote);
     this.subagentStore.set(record);
     const approval = options.approval ?? record.profile.approval;
     // Admission validation runs before queueing (design §4.2): a request that
@@ -2027,11 +2096,16 @@ export class Agent {
       };
 
       let route: ResolvedSubagentRoute;
+      let routeNote: string | undefined;
       try {
         route = this.resolveRouteForSubagent(profile, spec.opts.category, {
           model: spec.opts.model,
           effort: parseThinkingLevel(spec.opts.effort),
         });
+        // Dispatch-time validation + defaulted-fan-out accounting (§6–7):
+        // resolved routes, never script source text.
+        routeNote = this.validateRouteForDispatch(route);
+        this.noteRoutingDispatch(route);
       } catch (error: any) {
         return { ok: false, error: error?.message || String(error) };
       }
@@ -2048,6 +2122,7 @@ export class Agent {
         workflowInternal: true,
       });
       record.expectsStructuredOutput = spec.opts.schema !== undefined;
+      if (routeNote) record.toolNotes.push(routeNote);
       const memberLabel = typeof spec.opts.label === "string" ? spec.opts.label.trim().slice(0, 40) : "";
       if (memberLabel) record.nickname = memberLabel;
       runRecords.push(record);
@@ -2320,24 +2395,37 @@ export class Agent {
       model: this.apiModel,
       thinkingLevel: this.thinkingLevel,
     };
-    const resolved = resolveSubagentRoute(category ?? profile.category, {
-      ...parentRoute,
-    }, this.agentCategories);
+    const snapshot = this.currentRoutingSnapshot();
+    const resolved = resolveSubagentRoute(
+      category ?? profile.category,
+      { ...parentRoute },
+      this.agentCategories,
+      snapshot ? tierContextFromSnapshot(snapshot, this.agentRouting) : undefined,
+    );
     if ("error" in resolved) {
       throw new Error(resolved.error);
     }
     let route = resolved.route;
+    // modelSource is assigned while applying the chain (design §3.4): an
+    // explicit layer naming the parent's own model is indistinguishable from
+    // inherit by final-value comparison, yet carries different authority.
+    let modelSource: import("./agent/categories.js").RouteModelSource =
+      route.categoryModelSource ?? "inherit";
     if (profile.model && profile.model !== "inherit") {
       const model = resolveModelRoute(profile.model, parentRoute.providerId);
       if (model.model !== "inherit") {
         route = { ...route, providerId: model.providerId, model: model.model, inherited: false };
+        modelSource = "profile";
       }
     }
-    // Call-site override beats profile and category.
+    // Call-site override beats profile and category. Bare names resolve
+    // against the PARENT provider per the tool contract (design §3.5) — not
+    // against a provider that category/profile may already have switched.
     if (override?.model) {
-      const model = resolveModelRoute(override.model, route.providerId);
+      const model = resolveModelRoute(override.model, parentRoute.providerId);
       if (model.model !== "inherit") {
         route = { ...route, providerId: model.providerId, model: model.model, inherited: false };
+        modelSource = "callsite";
       }
     }
     const supportedLevels = getAvailableThinkingLevels(route.providerId, route.model);
@@ -2359,14 +2447,150 @@ export class Agent {
       const categoryThinkingLevel = route.category
         ? mergeAgentCategories(this.agentCategories)[route.category]?.thinkingLevel
         : undefined;
+      // A category's thinkingLevel is calibrated for the model the CATEGORY
+      // resolved. When a later layer (profile/call-site) replaced the model,
+      // that level is no longer explicit intent for the final model: keep it
+      // only if supported, else use the final model's own default — never
+      // downward-clamp a thinking-default model to "off" (v3.6; live case:
+      // explore's "low" + call-site glm-5.2 [high/max/off] silently landed
+      // on "off").
+      const modelReplacedAfterCategory = modelSource === "profile" || modelSource === "callsite";
       route = {
         ...route,
         thinkingLevel: categoryThinkingLevel
-          ? normalizeThinkingLevel(route.thinkingLevel, supportedLevels)
+          ? (modelReplacedAfterCategory && !supportedLevels.includes(route.thinkingLevel)
+              ? getDefaultThinkingLevel(route.providerId, route.model)
+              : normalizeThinkingLevel(route.thinkingLevel, supportedLevels))
           : normalizeInheritedThinkingLevel(route.providerId, route.model, route.thinkingLevel),
       };
     }
-    return route;
+    return {
+      ...route,
+      modelSource,
+      modelInherited: route.providerId === parentRoute.providerId && route.model === parentRoute.model,
+    };
+  }
+
+  /** Live snapshot for the CURRENT parent route; undefined when no accessor is wired. */
+  private currentRoutingSnapshot(): RoutingSnapshot | undefined {
+    if (!this.routingSnapshotAccessor) return undefined;
+    try {
+      return this.routingSnapshotAccessor({ providerId: this.providerId, model: this.apiModel });
+    } catch {
+      // Catalog data is an enhancement, never a spawn blocker.
+      return undefined;
+    }
+  }
+
+  /**
+   * Early route validation at dispatch time (design §7). Throws with an
+   * actionable message so the model self-corrects in the same turn. The
+   * cross-provider lock (§7.2.1) is snapshot-independent; catalog checks
+   * degrade silently when no snapshot is available (§7.0).
+   */
+  private validateRouteForDispatch(route: ResolvedSubagentRoute): string | undefined {
+    const snapshot = this.currentRoutingSnapshot();
+    const crossProvider = !!route.providerId && route.providerId !== this.providerId;
+
+    if (crossProvider) {
+      // §7.2.1 — the lock. Profile/user-category routes are standing user
+      // authorization and always pass; only call-site routes are lockable.
+      if (!this.agentRouting.allowCrossProvider && route.modelSource === "callsite") {
+        throw new Error(
+          "Cross-provider routing is disabled in this session's config (agentRouting.allowCrossProvider). "
+          + "Use a model from the parent provider, or ask the user to unlock cross-provider routing.",
+        );
+      }
+      // §7.2.2 — credentials, when a snapshot is available.
+      if (snapshot && !snapshot.runnableProviderIds.includes(route.providerId)) {
+        throw new Error(
+          `Provider "${route.providerId}" is not configured with active credentials. `
+          + `Available: ${snapshot.runnableProviderIds.join(", ") || "(none)"}.`,
+        );
+      }
+      // §7.2.3 amended (v3.6): the provider stays the authority — no hard
+      // catalog rejection — but a near-match against the target provider's
+      // local catalog is positive evidence of a mistyped id (a Grok parent
+      // invented "openai:gpt-5.6" for gpt-5.6-sol), so soft-reject with the
+      // correction and let the model fix it this turn. Genuinely unknown ids
+      // (no near candidates) still pass through with a note.
+      const targetCatalog = this.routableModelIndex?.()
+        .filter((entry) => entry.providerId === route.providerId) ?? [];
+      if (targetCatalog.length > 0 && !targetCatalog.some((entry) => entry.id === route.model)) {
+        const near = nearModelMatches(route.model, targetCatalog);
+        if (near.length > 0) {
+          throw new Error(
+            `Unknown model "${route.model}" for provider "${route.providerId}". Did you mean: ${near.join(", ")}?`,
+          );
+        }
+        return `model ${route.providerId}:${route.model} is not in the local catalog; the provider validates it`;
+      }
+      return `model ${route.providerId}:${route.model} is not locally verifiable; the provider validates it`;
+    }
+
+    // §7.1 — same-provider unknown model, resolved-provider based (never
+    // input-syntax based; qualified same-provider ids land here too).
+    if (snapshot && route.modelSource === "callsite") {
+      const known = snapshot.models.some((model) => model.id === route.model);
+      if (!known) {
+        if (snapshot.authoritative) {
+          const available = snapshot.models
+            .map((model) => (model.tier ? `${model.id} (${model.tier})` : model.id))
+            .join(", ");
+          throw new Error(
+            `Unknown model "${route.model}" for provider "${this.providerId}". Available: ${available}.`,
+          );
+        }
+        const near = nearModelMatches(
+          route.model,
+          snapshot.models.map((model): RoutableModelEntry => ({ providerId: this.providerId, id: model.id, name: model.name })),
+        );
+        return near.length > 0
+          ? `model id "${route.model}" is unrecognized locally (did you mean: ${near.join(", ")}?); the provider validates it`
+          : `model id "${route.model}" is unrecognized locally; the provider validates it`;
+      }
+    }
+    return undefined;
+  }
+
+  /** Routable catalog across runnable providers (design v3.6); undefined when unwired. */
+  listRoutableModels(): RoutableModelEntry[] | undefined {
+    try {
+      return this.routableModelIndex?.();
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Decision-point detector (design §6): counts dispatches whose model was
+   * decided by NO routing layer (modelSource "inherit") under a strong-tier
+   * parent. Fires once per session at the Nth qualifying dispatch; the
+   * reminder rides the same channel as the lifecycle reminder.
+   */
+  private noteRoutingDispatch(route: ResolvedSubagentRoute): void {
+    if (this.routingReminderFired) return;
+    if (route.modelSource !== "inherit") return;
+    const snapshot = this.currentRoutingSnapshot();
+    if (snapshot?.parent.tier !== "strong") return;
+    this.defaultedRoutingStreak++;
+    if (this.defaultedRoutingStreak >= ROUTING_REMINDER_THRESHOLD) {
+      this.routingReminderFired = true;
+      this.pendingRoutingReminder = [
+        `Routing note: ${this.defaultedRoutingStreak} children in this fan-out defaulted to the parent's`,
+        "strong-tier model (no model/category given). If any of these tasks are mechanical",
+        "(scan / summarize / search / extract), route them with category \"quick\"/\"explore\" or a",
+        "fast-tier model next time. If they genuinely need this model, ignore this note.",
+      ].join(" ");
+    }
+  }
+
+  /** Consumed by the turn hooks; also closes the counting window (§6). */
+  consumePendingRoutingReminder(): string | undefined {
+    const reminder = this.pendingRoutingReminder;
+    this.pendingRoutingReminder = undefined;
+    if (!this.routingReminderFired) this.defaultedRoutingStreak = 0;
+    return reminder;
   }
 
   private createSubagentThreadRecord(options: {

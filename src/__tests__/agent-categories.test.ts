@@ -65,6 +65,7 @@ describe("agent categories", () => {
         model: "gpt-5.4",
         thinkingLevel: "high",
         inherited: false,
+        categoryModelSource: "user-category",
       },
     });
   });
@@ -79,6 +80,7 @@ describe("agent categories", () => {
         model: "claude-sonnet-4.5",
         thinkingLevel: "high",
         inherited: false,
+        categoryModelSource: "user-category",
       },
     });
 

@@ -11,9 +11,33 @@ const AUTH_PATH = join(homedir(), ".bubble", "auth.json");
 
 export class AuthStorage {
   private data: Record<string, OAuthCredentials> = {};
+  private mutationListeners: Array<(providerId: string) => void> = [];
 
   constructor() {
     this.load();
+  }
+
+  /**
+   * Observe credential writes/removals. Callers across the codebase mutate
+   * this storage directly (login/logout flows), so consumers that must react
+   * to credential-identity changes (ProviderRegistry's routing revision)
+   * subscribe here instead of wrapping every call site.
+   */
+  onMutation(listener: (providerId: string) => void): () => void {
+    this.mutationListeners.push(listener);
+    return () => {
+      this.mutationListeners = this.mutationListeners.filter((item) => item !== listener);
+    };
+  }
+
+  private notifyMutation(providerId: string) {
+    for (const listener of this.mutationListeners) {
+      try {
+        listener(providerId);
+      } catch {
+        // Listeners must never break credential writes.
+      }
+    }
   }
 
   private load() {
@@ -44,11 +68,13 @@ export class AuthStorage {
   set(providerId: string, creds: OAuthCredentials) {
     this.data[providerId] = creds;
     this.save();
+    this.notifyMutation(providerId);
   }
 
   remove(providerId: string) {
     delete this.data[providerId];
     this.save();
+    this.notifyMutation(providerId);
   }
 
   has(providerId: string): boolean {

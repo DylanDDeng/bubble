@@ -21,6 +21,8 @@ import type { ApprovalDecision, ApprovalRequest } from "../../approval/types.js"
 import { getLspService } from "../../lsp/index.js";
 import { ExternalHookController } from "../../hooks/index.js";
 import { buildSystemPrompt } from "../../system-prompt.js";
+import { createRoutableModelIndex, createRoutingSnapshotAccessor } from "../../agent/routing-catalog.js";
+import { buildModelRoutingPrompt } from "../../prompt/routing.js";
 import { FileStateTracker } from "../../tools/file-state.js";
 import { buildToolPromptOptions, createAllTools, type PlanController } from "../../tools/index.js";
 import { displayModel, encodeModel, decodeModel } from "../../provider-registry.js";
@@ -133,6 +135,14 @@ export class RunDriver {
       ? normalizeThinkingLevel(configuredThinkingLevel, getAvailableThinkingLevels(providerId, modelId))
       : getDefaultThinkingLevel(providerId, modelId);
     const initialMode = session.permissionMode;
+    // Routing accessor built before the prompt (design §1.5): the prompt is
+    // composed before the Agent exists, same ordering constraint as main.ts.
+    const agentRouting = this.opts.deps.userConfig.getAgentRouting();
+    const routingSnapshotAccessor = createRoutingSnapshotAccessor(
+      this.opts.deps.providerRegistry,
+      () => this.opts.deps.userConfig.getAgentCategories(),
+      () => agentRouting,
+    );
     const systemPrompt = buildSystemPrompt({
       agentName: "Bubble",
       configuredProvider: providerId || "none",
@@ -143,6 +153,9 @@ export class RunDriver {
       workingDir: session.cwd,
       ...buildToolPromptOptions(tools.filter((tool) => !tool.deferred)),
       memoryPrompt,
+      modelRoutingPrompt: providerId && modelId
+        ? buildModelRoutingPrompt(routingSnapshotAccessor({ providerId, model: modelId }), agentRouting)
+        : undefined,
     });
     const budgetLedger = new BudgetLedger();
     let sessionTitleUpdater: SessionTitleUpdater | undefined;
@@ -180,6 +193,9 @@ export class RunDriver {
       memoryPrompt,
       fileStateTracker,
       agentCategories: this.opts.deps.userConfig.getAgentCategories(),
+      agentRouting,
+      routingSnapshot: routingSnapshotAccessor,
+      routableModels: createRoutableModelIndex(this.opts.deps.providerRegistry),
       subagents: this.opts.deps.userConfig.getSubagents(),
       providerFactory: (route) => this.opts.deps.createProviderForRoute(route, promptCacheKey),
       externalHooks: hookController,

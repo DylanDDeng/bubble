@@ -45,6 +45,10 @@ export interface ModelInfo {
   contextWindow?: number;
   useResponsesLite?: boolean;
   toolOutputTokenLimit?: number;
+  /** Within-provider capability/cost tier (models.json / catalog annotation). */
+  tier?: import("./model-catalog.js").ModelTier;
+  /** Deterministic within-tier routing order (models.json only). */
+  routingPriority?: number;
 }
 
 export type ModelDiscoverySource = "remote" | "cache" | "static" | "fallback";
@@ -60,6 +64,22 @@ export interface ModelDiscoveryResult {
 interface CachedModelDiscovery {
   result: Omit<ModelDiscoveryResult, "source"> & { source: Exclude<ModelDiscoverySource, "cache"> };
   expiresAt: number;
+  identityKey: string;
+}
+
+/**
+ * Read-only view of the discovery cache for routing consumers
+ * (docs/model-routing-design.md §1.4). `complete` is true only for a
+ * successful remote discovery that returned the provider's full catalog —
+ * static/fallback results are NEVER complete, regardless of the internal
+ * `authoritative` flag (which historically marks static fallbacks true).
+ */
+export interface CachedDiscoverySnapshot {
+  models: ModelInfo[];
+  source: Exclude<ModelDiscoverySource, "cache">;
+  complete: boolean;
+  expiresAt: number;
+  identityKey: string;
 }
 
 const MODEL_DISCOVERY_SUCCESS_TTL_MS = 60_000;
@@ -81,11 +101,56 @@ export class ProviderRegistry {
   private modelDiscoveryCache = new Map<string, CachedModelDiscovery>();
   private modelDiscoveryInFlight = new Map<string, Promise<ModelDiscoveryResult>>();
   private modelDiscoveryGeneration = new Map<string, number>();
+  /** Last membership seen per discovery key — survives cache eviction/TTL so
+   *  a re-discovery with identical membership never bumps the revision. */
+  private lastDiscoveryMembership = new Map<string, { ids: string[]; authoritative: boolean }>();
+  private routingRevision = 0;
+  private identityFingerprints = new Map<string, string>();
 
   constructor(config: UserConfig) {
     this.config = config;
     this.modelConfig = new ModelConfig();
     this.authStorage = new AuthStorage();
+    for (const authKey of this.authStorage.list()) {
+      const fingerprint = this.credentialFingerprint(authKey);
+      if (fingerprint) this.identityFingerprints.set(authKey, fingerprint);
+    }
+    this.authStorage.onMutation((authKey) => this.handleAuthMutation(authKey));
+  }
+
+  /**
+   * Monotonic counter of semantic routing-world changes: provider set,
+   * credential identity, provider key/config, discovery membership.
+   * Same-account OAuth token rotation deliberately does NOT bump it
+   * (docs/model-routing-design.md §1.6).
+   */
+  getRoutingRevision(): number {
+    return this.routingRevision;
+  }
+
+  private bumpRoutingRevision(): void {
+    this.routingRevision++;
+  }
+
+  /** Stable identity for stored credentials: account id, else refresh-token hash. */
+  private credentialFingerprint(authKey: string): string | undefined {
+    const credentials = this.authStorage.get(authKey);
+    if (!credentials) return undefined;
+    if (credentials.accountId) return credentials.accountId;
+    const stable = credentials.refreshToken || credentials.accessToken;
+    return createHash("sha256").update(stable).digest("hex").slice(0, 16);
+  }
+
+  private handleAuthMutation(authKey: string): void {
+    const next = this.credentialFingerprint(authKey);
+    const prev = this.identityFingerprints.get(authKey);
+    if (next === prev) return; // same-identity token rotation: not a routing change
+    if (next === undefined) {
+      this.identityFingerprints.delete(authKey);
+    } else {
+      this.identityFingerprints.set(authKey, next);
+    }
+    this.bumpRoutingRevision();
   }
 
   getModelConfig(): ModelConfig {
@@ -329,12 +394,14 @@ export class ProviderRegistry {
       providers.push(profile);
     }
     this.config.setProviders(providers);
+    this.bumpRoutingRevision();
     return true;
   }
 
   removeProvider(id: string) {
     const providers = this.config.getProviders().filter((p) => p.id !== id);
     this.config.setProviders(providers);
+    this.bumpRoutingRevision();
   }
 
   updateProviderKey(id: string, apiKey: string) {
@@ -343,6 +410,7 @@ export class ProviderRegistry {
     if (p) {
       p.apiKey = apiKey;
       this.config.setProviders(providers);
+      this.bumpRoutingRevision();
     }
   }
 
@@ -392,10 +460,19 @@ export class ProviderRegistry {
       }
 
       this.applyDynamicDiscoveryMetadata(provider, result);
+      const previous = this.lastDiscoveryMembership.get(key);
       this.modelDiscoveryCache.set(key, {
         result: { ...result, source: result.source === "cache" ? "remote" : result.source },
         expiresAt: Date.now() + (result.error ? MODEL_DISCOVERY_FAILURE_TTL_MS : MODEL_DISCOVERY_SUCCESS_TTL_MS),
+        identityKey: this.discoveryIdentity(provider),
       });
+      this.lastDiscoveryMembership.set(key, {
+        ids: result.models.map((model) => model.id),
+        authoritative: result.authoritative,
+      });
+      if (discoveryMembershipChanged(previous, result)) {
+        this.bumpRoutingRevision();
+      }
       return result;
     }).finally(() => {
       if (this.modelDiscoveryInFlight.get(key) === pending) {
@@ -526,23 +603,49 @@ export class ProviderRegistry {
     }));
   }
 
-  private modelDiscoveryKey(provider: ProviderProfile): string {
-    let identity = "anonymous";
+  private discoveryIdentity(provider: ProviderProfile): string {
     if (provider.id === "openai" && provider.authType === "oauth") {
       const credentials = this.authStorage.get(this.resolveOAuthAuthKey(provider.id));
-      identity = credentials?.accountId
+      return credentials?.accountId
         || extractChatGptAccountId(provider.apiKey)
         || "unknown-account";
-    } else if (provider.apiKey) {
-      identity = createHash("sha256").update(provider.apiKey).digest("hex").slice(0, 16);
     }
+    if (provider.apiKey) {
+      return createHash("sha256").update(provider.apiKey).digest("hex").slice(0, 16);
+    }
+    return "anonymous";
+  }
+
+  private modelDiscoveryKey(provider: ProviderProfile): string {
     return JSON.stringify([
       provider.id,
       normalizeBaseURL(provider.baseURL),
       provider.authType ?? "api",
       provider.protocol ?? "default",
-      identity,
+      this.discoveryIdentity(provider),
     ]);
+  }
+
+  /**
+   * Read-only view of the cached discovery result for the provider's CURRENT
+   * configuration/identity (docs/model-routing-design.md §1.4). Returns
+   * undefined when nothing is cached or the cache has expired. `complete` is
+   * derived strictly: only a successful full remote catalog qualifies —
+   * never static or fallback results, whose internal `authoritative` flag
+   * this design does not trust.
+   */
+  getCachedDiscoverySnapshot(providerId: string): CachedDiscoverySnapshot | undefined {
+    const provider = this.getConfigured().find((item) => item.id === providerId);
+    if (!provider) return undefined;
+    const cached = this.modelDiscoveryCache.get(this.modelDiscoveryKey(provider));
+    if (!cached || cached.expiresAt <= Date.now()) return undefined;
+    return {
+      models: cached.result.models,
+      source: cached.result.source,
+      complete: cached.result.source === "remote" && cached.result.authoritative && !cached.result.error,
+      expiresAt: cached.expiresAt,
+      identityKey: cached.identityKey,
+    };
   }
 
   private isCurrentModelDiscovery(
@@ -585,6 +688,18 @@ export class ProviderRegistry {
 function modelDiscoveryError(error: unknown): string {
   if (error instanceof Error && error.message.trim()) return error.message;
   return "Remote model catalog is unavailable.";
+}
+
+/** True when a discovery write changes the routing world: member ids or completeness. */
+function discoveryMembershipChanged(
+  previous: { ids: string[]; authoritative: boolean } | undefined,
+  next: ModelDiscoveryResult,
+): boolean {
+  if (!previous) return true;
+  if (previous.authoritative !== next.authoritative) return true;
+  const previousIds = new Set(previous.ids);
+  if (previousIds.size !== next.models.length) return true;
+  return next.models.some((model) => !previousIds.has(model.id));
 }
 
 /**

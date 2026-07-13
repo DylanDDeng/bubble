@@ -20,6 +20,9 @@ export interface ComposeSystemPromptOptions extends EnvironmentPromptOptions {
   skills?: SkillSummary[];
   memoryPrompt?: string;
   agentProfilePrompt?: string;
+  /** Rendered subagent model-routing menu (design §4). Placed right after the
+   *  delegation policy and gated the same way: spawn_agent present. */
+  modelRoutingPrompt?: string;
 }
 
 export function composeSystemPrompt(options: ComposeSystemPromptOptions = {}): string {
@@ -40,12 +43,15 @@ export function composeSystemPrompt(options: ComposeSystemPromptOptions = {}): s
     guidelines: buildGuidelines(options.tools ?? defaultToolNames, options.guidelines ?? []),
   });
   const delegationPrompt = buildDelegationPolicyPrompt(options.tools ?? defaultToolNames);
+  // Same gate as the delegation policy: children (no spawn_agent) never see the menu.
+  const modelRoutingPrompt = delegationPrompt ? options.modelRoutingPrompt : undefined;
 
   return [
     providerPrompt,
     environmentPrompt,
     runtimePrompt,
     delegationPrompt,
+    modelRoutingPrompt,
     options.agentProfilePrompt,
     options.memoryPrompt,
   ].filter(Boolean).join("\n\n");

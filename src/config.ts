@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getBubbleHome } from "./bubble-home.js";
 import { sanitizeAgentCategories, type AgentCategoriesConfig } from "./agent/categories.js";
+import { sanitizeAgentRouting, type AgentRoutingConfig } from "./agent/routing-catalog.js";
 import type { ProviderProfile } from "./provider-registry.js";
 import type { ThinkingLevel } from "./types.js";
 
@@ -72,6 +73,8 @@ export interface UserConfigData {
   providers?: ProviderProfile[];
   defaultProvider?: string;
   agentCategories?: AgentCategoriesConfig;
+  /** Subagent model-routing knobs: autoTier (default true), allowCrossProvider (default true). */
+  agentRouting?: Partial<AgentRoutingConfig>;
   subagents?: SubagentsUserConfig;
 }
 
@@ -269,6 +272,10 @@ export class UserConfig {
 
   getAgentCategories(): AgentCategoriesConfig {
     return sanitizeAgentCategories(this.data.agentCategories);
+  }
+
+  getAgentRouting(): AgentRoutingConfig {
+    return sanitizeAgentRouting(this.data.agentRouting);
   }
 
   getSubagents(): SubagentsUserConfig {

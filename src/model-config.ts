@@ -8,7 +8,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import type { ProviderProtocol } from "./model-catalog.js";
+import type { ModelTier, ProviderProtocol } from "./model-catalog.js";
 import type { ModelInfo } from "./provider-registry.js";
 
 const MODELS_PATH = join(homedir(), ".bubble", "models.json");
@@ -17,7 +17,19 @@ export interface ProviderModelConfig {
   baseURL?: string;
   apiKey?: string;
   protocol?: ProviderProtocol;
-  models?: Array<{ id: string; name?: string }>;
+  models?: Array<{ id: string; name?: string; tier?: ModelTier; routingPriority?: number }>;
+}
+
+const MODEL_TIERS: ModelTier[] = ["fast", "balanced", "strong"];
+
+function sanitizeTier(value: unknown): ModelTier | undefined {
+  return typeof value === "string" && MODEL_TIERS.includes(value as ModelTier)
+    ? (value as ModelTier)
+    : undefined;
+}
+
+function sanitizeRoutingPriority(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 export interface ModelsConfig {
@@ -69,6 +81,8 @@ export class ModelConfig {
       id: m.id,
       name: m.name || m.id,
       providerId,
+      tier: sanitizeTier(m.tier),
+      routingPriority: sanitizeRoutingPriority(m.routingPriority),
     }));
   }
 

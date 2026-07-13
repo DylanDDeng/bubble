@@ -11,12 +11,21 @@ export interface BuiltinProviderDefinition {
   supportsOAuth?: boolean;
 }
 
+/**
+ * Relative capability/cost tier within one provider's lineup (never a
+ * cross-provider comparison). Drives rank-guarded category routing and the
+ * routing menu (docs/model-routing-design.md §2). Untiered models never
+ * participate in automatic routing but stay reachable by explicit name.
+ */
+export type ModelTier = "fast" | "balanced" | "strong";
+
 export interface BuiltinModelDefinition {
   id: string;
   name: string;
   providerId: string;
   reasoningLevels: ReasoningEffort[];
   defaultReasoningLevel?: ReasoningEffort;
+  tier?: ModelTier;
   contextWindow?: number;
   /** Routes this model through the Codex Responses Lite backend when true. */
   useResponsesLite?: boolean;
@@ -102,84 +111,84 @@ const GEMINI_25_PRO_LEVELS: ReasoningEffort[] = ["low", "medium", "high"];
 const GEMINI_25_FLASH_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high"];
 
 export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
-  { id: "gpt-5.6-sol", name: "GPT-5.6-Sol", providerId: "openai-codex", reasoningLevels: GPT56_LEVELS, defaultReasoningLevel: "low", contextWindow: 372000, useResponsesLite: true, toolOutputTokenLimit: 10000 },
-  { id: "gpt-5.6-terra", name: "GPT-5.6-Terra", providerId: "openai-codex", reasoningLevels: GPT56_LEVELS, defaultReasoningLevel: "medium", contextWindow: 372000, useResponsesLite: true, toolOutputTokenLimit: 10000 },
-  { id: "gpt-5.6-luna", name: "GPT-5.6-Luna", providerId: "openai-codex", reasoningLevels: GPT56_LUNA_LEVELS, defaultReasoningLevel: "medium", contextWindow: 372000, useResponsesLite: true, toolOutputTokenLimit: 10000 },
-  { id: "gpt-5.5", name: "gpt-5.5", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000, toolOutputTokenLimit: 10000 },
-  { id: "gpt-5.4", name: "gpt-5.4", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000 },
-  { id: "gpt-5.4-mini", name: "gpt-5.4-mini", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000 },
+  { id: "gpt-5.6-sol", name: "GPT-5.6-Sol", providerId: "openai-codex", tier: "balanced", reasoningLevels: GPT56_LEVELS, defaultReasoningLevel: "low", contextWindow: 372000, useResponsesLite: true, toolOutputTokenLimit: 10000 },
+  { id: "gpt-5.6-terra", name: "GPT-5.6-Terra", providerId: "openai-codex", tier: "strong", reasoningLevels: GPT56_LEVELS, defaultReasoningLevel: "medium", contextWindow: 372000, useResponsesLite: true, toolOutputTokenLimit: 10000 },
+  { id: "gpt-5.6-luna", name: "GPT-5.6-Luna", providerId: "openai-codex", tier: "strong", reasoningLevels: GPT56_LUNA_LEVELS, defaultReasoningLevel: "medium", contextWindow: 372000, useResponsesLite: true, toolOutputTokenLimit: 10000 },
+  { id: "gpt-5.5", name: "gpt-5.5", providerId: "openai-codex", tier: "strong", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000, toolOutputTokenLimit: 10000 },
+  { id: "gpt-5.4", name: "gpt-5.4", providerId: "openai-codex", tier: "balanced", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000 },
+  { id: "gpt-5.4-mini", name: "gpt-5.4-mini", providerId: "openai-codex", tier: "fast", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000 },
   { id: "gpt-5.3-codex", name: "gpt-5.3-codex", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000 },
   { id: "gpt-5.3-codex-spark", name: "gpt-5.3-codex-spark", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000 },
   { id: "gpt-5.2-codex", name: "gpt-5.2-codex", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000 },
   { id: "gpt-5.2", name: "gpt-5.2", providerId: "openai-codex", reasoningLevels: ALL_OPENAI_LEVELS, contextWindow: 272000 },
   { id: "gpt-5.1-codex-max", name: "gpt-5.1-codex-max", providerId: "openai-codex", reasoningLevels: GPT51_CODEX_MAX_LEVELS, contextWindow: 272000 },
-  { id: "gpt-5.1-codex-mini", name: "gpt-5.1-codex-mini", providerId: "openai-codex", reasoningLevels: GPT51_CODEX_MINI_LEVELS, contextWindow: 272000 },
+  { id: "gpt-5.1-codex-mini", name: "gpt-5.1-codex-mini", providerId: "openai-codex", tier: "fast", reasoningLevels: GPT51_CODEX_MINI_LEVELS, contextWindow: 272000 },
   { id: "gpt-5.1", name: "gpt-5.1", providerId: "openai-codex", reasoningLevels: GPT51_LEVELS, contextWindow: 272000 },
 
-  { id: "grok-4.5", name: "Grok 4.5", providerId: "grok", reasoningLevels: GROK_45_LEVELS, defaultReasoningLevel: "high", contextWindow: 500000 },
-  { id: "grok-composer-2.5-fast", name: "Grok Composer 2.5 Fast", providerId: "grok", reasoningLevels: OPENAI_CHAT_LEVELS, contextWindow: 200000 },
+  { id: "grok-4.5", name: "Grok 4.5", providerId: "grok", tier: "strong", reasoningLevels: GROK_45_LEVELS, defaultReasoningLevel: "high", contextWindow: 500000 },
+  { id: "grok-composer-2.5-fast", name: "Grok Composer 2.5 Fast", providerId: "grok", tier: "fast", reasoningLevels: OPENAI_CHAT_LEVELS, contextWindow: 200000 },
 
-  { id: "gpt-4o", name: "gpt-4o", providerId: "openai", reasoningLevels: OPENAI_CHAT_LEVELS, contextWindow: 128000 },
-  { id: "gpt-4o-mini", name: "gpt-4o-mini", providerId: "openai", reasoningLevels: OPENAI_CHAT_LEVELS, contextWindow: 128000 },
-  { id: "o1-preview", name: "o1-preview", providerId: "openai", reasoningLevels: ["off", "low", "medium", "high"], contextWindow: 128000 },
-  { id: "o1-mini", name: "o1-mini", providerId: "openai", reasoningLevels: ["off", "low", "medium", "high"], contextWindow: 128000 },
+  { id: "gpt-4o", name: "gpt-4o", providerId: "openai", tier: "balanced", reasoningLevels: OPENAI_CHAT_LEVELS, contextWindow: 128000 },
+  { id: "gpt-4o-mini", name: "gpt-4o-mini", providerId: "openai", tier: "fast", reasoningLevels: OPENAI_CHAT_LEVELS, contextWindow: 128000 },
+  { id: "o1-preview", name: "o1-preview", providerId: "openai", tier: "strong", reasoningLevels: ["off", "low", "medium", "high"], contextWindow: 128000 },
+  { id: "o1-mini", name: "o1-mini", providerId: "openai", tier: "fast", reasoningLevels: ["off", "low", "medium", "high"], contextWindow: 128000 },
   { id: "gpt-4-turbo", name: "gpt-4-turbo", providerId: "openai", reasoningLevels: OPENAI_CHAT_LEVELS, contextWindow: 128000 },
 
-  { id: "claude-fable-5", name: "Claude Fable 5", providerId: "anthropic", reasoningLevels: ANTHROPIC_FABLE_EFFORT_LEVELS, defaultReasoningLevel: "high", contextWindow: 1000000 },
-  { id: "claude-opus-4-8", name: "Claude Opus 4.8", providerId: "anthropic", reasoningLevels: ANTHROPIC_OPUS_EFFORT_LEVELS, defaultReasoningLevel: "high", contextWindow: 1000000 },
-  { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", providerId: "anthropic", reasoningLevels: ANTHROPIC_SONNET_EFFORT_LEVELS, defaultReasoningLevel: "high", contextWindow: 1000000 },
-  { id: "claude-haiku-4-5-20251001", name: "Claude Haiku 4.5", providerId: "anthropic", reasoningLevels: ANTHROPIC_CHAT_LEVELS, contextWindow: 200000 },
+  { id: "claude-fable-5", name: "Claude Fable 5", providerId: "anthropic", tier: "strong", reasoningLevels: ANTHROPIC_FABLE_EFFORT_LEVELS, defaultReasoningLevel: "high", contextWindow: 1000000 },
+  { id: "claude-opus-4-8", name: "Claude Opus 4.8", providerId: "anthropic", tier: "strong", reasoningLevels: ANTHROPIC_OPUS_EFFORT_LEVELS, defaultReasoningLevel: "high", contextWindow: 1000000 },
+  { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", providerId: "anthropic", tier: "balanced", reasoningLevels: ANTHROPIC_SONNET_EFFORT_LEVELS, defaultReasoningLevel: "high", contextWindow: 1000000 },
+  { id: "claude-haiku-4-5-20251001", name: "Claude Haiku 4.5", providerId: "anthropic", tier: "fast", reasoningLevels: ANTHROPIC_CHAT_LEVELS, contextWindow: 200000 },
 
-  { id: "deepseek-v4-flash", name: "deepseek-v4-flash", providerId: "deepseek", reasoningLevels: DEEPSEEK_V4_LEVELS, contextWindow: 1048576 },
-  { id: "deepseek-v4-pro", name: "deepseek-v4-pro", providerId: "deepseek", reasoningLevels: DEEPSEEK_V4_LEVELS, contextWindow: 1048576 },
+  { id: "deepseek-v4-flash", name: "deepseek-v4-flash", providerId: "deepseek", tier: "fast", reasoningLevels: DEEPSEEK_V4_LEVELS, contextWindow: 1048576 },
+  { id: "deepseek-v4-pro", name: "deepseek-v4-pro", providerId: "deepseek", tier: "strong", reasoningLevels: DEEPSEEK_V4_LEVELS, contextWindow: 1048576 },
   // Offline/no-key fallback only: with an API key the registry replaces this
   // list via fetchGeminiModels (GET /v1beta/models, newest five). Gemini 3
   // exposes thinking_level (minimal/low/medium/high); 2.5 Pro cannot disable
   // thinking (no "off"), 2.5 Flash can (thinkingBudget 0).
-  { id: "gemini-3.5-flash", name: "Gemini 3.5 Flash", providerId: "google", reasoningLevels: GEMINI_3_FLASH_LEVELS, contextWindow: 1048576 },
-  { id: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro", providerId: "google", reasoningLevels: GEMINI_3_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
-  { id: "gemini-3-flash-preview", name: "Gemini 3 Flash", providerId: "google", reasoningLevels: GEMINI_3_FLASH_LEVELS, contextWindow: 1048576 },
-  { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", providerId: "google", reasoningLevels: GEMINI_25_PRO_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
-  { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", providerId: "google", reasoningLevels: GEMINI_25_FLASH_LEVELS, contextWindow: 1048576 },
-  { id: "glm-5.2", name: "GLM-5.2", providerId: "zhipuai", reasoningLevels: GLM_5_2_LEVELS, contextWindow: 1000000 },
-  { id: "glm-5.1", name: "GLM-5.1", providerId: "zhipuai", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
+  { id: "gemini-3.5-flash", name: "Gemini 3.5 Flash", providerId: "google", tier: "fast", reasoningLevels: GEMINI_3_FLASH_LEVELS, contextWindow: 1048576 },
+  { id: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro", providerId: "google", tier: "strong", reasoningLevels: GEMINI_3_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  { id: "gemini-3-flash-preview", name: "Gemini 3 Flash", providerId: "google", tier: "fast", reasoningLevels: GEMINI_3_FLASH_LEVELS, contextWindow: 1048576 },
+  { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", providerId: "google", tier: "strong", reasoningLevels: GEMINI_25_PRO_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", providerId: "google", tier: "fast", reasoningLevels: GEMINI_25_FLASH_LEVELS, contextWindow: 1048576 },
+  { id: "glm-5.2", name: "GLM-5.2", providerId: "zhipuai", tier: "strong", reasoningLevels: GLM_5_2_LEVELS, contextWindow: 1000000 },
+  { id: "glm-5.1", name: "GLM-5.1", providerId: "zhipuai", tier: "balanced", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
   { id: "glm-4.7", name: "GLM-4.7", providerId: "zhipuai", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
   { id: "glm-4.6", name: "GLM-4.6", providerId: "zhipuai", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
-  { id: "glm-5.2", name: "GLM-5.2", providerId: "zhipuai-coding-plan", reasoningLevels: GLM_5_2_LEVELS, contextWindow: 1000000 },
-  { id: "glm-5.1", name: "GLM-5.1", providerId: "zhipuai-coding-plan", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
+  { id: "glm-5.2", name: "GLM-5.2", providerId: "zhipuai-coding-plan", tier: "strong", reasoningLevels: GLM_5_2_LEVELS, contextWindow: 1000000 },
+  { id: "glm-5.1", name: "GLM-5.1", providerId: "zhipuai-coding-plan", tier: "balanced", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
   { id: "glm-4.7", name: "GLM-4.7", providerId: "zhipuai-coding-plan", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
   { id: "glm-4.6", name: "GLM-4.6", providerId: "zhipuai-coding-plan", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
-  { id: "glm-5.2", name: "GLM-5.2", providerId: "zai", reasoningLevels: GLM_5_2_LEVELS, contextWindow: 1000000 },
-  { id: "glm-5.1", name: "GLM-5.1", providerId: "zai", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
+  { id: "glm-5.2", name: "GLM-5.2", providerId: "zai", tier: "strong", reasoningLevels: GLM_5_2_LEVELS, contextWindow: 1000000 },
+  { id: "glm-5.1", name: "GLM-5.1", providerId: "zai", tier: "balanced", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
   { id: "glm-4.7", name: "GLM-4.7", providerId: "zai", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
   { id: "glm-4.6", name: "GLM-4.6", providerId: "zai", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
-  { id: "glm-5.2", name: "GLM-5.2", providerId: "zai-coding-plan", reasoningLevels: GLM_5_2_LEVELS, contextWindow: 1000000 },
-  { id: "glm-5-turbo", name: "GLM-5-Turbo", providerId: "zai-coding-plan", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
+  { id: "glm-5.2", name: "GLM-5.2", providerId: "zai-coding-plan", tier: "strong", reasoningLevels: GLM_5_2_LEVELS, contextWindow: 1000000 },
+  { id: "glm-5-turbo", name: "GLM-5-Turbo", providerId: "zai-coding-plan", tier: "fast", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
   { id: "glm-4.7", name: "GLM-4.7", providerId: "zai-coding-plan", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
   { id: "glm-4.6", name: "GLM-4.6", providerId: "zai-coding-plan", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
-  { id: "qwen3.6-plus", name: "Qwen3.6 Plus", providerId: "alibaba", reasoningLevels: ["off"], contextWindow: 1048576 },
-  { id: "qwen3.7-max", name: "Qwen3.7 Max", providerId: "alibaba", reasoningLevels: ["off"], contextWindow: 1048576 },
+  { id: "qwen3.6-plus", name: "Qwen3.6 Plus", providerId: "alibaba", tier: "balanced", reasoningLevels: ["off"], contextWindow: 1048576 },
+  { id: "qwen3.7-max", name: "Qwen3.7 Max", providerId: "alibaba", tier: "strong", reasoningLevels: ["off"], contextWindow: 1048576 },
   { id: "doubao-seed-2-1-pro-260628", name: "Doubao Seed 2.1 Pro", providerId: "doubao", reasoningLevels: DOUBAO_SEED_REASONING_LEVELS, defaultReasoningLevel: "high" },
-  { id: "MiniMax-M3", name: "MiniMax M3", providerId: "minimax", reasoningLevels: MINIMAX_M3_REASONING_LEVELS, contextWindow: 1000000 },
-  { id: "MiniMax-M2.7", name: "MiniMax M2.7", providerId: "minimax", reasoningLevels: MINIMAX_REASONING_LEVELS, contextWindow: 204800 },
-  { id: "MiniMax-M2.7-highspeed", name: "MiniMax M2.7 Highspeed", providerId: "minimax", reasoningLevels: MINIMAX_REASONING_LEVELS, contextWindow: 204800 },
-  { id: "MiniMax-M3", name: "MiniMax M3", providerId: "minimax-anthropic", reasoningLevels: MINIMAX_M3_REASONING_LEVELS, contextWindow: 1000000 },
-  { id: "MiniMax-M2.7", name: "MiniMax M2.7", providerId: "minimax-anthropic", reasoningLevels: MINIMAX_REASONING_LEVELS, contextWindow: 204800 },
-  { id: "MiniMax-M2.7-highspeed", name: "MiniMax M2.7 Highspeed", providerId: "minimax-anthropic", reasoningLevels: MINIMAX_REASONING_LEVELS, contextWindow: 204800 },
+  { id: "MiniMax-M3", name: "MiniMax M3", providerId: "minimax", tier: "strong", reasoningLevels: MINIMAX_M3_REASONING_LEVELS, contextWindow: 1000000 },
+  { id: "MiniMax-M2.7", name: "MiniMax M2.7", providerId: "minimax", tier: "balanced", reasoningLevels: MINIMAX_REASONING_LEVELS, contextWindow: 204800 },
+  { id: "MiniMax-M2.7-highspeed", name: "MiniMax M2.7 Highspeed", providerId: "minimax", tier: "fast", reasoningLevels: MINIMAX_REASONING_LEVELS, contextWindow: 204800 },
+  { id: "MiniMax-M3", name: "MiniMax M3", providerId: "minimax-anthropic", tier: "strong", reasoningLevels: MINIMAX_M3_REASONING_LEVELS, contextWindow: 1000000 },
+  { id: "MiniMax-M2.7", name: "MiniMax M2.7", providerId: "minimax-anthropic", tier: "balanced", reasoningLevels: MINIMAX_REASONING_LEVELS, contextWindow: 204800 },
+  { id: "MiniMax-M2.7-highspeed", name: "MiniMax M2.7 Highspeed", providerId: "minimax-anthropic", tier: "fast", reasoningLevels: MINIMAX_REASONING_LEVELS, contextWindow: 204800 },
   { id: "step-3.7-flash", name: "Step 3.7 Flash", providerId: "stepfun", reasoningLevels: STEPFUN_REASONING_LEVELS, contextWindow: 256000 },
   { id: "step-3.5-flash-2603", name: "Step 3.5 Flash 2603", providerId: "stepfun", reasoningLevels: STEPFUN_REASONING_LEVELS },
   { id: "step-3.5-flash", name: "Step 3.5 Flash", providerId: "stepfun", reasoningLevels: STEPFUN_REASONING_LEVELS },
   { id: "step-router-v1", name: "Step Router V1", providerId: "stepfun", reasoningLevels: STEPFUN_REASONING_LEVELS },
-  { id: "kimi-k2.7-code", name: "Kimi K2.7 Code", providerId: "moonshot-cn", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
-  { id: "kimi-k2.7-code-highspeed", name: "Kimi K2.7 Code Highspeed", providerId: "moonshot-cn", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
+  { id: "kimi-k2.7-code", name: "Kimi K2.7 Code", providerId: "moonshot-cn", tier: "strong", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
+  { id: "kimi-k2.7-code-highspeed", name: "Kimi K2.7 Code Highspeed", providerId: "moonshot-cn", tier: "fast", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
   { id: "kimi-k2.6", name: "Kimi K2.6", providerId: "moonshot-cn", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
   { id: "kimi-k2.5", name: "Kimi K2.5", providerId: "moonshot-cn", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
-  { id: "kimi-k2.7-code", name: "Kimi K2.7 Code", providerId: "moonshot-intl", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
-  { id: "kimi-k2.7-code-highspeed", name: "Kimi K2.7 Code Highspeed", providerId: "moonshot-intl", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
+  { id: "kimi-k2.7-code", name: "Kimi K2.7 Code", providerId: "moonshot-intl", tier: "strong", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
+  { id: "kimi-k2.7-code-highspeed", name: "Kimi K2.7 Code Highspeed", providerId: "moonshot-intl", tier: "fast", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
   { id: "kimi-k2.6", name: "Kimi K2.6", providerId: "moonshot-intl", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
   { id: "kimi-k2.5", name: "Kimi K2.5", providerId: "moonshot-intl", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
-  { id: "kimi-k2.7-code", name: "Kimi K2.7 Code", providerId: "kimi-for-coding", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
-  { id: "kimi-k2.7-code-highspeed", name: "Kimi K2.7 Code Highspeed", providerId: "kimi-for-coding", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
+  { id: "kimi-k2.7-code", name: "Kimi K2.7 Code", providerId: "kimi-for-coding", tier: "strong", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
+  { id: "kimi-k2.7-code-highspeed", name: "Kimi K2.7 Code Highspeed", providerId: "kimi-for-coding", tier: "fast", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
   { id: "kimi-k2.6", name: "Kimi K2.6", providerId: "kimi-for-coding", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
   { id: "kimi-k2.5", name: "Kimi K2.5", providerId: "kimi-for-coding", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
   { id: "llama-3.3-70b-versatile", name: "llama-3.3-70b-versatile", providerId: "groq", reasoningLevels: ["off"], contextWindow: 32768 },
@@ -229,6 +238,20 @@ export function replaceDynamicModelMetadata(
   for (const model of models) {
     if (acceptedProviderIds.has(model.providerId)) registerDynamicModelMetadata(model);
   }
+}
+
+/**
+ * All dynamic-overlay entries for a provider (openai includes its
+ * openai-codex catalog alias). The overlay was previously visible only via
+ * getBuiltinModel point lookups; the routing snapshot builder needs the list.
+ */
+export function listDynamicModelMetadata(providerId: string): BuiltinModelDefinition[] {
+  const providerIds = providerId === "openai" ? ["openai", "openai-codex"] : [providerId];
+  const out: BuiltinModelDefinition[] = [];
+  for (const [key, model] of dynamicOverlay) {
+    if (providerIds.some((id) => key.startsWith(`${id}:`))) out.push(model);
+  }
+  return out;
 }
 
 export function getBuiltinModel(providerId: string, modelId: string): BuiltinModelDefinition | undefined {

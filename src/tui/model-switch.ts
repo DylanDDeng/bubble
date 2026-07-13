@@ -11,6 +11,8 @@ export interface ModelSwitchAgent {
   thinking: ThinkingLevel;
   setProvider(provider: Provider): void;
   setSystemPrompt(prompt: string): void;
+  /** Routing menu for the NEXT parent route (model-routing design §1.5). */
+  renderModelRoutingPromptFor?(parent: { providerId: string; model: string }): string | undefined;
 }
 
 export interface ModelSwitchRegistry {
@@ -93,6 +95,10 @@ export async function switchAgentModel(options: SwitchAgentModelOptions): Promis
     thinkingLevel: nextThinkingLevel,
     workingDir: options.workingDir,
     ...options.systemPromptOptions,
+    // The spread carries the menu for the OLD parent; re-render for the model
+    // being switched to, before any agent state is mutated (design §1.5).
+    modelRoutingPrompt: options.agent.renderModelRoutingPromptFor?.({ providerId, model: modelId })
+      ?? options.systemPromptOptions.modelRoutingPrompt,
   });
 
   options.agent.model = options.model;

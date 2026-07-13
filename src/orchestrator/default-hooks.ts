@@ -10,7 +10,7 @@ import {
   buildTaskSummaryReminder,
   buildWorkflowPhaseReminder,
 } from "../prompt/reminders.js";
-import { orchestrationRequestReminder, reminderForTaskType } from "../prompt/task-reminders.js";
+import { orchestrationRequestReminder, reminderForTaskType, userNamedModelReminder } from "../prompt/task-reminders.js";
 import { formatCoverageSummary, resolveWorkflowPhase } from "./workflow.js";
 import type { TurnHookState, TurnHooks } from "./hooks.js";
 import type { ParsedToolCall, ToolResult } from "../types.js";
@@ -44,6 +44,17 @@ export function createDefaultHooks(): TurnHooks[] {
         );
         if (orchestrationReminder) {
           ctx.queueReminder(orchestrationReminder);
+        }
+        // User named a configured model ("gpt 5.6 sol"): resolve it against
+        // the routable catalog and hand over the exact id at the decision
+        // point — never let the parent retype ids from priors (v3.6).
+        const namedModelReminder = userNamedModelReminder(
+          ctx.input,
+          ctx.agent.listRoutableModels?.(),
+          ctx.agent.hasToolAvailable("spawn_agent"),
+        );
+        if (namedModelReminder) {
+          ctx.queueReminder(namedModelReminder);
         }
         // Small-task hint: counterweight to the default protocol's exploration
         // bias, only fires once per run on focused one-shot requests like
@@ -174,6 +185,13 @@ export function createDefaultHooks(): TurnHooks[] {
           if (reminder) {
             ctx.queueReminder(reminder);
           }
+        }
+        // Routing detector note (model-routing design §6): rides the same
+        // channel as the lifecycle reminder, once per session. Consuming also
+        // closes the per-fan-out counting window.
+        const routingReminder = ctx.agent.consumePendingRoutingReminder?.();
+        if (routingReminder) {
+          ctx.queueReminder(routingReminder);
         }
 
         if (ctx.state.taskType === "security_investigation" && ctx.state.evidenceTracker?.isCoreCoverageComplete()) {

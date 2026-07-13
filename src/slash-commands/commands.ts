@@ -733,6 +733,9 @@ const builtinSlashCommandEntries: SlashCommand[] = [
           return `Provider ${value} is defined in ~/.bubble/models.json. Please edit that file directly.`;
         }
         ctx.registry.removeProvider(value);
+        // Registry mutation without a model switch still changes the routing
+        // world (design §1.6): refresh the routing menu in the system prompt.
+        syncSystemPrompt(ctx, ctx.agent.model);
         return `Provider ${value} removed.`;
       }
 
@@ -937,6 +940,9 @@ const builtinSlashCommandEntries: SlashCommand[] = [
         ctx.agent.providerId = "";
       }
 
+      // No-fallback logout mutates the routing world without a model switch
+      // (design §1.6): refresh the menu so it stops advertising the provider.
+      syncSystemPrompt(ctx, ctx.agent.model);
       return `OAuth credentials for ${providerId} removed.`;
     },
   },

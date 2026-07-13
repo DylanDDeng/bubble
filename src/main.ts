@@ -16,6 +16,8 @@ import { ProviderRegistry, displayModel, encodeModel, decodeModel } from "./prov
 import { SessionManager } from "./session.js";
 import { createSessionTitleUpdater, type SessionTitleUpdater } from "./session-title.js";
 import { buildSystemPrompt } from "./system-prompt.js";
+import { createRoutableModelIndex, createRoutingSnapshotAccessor } from "./agent/routing-catalog.js";
+import { buildModelRoutingPrompt } from "./prompt/routing.js";
 import { SkillRegistry } from "./skills/registry.js";
 import { buildToolPromptOptions, createAllTools, type PlanController, type ToolSearchController } from "./tools/index.js";
 import { FileStateTracker } from "./tools/file-state.js";
@@ -369,6 +371,18 @@ async function main() {
   // provider's system prompt.
   purgeUnsafeMemorySources(args.cwd);
   const memoryPrompt = buildMemoryPrompt(args.cwd);
+  // Routing snapshot accessor (model-routing design §1.5): built before the
+  // system prompt because startup composes the prompt before the Agent exists;
+  // the same accessor is then handed to the Agent constructor.
+  const agentRouting = userConfig.getAgentRouting();
+  const routingSnapshotAccessor = createRoutingSnapshotAccessor(
+    registry,
+    () => userConfig.getAgentCategories(),
+    () => agentRouting,
+  );
+  const initialRoutingParent = activeProviderId && activeModel
+    ? { providerId: activeProviderId, model: decodeModel(activeModel).modelId }
+    : undefined;
   const systemPrompt = buildSystemPrompt({
     agentName: "Bubble",
     configuredProvider: activeProviderId || "none",
@@ -379,6 +393,9 @@ async function main() {
     workingDir: args.cwd,
     ...buildToolPromptOptions(tools.filter((tool) => !tool.deferred)),
     memoryPrompt,
+    modelRoutingPrompt: initialRoutingParent
+      ? buildModelRoutingPrompt(routingSnapshotAccessor(initialRoutingParent), agentRouting)
+      : undefined,
   });
   const traceInfo = configureDebugTrace({
     cwd: args.cwd,
@@ -448,6 +465,9 @@ async function main() {
     memoryPrompt,
     fileStateTracker,
     agentCategories: userConfig.getAgentCategories(),
+    agentRouting,
+    routingSnapshot: routingSnapshotAccessor,
+    routableModels: createRoutableModelIndex(registry),
     subagents: userConfig.getSubagents(),
     providerFactory: createProviderForRoute,
     externalHooks: hookController,

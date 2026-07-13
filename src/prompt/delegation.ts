@@ -34,8 +34,12 @@ Delegate when:
   filtered before they reach this conversation, or control flow between
   stages (pipelines, loops, retry rounds) favor a run_workflow script — each
   member's full handoff stays out of your context and the script returns one
-  digested result. Failed agent() calls resolve to null, so report which
-  items came back null instead of silently dropping them.
+  digested result. Inside parallel()/pipeline(), a failed agent() resolves to
+  null — report which items came back null instead of silently dropping them.
+  A bare "await agent(...)" outside those combinators PROPAGATES its error
+  and fails the whole run: keep must-not-die steps (a final synthesis, the
+  last aggregation) inside parallel([...]) or a try/catch so one member's
+  failure cannot discard every other member's finished work.
 - A side-investigation is independent of your current main-line work and can
   run in the background while you continue.
 
@@ -67,7 +71,22 @@ When in doubt about a one-off task, do it yourself. When a task is clearly
 the same read-only operation over three or more independent items — where
 each item alone would take more than a couple of tool calls — prefer
 run_workflow over doing them sequentially yourself. For just two small items,
-do them yourself with parallel tool calls.`;
+do them yourself with parallel tool calls.
+
+Routing (model per child): match each child's model to its task, not to
+habit. Mechanical fan-out work — scanning, grepping, summarizing single
+files, format checks, data extraction — belongs on category "quick" or
+"explore", or an explicit fast-tier model from the routing menu; spawning
+many children that all inherit a strong parent model is waste. Judgment
+work — reviewing, adjudicating between findings, synthesizing a final
+answer, subtle debugging — keeps the parent's model: do NOT downgrade it
+to save cost. When unsure, inherit. Follow the routing menu's rules on
+which model ids are valid and whether cross-provider routing is available.
+Cross-provider (provider:model) is for a reason, not a habit: use it when
+the user names a provider or a task clearly plays to another provider's
+strength; tier labels do not compare across providers, so a cross-provider
+pick is a judgment call you should be able to justify. Same-provider is
+the default frame.`;
 
 /**
  * Returns the delegation policy section when the agent actually has the
