@@ -1,11 +1,12 @@
-# Bubble Subagent Model Routing — Design (v3.6: autonomous per-task model selection)
+# Bubble Subagent Model Routing — Design (v3.7: autonomous per-task model selection)
 
 Status: **implemented** (Phases 0–3 shipped 2026-07-12; full suite green.
 v3 drafted 2026-07-11; v3.1–v3.4 after external review rounds 1–4 — see §11
 revision log; round 4 found no new P0. v3.5, 2026-07-12: product decision —
 cross-provider routing defaults to OPEN, the gate becomes an opt-out lock,
 §7.2. v3.6, 2026-07-12: three field fixes from the first live case — see
-§11). Builds on the shipped
+§11. v3.7, 2026-07-13: three verified fixes from the Codex review of
+PR #61 — see §11). Builds on the shipped
 orchestration v2 surface (`workflow-runtime-design.md`, revision 2026-07-06:
 `spawn_agent` + `run_workflow` dual path) and the subagent runtime
 (`subagent-runtime-design.md`). Key existing code this design extends:
@@ -1057,6 +1058,27 @@ verified and accepted:
    Fixed: deterministic within-tier ordering — `routingPriority` (new
    models.json field) > builtin catalog index > normalized-id tiebreak
    (§3.2).
+
+**v3.7 (2026-07-13)** — three fixes from the Codex review of PR #61 (all
+three claims verified against source before adopting):
+
+1. **Discovery-TTL snapshot invalidation** (§1.5): the accessor cached by
+   (revision, parent) only, but TTL expiry is passive — it bumps no
+   revision — so a snapshot built from complete discovery outlived its
+   60s TTL until an unrelated registry mutation. Snapshots now record
+   `discoveryExpiresAt` (the consumed discovery's expiry) and the accessor
+   rebuilds past that instant, matching what a fresh build would return.
+2. **Near-match direction** (§7.2.3): `nearModelMatches` matched
+   normalized prefixes in both directions, so a cataloged `gpt-5.6-sol`
+   hard-rejected the plausibly-real longer variant
+   `gpt-5.6-sol-20260701` as a "typo". The hard-reject path now uses
+   `mode: "truncation"` (catalog extends input only); soft "did you
+   mean" notes keep both directions.
+3. **Truncated-allowlist wording** (§4): with >12 allowlisted models the
+   prompt printed "any explicit id from this provider is valid" next to
+   "Choose only from this list" while validation hard-rejected unlisted
+   ids. The remainder note and the closing line are now
+   authoritative-aware; open catalogs keep the original wording.
 
 **v3.6 (2026-07-12)** — three fixes from the first live case (a Grok-4.5
 parent running "use GLM-5.2 and gpt 5.6 sol as an agent team"):

@@ -196,7 +196,7 @@ async function main() {
   };
   const lspService = getLspService(args.cwd, settingsManager.getMerged().lsp);
   const fileStateTracker = new FileStateTracker(args.cwd);
-  // Shared between the goal tools (model-facing get_goal/update_goal) and the
+  // Shared between the goal tool (model-facing update_goal) and the
   // TUI's auto-continuation engine / status-line indicator.
   const goalStore = new GoalStore();
   const tools = createAllTools(args.cwd, skillRegistry, {
@@ -569,6 +569,7 @@ async function main() {
       if (agent.mode === "plan") {
         agent.injectModeReminder();
       }
+      agent.injectDeferredToolsReminder();
       console.log(chalk.dim(`Resumed session: ${sessionManager.getSessionFile()}`));
     }
   }

@@ -14,7 +14,7 @@
  * the real tool list.
  */
 
-import type { ToolRegistryEntry, ToolResult } from "../types.js";
+import type { ToolContext, ToolRegistryEntry, ToolResult } from "../types.js";
 
 export interface ToolSearchController {
   /** All deferred tools in the current session, whether unlocked or not. */
@@ -23,7 +23,23 @@ export interface ToolSearchController {
   unlock: (names: string[]) => void;
 }
 
-export function createToolSearchTool(controller: ToolSearchController): ToolRegistryEntry {
+/**
+ * Without an injected controller, back the tool with the executing agent from
+ * the tool context. This keeps tool_search available in EVERY host — a host
+ * that forgets to wire a controller must not strand deferred tools behind an
+ * unreachable unlock path (Feishu and the desktop bridge hit exactly that
+ * with deferred MCP tools).
+ */
+function contextController(ctx: ToolContext): ToolSearchController | undefined {
+  const agent = ctx.agent;
+  if (!agent?.listDeferredTools || !agent.unlockDeferredTools) return undefined;
+  return {
+    listDeferred: () => agent.listDeferredTools!(),
+    unlock: (names) => agent.unlockDeferredTools!(names),
+  };
+}
+
+export function createToolSearchTool(controller?: ToolSearchController): ToolRegistryEntry {
   return {
     name: "tool_search",
     readOnly: true,
@@ -48,13 +64,17 @@ export function createToolSearchTool(controller: ToolSearchController): ToolRegi
       },
       required: ["query"],
     },
-    async execute(args): Promise<ToolResult> {
+    async execute(args, ctx): Promise<ToolResult> {
+      const resolved = controller ?? contextController(ctx);
+      if (!resolved) {
+        return { content: "Error: tool_search requires an agent runtime.", isError: true };
+      }
       const query = typeof args.query === "string" ? args.query : "";
       const maxResults = typeof args.max_results === "number" && args.max_results > 0
         ? Math.min(Math.floor(args.max_results), 25)
         : 5;
 
-      const deferred = controller.listDeferred();
+      const deferred = resolved.listDeferred();
       if (deferred.length === 0) {
         return { content: "No deferred tools are registered in this session." };
       }
@@ -86,7 +106,7 @@ export function createToolSearchTool(controller: ToolSearchController): ToolRegi
         }
       }
 
-      controller.unlock(matches.map((t) => t.name));
+      resolved.unlock(matches.map((t) => t.name));
 
       const lines = ["<functions>"];
       for (const tool of matches) {

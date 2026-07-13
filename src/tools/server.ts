@@ -20,6 +20,7 @@ export function createManagedServerTools(cwd: string, approval?: ApprovalControl
   return [
     {
       name: "start_server",
+      deferred: true,
       effect: "unknown",
       requiresApproval: true,
       description:
@@ -99,6 +100,7 @@ export function createManagedServerTools(cwd: string, approval?: ApprovalControl
     },
     {
       name: "server_status",
+      deferred: true,
       readOnly: true,
       effect: "read",
       description: "Show managed development server status. Pass serverId for one server, or omit it to list all managed servers.",
@@ -138,6 +140,7 @@ export function createManagedServerTools(cwd: string, approval?: ApprovalControl
     },
     {
       name: "server_logs",
+      deferred: true,
       readOnly: true,
       effect: "read",
       description: "Return recent logs for a managed development server.",
@@ -167,6 +170,7 @@ export function createManagedServerTools(cwd: string, approval?: ApprovalControl
     },
     {
       name: "stop_server",
+      deferred: true,
       effect: "unknown",
       description: "Stop a managed development server by serverId.",
       parameters: {

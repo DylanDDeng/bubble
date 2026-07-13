@@ -51,12 +51,16 @@ export function buildModelRoutingPrompt(
     lines.push("Models on this provider, usable via per-call `model`:");
     lines.push(`  ${modelList}`);
     if (remainder > 0) {
-      lines.push(`  … and ${remainder} more; any explicit id from this provider is valid.`);
+      lines.push(snapshot.authoritative
+        ? `  … and ${remainder} more in the configured allowlist (not shown); ids outside the allowlist are rejected.`
+        : `  … and ${remainder} more; any explicit id from this provider is valid.`);
     }
   }
 
   if (snapshot.authoritative) {
-    lines.push("Choose only from this list; do not invent model ids.");
+    lines.push(remainder > 0
+      ? "Choose only from the configured allowlist (shown plus the unlisted remainder); do not invent model ids."
+      : "Choose only from this list; do not invent model ids.");
   } else {
     lines.push("(list may lag the provider; explicit ids not listed are allowed)");
   }

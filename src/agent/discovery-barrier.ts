@@ -55,7 +55,7 @@ export class DiscoveryBarrier {
     return {
       content:
         `Blocked speculative ${target.kind}. The path "${target.path}" has not been discovered in this repository context ` +
-        "and was not explicitly requested by the user. Run glob/grep/lsp discovery first, then read only returned paths. " +
+        "and was not explicitly requested by the user. Run glob/grep discovery first, then read only returned paths. " +
         "Do not infer from this blocked call whether the path exists.",
       isError: true,
       status: "blocked",

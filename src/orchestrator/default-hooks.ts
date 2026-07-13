@@ -7,7 +7,6 @@ import { arbitrateToolCall } from "../agent/tool-arbiter.js";
 import {
   buildEditRetryEscalationReminder,
   buildSmallTaskHint,
-  buildTaskSummaryReminder,
   buildWorkflowPhaseReminder,
 } from "../prompt/reminders.js";
 import { orchestrationRequestReminder, reminderForTaskType, userNamedModelReminder } from "../prompt/task-reminders.js";
@@ -170,9 +169,6 @@ export function createDefaultHooks(): TurnHooks[] {
         // edit was correct. CC's approach is the opposite: verify when there
         // is something real to verify, say so explicitly when there isn't, and
         // trust the model to judge. We follow that.
-        if (ctx.toolCall.name === "task") {
-          ctx.queueReminder(buildTaskSummaryReminder());
-        }
         if (ctx.state.governor) {
           for (const reminder of ctx.state.governor.consumePendingReminders()) {
             ctx.queueReminder(reminder);
@@ -238,8 +234,7 @@ function isSubagentLifecycleTool(name: string): boolean {
   return name === "spawn_agent"
     || name === "wait_agent"
     || name === "send_input"
-    || name === "close_agent"
-    || name === "task";
+    || name === "close_agent";
 }
 
 function hashEditCall(toolCall: ParsedToolCall): string {

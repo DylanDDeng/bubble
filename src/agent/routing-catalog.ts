@@ -73,6 +73,12 @@ export interface RoutingSnapshot {
    *  that hard-rejects unknown ids (§1.4). */
   authoritative: boolean;
   registryRevision: number;
+  /**
+   * Earliest expiry of the discovery data this snapshot consumed. TTL expiry
+   * is passive — it bumps no revision — so the accessor must rebuild past
+   * this instant or it serves a catalog the registry itself no longer would.
+   */
+  discoveryExpiresAt?: number;
   /** Provider ids with active credentials (getEnabled, §1.1). */
   runnableProviderIds: string[];
   /** Post-merge, post-tier-resolution category bindings (§3). */
@@ -178,6 +184,7 @@ export function buildRoutingSnapshot(
     models,
     authoritative: membershipSource === "custom-allowlist",
     registryRevision: registry.getRoutingRevision(),
+    discoveryExpiresAt: discovery?.expiresAt,
     runnableProviderIds,
     resolvedCategories: resolveCategoriesForMenu(
       parent,
@@ -224,6 +231,7 @@ export function createRoutingSnapshotAccessor(
       && cached.registryRevision === registry.getRoutingRevision()
       && cached.parent.providerId === parent.providerId
       && cached.parent.model === parent.model
+      && (cached.discoveryExpiresAt === undefined || Date.now() < cached.discoveryExpiresAt)
     ) {
       return cached;
     }
@@ -323,17 +331,29 @@ export function normalizeModelToken(value: string): string {
 
 /**
  * Near-match candidates for a (probably mistyped) model id within one
- * provider's catalog: normalized prefix in either direction — catches
- * truncations like "gpt-5.6" -> gpt-5.6-sol/-terra/-luna without ever
- * matching a genuinely novel id. Capped, deterministic order.
+ * provider's catalog. "suggest" matches normalized prefixes in either
+ * direction (soft "did you mean" notes). "truncation" matches only inputs
+ * the catalog EXTENDS ("gpt-5.6" -> gpt-5.6-sol/-terra/-luna) — the one
+ * direction that is typo evidence. An input extending a catalog id
+ * (gpt-5.6-sol-20260701 vs cataloged gpt-5.6-sol) is more likely a newly
+ * released variant the local catalog lags on, and must not be treated as a
+ * typo by hard-reject paths. Capped, deterministic order.
  */
-export function nearModelMatches(input: string, candidates: RoutableModelEntry[], limit = 5): string[] {
+export function nearModelMatches(
+  input: string,
+  candidates: RoutableModelEntry[],
+  options: { limit?: number; mode?: "suggest" | "truncation" } = {},
+): string[] {
+  const limit = options.limit ?? 5;
+  const mode = options.mode ?? "suggest";
   const normalized = normalizeModelToken(input);
   if (normalized.length < 3) return [];
   return candidates
     .filter((candidate) => {
       const other = normalizeModelToken(candidate.id);
-      return other !== normalized && (other.startsWith(normalized) || normalized.startsWith(other));
+      if (other === normalized) return false;
+      if (other.startsWith(normalized)) return true;
+      return mode === "suggest" && normalized.startsWith(other);
     })
     .map((candidate) => candidate.id)
     .sort()

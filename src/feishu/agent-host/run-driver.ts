@@ -231,6 +231,7 @@ export class RunDriver {
       if (history.length > 0) {
         agent.messages = [{ role: "system", content: systemPrompt }, ...history];
         if (agent.mode === "plan") agent.injectModeReminder();
+        agent.injectDeferredToolsReminder();
       }
     }
 

@@ -24,7 +24,7 @@ const PLAN_MODE_ENTER = `
 Plan mode is now ACTIVE.
 
 Rules while in plan mode:
-- Only read-only tools are allowed, including read, glob, grep, lsp, web_search, web_fetch, spawn_agent, wait_agent, send_input, close_agent, skill_search, skill, todo_write, tool_search, question, and exit_plan_mode.
+- Only read-only tools are allowed, including read, glob, grep, web_search, web_fetch, spawn_agent, wait_agent, send_input, skill_search, skill, todo_write, tool_search, question, and exit_plan_mode.
 - Writes, edits, and shell commands WILL be rejected by the harness; do not try them.
 - Do not edit files or claim implementation is complete while plan mode is active.
 - Investigate the codebase, then use the question tool to clarify important ambiguities, tradeoffs, requirements, or preference choices that would materially change the plan.
@@ -182,16 +182,6 @@ ${pending}
 `);
 }
 
-export function buildTaskSummaryReminder(): string {
-  return wrapInSystemReminder(`
-Summarize the task tool output above and continue with your task.
-
-Treat the task output as a bounded subtask result:
-- extract the findings that matter
-- integrate them into your main reasoning
-- do not re-run the same exploratory search unless the subtask uncovered a concrete contradiction
-`);
-}
 
 // Removed: buildVerificationReminder / buildVerificationFailureReminder.
 // The verification reminder ladder pressured the model to run a "verification"

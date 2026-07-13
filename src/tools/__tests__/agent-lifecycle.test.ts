@@ -39,7 +39,6 @@ describe("agent lifecycle tools", () => {
         cwd: "/tmp",
         toolCall: { id: "spawn_1", name: "spawn_agent" },
         agent: {
-          runSubtask: async () => ({ content: "unused" }),
           spawnSubAgent: async (_input, _cwd, options) => {
             expect(options.profile.name).toBe("default");
             expect(options.parentToolCallId).toBe("spawn_1");
@@ -69,7 +68,6 @@ describe("agent lifecycle tools", () => {
         cwd: "/tmp",
         toolCall: { id: "spawn_1", name: "spawn_agent" },
         agent: {
-          runSubtask: async () => ({ content: "unused" }),
           spawnSubAgent: async (_input, _cwd, options) => {
             expect(options.category).toBe("review");
             return snapshot({
@@ -104,7 +102,6 @@ describe("agent lifecycle tools", () => {
       {
         cwd: "/tmp",
         agent: {
-          runSubtask: async () => ({ content: "unused" }),
           waitSubAgents: async () => [],
         },
       },
@@ -121,7 +118,6 @@ describe("agent lifecycle tools", () => {
       {
         cwd: "/tmp",
         agent: {
-          runSubtask: async () => ({ content: "unused" }),
           waitSubAgents: async () => [
             snapshot({ status: "running", summary: "", toolNotes: ["read: inspected index.html"] }),
           ],
