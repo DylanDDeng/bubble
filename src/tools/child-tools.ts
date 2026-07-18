@@ -69,9 +69,11 @@ export class WorktreeApprovalController implements ApprovalController {
       }
       case "edit":
       case "write":
+        // Reason before the path: subagent tool notes truncate long lines,
+        // and a long absolute path would push the reason off the end.
         return isPathInsideWorktree(this.worktreeRoot, req.path)
           ? { action: "approve" }
-          : { action: "reject", feedback: `Blocked by worktree policy: ${req.path} is outside the subagent worktree.` };
+          : { action: "reject", feedback: `Blocked by worktree policy: the path is outside the subagent worktree (${req.path}).` };
       case "patch":
         return req.paths.every((path) => isPathInsideWorktree(this.worktreeRoot, path))
           ? { action: "approve" }

@@ -63,6 +63,54 @@ describe("PermissionAwareApprovalController", () => {
     expect(handler).toHaveBeenCalledTimes(1);
   });
 
+  it("asks the UI for outside-workspace edit/write in default mode instead of auto-approving", async () => {
+    const handler = vi.fn(async () => ({ action: "approve" }) as ApprovalDecision);
+    const c = new PermissionAwareApprovalController({
+      getMode: () => "default",
+      handlerRef: { current: handler },
+      cwd: "/tmp/bubble-test",
+    });
+
+    const outsideWrite: ApprovalRequest = {
+      type: "write",
+      path: "/Users/someone/Downloads/out.md",
+      content: "hi",
+      fileExists: false,
+      outsideWorkspace: true,
+    };
+    const outsideEdit: ApprovalRequest = {
+      type: "edit",
+      path: "/Users/someone/Downloads/out.md",
+      diff: "diff",
+      fileExists: true,
+      outsideWorkspace: true,
+    };
+
+    expect(await c.request(outsideWrite)).toEqual({ action: "approve" });
+    expect(await c.request(outsideEdit)).toEqual({ action: "approve" });
+    expect(handler).toHaveBeenCalledTimes(2);
+  });
+
+  it("auto-approves outside-workspace edit/write in bypassPermissions", async () => {
+    const handler = vi.fn(async () => ({ action: "reject" }) as ApprovalDecision);
+    const c = new PermissionAwareApprovalController({
+      getMode: () => "bypassPermissions",
+      handlerRef: { current: handler },
+      cwd: "/tmp/bubble-test",
+    });
+
+    const outsideWrite: ApprovalRequest = {
+      type: "write",
+      path: "/Users/someone/Downloads/out.md",
+      content: "hi",
+      fileExists: false,
+      outsideWorkspace: true,
+    };
+
+    expect(await c.request(outsideWrite)).toEqual({ action: "approve" });
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it("rejects non-readonly tools in plan mode with a feedback message", async () => {
     const c = makeController("plan");
     const result = await c.request(BASH_REQ);

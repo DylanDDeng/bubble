@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import type { ApprovalRequest } from "../../approval/types.js";
 import { createEditTool } from "../edit.js";
 
 function extractCurrentCandidateExcerpt(content: string): string {
@@ -664,11 +665,18 @@ describe("edit tool", () => {
     expect(readFileSync(file, "utf-8")).toBe("alpha\nbeta\ngamma\n");
   });
 
-  it("rejects paths outside the workspace", async () => {
+  it("escalates outside-workspace paths to the approval controller instead of hard-blocking", async () => {
     const outside = join(tmpdir(), "bubble-outside-edit-test.txt");
     writeFileSync(outside, "outside", "utf-8");
 
-    const tool = createEditTool(tmpDir);
+    const approvalRequests: ApprovalRequest[] = [];
+    const tool = createEditTool(tmpDir, {
+      checkRules: () => ({ decision: "ask" as const }),
+      request: async (request: ApprovalRequest) => {
+        approvalRequests.push(request);
+        return { action: "reject" as const };
+      },
+    });
     const result = await tool.execute(
       {
         path: resolve(outside),
@@ -678,7 +686,8 @@ describe("edit tool", () => {
     );
 
     expect(result.isError).toBe(true);
-    expect(result.status).toBe("blocked");
+    expect(approvalRequests).toHaveLength(1);
+    expect(approvalRequests[0]).toMatchObject({ type: "edit", outsideWorkspace: true });
     expect(readFileSync(outside, "utf-8")).toBe("outside");
   });
 });

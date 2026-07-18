@@ -24,7 +24,16 @@ export async function gateToolAction(
   const message = feedback
     ? `${label} was rejected by the user. User feedback: ${feedback}`
     : `${label} was rejected by the user.`;
-  return { approved: false, result: { content: message, isError: true } };
+  return {
+    approved: false,
+    result: {
+      content: message,
+      isError: true,
+      // Surfaces the rejection reason in subagent tool notes (which prefer
+      // metadata.reason over the truncated first content line).
+      metadata: { kind: "security", reason: feedback || message },
+    },
+  };
 }
 
 function approvalRequestLabel(req: ApprovalRequest): string {

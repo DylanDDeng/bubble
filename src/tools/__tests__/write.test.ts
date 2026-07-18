@@ -84,18 +84,53 @@ describe("write tool", () => {
     expect(readFileSync(file, "utf-8")).toBe("second");
   });
 
-  it("rejects paths outside the workspace", async () => {
+  it("escalates outside-workspace paths to the approval controller instead of hard-blocking", async () => {
     const outside = join(tmpdir(), "bubble-outside-write-test.txt");
     writeFileSync(outside, "outside", "utf-8");
 
-    const tool = createWriteTool(tmpDir);
-    const result = await tool.execute(
+    const approvalRequests: ApprovalRequest[] = [];
+    const rejecting = createWriteTool(tmpDir, {}, {
+      checkRules: () => ({ decision: "ask" as const }),
+      request: async (request: ApprovalRequest) => {
+        approvalRequests.push(request);
+        return { action: "reject" as const };
+      },
+    });
+    const rejected = await rejecting.execute(
       { path: resolve(outside), content: "changed" },
       { cwd: tmpDir },
     );
 
-    expect(result.isError).toBe(true);
-    expect(result.status).toBe("blocked");
+    expect(rejected.isError).toBe(true);
     expect(readFileSync(outside, "utf-8")).toBe("outside");
+    expect(approvalRequests).toHaveLength(1);
+    expect(approvalRequests[0]).toMatchObject({ type: "write", outsideWorkspace: true });
+
+    const approving = createWriteTool(tmpDir, {}, {
+      checkRules: () => ({ decision: "ask" as const }),
+      request: async () => ({ action: "approve" as const }),
+    });
+    const approved = await approving.execute(
+      { path: resolve(outside), content: "changed" },
+      { cwd: tmpDir },
+    );
+
+    expect(approved.isError).toBeUndefined();
+    expect(readFileSync(outside, "utf-8")).toBe("changed");
+  });
+
+  it("does not flag workspace paths as outside the workspace", async () => {
+    const approvalRequests: ApprovalRequest[] = [];
+    const write = createWriteTool(tmpDir, {}, {
+      checkRules: () => ({ decision: "ask" as const }),
+      request: async (request: ApprovalRequest) => {
+        approvalRequests.push(request);
+        return { action: "approve" as const };
+      },
+    });
+    await write.execute({ path: "inside.txt", content: "hi" }, { cwd: tmpDir });
+
+    expect(approvalRequests).toHaveLength(1);
+    expect(approvalRequests[0]).toMatchObject({ type: "write", outsideWorkspace: false });
   });
 });

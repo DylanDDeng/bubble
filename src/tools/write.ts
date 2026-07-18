@@ -54,19 +54,11 @@ export function createWriteTool(
     prepareArguments: prepareWriteArguments,
     async execute(args): Promise<ToolResult> {
       const filePath = resolveToolPath(cwd, args.path);
-
-      if (!isWithinWorkspace(cwd, filePath)) {
-        return {
-          content: `Error: Write path is outside the workspace: ${filePath}`,
-          isError: true,
-          status: "blocked",
-          metadata: {
-            kind: "security",
-            path: filePath,
-            reason: "Write path is outside the workspace.",
-          },
-        };
-      }
+      // Outside-workspace paths are not blocked outright: the flag escalates
+      // the approval request past default-mode auto-approval, so the user
+      // decides (bypassPermissions and allow rules still auto-approve, and a
+      // worktree child's approval policy still rejects escapes).
+      const outsideWorkspace = !isWithinWorkspace(cwd, filePath);
 
       return withFileMutationQueue(filePath, async () => {
         let existed = false;
@@ -86,6 +78,7 @@ export function createWriteTool(
           content: args.content,
           diff,
           fileExists: existed,
+          outsideWorkspace,
         });
         if (!gate.approved) return gate.result;
 

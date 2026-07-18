@@ -14,6 +14,12 @@ export interface EditApprovalRequest {
   /** Unified patch (with context lines) to show the user. */
   diff: string;
   fileExists: boolean;
+  /**
+   * The path resolves outside the session workspace. Escalates the request
+   * past default-mode auto-approval so the user explicitly confirms it
+   * (bypassPermissions still auto-approves, consistent with bash).
+   */
+  outsideWorkspace?: boolean;
 }
 
 export interface WriteApprovalRequest {
@@ -24,6 +30,8 @@ export interface WriteApprovalRequest {
   /** Unified patch from existing contents to pending contents. */
   diff?: string;
   fileExists: boolean;
+  /** See EditApprovalRequest.outsideWorkspace. */
+  outsideWorkspace?: boolean;
 }
 
 export interface PatchApprovalRequest {

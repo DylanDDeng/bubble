@@ -54,6 +54,11 @@ export function ApprovalDialog({
       <Text color={theme.accent} bold>
         {title}
       </Text>
+      {(request.type === "edit" || request.type === "write") && request.outsideWorkspace && (
+        <Text color={theme.warning} bold>
+          ⚠ This path is outside the workspace
+        </Text>
+      )}
       <Box flexDirection="column" marginTop={1}>
         <RequestPreview request={request} />
       </Box>

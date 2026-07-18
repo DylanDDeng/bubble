@@ -39,7 +39,9 @@ export interface ApprovalControllerOptions {
  *
  *   deny rule match              → reject (applies even under bypassPermissions)
  *   bypassPermissions            → auto-approve, no prompt
- *   default + edit|write         → auto-approve
+ *   default + edit|write         → auto-approve (workspace paths only; a
+ *                                  path outside the workspace falls through
+ *                                  to allow rules / the interactive prompt)
  *   plan                         → reject with instructions to use exit_plan_mode
  *   allow rule match             → auto-approve
  *   bash in session allowlist    → auto-approve
@@ -82,7 +84,9 @@ export class PermissionAwareApprovalController implements ApprovalController {
       return finalize({ action: "approve" });
     }
 
-    if (mode === "default" && (req.type === "edit" || req.type === "write" || req.type === "patch")) {
+    const outsideWorkspace =
+      (req.type === "edit" || req.type === "write") && req.outsideWorkspace === true;
+    if (mode === "default" && !outsideWorkspace && (req.type === "edit" || req.type === "write" || req.type === "patch")) {
       return finalize({ action: "approve" });
     }
 

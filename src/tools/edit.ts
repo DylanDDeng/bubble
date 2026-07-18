@@ -135,19 +135,9 @@ export function createEditTool(
       }
 
       const filePath = resolveToolPath(cwd, args.path);
-
-      if (!isWithinWorkspace(cwd, filePath)) {
-        return {
-          content: `Error: Edit path is outside the workspace: ${filePath}`,
-          isError: true,
-          status: "blocked",
-          metadata: {
-            kind: "security",
-            path: filePath,
-            reason: "Edit path is outside the workspace.",
-          },
-        };
-      }
+      // Outside-workspace paths escalate the approval request instead of
+      // being blocked outright — see the matching note in write.ts.
+      const outsideWorkspace = !isWithinWorkspace(cwd, filePath);
 
       return withFileMutationQueue(filePath, async () => {
         try {
@@ -185,6 +175,7 @@ export function createEditTool(
           path: filePath,
           diff,
           fileExists: true,
+          outsideWorkspace,
         });
         if (!gate.approved) return gate.result;
 
