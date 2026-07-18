@@ -81,6 +81,10 @@ export function WelcomeBanner({
 }: WelcomeBannerProps) {
   const theme = useTheme();
   const effectiveWidth = Math.max(24, Math.min(terminalColumns - 2, 96));
+  // The model row here refreshes live only while the banner is still in the
+  // dynamic region (empty transcript). Once the first settled row commits it
+  // into <Static> scrollback it freezes; from then on the accent-colored
+  // "Model switched" transcript notices carry model changes.
   const modelLine = formatModelLine({
     providerId,
     modelId,

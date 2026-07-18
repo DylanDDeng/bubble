@@ -128,8 +128,14 @@ export function MessageList({
   const regularMessages = messages.filter((message) => !message.inputStatus);
   const pendingSteerMessages = messages.filter((message) => message.inputStatus === "pending_steer");
   const queuedInputMessages = messages.filter((message) => message.inputStatus === "queued");
+  // While the transcript has no settled rows, the banner stays OUT of
+  // <Static> and renders in the live region instead, so it repaints on every
+  // commit — a /model switch on the fresh launch screen updates the banner in
+  // place. It is committed to scrollback together with the first settled row
+  // (same render commit, so the hand-off is seamless) and frozen from then on.
+  const bannerCommitted = regularMessages.length > 0;
   const staticItems: MessageListItem[] = [];
-  if (welcomeBanner) {
+  if (welcomeBanner && bannerCommitted) {
     staticItems.push({ kind: "welcome", key: "welcome" });
   }
   const lastMessageIndex = regularMessages.length - 1;
@@ -184,6 +190,14 @@ export function MessageList({
           );
         }}
       </Static>
+      {/* Pre-commit banner: lives in the live region (repaints on every
+          commit, so its model row stays current) until the first settled row
+          moves it into <Static> above. */}
+      {welcomeBanner && !bannerCommitted && (
+        <Box flexDirection="column" paddingX={paddingX} backgroundColor={theme.background}>
+          {welcomeBanner}
+        </Box>
+      )}
       {/* The dynamic region: only the in-progress turn + queued/steer hints
           live here and repaint as tokens arrive. Kept short so the repaint is
           cheap and flicker-free even on tmux / non-GPU terminals. */}
@@ -339,6 +353,16 @@ const MessageItem = React.memo(function MessageItem({
       <Box marginBottom={1}>
         <Text color={theme.error}>⏹ </Text>
         <Text color={theme.muted} dimColor>{message.content || "Interrupted by user"}</Text>
+      </Box>
+    );
+  }
+
+  // One-line status notices (model switch etc.): accent-colored so they read
+  // as UI feedback, not assistant prose.
+  if (message.syntheticKind === "ui_notice") {
+    return (
+      <Box marginTop={1} marginBottom={1}>
+        <Text color={theme.accent}>✦ {message.content}</Text>
       </Box>
     );
   }
@@ -576,10 +600,12 @@ function TimelineText({
     <Box marginLeft={2} marginTop={compactTop ? 0 : 1}>
       <Text color={theme.agent}>●  </Text>
       <Box flexDirection="column" flexGrow={1}>
+        {/* flushTop: a leading heading/code/table block would otherwise carry
+            marginTop=1 and start one row below the ● marker. */}
         {streaming ? (
-          <StreamingMarkdown content={trimmed} maxWidth={available} />
+          <StreamingMarkdown content={trimmed} maxWidth={available} flushTop />
         ) : (
-          <MarkdownContent content={trimmed} maxWidth={available} />
+          <MarkdownContent content={trimmed} maxWidth={available} flushTop />
         )}
       </Box>
     </Box>

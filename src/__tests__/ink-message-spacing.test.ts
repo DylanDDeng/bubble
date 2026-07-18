@@ -334,4 +334,49 @@ describe("Ink message spacing", () => {
     expect(output).toContain("window-message-99");
     expect(output).not.toContain("hidden");
   });
+
+  it("keeps the ● marker on the same line as a leading heading", () => {
+    const lines = renderLines([
+      {
+        key: "a",
+        role: "assistant",
+        content: "",
+        parts: [{ type: "text", content: "# AI圈彻底变天！开源模型掀翻格局" }],
+      },
+    ]);
+
+    const markerLine = lines.find((line) => line.includes("●"));
+    expect(markerLine).toBeDefined();
+    expect(markerLine).toContain("AI圈彻底变天！开源模型掀翻格局");
+  });
+
+  it("keeps the ● marker on the same line as a leading code block", () => {
+    const lines = renderLines([
+      {
+        key: "a",
+        role: "assistant",
+        content: "",
+        parts: [{ type: "text", content: "```js\nconst x = 1;\n```" }],
+      },
+    ]);
+
+    const markerLine = lines.find((line) => line.includes("●"));
+    expect(markerLine).toBeDefined();
+    expect(markerLine).toContain("js");
+  });
+
+  it("keeps a mid-document heading's blank line above it", () => {
+    const lines = renderLines([
+      {
+        key: "a",
+        role: "assistant",
+        content: "",
+        parts: [{ type: "text", content: "intro paragraph\n\n## Section title" }],
+      },
+    ]);
+
+    const headingIndex = lines.findIndex((line) => line.includes("Section title"));
+    expect(headingIndex).toBeGreaterThan(0);
+    expect(lines[headingIndex - 1]!.trim()).toBe("");
+  });
 });

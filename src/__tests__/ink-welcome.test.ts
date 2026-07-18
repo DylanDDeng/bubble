@@ -2,6 +2,7 @@ import React from "react";
 import { renderToString } from "ink";
 import { describe, expect, it } from "vitest";
 import { WelcomeBanner, formatModelLine, shouldShowWelcomeBanner } from "../tui-ink/welcome.js";
+import { MessageList } from "../tui-ink/message-list.js";
 import type { DisplayMessage } from "../tui-ink/display-history.js";
 
 describe("Ink welcome banner", () => {
@@ -101,6 +102,53 @@ describe("Ink welcome banner", () => {
     expect(output).not.toContain("Skills");
     expect(output).not.toContain("MCPs");
     expect(output).not.toContain("AGENTS.md");
+  });
+
+  function renderTranscript(messages: DisplayMessage[]): string {
+    const banner = React.createElement(WelcomeBanner, {
+      terminalColumns: 100,
+      tips: [],
+      providerId: "openai",
+      modelLabel: "gpt-5.5",
+    });
+    return renderToString(
+      React.createElement(MessageList, {
+        messages,
+        streamingContent: "",
+        streamingReasoning: "",
+        streamingTools: [],
+        streamingParts: [],
+        terminalColumns: 100,
+        verboseTrace: false,
+        welcomeBanner: banner,
+      }),
+      { columns: 100 },
+    );
+  }
+
+  it("renders the banner exactly once on the empty (pre-commit, live) transcript", () => {
+    const output = renderTranscript([]);
+
+    expect(output.match(/Welcome to Bubble!/g)).toHaveLength(1);
+    expect(output).toContain("gpt-5.5 · openai");
+  });
+
+  it("renders the banner exactly once, above the transcript, after rows settle", () => {
+    const output = renderTranscript([
+      { key: "user-1", role: "user", content: "hello there" },
+      { key: "assistant-1", role: "assistant", content: "hi!" },
+    ]);
+
+    expect(output.match(/Welcome to Bubble!/g)).toHaveLength(1);
+    expect(output.indexOf("Welcome to Bubble!")).toBeLessThan(output.indexOf("hello there"));
+  });
+
+  it("renders model-switch notices with the ✦ notice marker", () => {
+    const output = renderTranscript([
+      { key: "notice-1", role: "assistant", content: "Model switched to gpt-5.5 with xhigh effort.", syntheticKind: "ui_notice" },
+    ]);
+
+    expect(output).toContain("✦ Model switched to gpt-5.5 with xhigh effort.");
   });
 
   it("formats the compact model line", () => {

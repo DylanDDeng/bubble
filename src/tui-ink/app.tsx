@@ -173,6 +173,15 @@ function buildTips(agent: Agent, registry: ProviderRegistry, grokActive = false)
   return tips;
 }
 
+/**
+ * Slash-command results arrive as plain strings; recognize the /model
+ * confirmations by shape so they render as accent-colored UI notices — the
+ * same treatment the picker path applies — instead of assistant prose.
+ */
+function slashResultNoticeKind(result: string): DisplayMessage["syntheticKind"] | undefined {
+  return /^(Grok m|M)odel switched to /.test(result) ? "ui_notice" : undefined;
+}
+
 function friendlyCwd(cwd: string): string {
   const home = os.homedir();
   if (cwd === home) return "~";
@@ -827,8 +836,8 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     [reprintTranscript, updateDisplayMessages],
   );
 
-  const addMessage = useCallback((role: DisplayMessage["role"], content: string) => {
-    updateDisplayMessages((prev) => [...prev, withMessageKey({ role, content })]);
+  const addMessage = useCallback((role: DisplayMessage["role"], content: string, syntheticKind?: DisplayMessage["syntheticKind"]) => {
+    updateDisplayMessages((prev) => [...prev, withMessageKey(syntheticKind ? { role, content, syntheticKind } : { role, content })]);
   }, [updateDisplayMessages]);
 
   // Reflow on terminal resize. ink 7.0.3 only clears its dynamic frame when the
@@ -973,7 +982,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         manager.appendMarker("thinking_level_switch", selection.reasoningEffort);
         refreshExternalRuntimeBinding(manager);
       }
-      addMessage("assistant", `Grok model switched to ${selection.modelId ?? parsed.modelId}${selection.reasoningEffort !== "off" ? ` (${selection.reasoningEffort})` : ""}.`);
+      addMessage("assistant", `Grok model switched to ${selection.modelId ?? parsed.modelId}${selection.reasoningEffort !== "off" ? ` (${selection.reasoningEffort})` : ""}.`, "ui_notice");
       closePicker();
     };
     void run().catch((error) => {
@@ -1188,7 +1197,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
       const effortNote = nextThinkingLevel && nextThinkingLevel !== "off"
         ? (isThinkingToggle || isThinkingOnly ? " in thinking mode" : ` with ${nextThinkingLevel} effort`)
         : "";
-      addMessage("assistant", `Model switched to ${displayModel(model)}${effortNote}.`);
+      addMessage("assistant", `Model switched to ${displayModel(model)}${effortNote}.`, "ui_notice");
       closePicker();
       return nextThinkingLevel;
     };
@@ -1252,7 +1261,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
       transitionToNative,
       onExternalRuntimeChange: refreshExternalRuntimeBinding,
     });
-    if (handled && result) addMessage("assistant", result);
+    if (handled && result) addMessage("assistant", result, slashResultNoticeKind(result));
   }, [
     addMessage,
     agent,
@@ -2197,7 +2206,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
                 { role: "assistant", content: result },
               ]);
             } else {
-              addMessage("assistant", result);
+              addMessage("assistant", result, slashResultNoticeKind(result));
             }
           }
           if (inject) {
@@ -2298,23 +2307,32 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   const showThinkingLabel = Boolean(thinkingLevel)
     && thinkingLevel !== "off"
     && (isThinkingToggle || isThinkingOnly || availableThinkingLevels.length > 2);
+  // The banner's model row stays live until the first settled row commits it
+  // into <Static> scrollback (so a /model switch on the fresh launch screen
+  // updates in place); after that the accent-colored transcript notices carry
+  // model changes. External runtimes surface theirs via the footer runtimeLabel.
+  const bannerTips = buildTips(agent, safeRegistry, grokSessionBound);
+  const bannerProviderId = grokSessionBound ? "grok" : externalSessionBound ? undefined : agent.providerId || safeRegistry.getDefault()?.id;
+  const bannerModelId = grokSessionBound ? externalRuntimeBinding?.modelId : externalSessionBound ? undefined : agent.apiModel;
+  const bannerModelLabel = externalSessionBound
+    ? (grokSessionBound
+        ? `Grok Subscription${externalRuntimeBinding?.modelId ? ` · ${externalRuntimeBinding.modelId}` : ""}`
+        : "Unsupported external runtime · recovery-only mode")
+    : agent.model ? displayModel(agent.model) : undefined;
+  const bannerThinkingLabel = grokSessionBound
+    ? externalRuntimeBinding?.reasoningEffort
+    : !externalSessionBound && showThinkingLabel ? thinkingLevel : undefined;
   const welcomeBannerNode = showWelcome ? (
     <WelcomeBanner
       terminalColumns={terminalColumns}
-      tips={buildTips(agent, safeRegistry, grokSessionBound)}
+      tips={bannerTips}
       updateNotice={currentUpdateNotice}
       cwd={friendlyCwd(args.cwd)}
       sessionLabel={sessionBasename(currentSessionFile())}
-      providerId={grokSessionBound ? "grok" : externalSessionBound ? undefined : agent.providerId || safeRegistry.getDefault()?.id}
-      modelId={grokSessionBound ? externalRuntimeBinding?.modelId : externalSessionBound ? undefined : agent.apiModel}
-      modelLabel={externalSessionBound
-        ? (grokSessionBound
-            ? `Grok Subscription${externalRuntimeBinding?.modelId ? ` · ${externalRuntimeBinding.modelId}` : ""}`
-            : "Unsupported external runtime · recovery-only mode")
-        : agent.model ? displayModel(agent.model) : undefined}
-      thinkingLabel={grokSessionBound
-        ? externalRuntimeBinding?.reasoningEffort
-        : !externalSessionBound && showThinkingLabel ? thinkingLevel : undefined}
+      providerId={bannerProviderId}
+      modelId={bannerModelId}
+      modelLabel={bannerModelLabel}
+      thinkingLabel={bannerThinkingLabel}
     />
   ) : null;
   const commandPaletteItems = useMemo(

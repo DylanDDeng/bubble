@@ -11,9 +11,9 @@ export interface FooterData {
 }
 
 /**
- * Bottom status line. Path / provider / model moved into the welcome banner;
- * the footer only surfaces the permission-mode badge, so it renders nothing
- * (zero rows) in the default mode.
+ * Bottom status line. Path / provider / model live in the welcome banner and
+ * the model-switch transcript notices; the footer only surfaces the
+ * permission-mode badge, so it renders nothing (zero rows) in the default mode.
  */
 export function FooterBar({ data }: { data: FooterData }) {
   const showMode = !!data.mode && data.mode !== "default";

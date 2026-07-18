@@ -423,7 +423,7 @@ function InlineText({ text, maxWidth }: { text: string; maxWidth?: number }) {
   );
 }
 
-function CodeBlock({ lang, lines }: { lang: string; lines: string[] }) {
+function CodeBlock({ lang, lines, flushTop = false }: { lang: string; lines: string[]; flushTop?: boolean }) {
   const theme = useTheme();
   // Lazy init: try sync highlight when shiki is already warm so the very first
   // paint carries highlighted output. Fall back to raw lines if shiki hasn't
@@ -454,7 +454,7 @@ function CodeBlock({ lang, lines }: { lang: string; lines: string[] }) {
   }, [lang, lines]);
 
   return (
-    <Box flexDirection="column" marginY={1}>
+    <Box flexDirection="column" marginTop={flushTop ? 0 : 1} marginBottom={1}>
       {lang && <Text color={theme.muted}>{lang}</Text>}
       <Box flexDirection="column">
         {highlighted.map((line, i) => (
@@ -469,10 +469,12 @@ function TableBlock({
   headers,
   rows,
   maxWidth,
+  flushTop = false,
 }: {
   headers: string[];
   rows: string[][];
   maxWidth?: number;
+  flushTop?: boolean;
 }) {
   const theme = useTheme();
   const { columns: termWidth } = useTerminalSize();
@@ -545,7 +547,7 @@ function TableBlock({
   };
 
   return (
-    <Box flexDirection="column" marginY={1}>
+    <Box flexDirection="column" marginTop={flushTop ? 0 : 1} marginBottom={1}>
       <Text>{top}</Text>
       {renderRow(headers, "header", true)}
       <Text>{mid}</Text>
@@ -805,7 +807,7 @@ function inlineSegmentsWidth(segments: MarkdownInlineSegment[]): number {
   return segments.reduce((sum, segment) => sum + visualWidth(segment.text), 0);
 }
 
-function HeadingBlock({ level, text }: { level: number; text: string }) {
+function HeadingBlock({ level, text, flushTop = false }: { level: number; text: string; flushTop?: boolean }) {
   const theme = useTheme();
   const props: any = { bold: true };
   if (level === 1) {
@@ -817,7 +819,7 @@ function HeadingBlock({ level, text }: { level: number; text: string }) {
     props.color = theme.warning;
   }
   return (
-    <Box marginTop={1} marginBottom={1}>
+    <Box marginTop={flushTop ? 0 : 1} marginBottom={1}>
       <Text {...props}>{text}</Text>
     </Box>
   );
@@ -841,9 +843,12 @@ function HeadingBlock({ level, text }: { level: number; text: string }) {
 export function StreamingMarkdown({
   content,
   maxWidth,
+  flushTop = false,
 }: {
   content: string;
   maxWidth?: number;
+  /** See MarkdownContent: applies to the true document start only. */
+  flushTop?: boolean;
 }) {
   const stablePrefixRef = React.useRef("");
 
@@ -863,8 +868,10 @@ export function StreamingMarkdown({
 
   return (
     <Box flexDirection="column">
-      {stablePrefix && <MarkdownContent content={stablePrefix} maxWidth={maxWidth} />}
-      {unstableSuffix && <MarkdownContent content={unstableSuffix} maxWidth={maxWidth} />}
+      {stablePrefix && <MarkdownContent content={stablePrefix} maxWidth={maxWidth} flushTop={flushTop} />}
+      {/* The suffix is the document start only until the first block commits
+          to the prefix; after that it is mid-document and keeps its margin. */}
+      {unstableSuffix && <MarkdownContent content={unstableSuffix} maxWidth={maxWidth} flushTop={flushTop && !stablePrefix} />}
     </Box>
   );
 }
@@ -885,25 +892,33 @@ export function splitListItem(line: string): { prefix: string; content: string; 
 export function MarkdownContent({
   content,
   maxWidth,
+  flushTop = false,
 }: {
   content: string;
   maxWidth?: number;
+  /**
+   * Suppress the FIRST block's top margin. Set when this document renders
+   * beside an inline marker (the timeline "●  " gutter): a leading heading /
+   * code block / table would otherwise start one row below the marker.
+   */
+  flushTop?: boolean;
 }) {
   const blocks = React.useMemo(() => parseMarkdownBlocks(content), [content]);
 
   return (
     <Box flexDirection="column">
       {blocks.map((block, i) => {
+        const blockFlushTop = flushTop && i === 0;
         if (block.type === "code") {
-          return <CodeBlock key={i} lang={block.lang} lines={block.lines} />;
+          return <CodeBlock key={i} lang={block.lang} lines={block.lines} flushTop={blockFlushTop} />;
         }
         if (block.type === "table") {
           return (
-            <TableBlock key={i} headers={block.headers} rows={block.rows} maxWidth={maxWidth} />
+            <TableBlock key={i} headers={block.headers} rows={block.rows} maxWidth={maxWidth} flushTop={blockFlushTop} />
           );
         }
         if (block.type === "heading") {
-          return <HeadingBlock key={i} level={block.level} text={block.text} />;
+          return <HeadingBlock key={i} level={block.level} text={block.text} flushTop={blockFlushTop} />;
         }
         return (
           <Box key={i} flexDirection="column" marginBottom={1}>

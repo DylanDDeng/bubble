@@ -31,7 +31,9 @@ describe("Ink footer", () => {
 
     expect(output).toContain("on");
     expect(output).toContain("⇧⇥");
-    // Path / provider / model chrome lives in the welcome banner now.
+    // Path / provider / model chrome lives in the welcome banner and the
+    // model-switch transcript notices, never in the footer.
+    expect(output).not.toContain("Model:");
     expect(output).not.toContain("ctx ");
     expect(output).not.toContain("•");
   });

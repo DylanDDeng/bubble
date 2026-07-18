@@ -14,7 +14,7 @@ export interface DisplayMessage {
   reasoning?: string;
   toolCalls?: DisplayToolCall[];
   parts?: DisplayMessagePart[];
-  syntheticKind?: "ui_summary" | "ui_compact_summary" | "ui_interrupt";
+  syntheticKind?: "ui_summary" | "ui_compact_summary" | "ui_interrupt" | "ui_notice";
   /** Markdown body shown inside a `ui_compact_summary` card. */
   compactionSummary?: string;
   hiddenCount?: number;
