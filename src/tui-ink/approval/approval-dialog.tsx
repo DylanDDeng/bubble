@@ -159,7 +159,7 @@ function basename(p: string): string {
 function RequestPreview({ request }: { request: ApprovalRequest }) {
   switch (request.type) {
     case "bash":
-      return <BashPreview command={request.command} cwd={request.cwd} />;
+      return <BashPreview command={request.command} cwd={request.cwd} background={request.background} />;
     case "edit":
       return <DiffView diff={request.diff} />;
     case "patch":
@@ -234,7 +234,7 @@ function AgentProfilePreview({ path, promptPreview }: { path: string; promptPrev
   );
 }
 
-function BashPreview({ command, cwd }: { command: string; cwd: string }) {
+function BashPreview({ command, cwd, background }: { command: string; cwd: string; background?: boolean }) {
   const theme = useTheme();
   const danger = classifyBashDanger(command);
   return (
@@ -244,6 +244,9 @@ function BashPreview({ command, cwd }: { command: string; cwd: string }) {
         <Text>{command}</Text>
       </Box>
       <Text color={theme.muted}>cwd: {compressHome(cwd)}</Text>
+      {background && (
+        <Text color={theme.warning}>runs in background — keeps running after this turn ends</Text>
+      )}
       {danger && (
         <Box marginTop={1}>
           <Text color={theme.warning} bold>

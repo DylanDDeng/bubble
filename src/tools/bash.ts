@@ -11,21 +11,49 @@ import type { ToolRegistryEntry, ToolResult } from "../types.js";
 import { parseReadBashCommand, parseSearchBashCommand } from "../agent/tool-intent.js";
 import { referencesSensitivePath } from "./sensitive-paths.js";
 import type { FileStateTracker } from "./file-state.js";
+import type { ProcessManager } from "../tasks/manager.js";
+import type { PromotionChannel } from "../tasks/promotion.js";
 
 const MAX_OUTPUT = 50 * 1024;
 const POST_EXIT_STDIO_GRACE_MS = 150;
 const FORCE_KILL_AFTER_MS = 750;
 const ABORT_SETTLE_AFTER_MS = 1500;
 
-type TerminalKind = "exit" | "error" | "timeout" | "cancelled";
+// "promoted" (design §2.5): a Ctrl+G promotion resolves the tool call early
+// while the process keeps running under the task manager — its finish path
+// must NOT kill the process group or destroy the stdio streams.
+type TerminalKind = "exit" | "error" | "timeout" | "cancelled" | "promoted";
 
-export function createBashTool(cwd: string, approval?: ApprovalController, _fileState?: FileStateTracker): ToolRegistryEntry {
+export interface BashToolOptions {
+  /**
+   * Background tasks are a per-host capability (background-tasks design
+   * §2.0): only the interactive TUI wires the manager AND enables the flag.
+   * Print mode, feishu/desktop hosts, and worktree/workflow children leave
+   * this off, so run_in_background is rejected there with a clear error.
+   */
+  processManager?: ProcessManager;
+  allowBackgroundTasks?: boolean;
+  /** Ctrl+G send-to-background requests, keyed by toolCall id (design §2.5). */
+  promotionChannel?: PromotionChannel;
+}
+
+export function createBashTool(
+  cwd: string,
+  approval?: ApprovalController,
+  _fileState?: FileStateTracker,
+  options: BashToolOptions = {},
+): ToolRegistryEntry {
+  const backgroundEnabled = options.allowBackgroundTasks === true && !!options.processManager;
   return {
     name: "bash",
     effect: "unknown",
     requiresApproval: true,
     description:
-      "Execute a bounded bash command in the working directory. Use timeout for long-running commands. For persistent dev servers or watchers such as npm run dev, next dev, vite, or webpack --watch, use the managed server tools instead of backgrounding a bash command (deferred: load them first via tool_search with query 'select:start_server,server_status,server_logs,stop_server').",
+      "Execute a bounded bash command in the working directory. Use timeout for long-running commands. "
+      + (backgroundEnabled
+        ? "For long one-shot commands with a definite end (full test suites, release builds, downloads), pass run_in_background: true — the command keeps running while you continue working and you are notified when it finishes; never poll with foreground sleep. "
+        : "")
+      + "For persistent dev servers or watchers such as npm run dev, next dev, vite, or webpack --watch, use the managed server tools instead of backgrounding a bash command (deferred: load them first via tool_search with query 'select:start_server,server_status,server_logs,stop_server').",
     parameters: {
       type: "object",
       properties: {
@@ -35,6 +63,14 @@ export function createBashTool(cwd: string, approval?: ApprovalController, _file
           description: "One short sentence (5-10 words) describing what this command does, shown to the user in the UI. Write it in the same language the user is conversing in.",
         },
         timeout: { type: "number", description: "Timeout in seconds (optional)" },
+        ...(backgroundEnabled
+          ? {
+              run_in_background: {
+                type: "boolean",
+                description: "Run as a background task: returns a task id immediately and the command keeps running while you continue. Only for long one-shot commands with a definite end; not for quick commands or persistent servers.",
+              },
+            }
+          : {}),
       },
       required: ["command"],
     },
@@ -45,6 +81,7 @@ export function createBashTool(cwd: string, approval?: ApprovalController, _file
 
       const command = String(args.command);
       const timeoutSec = typeof args.timeout === "number" ? args.timeout : 60;
+      const runInBackground = args.run_in_background === true;
       const parsedSearch = parseSearchBashCommand(command);
       const parsedRead = parsedSearch ? undefined : parseReadBashCommand(command);
 
@@ -60,12 +97,53 @@ export function createBashTool(cwd: string, approval?: ApprovalController, _file
         };
       }
 
-      const gate = await gateToolAction(approval, { type: "bash", command, cwd });
+      if (runInBackground && !backgroundEnabled) {
+        return {
+          content:
+            "Error: run_in_background is unavailable in this session (non-interactive host or subagent). "
+            + "Run the command in the foreground with an explicit timeout instead.",
+          isError: true,
+          status: "blocked",
+          metadata: { kind: "shell", reason: "background_unavailable" },
+        };
+      }
+
+      const gate = await gateToolAction(approval, {
+        type: "bash",
+        command,
+        cwd,
+        ...(runInBackground ? { background: true } : {}),
+      });
       if (!gate.approved) return gate.result;
+
+      if (runInBackground) {
+        try {
+          const task = options.processManager!.startTask({
+            command,
+            description: typeof args.description === "string" ? args.description : undefined,
+            cwd: ctx.cwd || cwd,
+            ownerSessionId: ctx.sessionID,
+          });
+          // Make the read/kill path available immediately — no tool_search hop
+          // (design §2.1: programmatic unlock at first spawn).
+          ctx.agent?.unlockDeferredTools?.(["task_output", "kill_task"]);
+          return {
+            content:
+              `Started background task ${task.id}${task.description ? ` (${task.description})` : ""}. `
+              + "It runs while you continue working; you will be notified when it finishes. "
+              + "Use task_output to check on it, kill_task to stop it.",
+            status: "success",
+            metadata: { kind: "shell", command, taskId: task.id, background: true },
+          };
+        } catch (error: any) {
+          return { content: `Error: ${error?.message ?? String(error)}`, isError: true };
+        }
+      }
 
       return new Promise((resolve) => {
         const shell = platform() === "win32" ? "cmd.exe" : "bash";
         const shellArgs = platform() === "win32" ? ["/c", command] : ["-c", command];
+        const spawnedAt = Date.now();
 
         const child = spawn(shell, shellArgs, {
           cwd,
@@ -77,6 +155,8 @@ export function createBashTool(cwd: string, approval?: ApprovalController, _file
 
         let stdout = "";
         let stderr = "";
+        let promotedTaskId: string | undefined;
+        let unregisterPromotion: (() => void) | undefined;
         let stdoutTruncated = false;
         let stderrTruncated = false;
         let stdoutEnded = child.stdout === null;
@@ -135,6 +215,7 @@ export function createBashTool(cwd: string, approval?: ApprovalController, _file
           if (settleHandle) clearTimeout(settleHandle);
           if (postExitHandle) clearTimeout(postExitHandle);
           ctx.abortSignal?.removeEventListener("abort", abortChild);
+          unregisterPromotion?.();
           child.stdout?.removeListener("data", onStdoutData);
           child.stderr?.removeListener("data", onStderrData);
           child.stdout?.removeListener("end", onStdoutEnd);
@@ -161,6 +242,21 @@ export function createBashTool(cwd: string, approval?: ApprovalController, _file
           if (resolved) return;
           resolved = true;
           cleanup();
+
+          if (terminal === "promoted") {
+            // Ctrl+G promotion (design §2.5): the process lives on under the
+            // task manager — skip the group kill AND the stream destruction
+            // (the manager attached its own data listeners in adoptTask).
+            resolve({
+              content: buildOutput(
+                `[Moved to background: ${promotedTaskId}. The command keeps running; check it with task_output.]`,
+              ),
+              status: "success",
+              metadata: { kind: "shell", command, taskId: promotedTaskId, background: true },
+            });
+            return;
+          }
+
           cleanupBackgroundGroup();
           destroyStreams();
 
@@ -292,6 +388,38 @@ export function createBashTool(cwd: string, approval?: ApprovalController, _file
           if (!terminal) terminal = "exit";
           finish();
         };
+
+        // Ctrl+G promotion (design §2.5): flag-flip into the task manager.
+        // Registered only for background-capable hosts; a no-op once any
+        // terminal state is set (benign race with exit/timeout/cancel).
+        const promoteToBackground = (): string | undefined => {
+          if (resolved || terminal) return undefined;
+          if (!options.processManager) return undefined;
+          try {
+            const task = options.processManager.adoptTask({
+              command,
+              description: typeof args.description === "string" ? args.description : undefined,
+              cwd: ctx.cwd || cwd,
+              ownerSessionId: ctx.sessionID,
+              child,
+              outputSoFar: [stdout && `stdout:\n${stdout}`, stderr && `stderr:\n${stderr}`]
+                .filter(Boolean)
+                .join(""),
+              startedAt: spawnedAt,
+            });
+            promotedTaskId = task.id;
+          } catch {
+            // Task cap reached or adopt failed — keep running in the foreground.
+            return undefined;
+          }
+          terminal = "promoted";
+          ctx.agent?.unlockDeferredTools?.(["task_output", "kill_task"]);
+          finish();
+          return promotedTaskId;
+        };
+        if (backgroundEnabled && options.promotionChannel && ctx.toolCall?.id) {
+          unregisterPromotion = options.promotionChannel.register(ctx.toolCall.id, promoteToBackground);
+        }
 
         timeoutHandle = setTimeout(timeoutChild, timeoutSec * 1000);
         if (ctx.abortSignal?.aborted) abortChild();

@@ -49,6 +49,13 @@ export interface BashApprovalRequest {
   type: "bash";
   command: string;
   cwd: string;
+  /**
+   * The command will run as a background task that outlives the turn
+   * (background-tasks design §2.4). Shown in the approval dialog and passed
+   * to permission hooks so org policy can discriminate; allow rules, the
+   * session allowlist, and bypass approve it like foreground by design.
+   */
+  background?: boolean;
 }
 
 export interface LspApprovalRequest {

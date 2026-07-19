@@ -33,6 +33,7 @@ import {
   type HookRunRequest,
 } from "./hooks/index.js";
 import { createDefaultHooks } from "./orchestrator/default-hooks.js";
+import { buildTaskLifecycleReminder } from "./agent/task-lifecycle-reminder.js";
 import { mergeAgentCategories, parseThinkingLevel, resolveModelRoute, resolveSubagentRoute, type AgentCategoriesConfig, type ResolvedSubagentRoute } from "./agent/categories.js";
 import { DEFAULT_AGENT_ROUTING, nearModelMatches, sanitizeAgentRouting, tierContextFromSnapshot, type AgentRoutingConfig, type RoutableModelEntry, type RoutableModelIndex, type RoutingSnapshot, type RoutingSnapshotAccessor } from "./agent/routing-catalog.js";
 import { buildModelRoutingPrompt } from "./prompt/routing.js";
@@ -214,6 +215,17 @@ export class Agent {
   messages: Message[] = [];
   private provider: Provider;
   private sessionID?: string;
+  /**
+   * Bridge to the unified process manager's background tasks, wired by the
+   * host (main.ts) when the host supports them (background-tasks design
+   * §2.3a). list() is pre-filtered to the agent's bound session.
+   */
+  backgroundTasks?: {
+    list: () => import("./tasks/manager.js").BackgroundTaskInfo[];
+    version: () => number;
+    outputTail: (id: string) => string | undefined;
+  };
+  private lastTaskReminderVersion = -1;
   private _providerId: string;
   private _model: string;
   private tools: Map<string, ToolRegistryEntry> = new Map();
@@ -381,6 +393,38 @@ export class Agent {
     if (deferredNames.length > 0) {
       this.injectSystemReminder(buildDeferredToolsReminder(deferredNames));
     }
+  }
+
+  /**
+   * Rebinds the agent to a new session (TUI session switch). Keeps
+   * ownerSessionId on newly spawned background tasks and managed servers
+   * accurate (background-tasks design §2.2c).
+   */
+  setSessionID(sessionID: string | undefined): void {
+    this.sessionID = sessionID;
+  }
+
+  getSessionID(): string | undefined {
+    return this.sessionID;
+  }
+
+  /**
+   * Background-task reminder, state-change gated (design §2.3a): returns a
+   * reminder only when the owned task set changed since the last emission
+   * (started/finished/killed). The reminder channel is append-only, so
+   * emitting on every model call while tasks are merely alive would stack
+   * persistent duplicates that neither pruning nor compaction removes.
+   */
+  consumeBackgroundTaskReminder(): string | undefined {
+    if (!this.backgroundTasks) return undefined;
+    const version = this.backgroundTasks.version();
+    if (version === this.lastTaskReminderVersion) return undefined;
+    this.lastTaskReminderVersion = version;
+    return buildTaskLifecycleReminder({
+      tasks: this.backgroundTasks.list(),
+      outputTail: (id) => this.backgroundTasks?.outputTail(id),
+      toolsAvailable: this.unlockedDeferred?.has("task_output") ?? false,
+    });
   }
 
   private async runExternalHook(

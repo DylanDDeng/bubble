@@ -67,6 +67,14 @@ export function createDefaultHooks(): TurnHooks[] {
           ctx.state.workflowPhase = "investigate";
           ctx.state.workflowKey = "";
         }
+        // Background-task truth at turn start: completions that landed while
+        // the agent was idle (or during another session's turn) reach the
+        // model here; the same state-change gate prevents duplicates with the
+        // beforeContinuation emission (background-tasks design §2.3a).
+        const backgroundTaskReminder = ctx.agent.consumeBackgroundTaskReminder?.();
+        if (backgroundTaskReminder) {
+          ctx.queueReminder(backgroundTaskReminder);
+        }
         for (const reminder of ctx.state.governor.consumePendingReminders()) {
           ctx.queueReminder(reminder);
         }
@@ -181,6 +189,14 @@ export function createDefaultHooks(): TurnHooks[] {
           if (reminder) {
             ctx.queueReminder(reminder);
           }
+        }
+        // Background-task truth: state-change gated inside the agent (a task
+        // started/finished/killed since the last emission), so a mid-turn
+        // completion reaches the model without stacking per-call duplicates
+        // (background-tasks design §2.3a).
+        const taskReminder = ctx.agent.consumeBackgroundTaskReminder?.();
+        if (taskReminder) {
+          ctx.queueReminder(taskReminder);
         }
         // Routing detector note (model-routing design §6): rides the same
         // channel as the lifecycle reminder, once per session. Consuming also

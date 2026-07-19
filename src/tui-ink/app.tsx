@@ -85,6 +85,26 @@ import { shouldContinueGoal, stopReasonNotice } from "../goal/engine.js";
 import { goalCompleteNotice, goalIndicatorLine, goalSummaryText } from "../goal/format.js";
 import { tokenUsageTotal } from "../goal/usage.js";
 import { formatInternalContextBlock } from "../agent/internal-reminder-sanitizer.js";
+import type { BackgroundTaskInfo, ProcessManager } from "../tasks/manager.js";
+import type { PromotionChannel } from "../tasks/promotion.js";
+import {
+  MAX_ACTIVE_LOOPS,
+  decideLoopFiring,
+  formatInterval,
+  formatLoopList,
+  parseLoopCommand,
+  type LoopState,
+} from "../loop/engine.js";
+import {
+  TaskWakeCoalescer,
+  findDanglingTaskStarts,
+  formatTaskWakeSummary,
+  isPidAlive,
+  shouldFireTaskWake,
+  taskEligibleForWake,
+} from "../tasks/wake.js";
+
+const TASK_WAKE_DEBOUNCE_MS = 2000;
 import { collectUsageStatsBundle, formatStatsPanelBody, rangeLabel, type StatsRange, type UsageStatsBundle } from "../stats/usage.js";
 import type { ExternalRuntimeManager, ExternalRuntimeModel } from "../external-runtime/types.js";
 import { GrokRuntimeError } from "../external-runtime/grok-errors.js";
@@ -137,6 +157,12 @@ interface AppProps {
   runMemorySummary?: (scope?: MemoryScope) => Promise<string>;
   runMemoryRefresh?: (scope?: MemoryScope) => Promise<string>;
   goalStore?: GoalStore;
+  /** Unified process manager; drives task notices, auto-resume, and the status row. */
+  processManager?: ProcessManager;
+  /** tasks.auto_resume user config (design §2.3b). Default ON. */
+  tasksAutoResume?: boolean;
+  /** Ctrl+G send-to-background channel shared with the bash tool (design §2.5). */
+  promotionChannel?: PromotionChannel;
   /** Whether the bypassPermissions mode is reachable via Shift+Tab cycling. */
   bypassEnabled?: boolean;
   updateNotice?: string;
@@ -182,6 +208,25 @@ function slashResultNoticeKind(result: string): DisplayMessage["syntheticKind"] 
   return /^(Grok m|M)odel switched to /.test(result) ? "ui_notice" : undefined;
 }
 
+/**
+ * True when a user message is nothing but harness-injected internal blocks
+ * (goal kicks, task wakes) — hidden live, so hidden on reconstruction too.
+ */
+export function isInternalBlockOnlyContent(content: Message["content"]): boolean {
+  if (typeof content !== "string") return false;
+  const trimmed = content.trim();
+  return /^<bubble_internal_(?:context|reminder)\b/.test(trimmed)
+    && /<\/bubble_internal_(?:context|reminder)>$/.test(trimmed);
+}
+
+/** Status-row summary for running background tasks (design §2.5). */
+function taskRowSummary(tasks: BackgroundTaskInfo[], nowTick: number): string {
+  const first = tasks[0]!;
+  const label = first.description?.trim() || first.command.replace(/\s+/g, " ").slice(0, 32);
+  const elapsed = Math.max(0, Math.round((nowTick - first.startedAt) / 1000));
+  return `${label} ${elapsed}s`;
+}
+
 function friendlyCwd(cwd: string): string {
   const home = os.homedir();
   if (cwd === home) return "~";
@@ -200,12 +245,17 @@ function truncate(value: string, max: number) {
   return `${value.slice(0, Math.max(0, max - 1))}…`;
 }
 
-function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] {
+export function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] {
   const result: DisplayMessage[] = [];
   for (const m of agentMessages) {
     if (m.role === "system" || m.role === "tool") continue;
     if (m.role === "user") {
       if ((m as { isMeta?: boolean }).isMeta) continue; // <system-reminder> injections are not user-visible
+      // Harness-initiated kicks (goal continuations, task wakes) persist as
+      // user-role messages wrapped in internal blocks so the model keeps
+      // them across resume — but they were hidden live and must stay hidden
+      // when the transcript is rebuilt.
+      if (isInternalBlockOnlyContent(m.content)) continue;
       result.push({
         key: nextDisplayMessageKey("user"),
         role: "user",
@@ -328,9 +378,13 @@ export const INK_LOCAL_SLASH_COMMANDS = [
     name: "goal",
     description: "Set/manage an autonomous goal (/goal <objective>|clear|pause|resume|edit)",
   },
+  {
+    name: "loop",
+    description: "Run a prompt on a recurring interval (/loop 5m <prompt>|list|stop [id])",
+  },
 ] as const;
 
-export function App({ agent, args, sessionManager: initialSessionManager, switchSession, createProvider, registry, skillRegistry, planHandlerRef, approvalHandlerRef, questionController, bashAllowlist, settingsManager, lspService, mcpManager, themeMode: initialThemeMode, themeOverrides, detectedTheme, onThemeModeChange, flushMemory, runMemoryCompaction, runMemorySummary, runMemoryRefresh, goalStore, bypassEnabled, updateNotice, updateNoticeRefresh, hookController, externalRuntime, onExit }: AppProps) {
+export function App({ agent, args, sessionManager: initialSessionManager, switchSession, createProvider, registry, skillRegistry, planHandlerRef, approvalHandlerRef, questionController, bashAllowlist, settingsManager, lspService, mcpManager, themeMode: initialThemeMode, themeOverrides, detectedTheme, onThemeModeChange, flushMemory, runMemoryCompaction, runMemorySummary, runMemoryRefresh, goalStore, processManager, tasksAutoResume, promotionChannel, bypassEnabled, updateNotice, updateNoticeRefresh, hookController, externalRuntime, onExit }: AppProps) {
   const [sessionManager, setSessionManager] = useState(initialSessionManager);
   const [externalRuntimeBinding, setExternalRuntimeBinding] = useState(
     () => initialSessionManager?.getMetadata().externalRuntime,
@@ -486,16 +540,25 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   // 1Hz tick keeps the composer activity indicator animated while the agent is
   // running without churning renders at idle.
   const [nowTick, setNowTick] = useState<number>(() => Date.now());
+  // Live background-task snapshot for the status row (design §2.5); refreshed
+  // by the manager subscription effect below.
+  const [taskSnapshot, setTaskSnapshot] = useState<BackgroundTaskInfo[]>([]);
+  const runningTasks = useMemo(
+    () => taskSnapshot.filter((task) => task.status === "running"),
+    [taskSnapshot],
+  );
   // Timestamp of when the current agent run started. Used only for the final
   // per-task duration summary.
   const runStartRef = useRef<number | null>(null);
   // Mark the moment the run started; flips back to null in the finally block.
+  // Also ticks while background tasks run at idle so their elapsed counter
+  // keeps moving (design §2.5).
   useEffect(() => {
-    if (!isRunning) return;
+    if (!isRunning && runningTasks.length === 0) return;
     setNowTick(Date.now());
     const t = setInterval(() => setNowTick(Date.now()), 1000);
     return () => clearInterval(t);
-  }, [isRunning]);
+  }, [isRunning, runningTasks.length]);
 
   const userConfig = new UserConfig();
   const safeRegistry = registry ?? new ProviderRegistry(userConfig);
@@ -718,6 +781,25 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     if (isCtrlLetterInput(input, key, "p") && !pickerMode && !activeAbortRef.current) {
       setStatsPanel(null);
       setPickerMode("slash");
+      return;
+    }
+
+    // Ctrl+G: promote the running foreground bash command to a background
+    // task (design §2.5). A no-op when nothing promotable is running.
+    if (isCtrlLetterInput(input, key, "g") && !pickerMode && promotionChannel) {
+      const liveTools = [
+        ...streamingTools,
+        ...streamingParts.flatMap((part) => (part.type === "tools" ? part.toolCalls : [])),
+      ];
+      const candidate = [...liveTools].reverse().find(
+        (tool) => tool.name === "bash" && !tool.result && promotionChannel.hasPromotable(tool.id),
+      );
+      if (candidate) {
+        const taskId = promotionChannel.requestPromotion(candidate.id);
+        if (taskId) {
+          addMessage("assistant", `Moved to background: ${taskId} — the command keeps running (Ctrl+G).`, "ui_notice");
+        }
+      }
       return;
     }
 
@@ -1063,6 +1145,8 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     clearComposerDraft();
     sessionManagerRef.current = result.manager;
     setSessionManager(result.manager);
+    // Keep ownerSessionId on newly spawned tasks/servers accurate (§2.2c).
+    agent.setSessionID(result.manager.getSessionFile());
     const nextExternalBinding = result.manager.getMetadata().externalRuntime;
     externalRuntimeBindingRef.current = nextExternalBinding;
     setExternalRuntimeBinding(nextExternalBinding);
@@ -1411,6 +1495,10 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
       closePicker();
     });
   }, [addMessage, agent, closePicker, createProvider, keyProviderId, safeRegistry, transitionToNative]);
+
+  // /loop handler lives below handleSubmit (it needs addMessage only); the
+  // ref breaks the declaration cycle so handleSubmit can route to it.
+  const handleLoopCommandRef = useRef<((raw: string) => void) | null>(null);
 
   const handleSubmit = useCallback(
     async (payload: SubmitPayload | string) => {
@@ -2114,6 +2202,14 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         }
       };
 
+      // Background-task wake (design §2.3b): an internal continuation, not a
+      // user message — hidden from the transcript (the ✦ notice row is the
+      // user-facing record) and wrapped as internal context for the model.
+      if (initialPayload.internal === "task_wake") {
+        await runAgentInput(input, "", [], { hidden: true });
+        return;
+      }
+
       // Slash commands and skill invocations drop any attached images —
       // they're meant for pure command routing.
       if (input.trimStart().startsWith("/")) {
@@ -2131,6 +2227,11 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         if (!externalSessionBound) {
           if (/^\/goal(?:\s|$)/.test(input.trim())) {
             await handleGoalCommand(input);
+            return;
+          }
+
+          if (/^\/loop(?:\s|$)/.test(input.trim())) {
+            handleLoopCommandRef.current?.(input);
             return;
           }
 
@@ -2253,6 +2354,206 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     },
     [addMessage, agent, args.cwd, openPicker, openSessionPicker, openRewindPicker, openStatsPanel, createProvider, currentSessionFile, externalRuntime, externalRuntimeBinding, externalSessionBound, fillComposer, grokSessionBound, prepareSubmitDisplay, refreshExternalRuntimeBinding, safeRegistry, safeSkillRegistry, startFreshSession, transitionToNative, unsupportedExternalSessionBound, updateDisplayMessages, queueInput, submitSteer, requestExit, setStartingSubmit]
   );
+
+  // --- Background tasks: markers, notices, auto-resume (design §2.3b) ---
+  // Owner SessionManager captured at spawn so markers always land in the
+  // owner session's jsonl, regardless of what is bound when the task ends.
+  const taskOwnerSessionsRef = useRef(new Map<string, SessionManager>());
+  // Completions for non-current sessions, held until switch-back (§2.2c).
+  const pendingTaskCompletionsRef = useRef(new Map<string, BackgroundTaskInfo[]>());
+  const taskWakeCoalescerRef = useRef<TaskWakeCoalescer | null>(null);
+
+  const announceTaskCompletion = useCallback((task: BackgroundTaskInfo) => {
+    const elapsed = Math.round(((task.endedAt ?? Date.now()) - task.startedAt) / 1000);
+    addMessage(
+      "assistant",
+      `Background task ${task.id}${task.description ? ` (${task.description})` : ""} ${task.status}${task.exitCode != null ? ` — exit ${task.exitCode}` : ""} in ${elapsed}s.`,
+      "ui_notice",
+    );
+  }, [addMessage]);
+
+  const fireTaskWake = useCallback((tasks: BackgroundTaskInfo[]) => {
+    if (!processManager) return;
+    // Gate at FIRE time (after the debounce): a turn that started meanwhile
+    // or queued user input suppresses the wake — the state-change reminder
+    // carries the completion into the next turn instead.
+    if (!shouldFireTaskWake({
+      autoResume: tasksAutoResume !== false,
+      turnRunning: !!activeAbortRef.current,
+      queuedInputs: queuedInputsRef.current.length,
+      exiting: exitRequestedRef.current,
+    })) {
+      return;
+    }
+    const summary = formatTaskWakeSummary(tasks, (id) => processManager.taskOutputTail(id, 2000));
+    for (const task of tasks) processManager.markTaskDelivered(task.id);
+    void handleSubmit({
+      text: formatInternalContextBlock("task-finished", summary),
+      images: [],
+      internal: "task_wake",
+    });
+  }, [handleSubmit, processManager, tasksAutoResume]);
+
+  const refreshTaskSnapshot = useCallback(() => {
+    if (!processManager) return;
+    setTaskSnapshot(processManager.listTasks(sessionManagerRef.current?.getSessionFile()));
+  }, [processManager]);
+
+  useEffect(() => {
+    refreshTaskSnapshot();
+  }, [refreshTaskSnapshot, sessionManager]);
+
+  useEffect(() => {
+    if (!processManager) return;
+    taskWakeCoalescerRef.current = new TaskWakeCoalescer(TASK_WAKE_DEBOUNCE_MS, fireTaskWake);
+    const unsubSnapshot = processManager.onChange(() => refreshTaskSnapshot());
+    const unsubChange = processManager.onChange((task) => {
+      if (task.status !== "running" || taskOwnerSessionsRef.current.has(task.id)) return;
+      const owner = sessionManagerRef.current;
+      if (!owner || task.ownerSessionId !== owner.getSessionFile()) return;
+      taskOwnerSessionsRef.current.set(task.id, owner);
+      owner.appendMarker("task_started", JSON.stringify({
+        id: task.id,
+        pid: task.pid,
+        startedAt: task.startedAt,
+        command: task.command,
+        description: task.description,
+      }));
+    });
+    const unsubFinish = processManager.onTaskFinished((task) => {
+      taskOwnerSessionsRef.current.get(task.id)?.appendMarker(
+        task.status === "killed" ? "task_killed" : "task_finished",
+        JSON.stringify({ id: task.id, status: task.status, exitCode: task.exitCode ?? null, endedAt: task.endedAt }),
+      );
+      const currentFile = sessionManagerRef.current?.getSessionFile();
+      if (task.ownerSessionId !== currentFile) {
+        if (taskEligibleForWake(task) && task.ownerSessionId) {
+          const held = pendingTaskCompletionsRef.current.get(task.ownerSessionId) ?? [];
+          held.push(task);
+          pendingTaskCompletionsRef.current.set(task.ownerSessionId, held);
+        }
+        return;
+      }
+      announceTaskCompletion(task);
+      if (taskEligibleForWake(task)) taskWakeCoalescerRef.current?.add(task);
+    });
+    return () => {
+      unsubSnapshot();
+      unsubChange();
+      unsubFinish();
+      taskWakeCoalescerRef.current?.cancel();
+      taskWakeCoalescerRef.current = null;
+    };
+  }, [announceTaskCompletion, fireTaskWake, processManager, refreshTaskSnapshot]);
+
+  // Switch-back sweep: completions held for this session fire now (§2.2c).
+  useEffect(() => {
+    if (!processManager) return;
+    const file = sessionManager?.getSessionFile();
+    if (!file) return;
+    const held = pendingTaskCompletionsRef.current.get(file);
+    if (!held?.length) return;
+    pendingTaskCompletionsRef.current.delete(file);
+    for (const task of held) {
+      announceTaskCompletion(task);
+      taskWakeCoalescerRef.current?.add(task);
+    }
+  }, [announceTaskCompletion, processManager, sessionManager]);
+
+  // Resume-time orphan report: dangling task_started markers from a previous
+  // process, probed for liveness (§2.2c). Runs once per mount.
+  const orphanProbeDoneRef = useRef(false);
+  useEffect(() => {
+    if (!processManager || orphanProbeDoneRef.current) return;
+    orphanProbeDoneRef.current = true;
+    const manager = sessionManagerRef.current;
+    if (!manager) return;
+    let entries: Array<{ type: string; kind?: string; value?: string }>;
+    try {
+      entries = manager.getEntries() as Array<{ type: string; kind?: string; value?: string }>;
+    } catch {
+      return;
+    }
+    for (const orphan of findDanglingTaskStarts(entries)) {
+      const alive = isPidAlive(orphan.pid);
+      addMessage(
+        "assistant",
+        alive
+          ? `Background task ${orphan.id}${orphan.description ? ` (${orphan.description})` : ""} from a previous process is still running (pid ${orphan.pid}). Kill it manually if unwanted: kill ${orphan.pid}`
+          : `Background task ${orphan.id}${orphan.description ? ` (${orphan.description})` : ""} was orphaned by a previous process and is no longer running.`,
+        "ui_notice",
+      );
+    }
+  }, [addMessage, processManager]);
+
+  // --- /loop: recurring prompts (design §2.6) ---
+  const loopsRef = useRef<LoopState[]>([]);
+  const nextLoopIdRef = useRef(1);
+  const handleSubmitRef = useRef(handleSubmit);
+  handleSubmitRef.current = handleSubmit;
+
+  const handleLoopCommand = useCallback((raw: string) => {
+    const parsed = parseLoopCommand(raw);
+    if (parsed.action === "help" || parsed.error) {
+      addMessage("assistant", parsed.error ?? "Usage: /loop <interval> <prompt> (e.g. /loop 5m check CI status). Also: /loop list, /loop stop [id].");
+      return;
+    }
+    if (parsed.action === "list") {
+      addMessage("assistant", formatLoopList(loopsRef.current, Date.now()));
+      return;
+    }
+    if (parsed.action === "stop") {
+      if (parsed.stopId === undefined) {
+        const count = loopsRef.current.length;
+        loopsRef.current = [];
+        addMessage("assistant", count > 0 ? `Stopped ${count} loop${count === 1 ? "" : "s"}.` : "No active loops.");
+        return;
+      }
+      const before = loopsRef.current.length;
+      loopsRef.current = loopsRef.current.filter((loop) => loop.id !== parsed.stopId);
+      addMessage("assistant", loopsRef.current.length < before ? `Stopped loop #${parsed.stopId}.` : `No loop #${parsed.stopId}.`);
+      return;
+    }
+    if (loopsRef.current.length >= MAX_ACTIVE_LOOPS) {
+      addMessage("assistant", `Loop limit reached (${MAX_ACTIVE_LOOPS}). Stop one with /loop stop [id] first.`);
+      return;
+    }
+    const loop: LoopState = {
+      id: nextLoopIdRef.current++,
+      prompt: parsed.prompt!,
+      intervalMs: parsed.intervalMs!,
+      // Fires immediately on creation (next idle tick), then repeats.
+      nextFireAt: Date.now(),
+      fires: 0,
+    };
+    loopsRef.current = [...loopsRef.current, loop];
+    addMessage("assistant", `Loop #${loop.id} set: every ${formatInterval(loop.intervalMs)} — ${loop.prompt}\nSession-scoped; /loop stop ${loop.id} to cancel.`, "ui_notice");
+  }, [addMessage]);
+  handleLoopCommandRef.current = handleLoopCommand;
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (loopsRef.current.length === 0 || exitRequestedRef.current) return;
+      const now = Date.now();
+      for (const loop of loopsRef.current) {
+        const decision = decideLoopFiring(loop, now, !!activeAbortRef.current);
+        if (decision === "wait") continue;
+        loop.nextFireAt = now + loop.intervalMs;
+        if (decision === "defer") {
+          // Defer-not-stack (design §2.6): the previous turn is still running.
+          addMessage("assistant", `Loop #${loop.id} skipped this interval (a turn is still running); next in ${formatInterval(loop.intervalMs)}.`, "ui_notice");
+          continue;
+        }
+        loop.fires += 1;
+        void handleSubmitRef.current({
+          text: loop.prompt,
+          displayText: `⟳ loop #${loop.id}: ${loop.prompt}`,
+          images: [],
+        });
+      }
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [addMessage]);
 
   // Drain the queue once the run ends and no modal needs the user first.
   // The placeholder row is removed right before resubmitting — handleSubmit
@@ -2570,7 +2871,12 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         )}
         {pickerMode === "agents" && (
           <Box paddingX={1} flexShrink={0}>
-            <SubagentInspector groups={subagentGroups} onCancel={closePicker} />
+            <SubagentInspector
+              groups={subagentGroups}
+              onCancel={closePicker}
+              tasks={taskSnapshot}
+              onKillTask={(taskId) => { void processManager?.killTask(taskId); }}
+            />
           </Box>
         )}
         {pickerMode === "rewind" && sessionManager && (
@@ -2740,14 +3046,25 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
           />
         </Box>
       )}
-      {/* Subagent entry sits BELOW the composer: pressing ↓ from the composer
-          moves focus downward into it (spatially consistent). */}
-      {!isExiting && !pickerMode && !statsPanel && !pendingPlan && !pendingApproval && !pendingQuestion && !pendingFeedback && subagentMembers.length > 0 && (
+      {/* Subagent/task entry sits BELOW the composer: pressing ↓ from the
+          composer moves focus downward into it (spatially consistent). The
+          row renders for background tasks too (design §2.5) — tasks come from
+          the process-manager snapshot, a different store than subagents. */}
+      {!isExiting && !pickerMode && !statsPanel && !pendingPlan && !pendingApproval && !pendingQuestion && !pendingFeedback && (subagentMembers.length > 0 || runningTasks.length > 0) && (
         <Box paddingX={1} flexShrink={0}>
           <Text bold={subagentEntryFocused} color={subagentEntryFocused ? palette.accent : palette.toolName}>{subagentEntryFocused ? "> ↳ " : "  ↳ "}</Text>
           <Text color={subagentEntryFocused ? palette.accent : palette.muted}>
-            {subagentMembers.length} subagent{subagentMembers.length === 1 ? "" : "s"} · {subagentSummary(subagentMembers)} · </Text>
-          <Text color={palette.accent}>{subagentEntryFocused ? "Enter open · Esc back" : "↓ to inspect traces"}</Text>
+            {[
+              subagentMembers.length > 0
+                ? `${subagentMembers.length} subagent${subagentMembers.length === 1 ? "" : "s"} · ${subagentSummary(subagentMembers)}`
+                : undefined,
+              runningTasks.length > 0
+                ? `${runningTasks.length} task${runningTasks.length === 1 ? "" : "s"} · ${taskRowSummary(runningTasks, nowTick)}`
+                : undefined,
+            ].filter(Boolean).join(" · ")} · </Text>
+          {subagentMembers.length > 0
+            ? <Text color={palette.accent}>{subagentEntryFocused ? "Enter open · Esc back" : "↓ to inspect traces"}</Text>
+            : <Text color={palette.accent}>task_output to check · kill_task to stop</Text>}
         </Box>
       )}
       {!isExiting && (

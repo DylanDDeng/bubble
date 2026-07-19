@@ -20,6 +20,8 @@ import { createRoutableModelIndex, createRoutingSnapshotAccessor } from "./agent
 import { buildModelRoutingPrompt } from "./prompt/routing.js";
 import { SkillRegistry } from "./skills/registry.js";
 import { buildToolPromptOptions, createAllTools, type PlanController, type ToolSearchController } from "./tools/index.js";
+import { getProcessManager } from "./tasks/manager.js";
+import { PromotionChannel } from "./tasks/promotion.js";
 import { FileStateTracker } from "./tools/file-state.js";
 import { GoalStore } from "./goal/store.js";
 import { PermissionAwareApprovalController } from "./approval/controller.js";
@@ -199,6 +201,13 @@ async function main() {
   // Shared between the goal tool (model-facing update_goal) and the
   // TUI's auto-continuation engine / status-line indicator.
   const goalStore = new GoalStore();
+  // Background tasks are TUI-only (design §2.0): print mode exits (and reaps)
+  // right after the single run, so a backgrounded command would be killed
+  // immediately after the model was told it started. Feishu/desktop hosts
+  // never reach this call site and stay off until they wire wake seams.
+  const processManager = getProcessManager();
+  const allowBackgroundTasks = !printMode;
+  const promotionChannel = new PromotionChannel();
   const tools = createAllTools(args.cwd, skillRegistry, {
     todoStore,
     planController,
@@ -208,6 +217,9 @@ async function main() {
     lspService,
     fileStateTracker,
     goalStore,
+    processManager,
+    allowBackgroundTasks,
+    promotionChannel,
     // Lazy: sessionManager is resolved after tools are created.
     checkpoints: () => sessionManager?.getCheckpoints(),
   });
@@ -256,6 +268,9 @@ async function main() {
     }
   };
   const shutdownSidecars = async () => {
+    // Signal path (design §2.2b layer 2): kill-only, no escalation wait —
+    // the process is about to exit and shutdownRuntime never runs here.
+    processManager.reapTasksSync();
     await Promise.allSettled([shutdownMcp(), shutdownExternalRuntime()]);
   };
   process.once("SIGINT", () => { void shutdownSidecars().then(() => process.exit(130)); });
@@ -473,6 +488,15 @@ async function main() {
     externalHooks: hookController,
   });
   agentRef = agent;
+  if (allowBackgroundTasks) {
+    // Reminder bridge (design §2.3a): list() is owner-filtered at call time so
+    // the reminder never leaks another session's tasks after a switch.
+    agent.backgroundTasks = {
+      list: () => processManager.listTasks(agent.getSessionID()),
+      version: () => processManager.getTaskStateVersion(),
+      outputTail: (id) => processManager.taskOutputTail(id, 2000),
+    };
+  }
   if (sessionManager) {
     sessionTitleUpdater = createSessionTitleUpdater({
       sessionManager,
@@ -526,6 +550,8 @@ async function main() {
       shutdownMcp(),
       shutdownExternalRuntime(),
       lspService.shutdown(),
+      // Graceful task reaping (design §2.2b layer 1): SIGTERM → SIGKILL.
+      processManager.shutdownTasks(),
     ]);
     for (const result of results) {
       if (result.status === "rejected") {
@@ -696,6 +722,9 @@ async function main() {
       runMemoryCompaction,
       runMemorySummary,
       runMemoryRefresh,
+      processManager,
+      tasksAutoResume: userConfig.getTasksAutoResume(),
+      promotionChannel,
     };
     // Grok Subscription is a first-class interactive provider target. Manager
     // construction is deliberately lazy: it does not inspect, spawn, or reach

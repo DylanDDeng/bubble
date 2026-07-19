@@ -49,6 +49,9 @@ import type { CheckpointStore } from "../checkpoints.js";
 import { FileStateTracker } from "./file-state.js";
 import { createGoalTools } from "../goal/tools.js";
 import type { GoalStore } from "../goal/store.js";
+import { createBackgroundTaskTools } from "./task-tools.js";
+import type { ProcessManager } from "../tasks/manager.js";
+import type { PromotionChannel } from "../tasks/promotion.js";
 
 export interface CreateAllToolsOptions {
   todoStore?: TodoStore;
@@ -66,6 +69,17 @@ export interface CreateAllToolsOptions {
   checkpoints?: () => CheckpointStore | undefined;
   /** Shared goal state; when present, registers the update_goal tool. */
   goalStore?: GoalStore;
+  /**
+   * Unified process manager (background tasks + managed servers). Background
+   * tasks are a per-host capability (background-tasks design §2.0): pass the
+   * manager AND set allowBackgroundTasks only in hosts that wire the full
+   * completion story (currently the interactive TUI). Without it, bash
+   * rejects run_in_background and the task tools are not registered.
+   */
+  processManager?: ProcessManager;
+  allowBackgroundTasks?: boolean;
+  /** Ctrl+G send-to-background requests from the TUI (design §2.5). */
+  promotionChannel?: PromotionChannel;
 }
 
 export function createAllTools(
@@ -76,9 +90,15 @@ export function createAllTools(
   const approval = options.approvalController;
   const lsp = options.lspService ?? getLspService(cwd);
   const fileState = options.fileStateTracker ?? new FileStateTracker(cwd);
+  const backgroundTasks = options.allowBackgroundTasks === true && !!options.processManager;
   return [
     createReadTool(cwd, approval, lsp, fileState),
-    createBashTool(cwd, approval, fileState),
+    createBashTool(cwd, approval, fileState, {
+      processManager: options.processManager,
+      allowBackgroundTasks: backgroundTasks,
+      promotionChannel: backgroundTasks ? options.promotionChannel : undefined,
+    }),
+    ...(backgroundTasks ? createBackgroundTaskTools(options.processManager!) : []),
     ...createManagedServerTools(cwd, approval),
     createWriteTool(cwd, {}, approval, lsp, fileState, options.checkpoints),
     createEditTool(cwd, approval, lsp, fileState, options.checkpoints),

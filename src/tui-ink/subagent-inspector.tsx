@@ -23,21 +23,26 @@ import {
   type SubagentDisplay,
   type SubagentGroup,
 } from "./subagent-view.js";
+import type { BackgroundTaskInfo } from "../tasks/manager.js";
 
 export type { SubagentGroup };
 
 export interface SubagentInspectorProps {
   groups: SubagentGroup[];
   onCancel: () => void;
+  /** Background tasks of the bound session (design §2.5). */
+  tasks?: BackgroundTaskInfo[];
+  onKillTask?: (taskId: string) => void;
 }
 
 const STATUS_FILTERS: Array<string | null> = [null, "running", "queued", "completed", "failed"];
 
 type Row =
   | { type: "header"; group: SubagentGroup }
-  | { type: "member"; group: SubagentGroup; member: SubagentDisplay; key: string };
+  | { type: "member"; group: SubagentGroup; member: SubagentDisplay; key: string }
+  | { type: "task"; task: BackgroundTaskInfo; key: string };
 
-export function SubagentInspector({ groups, onCancel }: SubagentInspectorProps) {
+export function SubagentInspector({ groups, onCancel, tasks = [], onKillTask }: SubagentInspectorProps) {
   const theme = useTheme();
   const { stdout } = useStdout();
   const termHeight = stdout?.rows || 24;
@@ -52,9 +57,13 @@ export function SubagentInspector({ groups, onCancel }: SubagentInspectorProps) 
 
   const allMembers = useMemo(() => groups.flatMap((g) => g.members), [groups]);
 
-  // Flat row list: a header per multi-member group, then its (filtered) members.
+  // Flat row list: background tasks first (design §2.5), then a header per
+  // multi-member group and its (filtered) members.
   const rows = useMemo<Row[]>(() => {
     const out: Row[] = [];
+    for (const task of tasks) {
+      out.push({ type: "task", task, key: task.id });
+    }
     for (const group of groups) {
       const members = statusFilter
         ? group.members.filter((m) => (m.status ?? "running") === statusFilter)
@@ -66,16 +75,17 @@ export function SubagentInspector({ groups, onCancel }: SubagentInspectorProps) 
       });
     }
     return out;
-  }, [groups, statusFilter]);
+  }, [groups, statusFilter, tasks]);
 
   const memberRowIndices = useMemo(
-    () => rows.map((row, i) => (row.type === "member" ? i : -1)).filter((i) => i >= 0),
+    () => rows.map((row, i) => (row.type === "member" || row.type === "task" ? i : -1)).filter((i) => i >= 0),
     [rows],
   );
   const clampedIdx = memberRowIndices.length === 0 ? 0 : Math.min(selectedIdx, memberRowIndices.length - 1);
   const selectedRowIndex = memberRowIndices[clampedIdx] ?? -1;
   const selectedRow = rows[selectedRowIndex];
   const selectedMember = selectedRow?.type === "member" ? selectedRow.member : undefined;
+  const selectedTask = selectedRow?.type === "task" ? selectedRow.task : undefined;
 
   useInput((input, key) => {
     if (isKeyReleaseEvent(key)) return;
@@ -119,13 +129,17 @@ export function SubagentInspector({ groups, onCancel }: SubagentInspectorProps) 
       setView("detail");
       return;
     }
+    if (input === "x" && selectedTask && selectedTask.status === "running") {
+      onKillTask?.(selectedTask.id);
+      return;
+    }
   });
 
-  if (groups.length === 0) {
+  if (groups.length === 0 && tasks.length === 0) {
     return (
       <Box flexDirection="column" marginY={1} paddingX={1} borderStyle="round" borderColor={theme.borderActive}>
-        <Text bold color={theme.accent}>Subagents</Text>
-        <Text color={theme.muted}>No subagents have been spawned yet. Esc to close.</Text>
+        <Text bold color={theme.accent}>Subagents & tasks</Text>
+        <Text color={theme.muted}>No subagents or background tasks yet. Esc to close.</Text>
       </Box>
     );
   }
@@ -150,18 +164,34 @@ export function SubagentInspector({ groups, onCancel }: SubagentInspectorProps) 
 
   return (
     <Box flexDirection="column" marginY={1} paddingX={1} borderStyle="round" borderColor={theme.borderActive}>
-      <Text bold color={theme.accent}>Subagents · working traces</Text>
+      <Text bold color={theme.accent}>{tasks.length > 0 ? "Subagents & tasks · working traces" : "Subagents · working traces"}</Text>
       <Text color={theme.muted}>
         {allMembers.length} member{allMembers.length === 1 ? "" : "s"} · {subagentSummary(allMembers)}
+        {tasks.length > 0 ? `  ·  ${tasks.length} task${tasks.length === 1 ? "" : "s"}` : ""}
         {statusFilter ? `  ·  filter: ${statusFilter}` : ""}
       </Text>
-      <Text color={theme.muted}>↑/↓ select · Enter/→ open trace · f filter status · Esc close</Text>
+      <Text color={theme.muted}>↑/↓ select · Enter/→ open trace{tasks.length > 0 ? " · x kill task" : ""} · f filter status · Esc close</Text>
       <Box flexDirection="column" marginTop={1}>
         {rows.length === 0 && (
           <Text color={theme.muted}>No members match the current filter.</Text>
         )}
         {visible.map((row, i) => {
           const actualIndex = start + i;
+          if (row.type === "task") {
+            const task = row.task;
+            const isSelected = actualIndex === selectedRowIndex;
+            const elapsed = Math.max(0, Math.round(((task.endedAt ?? Date.now()) - task.startedAt) / 1000));
+            const statusColor = task.status === "running" ? theme.warning : task.status === "completed" ? theme.success : theme.error;
+            return (
+              <Box key={row.key}>
+                <Text color={isSelected ? theme.accent : undefined}>{isSelected ? "> " : "  "}</Text>
+                <Text color={statusColor}>{padVisual(task.id, labelWidth)}</Text>
+                <Text color={theme.traceAction}> {padVisual(truncateVisual(task.description || task.command, descriptorWidth), descriptorWidth)}</Text>
+                <Text color={statusColor}> {padVisual(task.status, 9)}</Text>
+                <Text color={theme.traceDetail}> {elapsed}s{task.exitCode != null ? ` · exit ${task.exitCode}` : ""}</Text>
+              </Box>
+            );
+          }
           if (row.type === "header") {
             return (
               <Box key={`h-${actualIndex}`} marginTop={i === 0 ? 0 : 1}>

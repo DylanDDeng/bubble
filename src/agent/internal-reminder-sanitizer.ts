@@ -185,6 +185,8 @@ const INTERNAL_REASONING_REFERENCE_PATTERNS = [
   /Subagent lifecycle truth/i,
   /Count unique agent_id values only/i,
   /Do not describe a subagent as running or still working/i,
+  /Background task truth/i,
+  /Never re-run work a finished task already did/i,
 ];
 
 function consumeInternalBlockAtStart(text: string, final: boolean): { consume?: number; hold?: boolean } | undefined {

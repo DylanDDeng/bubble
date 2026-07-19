@@ -76,6 +76,8 @@ export interface UserConfigData {
   /** Subagent model-routing knobs: autoTier (default true), allowCrossProvider (default true). */
   agentRouting?: Partial<AgentRoutingConfig>;
   subagents?: SubagentsUserConfig;
+  /** Background tasks (design §2.3b): autoResume defaults ON; false keeps notices + reminders only. */
+  tasks?: { autoResume?: boolean };
 }
 
 export interface SubagentsUserConfig {
@@ -191,6 +193,11 @@ export class UserConfig {
 
   getRecentModels(): string[] {
     return sanitizeRecentModels(this.data.recentModels)?.slice() ?? [];
+  }
+
+  /** Auto-resume on background-task completion (design §2.3b). Default ON. */
+  getTasksAutoResume(): boolean {
+    return this.data.tasks?.autoResume !== false;
   }
 
   pushRecentModel(model: string) {

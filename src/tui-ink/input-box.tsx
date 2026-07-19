@@ -60,6 +60,12 @@ export interface SubmitPayload {
   images: ImageAttachment[];
   /** First UI-only [Image #N] label reserved for this submitted payload. */
   imageDisplayStart?: number;
+  /**
+   * Harness-initiated submission (background-tasks design §2.3b): runs
+   * hidden with the text wrapped as internal context, never rendered as a
+   * user row. Only the TUI wake path sets this.
+   */
+  internal?: "task_wake";
 }
 
 interface InputBoxProps {

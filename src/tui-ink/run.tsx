@@ -33,6 +33,12 @@ export interface RunTuiOptions {
   mcpManager?: McpManager;
   /** Shared with the model-facing goal tools and the Ink auto-continuation loop. */
   goalStore?: import("../goal/store.js").GoalStore;
+  /** Unified process manager; drives task notices, auto-resume, and the status row. */
+  processManager?: import("../tasks/manager.js").ProcessManager;
+  /** tasks.auto_resume from user config (design §2.3b). Default ON. */
+  tasksAutoResume?: boolean;
+  /** Ctrl+G send-to-background channel shared with the bash tool (design §2.5). */
+  promotionChannel?: import("../tasks/promotion.js").PromotionChannel;
   themeMode?: ThemeMode;
   themeOverrides?: Record<string, string>;
   detectedTheme?: ResolvedTheme;
@@ -75,6 +81,9 @@ export function createInkAppElement(
       lspService={options.lspService}
       mcpManager={options.mcpManager}
       goalStore={options.goalStore}
+      processManager={options.processManager}
+      tasksAutoResume={options.tasksAutoResume}
+      promotionChannel={options.promotionChannel}
       themeMode={options.themeMode}
       themeOverrides={options.themeOverrides}
       detectedTheme={options.detectedTheme}

@@ -41,7 +41,13 @@ export type SessionMarkerKind =
   | "skill_activated"
   | "mode_switch"
   | "runtime_switch"
-  | "conversation_clear";
+  | "conversation_clear"
+  // Background tasks (design §2.2c): values are JSON {id, pid, startedAt, ...}
+  // so /resume can probe orphan liveness. Audit/tooling only — not rendered
+  // as transcript rows.
+  | "task_started"
+  | "task_finished"
+  | "task_killed";
 
 interface BaseSessionLogEntry {
   id: string;
