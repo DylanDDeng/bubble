@@ -27,6 +27,15 @@ export interface TurnHookState {
     total: number;
     spent: number;
   };
+  // Large-task delegation detector (large-task-delegation design §1):
+  // files actually READ this turn (search results contribute nothing).
+  exploredFiles?: Set<string>;
+  /** Checkpoint evaluated at the first mutation — once per turn, fired or not. */
+  largeTaskCheckpointDone?: boolean;
+  /** Successful mutations this turn; rendered as K in the nudge wording. */
+  appliedEditCount?: number;
+  /** orchestrationRequestReminder fired: the nudge offers only run_workflow. */
+  orchestrationReminderSent?: boolean;
 }
 
 export interface TurnHookContext {

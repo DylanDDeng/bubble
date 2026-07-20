@@ -131,6 +131,39 @@ export function userNamedModelReminder(
   ].join("\n");
 }
 
+/**
+ * Large-change checkpoint (large-task-delegation design §3): injected once
+ * per session at the first mutation of a broad turn. Carries the routing
+ * decision criteria (independent vs entangled) and the real worktree
+ * mechanics (children fork from the last commit; disjoint file sets) —
+ * never a command. The "smallest coherent edit" clause is lifted verbatim
+ * from the implementation-workflow reminder so the two compose.
+ */
+export interface LargeTaskReminderInput {
+  exploredFiles: number;
+  pendingTodos: number;
+  /** Mutations already applied this turn (the current batch lands regardless). */
+  appliedEdits: number;
+  /** orchestrationRequestReminder fired this turn: only offer run_workflow. */
+  orchestrationRequested: boolean;
+}
+
+export function largeImplementationTaskReminder(input: LargeTaskReminderInput): string {
+  const plan = input.pendingTodos > 0 ? ` (plan: ${input.pendingTodos} open todo items)` : "";
+  const applied = input.appliedEdits > 0
+    ? ` ${input.appliedEdits} edit${input.appliedEdits === 1 ? "" : "s"} from your current batch will land regardless.`
+    : "";
+  const mechanism = input.orchestrationRequested
+    ? "one run_workflow script (the user asked for a coordinated workflow — keep everything in it)"
+    : "write_worktree subagents (spawn_agent with the implementer profile) or one run_workflow script";
+  return wrapInSystemReminder(`
+Large-change checkpoint: you have read ${input.exploredFiles} files this turn${plan} and are starting to edit.${applied}
+- If the REMAINING edits form INDEPENDENT groups (per-module, per-file, same shape repeated), split them across ${mechanism}. Assign each child a DISJOINT file set; keep shared files (types, registries, exports) for yourself. Children fork from the last COMMIT — commit your applied edits first, or fold them into the child briefings. Each child still makes the smallest coherent edit for its group.
+- If the edits are ENTANGLED (shared state, one file feeding the next, order matters), delegation only adds merge risk — proceed yourself.
+- Work already small enough to finish directly: just finish it.
+`);
+}
+
 const ORCHESTRATION_REQUEST =
   /\b(?:workflows?|orchestrat\w*|agent[ -]?teams?|fan[ -]?out)\b|工作流|编排|(?:智能体|代理|agent)\s*(?:团队|小队)/i;
 

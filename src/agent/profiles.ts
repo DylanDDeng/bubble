@@ -225,7 +225,40 @@ export function builtinAgentProfiles(): AgentProfile[] {
     toProfile("security_investigation"),
     toProfile("evidence_correlation"),
     toProfile("general_readonly"),
+    // The write-capable builtin (large-task-delegation design §3): before
+    // this, write_worktree was reachable only via user-authored profile
+    // frontmatter, so the delegation nudge would have recommended a surface
+    // that does not exist in a stock session.
+    {
+      name: "implementer",
+      description: "Write-capable implementation subagent (isolated git worktree)",
+      source: "builtin",
+      mode: "write_worktree",
+      model: "inherit",
+      tools: {
+        preset: "explicit",
+        include: ["read", "glob", "grep", "edit", "write", "bash", "lsp", "todo_write"],
+        exclude: [],
+      },
+      approval: "fail",
+      nicknameCandidates: DEFAULT_NICKNAME_CANDIDATES,
+      prompt: [
+        "You are an implementer subagent working in your own isolated git worktree — the parent tree is never touched.",
+        "Your worktree forks from the last commit; changes the parent made after that commit are NOT present unless included in your briefing.",
+        "Make the smallest coherent edits that complete your assigned group. Stay strictly inside the file set you were given; if a needed change falls outside it, report that instead of editing.",
+        "Verify your changes narrowly (targeted tests or typecheck) when possible, and end with a concise summary of files changed and verification results — the parent reviews and applies your worktree.",
+      ].join("\n"),
+    },
   ];
+}
+
+/**
+ * The delegation nudge only fires when a write-capable spawn surface exists
+ * (large-task-delegation design §3): defense in depth for hosts that strip
+ * or override the builtin profiles.
+ */
+export function hasWriteWorktreeProfile(profiles: AgentProfile[]): boolean {
+  return profiles.some((profile) => profile.mode === "write_worktree");
 }
 
 export function findAgentProfile(profiles: AgentProfile[], name: string): AgentProfile | undefined {

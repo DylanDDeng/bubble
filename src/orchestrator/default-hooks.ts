@@ -9,10 +9,13 @@ import {
   buildSmallTaskHint,
   buildWorkflowPhaseReminder,
 } from "../prompt/reminders.js";
-import { orchestrationRequestReminder, reminderForTaskType, userNamedModelReminder } from "../prompt/task-reminders.js";
+import { largeImplementationTaskReminder, orchestrationRequestReminder, reminderForTaskType, userNamedModelReminder } from "../prompt/task-reminders.js";
 import { formatCoverageSummary, resolveWorkflowPhase } from "./workflow.js";
-import type { TurnHookState, TurnHooks } from "./hooks.js";
+import type { BeforeToolCallHookContext, TurnHookState, TurnHooks } from "./hooks.js";
 import type { ParsedToolCall, ToolResult } from "../types.js";
+import { resolve as resolvePath } from "node:path";
+import { traceEvent } from "../debug-trace.js";
+import { builtinAgentProfiles, discoverAgentProfiles, hasWriteWorktreeProfile } from "../agent/profiles.js";
 import { buildSubagentLifecycleReminder } from "../agent/subagent-lifecycle-reminder.js";
 
 export function createDefaultHooks(): TurnHooks[] {
@@ -43,6 +46,9 @@ export function createDefaultHooks(): TurnHooks[] {
         );
         if (orchestrationReminder) {
           ctx.queueReminder(orchestrationReminder);
+          // The large-change checkpoint must not re-offer spawn_agent in a
+          // turn where this reminder just forbade it (design §3).
+          ctx.state.orchestrationReminderSent = true;
         }
         // User named a configured model ("gpt 5.6 sol"): resolve it against
         // the routable catalog and hand over the exact id at the decision
@@ -111,6 +117,12 @@ export function createDefaultHooks(): TurnHooks[] {
         const toolCall = { ...arbitration.toolCall, ...(arbitration.note ? { arbiterNote: arbitration.note } : {}) };
         ctx.replaceToolCall(toolCall);
         ctx.state.governor?.beforeToolCall(toolCall);
+        // Large-change checkpoint (large-task-delegation design §1): the
+        // first mutation of the turn is the decision point — exploration is
+        // over, nothing has been edited yet.
+        if (isMutationTool(toolCall.name)) {
+          maybeQueueLargeTaskNudge(ctx);
+        }
         const blockedResult = ctx.state.discoveryBarrier?.beforeToolCall(toolCall);
         if (blockedResult) ctx.blockToolCall(blockedResult);
       },
@@ -168,6 +180,18 @@ export function createDefaultHooks(): TurnHooks[] {
         // dedup do the work.
         if (isCodeWriteResult(ctx.toolCall, ctx.result)) {
           markCodeChanged(ctx.state);
+          ctx.state.appliedEditCount = (ctx.state.appliedEditCount ?? 0) + 1;
+        }
+        // Large-task breadth evidence (design §1): only files actually READ.
+        // Search results contribute nothing — one glob returns up to 100
+        // match paths and would saturate any threshold instantly (review
+        // blocker). Bash-parsed reads (cat/head/sed -n) carry relative
+        // paths, so resolve against cwd before dedup.
+        if (!ctx.result.isError && ctx.result.metadata?.kind === "read") {
+          const path = typeof ctx.result.metadata.path === "string" ? ctx.result.metadata.path : undefined;
+          if (path) {
+            (ctx.state.exploredFiles ??= new Set()).add(resolvePath(ctx.cwd, path));
+          }
         }
         // Removed: active verification tracking. The previous design nagged the
         // model every turn until it ran a recognised verification command, and
@@ -225,6 +249,63 @@ export function createDefaultHooks(): TurnHooks[] {
 
 function markCodeChanged(state: TurnHookState): void {
   state.codeChanged = true;
+}
+
+// Large-task delegation checkpoint (large-task-delegation design §1-3).
+const BREADTH_FILES = 8;
+const BREADTH_FILES_WITH_PLAN = 5;
+const BREADTH_TODOS = 6;
+
+function maybeQueueLargeTaskNudge(ctx: BeforeToolCallHookContext): void {
+  // Evaluated exactly once per turn, at the first mutation — fired or not
+  // (mid-implementation re-detection is out of scope by design §4).
+  if (ctx.state.largeTaskCheckpointDone) return;
+  ctx.state.largeTaskCheckpointDone = true;
+
+  const agent = ctx.agent;
+  const taskType = ctx.state.taskType;
+  const exploredFiles = ctx.state.exploredFiles?.size ?? 0;
+  const pendingTodos = agent.getTodos?.()
+    ?.filter((todo) => todo.status === "pending" || todo.status === "in_progress").length ?? 0;
+  const threshold = pendingTodos >= BREADTH_TODOS ? BREADTH_FILES_WITH_PLAN : BREADTH_FILES;
+
+  // Gate order: cheap checks first; the profile discovery (filesystem) runs
+  // only when everything else already passed.
+  const suppressedBy = agent.largeTaskNudgeConsumed ? "session_latch"
+    : (taskType === "code_review" || taskType === "security_investigation") ? "task_type"
+    : !agent.hasToolAvailable("spawn_agent") ? "no_spawn_tool"
+    : (agent.activeSubAgentCount?.() ?? 0) > 0 ? "active_children"
+    : agent.hasRunningWorkflow?.() ? "running_workflow"
+    : exploredFiles < threshold ? "below_threshold"
+    : !writeWorktreeSurfaceAvailable(ctx.cwd) ? "no_write_profile"
+    : undefined;
+
+  traceEvent("delegation_detector", {
+    fired: suppressedBy === undefined,
+    exploredFiles,
+    pendingTodos,
+    threshold,
+    taskType: taskType ?? "unknown",
+    ...(suppressedBy ? { suppressedBy } : {}),
+  });
+  if (suppressedBy !== undefined) return;
+
+  agent.largeTaskNudgeConsumed = true;
+  ctx.queueReminder(largeImplementationTaskReminder({
+    exploredFiles,
+    pendingTodos,
+    appliedEdits: ctx.state.appliedEditCount ?? 0,
+    orchestrationRequested: ctx.state.orchestrationReminderSent === true,
+  }));
+}
+
+function writeWorktreeSurfaceAvailable(cwd: string): boolean {
+  try {
+    const discovered = discoverAgentProfiles(cwd, "both").profiles;
+    return hasWriteWorktreeProfile([...builtinAgentProfiles(), ...discovered]);
+  } catch {
+    return hasWriteWorktreeProfile(builtinAgentProfiles());
+  }
 }
 
 function isCodeWriteResult(_toolCall: ParsedToolCall, result: ToolResult): boolean {

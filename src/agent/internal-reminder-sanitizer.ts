@@ -187,6 +187,8 @@ const INTERNAL_REASONING_REFERENCE_PATTERNS = [
   /Do not describe a subagent as running or still working/i,
   /Background task truth/i,
   /Never re-run work a finished task already did/i,
+  /Large-change checkpoint/i,
+  /delegation only adds merge risk/i,
 ];
 
 function consumeInternalBlockAtStart(text: string, final: boolean): { consume?: number; hold?: boolean } | undefined {

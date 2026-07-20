@@ -52,9 +52,12 @@ earlier work lives in an existing subagent, prefer send_input to resume it
 over spawning a fresh one.
 
 Do NOT delegate when:
-- The task requires editing files or running state-changing commands.
-  Built-in subagents are read-only; do edits and writes yourself unless a
-  write-capable (write_worktree) profile is explicitly available.
+- The edits are ENTANGLED — shared state, one file feeding the next, order
+  matters. Write delegation exists (the builtin "implementer" profile runs
+  in an isolated git worktree), but it only pays off for INDEPENDENT edit
+  groups with disjoint file sets. Worktree children fork from the last
+  commit and the parent reviews/applies their changes afterward; entangled
+  work through that contract only adds merge risk — do it yourself.
 - The task takes one or two tool calls (reading a single file, looking up one
   definition). The handoff overhead costs more than the task.
 - Doing it well depends on conversation context (preferences the user stated

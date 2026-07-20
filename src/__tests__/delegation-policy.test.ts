@@ -35,7 +35,10 @@ describe("delegation policy section (system prompt)", () => {
     expect(prompt).toContain("Never outsource knowledge you already hold");
     expect(prompt).toContain("prefer send_input to resume it");
     // Negative clauses — the over-delegation defenses must never be lost.
-    expect(prompt).toContain("requires editing files or running state-changing commands");
+    // (2026-07-19: the blanket "no edits" clause became the entangled-edits
+    // clause when the builtin implementer profile made write delegation real.)
+    expect(prompt).toContain("The edits are ENTANGLED");
+    expect(prompt).toContain("only pays off for INDEPENDENT edit groups with disjoint file sets");
     expect(prompt).toContain("one or two tool calls");
     expect(prompt).toContain("fork_context is not the fix");
     expect(prompt).toContain("already read the relevant files");

@@ -34,6 +34,7 @@ import {
 } from "./hooks/index.js";
 import { createDefaultHooks } from "./orchestrator/default-hooks.js";
 import { buildTaskLifecycleReminder } from "./agent/task-lifecycle-reminder.js";
+import { classifyTask } from "./agent/task-classifier.js";
 import { mergeAgentCategories, parseThinkingLevel, resolveModelRoute, resolveSubagentRoute, type AgentCategoriesConfig, type ResolvedSubagentRoute } from "./agent/categories.js";
 import { DEFAULT_AGENT_ROUTING, nearModelMatches, sanitizeAgentRouting, tierContextFromSnapshot, type AgentRoutingConfig, type RoutableModelEntry, type RoutableModelIndex, type RoutingSnapshot, type RoutingSnapshotAccessor } from "./agent/routing-catalog.js";
 import { buildModelRoutingPrompt } from "./prompt/routing.js";
@@ -226,6 +227,14 @@ export class Agent {
     outputTail: (id: string) => string | undefined;
   };
   private lastTaskReminderVersion = -1;
+  /**
+   * Once-per-session latch for the large-task delegation nudge
+   * (large-task-delegation design §2): goal-loop continuations rebuild
+   * TurnHookState every run, so a per-turn latch would nag on every turn.
+   * If the model read the nudge once and chose not to delegate, repeating
+   * it is noise.
+   */
+  largeTaskNudgeConsumed = false;
   private _providerId: string;
   private _model: string;
   private tools: Map<string, ToolRegistryEntry> = new Map();
@@ -714,6 +723,15 @@ export class Agent {
         events.push(...hook.events);
         this.injectHookModelContext(hook.result);
         this.appendMessage({ role: "user", content: input.content });
+        // Large-task detector (large-task-delegation design §1): a steer
+        // redirects the task — stale breadth evidence must not fire a nudge
+        // about the pre-steer task, and the classifier should reason about
+        // the redirected one.
+        hookState.exploredFiles?.clear();
+        hookState.largeTaskCheckpointDone = false;
+        if (typeof input.content === "string" && input.content.trim()) {
+          hookState.taskType = classifyTask(input.content);
+        }
         events.push({
           type: "input_applied",
           id: input.id,
@@ -1915,6 +1933,21 @@ export class Agent {
     this.subagentStore.persist(record);
     this.subagentStore.notifyWaiters(record);
     return this.snapshotSubagent(record);
+  }
+
+  /**
+   * Live (non-final) children only — the delegation-nudge gate
+   * (large-task-delegation design §2). listSubAgents() is a grows-only
+   * session history (finished + resumed children stay forever), so it must
+   * never be used to answer "am I currently delegating?".
+   */
+  activeSubAgentCount(): number {
+    return this.subagentStore.activeCount();
+  }
+
+  /** run_workflow children are workflowInternal and invisible to listSubAgents. */
+  hasRunningWorkflow(): boolean {
+    return [...this.workflowRuns.values()].some((record) => record.status === "running");
   }
 
   listSubAgents(): SubagentThreadSnapshot[] {
