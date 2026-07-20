@@ -21,6 +21,7 @@ import { createProviderProtocolArtifactFilter } from "./provider-artifacts.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
 import { debugReasoningStream, summarizeDebugText } from "./reasoning-debug.js";
 import { RateLimitError, type RateLimitPolicy } from "./network/errors.js";
+import { ProviderStreamInterruptedError } from "./network/retry.js";
 import type { ProviderProtocol } from "./model-catalog.js";
 import type { Provider, ProviderMessage, StreamChunk, ThinkingLevel, ToolChoiceMode, ToolDefinition } from "./types.js";
 
@@ -250,13 +251,25 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
     let stream: any;
     stream = (await createCompletion(body)) as any;
 
-    yield* translateOpenAIStream(stream, {
-      toolArgsMergeMode: resolveToolArgsMergeMode(options.providerId || "", options.baseURL),
-      reasoningMergeMode: resolveReasoningMergeMode(options.providerId || "", options.baseURL),
-      textMergeMode: resolveTextMergeMode(options.providerId || "", options.baseURL),
-      debugProviderId: options.providerId || "",
-      debugModelId: chatOptions.model,
-    });
+    // A socket drop while iterating the SSE stream must surface as
+    // ProviderStreamInterruptedError so the agent loop re-issues the request;
+    // a raw network error here aborts the whole run (anthropic/codex/ai-sdk
+    // paths already wrap — this generic chat-completions path did not).
+    try {
+      yield* translateOpenAIStream(stream, {
+        toolArgsMergeMode: resolveToolArgsMergeMode(options.providerId || "", options.baseURL),
+        reasoningMergeMode: resolveReasoningMergeMode(options.providerId || "", options.baseURL),
+        textMergeMode: resolveTextMergeMode(options.providerId || "", options.baseURL),
+        debugProviderId: options.providerId || "",
+        debugModelId: chatOptions.model,
+      });
+    } catch (error) {
+      if (chatOptions.abortSignal?.aborted) throw error;
+      throw new ProviderStreamInterruptedError(
+        `Provider stream interrupted: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
+    }
 
     yield { type: "done" };
   }
