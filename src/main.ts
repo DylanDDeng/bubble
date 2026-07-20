@@ -881,7 +881,10 @@ async function readPipedStdin(): Promise<string | undefined> {
 
 main()
   .then(() => {
-    void exitAfterFlush(0);
+    // Preserve an exit code set by a handled failure path (e.g. print-mode
+    // agent errors set exitCode = 1 and return normally) — exit(0) here
+    // would silently override it.
+    void exitAfterFlush(typeof process.exitCode === "number" ? process.exitCode : 0);
   })
   .catch((err) => {
     console.error(chalk.red(`Fatal error: ${err.message}`));
