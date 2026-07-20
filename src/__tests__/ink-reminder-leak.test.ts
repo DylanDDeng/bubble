@@ -77,3 +77,38 @@ describe("internal reminder leak in the transcript", () => {
     expect(out).toContain("Streaming the real answer");
   });
 });
+
+// Resume-path leak regression (2026-07-19): queueReminder-injected nudges
+// (Large-change checkpoint, Background task truth) are role:"meta" messages.
+// They must never be persisted (main.ts onMessageAppend skips meta) AND must
+// never render even if present in agent.messages when the transcript is
+// rebuilt — the task-wake leak taught us to lock both layers.
+describe("meta reminder resume-path leak", () => {
+  it("never renders role:meta messages when reconstructing a transcript", async () => {
+    const { reconstructDisplayMessages } = await import("../tui-ink/app.js");
+    const messages = [
+      { role: "user", content: "把所有工具的描述补全" },
+      {
+        role: "meta",
+        kind: "system-reminder",
+        content: "<system-reminder>\nLarge-change checkpoint: you have read 9 files this turn...\n</system-reminder>",
+      },
+      { role: "assistant", content: "开始处理。" },
+    ] as any;
+
+    const display = reconstructDisplayMessages(messages);
+    const rendered = JSON.stringify(display);
+    expect(rendered).not.toContain("Large-change checkpoint");
+    expect(display.filter((m) => m.role === "user")).toHaveLength(1);
+    expect(display.filter((m) => m.role === "assistant")).toHaveLength(1);
+  });
+
+  it("sanitizer patterns cover the new nudge phrases for echoed references", async () => {
+    const { sanitizeInternalReminderBlocks } = await import("../agent/internal-reminder-sanitizer.js");
+    // An assistant echoing the wrapped block gets it stripped entirely.
+    const echoed = "<bubble_internal_reminder kind=\"system-reminder\">\nLarge-change checkpoint: ...\ndelegation only adds merge risk\n</bubble_internal_reminder>\n\n真正的回答。";
+    const clean = sanitizeInternalReminderBlocks(echoed);
+    expect(clean).not.toContain("Large-change checkpoint");
+    expect(clean).toContain("真正的回答");
+  });
+});
