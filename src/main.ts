@@ -22,6 +22,7 @@ import { SkillRegistry } from "./skills/registry.js";
 import { buildToolPromptOptions, createAllTools, type PlanController, type ToolSearchController } from "./tools/index.js";
 import { getProcessManager } from "./tasks/manager.js";
 import { PromotionChannel } from "./tasks/promotion.js";
+import { PrintRunCollector, formatPrintJson, formatPrintJsonError } from "./print-output.js";
 import { FileStateTracker } from "./tools/file-state.js";
 import { GoalStore } from "./goal/store.js";
 import { PermissionAwareApprovalController } from "./approval/controller.js";
@@ -596,7 +597,10 @@ async function main() {
         agent.injectModeReminder();
       }
       agent.injectDeferredToolsReminder();
-      console.log(chalk.dim(`Resumed session: ${sessionManager.getSessionFile()}`));
+      // JSON print mode reserves stdout for the single result object.
+      (args.outputFormat === "json" ? console.error : console.log)(
+        chalk.dim(`Resumed session: ${sessionManager.getSessionFile()}`),
+      );
     }
   }
 
@@ -619,30 +623,66 @@ async function main() {
         process.exit(1);
       }
 
-      let printedTurnText = false;
-      for await (const event of agent.run(prompt, args.cwd)) {
-        traceEvent("print_agent_event", summarizeAgentEventForTrace(event));
-        if (event.type === "turn_start") {
-          printedTurnText = false;
-        } else if (event.type === "provider_retry") {
-          // The stream died mid-response and the agent re-issues the whole
-          // request. Text already on stdout cannot be un-printed, so at least
-          // separate the retried response and say what happened.
-          if (printedTurnText) process.stdout.write("\n");
-          console.error(chalk.yellow(
-            `[Stream interrupted; retrying (${event.attempt}/${event.maxAttempts}) — the partial text above is superseded by the retried response]`,
-          ));
-        } else if (event.type === "text_delta") {
-          printedTurnText = true;
-          process.stdout.write(event.content);
-        } else if (event.type === "tool_start") {
-          console.log(chalk.cyan(`\n[Tool: ${event.name}]`));
-        } else if (event.type === "tool_end") {
-          const color = event.result.isError ? chalk.red : chalk.dim;
-          console.log(color(`[Result: ${event.result.content.slice(0, 200)}${event.result.content.length > 200 ? "..." : ""}]`));
+      // JSON mode (benchmark/CI adapters): stdout carries exactly ONE JSON
+      // object; streaming text and tool logs move to stderr-silence. Plain
+      // mode is byte-for-byte the previous behavior.
+      const jsonOutput = args.outputFormat === "json";
+      const collector = new PrintRunCollector();
+      const printSessionId = sessionManager
+        ? basename(sessionManager.getSessionFile())
+        : undefined;
+      try {
+        let printedTurnText = false;
+        for await (const event of agent.run(prompt, args.cwd)) {
+          traceEvent("print_agent_event", summarizeAgentEventForTrace(event));
+          collector.onEvent(event);
+          if (jsonOutput) {
+            if (event.type === "provider_retry") {
+              console.error(chalk.yellow(
+                `[Stream interrupted; retrying (${event.attempt}/${event.maxAttempts})]`,
+              ));
+            }
+            continue;
+          }
+          if (event.type === "turn_start") {
+            printedTurnText = false;
+          } else if (event.type === "provider_retry") {
+            // The stream died mid-response and the agent re-issues the whole
+            // request. Text already on stdout cannot be un-printed, so at least
+            // separate the retried response and say what happened.
+            if (printedTurnText) process.stdout.write("\n");
+            console.error(chalk.yellow(
+              `[Stream interrupted; retrying (${event.attempt}/${event.maxAttempts}) — the partial text above is superseded by the retried response]`,
+            ));
+          } else if (event.type === "text_delta") {
+            printedTurnText = true;
+            process.stdout.write(event.content);
+          } else if (event.type === "tool_start") {
+            console.log(chalk.cyan(`\n[Tool: ${event.name}]`));
+          } else if (event.type === "tool_end") {
+            const color = event.result.isError ? chalk.red : chalk.dim;
+            console.log(color(`[Result: ${event.result.content.slice(0, 200)}${event.result.content.length > 200 ? "..." : ""}]`));
+          }
         }
+        if (jsonOutput) {
+          process.stdout.write(formatPrintJson({
+            summary: collector.summary(),
+            sessionId: printSessionId,
+          }) + "\n");
+        } else {
+          console.log();
+        }
+      } catch (error) {
+        if (!jsonOutput) throw error;
+        // Structured failure: adapters distinguish agent errors from crashes
+        // by the JSON error object + non-zero exit.
+        process.stdout.write(formatPrintJsonError({
+          message: error instanceof Error ? error.message : String(error),
+          summary: collector.summary(),
+          sessionId: printSessionId,
+        }) + "\n");
+        process.exitCode = 1;
       }
-      console.log();
 
       return;
     }

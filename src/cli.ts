@@ -15,6 +15,8 @@ export interface CliArgs {
   resume?: boolean;
   sessionName?: string;
   print?: boolean;
+  /** Print-mode output: plain (default) or a single JSON object on stdout. */
+  outputFormat?: "plain" | "json";
   prompt?: string;
   thinkingLevel?: ThinkingLevel;
   mode?: PermissionMode;
@@ -83,6 +85,15 @@ export function parseArgs(argv: string[]): CliArgs {
       case "-p":
         args.print = true;
         break;
+      case "--output-format": {
+        const value = argv[++i];
+        if (value !== "plain" && value !== "json") {
+          console.error(`Invalid --output-format: ${value ?? "(missing)"}. Expected plain or json.`);
+          process.exit(1);
+        }
+        args.outputFormat = value;
+        break;
+      }
       case "--plan":
         args.mode = "plan";
         break;
@@ -138,6 +149,8 @@ Options (default):
   --dangerously-skip-permissions
                            Enable bypass mode (auto-approve EVERY tool; disables all safety prompts)
   -p, --print              Non-interactive mode (single prompt)
+  --output-format <fmt>    Print-mode output: plain (default) or json
+                           (one JSON object on stdout: text, usage, num_turns)
   -v, --version            Print the installed version and exit
   -h, --help               Show this help
 
