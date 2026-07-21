@@ -12,7 +12,14 @@
 
 import type { Message, Provider, ProviderMessage, ToolCall } from "../types.js";
 import { estimateContextTokens } from "./budget.js";
-import { findFirstRealUserIndex } from "./compact.js";
+import {
+  buildCompactionSummaryMessage,
+  clonePinnedUserMessage,
+  findFirstRealUserIndex,
+  isCompactionSummaryMessage,
+  isRealUserMessage,
+  splitLeadingContext,
+} from "./compact.js";
 
 export const LLM_COMPACTION_PROMPT = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
 
@@ -51,12 +58,18 @@ export async function compactWithLLM(
   const maxInputTokens = options.maxInputTokens ?? 100_000;
   const keepRecentGroups = options.keepRecentGroups ?? 2;
 
-  const preserved = messages.filter((m) => m.role === "system" || m.role === "meta");
-  const body = messages.filter((m) => m.role !== "system" && m.role !== "meta");
+  // Positional leading prefix, not role-global filtering: filtering by role
+  // used to relocate mid-history system messages (including prior summaries)
+  // to the head, where the projector then fused them into the system prompt.
+  const { leading, body: rawBody } = splitLeadingContext(messages);
+  // Replace semantics: prior summaries become summarization INPUT (semantic
+  // rolling — the compactor model merges them), never preserved copies.
+  const priorSummaries = rawBody.filter(isCompactionSummaryMessage);
+  const body = rawBody.filter((m) => !isCompactionSummaryMessage(m));
 
   let lastUserIndex = -1;
   for (let i = body.length - 1; i >= 0; i--) {
-    if (body[i].role === "user") {
+    if (isRealUserMessage(body[i])) {
       lastUserIndex = i;
       break;
     }
@@ -105,10 +118,14 @@ export async function compactWithLLM(
   const evictedGroups = groups.slice(0, groups.length - keptGroupCount);
   const keptGroups = groups.slice(groups.length - keptGroupCount);
 
-  // What we'll send to the model to summarize: prior turns + the older groups
-  // in the current turn (everything we're about to evict). The pinned first
-  // instruction is excluded — it survives verbatim, not as summary fodder.
+  // What we'll send to the model to summarize: prior summaries (semantic
+  // rolling), prior turns, and the older groups in the current turn. The
+  // pinned first instruction is excluded — it survives verbatim.
   const toSummarize: Message[] = [
+    ...priorSummaries.map((m): Message => ({
+      role: "user",
+      content: `[Prior compaction summary]\n${typeof m.content === "string" ? m.content : ""}`,
+    })),
     ...summarizablePriorTurns,
     ...evictedGroups.flatMap((g) => [g.assistant, ...g.toolResults]),
   ];
@@ -155,12 +172,9 @@ export async function compactWithLLM(
   }
 
   const compacted: Message[] = [
-    ...preserved.map(cloneMessage),
-    ...(pinnedFirstUser ? [cloneMessage(pinnedFirstUser)] : []),
-    {
-      role: "user",
-      content: `${LLM_SUMMARY_PREFIX}\n${summaryText.trim()}`,
-    },
+    ...leading.map(cloneMessage),
+    ...(pinnedFirstUser ? [clonePinnedUserMessage(pinnedFirstUser)] : []),
+    buildCompactionSummaryMessage(`${LLM_SUMMARY_PREFIX}\n${summaryText.trim()}`),
     cloneMessage(lastUser),
     ...flatKept,
   ];

@@ -76,7 +76,14 @@ export interface SystemMessage {
   content: string;
 }
 
-export type MetaMessageKind = "system-reminder" | "runtime-context";
+export type MetaMessageKind =
+  | "system-reminder"
+  | "runtime-context"
+  // Compaction summaries are first-class citizens: identified by kind, never
+  // by content sniffing, so replace-not-append semantics survive projection
+  // round-trips ("at most one alive" invariant).
+  | "compaction-summary"
+  | "subturn-compaction-summary";
 
 export interface MetaMessage {
   role: "meta";

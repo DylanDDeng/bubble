@@ -229,7 +229,12 @@ const TURN_SUMMARY_PREFIX = /^Earlier in this turn \(compacted to free context\)
 export function latestCompactionSummary(agentMessages: Message[]): string | undefined {
   for (let index = agentMessages.length - 1; index >= 0; index--) {
     const message = agentMessages[index];
-    if (!message || message.role !== "system" || typeof message.content !== "string") continue;
+    if (!message || typeof message.content !== "string") continue;
+    // Summaries are meta messages since 0.0.43; raw system form is legacy.
+    const isSummaryCarrier = message.role === "system"
+      || (message.role === "meta"
+        && (message.kind === "compaction-summary" || message.kind === "subturn-compaction-summary"));
+    if (!isSummaryCarrier) continue;
     const previousMatch = message.content.match(PREVIOUS_SUMMARY_PREFIX);
     if (previousMatch?.[1]?.trim()) return previousMatch[1].trim();
     const turnMatch = message.content.match(TURN_SUMMARY_PREFIX);

@@ -113,7 +113,15 @@ export function projectMessages(messages: Message[], options: ProjectionOptions 
       if (!after.shouldCompact) break;
     }
 
-    return repairToolCallChains(working as ProviderMessage[]);
+    // Compaction passes emit summaries as meta messages (first-class identity);
+    // the provider payload must stay provider-safe, so render them here the
+    // same way body meta messages are rendered above.
+    const providerSafe = working.map((message) =>
+      message.role === "meta"
+        ? { role: "user" as const, content: formatMetaMessage(message) }
+        : message);
+
+    return repairToolCallChains(providerSafe as ProviderMessage[]);
   }
 
   return repaired;

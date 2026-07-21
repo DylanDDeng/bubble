@@ -6,13 +6,29 @@ import { isInternalBlockContent } from "../agent/internal-reminder-sanitizer.js"
  * Compaction must never summarize away what the user actually asked for:
  * requirements that appear late in a long instruction ("commit when done",
  * "write the report in French") would otherwise vanish once the heuristic
- * summary truncates the goal line. Messages larger than this cap are exempt
- * from pinning (e.g. a pasted megabyte of logs as the opening message) —
- * summarization is the lesser evil there.
+ * summary truncates the goal line. Messages larger than this cap are pinned
+ * in truncated form (e.g. a pasted megabyte of logs as the opening message).
  */
 export const PINNED_INSTRUCTION_MAX_CHARS = 8192;
 
-function userMessageText(message: Message): string {
+export const COMPACTION_SUMMARY_PREFIX = "Previous conversation summary:";
+export const SUBTURN_SUMMARY_PREFIX = "Earlier in this turn (compacted to free context):";
+// llm-compactor.ts's LLM_SUMMARY_PREFIX must start with this literal — a unit
+// test locks the two together (importing it here would create a module cycle).
+const LLM_ENVELOPE_PREFIX = "Another language model previously worked on this task";
+// Projected forms: the projector wraps meta messages into user-role internal
+// blocks, and the resident-history path writes that projected form back, so a
+// summary emitted as meta can come back around as one of these.
+const PROJECTED_SUMMARY_PREFIXES = [
+  `<bubble_internal_context kind="compaction-summary">`,
+  `<bubble_internal_context kind="subturn-compaction-summary">`,
+  // Legacy: summaries emitted as raw system messages by ≤0.0.42 got projected
+  // into runtime-system blocks.
+  `<bubble_internal_context kind="runtime-system">\n${COMPACTION_SUMMARY_PREFIX}`,
+  `<bubble_internal_context kind="runtime-system">\n${SUBTURN_SUMMARY_PREFIX}`,
+];
+
+function messageText(message: Message): string {
   if (typeof message.content === "string") return message.content;
   if (Array.isArray(message.content)) {
     return message.content
@@ -24,20 +40,84 @@ function userMessageText(message: Message): string {
 }
 
 /**
- * Index of the first message the user actually wrote: user-role, not an
- * internal reminder/context block re-rolled into user role by the projector,
- * and small enough to keep verbatim.
+ * Identity check for compaction summaries across every form they can take:
+ * the first-class meta form, the legacy raw-system form, and the projected
+ * user-role internal-block forms (the resident path rewrites projections back
+ * into history, so role/position are not conserved).
  */
+export function isCompactionSummaryMessage(message: Message): boolean {
+  if (message.role === "meta") {
+    return message.kind === "compaction-summary" || message.kind === "subturn-compaction-summary";
+  }
+  const text = messageText(message);
+  if (message.role === "system") {
+    return text.startsWith(COMPACTION_SUMMARY_PREFIX) || text.startsWith(SUBTURN_SUMMARY_PREFIX);
+  }
+  if (message.role === "user") {
+    const trimmed = text.trimStart();
+    if (trimmed.startsWith(LLM_ENVELOPE_PREFIX)) return true;
+    return PROJECTED_SUMMARY_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
+  }
+  return false;
+}
+
+/** A message the user actually typed (not a projected reminder, not a summary). */
+export function isRealUserMessage(message: Message): boolean {
+  if (message.role !== "user") return false;
+  const text = messageText(message);
+  if (!text.trim() || isInternalBlockContent(text)) return false;
+  if (text.trimStart().startsWith(LLM_ENVELOPE_PREFIX)) return false;
+  return true;
+}
+
+/**
+ * Split history into the leading system/meta context prefix (system prompt,
+ * startup reminders) and the conversational body. Positional, mirroring the
+ * projector's leading-prefix semantics: mid-history system/meta messages
+ * belong to the body and are foldable — preserving them by role forever is
+ * how stale reminders and relocated summaries used to pile up at the head.
+ */
+export function splitLeadingContext(messages: Message[]): { leading: Message[]; body: Message[] } {
+  let split = 0;
+  while (split < messages.length) {
+    const message = messages[split];
+    if ((message.role === "system" || message.role === "meta") && !isCompactionSummaryMessage(message)) {
+      split += 1;
+      continue;
+    }
+    break;
+  }
+  return { leading: messages.slice(0, split), body: messages.slice(split) };
+}
+
+/** Index of the first message the user actually wrote. */
 export function findFirstRealUserIndex(messages: Message[]): number {
   for (let index = 0; index < messages.length; index++) {
-    const message = messages[index];
-    if (message.role !== "user") continue;
-    const text = userMessageText(message);
-    if (!text.trim() || isInternalBlockContent(text)) continue;
-    if (text.length > PINNED_INSTRUCTION_MAX_CHARS) return -1;
-    return index;
+    if (isRealUserMessage(messages[index])) return index;
   }
   return -1;
+}
+
+/**
+ * Clone a message for pinning; oversized content is truncated rather than
+ * losing the pin entirely (P0.5: a truncated original beats a 140-char
+ * summary line).
+ */
+export function clonePinnedUserMessage(message: Message): Message {
+  const text = messageText(message);
+  if (text.length <= PINNED_INSTRUCTION_MAX_CHARS) return cloneMessage(message);
+  return {
+    role: "user",
+    content: `${text.slice(0, PINNED_INSTRUCTION_MAX_CHARS)}\n[...original message truncated for context management...]`,
+  };
+}
+
+export function buildCompactionSummaryMessage(summary: string): Message {
+  return {
+    role: "meta",
+    kind: "compaction-summary",
+    content: `${COMPACTION_SUMMARY_PREFIX}\n${summary}`,
+  };
 }
 
 export interface CompactOptions {
@@ -158,10 +238,19 @@ export function compactMessages(
 ): CompactResult {
   const keepRecentTurns = options.keepRecentTurns ?? 2;
   const maxSummaryItems = options.maxSummaryItems ?? 4;
-  const preservedContextMessages = messages.filter((message) => message.role === "system" || message.role === "meta");
-  const conversationalMessages = messages.filter((message) => message.role !== "system" && message.role !== "meta");
-  const turnStartIndexes = conversationalMessages
-    .map((message, index) => (message.role === "user" ? index : -1))
+
+  // Replace semantics: prior summaries (any form, any position) die here —
+  // at most one summary exists after every compaction. Their content is
+  // template-grade (goal truncated to 140 chars, constant next-steps line);
+  // the pinned original instruction is the durable record, not old summaries.
+  const { leading, body } = splitLeadingContext(messages);
+  const bodyMessages = body.filter((message) => !isCompactionSummaryMessage(message));
+
+  // Turn boundaries anchor on REAL user messages only. Projected reminders
+  // and summary envelopes used to inflate the turn count, shrinking the keep
+  // window to nothing and firing compaction almost every turn.
+  const turnStartIndexes = bodyMessages
+    .map((message, index) => (isRealUserMessage(message) ? index : -1))
     .filter((index) => index >= 0);
 
   if (turnStartIndexes.length <= keepRecentTurns) {
@@ -173,16 +262,19 @@ export function compactMessages(
     return { compacted: false };
   }
 
-  const oldMessages = conversationalMessages.slice(0, keepStartIndex);
-  const keptMessages = conversationalMessages.slice(keepStartIndex);
+  const oldMessages = bodyMessages.slice(0, keepStartIndex);
+  const keptMessages = bodyMessages.slice(keepStartIndex);
 
   // Pin the original instruction: it stays verbatim above the summary instead
   // of being crushed into the summary's 140-char goal line.
   const pinnedIndex = findFirstRealUserIndex(oldMessages);
   const pinnedMessage = pinnedIndex >= 0 ? oldMessages[pinnedIndex] : undefined;
-  const summaryInput = pinnedIndex >= 0
-    ? oldMessages.filter((_, index) => index !== pinnedIndex)
-    : oldMessages;
+  // Summary fodder: real conversational content only — no pinned original,
+  // no projected reminder blocks (they used to pollute Goal/Progress lines).
+  const summaryInput = oldMessages.filter((message, index) =>
+    index !== pinnedIndex
+    && message.role !== "meta"
+    && !(message.role === "user" && !isRealUserMessage(message)));
 
   const summary = buildMessageSummary(summaryInput, maxSummaryItems);
   if (!summary) {
@@ -190,12 +282,9 @@ export function compactMessages(
   }
 
   const compactedMessages: Message[] = [
-    ...preservedContextMessages.map((message) => cloneMessage(message)),
-    ...(pinnedMessage ? [cloneMessage(pinnedMessage)] : []),
-    {
-      role: "system",
-      content: `Previous conversation summary:\n${summary}`,
-    },
+    ...leading.map((message) => cloneMessage(message)),
+    ...(pinnedMessage ? [clonePinnedUserMessage(pinnedMessage)] : []),
+    buildCompactionSummaryMessage(summary),
     ...keptMessages.map((message) => cloneMessage(message)),
   ];
 
@@ -237,12 +326,13 @@ export function compactCurrentTurnToolGroups(
   const keepRecentGroups = options.keepRecentGroups ?? 2;
   const maxSummaryItems = options.maxSummaryItems ?? 8;
 
-  const preserved = messages.filter((m) => m.role === "system" || m.role === "meta");
-  const body = messages.filter((m) => m.role !== "system" && m.role !== "meta");
+  const { leading, body } = splitLeadingContext(messages);
 
+  // Anchor the "current turn" on the last REAL user message — a projected
+  // reminder must not shrink the turn to a sliver.
   let lastUserIndex = -1;
   for (let i = body.length - 1; i >= 0; i--) {
-    if (body[i].role === "user") {
+    if (isRealUserMessage(body[i])) {
       lastUserIndex = i;
       break;
     }
@@ -250,7 +340,12 @@ export function compactCurrentTurnToolGroups(
   if (lastUserIndex < 0) return { compacted: false };
 
   const preTurn = body.slice(0, lastUserIndex + 1);
-  const turnBody = body.slice(lastUserIndex + 1);
+  const rawTurnBody = body.slice(lastUserIndex + 1);
+  // Replace semantics within the turn: fold prior sub-turn summaries' lines
+  // into the new one instead of stacking marker messages.
+  const priorSubturnSummaries = rawTurnBody.filter((m) =>
+    m.role === "meta" ? m.kind === "subturn-compaction-summary" : isCompactionSummaryMessage(m) && messageText(m).includes(SUBTURN_SUMMARY_PREFIX.slice(0, 20)));
+  const turnBody = rawTurnBody.filter((m) => !priorSubturnSummaries.includes(m));
 
   type Group = { assistant: Message; toolResults: Message[] };
   const groups: Group[] = [];
@@ -274,8 +369,9 @@ export function compactCurrentTurnToolGroups(
     .filter((g) => g.assistant.role === "assistant" && (g.assistant.toolCalls?.length ?? 0) > 0);
   if (evictable.length === 0) return { compacted: false };
 
-  const summary = buildToolGroupsSummary(evictable, maxSummaryItems);
-  if (!summary) return { compacted: false };
+  const freshSummary = buildToolGroupsSummary(evictable, maxSummaryItems);
+  if (!freshSummary) return { compacted: false };
+  const summary = mergeSubturnSummaryLines(priorSubturnSummaries, freshSummary, maxSummaryItems);
 
   const survivingGroups = groups.filter((g) => !evictable.includes(g));
   const flatSurvivors: Message[] = [];
@@ -285,11 +381,12 @@ export function compactCurrentTurnToolGroups(
   }
 
   const compactedMessages: Message[] = [
-    ...preserved.map(cloneMessage),
+    ...leading.map(cloneMessage),
     ...preTurn.map(cloneMessage),
     {
-      role: "system",
-      content: `Earlier in this turn (compacted to free context):\n${summary}`,
+      role: "meta",
+      kind: "subturn-compaction-summary",
+      content: `${SUBTURN_SUMMARY_PREFIX}\n${summary}`,
     },
     ...flatSurvivors,
   ];
@@ -300,6 +397,36 @@ export function compactCurrentTurnToolGroups(
     messages: compactedMessages,
     droppedEntries: evictable.length,
   };
+}
+
+/**
+ * Merge prior sub-turn summary lines with the fresh one: line-level dedupe,
+ * prior lines first (chronological), capped. Structured merge of tool-name /
+ * file lists — not freetext concatenation.
+ */
+function mergeSubturnSummaryLines(
+  priorSummaries: Message[],
+  freshSummary: string,
+  maxItems: number,
+): string {
+  if (priorSummaries.length === 0) return freshSummary;
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  const push = (line: string) => {
+    const normalized = line.trim();
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    merged.push(line);
+  };
+  for (const prior of priorSummaries) {
+    for (const line of messageText(prior).split("\n")) {
+      if (line.startsWith(SUBTURN_SUMMARY_PREFIX) || line.startsWith("<bubble_internal_")) continue;
+      push(line);
+    }
+  }
+  for (const line of freshSummary.split("\n")) push(line);
+  const cap = Math.max(maxItems * 4, 24);
+  return merged.slice(-cap).join("\n");
 }
 
 function buildToolGroupsSummary(

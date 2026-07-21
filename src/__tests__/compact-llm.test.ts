@@ -33,11 +33,13 @@ describe("compactMessagesWithLLM", () => {
     expect(result.compacted).toBe(true);
     expect(complete).toHaveBeenCalledOnce();
     expect(result.messages).toBeDefined();
-    const systems = result.messages!.filter((m) => m.role === "system");
-    expect(systems.some((m) => m.content.includes("Previous conversation summary:"))).toBe(true);
-    expect(systems.some((m) => m.content.includes("fake summary"))).toBe(true);
+    const summaries = result.messages!.filter((m) => m.role === "meta" && m.kind === "compaction-summary");
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0].content).toContain("Previous conversation summary:");
+    expect(summaries[0].content).toContain("fake summary");
+    // The first real user message is pinned verbatim above the summary.
     const users = result.messages!.filter((m) => m.role === "user");
-    expect(users.map((m) => (m as any).content)).toEqual(["third task"]);
+    expect(users.map((m) => (m as any).content)).toEqual(["first task", "third task"]);
   });
 
   it("falls back to heuristic compaction when the provider throws", async () => {

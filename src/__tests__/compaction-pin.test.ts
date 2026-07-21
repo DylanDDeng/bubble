@@ -42,12 +42,12 @@ describe("findFirstRealUserIndex", () => {
     expect(findFirstRealUserIndex(messages)).toBe(1);
   });
 
-  it("returns -1 when the first real user message exceeds the pin size cap", () => {
+  it("still finds an oversized first user message (pin truncates at clone time)", () => {
     const messages: Message[] = [
       user("x".repeat(PINNED_INSTRUCTION_MAX_CHARS + 1)),
       user("small follow-up"),
     ];
-    expect(findFirstRealUserIndex(messages)).toBe(-1);
+    expect(findFirstRealUserIndex(messages)).toBe(0);
   });
 
   it("returns -1 when there is no user message", () => {
@@ -64,7 +64,7 @@ describe("compactMessages pinning", () => {
     expect(out[0]).toMatchObject({ role: "system", content: "sys prompt" });
     // Pinned instruction sits between the preserved prefix and the summary.
     expect(out[1]).toMatchObject({ role: "user", content: LONG_INSTRUCTION });
-    expect(out[2].role).toBe("system");
+    expect(out[2]).toMatchObject({ role: "meta", kind: "compaction-summary" });
     expect(out[2].content).toContain("Previous conversation summary:");
     // The late requirement survives in full, not truncated into the summary.
     expect(out[1].content).toContain(LATE_REQUIREMENT);
@@ -84,15 +84,17 @@ describe("compactMessages pinning", () => {
     expect(out[1]).toMatchObject({ role: "user", content: LONG_INSTRUCTION });
   });
 
-  it("falls back to summarizing an oversized first message instead of pinning it", () => {
+  it("pins an oversized first message in truncated form", () => {
     const huge = "x".repeat(PINNED_INSTRUCTION_MAX_CHARS + 100);
     const result = compactMessages(multiTurnHistory(user(huge)), { keepRecentTurns: 2 });
 
     expect(result.compacted).toBe(true);
     const out = result.messages!;
-    // No pinned user message before the summary.
-    expect(out[1].role).toBe("system");
-    expect(out[1].content).toContain("Previous conversation summary:");
+    expect(out[1].role).toBe("user");
+    const pinnedText = out[1].content as string;
+    expect(pinnedText.length).toBeLessThan(huge.length);
+    expect(pinnedText).toContain("[...original message truncated for context management...]");
+    expect(out[2]).toMatchObject({ role: "meta", kind: "compaction-summary" });
   });
 });
 
@@ -127,7 +129,7 @@ describe("compactWithLLM pinning", () => {
     const out = result.messages!;
     expect(out[0]).toMatchObject({ role: "system", content: "sys prompt" });
     expect(out[1]).toMatchObject({ role: "user", content: LONG_INSTRUCTION });
-    expect(out[2].role).toBe("user");
+    expect(out[2]).toMatchObject({ role: "meta", kind: "compaction-summary" });
     expect(out[2].content).toContain(LLM_SUMMARY_PREFIX);
     expect(out[3]).toMatchObject({ role: "user", content: "continue" });
 
@@ -150,7 +152,8 @@ describe("compactWithLLM pinning", () => {
 
     expect(result.compacted).toBe(true);
     const out = result.messages!;
-    // Same shape as before the pin change: summary envelope, then the ask.
+    // Summary as meta message, then the ask.
+    expect(out[1]).toMatchObject({ role: "meta", kind: "compaction-summary" });
     expect(out[1].content).toContain(LLM_SUMMARY_PREFIX);
     expect(out[2]).toMatchObject({ role: "user", content: "look at this project" });
     // The ask appears exactly once — no duplicate pin.

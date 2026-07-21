@@ -57,8 +57,8 @@ describe("compactCurrentTurnToolGroups", () => {
     // Preserved system + user are still at the start.
     expect(out[0]).toMatchObject({ role: "system", content: "you are helpful" });
     expect(out[1]).toMatchObject({ role: "user", content: "look at this project" });
-    // Then the synthetic summary system message.
-    expect(out[2].role).toBe("system");
+    // Then the synthetic summary as a first-class meta message.
+    expect(out[2]).toMatchObject({ role: "meta", kind: "subturn-compaction-summary" });
     expect((out[2] as { content: string }).content).toContain("Earlier in this turn");
     // Kept groups follow, in order.
     expect(out.slice(3).map((m) => m.role)).toEqual([

@@ -7,7 +7,15 @@
  * fails.
  */
 
-import { compactMessages as compactMessagesHeuristic } from "./compact.js";
+import {
+  buildCompactionSummaryMessage,
+  clonePinnedUserMessage,
+  compactMessages as compactMessagesHeuristic,
+  findFirstRealUserIndex,
+  isCompactionSummaryMessage,
+  isRealUserMessage,
+  splitLeadingContext,
+} from "./compact.js";
 import type { CompactOptions, CompactResult } from "./compact.js";
 import type { Message, Provider, ProviderMessage, ThinkingLevel, ToolCall } from "../types.js";
 
@@ -59,10 +67,13 @@ export async function compactMessagesWithLLM(
   options: LLMCompactOptions,
 ): Promise<CompactResult> {
   const keepRecentTurns = options.keepRecentTurns ?? 2;
-  const preservedContextMessages = messages.filter((m) => m.role === "system" || m.role === "meta");
-  const conversationalMessages = messages.filter((m) => m.role !== "system" && m.role !== "meta");
-  const turnStartIndexes = conversationalMessages
-    .map((m, i) => (m.role === "user" ? i : -1))
+  const { leading, body } = splitLeadingContext(messages);
+  // Replace semantics: prior summaries (any form) are folded into the new
+  // summary as INPUT (the LLM merges them semantically) and removed.
+  const priorSummaries = body.filter(isCompactionSummaryMessage);
+  const bodyMessages = body.filter((m) => !isCompactionSummaryMessage(m));
+  const turnStartIndexes = bodyMessages
+    .map((m, i) => (isRealUserMessage(m) ? i : -1))
     .filter((i) => i >= 0);
 
   if (turnStartIndexes.length <= keepRecentTurns) {
@@ -74,12 +85,25 @@ export async function compactMessagesWithLLM(
     return { compacted: false };
   }
 
-  const oldMessages = conversationalMessages.slice(0, keepStartIndex);
-  const keptMessages = conversationalMessages.slice(keepStartIndex);
+  const oldMessages = bodyMessages.slice(0, keepStartIndex);
+  const keptMessages = bodyMessages.slice(keepStartIndex);
+
+  // Pin the original instruction verbatim (P0.5: this path used to lack the
+  // pin the heuristic and llm-compactor paths already had).
+  const pinnedIndex = findFirstRealUserIndex(oldMessages);
+  const pinnedMessage = pinnedIndex >= 0 ? oldMessages[pinnedIndex] : undefined;
+
+  const summarizable: Message[] = [
+    ...priorSummaries.map((m): Message => ({
+      role: "user",
+      content: `[Prior compaction summary]\n${typeof m.content === "string" ? m.content : ""}`,
+    })),
+    ...oldMessages.filter((_, index) => index !== pinnedIndex),
+  ];
 
   let summary: string;
   try {
-    summary = await generateSummary(oldMessages, options);
+    summary = await generateSummary(summarizable, options);
   } catch {
     return compactMessagesHeuristic(messages, { keepRecentTurns, maxSummaryItems: options.maxSummaryItems });
   }
@@ -92,8 +116,9 @@ export async function compactMessagesWithLLM(
     compacted: true,
     summary,
     messages: [
-      ...preservedContextMessages,
-      { role: "system", content: `Previous conversation summary:\n${summary}` },
+      ...leading,
+      ...(pinnedMessage ? [clonePinnedUserMessage(pinnedMessage)] : []),
+      buildCompactionSummaryMessage(summary),
       ...keptMessages,
     ],
     droppedEntries: oldMessages.length,

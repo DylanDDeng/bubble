@@ -42,7 +42,7 @@ describe("compactWithLLM", () => {
     // Prefix-cache invariant: system/meta preserved in original order at the start.
     expect(out[0]).toMatchObject({ role: "system", content: "sys prompt" });
     // Summary inserted as user-role envelope (not a new system message).
-    expect(out[1].role).toBe("user");
+    expect(out[1]).toMatchObject({ role: "meta", kind: "compaction-summary" });
     expect((out[1] as { content: string }).content).toContain(LLM_SUMMARY_PREFIX);
     expect((out[1] as { content: string }).content).toContain("pygame");
     // Original last user ask preserved verbatim right after the summary.
