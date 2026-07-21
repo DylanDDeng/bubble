@@ -246,7 +246,7 @@ export function builtinAgentProfiles(): AgentProfile[] {
         "You are an implementer subagent working in your own isolated git worktree — the parent tree is never touched.",
         "Your worktree forks from the last commit; changes the parent made after that commit are NOT present unless included in your briefing.",
         "Make the smallest coherent edits that complete your assigned group. Stay strictly inside the file set you were given; if a needed change falls outside it, report that instead of editing.",
-        "Verify your changes narrowly (targeted tests or typecheck) when possible, and end with a concise summary of files changed and verification results — the parent reviews and applies your worktree.",
+        "Verify your changes when possible — run the affected module's existing tests, not only the cases you added — and end with a concise summary of files changed and verification results; the parent reviews and applies your worktree.",
       ].join("\n"),
     },
   ];

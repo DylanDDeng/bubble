@@ -128,16 +128,39 @@ You have enough context to act. Do not continue reading, searching, or delegatin
 Choose one of:
 1. Use edit/write to make the requested change.
 2. If no safe change can be made from the gathered context, explain the concrete blocker.
-3. If files were already changed, run the narrowest meaningful verification or finish with the result.
+3. If files were already changed, verify the change and run the affected module's existing tests, or finish with the result.
 `);
 }
 
-export function buildCompletionSelfCheckReminder(): string {
-  return wrapInSystemReminder(`
-You appear to be finishing. Before giving your final answer, re-read the user's original request in this conversation and check whether any explicit requirement in it remains unfulfilled — including requirements about how the work should be delivered or reported, not only whether the implementation works.
+export interface CompletionSelfCheckOptions {
+  /** Pre-existing test files this run modified, with deleted-line counts. */
+  modifiedExistingTests?: Array<{ path: string; deletedLines: number }>;
+}
 
-If something is missing, complete it now. If everything is done, give your final answer directly — do not repeat this check or re-verify work you have already verified.
-`);
+export function buildCompletionSelfCheckReminder(options: CompletionSelfCheckOptions = {}): string {
+  const sections: string[] = [];
+
+  const modifiedTests = options.modifiedExistingTests ?? [];
+  if (modifiedTests.length > 0) {
+    // Disclosure, not accusation: legitimate test updates (requirement
+    // changes, fixing a broken test, refactors) are normal engineering — the
+    // rule is that they must be declared, never silent. Confrontational
+    // wording risks a model rolling back a user-requested test update.
+    const listed = modifiedTests
+      .slice(0, 8)
+      .map((t) => `- ${t.path}${t.deletedLines > 0 ? ` (${t.deletedLines} line${t.deletedLines === 1 ? "" : "s"} removed)` : ""}`)
+      .join("\n");
+    sections.push(`This run modified pre-existing test files:
+${listed}${modifiedTests.length > 8 ? `\n- …and ${modifiedTests.length - 8} more` : ""}
+
+If a change you made caused an existing test to fail and you edited the test so the suite passes, restore the original behavior instead — weakening a test to make it pass is never acceptable. If the test changes are intentional (the request requires new expected behavior, or the test itself was wrong), keep them and state each modified test and the reason in your final summary.`);
+  }
+
+  sections.push(`You appear to be finishing. Before giving your final answer, re-read the user's original request in this conversation and check whether any explicit requirement in it remains unfulfilled — including requirements about how the work should be delivered or reported, not only whether the implementation works.
+
+If something is missing, complete it now. If everything is done, give your final answer directly — do not repeat this check or re-verify work you have already verified.`);
+
+  return wrapInSystemReminder(`\n${sections.join("\n\n")}\n`);
 }
 
 export function buildToolFreezeReminder(reason: string): string {

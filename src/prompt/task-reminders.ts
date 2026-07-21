@@ -33,7 +33,7 @@ Implementation workflow:
 - Do not stop at a proposal when the user asked for a change.
 - Inspect the relevant files first, then make the smallest coherent edit.
 - Keep unrelated files and behavior out of scope.
-- Run a narrow verification command or explain why it cannot be run.
+- Verify the change, then run the existing tests of the affected module — not only the cases you added — or explain why they cannot be run.
 `);
     case "code_review":
       return wrapInSystemReminder(`
