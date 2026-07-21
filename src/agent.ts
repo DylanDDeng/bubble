@@ -290,6 +290,12 @@ export class Agent {
   private readonly subagentUpdateWakers = new Set<() => void>();
   private lastInputTokens: number | null = null;
   private lastAnchorMessageCount: number | null = null;
+  // How often each compaction path actually rewrote history this run.
+  // Surfaced via getCompactionStats() for print-mode telemetry: without it,
+  // "did the model ever stop seeing the original instruction?" is
+  // unanswerable from the outside (only counts real compactions, not
+  // byte-saving projection rewrites).
+  private compactionStats = { resident: 0, llm: 0, overflow: 0, droppedMessages: 0 };
 
   constructor(options: AgentOptions) {
     this.provider = options.provider;
@@ -1179,6 +1185,9 @@ export class Agent {
         }
         const droppedMessages = await this.recoverFromOverflow(consecutiveOverflowRecoveries);
         consecutiveOverflowRecoveries += 1;
+        this.compactionStats.overflow += 1;
+        this.compactionStats.droppedMessages += droppedMessages;
+        traceEvent("compaction_fired", { path: "overflow", droppedMessages });
         yield emit({ type: "context_recovered", droppedMessages, reason: "overflow" });
         continue;
       }
@@ -1703,9 +1712,16 @@ export class Agent {
       this.lastInputTokens = null;
       this.lastAnchorMessageCount = null;
       this.fileStateTracker?.invalidateReadHistory();
+      this.compactionStats.llm += 1;
+      traceEvent("compaction_fired", { path: "llm" });
     }
     // If LLM compaction failed for any reason, leave this.messages alone —
     // the projector's algorithmic budgeted-mode passes will still try.
+  }
+
+  /** Snapshot of how often each compaction path rewrote history this run. */
+  getCompactionStats(): { resident: number; llm: number; overflow: number; droppedMessages: number } {
+    return { ...this.compactionStats };
   }
 
   /**
@@ -2916,6 +2932,8 @@ export class Agent {
       const compacted = compactMessages(candidate, { keepRecentTurns });
       if (compacted.compacted && compacted.messages) {
         candidate = compacted.messages as typeof candidate;
+        this.compactionStats.resident += 1;
+        traceEvent("compaction_fired", { path: "resident", droppedEntries: compacted.droppedEntries });
       }
     }
 

@@ -103,10 +103,23 @@ export class PrintRunCollector {
   }
 }
 
+/**
+ * Per-path counts of context compactions during the run. Lets benchmark
+ * harnesses correlate outcomes with "did the model ever lose sight of the
+ * full history" without access to the in-container session files.
+ */
+export interface PrintCompactionStats {
+  resident: number;
+  llm: number;
+  overflow: number;
+  droppedMessages: number;
+}
+
 export function formatPrintJson(input: {
   summary: PrintRunSummary;
   sessionId?: string;
   stopReason?: "end_turn" | "error" | "cancelled";
+  compaction?: PrintCompactionStats;
 }): string {
   return JSON.stringify({
     text: input.summary.text,
@@ -116,6 +129,7 @@ export function formatPrintJson(input: {
     num_tool_calls: input.summary.num_tool_calls,
     usage: input.summary.usage,
     usage_reported: input.summary.usage_reported,
+    ...(input.compaction ? { compaction: input.compaction } : {}),
   });
 }
 
@@ -123,6 +137,7 @@ export function formatPrintJsonError(input: {
   message: string;
   summary?: PrintRunSummary;
   sessionId?: string;
+  compaction?: PrintCompactionStats;
 }): string {
   return JSON.stringify({
     type: "error",
@@ -137,5 +152,6 @@ export function formatPrintJsonError(input: {
           usage: input.summary.usage,
         }
       : {}),
+    ...(input.compaction ? { compaction: input.compaction } : {}),
   });
 }

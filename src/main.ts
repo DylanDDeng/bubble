@@ -668,6 +668,7 @@ async function main() {
           process.stdout.write(formatPrintJson({
             summary: collector.summary(),
             sessionId: printSessionId,
+            compaction: agent.getCompactionStats(),
           }) + "\n");
         } else {
           console.log();
@@ -680,6 +681,7 @@ async function main() {
           message: error instanceof Error ? error.message : String(error),
           summary: collector.summary(),
           sessionId: printSessionId,
+          compaction: agent.getCompactionStats(),
         }) + "\n");
         process.exitCode = 1;
       }

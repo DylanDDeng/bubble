@@ -130,6 +130,22 @@ describe("formatPrintJson", () => {
   });
 });
 
+describe("compaction stats field", () => {
+  it("includes compaction counts when provided, omits when absent", () => {
+    const collector = feed([{ type: "turn_start" }] as AgentEvent[]);
+    const stats = { resident: 2, llm: 1, overflow: 0, droppedMessages: 14 };
+
+    const withStats = JSON.parse(formatPrintJson({ summary: collector.summary(), compaction: stats }));
+    expect(withStats.compaction).toEqual(stats);
+
+    const withoutStats = JSON.parse(formatPrintJson({ summary: collector.summary() }));
+    expect(withoutStats).not.toHaveProperty("compaction");
+
+    const errorWithStats = JSON.parse(formatPrintJsonError({ message: "boom", compaction: stats }));
+    expect(errorWithStats.compaction).toEqual(stats);
+  });
+});
+
 describe("parseOutputFormat", () => {
   it("accepts plain and json, rejects everything else", () => {
     expect(parseOutputFormat("plain")).toBe("plain");
