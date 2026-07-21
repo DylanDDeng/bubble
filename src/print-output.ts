@@ -110,8 +110,11 @@ export class PrintRunCollector {
  */
 export interface PrintCompactionStats {
   resident: number;
+  subturn: number;
   llm: number;
   overflow: number;
+  /** Successful compaction computations incl. rejected rewrites (churn signal). */
+  fired: number;
   droppedMessages: number;
 }
 

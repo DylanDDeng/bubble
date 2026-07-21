@@ -3,7 +3,7 @@
  * It maintains message state, calls the LLM, executes tools, and auto-continues.
  */
 
-import { compactMessages } from "./context/compact.js";
+import { compactCurrentTurnToolGroups, compactMessages, isRealUserMessage } from "./context/compact.js";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -293,9 +293,10 @@ export class Agent {
   // How often each compaction path actually rewrote history this run.
   // Surfaced via getCompactionStats() for print-mode telemetry: without it,
   // "did the model ever stop seeing the original instruction?" is
-  // unanswerable from the outside (only counts real compactions, not
-  // byte-saving projection rewrites).
-  private compactionStats = { resident: 0, llm: 0, overflow: 0, droppedMessages: 0 };
+  // unanswerable from the outside. `fired` counts successful compaction
+  // computations including ones whose rewrite was later rejected — a
+  // fired-but-never-written gap is the churn signal.
+  private compactionStats = { resident: 0, subturn: 0, llm: 0, overflow: 0, fired: 0, droppedMessages: 0 };
 
   constructor(options: AgentOptions) {
     this.provider = options.provider;
@@ -1190,6 +1191,7 @@ export class Agent {
         const droppedMessages = await this.recoverFromOverflow(consecutiveOverflowRecoveries);
         consecutiveOverflowRecoveries += 1;
         this.compactionStats.overflow += 1;
+        this.compactionStats.fired += 1;
         this.compactionStats.droppedMessages += droppedMessages;
         traceEvent("compaction_fired", { path: "overflow", droppedMessages });
         yield emit({ type: "context_recovered", droppedMessages, reason: "overflow" });
@@ -1717,6 +1719,7 @@ export class Agent {
       this.lastAnchorMessageCount = null;
       this.fileStateTracker?.invalidateReadHistory();
       this.compactionStats.llm += 1;
+      this.compactionStats.fired += 1;
       traceEvent("compaction_fired", { path: "llm" });
     }
     // If LLM compaction failed for any reason, leave this.messages alone —
@@ -1724,7 +1727,7 @@ export class Agent {
   }
 
   /** Snapshot of how often each compaction path rewrote history this run. */
-  getCompactionStats(): { resident: number; llm: number; overflow: number; droppedMessages: number } {
+  getCompactionStats(): { resident: number; subturn: number; llm: number; overflow: number; fired: number; droppedMessages: number } {
     return { ...this.compactionStats };
   }
 
@@ -2932,26 +2935,44 @@ export class Agent {
       candidate = aggressivePruneMessages(candidate);
     }
 
+    let compactedPath: "resident" | "subturn" | undefined;
     if (shouldCompact) {
       const compacted = compactMessages(candidate, { keepRecentTurns });
       if (compacted.compacted && compacted.messages) {
         candidate = compacted.messages as typeof candidate;
-        this.compactionStats.resident += 1;
+        compactedPath = "resident";
         traceEvent("compaction_fired", { path: "resident", droppedEntries: compacted.droppedEntries });
+      } else {
+        // Single-instruction runs (one real user turn) never satisfy the
+        // turn-level compactor; fold old tool groups within the turn instead.
+        const subturn = compactCurrentTurnToolGroups(candidate, { keepRecentGroups: 3 });
+        if (subturn.compacted && subturn.messages) {
+          candidate = subturn.messages as typeof candidate;
+          compactedPath = "subturn";
+          traceEvent("compaction_fired", { path: "subturn", droppedEntries: subturn.droppedEntries });
+        }
       }
+      if (compactedPath) this.compactionStats.fired += 1;
     }
 
     const afterChars = estimateResidentChars(candidate);
     const afterToolChars = estimateToolPayloadChars(candidate);
+    // Chars-not-increasing is a NECESSARY condition: the old OR gate let a
+    // fewer-but-bigger candidate (summary stacking) rewrite history.
     if (
-      afterChars < beforeChars
-      || afterToolChars < beforeToolChars
-      || candidate.length < before.length
+      afterChars <= beforeChars
+      && (
+        afterChars < beforeChars
+        || afterToolChars < beforeToolChars
+        || candidate.length < before.length
+      )
     ) {
       this.messages = candidate;
       this.lastInputTokens = null;
       this.lastAnchorMessageCount = null;
       this.fileStateTracker?.invalidateReadHistory();
+      if (compactedPath === "resident") this.compactionStats.resident += 1;
+      if (compactedPath === "subturn") this.compactionStats.subturn += 1;
     }
   }
 
@@ -3378,7 +3399,10 @@ function estimateToolPayloadChars(messages: Message[]): number {
 }
 
 function countUserTurns(messages: Message[]): number {
-  return messages.reduce((count, message) => count + (message.role === "user" ? 1 : 0), 0);
+  // Real user turns only: projected reminders and summary envelopes are
+  // user-ROLE but not user TURNS — counting them used to shrink the keep
+  // window and fire compaction almost every turn.
+  return messages.reduce((count, message) => count + (isRealUserMessage(message) ? 1 : 0), 0);
 }
 
 function getCurrentHeapUsed(): number {

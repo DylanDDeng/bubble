@@ -1640,7 +1640,10 @@ describe("Agent", () => {
     expect(captured).toHaveLength(1);
     const systemMessages = captured[0].filter((message) => message.role === "system");
     expect(systemMessages.length).toBeGreaterThan(0);
-    expect(systemMessages.some((message) => message.content.includes("Previous conversation summary:"))).toBe(true);
+    // Summaries are meta messages rendered as user-role internal blocks in
+    // the provider payload (0.0.43+), no longer raw system messages.
+    expect(captured[0].some((message) =>
+      typeof message.content === "string" && message.content.includes("Previous conversation summary:"))).toBe(true);
   });
 
   it("injects the security investigation workflow reminder for secret-storage questions", async () => {
