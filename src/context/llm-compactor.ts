@@ -12,6 +12,7 @@
 
 import type { Message, Provider, ProviderMessage, ToolCall } from "../types.js";
 import { estimateContextTokens } from "./budget.js";
+import { findFirstRealUserIndex } from "./compact.js";
 
 export const LLM_COMPACTION_PROMPT = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
 
@@ -68,9 +69,22 @@ export async function compactWithLLM(
   //   priorTurns:   everything from earlier user turns (multi-turn case)
   //   lastUser:     the user's current ask (always kept verbatim)
   //   currentTurn:  the assistant + tool groups produced in response so far
+  //
+  // The FIRST real user message (the original instruction) is pinned verbatim
+  // too: after meta reminders get re-rolled into user role by the projector,
+  // "last user message" often points at a reminder, not the instruction — and
+  // late requirements in a long instruction must survive compaction.
   const priorTurns = body.slice(0, lastUserIndex);
   const lastUser = body[lastUserIndex];
   const currentTurn = body.slice(lastUserIndex + 1);
+
+  const firstRealUserIndex = findFirstRealUserIndex(body);
+  const pinnedFirstUser = firstRealUserIndex >= 0 && firstRealUserIndex < lastUserIndex
+    ? body[firstRealUserIndex]
+    : undefined;
+  const summarizablePriorTurns = pinnedFirstUser
+    ? priorTurns.filter((message) => message !== pinnedFirstUser)
+    : priorTurns;
 
   // Split currentTurn into (assistant + its tool results) groups so we can
   // keep the most recent K verbatim and evict the older ones.
@@ -92,9 +106,10 @@ export async function compactWithLLM(
   const keptGroups = groups.slice(groups.length - keptGroupCount);
 
   // What we'll send to the model to summarize: prior turns + the older groups
-  // in the current turn (everything we're about to evict).
+  // in the current turn (everything we're about to evict). The pinned first
+  // instruction is excluded — it survives verbatim, not as summary fodder.
   const toSummarize: Message[] = [
-    ...priorTurns,
+    ...summarizablePriorTurns,
     ...evictedGroups.flatMap((g) => [g.assistant, ...g.toolResults]),
   ];
 
@@ -141,6 +156,7 @@ export async function compactWithLLM(
 
   const compacted: Message[] = [
     ...preserved.map(cloneMessage),
+    ...(pinnedFirstUser ? [cloneMessage(pinnedFirstUser)] : []),
     {
       role: "user",
       content: `${LLM_SUMMARY_PREFIX}\n${summaryText.trim()}`,

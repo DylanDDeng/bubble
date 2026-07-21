@@ -1,5 +1,44 @@
 import type { ContentPart, Message, ToolCall } from "../types.js";
 import type { SessionLogEntry } from "../session-types.js";
+import { isInternalBlockContent } from "../agent/internal-reminder-sanitizer.js";
+
+/**
+ * Compaction must never summarize away what the user actually asked for:
+ * requirements that appear late in a long instruction ("commit when done",
+ * "write the report in French") would otherwise vanish once the heuristic
+ * summary truncates the goal line. Messages larger than this cap are exempt
+ * from pinning (e.g. a pasted megabyte of logs as the opening message) —
+ * summarization is the lesser evil there.
+ */
+export const PINNED_INSTRUCTION_MAX_CHARS = 8192;
+
+function userMessageText(message: Message): string {
+  if (typeof message.content === "string") return message.content;
+  if (Array.isArray(message.content)) {
+    return message.content
+      .filter((part): part is Extract<ContentPart, { type: "text" }> => part.type === "text")
+      .map((part) => part.text)
+      .join(" ");
+  }
+  return "";
+}
+
+/**
+ * Index of the first message the user actually wrote: user-role, not an
+ * internal reminder/context block re-rolled into user role by the projector,
+ * and small enough to keep verbatim.
+ */
+export function findFirstRealUserIndex(messages: Message[]): number {
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index];
+    if (message.role !== "user") continue;
+    const text = userMessageText(message);
+    if (!text.trim() || isInternalBlockContent(text)) continue;
+    if (text.length > PINNED_INSTRUCTION_MAX_CHARS) return -1;
+    return index;
+  }
+  return -1;
+}
 
 export interface CompactOptions {
   keepRecentTurns?: number;
@@ -136,13 +175,23 @@ export function compactMessages(
 
   const oldMessages = conversationalMessages.slice(0, keepStartIndex);
   const keptMessages = conversationalMessages.slice(keepStartIndex);
-  const summary = buildMessageSummary(oldMessages, maxSummaryItems);
+
+  // Pin the original instruction: it stays verbatim above the summary instead
+  // of being crushed into the summary's 140-char goal line.
+  const pinnedIndex = findFirstRealUserIndex(oldMessages);
+  const pinnedMessage = pinnedIndex >= 0 ? oldMessages[pinnedIndex] : undefined;
+  const summaryInput = pinnedIndex >= 0
+    ? oldMessages.filter((_, index) => index !== pinnedIndex)
+    : oldMessages;
+
+  const summary = buildMessageSummary(summaryInput, maxSummaryItems);
   if (!summary) {
     return { compacted: false };
   }
 
   const compactedMessages: Message[] = [
     ...preservedContextMessages.map((message) => cloneMessage(message)),
+    ...(pinnedMessage ? [cloneMessage(pinnedMessage)] : []),
     {
       role: "system",
       content: `Previous conversation summary:\n${summary}`,
@@ -154,7 +203,7 @@ export function compactMessages(
     compacted: true,
     summary,
     messages: compactedMessages,
-    droppedEntries: oldMessages.length,
+    droppedEntries: summaryInput.length,
   };
 }
 

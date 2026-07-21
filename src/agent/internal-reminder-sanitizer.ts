@@ -31,6 +31,18 @@ const LEGACY_REMINDER_END_PHRASES = [
   "Do not put the final answer only in hidden reasoning.",
 ];
 
+/** Prefix shared by every internal reminder/context block this module emits. */
+export const INTERNAL_BLOCK_PREFIX = "<bubble_internal_";
+
+/**
+ * True when the text is an internal reminder/context block (e.g. a meta
+ * message that the projector re-rolled into user role) rather than something
+ * the user actually typed.
+ */
+export function isInternalBlockContent(text: string): boolean {
+  return text.trimStart().startsWith(INTERNAL_BLOCK_PREFIX);
+}
+
 export function formatInternalReminderBlock(kind: string, content: string): string {
   return formatInternalBlock("reminder", kind, content);
 }
