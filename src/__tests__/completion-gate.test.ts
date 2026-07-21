@@ -1,5 +1,10 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { Agent } from "../agent.js";
+import { AgentRunInputQueue } from "../agent/input-controller.js";
 import type { AgentEvent, Provider, StreamChunk, ToolRegistryEntry } from "../types.js";
 
 // The completion self-check gate (default-hooks afterTurn): when a run that
@@ -38,10 +43,10 @@ function fakeWriteTool(): ToolRegistryEntry {
   } as unknown as ToolRegistryEntry;
 }
 
-function writeCallTurn(): StreamChunk[] {
+function writeCallTurn(seq = 1): StreamChunk[] {
   return [
-    { type: "tool_call", id: "w1", name: "write", arguments: "", isStart: true, isEnd: false },
-    { type: "tool_call", id: "w1", name: "write", arguments: "", argumentsFull: '{"path":"/tmp/x"}', isStart: false, isEnd: true },
+    { type: "tool_call", id: `w${seq}`, name: "write", arguments: "", isStart: true, isEnd: false },
+    { type: "tool_call", id: `w${seq}`, name: "write", arguments: "", argumentsFull: '{"path":"/tmp/x"}', isStart: false, isEnd: true },
   ];
 }
 
@@ -96,6 +101,87 @@ describe("completion self-check gate", () => {
     await collect(agent.run("what is 6*7?", process.cwd()));
 
     expect(providerCalls).toBe(1);
+  });
+
+  it("fires via git ground truth when files are written through a shell-kind tool", async () => {
+    // codeChanged metadata stays false (kind "shell"), but the git baseline
+    // sees the new file — the gate must still fire, and the reminder must
+    // disclose the modified pre-existing test.
+    const dir = mkdtempSync(join(tmpdir(), "bubble-gate-git-"));
+    const git = (...a: string[]) => execFileSync("git", a, { cwd: dir });
+    git("init", "-q");
+    git("config", "user.email", "t@t.local");
+    git("config", "user.name", "t");
+    writeFileSync(join(dir, "app.test.ts"), "assert one\nassert two\n");
+    git("add", "-A");
+    git("commit", "-qm", "base");
+
+    const shellWriteTool: ToolRegistryEntry = {
+      name: "bash",
+      description: "run a command",
+      parameters: { type: "object", properties: { command: { type: "string" } } },
+      async execute() {
+        // Simulates `sed -i` weakening an existing test: deletes an assertion.
+        writeFileSync(join(dir, "app.test.ts"), "assert one\n");
+        return { content: "ok", isError: false, metadata: { kind: "shell" } };
+      },
+    } as unknown as ToolRegistryEntry;
+
+    let providerCalls = 0;
+    const agent = new Agent({
+      provider: providerFromTurns(
+        [
+          [
+            { type: "tool_call", id: "b1", name: "bash", arguments: "", isStart: true, isEnd: false },
+            { type: "tool_call", id: "b1", name: "bash", arguments: "", argumentsFull: '{"command":"sed -i ..."}', isStart: false, isEnd: true },
+          ],
+          textTurn("done"),
+          textTurn("final"),
+        ],
+        () => providerCalls++,
+      ),
+      model: "test-model",
+      tools: [shellWriteTool],
+    });
+
+    await collect(agent.run("tweak the tests", dir));
+
+    // Gate bought one extra turn despite codeChanged never being set.
+    expect(providerCalls).toBe(3);
+    const reminder = agent.messages.find((m) =>
+      m.role === "meta" && m.content.includes("modified pre-existing test files"));
+    expect(reminder).toBeDefined();
+    expect(reminder!.content).toContain("app.test.ts");
+    expect(reminder!.content).toContain("1 line removed");
+  });
+
+  it("re-arms the gate for a steered follow-up request", async () => {
+    const inputController = new AgentRunInputQueue();
+    let providerCalls = 0;
+    const agent = new Agent({
+      provider: providerFromTurns(
+        [
+          writeCallTurn(1),          // turn 1: write (codeChanged)
+          textTurn("done with A"),   // gate #1 fires -> continuation
+          textTurn("confirmed A"),   // steer applied before... (queue drains at turn boundaries)
+          writeCallTurn(2),          // follow-up work
+          textTurn("done with B"),   // gate #2 (re-armed by steer) -> continuation
+          textTurn("confirmed B"),
+        ],
+        () => {
+          providerCalls++;
+          if (providerCalls === 2) inputController.enqueue("also update B");
+        },
+      ),
+      model: "test-model",
+      tools: [fakeWriteTool()],
+    });
+
+    await collect(agent.run("update A", process.cwd(), { inputController }));
+
+    const gateReminders = agent.messages.filter((m) =>
+      m.role === "meta" && m.content.includes("You appear to be finishing"));
+    expect(gateReminders.length).toBe(2);
   });
 
   it("does not fire for subagents", async () => {

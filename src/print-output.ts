@@ -104,6 +104,16 @@ export class PrintRunCollector {
 }
 
 /**
+ * Harness-observed change footprint of the run (git ground truth). Printed
+ * by the harness, not the model — a run cannot omit or misstate what it
+ * touched ("no breaking changes" next to deleted test assertions).
+ */
+export interface PrintChangeSummary {
+  changed_files: number;
+  modified_existing_tests: Array<{ path: string; deleted_lines: number }>;
+}
+
+/**
  * Per-path counts of context compactions during the run. Lets benchmark
  * harnesses correlate outcomes with "did the model ever lose sight of the
  * full history" without access to the in-container session files.
@@ -123,6 +133,7 @@ export function formatPrintJson(input: {
   sessionId?: string;
   stopReason?: "end_turn" | "error" | "cancelled";
   compaction?: PrintCompactionStats;
+  changes?: PrintChangeSummary;
 }): string {
   return JSON.stringify({
     text: input.summary.text,
@@ -133,6 +144,7 @@ export function formatPrintJson(input: {
     usage: input.summary.usage,
     usage_reported: input.summary.usage_reported,
     ...(input.compaction ? { compaction: input.compaction } : {}),
+    ...(input.changes ? { changes: input.changes } : {}),
   });
 }
 
@@ -141,6 +153,7 @@ export function formatPrintJsonError(input: {
   summary?: PrintRunSummary;
   sessionId?: string;
   compaction?: PrintCompactionStats;
+  changes?: PrintChangeSummary;
 }): string {
   return JSON.stringify({
     type: "error",
@@ -156,5 +169,6 @@ export function formatPrintJsonError(input: {
         }
       : {}),
     ...(input.compaction ? { compaction: input.compaction } : {}),
+    ...(input.changes ? { changes: input.changes } : {}),
   });
 }

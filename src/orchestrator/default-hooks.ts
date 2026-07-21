@@ -11,6 +11,7 @@ import {
   buildWorkflowPhaseReminder,
 } from "../prompt/reminders.js";
 import { largeImplementationTaskReminder, orchestrationRequestReminder, reminderForTaskType, userNamedModelReminder } from "../prompt/task-reminders.js";
+import { captureGitBaseline, detectRunChanges, type RunChangeSummary } from "../agent/change-tracker.js";
 import { formatCoverageSummary, resolveWorkflowPhase } from "./workflow.js";
 import type { BeforeToolCallHookContext, TurnHookState, TurnHooks } from "./hooks.js";
 import type { ParsedToolCall, ToolResult } from "../types.js";
@@ -22,7 +23,13 @@ import { buildSubagentLifecycleReminder } from "../agent/subagent-lifecycle-remi
 export function createDefaultHooks(): TurnHooks[] {
   return [
     {
-      beforeTurn(ctx) {
+      async beforeTurn(ctx) {
+        // Git ground truth for the completion gate: tool-metadata bookkeeping
+        // misses bash-written files and subagent worktree merges; a dirty-state
+        // baseline at run start makes the run's real footprint observable.
+        if (ctx.state.gitBaseline === undefined) {
+          ctx.state.gitBaseline = await captureGitBaseline(ctx.cwd);
+        }
         const taskType = classifyTask(ctx.input);
         ctx.state.taskType = taskType;
         ctx.state.governor = new ExecutionGovernor(taskType);
@@ -114,6 +121,7 @@ export function createDefaultHooks(): TurnHooks[] {
     },
     {
       beforeToolCall(ctx) {
+        ctx.state.toolUsed = true;
         const arbitration = arbitrateToolCall(ctx.toolCall);
         const toolCall = { ...arbitration.toolCall, ...(arbitration.note ? { arbiterNote: arbitration.note } : {}) };
         ctx.replaceToolCall(toolCall);
@@ -240,7 +248,7 @@ export function createDefaultHooks(): TurnHooks[] {
 
         // Verification reminders intentionally removed. See afterToolCall.
       },
-      afterTurn(ctx) {
+      async afterTurn(ctx) {
         // Verification force-continuation removed. The model decides whether
         // verification is meaningful for the task, per the system prompt.
         //
@@ -251,18 +259,36 @@ export function createDefaultHooks(): TurnHooks[] {
         // is explicitly told a confirming final answer ends the run — so the
         // "prove it" spiral that killed the old design cannot start.
         if (ctx.state.completionGateFired) return;
-        if (!ctx.state.codeChanged) return;
         // Tools are frozen: the model could not act on anything the check
         // surfaces, so another turn is pure token burn.
         if (ctx.state.forceTextOnlyReason) return;
         // Subagents hand off to a parent that does its own closing pass, and
         // worktree profiles explicitly forbid the very actions a completion
-        // check would suggest.
+        // check would suggest. The parent's gate still covers their merged
+        // changes via the git baseline below.
         if (ctx.agent.role === "subagent") return;
+
+        // Change detection: tool metadata first (cheap), then git ground
+        // truth — which also catches bash-written files and subagent
+        // worktree merges. Gate only runs git when the run actually used
+        // tools, so external repo churn cannot hijack a pure Q&A turn.
+        let changes: RunChangeSummary | null = null;
+        if (ctx.state.toolUsed && ctx.state.gitBaseline) {
+          changes = await detectRunChanges(ctx.cwd, ctx.state.gitBaseline);
+        }
+        const changedSomething = !!ctx.state.codeChanged || (changes !== null && changes.changedFiles.length > 0);
+        if (!changedSomething) return;
+
         ctx.state.completionGateFired = true;
         ctx.state.forceContinuationReason = "completion_self_check";
-        ctx.queueReminder(buildCompletionSelfCheckReminder());
-        traceEvent("completion_gate_fired", { turnCount: ctx.state.turnCount });
+        ctx.queueReminder(buildCompletionSelfCheckReminder({
+          modifiedExistingTests: changes?.modifiedExistingTests,
+        }));
+        traceEvent("completion_gate_fired", {
+          turnCount: ctx.state.turnCount,
+          changedFiles: changes?.changedFiles.length,
+          modifiedExistingTests: changes?.modifiedExistingTests.length,
+        });
       },
     },
   ];

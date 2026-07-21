@@ -740,6 +740,10 @@ export class Agent {
         // the redirected one.
         hookState.exploredFiles?.clear();
         hookState.largeTaskCheckpointDone = false;
+        // A steer is a new ask: the completion gate must be able to fire
+        // again for the follow-up's closing pass, or appended requirements
+        // never get a self-check (codeChanged stays — prior edits are real).
+        hookState.completionGateFired = false;
         if (typeof input.content === "string" && input.content.trim()) {
           hookState.taskType = classifyTask(input.content);
         }

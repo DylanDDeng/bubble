@@ -22,7 +22,7 @@ import { SkillRegistry } from "./skills/registry.js";
 import { buildToolPromptOptions, createAllTools, type PlanController, type ToolSearchController } from "./tools/index.js";
 import { getProcessManager } from "./tasks/manager.js";
 import { PromotionChannel } from "./tasks/promotion.js";
-import { PrintRunCollector, formatPrintJson, formatPrintJsonError } from "./print-output.js";
+import { PrintRunCollector, formatPrintJson, formatPrintJsonError, type PrintChangeSummary } from "./print-output.js";
 import { FileStateTracker } from "./tools/file-state.js";
 import { GoalStore } from "./goal/store.js";
 import { PermissionAwareApprovalController } from "./approval/controller.js";
@@ -628,6 +628,24 @@ async function main() {
       // mode is byte-for-byte the previous behavior.
       const jsonOutput = args.outputFormat === "json";
       const collector = new PrintRunCollector();
+      // Harness-side change footprint (git ground truth) — printed by the
+      // harness so the run cannot omit or misstate what it touched.
+      const changeBaseline = jsonOutput
+        ? await (await import("./agent/change-tracker.js")).captureGitBaseline(args.cwd)
+        : null;
+      const collectChanges = async (): Promise<PrintChangeSummary | undefined> => {
+        if (!changeBaseline) return undefined;
+        const { detectRunChanges } = await import("./agent/change-tracker.js");
+        const detected = await detectRunChanges(args.cwd, changeBaseline).catch(() => null);
+        if (!detected) return undefined;
+        return {
+          changed_files: detected.changedFiles.length,
+          modified_existing_tests: detected.modifiedExistingTests.map((t) => ({
+            path: t.path,
+            deleted_lines: t.deletedLines,
+          })),
+        };
+      };
       const printSessionId = sessionManager
         ? basename(sessionManager.getSessionFile())
         : undefined;
@@ -669,6 +687,7 @@ async function main() {
             summary: collector.summary(),
             sessionId: printSessionId,
             compaction: agent.getCompactionStats(),
+            changes: await collectChanges(),
           }) + "\n");
         } else {
           console.log();
@@ -682,6 +701,7 @@ async function main() {
           summary: collector.summary(),
           sessionId: printSessionId,
           compaction: agent.getCompactionStats(),
+          changes: await collectChanges(),
         }) + "\n");
         process.exitCode = 1;
       }

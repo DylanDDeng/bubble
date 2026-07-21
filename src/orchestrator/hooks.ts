@@ -1,5 +1,6 @@
 import type { Agent } from "../agent.js";
 import type { ContentPart, ParsedToolCall, ToolRegistryEntry, ToolResult } from "../types.js";
+import type { GitChangeBaseline } from "../agent/change-tracker.js";
 import type { TaskType } from "../agent/task-classifier.js";
 import type { ExecutionGovernor } from "../agent/execution-governor.js";
 import type { EvidenceTracker } from "../agent/evidence-tracker.js";
@@ -19,6 +20,10 @@ export interface TurnHookState {
   codeChanged?: boolean;
   /** Completion self-check gate already fired this run (fires at most once). */
   completionGateFired?: boolean;
+  /** Git dirty-state snapshot at run start (null = not a git repo / git failed). */
+  gitBaseline?: GitChangeBaseline | null;
+  /** Any tool executed this run — guards git-change attribution for pure Q&A turns. */
+  toolUsed?: boolean;
   smallTaskHintSent?: boolean;
   recentEditFailures?: string[];
   editNoMatchReminderPaths?: string[];
