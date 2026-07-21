@@ -17,6 +17,8 @@ export interface TurnHookState {
   forceTextOnlyReason?: string;
   forceContinuationReason?: string;
   codeChanged?: boolean;
+  /** Completion self-check gate already fired this run (fires at most once). */
+  completionGateFired?: boolean;
   smallTaskHintSent?: boolean;
   recentEditFailures?: string[];
   editNoMatchReminderPaths?: string[];

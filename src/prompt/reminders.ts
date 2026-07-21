@@ -132,6 +132,14 @@ Choose one of:
 `);
 }
 
+export function buildCompletionSelfCheckReminder(): string {
+  return wrapInSystemReminder(`
+You appear to be finishing. Before giving your final answer, re-read the user's original request in this conversation and check whether any explicit requirement in it remains unfulfilled — including requirements about how the work should be delivered or reported, not only whether the implementation works.
+
+If something is missing, complete it now. If everything is done, give your final answer directly — do not repeat this check or re-verify work you have already verified.
+`);
+}
+
 export function buildToolFreezeReminder(reason: string): string {
   return wrapInSystemReminder(`
 CRITICAL - MAXIMUM STEPS REACHED

@@ -5,6 +5,7 @@ import { ExecutionGovernor } from "../agent/execution-governor.js";
 import { DiscoveryBarrier } from "../agent/discovery-barrier.js";
 import { arbitrateToolCall } from "../agent/tool-arbiter.js";
 import {
+  buildCompletionSelfCheckReminder,
   buildEditRetryEscalationReminder,
   buildSmallTaskHint,
   buildWorkflowPhaseReminder,
@@ -239,9 +240,29 @@ export function createDefaultHooks(): TurnHooks[] {
 
         // Verification reminders intentionally removed. See afterToolCall.
       },
-      afterTurn() {
+      afterTurn(ctx) {
         // Verification force-continuation removed. The model decides whether
         // verification is meaningful for the task, per the system prompt.
+        //
+        // Completion self-check gate: when a run that changed code is about
+        // to end (this hook only runs on final, no-tool-call turns), remind
+        // the model ONCE to re-read the original request before finishing.
+        // Unlike the removed verification gate it never repeats — the model
+        // is explicitly told a confirming final answer ends the run — so the
+        // "prove it" spiral that killed the old design cannot start.
+        if (ctx.state.completionGateFired) return;
+        if (!ctx.state.codeChanged) return;
+        // Tools are frozen: the model could not act on anything the check
+        // surfaces, so another turn is pure token burn.
+        if (ctx.state.forceTextOnlyReason) return;
+        // Subagents hand off to a parent that does its own closing pass, and
+        // worktree profiles explicitly forbid the very actions a completion
+        // check would suggest.
+        if (ctx.agent.role === "subagent") return;
+        ctx.state.completionGateFired = true;
+        ctx.state.forceContinuationReason = "completion_self_check";
+        ctx.queueReminder(buildCompletionSelfCheckReminder());
+        traceEvent("completion_gate_fired", { turnCount: ctx.state.turnCount });
       },
     },
   ];

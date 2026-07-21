@@ -570,6 +570,10 @@ export class Agent {
     this.injectSystemReminder(reminder);
   }
 
+  get role(): "parent" | "subagent" {
+    return this.agentRole;
+  }
+
   get model(): string {
     return this._model;
   }
