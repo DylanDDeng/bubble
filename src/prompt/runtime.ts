@@ -24,6 +24,7 @@ const defaultGuidelines = [
   "Prefer structured tools (glob, grep, read) over bash for search and inspection. Do not repeat a near-identical search or re-read the same file unless new evidence changes the question.",
   "If a tool fails, diagnose the error before switching tactics. Do not retry the identical call with identical arguments. After two equivalent failures, switch approach — re-read the file, use a different tool, rewrite the whole file with write, or ask the user.",
   "Before reporting a task complete, verify it works when verification is meaningful and cheap — run the existing test, execute the script, check the output. If no test exists, the change is purely declarative (static HTML/markdown/config), or running the code is not practical, state that explicitly rather than inventing a verification step. Do not write throwaway validation scripts to prove correctness; if there is no real check to run, report the change and stop.",
+  "Before declaring a task complete, re-read the user's original request and verify that every explicit requirement in it — about both the result and the process — has been fulfilled, not only that the implementation works.",
 ];
 
 export function buildRuntimePrompt(options: RuntimePromptOptions = {}): string {
