@@ -45,17 +45,40 @@ interface CallbackResult {
   state: string;
 }
 
+interface CallbackServer {
+  /** Loopback URI to hand to the authorization endpoint. Bound and ready. */
+  redirectUri: string;
+  /** Resolves when the browser hits /callback, rejects on error or timeout. */
+  result: Promise<CallbackResult>;
+}
+
 /**
  * xAI's OAuth client allows dynamic loopback ports, so listen on an ephemeral
- * port and report the redirect URI back to the login flow once bound.
+ * port. Awaiting this returns only once the socket is actually bound, so the
+ * caller can never build an authorization URL around an empty redirect URI.
  */
 async function startCallbackServer(
   timeoutMs: number,
-  onListening: (redirectUri: string) => void,
   onStatus?: (msg: string) => void,
-): Promise<CallbackResult> {
-  return new Promise((resolve, reject) => {
+): Promise<CallbackServer> {
+  let settle: (value: CallbackResult) => void = () => {};
+  let fail: (error: Error) => void = () => {};
+  const result = new Promise<CallbackResult>((resolve, reject) => {
+    settle = resolve;
+    fail = reject;
+  });
+  // Nothing awaits `result` until the caller has a redirect URI, and an early
+  // rejection (bind failure) would otherwise be an unhandled rejection.
+  result.catch(() => {});
+
+  return new Promise<CallbackServer>((resolveListening, rejectListening) => {
     let resolved = false;
+    const finish = (action: () => void) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timer);
+      server.close(action);
+    };
     const server = createServer((req, res) => {
       try {
         const port = (server.address() as AddressInfo).port;
@@ -70,20 +93,14 @@ async function startCallbackServer(
           if (error) {
             res.writeHead(400, { "Content-Type": "text/html" });
             res.end(`<html><body><h1>Authorization failed</h1><p>${errorDesc || error}</p></body></html>`);
-            if (!resolved) {
-              resolved = true;
-              server.close(() => reject(new Error(`OAuth error: ${errorDesc || error}`)));
-            }
+            finish(() => fail(new Error(`OAuth error: ${errorDesc || error}`)));
             return;
           }
 
           if (code) {
             res.writeHead(200, { "Content-Type": "text/html" });
             res.end("<html><body><h1>Authorization successful</h1><p>You can close this window and return to the terminal.</p></body></html>");
-            if (!resolved) {
-              resolved = true;
-              server.close(() => resolve({ code, state: state || "" }));
-            }
+            finish(() => settle({ code, state: state || "" }));
             return;
           }
         }
@@ -95,18 +112,33 @@ async function startCallbackServer(
       }
     });
 
+    // Unref'd so a pending login never keeps the process alive on its own,
+    // and cleared on completion so a successful login does not leave the
+    // event loop holding a five-minute timer.
+    const timer = setTimeout(() => {
+      finish(() => fail(new Error(`OAuth login timed out after ${timeoutMs / 1000}s`)));
+    }, timeoutMs);
+    timer.unref?.();
+
+    // Without this, a failed bind (port exhausted, sandbox denies listening)
+    // never rejects anything — the login just hangs until the timeout.
+    server.on("error", (error) => {
+      clearTimeout(timer);
+      if (resolved) return;
+      resolved = true;
+      rejectListening(error instanceof Error ? error : new Error(String(error)));
+      fail(error instanceof Error ? error : new Error(String(error)));
+    });
+
     server.listen(0, "127.0.0.1", () => {
       const port = (server.address() as AddressInfo).port;
       onStatus?.(`Local server listening on http://127.0.0.1:${port}`);
-      onListening(`http://127.0.0.1:${port}/callback`);
+      // Resolve only once the socket is genuinely bound. The caller used to
+      // race this with a single setImmediate tick and declare failure if the
+      // listen callback had not fired yet — which it frequently has not, since
+      // binding is real async I/O.
+      resolveListening({ redirectUri: `http://127.0.0.1:${port}/callback`, result });
     });
-
-    setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
-        server.close(() => reject(new Error(`OAuth login timed out after ${timeoutMs / 1000}s`)));
-      }
-    }, timeoutMs);
   });
 }
 
@@ -147,15 +179,16 @@ export async function loginGrok(
   const state = generateOpaqueId();
   const nonce = generateOpaqueId();
 
-  let redirectUri = "";
-  const serverPromise = startCallbackServer(5 * 60 * 1000, (uri) => {
-    redirectUri = uri;
-  }, callbacks?.onStatus);
-  // The listen callback fires before any request can arrive; give the event
-  // loop one tick so redirectUri is populated before building the URL.
-  await new Promise((resolve) => setImmediate(resolve));
-  if (!redirectUri) {
-    throw new Error("The local OAuth callback server did not start.");
+  let redirectUri: string;
+  let serverPromise: Promise<CallbackResult>;
+  try {
+    const server = await startCallbackServer(5 * 60 * 1000, callbacks?.onStatus);
+    redirectUri = server.redirectUri;
+    serverPromise = server.result;
+  } catch (error) {
+    throw new Error(
+      `The local OAuth callback server could not start: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 
   const params = new URLSearchParams({

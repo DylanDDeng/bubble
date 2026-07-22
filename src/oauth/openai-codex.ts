@@ -82,6 +82,19 @@ async function startCallbackServer(
       }
     });
 
+    // This flow binds a FIXED port (the provider only whitelists one redirect
+    // URI), so EADDRINUSE is a realistic outcome — a stale login, or any other
+    // process on the port. Without this handler nothing rejects and the user
+    // stares at "waiting for authorization" for the full timeout.
+    server.on("error", (error) => {
+      if (resolved) return;
+      resolved = true;
+      const detail = (error as NodeJS.ErrnoException)?.code === "EADDRINUSE"
+        ? `port ${port} is already in use — close any other sign-in still running and retry`
+        : error instanceof Error ? error.message : String(error);
+      reject(new Error(`The local OAuth callback server could not start: ${detail}`));
+    });
+
     server.listen(port, "127.0.0.1", () => {
       onStatus?.(`Local server listening on http://127.0.0.1:${port}`);
     });
