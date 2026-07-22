@@ -18,9 +18,23 @@ export function parseOutputFormat(raw: string | undefined): PrintOutputFormat | 
   return undefined;
 }
 
+/**
+ * Anthropic's usage decomposition, which the field names already claimed to
+ * follow: the four token buckets are DISJOINT and sum to `total_tokens`.
+ *
+ *   input_tokens + cache_read_input_tokens + cache_creation_input_tokens
+ *     + output_tokens === total_tokens
+ *
+ * `input_tokens` is therefore the uncached remainder only — it does NOT include
+ * cache reads. It used to carry the whole prompt total, which was harmless while
+ * cache reads were a flat few thousand tokens per turn, but message-level prompt
+ * caching makes reads 70-90% of the prompt, and a harness that priced
+ * `input_tokens` at the full input rate would then overstate cost ~2x.
+ */
 export interface PrintUsageSummary {
   input_tokens: number;
   cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
   output_tokens: number;
   reasoning_tokens: number;
   total_tokens: number;
@@ -50,6 +64,7 @@ export class PrintRunCollector {
   private readonly usage: PrintUsageSummary = {
     input_tokens: 0,
     cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
     output_tokens: 0,
     reasoning_tokens: 0,
     total_tokens: 0,
@@ -84,8 +99,17 @@ export class PrintRunCollector {
 
   private addUsage(usage: TokenUsage): void {
     this.usageReported = true;
-    this.usage.input_tokens += usage.promptTokens ?? 0;
-    this.usage.cache_read_input_tokens += usage.promptCacheHitTokens ?? 0;
+    const prompt = usage.promptTokens ?? 0;
+    const cacheRead = usage.promptCacheHitTokens ?? 0;
+    // promptCacheMissTokens already includes creation, so creation has to be
+    // netted out of the uncached remainder rather than added alongside it.
+    const cacheCreation = usage.cacheCreationTokens ?? 0;
+    const uncached = usage.promptCacheMissTokens !== undefined
+      ? Math.max(0, usage.promptCacheMissTokens - cacheCreation)
+      : Math.max(0, prompt - cacheRead - cacheCreation);
+    this.usage.input_tokens += uncached;
+    this.usage.cache_read_input_tokens += cacheRead;
+    this.usage.cache_creation_input_tokens += cacheCreation;
     this.usage.output_tokens += usage.completionTokens ?? 0;
     this.usage.reasoning_tokens += usage.reasoningTokens ?? 0;
     this.usage.total_tokens += usage.totalTokens

@@ -824,4 +824,37 @@ describe("provider-anthropic", () => {
     expect(requestInit?.headers).not.toHaveProperty("authorization");
     expect(JSON.parse(String(requestInit?.body))).not.toHaveProperty("temperature");
   });
+  it("carries cache-creation tokens forward across usage merges", async () => {
+    // message_start reports the full breakdown; a later delta may report only
+    // some fields. Defaulting the missing cache-write count to 0 deflated
+    // promptTokens, and promptTokens is the compaction anchor — an undercount
+    // makes the agent believe it has more context room than it does.
+    const chunks = await collect(translateAnthropicStream(fromArray([
+      {
+        type: "message_start",
+        message: {
+          usage: {
+            input_tokens: 40,
+            cache_read_input_tokens: 900,
+            cache_creation_input_tokens: 60,
+            output_tokens: 0,
+          },
+        },
+      },
+      { type: "message_delta", usage: { input_tokens: 40, output_tokens: 25 } },
+    ])));
+
+    const usage = chunks.filter((chunk) => chunk.type === "usage").at(-1);
+    expect(usage).toEqual({
+      type: "usage",
+      usage: {
+        promptTokens: 1000,
+        completionTokens: 25,
+        promptCacheHitTokens: 900,
+        promptCacheMissTokens: 100,
+        cacheCreationTokens: 60,
+        totalTokens: 1025,
+      },
+    });
+  });
 });

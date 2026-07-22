@@ -21,6 +21,8 @@ const ANTHROPIC_LONG_OUTPUT_MAX_TOKENS = 64000;
 const MINIMAX_M3_MAX_TOKENS = 128000;
 const MINIMAX_M2_MAX_TOKENS = 64000;
 const ANTHROPIC_PROMPT_CACHE_CONTROL = { type: "ephemeral" } as const;
+/** Hard API limit: a 5th cache_control breakpoint is a 400, not a warning. */
+const ANTHROPIC_MAX_CACHE_BREAKPOINTS = 4;
 const MINIMAX_PROMPT_CACHE_MODELS = new Set([
   "minimax-m2.7",
   "minimax-m2.7-highspeed",
@@ -86,12 +88,12 @@ interface AnthropicSystemBlock {
 }
 
 type AnthropicContentBlock =
-  | { type: "text"; text: string }
-  | { type: "image"; source: { type: "url"; url: string } | { type: "base64"; media_type: string; data: string } }
+  | { type: "text"; text: string; cache_control?: AnthropicCacheControl }
+  | { type: "image"; source: { type: "url"; url: string } | { type: "base64"; media_type: string; data: string }; cache_control?: AnthropicCacheControl }
   | { type: "thinking"; thinking: string; signature?: string }
   | { type: "redacted_thinking"; data: string }
-  | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
-  | { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean };
+  | { type: "tool_use"; id: string; name: string; input: Record<string, unknown>; cache_control?: AnthropicCacheControl }
+  | { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean; cache_control?: AnthropicCacheControl };
 
 interface AnthropicMessage {
   role: "user" | "assistant";
@@ -189,11 +191,36 @@ export function buildAnthropicRequest(
     description: tool.description,
     input_schema: tool.parameters,
   }));
+  // Anthropic caps a request at 4 cache_control breakpoints and rejects the
+  // fifth outright, so the static ones are counted and the message region only
+  // ever gets what is left.
+  let staticBreakpoints = 0;
   if (enablePromptCache && tools && tools.length > 0) {
     tools[tools.length - 1] = {
       ...tools[tools.length - 1],
       cache_control: ANTHROPIC_PROMPT_CACHE_CONTROL,
     };
+    staticBreakpoints += 1;
+  }
+  if (enablePromptCache && system) {
+    staticBreakpoints += 1;
+  }
+
+  // Message-region breakpoints go to the official endpoint only. `baseURL` is
+  // user-editable persisted config, so a corporate gateway can keep
+  // providerId "anthropic" while pointing elsewhere — the URL check is the only
+  // trustworthy signal. Streaming only: complete() has no next turn to read the
+  // entry back.
+  if (
+    enablePromptCache
+    && chatOptions.stream === true
+    && isOfficialAnthropicBaseUrl(options.baseURL)
+    && !messageCacheKillSwitchEnabled()
+  ) {
+    placeMessageCacheBreakpoints(
+      anthropicMessages,
+      ANTHROPIC_MAX_CACHE_BREAKPOINTS - staticBreakpoints,
+    );
   }
 
   const effectiveThinkingLevel = normalizeThinkingLevel(
@@ -234,6 +261,101 @@ export function buildAnthropicRequest(
   }
 
   return body;
+}
+
+/**
+ * Attach `cache_control` to the last cacheable block of `message`.
+ *
+ * Returns false when the message has nothing markable (empty block array, or a
+ * body made only of thinking blocks, where `cache_control` is not permitted).
+ */
+function markLastCacheableBlock(message: AnthropicMessage): boolean {
+  if (typeof message.content === "string") {
+    if (!message.content) return false;
+    // A breakpoint needs a block to sit on. Wrapping is safe: the API keys the
+    // cache on canonicalised content, so the same message reverting to a bare
+    // string on a later turn still matches this entry.
+    message.content = [{
+      type: "text",
+      text: message.content,
+      cache_control: ANTHROPIC_PROMPT_CACHE_CONTROL,
+    }];
+    return true;
+  }
+
+  const blocks = message.content;
+  for (let index = blocks.length - 1; index >= 0; index--) {
+    const block = blocks[index];
+    if (block.type === "thinking" || block.type === "redacted_thinking") continue;
+    blocks[index] = { ...block, cache_control: ANTHROPIC_PROMPT_CACHE_CONTROL };
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Roll prompt-cache breakpoints along the conversation so each turn's context is
+ * read back on the next turn instead of being re-billed as fresh input.
+ *
+ * Two breakpoints, and both are load-bearing:
+ *
+ * - the **tail** (last block of the last message) writes the entry that the next
+ *   request reads;
+ * - the **anchor** reads it. It goes on the message just before the final
+ *   assistant message — which is exactly where the previous request ended, since
+ *   consecutive agent-loop requests differ by one `[assistant, tool results]`
+ *   step. Landing on the written position directly is what makes this correct
+ *   for any turn size: Anthropic only looks back 20 content blocks from a
+ *   breakpoint to find a prior write, and a turn with many parallel tool calls
+ *   easily exceeds that (1 + 2N blocks for N calls). Measured on Opus 4.8 with
+ *   30 parallel calls: tail-only and a fixed-distance anchor both collapse to an
+ *   8.6% hit rate, while this anchor holds 77%.
+ *
+ * Mutates `messages` (built fresh per request by toAnthropicMessages) and
+ * returns how many breakpoints it used, never more than `budget`.
+ */
+export function placeMessageCacheBreakpoints(messages: AnthropicMessage[], budget: number): number {
+  // One-shot prompts (complete(): compaction, titles, memory) are excluded by
+  // the caller's streaming gate, not here — a single-message first turn is a
+  // real agent turn and marking its tail costs nothing, since writes are billed
+  // from the highest hit to the last breakpoint regardless of how many sit in
+  // between.
+  if (budget <= 0 || messages.length === 0) return 0;
+
+  let used = 0;
+  const tailIndex = messages.length - 1;
+
+  if (budget - used >= 2) {
+    let lastAssistantIndex = -1;
+    for (let index = tailIndex; index >= 0; index--) {
+      if (messages[index].role === "assistant") {
+        lastAssistantIndex = index;
+        break;
+      }
+    }
+    const anchorIndex = lastAssistantIndex - 1;
+    // An assistant at the anchor position means consecutive assistant messages
+    // merged, so this is not the previous request's boundary and the distance
+    // back is unbounded — skip rather than guess.
+    if (
+      anchorIndex >= 0
+      && anchorIndex < tailIndex
+      && messages[anchorIndex].role !== "assistant"
+      && markLastCacheableBlock(messages[anchorIndex])
+    ) {
+      used += 1;
+    }
+  }
+
+  if (budget - used >= 1 && markLastCacheableBlock(messages[tailIndex])) {
+    used += 1;
+  }
+  return used;
+}
+
+function messageCacheKillSwitchEnabled(): boolean {
+  const raw = process.env.BUBBLE_ANTHROPIC_MESSAGE_CACHE;
+  return raw === "0" || raw === "false";
 }
 
 export function resolveAnthropicMaxTokens(options: AnthropicProviderOptions, model: string): number {
@@ -811,9 +933,18 @@ function mergeAnthropicUsage(current: TokenUsage | undefined, raw: unknown): Tok
   let promptCacheMissTokens = current?.promptCacheMissTokens;
   let cacheCreationTokens = current?.cacheCreationTokens;
   if (hasPromptUsage) {
-    const inputTokens = rawInput ?? promptCacheMissTokens ?? promptTokens;
+    // Every field carries forward: a message_delta may report one of the three
+    // without the others, and defaulting a missing one to 0 would deflate
+    // promptTokens — which is the compaction anchor (agent lastInputTokens),
+    // so an undercount makes the agent compact later than it should.
+    // promptCacheMissTokens already includes cache creation, so the prior
+    // uncached remainder has to net it back out before being reused.
+    const priorUncachedInput = promptCacheMissTokens !== undefined
+      ? Math.max(0, promptCacheMissTokens - (cacheCreationTokens ?? 0))
+      : promptTokens;
+    const inputTokens = rawInput ?? priorUncachedInput;
     const cacheRead = rawCacheRead ?? promptCacheHitTokens ?? 0;
-    const cacheCreation = rawCacheCreation ?? 0;
+    const cacheCreation = rawCacheCreation ?? cacheCreationTokens ?? 0;
     promptTokens = inputTokens + cacheRead + cacheCreation;
     promptCacheHitTokens = cacheRead;
     promptCacheMissTokens = inputTokens + cacheCreation;

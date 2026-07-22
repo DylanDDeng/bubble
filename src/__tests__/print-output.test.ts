@@ -54,12 +54,47 @@ describe("PrintRunCollector", () => {
     ] as AgentEvent[]);
 
     const usage = collector.summary().usage;
-    expect(usage.input_tokens).toBe(300);
+    // input_tokens is the UNCACHED remainder, not the prompt total: turn 1
+    // contributes 100-60=40, turn 2 contributes its full 200.
+    expect(usage.input_tokens).toBe(240);
     expect(usage.cache_read_input_tokens).toBe(60);
+    expect(usage.cache_creation_input_tokens).toBe(0);
     expect(usage.output_tokens).toBe(50);
     expect(usage.reasoning_tokens).toBe(5);
     // totalTokens present (120) + fallback prompt+completion (230).
     expect(usage.total_tokens).toBe(350);
+  });
+
+  it("reports the four prompt buckets as disjoint, summing to total", () => {
+    // A harness that priced the old grand-total input_tokens at the full input
+    // rate would overstate cost roughly 2x once message-level caching makes
+    // reads the bulk of the prompt. The buckets must not overlap.
+    const collector = feed([
+      { type: "turn_start" },
+      {
+        type: "turn_end",
+        usage: {
+          promptTokens: 1000,
+          completionTokens: 40,
+          promptCacheHitTokens: 700,
+          promptCacheMissTokens: 300, // already includes the 250 written
+          cacheCreationTokens: 250,
+          totalTokens: 1040,
+        },
+      },
+    ] as AgentEvent[]);
+
+    const usage = collector.summary().usage;
+    expect(usage.input_tokens).toBe(50);
+    expect(usage.cache_read_input_tokens).toBe(700);
+    expect(usage.cache_creation_input_tokens).toBe(250);
+    expect(usage.output_tokens).toBe(40);
+    expect(
+      usage.input_tokens
+      + usage.cache_read_input_tokens
+      + usage.cache_creation_input_tokens
+      + usage.output_tokens,
+    ).toBe(usage.total_tokens);
   });
 
   it("discards partial text superseded by a provider retry", () => {

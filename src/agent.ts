@@ -19,10 +19,10 @@ import {
   sleepBeforeRetry,
 } from "./network/retry.js";
 import { projectMessages } from "./context/projector.js";
-import { aggressivePruneMessages, markStableCurrentToolResultsForCache } from "./context/prune.js";
+import { aggressivePruneMessages, markStableCurrentToolResultsForCache, markToolResultCacheStable } from "./context/prune.js";
 import { truncateToolOutputForModel } from "./context/tool-output-truncate.js";
 import { buildDeferredToolsReminder, buildToolFreezeReminder, reminderForMode } from "./prompt/reminders.js";
-import type { AgentEvent, AgentInputController, AgentRunInput, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ProviderMessage, ProviderMetadataProvider, ProviderRawContentBlock, ThinkingLevel, Todo, TokenUsage, ToolDefinition, ToolResult, ToolRegistryEntry, ToolUpdate } from "./types.js";
+import type { AgentEvent, AgentInputController, AgentRunInput, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ProviderMessage, ProviderMetadataProvider, ProviderRawContentBlock, ThinkingLevel, Todo, TokenUsage, ToolDefinition, ToolMessage, ToolResult, ToolRegistryEntry, ToolUpdate } from "./types.js";
 import { HookBus, type TurnHooks, type TurnHookState } from "./orchestrator/hooks.js";
 import type { ExternalHookController } from "./hooks/controller.js";
 import {
@@ -1499,13 +1499,17 @@ export class Agent {
               limit: truncatedOutput.limit,
             },
           }, traceContext);
-          this.appendMessage({
+          const toolMessage: ToolMessage = {
             role: "tool",
             toolCallId: tc.id,
             content: truncatedOutput.content,
             metadata: result.metadata,
             isError: result.isError,
-          });
+          };
+          // Stamp before appending: appendMessage persists to the session log
+          // synchronously, so a mark added on a later turn never reaches disk.
+          markToolResultCacheStable(tc.name, toolMessage);
+          this.appendMessage(toolMessage);
           this.compactResidentHistory();
           flushGovernorReminders();
           this.onToolResult?.(tc.name, result);

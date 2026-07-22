@@ -69,6 +69,22 @@ export function pruneMessages<T extends Message>(messages: T[]): T[] {
   });
 }
 
+/**
+ * Stamp a tool result as "projected in full" at the moment it is appended.
+ *
+ * markStableCurrentToolResultsForCache does the same thing one turn later, which
+ * is too late for the session log: the message is serialized to disk when it is
+ * appended, so a mark added afterwards never reaches the file and a resumed
+ * session re-prunes history the model had already been shown in full.
+ */
+export function markToolResultCacheStable(toolName: string, message: ToolMessage): void {
+  if (!shouldPruneToolResult(toolName, message.content)) return;
+  message.metadata = {
+    ...message.metadata,
+    [CACHE_STABLE_PROJECTION_KEY]: CACHE_STABLE_FULL_PROJECTION,
+  };
+}
+
 export function markStableCurrentToolResultsForCache(messages: Message[]): void {
   const protectedToolCallIds = collectProtectedToolCallIds(messages);
   if (protectedToolCallIds.size === 0) return;
@@ -121,6 +137,13 @@ function isCacheStableFullToolResult(message: ToolMessage): boolean {
  * tool output except the latest unresolved tool turn that the model still
  * needs to reason over. Used as a last-resort microcompact pass when a
  * standard prune hasn't reclaimed enough budget.
+ *
+ * Deliberately ignores `cacheStableProjection`, unlike pruneMessages. Honouring
+ * it here would make this a no-op — every result that has been sent once is
+ * marked — which is fine for the prefix cache and fatal for the two callers that
+ * depend on it: context-overflow (HTTP 400) recovery and the hard resident-memory
+ * limit. Losing the cache is the correct trade when the alternative is a run that
+ * cannot recover.
  */
 export function aggressivePruneMessages<T extends Message>(messages: T[]): T[] {
   const toolNameByCallId = new Map<string, string>();
@@ -149,7 +172,17 @@ export function aggressivePruneMessages<T extends Message>(messages: T[]): T[] {
 function collectProtectedToolCallIds(messages: Message[]): Set<string> {
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index];
-    if (message.role === "tool" || message.role === "system" || message.role === "meta") {
+    // A trailing user message is steered input (or a resumed session's new
+    // instruction), not the end of the tool batch. Stopping on it left the
+    // just-finished batch unmarked forever, so it stayed a live prune candidate
+    // and later batches rewrote its content mid-history — which both loses tool
+    // output the model may still need and invalidates the provider prefix cache.
+    if (
+      message.role === "tool"
+      || message.role === "system"
+      || message.role === "meta"
+      || message.role === "user"
+    ) {
       continue;
     }
     if (message.role === "assistant" && message.toolCalls && message.toolCalls.length > 0) {

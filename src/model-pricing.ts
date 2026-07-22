@@ -8,6 +8,13 @@ export interface ModelPricing {
   currency: PricingCurrency;
   inputCacheHitPerMillion: number;
   inputCacheMissPerMillion: number;
+  /**
+   * Rate for tokens written INTO the cache, when the provider charges a premium
+   * for it (Anthropic: 1.25x base input for the 5-minute TTL). Optional —
+   * without it, cache writes are billed at the plain miss rate, which is what
+   * every provider modelled here did before Anthropic caching was enabled.
+   */
+  inputCacheWritePerMillion?: number;
   outputPerMillion: number;
   effectiveUntil?: string;
   original?: {
@@ -24,13 +31,57 @@ export interface UsageCost {
 }
 
 export const MODEL_PRICING: ModelPricing[] = [
+  // Anthropic cache multipliers off base input: read 0.1x, 5-minute write 1.25x.
   {
     providerId: "anthropic",
     modelId: "claude-fable-5",
     currency: "USD",
-    inputCacheHitPerMillion: 10,
+    inputCacheHitPerMillion: 1,
     inputCacheMissPerMillion: 10,
+    inputCacheWritePerMillion: 12.5,
     outputPerMillion: 50,
+  },
+  {
+    providerId: "anthropic",
+    modelId: "claude-opus-4-8",
+    currency: "USD",
+    inputCacheHitPerMillion: 0.5,
+    inputCacheMissPerMillion: 5,
+    inputCacheWritePerMillion: 6.25,
+    outputPerMillion: 25,
+  },
+  {
+    providerId: "anthropic",
+    modelId: "claude-sonnet-5",
+    currency: "USD",
+    inputCacheHitPerMillion: 0.2,
+    inputCacheMissPerMillion: 2,
+    inputCacheWritePerMillion: 2.5,
+    outputPerMillion: 10,
+    effectiveUntil: "2026-08-31T23:59:00Z",
+    original: {
+      inputCacheHitPerMillion: 0.3,
+      inputCacheMissPerMillion: 3,
+      outputPerMillion: 15,
+    },
+  },
+  {
+    providerId: "anthropic",
+    modelId: "claude-sonnet-4-6",
+    currency: "USD",
+    inputCacheHitPerMillion: 0.3,
+    inputCacheMissPerMillion: 3,
+    inputCacheWritePerMillion: 3.75,
+    outputPerMillion: 15,
+  },
+  {
+    providerId: "anthropic",
+    modelId: "claude-haiku-4-5",
+    currency: "USD",
+    inputCacheHitPerMillion: 0.1,
+    inputCacheMissPerMillion: 1,
+    inputCacheWritePerMillion: 1.25,
+    outputPerMillion: 5,
   },
   {
     providerId: "deepseek",
@@ -80,9 +131,17 @@ export function calculateUsageCost(providerId: string, modelId: string, usage: T
   const miss = hasCacheBreakdown
     ? usage.promptCacheMissTokens ?? Math.max(0, usage.promptTokens - hit)
     : usage.promptTokens;
+  // `miss` already contains the cache-write tokens (see mergeAnthropicUsage),
+  // so writes must be netted out before being re-priced — adding a write term
+  // on top of the untouched miss term would bill them at miss + write.
+  const write = pricing.inputCacheWritePerMillion !== undefined
+    ? Math.min(usage.cacheCreationTokens ?? 0, miss)
+    : 0;
+  const missOnly = miss - write;
   const cost =
     (hit / 1_000_000) * pricing.inputCacheHitPerMillion
-    + (miss / 1_000_000) * pricing.inputCacheMissPerMillion
+    + (write / 1_000_000) * (pricing.inputCacheWritePerMillion ?? pricing.inputCacheMissPerMillion)
+    + (missOnly / 1_000_000) * pricing.inputCacheMissPerMillion
     + (usage.completionTokens / 1_000_000) * pricing.outputPerMillion;
 
   return {

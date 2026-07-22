@@ -168,3 +168,69 @@ describe("aggressivePruneMessages", () => {
     expect((pruned[1] as any).content).toBe(messages[1].content);
   });
 });
+
+describe("cache-stability marking across a steered turn", () => {
+  function turn(index: number): Message[] {
+    return [
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: `call_${index}`, name: "read", arguments: "{}" }],
+      },
+      { role: "tool", toolCallId: `call_${index}`, content: longText(`file ${index}`) },
+    ];
+  }
+
+  it("still marks the finished batch when the user steers mid-run", () => {
+    // applyPendingInputs appends the steered user message before the marking
+    // pass runs. Stopping the backward walk on that user message left the batch
+    // unmarked forever: it became a live prune candidate, so a later batch
+    // rewrote its content mid-history — losing tool output the model may still
+    // need, and invalidating the provider prefix cache from that point on.
+    const messages: Message[] = [
+      { role: "user", content: "read files" },
+      ...turn(1),
+      { role: "user", content: "also check the parser" },
+    ];
+
+    markStableCurrentToolResultsForCache(messages);
+
+    const toolMessage = messages.find((message) => message.role === "tool");
+    expect(toolMessage?.metadata).toMatchObject({ cacheStableProjection: "full" });
+  });
+
+  it("keeps a steered-over batch verbatim through later pruning", () => {
+    const messages: Message[] = [
+      { role: "user", content: "read files" },
+      ...turn(1),
+      { role: "user", content: "also check the parser" },
+    ];
+    markStableCurrentToolResultsForCache(messages);
+
+    // Two more batches arrive; without the mark, batch 1 would be the oldest
+    // candidate and get replaced by a placeholder.
+    messages.push(...turn(2), ...turn(3), ...turn(4));
+    const pruned = pruneMessages(messages);
+
+    const first = pruned.find(
+      (message): message is Extract<Message, { role: "tool" }> =>
+        message.role === "tool" && message.toolCallId === "call_1",
+    );
+    expect(first?.content).toBe(longText("file 1"));
+  });
+
+  it("does not stop the walk at an assistant turn that made no tool calls", () => {
+    const messages: Message[] = [
+      { role: "user", content: "read files" },
+      ...turn(1),
+      { role: "user", content: "thanks" },
+      { role: "assistant", content: "you're welcome" },
+      { role: "user", content: "one more thing" },
+    ];
+
+    markStableCurrentToolResultsForCache(messages);
+
+    const toolMessage = messages.find((message) => message.role === "tool");
+    expect(toolMessage?.metadata?.cacheStableProjection).toBeUndefined();
+  });
+});
