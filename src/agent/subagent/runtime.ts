@@ -140,14 +140,7 @@ export class SubagentRuntime {
       createInstance: (record, tools, cwd, forkContext) => this.createSubAgentInstance(record, tools, cwd, forkContext),
       notifyWaiters: (record) => this.store.notifyWaiters(record),
       onFinal: (record, options) => {
-        if (record.worktree) {
-          // Inspect and clean up the worktree: unchanged → removed; changed →
-          // kept for the parent to review, with a diff stat in the handoff (§8).
-          finalizeSubagentWorktree(record.worktree);
-          if (record.worktree.changed) {
-            record.toolNotes.push(`worktree: changes left in ${record.worktree.path} — review the diff before applying`);
-          }
-        }
+        this.reclaimWorktree(record);
         // Workflow-internal agents are not persisted (they never re-import into
         // the store on restart) and never ingest into parent context (option C).
         if (!record.workflowInternal) {
@@ -168,6 +161,34 @@ export class SubagentRuntime {
   /** Follows a session switch: evicts the old session's final children and loads the new one's. */
   repointPersistDir(persistDir: string | undefined): void {
     this.store.repoint(persistDir);
+  }
+
+  /**
+   * Inspects and cleans up a child's worktree at ANY terminal outcome:
+   * unchanged → removed; changed → kept for the parent to review, with a
+   * diff stat in the handoff (§8). Called from ChildRunner's onFinal and
+   * from all three scheduler-terminal callbacks — the scheduler paths used
+   * to skip reclamation entirely, leaking the directory and its git
+   * registration whenever a write child exhausted its retries
+   * (known-defects #1).
+   *
+   * When the directory was removed (= the child left no changes, so there
+   * is no file state to lose), the record's worktree reference is cleared:
+   * a kept reference would send a later resume into a deleted directory —
+   * clearing it makes the resume path rebuild a fresh worktree instead
+   * (see ChildRunner's reuse guard).
+   */
+  private reclaimWorktree(record: SubagentThreadRecord): void {
+    if (!record.worktree) return;
+    // finalizeSubagentWorktree is idempotent (already-finalized worktrees
+    // return unchanged); only the call that actually performed finalization
+    // may push the handoff note, or re-finalization would duplicate it.
+    const alreadyFinalized = record.worktree.changed !== undefined;
+    finalizeSubagentWorktree(record.worktree);
+    if (!alreadyFinalized && record.worktree.changed) {
+      record.toolNotes.push(`worktree: changes left in ${record.worktree.path} — review the diff before applying`);
+    }
+    if (record.worktree.removed) record.worktree = undefined;
   }
 
   /** Registers a waker so a blocked tool-execution loop learns about updates. */
@@ -344,6 +365,13 @@ export class SubagentRuntime {
     record.finalReason = undefined;
     record.deliveredAt = undefined;
     record.updatedAt = Date.now();
+    if (record.worktree) {
+      // A kept (changed) worktree carries changed/diffStat frozen at the
+      // previous terminal outcome; reset them so the finalize after THIS
+      // run recomputes instead of reporting stale state.
+      record.worktree.changed = undefined;
+      record.worktree.diffStat = undefined;
+    }
     // A send_input restart is a launch like any other: it goes through the
     // scheduler's dispatch point and is subject to the same admission limits
     // (design §4.1) — batch-resuming team members cannot bypass concurrency caps.
@@ -626,7 +654,13 @@ export class SubagentRuntime {
         record.finalReason = classifySubagentAbortReason(reason, options.abortSignal);
         record.error = reason instanceof Error ? reason.message : reason ? String(reason) : "Cancelled while queued.";
         record.updatedAt = Date.now();
-        // The run never started, so no SubagentStart fired and no SubagentStop follows.
+        // No SubagentStop here. NOTE: this path is NOT only "run never
+        // started" — a 429/transport failure re-queues the entry with the
+        // abort listener re-armed, so an abort during backoff lands here
+        // AFTER attempt 1 already ran (worktree created, SubagentStart
+        // fired — the unmatched-Start gap is known-defects #6). Reclaim is
+        // therefore a real leak fix on this path, not symmetry decoration.
+        this.reclaimWorktree(record);
         this.emitSubagentLifecycle(record, options, "cancelled", undefined, record.error);
         this.store.persist(record);
         this.store.notifyWaiters(record);
@@ -637,6 +671,9 @@ export class SubagentRuntime {
         record.finalReason = "rate_limited_exhausted";
         record.error = `Provider rate limit persisted after ${attempts} attempts.`;
         record.updatedAt = Date.now();
+        // Reclaim before persist so the handoff note lands in the
+        // persisted toolNotes.
+        this.reclaimWorktree(record);
         void this.runSubagentLifecycleHookFor(record, cwd, "SubagentStop", record.status, record.error);
         this.emitSubagentLifecycle(record, options, "failed", undefined, record.error);
         this.store.persist(record);
@@ -650,6 +687,7 @@ export class SubagentRuntime {
         record.finalReason = "failed_transient";
         record.error = `Provider transport error persisted after ${attempts} attempts.`;
         record.updatedAt = Date.now();
+        this.reclaimWorktree(record);
         void this.runSubagentLifecycleHookFor(record, cwd, "SubagentStop", record.status, record.error);
         this.emitSubagentLifecycle(record, options, "failed", undefined, record.error);
         this.store.persist(record);

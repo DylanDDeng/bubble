@@ -75,6 +75,17 @@ export class ChildRunner {
     }
 
     const tools = selectToolsForAgentProfile(allTools, record.profile, options.approval);
+    // A write child whose worktree was reclaimed (unchanged → removed at a
+    // terminal outcome) must NOT reuse its live instance: the instance's
+    // tools are fenced to the deleted directory, so every write would be
+    // rejected while the run itself falls back to the parent cwd. Carry the
+    // conversation over and rebuild through createInstance, which allocates
+    // a fresh worktree. Mid-run retries (attempt > 1) never hit this — the
+    // worktree is only reclaimed at terminal outcomes.
+    if (record.profile.mode === "write_worktree" && !record.worktree && record.agent) {
+      record.messages = record.agent.messages.map((message) => ({ ...message }));
+      record.agent = undefined;
+    }
     const reuseExistingAgent = (options.reuseAgent || attempt > 1) && !!record.agent;
     let subAgent: NonNullable<SubagentThreadRecord["agent"]>;
     try {

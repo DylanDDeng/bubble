@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Agent } from "../agent.js";
 import type { AgentProfile } from "../agent/profiles.js";
 import { WorktreeApprovalController, isPathInsideWorktree } from "../tools/child-tools.js";
+import { RateLimitError } from "../network/errors.js";
 import type { Provider, StreamChunk } from "../types.js";
 
 const LONG_SUMMARY = "Handoff: I created note.txt inside the worktree, verified its contents by reading it back, and left the diff for parent review. No files outside the worktree were touched. ".repeat(2);
@@ -120,10 +121,13 @@ describe("write_worktree subagents (design §8)", () => {
     const done = await agent.waitSubAgents({ agentIds: [spawned.agentId], timeoutMs: 10_000 });
 
     expect(done[0].status).toBe("completed");
-    const worktree = done[0].worktree!;
-    expect(worktree.changed).toBe(false);
-    expect(worktree.removed).toBe(true);
-    expect(existsSync(worktree.path)).toBe(false);
+    // Reclaimed: the unchanged worktree is removed AND the record's reference
+    // is cleared, so a later resume rebuilds a fresh worktree instead of
+    // running inside a deleted directory. The main checkout must be the only
+    // registered worktree left.
+    expect(done[0].worktree).toBeUndefined();
+    const registered = git(repo, ["worktree", "list", "--porcelain"]);
+    expect(registered.match(/^worktree /gm)).toHaveLength(1);
   });
 
   it("blocks escape attempts: writes outside the worktree and denied bash operations", async () => {
@@ -199,5 +203,187 @@ describe("WorktreeApprovalController", () => {
     expect(outsideCwd.action).toBe("reject");
     const escapeRef = await controller.request({ type: "bash", command: `cat /Users/someone/secret.txt`, cwd: root });
     expect(escapeRef.action).toBe("reject");
+  });
+});
+
+describe("worktree reclamation at scheduler-terminal outcomes (known-defects #1)", () => {
+  let repo: string;
+
+  beforeEach(() => {
+    repo = mkdtempSync(join(tmpdir(), "bubble-reclaim-repo-"));
+    git(repo, ["init", "--quiet"]);
+    git(repo, ["config", "user.email", "test@example.com"]);
+    git(repo, ["config", "user.name", "Test"]);
+    writeFileSync(join(repo, "file.txt"), "original content\n");
+    git(repo, ["add", "."]);
+    git(repo, ["commit", "--quiet", "-m", "init"]);
+  });
+
+  afterEach(() => {
+    // Force-drop any kept child worktrees (bubble-wt-* only: the repo itself
+    // shows under /private/var while mkdtemp reported /var) so the tmpdir rm
+    // succeeds.
+    for (const line of git(repo, ["worktree", "list", "--porcelain"]).split("\n")) {
+      const path = line.startsWith("worktree ") ? line.slice("worktree ".length) : undefined;
+      if (path && path.includes("bubble-wt-")) {
+        try { git(repo, ["worktree", "remove", "--force", path]); } catch { /* already gone */ }
+        rmSync(path, { recursive: true, force: true });
+      }
+    }
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  const onlyMainCheckout = () =>
+    git(repo, ["worktree", "list", "--porcelain"]).match(/^worktree /gm)!;
+
+  it("reclaims an unchanged worktree when rate-limit retries run out", async () => {
+    const provider: Provider = {
+      // eslint-disable-next-line require-yield
+      async *streamChat() {
+        throw new RateLimitError("429 from provider", { retryAfterMs: 0 });
+      },
+      async complete() { return "complete"; },
+    };
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [],
+      subagents: { rateLimitMaxAttempts: 2, rateLimitBackoffMs: [0, 0] },
+    });
+
+    const spawned = await agent.spawnSubAgent("never succeeds", repo, {
+      profile: writeProfile(),
+      parentToolCallId: "spawn_exhaust",
+    });
+    const done = await agent.waitSubAgents({ agentIds: [spawned.agentId], timeoutMs: 10_000 });
+
+    expect(done[0].finalReason).toBe("rate_limited_exhausted");
+    // Attempt 1 created a worktree (the 429 comes from the model call, after
+    // instance creation); exhaustion must reclaim it — directory removed,
+    // git registration gone, record reference cleared.
+    expect(done[0].worktree).toBeUndefined();
+    expect(onlyMainCheckout()).toHaveLength(1);
+  });
+
+  it("keeps a changed worktree on exhaustion, with exactly one handoff note", async () => {
+    let calls = 0;
+    const provider: Provider = {
+      async *streamChat() {
+        calls += 1;
+        if (calls === 1) {
+          const chunk: StreamChunk = toolCall("w1", "write", { path: "note.txt", content: "work in progress\n" });
+          yield chunk;
+          yield { type: "done" } as StreamChunk;
+          return;
+        }
+        throw new RateLimitError("429 from provider", { retryAfterMs: 0 });
+      },
+      async complete() { return "complete"; },
+    };
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [],
+      subagents: { rateLimitMaxAttempts: 2, rateLimitBackoffMs: [0, 0] },
+    });
+
+    const spawned = await agent.spawnSubAgent("write then stall", repo, {
+      profile: writeProfile(),
+      parentToolCallId: "spawn_changed",
+    });
+    const done = await agent.waitSubAgents({ agentIds: [spawned.agentId], timeoutMs: 10_000 });
+
+    expect(done[0].finalReason).toBe("rate_limited_exhausted");
+    // Changed → kept for review; the note must appear exactly once even
+    // though reclaim is reachable from more than one terminal path.
+    const worktree = done[0].worktree!;
+    expect(worktree.changed).toBe(true);
+    expect(existsSync(worktree.path)).toBe(true);
+    const notes = done[0].toolNotes.filter((note) => note.startsWith("worktree:"));
+    expect(notes).toHaveLength(1);
+  });
+
+  it("reclaims the worktree when an abort lands during retry backoff", async () => {
+    let firstCall: (() => void) | undefined;
+    const calledOnce = new Promise<void>((resolve) => { firstCall = resolve; });
+    const provider: Provider = {
+      // eslint-disable-next-line require-yield
+      async *streamChat() {
+        firstCall?.();
+        firstCall = undefined;
+        throw new RateLimitError("429 from provider", { retryAfterMs: 60_000 });
+      },
+      async complete() { return "complete"; },
+    };
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [],
+      subagents: { rateLimitMaxAttempts: 3, rateLimitBackoffMs: [60_000, 60_000] },
+    });
+    const controller = new AbortController();
+
+    const spawned = await agent.spawnSubAgent("aborted in backoff", repo, {
+      profile: writeProfile(),
+      parentToolCallId: "spawn_backoff",
+      abortSignal: controller.signal,
+    });
+    await calledOnce;                                  // attempt 1 ran → worktree exists
+    await new Promise((resolve) => setTimeout(resolve, 100)); // let the requeue settle
+    controller.abort(new Error("user abort"));
+    const done = await agent.waitSubAgents({ agentIds: [spawned.agentId], timeoutMs: 10_000 });
+
+    // Cancelled while re-queued: attempt 1 already created the worktree, so
+    // this cancel path MUST reclaim (the "run never started" assumption is
+    // false for retry re-entries).
+    expect(done[0].status).toBe("cancelled");
+    expect(done[0].worktree).toBeUndefined();
+    expect(onlyMainCheckout()).toHaveLength(1);
+  });
+
+  it("resume after reclamation rebuilds a fresh worktree with the history carried over", async () => {
+    let calls = 0;
+    const provider: Provider = {
+      async *streamChat() {
+        calls += 1;
+        if (calls <= 2) {
+          // Exactly what Bun's fetch throws on a request timeout.
+          throw Object.assign(new Error("The operation timed out."), { name: "TimeoutError" });
+        }
+        yield { type: "text", content: LONG_SUMMARY } as StreamChunk;
+        yield { type: "done" } as StreamChunk;
+      },
+      async complete() { return "complete"; },
+    };
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [],
+      subagents: { transportRetryMaxAttempts: 2, transportRetryBackoffMs: [0, 0] },
+    });
+
+    const spawned = await agent.spawnSubAgent("the original task", repo, {
+      profile: writeProfile(),
+      parentToolCallId: "spawn_transient",
+    });
+    const done = await agent.waitSubAgents({ agentIds: [spawned.agentId], timeoutMs: 10_000 });
+    expect(done[0].finalReason).toBe("failed_transient");
+    expect(done[0].worktree).toBeUndefined();          // reclaimed (unchanged)
+
+    // failed_transient is resumable: the reuse guard must rebuild a fresh
+    // worktree (the old instance's tools are fenced to the deleted dir) and
+    // carry the conversation over.
+    const resumed = await agent.sendSubAgentInput(spawned.agentId, "please continue", repo, {});
+    await agent.waitSubAgents({ agentIds: [resumed.agentId], timeoutMs: 10_000 });
+
+    const record = (agent as any).subagentStore.get(spawned.agentId);
+    expect(record.status).toBe("completed");
+    const history = (record.agent.messages as Array<{ role: string; content: string }>)
+      .map((message) => message.content).join("\n");
+    expect(history).toContain("the original task");
+    // The resumed run left no changes, so its fresh worktree was reclaimed
+    // again — nothing may linger in the registry either way.
+    expect(record.worktree).toBeUndefined();
+    expect(onlyMainCheckout()).toHaveLength(1);
   });
 });
