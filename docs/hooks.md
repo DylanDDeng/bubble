@@ -54,6 +54,15 @@ A hook can expose model context only by explicitly returning it:
 }
 ```
 
+`modelContext` is honored only for **in-turn** events — `UserPromptSubmit`,
+`PreModelCall`, `PreToolUse`, `PostToolUse`, `PermissionRequest` and the
+compaction events — where there is a current turn to inject it into.
+Terminal and lifecycle events (`Stop`, `StopFailure`, `SessionStart`,
+`SessionEnd`, `SubagentStart`, `SubagentStop`) are observe-only end to end:
+a `modelContext` returned from them is ignored. For the subagent pair this
+is deliberate — injecting it would push every child's start/stop hook output
+into the parent transcript, once per child in a fan-out.
+
 ## Management
 
 - `/hooks status`

@@ -1,20 +1,28 @@
-# Known Defects — deferred, not fixed
+# Known Defects — found during the agent.ts extraction
 
-Status: **open**. Recorded 2026-07-27 while extracting `SubagentRuntime` /
-`SubagentRouter` / `WorkflowLedger` out of `src/agent.ts`.
+Status: **mostly resolved** (2026-07-27, same day). Recorded while extracting
+`SubagentRuntime` / `SubagentRouter` / `WorkflowLedger` out of `src/agent.ts`;
+fixed in the commit series right after the extraction landed. Per-entry
+status: 1 FIXED, 2 FIXED, 3 DECIDED (docs updated), 4 FIXED, 5 FIXED,
+6 OPEN, 7 OPEN (report-only).
 
-All four were found during that refactor and deliberately **left unfixed**: the
-extraction commits are pure code movement, verified field-by-field against the
-pre-move source, and folding a behaviour change into a ~900-line move destroys
-the ability to bisect a regression back to either the move or the fix. Each
-entry below is its own commit's worth of work.
+These were found during the refactor and deliberately **left out of it**: the
+extraction commits are pure code movement, and folding a behaviour change into
+a ~900-line move destroys the ability to bisect a regression back to either
+the move or the fix. Each fix landed as its own commit afterwards; the
+original analysis below is kept as written (line references describe the tree
+BEFORE the fix commits).
 
 Line references are against the post-refactor tree. Every claim here was
 verified against source, not inferred.
 
 ---
 
-## 1. Worktree leak when a `write_worktree` child exhausts scheduler retries
+## 1. [FIXED] Worktree leak when a `write_worktree` child exhausts scheduler retries
+
+**Fixed**: `fix(agent): reclaim worktrees on scheduler-terminal outcomes` —
+shared `reclaimWorktree` on all terminal paths, reuse guard rebuilds after
+reclamation, kept-worktree state reset on resume.
 
 **Severity: high** — leaks disk and `git worktree` registry entries, silently.
 
@@ -72,7 +80,11 @@ change: it would newly emit `git worktree remove` and newly push a
 
 ---
 
-## 2. `setSessionID()` does not repoint the subagent persist directory
+## 2. [FIXED] `setSessionID()` does not repoint the subagent persist directory
+
+**Fixed**: `fix(agent): repoint the subagent persist dir when setSessionID
+rebinds the session` — `SubagentStore.repoint` with eviction of final
+non-workflow records; explicit config still wins.
 
 **Severity: high** — cross-session subagent resume silently fails after a
 session switch.
@@ -126,7 +138,11 @@ would force the decision to be explicit when someone changes it.
 
 ---
 
-## 3. Subagent lifecycle hooks silently discard their result
+## 3. [DECIDED] Subagent lifecycle hooks silently discard their result
+
+**Decided: intentional, kept.** Discarding matches every terminal/lifecycle
+event. `docs/hooks.md` now scopes `modelContext` to in-turn events, and the
+runtime comment warns against "fixing" it.
 
 **Severity: low / needs a decision** — may be intentional; the code does not say.
 
@@ -175,7 +191,10 @@ feature change and needs its own review.
 
 ---
 
-## 4. `grok-subscription-provider` test is not hermetic
+## 4. [FIXED] `grok-subscription-provider` test is not hermetic
+
+**Fixed**: `fix(oauth): accept an injectable home dir in
+importGrokCliCredentials so tests are hermetic`.
 
 **Severity: medium (test infrastructure)** — fails or passes depending on the
 developer's machine.
@@ -215,7 +234,10 @@ itself is intended behaviour, only the test's exposure to it is wrong.
 
 ---
 
-## 5. `markDelivered` bypasses the workflowInternal persistence gate
+## 5. [FIXED] `markDelivered` bypasses the workflowInternal persistence gate
+
+**Fixed** alongside defect 2: `store.persist()` refuses `workflowInternal`
+records at the store level.
 
 **Severity: medium** — found 2026-07-27 during adversarial review of the fix
 plan for defect 2.

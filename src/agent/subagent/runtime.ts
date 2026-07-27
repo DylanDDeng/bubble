@@ -741,6 +741,12 @@ export class SubagentRuntime {
       }, abortSignal);
     } catch {
       // Subagent lifecycle hooks are observe-only; never fail the subagent.
+      // Observe-only extends to the RESULT, not just errors: the returned
+      // events and modelContext are dropped ON PURPOSE, matching every other
+      // terminal/lifecycle event (Stop, StopFailure, SessionStart/End).
+      // Injecting them would push each child's start/stop hook output into
+      // the parent transcript, once per child in a fan-out. Do not "fix"
+      // this by wiring the result into injectHookModelContext.
     }
   }
 
