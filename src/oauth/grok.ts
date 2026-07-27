@@ -265,10 +265,15 @@ export async function refreshGrok(
  * Bubble's isolated runtime profile or the user's real ~/.grok). Users who
  * already completed `grok login` skip the browser round-trip entirely.
  */
-export function importGrokCliCredentials(bubbleHome = join(homedir(), ".bubble")): OAuthTokens | undefined {
+export function importGrokCliCredentials(
+  bubbleHome = join(homedir(), ".bubble"),
+  // Injectable so tests can isolate the ~/.grok fallback from the real home
+  // directory; production callers rely on the default.
+  homeDir = homedir(),
+): OAuthTokens | undefined {
   const candidates = [
     join(bubbleHome, "runtimes", "grok", "grok-home", "auth.json"),
-    join(homedir(), ".grok", "auth.json"),
+    join(homeDir, ".grok", "auth.json"),
   ];
   for (const path of candidates) {
     let parsed: unknown;

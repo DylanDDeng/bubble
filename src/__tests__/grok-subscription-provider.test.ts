@@ -57,6 +57,16 @@ describe("grok oauth refresh", () => {
 });
 
 describe("grok CLI credential import", () => {
+  // Both the bubbleHome candidate AND the ~/.grok fallback must point at
+  // temp dirs: isolating only bubbleHome lets the second candidate fall
+  // through to the developer's real ~/.grok/auth.json, and the "no usable
+  // entry" test then fails on any machine with a live grok CLI login.
+  const makeIsolatedHome = () => {
+    const home = mkdtempSync(join(tmpdir(), "bubble-grok-home-"));
+    cleanups.push(() => rmSync(home, { recursive: true, force: true }));
+    return home;
+  };
+
   it("imports the isolated runtime profile's auth entry", () => {
     const bubbleHome = mkdtempSync(join(tmpdir(), "bubble-grok-import-"));
     cleanups.push(() => rmSync(bubbleHome, { recursive: true, force: true }));
@@ -70,7 +80,7 @@ describe("grok CLI credential import", () => {
       },
     }), { mode: 0o600 });
 
-    const tokens = importGrokCliCredentials(bubbleHome);
+    const tokens = importGrokCliCredentials(bubbleHome, makeIsolatedHome());
     expect(tokens).toMatchObject({ accessToken: "cli-access", refreshToken: "cli-refresh" });
     expect(tokens?.expiresAt).toBe(Date.parse("2027-01-01T00:00:00.000Z"));
   });
@@ -85,7 +95,7 @@ describe("grok CLI credential import", () => {
       "unrelated-issuer::x": { key: "a", refresh_token: "b" },
     }), { mode: 0o600 });
 
-    expect(importGrokCliCredentials(bubbleHome)).toBeUndefined();
+    expect(importGrokCliCredentials(bubbleHome, makeIsolatedHome())).toBeUndefined();
   });
 });
 
