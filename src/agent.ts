@@ -5,9 +5,7 @@
 
 import { compactCurrentTurnToolGroups, compactMessages, isRealUserMessage } from "./context/compact.js";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { getBubbleHome } from "./bubble-home.js";
 import { compactMessagesWithLLM } from "./context/compact-llm.js";
 import { estimateContextTokens, getContextBudget } from "./context/budget.js";
 import { buildContextUsageSnapshot, type ContextUsageSnapshot } from "./context/usage.js";
@@ -35,14 +33,14 @@ import {
 import { createDefaultHooks } from "./orchestrator/default-hooks.js";
 import { buildTaskLifecycleReminder } from "./agent/task-lifecycle-reminder.js";
 import { classifyTask } from "./agent/task-classifier.js";
-import { mergeAgentCategories, parseThinkingLevel, resolveModelRoute, resolveSubagentRoute, type AgentCategoriesConfig, type ResolvedSubagentRoute } from "./agent/categories.js";
-import { DEFAULT_AGENT_ROUTING, nearModelMatches, sanitizeAgentRouting, tierContextFromSnapshot, type AgentRoutingConfig, type RoutableModelEntry, type RoutableModelIndex, type RoutingSnapshot, type RoutingSnapshotAccessor } from "./agent/routing-catalog.js";
-import { buildModelRoutingPrompt } from "./prompt/routing.js";
-import { getBuiltinModel } from "./model-catalog.js";
-import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeInheritedThinkingLevel, normalizeThinkingLevel } from "./variant/variant-resolver.js";
+import { mergeAgentCategories, parseThinkingLevel, type AgentCategoriesConfig, type ResolvedSubagentRoute } from "./agent/categories.js";
+import { DEFAULT_AGENT_ROUTING, sanitizeAgentRouting, type AgentRoutingConfig, type RoutableModelEntry, type RoutableModelIndex, type RoutingSnapshotAccessor } from "./agent/routing-catalog.js";
+import { SubagentRouter } from "./agent/subagent/router.js";
+import { normalizeWaitTimeout, SubagentRuntime, type ChildAgentLike, type ChildAgentSpec } from "./agent/subagent/runtime.js";
 import { appendOutputSchemaInstructions, buildSchemaCorrectionPrompt, validateStructuredSummary } from "./agent/structured-output.js";
 import { runWorkflow, WorkflowConcurrencyGate, type AgentDispatchResult, type WorkflowAgentSpec } from "./agent/workflow/runtime.js";
-import { buildWorkflowDeliveryNotice, renderWorkflowResultValue, type WorkflowRunRecord, type WorkflowRunSnapshot } from "./agent/workflow/control.js";
+import { type WorkflowRunSnapshot } from "./agent/workflow/control.js";
+import { WorkflowLedger } from "./agent/workflow/runs.js";
 import { BudgetLedger, composeAbortSignals } from "./agent/budget-ledger.js";
 import { assignAgentNickname, builtinAgentProfiles, discoverAgentProfiles, findAgentProfile, mergeUsage, selectToolsForAgentProfile, validateAgentProfileTools, type AgentProfile, type SubagentRunResult } from "./agent/profiles.js";
 import { snapshotSubagentThread, subagentResultFromThread, type PendingSubagentToolUpdate, type SubagentFinalReason, type SubagentThreadRecord, type SubagentThreadSnapshot } from "./agent/subagent-control.js";
@@ -207,11 +205,6 @@ export interface AgentRunOptions {
   resumeWithoutInput?: boolean;
 }
 
-/** Detector threshold N (design §6): 1–2 strong-model children are often a
- * deliberate deep side-investigation; at 3+ uniform defaults the odds that
- * all need frontier capability drop sharply. Revisit against live traces. */
-const ROUTING_REMINDER_THRESHOLD = 3;
-
 export class Agent {
   messages: Message[] = [];
   private provider: Provider;
@@ -262,32 +255,21 @@ export class Agent {
   private fileStateTracker?: FileStateTracker;
   private agentCategories: AgentCategoriesConfig;
   private agentRouting: AgentRoutingConfig;
-  private routingSnapshotAccessor?: RoutingSnapshotAccessor;
-  private routableModelIndex?: RoutableModelIndex;
-  /** Detector state (design §6): once per session, absolute defaulted count. */
-  private routingReminderFired = false;
-  private defaultedRoutingStreak = 0;
-  private pendingRoutingReminder?: string;
+  /** Owns the routing decision chain, the §6 detector state and the §4 menu. */
+  private readonly router: SubagentRouter;
   private providerFactory?: (route: ResolvedSubagentRoute) => Provider | Promise<Provider>;
-  private readonly subagentStore: SubagentStore;
-  private readonly subagentScheduler: SubagentScheduler;
-  private readonly childRunner: ChildRunner;
-  private readonly resultIntegrator = new ResultIntegrator();
-  /** Background dynamic-workflow runs (option C Phase 4), keyed by runId. */
-  private readonly workflowRuns = new Map<string, WorkflowRunRecord>();
-  /** runIds whose completed result should be ingested at the next turn. */
-  private readonly pendingWorkflowDeliveries = new Set<string>();
+  /**
+   * Subagent thread lifecycle + workflow script execution: the store,
+   * scheduler, ChildRunner and their dispatch/ingestion plumbing.
+   */
+  private readonly subagents: SubagentRuntime;
+  /**
+   * Background dynamic-workflow runs (option C Phase 4): run records, waiters,
+   * cancellation and the pending-delivery set. Execution stays on Agent.
+   */
+  private readonly workflowLedger: WorkflowLedger;
   private subagentsConfig: AgentSubagentRuntimeConfig;
   private readonly rateLimitPolicy?: RateLimitPolicy;
-  private pendingSubagentUpdates: PendingSubagentToolUpdate[] = [];
-  /**
-   * Wakers for tool-execution update loops currently awaiting updates. A
-   * blocking lifecycle tool (wait_workflow / wait_agent) produces no updates of
-   * its own, so without this wake the background children's queued lifecycle
-   * updates sit undrained until the tool settles — the UI would only show
-   * subagent traces after the whole team finished.
-   */
-  private readonly subagentUpdateWakers = new Set<() => void>();
   private lastInputTokens: number | null = null;
   private lastAnchorMessageCount: number | null = null;
   // How often each compaction path actually rewrote history this run.
@@ -326,54 +308,56 @@ export class Agent {
     this.agentRouting = options.agentRouting
       ? sanitizeAgentRouting(options.agentRouting)
       : { ...DEFAULT_AGENT_ROUTING };
-    this.routingSnapshotAccessor = options.routingSnapshot;
-    this.routableModelIndex = options.routableModels;
+    // parentRoute is a thunk, not a snapshot: /model reassigns provider/model/
+    // thinking mid-session and children must inherit the CURRENT values.
+    this.router = new SubagentRouter({
+      parentRoute: () => ({
+        providerId: this.providerId,
+        model: this.apiModel,
+        thinkingLevel: this.thinkingLevel,
+      }),
+      categories: this.agentCategories,
+      routing: this.agentRouting,
+      snapshot: options.routingSnapshot,
+      routableModels: options.routableModels,
+    });
     this.providerFactory = options.providerFactory;
+    this.workflowLedger = new WorkflowLedger({
+      execute: (cwd, opts) => this.subagents.executeWorkflow(cwd, opts),
+    });
     this.subagentsConfig = options.subagents ?? {};
     this.rateLimitPolicy = options.rateLimitPolicy;
     // Children persist next to the session file so a later process can
     // resume them via send_input (design §7). Child agents themselves
     // (agentRole "subagent") never persist children — no recursion exists.
+    // Resolved once here, exactly as before: setSessionID() has never
+    // repointed an existing store, and this move does not change that.
     const persistDir = this.agentRole === "parent"
       ? this.subagentsConfig.persistDir
         ?? (this.sessionID?.endsWith(".jsonl") ? this.sessionID.replace(/\.jsonl$/, ".subagents") : undefined)
       : undefined;
-    this.subagentStore = new SubagentStore(persistDir);
-    this.subagentStore.loadPersisted();
-    this.subagentScheduler = new SubagentScheduler({
-      maxActiveSubagents: this.subagentsConfig.maxActiveSubagents,
-      launchBurst: this.subagentsConfig.launchBurst,
-      launchIntervalMs: this.subagentsConfig.launchIntervalMs,
-      rateLimitMaxAttempts: this.subagentsConfig.rateLimitMaxAttempts,
-      rateLimitBackoffMs: this.subagentsConfig.rateLimitBackoffMs,
-      transportRetryMaxAttempts: this.subagentsConfig.transportRetryMaxAttempts,
-      transportRetryBackoffMs: this.subagentsConfig.transportRetryBackoffMs,
-      getCategoryLimit: (category) => mergeAgentCategories(this.agentCategories)[category]?.maxConcurrent,
-    });
-    this.childRunner = new ChildRunner({
-      allTools: () => [...this.tools.values()],
-      emit: (record, options, status, event, message) => this.emitSubagentLifecycle(record, options, status, event, message),
-      runLifecycleHook: (record, cwd, eventName, status, error, abortSignal) =>
-        this.runSubagentLifecycleHookFor(record, cwd, eventName, status, error, abortSignal),
-      finalizeBlocked: (record, error, options) => this.finalizeSubagentBlocked(record, error, options),
-      createInstance: (record, tools, cwd, forkContext) => this.createSubAgentInstance(record, tools, cwd, forkContext),
-      notifyWaiters: (record) => this.subagentStore.notifyWaiters(record),
-      onFinal: (record, options) => {
-        if (record.worktree) {
-          // Inspect and clean up the worktree: unchanged → removed; changed →
-          // kept for the parent to review, with a diff stat in the handoff (§8).
-          finalizeSubagentWorktree(record.worktree);
-          if (record.worktree.changed) {
-            record.toolNotes.push(`worktree: changes left in ${record.worktree.path} — review the diff before applying`);
-          }
-        }
-        // Workflow-internal agents are not persisted (they never re-import into
-        // the store on restart) and never ingest into parent context (option C).
-        if (!record.workflowInternal) {
-          this.subagentStore.persist(record);
-          this.maybeEnqueueIngestion(record, options);
-        }
+    // `self` so the parent adapter's getters read through to this agent.
+    const self = this;
+    this.subagents = new SubagentRuntime({
+      parent: {
+        // Live accessors, never snapshots — /model reassigns these mid-session.
+        get provider() { return self.provider; },
+        get providerId() { return self.providerId; },
+        get apiModel() { return self.apiModel; },
+        get thinkingLevel() { return self.thinkingLevel; },
+        get memoryPrompt() { return self.memoryPrompt; },
+        get providerFactory() { return self.providerFactory; },
+        // Unfiltered on purpose: profile admission and child tool selection
+        // must see deferred-but-registered tools (an explicit include in a
+        // profile is the author pre-unlocking them).
+        allTools: () => [...this.tools.values()],
+        createChild: (spec) => this.createChildAgent(spec),
+        runExternalHook: (input, abortSignal) => this.runExternalHook(input as any, abortSignal),
       },
+      router: this.router,
+      categories: this.agentCategories,
+      config: this.subagentsConfig,
+      persistDir,
     });
 
     if (options.systemPrompt) {
@@ -507,9 +491,7 @@ export class Agent {
 
   /** Current routing menu (design §4); undefined when no accessor is wired. */
   buildModelRoutingPromptSection(): string | undefined {
-    const snapshot = this.currentRoutingSnapshot();
-    if (!snapshot) return undefined;
-    return buildModelRoutingPrompt(snapshot, this.agentRouting);
+    return this.router.promptSection();
   }
 
   /**
@@ -518,12 +500,7 @@ export class Agent {
    * (design §1.5).
    */
   renderModelRoutingPromptFor(parent: { providerId: string; model: string }): string | undefined {
-    if (!this.routingSnapshotAccessor) return undefined;
-    try {
-      return buildModelRoutingPrompt(this.routingSnapshotAccessor(parent), this.agentRouting);
-    } catch {
-      return undefined;
-    }
+    return this.router.promptSectionFor(parent);
   }
 
   getContextUsageSnapshot(): ContextUsageSnapshot {
@@ -850,9 +827,11 @@ export class Agent {
       flushGovernorReminders();
       // Background child completions surface before the next inference turn
       // without requiring a wait_agent call (design §5).
-      this.flushSubagentIngestions();
+      for (const notice of this.subagents.drainIngestionNotices()) {
+        this.injectSystemReminder(notice);
+      }
       this.flushWorkflowDeliveries();
-      for (const update of this.drainSubagentToolUpdates()) yield emit(update);
+      for (const update of this.subagents.drainToolUpdates()) yield emit(update);
       for (const event of await applyPendingInputs()) yield emit(event);
       yield emit({ type: "turn_start" });
       step += 1;
@@ -1097,7 +1076,7 @@ export class Agent {
               }
               break;
           }
-          for (const update of this.drainSubagentToolUpdates()) yield emit(update);
+          for (const update of this.subagents.drainToolUpdates()) yield emit(update);
         }
         const flushedText = textSanitizer.flush();
         if (flushedText) {
@@ -1416,19 +1395,19 @@ export class Agent {
                 updateQueue.wake();
               });
 
-            this.subagentUpdateWakers.add(updateQueue.wake);
+            const unsubscribe = this.subagents.subscribe(updateQueue.wake);
             try {
-              while (!settled || updateQueue.hasItems() || this.pendingSubagentUpdates.length > 0) {
+              while (!settled || updateQueue.hasItems() || this.subagents.hasPendingUpdates()) {
                 for (const update of updateQueue.drain()) {
                   yield emit({ type: "tool_update", id: tc.id, name: tc.name, update });
                 }
-                for (const update of this.drainSubagentToolUpdates()) yield emit(update);
+                for (const update of this.subagents.drainToolUpdates()) yield emit(update);
                 // A wake() that fires while this generator is suspended at a
-                // yield above finds no parked waiter and is lost (the queue has
-                // no wake latch), so re-check the subagent queue synchronously
-                // before parking — otherwise an update pushed during the yield
-                // stalls until the next unrelated wake or the tool settles.
-                if (!settled && this.pendingSubagentUpdates.length === 0) {
+                // yield above finds no parked waiter. The queue latches such a
+                // wake, and this synchronous re-check covers the same case from
+                // the other side — an update pushed during the yield must not
+                // stall until the next unrelated wake or the tool settles.
+                if (!settled && !this.subagents.hasPendingUpdates()) {
                   const waitStatus = await updateQueue.wait(abortSignal);
                   if (waitStatus === "aborted" && !settled) {
                     cancelledByAbort = true;
@@ -1437,7 +1416,7 @@ export class Agent {
                 }
               }
             } finally {
-              this.subagentUpdateWakers.delete(updateQueue.wake);
+              unsubscribe();
             }
             if (cancelledByAbort) {
               result = cancelledToolResult(tc.name);
@@ -1515,7 +1494,7 @@ export class Agent {
           this.onToolResult?.(tc.name, result);
           executedResults.push(result);
           yield emit({ type: "tool_end", id: tc.id, name: tc.name, result });
-          for (const update of this.drainSubagentToolUpdates()) yield emit(update);
+          for (const update of this.subagents.drainToolUpdates()) yield emit(update);
           if (this._todosVersion !== todosVersionBefore) {
             yield emit({ type: "todos_updated", todos: this.getTodos() });
           }
@@ -1585,7 +1564,7 @@ export class Agent {
       break;
     }
 
-      for (const update of this.drainSubagentToolUpdates()) yield emit(update);
+      for (const update of this.subagents.drainToolUpdates()) yield emit(update);
       await stopOwnedAutoServers();
       yield emit({ type: "agent_end" });
     } catch (error) {
@@ -1776,131 +1755,28 @@ export class Agent {
     return sanitizeInternalReminderBlocks(full).trim();
   }
 
+  // ---- Subagent lifecycle: delegated to SubagentRuntime. ----
+  // These stay on Agent as one-line forwards so every existing caller
+  // (tools/agent-lifecycle.ts, orchestrator/default-hooks.ts) is unchanged.
+
   async runSubAgent(
     input: string | ContentPart[],
     cwd: string,
-    options: {
-      profile: AgentProfile;
-      runId: string;
-      subAgentId: string;
-      parentToolCallId: string;
-      category?: string;
-      route?: ResolvedSubagentRoute;
-      approval?: "fail" | "disabled";
-      emitUpdate?: (update: ToolUpdate) => void;
-      description?: string;
-      abortSignal?: AbortSignal;
-      nickname?: string;
-      forkContext?: boolean;
-    },
+    options: Parameters<SubagentRuntime["runSubAgent"]>[2],
   ): Promise<SubagentRunResult> {
-    const record = this.createSubagentThreadRecord({
-      profile: options.profile,
-      task: typeof input === "string" ? input : "(multimodal task)",
-      runId: options.runId,
-      agentId: options.subAgentId,
-      parentToolCallId: options.parentToolCallId,
-      parentToolName: "subagent",
-      nickname: options.nickname,
-      route: options.route ?? this.resolveRouteForSubagent(options.profile, options.category),
-    });
-    this.subagentStore.set(record);
-    const approval = options.approval ?? options.profile.approval;
-    const admissionError = this.admitSubagentProfile(record, approval);
-    if (admissionError) {
-      this.finalizeSubagentBlocked(record, admissionError, { directEmit: options.emitUpdate });
-      return subagentResultFromThread(record);
-    }
-    record.promise = this.dispatchSubagentRun(record, input, cwd, {
-      approval,
-      abortSignal: options.abortSignal,
-      forkContext: options.forkContext,
-      directEmit: options.emitUpdate,
-    });
-    await record.promise;
-    return subagentResultFromThread(record);
+    return this.subagents.runSubAgent(input, cwd, options);
   }
 
   async spawnSubAgent(
     input: string | ContentPart[],
     cwd: string,
-    options: {
-      profile: AgentProfile;
-      parentToolCallId: string;
-      category?: string;
-      model?: string;
-      effort?: ThinkingLevel;
-      route?: ResolvedSubagentRoute;
-      approval?: "fail" | "disabled";
-      description?: string;
-      abortSignal?: AbortSignal;
-      forkContext?: boolean;
-    },
+    options: Parameters<SubagentRuntime["spawnSubAgent"]>[2],
   ): Promise<SubagentThreadSnapshot> {
-    const route = options.route
-      ?? this.resolveRouteForSubagent(options.profile, options.category, { model: options.model, effort: options.effort });
-    // Early validation (design §7): throws reach the model as a tool error it
-    // can correct this turn, instead of a late provider-factory failure.
-    const routeNote = this.validateRouteForDispatch(route);
-    this.noteRoutingDispatch(route);
-    const record = this.createSubagentThreadRecord({
-      profile: options.profile,
-      task: typeof input === "string" ? input : "(multimodal task)",
-      parentToolCallId: options.parentToolCallId,
-      parentToolName: "spawn_agent",
-      route,
-    });
-    if (routeNote) record.toolNotes.push(routeNote);
-    this.subagentStore.set(record);
-    const approval = options.approval ?? record.profile.approval;
-    // Admission validation runs before queueing (design §4.2): a request that
-    // would block never consumes a queue slot.
-    const admissionError = this.admitSubagentProfile(record, approval);
-    if (admissionError) {
-      this.finalizeSubagentBlocked(record, admissionError, { queueUpdates: true });
-      return this.snapshotSubagent(record);
-    }
-    this.queueSubagentUpdate(record, "queued", undefined, `Queued ${record.nickname} (${record.profile.name})`);
-    record.promise = this.dispatchSubagentRun(record, input, cwd, {
-      approval,
-      abortSignal: options.abortSignal,
-      forkContext: options.forkContext,
-      queueUpdates: true,
-    });
-    void record.promise.finally(() => this.subagentStore.notifyWaiters(record));
-    return this.snapshotSubagent(record);
+    return this.subagents.spawnSubAgent(input, cwd, options);
   }
 
   async waitSubAgents(options: { agentIds?: string[]; timeoutMs?: number } = {}): Promise<SubagentThreadSnapshot[]> {
-    const targets = this.resolveSubagentTargets(options.agentIds);
-    if (targets.length === 0) return [];
-    const completed = targets.filter((record) => isFinalSubagentStatus(record.status));
-    if (completed.length > 0) {
-      for (const record of completed) this.subagentStore.markDelivered(record.agentId);
-      return completed.map((record) => this.snapshotSubagent(record));
-    }
-
-    const timeoutMs = normalizeWaitTimeout(options.timeoutMs);
-    let waiter: (() => void) | undefined;
-    await Promise.race([
-      new Promise<void>((resolve) => {
-        waiter = resolve;
-        for (const record of targets) {
-          record.waiters.add(resolve);
-        }
-      }).finally(() => {
-        if (waiter) {
-          for (const record of targets) {
-            record.waiters.delete(waiter);
-          }
-        }
-      }),
-      new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
-    ]);
-
-    const finished = targets.filter((record) => isFinalSubagentStatus(record.status));
-    for (const record of finished) this.subagentStore.markDelivered(record.agentId);
-    return (finished.length > 0 ? finished : targets).map((record) => this.snapshotSubagent(record));
+    return this.subagents.waitSubAgents(options);
   }
 
   async sendSubAgentInput(
@@ -1909,61 +1785,11 @@ export class Agent {
     cwd: string,
     options: { interrupt?: boolean; parentToolCallId?: string; abortSignal?: AbortSignal } = {},
   ): Promise<SubagentThreadSnapshot> {
-    const record = this.subagentStore.get(agentId);
-    if (!record) {
-      throw new Error(`Unknown subagent: ${agentId}`);
-    }
-    if (record.status === "running" || record.status === "queued") {
-      if (!options.interrupt) {
-        throw new Error(`Subagent ${agentId} is still running. Call wait_agent first or pass interrupt:true.`);
-      }
-      record.abortController.abort(new SubagentAbortError(`Subagent ${agentId} interrupted.`, "interrupt"));
-      await record.promise?.catch(() => undefined);
-      record.abortController = new AbortController();
-    }
-    if (record.status === "closed") {
-      throw new Error(`Subagent ${agentId} is closed.`);
-    }
-
-    record.parentToolCallId = options.parentToolCallId ?? record.parentToolCallId;
-    record.parentToolName = "send_input";
-    record.task = typeof input === "string" ? input : "(multimodal task)";
-    record.summary = "";
-    record.toolNotes = [];
-    record.usage = undefined;
-    record.error = undefined;
-    record.finalReason = undefined;
-    record.deliveredAt = undefined;
-    record.updatedAt = Date.now();
-    // A send_input restart is a launch like any other: it goes through the
-    // scheduler's dispatch point and is subject to the same admission limits
-    // (design §4.1) — batch-resuming team members cannot bypass concurrency caps.
-    record.promise = this.dispatchSubagentRun(record, input, cwd, {
-      approval: record.profile.approval,
-      abortSignal: options.abortSignal,
-      queueUpdates: true,
-      reuseAgent: true,
-    });
-    void record.promise.finally(() => this.subagentStore.notifyWaiters(record));
-    return this.snapshotSubagent(record);
+    return this.subagents.sendSubAgentInput(agentId, input, cwd, options);
   }
 
   async closeSubAgent(agentId: string): Promise<SubagentThreadSnapshot> {
-    const record = this.subagentStore.get(agentId);
-    if (!record) {
-      throw new Error(`Unknown subagent: ${agentId}`);
-    }
-    if (!isFinalSubagentStatus(record.status)) {
-      record.abortController.abort(new SubagentAbortError(`Subagent ${agentId} closed.`, "user_close"));
-      await record.promise?.catch(() => undefined);
-    }
-    record.status = "closed";
-    record.finalReason = record.finalReason ?? "cancelled_user";
-    record.updatedAt = Date.now();
-    this.queueSubagentUpdate(record, "cancelled", undefined, `${record.nickname} closed`);
-    this.subagentStore.persist(record);
-    this.subagentStore.notifyWaiters(record);
-    return this.snapshotSubagent(record);
+    return this.subagents.closeSubAgent(agentId);
   }
 
   /**
@@ -1973,19 +1799,33 @@ export class Agent {
    * never be used to answer "am I currently delegating?".
    */
   activeSubAgentCount(): number {
-    return this.subagentStore.activeCount();
+    return this.subagents.activeSubAgentCount();
+  }
+
+  listSubAgents(): SubagentThreadSnapshot[] {
+    return this.subagents.listSubAgents();
+  }
+
+  /** Marks a child's full summary as delivered to parent context (design §3.3). */
+  markSubagentDelivered(agentId: string): void {
+    this.subagents.markSubagentDelivered(agentId);
+  }
+
+  /**
+   * The child store, still reachable at its old name. Several tests inspect a
+   * spawned child's record (and its live child Agent) through
+   * `(agent as any).subagentStore`; keeping this forward means the extraction
+   * changed no caller, test or otherwise.
+   */
+  private get subagentStore(): SubagentStore {
+    return this.subagents.store;
   }
 
   /** run_workflow children are workflowInternal and invisible to listSubAgents. */
   hasRunningWorkflow(): boolean {
-    return [...this.workflowRuns.values()].some((record) => record.status === "running");
+    return this.workflowLedger.hasRunning();
   }
 
-  listSubAgents(): SubagentThreadSnapshot[] {
-    return this.subagentStore.values()
-      .filter((record) => !record.workflowInternal)
-      .map((record) => this.snapshotSubagent(record));
-  }
 
   /**
    * Dynamic workflow (option C): runs an LLM-authored JS orchestration script in
@@ -2008,7 +1848,7 @@ export class Agent {
       ensureProfileTrusted?: (profile: AgentProfile) => Promise<{ content: string | unknown } | undefined>;
     },
   ): Promise<{ result: { ok: true; value: unknown } | { ok: false; error: string }; agentCount: number; logs: string[]; snapshots: SubagentThreadSnapshot[] }> {
-    return this.executeWorkflow(cwd, {
+    return this.subagents.executeWorkflow(cwd, {
       script: options.script,
       args: options.args,
       parentToolCallId: options.parentToolCallId,
@@ -2035,426 +1875,30 @@ export class Agent {
       ensureProfileTrusted?: (profile: AgentProfile) => Promise<{ content: string | unknown } | undefined>;
     },
   ): { runId: string; title: string } {
-    const runId = randomUUID();
-    const abortController = new AbortController();
-    const composed = composeAbortSignals([options.abortSignal, abortController.signal]);
-    if (composed) {
-      composed.addEventListener("abort", () => abortController.abort(composed.reason), { once: true });
-    }
-    const record: WorkflowRunRecord = {
-      runId,
-      title: options.title ?? "workflow",
-      status: "running",
-      agentCount: 0,
-      snapshots: [],
-      logs: [],
-      abortController,
-      waiters: new Set(),
-      createdAt: Date.now(),
-      parentToolCallId: options.parentToolCallId,
-    };
-    this.workflowRuns.set(runId, record);
-    record.promise = this.executeWorkflow(cwd, {
-      script: options.script,
-      args: options.args,
-      parentToolCallId: options.parentToolCallId,
-      abortSignal: abortController.signal,
-      queueUpdates: true,
-      ensureProfileTrusted: options.ensureProfileTrusted,
-    }).then((out) => {
-      record.agentCount = out.agentCount;
-      record.snapshots = out.snapshots;
-      record.logs = out.logs;
-      record.result = out.result;
-      record.status = out.result.ok ? "completed" : (abortController.signal.aborted ? "cancelled" : "failed");
-      if (out.result.ok) record.resultPath = persistWorkflowResult(runId, out.result.value);
-    }, (error: any) => {
-      record.result = { ok: false, error: error?.message || String(error) };
-      record.status = "failed";
-    }).finally(() => {
-      record.updatedAt = Date.now();
-      this.pendingWorkflowDeliveries.add(runId);
-      for (const waiter of record.waiters) waiter();
-      record.waiters.clear();
-    });
-    return { runId, title: record.title };
+    return this.workflowLedger.start(cwd, options);
   }
 
   /** Blocks until a background workflow reaches a final state (or times out). */
   async waitWorkflow(runId: string, timeoutMs?: number): Promise<WorkflowRunSnapshot | undefined> {
-    const record = this.workflowRuns.get(runId);
-    if (!record) return undefined;
-    if (record.status === "running") {
-      const limit = normalizeWaitTimeout(timeoutMs);
-      let waiter: (() => void) | undefined;
-      await Promise.race([
-        new Promise<void>((resolve) => { waiter = resolve; record.waiters.add(resolve); }),
-        new Promise<void>((resolve) => setTimeout(resolve, limit)),
-      ]).finally(() => { if (waiter) record.waiters.delete(waiter); });
-    }
-    if (record.status !== "running") this.pendingWorkflowDeliveries.delete(runId);
-    return this.snapshotWorkflow(record);
+    return this.workflowLedger.wait(runId, normalizeWaitTimeout(timeoutMs));
   }
 
   /** Cancels a running background workflow. */
   closeWorkflow(runId: string): WorkflowRunSnapshot | undefined {
-    const record = this.workflowRuns.get(runId);
-    if (!record) return undefined;
-    if (record.status === "running") record.abortController.abort(new Error("workflow cancelled"));
-    return this.snapshotWorkflow(record);
+    return this.workflowLedger.close(runId);
   }
 
   listWorkflows(): WorkflowRunSnapshot[] {
-    return [...this.workflowRuns.values()].map((record) => this.snapshotWorkflow(record));
-  }
-
-  private snapshotWorkflow(record: WorkflowRunRecord): WorkflowRunSnapshot {
-    return {
-      runId: record.runId,
-      title: record.title,
-      status: record.status,
-      agentCount: record.agentCount,
-      result: record.result,
-      resultPath: record.resultPath,
-      logs: record.logs,
-      snapshots: record.snapshots,
-    };
+    return this.workflowLedger.list();
   }
 
   /** Injects completed background-workflow results before the next turn (§5 analog). */
   private flushWorkflowDeliveries(): void {
-    if (this.pendingWorkflowDeliveries.size === 0) return;
-    for (const runId of [...this.pendingWorkflowDeliveries]) {
-      this.pendingWorkflowDeliveries.delete(runId);
-      const record = this.workflowRuns.get(runId);
-      if (!record || record.status === "running" || record.deliveredAt) continue;
-      record.deliveredAt = Date.now();
-      this.injectSystemReminder(buildWorkflowDeliveryNotice(this.snapshotWorkflow(record)));
-    }
-  }
-
-  private async executeWorkflow(
-    cwd: string,
-    options: {
-      script: string;
-      args?: unknown;
-      parentToolCallId: string;
-      abortSignal?: AbortSignal;
-      directEmit?: (update: ToolUpdate) => void;
-      queueUpdates?: boolean;
-      ensureProfileTrusted?: (profile: AgentProfile) => Promise<{ content: string | unknown } | undefined>;
-    },
-  ): Promise<{ result: { ok: true; value: unknown } | { ok: false; error: string }; agentCount: number; logs: string[]; snapshots: SubagentThreadSnapshot[] }> {
-    const profiles = discoverAgentProfiles(cwd, "both").profiles;
-    const runRecords: SubagentThreadRecord[] = [];
-    const logs: string[] = [];
-
-    // Per-run isolation (option C review): a concurrency sub-cap below the
-    // global limit so a workflow can't starve interactive subagents.
-    const interactiveReserve = 2;
-    const globalCap = Math.max(1, this.subagentsConfig.maxActiveSubagents ?? 8);
-    const workflowConcurrency = Math.max(1, globalCap - interactiveReserve);
-    const gate = new WorkflowConcurrencyGate(workflowConcurrency);
-
-    const dispatchAgent = async (spec: WorkflowAgentSpec): Promise<AgentDispatchResult> => {
-      const baseProfile = findAgentProfile(profiles, spec.opts.agentType ?? "default")
-        ?? findAgentProfile(profiles, "default");
-      if (!baseProfile) return { ok: false, error: "no default subagent profile available" };
-      // Workflow agents are readonly-by-default; mode upgrades come only from the
-      // profile, never from the script (security invariant).
-      const unsupported = baseProfile.mode !== "readonly" && baseProfile.mode !== "write_worktree";
-      if (unsupported) return { ok: false, error: `profile "${baseProfile.name}" mode ${baseProfile.mode} not supported` };
-      // Default-no-network: unattended orchestration of net-capable agents is new
-      // authority in aggregate (option C review), so strip web tools unless the
-      // script opts in with agentType pointing at a profile that includes them.
-      const profile: AgentProfile = {
-        ...baseProfile,
-        tools: { ...baseProfile.tools, exclude: [...(baseProfile.tools.exclude ?? []), "web_fetch", "web_search"] },
-      };
-
-      let route: ResolvedSubagentRoute;
-      let routeNote: string | undefined;
-      try {
-        route = this.resolveRouteForSubagent(profile, spec.opts.category, {
-          model: spec.opts.model,
-          effort: parseThinkingLevel(spec.opts.effort),
-        });
-        // Dispatch-time validation + defaulted-fan-out accounting (§6–7):
-        // resolved routes, never script source text.
-        routeNote = this.validateRouteForDispatch(route);
-        this.noteRoutingDispatch(route);
-      } catch (error: any) {
-        return { ok: false, error: error?.message || String(error) };
-      }
-
-      const baseTask = spec.opts.schema !== undefined
-        ? appendOutputSchemaInstructions(spec.prompt, spec.opts.schema)
-        : spec.prompt;
-      const record = this.createSubagentThreadRecord({
-        profile,
-        task: baseTask,
-        parentToolCallId: options.parentToolCallId,
-        parentToolName: "run_workflow",
-        route,
-        workflowInternal: true,
-      });
-      record.expectsStructuredOutput = spec.opts.schema !== undefined;
-      if (routeNote) record.toolNotes.push(routeNote);
-      const memberLabel = typeof spec.opts.label === "string" ? spec.opts.label.trim().slice(0, 40) : "";
-      if (memberLabel) record.nickname = memberLabel;
-      runRecords.push(record);
-      this.subagentStore.set(record);
-      // Project-local profiles pass the same first-use trust gate as
-      // spawn_agent: a .bubble/agents profile must never gain a side door
-      // into execution just because a script named it (Codex review on #58).
-      // Checked AFTER the record exists so a rejected member still shows up
-      // in the run's counts/snapshots as blocked instead of vanishing.
-      if (options.ensureProfileTrusted) {
-        const blocked = await options.ensureProfileTrusted(baseProfile);
-        if (blocked) {
-          const message = typeof blocked.content === "string" ? blocked.content : `profile "${baseProfile.name}" requires user approval`;
-          this.finalizeSubagentBlocked(record, message, { directEmit: options.directEmit, queueUpdates: options.queueUpdates });
-          return { ok: false, error: message };
-        }
-      }
-      const admissionError = this.admitSubagentProfile(record, profile.approval);
-      if (admissionError) {
-        this.finalizeSubagentBlocked(record, admissionError, { directEmit: options.directEmit, queueUpdates: options.queueUpdates });
-        return { ok: false, error: admissionError };
-      }
-      // Leaf-only concurrency permit (option C review M5): held ONLY around this
-      // agent's dispatch, never across parallel/pipeline composition.
-      await gate.acquire();
-      try {
-        record.promise = this.dispatchSubagentRun(record, baseTask, cwd, {
-          approval: profile.approval,
-          abortSignal: options.abortSignal,
-          directEmit: options.directEmit,
-          queueUpdates: options.queueUpdates,
-        });
-        await record.promise;
-      } finally {
-        gate.release();
-      }
-      this.subagentStore.markDelivered(record.agentId);
-
-      if (record.status !== "completed") {
-        return { ok: false, error: record.error || `agent ${record.nickname} ended: ${record.finalReason ?? record.status}` };
-      }
-      if (spec.opts.schema === undefined) {
-        return { ok: true, value: record.summary };
-      }
-      // Structured output: validate, one corrective retry, then fall back to raw.
-      // The schema: log lines are the telemetry that decides whether the
-      // deferred terminate-style structured-output tool ever gets reopened.
-      let validated = validateStructuredSummary(record.summary, spec.opts.schema);
-      if (!validated.ok) {
-        logs.push(`schema: ${record.nickname} first output failed validation; sending one corrective retry`);
-        try {
-          await this.sendSubAgentInput(
-            record.agentId,
-            buildSchemaCorrectionPrompt(spec.opts.schema, record.summary),
-            cwd,
-            { abortSignal: options.abortSignal },
-          );
-          await record.promise?.catch(() => undefined);
-          validated = validateStructuredSummary(record.summary, spec.opts.schema);
-        } catch {
-          // resume failed; fall through to raw summary
-        }
-        logs.push(validated.ok
-          ? `schema: ${record.nickname} corrective retry produced valid output`
-          : `schema: ${record.nickname} corrective retry still invalid; returning raw summary`);
-      }
-      return { ok: true, value: validated.ok ? validated.value : record.summary };
-    };
-
-    const result = await runWorkflow({
-      script: options.script,
-      args: options.args,
-      dispatchAgent,
-      onLog: (message) => logs.push(message),
-      onPhase: (title) => logs.push(`— phase: ${title} —`),
-      budget: {
-        // The ledger is pure accounting (no pool limit); scripts see an
-        // unlimited budget unless a future host contract reintroduces one.
-        total: null,
-        spent: () => runRecords.reduce((sum, r) => sum + (r.usage ? r.usage.promptTokens + r.usage.completionTokens : 0), 0),
-        remaining: () => Number.POSITIVE_INFINITY,
-      },
-      signal: options.abortSignal,
-    });
-
-    return {
-      result,
-      agentCount: runRecords.length,
-      logs,
-      snapshots: runRecords.map((record) => this.snapshotSubagent(record)),
-    };
-  }
-
-  /** Marks a child's full summary as delivered to parent context (design §3.3). */
-  markSubagentDelivered(agentId: string): void {
-    this.subagentStore.markDelivered(agentId);
-  }
-
-  private snapshotSubagent(record: SubagentThreadRecord): SubagentThreadSnapshot {
-    const snapshot = snapshotSubagentThread(record);
-    if (record.status === "queued") {
-      const queuePosition = this.subagentScheduler.queuePosition(record.agentId);
-      if (queuePosition !== undefined) return { ...snapshot, queuePosition };
-    }
-    return snapshot;
-  }
-
-  /** Returns the blocking diagnostic message when the profile cannot run, else undefined. */
-  private admitSubagentProfile(record: SubagentThreadRecord, approval: "fail" | "disabled"): string | undefined {
-    const diagnostics = validateAgentProfileTools([...this.tools.values()], record.profile, approval);
-    const blocking = diagnostics.filter((diagnostic) => diagnostic.severity === "error");
-    if (blocking.length === 0) return undefined;
-    return blocking.map((diagnostic) => diagnostic.message).join("\n");
-  }
-
-  /**
-   * Background children (queueUpdates) get their results ingested before the
-   * parent's next inference turn (design §5); foreground children (team,
-   * legacy task) deliver through their tool result instead.
-   */
-  private maybeEnqueueIngestion(
-    record: SubagentThreadRecord,
-    options: { queueUpdates?: boolean },
-  ): void {
-    if (options.queueUpdates) {
-      this.resultIntegrator.enqueue(record.agentId);
-    }
-  }
-
-  private flushSubagentIngestions(): void {
-    if (!this.resultIntegrator.hasPending()) return;
-    for (const notice of this.resultIntegrator.drainNotices(this.subagentStore)) {
+    for (const notice of this.workflowLedger.drainDeliveryNotices()) {
       this.injectSystemReminder(notice);
     }
   }
 
-  private finalizeSubagentBlocked(
-    record: SubagentThreadRecord,
-    error: string,
-    emitOptions: { directEmit?: (update: ToolUpdate) => void; queueUpdates?: boolean },
-  ): void {
-    record.status = "blocked";
-    record.finalReason = "blocked";
-    record.error = error;
-    record.updatedAt = Date.now();
-    this.emitSubagentLifecycle(record, emitOptions, "blocked", undefined, error);
-    this.subagentStore.persist(record);
-    this.subagentStore.notifyWaiters(record);
-  }
-
-  private dispatchSubagentRun(
-    record: SubagentThreadRecord,
-    input: string | ContentPart[],
-    cwd: string,
-    options: {
-      approval: "fail" | "disabled";
-      abortSignal?: AbortSignal;
-      forkContext?: boolean;
-      directEmit?: (update: ToolUpdate) => void;
-      queueUpdates?: boolean;
-      reuseAgent?: boolean;
-    },
-  ): Promise<void> {
-    record.status = "queued";
-    record.updatedAt = Date.now();
-    const queueSignal = composeAbortSignals([options.abortSignal, record.abortController.signal]);
-    return this.subagentScheduler.dispatch({
-      agentId: record.agentId,
-      category: record.category,
-      signal: queueSignal,
-      run: (ctx) => this.runSubagentThread(record, input, cwd, { ...options, attempt: ctx.attempt }),
-      onCancelledWhileQueued: (reason) => {
-        record.status = "cancelled";
-        record.finalReason = classifySubagentAbortReason(reason, options.abortSignal);
-        record.error = reason instanceof Error ? reason.message : reason ? String(reason) : "Cancelled while queued.";
-        record.updatedAt = Date.now();
-        // The run never started, so no SubagentStart fired and no SubagentStop follows.
-        this.emitSubagentLifecycle(record, options, "cancelled", undefined, record.error);
-        this.subagentStore.persist(record);
-        this.subagentStore.notifyWaiters(record);
-        this.maybeEnqueueIngestion(record, options);
-      },
-      onRateLimitExhausted: (attempts) => {
-        record.status = "failed";
-        record.finalReason = "rate_limited_exhausted";
-        record.error = `Provider rate limit persisted after ${attempts} attempts.`;
-        record.updatedAt = Date.now();
-        void this.runSubagentLifecycleHookFor(record, cwd, "SubagentStop", record.status, record.error);
-        this.emitSubagentLifecycle(record, options, "failed", undefined, record.error);
-        this.subagentStore.persist(record);
-        this.subagentStore.notifyWaiters(record);
-        this.maybeEnqueueIngestion(record, options);
-      },
-      onTransportRetryExhausted: (attempts) => {
-        record.status = "failed";
-        // failed_transient stays resumable, so the parent can still send_input
-        // to recover the child with its context intact.
-        record.finalReason = "failed_transient";
-        record.error = `Provider transport error persisted after ${attempts} attempts.`;
-        record.updatedAt = Date.now();
-        void this.runSubagentLifecycleHookFor(record, cwd, "SubagentStop", record.status, record.error);
-        this.emitSubagentLifecycle(record, options, "failed", undefined, record.error);
-        this.subagentStore.persist(record);
-        this.subagentStore.notifyWaiters(record);
-        this.maybeEnqueueIngestion(record, options);
-      },
-    });
-  }
-
-  private emitSubagentLifecycle(
-    record: SubagentThreadRecord,
-    options: { directEmit?: (update: ToolUpdate) => void; queueUpdates?: boolean },
-    status: ToolUpdate["status"],
-    event?: AgentEvent,
-    message?: string,
-  ): void {
-    const update = this.buildSubagentUpdate(record, status, event, message);
-    options.directEmit?.(update);
-    if (options.queueUpdates) {
-      this.pendingSubagentUpdates.push({ id: record.parentToolCallId, name: record.parentToolName, update });
-      this.wakeSubagentUpdateWaiters();
-    }
-  }
-
-  /** Lets a blocked tool-execution loop drain freshly queued subagent updates. */
-  private wakeSubagentUpdateWaiters(): void {
-    for (const wake of this.subagentUpdateWakers) wake();
-  }
-
-  private async runSubagentLifecycleHookFor(
-    record: SubagentThreadRecord,
-    cwd: string,
-    eventName: "SubagentStart" | "SubagentStop",
-    status?: string,
-    error?: string,
-    abortSignal?: AbortSignal,
-  ): Promise<void> {
-    try {
-      await this.runExternalHook({
-        eventName,
-        cwd,
-        runId: record.runId,
-        target: record.profile.name,
-        payload: {
-          agentId: record.agentId,
-          nickname: record.nickname,
-          profile: record.profile.name,
-          status,
-          error,
-        },
-      }, abortSignal);
-    } catch {
-      // Subagent lifecycle hooks are observe-only; never fail the subagent.
-    }
-  }
 
   /**
    * Resolves a child's model route. Priority, highest first (design v2 §1.1):
@@ -2462,358 +1906,66 @@ export class Agent {
    * The call-site override is what lets the model say "opus for this reviewer,
    * haiku for these twenty scouts" per spawn/batch member at request time.
    */
+  /** Kept as a thin delegator: routing decisions now live in SubagentRouter. */
   private resolveRouteForSubagent(
     profile: AgentProfile,
     category: string | undefined,
     override?: { model?: string; effort?: ThinkingLevel },
   ): ResolvedSubagentRoute {
-    const parentRoute = {
-      providerId: this.providerId,
-      model: this.apiModel,
-      thinkingLevel: this.thinkingLevel,
-    };
-    const snapshot = this.currentRoutingSnapshot();
-    const resolved = resolveSubagentRoute(
-      category ?? profile.category,
-      { ...parentRoute },
-      this.agentCategories,
-      snapshot ? tierContextFromSnapshot(snapshot, this.agentRouting) : undefined,
-    );
-    if ("error" in resolved) {
-      throw new Error(resolved.error);
-    }
-    let route = resolved.route;
-    // modelSource is assigned while applying the chain (design §3.4): an
-    // explicit layer naming the parent's own model is indistinguishable from
-    // inherit by final-value comparison, yet carries different authority.
-    let modelSource: import("./agent/categories.js").RouteModelSource =
-      route.categoryModelSource ?? "inherit";
-    if (profile.model && profile.model !== "inherit") {
-      const model = resolveModelRoute(profile.model, parentRoute.providerId);
-      if (model.model !== "inherit") {
-        route = { ...route, providerId: model.providerId, model: model.model, inherited: false };
-        modelSource = "profile";
-      }
-    }
-    // Call-site override beats profile and category. Bare names resolve
-    // against the PARENT provider per the tool contract (design §3.5) — not
-    // against a provider that category/profile may already have switched.
-    if (override?.model) {
-      const model = resolveModelRoute(override.model, parentRoute.providerId);
-      if (model.model !== "inherit") {
-        route = { ...route, providerId: model.providerId, model: model.model, inherited: false };
-        modelSource = "callsite";
-      }
-    }
-    const supportedLevels = getAvailableThinkingLevels(route.providerId, route.model);
-    const modelMetadata = getBuiltinModel(route.providerId, route.model);
-    const hasTrustedEffortMetadata = !!modelMetadata
-      && modelMetadata.reasoningLevels.some((level) => level !== "off");
-    if (override?.effort) {
-      // A call-site effort is explicit user/model intent: preserve the existing
-      // value for legacy/unknown models, and downward-clamp only when the
-      // catalog declares real effort capabilities (for example Luna ultra -> max).
-      route = {
-        ...route,
-        thinkingLevel: hasTrustedEffortMetadata
-          ? normalizeThinkingLevel(override.effort, supportedLevels)
-          : override.effort,
-        inherited: false,
-      };
-    } else if (hasTrustedEffortMetadata) {
-      const categoryThinkingLevel = route.category
-        ? mergeAgentCategories(this.agentCategories)[route.category]?.thinkingLevel
-        : undefined;
-      // A category's thinkingLevel is calibrated for the model the CATEGORY
-      // resolved. When a later layer (profile/call-site) replaced the model,
-      // that level is no longer explicit intent for the final model: keep it
-      // only if supported, else use the final model's own default — never
-      // downward-clamp a thinking-default model to "off" (v3.6; live case:
-      // explore's "low" + call-site glm-5.2 [high/max/off] silently landed
-      // on "off").
-      const modelReplacedAfterCategory = modelSource === "profile" || modelSource === "callsite";
-      route = {
-        ...route,
-        thinkingLevel: categoryThinkingLevel
-          ? (modelReplacedAfterCategory && !supportedLevels.includes(route.thinkingLevel)
-              ? getDefaultThinkingLevel(route.providerId, route.model)
-              : normalizeThinkingLevel(route.thinkingLevel, supportedLevels))
-          : normalizeInheritedThinkingLevel(route.providerId, route.model, route.thinkingLevel),
-      };
-    }
-    return {
-      ...route,
-      modelSource,
-      modelInherited: route.providerId === parentRoute.providerId && route.model === parentRoute.model,
-    };
-  }
-
-  /** Live snapshot for the CURRENT parent route; undefined when no accessor is wired. */
-  private currentRoutingSnapshot(): RoutingSnapshot | undefined {
-    if (!this.routingSnapshotAccessor) return undefined;
-    try {
-      return this.routingSnapshotAccessor({ providerId: this.providerId, model: this.apiModel });
-    } catch {
-      // Catalog data is an enhancement, never a spawn blocker.
-      return undefined;
-    }
-  }
-
-  /**
-   * Early route validation at dispatch time (design §7). Throws with an
-   * actionable message so the model self-corrects in the same turn. The
-   * cross-provider lock (§7.2.1) is snapshot-independent; catalog checks
-   * degrade silently when no snapshot is available (§7.0).
-   */
-  private validateRouteForDispatch(route: ResolvedSubagentRoute): string | undefined {
-    const snapshot = this.currentRoutingSnapshot();
-    const crossProvider = !!route.providerId && route.providerId !== this.providerId;
-
-    if (crossProvider) {
-      // §7.2.1 — the lock. Profile/user-category routes are standing user
-      // authorization and always pass; only call-site routes are lockable.
-      if (!this.agentRouting.allowCrossProvider && route.modelSource === "callsite") {
-        throw new Error(
-          "Cross-provider routing is disabled in this session's config (agentRouting.allowCrossProvider). "
-          + "Use a model from the parent provider, or ask the user to unlock cross-provider routing.",
-        );
-      }
-      // §7.2.2 — credentials, when a snapshot is available.
-      if (snapshot && !snapshot.runnableProviderIds.includes(route.providerId)) {
-        throw new Error(
-          `Provider "${route.providerId}" is not configured with active credentials. `
-          + `Available: ${snapshot.runnableProviderIds.join(", ") || "(none)"}.`,
-        );
-      }
-      // §7.2.3 amended (v3.6): the provider stays the authority — no hard
-      // catalog rejection — but a near-match against the target provider's
-      // local catalog is positive evidence of a mistyped id (a Grok parent
-      // invented "openai:gpt-5.6" for gpt-5.6-sol), so soft-reject with the
-      // correction and let the model fix it this turn. Genuinely unknown ids
-      // (no near candidates) still pass through with a note.
-      const targetCatalog = this.routableModelIndex?.()
-        .filter((entry) => entry.providerId === route.providerId) ?? [];
-      if (targetCatalog.length > 0 && !targetCatalog.some((entry) => entry.id === route.model)) {
-        const near = nearModelMatches(route.model, targetCatalog, { mode: "truncation" });
-        if (near.length > 0) {
-          throw new Error(
-            `Unknown model "${route.model}" for provider "${route.providerId}". Did you mean: ${near.join(", ")}?`,
-          );
-        }
-        return `model ${route.providerId}:${route.model} is not in the local catalog; the provider validates it`;
-      }
-      return `model ${route.providerId}:${route.model} is not locally verifiable; the provider validates it`;
-    }
-
-    // §7.1 — same-provider unknown model, resolved-provider based (never
-    // input-syntax based; qualified same-provider ids land here too).
-    if (snapshot && route.modelSource === "callsite") {
-      const known = snapshot.models.some((model) => model.id === route.model);
-      if (!known) {
-        if (snapshot.authoritative) {
-          const available = snapshot.models
-            .map((model) => (model.tier ? `${model.id} (${model.tier})` : model.id))
-            .join(", ");
-          throw new Error(
-            `Unknown model "${route.model}" for provider "${this.providerId}". Available: ${available}.`,
-          );
-        }
-        const near = nearModelMatches(
-          route.model,
-          snapshot.models.map((model): RoutableModelEntry => ({ providerId: this.providerId, id: model.id, name: model.name })),
-        );
-        return near.length > 0
-          ? `model id "${route.model}" is unrecognized locally (did you mean: ${near.join(", ")}?); the provider validates it`
-          : `model id "${route.model}" is unrecognized locally; the provider validates it`;
-      }
-    }
-    return undefined;
+    return this.router.resolve(profile, category, override);
   }
 
   /** Routable catalog across runnable providers (design v3.6); undefined when unwired. */
   listRoutableModels(): RoutableModelEntry[] | undefined {
-    try {
-      return this.routableModelIndex?.();
-    } catch {
-      return undefined;
-    }
-  }
-
-  /**
-   * Decision-point detector (design §6): counts dispatches whose model was
-   * decided by NO routing layer (modelSource "inherit") under a strong-tier
-   * parent. Fires once per session at the Nth qualifying dispatch; the
-   * reminder rides the same channel as the lifecycle reminder.
-   */
-  private noteRoutingDispatch(route: ResolvedSubagentRoute): void {
-    if (this.routingReminderFired) return;
-    if (route.modelSource !== "inherit") return;
-    const snapshot = this.currentRoutingSnapshot();
-    if (snapshot?.parent.tier !== "strong") return;
-    this.defaultedRoutingStreak++;
-    if (this.defaultedRoutingStreak >= ROUTING_REMINDER_THRESHOLD) {
-      this.routingReminderFired = true;
-      this.pendingRoutingReminder = [
-        `Routing note: ${this.defaultedRoutingStreak} children in this fan-out defaulted to the parent's`,
-        "strong-tier model (no model/category given). If any of these tasks are mechanical",
-        "(scan / summarize / search / extract), route them with category \"quick\"/\"explore\" or a",
-        "fast-tier model next time. If they genuinely need this model, ignore this note.",
-      ].join(" ");
-    }
+    return this.router.listRoutableModels();
   }
 
   /** Consumed by the turn hooks; also closes the counting window (§6). */
   consumePendingRoutingReminder(): string | undefined {
-    const reminder = this.pendingRoutingReminder;
-    this.pendingRoutingReminder = undefined;
-    if (!this.routingReminderFired) this.defaultedRoutingStreak = 0;
-    return reminder;
+    return this.router.consumePendingReminder();
   }
 
-  private createSubagentThreadRecord(options: {
-    profile: AgentProfile;
-    task: string;
-    runId?: string;
-    agentId?: string;
-    parentToolCallId: string;
-    parentToolName: string;
-    nickname?: string;
-    route?: ResolvedSubagentRoute;
-    workflowInternal?: boolean;
-  }): SubagentThreadRecord {
-    const now = Date.now();
-    const nickname = options.nickname ?? assignAgentNickname(options.profile, this.activeSubagentNicknames());
-    return {
-      agentId: options.agentId ?? randomUUID(),
-      runId: options.runId ?? randomUUID(),
-      nickname,
-      profile: options.profile,
-      category: options.route?.category,
-      route: options.route,
-      workflowInternal: options.workflowInternal,
-      parentToolCallId: options.parentToolCallId,
-      parentToolName: options.parentToolName,
-      status: "queued",
-      task: options.task,
-      summary: "",
-      toolNotes: [],
-      createdAt: now,
-      updatedAt: now,
-      abortController: new AbortController(),
-      waiters: new Set(),
-    };
-  }
 
-  private runSubagentThread(
-    record: SubagentThreadRecord,
-    input: string | ContentPart[],
-    cwd: string,
-    options: ChildRunOptions,
-  ): Promise<SubagentRunOutcome> {
-    return this.childRunner.run(record, input, cwd, options);
-  }
 
-  private async createSubAgentInstance(
-    record: SubagentThreadRecord,
-    tools: ToolRegistryEntry[],
-    cwd: string,
-    forkContext?: boolean,
-  ): Promise<NonNullable<SubagentThreadRecord["agent"]>> {
-    let childCwd = cwd;
-    let childMode: PermissionMode = "plan";
-    if (record.profile.mode === "write_worktree") {
-      // Write children work in a runtime-allocated worktree with fresh tool
-      // instances bound to it (design §8): the parent tree is never touched,
-      // and the tools' own workspace fence enforces containment in code.
-      if (!record.worktree) {
-        record.worktree = createSubagentWorktree(cwd, record.agentId);
-      }
-      childCwd = record.worktree.path;
-      childMode = "default";
-      tools = createWorktreeChildTools(childCwd, record.profile.tools.include);
-    } else {
-      // Readonly children share the parent's tool instances; isolate the only
-      // one with mutable file state (read → its FileStateTracker) so concurrent
-      // fan-out members never race shared tool state (design v2 §2).
-      tools = isolateReadonlyChildFileTools(tools);
-    }
-    const childToolNames = tools.map((tool) => tool.name);
-    const route = record.route ?? {
-      providerId: this.providerId,
-      model: this.apiModel,
-      thinkingLevel: this.thinkingLevel,
-      inherited: true,
-    };
-    const provider = await this.resolveProviderForRoute(route);
-    const childSystemPrompt = buildSystemPrompt({
-      agentName: "Bubble",
-      configuredProvider: route.providerId || "none",
-      configuredModel: route.model || "none",
-      configuredModelId: route.providerId && route.model ? `${route.providerId}:${route.model}` : route.model || "none",
-      thinkingLevel: route.thinkingLevel,
-      mode: childMode,
-      workingDir: childCwd,
-      ...buildToolPromptOptions(tools),
-      memoryPrompt: childToolNames.some((name) => name === "memory")
-        ? this.memoryPrompt
-        : undefined,
-      agentProfilePrompt: [
-        `You are subagent ${record.nickname}. Your agent profile is ${record.profile.name}.`,
-        record.profile.mode === "write_worktree"
-          ? [
-            "You work inside an isolated git worktree; the parent reviews your diff after you finish.",
-            "Make your changes, verify them (run tests where possible), and end with a handoff that lists the files you changed and how you verified them.",
-            "Do not commit, push, or touch anything outside this worktree.",
-          ].join(" ")
-          : "",
-        record.profile.prompt,
-      ].filter(Boolean).join("\n\n"),
-    });
-    const subAgent = new Agent({
-      provider,
-      providerId: route.providerId,
-      model: route.model,
-      tools,
+
+  /**
+   * The ONE place a child Agent is constructed. The runtime hands over what it
+   * resolved (provider/route/tools/prompt); everything inherited from the
+   * parent is filled in here, which is also what keeps the deliberately
+   * ABSENT arguments absent — `onMessageAppend` (a child must not append to
+   * the parent's session log), `sessionID` (a child must not stop the
+   * parent's auto servers) and the routing catalog (children route by
+   * default, not from the parent's menu).
+   */
+  private createChildAgent(spec: ChildAgentSpec): ChildAgentLike {
+    const child = new Agent({
+      provider: spec.provider,
+      providerId: spec.providerId,
+      model: spec.model,
+      tools: spec.tools,
       temperature: this.temperature,
-      thinkingLevel: route.thinkingLevel,
-      mode: childMode,
-      maxTurns: record.profile.maxTurns,
+      thinkingLevel: spec.thinkingLevel,
+      mode: spec.mode,
+      maxTurns: spec.maxTurns,
       budgetLedger: this.budgetLedger,
-      budgetSource: { runId: record.runId, subAgentId: record.agentId },
-      systemPrompt: childSystemPrompt,
+      budgetSource: spec.budgetSource,
+      systemPrompt: spec.systemPrompt,
       hooks: this.hookDefinitions,
       externalHooks: this.externalHooks,
       agentRole: "subagent",
-      subAgentId: record.agentId,
+      subAgentId: spec.subAgentId,
       agentCategories: this.agentCategories,
       providerFactory: this.providerFactory,
       // The scheduler owns 429 backoff for children; the transport must not
       // stack its own retries on top (design §4.5).
       rateLimitPolicy: "defer",
     });
-    if (record.messages && record.messages.length > 0) {
-      // Cross-restart resume (design §7): rebuild the child from its
-      // persisted history — including its original system prompt — so
-      // send_input continues with context intact.
-      subAgent.messages = record.messages.map((message) => ({ ...message }));
-      record.messages = undefined;
-    } else if (forkContext) {
-      subAgent.messages = this.forkMessagesForSubagent(childSystemPrompt);
+    if (spec.resumeMessages && spec.resumeMessages.length > 0) {
+      child.messages = spec.resumeMessages;
+    } else if (spec.forkContext) {
+      child.messages = this.forkMessagesForSubagent(spec.systemPrompt);
     }
-    return subAgent;
-  }
-
-  private async resolveProviderForRoute(route: ResolvedSubagentRoute): Promise<Provider> {
-    if (!route.providerId || route.providerId === this.providerId) {
-      return this.provider;
-    }
-    if (!this.providerFactory) {
-      throw new Error([
-        `Subagent route requires provider "${route.providerId}" for model "${route.model}",`,
-        `but the parent agent only has provider "${this.providerId || "none"}" and no provider factory is configured.`,
-      ].join(" "));
-    }
-    return this.providerFactory(route);
+    return child;
   }
 
   private forkMessagesForSubagent(childSystemPrompt: string): Message[] {
@@ -2832,88 +1984,6 @@ export class Agent {
     return [{ role: "system", content: childSystemPrompt }, ...forked];
   }
 
-  private buildSubagentUpdate(
-    record: SubagentThreadRecord,
-    status: ToolUpdate["status"],
-    event?: AgentEvent,
-    message?: string,
-  ): ToolUpdate {
-    return {
-      type: "subagent_update",
-      parentToolCallId: record.parentToolCallId,
-      runId: record.runId,
-      subAgentId: record.agentId,
-      agentName: record.profile.name,
-      nickname: record.nickname,
-      category: record.category,
-      route: record.route,
-      status,
-      childEvent: event,
-      summaryDelta: event?.type === "text_delta" ? event.content : undefined,
-      toolName: "name" in (event ?? {}) ? (event as any).name : undefined,
-      toolCallId: "id" in (event ?? {}) ? (event as any).id : undefined,
-      message,
-      metadata: {
-        kind: "subagent",
-        runId: record.runId,
-        subagents: [{
-          subAgentId: record.agentId,
-          agentName: record.profile.name,
-          nickname: record.nickname,
-          category: record.category,
-          route: record.route,
-          status,
-          profileSource: record.profile.source,
-          task: record.task,
-          summary: record.summary,
-          toolNotes: record.toolNotes,
-          usage: record.usage,
-          error: record.error,
-        }],
-      },
-    };
-  }
-
-  private queueSubagentUpdate(
-    record: SubagentThreadRecord,
-    status: ToolUpdate["status"],
-    event?: AgentEvent,
-    message?: string,
-  ): void {
-    this.pendingSubagentUpdates.push({
-      id: record.parentToolCallId,
-      name: record.parentToolName,
-      update: this.buildSubagentUpdate(record, status, event, message),
-    });
-    this.wakeSubagentUpdateWaiters();
-  }
-
-  private drainSubagentToolUpdates(): AgentEvent[] {
-    return this.pendingSubagentUpdates.splice(0, this.pendingSubagentUpdates.length)
-      .map((pending) => ({
-        type: "tool_update" as const,
-        id: pending.id,
-        name: pending.name,
-        update: pending.update,
-      }));
-  }
-
-  private activeSubagentNicknames(): string[] {
-    return this.subagentStore.active().map((record) => record.nickname);
-  }
-
-  private resolveSubagentTargets(agentIds?: string[]): SubagentThreadRecord[] {
-    if (!agentIds || agentIds.length === 0) {
-      return this.subagentStore.values().filter((record) => record.status !== "closed" && !record.workflowInternal);
-    }
-    return agentIds.map((id) => {
-      const record = this.subagentStore.get(id);
-      if (!record) {
-        throw new Error(`Unknown subagent: ${id}`);
-      }
-      return record;
-    });
-  }
 
   private maybeCompactResidentHistory(): void {
     if (this.messages.length === 0) {
@@ -3351,10 +2421,18 @@ function cancelledToolResult(toolName: string): ToolResult {
   };
 }
 
-function createUpdateQueue<T>() {
+/** Exported for tests: the wake latch below is easiest to pin directly. */
+export function createUpdateQueue<T>() {
   const items: T[] = [];
   let waiter: ((status: "woken" | "aborted") => void) | undefined;
   let abortCleanup: (() => void) | undefined;
+  // Latch for wakes that arrive with no parked waiter — a wake() fired while
+  // the consuming generator is suspended at a yield would otherwise be lost.
+  // Callers today each pair their wake with a synchronously-checked flag
+  // (items / settled / pendingSubagentUpdates), so no wake is currently
+  // dropped; the latch keeps that correctness inside the queue instead of
+  // depending on every future caller repeating the pairing.
+  let signaled = false;
   return {
     push(item: T) {
       items.push(item);
@@ -3368,6 +2446,10 @@ function createUpdateQueue<T>() {
     },
     wait(signal?: AbortSignal): Promise<"woken" | "aborted"> {
       if (items.length > 0) return Promise.resolve("woken");
+      if (signaled) {
+        signaled = false;
+        return Promise.resolve("woken");
+      }
       if (signal?.aborted) return Promise.resolve("aborted");
       return new Promise((resolve) => {
         abortCleanup?.();
@@ -3389,10 +2471,14 @@ function createUpdateQueue<T>() {
     },
     wake() {
       const resolve = waiter;
+      if (!resolve) {
+        signaled = true;
+        return;
+      }
       waiter = undefined;
       abortCleanup?.();
       abortCleanup = undefined;
-      resolve?.("woken");
+      resolve("woken");
     },
   };
 }
@@ -3421,35 +2507,7 @@ function getCurrentHeapUsed(): number {
   }
 }
 
-function isFinalSubagentStatus(status: SubagentThreadRecord["status"]): boolean {
-  return status === "completed"
-    || status === "failed"
-    || status === "blocked"
-    || status === "cancelled"
-    || status === "closed";
-}
 
-/**
- * Persists the full rendered workflow result so the inline preview can stay
- * bounded without losing data (the parent reads the file selectively when the
- * preview was cut). A write failure only costs the pointer, never the run.
- */
-function persistWorkflowResult(runId: string, value: unknown): string | undefined {
-  try {
-    const dir = join(getBubbleHome(), "workflows");
-    mkdirSync(dir, { recursive: true });
-    const path = join(dir, `${runId}.result.txt`);
-    writeFileSync(path, renderWorkflowResultValue(value));
-    return path;
-  } catch {
-    return undefined;
-  }
-}
-
-function normalizeWaitTimeout(value: number | undefined): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) return 30_000;
-  return Math.max(100, Math.min(3_600_000, Math.floor(value)));
-}
 
 function isSubagentLifecycleTool(name: string): boolean {
   return name === "subagent"
