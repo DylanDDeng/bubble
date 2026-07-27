@@ -327,15 +327,7 @@ export class Agent {
     });
     this.subagentsConfig = options.subagents ?? {};
     this.rateLimitPolicy = options.rateLimitPolicy;
-    // Children persist next to the session file so a later process can
-    // resume them via send_input (design §7). Child agents themselves
-    // (agentRole "subagent") never persist children — no recursion exists.
-    // Resolved once here, exactly as before: setSessionID() has never
-    // repointed an existing store, and this move does not change that.
-    const persistDir = this.agentRole === "parent"
-      ? this.subagentsConfig.persistDir
-        ?? (this.sessionID?.endsWith(".jsonl") ? this.sessionID.replace(/\.jsonl$/, ".subagents") : undefined)
-      : undefined;
+    const persistDir = this.deriveSubagentPersistDir();
     // `self` so the parent adapter's getters read through to this agent.
     const self = this;
     this.subagents = new SubagentRuntime({
@@ -402,6 +394,23 @@ export class Agent {
    */
   setSessionID(sessionID: string | undefined): void {
     this.sessionID = sessionID;
+    // The TUI reuses one Agent across session switches, so the subagent
+    // persist directory must follow the session — otherwise children spawned
+    // after a switch land in the OLD session's directory and the new
+    // session's persisted children never load (known-defects #2).
+    this.subagents.repointPersistDir(this.deriveSubagentPersistDir());
+  }
+
+  /**
+   * Children persist next to the session file so a later process can resume
+   * them via send_input (design §7). An explicit subagents.persistDir config
+   * always wins over the sessionID derivation. Child agents themselves
+   * (agentRole "subagent") never persist children — no recursion exists.
+   */
+  private deriveSubagentPersistDir(): string | undefined {
+    if (this.agentRole !== "parent") return undefined;
+    return this.subagentsConfig.persistDir
+      ?? (this.sessionID?.endsWith(".jsonl") ? this.sessionID.replace(/\.jsonl$/, ".subagents") : undefined);
   }
 
   getSessionID(): string | undefined {

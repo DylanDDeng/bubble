@@ -93,9 +93,8 @@ export interface SubagentRuntimeDeps {
   categories: AgentCategoriesConfig;
   config: AgentSubagentRuntimeConfig;
   /**
-   * Resolved ONCE by the caller, exactly as the old constructor did. Kept a
-   * string rather than derived from a live sessionID so this move changes no
-   * behaviour: setSessionID() has never repointed the persist directory.
+   * Initial persist directory. Session switches repoint it through
+   * `repointPersistDir` (the TUI reuses one Agent across switches).
    */
   persistDir?: string;
 }
@@ -164,6 +163,11 @@ export class SubagentRuntime {
   /** True when a background child has queued an update the loop should drain. */
   hasPendingUpdates(): boolean {
     return this.pendingUpdates.length > 0;
+  }
+
+  /** Follows a session switch: evicts the old session's final children and loads the new one's. */
+  repointPersistDir(persistDir: string | undefined): void {
+    this.store.repoint(persistDir);
   }
 
   /** Registers a waker so a blocked tool-execution loop learns about updates. */

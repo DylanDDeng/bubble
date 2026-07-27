@@ -52,8 +52,37 @@ interface PersistedSubagent {
 
 export class SubagentStore {
   private readonly threads = new Map<string, SubagentThreadRecord>();
+  private persistDir?: string;
 
-  constructor(private readonly persistDir?: string) {}
+  constructor(persistDir?: string) {
+    this.persistDir = persistDir;
+  }
+
+  /**
+   * Repoints persistence at a different session's directory (the TUI reuses
+   * one Agent across session switches; see Agent.setSessionID).
+   *
+   * Final non-workflow records are evicted first: they are already persisted
+   * in the OLD directory and reloadable by switching back, and keeping them
+   * would leak one session's children into another's list_agents — growing
+   * monotonically with every switch. Live records stay (their runs are still
+   * attached to this process; their eventual persist lands in the new
+   * directory — an accepted tradeoff, preferable to losing them). Workflow-
+   * internal records stay because a running workflow's schema-correction
+   * retry looks its members up in this store by agentId.
+   *
+   * `undefined` disables persistence and loads nothing; threads are kept.
+   */
+  repoint(persistDir: string | undefined): void {
+    if (persistDir === this.persistDir) return;
+    for (const [agentId, record] of this.threads) {
+      if (isFinalSubagentThreadStatus(record.status) && !record.workflowInternal) {
+        this.threads.delete(agentId);
+      }
+    }
+    this.persistDir = persistDir;
+    this.loadPersisted();
+  }
 
   get(agentId: string): SubagentThreadRecord | undefined {
     return this.threads.get(agentId);
@@ -102,6 +131,10 @@ export class SubagentStore {
   persist(record: SubagentThreadRecord): void {
     if (!this.persistDir) return;
     if (!isFinalSubagentThreadStatus(record.status)) return;
+    // Workflow-internal members never persist (design: they never re-import
+    // on restart). The onFinal gate alone was not enough — markDelivered
+    // reaches persist too (known-defects #5) — so the store enforces it.
+    if (record.workflowInternal) return;
     try {
       mkdirSync(this.persistDir, { recursive: true });
       const payload: PersistedSubagent = {
