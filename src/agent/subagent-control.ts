@@ -94,6 +94,11 @@ export interface SubagentThreadRecord {
   /** True for agents spawned inside a run_workflow: kept out of list_agents /
    * wait_agent and not persisted (design v2 appendix; option C). */
   workflowInternal?: boolean;
+  /** A SubagentStart hook fired for the current logical run and its paired
+   * SubagentStop has not fired yet (design §9). Lets terminal paths that
+   * assume "the run never started" — cancel during a retry backoff — close
+   * the pair instead of leaking an unmatched Start. */
+  hookStopPending?: boolean;
   abortController: AbortController;
   waiters: Set<() => void>;
   agent?: {

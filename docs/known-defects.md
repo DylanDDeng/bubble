@@ -4,7 +4,7 @@ Status: **mostly resolved** (2026-07-27, same day). Recorded while extracting
 `SubagentRuntime` / `SubagentRouter` / `WorkflowLedger` out of `src/agent.ts`;
 fixed in the commit series right after the extraction landed. Per-entry
 status: 1 FIXED, 2 FIXED, 3 DECIDED (docs updated), 4 FIXED, 5 FIXED,
-6 OPEN, 7 OPEN (report-only).
+6 FIXED, 7 FIXED. All entries resolved as of 2026-07-28.
 
 These were found during the refactor and deliberately **left out of it**: the
 extraction commits are pure code movement, and folding a behaviour change into
@@ -257,7 +257,12 @@ loadPersisted on session switch) would raise the trigger frequency to every
 session switch — so `persist()` needs a `workflowInternal` early-return
 **before or together with** the defect-2 fix.
 
-## 6. `SubagentStart` can fire without a matching `SubagentStop`
+## 6. [FIXED] `SubagentStart` can fire without a matching `SubagentStop`
+
+**Fixed**: `fix(agent): close the SubagentStart hook pair on backoff-cancel`
+— pairing state (`hookStopPending`) tracked at the single choke point every
+Start/Stop passes through; the cancel-while-queued path closes an open pair
+and still skips Stop when no Start ever fired.
 
 **Severity: low** — hook pairing gap, same root as the defect-1 correction.
 
@@ -268,7 +273,13 @@ backoff, the terminal path is `onCancelledWhileQueued`
 fires no `SubagentStop` (`src/agent/subagent/runtime.ts:620-630` — the "run
 never started" assumption). External hook consumers see an unclosed pair.
 
-## 7. `oauth/storage.ts` hard-codes the auth path at module load
+## 7. [FIXED] `oauth/storage.ts` hard-codes the auth path at module load
+
+**Fixed**: `fix(oauth): resolve the auth path at construction through
+getBubbleHome` — construction-time resolution, injectable for tests, and
+auth.json now honors BUBBLE_HOME / dev mode like every other config file.
+Behaviour note: BUBBLE_DEV=1 sessions now keep credentials in
+~/.bubble-dev/auth.json (previously shared production credentials).
 
 **Severity: low (test infrastructure)** — same class as defect 4, harder form.
 `AUTH_PATH = join(homedir(), ".bubble", "auth.json")` is a module-level

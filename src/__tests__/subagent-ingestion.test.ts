@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Agent } from "../agent.js";
+import { RateLimitError } from "../network/errors.js";
 import { buildSubagentLifecycleReminder } from "../agent/subagent-lifecycle-reminder.js";
 import { discoverAgentProfiles, findAgentProfile, type AgentProfile } from "../agent/profiles.js";
 import type { Message, Provider, StreamChunk } from "../types.js";
@@ -171,5 +172,93 @@ describe("hook pairs across restarts (design §9)", () => {
     await agent.waitSubAgents({ agentIds: [spawned.agentId], timeoutMs: 2_000 });
 
     expect(hookEvents).toEqual(["SubagentStart", "SubagentStop", "SubagentStart", "SubagentStop"]);
+  });
+
+  it("closes the Start pair when an abort lands during retry backoff (known-defects #6)", async () => {
+    const hookEvents: string[] = [];
+    const externalHooks = {
+      runEvent: async (request: { eventName: string }) => {
+        if (request.eventName === "SubagentStart" || request.eventName === "SubagentStop") {
+          hookEvents.push(request.eventName);
+        }
+        return {
+          eventName: request.eventName,
+          decision: "allow",
+          modelContext: [],
+          results: [],
+          diagnostics: [],
+          matched: 0,
+        };
+      },
+    } as any;
+    let firstCall: (() => void) | undefined;
+    const calledOnce = new Promise<void>((resolve) => { firstCall = resolve; });
+    const provider: Provider = {
+      // eslint-disable-next-line require-yield
+      async *streamChat() {
+        firstCall?.();
+        firstCall = undefined;
+        throw new RateLimitError("429 from provider", { retryAfterMs: 60_000 });
+      },
+      async complete() { return "complete"; },
+    };
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [],
+      externalHooks,
+      subagents: { rateLimitMaxAttempts: 3, rateLimitBackoffMs: [60_000, 60_000] },
+    });
+    const controller = new AbortController();
+
+    const spawned = await agent.spawnSubAgent("aborted in backoff", "/tmp", {
+      profile: defaultProfile(),
+      parentToolCallId: "spawn_backoff_pair",
+      abortSignal: controller.signal,
+    });
+    await calledOnce;                                       // attempt 1 ran -> Start fired
+    await new Promise((resolve) => setTimeout(resolve, 100)); // let the requeue settle
+    controller.abort(new Error("user abort"));
+    const done = await agent.waitSubAgents({ agentIds: [spawned.agentId], timeoutMs: 10_000 });
+    // The void-fired Stop resolves off the wait path; give it a tick.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(done[0].status).toBe("cancelled");
+    // Attempt 1 fired SubagentStart; the backoff-cancel path must close the
+    // pair instead of leaking an unmatched Start (design §9).
+    expect(hookEvents).toEqual(["SubagentStart", "SubagentStop"]);
+  });
+
+  it("still skips SubagentStop when the run never started", async () => {
+    const hookEvents: string[] = [];
+    const externalHooks = {
+      runEvent: async (request: { eventName: string }) => {
+        if (request.eventName === "SubagentStart" || request.eventName === "SubagentStop") {
+          hookEvents.push(request.eventName);
+        }
+        return {
+          eventName: request.eventName,
+          decision: "allow",
+          modelContext: [],
+          results: [],
+          diagnostics: [],
+          matched: 0,
+        };
+      },
+    } as any;
+    const controller = new AbortController();
+    controller.abort(new Error("aborted before dispatch"));
+    const agent = new Agent({ provider: textProvider(), model: "gpt-4o", tools: [], externalHooks });
+
+    const spawned = await agent.spawnSubAgent("never starts", "/tmp", {
+      profile: defaultProfile(),
+      parentToolCallId: "spawn_never",
+      abortSignal: controller.signal,
+    });
+    await agent.waitSubAgents({ agentIds: [spawned.agentId], timeoutMs: 10_000 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // No Start ever fired, so no Stop may fire either.
+    expect(hookEvents).toEqual([]);
   });
 });

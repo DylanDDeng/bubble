@@ -654,12 +654,15 @@ export class SubagentRuntime {
         record.finalReason = classifySubagentAbortReason(reason, options.abortSignal);
         record.error = reason instanceof Error ? reason.message : reason ? String(reason) : "Cancelled while queued.";
         record.updatedAt = Date.now();
-        // No SubagentStop here. NOTE: this path is NOT only "run never
-        // started" — a 429/transport failure re-queues the entry with the
-        // abort listener re-armed, so an abort during backoff lands here
-        // AFTER attempt 1 already ran (worktree created, SubagentStart
-        // fired — the unmatched-Start gap is known-defects #6). Reclaim is
-        // therefore a real leak fix on this path, not symmetry decoration.
+        // This path is NOT only "run never started" — a 429/transport
+        // failure re-queues the entry with the abort listener re-armed, so
+        // an abort during backoff lands here AFTER attempt 1 already ran
+        // (worktree created, SubagentStart fired). Reclaim is therefore a
+        // real leak fix here, and an open Start pair must be closed too
+        // (design §9): only when no Start ever fired is skipping Stop right.
+        if (record.hookStopPending) {
+          void this.runSubagentLifecycleHookFor(record, cwd, "SubagentStop", record.status, record.error);
+        }
         this.reclaimWorktree(record);
         this.emitSubagentLifecycle(record, options, "cancelled", undefined, record.error);
         this.store.persist(record);
@@ -725,6 +728,10 @@ export class SubagentRuntime {
     error?: string,
     abortSignal?: AbortSignal,
   ): Promise<void> {
+    // Pairing state (design §9), tracked at this single choke point —
+    // every Start/Stop passes through here, so no call site can desync it.
+    // Set synchronously, before the await, to stay ordered with callers.
+    record.hookStopPending = eventName === "SubagentStart";
     try {
       await this.parent.runExternalHook({
         eventName,
