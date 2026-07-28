@@ -1,19 +1,25 @@
 /**
- * OAuth credential storage in ~/.bubble/auth.json
+ * OAuth credential storage in <bubble home>/auth.json.
+ *
+ * The path is resolved at CONSTRUCTION time through getBubbleHome(), never at
+ * module load: a module-level constant froze the real ~/.bubble at import,
+ * which no test could isolate (known-defects #7) and which ignored
+ * BUBBLE_HOME / dev mode while every other config file honored them
+ * (config.json, sessions, memory all derive from getBubbleHome).
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { homedir } from "node:os";
+import { getBubbleHome } from "../bubble-home.js";
 import type { OAuthCredentials } from "./types.js";
-
-const AUTH_PATH = join(homedir(), ".bubble", "auth.json");
 
 export class AuthStorage {
   private data: Record<string, OAuthCredentials> = {};
   private mutationListeners: Array<(providerId: string) => void> = [];
+  private readonly authPath: string;
 
-  constructor() {
+  constructor(authPath = join(getBubbleHome(), "auth.json")) {
+    this.authPath = authPath;
     this.load();
   }
 
@@ -41,9 +47,9 @@ export class AuthStorage {
   }
 
   private load() {
-    if (!existsSync(AUTH_PATH)) return;
+    if (!existsSync(this.authPath)) return;
     try {
-      const raw = readFileSync(AUTH_PATH, "utf-8");
+      const raw = readFileSync(this.authPath, "utf-8");
       const parsed = JSON.parse(raw) as Record<string, OAuthCredentials>;
       this.data = parsed;
     } catch {
@@ -52,13 +58,13 @@ export class AuthStorage {
   }
 
   private save() {
-    const dir = dirname(AUTH_PATH);
+    const dir = dirname(this.authPath);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeFileSync(AUTH_PATH, JSON.stringify(this.data, null, 2) + "\n", { mode: 0o600 });
+    writeFileSync(this.authPath, JSON.stringify(this.data, null, 2) + "\n", { mode: 0o600 });
   }
 
   getPath(): string {
-    return AUTH_PATH;
+    return this.authPath;
   }
 
   get(providerId: string): OAuthCredentials | undefined {
