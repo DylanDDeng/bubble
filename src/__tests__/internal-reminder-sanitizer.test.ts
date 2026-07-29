@@ -1,3 +1,4 @@
+import { wrapInSystemReminder } from "../prompt/reminders.js";
 import { describe, expect, it } from "vitest";
 import {
   createStreamingInternalReminderSanitizer,
@@ -6,7 +7,6 @@ import {
   sanitizeInternalReasoningText,
   sanitizeInternalReminderBlocks,
 } from "../agent/internal-reminder-sanitizer.js";
-import { buildLoopWarningReminder } from "../prompt/reminders.js";
 
 // The exact block a user saw leak in a released build (debugging task reminder,
 // projected into the system-reminder wrapper sent to the model).
@@ -95,7 +95,11 @@ Rules while in plan mode:
   });
 
   it("removes reworded loop reminders by structured tag rather than content", () => {
-    const reminder = buildLoopWarningReminder("This task has already used many search steps.");
+    // Inline replica of the removed governor loop-warning shape: the
+    // sanitizer strips by structured tag, so any reworded body must pass.
+    const reminder = wrapInSystemReminder(
+      "Further broad exploration is low value.\n\nThis task has already used many search steps.\n\nDo not repeat near-identical reads or searches.",
+    );
     const input = [
       "before ",
       formatInternalReminderBlock("system-reminder", reminder),

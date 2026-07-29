@@ -81,34 +81,6 @@ export function buildDeferredToolsReminder(names: string[]): string {
   return wrapInSystemReminder(lines.join("\n"));
 }
 
-// The two builders below are consumed only by execution-governor.ts and are
-// deleted together with it in the follow-up orphan-removal commit.
-export function buildInvestigationReminder(): string {
-  return wrapInSystemReminder(`
-Security/configuration investigation workflow is active.
-
-For this task, gather evidence in this order:
-- locate config load paths
-- locate environment variable reads
-- locate persistent storage paths
-- check whether sensitive values are masked or redacted
-- check whether values can reach logs, client bundles, or user-visible surfaces
-
-Stop once these categories are covered. Do not keep repeating near-identical searches when they are not producing new evidence.
-`);
-}
-
-export function buildLoopWarningReminder(reason: string): string {
-  return wrapInSystemReminder(`
-Further broad exploration is low value unless there is a concrete remaining evidence gap.
-
-${reason}
-
-Do not repeat near-identical reads or searches unless the path or hypothesis is materially different.
-If current evidence is sufficient, answer with the findings.
-`);
-}
-
 export function buildToolFreezeReminder(reason: string): string {
   return wrapInSystemReminder(`
 CRITICAL - MAXIMUM STEPS REACHED
