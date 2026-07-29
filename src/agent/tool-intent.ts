@@ -106,6 +106,16 @@ export interface ParsedSearchCommand {
   pattern: string;
   path?: string;
   include?: string;
+  /**
+   * True only when a structured-grep rewrite would execute EXACTLY what the
+   * model asked for. False whenever anything was dropped or reinterpreted:
+   * unknown flags (-i, -A, -w, ...), --iglob (case-insensitivity lost),
+   * --include under rg (not an rg flag - a faithful run would error), more
+   * than one path, or the `grep` binary itself (BRE dialect vs the tool's
+   * rg engine). Observation (intent classification) tolerates lossy parses;
+   * execution rewriting must not (tool-arbiter).
+   */
+  lossless: boolean;
 }
 
 export interface ParsedReadCommand {
@@ -134,6 +144,11 @@ export function parseSearchBashCommand(command: string): ParsedSearchCommand | u
     return undefined;
   }
 
+  // The structured grep tool shells out to rg, so only rg-origin commands
+  // can be dialect-identical; GNU grep patterns are BRE and must not be
+  // silently re-executed under rg's Rust regex engine.
+  let lossless = binary !== "grep";
+
   const positional: string[] = [];
   let include: string | undefined;
   for (let index = 1; index < tokens.length; index++) {
@@ -141,14 +156,22 @@ export function parseSearchBashCommand(command: string): ParsedSearchCommand | u
     if (!token) continue;
     if (token === "--glob" || token === "--iglob" || token === "--include") {
       include = tokens[index + 1];
+      // --iglob loses case-insensitivity in translation; --include is not an
+      // rg flag at all (a faithful run would error, and hiding that from the
+      // model masks its mistake). Only --glob maps 1:1 onto the tool.
+      if (token !== "--glob") lossless = false;
       index += 1;
       continue;
     }
     if (token.startsWith("--glob=") || token.startsWith("--iglob=") || token.startsWith("--include=")) {
       include = token.slice(token.indexOf("=") + 1);
+      if (!token.startsWith("--glob=")) lossless = false;
       continue;
     }
     if (token.startsWith("-")) {
+      // Any other flag (-i, -A 3, -w, -l, ...) has no representation in the
+      // structured tool; dropping it would change the search's meaning.
+      lossless = false;
       continue;
     }
     positional.push(token);
@@ -158,11 +181,15 @@ export function parseSearchBashCommand(command: string): ParsedSearchCommand | u
     return undefined;
   }
 
+  // A third positional (multiple search roots) cannot be expressed either.
+  if (positional.length > 2) lossless = false;
+
   const [pattern, maybePath] = positional;
   return {
     pattern,
     path: maybePath,
     include,
+    lossless,
   };
 }
 
