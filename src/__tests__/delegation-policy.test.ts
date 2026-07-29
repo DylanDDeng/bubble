@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Agent } from "../agent.js";
 import { buildSystemPrompt } from "../system-prompt.js";
 import { buildDelegationPolicyPrompt } from "../prompt/delegation.js";
-import { orchestrationRequestReminder, reminderForTaskType } from "../prompt/task-reminders.js";
+import { orchestrationRequestReminder } from "../prompt/task-reminders.js";
 import { discoverAgentProfiles, findAgentProfile } from "../agent/profiles.js";
 import { createRunWorkflowTool, createSpawnAgentTool } from "../tools/agent-lifecycle.js";
 import type { Message, Provider, StreamChunk } from "../types.js";
@@ -109,29 +109,6 @@ describe("delegation wording in tool descriptions", () => {
 
     expect(tool.description).toContain("coordinates many subagents");
     expect(tool.description).toContain("must be the ONLY tool call");
-  });
-});
-
-describe("task-start delegation nudge", () => {
-  it("adds the nudge to repo orientation only when the agent can delegate", () => {
-    const withDelegation = reminderForTaskType("repo_orientation", { canDelegate: true });
-    expect(withDelegation).toContain("delegate to a background subagent (spawn_agent)");
-    expect(withDelegation).toContain("same read-only question over several independent items");
-
-    const withoutDelegation = reminderForTaskType("repo_orientation", { canDelegate: false });
-    expect(withoutDelegation).toBeDefined();
-    expect(withoutDelegation).not.toContain("spawn_agent");
-
-    const defaultCall = reminderForTaskType("repo_orientation");
-    expect(defaultCall).not.toContain("spawn_agent");
-  });
-
-  it("does not add the nudge to implementation or debugging turns", () => {
-    for (const taskType of ["implementation", "debugging"] as const) {
-      const reminder = reminderForTaskType(taskType, { canDelegate: true });
-      expect(reminder).toBeDefined();
-      expect(reminder).not.toContain("spawn_agent");
-    }
   });
 });
 

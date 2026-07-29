@@ -81,6 +81,8 @@ export function buildDeferredToolsReminder(names: string[]): string {
   return wrapInSystemReminder(lines.join("\n"));
 }
 
+// The two builders below are consumed only by execution-governor.ts and are
+// deleted together with it in the follow-up orphan-removal commit.
 export function buildInvestigationReminder(): string {
   return wrapInSystemReminder(`
 Security/configuration investigation workflow is active.
@@ -107,62 +109,6 @@ If current evidence is sufficient, answer with the findings.
 `);
 }
 
-export function buildSearchFreezeReminder(reason: string): string {
-  return wrapInSystemReminder(`
-Search tools are now constrained for this task.
-
-Reason: ${reason}
-
-Do not continue blind keyword searching. Use the evidence already gathered to reason about the answer.
-You may still read specific files if you already know where the relevant configuration or persistence logic lives.
-`);
-}
-
-export function buildExplorationFreezeReminder(reason: string): string {
-  return wrapInSystemReminder(`
-Implementation phase has advanced from exploration to modification.
-
-Reason: ${reason}
-
-You have enough context to act. Do not continue reading, searching, or delegating exploration.
-Choose one of:
-1. Use edit/write to make the requested change.
-2. If no safe change can be made from the gathered context, explain the concrete blocker.
-3. If files were already changed, verify the change and run the affected module's existing tests, or finish with the result.
-`);
-}
-
-export interface CompletionSelfCheckOptions {
-  /** Pre-existing test files this run modified, with deleted-line counts. */
-  modifiedExistingTests?: Array<{ path: string; deletedLines: number }>;
-}
-
-export function buildCompletionSelfCheckReminder(options: CompletionSelfCheckOptions = {}): string {
-  const sections: string[] = [];
-
-  const modifiedTests = options.modifiedExistingTests ?? [];
-  if (modifiedTests.length > 0) {
-    // Disclosure, not accusation: legitimate test updates (requirement
-    // changes, fixing a broken test, refactors) are normal engineering — the
-    // rule is that they must be declared, never silent. Confrontational
-    // wording risks a model rolling back a user-requested test update.
-    const listed = modifiedTests
-      .slice(0, 8)
-      .map((t) => `- ${t.path}${t.deletedLines > 0 ? ` (${t.deletedLines} line${t.deletedLines === 1 ? "" : "s"} removed)` : ""}`)
-      .join("\n");
-    sections.push(`This run modified pre-existing test files:
-${listed}${modifiedTests.length > 8 ? `\n- …and ${modifiedTests.length - 8} more` : ""}
-
-If a change you made caused an existing test to fail and you edited the test so the suite passes, restore the original behavior instead — weakening a test to make it pass is never acceptable. If the test changes are intentional (the request requires new expected behavior, or the test itself was wrong), keep them and state each modified test and the reason in your final summary.`);
-  }
-
-  sections.push(`You appear to be finishing. Before giving your final answer, re-read the user's original request in this conversation and check whether any explicit requirement in it remains unfulfilled — including requirements about how the work should be delivered or reported, not only whether the implementation works.
-
-If something is missing, complete it now. If everything is done, give your final answer directly — do not repeat this check or re-verify work you have already verified.`);
-
-  return wrapInSystemReminder(`\n${sections.join("\n\n")}\n`);
-}
-
 export function buildToolFreezeReminder(reason: string): string {
   return wrapInSystemReminder(`
 CRITICAL - MAXIMUM STEPS REACHED
@@ -186,34 +132,6 @@ Respond with text ONLY.
 `);
 }
 
-export function buildWorkflowPhaseReminder(input: {
-  phase: "investigate" | "correlate" | "conclude";
-  covered: string[];
-  pending: string[];
-}): string {
-  const phaseInstructions: Record<typeof input.phase, string> = {
-    investigate: "Collect direct evidence. Prefer targeted reads and structured searches over blind keyword churn.",
-    correlate: "Stop broad searching. Correlate the evidence you already have and fill only the most specific remaining gaps.",
-    conclude: "You have enough evidence to answer. Do not continue exploring unless you discover a concrete contradiction in the current evidence.",
-  };
-
-  const covered = input.covered.length > 0 ? input.covered.map((item) => `- ${item}`).join("\n") : "- none yet";
-  const pending = input.pending.length > 0 ? input.pending.map((item) => `- ${item}`).join("\n") : "- none";
-
-  return wrapInSystemReminder(`
-Workflow phase: ${input.phase}
-
-${phaseInstructions[input.phase]}
-
-Covered evidence:
-${covered}
-
-Remaining evidence to check:
-${pending}
-`);
-}
-
-
 // Removed: buildVerificationReminder / buildVerificationFailureReminder.
 // The verification reminder ladder pressured the model to run a "verification"
 // after every file change. For models with hex-tokenization blind spots (e.g.
@@ -221,56 +139,28 @@ ${pending}
 // validation scripts that found the bug but could never fix it. CC trusts the
 // model to decide when verification is meaningful; we follow that.
 
-/**
- * Fired when a file mutation failure suggests the model may be relying on stale
- * local memory instead of the current file bytes. Models — especially
- * thinking-heavy ones — can otherwise spiral on `No changes made: identical
- * content` or `oldText not found` because their internal reasoning convinces
- * them they are typing the change correctly.
- */
-export function buildEditRetryEscalationReminder(reason: string): string {
-  return wrapInSystemReminder(`
-A file mutation just failed in a way that usually means your local view of the file is stale or the edit anchor is wrong.
-
-${reason}
-
-Stop retrying from memory. Pick one of:
-- Re-read the target file and compare the actual bytes to your intended oldText / newText. Trailing whitespace, unicode lookalikes, or off-by-one boundaries are common causes.
-- If you intended to add a single character (e.g. fixing a 5-digit hex color to 6 digits), confirm that your newText string actually contains the added character before sending again.
-- Use the write tool with the full new content instead of edit — useful when the change spans many lines or the diff anchor is ambiguous.
-- If you cannot determine the cause, ask the user for clarification.
-`);
-}
-
-/**
- * Fired the FIRST time the model re-reads a file it already read in this turn.
- * Soft — does not freeze the tool. The model may still re-read when context was
- * pruned, the requested range changed, or a later mutation needs verification.
- */
-export function buildRedundantReadReminder(path: string): string {
-  return wrapInSystemReminder(`
-You already read ${path} earlier in this turn. If that content is still available and nothing changed, rely on it rather than re-reading.
-It is okay to re-read when you need to recover pruned context, inspect a different range, or verify a later edit/write/bash change.
-`);
-}
-
-/**
- * Injected once at task start when the user's input looks like a small,
- * focused task (e.g. "write an HTML page about X"). Counterweight to the
- * default protocol which biases toward thorough exploration.
- */
-export function buildSmallTaskHint(): string {
-  return wrapInSystemReminder(`
-This appears to be a small, focused task (short request, single deliverable, no integration ambiguity).
-
-Prefer direct execution over exploration:
-- If the target file path is given or obvious, use write/edit directly.
-- Do not glob, read, or grep adjacent files unless the request explicitly references them.
-- Do not pre-plan with todo_write for tasks that can be done in one or two tool calls.
-- Skip the "investigate the codebase" step that applies to larger changes.
-`);
-}
-
 // Removed: buildFinalizeOpportunityReminder. Was paired with the verification
 // nag ladder. Without the ladder, "you can finalize now" advice is redundant —
 // the model finalises whenever its own judgement says the task is done.
+
+/**
+ * Modified-existing-tests disclosure (docs/harness-thinning.md): a fact from
+ * git ground truth — bash writes and subagent worktree merges do not appear
+ * in the model's own tool memory. Disclosure, not accusation: legitimate
+ * test updates are normal engineering; the rule is that they must be
+ * declared, never silent.
+ */
+export function buildModifiedTestsDisclosure(
+  modifiedExistingTests: Array<{ path: string; deletedLines: number }>,
+): string {
+  const listed = modifiedExistingTests
+    .slice(0, 8)
+    .map((t) => `- ${t.path}${t.deletedLines > 0 ? ` (${t.deletedLines} line${t.deletedLines === 1 ? "" : "s"} removed)` : ""}`)
+    .join("\n");
+  return wrapInSystemReminder(`
+Fact from git: this run modified pre-existing test files:
+${listed}${modifiedExistingTests.length > 8 ? `\n- …and ${modifiedExistingTests.length - 8} more` : ""}
+
+If a change you made caused an existing test to fail and you edited the test so the suite passes, restore the original behavior instead — weakening a test to make it pass is never acceptable. If the test changes are intentional (the request requires new expected behavior, or the test itself was wrong), keep them and state each modified test and the reason in your final summary. Then finish normally.
+`);
+}

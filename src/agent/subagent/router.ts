@@ -19,9 +19,6 @@ import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeInherited
 import type { AgentProfile } from "../profiles.js";
 import type { ThinkingLevel } from "../../types.js";
 
-/** Dispatches with an undecided model before the fan-out reminder fires (§6). */
-const ROUTING_REMINDER_THRESHOLD = 3;
-
 export interface ParentRoute {
   providerId: string;
   /** The API-facing model id — already stripped of any "provider:" prefix. */
@@ -44,10 +41,6 @@ export interface SubagentRouterDeps {
 
 export class SubagentRouter {
   private readonly deps: SubagentRouterDeps;
-  private reminderFired = false;
-  private defaultedStreak = 0;
-  private pendingReminder?: string;
-
   constructor(deps: SubagentRouterDeps) {
     this.deps = deps;
   }
@@ -225,37 +218,6 @@ export class SubagentRouter {
     } catch {
       return undefined;
     }
-  }
-
-  /**
-   * Decision-point detector (design §6): counts dispatches whose model was
-   * decided by NO routing layer (modelSource "inherit") under a strong-tier
-   * parent. Fires once per session at the Nth qualifying dispatch; the
-   * reminder rides the same channel as the lifecycle reminder.
-   */
-  noteDispatch(route: ResolvedSubagentRoute): void {
-    if (this.reminderFired) return;
-    if (route.modelSource !== "inherit") return;
-    const snapshot = this.currentSnapshot();
-    if (snapshot?.parent.tier !== "strong") return;
-    this.defaultedStreak++;
-    if (this.defaultedStreak >= ROUTING_REMINDER_THRESHOLD) {
-      this.reminderFired = true;
-      this.pendingReminder = [
-        `Routing note: ${this.defaultedStreak} children in this fan-out defaulted to the parent's`,
-        "strong-tier model (no model/category given). If any of these tasks are mechanical",
-        "(scan / summarize / search / extract), route them with category \"quick\"/\"explore\" or a",
-        "fast-tier model next time. If they genuinely need this model, ignore this note.",
-      ].join(" ");
-    }
-  }
-
-  /** Consumed by the turn hooks; also closes the counting window (§6). */
-  consumePendingReminder(): string | undefined {
-    const reminder = this.pendingReminder;
-    this.pendingReminder = undefined;
-    if (!this.reminderFired) this.defaultedStreak = 0;
-    return reminder;
   }
 
   /** Current routing menu (design §4); undefined when no accessor is wired. */

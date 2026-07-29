@@ -1,87 +1,6 @@
-import type { TaskType } from "../agent/task-classifier.js";
 import { normalizeModelToken, type RoutableModelEntry } from "../agent/routing-catalog.js";
 import { wrapInSystemReminder } from "./reminders.js";
 
-export interface TaskReminderOptions {
-  /** Whether this agent has the delegation tools (parent agents only). */
-  canDelegate?: boolean;
-}
-
-/**
- * Delegation nudge for exploration-shaped tasks: injected at the decision
- * point (start of turn), where it carries far more weight for weakly
- * delegating models than the session-start system prompt. Task-type gating
- * keeps it away from ordinary implementation/debugging turns, so it cannot
- * amplify over-delegation.
- */
-const DELEGATION_NUDGE =
-  "- If answering needs scanning many files and only the conclusion matters, delegate to a background subagent (spawn_agent); when it is the same read-only question over several independent items, fan out with a run_workflow script.";
-
-export function reminderForTaskType(taskType: TaskType, options: TaskReminderOptions = {}): string | undefined {
-  switch (taskType) {
-    case "debugging":
-      return wrapInSystemReminder(`
-Debugging workflow:
-- Reproduce or identify the failing boundary before editing.
-- Trace input, transformation, and output paths.
-- Prefer fixing the mechanism over raising thresholds or adding superficial fallbacks.
-- Verify the specific failure path after the change.
-`);
-    case "implementation":
-      return wrapInSystemReminder(`
-Implementation workflow:
-- Do not stop at a proposal when the user asked for a change.
-- Inspect the relevant files first, then make the smallest coherent edit.
-- Keep unrelated files and behavior out of scope.
-- Verify the change, then run the existing tests of the affected module — not only the cases you added — or explain why they cannot be run.
-`);
-    case "code_review":
-      return wrapInSystemReminder(`
-Code review workflow:
-- Lead with concrete findings, ordered by severity.
-- Reference file paths and line numbers when possible.
-- Prioritize bugs, regressions, missing tests, security, and user-visible risk.
-- Keep summaries secondary to findings.
-`);
-    case "code_explanation":
-      return wrapInSystemReminder(`
-Code explanation workflow:
-- Answer the direct question first.
-- Ground claims in concrete files, functions, and call paths.
-- Distinguish current source evidence from inference.
-- Avoid proposing changes unless the user asks for them.
-`);
-    case "repo_orientation":
-      return wrapInSystemReminder(`
-Repository orientation workflow:
-- Start with the repo purpose and main execution paths.
-- Inspect README/package metadata plus core runtime files before summarizing.
-- Keep the first pass read-only unless the user asks for changes or runtime verification.
-${options.canDelegate ? `${DELEGATION_NUDGE}\n` : ""}`);
-    case "product_discussion":
-      return wrapInSystemReminder(`
-Product discussion workflow:
-- Clarify the product goal, user workflow, and tradeoffs before suggesting implementation.
-- Give direct product judgment when the user asks for direction.
-- Avoid drifting into code changes unless the user explicitly asks to execute.
-`);
-    case "security_investigation":
-    case "code_search":
-    case "general":
-    default:
-      return undefined;
-  }
-}
-
-
-/**
- * Deterministic detector for an explicit user request for a coordinated
- * multi-agent run. Three rounds of prompt wording lost to the model's
- * "agent team = parallel spawns" prior in live tests (opus-4.8, 2026-07-06);
- * per the task-reminder principle above, a reminder injected at the decision
- * turn is the lever that actually works — the harness remembers so the model
- * does not have to.
- */
 /**
  * User-named model resolution (model-routing design v3.6): when the user's
  * message names a model that exists in the routable catalog, hand the main
@@ -129,39 +48,6 @@ export function userNamedModelReminder(
     ...lines,
     "Use these exact ids in spawn_agent / run_workflow `model` params; do not retype model ids from memory.",
   ].join("\n");
-}
-
-/**
- * Large-change checkpoint (large-task-delegation design §3): injected once
- * per session at the first mutation of a broad turn. Carries the routing
- * decision criteria (independent vs entangled) and the real worktree
- * mechanics (children fork from the last commit; disjoint file sets) —
- * never a command. The "smallest coherent edit" clause is lifted verbatim
- * from the implementation-workflow reminder so the two compose.
- */
-export interface LargeTaskReminderInput {
-  exploredFiles: number;
-  pendingTodos: number;
-  /** Mutations already applied this turn (the current batch lands regardless). */
-  appliedEdits: number;
-  /** orchestrationRequestReminder fired this turn: only offer run_workflow. */
-  orchestrationRequested: boolean;
-}
-
-export function largeImplementationTaskReminder(input: LargeTaskReminderInput): string {
-  const plan = input.pendingTodos > 0 ? ` (plan: ${input.pendingTodos} open todo items)` : "";
-  const applied = input.appliedEdits > 0
-    ? ` ${input.appliedEdits} edit${input.appliedEdits === 1 ? "" : "s"} from your current batch will land regardless.`
-    : "";
-  const mechanism = input.orchestrationRequested
-    ? "one run_workflow script (the user asked for a coordinated workflow — keep everything in it)"
-    : "write_worktree subagents (spawn_agent with the implementer profile) or one run_workflow script";
-  return wrapInSystemReminder(`
-Large-change checkpoint: you have read ${input.exploredFiles} files this turn${plan} and are starting to edit.${applied}
-- If the REMAINING edits form INDEPENDENT groups (per-module, per-file, same shape repeated), split them across ${mechanism}. Assign each child a DISJOINT file set; keep shared files (types, registries, exports) for yourself. Children fork from the last COMMIT — commit your applied edits first, or fold them into the child briefings. Each child still makes the smallest coherent edit for its group.
-- If the edits are ENTANGLED (shared state, one file feeding the next, order matters), delegation only adds merge risk — proceed yourself.
-- Work already small enough to finish directly: just finish it.
-`);
 }
 
 const ORCHESTRATION_REQUEST =

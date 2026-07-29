@@ -32,7 +32,6 @@ import {
 } from "./hooks/index.js";
 import { createDefaultHooks } from "./orchestrator/default-hooks.js";
 import { buildTaskLifecycleReminder } from "./agent/task-lifecycle-reminder.js";
-import { classifyTask } from "./agent/task-classifier.js";
 import { mergeAgentCategories, parseThinkingLevel, type AgentCategoriesConfig, type ResolvedSubagentRoute } from "./agent/categories.js";
 import { DEFAULT_AGENT_ROUTING, sanitizeAgentRouting, type AgentRoutingConfig, type RoutableModelEntry, type RoutableModelIndex, type RoutingSnapshotAccessor } from "./agent/routing-catalog.js";
 import { SubagentRouter } from "./agent/subagent/router.js";
@@ -227,7 +226,6 @@ export class Agent {
    * If the model read the nudge once and chose not to delegate, repeating
    * it is noise.
    */
-  largeTaskNudgeConsumed = false;
   private _providerId: string;
   private _model: string;
   private tools: Map<string, ToolRegistryEntry> = new Map();
@@ -720,19 +718,9 @@ export class Agent {
         events.push(...hook.events);
         this.injectHookModelContext(hook.result);
         this.appendMessage({ role: "user", content: input.content });
-        // Large-task detector (large-task-delegation design §1): a steer
-        // redirects the task — stale breadth evidence must not fire a nudge
-        // about the pre-steer task, and the classifier should reason about
-        // the redirected one.
-        hookState.exploredFiles?.clear();
-        hookState.largeTaskCheckpointDone = false;
-        // A steer is a new ask: the completion gate must be able to fire
-        // again for the follow-up's closing pass, or appended requirements
-        // never get a self-check (codeChanged stays — prior edits are real).
-        hookState.completionGateFired = false;
-        if (typeof input.content === "string" && input.content.trim()) {
-          hookState.taskType = classifyTask(input.content);
-        }
+        // A steer is a new ask: the tests-touched disclosure must be able to
+        // fire again for the follow-up's closing pass.
+        hookState.testsTouchedDisclosed = false;
         events.push({
           type: "input_applied",
           id: input.id,
@@ -774,7 +762,7 @@ export class Agent {
       events.push({ type: "input_pending_changed", pending: pendingInputCount() });
       return events;
     };
-    const flushGovernorReminders = () => {
+    const flushQueuedReminders = () => {
       for (const reminder of reminderQueue.splice(0, reminderQueue.length)) {
         this.injectSystemReminder(reminder);
       }
@@ -812,9 +800,9 @@ export class Agent {
       input: userInput,
       state: hookState,
       queueReminder,
-      flushReminders: flushGovernorReminders,
+      flushReminders: flushQueuedReminders,
     });
-    flushGovernorReminders();
+    flushQueuedReminders();
 
     let consecutiveOverflowRecoveries = 0;
     let consecutiveEmptyAssistantRecoveries = 0;
@@ -833,7 +821,7 @@ export class Agent {
     try {
       while (true) {
       throwIfAborted(abortSignal);
-      flushGovernorReminders();
+      flushQueuedReminders();
       // Background child completions surface before the next inference turn
       // without requiring a wait_agent call (design §5).
       for (const notice of this.subagents.drainIngestionNotices()) {
@@ -886,7 +874,7 @@ export class Agent {
         input: userInput,
         state: hookState,
         queueReminder,
-        flushReminders: flushGovernorReminders,
+        flushReminders: flushQueuedReminders,
         toolEntries,
         disableTools: (reason: string) => {
           (hookState as any).forceTextOnlyReason = reason;
@@ -910,7 +898,7 @@ export class Agent {
       }, abortSignal);
       for (const event of preModelHook.events) yield emit(event);
       this.injectHookModelContext(preModelHook.result);
-      flushGovernorReminders();
+      flushQueuedReminders();
       const textOnly = !!(hookState as any).forceTextOnlyReason;
       const toolDefinitions: ToolDefinition[] = toolEntries
         .map((t) => ({
@@ -927,7 +915,6 @@ export class Agent {
       await this.maybeCompactWithLLM();
 
       const bufferedStreamingToolCallIds = new Set<string>();
-      const discoveryBarrier = hookState.discoveryBarrier;
       try {
         markStableCurrentToolResultsForCache(this.messages);
         const projectedMessages = projectMessages(this.messages, {
@@ -1013,12 +1000,6 @@ export class Agent {
                   isEnd: chunk.isEnd,
                 }, traceContext);
                 break;
-              }
-              if (
-                discoveryBarrier?.isEnabled()
-                && (bufferedStreamingToolCallIds.has(chunk.id) || discoveryBarrier.shouldBufferStreamingToolCall(chunk.name))
-              ) {
-                bufferedStreamingToolCallIds.add(chunk.id);
               }
               if (chunk.isStart) {
                 streamingToolCalls.set(chunk.id, { id: chunk.id, name: chunk.name, args: "" });
@@ -1196,7 +1177,7 @@ export class Agent {
 
       // Execute tools if any
       if (assistantMsg.toolCalls && assistantMsg.toolCalls.length > 0) {
-        const parsedCalls: Array<ParsedToolCall & { arbiterNote?: string }> = [];
+        const parsedCalls: ParsedToolCall[] = [];
         for (let index = 0; index < assistantMsg.toolCalls.length; index++) {
           const tc = assistantMsg.toolCalls[index];
           try {
@@ -1209,17 +1190,6 @@ export class Agent {
             parsedCalls.push({ ...tc, parsedArgs: {}, argsCorrupt: true });
           }
         }
-        const orderedCalls = hookState.discoveryBarrier?.orderToolCalls(parsedCalls) ?? parsedCalls;
-        if (orderedCalls !== parsedCalls) {
-          parsedCalls.splice(0, parsedCalls.length, ...orderedCalls);
-          assistantMsg.toolCalls = parsedCalls.map((tc) => ({
-            id: tc.id,
-            name: tc.name,
-            arguments: tc.arguments,
-            ...(tc.argsCorrupt ? { argsCorrupt: true } : {}),
-          }));
-        }
-
         const executedResults: ToolResult[] = [];
         const appendCancelledToolMessages = (startIndex: number) => {
           for (let pendingIndex = startIndex; pendingIndex < parsedCalls.length; pendingIndex++) {
@@ -1261,7 +1231,7 @@ export class Agent {
             input: userInput,
             state: hookState,
             queueReminder,
-            flushReminders: flushGovernorReminders,
+            flushReminders: flushQueuedReminders,
             toolCall: tc,
             blockedResult,
             replaceToolCall: (toolCall) => {
@@ -1306,7 +1276,7 @@ export class Agent {
             name: tc.name,
             arguments: tc.arguments,
           };
-          flushGovernorReminders();
+          flushQueuedReminders();
           if (bufferedStreamingToolCallIds.has(tc.id) && !isHiddenToolResult(blockedResult)) {
             yield emit({ type: "tool_call_start", id: tc.id, name: tc.name });
             if (tc.arguments) {
@@ -1328,7 +1298,7 @@ export class Agent {
               input: userInput,
               state: hookState,
               queueReminder,
-              flushReminders: flushGovernorReminders,
+              flushReminders: flushQueuedReminders,
               toolCall: tc,
               result,
               replaceResult: (next) => {
@@ -1369,7 +1339,7 @@ export class Agent {
               isError: result.isError,
             });
             executedResults.push(result);
-            flushGovernorReminders();
+            flushQueuedReminders();
             continue;
           }
           const toolStartedAt = Date.now();
@@ -1440,7 +1410,7 @@ export class Agent {
             input: userInput,
             state: hookState,
             queueReminder,
-            flushReminders: flushGovernorReminders,
+            flushReminders: flushQueuedReminders,
             toolCall: tc,
             result,
             replaceResult: (next) => {
@@ -1499,7 +1469,7 @@ export class Agent {
           markToolResultCacheStable(tc.name, toolMessage);
           this.appendMessage(toolMessage);
           this.compactResidentHistory();
-          flushGovernorReminders();
+          flushQueuedReminders();
           this.onToolResult?.(tc.name, result);
           executedResults.push(result);
           yield emit({ type: "tool_end", id: tc.id, name: tc.name, result });
@@ -1522,14 +1492,14 @@ export class Agent {
           input: userInput,
           state: hookState,
           queueReminder,
-          flushReminders: flushGovernorReminders,
+          flushReminders: flushQueuedReminders,
           toolCalls: parsedCalls,
           toolResults: executedResults,
           requestTextOnlyTurn: (reason: string) => {
             (hookState as any).forceTextOnlyReason = reason;
           },
         });
-        flushGovernorReminders();
+        flushQueuedReminders();
 
         yield emit({ type: "turn_end", usage: turnUsage, willContinue: true });
 
@@ -1546,9 +1516,9 @@ export class Agent {
         input: userInput,
         state: hookState,
         queueReminder,
-        flushReminders: flushGovernorReminders,
+        flushReminders: flushQueuedReminders,
       });
-      flushGovernorReminders();
+      flushQueuedReminders();
       const stopHook = await this.runExternalHook({
         eventName: "Stop",
         cwd,
@@ -1927,11 +1897,6 @@ export class Agent {
   /** Routable catalog across runnable providers (design v3.6); undefined when unwired. */
   listRoutableModels(): RoutableModelEntry[] | undefined {
     return this.router.listRoutableModels();
-  }
-
-  /** Consumed by the turn hooks; also closes the counting window (§6). */
-  consumePendingRoutingReminder(): string | undefined {
-    return this.router.consumePendingReminder();
   }
 
 

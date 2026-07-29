@@ -170,7 +170,6 @@ export interface ToolResultMetadata {
   searchSignature?: string;
   searchFamily?: string;
   reason?: string;
-  arbiterNote?: string;
   diff?: string;
   addedLines?: number;
   removedLines?: number;

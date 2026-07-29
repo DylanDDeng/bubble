@@ -272,7 +272,6 @@ export class SubagentRuntime {
     // Early validation (design §7): throws reach the model as a tool error it
     // can correct this turn, instead of a late provider-factory failure.
     const routeNote = this.router.validateForDispatch(route);
-    this.router.noteDispatch(route);
     const record = this.createSubagentThreadRecord({
       profile: options.profile,
       task: typeof input === "string" ? input : "(multimodal task)",
@@ -465,10 +464,8 @@ export class SubagentRuntime {
           model: spec.opts.model,
           effort: parseThinkingLevel(spec.opts.effort),
         });
-        // Dispatch-time validation + defaulted-fan-out accounting (§6–7):
-        // resolved routes, never script source text.
+        // Dispatch-time validation (§7): resolved routes, never script source text.
         routeNote = this.router.validateForDispatch(route);
-        this.router.noteDispatch(route);
       } catch (error: any) {
         return { ok: false, error: error?.message || String(error) };
       }

@@ -908,67 +908,6 @@ describe("Agent", () => {
     expect(toolEnd.result.content).toBe("blocked by custom hook");
   });
 
-  it("hides speculative repo-orientation reads that were not discovered", async () => {
-    const provider = createMockProvider([
-      [
-        { type: "tool_call", id: "read_hugo", name: "read", arguments: "{\"path\":\"hugo.yaml\"}", isStart: true, isEnd: true },
-        { type: "tool_call", id: "glob_root", name: "glob", arguments: "{\"pattern\":\"*\"}", isStart: true, isEnd: true },
-        { type: "tool_call", id: "read_readme", name: "read", arguments: "{\"path\":\"README.md\"}", isStart: true, isEnd: true },
-        { type: "done" },
-      ],
-      [{ type: "text", content: "Astro project." }, { type: "done" }],
-    ]);
-    const readExecutions: string[] = [];
-    const globTool: ToolRegistryEntry = {
-      name: "glob",
-      readOnly: true,
-      description: "",
-      parameters: { type: "object", properties: {} },
-      async execute() {
-        return {
-          content: "README.md\npackage.json",
-          status: "success",
-          metadata: {
-            kind: "search",
-            path: "/repo",
-            pattern: "*",
-            matches: 2,
-            paths: ["/repo/README.md", "/repo/package.json"],
-          },
-        };
-      },
-    };
-    const readTool: ToolRegistryEntry = {
-      name: "read",
-      readOnly: true,
-      description: "",
-      parameters: { type: "object", properties: {} },
-      async execute(args) {
-        readExecutions.push(String(args.path));
-        return {
-          content: `${args.path} contents`,
-          status: "success",
-          metadata: { kind: "read", path: `/repo/${args.path}` },
-        };
-      },
-    };
-
-    const agent = new Agent({ provider, model: "gpt-4o", tools: [readTool, globTool] });
-    const events = await collectEvents(agent, "看下这个项目在干嘛呢", "/repo");
-
-    expect(readExecutions).toEqual(["README.md"]);
-    expect(JSON.stringify(events)).not.toContain("hugo.yaml");
-    expect(events
-      .filter((event): event is Extract<AgentEvent, { type: "tool_start" }> => event.type === "tool_start")
-      .map((event) => event.name)).toEqual(["glob", "read"]);
-    const hiddenToolMessage = agent.messages.find((message) => (
-      message.role === "tool" && message.toolCallId === "read_hugo"
-    )) as Extract<Message, { role: "tool" }> | undefined;
-    expect(hiddenToolMessage?.metadata?.reason).toBe("speculative_read_blocked");
-    expect(hiddenToolMessage?.metadata?.hiddenFromTranscript).toBe(true);
-    expect(hiddenToolMessage?.content).toContain("Do not infer");
-  });
-
   it("keeps exploration tools available after repeated implementation reads", async () => {
     const toolNamesByCall: string[][] = [];
     const captured: Message[][] = [];
@@ -1021,7 +960,6 @@ describe("Agent", () => {
     const repeatedRead = events.find((event) => event.type === "tool_end" && event.id === "read_2") as any;
     expect(repeatedRead.result.status).toBe("success");
     expect(toolNamesByCall[2]).toEqual(["read", "edit", "write", "bash", "lsp"]);
-    expect(hasModelContext(captured[2], "exact file range was already read")).toBe(true);
   });
 
   it("emits live tool_update events from tools", async () => {
@@ -1644,31 +1582,6 @@ describe("Agent", () => {
     // the provider payload (0.0.43+), no longer raw system messages.
     expect(captured[0].some((message) =>
       typeof message.content === "string" && message.content.includes("Previous conversation summary:"))).toBe(true);
-  });
-
-  it("injects the security investigation workflow reminder for secret-storage questions", async () => {
-    const captured: Message[][] = [];
-    const provider: Provider = {
-      async *streamChat(messages) {
-        captured.push(messages);
-        yield { type: "text", content: "done" };
-        yield { type: "done" };
-      },
-      async complete() {
-        return "done";
-      },
-    };
-
-    const agent = new Agent({
-      provider,
-      model: "gpt-4o",
-      tools: [],
-      systemPrompt: "system",
-    });
-
-    await collectEvents(agent, "Find where API keys are stored and whether they can leak", "/tmp");
-    expect(hasModelContext(captured[0], "Security/configuration investigation workflow is active")).toBe(true);
-    expect(hasModelContext(captured[0], "Workflow phase: investigate")).toBe(true);
   });
 
   it("shrinks resident history after a long tool-heavy run", async () => {
