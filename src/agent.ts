@@ -52,7 +52,7 @@ import { AgentAbortError, EMPTY_ASSISTANT_FALLBACK, SubagentAbortError } from ".
 import { createSubagentWorktree, finalizeSubagentWorktree } from "./agent/worktree.js";
 import { createWorktreeChildTools, isolateReadonlyChildFileTools } from "./tools/child-tools.js";
 import { type RateLimitPolicy } from "./network/errors.js";
-import { isHiddenToolResult } from "./agent/discovery-barrier.js";
+import { isHiddenToolResult } from "./agent/tool-visibility.js";
 import {
   createStreamingInternalReminderSanitizer,
   sanitizeAssistantProviderMetadata,

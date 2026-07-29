@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
 import { AgentAbortError, INTERRUPTED_ASSISTANT_CONTENT, type Agent } from "../agent.js";
-import { isHiddenToolMetadata } from "../agent/discovery-barrier.js";
+import { isHiddenToolMetadata } from "../agent/tool-visibility.js";
 import type { CliArgs } from "../cli.js";
 import { SessionManager, type SessionMetadata, type UserTurn } from "../session.js";
 import type { AgentEvent, ContentPart, PermissionMode, Message, PlanDecision, Provider, Todo, ToolResultMetadata } from "../types.js";

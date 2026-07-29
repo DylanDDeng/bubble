@@ -88,14 +88,6 @@ export class DiscoveryBarrier {
   }
 }
 
-export function isHiddenToolResult(result: ToolResult | undefined): result is ToolResult {
-  return result?.metadata?.hiddenFromTranscript === true;
-}
-
-export function isHiddenToolMetadata(metadata: ToolResultMetadata | undefined): boolean {
-  return metadata?.hiddenFromTranscript === true;
-}
-
 function isDiscoveryToolCall(toolCall: ParsedToolCall): boolean {
   if (toolCall.name === "glob" || toolCall.name === "grep") return true;
   return analyzeToolIntent(toolCall).family === "search";
