@@ -76,9 +76,6 @@ import {
 
 const MAX_CONSECUTIVE_OVERFLOW_RECOVERIES = 3;
 const RESIDENT_HISTORY_KEEP_RECENT_TURNS = 3;
-const RESIDENT_HISTORY_MESSAGE_LIMIT = 160;
-const RESIDENT_HISTORY_CHAR_SOFT_LIMIT = 256 * 1024;
-const RESIDENT_HISTORY_CHAR_HARD_LIMIT = 512 * 1024;
 const RESIDENT_HISTORY_HEAP_HARD_LIMIT = 768 * 1024 * 1024;
 const MAX_EMPTY_ASSISTANT_RECOVERIES = 1;
 const EMPTY_ASSISTANT_RECOVERY_REMINDER =
@@ -1973,15 +1970,17 @@ export class Agent {
       ? getContextBudget(this.providerId, this.apiModel, candidate)
       : undefined;
     const heapUsed = getCurrentHeapUsed();
-    const residentChars = estimateResidentChars(candidate);
     const keepRecentTurns = countUserTurns(candidate) > 10
       ? 2
       : RESIDENT_HISTORY_KEEP_RECENT_TURNS;
-    const shouldAggressivelyPrune = residentChars >= RESIDENT_HISTORY_CHAR_HARD_LIMIT
-      || heapUsed >= RESIDENT_HISTORY_HEAP_HARD_LIMIT;
-    const shouldCompact = !!budget?.shouldCompact
-      || candidate.length >= RESIDENT_HISTORY_MESSAGE_LIMIT
-      || residentChars >= RESIDENT_HISTORY_CHAR_SOFT_LIMIT;
+    // Cliff-edge only (docs/harness-thinning.md, wave 2): history is the
+    // model's working memory and is NEVER trimmed early. The message-count
+    // and char-size triggers that used to fire here mid-run created re-read
+    // loops - the model lost what it had read and read it again. Compaction
+    // now waits for the context-window budget itself; the heap guard stays
+    // as process life-support, not policy.
+    const shouldAggressivelyPrune = heapUsed >= RESIDENT_HISTORY_HEAP_HARD_LIMIT;
+    const shouldCompact = !!budget?.shouldCompact;
 
     if (shouldAggressivelyPrune) {
       candidate = aggressivePruneMessages(candidate);

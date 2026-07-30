@@ -36,7 +36,7 @@ function fakeReadTool(): ToolRegistryEntry {
     async execute() {
       call += 1;
       return {
-        content: `FILE CONTENT ${call}\n` + "x".repeat(4000),
+        content: `FILE CONTENT ${call}\n` + "x".repeat(12000),
         isError: false,
         metadata: { kind: "read", path: `/repo/file${call}.ts` },
       };
@@ -58,6 +58,50 @@ async function drain(iterable: AsyncIterable<AgentEvent>): Promise<void> {
 }
 
 describe("compaction full-loop invariants", () => {
+  it("never touches resident history below the context cliff (anti-amnesia)", async () => {
+    // The re-read death loop: mid-run trimming stole the model's working
+    // memory, so it re-read the same files over and over. Below the cliff
+    // (75% of the context window), every tool result must survive verbatim.
+    const TURNS = 10;
+    let calls = 0;
+    const provider: Provider = {
+      async *streamChat() {
+        calls += 1;
+        const chunks = calls <= TURNS
+          ? readCallTurn(calls)
+          : [{ type: "text", content: "final answer" } as StreamChunk, { type: "done" } as StreamChunk];
+        for (const chunk of chunks) yield chunk;
+      },
+      async complete() {
+        return "should never be asked to summarize below the cliff";
+      },
+    };
+
+    const agent = new Agent({
+      provider,
+      providerId: "openai",
+      model: "openai:gpt-4o",
+      tools: [fakeReadTool()],
+      systemPrompt: "system prompt for the below-cliff test",
+    });
+
+    await drain(agent.run("read ten files", process.cwd()));
+
+    const stats = agent.getCompactionStats();
+    expect(stats.fired).toBe(0);
+    // Every read result is still resident, in full - nothing folded, nothing
+    // summarized, nothing replaced by an "output omitted" stub.
+    const toolContents = agent.messages
+      .filter((m): m is Extract<Message, { role: "tool" }> => m.role === "tool")
+      .map((m) => m.content);
+    expect(toolContents).toHaveLength(TURNS);
+    for (const content of toolContents) {
+      expect(content).toContain("FILE CONTENT");
+      expect(content).not.toContain("omitted");
+    }
+    expect(agent.messages.some((m) => isCompactionSummaryMessage(m as Message))).toBe(false);
+  });
+
   it("keeps at most one summary in the projected payload across an 80-turn single-instruction run", async () => {
     const TURNS = 80;
     let calls = 0;
@@ -78,8 +122,8 @@ describe("compaction full-loop invariants", () => {
     const instruction = `Implement the feature. ${"Spec detail sentence. ".repeat(40)}FINAL_REQUIREMENT_MARKER: archive results when done.`;
     const agent = new Agent({
       provider,
-      providerId: "deepseek",
-      model: "deepseek:deepseek-v4-pro",
+      providerId: "openai",
+      model: "openai:gpt-4o",
       tools: [fakeReadTool()],
       systemPrompt: "system prompt for the loop test",
     });
@@ -105,7 +149,10 @@ describe("compaction full-loop invariants", () => {
     const stats = agent.getCompactionStats();
     const written = stats.resident + stats.subturn + stats.llm;
     // The run must actually exercise compaction for these invariants to mean
-    // anything — 80 turns of tool traffic crosses the resident thresholds.
+    // anything — 80 turns of 12KB tool traffic crosses the 75% cliff of
+    // gpt-4o's 128k window (the only remaining trigger; the early message-
+    // count and char-size thresholds were removed: below the cliff, history
+    // is never touched).
     expect(stats.fired).toBeGreaterThan(0);
     expect(stats.fired).toBeLessThanOrEqual(TURNS / 4);
     expect(written).toBeLessThanOrEqual(stats.fired);
