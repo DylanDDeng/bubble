@@ -1,26 +1,31 @@
 """
 Harbor agent adapter for Bubble.
 
-Implements the BaseInstalledAgent interface so Bubble can run in
-Terminal-Bench (2.x) evaluations via Harbor.
+Rewritten for Harbor's current BaseInstalledAgent API (the original was
+written against a 2026-07 draft whose install-template hook no longer
+exists): install() and run() are overridden directly, mirroring the
+in-tree claude_code adapter.
 
-Bubble specifics this adapter has to bridge:
-- Bubble reads provider credentials from ~/.bubble/models.json, not from
-  environment variables, so the first run command materializes that file
-  from the host-side API-key env var.
-- Bubble's launcher (bin.js) hard-requires Bun; the install template
-  installs Node 22 (for the launcher shebang + npm) and Bun.
-- Headless mode is `bubble -p --dangerously-skip-permissions <prompt>`.
+Bubble specifics this adapter bridges:
+- Provider credentials come from ~/.bubble/models.json inside the
+  container, materialized from the host-side API-key env var.
+- Bubble's launcher (bin.js) hard-requires Bun; install() sets up Node 22
+  (nvm) + Bun.
+- `tarball=<host path>` agent-kwarg installs a local `npm pack` tarball
+  instead of the npm registry — required to benchmark unpublished HEADs.
+- `bubble -p --output-format json` emits a final JSON object with usage,
+  which run() parses into AgentContext token accounting.
 """
 
 import json
 import os
 import shlex
+import uuid
 from pathlib import Path
 
-from harbor.agents.installed.base import BaseInstalledAgent, ExecInput
+from harbor.agents.installed.base import BaseInstalledAgent
+from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
-from harbor.models.trial.paths import EnvironmentPaths
 
 # Harbor passes models as "provider/model" (litellm-style). Map the provider
 # segment onto Bubble's builtin provider ids (src/model-catalog.ts).
@@ -31,8 +36,6 @@ PROVIDER_ID_MAP = {
     "zhipu": "zhipuai",
 }
 
-# Host env var that carries the API key for each Bubble provider id.
-# Fallback is <PROVIDER>_API_KEY with dashes turned into underscores.
 API_KEY_ENV_MAP = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
@@ -44,30 +47,77 @@ API_KEY_ENV_MAP = {
     "openrouter": "OPENROUTER_API_KEY",
 }
 
-# The install script sets up node via nvm and bun under $HOME; run commands
-# execute in a fresh shell, so re-source both before invoking bubble.
+# install() sets up node via nvm and bun under $HOME; run() executes in a
+# fresh shell, so re-source both before invoking bubble.
 SHELL_PRELUDE = (
     'export NVM_DIR="$HOME/.nvm"; '
     '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; '
     'export PATH="$HOME/.bun/bin:$PATH"; '
 )
 
+CONTAINER_TARBALL = "/tmp/bubble-local.tgz"
+
 
 class BubbleAgent(BaseInstalledAgent):
     """Runs Bubble headlessly inside Terminal-Bench task containers."""
+
+    def __init__(self, *args, tarball: str | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._tarball = tarball
 
     @staticmethod
     def name() -> str:
         return "bubble"
 
-    @property
-    def _install_agent_template_path(self) -> Path:
-        return Path(__file__).parent / "install-bubble.sh.j2"
+    # ------------------------------------------------------------------ setup
+
+    async def install(self, environment: BaseEnvironment) -> None:
+        await self.exec_as_root(
+            environment,
+            command=(
+                "apt-get update && apt-get install -y curl unzip ca-certificates"
+            ),
+            timeout_sec=600,
+        )
+        # Node 22 via nvm (launcher shebang + npm) and Bun (bin.js re-exec).
+        await self.exec_as_agent(
+            environment,
+            command=(
+                "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.2/install.sh | bash && "
+                'export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh" && '
+                "nvm install 22 && node -v && "
+                "curl -fsSL https://bun.sh/install | bash && "
+                '"$HOME/.bun/bin/bun" --version'
+            ),
+            timeout_sec=900,
+        )
+
+        if self._tarball:
+            tarball_path = Path(self._tarball).expanduser().resolve()
+            if not tarball_path.exists():
+                raise RuntimeError(f"local bubble tarball not found: {tarball_path}")
+            await environment.upload_file(str(tarball_path), CONTAINER_TARBALL)
+            # upload_file lands root-owned; npm -g under nvm runs as agent.
+            await self.exec_as_root(
+                environment, command=f"chmod 644 {CONTAINER_TARBALL}"
+            )
+            install_spec = CONTAINER_TARBALL
+        else:
+            version = self.version or "latest"
+            install_spec = f"@bubblebrain-ai/bubble@{version}"
+
+        await self.exec_as_agent(
+            environment,
+            command=SHELL_PRELUDE + f"npm install -g {shlex.quote(install_spec)} && bubble -v",
+            timeout_sec=600,
+        )
+
+    # ------------------------------------------------------------------- run
 
     def _resolve_provider_and_model(self) -> tuple[str, str]:
         if not self.model_name:
             raise ValueError(
-                "BubbleAgent needs a model, e.g. -m anthropic/claude-sonnet-4-5"
+                "BubbleAgent needs a model, e.g. -m deepseek/deepseek-v4-pro"
             )
         if "/" in self.model_name:
             provider, model = self.model_name.split("/", 1)
@@ -80,7 +130,6 @@ class BubbleAgent(BaseInstalledAgent):
         env_var = API_KEY_ENV_MAP.get(
             provider, provider.upper().replace("-", "_") + "_API_KEY"
         )
-        # BUBBLE_API_KEY wins as an explicit override for exotic setups.
         api_key = os.environ.get("BUBBLE_API_KEY") or os.environ.get(env_var)
         if not api_key:
             raise ValueError(
@@ -88,37 +137,59 @@ class BubbleAgent(BaseInstalledAgent):
             )
         return api_key
 
-    def create_run_agent_commands(self, instruction: str) -> list[ExecInput]:
+    async def run(
+        self, instruction: str, environment: BaseEnvironment, context: AgentContext
+    ) -> None:
         provider, model = self._resolve_provider_and_model()
         api_key = self._resolve_api_key(provider)
 
-        models_json = json.dumps(
-            {"providers": {provider: {"apiKey": api_key}}}
+        models_json = json.dumps({"providers": {provider: {"apiKey": api_key}}})
+        await self.exec_as_agent(
+            environment,
+            command=(
+                "mkdir -p $HOME/.bubble /logs/agent && "
+                f"printf '%s' {shlex.quote(models_json)} > $HOME/.bubble/models.json"
+            ),
         )
 
-        output_dir = EnvironmentPaths.agent_dir
-        output_file = output_dir / "bubble-output.txt"
+        # Instruction travels via env var (claude_code pattern): no shell
+        # quoting hazards, and it never appears in `ps` output.
+        shell_var = f"harbor_bubble_instruction_{uuid.uuid4().hex}"
+        env_var = shell_var.upper()
 
-        setup_config = (
-            f"mkdir -p $HOME/.bubble {output_dir} && "
-            f"printf '%s' {shlex.quote(models_json)} > $HOME/.bubble/models.json"
+        await self.exec_as_agent(
+            environment,
+            command=(
+                SHELL_PRELUDE
+                + f'{shell_var}="${env_var}"; unset {env_var}; '
+                + "bubble -p --dangerously-skip-permissions --output-format json "
+                + f'-m {shlex.quote(model)} "${shell_var}" '
+                + "2>&1 | tee /logs/agent/bubble-output.txt"
+            ),
+            env={env_var: instruction},
         )
 
-        run_bubble = (
-            SHELL_PRELUDE
-            + f"bubble -p --dangerously-skip-permissions -m {shlex.quote(model)} "
-            + f"{shlex.quote(instruction)} 2>&1 | tee {output_file}"
-        )
+        self._populate_context(context)
 
-        return [
-            ExecInput(command=setup_config),
-            ExecInput(command=run_bubble),
-        ]
-
-    def populate_context_post_run(self, context: AgentContext) -> None:
-        # Bubble's -p mode prints plain text and does not emit a structured
-        # trajectory yet, so token/cost accounting is left unset. The raw
-        # transcript is preserved via `tee` for manual inspection.
+    def _populate_context(self, context: AgentContext) -> None:
+        """Parse the final JSON line of bubble's -p output into token counts."""
         output_file = self.logs_dir / "bubble-output.txt"
         if not output_file.exists():
-            print(f"bubble output file not found: {output_file}")
+            self.logger.warning(f"bubble output file not found: {output_file}")
+            return
+        try:
+            lines = output_file.read_text(errors="replace").strip().splitlines()
+            payload = None
+            for line in reversed(lines):
+                line = line.strip()
+                if line.startswith("{") and line.endswith("}"):
+                    payload = json.loads(line)
+                    break
+            if not payload:
+                return
+            usage = payload.get("usage") or {}
+            context.n_input_tokens = usage.get("input_tokens")
+            context.n_cache_tokens = usage.get("cache_read_input_tokens")
+            context.n_output_tokens = usage.get("output_tokens")
+        except Exception as exc:  # accounting is best-effort, never fail a trial
+            self.logger.warning(f"failed to parse bubble output json: {exc}")
