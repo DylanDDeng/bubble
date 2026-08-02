@@ -1463,3 +1463,61 @@ describe("/session", () => {
     expect(result.result).toContain("Usage: /session");
   });
 });
+
+describe("/mcp status listing", () => {
+  const states = [
+    {
+      name: "zai",
+      scope: "user",
+      config: { type: "stdio" },
+      status: {
+        kind: "connected",
+        tools: Array.from({ length: 14 }, (_, i) => ({ name: `tool_${i}`, description: `does thing ${i}` })),
+        prompts: [],
+        serverInfo: { name: "zai-server", version: "1.0.0" },
+      },
+    },
+    {
+      name: "computer-use",
+      scope: "user",
+      config: { type: "http" },
+      status: { kind: "failed", error: "fetch failed: ECONNREFUSED" },
+    },
+  ];
+  const mcpManager = { getStates: () => states } as any;
+
+  it("collapses connected servers to a one-line summary with tool count", async () => {
+    const ctx = createContext({ mcpManager });
+    const result = await slashRegistry.execute("/mcp", ctx);
+
+    expect(result.handled).toBe(true);
+    expect(result.result).toContain("✔ zai — connected · 14 tools");
+    // Individual tools stay behind /mcp tools <name>.
+    expect(result.result).not.toContain("tool_0");
+  });
+
+  it("renders failures bold and uppercase with the error and a retry hint", async () => {
+    const ctx = createContext({ mcpManager });
+    const result = await slashRegistry.execute("/mcp", ctx);
+
+    expect(result.result).toContain("**✘ computer-use — UNABLE TO CONNECT**");
+    expect(result.result).toContain("fetch failed: ECONNREFUSED");
+    expect(result.result).toContain("retry: /mcp reconnect computer-use");
+  });
+
+  it("lists individual tools via /mcp tools <name>", async () => {
+    const ctx = createContext({ mcpManager });
+    const result = await slashRegistry.execute("/mcp tools zai", ctx);
+
+    expect(result.result).toContain("Tools from zai (14):");
+    expect(result.result).toContain("tool_0");
+  });
+
+  it("refuses /mcp tools for a server that is not connected", async () => {
+    const ctx = createContext({ mcpManager });
+    const result = await slashRegistry.execute("/mcp tools computer-use", ctx);
+
+    expect(result.result).toContain("not connected");
+    expect(result.result).toContain("/mcp reconnect computer-use");
+  });
+});

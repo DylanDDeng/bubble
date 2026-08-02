@@ -231,18 +231,13 @@ async function main() {
   for (const d of mcpLoaded.diagnostics) {
     console.error(chalk.yellow(`[mcp:${d.scope}] ${d.path}: ${d.message}`));
   }
-  const mcpManager = new McpManager({ servers: mcpLoaded.servers });
+  // Silent diagnostics: connect failures are captured per-server and shown by
+  // /mcp on demand. Printing them at startup (or mid-session, where stderr
+  // writes corrupt the Ink display) only duplicates that surface.
+  const mcpManager = new McpManager({ servers: mcpLoaded.servers, onDiagnostic: () => {} });
   let externalRuntime: ExternalRuntimeManager | undefined;
   if (mcpLoaded.servers.length > 0) {
     await mcpManager.start();
-    // Only surface failures at startup. Successful connections would push the
-    // welcome screen above the visible area on small terminals. /mcp shows the
-    // full status.
-    for (const state of mcpManager.getStates()) {
-      if (state.status.kind === "failed") {
-        console.error(chalk.yellow(`[mcp] ${state.name}: failed — ${state.status.error}`));
-      }
-    }
     tools.push(...mcpManager.getToolEntries());
   }
 

@@ -1093,7 +1093,7 @@ const builtinSlashCommandEntries: SlashCommand[] = [
   },
   {
     name: "mcp",
-    description: "Manage MCP servers. Usage: /mcp [list|reconnect <name>]",
+    description: "Manage MCP servers. Usage: /mcp [list|tools <name>|reconnect <name>]",
     async handler(args, ctx) {
       const tokens = args.trim().split(/\s+/).filter(Boolean);
       const sub = tokens[0] ?? "list";
@@ -1116,8 +1116,23 @@ const builtinSlashCommandEntries: SlashCommand[] = [
         return `${name}: ${state.status.kind}`;
       }
 
+      if (sub === "tools") {
+        const name = tokens[1];
+        if (!name) return "Usage: /mcp tools <server-name>";
+        const state = ctx.mcpManager.getStates().find((s) => s.name === name);
+        if (!state) return `Unknown MCP server: ${name}`;
+        if (state.status.kind !== "connected") {
+          return `${name} is not connected — no tools to list. Try /mcp reconnect ${name}.`;
+        }
+        const lines = [`Tools from ${name} (${state.status.tools.length}):`, ""];
+        for (const tool of state.status.tools) {
+          lines.push(`- \`${tool.name}\`${tool.description ? ` — ${tool.description.replace(/\s+/g, " ").slice(0, 100)}` : ""}`);
+        }
+        return lines.join("\n");
+      }
+
       if (sub !== "list" && sub !== "") {
-        return `Unknown /mcp subcommand "${sub}". Use /mcp list or /mcp reconnect <name>.`;
+        return `Unknown /mcp subcommand "${sub}". Use /mcp list, /mcp tools <name>, or /mcp reconnect <name>.`;
       }
 
       const states = ctx.mcpManager.getStates();
@@ -1125,36 +1140,34 @@ const builtinSlashCommandEntries: SlashCommand[] = [
         return "No MCP servers configured. Add entries under `mcpServers` in ~/.bubble/settings.json or <cwd>/.bubble/settings.json.";
       }
 
+      // Rendered as markdown in the TUI: each server is its own paragraph,
+      // failures are bold + uppercase so they stand apart from healthy rows,
+      // and tool lists stay collapsed behind /mcp tools <name>.
       const lines: string[] = ["MCP servers:"];
       for (const state of states) {
-        const transport = state.config.type;
-        const scope = state.scope;
+        const meta = `${state.scope}/${state.config.type}`;
+        lines.push("");
         if (state.status.kind === "connected") {
-          const info = state.status.serverInfo ? ` ${state.status.serverInfo.name}@${state.status.serverInfo.version}` : "";
+          const info = state.status.serverInfo ? ` · ${state.status.serverInfo.name}@${state.status.serverInfo.version}` : "";
           const tn = state.status.tools.length;
           const pn = state.status.prompts.length;
           const counts = [`${tn} tool${tn === 1 ? "" : "s"}`];
           if (pn > 0) counts.push(`${pn} prompt${pn === 1 ? "" : "s"}`);
-          lines.push(`  ✔ ${state.name} [${scope}/${transport}]${info} — ${counts.join(", ")}`);
-          for (const tool of state.status.tools) {
-            lines.push(`      · ${tool.name}${tool.description ? ` — ${tool.description.replace(/\s+/g, " ").slice(0, 80)}` : ""}`);
-          }
+          lines.push(`✔ ${state.name} — connected · ${counts.join(" · ")} (${meta}${info})`);
           if (pn > 0) {
-            lines.push(`    prompts (invoke as /<name>):`);
-            for (const p of state.status.prompts) {
-              const argSig = p.arguments?.length
-                ? ` <${p.arguments.map((a) => (a.required ? a.name : `${a.name}?`)).join("> <")}>`
-                : "";
-              const cmdName = normalizeNameForMCP(p.name);
-              lines.push(`      · /${cmdName}${argSig}${p.description ? ` — ${p.description.replace(/\s+/g, " ").slice(0, 70)}` : ""}`);
-            }
+            const prompts = state.status.prompts.map((p) => `/${normalizeNameForMCP(p.name)}`);
+            lines.push(`    prompts: ${prompts.join(", ")}`);
           }
         } else if (state.status.kind === "failed") {
-          lines.push(`  ✘ ${state.name} [${scope}/${transport}] — ${state.status.error}`);
+          lines.push(`**✘ ${state.name} — UNABLE TO CONNECT** (${meta})`);
+          lines.push(`    ${state.status.error.replace(/\s+/g, " ").slice(0, 200)}`);
+          lines.push(`    retry: /mcp reconnect ${state.name}`);
         } else {
-          lines.push(`  ○ ${state.name} [${scope}/${transport}] — disabled`);
+          lines.push(`○ ${state.name} — disabled (${meta})`);
         }
       }
+      lines.push("");
+      lines.push("Details: /mcp tools <name> · /mcp reconnect <name>");
       return lines.join("\n");
     },
   },
