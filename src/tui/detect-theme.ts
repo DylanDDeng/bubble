@@ -3,15 +3,21 @@ import { execFileSync } from "node:child_process";
 export type ResolvedTheme = "light" | "dark";
 
 export async function detectTerminalTheme(
-  timeoutMs = 150,
+  timeoutMs = 300,
 ): Promise<ResolvedTheme> {
-  const fromEnv = parseColorFgBg(process.env.COLORFGBG);
-  if (fromEnv) return fromEnv;
-
+  // OSC 11 asks the terminal for its actual background color right now — the
+  // only signal that tracks a theme switched after the shell started. The
+  // launch-time signals below are tie-breakers for terminals that don't
+  // answer: COLORFGBG is frozen at shell startup (and propagated stale by
+  // tmux/ssh), and the OS appearance describes the system, not the terminal
+  // profile. Ordering OSC 11 first is what keeps "auto" matching reality.
   if (process.stdout.isTTY && process.stdin.isTTY) {
     const fromOsc = await queryOsc11(timeoutMs);
     if (fromOsc) return fromOsc;
   }
+
+  const fromEnv = parseColorFgBg(process.env.COLORFGBG);
+  if (fromEnv) return fromEnv;
 
   const fromOs = detectOsAppearanceTheme();
   if (fromOs) return fromOs;
@@ -19,7 +25,7 @@ export async function detectTerminalTheme(
   return "dark";
 }
 
-function parseColorFgBg(value: string | undefined): ResolvedTheme | null {
+export function parseColorFgBg(value: string | undefined): ResolvedTheme | null {
   if (!value) return null;
   const parts = value.split(";");
   const last = parts[parts.length - 1];
