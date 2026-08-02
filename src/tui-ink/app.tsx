@@ -18,7 +18,6 @@ import { isMultiplexedTerminal } from "./terminal-env.js";
 import {
   appendTextPart,
   appendToolPart,
-  compactDisplayMessages,
   contentFromParts,
   latestCompactionSummary,
   moveStatusMessageToEnd,
@@ -421,7 +420,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   const themePickerRevertRef = useRef<ThemeMode>("auto");
   const themeResolved: ResolvedTheme = themeMode === "auto" ? autoResolved : themeMode;
   const { exit } = useApp();
-  const [messages, setMessages] = useState<DisplayMessage[]>(() => compactDisplayMessages(reconstructDisplayMessages(agent.messages)));
+  const [messages, setMessages] = useState<DisplayMessage[]>(() => reconstructDisplayMessages(agent.messages));
   const nextImageDisplayLabelStartRef = useRef(nextImageDisplayLabelStart(messages));
   const [isRunning, setIsRunning] = useState(false);
   const [streamingContent, setStreamingContent] = useState("");
@@ -902,7 +901,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   });
 
   const updateDisplayMessages = useCallback((updater: (prev: DisplayMessage[]) => DisplayMessage[]) => {
-    setMessages((prev) => compactDisplayMessages(updater(prev).map(withMessageKey)));
+    setMessages((prev) => updater(prev).map(withMessageKey));
   }, []);
 
   // Non-append transcript rebuilds (/clear, /compact, /rewind, session switch)

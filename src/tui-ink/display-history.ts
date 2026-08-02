@@ -91,7 +91,6 @@ export interface DisplayToolCall {
    */
   rawArguments?: string;
   result?: string;
-  resultCollapsed?: boolean;
   isError?: boolean;
   metadata?: ToolResultMetadata;
   /** Set when the tool_start event was received. Used to render elapsed time. */
@@ -146,73 +145,10 @@ export function toolCallsFromParts(parts: DisplayMessagePart[]): DisplayToolCall
   return parts.flatMap((part) => part.type === "tools" ? part.toolCalls : []);
 }
 
-const FULL_DETAIL_WINDOW = 24;
-
-// Folding policy: message text (content, reasoning) is NEVER rewritten or
-// truncated — what the user or the assistant said renders verbatim. All
-// messages stay in the list (the alt-screen viewport scrolls them); older
-// messages only collapse bulky tool-result bodies, which the UI re-expands
-// on demand.
-export function compactDisplayMessages(messages: DisplayMessage[]): DisplayMessage[] {
-  if (messages.length === 0) {
-    return messages;
-  }
-
-  const visible = messages.filter((message) => message.syntheticKind !== "ui_summary");
-  const detailStart = Math.max(0, visible.length - FULL_DETAIL_WINDOW);
-  return visible.map((message, index) => (
-    index < detailStart ? compactDisplayMessage(message) : message
-  ));
-}
-
-// Messages that already went through compaction. Re-compacting them would
-// produce equal-but-new objects on every transcript update, which defeats the
-// React.memo row cache in message-list.tsx — settled rows must keep identity.
-const compactedMessages = new WeakSet<DisplayMessage>();
-
-function compactDisplayMessage(message: DisplayMessage): DisplayMessage {
-  if (message.syntheticKind) {
-    return message;
-  }
-  if (compactedMessages.has(message)) {
-    return message;
-  }
-
-  const compacted: DisplayMessage = {
-    ...message,
-    toolCalls: message.toolCalls?.map(compactToolCall),
-    parts: message.parts?.map(compactDisplayPart),
-  };
-  compactedMessages.add(compacted);
-  return compacted;
-}
-
 function cloneToolCall(toolCall: DisplayToolCall): DisplayToolCall {
   return {
     ...toolCall,
     args: { ...toolCall.args },
-  };
-}
-
-function compactDisplayPart(part: DisplayMessagePart): DisplayMessagePart {
-  if (part.type === "text") {
-    return part;
-  }
-  return {
-    type: "tools",
-    toolCalls: part.toolCalls.map(compactToolCall),
-  };
-}
-
-function compactToolCall(toolCall: DisplayToolCall): DisplayToolCall {
-  if (toolCall.result === undefined) {
-    return toolCall;
-  }
-
-  return {
-    ...toolCall,
-    result: undefined,
-    resultCollapsed: true,
   };
 }
 

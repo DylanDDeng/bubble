@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   appendTextPart,
   appendToolPart,
-  compactDisplayMessages as compactInkDisplayMessages,
   contentFromParts,
   moveStatusMessageToEnd,
   snapshotDisplayParts,
@@ -90,56 +89,7 @@ describe("Ink display history parts", () => {
     ]);
   });
 
-  it("keeps old part text verbatim and collapses tool result bodies", () => {
-    const diff = [
-      "--- a/file-0.ts",
-      "+++ b/file-0.ts",
-      "@@ -1 +1 @@",
-      "-old",
-      "+new",
-    ].join("\n");
-    const messages: DisplayMessage[] = Array.from({ length: 30 }, (_, index) => ({
-      role: "assistant",
-      content: `assistant ${index} ${"x".repeat(1800)}`,
-      parts: [
-        { type: "text", content: `text ${index} ${"y".repeat(1800)}` },
-        {
-          type: "tools",
-          toolCalls: [
-            tool("edit", { path: `file-${index}.ts` }, `Edited file\n\nDiff:\n${diff}\n${"z".repeat(2400)}`, {
-              metadata: { kind: "edit", path: `file-${index}.ts`, diff },
-            }),
-          ],
-        },
-      ],
-    }));
-
-    const compacted = compactInkDisplayMessages(messages);
-
-    const oldText = compacted[0].parts?.find((part) => part.type === "text");
-    const oldTools = compacted[0].parts?.find((part) => part.type === "tools");
-    // a1aeb19 parity: what the assistant said is never rewritten — only bulky
-    // tool-result bodies collapse on old messages.
-    expect(oldText?.type === "text" ? oldText.content : "").toBe(
-      messages[0].parts?.[0].type === "text" ? messages[0].parts[0].content : "",
-    );
-    const oldTool = oldTools?.type === "tools" ? oldTools.toolCalls[0] : undefined;
-    expect(oldTool?.result).toBeUndefined();
-    expect(oldTool?.resultCollapsed).toBe(true);
-    expect(oldTool?.metadata?.diff).toBe(diff);
-    expect(JSON.stringify(oldTool)).not.toContain("✂");
-    expect(JSON.stringify(oldTool)).not.toContain("chars omitted for UI");
-
-    const recent = compacted.at(-1)!;
-    expect(recent.parts).toEqual(messages.at(-1)!.parts);
-  });
-
-  const displayHistoryCompactors: Array<[string, (messages: any[]) => any[]]> = [
-    ["legacy", compactLegacyDisplayMessages],
-    ["ink", compactInkDisplayMessages],
-  ];
-
-  it.each(displayHistoryCompactors)("collapses old tool result bodies for %s display history", (_name, compact) => {
+  it("collapses old tool result bodies for legacy display history", () => {
     const messages = Array.from({ length: 30 }, (_, index) => ({
       role: "assistant" as const,
       content: `assistant ${index}`,
@@ -148,7 +98,7 @@ describe("Ink display history parts", () => {
       ],
     }));
 
-    const compacted = compact(messages);
+    const compacted = compactLegacyDisplayMessages(messages as any);
 
     expect(compacted[0].toolCalls?.[0].result).toBeUndefined();
     expect(compacted[0].toolCalls?.[0].resultCollapsed).toBe(true);
@@ -211,19 +161,6 @@ describe("Ink display history parts", () => {
     expect(stripInterruptedAssistantMarker(`${marker} trailing`, marker)).toBe(`${marker} trailing`);
   });
 
-  it("keeps all display messages available for app-level scrolling", () => {
-    const messages: DisplayMessage[] = Array.from({ length: 100 }, (_, index) => ({
-      key: `msg-${index}`,
-      role: index % 2 === 0 ? "user" : "assistant",
-      content: `message ${index} ${"x".repeat(200)}`,
-    }));
-
-    const compacted = compactInkDisplayMessages(messages);
-
-    expect(compacted).toHaveLength(100);
-    expect(compacted[0].syntheticKind).toBeUndefined();
-    expect(compacted.at(-1)?.content).toBe(messages.at(-1)?.content);
-  });
 });
 
 function tool(

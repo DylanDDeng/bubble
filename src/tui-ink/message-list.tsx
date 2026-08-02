@@ -949,7 +949,7 @@ function approvalMatchesTool(hint: PendingApprovalHint, tc: DisplayToolCall): bo
 }
 
 function isToolPending(tool: DisplayToolCall): boolean {
-  return tool.result === undefined && tool.resultCollapsed !== true;
+  return tool.result === undefined;
 }
 
 function ReasoningTraceBlock({ reasoning }: { reasoning: string }) {
@@ -1168,7 +1168,6 @@ function getToolHeader(toolCall: DisplayToolCall): string | undefined {
 }
 
 function summarizeToolResult(tc: DisplayToolCall): string {
-  if (tc.resultCollapsed) return tc.isError ? "error output collapsed" : "result collapsed";
   if (tc.result === undefined) return "pending";
   const raw = tc.result.replace(/\r\n/g, "\n");
   if (tc.isError) {
@@ -1311,12 +1310,11 @@ function ToolCallDisplay({
   }
 
   const editDetails = getEditDiffDetails(toolCall);
-  const isEditDiff = editDetails !== null && toolCall.result !== undefined && !toolCall.resultCollapsed;
-  const showSummary = !toolCall.resultCollapsed || waitingApproval;
+  const isEditDiff = editDetails !== null && toolCall.result !== undefined;
   // Only show the file preview once the tool actually executed. During the
   // streaming-args phase, args.content is incomplete and re-rendering the
   // entire body per delta both looks chaotic and breaks on partial escapes.
-  const isWritePreview = toolCall.name === "write" && !toolCall.isError && toolCall.result !== undefined && !toolCall.resultCollapsed;
+  const isWritePreview = toolCall.name === "write" && !toolCall.isError && toolCall.result !== undefined;
 
   return (
     <Box flexDirection="column" marginLeft={2} marginTop={compactTop ? 0 : 1}>
@@ -1325,11 +1323,9 @@ function ToolCallDisplay({
         <Text bold color={theme.toolName}>{name}</Text>
         {header && <Text color={theme.muted}>({header})</Text>}
       </Box>
-      {showSummary && (
-        <Box marginLeft={2}>
-          <Text color={summaryColor}>⎿  {summary}</Text>
-        </Box>
-      )}
+      <Box marginLeft={2}>
+        <Text color={summaryColor}>⎿  {summary}</Text>
+      </Box>
       {toolCall.isError && toolCall.result && (
         <Box marginLeft={4} flexDirection="column">
           {toolCall.result.replace(/\r\n/g, "\n").split("\n").slice(0, 6).map((line, i) => (
