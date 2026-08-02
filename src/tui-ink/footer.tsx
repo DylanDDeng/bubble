@@ -50,13 +50,10 @@ function ModeBadge({ mode }: { mode?: PermissionMode }) {
   const color = (theme as unknown as Record<string, string>)[info.color] ?? theme.muted;
   const symbol = info.symbol ? `${info.symbol} ` : "";
   return (
-    <>
-      <Text color={color} bold>
-        {symbol}
-        {info.shortTitle} on
-      </Text>
-      <Text color={theme.muted}> ⇧⇥</Text>
-    </>
+    <Text color={color} bold>
+      {symbol}
+      {info.shortTitle} on
+    </Text>
   );
 }
 

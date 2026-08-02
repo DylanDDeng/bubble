@@ -16,7 +16,7 @@ export interface PermissionModeInfo {
 export const PERMISSION_MODE_INFO: Record<PermissionMode, PermissionModeInfo> = {
   default: { title: "Default", shortTitle: "default", symbol: "", color: "muted" },
   plan: { title: "Plan", shortTitle: "plan", symbol: "⏸", color: "accent" },
-  bypassPermissions: { title: "Bypass permissions", shortTitle: "bypass", symbol: "⏵⏵", color: "error" },
+  bypassPermissions: { title: "Bypass permissions", shortTitle: "bypass permission", symbol: "⏵⏵", color: "error" },
 };
 
 /**

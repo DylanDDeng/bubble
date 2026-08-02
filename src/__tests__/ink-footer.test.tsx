@@ -29,13 +29,23 @@ describe("Ink footer", () => {
       { columns: 100 },
     );
 
-    expect(output).toContain("on");
-    expect(output).toContain("⇧⇥");
+    expect(output).toContain("plan on");
+    expect(output).not.toContain("⇧⇥");
     // Path / provider / model chrome lives in the welcome banner and the
     // model-switch transcript notices, never in the footer.
     expect(output).not.toContain("Model:");
     expect(output).not.toContain("ctx ");
     expect(output).not.toContain("•");
+  });
+
+  it("spells out the bypass badge as 'bypass permission on'", () => {
+    const output = renderToString(
+      React.createElement(FooterBar, { data: { mode: "bypassPermissions" } }),
+      { columns: 100 },
+    );
+
+    expect(output).toContain("bypass permission on");
+    expect(output).not.toContain("⇧⇥");
   });
 
   it("keeps the Grok chat-only boundary visible", () => {
