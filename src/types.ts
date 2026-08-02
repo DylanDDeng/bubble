@@ -377,6 +377,18 @@ export interface TokenUsage {
   totalTokens?: number;
 }
 
+/**
+ * Priced token usage (see model-pricing.ts). Lives here rather than in
+ * model-pricing.ts because turn_end events carry it and model-pricing
+ * already imports from this module.
+ */
+export interface UsageCost {
+  currency: "USD" | "CNY";
+  cost: number;
+  /** True when the provider gave no cache breakdown and everything was billed at the miss rate. */
+  estimated: boolean;
+}
+
 export interface Provider {
   streamChat(
     messages: ProviderMessage[],
@@ -429,7 +441,7 @@ export type AgentEvent =
   | { type: "tool_start"; id: string; name: string; args: Record<string, any> }
   | { type: "tool_update"; id: string; name: string; update: ToolUpdate }
   | { type: "tool_end"; id: string; name: string; result: ToolResult }
-  | { type: "turn_end"; usage?: TokenUsage; willContinue?: boolean }
+  | { type: "turn_end"; usage?: TokenUsage; cost?: UsageCost; willContinue?: boolean }
   | { type: "context_recovered"; droppedMessages: number; reason: "overflow" }
   | { type: "provider_retry"; attempt: number; maxAttempts: number; reason: string }
   | { type: "input_pending_changed"; pending: number }

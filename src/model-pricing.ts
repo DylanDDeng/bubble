@@ -1,6 +1,8 @@
-import type { TokenUsage } from "./types.js";
+import type { TokenUsage, UsageCost } from "./types.js";
 
-export type PricingCurrency = "USD" | "CNY";
+export type { UsageCost } from "./types.js";
+
+export type PricingCurrency = UsageCost["currency"];
 
 export interface ModelPricing {
   providerId: string;
@@ -22,12 +24,6 @@ export interface ModelPricing {
     inputCacheMissPerMillion: number;
     outputPerMillion: number;
   };
-}
-
-export interface UsageCost {
-  currency: PricingCurrency;
-  cost: number;
-  estimated: boolean;
 }
 
 export const MODEL_PRICING: ModelPricing[] = [
