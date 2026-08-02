@@ -12,3 +12,6 @@ doc/
 .factory/
 *.tgz
 __pycache__/
+jobs/
+bench/terminal-bench/jobs/
+bubble-thinking-only.patch
