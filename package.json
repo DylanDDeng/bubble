@@ -30,6 +30,7 @@
   "scripts": {
     "build": "rm -rf dist && tsc && chmod +x dist/bin.js dist/main.js",
     "dev": "tsc && bun dist/main.js",
+    "refresh-models": "NODE_USE_ENV_PROXY=1 node scripts/generate-model-data.mjs",
     "prepack": "npm run build",
     "start": "bun dist/main.js",
     "test": "vitest run",
