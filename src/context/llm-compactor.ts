@@ -11,8 +11,12 @@
 // caller can fall back to algorithmic compaction without an exception.
 
 import type { Message, Provider, ProviderMessage, ToolCall } from "../types.js";
+import { sanitizeInternalReminderBlocks } from "../agent/internal-reminder-sanitizer.js";
 import { estimateContextTokens } from "./budget.js";
+import { appendFileBlocks, stripFileBlocks } from "./compaction-files.js";
 import {
+  collectCompactionFileOps,
+  messageText,
   buildCompactionSummaryMessage,
   clonePinnedUserMessage,
   findFirstRealUserIndex,
@@ -120,15 +124,25 @@ export async function compactWithLLM(
 
   // What we'll send to the model to summarize: prior summaries (semantic
   // rolling), prior turns, and the older groups in the current turn. The
-  // pinned first instruction is excluded — it survives verbatim.
+  // pinned first instruction is excluded — it survives verbatim. File blocks
+  // are stripped from prior summaries here: the deterministic merge below owns
+  // the file lists, and feeding them to the model only invites a lossy echo.
   const toSummarize: Message[] = [
     ...priorSummaries.map((m): Message => ({
       role: "user",
-      content: `[Prior compaction summary]\n${typeof m.content === "string" ? m.content : ""}`,
+      content: `[Prior compaction summary]\n${stripFileBlocks(messageText(m))}`,
     })),
     ...summarizablePriorTurns,
     ...evictedGroups.flatMap((g) => [g.assistant, ...g.toolResults]),
   ];
+
+  // Cumulative file tracking (deterministic, never via the model): union the
+  // lists the prior summaries carried with the ops in what we're evicting now.
+  // Tool results ride along so failed/rejected calls don't count as touches.
+  const fileOps = collectCompactionFileOps(
+    [...summarizablePriorTurns, ...evictedGroups.flatMap((g) => [g.assistant, ...g.toolResults])],
+    priorSummaries,
+  );
 
   if (toSummarize.length === 0) {
     return { compacted: false, reason: "nothing to evict" };
@@ -156,6 +170,14 @@ export async function compactWithLLM(
   if (!summaryText || summaryText.trim().length === 0) {
     return { compacted: false, reason: "compactor returned empty summary" };
   }
+  // The summarizer's input transcript can contain projected reminder blocks
+  // (resident history holds them after pruned-mode projection), and models
+  // quote their input. This summary is persisted via onCompactionApplied, so
+  // scrub markup before it can reach the session file.
+  summaryText = sanitizeInternalReminderBlocks(summaryText).trim();
+  if (!summaryText) {
+    return { compacted: false, reason: "compactor returned only internal markup" };
+  }
 
   // New history shape (prefix-cache-friendly: preserved system+meta stay at the
   // absolute prefix unchanged; summary is injected after as a user-role envelope
@@ -174,14 +196,19 @@ export async function compactWithLLM(
   const compacted: Message[] = [
     ...leading.map(cloneMessage),
     ...(pinnedFirstUser ? [clonePinnedUserMessage(pinnedFirstUser)] : []),
-    buildCompactionSummaryMessage(`${LLM_SUMMARY_PREFIX}\n${summaryText.trim()}`),
+    buildCompactionSummaryMessage(
+      appendFileBlocks(`${LLM_SUMMARY_PREFIX}\n${summaryText}`, fileOps),
+    ),
     cloneMessage(lastUser),
     ...flatKept,
   ];
 
   return {
     compacted: true,
-    summary: summaryText,
+    // Same payload the resident message carries (minus the envelope prefix —
+    // session replay adds its own "Previous conversation summary:" header), so
+    // the persisted checkpoint matches the in-memory state, file blocks included.
+    summary: appendFileBlocks(summaryText, fileOps),
     messages: compacted,
   };
 }

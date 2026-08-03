@@ -157,6 +157,15 @@ export interface AgentOptions {
   onToolResult?: (toolName: string, result: ToolResult) => void;
   onTodosUpdate?: (todos: Todo[]) => void;
   onModeUpdate?: (mode: PermissionMode) => void;
+  /**
+   * Fired when MULTI-TURN compaction rewrites resident history, with the
+   * summary text. Hosts persist it (SessionManager.applyLLMCompaction) so the
+   * compacted state — including the cumulative file blocks — survives resume;
+   * without this, meta summaries live only in memory (session-log drops meta).
+   * Sub-turn summaries never fire it: they cover only the current turn, and a
+   * session-level summary entry would make resume skip earlier history.
+   */
+  onCompactionApplied?: (summary: string) => void;
   hooks?: TurnHooks[];
   externalHooks?: ExternalHookController;
   agentRole?: "parent" | "subagent";
@@ -232,6 +241,7 @@ export class Agent {
   private _mode: PermissionMode;
   private _modeVersion = 0;
   private onModeUpdate?: (mode: PermissionMode) => void;
+  private onCompactionApplied?: (summary: string) => void;
   private _todos: Todo[];
   private _todosVersion = 0;
   private onTodosUpdate?: (todos: Todo[]) => void;
@@ -288,6 +298,7 @@ export class Agent {
     this.onToolResult = options.onToolResult;
     this.onTodosUpdate = options.onTodosUpdate;
     this.onModeUpdate = options.onModeUpdate;
+    this.onCompactionApplied = options.onCompactionApplied;
     this.hookDefinitions = options.hooks ?? [];
     this.externalHooks = options.externalHooks;
     this.agentRole = options.agentRole ?? "parent";
@@ -1606,6 +1617,7 @@ export class Agent {
       this.lastInputTokens = null;
       this.lastAnchorMessageCount = null;
       this.fileStateTracker?.invalidateReadHistory();
+      this.persistCompactionSummary(llmResult.summary);
       return before - this.messages.length;
     }
 
@@ -1622,6 +1634,7 @@ export class Agent {
       this.lastInputTokens = null;
       this.lastAnchorMessageCount = null;
       this.fileStateTracker?.invalidateReadHistory();
+      this.persistCompactionSummary(singleTurnResult.summary);
       return before - this.messages.length;
     }
 
@@ -1631,6 +1644,7 @@ export class Agent {
       this.lastInputTokens = null;
       this.lastAnchorMessageCount = null;
       this.fileStateTracker?.invalidateReadHistory();
+      this.persistCompactionSummary(fallback.summary);
       return before - this.messages.length;
     }
 
@@ -1683,6 +1697,7 @@ export class Agent {
       this.fileStateTracker?.invalidateReadHistory();
       this.compactionStats.llm += 1;
       this.compactionStats.fired += 1;
+      this.persistCompactionSummary(result.summary);
       traceEvent("compaction_fired", { path: "llm" });
     }
     // If LLM compaction failed for any reason, leave this.messages alone —
@@ -1711,7 +1726,21 @@ export class Agent {
   ): Promise<string> {
     if (oldMessages.length === 0) return "";
     const { buildCompactionPromptMessages } = await import("./context/compact-llm.js");
-    const promptMessages = buildCompactionPromptMessages(oldMessages);
+    const { collectCompactionFileOps, isCompactionSummaryMessage, messageText } = await import("./context/compact.js");
+    const { appendFileBlocks, stripFileBlocks } = await import("./context/compaction-files.js");
+    // File blocks stay out of the model round-trip: stripped from the input
+    // here, merged deterministically, re-appended to the returned summary.
+    const priorSummaries = oldMessages.filter(isCompactionSummaryMessage);
+    const fileOps = collectCompactionFileOps(
+      oldMessages.filter((message) => !isCompactionSummaryMessage(message)),
+      priorSummaries,
+    );
+    const promptInput = oldMessages.map((message) =>
+      isCompactionSummaryMessage(message) && typeof message.content === "string"
+        ? { ...message, content: stripFileBlocks(messageText(message)) }
+        : message,
+    );
+    const promptMessages = buildCompactionPromptMessages(promptInput);
     const stream = this.provider.streamChat(promptMessages, {
       model: this.apiModel,
       temperature: 0.2,
@@ -1728,7 +1757,9 @@ export class Agent {
     // Strip any internal reminder markup the summarizer may have reproduced from
     // the transcript: this summary is both displayed in the compaction card and
     // re-injected as a `Previous conversation summary` system message.
-    return sanitizeInternalReminderBlocks(full).trim();
+    const summary = sanitizeInternalReminderBlocks(full).trim();
+    if (!summary) return "";
+    return appendFileBlocks(summary, fileOps);
   }
 
   // ---- Subagent lifecycle: delegated to SubagentRuntime. ----
@@ -1987,11 +2018,13 @@ export class Agent {
     }
 
     let compactedPath: "resident" | "subturn" | undefined;
+    let residentSummary: string | undefined;
     if (shouldCompact) {
       const compacted = compactMessages(candidate, { keepRecentTurns });
       if (compacted.compacted && compacted.messages) {
         candidate = compacted.messages as typeof candidate;
         compactedPath = "resident";
+        residentSummary = compacted.summary;
         traceEvent("compaction_fired", { path: "resident", droppedEntries: compacted.droppedEntries });
       } else {
         // Single-instruction runs (one real user turn) never satisfy the
@@ -2022,8 +2055,24 @@ export class Agent {
       this.lastInputTokens = null;
       this.lastAnchorMessageCount = null;
       this.fileStateTracker?.invalidateReadHistory();
-      if (compactedPath === "resident") this.compactionStats.resident += 1;
+      if (compactedPath === "resident") {
+        this.compactionStats.resident += 1;
+        this.persistCompactionSummary(residentSummary);
+      }
       if (compactedPath === "subturn") this.compactionStats.subturn += 1;
+    }
+  }
+
+  /**
+   * Hand a multi-turn compaction summary to the host for session persistence.
+   * Failure is swallowed: losing persistence must never break the run itself.
+   */
+  private persistCompactionSummary(summary: string | undefined): void {
+    if (!summary?.trim()) return;
+    try {
+      this.onCompactionApplied?.(summary);
+    } catch {
+      // ignore — persistence is best-effort
     }
   }
 

@@ -178,6 +178,9 @@ export class RunDriver {
           recordMemoryCitations(session.cwd, message.content);
         }
       },
+      onCompactionApplied: (summary: string) => {
+        session.manager.applyLLMCompaction(summary);
+      },
       onToolResult: (toolName, result) => {
         if (toolName !== "skill" || result.isError) return;
         const match = result.content.match(/^Skill:\s+([^\n]+)$/m);

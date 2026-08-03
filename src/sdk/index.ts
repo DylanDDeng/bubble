@@ -321,6 +321,9 @@ export class BubbleSdk {
           session.appendMessage(message);
           if (message.role === "assistant") recordMemoryCitations(cwd, message.content);
         },
+        onCompactionApplied: (summary: string) => {
+          session.applyLLMCompaction(summary);
+        },
         onTodosUpdate: (todos) => session.appendTodosSnapshot(todos),
         onModeUpdate: (m: PermissionMode) => session.appendMarker("mode_switch", m),
       });

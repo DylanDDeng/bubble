@@ -10,12 +10,16 @@
 import {
   buildCompactionSummaryMessage,
   clonePinnedUserMessage,
+  collectCompactionFileOps,
   compactMessages as compactMessagesHeuristic,
   findFirstRealUserIndex,
   isCompactionSummaryMessage,
   isRealUserMessage,
+  messageText,
   splitLeadingContext,
 } from "./compact.js";
+import { sanitizeInternalReminderBlocks } from "../agent/internal-reminder-sanitizer.js";
+import { appendFileBlocks, stripFileBlocks } from "./compaction-files.js";
 import type { CompactOptions, CompactResult } from "./compact.js";
 import type { Message, Provider, ProviderMessage, ThinkingLevel, ToolCall } from "../types.js";
 
@@ -93,13 +97,17 @@ export async function compactMessagesWithLLM(
   const pinnedIndex = findFirstRealUserIndex(oldMessages);
   const pinnedMessage = pinnedIndex >= 0 ? oldMessages[pinnedIndex] : undefined;
 
+  // File blocks are stripped from prior summaries before summarization: the
+  // deterministic merge below owns the file lists end to end.
   const summarizable: Message[] = [
     ...priorSummaries.map((m): Message => ({
       role: "user",
-      content: `[Prior compaction summary]\n${typeof m.content === "string" ? m.content : ""}`,
+      content: `[Prior compaction summary]\n${stripFileBlocks(messageText(m))}`,
     })),
     ...oldMessages.filter((_, index) => index !== pinnedIndex),
   ];
+
+  const fileOps = collectCompactionFileOps(oldMessages, priorSummaries);
 
   let summary: string;
   try {
@@ -108,17 +116,21 @@ export async function compactMessagesWithLLM(
     return compactMessagesHeuristic(messages, { keepRecentTurns, maxSummaryItems: options.maxSummaryItems });
   }
 
-  if (!summary.trim()) {
+  // Models quote their input, and the transcript can contain projected
+  // reminder blocks; this summary is persisted, so scrub markup first.
+  summary = sanitizeInternalReminderBlocks(summary).trim();
+  if (!summary) {
     return compactMessagesHeuristic(messages, { keepRecentTurns, maxSummaryItems: options.maxSummaryItems });
   }
 
+  const summaryWithFiles = appendFileBlocks(summary, fileOps);
   return {
     compacted: true,
-    summary,
+    summary: summaryWithFiles,
     messages: [
       ...leading,
       ...(pinnedMessage ? [clonePinnedUserMessage(pinnedMessage)] : []),
-      buildCompactionSummaryMessage(summary),
+      buildCompactionSummaryMessage(summaryWithFiles),
       ...keptMessages,
     ],
     droppedEntries: oldMessages.length,

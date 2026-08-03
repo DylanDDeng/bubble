@@ -1,6 +1,14 @@
 import type { ContentPart, Message, ToolCall } from "../types.js";
 import type { SessionLogEntry } from "../session-types.js";
-import { isInternalBlockContent } from "../agent/internal-reminder-sanitizer.js";
+import { isInternalBlockContent, sanitizeInternalReminderBlocks } from "../agent/internal-reminder-sanitizer.js";
+import {
+  appendFileBlocks,
+  extractFileOps,
+  mergeFileOps,
+  parseFileBlocks,
+  stripFileBlocks,
+  type CompactionFileOps,
+} from "./compaction-files.js";
 
 /**
  * Compaction must never summarize away what the user actually asked for:
@@ -28,7 +36,7 @@ const PROJECTED_SUMMARY_PREFIXES = [
   `<bubble_internal_context kind="runtime-system">\n${SUBTURN_SUMMARY_PREFIX}`,
 ];
 
-function messageText(message: Message): string {
+export function messageText(message: Message): string {
   if (typeof message.content === "string") return message.content;
   if (Array.isArray(message.content)) {
     return message.content
@@ -184,6 +192,22 @@ export function planSessionCompaction(
 }
 
 /**
+ * Cumulative file ops for a compaction: the blocks prior summaries carried,
+ * unioned with the ops found in the messages being evicted now. Every
+ * compaction path — LLM, heuristic, sub-turn, session-entry — must thread
+ * this through, or the "cumulative" record resets on that path.
+ */
+export function collectCompactionFileOps(
+  evicted: Message[],
+  priorSummaries: Message[],
+): CompactionFileOps {
+  return mergeFileOps(
+    ...priorSummaries.map((message) => parseFileBlocks(messageText(message))),
+    extractFileOps(evicted),
+  );
+}
+
+/**
  * Assemble the post-compaction entry list from a plan and a (possibly
  * LLM-generated) summary string. The summary entry is keyed off the full
  * original `entries` so its id never collides with a prior summary.
@@ -196,7 +220,9 @@ export function buildCompactedEntries(
   const summaryEntry: SessionLogEntry = {
     id: nextSummaryId(entries),
     type: "summary",
-    summary,
+    // Sink-level backstop: whatever producer built this string (LLM or
+    // heuristic), internal markup never lands in the session file.
+    summary: sanitizeInternalReminderBlocks(summary),
     timestamp: Date.now(),
   };
   return [...plan.metadataEntries, summaryEntry, ...plan.keptEntries];
@@ -223,11 +249,19 @@ export function compactSessionEntries(
   if (!summary) {
     return { compacted: false };
   }
+  const oldMessages = entriesToMessages(plan.oldEntries);
+  const summaryWithFiles = appendFileBlocks(
+    summary,
+    collectCompactionFileOps(
+      oldMessages.filter((message) => !isCompactionSummaryMessage(message)),
+      oldMessages.filter(isCompactionSummaryMessage),
+    ),
+  );
 
   return {
     compacted: true,
-    summary,
-    entries: buildCompactedEntries(entries, plan, summary),
+    summary: summaryWithFiles,
+    entries: buildCompactedEntries(entries, plan, summaryWithFiles),
     droppedEntries: plan.oldEntries.length,
   };
 }
@@ -244,6 +278,7 @@ export function compactMessages(
   // template-grade (goal truncated to 140 chars, constant next-steps line);
   // the pinned original instruction is the durable record, not old summaries.
   const { leading, body } = splitLeadingContext(messages);
+  const priorSummaries = body.filter(isCompactionSummaryMessage);
   const bodyMessages = body.filter((message) => !isCompactionSummaryMessage(message));
 
   // Turn boundaries anchor on REAL user messages only. Projected reminders
@@ -280,17 +315,21 @@ export function compactMessages(
   if (!summary) {
     return { compacted: false };
   }
+  const summaryWithFiles = appendFileBlocks(
+    summary,
+    collectCompactionFileOps(oldMessages, priorSummaries),
+  );
 
   const compactedMessages: Message[] = [
     ...leading.map((message) => cloneMessage(message)),
     ...(pinnedMessage ? [clonePinnedUserMessage(pinnedMessage)] : []),
-    buildCompactionSummaryMessage(summary),
+    buildCompactionSummaryMessage(summaryWithFiles),
     ...keptMessages.map((message) => cloneMessage(message)),
   ];
 
   return {
     compacted: true,
-    summary,
+    summary: summaryWithFiles,
     messages: compactedMessages,
     droppedEntries: summaryInput.length,
   };
@@ -372,6 +411,15 @@ export function compactCurrentTurnToolGroups(
   const freshSummary = buildToolGroupsSummary(evictable, maxSummaryItems);
   if (!freshSummary) return { compacted: false };
   const summary = mergeSubturnSummaryLines(priorSubturnSummaries, freshSummary, maxSummaryItems);
+  // Evicted groups' file ops would otherwise vanish before any multi-turn
+  // compactor runs; blocks on the sub-turn summary get merged upward later.
+  const summaryWithFiles = appendFileBlocks(
+    summary,
+    collectCompactionFileOps(
+      evictable.flatMap((g) => [g.assistant, ...g.toolResults]),
+      priorSubturnSummaries,
+    ),
+  );
 
   const survivingGroups = groups.filter((g) => !evictable.includes(g));
   const flatSurvivors: Message[] = [];
@@ -386,7 +434,7 @@ export function compactCurrentTurnToolGroups(
     {
       role: "meta",
       kind: "subturn-compaction-summary",
-      content: `${SUBTURN_SUMMARY_PREFIX}\n${summary}`,
+      content: `${SUBTURN_SUMMARY_PREFIX}\n${summaryWithFiles}`,
     },
     ...flatSurvivors,
   ];
@@ -419,7 +467,9 @@ function mergeSubturnSummaryLines(
     merged.push(line);
   };
   for (const prior of priorSummaries) {
-    for (const line of messageText(prior).split("\n")) {
+    // File blocks are merged structurally by collectCompactionFileOps, not as
+    // prose lines — strip them so paths don't leak into the line dedupe.
+    for (const line of stripFileBlocks(messageText(prior)).split("\n")) {
       if (line.startsWith(SUBTURN_SUMMARY_PREFIX) || line.startsWith("<bubble_internal_")) continue;
       push(line);
     }
@@ -507,7 +557,14 @@ function buildMessageSummary(messages: Message[], maxSummaryItems: number): stri
     return "";
   }
 
-  const userMessages = messages.filter((message) => message.role === "user");
+  // Internal blocks (goal kicks, task wakes, projected reminders) must not
+  // become the Goal/Progress lines: 140-char truncation would turn them into
+  // markup FRAGMENTS, which defeat the anchored display filters downstream.
+  const userMessages = messages.filter(
+    (message) => message.role === "user"
+      && typeof message.content === "string"
+      && !isInternalBlockContent(message.content),
+  );
   const assistantMessages = messages.filter((message) => message.role === "assistant");
   const toolCalls = collectToolCalls(messages);
   const relevantFiles = collectRelevantFiles(toolCalls);

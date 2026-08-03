@@ -457,6 +457,11 @@ async function main() {
         recordMemoryCitations(args.cwd, message.content);
       }
     },
+    // Auto-compaction summaries are meta messages (dropped above); persist the
+    // compacted state as a session summary entry so it survives resume.
+    onCompactionApplied: (summary) => {
+      sessionManager?.applyLLMCompaction(summary);
+    },
     onToolResult: (toolName, result) => {
       if (!sessionManager) return;
       if (toolName !== "skill" || result.isError) return;
