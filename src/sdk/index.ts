@@ -58,6 +58,11 @@ import type {
 export interface BubbleSdkOptions {
   /** Fallback working directory for sessions created without an explicit cwd. */
   defaultCwd?: string;
+  /**
+   * Load MCP servers from user/project settings (default true). Hermetic hosts
+   * (evals, tests) set false so runs never depend on ambient MCP config.
+   */
+  mcp?: boolean;
 }
 
 /** Resolved turn configuration, reported via onStart (e.g. for a host's system-init event). */
@@ -93,6 +98,11 @@ export interface RunTurnOptions extends TurnHandlers {
   model?: string;
   mode?: PermissionMode;
   thinkingLevel?: ThinkingLevel;
+  /**
+   * Extra text appended to the built system prompt. Lets hosts (and the eval
+   * harness) A/B prompt variants without forking the prompt builder.
+   */
+  appendSystemPrompt?: string;
   signal?: AbortSignal;
 }
 
@@ -108,6 +118,7 @@ export class BubbleSdk {
   readonly registry = new ProviderRegistry(this.userConfig);
 
   private readonly defaultCwd: string;
+  private readonly mcpEnabled: boolean;
   private readonly cwdBySession = new Map<string, string>();
   private readonly bashAllowlists = new Map<string, BashAllowlist>();
   private readonly activeTurns = new Map<string, AbortController>();
@@ -117,6 +128,7 @@ export class BubbleSdk {
 
   constructor(options: BubbleSdkOptions = {}) {
     this.defaultCwd = options.defaultCwd || process.env.BUBBLE_CWD || os.homedir();
+    this.mcpEnabled = options.mcp !== false;
   }
 
   // ── Sessions ─────────────────────────────────────────────────────────────
@@ -273,7 +285,7 @@ export class BubbleSdk {
       // enter the system prompt.
       purgeUnsafeMemorySources(cwd);
       const memoryPrompt = buildMemoryPrompt(cwd);
-      const systemPrompt = buildSystemPrompt({
+      const builtSystemPrompt = buildSystemPrompt({
         agentName: "Bubble",
         configuredProvider: providerId || "none",
         configuredModel: model ? displayModel(model) : "none",
@@ -284,6 +296,9 @@ export class BubbleSdk {
         ...buildToolPromptOptions(tools.filter((t) => !t.deferred)),
         memoryPrompt,
       });
+      const systemPrompt = options.appendSystemPrompt
+        ? `${builtSystemPrompt}\n\n${options.appendSystemPrompt.trim()}`
+        : builtSystemPrompt;
 
       const agent = new Agent({
         provider,
@@ -358,6 +373,7 @@ export class BubbleSdk {
 
   /** MCP servers are started lazily, once per cwd (McpManager has no stop). */
   private mcpToolsFor(cwd: string): Promise<ToolRegistryEntry[]> {
+    if (!this.mcpEnabled) return Promise.resolve([]);
     let cached = this.mcpToolsByCwd.get(cwd);
     if (!cached) {
       cached = (async () => {
