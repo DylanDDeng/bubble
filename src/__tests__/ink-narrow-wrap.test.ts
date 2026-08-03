@@ -72,10 +72,13 @@ describe("Ink narrow-screen wrapping", () => {
     expect(narrow.length).toBeGreaterThan(wide.length);
   });
 
-  it("drops a long bash command to indented continuation rows", () => {
+  it("drops a long RUNNING bash command to indented continuation rows", () => {
     const longCommand =
       "echo --some-flag=value --another-flag=value2 --yet-another-flag=value3 /some/long/path";
 
+    // Running (no result yet): the command is what the user is watching, so
+    // it stays fully visible. Finished commands collapse to a one-line summary
+    // instead — covered by ink-execute-collapse.test.ts.
     const message: DisplayMessage = {
       key: "assistant-bash",
       role: "assistant",
@@ -88,7 +91,7 @@ describe("Ink narrow-screen wrapping", () => {
               id: "bash-1",
               name: "bash",
               args: { command: longCommand },
-              result: "ok",
+              startedAt: 1000,
             },
           ],
         },

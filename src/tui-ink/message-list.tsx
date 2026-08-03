@@ -789,21 +789,30 @@ function TraceGroupBlock({
   const commandWidth = Math.max(14, terminalColumns - group.title.length - 20);
   const detailWidth = Math.max(20, terminalColumns - 8);
   const detailLines = group.previewLines.length > 0 ? group.previewLines : group.items;
+  // Finished, error-free Execute rows collapse to a one-line summary: the
+  // multi-line command body and stdout preview only earn space while running
+  // (you want to see what's executing) or on failure (you need the error).
+  // Ctrl+O (verbose trace) shows everything.
+  const collapsedExecute = group.kind === "execute" && !group.pending && !waiting && !group.hasError;
   // A model-provided bash description owns the header slot; the command then
   // always renders as a block below. Without one, single-line commands that
   // fit stay inline; anything longer becomes a wrapped block preserving the
   // command's own line structure — commands are never clipped mid-line.
+  // Collapsed rows always inline the (truncated) command instead of a block.
   const showDescription = group.kind === "execute" && !!group.description;
   const inlineCommand = !showDescription && group.command
     ? (group.kind === "execute"
-        ? (shouldInlineExecuteCommand(group, commandWidth) ? group.command : undefined)
+        ? (collapsedExecute || shouldInlineExecuteCommand(group, commandWidth)
+            ? truncateVisual(group.command.replace(/\s+/g, " "), commandWidth)
+            : undefined)
         : (visualWidth(group.command) <= commandWidth ? group.command : undefined))
     : undefined;
-  const commandBlock = group.command && !inlineCommand
+  const commandBlock = group.command && !inlineCommand && !collapsedExecute
     ? (group.kind === "execute"
         ? executeCommandBlock(group, EXECUTE_COMMAND_BLOCK_MAX_LINES)
         : { lines: [group.command], omitted: 0 })
     : null;
+  const collapsedOutputLines = group.previewLines.length + group.omitted;
 
   return (
     <Box flexDirection="column" marginLeft={2} marginTop={compactTop ? 0 : 1}>
@@ -832,7 +841,15 @@ function TraceGroupBlock({
           )}
         </Box>
       )}
-      {detailLines.length > 0 && (
+      {collapsedExecute ? (
+        <Box marginLeft={2}>
+          <Text color={theme.traceDetail}>
+            ⎿  {collapsedOutputLines > 0
+              ? `${collapsedOutputLines} line${collapsedOutputLines === 1 ? "" : "s"} output · Ctrl+O to view`
+              : "no output"}
+          </Text>
+        </Box>
+      ) : detailLines.length > 0 && (
         <Box flexDirection="column" marginLeft={2}>
           {detailLines.map((line, index) => (
             <Box key={index} marginLeft={index === 0 ? 0 : 2}>
@@ -852,7 +869,7 @@ function TraceGroupBlock({
           ))}
         </Box>
       )}
-      {group.omitted > 0 && (
+      {group.omitted > 0 && !collapsedExecute && (
         <Box marginLeft={2}>
           <Text color={theme.traceDetail}>
             ... {group.omitted} more, Ctrl+O to view
