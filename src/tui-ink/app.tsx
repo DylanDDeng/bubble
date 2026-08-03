@@ -83,7 +83,7 @@ import { continuationPrompt, initialPrompt } from "../goal/prompts.js";
 import { shouldContinueGoal, stopReasonNotice } from "../goal/engine.js";
 import { goalCompleteNotice, goalIndicatorLine, goalSummaryText } from "../goal/format.js";
 import { tokenUsageTotal } from "../goal/usage.js";
-import { formatInternalContextBlock } from "../agent/internal-reminder-sanitizer.js";
+import { formatInternalContextBlock, isInternalBlockOnlyContent } from "../agent/internal-reminder-sanitizer.js";
 import type { BackgroundTaskInfo, ProcessManager } from "../tasks/manager.js";
 import type { PromotionChannel } from "../tasks/promotion.js";
 import {
@@ -207,16 +207,9 @@ function slashResultNoticeKind(result: string): DisplayMessage["syntheticKind"] 
   return /^(Grok m|M)odel switched to /.test(result) ? "ui_notice" : undefined;
 }
 
-/**
- * True when a user message is nothing but harness-injected internal blocks
- * (goal kicks, task wakes) — hidden live, so hidden on reconstruction too.
- */
-export function isInternalBlockOnlyContent(content: Message["content"]): boolean {
-  if (typeof content !== "string") return false;
-  const trimmed = content.trim();
-  return /^<bubble_internal_(?:context|reminder)\b/.test(trimmed)
-    && /<\/bubble_internal_(?:context|reminder)>$/.test(trimmed);
-}
+// Canonical implementation lives in the sanitizer module so non-TUI surfaces
+// (session pickers, desktop host) share it; re-exported here for existing users.
+export { isInternalBlockOnlyContent };
 
 /** Status-row summary for running background tasks (design §2.5). */
 function taskRowSummary(tasks: BackgroundTaskInfo[], nowTick: number): string {

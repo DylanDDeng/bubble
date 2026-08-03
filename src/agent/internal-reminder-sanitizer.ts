@@ -43,6 +43,19 @@ export function isInternalBlockContent(text: string): boolean {
   return text.trimStart().startsWith(INTERNAL_BLOCK_PREFIX);
 }
 
+/**
+ * True when the ENTIRE content is one internal block (start- and end-anchored)
+ * — the shape harness-injected user-role messages (goal kicks, task wakes)
+ * have. Display surfaces drop these rows outright; anything looser (a block
+ * plus trailing text) must instead be sanitized, never dropped.
+ */
+export function isInternalBlockOnlyContent(content: unknown): boolean {
+  if (typeof content !== "string") return false;
+  const trimmed = content.trim();
+  return /^<bubble_internal_(?:context|reminder)\b/.test(trimmed)
+    && /<\/bubble_internal_(?:context|reminder)>$/.test(trimmed);
+}
+
 export function formatInternalReminderBlock(kind: string, content: string): string {
   return formatInternalBlock("reminder", kind, content);
 }

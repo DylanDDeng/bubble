@@ -5,6 +5,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, appendFileSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { isInternalBlockOnlyContent } from "./agent/internal-reminder-sanitizer.js";
 import { getBubbleHome } from "./bubble-home.js";
 import { CheckpointStore } from "./checkpoints.js";
 import {
@@ -310,6 +311,9 @@ export class SessionManager {
     for (let i = start; i < entries.length; i++) {
       const entry = entries[i];
       if (entry.type !== "user_message") continue;
+      // Harness-injected turns (goal kicks, task wakes) are internal blocks —
+      // not rewind anchors, and their markup must never render in the picker.
+      if (isInternalBlockOnlyContent(entry.message.content)) continue;
       const text = messageText(entry.message);
       turns.push({
         id: entry.id,
@@ -439,7 +443,11 @@ function firstUserEntryAfterLatestClear(entries: SessionLogEntry[]) {
   const startIndex = latestClearIndex(entries) + 1;
   for (let i = startIndex; i < entries.length; i++) {
     const entry = entries[i];
-    if (entry.type === "user_message") return entry;
+    // Skip harness-injected internal blocks (goal kicks, task wakes): they
+    // must not become the /resume preview or the deterministic title.
+    if (entry.type === "user_message" && !isInternalBlockOnlyContent(entry.message.content)) {
+      return entry;
+    }
   }
   return undefined;
 }

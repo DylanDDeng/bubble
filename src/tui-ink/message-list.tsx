@@ -30,6 +30,7 @@ import {
   type SubagentDisplay,
 } from "./subagent-view.js";
 import { sanitizeInternalReminderBlocks } from "../agent/internal-reminder-sanitizer.js";
+import { stripFileBlocks } from "../context/compaction-files.js";
 import { splitImageDisplayContent } from "../tui/image-display.js";
 
 /**
@@ -980,7 +981,11 @@ function CompactionSummaryBlock({ message }: { message: DisplayMessage }) {
   // markup before rendering, so a summary that echoed it never reaches the
   // transcript. Belt-and-suspenders — the summarizer is fed sanitized history,
   // but the summary is model-generated and also re-injected as context.
-  const summary = sanitizeInternalReminderBlocks(message.compactionSummary ?? "").trim() || undefined;
+  // File-tracking blocks (<read-files>/<modified-files>) are model-facing
+  // bookkeeping welded onto the summary — never render them raw either.
+  const summary = stripFileBlocks(
+    sanitizeInternalReminderBlocks(message.compactionSummary ?? ""),
+  ).trim() || undefined;
   return (
     <Box
       marginTop={1}
@@ -1020,12 +1025,16 @@ function UserMessageBlock({
 }) {
   const theme = useTheme();
   const badge = userInputStatusBadgeLabel(inputStatus);
+  // Defense in depth: pure internal-block rows are dropped upstream
+  // (isInternalBlockOnlyContent), but a block with trailing text — or a
+  // truncated block — would slip that anchored filter. Never render markup.
+  const visibleContent = sanitizeInternalReminderBlocks(content);
   // Rail and its right gutter must share the bubble background; otherwise the
   // terminal background shows up as a dark seam between rail and message.
   const railWidth = 2;
   const horizontalRoom = Math.max(20, terminalColumns - 2);
   const bubbleTextWidth = Math.max(1, horizontalRoom - railWidth - 2);
-  const { bodyLines, referenceLines } = splitImageDisplayContent(content);
+  const { bodyLines, referenceLines } = splitImageDisplayContent(visibleContent);
   const wrappedLines = bodyLines
     .flatMap((line) => wrapByVisualWidth(line, bubbleTextWidth));
   const attachmentReferenceIndent = " ".repeat(railWidth + 1);
