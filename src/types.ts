@@ -298,6 +298,15 @@ export interface ToolRegistryEntry extends ToolDefinition {
    * fan-out never share it (design v2 §2). Tools without it are shared as-is.
    */
   cloneForChild?: () => ToolRegistryEntry;
+  /**
+   * Optional availability predicate, evaluated on EVERY model call. When it
+   * returns false the tool is omitted from the provider's function list
+   * entirely — the model cannot see or call it — and reappears on the next
+   * call once the predicate flips. For state-gated tools (e.g. update_goal
+   * without an active goal) this removes the affordance itself instead of
+   * relying on description wording, which strong models ignore.
+   */
+  enabled?: () => boolean;
   /** Optional one-line summary for the Available tools section. */
   promptSnippet?: string;
   /** Optional tool-specific rules appended to the system prompt when this tool is active. */

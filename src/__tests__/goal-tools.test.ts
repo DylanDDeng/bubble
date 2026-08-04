@@ -37,6 +37,17 @@ describe("goal tools", () => {
     expect(prompt).not.toContain("update_goal");
   });
 
+  it("is disabled until a goal is active, and re-enables live", () => {
+    const store = new GoalStore();
+    const { updateGoal } = tools(store);
+
+    expect(updateGoal.enabled?.()).toBe(false);
+    store.set("ship it");
+    expect(updateGoal.enabled?.()).toBe(true);
+    store.markComplete();
+    expect(updateGoal.enabled?.()).toBe(false);
+  });
+
   it("update_goal errors without a goal", async () => {
     const { updateGoal } = tools(new GoalStore());
     expect((await updateGoal.execute({ status: "complete" }, ctx)).isError).toBe(true);

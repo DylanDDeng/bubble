@@ -875,7 +875,8 @@ export class Agent {
       currentAssistantAppended = false;
 
       let toolEntries = Array.from(this.tools.values())
-        .filter((t) => !t.deferred || this.unlockedDeferred.has(t.name));
+        .filter((t) => !t.deferred || this.unlockedDeferred.has(t.name))
+        .filter((t) => t.enabled?.() !== false);
       const beforeModelCallCtx = {
         agent: this,
         cwd,

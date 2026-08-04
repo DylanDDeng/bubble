@@ -2151,6 +2151,38 @@ describe("Agent", () => {
     await expect(collectEvents(agent, "latest", "/tmp")).rejects.toThrow(/too long/i);
     expect(callCount).toBe(4); // initial + 3 retries
   });
+
+  it("omits enabled():false tools from the provider call and re-includes them live", async () => {
+    const seenToolNames: string[][] = [];
+    const provider: Provider = {
+      async *streamChat(_messages, options) {
+        seenToolNames.push((options.tools ?? []).map((tool) => tool.name));
+        yield { type: "text", content: "ok" } as StreamChunk;
+        yield { type: "done" } as StreamChunk;
+      },
+      async complete() {
+        return "";
+      },
+    };
+    let gateOpen = false;
+    const gated: ToolRegistryEntry = {
+      name: "gated_tool",
+      description: "state-gated",
+      parameters: { type: "object", properties: {} },
+      enabled: () => gateOpen,
+      async execute() {
+        return { content: "ok" };
+      },
+    };
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [gated, toolForAgentTest("always_tool")] });
+
+    await collectEvents(agent, "first", "/tmp");
+    gateOpen = true;
+    await collectEvents(agent, "second", "/tmp");
+
+    expect(seenToolNames[0]).toEqual(["always_tool"]);
+    expect(seenToolNames[1]).toEqual(["gated_tool", "always_tool"]);
+  });
 });
 
 async function waitFor(assertion: () => boolean, timeoutMs = 1000): Promise<void> {

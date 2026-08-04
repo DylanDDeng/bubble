@@ -35,12 +35,16 @@ export function createGoalTools(store: GoalStore): ToolRegistryEntry[] {
       additionalProperties: false,
     },
     effect: "unknown",
-    // Deliberately NO promptSnippet: a completion-marker tool advertised in
-    // the always-on tool list gets spuriously called at turn end even by
-    // strong models at high effort (observed with gpt-5.6-sol) — wording
-    // does not beat the trained close-out-the-task prior; removing the
-    // affordance does. Goal turns inject full usage guidance separately
-    // (goal/prompts.ts), so the legitimate path loses nothing.
+    // Goalless sessions must not see this tool AT ALL: a completion-marker
+    // in the function list gets spuriously called at turn end even by strong
+    // models at high effort (observed with gpt-5.6-sol) — wording does not
+    // beat the trained close-out-the-task prior. The enabled() gate removes
+    // it from the provider's tool list until a goal is active (re-evaluated
+    // every model call, so /goal mid-session takes effect immediately), and
+    // there is deliberately no promptSnippet since the static system prompt
+    // cannot track goal state. Goal turns inject full usage guidance
+    // separately (goal/prompts.ts), so the legitimate path loses nothing.
+    enabled: () => store.isActive(),
     async execute(args): Promise<{ content: string; isError?: boolean }> {
       const goal = store.snapshot();
       if (!goal) return { content: "No active goal to update.", isError: true };
