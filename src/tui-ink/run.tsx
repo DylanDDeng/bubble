@@ -1,5 +1,6 @@
 import { render } from "ink";
 import React from "react";
+import { END_SYNC, wrapSynchronizedOutput } from "./sync-output.js";
 import type { Agent } from "../agent.js";
 import type { CliArgs } from "../cli.js";
 import type { SessionManager } from "../session.js";
@@ -105,15 +106,16 @@ export function createInkAppElement(
 /**
  * Best-effort terminal restore for abnormal exits. Bubble renders into the
  * primary screen (no alt-screen, no mouse reporting) so the transcript flows
- * into the terminal's native scrollback — there is no global mouse/alt-screen
- * state to undo. We only make sure the cursor is visible again, mirroring
- * Ink's own teardown (idempotent when Ink already ran; load-bearing when it
- * didn't).
+ * into the terminal's native scrollback. We end synchronized output first —
+ * a crash between a frame's ?2026h and ?2026l would otherwise leave the
+ * terminal buffering until its own timeout — then restore the cursor,
+ * mirroring Ink's teardown (idempotent when Ink already ran; load-bearing
+ * when it didn't).
  */
 function restoreTerminal() {
   if (!process.stdout.isTTY) return;
   try {
-    process.stdout.write("\x1b[?25h");
+    process.stdout.write(`${END_SYNC}\x1b[?25h`);
   } catch {
     // stdout may already be destroyed during shutdown
   }
@@ -178,6 +180,9 @@ export async function runTui(
       // and frees the arrow keys for composer history. Only the streaming tail
       // and the composer live in the repainting region at the bottom.
       alternateScreen: false,
+      // Frames composite atomically via synchronized output (CSI ?2026) —
+      // kills erase-then-repaint flicker without alt-screen.
+      stdout: wrapSynchronizedOutput(process.stdout),
     },
   );
   try {
