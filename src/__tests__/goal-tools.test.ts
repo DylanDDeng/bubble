@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createGoalTools } from "../goal/tools.js";
 import { GoalStore } from "../goal/store.js";
+import { buildEnvironmentPrompt } from "../prompt/environment.js";
 import type { ToolContext } from "../types.js";
 
 const ctx = { cwd: "/tmp" } as ToolContext;
@@ -18,6 +19,22 @@ describe("goal tools", () => {
     const { list, updateGoal } = tools(new GoalStore());
     expect(list.map((t) => t.name)).toEqual(["update_goal"]);
     expect(updateGoal.parameters.properties.status.enum).toEqual(["complete", "blocked"]);
+  });
+
+  it("stays out of the ambient Available-tools list — no completion-marker bait", () => {
+    // A goal-completion tool advertised in every session's prompt gets called
+    // spuriously at turn end even by strong models (observed: gpt-5.6-sol,
+    // high effort, no goal set). No promptSnippet → the environment prompt's
+    // visible-tools filter drops it; goal turns inject usage guidance instead.
+    const { updateGoal } = tools(new GoalStore());
+    expect(updateGoal.promptSnippet).toBeUndefined();
+
+    const prompt = buildEnvironmentPrompt({
+      tools: ["read", "update_goal"],
+      toolSnippets: { read: "Read a file." },
+    });
+    expect(prompt).toContain("- read:");
+    expect(prompt).not.toContain("update_goal");
   });
 
   it("update_goal errors without a goal", async () => {

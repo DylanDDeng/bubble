@@ -12,8 +12,8 @@
 import type { ToolRegistryEntry } from "../types.js";
 import type { GoalStore } from "./store.js";
 
-const UPDATE_GOAL_DESCRIPTION = `Update the active thread goal's status. Use this tool only to mark the goal achieved or genuinely blocked; it returns an error if there is no active goal.
-Set status to "complete" only when the objective has actually been achieved and no required work remains — never merely because the budget is nearly exhausted or you are stopping.
+const UPDATE_GOAL_DESCRIPTION = `Errors unless the user has set an active goal via /goal — do NOT call this to wrap up an ordinary turn; most sessions have no goal.
+Update the active thread goal's status. Set status to "complete" only when the objective has actually been achieved and no required work remains — never merely because the budget is nearly exhausted or you are stopping.
 Set status to "blocked" only when the same blocking condition has repeated for at least three consecutive goal turns (counting the original turn and automatic continuations) and you cannot make meaningful progress without user input or an external-state change. Do not use "blocked" because work is hard, slow, uncertain, or incomplete.
 You cannot pause, resume, or set a budget through this tool; those are controlled by the user.`;
 
@@ -35,7 +35,12 @@ export function createGoalTools(store: GoalStore): ToolRegistryEntry[] {
       additionalProperties: false,
     },
     effect: "unknown",
-    promptSnippet: "Mark the goal complete (objective achieved) or blocked (true impasse).",
+    // Deliberately NO promptSnippet: a completion-marker tool advertised in
+    // the always-on tool list gets spuriously called at turn end even by
+    // strong models at high effort (observed with gpt-5.6-sol) — wording
+    // does not beat the trained close-out-the-task prior; removing the
+    // affordance does. Goal turns inject full usage guidance separately
+    // (goal/prompts.ts), so the legitimate path loses nothing.
     async execute(args): Promise<{ content: string; isError?: boolean }> {
       const goal = store.snapshot();
       if (!goal) return { content: "No active goal to update.", isError: true };
