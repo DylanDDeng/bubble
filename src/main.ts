@@ -125,21 +125,25 @@ async function main() {
         thinkingLevel: args.thinkingLevel,
         promptCacheKey: sessionPromptCacheKey,
         protocol: defaultProvider.protocol,
+        headers: defaultProvider.headers,
         openAICodexAuth: registry.createOpenAICodexAuthAdapter(defaultProvider.id),
         grokAuth: registry.createGrokAuthAdapter(defaultProvider.id),
       })
     : createUnavailableProvider(unavailableProviderMessage);
-  const createProvider = (providerId: string, apiKey: string, baseURL: string) =>
-    createProviderInstance({
+  const createProvider = (providerId: string, apiKey: string, baseURL: string) => {
+    const profile = registry.getConfigured().find((provider) => provider.id === providerId);
+    return createProviderInstance({
       providerId,
       apiKey,
       baseURL,
       thinkingLevel: args.thinkingLevel,
       promptCacheKey: sessionPromptCacheKey,
-      protocol: registry.getConfigured().find((provider) => provider.id === providerId)?.protocol,
+      protocol: profile?.protocol,
+      headers: profile?.headers,
       openAICodexAuth: registry.createOpenAICodexAuthAdapter(providerId),
       grokAuth: registry.createGrokAuthAdapter(providerId),
     });
+  };
   const createProviderForRoute = async (route: { providerId: string; model: string }) => {
     const providerId = route.providerId;
     if (!providerId) {

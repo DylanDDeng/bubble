@@ -39,6 +39,8 @@ export interface AnthropicProviderOptions {
   apiKey: string;
   baseURL: string;
   thinkingLevel?: ThinkingLevel;
+  /** User-configured extra headers, merged last (client-identity gates). */
+  headers?: Record<string, string>;
 }
 
 interface AnthropicRequest {
@@ -792,7 +794,9 @@ function buildAnthropicHeaders(options: AnthropicProviderOptions, stream: boolea
     headers.authorization = `Bearer ${options.apiKey}`;
   }
   if (stream) headers.accept = "text/event-stream";
-  return headers;
+  // User-configured headers win last: anthropic-protocol coding plans gate on
+  // client identity (e.g. a specific User-Agent), configured per provider.
+  return { ...headers, ...(options.headers ?? {}) };
 }
 
 async function readAnthropicErrorDetail(response: Response): Promise<string> {

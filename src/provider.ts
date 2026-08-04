@@ -103,6 +103,13 @@ export interface ProviderInstanceOptions {
   /** Stable per-session seed for provider prompt caches. */
   promptCacheKey?: string;
   protocol?: ProviderProtocol;
+  /**
+   * User-configured extra request headers (provider entry `headers` in
+   * config.json/models.json). Merged over protocol defaults, so a coding-plan
+   * endpoint's client-identity gate (usually a User-Agent allowlist) can be
+   * satisfied from config.
+   */
+  headers?: Record<string, string>;
   /** Dynamic OAuth access-token loader/refresh hook for ChatGPT Codex requests. */
   openAICodexAuth?: OpenAICodexAuthAdapter;
   /** Dynamic OAuth access-token loader/refresh hook for Grok subscription requests. */
@@ -147,13 +154,19 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
   // CLI identity headers the proxy gates on, plus a fetch that keeps the
   // short-lived OAuth bearer fresh (and proxy-aware) across long sessions.
   const grokSubscription = options.providerId === "grok" || isGrokSubscriptionBaseUrl(options.baseURL);
+  // User-configured headers merge over the built-in identity headers so a
+  // config entry can override even the Grok defaults deliberately.
+  const defaultHeaders = {
+    ...(grokSubscription ? buildGrokSubscriptionHeaders() : {}),
+    ...(options.headers ?? {}),
+  };
   const client = new OpenAI({
     apiKey: options.apiKey,
     baseURL: options.baseURL,
     timeout: resolveRequestTimeoutMs(process.env.BUBBLE_PROVIDER_REQUEST_TIMEOUT_MS),
+    ...(Object.keys(defaultHeaders).length > 0 ? { defaultHeaders } : {}),
     ...(grokSubscription
       ? {
-          defaultHeaders: buildGrokSubscriptionHeaders(),
           fetch: (options.grokAuth
             ? createGrokSubscriptionFetch(options.grokAuth)
             : getChatGptFetch()) as unknown as NonNullable<ConstructorParameters<typeof OpenAI>[0]>["fetch"],

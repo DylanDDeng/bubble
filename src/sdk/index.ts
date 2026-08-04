@@ -434,6 +434,8 @@ export class BubbleSdk {
       apiKey: target.apiKey,
       baseURL: target.baseURL,
       promptCacheKey,
+      protocol: target.protocol,
+      headers: target.headers,
     });
     return { provider, providerId: activeProviderId, model: activeModel };
   }

@@ -34,6 +34,24 @@ export interface ProviderProfile {
   enabled: boolean;
   authType?: "api" | "oauth";
   protocol?: ProviderProtocol;
+  /**
+   * Extra request headers sent with every call to this provider. The knob for
+   * client-identity gates: coding-plan endpoints commonly allowlist specific
+   * User-Agent strings (Grok wants "grok-cli", plans that "support Claude
+   * Code" check for its UA), so users can satisfy them from config without
+   * code changes. Merged over protocol defaults; same-name keys win.
+   */
+  headers?: Record<string, string>;
+}
+
+/** Keep only string-valued headers; returns undefined for empty/invalid maps. */
+export function sanitizeProviderHeaders(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof raw === "string" && key.trim()) out[key] = raw;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 export interface ModelInfo {
@@ -313,6 +331,7 @@ export class ProviderRegistry {
           enabled: true,
           authType: "api",
           protocol: resolveConfiguredProtocol(id, baseURL, cfg.protocol),
+          headers: sanitizeProviderHeaders(cfg.headers),
         };
       });
     } else {
@@ -323,6 +342,7 @@ export class ProviderRegistry {
           ...provider,
           baseURL,
           protocol: resolveConfiguredProtocol(provider.id, baseURL, provider.protocol),
+          headers: sanitizeProviderHeaders(provider.headers),
         };
       });
     }

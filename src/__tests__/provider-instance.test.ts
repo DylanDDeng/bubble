@@ -545,4 +545,81 @@ describe("createProviderInstance", () => {
 
     expect(openaiBody.parallel_tool_calls).toBeUndefined();
   });
+  it("sends user-configured headers on the generic chat path", async () => {
+    createMock.mockResolvedValue(fromArray([]));
+    const { createProviderInstance } = await import("../provider.js");
+    const OpenAI = (await import("openai")).default as unknown as ReturnType<typeof vi.fn>;
+    OpenAI.mockClear();
+
+    createProviderInstance({
+      providerId: "kimi-for-coding",
+      apiKey: "sk-test",
+      baseURL: "https://api.kimi.com/coding/v1",
+      headers: { "User-Agent": "claude-cli/1.0 (external, cli)", "x-custom": "1" },
+    });
+
+    expect(OpenAI).toHaveBeenCalledWith(expect.objectContaining({
+      defaultHeaders: expect.objectContaining({
+        "User-Agent": "claude-cli/1.0 (external, cli)",
+        "x-custom": "1",
+      }),
+    }));
+  });
+
+  it("merges user headers over Ark defaults", async () => {
+    const requestInits: RequestInit[] = [];
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestInits.push(init ?? {});
+      return makeSseResponse([{ type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } }]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({
+      providerId: "doubao",
+      apiKey: "sk-test",
+      baseURL: "https://ark.cn-beijing.volces.com/api/v3",
+      headers: { "User-Agent": "my-approved-client" },
+    });
+    await collect(provider.streamChat([{ role: "user", content: "hi" }], { model: "doubao-seed" }));
+
+    const headers = requestInits[0]?.headers as Record<string, string>;
+    expect(headers["User-Agent"]).toBe("my-approved-client");
+    expect(headers.Authorization).toBe("Bearer sk-test");
+  });
+
+  it("merges user headers into Anthropic-protocol requests", async () => {
+    const requestInits: RequestInit[] = [];
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestInits.push(init ?? {});
+      return new Response("bad request", { status: 400 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({
+      providerId: "kimi-for-coding",
+      apiKey: "sk-test",
+      baseURL: "https://api.kimi.com/coding",
+      protocol: "anthropic-messages",
+      headers: { "user-agent": "claude-cli/1.0 (external, cli)" },
+    });
+    await expect(
+      collect(provider.streamChat([{ role: "user", content: "hi" }], { model: "kimi-k2.7-code" })),
+    ).rejects.toThrow();
+
+    const headers = requestInits[0]?.headers as Record<string, string>;
+    expect(headers["user-agent"]).toBe("claude-cli/1.0 (external, cli)");
+    expect(headers["x-api-key"]).toBe("sk-test");
+  });
+});
+
+describe("sanitizeProviderHeaders", () => {
+  it("keeps string values, drops the rest, and returns undefined when empty", async () => {
+    const { sanitizeProviderHeaders } = await import("../provider-registry.js");
+    expect(sanitizeProviderHeaders({ "User-Agent": "x", bad: 42, worse: null })).toEqual({ "User-Agent": "x" });
+    expect(sanitizeProviderHeaders({})).toBeUndefined();
+    expect(sanitizeProviderHeaders("nope")).toBeUndefined();
+    expect(sanitizeProviderHeaders(undefined)).toBeUndefined();
+  });
 });

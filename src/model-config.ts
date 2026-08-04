@@ -17,6 +17,8 @@ export interface ProviderModelConfig {
   baseURL?: string;
   apiKey?: string;
   protocol?: ProviderProtocol;
+  /** Extra request headers (e.g. a User-Agent a coding-plan endpoint gates on). */
+  headers?: Record<string, string>;
   models?: Array<{ id: string; name?: string; tier?: ModelTier; routingPriority?: number }>;
 }
 

@@ -108,16 +108,19 @@ export async function serveFeishu(opts: ServeFeishuOptions = {}): Promise<void> 
   if (mcpLoaded.servers.length > 0) {
     await mcpManager.start();
   }
-  const createProvider = (providerId: string, apiKey: string, baseURL: string, promptCacheKey?: string) =>
-    createProviderInstance({
+  const createProvider = (providerId: string, apiKey: string, baseURL: string, promptCacheKey?: string) => {
+    const profile = providerRegistry.getConfigured().find((provider) => provider.id === providerId);
+    return createProviderInstance({
       providerId,
       apiKey,
       baseURL,
       promptCacheKey,
-      protocol: providerRegistry.getConfigured().find((provider) => provider.id === providerId)?.protocol,
+      protocol: profile?.protocol,
+      headers: profile?.headers,
       openAICodexAuth: providerRegistry.createOpenAICodexAuthAdapter(providerId),
       grokAuth: providerRegistry.createGrokAuthAdapter(providerId),
     });
+  };
   const createProviderForRoute = async (route: { providerId: string; model: string }, promptCacheKey?: string) => {
     const target = providerRegistry.getConfigured().find((p) => p.id === route.providerId);
     if (!target?.apiKey) {

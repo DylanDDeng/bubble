@@ -14,6 +14,8 @@ export interface ArkResponsesProviderOptions {
   apiKey: string;
   baseURL: string;
   thinkingLevel?: ThinkingLevel;
+  /** User-configured extra headers, merged last (client-identity gates). */
+  headers?: Record<string, string>;
 }
 
 interface ArkResponsesChatOptions {
@@ -188,6 +190,7 @@ async function sendArkResponsesRequest(
       "Authorization": `Bearer ${options.apiKey}`,
       "Content-Type": "application/json",
       "Accept": body.stream ? "text/event-stream" : "application/json",
+      ...(options.headers ?? {}),
     },
     body: JSON.stringify(body),
     signal: requestOptions.signal,

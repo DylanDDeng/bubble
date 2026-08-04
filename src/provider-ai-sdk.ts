@@ -52,6 +52,8 @@ export interface AiSdkProviderOptions {
   apiKey: string;
   baseURL?: string;
   thinkingLevel?: ThinkingLevel;
+  /** User-configured extra headers, merged last (client-identity gates). */
+  headers?: Record<string, string>;
   /** Transport override for tests; defaults to the shared provider fetch. */
   fetch?: ProviderFetch;
 }
@@ -73,6 +75,7 @@ const AI_SDK_PROVIDER_FACTORIES: Record<string, ModelFactory> = {
     const provider = createGoogleGenerativeAI({
       apiKey: options.apiKey,
       ...(options.baseURL ? { baseURL: normalizeBaseURL(options.baseURL) } : {}),
+      ...(options.headers ? { headers: options.headers } : {}),
       fetch: (options.fetch ?? createProviderFetch({
         providerName: "Google Gemini",
         verboseEnvVar: "BUBBLE_AI_SDK_FETCH_VERBOSE",
