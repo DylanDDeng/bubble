@@ -104,7 +104,13 @@ describe("variant resolver", () => {
   });
 
   it("aligns built-in Kimi models with the current API surface", () => {
+    // The first four are the plan slots GET /coding/v1/models actually serves
+    // (probed 2026-08-04); the kimi-k2.* ids are kept for older keys.
     expect(listBuiltinModels("kimi-for-coding").map((model) => model.id)).toEqual([
+      "k3",
+      "k3-256k",
+      "kimi-for-coding",
+      "kimi-for-coding-highspeed",
       "kimi-k2.7-code",
       "kimi-k2.7-code-highspeed",
       "kimi-k2.6",
@@ -114,6 +120,16 @@ describe("variant resolver", () => {
     expect(isThinkingOnlyModel("kimi-for-coding", "kimi-k2.7-code-highspeed")).toBe(true);
     expect(getAvailableThinkingLevels("kimi-for-coding", "kimi-k2.6")).toEqual(["off", "medium"]);
     expect(getAvailableThinkingLevels("kimi-for-coding", "kimi-k2.5")).toEqual(["off", "medium"]);
+  });
+
+  it("exposes K3's real effort grades rather than a thinking toggle", () => {
+    // K3 takes reasoning_effort low/high/max (no "medium") and can disable
+    // thinking; the 256k variant has no off switch.
+    expect(getAvailableThinkingLevels("kimi-for-coding", "k3")).toEqual(["off", "low", "high", "max"]);
+    expect(getAvailableThinkingLevels("kimi-for-coding", "k3-256k")).toEqual(["low", "high", "max"]);
+    expect(isThinkingToggleModel("kimi-for-coding", "k3")).toBe(false);
+    expect(isThinkingOnlyModel("kimi-for-coding", "k3-256k")).toBe(false);
+    expect(getAvailableThinkingLevels("moonshot-cn", "kimi-k3")).toEqual(["off", "low", "high", "max"]);
   });
 
   it("includes Alibaba DashScope qwen models", () => {
