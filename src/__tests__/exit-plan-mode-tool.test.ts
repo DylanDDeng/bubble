@@ -98,4 +98,18 @@ describe("exit_plan_mode tool", () => {
     expect(result.isError).toBe(true);
     expect(result.content).toContain("boom");
   });
+
+  it("is hidden from the tool list outside plan mode, and appears on entry", () => {
+    // Observed in a real trace: with the tool always in the function list, the
+    // model called it at the end of an ordinary turn and got back "Ignored
+    // exit_plan_mode because plan mode is not active" — a wasted round trip.
+    const { controller } = createController(async () => ({ action: "reject" }), "default");
+    const tool = createExitPlanModeTool(controller);
+
+    expect(tool.enabled?.()).toBe(false);
+    controller.setMode("plan");
+    expect(tool.enabled?.()).toBe(true);
+    controller.setMode("bypassPermissions");
+    expect(tool.enabled?.()).toBe(false);
+  });
 });

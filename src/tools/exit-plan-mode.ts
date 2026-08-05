@@ -23,6 +23,14 @@ export function createExitPlanModeTool(controller: PlanController): ToolRegistry
     readOnly: true,
     effect: "read",
     requiresApproval: true,
+    // Outside plan mode the tool is not just useless, it is bait: models call
+    // it to "wrap up" an ordinary turn despite the description below saying
+    // not to (same failure seen with update_goal — wording loses to the
+    // trained close-out prior). Gating it out of the provider's function list
+    // removes the affordance; the predicate re-runs every model call, so
+    // entering plan mode surfaces it immediately. The runtime no-op in
+    // agent.ts stays as a backstop for a mode flip mid-turn.
+    enabled: () => controller.getMode() === "plan",
     description:
       "ONLY call this tool when the harness has told you via a runtime reminder that plan mode is ACTIVE. " +
       "Do NOT call it during ordinary work — in default mode you should just use the regular tools directly. " +
