@@ -390,7 +390,9 @@ const MessageItem = React.memo(function MessageItem({
   const toolCallCount = message.toolCalls?.length ?? 0;
   const hasVisibleAssistantContent =
     (hasParts ? hasVisibleParts : (!!visibleContent.trim() || toolCallCount > 0)) ||
-    (!!visibleReasoning && (showThinking || verboseTrace)) ||
+    // Reasoning now always renders (collapsed by default), so its presence
+    // alone makes a turn visible.
+    !!visibleReasoning ||
     // A finalized turn carries taskElapsedMs and renders a TaskDurationLine even
     // when its text/parts are empty — mirror that so the duration isn't dropped.
     // (The verbose TurnDigest needs no term: whenever it renders, the same
@@ -400,7 +402,9 @@ const MessageItem = React.memo(function MessageItem({
 
   return (
     <Box marginTop={1} marginBottom={1} flexDirection="column">
-      {visibleReasoning && (showThinking || verboseTrace) && <ReasoningTraceBlock reasoning={visibleReasoning} />}
+      {visibleReasoning && (
+        <ReasoningTraceBlock reasoning={visibleReasoning} expanded={showThinking || verboseTrace} />
+      )}
       {message.parts && message.parts.length > 0 ? (
         <MessageParts
           parts={message.parts}
@@ -474,9 +478,16 @@ function StreamingMessage({
 
   return (
     <Box flexDirection="column">
-      {visibleReasoning && (showThinking || verboseTrace) && (
+      {visibleReasoning && (
         <Box marginTop={1} flexDirection="column">
-          <ReasoningTraceBlock reasoning={visibleReasoning} />
+          {/* Always visible while streaming: a reasoning model can be silent
+              for minutes, and an empty screen is indistinguishable from a
+              hang. Compact by default, full under Ctrl+T / Ctrl+O. */}
+          <ReasoningTraceBlock
+            reasoning={visibleReasoning}
+            expanded={showThinking || verboseTrace}
+            streaming
+          />
         </Box>
       )}
       {visibleParts.length > 0 && (
@@ -970,22 +981,59 @@ function isToolPending(tool: DisplayToolCall): boolean {
   return tool.result === undefined;
 }
 
-function ReasoningTraceBlock({ reasoning }: { reasoning: string }) {
+/** Live rolling window size — enough to read the model's train of thought. */
+const REASONING_STREAM_WINDOW = 5;
+/** Lines kept when a finished turn's reasoning is collapsed. */
+const REASONING_COLLAPSED_LINES = 2;
+
+/**
+ * Reasoning trace with three states, because a reasoning model can spend
+ * minutes here (qwen3.8-max at high effort drafts entire files in thought):
+ * hiding it looks like a hang, printing all of it buries the transcript.
+ *
+ *   streaming + compact  rolling last N lines, so there is always motion
+ *   settled + compact    opening lines + "(N more lines, ctrl+o to expand)"
+ *   expanded             everything (Ctrl+T thinking, or Ctrl+O verbose)
+ */
+function ReasoningTraceBlock({
+  reasoning,
+  expanded = false,
+  streaming = false,
+}: {
+  reasoning: string;
+  expanded?: boolean;
+  streaming?: boolean;
+}) {
   const theme = useTheme();
   const lines = React.useMemo(
     () => reasoning.split("\n").filter((l) => l.trim() !== ""),
     [reasoning],
   );
+  if (lines.length === 0) return null;
+
+  const visible = expanded
+    ? lines
+    : streaming
+      ? lines.slice(-REASONING_STREAM_WINDOW)
+      : lines.slice(0, REASONING_COLLAPSED_LINES);
+  const hidden = lines.length - visible.length;
+
   return (
     <Box flexDirection="column" marginLeft={2} marginBottom={1}>
       <Text color={theme.thinkingDim} dimColor>
-        ✻ Reasoning trace{lines.length > 0 ? ` · ${lines.length} line${lines.length === 1 ? "" : "s"}` : ""}
+        ✻ {streaming && !expanded ? "Thinking" : "Reasoning trace"}
+        {` · ${lines.length} line${lines.length === 1 ? "" : "s"}`}
       </Text>
-      {lines.map((line, i) => (
+      {visible.map((line, i) => (
         <Text key={i} color={theme.thinkingDim} dimColor italic>
           {line}
         </Text>
       ))}
+      {hidden > 0 && (
+        <Text color={theme.thinkingDim} dimColor>
+          … ({hidden} more line{hidden === 1 ? "" : "s"}{streaming ? "" : ", ctrl+o to expand"})
+        </Text>
+      )}
     </Box>
   );
 }
