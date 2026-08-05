@@ -56,6 +56,9 @@ export const BUILTIN_PROVIDERS: BuiltinProviderDefinition[] = [
   { id: "zai", name: "Z.AI", baseURL: "https://api.z.ai/api/paas/v4" },
   { id: "zai-coding-plan", name: "Z.AI Coding Plan", baseURL: "https://api.z.ai/api/coding/paas/v4" },
   { id: "alibaba", name: "Alibaba DashScope", baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1" },
+  // Bailian token plan: its own endpoint and quota, separate from the
+  // pay-per-token DashScope provider above. Hosts several vendors' models.
+  { id: "bailian-token-plan", name: "阿里云百炼 Token Plan", baseURL: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1" },
   { id: "doubao", name: "Doubao (Volcengine Ark)", baseURL: "https://ark.cn-beijing.volces.com/api/v3", protocol: "ark-responses" },
   { id: "minimax", name: "MiniMax Token Plan", baseURL: "https://api.minimaxi.com/anthropic", protocol: "anthropic-messages" },
   { id: "minimax-anthropic", name: "MiniMax API", baseURL: "https://api.minimaxi.com/anthropic", protocol: "anthropic-messages" },
@@ -96,6 +99,13 @@ const KIMI_THINKING_ONLY_LEVELS: ReasoningEffort[] = ["medium"];
 const KIMI_K3_LEVELS: ReasoningEffort[] = ["off", "low", "high", "max"];
 const KIMI_K3_EFFORT_ONLY_LEVELS: ReasoningEffort[] = ["low", "high", "max"];
 const DEEPSEEK_V4_LEVELS: ReasoningEffort[] = ["high", "max"];
+// Bailian token plan grades, read off the endpoint's own 400 responses
+// ("'reasoning_effort' must be one of: ..."), which differ per model. "none"
+// maps to our "off". qwen3.6-flash / qwen3.7-* stop at xhigh; deepseek-v4-pro
+// there has no off switch.
+const BAILIAN_FULL_LEVELS: ReasoningEffort[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+const BAILIAN_NO_MAX_LEVELS: ReasoningEffort[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+const BAILIAN_DEEPSEEK_LEVELS: ReasoningEffort[] = ["low", "medium", "high", "xhigh", "max"];
 const STEPFUN_REASONING_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high"];
 const DOUBAO_SEED_REASONING_LEVELS: ReasoningEffort[] = ["minimal", "low", "medium", "high"];
 const MINIMAX_M3_REASONING_LEVELS: ReasoningEffort[] = ["off", "medium"];
@@ -174,6 +184,16 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "glm-4.6", name: "GLM-4.6", providerId: "zai-coding-plan", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
   { id: "qwen3.6-plus", name: "Qwen3.6 Plus", providerId: "alibaba", tier: "balanced", reasoningLevels: ["off"], contextWindow: 1048576 },
   { id: "qwen3.7-max", name: "Qwen3.7 Max", providerId: "alibaba", tier: "strong", reasoningLevels: ["off"], contextWindow: 1048576 },
+  // Bailian token plan (GET /models on the plan endpoint, probed 2026-08-04).
+  // Image/TTS entries from that list are omitted — this is a text agent.
+  { id: "qwen3.8-max", name: "Qwen3.8 Max", providerId: "bailian-token-plan", tier: "strong", reasoningLevels: BAILIAN_FULL_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  { id: "qwen3.8-max-preview", name: "Qwen3.8 Max Preview", providerId: "bailian-token-plan", tier: "strong", reasoningLevels: BAILIAN_FULL_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  { id: "qwen3.7-max", name: "Qwen3.7 Max", providerId: "bailian-token-plan", tier: "strong", reasoningLevels: BAILIAN_NO_MAX_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  { id: "qwen3.7-plus", name: "Qwen3.7 Plus", providerId: "bailian-token-plan", tier: "balanced", reasoningLevels: BAILIAN_NO_MAX_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  { id: "qwen3.6-flash", name: "Qwen3.6 Flash", providerId: "bailian-token-plan", tier: "fast", reasoningLevels: BAILIAN_NO_MAX_LEVELS, defaultReasoningLevel: "medium", contextWindow: 1048576 },
+  { id: "glm-5.2", name: "GLM-5.2", providerId: "bailian-token-plan", tier: "strong", reasoningLevels: BAILIAN_FULL_LEVELS, defaultReasoningLevel: "high", contextWindow: 1000000 },
+  { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", providerId: "bailian-token-plan", tier: "strong", reasoningLevels: BAILIAN_DEEPSEEK_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  { id: "deepseek-v4-flash-0731", name: "DeepSeek V4 Flash 0731", providerId: "bailian-token-plan", tier: "fast", reasoningLevels: BAILIAN_DEEPSEEK_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
   { id: "doubao-seed-2-1-pro-260628", name: "Doubao Seed 2.1 Pro", providerId: "doubao", reasoningLevels: DOUBAO_SEED_REASONING_LEVELS, defaultReasoningLevel: "high" },
   { id: "MiniMax-M3", name: "MiniMax M3", providerId: "minimax", tier: "strong", reasoningLevels: MINIMAX_M3_REASONING_LEVELS, contextWindow: 1000000 },
   { id: "MiniMax-M2.7", name: "MiniMax M2.7", providerId: "minimax", tier: "balanced", reasoningLevels: MINIMAX_REASONING_LEVELS, contextWindow: 204800 },

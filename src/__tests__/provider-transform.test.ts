@@ -218,3 +218,23 @@ describe("Kimi K3 request shape", () => {
     expect(config.reasoningEffort).toBeUndefined();
   });
 });
+
+describe("Bailian token plan request shape", () => {
+  it("sends reasoning_effort for graded levels", () => {
+    const config = resolveProviderRequestConfig("bailian-token-plan", "qwen3.8-max", "xhigh");
+    expect(config.extraBody).toEqual({ reasoning_effort: "xhigh" });
+  });
+
+  it('maps "off" to the endpoint\'s "none" value', () => {
+    const config = resolveProviderRequestConfig("bailian-token-plan", "qwen3.8-max", "off");
+    expect(config.extraBody).toEqual({ reasoning_effort: "none" });
+  });
+
+  it("normalizes onto each model's own server-validated ladder", () => {
+    // qwen3.6-flash tops out at xhigh; deepseek-v4-pro there has no off.
+    expect(resolveProviderRequestConfig("bailian-token-plan", "qwen3.6-flash", "max").extraBody)
+      .not.toEqual({ reasoning_effort: "max" });
+    expect(resolveProviderRequestConfig("bailian-token-plan", "deepseek-v4-pro", "off").extraBody)
+      .not.toEqual({ reasoning_effort: "none" });
+  });
+});

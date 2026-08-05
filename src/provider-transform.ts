@@ -96,6 +96,19 @@ export function resolveProviderRequestConfig(
     };
   }
 
+  // Bailian token plan speaks OpenAI-compatible reasoning_effort, with "none"
+  // as its off value (verified: enable_thinking=false works too, but "none"
+  // keeps one parameter for every level). Grades are validated server-side —
+  // an unknown value is a 400 — so the catalog's per-model ladder matters.
+  if (providerId === "bailian-token-plan") {
+    return {
+      effectiveThinkingLevel,
+      extraBody: {
+        reasoning_effort: effectiveThinkingLevel === "off" ? "none" : effectiveThinkingLevel,
+      },
+    };
+  }
+
   if (providerId === "stepfun") {
     return {
       effectiveThinkingLevel,
