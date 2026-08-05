@@ -89,6 +89,12 @@ const GLM_5_2_LEVELS: ReasoningEffort[] = ["high", "max", "off"];
 // Kimi K2.7 Code variants only support thinking mode (disabling it errors), so
 // "off" is not offered — the model is always in its thinking variant.
 const KIMI_THINKING_ONLY_LEVELS: ReasoningEffort[] = ["medium"];
+// Kimi K3 takes OpenAI-style reasoning_effort (low/high/max — no "medium"),
+// verified against the live endpoint: low spent 92 reasoning tokens on a task
+// where high spent 1310. Thinking is disableable on k3 (thinking.type
+// "disabled"); the 256k variant exposes effort only, so it has no "off".
+const KIMI_K3_LEVELS: ReasoningEffort[] = ["off", "low", "high", "max"];
+const KIMI_K3_EFFORT_ONLY_LEVELS: ReasoningEffort[] = ["low", "high", "max"];
 const DEEPSEEK_V4_LEVELS: ReasoningEffort[] = ["high", "max"];
 const STEPFUN_REASONING_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high"];
 const DOUBAO_SEED_REASONING_LEVELS: ReasoningEffort[] = ["minimal", "low", "medium", "high"];
@@ -181,12 +187,20 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "step-router-v1", name: "Step Router V1", providerId: "stepfun", reasoningLevels: STEPFUN_REASONING_LEVELS },
   { id: "kimi-k2.7-code", name: "Kimi K2.7 Code", providerId: "moonshot-cn", tier: "strong", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
   { id: "kimi-k2.7-code-highspeed", name: "Kimi K2.7 Code Highspeed", providerId: "moonshot-cn", tier: "fast", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
+  { id: "kimi-k3", name: "Kimi K3", providerId: "moonshot-cn", tier: "strong", reasoningLevels: KIMI_K3_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
   { id: "kimi-k2.6", name: "Kimi K2.6", providerId: "moonshot-cn", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
   { id: "kimi-k2.5", name: "Kimi K2.5", providerId: "moonshot-cn", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
   { id: "kimi-k2.7-code", name: "Kimi K2.7 Code", providerId: "moonshot-intl", tier: "strong", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
   { id: "kimi-k2.7-code-highspeed", name: "Kimi K2.7 Code Highspeed", providerId: "moonshot-intl", tier: "fast", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
+  { id: "kimi-k3", name: "Kimi K3", providerId: "moonshot-intl", tier: "strong", reasoningLevels: KIMI_K3_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
   { id: "kimi-k2.6", name: "Kimi K2.6", providerId: "moonshot-intl", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
   { id: "kimi-k2.5", name: "Kimi K2.5", providerId: "moonshot-intl", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },
+  // Kimi for Coding serves plan-slot ids (verified via GET /coding/v1/models):
+  // k3, k3-256k, kimi-for-coding, kimi-for-coding-highspeed.
+  { id: "k3", name: "Kimi K3", providerId: "kimi-for-coding", tier: "strong", reasoningLevels: KIMI_K3_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  { id: "k3-256k", name: "Kimi K3 256K", providerId: "kimi-for-coding", tier: "strong", reasoningLevels: KIMI_K3_EFFORT_ONLY_LEVELS, defaultReasoningLevel: "high", contextWindow: 262144 },
+  { id: "kimi-for-coding", name: "Kimi for Coding", providerId: "kimi-for-coding", tier: "strong", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
+  { id: "kimi-for-coding-highspeed", name: "Kimi for Coding Highspeed", providerId: "kimi-for-coding", tier: "fast", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
   { id: "kimi-k2.7-code", name: "Kimi K2.7 Code", providerId: "kimi-for-coding", tier: "strong", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
   { id: "kimi-k2.7-code-highspeed", name: "Kimi K2.7 Code Highspeed", providerId: "kimi-for-coding", tier: "fast", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
   { id: "kimi-k2.6", name: "Kimi K2.6", providerId: "kimi-for-coding", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 256000 },

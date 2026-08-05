@@ -14,7 +14,17 @@ export interface ProviderRequestConfig {
 }
 
 const MOONSHOT_PROVIDER_IDS = new Set(["moonshot-cn", "moonshot-intl", "kimi-for-coding"]);
-const KIMI_K27_FAMILY = new Set(["kimi-k2.7-code", "kimi-k2.7-code-highspeed"]);
+const KIMI_K27_FAMILY = new Set([
+  "kimi-k2.7-code",
+  "kimi-k2.7-code-highspeed",
+  // Coding-plan slot ids for the same generation (GET /coding/v1/models).
+  "kimi-for-coding",
+  "kimi-for-coding-highspeed",
+]);
+// K3 takes OpenAI-style reasoning_effort (low/high/max, no "medium"); "off"
+// disables thinking via top-level thinking.type. Verified live: effort changes
+// reasoning-token spend, and nested extra_body.thinking is ignored server-side.
+const KIMI_K3_FAMILY = new Set(["k3", "k3-256k", "kimi-k3"]);
 const KIMI_TOGGLE_THINKING_FAMILY = new Set(["kimi-k2.5", "kimi-k2.6"]);
 const KIMI_K26_DEFAULT_MAX_TOKENS = 32768;
 const MINIMAX_M3_FAMILY = new Set(["MiniMax-M3"]);
@@ -167,6 +177,20 @@ export function resolveProviderRequestConfig(
         extraBody: {
           thinking: { type: "enabled" },
         },
+      };
+    }
+    if (KIMI_K3_FAMILY.has(modelId)) {
+      return {
+        effectiveThinkingLevel,
+        omitTemperature: true,
+        reasoningContentEcho: "tool_calls",
+        // extraBody spreads onto the request body verbatim. The sibling
+        // `reasoningEffort` field is NOT the same thing: the generic chat path
+        // turns it into OpenRouter's `reasoning: {enabled: true}`, which drops
+        // the grade entirely.
+        extraBody: effectiveThinkingLevel === "off"
+          ? { thinking: { type: "disabled" } }
+          : { reasoning_effort: effectiveThinkingLevel },
       };
     }
     if (KIMI_TOGGLE_THINKING_FAMILY.has(modelId)) {

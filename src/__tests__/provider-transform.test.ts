@@ -180,3 +180,41 @@ describe("provider transform", () => {
     expect(openai.parallelToolCalls).toBeUndefined();
   });
 });
+
+describe("Kimi K3 request shape", () => {
+  it("sends OpenAI-style reasoning_effort for graded levels", () => {
+    for (const [providerId, modelId] of [
+      ["kimi-for-coding", "k3"],
+      ["kimi-for-coding", "k3-256k"],
+      ["moonshot-cn", "kimi-k3"],
+    ] as const) {
+      const config = resolveProviderRequestConfig(providerId, modelId, "max");
+      // Must be the literal body field, not the OpenRouter-shaped
+      // `reasoningEffort` (which the chat path degrades to reasoning.enabled).
+      expect(config.extraBody).toEqual({ reasoning_effort: "max" });
+      expect(config.reasoningEffort).toBeUndefined();
+      expect(config.omitTemperature).toBe(true);
+    }
+  });
+
+  it("disables thinking via thinking.type for k3 (which supports off)", () => {
+    const config = resolveProviderRequestConfig("kimi-for-coding", "k3", "off");
+    expect(config.effectiveThinkingLevel).toBe("off");
+    expect(config.reasoningEffort).toBeUndefined();
+    expect(config.extraBody).toEqual({ thinking: { type: "disabled" } });
+  });
+
+  it("normalizes an unsupported level onto the model's own grades", () => {
+    // K3 has no "medium"; k3-256k additionally has no "off".
+    expect(resolveProviderRequestConfig("kimi-for-coding", "k3", "medium").extraBody)
+      .not.toEqual({ reasoning_effort: "medium" });
+    expect(resolveProviderRequestConfig("kimi-for-coding", "k3-256k", "off").effectiveThinkingLevel)
+      .not.toBe("off");
+  });
+
+  it("keeps coding-plan slot ids on the thinking-only K2.7 shape", () => {
+    const config = resolveProviderRequestConfig("kimi-for-coding", "kimi-for-coding", "high");
+    expect(config.extraBody).toEqual({ thinking: { type: "enabled" } });
+    expect(config.reasoningEffort).toBeUndefined();
+  });
+});
