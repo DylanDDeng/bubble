@@ -358,10 +358,16 @@ function shouldRequestStreamUsage(options: Pick<ProviderInstanceOptions, "provid
     || providerId === "deepseek"
     || providerId === "moonshot-cn"
     || providerId === "moonshot-intl"
+    // Verified 2026-08-04: this endpoint streams NO usage at all without the
+    // flag, so every coding-plan session was silently unpriced and left the
+    // context-budget anchor guessing.
+    || providerId === "kimi-for-coding"
     || providerId === "zhipuai"
     || providerId === "zhipuai-coding-plan"
     || providerId === "zai"
     || providerId === "zai-coding-plan"
+    // Bailian sends usage either way; ask explicitly so it stays guaranteed.
+    || providerId === "bailian-token-plan"
     || isMiniMaxOpenAICompatible(options);
 }
 

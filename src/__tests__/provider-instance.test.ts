@@ -623,3 +623,25 @@ describe("sanitizeProviderHeaders", () => {
     expect(sanitizeProviderHeaders(undefined)).toBeUndefined();
   });
 });
+
+describe("streaming usage opt-in", () => {
+  it("requests stream usage for coding-plan endpoints that withhold it otherwise", async () => {
+    // kimi-for-coding streams no usage at all without the flag (verified live),
+    // which silently disabled cost and context accounting for those sessions.
+    for (const providerId of ["kimi-for-coding", "bailian-token-plan"]) {
+      let body: any;
+      createMock.mockImplementation(async (input) => {
+        body = input;
+        return fromArray([{ choices: [{ delta: { content: "hi" } }] }]);
+      });
+      const { createProviderInstance } = await import("../provider.js");
+      const provider = createProviderInstance({
+        providerId,
+        apiKey: "sk-test",
+        baseURL: "https://example.invalid/v1",
+      });
+      await collect(provider.streamChat([{ role: "user", content: "hi" }], { model: "m" }));
+      expect(body.stream_options, providerId).toEqual({ include_usage: true });
+    }
+  });
+});
