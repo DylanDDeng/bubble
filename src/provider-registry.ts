@@ -44,6 +44,50 @@ export interface ProviderProfile {
   headers?: Record<string, string>;
 }
 
+/** True for providers speaking the OpenAI chat-completions protocol (the default). */
+export function isOpenAICompatibleProtocol(protocol: ProviderProtocol | undefined): boolean {
+  return protocol === undefined || protocol === "openai-chat";
+}
+
+/**
+ * Ids that are clearly not text chat models. Vendors with one big catalog
+ * (alibaba returns 236 entries) would otherwise flood the model picker.
+ * Deliberately conservative: vision/preview chat models must pass.
+ */
+const NON_CHAT_ID_PATTERN =
+  /(^|[-_/])(embed|embedding|embeddings|rerank|reranker|tts|asr|whisper|ocr|moderation|guard|image|video|audio|speech|voice|paint|draw)([-_/]|$)/i;
+
+export function isLikelyChatModelId(id: string): boolean {
+  return !NON_CHAT_ID_PATTERN.test(id);
+}
+
+/** GET {baseURL}/models, tolerating the common response shapes. */
+async function fetchOpenAICompatibleModelIds(
+  provider: ProviderProfile,
+): Promise<Array<{ id: string; name?: string }>> {
+  const base = provider.baseURL.replace(/\/+$/, "");
+  const response = await fetch(`${base}/models`, {
+    headers: {
+      Authorization: `Bearer ${provider.apiKey}`,
+      ...(provider.headers ?? {}),
+    },
+    signal: AbortSignal.timeout(MODEL_DISCOVERY_TIMEOUT_MS),
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const payload = (await response.json()) as {
+    data?: Array<{ id?: unknown; name?: unknown }>;
+    models?: Array<{ id?: unknown; name?: unknown }>;
+  };
+  const entries = payload.data ?? payload.models ?? [];
+  return entries
+    .filter((entry): entry is { id: string; name?: string } =>
+      typeof entry?.id === "string" && entry.id.trim().length > 0)
+    .map((entry) => ({
+      id: entry.id,
+      name: typeof entry.name === "string" ? entry.name : undefined,
+    }));
+}
+
 /** Keep only string-valued headers; returns undefined for empty/invalid maps. */
 export function sanitizeProviderHeaders(value: unknown): Record<string, string> | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
@@ -102,6 +146,8 @@ export interface CachedDiscoverySnapshot {
 
 const MODEL_DISCOVERY_SUCCESS_TTL_MS = 60_000;
 const MODEL_DISCOVERY_FAILURE_TTL_MS = 10_000;
+/** Discovery must never delay startup or a model picker for long. */
+const MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
 
 export const BUILTIN_PROVIDERS = CATALOG_PROVIDERS;
 export const USER_VISIBLE_PROVIDER_IDS = BUILTIN_PROVIDERS
@@ -586,6 +632,40 @@ export class ProviderRegistry {
         };
       } catch (error) {
         return this.fallbackDiscovery(provider, error);
+      }
+    }
+
+    // Generic OpenAI-compatible discovery: most vendors expose GET /models on
+    // the same base URL. Probed against every configured provider, their lists
+    // turned out to be neither complete nor clean — zhipuai omits glm-5.2,
+    // stepfun omits step-3.7-flash (both demonstrably usable), alibaba returns
+    // 236 entries including image/audio models, fireworks 412s. So the remote
+    // list AUGMENTS the curated catalog instead of replacing it: builtin
+    // entries always survive (they carry tier/reasoning metadata and some work
+    // while unlisted), remote-only ids are appended, obvious non-chat
+    // modalities are filtered out. Not authoritative — membership is a union,
+    // so nothing downstream may treat it as a closed allowlist.
+    if (isOpenAICompatibleProtocol(provider.protocol) && provider.apiKey) {
+      try {
+        const remote = await fetchOpenAICompatibleModelIds(provider);
+        const local = this.localModelsForProvider(provider);
+        const known = new Set(local.map((model) => model.id));
+        const extras: ModelInfo[] = remote
+          .filter((entry) => !known.has(entry.id) && isLikelyChatModelId(entry.id))
+          .map((entry) => ({
+            id: entry.id,
+            name: entry.name || entry.id,
+            providerId: provider.id,
+          }))
+          .sort((a, b) => a.id.localeCompare(b.id));
+        if (extras.length === 0) {
+          return { models: local, source: "static", authoritative: true };
+        }
+        return { models: [...local, ...extras], source: "remote", authoritative: false };
+      } catch {
+        // Vendors that don't implement /models (or gate it) fall back silently:
+        // the curated catalog is the contract, discovery is a bonus.
+        return { models: this.localModelsForProvider(provider), source: "static", authoritative: true };
       }
     }
 

@@ -1,0 +1,142 @@
+/**
+ * Generic OpenAI-compatible /models discovery.
+ *
+ * Vendor catalogs probed 2026-08-04 are neither complete nor clean: zhipuai
+ * omits glm-5.2, stepfun omits step-3.7-flash (both usable), kimi-for-coding
+ * ships ids that share nothing with the builtin list, alibaba returns 236
+ * entries including image/audio models, fireworks 412s. Discovery therefore
+ * augments the curated catalog rather than replacing it.
+ */
+
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  ProviderRegistry,
+  isLikelyChatModelId,
+  isOpenAICompatibleProtocol,
+  type ProviderProfile,
+} from "../provider-registry.js";
+import type { UserConfig } from "../config.js";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+function fakeUserConfig(providers: ProviderProfile[]): UserConfig {
+  return {
+    getProviders: () => providers.slice(),
+    setProviders: () => undefined,
+    getDefaultProvider: () => undefined,
+    setDefaultProvider: () => undefined,
+  } as unknown as UserConfig;
+}
+
+function isolatedRegistry(providers: ProviderProfile[]): ProviderRegistry {
+  const registry = new ProviderRegistry(fakeUserConfig(providers));
+  (registry.getAuthStorage() as any).save = () => {};
+  (registry as any).modelConfig = {
+    getAllProviders: () => ({}),
+    getCustomModels: () => [],
+    hasProvider: () => false,
+    getLoadError: () => undefined,
+    getProviderConfig: () => undefined,
+    getApiKey: () => undefined,
+    getBaseURL: () => undefined,
+    getProtocol: () => undefined,
+    getPath: () => "/dev/null",
+  };
+  return registry;
+}
+
+function stubModelsResponse(ids: string[]): ReturnType<typeof vi.fn> {
+  const fetchMock = vi.fn(async () =>
+    new Response(JSON.stringify({ data: ids.map((id) => ({ id })) }), { status: 200 }));
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+const stepfun: ProviderProfile = {
+  id: "stepfun",
+  name: "StepFun",
+  baseURL: "https://api.stepfun.com/step_plan/v1",
+  apiKey: "sk-test",
+  enabled: true,
+};
+
+describe("OpenAI-compatible model discovery", () => {
+  it("adds remote-only models to the curated catalog", async () => {
+    stubModelsResponse(["step-3.5-flash", "step-9-future"]);
+    const registry = isolatedRegistry([stepfun]);
+
+    const result = await registry.discoverModels(stepfun);
+    const ids = result.models.map((model) => model.id);
+
+    expect(ids).toContain("step-9-future");
+    // Curated entries the vendor list omits must survive (this one is usable
+    // and priced despite never appearing in /models).
+    expect(ids).toContain("step-3.7-flash");
+    // Union membership is not a closed allowlist.
+    expect(result.authoritative).toBe(false);
+  });
+
+  it("keeps curated metadata for ids present in both lists", async () => {
+    stubModelsResponse(["step-3.7-flash"]);
+    const registry = isolatedRegistry([stepfun]);
+
+    const result = await registry.discoverModels(stepfun);
+    const curated = result.models.filter((model) => model.id === "step-3.7-flash");
+
+    expect(curated).toHaveLength(1);
+    expect(curated[0].reasoningLevels?.length).toBeGreaterThan(0);
+  });
+
+  it("filters non-chat modalities out of noisy vendor catalogs", async () => {
+    stubModelsResponse(["chat-next", "qwen-image-3.0", "text-embedding-v4", "cosyvoice-tts", "paraformer-asr"]);
+    const alibaba: ProviderProfile = {
+      id: "alibaba",
+      name: "Alibaba",
+      baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      apiKey: "sk-test",
+      enabled: true,
+    };
+    const registry = isolatedRegistry([alibaba]);
+
+    const ids = (await registry.discoverModels(alibaba)).models.map((m) => m.id);
+
+    expect(ids).toContain("chat-next");
+    expect(ids).not.toContain("qwen-image-3.0");
+    expect(ids).not.toContain("text-embedding-v4");
+    expect(ids).not.toContain("cosyvoice-tts");
+    expect(ids).not.toContain("paraformer-asr");
+  });
+
+  it("falls back to the curated catalog when /models fails", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 412 })));
+    const registry = isolatedRegistry([stepfun]);
+
+    const result = await registry.discoverModels(stepfun);
+
+    expect(result.source).toBe("static");
+    expect(result.models.map((m) => m.id)).toContain("step-3.7-flash");
+  });
+
+  it("does not probe providers without an API key", async () => {
+    const fetchMock = stubModelsResponse(["whatever"]);
+    const registry = isolatedRegistry([{ ...stepfun, apiKey: "" }]);
+
+    await registry.discoverModels({ ...stepfun, apiKey: "" });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("classifies protocols and model ids", () => {
+    expect(isOpenAICompatibleProtocol(undefined)).toBe(true);
+    expect(isOpenAICompatibleProtocol("openai-chat")).toBe(true);
+    expect(isOpenAICompatibleProtocol("anthropic-messages")).toBe(false);
+    expect(isOpenAICompatibleProtocol("ark-responses")).toBe(false);
+
+    expect(isLikelyChatModelId("kimi-k3")).toBe(true);
+    expect(isLikelyChatModelId("moonshot-v1-128k-vision-preview")).toBe(true);
+    expect(isLikelyChatModelId("qwen-image-3.0-pro")).toBe(false);
+    expect(isLikelyChatModelId("text-embedding-3-large")).toBe(false);
+  });
+});
