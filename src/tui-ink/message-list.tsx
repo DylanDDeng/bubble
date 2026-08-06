@@ -992,7 +992,7 @@ const REASONING_COLLAPSED_LINES = 2;
  * hiding it looks like a hang, printing all of it buries the transcript.
  *
  *   streaming + compact  rolling last N lines, so there is always motion
- *   settled + compact    opening lines + "(N more lines, ctrl+o to expand)"
+ *   settled + compact    opening lines + "(ctrl+o to expand)"
  *   expanded             everything (Ctrl+T thinking, or Ctrl+O verbose)
  */
 function ReasoningTraceBlock({
@@ -1021,8 +1021,7 @@ function ReasoningTraceBlock({
   return (
     <Box flexDirection="column" marginLeft={2} marginBottom={1}>
       <Text color={theme.thinkingDim} dimColor>
-        ✻ {streaming && !expanded ? "Thinking" : "Reasoning trace"}
-        {` · ${lines.length} line${lines.length === 1 ? "" : "s"}`}
+        ✻ {streaming && !expanded ? "Thinking…" : "Thinking"}
       </Text>
       {visible.map((line, i) => (
         <Text key={i} color={theme.thinkingDim} dimColor italic>
@@ -1031,7 +1030,7 @@ function ReasoningTraceBlock({
       ))}
       {hidden > 0 && (
         <Text color={theme.thinkingDim} dimColor>
-          … ({hidden} more line{hidden === 1 ? "" : "s"}{streaming ? "" : ", ctrl+o to expand"})
+          {streaming ? "…" : "… (ctrl+o to expand)"}
         </Text>
       )}
     </Box>

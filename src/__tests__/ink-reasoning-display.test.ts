@@ -38,15 +38,20 @@ describe("reasoning trace display", () => {
     expect(out).toContain("thought line 12");
     expect(out).toContain("thought line 8");
     expect(out).not.toContain("thought line 1 ");
-    expect(out).toContain("more lines");
-    expect(out).toContain("Thinking");
+    expect(out).toContain("Thinking…");
+    expect(out).not.toContain("Reasoning trace");
+    expect(out).not.toContain("more lines");
   });
 
-  it("collapses a settled turn to its opening lines plus a count", () => {
+  it("collapses a settled turn to its opening lines plus an expand hint", () => {
     const out = render({});
 
     expect(out).toContain("thought line 1");
     expect(out).not.toContain("thought line 12");
+    expect(out).toContain("Thinking");
+    expect(out).not.toContain("Reasoning trace");
+    expect(out).not.toContain("12 lines");
+    expect(out).not.toContain("more lines");
     expect(out).toContain("ctrl+o to expand");
   });
 
