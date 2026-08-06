@@ -1093,15 +1093,16 @@ function UserMessageBlock({
   // (isInternalBlockOnlyContent), but a block with trailing text — or a
   // truncated block — would slip that anchored filter. Never render markup.
   const visibleContent = sanitizeInternalReminderBlocks(content);
-  // Rail and its right gutter must share the bubble background; otherwise the
-  // terminal background shows up as a dark seam between rail and message.
-  const railWidth = 2;
+  // Preserve the message's existing text inset after removing the decorative
+  // rail: the former two rail columns become ordinary background padding.
+  const leftPaddingWidth = 3;
+  const rightPaddingWidth = 1;
   const horizontalRoom = Math.max(20, terminalColumns - 2);
-  const bubbleTextWidth = Math.max(1, horizontalRoom - railWidth - 2);
+  const bubbleTextWidth = Math.max(1, horizontalRoom - leftPaddingWidth - rightPaddingWidth);
   const { bodyLines, referenceLines } = splitImageDisplayContent(visibleContent);
   const wrappedLines = bodyLines
     .flatMap((line) => wrapByVisualWidth(line, bubbleTextWidth));
-  const attachmentReferenceIndent = " ".repeat(railWidth + 1);
+  const attachmentReferenceIndent = " ".repeat(leftPaddingWidth);
 
   return (
     <Box flexDirection="column" marginTop={separateFromPrevious ? 1 : 0}>
@@ -1117,14 +1118,8 @@ function UserMessageBlock({
       )}
       {wrappedLines.map((line, index) => (
         <Box key={index}>
-          {/* Draw the rail on every wrapped row so the bar spans the full
-              height of a multi-line message instead of only the first line.
-              "▌" is a left half-block, so stacked rows form one continuous bar. */}
-          <Text backgroundColor={theme.userMessageBg} color={theme.userRail}>
-            {"▌ "}
-          </Text>
           <Text backgroundColor={theme.userMessageBg} color={theme.userMessageText}>
-            {` ${padVisual(line || " ", bubbleTextWidth)} `}
+            {`${" ".repeat(leftPaddingWidth)}${padVisual(line || " ", bubbleTextWidth)}${" ".repeat(rightPaddingWidth)}`}
           </Text>
         </Box>
       ))}

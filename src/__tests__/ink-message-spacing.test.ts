@@ -60,17 +60,18 @@ describe("Ink message spacing", () => {
     const lines = renderLines([user], [toolsPart]);
 
     expect(lines[0]).toContain("What is this project doing?");
-    expect(lines[0]).toContain("▌");
+    expect(lines[0]).not.toContain("▌");
     // Same blank line as after finalize — spacing must not jump when the
     // streaming block commits into a regular assistant message.
     expect(lines[1]).toBe("");
     expect(lines[2]).toContain("List Directory 2 files");
   });
 
-  it("renders sent user messages with a continuous rail and bubble fill", () => {
+  it("renders sent user messages with bubble fill and no left rail", () => {
     const output = renderLines([{ key: "short-user", role: "user", content: "你好啊" }]).join("\n");
 
-    expect(output).toContain("▌  你好啊");
+    expect(output).toContain("   你好啊");
+    expect(output).not.toContain("▌");
   });
 
   it("keeps consecutive user messages visually separate after steer is applied", () => {

@@ -67,7 +67,6 @@ export interface Theme {
   userMessageBorder: string;
   userMessageBg: string;
   userMessageText: string;
-  userRail: string;
 
   // Diff
   /** Painted band backgrounds for diff lines inside user-message cards. */
@@ -119,7 +118,6 @@ export const darkTheme: Theme = {
   userMessageBorder: "#8A7FC6",
   userMessageBg: "#2a2a34",
   userMessageText: "#f3f3f7",
-  userRail: "#8A7FC6",
 
   diffAdd: "#1a3d1a",
   diffRemove: "#3d1a1a",
@@ -173,7 +171,6 @@ export const lightTheme: Theme = {
   userMessageBorder: "#356FD2",
   userMessageBg: "#F1F3F0",
   userMessageText: "#234B93",
-  userRail: "#356FD2",
 
   diffAdd: "#D7E8D8",
   diffRemove: "#F7DADC",
