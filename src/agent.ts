@@ -19,7 +19,7 @@ import {
 import { projectMessages } from "./context/projector.js";
 import { aggressivePruneMessages, markStableCurrentToolResultsForCache, markToolResultCacheStable } from "./context/prune.js";
 import { truncateToolOutputForModel } from "./context/tool-output-truncate.js";
-import { buildDeferredToolsReminder, buildToolFreezeReminder, reminderForMode } from "./prompt/reminders.js";
+import { buildDeferredToolsReminder, buildToolFreezeReminder, isPermissionModeReminder, reminderForMode } from "./prompt/reminders.js";
 import type { AgentEvent, AgentInputController, AgentRunInput, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ProviderMessage, ProviderMetadataProvider, ProviderRawContentBlock, ThinkingLevel, Todo, TokenUsage, ToolDefinition, ToolMessage, ToolResult, ToolRegistryEntry, ToolUpdate } from "./types.js";
 import { HookBus, type TurnHooks, type TurnHookState } from "./orchestrator/hooks.js";
 import type { ExternalHookController } from "./hooks/controller.js";
@@ -557,10 +557,35 @@ export class Agent {
       last?.role === "meta"
       && last.kind === "system-reminder"
       && last.content === reminder
+      && last.includeInLlm !== false
     ) {
       return;
     }
+    this.retireStaleModeReminders();
     this.injectSystemReminder(reminder);
+  }
+
+  /**
+   * Mode reminders are enter-announcements with no cancel semantics, so a stale
+   * one keeps describing a mode the session left long ago. Shift+Tab cycles
+   * through plan on the way to bypassPermissions, which used to leave a live
+   * "Plan mode is now ACTIVE" (plus its "call exit_plan_mode" rule) in history
+   * for the rest of the session — the model then planned instead of building,
+   * and hunted for a tool that is filtered out outside plan mode.
+   *
+   * Hidden rather than spliced: keeping the array shape intact leaves message
+   * indices (usage anchors, compaction bookkeeping) valid, and the transcript
+   * still shows what happened. Cache cost is one invalidated prefix per real
+   * mode switch — the no-op path above keeps repeat injections free.
+   */
+  private retireStaleModeReminders(): void {
+    for (const message of this.messages) {
+      if (message.role !== "meta") continue;
+      if (message.kind !== "system-reminder") continue;
+      if (message.includeInLlm === false) continue;
+      if (!isPermissionModeReminder(message.content)) continue;
+      message.includeInLlm = false;
+    }
   }
 
   get role(): "parent" | "subagent" {

@@ -13,11 +13,21 @@ export function wrapInSystemReminder(content: string): string {
   return content.trim();
 }
 
+/**
+ * Headlines of the mode reminders below. Identity is content-based because a
+ * reminder is just text once it lands in the message stream; keeping the
+ * headlines in one place stops the matcher from drifting when the bodies are
+ * reworded.
+ */
+const MODE_REMINDER_HEADLINES = [
+  "Plan mode is now ACTIVE",
+  "Permission mode is now: bypassPermissions",
+  "Permission mode is now: default Build mode",
+];
+
 export function isPermissionModeReminder(content: unknown): boolean {
   if (typeof content !== "string") return false;
-  return content.includes("Plan mode is now ACTIVE")
-    || content.includes("Permission mode is now: bypassPermissions")
-    || content.includes("Permission mode is now: default Build mode");
+  return MODE_REMINDER_HEADLINES.some((headline) => content.includes(headline));
 }
 
 const PLAN_MODE_ENTER = `
@@ -37,6 +47,7 @@ Rules while in plan mode:
 const BYPASS_ENTER = `
 Permission mode is now: bypassPermissions.
 
+This replaces every earlier mode reminder in this conversation. Plan mode is NOT active; exit_plan_mode does not exist in your tool list and must not be called or searched for.
 ALL tool calls auto-approve with no user confirmation. The user has explicitly opted into this.
 Proceed with extra care — explain risky actions in the chat BEFORE performing them, and
 prefer reversible operations when possible.
@@ -46,6 +57,7 @@ Do not perform destructive operations, credential exposure, or unrelated reversi
 const DEFAULT_ENTER = `
 Permission mode is now: default Build mode.
 
+This replaces every earlier mode reminder in this conversation. Plan mode is NOT active; exit_plan_mode does not exist in your tool list and must not be called or searched for.
 File edits and writes auto-approve. Bash commands and other destructive tools still require explicit approval unless allowed by rules.
 Execute the requested change end to end; do not stop at analysis unless blocked or the user explicitly asks for discussion only.
 `;

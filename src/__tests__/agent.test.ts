@@ -3,6 +3,7 @@ import { Agent, AgentAbortError, type AgentRunOptions } from "../agent.js";
 import { BudgetLedger } from "../agent/budget-ledger.js";
 import { AgentRunInputQueue } from "../agent/input-controller.js";
 import type { AgentProfile } from "../agent/profiles.js";
+import { projectMessages } from "../context/projector.js";
 import type { AgentEvent, Message, Provider, StreamChunk, ToolRegistryEntry, ToolResult } from "../types.js";
 
 function createMockProvider(chunks: StreamChunk[][]): Provider {
@@ -2079,7 +2080,7 @@ describe("Agent", () => {
       expect(metas).toHaveLength(2);
     });
 
-    it("keeps prior mode reminders while appending the latest mode reminder", () => {
+    it("retires the previous mode reminder so only the current one reaches the model", () => {
       const agent = new Agent({
         provider: createMockProvider([]),
         model: "gpt-4o",
@@ -2087,13 +2088,48 @@ describe("Agent", () => {
         systemPrompt: "stable",
       });
 
+      // Shift+Tab cycles default → acceptEdits → plan → bypassPermissions, so
+      // reaching bypass always passes through plan.
       agent.setMode("plan");
       agent.setMode("bypassPermissions");
 
       const metas = agent.messages.filter((m) => m.role === "meta");
       expect(metas).toHaveLength(2);
+      // The transcript keeps the history...
       expect((metas[0] as any).content).toContain("Plan mode is now ACTIVE");
       expect((metas[1] as any).content).toContain("bypassPermissions");
+      // ...but only the live reminder is projected to the provider.
+      expect((metas[0] as any).includeInLlm).toBe(false);
+      expect((metas[1] as any).includeInLlm).not.toBe(false);
+
+      const projected = projectMessages(agent.messages);
+      const planMentions = projected.filter(
+        (m) => typeof m.content === "string" && m.content.includes("Plan mode is now ACTIVE"),
+      );
+      expect(planMentions).toHaveLength(0);
+    });
+
+    it("re-arms the mode reminder when plan mode is re-entered after being retired", () => {
+      const agent = new Agent({
+        provider: createMockProvider([]),
+        model: "gpt-4o",
+        tools: [],
+        systemPrompt: "stable",
+        mode: "plan",
+      });
+
+      agent.setMode("default");
+      agent.setMode("plan");
+
+      const projected = projectMessages(agent.messages);
+      const live = projected.filter(
+        (m) => typeof m.content === "string" && m.content.includes("Plan mode is now ACTIVE"),
+      );
+      expect(live).toHaveLength(1);
+      const stale = projected.filter(
+        (m) => typeof m.content === "string" && m.content.includes("default Build mode"),
+      );
+      expect(stale).toHaveLength(0);
     });
 
     it("injects a bypass reminder when switching to bypassPermissions", () => {

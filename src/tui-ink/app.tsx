@@ -879,9 +879,10 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     // <system-reminder>, so we do not rebuild the cache-friendly system prompt here.
     if (key.tab && key.shift && !pickerMode) {
       const nextMode = getNextPermissionMode(agent.mode);
+      // setMode fires onModeUpdate, which is the single writer of the
+      // mode_switch marker — appending here too double-logs every switch.
       agent.setMode(nextMode);
       setPermissionMode(nextMode);
-      sessionManager?.appendMarker("mode_switch", nextMode);
       return;
     }
 
@@ -1902,8 +1903,8 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
                 break;
               }
               case "mode_changed": {
+                // Marker already persisted by onModeUpdate at setMode time.
                 setPermissionMode(event.mode);
-                sessionManager?.appendMarker("mode_switch", event.mode);
                 break;
               }
               case "input_applied": {
