@@ -30,7 +30,6 @@ import {
   deleteComposerBackward,
   deleteComposerForward,
   expandComposerBuffer,
-  hasActiveComposerPastes,
   insertComposerPaste,
   insertComposerText,
   moveComposerCursor,
@@ -137,6 +136,19 @@ export interface ComposerHistoryTransition extends ComposerHistoryState {
 }
 
 /**
+ * Rebuild a composer buffer from a persisted history entry. Text long enough to
+ * have been collapsed at paste time is collapsed again into a `[Pasted text #N …]`
+ * marker, but its full content is preserved in the buffer's paste spans so the
+ * composer stays compact, no content is lost, and the next submit re-expands it.
+ */
+function bufferFromHistoryText(text: string): ComposerBuffer {
+  if (shouldCollapsePastedContent(text)) {
+    return insertComposerPaste(createComposerBuffer(), text);
+  }
+  return createComposerBuffer(text);
+}
+
+/**
  * Browse persisted history without turning marker-shaped text into live paste
  * tokens, while preserving the exact unsent draft in memory for the final
  * Down transition back out of history.
@@ -189,7 +201,7 @@ export function stepComposerHistory(
   }
 
   return {
-    buffer: createComposerBuffer(result.text),
+    buffer: bufferFromHistoryText(result.text),
     attachments: (result.images ?? []).map((attachment) => ({ ...attachment })),
     imageLabelStartOverride: result.imageDisplayStart ?? null,
     historyIndex: result.index,
@@ -989,10 +1001,10 @@ export function InputBox({
     if (submittedPayloadFingerprintRef.current === fingerprint) return;
     submittedPayloadFingerprintRef.current = fingerprint;
     deliver(payload);
-    // A collapsed text-paste marker cannot be safely replayed once its
-    // in-memory reference is gone; skip those. Image-label stripping is fine to
-    // replay (the attachments are stored on the history entry).
-    if (!hasActiveComposerPastes(submittedBuffer) && (expandedText.trim().length > 0 || attachments.length > 0)) {
+    // Always record the submitted text so ↑/↓ can recall it. The full expanded
+    // text is persisted (content is never lost); on recall, long text is
+    // re-collapsed into a paste marker that still carries its full content.
+    if (expandedText.trim().length > 0 || attachments.length > 0) {
       const historyEntry: HistoryEntry = {
         text: expandedText,
         images: attachments,

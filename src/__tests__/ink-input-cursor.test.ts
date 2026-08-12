@@ -364,6 +364,38 @@ describe("Ink atomic paste draft integration", () => {
     expect(withSecondPaste.pastes.map((paste) => paste.id)).toEqual([1, 2]);
   });
 
+  it("recalls long persisted history entries as collapsed markers without losing content", () => {
+    const longA = "a".repeat(1200);
+    const longB = "b".repeat(1500);
+    const history = [{ text: longA, images: [] }, { text: longB, images: [] }];
+    const fresh = {
+      buffer: createComposerBuffer(""),
+      attachments: [],
+      imageLabelStartOverride: null,
+      historyIndex: null as number | null,
+      draftSnapshot: null,
+    };
+
+    // Up into the newest entry: shown as a marker, full content retained.
+    const up = stepComposerHistory(fresh, history, "up");
+    expect(up.buffer.text).toBe(createPastedContentMarker(longB, 1));
+    expect(up.buffer.pastes).toHaveLength(1);
+    expect(up.historyIndex).toBe(1);
+    expect(expandComposerBuffer(up.buffer)).toBe(longB);
+
+    // Up again into the older entry: same guarantee.
+    const older = stepComposerHistory(up, history, "up");
+    expect(older.buffer.text).toBe(createPastedContentMarker(longA, 1));
+    expect(older.historyIndex).toBe(0);
+    expect(expandComposerBuffer(older.buffer)).toBe(longA);
+
+    // Down back into the newer entry still carries its full content.
+    const newer = stepComposerHistory(older, history, "down");
+    expect(newer.buffer.text).toBe(createPastedContentMarker(longB, 1));
+    expect(newer.historyIndex).toBe(1);
+    expect(expandComposerBuffer(newer.buffer)).toBe(longB);
+  });
+
   it("loads marker-shaped persisted history as literal text without resurrecting hidden content", () => {
     const persisted = createComposerBuffer("[Pasted text #1 +9 lines]");
     expect(hasActiveComposerPastes(persisted)).toBe(false);
