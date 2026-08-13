@@ -21,6 +21,23 @@ The `npm install` step puts a small Node.js launcher named `bubble` on your PATH
 
 ## Install
 
+One-line install (macOS / Linux):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/DylanDDeng/bubble/main/install.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+powershell -c "irm https://raw.githubusercontent.com/DylanDDeng/bubble/main/install.ps1 | iex"
+```
+
+The installer checks for Node.js 20+ and Bun (installing Bun for you if it is
+missing), then installs the `bubble` CLI globally via npm.
+
+Or install directly via npm:
+
 ```bash
 npm install -g @bubblebrain-ai/bubble
 ```
