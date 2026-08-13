@@ -6,6 +6,9 @@
  */
 
 import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { getBubbleHome } from "./bubble-home.js";
 import type { UserConfig } from "./config.js";
 import {
   BUILTIN_PROVIDERS as CATALOG_PROVIDERS,
@@ -128,6 +131,9 @@ interface CachedModelDiscovery {
   result: Omit<ModelDiscoveryResult, "source"> & { source: Exclude<ModelDiscoverySource, "cache"> };
   expiresAt: number;
   identityKey: string;
+  providerId: string;
+  authType?: ProviderProfile["authType"];
+  protocol?: ProviderProtocol;
 }
 
 /**
@@ -147,6 +153,8 @@ export interface CachedDiscoverySnapshot {
 
 const MODEL_DISCOVERY_SUCCESS_TTL_MS = 60_000;
 const MODEL_DISCOVERY_FAILURE_TTL_MS = 10_000;
+/** How long a successful discovery survives on disk before a fresh fetch. */
+const MODEL_DISCOVERY_DISK_TTL_MS = 24 * 60 * 60 * 1000;
 /** Discovery must never delay startup or a model picker for long. */
 const MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
 
@@ -164,6 +172,7 @@ export class ProviderRegistry {
   private modelConfig: ModelConfig;
   private authStorage: AuthStorage;
   private modelDiscoveryCache = new Map<string, CachedModelDiscovery>();
+  private readonly discoveryDiskCachePath = join(getBubbleHome(), "model-discovery-cache.json");
   private modelDiscoveryInFlight = new Map<string, Promise<ModelDiscoveryResult>>();
   private modelDiscoveryGeneration = new Map<string, number>();
   /** Last membership seen per discovery key — survives cache eviction/TTL so
@@ -181,6 +190,77 @@ export class ProviderRegistry {
       if (fingerprint) this.identityFingerprints.set(authKey, fingerprint);
     }
     this.authStorage.onMutation((authKey) => this.handleAuthMutation(authKey));
+    this.loadDiscoveryDiskCache();
+  }
+
+  /** The on-disk cache is production-only; disable it under the test runner so
+   *  tests sharing one isolated BUBBLE_HOME never contaminate each other. */
+  private get discoveryDiskCacheEnabled(): boolean {
+    const v = process.env.VITEST?.trim().toLowerCase();
+    return v !== "true" && v !== "1";
+  }
+
+  /** Restore a prior successful discovery so dynamic models resolve without a
+   *  network round-trip right after startup (no fetch on every launch). */
+  private loadDiscoveryDiskCache(): void {
+    if (!this.discoveryDiskCacheEnabled) return;
+    try {
+      if (!existsSync(this.discoveryDiskCachePath)) return;
+      const parsed = JSON.parse(readFileSync(this.discoveryDiskCachePath, "utf8")) as Record<string, {
+        result?: CachedModelDiscovery["result"];
+        expiresAt?: number;
+        identityKey?: string;
+        providerId?: string;
+        authType?: ProviderProfile["authType"];
+        protocol?: ProviderProtocol;
+      }>;
+      const now = Date.now();
+      for (const [key, entry] of Object.entries(parsed)) {
+        if (!entry || typeof entry.expiresAt !== "number" || entry.expiresAt <= now) continue;
+        if (!entry.result || !Array.isArray(entry.result.models)) continue;
+        this.modelDiscoveryCache.set(key, {
+          result: entry.result,
+          expiresAt: entry.expiresAt,
+          identityKey: entry.identityKey ?? "unknown",
+          providerId: entry.providerId ?? "",
+          authType: entry.authType,
+          protocol: entry.protocol,
+        });
+        // Rebuild the dynamic overlay so context window / reasoning levels
+        // resolve from the cached catalog at startup, not only on /model open.
+        if (entry.providerId) {
+          this.applyDynamicDiscoveryMetadata(
+            { id: entry.providerId, authType: entry.authType, protocol: entry.protocol },
+            entry.result,
+          );
+        }
+      }
+    } catch {
+      // Missing/corrupt cache is fine; the next discovery re-fetches.
+    }
+  }
+
+  /** Persist successful discoveries so the next launch can reuse them. */
+  private saveDiscoveryDiskCache(): void {
+    if (!this.discoveryDiskCacheEnabled) return;
+    try {
+      const data: Record<string, unknown> = {};
+      for (const [key, entry] of this.modelDiscoveryCache) {
+        if (entry.result.error) continue;
+        data[key] = {
+          result: entry.result,
+          expiresAt: Date.now() + MODEL_DISCOVERY_DISK_TTL_MS,
+          identityKey: entry.identityKey,
+          providerId: entry.providerId,
+          authType: entry.authType,
+          protocol: entry.protocol,
+        };
+      }
+      mkdirSync(dirname(this.discoveryDiskCachePath), { recursive: true });
+      writeFileSync(this.discoveryDiskCachePath, JSON.stringify(data, null, 2), { mode: 0o600 });
+    } catch {
+      // Persistence is best-effort.
+    }
   }
 
   /**
@@ -532,7 +612,11 @@ export class ProviderRegistry {
         result: { ...result, source: result.source === "cache" ? "remote" : result.source },
         expiresAt: Date.now() + (result.error ? MODEL_DISCOVERY_FAILURE_TTL_MS : MODEL_DISCOVERY_SUCCESS_TTL_MS),
         identityKey: this.discoveryIdentity(provider),
+        providerId: provider.id,
+        authType: provider.authType,
+        protocol: provider.protocol,
       });
+      if (!result.error) this.saveDiscoveryDiskCache();
       this.lastDiscoveryMembership.set(key, {
         ids: result.models.map((model) => model.id),
         authoritative: result.authoritative,
@@ -811,7 +895,7 @@ export class ProviderRegistry {
     return !current || this.modelDiscoveryKey(current) === key;
   }
 
-  private applyDynamicDiscoveryMetadata(provider: ProviderProfile, result: ModelDiscoveryResult): void {
+  private applyDynamicDiscoveryMetadata(provider: Pick<ProviderProfile, "id" | "authType" | "protocol">, result: ModelDiscoveryResult): void {
     const dynamicProviderId = provider.id === "openai" && provider.authType === "oauth"
       ? "openai-codex"
       : provider.id === "google" && provider.protocol === "ai-sdk"

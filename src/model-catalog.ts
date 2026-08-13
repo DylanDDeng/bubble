@@ -292,10 +292,27 @@ export function getBuiltinModel(providerId: string, modelId: string): BuiltinMod
   const overlayHit = dynamicOverlay.get(overlayKey(providerId, modelId))
     || (providerId === "openai" ? dynamicOverlay.get(overlayKey("openai-codex", modelId)) : undefined);
   if (overlayHit) return overlayHit;
-  return BUILTIN_MODELS.find((model) => model.providerId === providerId && model.id === modelId)
+  const staticHit = BUILTIN_MODELS.find((model) => model.providerId === providerId && model.id === modelId)
     || (providerId === "openai"
       ? BUILTIN_MODELS.find((model) => model.providerId === "openai-codex" && model.id === modelId)
       : undefined);
+  if (staticHit) return staticHit;
+  // Dynamically-discovered grok models aren't in the static catalog until
+  // remote discovery runs. Synthesize their metadata from the id so reasoning
+  // levels, default effort, and context window resolve correctly on a fresh
+  // start or resumed session (before the first /model discovery).
+  if (providerId === "grok") {
+    const inferred = inferGrokModelMetadata(modelId);
+    return {
+      id: modelId,
+      name: modelId,
+      providerId: "grok",
+      reasoningLevels: inferred.levels,
+      defaultReasoningLevel: inferred.defaultLevel,
+      contextWindow: inferred.contextWindow,
+    };
+  }
+  return undefined;
 }
 
 export function getModelDefaultReasoningLevel(providerId: string, modelId: string): ReasoningEffort | undefined {

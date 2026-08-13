@@ -11,8 +11,8 @@ import {
   isGrokSubscriptionBaseUrl,
   type GrokAuthAdapter,
 } from "../provider-grok.js";
-import { getModelContextWindow, inferGrokModelMetadata } from "../model-catalog.js";
-import { resolveProviderRequestConfig } from "../provider-transform.js";
+import { getModelContextWindow, getModelDefaultReasoningLevel, inferGrokModelMetadata } from "../model-catalog.js";
+import { getAvailableThinkingLevels, resolveProviderRequestConfig } from "../provider-transform.js";
 import type { OAuthCredentials } from "../oauth/types.js";
 
 const cleanups: Array<() => void> = [];
@@ -271,5 +271,12 @@ describe("grok subscription model discovery", () => {
     // Non-grok providers are untouched.
     expect(getModelContextWindow("openai", "gpt-4o")).toBe(128000);
     expect(getModelContextWindow("openai", "gpt-unknown")).toBeUndefined();
+  });
+
+  it("resolves reasoning levels for dynamic grok models before discovery", () => {
+    // Id inference gives the flagship ladder (xhigh only arrives via /models discovery).
+    expect(getAvailableThinkingLevels("grok", "grok-4.6")).toEqual(["low", "medium", "high"]);
+    expect(getModelDefaultReasoningLevel("grok", "grok-4.6")).toBe("high");
+    expect(getAvailableThinkingLevels("grok", "grok-4.6-fast")).toEqual(["off"]);
   });
 });
