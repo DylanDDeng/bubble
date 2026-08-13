@@ -123,6 +123,7 @@ import {
 } from "../external-runtime/session-policy.js";
 import os from "node:os";
 import { rmSync } from "node:fs";
+import { execFile } from "node:child_process";
 
 export interface PlanHandlerRef {
   current?: (plan: string) => Promise<PlanDecision>;
@@ -237,6 +238,25 @@ function truncate(value: string, max: number) {
   return `${value.slice(0, Math.max(0, max - 1))}…`;
 }
 
+function formatCompactTokens(n: number): string {
+  if (n < 1000) return `${Math.round(n)}`;
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}K`;
+  return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
+}
+
+function formatContextUsageLabel(snapshot: { usedTokens: number; contextWindow?: number }): string {
+  if (!snapshot.contextWindow || snapshot.contextWindow <= 0) {
+    return `${formatCompactTokens(snapshot.usedTokens)} context`;
+  }
+  const percent = (snapshot.usedTokens / snapshot.contextWindow) * 100;
+  const label = percent >= 10
+    ? `${Math.round(percent)}%`
+    : percent >= 0.05
+      ? `${percent.toFixed(1)}%`
+      : "<0.1%";
+  return `${label} context`;
+}
+
 export function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] {
   const result: DisplayMessage[] = [];
   for (const m of agentMessages) {
@@ -285,13 +305,14 @@ export function reconstructDisplayMessages(agentMessages: Message[]): DisplayMes
       const content = interrupted
         ? stripInterruptedAssistantMarker(m.content, INTERRUPTED_ASSISTANT_CONTENT)
         : m.content;
-      if (content || m.reasoning || toolCalls.length > 0) {
+      if (content || m.reasoning || toolCalls.length > 0 || m.systemFingerprint) {
         result.push({
           key: nextDisplayMessageKey("asst"),
           role: "assistant",
           content,
           reasoning: m.reasoning || undefined,
           toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+          systemFingerprint: m.systemFingerprint,
         });
       }
       if (interrupted) {
@@ -466,6 +487,23 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(agent.mode);
   const [todos, setTodos] = useState<Todo[]>(() => agent.getTodos());
   const [goalLine, setGoalLine] = useState("");
+  const [branch, setBranch] = useState<string | undefined>(undefined);
+  const [contextUsage, setContextUsage] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    execFile("git", ["-C", args.cwd, "branch", "--show-current"], { timeout: 3000 }, (error, stdout) => {
+      if (cancelled) return;
+      if (error) return;
+      const name = stdout.trim();
+      setBranch(name || undefined);
+    });
+    return () => { cancelled = true; };
+  }, [args.cwd]);
+
+  useEffect(() => {
+    setContextUsage(formatContextUsageLabel(agent.getContextUsageSnapshot()));
+  }, [agent]);
   const [currentUpdateNotice, setCurrentUpdateNotice] = useState(updateNotice);
   const [pendingPlan, setPendingPlan] = useState<{
     plan: string;
@@ -1657,6 +1695,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         let runErrored = false;
         const toolCalls: DisplayToolCall[] = [];
         const assistantParts: DisplayMessagePart[] = [];
+        let assistantSystemFingerprint: string | undefined;
         // Entries whose members all reached a final status are now covered by
         // the settled transcript; drop them so the accumulator stays bounded
         // across a long session. Running entries survive — for a workflow
@@ -1724,6 +1763,9 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
           if (taskElapsedMs !== undefined && Number.isFinite(taskElapsedMs) && taskElapsedMs > 0) {
             msg.taskElapsedMs = taskElapsedMs;
           }
+          if (assistantSystemFingerprint) {
+            msg.systemFingerprint = assistantSystemFingerprint;
+          }
           updateDisplayMessages((prev) => [...prev, msg]);
           if (runExternalRuntime) {
             runSessionManager!.appendMessage({
@@ -1746,6 +1788,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
           setStreamingParts([]);
           assistantContent = "";
           assistantReasoning = "";
+          assistantSystemFingerprint = undefined;
           toolCalls.length = 0;
           assistantParts.length = 0;
         };
@@ -1969,6 +2012,8 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
                   goalRunUsageReported = true;
                   goalRunTokens += tokenUsageTotal(event.usage);
                 }
+                assistantSystemFingerprint = event.systemFingerprint;
+                setContextUsage(formatContextUsageLabel(agent.getContextUsageSnapshot()));
                 if (event.willContinue) {
                   commitAssistantMessage();
                   clearAssistantStream();
@@ -3070,6 +3115,11 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
                   ? `Grok Subscription${externalRuntimeBinding?.modelId ? ` · ${externalRuntimeBinding.modelId}` : ""}${externalRuntimeBinding?.reasoningEffort && externalRuntimeBinding.reasoningEffort !== "off" ? ` · ${externalRuntimeBinding.reasoningEffort}` : ""} · workspace`
                   : "Unsupported external runtime · recovery-only")
               : undefined,
+            cwd: friendlyCwd(args.cwd),
+            branch,
+            model: externalSessionBound ? undefined : (agent.model ? displayModel(agent.model) : undefined),
+            sessionTitle: externalSessionBound ? undefined : (sessionManager?.getMetadata().title?.trim() || undefined),
+            contextUsage: externalSessionBound ? undefined : (contextUsage || undefined),
           })} />
         </Box>
       )}

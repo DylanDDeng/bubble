@@ -39,6 +39,25 @@ describe("SessionManager", () => {
     expect(messages[1].role).toBe("assistant");
   });
 
+  it("persists and restores assistant backend fingerprints", () => {
+    const file = join(tmpDir, "backend-fingerprint.jsonl");
+    const sm1 = new SessionManager(file);
+    sm1.appendMessage({
+      role: "assistant",
+      content: "done",
+      systemFingerprint: "fp_v4pro_test",
+    });
+
+    const raw = JSON.parse(readFileSync(file, "utf-8").trim());
+    expect(raw.message.systemFingerprint).toBe("fp_v4pro_test");
+
+    const sm2 = new SessionManager(file);
+    expect(sm2.getMessages()[0]).toMatchObject({
+      role: "assistant",
+      systemFingerprint: "fp_v4pro_test",
+    });
+  });
+
   it("persists interrupted assistant message errors", () => {
     const file = join(tmpDir, "interrupted-assistant.jsonl");
     const sm1 = new SessionManager(file);

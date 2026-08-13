@@ -430,6 +430,23 @@ describe("translateOpenAIStream", () => {
     });
   });
 
+  it("forwards an OpenAI-compatible backend fingerprint once", async () => {
+    const chunks = await collect(translateOpenAIStream(fromArray([
+      {
+        system_fingerprint: "fp_v4pro_test",
+        choices: [{ delta: { content: "Hello" } }],
+      },
+      {
+        system_fingerprint: "fp_v4pro_test",
+        choices: [{ delta: {}, finish_reason: "stop" }],
+      },
+    ])));
+
+    expect(chunks.filter((chunk) => chunk.type === "response_metadata")).toEqual([
+      { type: "response_metadata", systemFingerprint: "fp_v4pro_test" },
+    ]);
+  });
+
   it("forwards Kimi choice-level streaming usage", async () => {
     const chunks = await collect(translateOpenAIStream(fromArray([
       {

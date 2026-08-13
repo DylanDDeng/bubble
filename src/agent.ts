@@ -895,6 +895,7 @@ export class Agent {
       const textSanitizer = createStreamingInternalReminderSanitizer();
       const reasoningSanitizer = createStreamingInternalReminderSanitizer();
       let turnUsage: TokenUsage | undefined;
+      let turnSystemFingerprint: string | undefined;
       let assistantAppended = false;
       currentAssistantMsg = assistantMsg;
       currentAssistantAppended = false;
@@ -1099,6 +1100,11 @@ export class Agent {
                 }
               }
               break;
+
+            case "response_metadata":
+              turnSystemFingerprint = chunk.systemFingerprint;
+              assistantMsg.systemFingerprint = chunk.systemFingerprint;
+              break;
           }
           for (const update of this.subagents.drainToolUpdates()) yield emit(update);
         }
@@ -1140,7 +1146,7 @@ export class Agent {
           if (consecutiveEmptyAssistantRecoveries < MAX_EMPTY_ASSISTANT_RECOVERIES) {
             consecutiveEmptyAssistantRecoveries += 1;
             this.injectSystemReminder(EMPTY_ASSISTANT_RECOVERY_REMINDER);
-            yield emit({ type: "turn_end", usage: turnUsage, willContinue: true });
+            yield emit({ type: "turn_end", usage: turnUsage, systemFingerprint: turnSystemFingerprint, willContinue: true });
             continue;
           }
 
@@ -1535,7 +1541,7 @@ export class Agent {
         });
         flushQueuedReminders();
 
-        yield emit({ type: "turn_end", usage: turnUsage, willContinue: true });
+        yield emit({ type: "turn_end", usage: turnUsage, systemFingerprint: turnSystemFingerprint, willContinue: true });
 
         // Auto-continue: if we have tool results, the LLM needs to respond to them.
         // Emitting the turn boundary keeps UI renderers aligned with the persisted
@@ -1568,7 +1574,7 @@ export class Agent {
       }, abortSignal);
       for (const event of stopHook.events) yield emit(event);
       const willContinue = !!(hookState as any).forceContinuationReason;
-      yield emit({ type: "turn_end", usage: turnUsage, willContinue });
+      yield emit({ type: "turn_end", usage: turnUsage, systemFingerprint: turnSystemFingerprint, willContinue });
       if (willContinue) {
         delete (hookState as any).forceContinuationReason;
         continue;
@@ -2572,7 +2578,6 @@ function isSubagentLifecycleTool(name: string): boolean {
     || name === "agent_team"
     || name === "agent_batch";
 }
-
 
 
 

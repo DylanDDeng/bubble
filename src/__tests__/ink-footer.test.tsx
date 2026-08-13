@@ -31,11 +31,46 @@ describe("Ink footer", () => {
 
     expect(output).toContain("plan on");
     expect(output).not.toContain("⇧⇥");
-    // Path / provider / model chrome lives in the welcome banner and the
-    // model-switch transcript notices, never in the footer.
+    // With no status data supplied, only the badge renders — the cwd/branch/
+    // model/title/ctx segments appear only when their data is present.
     expect(output).not.toContain("Model:");
     expect(output).not.toContain("ctx ");
     expect(output).not.toContain("•");
+  });
+
+  it("renders the status line with cwd, branch, model, title, and context", () => {
+    const output = renderToString(
+      React.createElement(FooterBar, {
+        data: {
+          cwd: "~/project",
+          branch: "main",
+          model: "Grok 4.6",
+          sessionTitle: "fix the footer",
+          contextUsage: "12% context",
+        },
+      }),
+      { columns: 100 },
+    );
+
+    expect(output).toContain("~/project");
+    expect(output).toContain("main");
+    expect(output).toContain("Grok 4.6");
+    expect(output).toContain("fix the footer");
+    expect(output).toContain("12% context");
+    expect(output).toContain(" | ");
+  });
+
+  it("places the permission badge first in the status line", () => {
+    const output = renderToString(
+      React.createElement(FooterBar, {
+        data: { cwd: "~/project", branch: "main", model: "Grok 4.6", mode: "bypassPermissions" },
+      }),
+      { columns: 100 },
+    );
+
+    expect(output).toContain("bypass permission on");
+    expect(output).toContain(" | ");
+    expect(output.indexOf("bypass permission on")).toBeLessThan(output.indexOf("~/project"));
   });
 
   it("spells out the bypass badge as 'bypass permission on'", () => {

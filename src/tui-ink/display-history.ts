@@ -19,6 +19,8 @@ export interface DisplayMessage {
   compactionSummary?: string;
   hiddenCount?: number;
   taskElapsedMs?: number;
+  /** Backend configuration fingerprint reported for this model response. */
+  systemFingerprint?: string;
 }
 
 export function userInputStatusBadgeLabel(status?: UserInputStatus): string | undefined {

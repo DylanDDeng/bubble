@@ -241,6 +241,7 @@ function normalizeMessageToEntries(message: Message, id: string, timestamp: numb
           providerId: message.providerId,
           modelId: message.modelId,
           usage: message.usage,
+          systemFingerprint: message.systemFingerprint,
           error: message.error,
           providerMetadata: sanitizeAssistantProviderMetadata(cloneProviderMetadata(message.providerMetadata)),
         },

@@ -482,6 +482,9 @@ function extractBalancedJson(s: string, start: number): string | null {
  * execute safely.
  */
 export async function* translateOpenAIFullResponse(response: any): AsyncIterable<StreamChunk> {
+  if (typeof response?.system_fingerprint === "string" && response.system_fingerprint) {
+    yield { type: "response_metadata", systemFingerprint: response.system_fingerprint };
+  }
   const usageChunk = usageToStreamChunk(response?.usage);
   if (usageChunk) yield usageChunk;
 
@@ -592,6 +595,7 @@ export async function* translateOpenAIStream(
   let reasoningBuffer = "";
   let textBuffer = "";
   let rawChunkSeq = 0;
+  let systemFingerprint: string | undefined;
   // DeepSeek (and some inference re-hosts) sometimes deliver reasoning twice:
   // once via a dedicated `reasoning_content` / `thinking` field, and again
   // embedded as `<think>...</think>` inside `delta.content`. Track whether we
@@ -643,6 +647,16 @@ export async function* translateOpenAIStream(
     const delta = choice?.delta;
     const usage = (chunk as any).usage ?? choice?.usage;
     const finishReason = choice?.finish_reason;
+
+    if (
+      typeof chunk?.system_fingerprint === "string"
+      && chunk.system_fingerprint
+      && chunk.system_fingerprint !== systemFingerprint
+    ) {
+      const nextSystemFingerprint = chunk.system_fingerprint;
+      systemFingerprint = nextSystemFingerprint;
+      yield { type: "response_metadata", systemFingerprint: nextSystemFingerprint };
+    }
 
     debugReasoningStream({
       stage: "provider_raw",

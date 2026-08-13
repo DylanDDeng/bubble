@@ -56,6 +56,8 @@ export interface AssistantMessage {
   providerId?: string;
   modelId?: string;
   usage?: TokenUsage;
+  /** Backend configuration fingerprint reported by the model provider. */
+  systemFingerprint?: string;
   error?: {
     name: string;
     message: string;
@@ -374,6 +376,7 @@ export type StreamChunk =
   | { type: "provider_content_block"; provider: ProviderMetadataProvider; block: ProviderRawContentBlock }
   | { type: "tool_call"; id: string; name: string; arguments: string; isStart: boolean; isEnd: boolean; argumentsFull?: string; argumentsCorrupt?: boolean }
   | { type: "usage"; usage: TokenUsage }
+  | { type: "response_metadata"; systemFingerprint: string }
   | { type: "done" };
 
 export interface TokenUsage {
@@ -450,7 +453,7 @@ export type AgentEvent =
   | { type: "tool_start"; id: string; name: string; args: Record<string, any> }
   | { type: "tool_update"; id: string; name: string; update: ToolUpdate }
   | { type: "tool_end"; id: string; name: string; result: ToolResult }
-  | { type: "turn_end"; usage?: TokenUsage; cost?: UsageCost; willContinue?: boolean }
+  | { type: "turn_end"; usage?: TokenUsage; cost?: UsageCost; systemFingerprint?: string; willContinue?: boolean }
   | { type: "context_recovered"; droppedMessages: number; reason: "overflow" }
   | { type: "provider_retry"; attempt: number; maxAttempts: number; reason: string }
   | { type: "input_pending_changed"; pending: number }

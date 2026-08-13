@@ -89,6 +89,25 @@ describe("Agent", () => {
     expect(agent.messages).toHaveLength(2); // user + assistant (no system prompt in this test)
   });
 
+  it("persists and reports the provider backend fingerprint", async () => {
+    const provider = createMockProvider([[
+      { type: "response_metadata", systemFingerprint: "fp_v4pro_test" },
+      { type: "text", content: "Hello!" },
+      { type: "done" },
+    ]]);
+    const agent = new Agent({ provider, model: "deepseek-v4-pro", tools: [] });
+    const events = await collectEvents(agent, "Hi", "/tmp");
+
+    expect(agent.messages.at(-1)).toMatchObject({
+      role: "assistant",
+      systemFingerprint: "fp_v4pro_test",
+    });
+    expect(events.find((event) => event.type === "turn_end")).toMatchObject({
+      type: "turn_end",
+      systemFingerprint: "fp_v4pro_test",
+    });
+  });
+
   it("summarizeForCompaction streams deltas and strips leaked reminder markup", async () => {
     const provider = createMockProvider([
       [
