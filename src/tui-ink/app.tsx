@@ -472,18 +472,11 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   }, [subagentMembers.length, subagentEntryFocused]);
   // Live progress for a manual `/compact` run (null when not compacting).
   const [compaction, setCompaction] = useState<CompactionProgress | null>(null);
-  // Normalize agent.thinking against the current model's supported levels so the
-  // banner displays the *effective* level, not a stale user-config value like
-  // "xhigh" when switching to a model that only supports ["high","max","off"].
-  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(() => {
-    const modelParts = agent.model.includes(":")
-      ? agent.model.split(":")
-      : [agent.providerId || safeRegistry.getDefault()?.id || "openai", agent.model];
-    const providerId = modelParts[0];
-    const modelId = modelParts.slice(1).join(":");
-    const availableLevels = getAvailableThinkingLevels(providerId, modelId);
-    return normalizeThinkingLevel(agent.thinking, availableLevels);
-  });
+  // The reasoning level is persisted on the agent (agent.thinking); display it
+  // directly. switchAgentModel re-normalizes on explicit model switches, so the
+  // initial value needs no clamping against the (possibly not-yet-discovered)
+  // model ladder.
+  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(agent.thinking);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(agent.mode);
   const [todos, setTodos] = useState<Todo[]>(() => agent.getTodos());
   const [goalLine, setGoalLine] = useState("");
@@ -1312,6 +1305,7 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
       const effortNote = nextThinkingLevel && nextThinkingLevel !== "off"
         ? (isThinkingToggle || isThinkingOnly ? " in thinking mode" : ` with ${nextThinkingLevel} effort`)
         : "";
+      setContextUsage(formatContextUsageLabel(agent.getContextUsageSnapshot()));
       addMessage("assistant", `Model switched to ${displayModel(model)}${effortNote}.`, "ui_notice");
       closePicker();
       return nextThinkingLevel;
@@ -2661,6 +2655,15 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   const bannerThinkingLabel = grokSessionBound
     ? externalRuntimeBinding?.reasoningEffort
     : !externalSessionBound && showThinkingLabel ? thinkingLevel : undefined;
+  // Footer surfaces the graded effort level too (grok/DeepSeek/OpenAI ladders),
+  // but skips on/off toggles and thinking-only placeholders ("medium").
+  const footerThinkingLabel = !externalSessionBound
+    && thinkingLevel
+    && thinkingLevel !== "off"
+    && !isThinkingToggle
+    && !isThinkingOnly
+    ? thinkingLevel
+    : undefined;
   const welcomeBannerNode = showWelcome ? (
     <WelcomeBanner
       terminalColumns={terminalColumns}
@@ -3117,7 +3120,11 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
               : undefined,
             cwd: friendlyCwd(args.cwd),
             branch,
-            model: externalSessionBound ? undefined : (agent.model ? displayModel(agent.model) : undefined),
+            model: externalSessionBound
+              ? undefined
+              : (agent.model
+                ? `${displayModel(agent.model)}${footerThinkingLabel ? ` · ${footerThinkingLabel}` : ""}`
+                : undefined),
             sessionTitle: externalSessionBound ? undefined : (sessionManager?.getMetadata().title?.trim() || undefined),
             contextUsage: externalSessionBound ? undefined : (contextUsage || undefined),
           })} />
