@@ -193,6 +193,7 @@ describe("grok subscription discovery", () => {
       // is selectable with low/medium/high effort instead of being skipped.
       expect(getBuiltinModel("grok", "grok-5-next")?.reasoningLevels).toEqual(["low", "medium", "high"]);
       expect(getBuiltinModel("grok", "grok-5-next")?.defaultReasoningLevel).toBe("high");
+      expect(getBuiltinModel("grok", "grok-5-next")?.contextWindow).toBe(500000);
     } finally {
       process.env.BUBBLE_SYSTEM_PROXY = previousProxy;
       vi.unstubAllGlobals();

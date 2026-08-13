@@ -10,7 +10,7 @@
 
 import type { OAuthCredentials } from "./oauth/types.js";
 import { getChatGptFetch, type ChatGptFetch } from "./network/chatgpt-transport.js";
-import type { ThinkingLevel } from "./types.js";
+import { THINKING_LEVELS, type ThinkingLevel } from "./types.js";
 
 export const GROK_SUBSCRIPTION_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
 // The proxy rejects requests below a minimum client version; identify as the
@@ -21,21 +21,6 @@ const TOKEN_REFRESH_GRACE_MS = 5 * 60 * 1000;
 export function isGrokSubscriptionBaseUrl(baseURL: string): boolean {
   const normalized = baseURL.trim().replace(/\/+$/, "");
   return normalized === GROK_SUBSCRIPTION_BASE_URL || normalized.startsWith(`${GROK_SUBSCRIPTION_BASE_URL}/`);
-}
-
-/**
- * Infer reasoning levels for a Grok model id the /models endpoint returned
- * without metadata. Flagship reasoning models (grok-N.M) expose
- * low/medium/high with thinking always on — matching the curated grok-4.5
- * entry — while composer/fast/mini/flash variants have no effort control and
- * map to the plain "off" ladder.
- */
-export function inferGrokReasoningLevels(modelId: string): { levels: ThinkingLevel[]; defaultLevel?: ThinkingLevel } {
-  const id = modelId.toLowerCase();
-  if (/(composer|fast|mini|flash)/.test(id)) {
-    return { levels: ["off"] };
-  }
-  return { levels: ["low", "medium", "high"], defaultLevel: "high" };
 }
 
 export function buildGrokSubscriptionHeaders(): Record<string, string> {
@@ -90,18 +75,31 @@ export function createGrokSubscriptionFetch(
   };
 }
 
+export interface GrokModelDescriptor {
+  id: string;
+  name?: string;
+  /** Server-declared context window (the /models `context_window` field). */
+  contextWindow?: number;
+  /** Server-declared reasoning effort ladder, sorted ascending. */
+  reasoningEfforts?: ThinkingLevel[];
+  /** Server-declared default effort (the /models `reasoning_effort` field). */
+  defaultReasoningEffort?: ThinkingLevel;
+}
+
 /**
  * Fetch the model list for a Grok subscription account. The CLI chat proxy
  * gates on the grok-cli identity headers plus a fresh OAuth bearer, so this
  * rides the same refreshing fetch used for chat requests instead of a raw
- * global fetch. Throws on a non-2xx so callers fall back to the curated
- * catalog when the proxy exposes no /models endpoint.
+ * global fetch. The /models payload carries richer metadata than id+name —
+ * `context_window`, `reasoning_efforts`, and the default `reasoning_effort` —
+ * which this surfaces so discovery can stop inferring them. Throws on a
+ * non-2xx so callers fall back to the curated catalog.
  */
 export async function fetchGrokSubscriptionModels(
   baseURL: string,
   auth: GrokAuthAdapter,
   options: { timeoutMs?: number; fetch?: ChatGptFetch } = {},
-): Promise<Array<{ id: string; name?: string }>> {
+): Promise<GrokModelDescriptor[]> {
   const fetchImpl = createGrokSubscriptionFetch(auth, options.fetch);
   const base = baseURL.trim().replace(/\/+$/, "");
   const response = await fetchImpl(`${base}/models`, {
@@ -110,15 +108,37 @@ export async function fetchGrokSubscriptionModels(
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const payload = (await response.json()) as {
-    data?: Array<{ id?: unknown; name?: unknown }>;
-    models?: Array<{ id?: unknown; name?: unknown }>;
+    data?: Array<Record<string, unknown>>;
+    models?: Array<Record<string, unknown>>;
   };
   const entries = payload.data ?? payload.models ?? [];
   return entries
-    .filter((entry): entry is { id: string; name?: string } =>
+    .filter((entry): entry is Record<string, unknown> =>
       typeof entry?.id === "string" && entry.id.trim().length > 0)
-    .map((entry) => ({
-      id: entry.id,
-      name: typeof entry.name === "string" ? entry.name : undefined,
-    }));
+    .map((entry) => {
+      const id = entry.id as string;
+      const rawEfforts = Array.isArray(entry.reasoning_efforts) ? entry.reasoning_efforts : [];
+      const reasoningEfforts = rawEfforts
+        .map((effort) => (
+          effort && typeof effort === "object" && typeof (effort as Record<string, unknown>).value === "string"
+            ? (effort as Record<string, unknown>).value as string
+            : undefined
+        ))
+        .filter((value): value is ThinkingLevel =>
+          typeof value === "string" && (THINKING_LEVELS as readonly string[]).includes(value))
+        .sort((a, b) => THINKING_LEVELS.indexOf(a) - THINKING_LEVELS.indexOf(b));
+      const defaultReasoningEffort = typeof entry.reasoning_effort === "string"
+        && (THINKING_LEVELS as readonly string[]).includes(entry.reasoning_effort)
+        ? entry.reasoning_effort as ThinkingLevel
+        : undefined;
+      return {
+        id,
+        name: typeof entry.name === "string" ? entry.name : undefined,
+        contextWindow: typeof entry.context_window === "number" && entry.context_window > 0
+          ? entry.context_window
+          : undefined,
+        reasoningEfforts: reasoningEfforts.length > 0 ? reasoningEfforts : undefined,
+        defaultReasoningEffort,
+      };
+    });
 }

@@ -12,6 +12,7 @@ import {
   clearDynamicModelMetadata,
   getBuiltinModel,
   getBuiltinProvider,
+  inferGrokModelMetadata,
   listBuiltinModels,
   replaceDynamicModelMetadata,
   type ProviderProtocol,
@@ -20,7 +21,7 @@ import { ModelConfig } from "./model-config.js";
 import { AuthStorage } from "./oauth/index.js";
 import { fetchGeminiModels } from "./provider-ai-sdk.js";
 import { extractChatGptAccountId, fetchOpenAICodexModelCatalog, type OpenAICodexAuthAdapter } from "./provider-openai-codex.js";
-import { fetchGrokSubscriptionModels, inferGrokReasoningLevels, type GrokAuthAdapter } from "./provider-grok.js";
+import { fetchGrokSubscriptionModels, type GrokAuthAdapter } from "./provider-grok.js";
 import { refreshOpenAICodex } from "./oauth/openai-codex.js";
 import { refreshGrok } from "./oauth/grok.js";
 import type { OAuthCredentials } from "./oauth/types.js";
@@ -653,13 +654,27 @@ export class ProviderRegistry {
         const extras: ModelInfo[] = remote
           .filter((entry) => !known.has(entry.id) && isLikelyChatModelId(entry.id))
           .map((entry) => {
-            const inferred = inferGrokReasoningLevels(entry.id);
+            const inferred = inferGrokModelMetadata(entry.id);
+            // Prefer the server-declared effort ladder and context window over
+            // id-based inference; fall back to inference only when the endpoint
+            // omitted them (or for ids that don't match a known family).
+            const levels = entry.reasoningEfforts && entry.reasoningEfforts.length > 0
+              ? entry.reasoningEfforts
+              : inferred.levels;
+            const defaultLevel = entry.defaultReasoningEffort && levels.includes(entry.defaultReasoningEffort)
+              ? entry.defaultReasoningEffort
+              : inferred.defaultLevel;
             return {
               id: entry.id,
               name: entry.name || entry.id,
               providerId: currentProvider.id,
-              reasoningLevels: inferred.levels,
-              ...(inferred.defaultLevel ? { defaultReasoningLevel: inferred.defaultLevel } : {}),
+              reasoningLevels: levels,
+              ...(defaultLevel ? { defaultReasoningLevel: defaultLevel } : {}),
+              ...(entry.contextWindow !== undefined
+                ? { contextWindow: entry.contextWindow }
+                : inferred.contextWindow !== undefined
+                  ? { contextWindow: inferred.contextWindow }
+                  : {}),
             };
           })
           .sort((a, b) => a.id.localeCompare(b.id));

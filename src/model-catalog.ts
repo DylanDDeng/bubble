@@ -306,8 +306,31 @@ export function getBuiltinProvider(providerId: string): BuiltinProviderDefinitio
   return BUILTIN_PROVIDERS.find((provider) => provider.id === providerId);
 }
 
+/**
+ * Infer capability metadata for a Grok model id the /models endpoint returned
+ * without metadata. Flagship reasoning models (grok-N.M) expose low/medium/high
+ * with thinking always on and a 500K context window — matching the curated
+ * grok-4.5 entry — while composer/fast/mini/flash variants have no effort
+ * control and a 200K window. Pure (id-only) so it works even before remote
+ * model discovery runs.
+ */
+export function inferGrokModelMetadata(modelId: string): { levels: ReasoningEffort[]; defaultLevel?: ReasoningEffort; contextWindow?: number } {
+  const id = modelId.toLowerCase();
+  if (/(composer|fast|mini|flash)/.test(id)) {
+    return { levels: ["off"], contextWindow: 200000 };
+  }
+  return { levels: ["low", "medium", "high"], defaultLevel: "high", contextWindow: 500000 };
+}
+
 export function getModelContextWindow(providerId: string, modelId: string): number | undefined {
-  return getBuiltinModel(providerId, modelId)?.contextWindow;
+  const builtin = getBuiltinModel(providerId, modelId);
+  if (builtin?.contextWindow !== undefined) return builtin.contextWindow;
+  // Dynamically-discovered grok models aren't in the static catalog until
+  // discovery runs; infer the window from the id so context usage can render a
+  // percentage even before discovery (e.g. on a resumed session right after
+  // startup).
+  if (providerId === "grok") return inferGrokModelMetadata(modelId).contextWindow;
+  return undefined;
 }
 
 export function getToolOutputTokenLimit(providerId: string, modelId: string): number | undefined {

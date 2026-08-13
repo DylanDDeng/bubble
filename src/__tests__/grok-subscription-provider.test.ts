@@ -7,11 +7,11 @@ import {
   buildGrokSubscriptionHeaders,
   createGrokSubscriptionFetch,
   fetchGrokSubscriptionModels,
-  inferGrokReasoningLevels,
   GROK_SUBSCRIPTION_BASE_URL,
   isGrokSubscriptionBaseUrl,
   type GrokAuthAdapter,
 } from "../provider-grok.js";
+import { getModelContextWindow, inferGrokModelMetadata } from "../model-catalog.js";
 import { resolveProviderRequestConfig } from "../provider-transform.js";
 import type { OAuthCredentials } from "../oauth/types.js";
 
@@ -213,6 +213,37 @@ describe("grok subscription model discovery", () => {
     expect(models.map((model) => model.id)).toEqual(["grok-4.5", "grok-composer-2.5-fast"]);
   });
 
+  it("extracts context window and reasoning efforts from the /models payload", async () => {
+    const baseFetch = vi.fn(async () => new Response(JSON.stringify({ data: [
+      {
+        id: "grok-4.6",
+        name: "Grok 4.6",
+        context_window: 1000000,
+        reasoning_effort: "high",
+        reasoning_efforts: [
+          { value: "xhigh", label: "Extra High Effort", default: true },
+          { value: "high", label: "High Effort", default: true },
+          { value: "medium", label: "Medium Effort", default: false },
+          { value: "low", label: "Low Effort", default: false },
+        ],
+      },
+    ] }), { status: 200 }));
+
+    const models = await fetchGrokSubscriptionModels(
+      GROK_SUBSCRIPTION_BASE_URL,
+      futureAuth(),
+      { fetch: baseFetch },
+    );
+
+    expect(models).toEqual([{
+      id: "grok-4.6",
+      name: "Grok 4.6",
+      contextWindow: 1000000,
+      reasoningEfforts: ["low", "medium", "high", "xhigh"],
+      defaultReasoningEffort: "high",
+    }]);
+  });
+
   it("throws on a non-2xx so callers fall back to the curated catalog", async () => {
     const baseFetch = vi.fn(async () => new Response("not found", { status: 404 }));
 
@@ -223,11 +254,22 @@ describe("grok subscription model discovery", () => {
     )).rejects.toThrow(/HTTP 404/);
   });
 
-  it("infers flagship reasoning levels vs plain-off variants from the model id", () => {
-    expect(inferGrokReasoningLevels("grok-4.6")).toEqual({ levels: ["low", "medium", "high"], defaultLevel: "high" });
-    expect(inferGrokReasoningLevels("grok-5")).toEqual({ levels: ["low", "medium", "high"], defaultLevel: "high" });
-    expect(inferGrokReasoningLevels("grok-composer-2.5-fast")).toEqual({ levels: ["off"] });
-    expect(inferGrokReasoningLevels("grok-4.6-fast")).toEqual({ levels: ["off"] });
-    expect(inferGrokReasoningLevels("grok-mini")).toEqual({ levels: ["off"] });
+  it("infers flagship reasoning levels and context window vs fast variants", () => {
+    expect(inferGrokModelMetadata("grok-4.6")).toEqual({ levels: ["low", "medium", "high"], defaultLevel: "high", contextWindow: 500000 });
+    expect(inferGrokModelMetadata("grok-5")).toEqual({ levels: ["low", "medium", "high"], defaultLevel: "high", contextWindow: 500000 });
+    expect(inferGrokModelMetadata("grok-composer-2.5-fast")).toEqual({ levels: ["off"], contextWindow: 200000 });
+    expect(inferGrokModelMetadata("grok-4.6-fast")).toEqual({ levels: ["off"], contextWindow: 200000 });
+    expect(inferGrokModelMetadata("grok-mini")).toEqual({ levels: ["off"], contextWindow: 200000 });
+  });
+
+  it("resolves a context window for dynamic grok models before discovery", () => {
+    // Static catalog entries resolve without any discovery.
+    expect(getModelContextWindow("grok", "grok-4.5")).toBe(500000);
+    // Dynamically-discovered ids resolve via id inference (no discovery needed).
+    expect(getModelContextWindow("grok", "grok-4.6")).toBe(500000);
+    expect(getModelContextWindow("grok", "grok-4.6-fast")).toBe(200000);
+    // Non-grok providers are untouched.
+    expect(getModelContextWindow("openai", "gpt-4o")).toBe(128000);
+    expect(getModelContextWindow("openai", "gpt-unknown")).toBeUndefined();
   });
 });
