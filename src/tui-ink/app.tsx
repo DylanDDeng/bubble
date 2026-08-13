@@ -45,6 +45,7 @@ import { SkillRegistry } from "../skills/registry.js";
 import { parseSkillInvocation } from "../skills/invocation.js";
 import { useTerminalSize } from "./use-terminal-size.js";
 import { WelcomeBanner, shouldShowWelcomeBanner } from "./welcome.js";
+import { BubbleCodeWordmark } from "./wordmark.js";
 import { expandAtMentions } from "./file-mentions.js";
 import { TodosPanel } from "./todos.js";
 import { CompactionProgressCard } from "./compaction-progress.js";
@@ -2665,17 +2666,20 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     ? thinkingLevel
     : undefined;
   const welcomeBannerNode = showWelcome ? (
-    <WelcomeBanner
-      terminalColumns={terminalColumns}
-      tips={bannerTips}
-      updateNotice={currentUpdateNotice}
-      cwd={friendlyCwd(args.cwd)}
-      sessionLabel={sessionBasename(currentSessionFile())}
-      providerId={bannerProviderId}
-      modelId={bannerModelId}
-      modelLabel={bannerModelLabel}
-      thinkingLabel={bannerThinkingLabel}
-    />
+    <Box flexDirection="column" marginBottom={1}>
+      <BubbleCodeWordmark width={terminalColumns} />
+      <WelcomeBanner
+        terminalColumns={terminalColumns}
+        tips={bannerTips}
+        updateNotice={currentUpdateNotice}
+        cwd={friendlyCwd(args.cwd)}
+        sessionLabel={sessionBasename(currentSessionFile())}
+        providerId={bannerProviderId}
+        modelId={bannerModelId}
+        modelLabel={bannerModelLabel}
+        thinkingLabel={bannerThinkingLabel}
+      />
+    </Box>
   ) : null;
   const commandPaletteItems = useMemo(
     () => buildCommandPaletteItems(safeSkillRegistry, externalSessionBound),
