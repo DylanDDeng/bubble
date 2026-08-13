@@ -89,6 +89,18 @@ describe("Agent", () => {
     expect(agent.messages).toHaveLength(2); // user + assistant (no system prompt in this test)
   });
 
+  it("carries the persistent memory prompt into the model-switch prompt options", () => {
+    const provider = createMockProvider([]);
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [],
+      memoryPrompt: "Memory context visible to selected agents.",
+    });
+
+    expect(agent.getSystemPromptToolOptions().memoryPrompt).toBe("Memory context visible to selected agents.");
+  });
+
   it("persists and reports the provider backend fingerprint", async () => {
     const provider = createMockProvider([[
       { type: "response_metadata", systemFingerprint: "fp_v4pro_test" },

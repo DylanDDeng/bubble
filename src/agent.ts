@@ -495,12 +495,15 @@ export class Agent {
     return [...this.tools.values()].filter((t) => t.deferred);
   }
 
-  getSystemPromptToolOptions(): Pick<import("./system-prompt.js").SystemPromptOptions, "tools" | "toolSnippets" | "guidelines" | "modelRoutingPrompt"> {
+  getSystemPromptToolOptions(): Pick<import("./system-prompt.js").SystemPromptOptions, "tools" | "toolSnippets" | "guidelines" | "modelRoutingPrompt" | "memoryPrompt"> {
     return {
       ...buildToolPromptOptions(this.getActiveToolEntries()),
       // Rendered through the live accessor (design §1.5), so every host-
       // triggered prompt rebuild picks up the current catalog.
       modelRoutingPrompt: this.buildModelRoutingPromptSection(),
+      // Model switches rebuild the prompt from these options; without this the
+      // persistent memory (buildMemoryPrompt) is silently dropped on switch.
+      memoryPrompt: this.memoryPrompt,
     };
   }
 
