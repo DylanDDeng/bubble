@@ -6,8 +6,11 @@ import { importGrokCliCredentials, refreshGrok } from "../oauth/grok.js";
 import {
   buildGrokSubscriptionHeaders,
   createGrokSubscriptionFetch,
+  fetchGrokSubscriptionModels,
+  inferGrokReasoningLevels,
   GROK_SUBSCRIPTION_BASE_URL,
   isGrokSubscriptionBaseUrl,
+  type GrokAuthAdapter,
 } from "../provider-grok.js";
 import { resolveProviderRequestConfig } from "../provider-transform.js";
 import type { OAuthCredentials } from "../oauth/types.js";
@@ -153,5 +156,78 @@ describe("grok subscription provider plumbing", () => {
       effectiveThinkingLevel: "off",
       extraBody: undefined,
     });
+  });
+});
+
+describe("grok subscription model discovery", () => {
+  const futureCredentials = (): OAuthCredentials => ({
+    type: "oauth",
+    accessToken: "bearer-token",
+    refreshToken: "refresh-token",
+    expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+  });
+
+  const futureAuth = (): GrokAuthAdapter => ({
+    getCredentials: () => futureCredentials(),
+    refreshCredentials: vi.fn(async () => futureCredentials()),
+  });
+
+  it("requests /models with the CLI identity headers and a fresh bearer", async () => {
+    const seen: Array<{ url: string; headers: Headers }> = [];
+    const baseFetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      seen.push({ url: String(url), headers: new Headers(init?.headers) });
+      return new Response(JSON.stringify({ data: [
+        { id: "grok-4.5" },
+        { id: "grok-5-next", name: "Grok 5" },
+      ] }), { status: 200 });
+    });
+
+    const models = await fetchGrokSubscriptionModels(
+      GROK_SUBSCRIPTION_BASE_URL,
+      futureAuth(),
+      { fetch: baseFetch },
+    );
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].url).toBe("https://cli-chat-proxy.grok.com/v1/models");
+    expect(seen[0].headers.get("user-agent")).toBe("grok-cli");
+    expect(seen[0].headers.get("x-grok-client-version")).toBe("0.2.93");
+    expect(seen[0].headers.get("authorization")).toBe("Bearer bearer-token");
+    expect(models).toEqual([
+      { id: "grok-4.5" },
+      { id: "grok-5-next", name: "Grok 5" },
+    ]);
+  });
+
+  it("parses the { models: [...] } response shape too", async () => {
+    const baseFetch = vi.fn(async () => new Response(JSON.stringify({
+      models: [{ id: "grok-4.5" }, { id: "grok-composer-2.5-fast" }],
+    }), { status: 200 }));
+
+    const models = await fetchGrokSubscriptionModels(
+      GROK_SUBSCRIPTION_BASE_URL,
+      futureAuth(),
+      { fetch: baseFetch },
+    );
+
+    expect(models.map((model) => model.id)).toEqual(["grok-4.5", "grok-composer-2.5-fast"]);
+  });
+
+  it("throws on a non-2xx so callers fall back to the curated catalog", async () => {
+    const baseFetch = vi.fn(async () => new Response("not found", { status: 404 }));
+
+    await expect(fetchGrokSubscriptionModels(
+      GROK_SUBSCRIPTION_BASE_URL,
+      futureAuth(),
+      { fetch: baseFetch },
+    )).rejects.toThrow(/HTTP 404/);
+  });
+
+  it("infers flagship reasoning levels vs plain-off variants from the model id", () => {
+    expect(inferGrokReasoningLevels("grok-4.6")).toEqual({ levels: ["low", "medium", "high"], defaultLevel: "high" });
+    expect(inferGrokReasoningLevels("grok-5")).toEqual({ levels: ["low", "medium", "high"], defaultLevel: "high" });
+    expect(inferGrokReasoningLevels("grok-composer-2.5-fast")).toEqual({ levels: ["off"] });
+    expect(inferGrokReasoningLevels("grok-4.6-fast")).toEqual({ levels: ["off"] });
+    expect(inferGrokReasoningLevels("grok-mini")).toEqual({ levels: ["off"] });
   });
 });

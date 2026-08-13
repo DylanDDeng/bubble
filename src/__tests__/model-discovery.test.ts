@@ -15,6 +15,7 @@ import {
   isOpenAICompatibleProtocol,
   type ProviderProfile,
 } from "../provider-registry.js";
+import { getBuiltinModel } from "../model-catalog.js";
 import type { UserConfig } from "../config.js";
 
 afterEach(() => {
@@ -138,5 +139,63 @@ describe("OpenAI-compatible model discovery", () => {
     expect(isLikelyChatModelId("moonshot-v1-128k-vision-preview")).toBe(true);
     expect(isLikelyChatModelId("qwen-image-3.0-pro")).toBe(false);
     expect(isLikelyChatModelId("text-embedding-3-large")).toBe(false);
+  });
+});
+
+describe("grok subscription discovery", () => {
+  const grokProvider: ProviderProfile = {
+    id: "grok",
+    name: "Grok Subscription",
+    baseURL: "https://cli-chat-proxy.grok.com/v1",
+    apiKey: "",
+    enabled: true,
+  };
+
+  it("surfaces remote-only models through the refreshing subscription fetch", async () => {
+    const previousProxy = process.env.BUBBLE_SYSTEM_PROXY;
+    process.env.BUBBLE_SYSTEM_PROXY = "0";
+    try {
+      const fetchMock = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+        expect(String(url)).toBe("https://cli-chat-proxy.grok.com/v1/models");
+        const headers = new Headers(init?.headers);
+        expect(headers.get("user-agent")).toBe("grok-cli");
+        expect(headers.get("x-grok-client-version")).toBe("0.2.93");
+        expect(headers.get("authorization")).toBe("Bearer access-token");
+        return new Response(JSON.stringify({ data: [
+          { id: "grok-4.5" },
+          { id: "grok-5-next", name: "Grok 5" },
+        ] }), { status: 200 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const registry = isolatedRegistry([grokProvider]);
+      registry.getAuthStorage().set("grok", {
+        type: "oauth",
+        accessToken: "access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+      });
+      const configured = registry.getConfigured().find((provider) => provider.id === "grok");
+      expect(configured?.authType).toBe("oauth");
+
+      const result = await registry.discoverModels(configured!);
+      const ids = result.models.map((model) => model.id);
+
+      expect(result.authoritative).toBe(true);
+      // Curated entries survive even when the remote list omits them.
+      expect(ids).toContain("grok-4.5");
+      expect(ids).toContain("grok-composer-2.5-fast");
+      // A newly-released remote-only model is surfaced without a code change.
+      expect(ids).toContain("grok-5-next");
+      // Its metadata lands in the dynamic overlay for routing/picker lookups.
+      expect(getBuiltinModel("grok", "grok-5-next")?.name).toBe("Grok 5");
+      // A flagship grok-N.M id infers the same ladder as curated grok-4.5, so it
+      // is selectable with low/medium/high effort instead of being skipped.
+      expect(getBuiltinModel("grok", "grok-5-next")?.reasoningLevels).toEqual(["low", "medium", "high"]);
+      expect(getBuiltinModel("grok", "grok-5-next")?.defaultReasoningLevel).toBe("high");
+    } finally {
+      process.env.BUBBLE_SYSTEM_PROXY = previousProxy;
+      vi.unstubAllGlobals();
+    }
   });
 });

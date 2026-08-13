@@ -10,6 +10,7 @@
 
 import type { OAuthCredentials } from "./oauth/types.js";
 import { getChatGptFetch, type ChatGptFetch } from "./network/chatgpt-transport.js";
+import type { ThinkingLevel } from "./types.js";
 
 export const GROK_SUBSCRIPTION_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
 // The proxy rejects requests below a minimum client version; identify as the
@@ -20,6 +21,21 @@ const TOKEN_REFRESH_GRACE_MS = 5 * 60 * 1000;
 export function isGrokSubscriptionBaseUrl(baseURL: string): boolean {
   const normalized = baseURL.trim().replace(/\/+$/, "");
   return normalized === GROK_SUBSCRIPTION_BASE_URL || normalized.startsWith(`${GROK_SUBSCRIPTION_BASE_URL}/`);
+}
+
+/**
+ * Infer reasoning levels for a Grok model id the /models endpoint returned
+ * without metadata. Flagship reasoning models (grok-N.M) expose
+ * low/medium/high with thinking always on — matching the curated grok-4.5
+ * entry — while composer/fast/mini/flash variants have no effort control and
+ * map to the plain "off" ladder.
+ */
+export function inferGrokReasoningLevels(modelId: string): { levels: ThinkingLevel[]; defaultLevel?: ThinkingLevel } {
+  const id = modelId.toLowerCase();
+  if (/(composer|fast|mini|flash)/.test(id)) {
+    return { levels: ["off"] };
+  }
+  return { levels: ["low", "medium", "high"], defaultLevel: "high" };
 }
 
 export function buildGrokSubscriptionHeaders(): Record<string, string> {
@@ -72,4 +88,37 @@ export function createGrokSubscriptionFetch(
     headers.set("Authorization", `Bearer ${token}`);
     return baseFetch(input, { ...(init ?? {}), headers });
   };
+}
+
+/**
+ * Fetch the model list for a Grok subscription account. The CLI chat proxy
+ * gates on the grok-cli identity headers plus a fresh OAuth bearer, so this
+ * rides the same refreshing fetch used for chat requests instead of a raw
+ * global fetch. Throws on a non-2xx so callers fall back to the curated
+ * catalog when the proxy exposes no /models endpoint.
+ */
+export async function fetchGrokSubscriptionModels(
+  baseURL: string,
+  auth: GrokAuthAdapter,
+  options: { timeoutMs?: number; fetch?: ChatGptFetch } = {},
+): Promise<Array<{ id: string; name?: string }>> {
+  const fetchImpl = createGrokSubscriptionFetch(auth, options.fetch);
+  const base = baseURL.trim().replace(/\/+$/, "");
+  const response = await fetchImpl(`${base}/models`, {
+    headers: buildGrokSubscriptionHeaders(),
+    signal: AbortSignal.timeout(options.timeoutMs ?? 5_000),
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const payload = (await response.json()) as {
+    data?: Array<{ id?: unknown; name?: unknown }>;
+    models?: Array<{ id?: unknown; name?: unknown }>;
+  };
+  const entries = payload.data ?? payload.models ?? [];
+  return entries
+    .filter((entry): entry is { id: string; name?: string } =>
+      typeof entry?.id === "string" && entry.id.trim().length > 0)
+    .map((entry) => ({
+      id: entry.id,
+      name: typeof entry.name === "string" ? entry.name : undefined,
+    }));
 }

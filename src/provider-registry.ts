@@ -20,7 +20,7 @@ import { ModelConfig } from "./model-config.js";
 import { AuthStorage } from "./oauth/index.js";
 import { fetchGeminiModels } from "./provider-ai-sdk.js";
 import { extractChatGptAccountId, fetchOpenAICodexModelCatalog, type OpenAICodexAuthAdapter } from "./provider-openai-codex.js";
-import type { GrokAuthAdapter } from "./provider-grok.js";
+import { fetchGrokSubscriptionModels, inferGrokReasoningLevels, type GrokAuthAdapter } from "./provider-grok.js";
 import { refreshOpenAICodex } from "./oauth/openai-codex.js";
 import { refreshGrok } from "./oauth/grok.js";
 import type { OAuthCredentials } from "./oauth/types.js";
@@ -635,6 +635,44 @@ export class ProviderRegistry {
       }
     }
 
+    // Grok subscription: the CLI chat proxy gates on the grok-cli identity
+    // headers and a fresh OAuth bearer, neither of which the generic path below
+    // sends. Discover through the refreshing subscription fetch, then merge the
+    // curated catalog with any remote-only ids so newly-released models surface
+    // without a code change. Authoritative because the merged list is what the
+    // routing catalog and model picker should treat as the account's catalog.
+    if (provider.id === "grok" && provider.authType === "oauth" && provider.apiKey) {
+      try {
+        await this.prepareProvider("grok");
+        const currentProvider = this.getConfigured().find((item) => item.id === "grok") ?? provider;
+        const grokAuth = this.createGrokAuthAdapter("grok");
+        if (!grokAuth) throw new Error("Grok OAuth credentials are unavailable.");
+        const remote = await fetchGrokSubscriptionModels(currentProvider.baseURL, grokAuth);
+        const local = this.localModelsForProvider(currentProvider);
+        const known = new Set(local.map((model) => model.id));
+        const extras: ModelInfo[] = remote
+          .filter((entry) => !known.has(entry.id) && isLikelyChatModelId(entry.id))
+          .map((entry) => {
+            const inferred = inferGrokReasoningLevels(entry.id);
+            return {
+              id: entry.id,
+              name: entry.name || entry.id,
+              providerId: currentProvider.id,
+              reasoningLevels: inferred.levels,
+              ...(inferred.defaultLevel ? { defaultReasoningLevel: inferred.defaultLevel } : {}),
+            };
+          })
+          .sort((a, b) => a.id.localeCompare(b.id));
+        return {
+          models: [...local, ...extras],
+          source: "remote",
+          authoritative: true,
+        };
+      } catch (error) {
+        return this.fallbackDiscovery(provider, error);
+      }
+    }
+
     // Generic OpenAI-compatible discovery: most vendors expose GET /models on
     // the same base URL. Probed against every configured provider, their lists
     // turned out to be neither complete nor clean — zhipuai omits glm-5.2,
@@ -763,7 +801,9 @@ export class ProviderRegistry {
       ? "openai-codex"
       : provider.id === "google" && provider.protocol === "ai-sdk"
         ? "google"
-        : undefined;
+        : provider.id === "grok"
+          ? "grok"
+          : undefined;
     if (!dynamicProviderId) return;
 
     if (!result.authoritative) {
@@ -775,8 +815,11 @@ export class ProviderRegistry {
       id: model.id,
       name: model.name,
       providerId: dynamicProviderId,
-      // Empty means the remote model exists but declared no trusted effort metadata.
-      reasoningLevels: model.reasoningLevels ?? [],
+      // A remote model with no trusted effort metadata still has to be
+      // selectable: default it to the plain "off" level (no reasoning control)
+      // rather than an empty ladder, which the model picker would render
+      // "unavailable" and skip during arrow-key navigation.
+      reasoningLevels: model.reasoningLevels ?? ["off"],
       defaultReasoningLevel: model.defaultReasoningLevel,
       contextWindow: model.contextWindow,
       useResponsesLite: model.useResponsesLite,
