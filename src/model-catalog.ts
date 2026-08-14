@@ -82,13 +82,12 @@ const OPENAI_CHAT_LEVELS: ReasoningEffort[] = ["off"];
 // Internal representation for APIs that expose thinking as enabled/disabled.
 // UI code must render supported toggle models as on/off, not as "medium" effort.
 const TOGGLE_THINKING_LEVELS: ReasoningEffort[] = ["off", "medium"];
-// GLM-5.2 is the first GLM to accept OpenAI-style `reasoning_effort`. The API
-// enum is none/minimal/low/medium/high/xhigh/max; we expose high and max (the
-// two effort tiers worth offering a coding agent) plus "off", which disables
-// thinking outright via `thinking: {type: "disabled"}`. Order matters: "high"
-// is first so it is the default (getDefaultThinkingLevel falls back to levels[0]
-// when "medium" is absent), since GLM-5.2 is a thinking-on-by-default model.
+// GLM-5.2 accepts OpenAI-style `reasoning_effort`. We expose high and max plus
+// "off", which disables thinking outright via `thinking: {type: "disabled"}`.
 const GLM_5_2_LEVELS: ReasoningEffort[] = ["high", "max", "off"];
+// GLM-5.3 Coding Plan normalizes efforts into exactly three real tiers. Its
+// default is max, and disabling thinking maps to low rather than turning it off.
+const GLM_5_3_LEVELS: ReasoningEffort[] = ["low", "high", "max"];
 // Kimi K2.7 Code variants only support thinking mode (disabling it errors), so
 // "off" is not offered — the model is always in its thinking variant.
 const KIMI_THINKING_ONLY_LEVELS: ReasoningEffort[] = ["medium"];
@@ -170,6 +169,9 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "glm-5.1", name: "GLM-5.1", providerId: "zhipuai", tier: "balanced", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
   { id: "glm-4.7", name: "GLM-4.7", providerId: "zhipuai", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
   { id: "glm-4.6", name: "GLM-4.6", providerId: "zhipuai", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
+  // Coding Plan exposes GLM-5.3 before GET /models lists it (verified live
+  // 2026-08-14). The standard API is still marked "coming soon" in the docs.
+  { id: "glm-5.3", name: "GLM-5.3", providerId: "zhipuai-coding-plan", tier: "strong", reasoningLevels: GLM_5_3_LEVELS, defaultReasoningLevel: "max", contextWindow: 1000000 },
   { id: "glm-5.2", name: "GLM-5.2", providerId: "zhipuai-coding-plan", tier: "strong", reasoningLevels: GLM_5_2_LEVELS, contextWindow: 1000000 },
   { id: "glm-5.1", name: "GLM-5.1", providerId: "zhipuai-coding-plan", tier: "balanced", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
   { id: "glm-4.7", name: "GLM-4.7", providerId: "zhipuai-coding-plan", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },

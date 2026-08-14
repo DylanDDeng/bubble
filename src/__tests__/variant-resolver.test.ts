@@ -103,6 +103,15 @@ describe("variant resolver", () => {
     expect(isThinkingToggleModel("zhipuai", "glm-5.1")).toBe(false);
   });
 
+  it("includes GLM-5.3 in the Zhipu Coding Plan catalog", () => {
+    expect(listBuiltinModels("zhipuai-coding-plan")[0]).toMatchObject({
+      id: "glm-5.3",
+      contextWindow: 1_000_000,
+      reasoningLevels: ["low", "high", "max"],
+      defaultReasoningLevel: "max",
+    });
+  });
+
   it("aligns built-in Kimi models with the current API surface", () => {
     // The first four are the plan slots GET /coding/v1/models actually serves
     // (probed 2026-08-04); the kimi-k2.* ids are kept for older keys.
