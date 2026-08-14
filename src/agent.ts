@@ -3,11 +3,11 @@
  * It maintains message state, calls the LLM, executes tools, and auto-continues.
  */
 
-import { compactCurrentTurnToolGroups, compactMessages, isRealUserMessage } from "./context/compact.js";
+import { compactCurrentTurnToolGroups, compactMessages } from "./context/compact.js";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { compactMessagesWithLLM } from "./context/compact-llm.js";
-import { estimateContextTokens, getContextBudget } from "./context/budget.js";
+import { getContextBudget } from "./context/budget.js";
 import { buildContextUsageSnapshot, type ContextUsageSnapshot } from "./context/usage.js";
 import { isContextOverflowError } from "./context/overflow.js";
 import {
@@ -20,7 +20,7 @@ import { projectMessages } from "./context/projector.js";
 import { aggressivePruneMessages, markStableCurrentToolResultsForCache, markToolResultCacheStable } from "./context/prune.js";
 import { truncateToolOutputForModel } from "./context/tool-output-truncate.js";
 import { buildDeferredToolsReminder, buildToolFreezeReminder, isPermissionModeReminder, reminderForMode } from "./prompt/reminders.js";
-import type { AgentEvent, AgentInputController, AgentRunInput, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ProviderMessage, ProviderMetadataProvider, ProviderRawContentBlock, ThinkingLevel, Todo, TokenUsage, ToolDefinition, ToolMessage, ToolResult, ToolRegistryEntry, ToolUpdate } from "./types.js";
+import type { AgentEvent, AgentInputController, AgentRunInput, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ThinkingLevel, Todo, TokenUsage, ToolDefinition, ToolMessage, ToolResult, ToolRegistryEntry, ToolUpdate } from "./types.js";
 import { HookBus, type TurnHooks, type TurnHookState } from "./orchestrator/hooks.js";
 import type { ExternalHookController } from "./hooks/controller.js";
 import {
