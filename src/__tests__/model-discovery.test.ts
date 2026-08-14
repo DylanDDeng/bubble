@@ -64,6 +64,36 @@ const stepfun: ProviderProfile = {
 };
 
 describe("OpenAI-compatible model discovery", () => {
+  it("merges newly-added curated models into a stale non-authoritative cache", async () => {
+    const provider: ProviderProfile = {
+      id: "zhipuai-coding-plan",
+      name: "Zhipu AI Coding Plan",
+      baseURL: "https://open.bigmodel.cn/api/coding/paas/v4",
+      apiKey: "sk-test",
+      enabled: true,
+    };
+    const registry = isolatedRegistry([provider]);
+    const key = (registry as any).modelDiscoveryKey(provider);
+    (registry as any).modelDiscoveryCache.set(key, {
+      result: {
+        models: [{ id: "glm-5.2", name: "GLM-5.2", providerId: provider.id }],
+        source: "remote",
+        authoritative: false,
+      },
+      expiresAt: Date.now() + 60_000,
+      identityKey: "stale",
+      providerId: provider.id,
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await registry.discoverModels(provider);
+
+    expect(result.source).toBe("cache");
+    expect(result.models.map((model) => model.id)).toContain("glm-5.3");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("adds remote-only models to the curated catalog", async () => {
     stubModelsResponse(["step-3.5-flash", "step-9-future"]);
     const registry = isolatedRegistry([stepfun]);

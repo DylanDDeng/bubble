@@ -575,7 +575,19 @@ export class ProviderRegistry {
     if (!options.forceRefresh) {
       const cached = this.modelDiscoveryCache.get(key);
       if (cached && cached.expiresAt > now) {
-        const result: ModelDiscoveryResult = { ...cached.result, source: "cache" };
+        // A disk cache can outlive the application version that wrote it. Keep
+        // the current curated catalog authoritative over stale cached metadata,
+        // then retain cached remote-only ids for non-authoritative union results.
+        // This lets newly-added builtins surface immediately after an upgrade
+        // without waiting up to 24 hours or requiring a manual Ctrl+R refresh.
+        const local = this.localModelsForProvider(provider);
+        const localIds = new Set(local.map((model) => model.id));
+        const models = cached.result.source === "static"
+          ? local
+          : cached.result.authoritative
+            ? cached.result.models
+            : [...local, ...cached.result.models.filter((model) => !localIds.has(model.id))];
+        const result: ModelDiscoveryResult = { ...cached.result, models, source: "cache" };
         const current = this.getConfigured().find((item) => item.id === provider.id);
         if (!current || this.modelDiscoveryKey(current) === key) {
           this.applyDynamicDiscoveryMetadata(provider, result);
