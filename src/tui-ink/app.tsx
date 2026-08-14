@@ -1302,6 +1302,11 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
         setThinkingLevel,
         sessionManager: targetSessionManager,
       });
+      // Persist the resolved effort alongside the model so a fresh session
+      // restores both. Without this, the picker path only remembered the model
+      // and new sessions fell back to a stale config.json defaultThinkingLevel
+      // (e.g. picking glm-5.3 + max still restored "high" on next launch).
+      userConfig.setDefaultThinkingLevel(nextThinkingLevel);
       // Binary thinking toggles and thinking-only models use internal level
       // placeholders; do not present those placeholders as real effort grades.
       const decodedModel = decodeModel(model);
