@@ -42,18 +42,6 @@ export function slashResultNoticeKind(result: string): DisplayMessage["synthetic
   return /^(Grok m|M)odel switched to /.test(result) ? "ui_notice" : undefined;
 }
 
-/**
- * Streaming tool arguments arrive as an incomplete JSON buffer. We can't
- * JSON.parse() until the closing brace lands, but the user wants to see the
- * short identifying fields (path, command, …) as soon as the model emits
- * them so the tool row header reflects what's happening.
- *
- * Intentionally limited to short, single-line fields. Long fields like
- * `content` are *not* surfaced live: rendering thousands of partial lines
- * per delta floods the terminal and the partial value can break around
- * unescaped sequences. The final value lands when the tool actually
- * executes and tool_start delivers canonical args.
- */
 /** Status-row summary for running background tasks (design §2.5). */
 export function taskRowSummary(tasks: BackgroundTaskInfo[], nowTick: number): string {
   const first = tasks[0]!;
@@ -99,6 +87,18 @@ export function formatContextUsageLabel(snapshot: { usedTokens: number; contextW
   return `${label} context`;
 }
 
+/**
+ * Streaming tool arguments arrive as an incomplete JSON buffer. We can't
+ * JSON.parse() until the closing brace lands, but the user wants to see the
+ * short identifying fields (path, command, …) as soon as the model emits
+ * them so the tool row header reflects what's happening.
+ *
+ * Intentionally limited to short, single-line fields. Long fields like
+ * `content` are *not* surfaced live: rendering thousands of partial lines
+ * per delta floods the terminal and the partial value can break around
+ * unescaped sequences. The final value lands when the tool actually
+ * executes and tool_start delivers canonical args.
+ */
 export function parsePartialArgs(
   buffer: string,
   previous: Record<string, any>,

@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { AgentAbortError, INTERRUPTED_ASSISTANT_CONTENT, type Agent } from "../agent.js";
-import { isHiddenToolMetadata } from "../agent/tool-visibility.js";
 import type { CliArgs } from "../cli.js";
 import { SessionManager, type SessionMetadata } from "../session.js";
 import type { AgentEvent, ContentPart, PermissionMode, PlanDecision, Provider, Todo, ToolResultMetadata } from "../types.js";
@@ -24,7 +23,6 @@ import {
   nextDisplayMessageKey,
   setUserInputStatus,
   snapshotDisplayParts,
-  stripInterruptedAssistantMarker,
   type DisplayMessage,
   type DisplayMessagePart,
   type DisplayToolCall,
@@ -33,8 +31,8 @@ import {
 } from "./display-history.js";
 import { AgentRunInputQueue } from "../agent/input-controller.js";
 import type { PendingApprovalHint } from "./message-list.js";
-import { canvasBackgroundFor, paletteFor, ThemeProvider, useTheme, type ResolvedTheme, type Theme, type ThemeMode } from "./theme.js";
-import { isPrintablePickerInput, ModelPicker, ProviderPicker, KeyPicker, SkillPicker } from "./model-picker.js";
+import { canvasBackgroundFor, paletteFor, ThemeProvider, type ResolvedTheme, type Theme, type ThemeMode } from "./theme.js";
+import { ModelPicker, ProviderPicker, KeyPicker, SkillPicker } from "./model-picker.js";
 import { FeishuSetupPicker } from "./feishu-setup-picker.js";
 import { BUILTIN_PROVIDERS, ProviderRegistry, decodeModel, displayModel, isUserVisibleProvider } from "../provider-registry.js";
 import { buildSystemPrompt } from "../system-prompt.js";
@@ -130,13 +128,12 @@ import { RewindPicker } from "./rewind-picker.js";
 import { StatsPanel } from "./stats-panel.js";
 import { WaitingIndicator } from "./waiting-indicator.js";
 
-import { collectUsageStatsBundle, formatStatsPanelBody, rangeLabel, type StatsRange, type UsageStatsBundle } from "../stats/usage.js";
+import { collectUsageStatsBundle, type StatsRange, type UsageStatsBundle } from "../stats/usage.js";
 import type { ExternalRuntimeManager, ExternalRuntimeModel } from "../external-runtime/types.js";
 import { GrokRuntimeError } from "../external-runtime/grok-errors.js";
 import {
   GROK_LOCAL_SLASH_COMMANDS,
   classifyGrokInput,
-  isGrokLocalSlashCommand,
 } from "../external-runtime/grok-input-policy.js";
 import {
   GROK_SUBSCRIPTION_PROVIDER_ID,
@@ -147,7 +144,6 @@ import {
   classifyExternalRuntimeBinding,
   stopExternalRuntimeForSessionSwitch,
 } from "../external-runtime/session-policy.js";
-import os from "node:os";
 import { rmSync } from "node:fs";
 import { execFile } from "node:child_process";
 
