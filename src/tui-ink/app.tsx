@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Box, Text, useApp, useInput } from "ink";
+import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { AgentAbortError, INTERRUPTED_ASSISTANT_CONTENT, type Agent } from "../agent.js";
 import { isHiddenToolMetadata } from "../agent/tool-visibility.js";
 import type { CliArgs } from "../cli.js";
@@ -535,12 +535,19 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   // MessageList so Ink discards its already-printed rows and re-prints the
   // rebuilt list onto a freshly-cleared screen instead of appending duplicates.
   const [staticGeneration, setStaticGeneration] = useState(0);
+  // The clear must go through Ink's stdout hook, not a raw process.stdout
+  // write: Ink replays its last dynamic frame after any external write
+  // (restoreLastOutput), which is the only repaint guarantee when the
+  // generation bump produces no new output — with zero settled rows (fresh
+  // welcome screen) <Static> emits nothing and the dynamic frame diffs equal,
+  // so Ink skips the write and a raw clear would leave the screen blank.
+  const { write: writeThroughInk } = useStdout();
   const reprintTranscript = useCallback(() => {
     if (process.stdout.isTTY) {
-      process.stdout.write("\x1b[0m\x1b[2J\x1b[3J\x1b[H");
+      writeThroughInk("\x1b[0m\x1b[2J\x1b[3J\x1b[H");
     }
     setStaticGeneration((generation) => generation + 1);
-  }, []);
+  }, [writeThroughInk]);
   // Steer/queue while the agent runs:
   // Enter steers the current run via the agent's input controller; Tab (or an
   // ineligible input) queues for the next turn. Both render placeholder user
