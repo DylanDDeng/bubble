@@ -214,7 +214,24 @@ export interface AgentRunOptions {
 }
 
 export class Agent {
-  messages: Message[] = [];
+  /**
+   * Backing store for the public `messages` accessor. All whole-array
+   * rewrites (clear/compact/rewind/session switch/subagent fork) go through
+   * the setter, which notifies `onContextChanged` subscribers — that push
+   * channel is what keeps derived UI (e.g. the footer usage readout) in sync
+   * without per-path refresh calls that are easy to forget.
+   */
+  private _messages: Message[] = [];
+  private contextChangedListeners = new Set<() => void>();
+
+  get messages(): Message[] {
+    return this._messages;
+  }
+
+  set messages(value: Message[]) {
+    this._messages = value;
+    this.notifyContextChanged();
+  }
   private provider: Provider;
   private sessionID?: string;
   /**
@@ -362,7 +379,7 @@ export class Agent {
     });
 
     if (options.systemPrompt) {
-      this.messages.push({ role: "system", content: options.systemPrompt });
+      this._messages.push({ role: "system", content: options.systemPrompt });
     }
 
     for (const tool of options.tools) {
@@ -524,6 +541,30 @@ export class Agent {
     return this.router.promptSectionFor(parent);
   }
 
+  /**
+   * Push subscription for derived-context consumers (TUI footer, hosts).
+   * Fires whenever resident context mutates in a way that changes a
+   * `getContextUsageSnapshot()` reading: whole-array message rewrites,
+   * appended messages, system-prompt replacement, or model/provider switches
+   * (window size / estimation basis). Returns an unsubscribe function.
+   */
+  onContextChanged(listener: () => void): () => void {
+    this.contextChangedListeners.add(listener);
+    return () => {
+      this.contextChangedListeners.delete(listener);
+    };
+  }
+
+  private notifyContextChanged(): void {
+    for (const listener of [...this.contextChangedListeners]) {
+      try {
+        listener();
+      } catch {
+        // A broken subscriber must never corrupt agent state mid-mutation.
+      }
+    }
+  }
+
   getContextUsageSnapshot(): ContextUsageSnapshot {
     return buildContextUsageSnapshot({
       providerId: this.providerId,
@@ -604,6 +645,8 @@ export class Agent {
 
   set model(value: string) {
     this._model = value;
+    // Context window (and thus usage readings) is model-derived.
+    this.notifyContextChanged();
   }
 
   get providerId(): string {
@@ -612,6 +655,8 @@ export class Agent {
 
   set providerId(value: string) {
     this._providerId = value;
+    // Token estimation basis is provider-specific.
+    this.notifyContextChanged();
   }
 
   get apiModel(): string {
@@ -693,9 +738,11 @@ export class Agent {
     const systemMessage: Extract<Message, { role: "system" }> = { role: "system", content: prompt };
     if (this.messages[0]?.role === "system") {
       this.messages[0] = systemMessage;
+      this.notifyContextChanged();
       return;
     }
     this.messages.unshift(systemMessage);
+    this.notifyContextChanged();
   }
 
   async *run(
@@ -2134,6 +2181,7 @@ export class Agent {
       model: this.apiModel || "none",
     });
     this.onMessageAppend?.(message);
+    this.notifyContextChanged();
   }
 
   private appendInterruptedAssistantBoundary(

@@ -301,8 +301,16 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     return () => { cancelled = true; };
   }, [args.cwd]);
 
+  // Push-based sync: the agent notifies on every resident-context mutation
+  // (message rewrites from /clear /compact /rewind and session switches,
+  // per-message appends during runs, model/provider switches), so this single
+  // subscription replaces the per-path manual refreshes that were easy to
+  // forget (the /clear footer bug). Initial read covers agents mounted with
+  // pre-existing history.
   useEffect(() => {
-    setContextUsage(formatContextUsageLabel(agent.getContextUsageSnapshot()));
+    const update = () => setContextUsage(formatContextUsageLabel(agent.getContextUsageSnapshot()));
+    update();
+    return agent.onContextChanged(update);
   }, [agent]);
   const [currentUpdateNotice, setCurrentUpdateNotice] = useState(updateNotice);
   const [pendingPlan, setPendingPlan] = useState<{
@@ -1124,7 +1132,6 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
       const effortNote = nextThinkingLevel && nextThinkingLevel !== "off"
         ? (isThinkingToggle || isThinkingOnly ? " in thinking mode" : ` with ${nextThinkingLevel} effort`)
         : "";
-      setContextUsage(formatContextUsageLabel(agent.getContextUsageSnapshot()));
       addMessage("assistant", `Model switched to ${displayModel(model)}${effortNote}.`, "ui_notice");
       closePicker();
       return nextThinkingLevel;
@@ -1190,7 +1197,6 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
       onExternalRuntimeChange: refreshExternalRuntimeBinding,
     });
     if (handled) {
-      setContextUsage(formatContextUsageLabel(agent.getContextUsageSnapshot()));
       if (result) addMessage("assistant", result, slashResultNoticeKind(result));
     }
   }, [
@@ -1829,7 +1835,6 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
                   goalRunTokens += tokenUsageTotal(event.usage);
                 }
                 assistantSystemFingerprint = event.systemFingerprint;
-                setContextUsage(formatContextUsageLabel(agent.getContextUsageSnapshot()));
                 if (event.willContinue) {
                   commitAssistantMessage();
                   clearAssistantStream();
@@ -2136,11 +2141,6 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
           if (agent.mode !== permissionMode) {
             setPermissionMode(agent.mode);
           }
-          // Context-rewriting commands (/clear, /compact, /rewind, /model…)
-          // mutate agent state without a provider turn, so the footer's
-          // usage readout would keep the pre-command value until the next
-          // turn_end. Resync it from live agent state here.
-          setContextUsage(formatContextUsageLabel(agent.getContextUsageSnapshot()));
           if (result) {
             // `/compact` rewrites agent.messages, so the Ink transcript needs to
             // be rebuilt from the new agent state before appending the summary

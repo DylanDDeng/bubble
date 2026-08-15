@@ -706,6 +706,43 @@ describe("Agent", () => {
     expect(appended.some((m) => m.role === "assistant")).toBe(true);
   });
 
+  it("notifies onContextChanged subscribers on every resident-context mutation", async () => {
+    const provider = createMockProvider([
+      [{ type: "text", content: "ok" }, { type: "done" }],
+    ]);
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [],
+    });
+    let notifications = 0;
+    const unsubscribe = agent.onContextChanged(() => {
+      notifications += 1;
+    });
+
+    // Whole-array rewrites (the /clear, /rewind, /compact, session-switch path).
+    agent.messages = [{ role: "system", content: "system" }];
+    expect(notifications).toBe(1);
+
+    // Run-loop appends (user + assistant via appendMessage).
+    await collectEvents(agent, "Hi", "/tmp");
+    expect(notifications).toBeGreaterThanOrEqual(3);
+    const afterRun = notifications;
+
+    // Model switches change the context window reading.
+    agent.model = "gpt-4o-mini";
+    expect(notifications).toBe(afterRun + 1);
+
+    // setSystemPrompt mutates resident context in place.
+    agent.setSystemPrompt("replaced");
+    expect(notifications).toBe(afterRun + 2);
+
+    // Unsubscribe stops delivery.
+    unsubscribe();
+    agent.messages = [];
+    expect(notifications).toBe(afterRun + 2);
+  });
+
   it("calls onToolResult when a tool finishes successfully", async () => {
     const provider = createMockProvider([
       [
