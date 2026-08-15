@@ -30,6 +30,7 @@ import { BudgetLedger } from "../agent/budget-ledger.js";
 import { UserConfig } from "../config.js";
 import { ProviderRegistry, encodeModel, decodeModel, displayModel } from "../provider-registry.js";
 import { createProviderInstance } from "../provider.js";
+import type { ResolvedSubagentRoute } from "../agent/categories.js";
 import { getDefaultThinkingLevel } from "../variant/variant-resolver.js";
 import { QuestionController, type QuestionAnswer, type QuestionRequest } from "../question/controller.js";
 import { SkillRegistry } from "../skills/registry.js";
@@ -103,6 +104,14 @@ export interface RunTurnOptions extends TurnHandlers {
    * harness) A/B prompt variants without forking the prompt builder.
    */
   appendSystemPrompt?: string;
+  /**
+   * Creates the provider instance for a subagent route whose provider differs
+   * from the turn's provider (e.g. spawn_agent with `model: "provider:model"`).
+   * When omitted the SDK builds a default factory over its own registry —
+   * same semantics as the TUI's createProviderForRoute (OAuth prepare, then
+   * configured+enabled+keyed profile lookup). Pass your own to override.
+   */
+  providerFactory?: (route: ResolvedSubagentRoute) => Provider | Promise<Provider>;
   signal?: AbortSignal;
 }
 
@@ -311,6 +320,12 @@ export class BubbleSdk {
         skills: skillRegistry.summaries(),
         memoryPrompt,
         externalHooks: hookController,
+        // Cross-provider subagent routes (spawn_agent with "provider:model")
+        // need a factory; without one the child blocks with
+        // "no provider factory is configured". Default mirrors the TUI's
+        // createProviderForRoute (OAuth prepare + configured+enabled+keyed
+        // profile lookup); hosts may override per turn.
+        providerFactory: options.providerFactory ?? this.defaultProviderFactory(),
         onMessageAppend: (message: Message) => {
           if (message.role === "system" || message.role === "meta") return;
           session.appendMessage(message);
@@ -366,6 +381,40 @@ export class BubbleSdk {
       this.bashAllowlists.set(sessionId, allowlist);
     }
     return allowlist;
+  }
+
+  /**
+   * Default cross-provider subagent factory over this SDK instance's own
+   * registry — the same semantics as the TUI's createProviderForRoute. The
+   * registry is reloaded first so a key added after construction works.
+   */
+  private defaultProviderFactory(): (route: ResolvedSubagentRoute) => Promise<Provider> {
+    return async (route) => {
+      const providerId = route.providerId;
+      if (!providerId) {
+        throw new Error(`Subagent route for model "${route.model}" did not include a provider.`);
+      }
+      // getConfigured() reads config.json from disk every call, so keys
+      // added after SDK construction are picked up without a reload call.
+      if (this.registry.supportsOAuth(providerId) && this.registry.getAuthStorage().has(providerId)) {
+        await this.registry.prepareProvider(providerId);
+      }
+      const target = this.registry.getConfigured().find((item) => item.id === providerId);
+      if (!target?.enabled || !target.apiKey) {
+        throw new Error(
+          `Subagent route requires provider "${providerId}", but it is not configured or has no active credentials.`,
+        );
+      }
+      return createProviderInstance({
+        providerId,
+        apiKey: target.apiKey,
+        baseURL: target.baseURL,
+        protocol: target.protocol,
+        headers: target.headers,
+        openAICodexAuth: this.registry.createOpenAICodexAuthAdapter(providerId),
+        grokAuth: this.registry.createGrokAuthAdapter(providerId),
+      });
+    };
   }
 
   /** MCP servers are started lazily, once per cwd (McpManager has no stop). */
