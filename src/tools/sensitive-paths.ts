@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { getBubbleHome } from "../bubble-home.js";
 
 export function getSensitivePaths(): string[] {

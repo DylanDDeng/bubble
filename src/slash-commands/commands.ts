@@ -28,10 +28,7 @@ import type { SlashCommand, SlashCommandContext } from "./types.js";
 import type { UnifiedCommand } from "./unified.js";
 import { feishuCommand } from "./feishu.js";
 import { GROK_LOCAL_COMMAND_HELP } from "../external-runtime/grok-input-policy.js";
-import {
-  GROK_SUBSCRIPTION_PROVIDER_ID,
-  isGrokSubscriptionProviderId,
-} from "../external-runtime/grok-provider.js";
+import { isGrokSubscriptionProviderId } from "../external-runtime/grok-provider.js";
 import { classifyExternalRuntimeBinding } from "../external-runtime/session-policy.js";
 
 const VALID_SCOPES: SettingsScope[] = ["user", "project", "local"];
@@ -142,7 +139,7 @@ function persistSelectedModel(model: string, ctx: Parameters<SlashCommand["handl
 }
 
 function syncSystemPrompt(ctx: Parameters<SlashCommand["handler"]>[1], model: string) {
-  const { providerId, modelId } = decodeModel(model);
+  const { providerId } = decodeModel(model);
   const toolPromptOptions = typeof ctx.agent.getSystemPromptToolOptions === "function"
     ? ctx.agent.getSystemPromptToolOptions()
     : {};
@@ -485,14 +482,14 @@ const builtinSlashCommandEntries: SlashCommand[] = [
   {
     name: "skills",
     description: "Open the searchable skills picker",
-    async handler(args, ctx) {
+    async handler(_args, ctx) {
       ctx.openPicker("skill");
     },
   },
   {
     name: "help",
     description: "Show available slash commands",
-    async handler(args, ctx) {
+    async handler(_args, ctx) {
       if (hasExternalRuntimeSession(ctx)) {
         const grok = isGrokSessionActive(ctx);
         return [
@@ -523,14 +520,14 @@ const builtinSlashCommandEntries: SlashCommand[] = [
   {
     name: "context",
     description: "Show current context window usage and breakdown",
-    async handler(args, ctx) {
+    async handler(_args, ctx) {
       return `${formatContextUsage(ctx.agent.getContextUsageSnapshot())}\n\n${formatMcpContextStatus(ctx)}`;
     },
   },
   {
     name: "quit",
     description: "Exit the application",
-    async handler(args, ctx) {
+    async handler(_args, ctx) {
       ctx.exit();
     },
   },
@@ -557,7 +554,7 @@ const builtinSlashCommandEntries: SlashCommand[] = [
   {
     name: "clear",
     description: "Clear the current conversation history",
-    async handler(args, ctx) {
+    async handler(_args, ctx) {
       ctx.agent.messages = ctx.agent.messages.filter((m) => m.role === "system" || m.role === "meta");
       // The resident history just shrank: drop the incremental usage anchor
       // too (same as /compact and /rewind), or budget accounting keeps
@@ -953,7 +950,7 @@ const builtinSlashCommandEntries: SlashCommand[] = [
   {
     name: "plan",
     description: "Toggle plan mode on/off (Tab switches Build/Plan)",
-    async handler(args, ctx) {
+    async handler(_args, ctx) {
       const next = ctx.agent.mode === "plan" ? "default" : "plan";
       ctx.agent.setMode(next);
       return next === "plan"
@@ -1178,7 +1175,7 @@ const builtinSlashCommandEntries: SlashCommand[] = [
   {
     name: "compact",
     description: "Manually compact the current session context",
-    async handler(args, ctx) {
+    async handler(_args, ctx) {
       if (!ctx.sessionManager) {
         return "Compaction requires session persistence. Start an interactive session first.";
       }

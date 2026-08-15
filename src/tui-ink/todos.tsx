@@ -1,4 +1,3 @@
-import React from "react";
 import { Box, Text } from "ink";
 import type { Todo } from "../types.js";
 import { useTheme, type Theme } from "./theme.js";

@@ -60,7 +60,6 @@ const KNOWN_MODES: ReadonlySet<PermissionMode> = new Set<PermissionMode>([
 ]);
 
 export class SettingsManager {
-  private readonly cwd: string;
   private readonly paths: Record<SettingsScope, string>;
   private raw: Record<SettingsScope, RawSettings | null> = {
     user: null,
@@ -70,7 +69,6 @@ export class SettingsManager {
   private fileDiagnostics: SettingsDiagnostic[] = [];
 
   constructor(cwd: string, options: SettingsManagerOptions = {}) {
-    this.cwd = cwd;
     const bubbleHome = options.bubbleHome ?? getBubbleHome();
 
     this.paths = {

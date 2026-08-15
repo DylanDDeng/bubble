@@ -1,9 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { AgentAbortError, INTERRUPTED_ASSISTANT_CONTENT, type Agent } from "../agent.js";
 import type { CliArgs } from "../cli.js";
 import { SessionManager, type SessionMetadata } from "../session.js";
-import type { AgentEvent, ContentPart, PermissionMode, PlanDecision, Provider, Todo, ToolResultMetadata } from "../types.js";
+import type { AgentEvent, ContentPart, PermissionMode, PlanDecision, Provider, Todo } from "../types.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import { UserConfig, maskKey } from "../config.js";
 import {
@@ -56,7 +56,7 @@ import type { BashAllowlist } from "../approval/session-cache.js";
 import type { SettingsManager } from "../permissions/settings.js";
 import type { McpManager } from "../mcp/manager.js";
 import type { LspService } from "../lsp/index.js";
-import type { QuestionAnswer, QuestionController, QuestionRequest } from "../question/index.js";
+import type { QuestionController, QuestionRequest } from "../question/index.js";
 import type { MemoryScope } from "../memory/index.js";
 import { QuestionDialog } from "./question-dialog.js";
 import { FeedbackDialog } from "./feedback-dialog.js";
@@ -204,7 +204,7 @@ export interface ExitSummary {
 export { isInternalBlockOnlyContent };
 
 
-export function App({ agent, args, sessionManager: initialSessionManager, switchSession, createProvider, registry, skillRegistry, planHandlerRef, approvalHandlerRef, questionController, bashAllowlist, settingsManager, lspService, mcpManager, themeMode: initialThemeMode, themeOverrides, detectedTheme, onThemeModeChange, flushMemory, runMemoryCompaction, runMemorySummary, runMemoryRefresh, goalStore, processManager, tasksAutoResume, promotionChannel, bypassEnabled, updateNotice, updateNoticeRefresh, hookController, externalRuntime, onExit }: AppProps) {
+export function App({ agent, args, sessionManager: initialSessionManager, switchSession, createProvider, registry, skillRegistry, planHandlerRef, approvalHandlerRef, questionController, bashAllowlist, settingsManager, lspService, mcpManager, themeMode: initialThemeMode, themeOverrides, detectedTheme, onThemeModeChange, flushMemory, runMemoryCompaction, runMemorySummary, runMemoryRefresh, goalStore, processManager, tasksAutoResume, promotionChannel, updateNotice, updateNoticeRefresh, hookController, externalRuntime, onExit }: AppProps) {
   const [sessionManager, setSessionManager] = useState(initialSessionManager);
   const [externalRuntimeBinding, setExternalRuntimeBinding] = useState(
     () => initialSessionManager?.getMetadata().externalRuntime,

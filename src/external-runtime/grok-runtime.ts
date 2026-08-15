@@ -601,7 +601,7 @@ export class GrokRuntimeManager implements ExternalRuntimeManager {
     let temporaryLock: GrokProfileLock | undefined;
     try {
       if (!this.lock) temporaryLock = await this.acquireProfileLock();
-      const { profile, env, binary } = await this.prepareAndVerify();
+      const { env, binary } = await this.prepareAndVerify();
       const result = await runGrokCommand(
         this.spawn,
         binary.path,

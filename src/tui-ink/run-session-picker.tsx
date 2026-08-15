@@ -1,4 +1,3 @@
-import React from "react";
 import { render } from "ink";
 import { SessionPicker } from "./session-picker.js";
 import { ThemeProvider, paletteFor } from "./theme.js";

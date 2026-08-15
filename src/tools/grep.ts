@@ -61,7 +61,7 @@ export function createGrepTool(cwd: string): ToolRegistryEntry {
       rgArgs.push(searchPath);
 
       return new Promise((resolve) => {
-        execFile("rg", rgArgs, { cwd, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
+        execFile("rg", rgArgs, { cwd, maxBuffer: 10 * 1024 * 1024 }, (_error, stdout, _stderr) => {
           // rg returns exit code 1 when no matches found, which is not an error for us
           const lines = stdout.split("\n").filter((l) => l.trim() !== "");
           const matches: string[] = [];

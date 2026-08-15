@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import type { QuestionAnswer, QuestionRequest } from "../question/index.js";
 import { isKeyReleaseEvent } from "./key-events.js";

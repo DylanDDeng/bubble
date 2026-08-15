@@ -21,7 +21,7 @@ import {
 import { sanitizeInternalReminderBlocks } from "../agent/internal-reminder-sanitizer.js";
 import { appendFileBlocks, stripFileBlocks } from "./compaction-files.js";
 import type { CompactOptions, CompactResult } from "./compact.js";
-import type { Message, Provider, ProviderMessage, ThinkingLevel, ToolCall } from "../types.js";
+import type { Message, Provider, ProviderMessage, ThinkingLevel } from "../types.js";
 
 export interface LLMCompactOptions extends CompactOptions {
   provider: Provider;

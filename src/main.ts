@@ -33,7 +33,7 @@ import { ExternalHookController } from "./hooks/index.js";
 import { getLspService } from "./lsp/index.js";
 import { loadMcpConfig } from "./mcp/config.js";
 import { McpManager } from "./mcp/manager.js";
-import type { PermissionMode, Message, PlanDecision } from "./types.js";
+import type { PermissionMode, PlanDecision } from "./types.js";
 import { normalizeInheritedThinkingLevel } from "./variant/variant-resolver.js";
 import { QuestionController } from "./question/index.js";
 import {

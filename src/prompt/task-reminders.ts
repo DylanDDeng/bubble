@@ -1,5 +1,4 @@
 import { normalizeModelToken, type RoutableModelEntry } from "../agent/routing-catalog.js";
-import { wrapInSystemReminder } from "./reminders.js";
 
 /**
  * User-named model resolution (model-routing design v3.6): when the user's

@@ -1,4 +1,3 @@
-import React from "react";
 import { Box, Text } from "ink";
 import { useTheme } from "../theme.js";
 import { parseDiffHunks, type DiffHunk } from "../../approval/diff-hunks.js";

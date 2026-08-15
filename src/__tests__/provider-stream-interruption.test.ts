@@ -35,7 +35,7 @@ describe("openai-chat stream interruption wrapping", () => {
   }
 
   it("wraps a mid-stream socket drop as ProviderStreamInterruptedError after surfacing partial content", async () => {
-    const port = await startServer((req, res) => {
+    const port = await startServer((_req, res) => {
       res.writeHead(200, {
         "content-type": "text/event-stream",
         "cache-control": "no-cache",
@@ -71,7 +71,7 @@ describe("openai-chat stream interruption wrapping", () => {
   });
 
   it("completes normally when the stream finishes with [DONE]", async () => {
-    const port = await startServer((req, res) => {
+    const port = await startServer((_req, res) => {
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.write(sse({ choices: [{ delta: { content: "full answer" } }] }));
       res.write(sse({ choices: [{ delta: {}, finish_reason: "stop" }] }));

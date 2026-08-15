@@ -15,7 +15,7 @@ function createMockProvider(chunks: StreamChunk[][]): Provider {
         yield chunk;
       }
     },
-    async complete(messages, options) {
+    async complete(_messages, _options) {
       return "mock completion";
     },
   };
@@ -41,10 +41,6 @@ function toolForAgentTest(name: string): ToolRegistryEntry {
       return { content: `${name} ok`, status: "success" };
     },
   };
-}
-
-function hasSystemContext(messages: Message[], text: string): boolean {
-  return messages.some((message) => message.role === "system" && message.content.includes(text));
 }
 
 function hasUserText(messages: Message[], text: string): boolean {

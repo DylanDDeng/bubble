@@ -9,7 +9,7 @@
  * members as their events stream in.
  */
 
-import React, { useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { Box, Text, useInput, useStdout } from "ink";
 import { isKeyReleaseEvent } from "./key-events.js";
 import { useTheme } from "./theme.js";

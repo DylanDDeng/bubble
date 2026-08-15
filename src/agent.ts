@@ -5,7 +5,6 @@
 
 import { compactCurrentTurnToolGroups, compactMessages } from "./context/compact.js";
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
 import { compactMessagesWithLLM } from "./context/compact-llm.js";
 import { getContextBudget } from "./context/budget.js";
 import { buildContextUsageSnapshot, type ContextUsageSnapshot } from "./context/usage.js";
@@ -32,29 +31,22 @@ import {
 } from "./hooks/index.js";
 import { createDefaultHooks } from "./orchestrator/default-hooks.js";
 import { buildTaskLifecycleReminder } from "./agent/task-lifecycle-reminder.js";
-import { mergeAgentCategories, parseThinkingLevel, type AgentCategoriesConfig, type ResolvedSubagentRoute } from "./agent/categories.js";
+import type { AgentCategoriesConfig, ResolvedSubagentRoute } from "./agent/categories.js";
 import { DEFAULT_AGENT_ROUTING, sanitizeAgentRouting, type AgentRoutingConfig, type RoutableModelEntry, type RoutableModelIndex, type RoutingSnapshotAccessor } from "./agent/routing-catalog.js";
 import { SubagentRouter } from "./agent/subagent/router.js";
 import { normalizeWaitTimeout, SubagentRuntime, type ChildAgentLike, type ChildAgentSpec } from "./agent/subagent/runtime.js";
-import { appendOutputSchemaInstructions, buildSchemaCorrectionPrompt, validateStructuredSummary } from "./agent/structured-output.js";
-import { runWorkflow, WorkflowConcurrencyGate, type AgentDispatchResult, type WorkflowAgentSpec } from "./agent/workflow/runtime.js";
-import { type WorkflowRunSnapshot } from "./agent/workflow/control.js";
+import { BudgetLedger } from "./agent/budget-ledger.js";
 import { WorkflowLedger } from "./agent/workflow/runs.js";
-import { BudgetLedger, composeAbortSignals } from "./agent/budget-ledger.js";
-import { assignAgentNickname, builtinAgentProfiles, discoverAgentProfiles, findAgentProfile, mergeUsage, selectToolsForAgentProfile, validateAgentProfileTools, type AgentProfile, type SubagentRunResult } from "./agent/profiles.js";
-import { snapshotSubagentThread, subagentResultFromThread, type PendingSubagentToolUpdate, type SubagentFinalReason, type SubagentThreadRecord, type SubagentThreadSnapshot } from "./agent/subagent-control.js";
+import { type WorkflowRunSnapshot } from "./agent/workflow/control.js";
+import type { AgentProfile, SubagentRunResult } from "./agent/profiles.js";
+import type { SubagentThreadSnapshot } from "./agent/subagent-control.js";
 import { SubagentStore } from "./agent/subagent-store.js";
-import { SubagentScheduler, type SubagentRunOutcome } from "./agent/subagent-scheduler.js";
-import { ChildRunner, classifySubagentAbortReason, type ChildRunOptions } from "./agent/child-runner.js";
-import { ResultIntegrator } from "./agent/result-integrator.js";
-import { AgentAbortError, EMPTY_ASSISTANT_FALLBACK, SubagentAbortError, throwIfAborted, isAbortLikeError, isAbortError, summarizeInterruptError } from "./agent/abort-errors.js";
+import { EMPTY_ASSISTANT_FALLBACK, throwIfAborted, isAbortLikeError, isAbortError } from "./agent/abort-errors.js";
 import { appendProviderContentBlock, buildProviderRequestFingerprint } from "./agent/provider-fingerprint.js";
 import { countUserTurns, estimateResidentChars, estimateToolPayloadChars, getCurrentHeapUsed, RESIDENT_HISTORY_HEAP_HARD_LIMIT, RESIDENT_HISTORY_KEEP_RECENT_TURNS } from "./agent/resident-history.js";
 import { cancelledToolResult, createModelInterruptedMessage, findMissingRequiredArgs, isSubagentLifecycleTool, lastProviderMessage, shouldAppendModelInterruptedBoundary } from "./agent/transcript-helpers.js";
 import { createUpdateQueue } from "./agent/update-queue.js";
 export { createUpdateQueue } from "./agent/update-queue.js";
-import { createSubagentWorktree, finalizeSubagentWorktree } from "./agent/worktree.js";
-import { createWorktreeChildTools, isolateReadonlyChildFileTools } from "./tools/child-tools.js";
 import { type RateLimitPolicy } from "./network/errors.js";
 import { isHiddenToolResult } from "./agent/tool-visibility.js";
 import {
@@ -63,8 +55,6 @@ import {
   sanitizeInternalReasoningText,
   sanitizeInternalReminderBlocks,
 } from "./agent/internal-reminder-sanitizer.js";
-import { buildSystemPrompt } from "./system-prompt.js";
-import { isOnlyProviderProtocolArtifacts, stripProviderProtocolArtifacts } from "./provider-artifacts.js";
 import { debugReasoningStream, summarizeDebugText } from "./reasoning-debug.js";
 import type { SkillSummary } from "./skills/types.js";
 import type { FileStateTracker } from "./tools/file-state.js";
@@ -1909,7 +1899,7 @@ export class Agent {
    * `(agent as any).subagentStore`; keeping this forward means the extraction
    * changed no caller, test or otherwise.
    */
-  private get subagentStore(): SubagentStore {
+  get subagentStore(): SubagentStore {
     return this.subagents.store;
   }
 
@@ -1999,7 +1989,7 @@ export class Agent {
    * haiku for these twenty scouts" per spawn/batch member at request time.
    */
   /** Kept as a thin delegator: routing decisions now live in SubagentRouter. */
-  private resolveRouteForSubagent(
+  resolveRouteForSubagent(
     profile: AgentProfile,
     category: string | undefined,
     override?: { model?: string; effort?: ThinkingLevel },

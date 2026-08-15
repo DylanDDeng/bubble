@@ -30,10 +30,9 @@ import { buildMemoryPrompt, recordMemoryCitations } from "../../memory/index.js"
 import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingLevel } from "../../provider-transform.js";
 import { createSessionTitleUpdater, type SessionTitleUpdater } from "../../session-title.js";
 import type { AgentEvent, Message, PermissionMode, PlanDecision } from "../../types.js";
-import type { SessionManager } from "../../session.js";
 import { applyCardBudget } from "../card/budget.js";
 import { renderCard } from "../card/renderer.js";
-import { createInitialRunState, type RunState } from "../card/run-state-types.js";
+import { createInitialRunState } from "../card/run-state-types.js";
 import { hasInFlightTool, markError, markInterrupted, markIdleTimeout, reduceRunState } from "../card/run-state.js";
 import type { BubbleChannel } from "../channel/channel.js";
 import type { ScopeConfig } from "../types.js";
@@ -337,7 +336,7 @@ export class RunDriver {
     }
   }
 
-  private async resolveProvider(session: { cwd: string }, promptCacheKey: string): Promise<{ provider: import("../../types.js").Provider; providerId: string; model: string }> {
+  private async resolveProvider(_session: { cwd: string }, promptCacheKey: string): Promise<{ provider: import("../../types.js").Provider; providerId: string; model: string }> {
     const registry = this.opts.deps.providerRegistry;
     const userConfig = this.opts.deps.userConfig;
 

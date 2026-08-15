@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { Box, Text, useInput, usePaste, useStdout } from "ink";
 import { isKeyReleaseEvent } from "./key-events.js";
 import { useTheme } from "./theme.js";

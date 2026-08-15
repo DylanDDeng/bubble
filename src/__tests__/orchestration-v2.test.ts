@@ -8,7 +8,7 @@ import {
 } from "../agent/structured-output.js";
 import { isolateReadonlyChildFileTools } from "../tools/child-tools.js";
 import { createReadTool } from "../tools/read.js";
-import type { Provider, StreamChunk, ToolRegistryEntry, ToolUpdate } from "../types.js";
+import type { Provider, StreamChunk, ToolRegistryEntry } from "../types.js";
 
 const LONG = "Complete handoff with concrete file-level evidence and conclusions. ".repeat(4);
 

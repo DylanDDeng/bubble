@@ -551,7 +551,7 @@ const TypeScriptServer: LspServerInfo = {
   extensions: TS_EXTENSIONS,
   root: nearestRoot(NODE_ROOT_MARKERS, DENO_ROOT_MARKERS),
   languageId: languageIdFor,
-  async spawn(root, ctx) {
+  async spawn(root, _ctx) {
     const requireFromRoot = createRequire(join(root, "package.json"));
     const requireFromSelf = createRequire(import.meta.url);
     const tsserverPath = resolveModule(requireFromRoot, "typescript/lib/tsserver.js")
@@ -610,7 +610,7 @@ const ESLintServer: LspServerInfo = {
   extensions: [...TS_EXTENSIONS, ".vue"],
   root: eslintRoot,
   languageId: languageIdFor,
-  async spawn(root, ctx) {
+  async spawn(root, _ctx) {
     const requireFromRoot = createRequire(join(root, "package.json"));
     const requireFromSelf = createRequire(import.meta.url);
     const eslint = resolveModule(requireFromRoot, "eslint");
