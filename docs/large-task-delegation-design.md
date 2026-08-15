@@ -1,5 +1,11 @@
 # Large-Implementation-Task Delegation Nudge — Design (v2, post-review)
 
+> **Superseded in part (2026-08-14):** the §checkpoint nudge design at :67–69
+> and :206 reads `ctx.agent.getTodos()` — that API was removed with the
+> todo_write system (harness-thinning wave 2; see
+> todo-write-removal-design.md). Those passages are void; the detector itself
+> remains historical context only (the wave-1 governance layer removed it).
+
 Status: **implemented** (2026-07-19). Key code: detector + checkpoint in
 `src/orchestrator/default-hooks.ts` (`maybeQueueLargeTaskNudge`, read-only
 evidence accumulation in afterToolCall, `delegation_detector` traceEvent),

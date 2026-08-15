@@ -104,7 +104,7 @@ const WORKTREE_TOOL_NAMES = new Set(["read", "glob", "grep", "edit", "write", "b
  * exposes a cloneForChild hook (the standard `read`, which carries a
  * FileStateTracker) is rebuilt as a fresh per-child instance, so concurrent
  * members of a fan-out never share mutable tool state. Stateless tools
- * (glob/grep, web/memory/skill/todo) and custom/mock tools without the hook are
+ * (glob/grep, web/memory/skill) and custom/mock tools without the hook are
  * passed through unchanged. Write children get full isolation via
  * createWorktreeChildTools instead.
  */
