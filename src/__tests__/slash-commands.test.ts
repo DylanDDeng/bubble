@@ -1132,6 +1132,7 @@ describe("slash commands", () => {
     ];
     const appendMarker = vi.fn();
     const clearMessages = vi.fn();
+    const resetContextUsageAnchor = vi.fn();
     const ctx = createContext({
       clearMessages,
       agent: {
@@ -1145,6 +1146,7 @@ describe("slash commands", () => {
         setTodos: (next: any[]) => {
           todos = next;
         },
+        resetContextUsageAnchor,
       } as any,
       sessionManager: {
         appendMarker,
@@ -1162,6 +1164,7 @@ describe("slash commands", () => {
     expect(todos).toEqual([]);
     expect(appendMarker).toHaveBeenCalledWith("conversation_clear", "");
     expect(clearMessages).toHaveBeenCalledTimes(1);
+    expect(resetContextUsageAnchor).toHaveBeenCalledTimes(1);
   });
 
   it("/clear clears agent context before touching the TUI", async () => {
@@ -1177,6 +1180,7 @@ describe("slash commands", () => {
         ],
         getTodos: () => [],
         setTodos: vi.fn(),
+        resetContextUsageAnchor: vi.fn(),
       } as any,
       sessionManager: {
         appendMarker,

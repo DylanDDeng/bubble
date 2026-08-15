@@ -559,6 +559,10 @@ const builtinSlashCommandEntries: SlashCommand[] = [
     description: "Clear the current conversation history",
     async handler(args, ctx) {
       ctx.agent.messages = ctx.agent.messages.filter((m) => m.role === "system" || m.role === "meta");
+      // The resident history just shrank: drop the incremental usage anchor
+      // too (same as /compact and /rewind), or budget accounting keeps
+      // measuring against the pre-clear message count.
+      ctx.agent.resetContextUsageAnchor();
       ctx.sessionManager?.appendMarker("conversation_clear", "");
       ctx.sessionManager?.clearTitleMetadata?.();
       if (ctx.agent.getTodos().length > 0) {

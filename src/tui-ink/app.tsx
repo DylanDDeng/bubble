@@ -1189,7 +1189,10 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
       transitionToNative,
       onExternalRuntimeChange: refreshExternalRuntimeBinding,
     });
-    if (handled && result) addMessage("assistant", result, slashResultNoticeKind(result));
+    if (handled) {
+      setContextUsage(formatContextUsageLabel(agent.getContextUsageSnapshot()));
+      if (result) addMessage("assistant", result, slashResultNoticeKind(result));
+    }
   }, [
     addMessage,
     agent,
@@ -2133,6 +2136,11 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
           if (agent.mode !== permissionMode) {
             setPermissionMode(agent.mode);
           }
+          // Context-rewriting commands (/clear, /compact, /rewind, /model…)
+          // mutate agent state without a provider turn, so the footer's
+          // usage readout would keep the pre-command value until the next
+          // turn_end. Resync it from live agent state here.
+          setContextUsage(formatContextUsageLabel(agent.getContextUsageSnapshot()));
           if (result) {
             // `/compact` rewrites agent.messages, so the Ink transcript needs to
             // be rebuilt from the new agent state before appending the summary
