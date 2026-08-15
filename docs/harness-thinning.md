@@ -88,10 +88,9 @@ C. Delete orphans: the module files + wholly-governance test files
    large-task-nudge.test.ts).
 
 Verification per step: tsc + full vitest; after C additionally: repo-wide
-grep for every deleted symbol = 0, `npm run build`, desktop typecheck
-(desktop consumes the root package's dist types; root tsc does not cover
-it), `-p --output-format json` smoke (changes block intact), TUI smoke
-including spawn→wait→send_input→close and a background run_workflow.
+grep for every deleted symbol = 0, `npm run build`, `-p --output-format
+json` smoke (changes block intact), TUI smoke including
+spawn→wait→send_input→close and a background run_workflow.
 
 Expected net deletion: ~2,300+ lines including tests.
 

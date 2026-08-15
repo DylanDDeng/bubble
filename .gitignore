@@ -1,8 +1,5 @@
 node_modules/
 dist/
-desktop/dist-electron/
-desktop/dist-renderer/
-desktop/node_modules/
 *.log
 .DS_Store
 .env
