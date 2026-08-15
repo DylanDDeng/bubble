@@ -307,10 +307,24 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   // subscription replaces the per-path manual refreshes that were easy to
   // forget (the /clear footer bug). Initial read covers agents mounted with
   // pre-existing history.
+  //
+  // Notifications are trailing-edge debounced: a snapshot run is O(all
+  // resident messages) (tiktoken providers measured ~225ms at 400 messages),
+  // and a tool-dense turn appends 5-15 messages synchronously — recomputing
+  // per append would block the run loop 1-3s. The footer is a human-facing
+  // readout; one recomputation 150ms after the last append is indistinguishable.
   useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const update = () => setContextUsage(formatContextUsageLabel(agent.getContextUsageSnapshot()));
     update();
-    return agent.onContextChanged(update);
+    const off = agent.onContextChanged(() => {
+      clearTimeout(timer);
+      timer = setTimeout(update, 150);
+    });
+    return () => {
+      clearTimeout(timer);
+      off();
+    };
   }, [agent]);
   const [currentUpdateNotice, setCurrentUpdateNotice] = useState(updateNotice);
   const [pendingPlan, setPendingPlan] = useState<{

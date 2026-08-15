@@ -729,14 +729,59 @@ describe("Agent", () => {
     agent.model = "gpt-4o-mini";
     expect(notifications).toBe(afterRun + 1);
 
+    // providerId switches change the estimation basis (tiktoken vs heuristic).
+    agent.providerId = "anthropic";
+    expect(notifications).toBe(afterRun + 2);
+    const afterProvider = notifications;
+
     // setSystemPrompt mutates resident context in place.
     agent.setSystemPrompt("replaced");
-    expect(notifications).toBe(afterRun + 2);
+    expect(notifications).toBe(afterProvider + 1);
+    const afterPrompt = notifications;
+
+    // Idempotent re-assignment must not notify (footer avoids a full
+    // O(n) token re-estimate per no-op set).
+    agent.model = "gpt-4o-mini";
+    agent.providerId = "anthropic";
+    agent.setSystemPrompt("replaced");
+    expect(notifications).toBe(afterPrompt);
 
     // Unsubscribe stops delivery.
     unsubscribe();
     agent.messages = [];
-    expect(notifications).toBe(afterRun + 2);
+    expect(notifications).toBe(afterPrompt);
+  });
+
+  it("isolates throwing subscribers and survives re-entrant mutation", () => {
+    const provider = createMockProvider([]);
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [],
+    });
+    const seen: string[] = [];
+
+    // A throwing listener must not break delivery to the next one…
+    agent.onContextChanged(() => {
+      seen.push("boom");
+      throw new Error("listener exploded");
+    });
+    // …and a listener that rewrites messages must not recurse forever.
+    let reentrant = true;
+    agent.onContextChanged(() => {
+      if (reentrant) {
+        reentrant = false;
+        agent.messages = [...agent.messages, { role: "user", content: "from listener" }];
+      }
+      seen.push("mutator");
+    });
+    agent.onContextChanged(() => seen.push("reader"));
+
+    agent.messages = [{ role: "system", content: "system" }];
+
+    expect(seen).toEqual(["boom", "mutator", "reader"]);
+    // The re-entrant rewrite landed but its nested notification was gated.
+    expect(agent.messages.some((m) => m.role === "user" && m.content === "from listener")).toBe(true);
   });
 
   it("calls onToolResult when a tool finishes successfully", async () => {

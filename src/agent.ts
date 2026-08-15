@@ -213,6 +213,7 @@ export class Agent {
    */
   private _messages: Message[] = [];
   private contextChangedListeners = new Set<() => void>();
+  private notifyingContextChange = false;
 
   get messages(): Message[] {
     return this._messages;
@@ -546,12 +547,27 @@ export class Agent {
   }
 
   private notifyContextChanged(): void {
-    for (const listener of [...this.contextChangedListeners]) {
-      try {
-        listener();
-      } catch {
-        // A broken subscriber must never corrupt agent state mid-mutation.
+    if (this.notifyingContextChange) return;
+    this.notifyingContextChange = true;
+    try {
+      for (const listener of [...this.contextChangedListeners]) {
+        try {
+          listener();
+        } catch (error) {
+          // A broken subscriber must never corrupt agent state mid-mutation,
+          // but leave a trace — otherwise a throwing consumer (e.g. the footer
+          // readout hitting a pathological message) fails silently forever.
+          traceEvent("context_listener_error", {
+            error: error instanceof Error ? error.message : String(error),
+          }, {
+            sessionFile: this.sessionID,
+            provider: this._providerId || "none",
+            model: this.apiModel || "none",
+          });
+        }
       }
+    } finally {
+      this.notifyingContextChange = false;
     }
   }
 
@@ -634,6 +650,7 @@ export class Agent {
   }
 
   set model(value: string) {
+    if (this._model === value) return;
     this._model = value;
     // Context window (and thus usage readings) is model-derived.
     this.notifyContextChanged();
@@ -644,6 +661,7 @@ export class Agent {
   }
 
   set providerId(value: string) {
+    if (this._providerId === value) return;
     this._providerId = value;
     // Token estimation basis is provider-specific.
     this.notifyContextChanged();
@@ -727,6 +745,7 @@ export class Agent {
   setSystemPrompt(prompt: string) {
     const systemMessage: Extract<Message, { role: "system" }> = { role: "system", content: prompt };
     if (this.messages[0]?.role === "system") {
+      if (this.messages[0].content === prompt) return;
       this.messages[0] = systemMessage;
       this.notifyContextChanged();
       return;
