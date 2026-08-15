@@ -1,8 +1,9 @@
 # todo_write Removal — Harness Thinning, Wave 2
 
-Status: **design final** (adversarial review by Kimi K3 incorporated 2026-08-14:
-desktop/ consumer scope corrected, commit plan collapsed to one, Aegis claim
-corrected, touchpoint list completed).
+Status: **implemented** (adversarial review by Kimi K3 incorporated 2026-08-14:
+commit plan collapsed to one, Aegis claim corrected, touchpoint list
+completed; desktop/ consumer scope eliminated upstream by removing the
+abandoned desktop/ fork in the same wave — see its own commit).
 
 ## Motivation
 
@@ -96,24 +97,6 @@ already cover the honest version of this need.
   subagent/runtime.ts:593–599 only block on "error"), so stale entries would
   only emit misleading warnings per spawn, not fail.
 
-### The desktop/ package (same repo — the REAL breaking consumer)
-
-`@bubblebrain-ai/bubble-desktop` (`file:..` dep) consumes root dist types
-directly; the root tsconfig only includes `src/**`, so root tsc/vitest/build
-staying green says NOTHING about it:
-
-- `desktop/src/electron/agent-runner.ts:398, 497–499, 532, 610, 619` —
-  todos restore, todoStore, `onTodosUpdate` → `appendTodosSnapshot`.
-- `desktop/src/electron/turn-mapper.ts:127` — `todos_updated` → `plan_update`
-  UI event mapping.
-- `desktop/src/ui/components/TodoProgressCard.tsx` — the desktop progress UI.
-- `desktop/_bubble-ref/bridge.ts:144–146, 184, 191`, `ipc-types.ts:33`.
-- `desktop/scripts/verify-mapper.mjs:98–114` — asserts the
-  todos_updated → plan_update mapping; goes red until patched.
-
-Desktop must be patched in the same wave (it lives in this repo — one PR is
-enough; no cross-repo coordination needed).
-
 ### Tests
 
 - `src/__tests__/todo-tool.test.ts` — delete file.
@@ -121,6 +104,12 @@ enough; no cross-repo coordination needed).
   `session.test.ts` (:226, :236, :447 snapshot round-trip),
   `slash-commands.test.ts` (:1145–1182 /clear + /rewind todo assertions),
   `rewind.test.ts` (:192–230 setTodos mocks).
+
+Note: the earlier draft of this design tracked the in-repo desktop/ fork as
+the largest breaking consumer (agent-runner/turn-mapper/TodoProgressCard/
+verify-mapper). That directory was an abandoned July fork of bubble-cowork
+and has been deleted ahead of this wave, removing the entire consumer
+scope. No desktop patch step remains.
 
 ## What stays, and why
 
@@ -145,7 +134,6 @@ enough; no cross-repo coordination needed).
    session-types.ts:1) import `Todo` types deleted in commit 1, while files
    listed under commit 2 (main.ts/sdk/feishu) call Agent APIs deleted in
    commit 1. Total diff is small; a single atomic commit avoids the trap.
-   Desktop/ patches land in the same PR, after the root commit.
 3. **Aegis (~/coworker) breakage ≈ zero** (corrected after review): Aegis
    calls no `getTodos` (grep = 0), re-declares `BubbleAgentEvent` locally
    with a catch-all variant (bubble-sdk-loader.ts:49–63), loads the SDK via
@@ -157,18 +145,11 @@ enough; no cross-repo coordination needed).
    checklist gets a "no such tool" and self-corrects to file-based tracking.
    /rewind and /clear paths simply lose their todos branch (no-op).
 
-## Execution: one root commit + same-PR desktop patch
+## Execution: one root commit
 
 1. Root: delete everything in "What goes" (src/), with test surgery.
    `tsc --noEmit` + full `vitest run` green.
-2. Desktop: patch agent-runner/turn-mapper/TodoProgressCard/_bubble-ref/
-   verify-mapper; `npm run typecheck` + desktop verify scripts green.
-   Baseline note: desktop typecheck is ALREADY red today on two unrelated
-   errors (agent-runner.ts:420 missing `openPicker`, :475 `PlanDecision`
-   shape — root API drift desktop never absorbed). The gate for this wave
-   is "no NEW errors from todo removal"; fixing the pre-existing two is
-   optional scope, decided at patch time.
-3. Docs: this file's status flip + wave-ledger note that
+2. Docs: this file's status flip + wave-ledger note that
    `docs/large-task-delegation-design.md:67–69,206` (planned
    `getTodos()`-based checkpoint nudge) is voided by this wave;
    `docs/architecture.html:546` tool-table row and
@@ -177,11 +158,9 @@ enough; no cross-repo coordination needed).
 ## Verification checklist
 
 - `npx tsc --noEmit` + full `npx vitest run` (root).
-- **`cd desktop && npm run typecheck` + desktop verify scripts** — the check
-  the previous design draft relied on without running.
 - Repo-wide grep = 0 hits: `todo_write`, `TodosPanel`, `todos_updated`,
   `todos_snapshot`, `getTodos`, `setTodos`, `createTodoTool`, `TodoStore`
-  (src/ and desktop/src/).
+  (src/).
 - `npm run build`.
 - TUI smoke: fresh session, multi-step task, /clear, /rewind, session
   switch, plan-mode enter/exit — no todo references, no dead panel space.
@@ -195,9 +174,6 @@ enough; no cross-repo coordination needed).
   this wave runs. If quality regresses on real workloads, revert is a clean
   `git revert` (no on-disk data was touched; revert-safety of new logs
   verified above).
-- **Desktop loses its live progress card** (TodoProgressCard / plan_update):
-  the desktop equivalent of the TUI panel loss below. Transcript remains the
-  source of truth.
 - **Lost TUI affordance**: users who liked watching live checklists lose the
   panel. The transcript itself (what the model actually did) remains the
   source of truth.

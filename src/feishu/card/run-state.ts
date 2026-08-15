@@ -115,10 +115,6 @@ export function reduceRunState(state: RunState, event: AgentEvent): RunState {
       state.mode = event.mode as PermissionMode;
       return state;
 
-    case "todos_updated":
-      // Todos render is deferred (would need a todos block kind). v1 ignores.
-      return state;
-
     case "context_recovered":
       // Internal recovery — silent.
       return state;

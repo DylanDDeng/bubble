@@ -562,9 +562,6 @@ const builtinSlashCommandEntries: SlashCommand[] = [
       ctx.agent.resetContextUsageAnchor();
       ctx.sessionManager?.appendMarker("conversation_clear", "");
       ctx.sessionManager?.clearTitleMetadata?.();
-      if (ctx.agent.getTodos().length > 0) {
-        ctx.agent.setTodos([]);
-      }
       ctx.clearMessages();
     },
   },
@@ -646,7 +643,6 @@ const builtinSlashCommandEntries: SlashCommand[] = [
         session.rewindToEntry(target.id);
         const head = ctx.agent.messages.filter((m) => m.role === "system" || m.role === "meta");
         ctx.agent.messages = [...head, ...session.getMessages()];
-        ctx.agent.setTodos(session.getTodos());
         ctx.agent.resetContextUsageAnchor();
 
         if (ctx.fillComposer) {

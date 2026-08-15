@@ -107,13 +107,7 @@ export class RunDriver {
       setMode: (mode) => agentForPlan?.setMode(mode),
     };
 
-    const todoStore = {
-      getTodos: () => agentRef?.getTodos() ?? [],
-      setTodos: (todos: Parameters<Agent["setTodos"]>[0]) => agentRef?.setTodos(todos),
-    };
-
     const tools = createAllTools(session.cwd, this.opts.deps.skillRegistry, {
-      todoStore,
       planController,
       approvalController,
       lspService,
@@ -168,7 +162,6 @@ export class RunDriver {
       temperature: 0.2,
       thinkingLevel,
       mode: initialMode,
-      todos: session.manager.getTodos(),
       onMessageAppend: (message: Message) => {
         if (message.role === "system" || message.role === "meta") return;
         session.manager.appendMessage(message);
@@ -185,7 +178,6 @@ export class RunDriver {
         const match = result.content.match(/^Skill:\s+([^\n]+)$/m);
         if (match?.[1]) session.manager.appendMarker("skill_activated", match[1].trim());
       },
-      onTodosUpdate: (todos) => session.manager.appendTodosSnapshot(todos),
       onModeUpdate: (mode: PermissionMode) => {
         session.manager.appendMarker("mode_switch", mode);
         this.opts.binder.setMode(req.scopeKey, mode);

@@ -16,7 +16,6 @@ export { createWebSearchTool } from "./web-search.js";
 export { createSkillTool } from "./skill.js";
 export { createSkillSearchTool } from "./skill-search.js";
 export { createAgentLifecycleTools, createCloseAgentTool, createSendInputTool, createSpawnAgentTool, createWaitAgentTool } from "./agent-lifecycle.js";
-export { createTodoTool, type TodoStore } from "./todo.js";
 export { createExitPlanModeTool, type PlanController } from "./exit-plan-mode.js";
 export { createToolSearchTool, type ToolSearchController } from "./tool-search.js";
 export { createQuestionTool } from "./question.js";
@@ -37,7 +36,6 @@ import { createReadTool } from "./read.js";
 import { createSkillTool } from "./skill.js";
 import { createSkillSearchTool } from "./skill-search.js";
 import { createAgentLifecycleTools } from "./agent-lifecycle.js";
-import { createTodoTool, type TodoStore } from "./todo.js";
 import { createToolSearchTool, type ToolSearchController } from "./tool-search.js";
 import { createWebFetchTool } from "./web-fetch.js";
 import { createWebSearchTool } from "./web-search.js";
@@ -54,7 +52,6 @@ import type { ProcessManager } from "../tasks/manager.js";
 import type { PromotionChannel } from "../tasks/promotion.js";
 
 export interface CreateAllToolsOptions {
-  todoStore?: TodoStore;
   planController?: PlanController;
   approvalController?: ApprovalController;
   questionController?: QuestionController;
@@ -115,7 +112,6 @@ export function createAllTools(
     createToolSearchTool(options.toolSearchController),
     ...(options.questionController ? [createQuestionTool(options.questionController)] : []),
     ...(skillRegistry ? [createSkillSearchTool(skillRegistry), createSkillTool(skillRegistry)] : []),
-    ...(options.todoStore ? [createTodoTool(options.todoStore)] : []),
     ...(options.planController ? [createExitPlanModeTool(options.planController)] : []),
     ...(options.goalStore ? createGoalTools(options.goalStore) : []),
   ];

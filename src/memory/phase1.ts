@@ -186,8 +186,6 @@ function serializeSessionEntry(entry: SessionLogEntry): string {
       return `[tool_call:${entry.toolCall.name}] ${truncate(entry.toolCall.arguments, 1_500)}`;
     case "tool_result":
       return `[tool_result${entry.message.isError ? " error=true" : ""}] ${truncate(entry.message.content, 2_000)}`;
-    case "todos_snapshot":
-      return `[todos] ${truncate(JSON.stringify(entry.todos), 2_000)}`;
   }
 }
 

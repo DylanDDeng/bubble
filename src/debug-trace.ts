@@ -262,8 +262,6 @@ export function summarizeAgentEventForTrace(event: AgentEvent): Record<string, u
         ...event,
         content: summarizeTraceText(event.content),
       };
-    case "todos_updated":
-      return { type: event.type, count: event.todos.length };
     default:
       return { ...event };
   }

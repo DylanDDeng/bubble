@@ -1,4 +1,4 @@
-import type { AssistantMessage, Message, ThinkingLevel, Todo, ToolCall, ToolMessage, UserMessage } from "./types.js";
+import type { AssistantMessage, Message, ThinkingLevel, ToolCall, ToolMessage, UserMessage } from "./types.js";
 import type { GoalState } from "./goal/store.js";
 
 export interface ExternalRuntimeSessionMetadata {
@@ -90,11 +90,6 @@ export interface SessionToolResultEntry extends BaseSessionLogEntry {
   message: ToolMessage;
 }
 
-export interface SessionTodosSnapshotEntry extends BaseSessionLogEntry {
-  type: "todos_snapshot";
-  todos: Todo[];
-}
-
 export type SessionLogEntry =
   | SessionMetadataEntry
   | SessionSummaryEntry
@@ -102,8 +97,7 @@ export type SessionLogEntry =
   | SessionUserMessageEntry
   | SessionAssistantMessageEntry
   | SessionToolCallEntry
-  | SessionToolResultEntry
-  | SessionTodosSnapshotEntry;
+  | SessionToolResultEntry;
 
 export interface LegacySessionEntry {
   id: string;

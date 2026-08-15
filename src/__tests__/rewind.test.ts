@@ -189,8 +189,6 @@ describe("CheckpointStore", () => {
 
     const fakeAgent = {
       messages: [{ role: "system", content: "sys" }] as any[],
-      setTodos: (_todos: unknown) => {},
-      getTodos: () => [],
       resetContextUsageAnchor: () => {},
     };
     let composer = "";
@@ -227,7 +225,7 @@ describe("CheckpointStore", () => {
     sm.appendMessage({ role: "assistant", content: "hi" });
 
     const ctx = {
-      agent: { messages: [], setTodos: () => {}, getTodos: () => [], resetContextUsageAnchor: () => {} },
+      agent: { messages: [], resetContextUsageAnchor: () => {} },
       sessionManager: sm,
       addMessage: () => {},
       clearMessages: () => {},

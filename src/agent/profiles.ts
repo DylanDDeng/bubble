@@ -73,7 +73,6 @@ const READONLY_PRESET = [
   "web_fetch",
   "memory",
   "skill",
-  "todo_write",
 ];
 
 const SUBAGENT_DENY_TOOLS = new Set([
@@ -209,7 +208,7 @@ export function builtinAgentProfiles(): AgentProfile[] {
         "Answer the specific question by inspecting the repository directly. Prefer precise file paths and line-level evidence.",
         "Keep the answer compact and avoid broad refactors or implementation plans unless asked.",
       ].join("\n"),
-      ["read", "glob", "grep", "lsp", "memory", "skill", "todo_write"],
+      ["read", "glob", "grep", "lsp", "memory", "skill"],
     ),
     roleProfile(
       "worker",
@@ -219,7 +218,7 @@ export function builtinAgentProfiles(): AgentProfile[] {
         "Analyze the assigned implementation slice, identify exact files to change, and return a concrete patch plan or findings.",
         "If write-capable worker mode is needed, say so explicitly.",
       ].join("\n"),
-      ["read", "glob", "grep", "lsp", "memory", "skill", "todo_write"],
+      ["read", "glob", "grep", "lsp", "memory", "skill"],
     ),
     toProfile("search"),
     toProfile("security_investigation"),
@@ -237,7 +236,7 @@ export function builtinAgentProfiles(): AgentProfile[] {
       model: "inherit",
       tools: {
         preset: "explicit",
-        include: ["read", "glob", "grep", "edit", "write", "bash", "lsp", "todo_write"],
+        include: ["read", "glob", "grep", "edit", "write", "bash", "lsp"],
         exclude: [],
       },
       approval: "fail",

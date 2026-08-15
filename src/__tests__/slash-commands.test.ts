@@ -1126,10 +1126,7 @@ describe("slash commands", () => {
     expect(result.result).toContain("Exited plan mode");
   });
 
-  it("/clear resets agent context, todos, display history, and records a session boundary", async () => {
-    let todos = [
-      { content: "a", activeForm: "doing a", status: "in_progress" },
-    ];
+  it("/clear resets agent context, display history, and records a session boundary", async () => {
     const appendMarker = vi.fn();
     const clearMessages = vi.fn();
     const resetContextUsageAnchor = vi.fn();
@@ -1142,10 +1139,6 @@ describe("slash commands", () => {
           { role: "user", content: "old prompt" },
           { role: "assistant", content: "old answer" },
         ],
-        getTodos: () => todos,
-        setTodos: (next: any[]) => {
-          todos = next;
-        },
         resetContextUsageAnchor,
       } as any,
       sessionManager: {
@@ -1161,7 +1154,6 @@ describe("slash commands", () => {
       { role: "system", content: "system prompt" },
       { role: "meta", kind: "system-reminder", content: "tool reminder" },
     ]);
-    expect(todos).toEqual([]);
     expect(appendMarker).toHaveBeenCalledWith("conversation_clear", "");
     expect(clearMessages).toHaveBeenCalledTimes(1);
     expect(resetContextUsageAnchor).toHaveBeenCalledTimes(1);
@@ -1178,8 +1170,6 @@ describe("slash commands", () => {
           { role: "system", content: "system prompt" },
           { role: "user", content: "old prompt" },
         ],
-        getTodos: () => [],
-        setTodos: vi.fn(),
         resetContextUsageAnchor: vi.fn(),
       } as any,
       sessionManager: {

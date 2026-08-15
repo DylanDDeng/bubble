@@ -160,10 +160,6 @@ async function main() {
   };
 
   let agentRef: Agent | undefined;
-  const todoStore = {
-    getTodos: () => agentRef?.getTodos() ?? [],
-    setTodos: (todos: Parameters<Agent["setTodos"]>[0]) => agentRef?.setTodos(todos),
-  };
   const planHandlerRef: { current?: (plan: string) => Promise<PlanDecision> } = {};
   const planController: PlanController = {
     getMode: () => agentRef?.mode ?? "default",
@@ -214,7 +210,6 @@ async function main() {
   const allowBackgroundTasks = !printMode;
   const promotionChannel = new PromotionChannel();
   const tools = createAllTools(args.cwd, skillRegistry, {
-    todoStore,
     planController,
     approvalController,
     questionController: printMode ? undefined : questionController,
@@ -378,7 +373,6 @@ async function main() {
             )
           : getDefaultThinkingLevel(activeProviderId, effectiveModelId)
     : (args.thinkingLevel ?? sessionThinkingLevel ?? configuredThinkingLevel ?? "off");
-  const restoredTodos = sessionManager?.getTodos() ?? [];
   const initialMode: PermissionMode = args.mode ?? "default";
   const skillSummaries = skillRegistry.summaries();
   // This synchronous provenance gate must run before buildMemoryPrompt: the
@@ -445,7 +439,6 @@ async function main() {
     temperature: 0.2,
     thinkingLevel: initialThinkingLevel,
     mode: initialMode,
-    todos: restoredTodos,
     onMessageAppend: (message) => {
       if (!sessionManager) return;
       if (message.role === "system") return;
@@ -473,9 +466,6 @@ async function main() {
       if (match?.[1]) {
         sessionManager.appendMarker("skill_activated", match[1].trim());
       }
-    },
-    onTodosUpdate: (todos) => {
-      sessionManager?.appendTodosSnapshot(todos);
     },
     onModeUpdate: (mode) => {
       sessionManager?.appendMarker("mode_switch", mode);
@@ -749,7 +739,6 @@ async function main() {
         // mirroring the /rewind history-replacement pattern.
         const head = agent.messages.filter((m) => m.role === "system" || m.role === "meta");
         const nextMessages = [...head, ...history];
-        const nextTodos = next.getTodos();
 
         // Commit only after every file read/write and reconstruction step has
         // succeeded. Callers can safely prepare candidate sessions without a
@@ -761,7 +750,6 @@ async function main() {
         // These update only live in-memory/UI mirrors after the persistence
         // commit. A best-effort callback failure must not report the switch as
         // rolled back after the outer session binding has already changed.
-        try { agent.setTodos(nextTodos); } catch { /* candidate already committed */ }
         try { agent.resetContextUsageAnchor(); } catch { /* derived counter only */ }
         return { manager: next };
       } catch (error) {

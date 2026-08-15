@@ -3,7 +3,7 @@ import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { AgentAbortError, INTERRUPTED_ASSISTANT_CONTENT, type Agent } from "../agent.js";
 import type { CliArgs } from "../cli.js";
 import { SessionManager, type SessionMetadata } from "../session.js";
-import type { AgentEvent, ContentPart, PermissionMode, PlanDecision, Provider, Todo } from "../types.js";
+import type { AgentEvent, ContentPart, PermissionMode, PlanDecision, Provider } from "../types.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import { UserConfig, maskKey } from "../config.js";
 import {
@@ -45,7 +45,6 @@ import { useTerminalSize } from "./use-terminal-size.js";
 import { WelcomeBanner, shouldShowWelcomeBanner } from "./welcome.js";
 import { BubbleCodeWordmark } from "./wordmark.js";
 import { expandAtMentions } from "./file-mentions.js";
-import { TodosPanel } from "./todos.js";
 import { CompactionProgressCard } from "./compaction-progress.js";
 import type { CompactionProgress } from "../slash-commands/types.js";
 import { PlanConfirm } from "./plan-confirm.js";
@@ -285,7 +284,6 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
   // model ladder.
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(agent.thinking);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(agent.mode);
-  const [todos, setTodos] = useState<Todo[]>(() => agent.getTodos());
   const [goalLine, setGoalLine] = useState("");
   const [branch, setBranch] = useState<string | undefined>(undefined);
   const [contextUsage, setContextUsage] = useState("");
@@ -821,10 +819,6 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     // <Static>), so clearing React state is not enough — resetTranscript wipes
     // the screen + scrollback and re-prints the (now empty) transcript.
     resetTranscript(() => []);
-    // The todos panel renders off React state, not the transcript, so wiping
-    // messages alone leaves a stale To-Do list on screen. /clear already reset
-    // the agent's todos; mirror that into the UI (same as session switch).
-    setTodos(agent.getTodos());
     clearLiveSubagentTools();
   }, [resetTranscript, agent, clearLiveSubagentTools]);
 
@@ -1010,7 +1004,6 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     const nextExternalBinding = result.manager.getMetadata().externalRuntime;
     externalRuntimeBindingRef.current = nextExternalBinding;
     setExternalRuntimeBinding(nextExternalBinding);
-    setTodos(agent.getTodos());
     clearLiveSubagentTools();
     resetTranscript(() => [
       ...reconstructDisplayMessages(agent.messages).filter((message) => !queuedDisplayKeys.has(message.key ?? "")),
@@ -1775,10 +1768,6 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
                   // toolCalls; absorbed into the live accumulator instead.
                   setLiveSubagentVersion((version) => version + 1);
                 }
-                break;
-              }
-              case "todos_updated": {
-                setTodos(event.todos);
                 break;
               }
               case "mode_changed": {
@@ -2801,11 +2790,6 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
             onRangeChange={(range) => setStatsPanel((current) => current ? { ...current, range } : current)}
             onCancel={closeStatsPanel}
           />
-        </Box>
-      )}
-      {todos.length > 0 && !pickerMode && !statsPanel && !pendingPlan && !pendingQuestion && (
-        <Box paddingX={1} flexShrink={0}>
-          <TodosPanel todos={todos} terminalColumns={terminalColumns} />
         </Box>
       )}
       {pendingPlan && !pickerMode && !statsPanel && !pendingQuestion && (

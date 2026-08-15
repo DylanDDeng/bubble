@@ -17,7 +17,7 @@ export interface SubtaskPolicy {
 const POLICY_MAP: Record<SubtaskType, SubtaskPolicy> = {
   search: {
     type: "search",
-    allowedTools: ["read", "glob", "grep", "web_search", "web_fetch", "skill", "todo_write"],
+    allowedTools: ["read", "glob", "grep", "web_search", "web_fetch", "skill"],
     reminder: [
       "Subtask policy: search",
       "- Focus on locating relevant files, symbols, and evidence quickly.",
@@ -29,7 +29,7 @@ const POLICY_MAP: Record<SubtaskType, SubtaskPolicy> = {
   },
   security_investigation: {
     type: "security_investigation",
-    allowedTools: ["read", "glob", "grep", "web_search", "web_fetch", "skill", "todo_write"],
+    allowedTools: ["read", "glob", "grep", "web_search", "web_fetch", "skill"],
     reminder: [
       "Subtask policy: security_investigation",
       "- Investigate only in read-only mode.",
@@ -41,7 +41,7 @@ const POLICY_MAP: Record<SubtaskType, SubtaskPolicy> = {
   },
   evidence_correlation: {
     type: "evidence_correlation",
-    allowedTools: ["read", "skill", "todo_write"],
+    allowedTools: ["read", "skill"],
     reminder: [
       "Subtask policy: evidence_correlation",
       "- Correlate evidence already discovered.",
@@ -53,7 +53,7 @@ const POLICY_MAP: Record<SubtaskType, SubtaskPolicy> = {
   },
   general_readonly: {
     type: "general_readonly",
-    allowedTools: ["read", "glob", "grep", "web_search", "web_fetch", "skill", "todo_write"],
+    allowedTools: ["read", "glob", "grep", "web_search", "web_fetch", "skill"],
     reminder: [
       "Subtask policy: general_readonly",
       "- Stay in read-only mode.",

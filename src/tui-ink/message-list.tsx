@@ -1199,7 +1199,6 @@ const TOOL_GLYPHS: Record<string, string> = {
   web_fetch: "⇲",
   web_search: "⌕",
   task: "↳",
-  todo: "✓",
   skill: "★",
 };
 

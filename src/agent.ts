@@ -19,7 +19,7 @@ import { projectMessages } from "./context/projector.js";
 import { aggressivePruneMessages, markStableCurrentToolResultsForCache, markToolResultCacheStable } from "./context/prune.js";
 import { truncateToolOutputForModel } from "./context/tool-output-truncate.js";
 import { buildDeferredToolsReminder, buildToolFreezeReminder, isPermissionModeReminder, reminderForMode } from "./prompt/reminders.js";
-import type { AgentEvent, AgentInputController, AgentRunInput, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ThinkingLevel, Todo, TokenUsage, ToolDefinition, ToolMessage, ToolResult, ToolRegistryEntry, ToolUpdate } from "./types.js";
+import type { AgentEvent, AgentInputController, AgentRunInput, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ThinkingLevel, TokenUsage, ToolDefinition, ToolMessage, ToolResult, ToolRegistryEntry, ToolUpdate } from "./types.js";
 import { HookBus, type TurnHooks, type TurnHookState } from "./orchestrator/hooks.js";
 import type { ExternalHookController } from "./hooks/controller.js";
 import {
@@ -144,11 +144,9 @@ export interface AgentOptions {
   steps?: number;
   maxTurns?: number;
   taskBudget?: { total: number };
-  todos?: Todo[];
   systemPrompt?: string;
   onMessageAppend?: (message: Message) => void;
   onToolResult?: (toolName: string, result: ToolResult) => void;
-  onTodosUpdate?: (todos: Todo[]) => void;
   onModeUpdate?: (mode: PermissionMode) => void;
   /**
    * Fired when MULTI-TURN compaction rewrites resident history, with the
@@ -253,9 +251,6 @@ export class Agent {
   private _modeVersion = 0;
   private onModeUpdate?: (mode: PermissionMode) => void;
   private onCompactionApplied?: (summary: string) => void;
-  private _todos: Todo[];
-  private _todosVersion = 0;
-  private onTodosUpdate?: (todos: Todo[]) => void;
   private onMessageAppend?: (message: Message) => void;
   private onToolResult?: (toolName: string, result: ToolResult) => void;
   private hookDefinitions: TurnHooks[];
@@ -304,10 +299,8 @@ export class Agent {
     this.temperature = options.temperature ?? 0.2;
     this.thinkingLevel = options.thinkingLevel ?? "off";
     this._mode = options.mode ?? "default";
-    this._todos = options.todos ? [...options.todos] : [];
     this.onMessageAppend = options.onMessageAppend;
     this.onToolResult = options.onToolResult;
-    this.onTodosUpdate = options.onTodosUpdate;
     this.onModeUpdate = options.onModeUpdate;
     this.onCompactionApplied = options.onCompactionApplied;
     this.hookDefinitions = options.hooks ?? [];
@@ -727,21 +720,6 @@ export class Agent {
     return this._modeVersion;
   }
 
-  getTodos(): Todo[] {
-    return this._todos.map((todo) => ({ ...todo }));
-  }
-
-  setTodos(next: Todo[]): void {
-    this._todos = next.map((todo) => ({ ...todo }));
-    this._todosVersion += 1;
-    this.onTodosUpdate?.(this.getTodos());
-  }
-
-  /** Internal: snapshot counter that bumps on every setTodos. Used by run loop to detect mutations. */
-  get todosVersion(): number {
-    return this._todosVersion;
-  }
-
   setSystemPrompt(prompt: string) {
     const systemMessage: Extract<Message, { role: "system" }> = { role: "system", content: prompt };
     if (this.messages[0]?.role === "system") {
@@ -863,10 +841,6 @@ export class Agent {
       }
     };
 
-    if (this._todos.length > 0 && this._todos.every((t) => t.status === "completed")) {
-      this.setTodos([]);
-      yield emit({ type: "todos_updated", todos: [] });
-    }
     if (!options.resumeWithoutInput) {
       const promptHook = await this.runExternalHook({
         eventName: "UserPromptSubmit",
@@ -1452,7 +1426,6 @@ export class Agent {
             argsCorrupt: tc.argsCorrupt,
           }, traceContext);
           yield emit({ type: "tool_start", id: tc.id, name: tc.name, args: tc.parsedArgs });
-          const todosVersionBefore = this._todosVersion;
           const modeVersionBefore = this._modeVersion;
           const updateQueue = createUpdateQueue<ToolUpdate>();
           let result: ToolResult;
@@ -1576,9 +1549,6 @@ export class Agent {
           executedResults.push(result);
           yield emit({ type: "tool_end", id: tc.id, name: tc.name, result });
           for (const update of this.subagents.drainToolUpdates()) yield emit(update);
-          if (this._todosVersion !== todosVersionBefore) {
-            yield emit({ type: "todos_updated", todos: this.getTodos() });
-          }
           if (this._modeVersion !== modeVersionBefore) {
             yield emit({ type: "mode_changed", mode: this._mode });
           }
@@ -1654,15 +1624,10 @@ export class Agent {
           currentAssistantMsg,
           currentAssistantAppended,
         );
-        const clearedTodos = this.clearTodosAfterInterruptedRun();
         traceEvent("agent_run_interrupted", {
           appendedBoundary,
-          clearedTodos,
           messageCount: this.messages.length,
         }, traceContext);
-        if (clearedTodos) {
-          yield emit({ type: "todos_updated", todos: this.getTodos() });
-        }
       } else {
         const stopFailureHook = await this.runExternalHook({
           eventName: "StopFailure",
@@ -2220,12 +2185,6 @@ export class Agent {
     return true;
   }
 
-  private clearTodosAfterInterruptedRun(): boolean {
-    if (this._todos.length === 0) return false;
-    this.setTodos([]);
-    return true;
-  }
-
   private async executeTool(
     toolCall: ParsedToolCall,
     cwd: string,
@@ -2253,7 +2212,7 @@ export class Agent {
       return {
         content:
           `Error: Tool "${toolCall.name}" is not allowed in plan mode. ` +
-          `In plan mode you may only use read-only tools (read, glob, grep, web_search, web_fetch, spawn_agent, wait_agent, send_input, skill_search, skill, todo_write, tool_search, question, exit_plan_mode). ` +
+          `In plan mode you may only use read-only tools (read, glob, grep, web_search, web_fetch, spawn_agent, wait_agent, send_input, skill_search, skill, tool_search, question, exit_plan_mode). ` +
           `To modify files or run commands, present your proposal and call exit_plan_mode so the user can review and approve it.`,
         isError: true,
       };

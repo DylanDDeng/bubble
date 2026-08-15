@@ -16,7 +16,7 @@ import {
   type CompactOptions,
   type CompactResult,
 } from "./context/compact.js";
-import type { Message, Todo } from "./types.js";
+import type { Message } from "./types.js";
 import { SessionLog } from "./session-log.js";
 import type { SessionLogEntry, SessionMarkerKind, SessionMetadata } from "./session-types.js";
 import { normalizeSingleLine, truncateVisual } from "./text-display.js";
@@ -214,16 +214,6 @@ export class SessionManager {
   appendMarker(kind: SessionMarkerKind, value: string) {
     const entry = this.log.appendMarker(kind, value);
     this.persist(entry);
-  }
-
-  appendTodosSnapshot(todos: Todo[]) {
-    const entry = this.log.appendTodosSnapshot(todos);
-    this.persist(entry);
-    this.maybeAutoCompact();
-  }
-
-  getTodos(): Todo[] {
-    return this.log.getTodos();
   }
 
   compact(options?: CompactOptions): CompactResult {

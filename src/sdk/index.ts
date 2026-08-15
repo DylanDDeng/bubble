@@ -264,10 +264,6 @@ export class BubbleSdk {
         approvalController,
         fileStateTracker,
         planController,
-        todoStore: {
-          getTodos: () => agentRef?.getTodos() ?? [],
-          setTodos: (todos) => agentRef?.setTodos(todos),
-        },
         questionController,
         goalStore: new GoalStore(),
         checkpoints: () => session.getCheckpoints(),
@@ -310,7 +306,6 @@ export class BubbleSdk {
         temperature: 0.2,
         thinkingLevel,
         mode,
-        todos: session.getTodos(),
         budgetLedger: new BudgetLedger(),
         fileStateTracker,
         skills: skillRegistry.summaries(),
@@ -324,7 +319,6 @@ export class BubbleSdk {
         onCompactionApplied: (summary: string) => {
           session.applyLLMCompaction(summary);
         },
-        onTodosUpdate: (todos) => session.appendTodosSnapshot(todos),
         onModeUpdate: (m: PermissionMode) => session.appendMarker("mode_switch", m),
       });
       agentRef = agent;
@@ -537,7 +531,6 @@ export type {
   PermissionMode,
   Provider,
   ThinkingLevel,
-  Todo,
   TokenUsage,
   UsageCost,
   ToolRegistryEntry,

@@ -3,7 +3,7 @@ import {
   sanitizeInternalReasoningText,
   sanitizeInternalReminderBlocks,
 } from "./agent/internal-reminder-sanitizer.js";
-import type { AssistantMessage, Message, Todo } from "./types.js";
+import type { AssistantMessage, Message } from "./types.js";
 import type {
   LegacySessionEntry,
   SessionAssistantMessageEntry,
@@ -12,7 +12,6 @@ import type {
   SessionMetadata,
   SessionMetadataEntry,
   SessionSummaryEntry,
-  SessionTodosSnapshotEntry,
 } from "./session-types.js";
 
 export class SessionLog {
@@ -80,30 +79,6 @@ export class SessionLog {
     };
     this.entries.push(entry);
     return entry;
-  }
-
-  appendTodosSnapshot(todos: Todo[]): SessionTodosSnapshotEntry {
-    const entry: SessionTodosSnapshotEntry = {
-      id: nextEntryId(this.entries),
-      type: "todos_snapshot",
-      todos: todos.map((todo) => ({ ...todo })),
-      timestamp: Date.now(),
-    };
-    this.entries.push(entry);
-    return entry;
-  }
-
-  getTodos(): Todo[] {
-    for (let i = this.entries.length - 1; i >= 0; i--) {
-      const entry = this.entries[i];
-      if (entry.type === "marker" && entry.kind === "conversation_clear") {
-        return [];
-      }
-      if (entry.type === "todos_snapshot") {
-        return entry.todos.map((todo) => ({ ...todo }));
-      }
-    }
-    return [];
   }
 
   appendMarker(kind: SessionMarkerKind, value: string): SessionLogEntry {
@@ -280,7 +255,6 @@ function isSessionLogEntry(entry: SessionLogEntry | LegacySessionEntry): entry i
     "assistant_message",
     "tool_call",
     "tool_result",
-    "todos_snapshot",
   ].includes(entry.type);
 }
 
