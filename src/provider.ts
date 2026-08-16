@@ -270,9 +270,9 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
     // paths already wrap — this generic chat-completions path did not).
     try {
       yield* translateOpenAIStream(stream, {
-        toolArgsMergeMode: resolveToolArgsMergeMode(options.providerId || "", options.baseURL),
-        reasoningMergeMode: resolveReasoningMergeMode(options.providerId || "", options.baseURL),
-        textMergeMode: resolveTextMergeMode(options.providerId || "", options.baseURL),
+        toolArgsMergeMode: resolveToolArgsMergeMode(options.providerId || "", options.baseURL || ""),
+        reasoningMergeMode: resolveReasoningMergeMode(options.providerId || "", options.baseURL || ""),
+        textMergeMode: resolveTextMergeMode(options.providerId || "", options.baseURL || ""),
         debugProviderId: options.providerId || "",
         debugModelId: chatOptions.model,
       });
@@ -326,7 +326,7 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
 function resolveProviderProtocol(options: ProviderInstanceOptions): ProviderProtocol {
   if (options.protocol) return options.protocol;
   const providerId = (options.providerId || "").toLowerCase();
-  const baseURL = options.baseURL.toLowerCase();
+  const baseURL = (options.baseURL || "").toLowerCase();
   if (
     providerId === "doubao"
     && baseURL.replace(/\/+$/, "") === "https://ark.cn-beijing.volces.com/api/v3"
@@ -345,7 +345,7 @@ function resolveProviderProtocol(options: ProviderInstanceOptions): ProviderProt
 
 function isMiniMaxOpenAICompatible(options: Pick<ProviderInstanceOptions, "providerId" | "baseURL">): boolean {
   const providerId = (options.providerId || "").toLowerCase();
-  const baseURL = options.baseURL.toLowerCase();
+  const baseURL = (options.baseURL || "").toLowerCase();
   return providerId === "minimax-openai"
     || (providerId === "minimax" && !baseURL.includes("/anthropic"))
     || baseURL.includes("api.minimaxi.com/v1")

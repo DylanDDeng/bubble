@@ -464,7 +464,13 @@ export class ProviderRegistry {
     } else {
       // 2. Fall back to config.json providers (interactive TUI style)
       providers = this.config.getProviders().map((provider) => {
-        const baseURL = upgradeLegacyBaseURL(provider.id, provider.baseURL, provider.protocol);
+        // config.json entries may omit baseURL (a bare {id, apiKey} written
+        // by minimal setups / benchmark harnesses); merge the builtin default
+        // the same way the models.json path above does, instead of propagating
+        // undefined into provider construction.
+        const builtinBase = getBuiltinProvider(provider.id)?.baseURL ?? "";
+        const rawBaseURL = provider.baseURL || builtinBase;
+        const baseURL = upgradeLegacyBaseURL(provider.id, rawBaseURL, provider.protocol);
         return {
           ...provider,
           baseURL,
