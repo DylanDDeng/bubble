@@ -109,3 +109,24 @@ describe("transcript renderer", () => {
     expect(rows.some((r) => strip(r).includes("grep"))).toBe(true);
   });
 });
+
+describe("transcript markdown pipeline", () => {
+  it("routes assistant content through the injected markdown renderer", () => {
+    const calls: Array<{ text: string; width: number }> = [];
+    const rows = renderMessage(msg({ content: "# Title\n\nbody" }), {
+      columns: 50,
+      markdownRenderer: (text, width) => {
+        calls.push({ text, width });
+        return ["<MD>", ...text.split("\n")];
+      },
+    });
+    expect(calls).toEqual([{ text: "# Title\n\nbody", width: 48 }]);
+    expect(rows[0]).toBe("<MD>");
+    expect(rows[rows.length - 1]).toBe("");
+  });
+
+  it("falls back to plain wrapping without a renderer", () => {
+    const rows = renderMessage(msg({ content: "plain words" }), { columns: 50 });
+    expect(rows[0]).toBe("plain words");
+  });
+});

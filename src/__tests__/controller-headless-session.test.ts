@@ -5,6 +5,7 @@
  * clean shutdown — no terminal involved.
  */
 import { describe, expect, it } from "vitest";
+import type { AgentEvent } from "../types.js";
 import { BubbleTuiController } from "../tui/controller/controller.js";
 import type { ControllerEffect } from "../tui/controller/effects.js";
 import { FakeAgent } from "../tui/testing/fake-agent.js";
@@ -109,6 +110,48 @@ describe("BubbleTuiController headless session", () => {
     expect(second.reason).toBe("user-quit");
     expect(first.wallMs).toBeGreaterThanOrEqual(0);
     expect(controller.pendingOverlayCount()).toBe(0);
+  });
+
+  it("surfaces the live streaming tail while a run is in flight", async () => {
+    const host = new SpyHost();
+    const flushes: Array<() => void> = [];
+    host.ports.flush = {
+      scheduleFlush: (ms, flush) => {
+        expect(ms).toBe(40);
+        flushes.push(flush);
+      },
+      cancelFlush: () => {},
+    };
+
+    let controller: BubbleTuiController | null = null;
+    const gatedAgent = {
+      messages: [],
+      setSessionID: () => {},
+      async *run(): AsyncIterable<AgentEvent> {
+        yield { type: "text_delta", content: "part" };
+        // Fire the scheduled 40ms flush mid-run, then sample the tail.
+        for (const flush of flushes) flush();
+        midRunTail = controller!.getStreamingTail();
+        yield { type: "turn_end" };
+      },
+    };
+    let midRunTail: { content: string } | null = null;
+
+    controller = new BubbleTuiController({
+      agent: gatedAgent as never,
+      sessionManager: { getSessionFile: () => "/s.jsonl", getMetadata: () => ({}), appendMessage: () => {} } as never,
+      ports: host.ports,
+    });
+    await controller.runTurn("hi", "/cwd");
+
+    expect(flushes.length).toBeGreaterThanOrEqual(1); // scheduled by dirty deltas
+    expect(midRunTail).toMatchObject({ content: "part" });
+    expect(controller.getStreamingTail()).toBeNull(); // cleared at run end
+  });
+
+  it("streaming tail is null when idle", () => {
+    const { controller } = makeController();
+    expect(controller.getStreamingTail()).toBeNull();
   });
 
   it("session switch through the transaction notifies exactly once", async () => {

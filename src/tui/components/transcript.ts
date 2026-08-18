@@ -23,6 +23,9 @@ export interface TranscriptRenderOptions {
   showReasoning?: boolean;
   verboseTrace?: boolean;
   theme?: TranscriptTheme;
+  /** Optional markdown pipeline for assistant content (app injects pi-tui's
+   *  Markdown component; the default is plain wrapped text). */
+  markdownRenderer?: (text: string, width: number) => string[];
 }
 
 export interface TranscriptTheme {
@@ -100,6 +103,9 @@ export function wrapPlain(text: string, columns: number): string[] {
 
 export function renderAssistant(content: string, options: TranscriptRenderOptions): string[] {
   const width = Math.max(20, options.columns - 2);
+  if (options.markdownRenderer) {
+    return [...options.markdownRenderer(content, width), ""];
+  }
   return [...wrapPlain(content, width), ""];
 }
 

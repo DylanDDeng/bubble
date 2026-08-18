@@ -22,6 +22,7 @@ import {
   createRunState,
   reduceAgentEvent,
   reduceRunFinish,
+  STREAMING_FLUSH_INTERVAL_MS,
   type RunContext,
   type RunState,
 } from "./agent-event-reducer.js";
@@ -118,6 +119,23 @@ export class BubbleTuiController {
     return this.runActive;
   }
 
+  /**
+   * Live streaming tail for the render loop: the in-flight accumulator's
+   * content/reasoning/tool summary. Renderers draw it in the live region
+   * (never committed to scrollback) until the turn commits.
+   */
+  getStreamingTail(): { content: string; reasoning: string; toolCount: number; lastToolName?: string } | null {
+    if (!this.runActive || !this.runState) return null;
+    const acc = this.runState.accumulator;
+    const lastTool = acc.toolCalls[acc.toolCalls.length - 1];
+    return {
+      content: acc.content,
+      reasoning: acc.reasoning,
+      toolCount: acc.toolCalls.length,
+      lastToolName: lastTool?.name,
+    };
+  }
+
   pendingOverlayCount(): number {
     return this.overlays.pendingCount();
   }
@@ -147,6 +165,15 @@ export class BubbleTuiController {
         const { state, effects } = reduceAgentEvent(this.runState!, event, ctx);
         this.runState = state;
         for (const effect of effects) this.applyEffect(effect);
+        // Streaming deltas only set dirty flags — batch them behind the 40ms
+        // flush so text_delta bursts repaint at ~25fps instead of per-chunk.
+        if (state.dirty.content || state.dirty.reasoning || state.dirty.parts || state.dirty.tools) {
+          this.deps.ports.flush.scheduleFlush(STREAMING_FLUSH_INTERVAL_MS, () => {
+            if (this.disposed || !this.runActive) return;
+            this.state.touch();
+            this.notify();
+          });
+        }
       }
     } catch (error) {
       runError = error;
