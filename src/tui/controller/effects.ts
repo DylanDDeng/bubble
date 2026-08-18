@@ -17,7 +17,12 @@ export type ControllerEffect =
   | { kind: "transcript-move-message"; displayKey: string; fullReprint: boolean }
   | { kind: "transcript-rebuild-from-agent"; fullReprint: boolean }
   | { kind: "session-append-message"; role: "user"; content: string }
-  | { kind: "queue-updated" }
+  | { kind: "queue-updated"; pending?: number }
   | { kind: "external-cancel"; sessionId: string }
+  | { kind: "external-cancel-policy" }
+  | { kind: "steer-applied"; id: string; displayKey: string }
+  | { kind: "steer-requeued"; id: string; displayKey: string }
+  | { kind: "steers-drained"; cancelled: boolean; leftovers: Array<{ input: import("../../types.js").AgentRunInput; displayKey?: string; sessionFile?: string }> }
+  | { kind: "run-finished"; cancelled: boolean; errored: boolean }
   | { kind: "run-error"; error: unknown }
   | { kind: "notice"; role: "assistant" | "error"; text: string };
