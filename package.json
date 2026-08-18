@@ -77,6 +77,7 @@
     "@types/qrcode-terminal": "^0.12.2",
     "@vitest/coverage-v8": "^4.1.4",
     "@xterm/headless": "5.5.0",
+    "node-pty": "^1.1.0",
     "tsx": "^4.20.3",
     "typescript": "^5.7.0",
     "vitest": "^4.1.4"
@@ -90,6 +91,7 @@
     }
   },
   "allowScripts": {
-    "tsx@4.23.12": true
+    "tsx@4.23.12": true,
+    "node-pty@1.1.0": true
   }
 }

@@ -1,5 +1,8 @@
 import { defineConfig } from "vitest/config";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   resolve: {
@@ -9,11 +12,11 @@ export default defineConfig({
       // bare package alias does not swallow the /testing subpath.
       {
         find: "@bubblebrain-ai/pi-tui/testing",
-        replacement: path.resolve(__dirname, "packages/pi-tui/src/testing.ts"),
+        replacement: path.resolve(root, "packages/pi-tui/src/testing.ts"),
       },
       {
         find: "@bubblebrain-ai/pi-tui",
-        replacement: path.resolve(__dirname, "packages/pi-tui/src/index.ts"),
+        replacement: path.resolve(root, "packages/pi-tui/src/index.ts"),
       },
     ],
   },
