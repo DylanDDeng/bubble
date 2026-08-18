@@ -43,7 +43,6 @@ import { SkillRegistry } from "../skills/registry.js";
 import { parseSkillInvocation } from "../skills/invocation.js";
 import { useTerminalSize } from "./use-terminal-size.js";
 import { WelcomeBanner, shouldShowWelcomeBanner } from "./welcome.js";
-import { BubbleCodeWordmark } from "./wordmark.js";
 import { expandAtMentions } from "./file-mentions.js";
 import { CompactionProgressCard } from "./compaction-progress.js";
 import type { CompactionProgress } from "../slash-commands/types.js";
@@ -2496,7 +2495,6 @@ export function App({ agent, args, sessionManager: initialSessionManager, switch
     : undefined;
   const welcomeBannerNode = showWelcome ? (
     <Box flexDirection="column" marginBottom={1}>
-      <BubbleCodeWordmark width={terminalColumns} />
       <WelcomeBanner
         terminalColumns={terminalColumns}
         tips={bannerTips}
