@@ -1,6 +1,6 @@
 # Bubble TUI rewrite on vendored pi-tui
 
-Status: **approved direction; implementation not started**  
+Status: **approved direction; Node-only runtime switch landed, pi-tui import not started**  
 Branch: `rewrite/pi-tui`  
 Decision date: 2026-08-18
 
@@ -24,6 +24,13 @@ The final cutover removes:
 - the `ink`, `react`, and `@types/react` production dependencies
 - JSX configuration needed only by the old TUI
 - Ink-specific `<Static>`, Yoga measurement, cursor-compensation, and stdout repaint workarounds
+
+## 1a. Confirmed decisions (2026-08-18)
+
+1. **Runtime: Node only.** The Bun re-exec launcher is gone (commit `a64801e`). Bubble runs entirely on Node; `engines.node >= 22.19.0` matches pi-tui upstream. The Kimi-review P0 (Bun/Node TTY divergence between test and production runtime) is closed by construction.
+2. **Packaging: compiled into the single Bubble package.** `packages/pi-tui` holds maintained source; its build output ships inside Bubble's `dist/vendor/pi-tui`. No separate npm package, no runtime GitHub fetch.
+3. **Migration baseline: functional and visual parity first.** Shortcuts, message layout, and interaction habits stay as-is through cutover; visual redesign is a separate later effort.
+4. **Release gate platforms: macOS + Linux + Windows.** Node native deps, pi-tui helpers, TTY behavior, and packaged assets must be verified on all three before cutover.
 
 ## 2. Why this is a renderer replacement
 
