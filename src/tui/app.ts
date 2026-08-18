@@ -19,13 +19,13 @@ import {
   VStack,
   SelectList,
   Editor,
-  Loader,
   Markdown,
   type MarkdownTheme,
   type SelectItem,
   type TUI,
   type Component,
 } from "@bubblebrain-ai/pi-tui";
+import { StreamingMessageComponent } from "./components/streaming-message.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import type { SlashCommandContext } from "../slash-commands/types.js";
 import { BubbleTuiController } from "./controller/controller.js";
@@ -104,9 +104,8 @@ export class PiTuiApp {
   private readonly tui: TUI;
   private readonly editor: Editor;
   private readonly transcriptBox = new VStack([]);
-  private readonly streamBox = new VStack([]);
+  private readonly streamingMessage = new StreamingMessageComponent(8, () => this.tui.requestRender());
   private readonly markdown = new Markdown("", 0, 0, MD_THEME);
-  private readonly loader: Loader;
   private readonly footer = new Text("", 1, 0);
   private readonly welcomeBox = new VStack([]);
   private readonly overlays: OverlayRequestController;
@@ -121,7 +120,6 @@ export class PiTuiApp {
     const terminal = new ProcessTerminal();
     this.tui = new TuiMainScreen(terminal);
     this.editor = new Editor(this.tui, EDITOR_THEME);
-    this.loader = new Loader(this.tui, (s) => chalk.cyan(s), (s) => chalk.dim(s), "Thinking…");
     this.overlays = new OverlayRequestController({ questionController: options.questionController });
 
     this.installBlockingHandlers();
@@ -159,7 +157,6 @@ export class PiTuiApp {
   private buildLayout(): void {
     this.tui.addChild(this.welcomeBox);
     this.tui.addChild(this.transcriptBox);
-    this.tui.addChild(this.streamBox);
     this.tui.addChild(this.editor);
     this.tui.addChild(this.footer);
     this.tui.setFocus(this.editor);
@@ -312,7 +309,7 @@ export class PiTuiApp {
 
   /** Rows already committed to the append-only scrollback stream. */
   private committedRows = 0;
-  private streamingActive = false;
+  private streamingMounted = false;
 
   renderSnapshot(): void {
     if (this.disposed) return;
@@ -344,68 +341,36 @@ export class PiTuiApp {
       for (const row of rows) this.transcriptBox.addChild(new Text(row, 0, 0));
       this.committedRows = rows.length;
     }
-    this.renderStreamingTail(columns);
+    this.updateStreamingRegion(columns);
     this.footer.setText(this.renderFooterLine(columns));
     this.tui.requestRender();
   }
 
   /**
-   * Live streaming region between the committed transcript and the composer.
-   * Rebuilt freely each flush — it stays inside the viewport (clamped tail),
-   * so the main-screen renderer updates it in place and never commits it to
-   * scrollback; the full content commits once at turn end instead.
+   * The streaming preview is a persistent row-pool component mounted as the
+   * transcript's LAST child (upstream AssistantMessageComponent pattern).
+   * Rows are only ever setText — re-creating components per frame is what
+   * leaked every intermediate prefix into scrollback (verified with a
+   * VirtualTerminal matrix). On turn end it collapses to zero rows in the
+   * same frame the settled message commits, so the full answer replaces the
+   * preview with no duplicate.
    */
-  private renderStreamingTail(columns: number): void {
+  private updateStreamingRegion(columns: number): void {
     const controller = this.options.controller;
     const tail = controller.isRunning() ? controller.getStreamingTail() : null;
 
-    if (!tail) {
-      if (this.streamingActive) {
-        this.streamingActive = false;
-        this.loader.stop();
-        this.tui.removeChild(this.loader);
-        this.streamBox.children.length = 0;
+    if (tail) {
+      if (!this.streamingMounted) {
+        this.streamingMounted = true;
+        this.transcriptBox.addChild(this.streamingMessage);
+        this.streamingMessage.startSpinner();
       }
-      return;
+      this.streamingMessage.noteWidth(columns);
+      this.streamingMessage.update(tail, columns);
+    } else if (this.streamingMounted) {
+      this.streamingMounted = false;
+      this.streamingMessage.clearToNothing();
     }
-
-    if (!this.streamingActive) {
-      this.streamingActive = true;
-      this.tui.addChild(this.loader); // loader lands above the editor
-      this.loader.start();
-    }
-
-    const status = tail.content
-      ? "Streaming…"
-      : tail.toolCount > 0 && tail.lastToolName
-        ? `Running ${tail.lastToolName}…`
-        : tail.reasoning
-          ? "Thinking…"
-          : "Connecting…";
-    this.loader.setMessage(status);
-
-    const previewRows = Math.max(2, Math.min(8, (this.tui.terminal.rows || 24) - 8));
-    const lines: string[] = [];
-    if (tail.reasoning && !tail.content) {
-      const clamped = tail.reasoning.split("\n").slice(-2);
-      for (const line of clamped) lines.push(chalk.dim(`  ${line.slice(0, columns - 4)}`));
-    }
-    if (tail.content) {
-      this.markdown.setText(tail.content);
-      const rendered = this.markdown.render(Math.max(20, columns - 4));
-      if (rendered.length > previewRows) {
-        lines.push(chalk.dim("  …"));
-        lines.push(...rendered.slice(-previewRows));
-      } else {
-        lines.push(...rendered);
-      }
-    }
-    if (tail.toolCount > 0 && tail.lastToolName && !tail.content) {
-      lines.push(chalk.dim(`  ⚙ ${tail.lastToolName} (tool ${tail.toolCount})`));
-    }
-
-    this.streamBox.children.length = 0;
-    for (const line of lines) this.streamBox.addChild(new Text(line, 0, 0));
   }
 
   private renderFooterLine(columns: number): string {
@@ -554,6 +519,7 @@ export class PiTuiApp {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.streamingMessage.dispose();
     this.options.controller.shutdown("user-quit");
     this.overlays.dispose();
     this.options.callbacks.onExitRequest();
