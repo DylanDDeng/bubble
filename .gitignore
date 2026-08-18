@@ -13,3 +13,4 @@ jobs/
 bench/terminal-bench/jobs/
 bubble-thinking-only.patch
 .eval/
+.e2e-tmp/
