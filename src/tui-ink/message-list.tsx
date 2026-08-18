@@ -1093,16 +1093,16 @@ function UserMessageBlock({
   // (isInternalBlockOnlyContent), but a block with trailing text — or a
   // truncated block — would slip that anchored filter. Never render markup.
   const visibleContent = sanitizeInternalReminderBlocks(content);
-  // Preserve the message's existing text inset after removing the decorative
-  // rail: the former two rail columns become ordinary background padding.
-  const leftPaddingWidth = 3;
+  // Keep the existing three-column inset, using it for a subtle sent-message
+  // marker on the first visual line. Continuation lines stay text-aligned.
+  const leadingWidth = 3;
   const rightPaddingWidth = 1;
   const horizontalRoom = Math.max(20, terminalColumns - 2);
-  const bubbleTextWidth = Math.max(1, horizontalRoom - leftPaddingWidth - rightPaddingWidth);
+  const bubbleTextWidth = Math.max(1, horizontalRoom - leadingWidth - rightPaddingWidth);
   const { bodyLines, referenceLines } = splitImageDisplayContent(visibleContent);
   const wrappedLines = bodyLines
     .flatMap((line) => wrapByVisualWidth(line, bubbleTextWidth));
-  const attachmentReferenceIndent = " ".repeat(leftPaddingWidth);
+  const attachmentReferenceIndent = " ".repeat(leadingWidth);
 
   return (
     <Box flexDirection="column" marginTop={separateFromPrevious ? 1 : 0}>
@@ -1116,13 +1116,22 @@ function UserMessageBlock({
           </Text>
         </Box>
       )}
+      <Box>
+        <Text backgroundColor={theme.userMessageBg}>{" ".repeat(horizontalRoom)}</Text>
+      </Box>
       {wrappedLines.map((line, index) => (
         <Box key={index}>
+          <Text backgroundColor={theme.userMessageBg} color={theme.accent}>
+            {index === 0 ? " › " : " ".repeat(leadingWidth)}
+          </Text>
           <Text backgroundColor={theme.userMessageBg} color={theme.userMessageText}>
-            {`${" ".repeat(leftPaddingWidth)}${padVisual(line || " ", bubbleTextWidth)}${" ".repeat(rightPaddingWidth)}`}
+            {`${padVisual(line || " ", bubbleTextWidth)}${" ".repeat(rightPaddingWidth)}`}
           </Text>
         </Box>
       ))}
+      <Box>
+        <Text backgroundColor={theme.userMessageBg}>{" ".repeat(horizontalRoom)}</Text>
+      </Box>
       {referenceLines.map((line, index) => (
         <Box key={`attachment-${index}`}>
           <Text color={theme.muted}>{`${attachmentReferenceIndent}${line}`}</Text>

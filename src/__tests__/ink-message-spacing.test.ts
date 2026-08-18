@@ -59,19 +59,41 @@ describe("Ink message spacing", () => {
   it("gives the first streaming tool trace the same gap as a committed turn", () => {
     const lines = renderLines([user], [toolsPart]);
 
-    expect(lines[0]).toContain("What is this project doing?");
-    expect(lines[0]).not.toContain("▌");
-    // Same blank line as after finalize — spacing must not jump when the
-    // streaming block commits into a regular assistant message.
-    expect(lines[1]).toBe("");
-    expect(lines[2]).toContain("List Directory 2 files");
+    const userIndex = lines.findIndex((line) => line.includes("What is this project doing?"));
+    const toolIndex = lines.findIndex((line) => line.includes("List Directory 2 files"));
+
+    expect(userIndex).toBe(1);
+    expect(lines[userIndex]).toContain("› What is this project doing?");
+    expect(lines[userIndex]).not.toContain("▌");
+    // One filled row pads each side of the centered user text; the ordinary
+    // transcript gap follows the lower padding before the tool trace.
+    expect(lines[userIndex - 1]).toBe("");
+    expect(lines[userIndex + 1]).toBe("");
+    expect(lines[userIndex + 2]).toBe("");
+    expect(toolIndex).toBe(userIndex + 3);
   });
 
-  it("renders sent user messages with bubble fill and no left rail", () => {
-    const output = renderLines([{ key: "short-user", role: "user", content: "你好啊" }]).join("\n");
+  it("renders sent user messages with a subtle arrow and centered vertical padding", () => {
+    const lines = renderLines([{ key: "short-user", role: "user", content: "你好啊" }]);
+    const textIndex = lines.findIndex((line) => line.includes("你好啊"));
 
-    expect(output).toContain("   你好啊");
-    expect(output).not.toContain("▌");
+    expect(textIndex).toBe(1);
+    expect(lines[textIndex]).toContain(" › 你好啊");
+    expect(lines[textIndex]).not.toContain("▌");
+    expect(lines[textIndex - 1]).toBe("");
+    expect(lines[textIndex + 1]).toBe("");
+  });
+
+  it("shows the sent-message arrow only on the first wrapped line", () => {
+    const message: DisplayMessage = {
+      key: "wrapped-user",
+      role: "user",
+      content: "这是一条需要换行显示的用户消息，用来确认后续各行不会重复显示发送箭头。",
+    };
+    const rendered = renderToString(renderMessageList([message], 28), { columns: 28 });
+
+    expect(rendered.split("\n").length).toBeGreaterThan(3);
+    expect(rendered.match(/›/g)).toHaveLength(1);
   });
 
   it("keeps consecutive user messages visually separate after steer is applied", () => {
@@ -164,9 +186,14 @@ describe("Ink message spacing", () => {
       },
     ]);
 
-    expect(lines[0]).toContain("What is this project doing?");
-    expect(lines[1]).toBe("");
-    expect(lines[2]).toContain("List Directory 2 files");
+    const userIndex = lines.findIndex((line) => line.includes("What is this project doing?"));
+    const toolIndex = lines.findIndex((line) => line.includes("List Directory 2 files"));
+
+    expect(userIndex).toBe(1);
+    expect(lines[userIndex - 1]).toBe("");
+    expect(lines[userIndex + 1]).toBe("");
+    expect(lines[userIndex + 2]).toBe("");
+    expect(toolIndex).toBe(userIndex + 3);
   });
 
   it("drops an assistant turn that is only an echoed reminder, leaving no blank band", () => {
@@ -187,10 +214,10 @@ describe("Ink message spacing", () => {
     const answerIdx = lines.findIndex((line) => line.includes("现在我有完整图景"));
     expect(userIdx).toBeGreaterThanOrEqual(0);
     expect(answerIdx).toBeGreaterThan(userIdx);
-    // The dropped empty turn must not stack extra margin rows: only the normal
-    // single inter-message blank line sits between the user line and the answer.
+    // The dropped empty turn must not stack extra margin rows: only the user's
+    // lower padding and the normal inter-message gap sit before the answer.
     const blanksBetween = lines.slice(userIdx + 1, answerIdx).filter((line) => line.trim() === "").length;
-    expect(blanksBetween).toBeLessThanOrEqual(1);
+    expect(blanksBetween).toBe(2);
   });
 
   it("does not stack a blank band across consecutive echoed-reminder turns", () => {
@@ -211,9 +238,10 @@ describe("Ink message spacing", () => {
 
     const userIdx = lines.findIndex((line) => line.includes("go"));
     const answerIdx = lines.findIndex((line) => line.includes("现在我有完整图景"));
-    // Three dropped turns must add NO band — only the single inter-message gap.
+    // Three dropped turns must add NO band beyond the user's lower padding and
+    // the normal inter-message gap.
     const blanksBetween = lines.slice(userIdx + 1, answerIdx).filter((line) => line.trim() === "").length;
-    expect(blanksBetween).toBeLessThanOrEqual(1);
+    expect(blanksBetween).toBe(2);
   });
 
   it("keeps the Task duration line on a finalized turn whose text sanitizes to empty", () => {
