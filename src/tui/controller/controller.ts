@@ -100,6 +100,20 @@ export class BubbleTuiController {
     return this.transcript;
   }
 
+  /** Drop every transcript row (/clear). */
+  clearTranscript(): void {
+    this.transcript = [];
+    this.state.touch();
+    this.notify();
+  }
+
+  /** Host-side row injection (user echo, notices) — single append point. */
+  appendDisplayMessage(message: DisplayMessage): void {
+    this.transcript = [...this.transcript, message];
+    this.state.touch();
+    this.notify();
+  }
+
   isRunning(): boolean {
     return this.runActive;
   }
