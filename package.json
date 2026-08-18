@@ -4,7 +4,7 @@
   "description": "A terminal coding agent",
   "type": "module",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.19.0"
   },
   "bin": {
     "bubble": "dist/bin.js"
@@ -29,11 +29,11 @@
   ],
   "scripts": {
     "build": "rm -rf dist && tsc && chmod +x dist/bin.js dist/main.js",
-    "dev": "tsc && bun dist/main.js",
+    "dev": "tsc && node dist/main.js",
     "refresh-models": "NODE_USE_ENV_PROXY=1 node scripts/generate-model-data.mjs",
-    "eval": "bun evals/run.ts",
+    "eval": "tsx evals/run.ts",
     "prepack": "npm run build",
-    "start": "bun dist/main.js",
+    "start": "node dist/main.js",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -68,6 +68,7 @@
     "@types/picomatch": "^4.0.3",
     "@types/qrcode-terminal": "^0.12.2",
     "@vitest/coverage-v8": "^4.1.4",
+    "tsx": "^4.20.3",
     "typescript": "^5.7.0",
     "vitest": "^4.1.4"
   },
@@ -78,5 +79,8 @@
     "openai": {
       "zod": "$zod"
     }
+  },
+  "allowScripts": {
+    "tsx@4.23.12": true
   }
 }

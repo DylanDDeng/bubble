@@ -15,8 +15,6 @@ export interface ProviderFetchOptions {
 
 type RequestInitWithProviderOptions = RequestInit & {
   dispatcher?: Dispatcher;
-  proxy?: string;
-  tls?: { ca?: unknown[] };
   verbose?: boolean;
 };
 
@@ -51,7 +49,6 @@ export function createProviderDispatcher(
   input?: RequestInfo | URL,
   providerName = "provider",
 ): Dispatcher | undefined {
-  if (isBunRuntime()) return undefined;
   const ca = loadExtraCaCertificates(env, providerName);
   const proxy = input ? nodeProxyForUrl(input, env) : defaultNodeProxy(env);
   if (!proxy && ca.length === 0) return undefined;
@@ -80,15 +77,8 @@ export function withProviderNetworkOptions(
   const providerName = options.providerName ?? "provider";
   const next = { ...(init ?? {}) } as RequestInitWithProviderOptions;
 
-  if (isBunRuntime()) {
-    const proxy = bunProxyForUrl(input, env);
-    if (proxy) next.proxy = proxy;
-    const ca = bunExtraCaFiles(env);
-    if (ca.length > 0) next.tls = { ...(next.tls ?? {}), ca };
-  } else {
-    const dispatcher = createProviderDispatcher(env, input, providerName);
-    if (dispatcher) next.dispatcher = dispatcher;
-  }
+  const dispatcher = createProviderDispatcher(env, input, providerName);
+  if (dispatcher) next.dispatcher = dispatcher;
 
   if (shouldEnableFetchVerbose(env, options.verboseEnvVar)) {
     next.verbose = true;
@@ -176,19 +166,6 @@ function hasCustomCaEnv(env: NodeJS.ProcessEnv): boolean {
   return Boolean(env.NODE_EXTRA_CA_CERTS?.trim() || env.BUBBLE_EXTRA_CA_CERTS?.trim());
 }
 
-function isBunRuntime(): boolean {
-  return typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
-}
-
-function bunProxyForUrl(input: RequestInfo | URL, env: NodeJS.ProcessEnv): string | undefined {
-  const url = urlFromInput(input);
-  if (!url || shouldBypassProxy(url, env)) return undefined;
-  const allProxy = env.ALL_PROXY ?? env.all_proxy;
-  if (url.protocol === "https:") return env.HTTPS_PROXY ?? env.https_proxy ?? allProxy ?? getSystemProxyForUrl(url, env);
-  if (url.protocol === "http:") return env.HTTP_PROXY ?? env.http_proxy ?? allProxy ?? getSystemProxyForUrl(url, env);
-  return undefined;
-}
-
 function nodeProxyForUrl(input: RequestInfo | URL, env: NodeJS.ProcessEnv): string | undefined {
   const url = urlFromInput(input);
   if (!url || shouldBypassProxy(url, env)) return undefined;
@@ -200,12 +177,6 @@ function nodeProxyForUrl(input: RequestInfo | URL, env: NodeJS.ProcessEnv): stri
 function defaultNodeProxy(env: NodeJS.ProcessEnv): string | undefined {
   return env.HTTPS_PROXY ?? env.https_proxy ?? env.HTTP_PROXY ?? env.http_proxy ?? env.ALL_PROXY ?? env.all_proxy
     ?? getSystemProxyForUrl(new URL("https://system-proxy-default.invalid/"), env);
-}
-
-function bunExtraCaFiles(env: NodeJS.ProcessEnv): unknown[] {
-  const bun = (globalThis as { Bun?: { file?: (path: string) => unknown } }).Bun;
-  if (!bun?.file) return [];
-  return extraCaCertificatePaths(env).map((path) => bun.file!(path));
 }
 
 function urlFromInput(input: RequestInfo | URL): URL | undefined {
