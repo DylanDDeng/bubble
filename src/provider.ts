@@ -863,8 +863,12 @@ function parsePositiveInt(raw: string | undefined): number | undefined {
   return Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
-/** Largest value Node's 32-bit timers accept; ~24.8 days. */
-export const MAX_TIMER_MS = 2_147_483_647; // 2**31 - 1
+/**
+ * Largest value that survives the OpenAI SDK's internal `timeout + 1000`
+ * agent-grace (core.js minAgentTimeout) without overflowing Node's 32-bit
+ * timers; ~24.8 days.
+ */
+export const MAX_TIMER_MS = 2_147_482_647; // 2**31 - 1 - 1000
 
 /**
  * Resolve the provider request timeout (ms) from the operator override.
