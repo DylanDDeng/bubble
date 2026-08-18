@@ -3,7 +3,17 @@
   "version": "0.84.2",
   "description": "Bubble-maintained fork of the pi-tui terminal UI framework (upstream: earendil-works/pi packages/tui)",
   "type": "module",
-  "main": "dist/index.js",
+  "main": "dist/src/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    },
+    "./testing": {
+      "types": "./dist/src/testing.d.ts",
+      "default": "./dist/src/testing.js"
+    }
+  },
   "scripts": {
     "clean": "shx rm -rf dist",
     "build": "tsgo -p tsconfig.build.json",
@@ -43,7 +53,7 @@
   "engines": {
     "node": ">=22.19.0"
   },
-  "types": "./dist/index.d.ts",
+  "types": "./dist/src/index.d.ts",
   "dependencies": {
     "get-east-asian-width": "1.6.0",
     "marked": "18.0.5"

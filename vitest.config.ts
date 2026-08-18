@@ -3,11 +3,19 @@ import path from "node:path";
 
 export default defineConfig({
   resolve: {
-    alias: {
+    alias: [
       // Vendored renderer: tests exercise its TS source directly so vendor
-      // changes are picked up without a rebuild.
-      "@bubblebrain-ai/pi-tui": path.resolve(__dirname, "packages/pi-tui/src/index.ts"),
-    },
+      // changes are picked up without a rebuild. Longest prefix first so the
+      // bare package alias does not swallow the /testing subpath.
+      {
+        find: "@bubblebrain-ai/pi-tui/testing",
+        replacement: path.resolve(__dirname, "packages/pi-tui/src/testing.ts"),
+      },
+      {
+        find: "@bubblebrain-ai/pi-tui",
+        replacement: path.resolve(__dirname, "packages/pi-tui/src/index.ts"),
+      },
+    ],
   },
   test: {
     globals: true,

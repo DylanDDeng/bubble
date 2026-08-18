@@ -21,8 +21,8 @@
     "useDefineForClassFields": false,
     "types": ["node"],
     "outDir": "./dist",
-    "rootDir": "./src"
+    "rootDir": "."
   },
-  "include": ["src/**/*"],
+  "include": ["src/**/*", "test/virtual-terminal.ts"],
   "exclude": ["node_modules", "dist"]
 }
