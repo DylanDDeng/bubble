@@ -793,6 +793,45 @@ async function main() {
     const { startStartupUpdateCheck } = await import("./update/index.js");
     const updateCheck = await startStartupUpdateCheck();
     const updateNotice = updateCheck.notice;
+    if (process.env.BUBBLE_TUI === "pi") {
+      // rewrite/pi-tui Phase 4: vertical slice on the vendored renderer.
+      // E2E-only entry until the Phase 10 cutover.
+      const { startPiTuiApp } = await import("./tui/pi-app.js");
+      const { BubbleTuiController } = await import("./tui/controller/controller.js");
+      const controller = new BubbleTuiController({
+        agent,
+        sessionManager: sessionManager as never,
+        ports: {
+          clock: { now: () => Date.now() },
+          scheduler: {
+            setTimeout: (cb, ms) => {
+              const t = setTimeout(cb, ms);
+              return { [Symbol.dispose]: () => clearTimeout(t) } as Disposable;
+            },
+            setInterval: (cb, ms) => {
+              const t = setInterval(cb, ms);
+              return { [Symbol.dispose]: () => clearInterval(t) } as Disposable;
+            },
+          },
+          flush: {
+            scheduleFlush: (ms, flush) => setTimeout(flush, ms),
+            cancelFlush: () => {},
+          },
+          terminal: { isMultiplexed: () => !!process.env.TMUX || (process.env.TERM ?? "").startsWith("screen") },
+          sessionHost: {
+            switchSession: () => ({ error: "pi slice: session switching not wired" }),
+            createFresh: () => {
+              throw new Error("pi slice: createFresh not wired");
+            },
+          },
+          git: { currentBranch: () => undefined },
+          exitProcess: (code) => process.exit(code),
+        },
+      });
+      const app = startPiTuiApp({ controller });
+      await app.exited;
+      return;
+    }
     const { runTui } = await import("./tui-ink/run.js");
     const summary = await runTui(agent, args, {
       ...commonOptions,
