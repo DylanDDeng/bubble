@@ -13,7 +13,10 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "declaration": true,
-    "jsx": "react-jsx"
+    "jsx": "react-jsx",
+    "paths": {
+      "@bubblebrain-ai/pi-tui": ["./packages/pi-tui/dist/index.d.ts"]
+    }
   },
   "include": ["src/**/*"]
 }

@@ -28,7 +28,9 @@
     "!dist/**/*.test.d.ts"
   ],
   "scripts": {
-    "build": "rm -rf dist && tsc && chmod +x dist/bin.js dist/main.js",
+    "build": "npm run build:vendor && rm -rf dist && tsc && chmod +x dist/bin.js dist/main.js",
+    "build:vendor": "tsc -p packages/pi-tui/tsconfig.build.json",
+    "test:vendor": "cd packages/pi-tui && node --test --experimental-strip-types --no-warnings \"test/*.test.ts\"",
     "dev": "tsc && node dist/main.js",
     "refresh-models": "NODE_USE_ENV_PROXY=1 node scripts/generate-model-data.mjs",
     "eval": "tsx evals/run.ts",
@@ -37,10 +39,14 @@
     "test": "vitest run",
     "test:watch": "vitest"
   },
+  "bundleDependencies": [
+    "@bubblebrain-ai/pi-tui"
+  ],
   "dependencies": {
     "@agentclientprotocol/sdk": "1.2.1",
     "@ai-sdk/google": "^3.0.88",
     "@ai-sdk/provider": "^3.0.13",
+    "@bubblebrain-ai/pi-tui": "file:packages/pi-tui",
     "@larksuiteoapi/node-sdk": "^1.65.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/react": "^19.2.14",
@@ -48,8 +54,10 @@
     "better-sqlite3": "^13.0.1",
     "chalk": "^5.3.0",
     "diff": "^9.0.0",
+    "get-east-asian-width": "1.6.0",
     "ink": "^7.0.3",
     "js-tiktoken": "^1.0.21",
+    "marked": "^18.0.5",
     "openai": "^4.77.0",
     "picomatch": "^4.0.4",
     "qrcode-terminal": "^0.12.0",
@@ -68,6 +76,7 @@
     "@types/picomatch": "^4.0.3",
     "@types/qrcode-terminal": "^0.12.2",
     "@vitest/coverage-v8": "^4.1.4",
+    "@xterm/headless": "5.5.0",
     "tsx": "^4.20.3",
     "typescript": "^5.7.0",
     "vitest": "^4.1.4"

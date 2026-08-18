@@ -1,6 +1,14 @@
 import { defineConfig } from "vitest/config";
+import path from "node:path";
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      // Vendored renderer: tests exercise its TS source directly so vendor
+      // changes are picked up without a rebuild.
+      "@bubblebrain-ai/pi-tui": path.resolve(__dirname, "packages/pi-tui/src/index.ts"),
+    },
+  },
   test: {
     globals: true,
     environment: "node",
