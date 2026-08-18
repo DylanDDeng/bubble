@@ -5,7 +5,7 @@
  * header + composer, submits a message inside fullscreen, and returns to the
  * main screen via Escape — the terminal must end back on the main flow.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, it } from "vitest";
 import { startTui, type PtySession } from "./pty-harness.js";
 import { mkdirSync } from "node:fs";
 

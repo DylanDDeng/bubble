@@ -26,6 +26,8 @@ import {
   type TUI,
   type Component,
 } from "@bubblebrain-ai/pi-tui";
+import { registry as slashRegistry } from "../slash-commands/index.js";
+import type { SlashCommandContext } from "../slash-commands/types.js";
 import { BubbleTuiController } from "./controller/controller.js";
 import { OverlayRequestController } from "./controller/overlay-controller.js";
 import { renderTranscript, defaultTranscriptTheme } from "./components/transcript.js";
@@ -42,6 +44,7 @@ export interface PiAppCallbacks {
   onClearTranscript(): void;
   onModelSelect(modelId: string): void;
   onThemeToggle(): void;
+  onThemeModeChange?(mode: import("../config.js").ThemeMode): void;
   onCompact?(): void;
 }
 
@@ -49,12 +52,23 @@ export interface PiTuiAppOptions {
   agent: Agent;
   sessionManager: SessionManager;
   registry?: ProviderRegistry;
+  createProvider?: (providerId: string, apiKey: string, baseURL: string) => unknown;
+  skillRegistry?: unknown;
+  bashAllowlist?: unknown;
+  settingsManager?: unknown;
+  hookController?: unknown;
+  mcpManager?: unknown;
+  lspService?: unknown;
   questionController?: QuestionController;
   planHandlerRef?: { current?: (plan: string) => Promise<{ action: "approve" | "reject"; reason?: string }> };
   approvalHandlerRef?: { current?: (request: ApprovalRequest) => Promise<ApprovalDecision> };
   controller: BubbleTuiController;
   callbacks: PiAppCallbacks;
   updateNotice?: string;
+  flushMemory?: () => Promise<void>;
+  runMemoryCompaction?: () => Promise<string>;
+  runMemorySummary?: (scope?: string) => Promise<string>;
+  runMemoryRefresh?: (scope?: string) => Promise<string>;
 }
 
 const EDITOR_THEME = {
@@ -189,7 +203,7 @@ export class PiTuiApp {
     this.history.unshift(trimmed);
 
     if (trimmed.startsWith("/")) {
-      this.handleCommand(trimmed);
+      void this.handleCommand(trimmed);
       return;
     }
 
@@ -205,45 +219,70 @@ export class PiTuiApp {
     }
   }
 
-  private handleCommand(command: string): void {
+  private async handleCommand(command: string): Promise<void> {
     const [name, ...rest] = command.slice(1).split(/\s+/);
-    switch (name) {
-      case "clear":
-        this.options.callbacks.onClearTranscript();
-        this.welcomeBox.children.length = 0;
-        this.renderSnapshot();
-        break;
-      case "model": {
-        void this.modelPicker();
-        break;
-      }
-      case "theme":
-        this.options.callbacks.onThemeToggle();
-        break;
-      case "compact":
-        this.options.callbacks.onCompact?.();
-        break;
-      case "queue": {
-        const text = rest.join(" ");
-        if (text) {
-          this.queuedCount += 1;
-          this.pushNotice(`queued: ${text}`);
-          this.renderSnapshot();
-        }
-        break;
-      }
-      case "fullscreen": {
-        void this.enterFullscreen();
-        break;
-      }
-      case "help":
-        this.pushNotice("commands: /model /theme /clear /compact /queue <text> /fullscreen — more coming with the pi TUI");
-        this.renderSnapshot();
-        break;
-      default:
-        this.pushNotice(`"${name}" is not yet supported in the pi TUI`);
-        this.renderSnapshot();
+    const args = rest.join(" ");
+
+    // pi-tui-local commands first (renderer-specific modes).
+    if (name === "fullscreen") {
+      void this.enterFullscreen();
+      return;
     }
+
+    // Everything else routes through the shared registry (21 builtin
+    // commands + MCP dynamic prompts + skill fallback) — the same surface
+    // the Ink TUI exposed.
+    const ctx = this.buildSlashContext();
+    const outcome = await slashRegistry.execute(`/${name}${args ? ` ${args}` : ""}`, ctx);
+    if (outcome.inject) {
+      // Command produced model-facing input (e.g. /rewind restore).
+      void this.handleSubmit(outcome.inject);
+    } else if (outcome.result) {
+      this.pushNotice(outcome.result);
+    } else if (!outcome.handled) {
+      this.pushNotice(`Unknown command: /${name}`);
+    }
+    this.renderSnapshot();
+  }
+
+  private buildSlashContext(): SlashCommandContext {
+    const options = this.options;
+    const agent = options.agent;
+    const addMessage = (role: "user" | "assistant" | "error", content: string) => {
+      options.controller.appendDisplayMessage({ key: `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, role, content });
+    };
+    return {
+      agent,
+      addMessage,
+      clearMessages: () => options.controller.clearTranscript(),
+      cwd: process.cwd(),
+      exit: () => this.dispose(),
+      sessionManager: options.sessionManager as never,
+      createProvider: options.createProvider as never,
+      openPicker: (mode) => {
+        if (mode === "model") void this.modelPicker();
+      },
+      registry: options.registry as never,
+      skillRegistry: options.skillRegistry as never,
+      bashAllowlist: options.bashAllowlist as never,
+      settingsManager: options.settingsManager as never,
+      hookController: options.hookController as never,
+      mcpManager: options.mcpManager as never,
+      lspService: options.lspService as never,
+      flushMemory: options.flushMemory,
+      runMemoryCompaction: options.runMemoryCompaction,
+      runMemorySummary: options.runMemorySummary,
+      runMemoryRefresh: options.runMemoryRefresh,
+      setThemeMode: (mode) => {
+        options.callbacks.onThemeToggle();
+        options.callbacks.onThemeModeChange?.(mode);
+      },
+      openFeedback: () => this.pushNotice("feedback dialog: coming to the pi TUI"),
+      openStats: () => this.pushNotice("stats panel: coming to the pi TUI"),
+      openRewindPicker: () => this.pushNotice("rewind picker: coming to the pi TUI"),
+      openSessionPicker: () => this.pushNotice("session picker: coming to the pi TUI"),
+      compactionProgress: () => {},
+    } as SlashCommandContext;
   }
 
   private pushUserRow(text: string): void {

@@ -73,11 +73,22 @@ export async function runTui(agent: Agent, _args: unknown, options: RunTuiOption
     agent,
     sessionManager: options.sessionManager as never,
     registry: options.registry,
+    createProvider: options.createProvider,
+    skillRegistry: options.skillRegistry,
+    bashAllowlist: options.bashAllowlist,
+    settingsManager: options.settingsManager,
+    hookController: options.hookController,
+    mcpManager: options.mcpManager,
+    lspService: options.lspService,
     questionController: options.questionController,
     planHandlerRef: options.planHandlerRef as never,
     approvalHandlerRef: options.approvalHandlerRef,
     controller,
     updateNotice: options.updateNotice,
+    flushMemory: options.flushMemory,
+    runMemoryCompaction: options.runMemoryCompaction,
+    runMemorySummary: options.runMemorySummary,
+    runMemoryRefresh: options.runMemoryRefresh,
     callbacks: {
       onExitRequest: () => {},
       onClearTranscript: () => controller.clearTranscript(),
@@ -86,6 +97,9 @@ export async function runTui(agent: Agent, _args: unknown, options: RunTuiOption
       },
       onThemeToggle: () => {
         options.onThemeModeChange?.("dark");
+      },
+      onThemeModeChange: (mode) => {
+        options.onThemeModeChange?.(mode);
       },
       onCompact: () => {
         void options.runMemoryCompaction?.();
