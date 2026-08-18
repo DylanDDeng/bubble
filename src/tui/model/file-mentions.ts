@@ -187,3 +187,13 @@ function guessLanguage(filePath: string): string {
   };
   return map[ext] ?? "";
 }
+
+/** Composer @-mention context resolution (moved from input-box at cutover). */
+export function resolveComposerAtContext(
+  text: string,
+  cursor: number,
+  isSlashContext: boolean,
+  allowWorkspaceMentions = true,
+) {
+  return !allowWorkspaceMentions || isSlashContext ? null : findAtContext(text, cursor);
+}

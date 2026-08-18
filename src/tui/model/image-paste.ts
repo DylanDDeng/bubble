@@ -13,7 +13,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { ContentPart } from "../types.js";
+import type { ContentPart } from "../../types.js";
 
 const execFileAsync = promisify(execFile);
 

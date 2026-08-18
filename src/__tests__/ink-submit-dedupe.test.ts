@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { SubmitPayload } from "../tui-ink/input-box.js";
+import type { SubmitPayload } from "../tui/model/composer-types.js";
 import {
   decideStartingSubmit,
   decideStartingSubmitFingerprint,
   submitPayloadFingerprint,
-} from "../tui-ink/submit-dedupe.js";
+} from "../tui/model/submit-dedupe.js";
 
 function payload(text: string, displayText?: string): SubmitPayload {
   return { text, displayText, images: [] };

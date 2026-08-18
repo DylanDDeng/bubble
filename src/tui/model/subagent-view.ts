@@ -5,7 +5,7 @@
  */
 
 import { formatSubagentRoute, type SubagentRouteLike } from "../../agent/subagent-route-format.js";
-import type { Theme } from "../../tui-ink/theme.js";
+import type { Theme } from "./theme.js";
 import type { DisplayMessage, DisplayToolCall } from "./display-history.js";
 import type { ToolResultMetadata } from "../../types.js";
 

@@ -6,8 +6,8 @@ import {
   subagentDescriptor,
   subagentSummary,
   type SubagentDisplay,
-} from "../tui-ink/subagent-view.js";
-import type { DisplayMessage, DisplayToolCall } from "../tui-ink/display-history.js";
+} from "../tui/model/subagent-view.js";
+import type { DisplayMessage, DisplayToolCall } from "../tui/model/display-history.js";
 
 function member(over: Partial<SubagentDisplay>): SubagentDisplay {
   return { subAgentId: "m", nickname: "Ada", status: "running", ...over };

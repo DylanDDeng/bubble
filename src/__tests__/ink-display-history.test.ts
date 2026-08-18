@@ -10,7 +10,7 @@ import {
   type DisplayMessage,
   type DisplayMessagePart,
   type DisplayToolCall,
-} from "../tui-ink/display-history.js";
+} from "../tui/model/display-history.js";
 import {
   compactDisplayMessages as compactLegacyDisplayMessages,
   type DisplayMessage as LegacyDisplayMessage,

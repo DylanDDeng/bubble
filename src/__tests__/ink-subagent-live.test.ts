@@ -4,8 +4,8 @@ import {
   collectSubagentGroups,
   mergeToolMetadata,
   pruneSettledLiveSubagentTools,
-} from "../tui-ink/subagent-view.js";
-import type { DisplayMessage, DisplayToolCall } from "../tui-ink/display-history.js";
+} from "../tui/model/subagent-view.js";
+import type { DisplayMessage, DisplayToolCall } from "../tui/model/display-history.js";
 import type { ToolResultMetadata } from "../types.js";
 
 function childUpdateMetadata(subAgentId: string, status: string): ToolResultMetadata {

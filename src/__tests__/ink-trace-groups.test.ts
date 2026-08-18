@@ -4,8 +4,8 @@ import {
   formatElapsed,
   formatTracePath,
   traceGroupLabel,
-} from "../tui-ink/trace-groups.js";
-import type { DisplayToolCall } from "../tui-ink/display-history.js";
+} from "../tui/model/trace-groups.js";
+import type { DisplayToolCall } from "../tui/model/display-history.js";
 
 describe("Ink trace groups", () => {
   const homeDir = "/Users/tester";

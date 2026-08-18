@@ -16,7 +16,7 @@ import {
   resetComposerBuffer,
   sanitizeComposerBuffer,
   type ComposerBuffer,
-} from "../tui-ink/composer-buffer.js";
+} from "../tui/model/composer-buffer.js";
 
 const MARKER = "[Pasted text #1 +9 lines]";
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BEGIN_SYNC, END_SYNC, wrapSynchronizedOutput } from "../tui-ink/sync-output.js";
+import { BEGIN_SYNC, END_SYNC, wrapSynchronizedOutput } from "../tui/model/sync-output.js";
 
 function fakeStream(overrides: Record<string, unknown> = {}): NodeJS.WriteStream {
   return {

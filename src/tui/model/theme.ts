@@ -1,18 +1,10 @@
 /**
- * Color themes for the TUI.
- *
- * Two base palettes are shipped: `darkTheme` for dark terminal backgrounds and
- * `lightTheme` for light ones. The shape is identical so consumers depend on
- * `Theme` rather than either palette directly. Active palette is provided
- * through `ThemeContext` so components re-render automatically when the
- * user switches via `/theme` at runtime.
+ * Renderer-neutral theme tokens (moved from src/tui-ink/theme.ts at the
+ * Phase 10 cutover). Palettes keep their Ink-era shape; consumers that need
+ * React context are gone with the Ink renderer.
  */
-
-import { createContext, useContext } from "react";
-
 export type ResolvedTheme = "light" | "dark";
 export type ThemeMode = "auto" | ResolvedTheme;
-
 export interface Theme {
   // Actors
   user: string;
@@ -76,7 +68,6 @@ export interface Theme {
   diffAddFg: string;
   diffRemoveFg: string;
 }
-
 export const darkTheme: Theme = {
   user: "green",
   agent: "blue",
@@ -124,12 +115,6 @@ export const darkTheme: Theme = {
   diffAddFg: "green",
   diffRemoveFg: "red",
 };
-
-/**
- * Light palette tuned for paper-neutral surfaces, blue focus/user rails, warm
- * command accent, and semantic tool colors with readable contrast on a light
- * terminal background.
- */
 export const lightTheme: Theme = {
   user: "#356FD2",
   agent: "#171717",
@@ -177,20 +162,11 @@ export const lightTheme: Theme = {
   diffAddFg: "#2F7D4A",
   diffRemoveFg: "#B62633",
 };
-
-/** Canvas colors painted only when a forced theme mismatches the terminal. */
 const paintedCanvas: Record<ResolvedTheme, string> = {
   dark: "#0A0A0A",
   light: "#FCFCFA",
 };
 
-/**
- * Decide whether the canvas needs painting. Auto mode always inherits the
- * terminal's own background, and so does a forced theme that matches the
- * detected terminal. A forced theme that mismatches (e.g. `/theme light`
- * inside a dark terminal) paints its canvas, because its foregrounds are
- * tuned for the opposite background and would otherwise be unreadable.
- */
 export function canvasBackgroundFor(
   mode: ThemeMode,
   resolved: ResolvedTheme,
@@ -198,27 +174,4 @@ export function canvasBackgroundFor(
 ): string | undefined {
   if (mode === "auto" || resolved === terminalTheme) return undefined;
   return paintedCanvas[resolved];
-}
-
-const ThemeContext = createContext<Theme>(darkTheme);
-export const ThemeProvider = ThemeContext.Provider;
-
-export function useTheme(): Theme {
-  return useContext(ThemeContext);
-}
-
-/** Build the active palette given a resolved mode and optional overrides. */
-export function paletteFor(
-  mode: ResolvedTheme,
-  overrides?: Record<string, string>,
-): Theme {
-  const base = mode === "light" ? lightTheme : darkTheme;
-  if (!overrides) return base;
-  const filtered: Partial<Theme> = {};
-  for (const [key, value] of Object.entries(overrides)) {
-    if (typeof value === "string" && key in base) {
-      (filtered as Record<string, string>)[key] = value;
-    }
-  }
-  return { ...base, ...filtered };
 }

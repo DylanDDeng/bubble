@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isKeyReleaseEvent } from "../tui-ink/key-events.js";
+import { isKeyReleaseEvent } from "../tui/model/key-events.js";
 
 describe("Ink key events", () => {
   it("filters kitty keyboard release events without dropping press or repeat", () => {

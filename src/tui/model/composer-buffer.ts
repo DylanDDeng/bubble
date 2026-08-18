@@ -1,4 +1,4 @@
-import { createPastedContentMarker } from "../tui/paste-placeholder.js";
+import { createPastedContentMarker } from "../../tui/paste-placeholder.js";
 
 /**
  * Cursor offsets and paste starts are UTF-16 string offsets, matching the rest

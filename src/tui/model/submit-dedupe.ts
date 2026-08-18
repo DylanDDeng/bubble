@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { SubmitPayload } from "./input-box.js";
+import type { SubmitPayload } from "./composer-types.js";
 
 export type StartingSubmitDecision = "accept" | "ignore" | "queue";
 

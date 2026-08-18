@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { darkTheme as inkDarkTheme, lightTheme as inkLightTheme } from "../tui-ink/theme.js";
+import { darkTheme as inkDarkTheme, lightTheme as inkLightTheme } from "../tui/model/theme.js";
 
 function luminance(hex: string): number {
   const match = /^#([0-9a-f]{6})$/i.exec(hex);

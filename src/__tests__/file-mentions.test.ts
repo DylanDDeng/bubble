@@ -7,7 +7,7 @@ import {
   filterFileSuggestions,
   findAtContext,
   invalidateFileListCache,
-} from "../tui-ink/file-mentions.js";
+} from "../tui/model/file-mentions.js";
 
 describe("findAtContext", () => {
   it("returns null when no @ before cursor", () => {
@@ -46,8 +46,8 @@ describe("findAtContext", () => {
 describe("filterFileSuggestions", () => {
   const files = [
     "src/agent.ts",
-    "src/tui-ink/run.tsx",
-    "src/tui-ink/file-mentions.ts",
+    "src/tui/run.ts",
+    "src/tui/model/file-mentions.ts",
     "src/tools/bash.ts",
     "README.md",
     "package.json",
@@ -60,14 +60,14 @@ describe("filterFileSuggestions", () => {
 
   it("ranks basename prefix match above path substring match", () => {
     const result = filterFileSuggestions(files, "run");
-    expect(result[0].path).toBe("src/tui-ink/run.tsx");
+    expect(result[0].path).toBe("src/tui/run.ts");
   });
 
   it("matches by path prefix", () => {
-    const result = filterFileSuggestions(files, "src/tui-ink");
+    const result = filterFileSuggestions(files, "src/tui");
     const paths = result.map((r) => r.path);
-    expect(paths).toContain("src/tui-ink/run.tsx");
-    expect(paths).toContain("src/tui-ink/file-mentions.ts");
+    expect(paths).toContain("src/tui/run.ts");
+    expect(paths).toContain("src/tui/model/file-mentions.ts");
   });
 
   it("returns empty when no match", () => {
