@@ -232,8 +232,12 @@ export class PiTuiApp {
         }
         break;
       }
+      case "fullscreen": {
+        void this.enterFullscreen();
+        break;
+      }
       case "help":
-        this.pushNotice("commands: /model /theme /clear /compact /queue <text> — more coming with the pi TUI");
+        this.pushNotice("commands: /model /theme /clear /compact /queue <text> /fullscreen — more coming with the pi TUI");
         this.renderSnapshot();
         break;
       default:
@@ -374,6 +378,36 @@ export class PiTuiApp {
     if (this.queuedCount) parts.push(chalk.yellow(`queue ×${this.queuedCount}`));
     const line = parts.join(chalk.dim(" │ "));
     return line.length > columns ? line.slice(0, columns) : line;
+  }
+
+  // ---- Fullscreen mode ----------------------------------------------------
+
+  private fullscreen: import("./fullscreen.js").FullscreenApp | null = null;
+
+  /**
+   * Switch to the alternate-screen transcript view. The main screen stays
+   * mounted but paused (stopped renderer); both modes subscribe to the same
+   * controller so the transcript stays in sync. Escape / Ctrl+C / /fullscreen
+   * return here.
+   */
+  private async enterFullscreen(): Promise<void> {
+    if (this.fullscreen) return;
+    this.tui.stop();
+    const { FullscreenApp } = await import("./fullscreen.js");
+    this.fullscreen = new FullscreenApp({
+      controller: this.options.controller,
+      agent: this.options.agent,
+      onExit: () => this.exitFullscreen(),
+    });
+    this.fullscreen.start();
+  }
+
+  private exitFullscreen(): void {
+    if (!this.fullscreen) return;
+    this.fullscreen.dispose();
+    this.fullscreen = null;
+    this.tui.start();
+    this.renderSnapshot();
   }
 
   // ---- Overlays -----------------------------------------------------------
