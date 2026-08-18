@@ -17,7 +17,6 @@
 import { chmodSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn as nodeSpawnSync } from "node:child_process";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -60,9 +59,6 @@ export async function startTui(options: {
   if (!existsSync(bin)) {
     throw new Error(`TUI binary not found at ${bin} — run npm run build first`);
   }
-
-  const shell = await import("node:child_process");
-  void shell;
 
   const proc = pty.spawn(process.execPath, [bin, ...(options.args ?? [])], {
     name: "xterm-256color",
