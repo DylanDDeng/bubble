@@ -58,6 +58,8 @@ export class BubbleTuiController {
   private transcript: DisplayMessage[] = [];
   private runActive = false;
   private runState: RunState | null = null;
+  /** Request-level phase survives provider turn boundaries inside one run. */
+  private runHasToolActivity = false;
   private disposed = false;
 
   constructor(private readonly deps: BubbleTuiControllerDeps) {
@@ -124,15 +126,19 @@ export class BubbleTuiController {
    * content/reasoning/tool summary. Renderers draw it in the live region
    * (never committed to scrollback) until the turn commits.
    */
-  getStreamingTail(): { content: string; reasoning: string; toolCount: number; lastToolName?: string } | null {
+  getStreamingTail(): { content: string; reasoning: string; toolCount: number; lastToolName?: string; phase: "thinking" | "working" } | null {
     if (!this.runActive || !this.runState) return null;
     const acc = this.runState.accumulator;
     const lastTool = acc.toolCalls[acc.toolCalls.length - 1];
     return {
       content: acc.content,
-      reasoning: acc.reasoning,
+      // Once the request starts executing tools, intermediate provider-turn
+      // reasoning remains available in the committed transcript under Ctrl+T
+      // but no longer replaces the live Working status.
+      reasoning: this.runHasToolActivity ? "" : acc.reasoning,
       toolCount: acc.toolCalls.length,
       lastToolName: lastTool?.name,
+      phase: this.runHasToolActivity ? "working" : "thinking",
     };
   }
 
@@ -147,6 +153,7 @@ export class BubbleTuiController {
   async runTurn(input: unknown, cwd: string, options?: AgentRunOptions): Promise<void> {
     if (this.disposed) throw new Error("controller disposed");
     this.runActive = true;
+    this.runHasToolActivity = false;
     this.runState = createRunState(Date.now());
     this.state.touch();
 
@@ -164,6 +171,9 @@ export class BubbleTuiController {
       for await (const event of this.deps.agent.run(input as never, cwd, options)) {
         const { state, effects } = reduceAgentEvent(this.runState!, event, ctx);
         this.runState = state;
+        if (event.type === "tool_call_start" || event.type === "tool_start") {
+          this.runHasToolActivity = true;
+        }
         for (const effect of effects) this.applyEffect(effect);
         // Streaming deltas only set dirty flags — batch them behind the 40ms
         // flush so text_delta bursts repaint at ~25fps instead of per-chunk.
@@ -193,6 +203,7 @@ export class BubbleTuiController {
       for (const effect of finish.effects) this.applyEffect(effect);
       this.deps.ports.flush.cancelFlush();
       this.runActive = false;
+      this.runHasToolActivity = false;
       this.runState = null;
       this.state.touch();
     }

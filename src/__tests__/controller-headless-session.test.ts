@@ -149,6 +149,39 @@ describe("BubbleTuiController headless session", () => {
     expect(controller.getStreamingTail()).toBeNull(); // cleared at run end
   });
 
+  it("keeps the live phase Working across provider turn boundaries", async () => {
+    const host = new SpyHost();
+    const phases: Array<ReturnType<BubbleTuiController["getStreamingTail"]>> = [];
+    let controller: BubbleTuiController;
+    const agent = {
+      messages: [],
+      setSessionID: () => {},
+      async *run(): AsyncIterable<AgentEvent> {
+        yield { type: "reasoning_delta", content: "initial plan" };
+        phases.push(controller.getStreamingTail());
+        yield { type: "tool_start", id: "t1", name: "read", args: { path: "/x" } };
+        phases.push(controller.getStreamingTail());
+        yield { type: "tool_end", id: "t1", name: "read", result: { content: "ok", isError: false } };
+        yield { type: "turn_end", willContinue: true };
+        yield { type: "turn_start" };
+        yield { type: "reasoning_delta", content: "next internal plan" };
+        phases.push(controller.getStreamingTail());
+        yield { type: "turn_end" };
+      },
+    };
+    controller = new BubbleTuiController({
+      agent: agent as never,
+      sessionManager: { getSessionFile: () => "/s.jsonl", getMetadata: () => ({}), appendMessage: () => {} } as never,
+      ports: host.ports,
+    });
+
+    await controller.runTurn("go", "/cwd");
+
+    expect(phases[0]).toMatchObject({ phase: "thinking", reasoning: "initial plan" });
+    expect(phases[1]).toMatchObject({ phase: "working", lastToolName: "read" });
+    expect(phases[2]).toMatchObject({ phase: "working", reasoning: "" });
+  });
+
   it("streaming tail is null when idle", () => {
     const { controller } = makeController();
     expect(controller.getStreamingTail()).toBeNull();

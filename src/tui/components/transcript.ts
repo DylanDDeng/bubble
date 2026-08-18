@@ -12,6 +12,8 @@
  *   - synthetic rows (interrupt, compaction, notices) rendered as notices
  */
 import chalk from "chalk";
+import stringWidth from "string-width";
+import { truncateVisual } from "../../text-display.js";
 import { DisplayToolCall, DisplayMessage } from "../model/display-history.js";
 
 function toolTraceLabel(tool: DisplayToolCall): string {
@@ -46,15 +48,16 @@ export const defaultTranscriptTheme: TranscriptTheme = {
   success: (text) => chalk.green(text),
 };
 
-/** Visible-width-preserving truncation (no ANSI awareness needed pre-style). */
+/** Visible-width-preserving truncation (input is unstyled at this point). */
 function truncateVisible(text: string, maxColumns: number): string {
-  if (text.length <= maxColumns) return text;
-  if (maxColumns <= 1) return "…";
-  return `${text.slice(0, Math.max(0, maxColumns - 1))}…`;
+  return truncateVisual(text, maxColumns);
 }
 
 export function renderUserCard(content: string, options: TranscriptRenderOptions): string[] {
   const theme = options.theme ?? defaultTranscriptTheme;
+  // Leave two terminal cells unpainted. Painting the physical last column can
+  // trigger an automatic wrap in several terminals and leaves a broken bg
+  // patch at the right edge.
   const width = Math.max(20, options.columns - 2);
   const textWidth = width - 4; // " › " + trailing pad
 
@@ -63,16 +66,38 @@ export function renderUserCard(content: string, options: TranscriptRenderOptions
   const pad = " ".repeat(width);
   rows.push(theme.userBg(pad));
   lines.forEach((line, index) => {
-    const filled = (index === 0 ? theme.accent(" › ") : "   ") + theme.userText(line.padEnd(textWidth)) + " ";
+    // JS length/padEnd counts code units, not terminal cells: CJK characters
+    // occupy two columns. Visual padding prevents the line from overflowing,
+    // hard-wrapping, and resetting the painted background before the edge.
+    const padded = `${line}${" ".repeat(Math.max(0, textWidth - stringWidth(line)))}`;
+    const filled = (index === 0 ? theme.accent(" › ") : "   ") + theme.userText(padded) + " ";
     rows.push(theme.userBg(filled));
   });
-  rows.push(theme.userBg(pad));
-  rows.push("");
+  // No bottom painted spacer: it made every sent message look one row too
+  // tall and was the large blue gap visible before Thinking/Working.
   return rows;
 }
 
 export function wrapPlain(text: string, columns: number): string[] {
   const out: string[] = [];
+  const splitToken = (token: string): string[] => {
+    const chunks: string[] = [];
+    let chunk = "";
+    let width = 0;
+    for (const char of token) {
+      const charWidth = stringWidth(char);
+      if (chunk && width + charWidth > columns) {
+        chunks.push(chunk);
+        chunk = "";
+        width = 0;
+      }
+      chunk += char;
+      width += charWidth;
+    }
+    if (chunk) chunks.push(chunk);
+    return chunks;
+  };
+
   for (const paragraph of text.split("\n")) {
     if (paragraph === "") {
       out.push("");
@@ -80,15 +105,9 @@ export function wrapPlain(text: string, columns: number): string[] {
     }
     let line = "";
     for (const word of paragraph.split(/\s+/)) {
-      // Hard-break words longer than the column budget (URLs, long CJK runs,
-      // base64...) so no physical row ever exceeds the width.
-      const chunks: string[] = [];
-      for (let i = 0; i < word.length; i += columns) {
-        chunks.push(word.slice(i, i + columns));
-      }
-      for (const chunk of chunks) {
+      for (const chunk of splitToken(word)) {
         const candidate = line ? `${line} ${chunk}` : chunk;
-        if (candidate.length > columns && line) {
+        if (line && stringWidth(candidate) > columns) {
           out.push(line);
           line = chunk;
         } else {
@@ -114,11 +133,11 @@ export function renderReasoning(content: string, options: TranscriptRenderOption
   if (!options.showReasoning) {
     const firstLine = content.split("\n")[0] ?? "";
     const preview = truncateVisible(firstLine, Math.max(10, options.columns - 16));
-    return [theme.dim(`└─ thinking: ${preview} (Ctrl+T to expand)`), ""];
+    return [theme.dim(`└─ Thinking: ${preview} (Ctrl+T to expand)`), ""];
   }
   const width = Math.max(20, options.columns - 4);
   return [
-    theme.dim("└─ thinking"),
+    theme.dim("└─ Thinking"),
     ...wrapPlain(content, width).map((line) => theme.dim(`   ${line}`)),
     "",
   ];
@@ -183,10 +202,82 @@ export function renderMessage(message: DisplayMessage, options: TranscriptRender
   return rows;
 }
 
+interface RequestTraceState {
+  thinkingShown: boolean;
+  workingShown: boolean;
+}
+
+/**
+ * Render one assistant provider-turn as part of the surrounding user request.
+ *
+ * One agent run may contain many provider turns (`turn_end.willContinue`) —
+ * normally one before every tool call. Rendering every turn independently
+ * exposes the implementation boundary as `thinking → tool → thinking → tool`.
+ * The user-facing trace is instead one request lifecycle:
+ *
+ *   Thinking (first collapsed reasoning only)
+ *   Working
+ *     tool
+ *     tool
+ *   final answer
+ *
+ * Expanded mode still retains every reasoning segment for diagnostics.
+ */
+function renderAssistantInRequest(
+  message: DisplayMessage,
+  options: TranscriptRenderOptions,
+  trace: RequestTraceState,
+): string[] {
+  const theme = options.theme ?? defaultTranscriptTheme;
+  const rows: string[] = [];
+
+  if (message.reasoning && (options.showReasoning || !trace.thinkingShown)) {
+    rows.push(...renderReasoning(message.reasoning, options));
+    trace.thinkingShown = true;
+  }
+
+  const appendTools = (tools: readonly DisplayToolCall[]) => {
+    if (!trace.workingShown) {
+      rows.push(theme.dim("└─ Working"));
+      trace.workingShown = true;
+    }
+    for (const tool of tools) {
+      rows.push(`  ${renderToolTrace(tool, options)}`);
+    }
+  };
+
+  // Preserve the model's real commentary/tool timeline. `parts` is the
+  // canonical ordered stream; the top-level fields are only the fallback for
+  // restored/legacy messages. Rendering toolCalls first and content second
+  // inverted commentary that was emitted before a tool call.
+  if (message.parts?.length) {
+    for (const part of message.parts) {
+      if (part.type === "tools") {
+        appendTools(part.toolCalls);
+      } else if (part.content.trim()) {
+        rows.push(...renderAssistant(part.content, options));
+      }
+    }
+  } else {
+    if (message.toolCalls?.length) appendTools(message.toolCalls);
+    if (message.content?.trim()) rows.push(...renderAssistant(message.content, options));
+  }
+  return rows;
+}
+
 export function renderTranscript(messages: readonly DisplayMessage[], options: TranscriptRenderOptions): string[] {
   const rows: string[] = [];
+  let trace: RequestTraceState = { thinkingShown: false, workingShown: false };
+
   for (const message of messages) {
-    rows.push(...renderMessage(message, options));
+    if (message.role === "user") {
+      trace = { thinkingShown: false, workingShown: false };
+      rows.push(...renderUserCard(message.content, options));
+    } else if (message.role === "assistant" && !message.syntheticKind) {
+      rows.push(...renderAssistantInRequest(message, options, trace));
+    } else {
+      rows.push(...renderMessage(message, options));
+    }
   }
   return rows;
 }

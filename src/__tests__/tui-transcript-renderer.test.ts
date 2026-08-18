@@ -13,6 +13,7 @@ import {
 } from "../tui/components/transcript.js";
 import type { DisplayMessage } from "../tui/model/display-history.js";
 import chalk from "chalk";
+import stringWidth from "string-width";
 
 chalk.level = 0; // strip ANSI for assertions
 
@@ -22,20 +23,27 @@ const msg = (partial: Partial<DisplayMessage>): DisplayMessage =>
   ({ key: "k", role: "assistant", content: "", ...partial }) as DisplayMessage;
 
 describe("transcript renderer", () => {
-  it("renders the user card with vertical padding, marker, and centered text", () => {
+  it("renders a compact user card with exact terminal-cell width", () => {
     const rows = renderUserCard("你好啊", { columns: 40 });
-    expect(rows).toHaveLength(4);
+    expect(rows).toHaveLength(2); // top pad + body; no oversized bottom gap
     expect(rows[1]).toContain("›");
     expect(rows[1]).toContain("你好啊");
     expect(rows[0].trim()).toBe("");
-    expect(rows[2].trim()).toBe("");
+    expect(rows.every((row) => stringWidth(strip(row)) === 38)).toBe(true);
+  });
+
+  it("wraps CJK by terminal cells without overflowing the painted edge", () => {
+    const rows = renderUserCard("看下这个项目现在到底是在干什么以及还剩下哪些工作需要继续完成", { columns: 24 });
+    expect(rows.length).toBeGreaterThan(2);
+    expect(rows.every((row) => stringWidth(strip(row)) === 22)).toBe(true);
+    expect(rows.at(-1)).not.toBe("");
   });
 
   it("wraps long user text within the card and aligns continuation lines", () => {
     const rows = renderUserCard("word ".repeat(20).trim(), { columns: 30 });
-    expect(rows.length).toBeGreaterThan(5);
-    for (const row of rows.slice(1, -2)) {
-      expect(row.length).toBeLessThanOrEqual(120); // ANSI-stripped later; guard raw
+    expect(rows.length).toBeGreaterThan(4);
+    for (const row of rows) {
+      expect(stringWidth(strip(row))).toBe(28);
     }
   });
 
@@ -49,7 +57,7 @@ describe("transcript renderer", () => {
   it("collapses reasoning to one dim line unless expanded", () => {
     const collapsed = renderMessage(msg({ reasoning: "line one\nline two" }), { columns: 60 });
     expect(collapsed).toHaveLength(2);
-    expect(strip(collapsed[0]!)).toContain("thinking: line one");
+    expect(strip(collapsed[0]!)).toContain("Thinking: line one");
 
     const expanded = renderMessage(msg({ reasoning: "line one" }), { columns: 60, showReasoning: true });
     expect(expanded.length).toBeGreaterThan(2);
@@ -95,6 +103,47 @@ describe("transcript renderer", () => {
     const contentAt = text.indexOf("final answer");
     expect(reasoningAt).toBeLessThan(toolAt);
     expect(toolAt).toBeLessThan(contentAt);
+  });
+
+  it("groups provider turns into one Thinking then Working trace per user request", () => {
+    const rows = renderTranscript(
+      [
+        msg({ key: "u", role: "user", content: "inspect" }),
+        msg({ key: "a1", reasoning: "plan one", toolCalls: [{ id: "t1", name: "bash", args: { command: "ls" }, result: "ok" }] }),
+        msg({ key: "a2", reasoning: "plan two", toolCalls: [{ id: "t2", name: "read", args: { path: "README.md" }, result: "ok" }] }),
+        msg({ key: "a3", content: "done" }),
+      ],
+      { columns: 60 },
+    );
+    const text = rows.map(strip).join("\n");
+    expect(text.match(/Thinking:/g)).toHaveLength(1);
+    expect(text).toContain("plan one");
+    expect(text).not.toContain("plan two");
+    expect(text.match(/Working/g)).toHaveLength(1);
+    expect(text.indexOf("bash")).toBeLessThan(text.indexOf("read"));
+    expect(text.indexOf("read")).toBeLessThan(text.indexOf("done"));
+  });
+
+  it("preserves commentary/tool order from display parts inside Working", () => {
+    const rows = renderTranscript(
+      [
+        msg({ role: "user", content: "go" }),
+        msg({
+          reasoning: "plan",
+          content: "I will inspect.\nResult follows.",
+          toolCalls: [{ id: "t", name: "read", args: { path: "/x" }, result: "ok" }],
+          parts: [
+            { type: "text", content: "I will inspect." },
+            { type: "tools", toolCalls: [{ id: "t", name: "read", args: { path: "/x" }, result: "ok" }] },
+            { type: "text", content: "Result follows." },
+          ],
+        }),
+      ],
+      { columns: 60 },
+    );
+    const text = rows.map(strip).join("\n");
+    expect(text.indexOf("I will inspect.")).toBeLessThan(text.indexOf("read"));
+    expect(text.indexOf("read")).toBeLessThan(text.indexOf("Result follows."));
   });
 
   it("wrapPlain honors explicit newlines and long words", () => {

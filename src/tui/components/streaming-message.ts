@@ -23,6 +23,7 @@ export interface StreamingTailState {
   reasoning: string;
   toolCount: number;
   lastToolName?: string;
+  phase?: "thinking" | "working";
 }
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -54,8 +55,10 @@ export class StreamingMessageComponent extends VStack {
     this.tail = tail;
     const status = tail.content
       ? "Streaming…"
-      : tail.toolCount > 0 && tail.lastToolName
-        ? `Running ${tail.lastToolName}…`
+      : tail.phase === "working"
+        ? tail.lastToolName
+          ? `Working · ${tail.lastToolName}…`
+          : "Working…"
         : tail.reasoning
           ? "Thinking…"
           : "Connecting…";
@@ -67,7 +70,7 @@ export class StreamingMessageComponent extends VStack {
     };
 
     // Pre-first-token: last couple of reasoning lines, dim.
-    if (tail.reasoning && !tail.content) {
+    if (tail.reasoning && !tail.content && tail.phase !== "working") {
       for (const line of tail.reasoning.split("\n").slice(-2)) {
         put(chalk.dim(`  ${line.slice(0, Math.max(8, columns - 4))}`));
       }
@@ -81,7 +84,7 @@ export class StreamingMessageComponent extends VStack {
       for (const line of preview) put(line.slice(0, Math.max(8, columns - 2)));
     } else {
       this.ellipsisRow.setText("");
-      if (tail.toolCount > 0 && tail.lastToolName) {
+      if (tail.toolCount > 0 && tail.lastToolName && tail.phase === "working") {
         put(chalk.dim(`  ⚙ ${tail.lastToolName} (tool ${tail.toolCount})`));
       }
     }

@@ -104,6 +104,7 @@ export class PiTuiApp {
   private readonly tui: TUI;
   private readonly editor: Editor;
   private readonly transcriptBox = new VStack([]);
+  private readonly settledTranscriptBox = new VStack([]);
   private readonly streamingMessage = new StreamingMessageComponent(8, () => this.tui.requestRender());
   private readonly markdown = new Markdown("", 0, 0, MD_THEME);
   private readonly footer = new Text("", 1, 0);
@@ -155,6 +156,12 @@ export class PiTuiApp {
   }
 
   private buildLayout(): void {
+    // Keep the live component permanently after the settled transcript. It
+    // renders zero rows while idle. Appending it per turn eventually placed
+    // the same component reference in the tree multiple times and let settled
+    // rows land after it, breaking spacing/order on later turns.
+    this.transcriptBox.addChild(this.settledTranscriptBox);
+    this.transcriptBox.addChild(this.streamingMessage);
     this.tui.addChild(this.welcomeBox);
     this.tui.addChild(this.transcriptBox);
     this.tui.addChild(this.editor);
@@ -331,14 +338,14 @@ export class PiTuiApp {
     // (the duplicated-message bug). So: append only new trailing rows.
     if (rows.length > this.committedRows) {
       for (const row of rows.slice(this.committedRows)) {
-        this.transcriptBox.addChild(new Text(row, 0, 0));
+        this.settledTranscriptBox.addChild(new Text(row, 0, 0));
       }
       this.committedRows = rows.length;
     } else if (rows.length < this.committedRows) {
-      // /clear: the stream restarts from scratch.
-      this.transcriptBox.children.length = 0;
+      // /clear: reset settled rows, but preserve the permanent live tail.
+      this.settledTranscriptBox.children.length = 0;
       this.committedRows = 0;
-      for (const row of rows) this.transcriptBox.addChild(new Text(row, 0, 0));
+      for (const row of rows) this.settledTranscriptBox.addChild(new Text(row, 0, 0));
       this.committedRows = rows.length;
     }
     this.updateStreamingRegion(columns);
@@ -362,7 +369,6 @@ export class PiTuiApp {
     if (tail) {
       if (!this.streamingMounted) {
         this.streamingMounted = true;
-        this.transcriptBox.addChild(this.streamingMessage);
         this.streamingMessage.startSpinner();
       }
       this.streamingMessage.noteWidth(columns);
