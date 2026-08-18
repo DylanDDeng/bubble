@@ -242,6 +242,9 @@ export class PiTuiApp {
     for (const row of rows) this.welcomeBox.addChild(row);
   }
 
+  /** Rows already committed to the append-only scrollback stream. */
+  private committedRows = 0;
+
   renderSnapshot(): void {
     if (this.disposed) return;
     const columns = this.tui.terminal.columns || process.stdout.columns || 80;
@@ -252,8 +255,22 @@ export class PiTuiApp {
       verboseTrace: this.verboseTrace,
       theme: defaultTranscriptTheme,
     });
-    this.transcriptBox.children.length = 0;
-    for (const row of rows.slice(-400)) this.transcriptBox.addChild(new Text(row, 0, 0));
+
+    // TuiMainScreen is append-only: settled rows commit to scrollback exactly
+    // once. Rebuilding the whole box on every notify would re-emit them
+    // (the duplicated-message bug). So: append only new trailing rows.
+    if (rows.length > this.committedRows) {
+      for (const row of rows.slice(this.committedRows)) {
+        this.transcriptBox.addChild(new Text(row, 0, 0));
+      }
+      this.committedRows = rows.length;
+    } else if (rows.length < this.committedRows) {
+      // /clear: the stream restarts from scratch.
+      this.transcriptBox.children.length = 0;
+      this.committedRows = 0;
+      for (const row of rows) this.transcriptBox.addChild(new Text(row, 0, 0));
+      this.committedRows = rows.length;
+    }
     this.footer.setText(this.renderFooterLine(columns));
     this.tui.requestRender();
   }
