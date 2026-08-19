@@ -92,6 +92,9 @@ export interface DisplayToolCall {
    * a command preview.
    */
   rawArguments?: string;
+  /** Live execution state. Result text may be present during a running
+   *  subagent/tool update, so pending cannot be inferred from `result` alone. */
+  status?: "queued" | "pending" | "running" | "completed" | "failed" | "blocked" | "cancelled";
   result?: string;
   isError?: boolean;
   metadata?: ToolResultMetadata;

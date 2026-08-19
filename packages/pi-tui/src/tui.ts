@@ -428,10 +428,8 @@ export abstract class TuiBase extends Container implements TUI {
 	}): void {
 		const previousFocus = this.focusedComponent;
 		let nextFocus = component;
-		const previousFocusedOverlay = previousFocus
-			? this.overlayStack.find((entry) => entry.component === previousFocus && this.isOverlayVisible(entry))
-			: undefined;
-		const nextFocusIsOverlay = nextFocus ? this.overlayStack.some((entry) => entry.component === nextFocus) : false;
+		const previousFocusedOverlay = this.findOverlayContaining(previousFocus, true);
+		const nextFocusIsOverlay = this.findOverlayContaining(nextFocus) !== undefined;
 		const restoreState = this.getVisibleOverlayFocusRestore();
 		if (nextFocus && !nextFocusIsOverlay) {
 			if (restoreState.status === "blocked" && restoreState.blockedBy === previousFocus) {
@@ -476,9 +474,7 @@ export abstract class TuiBase extends Container implements TUI {
 			nextFocus.focused = true;
 		}
 
-		const focusedOverlay = nextFocus
-			? this.overlayStack.find((entry) => entry.component === nextFocus && this.isOverlayVisible(entry))
-			: undefined;
+		const focusedOverlay = this.findOverlayContaining(nextFocus, true);
 		if (focusedOverlay) {
 			this.overlayFocusRestore = { status: "eligible", overlay: focusedOverlay };
 		}
@@ -515,14 +511,14 @@ export abstract class TuiBase extends Container implements TUI {
 		while (current && !visited.has(current)) {
 			visited.add(current);
 			if (current === component) return true;
-			current = this.overlayStack.find((overlay) => overlay.component === current)?.preFocus ?? null;
+			current = this.findOverlayContaining(current)?.preFocus ?? null;
 		}
 		return false;
 	}
 
 	private retargetOverlayPreFocus(removed: OverlayStackEntry): void {
 		for (const overlay of this.overlayStack) {
-			if (overlay !== removed && overlay.preFocus === removed.component) {
+			if (overlay !== removed && overlay.preFocus && this.containsComponent(removed.component, overlay.preFocus)) {
 				overlay.preFocus = removed.preFocus;
 			}
 		}
@@ -540,6 +536,18 @@ export abstract class TuiBase extends Container implements TUI {
 		if (root === target) return true;
 		if (!(root instanceof Container)) return false;
 		return root.children.some((child) => this.containsComponent(child, target));
+	}
+
+	/** Resolve the visual-frontmost overlay that owns a focused component. */
+	private findOverlayContaining(component: Component | null, visibleOnly = false): OverlayStackEntry | undefined {
+		if (!component) return undefined;
+		let match: OverlayStackEntry | undefined;
+		for (const overlay of this.overlayStack) {
+			if (visibleOnly && !this.isOverlayVisible(overlay)) continue;
+			if (!this.containsComponent(overlay.component, component)) continue;
+			if (!match || overlay.focusOrder > match.focusOrder) match = overlay;
+		}
+		return match;
 	}
 
 	/**
@@ -567,11 +575,12 @@ export abstract class TuiBase extends Container implements TUI {
 			hide: () => {
 				const index = this.overlayStack.indexOf(entry);
 				if (index !== -1) {
+					const ownedFocus = this.findOverlayContaining(this.focusedComponent) === entry;
 					this.clearOverlayFocusRestoreFor(entry);
 					this.retargetOverlayPreFocus(entry);
 					this.overlayStack.splice(index, 1);
-					// Restore focus if this overlay had focus
-					if (this.focusedComponent === component) {
+					// Restore focus if this overlay or one of its descendants had focus.
+					if (ownedFocus) {
 						const topVisible = this.getTopmostVisibleOverlay();
 						this.setFocus(topVisible?.component ?? entry.preFocus);
 					}
@@ -586,7 +595,7 @@ export abstract class TuiBase extends Container implements TUI {
 				if (hidden) {
 					this.clearOverlayFocusRestoreFor(entry);
 					// If this overlay had focus, move focus to next visible or preFocus
-					if (this.focusedComponent === component) {
+					if (this.findOverlayContaining(this.focusedComponent) === entry) {
 						const topVisible = this.getTopmostVisibleOverlay();
 						this.setFocus(topVisible?.component ?? entry.preFocus);
 					}
@@ -607,7 +616,7 @@ export abstract class TuiBase extends Container implements TUI {
 				this.requestRender();
 			},
 			unfocus: (unfocusOptions) => {
-				const isFocused = this.focusedComponent === component;
+				const isFocused = this.findOverlayContaining(this.focusedComponent) === entry;
 				const restoreState = this.overlayFocusRestore;
 				const hasPendingRestore = restoreState.status !== "inactive" && restoreState.overlay === entry;
 				if (!isFocused && !hasPendingRestore) return;
@@ -637,7 +646,7 @@ export abstract class TuiBase extends Container implements TUI {
 				}
 				this.requestRender();
 			},
-			isFocused: () => this.focusedComponent === component,
+			isFocused: () => this.findOverlayContaining(this.focusedComponent) === entry,
 		};
 	}
 
@@ -645,10 +654,11 @@ export abstract class TuiBase extends Container implements TUI {
 	hideOverlay(): void {
 		const overlay = this.overlayStack[this.overlayStack.length - 1];
 		if (!overlay) return;
+		const ownedFocus = this.findOverlayContaining(this.focusedComponent) === overlay;
 		this.clearOverlayFocusRestoreFor(overlay);
 		this.retargetOverlayPreFocus(overlay);
 		this.overlayStack.pop();
-		if (this.focusedComponent === overlay.component) {
+		if (ownedFocus) {
 			// Find topmost visible overlay, or fall back to preFocus
 			const topVisible = this.getTopmostVisibleOverlay();
 			this.setFocus(topVisible?.component ?? overlay.preFocus);
@@ -664,9 +674,7 @@ export abstract class TuiBase extends Container implements TUI {
 
 	/** Check if the focused component is a visible overlay */
 	protected isOverlayFocused(): boolean {
-		return this.overlayStack.some(
-			(entry) => entry.component === this.focusedComponent && this.isOverlayVisible(entry),
-		);
+		return this.findOverlayContaining(this.focusedComponent, true) !== undefined;
 	}
 
 	/** Check if an overlay entry is currently visible */
@@ -861,7 +869,7 @@ export abstract class TuiBase extends Container implements TUI {
 
 		// If focused component is an overlay, verify it's still visible
 		// (visibility can change due to terminal resize or visible() callback)
-		const focusedOverlay = this.overlayStack.find((o) => o.component === this.focusedComponent);
+		const focusedOverlay = this.findOverlayContaining(this.focusedComponent);
 		if (focusedOverlay && !this.isOverlayVisible(focusedOverlay)) {
 			// Focused overlay is no longer visible, redirect to topmost visible overlay
 			const topVisible = this.getTopmostVisibleOverlay();
@@ -872,7 +880,7 @@ export abstract class TuiBase extends Container implements TUI {
 			}
 		}
 
-		const focusIsOverlay = this.overlayStack.some((o) => o.component === this.focusedComponent);
+		const focusIsOverlay = this.findOverlayContaining(this.focusedComponent) !== undefined;
 		if (!focusIsOverlay) {
 			const restoreState = this.getVisibleOverlayFocusRestore();
 			if (restoreState.status === "eligible") {

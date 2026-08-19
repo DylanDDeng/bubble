@@ -1,0 +1,359 @@
+import { describe, expect, it } from "vitest";
+import { VirtualTerminal } from "@bubblebrain-ai/pi-tui/testing";
+import { PiTuiApp } from "../tui/app.js";
+
+class RecordingTerminal extends VirtualTerminal {
+  readonly output: string[] = [];
+
+  override write(data: string): void {
+    this.output.push(data);
+    super.write(data);
+  }
+}
+
+describe("main pi-tui running input", () => {
+  it("enters fullscreen before the first product frame and keeps the complete app surface mounted", async () => {
+    const terminal = new RecordingTerminal(100, 30);
+    const controller = {
+      subscribe: () => () => {},
+      getTranscript: () => [],
+      isRunning: () => false,
+      getStreamingTail: () => null,
+      pendingSteerCount: () => 0,
+      queuedInputCount: () => 0,
+      steer: () => false,
+      cancelActiveRun: () => false,
+      runTurn: async () => {},
+      appendDisplayMessage: () => {},
+      clearTranscript: () => {},
+      shutdown: () => ({ reason: "test", wallMs: 0 }),
+    };
+    const app = new PiTuiApp({
+      agent: {
+        model: "test-model",
+        providerId: "test-provider",
+        thinking: "medium",
+        mode: "default",
+        setMode: () => {},
+        getContextUsageSnapshot: () => ({ usedTokens: 0, contextWindow: 1_000 }),
+      } as never,
+      sessionManager: { getSessionFile: () => "/s.jsonl" } as never,
+      controller: controller as never,
+      callbacks: {
+        onExitRequest: () => {},
+        onClearTranscript: () => {},
+        onModelSelect: () => {},
+        onThemeToggle: () => {},
+      },
+      terminal,
+    });
+
+    app.start();
+    let writesBeforeDispose = 0;
+    try {
+      await terminal.waitForRender();
+      const output = terminal.output.join("");
+      const altScreenEntry = output.indexOf("\x1b[?1049h");
+      expect(altScreenEntry).toBeGreaterThanOrEqual(0);
+      expect(output.slice(0, altScreenEntry)).not.toContain("I am a cat");
+      expect(terminal.getViewport().join("\n")).toContain("I am a cat");
+
+      terminal.sendInput("/he");
+      await terminal.waitForRender();
+      const viewport = terminal.getViewport().join("\n");
+      expect(viewport).toContain("Show available slash commands");
+      expect(viewport).not.toContain("Open the alternate-screen transcript view");
+      writesBeforeDispose = terminal.output.length;
+    } finally {
+      app.dispose();
+    }
+    const exitOutput = terminal.output.slice(writesBeforeDispose).join("");
+    expect(exitOutput).toContain("\x1b[?1049l");
+    expect(exitOutput).not.toContain("\x1b[2K");
+    expect(exitOutput).not.toContain("I am a cat");
+  });
+
+  it("cycles permission modes with Shift+Tab and reflects them in the footer", async () => {
+    const terminal = new VirtualTerminal(100, 14);
+    const modes: string[] = [];
+    const agent = {
+      model: "test-model",
+      providerId: "test-provider",
+      thinking: "medium",
+      mode: "default",
+      setMode(next: string) {
+        this.mode = next;
+        modes.push(next);
+      },
+      getContextUsageSnapshot: () => ({ usedTokens: 0, contextWindow: 1_000 }),
+    };
+    const controller = {
+      subscribe: () => () => {},
+      getTranscript: () => [],
+      isRunning: () => false,
+      getStreamingTail: () => ({ content: "", reasoning: "", tools: [], parts: [], phase: "idle" as const }),
+      pendingSteerCount: () => 0,
+      queuedInputCount: () => 0,
+      steer: () => false,
+      cancelActiveRun: () => false,
+      runTurn: async () => {},
+      appendDisplayMessage: () => {},
+      clearTranscript: () => {},
+      shutdown: () => ({ reason: "test", wallMs: 0 }),
+    };
+    const app = new PiTuiApp({
+      agent: agent as never,
+      sessionManager: { getSessionFile: () => "/s.jsonl" } as never,
+      controller: controller as never,
+      callbacks: {
+        onExitRequest: () => {},
+        onClearTranscript: () => {},
+        onModelSelect: () => {},
+        onThemeToggle: () => {},
+      },
+      terminal,
+      uiMode: "regular",
+    });
+
+    app.start();
+    try {
+      terminal.sendInput("\x1b[Z");
+      await terminal.waitForRender();
+      expect(modes).toEqual(["plan"]);
+      expect(terminal.getViewport().join("\n")).toContain("⏸ plan on");
+
+      terminal.sendInput("\x1b[Z");
+      await terminal.waitForRender();
+      expect(modes).toEqual(["plan", "bypassPermissions"]);
+      expect(terminal.getViewport().join("\n")).toContain("⏵⏵ bypass permission on");
+
+      terminal.sendInput("\x1b[Z");
+      await terminal.waitForRender();
+      expect(modes).toEqual(["plan", "bypassPermissions", "default"]);
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("steers and cancels the active run without starting another turn or exiting", async () => {
+    const terminal = new VirtualTerminal(80, 14);
+    const steers: string[] = [];
+    let cancellations = 0;
+    let exits = 0;
+    let runCalls = 0;
+    let controllerUnsubscribed = 0;
+    let questionUnsubscribed = 0;
+    const controller = {
+      subscribe: () => () => { controllerUnsubscribed += 1; },
+      getTranscript: () => [],
+      isRunning: () => true,
+      getStreamingTail: () => ({ content: "", reasoning: "", tools: [], parts: [], phase: "thinking" as const }),
+      pendingSteerCount: () => steers.length,
+      queuedInputCount: () => 0,
+      steer: (content: string) => { steers.push(content); return true; },
+      cancelActiveRun: () => { cancellations += 1; return true; },
+      runTurn: async () => { runCalls += 1; },
+      appendDisplayMessage: () => {},
+      clearTranscript: () => {},
+      shutdown: () => ({ reason: "test", wallMs: 0 }),
+    };
+    const agent = {
+      model: "test-model",
+      providerId: "test-provider",
+      thinking: "medium",
+      getContextUsageSnapshot: () => ({ usedTokens: 0, contextWindow: 1_000 }),
+    };
+    const app = new PiTuiApp({
+      agent: agent as never,
+      sessionManager: { getSessionFile: () => "/s.jsonl" } as never,
+      controller: controller as never,
+      callbacks: {
+        onExitRequest: () => { exits += 1; },
+        onClearTranscript: () => {},
+        onModelSelect: () => {},
+        onThemeToggle: () => {},
+      },
+      questionController: {
+        subscribe: () => () => { questionUnsubscribed += 1; },
+      } as never,
+      terminal,
+      uiMode: "regular",
+    });
+
+    app.start();
+    terminal.sendInput("follow up");
+    terminal.sendInput("\r");
+    await terminal.waitForRender();
+
+    expect(steers).toEqual(["follow up"]);
+    expect(runCalls).toBe(0);
+
+    terminal.sendInput("\x03");
+    expect(cancellations).toBe(1);
+    expect(exits).toBe(0);
+    terminal.sendInput("\x1b");
+    expect(cancellations).toBe(2);
+    expect(exits).toBe(0);
+
+    terminal.sendInput("/fullscreen");
+    terminal.sendInput("\r");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    app.dispose();
+    expect(exits).toBe(1);
+    // Main + alternate-screen controller subscriptions are both released.
+    expect(controllerUnsubscribed).toBe(2);
+    expect(questionUnsubscribed).toBe(1);
+  });
+
+  it("returns keyboard focus to the composer after approving or denying a tool", async () => {
+    const terminal = new VirtualTerminal(80, 14);
+    const turns: string[] = [];
+    const approvalHandlerRef: { current?: (request: unknown) => Promise<unknown> } = {};
+    const planHandlerRef: { current?: (plan: string) => Promise<unknown> } = {};
+    const controller = {
+      subscribe: () => () => {},
+      getTranscript: () => [],
+      isRunning: () => false,
+      getStreamingTail: () => ({ content: "", reasoning: "", tools: [], parts: [], phase: "idle" as const }),
+      pendingSteerCount: () => 0,
+      queuedInputCount: () => 0,
+      steer: () => false,
+      cancelActiveRun: () => false,
+      runTurn: async (content: string) => { turns.push(content); },
+      appendDisplayMessage: () => {},
+      clearTranscript: () => {},
+      shutdown: () => ({ reason: "test", wallMs: 0 }),
+    };
+    const agent = {
+      model: "test-model",
+      providerId: "test-provider",
+      thinking: "medium",
+      getContextUsageSnapshot: () => ({ usedTokens: 0, contextWindow: 1_000 }),
+    };
+    const app = new PiTuiApp({
+      agent: agent as never,
+      sessionManager: { getSessionFile: () => "/s.jsonl" } as never,
+      controller: controller as never,
+      callbacks: {
+        onExitRequest: () => {},
+        onClearTranscript: () => {},
+        onModelSelect: () => {},
+        onThemeToggle: () => {},
+      },
+      approvalHandlerRef: approvalHandlerRef as never,
+      planHandlerRef: planHandlerRef as never,
+      terminal,
+      uiMode: "regular",
+    });
+
+    app.start();
+    try {
+      const approved = approvalHandlerRef.current!({ kind: "bash", command: "pwd" });
+      terminal.sendInput("\r");
+      await expect(approved).resolves.toEqual({ action: "approve" });
+
+      terminal.sendInput("fourth message");
+      terminal.sendInput("\r");
+      await terminal.waitForRender();
+      expect(turns).toEqual(["fourth message"]);
+
+      const denied = approvalHandlerRef.current!({ kind: "bash", command: "ls" });
+      terminal.sendInput("\x1b");
+      await expect(denied).resolves.toEqual({ action: "reject", feedback: "User denied the tool call." });
+
+      terminal.sendInput("fifth message");
+      terminal.sendInput("\r");
+      await terminal.waitForRender();
+      expect(turns).toEqual(["fourth message", "fifth message"]);
+
+      const planApproved = planHandlerRef.current!("1. inspect\n2. implement");
+      terminal.sendInput("\r");
+      await expect(planApproved).resolves.toEqual({ action: "approve" });
+
+      terminal.sendInput("sixth message");
+      terminal.sendInput("\r");
+      await terminal.waitForRender();
+      expect(turns).toEqual(["fourth message", "fifth message", "sixth message"]);
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("shows slash suggestions and routes a selected skill invocation to the agent", async () => {
+    const terminal = new VirtualTerminal(100, 24);
+    const turns: string[] = [];
+    const controller = {
+      subscribe: () => () => {},
+      getTranscript: () => [],
+      isRunning: () => false,
+      getStreamingTail: () => ({ content: "", reasoning: "", tools: [], parts: [], phase: "idle" as const }),
+      pendingSteerCount: () => 0,
+      queuedInputCount: () => 0,
+      steer: () => false,
+      cancelActiveRun: () => false,
+      runTurn: async (content: string) => { turns.push(content); },
+      appendDisplayMessage: () => {},
+      clearTranscript: () => {},
+      shutdown: () => ({ reason: "test", wallMs: 0 }),
+    };
+    const skill = {
+      meta: { name: "podcast", description: "Create a podcast", disableModelInvocation: false },
+      source: "project",
+      rootDir: "/skills/podcast",
+      skillFile: "/skills/podcast/SKILL.md",
+      content: "instructions",
+      resources: { references: [], scripts: [], assets: [] },
+    };
+    const skillRegistry = {
+      summaries: () => [{ name: "podcast", description: "Create a podcast", source: "project" }],
+      get: (name: string) => name === "podcast" ? skill : undefined,
+    };
+    const app = new PiTuiApp({
+      agent: {
+        model: "test-model",
+        providerId: "test-provider",
+        thinking: "medium",
+        getContextUsageSnapshot: () => ({ usedTokens: 0, contextWindow: 1_000 }),
+      } as never,
+      sessionManager: { getSessionFile: () => "/s.jsonl" } as never,
+      controller: controller as never,
+      skillRegistry: skillRegistry as never,
+      callbacks: {
+        onExitRequest: () => {},
+        onClearTranscript: () => {},
+        onModelSelect: () => {},
+        onThemeToggle: () => {},
+      },
+      terminal,
+      uiMode: "regular",
+    });
+
+    app.start();
+    try {
+      terminal.sendInput("/he");
+      await terminal.waitForRender();
+      expect(terminal.getViewport().join("\n")).toContain("Show available slash commands");
+
+      terminal.sendInput("\x1b");
+      terminal.sendInput("\x15");
+      terminal.sendInput("/pod");
+      await terminal.waitForRender();
+      const viewport = terminal.getViewport().join("\n");
+      expect(viewport).toContain("podcast");
+      expect(viewport).toContain("[skill · project]");
+
+      terminal.sendInput("\r");
+      await terminal.waitForRender();
+      expect(turns).toEqual([]);
+
+      terminal.sendInput("make an episode");
+      terminal.sendInput("\r");
+      await terminal.waitForRender();
+      expect(turns).toHaveLength(1);
+      expect(turns[0]).toContain('load the "podcast" skill');
+      expect(turns[0]).toContain("make an episode");
+    } finally {
+      app.dispose();
+    }
+  });
+});

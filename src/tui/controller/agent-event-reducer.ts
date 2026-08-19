@@ -25,6 +25,8 @@ import {
   type DisplayToolCall,
 } from "../model/display-history.js";
 import type { ControllerEffect } from "./effects.js";
+import { parsePartialArgs } from "../formatting/summary.js";
+import { mergeToolMetadata } from "../model/subagent-view.js";
 
 export const STREAMING_FLUSH_INTERVAL_MS = 40;
 
@@ -118,7 +120,10 @@ export function reduceAgentEvent(state: RunState, event: AgentEvent, ctx: RunCon
       effects.push({ kind: "stream-cleared" });
       const fresh = createRunState(acc.runId);
       return {
-        state: { ...fresh, dirty: state.dirty, outcome: state.outcome },
+        // A new provider attempt discards both the half-built accumulator and
+        // its pending paint bits. Carrying dirty across retries schedules a
+        // stale flush for content that no longer exists.
+        state: { ...fresh, outcome: state.outcome },
         effects,
       };
     }
@@ -133,7 +138,13 @@ export function reduceAgentEvent(state: RunState, event: AgentEvent, ctx: RunCon
     }
     case "tool_call_start": {
       if (!acc.toolCalls.some((t) => t.id === event.id)) {
-        const toolCall: DisplayToolCall = { id: event.id, name: event.name, args: {}, startedAt: ctx.now() };
+        const toolCall: DisplayToolCall = {
+          id: event.id,
+          name: event.name,
+          args: {},
+          status: "pending",
+          startedAt: ctx.now(),
+        };
         acc.toolCalls.push(toolCall);
         appendToolPart(acc.parts, toolCall);
         effects.push({ kind: "tools-updated" });
@@ -145,6 +156,7 @@ export function reduceAgentEvent(state: RunState, event: AgentEvent, ctx: RunCon
       const tc = acc.toolCalls.find((t) => t.id === event.id);
       if (tc) {
         tc.rawArguments = event.arguments;
+        tc.args = parsePartialArgs(event.arguments, tc.args);
         effects.push({ kind: "tools-updated" });
         return { state: { ...state, dirty: { ...state.dirty, tools: true } }, effects };
       }
@@ -158,9 +170,16 @@ export function reduceAgentEvent(state: RunState, event: AgentEvent, ctx: RunCon
       const existing = acc.toolCalls.find((t) => t.id === event.id);
       if (existing) {
         existing.args = event.args;
+        existing.status = "running";
         existing.startedAt = existing.startedAt ?? ctx.now();
       } else {
-        const toolCall: DisplayToolCall = { id: event.id, name: event.name, args: event.args, startedAt: ctx.now() };
+        const toolCall: DisplayToolCall = {
+          id: event.id,
+          name: event.name,
+          args: event.args,
+          status: "running",
+          startedAt: ctx.now(),
+        };
         acc.toolCalls.push(toolCall);
         appendToolPart(acc.parts, toolCall);
       }
@@ -171,8 +190,16 @@ export function reduceAgentEvent(state: RunState, event: AgentEvent, ctx: RunCon
       const tc = acc.toolCalls.find((t) => t.id === event.id);
       if (tc) {
         tc.result = event.result.content;
-        tc.isError = event.result.isError;
+        const failedStatus = event.result.status === "blocked"
+          || event.result.status === "cancelled"
+          || event.result.status === "command_error";
+        tc.isError = !!event.result.isError || failedStatus;
         tc.metadata = event.result.metadata;
+        tc.status = event.result.status === "blocked" || event.result.status === "cancelled"
+          ? event.result.status
+          : tc.isError
+            ? "failed"
+            : "completed";
         effects.push({ kind: "tools-updated" });
         return { state: { ...state, dirty: { ...state.dirty, tools: true } }, effects };
       }
@@ -182,11 +209,14 @@ export function reduceAgentEvent(state: RunState, event: AgentEvent, ctx: RunCon
       const tc = acc.toolCalls.find((t) => t.id === event.id);
       if (tc) {
         if (event.update.metadata) {
-          tc.metadata = mergeMetadataShallow(tc.metadata, event.update.metadata);
+          // Subagent updates arrive one member at a time. A shallow merge
+          // replaces metadata.subagents and silently drops earlier children.
+          tc.metadata = mergeToolMetadata(tc.metadata, event.update.metadata);
         }
         if (event.update.message) {
           tc.result = event.update.message;
         }
+        tc.status = event.update.status;
         tc.isError = event.update.status === "failed" || event.update.status === "blocked" || event.update.status === "cancelled";
         effects.push({ kind: "tools-updated" });
         return { state: { ...state, dirty: { ...state.dirty, tools: true } }, effects };
@@ -285,13 +315,6 @@ export function buildAssistantMessage(state: RunState, taskElapsedMs?: number): 
   }
   if (acc.systemFingerprint) message.systemFingerprint = acc.systemFingerprint;
   return message;
-}
-
-function mergeMetadataShallow(
-  base: Record<string, unknown> | undefined,
-  patch: Record<string, unknown>,
-): Record<string, unknown> {
-  return { ...(base ?? {}), ...patch };
 }
 
 export type { setUserInputStatus };

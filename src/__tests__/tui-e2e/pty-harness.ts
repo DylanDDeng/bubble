@@ -17,6 +17,9 @@
 import { chmodSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import xterm from "@xterm/headless";
+
+const XtermTerminal = xterm.Terminal;
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -37,8 +40,12 @@ export interface PtySession {
   kill(): void;
   /** All output emitted so far (raw, includes ANSI). */
   output(): string;
+  /** Current emulated terminal viewport, excluding scrollback history. */
+  viewport(): string[];
   /** Wait until `pattern` appears in the output, or fail after timeoutMs. */
   waitFor(pattern: string | RegExp, timeoutMs?: number): Promise<string>;
+  /** Wait until `pattern` is visible on the current emulated screen. */
+  waitForViewport(pattern: string | RegExp, timeoutMs?: number): Promise<string[]>;
 }
 
 export function tuiBinPath(): string {
@@ -72,15 +79,59 @@ export async function startTui(options: {
       ...options.env,
     },
   });
+  const screen = new XtermTerminal({
+    cols,
+    rows,
+    allowProposedApi: true,
+    disableStdin: true,
+  });
 
   let buffered = "";
   proc.onData((chunk) => {
     buffered += chunk;
+    screen.write(chunk);
+  });
+
+  const viewport = (): string[] => {
+    const lines: string[] = [];
+    const buffer = screen.buffer.active;
+    for (let row = 0; row < screen.rows; row += 1) {
+      lines.push(buffer.getLine(buffer.viewportY + row)?.translateToString(true) ?? "");
+    }
+    return lines;
+  };
+
+  const matches = (value: string, pattern: string | RegExp): boolean => {
+    if (typeof pattern === "string") return value.includes(pattern);
+    pattern.lastIndex = 0;
+    return pattern.test(value);
+  };
+
+  const waitForMatch = <T>(
+    read: () => { value: string; result: T },
+    pattern: string | RegExp,
+    timeoutMs: number,
+    timeoutDetails: () => string,
+  ): Promise<T> => new Promise<T>((resolvePromise, reject) => {
+    const started = Date.now();
+    const timer = setInterval(() => {
+      const current = read();
+      if (matches(current.value, pattern)) {
+        clearInterval(timer);
+        resolvePromise(current.result);
+      } else if (Date.now() - started > timeoutMs) {
+        clearInterval(timer);
+        reject(new Error(`Timed out waiting for ${String(pattern)}. ${timeoutDetails()}`));
+      }
+    }, 30);
   });
 
   const session: PtySession = {
     write: (data) => proc.write(data),
-    resize: (nextCols, nextRows) => proc.resize(nextCols, nextRows),
+    resize: (nextCols, nextRows) => {
+      screen.resize(nextCols, nextRows);
+      proc.resize(nextCols, nextRows);
+    },
     kill: () => {
       try {
         proc.kill();
@@ -89,21 +140,22 @@ export async function startTui(options: {
       }
     },
     output: () => buffered,
-    waitFor: (pattern, timeoutMs = 10_000) =>
-      new Promise<string>((resolvePromise, reject) => {
-        const started = Date.now();
-        const timer = setInterval(() => {
-          if (typeof pattern === "string" ? buffered.includes(pattern) : pattern.test(buffered)) {
-            clearInterval(timer);
-            resolvePromise(buffered);
-          } else if (Date.now() - started > timeoutMs) {
-            clearInterval(timer);
-            reject(new Error(
-              `Timed out waiting for ${String(pattern)}. Output so far (tail 800):\n${buffered.slice(-800)}`,
-            ));
-          }
-        }, 30);
-      }),
+    viewport,
+    waitFor: (pattern, timeoutMs = 10_000) => waitForMatch(
+      () => ({ value: buffered, result: buffered }),
+      pattern,
+      timeoutMs,
+      () => `Output so far (tail 800):\n${buffered.slice(-800)}`,
+    ),
+    waitForViewport: (pattern, timeoutMs = 10_000) => waitForMatch(
+      () => {
+        const lines = viewport();
+        return { value: lines.join("\n"), result: lines };
+      },
+      pattern,
+      timeoutMs,
+      () => `Current viewport:\n${viewport().join("\n")}`,
+    ),
   };
 
   return session;

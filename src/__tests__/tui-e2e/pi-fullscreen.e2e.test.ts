@@ -1,11 +1,10 @@
 /**
- * PTY e2e: /fullscreen alternate-screen mode.
+ * PTY e2e: production starts directly in alternate-screen mode.
  *
- * Enters the alt-screen transcript view, verifies it renders the transcript
- * header + composer, submits a message inside fullscreen, and returns to the
- * main screen via Escape — the terminal must end back on the main flow.
+ * Verifies the alt-screen transition precedes the first product frame, the
+ * composer stays interactive, and Escape does not bounce through main-screen.
  */
-import { afterAll, beforeAll, describe, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTui, type PtySession } from "./pty-harness.js";
 import { mkdirSync } from "node:fs";
 
@@ -16,17 +15,19 @@ describe.skipIf(process.env.BUBBLE_SKIP_PTY_E2E === "1")("pi-tui fullscreen e2e"
 
   beforeAll(async () => {
     session = await startTui({ cols: 100, rows: 30 });
-    await session!.waitFor("Bubble", 15_000).catch(() => {});
+    await session!.waitFor("\x1b[?1049h", 15_000);
   }, 25_000);
 
   afterAll(() => {
     session?.kill();
   });
 
-  it("enters fullscreen via /fullscreen and renders the alt-screen view", async () => {
-    session!.write("/fullscreen\r");
-    // Alt screen activates (ESC[?1049h) and the view redraws with a footer.
-    await session!.waitFor("\x1b[?1049h", 8_000);
+  it("enters fullscreen before rendering the first product frame", async () => {
+    await session!.waitForViewport("I am a cat", 10_000);
+    const output = session!.output();
+    const altScreenEntry = output.indexOf("\x1b[?1049h");
+    expect(altScreenEntry).toBeGreaterThanOrEqual(0);
+    expect(output.slice(0, altScreenEntry)).not.toContain("I am a cat");
   }, 20_000);
 
   it("accepts typed input inside fullscreen", async () => {
@@ -34,11 +35,24 @@ describe.skipIf(process.env.BUBBLE_SKIP_PTY_E2E === "1")("pi-tui fullscreen e2e"
     await session!.waitFor("hello from fullscreen", 5_000);
   }, 15_000);
 
-  it("returns to the main screen on Escape", async () => {
+  it("stays in fullscreen and remains editable after Escape", async () => {
     session!.write("\x1b");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(session!.output()).not.toContain("\x1b[?1049l");
+    session!.write("still fullscreen");
+    await session!.waitForViewport("still fullscreen", 5_000);
+  }, 20_000);
+
+  it("restores the terminal without reprinting the fullscreen composer", async () => {
+    session!.write("\x03");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    session!.write("\x03");
     await session!.waitFor("\x1b[?1049l", 8_000);
-    // Main flow is interactive again.
-    session!.write("back on main");
-    await session!.waitFor("back on main", 5_000);
+    await session!.waitFor("Duration", 8_000);
+
+    const output = session!.output();
+    const exitIndex = output.lastIndexOf("\x1b[?1049l");
+    expect(exitIndex).toBeGreaterThanOrEqual(0);
+    expect(output.slice(exitIndex)).not.toContain("\x1b[2K");
   }, 20_000);
 });

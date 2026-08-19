@@ -220,6 +220,8 @@ export interface AutocompleteItem {
 	value: string;
 	label: string;
 	description?: string;
+	/** False inserts the completion without submitting it (for example, /skill <request>). */
+	submitOnSelect?: boolean;
 }
 
 type Awaitable<T> = T | Promise<T>;
@@ -228,6 +230,8 @@ export interface SlashCommand {
 	name: string;
 	description?: string;
 	argumentHint?: string;
+	/** False inserts the command and keeps the editor open for required arguments. */
+	submitOnSelect?: boolean;
 	// Function to get argument completions for this command
 	// Returns null if no argument completion is available
 	getArgumentCompletions?(argumentPrefix: string): Awaitable<AutocompleteItem[] | null>;
@@ -319,6 +323,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 						name,
 						label: name,
 						description: fullDesc || undefined,
+						...(cmd.submitOnSelect === undefined ? {} : { submitOnSelect: cmd.submitOnSelect }),
 					};
 				});
 
@@ -326,6 +331,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 					value: item.name,
 					label: item.label,
 					...(item.description && { description: item.description }),
+					...(item.submitOnSelect === undefined ? {} : { submitOnSelect: item.submitOnSelect }),
 				}));
 
 				if (filtered.length === 0) return null;

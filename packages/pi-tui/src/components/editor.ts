@@ -1,4 +1,4 @@
-import type { AutocompleteProvider, AutocompleteSuggestions } from "../autocomplete.ts";
+import type { AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions } from "../autocomplete.ts";
 import { getKeybindings } from "../keybindings.ts";
 import { decodePrintableKey, matchesKey } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
@@ -498,7 +498,11 @@ export class Editor implements Component, Focusable {
 
 		// Calculate max visible lines: 30% of terminal height, minimum 5 lines
 		const terminalRows = this.tui.terminal.rows;
-		const maxVisibleLines = Math.max(5, Math.floor(terminalRows * 0.3));
+		const preferredVisibleLines = Math.max(5, Math.floor(terminalRows * 0.3));
+		// Keep the focused cursor inside tiny main-screen viewports. Reserve two
+		// rows for the editor borders and one for the application footer; without
+		// this cap a multiline draft can push its own cursor above the viewport.
+		const maxVisibleLines = Math.max(1, Math.min(preferredVisibleLines, terminalRows - 3));
 
 		// Find the cursor line index in layoutLines
 		let cursorLineIndex = layoutLines.findIndex((line) => line.hasCursor);
@@ -674,6 +678,11 @@ export class Editor implements Component, Focusable {
 			}
 
 			if (kb.matches(data, "tui.input.tab")) {
+				if (!this.isAutocompletePrefixCurrent()) {
+					this.cancelAutocomplete();
+					this.handleTabCompletion();
+					return;
+				}
 				const selected = this.autocompleteList.getSelectedItem();
 				if (selected && this.autocompleteProvider) {
 					this.pushUndoSnapshot();
@@ -695,8 +704,16 @@ export class Editor implements Component, Focusable {
 			}
 
 			if (kb.matches(data, "tui.select.confirm")) {
-				const selected = this.autocompleteList.getSelectedItem();
-				if (selected && this.autocompleteProvider) {
+				const prefixIsCurrent = this.isAutocompletePrefixCurrent();
+				const selected = prefixIsCurrent
+					? (this.autocompleteList.getSelectedItem() as AutocompleteItem | undefined)
+					: undefined;
+				if (!prefixIsCurrent) {
+					// Suggestions are asynchronous. A fast type/paste + Enter can
+					// arrive before the refreshed list; never apply an old prefix to
+					// newer composer text. Submit the text exactly as typed instead.
+					this.cancelAutocomplete();
+				} else if (selected && this.autocompleteProvider) {
 					this.pushUndoSnapshot();
 					this.lastAction = null;
 					const result = this.autocompleteProvider.applyCompletion(
@@ -710,7 +727,7 @@ export class Editor implements Component, Focusable {
 					this.state.cursorLine = result.cursorLine;
 					this.setCursorCol(result.cursorCol);
 
-					if (this.autocompletePrefix.startsWith("/")) {
+					if (this.autocompletePrefix.startsWith("/") && selected.submitOnSelect !== false) {
 						this.cancelAutocomplete();
 						// Fall through to submit
 					} else {
@@ -2359,5 +2376,12 @@ export class Editor implements Component, Focusable {
 	private updateAutocomplete(): void {
 		if (!this.autocompleteState || !this.autocompleteProvider) return;
 		this.requestAutocomplete({ force: this.autocompleteState === "force", explicitTab: false });
+	}
+
+	private isAutocompletePrefixCurrent(): boolean {
+		if (!this.autocompletePrefix) return true;
+		const currentLine = this.state.lines[this.state.cursorLine] || "";
+		const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
+		return textBeforeCursor.endsWith(this.autocompletePrefix);
 	}
 }

@@ -15,6 +15,7 @@ import chalk from "chalk";
 import stringWidth from "string-width";
 import { truncateVisual } from "../../text-display.js";
 import { DisplayToolCall, DisplayMessage } from "../model/display-history.js";
+import { buildTraceGroups, traceGroupLabel, type TraceGroup } from "../model/trace-groups.js";
 
 function toolTraceLabel(tool: DisplayToolCall): string {
   return tool.name;
@@ -55,10 +56,19 @@ function truncateVisible(text: string, maxColumns: number): string {
 
 export function renderUserCard(content: string, options: TranscriptRenderOptions): string[] {
   const theme = options.theme ?? defaultTranscriptTheme;
+  const terminalWidth = Math.max(1, Math.floor(options.columns));
   // Leave two terminal cells unpainted. Painting the physical last column can
   // trigger an automatic wrap in several terminals and leaves a broken bg
-  // patch at the right edge.
-  const width = Math.max(20, options.columns - 2);
+  // patch at the right edge. At one or two columns there is no room to reserve
+  // that margin, so use every available cell.
+  const width = terminalWidth > 2 ? terminalWidth - 2 : terminalWidth;
+  // The normal card gutter is four cells (marker + trailing pad). On an
+  // extremely narrow terminal, degrade to a plain painted row; forcing the
+  // historical 20-column minimum is what made settled rows overflow after a
+  // 20x5 resize even though the live trace itself was width-safe.
+  if (width < 5) {
+    return wrapPlain(content, width).map((line) => theme.userBg(truncateVisible(line, width)));
+  }
   const textWidth = width - 4; // " › " + trailing pad
 
   const lines = wrapPlain(content, textWidth);
@@ -73,8 +83,10 @@ export function renderUserCard(content: string, options: TranscriptRenderOptions
     const filled = (index === 0 ? theme.accent(" › ") : "   ") + theme.userText(padded) + " ";
     rows.push(theme.userBg(filled));
   });
-  // No bottom painted spacer: it made every sent message look one row too
-  // tall and was the large blue gap visible before Thinking/Working.
+  // Keep the painted padding symmetric so the message body is vertically
+  // centered. Separation from the following trace belongs outside the card;
+  // removing only the bottom pad shifts every message down by half a row.
+  rows.push(theme.userBg(pad));
   return rows;
 }
 
@@ -121,26 +133,37 @@ export function wrapPlain(text: string, columns: number): string[] {
 }
 
 export function renderAssistant(content: string, options: TranscriptRenderOptions): string[] {
-  const width = Math.max(20, options.columns - 2);
+  const terminalWidth = Math.max(1, Math.floor(options.columns));
+  const width = Math.max(1, terminalWidth - 2);
   if (options.markdownRenderer) {
-    return [...options.markdownRenderer(content, width), ""];
+    return [
+      ...options.markdownRenderer(content, width).map((row) => truncateVisible(row, terminalWidth)),
+      "",
+    ];
   }
-  return [...wrapPlain(content, width), ""];
+  return [
+    ...wrapPlain(content, width).map((row) => truncateVisible(row, terminalWidth)),
+    "",
+  ];
 }
 
 export function renderReasoning(content: string, options: TranscriptRenderOptions): string[] {
   const theme = options.theme ?? defaultTranscriptTheme;
-  if (!options.showReasoning) {
-    const firstLine = content.split("\n")[0] ?? "";
-    const preview = truncateVisible(firstLine, Math.max(10, options.columns - 16));
-    return [theme.dim(`└─ Thinking: ${preview} (Ctrl+T to expand)`), ""];
+  const columns = Math.max(1, options.columns);
+  const lines = content.split("\n").filter((line) => line.trim() !== "");
+  if (lines.length === 0) return [];
+  const visible = options.showReasoning ? lines : lines.slice(0, 2);
+  const rows = [theme.dim(truncateVisible("  ✻ Thinking", columns))];
+  for (const line of visible) {
+    for (const wrapped of wrapPlain(line, Math.max(1, columns - 2))) {
+      rows.push(theme.dim(truncateVisible(`  ${wrapped}`, columns)));
+    }
   }
-  const width = Math.max(20, options.columns - 4);
-  return [
-    theme.dim("└─ Thinking"),
-    ...wrapPlain(content, width).map((line) => theme.dim(`   ${line}`)),
-    "",
-  ];
+  if (!options.showReasoning && lines.length > visible.length) {
+    rows.push(theme.dim(truncateVisible("  … (Ctrl+T to expand)", columns)));
+  }
+  rows.push("");
+  return rows;
 }
 
 function argPreview(tool: DisplayToolCall): string {
@@ -176,6 +199,111 @@ export function renderToolTrace(tool: DisplayToolCall, options: TranscriptRender
   return parts.join("");
 }
 
+export interface TraceGroupRenderOptions {
+  /** Live Ink parity: identify the last group that is actually still active. */
+  showActivity?: boolean;
+}
+
+/**
+ * Render the same semantic trace groups used by the Ink TUI. This is shared
+ * by the live row pool and settled transcript so tool_start/tool_update/
+ * tool_end cannot change from a rich trace into an unrelated one-line row at
+ * the commit boundary.
+ */
+export function renderToolTraceGroups(
+  toolCalls: readonly DisplayToolCall[],
+  options: TranscriptRenderOptions,
+  renderOptions: TraceGroupRenderOptions = {},
+): string[] {
+  const theme = options.theme ?? defaultTranscriptTheme;
+  const columns = Math.max(1, options.columns);
+  const groups = buildTraceGroups([...toolCalls]);
+  const rows: string[] = [];
+  const active = renderOptions.showActivity
+    ? [...groups].reverse().find((group) => group.pending)
+    : undefined;
+
+  if (active) {
+    rows.push(theme.dim(truncateVisible(`  ● Working on ${traceGroupLabel(active)}`, columns)));
+  }
+
+  for (const group of groups) {
+    rows.push(...renderTraceGroup(group, options));
+  }
+  return rows;
+}
+
+function renderTraceGroup(group: TraceGroup, options: TranscriptRenderOptions): string[] {
+  const theme = options.theme ?? defaultTranscriptTheme;
+  const columns = Math.max(1, options.columns);
+  const status = group.pending
+    ? " running"
+    : group.hasError
+      ? ` ${group.errorCount || 1} error${(group.errorCount || 1) === 1 ? "" : "s"}`
+      : "";
+  const detail = group.description
+    ? ` ${group.description}`
+    : group.command
+      ? ` ${group.command.replace(/\s+/g, " ")}`
+      : group.count !== undefined && group.noun
+        ? ` ${group.count} ${group.noun}`
+        : "";
+  const header = `  ${group.title}${detail}${status}`;
+  const allErrored = group.hasError && group.errorCount >= group.raw.length && !group.pending;
+  const rows = [allErrored
+    ? theme.error(truncateVisible(header, columns))
+    : truncateVisible(header, columns)];
+
+  // While Execute is running, retain the command's own lines just like Ink.
+  // The header is only a summary and may be truncated on a narrow terminal.
+  const commandLines = group.commandLines ?? [];
+  const commandNeedsBlock = group.kind === "execute"
+    && (group.pending || group.hasError)
+    && (
+      !!group.description
+      || commandLines.length > 1
+      || stringWidth(`  ${group.title} ${group.command ?? ""}`) > columns
+    );
+  if (commandNeedsBlock) {
+    const wrappedCommand = commandLines.flatMap((line) => wrapPlain(line || " ", Math.max(1, columns - 4)));
+    for (const line of wrappedCommand.slice(0, 4)) {
+      rows.push(theme.dim(truncateVisible(`    ${line}`, columns)));
+    }
+    if (wrappedCommand.length > 4) {
+      rows.push(theme.dim(truncateVisible(`    … ${wrappedCommand.length - 4} more lines`, columns)));
+    }
+  }
+
+  const collapseSuccessfulExecute = group.kind === "execute"
+    && !group.pending
+    && !group.hasError
+    && !options.verboseTrace;
+  const details = group.previewLines.length > 0 ? group.previewLines : group.items;
+  if (collapseSuccessfulExecute) {
+    const outputLines = group.previewLines.length + group.omitted;
+    rows.push(theme.dim(truncateVisible(
+      `    ⎿  ${outputLines > 0
+        ? `${outputLines} line${outputLines === 1 ? "" : "s"} output · Ctrl+O to view`
+        : "no output"}`,
+      columns,
+    )));
+  } else {
+    for (let index = 0; index < details.length; index += 1) {
+      const prefix = index === 0 ? "    ↳ " : "      ";
+      const line = truncateVisible(`${prefix}${details[index] ?? ""}`, columns);
+      rows.push(allErrored ? theme.error(line) : theme.dim(line));
+    }
+  }
+  for (let index = 0; index < group.errorLines.length; index += 1) {
+    const prefix = index === 0 ? "    ↳ " : "      ";
+    rows.push(theme.error(truncateVisible(`${prefix}${group.errorLines[index] ?? ""}`, columns)));
+  }
+  if (group.omitted > 0) {
+    rows.push(theme.dim(truncateVisible(`    … ${group.omitted} more`, columns)));
+  }
+  return rows;
+}
+
 export function renderMessage(message: DisplayMessage, options: TranscriptRenderOptions): string[] {
   const theme = options.theme ?? defaultTranscriptTheme;
   if (message.role === "user") {
@@ -190,9 +318,7 @@ export function renderMessage(message: DisplayMessage, options: TranscriptRender
     rows.push(...renderReasoning(message.reasoning, options));
   }
   if (message.toolCalls?.length) {
-    for (const tool of message.toolCalls) {
-      rows.push(renderToolTrace(tool, options));
-    }
+    rows.push(...renderToolTraceGroups(message.toolCalls, options));
   }
   if (message.content?.trim()) {
     rows.push(...renderAssistant(message.content, options));
@@ -203,7 +329,6 @@ export function renderMessage(message: DisplayMessage, options: TranscriptRender
 }
 
 interface RequestTraceState {
-  thinkingShown: boolean;
   workingShown: boolean;
 }
 
@@ -213,11 +338,15 @@ interface RequestTraceState {
  * One agent run may contain many provider turns (`turn_end.willContinue`) —
  * normally one before every tool call. Rendering every turn independently
  * exposes the implementation boundary as `thinking → tool → thinking → tool`.
- * The user-facing trace is instead one request lifecycle:
+ * The user-facing tool trace is grouped into one request lifecycle, while
+ * every provider turn's reasoning remains visible. Live rendering exposes
+ * each new reasoning segment, so suppressing later segments only after settle
+ * would create another disappear-at-finalize jump.
  *
- *   Thinking (first collapsed reasoning only)
- *   Working
+ *   Thinking
+ *   Working (one request-level heading)
  *     tool
+ *   Thinking (a later provider turn, if present)
  *     tool
  *   final answer
  *
@@ -231,19 +360,16 @@ function renderAssistantInRequest(
   const theme = options.theme ?? defaultTranscriptTheme;
   const rows: string[] = [];
 
-  if (message.reasoning && (options.showReasoning || !trace.thinkingShown)) {
+  if (message.reasoning) {
     rows.push(...renderReasoning(message.reasoning, options));
-    trace.thinkingShown = true;
   }
 
   const appendTools = (tools: readonly DisplayToolCall[]) => {
     if (!trace.workingShown) {
-      rows.push(theme.dim("└─ Working"));
+      rows.push(theme.dim(truncateVisible("  ● Working", Math.max(1, options.columns))));
       trace.workingShown = true;
     }
-    for (const tool of tools) {
-      rows.push(`  ${renderToolTrace(tool, options)}`);
-    }
+    rows.push(...renderToolTraceGroups(tools, options));
   };
 
   // Preserve the model's real commentary/tool timeline. `parts` is the
@@ -267,11 +393,11 @@ function renderAssistantInRequest(
 
 export function renderTranscript(messages: readonly DisplayMessage[], options: TranscriptRenderOptions): string[] {
   const rows: string[] = [];
-  let trace: RequestTraceState = { thinkingShown: false, workingShown: false };
+  let trace: RequestTraceState = { workingShown: false };
 
   for (const message of messages) {
     if (message.role === "user") {
-      trace = { thinkingShown: false, workingShown: false };
+      trace = { workingShown: false };
       rows.push(...renderUserCard(message.content, options));
     } else if (message.role === "assistant" && !message.syntheticKind) {
       rows.push(...renderAssistantInRequest(message, options, trace));

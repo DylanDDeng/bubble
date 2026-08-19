@@ -190,7 +190,22 @@ export function accumulateLiveSubagentUpdate(
   // Per-child updates carry no mode; group them under the launching workflow
   // call rather than falling back to one single-agent group per member.
   if (event.name === "run_workflow" && metadata.mode === undefined) metadata.mode = "workflow";
-  map.set(event.id, { id: event.id, name: event.name, args: prev?.args ?? {}, metadata });
+  const members = Array.isArray(metadata.subagents)
+    ? metadata.subagents.filter((member): member is Record<string, unknown> => (
+        typeof member === "object" && member !== null
+      ))
+    : [];
+  const statuses = members.map((member) => String(member.status ?? "running"));
+  const stillRunning = statuses.some((status) => status === "queued" || status === "running");
+  const failed = statuses.some((status) => status === "failed" || status === "blocked" || status === "cancelled");
+  map.set(event.id, {
+    id: event.id,
+    name: event.name,
+    args: prev?.args ?? {},
+    metadata,
+    status: stillRunning ? "running" : failed ? "failed" : "completed",
+    isError: failed,
+  });
   return true;
 }
 

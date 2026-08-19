@@ -527,6 +527,9 @@ function isFailedSubagent(subagent: SubagentTraceItem): boolean {
 }
 
 function isToolPending(tool: DisplayToolCall): boolean {
+  if (tool.status) {
+    return tool.status === "queued" || tool.status === "pending" || tool.status === "running";
+  }
   return tool.result === undefined;
 }
 

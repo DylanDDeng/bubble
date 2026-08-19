@@ -14,30 +14,43 @@ import process from "node:process";
 import chalk from "chalk";
 import {
   ProcessTerminal,
+  TuiAltScreen,
   TuiMainScreen,
   Text,
   VStack,
   SelectList,
   Editor,
+  ScrollView,
   Markdown,
   type MarkdownTheme,
   type SelectItem,
   type TUI,
+  type TuiMode,
+  type Terminal,
   type Component,
+  matchesKey,
+  isViewportTUI,
 } from "@bubblebrain-ai/pi-tui";
 import { StreamingMessageComponent } from "./components/streaming-message.js";
+import { ResponsiveTranscriptComponent } from "./components/responsive-transcript.js";
+import { WelcomeBannerComponent } from "./components/welcome.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import type { SlashCommandContext } from "../slash-commands/types.js";
 import { BubbleTuiController } from "./controller/controller.js";
 import { OverlayRequestController } from "./controller/overlay-controller.js";
-import { renderTranscript, defaultTranscriptTheme } from "./components/transcript.js";
-import { formatContextUsageLabel, friendlyCwd, sessionBasename } from "./formatting/summary.js";
+import { defaultTranscriptTheme } from "./components/transcript.js";
+import { friendlyCwd, sessionBasename } from "./formatting/summary.js";
+import { ResponsiveFooterComponent } from "./footer.js";
+import { ComposerAutocompleteProvider } from "./composer-autocomplete.js";
 import type { Agent } from "../agent.js";
 import type { SessionManager } from "../session.js";
 import type { ProviderRegistry } from "../provider-registry.js";
 import type { QuestionController, QuestionEvent } from "../question/controller.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
 import type { DisplayMessage } from "./model/display-history.js";
+import type { SkillRegistry } from "../skills/registry.js";
+import { parseSkillInvocation } from "../skills/invocation.js";
+import { getNextPermissionMode } from "../permission/mode.js";
 
 export interface PiAppCallbacks {
   onExitRequest(): void;
@@ -53,7 +66,7 @@ export interface PiTuiAppOptions {
   sessionManager: SessionManager;
   registry?: ProviderRegistry;
   createProvider?: (providerId: string, apiKey: string, baseURL: string) => unknown;
-  skillRegistry?: unknown;
+  skillRegistry?: SkillRegistry;
   bashAllowlist?: unknown;
   settingsManager?: unknown;
   hookController?: unknown;
@@ -69,6 +82,10 @@ export interface PiTuiAppOptions {
   runMemoryCompaction?: () => Promise<string>;
   runMemorySummary?: (scope?: string) => Promise<string>;
   runMemoryRefresh?: (scope?: string) => Promise<string>;
+  /** Test/embedded host injection; production uses ProcessTerminal. */
+  terminal?: Terminal;
+  /** Renderer selected before the first terminal paint. Production defaults to fullscreen. */
+  uiMode?: TuiMode;
 }
 
 const EDITOR_THEME = {
@@ -104,29 +121,78 @@ export class PiTuiApp {
   private readonly tui: TUI;
   private readonly editor: Editor;
   private readonly transcriptBox = new VStack([]);
-  private readonly settledTranscriptBox = new VStack([]);
   private readonly streamingMessage = new StreamingMessageComponent(8, () => this.tui.requestRender());
   private readonly markdown = new Markdown("", 0, 0, MD_THEME);
-  private readonly footer = new Text("", 1, 0);
-  private readonly welcomeBox = new VStack([]);
+  private readonly settledTranscript: ResponsiveTranscriptComponent;
+  private readonly welcome: WelcomeBannerComponent;
+  private readonly footer: ResponsiveFooterComponent;
   private readonly overlays: OverlayRequestController;
   private readonly history: string[] = [];
   private showReasoning = false;
   private verboseTrace = false;
-  private queuedCount = 0;
-  private steerCount = 0;
+  private controllerUnsubscribe: (() => void) | null = null;
+  private questionUnsubscribe: (() => void) | null = null;
   private disposed = false;
 
   constructor(private readonly options: PiTuiAppOptions) {
-    const terminal = new ProcessTerminal();
-    this.tui = new TuiMainScreen(terminal);
+    const terminal = options.terminal ?? new ProcessTerminal();
+    // Pick the renderer before start(). Entering fullscreen after the regular
+    // renderer has painted necessarily exposes a main-screen frame first.
+    // Constructing TuiAltScreen here makes its 1049h transition the first UI
+    // write and keeps the entire product surface on one application instance.
+    this.tui = (options.uiMode ?? "fullscreen") === "fullscreen"
+      ? new TuiAltScreen(terminal)
+      : new TuiMainScreen(terminal);
     this.editor = new Editor(this.tui, EDITOR_THEME);
+    this.editor.setAutocompleteProvider(new ComposerAutocompleteProvider({
+      cwd: process.cwd(),
+      commands: () => slashRegistry.list(),
+      skills: () => this.options.skillRegistry?.summaries() ?? [],
+      uiMode: () => this.tui.mode,
+    }));
+    this.settledTranscript = new ResponsiveTranscriptComponent(() => ({
+      messages: this.options.controller.getTranscript(),
+      options: {
+        showReasoning: this.showReasoning,
+        verboseTrace: this.verboseTrace,
+        theme: defaultTranscriptTheme,
+        markdownRenderer: (text, width) => {
+          this.markdown.setText(text);
+          return this.markdown.render(width);
+        },
+      },
+    }));
+    this.welcome = new WelcomeBannerComponent(() => {
+      const { agent, updateNotice } = this.options;
+      return {
+        cwd: friendlyCwd(process.cwd()),
+        session: sessionBasename(this.options.sessionManager.getSessionFile()),
+        model: agent.model,
+        provider: agent.providerId,
+        thinking: agent.thinking,
+        updateNotice,
+      };
+    });
+    this.footer = new ResponsiveFooterComponent(() => {
+      const extra: string[] = [];
+      const steerCount = this.options.controller.pendingSteerCount();
+      const queuedCount = this.options.controller.queuedInputCount();
+      if (steerCount) extra.push(chalk.yellow(`steer ×${steerCount}`));
+      if (queuedCount) extra.push(chalk.yellow(`queue ×${queuedCount}`));
+      return {
+        agent: this.options.agent,
+        cwd: friendlyCwd(process.cwd()),
+        extra,
+        mode: this.options.agent.mode,
+        // At two rows or fewer, preserve the focused editor body + border.
+        hidden: this.tui.terminal.rows <= 2,
+      };
+    });
     this.overlays = new OverlayRequestController({ questionController: options.questionController });
 
     this.installBlockingHandlers();
     this.buildLayout();
     this.wireInput();
-    this.renderWelcome();
     this.renderSnapshot();
   }
 
@@ -147,7 +213,7 @@ export class PiTuiApp {
       };
     }
     if (questionController) {
-      questionController.subscribe((event: QuestionEvent) => {
+      this.questionUnsubscribe = questionController.subscribe((event: QuestionEvent) => {
         if (event.type === "asked") {
           void this.questionDialog(event.request.id, event.request.questions.map((q) => q.question));
         }
@@ -160,22 +226,51 @@ export class PiTuiApp {
     // renders zero rows while idle. Appending it per turn eventually placed
     // the same component reference in the tree multiple times and let settled
     // rows land after it, breaking spacing/order on later turns.
-    this.transcriptBox.addChild(this.settledTranscriptBox);
+    this.transcriptBox.addChild(this.settledTranscript);
     this.transcriptBox.addChild(this.streamingMessage);
-    this.tui.addChild(this.welcomeBox);
-    this.tui.addChild(this.transcriptBox);
-    this.tui.addChild(this.editor);
-    this.tui.addChild(this.footer);
+    if (isViewportTUI(this.tui)) {
+      // Fullscreen owns a bounded viewport. History scrolls while the composer
+      // and footer stay docked, so the first frame is already the final layout.
+      const document = new VStack([this.welcome, this.transcriptBox]);
+      const scroll = new ScrollView(document, { follow: "end", primary: true });
+      this.tui.setLayoutRoot(new VStack([
+        { component: scroll, basis: 0, grow: 1, minSize: 0 },
+        { component: this.editor, basis: "auto", shrink: 0 },
+        { component: this.footer, basis: "auto", shrink: 0 },
+      ]));
+    } else {
+      this.tui.addChild(this.welcome);
+      this.tui.addChild(this.transcriptBox);
+      this.tui.addChild(this.editor);
+      this.tui.addChild(this.footer);
+    }
     this.tui.setFocus(this.editor);
 
     this.editor.onSubmit = (text: string) => this.handleSubmit(text);
-    this.options.controller.subscribe(() => this.renderSnapshot());
+    this.controllerUnsubscribe = this.options.controller.subscribe(() => this.renderSnapshot());
   }
 
   private wireInput(): void {
     let ctrlCArmed = false;
     this.tui.addInputListener((data: string) => {
+      if (matchesKey(data, "shift+tab")) {
+        this.options.agent.setMode(getNextPermissionMode(this.options.agent.mode));
+        this.renderSnapshot();
+        return { consume: true };
+      }
+      if (data === "\x1b" && this.options.controller.cancelActiveRun()) {
+        // Ink parity: Escape interrupts an active run. When idle, leave the
+        // key unconsumed so the editor/autocomplete layer can handle it.
+        return { consume: true };
+      }
       if (data === "\x03") {
+        // Match Ink: the first Ctrl+C interrupts the active run. Requiring a
+        // second keypress here made cancellation feel like a quit gesture and
+        // left the tool trace running behind the composer.
+        if (this.options.controller.cancelActiveRun()) {
+          ctrlCArmed = false;
+          return { consume: true };
+        }
         if (ctrlCArmed) {
           this.dispose();
           return { consume: true };
@@ -215,8 +310,8 @@ export class PiTuiApp {
     if (controller.isRunning()) {
       // Enter while running steers the current turn; Tab-equivalent queueing
       // is exposed via the /queue command until a dedicated keybinding lands.
-      this.steerCount += 1;
-      void controller.runTurn(trimmed, process.cwd()).finally(() => this.renderSnapshot());
+      controller.steer(trimmed);
+      this.renderSnapshot();
     } else {
       this.pushUserRow(trimmed);
       void controller.runTurn(trimmed, process.cwd()).finally(() => this.renderSnapshot());
@@ -229,7 +324,27 @@ export class PiTuiApp {
 
     // pi-tui-local commands first (renderer-specific modes).
     if (name === "fullscreen") {
+      if (this.tui.mode === "fullscreen") {
+        this.pushNotice("Already in fullscreen mode");
+        this.renderSnapshot();
+        return;
+      }
       void this.enterFullscreen();
+      return;
+    }
+
+    const skillInvocation = this.options.skillRegistry
+      ? parseSkillInvocation(command, this.options.skillRegistry)
+      : undefined;
+    if (skillInvocation) {
+      this.pushUserRow(command);
+      const controller = this.options.controller;
+      if (controller.isRunning()) {
+        controller.steer(skillInvocation.actualPrompt);
+        this.renderSnapshot();
+      } else {
+        void controller.runTurn(skillInvocation.actualPrompt, process.cwd()).finally(() => this.renderSnapshot());
+      }
       return;
     }
 
@@ -301,55 +416,12 @@ export class PiTuiApp {
     this.options.controller.appendDisplayMessage(message);
   }
 
-  private renderWelcome(): void {
-    const { agent, updateNotice } = this.options;
-    const session = sessionBasename(this.options.sessionManager.getSessionFile());
-    const rows = [
-      new Text(chalk.cyan("Bubble") + chalk.dim(` · pi-tui · ${agent.model}`), 1, 0),
-      new Text(chalk.dim(`cwd ${friendlyCwd(process.cwd())}${session ? ` · session ${session}` : ""}`), 1, 0),
-    ];
-    if (updateNotice) rows.push(new Text(chalk.yellow(updateNotice), 1, 0));
-    rows.push(new Text("", 1, 0));
-    this.welcomeBox.children.length = 0;
-    for (const row of rows) this.welcomeBox.addChild(row);
-  }
-
-  /** Rows already committed to the append-only scrollback stream. */
-  private committedRows = 0;
   private streamingMounted = false;
 
   renderSnapshot(): void {
     if (this.disposed) return;
     const columns = this.tui.terminal.columns || process.stdout.columns || 80;
-    const transcript = this.options.controller.getTranscript();
-    const rows = renderTranscript(transcript, {
-      columns,
-      showReasoning: this.showReasoning,
-      verboseTrace: this.verboseTrace,
-      theme: defaultTranscriptTheme,
-      markdownRenderer: (text, width) => {
-        this.markdown.setText(text);
-        return this.markdown.render(width);
-      },
-    });
-
-    // TuiMainScreen is append-only: settled rows commit to scrollback exactly
-    // once. Rebuilding the whole box on every notify would re-emit them
-    // (the duplicated-message bug). So: append only new trailing rows.
-    if (rows.length > this.committedRows) {
-      for (const row of rows.slice(this.committedRows)) {
-        this.settledTranscriptBox.addChild(new Text(row, 0, 0));
-      }
-      this.committedRows = rows.length;
-    } else if (rows.length < this.committedRows) {
-      // /clear: reset settled rows, but preserve the permanent live tail.
-      this.settledTranscriptBox.children.length = 0;
-      this.committedRows = 0;
-      for (const row of rows) this.settledTranscriptBox.addChild(new Text(row, 0, 0));
-      this.committedRows = rows.length;
-    }
     this.updateStreamingRegion(columns);
-    this.footer.setText(this.renderFooterLine(columns));
     this.tui.requestRender();
   }
 
@@ -379,17 +451,6 @@ export class PiTuiApp {
     }
   }
 
-  private renderFooterLine(columns: number): string {
-    const { agent } = this.options;
-    const usage = formatContextUsageLabel(agent.getContextUsageSnapshot());
-    const cwd = friendlyCwd(process.cwd());
-    const parts = [chalk.cyan(agent.model), chalk.dim(cwd), chalk.dim(usage)];
-    if (this.steerCount) parts.push(chalk.yellow(`steer ×${this.steerCount}`));
-    if (this.queuedCount) parts.push(chalk.yellow(`queue ×${this.queuedCount}`));
-    const line = parts.join(chalk.dim(" │ "));
-    return line.length > columns ? line.slice(0, columns) : line;
-  }
-
   // ---- Fullscreen mode ----------------------------------------------------
 
   private fullscreen: import("./fullscreen.js").FullscreenApp | null = null;
@@ -408,6 +469,14 @@ export class PiTuiApp {
       controller: this.options.controller,
       agent: this.options.agent,
       onExit: () => this.exitFullscreen(),
+      onCommand: (command) => {
+        // Pickers and dialogs are owned by the main-screen TUI. Return to it
+        // before executing so every slash command uses the same registry and
+        // never leaks into the model as ordinary fullscreen input.
+        this.exitFullscreen();
+        void this.handleCommand(command);
+      },
+      terminal: this.options.terminal,
     });
     this.fullscreen.start();
   }
@@ -422,11 +491,11 @@ export class PiTuiApp {
 
   // ---- Overlays -----------------------------------------------------------
 
-  private selectOverlay(items: SelectItem[], title: string): Promise<SelectItem | null> {
+  private selectOverlay(items: SelectItem[], title: string, preview?: Component): Promise<SelectItem | null> {
     return new Promise((resolve) => {
       const list = new SelectList(items, 8, EDITOR_THEME.selectList, {});
       const header = new Text(chalk.cyan(title), 1, 0);
-      const box = new VStack([header, list]);
+      const box = new VStack(preview ? [header, preview, list] : [header, list]);
       const handle = this.tui.showOverlay(box, { anchor: "center" });
       list.onSelect = (item) => {
         handle.hide();
@@ -442,13 +511,13 @@ export class PiTuiApp {
 
   private async planDialog(plan: string): Promise<boolean> {
     const preview = new Text(plan.split("\n").slice(0, 10).join("\n"), 1, 0);
-    this.tui.showOverlay(new VStack([preview]), { anchor: "center" });
     const choice = await this.selectOverlay(
       [
         { value: "approve", label: "Approve", description: "Proceed with the plan" },
         { value: "reject", label: "Reject", description: "Reject and ask for changes" },
       ],
       "Plan approval — Enter to confirm, Esc to reject",
+      preview,
     );
     return choice?.value === "approve";
   }
@@ -525,11 +594,24 @@ export class PiTuiApp {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.controllerUnsubscribe?.();
+    this.controllerUnsubscribe = null;
+    this.questionUnsubscribe?.();
+    this.questionUnsubscribe = null;
+    // Root lifecycle events (notably SIGTERM) can dispose the app while the
+    // alternate screen is still open. Tear it down directly so its controller
+    // listener, spinner timers, and terminal mode cannot outlive the root app.
+    this.fullscreen?.dispose();
+    this.fullscreen = null;
     this.streamingMessage.dispose();
     this.options.controller.shutdown("user-quit");
     this.overlays.dispose();
     this.options.callbacks.onExitRequest();
-    this.tui.stop();
+    // The fullscreen frame is transient application chrome. Reprinting it
+    // into the restored main buffer leaves the docked composer above the
+    // post-session summary. Exit the alternate screen without exporting that
+    // frame; regular mode keeps its native scrollback behavior unchanged.
+    this.tui.stop({ preserveScreen: this.tui.mode === "fullscreen" });
   }
 
   async waitUntilExit(): Promise<void> {

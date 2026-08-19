@@ -19,8 +19,12 @@
  * Bubble-abstraction bugs.
  */
 import { describe, expect, it } from "vitest";
+import type { Terminal as XtermTerminal } from "@xterm/headless";
 import { VirtualTerminal } from "@bubblebrain-ai/pi-tui/testing";
-import { TuiMainScreen, Text, type Component, type TUI } from "@bubblebrain-ai/pi-tui";
+import { Editor, TuiMainScreen, Text, type Component, type EditorTheme, type TUI } from "@bubblebrain-ai/pi-tui";
+import { ResponsiveTranscriptComponent } from "../tui/components/responsive-transcript.js";
+import type { TranscriptTheme } from "../tui/components/transcript.js";
+import { ResponsiveFooterComponent } from "../tui/footer.js";
 
 class TranscriptComponent implements Component {
   lines: string[] = [];
@@ -35,6 +39,43 @@ function start(columns = 80, rows = 24): { terminal: VirtualTerminal; tui: TUI }
   const tui: TUI = new TuiMainScreen(terminal);
   tui.start();
   return { terminal, tui };
+}
+
+const TEST_USER_BG = 0x22354a;
+const coloredTheme: TranscriptTheme = {
+  userBg: (text) => `\u001b[48;2;34;53;74m${text}\u001b[49m`,
+  userText: (text) => text,
+  accent: (text) => text,
+  dim: (text) => text,
+  error: (text) => text,
+  success: (text) => text,
+};
+
+const editorTheme: EditorTheme = {
+  borderColor: (text) => text,
+  selectList: {
+    selectedPrefix: (text) => text,
+    selectedText: (text) => text,
+    description: (text) => text,
+    scrollInfo: (text) => text,
+    noMatch: (text) => text,
+  },
+};
+
+const footerAgent = {
+  model: "resize-model",
+  getContextUsageSnapshot: () => ({ usedTokens: 123, contextWindow: 10_000 }),
+};
+
+function paintedCells(terminal: VirtualTerminal, row: number): number {
+  const xterm = (terminal as unknown as { xterm: XtermTerminal }).xterm;
+  const buffer = xterm.buffer.active;
+  const line = buffer.getLine(buffer.viewportY + row);
+  let count = 0;
+  for (let column = 0; column < terminal.columns; column += 1) {
+    if (line?.getCell(column)?.getBgColor() === TEST_USER_BG) count += 1;
+  }
+  return count;
 }
 
 describe("pi-tui main-screen resize contract", () => {
@@ -85,6 +126,104 @@ describe("pi-tui main-screen resize contract", () => {
     const all = terminal.getScrollBuffer().join("\n");
     expect(all.match(/alpha/g)?.length ?? 0).toBe(1);
     expect(all.match(/gamma/g)?.length ?? 0).toBe(1);
+  });
+
+  it("repaints a user card to the new width instead of preserving old ANSI padding", async () => {
+    const { terminal, tui } = start(40, 12);
+    const transcript = new ResponsiveTranscriptComponent(() => ({
+      messages: [{ key: "u", role: "user", content: "你好 resize should reflow" }],
+      options: { theme: coloredTheme },
+    }));
+    tui.addChild(transcript);
+    tui.requestRender();
+    await terminal.waitForRender();
+
+    expect([0, 1, 2].map((row) => paintedCells(terminal, row))).toEqual([38, 38, 38]);
+
+    terminal.resize(60, 12);
+    tui.requestRender(true);
+    await terminal.waitForRender();
+    expect([0, 1, 2].map((row) => paintedCells(terminal, row))).toEqual([58, 58, 58]);
+
+    terminal.resize(24, 12);
+    tui.requestRender(true);
+    await terminal.waitForRender();
+    const paintedRows = [0, 1, 2, 3].map((row) => paintedCells(terminal, row));
+    expect(paintedRows.every((count) => count === 22)).toBe(true);
+  });
+
+  it("renders a long settled Thinking row without terminating the TUI", async () => {
+    const terminal = new VirtualTerminal(256, 30);
+    const tui = new TuiMainScreen(terminal);
+    const transcript = new ResponsiveTranscriptComponent(() => ({
+      messages: [{
+        key: "assistant",
+        role: "assistant",
+        content: "我是 Kimi。",
+        reasoning: "We need answer user asks in Chinese: 你是啥模型. ".repeat(20),
+      }],
+      options: { theme: coloredTheme },
+    }));
+    tui.addChild(transcript);
+    tui.start();
+
+    expect(() => tui.renderNow()).not.toThrow();
+    await terminal.flush();
+    expect(terminal.getScrollBuffer().some((line) => line.includes("Thinking"))).toBe(true);
+    expect(terminal.getViewport().some((line) => line.includes("我是 Kimi。"))).toBe(true);
+    tui.stop();
+  });
+
+  it("keeps focused composer input visible after shrinking from 140x45 to 20x5", async () => {
+    const terminal = new VirtualTerminal(140, 45);
+    const tui = new TuiMainScreen(terminal);
+    const editor = new Editor(tui, editorTheme);
+    const footer = new ResponsiveFooterComponent(() => ({
+      agent: footerAgent,
+      cwd: "~/very/long/working/directory/项目🫧",
+      extra: ["queue ×12", "steer ×3"],
+    }));
+    tui.addChild(new Text("commands: /help rendered at the original width"));
+    tui.addChild(editor);
+    tui.addChild(footer);
+    tui.setFocus(editor);
+    tui.start();
+    await terminal.waitForRender();
+
+    terminal.resize(20, 5);
+    await terminal.waitForRender();
+    terminal.sendInput("Q");
+    await terminal.waitForRender();
+
+    expect(tui.getFocusedComponent()).toBe(editor);
+    expect(editor.getText()).toContain("Q");
+    expect(terminal.getViewport().some((line) => line.includes("Q"))).toBe(true);
+    expect(footer.render(20)).toHaveLength(1);
+    tui.stop();
+  });
+
+  it("keeps an edited multiline cursor row visible in a 20x6 viewport", async () => {
+    const terminal = new VirtualTerminal(140, 45);
+    const tui = new TuiMainScreen(terminal);
+    const editor = new Editor(tui, editorTheme);
+    const footer = new ResponsiveFooterComponent(() => ({ agent: footerAgent }));
+    tui.addChild(editor);
+    tui.addChild(footer);
+    tui.setFocus(editor);
+    tui.start();
+    editor.setText(Array.from({ length: 20 }, (_, index) => `draft-${String(index + 1).padStart(2, "0")}`).join("\n"));
+    await terminal.waitForRender();
+
+    terminal.resize(20, 6);
+    await terminal.waitForRender();
+    for (let index = 0; index < 17; index += 1) terminal.sendInput("\x1b[A");
+    terminal.sendInput("Z");
+    await terminal.waitForRender();
+
+    expect(tui.getFocusedComponent()).toBe(editor);
+    expect(editor.getText()).toContain("Z");
+    expect(terminal.getViewport().some((line) => line.includes("Z"))).toBe(true);
+    tui.stop();
   });
 
   it("keeps live-region collapse from rewinding scrollback", async () => {

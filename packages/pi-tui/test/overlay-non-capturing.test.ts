@@ -171,6 +171,33 @@ describe("TUI overlay non-capturing", () => {
 			}
 		});
 
+		it("hide() restores focus when an overlay child owns keyboard focus", async () => {
+			const terminal = new VirtualTerminal(80, 24);
+			const tui: TUI = new TuiMainScreen(terminal);
+			const editor = new FocusableOverlay(["EDITOR"]);
+			const overlay = new Container();
+			const overlayInput = new FocusableOverlay(["OVERLAY INPUT"]);
+			overlay.addChild(overlayInput);
+			tui.addChild(new EmptyContent());
+			tui.setFocus(editor);
+			tui.start();
+			try {
+				const handle = tui.showOverlay(overlay);
+				tui.setFocus(overlayInput);
+				assert.strictEqual(handle.isFocused(), true);
+
+				handle.hide();
+				terminal.sendInput("x");
+				await renderAndFlush(tui, terminal);
+
+				assert.strictEqual(tui.getFocusedComponent(), editor);
+				assert.deepStrictEqual(editor.inputs, ["x"]);
+				assert.deepStrictEqual(overlayInput.inputs, []);
+			} finally {
+				tui.stop();
+			}
+		});
+
 		it("capturing overlay removed with non-capturing below restores focus to editor", async () => {
 			const terminal = new VirtualTerminal(80, 24);
 			const tui: TUI = new TuiMainScreen(terminal);

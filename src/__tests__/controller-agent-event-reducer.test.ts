@@ -73,11 +73,22 @@ describe("agent-event reducer", () => {
     let result = reduceAgentEvent(state, ev({ type: "tool_call_start", id: "t1", name: "bash" }), ctx());
     state = result.state;
     expect(state.accumulator.toolCalls).toHaveLength(1);
+    expect(state.accumulator.toolCalls[0]!.status).toBe("pending");
     expect(result.effects).toContainEqual({ kind: "tools-updated" });
 
     result = reduceAgentEvent(state, ev({ type: "tool_call_delta", id: "t1", name: "bash", argumentsDelta: "{\"", arguments: "{\"command\":" }), ctx());
     state = result.state;
     expect(state.accumulator.toolCalls[0]!.rawArguments).toBe("{\"command\":");
+
+    result = reduceAgentEvent(state, ev({
+      type: "tool_call_delta",
+      id: "t1",
+      name: "bash",
+      argumentsDelta: "\"npm test\"}",
+      arguments: '{"command":"npm test"}',
+    }), ctx());
+    state = result.state;
+    expect(state.accumulator.toolCalls[0]!.args).toEqual({ command: "npm test" });
 
     // tool_call_end: intentionally no visual update (legacy comment at app.tsx:1723).
     result = reduceAgentEvent(state, ev({ type: "tool_call_end", id: "t1", name: "bash", arguments: "{}" }), ctx());
@@ -86,6 +97,7 @@ describe("agent-event reducer", () => {
     result = reduceAgentEvent(state, ev({ type: "tool_start", id: "t1", name: "bash", args: { command: "ls" } }), ctx());
     state = result.state;
     expect(state.accumulator.toolCalls[0]!.args).toEqual({ command: "ls" });
+    expect(state.accumulator.toolCalls[0]!.status).toBe("running");
     expect(state.accumulator.toolCalls[0]!.startedAt).toBe(1_000);
 
     result = reduceAgentEvent(state, ev({
@@ -93,7 +105,7 @@ describe("agent-event reducer", () => {
       result: { content: "done", isError: false },
     }), ctx());
     state = result.state;
-    expect(state.accumulator.toolCalls[0]).toMatchObject({ result: "done", isError: false });
+    expect(state.accumulator.toolCalls[0]).toMatchObject({ result: "done", isError: false, status: "completed" });
   });
 
   it("replaces the stream on turn_start (retry dedup)", () => {
@@ -126,6 +138,26 @@ describe("agent-event reducer", () => {
       expect(s2.accumulator.toolCalls[0]!.isError).toBe(true);
       expect(s2.accumulator.toolCalls[0]!.result).toBe("boom");
     }
+  });
+
+  it("merges multiple subagent members instead of replacing the previous update", () => {
+    let state = createRunState(1);
+    state = reduceAgentEvent(state, ev({ type: "tool_call_start", id: "team", name: "run_workflow" }), ctx()).state;
+    for (const subAgentId of ["a", "b"]) {
+      state = reduceAgentEvent(state, ev({
+        type: "tool_update",
+        id: "team",
+        name: "run_workflow",
+        update: subagentUpdate({
+          subAgentId,
+          metadata: { kind: "subagent", subagents: [{ subAgentId, agentName: "worker", status: "running" }] },
+        }),
+      }), ctx()).state;
+    }
+    expect(state.accumulator.toolCalls[0]!.metadata?.subagents).toMatchObject([
+      { subAgentId: "a" },
+      { subAgentId: "b" },
+    ]);
   });
 
   it("turn_end with willContinue commits without elapsed and clears", () => {

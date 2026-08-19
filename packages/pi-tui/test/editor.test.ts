@@ -2507,6 +2507,55 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.isShowingAutocomplete(), false);
 		});
 
+		it("does not apply a stale slash prefix when fast input is submitted before suggestions refresh", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const provider = new CombinedAutocompleteProvider(
+				[{ name: "podcast", description: "Create a podcast" }],
+				process.cwd(),
+			);
+			editor.setAutocompleteProvider(provider);
+			let submitted = "";
+			editor.onSubmit = (text) => {
+				submitted = text;
+			};
+
+			editor.handleInput("/");
+			editor.handleInput("p");
+			editor.handleInput("o");
+			editor.handleInput("d");
+			await flushAutocomplete();
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+
+			editor.handleInput("cast make an episode");
+			editor.handleInput("\r");
+
+			assert.strictEqual(submitted, "/podcast make an episode");
+		});
+
+		it("inserts a slash completion without submitting when the command requires more input", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const provider = new CombinedAutocompleteProvider(
+				[{ name: "podcast", description: "Create a podcast", submitOnSelect: false }],
+				process.cwd(),
+			);
+			editor.setAutocompleteProvider(provider);
+			let submissions = 0;
+			editor.onSubmit = () => {
+				submissions += 1;
+			};
+
+			editor.handleInput("/");
+			editor.handleInput("p");
+			editor.handleInput("o");
+			editor.handleInput("d");
+			await flushAutocomplete();
+			editor.handleInput("\r");
+
+			assert.strictEqual(editor.getText(), "/podcast ");
+			assert.strictEqual(submissions, 0);
+			assert.strictEqual(editor.isShowingAutocomplete(), false);
+		});
+
 		it("applies exact typed slash-argument value on Enter even when first item is highlighted", async () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 

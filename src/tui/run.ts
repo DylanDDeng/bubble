@@ -23,6 +23,7 @@ import type { ExternalHookController } from "../hooks/controller.js";
 import type { ExternalRuntimeManager } from "../external-runtime/types.js";
 import { BubbleTuiController } from "./controller/controller.js";
 import { PiTuiApp } from "./app.js";
+import type { FlushScheduler } from "./controller/ports.js";
 
 export interface RunTuiOptions {
   sessionManager?: SessionManager;
@@ -89,6 +90,9 @@ export async function runTui(agent: Agent, _args: unknown, options: RunTuiOption
     runMemoryCompaction: options.runMemoryCompaction,
     runMemorySummary: options.runMemorySummary,
     runMemoryRefresh: options.runMemoryRefresh,
+    // Fullscreen is the production root renderer. Selecting it before start()
+    // prevents a regular-screen frame from ever being painted at startup.
+    uiMode: "fullscreen",
     callbacks: {
       onExitRequest: () => {},
       onClearTranscript: () => controller.clearTranscript(),
@@ -122,6 +126,24 @@ export async function runTui(agent: Agent, _args: unknown, options: RunTuiOption
   return { exitCode: 0, reason: "user-quit", wallMs: Date.now() - startedAt };
 }
 
+/** Production streaming repaint scheduler: one cancellable timer per burst. */
+export function createFlushScheduler(): FlushScheduler {
+  let pending: ReturnType<typeof setTimeout> | null = null;
+  return {
+    scheduleFlush: (intervalMs, flush) => {
+      if (pending !== null) return;
+      pending = setTimeout(() => {
+        pending = null;
+        flush();
+      }, intervalMs);
+    },
+    cancelFlush: () => {
+      if (pending !== null) clearTimeout(pending);
+      pending = null;
+    },
+  };
+}
+
 function buildPorts(options: RunTuiOptions) {
   return {
     clock: { now: () => Date.now() },
@@ -135,12 +157,7 @@ function buildPorts(options: RunTuiOptions) {
         return { [Symbol.dispose]: () => clearInterval(timer) } as Disposable;
       },
     },
-    flush: {
-      scheduleFlush: (_intervalMs: number, flush: () => void) => {
-        setTimeout(flush, 40);
-      },
-      cancelFlush: () => {},
-    },
+    flush: createFlushScheduler(),
     terminal: {
       isMultiplexed: () => !!process.env.TMUX || (process.env.TERM ?? "").startsWith("screen"),
     },
