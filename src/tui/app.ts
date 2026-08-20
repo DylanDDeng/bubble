@@ -35,6 +35,7 @@ import {
 import { StreamingMessageComponent } from "./components/streaming-message.js";
 import { ResponsiveTranscriptComponent } from "./components/responsive-transcript.js";
 import { WelcomeBannerComponent } from "./components/welcome.js";
+import { ApprovalDialogComponent, type ApprovalDialogChoice } from "./components/approval-dialog.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import type { SlashCommandContext } from "../slash-commands/types.js";
 import { BubbleTuiController } from "./controller/controller.js";
@@ -258,6 +259,11 @@ export class PiTuiApp {
       // Global shortcuts act on key presses only. Kitty keyboard protocol also
       // reports releases; allowing those through can trigger a shortcut twice.
       if (isKeyRelease(data)) return { consume: true };
+      // Modal dialogs own their complete keyboard contract. In particular,
+      // an approval arrives while a run is active, so letting the global
+      // Escape/Ctrl+C handler run first would cancel the agent and strand the
+      // unresolved permission request instead of rejecting the dialog.
+      if (this.tui.hasOverlay()) return undefined;
       if (matchesKey(data, "shift+tab")) {
         this.options.agent.setMode(getNextPermissionMode(this.options.agent.mode));
         this.renderSnapshot();
@@ -527,17 +533,25 @@ export class PiTuiApp {
     return choice?.value === "approve";
   }
 
-  private async approvalDialog(_request: ApprovalRequest): Promise<boolean> {
-    const title = chalk.cyan("Tool approval");
-    const choice = await this.selectOverlay(
-      [
-        { value: "approve", label: "Allow once" },
-        { value: "always", label: "Always allow" },
-        { value: "reject", label: "Deny" },
-      ],
-      title,
-    );
-    return choice?.value === "approve" || choice?.value === "always";
+  private approvalDialog(request: ApprovalRequest): Promise<boolean> {
+    return new Promise((resolve) => {
+      const dialog = new ApprovalDialogComponent(request, () => this.tui.terminal.rows);
+      const handle = this.tui.showOverlay(dialog, {
+        anchor: "bottom-center",
+        width: "100%",
+        margin: { left: 1, right: 1 },
+      });
+      const finish = (choice: ApprovalDialogChoice) => {
+        handle.hide();
+        if (choice === "approve_always") {
+          this.options.agent.setMode("bypassPermissions");
+        }
+        resolve(choice === "approve_once" || choice === "approve_always");
+      };
+      dialog.onSelect = finish;
+      dialog.onCancel = () => finish("reject");
+      this.tui.setFocus(dialog);
+    });
   }
 
   private async questionDialog(id: string, questions: string[]): Promise<void> {

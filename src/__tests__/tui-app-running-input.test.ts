@@ -224,17 +224,23 @@ describe("main pi-tui running input", () => {
   it("returns keyboard focus to the composer after approving or denying a tool", async () => {
     const terminal = new VirtualTerminal(80, 14);
     const turns: string[] = [];
+    const modes: string[] = [];
+    let running = false;
+    let cancelCalls = 0;
     const approvalHandlerRef: { current?: (request: unknown) => Promise<unknown> } = {};
     const planHandlerRef: { current?: (plan: string) => Promise<unknown> } = {};
     const controller = {
       subscribe: () => () => {},
       getTranscript: () => [],
-      isRunning: () => false,
+      isRunning: () => running,
       getStreamingTail: () => ({ content: "", reasoning: "", tools: [], parts: [], phase: "idle" as const }),
       pendingSteerCount: () => 0,
       queuedInputCount: () => 0,
       steer: () => false,
-      cancelActiveRun: () => false,
+      cancelActiveRun: () => {
+        cancelCalls += 1;
+        return running;
+      },
       runTurn: async (content: string) => { turns.push(content); },
       appendDisplayMessage: () => {},
       clearTranscript: () => {},
@@ -244,6 +250,11 @@ describe("main pi-tui running input", () => {
       model: "test-model",
       providerId: "test-provider",
       thinking: "medium",
+      mode: "default",
+      setMode(next: string) {
+        this.mode = next;
+        modes.push(next);
+      },
       getContextUsageSnapshot: () => ({ usedTokens: 0, contextWindow: 1_000 }),
     };
     const app = new PiTuiApp({
@@ -264,7 +275,14 @@ describe("main pi-tui running input", () => {
 
     app.start();
     try {
-      const approved = approvalHandlerRef.current!({ kind: "bash", command: "pwd" });
+      const approved = approvalHandlerRef.current!({ type: "bash", command: "pwd", cwd: "/workspace" });
+      await terminal.waitForRender();
+      const approvalViewport = terminal.getViewport().join("\n");
+      expect(approvalViewport).toContain("Request approval for pwd");
+      expect(approvalViewport).toContain("working directory: /workspace");
+      expect(approvalViewport).toContain("1 (●) Yes, proceed");
+      expect(approvalViewport).toContain("2 (○) Yes, don't ask again");
+      expect(approvalViewport).not.toContain("Tool approval");
       terminal.sendInput("\r");
       await expect(approved).resolves.toEqual({ action: "approve" });
 
@@ -273,9 +291,12 @@ describe("main pi-tui running input", () => {
       await terminal.waitForRender();
       expect(turns).toEqual(["fourth message"]);
 
-      const denied = approvalHandlerRef.current!({ kind: "bash", command: "ls" });
+      const denied = approvalHandlerRef.current!({ type: "bash", command: "ls", cwd: "/workspace" });
+      running = true;
       terminal.sendInput("\x1b");
       await expect(denied).resolves.toEqual({ action: "reject", feedback: "User denied the tool call." });
+      expect(cancelCalls).toBe(0);
+      running = false;
 
       terminal.sendInput("fifth message");
       terminal.sendInput("\r");
@@ -290,6 +311,15 @@ describe("main pi-tui running input", () => {
       terminal.sendInput("\r");
       await terminal.waitForRender();
       expect(turns).toEqual(["fourth message", "fifth message", "sixth message"]);
+
+      const alwaysApproved = approvalHandlerRef.current!({
+        type: "bash",
+        command: "npm run build",
+        cwd: "/workspace",
+      });
+      terminal.sendInput("\x0f");
+      await expect(alwaysApproved).resolves.toEqual({ action: "approve" });
+      expect(modes).toEqual(["bypassPermissions"]);
     } finally {
       app.dispose();
     }
