@@ -29,6 +29,7 @@ import {
   type Terminal,
   type Component,
   matchesKey,
+  isKeyRelease,
   isViewportTUI,
 } from "@bubblebrain-ai/pi-tui";
 import { StreamingMessageComponent } from "./components/streaming-message.js";
@@ -42,6 +43,7 @@ import { defaultTranscriptTheme } from "./components/transcript.js";
 import { friendlyCwd, sessionBasename } from "./formatting/summary.js";
 import { ResponsiveFooterComponent } from "./footer.js";
 import { ComposerAutocompleteProvider } from "./composer-autocomplete.js";
+import { COMPOSER_EDITOR_OPTIONS, COMPOSER_EDITOR_THEME } from "./composer-style.js";
 import type { Agent } from "../agent.js";
 import type { SessionManager } from "../session.js";
 import type { ProviderRegistry } from "../provider-registry.js";
@@ -143,7 +145,7 @@ export class PiTuiApp {
     this.tui = (options.uiMode ?? "fullscreen") === "fullscreen"
       ? new TuiAltScreen(terminal)
       : new TuiMainScreen(terminal);
-    this.editor = new Editor(this.tui, EDITOR_THEME);
+    this.editor = new Editor(this.tui, COMPOSER_EDITOR_THEME, COMPOSER_EDITOR_OPTIONS);
     this.editor.setAutocompleteProvider(new ComposerAutocompleteProvider({
       cwd: process.cwd(),
       commands: () => slashRegistry.list(),
@@ -253,17 +255,20 @@ export class PiTuiApp {
   private wireInput(): void {
     let ctrlCArmed = false;
     this.tui.addInputListener((data: string) => {
+      // Global shortcuts act on key presses only. Kitty keyboard protocol also
+      // reports releases; allowing those through can trigger a shortcut twice.
+      if (isKeyRelease(data)) return { consume: true };
       if (matchesKey(data, "shift+tab")) {
         this.options.agent.setMode(getNextPermissionMode(this.options.agent.mode));
         this.renderSnapshot();
         return { consume: true };
       }
-      if (data === "\x1b" && this.options.controller.cancelActiveRun()) {
+      if (matchesKey(data, "escape") && this.options.controller.cancelActiveRun()) {
         // Ink parity: Escape interrupts an active run. When idle, leave the
         // key unconsumed so the editor/autocomplete layer can handle it.
         return { consume: true };
       }
-      if (data === "\x03") {
+      if (matchesKey(data, "ctrl+c")) {
         // Match Ink: the first Ctrl+C interrupts the active run. Requiring a
         // second keypress here made cancellation feel like a quit gesture and
         // left the tool trace running behind the composer.

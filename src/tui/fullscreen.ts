@@ -10,7 +10,6 @@
  * Toggle with /fullscreen; Escape exits back to the main screen.
  */
 import process from "node:process";
-import chalk from "chalk";
 import {
   ProcessTerminal,
   TuiAltScreen,
@@ -19,6 +18,7 @@ import {
   ScrollView,
   Editor,
   matchesKey,
+  isKeyRelease,
 } from "@bubblebrain-ai/pi-tui";
 import { ResponsiveTranscriptComponent } from "./components/responsive-transcript.js";
 import { StreamingMessageComponent } from "./components/streaming-message.js";
@@ -27,6 +27,7 @@ import type { BubbleTuiController } from "./controller/controller.js";
 import { ResponsiveFooterComponent } from "./footer.js";
 import { getNextPermissionMode } from "../permission/mode.js";
 import type { Agent } from "../agent.js";
+import { COMPOSER_EDITOR_OPTIONS, COMPOSER_EDITOR_THEME } from "./composer-style.js";
 
 export interface FullscreenAppOptions {
   controller: BubbleTuiController;
@@ -53,16 +54,7 @@ export class FullscreenApp {
   constructor(private readonly options: FullscreenAppOptions) {
     const terminal = options.terminal ?? new ProcessTerminal();
     this.tui = new TuiAltScreen(terminal);
-    this.editor = new Editor(this.tui, {
-      borderColor: (str: string) => chalk.cyan.dim(str),
-      selectList: {
-        selectedPrefix: () => chalk.cyan("› "),
-        selectedText: (str: string) => str,
-        description: (str: string) => chalk.dim(str),
-        scrollInfo: (str: string) => chalk.dim(str),
-        noMatch: (str: string) => chalk.dim(str),
-      },
-    });
+    this.editor = new Editor(this.tui, COMPOSER_EDITOR_THEME, COMPOSER_EDITOR_OPTIONS);
     this.transcript = new ResponsiveTranscriptComponent(() => ({
       messages: this.options.controller.getTranscript(),
       options: {
@@ -116,19 +108,22 @@ export class FullscreenApp {
     };
 
     this.tui.addInputListener((data: string) => {
+      // Kitty reports key releases separately. Global shortcuts must only run
+      // on the press or Escape would cancel the run and exit on key-up.
+      if (isKeyRelease(data)) return { consume: true };
       if (matchesKey(data, "shift+tab")) {
         this.options.agent.setMode(getNextPermissionMode(this.options.agent.mode));
         this.render();
         return { consume: true };
       }
-      if (data === "\x1b") {
+      if (matchesKey(data, "escape")) {
         if (this.options.controller.cancelActiveRun()) {
           return { consume: true };
         }
         this.options.onExit();
         return { consume: true };
       }
-      if (data === "\x03") {
+      if (matchesKey(data, "ctrl+c")) {
         if (this.options.controller.cancelActiveRun()) {
           return { consume: true };
         }

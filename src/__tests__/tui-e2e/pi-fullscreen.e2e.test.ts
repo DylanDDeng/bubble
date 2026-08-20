@@ -24,6 +24,10 @@ describe.skipIf(process.env.BUBBLE_SKIP_PTY_E2E === "1")("pi-tui fullscreen e2e"
 
   it("enters fullscreen before rendering the first product frame", async () => {
     await session!.waitForViewport("I am a cat", 10_000);
+    const viewport = session!.viewport().join("\n");
+    expect(viewport).toContain("│ >");
+    expect(viewport).toContain("┌");
+    expect(viewport).toContain("└");
     const output = session!.output();
     const altScreenEntry = output.indexOf("\x1b[?1049h");
     expect(altScreenEntry).toBeGreaterThanOrEqual(0);

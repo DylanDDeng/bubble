@@ -725,6 +725,30 @@ describe("Editor component", () => {
 		});
 	});
 
+	describe("Box border and prompt", () => {
+		it("renders a square box, aligns continuation rows, and keeps CJK content within width", () => {
+			const width = 12;
+			const editor = new Editor(
+				createTestTUI(width),
+				{ ...defaultEditorTheme, borderColor: (text) => text },
+				{ borderStyle: "box", paddingX: 1, prompt: "> " },
+			);
+			editor.setText("你好abcdef");
+
+			const lines = editor.render(width);
+			const plain = lines.map((line) => stripVTControlCharacters(line));
+
+			assert.strictEqual(plain[0], "┌──────────┐");
+			assert.match(plain[1]!, /^│ > 你好/);
+			assert.match(plain[2]!, /^│   /);
+			assert.strictEqual(plain.at(-1), "└──────────┘");
+			assert.strictEqual(plain.slice(1, -1).filter((line) => line.includes("> ")).length, 1);
+			for (const line of lines) {
+				assert.strictEqual(visibleWidth(line), width, `line exceeds width ${width}: ${JSON.stringify(line)}`);
+			}
+		});
+	});
+
 	describe("Grapheme-aware text wrapping", () => {
 		it("wraps lines correctly when text contains wide emojis", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);

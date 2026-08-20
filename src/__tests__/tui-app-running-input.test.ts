@@ -56,7 +56,11 @@ describe("main pi-tui running input", () => {
       const altScreenEntry = output.indexOf("\x1b[?1049h");
       expect(altScreenEntry).toBeGreaterThanOrEqual(0);
       expect(output.slice(0, altScreenEntry)).not.toContain("I am a cat");
-      expect(terminal.getViewport().join("\n")).toContain("I am a cat");
+      const initialViewport = terminal.getViewport().join("\n");
+      expect(initialViewport).toContain("I am a cat");
+      expect(initialViewport).toContain("┌");
+      expect(initialViewport).toContain("│ >");
+      expect(initialViewport).toContain("└");
 
       terminal.sendInput("/he");
       await terminal.waitForRender();
@@ -193,6 +197,18 @@ describe("main pi-tui running input", () => {
     expect(exits).toBe(0);
     terminal.sendInput("\x1b");
     expect(cancellations).toBe(2);
+    expect(exits).toBe(0);
+
+    // Escape/Ctrl+C are encoded once extended keyboard protocols are active.
+    terminal.sendInput("\x1b[27;1;27~");
+    expect(cancellations).toBe(3);
+    terminal.sendInput("\x1b[27u");
+    expect(cancellations).toBe(4);
+    terminal.sendInput("\x1b[99;5u");
+    expect(cancellations).toBe(5);
+    // Kitty release events must not invoke the global shortcut a second time.
+    terminal.sendInput("\x1b[27;1:3u");
+    expect(cancellations).toBe(5);
     expect(exits).toBe(0);
 
     terminal.sendInput("/fullscreen");

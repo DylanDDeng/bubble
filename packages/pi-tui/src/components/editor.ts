@@ -233,6 +233,10 @@ export interface EditorTheme {
 export interface EditorOptions {
 	paddingX?: number;
 	autocompleteMaxVisible?: number;
+	/** Horizontal rules (legacy/default) or a complete square-cornered box. */
+	borderStyle?: "horizontal" | "box";
+	/** Fixed prompt rendered before the first visual input line. */
+	prompt?: string;
 }
 
 const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
@@ -280,6 +284,8 @@ export class Editor implements Component, Focusable {
 	protected tui: TUI;
 	private theme: EditorTheme;
 	private paddingX: number = 0;
+	private borderStyle: "horizontal" | "box" = "horizontal";
+	private prompt: string = "";
 
 	// Store last render width for cursor navigation
 	private lastWidth: number = 80;
@@ -348,6 +354,8 @@ export class Editor implements Component, Focusable {
 		this.borderColor = theme.borderColor;
 		const paddingX = options.paddingX ?? 0;
 		this.paddingX = Number.isFinite(paddingX) ? Math.max(0, Math.floor(paddingX)) : 0;
+		this.borderStyle = options.borderStyle ?? "horizontal";
+		this.prompt = (options.prompt ?? "").replace(/[\r\n]/g, " ");
 		const maxVisible = options.autocompleteMaxVisible ?? 5;
 		this.autocompleteMaxVisible = Number.isFinite(maxVisible) ? Math.max(3, Math.min(20, Math.floor(maxVisible))) : 5;
 	}
@@ -480,18 +488,32 @@ export class Editor implements Component, Focusable {
 	}
 
 	render(width: number): string[] {
-		const maxPadding = Math.max(0, Math.floor((width - 1) / 2));
+		// A complete box consumes one column on each side. At widths below three
+		// cells there is no room for both sides and an editable cursor cell, so the
+		// legacy horizontal geometry remains the only representable layout.
+		const boxed = this.borderStyle === "box" && width >= 3;
+		const borderInnerWidth = boxed ? width - 2 : width;
+		const maxPadding = Math.max(0, Math.floor((borderInnerWidth - 1) / 2));
 		const paddingX = Math.min(this.paddingX, maxPadding);
-		const contentWidth = Math.max(1, width - paddingX * 2);
+		const contentWidth = Math.max(1, borderInnerWidth - paddingX * 2);
+		// Always preserve one editable cell; truncate an over-wide configured
+		// prompt rather than letting it push the cursor through the right border.
+		const prompt = sliceByColumn(this.prompt, 0, Math.max(0, contentWidth - 1), true);
+		const promptWidth = visibleWidth(prompt);
+		const editableWidth = Math.max(1, contentWidth - promptWidth);
 
 		// Layout width: with padding the cursor can overflow into it,
 		// without padding we reserve 1 column for the cursor.
-		const layoutWidth = Math.max(1, contentWidth - (paddingX ? 0 : 1));
+		const layoutWidth = Math.max(1, editableWidth - (paddingX ? 0 : 1));
 
 		// Store for cursor navigation (must match wrapping width)
 		this.lastWidth = layoutWidth;
 
-		const horizontal = this.borderColor("─");
+		const horizontal = "─".repeat(Math.max(0, boxed ? width - 2 : width));
+		const renderBorder = (position: "top" | "bottom", body: string): string => {
+			if (!boxed) return this.borderColor(body);
+			return this.borderColor(`${position === "top" ? "┌" : "└"}${body}${position === "top" ? "┐" : "┘"}`);
+		};
 
 		// Layout the text
 		const layoutLines = this.layoutText(layoutWidth);
@@ -528,10 +550,10 @@ export class Editor implements Component, Focusable {
 
 		// Render top border (with scroll indicator if scrolled down)
 		if (this.scrollOffset > 0) {
-			const border = createScrollBorder("↑", this.scrollOffset, width);
-			result.push(this.borderColor(border));
+			const border = createScrollBorder("↑", this.scrollOffset, boxed ? width - 2 : width);
+			result.push(renderBorder("top", border));
 		} else {
-			result.push(horizontal.repeat(width));
+			result.push(renderBorder("top", horizontal));
 		}
 
 		// Render each visible layout line
@@ -540,10 +562,12 @@ export class Editor implements Component, Focusable {
 		// autocomplete (e.g. slash-command menu) is visible.
 		const emitCursorMarker = this.focused;
 
-		for (const layoutLine of visibleLines) {
+		for (let visibleIndex = 0; visibleIndex < visibleLines.length; visibleIndex++) {
+			const layoutLine = visibleLines[visibleIndex]!;
 			let displayText = layoutLine.text;
 			let lineVisibleWidth = visibleWidth(layoutLine.text);
 			let cursorInPadding = false;
+			const linePrompt = this.scrollOffset + visibleIndex === 0 ? prompt : " ".repeat(promptWidth);
 
 			// Add cursor if this line has it
 			if (layoutLine.hasCursor && layoutLine.cursorPos !== undefined) {
@@ -568,27 +592,27 @@ export class Editor implements Component, Focusable {
 					displayText = before + marker + cursor;
 					lineVisibleWidth = lineVisibleWidth + 1;
 					// If cursor overflows content width into the padding, flag it
-					if (lineVisibleWidth > contentWidth && paddingX > 0) {
+					if (lineVisibleWidth > editableWidth && paddingX > 0) {
 						cursorInPadding = true;
 					}
 				}
 			}
 
 			// Calculate padding based on actual visible width
-			const padding = " ".repeat(Math.max(0, contentWidth - lineVisibleWidth));
+			const padding = " ".repeat(Math.max(0, editableWidth - lineVisibleWidth));
 			const lineRightPadding = cursorInPadding ? rightPadding.slice(1) : rightPadding;
 
-			// Render the line (no side borders, just horizontal lines above and below)
-			result.push(`${leftPadding}${displayText}${padding}${lineRightPadding}`);
+			const body = `${leftPadding}${linePrompt}${displayText}${padding}${lineRightPadding}`;
+			result.push(boxed ? `${this.borderColor("│")}${body}${this.borderColor("│")}` : body);
 		}
 
 		// Render bottom border (with scroll indicator if more content below)
 		const linesBelow = layoutLines.length - (this.scrollOffset + visibleLines.length);
 		if (linesBelow > 0) {
-			const border = createScrollBorder("↓", linesBelow, width);
-			result.push(this.borderColor(border));
+			const border = createScrollBorder("↓", linesBelow, boxed ? width - 2 : width);
+			result.push(renderBorder("bottom", border));
 		} else {
-			result.push(horizontal.repeat(width));
+			result.push(renderBorder("bottom", horizontal));
 		}
 
 		// Add autocomplete list if active
@@ -597,7 +621,8 @@ export class Editor implements Component, Focusable {
 			for (const line of autocompleteResult) {
 				const lineWidth = visibleWidth(line);
 				const linePadding = " ".repeat(Math.max(0, contentWidth - lineWidth));
-				result.push(`${leftPadding}${line}${linePadding}${rightPadding}`);
+				const outerPadding = boxed ? " " : "";
+				result.push(`${outerPadding}${leftPadding}${line}${linePadding}${rightPadding}${outerPadding}`);
 			}
 		}
 

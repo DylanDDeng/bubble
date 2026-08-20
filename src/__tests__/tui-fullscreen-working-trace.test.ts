@@ -142,6 +142,17 @@ describe("fullscreen working trace", () => {
     expect(cancellations).toBe(2);
     expect(exits).toBe(0);
 
+    terminal.sendInput("\x1b[27;1;27~");
+    expect(cancellations).toBe(3);
+    terminal.sendInput("\x1b[27u");
+    expect(cancellations).toBe(4);
+    terminal.sendInput("\x1b[99;5u");
+    expect(cancellations).toBe(5);
+    // Releasing Escape after cancelling must not exit fullscreen.
+    terminal.sendInput("\x1b[27;1:3u");
+    expect(cancellations).toBe(5);
+    expect(exits).toBe(0);
+
     app.dispose();
     expect(unsubscribed).toBe(1);
   });
