@@ -39,7 +39,11 @@ describe.skipIf(process.env.BUBBLE_SKIP_PTY_E2E === "1")("pi-tui app PTY e2e (pr
 
   it("shows slash-command suggestions while typing", async () => {
     session!.write("\x15/he");
-    await session!.waitForViewport("Show available slash commands", 5_000);
+    const viewport = await session!.waitForViewport("Show available slash commands", 5_000);
+    const suggestionRow = viewport.findIndex((line) => line.includes("Show available slash commands"));
+    const composerRow = viewport.findIndex((line) => line.includes("> /he"));
+    expect(suggestionRow).toBeGreaterThanOrEqual(0);
+    expect(composerRow).toBeGreaterThan(suggestionRow);
     session!.write("\x1b");
     await new Promise((resolve) => setTimeout(resolve, 50));
     session!.write("\x15");

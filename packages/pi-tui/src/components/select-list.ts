@@ -18,6 +18,8 @@ export interface SelectItem {
 export interface SelectListTheme {
 	selectedPrefix: (text: string) => string;
 	selectedText: (text: string) => string;
+	/** Optional full-width treatment for the selected suggestion row. */
+	selectedRow?: (text: string) => string;
 	description: (text: string) => string;
 	scrollInfo: (text: string) => string;
 	noMatch: (text: string) => string;
@@ -71,7 +73,7 @@ export class SelectList implements Component {
 		// No cached state to invalidate currently
 	}
 
-	render(width: number): string[] {
+	render(width: number, maxRows?: number): string[] {
 		const lines: string[] = [];
 
 		// If no items match filter, show message
@@ -82,12 +84,26 @@ export class SelectList implements Component {
 
 		const primaryColumnWidth = this.getPrimaryColumnWidth();
 
-		// Calculate visible range with scrolling
-		const startIndex = Math.max(
-			0,
-			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), this.filteredItems.length - this.maxVisible),
-		);
-		const endIndex = Math.min(startIndex + this.maxVisible, this.filteredItems.length);
+		const rowBudget = maxRows === undefined
+			? undefined
+			: Math.max(1, Number.isFinite(maxRows) ? Math.floor(maxRows) : this.maxVisible);
+		let visibleItemLimit = Math.min(this.maxVisible, rowBudget ?? this.maxVisible);
+		const calculateVisibleRange = (limit: number): { startIndex: number; endIndex: number } => {
+			const startIndex = Math.max(
+				0,
+				Math.min(this.selectedIndex - Math.floor(limit / 2), this.filteredItems.length - limit),
+			);
+			return { startIndex, endIndex: Math.min(startIndex + limit, this.filteredItems.length) };
+		};
+		let { startIndex, endIndex } = calculateVisibleRange(visibleItemLimit);
+		let needsScrollInfo = startIndex > 0 || endIndex < this.filteredItems.length;
+		// When a caller supplies a strict row budget, keep the selected item and
+		// reserve the last row for the scroll indicator whenever space allows.
+		if (rowBudget !== undefined && rowBudget > 1 && needsScrollInfo && endIndex - startIndex >= rowBudget) {
+			visibleItemLimit = rowBudget - 1;
+			({ startIndex, endIndex } = calculateVisibleRange(visibleItemLimit));
+			needsScrollInfo = startIndex > 0 || endIndex < this.filteredItems.length;
+		}
 
 		// Render visible items
 		for (let i = startIndex; i < endIndex; i++) {
@@ -96,11 +112,17 @@ export class SelectList implements Component {
 
 			const isSelected = i === this.selectedIndex;
 			const descriptionSingleLine = item.description ? normalizeToSingleLine(item.description) : undefined;
-			lines.push(this.renderItem(item, isSelected, width, descriptionSingleLine, primaryColumnWidth));
+			const renderedItem = this.renderItem(item, isSelected, width, descriptionSingleLine, primaryColumnWidth);
+			if (isSelected && this.theme.selectedRow) {
+				const rowPadding = " ".repeat(Math.max(0, width - visibleWidth(renderedItem)));
+				lines.push(this.theme.selectedRow(renderedItem + rowPadding));
+			} else {
+				lines.push(renderedItem);
+			}
 		}
 
 		// Add scroll indicators if needed
-		if (startIndex > 0 || endIndex < this.filteredItems.length) {
+		if (needsScrollInfo && (rowBudget === undefined || lines.length < rowBudget)) {
 			const scrollText = `  (${this.selectedIndex + 1}/${this.filteredItems.length})`;
 			// Truncate if too long for terminal
 			lines.push(this.theme.scrollInfo(truncateToWidth(scrollText, width - 2, "")));

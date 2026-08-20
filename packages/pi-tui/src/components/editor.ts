@@ -227,12 +227,18 @@ interface LayoutLine {
 
 export interface EditorTheme {
 	borderColor: (str: string) => string;
+	/** Background fill applied to the complete autocomplete content row. */
+	autocompleteBackground?: (str: string) => string;
 	selectList: SelectListTheme;
 }
 
 export interface EditorOptions {
 	paddingX?: number;
 	autocompleteMaxVisible?: number;
+	/** Render autocomplete before or after the editor. Defaults to below. */
+	autocompletePlacement?: "above" | "below";
+	/** Optional frame around autocomplete suggestions. Defaults to none. */
+	autocompleteBorderStyle?: "none" | "box";
 	/** Horizontal rules (legacy/default) or a complete square-cornered box. */
 	borderStyle?: "horizontal" | "box";
 	/** Fixed prompt rendered before the first visual input line. */
@@ -283,9 +289,12 @@ export class Editor implements Component, Focusable {
 
 	protected tui: TUI;
 	private theme: EditorTheme;
+	private autocompleteBackground: (str: string) => string;
 	private paddingX: number = 0;
 	private borderStyle: "horizontal" | "box" = "horizontal";
 	private prompt: string = "";
+	private autocompletePlacement: "above" | "below" = "below";
+	private autocompleteBorderStyle: "none" | "box" = "none";
 
 	// Store last render width for cursor navigation
 	private lastWidth: number = 80;
@@ -352,10 +361,13 @@ export class Editor implements Component, Focusable {
 		this.tui = tui;
 		this.theme = theme;
 		this.borderColor = theme.borderColor;
+		this.autocompleteBackground = theme.autocompleteBackground ?? ((str: string) => str);
 		const paddingX = options.paddingX ?? 0;
 		this.paddingX = Number.isFinite(paddingX) ? Math.max(0, Math.floor(paddingX)) : 0;
 		this.borderStyle = options.borderStyle ?? "horizontal";
 		this.prompt = (options.prompt ?? "").replace(/[\r\n]/g, " ");
+		this.autocompletePlacement = options.autocompletePlacement ?? "below";
+		this.autocompleteBorderStyle = options.autocompleteBorderStyle ?? "none";
 		const maxVisible = options.autocompleteMaxVisible ?? 5;
 		this.autocompleteMaxVisible = Number.isFinite(maxVisible) ? Math.max(3, Math.min(20, Math.floor(maxVisible))) : 5;
 	}
@@ -547,6 +559,44 @@ export class Editor implements Component, Focusable {
 		const result: string[] = [];
 		const leftPadding = " ".repeat(paddingX);
 		const rightPadding = leftPadding;
+		const autocompleteLines: string[] = [];
+		const autocompleteBoxed = this.autocompleteBorderStyle === "box" && width >= 3;
+		const autocompleteRowBudget = Math.max(
+			0,
+			terminalRows - visibleLines.length - 2 - 1 - (autocompleteBoxed ? 2 : 0),
+		);
+
+		if (this.autocompleteState && this.autocompleteList && autocompleteRowBudget > 0) {
+			if (autocompleteBoxed) {
+				const autocompleteInnerWidth = width - 2;
+				const autocompletePaddingX = Math.min(
+					this.paddingX,
+					Math.max(0, Math.floor((autocompleteInnerWidth - 1) / 2)),
+				);
+				const autocompleteContentWidth = Math.max(1, autocompleteInnerWidth - autocompletePaddingX * 2);
+				const autocompletePadding = " ".repeat(autocompletePaddingX);
+				autocompleteLines.push(this.borderColor(`┌${"─".repeat(autocompleteInnerWidth)}┐`));
+				for (const line of this.autocompleteList.render(autocompleteContentWidth, autocompleteRowBudget)) {
+					const lineWidth = visibleWidth(line);
+					const linePadding = " ".repeat(Math.max(0, autocompleteContentWidth - lineWidth));
+					const row = `${autocompletePadding}${line}${linePadding}${autocompletePadding}`;
+					autocompleteLines.push(
+						`${this.borderColor("│")}${this.autocompleteBackground(row)}${this.borderColor("│")}`,
+					);
+				}
+				autocompleteLines.push(this.borderColor(`└${"─".repeat(autocompleteInnerWidth)}┘`));
+			} else {
+				for (const line of this.autocompleteList.render(contentWidth, autocompleteRowBudget)) {
+					const lineWidth = visibleWidth(line);
+					const linePadding = " ".repeat(Math.max(0, contentWidth - lineWidth));
+					const outerPadding = boxed ? " " : "";
+					const row = `${outerPadding}${leftPadding}${line}${linePadding}${rightPadding}${outerPadding}`;
+					autocompleteLines.push(this.autocompleteBackground(row));
+				}
+			}
+		}
+
+		if (this.autocompletePlacement === "above") result.push(...autocompleteLines);
 
 		// Render top border (with scroll indicator if scrolled down)
 		if (this.scrollOffset > 0) {
@@ -615,16 +665,7 @@ export class Editor implements Component, Focusable {
 			result.push(renderBorder("bottom", horizontal));
 		}
 
-		// Add autocomplete list if active
-		if (this.autocompleteState && this.autocompleteList) {
-			const autocompleteResult = this.autocompleteList.render(contentWidth);
-			for (const line of autocompleteResult) {
-				const lineWidth = visibleWidth(line);
-				const linePadding = " ".repeat(Math.max(0, contentWidth - lineWidth));
-				const outerPadding = boxed ? " " : "";
-				result.push(`${outerPadding}${leftPadding}${line}${linePadding}${rightPadding}${outerPadding}`);
-			}
-		}
+		if (this.autocompletePlacement === "below") result.push(...autocompleteLines);
 
 		return result;
 	}

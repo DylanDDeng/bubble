@@ -747,6 +747,139 @@ describe("Editor component", () => {
 				assert.strictEqual(visibleWidth(line), width, `line exceeds width ${width}: ${JSON.stringify(line)}`);
 			}
 		});
+
+		it("renders boxed autocomplete above the composer at the exact terminal width", async () => {
+			const width = 28;
+			const editor = new Editor(
+				createTestTUI(width),
+				{
+					...defaultEditorTheme,
+					borderColor: (text) => text,
+					autocompleteBackground: (text) => `\x1b[48;5;236m${text}\x1b[49m`,
+					selectList: {
+						...defaultEditorTheme.selectList,
+						selectedRow: (text) => `\x1b[48;5;238m${text}\x1b[49m`,
+					},
+				},
+				{
+					borderStyle: "box",
+					paddingX: 1,
+					prompt: "> ",
+					autocompletePlacement: "above",
+					autocompleteBorderStyle: "box",
+				},
+			);
+			editor.setAutocompleteProvider({
+				getSuggestions: async () => ({
+					items: [
+						{ value: "/help", label: "/help", description: "Show commands" },
+						{ value: "/model", label: "/model", description: "Switch model" },
+					],
+					prefix: "/",
+				}),
+				applyCompletion,
+			});
+
+			editor.handleInput("/");
+			await flushAutocomplete();
+
+			const lines = editor.render(width);
+			const plain = lines.map((line) => stripVTControlCharacters(line));
+			const suggestionRow = plain.findIndex((line) => line.includes("/help"));
+			const composerRow = plain.findIndex((line) => line.includes("> /"));
+			const topBorders = plain
+				.map((line, index) => ({ line, index }))
+				.filter(({ line }) => line === `┌${"─".repeat(width - 2)}┐`)
+				.map(({ index }) => index);
+
+			assert.ok(suggestionRow >= 0);
+			assert.ok(composerRow > suggestionRow);
+			assert.deepStrictEqual(topBorders, [0, 4]);
+			assert.strictEqual(plain[3], `└${"─".repeat(width - 2)}┘`);
+			assert.strictEqual(plain.at(-1), `└${"─".repeat(width - 2)}┘`);
+			assert.match(lines[suggestionRow]!, /\x1b\[48;5;236m/);
+			assert.match(lines[suggestionRow]!, /\x1b\[48;5;238m/);
+			for (const line of lines) {
+				assert.strictEqual(visibleWidth(line), width, `line exceeds width ${width}: ${JSON.stringify(line)}`);
+			}
+		});
+
+		it("renders an unframed background panel above the composer", async () => {
+			const width = 28;
+			const editor = new Editor(
+				createTestTUI(width),
+				{
+					...defaultEditorTheme,
+					borderColor: (text) => text,
+					autocompleteBackground: (text) => `\x1b[48;5;236m${text}\x1b[49m`,
+					selectList: {
+						...defaultEditorTheme.selectList,
+						selectedRow: (text) => `\x1b[48;5;238m${text}\x1b[49m`,
+					},
+				},
+				{
+					borderStyle: "box",
+					paddingX: 1,
+					prompt: "> ",
+					autocompletePlacement: "above",
+					autocompleteBorderStyle: "none",
+				},
+			);
+			editor.setAutocompleteProvider({
+				getSuggestions: async () => ({
+					items: [{ value: "/help", label: "/help", description: "Show commands" }],
+					prefix: "/",
+				}),
+				applyCompletion,
+			});
+
+			editor.handleInput("/");
+			await flushAutocomplete();
+
+			const lines = editor.render(width);
+			const plain = lines.map((line) => stripVTControlCharacters(line));
+			assert.match(plain[0]!, /\/help/);
+			assert.strictEqual(plain[1], `┌${"─".repeat(width - 2)}┐`);
+			assert.ok(!plain[0]!.includes("┌") && !plain[0]!.includes("│") && !plain[0]!.includes("└"));
+			assert.match(lines[0]!, /\x1b\[48;5;236m/);
+			assert.match(lines[0]!, /\x1b\[48;5;238m/);
+			assert.strictEqual(visibleWidth(lines[0]!), width);
+		});
+
+		it("caps the popup above the composer in a short terminal", async () => {
+			const width = 24;
+			const rows = 7;
+			const editor = new Editor(
+				createTestTUI(width, rows),
+				{ ...defaultEditorTheme, borderColor: (text) => text },
+				{
+					borderStyle: "box",
+					paddingX: 1,
+					prompt: "> ",
+					autocompletePlacement: "above",
+					autocompleteBorderStyle: "box",
+				},
+			);
+			editor.setAutocompleteProvider({
+				getSuggestions: async () => ({
+					items: Array.from({ length: 8 }, (_, index) => ({
+						value: `/command-${index}`,
+						label: `/command-${index}`,
+					})),
+					prefix: "/",
+				}),
+				applyCompletion,
+			});
+
+			editor.handleInput("/");
+			await flushAutocomplete();
+
+			const lines = editor.render(width);
+			const plain = lines.map((line) => stripVTControlCharacters(line));
+			assert.ok(lines.length <= rows - 1, "editor must reserve one terminal row for the footer");
+			assert.ok(plain.findIndex((line) => line.includes("/command-0")) < plain.findIndex((line) => line.includes("> /")));
+			assert.strictEqual(plain.at(-1), `└${"─".repeat(width - 2)}┘`);
+		});
 	});
 
 	describe("Grapheme-aware text wrapping", () => {
