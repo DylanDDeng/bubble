@@ -46,7 +46,7 @@ export function renderFooterLine(
   const mode = renderPermissionModeBadge(options.mode);
   const parts = [
     ...(mode ? [mode] : []),
-    chalk.cyan(agent.model),
+    chalk.dim(agent.model),
     chalk.dim(cwd),
     chalk.dim(usage),
     ...(options.extra ?? []),

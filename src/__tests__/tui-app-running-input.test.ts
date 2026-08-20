@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { VirtualTerminal } from "@bubblebrain-ai/pi-tui/testing";
 import { PiTuiApp } from "../tui/app.js";
+import { QuestionController, QuestionRejectedError } from "../question/index.js";
 
 class RecordingTerminal extends VirtualTerminal {
   readonly output: string[] = [];
@@ -179,6 +180,7 @@ describe("main pi-tui running input", () => {
       },
       questionController: {
         subscribe: () => () => { questionUnsubscribed += 1; },
+        rejectAll: () => {},
       } as never,
       terminal,
       uiMode: "regular",
@@ -320,6 +322,112 @@ describe("main pi-tui running input", () => {
       terminal.sendInput("\x0f");
       await expect(alwaysApproved).resolves.toEqual({ action: "approve" });
       expect(modes).toEqual(["bypassPermissions"]);
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("renders structured questions, returns choices, and keeps modal Escape away from run cancellation", async () => {
+    const terminal = new VirtualTerminal(100, 18);
+    const questionController = new QuestionController();
+    const turns: string[] = [];
+    let running = false;
+    let cancelCalls = 0;
+    const controller = {
+      subscribe: () => () => {},
+      getTranscript: () => [],
+      isRunning: () => running,
+      getStreamingTail: () => running
+        ? ({ content: "", reasoning: "", tools: [], parts: [], phase: "thinking" as const })
+        : null,
+      pendingSteerCount: () => 0,
+      queuedInputCount: () => 0,
+      steer: () => false,
+      cancelActiveRun: () => { cancelCalls += 1; return running; },
+      runTurn: async (content: string) => { turns.push(content); },
+      appendDisplayMessage: () => {},
+      clearTranscript: () => {},
+      shutdown: () => ({ reason: "test", wallMs: 0 }),
+    };
+    const app = new PiTuiApp({
+      agent: {
+        model: "test-model",
+        providerId: "test-provider",
+        thinking: "medium",
+        mode: "default",
+        setMode: () => {},
+        getContextUsageSnapshot: () => ({ usedTokens: 0, contextWindow: 1_000 }),
+      } as never,
+      sessionManager: { getSessionFile: () => "/s.jsonl" } as never,
+      controller: controller as never,
+      callbacks: {
+        onExitRequest: () => {},
+        onClearTranscript: () => {},
+        onModelSelect: () => {},
+        onThemeToggle: () => {},
+      },
+      questionController,
+      terminal,
+      uiMode: "regular",
+    });
+
+    app.start();
+    try {
+      running = true;
+      const answer = questionController.ask({
+        questions: [{
+          header: "Mode",
+          question: "Which mode should Bubble use?",
+          options: [
+            { label: "Fast", description: "Prioritize speed" },
+            { label: "Careful", description: "Prioritize validation" },
+          ],
+        }],
+      });
+      const queuedAnswer = questionController.ask({
+        questions: [{
+          header: "Queued",
+          question: "This question should open second",
+          options: [{ label: "Continue", description: "Resolve from outside the panel" }],
+        }],
+      });
+      await terminal.waitForRender();
+      const viewport = terminal.getViewport().join("\n");
+      expect(viewport).toContain("Which mode should Bubble use?");
+      expect(viewport).not.toContain("This question should open second");
+      expect(viewport).toContain("Prioritize validation");
+      expect(viewport).toContain("Type your answer here");
+
+      terminal.sendInput("\x1b[B");
+      terminal.sendInput("\r");
+      await expect(answer).resolves.toEqual([["Careful"]]);
+      expect(cancelCalls).toBe(0);
+
+      await terminal.waitForRender();
+      expect(terminal.getViewport().join("\n")).toContain("This question should open second");
+      const queuedRequest = questionController.list()[0];
+      expect(queuedRequest).toBeDefined();
+      questionController.reply(queuedRequest!.id, [["Continue"]]);
+      await expect(queuedAnswer).resolves.toEqual([["Continue"]]);
+
+      running = false;
+      terminal.sendInput("after question");
+      terminal.sendInput("\r");
+      await terminal.waitForRender();
+      expect(turns).toEqual(["after question"]);
+
+      running = true;
+      const rejected = questionController.ask({
+        questions: [{
+          header: "Again",
+          question: "Dismiss this question?",
+          options: [{ label: "Keep", description: "Keep it open" }],
+        }],
+      });
+      const rejection = expect(rejected).rejects.toBeInstanceOf(QuestionRejectedError);
+      terminal.sendInput("\x1b");
+      await rejection;
+      expect(cancelCalls).toBe(0);
     } finally {
       app.dispose();
     }

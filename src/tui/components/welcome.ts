@@ -49,7 +49,7 @@ export function renderWelcomeBanner(data: WelcomeBannerData, columns: number): s
   const cardWidth = Math.min(96, available - 2);
   const contentWidth = cardWidth - 6; // border + two-cell horizontal padding
   const margin = " ".repeat(Math.max(0, Math.floor((available - cardWidth) / 2)));
-  const border = (value: string) => chalk.cyan(value);
+  const border = (value: string) => chalk.dim(value);
   const row = (content = "") => {
     const fitted = truncateToWidth(content, contentWidth);
     const padded = `${fitted}${" ".repeat(Math.max(0, contentWidth - stringWidth(fitted)))}`;

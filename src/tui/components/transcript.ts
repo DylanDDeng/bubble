@@ -15,6 +15,7 @@ import chalk from "chalk";
 import stringWidth from "string-width";
 import { truncateVisual } from "../../text-display.js";
 import { DisplayToolCall, DisplayMessage } from "../model/display-history.js";
+import { darkTheme } from "../model/theme.js";
 import { buildTraceGroups, traceGroupLabel, type TraceGroup } from "../model/trace-groups.js";
 
 function toolTraceLabel(tool: DisplayToolCall): string {
@@ -41,7 +42,7 @@ export interface TranscriptTheme {
 }
 
 export const defaultTranscriptTheme: TranscriptTheme = {
-  userBg: (text) => chalk.bgHex("#22354A")(text),
+  userBg: (text) => chalk.bgHex(darkTheme.userMessageBg)(text),
   userText: (text) => chalk.hex("#E8EDF4")(text),
   accent: (text) => chalk.cyan(text),
   dim: (text) => chalk.dim(text),

@@ -1,11 +1,11 @@
 import type { EditorOptions, EditorTheme } from "@bubblebrain-ai/pi-tui";
 import chalk from "chalk";
 
-/** Bubble's primary composer: terminal-default foreground, square box, agent prompt. */
+/** Bubble's primary composer: lightweight square box with an agent prompt. */
 export const COMPOSER_EDITOR_THEME: EditorTheme = {
-  // No ANSI color override: on the user's dark terminal this is the requested
-  // default white, and it remains readable when the terminal palette changes.
-  borderColor: (str: string) => str,
+  // A restrained neutral plus dim makes the frame recede consistently across
+  // terminal palettes while the prompt and editable text stay full-strength.
+  borderColor: (str: string) => chalk.rgb(160, 160, 160).dim(str),
   autocompleteBackground: (str: string) => chalk.bgRgb(31, 31, 31)(str),
   selectList: {
     selectedPrefix: () => chalk.cyan("› "),

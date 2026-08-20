@@ -107,7 +107,7 @@ export const darkTheme: Theme = {
   tracePending: "yellow",
 
   userMessageBorder: "#8A7FC6",
-  userMessageBg: "#2a2a34",
+  userMessageBg: "#2A2A2A",
   userMessageText: "#f3f3f7",
 
   diffAdd: "#1a3d1a",

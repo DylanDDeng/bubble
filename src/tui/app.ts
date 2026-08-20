@@ -36,6 +36,7 @@ import { StreamingMessageComponent } from "./components/streaming-message.js";
 import { ResponsiveTranscriptComponent } from "./components/responsive-transcript.js";
 import { WelcomeBannerComponent } from "./components/welcome.js";
 import { ApprovalDialogComponent, type ApprovalDialogChoice } from "./components/approval-dialog.js";
+import { QuestionDialogComponent } from "./components/question-dialog.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import type { SlashCommandContext } from "../slash-commands/types.js";
 import { BubbleTuiController } from "./controller/controller.js";
@@ -48,7 +49,7 @@ import { COMPOSER_EDITOR_OPTIONS, COMPOSER_EDITOR_THEME } from "./composer-style
 import type { Agent } from "../agent.js";
 import type { SessionManager } from "../session.js";
 import type { ProviderRegistry } from "../provider-registry.js";
-import type { QuestionController, QuestionEvent } from "../question/controller.js";
+import type { QuestionController, QuestionEvent, QuestionRequest } from "../question/controller.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
 import type { DisplayMessage } from "./model/display-history.js";
 import type { SkillRegistry } from "../skills/registry.js";
@@ -135,6 +136,8 @@ export class PiTuiApp {
   private verboseTrace = false;
   private controllerUnsubscribe: (() => void) | null = null;
   private questionUnsubscribe: (() => void) | null = null;
+  private activeQuestion: { id: string; close: () => void } | null = null;
+  private readonly questionQueue: QuestionRequest[] = [];
   private disposed = false;
 
   constructor(private readonly options: PiTuiAppOptions) {
@@ -218,7 +221,13 @@ export class PiTuiApp {
     if (questionController) {
       this.questionUnsubscribe = questionController.subscribe((event: QuestionEvent) => {
         if (event.type === "asked") {
-          void this.questionDialog(event.request.id, event.request.questions.map((q) => q.question));
+          this.questionQueue.push(event.request);
+          this.openNextQuestion();
+          return;
+        }
+        this.removeQueuedQuestion(event.request.id);
+        if (this.activeQuestion?.id === event.request.id) {
+          this.activeQuestion.close();
         }
       });
     }
@@ -554,29 +563,41 @@ export class PiTuiApp {
     });
   }
 
-  private async questionDialog(id: string, questions: string[]): Promise<void> {
+  private openNextQuestion(): void {
+    if (this.disposed || this.activeQuestion) return;
+    const request = this.questionQueue.shift();
+    if (!request) return;
     const questionController = this.options.questionController;
     if (!questionController) return;
-    const answers: string[][] = [];
-    for (const question of questions) {
-      const answer = await this.textOverlay(`? ${question}`);
-      answers.push([(answer ?? "").trim()].filter((line) => line.length > 0));
-    }
-    questionController.reply(id, answers);
+    const dialog = new QuestionDialogComponent(request, () => this.tui.terminal.rows);
+    const handle = this.tui.showOverlay(dialog, {
+      anchor: "bottom-center",
+      width: "100%",
+      margin: { left: 1, right: 1 },
+    });
+    let closed = false;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      handle.hide();
+      if (this.activeQuestion?.id === request.id) this.activeQuestion = null;
+      this.openNextQuestion();
+    };
+    this.activeQuestion = { id: request.id, close };
+    dialog.onSubmit = (answers) => {
+      close();
+      questionController.reply(request.id, answers);
+    };
+    dialog.onCancel = () => {
+      close();
+      questionController.reject(request.id);
+    };
+    this.tui.setFocus(dialog);
   }
 
-  private textOverlay(prompt: string): Promise<string | null> {
-    return new Promise((resolve) => {
-      const header = new Text(chalk.cyan(prompt), 1, 0);
-      const input = new Editor(this.tui, EDITOR_THEME);
-      const box = new VStack([header, input]);
-      const handle = this.tui.showOverlay(box, { anchor: "center" });
-      input.onSubmit = (text: string) => {
-        handle.hide();
-        resolve(text);
-      };
-      this.tui.setFocus(input);
-    });
+  private removeQueuedQuestion(id: string): void {
+    const index = this.questionQueue.findIndex((request) => request.id === id);
+    if (index >= 0) this.questionQueue.splice(index, 1);
   }
 
   private async modelPicker(): Promise<void> {
@@ -617,6 +638,10 @@ export class PiTuiApp {
     this.controllerUnsubscribe = null;
     this.questionUnsubscribe?.();
     this.questionUnsubscribe = null;
+    this.activeQuestion?.close();
+    this.activeQuestion = null;
+    this.questionQueue.length = 0;
+    this.options.questionController?.rejectAll();
     // Root lifecycle events (notably SIGTERM) can dispose the app while the
     // alternate screen is still open. Tear it down directly so its controller
     // listener, spinner timers, and terminal mode cannot outlive the root app.

@@ -62,4 +62,11 @@ describe("responsive TUI footer", () => {
     expect(plan).toContain("plan on");
     expect(bypass).toContain("bypass permission on");
   });
+
+  it("keeps the model in the same muted hierarchy as cwd and context usage", () => {
+    const line = renderFooterLine(agent, 100, { cwd: "~/project" });
+    expect(line).toContain(chalk.dim(agent.model));
+    expect(line).toContain(chalk.dim("~/project"));
+    expect(line).not.toContain(chalk.cyan(agent.model));
+  });
 });

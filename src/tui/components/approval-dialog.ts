@@ -2,14 +2,13 @@ import path from "node:path";
 import chalk from "chalk";
 import {
   matchesKey,
-  stripTerminalSequences,
   truncateToWidth,
-  visibleWidth,
   wrapTextWithAnsi,
   type Component,
   type Focusable,
 } from "@bubblebrain-ai/pi-tui";
 import type { ApprovalRequest } from "../../approval/types.js";
+import { paintSheetLine, padSheetLine, safeSheetText } from "./bottom-sheet.js";
 
 export type ApprovalDialogChoice = "approve_once" | "approve_always" | "reject";
 
@@ -18,27 +17,14 @@ interface ApprovalPresentation {
   details: string[];
 }
 
-const PANEL_BACKGROUND = "#242424";
-const SELECTED_BACKGROUND = "#3A3A3A";
-
 const CHOICES: ReadonlyArray<{ value: ApprovalDialogChoice; label: string }> = [
   { value: "approve_once", label: "Yes, proceed" },
   { value: "approve_always", label: "Yes, don't ask again (switch to Bypass Permissions)" },
   { value: "reject", label: "No, reject" },
 ];
 
-function safeTerminalText(value: string): string {
-  return stripTerminalSequences(value)
-    .replace(/\r\n?/g, "\n")
-    .replace(/\t/g, "   ")
-    // Keep user-visible newlines, but never let request data inject cursor,
-    // OSC, APC, bell, or other terminal control behavior into the approval UI.
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "�");
-}
-
 function bashCommandLabel(command: string): string {
-  const firstToken = safeTerminalText(command).trim().match(/^([^\s;&|]+)/)?.[1] ?? "command";
+  const firstToken = safeSheetText(command).trim().match(/^([^\s;&|]+)/)?.[1] ?? "command";
   const unquoted = firstToken.replace(/^["'`]+|["'`]+$/g, "");
   return path.basename(unquoted) || "command";
 }
@@ -46,9 +32,9 @@ function bashCommandLabel(command: string): string {
 function jsonPreview(value: unknown): string | undefined {
   if (value === undefined) return undefined;
   try {
-    return safeTerminalText(JSON.stringify(value));
+    return safeSheetText(JSON.stringify(value));
   } catch {
-    return safeTerminalText(String(value));
+    return safeSheetText(String(value));
   }
 }
 
@@ -59,34 +45,34 @@ export function approvalPresentation(request: ApprovalRequest): ApprovalPresenta
       return {
         title: `Request approval for ${bashCommandLabel(request.command)}`,
         details: [
-          safeTerminalText(request.command),
-          `${request.background ? "background command" : "working directory"}: ${safeTerminalText(request.cwd)}`,
+          safeSheetText(request.command),
+          `${request.background ? "background command" : "working directory"}: ${safeSheetText(request.cwd)}`,
         ],
       };
     case "edit":
       return {
-        title: safeTerminalText(`Request approval to edit ${path.basename(request.path) || request.path}`),
-        details: [request.path, ...request.diff.split("\n").filter(Boolean).slice(0, 2)].map(safeTerminalText),
+        title: safeSheetText(`Request approval to edit ${path.basename(request.path) || request.path}`),
+        details: [request.path, ...request.diff.split("\n").filter(Boolean).slice(0, 2)].map(safeSheetText),
       };
     case "write":
       return {
-        title: safeTerminalText(`Request approval to ${request.fileExists ? "overwrite" : "create"} ${path.basename(request.path) || request.path}`),
-        details: [request.path, ...(request.diff ?? request.content).split("\n").filter(Boolean).slice(0, 2)].map(safeTerminalText),
+        title: safeSheetText(`Request approval to ${request.fileExists ? "overwrite" : "create"} ${path.basename(request.path) || request.path}`),
+        details: [request.path, ...(request.diff ?? request.content).split("\n").filter(Boolean).slice(0, 2)].map(safeSheetText),
       };
     case "patch":
       return {
         title: `Request approval to update ${request.files.length} file${request.files.length === 1 ? "" : "s"}`,
-        details: (request.paths.length > 0 ? request.paths : [request.path]).map(safeTerminalText),
+        details: (request.paths.length > 0 ? request.paths : [request.path]).map(safeSheetText),
       };
     case "lsp":
       return {
-        title: safeTerminalText(`Request approval for ${request.operation}`),
-        details: [safeTerminalText(request.path)],
+        title: safeSheetText(`Request approval for ${request.operation}`),
+        details: [safeSheetText(request.path)],
       };
     case "agent_profile":
       return {
-        title: safeTerminalText(`Trust agent profile ${request.name}`),
-        details: [request.path, ...request.promptPreview.split("\n").filter(Boolean).slice(0, 2)].map(safeTerminalText),
+        title: safeSheetText(`Trust agent profile ${request.name}`),
+        details: [request.path, ...request.promptPreview.split("\n").filter(Boolean).slice(0, 2)].map(safeSheetText),
       };
     case "external_tool": {
       const input = jsonPreview(request.rawInput);
@@ -94,16 +80,11 @@ export function approvalPresentation(request: ApprovalRequest): ApprovalPresenta
         location.line == null ? location.path : `${location.path}:${location.line}`,
       ) ?? [];
       return {
-        title: safeTerminalText(`Request approval for ${request.title.trim() || request.kind.trim() || "external tool"}`),
-        details: [...(input ? [input] : []), ...locations].map(safeTerminalText),
+        title: safeSheetText(`Request approval for ${request.title.trim() || request.kind.trim() || "external tool"}`),
+        details: [...(input ? [input] : []), ...locations].map(safeSheetText),
       };
     }
   }
-}
-
-function padToWidth(line: string, width: number): string {
-  const truncated = truncateToWidth(line, Math.max(1, width), "");
-  return truncated + " ".repeat(Math.max(0, width - visibleWidth(truncated)));
 }
 
 function styleDetail(request: ApprovalRequest, detail: string, index: number): string {
@@ -193,12 +174,12 @@ export class ApprovalDialogComponent implements Component, Focusable {
     if (bottomPadding) panelLines.push({ line: "" });
 
     const paintedPanel = panelLines.slice(0, panelBudget).map(({ line, selected }) =>
-      chalk.bgHex(selected ? SELECTED_BACKGROUND : PANEL_BACKGROUND)(padToWidth(line, safeWidth)),
+      paintSheetLine(line, safeWidth, selected),
     );
 
     if (!showHelp) return paintedPanel;
     const help = `${this.selectedIndex + 1}/${CHOICES.length} select  │  Tab next  │  Enter confirm  │  Ctrl+O bypass  │  Esc deny`;
-    return [...paintedPanel, chalk.dim(padToWidth(help, safeWidth))];
+    return [...paintedPanel, chalk.dim(padSheetLine(help, safeWidth))];
   }
 
   handleInput(data: string): void {
