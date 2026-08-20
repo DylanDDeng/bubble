@@ -22,7 +22,7 @@ import {
 } from "@bubblebrain-ai/pi-tui";
 import { ResponsiveTranscriptComponent } from "./components/responsive-transcript.js";
 import { StreamingMessageComponent } from "./components/streaming-message.js";
-import { defaultTranscriptTheme } from "./components/transcript.js";
+import { defaultTranscriptTheme, type TranscriptRenderOptions } from "./components/transcript.js";
 import type { BubbleTuiController } from "./controller/controller.js";
 import { ResponsiveFooterComponent } from "./footer.js";
 import { getNextPermissionMode } from "../permission/mode.js";
@@ -57,11 +57,7 @@ export class FullscreenApp {
     this.editor = new Editor(this.tui, COMPOSER_EDITOR_THEME, COMPOSER_EDITOR_OPTIONS);
     this.transcript = new ResponsiveTranscriptComponent(() => ({
       messages: this.options.controller.getTranscript(),
-      options: {
-        theme: defaultTranscriptTheme,
-        showReasoning: this.showReasoning,
-        verboseTrace: this.verboseTrace,
-      },
+      options: this.transcriptRenderOptions(),
     }));
     this.streamingMessage = new StreamingMessageComponent(8, () => this.render());
     this.footer = new ResponsiveFooterComponent(() => ({
@@ -74,13 +70,14 @@ export class FullscreenApp {
   }
 
   private buildLayout(): void {
-    // The live tail belongs inside the scrolling transcript, above the docked
-    // composer, just like the main-screen layout. Previously /fullscreen
-    // rendered settled history only, making all Thinking/tool activity vanish.
+    // The live tail belongs inside the scrolling transcript. Its activity lane
+    // stays docked above the composer and keeps one row both running and idle,
+    // so clearing the spinner cannot pull settled content downward.
     const transcriptBody = new VStack([this.transcript, this.streamingMessage]);
     const scroll = new ScrollView(transcriptBody, { follow: "end", primary: true });
     const layout = new VStack([
       { component: scroll, basis: 0, grow: 1, minSize: 0 },
+      { component: this.streamingMessage.activityLane, basis: "auto", shrink: 0 },
       { component: this.editor, basis: "auto", shrink: 0 },
       { component: this.footer, basis: "auto", shrink: 0 },
     ]);
@@ -156,12 +153,20 @@ export class FullscreenApp {
         this.streamingMessage.startSpinner();
       }
       this.streamingMessage.noteWidth(columns);
-      this.streamingMessage.update(tail, columns);
+      this.streamingMessage.update(tail, columns, this.transcriptRenderOptions());
     } else if (this.streamingMounted) {
       this.streamingMounted = false;
       this.streamingMessage.clearToNothing();
     }
     this.tui.requestRender();
+  }
+
+  private transcriptRenderOptions(): Omit<TranscriptRenderOptions, "columns"> {
+    return {
+      theme: defaultTranscriptTheme,
+      showReasoning: this.showReasoning,
+      verboseTrace: this.verboseTrace,
+    };
   }
 
   start(): void {

@@ -15,7 +15,14 @@ describe("fullscreen working trace", () => {
       status: "running" as const,
     };
     let running = true;
-    let messages: DisplayMessage[] = [{ key: "user", role: "user", content: "inspect" }];
+    let messages: DisplayMessage[] = [
+      ...Array.from({ length: 8 }, (_, index): DisplayMessage => ({
+        key: `history-${index}`,
+        role: "assistant",
+        content: `history-${index}`,
+      })),
+      { key: "user", role: "user", content: "inspect" },
+    ];
     let tail: StreamingTailState | null = {
       content: "answer",
       reasoning: "reasoning stays visible",
@@ -49,11 +56,17 @@ describe("fullscreen working trace", () => {
 
     app.start();
     await terminal.waitForRender();
-    let viewport = terminal.getViewport().join("\n");
+    let viewportRows = terminal.getViewport();
+    let viewport = viewportRows.join("\n");
     expect(viewport).toContain("Thinking…");
-    expect(viewport).toContain("Working on Read 1 file");
+    expect(viewport).toContain("◆ Read 1 file running");
     expect(viewport).toContain("README.md");
     expect(viewport).toContain("answer");
+    const liveAnswer = viewportRows.find((row) => row.trim() === "answer");
+    expect(liveAnswer?.indexOf("answer")).toBe(0);
+    const liveComposerAt = viewportRows.findIndex((row) => row.includes("┌"));
+    const liveComposerDistance = liveComposerAt - viewportRows.indexOf(liveAnswer!);
+    expect(liveComposerAt).toBeGreaterThan(viewportRows.indexOf(liveAnswer!));
 
     messages = [...messages, {
       key: "assistant",
@@ -70,12 +83,18 @@ describe("fullscreen working trace", () => {
     running = false;
     for (const listener of listeners) listener();
     await terminal.waitForRender();
-    viewport = terminal.getViewport().join("\n");
+    viewportRows = terminal.getViewport();
+    viewport = viewportRows.join("\n");
     expect(viewport).toContain("Thinking");
     expect(viewport).toContain("Read 1 file");
     expect(viewport).toContain("answer");
     expect(viewport).not.toContain("Working on Read");
     expect(viewport).not.toContain("writing the response");
+    const settledAnswer = viewportRows.find((row) => row.trim() === "answer");
+    expect(settledAnswer?.indexOf("answer")).toBe(liveAnswer?.indexOf("answer"));
+    expect(viewport).not.toContain("● answer");
+    const settledComposerAt = viewportRows.findIndex((row) => row.includes("┌"));
+    expect(settledComposerAt - viewportRows.indexOf(settledAnswer!)).toBe(liveComposerDistance);
 
     app.dispose();
   });

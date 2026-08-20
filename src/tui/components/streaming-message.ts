@@ -9,16 +9,22 @@
  * and Text("") renders zero rows, so empty pool slots vanish from the
  * document naturally.
  *
- * Lifecycle: append one instance as the transcript container's LAST child
- * when a turn starts, update() per flush, and clearToNothing() in the same
- * frame the controller commits the settled message (all slots setText(""),
- * component collapses to zero rows; the full answer arrives via the normal
- * transcript append).
+ * Lifecycle: keep one instance as the transcript container's LAST child,
+ * update() per flush, and clearToNothing() in the same frame the controller
+ * commits the settled message. The scrollable row pool collapses to zero;
+ * the separate activityLane stays one row tall and merely clears its text.
  */
 import chalk from "chalk";
-import { Spacer, Text, truncateToWidth, VStack } from "@bubblebrain-ai/pi-tui";
+import { Spacer, Text, truncateToWidth, VStack, type Component } from "@bubblebrain-ai/pi-tui";
 import type { DisplayMessagePart, DisplayToolCall } from "../model/display-history.js";
-import { renderToolTraceGroups, wrapPlain } from "./transcript.js";
+import {
+  projectAssistantRows,
+  projectReasoningRows,
+  joinTranscriptBlocks,
+  MINIMAL_REASONING_BODY_ROWS,
+  renderToolTraceGroups,
+  type TranscriptRenderOptions,
+} from "./transcript.js";
 
 export interface StreamingTailState {
   content: string;
@@ -96,6 +102,55 @@ function approximateTokenLabel(chars: number): string {
   return `${Math.round(tokens / 1_000)}k`;
 }
 
+/**
+ * A permanent one-row boundary between the scrolling transcript and composer.
+ * Running turns paint the spinner into this lane; idle turns leave it blank.
+ * The row never collapses, so completing a turn cannot change the document /
+ * composer geometry.
+ */
+export class AgentActivityLaneComponent implements Component {
+  private text = "";
+
+  setText(text: string): void {
+    this.text = text;
+  }
+
+  render(width: number): string[] {
+    return [truncateToWidth(this.text, Math.max(1, Math.floor(width)))];
+  }
+
+  invalidate(): void {
+    // No cache: the owner mutates `text` and requests the enclosing TUI render.
+  }
+}
+
+/**
+ * A pooled projected row needs three states: unused (zero rows), semantic
+ * blank (one empty row), and visible text. `Text` collapses both unused and
+ * whitespace-only values, so it cannot preserve that distinction.
+ */
+class ProjectedRowComponent implements Component {
+  private row: string | null = null;
+
+  setRow(row: string): void {
+    this.row = row;
+  }
+
+  clear(): void {
+    this.row = null;
+  }
+
+  render(width: number): string[] {
+    if (this.row === null) return [];
+    if (this.row === "") return [""];
+    return [truncateToWidth(this.row, Math.max(1, Math.floor(width)))];
+  }
+
+  invalidate(): void {
+    // No cache; rows are already projected to terminal lines.
+  }
+}
+
 export class StreamingMessageComponent extends VStack {
   private tail: StreamingTailState | null = null;
   private frame = 0;
@@ -103,45 +158,51 @@ export class StreamingMessageComponent extends VStack {
   private readonly onFrame?: () => void;
 
   // Persistent row pool — NEVER re-created, only setText.
-  private readonly topGapRow: Spacer;
+  readonly activityLane: AgentActivityLaneComponent;
   private readonly thinkingHeaderRow: Text;
-  private readonly statusRow: Text;
   private readonly thinkingEllipsisRow: Text;
+  private readonly reasoningGapRow: Spacer;
   private readonly timelineEllipsisRow: Text;
   private readonly liveGapRow: Spacer;
   private readonly reasoningRows: Text[];
-  private readonly timelineRows: Text[];
+  private readonly timelineRows: ProjectedRowComponent[];
   private idlePhraseIndex = 0;
   private phraseTimer: ReturnType<typeof setInterval> | null = null;
+  private projectionOptions: Omit<TranscriptRenderOptions, "columns"> = {};
 
   constructor(maxPreviewRows = 8, onFrame?: () => void) {
     super([]);
     this.onFrame = onFrame;
-    this.topGapRow = new Spacer(0);
+    this.activityLane = new AgentActivityLaneComponent();
     this.thinkingHeaderRow = new Text("", 0, 0);
-    this.statusRow = new Text("", 0, 0);
     this.thinkingEllipsisRow = new Text("", 0, 0);
+    this.reasoningGapRow = new Spacer(0);
     this.timelineEllipsisRow = new Text("", 0, 0);
     this.liveGapRow = new Spacer(0);
-    this.reasoningRows = Array.from({ length: 5 }, () => new Text("", 0, 0));
+    this.reasoningRows = Array.from({ length: MINIMAL_REASONING_BODY_ROWS }, () => new Text("", 0, 0));
     // One ordered pool mirrors Ink's DisplayMessagePart timeline. Reserve
     // enough rows for a useful grouped tool trace plus an answer tail.
-    this.timelineRows = Array.from({ length: maxPreviewRows + 16 }, () => new Text("", 0, 0));
-    // Ink cadence: live tail first, spinner below it, then composer/footer.
-    this.addChild(this.topGapRow);
+    this.timelineRows = Array.from({ length: maxPreviewRows + 16 }, () => new ProjectedRowComponent());
+    // The live tail remains scrollable. Its spinner lives in the permanent
+    // activity lane mounted by the app immediately above the composer.
     this.addChild(this.thinkingHeaderRow);
     for (const row of this.reasoningRows) this.addChild(row);
     this.addChild(this.thinkingEllipsisRow);
+    this.addChild(this.reasoningGapRow);
     this.addChild(this.timelineEllipsisRow);
     for (const row of this.timelineRows) this.addChild(row);
     this.addChild(this.liveGapRow);
-    this.addChild(this.statusRow);
   }
 
   /** Live update while streaming. */
-  update(tail: StreamingTailState, columns: number): void {
+  update(
+    tail: StreamingTailState,
+    columns: number,
+    projectionOptions: Omit<TranscriptRenderOptions, "columns"> = {},
+  ): void {
     this.tail = tail;
     this.lastColumns = columns;
+    this.projectionOptions = projectionOptions;
     const width = Math.max(1, Math.floor(columns));
     const idlePhrase = GENERIC_PHRASES[this.idlePhraseIndex % GENERIC_PHRASES.length]!;
     const activeTool = [...tail.tools].reverse().find((tool) => (
@@ -159,31 +220,34 @@ export class StreamingMessageComponent extends VStack {
           : idlePhrase;
     const streamedChars = tail.content.length + tail.reasoning.length;
     const tokenText = streamedChars > 0 ? ` (↓${approximateTokenLabel(streamedChars)} tok)` : "";
-    this.statusRow.setText(truncateToWidth(
+    this.activityLane.setText(truncateToWidth(
       ` ${chalk.cyan(SPINNER_FRAMES[this.frame]!)} ${chalk.dim(`${phrase}${tokenText}`)}`,
       width,
     ));
-    // A stable unpainted row separates the sent card from all live activity.
-    this.topGapRow.setLines(1);
-
     let hasLiveRows = false;
     this.thinkingHeaderRow.setText("");
     this.thinkingEllipsisRow.setText("");
+    this.reasoningGapRow.setLines(0);
     this.timelineEllipsisRow.setText("");
     for (const row of this.reasoningRows) row.setText("");
-    for (const row of this.timelineRows) row.setText("");
+    for (const row of this.timelineRows) row.clear();
     // Reasoning models get a dedicated rolling window instead of burying
     // their work inside the spinner status line. It is an independent region:
     // answer/tool bytes must not make Thinking disappear mid-frame.
     if (tail.reasoning) {
       hasLiveRows = true;
-      this.thinkingHeaderRow.setText(truncateToWidth(chalk.dim("  ✻ Thinking…"), width));
-      const reasoningLines = tail.reasoning.split("\n").filter((line) => line.trim() !== "");
-      const visible = reasoningLines.slice(-this.reasoningRows.length);
+      const projected = projectReasoningRows(
+        tail.reasoning,
+        { ...projectionOptions, columns: width },
+        { running: true, maxBodyRows: MINIMAL_REASONING_BODY_ROWS, fromEnd: true },
+      );
+      this.thinkingHeaderRow.setText(projected[0] ?? "");
+      const body = projected.slice(1);
+      const visible = body.slice(0, this.reasoningRows.length);
       for (let index = 0; index < visible.length; index += 1) {
-        this.reasoningRows[index]!.setText(truncateToWidth(chalk.dim(`  ${visible[index]}`), width));
+        this.reasoningRows[index]!.setText(visible[index] ?? "");
       }
-      if (reasoningLines.length > visible.length) this.thinkingEllipsisRow.setText(chalk.dim("  …"));
+      if (body.length > visible.length) this.thinkingEllipsisRow.setText(body.at(-1) ?? "");
     }
 
     const parts: readonly DisplayMessagePart[] = tail.parts.length > 0
@@ -199,49 +263,49 @@ export class StreamingMessageComponent extends VStack {
         break;
       }
     }
-    const timeline: string[] = [];
+    const timelineBlocks: string[][] = [];
     for (let partIndex = 0; partIndex < parts.length; partIndex += 1) {
       const part = parts[partIndex]!;
       if (part.type === "tools") {
-        timeline.push(...renderToolTraceGroups(
+        timelineBlocks.push(renderToolTraceGroups(
           part.toolCalls,
-          { columns: width },
+          { ...projectionOptions, columns: width },
           { showActivity: partIndex === lastToolsPart },
         ));
         continue;
       }
-      const lines = wrapPlain(part.content, Math.max(1, width - 4));
-      for (let index = 0; index < lines.length; index += 1) {
-        timeline.push(`${index === 0 ? "  ● " : "    "}${lines[index] ?? ""}`);
-      }
+      timelineBlocks.push(projectAssistantRows(part.content, { ...projectionOptions, columns: width }));
     }
+    const timeline = joinTranscriptBlocks(timelineBlocks);
+    this.reasoningGapRow.setLines(tail.reasoning && timeline.length > 0 ? 1 : 0);
     if (timeline.length > 0) {
       hasLiveRows = true;
       const visible = timeline.slice(-this.timelineRows.length);
       this.timelineEllipsisRow.setText(timeline.length > visible.length ? chalk.dim("  …") : "");
       for (let index = 0; index < visible.length; index += 1) {
-        this.timelineRows[index]!.setText(truncateToWidth(visible[index]!, width));
+        this.timelineRows[index]!.setRow(visible[index]!);
       }
     }
     this.liveGapRow.setLines(hasLiveRows ? 1 : 0);
   }
 
   /**
-   * Turn ended: collapse every slot. Same-frame with the controller's
-   * settled append so the full answer replaces the preview without a
-   * duplicated or stale frame.
+   * Turn ended: collapse every scrollable slot and clear (but do not collapse)
+   * the permanent activity lane. Same-frame with the controller's settled
+   * append, the full answer replaces the preview without changing the
+   * transcript/composer boundary height.
    */
   clearToNothing(): void {
     this.stopSpinner();
     this.tail = null;
-    this.topGapRow.setLines(0);
     this.thinkingHeaderRow.setText("");
-    this.statusRow.setText("");
+    this.activityLane.setText("");
     this.thinkingEllipsisRow.setText("");
+    this.reasoningGapRow.setLines(0);
     this.timelineEllipsisRow.setText("");
     this.liveGapRow.setLines(0);
     for (const row of this.reasoningRows) row.setText("");
-    for (const row of this.timelineRows) row.setText("");
+    for (const row of this.timelineRows) row.clear();
   }
 
   startSpinner(): void {
@@ -251,14 +315,14 @@ export class StreamingMessageComponent extends VStack {
       if (this.tail) {
         // Re-render just the glyph by re-running the status text build.
         const keep = this.tail;
-        this.update(keep, this.lastColumns ?? 80);
+        this.update(keep, this.lastColumns ?? 80, this.projectionOptions);
       }
       this.onFrame?.();
     }, 100);
     this.phraseTimer = setInterval(() => {
       if (!this.tail || this.tail.content || this.tail.reasoning || this.tail.tools.length > 0) return;
       this.idlePhraseIndex = (this.idlePhraseIndex + 1) % GENERIC_PHRASES.length;
-      this.update(this.tail, this.lastColumns ?? 80);
+      this.update(this.tail, this.lastColumns ?? 80, this.projectionOptions);
       this.onFrame?.();
     }, 1_500);
   }

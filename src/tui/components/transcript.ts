@@ -16,7 +16,7 @@ import stringWidth from "string-width";
 import { truncateVisual } from "../../text-display.js";
 import { DisplayToolCall, DisplayMessage } from "../model/display-history.js";
 import { darkTheme } from "../model/theme.js";
-import { buildTraceGroups, traceGroupLabel, type TraceGroup } from "../model/trace-groups.js";
+import { buildTraceGroups, type TraceGroup } from "../model/trace-groups.js";
 
 function toolTraceLabel(tool: DisplayToolCall): string {
   return tool.name;
@@ -133,36 +133,100 @@ export function wrapPlain(text: string, columns: number): string[] {
   return out;
 }
 
-export function renderAssistant(content: string, options: TranscriptRenderOptions): string[] {
+/**
+ * Project assistant prose without transcript spacing. Live streaming and
+ * settled history both call this function, so completing a turn cannot change
+ * the answer gutter or wrapping width.
+ */
+export function projectAssistantRows(content: string, options: TranscriptRenderOptions): string[] {
   const terminalWidth = Math.max(1, Math.floor(options.columns));
   const width = Math.max(1, terminalWidth - 2);
   if (options.markdownRenderer) {
-    return [
-      ...options.markdownRenderer(content, width).map((row) => truncateVisible(row, terminalWidth)),
-      "",
-    ];
+    return options.markdownRenderer(content, width)
+      .map((row) => truncateVisible(row, terminalWidth));
   }
-  return [
-    ...wrapPlain(content, width).map((row) => truncateVisible(row, terminalWidth)),
-    "",
-  ];
+  return wrapPlain(content, width)
+    .map((row) => truncateVisible(row, terminalWidth));
+}
+
+export function renderAssistant(content: string, options: TranscriptRenderOptions): string[] {
+  return [...projectAssistantRows(content, options), ""];
+}
+
+/**
+ * Join reasoning, tool, and prose surfaces with one semantic separator.
+ * Individual projectors own only their visible rows; this composition layer
+ * owns vertical rhythm, so live and settled timelines cannot drift apart.
+ */
+export function joinTranscriptBlocks(blocks: readonly (readonly string[])[]): string[] {
+  const rows: string[] = [];
+  for (const block of blocks) {
+    let start = 0;
+    let end = block.length;
+    while (start < end && block[start] === "") start += 1;
+    while (end > start && block[end - 1] === "") end -= 1;
+    if (start === end) continue;
+    if (rows.length > 0 && rows.at(-1) !== "") rows.push("");
+    rows.push(...block.slice(start, end));
+  }
+  return rows;
+}
+
+export interface ReasoningProjectionOptions {
+  /** In-flight reasoning uses the only stateful visual difference Grok keeps. */
+  running?: boolean;
+  /** Maximum number of physical reasoning body rows. */
+  maxBodyRows?: number;
+  /** Minimal reasoning keeps the newest rows in both live and settled states. */
+  fromEnd?: boolean;
+}
+
+/** Grok minimal mode keeps the same rolling reasoning surface live/settled. */
+export const MINIMAL_REASONING_BODY_ROWS = 5;
+
+/**
+ * Grok-style reasoning surface. Reasoning alone owns a one-cell rail; normal
+ * assistant prose never inherits this gutter. The same projection is used by
+ * the live row pool and committed transcript.
+ */
+export function projectReasoningRows(
+  content: string,
+  options: TranscriptRenderOptions,
+  projection: ReasoningProjectionOptions = {},
+): string[] {
+  const theme = options.theme ?? defaultTranscriptTheme;
+  const columns = Math.max(1, Math.floor(options.columns));
+  const bodyWidth = Math.max(1, columns - 1);
+  const body = content
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .flatMap((line) => wrapPlain(line, bodyWidth));
+  if (body.length === 0) return [];
+
+  const limit = Math.max(0, projection.maxBodyRows ?? (
+    options.showReasoning ? body.length : MINIMAL_REASONING_BODY_ROWS
+  ));
+  const fromEnd = projection.fromEnd ?? !options.showReasoning;
+  const visible = limit === 0
+    ? []
+    : fromEnd
+      ? body.slice(-limit)
+      : body.slice(0, limit);
+  const style = (text: string) => theme.dim(chalk.italic(text));
+  const rows = [style(truncateVisible(`┃◆ Thinking${projection.running ? "…" : ""}`, columns))];
+  for (const line of visible) {
+    rows.push(style(truncateVisible(`┃${line}`, columns)));
+  }
+  if (body.length > visible.length) {
+    const suffix = options.showReasoning ? "┃…" : "┃… (Ctrl+T to expand)";
+    rows.push(style(truncateVisible(suffix, columns)));
+  }
+  return rows;
 }
 
 export function renderReasoning(content: string, options: TranscriptRenderOptions): string[] {
-  const theme = options.theme ?? defaultTranscriptTheme;
-  const columns = Math.max(1, options.columns);
-  const lines = content.split("\n").filter((line) => line.trim() !== "");
-  if (lines.length === 0) return [];
-  const visible = options.showReasoning ? lines : lines.slice(0, 2);
-  const rows = [theme.dim(truncateVisible("  ✻ Thinking", columns))];
-  for (const line of visible) {
-    for (const wrapped of wrapPlain(line, Math.max(1, columns - 2))) {
-      rows.push(theme.dim(truncateVisible(`  ${wrapped}`, columns)));
-    }
-  }
-  if (!options.showReasoning && lines.length > visible.length) {
-    rows.push(theme.dim(truncateVisible("  … (Ctrl+T to expand)", columns)));
-  }
+  const rows = projectReasoningRows(content, options);
+  if (rows.length === 0) return [];
   rows.push("");
   return rows;
 }
@@ -180,22 +244,16 @@ export function renderToolTrace(tool: DisplayToolCall, options: TranscriptRender
   const label = toolTraceLabel(tool) || tool.name;
   const preview = argPreview(tool);
 
-  const glyph = tool.isError
-    ? theme.error("✗")
-    : tool.result !== undefined
-      ? theme.success("✔")
-      : theme.dim("…");
-
-  const name = theme.accent(label);
-  const parts = [` ${glyph} ${name}`];
-  if (preview) parts.push(theme.dim(` ${truncateVisible(preview, Math.max(12, options.columns - label.length - 12))}`));
+  const columns = Math.max(1, Math.floor(options.columns));
+  const text = truncateVisible(`◆ ${label}${preview ? ` ${preview}` : ""}`, columns);
+  const parts = [tool.isError ? theme.error(text) : `${theme.accent("◆")}${text.slice(1)}`];
 
   if (tool.isError && tool.result !== undefined && options.verboseTrace) {
-    const errPreview = truncateVisible(String(tool.result).split("\n")[0] ?? "", options.columns - 8);
-    parts.push(`\n   ${theme.error(errPreview)}`);
+    const errPreview = String(tool.result).split("\n")[0] ?? "";
+    parts.push(`\n${theme.error(truncateVisible(`  ↳ ${errPreview}`, columns))}`);
   } else if (!tool.isError && options.verboseTrace && tool.result !== undefined) {
-    const okPreview = truncateVisible(String(tool.result).split("\n")[0] ?? "", options.columns - 8);
-    parts.push(`\n   ${theme.dim(okPreview)}`);
+    const okPreview = String(tool.result).split("\n")[0] ?? "";
+    parts.push(`\n${theme.dim(truncateVisible(`  ↳ ${okPreview}`, columns))}`);
   }
   return parts.join("");
 }
@@ -216,17 +274,12 @@ export function renderToolTraceGroups(
   options: TranscriptRenderOptions,
   renderOptions: TraceGroupRenderOptions = {},
 ): string[] {
-  const theme = options.theme ?? defaultTranscriptTheme;
-  const columns = Math.max(1, options.columns);
   const groups = buildTraceGroups([...toolCalls]);
   const rows: string[] = [];
-  const active = renderOptions.showActivity
-    ? [...groups].reverse().find((group) => group.pending)
-    : undefined;
-
-  if (active) {
-    rows.push(theme.dim(truncateVisible(`  ● Working on ${traceGroupLabel(active)}`, columns)));
-  }
+  // `showActivity` remains part of the call contract, but Grok expresses
+  // activity by mutating the tool entry itself (`running`) instead of adding
+  // a second Working heading with a different marker.
+  void renderOptions.showActivity;
 
   for (const group of groups) {
     rows.push(...renderTraceGroup(group, options));
@@ -249,11 +302,10 @@ function renderTraceGroup(group: TraceGroup, options: TranscriptRenderOptions): 
       : group.count !== undefined && group.noun
         ? ` ${group.count} ${group.noun}`
         : "";
-  const header = `  ${group.title}${detail}${status}`;
-  const allErrored = group.hasError && group.errorCount >= group.raw.length && !group.pending;
-  const rows = [allErrored
+  const header = `◆ ${group.title}${detail}${status}`;
+  const rows = [group.hasError
     ? theme.error(truncateVisible(header, columns))
-    : truncateVisible(header, columns)];
+    : `${theme.accent("◆")}${truncateVisible(header.slice(1), Math.max(0, columns - 1))}`];
 
   // While Execute is running, retain the command's own lines just like Ink.
   // The header is only a summary and may be truncated on a narrow terminal.
@@ -263,15 +315,15 @@ function renderTraceGroup(group: TraceGroup, options: TranscriptRenderOptions): 
     && (
       !!group.description
       || commandLines.length > 1
-      || stringWidth(`  ${group.title} ${group.command ?? ""}`) > columns
+      || stringWidth(`◆ ${group.title} ${group.command ?? ""}`) > columns
     );
   if (commandNeedsBlock) {
-    const wrappedCommand = commandLines.flatMap((line) => wrapPlain(line || " ", Math.max(1, columns - 4)));
+    const wrappedCommand = commandLines.flatMap((line) => wrapPlain(line || " ", Math.max(1, columns - 2)));
     for (const line of wrappedCommand.slice(0, 4)) {
-      rows.push(theme.dim(truncateVisible(`    ${line}`, columns)));
+      rows.push(theme.dim(truncateVisible(`  ${line}`, columns)));
     }
     if (wrappedCommand.length > 4) {
-      rows.push(theme.dim(truncateVisible(`    … ${wrappedCommand.length - 4} more lines`, columns)));
+      rows.push(theme.dim(truncateVisible(`  … ${wrappedCommand.length - 4} more lines`, columns)));
     }
   }
 
@@ -283,24 +335,24 @@ function renderTraceGroup(group: TraceGroup, options: TranscriptRenderOptions): 
   if (collapseSuccessfulExecute) {
     const outputLines = group.previewLines.length + group.omitted;
     rows.push(theme.dim(truncateVisible(
-      `    ⎿  ${outputLines > 0
+      `  ⎿  ${outputLines > 0
         ? `${outputLines} line${outputLines === 1 ? "" : "s"} output · Ctrl+O to view`
         : "no output"}`,
       columns,
     )));
   } else {
     for (let index = 0; index < details.length; index += 1) {
-      const prefix = index === 0 ? "    ↳ " : "      ";
+      const prefix = index === 0 ? "  ↳ " : "    ";
       const line = truncateVisible(`${prefix}${details[index] ?? ""}`, columns);
-      rows.push(allErrored ? theme.error(line) : theme.dim(line));
+      rows.push(group.hasError ? theme.error(line) : theme.dim(line));
     }
   }
   for (let index = 0; index < group.errorLines.length; index += 1) {
-    const prefix = index === 0 ? "    ↳ " : "      ";
+    const prefix = index === 0 ? "  ↳ " : "    ";
     rows.push(theme.error(truncateVisible(`${prefix}${group.errorLines[index] ?? ""}`, columns)));
   }
   if (group.omitted > 0) {
-    rows.push(theme.dim(truncateVisible(`    … ${group.omitted} more`, columns)));
+    rows.push(theme.dim(truncateVisible(`  … ${group.omitted} more`, columns)));
   }
   return rows;
 }
@@ -311,26 +363,17 @@ export function renderMessage(message: DisplayMessage, options: TranscriptRender
     return renderUserCard(message.content, options);
   }
   if (message.role === "error") {
-    return [theme.error(truncateVisible(message.content, options.columns)), ""];
+    return [...projectAssistantRows(message.content, options).map(theme.error), ""];
   }
-  // Assistant (and synthetic assistant rows).
-  const rows: string[] = [];
-  if (message.reasoning) {
-    rows.push(...renderReasoning(message.reasoning, options));
+  if (message.syntheticKind) {
+    return [...projectAssistantRows(message.content, { ...options, markdownRenderer: undefined }).map(theme.dim), ""];
   }
-  if (message.toolCalls?.length) {
-    rows.push(...renderToolTraceGroups(message.toolCalls, options));
-  }
-  if (message.content?.trim()) {
-    rows.push(...renderAssistant(message.content, options));
-  } else if (rows.length === 0) {
-    rows.push("");
-  }
-  return rows;
-}
-
-interface RequestTraceState {
-  workingShown: boolean;
+  const blocks: string[][] = [];
+  if (message.reasoning) blocks.push(projectReasoningRows(message.reasoning, options));
+  if (message.toolCalls?.length) blocks.push(renderToolTraceGroups(message.toolCalls, options));
+  if (message.content?.trim()) blocks.push(projectAssistantRows(message.content, options));
+  const rows = joinTranscriptBlocks(blocks);
+  return rows.length > 0 ? [...rows, ""] : [""];
 }
 
 /**
@@ -345,8 +388,7 @@ interface RequestTraceState {
  * would create another disappear-at-finalize jump.
  *
  *   Thinking
- *   Working (one request-level heading)
- *     tool
+ *   ◆ tool
  *   Thinking (a later provider turn, if present)
  *     tool
  *   final answer
@@ -356,21 +398,15 @@ interface RequestTraceState {
 function renderAssistantInRequest(
   message: DisplayMessage,
   options: TranscriptRenderOptions,
-  trace: RequestTraceState,
 ): string[] {
-  const theme = options.theme ?? defaultTranscriptTheme;
-  const rows: string[] = [];
+  const blocks: string[][] = [];
 
   if (message.reasoning) {
-    rows.push(...renderReasoning(message.reasoning, options));
+    blocks.push(projectReasoningRows(message.reasoning, options));
   }
 
   const appendTools = (tools: readonly DisplayToolCall[]) => {
-    if (!trace.workingShown) {
-      rows.push(theme.dim(truncateVisible("  ● Working", Math.max(1, options.columns))));
-      trace.workingShown = true;
-    }
-    rows.push(...renderToolTraceGroups(tools, options));
+    blocks.push(renderToolTraceGroups(tools, options));
   };
 
   // Preserve the model's real commentary/tool timeline. `parts` is the
@@ -382,29 +418,30 @@ function renderAssistantInRequest(
       if (part.type === "tools") {
         appendTools(part.toolCalls);
       } else if (part.content.trim()) {
-        rows.push(...renderAssistant(part.content, options));
+        blocks.push(projectAssistantRows(part.content, options));
       }
     }
   } else {
     if (message.toolCalls?.length) appendTools(message.toolCalls);
-    if (message.content?.trim()) rows.push(...renderAssistant(message.content, options));
+    if (message.content?.trim()) blocks.push(projectAssistantRows(message.content, options));
   }
-  return rows;
+  return joinTranscriptBlocks(blocks);
 }
 
 export function renderTranscript(messages: readonly DisplayMessage[], options: TranscriptRenderOptions): string[] {
-  const rows: string[] = [];
-  let trace: RequestTraceState = { workingShown: false };
-
+  const messageBlocks: string[][] = [];
   for (const message of messages) {
     if (message.role === "user") {
-      trace = { workingShown: false };
-      rows.push(...renderUserCard(message.content, options));
+      messageBlocks.push(renderUserCard(message.content, options));
     } else if (message.role === "assistant" && !message.syntheticKind) {
-      rows.push(...renderAssistantInRequest(message, options, trace));
+      messageBlocks.push(renderAssistantInRequest(message, options));
     } else {
-      rows.push(...renderMessage(message, options));
+      messageBlocks.push(renderMessage(message, options));
     }
   }
-  return rows;
+  const rows = joinTranscriptBlocks(messageBlocks);
+  // The transcript owns the sole separator before a live assistant surface.
+  // When that surface settles, the same row becomes the transcript's trailing
+  // separator, so user -> Thinking geometry cannot change at commit time.
+  return rows.length > 0 ? [...rows, ""] : [];
 }

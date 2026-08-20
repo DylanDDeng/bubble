@@ -24,6 +24,15 @@ const strip = (text: string): string => text.replace(/\u001b\[[0-9;]*m/g, "");
 const msg = (partial: Partial<DisplayMessage>): DisplayMessage =>
   ({ key: "k", role: "assistant", content: "", ...partial }) as DisplayMessage;
 
+const defaultMarkedTheme = {
+  userBg: (text: string) => text,
+  userText: (text: string) => text,
+  accent: (text: string) => text,
+  dim: (text: string) => text,
+  error: (text: string) => text,
+  success: (text: string) => text,
+};
+
 describe("transcript renderer", () => {
   it("renders a compact user card with exact terminal-cell width", () => {
     const rows = renderUserCard("你好啊", { columns: 40 });
@@ -50,8 +59,10 @@ describe("transcript renderer", () => {
     const wide = component.render(60);
 
     expect(narrow.length).toBeGreaterThan(wide.length);
-    expect(narrow.every((row) => stringWidth(strip(row)) === 22)).toBe(true);
-    expect(wide.every((row) => stringWidth(strip(row)) === 58)).toBe(true);
+    expect(narrow.at(-1)).toBe("");
+    expect(wide.at(-1)).toBe("");
+    expect(narrow.slice(0, -1).every((row) => stringWidth(strip(row)) === 22)).toBe(true);
+    expect(wide.slice(0, -1).every((row) => stringWidth(strip(row)) === 58)).toBe(true);
     expect(narrow.map(strip).join("\n")).toContain("resize");
     expect(wide.map(strip).join("\n")).toContain("resize should reflow this message");
   });
@@ -78,9 +89,11 @@ describe("transcript renderer", () => {
           { type: "text", content: "最终回答" },
         ],
       }),
+      msg({ key: "notice", content: "普通通知也必须在窄终端内换行", syntheticKind: "ui_notice" }),
+      msg({ key: "error", role: "error", content: "错误消息也不能越过终端宽度" }),
     ];
 
-    for (const columns of [1, 4, 12, 20, 40]) {
+    for (const columns of [1, 4, 12, 20, 40, 80]) {
       const rows = renderTranscript(messages, { columns });
       expect(rows.every((row) => stringWidth(strip(row)) <= columns), `overflow at ${columns} columns`).toBe(true);
     }
@@ -93,13 +106,12 @@ describe("transcript renderer", () => {
     expect(rows[rows.length - 1]).toBe("");
   });
 
-  it("restores the Ink-style settled Thinking block", () => {
+  it("renders the Grok-style settled reasoning surface", () => {
     const collapsed = renderMessage(msg({ reasoning: "line one\nline two" }), { columns: 60 });
-    expect(collapsed.map(strip)).toEqual(["  ✻ Thinking", "  line one", "  line two", ""]);
-    expect(collapsed.join("\n")).not.toContain("└─");
+    expect(collapsed.map(strip)).toEqual(["┃◆ Thinking", "┃line one", "┃line two", ""]);
 
     const expanded = renderMessage(msg({ reasoning: "line one" }), { columns: 60, showReasoning: true });
-    expect(expanded.map(strip)).toEqual(["  ✻ Thinking", "  line one", ""]);
+    expect(expanded.map(strip)).toEqual(["┃◆ Thinking", "┃line one", ""]);
   });
 
   it("keeps long collapsed reasoning within every terminal width", () => {
@@ -113,17 +125,29 @@ describe("transcript renderer", () => {
     expect(wide).not.toContain("└─");
   });
 
-  it("tool trace glyphs: pending, success, error", () => {
+  it("uses Grok's shared diamond marker for every tool state", () => {
     const opts = { columns: 60 };
     const pending = renderToolTrace({ id: "1", name: "bash", args: { command: "ls" } }, opts);
     const ok = renderToolTrace({ id: "1", name: "bash", args: { command: "ls" }, result: "done" }, opts);
     const err = renderToolTrace({ id: "1", name: "bash", args: { command: "ls" }, result: "boom", isError: true }, opts);
 
-    expect(strip(pending)).toContain("… bash");
-    expect(strip(ok)).toContain("✔ bash");
-    expect(strip(err)).toContain("✗ bash");
+    expect(strip(pending)).toContain("◆ bash");
+    expect(strip(ok)).toContain("◆ bash");
+    expect(strip(err)).toContain("◆ bash");
+    expect([pending, ok, err].every((row) => !/[●✔✗]/u.test(strip(row)))).toBe(true);
     // Command preview is surfaced.
     expect(strip(ok)).toContain("ls");
+  });
+
+  it("colors a failed tool's diamond and label as one error entry", () => {
+    const row = renderToolTrace(
+      { id: "1", name: "bash", args: { command: "false" }, result: "boom", isError: true },
+      {
+        columns: 60,
+        theme: { ...defaultMarkedTheme, error: (text) => `<error>${text}</error>` },
+      },
+    );
+    expect(row).toContain("<error>◆ bash false</error>");
   });
 
   it("verbose trace appends the result preview", () => {
@@ -156,7 +180,7 @@ describe("transcript renderer", () => {
       }],
     }), { columns: 80 }).map(strip).join("\n");
     expect(running).toContain("Execute check cwd running");
-    expect(running).toContain("    pwd");
+    expect(running).toContain("  pwd");
 
     const failed = renderMessage(msg({
       toolCalls: [{
@@ -169,7 +193,7 @@ describe("transcript renderer", () => {
       }],
     }), { columns: 80 }).map(strip).join("\n");
     expect(failed).toContain("Execute check cwd 1 error");
-    expect(failed).toContain("    pwd");
+    expect(failed).toContain("  pwd");
     expect(failed).toContain("boom");
   });
 
@@ -177,6 +201,22 @@ describe("transcript renderer", () => {
     const rows = renderMessage(msg({ role: "error", content: "boom happened" }), { columns: 40 });
     expect(rows).toHaveLength(2);
     expect(strip(rows[0]!)).toBe("boom happened");
+    expect(strip(rows[0]!)).not.toMatch(/^[■◆●]/u);
+  });
+
+  it("renders notices and interrupts muted without answer or status markers", () => {
+    const markedTheme = {
+      ...defaultMarkedTheme,
+      dim: (text: string) => `<dim>${text}</dim>`,
+    };
+    for (const syntheticKind of ["ui_notice", "ui_interrupt"] as const) {
+      const rows = renderMessage(msg({ content: "ordinary notice", syntheticKind }), {
+        columns: 40,
+        theme: markedTheme,
+      });
+      expect(rows[0]).toBe("<dim>ordinary notice</dim>");
+      expect(strip(rows[0]!)).not.toMatch(/[■◆●]/u);
+    }
   });
 
   it("orders reasoning above tool traces above content", () => {
@@ -196,7 +236,7 @@ describe("transcript renderer", () => {
     expect(toolAt).toBeLessThan(contentAt);
   });
 
-  it("keeps provider-turn Thinking while grouping Working per user request", () => {
+  it("keeps provider-turn Thinking while rendering tools as diamond entries", () => {
     const rows = renderTranscript(
       [
         msg({ key: "u", role: "user", content: "inspect" }),
@@ -210,9 +250,14 @@ describe("transcript renderer", () => {
     expect(text.match(/Thinking/g)).toHaveLength(2);
     expect(text).toContain("plan one");
     expect(text).toContain("plan two");
-    expect(text.match(/Working/g)).toHaveLength(1);
+    expect(text).not.toContain("Working");
+    expect(text.match(/◆ (Execute|Read)/g)).toHaveLength(2);
     expect(text.indexOf("Execute")).toBeLessThan(text.indexOf("Read"));
     expect(text.indexOf("Read")).toBeLessThan(text.indexOf("done"));
+    const plainRows = rows.map(strip);
+    const executeAt = plainRows.findIndex((row) => row.includes("◆ Execute"));
+    const secondThinkingAt = plainRows.findIndex((row, index) => index > executeAt && row.includes("◆ Thinking"));
+    expect(plainRows[secondThinkingAt - 1]).toBe("");
   });
 
   it("preserves commentary/tool order from display parts inside Working", () => {
@@ -235,6 +280,13 @@ describe("transcript renderer", () => {
     const text = rows.map(strip).join("\n");
     expect(text.indexOf("I will inspect.")).toBeLessThan(text.indexOf("Read"));
     expect(text.indexOf("Read")).toBeLessThan(text.indexOf("Result follows."));
+    const plainRows = rows.map(strip);
+    const commentaryAt = plainRows.indexOf("I will inspect.");
+    const toolDetailAt = plainRows.findIndex((row) => row.includes("/x"));
+    const answerAt = plainRows.indexOf("Result follows.");
+    expect(plainRows[commentaryAt + 1]).toBe("");
+    expect(plainRows[toolDetailAt + 1]).toBe("");
+    expect(answerAt).toBe(toolDetailAt + 2);
   });
 
   it("wrapPlain honors explicit newlines and long words", () => {

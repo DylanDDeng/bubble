@@ -1,10 +1,24 @@
 import { stripVTControlCharacters } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Editor, TuiMainScreen, visibleWidth, type EditorTheme } from "@bubblebrain-ai/pi-tui";
+import {
+  Editor,
+  ScrollView,
+  TuiAltScreen,
+  TuiMainScreen,
+  visibleWidth,
+  VStack,
+  type EditorTheme,
+} from "@bubblebrain-ai/pi-tui";
 import { VirtualTerminal } from "@bubblebrain-ai/pi-tui/testing";
 import { StreamingMessageComponent } from "../tui/components/streaming-message.js";
 import { ResponsiveTranscriptComponent } from "../tui/components/responsive-transcript.js";
-import { renderReasoning, type TranscriptTheme } from "../tui/components/transcript.js";
+import { COMPOSER_EDITOR_OPTIONS, COMPOSER_EDITOR_THEME } from "../tui/composer-style.js";
+import {
+  projectAssistantRows,
+  renderMessage,
+  renderReasoning,
+  type TranscriptTheme,
+} from "../tui/components/transcript.js";
 import { ResponsiveFooterComponent } from "../tui/footer.js";
 import { createFlushScheduler } from "../tui/run.js";
 import type { DisplayMessage } from "../tui/model/display-history.js";
@@ -12,7 +26,8 @@ import type { DisplayMessage } from "../tui/model/display-history.js";
 const strip = (value: string): string => stripVTControlCharacters(value);
 
 function rendered(component: StreamingMessageComponent, width = 80): string[] {
-  return component.render(width).map((row) => strip(row).trimEnd());
+  return [...component.render(width), ...component.activityLane.render(width)]
+    .map((row) => strip(row).trimEnd());
 }
 
 afterEach(() => {
@@ -40,7 +55,7 @@ const editorTheme: EditorTheme = {
 };
 
 describe("pi-tui working trace parity", () => {
-  it("keeps live reasoning in a five-line Thinking window above the spinner", () => {
+  it("keeps live reasoning in a five-line Grok rail above the spinner", () => {
     const component = new StreamingMessageComponent();
     component.update({
       content: "",
@@ -51,16 +66,15 @@ describe("pi-tui working trace parity", () => {
     }, 80);
 
     const rows = rendered(component);
-    expect(rows).toContain("  ✻ Thinking…");
-    expect(rows).toContain("  R3");
-    expect(rows).toContain("  R7");
-    expect(rows).not.toContain("  R1");
-    expect(rows).not.toContain("  R2");
-    expect(rows.indexOf("  ✻ Thinking…")).toBeLessThan(rows.findIndex((row) => row.includes("working through the request")));
-    expect(rows.join("\n")).not.toContain("└─");
+    expect(rows).toContain("┃◆ Thinking…");
+    expect(rows).toContain("┃R3");
+    expect(rows).toContain("┃R7");
+    expect(rows).not.toContain("┃R1");
+    expect(rows).not.toContain("┃R2");
+    expect(rows.indexOf("┃◆ Thinking…")).toBeLessThan(rows.findIndex((row) => row.includes("working through the request")));
   });
 
-  it("uses Ink state phrases and puts live output before status", () => {
+  it("keeps the status cadence while Grok entries render above it", () => {
     const component = new StreamingMessageComponent();
 
     component.update({ content: "", reasoning: "", tools: [], parts: [], phase: "thinking" }, 80);
@@ -74,10 +88,12 @@ describe("pi-tui working trace parity", () => {
       phase: "thinking",
     }, 80);
     let rows = rendered(component);
-    expect(rows).toContain("  ✻ Thinking…");
-    expect(rows).toContain("  thought");
+    expect(rows).toContain("┃◆ Thinking…");
+    expect(rows).toContain("┃thought");
     expect(rows.some((row) => row.includes("writing the response"))).toBe(true);
-    expect(rows.findIndex((row) => row.includes("● answer"))).toBeLessThan(rows.findIndex((row) => row.includes("writing the response")));
+    expect(rows).toContain("answer");
+    expect(rows.join("\n")).not.toContain("● answer");
+    expect(rows.indexOf("answer")).toBeLessThan(rows.findIndex((row) => row.includes("writing the response")));
 
     const read = { id: "read-1", name: "read", args: { path: "README.md" }, status: "running" as const };
     component.update({
@@ -89,10 +105,35 @@ describe("pi-tui working trace parity", () => {
     }, 80);
     rows = rendered(component);
     expect(rows.at(-1)).toContain("reading files");
-    expect(rows.join("\n")).toContain("Working on Read 1 file");
+    expect(rows.join("\n")).toContain("◆ Read 1 file running");
     expect(rows.join("\n")).toContain("README.md");
-    expect(rows.indexOf("  thought")).toBeLessThan(rows.findIndex((row) => row.includes("Working on Read")));
-    expect(rows.findIndex((row) => row.includes("Working on Read"))).toBeLessThan(rows.findIndex((row) => row.includes("● answer")));
+    expect(rows.indexOf("┃thought")).toBeLessThan(rows.findIndex((row) => row.includes("◆ Read")));
+    expect(rows.findIndex((row) => row.includes("◆ Read"))).toBeLessThan(rows.indexOf("answer"));
+  });
+
+  it("keeps live and settled multiline answers on the same column-zero projection", () => {
+    const width = 12;
+    const content = "alpha beta 这是多行 answer";
+    const expected = projectAssistantRows(content, { columns: width }).map(strip);
+    const component = new StreamingMessageComponent();
+    component.update({
+      content,
+      reasoning: "",
+      tools: [],
+      parts: [{ type: "text", content }],
+      phase: "thinking",
+    }, width);
+
+    const live = rendered(component, width);
+    const start = live.findIndex((row) => row === expected[0]);
+    expect(live.slice(start, start + expected.length)).toEqual(expected);
+
+    const settled = renderMessage({ role: "assistant", content }, { columns: width })
+      .map(strip)
+      .slice(0, -1);
+    expect(settled).toEqual(expected);
+    expect(expected.every((row) => row.length === 0 || !/^\s/u.test(row))).toBe(true);
+    expect(expected.join("\n")).not.toContain("●");
   });
 
   it("keeps ordered Thinking, commentary, full tool lifecycle, and answer trace", () => {
@@ -117,11 +158,19 @@ describe("pi-tui working trace parity", () => {
     }, 80);
 
     let text = rendered(component).join("\n");
-    expect(text).toContain("✻ Thinking…");
-    expect(text).toContain("Working on Execute npm test");
-    expect(text).toContain("Execute npm test running");
+    expect(text).toContain("┃◆ Thinking…");
+    expect(text).toContain("◆ Execute npm test running");
     expect(text.indexOf("I will verify.")).toBeLessThan(text.indexOf("Execute npm test"));
     expect(text.indexOf("Execute npm test")).toBeLessThan(text.indexOf("Done."));
+    const firstFrameRows = rendered(component);
+    const reasoningBodyAt = firstFrameRows.indexOf("┃inspect the tests");
+    const commentaryAt = firstFrameRows.indexOf("I will verify.");
+    const toolAt = firstFrameRows.findIndex((row) => row.includes("◆ Execute npm test running"));
+    const answerAt = firstFrameRows.indexOf("Done.");
+    expect(firstFrameRows[reasoningBodyAt + 1]).toBe("");
+    expect(firstFrameRows[commentaryAt + 1]).toBe("");
+    expect(firstFrameRows[toolAt + 1]).toBe("");
+    expect(answerAt).toBe(toolAt + 2);
 
     const running = { ...pending, args: { command: "npm test" }, status: "running" as const, result: "42 tests passed" };
     component.update({
@@ -132,7 +181,7 @@ describe("pi-tui working trace parity", () => {
       phase: "working",
     }, 80);
     text = rendered(component).join("\n");
-    expect(text).toContain("Working on Execute npm test");
+    expect(text).toContain("◆ Execute npm test running");
     expect(text).toContain("42 tests passed");
 
     const completed = { ...running, status: "completed" as const };
@@ -144,10 +193,10 @@ describe("pi-tui working trace parity", () => {
       phase: "working",
     }, 80);
     text = rendered(component).join("\n");
-    expect(text).not.toContain("Working on Execute");
+    expect(text).not.toContain("Working");
     expect(text).not.toContain(" running");
     expect(text).toContain("1 line output · Ctrl+O to view");
-    expect(text).toContain("✻ Thinking…");
+    expect(text).toContain("┃◆ Thinking…");
   });
 
   it("rotates the spinner and idle phrase on the Ink cadence, then cleans up", () => {
@@ -165,17 +214,20 @@ describe("pi-tui working trace parity", () => {
     expect(rendered(component).at(-1)).toContain("reading the room");
 
     component.clearToNothing();
-    expect(rendered(component)).toEqual([]);
+    expect(rendered(component)).toEqual([""]);
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("renders settled reasoning as the first two non-empty lines without a connector", () => {
-    const compact = renderReasoning("\nR1\n\nR2\nR3\nR4", { columns: 80 }).map(strip);
+  it("keeps the same five-line minimal reasoning surface after settle", () => {
+    const compact = renderReasoning("\nR1\n\nR2\nR3\nR4\nR5\nR6\nR7", { columns: 80 }).map(strip);
     expect(compact).toEqual([
-      "  ✻ Thinking",
-      "  R1",
-      "  R2",
-      "  … (Ctrl+T to expand)",
+      "┃◆ Thinking",
+      "┃R3",
+      "┃R4",
+      "┃R5",
+      "┃R6",
+      "┃R7",
+      "┃… (Ctrl+T to expand)",
       "",
     ]);
     expect(compact.join("\n")).not.toContain("└─");
@@ -207,9 +259,76 @@ describe("pi-tui working trace parity", () => {
         phase: "thinking",
       }, width);
       expect(component.render(width).every((row) => visibleWidth(row) <= width)).toBe(true);
+      expect(component.activityLane.render(width).every((row) => visibleWidth(row) <= width)).toBe(true);
       expect(renderReasoning("这是非常长的中文 reasoning 🫧\n第二行", { columns: width })
         .every((row) => visibleWidth(row) <= width)).toBe(true);
     }
+  });
+
+  it("keeps the reasoning-to-composer distance stable when the spinner clears", async () => {
+    const terminal = new VirtualTerminal(80, 14);
+    const tui = new TuiAltScreen(terminal);
+    let messages: DisplayMessage[] = [
+      ...Array.from({ length: 10 }, (_, index): DisplayMessage => ({
+        key: `history-${index}`,
+        role: "assistant",
+        content: `history-${index}`,
+      })),
+      { key: "current-user", role: "user", content: "inspect" },
+    ];
+    const transcript = new ResponsiveTranscriptComponent(() => ({ messages, options: { theme: plainTheme } }));
+    const streaming = new StreamingMessageComponent();
+    const reasoning = [
+      "TRACE_REASONING_1",
+      "TRACE_REASONING_2",
+      "TRACE_REASONING_3",
+      "TRACE_REASONING_4",
+      "TRACE_REASONING_5",
+      "TRACE_REASONING_6",
+      "TRACE_REASONING_7",
+    ].join("\n");
+    streaming.update({
+      content: "",
+      reasoning,
+      tools: [],
+      parts: [],
+      phase: "thinking",
+    }, 80, { theme: plainTheme });
+    const editor = new Editor(tui, COMPOSER_EDITOR_THEME, COMPOSER_EDITOR_OPTIONS);
+    const scroll = new ScrollView(new VStack([transcript, streaming]), { follow: "end", primary: true });
+    tui.setLayoutRoot(new VStack([
+      { component: scroll, basis: 0, grow: 1, minSize: 0 },
+      { component: streaming.activityLane, basis: "auto", shrink: 0 },
+      { component: editor, basis: "auto", shrink: 0 },
+    ]));
+    tui.setFocus(editor);
+    tui.start();
+    await terminal.waitForRender();
+
+    const distanceToComposer = () => {
+      const rows = terminal.getViewport();
+      const reasoningAt = rows.findIndex((row) => row.includes("◆ Thinking"));
+      const composerAt = rows.findIndex((row) => row.includes("┌"));
+      expect(reasoningAt).toBeGreaterThanOrEqual(0);
+      expect(composerAt).toBeGreaterThan(reasoningAt);
+      return composerAt - reasoningAt;
+    };
+    const liveDistance = distanceToComposer();
+    expect(liveDistance).toBeGreaterThanOrEqual(3);
+
+    messages = [...messages, {
+      key: "settled-reasoning",
+      role: "assistant",
+      content: "",
+      reasoning,
+    }];
+    streaming.clearToNothing();
+    tui.requestRender();
+    await terminal.waitForRender();
+
+    expect(distanceToComposer()).toBe(liveDistance);
+    expect(streaming.activityLane.render(80)).toEqual([""]);
+    tui.stop({ preserveScreen: true });
   });
 
   it("orders user, live Thinking, spinner, composer and footer in the current viewport", async () => {
@@ -226,6 +345,7 @@ describe("pi-tui working trace parity", () => {
     }));
     tui.addChild(transcript);
     tui.addChild(streaming);
+    tui.addChild(streaming.activityLane);
     tui.addChild(editor);
     tui.addChild(footer);
     tui.setFocus(editor);
@@ -235,7 +355,7 @@ describe("pi-tui working trace parity", () => {
 
     let viewport = terminal.getViewport();
     const userAt = viewport.findIndex((row) => row.includes("TRACE_USER_MARKER"));
-    const thinkingAt = viewport.findIndex((row) => row.includes("✻ Thinking"));
+    const thinkingAt = viewport.findIndex((row) => row.includes("◆ Thinking"));
     const spinnerAt = viewport.findIndex((row) => row.includes("working through the request"));
     const composerAt = viewport.findIndex((row) => row.includes("Q"));
     const footerAt = viewport.findIndex((row) => row.includes("TRACE_FOOTER"));

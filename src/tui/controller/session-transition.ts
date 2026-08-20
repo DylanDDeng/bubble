@@ -91,7 +91,12 @@ export class SessionTransitionController {
     const rows = reconstructDisplayMessages([...this.deps.agent.messages])
       .filter((message) => !queuedDisplayKeys?.has(message.key ?? ""));
     return notice
-      ? [...rows, { key: nextDisplayMessageKey("notice"), role: "assistant" as const, content: notice }]
+      ? [...rows, {
+          key: nextDisplayMessageKey("notice"),
+          role: "assistant" as const,
+          content: notice,
+          syntheticKind: "ui_notice" as const,
+        }]
       : rows;
   }
 }

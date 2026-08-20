@@ -561,8 +561,12 @@ describe("BubbleTuiController headless session", () => {
       manager: { getSessionFile: () => "/next.jsonl", getMetadata: () => ({}), appendMessage: () => {} },
     }) as never;
     const before = host.snapshotVersions.length;
-    const outcome = controller.switchSession({ targetFile: "/next.jsonl" });
+    const outcome = controller.switchSession({ targetFile: "/next.jsonl", notice: "Switched session" });
     expect(outcome.ok).toBe(true);
     expect(host.snapshotVersions.length - before).toBeLessThanOrEqual(1);
+    expect(controller.getTranscript().at(-1)).toMatchObject({
+      content: "Switched session",
+      syntheticKind: "ui_notice",
+    });
   });
 });

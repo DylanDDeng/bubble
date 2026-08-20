@@ -41,7 +41,7 @@ import { registry as slashRegistry } from "../slash-commands/index.js";
 import type { SlashCommandContext } from "../slash-commands/types.js";
 import { BubbleTuiController } from "./controller/controller.js";
 import { OverlayRequestController } from "./controller/overlay-controller.js";
-import { defaultTranscriptTheme } from "./components/transcript.js";
+import { defaultTranscriptTheme, type TranscriptRenderOptions } from "./components/transcript.js";
 import { friendlyCwd, sessionBasename } from "./formatting/summary.js";
 import { ResponsiveFooterComponent } from "./footer.js";
 import { ComposerAutocompleteProvider } from "./composer-autocomplete.js";
@@ -158,15 +158,7 @@ export class PiTuiApp {
     }));
     this.settledTranscript = new ResponsiveTranscriptComponent(() => ({
       messages: this.options.controller.getTranscript(),
-      options: {
-        showReasoning: this.showReasoning,
-        verboseTrace: this.verboseTrace,
-        theme: defaultTranscriptTheme,
-        markdownRenderer: (text, width) => {
-          this.markdown.setText(text);
-          return this.markdown.render(width);
-        },
-      },
+      options: this.transcriptRenderOptions(),
     }));
     this.welcome = new WelcomeBannerComponent(() => {
       const { agent, updateNotice } = this.options;
@@ -242,17 +234,20 @@ export class PiTuiApp {
     this.transcriptBox.addChild(this.streamingMessage);
     if (isViewportTUI(this.tui)) {
       // Fullscreen owns a bounded viewport. History scrolls while the composer
-      // and footer stay docked, so the first frame is already the final layout.
+      // and footer stay docked. The activity lane is a permanent one-row
+      // boundary: spinner text changes, its geometry never does.
       const document = new VStack([this.welcome, this.transcriptBox]);
       const scroll = new ScrollView(document, { follow: "end", primary: true });
       this.tui.setLayoutRoot(new VStack([
         { component: scroll, basis: 0, grow: 1, minSize: 0 },
+        { component: this.streamingMessage.activityLane, basis: "auto", shrink: 0 },
         { component: this.editor, basis: "auto", shrink: 0 },
         { component: this.footer, basis: "auto", shrink: 0 },
       ]));
     } else {
       this.tui.addChild(this.welcome);
       this.tui.addChild(this.transcriptBox);
+      this.tui.addChild(this.streamingMessage.activityLane);
       this.tui.addChild(this.editor);
       this.tui.addChild(this.footer);
     }
@@ -388,7 +383,12 @@ export class PiTuiApp {
     const options = this.options;
     const agent = options.agent;
     const addMessage = (role: "user" | "assistant" | "error", content: string) => {
-      options.controller.appendDisplayMessage({ key: `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, role, content });
+      options.controller.appendDisplayMessage({
+        key: `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        role,
+        content,
+        syntheticKind: role === "assistant" ? "ui_notice" : undefined,
+      });
     };
     return {
       agent,
@@ -429,7 +429,12 @@ export class PiTuiApp {
   }
 
   private pushNotice(text: string): void {
-    this.appendTranscriptRow({ key: `notice-${Date.now()}`, role: "assistant", content: text });
+    this.appendTranscriptRow({
+      key: `notice-${Date.now()}`,
+      role: "assistant",
+      content: text,
+      syntheticKind: "ui_notice",
+    });
   }
 
   private appendTranscriptRow(message: DisplayMessage): void {
@@ -437,6 +442,19 @@ export class PiTuiApp {
   }
 
   private streamingMounted = false;
+
+  /** One display policy feeds both committed history and the live row pool. */
+  private transcriptRenderOptions(): Omit<TranscriptRenderOptions, "columns"> {
+    return {
+      showReasoning: this.showReasoning,
+      verboseTrace: this.verboseTrace,
+      theme: defaultTranscriptTheme,
+      markdownRenderer: (text, width) => {
+        this.markdown.setText(text);
+        return this.markdown.render(width);
+      },
+    };
+  }
 
   renderSnapshot(): void {
     if (this.disposed) return;
@@ -464,7 +482,7 @@ export class PiTuiApp {
         this.streamingMessage.startSpinner();
       }
       this.streamingMessage.noteWidth(columns);
-      this.streamingMessage.update(tail, columns);
+      this.streamingMessage.update(tail, columns, this.transcriptRenderOptions());
     } else if (this.streamingMounted) {
       this.streamingMounted = false;
       this.streamingMessage.clearToNothing();

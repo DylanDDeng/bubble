@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { VirtualTerminal } from "@bubblebrain-ai/pi-tui/testing";
 import { PiTuiApp } from "../tui/app.js";
 import { QuestionController, QuestionRejectedError } from "../question/index.js";
+import type { StreamingTailState } from "../tui/components/streaming-message.js";
+import type { DisplayMessage } from "../tui/model/display-history.js";
 
 class RecordingTerminal extends VirtualTerminal {
   readonly output: string[] = [];
@@ -76,6 +78,105 @@ describe("main pi-tui running input", () => {
     expect(exitOutput).toContain("\x1b[?1049l");
     expect(exitOutput).not.toContain("\x1b[2K");
     expect(exitOutput).not.toContain("I am a cat");
+  });
+
+  it("keeps the first Thinking surface fixed when the user turn settles", async () => {
+    const terminal = new VirtualTerminal(204, 68);
+    const listeners: Array<() => void> = [];
+    const reasoning = [
+      "Inspect the request and current workspace state before answering.",
+      "Keep the response concise while preserving the relevant implementation context.",
+      "Verify the final wording and then return the answer.",
+    ].join(" ").repeat(2);
+    const answer = "Ready to help with the Pi TUI implementation.";
+    let messages: DisplayMessage[] = [{ key: "user", role: "user", content: "hello" }];
+    let running = true;
+    let tail: StreamingTailState | null = {
+      content: "",
+      reasoning,
+      tools: [],
+      parts: [],
+      phase: "thinking",
+    };
+    const controller = {
+      subscribe: (listener: () => void) => {
+        listeners.push(listener);
+        return () => {};
+      },
+      getTranscript: () => messages,
+      isRunning: () => running,
+      getStreamingTail: () => tail,
+      pendingSteerCount: () => 0,
+      queuedInputCount: () => 0,
+      steer: () => false,
+      cancelActiveRun: () => false,
+      runTurn: async () => {},
+      appendDisplayMessage: () => {},
+      clearTranscript: () => {},
+      shutdown: () => ({ reason: "test", wallMs: 0 }),
+    };
+    const app = new PiTuiApp({
+      agent: {
+        model: "test-model",
+        providerId: "test-provider",
+        thinking: "medium",
+        mode: "default",
+        setMode: () => {},
+        getContextUsageSnapshot: () => ({ usedTokens: 0, contextWindow: 1_000 }),
+      } as never,
+      sessionManager: { getSessionFile: () => "/s.jsonl" } as never,
+      controller: controller as never,
+      callbacks: {
+        onExitRequest: () => {},
+        onClearTranscript: () => {},
+        onModelSelect: () => {},
+        onThemeToggle: () => {},
+      },
+      terminal,
+    });
+    const geometry = () => {
+      const rows = terminal.getViewport();
+      const thinkingAt = rows.findIndex((row) => row.includes("◆ Thinking"));
+      let reasoningEndAt = -1;
+      for (let index = 0; index < rows.length; index += 1) {
+        if (rows[index]!.includes("┃")) reasoningEndAt = index;
+      }
+      const composerAt = rows.findIndex((row) => row.includes("┌"));
+      expect(thinkingAt).toBeGreaterThanOrEqual(0);
+      expect(reasoningEndAt).toBeGreaterThanOrEqual(thinkingAt);
+      expect(composerAt).toBeGreaterThan(reasoningEndAt);
+      return {
+        thinkingAt,
+        headerDistance: composerAt - thinkingAt,
+        bodyDistance: composerAt - reasoningEndAt,
+      };
+    };
+
+    app.start();
+    try {
+      await terminal.waitForRender();
+      const liveReasoning = geometry();
+
+      tail = {
+        content: answer,
+        reasoning,
+        tools: [],
+        parts: [{ type: "text", content: answer }],
+        phase: "thinking",
+      };
+      for (const listener of listeners) listener();
+      await terminal.waitForRender();
+      expect(geometry()).toEqual(liveReasoning);
+
+      messages = [...messages, { key: "assistant", role: "assistant", content: answer, reasoning }];
+      running = false;
+      tail = null;
+      for (const listener of listeners) listener();
+      await terminal.waitForRender();
+      expect(geometry()).toEqual(liveReasoning);
+    } finally {
+      app.dispose();
+    }
   });
 
   it("cycles permission modes with Shift+Tab and reflects them in the footer", async () => {

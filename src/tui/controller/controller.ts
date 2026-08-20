@@ -438,7 +438,12 @@ export class BubbleTuiController {
         this.transcript = [...this.transcript, effect.message];
         break;
       case "notice":
-        this.transcript = [...this.transcript, { key: `notice-${this.transcript.length}`, role: effect.role === "error" ? "error" : "assistant", content: effect.text }];
+        this.transcript = [...this.transcript, {
+          key: `notice-${this.transcript.length}`,
+          role: effect.role === "error" ? "error" : "assistant",
+          content: effect.text,
+          syntheticKind: effect.role === "error" ? undefined : "ui_notice",
+        }];
         break;
       case "queue-updated":
         void effect.pending;
@@ -476,7 +481,12 @@ export class BubbleTuiController {
   private publishTranscript(notice?: string): void {
     purgeForSessionSwitch(this.queue);
     if (notice) {
-      this.transcript = [...this.transcript, { key: `notice-${this.transcript.length}`, role: "assistant", content: notice }];
+      this.transcript = [...this.transcript, {
+        key: `notice-${this.transcript.length}`,
+        role: "assistant",
+        content: notice,
+        syntheticKind: "ui_notice",
+      }];
     }
     this.state.touch();
     this.notify();
