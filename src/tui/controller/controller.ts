@@ -13,6 +13,8 @@
  * snapshots. Renderers subscribe; they never mutate.
  */
 import type { Agent, AgentRunOptions } from "../../agent.js";
+import type { WorkflowRunSnapshot } from "../../agent/workflow/control.js";
+import type { BackgroundTaskInfo } from "../../tasks/manager.js";
 import type { SessionManager } from "../../session.js";
 import type { BubbleTuiPorts } from "./ports.js";
 import { ControllerState } from "./state.js";
@@ -47,8 +49,11 @@ import {
 } from "../model/display-history.js";
 import {
   accumulateLiveSubagentUpdate,
+  collectSubagentGroups,
   pruneSettledLiveSubagentTools,
+  type SubagentGroup,
 } from "../model/subagent-view.js";
+import { reconstructDisplayMessages } from "../model/display-reconstruct.js";
 
 export interface TuiExitSummary {
   reason: string;
@@ -56,7 +61,19 @@ export interface TuiExitSummary {
 }
 
 export interface BubbleTuiControllerDeps {
-  readonly agent: Pick<Agent, "run" | "messages" | "setSessionID"> & { messages: DisplayMessage extends never ? never : unknown[] };
+  readonly agent: Pick<Agent,
+    | "run"
+    | "messages"
+    | "setSessionID"
+    | "listSubAgents"
+    | "listWorkflows"
+    | "getSubAgentMessages"
+    | "closeSubAgent"
+    | "closeWorkflow"
+  > & {
+    messages: DisplayMessage extends never ? never : unknown[];
+    backgroundTasks?: Agent["backgroundTasks"];
+  };
   readonly sessionManager: SessionManager;
   readonly ports: BubbleTuiPorts;
   readonly onEffect?: (effect: ControllerEffect) => void;
@@ -75,11 +92,14 @@ export class BubbleTuiController {
   /** Background subagent updates can outlive the provider turn that launched
    * them. Keep their latest synthetic tool snapshot in the live trace. */
   private readonly liveSubagentTools = new Map<string, DisplayToolCall>();
+  /** Provider-turn accumulators for true child-session inspection. */
+  private readonly childRuns = new Map<string, { state: RunState; visible: boolean; updatedAt: number }>();
   private activeInputController: AgentRunInputQueue | null = null;
   private activeAbortController: AbortController | null = null;
   private readonly queuedAfterRun: Array<{ content: string; displayKey: string }> = [];
   /** False after a provider turn commits, so settled and live rows never coexist. */
   private liveStreamVisible = false;
+  private readonly backgroundTaskUnsubscribe?: () => void;
   private disposed = false;
 
   constructor(private readonly deps: BubbleTuiControllerDeps) {
@@ -99,6 +119,7 @@ export class BubbleTuiController {
       },
       clearLiveSubagentTools: () => {
         this.liveSubagentTools.clear();
+        this.childRuns.clear();
         this.liveSubagentVersion += 1;
       },
       commit: (notice?: string) => {
@@ -106,6 +127,10 @@ export class BubbleTuiController {
       },
     });
     this.overlays.onChange(() => this.state.touch());
+    this.backgroundTaskUnsubscribe = deps.agent.backgroundTasks?.subscribe?.(() => {
+      this.state.touch();
+      this.notify();
+    });
   }
 
   private externalGeneration = 0;
@@ -124,10 +149,86 @@ export class BubbleTuiController {
     return this.transcript;
   }
 
+  getSubagentGroups(): SubagentGroup[] {
+    const fromTrace = collectSubagentGroups(this.transcript, [...this.liveSubagentTools.values()]);
+    const claimed = new Set(fromTrace.flatMap((group) => group.members.map((member) => member.subAgentId).filter(Boolean)));
+    const direct = this.deps.agent.listSubAgents()
+      .filter((snapshot) => !claimed.has(snapshot.agentId))
+      .map((snapshot): SubagentGroup => ({
+        id: `single:${snapshot.agentId}`,
+        runId: snapshot.runId,
+        kind: "single",
+        label: snapshot.nickname,
+        members: [{
+          subAgentId: snapshot.agentId,
+          agentName: snapshot.agentName,
+          nickname: snapshot.nickname,
+          status: snapshot.status,
+          category: snapshot.category,
+          phase: snapshot.phase,
+          route: snapshot.route,
+          profileSource: snapshot.profileSource,
+          task: snapshot.task,
+          summary: snapshot.summary,
+          toolNotes: snapshot.toolNotes,
+          error: snapshot.error,
+          usage: snapshot.usage,
+          createdAt: snapshot.createdAt,
+          updatedAt: snapshot.updatedAt,
+        }],
+      }));
+    return [...fromTrace, ...direct];
+  }
+
+  getWorkflows(): WorkflowRunSnapshot[] {
+    return this.deps.agent.listWorkflows();
+  }
+
+  getBackgroundTasks(): BackgroundTaskInfo[] {
+    return this.deps.agent.backgroundTasks?.list() ?? [];
+  }
+
+  getChildTranscript(agentId: string): DisplayMessage[] {
+    return reconstructDisplayMessages(this.deps.agent.getSubAgentMessages(agentId));
+  }
+
+  getChildStreamingTail(agentId: string): { content: string; reasoning: string; tools: DisplayToolCall[]; parts: DisplayMessagePart[] } | null {
+    const child = this.childRuns.get(agentId);
+    if (!child?.visible) return null;
+    const acc = child.state.accumulator;
+    return {
+      content: acc.content,
+      reasoning: acc.reasoning,
+      tools: acc.toolCalls.map((tool) => ({
+        ...tool,
+        args: { ...tool.args },
+        metadata: tool.metadata ? { ...tool.metadata } : undefined,
+      })),
+      parts: snapshotDisplayParts(acc.parts),
+    };
+  }
+
+  stopSubagent(agentId: string): void {
+    void this.deps.agent.closeSubAgent(agentId);
+  }
+
+  stopWorkflow(runId: string): void {
+    this.deps.agent.closeWorkflow(runId);
+  }
+
+  stopBackgroundTask(id: string): void {
+    void this.deps.agent.backgroundTasks?.kill?.(id);
+  }
+
+  getBackgroundTaskOutput(id: string): string {
+    return this.deps.agent.backgroundTasks?.outputTail(id) ?? "";
+  }
+
   /** Drop every transcript row (/clear). */
   clearTranscript(): void {
     this.transcript = [];
     this.liveSubagentTools.clear();
+    this.childRuns.clear();
     this.state.touch();
     this.notify();
   }
@@ -280,6 +381,9 @@ export class BubbleTuiController {
             name: event.name,
             metadata: event.update.metadata,
           });
+        }
+        if (event.type === "tool_update" && event.update.childEvent) {
+          this.reduceChildEvent(event.update.subAgentId, event.update.childEvent);
         }
         if (event.type === "input_rejected") {
           const steer = this.queue.pendingSteers.get(event.id);
@@ -496,6 +600,29 @@ export class BubbleTuiController {
     for (const listener of this.listeners) listener(this.state.version);
   }
 
+  private reduceChildEvent(agentId: string, event: import("../../types.js").AgentEvent): void {
+    const current = this.childRuns.get(agentId) ?? {
+      state: createRunState(Date.now()),
+      visible: true,
+      updatedAt: Date.now(),
+    };
+    const reduced = reduceAgentEvent(current.state, event, {
+      external: false,
+      isCurrentRun: () => !this.disposed,
+      now: () => this.deps.ports.clock.now(),
+      runStartedAt: current.state.accumulator.runId,
+      pendingSteers: new Map(),
+    });
+    let state = reduced.state;
+    let visible = current.visible;
+    if (event.type === "turn_start") visible = true;
+    if (event.type === "turn_end") {
+      state = createRunState(current.state.accumulator.runId);
+      visible = !!event.willContinue;
+    }
+    this.childRuns.set(agentId, { state, visible, updatedAt: Date.now() });
+  }
+
   private isAbortLike(error: unknown): boolean {
     return error instanceof Error && (error.name === "AbortError" || error.name === "AgentAbortError");
   }
@@ -530,6 +657,7 @@ export class BubbleTuiController {
     this.disposed = true;
     this.cancelActiveRun(reason);
     this.overlays.dispose();
+    this.backgroundTaskUnsubscribe?.();
     this.deps.ports.flush.cancelFlush();
     return { reason, wallMs: Date.now() - this.startedAtMs };
   }

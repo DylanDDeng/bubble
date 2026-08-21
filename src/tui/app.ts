@@ -39,6 +39,16 @@ import { WelcomeBannerComponent } from "./components/welcome.js";
 import { ApprovalDialogComponent, type ApprovalDialogChoice } from "./components/approval-dialog.js";
 import { QuestionDialogComponent } from "./components/question-dialog.js";
 import { ProviderKeyInputComponent } from "./components/provider-key-input.js";
+import {
+  TaskStatusBarComponent,
+  TasksPaneComponent,
+  type SubagentPaneItem,
+  type TaskPaneItem,
+  type WorkflowPaneItem,
+} from "./components/tasks-pane.js";
+import { WorkflowInspectorComponent, type WorkflowInspectorSnapshot } from "./components/workflow-inspector.js";
+import { SubagentInspectorComponent } from "./components/subagent-inspector.js";
+import { TaskInspectorComponent } from "./components/task-inspector.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import type { SlashCommandContext } from "../slash-commands/types.js";
 import { BubbleTuiController } from "./controller/controller.js";
@@ -134,6 +144,8 @@ export class PiTuiApp {
   private readonly settledTranscript: ResponsiveTranscriptComponent;
   private readonly welcome: WelcomeBannerComponent;
   private readonly footer: ResponsiveFooterComponent;
+  private readonly tasksPane: TasksPaneComponent;
+  private readonly taskStatusBar: TaskStatusBarComponent;
   private readonly traceInteraction = new TraceInteractionState();
   private readonly overlays: OverlayRequestController;
   private readonly history: string[] = [];
@@ -157,7 +169,7 @@ export class PiTuiApp {
     // Constructing TuiAltScreen here makes its 1049h transition the first UI
     // write and keeps the entire product surface on one application instance.
     this.tui = (options.uiMode ?? "fullscreen") === "fullscreen"
-      ? new TuiAltScreen(terminal)
+      ? new TuiAltScreen(terminal, undefined, undefined, { mouseMotion: "all" })
       : new TuiMainScreen(terminal);
     this.editor = new Editor(this.tui, COMPOSER_EDITOR_THEME, COMPOSER_EDITOR_OPTIONS);
     this.editor.setAutocompleteProvider(new ComposerAutocompleteProvider({
@@ -202,6 +214,29 @@ export class PiTuiApp {
         hidden: this.tui.terminal.rows <= 2,
       };
     });
+    this.tasksPane = new TasksPaneComponent(
+      () => ({
+        groups: this.options.controller.getSubagentGroups?.() ?? [],
+        workflows: this.options.controller.getWorkflows?.() ?? [],
+        tasks: this.options.controller.getBackgroundTasks?.() ?? [],
+      }),
+      () => this.tui.terminal.rows,
+      {
+        onRender: () => this.renderSnapshot(),
+        onOpenWorkflow: (item) => this.openWorkflowInspector(item),
+        onOpenSubagent: (item) => this.openSubagentInspector(item),
+        onOpenTask: (item) => this.openTaskInspector(item),
+        onStopWorkflow: (id) => this.options.controller.stopWorkflow(id),
+        onStopSubagent: (id) => this.options.controller.stopSubagent(id),
+        onStopTask: (id) => this.options.controller.stopBackgroundTask(id),
+        onEscape: () => {
+          this.tasksPane.focused = false;
+          this.tui.setFocus(this.editor);
+          this.renderSnapshot();
+        },
+      },
+    );
+    this.taskStatusBar = new TaskStatusBarComponent(this.tasksPane);
     this.overlays = new OverlayRequestController({ questionController: options.questionController });
 
     this.installBlockingHandlers();
@@ -257,6 +292,8 @@ export class PiTuiApp {
       const scroll = new ScrollView(document, { follow: "end", primary: true });
       this.tui.setLayoutRoot(new VStack([
         { component: scroll, basis: 0, grow: 1, minSize: 0 },
+        { component: this.taskStatusBar, basis: "auto", shrink: 0 },
+        { component: this.tasksPane, basis: "auto", shrink: 0 },
         { component: this.streamingMessage.activityLane, basis: "auto", shrink: 0 },
         { component: this.composerSlot, basis: "auto", shrink: 0 },
         { component: this.footer, basis: "auto", shrink: 0 },
@@ -264,6 +301,8 @@ export class PiTuiApp {
     } else {
       this.tui.addChild(this.welcome);
       this.tui.addChild(this.transcriptBox);
+      this.tui.addChild(this.taskStatusBar);
+      this.tui.addChild(this.tasksPane);
       this.tui.addChild(this.streamingMessage.activityLane);
       this.tui.addChild(this.composerSlot);
       this.tui.addChild(this.footer);
@@ -289,6 +328,22 @@ export class PiTuiApp {
       // Escape returns to /provider instead of cancelling an unrelated run,
       // and Shift+Tab must not change permissions while a key is being typed.
       if (this.providerKeyPhase) return undefined;
+      if (matchesKey(data, "ctrl+g")) {
+        if (this.tasksPane.isOpen() && this.tasksPane.focused) {
+          this.tasksPane.close();
+          this.tasksPane.focused = false;
+          this.tui.setFocus(this.editor);
+        } else {
+          if (!this.tasksPane.isOpen()) this.tasksPane.toggle(true);
+          this.tasksPane.focused = true;
+          this.tui.setFocus(this.tasksPane);
+        }
+        this.renderSnapshot();
+        return { consume: true };
+      }
+      // A focused Tasks Pane owns Escape. It returns focus to the composer;
+      // it must never fall through and cancel the running parent Agent.
+      if (this.tasksPane.focused && matchesKey(data, "escape")) return undefined;
       if (matchesKey(data, "shift+tab")) {
         this.options.agent.setMode(getNextPermissionMode(this.options.agent.mode));
         this.renderSnapshot();
@@ -668,6 +723,132 @@ export class PiTuiApp {
     return choice?.value === "approve";
   }
 
+  private openWorkflowInspector(item: WorkflowPaneItem): void {
+    let handle: { hide(): void } | undefined;
+    const getSnapshot = (): WorkflowInspectorSnapshot => {
+      const workflow = this.options.controller.getWorkflows().find((candidate) => candidate.runId === item.id);
+      const group = this.options.controller.getSubagentGroups().find((candidate) => (
+        candidate.kind === "workflow" && (candidate.runId === item.id || candidate.id === item.id)
+      ));
+      const members = workflow?.snapshots.length
+        ? workflow.snapshots.map((snapshot) => ({
+            subAgentId: snapshot.agentId,
+            agentName: snapshot.agentName,
+            nickname: snapshot.nickname,
+            status: snapshot.status,
+            category: snapshot.category,
+            phase: snapshot.phase,
+            route: snapshot.route,
+            task: snapshot.task,
+            summary: snapshot.summary,
+            toolNotes: snapshot.toolNotes,
+            error: snapshot.error,
+            usage: snapshot.usage,
+            createdAt: snapshot.createdAt,
+            updatedAt: snapshot.updatedAt,
+          }))
+        : group?.members ?? item.members;
+      return {
+        id: item.id,
+        title: workflow?.title ?? group?.label ?? item.title,
+        status: workflow?.status ?? item.status,
+        members,
+        createdAt: workflow?.createdAt ?? item.createdAt,
+        updatedAt: workflow?.updatedAt ?? item.updatedAt,
+      };
+    };
+    const component = new WorkflowInspectorComponent({
+      getSnapshot,
+      getTerminalRows: () => this.tui.terminal.rows,
+      onClose: () => handle?.hide(),
+      onOpenAgent: (agentId) => {
+        handle?.hide();
+        const member = getSnapshot().members.find((candidate) => candidate.subAgentId === agentId);
+        if (!member) return;
+        this.openSubagentInspector({
+          kind: "subagent",
+          id: agentId,
+          title: member.nickname ?? member.agentName ?? "subagent",
+          status: member.status ?? "running",
+          member,
+        }, () => this.openWorkflowInspector(item));
+      },
+      onStop: (runId) => this.options.controller.stopWorkflow(runId),
+      onRender: () => this.renderSnapshot(),
+    });
+    handle = this.tui.showOverlay(component, {
+      width: "100%",
+      maxHeight: "100%",
+      margin: 1,
+    });
+    this.tui.setFocus(component);
+  }
+
+  private openSubagentInspector(item: SubagentPaneItem, onClose?: () => void): void {
+    let handle: { hide(): void } | undefined;
+    const allAgentIds = () => this.options.controller.getSubagentGroups()
+      .flatMap((group) => group.members)
+      .map((member) => member.subAgentId)
+      .filter((id): id is string => !!id);
+    const close = () => {
+      handle?.hide();
+      onClose?.();
+    };
+    const component = new SubagentInspectorComponent({
+      agentId: item.id,
+      controller: this.options.controller,
+      getMember: () => this.options.controller.getSubagentGroups()
+        .flatMap((group) => group.members)
+        .find((member) => member.subAgentId === item.id) ?? item.member,
+      getTerminalRows: () => this.tui.terminal.rows,
+      renderOptions: () => this.transcriptRenderOptions(),
+      onClose: close,
+      onNavigate: (direction) => {
+        const ids = allAgentIds();
+        const current = ids.indexOf(item.id);
+        if (current < 0 || ids.length < 2) return;
+        const nextId = ids[(current + direction + ids.length) % ids.length]!;
+        const member = this.options.controller.getSubagentGroups().flatMap((group) => group.members).find((candidate) => candidate.subAgentId === nextId);
+        if (!member) return;
+        handle?.hide();
+        this.openSubagentInspector({
+          kind: "subagent",
+          id: nextId,
+          title: member.nickname ?? member.agentName ?? "subagent",
+          status: member.status ?? "running",
+          member,
+        }, onClose);
+      },
+      onRender: () => this.renderSnapshot(),
+    });
+    handle = this.tui.showOverlay(component, {
+      width: "100%",
+      maxHeight: "100%",
+      margin: 1,
+    });
+    this.tui.setFocus(component);
+  }
+
+  private openTaskInspector(item: TaskPaneItem): void {
+    let handle: { hide(): void } | undefined;
+    const component = new TaskInspectorComponent({
+      id: item.id,
+      title: item.title,
+      getStatus: () => this.options.controller.getBackgroundTasks().find((task) => task.id === item.id)?.status ?? item.status,
+      getOutput: () => this.options.controller.getBackgroundTaskOutput(item.id),
+      getTerminalRows: () => this.tui.terminal.rows,
+      onClose: () => handle?.hide(),
+      onStop: () => this.options.controller.stopBackgroundTask(item.id),
+      onRender: () => this.renderSnapshot(),
+    });
+    handle = this.tui.showOverlay(component, {
+      width: "100%",
+      maxHeight: "100%",
+      margin: 1,
+    });
+    this.tui.setFocus(component);
+  }
+
   private approvalDialog(request: ApprovalRequest): Promise<boolean> {
     return new Promise((resolve) => {
       const dialog = new ApprovalDialogComponent(request, () => this.tui.terminal.rows);
@@ -754,6 +935,7 @@ export class PiTuiApp {
     this.fullscreen?.dispose();
     this.fullscreen = null;
     this.streamingMessage.dispose();
+    this.tasksPane.dispose();
     this.options.controller.shutdown("user-quit");
     this.overlays.dispose();
     this.options.callbacks.onExitRequest();

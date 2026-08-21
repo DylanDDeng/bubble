@@ -7,7 +7,7 @@
 import { formatSubagentRoute, type SubagentRouteLike } from "../../agent/subagent-route-format.js";
 import type { Theme } from "./theme.js";
 import type { DisplayMessage, DisplayToolCall } from "./display-history.js";
-import type { ToolResultMetadata } from "../../types.js";
+import type { TokenUsage, ToolResultMetadata } from "../../types.js";
 
 export interface SubagentDisplay {
   subAgentId?: string;
@@ -15,12 +15,16 @@ export interface SubagentDisplay {
   nickname?: string;
   status?: string;
   category?: string;
+  phase?: string;
   route?: SubagentRouteLike;
   profileSource?: string;
   task?: string;
   summary?: string;
   toolNotes?: string[];
   error?: string;
+  usage?: TokenUsage;
+  createdAt?: number;
+  updatedAt?: number;
 }
 
 export function latestSubagentNote(subagent: SubagentDisplay): string {
@@ -84,6 +88,7 @@ export function sortSubagents(subagents: SubagentDisplay[]): SubagentDisplay[] {
  * those tools were removed (2026-07-06). */
 export interface SubagentGroup {
   id: string;
+  runId?: string;
   kind: "single" | "team" | "batch" | "workflow";
   label: string;
   members: SubagentDisplay[];
@@ -241,7 +246,7 @@ export function collectSubagentGroups(
 
   const freshest = new Map<string, SubagentDisplay>();
   const memberToGroup = new Map<string, string>();
-  const groups = new Map<string, { kind: SubagentGroup["kind"]; label: string; memberKeys: string[]; order: number }>();
+  const groups = new Map<string, { kind: SubagentGroup["kind"]; label: string; runId?: string; memberKeys: string[]; order: number }>();
   let order = 0;
 
   for (const tc of toolCalls) {
@@ -263,7 +268,11 @@ export function collectSubagentGroups(
       if (!groups.has(groupKey)) {
         const description = typeof tc.args?.description === "string" ? tc.args.description.trim()
           : typeof tc.args?.title === "string" ? tc.args.title.trim() : "";
-        groups.set(groupKey, { kind: mode, label: description || mode, memberKeys: [], order: order++ });
+        const metadataRunId = typeof tc.metadata?.runId === "string" ? tc.metadata.runId : undefined;
+        const memberRunId = typeof members[0]?.subAgentId === "string"
+          ? (typeof (members[0] as Record<string, unknown>).runId === "string" ? String((members[0] as Record<string, unknown>).runId) : undefined)
+          : undefined;
+        groups.set(groupKey, { kind: mode, label: description || mode, runId: metadataRunId ?? memberRunId, memberKeys: [], order: order++ });
       }
       const group = groups.get(groupKey)!;
       for (const m of members) {
@@ -281,7 +290,7 @@ export function collectSubagentGroups(
         if (memberToGroup.has(key)) continue;
         const groupKey = `single:${key}`;
         memberToGroup.set(key, groupKey);
-        groups.set(groupKey, { kind: "single", label: m.nickname ?? m.task ?? "subagent", memberKeys: [key], order: order++ });
+        groups.set(groupKey, { kind: "single", label: m.nickname ?? m.task ?? "subagent", runId: typeof (m as Record<string, unknown>).runId === "string" ? String((m as Record<string, unknown>).runId) : undefined, memberKeys: [key], order: order++ });
       }
     }
   }
@@ -292,6 +301,7 @@ export function collectSubagentGroups(
       id,
       kind: g.kind,
       label: g.label,
+      runId: g.runId,
       members: g.memberKeys.map((k) => freshest.get(k)).filter((m): m is SubagentDisplay => !!m),
     }))
     // A group can end up empty when a later echo of the same run (e.g. the

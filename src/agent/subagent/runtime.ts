@@ -428,11 +428,13 @@ export class SubagentRuntime {
       directEmit?: (update: ToolUpdate) => void;
       queueUpdates?: boolean;
       ensureProfileTrusted?: (profile: AgentProfile) => Promise<{ content: string | unknown } | undefined>;
+      workflowRunId?: string;
     },
   ): Promise<{ result: { ok: true; value: unknown } | { ok: false; error: string }; agentCount: number; logs: string[]; snapshots: SubagentThreadSnapshot[] }> {
     const profiles = discoverAgentProfiles(cwd, "both").profiles;
     const runRecords: SubagentThreadRecord[] = [];
     const logs: string[] = [];
+    let currentWorkflowPhase: string | undefined;
 
     // Per-run isolation (option C review): a concurrency sub-cap below the
     // global limit so a workflow can't starve interactive subagents.
@@ -478,6 +480,8 @@ export class SubagentRuntime {
         task: baseTask,
         parentToolCallId: options.parentToolCallId,
         parentToolName: "run_workflow",
+        runId: options.workflowRunId,
+        phase: currentWorkflowPhase,
         route,
         workflowInternal: true,
       });
@@ -557,7 +561,10 @@ export class SubagentRuntime {
       args: options.args,
       dispatchAgent,
       onLog: (message) => logs.push(message),
-      onPhase: (title) => logs.push(`— phase: ${title} —`),
+      onPhase: (title) => {
+        currentWorkflowPhase = title;
+        logs.push(`— phase: ${title} —`);
+      },
       budget: {
         // The ledger is pure accounting (no pool limit); scripts see an
         // unlimited budget unless a future host contract reintroduces one.
@@ -764,6 +771,7 @@ export class SubagentRuntime {
     nickname?: string;
     route?: ResolvedSubagentRoute;
     workflowInternal?: boolean;
+    phase?: string;
   }): SubagentThreadRecord {
     const now = Date.now();
     const nickname = options.nickname ?? assignAgentNickname(options.profile, this.activeSubagentNicknames());
@@ -773,6 +781,7 @@ export class SubagentRuntime {
       nickname,
       profile: options.profile,
       category: options.route?.category,
+      phase: options.phase,
       route: options.route,
       workflowInternal: options.workflowInternal,
       parentToolCallId: options.parentToolCallId,
@@ -915,11 +924,14 @@ export class SubagentRuntime {
       metadata: {
         kind: "subagent",
         runId: record.runId,
+        mode: record.parentToolName === "run_workflow" ? "workflow" : "single",
         subagents: [{
           subAgentId: record.agentId,
+          runId: record.runId,
           agentName: record.profile.name,
           nickname: record.nickname,
           category: record.category,
+          phase: record.phase,
           route: record.route,
           status,
           profileSource: record.profile.source,
@@ -928,6 +940,8 @@ export class SubagentRuntime {
           toolNotes: record.toolNotes,
           usage: record.usage,
           error: record.error,
+          createdAt: record.createdAt,
+          updatedAt: record.updatedAt,
         }],
       },
     };

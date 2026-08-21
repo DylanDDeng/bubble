@@ -1,7 +1,6 @@
 import os from "node:os";
 import type { DisplayToolCall } from "./display-history.js";
 import { getEditDiffDetails } from "../formatting/edit-diff.js";
-import { formatSubagentRoute, type SubagentRouteLike } from "../../agent/subagent-route-format.js";
 import { analyzeToolIntent } from "../../agent/tool-intent.js";
 
 export type TraceGroupKind =
@@ -74,6 +73,16 @@ export function buildTraceGroups(
   };
 
   for (const toolCall of toolCalls) {
+    // Grok keeps background-agent lifecycle in Tasks Pane. The transcript
+    // records only the launch event; wait/list/input/close echoes would repeat
+    // the same roster on every provider turn without adding chat history.
+    if (
+      toolCall.metadata?.kind === "subagent"
+      && toolCall.name !== "spawn_agent"
+      && toolCall.name !== "run_workflow"
+    ) {
+      continue;
+    }
     const classifier = classifyTool(toolCall);
     if (!classifier.groupable) {
       flush();
@@ -148,7 +157,8 @@ export function executeCommandBlock(
 
 function classifyTool(toolCall: DisplayToolCall): TraceClassifier {
   if (toolCall.metadata?.kind === "subagent") {
-    return { kind: "subagent", title: "Subagents", bucketKey: `subagent:${toolCall.id}`, groupable: false };
+    const workflow = toolCall.name === "run_workflow" || toolCall.metadata.mode === "workflow";
+    return { kind: "subagent", title: workflow ? "Workflow" : "Subagent", bucketKey: `subagent:${toolCall.id}`, groupable: false };
   }
 
   if (toolCall.name === "bash") {
@@ -459,7 +469,6 @@ interface SubagentTraceItem {
   nickname?: string;
   status?: string;
   category?: string;
-  route?: SubagentRouteLike;
   task?: string;
   summary?: string;
   toolNotes?: string[];
@@ -469,27 +478,30 @@ interface SubagentTraceItem {
 function buildSubagentGroup(
   classifier: TraceClassifier,
   tool: DisplayToolCall,
-  options: Required<TraceGroupOptions>,
+  _options: Required<TraceGroupOptions>,
   pending: boolean,
   startedAt: number | undefined,
 ): TraceGroup {
   const subagents = subagentsFromMetadata(tool);
-  const rows = subagents.length > 0
-    ? subagents.map(formatSubagentRow)
-    : resultLines(tool.result).map((line) => formatTracePath(line, options.homeDir));
-  const { shown, omitted } = take(rows, options.maxPreviewLines);
   const errorCount = subagents.filter(isFailedSubagent).length + (tool.isError ? 1 : 0);
+  const launchLabel = tool.name === "run_workflow"
+    ? String(tool.args.title ?? tool.args.description ?? "").trim()
+    : subagents[0]?.nickname || subagents[0]?.agentName || String(tool.args.description ?? "").trim();
 
   return {
     kind: "subagent",
     title: classifier.title,
+    description: launchLabel || undefined,
     raw: [tool],
     count: subagents.length || 1,
     noun: plural(subagents.length || 1, "agent", "agents"),
     items: [],
-    previewLines: shown,
+    // The full roster and live activity belong to Tasks Pane. Keeping member
+    // rows here creates two competing sources of truth and makes every
+    // wait/list call visually replay the launch.
+    previewLines: [],
     errorLines: [],
-    omitted,
+    omitted: 0,
     pending: pending || subagents.some((subagent) => ["queued", "running"].includes(subagent.status ?? "running")),
     hasError: !!tool.isError || errorCount > 0,
     errorCount,
@@ -531,20 +543,6 @@ function subagentsFromMetadata(tool: DisplayToolCall): SubagentTraceItem[] {
   const raw = tool.metadata?.subagents;
   if (!Array.isArray(raw)) return [];
   return raw.filter((item): item is SubagentTraceItem => typeof item === "object" && item !== null);
-}
-
-function formatSubagentRow(subagent: SubagentTraceItem): string {
-  const label = subagent.nickname || subagent.agentName || subagent.subAgentId || "subagent";
-  const role = [subagent.agentName, subagent.category ? `/${subagent.category}` : ""].join("") || "default";
-  const route = formatSubagentRoute(subagent.route);
-  const descriptor = route ? `${role} @ ${route}` : role;
-  const status = subagent.status || "running";
-  const note = subagent.error
-    || subagent.toolNotes?.filter(Boolean).at(-1)
-    || subagent.summary
-    || subagent.task
-    || "";
-  return [label, `(${descriptor})`, status, note].filter(Boolean).join(" ");
 }
 
 function isFailedSubagent(subagent: SubagentTraceItem): boolean {

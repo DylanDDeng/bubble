@@ -182,6 +182,52 @@ describe("BubbleTuiController headless session", () => {
     expect(controller.getStreamingTail()).toBeNull(); // cleared at run end
   });
 
+  it("tracks a child provider turn independently for the read-only inspector", async () => {
+    const host = new SpyHost();
+    let controller: BubbleTuiController;
+    let childReasoning = "";
+    const update = (childEvent: AgentEvent) => ({
+      type: "subagent_update" as const,
+      parentToolCallId: "spawn",
+      runId: "child-run",
+      subAgentId: "child-1",
+      agentName: "explorer",
+      nickname: "Ada",
+      status: "running" as const,
+      childEvent,
+      metadata: {
+        kind: "subagent" as const,
+        mode: "single",
+        runId: "child-run",
+        subagents: [{ subAgentId: "child-1", nickname: "Ada", status: "running" }],
+      },
+    });
+    const agent = {
+      messages: [],
+      setSessionID: () => {},
+      listSubAgents: () => [],
+      listWorkflows: () => [],
+      getSubAgentMessages: () => [],
+      closeSubAgent: async () => { throw new Error("unused"); },
+      closeWorkflow: () => undefined,
+      async *run(): AsyncIterable<AgentEvent> {
+        yield { type: "tool_start", id: "spawn", name: "spawn_agent", args: {} };
+        yield { type: "tool_update", id: "spawn", name: "spawn_agent", update: update({ type: "turn_start" }) };
+        yield { type: "tool_update", id: "spawn", name: "spawn_agent", update: update({ type: "reasoning_delta", content: "investigating child state" }) };
+        childReasoning = controller.getChildStreamingTail("child-1")?.reasoning ?? "";
+        yield { type: "turn_end" };
+      },
+    };
+    controller = new BubbleTuiController({
+      agent: agent as never,
+      sessionManager: { getSessionFile: () => "/s.jsonl" } as never,
+      ports: host.ports,
+    });
+
+    await controller.runTurn("delegate", "/cwd");
+    expect(childReasoning).toBe("investigating child state");
+  });
+
   it("publishes settled content and live-tail removal as one snapshot", async () => {
     const { agent, controller } = makeController();
     agent.enqueueScript({

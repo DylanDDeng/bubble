@@ -15,6 +15,72 @@ class RecordingTerminal extends VirtualTerminal {
 }
 
 describe("main pi-tui running input", () => {
+  it("opens Tasks Pane with Ctrl+G and returns typing focus to composer after closing", async () => {
+    const terminal = new VirtualTerminal(100, 30);
+    const controller = {
+      subscribe: () => () => {},
+      getTranscript: () => [],
+      getSubagentGroups: () => [{
+        id: "single:child-1",
+        runId: "run-1",
+        kind: "single",
+        label: "Ada",
+        members: [{ subAgentId: "child-1", nickname: "Ada", status: "running", task: "review the code" }],
+      }],
+      getWorkflows: () => [],
+      getBackgroundTasks: () => [],
+      isRunning: () => false,
+      getStreamingTail: () => null,
+      pendingSteerCount: () => 0,
+      queuedInputCount: () => 0,
+      steer: () => false,
+      cancelActiveRun: () => false,
+      runTurn: async () => {},
+      appendDisplayMessage: () => {},
+      clearTranscript: () => {},
+      shutdown: () => ({ reason: "test", wallMs: 0 }),
+    };
+    const app = new PiTuiApp({
+      agent: {
+        model: "test-model",
+        providerId: "test-provider",
+        thinking: "medium",
+        mode: "default",
+        setMode: () => {},
+        getContextUsageSnapshot: () => ({ usedTokens: 0, contextWindow: 1_000 }),
+      } as never,
+      sessionManager: { getSessionFile: () => "/s.jsonl" } as never,
+      controller: controller as never,
+      callbacks: { onExitRequest: () => {}, onClearTranscript: () => {}, onThemeToggle: () => {} },
+      terminal,
+    });
+
+    app.start();
+    try {
+      await terminal.waitForRender();
+      const initialRows = terminal.getViewport();
+      expect(initialRows.join("\n")).toContain("Subagents");
+      expect(initialRows.findIndex((row) => row.includes("Subagents")))
+        .toBeGreaterThan(initialRows.findIndex((row) => row.includes("I am a cat")));
+      terminal.resize(20, 10);
+      await terminal.waitForRender();
+      terminal.sendInput("R");
+      await terminal.waitForRender();
+      expect(terminal.getViewport().join("\n")).toContain("R");
+      terminal.resize(100, 30);
+      await terminal.waitForRender();
+      expect(terminal.getViewport().join("\n")).toContain("Subagents");
+      terminal.sendInput("\x07");
+      await terminal.waitForRender();
+      terminal.sendInput("\x07");
+      terminal.sendInput("Q");
+      await terminal.waitForRender();
+      expect(terminal.getViewport().join("\n")).toContain("Q");
+    } finally {
+      app.dispose();
+    }
+  });
+
   it("enters fullscreen before the first product frame and keeps the complete app surface mounted", async () => {
     const terminal = new RecordingTerminal(100, 30);
     const controller = {

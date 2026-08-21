@@ -490,6 +490,8 @@ async function main() {
       list: () => processManager.listTasks(agent.getSessionID()),
       version: () => processManager.getTaskStateVersion(),
       outputTail: (id) => processManager.taskOutputTail(id, 2000),
+      kill: (id) => processManager.killTask(id),
+      subscribe: (listener) => processManager.onChange(() => listener()),
     };
   }
   if (sessionManager) {

@@ -190,7 +190,7 @@ describe("Ink trace groups", () => {
     expect(formatTracePath("/tmp/a.ts", homeDir)).toBe("/tmp/a.ts");
   });
 
-  it("summarizes subagent metadata for compact Ink traces", () => {
+  it("keeps only the subagent launch row in transcript; roster lives in Tasks Pane", () => {
     const groups = buildTraceGroups([
       tool("spawn_agent", { message: "review this" }, "Running Ada", {
         metadata: {
@@ -216,10 +216,11 @@ describe("Ink trace groups", () => {
 
     expect(groups[0]).toMatchObject({
       kind: "subagent",
-      title: "Subagents",
+      title: "Subagent",
+      description: "Ada",
       count: 1,
       noun: "agent",
-      previewLines: ["Ada (explorer/review @ openai:gpt-5.5) running grep: 3 matches"],
+      previewLines: [],
       pending: true,
     });
   });

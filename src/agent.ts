@@ -232,6 +232,8 @@ export class Agent {
     list: () => import("./tasks/manager.js").BackgroundTaskInfo[];
     version: () => number;
     outputTail: (id: string) => string | undefined;
+    kill?: (id: string) => Promise<import("./tasks/manager.js").BackgroundTaskInfo | undefined>;
+    subscribe?: (listener: () => void) => () => void;
   };
   private lastTaskReminderVersion = -1;
   /**
@@ -1870,6 +1872,13 @@ export class Agent {
 
   listSubAgents(): SubagentThreadSnapshot[] {
     return this.subagents.listSubAgents();
+  }
+
+  /** Read-only child transcript for the TUI inspector. */
+  getSubAgentMessages(agentId: string): Message[] {
+    const record = this.subagentStore.get(agentId);
+    const messages = record?.agent?.messages ?? record?.messages ?? [];
+    return messages.map((message) => ({ ...message }));
   }
 
   /** Marks a child's full summary as delivered to parent context (design §3.3). */
