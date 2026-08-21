@@ -20,6 +20,7 @@ import {
   VStack,
   SelectList,
   Editor,
+  Input,
   ScrollView,
   Markdown,
   type MarkdownTheme,
@@ -37,6 +38,7 @@ import { ResponsiveTranscriptComponent } from "./components/responsive-transcrip
 import { WelcomeBannerComponent } from "./components/welcome.js";
 import { ApprovalDialogComponent, type ApprovalDialogChoice } from "./components/approval-dialog.js";
 import { QuestionDialogComponent } from "./components/question-dialog.js";
+import { ProviderKeyInputComponent } from "./components/provider-key-input.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import type { SlashCommandContext } from "../slash-commands/types.js";
 import { BubbleTuiController } from "./controller/controller.js";
@@ -56,6 +58,7 @@ import { TraceInteractionState } from "./model/trace-interaction.js";
 import type { SkillRegistry } from "../skills/registry.js";
 import { parseSkillInvocation } from "../skills/invocation.js";
 import { getNextPermissionMode } from "../permission/mode.js";
+import { maskKey } from "../config.js";
 
 export interface PiAppCallbacks {
   onExitRequest(): void;
@@ -124,6 +127,7 @@ const MD_THEME: MarkdownTheme = {
 export class PiTuiApp {
   private readonly tui: TUI;
   private readonly editor: Editor;
+  private readonly composerSlot = new VStack([]);
   private readonly transcriptBox = new VStack([]);
   private readonly streamingMessage = new StreamingMessageComponent(8, () => this.tui.requestRender());
   private readonly markdown = new Markdown("", 0, 0, MD_THEME);
@@ -139,6 +143,11 @@ export class PiTuiApp {
   private questionUnsubscribe: (() => void) | null = null;
   private activeQuestion: { id: string; close: () => void } | null = null;
   private readonly questionQueue: QuestionRequest[] = [];
+  private providerKeyPhase: {
+    input: Input;
+    component: ProviderKeyInputComponent;
+    submitting: boolean;
+  } | null = null;
   private disposed = false;
 
   constructor(private readonly options: PiTuiAppOptions) {
@@ -158,6 +167,7 @@ export class PiTuiApp {
       uiMode: () => this.tui.mode,
       registry: this.options.registry,
       thinkingLevel: () => this.options.agent.thinking,
+      providerId: () => this.options.agent.providerId,
       onModelSuggestionsChanged: () => {
         if (!this.disposed) this.editor.refreshAutocomplete();
       },
@@ -238,6 +248,7 @@ export class PiTuiApp {
     // rows land after it, breaking spacing/order on later turns.
     this.transcriptBox.addChild(this.settledTranscript);
     this.transcriptBox.addChild(this.streamingMessage);
+    this.composerSlot.addChild(this.editor);
     if (isViewportTUI(this.tui)) {
       // Fullscreen owns a bounded viewport. History scrolls while the composer
       // and footer stay docked. The activity lane is a permanent one-row
@@ -247,14 +258,14 @@ export class PiTuiApp {
       this.tui.setLayoutRoot(new VStack([
         { component: scroll, basis: 0, grow: 1, minSize: 0 },
         { component: this.streamingMessage.activityLane, basis: "auto", shrink: 0 },
-        { component: this.editor, basis: "auto", shrink: 0 },
+        { component: this.composerSlot, basis: "auto", shrink: 0 },
         { component: this.footer, basis: "auto", shrink: 0 },
       ]));
     } else {
       this.tui.addChild(this.welcome);
       this.tui.addChild(this.transcriptBox);
       this.tui.addChild(this.streamingMessage.activityLane);
-      this.tui.addChild(this.editor);
+      this.tui.addChild(this.composerSlot);
       this.tui.addChild(this.footer);
     }
     this.tui.setFocus(this.editor);
@@ -274,6 +285,10 @@ export class PiTuiApp {
       // Escape/Ctrl+C handler run first would cancel the agent and strand the
       // unresolved permission request instead of rejecting the dialog.
       if (this.tui.hasOverlay()) return undefined;
+      // The inline credential phase owns all of its input. In particular,
+      // Escape returns to /provider instead of cancelling an unrelated run,
+      // and Shift+Tab must not change permissions while a key is being typed.
+      if (this.providerKeyPhase) return undefined;
       if (matchesKey(data, "shift+tab")) {
         this.options.agent.setMode(getNextPermissionMode(this.options.agent.mode));
         this.renderSnapshot();
@@ -404,13 +419,15 @@ export class PiTuiApp {
       exit: () => this.dispose(),
       sessionManager: options.sessionManager as never,
       createProvider: options.createProvider as never,
-      openPicker: (mode) => {
-        if (mode === "model") {
-          // A bare /model can still arrive from a fast Enter or a non-composer
-          // command host. Keep pi-tui on its inline command surface instead of
-          // falling back to the legacy centered overlay.
-          this.editor.setText("/model ");
+      openPicker: (mode, providerId) => {
+        if (mode === "model" || mode === "provider") {
+          // A bare picker command can still arrive from a fast Enter or a
+          // non-composer command host. Keep pi-tui on the shared inline
+          // command surface instead of falling back to a centered overlay.
+          this.editor.setText(mode === "model" ? "/model " : "/provider ");
           this.editor.refreshAutocomplete();
+        } else if (mode === "key" && providerId) {
+          this.openProviderKeyPhase(providerId);
         }
       },
       registry: options.registry as never,
@@ -561,6 +578,83 @@ export class PiTuiApp {
     });
   }
 
+  private openProviderKeyPhase(providerId: string): void {
+    const registry = this.options.registry;
+    const provider = registry?.getConfigured().find((candidate) => candidate.id === providerId);
+    if (!registry || !provider) {
+      this.pushNotice(`Provider ${providerId} could not be prepared for API key setup.`);
+      this.renderSnapshot();
+      return;
+    }
+
+    this.closeProviderKeyPhase(false);
+    const input = new Input({ prompt: "◆ ", mask: "•" });
+    const component = new ProviderKeyInputComponent(input, provider.name);
+    const phase = { input, component, submitting: false };
+    this.providerKeyPhase = phase;
+    this.composerSlot.removeChild(this.editor);
+    this.composerSlot.addChild(component);
+
+    input.onEscape = () => this.closeProviderKeyPhase(true);
+    input.onBackspaceAtStart = () => this.closeProviderKeyPhase(true);
+    input.onSubmit = (rawKey) => {
+      const key = rawKey.replace(/[\r\n\t]/g, "").trim();
+      if (!key || phase.submitting || this.providerKeyPhase !== phase) return;
+      phase.submitting = true;
+      this.closeProviderKeyPhase(false);
+      void this.saveProviderKey(providerId, key);
+    };
+    this.tui.setFocus(input);
+    this.renderSnapshot();
+  }
+
+  private closeProviderKeyPhase(returnToProviderPicker: boolean): void {
+    const phase = this.providerKeyPhase;
+    if (!phase) return;
+
+    // Erase the component-owned copy before releasing the phase. The caller
+    // may retain the submitted value just long enough to persist it, but UI
+    // state never keeps the raw credential after this point.
+    phase.input.setValue("");
+    phase.input.onSubmit = undefined;
+    phase.input.onEscape = undefined;
+    phase.input.onBackspaceAtStart = undefined;
+    this.composerSlot.removeChild(phase.component);
+    this.composerSlot.addChild(this.editor);
+    this.providerKeyPhase = null;
+
+    this.editor.setText(returnToProviderPicker ? "/provider " : "");
+    if (returnToProviderPicker) this.editor.refreshAutocomplete();
+    this.tui.setFocus(this.editor);
+    this.renderSnapshot();
+  }
+
+  private async saveProviderKey(providerId: string, key: string): Promise<void> {
+    const registry = this.options.registry;
+    if (!registry) return;
+
+    try {
+      registry.updateProviderKey(providerId, key);
+      const provider = registry.getConfigured().find((candidate) => candidate.id === providerId);
+      if (!provider) throw new Error("provider disappeared after saving credentials");
+
+      if (this.options.createProvider) {
+        const nextProvider = this.options.createProvider(providerId, key, provider.baseURL);
+        this.options.agent.setProvider(nextProvider as never);
+        this.options.agent.providerId = providerId;
+        registry.setDefault(providerId);
+      }
+
+      this.pushNotice(
+        `API key updated for ${provider.name} to ${maskKey(key)}. Use /model to select a compatible model.`,
+      );
+    } catch (error) {
+      const message = (error instanceof Error ? error.message : String(error)).replaceAll(key, "[redacted]");
+      this.pushNotice(`Failed to update API key for ${providerId}: ${message}`);
+    }
+    this.renderSnapshot();
+  }
+
   private async planDialog(plan: string): Promise<boolean> {
     const preview = new Text(plan.split("\n").slice(0, 10).join("\n"), 1, 0);
     const choice = await this.selectOverlay(
@@ -649,6 +743,10 @@ export class PiTuiApp {
     this.activeQuestion?.close();
     this.activeQuestion = null;
     this.questionQueue.length = 0;
+    if (this.providerKeyPhase) {
+      this.providerKeyPhase.input.setValue("");
+      this.providerKeyPhase = null;
+    }
     this.options.questionController?.rejectAll();
     // Root lifecycle events (notably SIGTERM) can dispose the app while the
     // alternate screen is still open. Tear it down directly so its controller

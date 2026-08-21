@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildComposerSlashCommands,
   buildModelAutocompleteItems,
+  buildProviderAutocompleteItems,
   ComposerAutocompleteProvider,
 } from "../tui/composer-autocomplete.js";
 import { localModelsForProvider } from "../tui/model-picker-data.js";
@@ -9,6 +10,13 @@ import { localModelsForProvider } from "../tui/model-picker-data.js";
 const modelCommand = {
   name: "model",
   description: "Switch model",
+  source: "builtin" as const,
+  handler: async () => {},
+};
+
+const providerCommand = {
+  name: "provider",
+  description: "Manage providers",
   source: "builtin" as const,
   handler: async () => {},
 };
@@ -25,7 +33,9 @@ const openaiProvider = {
 function modelRegistry(overrides: Record<string, unknown> = {}) {
   return {
     getEnabled: () => [openaiProvider],
-    getModelConfig: () => ({ getCustomModels: () => [] }),
+    getConfigured: () => [openaiProvider],
+    getDefault: () => openaiProvider,
+    getModelConfig: () => ({ getCustomModels: () => [], hasProvider: () => false }),
     listModels: async () => [],
     ...overrides,
   } as any;
@@ -102,6 +112,83 @@ describe("pi-tui composer autocomplete", () => {
       argumentEmptyMessage: "No matching models",
     });
     expect(command?.getArgumentCompletions?.("")).toEqual(completions());
+  });
+
+  it("turns /provider into the same inline searchable command surface", () => {
+    const completions = () => [{
+      value: "--set openai",
+      label: "OpenAI",
+      submitOnSelect: true,
+    }];
+    const commands = buildComposerSlashCommands(
+      [providerCommand],
+      [],
+      "fullscreen",
+      undefined,
+      completions,
+    );
+    const command = commands.find((entry) => entry.name === "provider");
+
+    expect(command).toMatchObject({
+      name: "provider",
+      argumentHint: "<provider>",
+      submitOnSelect: false,
+      argumentInputHint: {
+        prompt: "⌕ ",
+        placeholder: "Search providers…",
+        valuePrefix: "/provider ",
+      },
+      keepArgumentMenuOnEmpty: true,
+      argumentEmptyMessage: "No matching providers",
+    });
+    expect(command?.getArgumentCompletions?.("")).toEqual(completions());
+  });
+
+  it("labels provider state, filters provider search, and highlights the current provider", async () => {
+    const anthropic = {
+      id: "anthropic",
+      name: "Anthropic",
+      baseURL: "https://api.anthropic.com",
+      apiKey: "anthropic-key",
+      enabled: true,
+    };
+    const registry = modelRegistry({
+      getConfigured: () => [openaiProvider, anthropic],
+      getDefault: () => anthropic,
+    });
+
+    expect(buildProviderAutocompleteItems(registry, "anthropic", "openai")[0]).toEqual({
+      value: "--set anthropic",
+      label: "Anthropic",
+      description: "anthropic · Configured",
+      submitOnSelect: true,
+    });
+
+    const provider = new ComposerAutocompleteProvider({
+      cwd: process.cwd(),
+      commands: () => [providerCommand],
+      skills: () => [],
+      registry,
+      providerId: () => "anthropic",
+    });
+    const suggestions = await provider.getSuggestions(["/provider "], 0, 10, {
+      signal: new AbortController().signal,
+    });
+
+    expect(suggestions).toMatchObject({
+      inputHint: {
+        prompt: "⌕ ",
+        placeholder: "Search providers…",
+        valuePrefix: "/provider ",
+      },
+      preferredValue: "--set anthropic",
+      keepOpenOnEmpty: true,
+      emptyMessage: "No matching providers",
+    });
+    expect(suggestions?.items.find((item) => item.value === "--set anthropic")?.description)
+      .toBe("Current · anthropic · Configured");
+    expect(suggestions?.items.find((item) => item.value === "--add google"))
+      .toMatchObject({ description: "google · Needs API key", submitOnSelect: true });
   });
 
   it("encodes provider ids in model completion values and filters by provider or model", () => {

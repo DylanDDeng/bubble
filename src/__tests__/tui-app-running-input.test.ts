@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "@bubblebrain-ai/pi-tui/testing";
 import { PiTuiApp } from "../tui/app.js";
 import { QuestionController, QuestionRejectedError } from "../question/index.js";
@@ -702,6 +702,189 @@ describe("main pi-tui running input", () => {
       const returnedViewport = terminal.getViewport().join("\n");
       expect(returnedViewport).toContain("⌕ ");
       expect(returnedViewport).toContain("Test Model");
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("switches /provider to the same inline searchable suggestion surface", async () => {
+    const terminal = new VirtualTerminal(100, 24);
+    const setDefault = vi.fn();
+    const createProvider = vi.fn(() => ({ streamChat: vi.fn(), complete: vi.fn() }));
+    const setProvider = vi.fn();
+    const providers = [
+      {
+        id: "openai",
+        name: "OpenAI",
+        baseURL: "https://api.openai.com/v1",
+        apiKey: "openai-key",
+        enabled: true,
+      },
+      {
+        id: "anthropic",
+        name: "Anthropic",
+        baseURL: "https://api.anthropic.com",
+        apiKey: "anthropic-key",
+        enabled: true,
+      },
+    ];
+    const updateProviderKey = vi.fn((providerId: string, key: string) => {
+      const provider = providers.find((candidate) => candidate.id === providerId);
+      if (provider) provider.apiKey = key;
+    });
+    const appendedMessages: unknown[] = [];
+    const controller = {
+      subscribe: () => () => {},
+      getTranscript: () => [],
+      isRunning: () => false,
+      getStreamingTail: () => ({ content: "", reasoning: "", tools: [], parts: [], phase: "idle" as const }),
+      pendingSteerCount: () => 0,
+      queuedInputCount: () => 0,
+      steer: () => false,
+      cancelActiveRun: () => false,
+      runTurn: async () => {},
+      appendDisplayMessage: (message: unknown) => { appendedMessages.push(message); },
+      clearTranscript: () => {},
+      shutdown: () => ({ reason: "test", wallMs: 0 }),
+    };
+    const registry = {
+      getEnabled: () => providers,
+      getConfigured: () => providers,
+      getDefault: () => providers[0],
+      setDefault,
+      addProvider: vi.fn((providerId: string) => {
+        if (!providers.some((provider) => provider.id === providerId)) {
+          providers.push({
+            id: providerId,
+            name: "Z.AI Coding Plan",
+            baseURL: "https://api.z.ai/api/coding/paas/v4",
+            apiKey: "",
+            enabled: true,
+          });
+        }
+        return true;
+      }),
+      updateProviderKey,
+      getModelConfig: () => ({
+        getCustomModels: () => [],
+        hasProvider: () => false,
+      }),
+      listModels: async () => [],
+    };
+    const agent = {
+      model: "openai:gpt-4o",
+      providerId: "openai",
+      thinking: "off",
+      mode: "default",
+      setMode: () => {},
+      setProvider,
+      getContextUsageSnapshot: () => ({ usedTokens: 0, contextWindow: 1_000 }),
+    };
+    const app = new PiTuiApp({
+      agent: agent as never,
+      sessionManager: { getSessionFile: () => "/s.jsonl", getMetadata: () => ({}) } as never,
+      controller: controller as never,
+      registry: registry as never,
+      createProvider: createProvider as never,
+      callbacks: {
+        onExitRequest: () => {},
+        onClearTranscript: () => {},
+        onThemeToggle: () => {},
+      },
+      terminal,
+    });
+
+    app.start();
+    try {
+      terminal.sendInput("/prov");
+      await terminal.waitForRender();
+      expect(terminal.getViewport().join("\n")).toContain("Manage providers");
+
+      terminal.sendInput("\r");
+      await terminal.waitForRender();
+      const viewport = terminal.getViewport().join("\n");
+      expect(viewport).toContain("Search providers…");
+      expect(viewport).toContain("OpenAI");
+      expect(viewport).toContain("Current · openai · Configured");
+      expect(viewport).toContain("Anthropic");
+      expect(viewport).not.toContain("Select Provider");
+
+      terminal.sendInput("anth");
+      await terminal.waitForRender();
+      const filtered = terminal.getViewport().join("\n");
+      expect(filtered).toContain("Anthropic");
+      expect(filtered).not.toContain("Current · openai · Configured");
+
+      terminal.sendInput("\r");
+      await vi.waitFor(() => expect(setDefault).toHaveBeenCalledWith("anthropic"));
+
+      terminal.sendInput("/provider zai-coding-plan");
+      await terminal.waitForRender();
+      expect(terminal.getViewport().join("\n")).toContain("Z.AI Coding Plan");
+      expect(terminal.getViewport().join("\n")).toContain("Needs API key");
+
+      terminal.sendInput("\r");
+      await terminal.waitForRender();
+      const inlineKeyViewport = terminal.getViewport().join("\n");
+      expect(inlineKeyViewport).toContain("◆  Enter API Key for Z.AI Coding Plan");
+      expect(inlineKeyViewport).toContain("Esc or empty Backspace to return");
+      expect(inlineKeyViewport).not.toContain("Paste or type the key · Enter to save · Esc to cancel");
+      expect((app as unknown as { tui: { hasOverlay(): boolean } }).tui.hasOverlay()).toBe(false);
+
+      terminal.resize(36, 12);
+      await terminal.waitForRender();
+      expect(terminal.getViewport().join("\n")).toContain("Enter API Key");
+      terminal.resize(100, 24);
+      await terminal.waitForRender();
+
+      terminal.sendInput("super-secret-key");
+      await terminal.waitForRender();
+      const keyViewport = terminal.getViewport().join("\n");
+      expect(keyViewport).toContain("••••••••••••••••");
+      expect(keyViewport).not.toContain("super-secret-key");
+
+      terminal.sendInput("\x1b");
+      await terminal.waitForRender();
+      const escapedViewport = terminal.getViewport().join("\n");
+      expect(escapedViewport).toContain("Search providers…");
+      expect(escapedViewport).not.toContain("Enter API Key for Z.AI Coding Plan");
+      expect(escapedViewport).not.toContain("super-secret-key");
+
+      terminal.sendInput("zai-coding-plan");
+      await terminal.waitForRender();
+      terminal.sendInput("\r");
+      await terminal.waitForRender();
+      expect(terminal.getViewport().join("\n")).toContain("Enter API Key for Z.AI Coding Plan");
+
+      terminal.sendInput("\x7f");
+      await terminal.waitForRender();
+      const backedOutViewport = terminal.getViewport().join("\n");
+      expect(backedOutViewport).toContain("Search providers…");
+      expect(backedOutViewport).not.toContain("Enter API Key for Z.AI Coding Plan");
+
+      terminal.sendInput("zai-coding-plan");
+      await terminal.waitForRender();
+      terminal.sendInput("\r");
+      await terminal.waitForRender();
+      expect(terminal.getViewport().join("\n")).toContain("Enter API Key for Z.AI Coding Plan");
+
+      terminal.sendInput("super-secret-key");
+      await terminal.waitForRender();
+      terminal.sendInput("\r");
+      await vi.waitFor(() => expect(updateProviderKey).toHaveBeenCalledWith(
+        "zai-coding-plan",
+        "super-secret-key",
+      ));
+      expect(createProvider).toHaveBeenCalledWith(
+        "zai-coding-plan",
+        "super-secret-key",
+        "https://api.z.ai/api/coding/paas/v4",
+      );
+      expect(setProvider).toHaveBeenCalledTimes(1);
+      expect(agent.providerId).toBe("zai-coding-plan");
+      expect(JSON.stringify(appendedMessages)).not.toContain("super-secret-key");
+      expect(JSON.stringify((app as unknown as { history: string[] }).history)).not.toContain("super-secret-key");
+      expect(terminal.getViewport().join("\n")).not.toContain("super-secret-key");
     } finally {
       app.dispose();
     }

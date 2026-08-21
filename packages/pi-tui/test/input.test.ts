@@ -34,6 +34,39 @@ describe("Input component", () => {
 		assert.strictEqual(input.getValue(), "\\x");
 	});
 
+	it("masks secrets in rendered output while submitting the raw value", () => {
+		const input = new Input({ prompt: "Key: ", mask: "•" });
+		let submitted: string | undefined;
+		input.onSubmit = (value) => {
+			submitted = value;
+		};
+
+		input.handleInput("secret-key");
+		const rendered = input.render(40).join("\n");
+		assert.ok(rendered.startsWith("Key: "));
+		assert.ok(rendered.includes("••••••••••"));
+		assert.ok(!rendered.includes("secret-key"));
+
+		input.handleInput("\r");
+		assert.strictEqual(submitted, "secret-key");
+	});
+
+	it("notifies the host when Backspace is pressed at the start", () => {
+		const input = new Input();
+		let backCount = 0;
+		input.onBackspaceAtStart = () => {
+			backCount += 1;
+		};
+
+		input.handleInput("\x7f");
+		assert.strictEqual(backCount, 1);
+
+		input.handleInput("x");
+		input.handleInput("\x7f");
+		assert.strictEqual(input.getValue(), "");
+		assert.strictEqual(backCount, 1);
+	});
+
 	describe("render", () => {
 		it("does not overflow with wide CJK and fullwidth text", () => {
 			const width = 93;

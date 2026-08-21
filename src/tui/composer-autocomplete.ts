@@ -9,7 +9,14 @@ import {
 import type { UnifiedCommand } from "../slash-commands/unified.js";
 import type { SkillSummary } from "../skills/types.js";
 import type { TuiMode } from "@bubblebrain-ai/pi-tui";
-import { encodeModel, type ModelInfo, type ProviderProfile } from "../provider-registry.js";
+import {
+  BUILTIN_PROVIDERS,
+  encodeModel,
+  isUserVisibleProvider,
+  type ModelInfo,
+  type ProviderProfile,
+  type ProviderRegistry,
+} from "../provider-registry.js";
 import {
   getAvailableThinkingLevels,
   isThinkingToggleModel,
@@ -29,8 +36,9 @@ export interface ComposerAutocompleteSources {
   commands(): UnifiedCommand[];
   skills(): SkillSummary[];
   uiMode?(): TuiMode;
-  registry?: ModelPickerRegistry;
+  registry?: ComposerPickerRegistry;
   thinkingLevel?(): ThinkingLevel;
+  providerId?(): string;
   onModelSuggestionsChanged?(): void;
   fdPath?: string | null;
 }
@@ -39,8 +47,14 @@ type ModelCompletionSource = (
   argumentPrefix: string,
 ) => AutocompleteArgumentSuggestions | AutocompleteItem[] | null;
 
+type ProviderCompletionSource = ModelCompletionSource;
+
+type ComposerPickerRegistry = ModelPickerRegistry
+  & Pick<ProviderRegistry, "getConfigured" | "getDefault">;
+
 const MODEL_COMMAND_PREFIX = "/model ";
 const REASONING_EFFORT_SEPARATOR = " --reasoning-effort ";
+const PROVIDER_COMMAND_PREFIX = "/provider ";
 
 const EFFORT_DESCRIPTIONS: Record<ThinkingLevel, string> = {
   off: "no reasoning effort",
@@ -178,6 +192,50 @@ export function buildModelAutocompleteItems(
   return items;
 }
 
+export function buildProviderAutocompleteItems(
+  registry: Pick<ProviderRegistry, "getConfigured" | "getModelConfig">,
+  argumentPrefix = "",
+  currentProviderId?: string,
+): AutocompleteItem[] {
+  const query = argumentPrefix.trim().toLowerCase();
+  if (query.startsWith("--")) return [];
+
+  const configured = registry.getConfigured();
+  const configuredById = new Map(configured.map((provider) => [provider.id, provider]));
+  const seen = new Set<string>();
+  const candidates = [
+    ...BUILTIN_PROVIDERS.filter((provider) => isUserVisibleProvider(provider.id)),
+    ...configured.filter((provider) => isUserVisibleProvider(provider.id)),
+  ];
+
+  return candidates.flatMap((provider) => {
+    if (seen.has(provider.id)) return [];
+    seen.add(provider.id);
+
+    const profile = configuredById.get(provider.id);
+    const builtin = BUILTIN_PROVIDERS.find((candidate) => candidate.id === provider.id);
+    const managedByFile = registry.getModelConfig().hasProvider(provider.id);
+    const status = profile?.apiKey
+      ? (profile.authType === "oauth" ? "OAuth connected" : "Configured")
+      : builtin?.supportsOAuth
+        ? "OAuth available"
+        : "Needs API key";
+    const current = provider.id === currentProviderId;
+    const action = profile?.apiKey || provider.id === "grok" ? "--set" : "--add";
+    const source = managedByFile ? " · models.json" : "";
+    const description = `${current ? "Current · " : ""}${provider.id} · ${status}${source}`;
+    const searchable = `${provider.id} ${provider.name} ${description}`.toLowerCase();
+    if (query && !searchable.includes(query)) return [];
+
+    return [{
+      value: `${action} ${provider.id}`,
+      label: provider.name,
+      description,
+      submitOnSelect: true,
+    }];
+  });
+}
+
 /**
  * Build the command surface in execution-priority order. The registry remains
  * live so MCP prompts that connect after startup appear on the next keypress.
@@ -187,6 +245,7 @@ export function buildComposerSlashCommands(
   skills: SkillSummary[],
   uiMode: TuiMode = "regular",
   modelCompletions?: ModelCompletionSource,
+  providerCompletions?: ProviderCompletionSource,
 ): TuiSlashCommand[] {
   const result = new Map<string, TuiSlashCommand>();
   const add = (command: TuiSlashCommand) => {
@@ -213,6 +272,21 @@ export function buildComposerSlashCommands(
         keepArgumentMenuOnEmpty: true,
         argumentEmptyMessage: "No matching models",
         getArgumentCompletions: modelCompletions,
+      });
+    } else if (command.name === "provider" && providerCompletions) {
+      add({
+        name: command.name,
+        description: command.description,
+        argumentHint: "<provider>",
+        submitOnSelect: false,
+        argumentInputHint: {
+          prompt: "⌕ ",
+          placeholder: "Search providers…",
+          valuePrefix: PROVIDER_COMMAND_PREFIX,
+        },
+        keepArgumentMenuOnEmpty: true,
+        argumentEmptyMessage: "No matching providers",
+        getArgumentCompletions: providerCompletions,
       });
     } else {
       add({ name: command.name, description: command.description });
@@ -274,10 +348,32 @@ export class ComposerAutocompleteProvider implements AutocompleteProvider {
         this.sources.skills(),
         this.sources.uiMode?.() ?? "regular",
         this.sources.registry ? (prefix) => this.getModelCompletions(prefix) : undefined,
+        this.sources.registry ? (prefix) => this.getProviderCompletions(prefix) : undefined,
       ),
       this.sources.cwd,
       this.sources.fdPath ?? null,
     );
+  }
+
+  private getProviderCompletions(argumentPrefix: string): AutocompleteArgumentSuggestions | null {
+    const registry = this.sources.registry;
+    if (!registry || argumentPrefix.trimStart().startsWith("--")) return null;
+
+    const currentProviderId = this.sources.providerId?.() ?? registry.getDefault()?.id;
+    const items = buildProviderAutocompleteItems(registry, argumentPrefix, currentProviderId);
+    return {
+      items,
+      inputHint: {
+        prompt: "⌕ ",
+        placeholder: "Search providers…",
+        valuePrefix: PROVIDER_COMMAND_PREFIX,
+      },
+      keepOpenOnEmpty: true,
+      emptyMessage: "No matching providers",
+      ...(argumentPrefix.length === 0 && currentProviderId
+        ? { preferredValue: `--set ${currentProviderId}` }
+        : {}),
+    };
   }
 
   private getModelCompletions(argumentPrefix: string): AutocompleteArgumentSuggestions | null {
