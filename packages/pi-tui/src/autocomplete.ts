@@ -232,14 +232,42 @@ export interface SlashCommand {
 	argumentHint?: string;
 	/** False inserts the command and keeps the editor open for required arguments. */
 	submitOnSelect?: boolean;
+	/** Optional fallback composer treatment while completing this command's argument. */
+	argumentInputHint?: AutocompleteInputHint;
+	/** Keep the argument menu visible when a search has no matches. */
+	keepArgumentMenuOnEmpty?: boolean;
+	argumentEmptyMessage?: string;
 	// Function to get argument completions for this command
 	// Returns null if no argument completion is available
-	getArgumentCompletions?(argumentPrefix: string): Awaitable<AutocompleteItem[] | null>;
+	getArgumentCompletions?(argumentPrefix: string): Awaitable<AutocompleteArgumentSuggestions | AutocompleteItem[] | null>;
+}
+
+export interface AutocompleteInputHint {
+	prompt?: string;
+	placeholder?: string;
+	/** Placeholder is shown only while the editor value exactly matches this prefix. */
+	valuePrefix?: string;
+	/** Replaces the editor value when cancelling or backspacing from this completion phase. */
+	backValue?: string;
+}
+
+/** Per-request presentation and selection state for slash-command arguments. */
+export interface AutocompleteArgumentSuggestions {
+	items: AutocompleteItem[];
+	inputHint?: AutocompleteInputHint;
+	keepOpenOnEmpty?: boolean;
+	emptyMessage?: string;
+	/** Item selected initially when the user has not typed a more specific prefix. */
+	preferredValue?: string;
 }
 
 export interface AutocompleteSuggestions {
 	items: AutocompleteItem[];
 	prefix: string; // What we're matching against (e.g., "/" or "src/")
+	inputHint?: AutocompleteInputHint;
+	keepOpenOnEmpty?: boolean;
+	emptyMessage?: string;
+	preferredValue?: string;
 }
 
 export interface AutocompleteProvider {
@@ -353,14 +381,34 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				return null;
 			}
 
-			const argumentSuggestions = await command.getArgumentCompletions(argumentText);
-			if (!Array.isArray(argumentSuggestions) || argumentSuggestions.length === 0) {
+			const argumentResult = await command.getArgumentCompletions(argumentText);
+			const argumentSuggestions = Array.isArray(argumentResult)
+				? { items: argumentResult }
+				: argumentResult;
+			if (
+				!argumentSuggestions ||
+				!Array.isArray(argumentSuggestions.items) ||
+				(argumentSuggestions.items.length === 0 &&
+					!(argumentSuggestions.keepOpenOnEmpty ?? command.keepArgumentMenuOnEmpty))
+			) {
 				return null;
 			}
 
 			return {
-				items: argumentSuggestions,
+				items: argumentSuggestions.items,
 				prefix: argumentText,
+				...(argumentSuggestions.inputHint ?? command.argumentInputHint
+					? { inputHint: argumentSuggestions.inputHint ?? command.argumentInputHint }
+					: {}),
+				...(argumentSuggestions.keepOpenOnEmpty ?? command.keepArgumentMenuOnEmpty
+					? { keepOpenOnEmpty: true }
+					: {}),
+				...(argumentSuggestions.emptyMessage ?? command.argumentEmptyMessage
+					? { emptyMessage: argumentSuggestions.emptyMessage ?? command.argumentEmptyMessage }
+					: {}),
+				...(argumentSuggestions.preferredValue
+					? { preferredValue: argumentSuggestions.preferredValue }
+					: {}),
 			};
 		}
 

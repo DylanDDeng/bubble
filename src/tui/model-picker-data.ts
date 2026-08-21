@@ -6,7 +6,7 @@ import {
   type ProviderRegistry,
 } from "../provider-registry.js";
 
-type ModelPickerRegistry = Pick<ProviderRegistry, "getEnabled" | "getModelConfig" | "listModels">;
+export type ModelPickerRegistry = Pick<ProviderRegistry, "getEnabled" | "getModelConfig" | "listModels">;
 
 export type ModelProviderGroup = {
   provider: ProviderProfile;
@@ -28,6 +28,12 @@ export function localModelsForProvider(
     id: model.id,
     name: model.name,
     providerId: provider.id,
+    reasoningLevels: model.reasoningLevels,
+    defaultReasoningLevel: model.defaultReasoningLevel,
+    contextWindow: model.contextWindow,
+    useResponsesLite: model.useResponsesLite,
+    toolOutputTokenLimit: model.toolOutputTokenLimit,
+    tier: model.tier,
   }));
 }
 

@@ -96,9 +96,6 @@ export async function runTui(agent: Agent, _args: unknown, options: RunTuiOption
     callbacks: {
       onExitRequest: () => {},
       onClearTranscript: () => controller.clearTranscript(),
-      onModelSelect: (modelId) => {
-        agent.model = modelId;
-      },
       onThemeToggle: () => {
         options.onThemeModeChange?.("dark");
       },

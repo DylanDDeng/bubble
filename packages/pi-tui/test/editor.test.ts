@@ -2713,6 +2713,141 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.isShowingAutocomplete(), false);
 		});
 
+		it("switches an inline slash command to its argument list and submits an explicit argument item", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const provider = new CombinedAutocompleteProvider(
+				[
+					{
+						name: "model",
+						description: "Switch model",
+						submitOnSelect: false,
+						argumentInputHint: {
+							prompt: "⌕ ",
+							placeholder: "Search models…",
+							valuePrefix: "/model ",
+						},
+						keepArgumentMenuOnEmpty: true,
+						argumentEmptyMessage: "No matching models",
+						getArgumentCompletions: (prefix) => [{
+							value: "openai:gpt-5.6-sol",
+							label: "GPT-5.6 Sol",
+							submitOnSelect: true,
+						}].filter((item) => item.value.includes(prefix)),
+					},
+				],
+				process.cwd(),
+			);
+			editor.setAutocompleteProvider(provider);
+			let submitted = "";
+			editor.onSubmit = (text) => {
+				submitted = text;
+			};
+
+			editor.handleInput("/");
+			editor.handleInput("m");
+			editor.handleInput("o");
+			editor.handleInput("d");
+			await flushAutocomplete();
+			editor.handleInput("\r");
+			await flushAutocomplete();
+
+			assert.strictEqual(editor.getText(), "/model ");
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+			assert.match(editor.render(80).join("\n"), /⌕ .*Search models…/);
+
+			editor.handleInput("z");
+			editor.handleInput("z");
+			editor.handleInput("z");
+			await flushAutocomplete();
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+			assert.match(editor.render(80).join("\n"), /No matching models/);
+			editor.handleInput("\r");
+			assert.strictEqual(submitted, "");
+			editor.handleInput("\x17");
+			for (let index = 0; index < 5; index += 1) await flushAutocomplete();
+
+			editor.handleInput("\r");
+			assert.strictEqual(submitted, "/model openai:gpt-5.6-sol");
+			assert.strictEqual(editor.getText(), "");
+
+			editor.handleInput("/");
+			editor.handleInput("m");
+			editor.handleInput("o");
+			editor.handleInput("d");
+			await flushAutocomplete();
+			editor.handleInput("\t");
+			await flushAutocomplete();
+			assert.strictEqual(editor.getText(), "/model ");
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+			assert.match(editor.render(80).join("\n"), /Search models…/);
+		});
+
+		it("switches argument phases in place, honors the preferred item, and returns with Escape or Backspace", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const effortPrefix = "openai:gpt-test --reasoning-effort ";
+			const provider = new CombinedAutocompleteProvider(
+				[
+					{
+						name: "model",
+						submitOnSelect: false,
+						getArgumentCompletions: (prefix) => prefix.startsWith(effortPrefix)
+							? {
+								items: [
+									{ value: `${effortPrefix}low`, label: "low", submitOnSelect: true },
+									{ value: `${effortPrefix}high`, label: "high", submitOnSelect: true },
+								],
+								inputHint: {
+									prompt: "◆ ",
+									placeholder: "Select reasoning effort…",
+									valuePrefix: `/model ${effortPrefix}`,
+									backValue: "/model ",
+								},
+								preferredValue: `${effortPrefix}high`,
+							}
+							: {
+								items: [{
+									value: effortPrefix,
+									label: "GPT Test",
+									submitOnSelect: false,
+								}],
+								inputHint: { prompt: "⌕ ", valuePrefix: "/model " },
+							},
+					},
+				],
+				process.cwd(),
+			);
+			editor.setAutocompleteProvider(provider);
+			let submitted = "";
+			editor.onSubmit = (text) => {
+				submitted = text;
+			};
+
+			editor.setText("/model ");
+			editor.refreshAutocomplete();
+			await flushAutocomplete();
+			editor.handleInput("\r");
+			await flushAutocomplete();
+			assert.strictEqual(editor.getText(), `/model ${effortPrefix}`);
+			assert.match(editor.render(80).join("\n"), /◆ .*Select reasoning effort…/);
+
+			editor.handleInput("\x1b");
+			await flushAutocomplete();
+			assert.strictEqual(editor.getText(), "/model ");
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+
+			editor.handleInput("\r");
+			await flushAutocomplete();
+			editor.handleInput("\x7f");
+			await flushAutocomplete();
+			assert.strictEqual(editor.getText(), "/model ");
+
+			editor.handleInput("\r");
+			await flushAutocomplete();
+			editor.handleInput("\r");
+			assert.strictEqual(submitted, "/model openai:gpt-test --reasoning-effort high");
+			assert.strictEqual(editor.getText(), "");
+		});
+
 		it("applies exact typed slash-argument value on Enter even when first item is highlighted", async () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 

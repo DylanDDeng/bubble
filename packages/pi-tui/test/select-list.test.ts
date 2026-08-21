@@ -67,6 +67,12 @@ describe("SelectList", () => {
 		assert.equal(rendered[1].indexOf("second"), 14);
 	});
 
+	it("renders a context-specific empty message", () => {
+		const list = new SelectList([], 5, testTheme, { emptyMessage: "No matching models" });
+
+		assert.match(list.render(80)[0]!, /No matching models/);
+	});
+
 	it("uses the configured maximum primary column width", () => {
 		const items = [
 			{

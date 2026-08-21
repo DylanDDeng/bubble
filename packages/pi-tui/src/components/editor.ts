@@ -1,4 +1,9 @@
-import type { AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions } from "../autocomplete.ts";
+import type {
+	AutocompleteInputHint,
+	AutocompleteItem,
+	AutocompleteProvider,
+	AutocompleteSuggestions,
+} from "../autocomplete.ts";
 import { getKeybindings } from "../keybindings.ts";
 import { decodePrintableKey, matchesKey } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
@@ -313,6 +318,8 @@ export class Editor implements Component, Focusable {
 	private autocompleteList?: SelectList;
 	private autocompleteState: "regular" | "force" | null = null;
 	private autocompletePrefix: string = "";
+	private autocompleteInputHint?: AutocompleteInputHint;
+	private autocompleteKeepOpenOnEmpty: boolean = false;
 	private autocompleteMaxVisible: number = 5;
 	private autocompleteAbort?: AbortController;
 	private autocompleteDebounceTimer?: ReturnType<typeof setTimeout>;
@@ -410,6 +417,20 @@ export class Editor implements Component, Focusable {
 		this.cancelAutocomplete();
 		this.autocompleteProvider = provider;
 		this.setAutocompleteTriggerCharacters(provider.triggerCharacters ?? []);
+	}
+
+	/** Refresh suggestions for the current composer context without changing text. */
+	refreshAutocomplete(): void {
+		if (!this.autocompleteProvider) return;
+		const currentLine = this.state.lines[this.state.cursorLine] || "";
+		const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
+		if (
+			this.autocompleteState ||
+			this.isInSlashCommandContext(textBeforeCursor) ||
+			this.autocompleteTriggerPattern.test(textBeforeCursor)
+		) {
+			this.tryTriggerAutocomplete();
+		}
 	}
 
 	/**
@@ -510,7 +531,10 @@ export class Editor implements Component, Focusable {
 		const contentWidth = Math.max(1, borderInnerWidth - paddingX * 2);
 		// Always preserve one editable cell; truncate an over-wide configured
 		// prompt rather than letting it push the cursor through the right border.
-		const prompt = sliceByColumn(this.prompt, 0, Math.max(0, contentWidth - 1), true);
+		const promptSource = this.autocompleteState && this.autocompleteInputHint?.prompt
+			? this.autocompleteInputHint.prompt
+			: this.prompt;
+		const prompt = sliceByColumn(promptSource, 0, Math.max(0, contentWidth - 1), true);
 		const promptWidth = visibleWidth(prompt);
 		const editableWidth = Math.max(1, contentWidth - promptWidth);
 
@@ -639,8 +663,17 @@ export class Editor implements Component, Focusable {
 				} else {
 					// Cursor is at the end - add highlighted space
 					const cursor = "\x1b[7m \x1b[0m";
-					displayText = before + marker + cursor;
-					lineVisibleWidth = lineVisibleWidth + 1;
+					const hint = this.autocompleteInputHint;
+					const showPlaceholder = this.autocompleteState &&
+						this.state.cursorLine === 0 &&
+						this.state.cursorCol === (hint?.valuePrefix?.length ?? -1) &&
+						this.state.lines[0] === hint?.valuePrefix &&
+						Boolean(hint?.placeholder);
+					const placeholder = showPlaceholder
+						? sliceByColumn(hint!.placeholder!, 0, Math.max(0, editableWidth - lineVisibleWidth - 1), true)
+						: "";
+					displayText = before + marker + cursor + this.theme.selectList.description(placeholder);
+					lineVisibleWidth = lineVisibleWidth + 1 + visibleWidth(placeholder);
 					// If cursor overflows content width into the padding, flag it
 					if (lineVisibleWidth > editableWidth && paddingX > 0) {
 						cursorInPadding = true;
@@ -734,7 +767,16 @@ export class Editor implements Component, Focusable {
 		// Handle autocomplete mode
 		if (this.autocompleteState && this.autocompleteList) {
 			if (kb.matches(data, "tui.select.cancel")) {
+				if (this.returnToAutocompleteBackValue()) return;
 				this.cancelAutocomplete();
+				return;
+			}
+
+			if (
+				(kb.matches(data, "tui.editor.deleteCharBackward") || matchesKey(data, "shift+backspace")) &&
+				this.isAtAutocompletePhaseStart()
+			) {
+				this.returnToAutocompleteBackValue();
 				return;
 			}
 
@@ -749,7 +791,7 @@ export class Editor implements Component, Focusable {
 					this.handleTabCompletion();
 					return;
 				}
-				const selected = this.autocompleteList.getSelectedItem();
+				const selected = this.autocompleteList.getSelectedItem() as AutocompleteItem | null;
 				if (selected && this.autocompleteProvider) {
 					this.pushUndoSnapshot();
 					this.lastAction = null;
@@ -765,6 +807,7 @@ export class Editor implements Component, Focusable {
 					this.setCursorCol(result.cursorCol);
 					this.cancelAutocomplete();
 					if (this.onChange) this.onChange(this.getText());
+					if (selected.submitOnSelect === false) this.refreshAutocomplete();
 				}
 				return;
 			}
@@ -779,6 +822,8 @@ export class Editor implements Component, Focusable {
 					// arrive before the refreshed list; never apply an old prefix to
 					// newer composer text. Submit the text exactly as typed instead.
 					this.cancelAutocomplete();
+				} else if (!selected && this.autocompleteKeepOpenOnEmpty) {
+					return;
 				} else if (selected && this.autocompleteProvider) {
 					this.pushUndoSnapshot();
 					this.lastAction = null;
@@ -793,12 +838,15 @@ export class Editor implements Component, Focusable {
 					this.state.cursorLine = result.cursorLine;
 					this.setCursorCol(result.cursorCol);
 
-					if (this.autocompletePrefix.startsWith("/") && selected.submitOnSelect !== false) {
+					const shouldSubmit = selected.submitOnSelect === true ||
+						(this.autocompletePrefix.startsWith("/") && selected.submitOnSelect !== false);
+					if (shouldSubmit) {
 						this.cancelAutocomplete();
 						// Fall through to submit
 					} else {
 						this.cancelAutocomplete();
 						if (this.onChange) this.onChange(this.getText());
+						if (selected.submitOnSelect === false) this.refreshAutocomplete();
 						return;
 					}
 				}
@@ -1646,6 +1694,7 @@ export class Editor implements Component, Focusable {
 		if (this.onChange) {
 			this.onChange(this.getText());
 		}
+		this.refreshAutocomplete();
 	}
 
 	private deleteToEndOfLine(): void {
@@ -1678,6 +1727,7 @@ export class Editor implements Component, Focusable {
 		if (this.onChange) {
 			this.onChange(this.getText());
 		}
+		this.refreshAutocomplete();
 	}
 
 	private deleteWordBackwards(): void {
@@ -1723,6 +1773,7 @@ export class Editor implements Component, Focusable {
 		if (this.onChange) {
 			this.onChange(this.getText());
 		}
+		this.refreshAutocomplete();
 	}
 
 	private deleteWordForward(): void {
@@ -1765,6 +1816,7 @@ export class Editor implements Component, Focusable {
 		if (this.onChange) {
 			this.onChange(this.getText());
 		}
+		this.refreshAutocomplete();
 	}
 
 	private handleForwardDelete(): void {
@@ -2227,8 +2279,17 @@ export class Editor implements Component, Focusable {
 	private createAutocompleteList(
 		prefix: string,
 		items: Array<{ value: string; label: string; description?: string }>,
+		emptyMessage?: string,
 	): SelectList {
-		const layout = prefix.startsWith("/") ? SLASH_COMMAND_SELECT_LIST_LAYOUT : undefined;
+		const currentLine = this.state.lines[this.state.cursorLine] || "";
+		const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
+		const commandLayout = prefix.startsWith("/") || this.isInSlashCommandContext(textBeforeCursor)
+			? SLASH_COMMAND_SELECT_LIST_LAYOUT
+			: undefined;
+		const layout = {
+			...commandLayout,
+			...(emptyMessage ? { emptyMessage } : {}),
+		};
 		return new SelectList(items, this.autocompleteMaxVisible, this.theme.selectList, layout);
 	}
 
@@ -2357,7 +2418,11 @@ export class Editor implements Component, Focusable {
 
 		this.autocompleteAbort = undefined;
 
-		if (!suggestions || !Array.isArray(suggestions.items) || suggestions.items.length === 0) {
+		if (
+			!suggestions ||
+			!Array.isArray(suggestions.items) ||
+			(suggestions.items.length === 0 && !suggestions.keepOpenOnEmpty)
+		) {
 			this.cancelAutocomplete();
 			this.tui.requestRender();
 			return;
@@ -2403,10 +2468,29 @@ export class Editor implements Component, Focusable {
 	}
 
 	private applyAutocompleteSuggestions(suggestions: AutocompleteSuggestions, state: "regular" | "force"): void {
+		const previousSelection = this.autocompletePrefix === suggestions.prefix
+			? this.autocompleteList?.getSelectedItem()?.value
+			: undefined;
 		this.autocompletePrefix = suggestions.prefix;
-		this.autocompleteList = this.createAutocompleteList(suggestions.prefix, suggestions.items);
+		this.autocompleteInputHint = suggestions.inputHint;
+		this.autocompleteKeepOpenOnEmpty = suggestions.keepOpenOnEmpty ?? false;
+		this.autocompleteList = this.createAutocompleteList(
+			suggestions.prefix,
+			suggestions.items,
+			suggestions.emptyMessage,
+		);
 
-		const bestMatchIndex = this.getBestAutocompleteMatchIndex(suggestions.items, suggestions.prefix);
+		const previousSelectionIndex = previousSelection === undefined
+			? -1
+			: suggestions.items.findIndex((item) => item.value === previousSelection);
+		const preferredIndex = suggestions.preferredValue === undefined
+			? -1
+			: suggestions.items.findIndex((item) => item.value === suggestions.preferredValue);
+		const bestMatchIndex = previousSelectionIndex >= 0
+			? previousSelectionIndex
+			: preferredIndex >= 0
+				? preferredIndex
+				: this.getBestAutocompleteMatchIndex(suggestions.items, suggestions.prefix);
 		if (bestMatchIndex >= 0) {
 			this.autocompleteList.setSelectedIndex(bestMatchIndex);
 		}
@@ -2428,11 +2512,38 @@ export class Editor implements Component, Focusable {
 		this.autocompleteState = null;
 		this.autocompleteList = undefined;
 		this.autocompletePrefix = "";
+		this.autocompleteInputHint = undefined;
+		this.autocompleteKeepOpenOnEmpty = false;
 	}
 
 	private cancelAutocomplete(): void {
 		this.cancelAutocompleteRequest();
 		this.clearAutocompleteUi();
+	}
+
+	private isAtAutocompletePhaseStart(): boolean {
+		const hint = this.autocompleteInputHint;
+		return Boolean(
+			hint?.backValue !== undefined &&
+			hint.valuePrefix !== undefined &&
+			this.state.cursorLine === 0 &&
+			this.state.cursorCol === hint.valuePrefix.length &&
+			this.state.lines.length === 1 &&
+			this.state.lines[0] === hint.valuePrefix,
+		);
+	}
+
+	private returnToAutocompleteBackValue(): boolean {
+		const backValue = this.autocompleteInputHint?.backValue;
+		if (backValue === undefined) return false;
+
+		this.pushUndoSnapshot();
+		this.lastAction = null;
+		this.exitHistoryBrowsing();
+		this.cancelAutocomplete();
+		this.setTextInternal(backValue);
+		this.refreshAutocomplete();
+		return true;
 	}
 
 	public isShowingAutocomplete(): boolean {

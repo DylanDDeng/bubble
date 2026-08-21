@@ -45,7 +45,6 @@ describe("main pi-tui running input", () => {
       callbacks: {
         onExitRequest: () => {},
         onClearTranscript: () => {},
-        onModelSelect: () => {},
         onThemeToggle: () => {},
       },
       terminal,
@@ -129,7 +128,6 @@ describe("main pi-tui running input", () => {
       callbacks: {
         onExitRequest: () => {},
         onClearTranscript: () => {},
-        onModelSelect: () => {},
         onThemeToggle: () => {},
       },
       terminal,
@@ -214,7 +212,6 @@ describe("main pi-tui running input", () => {
       callbacks: {
         onExitRequest: () => {},
         onClearTranscript: () => {},
-        onModelSelect: () => {},
         onThemeToggle: () => {},
       },
       terminal,
@@ -276,7 +273,6 @@ describe("main pi-tui running input", () => {
       callbacks: {
         onExitRequest: () => { exits += 1; },
         onClearTranscript: () => {},
-        onModelSelect: () => {},
         onThemeToggle: () => {},
       },
       questionController: {
@@ -367,7 +363,6 @@ describe("main pi-tui running input", () => {
       callbacks: {
         onExitRequest: () => {},
         onClearTranscript: () => {},
-        onModelSelect: () => {},
         onThemeToggle: () => {},
       },
       approvalHandlerRef: approvalHandlerRef as never,
@@ -464,7 +459,6 @@ describe("main pi-tui running input", () => {
       callbacks: {
         onExitRequest: () => {},
         onClearTranscript: () => {},
-        onModelSelect: () => {},
         onThemeToggle: () => {},
       },
       questionController,
@@ -576,7 +570,6 @@ describe("main pi-tui running input", () => {
       callbacks: {
         onExitRequest: () => {},
         onClearTranscript: () => {},
-        onModelSelect: () => {},
         onThemeToggle: () => {},
       },
       terminal,
@@ -607,6 +600,108 @@ describe("main pi-tui running input", () => {
       expect(turns).toHaveLength(1);
       expect(turns[0]).toContain('load the "podcast" skill');
       expect(turns[0]).toContain("make an episode");
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("switches /model to the composer suggestion surface without opening a centered picker", async () => {
+    const terminal = new VirtualTerminal(100, 24);
+    const controller = {
+      subscribe: () => () => {},
+      getTranscript: () => [],
+      isRunning: () => false,
+      getStreamingTail: () => ({ content: "", reasoning: "", tools: [], parts: [], phase: "idle" as const }),
+      pendingSteerCount: () => 0,
+      queuedInputCount: () => 0,
+      steer: () => false,
+      cancelActiveRun: () => false,
+      runTurn: async () => {},
+      appendDisplayMessage: () => {},
+      clearTranscript: () => {},
+      shutdown: () => ({ reason: "test", wallMs: 0 }),
+    };
+    const provider = {
+      id: "openai",
+      name: "Test Provider",
+      baseURL: "https://example.com/v1",
+      apiKey: "token",
+      enabled: true,
+    };
+    const registry = {
+      getEnabled: () => [provider],
+      getModelConfig: () => ({
+        getCustomModels: () => [{
+          id: "test-model",
+          name: "Test Model",
+          providerId: "openai",
+          reasoningLevels: ["low", "medium", "high"],
+          defaultReasoningLevel: "low",
+        }],
+      }),
+      listModels: () => new Promise(() => {}),
+    };
+    const app = new PiTuiApp({
+      agent: {
+        model: "test-model",
+        providerId: "openai",
+        thinking: "medium",
+        mode: "default",
+        setMode: () => {},
+        getContextUsageSnapshot: () => ({ usedTokens: 0, contextWindow: 1_000 }),
+      } as never,
+      sessionManager: { getSessionFile: () => "/s.jsonl" } as never,
+      controller: controller as never,
+      registry: registry as never,
+      callbacks: {
+        onExitRequest: () => {},
+        onClearTranscript: () => {},
+        onThemeToggle: () => {},
+      },
+      terminal,
+    });
+
+    app.start();
+    try {
+      terminal.sendInput("/mod");
+      await terminal.waitForRender();
+      expect(terminal.getViewport().join("\n")).toContain("Switch model");
+
+      terminal.sendInput("\r");
+      await terminal.waitForRender();
+      const viewport = terminal.getViewport().join("\n");
+      expect(viewport).toContain("Test Model");
+      expect(viewport).toContain("Test Provider · test-model");
+      expect(viewport).toContain("/model ");
+      expect(viewport).toContain("⌕ ");
+      expect(viewport).toContain("Search models…");
+      expect(viewport).not.toContain("Select model");
+
+      terminal.sendInput("missing");
+      await terminal.waitForRender();
+      const noMatchViewport = terminal.getViewport().join("\n");
+      expect(noMatchViewport).toContain("No matching models");
+      expect(noMatchViewport).not.toContain("Test Provider · test-model");
+
+      terminal.sendInput("\x17");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await terminal.flush();
+      expect(terminal.getViewport().join("\n")).toContain("Test Model");
+
+      terminal.sendInput("\r");
+      await terminal.waitForRender();
+      const effortViewport = terminal.getViewport().join("\n");
+      expect(effortViewport).toContain("◆ ");
+      expect(effortViewport).toContain("Select reasoning effort…");
+      expect(effortViewport).toContain("light reasoning");
+      expect(effortViewport).toContain("balanced reasoning");
+      expect(effortViewport).toContain("deeper reasoning");
+
+      terminal.sendInput("\x1b");
+      await terminal.waitForRender();
+      const returnedViewport = terminal.getViewport().join("\n");
+      expect(returnedViewport).toContain("⌕ ");
+      expect(returnedViewport).toContain("Test Model");
     } finally {
       app.dispose();
     }

@@ -37,6 +37,7 @@ export interface SelectListLayoutOptions {
 	minPrimaryColumnWidth?: number;
 	maxPrimaryColumnWidth?: number;
 	truncatePrimary?: (context: SelectListTruncatePrimaryContext) => string;
+	emptyMessage?: string;
 }
 
 export class SelectList implements Component {
@@ -78,7 +79,7 @@ export class SelectList implements Component {
 
 		// If no items match filter, show message
 		if (this.filteredItems.length === 0) {
-			lines.push(this.theme.noMatch("  No matching commands"));
+			lines.push(this.theme.noMatch(`  ${this.layout.emptyMessage ?? "No matching commands"}`));
 			return lines;
 		}
 

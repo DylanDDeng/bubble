@@ -60,7 +60,6 @@ import { getNextPermissionMode } from "../permission/mode.js";
 export interface PiAppCallbacks {
   onExitRequest(): void;
   onClearTranscript(): void;
-  onModelSelect(modelId: string): void;
   onThemeToggle(): void;
   onThemeModeChange?(mode: import("../config.js").ThemeMode): void;
   onCompact?(): void;
@@ -157,6 +156,11 @@ export class PiTuiApp {
       commands: () => slashRegistry.list(),
       skills: () => this.options.skillRegistry?.summaries() ?? [],
       uiMode: () => this.tui.mode,
+      registry: this.options.registry,
+      thinkingLevel: () => this.options.agent.thinking,
+      onModelSuggestionsChanged: () => {
+        if (!this.disposed) this.editor.refreshAutocomplete();
+      },
     }));
     this.settledTranscript = new ResponsiveTranscriptComponent(() => ({
       messages: this.options.controller.getTranscript(),
@@ -401,7 +405,13 @@ export class PiTuiApp {
       sessionManager: options.sessionManager as never,
       createProvider: options.createProvider as never,
       openPicker: (mode) => {
-        if (mode === "model") void this.modelPicker();
+        if (mode === "model") {
+          // A bare /model can still arrive from a fast Enter or a non-composer
+          // command host. Keep pi-tui on its inline command surface instead of
+          // falling back to the legacy centered overlay.
+          this.editor.setText("/model ");
+          this.editor.refreshAutocomplete();
+        }
       },
       registry: options.registry as never,
       skillRegistry: options.skillRegistry as never,
@@ -620,30 +630,6 @@ export class PiTuiApp {
   private removeQueuedQuestion(id: string): void {
     const index = this.questionQueue.findIndex((request) => request.id === id);
     if (index >= 0) this.questionQueue.splice(index, 1);
-  }
-
-  private async modelPicker(): Promise<void> {
-    const registry = this.options.registry;
-    if (!registry) {
-      this.pushNotice("model registry unavailable");
-      this.renderSnapshot();
-      return;
-    }
-    const providers = registry.getConfigured().filter((provider) => provider.enabled && provider.apiKey);
-    const items: SelectItem[] = [];
-    for (const provider of providers) {
-      const discovery = await registry.listModels(provider).catch(() => []);
-      for (const model of discovery) {
-        items.push({ value: model.id, label: model.name ?? model.id, description: provider.id });
-      }
-    }
-    if (items.length === 0) {
-      this.pushNotice("no models registered");
-      this.renderSnapshot();
-      return;
-    }
-    const choice = await this.selectOverlay(items, "Select model");
-    if (choice) this.options.callbacks.onModelSelect(choice.value);
   }
 
   // ---- Lifecycle ----------------------------------------------------------

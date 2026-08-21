@@ -4,6 +4,8 @@ export { Marked, type Token, type Tokens } from "marked";
 // Autocomplete support
 export {
 	type AutocompleteItem,
+	type AutocompleteArgumentSuggestions,
+	type AutocompleteInputHint,
 	type AutocompleteProvider,
 	type AutocompleteSuggestions,
 	CombinedAutocompleteProvider,
