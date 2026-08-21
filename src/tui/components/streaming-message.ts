@@ -15,14 +15,23 @@
  * the separate activityLane stays one row tall and merely clears its text.
  */
 import chalk from "chalk";
-import { Spacer, Text, truncateToWidth, VStack, type Component } from "@bubblebrain-ai/pi-tui";
+import {
+  Spacer,
+  Text,
+  truncateToWidth,
+  VStack,
+  type Component,
+  type TuiMouseEvent,
+} from "@bubblebrain-ai/pi-tui";
 import type { DisplayMessagePart, DisplayToolCall } from "../model/display-history.js";
+import type { TraceInteractionState, TraceRowTarget } from "../model/trace-interaction.js";
 import {
   projectAssistantRows,
   projectReasoningRows,
-  joinTranscriptBlocks,
+  joinTranscriptProjections,
   MINIMAL_REASONING_BODY_ROWS,
-  renderToolTraceGroups,
+  projectToolTraceGroups,
+  type TranscriptProjection,
   type TranscriptRenderOptions,
 } from "./transcript.js";
 
@@ -131,13 +140,21 @@ export class AgentActivityLaneComponent implements Component {
  */
 class ProjectedRowComponent implements Component {
   private row: string | null = null;
+  private target?: TraceRowTarget;
+  private interaction?: TraceInteractionState;
 
-  setRow(row: string): void {
+  constructor(private readonly onActivate?: () => void) {}
+
+  setRow(row: string, target?: TraceRowTarget, interaction?: TraceInteractionState): void {
     this.row = row;
+    this.target = target;
+    this.interaction = interaction;
   }
 
   clear(): void {
     this.row = null;
+    this.target = undefined;
+    this.interaction = undefined;
   }
 
   render(width: number): string[] {
@@ -148,6 +165,24 @@ class ProjectedRowComponent implements Component {
 
   invalidate(): void {
     // No cache; rows are already projected to terminal lines.
+  }
+
+  handleMouse(event: TuiMouseEvent): boolean {
+    if (!this.interaction) return false;
+    if (event.kind === "leave") {
+      const changed = this.interaction.clearHover();
+      if (changed) this.onActivate?.();
+      return changed;
+    }
+    if (event.kind === "move") {
+      const changed = this.interaction.hover(this.target);
+      if (changed) this.onActivate?.();
+      return changed;
+    }
+    if (event.release || (event.button & 3) !== 0 || !this.target) return false;
+    this.interaction.activate(this.target, event.clickCount);
+    this.onActivate?.();
+    return true;
   }
 }
 
@@ -182,7 +217,13 @@ export class StreamingMessageComponent extends VStack {
     this.reasoningRows = Array.from({ length: MINIMAL_REASONING_BODY_ROWS }, () => new Text("", 0, 0));
     // One ordered pool mirrors Ink's DisplayMessagePart timeline. Reserve
     // enough rows for a useful grouped tool trace plus an answer tail.
-    this.timelineRows = Array.from({ length: maxPreviewRows + 16 }, () => new ProjectedRowComponent());
+    this.timelineRows = Array.from(
+      { length: maxPreviewRows + 16 },
+      () => new ProjectedRowComponent(() => {
+        if (this.tail) this.update(this.tail, this.lastColumns ?? 80, this.projectionOptions);
+        this.onFrame?.();
+      }),
+    );
     // The live tail remains scrollable. Its spinner lives in the permanent
     // activity lane mounted by the app immediately above the composer.
     this.addChild(this.thinkingHeaderRow);
@@ -263,27 +304,34 @@ export class StreamingMessageComponent extends VStack {
         break;
       }
     }
-    const timelineBlocks: string[][] = [];
+    const timelineBlocks: TranscriptProjection[] = [];
     for (let partIndex = 0; partIndex < parts.length; partIndex += 1) {
       const part = parts[partIndex]!;
       if (part.type === "tools") {
-        timelineBlocks.push(renderToolTraceGroups(
+        timelineBlocks.push(projectToolTraceGroups(
           part.toolCalls,
           { ...projectionOptions, columns: width },
           { showActivity: partIndex === lastToolsPart },
         ));
         continue;
       }
-      timelineBlocks.push(projectAssistantRows(part.content, { ...projectionOptions, columns: width }));
+      const rows = projectAssistantRows(part.content, { ...projectionOptions, columns: width });
+      timelineBlocks.push({ rows, traceTargets: rows.map(() => undefined) });
     }
-    const timeline = joinTranscriptBlocks(timelineBlocks);
-    this.reasoningGapRow.setLines(tail.reasoning && timeline.length > 0 ? 1 : 0);
-    if (timeline.length > 0) {
+    const timeline = joinTranscriptProjections(timelineBlocks);
+    this.reasoningGapRow.setLines(tail.reasoning && timeline.rows.length > 0 ? 1 : 0);
+    if (timeline.rows.length > 0) {
       hasLiveRows = true;
-      const visible = timeline.slice(-this.timelineRows.length);
-      this.timelineEllipsisRow.setText(timeline.length > visible.length ? chalk.dim("  …") : "");
+      const start = Math.max(0, timeline.rows.length - this.timelineRows.length);
+      const visible = timeline.rows.slice(start);
+      const visibleTargets = timeline.traceTargets.slice(start);
+      this.timelineEllipsisRow.setText(timeline.rows.length > visible.length ? chalk.dim("  …") : "");
       for (let index = 0; index < visible.length; index += 1) {
-        this.timelineRows[index]!.setRow(visible[index]!);
+        this.timelineRows[index]!.setRow(
+          visible[index]!,
+          visibleTargets[index],
+          projectionOptions.traceInteraction,
+        );
       }
     }
     this.liveGapRow.setLines(hasLiveRows ? 1 : 0);

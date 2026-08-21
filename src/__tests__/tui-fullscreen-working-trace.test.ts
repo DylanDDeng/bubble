@@ -5,6 +5,91 @@ import type { DisplayMessage } from "../tui/model/display-history.js";
 import type { StreamingTailState } from "../tui/components/streaming-message.js";
 
 describe("fullscreen working trace", () => {
+  it("opens settled Find Files and Execute entries through real mouse events", async () => {
+    const terminal = new VirtualTerminal(80, 24);
+    const glob = {
+      id: "glob-1",
+      name: "glob",
+      args: { pattern: "src/**/*.ts" },
+      result: "src/a.ts\nsrc/b.ts",
+      status: "completed" as const,
+      metadata: { matches: 2 },
+    };
+    const execute = {
+      id: "execute-1",
+      name: "bash",
+      args: { command: "printf 'one\\ntwo\\n'", description: "print lines" },
+      result: "one\ntwo",
+      status: "completed" as const,
+    };
+    const messages: DisplayMessage[] = [{
+      key: "assistant",
+      role: "assistant",
+      content: "",
+      toolCalls: [glob, execute],
+      parts: [{ type: "tools", toolCalls: [glob, execute] }],
+    }];
+    const controller = {
+      subscribe: () => () => {},
+      getTranscript: () => messages,
+      isRunning: () => false,
+      getStreamingTail: () => null,
+      appendDisplayMessage: () => {},
+      runTurn: async () => {},
+    };
+    const app = new FullscreenApp({
+      controller: controller as never,
+      agent: {
+        model: "test-model",
+        mode: "default",
+        setMode: () => {},
+        getContextUsageSnapshot: () => ({ usedTokens: 0, contextWindow: 1_000 }),
+      } as never,
+      onExit: () => {},
+      onCommand: () => {},
+      terminal,
+    });
+    const click = async (row: number) => {
+      const terminalRow = row + 1;
+      terminal.sendInput(`\x1b[<0;2;${terminalRow}M`);
+      terminal.sendInput(`\x1b[<0;2;${terminalRow}m`);
+      await terminal.waitForRender();
+    };
+
+    app.start();
+    await terminal.waitForRender();
+    let rows = terminal.getViewport();
+    let text = rows.join("\n");
+    expect(text).toContain("◆ Find Files 2 files");
+    expect(text).toContain("◆ Execute print lines");
+    expect(text).not.toContain("src/a.ts");
+    expect(text).not.toContain("printf 'one\\ntwo\\n'");
+
+    let headerRow = rows.findIndex((row) => row.includes("◆ Find Files 2 files"));
+    await click(headerRow);
+    rows = terminal.getViewport();
+    expect(rows.join("\n")).toContain("│  › Find Files 2 files");
+    await click(headerRow);
+    rows = terminal.getViewport();
+    text = rows.join("\n");
+    expect(text).toContain("⌄ Find Files 2 files");
+    expect(text).toContain("src/a.ts");
+    expect(text).toContain("src/b.ts");
+
+    headerRow = rows.findIndex((row) => row.includes("◆ Execute print lines"));
+    await click(headerRow);
+    rows = terminal.getViewport();
+    expect(rows.join("\n")).toContain("│  › Execute print lines");
+    await click(headerRow);
+    text = terminal.getViewport().join("\n");
+    expect(text).toContain("⌄ Execute print lines");
+    expect(text).toContain("printf 'one\\ntwo\\n'");
+    expect(text).toContain("one");
+    expect(text).toContain("two");
+
+    app.dispose();
+  });
+
   it("keeps Thinking, grouped tools, and answer live, then settles without a duplicate", async () => {
     const terminal = new VirtualTerminal(80, 20);
     const listeners: Array<() => void> = [];
@@ -13,6 +98,7 @@ describe("fullscreen working trace", () => {
       name: "read",
       args: { path: "README.md" },
       status: "running" as const,
+      result: "ok",
     };
     let running = true;
     let messages: DisplayMessage[] = [
@@ -59,14 +145,53 @@ describe("fullscreen working trace", () => {
     let viewportRows = terminal.getViewport();
     let viewport = viewportRows.join("\n");
     expect(viewport).toContain("Thinking…");
-    expect(viewport).toContain("◆ Read 1 file running");
-    expect(viewport).toContain("README.md");
+    expect(viewport).toContain("◆ Read README.md running");
+    expect(viewportRows.some((row) => row.trim() === "ok")).toBe(false);
     expect(viewport).toContain("answer");
     const liveAnswer = viewportRows.find((row) => row.trim() === "answer");
     expect(liveAnswer?.indexOf("answer")).toBe(0);
     const liveComposerAt = viewportRows.findIndex((row) => row.includes("┌"));
-    const liveComposerDistance = liveComposerAt - viewportRows.indexOf(liveAnswer!);
+    let liveComposerDistance = liveComposerAt - viewportRows.indexOf(liveAnswer!);
     expect(liveComposerAt).toBeGreaterThan(viewportRows.indexOf(liveAnswer!));
+
+    // Grok parity: a single Read is one entry. Single click selects it and the
+    // second click unfolds its preview in place.
+    const readHeaderRow = viewportRows.findIndex((row) => row.includes("◆ Read README.md running"));
+    const mouseRow = readHeaderRow + 1;
+    terminal.sendInput(`\x1b[<35;2;${mouseRow}M`);
+    await terminal.waitForRender();
+    viewportRows = terminal.getViewport();
+    expect(viewportRows[readHeaderRow - 1]?.trim()).toMatch(/^┌.*┐$/u);
+    expect(viewportRows[readHeaderRow]?.trim()).toMatch(/^│  ◆ Read README\.md running.*│$/u);
+    expect(viewportRows[readHeaderRow + 1]?.trim()).toMatch(/^└.*┘$/u);
+
+    const composerRow = viewportRows.map((row) => row.includes("┌")).lastIndexOf(true);
+    terminal.sendInput(`\x1b[<35;2;${composerRow + 1}M`);
+    await terminal.waitForRender();
+    viewportRows = terminal.getViewport();
+    expect(viewportRows[readHeaderRow - 1]?.trim()).toBe("");
+    expect(viewportRows[readHeaderRow]?.trim()).toBe("◆ Read README.md running");
+
+    terminal.sendInput(`\x1b[<35;2;${mouseRow}M`);
+    await terminal.waitForRender();
+    terminal.sendInput(`\x1b[<0;2;${mouseRow}M`);
+    terminal.sendInput(`\x1b[<0;2;${mouseRow}m`);
+    await terminal.waitForRender();
+    viewportRows = terminal.getViewport();
+    expect(viewportRows.join("\n")).toContain("› Read README.md running");
+    expect(viewportRows[readHeaderRow - 1]?.trim()).toMatch(/^┌.*┐$/u);
+    expect(viewportRows[readHeaderRow]?.trim()).toMatch(/^│  › Read README\.md running.*│$/u);
+    expect(viewportRows[readHeaderRow + 1]?.trim()).toMatch(/^└.*┘$/u);
+    terminal.sendInput(`\x1b[<0;2;${mouseRow}M`);
+    terminal.sendInput(`\x1b[<0;2;${mouseRow}m`);
+    await terminal.waitForRender();
+    viewportRows = terminal.getViewport();
+    viewport = viewportRows.join("\n");
+    expect(viewport).toContain("⌄ Read README.md running");
+    expect(viewportRows.some((row) => /^│\s+ok\s+│$/u.test(row.trim()))).toBe(true);
+    expect(viewportRows[readHeaderRow]).toContain("⌄ Read README.md running");
+    liveComposerDistance = viewportRows.map((row) => row.includes("┌")).lastIndexOf(true)
+      - viewportRows.findIndex((row) => row.trim() === "answer");
 
     messages = [...messages, {
       key: "assistant",
@@ -86,14 +211,15 @@ describe("fullscreen working trace", () => {
     viewportRows = terminal.getViewport();
     viewport = viewportRows.join("\n");
     expect(viewport).toContain("Thinking");
-    expect(viewport).toContain("Read 1 file");
+    expect(viewport).toContain("Read README.md");
+    expect(viewport).toContain("README.md");
     expect(viewport).toContain("answer");
     expect(viewport).not.toContain("Working on Read");
     expect(viewport).not.toContain("writing the response");
     const settledAnswer = viewportRows.find((row) => row.trim() === "answer");
     expect(settledAnswer?.indexOf("answer")).toBe(liveAnswer?.indexOf("answer"));
     expect(viewport).not.toContain("● answer");
-    const settledComposerAt = viewportRows.findIndex((row) => row.includes("┌"));
+    const settledComposerAt = viewportRows.map((row) => row.includes("┌")).lastIndexOf(true);
     expect(settledComposerAt - viewportRows.indexOf(settledAnswer!)).toBe(liveComposerDistance);
 
     app.dispose();

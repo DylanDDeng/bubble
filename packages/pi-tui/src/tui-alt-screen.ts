@@ -10,6 +10,7 @@ import { getKeybindings } from "./keybindings.ts";
 import { isKeyRelease } from "./keys.ts";
 import {
 	getScrollbarGeometry,
+	getLayoutBoxesAt,
 	getScrollViewBox,
 	getScrollViewsAt,
 	type LayoutFrame,
@@ -35,6 +36,7 @@ import {
 	type OverlayHandle,
 	TuiBase,
 	type TuiStopOptions,
+	type TuiMouseEvent,
 	VIEWPORT_TUI,
 	type ViewportTUI,
 } from "./tui.ts";
@@ -98,6 +100,19 @@ interface ClickTarget {
 	wordEnd: number;
 }
 
+interface ComponentClickTarget {
+	timestamp: number;
+	component: Component;
+	row: number;
+	count: 1 | 2;
+}
+
+interface ComponentHoverTarget {
+	component: Component;
+	x: number;
+	y: number;
+}
+
 interface SgrMouseEvent {
 	button: number;
 	x: number;
@@ -145,6 +160,8 @@ export interface TuiAltScreenOptions {
 	wheelScrollLines?: number;
 	/** Capture mouse events for viewport scrolling and application-owned text selection. */
 	mouse?: boolean;
+	/** Mouse-motion reporting policy. `all` is required by pointer-hover UI. */
+	mouseMotion?: "auto" | "all" | "button";
 	/** Style a non-current transcript search match. */
 	searchMatchStyle?: (text: string) => string;
 	/** Style the current transcript search match. */
@@ -182,6 +199,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private selectionGranularity: SelectionGranularity = "character";
 	private selectionInitialRange?: SelectionRange;
 	private lastClick?: ClickTarget;
+	private lastComponentClick?: ComponentClickTarget;
+	private componentHover?: ComponentHoverTarget;
 	private selectionDragPointer?: { x: number; y: number };
 	private selectionAutoScrollDirection: -1 | 0 | 1 = 0;
 	private selectionAutoScrollTimer?: NodeJS.Timeout;
@@ -193,6 +212,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private selectionDragged = false;
 	private readonly wheelScrollLines: number;
 	private readonly mouseEnabled: boolean;
+	private readonly mouseMotion: "auto" | "all" | "button";
 	private readonly searchMatchStyle: (text: string) => string;
 	private readonly searchCurrentMatchStyle: (text: string) => string;
 	private readonly openUrl?: (url: string) => void;
@@ -216,6 +236,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.flashes = new AltScreenFlashContainer(() => this.requestRender());
 		this.wheelScrollLines = Math.max(1, Math.floor(options.wheelScrollLines ?? 1));
 		this.mouseEnabled = options.mouse ?? true;
+		this.mouseMotion = options.mouseMotion ?? "auto";
 		this.searchMatchStyle = options.searchMatchStyle ?? ((text) => `\x1b[4m${text}\x1b[24m`);
 		this.searchCurrentMatchStyle = options.searchCurrentMatchStyle ?? ((text) => `\x1b[1;7m${text}\x1b[22;27m`);
 		this.openUrl = options.openUrl;
@@ -272,18 +293,23 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.selectionGranularity = "character";
 		this.selectionInitialRange = undefined;
 		this.lastClick = undefined;
+		this.lastComponentClick = undefined;
+		this.componentHover = undefined;
 		this.pressedUrl = undefined;
 		this.selectionDragged = false;
 		this.resetRenderState();
 		const term = process.env.TERM?.toLowerCase() ?? "";
 		// Multiplexers can lag when every pointer movement is forwarded. Button-motion
 		// tracking preserves clicks, wheel events, selections, and scrollbar dragging.
-		const mouseSequence =
+		const inMultiplexer =
 			process.env.TMUX !== undefined ||
 			process.env.ZELLIJ !== undefined ||
 			process.env.STY !== undefined ||
 			term.startsWith("tmux") ||
-			term.startsWith("screen")
+			term.startsWith("screen");
+		const mouseSequence = this.mouseMotion === "all"
+			? ENABLE_ALL_MOTION_MOUSE
+			: this.mouseMotion === "button" || inMultiplexer
 				? ENABLE_BUTTON_MOTION_MOUSE
 				: ENABLE_ALL_MOTION_MOUSE;
 		this.terminal.write(
@@ -292,6 +318,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	protected override beforeTerminalStop(_options: TuiStopOptions): void {
+		this.clearComponentHover(false);
 		this.closeSearch();
 		this.stopSelectionAutoScroll();
 		this.selectionPressActive = false;
@@ -554,6 +581,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				if (hadNonEmptyActiveSelection) this.requestRender();
 			}
 			this.lastClick = undefined;
+			this.lastComponentClick = undefined;
+			this.clearComponentHover();
 			return { consume: true };
 		}
 		if (data === FOCUS_IN) return { consume: true };
@@ -569,7 +598,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			if (this.handleRightClickPaste(mouseEvent)) return { consume: true };
 			const handled = this.handleScrollbarMouseEvent(mouseEvent);
 			if (!this.scrollbarDrag) this.updateScrollbarHover(mouseEvent.x, mouseEvent.y);
-			if (!handled) this.handleSelectionMouseEvent(mouseEvent);
+			const pointerOnScrollbar = this.isPointerMove(mouseEvent)
+				&& this.getScrollbarTargetAt(mouseEvent.x, mouseEvent.y) !== undefined;
+			const componentHandled = !handled && !pointerOnScrollbar && this.handleComponentMouseEvent(mouseEvent);
+			if ((handled || pointerOnScrollbar) && this.isPointerMove(mouseEvent)) this.clearComponentHover();
+			if (!handled && !componentHandled) this.handleSelectionMouseEvent(mouseEvent);
 			return { consume: true };
 		}
 		if (this.isMouseSequence(data)) return { consume: true };
@@ -712,6 +745,115 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return true;
 	}
 
+	private handleComponentMouseEvent(event: SgrMouseEvent): boolean {
+		if (this.isPointerMove(event)) {
+			this.handleComponentHoverMove(event);
+			return false;
+		}
+		if (
+			this.hasOverlay()
+			|| !this.currentLayout
+			|| event.release
+			|| (event.button & 32) !== 0
+			|| (event.button & 3) !== 0
+		) {
+			return false;
+		}
+
+		for (const box of getLayoutBoxesAt(this.currentLayout, event.x, event.y)) {
+			const handler = box.component.handleMouse;
+			if (!handler) continue;
+			const localRow = event.y - box.rect.y;
+			const now = Date.now();
+			const previous = this.lastComponentClick;
+			const clickCount: 1 | 2 = previous
+				&& previous.component === box.component
+				&& previous.row === localRow
+				&& now - previous.timestamp <= DOUBLE_CLICK_INTERVAL_MS
+				&& previous.count === 1
+					? 2
+					: 1;
+			const pointerEvent: TuiMouseEvent = {
+				kind: "press",
+				button: event.button,
+				x: event.x - box.rect.x,
+				y: localRow,
+				release: false,
+				clickCount,
+			};
+			if (!handler.call(box.component, pointerEvent)) continue;
+
+			this.lastComponentClick = { timestamp: now, component: box.component, row: localRow, count: clickCount };
+			this.selectionPressActive = false;
+			this.stopSelectionAutoScroll();
+			this.selectionAnchor = undefined;
+			this.selectionFocus = undefined;
+			this.selectionInitialRange = undefined;
+			this.selectionDragged = false;
+			this.pressedUrl = undefined;
+			this.lastClick = undefined;
+			// A fold changes content below the clicked row. If the viewport was
+			// following the end, pin its current top so the clicked header stays
+			// under the pointer instead of jumping upward with the new content.
+			const scrollView = getScrollViewsAt(this.currentLayout, event.x, event.y)[0];
+			scrollView?.scrollTo(scrollView.scrollTop, { disableFollow: true });
+			this.requestRender();
+			return true;
+		}
+		this.lastComponentClick = undefined;
+		return false;
+	}
+
+	private isPointerMove(event: SgrMouseEvent): boolean {
+		return !event.release && (event.button & 32) !== 0 && (event.button & 3) === 3;
+	}
+
+	private handleComponentHoverMove(event: SgrMouseEvent): void {
+		if (this.hasOverlay() || !this.currentLayout) {
+			this.clearComponentHover();
+			return;
+		}
+
+		const box = getLayoutBoxesAt(this.currentLayout, event.x, event.y)
+			.find((candidate) => candidate.component.handleMouse !== undefined);
+		if (!box?.component.handleMouse) {
+			this.clearComponentHover();
+			return;
+		}
+
+		if (this.componentHover?.component !== box.component) this.clearComponentHover();
+		const pointerEvent: TuiMouseEvent = {
+			kind: "move",
+			button: event.button,
+			x: event.x - box.rect.x,
+			y: event.y - box.rect.y,
+			release: false,
+			clickCount: 1,
+		};
+		const changed = box.component.handleMouse.call(box.component, pointerEvent);
+		this.componentHover = {
+			component: box.component,
+			x: pointerEvent.x,
+			y: pointerEvent.y,
+		};
+		if (changed) this.requestRender();
+	}
+
+	private clearComponentHover(render = true): void {
+		const previous = this.componentHover;
+		if (!previous) return;
+		this.componentHover = undefined;
+		const changed = previous.component.handleMouse?.call(previous.component, {
+			kind: "leave",
+			button: 35,
+			x: previous.x,
+			y: previous.y,
+			release: false,
+			clickCount: 1,
+		}) ?? false;
+		if (render && changed) this.requestRender();
+	}
+
 	private getScrollbarTargetAt(x: number, y: number): ScrollbarTarget | undefined {
 		if (this.hasOverlay() || !this.currentLayout) return undefined;
 		for (const scrollView of getScrollViewsAt(this.currentLayout, x, y)) {
@@ -777,6 +919,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.selectionGranularity = "character";
 		this.selectionInitialRange = undefined;
 		this.lastClick = undefined;
+		this.lastComponentClick = undefined;
 		this.pressedUrl = undefined;
 		this.selectionDragged = false;
 		this.setScrollbarHover(target.scrollView);

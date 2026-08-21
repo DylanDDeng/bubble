@@ -28,6 +28,7 @@ import { ResponsiveFooterComponent } from "./footer.js";
 import { getNextPermissionMode } from "../permission/mode.js";
 import type { Agent } from "../agent.js";
 import { COMPOSER_EDITOR_OPTIONS, COMPOSER_EDITOR_THEME } from "./composer-style.js";
+import { TraceInteractionState } from "./model/trace-interaction.js";
 
 export interface FullscreenAppOptions {
   controller: BubbleTuiController;
@@ -37,6 +38,8 @@ export interface FullscreenAppOptions {
   onCommand(command: string): void;
   /** Test/embedded host injection; production uses ProcessTerminal. */
   terminal?: Terminal;
+  /** Preserve tool-group folds when switching from the regular renderer. */
+  traceInteraction?: TraceInteractionState;
 }
 
 export class FullscreenApp {
@@ -45,6 +48,7 @@ export class FullscreenApp {
   private readonly streamingMessage: StreamingMessageComponent;
   private readonly editor: Editor;
   private readonly footer: ResponsiveFooterComponent;
+  private readonly traceInteraction: TraceInteractionState;
   private readonly unsubscribe: () => void;
   private showReasoning = false;
   private verboseTrace = false;
@@ -53,7 +57,9 @@ export class FullscreenApp {
 
   constructor(private readonly options: FullscreenAppOptions) {
     const terminal = options.terminal ?? new ProcessTerminal();
-    this.tui = new TuiAltScreen(terminal);
+    this.traceInteraction = options.traceInteraction ?? new TraceInteractionState();
+    // Trace hover depends on no-button pointer motion, including inside tmux.
+    this.tui = new TuiAltScreen(terminal, undefined, undefined, { mouseMotion: "all" });
     this.editor = new Editor(this.tui, COMPOSER_EDITOR_THEME, COMPOSER_EDITOR_OPTIONS);
     this.transcript = new ResponsiveTranscriptComponent(() => ({
       messages: this.options.controller.getTranscript(),
@@ -166,6 +172,10 @@ export class FullscreenApp {
       theme: defaultTranscriptTheme,
       showReasoning: this.showReasoning,
       verboseTrace: this.verboseTrace,
+      traceInteraction: this.traceInteraction,
+      // While running, this separates settled history from the live surface.
+      // Once settled, the permanent blank activity lane owns the dock gap.
+      trailingSpacer: this.options.controller.isRunning(),
     };
   }
 

@@ -7,9 +7,10 @@
  * old width. This also makes message identity independent from rendered row
  * count (which changes with Markdown, CJK, and terminal width).
  */
-import type { Component } from "@bubblebrain-ai/pi-tui";
+import type { Component, TuiMouseEvent } from "@bubblebrain-ai/pi-tui";
 import type { DisplayMessage } from "../model/display-history.js";
-import { renderTranscript, type TranscriptRenderOptions } from "./transcript.js";
+import type { TraceInteractionState, TraceRowTarget } from "../model/trace-interaction.js";
+import { projectTranscript, type TranscriptRenderOptions } from "./transcript.js";
 
 export interface ResponsiveTranscriptSnapshot {
   messages: readonly DisplayMessage[];
@@ -17,14 +18,30 @@ export interface ResponsiveTranscriptSnapshot {
 }
 
 export class ResponsiveTranscriptComponent implements Component {
+  private traceTargets: Array<TraceRowTarget | undefined> = [];
+  private traceInteraction?: TraceInteractionState;
+
   constructor(private readonly getSnapshot: () => ResponsiveTranscriptSnapshot) {}
 
   render(width: number): string[] {
     const snapshot = this.getSnapshot();
-    return renderTranscript(snapshot.messages, {
+    const projection = projectTranscript(snapshot.messages, {
       ...snapshot.options,
       columns: Math.max(1, width),
     });
+    this.traceTargets = projection.traceTargets;
+    this.traceInteraction = snapshot.options?.traceInteraction;
+    return projection.rows;
+  }
+
+  handleMouse(event: TuiMouseEvent): boolean {
+    if (!this.traceInteraction) return false;
+    if (event.kind === "leave") return this.traceInteraction.clearHover();
+    const target = this.traceTargets[event.y];
+    if (event.kind === "move") return this.traceInteraction.hover(target);
+    if (event.release || (event.button & 3) !== 0 || !target) return false;
+    this.traceInteraction.activate(target, event.clickCount);
+    return true;
   }
 
   invalidate(): void {

@@ -54,6 +54,9 @@ export interface Theme {
   traceDetail: string;
   traceCommand: string;
   tracePending: string;
+  /** Neutral painted surfaces for pointer-hovered / selected tool traces. */
+  traceHoverBg: string;
+  traceSelectedBg: string;
 
   // User message surface
   userMessageBorder: string;
@@ -105,6 +108,8 @@ export const darkTheme: Theme = {
   traceDetail: "gray",
   traceCommand: "#59BCE8",
   tracePending: "yellow",
+  traceHoverBg: "#232323",
+  traceSelectedBg: "#2B2B2B",
 
   userMessageBorder: "#8A7FC6",
   userMessageBg: "#2A2A2A",
@@ -152,6 +157,8 @@ export const lightTheme: Theme = {
   traceDetail: "#8B9094",
   traceCommand: "#257E8A",
   tracePending: "#8B4A00",
+  traceHoverBg: "#E8E8E5",
+  traceSelectedBg: "#DDDFDB",
 
   userMessageBorder: "#356FD2",
   userMessageBg: "#F1F3F0",

@@ -12,6 +12,35 @@ function bashTool(args: Record<string, unknown>, result = "ok"): DisplayToolCall
 }
 
 describe("execute trace groups", () => {
+  it("classifies read-only bash commands by normalized intent before the result arrives", () => {
+    const head = buildTraceGroups([bashTool({ command: "head -30 design-qa.md" })])[0];
+    expect(head.kind).toBe("read");
+    expect(head.title).toBe("Read");
+    expect(head.items).toEqual(["design-qa.md"]);
+
+    const compound = buildTraceGroups([
+      bashTool({ command: "git diff --stat && head -30 design-qa.md" }),
+    ])[0];
+    expect(compound.kind).toBe("execute");
+  });
+
+  it("honors completed bash read metadata and groups it with native Read calls", () => {
+    const groups = buildTraceGroups([
+      {
+        id: "bash-read",
+        name: "bash",
+        args: { command: "custom-reader design-qa.md" },
+        result: "contents",
+        metadata: { kind: "read", path: "design-qa.md" },
+      },
+      { id: "native-read", name: "read", args: { path: "README.md" }, result: "contents" },
+    ]);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].kind).toBe("read");
+    expect(groups[0].items).toEqual(["design-qa.md", "README.md"]);
+  });
+
   it("captures the model-provided description and preserves command line structure", () => {
     const command = "echo start \\\n  && cp \"$SRC\" \"$DST\"   \n  && ls -la";
     const groups = buildTraceGroups([bashTool({ command, description: "备份配置文件" })]);

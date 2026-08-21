@@ -15,6 +15,7 @@ import {
 	setCapabilities,
 } from "../src/terminal-image.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
+import type { TuiMouseEvent } from "../src/tui.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
@@ -54,6 +55,64 @@ class RecordingTerminal extends VirtualTerminal {
 }
 
 describe("TuiAltScreen", () => {
+	it("routes single and double clicks to the component under the pointer", async () => {
+		const terminal = new VirtualTerminal(20, 4);
+		const clicks: TuiMouseEvent[] = [];
+		const clickable = {
+			render: () => ["clickable", "ordinary"],
+			invalidate: () => {},
+			handleMouse: (event: TuiMouseEvent) => {
+				if (event.y !== 0) return false;
+				clicks.push(event);
+				return true;
+			},
+		};
+		const tui = new TuiAltScreen(terminal);
+		tui.setLayoutRoot(clickable);
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<0;1;1m");
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<0;1;1m");
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(clicks.map((event) => event.clickCount), [1, 2]);
+		assert.deepStrictEqual(clicks.map((event) => event.kind), ["press", "press"]);
+		assert.deepStrictEqual(clicks.map((event) => [event.x, event.y]), [[0, 0], [0, 0]]);
+		tui.stop();
+	});
+
+	it("routes no-button pointer motion and sends leave when the pointer exits", async () => {
+		const terminal = new VirtualTerminal(20, 4);
+		const events: TuiMouseEvent[] = [];
+		const hoverable = {
+			render: () => ["hoverable"],
+			invalidate: () => {},
+			handleMouse: (event: TuiMouseEvent) => {
+				events.push(event);
+				return true;
+			},
+		};
+		const tui = new TuiAltScreen(terminal);
+		tui.setLayoutRoot(new VStack([
+			{ component: hoverable, basis: 1, shrink: 0 },
+			{ component: new Text("ordinary", 0, 0), basis: 1, shrink: 0 },
+		]));
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<35;1;1M");
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<35;1;2M");
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(events.map((event) => event.kind), ["move", "leave"]);
+		assert.deepStrictEqual([events[0]?.x, events[0]?.y], [0, 0]);
+		tui.stop();
+	});
+
 	it("renders a terminal-height viewport and preserves manual scroll position", async () => {
 		const terminal = new VirtualTerminal(20, 4);
 		const tui = new TuiAltScreen(terminal);
@@ -222,6 +281,25 @@ describe("TuiAltScreen", () => {
 				if (value === undefined) delete process.env[key];
 				else process.env[key] = value;
 			}
+		}
+	});
+
+	it("allows hover-driven layouts to request all-motion tracking inside multiplexers", () => {
+		const previousTmux = process.env.TMUX;
+		try {
+			process.env.TMUX = "/tmp/tmux/default,1,0";
+			const terminal = new RecordingTerminal();
+			const tui = new TuiAltScreen(terminal, undefined, undefined, { mouseMotion: "all" });
+			tui.start();
+			const writes = terminal.events
+				.filter((event): event is { type: "write"; data: string } => event.type === "write")
+				.map((event) => event.data)
+				.join("");
+			assert.ok(writes.includes("\x1b[?1003h"));
+			tui.stop();
+		} finally {
+			if (previousTmux === undefined) delete process.env.TMUX;
+			else process.env.TMUX = previousTmux;
 		}
 	});
 

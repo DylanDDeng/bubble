@@ -52,6 +52,7 @@ import type { ProviderRegistry } from "../provider-registry.js";
 import type { QuestionController, QuestionEvent, QuestionRequest } from "../question/controller.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
 import type { DisplayMessage } from "./model/display-history.js";
+import { TraceInteractionState } from "./model/trace-interaction.js";
 import type { SkillRegistry } from "../skills/registry.js";
 import { parseSkillInvocation } from "../skills/invocation.js";
 import { getNextPermissionMode } from "../permission/mode.js";
@@ -130,6 +131,7 @@ export class PiTuiApp {
   private readonly settledTranscript: ResponsiveTranscriptComponent;
   private readonly welcome: WelcomeBannerComponent;
   private readonly footer: ResponsiveFooterComponent;
+  private readonly traceInteraction = new TraceInteractionState();
   private readonly overlays: OverlayRequestController;
   private readonly history: string[] = [];
   private showReasoning = false;
@@ -448,6 +450,7 @@ export class PiTuiApp {
     return {
       showReasoning: this.showReasoning,
       verboseTrace: this.verboseTrace,
+      traceInteraction: this.traceInteraction,
       theme: defaultTranscriptTheme,
       markdownRenderer: (text, width) => {
         this.markdown.setText(text);
@@ -515,6 +518,7 @@ export class PiTuiApp {
         void this.handleCommand(command);
       },
       terminal: this.options.terminal,
+      traceInteraction: this.traceInteraction,
     });
     this.fullscreen.start();
   }

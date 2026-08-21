@@ -16,7 +16,8 @@ import stringWidth from "string-width";
 import { truncateVisual } from "../../text-display.js";
 import { DisplayToolCall, DisplayMessage } from "../model/display-history.js";
 import { darkTheme } from "../model/theme.js";
-import { buildTraceGroups, type TraceGroup } from "../model/trace-groups.js";
+import { buildTraceGroups, formatTracePath, type TraceGroup } from "../model/trace-groups.js";
+import type { TraceInteractionState, TraceRowTarget } from "../model/trace-interaction.js";
 
 function toolTraceLabel(tool: DisplayToolCall): string {
   return tool.name;
@@ -30,6 +31,57 @@ export interface TranscriptRenderOptions {
   /** Optional markdown pipeline for assistant content (app injects pi-tui's
    *  Markdown component; the default is plain wrapped text). */
   markdownRenderer?: (text: string, width: number) => string[];
+  /** Shared UI-only selection/fold state for interactive tool groups. */
+  traceInteraction?: TraceInteractionState;
+  /** Keep a final transcript spacer; fullscreen disables it once no live tail follows. */
+  trailingSpacer?: boolean;
+}
+
+export interface TranscriptProjection {
+  rows: string[];
+  /** Row-aligned pointer targets; undefined rows remain ordinary selectable text. */
+  traceTargets: Array<TraceRowTarget | undefined>;
+  /** Semantic padding survives hover painting, so joins never add/remove rows. */
+  leadingSpacer?: boolean;
+  trailingSpacer?: boolean;
+}
+
+function plainProjection(rows: readonly string[]): TranscriptProjection {
+  return {
+    rows: [...rows],
+    traceTargets: rows.map(() => undefined),
+    leadingSpacer: rows.length > 0 && stringWidth(rows[0] ?? "") === 0,
+    trailingSpacer: rows.length > 0 && stringWidth(rows.at(-1) ?? "") === 0,
+  };
+}
+
+export function joinTranscriptProjections(blocks: readonly TranscriptProjection[]): TranscriptProjection {
+  const rows: string[] = [];
+  const traceTargets: Array<TraceRowTarget | undefined> = [];
+  let leadingSpacer = false;
+  let trailingSpacer = false;
+  for (const block of blocks) {
+    let start = 0;
+    let end = block.rows.length;
+    while (start < end && block.rows[start] === "") start += 1;
+    while (end > start && block.rows[end - 1] === "") end -= 1;
+    if (start === end) continue;
+    const blockHasLeadingSpacer = start === 0
+      ? (block.leadingSpacer ?? stringWidth(block.rows[start] ?? "") === 0)
+      : stringWidth(block.rows[start] ?? "") === 0;
+    if (rows.length === 0) leadingSpacer = blockHasLeadingSpacer;
+    const previousHasSpacer = rows.length > 0 && trailingSpacer;
+    if (rows.length > 0 && !previousHasSpacer && !blockHasLeadingSpacer) {
+      rows.push("");
+      traceTargets.push(undefined);
+    }
+    rows.push(...block.rows.slice(start, end));
+    traceTargets.push(...block.traceTargets.slice(start, end));
+    trailingSpacer = end === block.rows.length
+      ? (block.trailingSpacer ?? stringWidth(block.rows[end - 1] ?? "") === 0)
+      : stringWidth(block.rows[end - 1] ?? "") === 0;
+  }
+  return { rows, traceTargets, leadingSpacer, trailingSpacer };
 }
 
 export interface TranscriptTheme {
@@ -39,6 +91,14 @@ export interface TranscriptTheme {
   dim: (text: string) => string;
   error: (text: string) => string;
   success: (text: string) => string;
+  /** Dim chrome used by Grok-style pointer hover around tool entries. */
+  hoverBorder?: (text: string) => string;
+  /** Brighter chrome used by Grok for the selected scrollback entry. */
+  selectionBorder?: (text: string) => string;
+  /** Full-width neutral surface painted inside a hovered tool entry. */
+  hoverBackground?: (text: string) => string;
+  /** Persistent surface painted while the tool entry is selected. */
+  selectionBackground?: (text: string) => string;
 }
 
 export const defaultTranscriptTheme: TranscriptTheme = {
@@ -48,7 +108,18 @@ export const defaultTranscriptTheme: TranscriptTheme = {
   dim: (text) => chalk.dim(text),
   error: (text) => chalk.red(text),
   success: (text) => chalk.green(text),
+  hoverBorder: (text) => chalk.gray.dim(text),
+  selectionBorder: (text) => chalk.gray(text),
+  hoverBackground: (text) => chalk.bgHex(darkTheme.traceHoverBg)(text),
+  selectionBackground: (text) => chalk.bgHex(darkTheme.traceSelectedBg)(text),
 };
+
+const TRACE_BORDER_MIN_COLUMNS = 4;
+const TRACE_CONTENT_LEFT_PAD = 2;
+const TRACE_RESERVED_COLUMNS = 4; // left border + content pad + right border
+// Keep a zero-width row in projection joins without painting a terminal cell.
+// The row exists in layout at rest, so hover can add corners without reflow.
+const TRACE_IDLE_VPAD = "\x1b[0m";
 
 /** Visible-width-preserving truncation (input is unstyled at this point). */
 function truncateVisible(text: string, maxColumns: number): string {
@@ -274,106 +345,340 @@ export function renderToolTraceGroups(
   options: TranscriptRenderOptions,
   renderOptions: TraceGroupRenderOptions = {},
 ): string[] {
+  return projectToolTraceGroups(toolCalls, options, renderOptions).rows;
+}
+
+export function projectToolTraceGroups(
+  toolCalls: readonly DisplayToolCall[],
+  options: TranscriptRenderOptions,
+  renderOptions: TraceGroupRenderOptions = {},
+): TranscriptProjection {
   const groups = buildTraceGroups([...toolCalls]);
   const rows: string[] = [];
+  const traceTargets: Array<TraceRowTarget | undefined> = [];
   // `showActivity` remains part of the call contract, but Grok expresses
   // activity by mutating the tool entry itself (`running`) instead of adding
   // a second Working heading with a different marker.
   void renderOptions.showActivity;
 
   for (const group of groups) {
-    rows.push(...renderTraceGroup(group, options));
+    const projected = projectTraceGroup(group, options);
+    rows.push(...projected.rows);
+    traceTargets.push(...projected.traceTargets);
   }
-  return rows;
+  return {
+    rows,
+    traceTargets,
+    leadingSpacer: groups.length > 0,
+    trailingSpacer: groups.length > 0,
+  };
 }
 
-function renderTraceGroup(group: TraceGroup, options: TranscriptRenderOptions): string[] {
+function projectTraceGroup(group: TraceGroup, options: TranscriptRenderOptions): TranscriptProjection {
   const theme = options.theme ?? defaultTranscriptTheme;
   const columns = Math.max(1, options.columns);
+  const frameColumns = columns > 2 ? columns - 2 : columns;
+  const contentColumns = frameColumns >= TRACE_BORDER_MIN_COLUMNS
+    ? Math.max(1, frameColumns - TRACE_RESERVED_COLUMNS)
+    : frameColumns;
+  const interaction = options.traceInteraction;
+  const groupKey = interaction?.groupKey(group);
+  const readInteraction = group.kind === "read" ? interaction : undefined;
+  const singleRead = readInteraction && groupKey && group.raw.length === 1 ? group.raw[0] : undefined;
+  const singleItemKey = singleRead && interaction ? interaction.itemKey(group, singleRead.id) : undefined;
+  const interactive = interaction !== undefined && groupKey !== undefined;
+  const groupFoldable = isTraceGroupFoldable(group);
+  const singleItemFoldable = singleRead ? isTraceItemFoldable(singleRead) : false;
+  const expanded = interactive
+    ? singleItemKey
+      ? interaction!.isItemExpanded(singleItemKey)
+      : interaction!.isGroupExpanded(groupKey!)
+    : false;
+  const selected = interaction?.isSelected(singleItemKey ?? groupKey ?? "") ?? false;
+  const marker = expanded ? "⌄" : selected ? "›" : "◆";
   const status = group.pending
     ? " running"
     : group.hasError
       ? ` ${group.errorCount || 1} error${(group.errorCount || 1) === 1 ? "" : "s"}`
       : "";
-  const detail = group.description
-    ? ` ${group.description}`
-    : group.command
-      ? ` ${group.command.replace(/\s+/g, " ")}`
-      : group.count !== undefined && group.noun
-        ? ` ${group.count} ${group.noun}`
-        : "";
-  const header = `◆ ${group.title}${detail}${status}`;
+  const detail = singleRead
+    ? ` ${readTraceLabel(singleRead)}`
+    : group.description
+      ? ` ${group.description}`
+      : group.command
+        ? ` ${group.command.replace(/\s+/g, " ")}`
+        : group.count !== undefined && group.noun
+          ? ` ${group.count} ${group.noun}`
+          : "";
+  const header = `${marker} ${group.title}${detail}${status}`;
   const rows = [group.hasError
-    ? theme.error(truncateVisible(header, columns))
-    : `${theme.accent("◆")}${truncateVisible(header.slice(1), Math.max(0, columns - 1))}`];
+    ? theme.error(truncateVisible(header, contentColumns))
+    : `${theme.accent(marker)}${truncateVisible(header.slice(marker.length), Math.max(0, contentColumns - stringWidth(marker)))}`];
+  const groupTarget: TraceRowTarget | undefined = groupKey
+    ? { kind: "group", key: groupKey, groupKey, foldable: groupFoldable }
+    : undefined;
+  const singleTarget: TraceRowTarget | undefined = singleItemKey && groupKey && singleRead
+    ? { kind: "item", key: singleItemKey, groupKey, toolId: singleRead.id, foldable: singleItemFoldable }
+    : undefined;
+  const traceTargets: Array<TraceRowTarget | undefined> = [singleTarget ?? groupTarget];
+  const finish = (): TranscriptProjection => decorateTraceGroup(
+    { rows, traceTargets },
+    singleTarget ?? groupTarget,
+    groupKey,
+    frameColumns,
+    theme,
+    interaction,
+  );
+
+  // Interactive Read groups follow Grok's scrollback model: the summary row
+  // is collapsed by default; double-click reveals member rows. Individual
+  // members then own their file preview fold without changing the whole group.
+  if (readInteraction && groupKey) {
+    if (singleRead && singleTarget) {
+      if (expanded) appendReadPreview(rows, traceTargets, singleRead, singleTarget, contentColumns, theme, "  ");
+      return finish();
+    }
+    if (!expanded) return finish();
+    for (const tool of group.raw) {
+      const itemKey = readInteraction.itemKey(group, tool.id);
+      const itemExpanded = readInteraction.isItemExpanded(itemKey);
+      const itemSelected = readInteraction.isSelected(itemKey);
+      const itemMarker = itemExpanded ? "⌄" : itemSelected ? "›" : "◆";
+      const label = readTraceLabel(tool);
+      const itemText = truncateVisible(`  ${itemMarker} ${label}`, contentColumns);
+      rows.push(tool.isError ? theme.error(itemText) : theme.dim(itemText));
+      const itemTarget: TraceRowTarget = {
+        kind: "item",
+        key: itemKey,
+        groupKey,
+        toolId: tool.id,
+        foldable: isTraceItemFoldable(tool),
+      };
+      traceTargets.push(itemTarget);
+      if (itemExpanded) {
+        appendReadPreview(
+          rows,
+          traceTargets,
+          tool,
+          itemTarget,
+          contentColumns,
+          theme,
+          "    ",
+        );
+      }
+    }
+    return finish();
+  }
+
+  // Grok tool blocks are collapsed by default. A single click selects the
+  // entry; a double-click reveals the detail surface only when the block has
+  // something meaningful to reveal. Failed List/Search blocks are deliberately
+  // non-foldable and keep their error detail visible in-place.
+  if (interactive && groupFoldable && !expanded) return finish();
 
   // While Execute is running, retain the command's own lines just like Ink.
   // The header is only a summary and may be truncated on a narrow terminal.
   const commandLines = group.commandLines ?? [];
   const commandNeedsBlock = group.kind === "execute"
-    && (group.pending || group.hasError)
     && (
       !!group.description
       || commandLines.length > 1
-      || stringWidth(`◆ ${group.title} ${group.command ?? ""}`) > columns
+      || stringWidth(`◆ ${group.title} ${group.command ?? ""}`) > contentColumns
     );
   if (commandNeedsBlock) {
-    const wrappedCommand = commandLines.flatMap((line) => wrapPlain(line || " ", Math.max(1, columns - 2)));
+    const wrappedCommand = commandLines.flatMap((line) => wrapPlain(line || " ", Math.max(1, contentColumns - 2)));
     for (const line of wrappedCommand.slice(0, 4)) {
-      rows.push(theme.dim(truncateVisible(`  ${line}`, columns)));
+      rows.push(theme.dim(truncateVisible(`  ${line}`, contentColumns)));
+      traceTargets.push(groupTarget);
     }
     if (wrappedCommand.length > 4) {
-      rows.push(theme.dim(truncateVisible(`  … ${wrappedCommand.length - 4} more lines`, columns)));
+      rows.push(theme.dim(truncateVisible(`  … ${wrappedCommand.length - 4} more lines`, contentColumns)));
+      traceTargets.push(groupTarget);
     }
   }
 
-  const collapseSuccessfulExecute = group.kind === "execute"
+  const collapseSuccessfulExecute = !interactive
+    && group.kind === "execute"
     && !group.pending
     && !group.hasError
     && !options.verboseTrace;
-  const details = group.previewLines.length > 0 ? group.previewLines : group.items;
+  const details = group.kind === "search"
+    ? [...group.items, ...group.previewLines]
+    : group.previewLines.length > 0
+      ? group.previewLines
+      : group.items;
   if (collapseSuccessfulExecute) {
     const outputLines = group.previewLines.length + group.omitted;
     rows.push(theme.dim(truncateVisible(
       `  ⎿  ${outputLines > 0
         ? `${outputLines} line${outputLines === 1 ? "" : "s"} output · Ctrl+O to view`
         : "no output"}`,
-      columns,
+      contentColumns,
     )));
+    traceTargets.push(groupTarget);
   } else {
     for (let index = 0; index < details.length; index += 1) {
       const prefix = index === 0 ? "  ↳ " : "    ";
-      const line = truncateVisible(`${prefix}${details[index] ?? ""}`, columns);
+      const line = truncateVisible(`${prefix}${details[index] ?? ""}`, contentColumns);
       rows.push(group.hasError ? theme.error(line) : theme.dim(line));
+      traceTargets.push(groupTarget);
     }
   }
   for (let index = 0; index < group.errorLines.length; index += 1) {
     const prefix = index === 0 ? "  ↳ " : "    ";
-    rows.push(theme.error(truncateVisible(`${prefix}${group.errorLines[index] ?? ""}`, columns)));
+    rows.push(theme.error(truncateVisible(`${prefix}${group.errorLines[index] ?? ""}`, contentColumns)));
+    traceTargets.push(groupTarget);
   }
   if (group.omitted > 0) {
-    rows.push(theme.dim(truncateVisible(`  … ${group.omitted} more`, columns)));
+    rows.push(theme.dim(truncateVisible(`  … ${group.omitted} more`, contentColumns)));
+    traceTargets.push(groupTarget);
   }
-  return rows;
+  return finish();
+}
+
+function decorateTraceGroup(
+  projection: TranscriptProjection,
+  target: TraceRowTarget | undefined,
+  groupKey: string | undefined,
+  columns: number,
+  theme: TranscriptTheme,
+  interaction: TraceInteractionState | undefined,
+): TranscriptProjection {
+  const selected = groupKey !== undefined && interaction?.isGroupSelected(groupKey) === true;
+  const hovered = groupKey !== undefined
+    && interaction?.isGroupHovered(groupKey) === true
+    && !selected;
+  const active = selected || hovered;
+  const border = selected
+    ? (theme.selectionBorder ?? theme.hoverBorder ?? theme.dim)
+    : (theme.hoverBorder ?? theme.dim);
+  const background = selected
+    ? (theme.selectionBackground ?? theme.hoverBackground ?? ((text: string) => text))
+    : (theme.hoverBackground ?? ((text: string) => text));
+
+  if (columns < TRACE_BORDER_MIN_COLUMNS) {
+    return {
+      rows: [
+        TRACE_IDLE_VPAD,
+        ...projection.rows.map((row) => {
+          if (!active) return row;
+          const clipped = truncateVisible(row, columns);
+          return background(`${clipped}${" ".repeat(Math.max(0, columns - stringWidth(clipped)))}`);
+        }),
+        TRACE_IDLE_VPAD,
+      ],
+      traceTargets: [target, ...projection.traceTargets, target],
+      leadingSpacer: true,
+      trailingSpacer: true,
+    };
+  }
+
+  const top = active
+    ? border(`┌${" ".repeat(columns - 2)}┐`)
+    : TRACE_IDLE_VPAD;
+  const bottom = active
+    ? border(`└${" ".repeat(columns - 2)}┘`)
+    : TRACE_IDLE_VPAD;
+  const rows = projection.rows.map((row) => {
+    if (!active) return `${" ".repeat(TRACE_CONTENT_LEFT_PAD + 1)}${row}`;
+    const interior = `${" ".repeat(TRACE_CONTENT_LEFT_PAD)}${row}`;
+    const padding = " ".repeat(Math.max(0, columns - 2 - stringWidth(interior)));
+    return `${border("│")}${background(`${interior}${padding}`)}${border("│")}`;
+  });
+  return {
+    rows: [top, ...rows, bottom],
+    traceTargets: [target, ...projection.traceTargets, target],
+    leadingSpacer: true,
+    trailingSpacer: true,
+  };
+}
+
+function isTraceItemFoldable(tool: DisplayToolCall): boolean {
+  return typeof tool.result === "string" && tool.result.trim().length > 0;
+}
+
+function isTraceGroupFoldable(group: TraceGroup): boolean {
+  switch (group.kind) {
+    case "read":
+      return group.raw.length > 1 || group.raw.some(isTraceItemFoldable);
+    case "list":
+      return !group.hasError && (group.items.length > 0 || group.omitted > 0);
+    case "search":
+      // Grok keeps successful Search entries foldable even for zero results so
+      // the expanded view can still reveal the query metadata / no-result state.
+      return !group.hasError;
+    case "execute":
+      return !!group.description
+        || (group.commandLines?.length ?? 0) > 1
+        || group.previewLines.length > 0
+        || group.errorLines.length > 0
+        || group.omitted > 0;
+    default:
+      return false;
+  }
+}
+
+function readTraceLabel(tool: DisplayToolCall): string {
+  const value = tool.args.path ?? tool.args.file ?? tool.metadata?.path ?? argPreview(tool);
+  return formatTracePath(value || tool.name);
+}
+
+function appendReadPreview(
+  rows: string[],
+  traceTargets: Array<TraceRowTarget | undefined>,
+  tool: DisplayToolCall,
+  target: TraceRowTarget,
+  columns: number,
+  theme: TranscriptTheme,
+  indent: string,
+): void {
+  if (tool.result === undefined) return;
+  const normalized = tool.result.replace(/\r\n/g, "\n");
+  const source = tool.name === "bash" && normalized.startsWith("stdout:\n")
+    ? normalized.slice("stdout:\n".length)
+    : normalized;
+  const preview = source
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .flatMap((line) => wrapPlain(line, Math.max(1, columns - indent.length)));
+  for (const line of preview.slice(0, 8)) {
+    rows.push((tool.isError ? theme.error : theme.dim)(truncateVisible(`${indent}${line}`, columns)));
+    traceTargets.push(target);
+  }
+  if (preview.length > 8) {
+    rows.push(theme.dim(truncateVisible(`${indent}… ${preview.length - 8} more lines`, columns)));
+    traceTargets.push(target);
+  }
 }
 
 export function renderMessage(message: DisplayMessage, options: TranscriptRenderOptions): string[] {
+  return projectMessage(message, options).rows;
+}
+
+export function projectMessage(message: DisplayMessage, options: TranscriptRenderOptions): TranscriptProjection {
   const theme = options.theme ?? defaultTranscriptTheme;
   if (message.role === "user") {
-    return renderUserCard(message.content, options);
+    return plainProjection(renderUserCard(message.content, options));
   }
   if (message.role === "error") {
-    return [...projectAssistantRows(message.content, options).map(theme.error), ""];
+    return plainProjection([...projectAssistantRows(message.content, options).map(theme.error), ""]);
   }
   if (message.syntheticKind) {
-    return [...projectAssistantRows(message.content, { ...options, markdownRenderer: undefined }).map(theme.dim), ""];
+    return plainProjection([
+      ...projectAssistantRows(message.content, { ...options, markdownRenderer: undefined }).map(theme.dim),
+      "",
+    ]);
   }
-  const blocks: string[][] = [];
-  if (message.reasoning) blocks.push(projectReasoningRows(message.reasoning, options));
-  if (message.toolCalls?.length) blocks.push(renderToolTraceGroups(message.toolCalls, options));
-  if (message.content?.trim()) blocks.push(projectAssistantRows(message.content, options));
-  const rows = joinTranscriptBlocks(blocks);
-  return rows.length > 0 ? [...rows, ""] : [""];
+  const blocks: TranscriptProjection[] = [];
+  if (message.reasoning) blocks.push(plainProjection(projectReasoningRows(message.reasoning, options)));
+  if (message.toolCalls?.length) blocks.push(projectToolTraceGroups(message.toolCalls, options));
+  if (message.content?.trim()) blocks.push(plainProjection(projectAssistantRows(message.content, options)));
+  const projection = joinTranscriptProjections(blocks);
+  if (projection.rows.length === 0) return plainProjection([""]);
+  projection.rows.push("");
+  projection.traceTargets.push(undefined);
+  projection.trailingSpacer = true;
+  return projection;
 }
 
 /**
@@ -395,18 +700,18 @@ export function renderMessage(message: DisplayMessage, options: TranscriptRender
  *
  * Expanded mode still retains every reasoning segment for diagnostics.
  */
-function renderAssistantInRequest(
+function projectAssistantInRequest(
   message: DisplayMessage,
   options: TranscriptRenderOptions,
-): string[] {
-  const blocks: string[][] = [];
+): TranscriptProjection {
+  const blocks: TranscriptProjection[] = [];
 
   if (message.reasoning) {
-    blocks.push(projectReasoningRows(message.reasoning, options));
+    blocks.push(plainProjection(projectReasoningRows(message.reasoning, options)));
   }
 
   const appendTools = (tools: readonly DisplayToolCall[]) => {
-    blocks.push(renderToolTraceGroups(tools, options));
+    blocks.push(projectToolTraceGroups(tools, options));
   };
 
   // Preserve the model's real commentary/tool timeline. `parts` is the
@@ -418,30 +723,43 @@ function renderAssistantInRequest(
       if (part.type === "tools") {
         appendTools(part.toolCalls);
       } else if (part.content.trim()) {
-        blocks.push(projectAssistantRows(part.content, options));
+        blocks.push(plainProjection(projectAssistantRows(part.content, options)));
       }
     }
   } else {
     if (message.toolCalls?.length) appendTools(message.toolCalls);
-    if (message.content?.trim()) blocks.push(projectAssistantRows(message.content, options));
+    if (message.content?.trim()) blocks.push(plainProjection(projectAssistantRows(message.content, options)));
   }
-  return joinTranscriptBlocks(blocks);
+  return joinTranscriptProjections(blocks);
 }
 
 export function renderTranscript(messages: readonly DisplayMessage[], options: TranscriptRenderOptions): string[] {
-  const messageBlocks: string[][] = [];
+  return projectTranscript(messages, options).rows;
+}
+
+export function projectTranscript(
+  messages: readonly DisplayMessage[],
+  options: TranscriptRenderOptions,
+): TranscriptProjection {
+  const messageBlocks: TranscriptProjection[] = [];
   for (const message of messages) {
     if (message.role === "user") {
-      messageBlocks.push(renderUserCard(message.content, options));
+      messageBlocks.push(plainProjection(renderUserCard(message.content, options)));
     } else if (message.role === "assistant" && !message.syntheticKind) {
-      messageBlocks.push(renderAssistantInRequest(message, options));
+      messageBlocks.push(projectAssistantInRequest(message, options));
     } else {
-      messageBlocks.push(renderMessage(message, options));
+      messageBlocks.push(projectMessage(message, options));
     }
   }
-  const rows = joinTranscriptBlocks(messageBlocks);
+  const projection = joinTranscriptProjections(messageBlocks);
   // The transcript owns the sole separator before a live assistant surface.
   // When that surface settles, the same row becomes the transcript's trailing
   // separator, so user -> Thinking geometry cannot change at commit time.
-  return rows.length > 0 ? [...rows, ""] : [];
+  if (projection.rows.length === 0) return projection;
+  if (options.trailingSpacer !== false) {
+    projection.rows.push("");
+    projection.traceTargets.push(undefined);
+    projection.trailingSpacer = true;
+  }
+  return projection;
 }

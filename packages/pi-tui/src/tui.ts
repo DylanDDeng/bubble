@@ -34,6 +34,13 @@ export interface Component {
 	handleInput?(data: string): void;
 
 	/**
+	 * Optional pointer handler used by alternate-screen layouts. Coordinates
+	 * are local to this component's rendered box. Return true to claim the
+	 * event and suppress terminal text selection for that press.
+	 */
+	handleMouse?(event: TuiMouseEvent): boolean;
+
+	/**
 	 * If true, component receives key release events (Kitty protocol).
 	 * Default is false - release events are filtered out.
 	 */
@@ -44,6 +51,16 @@ export interface Component {
 	 * Called when theme changes or when component needs to re-render from scratch.
 	 */
 	invalidate(): void;
+}
+
+export interface TuiMouseEvent {
+	kind: "press" | "move" | "leave";
+	button: number;
+	x: number;
+	y: number;
+	release: boolean;
+	/** Consecutive primary presses on the same component row (1 or 2). */
+	clickCount: 1 | 2;
 }
 
 export type TuiInputListenerResult = { consume?: boolean; data?: string } | undefined;

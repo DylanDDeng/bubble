@@ -408,3 +408,16 @@ export function getScrollViewsAt(frame: LayoutFrame, x: number, y: number): Scro
 	result.sort((a, b) => b.depth - a.depth);
 	return result.map((entry) => entry.scrollView);
 }
+
+/** Layout boxes under a pointer, deepest component first. */
+export function getLayoutBoxesAt(frame: LayoutFrame, x: number, y: number): LayoutBox[] {
+	const result: Array<{ box: LayoutBox; depth: number }> = [];
+	const visit = (box: LayoutBox, depth: number): void => {
+		if (!containsPoint(box.clip, x, y)) return;
+		result.push({ box, depth });
+		for (const child of box.children) visit(child, depth + 1);
+	};
+	visit(frame.root, 0);
+	result.sort((a, b) => b.depth - a.depth);
+	return result.map((entry) => entry.box);
+}

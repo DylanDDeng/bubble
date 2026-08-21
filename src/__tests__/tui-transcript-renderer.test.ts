@@ -6,6 +6,7 @@
 import { describe, expect, it } from "vitest";
 import {
   renderMessage,
+  projectTranscript,
   renderToolTrace,
   renderTranscript,
   renderUserCard,
@@ -14,6 +15,7 @@ import {
 import { ResponsiveTranscriptComponent } from "../tui/components/responsive-transcript.js";
 import { formatWelcomeModel, renderWelcomeBanner } from "../tui/components/welcome.js";
 import type { DisplayMessage } from "../tui/model/display-history.js";
+import { TraceInteractionState } from "../tui/model/trace-interaction.js";
 import chalk from "chalk";
 import stringWidth from "string-width";
 
@@ -168,6 +170,192 @@ describe("transcript renderer", () => {
     expect(text).toContain("bad.ts");
     expect(text).toContain("permission denied");
     expect(text).toContain("1 error");
+  });
+
+  it("uses Grok-style independent folds for a Read group and its members", () => {
+    const interaction = new TraceInteractionState();
+    const messages = [msg({
+      toolCalls: [
+        { id: "read-a", name: "read", args: { path: "a.ts" }, result: "line a", status: "completed" },
+        { id: "read-b", name: "read", args: { path: "b.ts" }, result: "line b", status: "completed" },
+      ],
+    })];
+    const render = () => projectTranscript(messages, { columns: 80, traceInteraction: interaction });
+
+    let projection = render();
+    expect(projection.rows.map(strip).join("\n")).toContain("◆ Read 2 files");
+    expect(projection.rows.map(strip).join("\n")).not.toContain("a.ts");
+    const group = projection.traceTargets.find((target) => target?.kind === "group");
+    expect(group?.kind).toBe("group");
+
+    interaction.activate(group!, 1);
+    expect(render().rows.map(strip).join("\n")).toContain("› Read 2 files");
+    interaction.activate(group!, 2);
+    projection = render();
+    const expanded = projection.rows.map(strip).join("\n");
+    expect(expanded).toContain("⌄ Read 2 files");
+    expect(expanded).toContain("a.ts");
+    expect(expanded).toContain("b.ts");
+    expect(expanded).not.toContain("line a");
+
+    const item = projection.traceTargets.find((target) => target?.kind === "item" && target.toolId === "read-a");
+    expect(item?.kind).toBe("item");
+    interaction.activate(item!, 1);
+    interaction.activate(item!, 2);
+    expect(render().rows.map(strip).join("\n")).toContain("line a");
+  });
+
+  it("renders Grok's dim hover border and brighter selected border without reflow", () => {
+    const interaction = new TraceInteractionState();
+    const messages = [msg({
+      toolCalls: [
+        { id: "read-a", name: "read", args: { path: "a.ts" }, result: "line a", status: "completed" },
+        { id: "read-b", name: "read", args: { path: "b.ts" }, result: "line b", status: "completed" },
+      ],
+    })];
+    const render = () => projectTranscript(messages, { columns: 40, traceInteraction: interaction });
+    const idle = render();
+    const target = idle.traceTargets.find((candidate) => candidate?.kind === "group");
+    expect(target?.kind).toBe("group");
+    const idleRows = idle.rows.map(strip);
+    const idleHeader = idleRows.findIndex((row) => row.includes("◆ Read 2 files"));
+    expect(idleRows[idleHeader - 1]).toBe("");
+    expect(idleRows[idleHeader + 1]).toBe("");
+
+    interaction.hover(target);
+    const hoveredRows = render().rows.map(strip);
+    const hoveredHeader = hoveredRows.findIndex((row) => row.includes("◆ Read 2 files"));
+    expect(hoveredRows).toHaveLength(idleRows.length);
+    expect(hoveredRows[hoveredHeader - 1]).toMatch(/^┌ +┐$/u);
+    expect(hoveredRows[hoveredHeader]).toMatch(/^│  ◆ Read 2 files +│$/u);
+    expect(hoveredRows[hoveredHeader + 1]).toMatch(/^└ +┘$/u);
+    expect(stringWidth(hoveredRows[hoveredHeader - 1]!)).toBe(38);
+    expect(stringWidth(hoveredRows[hoveredHeader]!)).toBe(38);
+
+    interaction.activate(target!, 1);
+    const selectedRows = render().rows.map(strip);
+    expect(selectedRows.join("\n")).toContain("› Read 2 files");
+    expect(selectedRows[selectedRows.findIndex((row) => row.includes("› Read 2 files")) - 1]).toMatch(/^┌ +┐$/u);
+    expect(selectedRows.some((row) => row.includes("│  › Read 2 files"))).toBe(true);
+  });
+
+  it("paints the full trace interior on hover and keeps a stronger surface when selected", () => {
+    const previousLevel = chalk.level;
+    chalk.level = 3;
+    try {
+      const interaction = new TraceInteractionState();
+      const messages = [msg({
+        toolCalls: [{
+          id: "execute-hover",
+          name: "bash",
+          args: { command: "npm test", description: "run tests" },
+          result: "passed",
+          status: "completed",
+        }],
+      })];
+      const render = () => projectTranscript(messages, { columns: 40, traceInteraction: interaction });
+      const idle = render();
+      const target = idle.traceTargets.find((candidate) => candidate?.kind === "group");
+      expect(target?.kind).toBe("group");
+
+      interaction.hover(target);
+      const hovered = render().rows.find((row) => strip(row).includes("◆ Execute run tests"));
+      expect(hovered).toContain("\x1b[48;2;35;35;35m");
+      expect(stringWidth(strip(hovered!))).toBe(38);
+
+      interaction.activate(target!, 1);
+      const selected = render().rows.find((row) => strip(row).includes("› Execute run tests"));
+      expect(selected).toContain("\x1b[48;2;43;43;43m");
+      expect(stringWidth(strip(selected!))).toBe(38);
+    } finally {
+      chalk.level = previousLevel;
+    }
+  });
+
+  it("selects and double-click expands Find Files like Grok", () => {
+    const interaction = new TraceInteractionState();
+    const messages = [msg({
+      toolCalls: [{
+        id: "glob",
+        name: "glob",
+        args: { pattern: "src/**/*.ts" },
+        result: "src/a.ts\nsrc/b.ts",
+        status: "completed",
+        metadata: { matches: 2 },
+      }],
+    })];
+    const render = () => projectTranscript(messages, { columns: 60, traceInteraction: interaction });
+
+    let projection = render();
+    const target = projection.traceTargets.find((candidate) => candidate?.kind === "group");
+    expect(target).toMatchObject({ kind: "group", foldable: true });
+    expect(projection.rows.map(strip).join("\n")).toContain("◆ Find Files 2 files");
+    expect(projection.rows.map(strip).join("\n")).not.toContain("src/a.ts");
+
+    interaction.activate(target!, 1);
+    expect(render().rows.map(strip).join("\n")).toContain("│  › Find Files 2 files");
+
+    interaction.activate(target!, 2);
+    projection = render();
+    const expanded = projection.rows.map(strip).join("\n");
+    expect(expanded).toContain("⌄ Find Files 2 files");
+    expect(expanded).toContain("src/a.ts");
+    expect(expanded).toContain("src/b.ts");
+
+    interaction.activate(target!, 2);
+    expect(render().rows.map(strip).join("\n")).not.toContain("src/a.ts");
+  });
+
+  it("selects and double-click expands Execute output like Grok", () => {
+    const interaction = new TraceInteractionState();
+    const messages = [msg({
+      toolCalls: [{
+        id: "execute",
+        name: "bash",
+        args: { command: "printf 'one\\ntwo\\n'", description: "print lines" },
+        result: "one\ntwo",
+        status: "completed",
+      }],
+    })];
+    const render = () => projectTranscript(messages, { columns: 60, traceInteraction: interaction });
+
+    let projection = render();
+    const target = projection.traceTargets.find((candidate) => candidate?.kind === "group");
+    expect(target).toMatchObject({ kind: "group", foldable: true });
+    const collapsed = projection.rows.map(strip).join("\n");
+    expect(collapsed).toContain("◆ Execute print lines");
+    expect(collapsed).not.toContain("printf");
+    expect(collapsed).not.toContain("one");
+
+    interaction.activate(target!, 1);
+    expect(render().rows.map(strip).join("\n")).toContain("│  › Execute print lines");
+
+    interaction.activate(target!, 2);
+    projection = render();
+    const expanded = projection.rows.map(strip).join("\n");
+    expect(expanded).toContain("⌄ Execute print lines");
+    expect(expanded).toContain("printf 'one\\ntwo\\n'");
+    expect(expanded).toContain("one");
+    expect(expanded).toContain("two");
+  });
+
+  it("renders a semantic bash read as one interactive Read entry", () => {
+    const interaction = new TraceInteractionState();
+    const projection = projectTranscript([msg({
+      toolCalls: [{
+        id: "bash-read",
+        name: "bash",
+        args: { command: "head -30 design-qa.md" },
+        result: "stdout:\nreport",
+        status: "completed",
+        metadata: { kind: "read", path: "design-qa.md" },
+      }],
+    })], { columns: 80, traceInteraction: interaction });
+    const text = projection.rows.map(strip).join("\n");
+
+    expect(text).toContain("◆ Read design-qa.md");
+    expect(text).not.toContain("Execute");
+    expect(projection.traceTargets.some((target) => target?.kind === "item")).toBe(true);
   });
 
   it("shows the real Execute command below a description while running or failed", () => {
