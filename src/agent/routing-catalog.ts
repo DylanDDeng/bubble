@@ -25,6 +25,7 @@ import {
   type TierRoutingContext,
 } from "./categories.js";
 import type { ThinkingLevel } from "../types.js";
+import { filterProviderModels } from "../provider-model-policy.js";
 
 export interface AgentRoutingConfig {
   /** Automatic builtin-tier downgrade routing (§3.2). */
@@ -113,7 +114,10 @@ export function buildRoutingSnapshot(
   const builtins = listBuiltinModels(effectiveProviderId);
   const builtinIndex = new Map(builtins.map((model, index) => [model.id, index]));
   const dynamic = listDynamicModelMetadata(effectiveProviderId);
-  const custom = registry.getModelConfig().getCustomModels(parent.providerId);
+  const custom = filterProviderModels(
+    parent.providerId,
+    registry.getModelConfig().getCustomModels(parent.providerId),
+  );
   const discovery = registry.getCachedDiscoverySnapshot(parent.providerId);
 
   const metadataFor = (id: string): Omit<RoutingModelEntry, "source"> => {
@@ -314,7 +318,10 @@ export function createRoutableModelIndex(registry: ProviderRegistry): RoutableMo
         seen.add(id);
         entries.push({ providerId: provider.id, id, name });
       };
-      for (const model of registry.getModelConfig().getCustomModels(provider.id)) push(model.id, model.name);
+      for (const model of filterProviderModels(
+        provider.id,
+        registry.getModelConfig().getCustomModels(provider.id),
+      )) push(model.id, model.name);
       for (const model of listDynamicModelMetadata(effectiveProviderId)) push(model.id, model.name);
       for (const model of listBuiltinModels(effectiveProviderId)) push(model.id, model.name);
     }

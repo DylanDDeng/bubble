@@ -214,6 +214,109 @@ describe("createProviderInstance", () => {
     expect(body.messages[0].reasoning_content).toBeUndefined();
   });
 
+  it("sends the selected OpenRouter reasoning effort", async () => {
+    let body: any;
+    createMock.mockImplementation(async (input) => {
+      body = input;
+      return fromArray([{ choices: [{ delta: {}, finish_reason: "stop" }] }]);
+    });
+
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({
+      providerId: "openrouter",
+      apiKey: "sk-or-test",
+      baseURL: "https://openrouter.ai/api/v1",
+    });
+
+    await collect(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "stealth/ox-alpha",
+      thinkingLevel: "high",
+    }));
+
+    expect(body.model).toBe("stealth/ox-alpha");
+    expect(body.reasoning).toEqual({ effort: "high" });
+    expect(body.reasoning_effort).toBeUndefined();
+  });
+
+  it("surfaces OpenRouter terminal SSE errors as retryable stream failures", async () => {
+    createMock.mockImplementation(async () => fromArray([{
+      provider: "Ox Alpha upstream",
+      error: {
+        code: 504,
+        message: "Provider timed out during generation",
+        metadata: { error_type: "provider_timeout" },
+      },
+      choices: [{ delta: { content: "" }, finish_reason: "error" }],
+    }]));
+
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({
+      providerId: "openrouter",
+      apiKey: "sk-or-test",
+      baseURL: "https://openrouter.ai/api/v1",
+    });
+
+    await expect(collect(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "stealth/ox-alpha",
+      thinkingLevel: "high",
+    }))).rejects.toMatchObject({
+      name: "ProviderStreamInterruptedError",
+      maxRetries: 1,
+      message: expect.stringContaining("Provider timed out during generation"),
+    });
+  });
+
+  it("defers OpenRouter streamed rate limits to the subagent scheduler", async () => {
+    createMock.mockImplementation(async () => fromArray([{
+      error: {
+        code: 429,
+        message: "Rate limit exceeded",
+        metadata: {
+          error_type: "rate_limit_exceeded",
+          availability: { retry_after: 3 },
+        },
+      },
+      choices: [{ delta: { content: "" }, finish_reason: "error" }],
+    }]));
+
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({
+      providerId: "openrouter",
+      apiKey: "sk-or-test",
+      baseURL: "https://openrouter.ai/api/v1",
+    });
+
+    await expect(collect(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "stealth/ox-alpha",
+      rateLimitPolicy: "defer",
+    }))).rejects.toMatchObject({
+      name: "RateLimitError",
+      status: 429,
+      retryAfterMs: 3_000,
+      message: expect.stringContaining("Rate limit exceeded"),
+    });
+  });
+
+  it("rejects non-Ox OpenRouter models before any provider request", async () => {
+    createMock.mockImplementation(async () =>
+      fromArray([{ choices: [{ delta: {}, finish_reason: "stop" }] }]));
+
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({
+      providerId: "openrouter",
+      apiKey: "sk-or-test",
+      baseURL: "https://openrouter.ai/api/v1",
+    });
+
+    await expect(collect(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "openai/gpt-5.6",
+    }))).rejects.toThrow(/openrouter.*fixed.*stealth\/ox-alpha/i);
+    await expect(provider.complete([{ role: "user", content: "hi" }], {
+      model: "anthropic/claude-sonnet-4.6",
+    })).rejects.toThrow(/openrouter.*fixed.*stealth\/ox-alpha/i);
+    expect(createMock).not.toHaveBeenCalled();
+  });
+
   it("uses Volcengine Ark Responses API for Doubao", async () => {
     const requestInits: RequestInit[] = [];
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {

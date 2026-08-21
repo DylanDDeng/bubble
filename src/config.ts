@@ -11,8 +11,11 @@ import { sanitizeAgentCategories, type AgentCategoriesConfig } from "./agent/cat
 import { sanitizeAgentRouting, type AgentRoutingConfig } from "./agent/routing-catalog.js";
 import type { ProviderProfile } from "./provider-registry.js";
 import type { ThinkingLevel } from "./types.js";
+import { isProviderModelAllowed } from "./provider-model-policy.js";
 
-const HIDDEN_PROVIDER_IDS = new Set(["openrouter", "openai-codex"]);
+// openai-codex is an internal transport profile surfaced through the visible
+// OpenAI OAuth provider. OpenRouter is a regular user-configurable provider.
+const HIDDEN_PROVIDER_IDS = new Set(["openai-codex"]);
 
 function getConfigPath(): string {
   return join(getBubbleHome(), "config.json");
@@ -27,9 +30,16 @@ function modelProviderId(model: string): string | undefined {
   return model.split(":", 1)[0];
 }
 
+function isAllowedConfiguredModel(model: string): boolean {
+  if (!model.includes(":")) return true;
+  const [providerId, ...modelParts] = model.split(":");
+  return isProviderModelAllowed(providerId, modelParts.join(":"));
+}
+
 function sanitizeRecentModels(models?: string[]): string[] | undefined {
   if (!models) return undefined;
-  return models.filter((model) => !isHiddenProviderId(modelProviderId(model)));
+  return models.filter((model) =>
+    !isHiddenProviderId(modelProviderId(model)) && isAllowedConfiguredModel(model));
 }
 
 function sanitizeProviders(providers?: ProviderProfile[]): ProviderProfile[] | undefined {
@@ -39,7 +49,9 @@ function sanitizeProviders(providers?: ProviderProfile[]): ProviderProfile[] | u
 
 function sanitizeDefaultModel(model?: string): string | undefined {
   if (!model) return undefined;
-  return isHiddenProviderId(modelProviderId(model)) ? undefined : model;
+  return isHiddenProviderId(modelProviderId(model)) || !isAllowedConfiguredModel(model)
+    ? undefined
+    : model;
 }
 
 function sanitizeDefaultProvider(providerId?: string): string | undefined {
@@ -201,7 +213,7 @@ export class UserConfig {
   }
 
   pushRecentModel(model: string) {
-    if (isHiddenProviderId(modelProviderId(model))) {
+    if (isHiddenProviderId(modelProviderId(model)) || !isAllowedConfiguredModel(model)) {
       return;
     }
     const recent = this.data.recentModels ?? [];

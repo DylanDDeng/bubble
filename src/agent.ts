@@ -12,7 +12,7 @@ import { isContextOverflowError } from "./context/overflow.js";
 import {
   computeRetryDelayMs,
   isProviderStreamInterruption,
-  MAX_STREAM_INTERRUPTION_RETRIES,
+  providerStreamRetryLimit,
   sleepBeforeRetry,
 } from "./network/retry.js";
 import { projectMessages } from "./context/projector.js";
@@ -1203,10 +1203,14 @@ export class Agent {
         if (assistantAppended) {
           throw error;
         }
+        const streamInterruption = isProviderStreamInterruption(error) ? error : undefined;
+        const streamRetryLimit = streamInterruption
+          ? providerStreamRetryLimit(streamInterruption)
+          : 0;
         if (
-          isProviderStreamInterruption(error)
+          streamInterruption
           && !isAbortLikeError(error, abortSignal)
-          && consecutiveStreamInterruptionRetries < MAX_STREAM_INTERRUPTION_RETRIES
+          && consecutiveStreamInterruptionRetries < streamRetryLimit
         ) {
           // The provider stream died after partial content. The half-built
           // assistantMsg was never appended to this.messages, and the next
@@ -1216,11 +1220,13 @@ export class Agent {
           yield emit({
             type: "provider_retry",
             attempt: consecutiveStreamInterruptionRetries,
-            maxAttempts: MAX_STREAM_INTERRUPTION_RETRIES,
-            reason: "Provider stream interrupted mid-response.",
+            maxAttempts: streamRetryLimit,
+            reason: streamInterruption.message,
           });
           await sleepBeforeRetry(
-            computeRetryDelayMs(consecutiveStreamInterruptionRetries),
+            computeRetryDelayMs(consecutiveStreamInterruptionRetries, {
+              retryAfterMs: streamInterruption.retryAfterMs,
+            }),
             abortSignal,
           ).catch(() => undefined);
           continue;

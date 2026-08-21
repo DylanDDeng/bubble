@@ -1,4 +1,5 @@
 import type { ReasoningEffort } from "./types.js";
+import { OPENROUTER_MODEL_ID } from "./provider-model-policy.js";
 
 export type ProviderProtocol = "openai-chat" | "anthropic-messages" | "ark-responses" | "ai-sdk";
 
@@ -79,6 +80,9 @@ const GPT51_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high"];
 const GPT51_CODEX_MAX_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high", "xhigh"];
 const GPT51_CODEX_MINI_LEVELS: ReasoningEffort[] = ["off", "medium", "high"];
 const OPENAI_CHAT_LEVELS: ReasoningEffort[] = ["off"];
+// Ox Alpha declares mandatory reasoning with exactly low/high/max through
+// OpenRouter's live model metadata. The endpoint rejects disabled reasoning.
+const OPENROUTER_OX_REASONING_LEVELS: ReasoningEffort[] = ["low", "high", "max"];
 // Internal representation for APIs that expose thinking as enabled/disabled.
 // UI code must render supported toggle models as on/off, not as "medium" effort.
 const TOGGLE_THINKING_LEVELS: ReasoningEffort[] = ["off", "medium"];
@@ -126,6 +130,11 @@ const GEMINI_25_PRO_LEVELS: ReasoningEffort[] = ["low", "medium", "high"];
 const GEMINI_25_FLASH_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high"];
 
 export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
+  // OpenRouter exposes a very large catalog, but Bubble intentionally offers
+  // only Ox Alpha. Discovery refreshes this entry's public metadata without
+  // expanding provider membership.
+  { id: OPENROUTER_MODEL_ID, name: "Ox Alpha", providerId: "openrouter", tier: "strong", reasoningLevels: OPENROUTER_OX_REASONING_LEVELS, defaultReasoningLevel: "max", contextWindow: 1048576 },
+
   { id: "gpt-5.6-sol", name: "GPT-5.6-Sol", providerId: "openai-codex", tier: "balanced", reasoningLevels: GPT56_LEVELS, defaultReasoningLevel: "low", contextWindow: 372000, useResponsesLite: true, toolOutputTokenLimit: 10000 },
   { id: "gpt-5.6-terra", name: "GPT-5.6-Terra", providerId: "openai-codex", tier: "strong", reasoningLevels: GPT56_LEVELS, defaultReasoningLevel: "medium", contextWindow: 372000, useResponsesLite: true, toolOutputTokenLimit: 10000 },
   { id: "gpt-5.6-luna", name: "GPT-5.6-Luna", providerId: "openai-codex", tier: "strong", reasoningLevels: GPT56_LUNA_LEVELS, defaultReasoningLevel: "medium", contextWindow: 372000, useResponsesLite: true, toolOutputTokenLimit: 10000 },

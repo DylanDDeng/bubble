@@ -1,4 +1,5 @@
 import { listBuiltinModels } from "../model-catalog.js";
+import { filterProviderModels } from "../provider-model-policy.js";
 import {
   isUserVisibleProvider,
   type ModelInfo,
@@ -17,7 +18,10 @@ export function localModelsForProvider(
   registry: Pick<ProviderRegistry, "getModelConfig">,
   provider: ProviderProfile,
 ): ModelInfo[] {
-  const customModels = registry.getModelConfig().getCustomModels(provider.id);
+  const customModels = filterProviderModels(
+    provider.id,
+    registry.getModelConfig().getCustomModels(provider.id),
+  );
   if (customModels.length > 0) return customModels;
 
   const builtinProviderId = provider.id === "openai" && provider.authType === "oauth"

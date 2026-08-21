@@ -141,6 +141,10 @@ export class PiTuiApp {
   private readonly transcriptBox = new VStack([]);
   private readonly streamingMessage = new StreamingMessageComponent(8, () => this.tui.requestRender());
   private readonly markdown = new Markdown("", 0, 0, MD_THEME);
+  private readonly markdownRenderer = (text: string, width: number): string[] => {
+    this.markdown.setText(text);
+    return this.markdown.render(width);
+  };
   private readonly settledTranscript: ResponsiveTranscriptComponent;
   private readonly welcome: WelcomeBannerComponent;
   private readonly footer: ResponsiveFooterComponent;
@@ -534,10 +538,9 @@ export class PiTuiApp {
       verboseTrace: this.verboseTrace,
       traceInteraction: this.traceInteraction,
       theme: defaultTranscriptTheme,
-      markdownRenderer: (text, width) => {
-        this.markdown.setText(text);
-        return this.markdown.render(width);
-      },
+      // Stable identity lets the settled transcript cache survive composer-only
+      // frames. The stateful Markdown instance is still updated on cache misses.
+      markdownRenderer: this.markdownRenderer,
     };
   }
 
@@ -693,12 +696,10 @@ export class PiTuiApp {
       const provider = registry.getConfigured().find((candidate) => candidate.id === providerId);
       if (!provider) throw new Error("provider disappeared after saving credentials");
 
-      if (this.options.createProvider) {
-        const nextProvider = this.options.createProvider(providerId, key, provider.baseURL);
-        this.options.agent.setProvider(nextProvider as never);
-        this.options.agent.providerId = providerId;
-        registry.setDefault(providerId);
-      }
+      // Saving credentials configures the provider; it must not partially
+      // mutate the active route. Provider + model + thinking + prompt + session
+      // move together only through the shared /model switch transaction.
+      registry.setDefault(providerId);
 
       this.pushNotice(
         `API key updated for ${provider.name} to ${maskKey(key)}. Use /model to select a compatible model.`,

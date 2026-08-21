@@ -40,6 +40,19 @@ describe("provider transform", () => {
     expect(google.reasoningEffort).toBe("high");
   });
 
+  it("preserves Ox Alpha effort grades and defaults stale state to max", () => {
+    expect(resolveProviderRequestConfig("openrouter", "stealth/ox-alpha", "high")).toMatchObject({
+      effectiveThinkingLevel: "high",
+      extraBody: { reasoning: { effort: "high" } },
+    });
+    expect(resolveProviderRequestConfig("openrouter", "stealth/ox-alpha", "off")).toMatchObject({
+      effectiveThinkingLevel: "max",
+      extraBody: { reasoning: { effort: "max" } },
+    });
+    expect(resolveProviderRequestConfig("openrouter", "stealth/ox-alpha", "medium").effectiveThinkingLevel)
+      .toBe("max");
+  });
+
   it("emits Zhipu/Z.AI thinking config for coding-plan compatible providers", () => {
     const zhipu = resolveProviderRequestConfig("zhipuai-coding-plan", "glm-5.1", "medium");
     const zai = resolveProviderRequestConfig("zai-coding-plan", "glm-5-turbo", "medium");

@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import type { ModelTier, ProviderProtocol } from "./model-catalog.js";
 import type { ModelInfo } from "./provider-registry.js";
+import { filterProviderModels } from "./provider-model-policy.js";
 
 const MODELS_PATH = join(homedir(), ".bubble", "models.json");
 
@@ -79,13 +80,13 @@ export class ModelConfig {
   getCustomModels(providerId: string): ModelInfo[] {
     const cfg = this.data?.providers?.[providerId];
     if (!cfg?.models) return [];
-    return cfg.models.map((m) => ({
+    return filterProviderModels(providerId, cfg.models.map((m) => ({
       id: m.id,
       name: m.name || m.id,
       providerId,
       tier: sanitizeTier(m.tier),
       routingPriority: sanitizeRoutingPriority(m.routingPriority),
-    }));
+    })));
   }
 
   getApiKey(providerId: string): string | undefined {

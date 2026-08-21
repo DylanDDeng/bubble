@@ -941,13 +941,12 @@ describe("main pi-tui running input", () => {
         "zai-coding-plan",
         "super-secret-key",
       ));
-      expect(createProvider).toHaveBeenCalledWith(
-        "zai-coding-plan",
-        "super-secret-key",
-        "https://api.z.ai/api/coding/paas/v4",
-      );
-      expect(setProvider).toHaveBeenCalledTimes(1);
-      expect(agent.providerId).toBe("zai-coding-plan");
+      // Credential setup is configuration-only. The active provider/model
+      // remain atomic until the user completes a /model switch.
+      expect(createProvider).not.toHaveBeenCalled();
+      expect(setProvider).not.toHaveBeenCalled();
+      expect(agent.providerId).toBe("openai");
+      expect(agent.model).toBe("openai:gpt-4o");
       expect(JSON.stringify(appendedMessages)).not.toContain("super-secret-key");
       expect(JSON.stringify((app as unknown as { history: string[] }).history)).not.toContain("super-secret-key");
       expect(terminal.getViewport().join("\n")).not.toContain("super-secret-key");

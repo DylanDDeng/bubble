@@ -52,6 +52,55 @@ describe("UserConfig", () => {
     expect(restored.getDefaultThinkingLevel()).toBe("high");
   });
 
+  it("preserves OpenRouter provider and model selections", () => {
+    process.env.BUBBLE_HOME = root;
+    writeFileSync(
+      join(root, "config.json"),
+      JSON.stringify({
+        providers: [{
+          id: "openrouter",
+          name: "OpenRouter",
+          baseURL: "https://openrouter.ai/api/v1",
+          apiKey: "test-key",
+          enabled: true,
+        }],
+        defaultProvider: "openrouter",
+        defaultModel: "openrouter:stealth/ox-alpha",
+        recentModels: ["openrouter:stealth/ox-alpha"],
+      }, null, 2),
+    );
+
+    const config = new UserConfig();
+    expect(config.getProviders().map((provider) => provider.id)).toEqual(["openrouter"]);
+    expect(config.getDefaultProvider()).toBe("openrouter");
+    expect(config.getDefaultModel()).toBe("openrouter:stealth/ox-alpha");
+    expect(config.getRecentModels()).toEqual(["openrouter:stealth/ox-alpha"]);
+  });
+
+  it("drops OpenRouter model selections outside the fixed Ox policy", () => {
+    process.env.BUBBLE_HOME = root;
+    writeFileSync(
+      join(root, "config.json"),
+      JSON.stringify({
+        defaultProvider: "openrouter",
+        defaultModel: "openrouter:some/other-model",
+        recentModels: [
+          "openrouter:some/other-model",
+          "openrouter:stealth/ox-alpha",
+          "openai:gpt-5.5",
+        ],
+      }, null, 2),
+    );
+
+    const config = new UserConfig();
+    expect(config.getDefaultProvider()).toBe("openrouter");
+    expect(config.getDefaultModel()).toBe("openrouter:stealth/ox-alpha");
+    expect(config.getRecentModels()).toEqual([
+      "openrouter:stealth/ox-alpha",
+      "openai:gpt-5.5",
+    ]);
+  });
+
   it("migrates legacy flat theme overrides into the dark mode bucket", () => {
     process.env.BUBBLE_HOME = root;
     writeFileSync(

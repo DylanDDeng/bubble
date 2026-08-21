@@ -4,6 +4,7 @@ import { decodeModel, displayModel } from "../provider-registry.js";
 import { buildSystemPrompt, type SystemPromptOptions } from "../system-prompt.js";
 import { getAvailableThinkingLevels, normalizeThinkingLevel } from "../provider-transform.js";
 import { normalizeInheritedThinkingLevel } from "../variant/variant-resolver.js";
+import { assertProviderModelAllowed } from "../provider-model-policy.js";
 
 export interface ModelSwitchAgent {
   model: string;
@@ -73,6 +74,7 @@ export async function switchAgentModel(options: SwitchAgentModelOptions): Promis
     options.model,
     options.agent.providerId || options.registry.getDefault()?.id,
   );
+  assertProviderModelAllowed(providerId, modelId);
 
   if (!options.preparedProvider) {
     await options.registry.prepareProvider(providerId);

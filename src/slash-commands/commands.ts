@@ -30,6 +30,7 @@ import { feishuCommand } from "./feishu.js";
 import { GROK_LOCAL_COMMAND_HELP } from "../external-runtime/grok-input-policy.js";
 import { isGrokSubscriptionProviderId } from "../external-runtime/grok-provider.js";
 import { classifyExternalRuntimeBinding } from "../external-runtime/session-policy.js";
+import { providerModelPolicyError } from "../provider-model-policy.js";
 
 const VALID_SCOPES: SettingsScope[] = ["user", "project", "local"];
 const VALID_LISTS: RuleList[] = ["allow", "deny"];
@@ -890,6 +891,8 @@ const builtinSlashCommandEntries: SlashCommand[] = [
       const next = parsed.model.includes(":") ? parsed.model : encodeModel(defaultProvider, parsed.model);
       const { providerId, modelId } = decodeModel(next);
       const targetProviderId = providerId || defaultProvider;
+      const modelPolicyError = providerModelPolicyError(targetProviderId, modelId);
+      if (modelPolicyError) return modelPolicyError;
 
       await ctx.registry.prepareProvider(targetProviderId);
       const targetProvider = ctx.registry.getConfigured().find((item) => item.id === targetProviderId);

@@ -147,6 +147,37 @@ describe("toChatCompletionsMessage", () => {
 });
 
 describe("translateOpenAIStream", () => {
+  it("throws a structured error for OpenRouter's HTTP-200 terminal SSE event", async () => {
+    await expect(collect(translateOpenAIStream(fromArray([{
+      id: "gen-test",
+      provider: "Ox Alpha upstream",
+      error: {
+        code: 504,
+        message: "Provider timed out during generation",
+        metadata: {
+          error_type: "provider_timeout",
+          availability: { retry_after: 2 },
+        },
+      },
+      choices: [{ index: 0, delta: { content: "" }, finish_reason: "error" }],
+    }]), { debugProviderId: "openrouter" }))).rejects.toMatchObject({
+      name: "ProviderResponseError",
+      status: 504,
+      errorType: "provider_timeout",
+      retryAfterMs: 2_000,
+      message: expect.stringContaining("Provider timed out during generation"),
+    });
+  });
+
+  it("does not accept finish_reason=error without a top-level error payload", async () => {
+    await expect(collect(translateOpenAIStream(fromArray([{
+      choices: [{ index: 0, delta: { content: "" }, finish_reason: "error" }],
+    }]), { debugProviderId: "openrouter" }))).rejects.toMatchObject({
+      name: "ProviderResponseError",
+      message: expect.stringContaining("finish_reason=error"),
+    });
+  });
+
   it("captures a single tool call streamed across chunks", async () => {
     const chunks = await collect(translateOpenAIStream(fromArray([
       { choices: [{ delta: { tool_calls: [{ index: 0, id: "write:1", function: { name: "write" } }] } }] },

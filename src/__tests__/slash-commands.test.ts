@@ -391,6 +391,35 @@ describe("slash commands", () => {
     expect(result.result).toContain("not configured or has no active credentials");
   });
 
+  it("/model rejects non-Ox OpenRouter ids before provider or session mutation", async () => {
+    const prepareProvider = vi.fn(async () => undefined);
+    const createProvider = vi.fn();
+    const transitionToNative = vi.fn();
+    const session = createSessionStub({ model: "openai:gpt-4o" });
+    const ctx = createContext({
+      sessionManager: session,
+      transitionToNative,
+      createProvider,
+      registry: {
+        getDefault: () => ({ id: "openai" }),
+        prepareProvider,
+        getConfigured: () => [],
+      } as any,
+    });
+
+    const result = await slashRegistry.execute("/model openrouter:openai/gpt-5.6", ctx);
+
+    expect(result.result).toMatch(/openrouter.*fixed.*stealth\/ox-alpha/i);
+    expect(prepareProvider).not.toHaveBeenCalled();
+    expect(createProvider).not.toHaveBeenCalled();
+    expect(transitionToNative).not.toHaveBeenCalled();
+    expect(ctx.agent.model).toBe("openai:gpt-4o");
+    expect(ctx.agent.providerId).toBe("openai");
+    expect(ctx.agent.setProvider).not.toHaveBeenCalled();
+    expect(session.updateMetadata).not.toHaveBeenCalled();
+    expect(session.appendMarker).not.toHaveBeenCalled();
+  });
+
   it("/provider opens without leaving or mutating the active Grok session", async () => {
     const activeSession = createSessionStub({
       externalRuntime: { id: "grok", sessionId: "grok-session-1" },

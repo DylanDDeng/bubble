@@ -58,7 +58,17 @@ const OPENROUTER: ProviderProfile = {
 function stubOpenRouterCatalog(ids: string[]) {
   vi.stubGlobal("fetch", async () => ({
     ok: true,
-    json: async () => ({ data: ids.map((id) => ({ id, name: id })) }),
+    json: async () => ({
+      data: [
+        {
+          id: "stealth/ox-alpha",
+          name: "Ox Alpha",
+          context_length: 1048576,
+          supported_parameters: ["reasoning", "tools"],
+        },
+        ...ids.map((id) => ({ id, name: id })),
+      ],
+    }),
   }));
 }
 
@@ -137,7 +147,7 @@ describe("routing revision — credential identity (§1.6)", () => {
 });
 
 describe("routing revision — discovery membership (§1.6)", () => {
-  it("bumps when discovery membership changes, not when it repeats", async () => {
+  it("ignores OpenRouter catalog churn outside the Ox Alpha allowlist", async () => {
     const registry = isolatedRegistry([OPENROUTER]);
     const provider = registry.getConfigured().find((item) => item.id === "openrouter")!;
 
@@ -151,10 +161,11 @@ describe("routing revision — discovery membership (§1.6)", () => {
     await registry.discoverModels(provider, { forceRefresh: true });
     expect(registry.getRoutingRevision()).toBe(before + 1);
 
-    // Membership actually changed: bump.
+    // The upstream catalog changed, but Bubble's OpenRouter membership did
+    // not: only Ox Alpha is exposed, so routing must not churn.
     stubOpenRouterCatalog(["model-a", "model-b", "model-c"]);
     await registry.discoverModels(provider, { forceRefresh: true });
-    expect(registry.getRoutingRevision()).toBe(before + 2);
+    expect(registry.getRoutingRevision()).toBe(before + 1);
   });
 });
 
@@ -170,7 +181,7 @@ describe("getCachedDiscoverySnapshot (§1.4)", () => {
     const snapshot = registry.getCachedDiscoverySnapshot("openrouter");
     expect(snapshot?.complete).toBe(true);
     expect(snapshot?.source).toBe("remote");
-    expect(snapshot?.models.map((model) => model.id)).toEqual(["model-a"]);
+    expect(snapshot?.models.map((model) => model.id)).toEqual(["stealth/ox-alpha"]);
 
     // Past the 60s success TTL the snapshot is gone — never a stale authority.
     vi.setSystemTime(new Date("2026-07-12T00:01:01Z"));

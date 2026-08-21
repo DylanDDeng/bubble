@@ -18,6 +18,7 @@ import { getBuiltinModel } from "../../model-catalog.js";
 import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeInheritedThinkingLevel, normalizeThinkingLevel } from "../../variant/variant-resolver.js";
 import type { AgentProfile } from "../profiles.js";
 import type { ThinkingLevel } from "../../types.js";
+import { providerModelPolicyError } from "../../provider-model-policy.js";
 
 export interface ParentRoute {
   providerId: string;
@@ -147,6 +148,9 @@ export class SubagentRouter {
    */
   validateForDispatch(route: ResolvedSubagentRoute): string | undefined {
     const parentProviderId = this.deps.parentRoute().providerId;
+    const resolvedProviderId = route.providerId || parentProviderId;
+    const fixedPolicyError = providerModelPolicyError(resolvedProviderId, route.model);
+    if (fixedPolicyError) throw new Error(fixedPolicyError);
     const snapshot = this.currentSnapshot();
     const crossProvider = !!route.providerId && route.providerId !== parentProviderId;
 

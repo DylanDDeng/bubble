@@ -10,6 +10,7 @@ export type TraceRowTarget =
  * turn cannot reset an expanded tool entry.
  */
 export class TraceInteractionState {
+  private revision = 0;
   private selectedKey?: string;
   private selectedGroupKey?: string;
   private hoveredGroupKey?: string;
@@ -44,22 +45,39 @@ export class TraceInteractionState {
     return this.expandedItems.has(itemKey);
   }
 
+  /**
+   * Monotonic render revision for transcript projection caches. The tool
+   * lifecycle remains immutable in the controller; only these UI affordances
+   * can change the settled projection without replacing the transcript array.
+   */
+  getRevision(): number {
+    return this.revision;
+  }
+
   activate(target: TraceRowTarget, clickCount: 1 | 2): void {
+    const selectionChanged = this.selectedKey !== target.key || this.selectedGroupKey !== target.groupKey;
     this.selectedKey = target.key;
     this.selectedGroupKey = target.groupKey;
-    if (clickCount !== 2) return;
-    if (!target.foldable) return;
-    if (target.kind === "group") {
-      this.toggle(this.expandedGroups, target.groupKey);
+    let foldChanged = false;
+    if (clickCount !== 2 || !target.foldable) {
+      if (selectionChanged) this.revision += 1;
       return;
     }
-    this.toggle(this.expandedItems, target.key);
+    if (target.kind === "group") {
+      this.toggle(this.expandedGroups, target.groupKey);
+      foldChanged = true;
+    } else {
+      this.toggle(this.expandedItems, target.key);
+      foldChanged = true;
+    }
+    if (selectionChanged || foldChanged) this.revision += 1;
   }
 
   hover(target: TraceRowTarget | undefined): boolean {
     const next = target?.groupKey;
     if (next === this.hoveredGroupKey) return false;
     this.hoveredGroupKey = next;
+    this.revision += 1;
     return true;
   }
 

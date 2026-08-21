@@ -33,6 +33,7 @@ import { createProviderInstance } from "../provider.js";
 import type { ResolvedSubagentRoute } from "../agent/categories.js";
 import { getDefaultThinkingLevel } from "../variant/variant-resolver.js";
 import { QuestionController, type QuestionAnswer, type QuestionRequest } from "../question/controller.js";
+import { assertProviderModelAllowed } from "../provider-model-policy.js";
 import { SkillRegistry } from "../skills/registry.js";
 import { parseSkillInvocation } from "../skills/invocation.js";
 import type { SkillSummary } from "../skills/types.js";
@@ -466,6 +467,7 @@ export class BubbleSdk {
       ? decodeModel(normalized)
       : { providerId: undefined, modelId: "" };
     const activeProviderId = effId || fallbackProviderId;
+    if (effModelId) assertProviderModelAllowed(activeProviderId, effModelId);
     const target =
       this.registry.getConfigured().find((p) => p.id === activeProviderId) || defaultProvider;
     if (!target?.apiKey) {

@@ -37,7 +37,7 @@ describe("agent stream interruption retry", () => {
     expect(calls).toBe(2);
     const retryEvents = events.filter((event) => event.type === "provider_retry");
     expect(retryEvents).toEqual([
-      { type: "provider_retry", attempt: 1, maxAttempts: 2, reason: "Provider stream interrupted mid-response." },
+      { type: "provider_retry", attempt: 1, maxAttempts: 2, reason: "Anthropic connection failed mid-stream." },
     ]);
 
     const assistantMessages = agent.messages.filter((message) => message.role === "assistant");
@@ -63,5 +63,25 @@ describe("agent stream interruption retry", () => {
       .rejects.toThrow(/connection failed mid-stream/);
     // 1 initial attempt + 2 retries
     expect(calls).toBe(3);
+  });
+
+  it("honors a provider-specific retry limit for explicit terminal errors", async () => {
+    let calls = 0;
+    const provider: Provider = {
+      async *streamChat(): AsyncIterable<StreamChunk> {
+        calls += 1;
+        throw new ProviderStreamInterruptedError("OpenRouter provider timeout.", {
+          maxRetries: 1,
+        });
+      },
+      async complete() {
+        return "complete";
+      },
+    };
+
+    const agent = new Agent({ provider, model: "test-model", tools: [] });
+    await expect(collect(agent.run("hello", mkdtempSync(join(tmpdir(), "bubble-retry-")))))
+      .rejects.toThrow(/OpenRouter provider timeout/);
+    expect(calls).toBe(2);
   });
 });

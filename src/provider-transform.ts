@@ -76,6 +76,26 @@ export function resolveProviderRequestConfig(
     };
   }
 
+  // Ox Alpha exposes mandatory low/high/max reasoning. Treat unsupported state
+  // restored from an older session as inherited state and fall back to the
+  // model's declared default (max), never OpenRouter's disabling "none" value.
+  if (providerId === "openrouter") {
+    const openRouterThinkingLevel = normalizeInheritedThinkingLevel(
+      providerId,
+      modelId,
+      requestedLevel,
+    );
+    return {
+      effectiveThinkingLevel: openRouterThinkingLevel,
+      reasoningContentEcho: "tool_calls",
+      extraBody: {
+        reasoning: {
+          effort: openRouterThinkingLevel,
+        },
+      },
+    };
+  }
+
   if (isFireworksKimi(providerId, modelId)) {
     return {
       effectiveThinkingLevel,
@@ -220,7 +240,6 @@ export function resolveProviderRequestConfig(
 
   if (
     providerId === "openai"
-    || providerId === "openrouter"
     || providerId === "google"
     || providerId === "azure"
     || providerId === "openai-compatible"

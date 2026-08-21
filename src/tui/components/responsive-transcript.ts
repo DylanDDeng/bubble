@@ -10,7 +10,11 @@
 import type { Component, TuiMouseEvent } from "@bubblebrain-ai/pi-tui";
 import type { DisplayMessage } from "../model/display-history.js";
 import type { TraceInteractionState, TraceRowTarget } from "../model/trace-interaction.js";
-import { projectTranscript, type TranscriptRenderOptions } from "./transcript.js";
+import {
+  projectTranscript,
+  type TranscriptProjection,
+  type TranscriptRenderOptions,
+} from "./transcript.js";
 
 export interface ResponsiveTranscriptSnapshot {
   messages: readonly DisplayMessage[];
@@ -20,17 +24,62 @@ export interface ResponsiveTranscriptSnapshot {
 export class ResponsiveTranscriptComponent implements Component {
   private traceTargets: Array<TraceRowTarget | undefined> = [];
   private traceInteraction?: TraceInteractionState;
+  private cache?: {
+    messages: readonly DisplayMessage[];
+    width: number;
+    showReasoning: boolean;
+    verboseTrace: boolean;
+    trailingSpacer: boolean;
+    theme: TranscriptRenderOptions["theme"];
+    markdownRenderer: TranscriptRenderOptions["markdownRenderer"];
+    traceInteraction: TraceInteractionState | undefined;
+    traceRevision: number;
+    projection: TranscriptProjection;
+  };
 
   constructor(private readonly getSnapshot: () => ResponsiveTranscriptSnapshot) {}
 
   render(width: number): string[] {
     const snapshot = this.getSnapshot();
-    const projection = projectTranscript(snapshot.messages, {
-      ...snapshot.options,
-      columns: Math.max(1, width),
-    });
+    const options = snapshot.options ?? {};
+    const normalizedWidth = Math.max(1, width);
+    const showReasoning = options.showReasoning ?? false;
+    const verboseTrace = options.verboseTrace ?? false;
+    const trailingSpacer = options.trailingSpacer !== false;
+    const traceRevision = options.traceInteraction?.getRevision() ?? 0;
+    const cached = this.cache;
+    const projection = cached
+      && cached.messages === snapshot.messages
+      && cached.width === normalizedWidth
+      && cached.showReasoning === showReasoning
+      && cached.verboseTrace === verboseTrace
+      && cached.trailingSpacer === trailingSpacer
+      && cached.theme === options.theme
+      && cached.markdownRenderer === options.markdownRenderer
+      && cached.traceInteraction === options.traceInteraction
+      && cached.traceRevision === traceRevision
+      ? cached.projection
+      : projectTranscript(snapshot.messages, {
+          ...options,
+          columns: normalizedWidth,
+        });
+
+    if (projection !== cached?.projection) {
+      this.cache = {
+        messages: snapshot.messages,
+        width: normalizedWidth,
+        showReasoning,
+        verboseTrace,
+        trailingSpacer,
+        theme: options.theme,
+        markdownRenderer: options.markdownRenderer,
+        traceInteraction: options.traceInteraction,
+        traceRevision,
+        projection,
+      };
+    }
     this.traceTargets = projection.traceTargets;
-    this.traceInteraction = snapshot.options?.traceInteraction;
+    this.traceInteraction = options.traceInteraction;
     return projection.rows;
   }
 
@@ -45,6 +94,8 @@ export class ResponsiveTranscriptComponent implements Component {
   }
 
   invalidate(): void {
-    // No width-sensitive cache: render() always projects current message state.
+    // Theme/capability changes can alter ANSI output without changing the
+    // immutable transcript reference. Width changes already miss naturally.
+    this.cache = undefined;
   }
 }

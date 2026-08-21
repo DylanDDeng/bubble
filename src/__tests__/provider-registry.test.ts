@@ -25,12 +25,16 @@ describe("provider registry", () => {
     expect(isUserVisibleProvider("doubao")).toBe(true);
   });
 
+  it("shows OpenRouter as a user-visible provider", () => {
+    expect(isUserVisibleProvider("openrouter")).toBe(true);
+  });
+
   it("exposes MiniMax Token Plan and MiniMax API as visible providers", () => {
     expect(isUserVisibleProvider("minimax")).toBe(true);
     expect(isUserVisibleProvider("minimax-anthropic")).toBe(true);
   });
 
-  it("prefers user-visible providers over hidden openrouter defaults", () => {
+  it("honors OpenRouter as the configured default provider", () => {
     const providers = [
       {
         id: "openrouter",
@@ -63,7 +67,7 @@ describe("provider registry", () => {
     } as any;
 
     const registry = new ProviderRegistry(config);
-    expect(registry.getDefault()?.id).toBe("openai");
+    expect(registry.getDefault()?.id).toBe("openrouter");
   });
 
   it("overlays built-in protocol metadata onto configured providers", () => {
@@ -210,16 +214,62 @@ describe("provider registry", () => {
     const duplicate = registry.discoverModels(provider);
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
-    resolveFetch(jsonResponse({ data: [{ id: "model-a", name: "Model A" }] }));
+    resolveFetch(jsonResponse({ data: [
+      { id: "model-a", name: "Model A" },
+      {
+        id: "stealth/ox-alpha",
+        name: "Ox Alpha Remote",
+        context_length: 1048576,
+        supported_parameters: ["reasoning", "tools"],
+        reasoning: {
+          mandatory: true,
+          supported_efforts: ["max", "high", "low"],
+          default_effort: "max",
+        },
+      },
+    ] }));
     await expect(first).resolves.toMatchObject({ source: "remote", authoritative: true });
     await expect(duplicate).resolves.toMatchObject({ source: "remote", authoritative: true });
 
     await expect(registry.discoverModels(provider)).resolves.toMatchObject({
       source: "cache",
       authoritative: true,
-      models: [{ id: "model-a", name: "Model A", providerId: "openrouter" }],
+      models: [expect.objectContaining({
+        id: "stealth/ox-alpha",
+        name: "Ox Alpha Remote",
+        providerId: "openrouter",
+        contextWindow: 1048576,
+        reasoningLevels: ["low", "high", "max"],
+        defaultReasoningLevel: "max",
+      })],
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the static Ox reasoning contract when remote metadata is malformed", async () => {
+    const registry = new ProviderRegistry(emptyConfig());
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ data: [{
+      id: "stealth/ox-alpha",
+      name: "Ox Alpha Live",
+      context_length: "not-a-number",
+      reasoning: {
+        mandatory: true,
+        supported_efforts: ["none", "unsupported"],
+        default_effort: "none",
+      },
+    }] })));
+
+    await expect(registry.discoverModels(openRouterProfile("key-a"))).resolves.toMatchObject({
+      source: "remote",
+      authoritative: true,
+      models: [expect.objectContaining({
+        id: "stealth/ox-alpha",
+        name: "Ox Alpha Live",
+        contextWindow: 1048576,
+        reasoningLevels: ["low", "high", "max"],
+        defaultReasoningLevel: "max",
+      })],
+    });
   });
 
   it("isolates discovery by credential identity and rejects an older generation", async () => {
@@ -233,13 +283,13 @@ describe("provider registry", () => {
     const newRequest = registry.discoverModels(openRouterProfile("key-b"));
     expect(resolvers).toHaveLength(2);
 
-    resolvers[1](jsonResponse({ data: [{ id: "new-model" }] }));
+    resolvers[1](jsonResponse({ data: [{ id: "stealth/ox-alpha", name: "Current Ox" }] }));
     await expect(newRequest).resolves.toMatchObject({
       source: "remote",
-      models: [{ id: "new-model" }],
+      models: [expect.objectContaining({ id: "stealth/ox-alpha", name: "Current Ox" })],
     });
 
-    resolvers[0](jsonResponse({ data: [{ id: "stale-model" }] }));
+    resolvers[0](jsonResponse({ data: [{ id: "stealth/ox-alpha", name: "Stale Ox" }] }));
     await expect(oldRequest).resolves.toMatchObject({
       source: "fallback",
       authoritative: false,

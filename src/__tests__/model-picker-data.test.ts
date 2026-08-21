@@ -22,6 +22,48 @@ function registryStub(overrides: Record<string, unknown> = {}) {
 }
 
 describe("model picker data", () => {
+  it("offers only Ox Alpha for the builtin OpenRouter provider", () => {
+    const provider = {
+      id: "openrouter",
+      name: "OpenRouter",
+      baseURL: "https://openrouter.ai/api/v1",
+      apiKey: "or-key",
+      enabled: true,
+      authType: "api" as const,
+    };
+    const models = localModelsForProvider(registryStub(), provider);
+
+    expect(models.map((model) => model.id)).toEqual(["stealth/ox-alpha"]);
+    expect(models[0]).toMatchObject({
+      name: "Ox Alpha",
+      providerId: "openrouter",
+      contextWindow: 1048576,
+      reasoningLevels: ["low", "high", "max"],
+      defaultReasoningLevel: "max",
+    });
+  });
+
+  it("does not let custom OpenRouter models expand the fixed catalog", () => {
+    const provider = {
+      id: "openrouter",
+      name: "OpenRouter",
+      baseURL: "https://openrouter.ai/api/v1",
+      apiKey: "or-key",
+      enabled: true,
+      authType: "api" as const,
+    };
+    const models = localModelsForProvider(registryStub({
+      getModelConfig: () => ({
+        getCustomModels: () => [
+          { id: "some/other-model", name: "Other", providerId: "openrouter" },
+          { id: "stealth/ox-alpha", name: "Custom Ox", providerId: "openrouter" },
+        ],
+      }),
+    }), provider);
+
+    expect(models.map((model) => model.id)).toEqual(["stealth/ox-alpha"]);
+  });
+
   it("uses the OpenAI Codex fallback catalog for ChatGPT OAuth providers", () => {
     const models = localModelsForProvider(registryStub(), openaiOAuthProvider);
 

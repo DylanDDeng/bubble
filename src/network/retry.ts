@@ -20,17 +20,26 @@ const RETRYABLE_HTTP_STATUSES = new Set([408, 429, 500, 502, 503, 504, 529]);
 
 export class ProviderStreamInterruptedError extends Error {
   readonly isProviderStreamInterruption = true;
+  readonly retryAfterMs?: number;
+  readonly maxRetries?: number;
 
-  constructor(message: string, options?: { cause?: unknown }) {
+  constructor(message: string, options?: { cause?: unknown; retryAfterMs?: number; maxRetries?: number }) {
     super(message, options);
     this.name = "ProviderStreamInterruptedError";
+    this.retryAfterMs = options?.retryAfterMs;
+    this.maxRetries = options?.maxRetries;
   }
 }
 
-export function isProviderStreamInterruption(error: unknown): boolean {
+export function isProviderStreamInterruption(error: unknown): error is ProviderStreamInterruptedError {
   return !!error
     && typeof error === "object"
     && (error as { isProviderStreamInterruption?: unknown }).isProviderStreamInterruption === true;
+}
+
+export function providerStreamRetryLimit(error: ProviderStreamInterruptedError): number {
+  if (error.maxRetries === undefined) return MAX_STREAM_INTERRUPTION_RETRIES;
+  return Math.max(0, Math.min(MAX_CONFIGURABLE_RETRIES, Math.floor(error.maxRetries)));
 }
 
 export function getProviderMaxRetries(env: NodeJS.ProcessEnv = process.env): number {
