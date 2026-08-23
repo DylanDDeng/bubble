@@ -522,7 +522,12 @@ const builtinSlashCommandEntries: SlashCommand[] = [
     name: "context",
     description: "Show current context window usage and breakdown",
     async handler(_args, ctx) {
-      return `${formatContextUsage(ctx.agent.getContextUsageSnapshot())}\n\n${formatMcpContextStatus(ctx)}`;
+      const snapshot = ctx.agent.getContextUsageSnapshot();
+      if (ctx.openContextInfo) {
+        ctx.openContextInfo(snapshot);
+        return;
+      }
+      return `${formatContextUsage(snapshot)}\n\n${formatMcpContextStatus(ctx)}`;
     },
   },
   {

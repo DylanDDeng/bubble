@@ -54,6 +54,20 @@ describe.skipIf(process.env.BUBBLE_SKIP_PTY_E2E === "1")("pi-tui app PTY e2e (pr
     await session!.waitFor("commands:", 5_000);
   }, 20_000);
 
+  it("opens /context as a centered usage panel and returns focus on Esc", async () => {
+    session!.write("/context\r");
+    const viewport = await session!.waitForViewport("Context usage", 5_000);
+    expect(viewport.join("\n")).toContain("Reasoning/overhead");
+    expect(viewport.join("\n")).toContain("Tool definitions");
+    expect(viewport.join("\n")).toMatch(/Auto-compact (?:at|threshold unavailable)/);
+
+    session!.write("\x1b");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    session!.write("context-closed");
+    await session!.waitForViewport("context-closed", 5_000);
+    session!.write("\x15");
+  }, 20_000);
+
   it("cycles permission modes with Shift+Tab", async () => {
     session!.write("\x1b[Z");
     await session!.waitForViewport("plan on", 5_000);

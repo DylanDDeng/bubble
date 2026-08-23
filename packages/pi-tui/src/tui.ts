@@ -146,6 +146,8 @@ export interface OverlayOptions {
 	width?: SizeValue;
 	/** Minimum width in columns */
 	minWidth?: number;
+	/** Maximum width in columns */
+	maxWidth?: number;
 	/** Maximum height in rows, or percentage of terminal height (e.g., "50%") */
 	maxHeight?: SizeValue;
 
@@ -1013,6 +1015,11 @@ export abstract class TuiBase extends Container implements TUI {
 		// Apply minWidth
 		if (opt.minWidth !== undefined) {
 			width = Math.max(width, opt.minWidth);
+		}
+		// Apply maxWidth after minWidth. A contradictory pair intentionally lets
+		// maxWidth win, then the terminal clamp below keeps the overlay in bounds.
+		if (opt.maxWidth !== undefined) {
+			width = Math.min(width, Math.max(1, opt.maxWidth));
 		}
 		// Clamp to available space
 		width = Math.max(1, Math.min(width, availWidth));

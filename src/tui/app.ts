@@ -49,8 +49,10 @@ import {
 import { WorkflowInspectorComponent, type WorkflowInspectorSnapshot } from "./components/workflow-inspector.js";
 import { SubagentInspectorComponent } from "./components/subagent-inspector.js";
 import { TaskInspectorComponent } from "./components/task-inspector.js";
+import { ContextInfoComponent } from "./components/context-info.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import type { SlashCommandContext } from "../slash-commands/types.js";
+import type { ContextUsageSnapshot } from "../context/usage.js";
 import { BubbleTuiController } from "./controller/controller.js";
 import { OverlayRequestController } from "./controller/overlay-controller.js";
 import { defaultTranscriptTheme, type TranscriptRenderOptions } from "./components/transcript.js";
@@ -69,6 +71,7 @@ import type { SkillRegistry } from "../skills/registry.js";
 import { parseSkillInvocation } from "../skills/invocation.js";
 import { getNextPermissionMode } from "../permission/mode.js";
 import { maskKey } from "../config.js";
+import { copyToClipboard } from "../clipboard.js";
 
 export interface PiAppCallbacks {
   onExitRequest(): void;
@@ -513,6 +516,9 @@ export class PiTuiApp {
       },
       openFeedback: () => this.pushNotice("feedback dialog: coming to the pi TUI"),
       openStats: () => this.pushNotice("stats panel: coming to the pi TUI"),
+      ...(this.tui.mode === "fullscreen"
+        ? { openContextInfo: (snapshot: ContextUsageSnapshot) => this.openContextInfo(snapshot) }
+        : {}),
       openRewindPicker: () => this.pushNotice("rewind picker: coming to the pi TUI"),
       openSessionPicker: () => this.pushNotice("session picker: coming to the pi TUI"),
       compactionProgress: () => {},
@@ -624,6 +630,45 @@ export class PiTuiApp {
   }
 
   // ---- Overlays -----------------------------------------------------------
+
+  private openContextInfo(snapshot: ContextUsageSnapshot): void {
+    let handle: { hide(): void } | undefined;
+    const messages = this.options.agent.messages;
+    const turnCount = messages.filter((message) => message.role === "user").length;
+    const toolCallCount = messages.reduce((count, message) => (
+      count + (message.role === "assistant" ? message.toolCalls?.length ?? 0 : 0)
+    ), 0);
+    const compactionCount = this.options.agent.getCompactionStats().fired;
+    const mcpStates = (this.options.mcpManager as {
+      getStates?: () => unknown[];
+    } | undefined)?.getStates?.() ?? [];
+    const sessionId = sessionBasename(this.options.sessionManager.getSessionFile());
+    const component = new ContextInfoComponent({
+      snapshot,
+      sessionId,
+      cwd: friendlyCwd(process.cwd()),
+      thinking: this.options.agent.thinking,
+      permissionMode: this.options.agent.mode,
+      turnCount,
+      toolCallCount,
+      compactionCount,
+      mcpServerCount: mcpStates.length,
+    }, {
+      getTerminalRows: () => this.tui.terminal.rows,
+      onClose: () => handle?.hide(),
+      onRender: () => this.renderSnapshot(),
+      ...(sessionId ? { copySessionId: () => copyToClipboard(sessionId) } : {}),
+    });
+    handle = this.tui.showOverlay(component, {
+      anchor: "center",
+      width: "65%",
+      minWidth: 44,
+      maxWidth: 100,
+      maxHeight: 30,
+      margin: { top: 2, right: 0, bottom: 2, left: 0 },
+    });
+    this.tui.setFocus(component);
+  }
 
   private selectOverlay(items: SelectItem[], title: string, preview?: Component): Promise<SelectItem | null> {
     return new Promise((resolve) => {

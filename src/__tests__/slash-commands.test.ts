@@ -931,6 +931,42 @@ describe("slash commands", () => {
     expect(result.result).toContain("Other");
   });
 
+  it("/context opens the structured TUI panel instead of writing a transcript notice", async () => {
+    const snapshot = {
+      providerId: "openai",
+      modelId: "gpt-4o",
+      contextWindow: 128000,
+      usedTokens: 3000,
+      freeTokens: 125000,
+      buckets: {
+        systemPrompt: { label: "System prompt", tokens: 1000 },
+        tools: { label: "Tools", tokens: 800 },
+        skills: { label: "Skills", tokens: 500 },
+        deferredTools: { label: "Deferred/MCP", tokens: 200 },
+        other: { label: "Other", tokens: 500 },
+      },
+      toolCount: 2,
+      deferredToolCount: 1,
+      skillCount: 3,
+      messageCount: 3,
+    };
+    const openContextInfo = vi.fn();
+    const ctx = createContext({
+      agent: {
+        model: "openai:gpt-4o",
+        providerId: "openai",
+        thinking: "off",
+        getContextUsageSnapshot: () => snapshot,
+      } as any,
+      openContextInfo,
+    });
+
+    const result = await slashRegistry.execute("/context", ctx);
+
+    expect(result).toEqual({ handled: true, result: undefined });
+    expect(openContextInfo).toHaveBeenCalledWith(snapshot);
+  });
+
   it("/memory disables manual add and searches automatic memory workspace", async () => {
     const originalBubbleHome = process.env.BUBBLE_HOME;
     const root = join(tmpdir(), `bubble-memory-slash-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);

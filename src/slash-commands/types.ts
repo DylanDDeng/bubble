@@ -11,6 +11,7 @@ import type { MemoryScope } from "../memory/index.js";
 import type { ThemeMode } from "../config.js";
 import type { ExternalHookController } from "../hooks/controller.js";
 import type { ExternalRuntimeManager } from "../external-runtime/types.js";
+import type { ContextUsageSnapshot } from "../context/usage.js";
 
 /**
  * Live progress for a manual `/compact` run, pushed to the TUI so it can render
@@ -59,6 +60,8 @@ export interface SlashCommandContext {
   fillComposer?: (text: string) => void;
   /** Open the interactive usage stats panel. */
   openStats?: () => void;
+  /** Open the interactive context-usage panel. Text-only hosts omit this. */
+  openContextInfo?: (snapshot: ContextUsageSnapshot) => void;
   /**
    * Push live compaction progress to the running TUI. Pass a progress object
    * while compacting and `null` to clear the indicator. Absent in non-TUI hosts.

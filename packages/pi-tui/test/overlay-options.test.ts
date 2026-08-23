@@ -198,6 +198,20 @@ describe("TUI overlay options", () => {
 			assert.strictEqual(overlay.requestedWidth, 30);
 			tui.stop();
 		});
+
+		it("should respect maxWidth when widthPercent results in a wider overlay", async () => {
+			const terminal = new VirtualTerminal(240, 40);
+			const tui: TUI = new TuiMainScreen(terminal);
+			const overlay = new StaticOverlay(["test"]);
+
+			tui.addChild(new EmptyContent());
+			tui.showOverlay(overlay, { width: "65%", minWidth: 44, maxWidth: 100 });
+			tui.start();
+			await renderAndFlush(tui, terminal);
+
+			assert.strictEqual(overlay.requestedWidth, 100);
+			tui.stop();
+		});
 	});
 
 	describe("anchor positioning", () => {
