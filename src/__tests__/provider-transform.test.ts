@@ -126,6 +126,9 @@ describe("provider transform", () => {
   it("emits DeepSeek v4 thinking and reasoning effort fields", () => {
     const config = resolveProviderRequestConfig("deepseek", "deepseek-v4-pro", "max");
     const flash = resolveProviderRequestConfig("deepseek", "deepseek-v4-flash", "high");
+    const low = resolveProviderRequestConfig("deepseek", "deepseek-v4-flash", "low");
+    const off = resolveProviderRequestConfig("deepseek", "deepseek-v4-flash", "off");
+    const vision = resolveProviderRequestConfig("deepseek", "deepseek-v4-flash-vision-exp", "max");
 
     expect(config.effectiveThinkingLevel).toBe("max");
     expect(config.reasoningEffort).toBeUndefined();
@@ -137,6 +140,18 @@ describe("provider transform", () => {
     expect(flash.extraBody).toEqual({
       thinking: { type: "enabled" },
       reasoning_effort: "high",
+    });
+    expect(low.extraBody).toEqual({
+      thinking: { type: "enabled" },
+      reasoning_effort: "low",
+    });
+    expect(off.effectiveThinkingLevel).toBe("off");
+    expect(off.reasoningContentEcho).toBe("none");
+    expect(off.extraBody).toEqual({ thinking: { type: "disabled" } });
+    expect(vision.reasoningContentEcho).toBe("all");
+    expect(vision.extraBody).toEqual({
+      thinking: { type: "enabled" },
+      reasoning_effort: "max",
     });
   });
 

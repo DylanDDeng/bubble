@@ -73,6 +73,28 @@ describe("model picker data", () => {
     });
   });
 
+  it("offers DeepSeek V4 Flash Vision with complete static metadata", () => {
+    const provider = {
+      id: "deepseek",
+      name: "DeepSeek",
+      baseURL: "https://api.deepseek.com",
+      apiKey: "sk-deepseek",
+      enabled: true,
+      authType: "api" as const,
+    };
+    const models = localModelsForProvider(registryStub(), provider);
+    const vision = models.find((model) => model.id === "deepseek-v4-flash-vision-exp");
+
+    expect(vision).toMatchObject({
+      name: "DeepSeek-V4-Flash-Vision-Exp",
+      providerId: "deepseek",
+      contextWindow: 1048576,
+      reasoningLevels: ["off", "low", "high", "max"],
+      defaultReasoningLevel: "high",
+    });
+    expect(vision?.tier).toBeUndefined();
+  });
+
   it("discovers remote models through the provider registry", async () => {
     const listModels = vi.fn(async () => [
       { id: "gpt-5.5", name: "GPT-5.5", providerId: "openai" },

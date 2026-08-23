@@ -101,7 +101,9 @@ const KIMI_THINKING_ONLY_LEVELS: ReasoningEffort[] = ["medium"];
 // "disabled"); the 256k variant exposes effort only, so it has no "off".
 const KIMI_K3_LEVELS: ReasoningEffort[] = ["off", "low", "high", "max"];
 const KIMI_K3_EFFORT_ONLY_LEVELS: ReasoningEffort[] = ["low", "high", "max"];
-const DEEPSEEK_V4_LEVELS: ReasoningEffort[] = ["high", "max"];
+// DeepSeek V4 defaults to thinking/high, but the OpenAI-compatible API also
+// supports disabling thinking and selecting low/high/max effort explicitly.
+const DEEPSEEK_V4_LEVELS: ReasoningEffort[] = ["off", "low", "high", "max"];
 // Bailian token plan grades, read off the endpoint's own 400 responses
 // ("'reasoning_effort' must be one of: ..."), which differ per model. "none"
 // maps to our "off". qwen3.6-flash / qwen3.7-* stop at xhigh; deepseek-v4-pro
@@ -163,8 +165,12 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", providerId: "anthropic", tier: "balanced", reasoningLevels: ANTHROPIC_SONNET_EFFORT_LEVELS, defaultReasoningLevel: "high", contextWindow: 1000000 },
   { id: "claude-haiku-4-5-20251001", name: "Claude Haiku 4.5", providerId: "anthropic", tier: "fast", reasoningLevels: ANTHROPIC_CHAT_LEVELS, contextWindow: 200000 },
 
-  { id: "deepseek-v4-flash", name: "deepseek-v4-flash", providerId: "deepseek", tier: "fast", reasoningLevels: DEEPSEEK_V4_LEVELS, contextWindow: 1048576 },
-  { id: "deepseek-v4-pro", name: "deepseek-v4-pro", providerId: "deepseek", tier: "strong", reasoningLevels: DEEPSEEK_V4_LEVELS, contextWindow: 1048576 },
+  { id: "deepseek-v4-flash", name: "deepseek-v4-flash", providerId: "deepseek", tier: "fast", reasoningLevels: DEEPSEEK_V4_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  // Experimental vision model stays explicit-only: it is text-capable, but
+  // automatic fast-tier routing must not silently switch ordinary subagents
+  // from the stable Flash model to an experimental multimodal endpoint.
+  { id: "deepseek-v4-flash-vision-exp", name: "DeepSeek-V4-Flash-Vision-Exp", providerId: "deepseek", reasoningLevels: DEEPSEEK_V4_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  { id: "deepseek-v4-pro", name: "deepseek-v4-pro", providerId: "deepseek", tier: "strong", reasoningLevels: DEEPSEEK_V4_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
   // Offline/no-key fallback only: with an API key the registry replaces this
   // list via fetchGeminiModels (GET /v1beta/models, newest five). Gemini 3
   // exposes thinking_level (minimal/low/medium/high); 2.5 Pro cannot disable

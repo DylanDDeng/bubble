@@ -234,7 +234,7 @@ function processSessionFile(file: string, accumulators: Record<StatsRange, Range
       markActiveDay(accumulator, timestamp, usage);
       if (message && usage && model) {
         flags.hasUsage = true;
-        addModelUsage(accumulator, model, message, usage);
+        addModelUsage(accumulator, model, message, usage, timestamp);
       }
     }
   }
@@ -281,6 +281,7 @@ function addModelUsage(
   model: string,
   message: Record<string, unknown>,
   usage: TokenUsage,
+  timestamp: Date,
 ) {
   const decoded = decodeModel(model);
   const providerId = typeof message.providerId === "string" ? message.providerId : decoded.providerId;
@@ -311,7 +312,7 @@ function addModelUsage(
   existing.totalTokens += tokenTotal(usage);
 
   if (providerId && modelId) {
-    const cost = calculateUsageCost(providerId, modelId, usage);
+    const cost = calculateUsageCost(providerId, modelId, usage, timestamp);
     if (cost) {
       existing.cost = (existing.cost ?? 0) + cost.cost;
       existing.costCurrency = cost.currency;

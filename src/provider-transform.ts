@@ -28,6 +28,11 @@ const KIMI_K3_FAMILY = new Set(["k3", "k3-256k", "kimi-k3"]);
 const KIMI_TOGGLE_THINKING_FAMILY = new Set(["kimi-k2.5", "kimi-k2.6"]);
 const KIMI_K26_DEFAULT_MAX_TOKENS = 32768;
 const MINIMAX_M3_FAMILY = new Set(["MiniMax-M3"]);
+const DEEPSEEK_V4_FAMILY = new Set([
+  "deepseek-v4-flash",
+  "deepseek-v4-flash-vision-exp",
+  "deepseek-v4-pro",
+]);
 
 function isFireworksKimi(providerId: string, modelId: string): boolean {
   const model = modelId.toLowerCase();
@@ -105,7 +110,16 @@ export function resolveProviderRequestConfig(
     };
   }
 
-  if (providerId === "deepseek" && (modelId === "deepseek-v4-flash" || modelId === "deepseek-v4-pro")) {
+  if (providerId === "deepseek" && DEEPSEEK_V4_FAMILY.has(modelId)) {
+    if (effectiveThinkingLevel === "off") {
+      return {
+        effectiveThinkingLevel,
+        // Non-thinking requests do not need prior reasoning replayed. Omitting
+        // reasoning_content also keeps the history valid when switching modes.
+        reasoningContentEcho: "none",
+        extraBody: { thinking: { type: "disabled" } },
+      };
+    }
     return {
       effectiveThinkingLevel,
       reasoningContentEcho: "all",

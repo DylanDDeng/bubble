@@ -497,9 +497,14 @@ function sessionFileName(sessionId: string): string {
  * turn_end events; each cost covers only that step's usage, so hosts sum them.
  * Events for unpriced models (or without usage) pass through untouched.
  */
-export function attachTurnCost(event: AgentEvent, providerId: string, modelId: string): AgentEvent {
+export function attachTurnCost(
+  event: AgentEvent,
+  providerId: string,
+  modelId: string,
+  at: Date = new Date(),
+): AgentEvent {
   if (event.type !== "turn_end" || !event.usage) return event;
-  const cost = calculateUsageCost(providerId, modelId, event.usage);
+  const cost = calculateUsageCost(providerId, modelId, event.usage, at);
   return cost ? { ...event, cost } : event;
 }
 

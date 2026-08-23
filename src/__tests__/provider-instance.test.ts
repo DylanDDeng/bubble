@@ -78,6 +78,67 @@ describe("createProviderInstance", () => {
     expect(chunks.some((chunk) => chunk.type === "usage")).toBe(true);
   });
 
+  it("sends DeepSeek Vision image blocks with V4 thinking fields", async () => {
+    let body: any;
+    createMock.mockImplementation(async (input) => {
+      body = input;
+      return fromArray([{ choices: [{ delta: { content: "cat" }, finish_reason: "stop" }] }]);
+    });
+
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({
+      providerId: "deepseek",
+      apiKey: "sk-test",
+      baseURL: "https://api.deepseek.com",
+    });
+
+    await collect(provider.streamChat([{
+      role: "user",
+      content: [
+        { type: "text", text: "What is in this image?" },
+        { type: "image_url", image_url: { url: "data:image/png;base64,aGVsbG8=" } },
+      ],
+    }], {
+      model: "deepseek-v4-flash-vision-exp",
+      thinkingLevel: "high",
+    }));
+
+    expect(body.model).toBe("deepseek-v4-flash-vision-exp");
+    expect(body.messages[0].content).toEqual([
+      { type: "text", text: "What is in this image?" },
+      { type: "image_url", image_url: { url: "data:image/png;base64,aGVsbG8=" } },
+    ]);
+    expect(body.thinking).toEqual({ type: "enabled" });
+    expect(body.reasoning_effort).toBe("high");
+    expect(body.stream_options).toEqual({ include_usage: true });
+  });
+
+  it.each([
+    ["off", { type: "disabled" }, undefined],
+    ["low", { type: "enabled" }, "low"],
+  ] as const)("serializes DeepSeek Vision %s thinking mode", async (thinkingLevel, thinking, effort) => {
+    let body: any;
+    createMock.mockImplementation(async (input) => {
+      body = input;
+      return fromArray([{ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }]);
+    });
+
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({
+      providerId: "deepseek",
+      apiKey: "sk-test",
+      baseURL: "https://api.deepseek.com",
+    });
+
+    await collect(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "deepseek-v4-flash-vision-exp",
+      thinkingLevel,
+    }));
+
+    expect(body.thinking).toEqual(thinking);
+    expect(body.reasoning_effort).toBe(effort);
+  });
+
   it.each([
     ["openai", "https://api.openai.com/v1", "gpt-4o"],
     ["moonshot-cn", "https://api.moonshot.cn/v1", "kimi-k2.7-code"],
