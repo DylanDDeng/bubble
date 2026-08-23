@@ -50,6 +50,7 @@ import {
 import {
   accumulateLiveSubagentUpdate,
   collectSubagentGroups,
+  mergeSubagentSnapshotsIntoMessages,
   pruneSettledLiveSubagentTools,
   type SubagentGroup,
 } from "../model/subagent-view.js";
@@ -371,6 +372,15 @@ export class BubbleTuiController {
       })) {
         const { state, effects } = reduceAgentEvent(this.runState!, event, ctx);
         this.runState = state;
+
+        const subagentMetadata = event.type === "tool_update"
+          ? event.update.metadata
+          : event.type === "tool_end"
+            ? event.result.metadata
+            : undefined;
+        if (subagentMetadata?.kind === "subagent") {
+          this.transcript = mergeSubagentSnapshotsIntoMessages(this.transcript, subagentMetadata);
+        }
 
         if (
           event.type === "tool_update"

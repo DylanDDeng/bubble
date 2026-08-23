@@ -205,6 +205,29 @@ describe("transcript renderer", () => {
     expect(render().rows.map(strip).join("\n")).toContain("line a");
   });
 
+  it("renders a completed subagent launch as an inspector action instead of a stale running fold", () => {
+    const interaction = new TraceInteractionState();
+    const projection = projectTranscript([msg({
+      toolCalls: [{
+        id: "spawn",
+        name: "spawn_agent",
+        args: { message: "review" },
+        result: "completed",
+        status: "completed",
+        metadata: {
+          kind: "subagent",
+          subagents: [{ subAgentId: "child-1", nickname: "Karen", status: "completed", summary: "full review" }],
+        },
+      }],
+    })], { columns: 80, traceInteraction: interaction });
+
+    expect(projection.rows.map(strip).join("\n")).toContain("Subagent Karen completed");
+    expect(projection.traceTargets.find((target) => target?.action)).toMatchObject({
+      foldable: false,
+      action: { kind: "open-subagent", subAgentId: "child-1" },
+    });
+  });
+
   it("renders Grok's dim hover border and brighter selected border without reflow", () => {
     const interaction = new TraceInteractionState();
     const messages = [msg({

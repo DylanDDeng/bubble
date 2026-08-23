@@ -32,6 +32,8 @@ export interface TraceGroup {
   hasError: boolean;
   errorCount: number;
   startedAt?: number;
+  /** Final lifecycle label for traces whose tool call launches background work. */
+  statusLabel?: string;
 }
 
 interface TraceClassifier {
@@ -484,6 +486,10 @@ function buildSubagentGroup(
 ): TraceGroup {
   const subagents = subagentsFromMetadata(tool);
   const errorCount = subagents.filter(isFailedSubagent).length + (tool.isError ? 1 : 0);
+  const statusLabel = subagents.length > 0
+    && subagents.every((subagent) => subagent.status === "completed" || subagent.status === "closed")
+    ? "completed"
+    : undefined;
   const launchLabel = tool.name === "run_workflow"
     ? String(tool.args.title ?? tool.args.description ?? "").trim()
     : subagents[0]?.nickname || subagents[0]?.agentName || String(tool.args.description ?? "").trim();
@@ -506,6 +512,7 @@ function buildSubagentGroup(
     hasError: !!tool.isError || errorCount > 0,
     errorCount,
     startedAt,
+    statusLabel,
   };
 }
 

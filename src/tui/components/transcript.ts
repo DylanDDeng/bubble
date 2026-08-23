@@ -400,7 +400,9 @@ function projectTraceGroup(group: TraceGroup, options: TranscriptRenderOptions):
     ? " running"
     : group.hasError
       ? ` ${group.errorCount || 1} error${(group.errorCount || 1) === 1 ? "" : "s"}`
-      : "";
+      : group.statusLabel
+        ? ` ${group.statusLabel}`
+        : "";
   const detail = singleRead
     ? ` ${readTraceLabel(singleRead)}`
     : group.description
@@ -414,8 +416,16 @@ function projectTraceGroup(group: TraceGroup, options: TranscriptRenderOptions):
   const rows = [group.hasError
     ? theme.error(truncateVisible(header, contentColumns))
     : `${theme.accent(marker)}${truncateVisible(header.slice(marker.length), Math.max(0, contentColumns - stringWidth(marker)))}`];
+  const subagentIds = group.kind === "subagent"
+    ? (group.raw[0]?.metadata?.subagents as Array<{ subAgentId?: unknown }> | undefined)
+      ?.map((member) => typeof member?.subAgentId === "string" ? member.subAgentId : "")
+      .filter(Boolean) ?? []
+    : [];
+  const groupAction = subagentIds.length === 1
+    ? { kind: "open-subagent" as const, subAgentId: subagentIds[0]! }
+    : undefined;
   const groupTarget: TraceRowTarget | undefined = groupKey
-    ? { kind: "group", key: groupKey, groupKey, foldable: groupFoldable }
+    ? { kind: "group", key: groupKey, groupKey, foldable: groupFoldable, action: groupAction }
     : undefined;
   const singleTarget: TraceRowTarget | undefined = singleItemKey && groupKey && singleRead
     ? { kind: "item", key: singleItemKey, groupKey, toolId: singleRead.id, foldable: singleItemFoldable }

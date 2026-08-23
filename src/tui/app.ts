@@ -64,7 +64,7 @@ import type { ProviderRegistry } from "../provider-registry.js";
 import type { QuestionController, QuestionEvent, QuestionRequest } from "../question/controller.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
 import type { DisplayMessage } from "./model/display-history.js";
-import { TraceInteractionState } from "./model/trace-interaction.js";
+import { TraceInteractionState, type TraceAction } from "./model/trace-interaction.js";
 import type { SkillRegistry } from "../skills/registry.js";
 import { parseSkillInvocation } from "../skills/invocation.js";
 import { getNextPermissionMode } from "../permission/mode.js";
@@ -139,7 +139,11 @@ export class PiTuiApp {
   private readonly editor: Editor;
   private readonly composerSlot = new VStack([]);
   private readonly transcriptBox = new VStack([]);
-  private readonly streamingMessage = new StreamingMessageComponent(8, () => this.tui.requestRender());
+  private readonly streamingMessage = new StreamingMessageComponent(
+    8,
+    () => this.tui.requestRender(),
+    (action) => this.handleTraceAction(action),
+  );
   private readonly markdown = new Markdown("", 0, 0, MD_THEME);
   private readonly markdownRenderer = (text: string, width: number): string[] => {
     this.markdown.setText(text);
@@ -188,10 +192,13 @@ export class PiTuiApp {
         if (!this.disposed) this.editor.refreshAutocomplete();
       },
     }));
-    this.settledTranscript = new ResponsiveTranscriptComponent(() => ({
-      messages: this.options.controller.getTranscript(),
-      options: this.transcriptRenderOptions(),
-    }));
+    this.settledTranscript = new ResponsiveTranscriptComponent(
+      () => ({
+        messages: this.options.controller.getTranscript(),
+        options: this.transcriptRenderOptions(),
+      }),
+      { onTraceAction: (action) => this.handleTraceAction(action) },
+    );
     this.welcome = new WelcomeBannerComponent(() => {
       const { agent, updateNotice } = this.options;
       return {
@@ -828,6 +835,21 @@ export class PiTuiApp {
       margin: 1,
     });
     this.tui.setFocus(component);
+  }
+
+  private handleTraceAction(action: TraceAction): void {
+    if (action.kind !== "open-subagent") return;
+    const member = this.options.controller.getSubagentGroups()
+      .flatMap((group) => group.members)
+      .find((candidate) => candidate.subAgentId === action.subAgentId);
+    if (!member) return;
+    this.openSubagentInspector({
+      kind: "subagent",
+      id: action.subAgentId,
+      title: member.nickname ?? member.agentName ?? "subagent",
+      status: member.status ?? "running",
+      member,
+    });
   }
 
   private openTaskInspector(item: TaskPaneItem): void {

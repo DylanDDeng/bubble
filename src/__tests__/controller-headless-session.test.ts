@@ -445,6 +445,54 @@ describe("BubbleTuiController headless session", () => {
       tools: [{ id: "spawn-1", status: "completed", metadata: { subagents: [{ status: "completed", summary: "done" }] } }],
       parts: [{ type: "tools", toolCalls: [{ id: "spawn-1", status: "completed" }] }],
     });
+    expect(controller.getTranscript()[0]?.toolCalls?.[0]?.metadata?.subagents).toEqual([
+      expect.objectContaining({ subAgentId: "child-1", status: "completed", summary: "done" }),
+    ]);
+  });
+
+  it("merges a completed wait_agent result back into the settled spawn trace", async () => {
+    const host = new SpyHost();
+    const runningMember = { subAgentId: "child-1", nickname: "Karen", status: "running" };
+    const completedMember = { ...runningMember, status: "completed", summary: "full review" };
+    const agent = {
+      messages: [],
+      setSessionID: () => {},
+      listSubAgents: () => [],
+      listWorkflows: () => [],
+      getSubAgentMessages: () => [],
+      closeSubAgent: async () => { throw new Error("unused"); },
+      closeWorkflow: () => undefined,
+      async *run(): AsyncIterable<AgentEvent> {
+        yield { type: "tool_start", id: "spawn-1", name: "spawn_agent", args: {} };
+        yield {
+          type: "tool_end",
+          id: "spawn-1",
+          name: "spawn_agent",
+          result: { content: "started", metadata: { kind: "subagent", subagents: [runningMember] } },
+        };
+        yield { type: "turn_end", willContinue: true };
+        yield { type: "turn_start" };
+        yield { type: "tool_start", id: "wait-1", name: "wait_agent", args: {} };
+        yield {
+          type: "tool_end",
+          id: "wait-1",
+          name: "wait_agent",
+          result: { content: "finished", metadata: { kind: "subagent", subagents: [completedMember] } },
+        };
+        yield { type: "turn_end" };
+      },
+    };
+    const controller = new BubbleTuiController({
+      agent: agent as never,
+      sessionManager: { getSessionFile: () => "/s.jsonl" } as never,
+      ports: host.ports,
+    });
+
+    await controller.runTurn("delegate", "/cwd");
+
+    expect(controller.getTranscript()[0]?.toolCalls?.[0]?.metadata?.subagents).toEqual([
+      expect.objectContaining({ subAgentId: "child-1", status: "completed", summary: "full review" }),
+    ]);
   });
 
   it("routes a second running submit through the active input queue instead of starting another run", async () => {

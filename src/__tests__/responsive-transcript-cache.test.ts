@@ -60,4 +60,35 @@ describe("ResponsiveTranscriptComponent projection cache", () => {
     interaction.activate({ kind: "group", key: groupKey, groupKey, foldable: true }, 2);
     expect(component.render(80).join("\n")).toContain("one");
   });
+
+  it("dispatches a subagent inspector action on transcript double-click", () => {
+    const interaction = new TraceInteractionState();
+    const onTraceAction = vi.fn();
+    const messages: readonly DisplayMessage[] = [{
+      key: "subagent",
+      role: "assistant",
+      content: "",
+      toolCalls: [{
+        id: "spawn",
+        name: "spawn_agent",
+        args: {},
+        result: "done",
+        status: "completed",
+        metadata: {
+          kind: "subagent",
+          subagents: [{ subAgentId: "child-1", nickname: "Karen", status: "completed" }],
+        },
+      }],
+    }];
+    const component = new ResponsiveTranscriptComponent(
+      () => ({ messages, options: { traceInteraction: interaction } }),
+      { onTraceAction },
+    );
+    const rows = component.render(80);
+    const row = rows.findIndex((line) => line.includes("Subagent"));
+
+    expect(row).toBeGreaterThanOrEqual(0);
+    component.handleMouse({ kind: "press", button: 0, release: false, clickCount: 2, x: 4, y: row } as never);
+    expect(onTraceAction).toHaveBeenCalledWith({ kind: "open-subagent", subAgentId: "child-1" });
+  });
 });

@@ -1,8 +1,10 @@
 import type { TraceGroup } from "./trace-groups.js";
 
 export type TraceRowTarget =
-  | { kind: "group"; key: string; groupKey: string; foldable: boolean }
-  | { kind: "item"; key: string; groupKey: string; toolId: string; foldable: boolean };
+  | { kind: "group"; key: string; groupKey: string; foldable: boolean; action?: TraceAction }
+  | { kind: "item"; key: string; groupKey: string; toolId: string; foldable: boolean; action?: TraceAction };
+
+export type TraceAction = { kind: "open-subagent"; subAgentId: string };
 
 /**
  * UI-only fold/selection state. Tool lifecycle data remains immutable in the
@@ -54,14 +56,18 @@ export class TraceInteractionState {
     return this.revision;
   }
 
-  activate(target: TraceRowTarget, clickCount: 1 | 2): void {
+  activate(target: TraceRowTarget, clickCount: 1 | 2): TraceAction | undefined {
     const selectionChanged = this.selectedKey !== target.key || this.selectedGroupKey !== target.groupKey;
     this.selectedKey = target.key;
     this.selectedGroupKey = target.groupKey;
     let foldChanged = false;
+    if (clickCount === 2 && target.action) {
+      if (selectionChanged) this.revision += 1;
+      return target.action;
+    }
     if (clickCount !== 2 || !target.foldable) {
       if (selectionChanged) this.revision += 1;
-      return;
+      return undefined;
     }
     if (target.kind === "group") {
       this.toggle(this.expandedGroups, target.groupKey);
@@ -71,6 +77,7 @@ export class TraceInteractionState {
       foldChanged = true;
     }
     if (selectionChanged || foldChanged) this.revision += 1;
+    return undefined;
   }
 
   hover(target: TraceRowTarget | undefined): boolean {

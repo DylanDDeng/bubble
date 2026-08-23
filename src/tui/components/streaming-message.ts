@@ -24,7 +24,7 @@ import {
   type TuiMouseEvent,
 } from "@bubblebrain-ai/pi-tui";
 import type { DisplayMessagePart, DisplayToolCall } from "../model/display-history.js";
-import type { TraceInteractionState, TraceRowTarget } from "../model/trace-interaction.js";
+import type { TraceAction, TraceInteractionState, TraceRowTarget } from "../model/trace-interaction.js";
 import {
   projectAssistantRows,
   projectReasoningRows,
@@ -143,7 +143,7 @@ class ProjectedRowComponent implements Component {
   private target?: TraceRowTarget;
   private interaction?: TraceInteractionState;
 
-  constructor(private readonly onActivate?: () => void) {}
+  constructor(private readonly onActivate?: (action?: TraceAction) => void) {}
 
   setRow(row: string, target?: TraceRowTarget, interaction?: TraceInteractionState): void {
     this.row = row;
@@ -180,8 +180,8 @@ class ProjectedRowComponent implements Component {
       return changed;
     }
     if (event.release || (event.button & 3) !== 0 || !this.target) return false;
-    this.interaction.activate(this.target, event.clickCount);
-    this.onActivate?.();
+    const action = this.interaction.activate(this.target, event.clickCount);
+    this.onActivate?.(action);
     return true;
   }
 }
@@ -205,7 +205,7 @@ export class StreamingMessageComponent extends VStack {
   private phraseTimer: ReturnType<typeof setInterval> | null = null;
   private projectionOptions: Omit<TranscriptRenderOptions, "columns"> = {};
 
-  constructor(maxPreviewRows = 8, onFrame?: () => void) {
+  constructor(maxPreviewRows = 8, onFrame?: () => void, private readonly onTraceAction?: (action: TraceAction) => void) {
     super([]);
     this.onFrame = onFrame;
     this.activityLane = new AgentActivityLaneComponent();
@@ -219,7 +219,8 @@ export class StreamingMessageComponent extends VStack {
     // enough rows for a useful grouped tool trace plus an answer tail.
     this.timelineRows = Array.from(
       { length: maxPreviewRows + 16 },
-      () => new ProjectedRowComponent(() => {
+      () => new ProjectedRowComponent((action) => {
+        if (action) this.onTraceAction?.(action);
         if (this.tail) this.update(this.tail, this.lastColumns ?? 80, this.projectionOptions);
         this.onFrame?.();
       }),

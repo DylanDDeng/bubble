@@ -15,6 +15,83 @@ class RecordingTerminal extends VirtualTerminal {
 }
 
 describe("main pi-tui running input", () => {
+  it("opens the completed subagent inspector by double-clicking its transcript trace", async () => {
+    const terminal = new VirtualTerminal(100, 30);
+    const member = {
+      subAgentId: "child-1",
+      nickname: "Karen",
+      agentName: "explorer",
+      status: "completed",
+      summary: "full review details",
+    };
+    const messages: DisplayMessage[] = [{
+      key: "launch",
+      role: "assistant",
+      content: "",
+      toolCalls: [{
+        id: "spawn",
+        name: "spawn_agent",
+        args: {},
+        result: "finished",
+        status: "completed",
+        metadata: { kind: "subagent", subagents: [member] },
+      }],
+    }];
+    const controller = {
+      subscribe: () => () => {},
+      getTranscript: () => messages,
+      getSubagentGroups: () => [{ id: "single:child-1", kind: "single", label: "Karen", members: [member] }],
+      getWorkflows: () => [],
+      getBackgroundTasks: () => [],
+      getChildTranscript: () => [{ key: "review", role: "assistant", content: "full review details" }],
+      getChildStreamingTail: () => null,
+      stopSubagent: () => {},
+      isRunning: () => false,
+      getStreamingTail: () => null,
+      pendingSteerCount: () => 0,
+      queuedInputCount: () => 0,
+      steer: () => false,
+      cancelActiveRun: () => false,
+      runTurn: async () => {},
+      appendDisplayMessage: () => {},
+      clearTranscript: () => {},
+      shutdown: () => ({ reason: "test", wallMs: 0 }),
+    };
+    const app = new PiTuiApp({
+      agent: {
+        model: "test-model",
+        providerId: "test-provider",
+        thinking: "medium",
+        mode: "default",
+        setMode: () => {},
+        getContextUsageSnapshot: () => ({ usedTokens: 0, contextWindow: 1_000 }),
+      } as never,
+      sessionManager: { getSessionFile: () => "/s.jsonl" } as never,
+      controller: controller as never,
+      callbacks: { onExitRequest: () => {}, onClearTranscript: () => {}, onThemeToggle: () => {} },
+      terminal,
+    });
+
+    app.start();
+    try {
+      await terminal.waitForRender();
+      const traceRow = terminal.getViewport().findIndex((row) => row.includes("Subagent Karen completed"));
+      expect(traceRow).toBeGreaterThanOrEqual(0);
+      const y = traceRow + 1;
+      terminal.sendInput(`\x1b[<0;5;${y}M`);
+      terminal.sendInput(`\x1b[<0;5;${y}m`);
+      terminal.sendInput(`\x1b[<0;5;${y}M`);
+      terminal.sendInput(`\x1b[<0;5;${y}m`);
+      await terminal.waitForRender();
+
+      const inspector = terminal.getViewport().join("\n");
+      expect(inspector).toContain("Karen — read only");
+      expect(inspector).toContain("full review details");
+    } finally {
+      app.dispose();
+    }
+  });
+
   it("opens Tasks Pane with Ctrl+G and returns typing focus to composer after closing", async () => {
     const terminal = new VirtualTerminal(100, 30);
     const controller = {

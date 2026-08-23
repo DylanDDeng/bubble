@@ -112,6 +112,103 @@ function memberKey(member: SubagentDisplay): string {
   return member.subAgentId || `${member.nickname ?? ""}|${member.task ?? ""}`;
 }
 
+function toolCallsFromMessage(message: DisplayMessage): DisplayToolCall[] {
+  return [
+    ...(message.toolCalls ?? []),
+    ...(message.parts ?? []).flatMap((part) => part.type === "tools" ? part.toolCalls : []),
+  ];
+}
+
+function freshestSubagentSnapshots(messages: readonly DisplayMessage[]): SubagentDisplay[] {
+  const freshest = new Map<string, SubagentDisplay>();
+  for (const message of messages) {
+    for (const tool of toolCallsFromMessage(message)) {
+      if (tool.metadata?.kind !== "subagent" || !Array.isArray(tool.metadata.subagents)) continue;
+      for (const raw of tool.metadata.subagents) {
+        if (typeof raw !== "object" || raw === null) continue;
+        const member = raw as SubagentDisplay;
+        const key = memberKey(member);
+        if (!key) continue;
+        const current = freshest.get(key);
+        if (!current || subagentFreshness(member) >= subagentFreshness(current)) {
+          freshest.set(key, current ? { ...current, ...member } : member);
+        }
+      }
+    }
+  }
+  return [...freshest.values()];
+}
+
+/**
+ * Projects a newer lifecycle snapshot back onto every existing trace that
+ * already references the same child. spawn_agent settles as soon as the child
+ * is queued, while later tool_update/wait_agent events carry the authoritative
+ * running/final state. Keeping the launch row synchronized prevents it from
+ * remaining permanently "running" beside a completed Tasks Pane entry.
+ */
+export function mergeSubagentSnapshotsIntoMessages(
+  messages: DisplayMessage[],
+  incoming: ToolResultMetadata | undefined,
+): DisplayMessage[] {
+  if (incoming?.kind !== "subagent" || !Array.isArray(incoming.subagents)) return messages;
+  const incomingByKey = new Map<string, SubagentDisplay>();
+  for (const raw of incoming.subagents) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const member = raw as SubagentDisplay;
+    const key = memberKey(member);
+    if (key) incomingByKey.set(key, member);
+  }
+  if (incomingByKey.size === 0) return messages;
+
+  const updateTool = (tool: DisplayToolCall): DisplayToolCall => {
+    if (tool.metadata?.kind !== "subagent" || !Array.isArray(tool.metadata.subagents)) return tool;
+    let changed = false;
+    const subagents = tool.metadata.subagents.map((raw) => {
+      if (typeof raw !== "object" || raw === null) return raw;
+      const current = raw as SubagentDisplay;
+      const next = incomingByKey.get(memberKey(current));
+      if (!next || subagentFreshness(next) < subagentFreshness(current)) return raw;
+      changed = true;
+      return { ...current, ...next };
+    });
+    return changed ? { ...tool, metadata: { ...tool.metadata, subagents } } : tool;
+  };
+
+  let anyChanged = false;
+  const updated = messages.map((message) => {
+    let messageChanged = false;
+    const toolCalls = message.toolCalls?.map((tool) => {
+      const next = updateTool(tool);
+      if (next !== tool) messageChanged = true;
+      return next;
+    });
+    const parts = message.parts?.map((part) => {
+      if (part.type !== "tools") return part;
+      let partChanged = false;
+      const nextTools = part.toolCalls.map((tool) => {
+        const next = updateTool(tool);
+        if (next !== tool) partChanged = true;
+        return next;
+      });
+      if (!partChanged) return part;
+      messageChanged = true;
+      return { ...part, toolCalls: nextTools };
+    });
+    if (!messageChanged) return message;
+    anyChanged = true;
+    return { ...message, toolCalls, parts };
+  });
+  return anyChanged ? updated : messages;
+}
+
+/** Reconciles persisted launch/wait/list echoes when rebuilding a session. */
+export function synchronizeSubagentSnapshots(messages: DisplayMessage[]): DisplayMessage[] {
+  const snapshots = freshestSubagentSnapshots(messages);
+  return snapshots.length === 0
+    ? messages
+    : mergeSubagentSnapshotsIntoMessages(messages, { kind: "subagent", subagents: snapshots });
+}
+
 /**
  * Merges subagent tool metadata, deduping member snapshots by subAgentId so a
  * stream of per-child updates accumulates into one member list instead of each

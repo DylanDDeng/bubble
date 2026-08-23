@@ -9,7 +9,7 @@
  */
 import type { Component, TuiMouseEvent } from "@bubblebrain-ai/pi-tui";
 import type { DisplayMessage } from "../model/display-history.js";
-import type { TraceInteractionState, TraceRowTarget } from "../model/trace-interaction.js";
+import type { TraceAction, TraceInteractionState, TraceRowTarget } from "../model/trace-interaction.js";
 import {
   projectTranscript,
   type TranscriptProjection,
@@ -19,6 +19,10 @@ import {
 export interface ResponsiveTranscriptSnapshot {
   messages: readonly DisplayMessage[];
   options?: Omit<TranscriptRenderOptions, "columns">;
+}
+
+export interface ResponsiveTranscriptCallbacks {
+  onTraceAction?(action: TraceAction): void;
 }
 
 export class ResponsiveTranscriptComponent implements Component {
@@ -37,7 +41,10 @@ export class ResponsiveTranscriptComponent implements Component {
     projection: TranscriptProjection;
   };
 
-  constructor(private readonly getSnapshot: () => ResponsiveTranscriptSnapshot) {}
+  constructor(
+    private readonly getSnapshot: () => ResponsiveTranscriptSnapshot,
+    private readonly callbacks: ResponsiveTranscriptCallbacks = {},
+  ) {}
 
   render(width: number): string[] {
     const snapshot = this.getSnapshot();
@@ -89,7 +96,8 @@ export class ResponsiveTranscriptComponent implements Component {
     const target = this.traceTargets[event.y];
     if (event.kind === "move") return this.traceInteraction.hover(target);
     if (event.release || (event.button & 3) !== 0 || !target) return false;
-    this.traceInteraction.activate(target, event.clickCount);
+    const action = this.traceInteraction.activate(target, event.clickCount);
+    if (action) this.callbacks.onTraceAction?.(action);
     return true;
   }
 

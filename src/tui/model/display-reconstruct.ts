@@ -6,6 +6,7 @@ import { INTERRUPTED_ASSISTANT_CONTENT } from "../../agent.js";
 import { isHiddenToolMetadata } from "../../agent/tool-visibility.js";
 import { isInternalBlockOnlyContent } from "../../agent/internal-reminder-sanitizer.js";
 import { nextDisplayMessageKey, stripInterruptedAssistantMarker, type DisplayMessage, type DisplayToolCall } from "./display-history.js";
+import { synchronizeSubagentSnapshots } from "./subagent-view.js";
 import type { Message } from "../../types.js";
 
 export function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] {
@@ -76,5 +77,5 @@ export function reconstructDisplayMessages(agentMessages: Message[]): DisplayMes
       }
     }
   }
-  return result;
+  return synchronizeSubagentSnapshots(result);
 }
