@@ -112,6 +112,30 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
+	it("dismisses an opted-in centered overlay on a primary click outside it", async () => {
+		const terminal = new VirtualTerminal(20, 6);
+		const overlay = {
+			render: () => ["overlay", "content", "footer"],
+			invalidate: () => {},
+		};
+		const tui = new TuiAltScreen(terminal);
+		tui.setLayoutRoot(new Text("base", 0, 0));
+		tui.showOverlay(overlay, {
+			anchor: "center",
+			width: 10,
+			dismissOnOutsideClick: true,
+		});
+		tui.start();
+		await terminal.waitForRender();
+		assert.strictEqual(tui.hasOverlay(), true);
+
+		// Overlay origin is (5, 1); this click is outside its horizontal bounds.
+		terminal.sendInput("\x1b[<0;1;2M");
+		await terminal.waitForRender();
+		assert.strictEqual(tui.hasOverlay(), false);
+		tui.stop();
+	});
+
 	it("routes no-button pointer motion and sends leave when the pointer exits", async () => {
 		const terminal = new VirtualTerminal(20, 4);
 		const events: TuiMouseEvent[] = [];

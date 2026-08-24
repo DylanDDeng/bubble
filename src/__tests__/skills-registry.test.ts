@@ -115,4 +115,48 @@ Do not expose this to the model.
     expect(registry.all()).toHaveLength(1);
     expect(registry.summaries()).toHaveLength(0);
   });
+
+  it("reloads Skill metadata and keeps persisted enablement authoritative", () => {
+    const root = makeTempRoot("reload-enable");
+    const cwd = join(root, "project");
+    const skillDir = join(cwd, ".bubble", "skills", "repo-review");
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(
+      join(skillDir, "SKILL.md"),
+      `---
+description: Review a repository.
+author: Bubble Team
+allowed-tools: read, grep, glob
+---
+
+Review carefully.
+`,
+    );
+    const persisted: string[][] = [];
+    const registry = new SkillRegistry({
+      cwd,
+      bubbleHome: join(root, "home"),
+      agentsHome: join(root, "agents"),
+      claudeHome: join(root, "claude"),
+      onDisabledSkillsChange: (names) => persisted.push(names),
+    });
+
+    expect(registry.getAny("repo-review")?.meta.author).toBe("Bubble Team");
+    expect(registry.getAny("repo-review")?.meta.allowedTools).toEqual(["read", "grep", "glob"]);
+    expect(registry.setEnabled("repo-review", false)).toBe(true);
+    expect(registry.get("repo-review")).toBeUndefined();
+    expect(registry.summaries()).toEqual([]);
+    expect(persisted).toEqual([["repo-review"]]);
+
+    mkdirSync(join(cwd, ".bubble", "skills", "new-skill"), { recursive: true });
+    writeFileSync(
+      join(cwd, ".bubble", "skills", "new-skill", "SKILL.md"),
+      "---\ndescription: Newly installed.\n---\n\nRun it.\n",
+    );
+    registry.reload();
+    expect(registry.all().map((skill) => skill.meta.name)).toEqual(["new-skill", "repo-review"]);
+    expect(registry.isEnabled("repo-review")).toBe(false);
+    expect(registry.setEnabled("repo-review", true)).toBe(true);
+    expect(persisted.at(-1)).toEqual([]);
+  });
 });

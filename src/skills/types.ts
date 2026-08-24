@@ -4,6 +4,8 @@ export interface SkillMeta {
   disableModelInvocation: boolean;
   version?: number;
   tags?: string[];
+  author?: string;
+  allowedTools?: string[];
 }
 
 export interface SkillResourceIndex {
@@ -34,4 +36,3 @@ export interface SkillDiagnostic {
   filePath?: string;
   message: string;
 }
-

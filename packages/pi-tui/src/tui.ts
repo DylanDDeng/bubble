@@ -178,6 +178,8 @@ export interface OverlayOptions {
 	visible?: (termWidth: number, termHeight: number) => boolean;
 	/** If true, don't capture keyboard focus when shown */
 	nonCapturing?: boolean;
+	/** If true, a primary-button press outside the overlay closes it. */
+	dismissOnOutsideClick?: boolean;
 }
 
 /** Options for {@link OverlayHandle.unfocus}. */
@@ -748,6 +750,25 @@ export abstract class TuiBase extends Container implements TUI {
 			}
 		}
 		return topmost;
+	}
+
+	/** Close the visual-frontmost overlay when it opts into outside-click dismissal. */
+	protected dismissTopmostOverlayOnOutsideClick(): boolean {
+		const topmost = this.getTopmostVisibleOverlay();
+		if (!topmost?.options?.dismissOnOutsideClick) return false;
+		const ownedFocus = this.findOverlayContaining(this.focusedComponent) === topmost;
+		this.clearOverlayFocusRestoreFor(topmost);
+		this.retargetOverlayPreFocus(topmost);
+		const index = this.overlayStack.indexOf(topmost);
+		if (index < 0) return false;
+		this.overlayStack.splice(index, 1);
+		if (ownedFocus) {
+			const next = this.getTopmostVisibleOverlay();
+			this.setFocus(next?.component ?? topmost.preFocus);
+		}
+		if (this.overlayStack.length === 0) this.terminal.hideCursor();
+		this.requestRender();
+		return true;
 	}
 
 	override invalidate(): void {

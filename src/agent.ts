@@ -513,6 +513,12 @@ export class Agent {
     };
   }
 
+  /** Refresh the live Skill catalog after /skills reloads or changes enablement. */
+  setSkillSummaries(skills: SkillSummary[]): void {
+    this.skillSummaries = skills.slice();
+    this.notifyContextChanged();
+  }
+
   /** Current routing menu (design §4); undefined when no accessor is wired. */
   buildModelRoutingPromptSection(): string | undefined {
     return this.router.promptSection();

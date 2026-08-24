@@ -835,7 +835,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		}
 
 		if (event.release || (event.button & 32) !== 0 || (event.button & 3) !== 0) return true;
-		if (!target || !handler) return true;
+		if (!target) {
+			this.dismissTopmostOverlayOnOutsideClick();
+			return true;
+		}
+		if (!handler) return true;
 
 		const now = Date.now();
 		const previous = this.lastComponentClick;

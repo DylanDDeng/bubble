@@ -70,6 +70,8 @@ export interface UserConfigData {
   defaultModel?: string;
   defaultThinkingLevel?: ThinkingLevel;
   skillPaths?: string[];
+  /** Skill names disabled from invocation/search until re-enabled in /skills. */
+  skills?: { disabled?: string[] };
   /**
    * Three shapes are accepted on disk so we can evolve without breaking
    * existing configs:
@@ -257,6 +259,29 @@ export class UserConfig {
 
   setSkillPaths(paths: string[]) {
     this.data.skillPaths = paths.slice();
+    this.save();
+  }
+
+  getDisabledSkills(): string[] {
+    const disabled = this.data.skills?.disabled;
+    if (!Array.isArray(disabled)) return [];
+    return [...new Set(disabled.filter((name): name is string => (
+      typeof name === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(name)
+    )))].sort((a, b) => a.localeCompare(b));
+  }
+
+  setDisabledSkills(names: string[]) {
+    const disabled = [...new Set(names.filter((name) => (
+      /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(name)
+    )))].sort((a, b) => a.localeCompare(b));
+    if (disabled.length === 0) {
+      const next = { ...(this.data.skills ?? {}) };
+      delete next.disabled;
+      if (Object.keys(next).length === 0) delete this.data.skills;
+      else this.data.skills = next;
+    } else {
+      this.data.skills = { ...(this.data.skills ?? {}), disabled };
+    }
     this.save();
   }
 

@@ -55,6 +55,7 @@ import { SubagentInspectorComponent } from "./components/subagent-inspector.js";
 import { TaskInspectorComponent } from "./components/task-inspector.js";
 import { ContextInfoComponent } from "./components/context-info.js";
 import { StatsPanelComponent } from "./components/stats-panel.js";
+import { SkillsPanelComponent } from "./components/skills-panel.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import type { SlashCommandContext } from "../slash-commands/types.js";
 import type { ContextUsageSnapshot } from "../context/usage.js";
@@ -528,6 +529,8 @@ export class PiTuiApp {
           this.editor.refreshAutocomplete();
         } else if (mode === "key" && providerId) {
           this.openProviderKeyPhase(providerId);
+        } else if (mode === "skill") {
+          this.openSkills();
         }
       },
       registry: options.registry as never,
@@ -683,6 +686,35 @@ export class PiTuiApp {
       maxWidth: 100,
       maxHeight: 30,
       margin: { top: 2, right: 0, bottom: 2, left: 0 },
+    });
+    this.tui.setFocus(component);
+  }
+
+  private openSkills(): void {
+    const skillRegistry = this.options.skillRegistry;
+    if (!skillRegistry) {
+      this.pushNotice("No skill registry is attached to this session.");
+      return;
+    }
+    let handle: { hide(): void } | undefined;
+    const component = new SkillsPanelComponent(skillRegistry, {
+      getTerminalRows: () => this.tui.terminal.rows,
+      onClose: () => handle?.hide(),
+      onRender: () => this.renderSnapshot(),
+      onSkillsChanged: () => {
+        this.options.agent.setSkillSummaries(skillRegistry.summaries());
+        this.editor.refreshAutocomplete();
+        this.renderSnapshot();
+      },
+    });
+    handle = this.tui.showOverlay(component, {
+      anchor: "center",
+      width: "65%",
+      minWidth: 40,
+      maxWidth: 160,
+      maxHeight: 34,
+      margin: { top: 3, right: 0, bottom: 3, left: 0 },
+      dismissOnOutsideClick: true,
     });
     this.tui.setFocus(component);
   }

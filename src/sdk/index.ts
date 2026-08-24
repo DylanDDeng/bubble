@@ -182,6 +182,7 @@ export class BubbleSdk {
     const registry = new SkillRegistry({
       cwd: cwd || this.defaultCwd,
       skillPaths: this.userConfig.getSkillPaths(),
+      disabledSkills: this.userConfig.getDisabledSkills(),
     });
     return registry.summaries();
   }
@@ -269,7 +270,11 @@ export class BubbleSdk {
     abort.signal.addEventListener("abort", () => questionController.rejectAll(), { once: true });
 
     try {
-      const skillRegistry = new SkillRegistry({ cwd, skillPaths: this.userConfig.getSkillPaths() });
+      const skillRegistry = new SkillRegistry({
+        cwd,
+        skillPaths: this.userConfig.getSkillPaths(),
+        disabledSkills: this.userConfig.getDisabledSkills(),
+      });
       const tools = createAllTools(cwd, skillRegistry, {
         approvalController,
         fileStateTracker,

@@ -102,6 +102,8 @@ export async function serveFeishu(opts: ServeFeishuOptions = {}): Promise<void> 
   const skillRegistry = new SkillRegistry({
     cwd: rootCwd,
     skillPaths: userConfig.getSkillPaths(),
+    disabledSkills: userConfig.getDisabledSkills(),
+    onDisabledSkillsChange: (disabledSkills) => userConfig.setDisabledSkills(disabledSkills),
   });
   const mcpLoaded = loadMcpConfig({ cwd: rootCwd });
   const mcpManager = new McpManager({ servers: mcpLoaded.servers });

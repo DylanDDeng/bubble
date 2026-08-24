@@ -98,6 +98,8 @@ async function main() {
   const skillRegistry = new SkillRegistry({
     cwd: args.cwd,
     skillPaths: userConfig.getSkillPaths(),
+    disabledSkills: userConfig.getDisabledSkills(),
+    onDisabledSkillsChange: (disabledSkills) => userConfig.setDisabledSkills(disabledSkills),
   });
   const printMode = args.print || !!args.prompt;
 

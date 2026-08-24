@@ -17,6 +17,18 @@ describe("UserConfig", () => {
     process.env.BUBBLE_HOME = originalBubbleHome;
   });
 
+  it("persists disabled Skill names as a normalized user preference", () => {
+    process.env.BUBBLE_HOME = root;
+    writeFileSync(join(root, "config.json"), JSON.stringify({}, null, 2));
+
+    const config = new UserConfig();
+    config.setDisabledSkills(["podcast", "repo-review", "podcast", "bad name"]);
+
+    expect(new UserConfig().getDisabledSkills()).toEqual(["podcast", "repo-review"]);
+    config.setDisabledSkills([]);
+    expect(new UserConfig().getDisabledSkills()).toEqual([]);
+  });
+
   it("falls back to the most recent model when defaultModel is missing", () => {
     process.env.BUBBLE_HOME = root;
     writeFileSync(
