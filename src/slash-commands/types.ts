@@ -58,10 +58,14 @@ export interface SlashCommandContext {
   openSessionPicker?: () => void;
   /** Replace the composer/input box content (e.g. /rewind restores the rewound message for re-editing). */
   fillComposer?: (text: string) => void;
+  /** Re-project host transcript state after a command rewrites agent.messages. */
+  rebuildTranscript?: () => void;
   /** Open the interactive usage stats panel. */
   openStats?: () => void;
   /** Open the interactive context-usage panel. Text-only hosts omit this. */
   openContextInfo?: (snapshot: ContextUsageSnapshot) => void;
+  /** Execute the persistent autonomous Goal lifecycle in an interactive host. */
+  handleGoalCommand?: (input: string) => void | Promise<void>;
   /**
    * Push live compaction progress to the running TUI. Pass a progress object
    * while compacting and `null` to clear the indicator. Absent in non-TUI hosts.

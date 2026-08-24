@@ -40,6 +40,10 @@ import { ApprovalDialogComponent, type ApprovalDialogChoice } from "./components
 import { QuestionDialogComponent } from "./components/question-dialog.js";
 import { ProviderKeyInputComponent } from "./components/provider-key-input.js";
 import {
+  RewindPickerComponent,
+  type RewindPickerPoint,
+} from "./components/rewind-picker.js";
+import {
   TaskStatusBarComponent,
   TasksPaneComponent,
   type SubagentPaneItem,
@@ -55,7 +59,7 @@ import type { SlashCommandContext } from "../slash-commands/types.js";
 import type { ContextUsageSnapshot } from "../context/usage.js";
 import { BubbleTuiController } from "./controller/controller.js";
 import { OverlayRequestController } from "./controller/overlay-controller.js";
-import { defaultTranscriptTheme, type TranscriptRenderOptions } from "./components/transcript.js";
+import { defaultTranscriptTheme, projectTranscript, type TranscriptRenderOptions } from "./components/transcript.js";
 import { friendlyCwd, sessionBasename } from "./formatting/summary.js";
 import { ResponsiveFooterComponent } from "./footer.js";
 import { ComposerAutocompleteProvider } from "./composer-autocomplete.js";
@@ -72,6 +76,7 @@ import { parseSkillInvocation } from "../skills/invocation.js";
 import { getNextPermissionMode } from "../permission/mode.js";
 import { maskKey } from "../config.js";
 import { copyToClipboard } from "../clipboard.js";
+import type { RewindScope } from "../rewind.js";
 
 export interface PiAppCallbacks {
   onExitRequest(): void;
@@ -141,6 +146,7 @@ export class PiTuiApp {
   private readonly tui: TUI;
   private readonly editor: Editor;
   private readonly composerSlot = new VStack([]);
+  private viewportScroll: ScrollView | null = null;
   private readonly transcriptBox = new VStack([]);
   private readonly streamingMessage = new StreamingMessageComponent(
     8,
@@ -171,6 +177,12 @@ export class PiTuiApp {
     component: ProviderKeyInputComponent;
     submitting: boolean;
   } | null = null;
+  private rewindPhase: {
+    component: RewindPickerComponent;
+    draft: string;
+    previousScrollTop: number;
+  } | null = null;
+  private rewindPreviewMessageIndex: number | undefined;
   private disposed = false;
 
   constructor(private readonly options: PiTuiAppOptions) {
@@ -224,6 +236,7 @@ export class PiTuiApp {
         cwd: friendlyCwd(process.cwd()),
         extra,
         mode: this.options.agent.mode,
+        goalLine: this.options.controller.getGoalIndicator?.(),
         // At two rows or fewer, preserve the focused editor body + border.
         hidden: this.tui.terminal.rows <= 2,
       };
@@ -304,6 +317,7 @@ export class PiTuiApp {
       // boundary: spinner text changes, its geometry never does.
       const document = new VStack([this.welcome, this.transcriptBox]);
       const scroll = new ScrollView(document, { follow: "end", primary: true });
+      this.viewportScroll = scroll;
       this.tui.setLayoutRoot(new VStack([
         { component: scroll, basis: 0, grow: 1, minSize: 0 },
         { component: this.taskStatusBar, basis: "auto", shrink: 0 },
@@ -329,6 +343,7 @@ export class PiTuiApp {
 
   private wireInput(): void {
     let ctrlCArmed = false;
+    let rewindEscapeArmed = false;
     this.tui.addInputListener((data: string) => {
       // Global shortcuts act on key presses only. Kitty keyboard protocol also
       // reports releases; allowing those through can trigger a shortcut twice.
@@ -342,6 +357,7 @@ export class PiTuiApp {
       // Escape returns to /provider instead of cancelling an unrelated run,
       // and Shift+Tab must not change permissions while a key is being typed.
       if (this.providerKeyPhase) return undefined;
+      if (this.rewindPhase) return undefined;
       if (matchesKey(data, "ctrl+g")) {
         if (this.tasksPane.isOpen() && this.tasksPane.focused) {
           this.tasksPane.close();
@@ -368,6 +384,17 @@ export class PiTuiApp {
         // key unconsumed so the editor/autocomplete layer can handle it.
         return { consume: true };
       }
+      if (matchesKey(data, "escape") && !this.options.controller.isRunning() && !this.editor.getText()) {
+        if (rewindEscapeArmed) {
+          rewindEscapeArmed = false;
+          this.openRewindPicker();
+          return { consume: true };
+        }
+        rewindEscapeArmed = true;
+        setTimeout(() => { rewindEscapeArmed = false; }, 650);
+        return undefined;
+      }
+      rewindEscapeArmed = false;
       if (matchesKey(data, "ctrl+c")) {
         // Match Ink: the first Ctrl+C interrupts the active run. Requiring a
         // second keypress here made cancellation feel like a quit gesture and
@@ -486,7 +513,9 @@ export class PiTuiApp {
       clearMessages: () => options.controller.clearTranscript(),
       cwd: process.cwd(),
       exit: () => this.dispose(),
-      sessionManager: options.sessionManager as never,
+      // Embedded/test hosts created before session switching may only expose
+      // the constructor manager; production controllers provide the live one.
+      sessionManager: (options.controller.getSessionManager?.() ?? options.sessionManager) as never,
       createProvider: options.createProvider as never,
       openPicker: (mode, providerId) => {
         if (mode === "model" || mode === "provider") {
@@ -519,7 +548,13 @@ export class PiTuiApp {
       ...(this.tui.mode === "fullscreen"
         ? { openContextInfo: (snapshot: ContextUsageSnapshot) => this.openContextInfo(snapshot) }
         : {}),
-      openRewindPicker: () => this.pushNotice("rewind picker: coming to the pi TUI"),
+      handleGoalCommand: (input) => options.controller.handleGoalCommand(input, process.cwd()),
+      openRewindPicker: () => this.openRewindPicker(),
+      fillComposer: (text) => {
+        this.editor.setText(text);
+        this.tui.setFocus(this.editor);
+      },
+      rebuildTranscript: () => options.controller.rebuildTranscriptFromAgent(),
       openSessionPicker: () => this.pushNotice("session picker: coming to the pi TUI"),
       compactionProgress: () => {},
     } as SlashCommandContext;
@@ -550,6 +585,7 @@ export class PiTuiApp {
       showReasoning: this.showReasoning,
       verboseTrace: this.verboseTrace,
       traceInteraction: this.traceInteraction,
+      dimFromMessageIndex: this.rewindPreviewMessageIndex,
       theme: defaultTranscriptTheme,
       // Stable identity lets the settled transcript cache survive composer-only
       // frames. The stateful Markdown instance is still updated on cache misses.
@@ -759,6 +795,168 @@ export class PiTuiApp {
     } catch (error) {
       const message = (error instanceof Error ? error.message : String(error)).replaceAll(key, "[redacted]");
       this.pushNotice(`Failed to update API key for ${providerId}: ${message}`);
+    }
+    this.renderSnapshot();
+  }
+
+  private openRewindPicker(): void {
+    if (this.rewindPhase || this.providerKeyPhase || this.disposed) return;
+    const controller = this.options.controller;
+    const points = controller.isRunning() ? [] : this.collectRewindPoints();
+    if (!controller.isRunning() && points.length === 0) {
+      this.pushNotice("Nothing to rewind: no user messages in this session.");
+      this.renderSnapshot();
+      return;
+    }
+
+    const draft = this.editor.getText();
+    const component = new RewindPickerComponent(
+      controller.isRunning() ? "cancel-offer" : "picker",
+      points,
+      {
+        getTerminalRows: () => this.tui.terminal.rows,
+        onPreview: (point, scope) => this.previewRewindPoint(point, scope),
+        onScopeChange: (point, scope) => this.previewRewindPoint(point, scope),
+        onCancel: () => this.closeRewindPicker(true),
+        onCancelRun: () => void this.cancelRunForRewind(component),
+        onConfirm: (point, scope) => void this.executeRewindFromPicker(component, point, scope),
+        onRender: () => this.renderSnapshot(),
+      },
+    );
+    this.rewindPhase = {
+      component,
+      draft,
+      previousScrollTop: this.viewportScroll?.scrollTop ?? 0,
+    };
+    this.composerSlot.removeChild(this.editor);
+    this.composerSlot.addChild(component);
+    this.tui.setFocus(component);
+    const selected = component.getSelectedPoint();
+    if (selected) this.previewRewindPoint(selected, "all");
+    this.renderSnapshot();
+  }
+
+  private collectRewindPoints(): RewindPickerPoint[] {
+    const session = this.options.controller.getSessionManager();
+    const turns = session.listUserTurns();
+    const checkpoints = session.getCheckpoints();
+    return turns.map((turn, turnIndex) => ({
+      turn,
+      turnIndex,
+      fileCount: checkpoints.filesTouchedAt(turn.id).length,
+    }));
+  }
+
+  private async cancelRunForRewind(component: RewindPickerComponent): Promise<void> {
+    if (this.rewindPhase?.component !== component || component.getPhase() !== "cancel-offer") return;
+    component.showLoading();
+    this.options.controller.cancelActiveRun("Cancelled before rewind");
+    await this.waitForControllerIdle();
+    if (this.rewindPhase?.component !== component || this.disposed) return;
+    component.showPicker(this.collectRewindPoints());
+  }
+
+  private waitForControllerIdle(): Promise<void> {
+    const controller = this.options.controller;
+    if (!controller.isRunning()) return Promise.resolve();
+    return new Promise((resolve) => {
+      const unsubscribe = controller.subscribe(() => {
+        if (controller.isRunning()) return;
+        unsubscribe();
+        resolve();
+      });
+      // The run can settle between the first check and subscription.
+      if (!controller.isRunning()) {
+        unsubscribe();
+        resolve();
+      }
+    });
+  }
+
+  private async executeRewindFromPicker(
+    component: RewindPickerComponent,
+    point: RewindPickerPoint,
+    scope: RewindScope,
+  ): Promise<void> {
+    if (this.rewindPhase?.component !== component || component.getPhase() === "executing") return;
+    component.showExecuting();
+    try {
+      const result = await this.options.controller.rewindToTurn(point.turn.id, scope);
+      const targetText = result.target.text;
+      const restoredDraft = this.rewindPhase?.draft ?? "";
+      // Swap the panel, final composer value, transcript dim, and focus before
+      // requesting the success paint. This prevents an empty-composer frame
+      // between "Rewinding..." and the restored prompt.
+      this.closeRewindPicker(false, scope === "code" ? restoredDraft : targetText, false);
+      this.viewportScroll?.scrollToEnd();
+
+      const fileCount = result.files.restored.length + result.files.deleted.length;
+      const failed = result.files.failed.length;
+      if (scope === "code") {
+        this.pushNotice(
+          failed > 0
+            ? `Files restored with ${failed} failure${failed === 1 ? "" : "s"}.`
+            : fileCount > 0
+              ? `Restored ${fileCount} file${fileCount === 1 ? "" : "s"}.`
+              : "No tracked file edits to undo.",
+        );
+      } else {
+        const fileSuffix = scope === "all"
+          ? failed > 0
+            ? ` · ${failed} file restore failure${failed === 1 ? "" : "s"}`
+            : fileCount > 0
+              ? ` · ${fileCount} file${fileCount === 1 ? "" : "s"} restored`
+              : " · no tracked file edits"
+          : "";
+        this.pushNotice(`Reverted conversation${fileSuffix}`);
+      }
+      this.renderSnapshot();
+    } catch (error) {
+      if (this.rewindPhase?.component !== component) return;
+      component.showError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private closeRewindPicker(restoreDraft: boolean, replacementText?: string, render = true): void {
+    const phase = this.rewindPhase;
+    if (!phase) return;
+    this.composerSlot.removeChild(phase.component);
+    this.composerSlot.addChild(this.editor);
+    this.rewindPhase = null;
+    this.rewindPreviewMessageIndex = undefined;
+    if (restoreDraft || replacementText !== undefined) {
+      this.editor.setText(restoreDraft ? phase.draft : replacementText ?? "");
+    }
+    if (restoreDraft) {
+      this.viewportScroll?.scrollTo(phase.previousScrollTop, { disableFollow: true });
+    }
+    this.tui.setFocus(this.editor);
+    if (render) this.renderSnapshot();
+  }
+
+  private previewRewindPoint(point: RewindPickerPoint | undefined, scope: RewindScope): void {
+    if (!point) {
+      this.rewindPreviewMessageIndex = undefined;
+      this.renderSnapshot();
+      return;
+    }
+    const transcript = this.options.controller.getTranscript();
+    const userIndexes = transcript
+      .map((message, index) => message.role === "user" ? index : -1)
+      .filter((index) => index >= 0);
+    const turnCount = this.options.controller.getSessionManager().listUserTurns().length;
+    const relevantUsers = userIndexes.slice(Math.max(0, userIndexes.length - turnCount));
+    const messageIndex = relevantUsers[point.turnIndex];
+    this.rewindPreviewMessageIndex = scope === "code" ? undefined : messageIndex;
+
+    if (messageIndex !== undefined && this.viewportScroll) {
+      const columns = this.tui.terminal.columns || process.stdout.columns || 80;
+      const rowsBefore = this.welcome.render(columns).length + projectTranscript(
+        transcript.slice(0, messageIndex),
+        { ...this.transcriptRenderOptions(), columns, trailingSpacer: false, dimFromMessageIndex: undefined },
+      ).rows.length;
+      const centeredTop = rowsBefore - Math.floor(this.viewportScroll.viewportHeight / 2);
+      this.viewportScroll.scrollTo(centeredTop, { disableFollow: true });
     }
     this.renderSnapshot();
   }

@@ -8,6 +8,7 @@ describe("parseGoalCommand", () => {
   });
 
   it("parses subcommands", () => {
+    expect(parseGoalCommand("/goal status")).toEqual({ kind: "show" });
     expect(parseGoalCommand("/goal clear")).toEqual({ kind: "clear" });
     expect(parseGoalCommand("/goal pause")).toEqual({ kind: "pause" });
     expect(parseGoalCommand("/goal resume")).toEqual({ kind: "resume" });

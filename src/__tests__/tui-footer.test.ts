@@ -52,6 +52,21 @@ describe("responsive TUI footer", () => {
     expect(footer.render(20)).toEqual([]);
   });
 
+  it("renders an active goal as a separate width-safe status row", () => {
+    const footer = new ResponsiveFooterComponent(() => ({
+      agent,
+      cwd: "~/project",
+      goalLine: "goal: active · 12 turns · 63.9K/200K tok — ship the release safely",
+    }));
+
+    for (let width = 1; width <= 80; width += 1) {
+      const rows = footer.render(width);
+      expect(rows).toHaveLength(2);
+      expect(rows.every((row) => stringWidth(row) <= width)).toBe(true);
+    }
+    expect(footer.render(80)[0]).toContain("goal: active");
+  });
+
   it("shows the legacy non-default permission badges and hides default mode", () => {
     expect(renderPermissionModeBadge("default")).toBe("");
     expect(renderPermissionModeBadge("plan")).toContain("⏸ plan on");

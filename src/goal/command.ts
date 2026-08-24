@@ -4,7 +4,7 @@
  * Forms:
  *   /goal                      -> show summary
  *   /goal <objective> [--budget N]  -> set a new goal
- *   /goal clear | pause | resume
+ *   /goal status | clear | pause | resume
  *   /goal edit <new objective>
  *
  * --budget accepts plain integers and k/m suffixes: 200000, 200k, 1.5m.
@@ -19,7 +19,7 @@ export interface GoalCommand {
   error?: string;
 }
 
-const SUBCOMMANDS = new Set(["clear", "pause", "resume", "edit"]);
+const SUBCOMMANDS = new Set(["status", "clear", "pause", "resume", "edit"]);
 
 export function parseGoalCommand(input: string): GoalCommand {
   const body = input.trim().replace(/^\/goal\b/, "").trim();
@@ -29,6 +29,10 @@ export function parseGoalCommand(input: string): GoalCommand {
   const rest = body.slice(firstToken.length).trim();
 
   if (SUBCOMMANDS.has(firstToken)) {
+    if (firstToken === "status") {
+      if (rest) return { kind: "show", error: "/goal status takes no arguments" };
+      return { kind: "show" };
+    }
     if (firstToken === "edit") {
       if (!rest) return { kind: "edit", error: "Usage: /goal edit <new objective>" };
       const { text, tokenBudget, error } = extractBudget(rest);

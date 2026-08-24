@@ -14,6 +14,8 @@ export interface FooterRenderOptions {
   cwd?: string;
   extra?: readonly string[];
   mode?: PermissionMode;
+  /** Persistent autonomous Goal status, rendered on its own muted row. */
+  goalLine?: string;
 }
 
 export interface ResponsiveFooterSnapshot extends FooterRenderOptions {
@@ -28,7 +30,12 @@ export class ResponsiveFooterComponent implements Component {
   render(width: number): string[] {
     const snapshot = this.getSnapshot();
     if (snapshot.hidden) return [];
-    return [renderFooterLine(snapshot.agent, width, snapshot)];
+    const rows: string[] = [];
+    if (snapshot.goalLine?.trim()) {
+      rows.push(truncateToWidth(chalk.dim(snapshot.goalLine.trim()), Math.max(1, Math.floor(width))));
+    }
+    rows.push(renderFooterLine(snapshot.agent, width, snapshot));
+    return rows;
   }
 
   invalidate(): void {

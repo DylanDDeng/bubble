@@ -124,6 +124,18 @@ function createGrokRegistryStub(authStorage: ReturnType<typeof createGrokAuthSto
 }
 
 describe("slash commands", () => {
+  it("/goal is registered and delegates the complete command to the interactive host", async () => {
+    const handleGoalCommand = vi.fn();
+    const ctx = createContext({ handleGoalCommand });
+
+    const result = await slashRegistry.execute("/goal ship the release --budget 200k", ctx);
+
+    expect(result.handled).toBe(true);
+    expect(result.result).toBeUndefined();
+    expect(handleGoalCommand).toHaveBeenCalledWith("/goal ship the release --budget 200k");
+    expect(slashRegistry.list().some((command) => command.name === "goal")).toBe(true);
+  });
+
   it("/login grok runs browser OAuth, stores tokens, and switches to a grok model natively", async () => {
     vi.mocked(loginGrok).mockClear();
     vi.mocked(importGrokCliCredentials).mockClear();

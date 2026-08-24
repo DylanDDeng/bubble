@@ -16,6 +16,8 @@ import type { Agent, AgentRunOptions } from "../../agent.js";
 import type { WorkflowRunSnapshot } from "../../agent/workflow/control.js";
 import type { BackgroundTaskInfo } from "../../tasks/manager.js";
 import type { SessionManager } from "../../session.js";
+import type { GoalStore } from "../../goal/store.js";
+import { tokenUsageTotal } from "../../goal/usage.js";
 import type { BubbleTuiPorts } from "./ports.js";
 import { ControllerState } from "./state.js";
 import type { ControllerEffect } from "./effects.js";
@@ -55,6 +57,9 @@ import {
   type SubagentGroup,
 } from "../model/subagent-view.js";
 import { reconstructDisplayMessages } from "../model/display-reconstruct.js";
+import { GoalRuntimeController } from "./goal-runtime-controller.js";
+import { executeRewind, type RewindExecutionResult, type RewindScope } from "../../rewind.js";
+import type { Message } from "../../types.js";
 
 export interface TuiExitSummary {
   reason: string;
@@ -71,13 +76,20 @@ export interface BubbleTuiControllerDeps {
     | "getSubAgentMessages"
     | "closeSubAgent"
     | "closeWorkflow"
+    | "resetContextUsageAnchor"
   > & {
-    messages: DisplayMessage extends never ? never : unknown[];
+    messages: Message[];
     backgroundTasks?: Agent["backgroundTasks"];
   };
   readonly sessionManager: SessionManager;
+  readonly goalStore?: GoalStore;
   readonly ports: BubbleTuiPorts;
   readonly onEffect?: (effect: ControllerEffect) => void;
+}
+
+export interface TuiAgentRunOptions extends AgentRunOptions {
+  /** Internal Goal continuation; never forwarded to Agent.run(). */
+  goalRun?: boolean;
 }
 
 export class BubbleTuiController {
@@ -87,6 +99,8 @@ export class BubbleTuiController {
   private readonly queue: InputQueueState = createInputQueueState();
   private readonly sessionTransition: SessionTransitionController;
   private readonly startedAtMs: number;
+  private readonly goalRuntime?: GoalRuntimeController;
+  private sessionManager: SessionManager;
   private transcript: DisplayMessage[] = [];
   private runActive = false;
   private runState: RunState | null = null;
@@ -104,6 +118,7 @@ export class BubbleTuiController {
   private disposed = false;
 
   constructor(private readonly deps: BubbleTuiControllerDeps) {
+    this.sessionManager = deps.sessionManager;
     this.overlays = new OverlayRequestController();
     this.startedAtMs = Date.now();
     this.sessionTransition = new SessionTransitionController({
@@ -128,6 +143,30 @@ export class BubbleTuiController {
       },
     });
     this.overlays.onChange(() => this.state.touch());
+    if (deps.goalStore) {
+      this.goalRuntime = new GoalRuntimeController({
+        store: deps.goalStore,
+        getSessionManager: () => this.sessionManager,
+        isRunActive: () => this.runActive,
+        queuedInputs: () => this.queuedAfterRun.length,
+        isDisposed: () => this.disposed,
+        startRun: (input, cwd) => {
+          void this.runTurn(input, cwd, { goalRun: true });
+        },
+        appendMessage: (role, content) => {
+          this.appendDisplayMessage({
+            key: nextDisplayMessageKey(role === "user" ? "user" : role === "error" ? "error" : "notice"),
+            role,
+            content,
+            syntheticKind: role === "assistant" ? "ui_notice" : undefined,
+          });
+        },
+        onStateChanged: () => {
+          this.state.touch();
+          this.notify();
+        },
+      });
+    }
     this.backgroundTaskUnsubscribe = deps.agent.backgroundTasks?.subscribe?.(() => {
       this.state.touch();
       this.notify();
@@ -148,6 +187,26 @@ export class BubbleTuiController {
 
   getTranscript(): readonly DisplayMessage[] {
     return this.transcript;
+  }
+
+  getSessionManager(): SessionManager {
+    return this.sessionManager;
+  }
+
+  getGoalIndicator(): string | undefined {
+    return this.goalRuntime?.indicatorLine();
+  }
+
+  handleGoalCommand(input: string, cwd: string): void {
+    if (!this.goalRuntime) {
+      this.appendDisplayMessage({
+        key: nextDisplayMessageKey("error"),
+        role: "error",
+        content: "Goals are not available in this session.",
+      });
+      return;
+    }
+    this.goalRuntime.handleCommand(input, cwd);
   }
 
   getSubagentGroups(): SubagentGroup[] {
@@ -234,6 +293,43 @@ export class BubbleTuiController {
     this.notify();
   }
 
+  /** Re-project the visible transcript after a non-controller command rewrites Agent history. */
+  rebuildTranscriptFromAgent(): void {
+    this.state.withTransaction(() => {
+      this.transcript = reconstructDisplayMessages([...this.deps.agent.messages]);
+      this.liveSubagentTools.clear();
+      this.childRuns.clear();
+      this.liveSubagentVersion += 1;
+      this.state.touch();
+    });
+    this.notify();
+  }
+
+  /**
+   * Rewind persistence and every renderer-facing mirror as one observable
+   * transition. File restoration can take time, but no partial transcript is
+   * published while it runs.
+   */
+  async rewindToTurn(targetId: string, scope: RewindScope): Promise<RewindExecutionResult> {
+    if (this.runActive) throw new Error("Cancel the active turn before rewinding.");
+    const result = await executeRewind(this.sessionManager, this.deps.agent, targetId, scope);
+    if (scope !== "code") {
+      this.state.withTransaction(() => {
+        purgeForSessionSwitch(this.queue);
+        this.queuedAfterRun.length = 0;
+        this.transcript = reconstructDisplayMessages([...this.deps.agent.messages]);
+        this.liveSubagentTools.clear();
+        this.childRuns.clear();
+        this.liveSubagentVersion += 1;
+        this.liveStreamVisible = false;
+        this.runState = null;
+        this.state.touch();
+      });
+      this.notify();
+    }
+    return result;
+  }
+
   /** Host-side row injection (user echo, notices) — single append point. */
   appendDisplayMessage(message: DisplayMessage): void {
     this.transcript = [...this.transcript, message];
@@ -263,7 +359,7 @@ export class BubbleTuiController {
       id: input.id,
       content,
       displayKey,
-      sessionFile: this.deps.sessionManager.getSessionFile(),
+      sessionFile: this.sessionManager.getSessionFile(),
     });
     this.transcript = [...this.transcript, {
       key: displayKey,
@@ -334,7 +430,7 @@ export class BubbleTuiController {
    * Drive one agent run: reduce the event stream, apply effects, and finish.
    * Mirrors runAgentInput (app.tsx:1438-1958) minus the rendering.
    */
-  async runTurn(input: unknown, cwd: string, options?: AgentRunOptions): Promise<void> {
+  async runTurn(input: unknown, cwd: string, options?: TuiAgentRunOptions): Promise<void> {
     if (this.disposed) throw new Error("controller disposed");
     if (this.runActive) {
       if (typeof input === "string") this.steer(input);
@@ -345,6 +441,12 @@ export class BubbleTuiController {
     this.runState = createRunState(Date.now());
     const inputController = new AgentRunInputQueue(`run-${this.runState.accumulator.runId}`);
     const abortController = new AbortController();
+    const goalStatusAtStart = this.goalRuntime?.snapshot()?.status;
+    const goalRun = options?.goalRun === true;
+    const agentOptions: AgentRunOptions = { ...options };
+    delete (agentOptions as TuiAgentRunOptions).goalRun;
+    let runUsageTokens = 0;
+    let runUsageReported = false;
     this.activeInputController = inputController;
     this.activeAbortController = abortController;
     const upstreamAbort = () => abortController.abort(options?.abortSignal?.reason);
@@ -366,10 +468,14 @@ export class BubbleTuiController {
     let cancelled = false;
     try {
       for await (const event of this.deps.agent.run(input as never, cwd, {
-        ...options,
+        ...agentOptions,
         abortSignal: abortController.signal,
         inputController,
       })) {
+        if (event.type === "turn_end" && event.usage) {
+          runUsageReported = true;
+          runUsageTokens += tokenUsageTotal(event.usage);
+        }
         const { state, effects } = reduceAgentEvent(this.runState!, event, ctx);
         this.runState = state;
 
@@ -518,12 +624,21 @@ export class BubbleTuiController {
       options?.abortSignal?.removeEventListener("abort", upstreamAbort);
     }
 
+    this.goalRuntime?.afterRun({
+      goalRun,
+      goalStatusAtStart,
+      cancelled,
+      errored: runError != null && !cancelled,
+      usageTokens: runUsageTokens,
+      usageReported: runUsageReported,
+    }, cwd);
+
     const next = this.queuedAfterRun.shift();
     if (next && !this.disposed) {
       this.transcript = moveStatusMessageToEnd(this.transcript, next.displayKey);
       this.state.touch();
       this.notify();
-      await this.runTurn(next.content, cwd, options);
+      await this.runTurn(next.content, cwd, { ...agentOptions, goalRun: false });
     }
   }
 
@@ -646,7 +761,9 @@ export class BubbleTuiController {
   /** Atomic session switch through the two-phase transaction. */
   switchSession(plan: { targetFile: string; notice?: string }): { ok: boolean; error?: string } {
     const outcome = this.sessionTransition.switchTo(plan);
-    if (outcome.ok) {
+    if (outcome.ok && outcome.manager) {
+      this.sessionManager = outcome.manager;
+      this.goalRuntime?.loadCurrentSession();
       // A next-turn input belongs to the session in which it was submitted.
       // The extracted session transition owns its queue, while queuedAfterRun
       // is the controller's executable mirror and must be purged alongside it.
@@ -666,6 +783,7 @@ export class BubbleTuiController {
     }
     this.disposed = true;
     this.cancelActiveRun(reason);
+    this.goalRuntime?.dispose();
     this.overlays.dispose();
     this.backgroundTaskUnsubscribe?.();
     this.deps.ports.flush.cancelFlush();

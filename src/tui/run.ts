@@ -67,6 +67,7 @@ export async function runTui(agent: Agent, _args: unknown, options: RunTuiOption
   const controller = new BubbleTuiController({
     agent,
     sessionManager: options.sessionManager as never,
+    goalStore: options.goalStore,
     ports: buildPorts(options),
   });
 

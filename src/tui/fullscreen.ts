@@ -69,6 +69,7 @@ export class FullscreenApp {
     this.footer = new ResponsiveFooterComponent(() => ({
       agent: this.options.agent,
       mode: this.options.agent.mode,
+      goalLine: this.options.controller.getGoalIndicator?.(),
       hidden: this.tui.terminal.rows <= 2,
     }));
     this.buildLayout();

@@ -35,6 +35,8 @@ export interface TranscriptRenderOptions {
   traceInteraction?: TraceInteractionState;
   /** Keep a final transcript spacer; fullscreen disables it once no live tail follows. */
   trailingSpacer?: boolean;
+  /** Preview a destructive rewrite by dimming this message and everything after it. */
+  dimFromMessageIndex?: number;
 }
 
 export interface TranscriptProjection {
@@ -752,14 +754,23 @@ export function projectTranscript(
   options: TranscriptRenderOptions,
 ): TranscriptProjection {
   const messageBlocks: TranscriptProjection[] = [];
-  for (const message of messages) {
+  for (let messageIndex = 0; messageIndex < messages.length; messageIndex += 1) {
+    const message = messages[messageIndex]!;
+    let block: TranscriptProjection;
     if (message.role === "user") {
-      messageBlocks.push(plainProjection(renderUserCard(message.content, options)));
+      block = plainProjection(renderUserCard(message.content, options));
     } else if (message.role === "assistant" && !message.syntheticKind) {
-      messageBlocks.push(projectAssistantInRequest(message, options));
+      block = projectAssistantInRequest(message, options);
     } else {
-      messageBlocks.push(projectMessage(message, options));
+      block = projectMessage(message, options);
     }
+    if (options.dimFromMessageIndex !== undefined && messageIndex >= options.dimFromMessageIndex) {
+      block = {
+        ...block,
+        rows: block.rows.map((row) => row ? chalk.dim(row) : row),
+      };
+    }
+    messageBlocks.push(block);
   }
   const projection = joinTranscriptProjections(messageBlocks);
   // The transcript owns the sole separator before a live assistant surface.

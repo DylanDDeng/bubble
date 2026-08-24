@@ -34,6 +34,7 @@ export class ResponsiveTranscriptComponent implements Component {
     showReasoning: boolean;
     verboseTrace: boolean;
     trailingSpacer: boolean;
+    dimFromMessageIndex: number | undefined;
     theme: TranscriptRenderOptions["theme"];
     markdownRenderer: TranscriptRenderOptions["markdownRenderer"];
     traceInteraction: TraceInteractionState | undefined;
@@ -53,6 +54,7 @@ export class ResponsiveTranscriptComponent implements Component {
     const showReasoning = options.showReasoning ?? false;
     const verboseTrace = options.verboseTrace ?? false;
     const trailingSpacer = options.trailingSpacer !== false;
+    const dimFromMessageIndex = options.dimFromMessageIndex;
     const traceRevision = options.traceInteraction?.getRevision() ?? 0;
     const cached = this.cache;
     const projection = cached
@@ -61,6 +63,7 @@ export class ResponsiveTranscriptComponent implements Component {
       && cached.showReasoning === showReasoning
       && cached.verboseTrace === verboseTrace
       && cached.trailingSpacer === trailingSpacer
+      && cached.dimFromMessageIndex === dimFromMessageIndex
       && cached.theme === options.theme
       && cached.markdownRenderer === options.markdownRenderer
       && cached.traceInteraction === options.traceInteraction
@@ -78,6 +81,7 @@ export class ResponsiveTranscriptComponent implements Component {
         showReasoning,
         verboseTrace,
         trailingSpacer,
+        dimFromMessageIndex,
         theme: options.theme,
         markdownRenderer: options.markdownRenderer,
         traceInteraction: options.traceInteraction,
