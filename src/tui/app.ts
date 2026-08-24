@@ -64,7 +64,7 @@ import { BubbleTuiController } from "./controller/controller.js";
 import { OverlayRequestController } from "./controller/overlay-controller.js";
 import { defaultTranscriptTheme, projectTranscript, type TranscriptRenderOptions } from "./components/transcript.js";
 import { friendlyCwd, sessionBasename } from "./formatting/summary.js";
-import { ResponsiveFooterComponent } from "./footer.js";
+import { formatExternalRuntimeFooterLabel, ResponsiveFooterComponent } from "./footer.js";
 import { ComposerAutocompleteProvider } from "./composer-autocomplete.js";
 import { COMPOSER_EDITOR_OPTIONS, COMPOSER_EDITOR_THEME } from "./composer-style.js";
 import type { Agent } from "../agent.js";
@@ -114,6 +114,8 @@ export interface PiTuiAppOptions {
   terminal?: Terminal;
   /** Renderer selected before the first terminal paint. Production defaults to fullscreen. */
   uiMode?: TuiMode;
+  /** Non-blocking git lookup used to populate the footer after first paint. */
+  resolveGitBranch?: (cwd: string) => Promise<string | undefined>;
 }
 
 const EDITOR_THEME = {
@@ -169,6 +171,9 @@ export class PiTuiApp {
   private readonly traceInteraction = new TraceInteractionState();
   private readonly overlays: OverlayRequestController;
   private readonly history: string[] = [];
+  private gitBranch: string | undefined;
+  private metadataManager: SessionManager | null = null;
+  private metadataUnsubscribe: (() => void) | null = null;
   private showReasoning = false;
   private verboseTrace = false;
   private controllerUnsubscribe: (() => void) | null = null;
@@ -234,12 +239,18 @@ export class PiTuiApp {
       const queuedCount = this.options.controller.queuedInputCount();
       if (steerCount) extra.push(chalk.yellow(`steer ×${steerCount}`));
       if (queuedCount) extra.push(chalk.yellow(`queue ×${queuedCount}`));
+      const session = this.activeSessionManager();
+      const metadata = typeof session?.getMetadata === "function" ? session.getMetadata() : undefined;
+      const runtimeLabel = formatExternalRuntimeFooterLabel(metadata?.externalRuntime);
       return {
         agent: this.options.agent,
         cwd: friendlyCwd(process.cwd()),
+        branch: this.gitBranch,
+        sessionTitle: runtimeLabel ? undefined : metadata?.title,
+        runtimeLabel,
         extra,
         mode: this.options.agent.mode,
-        goalLine: this.options.controller.getGoalIndicator?.(),
+        goalLine: runtimeLabel ? undefined : this.options.controller.getGoalIndicator?.(),
         // At two rows or fewer, preserve the focused editor body + border.
         hidden: this.tui.terminal.rows <= 2,
       };
@@ -269,10 +280,30 @@ export class PiTuiApp {
     this.taskStatusBar = new TaskStatusBarComponent(this.tasksPane);
     this.overlays = new OverlayRequestController({ questionController: options.questionController });
 
+    this.syncMetadataSubscription();
     this.installBlockingHandlers();
     this.buildLayout();
     this.wireInput();
     this.renderSnapshot();
+    void options.resolveGitBranch?.(process.cwd()).then((branch) => {
+      if (this.disposed) return;
+      this.gitBranch = branch?.trim() || undefined;
+      this.renderSnapshot();
+    }).catch(() => undefined);
+  }
+
+  private activeSessionManager(): SessionManager {
+    return this.options.controller.getSessionManager?.() ?? this.options.sessionManager;
+  }
+
+  private syncMetadataSubscription(): void {
+    const manager = this.activeSessionManager();
+    if (manager === this.metadataManager) return;
+    this.metadataUnsubscribe?.();
+    this.metadataManager = manager;
+    this.metadataUnsubscribe = typeof manager?.subscribeMetadata === "function"
+      ? manager.subscribeMetadata(() => this.renderSnapshot())
+      : null;
   }
 
   private installBlockingHandlers(): void {
@@ -341,7 +372,10 @@ export class PiTuiApp {
     this.tui.setFocus(this.editor);
 
     this.editor.onSubmit = (text: string) => this.handleSubmit(text);
-    this.controllerUnsubscribe = this.options.controller.subscribe(() => this.renderSnapshot());
+    this.controllerUnsubscribe = this.options.controller.subscribe(() => {
+      this.syncMetadataSubscription();
+      this.renderSnapshot();
+    });
   }
 
   private wireInput(): void {
@@ -1237,6 +1271,9 @@ export class PiTuiApp {
     this.disposed = true;
     this.controllerUnsubscribe?.();
     this.controllerUnsubscribe = null;
+    this.metadataUnsubscribe?.();
+    this.metadataUnsubscribe = null;
+    this.metadataManager = null;
     this.questionUnsubscribe?.();
     this.questionUnsubscribe = null;
     this.activeQuestion?.close();

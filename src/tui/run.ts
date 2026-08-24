@@ -4,6 +4,7 @@
  * main.ts changes stay minimal.
  */
 import process from "node:process";
+import { execFile } from "node:child_process";
 import type { Agent } from "../agent.js";
 import type { SessionManager } from "../session.js";
 import type { ProviderRegistry } from "../provider-registry.js";
@@ -91,6 +92,7 @@ export async function runTui(agent: Agent, _args: unknown, options: RunTuiOption
     runMemoryCompaction: options.runMemoryCompaction,
     runMemorySummary: options.runMemorySummary,
     runMemoryRefresh: options.runMemoryRefresh,
+    resolveGitBranch: currentGitBranch,
     // Fullscreen is the production root renderer. Selecting it before start()
     // prevents a regular-screen frame from ever being painted at startup.
     uiMode: "fullscreen",
@@ -122,6 +124,19 @@ export async function runTui(agent: Agent, _args: unknown, options: RunTuiOption
   }
 
   return { exitCode: 0, reason: "user-quit", wallMs: Date.now() - startedAt };
+}
+
+/** Resolve after first paint so git discovery never delays TUI startup. */
+export function currentGitBranch(cwd: string): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    execFile("git", ["-C", cwd, "branch", "--show-current"], { timeout: 3_000 }, (error, stdout) => {
+      if (error) {
+        resolve(undefined);
+        return;
+      }
+      resolve(stdout.trim() || undefined);
+    });
+  });
 }
 
 /** Production streaming repaint scheduler: one cancellable timer per burst. */

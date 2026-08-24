@@ -3,6 +3,7 @@ import chalk from "chalk";
 import { truncateToWidth, type Component } from "@bubblebrain-ai/pi-tui";
 import { formatContextUsageLabel, friendlyCwd } from "./formatting/summary.js";
 import { PERMISSION_MODE_INFO } from "../permission/mode.js";
+import { classifyExternalRuntimeBinding } from "../external-runtime/session-policy.js";
 import type { PermissionMode } from "../types.js";
 
 export interface FooterAgentInfo {
@@ -12,6 +13,10 @@ export interface FooterAgentInfo {
 
 export interface FooterRenderOptions {
   cwd?: string;
+  branch?: string;
+  sessionTitle?: string;
+  /** External runtimes own model/context state and replace native details. */
+  runtimeLabel?: string;
   extra?: readonly string[];
   mode?: PermissionMode;
   /** Persistent autonomous Goal status, rendered on its own muted row. */
@@ -34,6 +39,9 @@ export class ResponsiveFooterComponent implements Component {
     if (snapshot.goalLine?.trim()) {
       rows.push(truncateToWidth(chalk.dim(snapshot.goalLine.trim()), Math.max(1, Math.floor(width))));
     }
+    if (snapshot.runtimeLabel?.trim()) {
+      rows.push(truncateToWidth(chalk.cyan(snapshot.runtimeLabel.trim()), Math.max(1, Math.floor(width))));
+    }
     rows.push(renderFooterLine(snapshot.agent, width, snapshot));
     return rows;
   }
@@ -51,15 +59,38 @@ export function renderFooterLine(
   const usage = formatContextUsageLabel(agent.getContextUsageSnapshot());
   const cwd = options.cwd ?? friendlyCwd(process.cwd());
   const mode = renderPermissionModeBadge(options.mode);
+  const nativeDetails = !options.runtimeLabel?.trim();
   const parts = [
     ...(mode ? [mode] : []),
-    chalk.dim(agent.model),
+    ...(nativeDetails && agent.model ? [chalk.dim(agent.model)] : []),
     chalk.dim(cwd),
-    chalk.dim(usage),
+    ...(options.branch?.trim() ? [chalk.dim(options.branch.trim())] : []),
+    ...(nativeDetails && options.sessionTitle?.trim() ? [chalk.dim(options.sessionTitle.trim())] : []),
+    ...(nativeDetails && usage ? [chalk.dim(usage)] : []),
     ...(options.extra ?? []),
   ];
   const line = parts.join(chalk.dim(" │ "));
   return truncateToWidth(line, Math.max(1, Math.floor(columns)));
+}
+
+/** Match the legacy footer contract for persisted external-runtime sessions. */
+export function formatExternalRuntimeFooterLabel(binding: unknown): string | undefined {
+  const kind = classifyExternalRuntimeBinding(binding);
+  if (kind === "none") return undefined;
+  if (kind === "unsupported") return "Unsupported external runtime · recovery-only";
+
+  const record = binding && typeof binding === "object"
+    ? binding as { modelId?: unknown; reasoningEffort?: unknown }
+    : undefined;
+  const model = typeof record?.modelId === "string" && record.modelId.trim()
+    ? record.modelId.trim()
+    : undefined;
+  const effort = typeof record?.reasoningEffort === "string"
+    && record.reasoningEffort.trim()
+    && record.reasoningEffort !== "off"
+    ? record.reasoningEffort.trim()
+    : undefined;
+  return ["Grok Subscription", model, effort, "workspace"].filter(Boolean).join(" · ");
 }
 
 export function renderPermissionModeBadge(mode?: PermissionMode): string {
