@@ -84,6 +84,34 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
+	it("routes terminal mouse coordinates into a centered overlay", async () => {
+		const terminal = new VirtualTerminal(20, 6);
+		const clicks: TuiMouseEvent[] = [];
+		const overlay = {
+			render: () => ["overlay", "clickable", "footer"],
+			invalidate: () => {},
+			handleMouse: (event: TuiMouseEvent) => {
+				if (event.y !== 1) return false;
+				clicks.push(event);
+				return true;
+			},
+		};
+		const tui = new TuiAltScreen(terminal);
+		tui.setLayoutRoot(new Text("base", 0, 0));
+		tui.showOverlay(overlay, { anchor: "center", width: 10 });
+		tui.start();
+		await terminal.waitForRender();
+
+		// 20x6 terminal, 10x3 centered overlay: origin (5, 1), local target (2, 1).
+		terminal.sendInput("\x1b[<0;8;3M");
+		terminal.sendInput("\x1b[<0;8;3m");
+		await terminal.waitForRender();
+
+		assert.strictEqual(clicks.length, 1);
+		assert.deepStrictEqual([clicks[0]?.x, clicks[0]?.y], [2, 1]);
+		tui.stop();
+	});
+
 	it("routes no-button pointer motion and sends leave when the pointer exits", async () => {
 		const terminal = new VirtualTerminal(20, 4);
 		const events: TuiMouseEvent[] = [];

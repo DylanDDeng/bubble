@@ -212,6 +212,14 @@ type OverlayStackEntry = {
 	focusOrder: number;
 };
 
+type OverlayMouseTarget = {
+	component: Component;
+	row: number;
+	col: number;
+	width: number;
+	height: number;
+};
+
 type OverlayBlockedFocusResume = { status: "restore-overlay" } | { status: "focus-target"; target: Component | null };
 type EligibleOverlayFocusRestoreState = { status: "eligible"; overlay: OverlayStackEntry };
 type BlockedOverlayFocusRestoreState = {
@@ -373,6 +381,7 @@ export abstract class TuiBase extends Container implements TUI {
 	// Overlay stack for modal components rendered on top of base content
 	private focusOrderCounter = 0;
 	private overlayStack: OverlayStackEntry[] = [];
+	private overlayMouseTargets: OverlayMouseTarget[] = [];
 
 	get hasOverlayEntries(): boolean {
 		return this.overlayStack.length > 0;
@@ -694,6 +703,30 @@ export abstract class TuiBase extends Container implements TUI {
 	/** Check if the focused component is a visible overlay */
 	protected isOverlayFocused(): boolean {
 		return this.findOverlayContaining(this.focusedComponent, true) !== undefined;
+	}
+
+	/** Resolve terminal coordinates to the visual-frontmost rendered overlay. */
+	protected getOverlayMouseTargetAt(
+		x: number,
+		y: number,
+	): { component: Component; x: number; y: number } | undefined {
+		for (let index = this.overlayMouseTargets.length - 1; index >= 0; index -= 1) {
+			const target = this.overlayMouseTargets[index]!;
+			if (
+				x < target.col
+				|| x >= target.col + target.width
+				|| y < target.row
+				|| y >= target.row + target.height
+			) {
+				continue;
+			}
+			return {
+				component: target.component,
+				x: x - target.col,
+				y: y - target.row,
+			};
+		}
+		return undefined;
 	}
 
 	/** Check if an overlay entry is currently visible */
@@ -1129,11 +1162,18 @@ export abstract class TuiBase extends Container implements TUI {
 
 	/** Composite all overlays into content lines (sorted by focusOrder, higher = on top). */
 	protected compositeOverlays(lines: string[], termWidth: number, termHeight: number): string[] {
+		this.overlayMouseTargets = [];
 		if (this.overlayStack.length === 0) return lines;
 		const result = [...lines];
 
 		// Pre-render all visible overlays and calculate positions
-		const rendered: { overlayLines: string[]; row: number; col: number; w: number }[] = [];
+		const rendered: Array<{
+			component: Component;
+			overlayLines: string[];
+			row: number;
+			col: number;
+			w: number;
+		}> = [];
 		let minLinesNeeded = result.length;
 
 		const visibleEntries = this.overlayStack.filter((e) => this.isOverlayVisible(e));
@@ -1156,9 +1196,22 @@ export abstract class TuiBase extends Container implements TUI {
 			// Get final row/col with actual overlay height
 			const { row, col } = this.resolveOverlayLayout(options, overlayLines.length, termWidth, termHeight);
 
-			rendered.push({ overlayLines, row, col, w: width });
+			rendered.push({
+				component,
+				overlayLines,
+				row,
+				col,
+				w: width,
+			});
 			minLinesNeeded = Math.max(minLinesNeeded, row + overlayLines.length);
 		}
+		this.overlayMouseTargets = rendered.map(({ component, row, col, w, overlayLines }) => ({
+			component,
+			row,
+			col,
+			width: w,
+			height: overlayLines.length,
+		}));
 
 		// Pad to at least terminal height so overlays have screen-relative positions.
 		// Excludes maxLinesRendered: the historical high-water mark caused self-reinforcing

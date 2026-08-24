@@ -54,9 +54,11 @@ import { WorkflowInspectorComponent, type WorkflowInspectorSnapshot } from "./co
 import { SubagentInspectorComponent } from "./components/subagent-inspector.js";
 import { TaskInspectorComponent } from "./components/task-inspector.js";
 import { ContextInfoComponent } from "./components/context-info.js";
+import { StatsPanelComponent } from "./components/stats-panel.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import type { SlashCommandContext } from "../slash-commands/types.js";
 import type { ContextUsageSnapshot } from "../context/usage.js";
+import { collectUsageStatsBundle } from "../stats/usage.js";
 import { BubbleTuiController } from "./controller/controller.js";
 import { OverlayRequestController } from "./controller/overlay-controller.js";
 import { defaultTranscriptTheme, projectTranscript, type TranscriptRenderOptions } from "./components/transcript.js";
@@ -544,7 +546,7 @@ export class PiTuiApp {
         options.callbacks.onThemeModeChange?.(mode);
       },
       openFeedback: () => this.pushNotice("feedback dialog: coming to the pi TUI"),
-      openStats: () => this.pushNotice("stats panel: coming to the pi TUI"),
+      openStats: () => this.openStats(),
       ...(this.tui.mode === "fullscreen"
         ? { openContextInfo: (snapshot: ContextUsageSnapshot) => this.openContextInfo(snapshot) }
         : {}),
@@ -666,6 +668,24 @@ export class PiTuiApp {
   }
 
   // ---- Overlays -----------------------------------------------------------
+
+  private openStats(): void {
+    let handle: { hide(): void } | undefined;
+    const component = new StatsPanelComponent(collectUsageStatsBundle(), {
+      getTerminalRows: () => this.tui.terminal.rows,
+      onClose: () => handle?.hide(),
+      onRender: () => this.renderSnapshot(),
+    });
+    handle = this.tui.showOverlay(component, {
+      anchor: "center",
+      width: "65%",
+      minWidth: 44,
+      maxWidth: 100,
+      maxHeight: 30,
+      margin: { top: 2, right: 0, bottom: 2, left: 0 },
+    });
+    this.tui.setFocus(component);
+  }
 
   private openContextInfo(snapshot: ContextUsageSnapshot): void {
     let handle: { hide(): void } | undefined;

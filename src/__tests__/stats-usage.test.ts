@@ -137,9 +137,11 @@ describe("usage stats", () => {
     expect(text).toContain("Bubble Stats · Last 30 days");
     expect(text).toContain("Activity");
     expect(text).toContain("Model usage");
-    expect(text).toContain("@");
-    expect(text).toContain("Less . o O @ More");
+    expect(text).toContain("●");
+    expect(text).toContain("Less · ○ ◉ ● More");
     expect(text).toContain("Tracked cost");
+    expect(text).toContain("1 turn");
+    expect(text).not.toContain("1t ");
     expect(text).not.toContain("cost unavailable");
   });
 

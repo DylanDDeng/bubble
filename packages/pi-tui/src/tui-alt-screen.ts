@@ -596,6 +596,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const mouseEvent = this.parseSgrMouseEvent(data);
 		if (mouseEvent) {
 			if (this.handleRightClickPaste(mouseEvent)) return { consume: true };
+			if (this.handleOverlayMouseEvent(mouseEvent)) return { consume: true };
 			const handled = this.handleScrollbarMouseEvent(mouseEvent);
 			if (!this.scrollbarDrag) this.updateScrollbarHover(mouseEvent.x, mouseEvent.y);
 			const pointerOnScrollbar = this.isPointerMove(mouseEvent)
@@ -802,6 +803,75 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		}
 		this.lastComponentClick = undefined;
 		return false;
+	}
+
+	private handleOverlayMouseEvent(event: SgrMouseEvent): boolean {
+		if (!this.hasOverlay()) return false;
+		const target = this.getOverlayMouseTargetAt(event.x, event.y);
+		const handler = target?.component.handleMouse;
+
+		if (this.isPointerMove(event)) {
+			if (!target || !handler) {
+				this.clearComponentHover();
+				return true;
+			}
+			if (this.componentHover?.component !== target.component) this.clearComponentHover();
+			const pointerEvent: TuiMouseEvent = {
+				kind: "move",
+				button: event.button,
+				x: target.x,
+				y: target.y,
+				release: false,
+				clickCount: 1,
+			};
+			const changed = handler.call(target.component, pointerEvent);
+			this.componentHover = {
+				component: target.component,
+				x: pointerEvent.x,
+				y: pointerEvent.y,
+			};
+			if (changed) this.requestRender();
+			return true;
+		}
+
+		if (event.release || (event.button & 32) !== 0 || (event.button & 3) !== 0) return true;
+		if (!target || !handler) return true;
+
+		const now = Date.now();
+		const previous = this.lastComponentClick;
+		const clickCount: 1 | 2 = previous
+			&& previous.component === target.component
+			&& previous.row === target.y
+			&& now - previous.timestamp <= DOUBLE_CLICK_INTERVAL_MS
+			&& previous.count === 1
+				? 2
+				: 1;
+		const handled = handler.call(target.component, {
+			kind: "press",
+			button: event.button,
+			x: target.x,
+			y: target.y,
+			release: false,
+			clickCount,
+		});
+		if (!handled) return true;
+
+		this.lastComponentClick = {
+			timestamp: now,
+			component: target.component,
+			row: target.y,
+			count: clickCount,
+		};
+		this.selectionPressActive = false;
+		this.stopSelectionAutoScroll();
+		this.selectionAnchor = undefined;
+		this.selectionFocus = undefined;
+		this.selectionInitialRange = undefined;
+		this.selectionDragged = false;
+		this.pressedUrl = undefined;
+		this.lastClick = undefined;
+		this.requestRender();
+		return true;
 	}
 
 	private isPointerMove(event: SgrMouseEvent): boolean {
