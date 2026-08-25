@@ -1796,6 +1796,7 @@ export class Agent {
     oldMessages: Message[],
     onDelta?: (full: string, delta: string) => void,
     abortSignal?: AbortSignal,
+    userContext?: string,
   ): Promise<string> {
     if (oldMessages.length === 0) return "";
     const { buildCompactionPromptMessages } = await import("./context/compact-llm.js");
@@ -1813,7 +1814,7 @@ export class Agent {
         ? { ...message, content: stripFileBlocks(messageText(message)) }
         : message,
     );
-    const promptMessages = buildCompactionPromptMessages(promptInput);
+    const promptMessages = buildCompactionPromptMessages(promptInput, userContext);
     const stream = this.provider.streamChat(promptMessages, {
       model: this.apiModel,
       temperature: 0.2,

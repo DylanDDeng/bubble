@@ -56,6 +56,7 @@ import { TaskInspectorComponent } from "./components/task-inspector.js";
 import { ContextInfoComponent } from "./components/context-info.js";
 import { StatsPanelComponent } from "./components/stats-panel.js";
 import { SkillsPanelComponent } from "./components/skills-panel.js";
+import { SessionPickerComponent } from "./components/session-picker.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import type { SlashCommandContext } from "../slash-commands/types.js";
 import type { ContextUsageSnapshot } from "../context/usage.js";
@@ -68,7 +69,7 @@ import { formatExternalRuntimeFooterLabel, ResponsiveFooterComponent } from "./f
 import { ComposerAutocompleteProvider } from "./composer-autocomplete.js";
 import { COMPOSER_EDITOR_OPTIONS, COMPOSER_EDITOR_THEME } from "./composer-style.js";
 import type { Agent } from "../agent.js";
-import type { SessionManager } from "../session.js";
+import { SessionManager } from "../session.js";
 import type { ProviderRegistry } from "../provider-registry.js";
 import type { QuestionController, QuestionEvent, QuestionRequest } from "../question/controller.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
@@ -226,7 +227,7 @@ export class PiTuiApp {
       const { agent, updateNotice } = this.options;
       return {
         cwd: friendlyCwd(process.cwd()),
-        session: sessionBasename(this.options.sessionManager.getSessionFile()),
+        session: sessionBasename(this.activeSessionManager().getSessionFile()),
         model: agent.model,
         provider: agent.providerId,
         thinking: agent.thinking,
@@ -421,6 +422,11 @@ export class PiTuiApp {
         // key unconsumed so the editor/autocomplete layer can handle it.
         return { consume: true };
       }
+      if (matchesKey(data, "escape") && this.options.controller.isBusy?.()) {
+        // A second Escape while the provider is acknowledging Compact
+        // cancellation must not arm rewind or leak into the editor.
+        return { consume: true };
+      }
       if (matchesKey(data, "escape") && !this.options.controller.isRunning() && !this.editor.getText()) {
         if (rewindEscapeArmed) {
           rewindEscapeArmed = false;
@@ -440,6 +446,7 @@ export class PiTuiApp {
           ctrlCArmed = false;
           return { consume: true };
         }
+        if (this.options.controller.isBusy?.()) return { consume: true };
         if (ctrlCArmed) {
           this.dispose();
           return { consume: true };
@@ -481,6 +488,8 @@ export class PiTuiApp {
       // is exposed via the /queue command until a dedicated keybinding lands.
       controller.steer(trimmed);
       this.renderSnapshot();
+    } else if (controller.queueAfterCommand?.(trimmed)) {
+      this.renderSnapshot();
     } else {
       this.pushUserRow(trimmed);
       void controller.runTurn(trimmed, process.cwd()).finally(() => this.renderSnapshot());
@@ -520,20 +529,59 @@ export class PiTuiApp {
     // Everything else routes through the shared registry (21 builtin
     // commands + MCP dynamic prompts + skill fallback) — the same surface
     // the Ink TUI exposed.
-    const ctx = this.buildSlashContext();
-    const outcome = await slashRegistry.execute(`/${name}${args ? ` ${args}` : ""}`, ctx);
-    if (outcome.inject) {
-      // Command produced model-facing input (e.g. /rewind restore).
-      void this.handleSubmit(outcome.inject);
-    } else if (outcome.result) {
-      this.pushNotice(outcome.result);
-    } else if (!outcome.handled) {
-      this.pushNotice(`Unknown command: /${name}`);
+    const compactCommand = name === "compact";
+    let compactSignal: AbortSignal | undefined;
+    try {
+      if (compactCommand) compactSignal = this.options.controller.beginCommandActivity?.("compact");
+      const ctx = this.buildSlashContext(compactSignal);
+      const outcome = await slashRegistry.execute(`/${name}${args ? ` ${args}` : ""}`, ctx);
+      if (compactCommand) {
+        const text = outcome.result ?? (outcome.handled ? undefined : `Unknown command: /${name}`);
+        const compactionSummary = outcome.detail?.kind === "compaction-summary"
+          ? outcome.detail.content.trim()
+          : "";
+        this.options.controller.finishCommandActivity?.("compact", text ? {
+          key: `compact-${Date.now()}`,
+          role: text.startsWith("Error:") ? "error" : "assistant",
+          content: text,
+          syntheticKind: text.startsWith("Error:")
+            ? undefined
+            : compactionSummary
+              ? "ui_compact_summary"
+              : "ui_notice",
+          compactionSummary: compactionSummary || undefined,
+        } : undefined);
+        void this.options.controller.drainQueuedInputs?.(process.cwd());
+        return;
+      }
+      if (outcome.inject) {
+        // Command produced model-facing input (e.g. /rewind restore).
+        void this.handleSubmit(outcome.inject);
+      } else if (outcome.result) {
+        this.pushNotice(outcome.result);
+      } else if (!outcome.handled) {
+        this.pushNotice(`Unknown command: /${name}`);
+      }
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      if (compactCommand && compactSignal) {
+        this.options.controller.finishCommandActivity?.("compact", {
+          key: `compact-error-${Date.now()}`,
+          role: "error",
+          content: text,
+        });
+      } else {
+        this.pushNotice(text);
+      }
+    } finally {
+      if (compactSignal && this.options.controller.getCommandActivity?.()?.kind === "compact") {
+        this.options.controller.finishCommandActivity?.("compact");
+      }
+      this.renderSnapshot();
     }
-    this.renderSnapshot();
   }
 
-  private buildSlashContext(): SlashCommandContext {
+  private buildSlashContext(compactionAbortSignal?: AbortSignal): SlashCommandContext {
     const options = this.options;
     const agent = options.agent;
     const addMessage = (role: "user" | "assistant" | "error", content: string) => {
@@ -594,8 +642,9 @@ export class PiTuiApp {
         this.tui.setFocus(this.editor);
       },
       rebuildTranscript: () => options.controller.rebuildTranscriptFromAgent(),
-      openSessionPicker: () => this.pushNotice("session picker: coming to the pi TUI"),
+      openSessionPicker: () => this.openSessionPicker(),
       compactionProgress: () => {},
+      compactionAbortSignal,
     } as SlashCommandContext;
   }
 
@@ -651,6 +700,7 @@ export class PiTuiApp {
   private updateStreamingRegion(columns: number): void {
     const controller = this.options.controller;
     const tail = controller.isRunning() ? controller.getStreamingTail() : null;
+    const commandActivity = controller.getCommandActivity?.() ?? null;
 
     if (tail) {
       if (!this.streamingMounted) {
@@ -659,6 +709,17 @@ export class PiTuiApp {
       }
       this.streamingMessage.noteWidth(columns);
       this.streamingMessage.update(tail, columns, this.transcriptRenderOptions());
+    } else if (commandActivity) {
+      if (!this.streamingMounted) {
+        this.streamingMounted = true;
+        this.streamingMessage.startSpinner();
+      }
+      this.streamingMessage.noteWidth(columns);
+      this.streamingMessage.updateCommandActivity(
+        commandActivity.kind === "compact" ? "Compacting" : commandActivity.kind,
+        commandActivity.status === "cancelling",
+        columns,
+      );
     } else if (this.streamingMounted) {
       this.streamingMounted = false;
       this.streamingMessage.clearToNothing();
@@ -753,6 +814,83 @@ export class PiTuiApp {
     this.tui.setFocus(component);
   }
 
+  private openSessionPicker(): void {
+    if (this.options.controller.isBusy?.()) {
+      this.appendTranscriptRow({
+        key: `session-error-${Date.now()}`,
+        role: "error",
+        content: "Stop the current run before switching sessions.",
+      });
+      return;
+    }
+
+    const activeFile = this.activeSessionManager().getSessionFile();
+    const currentSessions = SessionManager.summarizeSessionsForCwd(process.cwd());
+    const allSessions = SessionManager.listAllSessions();
+    let handle: { hide(): void } | undefined;
+    const close = () => {
+      handle?.hide();
+      this.tui.setFocus(this.editor);
+      this.renderSnapshot();
+    };
+    const fail = (prefix: string, error?: string) => {
+      close();
+      this.appendTranscriptRow({
+        key: `session-error-${Date.now()}`,
+        role: "error",
+        content: `${prefix}: ${error || "unknown error"}`,
+      });
+    };
+    const component = new SessionPickerComponent({
+      currentCwd: process.cwd(),
+      currentSessions,
+      allSessions,
+      activeFile,
+      getTerminalRows: () => this.tui.terminal.rows,
+      onClose: close,
+      onNewSession: () => {
+        const outcome = this.options.controller.createFreshSession(process.cwd());
+        if (!outcome.ok) {
+          fail("Failed to start a new session", outcome.error);
+          return;
+        }
+        this.editor.setText("");
+        this.viewportScroll?.scrollToEnd();
+        close();
+      },
+      onSelect: (file) => {
+        if (file === this.activeSessionManager().getSessionFile()) {
+          close();
+          return;
+        }
+        const summary = allSessions.find((session) => session.file === file);
+        const displayName = summary?.title || summary?.preview || sessionBasename(file) || "Session";
+        const outcome = this.options.controller.switchSession({
+          targetFile: file,
+          notice: `⤷ Resumed session: ${displayName}`,
+        });
+        if (!outcome.ok) {
+          fail("Failed to switch session", outcome.error);
+          return;
+        }
+        this.editor.setText("");
+        this.viewportScroll?.scrollToEnd();
+        close();
+      },
+      onRender: () => this.renderSnapshot(),
+    });
+    handle = this.tui.showOverlay(component, {
+      anchor: "center",
+      width: "70%",
+      minWidth: 40,
+      maxWidth: 120,
+      maxHeight: 30,
+      margin: { top: 2, right: 0, bottom: 2, left: 0 },
+      dismissOnOutsideClick: true,
+    });
+    this.tui.setFocus(component);
+  }
+
   private openContextInfo(snapshot: ContextUsageSnapshot): void {
     let handle: { hide(): void } | undefined;
     const messages = this.options.agent.messages;
@@ -764,7 +902,7 @@ export class PiTuiApp {
     const mcpStates = (this.options.mcpManager as {
       getStates?: () => unknown[];
     } | undefined)?.getStates?.() ?? [];
-    const sessionId = sessionBasename(this.options.sessionManager.getSessionFile());
+    const sessionId = sessionBasename(this.activeSessionManager().getSessionFile());
     const component = new ContextInfoComponent({
       snapshot,
       sessionId,

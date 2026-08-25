@@ -5,6 +5,7 @@
 import { INTERRUPTED_ASSISTANT_CONTENT } from "../../agent.js";
 import { isHiddenToolMetadata } from "../../agent/tool-visibility.js";
 import { isInternalBlockOnlyContent } from "../../agent/internal-reminder-sanitizer.js";
+import { COMPACTION_SUMMARY_PREFIX } from "../../context/compact.js";
 import { nextDisplayMessageKey, stripInterruptedAssistantMarker, type DisplayMessage, type DisplayToolCall } from "./display-history.js";
 import { synchronizeSubagentSnapshots } from "./subagent-view.js";
 import type { Message } from "../../types.js";
@@ -12,7 +13,23 @@ import type { Message } from "../../types.js";
 export function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] {
   const result: DisplayMessage[] = [];
   for (const m of agentMessages) {
-    if (m.role === "system" || m.role === "tool") continue;
+    if (m.role === "system") {
+      const content = typeof m.content === "string" ? m.content : "";
+      if (content.startsWith(COMPACTION_SUMMARY_PREFIX)) {
+        const summary = content.slice(COMPACTION_SUMMARY_PREFIX.length).trim();
+        if (summary) {
+          result.push({
+            key: nextDisplayMessageKey("compact"),
+            role: "assistant",
+            content: "Compaction completed.",
+            syntheticKind: "ui_compact_summary",
+            compactionSummary: summary,
+          });
+        }
+      }
+      continue;
+    }
+    if (m.role === "tool") continue;
     if (m.role === "user") {
       if ((m as { isMeta?: boolean }).isMeta) continue; // <system-reminder> injections are not user-visible
       // Harness-initiated kicks (goal continuations, task wakes) persist as

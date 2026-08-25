@@ -36,6 +36,15 @@ import { executeRewind, type RewindScope } from "../rewind.js";
 const VALID_SCOPES: SettingsScope[] = ["user", "project", "local"];
 const VALID_LISTS: RuleList[] = ["allow", "deny"];
 
+function isAbortLike(error: unknown): boolean {
+  return error instanceof Error && (error.name === "AbortError" || error.name === "AgentAbortError");
+}
+
+function formatCompactDuration(elapsedMs: number): string {
+  if (elapsedMs < 1_000) return `${Math.max(0, Math.round(elapsedMs))}ms`;
+  return `${(elapsedMs / 1_000).toFixed(1)}s`;
+}
+
 function isScope(value: string): value is SettingsScope {
   return (VALID_SCOPES as string[]).includes(value);
 }
@@ -1177,8 +1186,8 @@ const builtinSlashCommandEntries: SlashCommand[] = [
   },
   {
     name: "compact",
-    description: "Manually compact the current session context",
-    async handler(_args, ctx) {
+    description: "Compact session context; optional text says what to preserve",
+    async handler(args, ctx) {
       if (!ctx.sessionManager) {
         return "Compaction requires session persistence. Start an interactive session first.";
       }
@@ -1197,6 +1206,7 @@ const builtinSlashCommandEntries: SlashCommand[] = [
       if (preHook?.decision === "deny") {
         return preHook.reason ?? `Compaction blocked by hook ${preHook.sourceHookId ?? "<unknown>"}.`;
       }
+      if (ctx.compactionAbortSignal?.aborted) return "Compaction cancelled.";
 
       // Plan first so we can report "already compact" without spending a model
       // call, and so the LLM summarizer gets the exact set of evicted messages.
@@ -1217,14 +1227,21 @@ const builtinSlashCommandEntries: SlashCommand[] = [
       // On any failure (or empty output) fall back to the instant heuristic
       // compaction so /compact always makes progress.
       let result: CompactResult;
+      const startedAt = Date.now();
       try {
         ctx.compactionProgress?.({ phase: "collecting", streamedChars: 0 });
         let summary = "";
         try {
           summary = await ctx.agent.summarizeForCompaction(plan.oldMessages, (full) => {
             ctx.compactionProgress?.({ phase: "summarizing", streamedChars: full.length });
-          });
-        } catch {
+          }, ctx.compactionAbortSignal, args);
+          // The signal is authoritative even if a provider finishes normally
+          // after ignoring or racing its abort notification.
+          if (ctx.compactionAbortSignal?.aborted) return "Compaction cancelled.";
+        } catch (error) {
+          if (ctx.compactionAbortSignal?.aborted || isAbortLike(error)) {
+            return "Compaction cancelled.";
+          }
           summary = "";
         }
 
@@ -1273,7 +1290,13 @@ const builtinSlashCommandEntries: SlashCommand[] = [
           droppedEntries: dropped,
         },
       });
-      return `✓ Compaction complete · ${dropped} log entr${dropped === 1 ? "y" : "ies"} summarized`;
+      return {
+        result: `Compaction completed in ${formatCompactDuration(Date.now() - startedAt)}.`,
+        detail: {
+          kind: "compaction-summary",
+          content: result.summary ?? "",
+        },
+      };
     },
   },
   {

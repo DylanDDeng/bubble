@@ -32,12 +32,12 @@ export interface SessionTransitionDeps {
   state: ControllerState;
   overlays: OverlayRequestController;
   queue: InputQueueState;
-  agent: { messages: readonly import("../../types.js").Message[]; setSessionID(file: string): void };
+  agent: { getMessages(): readonly import("../../types.js").Message[]; setSessionID(file: string): void };
   /** Bump to invalidate stale external-runtime events. */
   bumpExternalGeneration(): void;
   clearLiveSubagentTools(): void;
-  /** Notified once after the atomic commit. */
-  commit(notice?: string): void;
+  /** Apply every controller-owned mirror inside the atomic commit. */
+  commit(manager: SessionManager, transcript: DisplayMessage[]): void;
 }
 
 export class SessionTransitionController {
@@ -56,6 +56,16 @@ export class SessionTransitionController {
     return { ok: true, manager: result.manager };
   }
 
+  /** Create and enter a new empty session through the same transaction. */
+  createFresh(cwd: string, notice?: string): SwitchOutcome {
+    const result = this.deps.host.createFresh(cwd);
+    if ("error" in result) {
+      return { ok: false, error: result.error };
+    }
+    this.commitSwitch(result.manager, notice);
+    return { ok: true, manager: result.manager };
+  }
+
   /** Atomic commit — the twelve-item cleanup list from the design doc §4.2. */
   private commitSwitch(manager: SessionManager, notice?: string): void {
     // Snapshot the keys to filter BEFORE purging (the queue is part of state).
@@ -63,6 +73,7 @@ export class SessionTransitionController {
       this.deps.queue.queued,
       this.deps.queue.pendingSteers.values(),
     );
+    const transcript = this.buildTranscript(notice, queuedDisplayKeys);
 
     this.deps.state.withTransaction(() => {
       // 1. Invalidate late external-runtime events.
@@ -78,17 +89,16 @@ export class SessionTransitionController {
       this.deps.clearLiveSubagentTools();
       // 11. Settle every blocking request (behavior delta vs legacy).
       this.deps.overlays.settleAll("session-switch");
+      // 9. Replace the entire renderer-facing history. The host has already
+      // rebound Agent.messages, so this projects the NEW session rather than
+      // appending a notice to the previous session's transcript.
+      this.deps.commit(manager, transcript);
     });
-
-    // 9. Transcript rebuild happens as a single follow-up commit so the
-    // queue keys (captured above) filter the placeholder rows.
-    this.deps.commit(notice);
-    void queuedDisplayKeys;
   }
 
   /** Rebuild the transcript rows for a freshly committed session. */
   buildTranscript(notice?: string, queuedDisplayKeys?: Set<string>): DisplayMessage[] {
-    const rows = reconstructDisplayMessages([...this.deps.agent.messages])
+    const rows = reconstructDisplayMessages([...this.deps.agent.getMessages()])
       .filter((message) => !queuedDisplayKeys?.has(message.key ?? ""));
     return notice
       ? [...rows, {

@@ -28,6 +28,38 @@ function makeController() {
 }
 
 describe("BubbleTuiController headless session", () => {
+  it("owns manual Compact as a cancellable command activity and commits its terminal event atomically", () => {
+    const { controller } = makeController();
+    const observations: Array<{ activity: string | undefined; terminal: boolean }> = [];
+    controller.subscribe(() => {
+      observations.push({
+        activity: controller.getCommandActivity()?.status,
+        terminal: controller.getTranscript().some((row) => row.content === "Compaction cancelled."),
+      });
+    });
+
+    const signal = controller.beginCommandActivity("compact");
+    expect(controller.isRunning()).toBe(false);
+    expect(controller.isBusy()).toBe(true);
+    expect(controller.getCommandActivity()).toMatchObject({ kind: "compact", status: "running" });
+    expect(controller.cancelActiveRun()).toBe(true);
+    expect(signal.aborted).toBe(true);
+    expect(controller.getCommandActivity()?.status).toBe("cancelling");
+
+    controller.finishCommandActivity("compact", {
+      key: "compact-cancelled",
+      role: "assistant",
+      content: "Compaction cancelled.",
+      syntheticKind: "ui_notice",
+    });
+
+    expect(controller.isBusy()).toBe(false);
+    expect(controller.getCommandActivity()).toBeNull();
+    expect(controller.getTranscript().at(-1)?.content).toBe("Compaction cancelled.");
+    expect(observations).toContainEqual({ activity: undefined, terminal: true });
+    expect(observations.some((item) => item.activity === undefined && !item.terminal)).toBe(false);
+  });
+
   it("streams, commits once per turn, and finishes a run", async () => {
     const { agent, controller } = makeController();
     agent.enqueueScript({
@@ -650,17 +682,77 @@ describe("BubbleTuiController headless session", () => {
   });
 
   it("session switch through the transaction notifies exactly once", async () => {
-    const { controller, host } = makeController();
-    host.ports.sessionHost.switchSession = () => ({
-      manager: { getSessionFile: () => "/next.jsonl", getMetadata: () => ({}), appendMessage: () => {} },
-    }) as never;
+    const { agent, controller, host } = makeController();
+    controller.appendDisplayMessage({ key: "old", role: "assistant", content: "old session answer" });
+    host.ports.sessionHost.switchSession = () => {
+      agent.messages = [
+        { role: "system", content: "system" },
+        { role: "user", content: "new session question" },
+        { role: "assistant", content: "new session answer" },
+      ];
+      return {
+        manager: { getSessionFile: () => "/next.jsonl", getMetadata: () => ({}), appendMessage: () => {} },
+      } as never;
+    };
     const before = host.snapshotVersions.length;
     const outcome = controller.switchSession({ targetFile: "/next.jsonl", notice: "Switched session" });
     expect(outcome.ok).toBe(true);
     expect(host.snapshotVersions.length - before).toBeLessThanOrEqual(1);
+    expect(controller.getTranscript().some((row) => row.content === "old session answer")).toBe(false);
+    expect(controller.getTranscript()).toContainEqual(expect.objectContaining({ content: "new session question" }));
+    expect(controller.getSessionManager().getSessionFile()).toBe("/next.jsonl");
     expect(controller.getTranscript().at(-1)).toMatchObject({
       content: "Switched session",
       syntheticKind: "ui_notice",
     });
+  });
+
+  it("creates a fresh session through the same lifecycle and leaves an empty transcript", () => {
+    const { agent, controller, host } = makeController();
+    controller.appendDisplayMessage({ key: "old", role: "assistant", content: "old answer" });
+    host.ports.sessionHost.createFresh = () => {
+      agent.messages = [{ role: "system", content: "system" }];
+      return {
+        manager: { getSessionFile: () => "/fresh.jsonl", getMetadata: () => ({}), appendMessage: () => {} },
+      } as never;
+    };
+
+    expect(controller.createFreshSession("/cwd")).toEqual({ ok: true });
+    expect(controller.getSessionManager().getSessionFile()).toBe("/fresh.jsonl");
+    expect(controller.getTranscript()).toEqual([]);
+  });
+
+  it("keeps the current session and transcript untouched when host preparation fails", () => {
+    const { controller, host } = makeController();
+    controller.appendDisplayMessage({ key: "old", role: "assistant", content: "keep me" });
+    host.ports.sessionHost.switchSession = () => ({ error: "cannot read session" });
+
+    expect(controller.switchSession({ targetFile: "/broken.jsonl" })).toEqual({
+      ok: false,
+      error: "cannot read session",
+    });
+    expect(controller.getSessionManager().getSessionFile()).toBe("/s.jsonl");
+    expect(controller.getTranscript()).toContainEqual(expect.objectContaining({ content: "keep me" }));
+  });
+
+  it("refuses session transitions while Compact owns the runtime", () => {
+    const { controller, host } = makeController();
+    let switchCalls = 0;
+    let freshCalls = 0;
+    host.ports.sessionHost.switchSession = () => {
+      switchCalls += 1;
+      return { error: "unexpected" };
+    };
+    host.ports.sessionHost.createFresh = () => {
+      freshCalls += 1;
+      return { error: "unexpected" };
+    };
+    controller.beginCommandActivity("compact");
+
+    expect(controller.switchSession({ targetFile: "/next.jsonl" })).toMatchObject({ ok: false });
+    expect(controller.createFreshSession("/cwd")).toMatchObject({ ok: false });
+    expect(switchCalls).toBe(0);
+    expect(freshCalls).toBe(0);
+    controller.finishCommandActivity("compact");
   });
 });

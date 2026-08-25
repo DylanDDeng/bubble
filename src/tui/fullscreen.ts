@@ -105,6 +105,8 @@ export class FullscreenApp {
       }
       if (this.options.controller.isRunning()) {
         this.options.controller.steer(trimmed);
+      } else if (this.options.controller.queueAfterCommand?.(trimmed)) {
+        this.render();
       } else {
         this.options.controller.appendDisplayMessage({ key: `user-${Date.now()}`, role: "user", content: trimmed });
         void this.options.controller.runTurn(trimmed, process.cwd());
@@ -124,6 +126,7 @@ export class FullscreenApp {
         if (this.options.controller.cancelActiveRun()) {
           return { consume: true };
         }
+        if (this.options.controller.isBusy?.()) return { consume: true };
         this.options.onExit();
         return { consume: true };
       }
@@ -131,6 +134,7 @@ export class FullscreenApp {
         if (this.options.controller.cancelActiveRun()) {
           return { consume: true };
         }
+        if (this.options.controller.isBusy?.()) return { consume: true };
         this.options.onExit();
         return { consume: true };
       }
@@ -154,6 +158,7 @@ export class FullscreenApp {
     const tail = this.options.controller.isRunning()
       ? this.options.controller.getStreamingTail()
       : null;
+    const commandActivity = this.options.controller.getCommandActivity?.() ?? null;
     if (tail) {
       if (!this.streamingMounted) {
         this.streamingMounted = true;
@@ -161,6 +166,17 @@ export class FullscreenApp {
       }
       this.streamingMessage.noteWidth(columns);
       this.streamingMessage.update(tail, columns, this.transcriptRenderOptions());
+    } else if (commandActivity) {
+      if (!this.streamingMounted) {
+        this.streamingMounted = true;
+        this.streamingMessage.startSpinner();
+      }
+      this.streamingMessage.noteWidth(columns);
+      this.streamingMessage.updateCommandActivity(
+        commandActivity.kind === "compact" ? "Compacting" : commandActivity.kind,
+        commandActivity.status === "cancelling",
+        columns,
+      );
     } else if (this.streamingMounted) {
       this.streamingMounted = false;
       this.streamingMessage.clearToNothing();

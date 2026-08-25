@@ -92,6 +92,12 @@ export interface TuiAgentRunOptions extends AgentRunOptions {
   goalRun?: boolean;
 }
 
+export interface CommandActivity {
+  kind: "compact";
+  status: "running" | "cancelling";
+  startedAt: number;
+}
+
 export class BubbleTuiController {
   private readonly state = new ControllerState();
   private readonly listeners = new Set<(version: number) => void>();
@@ -111,6 +117,7 @@ export class BubbleTuiController {
   private readonly childRuns = new Map<string, { state: RunState; visible: boolean; updatedAt: number }>();
   private activeInputController: AgentRunInputQueue | null = null;
   private activeAbortController: AbortController | null = null;
+  private commandActivity: (CommandActivity & { abortController: AbortController }) | null = null;
   private readonly queuedAfterRun: Array<{ content: string; displayKey: string }> = [];
   /** False after a provider turn commits, so settled and live rows never coexist. */
   private liveStreamVisible = false;
@@ -127,7 +134,7 @@ export class BubbleTuiController {
       overlays: this.overlays,
       queue: this.queue,
       agent: {
-        messages: deps.agent.messages as never,
+        getMessages: () => deps.agent.messages,
         setSessionID: (file: string) => deps.agent.setSessionID(file),
       },
       bumpExternalGeneration: () => {
@@ -138,8 +145,17 @@ export class BubbleTuiController {
         this.childRuns.clear();
         this.liveSubagentVersion += 1;
       },
-      commit: (notice?: string) => {
-        this.publishTranscript(notice);
+      commit: (manager, transcript) => {
+        this.sessionManager = manager;
+        this.deps.ports.flush.cancelFlush();
+        this.transcript = transcript;
+        this.queuedAfterRun.length = 0;
+        this.liveStreamVisible = false;
+        this.runState = null;
+        this.activeInputController = null;
+        this.activeAbortController = null;
+        this.commandActivity = null;
+        this.state.touch();
       },
     });
     this.overlays.onChange(() => this.state.touch());
@@ -147,7 +163,7 @@ export class BubbleTuiController {
       this.goalRuntime = new GoalRuntimeController({
         store: deps.goalStore,
         getSessionManager: () => this.sessionManager,
-        isRunActive: () => this.runActive,
+        isRunActive: () => this.isBusy(),
         queuedInputs: () => this.queuedAfterRun.length,
         isDisposed: () => this.disposed,
         startRun: (input, cwd) => {
@@ -341,6 +357,77 @@ export class BubbleTuiController {
     return this.runActive;
   }
 
+  /** A slash command that owns the activity lane without masquerading as an
+   * Agent turn. This keeps streaming/steering state separate while still
+   * giving Escape and Ctrl+C one cancellation boundary. */
+  beginCommandActivity(kind: CommandActivity["kind"]): AbortSignal {
+    if (this.runActive || this.commandActivity) {
+      throw new Error("Another operation is already running.");
+    }
+    const abortController = new AbortController();
+    this.commandActivity = {
+      kind,
+      status: "running",
+      startedAt: this.deps.ports.clock.now(),
+      abortController,
+    };
+    this.state.touch();
+    this.notify();
+    return abortController.signal;
+  }
+
+  finishCommandActivity(kind: CommandActivity["kind"], event?: DisplayMessage): void {
+    if (this.commandActivity?.kind !== kind) return;
+    this.state.withTransaction(() => {
+      if (event) this.transcript = [...this.transcript, event];
+      this.commandActivity = null;
+      this.state.touch();
+    });
+    this.notify();
+  }
+
+  getCommandActivity(): CommandActivity | null {
+    const activity = this.commandActivity;
+    if (!activity) return null;
+    return {
+      kind: activity.kind,
+      status: activity.status,
+      startedAt: activity.startedAt,
+    };
+  }
+
+  isBusy(): boolean {
+    return this.runActive || this.commandActivity !== null;
+  }
+
+  /** Queue composer input while a command owns the pane. Grok keeps the
+   * composer available during Compact; the message starts after the command
+   * reaches its terminal event instead of racing the history rewrite. */
+  queueAfterCommand(content: string): boolean {
+    if (!this.commandActivity) return false;
+    const displayKey = nextDisplayMessageKey("queued");
+    this.queuedAfterRun.push({ content, displayKey });
+    this.transcript = [...this.transcript, {
+      key: displayKey,
+      role: "user",
+      content,
+      inputStatus: "queued",
+    }];
+    this.state.touch();
+    this.notify();
+    return true;
+  }
+
+  async drainQueuedInputs(cwd: string, agentOptions: AgentRunOptions = {}): Promise<void> {
+    if (this.isBusy()) return;
+    const next = this.queuedAfterRun.shift();
+    if (!next || this.disposed) return;
+    this.transcript = moveStatusMessageToEnd(this.transcript, next.displayKey);
+    this.state.touch();
+    this.notify();
+    await this.runTurn(next.content, cwd, agentOptions);
+  }
+
   pendingSteerCount(): number {
     return this.queue.pendingSteers.size;
   }
@@ -374,9 +461,18 @@ export class BubbleTuiController {
   }
 
   cancelActiveRun(reason = "Interrupted by user"): boolean {
-    if (!this.activeAbortController || this.activeAbortController.signal.aborted) return false;
-    this.activeAbortController.abort(Object.assign(new Error(reason), { name: "AgentAbortError" }));
-    return true;
+    if (this.activeAbortController && !this.activeAbortController.signal.aborted) {
+      this.activeAbortController.abort(Object.assign(new Error(reason), { name: "AgentAbortError" }));
+      return true;
+    }
+    if (this.commandActivity && !this.commandActivity.abortController.signal.aborted) {
+      this.commandActivity.status = "cancelling";
+      this.commandActivity.abortController.abort(Object.assign(new Error(reason), { name: "AgentAbortError" }));
+      this.state.touch();
+      this.notify();
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -432,6 +528,9 @@ export class BubbleTuiController {
    */
   async runTurn(input: unknown, cwd: string, options?: TuiAgentRunOptions): Promise<void> {
     if (this.disposed) throw new Error("controller disposed");
+    if (this.commandActivity) {
+      throw new Error("A command is already running.");
+    }
     if (this.runActive) {
       if (typeof input === "string") this.steer(input);
       return;
@@ -633,13 +732,7 @@ export class BubbleTuiController {
       usageReported: runUsageReported,
     }, cwd);
 
-    const next = this.queuedAfterRun.shift();
-    if (next && !this.disposed) {
-      this.transcript = moveStatusMessageToEnd(this.transcript, next.displayKey);
-      this.state.touch();
-      this.notify();
-      await this.runTurn(next.content, cwd, { ...agentOptions, goalRun: false });
-    }
+    await this.drainQueuedInputs(cwd, agentOptions);
   }
 
   /** Apply one reducer transition and publish exactly one observable snapshot. */
@@ -707,20 +800,6 @@ export class BubbleTuiController {
     this.state.touch();
   }
 
-  private publishTranscript(notice?: string): void {
-    purgeForSessionSwitch(this.queue);
-    if (notice) {
-      this.transcript = [...this.transcript, {
-        key: `notice-${this.transcript.length}`,
-        role: "assistant",
-        content: notice,
-        syntheticKind: "ui_notice",
-      }];
-    }
-    this.state.touch();
-    this.notify();
-  }
-
   private notify(): void {
     for (const listener of this.listeners) listener(this.state.version);
   }
@@ -760,14 +839,21 @@ export class BubbleTuiController {
 
   /** Atomic session switch through the two-phase transaction. */
   switchSession(plan: { targetFile: string; notice?: string }): { ok: boolean; error?: string } {
+    if (this.isBusy()) return { ok: false, error: "Stop the current run before switching sessions." };
     const outcome = this.sessionTransition.switchTo(plan);
     if (outcome.ok && outcome.manager) {
-      this.sessionManager = outcome.manager;
       this.goalRuntime?.loadCurrentSession();
-      // A next-turn input belongs to the session in which it was submitted.
-      // The extracted session transition owns its queue, while queuedAfterRun
-      // is the controller's executable mirror and must be purged alongside it.
-      this.queuedAfterRun.length = 0;
+      this.notify();
+    }
+    return outcome.ok ? { ok: true } : { ok: false, error: outcome.error };
+  }
+
+  /** Start an empty native session using the same atomic lifecycle as resume. */
+  createFreshSession(cwd: string, notice?: string): { ok: boolean; error?: string } {
+    if (this.isBusy()) return { ok: false, error: "Stop the current run before starting a new session." };
+    const outcome = this.sessionTransition.createFresh(cwd, notice);
+    if (outcome.ok && outcome.manager) {
+      this.goalRuntime?.loadCurrentSession();
       this.notify();
     }
     return outcome.ok ? { ok: true } : { ok: false, error: outcome.error };

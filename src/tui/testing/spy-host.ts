@@ -35,9 +35,7 @@ export class SpyHost {
     terminal: { isMultiplexed: () => false },
     sessionHost: {
       switchSession: () => ({ error: "spy host: switchSession not configured" }),
-      createFresh: () => {
-        throw new Error("spy host: createFresh not configured");
-      },
+      createFresh: () => ({ error: "spy host: createFresh not configured" }),
     },
     git: { currentBranch: () => undefined },
     exitProcess: (code) => {

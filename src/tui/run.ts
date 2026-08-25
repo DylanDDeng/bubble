@@ -37,6 +37,7 @@ export interface RunTuiOptions {
   bashAllowlist?: BashAllowlist;
   settingsManager?: SettingsManager;
   switchSession?: (sessionFile: string) => { manager: SessionManager } | { error: string };
+  createFreshSession?: (cwd: string) => { manager: SessionManager } | { error: string };
   lspService?: LspService;
   mcpManager?: McpManager;
   goalStore?: GoalStore;
@@ -179,9 +180,10 @@ function buildPorts(options: RunTuiOptions) {
         options.switchSession
           ? options.switchSession(file)
           : { error: "session switching not configured" },
-      createFresh: () => {
-        throw new Error("createFresh not wired in the pi TUI yet");
-      },
+      createFresh: (cwd: string) =>
+        options.createFreshSession
+          ? options.createFreshSession(cwd)
+          : { error: "fresh session creation not configured" },
     },
     git: { currentBranch: () => undefined },
     exitProcess: (code: number) => process.exit(code),

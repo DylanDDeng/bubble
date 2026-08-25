@@ -663,6 +663,65 @@ function appendReadPreview(
   }
 }
 
+/**
+ * Manual Compact keeps its terminal event deliberately terse, but the summary
+ * that replaced the old context remains inspectable. Treat the event as the
+ * same scrollback surface as a settled tool trace: hover/select paint the
+ * complete row and double-click folds the real summary in place.
+ */
+function projectCompactionSummary(
+  message: DisplayMessage,
+  options: TranscriptRenderOptions,
+): TranscriptProjection {
+  const theme = options.theme ?? defaultTranscriptTheme;
+  const columns = Math.max(1, options.columns);
+  const frameColumns = columns > 2 ? columns - 2 : columns;
+  const contentColumns = frameColumns >= TRACE_BORDER_MIN_COLUMNS
+    ? Math.max(1, frameColumns - TRACE_RESERVED_COLUMNS)
+    : frameColumns;
+  const interaction = options.traceInteraction;
+  const groupKey = `compact:${message.key ?? `${message.content}:${message.compactionSummary ?? ""}`}`;
+  const target: TraceRowTarget = {
+    kind: "group",
+    key: groupKey,
+    groupKey,
+    foldable: true,
+  };
+  const expanded = interaction?.isGroupExpanded(groupKey) ?? false;
+  const selected = interaction?.isSelected(groupKey) ?? false;
+  const marker = expanded ? "⌄" : selected ? "›" : "◆";
+  const label = message.content.trim() || "Compaction completed.";
+  const header = `${marker} ${label}`;
+  const rows = [
+    `${theme.accent(marker)}${truncateVisible(
+      header.slice(marker.length),
+      Math.max(0, contentColumns - stringWidth(marker)),
+    )}`,
+  ];
+  const traceTargets: Array<TraceRowTarget | undefined> = [target];
+
+  if (expanded) {
+    const summary = message.compactionSummary?.trim() ?? "";
+    const bodyWidth = Math.max(1, contentColumns - 2);
+    const bodyRows = options.markdownRenderer
+      ? options.markdownRenderer(summary, bodyWidth)
+      : wrapPlain(summary, bodyWidth);
+    for (const row of bodyRows) {
+      rows.push(theme.dim(truncateVisible(`  ${row}`, contentColumns)));
+      traceTargets.push(target);
+    }
+  }
+
+  return decorateTraceGroup(
+    { rows, traceTargets },
+    target,
+    groupKey,
+    frameColumns,
+    theme,
+    interaction,
+  );
+}
+
 export function renderMessage(message: DisplayMessage, options: TranscriptRenderOptions): string[] {
   return projectMessage(message, options).rows;
 }
@@ -674,6 +733,9 @@ export function projectMessage(message: DisplayMessage, options: TranscriptRende
   }
   if (message.role === "error") {
     return plainProjection([...projectAssistantRows(message.content, options).map(theme.error), ""]);
+  }
+  if (message.syntheticKind === "ui_compact_summary" && message.compactionSummary?.trim()) {
+    return projectCompactionSummary(message, options);
   }
   if (message.syntheticKind) {
     return plainProjection([

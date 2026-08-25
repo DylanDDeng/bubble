@@ -5,6 +5,130 @@ import type { DisplayMessage } from "../tui/model/display-history.js";
 import type { StreamingTailState } from "../tui/components/streaming-message.js";
 
 describe("fullscreen working trace", () => {
+  it("renders Grok-style Compacting and Cancelling states in the shared activity lane", async () => {
+    const terminal = new VirtualTerminal(64, 10);
+    const listeners: Array<() => void> = [];
+    let activity: { kind: "compact"; status: "running" | "cancelling"; startedAt: number } | null = {
+      kind: "compact",
+      status: "running",
+      startedAt: Date.now(),
+    };
+    let messages: DisplayMessage[] = [];
+    const controller = {
+      subscribe: (listener: () => void) => {
+        listeners.push(listener);
+        return () => {};
+      },
+      getTranscript: () => messages,
+      isRunning: () => false,
+      getStreamingTail: () => null,
+      getCommandActivity: () => activity,
+      appendDisplayMessage: () => {},
+      runTurn: async () => {},
+      cancelActiveRun: () => false,
+    };
+    const app = new FullscreenApp({
+      controller: controller as never,
+      agent: {
+        model: "test-model",
+        mode: "default",
+        setMode: () => {},
+        getContextUsageSnapshot: () => ({ usedTokens: 0, contextWindow: 1_000 }),
+      } as never,
+      onExit: () => {},
+      onCommand: () => {},
+      terminal,
+    });
+
+    app.start();
+    await terminal.waitForRender();
+    expect(terminal.getViewport().join("\n")).toContain("Compacting…");
+
+    activity = { ...activity!, status: "cancelling" };
+    listeners.forEach((listener) => listener());
+    await terminal.waitForRender();
+    expect(terminal.getViewport().join("\n")).toContain("Cancelling…");
+
+    messages = [{
+      key: "compact-done",
+      role: "assistant",
+      content: "Compaction cancelled.",
+      syntheticKind: "ui_notice",
+    }];
+    activity = null;
+    listeners.forEach((listener) => listener());
+    await terminal.waitForRender();
+    const settled = terminal.getViewport().join("\n");
+    expect(settled).toContain("Compaction cancelled.");
+    expect(settled).not.toContain("Cancelling…");
+
+    app.dispose();
+  });
+
+  it("hovers and expands a completed Compact summary through real mouse events", async () => {
+    const terminal = new VirtualTerminal(80, 18);
+    const messages: DisplayMessage[] = [{
+      key: "compact-done",
+      role: "assistant",
+      content: "Compaction completed in 1.2s.",
+      syntheticKind: "ui_compact_summary",
+      compactionSummary: "Goal: preserve authentication behavior\nNext: run the full test suite",
+    }];
+    const controller = {
+      subscribe: () => () => {},
+      getTranscript: () => messages,
+      isRunning: () => false,
+      getStreamingTail: () => null,
+      getCommandActivity: () => null,
+      appendDisplayMessage: () => {},
+      runTurn: async () => {},
+    };
+    const app = new FullscreenApp({
+      controller: controller as never,
+      agent: {
+        model: "test-model",
+        mode: "default",
+        setMode: () => {},
+        getContextUsageSnapshot: () => ({ usedTokens: 0, contextWindow: 1_000 }),
+      } as never,
+      onExit: () => {},
+      onCommand: () => {},
+      terminal,
+    });
+    const click = async (row: number) => {
+      const terminalRow = row + 1;
+      terminal.sendInput(`\x1b[<0;2;${terminalRow}M`);
+      terminal.sendInput(`\x1b[<0;2;${terminalRow}m`);
+      await terminal.waitForRender();
+    };
+
+    app.start();
+    await terminal.waitForRender();
+    let rows = terminal.getViewport();
+    let headerRow = rows.findIndex((row) => row.includes("◆ Compaction completed in 1.2s."));
+    expect(headerRow).toBeGreaterThan(0);
+    expect(rows.join("\n")).not.toContain("preserve authentication behavior");
+
+    terminal.sendInput(`\x1b[<35;2;${headerRow + 1}M`);
+    await terminal.waitForRender();
+    rows = terminal.getViewport();
+    expect(rows[headerRow - 1]?.trim()).toMatch(/^┌.*┐$/u);
+    expect(rows[headerRow]?.trim()).toMatch(/^│  ◆ Compaction completed in 1\.2s\..*│$/u);
+    expect(rows[headerRow + 1]?.trim()).toMatch(/^└.*┘$/u);
+
+    await click(headerRow);
+    rows = terminal.getViewport();
+    expect(rows.join("\n")).toContain("› Compaction completed in 1.2s.");
+    await click(headerRow);
+    rows = terminal.getViewport();
+    const expanded = rows.join("\n");
+    expect(expanded).toContain("⌄ Compaction completed in 1.2s.");
+    expect(expanded).toContain("Goal: preserve authentication behavior");
+    expect(expanded).toContain("Next: run the full test suite");
+
+    app.dispose();
+  });
+
   it("opens settled Find Files and Execute entries through real mouse events", async () => {
     const terminal = new VirtualTerminal(80, 24);
     const glob = {

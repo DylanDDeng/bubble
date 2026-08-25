@@ -1024,14 +1024,19 @@ describe("slash commands", () => {
     expect(runMemoryCompaction).toHaveBeenCalledTimes(1);
   });
 
-  it("/compact streams an LLM summary, reports progress, and rebuilds history", async () => {
+  it("/compact streams an LLM summary, preserves optional context, and rebuilds agent history", async () => {
     const clearMessages = vi.fn();
     const resetContextUsageAnchor = vi.fn();
-    const applyLLMCompaction = vi.fn(() => ({ compacted: true, droppedEntries: 2 }));
+    const applyLLMCompaction = vi.fn(() => ({ compacted: true, droppedEntries: 2, summary: "LLM SUMMARY" }));
     const heuristicCompact = vi.fn(() => ({ compacted: true, droppedEntries: 2 }));
     const progress: Array<unknown> = [];
     // Fake streaming summarizer: emits two deltas, returns the final text.
-    const summarizeForCompaction = vi.fn(async (_old: unknown, onDelta?: (full: string, d: string) => void) => {
+    const summarizeForCompaction = vi.fn(async (
+      _old: unknown,
+      onDelta?: (full: string, d: string) => void,
+      _signal?: AbortSignal,
+      _userContext?: string,
+    ) => {
       onDelta?.("part one", "part one");
       onDelta?.("part one two", " two");
       return "LLM SUMMARY";
@@ -1059,11 +1064,13 @@ describe("slash commands", () => {
       } as any,
     });
 
-    const result = await slashRegistry.execute("/compact", ctx);
+    const result = await slashRegistry.execute("/compact keep the auth implementation", ctx);
 
     expect(result.handled).toBe(true);
-    expect(result.result).toContain("Compaction complete");
+    expect(result.result).toMatch(/^Compaction completed in (?:\d+ms|\d+\.\d+s)\.$/);
+    expect(result.detail).toEqual({ kind: "compaction-summary", content: "LLM SUMMARY" });
     expect(summarizeForCompaction).toHaveBeenCalledTimes(1);
+    expect(summarizeForCompaction.mock.calls[0]?.[3]).toBe("keep the auth implementation");
     expect(applyLLMCompaction).toHaveBeenCalledWith("LLM SUMMARY");
     expect(heuristicCompact).not.toHaveBeenCalled();
     expect(clearMessages).not.toHaveBeenCalled();
@@ -1099,7 +1106,7 @@ describe("slash commands", () => {
     const result = await slashRegistry.execute("/compact", ctx);
 
     expect(result.handled).toBe(true);
-    expect(result.result).toContain("Compaction complete");
+    expect(result.result).toContain("Compaction completed in");
     expect(applyLLMCompaction).not.toHaveBeenCalled();
     expect(heuristicCompact).toHaveBeenCalledTimes(1);
   });
@@ -1124,6 +1131,69 @@ describe("slash commands", () => {
 
     expect(result.result).toContain("already compact");
     expect(summarizeForCompaction).not.toHaveBeenCalled();
+  });
+
+  it("/compact cancellation never falls through to heuristic compaction", async () => {
+    const abortController = new AbortController();
+    const heuristicCompact = vi.fn();
+    const summarizeForCompaction = vi.fn(async (
+      _old: unknown,
+      _onDelta: unknown,
+      signal?: AbortSignal,
+    ) => {
+      expect(signal).toBe(abortController.signal);
+      abortController.abort();
+      throw Object.assign(new Error("cancelled"), { name: "AbortError" });
+    });
+    const ctx = createContext({
+      compactionAbortSignal: abortController.signal,
+      agent: {
+        messages: [{ role: "system", content: "system prompt" }],
+        resetContextUsageAnchor: vi.fn(),
+        summarizeForCompaction,
+      } as any,
+      sessionManager: {
+        getCompactionPlan: vi.fn(() => ({ oldMessages: [{ role: "user", content: "old" }] })),
+        applyLLMCompaction: vi.fn(),
+        compact: heuristicCompact,
+        getMessages: vi.fn(() => []),
+      } as any,
+    });
+
+    const result = await slashRegistry.execute("/compact", ctx);
+
+    expect(result.result).toBe("Compaction cancelled.");
+    expect(heuristicCompact).not.toHaveBeenCalled();
+    expect(ctx.agent.messages).toEqual([{ role: "system", content: "system prompt" }]);
+  });
+
+  it("/compact honours cancellation when a provider returns after ignoring abort", async () => {
+    const abortController = new AbortController();
+    const applyLLMCompaction = vi.fn();
+    const heuristicCompact = vi.fn();
+    const ctx = createContext({
+      compactionAbortSignal: abortController.signal,
+      agent: {
+        messages: [{ role: "system", content: "system prompt" }],
+        resetContextUsageAnchor: vi.fn(),
+        summarizeForCompaction: vi.fn(async () => {
+          abortController.abort();
+          return "summary returned after abort";
+        }),
+      } as any,
+      sessionManager: {
+        getCompactionPlan: vi.fn(() => ({ oldMessages: [{ role: "user", content: "old" }] })),
+        applyLLMCompaction,
+        compact: heuristicCompact,
+        getMessages: vi.fn(() => []),
+      } as any,
+    });
+
+    const result = await slashRegistry.execute("/compact", ctx);
+
+    expect(result.result).toBe("Compaction cancelled.");
+    expect(applyLLMCompaction).not.toHaveBeenCalled();
+    expect(heuristicCompact).not.toHaveBeenCalled();
   });
 
   it("/memory summarize and refresh delegate to Codex-style memory handlers", async () => {

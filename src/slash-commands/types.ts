@@ -14,14 +14,19 @@ import type { ExternalRuntimeManager } from "../external-runtime/types.js";
 import type { ContextUsageSnapshot } from "../context/usage.js";
 
 /**
- * Live progress for a manual `/compact` run, pushed to the TUI so it can render
- * a progress bar. `phase` advances collecting → summarizing → applying;
- * `streamedChars` is the running length of the streamed summary (drives the
- * bar's fill within the summarizing phase). Hosts without a UI omit the sink.
+ * Live progress for a manual `/compact` run. `phase` advances collecting →
+ * summarizing → applying; interactive hosts can use it for diagnostics while
+ * the visible Grok-style activity lane remains a stable `Compacting…` state.
+ * Hosts without a UI omit the sink.
  */
 export interface CompactionProgress {
   phase: "collecting" | "summarizing" | "applying";
   streamedChars: number;
+}
+
+export interface SlashCommandResultDetail {
+  kind: "compaction-summary";
+  content: string;
 }
 
 export interface SlashCommandContext {
@@ -71,6 +76,8 @@ export interface SlashCommandContext {
    * while compacting and `null` to clear the indicator. Absent in non-TUI hosts.
    */
   compactionProgress?: (progress: CompactionProgress | null) => void;
+  /** Cancellation signal owned by the interactive host's Compact activity. */
+  compactionAbortSignal?: AbortSignal;
   /** External agent runtime used by Grok subscription chat. */
   externalRuntime?: ExternalRuntimeManager;
   /**
@@ -90,8 +97,14 @@ export interface SlashCommandContext {
  *   - string | void: the string (if any) is displayed as an assistant message
  *   - { inject }: the content is sent to the agent as the user's next turn
  *     (used by MCP prompts that expand a template into a user message)
+ *   - { result, detail }: keep the visible result terse while exposing
+ *     structured, host-rendered detail such as an inspectable Compact summary
  */
-export type SlashCommandOutput = string | void | { inject: string };
+export type SlashCommandOutput =
+  | string
+  | void
+  | { inject: string }
+  | { result: string; detail?: SlashCommandResultDetail };
 
 export interface SlashCommand {
   name: string;

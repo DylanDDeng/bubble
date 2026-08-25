@@ -3,6 +3,7 @@ import { ResponsiveTranscriptComponent } from "../tui/components/responsive-tran
 import { buildTraceGroups } from "../tui/model/trace-groups.js";
 import { TraceInteractionState } from "../tui/model/trace-interaction.js";
 import type { DisplayMessage, DisplayToolCall } from "../tui/model/display-history.js";
+import { reconstructDisplayMessages } from "../tui/model/display-reconstruct.js";
 
 describe("ResponsiveTranscriptComponent projection cache", () => {
   it("reuses settled projection across composer-only frames", () => {
@@ -90,5 +91,21 @@ describe("ResponsiveTranscriptComponent projection cache", () => {
     expect(row).toBeGreaterThanOrEqual(0);
     component.handleMouse({ kind: "press", button: 0, release: false, clickCount: 2, x: 4, y: row } as never);
     expect(onTraceAction).toHaveBeenCalledWith({ kind: "open-subagent", subAgentId: "child-1" });
+  });
+
+  it("reconstructs a persisted session summary as an inspectable Compact entry", () => {
+    const messages = reconstructDisplayMessages([
+      { role: "system", content: "Bubble system prompt" },
+      { role: "system", content: "Previous conversation summary: Goal: preserve auth" },
+      { role: "user", content: "continue" },
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      role: "assistant",
+      content: "Compaction completed.",
+      syntheticKind: "ui_compact_summary",
+      compactionSummary: "Goal: preserve auth",
+    });
+    expect(messages[1]).toMatchObject({ role: "user", content: "continue" });
   });
 });

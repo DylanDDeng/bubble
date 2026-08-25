@@ -108,6 +108,28 @@ describe("transcript renderer", () => {
     expect(rows[rows.length - 1]).toBe("");
   });
 
+  it("keeps Compact completion terse until its trace-style detail is expanded", () => {
+    const interaction = new TraceInteractionState();
+    const message = msg({
+      key: "compact-1",
+      content: "Compaction completed in 1.2s.",
+      syntheticKind: "ui_compact_summary",
+      compactionSummary: "Goal: preserve authentication behavior\nNext: run the full test suite",
+    });
+    const options = { columns: 72, traceInteraction: interaction };
+
+    const collapsed = renderMessage(message, options).map(strip).join("\n");
+    expect(collapsed).toContain("◆ Compaction completed in 1.2s.");
+    expect(collapsed).not.toContain("preserve authentication behavior");
+
+    const groupKey = "compact:compact-1";
+    interaction.activate({ kind: "group", key: groupKey, groupKey, foldable: true }, 2);
+    const expanded = renderMessage(message, options).map(strip).join("\n");
+    expect(expanded).toContain("⌄ Compaction completed in 1.2s.");
+    expect(expanded).toContain("Goal: preserve authentication behavior");
+    expect(expanded).toContain("Next: run the full test suite");
+  });
+
   it("renders the Grok-style settled reasoning surface", () => {
     const collapsed = renderMessage(msg({ reasoning: "line one\nline two" }), { columns: 60 });
     expect(collapsed.map(strip)).toEqual(["┃◆ Thinking", "┃line one", "┃line two", ""]);

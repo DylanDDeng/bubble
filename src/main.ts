@@ -56,6 +56,8 @@ import {
 } from "./debug-trace.js";
 import { shouldRejectGrokSessionInPrintMode } from "./external-runtime/session-policy.js";
 import type { ExternalRuntimeManager } from "./external-runtime/types.js";
+import { rmSync } from "node:fs";
+import { splitLeadingContext } from "./context/compact.js";
 
 type TerminalTheme = "light" | "dark";
 
@@ -724,9 +726,8 @@ async function main() {
     // that persists to the session (onMessageAppend, markers, title updater)
     // by reassigning the outer `sessionManager`, then replace the agent's
     // history the same way startup resume does.
-    const switchSession = (sessionFile: string): { manager: SessionManager } | { error: string } => {
+    const activateSession = (next: SessionManager): { manager: SessionManager } | { error: string } => {
       try {
-        const next = new SessionManager(sessionFile);
         const history = next.getMessages();
         const nextPromptCacheKey = next.getOrCreatePromptCacheKey();
         const nextTitleUpdater = createSessionTitleUpdater({
@@ -741,7 +742,7 @@ async function main() {
         });
         // Keep the live system/meta head (mode reminders survive the switch),
         // mirroring the /rewind history-replacement pattern.
-        const head = agent.messages.filter((m) => m.role === "system" || m.role === "meta");
+        const head = splitLeadingContext(agent.messages).leading;
         const nextMessages = [...head, ...history];
 
         // Commit only after every file read/write and reconstruction step has
@@ -760,10 +761,30 @@ async function main() {
         return { error: error instanceof Error ? error.message : String(error) };
       }
     };
+    const switchSession = (sessionFile: string): { manager: SessionManager } | { error: string } => {
+      try {
+        return activateSession(new SessionManager(sessionFile));
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    };
+    const createFreshSession = (cwd: string): { manager: SessionManager } | { error: string } => {
+      let fresh: SessionManager | undefined;
+      try {
+        fresh = SessionManager.createFresh(cwd);
+        const result = activateSession(fresh);
+        if ("error" in result) rmSync(fresh.getSessionFile(), { force: true });
+        return result;
+      } catch (error) {
+        if (fresh) rmSync(fresh.getSessionFile(), { force: true });
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    };
 
     const commonOptions = {
       sessionManager,
       switchSession,
+      createFreshSession,
       createProvider,
       registry,
       skillRegistry,

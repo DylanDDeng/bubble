@@ -188,6 +188,7 @@ class ProjectedRowComponent implements Component {
 
 export class StreamingMessageComponent extends VStack {
   private tail: StreamingTailState | null = null;
+  private commandActivity: { label: string; cancelling: boolean } | null = null;
   private frame = 0;
   private frameTimer: ReturnType<typeof setInterval> | null = null;
   private readonly onFrame?: () => void;
@@ -243,6 +244,7 @@ export class StreamingMessageComponent extends VStack {
     projectionOptions: Omit<TranscriptRenderOptions, "columns"> = {},
   ): void {
     this.tail = tail;
+    this.commandActivity = null;
     this.lastColumns = columns;
     this.projectionOptions = projectionOptions;
     const width = Math.max(1, Math.floor(columns));
@@ -338,6 +340,21 @@ export class StreamingMessageComponent extends VStack {
     this.liveGapRow.setLines(hasLiveRows ? 1 : 0);
   }
 
+  /** Paint a non-turn command into the same permanent activity lane Grok uses
+   * for Thinking, tools and manual compaction. No transcript preview rows are
+   * created, so completion only replaces the spinner with its event line. */
+  updateCommandActivity(label: string, cancelling: boolean, columns: number): void {
+    this.tail = null;
+    this.commandActivity = { label, cancelling };
+    this.lastColumns = columns;
+    this.clearProjectedRows();
+    const text = cancelling ? "Cancelling…" : `${label}…`;
+    this.activityLane.setText(truncateToWidth(
+      ` ${chalk.cyan(SPINNER_FRAMES[this.frame]!)} ${chalk.dim(text)}`,
+      Math.max(1, Math.floor(columns)),
+    ));
+  }
+
   /**
    * Turn ended: collapse every scrollable slot and clear (but do not collapse)
    * the permanent activity lane. Same-frame with the controller's settled
@@ -347,8 +364,13 @@ export class StreamingMessageComponent extends VStack {
   clearToNothing(): void {
     this.stopSpinner();
     this.tail = null;
-    this.thinkingHeaderRow.setText("");
+    this.commandActivity = null;
+    this.clearProjectedRows();
     this.activityLane.setText("");
+  }
+
+  private clearProjectedRows(): void {
+    this.thinkingHeaderRow.setText("");
     this.thinkingEllipsisRow.setText("");
     this.reasoningGapRow.setLines(0);
     this.timelineEllipsisRow.setText("");
@@ -365,6 +387,12 @@ export class StreamingMessageComponent extends VStack {
         // Re-render just the glyph by re-running the status text build.
         const keep = this.tail;
         this.update(keep, this.lastColumns ?? 80, this.projectionOptions);
+      } else if (this.commandActivity) {
+        this.updateCommandActivity(
+          this.commandActivity.label,
+          this.commandActivity.cancelling,
+          this.lastColumns ?? 80,
+        );
       }
       this.onFrame?.();
     }, 100);

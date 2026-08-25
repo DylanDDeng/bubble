@@ -36,7 +36,7 @@ export interface TerminalProbe {
  */
 export interface SessionHostPort {
   switchSession(file: string): { manager: import("../../session.js").SessionManager } | { error: string };
-  createFresh(cwd: string): import("../../session.js").SessionManager;
+  createFresh(cwd: string): { manager: import("../../session.js").SessionManager } | { error: string };
 }
 
 export interface GitBranchProbe {
