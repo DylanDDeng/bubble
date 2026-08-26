@@ -1,4 +1,3 @@
-import chalk from "chalk";
 import {
   matchesKey,
   truncateToWidth,
@@ -6,6 +5,8 @@ import {
   type Component,
 } from "@bubblebrain-ai/pi-tui";
 import type { SubagentDisplay } from "../model/subagent-view.js";
+import { darkTheme, type Theme } from "../model/theme.js";
+import { themeBackground, themeDim, themeForeground } from "../model/theme-style.js";
 import { safeSheetText } from "./bottom-sheet.js";
 
 export interface WorkflowInspectorSnapshot {
@@ -24,6 +25,7 @@ export interface WorkflowInspectorOptions {
   onOpenAgent(agentId: string): void;
   onStop(runId: string): void;
   onRender(): void;
+  theme?: Theme;
 }
 
 const FINAL = new Set(["completed", "failed", "blocked", "cancelled", "closed"]);
@@ -37,12 +39,12 @@ function pad(line: string, width: number): string {
   return clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped)));
 }
 
-function glyph(status: string): string {
-  if (status === "completed" || status === "closed") return chalk.green("✓");
-  if (status === "failed" || status === "blocked") return chalk.red("×");
-  if (status === "cancelled") return chalk.gray("■");
-  if (status === "queued") return chalk.gray("○");
-  return chalk.cyan("◆");
+function glyph(status: string, theme: Theme): string {
+  if (status === "completed" || status === "closed") return themeForeground(theme.success, "✓");
+  if (status === "failed" || status === "blocked") return themeForeground(theme.error, "×");
+  if (status === "cancelled") return themeForeground(theme.muted, "■");
+  if (status === "queued") return themeForeground(theme.muted, "○");
+  return themeForeground(theme.accent, "◆");
 }
 
 function memberMeta(member: SubagentDisplay): string {
@@ -61,8 +63,12 @@ export class WorkflowInspectorComponent implements Component {
   constructor(private readonly options: WorkflowInspectorOptions) {}
 
   render(width: number): string[] {
+    const theme = this.options.theme ?? darkTheme;
     const snapshot = this.options.getSnapshot();
-    if (!snapshot) return [chalk.red("Workflow is no longer available"), chalk.dim("Esc close")];
+    if (!snapshot) return [
+      themeForeground(theme.error, "Workflow is no longer available"),
+      themeDim(theme.dim, "Esc close"),
+    ];
     const frameWidth = Math.max(1, Math.floor(width));
     const inside = Math.max(1, frameWidth - 4);
     const members = snapshot.members;
@@ -80,45 +86,49 @@ export class WorkflowInspectorComponent implements Component {
       return [
         title,
         `${done}/${members.length}`,
-        ...members.map((member) => `${glyph(member.status ?? "running")} ${safe(member.nickname ?? member.agentName ?? "agent")}`),
+        ...members.map((member) => `${glyph(member.status ?? "running", theme)} ${safe(member.nickname ?? member.agentName ?? "agent")}`),
       ].slice(0, terminalRows).map((row) => truncateToWidth(row, frameWidth, ""));
     }
-    const top = chalk.gray(`┌─ ${truncateToWidth(title, Math.max(1, frameWidth - 6), "")} ${"─".repeat(Math.max(0, frameWidth - visibleWidth(title) - 5))}┐`);
-    const header = `${chalk.gray("│")} ${pad(chalk.dim(`${done}/${members.length} agents · Enter inspect · x stop · Esc close`), inside)} ${chalk.gray("│")}`;
-    const separator = chalk.gray(`├${"─".repeat(frameWidth - 2)}┤`);
+    const border = (text: string) => themeForeground(theme.border, text);
+    const accent = (text: string) => themeForeground(theme.accent, text);
+    const dim = (text: string) => themeDim(theme.dim, text);
+    const selectedBackground = (text: string) => themeBackground(theme.traceSelectedBg, text);
+    const top = border(`┌─ ${truncateToWidth(title, Math.max(1, frameWidth - 6), "")} ${"─".repeat(Math.max(0, frameWidth - visibleWidth(title) - 5))}┐`);
+    const header = `${border("│")} ${pad(dim(`${done}/${members.length} agents · Enter inspect · x stop · Esc close`), inside)} ${border("│")}`;
+    const separator = border(`├${"─".repeat(frameWidth - 2)}┤`);
     const rows: string[] = [];
 
     if (frameWidth >= 88) {
       const railWidth = Math.min(24, Math.max(16, Math.floor(inside * 0.27)));
       const rosterWidth = inside - railWidth - 3;
-      const phaseRows = (phases.length > 0 ? phases : ["Workflow"]).map((phase) => `${phase === currentPhase ? chalk.cyan("◆") : chalk.dim("│")} ${safe(phase)}`);
+      const phaseRows = (phases.length > 0 ? phases : ["Workflow"]).map((phase) => `${phase === currentPhase ? accent("◆") : dim("│")} ${safe(phase)}`);
       const rosterRows = members.slice(this.scrollOffset, this.scrollOffset + bodyBudget).map((member, index) => {
         const actualIndex = this.scrollOffset + index;
         const selected = actualIndex === this.selected;
-        const line = `${selected ? chalk.cyan("›") : " "} ${glyph(member.status ?? "running")} ${safe(member.nickname ?? member.agentName ?? "agent")} — ${safe(member.task ?? "")}  ${chalk.dim(memberMeta(member))}`;
-        return selected ? chalk.bgHex("#2B2B2B")(pad(line, rosterWidth)) : pad(line, rosterWidth);
+        const line = `${selected ? accent("›") : " "} ${glyph(member.status ?? "running", theme)} ${safe(member.nickname ?? member.agentName ?? "agent")} — ${safe(member.task ?? "")}  ${dim(memberMeta(member))}`;
+        return selected ? selectedBackground(pad(line, rosterWidth)) : pad(line, rosterWidth);
       });
       for (let index = 0; index < bodyBudget; index += 1) {
-        rows.push(`${chalk.gray("│")} ${pad(phaseRows[index] ?? "", railWidth)} ${chalk.dim("│")} ${pad(rosterRows[index] ?? "", rosterWidth)} ${chalk.gray("│")}`);
+        rows.push(`${border("│")} ${pad(phaseRows[index] ?? "", railWidth)} ${dim("│")} ${pad(rosterRows[index] ?? "", rosterWidth)} ${border("│")}`);
       }
     } else {
       const phaseLine = phases.length > 0
-        ? phases.map((phase) => phase === currentPhase ? chalk.cyan(`◆ ${safe(phase)}`) : chalk.dim(`· ${safe(phase)}`)).join(chalk.dim("  →  "))
-        : chalk.dim("◆ Workflow");
-      rows.push(`${chalk.gray("│")} ${pad(phaseLine, inside)} ${chalk.gray("│")}`);
+        ? phases.map((phase) => phase === currentPhase ? accent(`◆ ${safe(phase)}`) : dim(`· ${safe(phase)}`)).join(dim("  →  "))
+        : dim("◆ Workflow");
+      rows.push(`${border("│")} ${pad(phaseLine, inside)} ${border("│")}`);
       const rosterBudget = Math.max(1, bodyBudget - 1);
       for (let index = 0; index < rosterBudget; index += 1) {
         const actualIndex = this.scrollOffset + index;
         const member = members[actualIndex];
         if (!member) {
-          rows.push(`${chalk.gray("│")} ${pad("", inside)} ${chalk.gray("│")}`);
+          rows.push(`${border("│")} ${pad("", inside)} ${border("│")}`);
           continue;
         }
-        const line = `${actualIndex === this.selected ? chalk.cyan("›") : " "} ${glyph(member.status ?? "running")} ${safe(member.nickname ?? member.agentName ?? "agent")} — ${safe(member.task ?? "")}  ${chalk.dim(memberMeta(member))}`;
-        rows.push(`${chalk.gray("│")} ${actualIndex === this.selected ? chalk.bgHex("#2B2B2B")(pad(line, inside)) : pad(line, inside)} ${chalk.gray("│")}`);
+        const line = `${actualIndex === this.selected ? accent("›") : " "} ${glyph(member.status ?? "running", theme)} ${safe(member.nickname ?? member.agentName ?? "agent")} — ${safe(member.task ?? "")}  ${dim(memberMeta(member))}`;
+        rows.push(`${border("│")} ${actualIndex === this.selected ? selectedBackground(pad(line, inside)) : pad(line, inside)} ${border("│")}`);
       }
     }
-    return [top, header, separator, ...rows, chalk.gray(`└${"─".repeat(frameWidth - 2)}┘`)];
+    return [top, header, separator, ...rows, border(`└${"─".repeat(frameWidth - 2)}┘`)];
   }
 
   handleInput(data: string): void {

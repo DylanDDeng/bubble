@@ -15,7 +15,8 @@ import chalk from "chalk";
 import stringWidth from "string-width";
 import { truncateVisual } from "../../text-display.js";
 import { DisplayToolCall, DisplayMessage } from "../model/display-history.js";
-import { darkTheme } from "../model/theme.js";
+import { darkTheme, type Theme } from "../model/theme.js";
+import { themeBackground, themeDim, themeForeground } from "../model/theme-style.js";
 import { buildTraceGroups, formatTracePath, type TraceGroup } from "../model/trace-groups.js";
 import type { TraceInteractionState, TraceRowTarget } from "../model/trace-interaction.js";
 import { splitImageDisplayContent } from "../image-display.js";
@@ -106,19 +107,26 @@ export interface TranscriptTheme {
   imageChip?: (text: string, active: boolean) => string;
 }
 
-export const defaultTranscriptTheme: TranscriptTheme = {
-  userBg: (text) => chalk.bgHex(darkTheme.userMessageBg)(text),
-  userText: (text) => chalk.hex("#E8EDF4")(text),
-  accent: (text) => chalk.cyan(text),
-  dim: (text) => chalk.dim(text),
-  error: (text) => chalk.red(text),
-  success: (text) => chalk.green(text),
-  hoverBorder: (text) => chalk.gray.dim(text),
-  selectionBorder: (text) => chalk.gray(text),
-  hoverBackground: (text) => chalk.bgHex(darkTheme.traceHoverBg)(text),
-  selectionBackground: (text) => chalk.bgHex(darkTheme.traceSelectedBg)(text),
-  imageChip: (text, active) => chalk.bgHex(active ? "#505050" : "#373737").white(text),
-};
+export function createTranscriptTheme(getTheme: () => Theme): TranscriptTheme {
+  return {
+    userBg: (text) => themeBackground(getTheme().userMessageBg, text),
+    userText: (text) => themeForeground(getTheme().userMessageText, text),
+    accent: (text) => themeForeground(getTheme().accent, text),
+    dim: (text) => themeDim(getTheme().dim, text),
+    error: (text) => themeForeground(getTheme().error, text),
+    success: (text) => themeForeground(getTheme().success, text),
+    hoverBorder: (text) => themeDim(getTheme().border, text),
+    selectionBorder: (text) => themeForeground(getTheme().border, text),
+    hoverBackground: (text) => themeBackground(getTheme().traceHoverBg, text),
+    selectionBackground: (text) => themeBackground(getTheme().traceSelectedBg, text),
+    imageChip: (text, active) => themeForeground(
+      getTheme().inputText,
+      themeBackground(active ? getTheme().traceSelectedBg : getTheme().backgroundElement, text),
+    ),
+  };
+}
+
+export const defaultTranscriptTheme: TranscriptTheme = createTranscriptTheme(() => darkTheme);
 
 const TRACE_BORDER_MIN_COLUMNS = 4;
 const IMAGE_LABEL_SPACE_SENTINEL = "\uE000";

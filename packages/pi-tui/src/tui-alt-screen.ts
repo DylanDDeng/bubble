@@ -175,6 +175,13 @@ export interface TuiAltScreenOptions {
 	 * an error otherwise. When omitted, the selection is copied via an OSC 52 write.
 	 */
 	copySelection?: (text: string) => Promise<boolean>;
+	/**
+	 * Optional full-screen background SGR pair. The callback is sampled on every
+	 * frame so applications can switch palettes without reconstructing the TUI.
+	 * The renderer applies `open` before erase-line, painting every terminal cell,
+	 * then applies `close` after row content.
+	 */
+	screenBackground?: () => { open: string; close: string } | undefined;
 }
 
 /** Alternate-screen TUI with a scrollable, application-owned viewport. */
@@ -218,6 +225,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly openUrl?: (url: string) => void;
 	private readonly onRightClickPaste?: () => void;
 	private readonly copySelection?: (text: string) => Promise<boolean>;
+	private readonly screenBackground?: () => { open: string; close: string } | undefined;
+	private previousScreenBackground = "";
 
 	constructor(
 		terminal: Terminal,
@@ -242,6 +251,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.openUrl = options.openUrl;
 		this.onRightClickPaste = options.onRightClickPaste;
 		this.copySelection = options.copySelection;
+		this.screenBackground = options.screenBackground;
 		this.addInputListener((data) => this.handleViewportInput(data));
 	}
 
@@ -415,6 +425,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.previousScreen = [];
 		this.previousScreenWidth = 0;
 		this.previousScreenHeight = 0;
+		this.previousScreenBackground = "";
 		this.currentLayout = undefined;
 	}
 
@@ -1488,8 +1499,13 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			return sliceByColumn(line, 0, width, true);
 		});
 
+		const screenBackground = this.screenBackground?.();
+		const screenBackgroundKey = screenBackground ? `${screenBackground.open}\0${screenBackground.close}` : "";
 		const fullRedraw =
-			this.previousScreen.length === 0 || this.previousScreenWidth !== width || this.previousScreenHeight !== height;
+			this.previousScreen.length === 0 ||
+			this.previousScreenWidth !== width ||
+			this.previousScreenHeight !== height ||
+			this.previousScreenBackground !== screenBackgroundKey;
 		const imagesNeedRedraw = screen.some(
 			(line, row) =>
 				line !== this.previousScreen[row] && (isImageLine(line) || isImageLine(this.previousScreen[row] ?? "")),
@@ -1517,7 +1533,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 		for (let row = 0; row < height; row++) {
 			if (!fullRedraw && !imagesNeedRedraw && screen[row] === this.previousScreen[row]) continue;
-			buffer += `\x1b[${row + 1};1H\x1b[2K${preparedKittyScreen.lines[row] ?? ""}`;
+			const backgroundOpen = screenBackground?.open ?? "";
+			const backgroundClose = screenBackground?.close ?? "";
+			buffer += `\x1b[${row + 1};1H${backgroundOpen}\x1b[2K${preparedKittyScreen.lines[row] ?? ""}${backgroundClose}`;
 		}
 
 		if (cursorPos) {
@@ -1532,6 +1550,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.previousScreen = screen;
 		this.previousScreenWidth = width;
 		this.previousScreenHeight = height;
+		this.previousScreenBackground = screenBackgroundKey;
 		this.currentLayout = nextLayout;
 	}
 }

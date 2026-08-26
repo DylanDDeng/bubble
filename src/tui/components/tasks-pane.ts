@@ -1,4 +1,3 @@
-import chalk from "chalk";
 import {
   matchesKey,
   truncateToWidth,
@@ -8,7 +7,8 @@ import {
 } from "@bubblebrain-ai/pi-tui";
 import type { WorkflowRunSnapshot } from "../../agent/workflow/control.js";
 import type { BackgroundTaskInfo } from "../../tasks/manager.js";
-import { darkTheme } from "../model/theme.js";
+import { darkTheme, type Theme } from "../model/theme.js";
+import { themeBackground, themeDim, themeForeground } from "../model/theme-style.js";
 import { safeSheetText } from "./bottom-sheet.js";
 import {
   latestSubagentNote,
@@ -59,19 +59,19 @@ function pad(line: string, width: number): string {
   return clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped)));
 }
 
-function paint(line: string, width: number, state: "idle" | "hover" | "selected"): string {
+function paint(line: string, width: number, state: "idle" | "hover" | "selected", theme = darkTheme): string {
   const filled = pad(line, width);
-  if (state === "selected") return chalk.bgHex(darkTheme.traceSelectedBg)(filled);
-  if (state === "hover") return chalk.bgHex(darkTheme.traceHoverBg)(filled);
+  if (state === "selected") return themeBackground(theme.traceSelectedBg, filled);
+  if (state === "hover") return themeBackground(theme.traceHoverBg, filled);
   return filled;
 }
 
-function statusGlyph(status: string, frame: number): string {
-  if (status === "completed" || status === "closed") return chalk.green("✓");
-  if (status === "failed" || status === "blocked") return chalk.red("×");
-  if (status === "cancelled" || status === "killed") return chalk.gray("■");
-  if (status === "queued") return chalk.gray("○");
-  return chalk.cyan(SPINNER[frame % SPINNER.length]!);
+function statusGlyph(status: string, frame: number, theme = darkTheme): string {
+  if (status === "completed" || status === "closed") return themeForeground(theme.success, "✓");
+  if (status === "failed" || status === "blocked") return themeForeground(theme.error, "×");
+  if (status === "cancelled" || status === "killed") return themeForeground(theme.muted, "■");
+  if (status === "queued") return themeForeground(theme.muted, "○");
+  return themeForeground(theme.accent, SPINNER[frame % SPINNER.length]!);
 }
 
 function elapsed(createdAt?: number, updatedAt?: number, active = true): string {
@@ -182,6 +182,7 @@ export class TasksPaneComponent implements Component {
     private readonly getSnapshot: () => TasksPaneSnapshot,
     private readonly getTerminalRows: () => number,
     private readonly callbacks: TasksPaneCallbacks,
+    private readonly getTheme: () => Theme = () => darkTheme,
   ) {
     this.timer = setInterval(() => {
       if (this.activeCount() === 0) return;
@@ -216,6 +217,10 @@ export class TasksPaneComponent implements Component {
 
   activityGlyph(): string {
     return SPINNER[this.frame % SPINNER.length]!;
+  }
+
+  theme(): Theme {
+    return this.getTheme();
   }
 
   toggle(forceFocus = false): void {
@@ -289,30 +294,32 @@ export class TasksPaneComponent implements Component {
     if (selectedIndex >= maxRows) start = selectedIndex - maxRows + 1;
     const visibleRows = rows.slice(start, start + maxRows);
     this.lastRows = visibleRows;
+    const theme = this.getTheme();
     return visibleRows.map((row) => {
       if (row.kind === "header") {
         const count = items[row.section].length;
         const marker = this.collapsed.has(row.section) ? "▸" : "▾";
         const label = sections.find(([section]) => section === row.section)?.[1] ?? row.section;
-        return chalk.dim(pad(` ${marker} ${label} ${count}`, width));
+        return themeDim(theme.dim, pad(` ${marker} ${label} ${count}`, width));
       }
       const key = `${row.item.kind}:${row.item.id}`;
       const state = key === this.selectedId && this.focused ? "selected" : key === this.hoveredId ? "hover" : "idle";
-      return paint(this.renderItem(row.item, width), width, state);
+      return paint(this.renderItem(row.item, width), width, state, theme);
     });
   }
 
   private renderItem(item: PaneItem, width: number): string {
-    const glyph = statusGlyph(item.status, this.frame);
+    const theme = this.getTheme();
+    const glyph = statusGlyph(item.status, this.frame, theme);
     if (item.kind === "workflow") {
       const done = item.members.filter((member) => !isActive(member.status ?? "running")).length;
       const progress = item.members.length > 0 ? `${done}/${item.members.length}` : item.status;
       const duration = elapsed(item.createdAt, item.updatedAt, isActive(item.status));
-      return truncateToWidth(`   ${glyph} ${safe(item.title)}  ${chalk.dim(`${progress}${duration ? ` · ${duration}` : ""}`)}${isActive(item.status) ? chalk.dim("  view  ×") : chalk.dim("  view")}`, width, "");
+      return truncateToWidth(`   ${glyph} ${safe(item.title)}  ${themeDim(theme.dim, `${progress}${duration ? ` · ${duration}` : ""}`)}${isActive(item.status) ? themeDim(theme.dim, "  view  ×") : themeDim(theme.dim, "  view")}`, width, "");
     }
     if (item.kind === "task") {
       const duration = elapsed(item.task.startedAt, item.task.endedAt, isActive(item.status));
-      return truncateToWidth(`   ${glyph} ${safe(item.title)}  ${chalk.dim(`${item.status}${duration ? ` · ${duration}` : ""}`)}${isActive(item.status) ? chalk.dim("  view  ×") : chalk.dim("  view")}`, width, "");
+      return truncateToWidth(`   ${glyph} ${safe(item.title)}  ${themeDim(theme.dim, `${item.status}${duration ? ` · ${duration}` : ""}`)}${isActive(item.status) ? themeDim(theme.dim, "  view  ×") : themeDim(theme.dim, "  view")}`, width, "");
     }
     const member = item.member;
     const activity = latestSubagentNote(member);
@@ -321,7 +328,7 @@ export class TasksPaneComponent implements Component {
     const duration = elapsed(member.createdAt, member.updatedAt, isActive(item.status));
     const meta = [model, tokens ? `${tokens} tok` : "", duration].filter(Boolean).join(" · ");
     const detail = activity ? ` — ${safe(activity)}` : "";
-    return truncateToWidth(`   ${glyph} ${safe(item.title)}${detail}  ${chalk.dim(meta)}${isActive(item.status) ? chalk.dim("  view  ×") : chalk.dim("  view")}`, width, "");
+    return truncateToWidth(`   ${glyph} ${safe(item.title)}${detail}  ${themeDim(theme.dim, meta)}${isActive(item.status) ? themeDim(theme.dim, "  view  ×") : themeDim(theme.dim, "  view")}`, width, "");
   }
 
   handleInput(data: string): void {
@@ -405,10 +412,11 @@ export class TaskStatusBarComponent implements Component {
     const total = this.pane.totalCount();
     if (total === 0 && !this.pane.isOpen()) return [];
     const marker = this.pane.isOpen() ? "▾" : "▸";
+    const theme = this.pane.theme();
     const text = count > 0
-      ? `${marker} ${chalk.cyan(this.pane.activityGlyph())} ${count} background activit${count === 1 ? "y" : "ies"} · Ctrl+G`
-      : `${marker} ${chalk.green("✓")} ${total} completed activit${total === 1 ? "y" : "ies"} · Ctrl+G`;
-    return [chalk.dim(truncateToWidth(` ${text}`, Math.max(1, width), ""))];
+      ? `${marker} ${themeForeground(theme.accent, this.pane.activityGlyph())} ${count} background activit${count === 1 ? "y" : "ies"} · Ctrl+G`
+      : `${marker} ${themeForeground(theme.success, "✓")} ${total} completed activit${total === 1 ? "y" : "ies"} · Ctrl+G`;
+    return [themeDim(theme.dim, truncateToWidth(` ${text}`, Math.max(1, width), ""))];
   }
 
   handleMouse(event: TuiMouseEvent): boolean {

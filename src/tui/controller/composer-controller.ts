@@ -1,4 +1,3 @@
-import chalk from "chalk";
 import type { Editor, EditorHistoryNavigationResult, EditorInlineDecoration } from "@bubblebrain-ai/pi-tui";
 import {
   appendHistoryEntry,
@@ -18,6 +17,8 @@ import type { ImageAttachment } from "../model/image-attachment.js";
 import { PasteOperationTracker } from "../model/paste-operation-tracker.js";
 import type { SubmitPayload } from "../model/composer-types.js";
 import { imageDisplayLabel, stripInlineImageLabels } from "../image-display.js";
+import { darkTheme, type Theme } from "../model/theme.js";
+import { themeBackground, themeForeground } from "../model/theme-style.js";
 
 interface ComposerControllerOptions {
   editor: Editor;
@@ -31,6 +32,7 @@ interface ComposerControllerOptions {
   readClipboardImage?: ClipboardImageReader;
   historyFilePath?: string;
   persistHistory?: boolean;
+  getTheme?: () => Theme;
 }
 
 export type ClipboardImageReader = () => Promise<{
@@ -559,9 +561,13 @@ export class ComposerController {
       id: item.label,
       text: item.label,
       style: (text, state) => {
-        if (state.hovered) return chalk.bgHex("#505050").white(text);
-        if (state.focused) return chalk.bgHex("#444444").white(text);
-        return chalk.bgHex("#353535").hex("#E7E7E7")(text);
+        const theme = this.options.getTheme?.() ?? darkTheme;
+        const background = state.focused
+          ? theme.traceSelectedBg
+          : state.hovered
+            ? theme.traceHoverBg
+            : theme.backgroundElement;
+        return themeForeground(theme.inputText, themeBackground(background, text));
       },
     }));
     this.editor.setInlineDecorations(decorations);

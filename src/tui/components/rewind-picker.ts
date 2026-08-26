@@ -10,9 +10,9 @@ import {
 import type { UserTurn } from "../../session.js";
 import type { RewindScope } from "../../rewind.js";
 import { safeSheetText } from "./bottom-sheet.js";
+import { darkTheme, type Theme } from "../model/theme.js";
+import { themeBackground, themeDim, themeForeground } from "../model/theme-style.js";
 
-const PANEL_BACKGROUND = "#242424";
-const SELECTED_BACKGROUND = "#3A3A3A";
 const SCOPE_ORDER: RewindScope[] = ["all", "chat", "code"];
 
 export const REWIND_SCOPE_LABEL: Record<RewindScope, string> = {
@@ -44,6 +44,7 @@ export interface RewindPickerCallbacks {
   onCancelRun(): void;
   onConfirm(point: RewindPickerPoint, scope: RewindScope): void;
   onRender(): void;
+  theme?: Theme;
 }
 
 type HitRow =
@@ -57,11 +58,12 @@ function fill(text: string, width: number): string {
   return clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped)));
 }
 
-function panelLine(text: string, width: number, selected = false): string {
+function panelLine(text: string, width: number, selected = false, theme = darkTheme): string {
   const safeWidth = Math.max(1, width);
-  if (safeWidth === 1) return chalk.bgHex(PANEL_BACKGROUND)(chalk.cyan("▎"));
-  const body = chalk.bgHex(selected ? SELECTED_BACKGROUND : PANEL_BACKGROUND)(fill(text, safeWidth - 1));
-  return `${chalk.bgHex(PANEL_BACKGROUND)(chalk.cyan("▎"))}${body}`;
+  const rail = themeForeground(theme.accent, "▎");
+  if (safeWidth === 1) return themeBackground(theme.backgroundPanel, rail);
+  const body = themeBackground(selected ? theme.traceSelectedBg : theme.backgroundPanel, fill(text, safeWidth - 1));
+  return `${themeBackground(theme.backgroundPanel, rail)}${body}`;
 }
 
 function cycleScope(scope: RewindScope, delta: 1 | -1): RewindScope {
@@ -129,13 +131,14 @@ export class RewindPickerComponent implements Component, Focusable {
   }
 
   render(width: number): string[] {
+    const theme = this.callbacks.theme ?? darkTheme;
     const safeWidth = Math.max(1, Math.floor(width));
     this.hitRows = [];
     switch (this.phase) {
       case "loading":
-        return this.finish([this.line(chalk.gray("  Loading rewind points..."), safeWidth)], safeWidth);
+        return this.finish([this.line(themeForeground(theme.muted, "  Loading rewind points..."), safeWidth)], safeWidth);
       case "executing":
-        return this.finish([this.line(chalk.gray("  Rewinding..."), safeWidth)], safeWidth);
+        return this.finish([this.line(themeForeground(theme.muted, "  Rewinding..."), safeWidth)], safeWidth);
       case "cancel-offer":
         return this.renderCancelOffer(safeWidth);
       case "confirm":
@@ -206,9 +209,10 @@ export class RewindPickerComponent implements Component, Focusable {
   invalidate(): void {}
 
   private renderPicker(width: number): string[] {
+    const theme = this.callbacks.theme ?? darkTheme;
     const rows: string[] = [];
-    rows.push(this.line(`  ${chalk.bold.cyan("Rewind to which turn?")}`, width));
-    rows.push(this.line(`  ${chalk.dim("Restore:")} ${chalk.cyan(REWIND_SCOPE_LABEL[this.scope])}`, width));
+    rows.push(this.line(`  ${chalk.bold(themeForeground(theme.accent, "Rewind to which turn?"))}`, width));
+    rows.push(this.line(`  ${themeDim(theme.dim, "Restore:")} ${themeForeground(theme.accent, REWIND_SCOPE_LABEL[this.scope])}`, width));
 
     const budget = this.visiblePointBudget();
     const start = Math.max(0, Math.min(this.selected - budget + 1, Math.max(0, this.points.length - budget)));
@@ -219,41 +223,44 @@ export class RewindPickerComponent implements Component, Focusable {
         ? ` · ${point.fileCount} file${point.fileCount === 1 ? "" : "s"}`
         : "";
       const plain = `  · ${safeSheetText(point.turn.preview)}${fileNote}`;
-      rows.push(this.line(selected ? chalk.bold.white(plain) : chalk.gray(plain), width, selected, { kind: "point", index }));
+      rows.push(this.line(selected ? chalk.bold(themeForeground(theme.inputText, plain)) : themeForeground(theme.muted, plain), width, selected, { kind: "point", index }));
     }
-    rows.push(this.line(chalk.dim("  ↑/↓ or j/k choose · ←/→ scope · Enter · Esc cancel"), width));
+    rows.push(this.line(themeDim(theme.dim, "  ↑/↓ or j/k choose · ←/→ scope · Enter · Esc cancel"), width));
     return this.finish(rows, width);
   }
 
   private renderCancelOffer(width: number): string[] {
+    const theme = this.callbacks.theme ?? darkTheme;
     const rows = [
-      this.line(`  ${chalk.bold.cyan("A turn is currently running.")}`, width),
-      this.line(chalk.gray("  Cancel it before rewinding?"), width),
+      this.line(`  ${chalk.bold(themeForeground(theme.accent, "A turn is currently running."))}`, width),
+      this.line(themeForeground(theme.muted, "  Cancel it before rewinding?"), width),
       this.choiceLine("y", "Cancel turn and rewind", this.choice === 0, width, { kind: "cancel-choice", index: 0 }),
       this.choiceLine("n", "Let it finish", this.choice === 1, width, { kind: "cancel-choice", index: 1 }),
-      this.line(chalk.dim("  ↑/↓ choose · Enter confirm · Esc dismiss"), width),
+      this.line(themeDim(theme.dim, "  ↑/↓ choose · Enter confirm · Esc dismiss"), width),
     ];
     return this.finish(rows, width);
   }
 
   private renderConfirm(width: number): string[] {
+    const theme = this.callbacks.theme ?? darkTheme;
     const point = this.getSelectedPoint();
     const preview = point?.turn.preview ?? "this turn";
     const title = truncateToWidth(`  Rewind to “${safeSheetText(preview)}”?`, Math.max(1, width - 1), "…");
     const rows = [
-      this.line(chalk.bold.cyan(title), width),
-      this.line(`  ${chalk.dim("Restore:")} ${chalk.cyan(REWIND_SCOPE_LABEL[this.scope])} ${chalk.dim("(←/→ change)")}`, width),
+      this.line(chalk.bold(themeForeground(theme.accent, title)), width),
+      this.line(`  ${themeDim(theme.dim, "Restore:")} ${themeForeground(theme.accent, REWIND_SCOPE_LABEL[this.scope])} ${themeDim(theme.dim, "(←/→ change)")}`, width),
       this.choiceLine("y", "Yes", this.choice === 0, width, { kind: "confirm-choice", index: 0 }),
       this.choiceLine("n", "No", this.choice === 1, width, { kind: "confirm-choice", index: 1 }),
-      this.line(chalk.dim("  ↑/↓ choose · Enter confirm · Esc dismiss"), width),
+      this.line(themeDim(theme.dim, "  ↑/↓ choose · Enter confirm · Esc dismiss"), width),
     ];
     return this.finish(rows, width);
   }
 
   private renderError(width: number): string[] {
+    const theme = this.callbacks.theme ?? darkTheme;
     const rows = [
-      this.line(`  ${chalk.bold.red("Rewind failed")}`, width),
-      this.line(`  ${chalk.white(this.error)}`, width),
+      this.line(`  ${chalk.bold(themeForeground(theme.error, "Rewind failed"))}`, width),
+      this.line(`  ${themeForeground(theme.inputText, this.error)}`, width),
       this.choiceLine("Esc", "Dismiss", true, width, { kind: "dismiss" }),
     ];
     return this.finish(rows, width);
@@ -261,13 +268,14 @@ export class RewindPickerComponent implements Component, Focusable {
 
   private line(text: string, width: number, selected = false, hit?: HitRow): string {
     this.hitRows.push(hit);
-    return panelLine(text, width, selected);
+    return panelLine(text, width, selected, this.callbacks.theme ?? darkTheme);
   }
 
   private choiceLine(key: string, label: string, selected: boolean, width: number, hit: HitRow): string {
+    const theme = this.callbacks.theme ?? darkTheme;
     const marker = selected ? "●" : "○";
     const plain = `  ${key.padEnd(4)} (${marker}) ${label}`;
-    return this.line(selected ? chalk.bold.white(plain) : chalk.gray(plain), width, selected, hit);
+    return this.line(selected ? chalk.bold(themeForeground(theme.inputText, plain)) : themeForeground(theme.muted, plain), width, selected, hit);
   }
 
   private finish(rows: string[], width: number): string[] {

@@ -93,6 +93,9 @@ export async function runTui(agent: Agent, _args: unknown, options: RunTuiOption
     runMemoryCompaction: options.runMemoryCompaction,
     runMemorySummary: options.runMemorySummary,
     runMemoryRefresh: options.runMemoryRefresh,
+    themeMode: options.themeMode,
+    detectedTheme: options.detectedTheme,
+    themeOverrides: options.themeOverrides,
     resolveGitBranch: currentGitBranch,
     // Fullscreen is the production root renderer. Selecting it before start()
     // prevents a regular-screen frame from ever being painted at startup.
@@ -101,7 +104,8 @@ export async function runTui(agent: Agent, _args: unknown, options: RunTuiOption
       onExitRequest: () => {},
       onClearTranscript: () => controller.clearTranscript(),
       onThemeToggle: () => {
-        options.onThemeModeChange?.("dark");
+        // Kept for embedded hosts compiled against the pre-runtime-theme
+        // callback shape. /theme now uses onThemeModeChange directly.
       },
       onThemeModeChange: (mode) => {
         options.onThemeModeChange?.(mode);

@@ -23,6 +23,7 @@ import {
   normalizeThinkingLevel,
 } from "../provider-transform.js";
 import type { ThinkingLevel } from "../types.js";
+import type { ResolvedTheme, ThemeMode } from "./model/theme.js";
 import {
   discoverModelProviderGroups,
   getVisibleModelProviders,
@@ -39,6 +40,8 @@ export interface ComposerAutocompleteSources {
   registry?: ComposerPickerRegistry;
   thinkingLevel?(): ThinkingLevel;
   providerId?(): string;
+  themeMode?(): ThemeMode;
+  detectedTheme?(): ResolvedTheme;
   onModelSuggestionsChanged?(): void;
   fdPath?: string | null;
 }
@@ -48,6 +51,7 @@ type ModelCompletionSource = (
 ) => AutocompleteArgumentSuggestions | AutocompleteItem[] | null;
 
 type ProviderCompletionSource = ModelCompletionSource;
+type ThemeCompletionSource = ModelCompletionSource;
 
 type ComposerPickerRegistry = ModelPickerRegistry
   & Pick<ProviderRegistry, "getConfigured" | "getDefault">;
@@ -55,6 +59,7 @@ type ComposerPickerRegistry = ModelPickerRegistry
 const MODEL_COMMAND_PREFIX = "/model ";
 const REASONING_EFFORT_SEPARATOR = " --reasoning-effort ";
 const PROVIDER_COMMAND_PREFIX = "/provider ";
+const THEME_COMMAND_PREFIX = "/theme ";
 
 const EFFORT_DESCRIPTIONS: Record<ThinkingLevel, string> = {
   off: "no reasoning effort",
@@ -236,6 +241,23 @@ export function buildProviderAutocompleteItems(
   });
 }
 
+export function buildThemeAutocompleteItems(
+  argumentPrefix = "",
+  detectedTheme: ResolvedTheme = "dark",
+): AutocompleteItem[] {
+  const query = argumentPrefix.trim().toLowerCase();
+  const candidates: Array<{ value: ThemeMode; label: string; description: string }> = [
+    { value: "auto", label: "Auto", description: `Match terminal · currently ${detectedTheme}` },
+    { value: "light", label: "Light", description: "Light surfaces and dark text" },
+    { value: "dark", label: "Dark", description: "Dark surfaces and light text" },
+  ];
+  return candidates.flatMap((candidate) => {
+    const searchable = `${candidate.value} ${candidate.label} ${candidate.description}`.toLowerCase();
+    if (query && !searchable.includes(query)) return [];
+    return [{ ...candidate, submitOnSelect: true }];
+  });
+}
+
 /**
  * Build the command surface in execution-priority order. The registry remains
  * live so MCP prompts that connect after startup appear on the next keypress.
@@ -246,6 +268,7 @@ export function buildComposerSlashCommands(
   uiMode: TuiMode = "regular",
   modelCompletions?: ModelCompletionSource,
   providerCompletions?: ProviderCompletionSource,
+  themeCompletions?: ThemeCompletionSource,
 ): TuiSlashCommand[] {
   const result = new Map<string, TuiSlashCommand>();
   const add = (command: TuiSlashCommand) => {
@@ -287,6 +310,21 @@ export function buildComposerSlashCommands(
         keepArgumentMenuOnEmpty: true,
         argumentEmptyMessage: "No matching providers",
         getArgumentCompletions: providerCompletions,
+      });
+    } else if (command.name === "theme" && themeCompletions) {
+      add({
+        name: command.name,
+        description: command.description,
+        argumentHint: "<auto|light|dark>",
+        submitOnSelect: false,
+        argumentInputHint: {
+          prompt: "◐ ",
+          placeholder: "Select theme…",
+          valuePrefix: THEME_COMMAND_PREFIX,
+        },
+        keepArgumentMenuOnEmpty: true,
+        argumentEmptyMessage: "No matching themes",
+        getArgumentCompletions: themeCompletions,
       });
     } else {
       add({ name: command.name, description: command.description });
@@ -349,10 +387,27 @@ export class ComposerAutocompleteProvider implements AutocompleteProvider {
         this.sources.uiMode?.() ?? "regular",
         this.sources.registry ? (prefix) => this.getModelCompletions(prefix) : undefined,
         this.sources.registry ? (prefix) => this.getProviderCompletions(prefix) : undefined,
+        (prefix) => this.getThemeCompletions(prefix),
       ),
       this.sources.cwd,
       this.sources.fdPath ?? null,
     );
+  }
+
+  private getThemeCompletions(argumentPrefix: string): AutocompleteArgumentSuggestions {
+    const items = buildThemeAutocompleteItems(argumentPrefix, this.sources.detectedTheme?.() ?? "dark");
+    const current = this.sources.themeMode?.() ?? "auto";
+    return {
+      items,
+      inputHint: {
+        prompt: "◐ ",
+        placeholder: "Select theme…",
+        valuePrefix: THEME_COMMAND_PREFIX,
+      },
+      keepOpenOnEmpty: true,
+      emptyMessage: "No matching themes",
+      ...(argumentPrefix.length === 0 ? { preferredValue: current } : {}),
+    };
   }
 
   private getProviderCompletions(argumentPrefix: string): AutocompleteArgumentSuggestions | null {

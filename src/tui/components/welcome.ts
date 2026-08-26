@@ -4,6 +4,8 @@ import stringWidth from "string-width";
 import { truncateToWidth, type Component } from "@bubblebrain-ai/pi-tui";
 import { displayModel } from "../../provider-registry.js";
 import { isThinkingOnlyModel, isThinkingToggleModel } from "../../provider-transform.js";
+import { darkTheme, type Theme } from "../model/theme.js";
+import { themeDim, themeForeground } from "../model/theme-style.js";
 
 export interface WelcomeBannerData {
   cwd: string;
@@ -12,6 +14,7 @@ export interface WelcomeBannerData {
   provider?: string;
   thinking?: string;
   updateNotice?: string;
+  theme?: Theme;
 }
 
 const require = createRequire(import.meta.url);
@@ -38,10 +41,11 @@ export class WelcomeBannerComponent implements Component {
 }
 
 export function renderWelcomeBanner(data: WelcomeBannerData, columns: number): string[] {
+  const theme = data.theme ?? darkTheme;
   const available = Math.max(1, Math.floor(columns));
   if (available < 24) {
     return [
-      truncateToWidth(chalk.bold.cyan("Bubble") + chalk.dim(" · /help"), available),
+      truncateToWidth(chalk.bold(themeForeground(theme.accent, "Bubble")) + themeDim(theme.dim, " · /help"), available),
       "",
     ];
   }
@@ -49,7 +53,7 @@ export function renderWelcomeBanner(data: WelcomeBannerData, columns: number): s
   const cardWidth = Math.min(96, available - 2);
   const contentWidth = cardWidth - 6; // border + two-cell horizontal padding
   const margin = " ".repeat(Math.max(0, Math.floor((available - cardWidth) / 2)));
-  const border = (value: string) => chalk.dim(value);
+  const border = (value: string) => themeDim(theme.border, value);
   const row = (content = "") => {
     const fitted = truncateToWidth(content, contentWidth);
     const padded = `${fitted}${" ".repeat(Math.max(0, contentWidth - stringWidth(fitted)))}`;
@@ -62,16 +66,18 @@ export function renderWelcomeBanner(data: WelcomeBannerData, columns: number): s
   ];
 
   if (contentWidth >= 34) {
-    const title = gradient("Welcome to Bubble!", "#67e8f9", "#a78bfa");
-    const subtitle = chalk.dim("I am a cat and you can send /help for help information.");
+    const gradientFrom = validGradientColor(theme.bannerGradientFrom, darkTheme.bannerGradientFrom);
+    const gradientTo = validGradientColor(theme.bannerGradientTo, darkTheme.bannerGradientTo);
+    const title = gradient("Welcome to Bubble!", gradientFrom, gradientTo);
+    const subtitle = themeDim(theme.dim, "I am a cat and you can send /help for help information.");
     const copy = ["", title, subtitle, "", ""];
     for (let index = 0; index < COMPACT_CAT.length; index++) {
-      const cat = chalk.bold.hex(interpolateHex("#67e8f9", "#a78bfa", index / (COMPACT_CAT.length - 1)))(COMPACT_CAT[index]!);
+      const cat = chalk.bold.hex(interpolateHex(gradientFrom, gradientTo, index / (COMPACT_CAT.length - 1)))(COMPACT_CAT[index]!);
       rows.push(row(`${cat}  ${copy[index] ?? ""}`));
     }
   } else {
-    rows.push(row(chalk.bold.cyan("Welcome to Bubble!")));
-    rows.push(row(chalk.dim("Send /help for help")));
+    rows.push(row(chalk.bold(themeForeground(theme.accent, "Welcome to Bubble!"))));
+    rows.push(row(themeDim(theme.dim, "Send /help for help")));
   }
 
   rows.push(row());
@@ -85,16 +91,20 @@ export function renderWelcomeBanner(data: WelcomeBannerData, columns: number): s
     ["Version:", PACKAGE_VERSION],
   ];
   for (const [label, value] of info) {
-    rows.push(row(`${chalk.dim(label.padEnd(labelWidth))}${value}`));
+    rows.push(row(`${themeDim(theme.dim, label.padEnd(labelWidth))}${themeForeground(theme.agent, value)}`));
   }
   if (data.updateNotice) {
     rows.push(row());
-    rows.push(row(chalk.yellow(data.updateNotice)));
+    rows.push(row(themeForeground(theme.warning, data.updateNotice)));
   }
   rows.push(row());
   rows.push(`${margin}${border(`╰${"─".repeat(Math.max(0, cardWidth - 2))}╯`)}`);
   rows.push("");
   return rows;
+}
+
+function validGradientColor(value: string, fallback: string): string {
+  return /^#[0-9a-f]{6}$/i.test(value) ? value : fallback;
 }
 
 export function formatWelcomeModel(data: Pick<WelcomeBannerData, "model" | "provider" | "thinking">): string {

@@ -14,6 +14,8 @@ import {
   OUTPUT_RESERVE_TOKENS,
 } from "../../context/budget.js";
 import { parseTerminalMouseWheel } from "../model/terminal-mouse.js";
+import { darkTheme, type Theme } from "../model/theme.js";
+import { themeBackground, themeDim, themeForeground } from "../model/theme-style.js";
 
 const TABS = ["Context usage", "Usage limit", "Session info"] as const;
 type ContextInfoTab = 0 | 1 | 2;
@@ -44,6 +46,7 @@ export interface ContextInfoComponentOptions {
   onClose(): void;
   onRender(): void;
   copySessionId?(): Promise<void>;
+  theme?: Theme;
 }
 
 interface UsageCategory {
@@ -127,19 +130,24 @@ function buildLegendRow(
   contentWidth: number,
   color: (value: string) => string,
   detail?: string,
+  theme?: Theme,
 ): string[] {
   const marker = color(glyph);
   const tokenText = formatTokens(tokens);
   const percent = formatPercent(tokens, total);
   if (contentWidth < WIDE_CONTENT_BREAKPOINT) {
     const data = `  ${tokenText.padStart(12)}  ${percent.padStart(6)}${detail ? ` · ${detail}` : ""}`;
-    return [`${marker} ${chalk.gray(label)}`, chalk.dim(data)];
+    return [
+      `${marker} ${theme ? themeForeground(theme.muted, label) : chalk.gray(label)}`,
+      theme ? themeDim(theme.dim, data) : chalk.dim(data),
+    ];
   }
-  const line = `${marker} ${chalk.gray(label.padEnd(20))} ${tokenText.padStart(11)}  ${percent.padStart(6)}${detail ? ` · ${detail}` : ""}`;
+  const styledLabel = theme ? themeForeground(theme.muted, label.padEnd(20)) : chalk.gray(label.padEnd(20));
+  const line = `${marker} ${styledLabel} ${tokenText.padStart(11)}  ${percent.padStart(6)}${detail ? ` · ${detail}` : ""}`;
   return [line];
 }
 
-export function buildContextUsageLines(data: ContextInfoPanelData, contentWidth: number): string[] {
+export function buildContextUsageLines(data: ContextInfoPanelData, contentWidth: number, theme?: Theme): string[] {
   const { snapshot } = data;
   const systemTokens = snapshot.buckets.systemPrompt.tokens;
   const messageTokens = snapshot.buckets.other.tokens;
@@ -149,32 +157,32 @@ export function buildContextUsageLines(data: ContextInfoPanelData, contentWidth:
   const freeTokens = snapshot.freeTokens ?? 0;
   const total = snapshot.contextWindow;
   const categories: UsageCategory[] = [
-    { glyph: "◆", tokens: systemTokens, color: (value) => chalk.gray(value) },
-    { glyph: "◆", tokens: messageTokens, color: (value) => chalk.white(value) },
-    { glyph: "◆", tokens: overheadTokens, color: (value) => chalk.magenta(value) },
-    { glyph: "◇", tokens: freeTokens, color: (value) => chalk.gray.dim(value) },
+    { glyph: "◆", tokens: systemTokens, color: (value) => theme ? themeForeground(theme.muted, value) : chalk.gray(value) },
+    { glyph: "◆", tokens: messageTokens, color: (value) => theme ? themeForeground(theme.agent, value) : chalk.white(value) },
+    { glyph: "◆", tokens: overheadTokens, color: (value) => theme ? themeForeground(theme.thinking, value) : chalk.magenta(value) },
+    { glyph: "◇", tokens: freeTokens, color: (value) => theme ? themeDim(theme.dim, value) : chalk.gray.dim(value) },
   ];
   const rowLength = contentWidth >= WIDE_CONTENT_BREAKPOINT ? 20 : 10;
   const lines: string[] = [
-    chalk.bold.white("Context"),
+    theme ? chalk.bold(themeForeground(theme.inputText, "Context")) : chalk.bold.white("Context"),
     "",
-    chalk.gray(`${formatTokenNumber(snapshot.usedTokens)} / ${total ? formatTokenNumber(total) : "unknown"} tokens (${formatPercent(snapshot.usedTokens, total, 2)})`),
-    chalk.gray(snapshot.modelId || "unknown model"),
+    theme ? themeForeground(theme.muted, `${formatTokenNumber(snapshot.usedTokens)} / ${total ? formatTokenNumber(total) : "unknown"} tokens (${formatPercent(snapshot.usedTokens, total, 2)})`) : chalk.gray(`${formatTokenNumber(snapshot.usedTokens)} / ${total ? formatTokenNumber(total) : "unknown"} tokens (${formatPercent(snapshot.usedTokens, total, 2)})`),
+    theme ? themeForeground(theme.muted, snapshot.modelId || "unknown model") : chalk.gray(snapshot.modelId || "unknown model"),
     "",
     ...buildGrid(categories, rowLength),
     "",
-    ...buildLegendRow("◆", "System prompt", systemTokens, total, contentWidth, (value) => chalk.gray(value)),
-    ...buildLegendRow("◆", "Messages", messageTokens, total, contentWidth, (value) => chalk.white(value)),
+    ...buildLegendRow("◆", "System prompt", systemTokens, total, contentWidth, (value) => theme ? themeForeground(theme.muted, value) : chalk.gray(value), undefined, theme),
+    ...buildLegendRow("◆", "Messages", messageTokens, total, contentWidth, (value) => theme ? themeForeground(theme.agent, value) : chalk.white(value), undefined, theme),
   ];
   if (overheadTokens > 0) {
-    lines.push(...buildLegendRow("◆", "Reasoning/overhead", overheadTokens, total, contentWidth, (value) => chalk.magenta(value)));
+    lines.push(...buildLegendRow("◆", "Reasoning/overhead", overheadTokens, total, contentWidth, (value) => theme ? themeForeground(theme.thinking, value) : chalk.magenta(value), undefined, theme));
   }
   lines.push(
-    ...buildLegendRow("◇", "Free", freeTokens, total, contentWidth, (value) => chalk.gray.dim(value)),
+    ...buildLegendRow("◇", "Free", freeTokens, total, contentWidth, (value) => theme ? themeDim(theme.dim, value) : chalk.gray.dim(value), undefined, theme),
     "",
-    ...buildLegendRow("◈", "Tool definitions", snapshot.buckets.tools.tokens, total, contentWidth, (value) => chalk.cyan(value), `${snapshot.toolCount} tools`),
-    ...buildLegendRow("◈", "Skills", snapshot.buckets.skills.tokens, total, contentWidth, (value) => chalk.cyan(value), `${snapshot.skillCount} skills`),
-    ...buildLegendRow("◈", "MCP servers", snapshot.buckets.deferredTools.tokens, total, contentWidth, (value) => chalk.cyan(value), `${data.mcpServerCount} servers`),
+    ...buildLegendRow("◈", "Tool definitions", snapshot.buckets.tools.tokens, total, contentWidth, (value) => theme ? themeForeground(theme.accent, value) : chalk.cyan(value), `${snapshot.toolCount} tools`, theme),
+    ...buildLegendRow("◈", "Skills", snapshot.buckets.skills.tokens, total, contentWidth, (value) => theme ? themeForeground(theme.accent, value) : chalk.cyan(value), `${snapshot.skillCount} skills`, theme),
+    ...buildLegendRow("◈", "MCP servers", snapshot.buckets.deferredTools.tokens, total, contentWidth, (value) => theme ? themeForeground(theme.accent, value) : chalk.cyan(value), `${data.mcpServerCount} servers`, theme),
     "",
   );
 
@@ -183,29 +191,31 @@ export function buildContextUsageLines(data: ContextInfoPanelData, contentWidth:
     const remaining = Math.max(0, threshold - snapshot.usedTokens);
     const thresholdPercent = Math.round((threshold / total) * 100);
     const text = `Auto-compact at ${thresholdPercent}% · ~${formatTokenNumber(remaining)} tokens remaining`;
-    lines.push(remaining <= total * 0.1 ? chalk.yellow(text) : chalk.gray(text));
+    lines.push(theme
+      ? themeForeground(remaining <= total * 0.1 ? theme.warning : theme.muted, text)
+      : remaining <= total * 0.1 ? chalk.yellow(text) : chalk.gray(text));
   } else {
-    lines.push(chalk.gray("Auto-compact threshold unavailable"));
+    lines.push(theme ? themeForeground(theme.muted, "Auto-compact threshold unavailable") : chalk.gray("Auto-compact threshold unavailable"));
   }
   lines.push(
     "",
-    chalk.dim(`Turns: ${data.turnCount} · Tool calls: ${data.toolCallCount} · Compactions: ${data.compactionCount}`),
+    theme ? themeDim(theme.dim, `Turns: ${data.turnCount} · Tool calls: ${data.toolCallCount} · Compactions: ${data.compactionCount}`) : chalk.dim(`Turns: ${data.turnCount} · Tool calls: ${data.toolCallCount} · Compactions: ${data.compactionCount}`),
   );
   return lines;
 }
 
-function buildUsageLimitLines(data: ContextInfoPanelData): string[] {
+function buildUsageLimitLines(data: ContextInfoPanelData, theme?: Theme): string[] {
   return [
-    chalk.bold.white("Usage limit"),
+    theme ? chalk.bold(themeForeground(theme.inputText, "Usage limit")) : chalk.bold.white("Usage limit"),
     "",
-    chalk.gray("Provider billing and plan limits are not available for this session."),
-    chalk.dim("Context-window usage is available in the Context usage tab."),
+    theme ? themeForeground(theme.muted, "Provider billing and plan limits are not available for this session.") : chalk.gray("Provider billing and plan limits are not available for this session."),
+    theme ? themeDim(theme.dim, "Context-window usage is available in the Context usage tab.") : chalk.dim("Context-window usage is available in the Context usage tab."),
     "",
-    chalk.dim(`Provider: ${data.snapshot.providerId || "unknown"}`),
+    theme ? themeDim(theme.dim, `Provider: ${data.snapshot.providerId || "unknown"}`) : chalk.dim(`Provider: ${data.snapshot.providerId || "unknown"}`),
   ];
 }
 
-function buildSessionInfoLines(data: ContextInfoPanelData): string[] {
+function buildSessionInfoLines(data: ContextInfoPanelData, theme?: Theme): string[] {
   const rows: Array<[string, string]> = [
     ["Session ID", data.sessionId ?? "unavailable"],
     ["Working directory", data.cwd],
@@ -218,9 +228,9 @@ function buildSessionInfoLines(data: ContextInfoPanelData): string[] {
     ["Compactions", `${data.compactionCount}`],
   ];
   return [
-    chalk.bold.white("Session info"),
+    theme ? chalk.bold(themeForeground(theme.inputText, "Session info")) : chalk.bold.white("Session info"),
     "",
-    ...rows.flatMap(([label, value]) => [chalk.gray(label), `  ${value}`, ""]),
+    ...rows.flatMap(([label, value]) => [theme ? themeForeground(theme.muted, label) : chalk.gray(label), `  ${value}`, ""]),
   ];
 }
 
@@ -245,6 +255,7 @@ export class ContextInfoComponent implements Component, Focusable {
   ) {}
 
   render(width: number): string[] {
+    const theme = this.options.theme ?? darkTheme;
     const frameWidth = Math.max(1, Math.floor(width));
     const frameHeight = Math.max(1, Math.min(MAX_PANEL_HEIGHT, this.options.getTerminalRows() - 4));
     this.frameWidth = frameWidth;
@@ -256,18 +267,18 @@ export class ContextInfoComponent implements Component, Focusable {
     const innerWidth = frameWidth - 2;
     const horizontal = "─".repeat(Math.max(0, frameWidth - 2));
     const topDashCount = Math.max(0, frameWidth - 7);
-    const close = this.closeHovered ? chalk.bold.white("[✗]") : chalk.gray("[✗]");
-    const top = `${chalk.gray("┌")}${chalk.gray("─".repeat(topDashCount))} ${close} ${chalk.gray("┐")}`;
-    const bottom = chalk.gray(`└${horizontal}┘`);
-    const separator = chalk.gray(`├${horizontal}┤`);
+    const close = this.closeHovered ? chalk.bold(themeForeground(theme.inputText, "[✗]")) : themeForeground(theme.muted, "[✗]");
+    const top = themeForeground(theme.border, `┌${"─".repeat(topDashCount)}`) + ` ${close} ` + themeForeground(theme.border, "┐");
+    const bottom = themeForeground(theme.border, `└${horizontal}┘`);
+    const separator = themeForeground(theme.border, `├${horizontal}┤`);
 
     const tabLines = this.renderTabs(innerWidth);
     const contentWidth = Math.max(1, innerWidth - 4);
     const content = this.activeTab === 0
-      ? buildContextUsageLines(this.data, contentWidth)
+      ? buildContextUsageLines(this.data, contentWidth, this.options.theme)
       : this.activeTab === 1
-        ? buildUsageLimitLines(this.data)
-        : buildSessionInfoLines(this.data);
+        ? buildUsageLimitLines(this.data, this.options.theme)
+        : buildSessionInfoLines(this.data, this.options.theme);
     this.bodyRows = Math.max(0, frameHeight - (4 + tabLines.length));
     this.contentRows = content.length;
     const maxOffset = Math.max(0, content.length - this.bodyRows);
@@ -344,10 +355,12 @@ export class ContextInfoComponent implements Component, Focusable {
   invalidate(): void {}
 
   private frameLine(content: string, width: number): string {
-    return `${chalk.gray("│")}${fit(content, width)}${chalk.gray("│")}`;
+    const theme = this.options.theme ?? darkTheme;
+    return `${themeForeground(theme.border, "│")}${fit(content, width)}${themeForeground(theme.border, "│")}`;
   }
 
   private renderTabs(innerWidth: number): string[] {
+    const theme = this.options.theme ?? darkTheme;
     const rows: Array<{ pieces: string[]; width: number }> = [{ pieces: ["  "], width: 2 }];
     this.tabHits = [];
     for (let index = 0; index < TABS.length; index++) {
@@ -368,10 +381,10 @@ export class ContextInfoComponent implements Component, Focusable {
       const active = index === this.activeTab;
       const hovered = index === this.hoveredTab;
       const styled = active
-        ? chalk.bgHex("#232323").bold.white(label)
+        ? chalk.bold(themeForeground(theme.inputText, themeBackground(theme.traceSelectedBg, label)))
         : hovered
-          ? chalk.bgHex("#232323").white(label)
-          : chalk.gray(label);
+          ? themeForeground(theme.inputText, themeBackground(theme.traceHoverBg, label))
+          : themeForeground(theme.muted, label);
       row.pieces.push(styled);
       row.width += visibleWidth(label);
     }
@@ -379,6 +392,7 @@ export class ContextInfoComponent implements Component, Focusable {
   }
 
   private renderFooter(innerWidth: number): string {
+    const theme = this.options.theme ?? darkTheme;
     let plain: string;
     if (innerWidth >= 78 && this.data.sessionId) {
       plain = "Tab switch  |  ↑/↓ scroll  |  c copy session ID  |  Esc close";
@@ -396,9 +410,9 @@ export class ContextInfoComponent implements Component, Focusable {
       ? { start: 1 + left + copyStart, end: 1 + left + copyStart + "c copy session ID".length, row: this.frameHeight - 2 }
       : undefined;
     const styled = this.copyHovered && copyStart >= 0
-      ? `${plain.slice(0, copyStart)}${chalk.bgHex("#232323").white("c copy session ID")}${plain.slice(copyStart + "c copy session ID".length)}`
+      ? `${plain.slice(0, copyStart)}${themeForeground(theme.inputText, themeBackground(theme.traceHoverBg, "c copy session ID"))}${plain.slice(copyStart + "c copy session ID".length)}`
       : plain;
-    return fit(`${" ".repeat(left)}${chalk.dim(styled)}`, innerWidth);
+    return fit(`${" ".repeat(left)}${themeDim(theme.dim, styled)}`, innerWidth);
   }
 
   private stepTab(direction: 1 | -1): void {

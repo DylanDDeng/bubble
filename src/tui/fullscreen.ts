@@ -23,16 +23,17 @@ import {
 } from "@bubblebrain-ai/pi-tui";
 import { ResponsiveTranscriptComponent } from "./components/responsive-transcript.js";
 import { StreamingMessageComponent } from "./components/streaming-message.js";
-import { defaultTranscriptTheme, type TranscriptRenderOptions } from "./components/transcript.js";
+import { createTranscriptTheme, type TranscriptRenderOptions, type TranscriptTheme } from "./components/transcript.js";
 import type { BubbleTuiController } from "./controller/controller.js";
 import { ResponsiveFooterComponent } from "./footer.js";
 import { getNextPermissionMode } from "../permission/mode.js";
 import type { Agent } from "../agent.js";
-import { COMPOSER_EDITOR_OPTIONS, COMPOSER_EDITOR_THEME } from "./composer-style.js";
+import { COMPOSER_EDITOR_OPTIONS, createComposerEditorTheme } from "./composer-style.js";
 import { TraceInteractionState } from "./model/trace-interaction.js";
 import type { ComposerController } from "./controller/composer-controller.js";
 import { ComposerImagePreviewComponent, ImageViewerComponent } from "./components/image-preview.js";
-import { ASSISTANT_MARKDOWN_THEME } from "./markdown-style.js";
+import { createAssistantMarkdownTheme } from "./markdown-style.js";
+import { darkTheme, type Theme } from "./model/theme.js";
 
 export interface FullscreenAppOptions {
   controller: BubbleTuiController;
@@ -46,6 +47,8 @@ export interface FullscreenAppOptions {
   traceInteraction?: TraceInteractionState;
   /** Shared semantic composer state when transitioning from the main renderer. */
   composer?: ComposerController;
+  /** Shared live palette when this view is entered from the regular renderer. */
+  getTheme?: () => Theme;
 }
 
 export class FullscreenApp {
@@ -56,7 +59,8 @@ export class FullscreenApp {
   private readonly composerPreview?: ComposerImagePreviewComponent;
   private readonly footer: ResponsiveFooterComponent;
   private readonly traceInteraction: TraceInteractionState;
-  private readonly markdown = new Markdown("", 0, 0, ASSISTANT_MARKDOWN_THEME);
+  private readonly markdown: Markdown;
+  private readonly transcriptTheme: TranscriptTheme;
   private readonly markdownRenderer = (text: string, width: number): string[] => {
     this.markdown.setText(text);
     return this.markdown.render(width);
@@ -69,12 +73,15 @@ export class FullscreenApp {
 
   constructor(private readonly options: FullscreenAppOptions) {
     const terminal = options.terminal ?? new ProcessTerminal();
+    const getTheme = options.getTheme ?? (() => darkTheme);
+    this.transcriptTheme = createTranscriptTheme(getTheme);
+    this.markdown = new Markdown("", 0, 0, createAssistantMarkdownTheme(getTheme));
     this.traceInteraction = options.traceInteraction ?? new TraceInteractionState();
     // Trace hover depends on no-button pointer motion, including inside tmux.
     this.tui = new TuiAltScreen(terminal, undefined, undefined, { mouseMotion: "all" });
-    this.editor = new Editor(this.tui, COMPOSER_EDITOR_THEME, COMPOSER_EDITOR_OPTIONS);
+    this.editor = new Editor(this.tui, createComposerEditorTheme(getTheme), COMPOSER_EDITOR_OPTIONS);
     this.composerPreview = options.composer
-      ? new ComposerImagePreviewComponent(() => options.composer?.previewAttachment())
+      ? new ComposerImagePreviewComponent(() => options.composer?.previewAttachment(), getTheme)
       : undefined;
     this.transcript = new ResponsiveTranscriptComponent(
       () => ({
@@ -90,12 +97,13 @@ export class FullscreenApp {
         },
       },
     );
-    this.streamingMessage = new StreamingMessageComponent(8, () => this.render());
+    this.streamingMessage = new StreamingMessageComponent(8, () => this.render(), undefined, getTheme);
     this.footer = new ResponsiveFooterComponent(() => ({
       agent: this.options.agent,
       mode: this.options.agent.mode,
       goalLine: this.options.controller.getGoalIndicator?.(),
       hidden: this.tui.terminal.rows <= 2,
+      theme: getTheme(),
     }));
     this.buildLayout();
     this.unsubscribe = this.options.controller.subscribe(() => this.render());
@@ -188,7 +196,7 @@ export class FullscreenApp {
       this.tui.setFocus(this.editor);
       this.render();
     };
-    const component = new ImageViewerComponent(image, close, () => this.tui.terminal.rows);
+    const component = new ImageViewerComponent(image, close, () => this.tui.terminal.rows, this.options.getTheme);
     handle = this.tui.showOverlay(component, {
       anchor: "center",
       width: "70%",
@@ -235,7 +243,7 @@ export class FullscreenApp {
 
   private transcriptRenderOptions(): Omit<TranscriptRenderOptions, "columns"> {
     return {
-      theme: defaultTranscriptTheme,
+      theme: this.transcriptTheme,
       showReasoning: this.showReasoning,
       verboseTrace: this.verboseTrace,
       traceInteraction: this.traceInteraction,

@@ -182,3 +182,33 @@ export function canvasBackgroundFor(
   if (mode === "auto" || resolved === terminalTheme) return undefined;
   return paintedCanvas[resolved];
 }
+
+/** Build a palette from one of the shipped themes plus user overrides. */
+export function paletteFor(
+  resolved: ResolvedTheme,
+  overrides?: Record<string, string>,
+): Theme {
+  const base = resolved === "light" ? lightTheme : darkTheme;
+  if (!overrides) return { ...base };
+
+  const palette = { ...base };
+  for (const [key, value] of Object.entries(overrides)) {
+    if (typeof value !== "string" || !(key in base)) continue;
+    (palette as unknown as Record<string, string | undefined>)[key] = value;
+  }
+  return palette;
+}
+
+/** Resolve the complete live palette used by an interactive TUI instance. */
+export function resolveThemePalette(
+  mode: ThemeMode,
+  terminalTheme: ResolvedTheme,
+  overrides?: Record<string, string>,
+): { resolved: ResolvedTheme; palette: Theme } {
+  const resolved = mode === "auto" ? terminalTheme : mode;
+  const palette = paletteFor(resolved, overrides);
+  if (palette.background === undefined) {
+    palette.background = canvasBackgroundFor(mode, resolved, terminalTheme);
+  }
+  return { resolved, palette };
+}

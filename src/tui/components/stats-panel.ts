@@ -14,6 +14,8 @@ import {
   type UsageStatsBundle,
 } from "../../stats/usage.js";
 import { parseTerminalMouseWheel } from "../model/terminal-mouse.js";
+import { darkTheme, type Theme } from "../model/theme.js";
+import { themeBackground, themeDim, themeForeground } from "../model/theme-style.js";
 
 const RANGES: Array<{ range: StatsRange; label: string }> = [
   { range: "7d", label: "Last 7 days" },
@@ -32,6 +34,7 @@ export interface StatsPanelComponentOptions {
   getTerminalRows(): number;
   onClose(): void;
   onRender(): void;
+  theme?: Theme;
 }
 
 function fit(value: string, width: number): string {
@@ -44,13 +47,22 @@ function formatGeneratedAt(value: Date): string {
   return value.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-function styleActivityLine(line: string): string {
+function styleActivityLine(line: string, theme?: Theme): string {
+  if (!theme) {
+    return line.split(/([·○◉●])/u).map((part) => {
+      if (part === "·") return chalk.gray.dim(part);
+      if (part === "○") return chalk.cyan.dim(part);
+      if (part === "◉") return chalk.cyan(part);
+      if (part === "●") return chalk.magenta(part);
+      return chalk.gray(part);
+    }).join("");
+  }
   return line.split(/([·○◉●])/u).map((part) => {
-    if (part === "·") return chalk.gray.dim(part);
-    if (part === "○") return chalk.cyan.dim(part);
-    if (part === "◉") return chalk.cyan(part);
-    if (part === "●") return chalk.magenta(part);
-    return chalk.gray(part);
+    if (part === "·") return themeDim(theme.dim, part);
+    if (part === "○") return themeDim(theme.accent, part);
+    if (part === "◉") return themeForeground(theme.accent, part);
+    if (part === "●") return themeForeground(theme.thinking, part);
+    return themeForeground(theme.muted, part);
   }).join("");
 }
 
@@ -58,13 +70,13 @@ function isModelToggleLine(line: string): boolean {
   return line.includes("Show fewer models") || /Show \d+ more models?/u.test(line);
 }
 
-function styleBodyLine(line: string): string {
+function styleBodyLine(line: string, theme?: Theme): string {
   if (line === "Activity" || line === "Model usage" || line === "Summary") {
-    return chalk.bold.white(line);
+    return theme ? chalk.bold(themeForeground(theme.inputText, line)) : chalk.bold.white(line);
   }
-  if (/[·○◉●]/u.test(line)) return styleActivityLine(line);
-  if (isModelToggleLine(line)) return chalk.cyan(line);
-  return chalk.gray(line);
+  if (/[·○◉●]/u.test(line)) return styleActivityLine(line, theme);
+  if (isModelToggleLine(line)) return theme ? themeForeground(theme.accent, line) : chalk.cyan(line);
+  return theme ? themeForeground(theme.muted, line) : chalk.gray(line);
 }
 
 export function buildStatsPanelLines(
@@ -72,16 +84,21 @@ export function buildStatsPanelLines(
   range: StatsRange,
   contentWidth: number,
   expandedModels = false,
+  theme?: Theme,
 ): string[] {
   const stats = bundle.ranges[range];
   const body = formatStatsPanelBody(stats, Math.max(48, contentWidth), { expandedModels })
     .split("\n")
-    .map(styleBodyLine);
+    .map((line) => styleBodyLine(line, theme));
   return [
-    chalk.bold.white("Stats"),
+    theme ? chalk.bold(themeForeground(theme.inputText, "Stats")) : chalk.bold.white("Stats"),
     "",
-    chalk.gray(`${rangeLabel(range)} · ${stats.startDate} – ${stats.endDate}`),
-    chalk.dim(`Generated ${formatGeneratedAt(bundle.generatedAt)}`),
+    theme
+      ? themeForeground(theme.muted, `${rangeLabel(range)} · ${stats.startDate} – ${stats.endDate}`)
+      : chalk.gray(`${rangeLabel(range)} · ${stats.startDate} – ${stats.endDate}`),
+    theme
+      ? themeDim(theme.dim, `Generated ${formatGeneratedAt(bundle.generatedAt)}`)
+      : chalk.dim(`Generated ${formatGeneratedAt(bundle.generatedAt)}`),
     "",
     ...body,
   ];
@@ -108,6 +125,7 @@ export class StatsPanelComponent implements Component, Focusable {
   ) {}
 
   render(width: number): string[] {
+    const theme = this.options.theme ?? darkTheme;
     const frameWidth = Math.max(1, Math.floor(width));
     const frameHeight = Math.max(1, Math.min(MAX_PANEL_HEIGHT, this.options.getTerminalRows() - 4));
     this.frameWidth = frameWidth;
@@ -118,10 +136,12 @@ export class StatsPanelComponent implements Component, Focusable {
     const innerWidth = frameWidth - 2;
     const horizontal = "─".repeat(Math.max(0, frameWidth - 2));
     const topDashCount = Math.max(0, frameWidth - 7);
-    const close = this.closeHovered ? chalk.bold.white("[✗]") : chalk.gray("[✗]");
-    const top = `${chalk.gray("┌")}${chalk.gray("─".repeat(topDashCount))} ${close} ${chalk.gray("┐")}`;
-    const bottom = chalk.gray(`└${horizontal}┘`);
-    const separator = chalk.gray(`├${horizontal}┤`);
+    const close = this.closeHovered
+      ? chalk.bold(themeForeground(theme.inputText, "[✗]"))
+      : themeForeground(theme.muted, "[✗]");
+    const top = themeForeground(theme.border, `┌${"─".repeat(topDashCount)}`) + ` ${close} ` + themeForeground(theme.border, "┐");
+    const bottom = themeForeground(theme.border, `└${horizontal}┘`);
+    const separator = themeForeground(theme.border, `├${horizontal}┤`);
     const tabLine = this.renderTabs(innerWidth);
     const contentWidth = Math.max(1, innerWidth - 4);
     const content = buildStatsPanelLines(
@@ -129,6 +149,7 @@ export class StatsPanelComponent implements Component, Focusable {
       this.range,
       contentWidth,
       this.modelsExpanded,
+      this.options.theme,
     );
 
     this.bodyRows = Math.max(0, frameHeight - 5);
@@ -149,7 +170,7 @@ export class StatsPanelComponent implements Component, Focusable {
       }
       const padded = `  ${fit(line, contentWidth)}  `;
       const decorated = modelToggle && this.modelToggleHovered
-        ? chalk.bgHex("#232323").white(padded)
+        ? themeForeground(theme.inputText, themeBackground(theme.traceHoverBg, padded))
         : padded;
       return this.frameLine(decorated, innerWidth);
     });
@@ -230,10 +251,12 @@ export class StatsPanelComponent implements Component, Focusable {
   invalidate(): void {}
 
   private frameLine(content: string, width: number): string {
-    return `${chalk.gray("│")}${fit(content, width)}${chalk.gray("│")}`;
+    const theme = this.options.theme ?? darkTheme;
+    return `${themeForeground(theme.border, "│")}${fit(content, width)}${themeForeground(theme.border, "│")}`;
   }
 
   private renderTabs(innerWidth: number): string {
+    const theme = this.options.theme ?? darkTheme;
     const pieces = ["  "];
     let width = 2;
     this.tabHits = [];
@@ -249,16 +272,17 @@ export class StatsPanelComponent implements Component, Focusable {
       const active = item.range === this.range;
       const hovered = index === this.hoveredTab;
       pieces.push(active
-        ? chalk.bgHex("#232323").bold.white(item.label)
+        ? chalk.bold(themeForeground(theme.inputText, themeBackground(theme.traceSelectedBg, item.label)))
         : hovered
-          ? chalk.bgHex("#232323").white(item.label)
-          : chalk.gray(item.label));
+          ? themeForeground(theme.inputText, themeBackground(theme.traceHoverBg, item.label))
+          : themeForeground(theme.muted, item.label));
       width += visibleWidth(item.label);
     }
     return fit(pieces.join(""), innerWidth);
   }
 
   private renderFooter(innerWidth: number): string {
+    const theme = this.options.theme ?? darkTheme;
     const plain = innerWidth >= 74 && this.bundle.ranges[this.range].models.length > COLLAPSED_MODEL_ROWS
       ? "m models  |  Tab/←/→ range  |  ↑/↓ scroll  |  Esc close"
       : innerWidth >= 62
@@ -267,7 +291,7 @@ export class StatsPanelComponent implements Component, Focusable {
         ? "←/→ range  |  ↑/↓ scroll  |  Esc close"
         : "↑/↓ scroll  |  Esc close";
     const left = Math.max(0, Math.floor((innerWidth - visibleWidth(plain)) / 2));
-    return fit(`${" ".repeat(left)}${chalk.dim(plain)}`, innerWidth);
+    return fit(`${" ".repeat(left)}${themeDim(theme.dim, plain)}`, innerWidth);
   }
 
   private stepRange(direction: 1 | -1): void {

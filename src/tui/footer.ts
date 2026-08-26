@@ -5,6 +5,8 @@ import { formatContextUsageLabel, friendlyCwd } from "./formatting/summary.js";
 import { PERMISSION_MODE_INFO } from "../permission/mode.js";
 import { classifyExternalRuntimeBinding } from "../external-runtime/session-policy.js";
 import type { PermissionMode } from "../types.js";
+import { darkTheme, type Theme } from "./model/theme.js";
+import { themeDim, themeForeground } from "./model/theme-style.js";
 
 export interface FooterAgentInfo {
   model: string;
@@ -21,6 +23,7 @@ export interface FooterRenderOptions {
   mode?: PermissionMode;
   /** Persistent autonomous Goal status, rendered on its own muted row. */
   goalLine?: string;
+  theme?: Theme;
 }
 
 export interface ResponsiveFooterSnapshot extends FooterRenderOptions {
@@ -36,11 +39,16 @@ export class ResponsiveFooterComponent implements Component {
     const snapshot = this.getSnapshot();
     if (snapshot.hidden) return [];
     const rows: string[] = [];
+    const theme = snapshot.theme ?? darkTheme;
+    const muted = snapshot.theme ? (text: string) => themeDim(theme.dim, text) : chalk.dim;
     if (snapshot.goalLine?.trim()) {
-      rows.push(truncateToWidth(chalk.dim(snapshot.goalLine.trim()), Math.max(1, Math.floor(width))));
+      rows.push(truncateToWidth(muted(snapshot.goalLine.trim()), Math.max(1, Math.floor(width))));
     }
     if (snapshot.runtimeLabel?.trim()) {
-      rows.push(truncateToWidth(chalk.cyan(snapshot.runtimeLabel.trim()), Math.max(1, Math.floor(width))));
+      rows.push(truncateToWidth(
+        snapshot.theme ? themeForeground(theme.accent, snapshot.runtimeLabel.trim()) : chalk.cyan(snapshot.runtimeLabel.trim()),
+        Math.max(1, Math.floor(width)),
+      ));
     }
     rows.push(renderFooterLine(snapshot.agent, width, snapshot));
     return rows;
@@ -56,20 +64,22 @@ export function renderFooterLine(
   columns: number,
   options: FooterRenderOptions = {},
 ): string {
+  const theme = options.theme ?? darkTheme;
+  const muted = options.theme ? (text: string) => themeDim(theme.dim, text) : chalk.dim;
   const usage = formatContextUsageLabel(agent.getContextUsageSnapshot());
   const cwd = options.cwd ?? friendlyCwd(process.cwd());
   const mode = renderPermissionModeBadge(options.mode);
   const nativeDetails = !options.runtimeLabel?.trim();
   const parts = [
     ...(mode ? [mode] : []),
-    ...(nativeDetails && agent.model ? [chalk.dim(agent.model)] : []),
-    chalk.dim(cwd),
-    ...(options.branch?.trim() ? [chalk.dim(options.branch.trim())] : []),
-    ...(nativeDetails && options.sessionTitle?.trim() ? [chalk.dim(options.sessionTitle.trim())] : []),
-    ...(nativeDetails && usage ? [chalk.dim(usage)] : []),
+    ...(nativeDetails && agent.model ? [muted(agent.model)] : []),
+    muted(cwd),
+    ...(options.branch?.trim() ? [muted(options.branch.trim())] : []),
+    ...(nativeDetails && options.sessionTitle?.trim() ? [muted(options.sessionTitle.trim())] : []),
+    ...(nativeDetails && usage ? [muted(usage)] : []),
     ...(options.extra ?? []),
   ];
-  const line = parts.join(chalk.dim(" │ "));
+  const line = parts.join(muted(" │ "));
   return truncateToWidth(line, Math.max(1, Math.floor(columns)));
 }
 

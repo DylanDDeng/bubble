@@ -10,7 +10,8 @@ import {
 import type { SessionSummary } from "../../session.js";
 import { formatRelativeTime } from "../recent-activity.js";
 import { parseTerminalMouseWheel } from "../model/terminal-mouse.js";
-import { darkTheme } from "../model/theme.js";
+import { darkTheme, type Theme } from "../model/theme.js";
+import { themeBackground, themeDim, themeForeground } from "../model/theme-style.js";
 
 export type SessionPickerScope = "project" | "all";
 
@@ -24,6 +25,7 @@ export interface SessionPickerComponentOptions {
   onNewSession(): void;
   onClose(): void;
   onRender(): void;
+  theme?: Theme;
 }
 
 type SessionRow =
@@ -37,7 +39,6 @@ interface HitRow {
 }
 
 const MAX_PANEL_HEIGHT = 30;
-const PANEL_BACKGROUND = "#1F1F1F";
 
 function fit(value: string, width: number, ellipsis = ""): string {
   if (width <= 0) return "";
@@ -84,6 +85,7 @@ export class SessionPickerComponent implements Component, Focusable {
   }
 
   render(width: number): string[] {
+    const theme = this.options.theme ?? darkTheme;
     const frameWidth = Math.max(1, Math.floor(width));
     const frameHeight = Math.max(1, Math.min(MAX_PANEL_HEIGHT, this.options.getTerminalRows() - 4));
     this.frameWidth = frameWidth;
@@ -94,11 +96,13 @@ export class SessionPickerComponent implements Component, Focusable {
 
     const innerWidth = frameWidth - 2;
     const horizontal = "─".repeat(innerWidth);
-    const close = this.closeHovered ? chalk.bold.white("[✗]") : chalk.gray("[✗]");
+    const close = this.closeHovered
+      ? chalk.bold(themeForeground(theme.inputText, "[✗]"))
+      : themeForeground(theme.muted, "[✗]");
     const topDashCount = Math.max(0, frameWidth - 7);
-    const top = `${chalk.gray("┌")}${chalk.gray("─".repeat(topDashCount))} ${close} ${chalk.gray("┐")}`;
-    const bottom = chalk.gray(`└${horizontal}┘`);
-    const separator = chalk.gray(`├${horizontal}┤`);
+    const top = themeForeground(theme.border, `┌${"─".repeat(topDashCount)}`) + ` ${close} ` + themeForeground(theme.border, "┐");
+    const bottom = themeForeground(theme.border, `└${horizontal}┘`);
+    const separator = themeForeground(theme.border, `├${horizontal}┤`);
     const tabs = this.frameLine(this.renderTabs(innerWidth), innerWidth);
 
     this.rows = this.buildRows();
@@ -127,11 +131,11 @@ export class SessionPickerComponent implements Component, Focusable {
       const text = this.renderRow(row, contentWidth);
       const padded = `  ${fit(text, contentWidth, "…")}  `;
       const styled = selected
-        ? chalk.bgHex(darkTheme.traceSelectedBg).bold.white(fit(padded, innerWidth))
+        ? chalk.bold(themeForeground(theme.inputText, themeBackground(theme.traceSelectedBg, fit(padded, innerWidth))))
         : hovered
-          ? chalk.bgHex(darkTheme.traceHoverBg).white(fit(padded, innerWidth))
-          : chalk.bgHex(PANEL_BACKGROUND)(fit(padded, innerWidth));
-      return `${chalk.gray("│")}${styled}${chalk.gray("│")}`;
+          ? themeForeground(theme.inputText, themeBackground(theme.traceHoverBg, fit(padded, innerWidth)))
+          : themeBackground(theme.backgroundPanel, fit(padded, innerWidth));
+      return `${themeForeground(theme.border, "│")}${styled}${themeForeground(theme.border, "│")}`;
     });
     const footer = this.frameLine(this.renderFooter(innerWidth), innerWidth);
     return [top, tabs, separator, ...body, footer, bottom]
@@ -233,17 +237,19 @@ export class SessionPickerComponent implements Component, Focusable {
   }
 
   private renderRow(row: SessionRow, width: number): string {
-    if (row.kind === "header") return row.label ? chalk.dim(truncateToWidth(row.label, width, "…")) : "";
-    if (row.kind === "new") return alignSides(chalk.cyan("＋ New session"), chalk.dim("Start fresh"), width);
+    const theme = this.options.theme ?? darkTheme;
+    if (row.kind === "header") return row.label ? themeDim(theme.dim, truncateToWidth(row.label, width, "…")) : "";
+    if (row.kind === "new") return alignSides(themeForeground(theme.accent, "＋ New session"), themeDim(theme.dim, "Start fresh"), width);
     const current = row.session.file === this.options.activeFile;
-    const marker = current ? chalk.cyan("●") : " ";
+    const marker = current ? themeForeground(theme.accent, "●") : " ";
     const label = `${marker} ${row.session.title || row.session.preview || row.session.name}`;
     const count = `${row.session.messageCount} msg${row.session.messageCount === 1 ? "" : "s"}`;
     const meta = current ? `${count} · current` : `${count} · ${formatRelativeTime(row.session.mtime)}`;
-    return alignSides(label, chalk.dim(meta), width);
+    return alignSides(label, themeDim(theme.dim, meta), width);
   }
 
   private renderTabs(width: number): string {
+    const theme = this.options.theme ?? darkTheme;
     const tabs: Array<{ scope: SessionPickerScope; label: string }> = [
       { scope: "project", label: "Current project" },
       { scope: "all", label: "All projects" },
@@ -261,26 +267,28 @@ export class SessionPickerComponent implements Component, Focusable {
       const active = tab.scope === this.scope;
       const hovered = tab.scope === this.hoveredTab;
       pieces.push(active
-        ? chalk.bgHex(darkTheme.traceSelectedBg).bold.white(tab.label)
+        ? chalk.bold(themeForeground(theme.inputText, themeBackground(theme.traceSelectedBg, tab.label)))
         : hovered
-          ? chalk.bgHex(darkTheme.traceHoverBg).white(tab.label)
-          : chalk.gray(tab.label));
+          ? themeForeground(theme.inputText, themeBackground(theme.traceHoverBg, tab.label))
+          : themeForeground(theme.muted, tab.label));
       cursor += visibleWidth(tab.label);
     }
     const count = `${this.visibleSessions().length} session${this.visibleSessions().length === 1 ? "" : "s"}`;
-    return alignSides(pieces.join(""), chalk.dim(count), width);
+    return alignSides(pieces.join(""), themeDim(theme.dim, count), width);
   }
 
   private renderFooter(width: number): string {
+    const theme = this.options.theme ?? darkTheme;
     const plain = width >= 68
       ? "Tab/←/→ scope  |  ↑/↓ choose  |  Enter open  |  Esc close"
       : "Tab scope  |  ↑/↓ choose  |  Enter  |  Esc";
     const left = Math.max(0, Math.floor((width - visibleWidth(plain)) / 2));
-    return fit(`${" ".repeat(left)}${chalk.dim(plain)}`, width);
+    return fit(`${" ".repeat(left)}${themeDim(theme.dim, plain)}`, width);
   }
 
   private frameLine(content: string, width: number): string {
-    return `${chalk.gray("│")}${fit(content, width)}${chalk.gray("│")}`;
+    const theme = this.options.theme ?? darkTheme;
+    return `${themeForeground(theme.border, "│")}${fit(content, width)}${themeForeground(theme.border, "│")}`;
   }
 
   private preferredKey(sessions: SessionSummary[]): string {

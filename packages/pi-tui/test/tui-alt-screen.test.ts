@@ -55,6 +55,35 @@ class RecordingTerminal extends VirtualTerminal {
 }
 
 describe("TuiAltScreen", () => {
+	it("repaints every row when the live screen background changes", async () => {
+		const terminal = new RecordingTerminal(12, 3);
+		let background = { open: "\x1b[48;2;1;2;3m", close: "\x1b[49m" };
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			screenBackground: () => background,
+		});
+		tui.setLayoutRoot(new Text("content", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		const initialWrites = terminal.events
+			.filter((event): event is { type: "write"; data: string } => event.type === "write")
+			.map((event) => event.data)
+			.join("");
+		assert.match(initialWrites, /\x1b\[48;2;1;2;3m\x1b\[2Kcontent/);
+
+		terminal.events.length = 0;
+		background = { open: "\x1b[48;2;4;5;6m", close: "\x1b[49m" };
+		tui.requestRender(true);
+		await terminal.waitForRender();
+		const switchedWrites = terminal.events
+			.filter((event): event is { type: "write"; data: string } => event.type === "write")
+			.map((event) => event.data)
+			.join("");
+		assert.match(switchedWrites, /\x1b\[48;2;4;5;6m\x1b\[2Kcontent/);
+		assert.match(switchedWrites, /\x1b\[2J/);
+		tui.stop();
+	});
+
 	it("routes single and double clicks to the component under the pointer", async () => {
 		const terminal = new VirtualTerminal(20, 4);
 		const clicks: TuiMouseEvent[] = [];

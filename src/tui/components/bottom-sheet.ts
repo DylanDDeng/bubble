@@ -1,5 +1,7 @@
 import chalk from "chalk";
 import { stripTerminalSequences, truncateToWidth, visibleWidth } from "@bubblebrain-ai/pi-tui";
+import type { Theme } from "../model/theme.js";
+import { themeBackground } from "../model/theme-style.js";
 
 export const BOTTOM_SHEET_BACKGROUND = "#242424";
 export const BOTTOM_SHEET_SELECTED_BACKGROUND = "#3A3A3A";
@@ -20,8 +22,9 @@ export function padSheetLine(line: string, width: number): string {
   return truncated + " ".repeat(Math.max(0, safeWidth - visibleWidth(truncated)));
 }
 
-export function paintSheetLine(line: string, width: number, selected = false): string {
-  return chalk
-    .bgHex(selected ? BOTTOM_SHEET_SELECTED_BACKGROUND : BOTTOM_SHEET_BACKGROUND)
-    (padSheetLine(line, width));
+export function paintSheetLine(line: string, width: number, selected = false, theme?: Theme): string {
+  const background = theme
+    ? selected ? theme.traceSelectedBg : theme.backgroundPanel
+    : selected ? BOTTOM_SHEET_SELECTED_BACKGROUND : BOTTOM_SHEET_BACKGROUND;
+  return theme ? themeBackground(background, padSheetLine(line, width)) : chalk.bgHex(background)(padSheetLine(line, width));
 }

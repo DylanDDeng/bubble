@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { darkTheme as inkDarkTheme, lightTheme as inkLightTheme } from "../tui/model/theme.js";
+import {
+  darkTheme as inkDarkTheme,
+  lightTheme as inkLightTheme,
+  resolveThemePalette,
+} from "../tui/model/theme.js";
 
 function luminance(hex: string): number {
   const match = /^#([0-9a-f]{6})$/i.exec(hex);
@@ -45,5 +49,16 @@ describe("TUI theme palettes", () => {
     // hexes, which is the point of the adaptive theme.
     expect(inkDarkTheme.diffAddFg).toBe("green");
     expect(inkDarkTheme.diffRemoveFg).toBe("red");
+  });
+
+  it("resolves auto, forced canvas colors, and user overrides through one runtime palette", () => {
+    const automatic = resolveThemePalette("auto", "light", { accent: "#123456" });
+    expect(automatic.resolved).toBe("light");
+    expect(automatic.palette.accent).toBe("#123456");
+    expect(automatic.palette.background).toBeUndefined();
+
+    const forced = resolveThemePalette("light", "dark");
+    expect(forced.resolved).toBe("light");
+    expect(forced.palette.background).toBe("#FCFCFA");
   });
 });

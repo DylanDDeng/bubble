@@ -3,9 +3,10 @@
  * replaces src/tui-ink/run-session-picker.tsx at cutover. Same contract:
  * resolve the chosen session file, or undefined on cancel.
  */
-import chalk from "chalk";
-import { ProcessTerminal, TuiMainScreen, Text, VStack, SelectList, type SelectItem } from "@bubblebrain-ai/pi-tui";
+import { Box, ProcessTerminal, TuiMainScreen, Text, VStack, SelectList, type SelectItem } from "@bubblebrain-ai/pi-tui";
 import { SessionSummary } from "../session.js";
+import { paletteFor } from "./model/theme.js";
+import { themeBackground, themeDim, themeForeground } from "./model/theme-style.js";
 
 
 export interface RunSessionPickerOptions {
@@ -19,6 +20,7 @@ export interface RunSessionPickerOptions {
 export async function runSessionPicker(options: RunSessionPickerOptions): Promise<string | undefined> {
   const terminal = new ProcessTerminal();
   const tui = new TuiMainScreen(terminal);
+  const theme = paletteFor(options.resolvedTheme ?? "dark", options.themeOverrides);
 
   const items: SelectItem[] = [];
   for (const summary of options.currentSessions.slice(0, 10)) {
@@ -51,18 +53,21 @@ export async function runSessionPicker(options: RunSessionPickerOptions): Promis
     };
 
     const header = new VStack([
-      new Text(chalk.cyan("Resume session"), 1, 0),
-      new Text(chalk.dim("Enter to select · Esc to start fresh"), 1, 0),
+      new Text(themeForeground(theme.accent, "Resume session"), 1, 0),
+      new Text(themeDim(theme.dim, "Enter to select · Esc to start fresh"), 1, 0),
     ]);
     const list = new SelectList(items, 10, {
-      selectedPrefix: () => chalk.cyan("› "),
-
-      selectedText: (str: string) => str,
-      description: (str: string) => chalk.dim(str),
-      scrollInfo: (str: string) => chalk.dim(str),
-      noMatch: (str: string) => chalk.dim(str),
+      selectedPrefix: () => themeForeground(theme.accent, "› "),
+      selectedText: (str: string) => themeForeground(theme.inputText, str),
+      description: (str: string) => themeDim(theme.dim, str),
+      scrollInfo: (str: string) => themeDim(theme.dim, str),
+      noMatch: (str: string) => themeDim(theme.dim, str),
     }, {});
-    const box = new VStack([header, list]);
+    const content = new VStack([header, list]);
+    const box = theme.background
+      ? new Box(0, 0, (text) => themeBackground(theme.background, text))
+      : new Box(0, 0);
+    box.addChild(content);
 
     list.onSelect = (item) => finish(item.value);
     list.onCancel = () => finish(undefined);

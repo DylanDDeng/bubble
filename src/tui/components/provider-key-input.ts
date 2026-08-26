@@ -1,13 +1,11 @@
-import chalk from "chalk";
 import {
   Input,
   type Component,
   truncateToWidth,
   visibleWidth,
 } from "@bubblebrain-ai/pi-tui";
-
-const borderColor = (text: string): string => chalk.rgb(160, 160, 160).dim(text);
-const surfaceBackground = (text: string): string => chalk.bgRgb(31, 31, 31)(text);
+import { darkTheme, type Theme } from "../model/theme.js";
+import { themeBackground, themeDim, themeForeground } from "../model/theme-style.js";
 
 function fillLine(text: string, width: number): string {
   const clipped = truncateToWidth(text, width);
@@ -26,13 +24,17 @@ export class ProviderKeyInputComponent implements Component {
   constructor(
     readonly input: Input,
     private readonly providerName: string,
+    private readonly getTheme: () => Theme = () => darkTheme,
   ) {}
 
   render(width: number): string[] {
+    const theme = this.getTheme();
+    const borderColor = (text: string): string => themeDim(theme.border, text);
+    const surfaceBackground = (text: string): string => themeBackground(theme.backgroundPanel, text);
     const safeWidth = Math.max(1, Math.floor(width));
     const title = `  Enter API Key for ${this.providerName}`;
     const hint = " · Enter to save · Esc or empty Backspace to return";
-    const surface = surfaceBackground(fillLine(`${chalk.cyan("◆")}${title}${chalk.dim(hint)}`, safeWidth));
+    const surface = surfaceBackground(fillLine(`${themeForeground(theme.accent, "◆")}${title}${themeDim(theme.dim, hint)}`, safeWidth));
 
     if (safeWidth < 3) {
       return [surface, ...this.input.render(safeWidth)];

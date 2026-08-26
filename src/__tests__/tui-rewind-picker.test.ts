@@ -13,6 +13,7 @@ import {
   type RewindPickerPoint,
 } from "../tui/components/rewind-picker.js";
 import type { DisplayMessage } from "../tui/model/display-history.js";
+import { darkTheme } from "../tui/model/theme.js";
 
 let fixtureCounter = 0;
 
@@ -44,7 +45,12 @@ describe("Grok-style rewind picker", () => {
       expect(plain[2]).toContain("second prompt");
       expect(plain[3]).toContain("first prompt");
       expect(rows.every((row) => stripTerminalSequences(row).startsWith("▎"))).toBe(true);
-      expect(rows[2]).toContain("48;2;58;58;58");
+      const selectedRgb = darkTheme.traceSelectedBg
+        .slice(1)
+        .match(/../g)!
+        .map((part) => Number.parseInt(part, 16))
+        .join(";");
+      expect(rows[2]).toContain(`48;2;${selectedRgb}`);
       expect(plain[2]?.length).toBe(72);
     } finally {
       chalk.level = previousLevel;

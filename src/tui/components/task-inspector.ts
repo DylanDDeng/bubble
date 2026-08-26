@@ -1,6 +1,7 @@
-import chalk from "chalk";
 import { matchesKey, truncateToWidth, visibleWidth, type Component } from "@bubblebrain-ai/pi-tui";
 import { safeSheetText } from "./bottom-sheet.js";
+import { darkTheme, type Theme } from "../model/theme.js";
+import { themeDim, themeForeground } from "../model/theme-style.js";
 
 export interface TaskInspectorOptions {
   id: string;
@@ -11,6 +12,7 @@ export interface TaskInspectorOptions {
   onClose(): void;
   onStop(): void;
   onRender(): void;
+  theme?: Theme;
 }
 
 function pad(line: string, width: number): string {
@@ -28,6 +30,7 @@ export class TaskInspectorComponent implements Component {
   constructor(private readonly options: TaskInspectorOptions) {}
 
   render(width: number): string[] {
+    const theme = this.options.theme ?? darkTheme;
     const frameWidth = Math.max(1, Math.floor(width));
     const inside = Math.max(1, frameWidth - 4);
     const bodyRows = Math.max(3, this.options.getTerminalRows() - 6);
@@ -46,10 +49,10 @@ export class TaskInspectorComponent implements Component {
     }
     const title = truncateToWidth(rawTitle, frameWidth - 6, "");
     return [
-      chalk.gray(`┌─ ${title} ${"─".repeat(Math.max(0, frameWidth - visibleWidth(title) - 5))}┐`),
-      ...visible.map((line) => `${chalk.gray("│")} ${pad(line, inside)} ${chalk.gray("│")}`),
-      `${chalk.gray("│")} ${pad(chalk.dim("↑↓ scroll · x stop · Esc close"), inside)} ${chalk.gray("│")}`,
-      chalk.gray(`└${"─".repeat(frameWidth - 2)}┘`),
+      themeForeground(theme.border, `┌─ ${title} ${"─".repeat(Math.max(0, frameWidth - visibleWidth(title) - 5))}┐`),
+      ...visible.map((line) => `${themeForeground(theme.border, "│")} ${pad(line, inside)} ${themeForeground(theme.border, "│")}`),
+      `${themeForeground(theme.border, "│")} ${pad(themeDim(theme.dim, "↑↓ scroll · x stop · Esc close"), inside)} ${themeForeground(theme.border, "│")}`,
+      themeForeground(theme.border, `└${"─".repeat(frameWidth - 2)}┘`),
     ];
   }
 

@@ -1,4 +1,3 @@
-import chalk from "chalk";
 import {
   matchesKey,
   truncateToWidth,
@@ -15,6 +14,8 @@ import {
   projectTranscript,
 } from "./transcript.js";
 import type { SubagentDisplay } from "../model/subagent-view.js";
+import { darkTheme, type Theme } from "../model/theme.js";
+import { themeDim, themeForeground } from "../model/theme-style.js";
 
 export interface SubagentInspectorOptions {
   agentId: string;
@@ -25,6 +26,7 @@ export interface SubagentInspectorOptions {
   onClose(): void;
   onNavigate?(direction: -1 | 1): void;
   onRender(): void;
+  theme?: Theme;
 }
 
 function pad(line: string, width: number): string {
@@ -55,6 +57,7 @@ export class SubagentInspectorComponent implements Component {
   constructor(private readonly options: SubagentInspectorOptions) {}
 
   render(width: number): string[] {
+    const theme = this.options.theme ?? darkTheme;
     const frameWidth = Math.max(1, Math.floor(width));
     const bodyWidth = Math.max(1, frameWidth - 4);
     const member = this.options.getMember();
@@ -91,13 +94,14 @@ export class SubagentInspectorComponent implements Component {
         .slice(0, Math.max(1, this.options.getTerminalRows()))
         .map((row) => truncateToWidth(row, frameWidth, ""));
     }
-    const top = chalk.gray(`┌─ ${truncateToWidth(title, Math.max(1, frameWidth - 6), "")} ${"─".repeat(Math.max(0, frameWidth - visibleWidth(title) - 5))}┐`);
-    const header = `${chalk.gray("│")} ${pad(chalk.dim(meta), bodyWidth)} ${chalk.gray("│")}`;
-    const separator = chalk.gray(`├${"─".repeat(frameWidth - 2)}┤`);
-    const body = visible.map((row) => `${chalk.gray("│")} ${pad(row, bodyWidth)} ${chalk.gray("│")}`);
-    const hint = pad(chalk.dim("↑↓ scroll · [ ] previous/next · x stop · Esc close"), bodyWidth);
-    const bottom = chalk.gray(`└${"─".repeat(frameWidth - 2)}┘`);
-    return [top, header, separator, ...body, `${chalk.gray("│")} ${hint} ${chalk.gray("│")}`, bottom];
+    const border = (text: string) => themeForeground(theme.border, text);
+    const top = border(`┌─ ${truncateToWidth(title, Math.max(1, frameWidth - 6), "")} ${"─".repeat(Math.max(0, frameWidth - visibleWidth(title) - 5))}┐`);
+    const header = `${border("│")} ${pad(themeDim(theme.dim, meta), bodyWidth)} ${border("│")}`;
+    const separator = border(`├${"─".repeat(frameWidth - 2)}┤`);
+    const body = visible.map((row) => `${border("│")} ${pad(row, bodyWidth)} ${border("│")}`);
+    const hint = pad(themeDim(theme.dim, "↑↓ scroll · [ ] previous/next · x stop · Esc close"), bodyWidth);
+    const bottom = border(`└${"─".repeat(frameWidth - 2)}┘`);
+    return [top, header, separator, ...body, `${border("│")} ${hint} ${border("│")}`, bottom];
   }
 
   handleInput(data: string): void {

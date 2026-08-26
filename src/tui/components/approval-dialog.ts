@@ -11,6 +11,8 @@ import {
 import type { ApprovalRequest } from "../../approval/types.js";
 import { inferBashPrefix } from "../../approval/session-cache.js";
 import { paintSheetLine, padSheetLine, safeSheetText } from "./bottom-sheet.js";
+import { darkTheme, type Theme } from "../model/theme.js";
+import { themeDim, themeForeground } from "../model/theme-style.js";
 
 export type ApprovalDialogChoice =
   | { kind: "approve_once" }
@@ -33,6 +35,7 @@ interface ApprovalChoiceRow {
 export interface ApprovalDialogOptions {
   /** Only advertise session remembering when the host can persist the prefix. */
   allowBashPrefix?: boolean;
+  getTheme?: () => Theme;
 }
 
 function printableInput(data: string): string | undefined {
@@ -109,14 +112,14 @@ export function approvalPresentation(request: ApprovalRequest): ApprovalPresenta
   }
 }
 
-function styleDetail(request: ApprovalRequest, detail: string, index: number): string {
+function styleDetail(request: ApprovalRequest, detail: string, index: number, theme: Theme): string {
   if (request.type === "bash" && index === 0) {
     const commandMatch = detail.match(/^(\S+)([\s\S]*)$/);
     if (commandMatch) {
-      return chalk.cyan(commandMatch[1]) + chalk.green(commandMatch[2]);
+      return themeForeground(theme.traceCommand, commandMatch[1]) + themeForeground(theme.success, commandMatch[2]);
     }
   }
-  return index === 0 ? chalk.cyan(detail) : chalk.dim(detail);
+  return index === 0 ? themeForeground(theme.accent, detail) : themeDim(theme.dim, detail);
 }
 
 /**
@@ -155,6 +158,7 @@ export class ApprovalDialogComponent implements Component, Focusable {
   }
 
   render(width: number): string[] {
+    const theme = this.options.getTheme?.() ?? darkTheme;
     const safeWidth = Math.max(1, width);
     const terminalRows = Math.max(1, this.getTerminalRows());
     const showHelp = terminalRows >= 5;
@@ -180,7 +184,7 @@ export class ApprovalDialogComponent implements Component, Focusable {
     const panelLines: Array<{ line: string; selected?: boolean }> = [];
     if (topPadding) panelLines.push({ line: "" });
     if (titleRows) {
-      panelLines.push({ line: `${indent}${chalk.bold.white(truncateToWidth(presentation.title, contentWidth, "…"))}` });
+      panelLines.push({ line: `${indent}${chalk.bold(themeForeground(theme.inputText, truncateToWidth(presentation.title, contentWidth, "…")))}` });
     }
 
     if (detailBudget > 0) {
@@ -188,7 +192,7 @@ export class ApprovalDialogComponent implements Component, Focusable {
       for (let index = 0; index < presentation.details.length && renderedDetails.length < detailBudget; index += 1) {
         const detail = presentation.details[index];
         if (!detail) continue;
-        const styled = styleDetail(this.request, detail, index);
+        const styled = styleDetail(this.request, detail, index, theme);
         renderedDetails.push(...wrapTextWithAnsi(styled, contentWidth));
       }
       for (const detail of renderedDetails.slice(0, detailBudget)) {
@@ -212,13 +216,15 @@ export class ApprovalDialogComponent implements Component, Focusable {
         ? ` [${safeSheetText(this.bashPrefix) || "command prefix"}${selected ? "▏" : ""}]`
         : "";
       const label = `${index + 1} (${radio}) ${choice.label}${prefix}`;
-      const line = `${indent}${selected ? chalk.bold.white(label) : chalk.gray(label)}`;
+      const line = `${indent}${selected
+        ? chalk.bold(themeForeground(theme.inputText, label))
+        : themeForeground(theme.muted, label)}`;
       panelLines.push({ line, selected });
     }
     if (bottomPadding) panelLines.push({ line: "" });
 
     const paintedPanel = panelLines.slice(0, panelBudget).map(({ line, selected }) =>
-      paintSheetLine(line, safeWidth, selected),
+      paintSheetLine(line, safeWidth, selected, theme),
     );
 
     if (!showHelp) return paintedPanel;
@@ -226,7 +232,7 @@ export class ApprovalDialogComponent implements Component, Focusable {
     const help = editing
       ? `${this.selectedIndex + 1}/${choices.length} select  │  type/backspace edit prefix  │  Ctrl+U clear  │  Enter confirm  │  Esc deny`
       : `${this.selectedIndex + 1}/${choices.length} select  │  Tab next  │  Enter confirm  │  Esc deny`;
-    return [...paintedPanel, chalk.dim(padSheetLine(help, safeWidth))];
+    return [...paintedPanel, themeDim(theme.dim, padSheetLine(help, safeWidth))];
   }
 
   handleInput(data: string): void {

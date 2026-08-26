@@ -3,6 +3,7 @@ import {
   buildComposerSlashCommands,
   buildModelAutocompleteItems,
   buildProviderAutocompleteItems,
+  buildThemeAutocompleteItems,
   ComposerAutocompleteProvider,
 } from "../tui/composer-autocomplete.js";
 import { localModelsForProvider } from "../tui/model-picker-data.js";
@@ -17,6 +18,13 @@ const modelCommand = {
 const providerCommand = {
   name: "provider",
   description: "Manage providers",
+  source: "builtin" as const,
+  handler: async () => {},
+};
+
+const themeCommand = {
+  name: "theme",
+  description: "Pick theme",
   source: "builtin" as const,
   handler: async () => {},
 };
@@ -112,6 +120,34 @@ describe("pi-tui composer autocomplete", () => {
       argumentEmptyMessage: "No matching models",
     });
     expect(command?.getArgumentCompletions?.("")).toEqual(completions());
+  });
+
+  it("keeps /theme in the composer and exposes auto/light/dark as an inline phase", async () => {
+    const provider = new ComposerAutocompleteProvider({
+      cwd: process.cwd(),
+      commands: () => [themeCommand],
+      skills: () => [],
+      themeMode: () => "light",
+      detectedTheme: () => "dark",
+    });
+
+    const suggestions = await provider.getSuggestions(
+      ["/theme "],
+      0,
+      7,
+      { signal: new AbortController().signal },
+    );
+    expect(suggestions).toMatchObject({
+      inputHint: { prompt: "◐ ", placeholder: "Select theme…", valuePrefix: "/theme " },
+      preferredValue: "light",
+      keepOpenOnEmpty: true,
+    });
+    expect(suggestions?.items.map((item) => [item.value, item.submitOnSelect])).toEqual([
+      ["auto", true],
+      ["light", true],
+      ["dark", true],
+    ]);
+    expect(buildThemeAutocompleteItems("term", "light").map((item) => item.value)).toEqual(["auto"]);
   });
 
   it("turns /provider into the same inline searchable command surface", () => {

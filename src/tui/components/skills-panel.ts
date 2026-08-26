@@ -15,7 +15,8 @@ import {
 import type { SkillRegistry } from "../../skills/registry.js";
 import type { SkillRecord } from "../../skills/types.js";
 import { parseTerminalMouseWheel } from "../model/terminal-mouse.js";
-import { darkTheme } from "../model/theme.js";
+import { darkTheme, type Theme } from "../model/theme.js";
+import { themeBackground, themeDim, themeForeground } from "../model/theme-style.js";
 
 type SkillFilter = "all" | "enabled" | "disabled";
 type SourceGroup = SkillRecord["source"];
@@ -27,7 +28,6 @@ const GROUP_LABEL: Record<SourceGroup, string> = {
   configured: "Config",
 };
 const MAX_PANEL_HEIGHT = 34;
-const PANEL_BACKGROUND = "#1F1F1F";
 
 interface SelectableEntry {
   key: string;
@@ -60,6 +60,7 @@ export interface SkillsPanelComponentOptions {
   onClose(): void;
   onRender(): void;
   onSkillsChanged(): void;
+  theme?: Theme;
 }
 
 function fit(value: string, width: number, ellipsis = ""): string {
@@ -150,6 +151,7 @@ export class SkillsPanelComponent implements Component, Focusable {
   }
 
   render(width: number): string[] {
+    const theme = this.options.theme ?? darkTheme;
     const frameWidth = Math.max(1, Math.floor(width));
     const frameHeight = Math.max(1, Math.min(MAX_PANEL_HEIGHT, this.options.getTerminalRows() - 6));
     this.frameWidth = frameWidth;
@@ -161,12 +163,12 @@ export class SkillsPanelComponent implements Component, Focusable {
     this.pruneBadges();
     const innerWidth = frameWidth - 2;
     const horizontal = "─".repeat(innerWidth);
-    const close = this.closeHovered ? chalk.bold.white("[✗]") : chalk.gray("[✗]");
+    const close = this.closeHovered ? chalk.bold(themeForeground(theme.inputText, "[✗]")) : themeForeground(theme.muted, "[✗]");
     const topDashCount = Math.max(0, frameWidth - 7);
-    const top = `${chalk.gray("┌")}${chalk.gray("─".repeat(topDashCount))} ${close} ${chalk.gray("┐")}`;
-    const bottom = chalk.gray(`└${horizontal}┘`);
-    const separator = chalk.gray(`├${horizontal}┤`);
-    const tab = this.frameLine(`  ${chalk.bgHex(darkTheme.traceHoverBg).bold.white(" Skills ")}`, innerWidth);
+    const top = themeForeground(theme.border, `┌${"─".repeat(topDashCount)}`) + ` ${close} ` + themeForeground(theme.border, "┐");
+    const bottom = themeForeground(theme.border, `└${horizontal}┘`);
+    const separator = themeForeground(theme.border, `├${horizontal}┤`);
+    const tab = this.frameLine(`  ${chalk.bold(themeForeground(theme.inputText, themeBackground(theme.traceHoverBg, " Skills ")))}`, innerWidth);
     const search = this.frameLine(this.renderSearch(innerWidth), innerWidth);
 
     const footerRows = this.searchActive ? 0 : 2;
@@ -197,11 +199,11 @@ export class SkillsPanelComponent implements Component, Focusable {
       const hovered = !!row.key && row.key === this.hoveredKey;
       const content = `  ${fit(row.text, contentWidth, "…")}  `;
       const styled = selected
-        ? chalk.bgHex(darkTheme.traceSelectedBg).bold.white(fit(content, innerWidth))
+        ? chalk.bold(themeForeground(theme.inputText, themeBackground(theme.traceSelectedBg, fit(content, innerWidth))))
         : hovered
-          ? chalk.bgHex(darkTheme.traceHoverBg).white(fit(content, innerWidth))
-          : chalk.bgHex(PANEL_BACKGROUND)(fit(content, innerWidth));
-      return `${chalk.gray("│")}${styled}${chalk.gray("│")}`;
+          ? themeForeground(theme.inputText, themeBackground(theme.traceHoverBg, fit(content, innerWidth)))
+          : themeBackground(theme.backgroundPanel, fit(content, innerWidth));
+      return `${themeForeground(theme.border, "│")}${styled}${themeForeground(theme.border, "│")}`;
     });
 
     const footer = this.searchActive ? [] : this.renderFooter(innerWidth, bodyStart + this.bodyRows);
@@ -320,14 +322,16 @@ export class SkillsPanelComponent implements Component, Focusable {
   }
 
   private frameLine(content: string, width: number): string {
-    return `${chalk.gray("│")}${chalk.bgHex(PANEL_BACKGROUND)(fit(content, width))}${chalk.gray("│")}`;
+    const theme = this.options.theme ?? darkTheme;
+    return `${themeForeground(theme.border, "│")}${themeBackground(theme.backgroundPanel, fit(content, width))}${themeForeground(theme.border, "│")}`;
   }
 
   private renderSearch(innerWidth: number): string {
+    const theme = this.options.theme ?? darkTheme;
     const filter = filterLabel(this.filter);
     const filterText = this.filterHovered || this.filter !== "all"
-      ? chalk.bgHex(darkTheme.traceHoverBg).white(` f ${filter} `)
-      : chalk.gray(` f ${filter} `);
+      ? themeForeground(theme.inputText, themeBackground(theme.traceHoverBg, ` f ${filter} `))
+      : themeForeground(theme.muted, ` f ${filter} `);
     const filterWidth = visibleWidth(` f ${filter} `);
     const leftWidth = Math.max(1, innerWidth - filterWidth - 3);
     let left: string;
@@ -337,19 +341,20 @@ export class SkillsPanelComponent implements Component, Focusable {
     } else {
       this.search.focused = false;
       left = this.searchHovered
-        ? chalk.white("/ to search")
-        : chalk.gray.dim("/ to search");
+        ? themeForeground(theme.inputText, "/ to search")
+        : themeDim(theme.dim, "/ to search");
     }
     return fit(`  ${fit(left, leftWidth)} ${filterText}`, innerWidth);
   }
 
   private renderFooter(innerWidth: number, firstRow: number): string[] {
+    const theme = this.options.theme ?? darkTheme;
     const actionPlain = "space toggle  ·  f filter  ·  r reload  ·  / search";
     const navPlain = "↑/↓ navigate  ·  Enter expand  ·  Esc close";
     const actionLeft = Math.max(0, Math.floor((innerWidth - visibleWidth(actionPlain)) / 2));
     const navLeft = Math.max(0, Math.floor((innerWidth - visibleWidth(navPlain)) / 2));
-    const action = fit(`${" ".repeat(actionLeft)}${chalk.dim(actionPlain)}`, innerWidth);
-    const nav = fit(`${" ".repeat(navLeft)}${chalk.dim(navPlain)}`, innerWidth);
+    const action = fit(`${" ".repeat(actionLeft)}${themeDim(theme.dim, actionPlain)}`, innerWidth);
+    const nav = fit(`${" ".repeat(navLeft)}${themeDim(theme.dim, navPlain)}`, innerWidth);
     const toggleAt = actionPlain.indexOf("space toggle");
     const filterAt = actionPlain.indexOf("f filter");
     const reloadAt = actionPlain.indexOf("r reload");
@@ -362,6 +367,7 @@ export class SkillsPanelComponent implements Component, Focusable {
   }
 
   private buildRows(contentWidth: number): RenderRow[] {
+    const theme = this.options.theme ?? darkTheme;
     const query = this.search.getValue().trim().toLocaleLowerCase();
     const rows: RenderRow[] = [];
     const records = this.registry.all();
@@ -397,10 +403,10 @@ export class SkillsPanelComponent implements Component, Focusable {
         const enabled = this.registry.isEnabled(skill.meta.name);
         const badge = this.actionBadges.get(skill.meta.name)?.text;
         const status = badge
-          ? chalk.cyan(`[${badge}]`)
+          ? themeForeground(theme.accent, `[${badge}]`)
           : enabled
             ? ""
-            : chalk.red("[disabled]");
+            : themeForeground(theme.error, "[disabled]");
         const author = skill.meta.author ? ` · ${skill.meta.author}` : "";
         const right = `${status}${status && (author || skillSourceLabel(skill)) ? " " : ""}(${skillSourceLabel(skill)}${author})`;
         const key = skillKey(skill.meta.name);
@@ -411,7 +417,7 @@ export class SkillsPanelComponent implements Component, Focusable {
           selectable: entry,
           text: enabled
             ? alignSides(left, right, contentWidth)
-            : chalk.dim(alignSides(left, right, contentWidth)),
+            : themeDim(theme.dim, alignSides(left, right, contentWidth)),
         });
         if (this.expandedSkills.has(skill.meta.name)) {
           rows.push(...this.skillDetailRows(skill, contentWidth));
@@ -425,15 +431,16 @@ export class SkillsPanelComponent implements Component, Focusable {
         : query
           ? `No skills matched “${this.search.getValue().trim()}”.`
           : `No ${filterLabel(this.filter).toLocaleLowerCase()} skills.`;
-      rows.push({ text: chalk.gray(message) });
+      rows.push({ text: themeForeground(theme.muted, message) });
     }
     return rows;
   }
 
   private skillDetailRows(skill: SkillRecord, width: number): RenderRow[] {
+    const theme = this.options.theme ?? darkTheme;
     const indent = "      ";
     const detailWidth = Math.max(1, width - visibleWidth(indent));
-    const rows = wrapTextWithAnsi(chalk.gray(skill.meta.description), detailWidth)
+    const rows = wrapTextWithAnsi(themeForeground(theme.muted, skill.meta.description), detailWidth)
       .map((line) => ({ text: `${indent}${line}` }));
     const fields: Array<[string, string | undefined]> = [
       ["path", friendlyPath(skill.skillFile)],
@@ -445,9 +452,9 @@ export class SkillsPanelComponent implements Component, Focusable {
     ];
     for (const [label, value] of fields) {
       if (!value) continue;
-      const prefix = `${indent}${chalk.gray.dim(`${label}:`)} `;
+      const prefix = `${indent}${themeDim(theme.dim, `${label}:`)} `;
       const prefixWidth = visibleWidth(`${indent}${label}: `);
-      const wrapped = wrapTextWithAnsi(chalk.gray(value), Math.max(1, width - prefixWidth));
+      const wrapped = wrapTextWithAnsi(themeForeground(theme.muted, value), Math.max(1, width - prefixWidth));
       rows.push({ text: `${prefix}${wrapped[0] ?? ""}` });
       for (const continuation of wrapped.slice(1)) {
         rows.push({ text: `${" ".repeat(prefixWidth)}${continuation}` });

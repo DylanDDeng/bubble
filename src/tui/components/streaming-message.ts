@@ -25,6 +25,8 @@ import {
 } from "@bubblebrain-ai/pi-tui";
 import type { DisplayMessagePart, DisplayToolCall } from "../model/display-history.js";
 import type { TraceAction, TraceInteractionState, TraceRowTarget } from "../model/trace-interaction.js";
+import type { Theme } from "../model/theme.js";
+import { themeDim, themeForeground } from "../model/theme-style.js";
 import {
   projectAssistantRows,
   projectReasoningRows,
@@ -206,7 +208,12 @@ export class StreamingMessageComponent extends VStack {
   private phraseTimer: ReturnType<typeof setInterval> | null = null;
   private projectionOptions: Omit<TranscriptRenderOptions, "columns"> = {};
 
-  constructor(maxPreviewRows = 8, onFrame?: () => void, private readonly onTraceAction?: (action: TraceAction) => void) {
+  constructor(
+    maxPreviewRows = 8,
+    onFrame?: () => void,
+    private readonly onTraceAction?: (action: TraceAction) => void,
+    private readonly getTheme?: () => Theme,
+  ) {
     super([]);
     this.onFrame = onFrame;
     this.activityLane = new AgentActivityLaneComponent();
@@ -264,8 +271,15 @@ export class StreamingMessageComponent extends VStack {
           : idlePhrase;
     const streamedChars = tail.content.length + tail.reasoning.length;
     const tokenText = streamedChars > 0 ? ` (↓${approximateTokenLabel(streamedChars)} tok)` : "";
+    const theme = this.getTheme?.();
+    const spinner = theme
+      ? themeForeground(theme.accent, SPINNER_FRAMES[this.frame]!)
+      : chalk.cyan(SPINNER_FRAMES[this.frame]!);
+    const status = theme
+      ? themeDim(theme.dim, `${phrase}${tokenText}`)
+      : chalk.dim(`${phrase}${tokenText}`);
     this.activityLane.setText(truncateToWidth(
-      ` ${chalk.cyan(SPINNER_FRAMES[this.frame]!)} ${chalk.dim(`${phrase}${tokenText}`)}`,
+      ` ${spinner} ${status}`,
       width,
     ));
     let hasLiveRows = false;
@@ -328,7 +342,9 @@ export class StreamingMessageComponent extends VStack {
       const start = Math.max(0, timeline.rows.length - this.timelineRows.length);
       const visible = timeline.rows.slice(start);
       const visibleTargets = timeline.traceTargets.slice(start);
-      this.timelineEllipsisRow.setText(timeline.rows.length > visible.length ? chalk.dim("  …") : "");
+      this.timelineEllipsisRow.setText(timeline.rows.length > visible.length
+        ? theme ? themeDim(theme.dim, "  …") : chalk.dim("  …")
+        : "");
       for (let index = 0; index < visible.length; index += 1) {
         this.timelineRows[index]!.setRow(
           visible[index]!,
@@ -349,8 +365,13 @@ export class StreamingMessageComponent extends VStack {
     this.lastColumns = columns;
     this.clearProjectedRows();
     const text = cancelling ? "Cancelling…" : `${label}…`;
+    const theme = this.getTheme?.();
+    const spinner = theme
+      ? themeForeground(theme.accent, SPINNER_FRAMES[this.frame]!)
+      : chalk.cyan(SPINNER_FRAMES[this.frame]!);
+    const status = theme ? themeDim(theme.dim, text) : chalk.dim(text);
     this.activityLane.setText(truncateToWidth(
-      ` ${chalk.cyan(SPINNER_FRAMES[this.frame]!)} ${chalk.dim(text)}`,
+      ` ${spinner} ${status}`,
       Math.max(1, Math.floor(columns)),
     ));
   }

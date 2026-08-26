@@ -11,7 +11,6 @@
  * this file owns rendering and input routing only.
  */
 import process from "node:process";
-import chalk from "chalk";
 import {
   ProcessTerminal,
   TuiAltScreen,
@@ -68,11 +67,11 @@ import {
   type ComposerDraftSnapshot,
 } from "./controller/composer-controller.js";
 import { OverlayRequestController } from "./controller/overlay-controller.js";
-import { defaultTranscriptTheme, projectTranscript, type TranscriptRenderOptions } from "./components/transcript.js";
+import { createTranscriptTheme, projectTranscript, type TranscriptRenderOptions, type TranscriptTheme } from "./components/transcript.js";
 import { friendlyCwd, sessionBasename } from "./formatting/summary.js";
 import { formatExternalRuntimeFooterLabel, ResponsiveFooterComponent } from "./footer.js";
 import { ComposerAutocompleteProvider } from "./composer-autocomplete.js";
-import { COMPOSER_EDITOR_OPTIONS, COMPOSER_EDITOR_THEME } from "./composer-style.js";
+import { COMPOSER_EDITOR_OPTIONS, createComposerEditorTheme } from "./composer-style.js";
 import type { Agent } from "../agent.js";
 import { SessionManager } from "../session.js";
 import type { ProviderRegistry } from "../provider-registry.js";
@@ -89,7 +88,14 @@ import { maskKey } from "../config.js";
 import { copyToClipboard } from "../clipboard.js";
 import type { RewindScope } from "../rewind.js";
 import { displayImagesFromPayload, formatImageUserDisplayText, nextImageDisplayLabelStart } from "./image-display.js";
-import { ASSISTANT_MARKDOWN_THEME } from "./markdown-style.js";
+import { createAssistantMarkdownTheme } from "./markdown-style.js";
+import {
+  resolveThemePalette,
+  type ResolvedTheme,
+  type Theme,
+  type ThemeMode,
+} from "./model/theme.js";
+import { themeBackgroundCodes, themeDim, themeForeground } from "./model/theme-style.js";
 
 export interface PiAppCallbacks {
   onExitRequest(): void;
@@ -130,19 +136,25 @@ export interface PiTuiAppOptions {
   inputHistoryFilePath?: string;
   /** Override the native clipboard image reader (primarily for embedded hosts/tests). */
   readClipboardImage?: ClipboardImageReader;
+  /** Persisted theme preference and the terminal color detected before raw mode. */
+  themeMode?: ThemeMode;
+  detectedTheme?: ResolvedTheme;
+  themeOverrides?: Record<string, string>;
 }
 
-const EDITOR_THEME = {
-  borderColor: (str: string) => chalk.cyan.dim(str),
-  selectList: {
-    selectedPrefix: () => chalk.cyan("› "),
-    unselectedPrefix: () => "  ",
-    selectedText: (str: string) => str,
-    description: (str: string) => chalk.dim(str),
-    scrollInfo: (str: string) => chalk.dim(str),
-    noMatch: (str: string) => chalk.dim(str),
-  },
-};
+function selectOverlayTheme(getTheme: () => Theme) {
+  return {
+    borderColor: (str: string) => themeDim(getTheme().border, str),
+    selectList: {
+      selectedPrefix: () => themeForeground(getTheme().accent, "› "),
+      unselectedPrefix: () => "  ",
+      selectedText: (str: string) => themeForeground(getTheme().inputText, str),
+      description: (str: string) => themeDim(getTheme().dim, str),
+      scrollInfo: (str: string) => themeDim(getTheme().dim, str),
+      noMatch: (str: string) => themeDim(getTheme().dim, str),
+    },
+  };
+}
 
 export class PiTuiApp {
   private readonly tui: TUI;
@@ -152,12 +164,8 @@ export class PiTuiApp {
   private readonly composerSlot = new VStack([]);
   private viewportScroll: ScrollView | null = null;
   private readonly transcriptBox = new VStack([]);
-  private readonly streamingMessage = new StreamingMessageComponent(
-    8,
-    () => this.tui.requestRender(),
-    (action) => this.handleTraceAction(action),
-  );
-  private readonly markdown = new Markdown("", 0, 0, ASSISTANT_MARKDOWN_THEME);
+  private readonly streamingMessage: StreamingMessageComponent;
+  private readonly markdown: Markdown;
   private readonly markdownRenderer = (text: string, width: number): string[] => {
     this.markdown.setText(text);
     return this.markdown.render(width);
@@ -169,6 +177,11 @@ export class PiTuiApp {
   private readonly taskStatusBar: TaskStatusBarComponent;
   private readonly traceInteraction = new TraceInteractionState();
   private readonly overlays: OverlayRequestController;
+  private themeMode: ThemeMode;
+  private readonly detectedTheme: ResolvedTheme;
+  private readonly themeOverrides?: Record<string, string>;
+  private theme: Theme;
+  private readonly transcriptTheme: TranscriptTheme;
   private gitBranch: string | undefined;
   private metadataManager: SessionManager | null = null;
   private metadataUnsubscribe: (() => void) | null = null;
@@ -198,14 +211,34 @@ export class PiTuiApp {
 
   constructor(private readonly options: PiTuiAppOptions) {
     const terminal = options.terminal ?? new ProcessTerminal();
+    this.themeMode = options.themeMode ?? "auto";
+    this.detectedTheme = options.detectedTheme
+      ?? (this.themeMode === "auto" ? "dark" : this.themeMode);
+    this.themeOverrides = options.themeOverrides;
+    this.theme = resolveThemePalette(this.themeMode, this.detectedTheme, this.themeOverrides).palette;
+    this.transcriptTheme = createTranscriptTheme(() => this.theme);
     // Pick the renderer before start(). Entering fullscreen after the regular
     // renderer has painted necessarily exposes a main-screen frame first.
     // Constructing TuiAltScreen here makes its 1049h transition the first UI
     // write and keeps the entire product surface on one application instance.
     this.tui = (options.uiMode ?? "fullscreen") === "fullscreen"
-      ? new TuiAltScreen(terminal, undefined, undefined, { mouseMotion: "all" })
+      ? new TuiAltScreen(terminal, undefined, undefined, {
+          mouseMotion: "all",
+          screenBackground: () => themeBackgroundCodes(this.theme.background),
+        })
       : new TuiMainScreen(terminal);
-    this.editor = new Editor(this.tui, COMPOSER_EDITOR_THEME, COMPOSER_EDITOR_OPTIONS);
+    this.markdown = new Markdown("", 0, 0, createAssistantMarkdownTheme(() => this.theme));
+    this.streamingMessage = new StreamingMessageComponent(
+      8,
+      () => this.tui.requestRender(),
+      (action) => this.handleTraceAction(action),
+      () => this.theme,
+    );
+    this.editor = new Editor(
+      this.tui,
+      createComposerEditorTheme(() => this.theme),
+      COMPOSER_EDITOR_OPTIONS,
+    );
     this.composer = new ComposerController({
       editor: this.editor,
       scope: {
@@ -220,11 +253,15 @@ export class PiTuiApp {
       allowImageAttachments: () => !this.activeSessionManager().getMetadata?.().externalRuntime,
       readClipboardImage: options.readClipboardImage,
       historyFilePath: options.inputHistoryFilePath,
+      getTheme: () => this.theme,
       // Injected terminals are isolated hosts and must not mutate the user's
       // real ~/.bubble history unless they explicitly provide a history file.
       persistHistory: options.terminal === undefined || options.inputHistoryFilePath !== undefined,
     });
-    this.composerPreview = new ComposerImagePreviewComponent(() => this.composer.previewAttachment());
+    this.composerPreview = new ComposerImagePreviewComponent(
+      () => this.composer.previewAttachment(),
+      () => this.theme,
+    );
     this.editor.setAutocompleteProvider(new ComposerAutocompleteProvider({
       cwd: process.cwd(),
       commands: () => slashRegistry.list(),
@@ -233,6 +270,8 @@ export class PiTuiApp {
       registry: this.options.registry,
       thinkingLevel: () => this.options.agent.thinking,
       providerId: () => this.options.agent.providerId,
+      themeMode: () => this.themeMode,
+      detectedTheme: () => this.detectedTheme,
       onModelSuggestionsChanged: () => {
         if (!this.disposed) this.editor.refreshAutocomplete();
       },
@@ -253,6 +292,7 @@ export class PiTuiApp {
         provider: agent.providerId,
         thinking: agent.thinking,
         updateNotice,
+        theme: this.theme,
       };
     });
     this.footer = new ResponsiveFooterComponent(() => {
@@ -260,9 +300,9 @@ export class PiTuiApp {
       const steerCount = this.options.controller.pendingSteerCount();
       const queuedCount = this.options.controller.queuedInputCount();
       const pendingImages = this.composer.pendingImageCount();
-      if (steerCount) extra.push(chalk.yellow(`steer ×${steerCount}`));
-      if (queuedCount) extra.push(chalk.yellow(`queue ×${queuedCount}`));
-      if (pendingImages) extra.push(chalk.dim(`reading image ×${pendingImages}`));
+      if (steerCount) extra.push(themeForeground(this.theme.warning, `steer ×${steerCount}`));
+      if (queuedCount) extra.push(themeForeground(this.theme.warning, `queue ×${queuedCount}`));
+      if (pendingImages) extra.push(themeDim(this.theme.dim, `reading image ×${pendingImages}`));
       const session = this.activeSessionManager();
       const metadata = typeof session?.getMetadata === "function" ? session.getMetadata() : undefined;
       const runtimeLabel = formatExternalRuntimeFooterLabel(metadata?.externalRuntime);
@@ -275,6 +315,7 @@ export class PiTuiApp {
         extra,
         mode: this.options.agent.mode,
         goalLine: runtimeLabel ? undefined : this.options.controller.getGoalIndicator?.(),
+        theme: this.theme,
         // At two rows or fewer, preserve the focused editor body + border.
         hidden: this.tui.terminal.rows <= 2,
       };
@@ -300,6 +341,7 @@ export class PiTuiApp {
           this.renderSnapshot();
         },
       },
+      () => this.theme,
     );
     this.taskStatusBar = new TaskStatusBarComponent(this.tasksPane);
     this.overlays = new OverlayRequestController({ questionController: options.questionController });
@@ -661,11 +703,13 @@ export class PiTuiApp {
       sessionManager: (options.controller.getSessionManager?.() ?? options.sessionManager) as never,
       createProvider: options.createProvider as never,
       openPicker: (mode, providerId) => {
-        if (mode === "model" || mode === "provider") {
+        if (mode === "model" || mode === "provider" || mode === "theme") {
           // A bare picker command can still arrive from a fast Enter or a
           // non-composer command host. Keep pi-tui on the shared inline
           // command surface instead of falling back to a centered overlay.
-          this.composer.replaceDraft(mode === "model" ? "/model " : "/provider ");
+          this.composer.replaceDraft(
+            mode === "model" ? "/model " : mode === "provider" ? "/provider " : "/theme ",
+          );
           this.editor.refreshAutocomplete();
         } else if (mode === "key" && providerId) {
           this.openProviderKeyPhase(providerId);
@@ -684,10 +728,9 @@ export class PiTuiApp {
       runMemoryCompaction: options.runMemoryCompaction,
       runMemorySummary: options.runMemorySummary,
       runMemoryRefresh: options.runMemoryRefresh,
-      setThemeMode: (mode) => {
-        options.callbacks.onThemeToggle();
-        options.callbacks.onThemeModeChange?.(mode);
-      },
+      getThemeMode: () => this.themeMode,
+      getResolvedTheme: () => this.resolvedTheme(),
+      setThemeMode: (mode) => this.applyThemeMode(mode),
       openFeedback: () => this.pushNotice("feedback dialog: coming to the pi TUI"),
       openStats: () => this.openStats(),
       ...(this.tui.mode === "fullscreen"
@@ -719,6 +762,26 @@ export class PiTuiApp {
     });
   }
 
+  private resolvedTheme(): ResolvedTheme {
+    return this.themeMode === "auto" ? this.detectedTheme : this.themeMode;
+  }
+
+  private applyThemeMode(mode: ThemeMode): void {
+    if (this.themeMode === mode) {
+      // Persist an explicit selection even when it resolves to the palette
+      // already on screen (e.g. auto-dark -> forced dark).
+      this.options.callbacks.onThemeModeChange?.(mode);
+      return;
+    }
+    this.themeMode = mode;
+    // Preserve object identity so already-open panels that received this
+    // palette also repaint in place.
+    Object.assign(this.theme, resolveThemePalette(mode, this.detectedTheme, this.themeOverrides).palette);
+    this.options.callbacks.onThemeModeChange?.(mode);
+    this.tui.invalidate();
+    this.renderSnapshot();
+  }
+
   private pushNotice(text: string): void {
     this.appendTranscriptRow({
       key: `notice-${Date.now()}`,
@@ -741,7 +804,7 @@ export class PiTuiApp {
       verboseTrace: this.verboseTrace,
       traceInteraction: this.traceInteraction,
       dimFromMessageIndex: this.rewindPreviewMessageIndex,
-      theme: defaultTranscriptTheme,
+      theme: this.transcriptTheme,
       // Stable identity lets the settled transcript cache survive composer-only
       // frames. The stateful Markdown instance is still updated on cache misses.
       markdownRenderer: this.markdownRenderer,
@@ -821,6 +884,7 @@ export class PiTuiApp {
       terminal: this.options.terminal,
       traceInteraction: this.traceInteraction,
       composer: this.composer,
+      getTheme: () => this.theme,
     });
     this.fullscreen.start();
   }
@@ -844,7 +908,7 @@ export class PiTuiApp {
       this.tui.setFocus(this.editor);
       this.renderSnapshot();
     };
-    const component = new ImageViewerComponent(image, close, () => this.tui.terminal.rows);
+    const component = new ImageViewerComponent(image, close, () => this.tui.terminal.rows, () => this.theme);
     handle = this.tui.showOverlay(component, {
       anchor: "center",
       width: "70%",
@@ -863,6 +927,7 @@ export class PiTuiApp {
       getTerminalRows: () => this.tui.terminal.rows,
       onClose: () => handle?.hide(),
       onRender: () => this.renderSnapshot(),
+      theme: this.theme,
     });
     handle = this.tui.showOverlay(component, {
       anchor: "center",
@@ -891,6 +956,7 @@ export class PiTuiApp {
         this.editor.refreshAutocomplete();
         this.renderSnapshot();
       },
+      theme: this.theme,
     });
     handle = this.tui.showOverlay(component, {
       anchor: "center",
@@ -974,6 +1040,7 @@ export class PiTuiApp {
         close();
       },
       onRender: () => this.renderSnapshot(),
+      theme: this.theme,
     });
     handle = this.tui.showOverlay(component, {
       anchor: "center",
@@ -1014,6 +1081,7 @@ export class PiTuiApp {
       onClose: () => handle?.hide(),
       onRender: () => this.renderSnapshot(),
       ...(sessionId ? { copySessionId: () => copyToClipboard(sessionId) } : {}),
+      theme: this.theme,
     });
     handle = this.tui.showOverlay(component, {
       anchor: "center",
@@ -1028,8 +1096,9 @@ export class PiTuiApp {
 
   private selectOverlay(items: SelectItem[], title: string, preview?: Component): Promise<SelectItem | null> {
     return new Promise((resolve) => {
-      const list = new SelectList(items, 8, EDITOR_THEME.selectList, {});
-      const header = new Text(chalk.cyan(title), 1, 0);
+      const pickerTheme = selectOverlayTheme(() => this.theme);
+      const list = new SelectList(items, 8, pickerTheme.selectList, {});
+      const header = new Text(themeForeground(this.theme.accent, title), 1, 0);
       const box = new VStack(preview ? [header, preview, list] : [header, list]);
       const handle = this.tui.showOverlay(box, { anchor: "center" });
       list.onSelect = (item) => {
@@ -1055,7 +1124,7 @@ export class PiTuiApp {
 
     this.closeProviderKeyPhase(false);
     const input = new Input({ prompt: "◆ ", mask: "•" });
-    const component = new ProviderKeyInputComponent(input, provider.name);
+    const component = new ProviderKeyInputComponent(input, provider.name, () => this.theme);
     const phase = { input, component, submitting: false };
     this.providerKeyPhase = phase;
     this.composerSlot.removeChild(this.editor);
@@ -1141,6 +1210,7 @@ export class PiTuiApp {
         onCancelRun: () => void this.cancelRunForRewind(component),
         onConfirm: (point, scope) => void this.executeRewindFromPicker(component, point, scope),
         onRender: () => this.renderSnapshot(),
+        theme: this.theme,
       },
     );
     this.rewindPhase = {
@@ -1329,6 +1399,7 @@ export class PiTuiApp {
     const component = new WorkflowInspectorComponent({
       getSnapshot,
       getTerminalRows: () => this.tui.terminal.rows,
+      theme: this.theme,
       onClose: () => handle?.hide(),
       onOpenAgent: (agentId) => {
         handle?.hide();
@@ -1366,6 +1437,7 @@ export class PiTuiApp {
     const component = new SubagentInspectorComponent({
       agentId: item.id,
       controller: this.options.controller,
+      theme: this.theme,
       getMember: () => this.options.controller.getSubagentGroups()
         .flatMap((group) => group.members)
         .find((member) => member.subAgentId === item.id) ?? item.member,
@@ -1430,6 +1502,7 @@ export class PiTuiApp {
       onClose: () => handle?.hide(),
       onStop: () => this.options.controller.stopBackgroundTask(item.id),
       onRender: () => this.renderSnapshot(),
+      theme: this.theme,
     });
     handle = this.tui.showOverlay(component, {
       width: "100%",
@@ -1444,7 +1517,10 @@ export class PiTuiApp {
       const dialog = new ApprovalDialogComponent(
         request,
         () => this.tui.terminal.rows,
-        { allowBashPrefix: this.options.bashAllowlist !== undefined },
+        {
+          allowBashPrefix: this.options.bashAllowlist !== undefined,
+          getTheme: () => this.theme,
+        },
       );
       const handle = this.tui.showOverlay(dialog, {
         anchor: "bottom-center",
@@ -1467,7 +1543,7 @@ export class PiTuiApp {
     if (!request) return;
     const questionController = this.options.questionController;
     if (!questionController) return;
-    const dialog = new QuestionDialogComponent(request, () => this.tui.terminal.rows);
+    const dialog = new QuestionDialogComponent(request, () => this.tui.terminal.rows, () => this.theme);
     const handle = this.tui.showOverlay(dialog, {
       anchor: "bottom-center",
       width: "100%",

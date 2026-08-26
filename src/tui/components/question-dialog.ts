@@ -9,6 +9,8 @@ import {
 } from "@bubblebrain-ai/pi-tui";
 import type { QuestionAnswer, QuestionRequest } from "../../question/types.js";
 import { paintSheetLine, padSheetLine, safeSheetText } from "./bottom-sheet.js";
+import { darkTheme, type Theme } from "../model/theme.js";
+import { themeDim, themeForeground } from "../model/theme-style.js";
 
 interface ChoiceRow {
   kind: "option" | "custom";
@@ -33,9 +35,9 @@ function removeLastGrapheme(value: string): string {
   return last ? value.slice(0, last.index) : "";
 }
 
-function joinColumns(left: string, right: string, width: number): string {
+function joinColumns(left: string, right: string, width: number, theme = darkTheme): string {
   if (!right || width < 56) {
-    const combined = right ? `${left}  ${chalk.dim(right)}` : left;
+    const combined = right ? `${left}  ${themeDim(theme.dim, right)}` : left;
     return truncateToWidth(combined, width, "…");
   }
   // The reference keeps the answer label compact and gives the explanation
@@ -44,7 +46,7 @@ function joinColumns(left: string, right: string, width: number): string {
   const leftWidth = Math.max(20, Math.min(34, Math.floor(width * 0.33)));
   const renderedLeft = truncateToWidth(left, leftWidth - 2, "…");
   const gap = " ".repeat(Math.max(2, leftWidth - visibleWidth(renderedLeft)));
-  return `${renderedLeft}${gap}${chalk.dim(truncateToWidth(right, Math.max(1, width - leftWidth), "…"))}`;
+  return `${renderedLeft}${gap}${themeDim(theme.dim, truncateToWidth(right, Math.max(1, width - leftWidth), "…"))}`;
 }
 
 /** Request-aware, bottom-docked replacement for the lost Ink QuestionDialog. */
@@ -61,11 +63,13 @@ export class QuestionDialogComponent implements Component, Focusable {
   constructor(
     private readonly request: QuestionRequest,
     private readonly getTerminalRows: () => number,
+    private readonly getTheme: () => Theme = () => darkTheme,
   ) {
     this.answers = request.questions.map(() => []);
   }
 
   render(width: number): string[] {
+    const theme = this.getTheme();
     const safeWidth = Math.max(1, width);
     const terminalRows = Math.max(1, this.getTerminalRows());
     // A bottom sheet must not become the entire screen after a resize. Keep
@@ -97,11 +101,11 @@ export class QuestionDialogComponent implements Component, Focusable {
 
     if (roomy) panel.push({ line: "" });
     const tab = this.request.questions.length > 1
-      ? chalk.dim(`  ${question.header || "Question"} ${this.questionIndex + 1}/${this.request.questions.length}`)
+      ? themeDim(theme.dim, `  ${question.header || "Question"} ${this.questionIndex + 1}/${this.request.questions.length}`)
       : "";
     const titleWidth = Math.max(1, contentWidth - visibleWidth(tab));
     panel.push({
-      line: `${indent}${chalk.bold.white(truncateToWidth(safeSheetText(question.question), titleWidth, "…"))}${tab}`,
+      line: `${indent}${chalk.bold(themeForeground(theme.inputText, truncateToWidth(safeSheetText(question.question), titleWidth, "…")))}${tab}`,
     });
     if (roomy) panel.push({ line: "" });
 
@@ -113,7 +117,9 @@ export class QuestionDialogComponent implements Component, Focusable {
         const marker = this.customInput.trim() ? "●" : "○";
         const custom = this.customInput || "Type your answer here";
         panel.push({
-          line: `${indent}${selected ? chalk.bold.white(`z (${marker}) ${custom}`) : chalk.gray(`z (${marker}) ${custom}`)}`,
+          line: `${indent}${selected
+            ? chalk.bold(themeForeground(theme.inputText, `z (${marker}) ${custom}`))
+            : themeForeground(theme.muted, `z (${marker}) ${custom}`)}`,
           selected,
         });
         continue;
@@ -123,8 +129,13 @@ export class QuestionDialogComponent implements Component, Focusable {
       const checked = currentAnswers.includes(option.label);
       const marker = checked ? "●" : "○";
       const left = `${optionIndex + 1} (${marker}) ${safeSheetText(option.label)}`;
-      const line = joinColumns(left, safeSheetText(option.description), contentWidth);
-      panel.push({ line: `${indent}${selected ? chalk.bold.white(line) : chalk.gray(line)}`, selected });
+      const line = joinColumns(left, safeSheetText(option.description), contentWidth, theme);
+      panel.push({
+        line: `${indent}${selected
+          ? chalk.bold(themeForeground(theme.inputText, line))
+          : themeForeground(theme.muted, line)}`,
+        selected,
+      });
     }
 
     if (roomy) panel.push({ line: "" });
@@ -133,15 +144,15 @@ export class QuestionDialogComponent implements Component, Focusable {
       const submitHelp = this.questionIndex < this.request.questions.length - 1 ? "Enter:next" : "Enter:submit";
       const rightGap = Math.max(1, contentWidth - visibleWidth(selectionHelp) - visibleWidth(submitHelp));
       panel.push({
-        line: `${indent}${chalk.dim(truncateToWidth(`${selectionHelp}${" ".repeat(rightGap)}${submitHelp}`, contentWidth, ""))}`,
+        line: `${indent}${themeDim(theme.dim, truncateToWidth(`${selectionHelp}${" ".repeat(rightGap)}${submitHelp}`, contentWidth, ""))}`,
       });
     }
-    const painted = panel.slice(0, panelBudget).map(({ line, selected }) => paintSheetLine(line, safeWidth, selected));
+    const painted = panel.slice(0, panelBudget).map(({ line, selected }) => paintSheetLine(line, safeWidth, selected, theme));
     if (!showOuterHelp) return painted;
     const outerHelp = this.request.questions.length > 1
       ? "Tab next question  │  ←/→ change question  │  Esc dismiss"
       : "Tab next answer  │  Esc dismiss  │  Shift+X dismiss";
-    return [...painted, chalk.dim(padSheetLine(outerHelp, safeWidth))];
+    return [...painted, themeDim(theme.dim, padSheetLine(outerHelp, safeWidth))];
   }
 
   handleInput(data: string): void {
