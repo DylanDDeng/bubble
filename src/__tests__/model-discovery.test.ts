@@ -90,6 +90,13 @@ describe("OpenAI-compatible model discovery", () => {
     const result = await registry.discoverModels(provider);
 
     expect(result.source).toBe("cache");
+    expect(result.models).toContainEqual(expect.objectContaining({
+      id: "glm-5.3-flash",
+      tier: "fast",
+      contextWindow: 1_000_000,
+      reasoningLevels: ["low", "high", "max"],
+      defaultReasoningLevel: "max",
+    }));
     expect(result.models.map((model) => model.id)).toContain("glm-5.3");
     expect(fetchMock).not.toHaveBeenCalled();
   });

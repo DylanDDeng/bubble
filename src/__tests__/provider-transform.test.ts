@@ -81,6 +81,7 @@ describe("provider transform", () => {
   it("emits GLM-5.2+ reasoning_effort (high/max) alongside the thinking block", () => {
     const max = resolveProviderRequestConfig("zhipuai", "glm-5.2", "max");
     const high = resolveProviderRequestConfig("zhipuai-coding-plan", "glm-5.3", "high");
+    const flash = resolveProviderRequestConfig("zhipuai-coding-plan", "glm-5.3-flash", "max");
 
     expect(max.reasoningEffort).toBeUndefined();
     expect(max.extraBody).toEqual({
@@ -91,6 +92,10 @@ describe("provider transform", () => {
       thinking: { type: "enabled", clear_thinking: false },
       reasoning_effort: "high",
     });
+    expect(flash.extraBody).toEqual({
+      thinking: { type: "enabled", clear_thinking: false },
+      reasoning_effort: "max",
+    });
   });
 
   it("disables GLM-5.2 thinking when level is off (no effort sent)", () => {
@@ -99,14 +104,17 @@ describe("provider transform", () => {
     expect(config.extraBody).toEqual({ thinking: { type: "disabled" } });
   });
 
-  it("maps GLM-5.3 off to low because the model requires thinking", () => {
-    const config = resolveProviderRequestConfig("zhipuai-coding-plan", "glm-5.3", "off");
-    expect(config.effectiveThinkingLevel).toBe("low");
-    expect(config.extraBody).toEqual({
-      thinking: { type: "enabled", clear_thinking: false },
-      reasoning_effort: "low",
-    });
-  });
+  it.each(["glm-5.3", "glm-5.3-flash"])(
+    "maps %s off to low because the model requires thinking",
+    (modelId) => {
+      const config = resolveProviderRequestConfig("zhipuai-coding-plan", modelId, "off");
+      expect(config.effectiveThinkingLevel).toBe("low");
+      expect(config.extraBody).toEqual({
+        thinking: { type: "enabled", clear_thinking: false },
+        reasoning_effort: "low",
+      });
+    },
+  );
 
   it("clamps unsupported GLM-5.2 levels down to nearest supported (off)", () => {
     // clampThinkingLevel walks downward; with off/high/max supported, "low"

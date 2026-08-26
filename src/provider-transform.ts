@@ -181,11 +181,11 @@ export function resolveProviderRequestConfig(
     ["zhipuai", "zhipuai-coding-plan", "zai", "zai-coding-plan"].includes(providerId)
   ) {
     // GLM-5.2+ also accept `reasoning_effort`. GLM-5.2 can disable thinking;
-    // GLM-5.3 requires thinking and Coding Plan normalizes its effort into
+    // the GLM-5.3 family requires thinking and normalizes its effort into
     // low/high/max. The catalog clamps 5.3 choices before this serialization
     // boundary. The effort field rides inside the body alongside `thinking`,
     // so it goes in extraBody, not the OpenRouter-style config field.
-    if (modelId === "glm-5.2" || modelId === "glm-5.3") {
+    if (modelId === "glm-5.2" || modelId === "glm-5.3" || modelId === "glm-5.3-flash") {
       return {
         effectiveThinkingLevel,
         extraBody: modelId === "glm-5.2" && effectiveThinkingLevel === "off"

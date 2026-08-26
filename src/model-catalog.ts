@@ -89,7 +89,7 @@ const TOGGLE_THINKING_LEVELS: ReasoningEffort[] = ["off", "medium"];
 // GLM-5.2 accepts OpenAI-style `reasoning_effort`. We expose high and max plus
 // "off", which disables thinking outright via `thinking: {type: "disabled"}`.
 const GLM_5_2_LEVELS: ReasoningEffort[] = ["high", "max", "off"];
-// GLM-5.3 Coding Plan normalizes efforts into exactly three real tiers. Its
+// The GLM-5.3 family normalizes efforts into exactly three real tiers. Its
 // default is max, and disabling thinking maps to low rather than turning it off.
 const GLM_5_3_LEVELS: ReasoningEffort[] = ["low", "high", "max"];
 // Kimi K2.7 Code variants only support thinking mode (disabling it errors), so
@@ -184,8 +184,13 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "glm-5.1", name: "GLM-5.1", providerId: "zhipuai", tier: "balanced", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
   { id: "glm-4.7", name: "GLM-4.7", providerId: "zhipuai", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
   { id: "glm-4.6", name: "GLM-4.6", providerId: "zhipuai", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
-  // Coding Plan exposes GLM-5.3 before GET /models lists it (verified live
-  // 2026-08-14). The standard API is still marked "coming soon" in the docs.
+  // GLM-5.3-Flash is a native multimodal model with the same mandatory
+  // low/high/max thinking contract as GLM-5.3. It is fully available on the
+  // Coding Plan and GET /models (verified live 2026-08-26). Official docs list
+  // a 1M context window and position it as the fast/low-cost plan model.
+  { id: "glm-5.3-flash", name: "GLM-5.3-Flash", providerId: "zhipuai-coding-plan", tier: "fast", reasoningLevels: GLM_5_3_LEVELS, defaultReasoningLevel: "max", contextWindow: 1000000 },
+  // Coding Plan exposed GLM-5.3 before GET /models listed it (verified live
+  // 2026-08-14). The standard API was still marked "coming soon" at that time.
   { id: "glm-5.3", name: "GLM-5.3", providerId: "zhipuai-coding-plan", tier: "strong", reasoningLevels: GLM_5_3_LEVELS, defaultReasoningLevel: "max", contextWindow: 1000000 },
   { id: "glm-5.2", name: "GLM-5.2", providerId: "zhipuai-coding-plan", tier: "strong", reasoningLevels: GLM_5_2_LEVELS, contextWindow: 1000000 },
   { id: "glm-5.1", name: "GLM-5.1", providerId: "zhipuai-coding-plan", tier: "balanced", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },

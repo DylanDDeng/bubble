@@ -106,9 +106,18 @@ describe("variant resolver", () => {
     expect(isThinkingToggleModel("zhipuai", "glm-5.1")).toBe(false);
   });
 
-  it("includes GLM-5.3 in the Zhipu Coding Plan catalog", () => {
-    expect(listBuiltinModels("zhipuai-coding-plan")[0]).toMatchObject({
+  it("includes the GLM-5.3 family in the Zhipu Coding Plan catalog", () => {
+    const models = listBuiltinModels("zhipuai-coding-plan");
+    expect(models.find((model) => model.id === "glm-5.3-flash")).toMatchObject({
+      id: "glm-5.3-flash",
+      tier: "fast",
+      contextWindow: 1_000_000,
+      reasoningLevels: ["low", "high", "max"],
+      defaultReasoningLevel: "max",
+    });
+    expect(models.find((model) => model.id === "glm-5.3")).toMatchObject({
       id: "glm-5.3",
+      tier: "strong",
       contextWindow: 1_000_000,
       reasoningLevels: ["low", "high", "max"],
       defaultReasoningLevel: "max",

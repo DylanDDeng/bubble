@@ -931,6 +931,7 @@ export class ProviderRegistry {
       reasoningLevels: model.reasoningLevels,
       defaultReasoningLevel: model.defaultReasoningLevel,
       contextWindow: model.contextWindow,
+      tier: model.tier,
       useResponsesLite: model.useResponsesLite,
       toolOutputTokenLimit: model.toolOutputTokenLimit,
     }));
