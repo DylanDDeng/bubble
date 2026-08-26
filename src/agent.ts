@@ -193,6 +193,8 @@ export interface AgentOptions {
 export interface AgentRunOptions {
   abortSignal?: AbortSignal;
   inputController?: AgentInputController;
+  /** Local-only presentation metadata persisted with the submitted user turn. */
+  userMessageUi?: Extract<Message, { role: "user" }>["ui"];
   /**
    * Internal: re-enter the loop without appending the input as a new user
    * message. Used by the subagent scheduler's rate-limit re-entry so a child
@@ -869,7 +871,11 @@ export class Agent {
         return;
       }
       this.injectHookModelContext(promptHook.result);
-      this.appendMessage({ role: "user", content: userInput });
+      this.appendMessage({
+        role: "user",
+        content: userInput,
+        ...(options.userMessageUi ? { ui: { ...options.userMessageUi } } : {}),
+      });
     }
     await hookBus.runBeforeTurn({
       agent: this,

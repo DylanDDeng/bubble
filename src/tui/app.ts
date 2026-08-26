@@ -23,7 +23,6 @@ import {
   Input,
   ScrollView,
   Markdown,
-  type MarkdownTheme,
   type SelectItem,
   type TUI,
   type TuiMode,
@@ -57,11 +56,17 @@ import { ContextInfoComponent } from "./components/context-info.js";
 import { StatsPanelComponent } from "./components/stats-panel.js";
 import { SkillsPanelComponent } from "./components/skills-panel.js";
 import { SessionPickerComponent } from "./components/session-picker.js";
+import { ComposerImagePreviewComponent, ImageViewerComponent } from "./components/image-preview.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
 import type { SlashCommandContext } from "../slash-commands/types.js";
 import type { ContextUsageSnapshot } from "../context/usage.js";
 import { collectUsageStatsBundle } from "../stats/usage.js";
 import { BubbleTuiController } from "./controller/controller.js";
+import {
+  ComposerController,
+  type ClipboardImageReader,
+  type ComposerDraftSnapshot,
+} from "./controller/composer-controller.js";
 import { OverlayRequestController } from "./controller/overlay-controller.js";
 import { defaultTranscriptTheme, projectTranscript, type TranscriptRenderOptions } from "./components/transcript.js";
 import { friendlyCwd, sessionBasename } from "./formatting/summary.js";
@@ -74,6 +79,7 @@ import type { ProviderRegistry } from "../provider-registry.js";
 import type { QuestionController, QuestionEvent, QuestionRequest } from "../question/controller.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
 import type { DisplayMessage } from "./model/display-history.js";
+import type { SubmitPayload } from "./model/composer-types.js";
 import { TraceInteractionState, type TraceAction } from "./model/trace-interaction.js";
 import type { SkillRegistry } from "../skills/registry.js";
 import { parseSkillInvocation } from "../skills/invocation.js";
@@ -81,6 +87,8 @@ import { getNextPermissionMode } from "../permission/mode.js";
 import { maskKey } from "../config.js";
 import { copyToClipboard } from "../clipboard.js";
 import type { RewindScope } from "../rewind.js";
+import { displayImagesFromPayload, formatImageUserDisplayText, nextImageDisplayLabelStart } from "./image-display.js";
+import { ASSISTANT_MARKDOWN_THEME } from "./markdown-style.js";
 
 export interface PiAppCallbacks {
   onExitRequest(): void;
@@ -117,6 +125,10 @@ export interface PiTuiAppOptions {
   uiMode?: TuiMode;
   /** Non-blocking git lookup used to populate the footer after first paint. */
   resolveGitBranch?: (cwd: string) => Promise<string | undefined>;
+  /** Override composer history storage (primarily for embedded hosts/tests). */
+  inputHistoryFilePath?: string;
+  /** Override the native clipboard image reader (primarily for embedded hosts/tests). */
+  readClipboardImage?: ClipboardImageReader;
 }
 
 const EDITOR_THEME = {
@@ -131,26 +143,11 @@ const EDITOR_THEME = {
   },
 };
 
-const MD_THEME: MarkdownTheme = {
-  heading: (t) => chalk.bold.cyan(t),
-  link: (t) => chalk.underline.cyan(t),
-  linkUrl: (t) => chalk.dim(t),
-  code: (t) => chalk.yellow(t),
-  codeBlock: (t) => chalk(t),
-  codeBlockBorder: (t) => chalk.cyan.dim(t),
-  quote: (t) => chalk.dim(t),
-  quoteBorder: (t) => chalk.cyan.dim(t),
-  hr: (t) => chalk.dim(t),
-  listBullet: (t) => chalk.cyan(t),
-  bold: (t) => chalk.bold(t),
-  italic: (t) => chalk.italic(t),
-  strikethrough: (t) => chalk.strikethrough(t),
-  underline: (t) => chalk.underline(t),
-};
-
 export class PiTuiApp {
   private readonly tui: TUI;
   private readonly editor: Editor;
+  private readonly composer: ComposerController;
+  private readonly composerPreview: ComposerImagePreviewComponent;
   private readonly composerSlot = new VStack([]);
   private viewportScroll: ScrollView | null = null;
   private readonly transcriptBox = new VStack([]);
@@ -159,7 +156,7 @@ export class PiTuiApp {
     () => this.tui.requestRender(),
     (action) => this.handleTraceAction(action),
   );
-  private readonly markdown = new Markdown("", 0, 0, MD_THEME);
+  private readonly markdown = new Markdown("", 0, 0, ASSISTANT_MARKDOWN_THEME);
   private readonly markdownRenderer = (text: string, width: number): string[] => {
     this.markdown.setText(text);
     return this.markdown.render(width);
@@ -171,7 +168,6 @@ export class PiTuiApp {
   private readonly taskStatusBar: TaskStatusBarComponent;
   private readonly traceInteraction = new TraceInteractionState();
   private readonly overlays: OverlayRequestController;
-  private readonly history: string[] = [];
   private gitBranch: string | undefined;
   private metadataManager: SessionManager | null = null;
   private metadataUnsubscribe: (() => void) | null = null;
@@ -188,11 +184,16 @@ export class PiTuiApp {
   } | null = null;
   private rewindPhase: {
     component: RewindPickerComponent;
-    draft: string;
+    draft: ComposerDraftSnapshot;
     previousScrollTop: number;
   } | null = null;
   private rewindPreviewMessageIndex: number | undefined;
   private disposed = false;
+
+  /** Compatibility/debug view backed by the canonical persistent history. */
+  get history(): string[] {
+    return this.composer.historyTexts();
+  }
 
   constructor(private readonly options: PiTuiAppOptions) {
     const terminal = options.terminal ?? new ProcessTerminal();
@@ -204,6 +205,25 @@ export class PiTuiApp {
       ? new TuiAltScreen(terminal, undefined, undefined, { mouseMotion: "all" })
       : new TuiMainScreen(terminal);
     this.editor = new Editor(this.tui, COMPOSER_EDITOR_THEME, COMPOSER_EDITOR_OPTIONS);
+    this.composer = new ComposerController({
+      editor: this.editor,
+      scope: {
+        sessionFile: this.activeSessionManager().getSessionFile(),
+        cwd: process.cwd(),
+      },
+      nextImageLabelStart: nextImageDisplayLabelStart(options.controller.getTranscript()),
+      onSubmit: (payload) => this.handleSubmit(payload),
+      onNotice: (message) => this.pushNotice(message),
+      onStateChange: () => this.renderSnapshot(),
+      onOpenImage: (item) => this.openImageViewer(item),
+      allowImageAttachments: () => !this.activeSessionManager().getMetadata?.().externalRuntime,
+      readClipboardImage: options.readClipboardImage,
+      historyFilePath: options.inputHistoryFilePath,
+      // Injected terminals are isolated hosts and must not mutate the user's
+      // real ~/.bubble history unless they explicitly provide a history file.
+      persistHistory: options.terminal === undefined || options.inputHistoryFilePath !== undefined,
+    });
+    this.composerPreview = new ComposerImagePreviewComponent(() => this.composer.previewAttachment());
     this.editor.setAutocompleteProvider(new ComposerAutocompleteProvider({
       cwd: process.cwd(),
       commands: () => slashRegistry.list(),
@@ -238,8 +258,10 @@ export class PiTuiApp {
       const extra: string[] = [];
       const steerCount = this.options.controller.pendingSteerCount();
       const queuedCount = this.options.controller.queuedInputCount();
+      const pendingImages = this.composer.pendingImageCount();
       if (steerCount) extra.push(chalk.yellow(`steer ×${steerCount}`));
       if (queuedCount) extra.push(chalk.yellow(`queue ×${queuedCount}`));
+      if (pendingImages) extra.push(chalk.dim(`reading image ×${pendingImages}`));
       const session = this.activeSessionManager();
       const metadata = typeof session?.getMetadata === "function" ? session.getMetadata() : undefined;
       const runtimeLabel = formatExternalRuntimeFooterLabel(metadata?.externalRuntime);
@@ -345,6 +367,7 @@ export class PiTuiApp {
     // rows land after it, breaking spacing/order on later turns.
     this.transcriptBox.addChild(this.settledTranscript);
     this.transcriptBox.addChild(this.streamingMessage);
+    this.composerSlot.addChild(this.composerPreview);
     this.composerSlot.addChild(this.editor);
     if (isViewportTUI(this.tui)) {
       // Fullscreen owns a bounded viewport. History scrolls while the composer
@@ -372,9 +395,12 @@ export class PiTuiApp {
     }
     this.tui.setFocus(this.editor);
 
-    this.editor.onSubmit = (text: string) => this.handleSubmit(text);
     this.controllerUnsubscribe = this.options.controller.subscribe(() => {
       this.syncMetadataSubscription();
+      this.composer.setScope({
+        sessionFile: this.activeSessionManager().getSessionFile(),
+        cwd: process.cwd(),
+      }, nextImageDisplayLabelStart(this.options.controller.getTranscript()));
       this.renderSnapshot();
     });
   }
@@ -396,6 +422,17 @@ export class PiTuiApp {
       // and Shift+Tab must not change permissions while a key is being typed.
       if (this.providerKeyPhase) return undefined;
       if (this.rewindPhase) return undefined;
+      if (
+        this.editor.focused
+        && (matchesKey(data, "ctrl+v") || matchesKey(data, "super+v"))
+      ) {
+        // A terminal can only bracket text that it receives from the clipboard.
+        // Image-only Cmd+V is therefore silent in some terminals; Ctrl+V (and
+        // Kitty's super+v when available) gives the composer an explicit,
+        // terminal-independent signal to probe the native image clipboard.
+        this.composer.requestClipboardImagePaste();
+        return { consume: true };
+      }
       if (matchesKey(data, "ctrl+g")) {
         if (this.tasksPane.isOpen() && this.tasksPane.focused) {
           this.tasksPane.close();
@@ -471,11 +508,12 @@ export class PiTuiApp {
     });
   }
 
-  private handleSubmit(text: string): void {
-    const trimmed = text.trim();
-    if (!trimmed) return;
-    this.editor.addToHistory(trimmed);
-    this.history.unshift(trimmed);
+  private handleSubmit(input: string | SubmitPayload): void {
+    const payload: SubmitPayload = typeof input === "string"
+      ? { text: input, images: [] }
+      : input;
+    const trimmed = payload.text.trim();
+    if (!trimmed && payload.images.length === 0) return;
 
     if (trimmed.startsWith("/")) {
       void this.handleCommand(trimmed);
@@ -484,15 +522,18 @@ export class PiTuiApp {
 
     const controller = this.options.controller;
     if (controller.isRunning()) {
-      // Enter while running steers the current turn; Tab-equivalent queueing
-      // is exposed via the /queue command until a dedicated keybinding lands.
-      controller.steer(trimmed);
+      // AgentRunInputQueue is intentionally text-only. Image payloads retain
+      // their bytes by waiting for the next provider turn instead of degrading
+      // into a text steer.
+      if (payload.images.length > 0) controller.queueInput(payload);
+      else controller.steer(trimmed);
       this.renderSnapshot();
-    } else if (controller.queueAfterCommand?.(trimmed)) {
+    } else if (controller.queueAfterCommand?.(payload)) {
       this.renderSnapshot();
     } else {
-      this.pushUserRow(trimmed);
-      void controller.runTurn(trimmed, process.cwd()).finally(() => this.renderSnapshot());
+      this.pushUserRow(payload);
+      const agentInput = payload.images.length > 0 ? payload : trimmed;
+      void controller.runTurn(agentInput, process.cwd()).finally(() => this.renderSnapshot());
     }
   }
 
@@ -502,6 +543,10 @@ export class PiTuiApp {
 
     // pi-tui-local commands first (renderer-specific modes).
     if (name === "fullscreen") {
+      if (this.fullscreen) {
+        this.exitFullscreen();
+        return;
+      }
       if (this.tui.mode === "fullscreen") {
         this.pushNotice("Already in fullscreen mode");
         this.renderSnapshot();
@@ -515,7 +560,7 @@ export class PiTuiApp {
       ? parseSkillInvocation(command, this.options.skillRegistry)
       : undefined;
     if (skillInvocation) {
-      this.pushUserRow(command);
+      this.pushUserRow({ text: command, images: [] });
       const controller = this.options.controller;
       if (controller.isRunning()) {
         controller.steer(skillInvocation.actualPrompt);
@@ -607,7 +652,7 @@ export class PiTuiApp {
           // A bare picker command can still arrive from a fast Enter or a
           // non-composer command host. Keep pi-tui on the shared inline
           // command surface instead of falling back to a centered overlay.
-          this.editor.setText(mode === "model" ? "/model " : "/provider ");
+          this.composer.replaceDraft(mode === "model" ? "/model " : "/provider ");
           this.editor.refreshAutocomplete();
         } else if (mode === "key" && providerId) {
           this.openProviderKeyPhase(providerId);
@@ -638,7 +683,7 @@ export class PiTuiApp {
       handleGoalCommand: (input) => options.controller.handleGoalCommand(input, process.cwd()),
       openRewindPicker: () => this.openRewindPicker(),
       fillComposer: (text) => {
-        this.editor.setText(text);
+        this.composer.replaceDraft(text);
         this.tui.setFocus(this.editor);
       },
       rebuildTranscript: () => options.controller.rebuildTranscriptFromAgent(),
@@ -648,8 +693,17 @@ export class PiTuiApp {
     } as SlashCommandContext;
   }
 
-  private pushUserRow(text: string): void {
-    this.appendTranscriptRow({ key: `user-${this.history.length}`, role: "user", content: text });
+  private pushUserRow(payload: SubmitPayload): void {
+    this.appendTranscriptRow({
+      key: `user-${Date.now()}`,
+      role: "user",
+      content: formatImageUserDisplayText(
+        payload.displayText ?? payload.text,
+        payload.images.length,
+        payload.imageDisplayStart,
+      ),
+      images: displayImagesFromPayload(payload),
+    });
   }
 
   private pushNotice(text: string): void {
@@ -753,6 +807,7 @@ export class PiTuiApp {
       },
       terminal: this.options.terminal,
       traceInteraction: this.traceInteraction,
+      composer: this.composer,
     });
     this.fullscreen.start();
   }
@@ -761,11 +816,33 @@ export class PiTuiApp {
     if (!this.fullscreen) return;
     this.fullscreen.dispose();
     this.fullscreen = null;
+    this.composer.attachEditor(this.editor);
+    this.composer.setOpenImageHandler((item) => this.openImageViewer(item));
     this.tui.start();
     this.renderSnapshot();
   }
 
   // ---- Overlays -----------------------------------------------------------
+
+  private openImageViewer(image: import("./controller/composer-controller.js").ComposerDraftAttachment | import("./model/image-attachment.js").DisplayImageAttachment): void {
+    let handle: { hide(): void } | undefined;
+    const close = () => {
+      handle?.hide();
+      this.tui.setFocus(this.editor);
+      this.renderSnapshot();
+    };
+    const component = new ImageViewerComponent(image, close, () => this.tui.terminal.rows);
+    handle = this.tui.showOverlay(component, {
+      anchor: "center",
+      width: "70%",
+      minWidth: 36,
+      maxWidth: 110,
+      maxHeight: "85%",
+      margin: { top: 2, right: 1, bottom: 2, left: 1 },
+      dismissOnOutsideClick: true,
+    });
+    this.tui.setFocus(component);
+  }
 
   private openStats(): void {
     let handle: { hide(): void } | undefined;
@@ -854,7 +931,10 @@ export class PiTuiApp {
           fail("Failed to start a new session", outcome.error);
           return;
         }
-        this.editor.setText("");
+        this.composer.setScope({
+          sessionFile: this.activeSessionManager().getSessionFile(),
+          cwd: process.cwd(),
+        }, nextImageDisplayLabelStart(this.options.controller.getTranscript()));
         this.viewportScroll?.scrollToEnd();
         close();
       },
@@ -873,7 +953,10 @@ export class PiTuiApp {
           fail("Failed to switch session", outcome.error);
           return;
         }
-        this.editor.setText("");
+        this.composer.setScope({
+          sessionFile: this.activeSessionManager().getSessionFile(),
+          cwd: process.cwd(),
+        }, nextImageDisplayLabelStart(this.options.controller.getTranscript()));
         this.viewportScroll?.scrollToEnd();
         close();
       },
@@ -993,7 +1076,7 @@ export class PiTuiApp {
     this.composerSlot.addChild(this.editor);
     this.providerKeyPhase = null;
 
-    this.editor.setText(returnToProviderPicker ? "/provider " : "");
+    this.composer.replaceDraft(returnToProviderPicker ? "/provider " : "");
     if (returnToProviderPicker) this.editor.refreshAutocomplete();
     this.tui.setFocus(this.editor);
     this.renderSnapshot();
@@ -1033,7 +1116,7 @@ export class PiTuiApp {
       return;
     }
 
-    const draft = this.editor.getText();
+    const draft = this.composer.snapshotDraft();
     const component = new RewindPickerComponent(
       controller.isRunning() ? "cancel-offer" : "picker",
       points,
@@ -1107,11 +1190,10 @@ export class PiTuiApp {
     try {
       const result = await this.options.controller.rewindToTurn(point.turn.id, scope);
       const targetText = result.target.text;
-      const restoredDraft = this.rewindPhase?.draft ?? "";
       // Swap the panel, final composer value, transcript dim, and focus before
       // requesting the success paint. This prevents an empty-composer frame
       // between "Rewinding..." and the restored prompt.
-      this.closeRewindPicker(false, scope === "code" ? restoredDraft : targetText, false);
+      this.closeRewindPicker(scope === "code", scope === "code" ? undefined : targetText, false);
       this.viewportScroll?.scrollToEnd();
 
       const fileCount = result.files.restored.length + result.files.deleted.length;
@@ -1148,9 +1230,8 @@ export class PiTuiApp {
     this.composerSlot.addChild(this.editor);
     this.rewindPhase = null;
     this.rewindPreviewMessageIndex = undefined;
-    if (restoreDraft || replacementText !== undefined) {
-      this.editor.setText(restoreDraft ? phase.draft : replacementText ?? "");
-    }
+    if (restoreDraft) this.composer.restoreDraft(phase.draft);
+    else if (replacementText !== undefined) this.composer.replaceDraft(replacementText);
     if (restoreDraft) {
       this.viewportScroll?.scrollTo(phase.previousScrollTop, { disableFollow: true });
     }
@@ -1305,6 +1386,12 @@ export class PiTuiApp {
   }
 
   private handleTraceAction(action: TraceAction): void {
+    if (action.kind === "open-image") {
+      const message = this.options.controller.getTranscript().find((candidate) => candidate.key === action.messageKey);
+      const image = message?.images?.find((candidate) => candidate.label === action.imageLabel);
+      if (image) this.openImageViewer(image);
+      return;
+    }
     if (action.kind !== "open-subagent") return;
     const member = this.options.controller.getSubagentGroups()
       .flatMap((group) => group.members)
@@ -1427,6 +1514,7 @@ export class PiTuiApp {
     // listener, spinner timers, and terminal mode cannot outlive the root app.
     this.fullscreen?.dispose();
     this.fullscreen = null;
+    this.composer.dispose();
     this.streamingMessage.dispose();
     this.tasksPane.dispose();
     this.options.controller.shutdown("user-quit");

@@ -45,18 +45,36 @@ function segmentWithMarkers(
 	text: string,
 	baseSegmenter: Intl.Segmenter,
 	validIds: Set<number>,
+	inlineTokens: readonly string[] = [],
 ): Iterable<Intl.SegmentData> {
-	// Fast path: no paste markers in the text or no valid IDs.
-	if (validIds.size === 0 || !text.includes("[paste #")) {
+	const hasPasteMarkers = validIds.size > 0 && text.includes("[paste #");
+	const matchingInlineTokens = inlineTokens.filter((token) => token.length > 0 && text.includes(token));
+	// Fast path: there are no application-owned atomic spans on this line.
+	if (!hasPasteMarkers && matchingInlineTokens.length === 0) {
 		return baseSegmenter.segment(text);
 	}
 
-	// Find all marker spans with valid IDs.
+	// Find all marker/token spans. Overlaps are resolved by preferring the
+	// longest span at a given offset, which keeps application-owned chips
+	// atomic without coupling the generic editor to their label syntax.
 	const markers: Array<{ start: number; end: number }> = [];
-	for (const m of text.matchAll(PASTE_MARKER_REGEX)) {
-		const id = Number.parseInt(m[1]!, 10);
-		if (!validIds.has(id)) continue;
-		markers.push({ start: m.index, end: m.index + m[0].length });
+	if (hasPasteMarkers) {
+		for (const m of text.matchAll(PASTE_MARKER_REGEX)) {
+			const id = Number.parseInt(m[1]!, 10);
+			if (!validIds.has(id)) continue;
+			markers.push({ start: m.index, end: m.index + m[0].length });
+		}
+	}
+	for (const token of matchingInlineTokens) {
+		let start = text.indexOf(token);
+		while (start >= 0) {
+			markers.push({ start, end: start + token.length });
+			start = text.indexOf(token, start + token.length);
+		}
+	}
+	markers.sort((a, b) => a.start - b.start || b.end - a.end);
+	for (let index = markers.length - 1; index > 0; index--) {
+		if (markers[index]!.start < markers[index - 1]!.end) markers.splice(index, 1);
 	}
 	if (markers.length === 0) {
 		return baseSegmenter.segment(text);
@@ -250,6 +268,34 @@ export interface EditorOptions {
 	prompt?: string;
 }
 
+export interface EditorHistoryNavigationResult {
+	/** Text to restore into the editor for this history step. */
+	text: string;
+	/** True while browsing history; false after returning to the unsent draft. */
+	active: boolean;
+}
+
+export interface EditorInlineDecorationState {
+	focused: boolean;
+	hovered: boolean;
+}
+
+/** Application-owned atomic token rendered inside the editable text. */
+export interface EditorInlineDecoration {
+	id: string;
+	/** Exact text stored in the editor. The editor never rewrites this value. */
+	text: string;
+	style(text: string, state: EditorInlineDecorationState): string;
+}
+
+interface EditorInlineHitTarget {
+	id: string;
+	xStart: number;
+	xEnd: number;
+	y: number;
+	cursorOffset: number;
+}
+
 const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	minPrimaryColumnWidth: 12,
 	maxPrimaryColumnWidth: 32,
@@ -326,6 +372,9 @@ export class Editor implements Component, Focusable {
 	private autocompleteRequestTask: Promise<void> = Promise.resolve();
 	private autocompleteStartToken: number = 0;
 	private autocompleteRequestId: number = 0;
+	private inlineDecorations: EditorInlineDecoration[] = [];
+	private hoveredInlineDecorationId?: string;
+	private inlineHitTargets: EditorInlineHitTarget[] = [];
 
 	// Paste tracking for large pastes
 	private pastes: Map<number, string> = new Map();
@@ -361,8 +410,31 @@ export class Editor implements Component, Focusable {
 	private undoStack = new UndoStack<EditorSnapshot>();
 
 	public onSubmit?: (text: string) => void;
+	/** Called after expansion but before the editor clears its submitted value. */
+	public onBeforeSubmit?: (text: string) => void;
 	public onChange?: (text: string) => void;
+	public onCursorMove?: () => void;
+	/**
+	 * Optional application-level paste interceptor. Returning true consumes the
+	 * paste; returning false lets the editor apply its normal text-paste logic.
+	 * Empty bracketed pastes are delivered too, which lets terminal applications
+	 * probe an image-only system clipboard without teaching this generic editor
+	 * about attachments.
+	 */
+	public onPaste?: (text: string) => boolean;
+	/** Enter or a double click on an application-owned inline token. */
+	public onInlineDecorationActivate?: (id: string) => void;
+	/**
+	 * Optional structured history provider. Applications with history metadata
+	 * (for example image attachments) can restore that state atomically while the
+	 * editor remains responsible only for text and cursor mechanics.
+	 */
+	public onHistoryNavigate?: (
+		direction: "up" | "down",
+		currentText: string,
+	) => EditorHistoryNavigationResult | undefined;
 	public disableSubmit: boolean = false;
+	private externalHistoryActive: boolean = false;
 
 	constructor(tui: TUI, theme: EditorTheme, options: EditorOptions = {}) {
 		this.tui = tui;
@@ -386,7 +458,41 @@ export class Editor implements Component, Focusable {
 
 	/** Segment text with paste-marker awareness, only merging markers with valid IDs. */
 	private segment(text: string, mode: "word" | "grapheme"): Iterable<Intl.SegmentData> {
-		return segmentWithMarkers(text, mode === "word" ? wordSegmenter : graphemeSegmenter, this.validPasteIds());
+		return segmentWithMarkers(
+			text,
+			mode === "word" ? wordSegmenter : graphemeSegmenter,
+			this.validPasteIds(),
+			this.inlineDecorations.map((decoration) => decoration.text),
+		);
+	}
+
+	setInlineDecorations(decorations: readonly EditorInlineDecoration[]): void {
+		this.inlineDecorations = decorations
+			.filter((decoration) => decoration.id && decoration.text)
+			.map((decoration) => ({ ...decoration }));
+		if (!this.inlineDecorations.some((item) => item.id === this.hoveredInlineDecorationId)) {
+			this.hoveredInlineDecorationId = undefined;
+		}
+		this.tui.requestRender();
+	}
+
+	getActiveInlineDecorationId(): string | undefined {
+		if (this.hoveredInlineDecorationId) return this.hoveredInlineDecorationId;
+		return this.getCursorInlineDecorationId();
+	}
+
+	private getCursorInlineDecorationId(): string | undefined {
+		const text = this.getText();
+		const cursor = this.getCursorOffset();
+		for (const decoration of this.inlineDecorations) {
+			let start = text.indexOf(decoration.text);
+			while (start >= 0) {
+				const end = start + decoration.text.length;
+				if (cursor >= start && cursor <= end) return decoration.id;
+				start = text.indexOf(decoration.text, end);
+			}
+		}
+		return undefined;
 	}
 
 	getPaddingX(): number {
@@ -467,6 +573,16 @@ export class Editor implements Component, Focusable {
 
 	private navigateHistory(direction: 1 | -1): void {
 		this.lastAction = null;
+		if (this.onHistoryNavigate) {
+			const result = this.onHistoryNavigate(direction === -1 ? "up" : "down", this.getText());
+			if (!result) return;
+			this.externalHistoryActive = result.active;
+			// Recalled prompts are drafts ready to continue editing. Place the
+			// caret at the end in both directions, matching shell and agent
+			// composers instead of forcing an extra End/Right keypress.
+			this.setTextInternal(result.text, "end");
+			return;
+		}
 		if (this.history.length === 0) return;
 
 		const newIndex = this.historyIndex - direction; // Up(-1) increases index, Down(1) decreases
@@ -500,6 +616,7 @@ export class Editor implements Component, Focusable {
 	private exitHistoryBrowsing(): void {
 		this.historyIndex = -1;
 		this.historyDraft = null;
+		this.externalHistoryActive = false;
 	}
 
 	/** Internal setText that doesn't reset history state - used by navigateHistory */
@@ -521,6 +638,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	render(width: number): string[] {
+		this.inlineHitTargets = [];
 		// A complete box consumes one column on each side. At widths below three
 		// cells there is no room for both sides and an editable cursor cell, so the
 		// legacy horizontal geometry remains the only representable layout.
@@ -643,7 +761,36 @@ export class Editor implements Component, Focusable {
 			let cursorInPadding = false;
 			const linePrompt = this.scrollOffset + visibleIndex === 0 ? prompt : " ".repeat(promptWidth);
 
-			// Add cursor if this line has it
+			const activeInlineId = this.getActiveInlineDecorationId();
+			const decorateInlineTokens = (source: string): string => {
+				let output = "";
+				let offset = 0;
+				while (offset < source.length) {
+					let match: { decoration: EditorInlineDecoration; start: number } | undefined;
+					for (const decoration of this.inlineDecorations) {
+						const start = source.indexOf(decoration.text, offset);
+						if (start < 0) continue;
+						if (!match || start < match.start || (start === match.start && decoration.text.length > match.decoration.text.length)) {
+							match = { decoration, start };
+						}
+					}
+					if (!match) {
+						output += source.slice(offset);
+						break;
+					}
+					output += source.slice(offset, match.start);
+					output += match.decoration.style(match.decoration.text, {
+						focused: activeInlineId === match.decoration.id,
+						hovered: this.hoveredInlineDecorationId === match.decoration.id,
+					});
+					offset = match.start + match.decoration.text.length;
+				}
+				return output;
+			};
+
+			// Add cursor if this line has it. Inline tokens are atomic, so a
+			// focused token is painted as a unit and the hardware marker sits at
+			// its boundary instead of splitting its ANSI-styled label.
 			if (layoutLine.hasCursor && layoutLine.cursorPos !== undefined) {
 				const before = displayText.slice(0, layoutLine.cursorPos);
 				const after = displayText.slice(layoutLine.cursorPos);
@@ -651,14 +798,33 @@ export class Editor implements Component, Focusable {
 				// Hardware cursor marker (zero-width, emitted before fake cursor for IME positioning)
 				const marker = emitCursorMarker ? CURSOR_MARKER : "";
 
-				if (after.length > 0) {
+				const focusedDecoration = this.inlineDecorations.find((item) => item.id === activeInlineId);
+				const focusedStart = focusedDecoration ? displayText.indexOf(focusedDecoration.text) : -1;
+				const cursorTouchesFocused = focusedDecoration && focusedStart >= 0
+					&& layoutLine.cursorPos >= focusedStart
+					&& layoutLine.cursorPos <= focusedStart + focusedDecoration.text.length;
+				if (cursorTouchesFocused && focusedDecoration) {
+					if (layoutLine.cursorPos <= focusedStart) {
+						displayText = decorateInlineTokens(before) + marker + decorateInlineTokens(after);
+					} else if (after.length > 0) {
+						const afterGraphemes = [...this.segment(after, "grapheme")];
+						const firstGrapheme = afterGraphemes[0]?.segment || "";
+						displayText = decorateInlineTokens(before)
+							+ marker
+							+ `\x1b[7m${firstGrapheme}\x1b[0m`
+							+ decorateInlineTokens(after.slice(firstGrapheme.length));
+					} else {
+						displayText = decorateInlineTokens(before) + marker + "\x1b[7m \x1b[0m";
+						lineVisibleWidth += 1;
+					}
+				} else if (after.length > 0) {
 					// Cursor is on a character (grapheme) - replace it with highlighted version
 					// Get the first grapheme from 'after'
 					const afterGraphemes = [...this.segment(after, "grapheme")];
 					const firstGrapheme = afterGraphemes[0]?.segment || "";
 					const restAfter = after.slice(firstGrapheme.length);
 					const cursor = `\x1b[7m${firstGrapheme}\x1b[0m`;
-					displayText = before + marker + cursor + restAfter;
+					displayText = decorateInlineTokens(before) + marker + cursor + decorateInlineTokens(restAfter);
 					// lineVisibleWidth stays the same - we're replacing, not adding
 				} else {
 					// Cursor is at the end - add highlighted space
@@ -672,12 +838,29 @@ export class Editor implements Component, Focusable {
 					const placeholder = showPlaceholder
 						? sliceByColumn(hint!.placeholder!, 0, Math.max(0, editableWidth - lineVisibleWidth - 1), true)
 						: "";
-					displayText = before + marker + cursor + this.theme.selectList.description(placeholder);
+					displayText = decorateInlineTokens(before) + marker + cursor + this.theme.selectList.description(placeholder);
 					lineVisibleWidth = lineVisibleWidth + 1 + visibleWidth(placeholder);
 					// If cursor overflows content width into the padding, flag it
 					if (lineVisibleWidth > editableWidth && paddingX > 0) {
 						cursorInPadding = true;
 					}
+				}
+			} else displayText = decorateInlineTokens(displayText);
+
+			const editorRow = result.length;
+			for (const decoration of this.inlineDecorations) {
+				let start = layoutLine.text.indexOf(decoration.text);
+				while (start >= 0) {
+					const xStart = (boxed ? 1 : 0) + paddingX + promptWidth + visibleWidth(layoutLine.text.slice(0, start));
+					const sourceOffset = this.getText().indexOf(decoration.text);
+					this.inlineHitTargets.push({
+						id: decoration.id,
+						xStart,
+						xEnd: xStart + visibleWidth(decoration.text),
+						y: editorRow,
+						cursorOffset: Math.max(0, sourceOffset) + decoration.text.length,
+					});
+					start = layoutLine.text.indexOf(decoration.text, start + decoration.text.length);
 				}
 			}
 
@@ -703,8 +886,37 @@ export class Editor implements Component, Focusable {
 		return result;
 	}
 
+	handleMouse(event: import("../tui.ts").TuiMouseEvent): boolean {
+		if (event.kind === "leave") {
+			if (!this.hoveredInlineDecorationId) return false;
+			this.hoveredInlineDecorationId = undefined;
+			return true;
+		}
+		const hit = this.inlineHitTargets.find((target) => (
+			target.y === event.y && event.x >= target.xStart && event.x < target.xEnd
+		));
+		if (event.kind === "move") {
+			const next = hit?.id;
+			if (next === this.hoveredInlineDecorationId) return false;
+			this.hoveredInlineDecorationId = next;
+			return true;
+		}
+		if (!hit || event.release || (event.button & 3) !== 0) return false;
+		this.setCursorOffset(hit.cursorOffset);
+		this.tui.setFocus(this);
+		if (event.clickCount === 2) this.onInlineDecorationActivate?.(hit.id);
+		return true;
+	}
+
 	handleInput(data: string): void {
 		const kb = getKeybindings();
+		if (kb.matches(data, "tui.input.submit")) {
+			const inlineId = this.getCursorInlineDecorationId();
+			if (inlineId && this.onInlineDecorationActivate) {
+				this.onInlineDecorationActivate(inlineId);
+				return;
+			}
+		}
 
 		// Handle character jump mode (awaiting next character to jump to)
 		if (this.jumpMode !== null) {
@@ -739,7 +951,8 @@ export class Editor implements Component, Focusable {
 			const endIndex = this.pasteBuffer.indexOf("\x1b[201~");
 			if (endIndex !== -1) {
 				const pasteContent = this.pasteBuffer.substring(0, endIndex);
-				if (pasteContent.length > 0) {
+				const intercepted = this.onPaste?.(pasteContent) === true;
+				if (!intercepted && pasteContent.length > 0) {
 					this.handlePaste(pasteContent);
 				}
 				this.isInPaste = false;
@@ -964,7 +1177,7 @@ export class Editor implements Component, Focusable {
 		if (kb.matches(data, "tui.editor.cursorUp")) {
 			if (
 				this.isOnFirstVisualLine() &&
-				(this.isEditorEmpty() || this.historyIndex > -1 || this.state.cursorCol === 0)
+				(this.isEditorEmpty() || this.historyIndex > -1 || this.externalHistoryActive || this.state.cursorCol === 0)
 			) {
 				this.navigateHistory(-1);
 			} else if (this.isOnFirstVisualLine()) {
@@ -976,7 +1189,7 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorDown")) {
-			if (this.historyIndex > -1 && this.isOnLastVisualLine()) {
+			if ((this.historyIndex > -1 || this.externalHistoryActive) && this.isOnLastVisualLine()) {
 				this.navigateHistory(1);
 			} else if (this.isOnLastVisualLine()) {
 				// Already at bottom - jump to end of line
@@ -1148,6 +1361,67 @@ export class Editor implements Component, Focusable {
 
 	getCursor(): { line: number; col: number } {
 		return { line: this.state.cursorLine, col: this.state.cursorCol };
+	}
+
+	/** Absolute UTF-16 offset of the cursor in getText(). */
+	getCursorOffset(): number {
+		let offset = 0;
+		for (let line = 0; line < this.state.cursorLine; line++) {
+			offset += (this.state.lines[line]?.length ?? 0) + 1;
+		}
+		return offset + this.state.cursorCol;
+	}
+
+	private setCursorOffset(offset: number): void {
+		let remaining = Math.max(0, Math.min(offset, this.getText().length));
+		let line = 0;
+		while (line < this.state.lines.length - 1) {
+			const length = this.state.lines[line]?.length ?? 0;
+			if (remaining <= length) break;
+			remaining -= length + 1;
+			line += 1;
+		}
+		this.state.cursorLine = line;
+		this.setCursorCol(Math.min(remaining, this.state.lines[line]?.length ?? 0));
+	}
+
+	/**
+	 * Replace a text range while preserving the user's cursor relative to the
+	 * edit. This is primarily useful for asynchronous application-owned paste
+	 * placeholders: the user can keep typing while the placeholder is resolved.
+	 */
+	replaceRange(start: number, end: number, replacement: string): void {
+		const current = this.getText();
+		const from = Math.max(0, Math.min(start, current.length));
+		const to = Math.max(from, Math.min(end, current.length));
+		const normalized = this.normalizeText(replacement);
+		const next = current.slice(0, from) + normalized + current.slice(to);
+		if (next === current) return;
+
+		this.cancelAutocomplete();
+		this.pushUndoSnapshot();
+		this.lastAction = null;
+		this.exitHistoryBrowsing();
+
+		const cursor = this.getCursorOffset();
+		const nextCursor = cursor <= from
+			? cursor
+			: cursor >= to
+				? cursor + normalized.length - (to - from)
+				: from + normalized.length;
+		this.state.lines = next.split("\n");
+		let remaining = Math.max(0, Math.min(nextCursor, next.length));
+		let cursorLine = 0;
+		while (cursorLine < this.state.lines.length - 1) {
+			const width = this.state.lines[cursorLine]?.length ?? 0;
+			if (remaining <= width) break;
+			remaining -= width + 1;
+			cursorLine++;
+		}
+		this.state.cursorLine = cursorLine;
+		this.setCursorCol(Math.min(remaining, this.state.lines[cursorLine]?.length ?? 0));
+		this.scrollOffset = 0;
+		if (this.onChange) this.onChange(this.getText());
 	}
 
 	setText(text: string): void {
@@ -1403,6 +1677,7 @@ export class Editor implements Component, Focusable {
 	private submitValue(): void {
 		this.cancelAutocomplete();
 		const result = this.expandPasteMarkers(this.state.lines.join("\n")).trim();
+		if (this.onBeforeSubmit) this.onBeforeSubmit(result);
 
 		this.state = { lines: [""], cursorLine: 0, cursorCol: 0 };
 		this.pastes.clear();
@@ -1652,11 +1927,13 @@ export class Editor implements Component, Focusable {
 
 	private moveToLineStart(): void {
 		this.lastAction = null;
+		this.onCursorMove?.();
 		this.setCursorCol(0);
 	}
 
 	private moveToLineEnd(): void {
 		this.lastAction = null;
+		this.onCursorMove?.();
 		const currentLine = this.state.lines[this.state.cursorLine] || "";
 		this.setCursorCol(currentLine.length);
 	}
@@ -1936,6 +2213,7 @@ export class Editor implements Component, Focusable {
 
 	private moveCursor(deltaLine: number, deltaCol: number): void {
 		this.lastAction = null;
+		this.onCursorMove?.();
 		const visualLines = this.buildVisualLineMap(this.lastWidth);
 		const currentVisualLine = this.findCurrentVisualLine(visualLines);
 

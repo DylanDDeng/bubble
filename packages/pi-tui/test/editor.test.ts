@@ -1958,6 +1958,76 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.getText(), "hello| world");
 		});
 
+		it("delivers empty bracketed paste to the application interceptor", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const received: string[] = [];
+			editor.onPaste = (text) => {
+				received.push(text);
+				return true;
+			};
+
+			editor.handleInput("\x1b[200~\x1b[201~");
+
+			assert.deepStrictEqual(received, [""]);
+			assert.strictEqual(editor.getText(), "");
+		});
+
+		it("keeps native text paste when the application declines interception", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.onPaste = () => false;
+
+			editor.handleInput("\x1b[200~plain text\x1b[201~");
+
+			assert.strictEqual(editor.getText(), "plain text");
+		});
+
+		it("uses external structured history in both directions", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const entries = ["[Image #1] most recent", "[Image #2] older"];
+			let index: number | null = null;
+			editor.onHistoryNavigate = (direction) => {
+				if (direction === "up" && index === null) {
+					index = 0;
+					return { text: entries[index], active: true };
+				}
+				if (direction === "up" && index === 0) {
+					index = 1;
+					return { text: entries[index], active: true };
+				}
+				if (direction === "down" && index === 1) {
+					index = 0;
+					return { text: entries[index], active: true };
+				}
+				if (direction === "down" && index === 0) {
+					index = null;
+					return { text: "", active: false };
+				}
+				return undefined;
+			};
+
+			editor.handleInput("\x1b[A");
+			assert.strictEqual(editor.getText(), entries[0]);
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: entries[0].length });
+			editor.handleInput("\x1b[A");
+			assert.strictEqual(editor.getText(), entries[1]);
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: entries[1].length });
+			editor.handleInput("\x1b[B");
+			assert.strictEqual(editor.getText(), entries[0]);
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: entries[0].length });
+			editor.handleInput("\x1b[B");
+			assert.strictEqual(editor.getText(), "");
+		});
+
+		it("replaces an async placeholder without moving a later cursor", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.setText("[Reading image] later text");
+
+			editor.replaceRange(0, "[Reading image]".length, "[Image #1]");
+
+			assert.strictEqual(editor.getText(), "[Image #1] later text");
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: "[Image #1] later text".length });
+		});
+
 		it("does not trigger autocomplete during single-line paste", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 			let suggestionCalls = 0;
@@ -4488,6 +4558,36 @@ describe("Editor component", () => {
 			editor.handleInput("\r");
 
 			assert.strictEqual(submitted, pastedText);
+		});
+
+		it("treats application inline decorations as atomic interactive chips", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const states: Array<{ focused: boolean; hovered: boolean }> = [];
+			const activated: string[] = [];
+			editor.setText("[Image #1] note");
+			editor.setInlineDecorations([{
+				id: "image-1",
+				text: "[Image #1]",
+				style: (text, state) => {
+					states.push(state);
+					return `<${text}>`;
+				},
+			}]);
+			editor.onInlineDecorationActivate = (id) => activated.push(id);
+
+			editor.handleInput("\x01"); // line start
+			editor.handleInput("\x1b[C"); // one move crosses the complete chip
+			assert.strictEqual(editor.getCursorOffset(), "[Image #1]".length);
+			assert.strictEqual(editor.getActiveInlineDecorationId(), "image-1");
+			editor.render(40);
+			assert.ok(states.some((state) => state.focused));
+
+			editor.handleInput("\r");
+			assert.deepStrictEqual(activated, ["image-1"]);
+			assert.strictEqual(editor.getText(), "[Image #1] note");
+
+			editor.handleInput("\x7f");
+			assert.strictEqual(editor.getText(), " note");
 		});
 	});
 });

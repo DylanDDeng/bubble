@@ -5,6 +5,58 @@ import type { DisplayMessage } from "../tui/model/display-history.js";
 import type { StreamingTailState } from "../tui/components/streaming-message.js";
 
 describe("fullscreen working trace", () => {
+  it("renders settled assistant Markdown in fullscreen without source heading markers", async () => {
+    const terminal = new VirtualTerminal(80, 24);
+    const messages: DisplayMessage[] = [{
+      key: "assistant-markdown",
+      role: "assistant",
+      content: [
+        "### 对话内容",
+        "",
+        "| 风格定位 | 推荐表达 |",
+        "| --- | --- |",
+        "| 更 local | Example |",
+        "",
+        "### 总结",
+        "",
+        "这是 **Markdown** 正文。",
+      ].join("\n"),
+    }];
+    const controller = {
+      subscribe: () => () => {},
+      getTranscript: () => messages,
+      isRunning: () => false,
+      getStreamingTail: () => null,
+      getCommandActivity: () => null,
+      appendDisplayMessage: () => {},
+      runTurn: async () => {},
+    };
+    const app = new FullscreenApp({
+      controller: controller as never,
+      agent: {
+        model: "test-model",
+        mode: "default",
+        setMode: () => {},
+        getContextUsageSnapshot: () => ({ usedTokens: 0, contextWindow: 1_000 }),
+      } as never,
+      onExit: () => {},
+      onCommand: () => {},
+      terminal,
+    });
+
+    app.start();
+    await terminal.waitForRender();
+    const viewport = terminal.getViewport().join("\n");
+    expect(viewport).toContain("对话内容");
+    expect(viewport).toContain("总结");
+    expect(viewport).not.toContain("### 对话内容");
+    expect(viewport).not.toContain("### 总结");
+    expect(viewport).toMatch(/│\s*风格定位\s*│\s*推荐表达\s*│/u);
+    expect(viewport).not.toContain("| --- | --- |");
+
+    app.dispose();
+  });
+
   it("renders Grok-style Compacting and Cancelling states in the shared activity lane", async () => {
     const terminal = new VirtualTerminal(64, 10);
     const listeners: Array<() => void> = [];

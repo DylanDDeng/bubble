@@ -93,6 +93,41 @@ describe("ResponsiveTranscriptComponent projection cache", () => {
     expect(onTraceAction).toHaveBeenCalledWith({ kind: "open-subagent", subAgentId: "child-1" });
   });
 
+  it("renders sent images as interactive chips and opens them on click", () => {
+    const interaction = new TraceInteractionState();
+    const onTraceAction = vi.fn();
+    const messages: readonly DisplayMessage[] = [{
+      key: "user-image",
+      role: "user",
+      content: "[Image #1] inspect this",
+      images: [{
+        label: "[Image #1]",
+        base64: "YQ==",
+        mediaType: "image/png",
+        bytes: 1,
+        dataUrl: "data:image/png;base64,YQ==",
+      }],
+    }];
+    const component = new ResponsiveTranscriptComponent(
+      () => ({ messages, options: { traceInteraction: interaction } }),
+      { onTraceAction },
+    );
+    const rows = component.render(80);
+    const row = rows.findIndex((line) => line.includes("[Image #1]"));
+
+    expect(row).toBeGreaterThanOrEqual(0);
+    expect(rows[row]).toContain("[Image #1] inspect this");
+    expect(rows.join("\n")).not.toContain("└ [Image #1]");
+    expect(rows.join("\n")).not.toContain("▣");
+    component.handleMouse({ kind: "move", button: 35, release: false, clickCount: 1, x: 8, y: row } as never);
+    component.handleMouse({ kind: "press", button: 0, release: false, clickCount: 1, x: 8, y: row } as never);
+    expect(onTraceAction).toHaveBeenCalledWith({
+      kind: "open-image",
+      messageKey: "user-image",
+      imageLabel: "[Image #1]",
+    });
+  });
+
   it("reconstructs a persisted session summary as an inspectable Compact entry", () => {
     const messages = reconstructDisplayMessages([
       { role: "system", content: "Bubble system prompt" },
@@ -107,5 +142,50 @@ describe("ResponsiveTranscriptComponent projection cache", () => {
       compactionSummary: "Goal: preserve auth",
     });
     expect(messages[1]).toMatchObject({ role: "user", content: "continue" });
+  });
+
+  it("reconstructs persisted multimedia user turns with stable image labels", () => {
+    const messages = reconstructDisplayMessages([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "first image" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,YQ==" } },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "two more" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,Yg==" } },
+          { type: "image_url", image_url: { url: "data:image/png;base64,Yw==" } },
+        ],
+      },
+    ]);
+
+    expect(messages[0]?.content).toContain("[Image #1]");
+    expect(messages[0]?.images?.[0]).toMatchObject({
+      label: "[Image #1]",
+      mediaType: "image/png",
+      bytes: 1,
+    });
+    expect(messages[0]?.content).not.toContain("(multimedia)");
+    expect(messages[1]?.content).toContain("└ [Image #2]\n└ [Image #3]");
+  });
+
+  it("restores the exact inline chip position from persisted user UI metadata", () => {
+    const messages = reconstructDisplayMessages([{
+      role: "user",
+      content: [
+        { type: "image_url", image_url: { url: "data:image/png;base64,YQ==" } },
+        { type: "text", text: "这在干嘛" },
+      ],
+      ui: { displayText: "[Image #4] 这在干嘛", imageDisplayStart: 4 },
+    }]);
+
+    expect(messages[0]).toMatchObject({
+      content: "[Image #4] 这在干嘛",
+      images: [{ label: "[Image #4]" }],
+    });
   });
 });

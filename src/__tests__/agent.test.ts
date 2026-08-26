@@ -85,6 +85,31 @@ describe("Agent", () => {
     expect(agent.messages).toHaveLength(2); // user + assistant (no system prompt in this test)
   });
 
+  it("persists local user presentation metadata for transcript reconstruction", async () => {
+    const provider = createMockProvider([[{ type: "text", content: "Done" }, { type: "done" }]]);
+    const appended: Message[] = [];
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [],
+      onMessageAppend: (message) => appended.push(message),
+    });
+
+    await collectEvents(agent, "inspect it", "/tmp", {
+      userMessageUi: { displayText: "[Image #4] inspect it", imageDisplayStart: 4 },
+    });
+
+    expect(agent.messages[0]).toMatchObject({
+      role: "user",
+      content: "inspect it",
+      ui: { displayText: "[Image #4] inspect it", imageDisplayStart: 4 },
+    });
+    expect(appended[0]).toMatchObject({
+      role: "user",
+      ui: { displayText: "[Image #4] inspect it", imageDisplayStart: 4 },
+    });
+  });
+
   it("carries the persistent memory prompt into the model-switch prompt options", () => {
     const provider = createMockProvider([]);
     const agent = new Agent({

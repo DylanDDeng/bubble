@@ -626,6 +626,62 @@ describe("BubbleTuiController headless session", () => {
     expect(controller.getTranscript()).toContainEqual(expect.objectContaining({ content: "next answer" }));
   });
 
+  it("preserves image bytes while a running turn queues the next payload", async () => {
+    const host = new SpyHost();
+    let release!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const entered = new Promise<void>((resolve) => { started = resolve; });
+    const runInputs: unknown[] = [];
+    const agent = {
+      messages: [],
+      setSessionID: () => {},
+      async *run(input: unknown): AsyncIterable<AgentEvent> {
+        runInputs.push(input);
+        if (runInputs.length === 1) {
+          started();
+          await gate;
+        }
+        yield { type: "turn_end" };
+      },
+    };
+    const controller = new BubbleTuiController({
+      agent: agent as never,
+      sessionManager: { getSessionFile: () => "/s.jsonl", getMetadata: () => ({}), appendMessage: () => {} } as never,
+      ports: host.ports,
+    });
+
+    const first = controller.runTurn("first", "/cwd");
+    await entered;
+    controller.queueInput({
+      text: "inspect it",
+      displayText: "[Image #1] inspect it",
+      images: [{
+        base64: "YWJj",
+        mediaType: "image/png",
+        bytes: 3,
+        dataUrl: "data:image/png;base64,YWJj",
+      }],
+      imageDisplayStart: 1,
+    });
+    expect(controller.queuedInputCount()).toBe(1);
+    expect(controller.getTranscript()).toContainEqual(expect.objectContaining({
+      role: "user",
+      inputStatus: "queued",
+      content: "[Image #1] inspect it",
+    }));
+
+    release();
+    await first;
+
+    expect(runInputs).toHaveLength(2);
+    expect(runInputs[1]).toEqual([
+      { type: "image_url", image_url: { url: "data:image/png;base64,YWJj" } },
+      { type: "text", text: "inspect it" },
+    ]);
+    expect(controller.queuedInputCount()).toBe(0);
+  });
+
   it("aborts the real Agent signal, drops pending steers, and atomically settles an interrupt", async () => {
     const host = new SpyHost();
     let started!: () => void;

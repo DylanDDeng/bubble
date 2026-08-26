@@ -156,6 +156,59 @@ export function buildImageContentParts(promptText: string, attachments: ImageAtt
   ];
 }
 
+/**
+ * Convert the composer's inline [Image #N] chips into ordered multimodal
+ * content. The labels remain UI-only, while each image reaches the provider at
+ * the same position the user chose in the draft.
+ */
+export function buildImageContentPartsFromDisplayText(
+  displayText: string,
+  promptText: string,
+  attachments: ImageAttachment[],
+  labelStart = 1,
+): ContentPart[] {
+  const byLabel = new Map<string, ImageAttachment>(
+    attachments.map((attachment, index) => [`[Image #${labelStart + index}]`, attachment] as const),
+  );
+  const parts: ContentPart[] = [];
+  const used = new Set<string>();
+  let cursor = 0;
+
+  while (cursor < displayText.length) {
+    let nextLabel: string | undefined;
+    let nextIndex = -1;
+    for (const label of byLabel.keys()) {
+      if (used.has(label)) continue;
+      const index = displayText.indexOf(label, cursor);
+      if (index >= 0 && (nextIndex < 0 || index < nextIndex)) {
+        nextLabel = label;
+        nextIndex = index;
+      }
+    }
+    if (!nextLabel || nextIndex < 0) break;
+
+    const before = displayText.slice(cursor, nextIndex).trim();
+    if (before) parts.push({ type: "text", text: before });
+    parts.push({ type: "image_url", image_url: { url: byLabel.get(nextLabel)!.dataUrl } });
+    used.add(nextLabel);
+    cursor = nextIndex + nextLabel.length;
+  }
+
+  const after = displayText.slice(cursor).trim();
+  if (after) parts.push({ type: "text", text: after });
+  for (const [label, attachment] of byLabel) {
+    if (!used.has(label)) {
+      parts.push({ type: "image_url", image_url: { url: attachment.dataUrl } });
+    }
+  }
+
+  if (used.size === 0) return buildImageContentParts(promptText, attachments);
+  if (!parts.some((part) => part.type === "text")) {
+    parts.unshift({ type: "text", text: promptText.trim() || defaultImagePrompt(attachments.length) });
+  }
+  return parts;
+}
+
 export function formatImageDisplayInput(promptText: string, attachments: ImageAttachment[], labelStart = 1): string {
   const text = promptText.trim() || defaultImagePrompt(attachments.length);
   const imageLines = attachments.map((attachment, index) => imageAttachmentReference(attachment, labelStart + index));

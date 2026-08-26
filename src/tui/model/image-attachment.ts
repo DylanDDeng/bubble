@@ -9,3 +9,8 @@ export interface ImageAttachment {
   filename?: string;
   sourcePath?: string;
 }
+
+/** Image state retained by a rendered user message after composer submit. */
+export interface DisplayImageAttachment extends ImageAttachment {
+  label: string;
+}

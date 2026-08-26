@@ -2,9 +2,12 @@ import type { TraceGroup } from "./trace-groups.js";
 
 export type TraceRowTarget =
   | { kind: "group"; key: string; groupKey: string; foldable: boolean; action?: TraceAction }
-  | { kind: "item"; key: string; groupKey: string; toolId: string; foldable: boolean; action?: TraceAction };
+  | { kind: "item"; key: string; groupKey: string; toolId: string; foldable: boolean; action?: TraceAction }
+  | { kind: "image"; key: string; groupKey: string; imageLabel: string; foldable: false; action: TraceAction };
 
-export type TraceAction = { kind: "open-subagent"; subAgentId: string };
+export type TraceAction =
+  | { kind: "open-subagent"; subAgentId: string }
+  | { kind: "open-image"; messageKey: string; imageLabel: string };
 
 /**
  * UI-only fold/selection state. Tool lifecycle data remains immutable in the
@@ -61,7 +64,8 @@ export class TraceInteractionState {
     this.selectedKey = target.key;
     this.selectedGroupKey = target.groupKey;
     let foldChanged = false;
-    if (clickCount === 2 && target.action) {
+    const actionClickCount = target.kind === "image" ? 1 : 2;
+    if (clickCount === actionClickCount && target.action) {
       if (selectionChanged) this.revision += 1;
       return target.action;
     }
@@ -72,7 +76,7 @@ export class TraceInteractionState {
     if (target.kind === "group") {
       this.toggle(this.expandedGroups, target.groupKey);
       foldChanged = true;
-    } else {
+    } else if (target.kind === "item") {
       this.toggle(this.expandedItems, target.key);
       foldChanged = true;
     }

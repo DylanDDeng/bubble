@@ -57,9 +57,12 @@ import {
   type SubagentGroup,
 } from "../model/subagent-view.js";
 import { reconstructDisplayMessages } from "../model/display-reconstruct.js";
+import type { SubmitPayload } from "../model/composer-types.js";
+import { buildImageContentParts, buildImageContentPartsFromDisplayText } from "../model/image-paste.js";
+import { displayImagesFromPayload, formatImageUserDisplayText } from "../image-display.js";
 import { GoalRuntimeController } from "./goal-runtime-controller.js";
 import { executeRewind, type RewindExecutionResult, type RewindScope } from "../../rewind.js";
-import type { Message } from "../../types.js";
+import type { ContentPart, Message } from "../../types.js";
 
 export interface TuiExitSummary {
   reason: string;
@@ -98,6 +101,12 @@ export interface CommandActivity {
   startedAt: number;
 }
 
+function isSubmitPayload(value: unknown): value is SubmitPayload {
+  if (!value || typeof value !== "object") return false;
+  const payload = value as Partial<SubmitPayload>;
+  return typeof payload.text === "string" && Array.isArray(payload.images);
+}
+
 export class BubbleTuiController {
   private readonly state = new ControllerState();
   private readonly listeners = new Set<(version: number) => void>();
@@ -118,7 +127,6 @@ export class BubbleTuiController {
   private activeInputController: AgentRunInputQueue | null = null;
   private activeAbortController: AbortController | null = null;
   private commandActivity: (CommandActivity & { abortController: AbortController }) | null = null;
-  private readonly queuedAfterRun: Array<{ content: string; displayKey: string }> = [];
   /** False after a provider turn commits, so settled and live rows never coexist. */
   private liveStreamVisible = false;
   private readonly backgroundTaskUnsubscribe?: () => void;
@@ -149,7 +157,7 @@ export class BubbleTuiController {
         this.sessionManager = manager;
         this.deps.ports.flush.cancelFlush();
         this.transcript = transcript;
-        this.queuedAfterRun.length = 0;
+        this.queue.queued.length = 0;
         this.liveStreamVisible = false;
         this.runState = null;
         this.activeInputController = null;
@@ -164,7 +172,7 @@ export class BubbleTuiController {
         store: deps.goalStore,
         getSessionManager: () => this.sessionManager,
         isRunActive: () => this.isBusy(),
-        queuedInputs: () => this.queuedAfterRun.length,
+        queuedInputs: () => this.queue.queued.length,
         isDisposed: () => this.disposed,
         startRun: (input, cwd) => {
           void this.runTurn(input, cwd, { goalRun: true });
@@ -332,7 +340,7 @@ export class BubbleTuiController {
     if (scope !== "code") {
       this.state.withTransaction(() => {
         purgeForSessionSwitch(this.queue);
-        this.queuedAfterRun.length = 0;
+        this.queue.queued.length = 0;
         this.transcript = reconstructDisplayMessages([...this.deps.agent.messages]);
         this.liveSubagentTools.clear();
         this.childRuns.clear();
@@ -403,29 +411,42 @@ export class BubbleTuiController {
   /** Queue composer input while a command owns the pane. Grok keeps the
    * composer available during Compact; the message starts after the command
    * reaches its terminal event instead of racing the history rewrite. */
-  queueAfterCommand(content: string): boolean {
+  queueAfterCommand(input: string | SubmitPayload): boolean {
     if (!this.commandActivity) return false;
+    this.queueInput(input);
+    return true;
+  }
+
+  /** Queue a complete composer payload for the next provider turn. */
+  queueInput(input: string | SubmitPayload): void {
+    const payload = typeof input === "string" ? { text: input, images: [] } : input;
     const displayKey = nextDisplayMessageKey("queued");
-    this.queuedAfterRun.push({ content, displayKey });
+    this.queue.queued.push({
+      payload,
+      displayKey,
+      sessionFile: this.sessionManager.getSessionFile(),
+    });
     this.transcript = [...this.transcript, {
       key: displayKey,
       role: "user",
-      content,
+      content: this.submitDisplayText(payload),
+      images: displayImagesFromPayload(payload),
       inputStatus: "queued",
     }];
     this.state.touch();
     this.notify();
-    return true;
   }
 
   async drainQueuedInputs(cwd: string, agentOptions: AgentRunOptions = {}): Promise<void> {
     if (this.isBusy()) return;
-    const next = this.queuedAfterRun.shift();
+    const next = this.queue.queued.shift();
     if (!next || this.disposed) return;
-    this.transcript = moveStatusMessageToEnd(this.transcript, next.displayKey);
+    if (next.displayKey) {
+      this.transcript = moveStatusMessageToEnd(this.transcript, next.displayKey);
+    }
     this.state.touch();
     this.notify();
-    await this.runTurn(next.content, cwd, agentOptions);
+    await this.runTurn(next.payload, cwd, agentOptions);
   }
 
   pendingSteerCount(): number {
@@ -433,7 +454,27 @@ export class BubbleTuiController {
   }
 
   queuedInputCount(): number {
-    return this.queuedAfterRun.length;
+    return this.queue.queued.length;
+  }
+
+  private submitDisplayText(payload: SubmitPayload): string {
+    return formatImageUserDisplayText(
+      payload.displayText ?? payload.text,
+      payload.images.length,
+      payload.imageDisplayStart,
+    );
+  }
+
+  private submitAgentInput(payload: SubmitPayload): string | ContentPart[] {
+    if (payload.images.length === 0) return payload.text;
+    return payload.displayText
+      ? buildImageContentPartsFromDisplayText(
+          payload.displayText,
+          payload.text,
+          payload.images,
+          payload.imageDisplayStart,
+        )
+      : buildImageContentParts(payload.text, payload.images);
   }
 
   /** Add input to the current Agent run without creating a second run that
@@ -533,8 +574,13 @@ export class BubbleTuiController {
     }
     if (this.runActive) {
       if (typeof input === "string") this.steer(input);
+      else if (isSubmitPayload(input)) {
+        if (input.images.length === 0) this.steer(input.text);
+        else this.queueInput(input);
+      }
       return;
     }
+    const agentInput = isSubmitPayload(input) ? this.submitAgentInput(input) : input;
     this.runActive = true;
     this.liveStreamVisible = true;
     this.runState = createRunState(Date.now());
@@ -544,6 +590,14 @@ export class BubbleTuiController {
     const goalRun = options?.goalRun === true;
     const agentOptions: AgentRunOptions = { ...options };
     delete (agentOptions as TuiAgentRunOptions).goalRun;
+    if (isSubmitPayload(input) && input.images.length > 0 && input.displayText) {
+      agentOptions.userMessageUi = {
+        displayText: input.displayText,
+        ...(input.imageDisplayStart !== undefined
+          ? { imageDisplayStart: input.imageDisplayStart }
+          : {}),
+      };
+    }
     let runUsageTokens = 0;
     let runUsageReported = false;
     this.activeInputController = inputController;
@@ -566,7 +620,7 @@ export class BubbleTuiController {
     let runError: unknown;
     let cancelled = false;
     try {
-      for await (const event of this.deps.agent.run(input as never, cwd, {
+      for await (const event of this.deps.agent.run(agentInput as never, cwd, {
         ...agentOptions,
         abortSignal: abortController.signal,
         inputController,
@@ -604,7 +658,11 @@ export class BubbleTuiController {
           const steer = this.queue.pendingSteers.get(event.id);
           if (steer) {
             this.queue.pendingSteers.delete(event.id);
-            this.queuedAfterRun.push({ content: event.content, displayKey: steer.displayKey });
+            this.queue.queued.push({
+              payload: { text: event.content, images: [] },
+              displayKey: steer.displayKey,
+              sessionFile: steer.sessionFile ?? this.sessionManager.getSessionFile(),
+            });
             this.transcript = this.transcript.map((message) => (
               message.key === steer.displayKey ? setUserInputStatus(message, "queued") : message
             ));
@@ -695,7 +753,11 @@ export class BubbleTuiController {
         if (cancelled) {
           this.transcript = this.transcript.filter((message) => message.key !== steer.displayKey);
         } else {
-          this.queuedAfterRun.push({ content: leftover.content, displayKey: steer.displayKey });
+          this.queue.queued.push({
+            payload: { text: leftover.content, images: [] },
+            displayKey: steer.displayKey,
+            sessionFile: steer.sessionFile ?? this.sessionManager.getSessionFile(),
+          });
           this.transcript = this.transcript.map((message) => (
             message.key === steer.displayKey ? setUserInputStatus(message, "queued") : message
           ));

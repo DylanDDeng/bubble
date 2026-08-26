@@ -7,9 +7,11 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTui, type PtySession } from "./pty-harness.js";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 
 mkdirSync(new URL("../../../.e2e-tmp/bubble-home", import.meta.url).pathname, { recursive: true });
+const imageFixture = new URL("../../../.e2e-tmp/paste-fixture.png", import.meta.url).pathname;
+writeFileSync(imageFixture, Buffer.from("small-png-fixture"));
 
 describe.skipIf(process.env.BUBBLE_SKIP_PTY_E2E === "1")("pi-tui app PTY e2e (production entry)", () => {
   let session: PtySession | null = null;
@@ -56,7 +58,9 @@ describe.skipIf(process.env.BUBBLE_SKIP_PTY_E2E === "1")("pi-tui app PTY e2e (pr
 
   it("opens /context as a centered usage panel and returns focus on Esc", async () => {
     session!.write("/context\r");
-    const viewport = await session!.waitForViewport("Context usage", 5_000);
+    // The overlay title can paint one frame before its scrollable body under
+    // full-suite load. Wait for the last context section, not the first chrome.
+    const viewport = await session!.waitForViewport(/Auto-compact (?:at|threshold unavailable)/, 5_000);
     expect(viewport.join("\n")).toContain("Reasoning/overhead");
     expect(viewport.join("\n")).toContain("Tool definitions");
     expect(viewport.join("\n")).toMatch(/Auto-compact (?:at|threshold unavailable)/);
@@ -78,6 +82,34 @@ describe.skipIf(process.env.BUBBLE_SKIP_PTY_E2E === "1")("pi-tui app PTY e2e (pr
     session!.write("\x1b[Z");
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(session!.viewport().join("\n")).not.toContain("bypass permission on");
+  }, 20_000);
+
+  it("turns a bracketed image-path paste into an attachment label", async () => {
+    session!.write(`\x1b[200~${imageFixture}\x1b[201~`);
+    await session!.waitForViewport("[Image #1]", 8_000);
+    const preview = session!.viewport().join("\n");
+    expect(preview).not.toContain("Reading image");
+    expect(preview).toContain("PNG");
+    expect(preview).toContain("Enter to view");
+
+    session!.write("\x1b[D");
+    session!.write("\r");
+    await session!.waitForViewport("Esc close", 5_000);
+    session!.write("\x1b");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    session!.write("\x05"); // Return to the end after opening the chip viewer.
+    session!.write("这在干嘛");
+    await session!.waitForViewport("这在干嘛", 5_000);
+    session!.write("\r");
+    const sent = await session!.waitForViewport("[Image #1] 这在干嘛", 8_000);
+    expect(sent.join("\n")).not.toContain("└ [Image #1]");
+    session!.write("\x1b");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    session!.write("\x1b[A");
+    await session!.waitForViewport("[Image #1] 这在干嘛", 5_000);
+    session!.write("-续写");
+    await session!.waitForViewport("[Image #1] 这在干嘛-续写", 5_000);
+    session!.write("\x15");
   }, 20_000);
 
   it("keeps the composer visible and editable through a resize storm", async () => {

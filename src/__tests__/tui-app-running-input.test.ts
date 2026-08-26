@@ -15,6 +15,126 @@ class RecordingTerminal extends VirtualTerminal {
 }
 
 describe("main pi-tui running input", () => {
+  it("keeps an image chip inline when the composer draft becomes a sent message", async () => {
+    const terminal = new VirtualTerminal(100, 30);
+    const messages: DisplayMessage[] = [];
+    const submitted: unknown[] = [];
+    const controller = {
+      subscribe: () => () => {},
+      getTranscript: () => messages,
+      getSubagentGroups: () => [],
+      getWorkflows: () => [],
+      getBackgroundTasks: () => [],
+      isRunning: () => false,
+      getStreamingTail: () => null,
+      pendingSteerCount: () => 0,
+      queuedInputCount: () => 0,
+      steer: () => false,
+      cancelActiveRun: () => false,
+      runTurn: async (input: unknown) => { submitted.push(input); },
+      appendDisplayMessage: (message: DisplayMessage) => { messages.push(message); },
+      clearTranscript: () => {},
+      shutdown: () => ({ reason: "test", wallMs: 0 }),
+    };
+    const app = new PiTuiApp({
+      agent: {
+        model: "test-model",
+        providerId: "test-provider",
+        thinking: "medium",
+        mode: "default",
+        setMode: () => {},
+        getContextUsageSnapshot: () => ({ usedTokens: 0, contextWindow: 1_000 }),
+      } as never,
+      sessionManager: { getSessionFile: () => "/s.jsonl" } as never,
+      controller: controller as never,
+      callbacks: { onExitRequest: () => {}, onClearTranscript: () => {}, onThemeToggle: () => {} },
+      terminal,
+      readClipboardImage: async () => ({
+        attachment: {
+          base64: "cG5n",
+          mediaType: "image/png",
+          bytes: 3,
+          dataUrl: "data:image/png;base64,cG5n",
+        },
+      }),
+    });
+
+    app.start();
+    try {
+      terminal.sendInput("\x16");
+      await vi.waitFor(() => expect(terminal.getViewport().join("\n")).toContain("[Image #1]"));
+      terminal.sendInput("这在干嘛");
+      await vi.waitFor(() => expect(terminal.getViewport().join("\n")).toContain("这在干嘛"));
+      terminal.sendInput("\r");
+      await vi.waitFor(() => expect(submitted).toHaveLength(1));
+
+      const viewport = terminal.getViewport();
+      expect(viewport.join("\n")).toContain("[Image #1] 这在干嘛");
+      expect(viewport.join("\n")).not.toContain("└ [Image #1]");
+      expect(messages[0]?.content).toBe("[Image #1] 这在干嘛");
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("routes Ctrl+V and reportable Cmd+V to the image clipboard reader", async () => {
+    const terminal = new VirtualTerminal(100, 30);
+    const readClipboardImage = vi.fn(async () => ({
+      attachment: {
+        base64: "cG5n",
+        mediaType: "image/png",
+        bytes: 3,
+        dataUrl: "data:image/png;base64,cG5n",
+        filename: "clipboard.png",
+      },
+    }));
+    const controller = {
+      subscribe: () => () => {},
+      getTranscript: () => [],
+      getSubagentGroups: () => [],
+      getWorkflows: () => [],
+      getBackgroundTasks: () => [],
+      isRunning: () => false,
+      getStreamingTail: () => null,
+      pendingSteerCount: () => 0,
+      queuedInputCount: () => 0,
+      steer: () => false,
+      cancelActiveRun: () => false,
+      runTurn: async () => {},
+      appendDisplayMessage: () => {},
+      clearTranscript: () => {},
+      shutdown: () => ({ reason: "test", wallMs: 0 }),
+    };
+    const app = new PiTuiApp({
+      agent: {
+        model: "test-model",
+        providerId: "test-provider",
+        thinking: "medium",
+        mode: "default",
+        setMode: () => {},
+        getContextUsageSnapshot: () => ({ usedTokens: 0, contextWindow: 1_000 }),
+      } as never,
+      sessionManager: { getSessionFile: () => "/s.jsonl" } as never,
+      controller: controller as never,
+      callbacks: { onExitRequest: () => {}, onClearTranscript: () => {}, onThemeToggle: () => {} },
+      terminal,
+      readClipboardImage,
+    });
+
+    app.start();
+    try {
+      terminal.sendInput("\x16");
+      await vi.waitFor(() => expect(terminal.getViewport().join("\n")).toContain("[Image #1]"));
+
+      // Kitty keyboard protocol encodes Command as the Super modifier (8 + 1).
+      terminal.sendInput("\x1b[118;9u");
+      await vi.waitFor(() => expect(terminal.getViewport().join("\n")).toContain("[Image #2]"));
+      expect(readClipboardImage).toHaveBeenCalledTimes(2);
+    } finally {
+      app.dispose();
+    }
+  });
+
   it("opens the completed subagent inspector by double-clicking its transcript trace", async () => {
     const terminal = new VirtualTerminal(100, 30);
     const member = {

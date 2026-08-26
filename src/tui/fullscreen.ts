@@ -17,6 +17,7 @@ import {
   VStack,
   ScrollView,
   Editor,
+  Markdown,
   matchesKey,
   isKeyRelease,
 } from "@bubblebrain-ai/pi-tui";
@@ -29,6 +30,9 @@ import { getNextPermissionMode } from "../permission/mode.js";
 import type { Agent } from "../agent.js";
 import { COMPOSER_EDITOR_OPTIONS, COMPOSER_EDITOR_THEME } from "./composer-style.js";
 import { TraceInteractionState } from "./model/trace-interaction.js";
+import type { ComposerController } from "./controller/composer-controller.js";
+import { ComposerImagePreviewComponent, ImageViewerComponent } from "./components/image-preview.js";
+import { ASSISTANT_MARKDOWN_THEME } from "./markdown-style.js";
 
 export interface FullscreenAppOptions {
   controller: BubbleTuiController;
@@ -40,6 +44,8 @@ export interface FullscreenAppOptions {
   terminal?: Terminal;
   /** Preserve tool-group folds when switching from the regular renderer. */
   traceInteraction?: TraceInteractionState;
+  /** Shared semantic composer state when transitioning from the main renderer. */
+  composer?: ComposerController;
 }
 
 export class FullscreenApp {
@@ -47,8 +53,14 @@ export class FullscreenApp {
   private readonly transcript: ResponsiveTranscriptComponent;
   private readonly streamingMessage: StreamingMessageComponent;
   private readonly editor: Editor;
+  private readonly composerPreview?: ComposerImagePreviewComponent;
   private readonly footer: ResponsiveFooterComponent;
   private readonly traceInteraction: TraceInteractionState;
+  private readonly markdown = new Markdown("", 0, 0, ASSISTANT_MARKDOWN_THEME);
+  private readonly markdownRenderer = (text: string, width: number): string[] => {
+    this.markdown.setText(text);
+    return this.markdown.render(width);
+  };
   private readonly unsubscribe: () => void;
   private showReasoning = false;
   private verboseTrace = false;
@@ -61,10 +73,23 @@ export class FullscreenApp {
     // Trace hover depends on no-button pointer motion, including inside tmux.
     this.tui = new TuiAltScreen(terminal, undefined, undefined, { mouseMotion: "all" });
     this.editor = new Editor(this.tui, COMPOSER_EDITOR_THEME, COMPOSER_EDITOR_OPTIONS);
-    this.transcript = new ResponsiveTranscriptComponent(() => ({
-      messages: this.options.controller.getTranscript(),
-      options: this.transcriptRenderOptions(),
-    }));
+    this.composerPreview = options.composer
+      ? new ComposerImagePreviewComponent(() => options.composer?.previewAttachment())
+      : undefined;
+    this.transcript = new ResponsiveTranscriptComponent(
+      () => ({
+        messages: this.options.controller.getTranscript(),
+        options: this.transcriptRenderOptions(),
+      }),
+      {
+        onTraceAction: (action) => {
+          if (action.kind !== "open-image") return;
+          const message = this.options.controller.getTranscript().find((candidate) => candidate.key === action.messageKey);
+          const image = message?.images?.find((candidate) => candidate.label === action.imageLabel);
+          if (image) this.openImageViewer(image);
+        },
+      },
+    );
     this.streamingMessage = new StreamingMessageComponent(8, () => this.render());
     this.footer = new ResponsiveFooterComponent(() => ({
       agent: this.options.agent,
@@ -85,13 +110,17 @@ export class FullscreenApp {
     const layout = new VStack([
       { component: scroll, basis: 0, grow: 1, minSize: 0 },
       { component: this.streamingMessage.activityLane, basis: "auto", shrink: 0 },
+      ...(this.composerPreview ? [{ component: this.composerPreview, basis: "auto" as const, shrink: 0 }] : []),
       { component: this.editor, basis: "auto", shrink: 0 },
       { component: this.footer, basis: "auto", shrink: 0 },
     ]);
     this.tui.setLayoutRoot(layout);
     this.tui.setFocus(this.editor);
 
-    this.editor.onSubmit = (text: string) => {
+    if (this.options.composer) {
+      this.options.composer.attachEditor(this.editor);
+      this.options.composer.setOpenImageHandler((image) => this.openImageViewer(image));
+    } else this.editor.onSubmit = (text: string) => {
       const trimmed = text.trim();
       if (!trimmed) return;
       this.editor.addToHistory(trimmed);
@@ -152,6 +181,26 @@ export class FullscreenApp {
     });
   }
 
+  private openImageViewer(image: import("./controller/composer-controller.js").ComposerDraftAttachment | import("./model/image-attachment.js").DisplayImageAttachment): void {
+    let handle: { hide(): void } | undefined;
+    const close = () => {
+      handle?.hide();
+      this.tui.setFocus(this.editor);
+      this.render();
+    };
+    const component = new ImageViewerComponent(image, close, () => this.tui.terminal.rows);
+    handle = this.tui.showOverlay(component, {
+      anchor: "center",
+      width: "70%",
+      minWidth: 36,
+      maxWidth: 110,
+      maxHeight: "85%",
+      margin: 1,
+      dismissOnOutsideClick: true,
+    });
+    this.tui.setFocus(component);
+  }
+
   render(): void {
     if (this.disposed) return;
     const columns = this.tui.terminal.columns || process.stdout.columns || 80;
@@ -190,6 +239,7 @@ export class FullscreenApp {
       showReasoning: this.showReasoning,
       verboseTrace: this.verboseTrace,
       traceInteraction: this.traceInteraction,
+      markdownRenderer: this.markdownRenderer,
       // While running, this separates settled history from the live surface.
       // Once settled, the permanent blank activity lane owns the dock gap.
       trailingSpacer: this.options.controller.isRunning(),

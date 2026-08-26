@@ -9,9 +9,41 @@ import { COMPACTION_SUMMARY_PREFIX } from "../../context/compact.js";
 import { nextDisplayMessageKey, stripInterruptedAssistantMarker, type DisplayMessage, type DisplayToolCall } from "./display-history.js";
 import { synchronizeSubagentSnapshots } from "./subagent-view.js";
 import type { Message } from "../../types.js";
+import { formatImageUserDisplayText, imageAttachmentFromDataUrl, imageDisplayLabel } from "../image-display.js";
+import type { DisplayImageAttachment } from "./image-attachment.js";
+
+function reconstructUserContent(
+  message: import("../../types.js").UserMessage,
+  imageDisplayStart: number,
+): { text: string; images: DisplayImageAttachment[]; nextImageDisplayStart: number } {
+  const { content } = message;
+  if (typeof content === "string") {
+    return { text: content, images: [], nextImageDisplayStart: imageDisplayStart };
+  }
+  const text = content
+    .filter((part): part is import("../../types.js").TextContent => part.type === "text")
+    .map((part) => part.text)
+    .join("\n")
+    .trim();
+  const imageCount = content.filter((part) => part.type === "image_url").length;
+  const labelStart = message.ui?.imageDisplayStart ?? imageDisplayStart;
+  const images = content
+    .filter((part): part is import("../../types.js").ImageContent => part.type === "image_url")
+    .map((part, index) => {
+      const attachment = imageAttachmentFromDataUrl(part.image_url.url);
+      return attachment ? { ...attachment, label: imageDisplayLabel(labelStart + index) } : undefined;
+    })
+    .filter((item): item is DisplayImageAttachment => item !== undefined);
+  return {
+    text: formatImageUserDisplayText(message.ui?.displayText ?? text, imageCount, labelStart),
+    images,
+    nextImageDisplayStart: Math.max(imageDisplayStart, labelStart + imageCount),
+  };
+}
 
 export function reconstructDisplayMessages(agentMessages: Message[]): DisplayMessage[] {
   const result: DisplayMessage[] = [];
+  let nextImageDisplayStart = 1;
   for (const m of agentMessages) {
     if (m.role === "system") {
       const content = typeof m.content === "string" ? m.content : "";
@@ -37,10 +69,13 @@ export function reconstructDisplayMessages(agentMessages: Message[]): DisplayMes
       // them across resume — but they were hidden live and must stay hidden
       // when the transcript is rebuilt.
       if (isInternalBlockOnlyContent(m.content)) continue;
+      const reconstructed = reconstructUserContent(m, nextImageDisplayStart);
+      nextImageDisplayStart = reconstructed.nextImageDisplayStart;
       result.push({
         key: nextDisplayMessageKey("user"),
         role: "user",
-        content: typeof m.content === "string" ? m.content : "(multimedia)",
+        content: reconstructed.text,
+        images: reconstructed.images.length > 0 ? reconstructed.images : undefined,
       });
     } else if (m.role === "assistant") {
       const toolCalls: DisplayToolCall[] = [];

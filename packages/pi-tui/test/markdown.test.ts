@@ -1373,6 +1373,20 @@ bar`,
 	});
 
 	describe("Heading with inline code", () => {
+		it("renders heading hierarchy without leaking source hash markers", () => {
+			for (const source of [
+				"# Heading one",
+				"## Heading two",
+				"### Heading three",
+				"#### Heading four",
+			]) {
+				const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+				const plain = markdown.render(80).map((line) => stripAnsi(line).trimEnd());
+				assert.strictEqual(plain[0], source.replace(/^#+\s+/, ""));
+				assert.ok(!plain[0]!.startsWith("#"));
+			}
+		});
+
 		it("should preserve heading styling after inline code", () => {
 			const markdown = new Markdown("### Why `sourceInfo` should not be optional", 0, 0, defaultMarkdownTheme);
 

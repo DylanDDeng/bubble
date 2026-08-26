@@ -18,6 +18,8 @@ import { DisplayToolCall, DisplayMessage } from "../model/display-history.js";
 import { darkTheme } from "../model/theme.js";
 import { buildTraceGroups, formatTracePath, type TraceGroup } from "../model/trace-groups.js";
 import type { TraceInteractionState, TraceRowTarget } from "../model/trace-interaction.js";
+import { splitImageDisplayContent } from "../image-display.js";
+import type { DisplayImageAttachment } from "../model/image-attachment.js";
 
 function toolTraceLabel(tool: DisplayToolCall): string {
   return tool.name;
@@ -101,6 +103,7 @@ export interface TranscriptTheme {
   hoverBackground?: (text: string) => string;
   /** Persistent surface painted while the tool entry is selected. */
   selectionBackground?: (text: string) => string;
+  imageChip?: (text: string, active: boolean) => string;
 }
 
 export const defaultTranscriptTheme: TranscriptTheme = {
@@ -114,9 +117,11 @@ export const defaultTranscriptTheme: TranscriptTheme = {
   selectionBorder: (text) => chalk.gray(text),
   hoverBackground: (text) => chalk.bgHex(darkTheme.traceHoverBg)(text),
   selectionBackground: (text) => chalk.bgHex(darkTheme.traceSelectedBg)(text),
+  imageChip: (text, active) => chalk.bgHex(active ? "#505050" : "#373737").white(text),
 };
 
 const TRACE_BORDER_MIN_COLUMNS = 4;
+const IMAGE_LABEL_SPACE_SENTINEL = "\uE000";
 const TRACE_CONTENT_LEFT_PAD = 2;
 const TRACE_RESERVED_COLUMNS = 4; // left border + content pad + right border
 // Keep a zero-width row in projection joins without painting a terminal cell.
@@ -128,7 +133,12 @@ function truncateVisible(text: string, maxColumns: number): string {
   return truncateVisual(text, maxColumns);
 }
 
-export function renderUserCard(content: string, options: TranscriptRenderOptions): string[] {
+export function renderUserCard(
+  content: string,
+  options: TranscriptRenderOptions,
+  images: readonly DisplayImageAttachment[] = [],
+  messageKey = "user",
+): string[] {
   const theme = options.theme ?? defaultTranscriptTheme;
   const terminalWidth = Math.max(1, Math.floor(options.columns));
   // Leave two terminal cells unpainted. Painting the physical last column can
@@ -145,7 +155,26 @@ export function renderUserCard(content: string, options: TranscriptRenderOptions
   }
   const textWidth = width - 4; // " › " + trailing pad
 
-  const lines = wrapPlain(content, textWidth);
+  const split = images.length > 0 ? splitImageDisplayContent(content) : undefined;
+  const body = split?.bodyLines.join("\n") ?? content;
+  // Preserve the label's visible width while preventing the generic word
+  // wrapper from splitting `[Image #1]` at its internal ASCII space.
+  const protectedBody = images.reduce(
+    (value, image) => value.replaceAll(
+      image.label,
+      image.label.replaceAll(" ", IMAGE_LABEL_SPACE_SENTINEL),
+    ),
+    body,
+  );
+  const lines = body.length > 0
+    ? wrapPlain(protectedBody, textWidth).map((line) => line.replaceAll(IMAGE_LABEL_SPACE_SENTINEL, " "))
+    : [];
+  if (split) {
+    for (const reference of split.referenceLines) {
+      if (images.some((image) => reference === `└ ${image.label}`)) lines.push(reference);
+      else lines.push(...wrapPlain(reference, textWidth));
+    }
+  }
   const rows: string[] = [];
   const pad = " ".repeat(width);
   rows.push(theme.userBg(pad));
@@ -153,7 +182,18 @@ export function renderUserCard(content: string, options: TranscriptRenderOptions
     // JS length/padEnd counts code units, not terminal cells: CJK characters
     // occupy two columns. Visual padding prevents the line from overflowing,
     // hard-wrapping, and resetting the painted background before the edge.
-    const padded = `${line}${" ".repeat(Math.max(0, textWidth - stringWidth(line)))}`;
+    let renderedLine = line;
+    for (const image of images) {
+      if (!renderedLine.includes(image.label)) continue;
+      const groupKey = `image:${messageKey}:${image.label}`;
+      const chip = (theme.imageChip ?? ((text: string) => text))(
+        image.label,
+        options.traceInteraction?.isGroupHovered(groupKey) === true
+          || options.traceInteraction?.isGroupSelected(groupKey) === true,
+      );
+      renderedLine = renderedLine.replace(image.label, chip);
+    }
+    const padded = `${renderedLine}${" ".repeat(Math.max(0, textWidth - stringWidth(renderedLine)))}`;
     const filled = (index === 0 ? theme.accent(" › ") : "   ") + theme.userText(padded) + " ";
     rows.push(theme.userBg(filled));
   });
@@ -162,6 +202,36 @@ export function renderUserCard(content: string, options: TranscriptRenderOptions
   // removing only the bottom pad shifts every message down by half a row.
   rows.push(theme.userBg(pad));
   return rows;
+}
+
+function projectUserCard(message: DisplayMessage, options: TranscriptRenderOptions): TranscriptProjection {
+  const rows = renderUserCard(message.content, options, message.images ?? [], message.key ?? "user");
+  const targets: Array<TraceRowTarget | undefined> = rows.map(() => undefined);
+  if (!message.images?.length) return { rows, traceTargets: targets };
+
+  // User-card geometry is top padding + wrapped source lines + bottom padding.
+  // Inline chips retain their composer row; legacy reconstructed attachments
+  // may still occupy standalone reference rows.
+  for (let index = 0; index < message.images.length; index += 1) {
+    const image = message.images[index]!;
+    const row = rows.findIndex((line) => line.includes(image.label));
+    // At widths too narrow to show the complete atomic label, do not attach an
+    // action to an unrelated wrapped fragment.
+    if (row <= 0 || row >= rows.length - 1) continue;
+    const messageKey = message.key ?? "user";
+    const groupKey = `image:${messageKey}:${image.label}`;
+    // The current interaction model is row-oriented. If multiple chips share
+    // one row, keep the first stable target rather than changing action order.
+    targets[row] ??= {
+      kind: "image",
+      key: groupKey,
+      groupKey,
+      imageLabel: image.label,
+      foldable: false,
+      action: { kind: "open-image", messageKey, imageLabel: image.label },
+    };
+  }
+  return { rows, traceTargets: targets };
 }
 
 export function wrapPlain(text: string, columns: number): string[] {
@@ -729,7 +799,7 @@ export function renderMessage(message: DisplayMessage, options: TranscriptRender
 export function projectMessage(message: DisplayMessage, options: TranscriptRenderOptions): TranscriptProjection {
   const theme = options.theme ?? defaultTranscriptTheme;
   if (message.role === "user") {
-    return plainProjection(renderUserCard(message.content, options));
+    return projectUserCard(message, options);
   }
   if (message.role === "error") {
     return plainProjection([...projectAssistantRows(message.content, options).map(theme.error), ""]);
@@ -820,7 +890,7 @@ export function projectTranscript(
     const message = messages[messageIndex]!;
     let block: TranscriptProjection;
     if (message.role === "user") {
-      block = plainProjection(renderUserCard(message.content, options));
+      block = projectUserCard(message, options);
     } else if (message.role === "assistant" && !message.syntheticKind) {
       block = projectAssistantInRequest(message, options);
     } else {

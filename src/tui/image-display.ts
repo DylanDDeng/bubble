@@ -62,18 +62,35 @@ export function formatImageUserDisplayText(
 ): string {
   if (imageCount <= 0) return input;
   const labels = imageDisplayLabels(imageCount, labelStart);
-  const base = input.trim();
-  // Labels already present inline (placed at their paste position in the
-  // composer) stay where they are; only labels missing from the text are
-  // prepended as a headline (back-compat for callers without inline labels).
-  const missing = labels.filter((label) => !input.includes(label));
-  const headline = missing.length > 0
-    ? (base ? `${missing.join(" ")} ${base}` : missing.join(" "))
-    : base;
-  return [
-    headline,
-    ...labels.map(imageDisplayReferenceLine),
-  ].join("\n");
+  // The composer text is the canonical presentation: if a chip was inserted
+  // inline, keep it at that exact position after submit. Reconstructed legacy
+  // messages do not contain labels, so only their missing chips fall back to
+  // standalone reference rows.
+  const missingLabels = labels.filter((label) => !input.includes(label));
+  return [input, ...missingLabels.map(imageDisplayReferenceLine)].filter(Boolean).join("\n");
+}
+
+export function displayImagesFromPayload(payload: SubmitPayload): DisplayImageAttachment[] {
+  const start = payload.imageDisplayStart ?? 1;
+  return payload.images.map((attachment, index) => ({
+    ...attachment,
+    label: imageDisplayLabel(start + index),
+  }));
+}
+
+export function imageAttachmentFromDataUrl(url: string): ImageAttachment | undefined {
+  const match = /^data:([^;,]+);base64,([A-Za-z0-9+/=\r\n]+)$/.exec(url.trim());
+  if (!match) return undefined;
+  const mediaType = match[1]!.toLowerCase();
+  const base64 = match[2]!.replace(/[\r\n]/g, "");
+  if (!mediaType.startsWith("image/")) return undefined;
+  let bytes = 0;
+  try {
+    bytes = Buffer.from(base64, "base64").byteLength;
+  } catch {
+    return undefined;
+  }
+  return { base64, mediaType, bytes, dataUrl: `data:${mediaType};base64,${base64}` };
 }
 
 export function nextImageDisplayLabelStart(messages: Iterable<ImageDisplayMessage>): number {
@@ -88,3 +105,5 @@ export function nextImageDisplayLabelStart(messages: Iterable<ImageDisplayMessag
   }
   return max + 1;
 }
+import type { SubmitPayload } from "./model/composer-types.js";
+import type { DisplayImageAttachment, ImageAttachment } from "./model/image-attachment.js";

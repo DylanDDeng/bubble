@@ -30,13 +30,19 @@ describe("stripInlineImageLabels", () => {
 describe("image display formatting", () => {
   it("renders a pasted image like the transcript attachment style", () => {
     expect(formatImageUserDisplayText("composer 这里点击加号 没有反应啊", 1, 3)).toBe(
-      "[Image #3] composer 这里点击加号 没有反应啊\n└ [Image #3]",
+      "composer 这里点击加号 没有反应啊\n└ [Image #3]",
     );
   });
 
   it("renders multiple images with stable labels", () => {
     expect(formatImageUserDisplayText("看看这些图", 2, 4)).toBe(
-      "[Image #4] [Image #5] 看看这些图\n└ [Image #4]\n└ [Image #5]",
+      "看看这些图\n└ [Image #4]\n└ [Image #5]",
+    );
+  });
+
+  it("keeps an inline composer label at its submitted position", () => {
+    expect(formatImageUserDisplayText("look [Image #1] here", 1, 1)).toBe(
+      "look [Image #1] here",
     );
   });
 

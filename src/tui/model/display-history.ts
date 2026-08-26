@@ -1,4 +1,5 @@
 import type { Message, ToolResultMetadata } from "../../types.js";
+import type { DisplayImageAttachment } from "./image-attachment.js";
 
 export type UserInputStatus = "queued" | "pending_steer";
 
@@ -7,6 +8,8 @@ export interface DisplayMessage {
   key?: string;
   role: "user" | "assistant" | "error";
   content: string;
+  /** Rich image state retained for chips, preview and session restore. */
+  images?: DisplayImageAttachment[];
   /** Correlates queued/steer placeholder rows with their lifecycle events. */
   clientId?: string;
   /** Badge for user input waiting to enter the run (QUEUED / STEER). */
