@@ -43,7 +43,11 @@ describe("approval dialog", () => {
 
   it("renders a full-width bottom-sheet body and keeps all decisions usable when narrow or short", () => {
     for (const [width, rows] of [[80, 14], [28, 6], [14, 4]] as const) {
-      const dialog = new ApprovalDialogComponent(bashRequest, () => rows);
+      const dialog = new ApprovalDialogComponent(
+        bashRequest,
+        () => rows,
+        { allowBashPrefix: true },
+      );
       const rendered = dialog.render(width);
       expect(rendered.length).toBeLessThanOrEqual(rows);
       expect(rendered.every((line) => visibleWidth(line) === width)).toBe(true);
@@ -54,8 +58,12 @@ describe("approval dialog", () => {
     }
   });
 
-  it("supports arrows, Tab, number selection, confirm, bypass, and cancellation", () => {
-    const dialog = new ApprovalDialogComponent(bashRequest, () => 14);
+  it("confirms an inferred or edited session prefix without enabling global bypass", () => {
+    const dialog = new ApprovalDialogComponent(
+      bashRequest,
+      () => 14,
+      { allowBashPrefix: true },
+    );
     const selected: ApprovalDialogChoice[] = [];
     const cancelled = vi.fn();
     dialog.onSelect = (choice) => selected.push(choice);
@@ -63,17 +71,42 @@ describe("approval dialog", () => {
 
     dialog.handleInput("\t");
     dialog.handleInput("\r");
-    expect(selected).toEqual(["approve_always"]);
+    expect(selected).toEqual([{ kind: "approve_bash_prefix", prefix: "printf" }]);
 
     dialog.handleInput("3");
     dialog.handleInput("\r");
-    expect(selected).toEqual(["approve_always", "reject"]);
+    expect(selected).toEqual([
+      { kind: "approve_bash_prefix", prefix: "printf" },
+      { kind: "reject" },
+    ]);
 
-    dialog.handleInput("\x0f");
-    expect(selected).toEqual(["approve_always", "reject", "approve_always"]);
+    dialog.handleInput("2");
+    dialog.handleInput("\x15");
+    dialog.handleInput("npm run:*");
+    dialog.handleInput("\r");
+    expect(selected).toEqual([
+      { kind: "approve_bash_prefix", prefix: "printf" },
+      { kind: "reject" },
+      { kind: "approve_bash_prefix", prefix: "npm run:*" },
+    ]);
 
     dialog.handleInput("\x1b");
     dialog.handleInput("\x03");
     expect(cancelled).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not offer a remember-or-bypass choice for non-bash tools", () => {
+    const dialog = new ApprovalDialogComponent({
+      type: "write",
+      path: "/workspace/new.txt",
+      content: "hello",
+      fileExists: false,
+    }, () => 14, { allowBashPrefix: true });
+
+    const plain = dialog.render(80).map(stripTerminalSequences).join("\n");
+    expect(plain).toContain("1 (●) Yes, proceed");
+    expect(plain).toContain("2 (○) No, reject");
+    expect(plain).not.toContain("don't ask again");
+    expect(plain).not.toContain("Bypass Permissions");
   });
 });

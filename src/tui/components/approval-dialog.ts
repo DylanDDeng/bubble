@@ -1,6 +1,7 @@
 import path from "node:path";
 import chalk from "chalk";
 import {
+  decodeKittyPrintable,
   matchesKey,
   truncateToWidth,
   wrapTextWithAnsi,
@@ -8,20 +9,41 @@ import {
   type Focusable,
 } from "@bubblebrain-ai/pi-tui";
 import type { ApprovalRequest } from "../../approval/types.js";
+import { inferBashPrefix } from "../../approval/session-cache.js";
 import { paintSheetLine, padSheetLine, safeSheetText } from "./bottom-sheet.js";
 
-export type ApprovalDialogChoice = "approve_once" | "approve_always" | "reject";
+export type ApprovalDialogChoice =
+  | { kind: "approve_once" }
+  | { kind: "approve_bash_prefix"; prefix: string }
+  | { kind: "reject" };
 
 interface ApprovalPresentation {
   title: string;
   details: string[];
 }
 
-const CHOICES: ReadonlyArray<{ value: ApprovalDialogChoice; label: string }> = [
-  { value: "approve_once", label: "Yes, proceed" },
-  { value: "approve_always", label: "Yes, don't ask again (switch to Bypass Permissions)" },
-  { value: "reject", label: "No, reject" },
-];
+type ApprovalChoiceKind = ApprovalDialogChoice["kind"];
+
+interface ApprovalChoiceRow {
+  kind: ApprovalChoiceKind;
+  label: string;
+  editablePrefix?: boolean;
+}
+
+export interface ApprovalDialogOptions {
+  /** Only advertise session remembering when the host can persist the prefix. */
+  allowBashPrefix?: boolean;
+}
+
+function printableInput(data: string): string | undefined {
+  const decoded = decodeKittyPrintable(data);
+  if (decoded !== undefined) return decoded;
+  // ProcessTerminal has already unwrapped bracketed paste. Reject raw control
+  // input here so an escape sequence can never become part of an allow rule.
+  // eslint-disable-next-line no-control-regex
+  if (!data || /[\u0000-\u001f\u007f-\u009f]/.test(data)) return undefined;
+  return data;
+}
 
 function bashCommandLabel(command: string): string {
   const firstToken = safeSheetText(command).trim().match(/^([^\s;&|]+)/)?.[1] ?? "command";
@@ -105,6 +127,7 @@ function styleDetail(request: ApprovalRequest, detail: string, index: number): s
 export class ApprovalDialogComponent implements Component, Focusable {
   focused = false;
   private selectedIndex = 0;
+  private bashPrefix: string;
 
   onSelect?: (choice: ApprovalDialogChoice) => void;
   onCancel?: () => void;
@@ -112,7 +135,24 @@ export class ApprovalDialogComponent implements Component, Focusable {
   constructor(
     private readonly request: ApprovalRequest,
     private readonly getTerminalRows: () => number,
-  ) {}
+    private readonly options: ApprovalDialogOptions = {},
+  ) {
+    this.bashPrefix = request.type === "bash" ? inferBashPrefix(request.command) : "";
+  }
+
+  private choices(): ApprovalChoiceRow[] {
+    return [
+      { kind: "approve_once", label: "Yes, proceed" },
+      ...(this.request.type === "bash" && this.options.allowBashPrefix
+        ? [{
+            kind: "approve_bash_prefix" as const,
+            label: "Yes, don't ask again for",
+            editablePrefix: true,
+          }]
+        : []),
+      { kind: "reject", label: "No, reject" },
+    ];
+  }
 
   render(width: number): string[] {
     const safeWidth = Math.max(1, width);
@@ -120,7 +160,8 @@ export class ApprovalDialogComponent implements Component, Focusable {
     const showHelp = terminalRows >= 5;
     const panelBudget = Math.max(1, Math.min(9, terminalRows - (showHelp ? 1 : 0)));
     const presentation = approvalPresentation(this.request);
-    const choiceCount = Math.min(CHOICES.length, panelBudget);
+    const choices = this.choices();
+    const choiceCount = Math.min(choices.length, panelBudget);
     const extraRows = Math.max(0, panelBudget - choiceCount);
     const contentWidth = Math.max(1, safeWidth - (safeWidth >= 12 ? 4 : 2));
     const indent = " ".repeat(safeWidth >= 12 ? 2 : 1);
@@ -157,17 +198,20 @@ export class ApprovalDialogComponent implements Component, Focusable {
     }
     if (blankBeforeChoices) panelLines.push({ line: "" });
 
-    const visibleChoices = choiceCount === CHOICES.length
-      ? CHOICES.map((choice, index) => ({ choice, index }))
-      : CHOICES
+    const visibleChoices = choiceCount === choices.length
+      ? choices.map((choice, index) => ({ choice, index }))
+      : choices
           .map((choice, index) => ({ choice, index }))
-          .slice(Math.max(0, Math.min(this.selectedIndex - choiceCount + 1, CHOICES.length - choiceCount)), CHOICES.length)
+          .slice(Math.max(0, Math.min(this.selectedIndex - choiceCount + 1, choices.length - choiceCount)), choices.length)
           .slice(0, choiceCount);
 
     for (const { choice, index } of visibleChoices) {
       const selected = index === this.selectedIndex;
       const radio = selected ? "●" : "○";
-      const label = `${index + 1} (${radio}) ${choice.label}`;
+      const prefix = choice.editablePrefix
+        ? ` [${safeSheetText(this.bashPrefix) || "command prefix"}${selected ? "▏" : ""}]`
+        : "";
+      const label = `${index + 1} (${radio}) ${choice.label}${prefix}`;
       const line = `${indent}${selected ? chalk.bold.white(label) : chalk.gray(label)}`;
       panelLines.push({ line, selected });
     }
@@ -178,33 +222,56 @@ export class ApprovalDialogComponent implements Component, Focusable {
     );
 
     if (!showHelp) return paintedPanel;
-    const help = `${this.selectedIndex + 1}/${CHOICES.length} select  │  Tab next  │  Enter confirm  │  Ctrl+O bypass  │  Esc deny`;
+    const editing = choices[this.selectedIndex]?.editablePrefix;
+    const help = editing
+      ? `${this.selectedIndex + 1}/${choices.length} select  │  type/backspace edit prefix  │  Ctrl+U clear  │  Enter confirm  │  Esc deny`
+      : `${this.selectedIndex + 1}/${choices.length} select  │  Tab next  │  Enter confirm  │  Esc deny`;
     return [...paintedPanel, chalk.dim(padSheetLine(help, safeWidth))];
   }
 
   handleInput(data: string): void {
+    const choices = this.choices();
     if (matchesKey(data, "up") || matchesKey(data, "shift+tab")) {
-      this.selectedIndex = (this.selectedIndex + CHOICES.length - 1) % CHOICES.length;
+      this.selectedIndex = (this.selectedIndex + choices.length - 1) % choices.length;
       return;
     }
     if (matchesKey(data, "down") || matchesKey(data, "tab")) {
-      this.selectedIndex = (this.selectedIndex + 1) % CHOICES.length;
+      this.selectedIndex = (this.selectedIndex + 1) % choices.length;
       return;
     }
-    if (data === "1" || data === "2" || data === "3") {
+    if (/^[1-9]$/.test(data) && Number(data) <= choices.length) {
       this.selectedIndex = Number(data) - 1;
       return;
     }
-    if (matchesKey(data, "ctrl+o")) {
-      this.onSelect?.("approve_always");
+    const selected = choices[this.selectedIndex];
+    if (!selected) return;
+    if (selected.editablePrefix && (matchesKey(data, "backspace") || matchesKey(data, "delete"))) {
+      this.bashPrefix = Array.from(this.bashPrefix).slice(0, -1).join("");
+      return;
+    }
+    if (selected.editablePrefix && matchesKey(data, "ctrl+u")) {
+      this.bashPrefix = "";
       return;
     }
     if (matchesKey(data, "enter")) {
-      this.onSelect?.(CHOICES[this.selectedIndex]!.value);
+      if (selected.kind === "approve_bash_prefix") {
+        const prefix = this.bashPrefix.trim();
+        if (!prefix) return;
+        this.onSelect?.({ kind: selected.kind, prefix });
+      } else {
+        this.onSelect?.({ kind: selected.kind });
+      }
       return;
     }
     if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
       this.onCancel?.();
+      return;
+    }
+    if (selected.editablePrefix) {
+      const printable = printableInput(data);
+      if (printable !== undefined) {
+        this.bashPrefix += safeSheetText(printable).replace(/[\r\n\t]+/g, " ");
+      }
     }
   }
 

@@ -78,6 +78,7 @@ import { SessionManager } from "../session.js";
 import type { ProviderRegistry } from "../provider-registry.js";
 import type { QuestionController, QuestionEvent, QuestionRequest } from "../question/controller.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
+import type { BashAllowlist } from "../approval/session-cache.js";
 import type { DisplayMessage } from "./model/display-history.js";
 import type { SubmitPayload } from "./model/composer-types.js";
 import { TraceInteractionState, type TraceAction } from "./model/trace-interaction.js";
@@ -104,7 +105,7 @@ export interface PiTuiAppOptions {
   registry?: ProviderRegistry;
   createProvider?: (providerId: string, apiKey: string, baseURL: string) => unknown;
   skillRegistry?: SkillRegistry;
-  bashAllowlist?: unknown;
+  bashAllowlist?: BashAllowlist;
   settingsManager?: unknown;
   hookController?: unknown;
   mcpManager?: unknown;
@@ -339,8 +340,20 @@ export class PiTuiApp {
     }
     if (approvalHandlerRef) {
       approvalHandlerRef.current = async (request: ApprovalRequest) => {
-        const approved = await this.approvalDialog(request);
-        return approved
+        const choice = await this.approvalDialog(request);
+        if (choice.kind === "approve_bash_prefix") {
+          if (request.type !== "bash" || !this.options.bashAllowlist) {
+            return {
+              action: "reject" as const,
+              feedback: "This host cannot remember Bash approvals for the current session.",
+            };
+          }
+          // Session-scoped and command-scoped: PermissionAwareApprovalController
+          // consults this same instance before opening the next dialog.
+          this.options.bashAllowlist.add(choice.prefix);
+          return { action: "approve" as const };
+        }
+        return choice.kind === "approve_once"
           ? { action: "approve" as const }
           : { action: "reject" as const, feedback: "User denied the tool call." };
       };
@@ -1426,9 +1439,13 @@ export class PiTuiApp {
     this.tui.setFocus(component);
   }
 
-  private approvalDialog(request: ApprovalRequest): Promise<boolean> {
+  private approvalDialog(request: ApprovalRequest): Promise<ApprovalDialogChoice> {
     return new Promise((resolve) => {
-      const dialog = new ApprovalDialogComponent(request, () => this.tui.terminal.rows);
+      const dialog = new ApprovalDialogComponent(
+        request,
+        () => this.tui.terminal.rows,
+        { allowBashPrefix: this.options.bashAllowlist !== undefined },
+      );
       const handle = this.tui.showOverlay(dialog, {
         anchor: "bottom-center",
         width: "100%",
@@ -1436,13 +1453,10 @@ export class PiTuiApp {
       });
       const finish = (choice: ApprovalDialogChoice) => {
         handle.hide();
-        if (choice === "approve_always") {
-          this.options.agent.setMode("bypassPermissions");
-        }
-        resolve(choice === "approve_once" || choice === "approve_always");
+        resolve(choice);
       };
       dialog.onSelect = finish;
-      dialog.onCancel = () => finish("reject");
+      dialog.onCancel = () => finish({ kind: "reject" });
       this.tui.setFocus(dialog);
     });
   }

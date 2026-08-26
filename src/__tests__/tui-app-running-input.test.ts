@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "@bubblebrain-ai/pi-tui/testing";
 import { PiTuiApp } from "../tui/app.js";
 import { QuestionController, QuestionRejectedError } from "../question/index.js";
+import { BashAllowlist } from "../approval/session-cache.js";
 import type { StreamingTailState } from "../tui/components/streaming-message.js";
 import type { DisplayMessage } from "../tui/model/display-history.js";
 
@@ -587,6 +588,7 @@ describe("main pi-tui running input", () => {
     const terminal = new VirtualTerminal(80, 14);
     const turns: string[] = [];
     const modes: string[] = [];
+    const bashAllowlist = new BashAllowlist();
     let running = false;
     let cancelCalls = 0;
     const approvalHandlerRef: { current?: (request: unknown) => Promise<unknown> } = {};
@@ -629,6 +631,7 @@ describe("main pi-tui running input", () => {
         onThemeToggle: () => {},
       },
       approvalHandlerRef: approvalHandlerRef as never,
+      bashAllowlist,
       planHandlerRef: planHandlerRef as never,
       terminal,
       uiMode: "regular",
@@ -678,9 +681,13 @@ describe("main pi-tui running input", () => {
         command: "npm run build",
         cwd: "/workspace",
       });
-      terminal.sendInput("\x0f");
+      terminal.sendInput("\t");
+      terminal.sendInput("\r");
       await expect(alwaysApproved).resolves.toEqual({ action: "approve" });
-      expect(modes).toEqual(["bypassPermissions"]);
+      expect(bashAllowlist.list()).toEqual(["npm run"]);
+      expect(bashAllowlist.matches("npm run test")).toBe(true);
+      expect(bashAllowlist.matches("git status")).toBe(false);
+      expect(modes).toEqual([]);
     } finally {
       app.dispose();
     }
