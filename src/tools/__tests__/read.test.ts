@@ -183,6 +183,26 @@ describe("read tool", () => {
     expect(fourth.content).toContain("End of file reached");
   });
 
+  it("uses the actual byte-bounded line count as the next-page cursor", async () => {
+    const file = join(tmpDir, "byte-paged.txt");
+    const lines = Array.from({ length: 100 }, (_, i) => `line-${i + 1}:${"界🙂".repeat(500)}`);
+    writeFileSync(file, lines.join("\n"), "utf-8");
+    const tool = createReadTool(tmpDir);
+
+    const first = await tool.execute({ path: "byte-paged.txt" }, { cwd: tmpDir });
+    const returned = Number(first.metadata?.lines);
+    expect(first.metadata?.truncated).toBe(true);
+    expect(returned).toBeGreaterThan(0);
+    expect(returned).toBeLessThan(100);
+    expect(Buffer.byteLength(first.content, "utf8")).toBeLessThanOrEqual(64 * 1024);
+    expect(first.content).not.toContain("�");
+
+    const second = await tool.execute({ path: "byte-paged.txt" }, { cwd: tmpDir });
+    expect(second.metadata?.offset).toBe(returned + 1);
+    expect(second.content).toContain(`line-${returned + 1}:`);
+    expect(second.content).not.toContain("�");
+  });
+
   it("does not dedup when the file changes on disk", async () => {
     const file = join(tmpDir, "mutating.txt");
     writeFileSync(file, "v1", "utf-8");

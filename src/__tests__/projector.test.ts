@@ -125,6 +125,53 @@ describe("repairToolCallChains", () => {
 });
 
 describe("projectMessages", () => {
+  it("re-bounds oversized tool output restored from an old session", () => {
+    const out = projectMessages([
+      { role: "user", content: "search" },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "grep:old", name: "grep", arguments: "{}" }],
+      },
+      { role: "tool", toolCallId: "grep:old", content: "x".repeat(6_000_000) },
+    ], {
+      mode: "full",
+      providerId: "zhipuai-coding-plan",
+      modelId: "glm-5.3-flash",
+    });
+
+    const tool = out.find((message) => message.role === "tool")!;
+    expect(Buffer.byteLength(tool.content as string, "utf8")).toBeLessThanOrEqual(64 * 1024);
+    expect(tool.content).toContain("truncated by model policy");
+  });
+
+  it("shares a 160KiB aggregate budget across sibling tool results", () => {
+    const calls = Array.from({ length: 4 }, (_, index) => ({
+      id: `tool:${index}`,
+      name: "read",
+      arguments: "{}",
+    }));
+    const out = projectMessages([
+      { role: "user", content: "inspect" },
+      { role: "assistant", content: "", toolCalls: calls },
+      ...calls.map((call) => ({
+        role: "tool" as const,
+        toolCallId: call.id,
+        content: "y".repeat(100_000),
+      })),
+    ], {
+      mode: "full",
+      providerId: "zhipuai-coding-plan",
+      modelId: "glm-5.3-flash",
+    });
+
+    const tools = out.filter((message) => message.role === "tool");
+    const sizes = tools.map((message) => Buffer.byteLength(message.content as string, "utf8"));
+    expect(tools).toHaveLength(4);
+    expect(sizes.every((size) => size <= 40 * 1024)).toBe(true);
+    expect(sizes.reduce((sum, size) => sum + size, 0)).toBeLessThanOrEqual(160 * 1024);
+  });
+
   it("repairs the chain before returning, even in default (full) mode", () => {
     const input: Message[] = [
       { role: "system", content: "sys" },

@@ -35,7 +35,7 @@ describe("truncateToolOutputForModel", () => {
     expect(result.content).toContain("truncated by model policy");
   });
 
-  it("returns content unchanged when the model has no declared limit", () => {
+  it("applies the generic byte cap when the model has no declared token limit", () => {
     registerDynamicModelMetadata({
       id: "uncapped-model",
       name: "uncapped-model",
@@ -44,11 +44,28 @@ describe("truncateToolOutputForModel", () => {
       contextWindow: 100_000,
       // no toolOutputTokenLimit
     });
-    const big = "x".repeat(20_000);
+    const big = "x".repeat(100_000);
     const result = truncateToolOutputForModel(big, "openai-codex", "uncapped-model");
-    expect(result.truncated).toBe(false);
-    expect(result.content).toBe(big);
+    expect(result.truncated).toBe(true);
+    expect(result.finalBytes).toBeLessThanOrEqual(64 * 1024);
     expect(result.limit).toBeUndefined();
+  });
+
+  it("keeps byte truncation valid UTF-8 for CJK and emoji", () => {
+    registerDynamicModelMetadata({
+      id: "utf8-model",
+      name: "utf8-model",
+      providerId: "openai-codex",
+      reasoningLevels: ["off"],
+      contextWindow: 100_000,
+    });
+    const big = `开头🙂${"内容🚀".repeat(20_000)}结尾✅`;
+    const result = truncateToolOutputForModel(big, "openai-codex", "utf8-model");
+    expect(result.truncated).toBe(true);
+    expect(result.finalBytes).toBeLessThanOrEqual(64 * 1024);
+    expect(result.content).not.toContain("�");
+    expect(result.content).toContain("开头🙂");
+    expect(result.content).toContain("结尾✅");
   });
 
   it("falls through openai → openai-codex catalog lookup for OAuth provider", () => {

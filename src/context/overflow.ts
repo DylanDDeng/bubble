@@ -11,6 +11,8 @@ const OVERFLOW_PATTERNS: RegExp[] = [
   /exceeds the context window/i,
   /exceeds the limit of\s+\d+/i,
   /prompt is too long/i,
+  /prompt exceeds max(?:imum)? length/i,
+  /maximum prompt length/i,
   /maximum context length/i,
   /too many tokens/i,
   // Gemini: "The input token count (N) exceeds the maximum number of tokens allowed (M)."

@@ -3,6 +3,11 @@ import { compactCurrentTurnToolGroups, compactMessages } from "./compact.js";
 import { pruneMessages } from "./prune.js";
 import { formatInternalContextBlock, formatInternalReminderBlock } from "../agent/internal-reminder-sanitizer.js";
 import type { AssistantMessage, Message, MetaMessage, ProviderMessage, SystemMessage, ToolMessage } from "../types.js";
+import {
+  DEFAULT_TOOL_OUTPUT_BYTE_LIMIT,
+  TOOL_OUTPUT_BATCH_BYTE_LIMIT,
+  truncateToolOutputForModel,
+} from "./tool-output-truncate.js";
 
 export interface ProjectionOptions {
   mode?: "full" | "pruned" | "budgeted";
@@ -10,6 +15,8 @@ export interface ProjectionOptions {
   modelId?: string;
   usageAnchorTokens?: number;
   anchorMessageCount?: number;
+  /** Request tokens not represented by messages, such as active tool schemas. */
+  additionalInputTokens?: number;
 }
 
 // Prefix-cache invariant: only the leading static system prompt is promoted to
@@ -67,13 +74,16 @@ export function projectMessages(messages: Message[], options: ProjectionOptions 
   ];
 
   const repaired = repairToolCallChains(projected);
+  const bounded = options.providerId && options.modelId
+    ? boundToolOutputBatches(repaired, options.providerId, options.modelId)
+    : repaired;
 
   if (mode === "pruned") {
-    return pruneMessages(repaired);
+    return pruneMessages(bounded);
   }
 
   if (mode === "budgeted") {
-    const pruned = pruneMessages(repaired);
+    const pruned = pruneMessages(bounded);
     if (!options.providerId || !options.modelId) {
       return pruned;
     }
@@ -86,8 +96,9 @@ export function projectMessages(messages: Message[], options: ProjectionOptions 
         ? {
             usageAnchorTokens: options.usageAnchorTokens,
             tailMessages: pruned.slice(Math.min(options.anchorMessageCount, pruned.length)),
+            additionalInputTokens: options.additionalInputTokens,
           }
-        : undefined,
+        : { additionalInputTokens: options.additionalInputTokens },
     );
     if (!budget.shouldCompact) {
       return pruned;
@@ -109,7 +120,9 @@ export function projectMessages(messages: Message[], options: ProjectionOptions 
     for (const pass of passes) {
       const next = pass();
       if (next) working = next;
-      const after = getContextBudget(options.providerId, options.modelId, working);
+      const after = getContextBudget(options.providerId, options.modelId, working, {
+        additionalInputTokens: options.additionalInputTokens,
+      });
       if (!after.shouldCompact) break;
     }
 
@@ -121,10 +134,70 @@ export function projectMessages(messages: Message[], options: ProjectionOptions 
         ? { role: "user" as const, content: formatMetaMessage(message) }
         : message);
 
-    return repairToolCallChains(providerSafe as ProviderMessage[]);
+    return boundToolOutputBatches(
+      repairToolCallChains(providerSafe as ProviderMessage[]),
+      options.providerId,
+      options.modelId,
+    );
   }
 
-  return repaired;
+  return bounded;
+}
+
+/**
+ * Re-bound restored tool messages and divide a hard aggregate budget fairly
+ * across sibling calls. A historical 6MB JSONL entry therefore becomes safe
+ * at projection time even if it predates live-result normalization.
+ */
+export function boundToolOutputBatches(
+  messages: ProviderMessage[],
+  providerId: string,
+  modelId: string,
+): ProviderMessage[] {
+  const bounded: ProviderMessage[] = [];
+
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index];
+    bounded.push(message);
+    if (message.role !== "assistant" || !message.toolCalls?.length) continue;
+
+    const siblingCount = message.toolCalls.length;
+    const perResultByteLimit = Math.min(
+      DEFAULT_TOOL_OUTPUT_BYTE_LIMIT,
+      Math.floor(TOOL_OUTPUT_BATCH_BYTE_LIMIT / siblingCount),
+    );
+    for (let sibling = 0; sibling < siblingCount; sibling++) {
+      const toolMessage = messages[index + 1 + sibling];
+      if (!toolMessage || toolMessage.role !== "tool") break;
+      const result = truncateToolOutputForModel(
+        toolMessage.content,
+        providerId,
+        modelId,
+        { hardByteLimit: perResultByteLimit },
+      );
+      bounded.push(result.truncated
+        ? {
+            ...toolMessage,
+            content: result.content,
+            metadata: {
+              ...toolMessage.metadata,
+              truncated: true,
+              toolOutputTruncation: {
+                originalBytes: result.originalBytes,
+                finalBytes: result.finalBytes,
+                originalTokens: result.originalTokens,
+                finalTokens: result.finalTokens,
+                hardByteLimit: result.hardByteLimit,
+                ...(result.limit ? { modelTokenLimit: result.limit } : {}),
+              },
+            },
+          }
+        : toolMessage);
+    }
+    index += siblingCount;
+  }
+
+  return bounded;
 }
 
 /**

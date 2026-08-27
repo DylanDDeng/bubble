@@ -6,7 +6,11 @@
 import { compactCurrentTurnToolGroups, compactMessages } from "./context/compact.js";
 import { randomUUID } from "node:crypto";
 import { compactMessagesWithLLM } from "./context/compact-llm.js";
-import { getContextBudget } from "./context/budget.js";
+import {
+  estimateToolDefinitionsTokens,
+  getContextBudget,
+  getMaxInputTokens,
+} from "./context/budget.js";
 import { buildContextUsageSnapshot, type ContextUsageSnapshot } from "./context/usage.js";
 import { isContextOverflowError } from "./context/overflow.js";
 import {
@@ -17,7 +21,7 @@ import {
 } from "./network/retry.js";
 import { projectMessages } from "./context/projector.js";
 import { aggressivePruneMessages, markStableCurrentToolResultsForCache, markToolResultCacheStable } from "./context/prune.js";
-import { truncateToolOutputForModel } from "./context/tool-output-truncate.js";
+import { normalizeToolResultForModel, truncateToolOutputForModel } from "./context/tool-output-truncate.js";
 import { buildDeferredToolsReminder, buildToolFreezeReminder, isPermissionModeReminder, reminderForMode } from "./prompt/reminders.js";
 import type { AgentEvent, AgentInputController, AgentRunInput, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ThinkingLevel, TokenUsage, ToolDefinition, ToolMessage, ToolResult, ToolRegistryEntry, ToolUpdate } from "./types.js";
 import { HookBus, type TurnHooks, type TurnHookState } from "./orchestrator/hooks.js";
@@ -69,12 +73,21 @@ import {
   traceEvent,
 } from "./debug-trace.js";
 
-const MAX_CONSECUTIVE_OVERFLOW_RECOVERIES = 3;
+const MAX_CONSECUTIVE_OVERFLOW_RECOVERIES = 2;
 const MAX_EMPTY_ASSISTANT_RECOVERIES = 1;
 const EMPTY_ASSISTANT_RECOVERY_REMINDER =
   "The previous model response contained no user-visible assistant content and no tool calls. " +
   "Respond now with a concise, user-visible answer, or call an available tool if more work is required. " +
   "Do not put the final answer only in hidden reasoning.";
+
+class LocalContextPreflightError extends Error {
+  constructor(estimatedTokens: number, maxInputTokens: number) {
+    super(
+      `Local request preflight: estimated prompt length ${estimatedTokens} tokens exceeds maximum prompt length ${maxInputTokens}.`,
+    );
+    this.name = "LocalContextPreflightError";
+  }
+}
 export { AgentAbortError, SubagentAbortError } from "./agent/abort-errors.js";
 // Model-facing interruption boundary. Persisted into the transcript so the
 // next turn sees an explicit stop instead of a dangling request — but it must
@@ -991,24 +1004,39 @@ export class Agent {
           description: t.description,
           parameters: t.parameters,
         }));
+      const toolDefinitionTokens = estimateToolDefinitionsTokens(toolDefinitions, this.providerId);
 
       // LLM-driven compaction runs ahead of projector's algorithmic passes. If
       // it succeeds, this.messages is replaced with [preserved system+meta] +
       // [LLM summary] + [last user msg], and the projector becomes a no-op for
       // budget. If it fails (network error, etc.), the projector's existing
       // algorithmic fallback still kicks in.
-      await this.maybeCompactWithLLM();
+      await this.maybeCompactWithLLM(toolDefinitionTokens);
 
       const bufferedStreamingToolCallIds = new Set<string>();
+      let currentRequestEstimate: number | undefined;
       try {
         markStableCurrentToolResultsForCache(this.messages);
         const projectedMessages = projectMessages(this.messages, {
           mode: "budgeted",
           providerId: this.providerId,
           modelId: this.apiModel,
-          usageAnchorTokens: this.lastInputTokens ?? undefined,
-          anchorMessageCount: this.lastAnchorMessageCount ?? undefined,
+          // Projection changes message identity/count (meta rendering, pruning,
+          // chain repair), so a resident-array anchor index is not safe here.
+          // A fresh estimate also lets us account for current tool schemas.
+          additionalInputTokens: toolDefinitionTokens,
         });
+        const requestBudget = getContextBudget(
+          this.providerId,
+          this.apiModel,
+          projectedMessages,
+          { additionalInputTokens: toolDefinitionTokens },
+        );
+        currentRequestEstimate = requestBudget.estimatedTokens;
+        const maxInputTokens = getMaxInputTokens(requestBudget.contextWindow);
+        if (maxInputTokens !== undefined && currentRequestEstimate > maxInputTokens) {
+          throw new LocalContextPreflightError(currentRequestEstimate, maxInputTokens);
+        }
         const providerStartedAt = Date.now();
         let streamTextChars = 0;
         let streamReasoningChars = 0;
@@ -1257,12 +1285,57 @@ export class Agent {
         if (consecutiveOverflowRecoveries >= MAX_CONSECUTIVE_OVERFLOW_RECOVERIES) {
           throw error;
         }
-        const droppedMessages = await this.recoverFromOverflow(consecutiveOverflowRecoveries);
+        const messagesBeforeRecovery = this.messages;
+        const inputTokensBeforeRecovery = this.lastInputTokens;
+        const anchorBeforeRecovery = this.lastAnchorMessageCount;
+        const failedRequestEstimate = currentRequestEstimate ?? getContextBudget(
+          this.providerId,
+          this.apiModel,
+          projectMessages(this.messages, {
+            mode: "budgeted",
+            providerId: this.providerId,
+            modelId: this.apiModel,
+            additionalInputTokens: toolDefinitionTokens,
+          }),
+          { additionalInputTokens: toolDefinitionTokens },
+        ).estimatedTokens;
+        const droppedMessages = await this.recoverFromOverflow(
+          consecutiveOverflowRecoveries,
+          error instanceof LocalContextPreflightError ? 0.999_999 : 0.9,
+        );
+        const recoveredRequestEstimate = getContextBudget(
+          this.providerId,
+          this.apiModel,
+          projectMessages(this.messages, {
+            mode: "budgeted",
+            providerId: this.providerId,
+            modelId: this.apiModel,
+            additionalInputTokens: toolDefinitionTokens,
+          }),
+          { additionalInputTokens: toolDefinitionTokens },
+        ).estimatedTokens;
+        // Never issue a retry that is the same size or larger. Apart from
+        // avoiding a useless retry loop, this proves that already-completed
+        // tool calls stay historical data rather than being executed again.
+        const madeProgress = recoveredRequestEstimate < failedRequestEstimate;
+        const meaningfulProviderProgress = error instanceof LocalContextPreflightError
+          || recoveredRequestEstimate <= Math.floor(failedRequestEstimate * 0.9);
+        if (!madeProgress || !meaningfulProviderProgress) {
+          this.messages = messagesBeforeRecovery;
+          this.lastInputTokens = inputTokensBeforeRecovery;
+          this.lastAnchorMessageCount = anchorBeforeRecovery;
+          throw error;
+        }
         consecutiveOverflowRecoveries += 1;
         this.compactionStats.overflow += 1;
         this.compactionStats.fired += 1;
         this.compactionStats.droppedMessages += droppedMessages;
-        traceEvent("compaction_fired", { path: "overflow", droppedMessages });
+        traceEvent("compaction_fired", {
+          path: "overflow",
+          droppedMessages,
+          beforeEstimatedTokens: failedRequestEstimate,
+          afterEstimatedTokens: recoveredRequestEstimate,
+        });
         yield emit({ type: "context_recovered", droppedMessages, reason: "overflow" });
         continue;
       }
@@ -1387,7 +1460,11 @@ export class Agent {
             yield emit({ type: "tool_call_end", id: tc.id, name: tc.name, arguments: tc.arguments });
           }
           if (isHiddenToolResult(blockedResult)) {
-            let result = blockedResult;
+            let result = normalizeToolResultForModel(
+              blockedResult,
+              this.providerId,
+              this.apiModel,
+            );
             await hookBus.runAfterToolCall({
               agent: this,
               cwd,
@@ -1401,6 +1478,7 @@ export class Agent {
                 result = next;
               },
             });
+            result = normalizeToolResultForModel(result, this.providerId, this.apiModel);
             const postToolHook = await this.runExternalHook({
               eventName: result.isError ? "PostToolUseFailure" : "PostToolUse",
               cwd,
@@ -1499,6 +1577,9 @@ export class Agent {
               result = resolved ?? { content: `Error: Tool "${tc.name}" returned no result`, isError: true };
             }
           }
+          // Hooks receive a bounded canonical result. This prevents a tool
+          // from handing an unbounded multi-megabyte value to PostToolUse.
+          result = normalizeToolResultForModel(result, this.providerId, this.apiModel);
           await hookBus.runAfterToolCall({
             agent: this,
             cwd,
@@ -1512,6 +1593,9 @@ export class Agent {
               result = next;
             },
           });
+          // A hook is allowed to replace the result, so enforce the invariant
+          // again before persistence, callbacks, UI events and provider reuse.
+          result = normalizeToolResultForModel(result, this.providerId, this.apiModel);
           const postToolHook = await this.runExternalHook({
             eventName: result.isError ? "PostToolUseFailure" : "PostToolUse",
             cwd,
@@ -1549,7 +1633,10 @@ export class Agent {
               truncated: truncatedOutput.truncated,
               originalTokens: truncatedOutput.originalTokens,
               finalTokens: truncatedOutput.finalTokens,
+              originalBytes: truncatedOutput.originalBytes,
+              finalBytes: truncatedOutput.finalBytes,
               limit: truncatedOutput.limit,
+              hardByteLimit: truncatedOutput.hardByteLimit,
             },
           }, traceContext);
           const toolMessage: ToolMessage = {
@@ -1669,34 +1756,55 @@ export class Agent {
     }
   }
 
-  private async recoverFromOverflow(attempt: number): Promise<number> {
+  private async recoverFromOverflow(attempt: number, maximumSizeRatio = 0.999_999): Promise<number> {
     const before = this.messages.length;
-    const beforeTokens = this.messages.reduce((sum, m) => sum + JSON.stringify(m).length, 0);
+    const originalMessages = this.messages;
+    const beforeBytes = serializedMessageBytes(originalMessages);
+    const commitIfSmaller = (candidate: Message[] | undefined, summary?: string): boolean => {
+      if (
+        !candidate
+        || serializedMessageBytes(candidate) > Math.floor(beforeBytes * maximumSizeRatio)
+      ) return false;
+      this.messages = candidate;
+      this.lastInputTokens = null;
+      this.lastAnchorMessageCount = null;
+      this.fileStateTracker?.invalidateReadHistory();
+      this.persistCompactionSummary(summary);
+      return true;
+    };
 
     if (attempt === 0) {
-      this.messages = aggressivePruneMessages(this.messages);
-      const afterTokens = this.messages.reduce((sum, m) => sum + JSON.stringify(m).length, 0);
-      if (afterTokens < beforeTokens) {
-        this.lastInputTokens = null;
-        this.lastAnchorMessageCount = null;
-        this.fileStateTracker?.invalidateReadHistory();
+      if (commitIfSmaller(aggressivePruneMessages(originalMessages))) {
         return before - this.messages.length;
       }
     }
 
-    const keepRecentTurns = attempt >= 2 ? 1 : 2;
-    const llmResult = await compactMessagesWithLLM(this.messages, {
+    // Unlike ordinary pruning, overflow recovery is allowed to thin the most
+    // recent completed tool batch. Keeping it protected is exactly what made
+    // a one-turn 6MB grep result impossible to recover from.
+    const emergencyToolLimit = attempt === 0 ? 16 * 1024 : 4 * 1024;
+    const thinnedLatestTools = originalMessages.map((message): Message => {
+      if (message.role !== "tool") return message;
+      const bounded = truncateToolOutputForModel(
+        message.content,
+        this.providerId,
+        this.apiModel,
+        { hardByteLimit: emergencyToolLimit },
+      );
+      return bounded.truncated ? { ...message, content: bounded.content } : message;
+    });
+    if (commitIfSmaller(thinnedLatestTools)) {
+      return before - this.messages.length;
+    }
+
+    const keepRecentTurns = attempt >= 1 ? 1 : 2;
+    const llmResult = await compactMessagesWithLLM(originalMessages, {
       provider: this.provider,
       model: this.apiModel,
       thinkingLevel: this.thinkingLevel,
       keepRecentTurns,
     });
-    if (llmResult.compacted && llmResult.messages) {
-      this.messages = llmResult.messages;
-      this.lastInputTokens = null;
-      this.lastAnchorMessageCount = null;
-      this.fileStateTracker?.invalidateReadHistory();
-      this.persistCompactionSummary(llmResult.summary);
+    if (llmResult.compacted && commitIfSmaller(llmResult.messages, llmResult.summary)) {
       return before - this.messages.length;
     }
 
@@ -1704,43 +1812,44 @@ export class Agent {
     // when there's only one user turn (the "single huge prompt with many tool
     // calls" case), so try the turn-internal compactor before giving up.
     const { compactWithLLM } = await import("./context/llm-compactor.js");
-    const singleTurnResult = await compactWithLLM(this.messages, {
+    const singleTurnResult = await compactWithLLM(originalMessages, {
       provider: this.provider,
       modelId: this.apiModel,
     });
-    if (singleTurnResult.compacted && singleTurnResult.messages) {
-      this.messages = singleTurnResult.messages;
-      this.lastInputTokens = null;
-      this.lastAnchorMessageCount = null;
-      this.fileStateTracker?.invalidateReadHistory();
-      this.persistCompactionSummary(singleTurnResult.summary);
+    if (singleTurnResult.compacted && commitIfSmaller(singleTurnResult.messages, singleTurnResult.summary)) {
       return before - this.messages.length;
     }
 
-    const fallback = compactMessages(this.messages, { keepRecentTurns });
-    if (fallback.compacted && fallback.messages) {
-      this.messages = fallback.messages;
-      this.lastInputTokens = null;
-      this.lastAnchorMessageCount = null;
-      this.fileStateTracker?.invalidateReadHistory();
-      this.persistCompactionSummary(fallback.summary);
+    const fallback = compactMessages(originalMessages, { keepRecentTurns });
+    if (fallback.compacted && commitIfSmaller(fallback.messages, fallback.summary)) {
+      return before - this.messages.length;
+    }
+
+    const subturn = compactCurrentTurnToolGroups(originalMessages, {
+      keepRecentGroups: attempt === 0 ? 1 : 0,
+    });
+    if (subturn.compacted && commitIfSmaller(subturn.messages, subturn.summary)) {
       return before - this.messages.length;
     }
 
     // Codex-style last-resort: drop the single oldest non-protected message
     // and let the retry loop try again. Cheap, but eventually narrows even an
     // intractable single-turn overflow.
-    const oldestIdx = this.messages.findIndex(
-      (m) => m.role !== "system" && m.role !== "meta",
-    );
-    if (oldestIdx >= 0 && oldestIdx < this.messages.length - 1) {
-      this.messages = [
-        ...this.messages.slice(0, oldestIdx),
-        ...this.messages.slice(oldestIdx + 1),
+    const realUserIndexes = originalMessages
+      .map((message, index) => message.role === "user" ? index : -1)
+      .filter((index) => index >= 0);
+    const oldestIdx = realUserIndexes.length > 1
+      ? realUserIndexes[0]
+      : -1;
+    const removeUntil = realUserIndexes.length > 1
+      ? realUserIndexes[1]
+      : -1;
+    if (oldestIdx >= 0 && removeUntil > oldestIdx && removeUntil < originalMessages.length) {
+      const candidate = [
+        ...originalMessages.slice(0, oldestIdx),
+        ...originalMessages.slice(removeUntil),
       ];
-      this.lastInputTokens = null;
-      this.lastAnchorMessageCount = null;
-      this.fileStateTracker?.invalidateReadHistory();
+      if (!commitIfSmaller(candidate)) return 0;
       return before - this.messages.length;
     }
 
@@ -1751,7 +1860,7 @@ export class Agent {
     this.maybeCompactResidentHistory();
   }
 
-  private async maybeCompactWithLLM(): Promise<void> {
+  private async maybeCompactWithLLM(additionalInputTokens = 0): Promise<void> {
     if (!this.providerId || !this.apiModel) return;
     if (this.messages.length === 0) return;
 
@@ -1761,6 +1870,7 @@ export class Agent {
     const budget = getContextBudget(this.providerId, this.apiModel, this.messages, {
       usageAnchorTokens: this.lastInputTokens ?? undefined,
       tailMessages: tail,
+      additionalInputTokens,
     });
     if (!budget.shouldCompact) return;
 
@@ -2310,4 +2420,8 @@ export class Agent {
       };
     }
   }
+}
+
+function serializedMessageBytes(messages: Message[]): number {
+  return Buffer.byteLength(JSON.stringify(messages), "utf8");
 }
