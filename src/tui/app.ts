@@ -15,18 +15,14 @@ import {
   ProcessTerminal,
   TuiAltScreen,
   TuiMainScreen,
-  Text,
   VStack,
-  SelectList,
   Editor,
   Input,
   ScrollView,
   Markdown,
-  type SelectItem,
   type TUI,
   type TuiMode,
   type Terminal,
-  type Component,
   matchesKey,
   isKeyRelease,
   isViewportTUI,
@@ -35,6 +31,8 @@ import { StreamingMessageComponent } from "./components/streaming-message.js";
 import { ResponsiveTranscriptComponent } from "./components/responsive-transcript.js";
 import { WelcomeBannerComponent } from "./components/welcome.js";
 import { ApprovalDialogComponent, type ApprovalDialogChoice } from "./components/approval-dialog.js";
+import { PlanDialogComponent } from "./components/plan-dialog.js";
+import { FeedbackDialogComponent, type FeedbackDialogResult } from "./components/feedback-dialog.js";
 import { QuestionDialogComponent } from "./components/question-dialog.js";
 import { ProviderKeyInputComponent } from "./components/provider-key-input.js";
 import {
@@ -77,6 +75,9 @@ import { SessionManager } from "../session.js";
 import type { ProviderRegistry } from "../provider-registry.js";
 import type { QuestionController, QuestionEvent, QuestionRequest } from "../question/controller.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
+import type { PlanDecision } from "../types.js";
+import { collectFeedback } from "../feedback/collect.js";
+import type { FeedbackPayload, SubmitResult } from "../feedback/types.js";
 import type { BashAllowlist } from "../approval/session-cache.js";
 import type { DisplayMessage } from "./model/display-history.js";
 import type { SubmitPayload } from "./model/composer-types.js";
@@ -117,7 +118,7 @@ export interface PiTuiAppOptions {
   mcpManager?: unknown;
   lspService?: unknown;
   questionController?: QuestionController;
-  planHandlerRef?: { current?: (plan: string) => Promise<{ action: "approve" | "reject"; reason?: string }> };
+  planHandlerRef?: { current?: (plan: string) => Promise<PlanDecision> };
   approvalHandlerRef?: { current?: (request: ApprovalRequest) => Promise<ApprovalDecision> };
   controller: BubbleTuiController;
   callbacks: PiAppCallbacks;
@@ -136,24 +137,12 @@ export interface PiTuiAppOptions {
   inputHistoryFilePath?: string;
   /** Override the native clipboard image reader (primarily for embedded hosts/tests). */
   readClipboardImage?: ClipboardImageReader;
+  /** Override feedback transport for embedded hosts and tests. */
+  submitFeedback?: (payload: FeedbackPayload) => Promise<SubmitResult>;
   /** Persisted theme preference and the terminal color detected before raw mode. */
   themeMode?: ThemeMode;
   detectedTheme?: ResolvedTheme;
   themeOverrides?: Record<string, string>;
-}
-
-function selectOverlayTheme(getTheme: () => Theme) {
-  return {
-    borderColor: (str: string) => themeDim(getTheme().border, str),
-    selectList: {
-      selectedPrefix: () => themeForeground(getTheme().accent, "› "),
-      unselectedPrefix: () => "  ",
-      selectedText: (str: string) => themeForeground(getTheme().inputText, str),
-      description: (str: string) => themeDim(getTheme().dim, str),
-      scrollInfo: (str: string) => themeDim(getTheme().dim, str),
-      noMatch: (str: string) => themeDim(getTheme().dim, str),
-    },
-  };
 }
 
 export class PiTuiApp {
@@ -376,8 +365,7 @@ export class PiTuiApp {
     const { planHandlerRef, approvalHandlerRef, questionController } = this.options;
     if (planHandlerRef) {
       planHandlerRef.current = async (plan: string) => {
-        const decision = await this.planDialog(plan);
-        return decision ? { action: "approve" as const } : { action: "reject" as const, reason: "User rejected the plan." };
+        return this.planDialog(plan);
       };
     }
     if (approvalHandlerRef) {
@@ -731,7 +719,7 @@ export class PiTuiApp {
       getThemeMode: () => this.themeMode,
       getResolvedTheme: () => this.resolvedTheme(),
       setThemeMode: (mode) => this.applyThemeMode(mode),
-      openFeedback: () => this.pushNotice("feedback dialog: coming to the pi TUI"),
+      openFeedback: (initialDescription) => this.openFeedback(initialDescription),
       openStats: () => this.openStats(),
       ...(this.tui.mode === "fullscreen"
         ? { openContextInfo: (snapshot: ContextUsageSnapshot) => this.openContextInfo(snapshot) }
@@ -1094,25 +1082,6 @@ export class PiTuiApp {
     this.tui.setFocus(component);
   }
 
-  private selectOverlay(items: SelectItem[], title: string, preview?: Component): Promise<SelectItem | null> {
-    return new Promise((resolve) => {
-      const pickerTheme = selectOverlayTheme(() => this.theme);
-      const list = new SelectList(items, 8, pickerTheme.selectList, {});
-      const header = new Text(themeForeground(this.theme.accent, title), 1, 0);
-      const box = new VStack(preview ? [header, preview, list] : [header, list]);
-      const handle = this.tui.showOverlay(box, { anchor: "center" });
-      list.onSelect = (item) => {
-        handle.hide();
-        resolve(item);
-      };
-      list.onCancel = () => {
-        handle.hide();
-        resolve(null);
-      };
-      this.tui.setFocus(list);
-    });
-  }
-
   private openProviderKeyPhase(providerId: string): void {
     const registry = this.options.registry;
     const provider = registry?.getConfigured().find((candidate) => candidate.id === providerId);
@@ -1349,17 +1318,66 @@ export class PiTuiApp {
     this.renderSnapshot();
   }
 
-  private async planDialog(plan: string): Promise<boolean> {
-    const preview = new Text(plan.split("\n").slice(0, 10).join("\n"), 1, 0);
-    const choice = await this.selectOverlay(
-      [
-        { value: "approve", label: "Approve", description: "Proceed with the plan" },
-        { value: "reject", label: "Reject", description: "Reject and ask for changes" },
-      ],
-      "Plan approval — Enter to confirm, Esc to reject",
-      preview,
-    );
-    return choice?.value === "approve";
+  private planDialog(plan: string): Promise<PlanDecision> {
+    return new Promise((resolve) => {
+      const dialog = new PlanDialogComponent(
+        this.tui,
+        plan,
+        () => this.tui.terminal.rows,
+        () => this.theme,
+      );
+      const handle = this.tui.showOverlay(dialog, {
+        anchor: "bottom-center",
+        width: "100%",
+        margin: { left: 1, right: 1 },
+      });
+      let settled = false;
+      const finish = (decision: PlanDecision) => {
+        if (settled) return;
+        settled = true;
+        handle.hide();
+        resolve(decision);
+      };
+      dialog.onApprove = (finalPlan) => finish({ action: "approve", plan: finalPlan });
+      dialog.onReject = () => finish({ action: "reject", reason: "User rejected the plan." });
+      this.tui.setFocus(dialog);
+    });
+  }
+
+  private openFeedback(initialDescription: string): void {
+    const collected = collectFeedback(this.options.agent, { description: "" });
+    const { description: _description, ...base } = collected;
+    let handle: { hide(): void } | undefined;
+    const close = () => {
+      handle?.hide();
+      this.tui.setFocus(this.editor);
+      this.renderSnapshot();
+    };
+    const recordResult = (result: FeedbackDialogResult) => {
+      if (result.kind === "success") {
+        this.pushNotice(`Feedback submitted: ${result.url}`);
+      } else if (result.kind === "error") {
+        this.appendTranscriptRow({
+          key: `feedback-error-${Date.now()}`,
+          role: "error",
+          content: `Feedback failed: ${result.message}`,
+        });
+      }
+    };
+    const dialog = new FeedbackDialogComponent(this.tui, base, initialDescription, {
+      getTerminalRows: () => this.tui.terminal.rows,
+      getTheme: () => this.theme,
+      submit: this.options.submitFeedback,
+      onDismiss: close,
+      onResult: recordResult,
+      onRender: () => this.renderSnapshot(),
+    });
+    handle = this.tui.showOverlay(dialog, {
+      anchor: "bottom-center",
+      width: "100%",
+      margin: { left: 1, right: 1 },
+    });
+    this.tui.setFocus(dialog);
   }
 
   private openWorkflowInspector(item: WorkflowPaneItem): void {
@@ -1627,5 +1645,3 @@ export class PiTuiApp {
     });
   }
 }
-
-void ({} as Component | undefined);

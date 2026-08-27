@@ -5,6 +5,8 @@ import { QuestionController, QuestionRejectedError } from "../question/index.js"
 import { BashAllowlist } from "../approval/session-cache.js";
 import type { StreamingTailState } from "../tui/components/streaming-message.js";
 import type { DisplayMessage } from "../tui/model/display-history.js";
+import type { PlanDecision } from "../types.js";
+import type { FeedbackPayload, SubmitResult } from "../feedback/types.js";
 
 class RecordingTerminal extends VirtualTerminal {
   readonly output: string[] = [];
@@ -592,7 +594,7 @@ describe("main pi-tui running input", () => {
     let running = false;
     let cancelCalls = 0;
     const approvalHandlerRef: { current?: (request: unknown) => Promise<unknown> } = {};
-    const planHandlerRef: { current?: (plan: string) => Promise<unknown> } = {};
+    const planHandlerRef: { current?: (plan: string) => Promise<PlanDecision> } = {};
     const controller = {
       subscribe: () => () => {},
       getTranscript: () => [],
@@ -632,7 +634,7 @@ describe("main pi-tui running input", () => {
       },
       approvalHandlerRef: approvalHandlerRef as never,
       bashAllowlist,
-      planHandlerRef: planHandlerRef as never,
+      planHandlerRef,
       terminal,
       uiMode: "regular",
     });
@@ -668,8 +670,36 @@ describe("main pi-tui running input", () => {
       expect(turns).toEqual(["fourth message", "fifth message"]);
 
       const planApproved = planHandlerRef.current!("1. inspect\n2. implement");
+      await terminal.waitForRender();
+      expect(terminal.getViewport().join("\n")).toContain("Proposed plan");
       terminal.sendInput("\r");
-      await expect(planApproved).resolves.toEqual({ action: "approve" });
+      await expect(planApproved).resolves.toEqual({
+        action: "approve",
+        plan: "1. inspect\n2. implement",
+      });
+
+      const planEdited = planHandlerRef.current!("1. inspect\n2. implement");
+      terminal.sendInput("e");
+      terminal.sendInput(" carefully");
+      terminal.sendInput("\x13");
+      await expect(planEdited).resolves.toEqual({
+        action: "approve",
+        plan: "1. inspect\n2. implement carefully",
+      });
+
+      const planEditCancelled = planHandlerRef.current!("keep original");
+      terminal.sendInput("e");
+      terminal.sendInput(" changed");
+      terminal.sendInput("\x1b");
+      terminal.sendInput("\r");
+      await expect(planEditCancelled).resolves.toEqual({ action: "approve", plan: "keep original" });
+
+      const planRejected = planHandlerRef.current!("reject this");
+      terminal.sendInput("\x1b");
+      await expect(planRejected).resolves.toEqual({
+        action: "reject",
+        reason: "User rejected the plan.",
+      });
 
       terminal.sendInput("sixth message");
       terminal.sendInput("\r");
@@ -688,6 +718,88 @@ describe("main pi-tui running input", () => {
       expect(bashAllowlist.matches("npm run test")).toBe(true);
       expect(bashAllowlist.matches("git status")).toBe(false);
       expect(modes).toEqual([]);
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("opens /feedback in place, submits the reviewed payload, and restores composer focus", async () => {
+    const terminal = new VirtualTerminal(100, 22);
+    const turns: string[] = [];
+    const transcript: DisplayMessage[] = [];
+    const submitFeedback = vi.fn<(payload: FeedbackPayload) => Promise<SubmitResult>>(async () => ({
+      url: "https://github.com/DylanDDeng/bubble/issues/88",
+      number: 88,
+    }));
+    const controller = {
+      subscribe: () => () => {},
+      getTranscript: () => transcript,
+      isRunning: () => false,
+      getStreamingTail: () => null,
+      pendingSteerCount: () => 0,
+      queuedInputCount: () => 0,
+      steer: () => false,
+      cancelActiveRun: () => false,
+      runTurn: async (content: string) => { turns.push(content); },
+      appendDisplayMessage: (message: DisplayMessage) => { transcript.push(message); },
+      clearTranscript: () => {},
+      shutdown: () => ({ reason: "test", wallMs: 0 }),
+    };
+    const agent = {
+      messages: [
+        { role: "user", content: "previous question" },
+        { role: "assistant", content: "previous answer", toolCalls: [] },
+      ],
+      model: "test-model",
+      providerId: "test-provider",
+      thinking: "medium",
+      mode: "default",
+      getContextUsageSnapshot: () => ({ usedTokens: 0, contextWindow: 1_000 }),
+    };
+    const app = new PiTuiApp({
+      agent: agent as never,
+      sessionManager: { getSessionFile: () => "/s.jsonl" } as never,
+      controller: controller as never,
+      callbacks: {
+        onExitRequest: () => {},
+        onClearTranscript: () => {},
+        onThemeToggle: () => {},
+      },
+      submitFeedback,
+      terminal,
+      uiMode: "regular",
+    });
+
+    app.start();
+    try {
+      terminal.sendInput("/feedback cursor jumps after submit");
+      terminal.sendInput("\r");
+      await terminal.waitForRender();
+      expect(terminal.getViewport().join("\n")).toContain("Send feedback");
+      expect(terminal.getViewport().join("\n")).toContain("PUBLIC GitHub issue");
+
+      terminal.sendInput("\t");
+      await terminal.waitForRender();
+      expect(terminal.getViewport().join("\n")).toContain("Payload preview");
+      expect(terminal.getViewport().join("\n")).toContain("cursor jumps after submit");
+      terminal.sendInput("\t");
+      terminal.sendInput("\x13");
+
+      await vi.waitFor(() => expect(submitFeedback).toHaveBeenCalledTimes(1));
+      await terminal.waitForRender();
+      expect(submitFeedback.mock.calls[0]![0].description).toBe("cursor jumps after submit");
+      expect(submitFeedback.mock.calls[0]![0].transcript).toHaveLength(2);
+      expect(terminal.getViewport().join("\n")).toContain("Issue #88 was created");
+      expect(transcript.at(-1)).toMatchObject({
+        role: "assistant",
+        content: "Feedback submitted: https://github.com/DylanDDeng/bubble/issues/88",
+      });
+
+      terminal.sendInput("\r");
+      terminal.sendInput("after feedback");
+      terminal.sendInput("\r");
+      await terminal.waitForRender();
+      expect(turns).toEqual(["after feedback"]);
     } finally {
       app.dispose();
     }

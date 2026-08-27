@@ -85,7 +85,7 @@ export async function runTui(agent: Agent, _args: unknown, options: RunTuiOption
     mcpManager: options.mcpManager,
     lspService: options.lspService,
     questionController: options.questionController,
-    planHandlerRef: options.planHandlerRef as never,
+    planHandlerRef: options.planHandlerRef,
     approvalHandlerRef: options.approvalHandlerRef,
     controller,
     updateNotice: options.updateNotice,
