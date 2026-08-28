@@ -122,7 +122,10 @@ export interface PiTuiAppOptions {
   approvalHandlerRef?: { current?: (request: ApprovalRequest) => Promise<ApprovalDecision> };
   controller: BubbleTuiController;
   callbacks: PiAppCallbacks;
+  /** Update notice already known from the local startup cache. */
   updateNotice?: string;
+  /** Late registry result that should surface without restarting the TUI. */
+  updateNoticeRefresh?: Promise<string | null>;
   flushMemory?: () => Promise<void>;
   runMemoryCompaction?: () => Promise<string>;
   runMemorySummary?: (scope?: string) => Promise<string>;
@@ -174,6 +177,8 @@ export class PiTuiApp {
   private gitBranch: string | undefined;
   private metadataManager: SessionManager | null = null;
   private metadataUnsubscribe: (() => void) | null = null;
+  private currentUpdateNotice?: string;
+  private updateNoticeRefreshStarted = false;
   private showReasoning = false;
   private verboseTrace = false;
   private controllerUnsubscribe: (() => void) | null = null;
@@ -200,6 +205,7 @@ export class PiTuiApp {
 
   constructor(private readonly options: PiTuiAppOptions) {
     const terminal = options.terminal ?? new ProcessTerminal();
+    this.currentUpdateNotice = options.updateNotice;
     this.themeMode = options.themeMode ?? "auto";
     this.detectedTheme = options.detectedTheme
       ?? (this.themeMode === "auto" ? "dark" : this.themeMode);
@@ -273,14 +279,14 @@ export class PiTuiApp {
       { onTraceAction: (action) => this.handleTraceAction(action) },
     );
     this.welcome = new WelcomeBannerComponent(() => {
-      const { agent, updateNotice } = this.options;
+      const { agent } = this.options;
       return {
         cwd: friendlyCwd(process.cwd()),
         session: sessionBasename(this.activeSessionManager().getSessionFile()),
         model: agent.model,
         provider: agent.providerId,
         thinking: agent.thinking,
-        updateNotice,
+        updateNotice: this.currentUpdateNotice,
         theme: this.theme,
       };
     });
@@ -1603,6 +1609,28 @@ export class PiTuiApp {
   start(): void {
     this.tui.start();
     this.renderSnapshot();
+    this.watchUpdateNoticeRefresh();
+  }
+
+  private watchUpdateNoticeRefresh(): void {
+    if (this.updateNoticeRefreshStarted) return;
+    this.updateNoticeRefreshStarted = true;
+    const refresh = this.options.updateNoticeRefresh;
+    if (!refresh) return;
+    void refresh.then((notice) => {
+      if (this.disposed || !notice || notice === this.currentUpdateNotice) return;
+      this.currentUpdateNotice = notice;
+      // The root fullscreen renderer includes the welcome card. The legacy
+      // main-to-fullscreen transition does not, so it needs a transcript row
+      // even before the first user turn.
+      if (this.fullscreen || this.options.controller.getTranscript().length > 0) {
+        this.pushNotice(notice);
+      } else {
+        this.renderSnapshot();
+      }
+    }).catch(() => {
+      // Update checks are best-effort and must never disturb an active session.
+    });
   }
 
   dispose(): void {

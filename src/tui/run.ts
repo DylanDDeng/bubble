@@ -89,6 +89,7 @@ export async function runTui(agent: Agent, _args: unknown, options: RunTuiOption
     approvalHandlerRef: options.approvalHandlerRef,
     controller,
     updateNotice: options.updateNotice,
+    updateNoticeRefresh: options.updateNoticeRefresh,
     flushMemory: options.flushMemory,
     runMemoryCompaction: options.runMemoryCompaction,
     runMemorySummary: options.runMemorySummary,
