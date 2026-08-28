@@ -14,7 +14,8 @@
  * can land without its executable bit on macOS. The harness repairs it
  * in-place at require time (one chmod) rather than failing mysteriously.
  */
-import { chmodSync, existsSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import xterm from "@xterm/headless";
@@ -67,6 +68,8 @@ export async function startTui(options: {
     throw new Error(`TUI binary not found at ${bin} — run npm run build first`);
   }
 
+  const explicitBubbleHome = options.env?.BUBBLE_HOME;
+  const bubbleHome = explicitBubbleHome ?? mkdtempSync(join(tmpdir(), "bubble-tui-e2e-"));
   const proc = pty.spawn(process.execPath, [bin, ...(options.args ?? [])], {
     name: "xterm-256color",
     cols,
@@ -75,7 +78,7 @@ export async function startTui(options: {
     env: {
       ...process.env,
       // Keep the harness hermetic: no user config, no real API keys.
-      BUBBLE_HOME: join(repoRoot, ".e2e-tmp/bubble-home"),
+      BUBBLE_HOME: bubbleHome,
       ...options.env,
     },
   });
@@ -85,6 +88,14 @@ export async function startTui(options: {
     allowProposedApi: true,
     disableStdin: true,
   });
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    screen.dispose();
+    if (!explicitBubbleHome) rmSync(bubbleHome, { recursive: true, force: true });
+  };
+  proc.onExit(cleanup);
 
   let buffered = "";
   proc.onData((chunk) => {

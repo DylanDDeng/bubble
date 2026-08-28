@@ -7,9 +7,6 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 export default defineConfig({
   resolve: {
     alias: [
-      // Vendored renderer: tests exercise its TS source directly so vendor
-      // changes are picked up without a rebuild. Longest prefix first so the
-      // bare package alias does not swallow the /testing subpath.
       {
         find: "@bubblebrain-ai/pi-tui/testing",
         replacement: path.resolve(root, "packages/pi-tui/src/testing.ts"),
@@ -23,17 +20,9 @@ export default defineConfig({
   test: {
     globals: true,
     environment: "node",
-    // Native PTY suites own real subprocesses and terminal file descriptors.
-    // Run them through `npm run test:e2e` with one worker instead of competing
-    // with the unit-test pool.
-    exclude: [
-      "**/node_modules/**",
-      "dist",
-      "services/**",
-      "packages/**",
-      "src/__tests__/tui-e2e/**",
-    ],
-    // Isolates BUBBLE_HOME so no test can write the developer's real ~/.bubble.
+    include: ["src/__tests__/tui-e2e/*.e2e.test.ts"],
+    fileParallelism: false,
+    maxWorkers: 1,
     setupFiles: ["./src/__tests__/setup/isolate-bubble-home.ts"],
   },
 });

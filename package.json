@@ -31,6 +31,7 @@
     "build": "npm run build:vendor && rm -rf dist && tsc && chmod +x dist/bin.js dist/main.js",
     "build:vendor": "tsc -p packages/pi-tui/tsconfig.build.json",
     "test:vendor": "cd packages/pi-tui && node --test --experimental-strip-types --no-warnings \"test/*.test.ts\"",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "dev": "tsc && node dist/main.js",
     "refresh-models": "NODE_USE_ENV_PROXY=1 node scripts/generate-model-data.mjs",
     "eval": "tsx evals/run.ts",

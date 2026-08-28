@@ -21,8 +21,11 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22.19.0
           cache: npm
+
+      - name: Install runtime search dependency
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
 
       - name: Install dependencies
         run: npm ci
@@ -32,3 +35,9 @@ jobs:
 
       - name: Test
         run: npm test
+
+      - name: Test vendored Pi TUI
+        run: npm run test:vendor
+
+      - name: Test terminal PTY flows
+        run: npm run test:e2e

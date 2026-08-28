@@ -1,16 +1,15 @@
 /**
  * PTY e2e: the resize bug class that motivated the pi-tui rewrite.
  *
- * Starts the *current* (Ink) TUI in a real PTY, runs a scripted session with
+ * Starts the production Pi TUI in a real PTY, runs a scripted session with
  * width changes mid-stream, and asserts the invariants that keep breaking:
  *   - the CLI starts and renders its composer
  *   - narrowing to a split-pane width never wraps a full-width composer rule
  *     into extra physical rows
  *   - the process still exits cleanly afterwards (terminal restored)
  *
- * When the pi-tui TUI lands, this same file gates it: same script, stronger
- * assertions (no duplicate transcript, no blank bands) once the renderer
- * exposes them.
+ * The same script gates composer liveness, terminal restoration, and resize
+ * behavior without depending on a user's provider configuration.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTui, type PtySession } from "./pty-harness.js";
