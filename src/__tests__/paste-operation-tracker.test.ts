@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PasteOperationTracker } from "../tui-ink/paste-operation-tracker.js";
+import { PasteOperationTracker } from "../tui/model/paste-operation-tracker.js";
 
 describe("paste operation tracker", () => {
   it("keeps a newer paste pending when an older paste finishes", () => {

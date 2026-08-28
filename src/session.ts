@@ -60,6 +60,7 @@ export class SessionManager {
   private sessionFile: string;
   private log = new SessionLog();
   private checkpoints?: CheckpointStore;
+  private readonly metadataListeners = new Set<(metadata: SessionMetadata) => void>();
 
   constructor(sessionFile: string) {
     this.sessionFile = sessionFile;
@@ -163,6 +164,16 @@ export class SessionManager {
     return this.log.getMetadata();
   }
 
+  /**
+   * Subscribe to committed metadata changes (title, model, goal, runtime, ...).
+   * Renderers use this instead of polling the session file, so async title
+   * generation and runtime switches update fixed UI surfaces immediately.
+   */
+  subscribeMetadata(listener: (metadata: SessionMetadata) => void): () => void {
+    this.metadataListeners.add(listener);
+    return () => this.metadataListeners.delete(listener);
+  }
+
   getOrCreatePromptCacheKey(): string {
     const existing = this.log.getMetadata().promptCacheKey;
     if (existing) return existing;
@@ -175,6 +186,15 @@ export class SessionManager {
   setMetadata(metadata: SessionMetadata) {
     const nextEntries = this.log.setMetadata(metadata);
     this.rewrite(nextEntries);
+    const committed = this.log.getMetadata();
+    for (const listener of this.metadataListeners) {
+      try {
+        listener(committed);
+      } catch {
+        // Persistence already committed. A UI observer must never turn a
+        // successful metadata write into an application-level failure.
+      }
+    }
   }
 
   updateMetadata(patch: Partial<SessionMetadata>) {

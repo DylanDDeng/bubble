@@ -142,13 +142,16 @@ export async function compactMessagesWithLLM(
  * `oldMessages`. Shared by the non-streaming overflow path (`generateSummary`)
  * and the streaming manual `/compact` path (`Agent.summarizeForCompaction`).
  */
-export function buildCompactionPromptMessages(oldMessages: Message[]): ProviderMessage[] {
+export function buildCompactionPromptMessages(oldMessages: Message[], userContext?: string): ProviderMessage[] {
   const transcript = serializeTranscript(oldMessages);
+  const preservationNote = userContext?.trim()
+    ? `\n\nUser-provided context for this compaction:\n${userContext.trim()}\n\nIncorporate this context prominently in the relevant sections.`
+    : "";
   return [
     { role: "system", content: COMPACT_SYSTEM_PROMPT },
     {
       role: "user",
-      content: `Conversation to summarize:\n\n${transcript}\n\n---\n\n${COMPACT_INSTRUCTIONS}`,
+      content: `Conversation to summarize:\n\n${transcript}\n\n---\n\n${COMPACT_INSTRUCTIONS}${preservationNote}`,
     },
   ];
 }

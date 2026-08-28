@@ -4,14 +4,43 @@ import {
   executeCommandBlock,
   shouldInlineExecuteCommand,
   traceGroupLabel,
-} from "../tui/trace-groups.js";
-import type { DisplayToolCall } from "../tui/display-history.js";
+} from "../tui/model/trace-groups.js";
+import type { DisplayToolCall } from "../tui/model/display-history.js";
 
 function bashTool(args: Record<string, unknown>, result = "ok"): DisplayToolCall {
   return { id: `bash:${JSON.stringify(args)}`, name: "bash", args, result };
 }
 
 describe("execute trace groups", () => {
+  it("classifies read-only bash commands by normalized intent before the result arrives", () => {
+    const head = buildTraceGroups([bashTool({ command: "head -30 design-qa.md" })])[0];
+    expect(head.kind).toBe("read");
+    expect(head.title).toBe("Read");
+    expect(head.items).toEqual(["design-qa.md"]);
+
+    const compound = buildTraceGroups([
+      bashTool({ command: "git diff --stat && head -30 design-qa.md" }),
+    ])[0];
+    expect(compound.kind).toBe("execute");
+  });
+
+  it("honors completed bash read metadata and groups it with native Read calls", () => {
+    const groups = buildTraceGroups([
+      {
+        id: "bash-read",
+        name: "bash",
+        args: { command: "custom-reader design-qa.md" },
+        result: "contents",
+        metadata: { kind: "read", path: "design-qa.md" },
+      },
+      { id: "native-read", name: "read", args: { path: "README.md" }, result: "contents" },
+    ]);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].kind).toBe("read");
+    expect(groups[0].items).toEqual(["design-qa.md", "README.md"]);
+  });
+
   it("captures the model-provided description and preserves command line structure", () => {
     const command = "echo start \\\n  && cp \"$SRC\" \"$DST\"   \n  && ls -la";
     const groups = buildTraceGroups([bashTool({ command, description: "备份配置文件" })]);
@@ -53,5 +82,37 @@ describe("execute trace groups", () => {
     expect(block.lines).toHaveLength(4);
     expect(block.lines[0]).toBe("echo line-0");
     expect(block.omitted).toBe(3);
+  });
+
+  it("projects background Execute calls through started and terminal lifecycle labels", () => {
+    const started = buildTraceGroups([{
+      id: "call-bg",
+      name: "bash",
+      args: { command: "npm test", description: "Run tests" },
+      status: "completed",
+      startedAt: 1_000,
+      metadata: { kind: "shell", background: true, taskId: "task_0001" },
+    }])[0]!;
+    expect(started.title).toBe("Task started");
+    expect(started.statusLabel).toBe("task_0001");
+
+    const completed = buildTraceGroups([{
+      id: "task-lifecycle:task_0001:3000",
+      name: "bash",
+      args: { command: "npm test", description: "Run tests" },
+      status: "completed",
+      startedAt: 1_000,
+      metadata: {
+        kind: "shell",
+        background: true,
+        taskId: "task_0001",
+        taskLifecycle: "completed",
+        endedAt: 3_000,
+        exitCode: 0,
+        outputLines: 12,
+      },
+    }])[0]!;
+    expect(completed.title).toBe("Task completed");
+    expect(completed.statusLabel).toBe("task_0001 · in 2s · exit 0 · 12 lines");
   });
 });

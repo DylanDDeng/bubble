@@ -78,6 +78,67 @@ describe("createProviderInstance", () => {
     expect(chunks.some((chunk) => chunk.type === "usage")).toBe(true);
   });
 
+  it("sends DeepSeek Vision image blocks with V4 thinking fields", async () => {
+    let body: any;
+    createMock.mockImplementation(async (input) => {
+      body = input;
+      return fromArray([{ choices: [{ delta: { content: "cat" }, finish_reason: "stop" }] }]);
+    });
+
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({
+      providerId: "deepseek",
+      apiKey: "sk-test",
+      baseURL: "https://api.deepseek.com",
+    });
+
+    await collect(provider.streamChat([{
+      role: "user",
+      content: [
+        { type: "text", text: "What is in this image?" },
+        { type: "image_url", image_url: { url: "data:image/png;base64,aGVsbG8=" } },
+      ],
+    }], {
+      model: "deepseek-v4-flash-vision-exp",
+      thinkingLevel: "high",
+    }));
+
+    expect(body.model).toBe("deepseek-v4-flash-vision-exp");
+    expect(body.messages[0].content).toEqual([
+      { type: "text", text: "What is in this image?" },
+      { type: "image_url", image_url: { url: "data:image/png;base64,aGVsbG8=" } },
+    ]);
+    expect(body.thinking).toEqual({ type: "enabled" });
+    expect(body.reasoning_effort).toBe("high");
+    expect(body.stream_options).toEqual({ include_usage: true });
+  });
+
+  it.each([
+    ["off", { type: "disabled" }, undefined],
+    ["low", { type: "enabled" }, "low"],
+  ] as const)("serializes DeepSeek Vision %s thinking mode", async (thinkingLevel, thinking, effort) => {
+    let body: any;
+    createMock.mockImplementation(async (input) => {
+      body = input;
+      return fromArray([{ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }]);
+    });
+
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({
+      providerId: "deepseek",
+      apiKey: "sk-test",
+      baseURL: "https://api.deepseek.com",
+    });
+
+    await collect(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "deepseek-v4-flash-vision-exp",
+      thinkingLevel,
+    }));
+
+    expect(body.thinking).toEqual(thinking);
+    expect(body.reasoning_effort).toBe(effort);
+  });
+
   it.each([
     ["openai", "https://api.openai.com/v1", "gpt-4o"],
     ["moonshot-cn", "https://api.moonshot.cn/v1", "kimi-k2.7-code"],
@@ -212,6 +273,109 @@ describe("createProviderInstance", () => {
     expect(body.reasoning_effort).toBe("high");
     expect(body.reasoning).toBeUndefined();
     expect(body.messages[0].reasoning_content).toBeUndefined();
+  });
+
+  it("sends the selected OpenRouter reasoning effort", async () => {
+    let body: any;
+    createMock.mockImplementation(async (input) => {
+      body = input;
+      return fromArray([{ choices: [{ delta: {}, finish_reason: "stop" }] }]);
+    });
+
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({
+      providerId: "openrouter",
+      apiKey: "sk-or-test",
+      baseURL: "https://openrouter.ai/api/v1",
+    });
+
+    await collect(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "stealth/ox-alpha",
+      thinkingLevel: "high",
+    }));
+
+    expect(body.model).toBe("stealth/ox-alpha");
+    expect(body.reasoning).toEqual({ effort: "high" });
+    expect(body.reasoning_effort).toBeUndefined();
+  });
+
+  it("surfaces OpenRouter terminal SSE errors as retryable stream failures", async () => {
+    createMock.mockImplementation(async () => fromArray([{
+      provider: "Ox Alpha upstream",
+      error: {
+        code: 504,
+        message: "Provider timed out during generation",
+        metadata: { error_type: "provider_timeout" },
+      },
+      choices: [{ delta: { content: "" }, finish_reason: "error" }],
+    }]));
+
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({
+      providerId: "openrouter",
+      apiKey: "sk-or-test",
+      baseURL: "https://openrouter.ai/api/v1",
+    });
+
+    await expect(collect(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "stealth/ox-alpha",
+      thinkingLevel: "high",
+    }))).rejects.toMatchObject({
+      name: "ProviderStreamInterruptedError",
+      maxRetries: 1,
+      message: expect.stringContaining("Provider timed out during generation"),
+    });
+  });
+
+  it("defers OpenRouter streamed rate limits to the subagent scheduler", async () => {
+    createMock.mockImplementation(async () => fromArray([{
+      error: {
+        code: 429,
+        message: "Rate limit exceeded",
+        metadata: {
+          error_type: "rate_limit_exceeded",
+          availability: { retry_after: 3 },
+        },
+      },
+      choices: [{ delta: { content: "" }, finish_reason: "error" }],
+    }]));
+
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({
+      providerId: "openrouter",
+      apiKey: "sk-or-test",
+      baseURL: "https://openrouter.ai/api/v1",
+    });
+
+    await expect(collect(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "stealth/ox-alpha",
+      rateLimitPolicy: "defer",
+    }))).rejects.toMatchObject({
+      name: "RateLimitError",
+      status: 429,
+      retryAfterMs: 3_000,
+      message: expect.stringContaining("Rate limit exceeded"),
+    });
+  });
+
+  it("rejects non-Ox OpenRouter models before any provider request", async () => {
+    createMock.mockImplementation(async () =>
+      fromArray([{ choices: [{ delta: {}, finish_reason: "stop" }] }]));
+
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({
+      providerId: "openrouter",
+      apiKey: "sk-or-test",
+      baseURL: "https://openrouter.ai/api/v1",
+    });
+
+    await expect(collect(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "openai/gpt-5.6",
+    }))).rejects.toThrow(/openrouter.*fixed.*stealth\/ox-alpha/i);
+    await expect(provider.complete([{ role: "user", content: "hi" }], {
+      model: "anthropic/claude-sonnet-4.6",
+    })).rejects.toThrow(/openrouter.*fixed.*stealth\/ox-alpha/i);
+    expect(createMock).not.toHaveBeenCalled();
   });
 
   it("uses Volcengine Ark Responses API for Doubao", async () => {

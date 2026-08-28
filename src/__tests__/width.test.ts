@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { visualWidth, graphemeWidth, ambiguousIsWide, setAmbiguousWide } from "../tui-ink/width.js";
+import { visualWidth, graphemeWidth, ambiguousIsWide, setAmbiguousWide } from "../tui/model/width.js";
 
 afterEach(() => setAmbiguousWide(false));
 

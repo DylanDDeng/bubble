@@ -12,9 +12,10 @@ import type { LspService } from "../lsp/index.js";
 import { FileStateTracker } from "./file-state.js";
 import type { ReadHistoryEntry } from "./file-state.js";
 import { resolveToolPath } from "./path-utils.js";
+import { utf8Prefix } from "../context/tool-output-truncate.js";
 
 const MAX_LINES = 2500;
-const MAX_BYTES = 256 * 1024;
+const MAX_BYTES = 64 * 1024;
 
 const FILE_UNCHANGED_STUB =
   "File unchanged since last read. The earlier read tool_result in this conversation is still current — refer to that instead of re-reading. If you need a different range, call read again with explicit offset/limit; if the file has actually changed, edit or write will refresh this cache automatically.";
@@ -145,28 +146,50 @@ export function createReadTool(cwd: string, approval?: ApprovalController, lsp?:
       const totalLines = lines.length;
       const effectiveLimit = argLimit !== undefined ? argLimit : totalLines;
 
-      let sliced = lines.slice(effectiveOffset, effectiveOffset + effectiveLimit);
-      let truncated = false;
+      const requestedLines = lines.slice(effectiveOffset, effectiveOffset + effectiveLimit);
+      const lineLimited = requestedLines.length > MAX_LINES;
+      const candidates = requestedLines.slice(0, MAX_LINES);
+      const prefix = autoAdvanceNote ? `${autoAdvanceNote}\n` : "";
 
-      if (sliced.length > MAX_LINES) {
-        sliced = sliced.slice(0, MAX_LINES);
-        truncated = true;
-      }
+      let returnedLines = candidates.length;
+      let partialFirstLine = false;
+      let body = candidates.join("\n");
+      let truncated = lineLimited || Buffer.byteLength(`${prefix}${body}`, "utf8") > MAX_BYTES;
 
-      let result = sliced.join("\n");
-      const byteLength = Buffer.byteLength(result, "utf-8");
-      if (byteLength > MAX_BYTES) {
-        result = Buffer.from(result, "utf-8").subarray(0, MAX_BYTES).toString("utf-8");
-        truncated = true;
-      }
-
-      if (autoAdvanceNote) {
-        result = `${autoAdvanceNote}\n${result}`;
-      }
       if (truncated) {
-        const lastLine = effectiveOffset + sliced.length;
-        result += `\n[Output truncated at line ${lastLine} of ${totalLines}. Call read again on the same path to auto-advance to the next page, or pass explicit offset/limit.]`;
+        const accepted: string[] = [];
+        for (const line of candidates) {
+          const next = accepted.length === 0 ? line : `${accepted.join("\n")}\n${line}`;
+          const nextReturnedLines = accepted.length + 1;
+          const marker = readTruncationMarker(
+            effectiveOffset + nextReturnedLines,
+            totalLines,
+          );
+          if (Buffer.byteLength(`${prefix}${next}${marker}`, "utf8") > MAX_BYTES) break;
+          accepted.push(line);
+        }
+
+        returnedLines = accepted.length;
+        body = accepted.join("\n");
+
+        // A pathological single line can exceed the whole page. Preserve a
+        // UTF-8-safe prefix and advance by exactly that represented line so
+        // auto-pagination never loops forever or skips multiple unseen lines.
+        if (returnedLines === 0 && candidates.length > 0) {
+          returnedLines = 1;
+          partialFirstLine = true;
+          const marker = readTruncationMarker(effectiveOffset + returnedLines, totalLines);
+          const available = Math.max(
+            0,
+            MAX_BYTES - Buffer.byteLength(`${prefix}${marker}`, "utf8"),
+          );
+          body = utf8Prefix(candidates[0], available);
+        }
+
+        body += readTruncationMarker(effectiveOffset + returnedLines, totalLines);
       }
+
+      const result = `${prefix}${body}`;
 
       if (currentMtimeMs !== undefined) {
         setHistory(filePath, {
@@ -174,7 +197,7 @@ export function createReadTool(cwd: string, approval?: ApprovalController, lsp?:
           argLimit,
           effectiveOffset,
           effectiveLimit,
-          returnedLines: sliced.length,
+          returnedLines,
           totalLines,
           mtimeMs: currentMtimeMs,
           truncated,
@@ -183,7 +206,7 @@ export function createReadTool(cwd: string, approval?: ApprovalController, lsp?:
 
       const isFullRead = effectiveOffset === 0
         && !truncated
-        && effectiveOffset + effectiveLimit >= totalLines;
+        && effectiveOffset + returnedLines >= totalLines;
       if (isFullRead) {
         await fileState?.observe(filePath, "read", content).catch(() => undefined);
       }
@@ -197,14 +220,19 @@ export function createReadTool(cwd: string, approval?: ApprovalController, lsp?:
           kind: "read",
           path: filePath,
           offset: effectiveOffset + 1,
-          lines: sliced.length,
+          lines: returnedLines,
           total: totalLines,
           ...(autoAdvanceNote ? { autoAdvanced: true } : {}),
           ...(truncated ? { truncated: true } : {}),
+          ...(partialFirstLine ? { partialFirstLine: true } : {}),
         },
       };
     },
   };
+}
+
+function readTruncationMarker(lastLine: number, totalLines: number): string {
+  return `\n[Output truncated at line ${lastLine} of ${totalLines}. Call read again on the same path to auto-advance to the next page, or pass explicit offset/limit.]`;
 }
 
 async function readFileNotFoundMessage(filePath: string, cwd: string, error: any): Promise<string> {

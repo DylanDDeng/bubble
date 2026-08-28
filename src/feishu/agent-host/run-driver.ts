@@ -40,6 +40,7 @@ import type { ScopeKey } from "../types.js";
 import type { FeishuRuntimeDeps } from "./runtime-deps.js";
 import type { FeishuApprovalUI } from "./approval-ui.js";
 import type { SessionBinder } from "../scope/session-binder.js";
+import { assertProviderModelAllowed } from "../../provider-model-policy.js";
 
 export interface RunDriverOptions {
   channel: BubbleChannel;
@@ -347,6 +348,7 @@ export class RunDriver {
       ? decodeModel(normalizedConfigured)
       : { providerId: undefined, modelId: "" };
     const activeProviderId = effectiveProviderId || fallbackProviderId;
+    if (effectiveModelId) assertProviderModelAllowed(activeProviderId, effectiveModelId);
     if (registry.supportsOAuth(activeProviderId) && registry.getAuthStorage().has(activeProviderId)) {
       await registry.prepareProvider(activeProviderId);
     }

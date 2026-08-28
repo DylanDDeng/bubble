@@ -27,6 +27,38 @@ export function isRateLimitError(error: unknown): error is RateLimitError {
 }
 
 /**
+ * A provider accepted the HTTP request but terminated generation with an
+ * in-band protocol error (for example OpenRouter's HTTP-200 SSE error chunk).
+ * Keeping the wire status/type structured prevents the agent from mistaking
+ * the terminal event for a successful empty response.
+ */
+export class ProviderResponseError extends Error {
+  readonly isProviderResponseError = true;
+  readonly status?: number;
+  readonly errorType?: string;
+  readonly retryAfterMs?: number;
+
+  constructor(message: string, options: {
+    status?: number;
+    errorType?: string;
+    retryAfterMs?: number;
+    cause?: unknown;
+  } = {}) {
+    super(message, options.cause !== undefined ? { cause: options.cause } : undefined);
+    this.name = "ProviderResponseError";
+    this.status = options.status;
+    this.errorType = options.errorType;
+    this.retryAfterMs = options.retryAfterMs;
+  }
+}
+
+export function isProviderResponseError(error: unknown): error is ProviderResponseError {
+  return !!error
+    && typeof error === "object"
+    && (error as { isProviderResponseError?: unknown }).isProviderResponseError === true;
+}
+
+/**
  * How a provider transport should treat HTTP 429 responses.
  *
  * - "handle": retry inside the transport with backoff (parent traffic default).

@@ -12,13 +12,18 @@ const usage: TokenUsage = {
 describe("attachTurnCost", () => {
   it("prices a turn_end event for a model with a pricing entry", () => {
     const event: AgentEvent = { type: "turn_end", usage, willContinue: false };
-    const enriched = attachTurnCost(event, "deepseek", "deepseek-v4-flash");
+    const enriched = attachTurnCost(
+      event,
+      "deepseek",
+      "deepseek-v4-flash",
+      new Date("2026-08-21T05:00:00Z"),
+    );
 
     expect(enriched.type).toBe("turn_end");
     if (enriched.type !== "turn_end") return;
     expect(enriched.cost).toEqual({
       currency: "USD",
-      cost: 0.4 * 0.0028 + 0.6 * 0.14 + 0.5 * 0.28,
+      cost: 0.4 * 0.007 + 0.6 * 0.22 + 0.5 * 0.66,
       estimated: false,
     });
     // The original event stays untouched — enrichment returns a copy.
@@ -46,9 +51,14 @@ describe("attachTurnCost", () => {
       usage: { promptTokens: 1_000_000, completionTokens: 0 },
       willContinue: true,
     };
-    const enriched = attachTurnCost(event, "deepseek", "deepseek-v4-pro");
+    const enriched = attachTurnCost(
+      event,
+      "deepseek",
+      "deepseek-v4-pro",
+      new Date("2026-08-21T02:00:00Z"),
+    );
     if (enriched.type !== "turn_end") return;
     expect(enriched.cost?.estimated).toBe(true);
-    expect(enriched.cost?.cost).toBeCloseTo(0.435);
+    expect(enriched.cost?.cost).toBeCloseTo(1.32);
   });
 });

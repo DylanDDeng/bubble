@@ -1,9 +1,9 @@
 /**
- * Ctrl+G send-to-background promotion channel (background-tasks design §2.5).
+ * Ctrl+B send-to-background promotion channel (background-tasks design §2.5).
  *
  * A running foreground bash tool call registers a promotion handler keyed by
  * its toolCall id at spawn; the TUI requests promotion when the user presses
- * Ctrl+G. The handler returns the new task id on success, or undefined when
+ * Ctrl+B. The handler returns the new task id on success, or undefined when
  * it is too late (the command already reached a terminal state — exit,
  * timeout, cancel — a benign race, not an error).
  */

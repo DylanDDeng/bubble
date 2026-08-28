@@ -203,6 +203,40 @@ describe("Ink model switching", () => {
       .toBe("Failed to switch model to gpt-5.5: OAuth refresh failed");
   });
 
+  it("rejects a non-Ox OpenRouter switch before any state or provider work", async () => {
+    const a = agent();
+    const prepareProvider = vi.fn(async () => {});
+    const createProvider = vi.fn(() => fakeProvider);
+    const rememberModel = vi.fn();
+
+    await expect(switchAgentModel({
+      model: "openrouter:openai/gpt-5.6",
+      agent: a,
+      registry: registry({
+        prepareProvider,
+        getConfigured: () => [provider({
+          id: "openrouter",
+          name: "OpenRouter",
+          baseURL: "https://openrouter.ai/api/v1",
+          authType: "api",
+        })],
+      }),
+      createProvider,
+      workingDir: "/repo",
+      systemPromptOptions: {},
+      rememberModel,
+      setThinkingLevel: vi.fn(),
+    })).rejects.toThrow(/openrouter.*fixed.*stealth\/ox-alpha/i);
+
+    expect(prepareProvider).not.toHaveBeenCalled();
+    expect(createProvider).not.toHaveBeenCalled();
+    expect(rememberModel).not.toHaveBeenCalled();
+    expect(a.model).toBe("openai:gpt-4o");
+    expect(a.providerId).toBe("openai");
+    expect(a.setProvider).not.toHaveBeenCalled();
+    expect(a.setSystemPrompt).not.toHaveBeenCalled();
+  });
+
   it("turns reused refresh token failures into a re-login hint", () => {
     const raw = `Token refresh failed: 401 Unauthorized - {
       "error": {

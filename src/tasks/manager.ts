@@ -95,6 +95,8 @@ export interface BackgroundTaskInfo {
   startedAt: number;
   endedAt?: number;
   outputTruncated: boolean;
+  /** Total stdout/stderr lines observed, including lines no longer in the tail buffer. */
+  outputLines: number;
   /** Wake fired or model read the task via task_output (design §2.3a). */
   deliveredAt?: number;
   ownerSessionId?: string;
@@ -103,6 +105,9 @@ export interface BackgroundTaskInfo {
 interface BackgroundTaskRecord extends BackgroundTaskInfo {
   child?: ChildProcess;
   output: string;
+  outputLineBreaks: number;
+  outputHasData: boolean;
+  outputEndsWithNewline: boolean;
 }
 
 export interface StartBackgroundTaskInput {
@@ -113,7 +118,7 @@ export interface StartBackgroundTaskInput {
 }
 
 export interface AdoptBackgroundTaskInput extends StartBackgroundTaskInput {
-  /** Already-running child handed over by Ctrl+G promotion (design §2.5). */
+  /** Already-running child handed over by Ctrl+B promotion (design §2.5). */
   child: ChildProcess;
   /** Output accumulated before promotion, seeds the ring buffer. */
   outputSoFar?: string;
@@ -121,6 +126,19 @@ export interface AdoptBackgroundTaskInput extends StartBackgroundTaskInput {
 }
 
 export type TaskEventListener = (task: BackgroundTaskInfo) => void;
+
+function countLineBreaks(value: string): number {
+  let count = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    if (value.charCodeAt(index) === 10) count += 1;
+  }
+  return count;
+}
+
+function logicalLineCount(lineBreaks: number, hasData: boolean, endsWithNewline: boolean): number {
+  if (!hasData) return 0;
+  return lineBreaks + (endsWithNewline ? 0 : 1);
+}
 
 // ---------------------------------------------------------------------------
 // Manager
@@ -169,7 +187,7 @@ export class ProcessManager {
     return this.registerTaskChild(child, { ...input, command });
   }
 
-  /** Ctrl+G promotion: adopt a child the bash tool already spawned (§2.5). */
+  /** Ctrl+B promotion: adopt a child the bash tool already spawned (§2.5). */
   adoptTask(input: AdoptBackgroundTaskInput): BackgroundTaskInfo {
     this.reserveTaskSlot(input.ownerSessionId);
     return this.registerTaskChild(input.child, input, {
@@ -196,6 +214,8 @@ export class ProcessManager {
     seed?: { outputSoFar?: string; startedAt?: number },
   ): BackgroundTaskInfo {
     const id = `task_${String(this.nextTaskId++).padStart(4, "0")}`;
+    const seedOutput = seed?.outputSoFar ?? "";
+    const seedLineBreaks = countLineBreaks(seedOutput);
     const record: BackgroundTaskRecord = {
       kind: "task",
       id,
@@ -205,16 +225,31 @@ export class ProcessManager {
       pid: child.pid,
       status: "running",
       startedAt: seed?.startedAt ?? Date.now(),
-      output: seed?.outputSoFar ?? "",
+      output: seedOutput,
       outputTruncated: false,
+      outputLines: logicalLineCount(seedLineBreaks, seedOutput.length > 0, seedOutput.endsWith("\n")),
+      outputLineBreaks: seedLineBreaks,
+      outputHasData: seedOutput.length > 0,
+      outputEndsWithNewline: seedOutput.endsWith("\n"),
       ownerSessionId: input.ownerSessionId,
       child,
     };
     this.registry.set(id, record);
 
     const append = (data: Buffer) => {
+      const chunk = data.toString();
       const before = record.output;
-      record.output = appendTailCapped(record.output, data.toString(), MAX_LOG_BYTES);
+      record.output = appendTailCapped(record.output, chunk, MAX_LOG_BYTES);
+      record.outputLineBreaks += countLineBreaks(chunk);
+      if (chunk.length > 0) {
+        record.outputHasData = true;
+        record.outputEndsWithNewline = chunk.endsWith("\n");
+      }
+      record.outputLines = logicalLineCount(
+        record.outputLineBreaks,
+        record.outputHasData,
+        record.outputEndsWithNewline,
+      );
       if (!record.outputTruncated && before.length + data.length > record.output.length) {
         record.outputTruncated = true;
       }
@@ -222,7 +257,7 @@ export class ProcessManager {
     child.stdout?.on("data", append);
     child.stderr?.on("data", append);
     child.once("error", (error) => {
-      record.output = appendTailCapped(record.output, `\n[task failed to start: ${error.message}]\n`, MAX_LOG_BYTES);
+      append(Buffer.from(`\n[task failed to start: ${error.message}]\n`));
       this.finalizeTask(record, "failed", null);
     });
     child.once("exit", (code) => {
@@ -278,9 +313,9 @@ export class ProcessManager {
     if (!record || record.kind !== "task") return;
     if (record.deliveredAt === undefined) {
       record.deliveredAt = Date.now();
-      // Delivered tasks drop their output to bound memory (design §2.2d);
-      // keep the metadata line for the transcript/reminder demotion.
-      if (record.status !== "running") record.output = "";
+      // Delivery suppresses duplicate Agent wakes, but the task inspector and
+      // `y` copy action must retain the output for the complete UI lifecycle.
+      // The existing 96KB-per-task cap and 20-task eviction bound memory.
     }
   }
 
@@ -405,7 +440,14 @@ export class ProcessManager {
   }
 
   private publicTask(record: BackgroundTaskRecord): BackgroundTaskInfo {
-    const { child: _child, output: _output, ...info } = record;
+    const {
+      child: _child,
+      output: _output,
+      outputLineBreaks: _outputLineBreaks,
+      outputHasData: _outputHasData,
+      outputEndsWithNewline: _outputEndsWithNewline,
+      ...info
+    } = record;
     return { ...info };
   }
 

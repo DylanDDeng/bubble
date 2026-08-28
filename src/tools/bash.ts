@@ -19,7 +19,7 @@ const POST_EXIT_STDIO_GRACE_MS = 150;
 const FORCE_KILL_AFTER_MS = 750;
 const ABORT_SETTLE_AFTER_MS = 1500;
 
-// "promoted" (design §2.5): a Ctrl+G promotion resolves the tool call early
+// "promoted" (design §2.5): a Ctrl+B/automatic promotion resolves the tool call early
 // while the process keeps running under the task manager — its finish path
 // must NOT kill the process group or destroy the stdio streams.
 type TerminalKind = "exit" | "error" | "timeout" | "cancelled" | "promoted";
@@ -33,8 +33,10 @@ export interface BashToolOptions {
    */
   processManager?: ProcessManager;
   allowBackgroundTasks?: boolean;
-  /** Ctrl+G send-to-background requests, keyed by toolCall id (design §2.5). */
+  /** Ctrl+B send-to-background requests, keyed by toolCall id (design §2.5). */
   promotionChannel?: PromotionChannel;
+  /** Move a still-running foreground command into Tasks after this budget. */
+  autoBackgroundAfterMs?: number | false;
 }
 
 export function createBashTool(
@@ -166,6 +168,7 @@ export function createBashTool(
         let terminalError: Error | undefined;
         let resolved = false;
         let timeoutHandle: NodeJS.Timeout | undefined;
+        let autoBackgroundHandle: NodeJS.Timeout | undefined;
         let forceKillHandle: NodeJS.Timeout | undefined;
         let settleHandle: NodeJS.Timeout | undefined;
         let postExitHandle: NodeJS.Timeout | undefined;
@@ -211,6 +214,7 @@ export function createBashTool(
 
         const cleanup = () => {
           if (timeoutHandle) clearTimeout(timeoutHandle);
+          if (autoBackgroundHandle) clearTimeout(autoBackgroundHandle);
           if (forceKillHandle) clearTimeout(forceKillHandle);
           if (settleHandle) clearTimeout(settleHandle);
           if (postExitHandle) clearTimeout(postExitHandle);
@@ -244,7 +248,7 @@ export function createBashTool(
           cleanup();
 
           if (terminal === "promoted") {
-            // Ctrl+G promotion (design §2.5): the process lives on under the
+            // Ctrl+B/automatic promotion (design §2.5): the process lives on under the
             // task manager — skip the group kill AND the stream destruction
             // (the manager attached its own data listeners in adoptTask).
             resolve({
@@ -389,7 +393,7 @@ export function createBashTool(
           finish();
         };
 
-        // Ctrl+G promotion (design §2.5): flag-flip into the task manager.
+        // Ctrl+B/automatic promotion (design §2.5): flag-flip into the task manager.
         // Registered only for background-capable hosts; a no-op once any
         // terminal state is set (benign race with exit/timeout/cancel).
         const promoteToBackground = (): string | undefined => {
@@ -419,6 +423,16 @@ export function createBashTool(
         };
         if (backgroundEnabled && options.promotionChannel && ctx.toolCall?.id) {
           unregisterPromotion = options.promotionChannel.register(ctx.toolCall.id, promoteToBackground);
+        }
+        if (
+          backgroundEnabled
+          && options.autoBackgroundAfterMs !== false
+          && typeof options.autoBackgroundAfterMs === "number"
+          && options.autoBackgroundAfterMs > 0
+          && options.autoBackgroundAfterMs < timeoutSec * 1000
+        ) {
+          autoBackgroundHandle = setTimeout(promoteToBackground, options.autoBackgroundAfterMs);
+          autoBackgroundHandle.unref?.();
         }
 
         timeoutHandle = setTimeout(timeoutChild, timeoutSec * 1000);

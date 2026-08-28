@@ -114,6 +114,19 @@ describe("routing snapshot membership (§1.3)", () => {
     expect(snapshot.authoritative).toBe(true);
   });
 
+  it("models.json cannot expand the fixed OpenRouter model set", () => {
+    const snapshot = snapshotFor({
+      providerId: "openrouter",
+      customModels: [
+        { id: "openai/gpt-5.6", name: "Other", providerId: "openrouter" },
+        { id: "stealth/ox-alpha", name: "Custom Ox", providerId: "openrouter" },
+      ],
+    }, { providerId: "openrouter", model: "stealth/ox-alpha" });
+
+    expect(snapshot.models.map((model) => model.id)).toEqual(["stealth/ox-alpha"]);
+    expect(snapshot.membershipSource).toBe("custom-allowlist");
+  });
+
   it("complete discovery does not resurrect builtin ids the server omitted", () => {
     const snapshot = snapshotFor({
       discovery: {
@@ -352,6 +365,34 @@ describe("route provenance and call-site semantics (§3.4–3.5)", () => {
 // §7 validation
 
 describe("early validation (§7)", () => {
+  it("rejects non-Ox same-provider OpenRouter routes before dispatch", async () => {
+    const agent = new Agent({
+      provider: textProvider(),
+      providerId: "openrouter",
+      model: "stealth/ox-alpha",
+      tools: [],
+    });
+    await expect(agent.spawnSubAgent("inspect", "/tmp", {
+      profile: defaultProfile(),
+      parentToolCallId: "s1",
+      model: "openai/gpt-5.6",
+    })).rejects.toThrow(/openrouter.*fixed.*stealth\/ox-alpha/i);
+  });
+
+  it("rejects non-Ox cross-provider OpenRouter routes before dispatch", async () => {
+    const agent = new Agent({
+      provider: textProvider(),
+      providerId: "anthropic",
+      model: "claude-fable-5",
+      tools: [],
+    });
+    await expect(agent.spawnSubAgent("inspect", "/tmp", {
+      profile: defaultProfile(),
+      parentToolCallId: "s1",
+      model: "openrouter:openai/gpt-5.6",
+    })).rejects.toThrow(/openrouter.*fixed.*stealth\/ox-alpha/i);
+  });
+
   it("default config allows call-site cross-provider (v3.5 open default)", async () => {
     const agent = new Agent({
       provider: textProvider(),

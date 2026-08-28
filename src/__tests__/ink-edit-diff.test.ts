@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { formatEditSuccessSummary, getEditDiffDetails } from "../tui-ink/edit-diff.js";
-import type { DisplayToolCall } from "../tui-ink/display-history.js";
+import { formatEditSuccessSummary, getEditDiffDetails } from "../tui/formatting/edit-diff.js";
+import type { DisplayToolCall } from "../tui/model/display-history.js";
 
 describe("Ink edit diff helpers", () => {
   it("prefers structured metadata for edit diff details", () => {

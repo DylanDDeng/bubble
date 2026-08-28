@@ -28,7 +28,11 @@ import { fetchGrokSubscriptionModels, type GrokAuthAdapter } from "./provider-gr
 import { refreshOpenAICodex } from "./oauth/openai-codex.js";
 import { refreshGrok } from "./oauth/grok.js";
 import type { OAuthCredentials } from "./oauth/types.js";
-import type { ThinkingLevel } from "./types.js";
+import { THINKING_LEVELS, type ThinkingLevel } from "./types.js";
+import {
+  filterProviderModels,
+  OPENROUTER_MODEL_ID,
+} from "./provider-model-policy.js";
 
 export interface ProviderProfile {
   id: string;
@@ -157,10 +161,58 @@ const MODEL_DISCOVERY_FAILURE_TTL_MS = 10_000;
 const MODEL_DISCOVERY_DISK_TTL_MS = 24 * 60 * 60 * 1000;
 /** Discovery must never delay startup or a model picker for long. */
 const MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
+// Included in the cache identity so a pre-single-model OpenRouter disk cache
+// can never repopulate the picker with the old full remote catalog.
+const OPENROUTER_CATALOG_SCOPE = "ox-alpha-only-v2";
+
+const OPENROUTER_WIRE_EFFORTS = new Map<string, ThinkingLevel>([
+  ["none", "off"],
+  ["minimal", "minimal"],
+  ["low", "low"],
+  ["medium", "medium"],
+  ["high", "high"],
+  ["xhigh", "xhigh"],
+  ["max", "max"],
+]);
+
+function openRouterReasoningMetadata(
+  value: unknown,
+  fallback: Pick<ModelInfo, "reasoningLevels" | "defaultReasoningLevel">,
+): Pick<ModelInfo, "reasoningLevels" | "defaultReasoningLevel"> {
+  const fallbackMetadata = {
+    reasoningLevels: fallback.reasoningLevels,
+    defaultReasoningLevel: fallback.defaultReasoningLevel,
+  };
+  if (!value || typeof value !== "object" || Array.isArray(value)) return fallbackMetadata;
+  const raw = value as Record<string, unknown>;
+  if (!Array.isArray(raw.supported_efforts)) return fallbackMetadata;
+
+  const declared = new Set<ThinkingLevel>();
+  for (const effort of raw.supported_efforts) {
+    if (typeof effort !== "string") continue;
+    const mapped = OPENROUTER_WIRE_EFFORTS.get(effort);
+    if (mapped) declared.add(mapped);
+  }
+  if (raw.mandatory === true) declared.delete("off");
+  const reasoningLevels = THINKING_LEVELS.filter((level) => declared.has(level));
+  if (reasoningLevels.length === 0) return fallbackMetadata;
+
+  const rawDefault = typeof raw.default_effort === "string"
+    ? OPENROUTER_WIRE_EFFORTS.get(raw.default_effort)
+    : undefined;
+  const defaultReasoningLevel = rawDefault && reasoningLevels.includes(rawDefault)
+    ? rawDefault
+    : fallback.defaultReasoningLevel && reasoningLevels.includes(fallback.defaultReasoningLevel)
+      ? fallback.defaultReasoningLevel
+      : reasoningLevels.includes("medium")
+        ? "medium"
+        : reasoningLevels[0];
+  return { reasoningLevels, defaultReasoningLevel };
+}
 
 export const BUILTIN_PROVIDERS = CATALOG_PROVIDERS;
 export const USER_VISIBLE_PROVIDER_IDS = BUILTIN_PROVIDERS
-  .filter((provider) => !provider.hidden && provider.id !== "openrouter" && provider.id !== "openai-codex")
+  .filter((provider) => !provider.hidden && provider.id !== "openai-codex")
   .map((provider) => provider.id);
 
 export function isUserVisibleProvider(providerId: string): boolean {
@@ -394,7 +446,7 @@ export class ProviderRegistry {
   }
 
   getDefaultModel(providerId: string, authType: ProviderProfile["authType"] = "api"): string | undefined {
-    const customModels = this.modelConfig.getCustomModels(providerId);
+    const customModels = filterProviderModels(providerId, this.modelConfig.getCustomModels(providerId));
     if (customModels.length > 0) {
       return customModels[0].id;
     }
@@ -654,22 +706,45 @@ export class ProviderRegistry {
   }
 
   private async performModelDiscovery(provider: ProviderProfile): Promise<ModelDiscoveryResult> {
-    const customModels = this.modelConfig.getCustomModels(provider.id);
+    const customModels = filterProviderModels(
+      provider.id,
+      this.modelConfig.getCustomModels(provider.id),
+    );
     if (customModels.length > 0) {
       return { models: customModels, source: "static", authoritative: true };
     }
 
     if (provider.id === "openrouter") {
       try {
-        const response = await fetch("https://openrouter.ai/api/v1/models");
+        const response = await fetch("https://openrouter.ai/api/v1/models", {
+          signal: AbortSignal.timeout(MODEL_DISCOVERY_TIMEOUT_MS),
+        });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const data = (await response.json()) as { data?: Array<{ id: string; name?: string }> };
+        const data = (await response.json()) as {
+          data?: Array<{
+            id?: unknown;
+            name?: unknown;
+            context_length?: unknown;
+            supported_parameters?: unknown;
+            reasoning?: unknown;
+          }>;
+        };
+        const local = this.localModelsForProvider(provider);
+        const fallback = local.find((model) => model.id === OPENROUTER_MODEL_ID);
+        const remote = (data.data ?? []).find((model) => model?.id === OPENROUTER_MODEL_ID);
+        if (!remote || !fallback) {
+          return { models: local, source: "static", authoritative: true };
+        }
+        const reasoning = openRouterReasoningMetadata(remote.reasoning, fallback);
         return {
-          models: (data.data ?? []).map((model) => ({
-            id: model.id,
-            name: model.name || model.id,
-            providerId: provider.id,
-          })),
+          models: [{
+            ...fallback,
+            name: typeof remote.name === "string" && remote.name.trim() ? remote.name : fallback.name,
+            ...reasoning,
+            contextWindow: typeof remote.context_length === "number" && remote.context_length > 0
+              ? remote.context_length
+              : fallback.contextWindow,
+          }],
           source: "remote",
           authoritative: true,
         };
@@ -841,7 +916,10 @@ export class ProviderRegistry {
   }
 
   private localModelsForProvider(provider: ProviderProfile): ModelInfo[] {
-    const customModels = this.modelConfig.getCustomModels(provider.id);
+    const customModels = filterProviderModels(
+      provider.id,
+      this.modelConfig.getCustomModels(provider.id),
+    );
     if (customModels.length > 0) return customModels;
     const catalogProviderId = provider.id === "openai" && provider.authType === "oauth"
       ? "openai-codex"
@@ -853,6 +931,7 @@ export class ProviderRegistry {
       reasoningLevels: model.reasoningLevels,
       defaultReasoningLevel: model.defaultReasoningLevel,
       contextWindow: model.contextWindow,
+      tier: model.tier,
       useResponsesLite: model.useResponsesLite,
       toolOutputTokenLimit: model.toolOutputTokenLimit,
     }));
@@ -878,6 +957,7 @@ export class ProviderRegistry {
       provider.authType ?? "api",
       provider.protocol ?? "default",
       this.discoveryIdentity(provider),
+      provider.id === "openrouter" ? OPENROUTER_CATALOG_SCOPE : undefined,
     ]);
   }
 

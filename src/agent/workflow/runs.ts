@@ -28,6 +28,7 @@ export interface WorkflowExecuteOptions {
   directEmit?: (update: ToolUpdate) => void;
   queueUpdates?: boolean;
   ensureProfileTrusted?: (profile: AgentProfile) => Promise<{ content: string | unknown } | undefined>;
+  workflowRunId?: string;
 }
 
 export interface WorkflowExecuteOutcome {
@@ -96,6 +97,7 @@ export class WorkflowLedger {
       script: options.script,
       args: options.args,
       parentToolCallId: options.parentToolCallId,
+      workflowRunId: runId,
       abortSignal: abortController.signal,
       queueUpdates: true,
       ensureProfileTrusted: options.ensureProfileTrusted,
@@ -175,6 +177,8 @@ export class WorkflowLedger {
       resultPath: record.resultPath,
       logs: record.logs,
       snapshots: record.snapshots,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
     };
   }
 }

@@ -34,6 +34,8 @@ export interface WorkflowRunSnapshot {
   resultPath?: string;
   logs: string[];
   snapshots: SubagentThreadSnapshot[];
+  createdAt: number;
+  updatedAt?: number;
 }
 
 /** System-reminder injected at the next turn when a background workflow finishes. */

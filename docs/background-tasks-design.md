@@ -3,7 +3,7 @@
 Status: **implemented** (P0 + P1, 2026-07-18). Key code:
 `src/tasks/manager.ts` (unified process manager, absorbed server-manager via
 the `src/tools/server-manager.ts` re-export shim), `src/tasks/wake.ts`
-(auto-resume gate/coalescer/orphan probe), `src/tasks/promotion.ts` (Ctrl+G
+(auto-resume gate/coalescer/orphan probe), `src/tasks/promotion.ts` (Ctrl+B
 channel), `src/tools/bash.ts` (`run_in_background` + `promoted` terminal
 kind), `src/tools/task-tools.ts` (deferred `task_output`/`kill_task`),
 `src/agent/task-lifecycle-reminder.ts` + `Agent.consumeBackgroundTaskReminder`
@@ -39,7 +39,7 @@ Bubble's existing substrate instead of porting the grok tool surface verbatim.
 > structural changes vs v1: host-capability gating (§2.0 — the tool is
 > TUI-only in P0, print mode rejects it), the auto-resume wake moved OFF the
 > user input queue onto a goal-engine-style internal kick (§2.3b), the task
-> reminder trigger respecified as state-change-gated (§2.3a), Ctrl+G promotion
+> reminder trigger respecified as state-change-gated (§2.3a), Ctrl+B promotion
 > given a real mechanism (`promoted` terminal kind + manager-owned buffers,
 > §2.5), the merge discriminator renamed `kind` (`purpose` is a shipped
 > model-facing server field, §2.2), three-layer process reaping (§2.2b), and
@@ -68,7 +68,7 @@ no way to:
 
 grok-build's answer is a task_id-unified family (`background: true`,
 `get_command_or_subagent_output`, `wait_commands_or_subagents`,
-`kill_command_or_subagent`, `monitor`, `/loop`, scheduler tools, Ctrl+G).
+`kill_command_or_subagent`, `monitor`, `/loop`, scheduler tools, Ctrl+B).
 Their key lesson: **one task namespace and an explicit "never sleep-poll"
 contract** teach the model a single mental model for all async work.
 
@@ -329,7 +329,9 @@ while no turn is running:
   running (review: it currently ticks only while `isRunning`). The subagent
   inspector gains a "Tasks" section (id, description, elapsed, exit code,
   kill binding `x`).
-- **Ctrl+G — send to background** (P1; mechanics respecified after review —
+- **Ctrl+B — send to background** (`Ctrl+G` is reserved for Tasks Pane), plus
+  Grok-style automatic demotion after a default 15-second foreground budget.
+  Both paths share the same mechanics (P1; respecified after review —
   4 findings converged on the same two defects: `finish()` destroys the
   child's stdio streams, and bash's head-capped 50KB buffer is not the
   manager's 96KB tail ring):
@@ -344,16 +346,15 @@ while no turn is running:
     `[Moved to background: task_0004. Output so far:]\n<tail>`.
   - Promotion is a no-op ("too late — command already finished") if a
     terminal kind is already set (race with exit/timeout/abort).
-  - Key binding must respect the non-colliding-channels rule (project
-    memory); verify against input-box.tsx before choosing Ctrl+G.
+  - `tasks.autoBackground = false` disables automatic demotion;
+    `tasks.foregroundWaitMs` adjusts the foreground budget.
 - **Synthetic-origin rendering** (review): auto-resume wakes are hidden
   internal context (the ui_notice is their visible record); `/loop` firings
   render with a distinct origin badge (`⟳ loop`) rather than as ordinary
   user rows — an `origin` flag on the submit payload drives both.
-- Session markers are for tooling/audit and resume-time orphan probing; they
-  are NOT rendered as transcript rows on resume in P0 (review: marker
-  reconstruction does not exist today; mapping markers to ui_notice rows on
-  resume is optional P2 work).
+- Session markers are for tooling/audit, completion-row reconstruction, and
+  resume-time orphan probing. Terminal markers retain the bounded output tail
+  so restored lifecycle rows can still open useful task detail.
 
 ### 2.6 `/loop` — recurring prompts (P1)
 
@@ -384,11 +385,11 @@ tool):
   tests (wait modes, timeout-not-error, print-mode rejection, child denial),
   reminder builder tests (state-change gating, delivered demotion), wake
   tests (debounce, preemption, session filter, goal-loop non-interference).
-- **P1 — UX**: Ctrl+G promotion (`promoted` terminal kind), inspector Tasks
+- **P1 — UX**: Ctrl+B promotion (`promoted` terminal kind), inspector Tasks
   section, status row + idle tick, `/loop`.
 - **P2 — later**: feishu/desktop enablement (per-host wake seams), `monitor`
   tool, model-facing scheduler tools, durable tasks/loops, marker→notice
-  resume rendering, id-namespace consolidation (§5).
+  id-namespace consolidation (§5).
 
 ## 4. Resolved decisions
 

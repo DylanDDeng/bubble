@@ -19,6 +19,7 @@ function task(overrides: Partial<BackgroundTaskInfo>): BackgroundTaskInfo {
     startedAt: Date.now() - 90_000,
     endedAt: Date.now(),
     outputTruncated: false,
+    outputLines: 0,
     ...overrides,
   };
 }

@@ -8,16 +8,9 @@ It is provider-agnostic. Bring an API key for OpenAI, Anthropic, Google, DeepSee
 
 ## Requirements
 
-- Node.js 20 or newer (used to install the launcher)
-- [Bun](https://bun.sh) (used to run the agent)
+- Node.js 22.19 or newer — Bubble's only runtime
 
-Install Bun if you do not already have it:
-
-```bash
-curl -fsSL https://bun.sh/install | bash
-```
-
-The `npm install` step puts a small Node.js launcher named `bubble` on your PATH. When you run `bubble`, the launcher locates Bun and starts the real runtime under it. If Bun is missing, it prints the install command above instead of failing with a low-level error.
+The `npm install` step puts the `bubble` CLI on your PATH. When you run `bubble`, it starts directly on your Node.js runtime; no other runtime is required.
 
 ## Install
 
@@ -33,8 +26,7 @@ Windows (PowerShell):
 powershell -c "irm https://raw.githubusercontent.com/DylanDDeng/bubble/main/install.ps1 | iex"
 ```
 
-The installer checks for Node.js 20+ and Bun (installing Bun for you if it is
-missing), then installs the `bubble` CLI globally via npm.
+The installer checks for Node.js 22.19+, then installs the `bubble` CLI globally via npm.
 
 Or install directly via npm:
 
@@ -281,7 +273,7 @@ NODE_EXTRA_CA_CERTS=/absolute/path/to/ca.pem bubble
 ## Development
 
 ```bash
-bun install        # install dependencies
+npm install         # install dependencies
 npm run build      # compile TypeScript to dist/
 npm test           # run the test suite (vitest)
 npm start          # run the built agent

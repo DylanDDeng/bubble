@@ -2,12 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   collectSubagentGroups,
   latestSubagentNote,
+  synchronizeSubagentSnapshots,
   sortSubagents,
   subagentDescriptor,
   subagentSummary,
   type SubagentDisplay,
-} from "../tui-ink/subagent-view.js";
-import type { DisplayMessage, DisplayToolCall } from "../tui-ink/display-history.js";
+} from "../tui/model/subagent-view.js";
+import type { DisplayMessage, DisplayToolCall } from "../tui/model/display-history.js";
 
 function member(over: Partial<SubagentDisplay>): SubagentDisplay {
   return { subAgentId: "m", nickname: "Ada", status: "running", ...over };
@@ -104,6 +105,25 @@ describe("collectSubagentGroups", () => {
 });
 
 describe("subagent-view helpers", () => {
+  it("projects the freshest wait_agent snapshot back onto the launch trace", () => {
+    const launch = subagentToolCall("spawn", [member({ subAgentId: "A", status: "running", summary: "" })]);
+    const wait = subagentToolCall("wait", [member({ subAgentId: "A", status: "completed", summary: "full review" })]);
+    wait.name = "wait_agent";
+    const original: DisplayMessage[] = [
+      { role: "assistant", content: "", toolCalls: [launch] },
+      { role: "assistant", content: "", toolCalls: [wait] },
+    ];
+
+    const synchronized = synchronizeSubagentSnapshots(original);
+
+    expect(synchronized).not.toBe(original);
+    expect((original[0]!.toolCalls![0]!.metadata!.subagents as SubagentDisplay[])[0]!.status).toBe("running");
+    expect((synchronized[0]!.toolCalls![0]!.metadata!.subagents as SubagentDisplay[])[0]).toMatchObject({
+      status: "completed",
+      summary: "full review",
+    });
+  });
+
   it("subagentSummary counts statuses in a stable order", () => {
     const summary = subagentSummary([
       member({ status: "completed" }),

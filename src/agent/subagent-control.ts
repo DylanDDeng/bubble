@@ -49,6 +49,8 @@ export interface SubagentThreadSnapshot {
   agentName: string;
   profileSource: AgentProfileSource;
   category?: string;
+  /** Workflow phase active when this child was dispatched. */
+  phase?: string;
   route?: ResolvedSubagentRoute;
   status: SubagentThreadStatus;
   finalReason?: SubagentFinalReason;
@@ -73,6 +75,8 @@ export interface SubagentThreadRecord {
   nickname: string;
   profile: AgentProfile;
   category?: string;
+  /** Workflow phase active when this child was dispatched. */
+  phase?: string;
   route?: ResolvedSubagentRoute;
   parentToolCallId: string;
   parentToolName: string;
@@ -124,6 +128,7 @@ export function snapshotSubagentThread(record: SubagentThreadRecord): SubagentTh
     agentName: record.profile.name,
     profileSource: record.profile.source,
     category: record.category,
+    phase: record.phase,
     route: record.route,
     status: record.status,
     finalReason: record.finalReason,

@@ -1,4 +1,5 @@
-import { encodeModel } from "./provider-registry.js";
+import { decodeModel, encodeModel } from "./provider-registry.js";
+import { assertProviderModelAllowed } from "./provider-model-policy.js";
 
 export interface ResolveConfiguredModelInput {
   cliModel?: string;
@@ -10,6 +11,13 @@ export interface ResolveConfiguredModelInput {
 export function resolveConfiguredModel(input: ResolveConfiguredModelInput): string {
   const selected = input.cliModel ?? input.sessionModel ?? input.defaultModel;
   if (!selected) return "";
-  if (selected.includes(":")) return selected;
-  return input.fallbackProviderId ? encodeModel(input.fallbackProviderId, selected) : "";
+  const normalized = selected.includes(":")
+    ? selected
+    : input.fallbackProviderId
+      ? encodeModel(input.fallbackProviderId, selected)
+      : "";
+  if (!normalized) return "";
+  const { providerId, modelId } = decodeModel(normalized);
+  if (providerId) assertProviderModelAllowed(providerId, modelId);
+  return normalized;
 }

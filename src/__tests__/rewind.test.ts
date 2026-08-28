@@ -1,11 +1,13 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CheckpointStore } from "../checkpoints.js";
 import { SessionManager } from "../session.js";
 import { builtinSlashCommands } from "../slash-commands/commands.js";
 import type { SlashCommandContext } from "../slash-commands/types.js";
+import { BubbleTuiController } from "../tui/controller/controller.js";
+import { SpyHost } from "../tui/testing/spy-host.js";
 
 let counter = 0;
 function freshDir(): string {
@@ -216,6 +218,44 @@ describe("CheckpointStore", () => {
     expect(sm.getMessages()).toHaveLength(2);
     expect(fakeAgent.messages.map((m) => m.role)).toEqual(["system", "user", "assistant"]);
     expect(composer).toBe("turn two");
+  });
+
+  it("controller atomically rebuilds its transcript after a conversation rewind", async () => {
+    const dir = freshDir();
+    const sm = new SessionManager(join(dir, "s.jsonl"));
+    sm.appendMessage({ role: "user", content: "keep" });
+    sm.appendMessage({ role: "assistant", content: "kept answer" });
+    sm.appendMessage({ role: "user", content: "rewind me" });
+    sm.appendMessage({ role: "assistant", content: "drop answer" });
+    const agent = {
+      messages: [{ role: "system", content: "system" }, ...sm.getMessages()],
+      resetContextUsageAnchor: vi.fn(),
+      setSessionID: () => {},
+      listSubAgents: () => [],
+      listWorkflows: () => [],
+      getSubAgentMessages: () => [],
+      closeSubAgent: async () => {},
+      closeWorkflow: () => {},
+      async *run() {},
+    };
+    const controller = new BubbleTuiController({
+      agent: agent as never,
+      sessionManager: sm,
+      ports: new SpyHost().ports,
+    });
+    controller.rebuildTranscriptFromAgent();
+    const target = sm.listUserTurns()[1]!;
+    const observations: string[][] = [];
+    controller.subscribe(() => observations.push(controller.getTranscript().map((message) => message.content)));
+
+    await controller.rewindToTurn(target.id, "chat");
+
+    expect(sm.getMessages().map((message) => message.content)).toEqual(["keep", "kept answer"]);
+    expect(agent.messages.map((message) => message.content)).toEqual(["system", "keep", "kept answer"]);
+    expect(controller.getTranscript().map((message) => message.content)).toEqual(["keep", "kept answer"]);
+    expect(observations.at(-1)).toEqual(["keep", "kept answer"]);
+    expect(observations).not.toContainEqual(["keep", "kept answer", "rewind me"]);
+    expect(agent.resetContextUsageAnchor).toHaveBeenCalledOnce();
   });
 
   it("command without picker support falls back to a text listing", async () => {

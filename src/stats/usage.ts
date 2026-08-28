@@ -92,7 +92,7 @@ const RANGES: Array<{ range: StatsRange; days: number }> = [
 ];
 const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const EMPTY_CELL = " ";
-const HEAT_LEVELS = [".", "o", "O", "@"];
+const HEAT_LEVELS = ["·", "○", "◉", "●"] as const;
 const MAX_MODEL_ROWS = 5;
 
 export function collectUsageStatsBundle(options: {
@@ -127,7 +127,11 @@ export function formatStatsText(bundle: UsageStatsBundle, range: StatsRange = "3
   ].join("\n");
 }
 
-export function formatStatsPanelBody(stats: UsageStats, width = 72): string {
+export function formatStatsPanelBody(
+  stats: UsageStats,
+  width = 72,
+  options: { expandedModels?: boolean } = {},
+): string {
   const bodyWidth = Math.max(48, width);
   const lines: string[] = [];
 
@@ -135,7 +139,7 @@ export function formatStatsPanelBody(stats: UsageStats, width = 72): string {
   lines.push(...formatHeatmapLines(stats));
   lines.push("");
   lines.push("Model usage");
-  lines.push(...formatModelUsageLines(stats, bodyWidth));
+  lines.push(...formatModelUsageLines(stats, bodyWidth, options.expandedModels ?? false));
   lines.push("");
   lines.push("Summary");
   lines.push(...formatSummaryLines(stats, bodyWidth));
@@ -234,7 +238,7 @@ function processSessionFile(file: string, accumulators: Record<StatsRange, Range
       markActiveDay(accumulator, timestamp, usage);
       if (message && usage && model) {
         flags.hasUsage = true;
-        addModelUsage(accumulator, model, message, usage);
+        addModelUsage(accumulator, model, message, usage, timestamp);
       }
     }
   }
@@ -281,6 +285,7 @@ function addModelUsage(
   model: string,
   message: Record<string, unknown>,
   usage: TokenUsage,
+  timestamp: Date,
 ) {
   const decoded = decodeModel(model);
   const providerId = typeof message.providerId === "string" ? message.providerId : decoded.providerId;
@@ -311,7 +316,7 @@ function addModelUsage(
   existing.totalTokens += tokenTotal(usage);
 
   if (providerId && modelId) {
-    const cost = calculateUsageCost(providerId, modelId, usage);
+    const cost = calculateUsageCost(providerId, modelId, usage, timestamp);
     if (cost) {
       existing.cost = (existing.cost ?? 0) + cost.cost;
       existing.costCurrency = cost.currency;
@@ -368,35 +373,44 @@ function formatHeatmapLines(stats: UsageStats): string[] {
   return lines;
 }
 
-function formatModelUsageLines(stats: UsageStats, width: number): string[] {
+function formatModelUsageLines(stats: UsageStats, width: number, expanded: boolean): string[] {
   if (stats.models.length === 0) {
     return ["  No precise token usage recorded yet."];
   }
 
   const showCost = stats.models.some((model) => model.cost !== undefined);
-  const overhead = showCost ? 29 : 21;
-  const minBarWidth = 6;
+  const visibleModels = expanded ? stats.models : stats.models.slice(0, MAX_MODEL_ROWS);
+  const turnsWidth = Math.max(
+    6,
+    ...visibleModels.map((model) => formatTurnCount(model.turns).length),
+  );
+  const overhead = (showCost ? 25 : 17) + turnsWidth;
+  const minBarWidth = 4;
+  const longestLabelWidth = Math.max(...visibleModels.map((model) => model.displayName.length));
   const labelWidth = Math.max(
-    12,
-    Math.min(28, Math.floor((width - overhead - minBarWidth) * 0.65)),
+    8,
+    Math.min(longestLabelWidth, width - overhead - minBarWidth),
   );
   const barWidth = Math.max(
     minBarWidth,
     Math.min(20, width - labelWidth - overhead),
   );
-  const rows = stats.models.slice(0, MAX_MODEL_ROWS).map((model) => {
+  const rows = visibleModels.map((model) => {
     const percent = stats.totalTokens > 0 ? model.totalTokens / stats.totalTokens : 0;
     const bar = usageBar(percent, barWidth);
     const percentText = `${Math.round(percent * 100)}%`.padStart(4, " ");
     const tokenText = formatCompactNumber(model.totalTokens).padStart(6, " ");
-    const turnsText = `${model.turns}t`.padStart(4, " ");
+    const turnsText = formatTurnCount(model.turns).padStart(turnsWidth, " ");
     const costText = showCost
       ? ` ${(model.cost !== undefined ? formatCurrencyFor(model.cost, model.costCurrency ?? "USD") : "").padStart(7, " ")}`
       : "";
     return `  ${truncate(model.displayName, labelWidth).padEnd(labelWidth, " ")} ${bar} ${percentText} ${tokenText} ${turnsText}${costText}`.trimEnd();
   });
   if (stats.models.length > MAX_MODEL_ROWS) {
-    rows.push(`  ...and ${stats.models.length - MAX_MODEL_ROWS} more model${stats.models.length - MAX_MODEL_ROWS === 1 ? "" : "s"}`);
+    const remaining = stats.models.length - MAX_MODEL_ROWS;
+    rows.push(expanded
+      ? "  ⌃ Show fewer models"
+      : `  › Show ${remaining} more model${remaining === 1 ? "" : "s"}`);
   }
   return rows;
 }
@@ -471,6 +485,10 @@ function usageBar(percent: number, width: number): string {
   if (percent > 0 && filled === 0) filled = 1;
   filled = Math.max(0, Math.min(width, filled));
   return "█".repeat(filled) + "░".repeat(width - filled);
+}
+
+function formatTurnCount(turns: number): string {
+  return `${turns} ${turns === 1 ? "turn" : "turns"}`;
 }
 
 function assistantPayload(entry: ParsedSessionEntry): Record<string, unknown> | undefined {

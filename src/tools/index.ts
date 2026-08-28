@@ -75,8 +75,10 @@ export interface CreateAllToolsOptions {
    */
   processManager?: ProcessManager;
   allowBackgroundTasks?: boolean;
-  /** Ctrl+G send-to-background requests from the TUI (design §2.5). */
+  /** Ctrl+B send-to-background requests from the TUI (design §2.5). */
   promotionChannel?: PromotionChannel;
+  /** Grok-style foreground wait budget before a Bash Execute is demoted. */
+  autoBackgroundAfterMs?: number | false;
 }
 
 export function createAllTools(
@@ -94,6 +96,7 @@ export function createAllTools(
       processManager: options.processManager,
       allowBackgroundTasks: backgroundTasks,
       promotionChannel: backgroundTasks ? options.promotionChannel : undefined,
+      autoBackgroundAfterMs: backgroundTasks ? options.autoBackgroundAfterMs : false,
     }),
     ...(backgroundTasks ? createBackgroundTaskTools(options.processManager!) : []),
     ...createManagedServerTools(cwd, approval),

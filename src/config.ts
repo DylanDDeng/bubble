@@ -11,8 +11,11 @@ import { sanitizeAgentCategories, type AgentCategoriesConfig } from "./agent/cat
 import { sanitizeAgentRouting, type AgentRoutingConfig } from "./agent/routing-catalog.js";
 import type { ProviderProfile } from "./provider-registry.js";
 import type { ThinkingLevel } from "./types.js";
+import { isProviderModelAllowed } from "./provider-model-policy.js";
 
-const HIDDEN_PROVIDER_IDS = new Set(["openrouter", "openai-codex"]);
+// openai-codex is an internal transport profile surfaced through the visible
+// OpenAI OAuth provider. OpenRouter is a regular user-configurable provider.
+const HIDDEN_PROVIDER_IDS = new Set(["openai-codex"]);
 
 function getConfigPath(): string {
   return join(getBubbleHome(), "config.json");
@@ -27,9 +30,16 @@ function modelProviderId(model: string): string | undefined {
   return model.split(":", 1)[0];
 }
 
+function isAllowedConfiguredModel(model: string): boolean {
+  if (!model.includes(":")) return true;
+  const [providerId, ...modelParts] = model.split(":");
+  return isProviderModelAllowed(providerId, modelParts.join(":"));
+}
+
 function sanitizeRecentModels(models?: string[]): string[] | undefined {
   if (!models) return undefined;
-  return models.filter((model) => !isHiddenProviderId(modelProviderId(model)));
+  return models.filter((model) =>
+    !isHiddenProviderId(modelProviderId(model)) && isAllowedConfiguredModel(model));
 }
 
 function sanitizeProviders(providers?: ProviderProfile[]): ProviderProfile[] | undefined {
@@ -39,7 +49,9 @@ function sanitizeProviders(providers?: ProviderProfile[]): ProviderProfile[] | u
 
 function sanitizeDefaultModel(model?: string): string | undefined {
   if (!model) return undefined;
-  return isHiddenProviderId(modelProviderId(model)) ? undefined : model;
+  return isHiddenProviderId(modelProviderId(model)) || !isAllowedConfiguredModel(model)
+    ? undefined
+    : model;
 }
 
 function sanitizeDefaultProvider(providerId?: string): string | undefined {
@@ -58,6 +70,8 @@ export interface UserConfigData {
   defaultModel?: string;
   defaultThinkingLevel?: ThinkingLevel;
   skillPaths?: string[];
+  /** Skill names disabled from invocation/search until re-enabled in /skills. */
+  skills?: { disabled?: string[] };
   /**
    * Three shapes are accepted on disk so we can evolve without breaking
    * existing configs:
@@ -76,8 +90,15 @@ export interface UserConfigData {
   /** Subagent model-routing knobs: autoTier (default true), allowCrossProvider (default true). */
   agentRouting?: Partial<AgentRoutingConfig>;
   subagents?: SubagentsUserConfig;
-  /** Background tasks (design §2.3b): autoResume defaults ON; false keeps notices + reminders only. */
-  tasks?: { autoResume?: boolean };
+  /** Background tasks: completion wakes and Grok-style foreground demotion. */
+  tasks?: {
+    /** Auto-resume the Agent when an owned task finishes. Defaults ON. */
+    autoResume?: boolean;
+    /** Move long foreground Execute calls into Tasks automatically. Defaults ON. */
+    autoBackground?: boolean;
+    /** Foreground wait budget before automatic demotion. Defaults to 15 seconds. */
+    foregroundWaitMs?: number;
+  };
 }
 
 export interface SubagentsUserConfig {
@@ -200,8 +221,16 @@ export class UserConfig {
     return this.data.tasks?.autoResume !== false;
   }
 
+  /** Grok-style foreground wait budget. `false` disables automatic demotion. */
+  getTasksAutoBackgroundAfterMs(): number | false {
+    if (this.data.tasks?.autoBackground === false) return false;
+    const configured = this.data.tasks?.foregroundWaitMs;
+    if (typeof configured !== "number" || !Number.isFinite(configured)) return 15_000;
+    return Math.max(1_000, Math.min(300_000, Math.floor(configured)));
+  }
+
   pushRecentModel(model: string) {
-    if (isHiddenProviderId(modelProviderId(model))) {
+    if (isHiddenProviderId(modelProviderId(model)) || !isAllowedConfiguredModel(model)) {
       return;
     }
     const recent = this.data.recentModels ?? [];
@@ -245,6 +274,29 @@ export class UserConfig {
 
   setSkillPaths(paths: string[]) {
     this.data.skillPaths = paths.slice();
+    this.save();
+  }
+
+  getDisabledSkills(): string[] {
+    const disabled = this.data.skills?.disabled;
+    if (!Array.isArray(disabled)) return [];
+    return [...new Set(disabled.filter((name): name is string => (
+      typeof name === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(name)
+    )))].sort((a, b) => a.localeCompare(b));
+  }
+
+  setDisabledSkills(names: string[]) {
+    const disabled = [...new Set(names.filter((name) => (
+      /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(name)
+    )))].sort((a, b) => a.localeCompare(b));
+    if (disabled.length === 0) {
+      const next = { ...(this.data.skills ?? {}) };
+      delete next.disabled;
+      if (Object.keys(next).length === 0) delete this.data.skills;
+      else this.data.skills = next;
+    } else {
+      this.data.skills = { ...(this.data.skills ?? {}), disabled };
+    }
     this.save();
   }
 

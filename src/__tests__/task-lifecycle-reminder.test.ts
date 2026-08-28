@@ -11,6 +11,7 @@ function task(overrides: Partial<BackgroundTaskInfo>): BackgroundTaskInfo {
     status: "running",
     startedAt: Date.now() - 5000,
     outputTruncated: false,
+    outputLines: 0,
     ...overrides,
   };
 }

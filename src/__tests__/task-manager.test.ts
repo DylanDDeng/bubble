@@ -120,15 +120,27 @@ describe("ProcessManager background tasks", () => {
     expect(tail).not.toContain("[");
   });
 
-  it("markTaskDelivered drops finished output but keeps metadata", async () => {
+  it("markTaskDelivered suppresses duplicate delivery but retains inspectable output", async () => {
     const manager = new ProcessManager();
     const task = manager.startTask({ command: "echo will-be-dropped", cwd, ownerSessionId: "s1" });
     await manager.waitTasks([task.id], { timeoutMs: 5000 });
 
     manager.markTaskDelivered(task.id);
     expect(manager.getTask(task.id)!.deliveredAt).toBeDefined();
-    expect(manager.taskOutputTail(task.id)).toBe("");
+    expect(manager.taskOutputTail(task.id)).toContain("will-be-dropped");
     expect(manager.getTask(task.id)!.exitCode).toBe(0);
+  });
+
+  it("tracks total output lines independently from the retained output tail", async () => {
+    const manager = new ProcessManager();
+    const task = manager.startTask({
+      command: "printf 'one\\ntwo\\nthree'",
+      cwd,
+      ownerSessionId: "s1",
+    });
+    await manager.waitTasks([task.id], { timeoutMs: 5000 });
+
+    expect(manager.getTask(task.id)!.outputLines).toBe(3);
   });
 
   it("evicts oldest delivered finished tasks past the retention cap", async () => {
@@ -144,7 +156,7 @@ describe("ProcessManager background tasks", () => {
     expect(manager.getTask(ids[20]!)).toBeDefined();
   });
 
-  it("adopts an externally spawned child (Ctrl+G promotion path)", async () => {
+  it("adopts an externally spawned child (Ctrl+B promotion path)", async () => {
     const { spawn } = await import("node:child_process");
     const manager = new ProcessManager();
     const child = spawn("bash", ["-c", "echo adopted && exit 0"], { cwd, stdio: ["ignore", "pipe", "pipe"] });

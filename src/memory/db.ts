@@ -403,10 +403,6 @@ function unixNow(): number {
 }
 
 function createDatabase(path: string): SqliteDatabase {
-  if (isBunRuntime()) {
-    const bunSqlite = require("bun:sqlite") as { Database: SqliteDatabaseConstructor };
-    return new bunSqlite.Database(path);
-  }
   const Database = require("better-sqlite3") as SqliteDatabaseConstructor;
   return new Database(path);
 }
@@ -417,8 +413,4 @@ function setWalMode(db: SqliteDatabase): void {
     return;
   }
   db.prepare("PRAGMA journal_mode = WAL").get();
-}
-
-function isBunRuntime(): boolean {
-  return typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
 }

@@ -3,6 +3,7 @@ import type { DisplayToolCall } from "./display-history.js";
 import { getEditDiffDetails } from "./edit-diff.js";
 import { formatSubagentRoute, type SubagentRouteLike } from "../agent/subagent-route-format.js";
 import { mcpInfoFromString } from "../mcp/name.js";
+import { analyzeToolIntent } from "../agent/tool-intent.js";
 
 export type TraceGroupKind =
   | "list"
@@ -151,6 +152,19 @@ function classifyTool(toolCall: DisplayToolCall): TraceClassifier {
     return { kind: "subagent", title: "Subagents", bucketKey: `subagent:${toolCall.id}`, groupable: false };
   }
 
+  if (toolCall.name === "bash") {
+    const semanticKind = toolCall.metadata?.kind;
+    const family = semanticKind === "read" || semanticKind === "search"
+      ? semanticKind
+      : analyzeToolIntent({ name: toolCall.name, parsedArgs: toolCall.args }).family;
+    if (family === "read") {
+      return { kind: "read", title: "Read", bucketKey: "read", groupable: true };
+    }
+    if (family === "search") {
+      return { kind: "search", title: "Search", bucketKey: "search", groupable: true };
+    }
+  }
+
   switch (toolCall.name) {
     case "glob": {
       const pattern = String(toolCall.args.pattern ?? "");
@@ -262,7 +276,7 @@ function listResultItems(tool: DisplayToolCall, homeDir: string): string[] {
   const metadataPaths = Array.isArray(tool.metadata?.paths)
     ? tool.metadata.paths.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
     : [];
-  if (metadataPaths.length > 0 || typeof tool.metadata?.matches === "number") {
+  if (metadataPaths.length > 0) {
     return metadataPaths.map((line) => formatTracePath(line, homeDir));
   }
   return resultLines(tool.result)
@@ -306,7 +320,14 @@ function buildPathGroup(
   nounBase: string,
 ): TraceGroup {
   const items = unique(raw
-    .map((tool) => formatTracePath(tool.args.path ?? tool.args.file ?? "", options.homeDir))
+    .map((tool) => formatTracePath(
+      tool.args.path
+      ?? tool.args.file
+      ?? tool.metadata?.path
+      ?? analyzeToolIntent({ name: tool.name, parsedArgs: tool.args }).read?.path
+      ?? "",
+      options.homeDir,
+    ))
     .filter(Boolean));
   const { shown, omitted } = take(items, options.maxItems);
   const count = items.length || raw.length;
@@ -337,12 +358,16 @@ function buildSearchGroup(
   errorCount: number,
 ): TraceGroup {
   const items = raw.map((tool) => {
-    const pattern = String(tool.args.pattern ?? tool.args.query ?? "").trim();
-    const scope = String(tool.args.path ?? tool.args.glob ?? tool.args.include ?? "").trim();
+    const intent = analyzeToolIntent({ name: tool.name, parsedArgs: tool.args }).search;
+    const pattern = String(tool.args.pattern ?? tool.args.query ?? tool.metadata?.pattern ?? intent?.pattern ?? "").trim();
+    const scope = String(tool.args.path ?? tool.args.glob ?? tool.args.include ?? tool.metadata?.path ?? intent?.path ?? "").trim();
     const patternText = pattern ? `"${pattern}"` : "(pattern)";
     return scope ? `${patternText} in ${formatTracePath(scope, options.homeDir)}` : patternText;
   });
+  const resultPreview = raw.flatMap((tool) => resultLines(tool.result))
+    .map((line) => formatTracePath(line, options.homeDir));
   const { shown, omitted } = take(items, options.maxItems);
+  const preview = take(resultPreview, options.maxPreviewLines);
   const count = raw.length;
   return {
     kind: "search",
@@ -351,9 +376,9 @@ function buildSearchGroup(
     count,
     noun: plural(count, "search", "searches"),
     items: shown,
-    previewLines: [],
+    previewLines: preview.shown,
     errorLines: collectErrorLines(raw, options),
-    omitted,
+    omitted: omitted + preview.omitted,
     pending,
     hasError,
     errorCount,

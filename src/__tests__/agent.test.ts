@@ -4,6 +4,7 @@ import { BudgetLedger } from "../agent/budget-ledger.js";
 import { AgentRunInputQueue } from "../agent/input-controller.js";
 import type { AgentProfile } from "../agent/profiles.js";
 import { projectMessages } from "../context/projector.js";
+import { registerDynamicModelMetadata } from "../model-catalog.js";
 import type { AgentEvent, Message, Provider, StreamChunk, ToolRegistryEntry, ToolResult } from "../types.js";
 
 function createMockProvider(chunks: StreamChunk[][]): Provider {
@@ -83,6 +84,31 @@ describe("Agent", () => {
     expect(events.some((e) => e.type === "text_delta" && e.content === "Hello!")).toBe(true);
     expect(events.some((e) => e.type === "agent_end")).toBe(true);
     expect(agent.messages).toHaveLength(2); // user + assistant (no system prompt in this test)
+  });
+
+  it("persists local user presentation metadata for transcript reconstruction", async () => {
+    const provider = createMockProvider([[{ type: "text", content: "Done" }, { type: "done" }]]);
+    const appended: Message[] = [];
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [],
+      onMessageAppend: (message) => appended.push(message),
+    });
+
+    await collectEvents(agent, "inspect it", "/tmp", {
+      userMessageUi: { displayText: "[Image #4] inspect it", imageDisplayStart: 4 },
+    });
+
+    expect(agent.messages[0]).toMatchObject({
+      role: "user",
+      content: "inspect it",
+      ui: { displayText: "[Image #4] inspect it", imageDisplayStart: 4 },
+    });
+    expect(appended[0]).toMatchObject({
+      role: "user",
+      ui: { displayText: "[Image #4] inspect it", imageDisplayStart: 4 },
+    });
   });
 
   it("carries the persistent memory prompt into the model-switch prompt options", () => {
@@ -813,6 +839,48 @@ describe("Agent", () => {
 
     await collectEvents(agent, "Call dummy", "/tmp");
     expect(seen).toEqual([{ toolName: "dummy", content: "result: 42" }]);
+  });
+
+  it("re-bounds a PostToolUse replacement before persistence, callbacks and events", async () => {
+    const provider = createMockProvider([
+      [
+        { type: "tool_call", id: "tc_big", name: "big", arguments: "{}", isStart: true, isEnd: true },
+        { type: "done" },
+      ],
+      [{ type: "text", content: "done" }, { type: "done" }],
+    ]);
+    let hookInputBytes = 0;
+    let callbackResult: ToolResult | undefined;
+    const agent = new Agent({
+      provider,
+      providerId: "zhipuai-coding-plan",
+      model: "zhipuai-coding-plan:glm-5.3-flash",
+      tools: [{
+        name: "big",
+        description: "large output",
+        parameters: { type: "object", properties: {} },
+        async execute() {
+          return { content: "a".repeat(200_000) };
+        },
+      }],
+      hooks: [{
+        afterToolCall(ctx) {
+          hookInputBytes = Buffer.byteLength(ctx.result.content, "utf8");
+          ctx.replaceResult({ content: "b".repeat(200_000) });
+        },
+      }],
+      onToolResult(_name, result) {
+        callbackResult = result;
+      },
+    });
+
+    const events = await collectEvents(agent, "go", "/tmp");
+    const toolEnd = events.find((event) => event.type === "tool_end") as Extract<AgentEvent, { type: "tool_end" }>;
+    const stored = agent.messages.find((message) => message.role === "tool");
+    expect(hookInputBytes).toBeLessThanOrEqual(64 * 1024);
+    expect(Buffer.byteLength(callbackResult!.content, "utf8")).toBeLessThanOrEqual(64 * 1024);
+    expect(Buffer.byteLength(toolEnd.result.content, "utf8")).toBeLessThanOrEqual(64 * 1024);
+    expect(Buffer.byteLength(stored!.content as string, "utf8")).toBeLessThanOrEqual(64 * 1024);
   });
 
   it("rejects a tool call whose arguments are not valid JSON", async () => {
@@ -1829,6 +1897,101 @@ describe("Agent", () => {
     expect(callCount).toBe(2);
   });
 
+  it("does not retry an overflow when recovery cannot make the request smaller", async () => {
+    let callCount = 0;
+    const provider: Provider = {
+      async *streamChat() {
+        callCount += 1;
+        throw new Error("400 Prompt exceeds max length");
+      },
+      async complete() {
+        return "";
+      },
+    };
+    const agent = new Agent({ provider, model: "unknown-model", tools: [] });
+
+    await expect(collectEvents(agent, "only indispensable user message", "/tmp"))
+      .rejects.toThrow(/Prompt exceeds max length/);
+    expect(callCount).toBe(1);
+  });
+
+  it("retries the provider after shrinking a completed tool result without executing the tool twice", async () => {
+    let providerCalls = 0;
+    let executions = 0;
+    const provider: Provider = {
+      async *streamChat() {
+        providerCalls += 1;
+        if (providerCalls === 1) {
+          yield { type: "tool_call", id: "once", name: "large", arguments: "{}", isStart: true, isEnd: true };
+          yield { type: "done" };
+          return;
+        }
+        if (providerCalls === 2) throw new Error("400 Prompt exceeds max length");
+        yield { type: "text", content: "recovered without rerun" };
+        yield { type: "done" };
+      },
+      async complete() {
+        return "";
+      },
+    };
+    const agent = new Agent({
+      provider,
+      providerId: "zhipuai-coding-plan",
+      model: "zhipuai-coding-plan:glm-5.3-flash",
+      tools: [{
+        name: "large",
+        description: "large",
+        parameters: { type: "object", properties: {} },
+        async execute() {
+          executions += 1;
+          return { content: "z".repeat(64 * 1024) };
+        },
+      }],
+    });
+
+    const events = await collectEvents(agent, "run it", "/tmp");
+    expect(providerCalls).toBe(3);
+    expect(executions).toBe(1);
+    expect(events).toContainEqual({ type: "text_delta", content: "recovered without rerun" });
+  });
+
+  it("includes tool schemas in local preflight and avoids sending an impossible request", async () => {
+    registerDynamicModelMetadata({
+      id: "tiny-preflight",
+      name: "tiny-preflight",
+      providerId: "test-provider",
+      reasoningLevels: ["off"],
+      contextWindow: 1_000,
+    });
+    let providerCalls = 0;
+    const provider: Provider = {
+      async *streamChat() {
+        providerCalls += 1;
+        yield { type: "done" };
+      },
+      async complete() {
+        return "";
+      },
+    };
+    const agent = new Agent({
+      provider,
+      providerId: "test-provider",
+      model: "test-provider:tiny-preflight",
+      tools: [{
+        name: "huge_schema",
+        description: "d".repeat(20_000),
+        parameters: { type: "object", properties: {} },
+        async execute() {
+          return { content: "unused" };
+        },
+      }],
+    });
+
+    await expect(collectEvents(agent, "go", "/tmp"))
+      .rejects.toThrow(/Local request preflight/);
+    expect(providerCalls).toBe(0);
+  });
+
   describe("plan mode", () => {
     const writeTool: ToolRegistryEntry = {
       name: "write",
@@ -2153,7 +2316,7 @@ describe("Agent", () => {
     });
   });
 
-  it("gives up after 3 consecutive overflow attempts", async () => {
+  it("gives up after at most 2 shrinking overflow recoveries", async () => {
     let callCount = 0;
     const provider: Provider = {
       async *streamChat() {
@@ -2177,7 +2340,7 @@ describe("Agent", () => {
     }
 
     await expect(collectEvents(agent, "latest", "/tmp")).rejects.toThrow(/too long/i);
-    expect(callCount).toBe(4); // initial + 3 retries
+    expect(callCount).toBeLessThanOrEqual(3); // initial + at most 2 retries
   });
 
   it("omits enabled():false tools from the provider call and re-includes them live", async () => {

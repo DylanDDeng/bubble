@@ -1,4 +1,5 @@
 import { listBuiltinModels } from "../model-catalog.js";
+import { filterProviderModels } from "../provider-model-policy.js";
 import {
   isUserVisibleProvider,
   type ModelInfo,
@@ -6,7 +7,7 @@ import {
   type ProviderRegistry,
 } from "../provider-registry.js";
 
-type ModelPickerRegistry = Pick<ProviderRegistry, "getEnabled" | "getModelConfig" | "listModels">;
+export type ModelPickerRegistry = Pick<ProviderRegistry, "getEnabled" | "getModelConfig" | "listModels">;
 
 export type ModelProviderGroup = {
   provider: ProviderProfile;
@@ -17,7 +18,10 @@ export function localModelsForProvider(
   registry: Pick<ProviderRegistry, "getModelConfig">,
   provider: ProviderProfile,
 ): ModelInfo[] {
-  const customModels = registry.getModelConfig().getCustomModels(provider.id);
+  const customModels = filterProviderModels(
+    provider.id,
+    registry.getModelConfig().getCustomModels(provider.id),
+  );
   if (customModels.length > 0) return customModels;
 
   const builtinProviderId = provider.id === "openai" && provider.authType === "oauth"
@@ -28,6 +32,12 @@ export function localModelsForProvider(
     id: model.id,
     name: model.name,
     providerId: provider.id,
+    reasoningLevels: model.reasoningLevels,
+    defaultReasoningLevel: model.defaultReasoningLevel,
+    contextWindow: model.contextWindow,
+    useResponsesLite: model.useResponsesLite,
+    toolOutputTokenLimit: model.toolOutputTokenLimit,
+    tier: model.tier,
   }));
 }
 

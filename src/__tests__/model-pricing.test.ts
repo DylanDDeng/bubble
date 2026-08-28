@@ -27,22 +27,32 @@ describe("model pricing", () => {
     });
   });
 
-  it("contains current DeepSeek v4 pricing", () => {
-    // Cache-hit rates were pinned at 10x the official price (0.028/0.03625 vs
-    // 0.0028/0.003625 on api-docs.deepseek.com), overstating cached-input cost.
+  it("contains current DeepSeek v4 peak/off-peak pricing", () => {
     expect(getModelPricing("deepseek", "deepseek-v4-flash")).toMatchObject({
-      inputCacheHitPerMillion: 0.0028,
-      inputCacheMissPerMillion: 0.14,
-      outputPerMillion: 0.28,
+      inputCacheHitPerMillion: 0.014,
+      inputCacheMissPerMillion: 0.44,
+      outputPerMillion: 1.32,
+      offPeak: {
+        inputCacheHitPerMillion: 0.007,
+        inputCacheMissPerMillion: 0.22,
+        outputPerMillion: 0.66,
+      },
     });
-    // The 2026-05-05 "promotional" rate became the standard price, so the
-    // effectiveUntil/original promo fields are gone.
     expect(getModelPricing("deepseek", "deepseek-v4-pro")).toMatchObject({
-      inputCacheHitPerMillion: 0.003625,
-      inputCacheMissPerMillion: 0.435,
-      outputPerMillion: 0.87,
+      inputCacheHitPerMillion: 0.044,
+      inputCacheMissPerMillion: 1.32,
+      outputPerMillion: 3.96,
+      offPeak: {
+        inputCacheHitPerMillion: 0.022,
+        inputCacheMissPerMillion: 0.66,
+        outputPerMillion: 1.98,
+      },
     });
-    expect(getModelPricing("deepseek", "deepseek-v4-pro")?.effectiveUntil).toBeUndefined();
+    expect(getModelPricing("deepseek", "deepseek-v4-flash-vision-exp")).toMatchObject({
+      inputCacheHitPerMillion: 0.014,
+      inputCacheMissPerMillion: 0.44,
+      outputPerMillion: 1.32,
+    });
   });
 
   it("contains StepFun step-3.7-flash CNY pricing", () => {
@@ -60,23 +70,32 @@ describe("model pricing", () => {
       promptCacheHitTokens: 250_000,
       promptCacheMissTokens: 750_000,
       completionTokens: 500_000,
-    });
+    }, new Date("2026-08-21T02:00:00Z"));
 
     expect(result).toEqual({
       currency: "USD",
-      cost: 0.25 * 0.003625 + 0.75 * 0.435 + 0.5 * 0.87,
+      cost: 0.25 * 0.044 + 0.75 * 1.32 + 0.5 * 3.96,
       estimated: false,
     });
   });
 
-  it("treats prompt tokens as cache misses when cache breakdown is absent", () => {
+  it("uses the DeepSeek off-peak tariff outside the UTC peak windows", () => {
     const result = calculateUsageCost("deepseek", "deepseek-v4-flash", {
       promptTokens: 1_000_000,
       completionTokens: 1_000_000,
-    });
+    }, new Date("2026-08-21T05:00:00Z"));
     expect(result?.currency).toBe("USD");
     expect(result?.estimated).toBe(true);
-    expect(result?.cost).toBeCloseTo(0.42);
+    expect(result?.cost).toBeCloseTo(0.88);
+  });
+
+  it("does not reprice DeepSeek sessions from before the tariff change", () => {
+    const result = calculateUsageCost("deepseek", "deepseek-v4-flash", {
+      promptTokens: 1_000_000,
+      completionTokens: 1_000_000,
+    }, new Date("2026-08-16T15:59:59Z"));
+
+    expect(result?.cost).toBeCloseTo(0.14 + 0.28);
   });
 
   it("calculates StepFun cache-aware CNY cost", () => {
@@ -120,9 +139,9 @@ describe("model pricing", () => {
       promptCacheMissTokens: 600_000,
       cacheCreationTokens: 200_000,
       completionTokens: 0,
-    });
+    }, new Date("2026-08-21T05:00:00Z"));
 
-    expect(result?.cost).toBeCloseTo(0.4 * 0.0028 + 0.6 * 0.14);
+    expect(result?.cost).toBeCloseTo(0.4 * 0.007 + 0.6 * 0.22);
   });
 
   it("prices a cached Opus run far below an uncached one", () => {

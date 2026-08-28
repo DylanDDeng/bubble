@@ -49,7 +49,6 @@ export function createChatGptDispatcher(
   env: NodeJS.ProcessEnv = process.env,
   input?: RequestInfo | URL,
 ): Dispatcher | undefined {
-  if (isBunRuntime()) return undefined;
   const ca = loadExtraCaCertificates(env);
   const proxy = input ? nodeProxyForUrl(input, env) : defaultNodeProxy(env);
   if (!proxy && ca.length === 0) return undefined;
@@ -71,18 +70,7 @@ export function withChatGptNetworkOptions(
   env: NodeJS.ProcessEnv = process.env,
   dispatcher = createChatGptDispatcher(env, input),
 ): RequestInitWithDispatcher {
-  const next = { ...(init ?? {}) } as RequestInitWithDispatcher & {
-    proxy?: string;
-    tls?: { ca?: unknown[] };
-  };
-
-  if (isBunRuntime()) {
-    const proxy = bunProxyForUrl(input, env);
-    if (proxy) next.proxy = proxy;
-    const ca = bunExtraCaFiles(env);
-    if (ca.length > 0) next.tls = { ...(next.tls ?? {}), ca };
-    return next;
-  }
+  const next = { ...(init ?? {}) } as RequestInitWithDispatcher;
 
   if (dispatcher) next.dispatcher = dispatcher;
   return next;
@@ -127,21 +115,6 @@ function chatGptProxyOverride(env: NodeJS.ProcessEnv): string | undefined {
   return env.BUBBLE_CHATGPT_PROXY ?? env.bubble_chatgpt_proxy;
 }
 
-function isBunRuntime(): boolean {
-  return typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
-}
-
-function bunProxyForUrl(input: RequestInfo | URL, env: NodeJS.ProcessEnv): string | undefined {
-  const url = urlFromInput(input);
-  if (!url || shouldBypassProxy(url, env)) return undefined;
-  const override = chatGptProxyOverride(env);
-  if (override) return override;
-  const allProxy = env.ALL_PROXY ?? env.all_proxy;
-  if (url.protocol === "https:") return env.HTTPS_PROXY ?? env.https_proxy ?? allProxy ?? getSystemProxyForUrl(url, env);
-  if (url.protocol === "http:") return env.HTTP_PROXY ?? env.http_proxy ?? allProxy ?? getSystemProxyForUrl(url, env);
-  return undefined;
-}
-
 function nodeProxyForUrl(input: RequestInfo | URL, env: NodeJS.ProcessEnv): string | undefined {
   const url = urlFromInput(input);
   if (!url || shouldBypassProxy(url, env)) return undefined;
@@ -156,12 +129,6 @@ function defaultNodeProxy(env: NodeJS.ProcessEnv): string | undefined {
   return chatGptProxyOverride(env)
     ?? env.HTTPS_PROXY ?? env.https_proxy ?? env.HTTP_PROXY ?? env.http_proxy ?? env.ALL_PROXY ?? env.all_proxy
     ?? getSystemProxyForUrl(new URL("https://system-proxy-default.invalid/"), env);
-}
-
-function bunExtraCaFiles(env: NodeJS.ProcessEnv): unknown[] {
-  const bun = (globalThis as { Bun?: { file?: (path: string) => unknown } }).Bun;
-  if (!bun?.file) return [];
-  return extraCaCertificatePaths(env).map((path) => bun.file!(path));
 }
 
 function urlFromInput(input: RequestInfo | URL): URL | undefined {

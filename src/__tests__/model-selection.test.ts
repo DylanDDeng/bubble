@@ -33,4 +33,26 @@ describe("resolveConfiguredModel", () => {
       fallbackProviderId: "minimax",
     })).toBe("minimax:MiniMax-M3");
   });
+
+  it("rejects non-Ox models for the fixed OpenRouter provider", () => {
+    expect(() => resolveConfiguredModel({
+      cliModel: "openrouter:openai/gpt-5.6",
+      fallbackProviderId: "openrouter",
+    })).toThrow(/openrouter.*fixed.*stealth\/ox-alpha/i);
+    expect(() => resolveConfiguredModel({
+      cliModel: "openai/gpt-5.6",
+      fallbackProviderId: "openrouter",
+    })).toThrow(/openrouter.*fixed.*stealth\/ox-alpha/i);
+  });
+
+  it("accepts Ox Alpha through explicit and fallback OpenRouter routes", () => {
+    expect(resolveConfiguredModel({
+      cliModel: "openrouter:stealth/ox-alpha",
+      fallbackProviderId: "openai",
+    })).toBe("openrouter:stealth/ox-alpha");
+    expect(resolveConfiguredModel({
+      cliModel: "stealth/ox-alpha",
+      fallbackProviderId: "openrouter",
+    })).toBe("openrouter:stealth/ox-alpha");
+  });
 });

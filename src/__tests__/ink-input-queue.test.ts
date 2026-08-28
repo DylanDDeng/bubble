@@ -3,7 +3,7 @@ import {
   isQueuedInputForCurrentSession,
   queuedAndPendingDisplayKeys,
   type QueuedInput,
-} from "../tui-ink/input-queue.js";
+} from "../tui/model/input-queue.js";
 
 const queued = (sessionFile?: string): QueuedInput => ({
   payload: { text: "hello", images: [] },

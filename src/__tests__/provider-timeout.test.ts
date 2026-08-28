@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import { resolveRequestTimeoutMs, MAX_TIMER_MS } from "../provider.js";
 
 describe("resolveRequestTimeoutMs", () => {
-  it("defaults to the largest 32-bit-safe timer, never Number.MAX_SAFE_INTEGER", () => {
+  it("defaults to the largest SDK-safe 32-bit timer, never Number.MAX_SAFE_INTEGER", () => {
     const t = resolveRequestTimeoutMs(undefined);
     expect(t).toBe(MAX_TIMER_MS);
-    expect(t).toBe(2_147_483_647);
-    // The bug: a duration above 2**31-1 overflows Node timers (warning + clamp to 1ms).
-    expect(t).toBeLessThanOrEqual(2 ** 31 - 1);
+    // The sentinel must leave headroom for the OpenAI SDK's internal
+    // `timeout + 1000` (core.js minAgentTimeout): at exactly 2**31-1 that
+    // addition overflows Node's timers (TimeoutOverflowWarning + clamp).
+    expect(t).toBe(2 ** 31 - 1 - 1000);
+    expect(t + 1000).toBeLessThanOrEqual(2 ** 31 - 1);
     expect(t).toBeLessThan(Number.MAX_SAFE_INTEGER);
   });
 

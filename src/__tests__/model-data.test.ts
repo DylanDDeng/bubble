@@ -23,6 +23,7 @@ describe("generated model data", () => {
 
   it("keeps subscription plans unpriced instead of showing $0", () => {
     expect(getModelPricing("zai-coding-plan", "glm-5.2")).toBeUndefined();
+    expect(getModelPricing("zhipuai-coding-plan", "glm-5.3-flash")).toBeUndefined();
     expect(getModelPricing("kimi-for-coding", "kimi-k2.7-code")).toBeUndefined();
     expect(getModelPricing("openai-codex", "gpt-5.6-sol")).toBeUndefined();
   });

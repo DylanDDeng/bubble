@@ -30,6 +30,32 @@ describe("QuestionController", () => {
     expect(events).toEqual(["asked", "replied"]);
   });
 
+  it("collapses embedded terminal line breaks in structured question fields", () => {
+    const controller = new QuestionController();
+    void controller.ask({
+      questions: [{
+        header: "扩充\r范围",
+        question: "想扩多大范围\r？",
+        options: [{
+          label: "混合套餐 ~16个 \r(Recommended\r)",
+          description: "上游精选\r\n+\r 手写独占热门",
+        }],
+      }],
+    }).catch(() => undefined);
+
+    expect(controller.list()[0]?.questions[0]).toEqual({
+      header: "扩充 范围",
+      question: "想扩多大范围？",
+      options: [{
+        label: "混合套餐 ~16个 (Recommended)",
+        description: "上游精选 + 手写独占热门",
+      }],
+      multiple: false,
+      custom: undefined,
+    });
+    controller.rejectAll();
+  });
+
   it("rejects pending questions with a typed error", async () => {
     const controller = new QuestionController();
     const promise = controller.ask({ questions });
@@ -51,4 +77,3 @@ describe("QuestionController", () => {
     controller.rejectAll();
   });
 });
-

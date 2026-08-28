@@ -1,5 +1,5 @@
 import { getModelContextWindow } from "../model-catalog.js";
-import type { AssistantProviderMetadata, Message } from "../types.js";
+import type { AssistantProviderMetadata, Message, ToolDefinition } from "../types.js";
 import { getTokenEstimator } from "./token-estimator.js";
 
 export const OUTPUT_RESERVE_TOKENS = 20_000;
@@ -27,6 +27,8 @@ export interface ContextBudgetOptions {
   usageAnchorTokens?: number;
   /** Messages appended after the anchor (their tokens are estimated and added). */
   tailMessages?: Message[];
+  /** Tokens outside the message list, primarily serialized tool definitions. */
+  additionalInputTokens?: number;
 }
 
 export function estimateMessageTokens(message: Message, providerId?: string): number {
@@ -94,16 +96,47 @@ export function getContextBudget(
 }
 
 function computeEstimatedTokens(providerId: string, messages: Message[], options: ContextBudgetOptions): number {
+  const additionalInputTokens = Math.max(0, options.additionalInputTokens ?? 0);
   if (options.usageAnchorTokens !== undefined && options.tailMessages) {
     // Anchor is authoritative (server-reported input tokens from the last
     // response). Tail goes through our estimator and may undercount on dense /
     // tool-output content, so we inflate it by a small margin before adding.
     const tailEstimate = estimateContextTokens(options.tailMessages, providerId);
-    return options.usageAnchorTokens + Math.ceil(tailEstimate * TAIL_SAFETY_MARGIN);
+    return options.usageAnchorTokens
+      + Math.ceil(tailEstimate * TAIL_SAFETY_MARGIN)
+      + additionalInputTokens;
   }
   // First turn (or anchor lost): there's no server-reported baseline at all,
   // so apply a larger safety margin to the pure estimate.
-  return Math.ceil(estimateContextTokens(messages, providerId) * FIRST_TURN_SAFETY_MARGIN);
+  return Math.ceil(
+    (estimateContextTokens(messages, providerId) + additionalInputTokens)
+      * FIRST_TURN_SAFETY_MARGIN,
+  );
+}
+
+/** Estimate the request-space occupied by tool schemas sent on every turn. */
+export function estimateToolDefinitionsTokens(
+  tools: ToolDefinition[],
+  providerId?: string,
+): number {
+  if (tools.length === 0) return 0;
+  // Providers wrap this array in their own function/tool envelope. The fixed
+  // per-entry allowance covers names, discriminator keys and separators not
+  // represented by the plain JSON payload.
+  return estimateTextTokens(JSON.stringify(tools), providerId) + tools.length * 16 + 16;
+}
+
+/** Maximum estimated input size that still leaves useful room for an answer. */
+export function getMaxInputTokens(contextWindow: number | undefined): number | undefined {
+  if (!contextWindow) return undefined;
+  return contextWindow >= MIN_WINDOW_FOR_RESERVE
+    ? Math.max(
+        1,
+        contextWindow
+          - OUTPUT_RESERVE_TOKENS
+          - Math.max(AUTOCOMPACT_BUFFER_TOKENS, Math.floor(contextWindow * 0.05)),
+      )
+    : Math.max(1, Math.floor(contextWindow * 0.75));
 }
 
 function shouldTriggerPrune(estimatedTokens: number, contextWindow?: number): boolean {

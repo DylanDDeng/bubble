@@ -136,6 +136,10 @@ function normalizeMeta(
   const tags = Array.isArray(attributes.tags)
     ? attributes.tags.filter((item): item is string => typeof item === "string" && !!item.trim()).map((item) => item.trim())
     : undefined;
+  const author = typeof attributes.author === "string" && attributes.author.trim()
+    ? attributes.author.trim()
+    : undefined;
+  const allowedTools = normalizeStringList(attributes["allowed-tools"] ?? attributes.allowedTools);
 
   return {
     name,
@@ -143,7 +147,22 @@ function normalizeMeta(
     disableModelInvocation: attributes["disable-model-invocation"] === true,
     version: typeof attributes.version === "number" ? attributes.version : undefined,
     tags: tags && tags.length > 0 ? tags : undefined,
+    author,
+    allowedTools,
   };
+}
+
+function normalizeStringList(value: unknown): string[] | undefined {
+  const raw = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? value.trim().replace(/^\[(.*)\]$/, "$1").split(",")
+      : [];
+  const items = raw
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return items.length > 0 ? [...new Set(items)] : undefined;
 }
 
 function indexResources(rootDir: string): SkillResourceIndex {
@@ -173,4 +192,3 @@ function walkDir(targetDir: string, rootDir: string, results: string[]) {
     results.push(fullPath.slice(rootDir.length + 1).replace(/\\/g, "/"));
   }
 }
-

@@ -736,6 +736,7 @@ function formatRouteLines(snapshot: SubagentThreadSnapshot): string[] {
 function snapshotToMetadata(snapshot: SubagentThreadSnapshot): Record<string, unknown> {
   return {
     subAgentId: snapshot.agentId,
+    runId: snapshot.runId,
     agentName: snapshot.agentName,
     nickname: snapshot.nickname,
     status: snapshot.status === "closed" ? "cancelled" : snapshot.status,
@@ -743,12 +744,15 @@ function snapshotToMetadata(snapshot: SubagentThreadSnapshot): Record<string, un
     resumable: snapshot.resumable,
     profileSource: snapshot.profileSource,
     category: snapshot.category,
+    phase: snapshot.phase,
     route: snapshot.route,
     task: snapshot.task,
     summary: snapshot.summary,
     toolNotes: snapshot.toolNotes,
     usage: snapshot.usage,
     error: snapshot.error,
+    createdAt: snapshot.createdAt,
+    updatedAt: snapshot.updatedAt,
   };
 }
 

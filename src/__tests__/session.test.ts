@@ -26,6 +26,33 @@ describe("SessionManager", () => {
     expect(JSON.parse(lines[1]).type).toBe("assistant_message");
   });
 
+  it("notifies metadata subscribers after persistence and supports unsubscribe", () => {
+    const file = join(tmpDir, "metadata-subscribe.jsonl");
+    const sm = new SessionManager(file);
+    const seen: string[] = [];
+    const unsubscribe = sm.subscribeMetadata((metadata) => {
+      seen.push(metadata.title ?? "");
+    });
+
+    sm.updateMetadata({ title: "First title" });
+    unsubscribe();
+    sm.updateMetadata({ title: "Second title" });
+
+    expect(seen).toEqual(["First title"]);
+    expect(new SessionManager(file).getMetadata().title).toBe("Second title");
+  });
+
+  it("does not fail a committed metadata write when an observer throws", () => {
+    const file = join(tmpDir, "metadata-observer-error.jsonl");
+    const sm = new SessionManager(file);
+    sm.subscribeMetadata(() => {
+      throw new Error("render failed");
+    });
+
+    expect(() => sm.updateMetadata({ title: "Still persisted" })).not.toThrow();
+    expect(new SessionManager(file).getMetadata().title).toBe("Still persisted");
+  });
+
   it("restores messages from disk", () => {
     const file = join(tmpDir, "restore.jsonl");
     const sm1 = new SessionManager(file);

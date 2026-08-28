@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 
 /**
  * Main entry point - assembles all layers and runs the agent.
@@ -56,6 +56,8 @@ import {
 } from "./debug-trace.js";
 import { shouldRejectGrokSessionInPrintMode } from "./external-runtime/session-policy.js";
 import type { ExternalRuntimeManager } from "./external-runtime/types.js";
+import { rmSync } from "node:fs";
+import { splitLeadingContext } from "./context/compact.js";
 
 type TerminalTheme = "light" | "dark";
 
@@ -98,6 +100,8 @@ async function main() {
   const skillRegistry = new SkillRegistry({
     cwd: args.cwd,
     skillPaths: userConfig.getSkillPaths(),
+    disabledSkills: userConfig.getDisabledSkills(),
+    onDisabledSkillsChange: (disabledSkills) => userConfig.setDisabledSkills(disabledSkills),
   });
   const printMode = args.print || !!args.prompt;
 
@@ -220,6 +224,7 @@ async function main() {
     processManager,
     allowBackgroundTasks,
     promotionChannel,
+    autoBackgroundAfterMs: userConfig.getTasksAutoBackgroundAfterMs(),
     // Lazy: sessionManager is resolved after tools are created.
     checkpoints: () => sessionManager?.getCheckpoints(),
   });
@@ -296,8 +301,8 @@ async function main() {
       }
       const pickerThemeMode = effectiveThemeModeForTerminal(themeConfig, preResolvedTheme);
       const pickerResolvedTheme = pickerThemeMode === "auto" ? preResolvedTheme : pickerThemeMode;
-      const { runSessionPicker } = await import("./tui-ink/run-session-picker.js");
-      const { canvasBackgroundFor } = await import("./tui-ink/theme.js");
+      const { runSessionPicker } = await import("./tui/run-session-picker.js");
+      const { canvasBackgroundFor } = await import("./tui/model/theme.js");
       // Same rule as the main TUI: a forced theme mismatching the terminal
       // paints its canvas so its foregrounds stay readable.
       const pickerCanvas = themeConfig.overrides?.background
@@ -411,7 +416,7 @@ async function main() {
     sessionFile: sessionManager?.getSessionFile(),
     provider: activeProviderId || "none",
     model: activeModel || "none",
-    renderer: printMode ? "print" : "ink",
+    renderer: printMode ? "print" : "pi-tui",
   });
   if (traceInfo.enabled) {
     traceEvent("run_start", {
@@ -490,6 +495,8 @@ async function main() {
       list: () => processManager.listTasks(agent.getSessionID()),
       version: () => processManager.getTaskStateVersion(),
       outputTail: (id) => processManager.taskOutputTail(id, 2000),
+      kill: (id) => processManager.killTask(id),
+      subscribe: (listener) => processManager.onChange(() => listener()),
     };
   }
   if (sessionManager) {
@@ -720,9 +727,8 @@ async function main() {
     // that persists to the session (onMessageAppend, markers, title updater)
     // by reassigning the outer `sessionManager`, then replace the agent's
     // history the same way startup resume does.
-    const switchSession = (sessionFile: string): { manager: SessionManager } | { error: string } => {
+    const activateSession = (next: SessionManager): { manager: SessionManager } | { error: string } => {
       try {
-        const next = new SessionManager(sessionFile);
         const history = next.getMessages();
         const nextPromptCacheKey = next.getOrCreatePromptCacheKey();
         const nextTitleUpdater = createSessionTitleUpdater({
@@ -737,7 +743,7 @@ async function main() {
         });
         // Keep the live system/meta head (mode reminders survive the switch),
         // mirroring the /rewind history-replacement pattern.
-        const head = agent.messages.filter((m) => m.role === "system" || m.role === "meta");
+        const head = splitLeadingContext(agent.messages).leading;
         const nextMessages = [...head, ...history];
 
         // Commit only after every file read/write and reconstruction step has
@@ -756,10 +762,30 @@ async function main() {
         return { error: error instanceof Error ? error.message : String(error) };
       }
     };
+    const switchSession = (sessionFile: string): { manager: SessionManager } | { error: string } => {
+      try {
+        return activateSession(new SessionManager(sessionFile));
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    };
+    const createFreshSession = (cwd: string): { manager: SessionManager } | { error: string } => {
+      let fresh: SessionManager | undefined;
+      try {
+        fresh = SessionManager.createFresh(cwd);
+        const result = activateSession(fresh);
+        if ("error" in result) rmSync(fresh.getSessionFile(), { force: true });
+        return result;
+      } catch (error) {
+        if (fresh) rmSync(fresh.getSessionFile(), { force: true });
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    };
 
     const commonOptions = {
       sessionManager,
       switchSession,
+      createFreshSession,
       createProvider,
       registry,
       skillRegistry,
@@ -793,7 +819,7 @@ async function main() {
     const { startStartupUpdateCheck } = await import("./update/index.js");
     const updateCheck = await startStartupUpdateCheck();
     const updateNotice = updateCheck.notice;
-    const { runTui } = await import("./tui-ink/run.js");
+    const { runTui } = await import("./tui/run.js");
     const summary = await runTui(agent, args, {
       ...commonOptions,
       themeMode: effectiveThemeMode,

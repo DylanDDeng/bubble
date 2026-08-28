@@ -1,4 +1,4 @@
-import type { SlashCommand, SlashCommandContext } from "./types.js";
+import type { SlashCommand, SlashCommandContext, SlashCommandResultDetail } from "./types.js";
 import { asUnified, type CommandSource, type UnifiedCommand } from "./unified.js";
 
 /**
@@ -57,7 +57,7 @@ export class SlashCommandRegistry {
   async execute(
     input: string,
     ctx: SlashCommandContext,
-  ): Promise<{ handled: boolean; result?: string; inject?: string }> {
+  ): Promise<{ handled: boolean; result?: string; inject?: string; detail?: SlashCommandResultDetail }> {
     if (!input.startsWith("/")) return { handled: false };
 
     const spaceIndex = input.indexOf(" ");
@@ -83,6 +83,9 @@ export class SlashCommandRegistry {
       const output = await cmd.handler(args, ctx);
       if (output && typeof output === "object" && "inject" in output) {
         return { handled: true, inject: output.inject };
+      }
+      if (output && typeof output === "object" && "result" in output) {
+        return { handled: true, result: output.result, detail: output.detail };
       }
       return { handled: true, result: typeof output === "string" ? output : undefined };
     } catch (err: any) {

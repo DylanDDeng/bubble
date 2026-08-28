@@ -1,6 +1,7 @@
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
 import type { QuestionAnswer, QuestionController, QuestionPrompt } from "../question/index.js";
 import { QuestionRejectedError } from "../question/index.js";
+import { normalizeQuestionInlineText } from "../question/normalize.js";
 
 export function createQuestionTool(controller: QuestionController): ToolRegistryEntry {
   return {
@@ -133,8 +134,8 @@ function normalizeQuestions(input: unknown): { questions: QuestionPrompt[] } | {
       return { error: `Error: question at index ${index} must be an object.` };
     }
     const q = raw as Record<string, unknown>;
-    const header = typeof q.header === "string" ? q.header.trim() : "";
-    const question = typeof q.question === "string" ? q.question.trim() : "";
+    const header = typeof q.header === "string" ? normalizeQuestionInlineText(q.header) : "";
+    const question = typeof q.question === "string" ? normalizeQuestionInlineText(q.question) : "";
     const options = q.options;
     if (!header) return { error: `Error: question at index ${index} has an empty header.` };
     if (!question) return { error: `Error: question at index ${index} has empty question text.` };
@@ -152,8 +153,8 @@ function normalizeQuestions(input: unknown): { questions: QuestionPrompt[] } | {
         return { error: `Error: option ${optIndex + 1} for "${header}" must be an object.` };
       }
       const value = opt as Record<string, unknown>;
-      const label = typeof value.label === "string" ? value.label.trim() : "";
-      const description = typeof value.description === "string" ? value.description.trim() : "";
+      const label = typeof value.label === "string" ? normalizeQuestionInlineText(value.label) : "";
+      const description = typeof value.description === "string" ? normalizeQuestionInlineText(value.description) : "";
       if (!label) return { error: `Error: option ${optIndex + 1} for "${header}" has empty label.` };
       if (!description) return { error: `Error: option "${label}" for "${header}" has empty description.` };
       normalizedOptions.push({ label, description });

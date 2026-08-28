@@ -10,7 +10,7 @@ import {
   sanitizeTerminalMouseInput,
   stripTerminalMouseSequences,
   transcriptScrollLinesFromMouseInput,
-} from "../tui-ink/terminal-mouse.js";
+} from "../tui/model/terminal-mouse.js";
 
 describe("Ink terminal mouse parsing", () => {
   it("keeps alternate-scroll disabled when mouse reporting handles wheel input", () => {

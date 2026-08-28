@@ -28,6 +28,11 @@ const KIMI_K3_FAMILY = new Set(["k3", "k3-256k", "kimi-k3"]);
 const KIMI_TOGGLE_THINKING_FAMILY = new Set(["kimi-k2.5", "kimi-k2.6"]);
 const KIMI_K26_DEFAULT_MAX_TOKENS = 32768;
 const MINIMAX_M3_FAMILY = new Set(["MiniMax-M3"]);
+const DEEPSEEK_V4_FAMILY = new Set([
+  "deepseek-v4-flash",
+  "deepseek-v4-flash-vision-exp",
+  "deepseek-v4-pro",
+]);
 
 function isFireworksKimi(providerId: string, modelId: string): boolean {
   const model = modelId.toLowerCase();
@@ -76,6 +81,26 @@ export function resolveProviderRequestConfig(
     };
   }
 
+  // Ox Alpha exposes mandatory low/high/max reasoning. Treat unsupported state
+  // restored from an older session as inherited state and fall back to the
+  // model's declared default (max), never OpenRouter's disabling "none" value.
+  if (providerId === "openrouter") {
+    const openRouterThinkingLevel = normalizeInheritedThinkingLevel(
+      providerId,
+      modelId,
+      requestedLevel,
+    );
+    return {
+      effectiveThinkingLevel: openRouterThinkingLevel,
+      reasoningContentEcho: "tool_calls",
+      extraBody: {
+        reasoning: {
+          effort: openRouterThinkingLevel,
+        },
+      },
+    };
+  }
+
   if (isFireworksKimi(providerId, modelId)) {
     return {
       effectiveThinkingLevel,
@@ -85,7 +110,16 @@ export function resolveProviderRequestConfig(
     };
   }
 
-  if (providerId === "deepseek" && (modelId === "deepseek-v4-flash" || modelId === "deepseek-v4-pro")) {
+  if (providerId === "deepseek" && DEEPSEEK_V4_FAMILY.has(modelId)) {
+    if (effectiveThinkingLevel === "off") {
+      return {
+        effectiveThinkingLevel,
+        // Non-thinking requests do not need prior reasoning replayed. Omitting
+        // reasoning_content also keeps the history valid when switching modes.
+        reasoningContentEcho: "none",
+        extraBody: { thinking: { type: "disabled" } },
+      };
+    }
     return {
       effectiveThinkingLevel,
       reasoningContentEcho: "all",
@@ -147,11 +181,11 @@ export function resolveProviderRequestConfig(
     ["zhipuai", "zhipuai-coding-plan", "zai", "zai-coding-plan"].includes(providerId)
   ) {
     // GLM-5.2+ also accept `reasoning_effort`. GLM-5.2 can disable thinking;
-    // GLM-5.3 requires thinking and Coding Plan normalizes its effort into
+    // the GLM-5.3 family requires thinking and normalizes its effort into
     // low/high/max. The catalog clamps 5.3 choices before this serialization
     // boundary. The effort field rides inside the body alongside `thinking`,
     // so it goes in extraBody, not the OpenRouter-style config field.
-    if (modelId === "glm-5.2" || modelId === "glm-5.3") {
+    if (modelId === "glm-5.2" || modelId === "glm-5.3" || modelId === "glm-5.3-flash") {
       return {
         effectiveThinkingLevel,
         extraBody: modelId === "glm-5.2" && effectiveThinkingLevel === "off"
@@ -220,7 +254,6 @@ export function resolveProviderRequestConfig(
 
   if (
     providerId === "openai"
-    || providerId === "openrouter"
     || providerId === "google"
     || providerId === "azure"
     || providerId === "openai-compatible"

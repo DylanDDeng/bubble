@@ -1,4 +1,5 @@
 import type { ReasoningEffort } from "./types.js";
+import { OPENROUTER_MODEL_ID } from "./provider-model-policy.js";
 
 export type ProviderProtocol = "openai-chat" | "anthropic-messages" | "ark-responses" | "ai-sdk";
 
@@ -79,13 +80,16 @@ const GPT51_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high"];
 const GPT51_CODEX_MAX_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high", "xhigh"];
 const GPT51_CODEX_MINI_LEVELS: ReasoningEffort[] = ["off", "medium", "high"];
 const OPENAI_CHAT_LEVELS: ReasoningEffort[] = ["off"];
+// Ox Alpha declares mandatory reasoning with exactly low/high/max through
+// OpenRouter's live model metadata. The endpoint rejects disabled reasoning.
+const OPENROUTER_OX_REASONING_LEVELS: ReasoningEffort[] = ["low", "high", "max"];
 // Internal representation for APIs that expose thinking as enabled/disabled.
 // UI code must render supported toggle models as on/off, not as "medium" effort.
 const TOGGLE_THINKING_LEVELS: ReasoningEffort[] = ["off", "medium"];
 // GLM-5.2 accepts OpenAI-style `reasoning_effort`. We expose high and max plus
 // "off", which disables thinking outright via `thinking: {type: "disabled"}`.
 const GLM_5_2_LEVELS: ReasoningEffort[] = ["high", "max", "off"];
-// GLM-5.3 Coding Plan normalizes efforts into exactly three real tiers. Its
+// The GLM-5.3 family normalizes efforts into exactly three real tiers. Its
 // default is max, and disabling thinking maps to low rather than turning it off.
 const GLM_5_3_LEVELS: ReasoningEffort[] = ["low", "high", "max"];
 // Kimi K2.7 Code variants only support thinking mode (disabling it errors), so
@@ -97,7 +101,9 @@ const KIMI_THINKING_ONLY_LEVELS: ReasoningEffort[] = ["medium"];
 // "disabled"); the 256k variant exposes effort only, so it has no "off".
 const KIMI_K3_LEVELS: ReasoningEffort[] = ["off", "low", "high", "max"];
 const KIMI_K3_EFFORT_ONLY_LEVELS: ReasoningEffort[] = ["low", "high", "max"];
-const DEEPSEEK_V4_LEVELS: ReasoningEffort[] = ["high", "max"];
+// DeepSeek V4 defaults to thinking/high, but the OpenAI-compatible API also
+// supports disabling thinking and selecting low/high/max effort explicitly.
+const DEEPSEEK_V4_LEVELS: ReasoningEffort[] = ["off", "low", "high", "max"];
 // Bailian token plan grades, read off the endpoint's own 400 responses
 // ("'reasoning_effort' must be one of: ..."), which differ per model. "none"
 // maps to our "off". qwen3.6-flash / qwen3.7-* stop at xhigh; deepseek-v4-pro
@@ -126,6 +132,11 @@ const GEMINI_25_PRO_LEVELS: ReasoningEffort[] = ["low", "medium", "high"];
 const GEMINI_25_FLASH_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high"];
 
 export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
+  // OpenRouter exposes a very large catalog, but Bubble intentionally offers
+  // only Ox Alpha. Discovery refreshes this entry's public metadata without
+  // expanding provider membership.
+  { id: OPENROUTER_MODEL_ID, name: "Ox Alpha", providerId: "openrouter", tier: "strong", reasoningLevels: OPENROUTER_OX_REASONING_LEVELS, defaultReasoningLevel: "max", contextWindow: 1048576 },
+
   { id: "gpt-5.6-sol", name: "GPT-5.6-Sol", providerId: "openai-codex", tier: "balanced", reasoningLevels: GPT56_LEVELS, defaultReasoningLevel: "low", contextWindow: 372000, useResponsesLite: true, toolOutputTokenLimit: 10000 },
   { id: "gpt-5.6-terra", name: "GPT-5.6-Terra", providerId: "openai-codex", tier: "strong", reasoningLevels: GPT56_LEVELS, defaultReasoningLevel: "medium", contextWindow: 372000, useResponsesLite: true, toolOutputTokenLimit: 10000 },
   { id: "gpt-5.6-luna", name: "GPT-5.6-Luna", providerId: "openai-codex", tier: "strong", reasoningLevels: GPT56_LUNA_LEVELS, defaultReasoningLevel: "medium", contextWindow: 372000, useResponsesLite: true, toolOutputTokenLimit: 10000 },
@@ -154,8 +165,12 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", providerId: "anthropic", tier: "balanced", reasoningLevels: ANTHROPIC_SONNET_EFFORT_LEVELS, defaultReasoningLevel: "high", contextWindow: 1000000 },
   { id: "claude-haiku-4-5-20251001", name: "Claude Haiku 4.5", providerId: "anthropic", tier: "fast", reasoningLevels: ANTHROPIC_CHAT_LEVELS, contextWindow: 200000 },
 
-  { id: "deepseek-v4-flash", name: "deepseek-v4-flash", providerId: "deepseek", tier: "fast", reasoningLevels: DEEPSEEK_V4_LEVELS, contextWindow: 1048576 },
-  { id: "deepseek-v4-pro", name: "deepseek-v4-pro", providerId: "deepseek", tier: "strong", reasoningLevels: DEEPSEEK_V4_LEVELS, contextWindow: 1048576 },
+  { id: "deepseek-v4-flash", name: "deepseek-v4-flash", providerId: "deepseek", tier: "fast", reasoningLevels: DEEPSEEK_V4_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  // Experimental vision model stays explicit-only: it is text-capable, but
+  // automatic fast-tier routing must not silently switch ordinary subagents
+  // from the stable Flash model to an experimental multimodal endpoint.
+  { id: "deepseek-v4-flash-vision-exp", name: "DeepSeek-V4-Flash-Vision-Exp", providerId: "deepseek", reasoningLevels: DEEPSEEK_V4_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  { id: "deepseek-v4-pro", name: "deepseek-v4-pro", providerId: "deepseek", tier: "strong", reasoningLevels: DEEPSEEK_V4_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
   // Offline/no-key fallback only: with an API key the registry replaces this
   // list via fetchGeminiModels (GET /v1beta/models, newest five). Gemini 3
   // exposes thinking_level (minimal/low/medium/high); 2.5 Pro cannot disable
@@ -169,8 +184,13 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "glm-5.1", name: "GLM-5.1", providerId: "zhipuai", tier: "balanced", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },
   { id: "glm-4.7", name: "GLM-4.7", providerId: "zhipuai", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
   { id: "glm-4.6", name: "GLM-4.6", providerId: "zhipuai", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 204800 },
-  // Coding Plan exposes GLM-5.3 before GET /models lists it (verified live
-  // 2026-08-14). The standard API is still marked "coming soon" in the docs.
+  // GLM-5.3-Flash is a native multimodal model with the same mandatory
+  // low/high/max thinking contract as GLM-5.3. It is fully available on the
+  // Coding Plan and GET /models (verified live 2026-08-26). Official docs list
+  // a 1M context window and position it as the fast/low-cost plan model.
+  { id: "glm-5.3-flash", name: "GLM-5.3-Flash", providerId: "zhipuai-coding-plan", tier: "fast", reasoningLevels: GLM_5_3_LEVELS, defaultReasoningLevel: "max", contextWindow: 1000000 },
+  // Coding Plan exposed GLM-5.3 before GET /models listed it (verified live
+  // 2026-08-14). The standard API was still marked "coming soon" at that time.
   { id: "glm-5.3", name: "GLM-5.3", providerId: "zhipuai-coding-plan", tier: "strong", reasoningLevels: GLM_5_3_LEVELS, defaultReasoningLevel: "max", contextWindow: 1000000 },
   { id: "glm-5.2", name: "GLM-5.2", providerId: "zhipuai-coding-plan", tier: "strong", reasoningLevels: GLM_5_2_LEVELS, contextWindow: 1000000 },
   { id: "glm-5.1", name: "GLM-5.1", providerId: "zhipuai-coding-plan", tier: "balanced", reasoningLevels: TOGGLE_THINKING_LEVELS, contextWindow: 200000 },

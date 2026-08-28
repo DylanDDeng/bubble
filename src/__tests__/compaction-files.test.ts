@@ -197,7 +197,9 @@ describe("compaction file tracking", () => {
       ...turn("four", "src/four.ts"),
     ];
 
-    await (agent as unknown as { recoverFromOverflow(attempt: number): Promise<number> }).recoverFromOverflow(1);
+    // First recovery keeps two recent turns; the second is intentionally more
+    // aggressive and keeps one.
+    await (agent as unknown as { recoverFromOverflow(attempt: number): Promise<number> }).recoverFromOverflow(0);
 
     expect(persisted).toHaveLength(1);
     expect(persisted[0]).toContain("Overflow recovery summary.");

@@ -124,6 +124,18 @@ function createGrokRegistryStub(authStorage: ReturnType<typeof createGrokAuthSto
 }
 
 describe("slash commands", () => {
+  it("/goal is registered and delegates the complete command to the interactive host", async () => {
+    const handleGoalCommand = vi.fn();
+    const ctx = createContext({ handleGoalCommand });
+
+    const result = await slashRegistry.execute("/goal ship the release --budget 200k", ctx);
+
+    expect(result.handled).toBe(true);
+    expect(result.result).toBeUndefined();
+    expect(handleGoalCommand).toHaveBeenCalledWith("/goal ship the release --budget 200k");
+    expect(slashRegistry.list().some((command) => command.name === "goal")).toBe(true);
+  });
+
   it("/login grok runs browser OAuth, stores tokens, and switches to a grok model natively", async () => {
     vi.mocked(loginGrok).mockClear();
     vi.mocked(importGrokCliCredentials).mockClear();
@@ -389,6 +401,35 @@ describe("slash commands", () => {
     expect(transitionToNative).not.toHaveBeenCalled();
     expect(ctx.sessionManager).toBe(activeSession);
     expect(result.result).toContain("not configured or has no active credentials");
+  });
+
+  it("/model rejects non-Ox OpenRouter ids before provider or session mutation", async () => {
+    const prepareProvider = vi.fn(async () => undefined);
+    const createProvider = vi.fn();
+    const transitionToNative = vi.fn();
+    const session = createSessionStub({ model: "openai:gpt-4o" });
+    const ctx = createContext({
+      sessionManager: session,
+      transitionToNative,
+      createProvider,
+      registry: {
+        getDefault: () => ({ id: "openai" }),
+        prepareProvider,
+        getConfigured: () => [],
+      } as any,
+    });
+
+    const result = await slashRegistry.execute("/model openrouter:openai/gpt-5.6", ctx);
+
+    expect(result.result).toMatch(/openrouter.*fixed.*stealth\/ox-alpha/i);
+    expect(prepareProvider).not.toHaveBeenCalled();
+    expect(createProvider).not.toHaveBeenCalled();
+    expect(transitionToNative).not.toHaveBeenCalled();
+    expect(ctx.agent.model).toBe("openai:gpt-4o");
+    expect(ctx.agent.providerId).toBe("openai");
+    expect(ctx.agent.setProvider).not.toHaveBeenCalled();
+    expect(session.updateMetadata).not.toHaveBeenCalled();
+    expect(session.appendMarker).not.toHaveBeenCalled();
   });
 
   it("/provider opens without leaving or mutating the active Grok session", async () => {
@@ -902,6 +943,42 @@ describe("slash commands", () => {
     expect(result.result).toContain("Other");
   });
 
+  it("/context opens the structured TUI panel instead of writing a transcript notice", async () => {
+    const snapshot = {
+      providerId: "openai",
+      modelId: "gpt-4o",
+      contextWindow: 128000,
+      usedTokens: 3000,
+      freeTokens: 125000,
+      buckets: {
+        systemPrompt: { label: "System prompt", tokens: 1000 },
+        tools: { label: "Tools", tokens: 800 },
+        skills: { label: "Skills", tokens: 500 },
+        deferredTools: { label: "Deferred/MCP", tokens: 200 },
+        other: { label: "Other", tokens: 500 },
+      },
+      toolCount: 2,
+      deferredToolCount: 1,
+      skillCount: 3,
+      messageCount: 3,
+    };
+    const openContextInfo = vi.fn();
+    const ctx = createContext({
+      agent: {
+        model: "openai:gpt-4o",
+        providerId: "openai",
+        thinking: "off",
+        getContextUsageSnapshot: () => snapshot,
+      } as any,
+      openContextInfo,
+    });
+
+    const result = await slashRegistry.execute("/context", ctx);
+
+    expect(result).toEqual({ handled: true, result: undefined });
+    expect(openContextInfo).toHaveBeenCalledWith(snapshot);
+  });
+
   it("/memory disables manual add and searches automatic memory workspace", async () => {
     const originalBubbleHome = process.env.BUBBLE_HOME;
     const root = join(tmpdir(), `bubble-memory-slash-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
@@ -947,14 +1024,19 @@ describe("slash commands", () => {
     expect(runMemoryCompaction).toHaveBeenCalledTimes(1);
   });
 
-  it("/compact streams an LLM summary, reports progress, and rebuilds history", async () => {
+  it("/compact streams an LLM summary, preserves optional context, and rebuilds agent history", async () => {
     const clearMessages = vi.fn();
     const resetContextUsageAnchor = vi.fn();
-    const applyLLMCompaction = vi.fn(() => ({ compacted: true, droppedEntries: 2 }));
+    const applyLLMCompaction = vi.fn(() => ({ compacted: true, droppedEntries: 2, summary: "LLM SUMMARY" }));
     const heuristicCompact = vi.fn(() => ({ compacted: true, droppedEntries: 2 }));
     const progress: Array<unknown> = [];
     // Fake streaming summarizer: emits two deltas, returns the final text.
-    const summarizeForCompaction = vi.fn(async (_old: unknown, onDelta?: (full: string, d: string) => void) => {
+    const summarizeForCompaction = vi.fn(async (
+      _old: unknown,
+      onDelta?: (full: string, d: string) => void,
+      _signal?: AbortSignal,
+      _userContext?: string,
+    ) => {
       onDelta?.("part one", "part one");
       onDelta?.("part one two", " two");
       return "LLM SUMMARY";
@@ -982,11 +1064,13 @@ describe("slash commands", () => {
       } as any,
     });
 
-    const result = await slashRegistry.execute("/compact", ctx);
+    const result = await slashRegistry.execute("/compact keep the auth implementation", ctx);
 
     expect(result.handled).toBe(true);
-    expect(result.result).toContain("Compaction complete");
+    expect(result.result).toMatch(/^Compaction completed in (?:\d+ms|\d+\.\d+s)\.$/);
+    expect(result.detail).toEqual({ kind: "compaction-summary", content: "LLM SUMMARY" });
     expect(summarizeForCompaction).toHaveBeenCalledTimes(1);
+    expect(summarizeForCompaction.mock.calls[0]?.[3]).toBe("keep the auth implementation");
     expect(applyLLMCompaction).toHaveBeenCalledWith("LLM SUMMARY");
     expect(heuristicCompact).not.toHaveBeenCalled();
     expect(clearMessages).not.toHaveBeenCalled();
@@ -1022,7 +1106,7 @@ describe("slash commands", () => {
     const result = await slashRegistry.execute("/compact", ctx);
 
     expect(result.handled).toBe(true);
-    expect(result.result).toContain("Compaction complete");
+    expect(result.result).toContain("Compaction completed in");
     expect(applyLLMCompaction).not.toHaveBeenCalled();
     expect(heuristicCompact).toHaveBeenCalledTimes(1);
   });
@@ -1047,6 +1131,69 @@ describe("slash commands", () => {
 
     expect(result.result).toContain("already compact");
     expect(summarizeForCompaction).not.toHaveBeenCalled();
+  });
+
+  it("/compact cancellation never falls through to heuristic compaction", async () => {
+    const abortController = new AbortController();
+    const heuristicCompact = vi.fn();
+    const summarizeForCompaction = vi.fn(async (
+      _old: unknown,
+      _onDelta: unknown,
+      signal?: AbortSignal,
+    ) => {
+      expect(signal).toBe(abortController.signal);
+      abortController.abort();
+      throw Object.assign(new Error("cancelled"), { name: "AbortError" });
+    });
+    const ctx = createContext({
+      compactionAbortSignal: abortController.signal,
+      agent: {
+        messages: [{ role: "system", content: "system prompt" }],
+        resetContextUsageAnchor: vi.fn(),
+        summarizeForCompaction,
+      } as any,
+      sessionManager: {
+        getCompactionPlan: vi.fn(() => ({ oldMessages: [{ role: "user", content: "old" }] })),
+        applyLLMCompaction: vi.fn(),
+        compact: heuristicCompact,
+        getMessages: vi.fn(() => []),
+      } as any,
+    });
+
+    const result = await slashRegistry.execute("/compact", ctx);
+
+    expect(result.result).toBe("Compaction cancelled.");
+    expect(heuristicCompact).not.toHaveBeenCalled();
+    expect(ctx.agent.messages).toEqual([{ role: "system", content: "system prompt" }]);
+  });
+
+  it("/compact honours cancellation when a provider returns after ignoring abort", async () => {
+    const abortController = new AbortController();
+    const applyLLMCompaction = vi.fn();
+    const heuristicCompact = vi.fn();
+    const ctx = createContext({
+      compactionAbortSignal: abortController.signal,
+      agent: {
+        messages: [{ role: "system", content: "system prompt" }],
+        resetContextUsageAnchor: vi.fn(),
+        summarizeForCompaction: vi.fn(async () => {
+          abortController.abort();
+          return "summary returned after abort";
+        }),
+      } as any,
+      sessionManager: {
+        getCompactionPlan: vi.fn(() => ({ oldMessages: [{ role: "user", content: "old" }] })),
+        applyLLMCompaction,
+        compact: heuristicCompact,
+        getMessages: vi.fn(() => []),
+      } as any,
+    });
+
+    const result = await slashRegistry.execute("/compact", ctx);
+
+    expect(result.result).toBe("Compaction cancelled.");
+    expect(applyLLMCompaction).not.toHaveBeenCalled();
+    expect(heuristicCompact).not.toHaveBeenCalled();
   });
 
   it("/memory summarize and refresh delegate to Codex-style memory handlers", async () => {

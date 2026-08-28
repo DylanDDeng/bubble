@@ -10,7 +10,7 @@ import {
   stepHistory,
   type HistoryEntry,
   type HistoryImageAttachment,
-} from "../tui-ink/input-history.js";
+} from "../tui/model/input-history.js";
 
 function tempHistoryFile(): string {
   return join(mkdtempSync(join(tmpdir(), "bubble-history-")), "input-history.jsonl");

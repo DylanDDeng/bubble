@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveComposerAtContext } from "../tui-ink/input-box.js";
+import { resolveComposerAtContext } from "../tui/model/file-mentions.js";
 
 describe("Grok constrained composer", () => {
   it("never opens workspace file discovery for @ syntax", () => {

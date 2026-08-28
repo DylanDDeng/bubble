@@ -33,6 +33,7 @@ import { createProviderInstance } from "../provider.js";
 import type { ResolvedSubagentRoute } from "../agent/categories.js";
 import { getDefaultThinkingLevel } from "../variant/variant-resolver.js";
 import { QuestionController, type QuestionAnswer, type QuestionRequest } from "../question/controller.js";
+import { assertProviderModelAllowed } from "../provider-model-policy.js";
 import { SkillRegistry } from "../skills/registry.js";
 import { parseSkillInvocation } from "../skills/invocation.js";
 import type { SkillSummary } from "../skills/types.js";
@@ -181,6 +182,7 @@ export class BubbleSdk {
     const registry = new SkillRegistry({
       cwd: cwd || this.defaultCwd,
       skillPaths: this.userConfig.getSkillPaths(),
+      disabledSkills: this.userConfig.getDisabledSkills(),
     });
     return registry.summaries();
   }
@@ -268,7 +270,11 @@ export class BubbleSdk {
     abort.signal.addEventListener("abort", () => questionController.rejectAll(), { once: true });
 
     try {
-      const skillRegistry = new SkillRegistry({ cwd, skillPaths: this.userConfig.getSkillPaths() });
+      const skillRegistry = new SkillRegistry({
+        cwd,
+        skillPaths: this.userConfig.getSkillPaths(),
+        disabledSkills: this.userConfig.getDisabledSkills(),
+      });
       const tools = createAllTools(cwd, skillRegistry, {
         approvalController,
         fileStateTracker,
@@ -466,6 +472,7 @@ export class BubbleSdk {
       ? decodeModel(normalized)
       : { providerId: undefined, modelId: "" };
     const activeProviderId = effId || fallbackProviderId;
+    if (effModelId) assertProviderModelAllowed(activeProviderId, effModelId);
     const target =
       this.registry.getConfigured().find((p) => p.id === activeProviderId) || defaultProvider;
     if (!target?.apiKey) {
@@ -495,9 +502,14 @@ function sessionFileName(sessionId: string): string {
  * turn_end events; each cost covers only that step's usage, so hosts sum them.
  * Events for unpriced models (or without usage) pass through untouched.
  */
-export function attachTurnCost(event: AgentEvent, providerId: string, modelId: string): AgentEvent {
+export function attachTurnCost(
+  event: AgentEvent,
+  providerId: string,
+  modelId: string,
+  at: Date = new Date(),
+): AgentEvent {
   if (event.type !== "turn_end" || !event.usage) return event;
-  const cost = calculateUsageCost(providerId, modelId, event.usage);
+  const cost = calculateUsageCost(providerId, modelId, event.usage, at);
   return cost ? { ...event, cost } : event;
 }
 

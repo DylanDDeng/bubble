@@ -15,8 +15,9 @@ import { getNextThinkingLevel, isThinkingLevel } from "../variant/thinking-level
 describe("variant resolver", () => {
   it("returns model-specific thinking levels", () => {
     expect(getAvailableThinkingLevels("openai-codex", "gpt-5.1-codex-mini")).toEqual(["off", "medium", "high"]);
-    expect(getAvailableThinkingLevels("deepseek", "deepseek-v4-flash")).toEqual(["high", "max"]);
-    expect(getAvailableThinkingLevels("deepseek", "deepseek-v4-pro")).toEqual(["high", "max"]);
+    expect(getAvailableThinkingLevels("deepseek", "deepseek-v4-flash")).toEqual(["off", "low", "high", "max"]);
+    expect(getAvailableThinkingLevels("deepseek", "deepseek-v4-flash-vision-exp")).toEqual(["off", "low", "high", "max"]);
+    expect(getAvailableThinkingLevels("deepseek", "deepseek-v4-pro")).toEqual(["off", "low", "high", "max"]);
   });
 
   it("uses one canonical effort order including ultra", () => {
@@ -57,12 +58,14 @@ describe("variant resolver", () => {
 
   it("uses the DeepSeek v4 documented context window", () => {
     expect(getModelContextWindow("deepseek", "deepseek-v4-flash")).toBe(1048576);
+    expect(getModelContextWindow("deepseek", "deepseek-v4-flash-vision-exp")).toBe(1048576);
     expect(getModelContextWindow("deepseek", "deepseek-v4-pro")).toBe(1048576);
   });
 
   it("chooses medium as the default when supported", () => {
     expect(getDefaultThinkingLevel("openai-codex", "gpt-5.4")).toBe("medium");
     expect(getDefaultThinkingLevel("deepseek", "deepseek-v4-flash")).toBe("high");
+    expect(getDefaultThinkingLevel("deepseek", "deepseek-v4-flash-vision-exp")).toBe("high");
     expect(getDefaultThinkingLevel("deepseek", "deepseek-v4-pro")).toBe("high");
   });
 
@@ -103,9 +106,18 @@ describe("variant resolver", () => {
     expect(isThinkingToggleModel("zhipuai", "glm-5.1")).toBe(false);
   });
 
-  it("includes GLM-5.3 in the Zhipu Coding Plan catalog", () => {
-    expect(listBuiltinModels("zhipuai-coding-plan")[0]).toMatchObject({
+  it("includes the GLM-5.3 family in the Zhipu Coding Plan catalog", () => {
+    const models = listBuiltinModels("zhipuai-coding-plan");
+    expect(models.find((model) => model.id === "glm-5.3-flash")).toMatchObject({
+      id: "glm-5.3-flash",
+      tier: "fast",
+      contextWindow: 1_000_000,
+      reasoningLevels: ["low", "high", "max"],
+      defaultReasoningLevel: "max",
+    });
+    expect(models.find((model) => model.id === "glm-5.3")).toMatchObject({
       id: "glm-5.3",
+      tier: "strong",
       contextWindow: 1_000_000,
       reasoningLevels: ["low", "high", "max"],
       defaultReasoningLevel: "max",

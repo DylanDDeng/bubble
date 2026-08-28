@@ -20,10 +20,16 @@ import { getChatGptFetch } from "./network/chatgpt-transport.js";
 import { createProviderProtocolArtifactFilter } from "./provider-artifacts.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
 import { debugReasoningStream, summarizeDebugText } from "./reasoning-debug.js";
-import { RateLimitError, type RateLimitPolicy } from "./network/errors.js";
-import { ProviderStreamInterruptedError } from "./network/retry.js";
+import {
+  isProviderResponseError,
+  ProviderResponseError,
+  RateLimitError,
+  type RateLimitPolicy,
+} from "./network/errors.js";
+import { isRetryableHttpStatus, ProviderStreamInterruptedError } from "./network/retry.js";
 import type { ProviderProtocol } from "./model-catalog.js";
 import type { Provider, ProviderMessage, StreamChunk, ThinkingLevel, ToolChoiceMode, ToolDefinition } from "./types.js";
+import { assertProviderModelAllowed } from "./provider-model-policy.js";
 
 // Diagnostic logger for tool-args byte-loss investigation. Activate with
 //   BUBBLE_DEBUG_TOOL_ARGS=/path/to/log.jsonl   (any writable path)
@@ -180,6 +186,7 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
     messages: ProviderMessage[],
     chatOptions: { model: string; tools?: ToolDefinition[]; toolChoice?: ToolChoiceMode; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal; rateLimitPolicy?: RateLimitPolicy }
   ): AsyncIterable<StreamChunk> {
+    assertProviderModelAllowed(options.providerId || "", chatOptions.model);
     const requestConfig = resolveProviderRequestConfig(
       options.providerId || "",
       chatOptions.model,
@@ -278,6 +285,28 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
       });
     } catch (error) {
       if (chatOptions.abortSignal?.aborted) throw error;
+      if (isProviderResponseError(error)) {
+        const rateLimited = error.status === 429 || error.errorType === "rate_limit_exceeded";
+        if (rateLimited && chatOptions.rateLimitPolicy === "defer") {
+          throw new RateLimitError(error.message, {
+            status: error.status ?? 429,
+            retryAfterMs: error.retryAfterMs,
+            cause: error,
+          });
+        }
+        if (isRetryableProviderResponseError(error)) {
+          // OpenRouter has already exhausted any pre-stream fallback before it
+          // emits a terminal SSE error. One client retry is useful for a fresh
+          // route; repeating the previous two-retry socket budget turns a
+          // five-minute upstream timeout into a fifteen-minute apparent hang.
+          throw new ProviderStreamInterruptedError(error.message, {
+            cause: error,
+            retryAfterMs: error.retryAfterMs,
+            maxRetries: 1,
+          });
+        }
+        throw error;
+      }
       throw new ProviderStreamInterruptedError(
         `Provider stream interrupted: ${error instanceof Error ? error.message : String(error)}`,
         { cause: error },
@@ -288,13 +317,15 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
   }
 
   async function complete(messages: ProviderMessage[], chatOptions?: { model?: string; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal }): Promise<string> {
+    const model = chatOptions?.model ?? fallbackModel;
+    assertProviderModelAllowed(options.providerId || "", model);
     const requestConfig = resolveProviderRequestConfig(
       options.providerId || "",
-      chatOptions?.model ?? fallbackModel,
+      model,
       chatOptions?.thinkingLevel ?? options.thinkingLevel ?? "off",
     );
     const body: any = {
-      model: chatOptions?.model ?? fallbackModel,
+      model,
       messages: messages.map((message) => toChatCompletionsMessage(message, {
         reasoningContentEcho: requestConfig.reasoningContentEcho ?? "tool_calls",
       })),
@@ -575,6 +606,68 @@ function usageToStreamChunk(usage: any): Extract<StreamChunk, { type: "usage" }>
   };
 }
 
+const RETRYABLE_PROVIDER_ERROR_TYPES = new Set([
+  "capacity_exhausted",
+  "provider_timeout",
+  "rate_limit_exceeded",
+  "server",
+  "temporarily_unavailable",
+]);
+
+function isRetryableProviderResponseError(error: ProviderResponseError): boolean {
+  return (error.status !== undefined && isRetryableHttpStatus(error.status))
+    || (error.errorType !== undefined && RETRYABLE_PROVIDER_ERROR_TYPES.has(error.errorType));
+}
+
+function positiveSecondsToMs(value: unknown): number | undefined {
+  const seconds = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(seconds) && seconds >= 0 ? Math.round(seconds * 1000) : undefined;
+}
+
+/** Parse HTTP-200 in-band provider errors such as OpenRouter's SSE format. */
+function providerResponseErrorFromChunk(chunk: any, providerId?: string): ProviderResponseError | undefined {
+  const finishReason = chunk?.choices?.[0]?.finish_reason;
+  const rawError = chunk?.error;
+  if ((!rawError || typeof rawError !== "object") && finishReason !== "error") return undefined;
+
+  const metadata = rawError && typeof rawError.metadata === "object" && rawError.metadata !== null
+    ? rawError.metadata as Record<string, unknown>
+    : undefined;
+  const availability = metadata && typeof metadata.availability === "object" && metadata.availability !== null
+    ? metadata.availability as Record<string, unknown>
+    : undefined;
+  const status = typeof rawError?.code === "number"
+    ? rawError.code
+    : typeof rawError?.status === "number"
+      ? rawError.status
+      : undefined;
+  const errorType = typeof metadata?.error_type === "string"
+    ? metadata.error_type
+    : typeof rawError?.type === "string"
+      ? rawError.type
+      : undefined;
+  const retryAfterMs = positiveSecondsToMs(
+    availability?.retry_after ?? metadata?.retry_after ?? rawError?.retry_after,
+  );
+  const provider = typeof chunk?.provider === "string" && chunk.provider.trim()
+    ? chunk.provider.trim()
+    : providerId?.trim() || "Provider";
+  const details = [
+    status !== undefined ? String(status) : undefined,
+    errorType,
+  ].filter(Boolean).join(", ");
+  const rawMessage = typeof rawError?.message === "string" && rawError.message.trim()
+    ? rawError.message.trim()
+    : "Generation ended with finish_reason=error.";
+  const message = `${provider} stream error${details ? ` (${details})` : ""}: ${rawMessage}`;
+  return new ProviderResponseError(message, {
+    status,
+    errorType,
+    retryAfterMs,
+    cause: rawError,
+  });
+}
+
 /**
  * Convert an OpenAI-compatible chat-completions stream into our internal StreamChunk events.
  *
@@ -647,6 +740,8 @@ export async function* translateOpenAIStream(
     const delta = choice?.delta;
     const usage = (chunk as any).usage ?? choice?.usage;
     const finishReason = choice?.finish_reason;
+    const providerError = providerResponseErrorFromChunk(chunk, options.debugProviderId);
+    if (providerError) throw providerError;
 
     if (
       typeof chunk?.system_fingerprint === "string"
@@ -863,8 +958,12 @@ function parsePositiveInt(raw: string | undefined): number | undefined {
   return Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
-/** Largest value Node's 32-bit timers accept; ~24.8 days. */
-export const MAX_TIMER_MS = 2_147_483_647; // 2**31 - 1
+/**
+ * Largest value that survives the OpenAI SDK's internal `timeout + 1000`
+ * agent-grace (core.js minAgentTimeout) without overflowing Node's 32-bit
+ * timers; ~24.8 days.
+ */
+export const MAX_TIMER_MS = 2_147_482_647; // 2**31 - 1 - 1000
 
 /**
  * Resolve the provider request timeout (ms) from the operator override.

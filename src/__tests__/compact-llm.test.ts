@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { compactMessagesWithLLM } from "../context/compact-llm.js";
+import { buildCompactionPromptMessages, compactMessagesWithLLM } from "../context/compact-llm.js";
 import type { Message, Provider } from "../types.js";
 
 function makeProvider(completeImpl: Provider["complete"]): Provider {
@@ -22,6 +22,13 @@ const history: Message[] = [
 ];
 
 describe("compactMessagesWithLLM", () => {
+  it("places /compact optional context in the summarizer request, not the stored transcript", () => {
+    const prompt = buildCompactionPromptMessages(history, "keep the auth implementation details");
+    expect(prompt[1]?.content).toContain("User-provided context for this compaction:");
+    expect(prompt[1]?.content).toContain("keep the auth implementation details");
+    expect(history.some((message) => String(message.content).includes("keep the auth"))).toBe(false);
+  });
+
   it("summarizes via the provider and preserves recent turns", async () => {
     const complete = vi.fn(async () => "1. Primary Request\n- fake summary");
     const provider = makeProvider(complete);

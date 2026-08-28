@@ -30,9 +30,20 @@ import { feishuCommand } from "./feishu.js";
 import { GROK_LOCAL_COMMAND_HELP } from "../external-runtime/grok-input-policy.js";
 import { isGrokSubscriptionProviderId } from "../external-runtime/grok-provider.js";
 import { classifyExternalRuntimeBinding } from "../external-runtime/session-policy.js";
+import { providerModelPolicyError } from "../provider-model-policy.js";
+import { executeRewind, type RewindScope } from "../rewind.js";
 
 const VALID_SCOPES: SettingsScope[] = ["user", "project", "local"];
 const VALID_LISTS: RuleList[] = ["allow", "deny"];
+
+function isAbortLike(error: unknown): boolean {
+  return error instanceof Error && (error.name === "AbortError" || error.name === "AgentAbortError");
+}
+
+function formatCompactDuration(elapsedMs: number): string {
+  if (elapsedMs < 1_000) return `${Math.max(0, Math.round(elapsedMs))}ms`;
+  return `${(elapsedMs / 1_000).toFixed(1)}s`;
+}
 
 function isScope(value: string): value is SettingsScope {
   return (VALID_SCOPES as string[]).includes(value);
@@ -40,6 +51,77 @@ function isScope(value: string): value is SettingsScope {
 
 function isList(value: string): value is RuleList {
   return (VALID_LISTS as string[]).includes(value);
+}
+
+async function handleRewindCommand(args: string, ctx: SlashCommandContext): Promise<string | void> {
+  const session = ctx.sessionManager;
+  if (!session) return "Rewind requires an active session.";
+
+  const turns = session.listUserTurns();
+  if (turns.length === 0) return "Nothing to rewind: no user messages in this session.";
+
+  const tokens = args.trim().split(/\s+/).filter(Boolean);
+  const flags = tokens.filter((token) => token.startsWith("--"));
+  const positional = tokens.filter((token) => !token.startsWith("--"));
+  const checkpoints = session.getCheckpoints();
+
+  if (positional.length === 0) {
+    if (ctx.openRewindPicker) {
+      ctx.openRewindPicker();
+      return;
+    }
+    const lines = ["Rewind points (oldest first):", ""];
+    turns.forEach((turn, index) => {
+      const time = new Date(turn.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      const files = checkpoints.filesTouchedAt(turn.id).length;
+      const fileNote = files > 0 ? `  [${files} file${files === 1 ? "" : "s"} changed]` : "";
+      lines.push(`  ${index + 1}. ${time}  ${turn.preview}${fileNote}`);
+    });
+    lines.push(
+      "",
+      "Usage:",
+      "  /rewind <n>         restore conversation AND files to just before message n",
+      "  /rewind <n> --chat  conversation only",
+      "  /rewind <n> --code  files only",
+      "",
+      "Note: only edits made by the edit/write tools are tracked; changes from",
+      "bash commands are not. Checkpoints complement git, they don't replace it.",
+    );
+    return lines.join("\n");
+  }
+
+  const n = Number(positional[0]);
+  if (!Number.isInteger(n) || n < 1 || n > turns.length) {
+    return `Invalid rewind point "${positional[0]}". Run /rewind to list points (1-${turns.length}).`;
+  }
+  const target = turns[n - 1]!;
+  const codeOnly = flags.includes("--code");
+  const chatOnly = flags.includes("--chat") || flags.includes("--conversation");
+  if (codeOnly && chatOnly) return "Pick at most one of --code / --chat.";
+  const scope: RewindScope = codeOnly ? "code" : chatOnly ? "chat" : "all";
+  const result = await executeRewind(session, ctx.agent, target.id, scope);
+
+  const lines: string[] = [
+    codeOnly
+      ? `Files restored to just before: ${target.preview}`
+      : `⏪ Rewound to before: ${target.preview}`,
+  ];
+  if (scope !== "chat") {
+    const touched = result.files.restored.length + result.files.deleted.length;
+    if (touched === 0 && result.files.failed.length === 0) {
+      lines.push("Files: no tracked edits to undo.");
+    } else {
+      for (const file of result.files.restored) lines.push(`Restored ${file}`);
+      for (const file of result.files.deleted) lines.push(`Deleted ${file} (created after this point)`);
+      for (const file of result.files.failed) lines.push(`FAILED to restore ${file}`);
+    }
+  }
+  if (scope !== "code") {
+    ctx.rebuildTranscript?.();
+    if (ctx.fillComposer) ctx.fillComposer(target.text);
+    else lines.push("", "Rewound message (copy to re-edit):", target.text);
+  }
+  return lines.join("\n");
 }
 
 function handlePermissionsMutation(
@@ -521,7 +603,12 @@ const builtinSlashCommandEntries: SlashCommand[] = [
     name: "context",
     description: "Show current context window usage and breakdown",
     async handler(_args, ctx) {
-      return `${formatContextUsage(ctx.agent.getContextUsageSnapshot())}\n\n${formatMcpContextStatus(ctx)}`;
+      const snapshot = ctx.agent.getContextUsageSnapshot();
+      if (ctx.openContextInfo) {
+        ctx.openContextInfo(snapshot);
+        return;
+      }
+      return `${formatContextUsage(snapshot)}\n\n${formatMcpContextStatus(ctx)}`;
     },
   },
   {
@@ -568,93 +655,12 @@ const builtinSlashCommandEntries: SlashCommand[] = [
   {
     name: "rewind",
     description: "Rewind conversation and/or file edits to before an earlier message. Usage: /rewind [n] [--code|--chat]",
-    async handler(args, ctx) {
-      const session = ctx.sessionManager;
-      if (!session) {
-        return "Rewind requires an active session.";
-      }
-      const turns = session.listUserTurns();
-      if (turns.length === 0) {
-        return "Nothing to rewind: no user messages in this session.";
-      }
-
-      const tokens = args.trim().split(/\s+/).filter(Boolean);
-      const flags = tokens.filter((token) => token.startsWith("--"));
-      const positional = tokens.filter((token) => !token.startsWith("--"));
-      const checkpoints = session.getCheckpoints();
-
-      if (positional.length === 0) {
-        if (ctx.openRewindPicker) {
-          ctx.openRewindPicker();
-          return;
-        }
-        const lines = ["Rewind points (oldest first):", ""];
-        turns.forEach((turn, index) => {
-          const time = new Date(turn.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-          const files = checkpoints.filesTouchedAt(turn.id).length;
-          const fileNote = files > 0 ? `  [${files} file${files === 1 ? "" : "s"} changed]` : "";
-          lines.push(`  ${index + 1}. ${time}  ${turn.preview}${fileNote}`);
-        });
-        lines.push(
-          "",
-          "Usage:",
-          "  /rewind <n>         restore conversation AND files to just before message n",
-          "  /rewind <n> --chat  conversation only",
-          "  /rewind <n> --code  files only",
-          "",
-          "Note: only edits made by the edit/write tools are tracked; changes from",
-          "bash commands are not. Checkpoints complement git, they don't replace it.",
-        );
-        return lines.join("\n");
-      }
-
-      const n = Number(positional[0]);
-      if (!Number.isInteger(n) || n < 1 || n > turns.length) {
-        return `Invalid rewind point "${positional[0]}". Run /rewind to list points (1-${turns.length}).`;
-      }
-      const target = turns[n - 1];
-      const codeOnly = flags.includes("--code");
-      const chatOnly = flags.includes("--chat") || flags.includes("--conversation");
-      if (codeOnly && chatOnly) {
-        return "Pick at most one of --code / --chat.";
-      }
-
-      // The "⏪" prefix is recognized by the TUIs: they rebuild the visible
-      // transcript from the rewound agent.messages before showing this text.
-      const lines: string[] = [
-        codeOnly
-          ? `Files restored to just before: ${target.preview}`
-          : `⏪ Rewound to before: ${target.preview}`,
-      ];
-
-      if (!chatOnly) {
-        const restore = await checkpoints.restoreTo(target.id);
-        const touched = restore.restored.length + restore.deleted.length;
-        if (touched === 0 && restore.failed.length === 0) {
-          lines.push("Files: no tracked edits to undo.");
-        } else {
-          for (const file of restore.restored) lines.push(`Restored ${file}`);
-          for (const file of restore.deleted) lines.push(`Deleted ${file} (created after this point)`);
-          for (const file of restore.failed) lines.push(`FAILED to restore ${file}`);
-        }
-      }
-
-      if (!codeOnly) {
-        session.rewindToEntry(target.id);
-        const head = ctx.agent.messages.filter((m) => m.role === "system" || m.role === "meta");
-        ctx.agent.messages = [...head, ...session.getMessages()];
-        ctx.agent.resetContextUsageAnchor();
-
-        if (ctx.fillComposer) {
-          // Put the rewound message back into the input box for re-editing.
-          ctx.fillComposer(target.text);
-        } else {
-          lines.push("", "Rewound message (copy to re-edit):", target.text);
-        }
-      }
-
-      return lines.join("\n");
-    },
+    handler: handleRewindCommand,
+  },
+  {
+    name: "undo",
+    description: "Alias for /rewind",
+    handler: handleRewindCommand,
   },
   {
     name: "session",
@@ -890,6 +896,8 @@ const builtinSlashCommandEntries: SlashCommand[] = [
       const next = parsed.model.includes(":") ? parsed.model : encodeModel(defaultProvider, parsed.model);
       const { providerId, modelId } = decodeModel(next);
       const targetProviderId = providerId || defaultProvider;
+      const modelPolicyError = providerModelPolicyError(targetProviderId, modelId);
+      if (modelPolicyError) return modelPolicyError;
 
       await ctx.registry.prepareProvider(targetProviderId);
       const targetProvider = ctx.registry.getConfigured().find((item) => item.id === targetProviderId);
@@ -941,6 +949,14 @@ const builtinSlashCommandEntries: SlashCommand[] = [
       // (design §1.6): refresh the menu so it stops advertising the provider.
       syncSystemPrompt(ctx, ctx.agent.model);
       return `OAuth credentials for ${providerId} removed.`;
+    },
+  },
+  {
+    name: "goal",
+    description: "Set, manage, or inspect an autonomous goal. Usage: /goal <objective> [--budget N] | status | pause | resume | edit | clear",
+    async handler(args, ctx) {
+      if (!ctx.handleGoalCommand) return "Goals are not available in this host.";
+      await ctx.handleGoalCommand(`/goal${args.trim() ? ` ${args.trim()}` : ""}`);
     },
   },
   {
@@ -1170,8 +1186,8 @@ const builtinSlashCommandEntries: SlashCommand[] = [
   },
   {
     name: "compact",
-    description: "Manually compact the current session context",
-    async handler(_args, ctx) {
+    description: "Compact session context; optional text says what to preserve",
+    async handler(args, ctx) {
       if (!ctx.sessionManager) {
         return "Compaction requires session persistence. Start an interactive session first.";
       }
@@ -1190,6 +1206,7 @@ const builtinSlashCommandEntries: SlashCommand[] = [
       if (preHook?.decision === "deny") {
         return preHook.reason ?? `Compaction blocked by hook ${preHook.sourceHookId ?? "<unknown>"}.`;
       }
+      if (ctx.compactionAbortSignal?.aborted) return "Compaction cancelled.";
 
       // Plan first so we can report "already compact" without spending a model
       // call, and so the LLM summarizer gets the exact set of evicted messages.
@@ -1210,14 +1227,21 @@ const builtinSlashCommandEntries: SlashCommand[] = [
       // On any failure (or empty output) fall back to the instant heuristic
       // compaction so /compact always makes progress.
       let result: CompactResult;
+      const startedAt = Date.now();
       try {
         ctx.compactionProgress?.({ phase: "collecting", streamedChars: 0 });
         let summary = "";
         try {
           summary = await ctx.agent.summarizeForCompaction(plan.oldMessages, (full) => {
             ctx.compactionProgress?.({ phase: "summarizing", streamedChars: full.length });
-          });
-        } catch {
+          }, ctx.compactionAbortSignal, args);
+          // The signal is authoritative even if a provider finishes normally
+          // after ignoring or racing its abort notification.
+          if (ctx.compactionAbortSignal?.aborted) return "Compaction cancelled.";
+        } catch (error) {
+          if (ctx.compactionAbortSignal?.aborted || isAbortLike(error)) {
+            return "Compaction cancelled.";
+          }
           summary = "";
         }
 
@@ -1266,7 +1290,13 @@ const builtinSlashCommandEntries: SlashCommand[] = [
           droppedEntries: dropped,
         },
       });
-      return `✓ Compaction complete · ${dropped} log entr${dropped === 1 ? "y" : "ies"} summarized`;
+      return {
+        result: `Compaction completed in ${formatCompactDuration(Date.now() - startedAt)}.`,
+        detail: {
+          kind: "compaction-summary",
+          content: result.summary ?? "",
+        },
+      };
     },
   },
   {

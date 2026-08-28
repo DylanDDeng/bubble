@@ -7,6 +7,8 @@ describe("isContextOverflowError", () => {
     expect(isContextOverflowError(new Error("Your input exceeds the context window of this model."))).toBe(true);
     expect(isContextOverflowError(new Error("input exceeds the limit of 32768 tokens"))).toBe(true);
     expect(isContextOverflowError(new Error("Prompt is too long"))).toBe(true);
+    expect(isContextOverflowError(new Error("400 Prompt exceeds max length"))).toBe(true);
+    expect(isContextOverflowError(new Error("request exceeds maximum prompt length"))).toBe(true);
   });
 
   it("matches nested error messages", () => {

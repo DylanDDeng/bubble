@@ -1,0 +1,407 @@
+/**
+ * Shared subagent view-model + presentation helpers, used by both the inline
+ * Subagents block (message-list.tsx) and the full-screen inspector
+ * (subagent-inspector.tsx). Pure functions only — no React.
+ */
+
+import { formatSubagentRoute, type SubagentRouteLike } from "../../agent/subagent-route-format.js";
+import type { Theme } from "./theme.js";
+import type { DisplayMessage, DisplayToolCall } from "./display-history.js";
+import type { TokenUsage, ToolResultMetadata } from "../../types.js";
+
+export interface SubagentDisplay {
+  subAgentId?: string;
+  agentName?: string;
+  nickname?: string;
+  status?: string;
+  category?: string;
+  phase?: string;
+  route?: SubagentRouteLike;
+  profileSource?: string;
+  task?: string;
+  summary?: string;
+  toolNotes?: string[];
+  error?: string;
+  usage?: TokenUsage;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+export function latestSubagentNote(subagent: SubagentDisplay): string {
+  const note = subagent.error
+    || subagent.toolNotes?.filter(Boolean).at(-1)
+    || subagent.summary
+    || subagent.task
+    || "";
+  return note.replace(/\r\n/g, "\n").split("\n").map((line) => line.trim()).find(Boolean) ?? "";
+}
+
+export function subagentLabel(subagent: SubagentDisplay): string {
+  return subagent.nickname ?? subagent.agentName ?? "subagent";
+}
+
+export function subagentRole(subagent: SubagentDisplay): string {
+  return [subagent.agentName, subagent.category ? `/${subagent.category}` : ""].join("") || "default";
+}
+
+export function subagentDescriptor(subagent: SubagentDisplay, includeThinking = false): string {
+  const route = formatSubagentRoute(subagent.route, { includeThinking });
+  const role = subagentRole(subagent);
+  return route ? `${role} @ ${route}` : role;
+}
+
+export function subagentStatusColor(status: string | undefined, theme: Theme): string {
+  if (status === "completed") return theme.success;
+  if (status === "failed" || status === "blocked" || status === "cancelled") return theme.error;
+  if (status === "queued") return theme.muted;
+  return theme.toolPending;
+}
+
+export function subagentSummary(subagents: SubagentDisplay[]): string {
+  if (subagents.length === 0) return "no subagents";
+  const counts = new Map<string, number>();
+  for (const subagent of subagents) {
+    const status = subagent.status ?? "running";
+    counts.set(status, (counts.get(status) ?? 0) + 1);
+  }
+  const order = ["running", "queued", "completed", "blocked", "failed", "cancelled"];
+  return order
+    .filter((status) => counts.has(status))
+    .map((status) => `${counts.get(status)} ${status}`)
+    .join("  ");
+}
+
+export function sortSubagents(subagents: SubagentDisplay[]): SubagentDisplay[] {
+  const rank: Record<string, number> = {
+    running: 0,
+    blocked: 1,
+    failed: 2,
+    queued: 3,
+    cancelled: 4,
+    completed: 5,
+  };
+  return [...subagents].sort((a, b) => (rank[a.status ?? "running"] ?? 9) - (rank[b.status ?? "running"] ?? 9));
+}
+
+/** A spawn_agent (one member) or a run_workflow (a group of members). The
+ * "team"/"batch" kinds survive only to render transcripts recorded before
+ * those tools were removed (2026-07-06). */
+export interface SubagentGroup {
+  id: string;
+  runId?: string;
+  kind: "single" | "team" | "batch" | "workflow";
+  label: string;
+  members: SubagentDisplay[];
+}
+
+function subagentStatusRank(status: string | undefined): number {
+  if (status === "completed" || status === "failed" || status === "blocked" || status === "cancelled" || status === "closed") return 3;
+  if (status === "running") return 2;
+  if (status === "queued") return 1;
+  return 0;
+}
+
+/** Higher = more "complete"/recent snapshot of the same subagent. */
+function subagentFreshness(member: SubagentDisplay): number {
+  return subagentStatusRank(member.status) * 100_000
+    + (member.toolNotes?.length ?? 0) * 10
+    + (member.summary ? 1 : 0);
+}
+
+function memberKey(member: SubagentDisplay): string {
+  return member.subAgentId || `${member.nickname ?? ""}|${member.task ?? ""}`;
+}
+
+function toolCallsFromMessage(message: DisplayMessage): DisplayToolCall[] {
+  return [
+    ...(message.toolCalls ?? []),
+    ...(message.parts ?? []).flatMap((part) => part.type === "tools" ? part.toolCalls : []),
+  ];
+}
+
+function freshestSubagentSnapshots(messages: readonly DisplayMessage[]): SubagentDisplay[] {
+  const freshest = new Map<string, SubagentDisplay>();
+  for (const message of messages) {
+    for (const tool of toolCallsFromMessage(message)) {
+      if (tool.metadata?.kind !== "subagent" || !Array.isArray(tool.metadata.subagents)) continue;
+      for (const raw of tool.metadata.subagents) {
+        if (typeof raw !== "object" || raw === null) continue;
+        const member = raw as SubagentDisplay;
+        const key = memberKey(member);
+        if (!key) continue;
+        const current = freshest.get(key);
+        if (!current || subagentFreshness(member) >= subagentFreshness(current)) {
+          freshest.set(key, current ? { ...current, ...member } : member);
+        }
+      }
+    }
+  }
+  return [...freshest.values()];
+}
+
+/**
+ * Projects a newer lifecycle snapshot back onto every existing trace that
+ * already references the same child. spawn_agent settles as soon as the child
+ * is queued, while later tool_update/wait_agent events carry the authoritative
+ * running/final state. Keeping the launch row synchronized prevents it from
+ * remaining permanently "running" beside a completed Tasks Pane entry.
+ */
+export function mergeSubagentSnapshotsIntoMessages(
+  messages: DisplayMessage[],
+  incoming: ToolResultMetadata | undefined,
+): DisplayMessage[] {
+  if (incoming?.kind !== "subagent" || !Array.isArray(incoming.subagents)) return messages;
+  const incomingByKey = new Map<string, SubagentDisplay>();
+  for (const raw of incoming.subagents) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const member = raw as SubagentDisplay;
+    const key = memberKey(member);
+    if (key) incomingByKey.set(key, member);
+  }
+  if (incomingByKey.size === 0) return messages;
+
+  const updateTool = (tool: DisplayToolCall): DisplayToolCall => {
+    if (tool.metadata?.kind !== "subagent" || !Array.isArray(tool.metadata.subagents)) return tool;
+    let changed = false;
+    const subagents = tool.metadata.subagents.map((raw) => {
+      if (typeof raw !== "object" || raw === null) return raw;
+      const current = raw as SubagentDisplay;
+      const next = incomingByKey.get(memberKey(current));
+      if (!next || subagentFreshness(next) < subagentFreshness(current)) return raw;
+      changed = true;
+      return { ...current, ...next };
+    });
+    return changed ? { ...tool, metadata: { ...tool.metadata, subagents } } : tool;
+  };
+
+  let anyChanged = false;
+  const updated = messages.map((message) => {
+    let messageChanged = false;
+    const toolCalls = message.toolCalls?.map((tool) => {
+      const next = updateTool(tool);
+      if (next !== tool) messageChanged = true;
+      return next;
+    });
+    const parts = message.parts?.map((part) => {
+      if (part.type !== "tools") return part;
+      let partChanged = false;
+      const nextTools = part.toolCalls.map((tool) => {
+        const next = updateTool(tool);
+        if (next !== tool) partChanged = true;
+        return next;
+      });
+      if (!partChanged) return part;
+      messageChanged = true;
+      return { ...part, toolCalls: nextTools };
+    });
+    if (!messageChanged) return message;
+    anyChanged = true;
+    return { ...message, toolCalls, parts };
+  });
+  return anyChanged ? updated : messages;
+}
+
+/** Reconciles persisted launch/wait/list echoes when rebuilding a session. */
+export function synchronizeSubagentSnapshots(messages: DisplayMessage[]): DisplayMessage[] {
+  const snapshots = freshestSubagentSnapshots(messages);
+  return snapshots.length === 0
+    ? messages
+    : mergeSubagentSnapshotsIntoMessages(messages, { kind: "subagent", subagents: snapshots });
+}
+
+/**
+ * Merges subagent tool metadata, deduping member snapshots by subAgentId so a
+ * stream of per-child updates accumulates into one member list instead of each
+ * update replacing the last.
+ */
+export function mergeToolMetadata(
+  current: ToolResultMetadata | undefined,
+  incoming: ToolResultMetadata | undefined,
+): ToolResultMetadata | undefined {
+  if (!incoming) return current;
+  if (current?.kind !== "subagent" || incoming.kind !== "subagent") {
+    return incoming;
+  }
+
+  const currentSubagents = Array.isArray(current.subagents) ? current.subagents : [];
+  const incomingSubagents = Array.isArray(incoming.subagents) ? incoming.subagents : [];
+  const byId = new Map<string, unknown>();
+  for (const item of currentSubagents) {
+    const subAgentId = typeof item === "object" && item !== null && "subAgentId" in item
+      ? String((item as Record<string, unknown>).subAgentId)
+      : "";
+    byId.set(subAgentId || `current:${byId.size}`, item);
+  }
+  for (const item of incomingSubagents) {
+    const subAgentId = typeof item === "object" && item !== null && "subAgentId" in item
+      ? String((item as Record<string, unknown>).subAgentId)
+      : "";
+    byId.set(subAgentId || `incoming:${byId.size}`, item);
+  }
+
+  return {
+    ...current,
+    ...incoming,
+    subagents: [...byId.values()],
+  };
+}
+
+const FINAL_MEMBER_STATUSES = new Set(["completed", "failed", "blocked", "cancelled", "closed"]);
+
+/**
+ * Drops accumulator entries whose every member reached a final status: by then
+ * the authoritative snapshot lives in the settled transcript (wait_workflow /
+ * wait_agent result), so the entry is dead weight that would otherwise pile up
+ * for the life of the process. Entries with running/queued members stay — for
+ * a workflow spanning turns they are the only live view. Returns whether the
+ * map changed (callers bump their version counter on true).
+ */
+export function pruneSettledLiveSubagentTools(map: Map<string, DisplayToolCall>): boolean {
+  let changed = false;
+  for (const [id, tc] of map) {
+    const members = Array.isArray(tc.metadata?.subagents) ? tc.metadata!.subagents : [];
+    const allFinal = members.every((member) =>
+      typeof member === "object" && member !== null
+      && FINAL_MEMBER_STATUSES.has(String((member as Record<string, unknown>).status)));
+    if (allFinal) {
+      map.delete(id);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/**
+ * Accumulates a subagent tool_update whose originating tool call has already
+ * settled out of the current streaming round. The TUI clears its streaming
+ * toolCalls on every turn_start, but background children keep reporting
+ * against the launching run_workflow/spawn_agent call id across later rounds
+ * (e.g. while a wait_workflow blocks) — without this side-channel those
+ * updates are dropped and traces only appear after the whole team finishes.
+ * Entries act as synthetic tool calls feeding collectSubagentGroups.
+ * Returns true when the update was absorbed.
+ */
+export function accumulateLiveSubagentUpdate(
+  map: Map<string, DisplayToolCall>,
+  event: { id: string; name: string; metadata?: ToolResultMetadata },
+): boolean {
+  if (event.metadata?.kind !== "subagent") return false;
+  const prev = map.get(event.id);
+  const metadata = mergeToolMetadata(prev?.metadata, event.metadata);
+  if (!metadata) return false;
+  // Per-child updates carry no mode; group them under the launching workflow
+  // call rather than falling back to one single-agent group per member.
+  if (event.name === "run_workflow" && metadata.mode === undefined) metadata.mode = "workflow";
+  const members = Array.isArray(metadata.subagents)
+    ? metadata.subagents.filter((member): member is Record<string, unknown> => (
+        typeof member === "object" && member !== null
+      ))
+    : [];
+  const statuses = members.map((member) => String(member.status ?? "running"));
+  const stillRunning = statuses.some((status) => status === "queued" || status === "running");
+  const failed = statuses.some((status) => status === "failed" || status === "blocked" || status === "cancelled");
+  map.set(event.id, {
+    id: event.id,
+    name: event.name,
+    args: prev?.args ?? {},
+    metadata,
+    status: stillRunning ? "running" : failed ? "failed" : "completed",
+    isError: failed,
+  });
+  return true;
+}
+
+/**
+ * Collects every spawned subagent from the live transcript + streaming tools,
+ * grouped by their originating tool call, for the inspector. Pure.
+ *
+ * The same subagent is echoed by MULTIPLE lifecycle tool calls — its spawn_agent
+ * (a stale snapshot) plus every wait_agent/list_agents that observed it (later
+ * snapshots), all carrying metadata.subagents (agent-lifecycle formatLifecycleResult).
+ * So we dedupe by subAgentId, keep the freshest snapshot, group team/batch members
+ * by their originating tool call, and collapse a single agent's many lifecycle
+ * echoes into one "single" group keyed by the agent itself.
+ */
+export function collectSubagentGroups(
+  messages: DisplayMessage[],
+  streamingTools: DisplayToolCall[],
+): SubagentGroup[] {
+  const toolCalls: DisplayToolCall[] = [];
+  const ingest = (tcs: DisplayToolCall[] | undefined): void => {
+    if (!tcs) return;
+    for (const tc of tcs) if (tc.metadata?.kind === "subagent") toolCalls.push(tc);
+  };
+  for (const message of messages) {
+    ingest(message.toolCalls);
+    if (message.parts) {
+      for (const part of message.parts) {
+        if (part.type === "tools") ingest(part.toolCalls);
+      }
+    }
+  }
+  ingest(streamingTools);
+
+  const freshest = new Map<string, SubagentDisplay>();
+  const memberToGroup = new Map<string, string>();
+  const groups = new Map<string, { kind: SubagentGroup["kind"]; label: string; runId?: string; memberKeys: string[]; order: number }>();
+  let order = 0;
+
+  for (const tc of toolCalls) {
+    const rawMembers = Array.isArray(tc.metadata?.subagents) ? tc.metadata!.subagents : [];
+    const members = rawMembers.filter((m): m is SubagentDisplay => typeof m === "object" && m !== null);
+    if (members.length === 0) continue;
+
+    // Track the freshest snapshot seen for each subagent.
+    for (const m of members) {
+      const key = memberKey(m);
+      const prev = freshest.get(key);
+      if (!prev || subagentFreshness(m) >= subagentFreshness(prev)) freshest.set(key, m);
+    }
+
+    const mode = (tc.metadata as Record<string, unknown>).mode;
+    if (mode === "team" || mode === "batch" || mode === "workflow") {
+      // A team/batch/workflow tool call is the canonical group for its members.
+      const groupKey = tc.id;
+      if (!groups.has(groupKey)) {
+        const description = typeof tc.args?.description === "string" ? tc.args.description.trim()
+          : typeof tc.args?.title === "string" ? tc.args.title.trim() : "";
+        const metadataRunId = typeof tc.metadata?.runId === "string" ? tc.metadata.runId : undefined;
+        const memberRunId = typeof members[0]?.subAgentId === "string"
+          ? (typeof (members[0] as Record<string, unknown>).runId === "string" ? String((members[0] as Record<string, unknown>).runId) : undefined)
+          : undefined;
+        groups.set(groupKey, { kind: mode, label: description || mode, runId: metadataRunId ?? memberRunId, memberKeys: [], order: order++ });
+      }
+      const group = groups.get(groupKey)!;
+      for (const m of members) {
+        const key = memberKey(m);
+        if (!memberToGroup.has(key)) {
+          memberToGroup.set(key, groupKey);
+          group.memberKeys.push(key);
+        }
+      }
+    } else {
+      // Lifecycle echo (spawn/wait/list/...): one "single" group per agent,
+      // collapsing all its echoes; skip any already claimed by a team/batch.
+      for (const m of members) {
+        const key = memberKey(m);
+        if (memberToGroup.has(key)) continue;
+        const groupKey = `single:${key}`;
+        memberToGroup.set(key, groupKey);
+        groups.set(groupKey, { kind: "single", label: m.nickname ?? m.task ?? "subagent", runId: typeof (m as Record<string, unknown>).runId === "string" ? String((m as Record<string, unknown>).runId) : undefined, memberKeys: [key], order: order++ });
+      }
+    }
+  }
+
+  return [...groups.entries()]
+    .sort((a, b) => a[1].order - b[1].order)
+    .map(([id, g]) => ({
+      id,
+      kind: g.kind,
+      label: g.label,
+      runId: g.runId,
+      members: g.memberKeys.map((k) => freshest.get(k)).filter((m): m is SubagentDisplay => !!m),
+    }))
+    // A group can end up empty when a later echo of the same run (e.g. the
+    // wait_workflow result vs the live accumulator) claimed all its members.
+    .filter((group) => group.members.length > 0);
+}

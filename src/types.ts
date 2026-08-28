@@ -43,6 +43,13 @@ export interface AssistantProviderMetadata {
 export interface UserMessage {
   role: "user";
   content: string | ContentPart[];
+  /** Local presentation metadata; provider adapters intentionally ignore it. */
+  ui?: {
+    /** Exact composer layout, including inline image chips. */
+    displayText: string;
+    /** First [Image #N] label used by this message. */
+    imageDisplayStart?: number;
+  };
 }
 
 export interface AssistantMessage {

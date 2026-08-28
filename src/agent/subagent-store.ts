@@ -34,6 +34,7 @@ interface PersistedSubagent {
   nickname: string;
   profile: AgentProfile;
   category?: string;
+  phase?: string;
   route?: ResolvedSubagentRoute;
   parentToolCallId: string;
   parentToolName: string;
@@ -144,6 +145,7 @@ export class SubagentStore {
         nickname: record.nickname,
         profile: record.profile,
         category: record.category,
+        phase: record.phase,
         route: record.route,
         parentToolCallId: record.parentToolCallId,
         parentToolName: record.parentToolName,
@@ -190,6 +192,7 @@ export class SubagentStore {
           nickname: parsed.nickname,
           profile: parsed.profile,
           category: parsed.category,
+          phase: parsed.phase,
           route: parsed.route,
           parentToolCallId: parsed.parentToolCallId,
           parentToolName: parsed.parentToolName,

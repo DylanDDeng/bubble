@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isMultiplexedTerminal } from "../tui-ink/terminal-env.js";
+import { isMultiplexedTerminal } from "../tui/model/terminal-env.js";
 
 describe("isMultiplexedTerminal", () => {
   it("detects tmux via TMUX and TERM", () => {
