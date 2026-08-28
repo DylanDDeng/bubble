@@ -41,3 +41,6 @@ jobs:
 
       - name: Test terminal PTY flows
         run: npm run test:e2e
+
+      - name: Test packed npm installation
+        run: npm run test:package

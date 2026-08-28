@@ -4,11 +4,32 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   compareVersions,
+  detectInstallFromPath,
   getCurrentVersion,
   startStartupUpdateCheck,
   upgradeCommandFor,
   PACKAGE_NAME,
 } from "../update/index.js";
+
+describe("detectInstallFromPath", () => {
+  it("recognizes npm global installs below a Homebrew npm prefix", () => {
+    expect(
+      detectInstallFromPath("/opt/homebrew/lib/node_modules/@bubblebrain-ai/bubble/"),
+    ).toMatchObject({ manager: "npm", isGlobal: true, isLocalCheckout: false });
+  });
+
+  it("still recognizes an actual Homebrew Cellar checkout", () => {
+    expect(detectInstallFromPath("/opt/homebrew/Cellar/bubble/0.0.54/libexec/"))
+      .toMatchObject({ manager: "homebrew", isGlobal: false, isLocalCheckout: true });
+  });
+
+  it("keeps package-manager-specific node_modules layouts", () => {
+    expect(detectInstallFromPath("/Users/me/.bun/install/global/node_modules/@bubblebrain-ai/bubble/"))
+      .toMatchObject({ manager: "bun", isGlobal: true });
+    expect(detectInstallFromPath("/store/.pnpm/@bubblebrain-ai+bubble/node_modules/@bubblebrain-ai/bubble/"))
+      .toMatchObject({ manager: "pnpm", isGlobal: true });
+  });
+});
 
 describe("compareVersions", () => {
   it("orders numeric cores", () => {

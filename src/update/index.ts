@@ -87,6 +87,30 @@ export interface InstallInfo {
   installPath: string;
 }
 
+export function detectInstallFromPath(installPath: string): InstallInfo {
+  const lower = installPath.replace(/\\/g, "/").toLowerCase();
+  const isUnderNodeModules = lower.includes("/node_modules/");
+  // A dev/source checkout has src/ alongside dist/ and isn't under node_modules.
+  const isLocalCheckout = !isUnderNodeModules;
+
+  let manager: PackageManager = "unknown";
+  // Package-manager-specific node_modules layouts take precedence over a
+  // parent directory name (for example /opt/homebrew/lib/node_modules is npm).
+  if (lower.includes("/.bun/") || lower.includes("/bun/install/")) {
+    manager = "bun";
+  } else if (lower.includes("/pnpm/") || lower.includes("/.pnpm/")) {
+    manager = "pnpm";
+  } else if (lower.includes("/.yarn/") || lower.includes("/yarn/global")) {
+    manager = "yarn";
+  } else if (isUnderNodeModules) {
+    manager = "npm";
+  } else if (lower.includes("/cellar/") || lower.includes("/homebrew/")) {
+    manager = "homebrew";
+  }
+
+  return { manager, isGlobal: isUnderNodeModules, isLocalCheckout, installPath };
+}
+
 /**
  * Figure out how this copy of Bubble was installed by inspecting the real path
  * of the package directory (two levels up from this module: dist/update -> pkg).
@@ -99,25 +123,7 @@ export function detectInstall(): InstallInfo {
   } catch {
     // keep rawRoot
   }
-  const lower = installPath.replace(/\\/g, "/").toLowerCase();
-  const isUnderNodeModules = lower.includes("/node_modules/");
-  // A dev/source checkout has src/ alongside dist/ and isn't under node_modules.
-  const isLocalCheckout = !isUnderNodeModules;
-
-  let manager: PackageManager = "unknown";
-  if (lower.includes("/cellar/") || lower.includes("/homebrew/")) {
-    manager = "homebrew";
-  } else if (lower.includes("/.bun/") || lower.includes("/bun/install/")) {
-    manager = "bun";
-  } else if (lower.includes("/pnpm/") || lower.includes("/.pnpm/")) {
-    manager = "pnpm";
-  } else if (lower.includes("/.yarn/") || lower.includes("/yarn/global")) {
-    manager = "yarn";
-  } else if (isUnderNodeModules) {
-    manager = "npm";
-  }
-
-  return { manager, isGlobal: isUnderNodeModules, isLocalCheckout, installPath };
+  return detectInstallFromPath(installPath);
 }
 
 export function upgradeCommandFor(manager: PackageManager): { cmd: string; args: string[] } | null {

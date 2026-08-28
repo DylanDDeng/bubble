@@ -1,6 +1,6 @@
 {
   "name": "@bubblebrain-ai/bubble",
-  "version": "0.0.53",
+  "version": "0.0.54",
   "description": "A terminal coding agent",
   "type": "module",
   "engines": {
@@ -31,6 +31,7 @@
     "build": "npm run build:vendor && rm -rf dist && tsc && chmod +x dist/bin.js dist/main.js",
     "build:vendor": "tsc -p packages/pi-tui/tsconfig.build.json",
     "test:vendor": "cd packages/pi-tui && node --test --experimental-strip-types --no-warnings \"test/*.test.ts\"",
+    "test:package": "node scripts/verify-packed-install.mjs",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "dev": "tsc && node dist/main.js",
     "refresh-models": "NODE_USE_ENV_PROXY=1 node scripts/generate-model-data.mjs",
@@ -53,7 +54,7 @@
     "diff": "^9.0.0",
     "get-east-asian-width": "1.6.0",
     "js-tiktoken": "^1.0.21",
-    "marked": "^18.0.5",
+    "marked": "18.0.5",
     "openai": "^4.77.0",
     "picomatch": "^4.0.4",
     "qrcode-terminal": "^0.12.0",
@@ -90,6 +91,7 @@
     "node-pty@1.1.0": true
   },
   "bundleDependencies": [
-    "@bubblebrain-ai/pi-tui"
+    "@bubblebrain-ai/pi-tui",
+    "marked"
   ]
 }
