@@ -1,5 +1,6 @@
 import type { QuestionAnswer, QuestionEvent, QuestionPrompt, QuestionRequest, QuestionToolRef } from "./types.js";
 import { QuestionRejectedError } from "./types.js";
+import { normalizeQuestionInlineText } from "./normalize.js";
 
 interface PendingQuestion {
   request: QuestionRequest;
@@ -96,12 +97,12 @@ export class QuestionController {
 
 function normalizePrompt(input: QuestionPrompt): QuestionPrompt {
   return {
-    header: String(input.header ?? "").trim(),
-    question: String(input.question ?? "").trim(),
+    header: normalizeQuestionInlineText(input.header),
+    question: normalizeQuestionInlineText(input.question),
     options: Array.isArray(input.options)
       ? input.options.map((option) => ({
-          label: String(option?.label ?? "").trim(),
-          description: String(option?.description ?? "").trim(),
+          label: normalizeQuestionInlineText(option?.label),
+          description: normalizeQuestionInlineText(option?.description),
         }))
       : [],
     multiple: input.multiple === true,

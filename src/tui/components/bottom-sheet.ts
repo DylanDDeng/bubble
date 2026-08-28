@@ -16,6 +16,14 @@ export function safeSheetText(value: string): string {
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "�");
 }
 
+/** Sanitize a field that must occupy exactly one terminal row. */
+export function safeSheetInlineText(value: string): string {
+  return safeSheetText(value)
+    .replace(/\s+/gu, " ")
+    .replace(/\s+([,.;:!?，。；：！？、）)\]}])/gu, "$1")
+    .trim();
+}
+
 export function padSheetLine(line: string, width: number): string {
   const safeWidth = Math.max(1, width);
   const truncated = truncateToWidth(line, safeWidth, "");

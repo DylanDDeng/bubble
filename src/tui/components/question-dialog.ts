@@ -8,7 +8,7 @@ import {
   type Focusable,
 } from "@bubblebrain-ai/pi-tui";
 import type { QuestionAnswer, QuestionRequest } from "../../question/types.js";
-import { paintSheetLine, padSheetLine, safeSheetText } from "./bottom-sheet.js";
+import { paintSheetLine, padSheetLine, safeSheetInlineText, safeSheetText } from "./bottom-sheet.js";
 import { darkTheme, type Theme } from "../model/theme.js";
 import { themeDim, themeForeground } from "../model/theme-style.js";
 
@@ -101,11 +101,11 @@ export class QuestionDialogComponent implements Component, Focusable {
 
     if (roomy) panel.push({ line: "" });
     const tab = this.request.questions.length > 1
-      ? themeDim(theme.dim, `  ${question.header || "Question"} ${this.questionIndex + 1}/${this.request.questions.length}`)
+      ? themeDim(theme.dim, `  ${safeSheetInlineText(question.header) || "Question"} ${this.questionIndex + 1}/${this.request.questions.length}`)
       : "";
     const titleWidth = Math.max(1, contentWidth - visibleWidth(tab));
     panel.push({
-      line: `${indent}${chalk.bold(themeForeground(theme.inputText, truncateToWidth(safeSheetText(question.question), titleWidth, "…")))}${tab}`,
+      line: `${indent}${chalk.bold(themeForeground(theme.inputText, truncateToWidth(safeSheetInlineText(question.question), titleWidth, "…")))}${tab}`,
     });
     if (roomy) panel.push({ line: "" });
 
@@ -128,8 +128,8 @@ export class QuestionDialogComponent implements Component, Focusable {
       const option = question.options[optionIndex]!;
       const checked = currentAnswers.includes(option.label);
       const marker = checked ? "●" : "○";
-      const left = `${optionIndex + 1} (${marker}) ${safeSheetText(option.label)}`;
-      const line = joinColumns(left, safeSheetText(option.description), contentWidth, theme);
+      const left = `${optionIndex + 1} (${marker}) ${safeSheetInlineText(option.label)}`;
+      const line = joinColumns(left, safeSheetInlineText(option.description), contentWidth, theme);
       panel.push({
         line: `${indent}${selected
           ? chalk.bold(themeForeground(theme.inputText, line))

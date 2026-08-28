@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { stripTerminalSequences, visibleWidth } from "@bubblebrain-ai/pi-tui";
+import { stripTerminalSequences, Text, TuiAltScreen, visibleWidth } from "@bubblebrain-ai/pi-tui";
+import { VirtualTerminal } from "@bubblebrain-ai/pi-tui/testing";
 import type { QuestionRequest } from "../question/types.js";
 import { QuestionDialogComponent } from "../tui/components/question-dialog.js";
 
@@ -153,6 +154,58 @@ describe("question dialog", () => {
         expect(rendered.length).toBeLessThanOrEqual(rows === 1 ? 1 : rows - 1);
         expect(rendered.every((line) => visibleWidth(line) === width)).toBe(true);
       }
+    }
+  });
+
+  it("keeps CR-rich model choices on one row across repeated arrow navigation", async () => {
+    const crRichRequest: QuestionRequest = {
+      id: "question-cr-rich",
+      createdAt: 3,
+      questions: [{
+        header: "扩充范围",
+        question: "想扩多大范围\r？",
+        options: [
+          {
+            label: "混合套餐 ~16个 \r(Recommended\r)",
+            description: "上游精选\r（cal、mintlify、posthog\r）\r+\r 手写独占热门",
+          },
+          { label: "只用上游精选", description: "只加 VoltAgent\r 上游人工深度文档" },
+          { label: "只要独占热门", description: "只要 designlang\r 独占品牌" },
+        ],
+      }],
+    };
+    const dialog = new QuestionDialogComponent(crRichRequest, () => 24);
+
+    for (let index = 0; index < 12; index++) dialog.handleInput("\x1b[B");
+    const rendered = dialog.render(120);
+    const plain = rendered.map(stripTerminalSequences);
+
+    expect(rendered.every((line) => !/[\r\n]/.test(line))).toBe(true);
+    expect(plain.filter((line) => line.includes("混合套餐 ~16个"))).toHaveLength(1);
+    expect(plain.filter((line) => line.includes("只用上游精选"))).toHaveLength(1);
+    expect(plain.filter((line) => line.includes("只要独占热门"))).toHaveLength(1);
+
+    const terminal = new VirtualTerminal(120, 24);
+    const tui = new TuiAltScreen(terminal);
+    tui.setLayoutRoot(new Text("transcript", 0, 0));
+    tui.showOverlay(new QuestionDialogComponent(crRichRequest, () => terminal.rows), {
+      anchor: "bottom-center",
+      width: "100%",
+      margin: { left: 1, right: 1 },
+    });
+    tui.start();
+    try {
+      await terminal.waitForRender();
+      for (let index = 0; index < 12; index++) {
+        terminal.sendInput("\x1b[B");
+        await terminal.waitForRender();
+      }
+      const viewport = terminal.getViewport().join("\n");
+      expect(viewport.match(/混合套餐 ~16个/g)).toHaveLength(1);
+      expect(viewport.match(/只用上游精选/g)).toHaveLength(1);
+      expect(viewport.match(/只要独占热门/g)).toHaveLength(1);
+    } finally {
+      tui.stop();
     }
   });
 });

@@ -76,5 +76,34 @@ describe("question tool", () => {
     expect(result.isError).toBe(true);
     expect(controller.list()).toEqual([]);
   });
-});
 
+  it("normalizes CR-rich model copy before opening and persisting a question", async () => {
+    const controller = new QuestionController();
+    const tool = createQuestionTool(controller);
+    const resultPromise = tool.execute({
+      questions: [{
+        header: "扩充\r范围",
+        question: "想扩多大范围\r？",
+        options: [{
+          label: "混合套餐\r(Recommended)",
+          description: "上游精选\r+\r手写独占热门",
+        }],
+      }],
+    }, { cwd: "/tmp" });
+    const [pending] = controller.list();
+
+    expect(pending.questions[0]).toMatchObject({
+      header: "扩充 范围",
+      question: "想扩多大范围？",
+      options: [{
+        label: "混合套餐 (Recommended)",
+        description: "上游精选 + 手写独占热门",
+      }],
+    });
+    controller.reply(pending.id, [["混合套餐 (Recommended)"]]);
+
+    const result = await resultPromise;
+    expect(result.metadata?.questions).toEqual(pending.questions);
+    expect(result.content).not.toMatch(/[\r\n]/);
+  });
+});
