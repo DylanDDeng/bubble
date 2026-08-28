@@ -18,6 +18,74 @@ class RecordingTerminal extends VirtualTerminal {
 }
 
 describe("main pi-tui running input", () => {
+  it("returns to the latest message when submitting after scrolling through history", async () => {
+    const terminal = new VirtualTerminal(80, 18);
+    let messages: DisplayMessage[] = Array.from({ length: 12 }, (_, index) => ({
+      key: `history-${index + 1}`,
+      role: "user" as const,
+      content: `historical request ${index + 1}`,
+    }));
+    const submitted: unknown[] = [];
+    let notifyTranscriptChanged = () => {};
+    const controller = {
+      subscribe: (listener: () => void) => {
+        notifyTranscriptChanged = listener;
+        return () => { notifyTranscriptChanged = () => {}; };
+      },
+      getTranscript: () => messages,
+      getSubagentGroups: () => [],
+      getWorkflows: () => [],
+      getBackgroundTasks: () => [],
+      isRunning: () => false,
+      getStreamingTail: () => null,
+      pendingSteerCount: () => 0,
+      queuedInputCount: () => 0,
+      steer: () => false,
+      cancelActiveRun: () => false,
+      runTurn: async (input: unknown) => { submitted.push(input); },
+      appendDisplayMessage: (message: DisplayMessage) => {
+        messages = [...messages, message];
+        notifyTranscriptChanged();
+      },
+      clearTranscript: () => {},
+      shutdown: () => ({ reason: "test", wallMs: 0 }),
+    };
+    const app = new PiTuiApp({
+      agent: {
+        model: "test-model",
+        providerId: "test-provider",
+        thinking: "medium",
+        mode: "default",
+        setMode: () => {},
+        getContextUsageSnapshot: () => ({ usedTokens: 0, contextWindow: 1_000 }),
+      } as never,
+      sessionManager: { getSessionFile: () => "/s.jsonl" } as never,
+      controller: controller as never,
+      callbacks: { onExitRequest: () => {}, onClearTranscript: () => {}, onThemeToggle: () => {} },
+      terminal,
+    });
+
+    app.start();
+    try {
+      await terminal.waitForRender();
+      expect(terminal.getViewport().join("\n")).toContain("historical request 12");
+
+      for (let index = 0; index < 8; index += 1) terminal.sendInput("\x1b[<64;1;1M");
+      await vi.waitFor(() => {
+        expect(terminal.getViewport().join("\n")).not.toContain("historical request 12");
+      });
+
+      terminal.sendInput("latest composer request");
+      terminal.sendInput("\r");
+      await vi.waitFor(() => expect(submitted).toEqual(["latest composer request"]));
+      await vi.waitFor(() => {
+        expect(terminal.getViewport().join("\n")).toContain("latest composer request");
+      });
+    } finally {
+      app.dispose();
+    }
+  });
+
   it("keeps an image chip inline when the composer draft becomes a sent message", async () => {
     const terminal = new VirtualTerminal(100, 30);
     const messages: DisplayMessage[] = [];

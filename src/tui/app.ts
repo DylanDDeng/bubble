@@ -558,6 +558,12 @@ export class PiTuiApp {
     const trimmed = payload.text.trim();
     if (!trimmed && payload.images.length === 0) return;
 
+    // Passive output preserves a user's manual history position, but an
+    // explicit Composer submission changes their point of attention to the
+    // new turn. Re-enable follow-end before appending the user row so the same
+    // layout pass that renders it also brings it into view.
+    this.viewportScroll?.scrollToEnd();
+
     if (trimmed.startsWith("/")) {
       void this.handleCommand(trimmed);
       return;
