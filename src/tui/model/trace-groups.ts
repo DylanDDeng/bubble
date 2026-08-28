@@ -405,9 +405,33 @@ function buildExecuteGroup(
   const { shown, omitted } = take(lines, options.maxPreviewLines);
   const rawCommand = String(tool.args.command ?? tool.args.cmd ?? commandFromRawArguments(tool.rawArguments) ?? "");
   const description = String(tool.args.description ?? "").trim() || undefined;
+  const taskId = typeof tool.metadata?.taskId === "string" ? tool.metadata.taskId : undefined;
+  const lifecycle = typeof tool.metadata?.taskLifecycle === "string"
+    ? tool.metadata.taskLifecycle
+    : undefined;
+  const backgroundLaunch = tool.metadata?.background === true && taskId && !lifecycle;
+  const title = lifecycle === "completed"
+    ? "Task completed"
+    : lifecycle === "failed"
+      ? "Task failed"
+      : lifecycle === "killed"
+        ? "Task killed"
+        : backgroundLaunch
+          ? "Task started"
+          : classifier.title;
+  const endedAt = typeof tool.metadata?.endedAt === "number" ? tool.metadata.endedAt : undefined;
+  const elapsed = endedAt ? formatElapsedDuration(tool.startedAt, endedAt) : undefined;
+  const exitCode = typeof tool.metadata?.exitCode === "number" ? tool.metadata.exitCode : undefined;
+  const outputLines = typeof tool.metadata?.outputLines === "number" ? tool.metadata.outputLines : undefined;
+  const statusLabel = taskId
+    ? [taskId, elapsed ? `in ${elapsed}` : undefined, exitCode !== undefined ? `exit ${exitCode}` : undefined,
+        outputLines !== undefined ? `${outputLines} line${outputLines === 1 ? "" : "s"}` : undefined]
+      .filter(Boolean)
+      .join(" · ")
+    : undefined;
   return {
     kind: "execute",
-    title: classifier.title,
+    title,
     raw: [tool],
     command: normalizeCommand(rawCommand),
     description,
@@ -420,7 +444,16 @@ function buildExecuteGroup(
     hasError,
     errorCount,
     startedAt,
+    statusLabel,
   };
+}
+
+function formatElapsedDuration(startedAt: number | undefined, endedAt: number): string | undefined {
+  if (startedAt === undefined) return undefined;
+  const seconds = Math.max(0, Math.round((endedAt - startedAt) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m${String(seconds % 60).padStart(2, "0")}s`;
 }
 
 function buildMutationGroup(

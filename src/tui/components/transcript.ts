@@ -478,10 +478,10 @@ function projectTraceGroup(group: TraceGroup, options: TranscriptRenderOptions):
   const marker = expanded ? "⌄" : selected ? "›" : "◆";
   const status = group.pending
     ? " running"
-    : group.hasError
-      ? ` ${group.errorCount || 1} error${(group.errorCount || 1) === 1 ? "" : "s"}`
-      : group.statusLabel
-        ? ` ${group.statusLabel}`
+    : group.statusLabel
+      ? ` ${group.statusLabel}`
+      : group.hasError
+        ? ` ${group.errorCount || 1} error${(group.errorCount || 1) === 1 ? "" : "s"}`
         : "";
   const detail = singleRead
     ? ` ${readTraceLabel(singleRead)}`
@@ -503,7 +503,9 @@ function projectTraceGroup(group: TraceGroup, options: TranscriptRenderOptions):
     : [];
   const groupAction = subagentIds.length === 1
     ? { kind: "open-subagent" as const, subAgentId: subagentIds[0]! }
-    : undefined;
+    : typeof group.raw[0]?.metadata?.taskId === "string"
+      ? { kind: "open-task" as const, taskId: group.raw[0].metadata.taskId }
+      : undefined;
   const groupTarget: TraceRowTarget | undefined = groupKey
     ? { kind: "group", key: groupKey, groupKey, foldable: groupFoldable, action: groupAction }
     : undefined;

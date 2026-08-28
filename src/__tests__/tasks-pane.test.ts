@@ -12,6 +12,7 @@ function callbacks() {
     onStopWorkflow: vi.fn(),
     onStopSubagent: vi.fn(),
     onStopTask: vi.fn(),
+    onCopyTaskOutput: vi.fn(),
     onEscape: vi.fn(),
   };
 }
@@ -126,5 +127,32 @@ describe("Grok-style Tasks Pane", () => {
     const groups = buildTraceGroups([launch, wait]);
     expect(groups).toHaveLength(1);
     expect(groups[0]).toMatchObject({ title: "Subagent", description: "Ada", previewLines: [] });
+  });
+
+  it("shows task output lines and supports Ctrl+F inspect plus y copy", () => {
+    const cb = callbacks();
+    const pane = new TasksPaneComponent(() => ({
+      workflows: [],
+      groups: [],
+      tasks: [{
+        kind: "task",
+        id: "task_0001",
+        command: "npm test",
+        description: "Run tests",
+        cwd: "/tmp",
+        status: "running",
+        startedAt: Date.now() - 2_000,
+        outputTruncated: false,
+        outputLines: 17,
+      }],
+    }), () => 40, cb);
+    pane.focused = true;
+
+    expect(pane.render(100).join("\n")).toContain("17 lines");
+    pane.handleInput("\x06");
+    expect(cb.onOpenTask).toHaveBeenCalledWith(expect.objectContaining({ id: "task_0001" }));
+    pane.handleInput("y");
+    expect(cb.onCopyTaskOutput).toHaveBeenCalledWith("task_0001");
+    pane.dispose();
   });
 });

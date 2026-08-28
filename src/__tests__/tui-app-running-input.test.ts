@@ -349,6 +349,52 @@ describe("main pi-tui running input", () => {
     }
   });
 
+  it("uses Ctrl+B for foreground Execute promotion while Ctrl+G remains the Tasks Pane shortcut", async () => {
+    const terminal = new VirtualTerminal(100, 30);
+    const promoteActiveBash = vi.fn(() => "task_0001");
+    const controller = {
+      subscribe: () => () => {},
+      getTranscript: () => [],
+      getSubagentGroups: () => [],
+      getWorkflows: () => [],
+      getBackgroundTasks: () => [],
+      isRunning: () => true,
+      getStreamingTail: () => null,
+      pendingSteerCount: () => 0,
+      queuedInputCount: () => 0,
+      promoteActiveBash,
+      steer: () => false,
+      cancelActiveRun: () => false,
+      runTurn: async () => {},
+      appendDisplayMessage: () => {},
+      clearTranscript: () => {},
+      shutdown: () => ({ reason: "test", wallMs: 0 }),
+    };
+    const app = new PiTuiApp({
+      agent: {
+        model: "test-model",
+        providerId: "test-provider",
+        thinking: "medium",
+        mode: "default",
+        setMode: () => {},
+        getContextUsageSnapshot: () => ({ usedTokens: 0, contextWindow: 1_000 }),
+      } as never,
+      sessionManager: { getSessionFile: () => "/s.jsonl" } as never,
+      controller: controller as never,
+      callbacks: { onExitRequest: () => {}, onClearTranscript: () => {}, onThemeToggle: () => {} },
+      terminal,
+    });
+
+    app.start();
+    try {
+      terminal.sendInput("\x02");
+      await terminal.waitForRender();
+      expect(promoteActiveBash).toHaveBeenCalledTimes(1);
+    } finally {
+      app.dispose();
+    }
+  });
+
   it("enters fullscreen before the first product frame and keeps the complete app surface mounted", async () => {
     const terminal = new RecordingTerminal(100, 30);
     const controller = {

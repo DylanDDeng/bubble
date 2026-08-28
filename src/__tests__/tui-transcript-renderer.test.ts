@@ -250,6 +250,33 @@ describe("transcript renderer", () => {
     });
   });
 
+  it("renders background task lifecycle rows as task-inspector actions", () => {
+    const interaction = new TraceInteractionState();
+    const projection = projectTranscript([msg({
+      toolCalls: [{
+        id: "task-lifecycle:task_0001:3000",
+        name: "bash",
+        args: { command: "npm test", description: "Run tests" },
+        status: "completed",
+        startedAt: 1_000,
+        metadata: {
+          kind: "shell",
+          background: true,
+          taskId: "task_0001",
+          taskLifecycle: "completed",
+          endedAt: 3_000,
+          exitCode: 0,
+          outputLines: 4,
+        },
+      }],
+    })], { columns: 100, traceInteraction: interaction });
+
+    expect(projection.rows.map(strip).join("\n")).toContain("Task completed Run tests task_0001 · in 2s · exit 0 · 4 lines");
+    expect(projection.traceTargets.find((target) => target?.action)).toMatchObject({
+      action: { kind: "open-task", taskId: "task_0001" },
+    });
+  });
+
   it("renders Grok's dim hover border and brighter selected border without reflow", () => {
     const interaction = new TraceInteractionState();
     const messages = [msg({

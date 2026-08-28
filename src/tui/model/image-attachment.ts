@@ -1,4 +1,4 @@
-/** Image attachment shape (moved from src/tui-ink/image-paste.ts at cutover). */
+/** Image attachment shape shared by composer, provider payload, and history. */
 export interface ImageAttachment {
   base64: string;
   mediaType: string;

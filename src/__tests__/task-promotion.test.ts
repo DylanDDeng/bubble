@@ -17,7 +17,7 @@ function backgroundBash(manager: ProcessManager, channel: PromotionChannel) {
   });
 }
 
-describe("Ctrl+G promotion", () => {
+describe("Ctrl+B and automatic promotion", () => {
   it("promotes a running foreground command: tool resolves, process keeps running, output lands in the task", async () => {
     const manager = new ProcessManager();
     const channel = new PromotionChannel();
@@ -57,7 +57,7 @@ describe("Ctrl+G promotion", () => {
     );
     expect(result.isError).toBeFalsy();
 
-    // The handler unregisters on finish; a late Ctrl+G finds nothing.
+    // The handler unregisters on finish; a late Ctrl+B finds nothing.
     expect(channel.hasPromotable("call_2")).toBe(false);
     expect(channel.requestPromotion("call_2")).toBeUndefined();
   });
@@ -73,5 +73,28 @@ describe("Ctrl+G promotion", () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(channel.hasPromotable("call_3")).toBe(false);
     await resultPromise;
+  });
+
+  it("automatically demotes a command after the configured foreground budget", async () => {
+    const manager = new ProcessManager();
+    const channel = new PromotionChannel();
+    const bash = createBashTool(cwd, undefined, undefined, {
+      processManager: manager,
+      allowBackgroundTasks: true,
+      promotionChannel: channel,
+      autoBackgroundAfterMs: 50,
+    });
+
+    const result = await bash.execute(
+      { command: "echo before-auto; sleep 0.3; echo after-auto" },
+      { cwd, sessionID: "s1", toolCall: { id: "call_auto", name: "bash" } } as any,
+    );
+    const taskId = String(result.metadata?.taskId);
+    expect(result.content).toContain(`Moved to background: ${taskId}`);
+    expect(taskId).toMatch(/^task_\d{4}$/);
+
+    const [done] = await manager.waitTasks([taskId], { timeoutMs: 5000 });
+    expect(done?.status).toBe("completed");
+    expect(manager.taskOutputTail(taskId)).toContain("after-auto");
   });
 });

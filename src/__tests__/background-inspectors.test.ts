@@ -47,6 +47,7 @@ describe("background activity inspectors", () => {
       getTerminalRows: () => 8,
       onClose: vi.fn(),
       onStop: vi.fn(),
+      onCopy: vi.fn(),
       onRender: vi.fn(),
     });
 

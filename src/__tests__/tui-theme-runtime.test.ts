@@ -101,6 +101,7 @@ describe("pi-tui runtime theme", () => {
         getTerminalRows: () => 10,
         onClose: () => {},
         onStop: () => {},
+        onCopy: () => {},
         onRender: () => {},
         theme: palette,
       });

@@ -1,7 +1,6 @@
 /**
- * pi-tui production entry — replaces src/tui-ink/run.tsx at the Phase 10
- * cutover. Keeps the same RunTuiOptions surface main.ts already builds so
- * main.ts changes stay minimal.
+ * Pi TUI production entry. Keeps the RunTuiOptions surface main.ts builds so
+ * renderer startup and shutdown remain isolated from application wiring.
  */
 import process from "node:process";
 import { execFile } from "node:child_process";
@@ -70,6 +69,10 @@ export async function runTui(agent: Agent, _args: unknown, options: RunTuiOption
     agent,
     sessionManager: options.sessionManager as never,
     goalStore: options.goalStore,
+    processManager: options.processManager,
+    tasksAutoResume: options.tasksAutoResume,
+    promotionChannel: options.promotionChannel,
+    workspaceCwd: process.cwd(),
     ports: buildPorts(options),
   });
 
@@ -127,6 +130,11 @@ export async function runTui(agent: Agent, _args: unknown, options: RunTuiOption
     await app.waitUntilExit();
   } finally {
     process.removeListener("SIGTERM", sigterm);
+    // The app has stopped painting, but the runtime still retains owner-session
+    // bindings. Reap first, then persist killed terminal markers so a resumed
+    // session never contains a dangling `task_started` lifecycle.
+    await options.processManager?.shutdownTasks();
+    controller.persistFinalTaskMarkers();
   }
 
   return { exitCode: 0, reason: "user-quit", wallMs: Date.now() - startedAt };

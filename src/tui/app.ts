@@ -1,8 +1,8 @@
 /**
  * Bubble production TUI on the vendored pi-tui renderer.
  *
- * Replaces the Ink App (src/tui-ink/app.tsx) with the same product surface:
- * transcript (user cards, assistant text, reasoning, tool traces), composer
+ * Owns Bubble's terminal product surface: transcript (user cards, assistant
+ * text, reasoning, tool traces), composer
  * with native history, queue/steer while running, status footer, blocking
  * overlays (plan approval, tool approval, questions), model/theme pickers,
  * task wake notices, and clean terminal lifecycle on exit.
@@ -33,6 +33,7 @@ import { WelcomeBannerComponent } from "./components/welcome.js";
 import { ApprovalDialogComponent, type ApprovalDialogChoice } from "./components/approval-dialog.js";
 import { PlanDialogComponent } from "./components/plan-dialog.js";
 import { FeedbackDialogComponent, type FeedbackDialogResult } from "./components/feedback-dialog.js";
+import { FeishuSetupDialogComponent, type FeishuSetupResult } from "./components/feishu-setup-dialog.js";
 import { QuestionDialogComponent } from "./components/question-dialog.js";
 import { ProviderKeyInputComponent } from "./components/provider-key-input.js";
 import {
@@ -97,6 +98,7 @@ import {
   type ThemeMode,
 } from "./model/theme.js";
 import { themeBackgroundCodes, themeDim, themeForeground } from "./model/theme-style.js";
+import { TuiAnimationClock } from "./animation-clock.js";
 
 export interface PiAppCallbacks {
   onExitRequest(): void;
@@ -167,6 +169,7 @@ export class PiTuiApp {
   private readonly footer: ResponsiveFooterComponent;
   private readonly tasksPane: TasksPaneComponent;
   private readonly taskStatusBar: TaskStatusBarComponent;
+  private readonly animationClock: TuiAnimationClock;
   private readonly traceInteraction = new TraceInteractionState();
   private readonly overlays: OverlayRequestController;
   private themeMode: ThemeMode;
@@ -196,6 +199,10 @@ export class PiTuiApp {
     previousScrollTop: number;
   } | null = null;
   private rewindPreviewMessageIndex: number | undefined;
+  private feishuSetupPhase: {
+    component: FeishuSetupDialogComponent;
+    handle: { hide(): void };
+  } | null = null;
   private disposed = false;
 
   /** Compatibility/debug view backed by the canonical persistent history. */
@@ -323,21 +330,33 @@ export class PiTuiApp {
       }),
       () => this.tui.terminal.rows,
       {
-        onRender: () => this.renderSnapshot(),
+        // Pane navigation only changes local presentation state. Reprojecting
+        // the live trace/Markdown here is both unnecessary and expensive.
+        onRender: () => this.tui.requestRender(),
         onOpenWorkflow: (item) => this.openWorkflowInspector(item),
         onOpenSubagent: (item) => this.openSubagentInspector(item),
         onOpenTask: (item) => this.openTaskInspector(item),
         onStopWorkflow: (id) => this.options.controller.stopWorkflow(id),
         onStopSubagent: (id) => this.options.controller.stopSubagent(id),
         onStopTask: (id) => this.options.controller.stopBackgroundTask(id),
+        onCopyTaskOutput: (id) => {
+          const output = this.options.controller.getBackgroundTaskOutput(id);
+          if (!output) return;
+          void copyToClipboard(output).then(() => this.pushNotice("Copied task output."));
+        },
         onEscape: () => {
           this.tasksPane.focused = false;
           this.tui.setFocus(this.editor);
-          this.renderSnapshot();
+          this.tui.requestRender();
         },
       },
       () => this.theme,
     );
+    this.animationClock = new TuiAnimationClock((elapsedMs) => {
+      const streamingChanged = this.streamingMessage.advanceAnimationFrame(elapsedMs);
+      const tasksChanged = this.tasksPane.advanceAnimationFrame();
+      if (streamingChanged || tasksChanged) this.tui.requestRender();
+    });
     this.taskStatusBar = new TaskStatusBarComponent(this.tasksPane);
     this.overlays = new OverlayRequestController({ questionController: options.questionController });
 
@@ -493,6 +512,12 @@ export class PiTuiApp {
           this.tui.setFocus(this.tasksPane);
         }
         this.renderSnapshot();
+        return { consume: true };
+      }
+      if (matchesKey(data, "ctrl+b") && this.options.controller.isRunning()) {
+        // Current Grok contract: Ctrl+B transfers a live Execute into Tasks;
+        // Ctrl+G remains dedicated to opening and closing the Tasks Pane.
+        this.options.controller.promoteActiveBash?.();
         return { consume: true };
       }
       // A focused Tasks Pane owns Escape. It returns focus to the composer;
@@ -715,6 +740,8 @@ export class PiTuiApp {
           this.openProviderKeyPhase(providerId);
         } else if (mode === "skill") {
           this.openSkills();
+        } else if (mode === "feishu-setup") {
+          this.openFeishuSetup();
         }
       },
       registry: options.registry as never,
@@ -854,6 +881,14 @@ export class PiTuiApp {
       this.streamingMounted = false;
       this.streamingMessage.clearToNothing();
     }
+    this.syncAnimationClock();
+  }
+
+  private syncAnimationClock(): void {
+    this.animationClock.setActive(
+      this.fullscreen === null
+        && (this.streamingMessage.isAnimationActive() || this.tasksPane.isAnimationActive()),
+    );
   }
 
   // ---- Fullscreen mode ----------------------------------------------------
@@ -868,6 +903,7 @@ export class PiTuiApp {
    */
   private async enterFullscreen(): Promise<void> {
     if (this.fullscreen) return;
+    this.animationClock.setActive(false);
     this.tui.stop();
     const { FullscreenApp } = await import("./fullscreen.js");
     this.fullscreen = new FullscreenApp({
@@ -1392,6 +1428,50 @@ export class PiTuiApp {
     this.tui.setFocus(dialog);
   }
 
+  private openFeishuSetup(): void {
+    if (this.feishuSetupPhase) return;
+    let handle: { hide(): void } | undefined;
+    let closed = false;
+    const close = (result: FeishuSetupResult) => {
+      if (closed) return;
+      closed = true;
+      handle?.hide();
+      this.feishuSetupPhase = null;
+      this.tui.setFocus(this.editor);
+      if (result.kind === "completed") {
+        this.appendTranscriptRow({
+          key: `feishu-setup-${Date.now()}`,
+          role: "assistant",
+          content: result.summary,
+          syntheticKind: "ui_notice",
+        });
+      } else if (result.kind === "error") {
+        this.appendTranscriptRow({
+          key: `feishu-setup-error-${Date.now()}`,
+          role: "error",
+          content: `Feishu setup failed: ${result.message}`,
+        });
+      } else {
+        this.pushNotice("已取消 Feishu setup。");
+      }
+      this.renderSnapshot();
+    };
+    const dialog = new FeishuSetupDialogComponent({
+      getTerminalRows: () => this.tui.terminal.rows,
+      getTheme: () => this.theme,
+      onResult: close,
+      onRender: () => this.renderSnapshot(),
+    });
+    handle = this.tui.showOverlay(dialog, {
+      anchor: "bottom-center",
+      width: "100%",
+      margin: { left: 1, right: 1 },
+    });
+    this.feishuSetupPhase = { component: dialog, handle };
+    this.tui.setFocus(dialog);
+    dialog.start();
+  }
+
   private openWorkflowInspector(item: WorkflowPaneItem): void {
     let handle: { hide(): void } | undefined;
     const getSnapshot = (): WorkflowInspectorSnapshot => {
@@ -1507,6 +1587,51 @@ export class PiTuiApp {
       if (image) this.openImageViewer(image);
       return;
     }
+    if (action.kind === "open-task") {
+      const task = this.options.controller.getBackgroundTasks()
+        .find((candidate) => candidate.id === action.taskId);
+      if (task) {
+        this.openTaskInspector({
+          kind: "task",
+          id: task.id,
+          title: task.description || task.command,
+          status: task.status,
+          task,
+        });
+      } else {
+        const tool = this.options.controller.getTranscript()
+          .flatMap((message) => message.toolCalls ?? [])
+          .find((candidate) => candidate.metadata?.taskId === action.taskId
+            && candidate.metadata?.taskLifecycle !== undefined);
+        if (tool) {
+          const lifecycle = String(tool.metadata?.taskLifecycle ?? "completed");
+          const command = String(tool.args.command ?? action.taskId);
+          const description = typeof tool.args.description === "string" ? tool.args.description : undefined;
+          const startedAt = tool.startedAt ?? Date.now();
+          const endedAt = typeof tool.metadata?.endedAt === "number" ? tool.metadata.endedAt : startedAt;
+          this.openTaskInspector({
+            kind: "task",
+            id: action.taskId,
+            title: description || command,
+            status: lifecycle,
+            task: {
+              kind: "task",
+              id: action.taskId,
+              command,
+              description,
+              cwd: process.cwd(),
+              status: lifecycle === "failed" ? "failed" : lifecycle === "killed" ? "killed" : "completed",
+              exitCode: typeof tool.metadata?.exitCode === "number" ? tool.metadata.exitCode : null,
+              startedAt,
+              endedAt,
+              outputTruncated: false,
+              outputLines: typeof tool.metadata?.outputLines === "number" ? tool.metadata.outputLines : 0,
+            },
+          }, tool.result ?? "");
+        }
+      }
+      return;
+    }
     if (action.kind !== "open-subagent") return;
     const member = this.options.controller.getSubagentGroups()
       .flatMap((group) => group.members)
@@ -1521,16 +1646,18 @@ export class PiTuiApp {
     });
   }
 
-  private openTaskInspector(item: TaskPaneItem): void {
+  private openTaskInspector(item: TaskPaneItem, fallbackOutput = ""): void {
     let handle: { hide(): void } | undefined;
+    const taskOutput = () => this.options.controller.getBackgroundTaskOutput(item.id) || fallbackOutput;
     const component = new TaskInspectorComponent({
       id: item.id,
       title: item.title,
       getStatus: () => this.options.controller.getBackgroundTasks().find((task) => task.id === item.id)?.status ?? item.status,
-      getOutput: () => this.options.controller.getBackgroundTaskOutput(item.id),
+      getOutput: taskOutput,
       getTerminalRows: () => this.tui.terminal.rows,
       onClose: () => handle?.hide(),
       onStop: () => this.options.controller.stopBackgroundTask(item.id),
+      onCopy: () => copyToClipboard(taskOutput()),
       onRender: () => this.renderSnapshot(),
       theme: this.theme,
     });
@@ -1646,6 +1773,9 @@ export class PiTuiApp {
     this.activeQuestion?.close();
     this.activeQuestion = null;
     this.questionQueue.length = 0;
+    this.feishuSetupPhase?.component.dispose();
+    this.feishuSetupPhase?.handle.hide();
+    this.feishuSetupPhase = null;
     if (this.providerKeyPhase) {
       this.providerKeyPhase.input.setValue("");
       this.providerKeyPhase = null;
@@ -1656,6 +1786,7 @@ export class PiTuiApp {
     // listener, spinner timers, and terminal mode cannot outlive the root app.
     this.fullscreen?.dispose();
     this.fullscreen = null;
+    this.animationClock.dispose();
     this.composer.dispose();
     this.streamingMessage.dispose();
     this.tasksPane.dispose();

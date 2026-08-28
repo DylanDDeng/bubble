@@ -206,11 +206,11 @@ describe("pi-tui working trace parity", () => {
     component.startSpinner();
     const initial = rendered(component).at(-1)!;
 
-    vi.advanceTimersByTime(100);
+    component.advanceAnimationFrame(100);
     const nextFrame = rendered(component).at(-1)!;
     expect(nextFrame).not.toBe(initial);
 
-    vi.advanceTimersByTime(1_400);
+    component.advanceAnimationFrame(1_400);
     expect(rendered(component).at(-1)).toContain("reading the room");
 
     component.clearToNothing();

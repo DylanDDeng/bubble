@@ -1,6 +1,5 @@
 /**
- * Startup `--resume` session picker on the vendored pi-tui renderer —
- * replaces src/tui-ink/run-session-picker.tsx at cutover. Same contract:
+ * Startup `--resume` session picker on the vendored Pi TUI renderer. Contract:
  * resolve the chosen session file, or undefined on cancel.
  */
 import { Box, ProcessTerminal, TuiMainScreen, Text, VStack, SelectList, type SelectItem } from "@bubblebrain-ai/pi-tui";

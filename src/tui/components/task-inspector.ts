@@ -11,6 +11,7 @@ export interface TaskInspectorOptions {
   getTerminalRows(): number;
   onClose(): void;
   onStop(): void;
+  onCopy(): void | Promise<void>;
   onRender(): void;
   theme?: Theme;
 }
@@ -26,7 +27,6 @@ export class TaskInspectorComponent implements Component {
   private follow = true;
   private bodyRows = 0;
   private contentRows = 0;
-
   constructor(private readonly options: TaskInspectorOptions) {}
 
   render(width: number): string[] {
@@ -51,7 +51,7 @@ export class TaskInspectorComponent implements Component {
     return [
       themeForeground(theme.border, `┌─ ${title} ${"─".repeat(Math.max(0, frameWidth - visibleWidth(title) - 5))}┐`),
       ...visible.map((line) => `${themeForeground(theme.border, "│")} ${pad(line, inside)} ${themeForeground(theme.border, "│")}`),
-      `${themeForeground(theme.border, "│")} ${pad(themeDim(theme.dim, "↑↓ scroll · x stop · Esc close"), inside)} ${themeForeground(theme.border, "│")}`,
+      `${themeForeground(theme.border, "│")} ${pad(themeDim(theme.dim, "↑↓ scroll · y copy · x stop · Esc close"), inside)} ${themeForeground(theme.border, "│")}`,
       themeForeground(theme.border, `└${"─".repeat(frameWidth - 2)}┘`),
     ];
   }
@@ -59,6 +59,10 @@ export class TaskInspectorComponent implements Component {
   handleInput(data: string): void {
     if (matchesKey(data, "escape")) return this.options.onClose();
     if (data === "x" && this.options.getStatus() === "running") return this.options.onStop();
+    if (data === "y") {
+      void this.options.onCopy();
+      return;
+    }
     const maxOffset = Math.max(0, this.contentRows - this.bodyRows);
     if (matchesKey(data, "up") || data === "k") {
       this.follow = false;

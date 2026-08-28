@@ -90,8 +90,15 @@ export interface UserConfigData {
   /** Subagent model-routing knobs: autoTier (default true), allowCrossProvider (default true). */
   agentRouting?: Partial<AgentRoutingConfig>;
   subagents?: SubagentsUserConfig;
-  /** Background tasks (design §2.3b): autoResume defaults ON; false keeps notices + reminders only. */
-  tasks?: { autoResume?: boolean };
+  /** Background tasks: completion wakes and Grok-style foreground demotion. */
+  tasks?: {
+    /** Auto-resume the Agent when an owned task finishes. Defaults ON. */
+    autoResume?: boolean;
+    /** Move long foreground Execute calls into Tasks automatically. Defaults ON. */
+    autoBackground?: boolean;
+    /** Foreground wait budget before automatic demotion. Defaults to 15 seconds. */
+    foregroundWaitMs?: number;
+  };
 }
 
 export interface SubagentsUserConfig {
@@ -212,6 +219,14 @@ export class UserConfig {
   /** Auto-resume on background-task completion (design §2.3b). Default ON. */
   getTasksAutoResume(): boolean {
     return this.data.tasks?.autoResume !== false;
+  }
+
+  /** Grok-style foreground wait budget. `false` disables automatic demotion. */
+  getTasksAutoBackgroundAfterMs(): number | false {
+    if (this.data.tasks?.autoBackground === false) return false;
+    const configured = this.data.tasks?.foregroundWaitMs;
+    if (typeof configured !== "number" || !Number.isFinite(configured)) return 15_000;
+    return Math.max(1_000, Math.min(300_000, Math.floor(configured)));
   }
 
   pushRecentModel(model: string) {

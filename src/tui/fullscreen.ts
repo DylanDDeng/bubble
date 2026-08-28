@@ -34,6 +34,7 @@ import type { ComposerController } from "./controller/composer-controller.js";
 import { ComposerImagePreviewComponent, ImageViewerComponent } from "./components/image-preview.js";
 import { createAssistantMarkdownTheme } from "./markdown-style.js";
 import { darkTheme, type Theme } from "./model/theme.js";
+import { TuiAnimationClock } from "./animation-clock.js";
 
 export interface FullscreenAppOptions {
   controller: BubbleTuiController;
@@ -55,6 +56,7 @@ export class FullscreenApp {
   private readonly tui: TuiAltScreen;
   private readonly transcript: ResponsiveTranscriptComponent;
   private readonly streamingMessage: StreamingMessageComponent;
+  private readonly animationClock: TuiAnimationClock;
   private readonly editor: Editor;
   private readonly composerPreview?: ComposerImagePreviewComponent;
   private readonly footer: ResponsiveFooterComponent;
@@ -97,7 +99,15 @@ export class FullscreenApp {
         },
       },
     );
-    this.streamingMessage = new StreamingMessageComponent(8, () => this.render(), undefined, getTheme);
+    this.streamingMessage = new StreamingMessageComponent(
+      8,
+      () => this.tui.requestRender(),
+      undefined,
+      getTheme,
+    );
+    this.animationClock = new TuiAnimationClock((elapsedMs) => {
+      if (this.streamingMessage.advanceAnimationFrame(elapsedMs)) this.tui.requestRender();
+    });
     this.footer = new ResponsiveFooterComponent(() => ({
       agent: this.options.agent,
       mode: this.options.agent.mode,
@@ -238,6 +248,7 @@ export class FullscreenApp {
       this.streamingMounted = false;
       this.streamingMessage.clearToNothing();
     }
+    this.animationClock.setActive(this.streamingMessage.isAnimationActive());
     this.tui.requestRender();
   }
 
@@ -263,6 +274,7 @@ export class FullscreenApp {
     if (this.disposed) return;
     this.disposed = true;
     this.unsubscribe();
+    this.animationClock.dispose();
     this.streamingMessage.dispose();
     // Returning to the host/main renderer must not copy the fullscreen dock
     // (composer + footer) into terminal scrollback.

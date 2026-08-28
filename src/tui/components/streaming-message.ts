@@ -192,7 +192,8 @@ export class StreamingMessageComponent extends VStack {
   private tail: StreamingTailState | null = null;
   private commandActivity: { label: string; cancelling: boolean } | null = null;
   private frame = 0;
-  private frameTimer: ReturnType<typeof setInterval> | null = null;
+  private spinnerActive = false;
+  private idlePhraseElapsedMs = 0;
   private readonly onFrame?: () => void;
 
   // Persistent row pool — NEVER re-created, only setText.
@@ -205,7 +206,6 @@ export class StreamingMessageComponent extends VStack {
   private readonly reasoningRows: Text[];
   private readonly timelineRows: ProjectedRowComponent[];
   private idlePhraseIndex = 0;
-  private phraseTimer: ReturnType<typeof setInterval> | null = null;
   private projectionOptions: Omit<TranscriptRenderOptions, "columns"> = {};
 
   constructor(
@@ -255,33 +255,8 @@ export class StreamingMessageComponent extends VStack {
     this.lastColumns = columns;
     this.projectionOptions = projectionOptions;
     const width = Math.max(1, Math.floor(columns));
-    const idlePhrase = GENERIC_PHRASES[this.idlePhraseIndex % GENERIC_PHRASES.length]!;
-    const activeTool = [...tail.tools].reverse().find((tool) => (
-      tool.status === "queued"
-      || tool.status === "pending"
-      || tool.status === "running"
-      || (tool.status === undefined && tool.result === undefined)
-    ));
-    const phrase = activeTool
-      ? TOOL_TARGET_PHRASES[activeTool.name] ?? `running ${activeTool.name}`
-      : tail.content
-        ? "writing the response"
-        : tail.reasoning
-          ? "working through the request"
-          : idlePhrase;
-    const streamedChars = tail.content.length + tail.reasoning.length;
-    const tokenText = streamedChars > 0 ? ` (↓${approximateTokenLabel(streamedChars)} tok)` : "";
     const theme = this.getTheme?.();
-    const spinner = theme
-      ? themeForeground(theme.accent, SPINNER_FRAMES[this.frame]!)
-      : chalk.cyan(SPINNER_FRAMES[this.frame]!);
-    const status = theme
-      ? themeDim(theme.dim, `${phrase}${tokenText}`)
-      : chalk.dim(`${phrase}${tokenText}`);
-    this.activityLane.setText(truncateToWidth(
-      ` ${spinner} ${status}`,
-      width,
-    ));
+    this.updateActivityLane();
     let hasLiveRows = false;
     this.thinkingHeaderRow.setText("");
     this.thinkingEllipsisRow.setText("");
@@ -364,16 +339,7 @@ export class StreamingMessageComponent extends VStack {
     this.commandActivity = { label, cancelling };
     this.lastColumns = columns;
     this.clearProjectedRows();
-    const text = cancelling ? "Cancelling…" : `${label}…`;
-    const theme = this.getTheme?.();
-    const spinner = theme
-      ? themeForeground(theme.accent, SPINNER_FRAMES[this.frame]!)
-      : chalk.cyan(SPINNER_FRAMES[this.frame]!);
-    const status = theme ? themeDim(theme.dim, text) : chalk.dim(text);
-    this.activityLane.setText(truncateToWidth(
-      ` ${spinner} ${status}`,
-      Math.max(1, Math.floor(columns)),
-    ));
+    this.updateActivityLane();
   }
 
   /**
@@ -401,41 +367,37 @@ export class StreamingMessageComponent extends VStack {
   }
 
   startSpinner(): void {
-    if (this.frameTimer) return;
-    this.frameTimer = setInterval(() => {
-      this.frame = (this.frame + 1) % SPINNER_FRAMES.length;
-      if (this.tail) {
-        // Re-render just the glyph by re-running the status text build.
-        const keep = this.tail;
-        this.update(keep, this.lastColumns ?? 80, this.projectionOptions);
-      } else if (this.commandActivity) {
-        this.updateCommandActivity(
-          this.commandActivity.label,
-          this.commandActivity.cancelling,
-          this.lastColumns ?? 80,
-        );
-      }
-      this.onFrame?.();
-    }, 100);
-    this.phraseTimer = setInterval(() => {
-      if (!this.tail || this.tail.content || this.tail.reasoning || this.tail.tools.length > 0) return;
-      this.idlePhraseIndex = (this.idlePhraseIndex + 1) % GENERIC_PHRASES.length;
-      this.update(this.tail, this.lastColumns ?? 80, this.projectionOptions);
-      this.onFrame?.();
-    }, 1_500);
+    if (this.spinnerActive) return;
+    this.spinnerActive = true;
+    this.idlePhraseElapsedMs = 0;
   }
 
   private lastColumns?: number;
 
   stopSpinner(): void {
-    if (this.frameTimer) {
-      clearInterval(this.frameTimer);
-      this.frameTimer = null;
+    this.spinnerActive = false;
+    this.idlePhraseElapsedMs = 0;
+  }
+
+  isAnimationActive(): boolean {
+    return this.spinnerActive;
+  }
+
+  /** Advance decorative state only; trace/Markdown projection never runs here. */
+  advanceAnimationFrame(elapsedMs = 100): boolean {
+    if (!this.spinnerActive) return false;
+    this.frame = (this.frame + 1) % SPINNER_FRAMES.length;
+    if (this.tail && !this.tail.content && !this.tail.reasoning && this.tail.tools.length === 0) {
+      this.idlePhraseElapsedMs += Math.max(0, elapsedMs);
+      while (this.idlePhraseElapsedMs >= 1_500) {
+        this.idlePhraseElapsedMs -= 1_500;
+        this.idlePhraseIndex = (this.idlePhraseIndex + 1) % GENERIC_PHRASES.length;
+      }
+    } else {
+      this.idlePhraseElapsedMs = 0;
     }
-    if (this.phraseTimer) {
-      clearInterval(this.phraseTimer);
-      this.phraseTimer = null;
-    }
+    this.updateActivityLane();
+    return true;
   }
 
   dispose(): void {
@@ -445,5 +407,41 @@ export class StreamingMessageComponent extends VStack {
   /** Remember the width for spinner-driven rebuilds between flushes. */
   noteWidth(columns: number): void {
     this.lastColumns = columns;
+  }
+
+  private updateActivityLane(): void {
+    const width = Math.max(1, Math.floor(this.lastColumns ?? 80));
+    const theme = this.getTheme?.();
+    const spinner = theme
+      ? themeForeground(theme.accent, SPINNER_FRAMES[this.frame]!)
+      : chalk.cyan(SPINNER_FRAMES[this.frame]!);
+    let text = "";
+    if (this.tail) {
+      const idlePhrase = GENERIC_PHRASES[this.idlePhraseIndex % GENERIC_PHRASES.length]!;
+      const activeTool = [...this.tail.tools].reverse().find((tool) => (
+        tool.status === "queued"
+        || tool.status === "pending"
+        || tool.status === "running"
+        || (tool.status === undefined && tool.result === undefined)
+      ));
+      const phrase = activeTool
+        ? TOOL_TARGET_PHRASES[activeTool.name] ?? `running ${activeTool.name}`
+        : this.tail.content
+          ? "writing the response"
+          : this.tail.reasoning
+            ? "working through the request"
+            : idlePhrase;
+      const streamedChars = this.tail.content.length + this.tail.reasoning.length;
+      const tokenText = streamedChars > 0 ? ` (↓${approximateTokenLabel(streamedChars)} tok)` : "";
+      text = `${phrase}${tokenText}`;
+    } else if (this.commandActivity) {
+      text = this.commandActivity.cancelling ? "Cancelling…" : `${this.commandActivity.label}…`;
+    }
+    if (!text) {
+      this.activityLane.setText("");
+      return;
+    }
+    const status = theme ? themeDim(theme.dim, text) : chalk.dim(text);
+    this.activityLane.setText(truncateToWidth(` ${spinner} ${status}`, width));
   }
 }

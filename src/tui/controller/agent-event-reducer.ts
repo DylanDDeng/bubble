@@ -1,7 +1,7 @@
 /**
  * Pure Agent-event reducer for a single agent run.
  *
- * Mechanical extraction of the switch in src/tui-ink/app.tsx:1657-1854 plus
+ * Mechanical extraction of the legacy application event switch plus
  * its finally-block semantics (1888-1958) into a pure function: state in,
  * (state, effects) out. No React, no Ink, no ports — the controller applies
  * effects and owns scheduling (40ms flush) via ports.

@@ -40,6 +40,7 @@ export interface TasksPaneCallbacks {
   onStopWorkflow(id: string): void;
   onStopSubagent(id: string): void;
   onStopTask(id: string): void;
+  onCopyTaskOutput?(id: string): void;
   onEscape(): void;
 }
 
@@ -156,12 +157,23 @@ function normalize(snapshot: TasksPaneSnapshot, showHistory: boolean): Record<Pa
     status: task.status,
     task,
   }));
-  const filter = (items: PaneItem[]) => showHistory ? items : items.filter((item) => isActive(item.status));
+  const filter = (items: PaneItem[]) => (showHistory ? items : items.filter((item) => isActive(item.status)))
+    .sort((left, right) => {
+      const activityOrder = Number(isActive(right.status)) - Number(isActive(left.status));
+      if (activityOrder !== 0) return activityOrder;
+      return itemUpdatedAt(right) - itemUpdatedAt(left);
+    });
   return {
     workflows: filter(workflowItems),
     subagents: filter(subagentItems),
     tasks: filter(taskItems),
   };
+}
+
+function itemUpdatedAt(item: PaneItem): number {
+  if (item.kind === "workflow") return item.updatedAt ?? item.createdAt ?? 0;
+  if (item.kind === "subagent") return item.member.updatedAt ?? item.member.createdAt ?? 0;
+  return item.task.endedAt ?? item.task.startedAt;
 }
 
 export class TasksPaneComponent implements Component {
@@ -175,7 +187,6 @@ export class TasksPaneComponent implements Component {
   private lastRows: RenderRow[] = [];
   private allRows: RenderRow[] = [];
   private frame = 0;
-  private timer: ReturnType<typeof setInterval>;
   private readonly collapsed = new Set<PaneSection>();
 
   constructor(
@@ -183,17 +194,19 @@ export class TasksPaneComponent implements Component {
     private readonly getTerminalRows: () => number,
     private readonly callbacks: TasksPaneCallbacks,
     private readonly getTheme: () => Theme = () => darkTheme,
-  ) {
-    this.timer = setInterval(() => {
-      if (this.activeCount() === 0) return;
-      this.frame += 1;
-      this.callbacks.onRender();
-    }, 100);
+  ) {}
+
+  isAnimationActive(): boolean {
+    return this.isAvailable() && this.activeCount() > 0;
   }
 
-  dispose(): void {
-    clearInterval(this.timer);
+  advanceAnimationFrame(): boolean {
+    if (!this.isAnimationActive()) return false;
+    this.frame = (this.frame + 1) % SPINNER.length;
+    return true;
   }
+
+  dispose(): void {}
 
   invalidate(): void {}
 
@@ -319,7 +332,8 @@ export class TasksPaneComponent implements Component {
     }
     if (item.kind === "task") {
       const duration = elapsed(item.task.startedAt, item.task.endedAt, isActive(item.status));
-      return truncateToWidth(`   ${glyph} ${safe(item.title)}  ${themeDim(theme.dim, `${item.status}${duration ? ` · ${duration}` : ""}`)}${isActive(item.status) ? themeDim(theme.dim, "  view  ×") : themeDim(theme.dim, "  view")}`, width, "");
+      const lineCount = `${item.task.outputLines} line${item.task.outputLines === 1 ? "" : "s"}`;
+      return truncateToWidth(`   ${glyph} ${safe(item.title)}  ${themeDim(theme.dim, `${item.status}${duration ? ` · ${duration}` : ""} · ${lineCount}`)}${isActive(item.status) ? themeDim(theme.dim, "  view  ×") : themeDim(theme.dim, "  view")}`, width, "");
     }
     const member = item.member;
     const activity = latestSubagentNote(member);
@@ -363,8 +377,9 @@ export class TasksPaneComponent implements Component {
       this.callbacks.onRender();
       return;
     }
-    if (matchesKey(data, "enter") && selected) this.openItem(selected);
+    if ((matchesKey(data, "enter") || matchesKey(data, "ctrl+f")) && selected) this.openItem(selected);
     if (data === "x" && selected && isActive(selected.status)) this.stopItem(selected);
+    if (data === "y" && selected?.kind === "task") this.callbacks.onCopyTaskOutput?.(selected.id);
   }
 
   handleMouse(event: TuiMouseEvent): boolean {

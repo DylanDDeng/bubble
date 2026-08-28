@@ -224,6 +224,7 @@ async function main() {
     processManager,
     allowBackgroundTasks,
     promotionChannel,
+    autoBackgroundAfterMs: userConfig.getTasksAutoBackgroundAfterMs(),
     // Lazy: sessionManager is resolved after tools are created.
     checkpoints: () => sessionManager?.getCheckpoints(),
   });
@@ -415,7 +416,7 @@ async function main() {
     sessionFile: sessionManager?.getSessionFile(),
     provider: activeProviderId || "none",
     model: activeModel || "none",
-    renderer: printMode ? "print" : "ink",
+    renderer: printMode ? "print" : "pi-tui",
   });
   if (traceInfo.enabled) {
     traceEvent("run_start", {

@@ -90,13 +90,15 @@ describe("task runtime controller", () => {
   });
 
   it("holds completions for other sessions and replays them on switch-back", async () => {
-    const h = makeDeps();
+    let current = "/current.jsonl";
+    const h = makeDeps({ getSessionFile: () => current });
     const controller = new TaskRuntimeController(h.deps);
     controller.start();
 
     h.listeners.finish[0]!(task({ ownerSessionId: "/other.jsonl" }));
     expect(h.announcements).toHaveLength(0);
 
+    current = "/other.jsonl";
     const replayed = controller.releaseHeldCompletions("/other.jsonl");
     expect(replayed).toHaveLength(1);
     expect(h.announcements).toHaveLength(1);
@@ -117,6 +119,36 @@ describe("task runtime controller", () => {
     controller.dispose();
   });
 
+  it("defers a completion that lands during a turn and wakes once the loop is idle", async () => {
+    let turnRunning = true;
+    const h = makeDeps({ gates: () => ({ turnRunning, queuedInputs: 0, exiting: false }) });
+    h.deps.processManager.getTask = () => task();
+    const controller = new TaskRuntimeController(h.deps);
+    controller.start();
+
+    h.listeners.finish[0]!(task());
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(h.wakes).toHaveLength(0);
+
+    turnRunning = false;
+    controller.onIdle();
+    expect(h.wakes).toHaveLength(1);
+    controller.dispose();
+  });
+
+  it("does not wake again after task_output or an accepted turn delivered the result", async () => {
+    const delivered = task({ deliveredAt: Date.now() });
+    const h = makeDeps();
+    h.deps.processManager.getTask = () => delivered;
+    const controller = new TaskRuntimeController(h.deps);
+    controller.start();
+
+    h.listeners.finish[0]!(task());
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(h.wakes).toHaveLength(0);
+    controller.dispose();
+  });
+
   it("disposed controller fires no wake even if a task lands late", async () => {
     const h = makeDeps();
     const controller = new TaskRuntimeController(h.deps);
@@ -128,5 +160,19 @@ describe("task runtime controller", () => {
     h.listeners.finish.forEach((listener) => listener(task()));
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(h.wakes).toHaveLength(0);
+  });
+
+  it("persists a killed terminal marker after host-side exit reaping", () => {
+    let listed: BackgroundTaskInfo[] = [];
+    const h = makeDeps();
+    h.deps.processManager.listTasks = () => listed;
+    const controller = new TaskRuntimeController(h.deps);
+    controller.start();
+    h.listeners.change[0]!(task({ status: "running" }));
+    controller.dispose();
+
+    listed = [task({ status: "killed", endedAt: 3_000 })];
+    controller.persistTerminalSnapshot();
+    expect(h.markers.map((marker) => marker.marker)).toEqual(["task_started", "task_killed"]);
   });
 });

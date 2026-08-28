@@ -7,6 +7,7 @@ export type TraceRowTarget =
 
 export type TraceAction =
   | { kind: "open-subagent"; subAgentId: string }
+  | { kind: "open-task"; taskId: string }
   | { kind: "open-image"; messageKey: string; imageLabel: string };
 
 /**

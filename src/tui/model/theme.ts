@@ -1,7 +1,5 @@
 /**
- * Renderer-neutral theme tokens (moved from src/tui-ink/theme.ts at the
- * Phase 10 cutover). Palettes keep their Ink-era shape; consumers that need
- * React context are gone with the Ink renderer.
+ * Renderer-neutral theme tokens shared by the terminal UI surfaces.
  */
 export type ResolvedTheme = "light" | "dark";
 export type ThemeMode = "auto" | ResolvedTheme;

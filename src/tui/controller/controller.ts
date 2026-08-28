@@ -14,8 +14,8 @@
  */
 import type { Agent, AgentRunOptions } from "../../agent.js";
 import type { WorkflowRunSnapshot } from "../../agent/workflow/control.js";
-import type { BackgroundTaskInfo } from "../../tasks/manager.js";
-import type { SessionManager } from "../../session.js";
+import type { BackgroundTaskInfo, ProcessManager } from "../../tasks/manager.js";
+import { SessionManager, type SessionMarkerKind } from "../../session.js";
 import type { GoalStore } from "../../goal/store.js";
 import { tokenUsageTotal } from "../../goal/usage.js";
 import type { BubbleTuiPorts } from "./ports.js";
@@ -61,6 +61,9 @@ import type { SubmitPayload } from "../model/composer-types.js";
 import { buildImageContentParts, buildImageContentPartsFromDisplayText } from "../model/image-paste.js";
 import { displayImagesFromPayload, formatImageUserDisplayText } from "../image-display.js";
 import { GoalRuntimeController } from "./goal-runtime-controller.js";
+import { TaskRuntimeController } from "./task-runtime-controller.js";
+import type { PromotionChannel } from "../../tasks/promotion.js";
+import { formatInternalContextBlock } from "../../agent/internal-reminder-sanitizer.js";
 import { executeRewind, type RewindExecutionResult, type RewindScope } from "../../rewind.js";
 import type { ContentPart, Message } from "../../types.js";
 
@@ -86,6 +89,10 @@ export interface BubbleTuiControllerDeps {
   };
   readonly sessionManager: SessionManager;
   readonly goalStore?: GoalStore;
+  readonly processManager?: ProcessManager;
+  readonly tasksAutoResume?: boolean;
+  readonly promotionChannel?: PromotionChannel;
+  readonly workspaceCwd?: string;
   readonly ports: BubbleTuiPorts;
   readonly onEffect?: (effect: ControllerEffect) => void;
 }
@@ -115,6 +122,8 @@ export class BubbleTuiController {
   private readonly sessionTransition: SessionTransitionController;
   private readonly startedAtMs: number;
   private readonly goalRuntime?: GoalRuntimeController;
+  private readonly taskRuntime?: TaskRuntimeController;
+  private readonly pendingTaskAnnouncements = new Map<string, BackgroundTaskInfo>();
   private sessionManager: SessionManager;
   private transcript: DisplayMessage[] = [];
   private runActive = false;
@@ -134,6 +143,10 @@ export class BubbleTuiController {
 
   constructor(private readonly deps: BubbleTuiControllerDeps) {
     this.sessionManager = deps.sessionManager;
+    this.transcript = [
+      ...reconstructDisplayMessages([...deps.agent.messages]),
+      ...restoredTaskLifecycleMessages(this.sessionManager),
+    ];
     this.overlays = new OverlayRequestController();
     this.startedAtMs = Date.now();
     this.sessionTransition = new SessionTransitionController({
@@ -156,7 +169,7 @@ export class BubbleTuiController {
       commit: (manager, transcript) => {
         this.sessionManager = manager;
         this.deps.ports.flush.cancelFlush();
-        this.transcript = transcript;
+        this.transcript = [...transcript, ...restoredTaskLifecycleMessages(manager)];
         this.queue.queued.length = 0;
         this.liveStreamVisible = false;
         this.runState = null;
@@ -191,10 +204,35 @@ export class BubbleTuiController {
         },
       });
     }
-    this.backgroundTaskUnsubscribe = deps.agent.backgroundTasks?.subscribe?.(() => {
-      this.state.touch();
-      this.notify();
-    });
+    if (deps.processManager) {
+      this.taskRuntime = new TaskRuntimeController({
+        processManager: deps.processManager,
+        getSessionFile: () => this.sessionManager.getSessionFile(),
+        appendMarker: (file, marker, payload) => this.appendTaskMarker(file, marker as SessionMarkerKind, payload),
+        announceCompletion: (task) => this.announceTaskCompletion(task),
+        submitTaskWake: (summary) => {
+          const cwd = this.sessionManager.getMetadata().cwd ?? deps.workspaceCwd ?? process.cwd();
+          void this.runTurn(formatInternalContextBlock("background-task", summary), cwd);
+        },
+        tasksAutoResume: deps.tasksAutoResume !== false,
+        gates: () => ({
+          turnRunning: this.isBusy(),
+          queuedInputs: this.queue.queued.length,
+          exiting: this.disposed,
+          goalActive: this.goalRuntime?.snapshot()?.status === "active",
+        }),
+      });
+      this.taskRuntime.start();
+    }
+    this.backgroundTaskUnsubscribe = (deps.processManager
+      ? deps.processManager.onChange(() => {
+          this.state.touch();
+          this.notify();
+        })
+      : deps.agent.backgroundTasks?.subscribe?.(() => {
+          this.state.touch();
+          this.notify();
+        }));
   }
 
   private externalGeneration = 0;
@@ -269,7 +307,9 @@ export class BubbleTuiController {
   }
 
   getBackgroundTasks(): BackgroundTaskInfo[] {
-    return this.deps.agent.backgroundTasks?.list() ?? [];
+    return this.deps.processManager?.listTasks(this.sessionManager.getSessionFile())
+      ?? this.deps.agent.backgroundTasks?.list()
+      ?? [];
   }
 
   getChildTranscript(agentId: string): DisplayMessage[] {
@@ -301,11 +341,60 @@ export class BubbleTuiController {
   }
 
   stopBackgroundTask(id: string): void {
-    void this.deps.agent.backgroundTasks?.kill?.(id);
+    if (this.deps.processManager) void this.deps.processManager.killTask(id);
+    else void this.deps.agent.backgroundTasks?.kill?.(id);
   }
 
   getBackgroundTaskOutput(id: string): string {
-    return this.deps.agent.backgroundTasks?.outputTail(id) ?? "";
+    return this.deps.processManager?.taskOutputTail(id) ?? this.deps.agent.backgroundTasks?.outputTail(id) ?? "";
+  }
+
+  /** Called by the host after graceful task reaping on TUI exit. */
+  persistFinalTaskMarkers(): void {
+    this.taskRuntime?.persistTerminalSnapshot();
+  }
+
+  private appendTaskMarker(file: string, marker: SessionMarkerKind, payload: string): void {
+    try {
+      const manager = this.sessionManager.getSessionFile() === file
+        ? this.sessionManager
+        : new SessionManager(file);
+      manager.appendMarker(marker, payload);
+    } catch {
+      // Lifecycle persistence is best-effort; it must never break the child.
+    }
+  }
+
+  private announceTaskCompletion(task: BackgroundTaskInfo): void {
+    // Switching back to the owner session reconstructs terminal task rows
+    // from its persisted marker before held completions are released. Treat
+    // that row as the same lifecycle event instead of appending a duplicate.
+    if (this.transcript.some((message) => message.toolCalls?.some((tool) =>
+      tool.metadata?.taskId === task.id && tool.metadata?.taskLifecycle !== undefined))) {
+      return;
+    }
+    if (this.runActive) {
+      this.pendingTaskAnnouncements.set(task.id, task);
+      this.state.touch();
+      this.notify();
+      return;
+    }
+    this.appendDisplayMessage(taskLifecycleDisplayMessage(
+      task,
+      this.deps.processManager?.taskOutputTail(task.id, 12_000),
+    ));
+  }
+
+  /** Move the newest live Bash Execute into the unified task manager. */
+  promoteActiveBash(): string | undefined {
+    const channel = this.deps.promotionChannel;
+    if (!channel || !this.runState) return undefined;
+    const tool = [...this.runState.accumulator.toolCalls]
+      .reverse()
+      .find((candidate) => candidate.name === "bash"
+        && candidate.status === "running"
+        && channel.hasPromotable(candidate.id));
+    return tool ? channel.requestPromotion(tool.id) : undefined;
   }
 
   /** Drop every transcript row (/clear). */
@@ -320,7 +409,10 @@ export class BubbleTuiController {
   /** Re-project the visible transcript after a non-controller command rewrites Agent history. */
   rebuildTranscriptFromAgent(): void {
     this.state.withTransaction(() => {
-      this.transcript = reconstructDisplayMessages([...this.deps.agent.messages]);
+      this.transcript = [
+        ...reconstructDisplayMessages([...this.deps.agent.messages]),
+        ...restoredTaskLifecycleMessages(this.sessionManager),
+      ];
       this.liveSubagentTools.clear();
       this.childRuns.clear();
       this.liveSubagentVersion += 1;
@@ -341,7 +433,10 @@ export class BubbleTuiController {
       this.state.withTransaction(() => {
         purgeForSessionSwitch(this.queue);
         this.queue.queued.length = 0;
-        this.transcript = reconstructDisplayMessages([...this.deps.agent.messages]);
+        this.transcript = [
+          ...reconstructDisplayMessages([...this.deps.agent.messages]),
+          ...restoredTaskLifecycleMessages(this.sessionManager),
+        ];
         this.liveSubagentTools.clear();
         this.childRuns.clear();
         this.liveSubagentVersion += 1;
@@ -392,6 +487,7 @@ export class BubbleTuiController {
       this.state.touch();
     });
     this.notify();
+    this.taskRuntime?.onIdle();
   }
 
   getCommandActivity(): CommandActivity | null {
@@ -600,6 +696,7 @@ export class BubbleTuiController {
     }
     let runUsageTokens = 0;
     let runUsageReported = false;
+    let taskResultsForNextTurn = this.taskRuntime?.captureCurrentUndeliveredIds() ?? [];
     this.activeInputController = inputController;
     this.activeAbortController = abortController;
     const upstreamAbort = () => abortController.abort(options?.abortSignal?.reason);
@@ -625,6 +722,10 @@ export class BubbleTuiController {
         abortSignal: abortController.signal,
         inputController,
       })) {
+        if (event.type === "turn_start") {
+          this.taskRuntime?.markResultsDelivered(taskResultsForNextTurn);
+          taskResultsForNextTurn = [];
+        }
         if (event.type === "turn_end" && event.usage) {
           runUsageReported = true;
           runUsageTokens += tokenUsageTotal(event.usage);
@@ -676,6 +777,9 @@ export class BubbleTuiController {
         // the empty waiting spinner mounted; only turn_end hides the live tail
         // in the same transaction that commits its settled replacement.
         if (event.type === "turn_end") {
+          if (event.willContinue) {
+            taskResultsForNextTurn = this.taskRuntime?.captureCurrentUndeliveredIds() ?? [];
+          }
           this.liveStreamVisible = !!event.willContinue;
         } else if (
           event.type === "turn_start"
@@ -779,6 +883,16 @@ export class BubbleTuiController {
         this.runState = null;
         this.activeInputController = null;
         this.activeAbortController = null;
+        if (this.pendingTaskAnnouncements.size > 0) {
+          this.transcript = [
+            ...this.transcript,
+            ...[...this.pendingTaskAnnouncements.values()].map((task) => taskLifecycleDisplayMessage(
+              task,
+              this.deps.processManager?.taskOutputTail(task.id, 12_000),
+            )),
+          ];
+          this.pendingTaskAnnouncements.clear();
+        }
         this.state.touch();
       });
       this.notify();
@@ -793,6 +907,8 @@ export class BubbleTuiController {
       usageTokens: runUsageTokens,
       usageReported: runUsageReported,
     }, cwd);
+
+    this.taskRuntime?.onIdle();
 
     await this.drainQueuedInputs(cwd, agentOptions);
   }
@@ -905,6 +1021,7 @@ export class BubbleTuiController {
     const outcome = this.sessionTransition.switchTo(plan);
     if (outcome.ok && outcome.manager) {
       this.goalRuntime?.loadCurrentSession();
+      this.taskRuntime?.releaseHeldCompletions(outcome.manager.getSessionFile());
       this.notify();
     }
     return outcome.ok ? { ok: true } : { ok: false, error: outcome.error };
@@ -916,6 +1033,7 @@ export class BubbleTuiController {
     const outcome = this.sessionTransition.createFresh(cwd, notice);
     if (outcome.ok && outcome.manager) {
       this.goalRuntime?.loadCurrentSession();
+      this.taskRuntime?.releaseHeldCompletions(outcome.manager.getSessionFile());
       this.notify();
     }
     return outcome.ok ? { ok: true } : { ok: false, error: outcome.error };
@@ -932,9 +1050,120 @@ export class BubbleTuiController {
     this.disposed = true;
     this.cancelActiveRun(reason);
     this.goalRuntime?.dispose();
+    this.taskRuntime?.dispose();
     this.overlays.dispose();
     this.backgroundTaskUnsubscribe?.();
     this.deps.ports.flush.cancelFlush();
     return { reason, wallMs: Date.now() - this.startedAtMs };
   }
+}
+
+function taskLifecycleDisplayMessage(task: BackgroundTaskInfo, output?: string): DisplayMessage {
+  const status = task.status === "killed"
+    ? "cancelled"
+    : task.status === "failed"
+      ? "failed"
+      : "completed";
+  const tool: DisplayToolCall = {
+    id: `task-lifecycle:${task.id}:${task.endedAt ?? Date.now()}`,
+    name: "bash",
+    args: {
+      command: task.command,
+      ...(task.description ? { description: task.description } : {}),
+    },
+    status,
+    isError: task.status === "failed",
+    result: output?.trim() ? output : undefined,
+    startedAt: task.startedAt,
+    metadata: {
+      kind: "shell",
+      background: true,
+      taskId: task.id,
+      taskLifecycle: task.status,
+      exitCode: task.exitCode ?? null,
+      endedAt: task.endedAt,
+      outputLines: task.outputLines,
+    },
+  };
+  return {
+    key: nextDisplayMessageKey("task"),
+    role: "assistant",
+    content: "",
+    toolCalls: [tool],
+    parts: [{ type: "tools", toolCalls: [tool] }],
+  };
+}
+
+function restoredTaskLifecycleMessages(manager: SessionManager): DisplayMessage[] {
+  let entries: ReturnType<SessionManager["getEntries"]>;
+  try {
+    entries = manager.getEntries();
+  } catch {
+    return [];
+  }
+  let startIndex = 0;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry?.type === "marker" && entry.kind === "conversation_clear") {
+      startIndex = index + 1;
+      break;
+    }
+  }
+  const starts = new Map<string, Record<string, unknown>>();
+  const completed = new Map<string, { task: BackgroundTaskInfo; output?: string; order: number }>();
+  for (let index = startIndex; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (entry?.type !== "marker" || !entry.value) continue;
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(entry.value) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const id = typeof payload.id === "string" ? payload.id : undefined;
+    if (!id) continue;
+    if (entry.kind === "task_started") {
+      starts.set(id, payload);
+      continue;
+    }
+    if (entry.kind !== "task_finished" && entry.kind !== "task_killed") continue;
+    const start = starts.get(id) ?? {};
+    const status = entry.kind === "task_killed"
+      ? "killed"
+      : payload.status === "failed"
+        ? "failed"
+        : "completed";
+    const startedAt = numeric(payload.startedAt) ?? numeric(start.startedAt) ?? entry.timestamp;
+    const endedAt = numeric(payload.endedAt) ?? entry.timestamp;
+    completed.set(id, {
+      order: index,
+      task: {
+        kind: "task",
+        id,
+        command: stringValue(payload.command) ?? stringValue(start.command) ?? id,
+        description: stringValue(payload.description) ?? stringValue(start.description),
+        cwd: manager.getMetadata().cwd ?? process.cwd(),
+        pid: numeric(start.pid),
+        status,
+        exitCode: typeof payload.exitCode === "number" ? payload.exitCode : null,
+        startedAt,
+        endedAt,
+        outputTruncated: false,
+        outputLines: numeric(payload.outputLines) ?? 0,
+        ownerSessionId: manager.getSessionFile(),
+      },
+      output: stringValue(payload.output),
+    });
+  }
+  return [...completed.values()]
+    .sort((left, right) => left.order - right.order)
+    .map(({ task, output }) => taskLifecycleDisplayMessage(task, output));
+}
+
+function numeric(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
