@@ -6,11 +6,13 @@
  * Ctrl+C exits cleanly with the terminal restored.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { basename } from "node:path";
 import { startTui, type PtySession } from "./pty-harness.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 
 mkdirSync(new URL("../../../.e2e-tmp/bubble-home", import.meta.url).pathname, { recursive: true });
 const imageFixture = new URL("../../../.e2e-tmp/paste-fixture.png", import.meta.url).pathname;
+const repoDirectoryName = basename(new URL("../../..", import.meta.url).pathname);
 writeFileSync(imageFixture, Buffer.from("small-png-fixture"));
 
 describe.skipIf(process.env.BUBBLE_SKIP_PTY_E2E === "1")("pi-tui app PTY e2e (production entry)", () => {
@@ -31,7 +33,7 @@ describe.skipIf(process.env.BUBBLE_SKIP_PTY_E2E === "1")("pi-tui app PTY e2e (pr
     await session!.waitFor("I am a cat", 10_000);
     await session!.waitFor("Model:", 5_000);
     await session!.waitFor("Version:", 5_000);
-    await session!.waitFor("my-coding-agent-pi-tui", 5_000);
+    await session!.waitFor(repoDirectoryName, 5_000);
   }, 30_000);
 
   it("echoes composer input", async () => {
