@@ -6,6 +6,7 @@ import {
 	normalizeNativeShiftEnterInput,
 	ProcessTerminal,
 	resolveEscapeTimeoutMs,
+	isTerminalWakeGap,
 } from "../src/terminal.ts";
 
 describe("resolveEscapeTimeoutMs", () => {
@@ -28,6 +29,16 @@ describe("resolveEscapeTimeoutMs", () => {
 
 	it("defaults to 10ms otherwise", () => {
 		assert.equal(resolveEscapeTimeoutMs({}), 10);
+	});
+});
+
+describe("isTerminalWakeGap", () => {
+	it("detects a suspended event loop without treating ordinary timer drift as wake", () => {
+		assert.equal(isTerminalWakeGap(999), false);
+		assert.equal(isTerminalWakeGap(4_999), false);
+		assert.equal(isTerminalWakeGap(5_000), true);
+		assert.equal(isTerminalWakeGap(60_000), true);
+		assert.equal(isTerminalWakeGap(Number.NaN), false);
 	});
 });
 
@@ -75,6 +86,7 @@ describe("ProcessTerminal Kitty keyboard protocol negotiation", () => {
 		writes: string[];
 		send(data: string): void;
 		getInput(): string | undefined;
+		getDataHandlerRegistrations(): number;
 		cleanup(): void;
 	};
 
@@ -83,6 +95,7 @@ describe("ProcessTerminal Kitty keyboard protocol negotiation", () => {
 		const writes: string[] = [];
 		let input: string | undefined;
 		let dataHandler: ((data: string) => void) | undefined;
+		let dataHandlerRegistrations = 0;
 		let cleaned = false;
 		const previousWrite = process.stdout.write;
 		const previousOn = process.stdin.on;
@@ -92,7 +105,10 @@ describe("ProcessTerminal Kitty keyboard protocol negotiation", () => {
 			return true;
 		}) as typeof process.stdout.write;
 		process.stdin.on = ((event: string | symbol, listener: (...args: unknown[]) => void) => {
-			if (event === "data") dataHandler = listener as (data: string) => void;
+			if (event === "data") {
+				dataHandler = listener as (data: string) => void;
+				dataHandlerRegistrations += 1;
+			}
 			return process.stdin;
 		}) as typeof process.stdin.on;
 
@@ -114,6 +130,9 @@ describe("ProcessTerminal Kitty keyboard protocol negotiation", () => {
 			},
 			getInput(): string | undefined {
 				return input;
+			},
+			getDataHandlerRegistrations(): number {
+				return dataHandlerRegistrations;
 			},
 			cleanup(): void {
 				if (cleaned) return;
@@ -196,6 +215,92 @@ describe("ProcessTerminal Kitty keyboard protocol negotiation", () => {
 			assert.equal(harness.terminal.kittyProtocolActive, false);
 		} finally {
 			harness.cleanup();
+		}
+	});
+
+	it("rebuilds the stdin parser and keyboard protocol after wake", () => {
+		const harness = setupNegotiation();
+		try {
+			harness.send("\x1b[?7u");
+			assert.equal(harness.terminal.kittyProtocolActive, true);
+
+			(
+				harness.terminal as unknown as {
+					recoverAfterWake(): void;
+				}
+			).recoverAfterWake();
+
+			assert.deepEqual(harness.writes.slice(-3), [
+				"\x1b[<u",
+				"\x1b[?2004h",
+				"\x1b[>7u\x1b[?u\x1b[c",
+			]);
+			assert.equal(harness.terminal.kittyProtocolActive, false);
+			harness.send("b");
+			assert.equal(harness.getInput(), "b");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("coalesces an overdue watchdog tick and SIGCONT into one recovery", () => {
+		for (const first of ["watchdog", "sigcont"] as const) {
+			const harness = setupNegotiation();
+			try {
+				harness.send("\x1b[?7u");
+				const terminal = harness.terminal as unknown as {
+					lastWakeCheckAt: number;
+					checkForWake(now: number): void;
+					requestWakeRecovery(now: number): void;
+				};
+				terminal.lastWakeCheckAt = 1_000;
+
+				// The overdue interval can run before or after SIGCONT. Both orderings
+				// must leave one parser and one balanced Kitty protocol push.
+				if (first === "watchdog") {
+					terminal.checkForWake(7_000);
+					terminal.requestWakeRecovery(7_000);
+				} else {
+					terminal.requestWakeRecovery(7_000);
+					terminal.checkForWake(7_000);
+				}
+
+				assert.equal(harness.getDataHandlerRegistrations(), 2);
+				assert.equal(harness.writes.filter((write) => write === "\x1b[<u").length, 1);
+				assert.equal(
+					harness.writes.filter((write) => write === "\x1b[>7u\x1b[?u\x1b[c").length,
+					2,
+				);
+				harness.send("c");
+				assert.equal(harness.getInput(), "c");
+			} finally {
+				harness.cleanup();
+			}
+		}
+	});
+
+	it("removes the SIGCONT listener and watchdog when wake recovery stops", () => {
+		const terminal = new ProcessTerminal();
+		const internal = terminal as unknown as {
+			startWakeRecovery(): void;
+			stopWakeRecovery(): void;
+			wakeCheckInterval?: ReturnType<typeof setInterval>;
+		};
+		const listenersBefore = process.listenerCount("SIGCONT");
+
+		try {
+			internal.startWakeRecovery();
+			assert.ok(internal.wakeCheckInterval);
+			if (process.platform !== "win32") {
+				assert.equal(process.listenerCount("SIGCONT"), listenersBefore + 1);
+			}
+		} finally {
+			internal.stopWakeRecovery();
+		}
+
+		assert.equal(internal.wakeCheckInterval, undefined);
+		if (process.platform !== "win32") {
+			assert.equal(process.listenerCount("SIGCONT"), listenersBefore);
 		}
 	});
 

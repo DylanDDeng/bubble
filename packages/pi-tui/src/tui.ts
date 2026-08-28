@@ -782,6 +782,13 @@ export abstract class TuiBase extends Container implements TUI {
 		this.terminal.start(
 			(data) => this.handleTerminalInput(data),
 			() => this.requestRender(),
+			() => {
+				// The terminal emulator may have reset its alternate-screen contents
+				// while the application state remained live. Repaint from source state
+				// instead of trusting the pre-sleep diff cache.
+				this.invalidate();
+				this.requestRender(true);
+			},
 		);
 		this.afterTerminalStart();
 		this.terminal.hideCursor();

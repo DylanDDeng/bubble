@@ -12,6 +12,7 @@ export class VirtualTerminal implements Terminal {
 	private xterm: XtermTerminalType;
 	private inputHandler?: (data: string) => void;
 	private resizeHandler?: () => void;
+	private resumeHandler?: () => void;
 	private _columns: number;
 	private _rows: number;
 
@@ -29,9 +30,10 @@ export class VirtualTerminal implements Terminal {
 		});
 	}
 
-	start(onInput: (data: string) => void, onResize: () => void): void {
+	start(onInput: (data: string) => void, onResize: () => void, onResume?: () => void): void {
 		this.inputHandler = onInput;
 		this.resizeHandler = onResize;
+		this.resumeHandler = onResume;
 		// Enable bracketed paste mode for consistency with ProcessTerminal
 		this.xterm.write("\x1b[?2004h");
 	}
@@ -45,6 +47,7 @@ export class VirtualTerminal implements Terminal {
 		this.xterm.write("\x1b[?2004l");
 		this.inputHandler = undefined;
 		this.resizeHandler = undefined;
+		this.resumeHandler = undefined;
 	}
 
 	write(data: string): void {
@@ -123,6 +126,12 @@ export class VirtualTerminal implements Terminal {
 		if (this.resizeHandler) {
 			this.resizeHandler();
 		}
+	}
+
+	/** Simulate the ProcessTerminal wake callback without touching host stdin. */
+	resumeFromSleep(): void {
+		this.resizeHandler?.();
+		this.resumeHandler?.();
 	}
 
 	/**

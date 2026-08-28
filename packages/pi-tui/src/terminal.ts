@@ -15,6 +15,9 @@ const NATIVE_SHIFT_ENTER_SEQUENCE = "\x1b[13;2u";
 const DESIRED_KITTY_KEYBOARD_PROTOCOL_FLAGS = 7;
 const KEYBOARD_PROTOCOL_RESPONSE_FRAGMENT_TIMEOUT_MS = 150;
 const KITTY_KEYBOARD_PROTOCOL_QUERY = `\x1b[>${DESIRED_KITTY_KEYBOARD_PROTOCOL_FLAGS}u\x1b[?u\x1b[c`;
+const TERMINAL_WAKE_CHECK_INTERVAL_MS = 1_000;
+const TERMINAL_WAKE_GAP_MS = 5_000;
+const TERMINAL_WAKE_RECOVERY_COOLDOWN_MS = 2_000;
 
 export type KeyboardProtocolNegotiationSequence =
 	| { type: "kitty-flags"; flags: number }
@@ -54,12 +57,18 @@ export function normalizeAppleTerminalInput(data: string, isAppleTerminal: boole
 	return normalizeNativeShiftEnterInput(data, isAppleTerminal, isShiftPressed);
 }
 
+/** A long wall-clock gap while the event loop could not run is the portable
+ * signal Node exposes for laptop sleep/wake. */
+export function isTerminalWakeGap(elapsedMs: number, thresholdMs = TERMINAL_WAKE_GAP_MS): boolean {
+	return Number.isFinite(elapsedMs) && elapsedMs >= thresholdMs;
+}
+
 /**
  * Minimal terminal interface for TUI
  */
 export interface Terminal {
 	// Start the terminal with input and resize handlers
-	start(onInput: (data: string) => void, onResize: () => void): void;
+	start(onInput: (data: string) => void, onResize: () => void, onResume?: () => void): void;
 
 	// Stop the terminal and restore state
 	stop(): void;
@@ -127,6 +136,7 @@ export class ProcessTerminal implements Terminal {
 	private wasRaw = false;
 	private inputHandler?: (data: string) => void;
 	private resizeHandler?: () => void;
+	private resumeHandler?: () => void;
 	private _kittyProtocolActive = false;
 	private _modifyOtherKeysActive = false;
 	private keyboardProtocolPushed = false;
@@ -135,6 +145,10 @@ export class ProcessTerminal implements Terminal {
 	private stdinBuffer?: StdinBuffer;
 	private stdinDataHandler?: (data: string) => void;
 	private progressInterval?: ReturnType<typeof setInterval>;
+	private wakeCheckInterval?: ReturnType<typeof setInterval>;
+	private lastWakeCheckAt = 0;
+	private lastWakeRecoveryAt?: number;
+	private readonly handleContinue = () => this.requestWakeRecovery();
 	private writeLogPath = (() => {
 		const env = process.env.PI_TUI_WRITE_LOG || "";
 		if (!env) return "";
@@ -158,9 +172,10 @@ export class ProcessTerminal implements Terminal {
 		return this._modifyOtherKeysActive;
 	}
 
-	start(onInput: (data: string) => void, onResize: () => void): void {
+	start(onInput: (data: string) => void, onResize: () => void, onResume?: () => void): void {
 		this.inputHandler = onInput;
 		this.resizeHandler = onResize;
+		this.resumeHandler = onResume;
 
 		// Save previous state and enable raw mode
 		this.wasRaw = process.stdin.isRaw || false;
@@ -191,6 +206,90 @@ export class ProcessTerminal implements Terminal {
 		// Query Kitty keyboard protocol and fall back to modifyOtherKeys when DA confirms no Kitty response.
 		// See: https://sw.kovidgoyal.net/kitty/keyboard-protocol/
 		this.queryAndEnableKittyProtocol();
+		this.startWakeRecovery();
+	}
+
+	/**
+	 * Reassert every terminal-side input contract after system wake. macOS may
+	 * preserve tty raw flags while leaving Node stdin paused or Ghostty's
+	 * private keyboard modes reset.
+	 */
+	private recoverAfterWake(): void {
+		if (!this.inputHandler) return;
+		if (process.stdin.setRawMode) process.stdin.setRawMode(true);
+		process.stdin.setEncoding("utf8");
+
+		this.resetKeyboardInputPipeline();
+		process.stdin.resume();
+		process.stdout.write("\x1b[?2004h");
+		this.queryAndEnableKittyProtocol();
+
+		// Dimensions and the alternate-screen buffer can both be stale even when
+		// macOS did not deliver a SIGWINCH for the wake.
+		this.resizeHandler?.();
+		this.resumeHandler?.();
+	}
+
+	private startWakeRecovery(): void {
+		this.stopWakeRecovery();
+		this.lastWakeCheckAt = Date.now();
+		this.lastWakeRecoveryAt = undefined;
+		this.wakeCheckInterval = setInterval(() => {
+			this.checkForWake();
+		}, TERMINAL_WAKE_CHECK_INTERVAL_MS);
+		this.wakeCheckInterval.unref?.();
+		if (process.platform !== "win32") process.on("SIGCONT", this.handleContinue);
+	}
+
+	private checkForWake(now = Date.now()): void {
+		const elapsed = now - this.lastWakeCheckAt;
+		this.lastWakeCheckAt = now;
+		if (isTerminalWakeGap(elapsed)) this.requestWakeRecovery(now);
+	}
+
+	/**
+	 * SIGCONT and the overdue watchdog timer are commonly delivered together
+	 * after a long process suspension. Collapse them into one atomic recovery so
+	 * the freshly rebuilt stdin parser cannot be torn down a second time while
+	 * the user is already typing or pasting.
+	 */
+	private requestWakeRecovery(now = Date.now()): void {
+		this.lastWakeCheckAt = now;
+		if (this.lastWakeRecoveryAt !== undefined) {
+			const elapsedSinceRecovery = now - this.lastWakeRecoveryAt;
+			if (elapsedSinceRecovery >= 0 && elapsedSinceRecovery < TERMINAL_WAKE_RECOVERY_COOLDOWN_MS) {
+				return;
+			}
+		}
+		this.lastWakeRecoveryAt = now;
+		this.recoverAfterWake();
+	}
+
+	private stopWakeRecovery(): void {
+		if (this.wakeCheckInterval) {
+			clearInterval(this.wakeCheckInterval);
+			this.wakeCheckInterval = undefined;
+		}
+		if (process.platform !== "win32") process.removeListener("SIGCONT", this.handleContinue);
+		this.lastWakeRecoveryAt = undefined;
+	}
+
+	private resetKeyboardInputPipeline(): void {
+		const shouldPopKittyProtocol = this.keyboardProtocolPushed || this._kittyProtocolActive;
+		this.clearKeyboardProtocolNegotiationBuffer();
+		if (shouldPopKittyProtocol) process.stdout.write("\x1b[<u");
+		this.keyboardProtocolPushed = false;
+		this._kittyProtocolActive = false;
+		setKittyProtocolActive(false);
+		this.disableModifyOtherKeys();
+		if (this.stdinBuffer) {
+			this.stdinBuffer.destroy();
+			this.stdinBuffer = undefined;
+		}
+		if (this.stdinDataHandler) {
+			process.stdin.removeListener("data", this.stdinDataHandler);
+			this.stdinDataHandler = undefined;
+		}
 	}
 
 	/**
@@ -432,6 +531,7 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	stop(): void {
+		this.stopWakeRecovery();
 		if (this.clearProgressInterval()) {
 			process.stdout.write(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
 		}
@@ -467,6 +567,7 @@ export class ProcessTerminal implements Terminal {
 			process.stdout.removeListener("resize", this.resizeHandler);
 			this.resizeHandler = undefined;
 		}
+		this.resumeHandler = undefined;
 
 		// Pause stdin to prevent any buffered input (e.g., Ctrl+D) from being
 		// re-interpreted after raw mode is disabled. This fixes a race condition

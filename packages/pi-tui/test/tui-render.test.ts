@@ -18,10 +18,13 @@ import { VirtualTerminal } from "./virtual-terminal.ts";
 
 class TestComponent implements Component {
 	lines: string[] = [];
+	invalidateCount = 0;
 	render(_width: number): string[] {
 		return this.lines;
 	}
-	invalidate(): void {}
+	invalidate(): void {
+		this.invalidateCount += 1;
+	}
 }
 
 class InputComponent extends TestComponent {
@@ -110,6 +113,25 @@ describe("TUI render scheduling", () => {
 
 		assert.strictEqual(component.renderCount, renderCountBeforeInput + 1);
 		assert.deepStrictEqual(component.lines, ["typed"]);
+		tui.stop();
+	});
+
+	it("invalidates component caches and forces a repaint after terminal wake", async () => {
+		const terminal = new VirtualTerminal(40, 10);
+		const tui: TUI = new TuiMainScreen(terminal);
+		const component = new InputComponent();
+		component.lines = ["before sleep"];
+		tui.addChild(component);
+		tui.start();
+		await terminal.waitForRender();
+		const rendersBeforeWake = component.renderCount;
+
+		terminal.resumeFromSleep();
+		await terminal.waitForRender();
+
+		assert.ok(component.invalidateCount >= 1);
+		assert.ok(component.renderCount > rendersBeforeWake);
+		assert.ok(terminal.getViewport().some((line) => line.includes("before sleep")));
 		tui.stop();
 	});
 });
