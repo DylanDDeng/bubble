@@ -828,7 +828,11 @@ export class Agent {
       return events;
     };
     const rejectPendingInputs = async (reason: "no_continuation"): Promise<AgentEvent[]> => {
-      const pendingInputs: AgentRunInput[] = inputController?.drainPendingInputs() ?? [];
+      // Seal before the first await. A host can submit in reaction to the final
+      // turn boundary; accepting after this drain would orphan that input.
+      const pendingInputs: AgentRunInput[] = inputController?.closePendingInputs?.()
+        ?? inputController?.drainPendingInputs()
+        ?? [];
       if (pendingInputs.length === 0) return [];
       const events: AgentEvent[] = [];
       for (const input of pendingInputs) {
@@ -880,6 +884,7 @@ export class Agent {
         yield emit({ type: "turn_start" });
         yield emit({ type: "text_delta", content: message });
         yield emit({ type: "turn_end", willContinue: false });
+        for (const event of await rejectPendingInputs("no_continuation")) yield emit(event);
         yield emit({ type: "agent_end" });
         return;
       }

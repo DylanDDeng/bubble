@@ -577,7 +577,8 @@ export class BubbleTuiController {
    * would overwrite the shared streaming accumulator. */
   steer(content: string): boolean {
     if (!this.runActive || !this.activeInputController) return false;
-    const input = this.activeInputController.enqueue(content);
+    const input = this.activeInputController.tryEnqueue(content);
+    if (!input) return false;
     const displayKey = nextDisplayMessageKey("steer");
     beginSteer(this.queue, {
       id: input.id,
@@ -669,9 +670,13 @@ export class BubbleTuiController {
       throw new Error("A command is already running.");
     }
     if (this.runActive) {
-      if (typeof input === "string") this.steer(input);
+      if (typeof input === "string") {
+        if (!this.steer(input)) this.queueInput(input);
+      }
       else if (isSubmitPayload(input)) {
-        if (input.images.length === 0) this.steer(input.text);
+        if (input.images.length === 0) {
+          if (!this.steer(input.text)) this.queueInput(input);
+        }
         else this.queueInput(input);
       }
       return;
@@ -845,7 +850,7 @@ export class BubbleTuiController {
       });
       this.notify();
     } finally {
-      const leftoverSteers = inputController.clear();
+      const leftoverSteers = inputController.closePendingInputs();
       // The signal is the source of truth. A provider may observe cancellation
       // and end its iterator without throwing, but the user's pending steers
       // must still be dropped exactly as they are in the Ink implementation.

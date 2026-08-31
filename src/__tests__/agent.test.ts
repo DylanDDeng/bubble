@@ -5,7 +5,7 @@ import { AgentRunInputQueue } from "../agent/input-controller.js";
 import type { AgentProfile } from "../agent/profiles.js";
 import { projectMessages } from "../context/projector.js";
 import { registerDynamicModelMetadata } from "../model-catalog.js";
-import type { AgentEvent, Message, Provider, StreamChunk, ToolRegistryEntry, ToolResult } from "../types.js";
+import type { AgentEvent, AgentInputController, Message, Provider, StreamChunk, ToolRegistryEntry, ToolResult } from "../types.js";
 
 function createMockProvider(chunks: StreamChunk[][]): Provider {
   let callIndex = 0;
@@ -589,6 +589,23 @@ describe("Agent", () => {
       target: "next_turn",
     }));
     expect(hasUserText(agent.messages, "follow-up detail")).toBe(false);
+  });
+
+  it("seals boundary input atomically at teardown", () => {
+    const inputQueue = new AgentRunInputQueue("sealed-steer");
+    const accepted = inputQueue.tryEnqueue("accepted before close");
+    expect(accepted?.content).toBe("accepted before close");
+    expect(inputQueue.closePendingInputs()).toEqual([accepted]);
+    expect(inputQueue.tryEnqueue("too late")).toBeUndefined();
+    expect(() => inputQueue.enqueue("legacy late enqueue")).toThrow("Agent input queue is closed");
+  });
+
+  it("keeps legacy read-only input-controller implementations assignable", () => {
+    const legacyController: AgentInputController = {
+      drainPendingInputs: () => [],
+      pendingInputCount: () => 0,
+    };
+    expect(legacyController.pendingInputCount()).toBe(0);
   });
 
   it("applies boundary input before the next provider call after tool continuation", async () => {

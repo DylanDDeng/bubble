@@ -18,7 +18,13 @@ import os from "node:os";
 import { rmSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 
-import { Agent } from "../agent.js";
+import { Agent, AgentAbortError } from "../agent.js";
+import { AgentRunInputQueue } from "../agent/input-controller.js";
+import {
+  SessionTurnCoordinator,
+  type SessionTurnReservation,
+} from "./session-turn-coordinator.js";
+import { ReplayEventLog } from "./replay-event-log.js";
 import { SessionManager, type SessionSummary } from "../session.js";
 import { PermissionAwareApprovalController } from "../approval/controller.js";
 import { BashAllowlist } from "../approval/session-cache.js";
@@ -47,6 +53,7 @@ import { purgeUnsafeMemorySources } from "../memory/session-policy.js";
 import { recordMemoryCitations } from "../memory/usage.js";
 import type {
   AgentEvent,
+  AgentRunInput,
   ContentPart,
   Message,
   PermissionMode,
@@ -121,6 +128,77 @@ export interface SdkSessionRef {
   cwd: string;
 }
 
+export interface SdkSessionRunState {
+  /** A turn owns the session slot, including setup and teardown. */
+  active: boolean;
+  queuedTurns: number;
+  pendingSteers: number;
+  phase: "idle" | "reserved" | "starting" | "active" | "stopping" | "deleted";
+}
+
+export type SdkSteerOutcome = Extract<AgentEvent, {
+  type: "input_applied" | "input_queued" | "input_rejected";
+}>;
+
+export type SdkSteerResult =
+  | {
+      accepted: true;
+      disposition: "steered";
+      input: AgentRunInput;
+      outcome: Promise<SdkSteerOutcome>;
+    }
+  | {
+      accepted: true;
+      disposition: "queued";
+      input: AgentRunInput;
+      turnId: string;
+      outcome: Promise<SdkSteerOutcome>;
+    }
+  | {
+      accepted: false;
+      disposition: "rejected";
+      reason: "unknown_session" | "session_deleted" | "ownership_conflict";
+    };
+
+export interface SdkSessionEvent {
+  sequence: number;
+  sessionId: string;
+  turnId: string;
+  event: AgentEvent;
+}
+
+export interface SdkStopOptions {
+  /** Match Claude-style interruption: queued messages survive by default. */
+  cancelQueued?: boolean;
+}
+
+export interface SdkSessionHandle extends SdkSessionRef {
+  /** Events from every turn in this session. Opening another handle reconnects from sequence 1. */
+  readonly events: AsyncIterable<SdkSessionEvent>;
+  /** Reconnect after the last sequence the host durably processed. */
+  eventsFrom(afterSequence: number): AsyncIterable<SdkSessionEvent>;
+  send(options: RunTurnOptions): AsyncGenerator<AgentEvent>;
+  steer(content: string): SdkSteerResult;
+  stop(options?: SdkStopOptions): number;
+  close(): void;
+}
+
+interface PendingSteerOutcome {
+  input: AgentRunInput;
+  promise: Promise<SdkSteerOutcome>;
+  resolve(outcome: SdkSteerOutcome): void;
+}
+
+interface SdkTurnRuntime {
+  sessionId: string;
+  ownerKey: string;
+  reservation: SessionTurnReservation;
+  inputController: AgentRunInputQueue;
+  outcomes: Map<string, PendingSteerOutcome>;
+  options: RunTurnOptions;
+  events: ReplayEventLog<AgentEvent>;
+}
+
 // ── Facade ─────────────────────────────────────────────────────────────────
 
 export class BubbleSdk {
@@ -131,8 +209,12 @@ export class BubbleSdk {
   private readonly mcpEnabled: boolean;
   private readonly cwdBySession = new Map<string, string>();
   private readonly bashAllowlists = new Map<string, BashAllowlist>();
-  private readonly activeTurns = new Map<string, AbortController>();
+  private readonly turnCoordinator = new SessionTurnCoordinator();
+  private readonly turnRuntimes = new Map<string, SdkTurnRuntime>();
+  private readonly lastTurnOptions = new Map<string, Omit<RunTurnOptions, "prompt" | "signal">>();
   private readonly mcpToolsByCwd = new Map<string, Promise<ToolRegistryEntry[]>>();
+  private nextTurnInputPrefix = 0;
+  private nextDetachedInputId = 0;
   /** id -> {cwd,file} rebuilt from disk so sessions survive host restarts. */
   private sessionIndex = new Map<string, { cwd: string; file: string }>();
 
@@ -144,7 +226,7 @@ export class BubbleSdk {
   // ── Sessions ─────────────────────────────────────────────────────────────
 
   listSessions(): SessionSummary[] {
-    const sessions = SessionManager.listAllSessions();
+    const sessions = SessionManager.listAllSessions().filter((session) => !this.turnCoordinator.isDeleted(session.name));
     this.sessionIndex = new Map(
       sessions.map((s) => [s.name, { cwd: s.cwd ?? s.cwdLabel ?? this.defaultCwd, file: s.file }]),
     );
@@ -154,26 +236,120 @@ export class BubbleSdk {
   createSession(options: { cwd?: string; id?: string } = {}): SdkSessionRef {
     const cwd = options.cwd || this.defaultCwd;
     const id = options.id || `sdk-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
+    this.turnCoordinator.revive(id);
     SessionManager.create(cwd, sessionFileName(id));
     this.cwdBySession.set(id, cwd);
     return { id, cwd };
   }
 
+  openSession(sessionId: string): SdkSessionHandle {
+    const resolved = this.resolveSession(sessionId);
+    if (!resolved) throw new Error(`Unknown session: ${sessionId}`);
+    const ownerKey = resolved.manager.getSessionFile();
+    const eventLog = sessionEventLogFor(ownerKey);
+    const closed = new AbortController();
+    return {
+      id: sessionId,
+      cwd: resolved.cwd,
+      events: eventLog.iterate({ signal: closed.signal }),
+      eventsFrom: (afterSequence) => eventLog.iterate({
+        from: Math.max(0, afterSequence),
+        signal: closed.signal,
+      }),
+      send: (options) => this.runTurn(sessionId, options),
+      steer: (content) => this.steer(sessionId, content),
+      stop: (options) => this.stop(sessionId, options),
+      close: () => closed.abort(),
+    };
+  }
+
   getHistory(sessionId: string): Message[] {
+    if (this.turnCoordinator.isDeleted(sessionId)) return [];
     return this.resolveSession(sessionId)?.manager.getMessages() ?? [];
   }
 
-  deleteSession(sessionId: string): void {
+  async deleteSession(sessionId: string): Promise<void> {
+    const owner = this.ownerForSession(sessionId);
+    if (owner && owner !== this) return owner.deleteSession(sessionId);
     const resolved = this.resolveSession(sessionId);
+    for (const runtime of this.runtimesForSession(sessionId)) runtime.inputController.closePendingInputs();
+    await this.turnCoordinator.delete(sessionId);
     if (resolved) rmSync(resolved.manager.getSessionFile(), { force: true });
     this.cwdBySession.delete(sessionId);
     this.bashAllowlists.delete(sessionId);
+    this.lastTurnOptions.delete(sessionId);
     this.sessionIndex.delete(sessionId);
+    if (resolved) {
+      releaseSessionEventLog(resolved.manager.getSessionFile());
+      releaseProcessOwner(resolved.manager.getSessionFile(), this);
+    }
   }
 
-  /** Abort the in-flight turn of a session, if any. */
-  stop(sessionId: string): void {
-    this.activeTurns.get(sessionId)?.abort();
+  /** Interrupt the active turn. Queued turns survive unless cancelQueued is true. */
+  stop(sessionId: string, options: SdkStopOptions = {}): number {
+    const owner = this.ownerForSession(sessionId);
+    if (owner && owner !== this) return owner.stop(sessionId, options);
+    const current = this.turnCoordinator.getCurrent(sessionId);
+    const runtime = current ? this.turnRuntimes.get(current.id) : undefined;
+    runtime?.inputController.closePendingInputs();
+    const stopped = this.turnCoordinator.stopCurrent(sessionId);
+    return stopped + (options.cancelQueued ? this.turnCoordinator.clearQueue(sessionId) : 0);
+  }
+
+  /** Cancel queued turns without interrupting the turn that owns the session slot. */
+  clearQueue(sessionId: string): number {
+    const owner = this.ownerForSession(sessionId);
+    if (owner && owner !== this) return owner.clearQueue(sessionId);
+    return this.turnCoordinator.clearQueue(sessionId);
+  }
+
+  getSessionRunState(sessionId: string): SdkSessionRunState {
+    const owner = this.ownerForSession(sessionId);
+    if (owner && owner !== this) return owner.getSessionRunState(sessionId);
+    const state = this.turnCoordinator.getState(sessionId);
+    const current = this.turnCoordinator.getCurrent(sessionId);
+    const runtime = current ? this.turnRuntimes.get(current.id) : undefined;
+    return {
+      active: state.active,
+      queuedTurns: state.queued,
+      pendingSteers: runtime?.outcomes.size ?? 0,
+      phase: state.phase,
+    };
+  }
+
+  /**
+   * Add text to the turn that currently owns the session slot. Every accepted
+   * input exposes an outcome promise, independent of event-stream consumption.
+   */
+  steer(sessionId: string, content: string): SdkSteerResult {
+    if (this.turnCoordinator.isDeleted(sessionId)) {
+      return { accepted: false, disposition: "rejected", reason: "session_deleted" };
+    }
+    const owner = this.ownerForSession(sessionId);
+    if (owner && owner !== this) return owner.steer(sessionId, content);
+    const resolved = this.resolveSession(sessionId);
+    if (!resolved) {
+      return { accepted: false, disposition: "rejected", reason: "unknown_session" };
+    }
+    const current = this.turnCoordinator.getCurrent(sessionId);
+    const runtime = current ? this.turnRuntimes.get(current.id) : undefined;
+    if (runtime) {
+      const input = runtime.inputController.tryEnqueue(content);
+      if (input) {
+        const pending = pendingSteerOutcome(input);
+        runtime.outcomes.set(input.id, pending);
+        return { accepted: true, disposition: "steered", input, outcome: pending.promise };
+      }
+    }
+    return this.queueDetachedInput(sessionId, content, resolved);
+  }
+
+  enqueueTurn(sessionId: string, options: RunTurnOptions): AsyncGenerator<AgentEvent> {
+    return this.runTurn(sessionId, options);
+  }
+
+  queueTurn(sessionId: string, options: RunTurnOptions): AsyncGenerator<AgentEvent> {
+    return this.enqueueTurn(sessionId, options);
   }
 
   // ── Discovery (composer pickers) ─────────────────────────────────────────
@@ -203,27 +379,97 @@ export class BubbleSdk {
 
   // ── The turn ─────────────────────────────────────────────────────────────
 
-  async *runTurn(sessionId: string, options: RunTurnOptions): AsyncGenerator<AgentEvent> {
+  /**
+   * Reserve and start a session turn immediately. Execution is driven by the
+   * SDK's own pump, not by consumption of the returned iterator: the iterator
+   * is a replay subscription, so a host may drop it (or reconnect later via
+   * `openSession`) without stalling or cancelling the turn. Cancel with
+   * `stop()`, the options signal, or `deleteSession()`.
+   */
+  runTurn(sessionId: string, options: RunTurnOptions): AsyncGenerator<AgentEvent> {
     const resolved = this.resolveSession(sessionId);
     if (!resolved) throw new Error(`Unknown session: ${sessionId}`);
+    const ownerKey = resolved.manager.getSessionFile();
+    const owner = processSessionOwners.get(ownerKey);
+    if (owner && owner !== this) return owner.runTurn(sessionId, options);
+    claimProcessOwner(ownerKey, this);
+    try {
+      const runtime = this.startOwnedTurn(sessionId, options, resolved, ownerKey);
+      return runtime.events.iterate();
+    } catch (error) {
+      // A synchronous reserve() failure (e.g. pre-aborted signal) must not
+      // leave this SDK pinned as process owner of a session it never ran.
+      if (!this.turnCoordinator.getState(sessionId).active) {
+        releaseProcessOwner(ownerKey, this);
+      }
+      throw error;
+    }
+  }
+
+  private startOwnedTurn(
+    sessionId: string,
+    options: RunTurnOptions,
+    resolved: { manager: SessionManager; cwd: string },
+    ownerKey: string,
+  ): SdkTurnRuntime {
+    const reservation = this.turnCoordinator.reserve(sessionId, options.signal);
+    const runtime: SdkTurnRuntime = {
+      sessionId,
+      ownerKey,
+      reservation,
+      inputController: new AgentRunInputQueue(`sdk-turn-${++this.nextTurnInputPrefix}`),
+      outcomes: new Map(),
+      options,
+      events: new ReplayEventLog<AgentEvent>(),
+    };
+    this.lastTurnOptions.set(sessionId, inheritableTurnOptions(options));
+    this.turnRuntimes.set(reservation.id, runtime);
+    void this.pumpTurn(runtime, resolved);
+    return runtime;
+  }
+
+  private async pumpTurn(
+    runtime: SdkTurnRuntime,
+    resolved: { manager: SessionManager; cwd: string },
+  ): Promise<void> {
+    let failure: unknown;
+    try {
+      for await (const event of this.runReservedTurn(runtime, runtime.options, resolved)) {
+        runtime.events.append(event);
+        this.publishSessionEvent(runtime, event);
+      }
+    } catch (error) {
+      failure = error;
+    } finally {
+      runtime.events.close(failure);
+      if (this.turnRuntimes.get(runtime.reservation.id) === runtime) {
+        this.turnRuntimes.delete(runtime.reservation.id);
+      }
+      if (!this.turnCoordinator.getState(runtime.sessionId).active) {
+        releaseProcessOwner(runtime.ownerKey, this);
+      }
+    }
+  }
+
+  private async *runReservedTurn(
+    runtime: SdkTurnRuntime,
+    options: RunTurnOptions,
+    resolved: { manager: SessionManager; cwd: string },
+  ): AsyncGenerator<AgentEvent> {
+    const { sessionId, reservation, inputController } = runtime;
     const { manager: session, cwd } = resolved;
     const mode: PermissionMode = options.mode ?? "default";
-
-    const abort = new AbortController();
-    if (options.signal) {
-      if (options.signal.aborted) abort.abort();
-      else options.signal.addEventListener("abort", () => abort.abort(), { once: true });
-    }
-    this.activeTurns.set(sessionId, abort);
+    const abortSignal = reservation.signal;
 
     let agentRef: Agent | undefined;
+    let streamCompleted = false;
     const hookController = new ExternalHookController({ cwd, sessionId });
     // Settles as reject the moment the turn aborts, so a tool blocked on a
     // host approval (or question) can never hang the abort path.
     const abortedDecision = new Promise<ApprovalDecision>((resolve) => {
       const decide = () => resolve({ action: "reject", feedback: "Turn aborted" });
-      if (abort.signal.aborted) decide();
-      else abort.signal.addEventListener("abort", decide, { once: true });
+      if (abortSignal.aborted) decide();
+      else abortSignal.addEventListener("abort", decide, { once: true });
     });
     const approvalController = new PermissionAwareApprovalController({
       getMode: () => agentRef?.mode ?? mode,
@@ -244,7 +490,9 @@ export class BubbleSdk {
     const planController: PlanController = {
       getMode: () => agentRef?.mode ?? mode,
       requestApproval: async (plan: string) => {
-        const approved = options.onPlanApproval ? await options.onPlanApproval(plan) : false;
+        const approved = options.onPlanApproval
+          ? await awaitWithAbort(options.onPlanApproval(plan), abortSignal)
+          : false;
         if (approved) {
           agentRef?.setMode("default");
           return { action: "approve" as const, plan };
@@ -267,9 +515,10 @@ export class BubbleSdk {
         () => questionController.reject(request.id),
       );
     });
-    abort.signal.addEventListener("abort", () => questionController.rejectAll(), { once: true });
+    abortSignal.addEventListener("abort", () => questionController.rejectAll(), { once: true });
 
     try {
+      await reservation.waitForStart();
       const skillRegistry = new SkillRegistry({
         cwd,
         skillPaths: this.userConfig.getSkillPaths(),
@@ -283,10 +532,13 @@ export class BubbleSdk {
         goalStore: new GoalStore(),
         checkpoints: () => session.getCheckpoints(),
       });
-      tools.push(...(await this.mcpToolsFor(cwd)));
+      tools.push(...(await awaitWithAbort(this.mcpToolsFor(cwd), abortSignal)));
+      throwAbortSignal(abortSignal);
 
       const promptCacheKey = session.getOrCreatePromptCacheKey();
-      session.updateMetadata({ cwd }); // recoverable by cwd after host restart
+      if (!this.turnCoordinator.isDeleted(sessionId)) {
+        session.updateMetadata({ cwd }); // recoverable by cwd after host restart
+      }
       const { provider, providerId, model } = this.resolveProvider(promptCacheKey, options.model);
       const thinkingLevel =
         options.thinkingLevel ??
@@ -334,13 +586,17 @@ export class BubbleSdk {
         providerFactory: options.providerFactory ?? this.defaultProviderFactory(),
         onMessageAppend: (message: Message) => {
           if (message.role === "system" || message.role === "meta") return;
+          if (this.turnCoordinator.isDeleted(sessionId)) return;
           session.appendMessage(message);
           if (message.role === "assistant") recordMemoryCitations(cwd, message.content);
         },
         onCompactionApplied: (summary: string) => {
+          if (this.turnCoordinator.isDeleted(sessionId)) return;
           session.applyLLMCompaction(summary);
         },
-        onModeUpdate: (m: PermissionMode) => session.appendMarker("mode_switch", m),
+        onModeUpdate: (m: PermissionMode) => {
+          if (!this.turnCoordinator.isDeleted(sessionId)) session.appendMarker("mode_switch", m);
+        },
       });
       agentRef = agent;
 
@@ -349,6 +605,7 @@ export class BubbleSdk {
         agent.messages = [{ role: "system", content: systemPrompt }, ...history];
       }
 
+      reservation.markActive();
       options.onStart?.({
         providerId,
         model,
@@ -364,21 +621,174 @@ export class BubbleSdk {
       const prompt = rewriteSkillInvocationPrompt(options.prompt, skillRegistry);
 
       const bareModelId = decodeModel(model).modelId;
-      for await (const event of agent.run(prompt, cwd, { abortSignal: abort.signal })) {
-        yield attachTurnCost(event, providerId, bareModelId);
-        if (abort.signal.aborted) break;
+      for await (const event of agent.run(prompt, cwd, {
+        abortSignal,
+        inputController,
+      })) {
+        const sdkEvent = this.handleSteerEvent(runtime, event, resolved);
+        yield attachTurnCost(sdkEvent, providerId, bareModelId);
       }
+      streamCompleted = true;
+      for (const event of this.rejectOutstandingSteers(runtime, "no_continuation", resolved)) yield event;
+    } catch (error) {
+      const reason = abortSignal.aborted ? "turn_cancelled" : "turn_failed";
+      for (const event of this.rejectOutstandingSteers(runtime, reason)) yield event;
+      throw error;
     } finally {
-      // Also reached via generator.return() when the host stops consuming
-      // early: aborting here unblocks any tool still awaiting an approval.
-      abort.abort();
+      inputController.closePendingInputs();
+      this.rejectOutstandingSteers(
+        runtime,
+        streamCompleted ? "no_continuation" : abortSignal.aborted ? "turn_cancelled" : "turn_failed",
+        streamCompleted ? resolved : undefined,
+      );
       unsubscribeQuestions();
       questionController.rejectAll();
-      if (this.activeTurns.get(sessionId) === abort) this.activeTurns.delete(sessionId);
+      reservation.finish();
+      if (this.turnRuntimes.get(reservation.id) === runtime) this.turnRuntimes.delete(reservation.id);
     }
   }
 
   // ── Internals ────────────────────────────────────────────────────────────
+
+  private runtimesForSession(sessionId: string): SdkTurnRuntime[] {
+    return [...this.turnRuntimes.values()].filter((runtime) => runtime.sessionId === sessionId);
+  }
+
+  private settleSteerFromEvent(runtime: SdkTurnRuntime, event: AgentEvent): void {
+    if (event.type !== "input_applied" && event.type !== "input_rejected") return;
+    const pending = runtime.outcomes.get(event.id);
+    if (!pending) return;
+    runtime.outcomes.delete(event.id);
+    pending.resolve(event);
+  }
+
+  private handleSteerEvent(
+    runtime: SdkTurnRuntime,
+    event: AgentEvent,
+    resolved: { manager: SessionManager; cwd: string },
+  ): AgentEvent {
+    if (event.type === "input_rejected" && event.reason === "no_continuation") {
+      const pending = runtime.outcomes.get(event.id);
+      if (pending) return this.queuePendingSteer(runtime, pending, resolved, event);
+    }
+    this.settleSteerFromEvent(runtime, event);
+    return event;
+  }
+
+  private rejectOutstandingSteers(
+    runtime: SdkTurnRuntime,
+    reason: "no_continuation" | "turn_failed" | "turn_cancelled",
+    resolved?: { manager: SessionManager; cwd: string },
+  ): AgentEvent[] {
+    runtime.inputController.closePendingInputs();
+    const events: AgentEvent[] = [];
+    for (const [id, pending] of runtime.outcomes) {
+      const event: Extract<AgentEvent, { type: "input_rejected" }> = {
+        type: "input_rejected",
+        id,
+        content: pending.input.content,
+        reason,
+        target: "next_turn",
+      };
+      runtime.outcomes.delete(id);
+      if (reason === "no_continuation" && resolved) {
+        events.push(this.queuePendingSteer(runtime, pending, resolved, event));
+      } else {
+        pending.resolve(event);
+        events.push(event);
+      }
+    }
+    return events;
+  }
+
+  private queuePendingSteer(
+    runtime: SdkTurnRuntime,
+    pending: PendingSteerOutcome,
+    resolved: { manager: SessionManager; cwd: string },
+    rejected: Extract<AgentEvent, { type: "input_rejected" }>,
+  ): Extract<AgentEvent, { type: "input_queued" | "input_rejected" }> {
+    try {
+      const queuedRuntime = this.startOwnedTurn(
+        runtime.sessionId,
+        { ...inheritableTurnOptions(runtime.options), prompt: pending.input.content },
+        resolved,
+        runtime.ownerKey,
+      );
+      const queued: Extract<AgentEvent, { type: "input_queued" }> = {
+        type: "input_queued",
+        id: pending.input.id,
+        content: pending.input.content,
+        turnId: queuedRuntime.reservation.id,
+        target: "next_turn",
+      };
+      // The follow-up turn's own subscribers also see the queue marker; the
+      // session-level log already gets it once via this turn's yielded event.
+      queuedRuntime.events.append(queued);
+      runtime.outcomes.delete(pending.input.id);
+      pending.resolve(queued);
+      return queued;
+    } catch {
+      runtime.outcomes.delete(pending.input.id);
+      pending.resolve(rejected);
+      return rejected;
+    }
+  }
+
+  private queueDetachedInput(
+    sessionId: string,
+    content: string,
+    resolved: { manager: SessionManager; cwd: string },
+  ): SdkSteerResult {
+    const ownerKey = resolved.manager.getSessionFile();
+    try {
+      claimProcessOwner(ownerKey, this);
+      const input: AgentRunInput = {
+        id: `sdk-steer-${++this.nextDetachedInputId}`,
+        content,
+        submittedAt: Date.now(),
+      };
+      const runtime = this.startOwnedTurn(
+        sessionId,
+        { ...(this.lastTurnOptions.get(sessionId) ?? {}), prompt: content },
+        resolved,
+        ownerKey,
+      );
+      const queued: Extract<AgentEvent, { type: "input_queued" }> = {
+        type: "input_queued",
+        id: input.id,
+        content,
+        turnId: runtime.reservation.id,
+        target: "next_turn",
+      };
+      runtime.events.append(queued);
+      this.publishSessionEvent(runtime, queued);
+      return {
+        accepted: true,
+        disposition: "queued",
+        input,
+        turnId: runtime.reservation.id,
+        outcome: Promise.resolve(queued),
+      };
+    } catch {
+      releaseProcessOwner(ownerKey, this);
+      return { accepted: false, disposition: "rejected", reason: "ownership_conflict" };
+    }
+  }
+
+  private publishSessionEvent(runtime: SdkTurnRuntime, event: AgentEvent): void {
+    const log = sessionEventLogFor(runtime.ownerKey);
+    log.append({
+      sequence: log.length + 1,
+      sessionId: runtime.sessionId,
+      turnId: runtime.reservation.id,
+      event,
+    });
+  }
+
+  private ownerForSession(sessionId: string): BubbleSdk | undefined {
+    const resolved = this.resolveSession(sessionId);
+    return resolved ? processSessionOwners.get(resolved.manager.getSessionFile()) : undefined;
+  }
 
   private bashAllowlistFor(sessionId: string): BashAllowlist {
     let allowlist = this.bashAllowlists.get(sessionId);
@@ -441,6 +851,7 @@ export class BubbleSdk {
   }
 
   private resolveSession(sessionId: string): { manager: SessionManager; cwd: string } | undefined {
+    if (this.turnCoordinator.isDeleted(sessionId)) return undefined;
     const memCwd = this.cwdBySession.get(sessionId);
     if (memCwd) {
       // create() only resolves the path and loads iff the file exists, so this
@@ -491,8 +902,98 @@ export class BubbleSdk {
   }
 }
 
+/**
+ * Process-local ownership routes every producer to one SDK runner. Hosts that
+ * run multiple OS processes still need a broker or distributed per-session
+ * lease; two processes cannot safely share a local JSONL transcript directly.
+ */
+const processSessionOwners = new Map<string, BubbleSdk>();
+const sessionEventLogs = new Map<string, ReplayEventLog<SdkSessionEvent>>();
+
+function claimProcessOwner(ownerKey: string, sdk: BubbleSdk): void {
+  const existing = processSessionOwners.get(ownerKey);
+  if (existing && existing !== sdk) {
+    throw new Error(`SDK session is owned by another runner: ${ownerKey}`);
+  }
+  processSessionOwners.set(ownerKey, sdk);
+}
+
+function releaseProcessOwner(ownerKey: string, sdk: BubbleSdk): void {
+  if (processSessionOwners.get(ownerKey) === sdk) processSessionOwners.delete(ownerKey);
+}
+
+function sessionEventLogFor(ownerKey: string): ReplayEventLog<SdkSessionEvent> {
+  let log = sessionEventLogs.get(ownerKey);
+  if (!log) {
+    log = new ReplayEventLog<SdkSessionEvent>();
+    sessionEventLogs.set(ownerKey, log);
+  }
+  return log;
+}
+
+/** End live iterators and drop the buffered events of a deleted session. */
+function releaseSessionEventLog(ownerKey: string): void {
+  const log = sessionEventLogs.get(ownerKey);
+  if (!log) return;
+  log.close();
+  sessionEventLogs.delete(ownerKey);
+}
+
+function inheritableTurnOptions(
+  options: RunTurnOptions,
+): Omit<RunTurnOptions, "prompt" | "signal"> {
+  const { prompt: _prompt, signal: _signal, ...inherited } = options;
+  return inherited;
+}
+
 function sessionFileName(sessionId: string): string {
   return sessionId.endsWith(".jsonl") ? sessionId : `${sessionId}.jsonl`;
+}
+
+function pendingSteerOutcome(input: AgentRunInput): PendingSteerOutcome {
+  let resolve!: (outcome: SdkSteerOutcome) => void;
+  const promise = new Promise<SdkSteerOutcome>((done) => {
+    resolve = done;
+  });
+  return { input, promise, resolve };
+}
+
+function throwAbortSignal(signal: AbortSignal): void {
+  if (!signal.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  throw new AgentAbortError(typeof signal.reason === "string" ? signal.reason : "SDK turn cancelled.");
+}
+
+function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    try {
+      throwAbortSignal(signal);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      cleanup();
+      try {
+        throwAbortSignal(signal);
+      } catch (error) {
+        reject(error);
+      }
+    };
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
 }
 
 /**
@@ -538,6 +1039,7 @@ export function rewriteSkillInvocationPrompt(
 // ── Building blocks (escape hatch for custom hosts) ────────────────────────
 
 export { Agent, AgentAbortError, type AgentOptions, type AgentRunOptions } from "../agent.js";
+export { AgentRunInputQueue } from "../agent/input-controller.js";
 export {
   SessionManager,
   getSessionsDir,
@@ -587,6 +1089,8 @@ export { registry as slashCommandRegistry } from "../slash-commands/index.js";
 export type { SlashCommandContext } from "../slash-commands/types.js";
 export type {
   AgentEvent,
+  AgentInputController,
+  AgentRunInput,
   ContentPart,
   Message,
   PermissionMode,

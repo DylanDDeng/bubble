@@ -67,6 +67,49 @@ Resume your last conversation:
 bubble --resume
 ```
 
+## Embed with the SDK
+
+The npm package exports `BubbleSdk` from both `@bubblebrain-ai/bubble` and
+`@bubblebrain-ai/bubble/sdk`. Turns are serialized FIFO within one session and
+remain parallel across different sessions.
+
+```ts
+import { BubbleSdk } from "@bubblebrain-ai/bubble/sdk";
+
+const sdk = new BubbleSdk({ defaultCwd: process.cwd() });
+const session = sdk.createSession();
+const events = sdk.runTurn(session.id, { prompt: "Inspect this project" });
+
+for await (const event of events) {
+  if (event.type === "text_delta") process.stdout.write(event.content);
+}
+
+const queued = sdk.enqueueTurn(session.id, { prompt: "Run the tests next" });
+void (async () => {
+  for await (const event of queued) {
+    // Render the queued turn's events.
+  }
+})();
+```
+
+While a turn owns the session slot, `sdk.steer(session.id, text)` adds text at
+the next model-call boundary and returns a receipt: `steered` (injected into
+the active turn), `queued` (the session is idle or the active turn can no
+longer accept input, so the text becomes the next FIFO turn automatically),
+or `rejected`. Every accepted receipt includes an `outcome` promise that
+settles exactly once to `input_applied`, `input_queued`, or `input_rejected` —
+even if the host drops the event iterator early.
+
+Turns are driven by the SDK itself, not by iterator consumption: a returned
+iterator is a replay subscription, so dropping it never stalls or cancels the
+turn. `openSession(sessionId)` returns a durable handle whose `events` iterable
+replays the whole session log from sequence 1 and `eventsFrom(n)` resumes after
+the last sequence the host durably processed. `stop(sessionId)` is
+Claude-style: it interrupts the active turn and keeps the queue; pass
+`{ cancelQueued: true }` to clear both. `clearQueue(sessionId)` cancels only
+queued turns, and `deleteSession(sessionId)` awaits teardown before the JSONL
+file is removed.
+
 ## Model providers
 
 Bubble ships with a catalog of built-in providers. Configure them inside the app — no environment variables required.

@@ -43,6 +43,11 @@ try {
   const smokeScript = `
     const sdk = await import(${JSON.stringify(join(packageRoot, "dist/sdk/index.js"))});
     if (typeof sdk.BubbleSdk !== "function") throw new Error("BubbleSdk export is unavailable");
+    if (typeof sdk.AgentRunInputQueue !== "function") throw new Error("AgentRunInputQueue export is unavailable");
+    const client = new sdk.BubbleSdk({ mcp: false });
+    for (const method of ["steer", "enqueueTurn", "queueTurn", "clearQueue", "getSessionRunState", "stop"]) {
+      if (typeof client[method] !== "function") throw new Error(\`BubbleSdk.\${method} is unavailable\`);
+    }
 
     const tui = await import(${JSON.stringify(
       join(packageRoot, "node_modules/@bubblebrain-ai/pi-tui/dist/src/index.js"),
@@ -50,7 +55,7 @@ try {
     if (typeof tui.Marked !== "function") throw new Error("bundled Pi TUI could not load marked");
   `;
   run(process.execPath, ["--input-type=module", "--eval", smokeScript], sandbox);
-  process.stdout.write("Packed Bubble install loaded BubbleSdk and the bundled Pi TUI successfully.\n");
+  process.stdout.write("Packed Bubble install loaded SDK turn control and the bundled Pi TUI successfully.\n");
 } finally {
   await rm(sandbox, { recursive: true, force: true });
 }

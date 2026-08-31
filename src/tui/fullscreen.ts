@@ -151,7 +151,7 @@ export class FullscreenApp {
         return;
       }
       if (this.options.controller.isRunning()) {
-        this.options.controller.steer(trimmed);
+        if (!this.options.controller.steer(trimmed)) this.options.controller.queueInput(trimmed);
       } else if (this.options.controller.queueAfterCommand?.(trimmed)) {
         this.render();
       } else {

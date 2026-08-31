@@ -425,11 +425,15 @@ export interface AgentRunInput {
 }
 
 export interface AgentInputController {
+  /** Enqueue only while the current run can still accept boundary input. */
+  tryEnqueue?(content: string): AgentRunInput | undefined;
   drainPendingInputs(): AgentRunInput[];
   pendingInputCount(): number;
+  /** Atomically stop accepting input and return everything still pending. */
+  closePendingInputs?(): AgentRunInput[];
 }
 
-export type AgentInputRejectedReason = "no_continuation";
+export type AgentInputRejectedReason = "no_continuation" | "turn_failed" | "turn_cancelled";
 
 // ============================================================================
 // Agent Events
@@ -453,6 +457,7 @@ export type AgentEvent =
   | { type: "provider_retry"; attempt: number; maxAttempts: number; reason: string }
   | { type: "input_pending_changed"; pending: number }
   | { type: "input_applied"; id: string; content: string; target: "current_turn" }
+  | { type: "input_queued"; id: string; content: string; turnId: string; target: "next_turn" }
   | { type: "input_rejected"; id: string; content: string; reason: AgentInputRejectedReason; target: "next_turn" }
   | { type: "mode_changed"; mode: PermissionMode }
   | { type: "agent_end" };

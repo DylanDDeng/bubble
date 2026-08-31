@@ -621,6 +621,8 @@ describe("main pi-tui running input", () => {
   it("steers and cancels the active run without starting another turn or exiting", async () => {
     const terminal = new VirtualTerminal(80, 14);
     const steers: string[] = [];
+    const queued: string[] = [];
+    let acceptSteer = true;
     let cancellations = 0;
     let exits = 0;
     let runCalls = 0;
@@ -633,7 +635,14 @@ describe("main pi-tui running input", () => {
       getStreamingTail: () => ({ content: "", reasoning: "", tools: [], parts: [], phase: "thinking" as const }),
       pendingSteerCount: () => steers.length,
       queuedInputCount: () => 0,
-      steer: (content: string) => { steers.push(content); return true; },
+      steer: (content: string) => {
+        if (!acceptSteer) return false;
+        steers.push(content);
+        return true;
+      },
+      queueInput: (input: string | { text: string }) => {
+        queued.push(typeof input === "string" ? input : input.text);
+      },
       cancelActiveRun: () => { cancellations += 1; return true; },
       runTurn: async () => { runCalls += 1; },
       appendDisplayMessage: () => {},
@@ -670,6 +679,12 @@ describe("main pi-tui running input", () => {
 
     expect(steers).toEqual(["follow up"]);
     expect(runCalls).toBe(0);
+
+    acceptSteer = false;
+    terminal.sendInput("after seal");
+    terminal.sendInput("\r");
+    await terminal.waitForRender();
+    expect(queued).toEqual(["after seal"]);
 
     terminal.sendInput("\x03");
     expect(cancellations).toBe(1);

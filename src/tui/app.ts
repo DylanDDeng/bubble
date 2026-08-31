@@ -606,7 +606,7 @@ export class PiTuiApp {
       // their bytes by waiting for the next provider turn instead of degrading
       // into a text steer.
       if (payload.images.length > 0) controller.queueInput(payload);
-      else controller.steer(trimmed);
+      else if (!controller.steer(trimmed)) controller.queueInput(payload);
       this.renderSnapshot();
     } else if (controller.queueAfterCommand?.(payload)) {
       this.renderSnapshot();
@@ -643,7 +643,9 @@ export class PiTuiApp {
       this.pushUserRow({ text: command, images: [] });
       const controller = this.options.controller;
       if (controller.isRunning()) {
-        controller.steer(skillInvocation.actualPrompt);
+        if (!controller.steer(skillInvocation.actualPrompt)) {
+          controller.queueInput(skillInvocation.actualPrompt);
+        }
         this.renderSnapshot();
       } else {
         void controller.runTurn(skillInvocation.actualPrompt, process.cwd()).finally(() => this.renderSnapshot());
