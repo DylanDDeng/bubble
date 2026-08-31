@@ -592,7 +592,7 @@ describe("BubbleSdk turn control", () => {
     const session = owner.createSession({ id: `routed-${Date.now()}` });
 
     // The owner holds an active turn on the session.
-    void collect(owner.runTurn(session.id, { prompt: "owned turn" }));
+    collect(owner.runTurn(session.id, { prompt: "owned turn" })).catch(() => undefined);
     await entered.promise;
 
     // The second instance has no working provider: if it executed this
@@ -615,18 +615,19 @@ describe("BubbleSdk turn control", () => {
   });
 
   it("lets another instance take over once the owner goes idle", async () => {
-    const prompts: string[] = [];
-    const makeProvider = (): Provider => ({
+    const firstPrompts: string[] = [];
+    const secondPrompts: string[] = [];
+    const makeProvider = (log: string[]): Provider => ({
       async *streamChat(messages) {
         const prompt = latestUserText(messages);
-        prompts.push(prompt);
+        log.push(prompt);
         yield { type: "text", content: prompt };
         yield { type: "done" };
       },
       async complete() { return ""; },
     });
-    const first = sdkWithProvider(makeProvider());
-    const second = sdkWithProvider(makeProvider());
+    const first = sdkWithProvider(makeProvider(firstPrompts));
+    const second = sdkWithProvider(makeProvider(secondPrompts));
     const session = first.createSession({ id: `handover-${Date.now()}` });
 
     await collect(first.runTurn(session.id, { prompt: "by first" }));
@@ -634,41 +635,36 @@ describe("BubbleSdk turn control", () => {
     // Ownership is released at idle, so the second instance claims it itself.
     await collect(second.runTurn(session.id, { prompt: "by second" }));
     await until(() => second.getSessionRunState(session.id).phase === "idle");
-    expect(prompts).toEqual(["by first", "by second"]);
+    // The second instance executed with its own provider: had it delegated
+    // to the first, secondPrompts would stay empty.
+    expect(firstPrompts).toEqual(["by first"]);
+    expect(secondPrompts).toEqual(["by second"]);
   });
 
-  it("routes a second instance to a session that has not been persisted yet", async () => {
-    const entered = deferred();
-    const release = deferred();
+  it("resolves another instance's session that has not been persisted yet", async () => {
+    const prompts: string[] = [];
     const provider: Provider = {
       async *streamChat(messages) {
         const prompt = latestUserText(messages);
-        if (prompt === "owned turn") {
-          entered.resolve();
-          await release.promise;
-        }
+        prompts.push(prompt);
         yield { type: "text", content: prompt };
         yield { type: "done" };
       },
       async complete() { return ""; },
     };
-    const owner = sdkWithProvider(provider);
-    const session = owner.createSession({ id: `fresh-route-${Date.now()}` });
-    void collect(owner.runTurn(session.id, { prompt: "owned turn" }));
-    await entered.promise;
+    const creator = sdkWithProvider(provider);
+    const session = creator.createSession({ id: `fresh-resolve-${Date.now()}` });
+    const file = (creator as unknown as {
+      resolveSession(id: string): { manager: { getSessionFile(): string } };
+    }).resolveSession(session.id)!.manager.getSessionFile();
+    expect(existsSync(file)).toBe(false);
 
-    // No JSONL exists on disk yet; the process-level location registry still
-    // routes the bystander to the running owner instead of unknown_session.
-    const bystander = new BubbleSdk({ defaultCwd: temporaryDirectory, mcp: false });
-    (bystander as unknown as { resolveProvider(): never }).resolveProvider = () => {
-      throw new Error("bystander must not execute this session");
-    };
-    expect(bystander.steer(session.id, "find the owner")).toMatchObject({
-      accepted: true,
-      disposition: "steered",
-    });
-    release.resolve();
-    await until(() => owner.getSessionRunState(session.id).phase === "idle");
+    // Nothing is on disk, so only the process-level registry can resolve the
+    // session. Ownership belongs to whoever runs first: the bystander claims it.
+    const bystander = sdkWithProvider(provider);
+    await collect(bystander.runTurn(session.id, { prompt: "from bystander" }));
+    await until(() => bystander.getSessionRunState(session.id).phase === "idle");
+    expect(prompts).toEqual(["from bystander"]);
   });
 
   it("settles an accepted steer when the session is deleted mid-turn", async () => {

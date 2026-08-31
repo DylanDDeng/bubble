@@ -224,6 +224,7 @@ export class BubbleSdk {
   private readonly turnRuntimes = new Map<string, SdkTurnRuntime>();
   private readonly lastTurnOptions = new Map<string, Omit<RunTurnOptions, "prompt" | "signal">>();
   private readonly mcpToolsByCwd = new Map<string, Promise<ToolRegistryEntry[]>>();
+  private readonly inputIdNonce = randomUUID().slice(0, 6);
   private nextTurnInputPrefix = 0;
   private nextDetachedInputId = 0;
   /** id -> {cwd,file} rebuilt from disk so sessions survive host restarts. */
@@ -248,8 +249,8 @@ export class BubbleSdk {
     const cwd = options.cwd || this.defaultCwd;
     const id = options.id || `sdk-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
     this.turnCoordinator.revive(id);
-    const manager = SessionManager.create(cwd, sessionFileName(id));
-    processSessionLocations.set(id, { ownerKey: manager.getSessionFile(), cwd });
+    SessionManager.create(cwd, sessionFileName(id));
+    processSessionLocations.set(id, cwd);
     this.cwdBySession.set(id, cwd);
     return { id, cwd };
   }
@@ -430,7 +431,7 @@ export class BubbleSdk {
       sessionId,
       ownerKey,
       reservation,
-      inputController: new AgentRunInputQueue(`sdk-turn-${++this.nextTurnInputPrefix}`),
+      inputController: new AgentRunInputQueue(`sdk-turn-${this.inputIdNonce}-${++this.nextTurnInputPrefix}`),
       outcomes: new Map(),
       options,
       events: new ReplayEventLog<AgentEvent>(),
@@ -462,7 +463,9 @@ export class BubbleSdk {
           runtime,
           { type: "turn_end", willContinue: false },
           {
-            kind: failure instanceof AgentAbortError ? "cancelled" : "failed",
+            kind: failure instanceof AgentAbortError || runtime.reservation.signal.aborted
+              ? "cancelled"
+              : "failed",
             message: failure instanceof Error ? failure.message : String(failure),
           },
         );
@@ -769,7 +772,7 @@ export class BubbleSdk {
     try {
       claimProcessOwner(ownerKey, this);
       const input: AgentRunInput = {
-        id: `sdk-steer-${++this.nextDetachedInputId}`,
+        id: `sdk-steer-${this.inputIdNonce}-${++this.nextDetachedInputId}`,
         content,
         submittedAt: Date.now(),
       };
@@ -893,15 +896,17 @@ export class BubbleSdk {
     const entry = this.sessionIndex.get(sessionId);
     if (!entry) {
       // A session created in this process but not yet persisted to disk is
-      // still routable for other SDK instances (ownership conflict window).
-      const location = processSessionLocations.get(sessionId);
-      if (!location) return undefined;
-      this.cwdBySession.set(sessionId, location.cwd);
+      // still resolvable (and routable) for other SDK instances.
+      const registeredCwd = processSessionLocations.get(sessionId);
+      if (!registeredCwd) return undefined;
+      this.cwdBySession.set(sessionId, registeredCwd);
       return {
-        manager: SessionManager.create(location.cwd, sessionFileName(sessionId)),
-        cwd: location.cwd,
+        manager: SessionManager.create(registeredCwd, sessionFileName(sessionId)),
+        cwd: registeredCwd,
       };
     }
+    // The disk entry supersedes the pre-persistence registry entry.
+    processSessionLocations.delete(sessionId);
     this.cwdBySession.set(sessionId, entry.cwd);
     return { manager: new SessionManager(entry.file), cwd: entry.cwd };
   }
@@ -950,8 +955,8 @@ export class BubbleSdk {
  */
 const processSessionOwners = new Map<string, BubbleSdk>();
 const sessionEventLogs = new Map<string, ReplayEventLog<SdkSessionEvent>>();
-/** sessionId -> {ownerKey, cwd} for sessions created here but not yet on disk. */
-const processSessionLocations = new Map<string, { ownerKey: string; cwd: string }>();
+/** sessionId -> cwd for sessions created in this process but not yet on disk. */
+const processSessionLocations = new Map<string, string>();
 
 function claimProcessOwner(ownerKey: string, sdk: BubbleSdk): void {
   const existing = processSessionOwners.get(ownerKey);
