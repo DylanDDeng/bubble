@@ -422,8 +422,12 @@ describe("BubbleSdk turn control", () => {
     const deletion = sdk.deleteSession(session.id);
     await expect(run).rejects.toThrow("SDK session deleted");
     await deletion;
-    expect(existsSync(sessionFile)).toBe(false);
-    await Promise.resolve();
+    // Poll a real macrotask window: no late async write may resurrect the file.
+    const deadline = Date.now() + 200;
+    while (Date.now() < deadline) {
+      expect(existsSync(sessionFile)).toBe(false);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
     expect(existsSync(sessionFile)).toBe(false);
     expect(sdk.getSessionRunState(session.id).phase).toBe("deleted");
     expect(() => sdk.runTurn(session.id, { prompt: "resurrect" })).toThrow("Unknown session");
@@ -608,5 +612,194 @@ describe("BubbleSdk turn control", () => {
     await until(() => prompts.includes("routed steer"), "routed steer never applied");
     await until(() => bystander.getSessionRunState(session.id).phase === "idle");
     expect(prompts).toContain("routed run");
+  });
+
+  it("lets another instance take over once the owner goes idle", async () => {
+    const prompts: string[] = [];
+    const makeProvider = (): Provider => ({
+      async *streamChat(messages) {
+        const prompt = latestUserText(messages);
+        prompts.push(prompt);
+        yield { type: "text", content: prompt };
+        yield { type: "done" };
+      },
+      async complete() { return ""; },
+    });
+    const first = sdkWithProvider(makeProvider());
+    const second = sdkWithProvider(makeProvider());
+    const session = first.createSession({ id: `handover-${Date.now()}` });
+
+    await collect(first.runTurn(session.id, { prompt: "by first" }));
+    await until(() => first.getSessionRunState(session.id).phase === "idle");
+    // Ownership is released at idle, so the second instance claims it itself.
+    await collect(second.runTurn(session.id, { prompt: "by second" }));
+    await until(() => second.getSessionRunState(session.id).phase === "idle");
+    expect(prompts).toEqual(["by first", "by second"]);
+  });
+
+  it("routes a second instance to a session that has not been persisted yet", async () => {
+    const entered = deferred();
+    const release = deferred();
+    const provider: Provider = {
+      async *streamChat(messages) {
+        const prompt = latestUserText(messages);
+        if (prompt === "owned turn") {
+          entered.resolve();
+          await release.promise;
+        }
+        yield { type: "text", content: prompt };
+        yield { type: "done" };
+      },
+      async complete() { return ""; },
+    };
+    const owner = sdkWithProvider(provider);
+    const session = owner.createSession({ id: `fresh-route-${Date.now()}` });
+    void collect(owner.runTurn(session.id, { prompt: "owned turn" }));
+    await entered.promise;
+
+    // No JSONL exists on disk yet; the process-level location registry still
+    // routes the bystander to the running owner instead of unknown_session.
+    const bystander = new BubbleSdk({ defaultCwd: temporaryDirectory, mcp: false });
+    (bystander as unknown as { resolveProvider(): never }).resolveProvider = () => {
+      throw new Error("bystander must not execute this session");
+    };
+    expect(bystander.steer(session.id, "find the owner")).toMatchObject({
+      accepted: true,
+      disposition: "steered",
+    });
+    release.resolve();
+    await until(() => owner.getSessionRunState(session.id).phase === "idle");
+  });
+
+  it("settles an accepted steer when the session is deleted mid-turn", async () => {
+    const entered = deferred();
+    const provider: Provider = {
+      async *streamChat(_messages, options) {
+        entered.resolve();
+        await new Promise<void>((_resolve, reject) => {
+          const fail = () => reject(options.abortSignal?.reason);
+          if (options.abortSignal?.aborted) fail();
+          else options.abortSignal?.addEventListener("abort", fail, { once: true });
+        });
+      },
+      async complete() { return ""; },
+    };
+    const sdk = sdkWithProvider(provider);
+    const session = sdk.createSession({ id: `delete-steer-${Date.now()}` });
+    const run = collect(sdk.runTurn(session.id, { prompt: "initial" }));
+    void run.catch(() => undefined);
+    await entered.promise;
+    const steer = sdk.steer(session.id, "settle me on delete");
+    if (!steer.accepted) throw new Error("expected accepted steer");
+
+    await sdk.deleteSession(session.id);
+    await expect(steer.outcome).resolves.toMatchObject({
+      type: "input_rejected",
+      reason: "turn_cancelled",
+      content: "settle me on delete",
+    });
+    expect(sdk.getSessionRunState(session.id).phase).toBe("deleted");
+  });
+
+  it("queues a steer that arrives after stop seals the active turn", async () => {
+    const prompts: string[] = [];
+    const provider: Provider = {
+      async *streamChat(messages, options) {
+        const prompt = latestUserText(messages);
+        prompts.push(prompt);
+        if (prompt === "initial") {
+          await new Promise<void>((_resolve, reject) => {
+            const fail = () => reject(options.abortSignal?.reason);
+            if (options.abortSignal?.aborted) fail();
+            else options.abortSignal?.addEventListener("abort", fail, { once: true });
+          });
+          return;
+        }
+        yield { type: "text", content: prompt };
+        yield { type: "done" };
+      },
+      async complete() { return ""; },
+    };
+    const sdk = sdkWithProvider(provider);
+    const session = sdk.createSession({ id: `post-stop-${Date.now()}` });
+    const run = collect(sdk.runTurn(session.id, { prompt: "initial" }));
+    void run.catch(() => undefined);
+    await until(() => prompts.includes("initial"));
+
+    sdk.stop(session.id);
+    // The active turn is sealed but still settling: the steer must not be
+    // dropped into it, and must not be lost — it becomes the next turn.
+    const steer = sdk.steer(session.id, "queued after stop");
+    expect(steer).toMatchObject({ accepted: true, disposition: "queued" });
+    await until(() => prompts.includes("queued after stop"), "post-stop steer never ran");
+    await until(() => sdk.getSessionRunState(session.id).phase === "idle");
+  });
+
+  it("marks turn failure and cancellation with terminal records on the session log", async () => {
+    const failSession = (() => {
+      const entered = deferred();
+      const provider: Provider = {
+        async *streamChat() {
+          entered.resolve();
+          throw new Error("provider exploded");
+        },
+        async complete() { return ""; },
+      };
+      return { provider, entered };
+    })();
+    const failSdk = sdkWithProvider(failSession.provider);
+    const failing = failSdk.createSession({ id: `terminal-fail-${Date.now()}` });
+    const failHandle = failSdk.openSession(failing.id);
+    const failRun = collect(failSdk.runTurn(failing.id, { prompt: "doom" }));
+    void failRun.catch(() => undefined);
+    await failSession.entered.promise;
+
+    const cancelSession = (() => {
+      const entered = deferred();
+      const provider: Provider = {
+        async *streamChat(_messages, options) {
+          entered.resolve();
+          await new Promise<void>((_resolve, reject) => {
+            const fail = () => reject(options.abortSignal?.reason);
+            if (options.abortSignal?.aborted) fail();
+            else options.abortSignal?.addEventListener("abort", fail, { once: true });
+          });
+        },
+        async complete() { return ""; },
+      };
+      return { provider, entered };
+    })();
+    const cancelSdk = sdkWithProvider(cancelSession.provider);
+    const cancelling = cancelSdk.createSession({ id: `terminal-cancel-${Date.now()}` });
+    const cancelHandle = cancelSdk.openSession(cancelling.id);
+    const cancelRun = collect(cancelSdk.runTurn(cancelling.id, { prompt: "block" }));
+    void cancelRun.catch(() => undefined);
+    await cancelSession.entered.promise;
+    cancelSdk.stop(cancelling.id);
+
+    const readTerminal = async (
+      iterable: AsyncIterable<SdkSessionEvent>,
+    ): Promise<SdkSessionEvent> => {
+      for await (const item of iterable) {
+        if (item.terminal) return item;
+      }
+      throw new Error("session log never produced a terminal record");
+    };
+    const [failed, cancelled] = await Promise.all([
+      readTerminal(failHandle.events),
+      readTerminal(cancelHandle.events),
+    ]);
+    failHandle.close();
+    cancelHandle.close();
+    expect(failed).toMatchObject({
+      sessionId: failing.id,
+      event: { type: "turn_end" },
+      terminal: { kind: "failed", message: "provider exploded" },
+    });
+    expect(cancelled).toMatchObject({
+      sessionId: cancelling.id,
+      event: { type: "turn_end", willContinue: false },
+      terminal: { kind: "cancelled" },
+    });
   });
 });

@@ -165,6 +165,17 @@ export interface SdkSessionEvent {
   sessionId: string;
   turnId: string;
   event: AgentEvent;
+  /**
+   * Present only on the synthesized record that ends a turn abnormally.
+   * Replay subscribers use it to tell "turn failed" from "turn still running";
+   * the per-turn runTurn() iterator instead surfaces the thrown error.
+   */
+  terminal?: SdkSessionTerminal;
+}
+
+export interface SdkSessionTerminal {
+  kind: "failed" | "cancelled";
+  message: string;
 }
 
 export interface SdkStopOptions {
@@ -237,7 +248,8 @@ export class BubbleSdk {
     const cwd = options.cwd || this.defaultCwd;
     const id = options.id || `sdk-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
     this.turnCoordinator.revive(id);
-    SessionManager.create(cwd, sessionFileName(id));
+    const manager = SessionManager.create(cwd, sessionFileName(id));
+    processSessionLocations.set(id, { ownerKey: manager.getSessionFile(), cwd });
     this.cwdBySession.set(id, cwd);
     return { id, cwd };
   }
@@ -279,6 +291,7 @@ export class BubbleSdk {
     this.bashAllowlists.delete(sessionId);
     this.lastTurnOptions.delete(sessionId);
     this.sessionIndex.delete(sessionId);
+    processSessionLocations.delete(sessionId);
     if (resolved) {
       releaseSessionEventLog(resolved.manager.getSessionFile());
       releaseProcessOwner(resolved.manager.getSessionFile(), this);
@@ -441,6 +454,19 @@ export class BubbleSdk {
     } catch (error) {
       failure = error;
     } finally {
+      if (failure !== undefined) {
+        // The session-level log never closes per turn, so replay subscribers
+        // need an explicit terminal record — otherwise a failed turn is
+        // indistinguishable from one that is still running.
+        this.publishSessionEvent(
+          runtime,
+          { type: "turn_end", willContinue: false },
+          {
+            kind: failure instanceof AgentAbortError ? "cancelled" : "failed",
+            message: failure instanceof Error ? failure.message : String(failure),
+          },
+        );
+      }
       runtime.events.close(failure);
       if (this.turnRuntimes.get(runtime.reservation.id) === runtime) {
         this.turnRuntimes.delete(runtime.reservation.id);
@@ -775,13 +801,18 @@ export class BubbleSdk {
     }
   }
 
-  private publishSessionEvent(runtime: SdkTurnRuntime, event: AgentEvent): void {
+  private publishSessionEvent(
+    runtime: SdkTurnRuntime,
+    event: AgentEvent,
+    terminal?: SdkSessionTerminal,
+  ): void {
     const log = sessionEventLogFor(runtime.ownerKey);
     log.append({
       sequence: log.length + 1,
       sessionId: runtime.sessionId,
       turnId: runtime.reservation.id,
       event,
+      ...(terminal ? { terminal } : {}),
     });
   }
 
@@ -860,7 +891,17 @@ export class BubbleSdk {
     }
     if (this.sessionIndex.size === 0) this.listSessions();
     const entry = this.sessionIndex.get(sessionId);
-    if (!entry) return undefined;
+    if (!entry) {
+      // A session created in this process but not yet persisted to disk is
+      // still routable for other SDK instances (ownership conflict window).
+      const location = processSessionLocations.get(sessionId);
+      if (!location) return undefined;
+      this.cwdBySession.set(sessionId, location.cwd);
+      return {
+        manager: SessionManager.create(location.cwd, sessionFileName(sessionId)),
+        cwd: location.cwd,
+      };
+    }
     this.cwdBySession.set(sessionId, entry.cwd);
     return { manager: new SessionManager(entry.file), cwd: entry.cwd };
   }
@@ -909,6 +950,8 @@ export class BubbleSdk {
  */
 const processSessionOwners = new Map<string, BubbleSdk>();
 const sessionEventLogs = new Map<string, ReplayEventLog<SdkSessionEvent>>();
+/** sessionId -> {ownerKey, cwd} for sessions created here but not yet on disk. */
+const processSessionLocations = new Map<string, { ownerKey: string; cwd: string }>();
 
 function claimProcessOwner(ownerKey: string, sdk: BubbleSdk): void {
   const existing = processSessionOwners.get(ownerKey);

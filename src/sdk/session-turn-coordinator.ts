@@ -1,4 +1,5 @@
 import { AgentAbortError, throwIfAborted } from "../agent/abort-errors.js";
+import { randomUUID } from "node:crypto";
 
 export type SessionTurnPhase =
   | "queued"
@@ -58,6 +59,7 @@ interface SessionRecord {
 export class SessionTurnCoordinator {
   private readonly sessions = new Map<string, SessionRecord>();
   private readonly deletedSessions = new Set<string>();
+  private readonly turnIdPrefix = `sdk-turn-${randomUUID().slice(0, 6)}`;
   private nextTurnId = 0;
 
   reserve(sessionId: string, signal?: AbortSignal): SessionTurnReservation {
@@ -67,7 +69,7 @@ export class SessionTurnCoordinator {
     throwIfAborted(signal);
 
     const turn: TurnRecord = {
-      id: `sdk-turn-${++this.nextTurnId}`,
+      id: `${this.turnIdPrefix}-${++this.nextTurnId}`,
       sessionId,
       phase: "queued",
       abort: new AbortController(),
