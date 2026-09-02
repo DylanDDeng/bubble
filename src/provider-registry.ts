@@ -22,7 +22,7 @@ import {
 } from "./model-catalog.js";
 import { ModelConfig } from "./model-config.js";
 import { AuthStorage } from "./oauth/index.js";
-import { fetchGeminiModels } from "./provider-ai-sdk.js";
+import { fetchGeminiModels, geminiReasoningLevels } from "./provider-ai-sdk.js";
 import { extractChatGptAccountId, fetchOpenAICodexModelCatalog, type OpenAICodexAuthAdapter } from "./provider-openai-codex.js";
 import { fetchGrokSubscriptionModels, type GrokAuthAdapter } from "./provider-grok.js";
 import { refreshOpenAICodex } from "./oauth/openai-codex.js";
@@ -270,21 +270,23 @@ export class ProviderRegistry {
       for (const [key, entry] of Object.entries(parsed)) {
         if (!entry || typeof entry.expiresAt !== "number" || entry.expiresAt <= now) continue;
         if (!entry.result || !Array.isArray(entry.result.models)) continue;
+        const provider = { id: entry.providerId ?? "", authType: entry.authType, protocol: entry.protocol };
+        // Capability fields may have been derived by an older Bubble build.
+        // Recompute them with the current code while retaining cached remote
+        // membership, display names and context windows.
+        const result = normalizeProviderDiscoveryMetadata(provider, entry.result);
         this.modelDiscoveryCache.set(key, {
-          result: entry.result,
+          result,
           expiresAt: entry.expiresAt,
           identityKey: entry.identityKey ?? "unknown",
-          providerId: entry.providerId ?? "",
+          providerId: provider.id,
           authType: entry.authType,
           protocol: entry.protocol,
         });
         // Rebuild the dynamic overlay so context window / reasoning levels
         // resolve from the cached catalog at startup, not only on /model open.
         if (entry.providerId) {
-          this.applyDynamicDiscoveryMetadata(
-            { id: entry.providerId, authType: entry.authType, protocol: entry.protocol },
-            entry.result,
-          );
+          this.applyDynamicDiscoveryMetadata(provider, result);
         }
       }
     } catch {
@@ -633,6 +635,8 @@ export class ProviderRegistry {
     if (!options.forceRefresh) {
       const cached = this.modelDiscoveryCache.get(key);
       if (cached && cached.expiresAt > now) {
+        const cachedResult = normalizeProviderDiscoveryMetadata(provider, cached.result);
+        cached.result = cachedResult;
         // A disk cache can outlive the application version that wrote it. Keep
         // the current curated catalog authoritative over stale cached metadata,
         // then retain cached remote-only ids for non-authoritative union results.
@@ -640,12 +644,12 @@ export class ProviderRegistry {
         // without waiting up to 24 hours or requiring a manual Ctrl+R refresh.
         const local = this.localModelsForProvider(provider);
         const localIds = new Set(local.map((model) => model.id));
-        const models = cached.result.source === "static"
+        const models = cachedResult.source === "static"
           ? local
-          : cached.result.authoritative
-            ? cached.result.models
-            : [...local, ...cached.result.models.filter((model) => !localIds.has(model.id))];
-        const result: ModelDiscoveryResult = { ...cached.result, models, source: "cache" };
+          : cachedResult.authoritative
+            ? cachedResult.models
+            : [...local, ...cachedResult.models.filter((model) => !localIds.has(model.id))];
+        const result: ModelDiscoveryResult = { ...cachedResult, models, source: "cache" };
         const current = this.getConfigured().find((item) => item.id === provider.id);
         if (!current || this.modelDiscoveryKey(current) === key) {
           this.applyDynamicDiscoveryMetadata(provider, result);
@@ -664,7 +668,8 @@ export class ProviderRegistry {
     this.modelDiscoveryGeneration.set(provider.id, generation);
 
     let pending!: Promise<ModelDiscoveryResult>;
-    pending = this.performModelDiscovery(provider).then((result): ModelDiscoveryResult => {
+    pending = this.performModelDiscovery(provider).then((rawResult): ModelDiscoveryResult => {
+      const result = normalizeProviderDiscoveryMetadata(provider, rawResult);
       if (!this.isCurrentModelDiscovery(provider, key, generation)) {
         return {
           models: this.localModelsForProvider(
@@ -1023,6 +1028,25 @@ export class ProviderRegistry {
       toolOutputTokenLimit: model.toolOutputTokenLimit,
     })));
   }
+}
+
+/**
+ * Remote Gemini discovery does not expose Bubble's reasoning ladder; that
+ * metadata is inferred locally. Never trust a persisted inference across app
+ * upgrades, or a corrected capability matrix can remain stale for the cache
+ * TTL after restart.
+ */
+function normalizeProviderDiscoveryMetadata<T extends { models: ModelInfo[] }>(
+  provider: Pick<ProviderProfile, "id" | "protocol">,
+  result: T,
+): T {
+  if (provider.id !== "google" || provider.protocol !== "ai-sdk") return result;
+  return {
+    ...result,
+    models: result.models.map((model) => model.id.startsWith("gemini-")
+      ? { ...model, reasoningLevels: geminiReasoningLevels(model.id) }
+      : model),
+  };
 }
 
 function modelDiscoveryError(error: unknown): string {

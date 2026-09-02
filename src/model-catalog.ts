@@ -128,6 +128,9 @@ const ANTHROPIC_CHAT_LEVELS: ReasoningEffort[] = ["off"];
 const GROK_45_LEVELS: ReasoningEffort[] = ["low", "medium", "high"];
 const GEMINI_3_LEVELS: ReasoningEffort[] = ["low", "medium", "high"];
 const GEMINI_3_FLASH_LEVELS: ReasoningEffort[] = ["minimal", "low", "medium", "high"];
+// Verified against the native API on 2026-09-02: Gemini 3.7/3.8 Flash reject
+// thinkingLevel=minimal but accept thinkingBudget=0 plus low/medium/high.
+const GEMINI_37_38_FLASH_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high"];
 const GEMINI_25_PRO_LEVELS: ReasoningEffort[] = ["low", "medium", "high"];
 const GEMINI_25_FLASH_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high"];
 
@@ -173,8 +176,10 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "deepseek-v4-pro", name: "deepseek-v4-pro", providerId: "deepseek", tier: "strong", reasoningLevels: DEEPSEEK_V4_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
   // Offline/no-key fallback only: with an API key the registry replaces this
   // list via fetchGeminiModels (GET /v1beta/models, newest five). Gemini 3
-  // exposes thinking_level (minimal/low/medium/high); 2.5 Pro cannot disable
-  // thinking (no "off"), 2.5 Flash can (thinkingBudget 0).
+  // thinking support varies by release: 3.7/3.8 Flash support off/low/medium/high
+  // while older Flash releases expose minimal/low/medium/high.
+  { id: "gemini-3.8-flash", name: "Gemini 3.8 Flash", providerId: "google", tier: "fast", reasoningLevels: GEMINI_37_38_FLASH_LEVELS, contextWindow: 1048576 },
+  { id: "gemini-3.7-flash", name: "Gemini 3.7 Flash", providerId: "google", tier: "fast", reasoningLevels: GEMINI_37_38_FLASH_LEVELS, contextWindow: 1048576 },
   { id: "gemini-3.5-flash", name: "Gemini 3.5 Flash", providerId: "google", tier: "fast", reasoningLevels: GEMINI_3_FLASH_LEVELS, contextWindow: 1048576 },
   { id: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro", providerId: "google", tier: "strong", reasoningLevels: GEMINI_3_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
   { id: "gemini-3-flash-preview", name: "Gemini 3 Flash", providerId: "google", tier: "fast", reasoningLevels: GEMINI_3_FLASH_LEVELS, contextWindow: 1048576 },

@@ -8,6 +8,9 @@
  * augments the curated catalog rather than replacing it.
  */
 
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ProviderRegistry,
@@ -15,7 +18,7 @@ import {
   isOpenAICompatibleProtocol,
   type ProviderProfile,
 } from "../provider-registry.js";
-import { getBuiltinModel } from "../model-catalog.js";
+import { clearDynamicModelMetadata, getBuiltinModel } from "../model-catalog.js";
 import type { UserConfig } from "../config.js";
 
 afterEach(() => {
@@ -176,6 +179,71 @@ describe("OpenAI-compatible model discovery", () => {
     expect(isLikelyChatModelId("moonshot-v1-128k-vision-preview")).toBe(true);
     expect(isLikelyChatModelId("qwen-image-3.0-pro")).toBe(false);
     expect(isLikelyChatModelId("text-embedding-3-large")).toBe(false);
+  });
+});
+
+describe("Gemini model discovery cache", () => {
+  it("recomputes locally-derived reasoning levels when an old disk cache is restored", async () => {
+    const previousBubbleHome = process.env.BUBBLE_HOME;
+    const previousVitest = process.env.VITEST;
+    const bubbleHome = mkdtempSync(join(tmpdir(), "bubble-gemini-cache-"));
+    const provider: ProviderProfile = {
+      id: "google",
+      name: "Google Gemini",
+      baseURL: "https://generativelanguage.googleapis.com/v1beta",
+      apiKey: "g-key",
+      enabled: true,
+      protocol: "ai-sdk",
+    };
+
+    try {
+      process.env.BUBBLE_HOME = bubbleHome;
+      // Build the identity-aware key without loading disk state first.
+      process.env.VITEST = "true";
+      const probe = isolatedRegistry([provider]);
+      const key = (probe as any).modelDiscoveryKey(provider);
+      writeFileSync(join(bubbleHome, "model-discovery-cache.json"), JSON.stringify({
+        [key]: {
+          result: {
+            models: [{
+              id: "gemini-3.8-flash",
+              name: "Gemini 3.8 Flash",
+              providerId: "google",
+              reasoningLevels: ["minimal", "low", "medium", "high"],
+              contextWindow: 1_048_576,
+            }],
+            source: "remote",
+            authoritative: true,
+          },
+          expiresAt: Date.now() + 60_000,
+          identityKey: "old-build",
+          providerId: "google",
+          protocol: "ai-sdk",
+        },
+      }));
+
+      clearDynamicModelMetadata("google");
+      process.env.VITEST = "false";
+      const registry = isolatedRegistry([provider]);
+
+      // Startup overlay is already corrected before /model is opened.
+      expect(getBuiltinModel("google", "gemini-3.8-flash")?.reasoningLevels)
+        .toEqual(["off", "low", "medium", "high"]);
+
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      const result = await registry.discoverModels(provider);
+      expect(result.source).toBe("cache");
+      expect(result.models[0]?.reasoningLevels).toEqual(["off", "low", "medium", "high"]);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      clearDynamicModelMetadata("google");
+      rmSync(bubbleHome, { recursive: true, force: true });
+      if (previousBubbleHome === undefined) delete process.env.BUBBLE_HOME;
+      else process.env.BUBBLE_HOME = previousBubbleHome;
+      if (previousVitest === undefined) delete process.env.VITEST;
+      else process.env.VITEST = previousVitest;
+    }
   });
 });
 

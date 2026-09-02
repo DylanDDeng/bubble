@@ -64,6 +64,21 @@ describe("model pricing", () => {
     });
   });
 
+  it("prices Gemini 3.7/3.8 Flash across the launch-promo boundary", () => {
+    for (const modelId of ["gemini-3.7-flash", "gemini-3.8-flash"]) {
+      const usage = {
+        promptTokens: 1_000_000,
+        promptCacheHitTokens: 250_000,
+        promptCacheMissTokens: 750_000,
+        completionTokens: 1_000_000,
+      };
+      expect(calculateUsageCost("google", modelId, usage, new Date("2026-12-31T23:59:59Z")))
+        .toEqual({ currency: "USD", cost: 0.25 * 0.075 + 0.75 * 0.75 + 3.75, estimated: false });
+      expect(calculateUsageCost("google", modelId, usage, new Date("2027-01-01T00:00:00Z")))
+        .toEqual({ currency: "USD", cost: 0.25 * 0.15 + 0.75 * 1.5 + 7.5, estimated: false });
+    }
+  });
+
   it("calculates DeepSeek cache-aware cost", () => {
     const result = calculateUsageCost("deepseek", "deepseek-v4-pro", {
       promptTokens: 1_000_000,
@@ -159,5 +174,16 @@ describe("model pricing", () => {
 
     expect(uncached!.cost).toBeCloseTo(5);
     expect(cached!.cost).toBeLessThan(uncached!.cost / 3);
+  });
+
+  it("uses Sonnet 5 post-promo cache-write pricing after expiry", () => {
+    const result = calculateUsageCost("anthropic", "claude-sonnet-5", {
+      promptTokens: 1_000_000,
+      promptCacheMissTokens: 1_000_000,
+      cacheCreationTokens: 1_000_000,
+      completionTokens: 0,
+    }, new Date("2026-09-01T00:00:00Z"));
+
+    expect(result).toEqual({ currency: "USD", cost: 3.75, estimated: false });
   });
 });

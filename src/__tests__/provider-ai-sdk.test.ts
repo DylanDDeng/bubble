@@ -341,6 +341,8 @@ describe("Gemini model discovery", () => {
   });
 
   it("derives reasoning levels by family", () => {
+    expect(geminiReasoningLevels("gemini-3.8-flash")).toEqual(["off", "low", "medium", "high"]);
+    expect(geminiReasoningLevels("gemini-3.7-flash")).toEqual(["off", "low", "medium", "high"]);
     expect(geminiReasoningLevels("gemini-3.5-flash")).toEqual(["minimal", "low", "medium", "high"]);
     expect(geminiReasoningLevels("gemini-3.1-pro-preview")).toEqual(["low", "medium", "high"]);
     expect(geminiReasoningLevels("gemini-2.5-pro")).toEqual(["low", "medium", "high"]);

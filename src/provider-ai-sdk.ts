@@ -656,6 +656,11 @@ export function selectLatestGeminiModels(
 export function geminiReasoningLevels(modelId: string): ReasoningEffort[] {
   const version = Number.parseFloat(/^gemini-(\d+(?:\.\d+)?)/.exec(modelId)?.[1] ?? "0");
   const isPro = modelId.includes("-pro");
+  // Live probes show 3.7 and 3.8 Flash share this newer ladder. Keep the
+  // exception bounded to verified releases instead of guessing for 3.9+.
+  if (!isPro && (version === 3.7 || version === 3.8)) {
+    return ["off", "low", "medium", "high"];
+  }
   if (version >= 3) {
     return isPro ? ["low", "medium", "high"] : ["minimal", "low", "medium", "high"];
   }
