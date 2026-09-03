@@ -7,9 +7,10 @@ import {
   retryAfterMsFromResponse,
   sleepBeforeRetry,
 } from "./network/retry.js";
+import { providerFetch } from "./network/provider-transport.js";
 import type { Provider, ProviderMessage, StreamChunk, ThinkingLevel, TokenUsage, ToolChoiceMode, ToolDefinition } from "./types.js";
 
-export interface ArkResponsesProviderOptions {
+export interface ResponsesProviderOptions {
   providerId?: string;
   apiKey: string;
   baseURL: string;
@@ -18,7 +19,9 @@ export interface ArkResponsesProviderOptions {
   headers?: Record<string, string>;
 }
 
-interface ArkResponsesChatOptions {
+export type ArkResponsesProviderOptions = ResponsesProviderOptions;
+
+interface ResponsesChatOptions {
   model: string;
   tools?: ToolDefinition[];
   toolChoice?: ToolChoiceMode;
@@ -29,21 +32,36 @@ interface ArkResponsesChatOptions {
 }
 
 type ArkResponseItem = Record<string, unknown>;
+type ResponsesDialect = "ark" | "openai";
 
 const DEFAULT_ARK_MODEL = "doubao-seed-2-1-pro-260628";
+const DEFAULT_MUSE_MODEL = "muse-spark-1.3-contributor-free";
 
 export function createArkResponsesProvider(options: ArkResponsesProviderOptions): Provider {
+  return createResponsesProvider(options, "ark", DEFAULT_ARK_MODEL);
+}
+
+export function createOpenAIResponsesProvider(options: ResponsesProviderOptions): Provider {
+  return createResponsesProvider(options, "openai", DEFAULT_MUSE_MODEL);
+}
+
+function createResponsesProvider(
+  options: ResponsesProviderOptions,
+  dialect: ResponsesDialect,
+  defaultModel: string,
+): Provider {
   async function* streamChat(
     messages: ProviderMessage[],
-    chatOptions: ArkResponsesChatOptions,
+    chatOptions: ResponsesChatOptions,
   ): AsyncIterable<StreamChunk> {
-    const body = buildArkResponsesBody(messages, {
+    const body = buildResponsesBody(messages, {
       model: chatOptions.model,
       tools: chatOptions.tools,
       toolChoice: chatOptions.toolChoice,
+      temperature: chatOptions.temperature,
       thinkingLevel: chatOptions.thinkingLevel ?? options.thinkingLevel ?? "high",
       stream: true,
-    });
+    }, dialect);
 
     for (let attempt = 0; ; attempt += 1) {
       const response = await sendArkResponsesRequest(options, body, {
@@ -51,7 +69,7 @@ export function createArkResponsesProvider(options: ArkResponsesProviderOptions)
         rateLimitPolicy: chatOptions.rateLimitPolicy,
         attempt,
       });
-      yield* translateArkResponsesStream(response);
+      yield* translateArkResponsesStream(response, dialect === "openai");
       yield { type: "done" };
       return;
     }
@@ -61,11 +79,12 @@ export function createArkResponsesProvider(options: ArkResponsesProviderOptions)
     messages: ProviderMessage[],
     chatOptions?: { model?: string; temperature?: number; thinkingLevel?: ThinkingLevel; abortSignal?: AbortSignal },
   ): Promise<string> {
-    const body = buildArkResponsesBody(messages, {
-      model: chatOptions?.model ?? DEFAULT_ARK_MODEL,
+    const body = buildResponsesBody(messages, {
+      model: chatOptions?.model ?? defaultModel,
+      temperature: chatOptions?.temperature,
       thinkingLevel: chatOptions?.thinkingLevel ?? options.thinkingLevel ?? "high",
       stream: false,
-    });
+    }, dialect);
     const response = await sendArkResponsesRequest(options, body, {
       signal: chatOptions?.abortSignal,
       attempt: 0,
@@ -87,15 +106,56 @@ export function buildArkResponsesBody(
     stream: boolean;
   },
 ): Record<string, unknown> {
+  return buildResponsesBody(messages, options, "ark");
+}
+
+export function buildOpenAIResponsesBody(
+  messages: ProviderMessage[],
+  options: {
+    model: string;
+    tools?: ToolDefinition[];
+    toolChoice?: ToolChoiceMode;
+    temperature?: number;
+    thinkingLevel?: ThinkingLevel;
+    stream: boolean;
+  },
+): Record<string, unknown> {
+  return buildResponsesBody(messages, options, "openai");
+}
+
+function buildResponsesBody(
+  messages: ProviderMessage[],
+  options: {
+    model: string;
+    tools?: ToolDefinition[];
+    toolChoice?: ToolChoiceMode;
+    temperature?: number;
+    thinkingLevel?: ThinkingLevel;
+    stream: boolean;
+  },
+  dialect: ResponsesDialect,
+): Record<string, unknown> {
   const body: Record<string, unknown> = {
     model: options.model,
-    input: messages.flatMap((message) => convertMessageToArkResponsesInput(message)),
+    input: messages.flatMap((message) => convertMessageToResponsesInput(message, dialect)),
     store: false,
     stream: options.stream,
-    thinking: {
-      type: shouldDisableArkThinking(options.thinkingLevel) ? "disabled" : "enabled",
-    },
   };
+
+  if (dialect === "ark") {
+    body.thinking = {
+      type: shouldDisableArkThinking(options.thinkingLevel) ? "disabled" : "enabled",
+    };
+  } else {
+    body.include = ["reasoning.encrypted_content"];
+    if (options.thinkingLevel && options.thinkingLevel !== "off") {
+      body.reasoning = {
+        effort: options.thinkingLevel === "ultra" ? "xhigh" : options.thinkingLevel,
+        summary: "auto",
+      };
+    }
+    if (options.temperature !== undefined) body.temperature = options.temperature;
+  }
 
   if (options.tools && options.tools.length > 0) {
     body.tools = options.tools.map((tool) => ({
@@ -116,7 +176,7 @@ function shouldDisableArkThinking(level: ThinkingLevel | undefined): boolean {
   return level === "off" || level === "minimal";
 }
 
-function convertMessageToArkResponsesInput(message: ProviderMessage): ArkResponseItem[] {
+function convertMessageToResponsesInput(message: ProviderMessage, dialect: ResponsesDialect): ArkResponseItem[] {
   if (message.role === "user") {
     if (typeof message.content === "string") {
       return [{
@@ -148,6 +208,16 @@ function convertMessageToArkResponsesInput(message: ProviderMessage): ArkRespons
 
   if (message.role === "assistant") {
     const items: ArkResponseItem[] = [];
+    if (dialect === "openai") {
+      for (const block of message.providerMetadata?.openai?.contentBlocks ?? []) {
+        if (block.type !== "reasoning" || typeof block.encrypted_content !== "string") continue;
+        items.push({
+          type: "reasoning",
+          summary: Array.isArray(block.summary) ? block.summary : [],
+          encrypted_content: block.encrypted_content,
+        });
+      }
+    }
     if (message.content) {
       items.push({
         type: "message",
@@ -184,7 +254,7 @@ async function sendArkResponsesRequest(
     attempt: number;
   },
 ): Promise<Response> {
-  const response = await fetch(resolveArkResponsesUrl(options.baseURL), {
+  const response = await providerFetch(resolveArkResponsesUrl(options.baseURL), {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${options.apiKey}`,
@@ -194,6 +264,8 @@ async function sendArkResponsesRequest(
     },
     body: JSON.stringify(body),
     signal: requestOptions.signal,
+  }, {
+    providerName: options.providerId ?? "Responses provider",
   });
 
   if (response.ok) return response;
@@ -232,7 +304,10 @@ function resolveArkResponsesUrl(baseURL: string): string {
   return `${baseURL.trim().replace(/\/+$/, "")}/responses`;
 }
 
-export async function* translateArkResponsesStream(response: Response): AsyncIterable<StreamChunk> {
+export async function* translateArkResponsesStream(
+  response: Response,
+  captureOpenAIReasoning = false,
+): AsyncIterable<StreamChunk> {
   const toolCalls = new Map<string, { id: string; name: string; args: string; started: boolean; corrupt?: boolean }>();
   const textFilter = createProviderProtocolArtifactFilter();
 
@@ -333,6 +408,21 @@ export async function* translateArkResponsesStream(response: Response): AsyncIte
 
     if (type === "response.output_item.done") {
       const item = event.item as Record<string, unknown> | undefined;
+      if (
+        captureOpenAIReasoning
+        && item?.type === "reasoning"
+        && typeof item.encrypted_content === "string"
+      ) {
+        yield {
+          type: "provider_content_block",
+          provider: "openai",
+          block: {
+            type: "reasoning",
+            summary: Array.isArray(item.summary) ? item.summary : [],
+            encrypted_content: item.encrypted_content,
+          },
+        };
+      }
       if (item?.type === "function_call") {
         const key = toolCallEventKey(event, item);
         const entry = toolCalls.get(key);

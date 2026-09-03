@@ -44,6 +44,7 @@ describe("createProviderInstance", () => {
   beforeEach(() => {
     createMock.mockReset();
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
   });
 
   it("requests stream usage for DeepSeek so cost can be calculated", async () => {
@@ -464,6 +465,137 @@ describe("createProviderInstance", () => {
 
     const body = JSON.parse(String(requestInits[0].body));
     expect(body.thinking).toEqual({ type: "disabled" });
+  });
+
+  it("uses OpenCode Zen Responses API for Muse without Ark-only fields", async () => {
+    vi.stubEnv("HTTPS_PROXY", "http://127.0.0.1:7890");
+    vi.stubEnv("NO_PROXY", "");
+    const requestInits: RequestInit[] = [];
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestInits.push(init ?? {});
+      return makeSseResponse([
+        {
+          type: "response.output_item.done",
+          output_index: 0,
+          item: {
+            id: "rs_1",
+            type: "reasoning",
+            summary: [],
+            encrypted_content: "encrypted-reasoning",
+          },
+        },
+        {
+          type: "response.completed",
+          response: {
+            usage: {
+              input_tokens: 12,
+              input_tokens_details: { cached_tokens: 4 },
+              output_tokens: 3,
+              output_tokens_details: { reasoning_tokens: 2 },
+              total_tokens: 15,
+            },
+          },
+        },
+      ]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({
+      providerId: "opencode-zen",
+      apiKey: "zen-test",
+      baseURL: "https://opencode.ai/zen/v1",
+    });
+
+    const chunks = await collect(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "muse-spark-1.3-contributor-free",
+      thinkingLevel: "xhigh",
+      temperature: 0.2,
+    }));
+
+    const body = JSON.parse(String(requestInits[0].body));
+    expect(fetchMock).toHaveBeenCalledWith("https://opencode.ai/zen/v1/responses", expect.any(Object));
+    expect((requestInits[0] as RequestInit & { dispatcher?: unknown }).dispatcher).toBeTruthy();
+    expect(body).toMatchObject({
+      model: "muse-spark-1.3-contributor-free",
+      store: false,
+      stream: true,
+      include: ["reasoning.encrypted_content"],
+      reasoning: { effort: "xhigh", summary: "auto" },
+      temperature: 0.2,
+    });
+    expect(body.thinking).toBeUndefined();
+    expect(chunks).toContainEqual({
+      type: "provider_content_block",
+      provider: "openai",
+      block: {
+        type: "reasoning",
+        summary: [],
+        encrypted_content: "encrypted-reasoning",
+      },
+    });
+    expect(chunks).toContainEqual({
+      type: "usage",
+      usage: {
+        promptTokens: 12,
+        completionTokens: 3,
+        promptCacheHitTokens: 4,
+        promptCacheMissTokens: 8,
+        reasoningTokens: 2,
+        totalTokens: 15,
+      },
+    });
+  });
+
+  it("replays Muse Responses reasoning items before tool outputs", async () => {
+    const requestInits: RequestInit[] = [];
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestInits.push(init ?? {});
+      return makeSseResponse([{ type: "response.completed", response: {} }]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({
+      providerId: "opencode-zen",
+      apiKey: "zen-test",
+      baseURL: "https://opencode.ai/zen/v1",
+    });
+
+    await collect(provider.streamChat([
+      { role: "user", content: "Use the tool" },
+      {
+        role: "assistant",
+        content: "",
+        providerMetadata: {
+          openai: {
+            contentBlocks: [{
+              type: "reasoning",
+              summary: [],
+              encrypted_content: "encrypted-reasoning",
+            }],
+          },
+        },
+        toolCalls: [{ id: "call_1", name: "read", arguments: '{"path":"a.ts"}' }],
+      },
+      { role: "tool", toolCallId: "call_1", content: "file contents" },
+    ], {
+      model: "muse-spark-1.2",
+      thinkingLevel: "high",
+    }));
+
+    const body = JSON.parse(String(requestInits[0].body));
+    expect(body.input.slice(1)).toEqual([
+      { type: "reasoning", summary: [], encrypted_content: "encrypted-reasoning" },
+      {
+        type: "function_call",
+        call_id: "call_1",
+        name: "read",
+        arguments: '{"path":"a.ts"}',
+        status: "completed",
+      },
+      { type: "function_call_output", call_id: "call_1", output: "file contents" },
+    ]);
   });
 
   it("streams tool calls through Doubao Ark Responses API", async () => {

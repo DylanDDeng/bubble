@@ -7,7 +7,7 @@
 import OpenAI from "openai";
 import { appendFileSync } from "node:fs";
 import { createAnthropicMessagesProvider } from "./provider-anthropic.js";
-import { createArkResponsesProvider } from "./provider-ark-responses.js";
+import { createArkResponsesProvider, createOpenAIResponsesProvider } from "./provider-ark-responses.js";
 import { createAiSdkProvider } from "./provider-ai-sdk.js";
 import { createOpenAICodexProvider, isOpenAICodexBaseUrl, type OpenAICodexAuthAdapter } from "./provider-openai-codex.js";
 import {
@@ -142,6 +142,10 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
 
   if (protocol === "ark-responses") {
     return createArkResponsesProvider(options);
+  }
+
+  if (protocol === "openai-responses") {
+    return createOpenAIResponsesProvider(options);
   }
 
   if (protocol === "ai-sdk") {
@@ -358,6 +362,11 @@ function resolveProviderProtocol(options: ProviderInstanceOptions): ProviderProt
   if (options.protocol) return options.protocol;
   const providerId = (options.providerId || "").toLowerCase();
   const baseURL = (options.baseURL || "").toLowerCase();
+  if (
+    providerId === "opencode-zen"
+  ) {
+    return "openai-responses";
+  }
   if (
     providerId === "doubao"
     && baseURL.replace(/\/+$/, "") === "https://ark.cn-beijing.volces.com/api/v3"

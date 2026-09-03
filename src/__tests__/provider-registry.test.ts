@@ -19,6 +19,7 @@ describe("provider registry", () => {
     expect(displayModel("doubao:doubao-seed-2-1-pro-260628")).toBe("Doubao Seed 2.1 Pro");
     expect(displayModel("anthropic:claude-fable-5")).toBe("Claude Fable 5");
     expect(displayModel("anthropic:claude-sonnet-4-6")).toBe("Claude Sonnet 4.6");
+    expect(displayModel("opencode-zen:muse-spark-1.3-contributor-free")).toBe("Muse Spark 1.3 Free");
   });
 
   it("shows Doubao as a user-visible provider", () => {
@@ -27,6 +28,10 @@ describe("provider registry", () => {
 
   it("shows OpenRouter as a user-visible provider", () => {
     expect(isUserVisibleProvider("openrouter")).toBe(true);
+  });
+
+  it("shows the OpenCode Zen Muse provider", () => {
+    expect(isUserVisibleProvider("opencode-zen")).toBe(true);
   });
 
   it("exposes MiniMax Token Plan and MiniMax API as visible providers", () => {

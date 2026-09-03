@@ -362,20 +362,20 @@ export async function getImageFromClipboard(): Promise<ImageAttachment | null> {
 }
 
 async function getClipboardImageDarwin(): Promise<ImageAttachment | null> {
-  // Probe first — `as «class PNGf»` throws if clipboard has no image.
-  try {
-    await execFileAsync("osascript", ["-e", "the clipboard as «class PNGf»"], {
-      timeout: 5000,
-    });
-  } catch {
-    return null;
-  }
   const tmp = path.join(os.tmpdir(), `bubble_clip_${Date.now()}_${process.pid}.png`);
   const script =
     `set png_data to (the clipboard as «class PNGf»)\n` +
     `set fp to open for access POSIX file "${tmp}" with write permission\n` +
+    `try\n` +
+    `set eof fp to 0\n` +
     `write png_data to fp\n` +
-    `close access fp`;
+    `close access fp\n` +
+    `on error err_msg number err_num\n` +
+    `try\n` +
+    `close access fp\n` +
+    `end try\n` +
+    `error err_msg number err_num\n` +
+    `end try`;
   try {
     await execFileAsync("osascript", ["-e", script], { timeout: 5000 });
     const buf = await fs.readFile(tmp);

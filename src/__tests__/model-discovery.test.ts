@@ -172,6 +172,7 @@ describe("OpenAI-compatible model discovery", () => {
   it("classifies protocols and model ids", () => {
     expect(isOpenAICompatibleProtocol(undefined)).toBe(true);
     expect(isOpenAICompatibleProtocol("openai-chat")).toBe(true);
+    expect(isOpenAICompatibleProtocol("openai-responses")).toBe(false);
     expect(isOpenAICompatibleProtocol("anthropic-messages")).toBe(false);
     expect(isOpenAICompatibleProtocol("ark-responses")).toBe(false);
 

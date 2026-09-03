@@ -23,7 +23,7 @@ export type ReasoningEffort = ThinkingLevel;
 
 export type ProviderRawContentBlock = Record<string, unknown> & { type: string };
 
-export type ProviderMetadataProvider = "anthropic" | "google";
+export type ProviderMetadataProvider = "anthropic" | "google" | "openai";
 
 export interface ProviderContentBlockStore {
   contentBlocks?: ProviderRawContentBlock[];
@@ -31,6 +31,8 @@ export interface ProviderContentBlockStore {
 
 export interface AssistantProviderMetadata {
   anthropic?: ProviderContentBlockStore;
+  /** OpenAI Responses reasoning items captured for stateless tool-loop replay. */
+  openai?: ProviderContentBlockStore;
   /**
    * Gemini raw parts captured for replay: reasoning/tool-call parts carrying
    * thoughtSignature so multi-turn thinking round-trips through our own

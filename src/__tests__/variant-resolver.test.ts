@@ -199,6 +199,24 @@ describe("variant resolver", () => {
     expect(getDefaultThinkingLevel("doubao", "doubao-seed-2-1-pro-260628")).toBe("high");
   });
 
+  it("includes only Muse models on the OpenCode Zen Muse provider", () => {
+    expect(getBuiltinProvider("opencode-zen")).toMatchObject({
+      name: "OpenCode Zen",
+      baseURL: "https://opencode.ai/zen/v1",
+      protocol: "openai-responses",
+    });
+    expect(listBuiltinModels("opencode-zen").map((model) => model.id)).toEqual([
+      "muse-spark-1.3-contributor-free",
+      "muse-spark-1.2",
+      "muse-spark-1.2-contributor-free",
+    ]);
+    expect(getAvailableThinkingLevels("opencode-zen", "muse-spark-1.3-contributor-free"))
+      .toEqual(["minimal", "low", "medium", "high", "xhigh"]);
+    expect(getDefaultThinkingLevel("opencode-zen", "muse-spark-1.3-contributor-free"))
+      .toBe("high");
+    expect(getModelContextWindow("opencode-zen", "muse-spark-1.2")).toBe(1048576);
+  });
+
   it("includes MiniMax agent models", () => {
     expect(getBuiltinProvider("minimax")).toMatchObject({
       name: "MiniMax Token Plan",

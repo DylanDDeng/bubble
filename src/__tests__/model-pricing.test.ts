@@ -2,6 +2,19 @@ import { describe, expect, it } from "vitest";
 import { calculateUsageCost, getModelPricing } from "../model-pricing.js";
 
 describe("model pricing", () => {
+  it("contains OpenCode Zen Muse Spark pricing", () => {
+    expect(getModelPricing("opencode-zen", "muse-spark-1.2")).toMatchObject({
+      currency: "USD",
+      inputCacheHitPerMillion: 0.15,
+      inputCacheMissPerMillion: 1.25,
+      outputPerMillion: 4.25,
+    });
+    expect(calculateUsageCost("opencode-zen", "muse-spark-1.3-contributor-free", {
+      promptTokens: 1_000_000,
+      completionTokens: 1_000_000,
+    })).toEqual({ currency: "USD", cost: 0, estimated: true });
+  });
+
   it("contains Claude Fable 5 USD pricing", () => {
     // Anthropic bills a cache read at 0.1x base input and a 5-minute cache write
     // at 1.25x. The hit rate here used to be pinned at the full 10/M base price,

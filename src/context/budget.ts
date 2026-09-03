@@ -61,13 +61,17 @@ function estimateProviderMetadataOverhead(
   metadata: AssistantProviderMetadata | undefined,
   providerId?: string,
 ): number {
-  const blocks = metadata?.anthropic?.contentBlocks;
-  if (!blocks || blocks.length === 0) return 0;
+  const blocks = [
+    ...(metadata?.anthropic?.contentBlocks ?? []),
+    ...(metadata?.openai?.contentBlocks ?? []),
+  ];
+  if (blocks.length === 0) return 0;
   const estimate = (text: string) => estimateTextTokens(text, providerId);
   return blocks.reduce((sum, block) => {
     let overhead = 0;
     if (typeof block.signature === "string") overhead += estimate(block.signature);
     if (block.type === "redacted_thinking" && typeof block.data === "string") overhead += estimate(block.data);
+    if (block.type === "reasoning" && typeof block.encrypted_content === "string") overhead += estimate(block.encrypted_content);
     return sum + overhead;
   }, 0);
 }

@@ -1,7 +1,7 @@
 import type { ReasoningEffort } from "./types.js";
 import { OPENROUTER_MODEL_ID } from "./provider-model-policy.js";
 
-export type ProviderProtocol = "openai-chat" | "anthropic-messages" | "ark-responses" | "ai-sdk";
+export type ProviderProtocol = "openai-chat" | "openai-responses" | "anthropic-messages" | "ark-responses" | "ai-sdk";
 
 export interface BuiltinProviderDefinition {
   id: string;
@@ -43,6 +43,7 @@ export const BUILTIN_PROVIDERS: BuiltinProviderDefinition[] = [
   { id: "openrouter", name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1" },
   { id: "openai", name: "OpenAI", baseURL: "https://api.openai.com/v1", supportsOAuth: true },
   { id: "openai-codex", name: "OpenAI Codex (ChatGPT)", baseURL: "https://chatgpt.com/backend-api" },
+  { id: "opencode-zen", name: "OpenCode Zen", baseURL: "https://opencode.ai/zen/v1", protocol: "openai-responses" },
   // Grok subscription models via the CLI chat proxy. OAuth-only: the proxy
   // accepts xAI session bearers (from /login grok), not api.x.ai API keys.
   { id: "grok", name: "Grok Subscription", baseURL: "https://cli-chat-proxy.grok.com/v1", supportsOAuth: true },
@@ -80,6 +81,7 @@ const GPT51_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high"];
 const GPT51_CODEX_MAX_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high", "xhigh"];
 const GPT51_CODEX_MINI_LEVELS: ReasoningEffort[] = ["off", "medium", "high"];
 const OPENAI_CHAT_LEVELS: ReasoningEffort[] = ["off"];
+const MUSE_SPARK_LEVELS: ReasoningEffort[] = ["minimal", "low", "medium", "high", "xhigh"];
 // Ox Alpha declares mandatory reasoning with exactly low/high/max through
 // OpenRouter's live model metadata. The endpoint rejects disabled reasoning.
 const OPENROUTER_OX_REASONING_LEVELS: ReasoningEffort[] = ["low", "high", "max"];
@@ -162,6 +164,10 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "o1-preview", name: "o1-preview", providerId: "openai", tier: "strong", reasoningLevels: ["off", "low", "medium", "high"], contextWindow: 128000 },
   { id: "o1-mini", name: "o1-mini", providerId: "openai", tier: "fast", reasoningLevels: ["off", "low", "medium", "high"], contextWindow: 128000 },
   { id: "gpt-4-turbo", name: "gpt-4-turbo", providerId: "openai", reasoningLevels: OPENAI_CHAT_LEVELS, contextWindow: 128000 },
+
+  { id: "muse-spark-1.3-contributor-free", name: "Muse Spark 1.3 Free", providerId: "opencode-zen", reasoningLevels: MUSE_SPARK_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  { id: "muse-spark-1.2", name: "Muse Spark 1.2", providerId: "opencode-zen", reasoningLevels: MUSE_SPARK_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  { id: "muse-spark-1.2-contributor-free", name: "Muse Spark 1.2 Free", providerId: "opencode-zen", reasoningLevels: MUSE_SPARK_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
 
   { id: "claude-fable-5", name: "Claude Fable 5", providerId: "anthropic", tier: "strong", reasoningLevels: ANTHROPIC_FABLE_EFFORT_LEVELS, defaultReasoningLevel: "high", contextWindow: 1000000 },
   { id: "claude-opus-4-8", name: "Claude Opus 4.8", providerId: "anthropic", tier: "strong", reasoningLevels: ANTHROPIC_OPUS_EFFORT_LEVELS, defaultReasoningLevel: "high", contextWindow: 1000000 },
