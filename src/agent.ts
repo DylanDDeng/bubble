@@ -65,6 +65,11 @@ import type { FileStateTracker } from "./tools/file-state.js";
 import { buildToolPromptOptions } from "./tools/prompt-metadata.js";
 import { stopAutoServersForSession } from "./tools/server-manager.js";
 import {
+  createSanitizedProviderError,
+  type ProviderErrorContext,
+  type SanitizedProviderError,
+} from "./provider-error-record.js";
+import {
   summarizeAgentEventForTrace,
   summarizeTraceError,
   summarizeTraceMessage,
@@ -159,6 +164,8 @@ export interface AgentOptions {
   taskBudget?: { total: number };
   systemPrompt?: string;
   onMessageAppend?: (message: Message) => void;
+  /** Persistable, allowlisted diagnostics for terminal provider failures. */
+  onProviderError?: (error: SanitizedProviderError) => void;
   onToolResult?: (toolName: string, result: ToolResult) => void;
   onModeUpdate?: (mode: PermissionMode) => void;
   /**
@@ -269,6 +276,7 @@ export class Agent {
   private onModeUpdate?: (mode: PermissionMode) => void;
   private onCompactionApplied?: (summary: string) => void;
   private onMessageAppend?: (message: Message) => void;
+  private onProviderError?: (error: SanitizedProviderError) => void;
   private onToolResult?: (toolName: string, result: ToolResult) => void;
   private hookDefinitions: TurnHooks[];
   private externalHooks?: ExternalHookController;
@@ -317,6 +325,7 @@ export class Agent {
     this.thinkingLevel = options.thinkingLevel ?? "off";
     this._mode = options.mode ?? "default";
     this.onMessageAppend = options.onMessageAppend;
+    this.onProviderError = options.onProviderError;
     this.onToolResult = options.onToolResult;
     this.onModeUpdate = options.onModeUpdate;
     this.onCompactionApplied = options.onCompactionApplied;
@@ -371,6 +380,7 @@ export class Agent {
         // profile is the author pre-unlocking them).
         allTools: () => [...this.tools.values()],
         createChild: (spec) => this.createChildAgent(spec),
+        recordProviderError: (error, context) => this.recordProviderError(error, context),
         runExternalHook: (input, abortSignal) => this.runExternalHook(input as any, abortSignal),
       },
       router: this.router,
@@ -1010,6 +1020,11 @@ export class Agent {
           parameters: t.parameters,
         }));
       const toolDefinitionTokens = estimateToolDefinitionsTokens(toolDefinitions, this.providerId);
+      let currentRequestMessageCount = this.messages.length;
+      const persistTerminalProviderError = (error: unknown) => this.persistProviderError(error, {
+        messageCount: currentRequestMessageCount,
+        toolCount: toolDefinitions.length,
+      });
 
       // LLM-driven compaction runs ahead of projector's algorithmic passes. If
       // it succeeds, this.messages is replaced with [preserved system+meta] +
@@ -1031,6 +1046,7 @@ export class Agent {
           // A fresh estimate also lets us account for current tool schemas.
           additionalInputTokens: toolDefinitionTokens,
         });
+        currentRequestMessageCount = projectedMessages.length;
         const requestBudget = getContextBudget(
           this.providerId,
           this.apiModel,
@@ -1246,6 +1262,7 @@ export class Agent {
           error: summarizeTraceError(error),
         }, traceContext);
         if (assistantAppended) {
+          if (!isAbortLikeError(error, abortSignal)) persistTerminalProviderError(error);
           throw error;
         }
         const streamInterruption = isProviderStreamInterruption(error) ? error : undefined;
@@ -1285,9 +1302,11 @@ export class Agent {
             }));
             assistantAppended = true;
           }
+          if (!isAbortLikeError(error, abortSignal)) persistTerminalProviderError(error);
           throw error;
         }
         if (consecutiveOverflowRecoveries >= MAX_CONSECUTIVE_OVERFLOW_RECOVERIES) {
+          persistTerminalProviderError(error);
           throw error;
         }
         const messagesBeforeRecovery = this.messages;
@@ -1329,6 +1348,7 @@ export class Agent {
           this.messages = messagesBeforeRecovery;
           this.lastInputTokens = inputTokensBeforeRecovery;
           this.lastAnchorMessageCount = anchorBeforeRecovery;
+          persistTerminalProviderError(error);
           throw error;
         }
         consecutiveOverflowRecoveries += 1;
@@ -2299,6 +2319,29 @@ export class Agent {
     });
     this.onMessageAppend?.(message);
     this.notifyContextChanged();
+  }
+
+  private persistProviderError(
+    error: unknown,
+    request: { messageCount: number; toolCount: number },
+  ): void {
+    this.recordProviderError(error, {
+      providerId: this.providerId,
+      modelId: this.apiModel,
+      model: this._model,
+      thinkingLevel: this.thinkingLevel,
+      messageCount: request.messageCount,
+      toolCount: request.toolCount,
+    });
+  }
+
+  private recordProviderError(error: unknown, context: ProviderErrorContext): void {
+    if (!this.onProviderError) return;
+    try {
+      this.onProviderError(createSanitizedProviderError(error, context));
+    } catch {
+      // Diagnostics are best-effort and must never replace the provider error.
+    }
   }
 
   private appendInterruptedAssistantBoundary(

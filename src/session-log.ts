@@ -11,8 +11,10 @@ import type {
   SessionMarkerKind,
   SessionMetadata,
   SessionMetadataEntry,
+  SessionProviderErrorEntry,
   SessionSummaryEntry,
 } from "./session-types.js";
+import type { SanitizedProviderError } from "./provider-error-record.js";
 
 export class SessionLog {
   private entries: SessionLogEntry[] = [];
@@ -87,6 +89,17 @@ export class SessionLog {
       type: "marker",
       kind,
       value,
+      timestamp: Date.now(),
+    };
+    this.entries.push(entry);
+    return entry;
+  }
+
+  appendProviderError(error: SanitizedProviderError): SessionProviderErrorEntry {
+    const entry: SessionProviderErrorEntry = {
+      id: nextEntryId(this.entries),
+      type: "provider_error",
+      error,
       timestamp: Date.now(),
     };
     this.entries.push(entry);
@@ -255,6 +268,7 @@ function isSessionLogEntry(entry: SessionLogEntry | LegacySessionEntry): entry i
     "assistant_message",
     "tool_call",
     "tool_result",
+    "provider_error",
   ].includes(entry.type);
 }
 

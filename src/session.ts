@@ -19,6 +19,7 @@ import {
 import type { Message } from "./types.js";
 import { SessionLog } from "./session-log.js";
 import type { SessionLogEntry, SessionMarkerKind, SessionMetadata } from "./session-types.js";
+import type { SanitizedProviderError } from "./provider-error-record.js";
 import { normalizeSingleLine, truncateVisual } from "./text-display.js";
 import { deterministicTitleFromUserContent } from "./session-title.js";
 
@@ -233,6 +234,11 @@ export class SessionManager {
 
   appendMarker(kind: SessionMarkerKind, value: string) {
     const entry = this.log.appendMarker(kind, value);
+    this.persist(entry);
+  }
+
+  appendProviderError(error: SanitizedProviderError) {
+    const entry = this.log.appendProviderError(error);
     this.persist(entry);
   }
 

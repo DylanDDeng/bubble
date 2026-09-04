@@ -459,6 +459,9 @@ async function main() {
         recordMemoryCitations(args.cwd, message.content);
       }
     },
+    onProviderError: (error) => {
+      sessionManager?.appendProviderError(error);
+    },
     // Auto-compaction summaries are meta messages (dropped above); persist the
     // compacted state as a session summary entry so it survives resume.
     onCompactionApplied: (summary) => {

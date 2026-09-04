@@ -171,6 +171,9 @@ export class RunDriver {
           recordMemoryCitations(session.cwd, message.content);
         }
       },
+      onProviderError: (error) => {
+        session.manager.appendProviderError(error);
+      },
       onCompactionApplied: (summary: string) => {
         session.manager.applyLLMCompaction(summary);
       },

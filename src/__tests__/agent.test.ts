@@ -86,6 +86,44 @@ describe("Agent", () => {
     expect(agent.messages).toHaveLength(2); // user + assistant (no system prompt in this test)
   });
 
+  it("reports a sanitized record when a provider request fails terminally", async () => {
+    const provider: Provider = {
+      async *streamChat() {
+        throw Object.assign(
+          new Error("Invalid parameter token=secret-provider-token-123456789"),
+          { status: 400, code: "InvalidParameter", param: "reasoning_effort" },
+        );
+      },
+      async complete() {
+        return "unused";
+      },
+    };
+    const errors: import("../provider-error-record.js").SanitizedProviderError[] = [];
+    const agent = new Agent({
+      provider,
+      providerId: "zhipuai-coding-plan",
+      model: "zhipuai-coding-plan:glm-5.3",
+      thinkingLevel: "max",
+      tools: [],
+      onProviderError: (error) => errors.push(error),
+    });
+
+    await expect(collectEvents(agent, "hello", "/tmp")).rejects.toThrow("Invalid parameter");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({
+      providerId: "zhipuai-coding-plan",
+      modelId: "glm-5.3",
+      thinkingLevel: "max",
+      httpStatus: 400,
+      code: "invalid_parameter",
+      parameter: "reasoning_effort",
+      messageCount: 1,
+      toolCount: 0,
+      message: "Provider rejected a request parameter.",
+    });
+    expect(errors[0].message).not.toContain("secret-provider-token");
+  });
+
   it("persists local user presentation metadata for transcript reconstruction", async () => {
     const provider = createMockProvider([[{ type: "text", content: "Done" }, { type: "done" }]]);
     const appended: Message[] = [];
@@ -1296,7 +1334,7 @@ describe("Agent", () => {
 
     expect(providerSawSignal).toBe(true);
     expect(result.status).toBe("cancelled");
-    expect(result.error).toBe("stop child");
+    expect(result.error).toBe("Subagent was cancelled.");
   });
 
   it("adds memory prompt context to subagents without advertising skill summaries", async () => {
@@ -1850,7 +1888,7 @@ describe("Agent", () => {
           yield { type: "done" };
           return;
         }
-        throw new Error("The socket connection was closed unexpectedly.");
+        throw new Error("The socket connection was closed unexpectedly; x-api-key: opaqueCredentialValue12345678901234567890");
       },
       async complete() {
         return "";
@@ -1874,6 +1912,7 @@ describe("Agent", () => {
       modelId: "gpt-5.5",
     });
     expect((boundary as any).content).toContain("model request interrupted before a final answer was produced");
+    expect((boundary as any).content).not.toContain("opaqueCredentialValue");
     expect((boundary as any).toolCalls).toBeUndefined();
   });
 

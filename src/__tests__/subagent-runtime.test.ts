@@ -229,10 +229,12 @@ describe("subagent runtime — rate-limit contract", () => {
 
   it("finalizes as rate_limited_exhausted (resumable) when retries run out", async () => {
     const { provider } = rateLimitedProvider([], 99);
+    const providerErrors: unknown[] = [];
     const agent = new Agent({
       provider,
       model: "gpt-4o",
       tools: [],
+      onProviderError: (error) => providerErrors.push(error),
       subagents: { rateLimitMaxAttempts: 2, rateLimitBackoffMs: [0, 0] },
     });
     const profile = defaultProfile();
@@ -243,6 +245,12 @@ describe("subagent runtime — rate-limit contract", () => {
     expect(done[0].status).toBe("failed");
     expect(done[0].finalReason).toBe("rate_limited_exhausted");
     expect(done[0].resumable).toBe(true);
+    expect(providerErrors).toHaveLength(1);
+    expect(providerErrors[0]).toMatchObject({
+      message: "Provider rate limit was exceeded.",
+      httpStatus: 429,
+      code: "rate_limit_exhausted",
+    });
   });
 });
 
@@ -297,17 +305,23 @@ describe("subagent runtime — transport-timeout contract", () => {
 
   it("still hard-fails a non-transport provider error (no spurious retry)", async () => {
     let calls = 0;
+    const providerErrors: unknown[] = [];
     const provider: Provider = {
       // eslint-disable-next-line require-yield
       async *streamChat() {
         calls += 1;
-        throw new Error("provider exploded");
+        throw new Error("provider exploded; x-api-key: opaqueCredentialValue12345678901234567890");
       },
       async complete() {
         return "complete";
       },
     };
-    const agent = new Agent({ provider, model: "gpt-4o", tools: [] });
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [],
+      onProviderError: (error) => providerErrors.push(error),
+    });
     const profile = defaultProfile();
 
     const spawned = await agent.spawnSubAgent("boom", "/tmp", { profile, parentToolCallId: "spawn_1" });
@@ -316,6 +330,10 @@ describe("subagent runtime — transport-timeout contract", () => {
     expect(done[0].status).toBe("failed");
     expect(done[0].finalReason).toBe("failed_transient");
     expect(calls).toBe(1); // not a transport error -> no requeue
+    expect(done[0].error).toBe("Provider request failed.");
+    expect(done[0].error).not.toContain("opaqueCredentialValue");
+    expect(providerErrors).toHaveLength(1);
+    expect(providerErrors[0]).toMatchObject({ message: "Provider request failed." });
   });
 });
 
@@ -390,6 +408,49 @@ describe("subagent runtime — handoff guard", () => {
 
     expect(done[0].status).toBe("completed");
     expect(done[0].summary).toContain("结论：调度器没有实施并发上限");
+  });
+
+  it("finalizes and records a sanitized diagnostic when the handoff follow-up fails", async () => {
+    let calls = 0;
+    const opaque = "opaqueCredentialValue12345678901234567890";
+    const provider: Provider = {
+      async *streamChat() {
+        calls += 1;
+        if (calls === 1) {
+          yield { type: "tool_call", id: "r1", name: "read", arguments: "{}", isStart: true, isEnd: true };
+          yield { type: "done" };
+          return;
+        }
+        if (calls === 2) {
+          yield { type: "text", content: "接下来我将继续检查。" };
+          yield { type: "done" };
+          return;
+        }
+        throw new Error(`provider exploded; x-api-key: ${opaque}`);
+      },
+      async complete() {
+        return "complete";
+      },
+    };
+    const providerErrors: unknown[] = [];
+    const agent = new Agent({
+      provider,
+      model: "gpt-4o",
+      tools: [readTool()],
+      onProviderError: (error) => providerErrors.push(error),
+    });
+    const spawned = await agent.spawnSubAgent("inspect", "/tmp", {
+      profile: defaultProfile(),
+      parentToolCallId: "spawn_1",
+    });
+    const done = await agent.waitSubAgents({ agentIds: [spawned.agentId], timeoutMs: 2_000 });
+
+    expect(calls).toBe(3);
+    expect(done[0].status).toBe("failed");
+    expect(done[0].error).toBe("Provider request failed.");
+    expect(JSON.stringify(done[0])).not.toContain(opaque);
+    expect(providerErrors).toHaveLength(1);
+    expect(JSON.stringify(providerErrors[0])).not.toContain(opaque);
   });
 });
 

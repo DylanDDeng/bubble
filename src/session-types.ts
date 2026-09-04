@@ -1,5 +1,6 @@
 import type { AssistantMessage, Message, ThinkingLevel, ToolCall, ToolMessage, UserMessage } from "./types.js";
 import type { GoalState } from "./goal/store.js";
+import type { SanitizedProviderError } from "./provider-error-record.js";
 
 export interface ExternalRuntimeSessionMetadata {
   /** External agent runtime that owns the conversational state. */
@@ -90,6 +91,11 @@ export interface SessionToolResultEntry extends BaseSessionLogEntry {
   message: ToolMessage;
 }
 
+export interface SessionProviderErrorEntry extends BaseSessionLogEntry {
+  type: "provider_error";
+  error: SanitizedProviderError;
+}
+
 export type SessionLogEntry =
   | SessionMetadataEntry
   | SessionSummaryEntry
@@ -97,7 +103,8 @@ export type SessionLogEntry =
   | SessionUserMessageEntry
   | SessionAssistantMessageEntry
   | SessionToolCallEntry
-  | SessionToolResultEntry;
+  | SessionToolResultEntry
+  | SessionProviderErrorEntry;
 
 export interface LegacySessionEntry {
   id: string;

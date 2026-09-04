@@ -619,6 +619,10 @@ export class BubbleSdk {
           session.appendMessage(message);
           if (message.role === "assistant") recordMemoryCitations(cwd, message.content);
         },
+        onProviderError: (error) => {
+          if (this.turnCoordinator.isDeleted(sessionId)) return;
+          session.appendProviderError(error);
+        },
         onCompactionApplied: (summary: string) => {
           if (this.turnCoordinator.isDeleted(sessionId)) return;
           session.applyLLMCompaction(summary);

@@ -67,6 +67,39 @@ describe("memory", () => {
     expect(outputs[0].rolloutSlug).toBe("phase-one-memory");
   });
 
+  it("does not send persisted provider diagnostics to memory extraction", async () => {
+    const { cwd, home } = setupWorkspace("bubble-memory-provider-error");
+    process.env.BUBBLE_HOME = home;
+    const session = createSession(cwd, "provider-error.jsonl");
+    session.appendProviderError({
+      providerId: "google",
+      modelId: "gemini-3.8-flash",
+      model: "google:gemini-3.8-flash",
+      thinkingLevel: "off",
+      name: "Error",
+      message: "PROVIDER_DIAGNOSTIC_MUST_NOT_REACH_MEMORY_MODEL",
+      httpStatus: 400,
+      messageCount: 4,
+      toolCount: 0,
+      bubbleVersion: "0.0.56",
+      pid: 123,
+      runtimeStartedAt: 456,
+    });
+
+    const complete = vi.fn(async (messages) => {
+      expect(String(messages[1].content)).not.toContain("PROVIDER_DIAGNOSTIC_MUST_NOT_REACH_MEMORY_MODEL");
+      return JSON.stringify({
+        raw_memory: "Provider diagnostics stay local.",
+        rollout_summary: "Provider diagnostics are excluded from extraction.",
+        rollout_slug: "provider-diagnostics-local",
+      });
+    });
+
+    const result = await runMemoryPhase1({ cwd, model: "gpt-test", complete });
+    expect(result.succeeded).toBe(1);
+    expect(complete).toHaveBeenCalledTimes(1);
+  });
+
   it("never sends external-runtime transcripts to phase 1 and purges stale stage outputs", async () => {
     const { cwd, home } = setupWorkspace("bubble-memory-external-phase1");
     process.env.BUBBLE_HOME = home;

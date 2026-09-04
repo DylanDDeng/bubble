@@ -14,6 +14,7 @@ import { composeAbortSignals } from "./budget-ledger.js";
 import { isOnlyProviderProtocolArtifacts, stripProviderProtocolArtifacts } from "../provider-artifacts.js";
 import { isRateLimitError } from "../network/errors.js";
 import { isProviderTransportError } from "../network/provider-transport.js";
+import { sanitizeProviderErrorText } from "../provider-error-record.js";
 import { mergeUsage, selectToolsForAgentProfile, validateAgentProfileTools } from "./profiles.js";
 import {
   estimateHandoffTokens,
@@ -24,6 +25,9 @@ import {
 import type { SubagentRunOutcome } from "./subagent-scheduler.js";
 import type { SubagentFinalReason, SubagentThreadRecord } from "./subagent-control.js";
 import type { AgentEvent, Message, ToolRegistryEntry, ToolResult, ToolUpdate } from "../types.js";
+
+/** Bubble-authored configuration failure whose message contains no provider data. */
+export class SafeSubagentConfigurationError extends Error {}
 
 export interface ChildRunOptions {
   approval: "fail" | "disabled";
@@ -42,6 +46,7 @@ export interface ChildRunnerHost {
   runLifecycleHook(record: SubagentThreadRecord, cwd: string, eventName: "SubagentStart" | "SubagentStop", status?: string, error?: string, abortSignal?: AbortSignal): Promise<void>;
   finalizeBlocked(record: SubagentThreadRecord, error: string, options: ChildRunOptions): void;
   createInstance(record: SubagentThreadRecord, tools: ToolRegistryEntry[], cwd: string, forkContext?: boolean): Promise<NonNullable<SubagentThreadRecord["agent"]>>;
+  recordProviderError(record: SubagentThreadRecord, error: unknown, request: { messageCount: number; toolCount: number }): void;
   notifyWaiters(record: SubagentThreadRecord): void;
   /** Called on every final state so background results can be ingested (§5). */
   onFinal(record: SubagentThreadRecord, options: ChildRunOptions): void;
@@ -95,7 +100,17 @@ export class ChildRunner {
     } catch (error: any) {
       // Instance creation failed before the run started: no SubagentStart
       // fired, so no SubagentStop follows (§9 — hooks pair per started run).
-      this.host.finalizeBlocked(record, error?.message || String(error), options);
+      const isSafeConfigurationError = error instanceof SafeSubagentConfigurationError;
+      if (!isSafeConfigurationError) {
+        this.host.recordProviderError(record, error, { messageCount: 0, toolCount: tools.length });
+      }
+      this.host.finalizeBlocked(
+        record,
+        isSafeConfigurationError
+          ? error.message
+          : sanitizeProviderErrorText(error?.message || String(error)),
+        options,
+      );
       record.finalReason = "failed_fatal";
       this.host.onFinal(record, options);
       return { kind: "final" };
@@ -213,7 +228,15 @@ export class ChildRunner {
         )
         : "failed_transient";
       record.summary = sanitizeSubagentSummary(record.summary);
-      record.error = error?.message || String(error);
+      if (!cancelled) {
+        this.host.recordProviderError(record, error, {
+          messageCount: messagesBeforeInterruptedBoundary(subAgent.messages),
+          toolCount: tools.length,
+        });
+      }
+      record.error = cancelled
+        ? "Subagent was cancelled."
+        : sanitizeProviderErrorText(error?.message || String(error));
       record.updatedAt = Date.now();
       await this.host.runLifecycleHook(record, cwd, "SubagentStop", record.status, record.error, options.abortSignal);
       emit(record.status, undefined, record.error);
@@ -224,7 +247,52 @@ export class ChildRunner {
 
     record.summary = sanitizeSubagentSummary(record.summary);
     if (needsExplicitFinalSummary(record, executedAnyTool)) {
-      await this.runFinalSummaryTurn(record, subAgent, runCwd, options.abortSignal, emit);
+      try {
+        await this.runFinalSummaryTurn(record, subAgent, runCwd, options.abortSignal, emit);
+      } catch (error: any) {
+        const abortedNow = record.abortController.signal.aborted
+          || options.abortSignal?.aborted
+          || error instanceof AgentAbortError
+          || error?.name === "AbortError";
+        if (isRateLimitError(error) && !abortedNow) {
+          record.status = "queued";
+          record.updatedAt = Date.now();
+          stripTrailingModelInterruptedBoundary(subAgent.messages);
+          emit("queued", undefined, `Rate limited; ${record.nickname} will retry with its context intact.`);
+          return { kind: "rate_limited", retryAfterMs: error.retryAfterMs };
+        }
+        if (isProviderTransportError(error) && !abortedNow) {
+          record.status = "queued";
+          record.updatedAt = Date.now();
+          stripTrailingModelInterruptedBoundary(subAgent.messages);
+          emit("queued", undefined, `Connection error; ${record.nickname} will retry with its context intact.`);
+          return { kind: "transport_retry" };
+        }
+
+        const cancelled = error instanceof AgentAbortError || error?.name === "AbortError";
+        record.status = cancelled ? "cancelled" : "failed";
+        record.finalReason = cancelled
+          ? classifySubagentAbortReason(
+            record.abortController.signal.aborted ? record.abortController.signal.reason : error,
+            options.abortSignal,
+          )
+          : "failed_transient";
+        if (!cancelled) {
+          this.host.recordProviderError(record, error, {
+            messageCount: messagesBeforeInterruptedBoundary(subAgent.messages),
+            toolCount: tools.length,
+          });
+        }
+        record.error = cancelled
+          ? "Subagent was cancelled."
+          : sanitizeProviderErrorText(error?.message || String(error));
+        record.updatedAt = Date.now();
+        await this.host.runLifecycleHook(record, cwd, "SubagentStop", record.status, record.error, options.abortSignal);
+        emit(record.status, undefined, record.error);
+        this.host.notifyWaiters(record);
+        this.host.onFinal(record, options);
+        return { kind: "final" };
+      }
     }
 
     record.status = "completed";
@@ -346,6 +414,13 @@ export function stripTrailingModelInterruptedBoundary(messages: Message[]): void
     }
     break;
   }
+}
+
+function messagesBeforeInterruptedBoundary(messages: Message[]): number {
+  const last = messages.at(-1);
+  return Math.max(0, messages.length - (
+    last?.role === "assistant" && last.content.startsWith("[model request interrupted") ? 1 : 0
+  ));
 }
 
 export function summarizeSubagentToolEnd(event: { name: string; result: ToolResult }): string {

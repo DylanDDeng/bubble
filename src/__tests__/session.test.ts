@@ -108,6 +108,43 @@ describe("SessionManager", () => {
     });
   });
 
+  it("persists provider errors without adding them to model history", () => {
+    const file = join(tmpDir, "provider-error.jsonl");
+    const sm1 = new SessionManager(file);
+    sm1.appendProviderError({
+      providerId: "zhipuai-coding-plan",
+      modelId: "glm-5.3",
+      model: "zhipuai-coding-plan:glm-5.3",
+      thinkingLevel: "max",
+      name: "BadRequestError",
+      message: "Invalid parameter.",
+      httpStatus: 400,
+      code: "InvalidParameter",
+      parameter: "reasoning_effort",
+      messageCount: 4,
+      toolCount: 12,
+      bubbleVersion: "0.0.56",
+      pid: 123,
+      runtimeStartedAt: 456,
+    });
+
+    const raw = JSON.parse(readFileSync(file, "utf-8").trim());
+    expect(raw).toMatchObject({
+      type: "provider_error",
+      error: {
+        providerId: "zhipuai-coding-plan",
+        modelId: "glm-5.3",
+        httpStatus: 400,
+        parameter: "reasoning_effort",
+      },
+    });
+
+    const sm2 = new SessionManager(file);
+    expect(sm2.getEntries()).toHaveLength(1);
+    expect(sm2.getEntries()[0]).toMatchObject({ type: "provider_error" });
+    expect(sm2.getMessages()).toEqual([]);
+  });
+
   it("preserves a clean signed thinking block verbatim while sanitizing reasoning and text", () => {
     const file = join(tmpDir, "provider-metadata.jsonl");
     const sm1 = new SessionManager(file);

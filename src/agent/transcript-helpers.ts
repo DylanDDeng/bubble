@@ -4,7 +4,6 @@
  * predicate used when forking context for children.
  */
 import type { Message, ToolResult } from "../types.js";
-import { summarizeInterruptError } from "./abort-errors.js";
 
 export function findMissingRequiredArgs(
   schema: { required?: string[] } | undefined,
@@ -31,12 +30,14 @@ export function shouldAppendModelInterruptedBoundary(messages: Message[]): boole
 }
 
 export function createModelInterruptedMessage(
-  error: unknown,
+  _error: unknown,
   metadata: { model: string; providerId: string; modelId: string },
 ): Extract<Message, { role: "assistant" }> {
   return {
     role: "assistant",
-    content: `[model request interrupted before a final answer was produced: ${summarizeInterruptError(error)}]`,
+    // This boundary is replayed to future providers and memory extraction.
+    // Never copy provider error text into conversational history.
+    content: "[model request interrupted before a final answer was produced]",
     model: metadata.model,
     providerId: metadata.providerId,
     modelId: metadata.modelId,

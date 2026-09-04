@@ -165,8 +165,15 @@ export function planSessionCompaction(
 ): SessionCompactionPlan {
   const keepRecentTurns = options.keepRecentTurns ?? 2;
 
-  const metadataEntries = entries.filter((entry) => entry.type === "metadata");
-  const nonMetadataEntries = entries.filter((entry) => entry.type !== "metadata");
+  // Provider errors are diagnostics, not model context. Keep the latest audit
+  // records across compaction without allowing repeated failures to grow the
+  // compacted session forever.
+  const metadataEntries = [
+    ...entries.filter((entry) => entry.type === "metadata"),
+    ...entries.filter((entry) => entry.type === "provider_error").slice(-20),
+  ];
+  const nonMetadataEntries = entries.filter((entry) =>
+    entry.type !== "metadata" && entry.type !== "provider_error");
   const latestSummaryIndex = findLatestSummaryIndex(nonMetadataEntries);
   const baseIndex = latestSummaryIndex >= 0 ? latestSummaryIndex + 1 : 0;
   const activeEntries = nonMetadataEntries.slice(baseIndex);

@@ -25,6 +25,28 @@ function assistant(id: string, content: string): SessionLogEntry {
   };
 }
 
+function providerError(id: string, message: string): SessionLogEntry {
+  return {
+    id,
+    type: "provider_error",
+    error: {
+      providerId: "google",
+      modelId: "gemini-3.8-flash",
+      model: "google:gemini-3.8-flash",
+      thinkingLevel: "off",
+      name: "Error",
+      message,
+      httpStatus: 400,
+      messageCount: 1,
+      toolCount: 0,
+      bubbleVersion: "0.0.56",
+      pid: 123,
+      runtimeStartedAt: 456,
+    },
+    timestamp: Number(id),
+  };
+}
+
 describe("compactSessionEntries", () => {
   it("keeps recent turns and replaces older history with a summary", () => {
     const entries: SessionLogEntry[] = [
@@ -88,6 +110,31 @@ describe("planSessionCompaction / buildCompactedEntries (LLM path)", () => {
     // Metadata stays at the front; recent turns are preserved verbatim.
     expect(next[0].type).toBe("metadata");
     expect(next.filter((e) => e.type === "user_message")).toHaveLength(2);
+  });
+
+  it("keeps only the latest provider diagnostics and excludes them from summary input", () => {
+    const errors = Array.from({ length: 25 }, (_, index) =>
+      providerError(String(100 + index), `diagnostic-${index + 1}`));
+    const withErrors = [
+      entries[0],
+      errors[0],
+      ...entries.slice(1, 3),
+      ...errors.slice(1),
+      ...entries.slice(3),
+    ];
+
+    const plan = planSessionCompaction(withErrors, { keepRecentTurns: 2 });
+    if (!plan.compactable) throw new Error("expected compactable");
+
+    expect(plan.oldEntries.some((entry) => entry.type === "provider_error")).toBe(false);
+    expect(planOldMessages(plan).some((message) =>
+      typeof message.content === "string" && message.content.includes("diagnostic-"))).toBe(false);
+
+    const next = buildCompactedEntries(withErrors, plan, "LLM SUMMARY TEXT");
+    const keptErrors = next.filter((entry) => entry.type === "provider_error");
+    expect(keptErrors).toHaveLength(20);
+    expect(keptErrors.map((entry) => entry.type === "provider_error" ? entry.error.message : ""))
+      .toEqual(errors.slice(-20).map((entry) => entry.type === "provider_error" ? entry.error.message : ""));
   });
 
   it("reports not compactable when there aren't enough turns", () => {

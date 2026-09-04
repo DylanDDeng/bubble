@@ -11,10 +11,10 @@
  *    `SubagentRuntimeParent` as a LIVE accessor, never a construction-time
  *    snapshot: `/model` reassigns the parent's provider/model/thinking
  *    mid-session and children must inherit the current values.
- *  - Nothing is pushed back into the parent. Tool updates and ingestion
- *    notices are PULLED (`drainToolUpdates` / `drainIngestionNotices`) at the
- *    points in Agent.run() that previously called the private flush methods,
- *    matching ResultIntegrator.drainNotices.
+ *  - Conversation state is never pushed back into the parent. Tool updates
+ *    and ingestion notices are PULLED (`drainToolUpdates` /
+ *    `drainIngestionNotices`). The only direct sink is a terminal,
+ *    fail-closed provider diagnostic that contains no child transcript.
  *
  * `new Agent(...)` stays on Agent, reached through `parent.createChild`. That
  * is the only genuine call back into the parent, and keeping it there is what
@@ -31,7 +31,12 @@ import { assignAgentNickname, discoverAgentProfiles, findAgentProfile, validateA
 import { snapshotSubagentThread, subagentResultFromThread, type PendingSubagentToolUpdate, type SubagentThreadRecord, type SubagentThreadSnapshot } from "../subagent-control.js";
 import { SubagentStore } from "../subagent-store.js";
 import { SubagentScheduler, type SubagentRunOutcome } from "../subagent-scheduler.js";
-import { ChildRunner, classifySubagentAbortReason, type ChildRunOptions } from "../child-runner.js";
+import {
+  ChildRunner,
+  classifySubagentAbortReason,
+  SafeSubagentConfigurationError,
+  type ChildRunOptions,
+} from "../child-runner.js";
 import { ResultIntegrator } from "../result-integrator.js";
 import { SubagentAbortError } from "../abort-errors.js";
 import { createSubagentWorktree, finalizeSubagentWorktree } from "../worktree.js";
@@ -40,6 +45,7 @@ import { mergeAgentCategories, parseThinkingLevel, type AgentCategoriesConfig, t
 import { composeAbortSignals } from "../budget-ledger.js";
 import type { SubagentRouter } from "./router.js";
 import type { AgentEvent, ContentPart, Message, PermissionMode, Provider, ThinkingLevel, ToolRegistryEntry, ToolUpdate } from "../../types.js";
+import type { ProviderErrorContext } from "../../provider-error-record.js";
 // Type-only, so this never becomes a runtime import cycle with agent.js.
 import type { AgentSubagentRuntimeConfig } from "../../agent.js";
 import type { HookCombinedResult } from "../../hooks/index.js";
@@ -81,6 +87,7 @@ export interface SubagentRuntimeParent {
    */
   allTools(): ToolRegistryEntry[];
   createChild(spec: ChildAgentSpec): ChildAgentLike;
+  recordProviderError(error: unknown, context: ProviderErrorContext): void;
   runExternalHook(
     input: { eventName: string; cwd: string; runId?: string; target?: string; payload?: Record<string, unknown> },
     abortSignal?: AbortSignal,
@@ -138,6 +145,7 @@ export class SubagentRuntime {
         this.runSubagentLifecycleHookFor(record, cwd, eventName, status, error, abortSignal),
       finalizeBlocked: (record, error, options) => this.finalizeSubagentBlocked(record, error, options),
       createInstance: (record, tools, cwd, forkContext) => this.createSubAgentInstance(record, tools, cwd, forkContext),
+      recordProviderError: (record, error, request) => this.recordSubagentProviderError(record, error, request),
       notifyWaiters: (record) => this.store.notifyWaiters(record),
       onFinal: (record, options) => {
         this.reclaimWorktree(record);
@@ -656,7 +664,7 @@ export class SubagentRuntime {
       onCancelledWhileQueued: (reason) => {
         record.status = "cancelled";
         record.finalReason = classifySubagentAbortReason(reason, options.abortSignal);
-        record.error = reason instanceof Error ? reason.message : reason ? String(reason) : "Cancelled while queued.";
+        record.error = "Subagent was cancelled.";
         record.updatedAt = Date.now();
         // This path is NOT only "run never started" — a 429/transport
         // failure re-queues the entry with the abort listener re-armed, so
@@ -677,6 +685,11 @@ export class SubagentRuntime {
         record.status = "failed";
         record.finalReason = "rate_limited_exhausted";
         record.error = `Provider rate limit persisted after ${attempts} attempts.`;
+        this.recordSubagentProviderError(
+          record,
+          Object.assign(new Error(record.error), { status: 429, code: "rate_limit_exhausted" }),
+          { messageCount: record.agent?.messages.length ?? 0, toolCount: 0 },
+        );
         record.updatedAt = Date.now();
         // Reclaim before persist so the handoff note lands in the
         // persisted toolNotes.
@@ -693,6 +706,10 @@ export class SubagentRuntime {
         // to recover the child with its context intact.
         record.finalReason = "failed_transient";
         record.error = `Provider transport error persisted after ${attempts} attempts.`;
+        this.recordSubagentProviderError(record, new Error(record.error), {
+          messageCount: record.agent?.messages.length ?? 0,
+          toolCount: 0,
+        });
         record.updatedAt = Date.now();
         this.reclaimWorktree(record);
         void this.runSubagentLifecycleHookFor(record, cwd, "SubagentStop", record.status, record.error);
@@ -701,6 +718,27 @@ export class SubagentRuntime {
         this.store.notifyWaiters(record);
         this.maybeEnqueueIngestion(record, options);
       },
+    });
+  }
+
+  private recordSubagentProviderError(
+    record: SubagentThreadRecord,
+    error: unknown,
+    request: { messageCount: number; toolCount: number },
+  ): void {
+    const route = record.route ?? {
+      providerId: this.parent.providerId,
+      model: this.parent.apiModel,
+      thinkingLevel: this.parent.thinkingLevel,
+      inherited: true,
+    };
+    this.parent.recordProviderError(error, {
+      providerId: route.providerId,
+      modelId: route.model,
+      model: route.providerId ? `${route.providerId}:${route.model}` : route.model,
+      thinkingLevel: route.thinkingLevel,
+      messageCount: request.messageCount,
+      toolCount: request.toolCount,
     });
   }
 
@@ -821,7 +859,14 @@ export class SubagentRuntime {
       // NOTE: record.worktree must be assigned before anything below can
       // throw — ChildRunner's failure path reclaims it off the record.
       if (!record.worktree) {
-        record.worktree = createSubagentWorktree(cwd, record.agentId);
+        try {
+          record.worktree = createSubagentWorktree(cwd, record.agentId);
+        } catch (error) {
+          const message = error instanceof Error && error.message.includes("need a git repository")
+            ? "write_worktree subagents need a git repository: the working directory is not inside one."
+            : "Failed to create subagent worktree.";
+          throw new SafeSubagentConfigurationError(message);
+        }
       }
       childCwd = record.worktree.path;
       childMode = "default";
@@ -892,7 +937,7 @@ export class SubagentRuntime {
       return this.parent.provider;
     }
     if (!this.parent.providerFactory) {
-      throw new Error([
+      throw new SafeSubagentConfigurationError([
         `Subagent route requires provider "${route.providerId}" for model "${route.model}",`,
         `but the parent agent only has provider "${this.parent.providerId || "none"}" and no provider factory is configured.`,
       ].join(" "));
