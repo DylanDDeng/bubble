@@ -28,6 +28,54 @@ function makeController() {
 }
 
 describe("BubbleTuiController headless session", () => {
+  it("coalesces tool argument bursts and publishes tool execution immediately", async () => {
+    const { agent, host, controller } = makeController();
+    const snapshots: Array<ReturnType<BubbleTuiController["getStreamingTail"]>> = [];
+    let beforeBurst = 0;
+    let afterBurst = 0;
+    let afterFlush = 0;
+    let flushedTail: ReturnType<BubbleTuiController["getStreamingTail"]> = null;
+    let executionTail: ReturnType<BubbleTuiController["getStreamingTail"]> = null;
+    controller.subscribe(() => snapshots.push(controller.getStreamingTail()));
+    agent.run = async function* (): AsyncIterable<AgentEvent> {
+      yield { type: "turn_start" };
+      yield { type: "reasoning_delta", content: "long reasoning ".repeat(8_000) };
+      yield { type: "tool_call_start", id: "write-1", name: "write" };
+      host.fireFlush();
+      beforeBurst = snapshots.length;
+      for (let index = 0; index < 1_000; index += 1) {
+        yield {
+          type: "tool_call_delta", id: "write-1", name: "write",
+          argumentsDelta: "x", arguments: `{"path":"demo.html","content":"${"x".repeat(index + 1)}`,
+        };
+      }
+      afterBurst = snapshots.length;
+      host.fireFlush();
+      afterFlush = snapshots.length;
+      flushedTail = snapshots.at(-1) ?? null;
+
+      yield {
+        type: "tool_call_delta", id: "write-1", name: "write",
+        argumentsDelta: '"}', arguments: '{"path":"demo.html","content":"finished"}',
+      };
+      yield { type: "tool_start", id: "write-1", name: "write", args: { path: "demo.html", content: "finished" } };
+      executionTail = snapshots.at(-1) ?? null;
+      yield { type: "turn_end" };
+    };
+
+    await controller.runTurn("replay", "/cwd");
+    expect(afterBurst).toBe(beforeBurst);
+    expect(afterFlush).toBe(beforeBurst + 1);
+    expect(flushedTail).toMatchObject({ tools: [{ args: { path: "demo.html" } }] });
+    expect(JSON.stringify(flushedTail)).toContain("x".repeat(1_000));
+    expect(executionTail).toMatchObject({ tools: [{ status: "running", args: { content: "finished" } }] });
+    expect(controller.getTranscript().find((row) => row.role === "assistant")?.toolCalls?.[0]?.args.content).toBe("finished");
+    const afterEnd = snapshots.length;
+    host.fireFlush();
+    expect(snapshots).toHaveLength(afterEnd);
+    expect(controller.getStreamingTail()).toBeNull();
+  });
+
   it("owns manual Compact as a cancellable command activity and commits its terminal event atomically", () => {
     const { controller } = makeController();
     const observations: Array<{ activity: string | undefined; terminal: boolean }> = [];

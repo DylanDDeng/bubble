@@ -814,12 +814,13 @@ export class BubbleTuiController {
         }
 
         const hasDirty = Object.values(this.runState.dirty).some(Boolean);
-        // Text/reasoning deltas have no immediate effect notification. Batch
-        // them behind one coalesced 40ms paint. Tool events already notified
-        // through their effects, so acknowledging their dirty bits here avoids
-        // a redundant delayed repaint. Dirty means "paint pending", not
+        // Streamed text, reasoning, and tool arguments share one 40ms paint.
+        // Repainting each argument chunk can starve input/timers while a
+        // buffered response drains, especially with a long reasoning preview.
+        // Tool lifecycle events still notify immediately through their effects.
+        // Dirty means "paint pending", not
         // "this run has ever changed", and must never remain latched forever.
-        if (hasDirty && (event.type === "text_delta" || event.type === "reasoning_delta")) {
+        if (hasDirty && (event.type === "text_delta" || event.type === "reasoning_delta" || event.type === "tool_call_delta")) {
           this.deps.ports.flush.scheduleFlush(STREAMING_FLUSH_INTERVAL_MS, () => {
             if (this.disposed || !this.runActive) return;
             this.state.touch();
