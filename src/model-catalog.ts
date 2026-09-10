@@ -175,6 +175,8 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "claude-haiku-4-5-20251001", name: "Claude Haiku 4.5", providerId: "anthropic", tier: "fast", reasoningLevels: ANTHROPIC_CHAT_LEVELS, contextWindow: 200000 },
 
   { id: "deepseek-v4-flash", name: "deepseek-v4-flash", providerId: "deepseek", tier: "fast", reasoningLevels: DEEPSEEK_V4_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  // DeepSeek Flash: retain the high effort used by the previous preview.
+  { id: "deepseek-flash", name: "deepseek-flash", providerId: "deepseek", reasoningLevels: ["high"], defaultReasoningLevel: "high" },
   // Experimental vision model stays explicit-only: it is text-capable, but
   // automatic fast-tier routing must not silently switch ordinary subagents
   // from the stable Flash model to an experimental multimodal endpoint.

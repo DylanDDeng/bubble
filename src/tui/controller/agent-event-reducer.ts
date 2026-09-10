@@ -157,7 +157,8 @@ export function reduceAgentEvent(state: RunState, event: AgentEvent, ctx: RunCon
       if (tc) {
         tc.rawArguments = event.arguments;
         tc.args = parsePartialArgs(event.arguments, tc.args);
-        effects.push({ kind: "tools-updated" });
+        // Parameter chunks are streaming data, like text/reasoning. Let the
+        // controller coalesce their paint instead of rendering for every byte.
         return { state: { ...state, dirty: { ...state.dirty, tools: true } }, effects };
       }
       return { state, effects };

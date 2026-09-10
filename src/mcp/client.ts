@@ -242,7 +242,21 @@ export class MCPClient {
       }
       return;
     }
-    // Server→client request or notification. v1 ignores these (no sampling, no roots).
+    // Ping is a core MCP request and requires no advertised capability. Long-lived
+    // servers (including Playwright) close healthy sessions when it is ignored.
+    if ("id" in msg && "method" in msg) {
+      const response: JsonRpcResponse = msg.method === "ping"
+        ? { jsonrpc: "2.0", id: msg.id, result: {} }
+        : { jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: `Unsupported client method: ${msg.method}` } };
+      void this.transport.send(response).catch((error) => {
+        for (const pending of this.pending.values()) {
+          clearTimeout(pending.timer);
+          pending.reject(error instanceof Error ? error : new Error(String(error)));
+        }
+        this.pending.clear();
+      });
+    }
+    // Notifications need no response; sampling and roots are not advertised.
   }
 
   async close(): Promise<void> {

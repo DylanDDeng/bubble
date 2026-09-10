@@ -22,6 +22,7 @@ import { SkillRegistry } from "./skills/registry.js";
 import { buildToolPromptOptions, createAllTools, type PlanController, type ToolSearchController } from "./tools/index.js";
 import { getProcessManager } from "./tasks/manager.js";
 import { PromotionChannel } from "./tasks/promotion.js";
+import { runStreamJsonSession } from "./stream-json.js";
 import { PrintRunCollector, formatPrintJson, formatPrintJsonError, type PrintChangeSummary } from "./print-output.js";
 import { FileStateTracker } from "./tools/file-state.js";
 import { GoalStore } from "./goal/store.js";
@@ -602,7 +603,7 @@ async function main() {
       }
       agent.injectDeferredToolsReminder();
       // JSON print mode reserves stdout for the single result object.
-      (args.outputFormat === "json" ? console.error : console.log)(
+      (args.outputFormat === "json" || args.outputFormat === "stream-json" ? console.error : console.log)(
         chalk.dim(`Resumed session: ${sessionManager.getSessionFile()}`),
       );
     }
@@ -619,6 +620,17 @@ async function main() {
           "Error: Grok subscription sessions are interactive. Resume this workspace session in the TUI, or start a fresh native session for --print.",
         ));
         process.exitCode = 1;
+        return;
+      }
+      if (args.inputFormat === "stream-json") {
+        await runStreamJsonSession({
+          input: process.stdin,
+          write: (message) => { process.stdout.write(JSON.stringify(message) + "\n"); },
+          sessionId: basename(sessionManager.getSessionFile()),
+          model: agent.model,
+          run: (prompt) => agent.run(prompt, args.cwd),
+          onEvent: (event) => traceEvent("print_agent_event", summarizeAgentEventForTrace(event)),
+        });
         return;
       }
       const prompt = args.prompt || (await readPipedStdin()) || "";

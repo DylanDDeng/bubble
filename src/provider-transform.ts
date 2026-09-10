@@ -29,6 +29,7 @@ const KIMI_TOGGLE_THINKING_FAMILY = new Set(["kimi-k2.5", "kimi-k2.6"]);
 const KIMI_K26_DEFAULT_MAX_TOKENS = 32768;
 const MINIMAX_M3_FAMILY = new Set(["MiniMax-M3"]);
 const DEEPSEEK_V4_FAMILY = new Set([
+  "deepseek-flash",
   "deepseek-v4-flash",
   "deepseek-v4-flash-vision-exp",
   "deepseek-v4-pro",

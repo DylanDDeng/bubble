@@ -103,7 +103,7 @@ export type JsonRpcMessage = JsonRpcRequest | JsonRpcNotification | JsonRpcRespo
 /** Low-level transport interface. */
 export interface McpTransport {
   start(): Promise<void>;
-  send(message: JsonRpcRequest | JsonRpcNotification): Promise<void>;
+  send(message: JsonRpcRequest | JsonRpcNotification | JsonRpcResponse): Promise<void>;
   /** Called once per incoming JSON-RPC message (response or server→client request/notification). */
   onMessage(handler: (msg: JsonRpcResponse | JsonRpcNotification | JsonRpcRequest) => void): void;
   onError(handler: (err: Error) => void): void;

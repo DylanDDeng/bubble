@@ -16,7 +16,8 @@ export interface CliArgs {
   sessionName?: string;
   print?: boolean;
   /** Print-mode output: plain (default) or a single JSON object on stdout. */
-  outputFormat?: "plain" | "json";
+  outputFormat?: "plain" | "json" | "stream-json";
+  inputFormat?: "text" | "stream-json";
   prompt?: string;
   thinkingLevel?: ThinkingLevel;
   mode?: PermissionMode;
@@ -87,11 +88,19 @@ export function parseArgs(argv: string[]): CliArgs {
         break;
       case "--output-format": {
         const value = argv[++i];
-        if (value !== "plain" && value !== "json") {
-          console.error(`Invalid --output-format: ${value ?? "(missing)"}. Expected plain or json.`);
+        if (value !== "plain" && value !== "json" && value !== "stream-json") {
+          console.error(`Invalid --output-format: ${value ?? "(missing)"}. Expected plain, json, or stream-json.`);
           process.exit(1);
         }
         args.outputFormat = value;
+        break;
+      }
+      case "--input-format": {
+        const value = argv[++i];
+        if (value !== "text" && value !== "stream-json") {
+          throw new Error("--input-format expects text or stream-json");
+        }
+        args.inputFormat = value;
         break;
       }
       case "--plan":
@@ -127,6 +136,16 @@ export function parseArgs(argv: string[]): CliArgs {
     }
   }
 
+  const streamingInput = args.inputFormat === "stream-json";
+  const streamingOutput = args.outputFormat === "stream-json";
+  if (streamingInput || streamingOutput) {
+    if (!streamingInput || !streamingOutput || !args.print || args.prompt || args.command !== "default") {
+      throw new Error("Persistent mode requires -p --input-format stream-json --output-format stream-json and prompts on stdin");
+    }
+    if (args.resume && !args.sessionName) {
+      throw new Error("Persistent mode requires --session when using --resume (no interactive picker)");
+    }
+  }
   return args;
 }
 
@@ -149,8 +168,9 @@ Options (default):
   --dangerously-skip-permissions
                            Enable bypass mode (auto-approve EVERY tool; disables all safety prompts)
   -p, --print              Non-interactive mode (single prompt)
-  --output-format <fmt>    Print-mode output: plain (default) or json
+  --output-format <fmt>    Print-mode output: plain (default), json, or stream-json
                            (one JSON object on stdout: text, usage, num_turns)
+  --input-format <fmt>     text (default) or stream-json; use both stream-json flags with -p\n                           for a persistent session (one user JSON message per line)
   -v, --version            Print the installed version and exit
   -h, --help               Show this help
 

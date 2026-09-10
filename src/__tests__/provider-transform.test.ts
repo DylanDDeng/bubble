@@ -131,6 +131,13 @@ describe("provider transform", () => {
     expect(config.reasoningEffort).toBeUndefined();
   });
 
+  it("preserves high and reasoning history for DeepSeek Flash", () => {
+    const config = resolveProviderRequestConfig("deepseek", "deepseek-flash", "high");
+    expect(config.effectiveThinkingLevel).toBe("high");
+    expect(config.reasoningContentEcho).toBe("all");
+    expect(config.extraBody).toEqual({ thinking: { type: "enabled" }, reasoning_effort: "high" });
+  });
+
   it("emits DeepSeek v4 thinking and reasoning effort fields", () => {
     const config = resolveProviderRequestConfig("deepseek", "deepseek-v4-pro", "max");
     const flash = resolveProviderRequestConfig("deepseek", "deepseek-v4-flash", "high");

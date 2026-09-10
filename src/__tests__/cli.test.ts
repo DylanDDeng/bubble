@@ -22,3 +22,17 @@ describe("parseArgs", () => {
     expect(parseArgs(["--reasoning-effort", "ultra"]).thinkingLevel).toBe("ultra");
   });
 });
+
+describe("persistent CLI flags", () => {
+  it("accepts paired stream formats in print mode", () => {
+    expect(parseArgs(['-p','--input-format','stream-json','--output-format','stream-json']).inputFormat).toBe('stream-json');
+  });
+  it("rejects incompatible modes and interactive resume selection", () => {
+    for (const args of [
+      ['-p','--output-format','stream-json'],
+      ['--input-format','stream-json','--output-format','stream-json'],
+      ['-p','--input-format','stream-json','--output-format','stream-json','prompt'],
+      ['-p','--input-format','stream-json','--output-format','stream-json','--resume'],
+    ]) expect(()=>parseArgs(args)).toThrow();
+  });
+});

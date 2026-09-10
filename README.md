@@ -67,6 +67,41 @@ Resume your last conversation:
 bubble --resume
 ```
 
+## Persistent headless sessions
+
+To keep one agent session and its MCP connections alive across multiple prompts:
+
+```bash
+bubble -p --input-format stream-json --output-format stream-json \
+  --model zhipuai-coding-plan:glm-5.3 --session my-session
+```
+
+Write one JSON message per line to stdin (keep stdin open between turns):
+
+```json
+{"type":"user","request_id":"turn-1","message":{"role":"user","content":"Inspect the page."}}
+{"type":"user","request_id":"turn-2","message":{"role":"user","content":"Continue with the next action."}}
+```
+
+Stdout contains only newline-delimited JSON: one `system/init` event with the model
+and `session_id`, `stream_event` messages wrapping native agent events (including
+`text_delta`, `tool_start`, and `tool_end`), and one `result` per input. Results
+include `is_error`, text in `result`, token usage, and the input `request_id` when
+provided. This is Bubble's protocol; it does not claim full Claude Code protocol
+compatibility. Input content may also be an array of text blocks.
+
+Turns run sequentially in arrival order and retain the same agent history, MCP
+connections, and tool discovery state. Malformed input and failed turns produce an
+error result; the process remains available for the next input. An optional
+`session_id` must match the initialized session. EOF drains submitted turns, then
+releases resources. SIGINT/SIGTERM stop the process. Input lines are limited to
+1 MiB. Permission settings remain unchanged unless explicitly overridden.
+
+Both stream format flags require `-p`; positional prompts are not accepted in this
+mode. To resume a saved session, pass both `--resume` and `--session <name>` so no
+interactive picker is needed. Existing plain and single-result JSON print modes
+retain their behavior.
+
 ## Embed with the SDK
 
 The npm package exports `BubbleSdk` from both `@bubblebrain-ai/bubble` and

@@ -61,9 +61,18 @@ CONTAINER_TARBALL = "/tmp/bubble-local.tgz"
 class BubbleAgent(BaseInstalledAgent):
     """Runs Bubble headlessly inside Terminal-Bench task containers."""
 
-    def __init__(self, *args, tarball: str | None = None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        tarball: str | None = None,
+        effort: str | None = None,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self._tarball = tarball
+        # `effort=<level>` agent-kwarg -> `bubble --reasoning-effort <level>`
+        # (off|minimal|low|medium|high|xhigh|max|ultra).
+        self._effort = effort
 
     @staticmethod
     def name() -> str:
@@ -163,22 +172,33 @@ class BubbleAgent(BaseInstalledAgent):
                 SHELL_PRELUDE
                 + f'{shell_var}="${env_var}"; unset {env_var}; '
                 + "bubble -p --dangerously-skip-permissions --output-format json "
-                + f'-m {shlex.quote(model)} "${shell_var}" '
+                + f'-m {shlex.quote(model)} '
+                + (f"--reasoning-effort {shlex.quote(self._effort)} " if self._effort else "")
+                + f'"${shell_var}" '
                 + "2>&1 | tee /logs/agent/bubble-output.txt"
             ),
             env={env_var: instruction},
         )
 
-        self._populate_context(context)
+        await self._populate_context(environment, context)
 
-    def _populate_context(self, context: AgentContext) -> None:
-        """Parse the final JSON line of bubble's -p output into token counts."""
-        output_file = self.logs_dir / "bubble-output.txt"
-        if not output_file.exists():
-            self.logger.warning(f"bubble output file not found: {output_file}")
-            return
+    async def _populate_context(
+        self, environment: BaseEnvironment, context: AgentContext
+    ) -> None:
+        """Parse the final JSON line of bubble's -p output into token counts.
+
+        Read from inside the environment: on remote backends (Modal) the
+        host-side logs_dir is only synced after run() returns.
+        """
         try:
-            lines = output_file.read_text(errors="replace").strip().splitlines()
+            result = await environment.exec(
+                "tail -c 200000 /logs/agent/bubble-output.txt 2>/dev/null || true"
+            )
+            text = result.stdout or ""
+            if not text.strip():
+                self.logger.warning("bubble output empty; no token accounting")
+                return
+            lines = text.strip().splitlines()
             payload = None
             for line in reversed(lines):
                 line = line.strip()
@@ -188,8 +208,13 @@ class BubbleAgent(BaseInstalledAgent):
             if not payload:
                 return
             usage = payload.get("usage") or {}
-            context.n_input_tokens = usage.get("input_tokens")
-            context.n_cache_tokens = usage.get("cache_read_input_tokens")
+            # bubble's buckets are mutually exclusive; harbor's n_input_tokens
+            # is the total prompt size, so add cache read + creation back in.
+            uncached = usage.get("input_tokens") or 0
+            cache_read = usage.get("cache_read_input_tokens") or 0
+            cache_write = usage.get("cache_creation_input_tokens") or 0
+            context.n_input_tokens = uncached + cache_read + cache_write
+            context.n_cache_tokens = cache_read
             context.n_output_tokens = usage.get("output_tokens")
         except Exception as exc:  # accounting is best-effort, never fail a trial
             self.logger.warning(f"failed to parse bubble output json: {exc}")

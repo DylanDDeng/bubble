@@ -17,7 +17,7 @@ class FakeTransport implements McpTransport {
   private messageHandler?: (m: JsonRpcResponse | JsonRpcNotification | JsonRpcRequest) => void;
   private errorHandler?: (e: Error) => void;
   private closeHandler?: () => void;
-  sent: (JsonRpcRequest | JsonRpcNotification)[] = [];
+  sent: (JsonRpcRequest | JsonRpcNotification | JsonRpcResponse)[] = [];
   closed = false;
 
   constructor(
@@ -26,9 +26,9 @@ class FakeTransport implements McpTransport {
 
   async start(): Promise<void> {}
 
-  async send(msg: JsonRpcRequest | JsonRpcNotification): Promise<void> {
+  async send(msg: JsonRpcRequest | JsonRpcNotification | JsonRpcResponse): Promise<void> {
     this.sent.push(msg);
-    if ("id" in msg) {
+    if ("id" in msg && "method" in msg) {
       // Respond asynchronously so id registration completes first.
       queueMicrotask(() => {
         const reply = this.respond(msg);
@@ -60,6 +60,8 @@ class FakeTransport implements McpTransport {
     this.closeHandler?.();
   }
 
+  emitMessage(msg: JsonRpcResponse | JsonRpcNotification | JsonRpcRequest) { this.messageHandler?.(msg); }
+
   emitError(err: Error) {
     this.errorHandler?.(err);
   }
@@ -74,6 +76,21 @@ afterEach(() => {
 });
 
 describe("MCPClient", () => {
+  it("answers server pings without confusing them with pending client requests", async () => {
+    const transport = new FakeTransport(req => req.method === "initialize" ? {result:{}} : undefined);
+    const client = new MCPClient(transport, {name:"test",version:"1"});
+    await client.start();
+    const pending = client.callTool("slow", {});
+    const request = transport.sent.find(m => "method" in m && m.method === "tools/call") as JsonRpcRequest;
+    transport.emitMessage({jsonrpc:"2.0",id:request.id,method:"ping"});
+    expect(transport.sent.at(-1)).toEqual({jsonrpc:"2.0",id:request.id,result:{}});
+    transport.emitMessage({jsonrpc:"2.0",id:"unknown",method:"sampling/createMessage"});
+    expect(transport.sent.at(-1)).toMatchObject({id:"unknown",error:{code:-32601}});
+    transport.emitMessage({jsonrpc:"2.0",id:request.id,result:{content:[]}});
+    await expect(pending).resolves.toEqual({content:[],isError:undefined,structuredContent:undefined});
+    await client.close();
+  });
+
   it("performs initialize handshake, lists tools, calls tool", async () => {
     const transport = new FakeTransport((req) => {
       if (req.method === "initialize") {
@@ -118,7 +135,7 @@ describe("MCPClient", () => {
 
     expect(client.serverInfo).toEqual({ name: "fake", version: "1.0.0" });
     // After initialize, the client must send notifications/initialized.
-    expect(transport.sent.some((m) => m.method === "notifications/initialized")).toBe(true);
+    expect(transport.sent.some((m) => "method" in m && m.method === "notifications/initialized")).toBe(true);
 
     const tools = await client.listTools();
     expect(tools).toHaveLength(1);

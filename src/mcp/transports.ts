@@ -94,7 +94,7 @@ export class StdioTransport implements McpTransport {
     }
   }
 
-  async send(message: JsonRpcRequest | JsonRpcNotification): Promise<void> {
+  async send(message: JsonRpcRequest | JsonRpcNotification | JsonRpcResponse): Promise<void> {
     if (!this.child || this.closed) throw new Error("Transport not started or already closed");
     this.child.stdin.write(JSON.stringify(message) + "\n");
   }
@@ -163,7 +163,7 @@ export class HttpTransport implements McpTransport {
     // HTTP transport is connectionless per message. Nothing to do here.
   }
 
-  async send(message: JsonRpcRequest | JsonRpcNotification): Promise<void> {
+  async send(message: JsonRpcRequest | JsonRpcNotification | JsonRpcResponse): Promise<void> {
     if (this.closed) throw new Error("Transport closed");
 
     const headers: Record<string, string> = {
