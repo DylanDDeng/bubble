@@ -3,6 +3,7 @@ import { VirtualTerminal } from "@bubblebrain-ai/pi-tui/testing";
 import { FullscreenApp } from "../tui/fullscreen.js";
 import type { DisplayMessage } from "../tui/model/display-history.js";
 import type { StreamingTailState } from "../tui/components/streaming-message.js";
+import { TRANSCRIPT_RAIL_COLUMNS } from "../tui/components/transcript.js";
 
 describe("fullscreen working trace", () => {
   it("renders settled assistant Markdown in fullscreen without source heading markers", async () => {
@@ -325,7 +326,8 @@ describe("fullscreen working trace", () => {
     expect(viewportRows.some((row) => row.trim() === "ok")).toBe(false);
     expect(viewport).toContain("answer");
     const liveAnswer = viewportRows.find((row) => row.trim() === "answer");
-    expect(liveAnswer?.indexOf("answer")).toBe(0);
+    // The answer sits on the shared rail column, level with tool entries.
+    expect(liveAnswer?.indexOf("answer")).toBe(TRANSCRIPT_RAIL_COLUMNS);
     const liveComposerAt = viewportRows.findIndex((row) => row.includes("┌"));
     let liveComposerDistance = liveComposerAt - viewportRows.indexOf(liveAnswer!);
     expect(liveComposerAt).toBeGreaterThan(viewportRows.indexOf(liveAnswer!));
@@ -476,5 +478,103 @@ describe("fullscreen working trace", () => {
 
     app.dispose();
     expect(unsubscribed).toBe(1);
+  });
+
+  it("keeps the tool trace still across tool completion, turn commit, and the next turn's summary", async () => {
+    const terminal = new VirtualTerminal(70, 30);
+    const listeners: Array<() => void> = [];
+    let messages: DisplayMessage[] = [{ key: "u", role: "user", content: "go" }];
+    let tail: StreamingTailState | null = null;
+    let running = true;
+    const controller = {
+      subscribe: (listener: () => void) => {
+        listeners.push(listener);
+        return () => {};
+      },
+      getTranscript: () => messages,
+      isRunning: () => running,
+      getStreamingTail: () => tail,
+      getCommandActivity: () => null,
+      appendDisplayMessage: () => {},
+      runTurn: async () => {},
+      cancelActiveRun: () => false,
+    };
+    const app = new FullscreenApp({
+      controller: controller as never,
+      agent: {
+        model: "test-model",
+        mode: "default",
+        setMode: () => {},
+        getContextUsageSnapshot: () => ({ usedTokens: 0, contextWindow: 1_000 }),
+      } as never,
+      onExit: () => {},
+      onCommand: () => {},
+      terminal,
+    });
+    app.start();
+
+    const frame = async (): Promise<{ rows: string[]; execute: number; thinking2: number }> => {
+      listeners.forEach((listener) => listener());
+      await terminal.waitForRender();
+      const rows = terminal.getViewport();
+      return {
+        rows,
+        execute: rows.findIndex((row) => row.includes("◆ Execute npm test")),
+        thinking2: rows.findIndex((row) => row.includes("now summarize")),
+      };
+    };
+
+    const pending = { id: "b1", name: "bash", args: { command: "npm test" }, status: "running" as const };
+    tail = { content: "", reasoning: "plan the check", tools: [pending], parts: [{ type: "tools", toolCalls: [pending] }], phase: "working" };
+    const liveRunning = await frame();
+    expect(liveRunning.execute).toBeGreaterThan(0);
+
+    const done = { ...pending, status: "completed" as const, result: "42 passed" };
+    tail = { content: "", reasoning: "plan the check", tools: [done], parts: [{ type: "tools", toolCalls: [done] }], phase: "working" };
+    const liveDone = await frame();
+    expect(liveDone.execute).toBe(liveRunning.execute);
+
+    // turn_end(willContinue): the partial turn commits and the live tail clears.
+    messages = [...messages, {
+      key: "a1",
+      role: "assistant",
+      content: "",
+      reasoning: "plan the check",
+      toolCalls: [done],
+      parts: [{ type: "tools", toolCalls: [done] }],
+    } as DisplayMessage];
+    tail = null;
+    const committed = await frame();
+    expect(committed.execute).toBe(liveRunning.execute);
+
+    tail = { content: "", reasoning: "now summarize", tools: [], parts: [], phase: "thinking" };
+    const nextReasoning = await frame();
+    expect(nextReasoning.execute).toBe(liveRunning.execute);
+    expect(nextReasoning.rows[nextReasoning.thinking2 - 1]).toContain("◆ Thinking");
+    expect(nextReasoning.rows[nextReasoning.thinking2 - 2]?.trim()).toBe("");
+    expect(nextReasoning.rows[nextReasoning.thinking2 - 3]).toContain("◆ Execute npm test");
+
+    const summary = "Tests passed, 42 green.";
+    tail = { content: summary, reasoning: "now summarize", tools: [], parts: [{ type: "text", content: summary }], phase: "thinking" };
+    const liveSummary = await frame();
+    expect(liveSummary.execute).toBe(liveRunning.execute);
+    expect(liveSummary.thinking2).toBe(nextReasoning.thinking2);
+
+    messages = [...messages, {
+      key: "a2",
+      role: "assistant",
+      content: summary,
+      reasoning: "now summarize",
+      parts: [{ type: "text", content: summary }],
+    } as DisplayMessage];
+    tail = null;
+    running = false;
+    const settled = await frame();
+    expect(settled.execute).toBe(liveRunning.execute);
+    expect(settled.thinking2).toBe(liveSummary.thinking2);
+    expect(settled.rows.findIndex((row) => row.includes(summary)))
+      .toBe(liveSummary.rows.findIndex((row) => row.includes(summary)));
+
+    app.dispose();
   });
 });

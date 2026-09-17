@@ -10,6 +10,11 @@
  *   - tool calls: single-line trace with status glyph, name, arg preview,
  *     error result preview
  *   - synthetic rows (interrupt, compaction, notices) rendered as notices
+ *
+ * Horizontal geometry: every surface shares one left rail (see
+ * TRANSCRIPT_RAIL_COLUMNS). The rail carries per-surface chrome and the body
+ * always starts at the same column, so user text, tool entries, reasoning and
+ * the final answer line up no matter which projector drew the row.
  */
 import chalk from "chalk";
 import stringWidth from "string-width";
@@ -128,10 +133,21 @@ export function createTranscriptTheme(getTheme: () => Theme): TranscriptTheme {
 
 export const defaultTranscriptTheme: TranscriptTheme = createTranscriptTheme(() => darkTheme);
 
+/**
+ * Width of the shared left rail. Column 0..2 belong to surface chrome
+ * (user `›`, hovered tool `│`, reasoning `┃`); the body starts at column 3.
+ * Changing this moves every transcript surface together.
+ */
+export const TRANSCRIPT_RAIL_COLUMNS = 3;
+/**
+ * Cells left unpainted on the right. Painting the physical last column can
+ * trigger an automatic wrap in several terminals and leaves a broken bg patch.
+ */
+const TRANSCRIPT_RIGHT_MARGIN = 2;
 const TRACE_BORDER_MIN_COLUMNS = 4;
 const IMAGE_LABEL_SPACE_SENTINEL = "\uE000";
-const TRACE_CONTENT_LEFT_PAD = 2;
-const TRACE_RESERVED_COLUMNS = 4; // left border + content pad + right border
+const TRACE_CONTENT_LEFT_PAD = TRANSCRIPT_RAIL_COLUMNS - 1; // cells between the hover border and the body
+const TRACE_RESERVED_COLUMNS = TRANSCRIPT_RAIL_COLUMNS + 1; // rail + right border
 // Keep a zero-width row in projection joins without painting a terminal cell.
 // The row exists in layout at rest, so hover can add corners without reflow.
 const TRACE_IDLE_VPAD = "\x1b[0m";
@@ -139,6 +155,38 @@ const TRACE_IDLE_VPAD = "\x1b[0m";
 /** Visible-width-preserving truncation (input is unstyled at this point). */
 function truncateVisible(text: string, maxColumns: number): string {
   return truncateVisual(text, maxColumns);
+}
+
+/**
+ * Compose one transcript row from rail chrome and body. `rail` may be styled
+ * and is padded to exactly TRANSCRIPT_RAIL_COLUMNS cells, so the body column
+ * is identical for every surface regardless of which glyph the rail carries.
+ */
+function railRow(rail: string, body: string): string {
+  const pad = Math.max(0, TRANSCRIPT_RAIL_COLUMNS - stringWidth(rail));
+  return `${rail}${" ".repeat(pad)}${body}`;
+}
+
+interface RailGeometry {
+  /** Whether the rail fits; very narrow terminals fall back to full-width rows. */
+  rail: boolean;
+  /** Width available to the body once rail and right margin are reserved. */
+  bodyColumns: number;
+}
+
+/**
+ * Shared body-width computation. Below the same threshold the tool frame uses
+ * to drop its border, surfaces give up the rail rather than squeezing text
+ * into a one-cell column.
+ */
+function railGeometry(columns: number): RailGeometry {
+  const width = Math.max(1, Math.floor(columns));
+  const frameColumns = width > TRANSCRIPT_RIGHT_MARGIN ? width - TRANSCRIPT_RIGHT_MARGIN : width;
+  const rail = frameColumns >= TRACE_BORDER_MIN_COLUMNS;
+  return {
+    rail,
+    bodyColumns: rail ? Math.max(1, frameColumns - TRANSCRIPT_RAIL_COLUMNS) : frameColumns,
+  };
 }
 
 export function renderUserCard(
@@ -149,19 +197,17 @@ export function renderUserCard(
 ): string[] {
   const theme = options.theme ?? defaultTranscriptTheme;
   const terminalWidth = Math.max(1, Math.floor(options.columns));
-  // Leave two terminal cells unpainted. Painting the physical last column can
-  // trigger an automatic wrap in several terminals and leaves a broken bg
-  // patch at the right edge. At one or two columns there is no room to reserve
-  // that margin, so use every available cell.
-  const width = terminalWidth > 2 ? terminalWidth - 2 : terminalWidth;
-  // The normal card gutter is four cells (marker + trailing pad). On an
+  // At one or two columns there is no room to reserve the right margin, so
+  // use every available cell.
+  const width = terminalWidth > TRANSCRIPT_RIGHT_MARGIN ? terminalWidth - TRANSCRIPT_RIGHT_MARGIN : terminalWidth;
+  // The card gutter is the shared rail plus one trailing pad cell. On an
   // extremely narrow terminal, degrade to a plain painted row; forcing the
   // historical 20-column minimum is what made settled rows overflow after a
   // 20x5 resize even though the live trace itself was width-safe.
-  if (width < 5) {
+  if (width < TRANSCRIPT_RAIL_COLUMNS + 2) {
     return wrapPlain(content, width).map((line) => theme.userBg(truncateVisible(line, width)));
   }
-  const textWidth = width - 4; // " › " + trailing pad
+  const textWidth = width - TRANSCRIPT_RAIL_COLUMNS - 1; // rail + trailing pad
 
   const split = images.length > 0 ? splitImageDisplayContent(content) : undefined;
   const body = split?.bodyLines.join("\n") ?? content;
@@ -202,7 +248,7 @@ export function renderUserCard(
       renderedLine = renderedLine.replace(image.label, chip);
     }
     const padded = `${renderedLine}${" ".repeat(Math.max(0, textWidth - stringWidth(renderedLine)))}`;
-    const filled = (index === 0 ? theme.accent(" › ") : "   ") + theme.userText(padded) + " ";
+    const filled = railRow(index === 0 ? theme.accent(" › ") : "", theme.userText(padded)) + " ";
     rows.push(theme.userBg(filled));
   });
   // Keep the painted padding symmetric so the message body is vertically
@@ -287,17 +333,21 @@ export function wrapPlain(text: string, columns: number): string[] {
 /**
  * Project assistant prose without transcript spacing. Live streaming and
  * settled history both call this function, so completing a turn cannot change
- * the answer gutter or wrapping width.
+ * the answer gutter or wrapping width. Prose carries an empty rail: its body
+ * sits in the same column as user text and tool entries.
  */
 export function projectAssistantRows(content: string, options: TranscriptRenderOptions): string[] {
-  const terminalWidth = Math.max(1, Math.floor(options.columns));
-  const width = Math.max(1, terminalWidth - 2);
-  if (options.markdownRenderer) {
-    return options.markdownRenderer(content, width)
-      .map((row) => truncateVisible(row, terminalWidth));
-  }
-  return wrapPlain(content, width)
-    .map((row) => truncateVisible(row, terminalWidth));
+  const geometry = railGeometry(options.columns);
+  const body = options.markdownRenderer
+    ? options.markdownRenderer(content, geometry.bodyColumns)
+    : wrapPlain(content, geometry.bodyColumns);
+  return body.map((row) => {
+    const clipped = truncateVisible(row, geometry.bodyColumns);
+    // Paragraph breaks stay genuinely empty so projection joins still treat
+    // them as spacers instead of three painted cells.
+    if (stringWidth(clipped) === 0) return "";
+    return geometry.rail ? railRow("", clipped) : clipped;
+  });
 }
 
 export function renderAssistant(content: string, options: TranscriptRenderOptions): string[] {
@@ -336,9 +386,9 @@ export interface ReasoningProjectionOptions {
 export const MINIMAL_REASONING_BODY_ROWS = 5;
 
 /**
- * Grok-style reasoning surface. Reasoning alone owns a one-cell rail; normal
- * assistant prose never inherits this gutter. The same projection is used by
- * the live row pool and committed transcript.
+ * Grok-style reasoning surface. Reasoning paints a `┃` in the shared rail so
+ * its body lines up with prose and tool entries. The same projection is used
+ * by the live row pool and committed transcript.
  */
 export function projectReasoningRows(
   content: string,
@@ -346,12 +396,11 @@ export function projectReasoningRows(
   projection: ReasoningProjectionOptions = {},
 ): string[] {
   const theme = options.theme ?? defaultTranscriptTheme;
-  const columns = Math.max(1, Math.floor(options.columns));
-  const bodyWidth = Math.max(1, columns - 1);
+  const geometry = railGeometry(options.columns);
   const body = content
     .split("\n")
     .filter((line) => line.trim() !== "")
-    .flatMap((line) => wrapPlain(line, bodyWidth));
+    .flatMap((line) => wrapPlain(line, geometry.bodyColumns));
   if (body.length === 0) return [];
 
   const limit = Math.max(0, projection.maxBodyRows ?? (
@@ -364,13 +413,13 @@ export function projectReasoningRows(
       ? body.slice(-limit)
       : body.slice(0, limit);
   const style = (text: string) => theme.dim(chalk.italic(text));
-  const rows = [style(truncateVisible(`┃◆ Thinking${projection.running ? "…" : ""}`, columns))];
-  for (const line of visible) {
-    rows.push(style(truncateVisible(`┃${line}`, columns)));
-  }
+  const row = (text: string) => style(geometry.rail
+    ? railRow("┃", truncateVisible(text, geometry.bodyColumns))
+    : truncateVisible(text, geometry.bodyColumns));
+  const rows = [row(`◆ Thinking${projection.running ? "…" : ""}`)];
+  for (const line of visible) rows.push(row(line));
   if (body.length > visible.length) {
-    const suffix = options.showReasoning ? "┃…" : "┃… (Ctrl+T to expand)";
-    rows.push(style(truncateVisible(suffix, columns)));
+    rows.push(row(options.showReasoning ? "…" : "… (Ctrl+T to expand)"));
   }
   return rows;
 }
@@ -457,7 +506,7 @@ export function projectToolTraceGroups(
 function projectTraceGroup(group: TraceGroup, options: TranscriptRenderOptions): TranscriptProjection {
   const theme = options.theme ?? defaultTranscriptTheme;
   const columns = Math.max(1, options.columns);
-  const frameColumns = columns > 2 ? columns - 2 : columns;
+  const frameColumns = columns > TRANSCRIPT_RIGHT_MARGIN ? columns - TRANSCRIPT_RIGHT_MARGIN : columns;
   const contentColumns = frameColumns >= TRACE_BORDER_MIN_COLUMNS
     ? Math.max(1, frameColumns - TRACE_RESERVED_COLUMNS)
     : frameColumns;
@@ -672,7 +721,7 @@ function decorateTraceGroup(
     ? border(`└${" ".repeat(columns - 2)}┘`)
     : TRACE_IDLE_VPAD;
   const rows = projection.rows.map((row) => {
-    if (!active) return `${" ".repeat(TRACE_CONTENT_LEFT_PAD + 1)}${row}`;
+    if (!active) return railRow("", row);
     const interior = `${" ".repeat(TRACE_CONTENT_LEFT_PAD)}${row}`;
     const padding = " ".repeat(Math.max(0, columns - 2 - stringWidth(interior)));
     return `${border("│")}${background(`${interior}${padding}`)}${border("│")}`;
@@ -755,7 +804,7 @@ function projectCompactionSummary(
 ): TranscriptProjection {
   const theme = options.theme ?? defaultTranscriptTheme;
   const columns = Math.max(1, options.columns);
-  const frameColumns = columns > 2 ? columns - 2 : columns;
+  const frameColumns = columns > TRANSCRIPT_RIGHT_MARGIN ? columns - TRANSCRIPT_RIGHT_MARGIN : columns;
   const contentColumns = frameColumns >= TRACE_BORDER_MIN_COLUMNS
     ? Math.max(1, frameColumns - TRACE_RESERVED_COLUMNS)
     : frameColumns;
@@ -918,8 +967,11 @@ export function projectTranscript(
   // The transcript owns the sole separator before a live assistant surface.
   // When that surface settles, the same row becomes the transcript's trailing
   // separator, so user -> Thinking geometry cannot change at commit time.
+  // A transcript that already ends in a spacer (a tool group's bottom padding)
+  // must not gain a second one, or the next turn's live Thinking sits one row
+  // lower than it will after commit.
   if (projection.rows.length === 0) return projection;
-  if (options.trailingSpacer !== false) {
+  if (options.trailingSpacer !== false && !projection.trailingSpacer) {
     projection.rows.push("");
     projection.traceTargets.push(undefined);
     projection.trailingSpacer = true;

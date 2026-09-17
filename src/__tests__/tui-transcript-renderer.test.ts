@@ -10,6 +10,7 @@ import {
   renderToolTrace,
   renderTranscript,
   renderUserCard,
+  TRANSCRIPT_RAIL_COLUMNS,
   wrapPlain,
 } from "../tui/components/transcript.js";
 import { ResponsiveTranscriptComponent } from "../tui/components/responsive-transcript.js";
@@ -22,6 +23,8 @@ import stringWidth from "string-width";
 chalk.level = 0; // strip ANSI for assertions
 
 const strip = (text: string): string => text.replace(/\u001b\[[0-9;]*m/g, "");
+/** Empty rail: prose, notices and errors start at the shared body column. */
+const RAIL = " ".repeat(TRANSCRIPT_RAIL_COLUMNS);
 
 const msg = (partial: Partial<DisplayMessage>): DisplayMessage =>
   ({ key: "k", role: "assistant", content: "", ...partial }) as DisplayMessage;
@@ -104,7 +107,7 @@ describe("transcript renderer", () => {
   it("renders assistant text wrapped to the terminal width", () => {
     const rows = renderMessage(msg({ content: "a".repeat(90) }), { columns: 40 });
     const text = rows.map((r) => strip(r));
-    expect(text.some((line) => line.length <= 38 && line.startsWith("a"))).toBe(true);
+    expect(text.some((line) => line.length <= 38 && line.startsWith(`${RAIL}a`))).toBe(true);
     expect(rows[rows.length - 1]).toBe("");
   });
 
@@ -132,10 +135,29 @@ describe("transcript renderer", () => {
 
   it("renders the Grok-style settled reasoning surface", () => {
     const collapsed = renderMessage(msg({ reasoning: "line one\nline two" }), { columns: 60 });
-    expect(collapsed.map(strip)).toEqual(["┃◆ Thinking", "┃line one", "┃line two", ""]);
+    expect(collapsed.map(strip)).toEqual(["┃  ◆ Thinking", "┃  line one", "┃  line two", ""]);
 
     const expanded = renderMessage(msg({ reasoning: "line one" }), { columns: 60, showReasoning: true });
-    expect(expanded.map(strip)).toEqual(["┃◆ Thinking", "┃line one", ""]);
+    expect(expanded.map(strip)).toEqual(["┃  ◆ Thinking", "┃  line one", ""]);
+  });
+
+  it("starts user text, reasoning, tool entries and the answer on the same rail column", () => {
+    const rows = renderTranscript(
+      [
+        msg({ role: "user", content: "go" }),
+        msg({
+          reasoning: "plan",
+          content: "Final answer.",
+          toolCalls: [{ id: "t", name: "bash", args: { command: "npm test" }, result: "ok" }],
+        }),
+      ],
+      { columns: 60 },
+    ).map(strip);
+    const bodyColumn = (row: string): number => stringWidth(row) - stringWidth(row.replace(/^[\s›┃│]+/u, ""));
+    const find = (needle: string) => rows.find((row) => row.includes(needle))!;
+    for (const needle of ["go", "◆ Thinking", "plan", "◆ Execute", "Final answer."]) {
+      expect(bodyColumn(find(needle)), needle).toBe(TRANSCRIPT_RAIL_COLUMNS);
+    }
   });
 
   it("keeps long collapsed reasoning within every terminal width", () => {
@@ -460,7 +482,7 @@ describe("transcript renderer", () => {
   it("error messages render on a single red line", () => {
     const rows = renderMessage(msg({ role: "error", content: "boom happened" }), { columns: 40 });
     expect(rows).toHaveLength(2);
-    expect(strip(rows[0]!)).toBe("boom happened");
+    expect(strip(rows[0]!)).toBe(`${RAIL}boom happened`);
     expect(strip(rows[0]!)).not.toMatch(/^[■◆●]/u);
   });
 
@@ -474,7 +496,7 @@ describe("transcript renderer", () => {
         columns: 40,
         theme: markedTheme,
       });
-      expect(rows[0]).toBe("<dim>ordinary notice</dim>");
+      expect(rows[0]).toBe(`<dim>${RAIL}ordinary notice</dim>`);
       expect(strip(rows[0]!)).not.toMatch(/[■◆●]/u);
     }
   });
@@ -541,9 +563,10 @@ describe("transcript renderer", () => {
     expect(text.indexOf("I will inspect.")).toBeLessThan(text.indexOf("Read"));
     expect(text.indexOf("Read")).toBeLessThan(text.indexOf("Result follows."));
     const plainRows = rows.map(strip);
-    const commentaryAt = plainRows.indexOf("I will inspect.");
+    const commentaryAt = plainRows.indexOf(`${RAIL}I will inspect.`);
     const toolDetailAt = plainRows.findIndex((row) => row.includes("/x"));
-    const answerAt = plainRows.indexOf("Result follows.");
+    const answerAt = plainRows.indexOf(`${RAIL}Result follows.`);
+    expect(commentaryAt).toBeGreaterThan(0);
     expect(plainRows[commentaryAt + 1]).toBe("");
     expect(plainRows[toolDetailAt + 1]).toBe("");
     expect(answerAt).toBe(toolDetailAt + 2);
@@ -605,13 +628,18 @@ describe("transcript markdown pipeline", () => {
         return ["<MD>", ...text.split("\n")];
       },
     });
-    expect(calls).toEqual([{ text: "# Title\n\nbody", width: 48 }]);
-    expect(rows[0]).toBe("<MD>");
+    expect(calls).toEqual([{ text: "# Title\n\nbody", width: 50 - 2 - TRANSCRIPT_RAIL_COLUMNS }]);
+    expect(rows[0]).toBe(`${RAIL}<MD>`);
     expect(rows[rows.length - 1]).toBe("");
   });
 
   it("falls back to plain wrapping without a renderer", () => {
     const rows = renderMessage(msg({ content: "plain words" }), { columns: 50 });
-    expect(rows[0]).toBe("plain words");
+    expect(rows[0]).toBe(`${RAIL}plain words`);
+  });
+
+  it("keeps paragraph breaks empty instead of painting the rail", () => {
+    const rows = renderMessage(msg({ content: "first\n\nsecond" }), { columns: 50 });
+    expect(rows).toEqual([`${RAIL}first`, "", `${RAIL}second`, ""]);
   });
 });

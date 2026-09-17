@@ -311,10 +311,15 @@ export class StreamingMessageComponent extends VStack {
       timelineBlocks.push({ rows, traceTargets: rows.map(() => undefined) });
     }
     const timeline = joinTranscriptProjections(timelineBlocks);
-    this.reasoningGapRow.setLines(tail.reasoning && timeline.rows.length > 0 ? 1 : 0);
+    const start = Math.max(0, timeline.rows.length - this.timelineRows.length);
+    // The settled transcript joins reasoning and the timeline with exactly one
+    // spacer. A tool group already carries its own top padding, so adding the
+    // gap row on top of it made the live surface one row taller than the
+    // committed one and the trace jumped up at every turn boundary.
+    const timelineBringsSpacer = start === 0 && timeline.leadingSpacer === true;
+    this.reasoningGapRow.setLines(tail.reasoning && timeline.rows.length > 0 && !timelineBringsSpacer ? 1 : 0);
     if (timeline.rows.length > 0) {
       hasLiveRows = true;
-      const start = Math.max(0, timeline.rows.length - this.timelineRows.length);
       const visible = timeline.rows.slice(start);
       const visibleTargets = timeline.traceTargets.slice(start);
       this.timelineEllipsisRow.setText(timeline.rows.length > visible.length
