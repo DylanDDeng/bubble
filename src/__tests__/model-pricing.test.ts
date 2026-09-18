@@ -170,6 +170,16 @@ describe("model pricing", () => {
     expect(result?.cost).toBeCloseTo(0.88);
   });
 
+  it("treats August weekends inside the peak windows as off-peak", () => {
+    // 2026-08-22 is a Saturday, 02:00 UTC sits inside the 01:00-04:00 window.
+    // The August 16 schedule was already weekday-only, so this is off-peak.
+    const result = calculateUsageCost("deepseek", "deepseek-v4-flash", {
+      promptTokens: 1_000_000,
+      completionTokens: 1_000_000,
+    }, new Date("2026-08-22T02:00:00Z"));
+    expect(result?.cost).toBeCloseTo(0.88);
+  });
+
   it("does not reprice DeepSeek sessions from before the tariff change", () => {
     const result = calculateUsageCost("deepseek", "deepseek-v4-flash", {
       promptTokens: 1_000_000,

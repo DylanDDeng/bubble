@@ -138,6 +138,9 @@ export const MODEL_PRICING_OVERRIDES: ModelPricing[] = [
     const prior = kind === "pro"
       ? { inputCacheHitPerMillion: 0.003625, inputCacheMissPerMillion: 0.435, outputPerMillion: 0.87 }
       : { inputCacheHitPerMillion: 0.0028, inputCacheMissPerMillion: 0.14, outputPerMillion: 0.28 };
+    // The 2026-08-16 schedule was already Monday-Friday only; the earlier
+    // every-day model here was an omission, so applying the weekday rule to
+    // this tariff corrects August weekend history rather than repricing it.
     const previous: ModelPricingTariff = {
       ...peak,
       peakWindowsUtc: DEEPSEEK_PEAK_WINDOWS_UTC,
