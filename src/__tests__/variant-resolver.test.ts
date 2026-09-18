@@ -20,6 +20,13 @@ describe("variant resolver", () => {
     expect(getAvailableThinkingLevels("deepseek", "deepseek-v4-pro")).toEqual(["off", "low", "high", "max"]);
   });
 
+  it("keeps DeepSeek Flash effort selectable with high as the default", () => {
+    expect(getAvailableThinkingLevels("deepseek", "deepseek-flash")).toEqual(["off", "low", "high", "max"]);
+    expect(getDefaultThinkingLevel("deepseek", "deepseek-flash")).toBe("high");
+    expect(isThinkingOnlyModel("deepseek", "deepseek-flash")).toBe(false);
+    expect(getModelContextWindow("deepseek", "deepseek-flash")).toBe(1048576);
+  });
+
   it("uses one canonical effort order including ultra", () => {
     expect(THINKING_LEVELS).toEqual(["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
     expect(isThinkingLevel("ultra")).toBe(true);

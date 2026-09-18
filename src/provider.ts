@@ -408,6 +408,7 @@ function shouldRequestStreamUsage(options: Pick<ProviderInstanceOptions, "provid
     || providerId === "zai-coding-plan"
     // Bailian sends usage either way; ask explicitly so it stays guaranteed.
     || providerId === "bailian-token-plan"
+    || providerId === "stepfun-api"
     || isMiniMaxOpenAICompatible(options);
 }
 
@@ -597,6 +598,7 @@ function usageToStreamChunk(usage: any): Extract<StreamChunk, { type: "usage" }>
     usage: {
       promptTokens: typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : 0,
       completionTokens: typeof usage.completion_tokens === "number" ? usage.completion_tokens : 0,
+      outputTokensReported: typeof usage.completion_tokens === "number",
       promptCacheHitTokens: typeof usage.prompt_cache_hit_tokens === "number"
         ? usage.prompt_cache_hit_tokens
         : typeof usage.prompt_tokens_details?.cached_tokens === "number"
@@ -781,6 +783,7 @@ export async function* translateOpenAIStream(
         usage: {
           promptTokens: typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : 0,
           completionTokens: typeof usage.completion_tokens === "number" ? usage.completion_tokens : 0,
+          outputTokensReported: typeof usage.completion_tokens === "number",
           promptCacheHitTokens: typeof usage.prompt_cache_hit_tokens === "number"
             ? usage.prompt_cache_hit_tokens
             : typeof usage.prompt_tokens_details?.cached_tokens === "number"

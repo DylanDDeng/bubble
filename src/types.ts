@@ -377,6 +377,8 @@ export type StreamChunk =
   | { type: "done" };
 
 export interface TokenUsage {
+  /** Whether the upstream response explicitly supplied completion_tokens. */
+  outputTokensReported?: boolean;
   promptTokens: number;
   completionTokens: number;
   promptCacheHitTokens?: number;

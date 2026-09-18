@@ -144,6 +144,10 @@ export function resolveProviderRequestConfig(
     };
   }
 
+  if (providerId === "stepfun-api") {
+    return { effectiveThinkingLevel, reasoningContentEcho: "none" };
+  }
+
   if (providerId === "stepfun") {
     return {
       effectiveThinkingLevel,

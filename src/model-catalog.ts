@@ -65,6 +65,7 @@ export const BUILTIN_PROVIDERS: BuiltinProviderDefinition[] = [
   { id: "minimax", name: "MiniMax Token Plan", baseURL: "https://api.minimaxi.com/anthropic", protocol: "anthropic-messages" },
   { id: "minimax-anthropic", name: "MiniMax API", baseURL: "https://api.minimaxi.com/anthropic", protocol: "anthropic-messages" },
   { id: "stepfun", name: "StepFun Step Plan", baseURL: "https://api.stepfun.com/step_plan/v1" },
+  { id: "stepfun-api", name: "StepFun API", baseURL: "https://api.stepfun.com/v1", protocol: "openai-chat" },
   { id: "moonshot-cn", name: "Moonshot (国内 platform.moonshot.cn)", baseURL: "https://api.moonshot.cn/v1" },
   { id: "moonshot-intl", name: "Moonshot (海外 platform.moonshot.ai)", baseURL: "https://api.moonshot.ai/v1" },
   { id: "kimi-for-coding", name: "Kimi for Coding", baseURL: "https://api.kimi.com/coding/v1" },
@@ -178,11 +179,11 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "claude-haiku-4-5-20251001", name: "Claude Haiku 4.5", providerId: "anthropic", tier: "fast", reasoningLevels: ANTHROPIC_CHAT_LEVELS, contextWindow: 200000 },
 
   { id: "deepseek-v4-flash", name: "deepseek-v4-flash", providerId: "deepseek", tier: "fast", reasoningLevels: DEEPSEEK_V4_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
-  // DeepSeek Flash: retain the high effort used by the previous preview.
-  { id: "deepseek-flash", name: "deepseek-flash", providerId: "deepseek", reasoningLevels: ["high"], defaultReasoningLevel: "high" },
-  // Experimental vision model stays explicit-only: it is text-capable, but
-  // automatic fast-tier routing must not silently switch ordinary subagents
-  // from the stable Flash model to an experimental multimodal endpoint.
+  // V4.1 Flash (2026-09-10): high is the default, not the only effort.
+  // https://api-docs.deepseek.com/guides/thinking_mode
+  { id: "deepseek-flash", name: "deepseek-flash", providerId: "deepseek", reasoningLevels: DEEPSEEK_V4_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  // Legacy vision alias now routes to V4.1 Flash. Keep its explicit-only
+  // routing policy; existing sessions can continue using the old model ID.
   { id: "deepseek-v4-flash-vision-exp", name: "DeepSeek-V4-Flash-Vision-Exp", providerId: "deepseek", reasoningLevels: DEEPSEEK_V4_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
   { id: "deepseek-v4-pro", name: "deepseek-v4-pro", providerId: "deepseek", tier: "strong", reasoningLevels: DEEPSEEK_V4_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
   // Offline/no-key fallback only: with an API key the registry replaces this
@@ -243,6 +244,8 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "step-3.5-flash-2603", name: "Step 3.5 Flash 2603", providerId: "stepfun", reasoningLevels: STEPFUN_REASONING_LEVELS },
   { id: "step-3.5-flash", name: "Step 3.5 Flash", providerId: "stepfun", reasoningLevels: STEPFUN_REASONING_LEVELS },
   { id: "step-router-v1", name: "Step Router V1", providerId: "stepfun", reasoningLevels: STEPFUN_REASONING_LEVELS },
+  // Use server-default reasoning until this model's effort controls are documented.
+  { id: "water18-0910", name: "water18-0910", providerId: "stepfun-api", reasoningLevels: [] },
   { id: "kimi-k2.7-code", name: "Kimi K2.7 Code", providerId: "moonshot-cn", tier: "strong", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
   { id: "kimi-k2.7-code-highspeed", name: "Kimi K2.7 Code Highspeed", providerId: "moonshot-cn", tier: "fast", reasoningLevels: KIMI_THINKING_ONLY_LEVELS, contextWindow: 262144 },
   { id: "kimi-k3", name: "Kimi K3", providerId: "moonshot-cn", tier: "strong", reasoningLevels: KIMI_K3_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },

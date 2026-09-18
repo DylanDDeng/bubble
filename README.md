@@ -181,6 +181,12 @@ For Doubao Seed models on Volcengine Ark, run `/provider --add doubao` and paste
 
 ### Custom providers and models
 
+For StepFun's standard API, run `/provider --add stepfun-api`, enter your API
+key, then select `/model stepfun-api:water18-0910`. This uses OpenAI-compatible
+Chat Completions at `https://api.stepfun.com/v1`, with streaming and agent tools.
+The existing `stepfun` provider continues to use Step Plan. The API model uses
+server-default reasoning; effort controls and pricing are not assumed.
+
 For full control — custom base URLs, self-hosted gateways, extra models, or pinning a protocol — define providers in `~/.bubble/models.json`:
 
 ```json

@@ -178,6 +178,7 @@ describe("createProviderInstance", () => {
       usage: {
         promptTokens: 12,
         completionTokens: 3,
+        outputTokensReported: true,
         promptCacheHitTokens: undefined,
         promptCacheMissTokens: undefined,
         reasoningTokens: undefined,
@@ -274,6 +275,35 @@ describe("createProviderInstance", () => {
     expect(body.reasoning_effort).toBe("high");
     expect(body.reasoning).toBeUndefined();
     expect(body.messages[0].reasoning_content).toBeUndefined();
+  });
+
+  it("routes StepFun API tools through chat completions without plan reasoning fields", async () => {
+    const { getBuiltinProvider, getBuiltinModel } = await import("../model-catalog.js");
+    const builtin = getBuiltinProvider("stepfun-api")!;
+    expect(builtin.baseURL).toBe("https://api.stepfun.com/v1");
+    expect(builtin.protocol).toBe("openai-chat");
+    expect(getBuiltinProvider("stepfun")?.baseURL).toContain("/step_plan/");
+    expect(getBuiltinModel("stepfun-api", "water18-0910")?.reasoningLevels).toEqual([]);
+    createMock.mockResolvedValue(fromArray([{ choices: [{ delta: {}, finish_reason: "stop" }] }]));
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({ ...builtin, providerId: builtin.id, apiKey: "sk-test" });
+    await collect(provider.streamChat([
+      { role: "assistant", content: "", reasoning: "previous thinking", toolCalls: [{ id: "call-1", name: "add", arguments: "{}" }] },
+      { role: "tool", toolCallId: "call-1", content: "42" },
+    ], {
+      model: "water18-0910",
+      thinkingLevel: "high",
+      tools: [{ name: "add", description: "Add numbers", parameters: { type: "object", properties: {} } }],
+    }));
+    const body = createMock.mock.calls[0][0];
+    expect(body.model).toBe("water18-0910");
+    expect(body.stream).toBe(true);
+    expect(body.stream_options).toEqual({ include_usage: true });
+    expect(body.tools[0].function.name).toBe("add");
+    expect(body.messages[1]).toEqual({ role: "tool", tool_call_id: "call-1", content: "42" });
+    expect(body.messages[0].reasoning_content).toBeUndefined();
+    expect(body.reasoning_effort).toBeUndefined();
+    expect(body.reasoning).toBeUndefined();
   });
 
   it("sends the selected OpenRouter reasoning effort", async () => {

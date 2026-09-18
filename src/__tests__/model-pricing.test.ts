@@ -40,17 +40,25 @@ describe("model pricing", () => {
     });
   });
 
-  it("contains current DeepSeek v4 peak/off-peak pricing", () => {
-    expect(getModelPricing("deepseek", "deepseek-v4-flash")).toMatchObject({
-      inputCacheHitPerMillion: 0.014,
-      inputCacheMissPerMillion: 0.44,
-      outputPerMillion: 1.32,
-      offPeak: {
-        inputCacheHitPerMillion: 0.007,
-        inputCacheMissPerMillion: 0.22,
-        outputPerMillion: 0.66,
-      },
-    });
+  it("contains the September 10 Flash prices for its canonical and legacy names", () => {
+    for (const modelId of ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"]) {
+      expect(getModelPricing("deepseek", modelId)).toMatchObject({
+        currency: "USD",
+        inputCacheHitPerMillion: 0.006,
+        inputCacheMissPerMillion: 0.3,
+        outputPerMillion: 1.2,
+        peakWeekdaysUtc: [1, 2, 3, 4, 5],
+        effectiveFrom: "2026-09-10T04:00:00Z",
+        offPeak: {
+          inputCacheHitPerMillion: 0.003,
+          inputCacheMissPerMillion: 0.15,
+          outputPerMillion: 0.6,
+        },
+      });
+    }
+  });
+
+  it("keeps Pro prices until its September 14 rerouting", () => {
     expect(getModelPricing("deepseek", "deepseek-v4-pro")).toMatchObject({
       inputCacheHitPerMillion: 0.044,
       inputCacheMissPerMillion: 1.32,
@@ -61,11 +69,56 @@ describe("model pricing", () => {
         outputPerMillion: 1.98,
       },
     });
-    expect(getModelPricing("deepseek", "deepseek-v4-flash-vision-exp")).toMatchObject({
-      inputCacheHitPerMillion: 0.014,
-      inputCacheMissPerMillion: 0.44,
-      outputPerMillion: 1.32,
-    });
+  });
+
+  it.each([
+    ["2026-09-11T00:59:59Z", false],
+    ["2026-09-11T01:00:00Z", true],
+    ["2026-09-11T03:59:59Z", true],
+    ["2026-09-11T04:00:00Z", false],
+    ["2026-09-11T05:59:59Z", false],
+    ["2026-09-11T06:00:00Z", true],
+    ["2026-09-11T09:59:59Z", true],
+    ["2026-09-11T10:00:00Z", false],
+    ["2026-09-12T02:00:00Z", false],
+    ["2026-09-13T07:00:00Z", false],
+    ["2026-09-14T01:00:00Z", true],
+  ])("prices Flash cache hits, misses, and output at %s", (timestamp, peak) => {
+    for (const modelId of ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"]) {
+      const result = calculateUsageCost("deepseek", modelId, {
+        promptTokens: 1_000_000,
+        promptCacheHitTokens: 250_000,
+        promptCacheMissTokens: 750_000,
+        completionTokens: 500_000,
+      }, new Date(timestamp));
+      expect(result?.currency).toBe("USD");
+      expect(result?.estimated).toBe(false);
+      expect(result?.cost).toBeCloseTo((0.25 * 0.006 + 0.75 * 0.3 + 0.5 * 1.2) * (peak ? 1 : 0.5));
+    }
+  });
+
+  it.each(["deepseek-v4-flash", "deepseek-v4-flash-vision-exp"])(
+    "preserves %s history across the exact September 10 tariff boundary",
+    (modelId) => {
+      const usage = { promptTokens: 1_000_000, completionTokens: 1_000_000 };
+      expect(calculateUsageCost("deepseek", modelId, usage, new Date("2026-09-10T03:59:59Z"))?.cost)
+        .toBeCloseTo(0.44 + 1.32);
+      expect(calculateUsageCost("deepseek", modelId, usage, new Date("2026-09-10T04:00:00Z"))?.cost)
+        .toBeCloseTo(0.15 + 0.6);
+    },
+  );
+
+  it("uses the full Flash schedule after the exact Pro rerouting boundary", () => {
+    const usage = { promptTokens: 1_000_000, completionTokens: 1_000_000 };
+    for (const [timestamp, expected] of [
+      ["2026-09-14T03:59:59Z", 1.32 + 3.96],
+      ["2026-09-14T04:00:00Z", 0.15 + 0.6],
+      ["2026-09-14T06:00:00Z", 0.3 + 1.2],
+      ["2026-09-19T06:00:00Z", 0.15 + 0.6],
+    ] as const) {
+      expect(calculateUsageCost("deepseek", "deepseek-v4-pro", usage, new Date(timestamp))?.cost)
+        .toBeCloseTo(expected);
+    }
   });
 
   it("contains StepFun step-3.7-flash CNY pricing", () => {
