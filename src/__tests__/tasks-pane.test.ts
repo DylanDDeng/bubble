@@ -109,6 +109,108 @@ describe("Grok-style Tasks Pane", () => {
     pane.dispose();
   });
 
+  // Two turns: Sophie finishes in the first, Bjarne runs in the second.
+  function twoTurnPane() {
+    const members = [{ subAgentId: "child-1", nickname: "Sophie", status: "running", task: "read refs" }];
+    const cb = callbacks();
+    const pane = new TasksPaneComponent(() => ({
+      workflows: [],
+      groups: members.map((member) => ({
+        id: `single:${member.subAgentId}`,
+        runId: `run-${member.subAgentId}`,
+        kind: "single" as const,
+        label: member.nickname,
+        members: [member],
+      })),
+      tasks: [],
+    }), () => 40, cb);
+    const startSecondTurn = () => {
+      members.push({ subAgentId: "child-2", nickname: "Bjarne", status: "running", task: "glob workflows" });
+    };
+    return { pane, members, startSecondTurn, statusBar: new TaskStatusBarComponent(pane) };
+  }
+
+  it("drops the history view when a new round of activity starts", () => {
+    const { pane, members, startSecondTurn, statusBar } = twoTurnPane();
+    pane.render(100);
+    members[0]!.status = "completed";
+    pane.render(100); // settles and auto-closes
+
+    // The user looks back at the finished subagent, then leaves the pane open.
+    pane.toggle(true);
+    expect(pane.render(100).join("\n")).toContain("Sophie");
+
+    startSecondTurn();
+    const output = pane.render(100).join("\n");
+    expect(output).toContain("Bjarne");
+    expect(output).not.toContain("Sophie");
+    expect(output).toContain("Subagents 1");
+    expect(statusBar.render(100).join("\n")).toContain("1 background activity");
+    pane.dispose();
+  });
+
+  it("drops the history view when the pane is closed, and offers it again once everything settled", () => {
+    const { pane, members, startSecondTurn } = twoTurnPane();
+    pane.render(100);
+    members[0]!.status = "completed";
+    pane.render(100);
+    pane.toggle(true); // history on
+    pane.render(100);
+    pane.toggle(); // closed by the user
+
+    startSecondTurn();
+    pane.render(100);
+    pane.toggle(true); // reopened while Bjarne is running
+    const running = pane.render(100).join("\n");
+    expect(running).toContain("Bjarne");
+    expect(running).not.toContain("Sophie");
+
+    // Once nothing is running, Ctrl+G is the route back to both transcripts.
+    members[1]!.status = "completed";
+    pane.focused = false;
+    pane.render(100);
+    pane.toggle(true);
+    const settled = pane.render(100).join("\n");
+    expect(settled).toContain("Bjarne");
+    expect(settled).toContain("Sophie");
+    pane.dispose();
+  });
+
+  it("keeps the rows of a user who is browsing history inside the pane when new activity starts", () => {
+    const { pane, members, startSecondTurn } = twoTurnPane();
+    pane.render(100);
+    members[0]!.status = "completed";
+    pane.render(100);
+    pane.toggle(true);
+    pane.focused = true;
+    pane.render(100);
+
+    startSecondTurn();
+    const focused = pane.render(100).join("\n");
+    expect(focused).toContain("Sophie");
+    expect(focused).toContain("Bjarne");
+
+    // Leaving and closing the pane ends the history view.
+    pane.focused = false;
+    pane.close();
+    pane.toggle(true);
+    const reopened = pane.render(100).join("\n");
+    expect(reopened).toContain("Bjarne");
+    expect(reopened).not.toContain("Sophie");
+    pane.dispose();
+  });
+
+  it("still lands the final status in place for a user focused on the pane", () => {
+    const { pane, members } = twoTurnPane();
+    pane.focused = true;
+    pane.render(100);
+    members[0]!.status = "completed";
+    const output = pane.render(100).join("\n");
+    expect(pane.isOpen()).toBe(true);
+    expect(output).toContain("Sophie");
+    pane.dispose();
+  });
+
   it("keeps lifecycle echoes out of transcript while retaining launch history", () => {
     const launch: DisplayToolCall = {
       id: "launch",

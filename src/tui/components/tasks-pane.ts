@@ -180,6 +180,13 @@ export class TasksPaneComponent implements Component {
   focused = false;
   private open = false;
   private manuallyClosed = false;
+  /**
+   * History is a view the user opts into for one look, never a mode: it is
+   * dropped whenever the pane closes and when a new round of activity starts.
+   * Otherwise one Ctrl+G after a finished turn left every earlier subagent
+   * listed above the composer for the rest of the session, next to a header
+   * that counts only the running ones.
+   */
   private showHistory = false;
   private selectedId?: string;
   private hoveredId?: string;
@@ -240,6 +247,7 @@ export class TasksPaneComponent implements Component {
     if (this.open && !forceFocus) {
       this.open = false;
       this.manuallyClosed = true;
+      this.showHistory = false;
     } else {
       this.open = true;
       this.manuallyClosed = false;
@@ -254,6 +262,7 @@ export class TasksPaneComponent implements Component {
   close(): void {
     this.open = false;
     this.manuallyClosed = true;
+    this.showHistory = false;
     this.callbacks.onRender();
   }
 
@@ -265,7 +274,12 @@ export class TasksPaneComponent implements Component {
       return [];
     }
     const activeCount = this.activeCount();
-    if (activeCount > 0 && this.lastActiveCount === 0 && !this.manuallyClosed) this.open = true;
+    if (activeCount > 0 && this.lastActiveCount === 0) {
+      // A user who is browsing history inside the pane keeps their rows; the
+      // view resets when they close it.
+      if (!this.focused) this.showHistory = false;
+      if (!this.manuallyClosed) this.open = true;
+    }
     if (activeCount === 0 && this.lastActiveCount > 0) {
       if (this.focused) {
         // A user who is already inspecting the pane should see the final
@@ -274,6 +288,7 @@ export class TasksPaneComponent implements Component {
       } else {
         this.open = false;
         this.manuallyClosed = false;
+        this.showHistory = false;
       }
     }
     this.lastActiveCount = activeCount;
