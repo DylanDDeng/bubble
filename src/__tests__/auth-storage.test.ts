@@ -133,6 +133,23 @@ describe("AuthStorage shared between processes", () => {
     expect(existsSync(lockPath)).toBe(false);
   });
 
+  it("recovers a stale lock even when a crashed breaker left its file behind", async () => {
+    const authPath = join(makeTempDir(), "auth.json");
+    const lockPath = `${authPath}.lock`;
+    // Crashed breaker leftovers must not block recovery of a stale lock.
+    writeFileSync(`${lockPath}.breaker`, "");
+    writeFileSync(lockPath, "crashed-holder");
+    const longAgo = new Date(Date.now() - 10 * 60_000);
+    utimesSync(lockPath, longAgo, longAgo);
+    utimesSync(`${lockPath}.breaker`, longAgo, longAgo);
+
+    const startedAt = Date.now();
+    await new AuthStorage(authPath).withRefreshLock(async () => undefined);
+    expect(Date.now() - startedAt).toBeLessThan(2000);
+    expect(existsSync(lockPath)).toBe(false);
+    expect(existsSync(`${lockPath}.breaker`)).toBe(false);
+  });
+
   it("releases the lock when the holder throws", async () => {
     const authPath = join(makeTempDir(), "auth.json");
     const storage = new AuthStorage(authPath);

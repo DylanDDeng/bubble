@@ -200,4 +200,20 @@ describe("OAuth refresh with auth.json shared between processes", () => {
     await expect(registry.prepareProvider("openai")).rejects.toThrow(/removed while refreshing/);
     expect(JSON.parse(readFileSync(authPath, "utf-8")).openai).toBeUndefined();
   });
+
+  it("hands back a canonical login that landed while a legacy refresh was in flight", async () => {
+    new AuthStorage(authPath).set("openai-codex", expired("legacy"));
+    const registry = new ProviderRegistry(emptyConfig());
+    const adapter = registry.createOpenAICodexAuthAdapter("openai")!;
+    const held = (await adapter.getCredentials())!;
+    refreshOpenAICodex.mockImplementation(async () => {
+      new AuthStorage(authPath).set("openai", { ...fresh("new-login"), accountId: "account-b" });
+      return { accessToken: "access-legacy-new", refreshToken: "refresh-legacy-new", expiresAt: Date.now() + 3_600_000 };
+    });
+
+    const result = await adapter.refreshCredentials(held);
+
+    expect(result.refreshToken).toBe("refresh-new-login");
+    expect(JSON.parse(readFileSync(authPath, "utf-8")).openai.refreshToken).toBe("refresh-new-login");
+  });
 });

@@ -623,9 +623,14 @@ export class ProviderRegistry {
         throw new Error(`${label} credentials were removed while refreshing. Run ${loginHint} to sign in again.`);
       }
       for (const key of writeKeys) {
-        // Mirror keys were absent when resolved under the lock; stay out of the
-        // way if a login created one since.
-        if (key !== authKey) this.authStorage.replaceIfUnchanged(key, next, null);
+        if (key === authKey) continue;
+        // Mirror keys were absent when resolved under the lock. If a login
+        // created one since, it is now the preferred entry: leave it alone and
+        // hand its credentials to the caller instead of the old account's.
+        if (!this.authStorage.replaceIfUnchanged(key, next, null)) {
+          const preferred = this.authStorage.get(options.resolveKeys().authKey);
+          if (preferred && !credentialsExpired(preferred)) return preferred;
+        }
       }
       return next;
     });

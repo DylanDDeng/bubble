@@ -19,11 +19,12 @@
  *
  * Node has no flock, so both locks are O_EXCL lock files carrying an owner
  * token: a holder only ever deletes a lock whose content is its own token,
- * and a stale lock is only broken after re-verifying it is still the one that
- * was observed. That last check-then-unlink is not atomic (nothing portable
- * is); the residual window is a few microseconds and needs a crashed holder
- * plus two simultaneous breakers. The refresh path tolerates even that: a
- * rejected token triggers a second look at the file (ProviderRegistry).
+ * and stale locks are broken one breaker at a time (see breakLockIfStale), so
+ * a breaker cannot remove a successor's live lock. What remains is a holder
+ * suspended past the stale threshold that resumes and releases in the same
+ * microseconds a breaker acts. The refresh path tolerates even that: results
+ * are stored by compare-and-set, and a rejected token triggers a second look
+ * at the file (ProviderRegistry).
  */
 
 import { randomUUID } from "node:crypto";
@@ -57,6 +58,7 @@ const REFRESH_LOCK_POLL_MS = 50;
 const WRITE_LOCK_STALE_MS = 5_000;
 const WRITE_LOCK_WAIT_MS = 15_000;
 const WRITE_LOCK_POLL_MS = 5;
+const BREAKER_STALE_MS = 10_000;
 
 const sleepCell = new Int32Array(new SharedArrayBuffer(4));
 function sleepSync(ms: number): void {
@@ -97,17 +99,48 @@ function observeLock(lockPath: string): { token: string; mtimeMs: number } | und
   }
 }
 
-function breakLockIfStale(lockPath: string, staleMs: number): void {
+function isStale(lockPath: string, staleMs: number): boolean {
   const observed = observeLock(lockPath);
-  if (!observed || Date.now() - observed.mtimeMs <= staleMs) return;
-  // Another waiter may have broken it and a successor acquired the path since:
-  // only remove the exact lock that was judged stale.
-  const current = observeLock(lockPath);
-  if (!current || current.token !== observed.token || current.mtimeMs !== observed.mtimeMs) return;
+  return !!observed && Date.now() - observed.mtimeMs > staleMs;
+}
+
+/**
+ * Breakers are serialized by their own O_EXCL lock, held for the few
+ * microseconds of the re-check and unlink below. Without it, two waiters that
+ * both judged the lock stale could interleave: one unlinks it, a successor
+ * acquires the path, and the other then unlinks the successor's live lock.
+ * Under the breaker lock the second one re-checks and finds a fresh lock.
+ */
+function breakLockIfStale(lockPath: string, staleMs: number): void {
+  if (!isStale(lockPath, staleMs)) return;
+  const breakerPath = `${lockPath}.breaker`;
+  let fd: number;
   try {
-    unlinkSync(lockPath);
+    fd = openSync(breakerPath, "wx", 0o600);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    // Someone else is breaking it right now; only a crash inside that tiny
+    // section leaves the file behind, so clear an old one for the next retry.
+    if (isStale(breakerPath, BREAKER_STALE_MS)) {
+      try {
+        unlinkSync(breakerPath);
+      } catch {
+        // Already gone.
+      }
+    }
+    return;
+  }
+  try {
+    closeSync(fd);
+    if (isStale(lockPath, staleMs)) unlinkSync(lockPath);
   } catch {
     // Already gone.
+  } finally {
+    try {
+      unlinkSync(breakerPath);
+    } catch {
+      // Already gone.
+    }
   }
 }
 
