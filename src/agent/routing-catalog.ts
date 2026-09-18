@@ -67,11 +67,13 @@ export interface RoutingSnapshot {
   parent: { providerId: string; model: string; tier?: ModelTier };
   /**
    * Subscription (OAuth) catalogs are account-scoped: the server decides which
-   * models this account may use, so a builtin entry that discovery has not
-   * confirmed must never be chosen by automatic tier routing. API-key
-   * providers keep their builtin tiers routable.
+   * models this account may use, so only models the CURRENT identity's
+   * discovery snapshot (or the user's models.json) confirmed may be chosen by
+   * automatic tier routing. API-key providers keep their builtin tiers routable.
    */
   accountScopedCatalog: boolean;
+  /** Models automatic tier routing may pick from (see accountScopedCatalog). */
+  tierCatalog: TierCatalogEntry[];
   /** Catalog-effective provider id (openai OAuth -> "openai-codex" alias). */
   effectiveProviderId: string;
   membershipSource: RoutingMembershipSource;
@@ -188,10 +190,20 @@ export function buildRoutingSnapshot(
     ?? getBuiltinModel(effectiveProviderId, parent.model)?.tier;
 
   const runnableProviderIds = registry.getEnabled().map((provider) => provider.id);
+  // The dynamic overlay is provider-wide and is rebuilt from EVERY unexpired
+  // disk-cache entry at startup (other accounts, older client pins included),
+  // so "dynamic" membership alone does not prove this account can use a model.
+  // Only the current identity's own discovery snapshot does.
+  const tierCatalog = tierCatalogEntries(
+    models,
+    accountScopedCatalog,
+    discovery ? new Set(discovery.models.map((model) => model.id)) : undefined,
+  );
 
   return {
     parent: { ...parent, tier: parentTier },
     accountScopedCatalog,
+    tierCatalog,
     effectiveProviderId,
     membershipSource,
     models,
@@ -202,7 +214,7 @@ export function buildRoutingSnapshot(
     resolvedCategories: resolveCategoriesForMenu(
       parent,
       parentTier,
-      tierCatalogEntries(models, accountScopedCatalog),
+      tierCatalog,
       agentCategories,
       agentRouting,
     ),
@@ -211,16 +223,23 @@ export function buildRoutingSnapshot(
 
 /**
  * Catalog visible to automatic tier routing. On an account-scoped catalog only
- * discovery-confirmed or user-listed models are candidates; a builtin-only
- * entry (e.g. a static fast-tier model the ChatGPT plan does not include)
- * would otherwise be routed to and rejected server-side.
+ * models confirmed by the current identity's discovery snapshot, or listed by
+ * the user in models.json, are candidates. A builtin-only entry (e.g. a static
+ * fast-tier model the ChatGPT plan does not include) or an overlay entry left
+ * by another account's cache would otherwise be routed to and rejected
+ * server-side. Without a snapshot nothing but user-listed models qualifies.
  */
 export function tierCatalogEntries(
   models: readonly RoutingModelEntry[],
   accountScopedCatalog: boolean,
+  confirmedIds?: ReadonlySet<string>,
 ): TierCatalogEntry[] {
   return models
-    .filter((model) => !accountScopedCatalog || model.source !== "builtin")
+    .filter((model) => (
+      !accountScopedCatalog
+      || model.source === "custom"
+      || (confirmedIds?.has(model.id) ?? false)
+    ))
     .map((model): TierCatalogEntry => ({
       id: model.id,
       tier: model.tier,
@@ -236,7 +255,7 @@ export function tierContextFromSnapshot(
 ): TierRoutingContext {
   return {
     parentTier: snapshot.parent.tier,
-    models: tierCatalogEntries(snapshot.models, snapshot.accountScopedCatalog),
+    models: snapshot.tierCatalog,
     autoTier: agentRouting.autoTier,
   };
 }

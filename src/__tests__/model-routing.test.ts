@@ -30,6 +30,7 @@ import {
   type RoutingSnapshotAccessor,
 } from "../agent/routing-catalog.js";
 import { buildModelRoutingPrompt } from "../prompt/routing.js";
+import { clearDynamicModelMetadata, registerDynamicModelMetadata } from "../model-catalog.js";
 import { userNamedModelReminder } from "../prompt/task-reminders.js";
 import { composeSystemPrompt } from "../prompt/compose.js";
 import { discoverAgentProfiles, findAgentProfile, type AgentProfile } from "../agent/profiles.js";
@@ -185,6 +186,35 @@ describe("routing snapshot membership (§1.3)", () => {
     const apiKey = snapshotFor();
     expect(apiKey.accountScopedCatalog).toBe(false);
     expect(apiKey.resolvedCategories.find((c) => c.name === "explore")?.model).toBe("claude-haiku-4-5-20251001");
+  });
+
+  it("does not trust overlay entries another account's cache left behind", () => {
+    const parent = { providerId: "openai", model: "gpt-6-astra" };
+    // Startup rebuilds the provider-wide overlay from every unexpired disk
+    // cache entry, including one written for a different ChatGPT account.
+    registerDynamicModelMetadata({ id: "gpt-5.4-mini", name: "gpt-5.4-mini", providerId: "openai-codex", tier: "fast", reasoningLevels: ["low"] });
+    try {
+      const foreign = snapshotFor({ providerId: "openai", oauth: true }, parent);
+      expect(foreign.models.some((model) => model.id === "gpt-5.4-mini" && model.source === "dynamic")).toBe(true);
+      expect(foreign.tierCatalog.some((model) => model.id === "gpt-5.4-mini")).toBe(false);
+      expect(foreign.resolvedCategories.find((c) => c.name === "explore")?.model).toBe("inherit");
+
+      // The current identity's own snapshot is what confirms a model.
+      const own = snapshotFor({
+        providerId: "openai",
+        oauth: true,
+        discovery: {
+          models: [{ id: "gpt-6-astra", name: "GPT-6-Astra", providerId: "openai" }, { id: "gpt-5.4-mini", name: "gpt-5.4-mini", providerId: "openai" }],
+          source: "remote",
+          complete: true,
+          expiresAt: Date.now() + 60_000,
+          identityKey: "acct",
+        },
+      }, parent);
+      expect(own.resolvedCategories.find((c) => c.name === "explore")?.model).toBe("gpt-5.4-mini");
+    } finally {
+      clearDynamicModelMetadata("openai-codex");
+    }
   });
 
   it("fallback-union includes builtin models when nothing authoritative exists", () => {
