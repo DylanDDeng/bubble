@@ -85,7 +85,7 @@ export class SessionTransitionController {
       this.deps.agent.setSessionID(manager.getSessionFile());
       // 7. External binding refresh comes from the new manager's metadata.
       void manager.getMetadata().externalRuntime;
-      // 8. Drop live subagent accumulators (ghost-group defense).
+      // 8. Drop child-run accumulators (ghost-group defense).
       this.deps.clearLiveSubagentTools();
       // 11. Settle every blocking request (behavior delta vs legacy).
       this.deps.overlays.settleAll("session-switch");

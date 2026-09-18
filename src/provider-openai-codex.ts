@@ -34,6 +34,10 @@ const TOKEN_REFRESH_GRACE_MS = 5 * 60 * 1000;
 // when OpenAI lifts the gate again before we cut a new release.
 // 2026-09-17: gpt-6-astra requires 0.153.0; 0.155.0 is the current @openai/codex release.
 const CODEX_CLIENT_VERSION = process.env.BUBBLE_CODEX_CLIENT_VERSION?.trim() || "0.155.0";
+/** The Codex client version Bubble claims; the account catalog the server returns depends on it. */
+export function getCodexClientVersion(): string {
+  return CODEX_CLIENT_VERSION;
+}
 const MODEL_DISCOVERY_PATHS = [
   `/codex/models?client_version=${CODEX_CLIENT_VERSION}`,
   "/models",
@@ -155,6 +159,10 @@ export function createOpenAICodexProvider(options: {
           }
         | undefined;
 
+      // OpenAI streams one reasoning summary per part; each part is a
+      // self-contained markdown block. Separate parts so Thinking does not
+      // read as one run-on line.
+      let summaryPartsSeen = 0;
       try {
         let response = await sendRequest();
 
@@ -214,6 +222,14 @@ export function createOpenAICodexProvider(options: {
             const delta = typeof (event as any).delta === "string" ? (event as any).delta : "";
             if (delta) {
               yield { type: "text", content: delta };
+            }
+            continue;
+          }
+
+          if (type === "response.reasoning_summary_part.added") {
+            summaryPartsSeen += 1;
+            if (summaryPartsSeen > 1) {
+              yield { type: "reasoning_delta", content: "\n\n" };
             }
             continue;
           }
@@ -397,6 +413,8 @@ export async function fetchOpenAICodexModelCatalog(options: {
   baseURL: string;
   accessToken: string;
   fetch?: ChatGptFetch;
+  /** Bounds both catalog GETs; a stalled warm-up must not pin the in-flight slot. */
+  signal?: AbortSignal;
 }): Promise<OpenAICodexModelCatalogResult> {
   const accountId = extractChatGptAccountId(options.accessToken);
   if (!accountId) {
@@ -413,6 +431,7 @@ export async function fetchOpenAICodexModelCatalog(options: {
         globalThis.crypto?.randomUUID?.() ?? `bubble_${Date.now()}`,
         { accept: "application/json" },
       ),
+      signal: options.signal,
     }).catch(() => undefined);
 
     if (!response?.ok) continue;
@@ -506,6 +525,11 @@ function buildRequestBody(
     const wireEffort = options.reasoningEffort === "ultra" ? "max" : options.reasoningEffort;
     body.reasoning = {
       effort: wireEffort,
+      // The Codex backend's default_reasoning_summary is "none" for every
+      // current model, so without an explicit summary request no
+      // response.reasoning_summary_text.delta events arrive and the TUI never
+      // shows Thinking. Ask for the server-chosen summary like Codex CLI does.
+      summary: "auto",
       ...(options.useResponsesLite ? { context: "all_turns" } : {}),
     };
   }

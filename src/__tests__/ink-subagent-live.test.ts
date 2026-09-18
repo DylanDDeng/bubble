@@ -1,9 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-  accumulateLiveSubagentUpdate,
+  applySubagentUpdateToMessages,
   collectSubagentGroups,
   mergeToolMetadata,
-  pruneSettledLiveSubagentTools,
 } from "../tui/model/subagent-view.js";
 import type { DisplayMessage, DisplayToolCall } from "../tui/model/display-history.js";
 import type { ToolResultMetadata } from "../types.js";
@@ -16,43 +15,93 @@ function childUpdateMetadata(subAgentId: string, status: string): ToolResultMeta
   };
 }
 
-describe("live subagent trace accumulation (cross-round updates)", () => {
-  it("absorbs updates whose launching tool call left the streaming round, grouped as a workflow", () => {
-    const map = new Map<string, DisplayToolCall>();
+function toolsOf(message: DisplayMessage): DisplayToolCall[] {
+  return [
+    ...(message.toolCalls ?? []),
+    ...(message.parts ?? []).flatMap((part) => part.type === "tools" ? part.toolCalls : []),
+  ];
+}
 
-    // Round N+1: wait_workflow blocks; children report against the settled
-    // run_workflow call id. Each update carries ONE member snapshot.
-    expect(accumulateLiveSubagentUpdate(map, { id: "wf_call", name: "run_workflow", metadata: childUpdateMetadata("a", "running") })).toBe(true);
-    expect(accumulateLiveSubagentUpdate(map, { id: "wf_call", name: "run_workflow", metadata: childUpdateMetadata("b", "running") })).toBe(true);
-    expect(accumulateLiveSubagentUpdate(map, { id: "wf_call", name: "run_workflow", metadata: childUpdateMetadata("a", "completed") })).toBe(true);
+function membersOf(tool: DisplayToolCall | undefined): Array<Record<string, unknown>> {
+  return Array.isArray(tool?.metadata?.subagents)
+    ? tool!.metadata!.subagents.filter((m): m is Record<string, unknown> => typeof m === "object" && m !== null)
+    : [];
+}
 
+describe("cross-round subagent updates land on the settled launch row", () => {
+  it("absorbs workflow children spawned after run_workflow committed, grouped as a workflow", () => {
     // Settled transcript: the run_workflow result itself carries no members.
-    const messages: DisplayMessage[] = [{
+    let messages: DisplayMessage[] = [{
       role: "assistant",
       content: "",
       toolCalls: [{ id: "wf_call", name: "run_workflow", args: { title: "audit team" }, metadata: { kind: "subagent", mode: "workflow", runId: "run-1" } }],
     } as DisplayMessage];
 
-    const groups = collectSubagentGroups(messages, [...map.values()]);
+    // Round N+1: wait_workflow blocks; children report against the settled
+    // run_workflow call id. Each update carries ONE member snapshot.
+    for (const update of [childUpdateMetadata("a", "running"), childUpdateMetadata("b", "running"), childUpdateMetadata("a", "completed")]) {
+      messages = applySubagentUpdateToMessages(messages, { id: "wf_call", name: "run_workflow", metadata: update });
+    }
+
+    const launch = toolsOf(messages[0]!).find((tool) => tool.id === "wf_call");
+    expect(launch?.metadata?.mode).toBe("workflow");
+    expect(membersOf(launch).map((m) => `${m.subAgentId}:${m.status}`)).toEqual(["a:completed", "b:running"]);
+
+    // The inspector reads the same transcript row: one workflow group, no twin.
+    const groups = collectSubagentGroups(messages, []);
     expect(groups).toHaveLength(1);
     expect(groups[0].kind).toBe("workflow");
-    expect(groups[0].members).toHaveLength(2);
-    const a = groups[0].members.find((m) => m.subAgentId === "a");
-    expect(a?.status).toBe("completed");
+    expect(groups[0].members.map((m) => m.subAgentId).sort()).toEqual(["a", "b"]);
   });
 
-  it("ignores non-subagent updates", () => {
-    const map = new Map<string, DisplayToolCall>();
-    expect(accumulateLiveSubagentUpdate(map, { id: "x", name: "bash", metadata: { kind: "shell" } })).toBe(false);
-    expect(accumulateLiveSubagentUpdate(map, { id: "x", name: "bash" })).toBe(false);
-    expect(map.size).toBe(0);
+  it("marks a spawned child failed on its launch row and syncs later echoes", () => {
+    const spawnMember = { subAgentId: "c", nickname: "Jean", status: "queued", task: "inspect" };
+    let messages: DisplayMessage[] = [{
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "spawn_call", name: "spawn_agent", args: {}, metadata: { kind: "subagent", mode: "lifecycle", subagents: [spawnMember] } }],
+    } as DisplayMessage];
+
+    messages = applySubagentUpdateToMessages(messages, {
+      id: "spawn_call",
+      name: "spawn_agent",
+      metadata: { kind: "subagent", subagents: [{ ...spawnMember, status: "failed", error: "Provider rejected a request parameter." }] },
+    });
+
+    const launch = toolsOf(messages[0]!)[0];
+    expect(membersOf(launch)[0]).toMatchObject({ subAgentId: "c", status: "failed", error: "Provider rejected a request parameter." });
+    const groups = collectSubagentGroups(messages, []);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].kind).toBe("single");
+    expect(groups[0].members[0]?.status).toBe("failed");
   });
 
-  it("later wait_workflow result claims the members; the stale live group drops out", () => {
-    const map = new Map<string, DisplayToolCall>();
-    accumulateLiveSubagentUpdate(map, { id: "wf_call", name: "run_workflow", metadata: childUpdateMetadata("a", "running") });
+  it("returns the same array when nothing matches or the update is not a subagent update", () => {
+    const messages: DisplayMessage[] = [{
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "bash_1", name: "bash", args: {}, metadata: { kind: "shell" } }],
+    } as DisplayMessage];
+    expect(applySubagentUpdateToMessages(messages, { id: "bash_1", name: "bash", metadata: { kind: "shell" } })).toBe(messages);
+    expect(applySubagentUpdateToMessages(messages, { id: "bash_1", name: "bash" })).toBe(messages);
+    // After /clear the launch row is gone: the update is dropped, never re-created.
+    expect(applySubagentUpdateToMessages(messages, { id: "gone", name: "spawn_agent", metadata: childUpdateMetadata("z", "running") })).toBe(messages);
+  });
 
-    // wait_workflow settles with the authoritative full member list.
+  it("this round's launches come from the streaming accumulator until they commit", () => {
+    const streaming: DisplayToolCall[] = [{
+      id: "spawn_live",
+      name: "spawn_agent",
+      args: {},
+      metadata: childUpdateMetadata("d", "running"),
+    }];
+    const groups = collectSubagentGroups([], streaming);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].kind).toBe("single");
+    expect(groups[0].members[0]?.subAgentId).toBe("d");
+  });
+
+  it("later wait_workflow result claims the members without producing an empty twin", () => {
     const messages: DisplayMessage[] = [{
       role: "assistant",
       content: "",
@@ -71,34 +120,9 @@ describe("live subagent trace accumulation (cross-round updates)", () => {
       }],
     } as DisplayMessage];
 
-    const groups = collectSubagentGroups(messages, [...map.values()]);
-    // One group only — the accumulator's echo must not produce an empty twin.
+    const groups = collectSubagentGroups(messages, []);
     expect(groups).toHaveLength(1);
     expect(groups[0].members).toHaveLength(2);
-    // Freshest wins: the completed snapshot beats the stale running one.
-    expect(groups[0].members.find((m) => m.subAgentId === "a")?.status).toBe("completed");
-  });
-
-  it("spawn_agent children absorbed cross-round render as single groups", () => {
-    const map = new Map<string, DisplayToolCall>();
-    accumulateLiveSubagentUpdate(map, { id: "spawn_call", name: "spawn_agent", metadata: childUpdateMetadata("c", "running") });
-    const groups = collectSubagentGroups([], [...map.values()]);
-    expect(groups).toHaveLength(1);
-    expect(groups[0].kind).toBe("single");
-    expect(groups[0].members[0]?.subAgentId).toBe("c");
-  });
-
-  it("prunes entries whose members all reached a final status, keeps live ones", () => {
-    const map = new Map<string, DisplayToolCall>();
-    accumulateLiveSubagentUpdate(map, { id: "done_wf", name: "run_workflow", metadata: childUpdateMetadata("a", "completed") });
-    accumulateLiveSubagentUpdate(map, { id: "done_wf", name: "run_workflow", metadata: childUpdateMetadata("b", "failed") });
-    accumulateLiveSubagentUpdate(map, { id: "live_wf", name: "run_workflow", metadata: childUpdateMetadata("c", "completed") });
-    accumulateLiveSubagentUpdate(map, { id: "live_wf", name: "run_workflow", metadata: childUpdateMetadata("d", "running") });
-
-    expect(pruneSettledLiveSubagentTools(map)).toBe(true);
-    expect([...map.keys()]).toEqual(["live_wf"]);
-    // No change on a second pass — callers key their version bump off this.
-    expect(pruneSettledLiveSubagentTools(map)).toBe(false);
   });
 
   it("mergeToolMetadata accumulates member snapshots by subAgentId", () => {

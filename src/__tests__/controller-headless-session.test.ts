@@ -474,7 +474,7 @@ describe("BubbleTuiController headless session", () => {
     expect(started).toMatchObject({ tools: [{ status: "running" }] });
   });
 
-  it("carries cross-provider-turn subagent updates into the live trace", async () => {
+  it("lands cross-provider-turn subagent updates on the settled launch row, not in the live trace", async () => {
     const host = new SpyHost();
     let controller: BubbleTuiController;
     let updated: ReturnType<BubbleTuiController["getStreamingTail"]> = null;
@@ -521,10 +521,10 @@ describe("BubbleTuiController headless session", () => {
 
     await controller.runTurn("go", "/cwd");
 
-    expect(updated).toMatchObject({
-      tools: [{ id: "spawn-1", status: "completed", metadata: { subagents: [{ status: "completed", summary: "done" }] } }],
-      parts: [{ type: "tools", toolCalls: [{ id: "spawn-1", status: "completed" }] }],
-    });
+    // The launch already committed: the live tail must not grow a synthetic
+    // second Subagent row for the same child (it rendered as a duplicate at the
+    // bottom of the working trace). The committed row is the single source.
+    expect(updated).toMatchObject({ tools: [], parts: [] });
     expect(controller.getTranscript()[0]?.toolCalls?.[0]?.metadata?.subagents).toEqual([
       expect.objectContaining({ subAgentId: "child-1", status: "completed", summary: "done" }),
     ]);

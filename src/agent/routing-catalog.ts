@@ -65,6 +65,15 @@ export type RoutingMembershipSource = "custom-allowlist" | "complete-discovery" 
 
 export interface RoutingSnapshot {
   parent: { providerId: string; model: string; tier?: ModelTier };
+  /**
+   * Subscription (OAuth) catalogs are account-scoped: the server decides which
+   * models this account may use, so only models the CURRENT identity's
+   * discovery snapshot (or the user's models.json) confirmed may be chosen by
+   * automatic tier routing. API-key providers keep their builtin tiers routable.
+   */
+  accountScopedCatalog: boolean;
+  /** Models automatic tier routing may pick from (see accountScopedCatalog). */
+  tierCatalog: TierCatalogEntry[];
   /** Catalog-effective provider id (openai OAuth -> "openai-codex" alias). */
   effectiveProviderId: string;
   membershipSource: RoutingMembershipSource;
@@ -110,6 +119,7 @@ export function buildRoutingSnapshot(
   const effectiveProviderId = parent.providerId === "openai" && configured?.authType === "oauth"
     ? "openai-codex"
     : parent.providerId;
+  const accountScopedCatalog = configured?.authType === "oauth";
 
   const builtins = listBuiltinModels(effectiveProviderId);
   const builtinIndex = new Map(builtins.map((model, index) => [model.id, index]));
@@ -180,9 +190,21 @@ export function buildRoutingSnapshot(
     ?? getBuiltinModel(effectiveProviderId, parent.model)?.tier;
 
   const runnableProviderIds = registry.getEnabled().map((provider) => provider.id);
+  // The dynamic overlay is provider-wide and is rebuilt from EVERY unexpired
+  // disk-cache entry at startup (other accounts, older client pins included),
+  // so "dynamic" membership alone does not prove this account can use a model.
+  // Only the current identity's own COMPLETE discovery does: a failed fetch is
+  // cached briefly as a builtin fallback and must not confirm anything.
+  const tierCatalog = tierCatalogEntries(
+    models,
+    accountScopedCatalog,
+    discovery?.complete ? new Set(discovery.models.map((model) => model.id)) : undefined,
+  );
 
   return {
     parent: { ...parent, tier: parentTier },
+    accountScopedCatalog,
+    tierCatalog,
     effectiveProviderId,
     membershipSource,
     models,
@@ -193,11 +215,38 @@ export function buildRoutingSnapshot(
     resolvedCategories: resolveCategoriesForMenu(
       parent,
       parentTier,
-      models,
+      tierCatalog,
       agentCategories,
       agentRouting,
     ),
   };
+}
+
+/**
+ * Catalog visible to automatic tier routing. On an account-scoped catalog only
+ * models confirmed by the current identity's discovery snapshot, or listed by
+ * the user in models.json, are candidates. A builtin-only entry (e.g. a static
+ * fast-tier model the ChatGPT plan does not include) or an overlay entry left
+ * by another account's cache would otherwise be routed to and rejected
+ * server-side. Without a snapshot nothing but user-listed models qualifies.
+ */
+export function tierCatalogEntries(
+  models: readonly RoutingModelEntry[],
+  accountScopedCatalog: boolean,
+  confirmedIds?: ReadonlySet<string>,
+): TierCatalogEntry[] {
+  return models
+    .filter((model) => (
+      !accountScopedCatalog
+      || model.source === "custom"
+      || (confirmedIds?.has(model.id) ?? false)
+    ))
+    .map((model): TierCatalogEntry => ({
+      id: model.id,
+      tier: model.tier,
+      routingPriority: model.routingPriority,
+      builtinIndex: model.builtinIndex,
+    }));
 }
 
 /** Tier-resolution context derived from a snapshot (consumed by categories §3.2). */
@@ -207,12 +256,7 @@ export function tierContextFromSnapshot(
 ): TierRoutingContext {
   return {
     parentTier: snapshot.parent.tier,
-    models: snapshot.models.map((model): TierCatalogEntry => ({
-      id: model.id,
-      tier: model.tier,
-      routingPriority: model.routingPriority,
-      builtinIndex: model.builtinIndex,
-    })),
+    models: snapshot.tierCatalog,
     autoTier: agentRouting.autoTier,
   };
 }
@@ -247,19 +291,14 @@ export function createRoutingSnapshotAccessor(
 function resolveCategoriesForMenu(
   parent: { providerId: string; model: string },
   parentTier: ModelTier | undefined,
-  models: RoutingModelEntry[],
+  models: TierCatalogEntry[],
   agentCategories: AgentCategoriesConfig,
   agentRouting: AgentRoutingConfig,
 ): RoutingSnapshot["resolvedCategories"] {
   const merged = mergeAgentCategoriesWithProvenance(agentCategories);
   const tierContext: TierRoutingContext = {
     parentTier,
-    models: models.map((model): TierCatalogEntry => ({
-      id: model.id,
-      tier: model.tier,
-      routingPriority: model.routingPriority,
-      builtinIndex: model.builtinIndex,
-    })),
+    models,
     autoTier: agentRouting.autoTier,
   };
   return Object.entries(merged).map(([name, entry]) => {

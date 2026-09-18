@@ -249,6 +249,34 @@ describe("transcript renderer", () => {
     expect(render().rows.map(strip).join("\n")).toContain("line a");
   });
 
+  it("reports a failed subagent once on its launch row; wait echoes add no second row", () => {
+    const failed = {
+      kind: "subagent" as const,
+      mode: "lifecycle",
+      subagents: [{ subAgentId: "child_9", agentName: "explorer", nickname: "Jean", status: "failed", error: "Provider rejected a request parameter." }],
+    };
+    const rows = renderTranscript([
+      msg({ role: "user", content: "看下这个项目是在干嘛的" }),
+      msg({
+        key: "a1",
+        parts: [{ type: "tools", toolCalls: [{ id: "spawn", name: "spawn_agent", args: { message: "inspect" }, result: "Spawned Jean", status: "completed", metadata: failed }] }],
+      }),
+      msg({
+        key: "a2",
+        parts: [{ type: "tools", toolCalls: [
+          { id: "wait", name: "wait_agent", args: { agent_id: "child_9" }, result: "wait_agent: 1 subagent", status: "completed", metadata: failed },
+          { id: "read-1", name: "read", args: { path: "README.md" }, result: "# readme", status: "completed" },
+        ] }],
+      }),
+    ], { columns: 80 }).map(strip);
+    const text = rows.join("\n");
+    expect(text).toContain("◆ Subagent Jean 1 error");
+    expect(text.match(/1 error/g)).toHaveLength(1);
+    // The wait echo never renders; the later Read row follows the launch directly.
+    expect(text).not.toContain("Wait");
+    expect(text.indexOf("Subagent Jean")).toBeLessThan(text.indexOf("◆ Read"));
+  });
+
   it("renders a completed subagent launch as an inspector action instead of a stale running fold", () => {
     const interaction = new TraceInteractionState();
     const projection = projectTranscript([msg({

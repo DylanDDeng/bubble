@@ -18,6 +18,9 @@ import { createSessionTitleUpdater, type SessionTitleUpdater } from "./session-t
 import { buildSystemPrompt } from "./system-prompt.js";
 import { createRoutableModelIndex, createRoutingSnapshotAccessor } from "./agent/routing-catalog.js";
 import { buildModelRoutingPrompt } from "./prompt/routing.js";
+
+/** Upper bound on blocking startup for OAuth catalog discovery (one HTTP round trip normally). */
+const MODEL_DISCOVERY_STARTUP_WAIT_MS = 3_000;
 import { SkillRegistry } from "./skills/registry.js";
 import { buildToolPromptOptions, createAllTools, type PlanController, type ToolSearchController } from "./tools/index.js";
 import { getProcessManager } from "./tasks/manager.js";
@@ -354,8 +357,14 @@ async function main() {
     ? decodeModel(normalizedConfiguredModel)
     : { providerId: undefined, modelId: "" };
   let activeProviderId = effectiveProviderId || fallbackProviderId;
-  if (registry.supportsOAuth(activeProviderId) && registry.getAuthStorage().has(activeProviderId)) {
+  // getConfigured() resolves the legacy openai-codex auth alias; the raw
+  // auth key would skip token refresh and discovery for such logins.
+  if (registry.getConfigured().find((item) => item.id === activeProviderId)?.authType === "oauth") {
     await registry.prepareProvider(activeProviderId);
+    // The routing prompt below is composed once; give the account catalog a
+    // bounded chance to land first so the menu the model reads matches what a
+    // spawn will actually get (design §1.5).
+    await registry.waitForModelDiscovery(activeProviderId, MODEL_DISCOVERY_STARTUP_WAIT_MS);
   }
   const activeProvider = registry.getConfigured().find((p) => p.id === activeProviderId) || defaultProvider;
   const activeModel = activeProvider && effectiveModelId

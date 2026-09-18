@@ -8,7 +8,7 @@
  * augments the curated catalog rather than replacing it.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -19,6 +19,7 @@ import {
   type ProviderProfile,
 } from "../provider-registry.js";
 import { clearDynamicModelMetadata, getBuiltinModel } from "../model-catalog.js";
+import { getCodexClientVersion } from "../provider-openai-codex.js";
 import type { UserConfig } from "../config.js";
 
 afterEach(() => {
@@ -304,5 +305,168 @@ describe("grok subscription discovery", () => {
       process.env.BUBBLE_SYSTEM_PROXY = previousProxy;
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe("ChatGPT (openai oauth) discovery scope", () => {
+  const oauthProvider: ProviderProfile = {
+    id: "openai",
+    name: "OpenAI",
+    baseURL: "https://chatgpt.com/backend-api",
+    apiKey: "eyJ.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC0xIn19.sig",
+    enabled: true,
+    authType: "oauth",
+  };
+
+  it("keys the discovery cache by the claimed Codex client version", () => {
+    const registry = isolatedRegistry([oauthProvider]);
+    const key = (registry as any).modelDiscoveryKey(oauthProvider) as string;
+    // A catalog written by an older build (or another running Bubble sharing
+    // the disk cache) under a lower pin must not satisfy this build's lookup.
+    expect(key).toContain(`codex-client:${getCodexClientVersion()}`);
+    const apiKeyProvider: ProviderProfile = { ...oauthProvider, authType: "api", baseURL: "https://api.openai.com/v1" };
+    expect((registry as any).modelDiscoveryKey(apiKeyProvider)).not.toContain("codex-client:");
+  });
+
+  it("warms discovery for account-scoped providers only, and only when nothing fresh is cached", async () => {
+    const registry = isolatedRegistry([oauthProvider]);
+    const discover = vi.spyOn(registry, "discoverModels").mockResolvedValue({ models: [], source: "remote", authoritative: true });
+    await registry.warmModelDiscovery("openai");
+    expect(discover).toHaveBeenCalledTimes(1);
+
+    vi.spyOn(registry, "getCachedDiscoverySnapshot").mockReturnValue({
+      models: [], source: "remote", complete: true, expiresAt: Date.now() + 60_000, identityKey: "acct",
+    });
+    await registry.warmModelDiscovery("openai");
+    expect(discover).toHaveBeenCalledTimes(1);
+
+    const apiRegistry = isolatedRegistry([{ ...oauthProvider, id: "deepseek", authType: "api", baseURL: "https://api.deepseek.com" }]);
+    const apiDiscover = vi.spyOn(apiRegistry, "discoverModels");
+    await apiRegistry.warmModelDiscovery("deepseek");
+    expect(apiDiscover).not.toHaveBeenCalled();
+  });
+
+  it("keeps the confirmed catalog for routing past the freshness minute and across a failed refresh", async () => {
+    const registry = isolatedRegistry([oauthProvider]);
+    const provider = registry.getConfigured().find((item) => item.id === "openai")!;
+    const key = (registry as any).modelDiscoveryKey(provider) as string;
+    const base = Date.now();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(base);
+    try {
+      (registry as any).modelDiscoveryCache.set(key, {
+        result: { models: [{ id: "gpt-6-astra", name: "GPT-6-Astra", providerId: "openai" }], source: "remote", authoritative: true },
+        expiresAt: base + 60_000,
+        confirmed: { models: [{ id: "gpt-6-astra", name: "GPT-6-Astra", providerId: "openai" }], until: base + 24 * 60 * 60 * 1000 },
+        identityKey: "acct",
+        providerId: "openai",
+        authType: "oauth",
+      });
+      expect(registry.getCachedDiscoverySnapshot("openai")?.complete).toBe(true);
+
+      // Freshness minute passed: still confirmed for routing.
+      nowSpy.mockReturnValue(base + 5 * 60_000);
+      const stale = registry.getCachedDiscoverySnapshot("openai");
+      expect(stale?.complete).toBe(true);
+      expect(stale?.models.map((m) => m.id)).toEqual(["gpt-6-astra"]);
+
+      // A failed refresh replaces the live result but carries the confirmation.
+      (registry as any).modelDiscoveryCache.set(key, {
+        result: { models: [{ id: "gpt-5.4-mini", name: "mini", providerId: "openai" }], source: "fallback", authoritative: false, error: "boom" },
+        expiresAt: base + 5 * 60_000 + 10_000,
+        confirmed: (registry as any).modelDiscoveryCache.get(key).confirmed,
+        identityKey: "acct",
+        providerId: "openai",
+        authType: "oauth",
+      });
+      const afterFailure = registry.getCachedDiscoverySnapshot("openai");
+      expect(afterFailure?.complete).toBe(true);
+      expect(afterFailure?.models.map((m) => m.id)).toEqual(["gpt-6-astra"]);
+
+      // Past the confirmation horizon nothing is trusted anymore.
+      nowSpy.mockReturnValue(base + 25 * 60 * 60 * 1000);
+      expect(registry.getCachedDiscoverySnapshot("openai")).toBeUndefined();
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it("a complete discovery result records a confirmation horizon; a failure carries the previous one", async () => {
+    const registry = isolatedRegistry([oauthProvider]);
+    const provider = registry.getConfigured().find((item) => item.id === "openai")!;
+    const key = (registry as any).modelDiscoveryKey(provider) as string;
+    vi.spyOn(registry as any, "performModelDiscovery").mockResolvedValueOnce({
+      models: [{ id: "gpt-6-astra", name: "GPT-6-Astra", providerId: "openai" }], source: "remote", authoritative: true,
+    });
+    await registry.discoverModels(provider, { forceRefresh: true });
+    const confirmed = (registry as any).modelDiscoveryCache.get(key).confirmed;
+    expect(confirmed?.models.map((m: { id: string }) => m.id)).toEqual(["gpt-6-astra"]);
+    expect(confirmed?.until).toBeGreaterThan(Date.now() + 60_000);
+
+    vi.spyOn(registry as any, "performModelDiscovery").mockResolvedValueOnce({
+      models: [], source: "fallback", authoritative: false, error: "network down",
+    });
+    await registry.discoverModels(provider, { forceRefresh: true });
+    expect((registry as any).modelDiscoveryCache.get(key).confirmed).toBe(confirmed);
+    expect(registry.getCachedDiscoverySnapshot("openai")?.complete).toBe(true);
+  });
+
+  it("persists a retained confirmation to disk when the live result is an error", () => {
+    const previousBubbleHome = process.env.BUBBLE_HOME;
+    const previousVitest = process.env.VITEST;
+    const bubbleHome = mkdtempSync(join(tmpdir(), "bubble-confirmed-cache-"));
+    try {
+      process.env.BUBBLE_HOME = bubbleHome;
+      process.env.VITEST = "false";
+      const registry = isolatedRegistry([oauthProvider]);
+      const provider = registry.getConfigured().find((item) => item.id === "openai")!;
+      const key = (registry as any).modelDiscoveryKey(provider) as string;
+      const until = Date.now() + 12 * 60 * 60 * 1000;
+      (registry as any).modelDiscoveryCache.set(key, {
+        result: { models: [], source: "fallback", authoritative: false, error: "network down" },
+        expiresAt: Date.now() + 10_000,
+        confirmed: { models: [{ id: "gpt-6-astra", name: "GPT-6-Astra", providerId: "openai" }], until },
+        identityKey: "acct-1",
+        providerId: "openai",
+        authType: "oauth",
+      });
+      (registry as any).saveDiscoveryDiskCache();
+      const written = JSON.parse(readFileSync(join(bubbleHome, "model-discovery-cache.json"), "utf8"));
+      expect(written[key]?.result?.models?.map((m: { id: string }) => m.id)).toEqual(["gpt-6-astra"]);
+      expect(written[key]?.result?.error).toBeUndefined();
+      expect(written[key]?.expiresAt).toBe(until);
+
+      // A restart during the outage restores the confirmation for routing.
+      const restarted = isolatedRegistry([oauthProvider]);
+      const snapshot = restarted.getCachedDiscoverySnapshot("openai");
+      expect(snapshot?.complete).toBe(true);
+      expect(snapshot?.models.map((m) => m.id)).toEqual(["gpt-6-astra"]);
+    } finally {
+      clearDynamicModelMetadata("openai-codex");
+      rmSync(bubbleHome, { recursive: true, force: true });
+      if (previousBubbleHome === undefined) delete process.env.BUBBLE_HOME;
+      else process.env.BUBBLE_HOME = previousBubbleHome;
+      if (previousVitest === undefined) delete process.env.VITEST;
+      else process.env.VITEST = previousVitest;
+    }
+  });
+
+  it("bounds the startup wait but lets a slow discovery finish in the background", async () => {
+    const registry = isolatedRegistry([oauthProvider]);
+    let settle!: () => void;
+    const pending = new Promise<{ models: []; source: "remote"; authoritative: true }>((resolve) => {
+      settle = () => resolve({ models: [], source: "remote", authoritative: true });
+    });
+    const discover = vi.spyOn(registry, "discoverModels").mockReturnValue(pending as never);
+
+    const started = Date.now();
+    await registry.waitForModelDiscovery("openai", 30);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(discover).toHaveBeenCalledTimes(1);
+
+    // A fast discovery resolves the wait without hitting the cap.
+    const quick = isolatedRegistry([oauthProvider]);
+    vi.spyOn(quick, "discoverModels").mockResolvedValue({ models: [], source: "remote", authoritative: true });
+    await quick.waitForModelDiscovery("openai", 5_000);
+    settle();
   });
 });
