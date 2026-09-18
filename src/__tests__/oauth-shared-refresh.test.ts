@@ -172,4 +172,32 @@ describe("OAuth refresh with auth.json shared between processes", () => {
 
     expect(registry.getRoutingRevision()).toBeGreaterThan(before);
   });
+
+  it("lets a login in another process win over a refresh that was in flight", async () => {
+    new AuthStorage(authPath).set("openai", expired("old"));
+    const registry = new ProviderRegistry(emptyConfig());
+    refreshOpenAICodex.mockImplementation(async () => {
+      // /login only takes the write lock, so it can land mid-request.
+      new AuthStorage(authPath).set("openai", { ...fresh("other-account"), accountId: "account-b" });
+      return { accessToken: "access-new", refreshToken: "refresh-new", expiresAt: Date.now() + 3_600_000 };
+    });
+
+    await registry.prepareProvider("openai");
+
+    const onDisk = JSON.parse(readFileSync(authPath, "utf-8")).openai;
+    expect(onDisk.refreshToken).toBe("refresh-other-account");
+    expect(onDisk.accountId).toBe("account-b");
+  });
+
+  it("does not resurrect credentials removed by a logout during the refresh", async () => {
+    new AuthStorage(authPath).set("openai", expired("old"));
+    const registry = new ProviderRegistry(emptyConfig());
+    refreshOpenAICodex.mockImplementation(async () => {
+      new AuthStorage(authPath).remove("openai");
+      return { accessToken: "access-new", refreshToken: "refresh-new", expiresAt: Date.now() + 3_600_000 };
+    });
+
+    await expect(registry.prepareProvider("openai")).rejects.toThrow(/removed while refreshing/);
+    expect(JSON.parse(readFileSync(authPath, "utf-8")).openai).toBeUndefined();
+  });
 });

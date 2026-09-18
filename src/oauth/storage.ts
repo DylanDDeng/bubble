@@ -122,7 +122,7 @@ function releaseLock(lockPath: string, token: string): void {
 
 export class AuthStorage {
   private data: Record<string, OAuthCredentials> = {};
-  /** mtime+size of the file as last read/written, to detect foreign writes. */
+  /** Identity of the file as last read/written, to detect foreign writes. */
   private diskStamp: string | undefined;
   private mutationListeners: Array<(providerId: string) => void> = [];
   private readonly authPath: string;
@@ -158,7 +158,9 @@ export class AuthStorage {
   private stampOf(): string | undefined {
     try {
       const stat = statSync(this.authPath);
-      return `${stat.mtimeMs}:${stat.size}`;
+      // ino + ctime: every write replaces the file by rename, so they change
+      // even when a same-size rotation lands within one coarse mtime tick.
+      return `${stat.ino}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.size}`;
     } catch {
       return undefined;
     }
@@ -201,7 +203,12 @@ export class AuthStorage {
    * process could read, lose the CPU while another persists a rotated token,
    * then rename its older snapshot over it.
    */
-  private commit(providerId: string, creds: OAuthCredentials | undefined) {
+  private commit(
+    providerId: string,
+    creds: OAuthCredentials | undefined,
+    /** Compare-and-set guard, checked under the lock against the re-read file. */
+    guard?: (onDisk: OAuthCredentials | undefined) => boolean,
+  ): boolean {
     const lockPath = `${this.authPath}.wlock`;
     const deadline = Date.now() + WRITE_LOCK_WAIT_MS;
     let token = tryAcquireLock(lockPath, WRITE_LOCK_STALE_MS);
@@ -214,6 +221,7 @@ export class AuthStorage {
     }
     try {
       this.sync(true);
+      if (guard && !guard(this.data[providerId])) return false;
       const next = { ...this.data };
       if (creds) next[providerId] = creds;
       else delete next[providerId];
@@ -222,6 +230,7 @@ export class AuthStorage {
       renameSync(tmpPath, this.authPath);
       this.data = next;
       this.diskStamp = this.stampOf();
+      return true;
     } finally {
       releaseLock(lockPath, token);
     }
@@ -281,6 +290,20 @@ export class AuthStorage {
   set(providerId: string, creds: OAuthCredentials) {
     this.commit(providerId, creds);
     this.notifyMutation(providerId);
+  }
+
+  /**
+   * Store the result of a refresh only if the entry is still the one that was
+   * refreshed (`fromRefreshToken`; null = the key must still be absent). A
+   * /login or /logout in another process only takes the write lock, so it can
+   * land while a refresh request is in flight; its outcome must win over a
+   * result derived from the credentials it replaced.
+   */
+  replaceIfUnchanged(providerId: string, creds: OAuthCredentials, fromRefreshToken: string | null): boolean {
+    const written = this.commit(providerId, creds, (onDisk) =>
+      fromRefreshToken === null ? onDisk === undefined : onDisk?.refreshToken === fromRefreshToken);
+    if (written) this.notifyMutation(providerId);
+    return written;
   }
 
   remove(providerId: string) {

@@ -615,7 +615,18 @@ export class ProviderRegistry {
         }
         throw error;
       }
-      for (const key of writeKeys) this.authStorage.set(key, next);
+      // A /login or /logout elsewhere may have landed while the request was in
+      // flight (they do not take the refresh lock): their outcome wins.
+      if (!this.authStorage.replaceIfUnchanged(authKey, next, current.refreshToken)) {
+        const replaced = this.authStorage.get(authKey);
+        if (replaced) return replaced;
+        throw new Error(`${label} credentials were removed while refreshing. Run ${loginHint} to sign in again.`);
+      }
+      for (const key of writeKeys) {
+        // Mirror keys were absent when resolved under the lock; stay out of the
+        // way if a login created one since.
+        if (key !== authKey) this.authStorage.replaceIfUnchanged(key, next, null);
+      }
       return next;
     });
   }
