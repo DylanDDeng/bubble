@@ -50,10 +50,9 @@ import {
   type DisplayToolCall,
 } from "../model/display-history.js";
 import {
-  accumulateLiveSubagentUpdate,
+  applySubagentUpdateToMessages,
   collectSubagentGroups,
   mergeSubagentSnapshotsIntoMessages,
-  pruneSettledLiveSubagentTools,
   type SubagentGroup,
 } from "../model/subagent-view.js";
 import { reconstructDisplayMessages } from "../model/display-reconstruct.js";
@@ -128,9 +127,6 @@ export class BubbleTuiController {
   private transcript: DisplayMessage[] = [];
   private runActive = false;
   private runState: RunState | null = null;
-  /** Background subagent updates can outlive the provider turn that launched
-   * them. Keep their latest synthetic tool snapshot in the live trace. */
-  private readonly liveSubagentTools = new Map<string, DisplayToolCall>();
   /** Provider-turn accumulators for true child-session inspection. */
   private readonly childRuns = new Map<string, { state: RunState; visible: boolean; updatedAt: number }>();
   private activeInputController: AgentRunInputQueue | null = null;
@@ -162,9 +158,7 @@ export class BubbleTuiController {
         this.externalGeneration += 1;
       },
       clearLiveSubagentTools: () => {
-        this.liveSubagentTools.clear();
         this.childRuns.clear();
-        this.liveSubagentVersion += 1;
       },
       commit: (manager, transcript) => {
         this.sessionManager = manager;
@@ -236,7 +230,6 @@ export class BubbleTuiController {
   }
 
   private externalGeneration = 0;
-  private liveSubagentVersion = 0;
 
   subscribe(listener: (version: number) => void): () => void {
     this.listeners.add(listener);
@@ -272,7 +265,11 @@ export class BubbleTuiController {
   }
 
   getSubagentGroups(): SubagentGroup[] {
-    const fromTrace = collectSubagentGroups(this.transcript, [...this.liveSubagentTools.values()]);
+    // Launches from earlier rounds live in the transcript (kept current by
+    // applySubagentUpdateToMessages); this round's launches are still in the
+    // streaming accumulator until turn_end commits them.
+    const streamingTools = this.runActive && this.runState ? this.runState.accumulator.toolCalls : [];
+    const fromTrace = collectSubagentGroups(this.transcript, streamingTools);
     const claimed = new Set(fromTrace.flatMap((group) => group.members.map((member) => member.subAgentId).filter(Boolean)));
     const direct = this.deps.agent.listSubAgents()
       .filter((snapshot) => !claimed.has(snapshot.agentId))
@@ -400,7 +397,6 @@ export class BubbleTuiController {
   /** Drop every transcript row (/clear). */
   clearTranscript(): void {
     this.transcript = [];
-    this.liveSubagentTools.clear();
     this.childRuns.clear();
     this.state.touch();
     this.notify();
@@ -413,9 +409,7 @@ export class BubbleTuiController {
         ...reconstructDisplayMessages([...this.deps.agent.messages]),
         ...restoredTaskLifecycleMessages(this.sessionManager),
       ];
-      this.liveSubagentTools.clear();
       this.childRuns.clear();
-      this.liveSubagentVersion += 1;
       this.state.touch();
     });
     this.notify();
@@ -437,9 +431,7 @@ export class BubbleTuiController {
           ...reconstructDisplayMessages([...this.deps.agent.messages]),
           ...restoredTaskLifecycleMessages(this.sessionManager),
         ];
-        this.liveSubagentTools.clear();
         this.childRuns.clear();
-        this.liveSubagentVersion += 1;
         this.liveStreamVisible = false;
         this.runState = null;
         this.state.touch();
@@ -621,20 +613,7 @@ export class BubbleTuiController {
   getStreamingTail(): { content: string; reasoning: string; tools: DisplayToolCall[]; parts: DisplayMessagePart[]; phase: "thinking" | "working" } | null {
     if (!this.runActive || !this.runState || !this.liveStreamVisible) return null;
     const acc = this.runState.accumulator;
-    const currentIds = new Set(acc.toolCalls.map((tool) => tool.id));
-    const carriedTools = [...this.liveSubagentTools.values()].filter((tool) => !currentIds.has(tool.id));
-    const allTools = [...acc.toolCalls, ...carriedTools];
     const parts = snapshotDisplayParts(acc.parts);
-    if (carriedTools.length > 0) {
-      parts.push({
-        type: "tools",
-        toolCalls: carriedTools.map((tool) => ({
-          ...tool,
-          args: { ...tool.args },
-          metadata: tool.metadata ? { ...tool.metadata } : undefined,
-        })),
-      });
-    }
     return {
       content: acc.content,
       // Ink kept the current provider turn's reasoning visible even after
@@ -642,7 +621,7 @@ export class BubbleTuiController {
       reasoning: acc.reasoning,
       // Return a render-safe snapshot: reducer events continue mutating the
       // accumulator in place while the TUI may still hold the previous tail.
-      tools: allTools.map((tool) => ({
+      tools: acc.toolCalls.map((tool) => ({
         ...tool,
         args: { ...tool.args },
         metadata: tool.metadata ? { ...tool.metadata } : undefined,
@@ -652,7 +631,7 @@ export class BubbleTuiController {
       parts,
       // Phase is provider-turn local, matching Ink's clearAssistantStream().
       // A tool in an earlier committed turn must not suppress fresh Thinking.
-      phase: allTools.length > 0 ? "working" : "thinking",
+      phase: acc.toolCalls.length > 0 ? "working" : "thinking",
     };
   }
 
@@ -707,7 +686,6 @@ export class BubbleTuiController {
     const upstreamAbort = () => abortController.abort(options?.abortSignal?.reason);
     if (options?.abortSignal?.aborted) upstreamAbort();
     else options?.abortSignal?.addEventListener("abort", upstreamAbort, { once: true });
-    pruneSettledLiveSubagentTools(this.liveSubagentTools);
     this.state.touch();
     this.notify();
 
@@ -743,19 +721,21 @@ export class BubbleTuiController {
           : event.type === "tool_end"
             ? event.result.metadata
             : undefined;
-        if (subagentMetadata?.kind === "subagent") {
-          this.transcript = mergeSubagentSnapshotsIntoMessages(this.transcript, subagentMetadata);
-        }
-
         if (
           event.type === "tool_update"
+          && subagentMetadata?.kind === "subagent"
           && effects.some((effect) => effect.kind === "live-subagent-changed")
         ) {
-          accumulateLiveSubagentUpdate(this.liveSubagentTools, {
+          // The launching call already committed: merge the update into its
+          // transcript entry so the settled row stays the single source of
+          // truth for live and settled rendering alike.
+          this.transcript = applySubagentUpdateToMessages(this.transcript, {
             id: event.id,
             name: event.name,
-            metadata: event.update.metadata,
+            metadata: subagentMetadata,
           });
+        } else if (subagentMetadata?.kind === "subagent") {
+          this.transcript = mergeSubagentSnapshotsIntoMessages(this.transcript, subagentMetadata);
         }
         if (event.type === "tool_update" && event.update.childEvent) {
           this.reduceChildEvent(event.update.subAgentId, event.update.childEvent);

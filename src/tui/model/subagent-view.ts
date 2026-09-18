@@ -139,6 +139,38 @@ function freshestSubagentSnapshots(messages: readonly DisplayMessage[]): Subagen
   return [...freshest.values()];
 }
 
+/** Maps every tool call in the transcript; returns the same array when nothing changed. */
+function mapTranscriptTools(
+  messages: DisplayMessage[],
+  updateTool: (tool: DisplayToolCall) => DisplayToolCall,
+): DisplayMessage[] {
+  let anyChanged = false;
+  const updated = messages.map((message) => {
+    let messageChanged = false;
+    const toolCalls = message.toolCalls?.map((tool) => {
+      const next = updateTool(tool);
+      if (next !== tool) messageChanged = true;
+      return next;
+    });
+    const parts = message.parts?.map((part) => {
+      if (part.type !== "tools") return part;
+      let partChanged = false;
+      const nextTools = part.toolCalls.map((tool) => {
+        const next = updateTool(tool);
+        if (next !== tool) partChanged = true;
+        return next;
+      });
+      if (!partChanged) return part;
+      messageChanged = true;
+      return { ...part, toolCalls: nextTools };
+    });
+    if (!messageChanged) return message;
+    anyChanged = true;
+    return { ...message, toolCalls, parts };
+  });
+  return anyChanged ? updated : messages;
+}
+
 /**
  * Projects a newer lifecycle snapshot back onto every existing trace that
  * already references the same child. spawn_agent settles as soon as the child
@@ -174,31 +206,7 @@ export function mergeSubagentSnapshotsIntoMessages(
     return changed ? { ...tool, metadata: { ...tool.metadata, subagents } } : tool;
   };
 
-  let anyChanged = false;
-  const updated = messages.map((message) => {
-    let messageChanged = false;
-    const toolCalls = message.toolCalls?.map((tool) => {
-      const next = updateTool(tool);
-      if (next !== tool) messageChanged = true;
-      return next;
-    });
-    const parts = message.parts?.map((part) => {
-      if (part.type !== "tools") return part;
-      let partChanged = false;
-      const nextTools = part.toolCalls.map((tool) => {
-        const next = updateTool(tool);
-        if (next !== tool) partChanged = true;
-        return next;
-      });
-      if (!partChanged) return part;
-      messageChanged = true;
-      return { ...part, toolCalls: nextTools };
-    });
-    if (!messageChanged) return message;
-    anyChanged = true;
-    return { ...message, toolCalls, parts };
-  });
-  return anyChanged ? updated : messages;
+  return mapTranscriptTools(messages, updateTool);
 }
 
 /** Reconciles persisted launch/wait/list echoes when rebuilding a session. */
@@ -246,69 +254,30 @@ export function mergeToolMetadata(
   };
 }
 
-const FINAL_MEMBER_STATUSES = new Set(["completed", "failed", "blocked", "cancelled", "closed"]);
-
 /**
- * Drops accumulator entries whose every member reached a final status: by then
- * the authoritative snapshot lives in the settled transcript (wait_workflow /
- * wait_agent result), so the entry is dead weight that would otherwise pile up
- * for the life of the process. Entries with running/queued members stay — for
- * a workflow spanning turns they are the only live view. Returns whether the
- * map changed (callers bump their version counter on true).
+ * Applies a subagent tool_update whose launching call has already settled out
+ * of the streaming round. Children keep reporting against the launching
+ * spawn_agent / run_workflow call id across later rounds (e.g. while a
+ * wait_workflow blocks), so the update is merged into that entry by id — which
+ * absorbs members a workflow spawned after commit — and then projected onto
+ * every echo referencing the same members. The settled transcript is the only
+ * data source; the live tail never carries synthetic tool rows.
  */
-export function pruneSettledLiveSubagentTools(map: Map<string, DisplayToolCall>): boolean {
-  let changed = false;
-  for (const [id, tc] of map) {
-    const members = Array.isArray(tc.metadata?.subagents) ? tc.metadata!.subagents : [];
-    const allFinal = members.every((member) =>
-      typeof member === "object" && member !== null
-      && FINAL_MEMBER_STATUSES.has(String((member as Record<string, unknown>).status)));
-    if (allFinal) {
-      map.delete(id);
-      changed = true;
-    }
-  }
-  return changed;
-}
-
-/**
- * Accumulates a subagent tool_update whose originating tool call has already
- * settled out of the current streaming round. The TUI clears its streaming
- * toolCalls on every turn_start, but background children keep reporting
- * against the launching run_workflow/spawn_agent call id across later rounds
- * (e.g. while a wait_workflow blocks) — without this side-channel those
- * updates are dropped and traces only appear after the whole team finishes.
- * Entries act as synthetic tool calls feeding collectSubagentGroups.
- * Returns true when the update was absorbed.
- */
-export function accumulateLiveSubagentUpdate(
-  map: Map<string, DisplayToolCall>,
-  event: { id: string; name: string; metadata?: ToolResultMetadata },
-): boolean {
-  if (event.metadata?.kind !== "subagent") return false;
-  const prev = map.get(event.id);
-  const metadata = mergeToolMetadata(prev?.metadata, event.metadata);
-  if (!metadata) return false;
-  // Per-child updates carry no mode; group them under the launching workflow
-  // call rather than falling back to one single-agent group per member.
-  if (event.name === "run_workflow" && metadata.mode === undefined) metadata.mode = "workflow";
-  const members = Array.isArray(metadata.subagents)
-    ? metadata.subagents.filter((member): member is Record<string, unknown> => (
-        typeof member === "object" && member !== null
-      ))
-    : [];
-  const statuses = members.map((member) => String(member.status ?? "running"));
-  const stillRunning = statuses.some((status) => status === "queued" || status === "running");
-  const failed = statuses.some((status) => status === "failed" || status === "blocked" || status === "cancelled");
-  map.set(event.id, {
-    id: event.id,
-    name: event.name,
-    args: prev?.args ?? {},
-    metadata,
-    status: stillRunning ? "running" : failed ? "failed" : "completed",
-    isError: failed,
+export function applySubagentUpdateToMessages(
+  messages: DisplayMessage[],
+  update: { id: string; name: string; metadata?: ToolResultMetadata },
+): DisplayMessage[] {
+  if (update.metadata?.kind !== "subagent") return messages;
+  const byId = mapTranscriptTools(messages, (tool) => {
+    if (tool.id !== update.id) return tool;
+    const metadata = mergeToolMetadata(tool.metadata, update.metadata);
+    if (!metadata || metadata === tool.metadata) return tool;
+    // Per-child updates carry no mode; keep them grouped under the launching
+    // workflow call rather than falling back to one single-agent group each.
+    if (update.name === "run_workflow" && metadata.mode === undefined) metadata.mode = "workflow";
+    return { ...tool, metadata };
   });
-  return true;
+  return mergeSubagentSnapshotsIntoMessages(byId, update.metadata);
 }
 
 /**

@@ -224,6 +224,23 @@ describe("Ink trace groups", () => {
       pending: true,
     });
   });
+
+  it("drops wait/list/send echoes so a child's failure is reported on its launch row only", () => {
+    const failed = {
+      kind: "subagent" as const,
+      mode: "lifecycle",
+      subagents: [{ subAgentId: "child_2", agentName: "explorer", nickname: "Jean", status: "failed", error: "Provider rejected a request parameter." }],
+    };
+    const groups = buildTraceGroups([
+      tool("spawn_agent", { message: "inspect" }, "Spawned Jean", { metadata: failed }),
+      tool("wait_agent", { agent_id: "child_2" }, "wait_agent: 1 subagent", { metadata: failed }),
+      tool("list_agents", {}, "1 subagent", { metadata: failed }),
+      tool("send_input", { agent_id: "child_2", message: "go" }, "sent", { metadata: failed }),
+    ], { homeDir });
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toMatchObject({ title: "Subagent", description: "Jean", hasError: true, errorCount: 1, pending: false });
+  });
 });
 
 let toolCounter = 0;
