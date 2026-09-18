@@ -606,6 +606,42 @@ describe("provider-openai-codex", () => {
     expect(authHeaders).toEqual([`Bearer ${oldToken}`, `Bearer ${newToken}`]);
   });
 
+  it("adopts a token another process rotated during the rejected request instead of refreshing again", async () => {
+    const oldToken = makeAccessToken("account-1");
+    const rotatedToken = makeAccessToken("account-1-rotated");
+    let credentials: OAuthCredentials = {
+      type: "oauth",
+      accessToken: oldToken,
+      refreshToken: "refresh-old",
+      expiresAt: Date.now() + 60 * 60 * 1000,
+      accountId: "account-1",
+    };
+    const refreshCredentials = vi.fn(async () => credentials);
+    const authHeaders: string[] = [];
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      authHeaders.push(new Headers(init?.headers).get("Authorization") || "");
+      if (authHeaders.length === 1) {
+        // While this request is rejected, another Bubble process rotates the token.
+        credentials = { ...credentials, accessToken: rotatedToken, refreshToken: "refresh-rotated" };
+        return new Response(JSON.stringify({ detail: { code: "token_expired" } }), { status: 401 });
+      }
+      return makeSseResponse();
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const provider = createOpenAICodexProvider({
+      providerId: "openai-codex",
+      apiKey: oldToken,
+      baseURL: "https://chatgpt.com/backend-api",
+      auth: { getCredentials: () => credentials, refreshCredentials },
+    });
+
+    await collectStream(provider.streamChat([{ role: "user", content: "hi" }], { model: "gpt-5.5" }));
+
+    expect(refreshCredentials).not.toHaveBeenCalled();
+    expect(authHeaders).toEqual([`Bearer ${oldToken}`, `Bearer ${rotatedToken}`]);
+  });
+
   it("retries a transient transport failure before any SSE event is parsed", async () => {
     const token = makeAccessToken("account-123");
     const fetchMock = vi.fn(async () => {

@@ -231,6 +231,11 @@ export function isUserVisibleProvider(providerId: string): boolean {
   return USER_VISIBLE_PROVIDER_IDS.includes(providerId);
 }
 
+/** Judge expiry on the exact credential set the caller is about to send. */
+function credentialsExpired(credentials: OAuthCredentials, graceMs = 5 * 60 * 1000): boolean {
+  return Date.now() >= credentials.expiresAt - graceMs;
+}
+
 export class ProviderRegistry {
   private config: UserConfig;
   private modelConfig: ModelConfig;
@@ -349,6 +354,10 @@ export class ProviderRegistry {
    * (docs/model-routing-design.md §1.6).
    */
   getRoutingRevision(): number {
+    // A login/logout in another Bubble process only reaches handleAuthMutation
+    // when the storage notices the file changed; callers cache against this
+    // number without touching credentials, so look now (one stat).
+    this.authStorage.sync();
     return this.routingRevision;
   }
 
@@ -454,8 +463,7 @@ export class ProviderRegistry {
     let refreshPromise: Promise<OAuthCredentials> | undefined;
     return {
       getCredentials: readCredentials,
-      isExpired: (_credentials, graceMs) =>
-        this.authStorage.isExpired(this.resolveOAuthAuthKey(providerId), graceMs),
+      isExpired: credentialsExpired,
       refreshCredentials: async (used) => {
         if (!refreshPromise) {
           refreshPromise = this.refreshOpenAICredentials(providerId, used).finally(() => {
@@ -473,7 +481,7 @@ export class ProviderRegistry {
     let refreshPromise: Promise<OAuthCredentials> | undefined;
     return {
       getCredentials: () => this.authStorage.get("grok"),
-      isExpired: (_credentials, graceMs) => this.authStorage.isExpired("grok", graceMs),
+      isExpired: credentialsExpired,
       refreshCredentials: async (used) => {
         if (!refreshPromise) {
           refreshPromise = this.refreshGrokCredentials(used).finally(() => {
@@ -511,12 +519,16 @@ export class ProviderRegistry {
   }
 
   private refreshOpenAICredentials(providerId: string, used?: OAuthCredentials): Promise<OAuthCredentials> {
-    const authKey = this.resolveOAuthAuthKey(providerId);
     return this.refreshSharedCredentials({
-      authKey,
+      // Resolved under the lock: another process may have completed a fresh
+      // /login openai meanwhile, and a legacy openai-codex refresh must not be
+      // mirrored over it.
+      resolveKeys: () => {
+        const authKey = this.resolveOAuthAuthKey(providerId);
+        // "openai" is the canonical key; a legacy openai-codex login is mirrored.
+        return { authKey, writeKeys: authKey === "openai" ? ["openai"] : ["openai", authKey] };
+      },
       used,
-      // "openai" is the canonical key; a legacy openai-codex login is mirrored.
-      writeKeys: authKey === "openai" ? ["openai"] : ["openai", authKey],
       label: "OpenAI",
       loginHint: "/login openai",
       refresh: async (current) => {
@@ -535,9 +547,8 @@ export class ProviderRegistry {
 
   private refreshGrokCredentials(used?: OAuthCredentials): Promise<OAuthCredentials> {
     return this.refreshSharedCredentials({
-      authKey: "grok",
+      resolveKeys: () => ({ authKey: "grok", writeKeys: ["grok"] }),
       used,
-      writeKeys: ["grok"],
       label: "Grok",
       loginHint: "/login grok",
       refresh: async (current) => {
@@ -565,17 +576,17 @@ export class ProviderRegistry {
    * the file no longer holds that set, not merely that it is unexpired.
    */
   private refreshSharedCredentials(options: {
-    authKey: string;
+    resolveKeys: () => { authKey: string; writeKeys: string[] };
     used?: OAuthCredentials;
-    writeKeys: string[];
     label: string;
     loginHint: string;
     refresh: (current: OAuthCredentials) => Promise<OAuthCredentials>;
   }): Promise<OAuthCredentials> {
-    const { authKey, writeKeys, label, loginHint, refresh } = options;
-    const held = options.used ?? this.authStorage.get(authKey);
+    const { label, loginHint, refresh } = options;
+    const held = options.used ?? this.authStorage.get(options.resolveKeys().authKey);
     return this.authStorage.withRefreshLock(async () => {
       this.authStorage.reload();
+      const { authKey, writeKeys } = options.resolveKeys();
       const current = this.authStorage.get(authKey);
       if (!current?.refreshToken) {
         throw new Error(`${label} OAuth credentials are missing a refresh token. Run ${loginHint} again.`);

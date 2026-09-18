@@ -130,4 +130,46 @@ describe("OAuth refresh with auth.json shared between processes", () => {
     expect(refreshOpenAICodex).toHaveBeenCalledTimes(1);
     expect(result.refreshToken).toBe("refresh-new");
   });
+
+  it("does not mirror a legacy openai-codex refresh over a login another process just completed", async () => {
+    new AuthStorage(authPath).set("openai-codex", expired("legacy"));
+    const registry = new ProviderRegistry(emptyConfig());
+    const adapter = registry.createOpenAICodexAuthAdapter("openai")!;
+    const held = (await adapter.getCredentials())!;
+    expect(held.refreshToken).toBe("refresh-legacy");
+
+    // Another process holds the refresh lock and completes a fresh /login openai.
+    const other = new AuthStorage(authPath);
+    let refreshing: Promise<unknown> | undefined;
+    await other.withRefreshLock(async () => {
+      refreshing = adapter.refreshCredentials(held); // queues behind the lock
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      other.set("openai", fresh("new-login"));
+    });
+    const result = (await refreshing) as { refreshToken: string };
+
+    expect(refreshOpenAICodex).not.toHaveBeenCalled();
+    expect(result.refreshToken).toBe("refresh-new-login");
+    expect(JSON.parse(readFileSync(authPath, "utf-8")).openai.refreshToken).toBe("refresh-new-login");
+  });
+
+  it("judges expiry on the credentials about to be sent, not on a later re-read", async () => {
+    new AuthStorage(authPath).set("openai", fresh("rotated"));
+    new AuthStorage(authPath).set("grok", fresh("rotated"));
+    const registry = new ProviderRegistry(emptyConfig());
+    const stale = expired("old");
+
+    expect(registry.createOpenAICodexAuthAdapter("openai")!.isExpired!(stale, 0)).toBe(true);
+    expect(registry.createGrokAuthAdapter("grok")!.isExpired!(stale, 0)).toBe(true);
+  });
+
+  it("bumps the routing revision when another process switches accounts", () => {
+    new AuthStorage(authPath).set("openai", { ...fresh("a"), accountId: "account-a" });
+    const registry = new ProviderRegistry(emptyConfig());
+    const before = registry.getRoutingRevision();
+
+    new AuthStorage(authPath).set("openai", { ...fresh("b-longer-token"), accountId: "account-b" });
+
+    expect(registry.getRoutingRevision()).toBeGreaterThan(before);
+  });
 });

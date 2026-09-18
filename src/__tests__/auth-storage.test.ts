@@ -6,7 +6,8 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { spawn } from "node:child_process";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../oauth/storage.js";
 
 const cleanups: Array<() => void> = [];
@@ -138,4 +139,82 @@ describe("AuthStorage shared between processes", () => {
     await expect(storage.withRefreshLock(async () => { throw new Error("boom"); })).rejects.toThrow("boom");
     expect(existsSync(`${authPath}.lock`)).toBe(false);
   });
+
+  it("never runs the protected section without the lock while a live holder keeps it", async () => {
+    vi.useFakeTimers();
+    cleanups.push(() => vi.useRealTimers());
+    const authPath = join(makeTempDir(), "auth.json");
+    const lockPath = `${authPath}.lock`;
+    writeFileSync(lockPath, "other-process-token");
+
+    const fn = vi.fn(async () => undefined);
+    const outcome = new AuthStorage(authPath).withRefreshLock(fn).then(() => "ran", (error: Error) => error.message);
+    // A live holder heartbeats, so its lock never goes stale.
+    for (let elapsed = 0; elapsed < 120_000; elapsed += 5_000) {
+      utimesSync(lockPath, new Date(), new Date());
+      await vi.advanceTimersByTimeAsync(5_000);
+    }
+
+    expect(await outcome).toMatch(/Timed out waiting for another Bubble process/);
+    expect(fn).not.toHaveBeenCalled();
+    expect(readFileSync(lockPath, "utf-8")).toBe("other-process-token");
+  });
+
+  it("does not delete a successor's lock when its own was broken as stale meanwhile", async () => {
+    const authPath = join(makeTempDir(), "auth.json");
+    const lockPath = `${authPath}.lock`;
+    await new AuthStorage(authPath).withRefreshLock(async () => {
+      // Simulates: we stalled, a waiter broke our lock and a successor took it.
+      writeFileSync(lockPath, "successor-token");
+    });
+    expect(readFileSync(lockPath, "utf-8")).toBe("successor-token");
+  });
+
+  it("surfaces a lock that cannot be created instead of spinning on it", async () => {
+    const notADir = join(makeTempDir(), "file");
+    writeFileSync(notADir, "");
+    const storage = new AuthStorage(join(notADir, "nested", "auth.json"));
+    const fn = vi.fn(async () => undefined);
+    await expect(storage.withRefreshLock(fn)).rejects.toThrow(/ENOTDIR|EEXIST|not a directory/i);
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("recovers from a write lock left behind by a crashed process", () => {
+    const authPath = join(makeTempDir(), "auth.json");
+    const wlock = `${authPath}.wlock`;
+    writeFileSync(wlock, "crashed-token");
+    const longAgo = new Date(Date.now() - 60_000);
+    utimesSync(wlock, longAgo, longAgo);
+
+    new AuthStorage(authPath).set("openai", creds("o"));
+    expect(JSON.parse(readFileSync(authPath, "utf-8")).openai.refreshToken).toBe("refresh-o");
+    expect(existsSync(wlock)).toBe(false);
+  });
+
+  // Real processes: the read-merge-write must not lose another writer's key.
+  it("loses no update when several processes write different keys at once", async () => {
+    const dir = makeTempDir();
+    const authPath = join(dir, "auth.json");
+    const script = join(dir, "writer.ts");
+    const storageModule = join(process.cwd(), "src/oauth/storage.ts");
+    writeFileSync(script, `
+      import { AuthStorage } from ${JSON.stringify(storageModule)};
+      const [authPath, id] = process.argv.slice(2);
+      const storage = new AuthStorage(authPath);
+      for (let i = 0; i < 25; i++) {
+        storage.set(id + "-" + i, { type: "oauth", accessToken: "a", refreshToken: "r", expiresAt: 1 });
+      }
+    `);
+    const tsx = join(process.cwd(), "node_modules/.bin/tsx");
+    const writers = ["w1", "w2", "w3", "w4"];
+    await Promise.all(writers.map((id) => new Promise<void>((resolve, reject) => {
+      const child = spawn(tsx, [script, authPath, id], { stdio: ["ignore", "ignore", "pipe"] });
+      let stderr = "";
+      child.stderr.on("data", (chunk) => { stderr += chunk; });
+      child.once("close", (code) => (code === 0 ? resolve() : reject(new Error(`writer ${id} exited ${code}: ${stderr}`))));
+    })));
+
+    const keys = Object.keys(JSON.parse(readFileSync(authPath, "utf-8")));
+    expect(keys).toHaveLength(writers.length * 25);
+  }, 60_000);
 });

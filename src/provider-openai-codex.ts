@@ -89,13 +89,23 @@ export function createOpenAICodexProvider(options: {
   const fetchImpl = options.fetch ?? chatGptFetch;
   let refreshPromise: Promise<OAuthCredentials> | undefined;
 
-  async function resolveRequestAuth(forceRefresh = false): Promise<{ accessToken: string; accountId: string }> {
+  // `rejectedAccessToken`: the token a 401 was returned for. If storage already
+  // holds a different one, another process rotated it while the request was in
+  // flight — use that instead of spending its refresh token on a second rotation.
+  async function resolveRequestAuth(
+    forceRefresh = false,
+    rejectedAccessToken?: string,
+  ): Promise<{ accessToken: string; accountId: string }> {
     let credentials = await options.auth?.getCredentials();
     if (credentials && options.auth) {
       const expired = options.auth.isExpired
         ? options.auth.isExpired(credentials, TOKEN_REFRESH_GRACE_MS)
         : Date.now() >= credentials.expiresAt - TOKEN_REFRESH_GRACE_MS;
-      if ((forceRefresh || !credentials.accessToken || expired) && credentials.refreshToken) {
+      const alreadyRotated = rejectedAccessToken !== undefined
+        && !!credentials.accessToken
+        && credentials.accessToken !== rejectedAccessToken;
+      const mustRefresh = (forceRefresh && !alreadyRotated) || !credentials.accessToken || expired;
+      if (mustRefresh && credentials.refreshToken) {
         if (!refreshPromise) {
           refreshPromise = options.auth.refreshCredentials(credentials).finally(() => {
             refreshPromise = undefined;
@@ -136,8 +146,10 @@ export function createOpenAICodexProvider(options: {
       })
     );
 
+    let sentAccessToken: string | undefined;
     const sendRequest = async (forceRefresh = false) => {
-      const { accessToken, accountId } = await resolveRequestAuth(forceRefresh);
+      const { accessToken, accountId } = await resolveRequestAuth(forceRefresh, forceRefresh ? sentAccessToken : undefined);
+      sentAccessToken = accessToken;
       return fetchImpl(resolveCodexUrl(options.baseURL), buildCodexRequestInit({
         accessToken,
         accountId,
