@@ -328,21 +328,41 @@ describe("ChatGPT (openai oauth) discovery scope", () => {
     expect((registry as any).modelDiscoveryKey(apiKeyProvider)).not.toContain("codex-client:");
   });
 
-  it("warms discovery for account-scoped providers only, and only when nothing fresh is cached", () => {
+  it("warms discovery for account-scoped providers only, and only when nothing fresh is cached", async () => {
     const registry = isolatedRegistry([oauthProvider]);
     const discover = vi.spyOn(registry, "discoverModels").mockResolvedValue({ models: [], source: "remote", authoritative: true });
-    registry.warmModelDiscovery("openai");
+    await registry.warmModelDiscovery("openai");
     expect(discover).toHaveBeenCalledTimes(1);
 
     vi.spyOn(registry, "getCachedDiscoverySnapshot").mockReturnValue({
       models: [], source: "remote", complete: true, expiresAt: Date.now() + 60_000, identityKey: "acct",
     });
-    registry.warmModelDiscovery("openai");
+    await registry.warmModelDiscovery("openai");
     expect(discover).toHaveBeenCalledTimes(1);
 
     const apiRegistry = isolatedRegistry([{ ...oauthProvider, id: "deepseek", authType: "api", baseURL: "https://api.deepseek.com" }]);
     const apiDiscover = vi.spyOn(apiRegistry, "discoverModels");
-    apiRegistry.warmModelDiscovery("deepseek");
+    await apiRegistry.warmModelDiscovery("deepseek");
     expect(apiDiscover).not.toHaveBeenCalled();
+  });
+
+  it("bounds the startup wait but lets a slow discovery finish in the background", async () => {
+    const registry = isolatedRegistry([oauthProvider]);
+    let settle!: () => void;
+    const pending = new Promise<{ models: []; source: "remote"; authoritative: true }>((resolve) => {
+      settle = () => resolve({ models: [], source: "remote", authoritative: true });
+    });
+    const discover = vi.spyOn(registry, "discoverModels").mockReturnValue(pending as never);
+
+    const started = Date.now();
+    await registry.waitForModelDiscovery("openai", 30);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(discover).toHaveBeenCalledTimes(1);
+
+    // A fast discovery resolves the wait without hitting the cap.
+    const quick = isolatedRegistry([oauthProvider]);
+    vi.spyOn(quick, "discoverModels").mockResolvedValue({ models: [], source: "remote", authoritative: true });
+    await quick.waitForModelDiscovery("openai", 5_000);
+    settle();
   });
 });

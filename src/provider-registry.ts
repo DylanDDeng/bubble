@@ -361,18 +361,38 @@ export class ProviderRegistry {
   }
 
   /**
-   * Start background discovery for an account-scoped (OAuth) provider so the
-   * routing snapshot knows the account's real catalog before the first
-   * subagent spawn. Discovery was previously triggered only by the model
-   * picker, which left tier routing on the static builtin list for the whole
-   * session unless the user opened /model. Fire-and-forget: discovery never
-   * throws (failures resolve to the local fallback) and a fresh cache is reused.
+   * Run discovery for an account-scoped (OAuth) provider so the routing
+   * snapshot knows the account's real catalog before the routing prompt is
+   * composed and before the first subagent spawn. Discovery was previously
+   * triggered only by the model picker, which left tier routing on the static
+   * builtin list for the whole session unless the user opened /model.
+   * Resolves when discovery settles (it never throws: failures resolve to the
+   * local fallback); resolves immediately when a fresh cache exists or the
+   * provider is not account-scoped. Hosts bound the wait, see waitForModelDiscovery.
    */
-  warmModelDiscovery(providerId: string): void {
+  warmModelDiscovery(providerId: string): Promise<void> {
     const provider = this.getConfigured().find((item) => item.id === providerId);
-    if (!provider?.enabled || !provider.apiKey || provider.authType !== "oauth") return;
-    if (this.getCachedDiscoverySnapshot(providerId)) return;
-    void this.discoverModels(provider).catch(() => undefined);
+    if (!provider?.enabled || !provider.apiKey || provider.authType !== "oauth") return Promise.resolve();
+    if (this.getCachedDiscoverySnapshot(providerId)) return Promise.resolve();
+    return this.discoverModels(provider).then(() => undefined, () => undefined);
+  }
+
+  /**
+   * Warm discovery but never hold startup hostage to the network: after
+   * `maxWaitMs` the host proceeds with whatever the snapshot has, and the
+   * still-running discovery updates the live accessor when it lands.
+   */
+  async waitForModelDiscovery(providerId: string, maxWaitMs: number): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, maxWaitMs);
+      timer.unref?.();
+    });
+    try {
+      await Promise.race([this.warmModelDiscovery(providerId), deadline]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   supportsOAuth(providerId: string): boolean {

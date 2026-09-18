@@ -193,11 +193,12 @@ export function buildRoutingSnapshot(
   // The dynamic overlay is provider-wide and is rebuilt from EVERY unexpired
   // disk-cache entry at startup (other accounts, older client pins included),
   // so "dynamic" membership alone does not prove this account can use a model.
-  // Only the current identity's own discovery snapshot does.
+  // Only the current identity's own COMPLETE discovery does: a failed fetch is
+  // cached briefly as a builtin fallback and must not confirm anything.
   const tierCatalog = tierCatalogEntries(
     models,
     accountScopedCatalog,
-    discovery ? new Set(discovery.models.map((model) => model.id)) : undefined,
+    discovery?.complete ? new Set(discovery.models.map((model) => model.id)) : undefined,
   );
 
   return {

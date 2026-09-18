@@ -212,6 +212,22 @@ describe("routing snapshot membership (§1.3)", () => {
         },
       }, parent);
       expect(own.resolvedCategories.find((c) => c.name === "explore")?.model).toBe("gpt-5.4-mini");
+
+      // A failed discovery is cached briefly as the builtin fallback with
+      // complete=false; it confirms nothing.
+      const failed = snapshotFor({
+        providerId: "openai",
+        oauth: true,
+        discovery: {
+          models: [{ id: "gpt-6-astra", name: "GPT-6-Astra", providerId: "openai" }, { id: "gpt-5.4-mini", name: "gpt-5.4-mini", providerId: "openai" }],
+          source: "fallback",
+          complete: false,
+          expiresAt: Date.now() + 10_000,
+          identityKey: "acct",
+        },
+      }, parent);
+      expect(failed.tierCatalog.some((model) => model.id === "gpt-5.4-mini")).toBe(false);
+      expect(failed.resolvedCategories.find((c) => c.name === "explore")?.model).toBe("inherit");
     } finally {
       clearDynamicModelMetadata("openai-codex");
     }

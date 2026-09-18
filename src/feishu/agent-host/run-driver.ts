@@ -354,7 +354,8 @@ export class RunDriver {
     if (effectiveModelId) assertProviderModelAllowed(activeProviderId, effectiveModelId);
     if (registry.supportsOAuth(activeProviderId) && registry.getAuthStorage().has(activeProviderId)) {
       await registry.prepareProvider(activeProviderId);
-      registry.warmModelDiscovery(activeProviderId);
+      // Same bounded wait as main.ts: the routing prompt is composed right after.
+      await registry.waitForModelDiscovery(activeProviderId, 3_000);
     }
     const target = registry.getConfigured().find((p) => p.id === activeProviderId) || defaultProvider;
     if (!target?.apiKey) {
