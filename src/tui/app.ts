@@ -738,6 +738,11 @@ export class PiTuiApp {
             mode === "model" ? "/model " : mode === "provider" ? "/provider " : "/theme ",
           );
           this.editor.refreshAutocomplete();
+        } else if (mode === "login" || mode === "logout") {
+          // Same inline surface as /model: the account list appears as the
+          // command's argument menu, so nothing is chosen for the user.
+          this.composer.replaceDraft(mode === "login" ? "/login " : "/logout ");
+          this.editor.refreshAutocomplete();
         } else if (mode === "key" && providerId) {
           this.openProviderKeyPhase(providerId);
         } else if (mode === "skill") {

@@ -52,14 +52,24 @@ type ModelCompletionSource = (
 
 type ProviderCompletionSource = ModelCompletionSource;
 type ThemeCompletionSource = ModelCompletionSource;
+export type AuthCommandName = "login" | "logout";
+type AuthCompletionSource = (
+  command: AuthCommandName,
+  argumentPrefix: string,
+) => AutocompleteArgumentSuggestions | AutocompleteItem[] | null;
 
 type ComposerPickerRegistry = ModelPickerRegistry
-  & Pick<ProviderRegistry, "getConfigured" | "getDefault">;
+  & Pick<ProviderRegistry, "getConfigured" | "getDefault">
+  & Partial<Pick<ProviderRegistry, "getAuthStorage">>;
 
 const MODEL_COMMAND_PREFIX = "/model ";
 const REASONING_EFFORT_SEPARATOR = " --reasoning-effort ";
 const PROVIDER_COMMAND_PREFIX = "/provider ";
 const THEME_COMMAND_PREFIX = "/theme ";
+const AUTH_COMMAND_PREFIX: Record<AuthCommandName, string> = {
+  login: "/login ",
+  logout: "/logout ",
+};
 
 const EFFORT_DESCRIPTIONS: Record<ThinkingLevel, string> = {
   off: "no reasoning effort",
@@ -241,6 +251,32 @@ export function buildProviderAutocompleteItems(
   });
 }
 
+/**
+ * Accounts for /login and /logout. Derived from the catalog so a new OAuth
+ * provider is offered without touching this list.
+ */
+export function buildAuthAutocompleteItems(
+  command: AuthCommandName,
+  argumentPrefix = "",
+  isSignedIn: (providerId: string) => boolean = () => false,
+): AutocompleteItem[] {
+  const query = argumentPrefix.trim().toLowerCase();
+  return BUILTIN_PROVIDERS.flatMap((provider) => {
+    if (!provider.supportsOAuth || !isUserVisibleProvider(provider.id)) return [];
+    const signedIn = isSignedIn(provider.id);
+    const status = signedIn ? "Signed in" : "Not signed in";
+    const hint = command === "login"
+      ? (signedIn ? "sign in again" : "opens the browser")
+      : (signedIn ? "removes this device's credentials" : "nothing to remove");
+    const description = `${provider.id} · ${status} · ${hint}`;
+    // Match the account only. The status/hint prose is shared by every row,
+    // so searching it would make "open" match Grok via "opens the browser".
+    const searchable = `${provider.id} ${provider.name}`.toLowerCase();
+    if (query && !searchable.includes(query)) return [];
+    return [{ value: provider.id, label: provider.name, description, submitOnSelect: true }];
+  });
+}
+
 export function buildThemeAutocompleteItems(
   argumentPrefix = "",
   detectedTheme: ResolvedTheme = "dark",
@@ -269,6 +305,7 @@ export function buildComposerSlashCommands(
   modelCompletions?: ModelCompletionSource,
   providerCompletions?: ProviderCompletionSource,
   themeCompletions?: ThemeCompletionSource,
+  authCompletions?: AuthCompletionSource,
 ): TuiSlashCommand[] {
   const result = new Map<string, TuiSlashCommand>();
   const add = (command: TuiSlashCommand) => {
@@ -325,6 +362,22 @@ export function buildComposerSlashCommands(
         keepArgumentMenuOnEmpty: true,
         argumentEmptyMessage: "No matching themes",
         getArgumentCompletions: themeCompletions,
+      });
+    } else if ((command.name === "login" || command.name === "logout") && authCompletions) {
+      const authCommand: AuthCommandName = command.name;
+      add({
+        name: command.name,
+        description: command.description,
+        argumentHint: "<account>",
+        submitOnSelect: false,
+        argumentInputHint: {
+          prompt: "⌕ ",
+          placeholder: "Select account…",
+          valuePrefix: AUTH_COMMAND_PREFIX[authCommand],
+        },
+        keepArgumentMenuOnEmpty: true,
+        argumentEmptyMessage: "No matching accounts",
+        getArgumentCompletions: (prefix) => authCompletions(authCommand, prefix),
       });
     } else {
       add({ name: command.name, description: command.description });
@@ -388,10 +441,28 @@ export class ComposerAutocompleteProvider implements AutocompleteProvider {
         this.sources.registry ? (prefix) => this.getModelCompletions(prefix) : undefined,
         this.sources.registry ? (prefix) => this.getProviderCompletions(prefix) : undefined,
         (prefix) => this.getThemeCompletions(prefix),
+        (command, prefix) => this.getAuthCompletions(command, prefix),
       ),
       this.sources.cwd,
       this.sources.fdPath ?? null,
     );
+  }
+
+  private getAuthCompletions(
+    command: AuthCommandName,
+    argumentPrefix: string,
+  ): AutocompleteArgumentSuggestions {
+    const storage = this.sources.registry?.getAuthStorage?.();
+    return {
+      items: buildAuthAutocompleteItems(command, argumentPrefix, (id) => storage?.has(id) ?? false),
+      inputHint: {
+        prompt: "⌕ ",
+        placeholder: "Select account…",
+        valuePrefix: AUTH_COMMAND_PREFIX[command],
+      },
+      keepOpenOnEmpty: true,
+      emptyMessage: "No matching accounts",
+    };
   }
 
   private getThemeCompletions(argumentPrefix: string): AutocompleteArgumentSuggestions {

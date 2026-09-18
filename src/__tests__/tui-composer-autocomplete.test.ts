@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  buildAuthAutocompleteItems,
   buildComposerSlashCommands,
   buildModelAutocompleteItems,
   buildProviderAutocompleteItems,
@@ -148,6 +149,39 @@ describe("pi-tui composer autocomplete", () => {
       ["dark", true],
     ]);
     expect(buildThemeAutocompleteItems("term", "light").map((item) => item.value)).toEqual(["auto"]);
+  });
+
+  it("offers every OAuth account for /login and /logout instead of assuming OpenAI", () => {
+    const login = buildAuthAutocompleteItems("login", "", (id) => id === "grok");
+    expect(login.map((item) => item.value)).toEqual(["openai", "grok"]);
+    expect(login.every((item) => item.submitOnSelect)).toBe(true);
+    expect(login[0]?.description).toContain("Not signed in");
+    expect(login[1]?.description).toContain("Signed in");
+
+    expect(buildAuthAutocompleteItems("logout", "gro").map((item) => item.value)).toEqual(["grok"]);
+    // Shared hint prose ("opens the browser") must not leak into search.
+    expect(buildAuthAutocompleteItems("login", "open").map((item) => item.value)).toEqual(["openai"]);
+    expect(buildAuthAutocompleteItems("login", "browser")).toEqual([]);
+
+    const commands = buildComposerSlashCommands(
+      [
+        { name: "login", description: "Login", source: "builtin" as const, handler: async () => {} },
+        { name: "logout", description: "Logout", source: "builtin" as const, handler: async () => {} },
+      ],
+      [],
+      "fullscreen",
+      undefined,
+      undefined,
+      undefined,
+      (command, prefix) => buildAuthAutocompleteItems(command, prefix),
+    );
+    const loginCommand = commands.find((entry) => entry.name === "login");
+    expect(loginCommand).toMatchObject({
+      submitOnSelect: false,
+      keepArgumentMenuOnEmpty: true,
+      argumentInputHint: { valuePrefix: "/login " },
+    });
+    expect(commands.find((entry) => entry.name === "logout")?.argumentInputHint?.valuePrefix).toBe("/logout ");
   });
 
   it("turns /provider into the same inline searchable command surface", () => {

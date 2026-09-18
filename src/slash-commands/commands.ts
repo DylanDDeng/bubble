@@ -783,7 +783,9 @@ const builtinSlashCommandEntries: SlashCommand[] = [
     name: "login",
     description: "Login to OpenAI OAuth or Grok Subscription. Usage: /login [openai|grok]",
     async handler(args, ctx) {
-      const providerId = args?.trim() || "openai";
+      // No default provider: a bare command must ask which account, never
+      // silently act on OpenAI now that more than one OAuth provider exists.
+      const providerId = args?.trim();
       if (!providerId) {
         ctx.openPicker("login");
         return;
@@ -919,7 +921,9 @@ const builtinSlashCommandEntries: SlashCommand[] = [
     name: "logout",
     description: "Remove local login credentials. Usage: /logout [openai|grok]",
     async handler(args, ctx) {
-      const providerId = args?.trim() || "openai";
+      // No default provider: a bare command must ask which account, never
+      // silently act on OpenAI now that more than one OAuth provider exists.
+      const providerId = args?.trim();
       if (!providerId) {
         ctx.openPicker("logout");
         return;

@@ -507,6 +507,32 @@ describe("slash commands", () => {
     expect(transitionToNative).not.toHaveBeenCalled();
   });
 
+  it("bare /login asks which account instead of defaulting to OpenAI", async () => {
+    const mockedLogin = vi.mocked(loginOpenAICodex);
+    mockedLogin.mockClear();
+    const ctx = createContext();
+
+    const result = await slashRegistry.execute("/login", ctx);
+
+    expect(result.result).toBeUndefined();
+    expect(ctx.openPicker).toHaveBeenCalledWith("login");
+    expect(mockedLogin).not.toHaveBeenCalled();
+  });
+
+  it("bare /logout asks which account and removes no credentials", async () => {
+    const remove = vi.fn();
+    const registry = {
+      getAuthStorage: () => ({ has: () => true, remove, getPath: () => "/tmp/auth.json" }),
+    } as never;
+    const ctx = createContext({ registry });
+
+    const result = await slashRegistry.execute("/logout", ctx);
+
+    expect(result.result).toBeUndefined();
+    expect(ctx.openPicker).toHaveBeenCalledWith("logout");
+    expect(remove).not.toHaveBeenCalled();
+  });
+
   it("/login openai keeps the active Grok session when no usable model is available", async () => {
     const mockedLogin = vi.mocked(loginOpenAICodex);
     mockedLogin.mockClear();
