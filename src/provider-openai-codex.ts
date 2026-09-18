@@ -32,7 +32,8 @@ const TOKEN_REFRESH_GRACE_MS = 5 * 60 * 1000;
 // OpenAI gates new codex models server-side by client_version (each model carries a
 // `minimal_client_version`). Track a recent real Codex CLI release; override via env
 // when OpenAI lifts the gate again before we cut a new release.
-const CODEX_CLIENT_VERSION = process.env.BUBBLE_CODEX_CLIENT_VERSION?.trim() || "0.150.0";
+// 2026-09-17: gpt-6-astra requires 0.153.0; 0.155.0 is the current @openai/codex release.
+const CODEX_CLIENT_VERSION = process.env.BUBBLE_CODEX_CLIENT_VERSION?.trim() || "0.155.0";
 const MODEL_DISCOVERY_PATHS = [
   `/codex/models?client_version=${CODEX_CLIENT_VERSION}`,
   "/models",
@@ -844,13 +845,14 @@ function extractCodexModelDescriptors(payload: unknown): CodexModelDescriptor[] 
   return out;
 }
 
-// Extracts the family version from a codex slug (e.g. "gpt-5.5-codex" → 5005).
-// Used so models from a newer family float to the top even before the static
-// catalog knows about them.
+// Extracts the family version from a codex slug (e.g. "gpt-5.5-codex" → 5005,
+// "gpt-6-astra" → 6000). Used so models from a newer family float to the top
+// even before the static catalog knows about them. Integer-major slugs must
+// rank above every older major.minor family, not fall to zero.
 function parseCodexFamilyRank(id: string): number {
-  const match = id.match(/(\d+)\.(\d+)/);
+  const match = id.match(/(\d+)(?:\.(\d+))?/);
   if (!match) return 0;
-  return parseInt(match[1], 10) * 1000 + parseInt(match[2], 10);
+  return parseInt(match[1], 10) * 1000 + (match[2] ? parseInt(match[2], 10) : 0);
 }
 
 export function sortCodexModelDescriptors(descriptors: CodexModelDescriptor[]): CodexModelDescriptor[] {

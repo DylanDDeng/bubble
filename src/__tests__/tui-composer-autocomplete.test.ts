@@ -260,6 +260,21 @@ describe("pi-tui composer autocomplete", () => {
     });
   });
 
+  it("opens the effort menu after choosing the builtin DeepSeek Flash model", () => {
+    const provider = { ...openaiProvider, id: "deepseek", name: "DeepSeek", baseURL: "https://api.deepseek.com" };
+    const groups = [{ provider, models: localModelsForProvider(modelRegistry(), provider) }];
+    const [model] = buildModelAutocompleteItems(groups, "deepseek-flash", "high");
+    expect(model).toMatchObject({
+      value: "deepseek:deepseek-flash --reasoning-effort ",
+      submitOnSelect: false,
+    });
+    const efforts = buildModelAutocompleteItems(groups, model.value, "high");
+    expect(efforts.map((item) => item.label)).toEqual(["off", "low", "high", "max"]);
+    expect(efforts.every((item) => item.submitOnSelect)).toBe(true);
+    expect(efforts.find((item) => item.label === "max")?.value)
+      .toBe("deepseek:deepseek-flash --reasoning-effort max");
+  });
+
   it("switches multi-effort models to an inline effort phase and prefers the current effort", async () => {
     const model = {
       id: "gpt-test",

@@ -626,10 +626,14 @@ describe("main pi-tui running input", () => {
     let cancellations = 0;
     let exits = 0;
     let runCalls = 0;
+    let controllerSubscribed = 0;
     let controllerUnsubscribed = 0;
     let questionUnsubscribed = 0;
     const controller = {
-      subscribe: () => () => { controllerUnsubscribed += 1; },
+      subscribe: () => {
+        controllerSubscribed += 1;
+        return () => { controllerUnsubscribed += 1; };
+      },
       getTranscript: () => [],
       isRunning: () => true,
       getStreamingTail: () => ({ content: "", reasoning: "", tools: [], parts: [], phase: "thinking" as const }),
@@ -707,7 +711,10 @@ describe("main pi-tui running input", () => {
 
     terminal.sendInput("/fullscreen");
     terminal.sendInput("\r");
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Entering fullscreen awaits a dynamic import before the alternate-screen
+    // app subscribes; wait for that subscription instead of a fixed delay,
+    // which was too short on cold CI runners.
+    await vi.waitFor(() => expect(controllerSubscribed).toBe(2));
     app.dispose();
     expect(exits).toBe(1);
     // Main + alternate-screen controller subscriptions are both released.

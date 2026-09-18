@@ -908,6 +908,9 @@ export class PiTuiApp {
     this.animationClock.setActive(false);
     this.tui.stop();
     const { FullscreenApp } = await import("./fullscreen.js");
+    // The import yields; a dispose (or a second /fullscreen) racing it must not
+    // mount an alternate screen nobody will tear down.
+    if (this.disposed || this.fullscreen) return;
     this.fullscreen = new FullscreenApp({
       controller: this.options.controller,
       agent: this.options.agent,

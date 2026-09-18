@@ -20,13 +20,28 @@ describe("variant resolver", () => {
     expect(getAvailableThinkingLevels("deepseek", "deepseek-v4-pro")).toEqual(["off", "low", "high", "max"]);
   });
 
+  it("keeps DeepSeek Flash effort selectable with high as the default", () => {
+    expect(getAvailableThinkingLevels("deepseek", "deepseek-flash")).toEqual(["off", "low", "high", "max"]);
+    expect(getDefaultThinkingLevel("deepseek", "deepseek-flash")).toBe("high");
+    expect(isThinkingOnlyModel("deepseek", "deepseek-flash")).toBe(false);
+    expect(getModelContextWindow("deepseek", "deepseek-flash")).toBe(1048576);
+  });
+
   it("uses one canonical effort order including ultra", () => {
     expect(THINKING_LEVELS).toEqual(["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
     expect(isThinkingLevel("ultra")).toBe(true);
   });
 
-  it("defines the exact GPT-5.6 fallback catalog", () => {
-    expect(listBuiltinModels("openai-codex").slice(0, 3)).toEqual([
+  it("defines the exact GPT-6 / GPT-5.6 fallback catalog", () => {
+    expect(listBuiltinModels("openai-codex").slice(0, 4)).toEqual([
+      expect.objectContaining({
+        id: "gpt-6-astra",
+        reasoningLevels: ["low", "medium", "high", "xhigh", "max", "ultra"],
+        defaultReasoningLevel: "medium",
+        contextWindow: 372000,
+        useResponsesLite: true,
+        toolOutputTokenLimit: 10000,
+      }),
       expect.objectContaining({
         id: "gpt-5.6-sol",
         reasoningLevels: ["low", "medium", "high", "xhigh", "max", "ultra"],

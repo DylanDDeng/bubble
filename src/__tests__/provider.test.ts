@@ -311,6 +311,7 @@ describe("translateOpenAIStream", () => {
     expect(chunks.find((c): c is Extract<StreamChunk, { type: "usage" }> => c.type === "usage")?.usage).toMatchObject({
       promptTokens: 100,
       completionTokens: 20,
+      outputTokensReported: true,
       promptCacheHitTokens: 40,
       promptCacheMissTokens: 60,
       totalTokens: 120,
@@ -433,6 +434,14 @@ describe("translateOpenAIStream", () => {
     expect(chunks.filter((c) => c.type === "text").map((c: any) => c.content).join("")).toBe("if (i < n) {");
   });
 
+  it("distinguishes a reported zero from absent completion usage", async () => {
+    for (const [usage, reported] of [[{ prompt_tokens: 5 }, false], [{ prompt_tokens: 5, completion_tokens: 0 }, true]] as const) {
+      const chunks = await collect(translateOpenAIStream(fromArray([{ usage, choices: [{ delta: {} }] }])));
+      const chunk = chunks.find(c => c.type === "usage");
+      expect(chunk?.type === "usage" && chunk.usage.outputTokensReported).toBe(reported);
+    }
+  });
+
   it("forwards DeepSeek usage cache and reasoning token details", async () => {
     const chunks = await collect(translateOpenAIStream(fromArray([
       {
@@ -455,6 +464,7 @@ describe("translateOpenAIStream", () => {
         promptCacheHitTokens: 40,
         promptCacheMissTokens: 60,
         completionTokens: 20,
+        outputTokensReported: true,
         totalTokens: 120,
         reasoningTokens: 12,
       },
@@ -500,6 +510,7 @@ describe("translateOpenAIStream", () => {
         promptCacheHitTokens: undefined,
         promptCacheMissTokens: undefined,
         completionTokens: 20,
+        outputTokensReported: true,
         totalTokens: 120,
         reasoningTokens: undefined,
       },

@@ -127,7 +127,7 @@ describe("provider-openai-codex", () => {
   });
 
   it("returns the latest fallback model first", () => {
-    expect(getOpenAICodexFallbackModels()[0]).toBe("gpt-5.6-sol");
+    expect(getOpenAICodexFallbackModels()[0]).toBe("gpt-6-astra");
   });
 
   it("parses the account catalog without inventing off and honors server priority", async () => {
@@ -709,11 +709,14 @@ describe("provider-openai-codex", () => {
       { id: "gpt-5.4-mini" },
       { id: "gpt-5.2" },
       { id: "gpt-5.4" },
-      { id: "gpt-5.6" },
+      // Integer-major slug with the lowest server priority; it must still lead.
+      { id: "gpt-6-astra", priority: 1 },
+      { id: "gpt-5.6", priority: 4 },
       { id: "gpt-5.3-codex" },
     ]).map((d) => d.id);
 
-    expect(sorted[0]).toBe("gpt-5.6");
+    expect(sorted[0]).toBe("gpt-6-astra");
+    expect(sorted[1]).toBe("gpt-5.6");
     expect(sorted.indexOf("gpt-5.4")).toBeLessThan(sorted.indexOf("gpt-5.4-mini"));
     expect(sorted.indexOf("gpt-5.4-mini")).toBeLessThan(sorted.indexOf("gpt-5.3-codex"));
     expect(sorted[sorted.length - 1]).toBe("gpt-5.2");

@@ -17,6 +17,7 @@ import {
   projectAssistantRows,
   renderMessage,
   renderReasoning,
+  TRANSCRIPT_RAIL_COLUMNS,
   type TranscriptTheme,
 } from "../tui/components/transcript.js";
 import { ResponsiveFooterComponent } from "../tui/footer.js";
@@ -24,6 +25,8 @@ import { createFlushScheduler } from "../tui/run.js";
 import type { DisplayMessage } from "../tui/model/display-history.js";
 
 const strip = (value: string): string => stripVTControlCharacters(value);
+/** Empty rail in front of assistant prose. */
+const RAIL = " ".repeat(TRANSCRIPT_RAIL_COLUMNS);
 
 function rendered(component: StreamingMessageComponent, width = 80): string[] {
   return [...component.render(width), ...component.activityLane.render(width)]
@@ -66,12 +69,12 @@ describe("pi-tui working trace parity", () => {
     }, 80);
 
     const rows = rendered(component);
-    expect(rows).toContain("┃◆ Thinking…");
-    expect(rows).toContain("┃R3");
-    expect(rows).toContain("┃R7");
-    expect(rows).not.toContain("┃R1");
-    expect(rows).not.toContain("┃R2");
-    expect(rows.indexOf("┃◆ Thinking…")).toBeLessThan(rows.findIndex((row) => row.includes("working through the request")));
+    expect(rows).toContain("┃  ◆ Thinking…");
+    expect(rows).toContain("┃  R3");
+    expect(rows).toContain("┃  R7");
+    expect(rows).not.toContain("┃  R1");
+    expect(rows).not.toContain("┃  R2");
+    expect(rows.indexOf("┃  ◆ Thinking…")).toBeLessThan(rows.findIndex((row) => row.includes("working through the request")));
   });
 
   it("keeps the status cadence while Grok entries render above it", () => {
@@ -88,12 +91,12 @@ describe("pi-tui working trace parity", () => {
       phase: "thinking",
     }, 80);
     let rows = rendered(component);
-    expect(rows).toContain("┃◆ Thinking…");
-    expect(rows).toContain("┃thought");
+    expect(rows).toContain("┃  ◆ Thinking…");
+    expect(rows).toContain("┃  thought");
     expect(rows.some((row) => row.includes("writing the response"))).toBe(true);
-    expect(rows).toContain("answer");
+    expect(rows).toContain(`${RAIL}answer`);
     expect(rows.join("\n")).not.toContain("● answer");
-    expect(rows.indexOf("answer")).toBeLessThan(rows.findIndex((row) => row.includes("writing the response")));
+    expect(rows.indexOf(`${RAIL}answer`)).toBeLessThan(rows.findIndex((row) => row.includes("writing the response")));
 
     const read = { id: "read-1", name: "read", args: { path: "README.md" }, status: "running" as const };
     component.update({
@@ -107,11 +110,11 @@ describe("pi-tui working trace parity", () => {
     expect(rows.at(-1)).toContain("reading files");
     expect(rows.join("\n")).toContain("◆ Read 1 file running");
     expect(rows.join("\n")).toContain("README.md");
-    expect(rows.indexOf("┃thought")).toBeLessThan(rows.findIndex((row) => row.includes("◆ Read")));
-    expect(rows.findIndex((row) => row.includes("◆ Read"))).toBeLessThan(rows.indexOf("answer"));
+    expect(rows.indexOf("┃  thought")).toBeLessThan(rows.findIndex((row) => row.includes("◆ Read")));
+    expect(rows.findIndex((row) => row.includes("◆ Read"))).toBeLessThan(rows.indexOf(`${RAIL}answer`));
   });
 
-  it("keeps live and settled multiline answers on the same column-zero projection", () => {
+  it("keeps live and settled multiline answers on the same rail projection", () => {
     const width = 12;
     const content = "alpha beta 这是多行 answer";
     const expected = projectAssistantRows(content, { columns: width }).map(strip);
@@ -132,7 +135,8 @@ describe("pi-tui working trace parity", () => {
       .map(strip)
       .slice(0, -1);
     expect(settled).toEqual(expected);
-    expect(expected.every((row) => row.length === 0 || !/^\s/u.test(row))).toBe(true);
+    // Every prose row sits behind the shared empty rail, never deeper.
+    expect(expected.every((row) => row.length === 0 || (row.startsWith(RAIL) && !/^\s/u.test(row.slice(RAIL.length))))).toBe(true);
     expect(expected.join("\n")).not.toContain("●");
   });
 
@@ -158,15 +162,17 @@ describe("pi-tui working trace parity", () => {
     }, 80);
 
     let text = rendered(component).join("\n");
-    expect(text).toContain("┃◆ Thinking…");
+    expect(text).toContain("┃  ◆ Thinking…");
     expect(text).toContain("◆ Execute npm test running");
     expect(text.indexOf("I will verify.")).toBeLessThan(text.indexOf("Execute npm test"));
     expect(text.indexOf("Execute npm test")).toBeLessThan(text.indexOf("Done."));
     const firstFrameRows = rendered(component);
-    const reasoningBodyAt = firstFrameRows.indexOf("┃inspect the tests");
-    const commentaryAt = firstFrameRows.indexOf("I will verify.");
+    const reasoningBodyAt = firstFrameRows.indexOf("┃  inspect the tests");
+    const commentaryAt = firstFrameRows.indexOf(`${RAIL}I will verify.`);
     const toolAt = firstFrameRows.findIndex((row) => row.includes("◆ Execute npm test running"));
-    const answerAt = firstFrameRows.indexOf("Done.");
+    const answerAt = firstFrameRows.indexOf(`${RAIL}Done.`);
+    expect(reasoningBodyAt).toBeGreaterThan(0);
+    expect(commentaryAt).toBeGreaterThan(0);
     expect(firstFrameRows[reasoningBodyAt + 1]).toBe("");
     expect(firstFrameRows[commentaryAt + 1]).toBe("");
     expect(firstFrameRows[toolAt + 1]).toBe("");
@@ -196,7 +202,7 @@ describe("pi-tui working trace parity", () => {
     expect(text).not.toContain("Working");
     expect(text).not.toContain(" running");
     expect(text).toContain("1 line output · Ctrl+O to view");
-    expect(text).toContain("┃◆ Thinking…");
+    expect(text).toContain("┃  ◆ Thinking…");
   });
 
   it("rotates the spinner and idle phrase on the Ink cadence, then cleans up", () => {
@@ -221,13 +227,13 @@ describe("pi-tui working trace parity", () => {
   it("keeps the same five-line minimal reasoning surface after settle", () => {
     const compact = renderReasoning("\nR1\n\nR2\nR3\nR4\nR5\nR6\nR7", { columns: 80 }).map(strip);
     expect(compact).toEqual([
-      "┃◆ Thinking",
-      "┃R3",
-      "┃R4",
-      "┃R5",
-      "┃R6",
-      "┃R7",
-      "┃… (Ctrl+T to expand)",
+      "┃  ◆ Thinking",
+      "┃  R3",
+      "┃  R4",
+      "┃  R5",
+      "┃  R6",
+      "┃  R7",
+      "┃  … (Ctrl+T to expand)",
       "",
     ]);
     expect(compact.join("\n")).not.toContain("└─");
