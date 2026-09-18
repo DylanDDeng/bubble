@@ -23,6 +23,10 @@ import {
   normalizeThinkingLevel,
 } from "../provider-transform.js";
 import type { ThinkingLevel } from "../types.js";
+import {
+  GROK_SUBSCRIPTION_PROVIDER_ID,
+  isGrokSubscriptionProviderId,
+} from "../external-runtime/grok-provider.js";
 import type { ResolvedTheme, ThemeMode } from "./model/theme.js";
 import {
   discoverModelProviderGroups,
@@ -42,6 +46,8 @@ export interface ComposerAutocompleteSources {
   providerId?(): string;
   themeMode?(): ThemeMode;
   detectedTheme?(): ResolvedTheme;
+  /** True while the session is bound to the legacy Grok external runtime. */
+  grokRuntimeActive?(): boolean;
   onModelSuggestionsChanged?(): void;
   fdPath?: string | null;
 }
@@ -60,7 +66,7 @@ type AuthCompletionSource = (
 
 type ComposerPickerRegistry = ModelPickerRegistry
   & Pick<ProviderRegistry, "getConfigured" | "getDefault">
-  & Partial<Pick<ProviderRegistry, "getAuthStorage">>;
+  & Partial<Pick<ProviderRegistry, "getOAuthLoginKeys">>;
 
 const MODEL_COMMAND_PREFIX = "/model ";
 const REASONING_EFFORT_SEPARATOR = " --reasoning-effort ";
@@ -251,6 +257,32 @@ export function buildProviderAutocompleteItems(
   });
 }
 
+export interface AuthAccountState {
+  isSignedIn(providerId: string): boolean;
+  /** Session is bound to the legacy Grok external runtime. */
+  grokRuntimeActive?: boolean;
+}
+
+/**
+ * What picking a row will actually do. Provider-specific because the handlers
+ * differ: /login openai always runs a fresh OAuth flow, while /login grok
+ * reuses stored credentials and only opens the browser when they fail.
+ */
+function authActionHint(
+  command: AuthCommandName,
+  providerId: string,
+  signedIn: boolean,
+  grokRuntimeActive: boolean,
+): string {
+  const grok = isGrokSubscriptionProviderId(providerId);
+  if (command === "login") {
+    if (!signedIn) return "opens the browser";
+    return grok ? "reuses the stored sign-in · /logout grok first to switch accounts" : "sign in again";
+  }
+  if (grok && grokRuntimeActive) return "ends the active Grok session and starts a fresh one";
+  return signedIn ? "removes this device's credentials" : "nothing to remove";
+}
+
 /**
  * Accounts for /login and /logout. Derived from the catalog so a new OAuth
  * provider is offered without touching this list.
@@ -258,20 +290,22 @@ export function buildProviderAutocompleteItems(
 export function buildAuthAutocompleteItems(
   command: AuthCommandName,
   argumentPrefix = "",
-  isSignedIn: (providerId: string) => boolean = () => false,
+  state: AuthAccountState = { isSignedIn: () => false },
 ): AutocompleteItem[] {
   const query = argumentPrefix.trim().toLowerCase();
   return BUILTIN_PROVIDERS.flatMap((provider) => {
     if (!provider.supportsOAuth || !isUserVisibleProvider(provider.id)) return [];
-    const signedIn = isSignedIn(provider.id);
-    const status = signedIn ? "Signed in" : "Not signed in";
-    const hint = command === "login"
-      ? (signedIn ? "sign in again" : "opens the browser")
-      : (signedIn ? "removes this device's credentials" : "nothing to remove");
+    const grok = isGrokSubscriptionProviderId(provider.id);
+    const runtimeActive = grok && state.grokRuntimeActive === true;
+    const signedIn = state.isSignedIn(provider.id);
+    const status = signedIn ? "Signed in" : runtimeActive ? "Active session" : "Not signed in";
+    const hint = authActionHint(command, provider.id, signedIn, runtimeActive);
     const description = `${provider.id} · ${status} · ${hint}`;
     // Match the account only. The status/hint prose is shared by every row,
     // so searching it would make "open" match Grok via "opens the browser".
-    const searchable = `${provider.id} ${provider.name}`.toLowerCase();
+    // Include every id the handler accepts so a typed alias still matches.
+    const aliases = grok ? ` ${GROK_SUBSCRIPTION_PROVIDER_ID}` : "";
+    const searchable = `${provider.id} ${provider.name}${aliases}`.toLowerCase();
     if (query && !searchable.includes(query)) return [];
     return [{ value: provider.id, label: provider.name, description, submitOnSelect: true }];
   });
@@ -375,8 +409,8 @@ export function buildComposerSlashCommands(
           placeholder: "Select account…",
           valuePrefix: AUTH_COMMAND_PREFIX[authCommand],
         },
-        keepArgumentMenuOnEmpty: true,
-        argumentEmptyMessage: "No matching accounts",
+        // No keep-open-on-empty: an empty menu swallows Enter, and a typed id
+        // the list does not show must still reach the handler's own error.
         getArgumentCompletions: (prefix) => authCompletions(authCommand, prefix),
       });
     } else {
@@ -452,16 +486,17 @@ export class ComposerAutocompleteProvider implements AutocompleteProvider {
     command: AuthCommandName,
     argumentPrefix: string,
   ): AutocompleteArgumentSuggestions {
-    const storage = this.sources.registry?.getAuthStorage?.();
+    const registry = this.sources.registry;
     return {
-      items: buildAuthAutocompleteItems(command, argumentPrefix, (id) => storage?.has(id) ?? false),
+      items: buildAuthAutocompleteItems(command, argumentPrefix, {
+        isSignedIn: (id) => (registry?.getOAuthLoginKeys?.(id).length ?? 0) > 0,
+        grokRuntimeActive: this.sources.grokRuntimeActive?.() ?? false,
+      }),
       inputHint: {
         prompt: "⌕ ",
         placeholder: "Select account…",
         valuePrefix: AUTH_COMMAND_PREFIX[command],
       },
-      keepOpenOnEmpty: true,
-      emptyMessage: "No matching accounts",
     };
   }
 

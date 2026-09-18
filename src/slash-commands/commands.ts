@@ -931,10 +931,12 @@ const builtinSlashCommandEntries: SlashCommand[] = [
       if (isGrokSubscriptionProviderId(providerId)) {
         return logoutGrokSubscription(ctx);
       }
-      if (!ctx.registry.getAuthStorage().has(providerId)) {
+      // Alias-aware: `openai` may be backed by the legacy `openai-codex` key.
+      const loginKeys = ctx.registry.getOAuthLoginKeys(providerId);
+      if (loginKeys.length === 0) {
         return `No OAuth credentials found for ${providerId}.`;
       }
-      ctx.registry.getAuthStorage().remove(providerId);
+      for (const key of loginKeys) ctx.registry.getAuthStorage().remove(key);
 
       const fallback = ctx.registry.getDefault();
       if (fallback?.apiKey) {

@@ -152,7 +152,7 @@ describe("pi-tui composer autocomplete", () => {
   });
 
   it("offers every OAuth account for /login and /logout instead of assuming OpenAI", () => {
-    const login = buildAuthAutocompleteItems("login", "", (id) => id === "grok");
+    const login = buildAuthAutocompleteItems("login", "", { isSignedIn: (id) => id === "grok" });
     expect(login.map((item) => item.value)).toEqual(["openai", "grok"]);
     expect(login.every((item) => item.submitOnSelect)).toBe(true);
     expect(login[0]?.description).toContain("Not signed in");
@@ -162,6 +162,27 @@ describe("pi-tui composer autocomplete", () => {
     // Shared hint prose ("opens the browser") must not leak into search.
     expect(buildAuthAutocompleteItems("login", "open").map((item) => item.value)).toEqual(["openai"]);
     expect(buildAuthAutocompleteItems("login", "browser")).toEqual([]);
+    // Every id the handler accepts must still match its row.
+    expect(buildAuthAutocompleteItems("login", "grok-subscription").map((item) => item.value)).toEqual(["grok"]);
+  });
+
+  it("describes what each account row will really do", () => {
+    const signedIn = { isSignedIn: () => true };
+    const [openaiLogin, grokLogin] = buildAuthAutocompleteItems("login", "", signedIn);
+    // /login openai always re-runs OAuth; /login grok reuses stored credentials.
+    expect(openaiLogin?.description).toContain("sign in again");
+    expect(grokLogin?.description).not.toContain("sign in again");
+    expect(grokLogin?.description).toContain("reuses the stored sign-in");
+
+    // A bound legacy Grok runtime makes /logout grok destructive even with no
+    // native credentials, so the row must not claim there is nothing to remove.
+    const runtimeOnly = buildAuthAutocompleteItems("logout", "grok", {
+      isSignedIn: () => false,
+      grokRuntimeActive: true,
+    });
+    expect(runtimeOnly[0]?.description).toContain("Active session");
+    expect(runtimeOnly[0]?.description).toContain("ends the active Grok session");
+    expect(runtimeOnly[0]?.description).not.toContain("nothing to remove");
 
     const commands = buildComposerSlashCommands(
       [
@@ -178,9 +199,10 @@ describe("pi-tui composer autocomplete", () => {
     const loginCommand = commands.find((entry) => entry.name === "login");
     expect(loginCommand).toMatchObject({
       submitOnSelect: false,
-      keepArgumentMenuOnEmpty: true,
       argumentInputHint: { valuePrefix: "/login " },
     });
+    // An empty keep-open menu swallows Enter; typed ids must reach the handler.
+    expect(loginCommand?.keepArgumentMenuOnEmpty).toBeUndefined();
     expect(commands.find((entry) => entry.name === "logout")?.argumentInputHint?.valuePrefix).toBe("/logout ");
   });
 

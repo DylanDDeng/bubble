@@ -17,12 +17,16 @@ const ESC = "\x1b";
 const ENTER = "\r";
 const DOWN = "\x1b[B";
 
-function createApp(signedIn: string[] = []) {
+function createApp(signedIn: string[] = [], externalRuntime?: unknown) {
   const terminal = new VirtualTerminal(100, 30);
-  const messages: DisplayMessage[] = [];
+  let messages: DisplayMessage[] = [];
   const remove = vi.fn();
+  let notifyTranscriptChanged = () => {};
   const controller = {
-    subscribe: () => () => {},
+    subscribe: (listener: () => void) => {
+      notifyTranscriptChanged = listener;
+      return () => { notifyTranscriptChanged = () => {}; };
+    },
     getTranscript: () => messages,
     getSubagentGroups: () => [],
     getWorkflows: () => [],
@@ -34,7 +38,10 @@ function createApp(signedIn: string[] = []) {
     steer: () => false,
     cancelActiveRun: () => false,
     runTurn: async () => {},
-    appendDisplayMessage: (message: DisplayMessage) => { messages.push(message); },
+    appendDisplayMessage: (message: DisplayMessage) => {
+      messages = [...messages, message];
+      notifyTranscriptChanged();
+    },
     clearTranscript: () => {},
     shutdown: () => ({ reason: "test", wallMs: 0 }),
   };
@@ -46,6 +53,9 @@ function createApp(signedIn: string[] = []) {
   };
   const registry = {
     getAuthStorage: () => authStorage,
+    // Mirrors ProviderRegistry: `openai` may be backed by legacy `openai-codex`.
+    getOAuthLoginKeys: (id: string) =>
+      (id === "openai" ? ["openai", "openai-codex"] : [id]).filter((key) => signedIn.includes(key)),
     supportsOAuth: (id: string) => id === "openai" || id === "grok",
     getConfigured: () => [],
     getDefault: () => undefined,
@@ -61,7 +71,7 @@ function createApp(signedIn: string[] = []) {
       setMode: () => {},
       getContextUsageSnapshot: () => ({ usedTokens: 0, contextWindow: 1_000 }),
     } as never,
-    sessionManager: { getSessionFile: () => "/login.jsonl", getMetadata: () => ({}) } as never,
+    sessionManager: { getSessionFile: () => "/login.jsonl", getMetadata: () => ({ externalRuntime }) } as never,
     controller: controller as never,
     registry: registry as never,
     callbacks: { onExitRequest: () => {}, onClearTranscript: () => {}, onThemeToggle: () => {} },
@@ -140,6 +150,45 @@ describe("main pi-tui /login and /logout account picker", () => {
         expect(viewport()).toContain("nothing to remove");
       });
       expect(remove).not.toHaveBeenCalled();
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("treats legacy openai-codex credentials as the OpenAI login and removes them", async () => {
+    const { app, terminal, viewport, remove } = createApp(["openai-codex"]);
+    app.start();
+    try {
+      await submitBare(terminal, "/logout");
+      await vi.waitFor(() => expect(viewport()).toContain("removes this device's credentials"));
+      terminal.sendInput(ENTER);
+      await vi.waitFor(() => expect(remove).toHaveBeenCalledWith("openai-codex"));
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("submits a typed account id the menu does not list instead of swallowing Enter", async () => {
+    const { app, terminal, viewport } = createApp();
+    app.start();
+    try {
+      terminal.sendInput("/login nope");
+      await vi.waitFor(() => expect(viewport()).toContain("/login nope"));
+      terminal.sendInput(ENTER);
+      await vi.waitFor(() => expect(viewport()).toContain("Unsupported login provider: nope"));
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("accepts the canonical grok-subscription id typed by hand", async () => {
+    const { app, terminal, viewport } = createApp();
+    app.start();
+    try {
+      terminal.sendInput("/login grok-subscription");
+      await vi.waitFor(() => expect(viewport()).toContain("Grok Subscription"));
+      terminal.sendInput(ENTER);
+      await vi.waitFor(() => expect(loginGrok).toHaveBeenCalledTimes(1));
     } finally {
       app.dispose();
     }

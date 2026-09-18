@@ -424,6 +424,18 @@ export class ProviderRegistry {
     return !!getBuiltinProvider(providerId)?.supportsOAuth;
   }
 
+  /**
+   * Auth-storage keys currently backing a provider's OAuth login. The visible
+   * `openai` provider may still be backed by the legacy `openai-codex` key,
+   * so UI state and logout must not check `has(providerId)` directly.
+   */
+  getOAuthLoginKeys(providerId: string): string[] {
+    const candidates = providerId === "openai" || providerId === "openai-codex"
+      ? ["openai", "openai-codex"]
+      : [providerId];
+    return candidates.filter((key) => this.authStorage.has(key));
+  }
+
   private resolveOAuthAuthKey(providerId: string): string {
     if (providerId === "openai" || providerId === "openai-codex") {
       if (this.authStorage.has("openai")) return "openai";
