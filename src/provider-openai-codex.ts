@@ -413,6 +413,8 @@ export async function fetchOpenAICodexModelCatalog(options: {
   baseURL: string;
   accessToken: string;
   fetch?: ChatGptFetch;
+  /** Bounds both catalog GETs; a stalled warm-up must not pin the in-flight slot. */
+  signal?: AbortSignal;
 }): Promise<OpenAICodexModelCatalogResult> {
   const accountId = extractChatGptAccountId(options.accessToken);
   if (!accountId) {
@@ -429,6 +431,7 @@ export async function fetchOpenAICodexModelCatalog(options: {
         globalThis.crypto?.randomUUID?.() ?? `bubble_${Date.now()}`,
         { accept: "application/json" },
       ),
+      signal: options.signal,
     }).catch(() => undefined);
 
     if (!response?.ok) continue;

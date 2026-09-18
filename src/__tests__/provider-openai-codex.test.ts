@@ -133,6 +133,22 @@ describe("provider-openai-codex", () => {
     expect(getOpenAICodexFallbackModels()[0]).toBe("gpt-6-astra");
   });
 
+  it("forwards the caller's abort signal to the catalog request", async () => {
+    const seen: RequestInit[] = [];
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      seen.push(init ?? {});
+      return new Response(JSON.stringify(GPT56_CATALOG_FIXTURE), { status: 200 });
+    });
+    const controller = new AbortController();
+    await fetchOpenAICodexModelCatalog({
+      baseURL: "https://chatgpt.com/backend-api",
+      accessToken: makeAccessToken("account-123"),
+      fetch: fetchMock,
+      signal: controller.signal,
+    });
+    expect(seen[0]?.signal).toBe(controller.signal);
+  });
+
   it("parses the account catalog without inventing off and honors server priority", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify(GPT56_CATALOG_FIXTURE), { status: 200 }));
 

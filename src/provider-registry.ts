@@ -312,16 +312,28 @@ export class ProviderRegistry {
     if (!this.discoveryDiskCacheEnabled) return;
     try {
       const data: Record<string, unknown> = {};
+      const now = Date.now();
       for (const [key, entry] of this.modelDiscoveryCache) {
-        if (entry.result.error) continue;
-        data[key] = {
-          result: entry.result,
-          expiresAt: Date.now() + MODEL_DISCOVERY_DISK_TTL_MS,
+        const common = {
           identityKey: entry.identityKey,
           providerId: entry.providerId,
           authType: entry.authType,
           protocol: entry.protocol,
         };
+        if (!entry.result.error) {
+          data[key] = { ...common, result: entry.result, expiresAt: now + MODEL_DISCOVERY_DISK_TTL_MS };
+          continue;
+        }
+        // A failed refresh must not erase the identity's last confirmed catalog
+        // from disk when an unrelated provider triggers a rewrite; persist the
+        // confirmation under its remaining horizon instead of dropping the key.
+        if (entry.confirmed && entry.confirmed.until > now) {
+          data[key] = {
+            ...common,
+            result: { models: entry.confirmed.models, source: "remote", authoritative: true },
+            expiresAt: entry.confirmed.until,
+          };
+        }
       }
       mkdirSync(dirname(this.discoveryDiskCachePath), { recursive: true });
       writeFileSync(this.discoveryDiskCachePath, JSON.stringify(data, null, 2), { mode: 0o600 });
@@ -848,6 +860,7 @@ export class ProviderRegistry {
         const catalog = await fetchOpenAICodexModelCatalog({
           baseURL: currentProvider.baseURL,
           accessToken: currentProvider.apiKey,
+          signal: AbortSignal.timeout(MODEL_DISCOVERY_TIMEOUT_MS),
         });
         if (catalog.status === "unavailable") {
           throw new Error("OpenAI Codex model catalog is unavailable.");

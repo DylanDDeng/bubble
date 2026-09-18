@@ -8,7 +8,7 @@
  * augments the curated catalog rather than replacing it.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -408,6 +408,46 @@ describe("ChatGPT (openai oauth) discovery scope", () => {
     await registry.discoverModels(provider, { forceRefresh: true });
     expect((registry as any).modelDiscoveryCache.get(key).confirmed).toBe(confirmed);
     expect(registry.getCachedDiscoverySnapshot("openai")?.complete).toBe(true);
+  });
+
+  it("persists a retained confirmation to disk when the live result is an error", () => {
+    const previousBubbleHome = process.env.BUBBLE_HOME;
+    const previousVitest = process.env.VITEST;
+    const bubbleHome = mkdtempSync(join(tmpdir(), "bubble-confirmed-cache-"));
+    try {
+      process.env.BUBBLE_HOME = bubbleHome;
+      process.env.VITEST = "false";
+      const registry = isolatedRegistry([oauthProvider]);
+      const provider = registry.getConfigured().find((item) => item.id === "openai")!;
+      const key = (registry as any).modelDiscoveryKey(provider) as string;
+      const until = Date.now() + 12 * 60 * 60 * 1000;
+      (registry as any).modelDiscoveryCache.set(key, {
+        result: { models: [], source: "fallback", authoritative: false, error: "network down" },
+        expiresAt: Date.now() + 10_000,
+        confirmed: { models: [{ id: "gpt-6-astra", name: "GPT-6-Astra", providerId: "openai" }], until },
+        identityKey: "acct-1",
+        providerId: "openai",
+        authType: "oauth",
+      });
+      (registry as any).saveDiscoveryDiskCache();
+      const written = JSON.parse(readFileSync(join(bubbleHome, "model-discovery-cache.json"), "utf8"));
+      expect(written[key]?.result?.models?.map((m: { id: string }) => m.id)).toEqual(["gpt-6-astra"]);
+      expect(written[key]?.result?.error).toBeUndefined();
+      expect(written[key]?.expiresAt).toBe(until);
+
+      // A restart during the outage restores the confirmation for routing.
+      const restarted = isolatedRegistry([oauthProvider]);
+      const snapshot = restarted.getCachedDiscoverySnapshot("openai");
+      expect(snapshot?.complete).toBe(true);
+      expect(snapshot?.models.map((m) => m.id)).toEqual(["gpt-6-astra"]);
+    } finally {
+      clearDynamicModelMetadata("openai-codex");
+      rmSync(bubbleHome, { recursive: true, force: true });
+      if (previousBubbleHome === undefined) delete process.env.BUBBLE_HOME;
+      else process.env.BUBBLE_HOME = previousBubbleHome;
+      if (previousVitest === undefined) delete process.env.VITEST;
+      else process.env.VITEST = previousVitest;
+    }
   });
 
   it("bounds the startup wait but lets a slow discovery finish in the background", async () => {
