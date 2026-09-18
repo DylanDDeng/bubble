@@ -1,7 +1,9 @@
 import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProcessManager } from "../tasks/manager.js";
 
 const cwd = join(tmpdir(), `bubble-task-manager-${process.pid}`);
@@ -171,5 +173,72 @@ describe("ProcessManager background tasks", () => {
     const [done] = await manager.waitTasks([task.id], { timeoutMs: 5000 });
     expect(done!.status).toBe("completed");
     expect(manager.taskOutputTail(task.id)).toContain("pre-promotion output");
+  });
+
+  // Deterministic stand-in for a child whose "exit" outruns its stdio pipes.
+  function fakeChild() {
+    const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; pid?: number };
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    return child;
+  }
+
+  describe("finalization waits for stdio to drain", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("does not finish on exit until output buffered in the pipe has been appended", () => {
+      const manager = new ProcessManager();
+      const child = fakeChild();
+      const finished: Array<{ status: string; tail?: string; lines: number }> = [];
+      manager.onTaskFinished((t) => finished.push({
+        status: t.status,
+        tail: manager.taskOutputTail(t.id),
+        lines: t.outputLines,
+      }));
+      const task = manager.adoptTask({ command: "fast", cwd, child: child as unknown as ChildProcess });
+
+      child.emit("exit", 0, null);
+      expect(manager.getTask(task.id)!.status).toBe("running");
+      expect(finished).toHaveLength(0);
+
+      child.stdout.emit("data", Buffer.from("late line 1\nlate line 2\n"));
+      child.emit("close", 0, null);
+
+      expect(finished).toEqual([{ status: "completed", tail: "late line 1\nlate line 2\n", lines: 2 }]);
+      expect(manager.getTask(task.id)!.exitCode).toBe(0);
+    });
+
+    it("falls back to a bounded grace timer when close never fires (pipe held by a grandchild)", () => {
+      vi.useFakeTimers();
+      const manager = new ProcessManager();
+      const child = fakeChild();
+      const finished: string[] = [];
+      manager.onTaskFinished((t) => finished.push(t.status));
+      const task = manager.adoptTask({ command: "some-server &", cwd, child: child as unknown as ChildProcess });
+
+      child.emit("exit", 3, null);
+      expect(manager.getTask(task.id)!.status).toBe("running");
+
+      vi.advanceTimersByTime(1000);
+      expect(manager.getTask(task.id)!.status).toBe("failed");
+      expect(manager.getTask(task.id)!.exitCode).toBe(3);
+
+      // A late close must not emit a second finish event.
+      child.emit("close", 3, null);
+      expect(finished).toEqual(["failed"]);
+    });
+
+    it("killTask during the drain window reports the real exit, not killed", async () => {
+      const manager = new ProcessManager();
+      const child = fakeChild();
+      const task = manager.adoptTask({ command: "fast", cwd, child: child as unknown as ChildProcess });
+
+      child.emit("exit", 0, null);
+      const result = await manager.killTask(task.id);
+      expect(result!.status).toBe("completed");
+      expect(result!.exitCode).toBe(0);
+    });
   });
 });

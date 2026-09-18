@@ -20,6 +20,12 @@
  * process, so the event loop keeps owning it (design §2.2a). Reaping is
  * three-layered (design §2.2b): graceful shutdownTasks() with escalation, a
  * SIGKILL-only path for signal handlers, and a process.once("exit") backstop.
+ *
+ * Finalization waits for stdio to drain: Node may emit "exit" before the last
+ * pipe chunks are delivered, so a record is settled on "close" — with a short
+ * grace timer from "exit" as the fallback, because a detached grandchild that
+ * inherited the pipes (`some-server &`) can keep "close" from ever firing.
+ * Same pattern as POST_EXIT_STDIO_GRACE_MS in src/tools/bash.ts.
  */
 
 import { spawn, type ChildProcess, type ChildProcessByStdio } from "node:child_process";
@@ -31,6 +37,7 @@ import { appendTailCapped, killProcessTree, stripAnsi, tail } from "./process-ut
 
 const MAX_LOG_BYTES = 96 * 1024;
 const STOP_FORCE_AFTER_MS = 1000;
+const POST_EXIT_STDIO_GRACE_MS = 150;
 const MAX_RUNNING_TASKS_PER_SESSION = 8;
 const MAX_FINISHED_TASKS = 20;
 
@@ -104,6 +111,8 @@ export interface BackgroundTaskInfo {
 
 interface BackgroundTaskRecord extends BackgroundTaskInfo {
   child?: ChildProcess;
+  /** Set once "exit" is observed; finalization is still pending stdio drain. */
+  exited?: { code: number | null };
   output: string;
   outputLineBreaks: number;
   outputHasData: boolean;
@@ -260,14 +269,19 @@ export class ProcessManager {
       append(Buffer.from(`\n[task failed to start: ${error.message}]\n`));
       this.finalizeTask(record, "failed", null);
     });
-    child.once("exit", (code) => {
-      if (record.status === "running") {
-        this.finalizeTask(record, code === 0 ? "completed" : "failed", code);
-      }
+    onChildSettled(child, {
+      onExit: (code) => {
+        record.exited = { code };
+      },
+      onSettled: (code) => this.finalizeExitedTask(record, code),
     });
 
     this.bumpTaskState(record);
     return this.publicTask(record);
+  }
+
+  private finalizeExitedTask(record: BackgroundTaskRecord, code: number | null): void {
+    this.finalizeTask(record, code === 0 ? "completed" : "failed", code);
   }
 
   private finalizeTask(record: BackgroundTaskRecord, status: BackgroundTaskStatus, exitCode: number | null): void {
@@ -361,8 +375,14 @@ export class ProcessManager {
     if (!record || record.kind !== "task") return undefined;
     if (record.status !== "running") return this.publicTask(record);
     const pid = record.child?.pid ?? record.pid;
-    // Mark first so the exit listener does not double-finalize as failed.
-    this.finalizeTask(record, "killed", null);
+    if (record.exited) {
+      // Already exited on its own, only the stdio drain was pending: report the
+      // real outcome. The group kill below still reaps pipe-holding grandchildren.
+      this.finalizeExitedTask(record, record.exited.code);
+    } else {
+      // Mark first so the exit listener does not double-finalize as failed.
+      this.finalizeTask(record, "killed", null);
+    }
     if (pid) {
       killProcessTree(pid, "SIGTERM");
       const forceTimer = setTimeout(() => killProcessTree(pid, "SIGKILL"), STOP_FORCE_AFTER_MS);
@@ -383,7 +403,9 @@ export class ProcessManager {
     for (const task of running) {
       const pid = task.child?.pid ?? task.pid;
       if (pid) killProcessTree(pid, "SIGKILL");
-      if (task.status === "running") this.finalizeTask(task, "killed", null);
+      if (task.status !== "running") continue;
+      if (task.exited) this.finalizeExitedTask(task, task.exited.code);
+      else this.finalizeTask(task, "killed", null);
     }
   }
 
@@ -442,6 +464,7 @@ export class ProcessManager {
   private publicTask(record: BackgroundTaskRecord): BackgroundTaskInfo {
     const {
       child: _child,
+      exited: _exited,
       output: _output,
       outputLineBreaks: _outputLineBreaks,
       outputHasData: _outputHasData,
@@ -514,12 +537,17 @@ export class ProcessManager {
       record.status = "failed";
       appendServerLog(record, `\n[server failed: ${error.message}]\n`);
     });
-    child.once("exit", (code) => {
-      record.exitCode = code;
-      if (record.status !== "stopped") {
-        record.status = code === 0 ? "exited" : "failed";
-      }
-      record.child = undefined;
+    // Settle after stdio drains so a fast crash surfaces its logs in the
+    // "did not become ready" error instead of racing the status flip.
+    onChildSettled(child, {
+      unrefTimer: true,
+      onSettled: (code) => {
+        record.exitCode = code;
+        if (record.status !== "stopped") {
+          record.status = code === 0 ? "exited" : "failed";
+        }
+        record.child = undefined;
+      },
     });
 
     const timeoutSec = input.timeoutSec ?? 30;
@@ -627,6 +655,36 @@ process.once("exit", () => {
 // ---------------------------------------------------------------------------
 // Server internals (moved verbatim)
 // ---------------------------------------------------------------------------
+
+/**
+ * Calls `onSettled` exactly once, after the child has exited AND its stdio has
+ * drained ("close"), or POST_EXIT_STDIO_GRACE_MS after "exit" when something
+ * else still holds the pipes open. `onExit` fires synchronously at "exit".
+ */
+function onChildSettled(
+  child: ChildProcess,
+  handlers: {
+    onExit?: (code: number | null) => void;
+    onSettled: (code: number | null) => void;
+    unrefTimer?: boolean;
+  },
+): void {
+  let settled = false;
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  const settle = (code: number | null) => {
+    if (settled) return;
+    settled = true;
+    if (graceTimer) clearTimeout(graceTimer);
+    handlers.onSettled(code);
+  };
+  child.once("exit", (code) => {
+    handlers.onExit?.(code);
+    if (settled) return;
+    graceTimer = setTimeout(() => settle(code), POST_EXIT_STDIO_GRACE_MS);
+    if (handlers.unrefTimer) graceTimer.unref?.();
+  });
+  child.once("close", (code) => settle(code));
+}
 
 function publicServerInfo(server: ManagedServerRecord): ManagedServerInfo {
   return {
