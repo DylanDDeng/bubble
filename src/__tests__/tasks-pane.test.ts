@@ -211,6 +211,139 @@ describe("Grok-style Tasks Pane", () => {
     pane.dispose();
   });
 
+  // Rows are derived from "still running, or launched this turn".
+  function turnPane() {
+    const state = {
+      turnStartedAt: 1_000 as number | undefined,
+      members: [] as Array<{ subAgentId: string; nickname: string; status: string; task: string; createdAt?: number }>,
+      tasks: [] as any[],
+    };
+    const pane = new TasksPaneComponent(() => ({
+      workflows: [],
+      groups: state.members.map((member) => ({
+        id: `single:${member.subAgentId}`,
+        runId: `run-${member.subAgentId}`,
+        kind: "single" as const,
+        label: member.nickname,
+        members: [member],
+      })),
+      tasks: state.tasks,
+      turnStartedAt: state.turnStartedAt,
+    }), () => 40, callbacks());
+    const spawn = (nickname: string, createdAt?: number) => {
+      const member = { subAgentId: `id-${nickname}`, nickname, status: "running", task: "work", createdAt };
+      state.members.push(member);
+      return member;
+    };
+    const statusBar = new TaskStatusBarComponent(pane);
+    const screen = () => {
+      const body = pane.render(100); // render first: it drives open/close
+      return [...statusBar.render(100), ...body].join("\n").replace(/\x1b\[[0-9;]*m/g, "");
+    };
+    return { pane, state, spawn, screen };
+  }
+
+  it("keeps a sibling that finished first in view, and says so in the header", () => {
+    const { pane, spawn, screen } = turnPane();
+    const sophie = spawn("Sophie", 1_100);
+    spawn("Bjarne", 1_200);
+    screen();
+    sophie.status = "completed";
+
+    const output = screen();
+    expect(output).toContain("1 background activity · 1 done · Ctrl+G");
+    expect(output).toContain("Subagents 2");
+    expect(output).toMatch(/Bjarne[\s\S]*Sophie/); // running rows stay on top
+    pane.dispose();
+  });
+
+  it("surfaces a sibling that failed instead of letting it vanish", () => {
+    const { pane, spawn, screen } = turnPane();
+    const sophie = spawn("Sophie", 1_100);
+    spawn("Bjarne", 1_200);
+    screen();
+    sophie.status = "failed";
+
+    const output = screen();
+    expect(output).toContain("1 background activity · 1 failed · Ctrl+G");
+    expect(output).toContain("× Sophie");
+    pane.dispose();
+  });
+
+  it("treats subagents launched one after another in the same turn like parallel ones", () => {
+    const { pane, spawn, screen } = turnPane();
+    const sophie = spawn("Sophie", 1_100);
+    screen();
+    sophie.status = "completed";
+    screen(); // nothing running: the pane closes
+    expect(pane.isOpen()).toBe(false);
+
+    spawn("Bjarne", 1_500); // same turn, launched after Sophie finished
+    const output = screen();
+    expect(pane.isOpen()).toBe(true);
+    expect(output).toContain("Bjarne");
+    expect(output).toContain("✓ Sophie");
+    pane.dispose();
+  });
+
+  it("clears the previous turn's finished rows when the next turn starts", () => {
+    const { pane, state, spawn, screen } = turnPane();
+    const sophie = spawn("Sophie", 1_100);
+    screen();
+    sophie.status = "completed";
+    screen();
+
+    state.turnStartedAt = 2_000;
+    spawn("Carl", 2_100);
+    const output = screen();
+    expect(output).toContain("1 background activity · Ctrl+G");
+    expect(output).toContain("Subagents 1");
+    expect(output).toContain("Carl");
+    expect(output).not.toContain("Sophie");
+    pane.dispose();
+  });
+
+  it("shows a task from an earlier turn while it runs, and drops it once it ends", () => {
+    const { pane, state, spawn, screen } = turnPane();
+    const task = { kind: "task", id: "task_0001", command: "npm test", cwd: "/", status: "running", startedAt: 500, outputTruncated: false, outputLines: 0 };
+    state.tasks.push(task);
+    spawn("Bjarne", 1_100);
+    expect(screen()).toContain("npm test");
+
+    task.status = "completed";
+    const output = screen();
+    expect(output).not.toContain("npm test");
+    expect(output).toContain("1 background activity · Ctrl+G");
+    pane.dispose();
+  });
+
+  it("falls back to hiding finished rows when the launch time is unknown", () => {
+    const { pane, spawn, screen } = turnPane();
+    const sophie = spawn("Sophie", undefined);
+    spawn("Bjarne", 1_200);
+    screen();
+    sophie.status = "completed";
+    expect(screen()).not.toContain("Sophie");
+    pane.dispose();
+  });
+
+  it("lands the final status in place for a focused user without pulling in older turns", () => {
+    const { pane, state, spawn, screen } = turnPane();
+    const old = spawn("Oldie", 100); // launched in an earlier turn
+    old.status = "completed";
+    const bjarne = spawn("Bjarne", 1_200);
+    pane.focused = true;
+    screen();
+    bjarne.status = "completed";
+
+    const output = screen();
+    expect(pane.isOpen()).toBe(true);
+    expect(output).toContain("✓ Bjarne");
+    expect(output).not.toContain("Oldie");
+    expect(state.members).toHaveLength(2);
+    pane.dispose();
+  });
+
   it("keeps lifecycle echoes out of transcript while retaining launch history", () => {
     const launch: DisplayToolCall = {
       id: "launch",

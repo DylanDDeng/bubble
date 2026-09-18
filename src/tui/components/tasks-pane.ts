@@ -20,6 +20,8 @@ export interface TasksPaneSnapshot {
   groups: SubagentGroup[];
   workflows: WorkflowRunSnapshot[];
   tasks: BackgroundTaskInfo[];
+  /** Start of the current agent run; undefined keeps finished work hidden. */
+  turnStartedAt?: number;
 }
 
 type PaneSection = "workflows" | "subagents" | "tasks";
@@ -157,7 +159,18 @@ function normalize(snapshot: TasksPaneSnapshot, showHistory: boolean): Record<Pa
     status: task.status,
     task,
   }));
-  const filter = (items: PaneItem[]) => (showHistory ? items : items.filter((item) => isActive(item.status)))
+  // Which rows belong above the composer is derived, not remembered: whatever
+  // is still running, plus whatever this turn launched — so a sibling that
+  // finishes (or fails) first stays in view with its outcome until the next
+  // turn, whether its siblings ran in parallel or one after another. Work from
+  // earlier turns is history and shows only on request.
+  const launchedThisTurn = (item: PaneItem) => {
+    const launchedAt = itemLaunchedAt(item);
+    return snapshot.turnStartedAt !== undefined && launchedAt !== undefined && launchedAt >= snapshot.turnStartedAt;
+  };
+  const filter = (items: PaneItem[]) => (showHistory
+    ? items
+    : items.filter((item) => isActive(item.status) || launchedThisTurn(item)))
     .sort((left, right) => {
       const activityOrder = Number(isActive(right.status)) - Number(isActive(left.status));
       if (activityOrder !== 0) return activityOrder;
@@ -168,6 +181,12 @@ function normalize(snapshot: TasksPaneSnapshot, showHistory: boolean): Record<Pa
     subagents: filter(subagentItems),
     tasks: filter(taskItems),
   };
+}
+
+function itemLaunchedAt(item: PaneItem): number | undefined {
+  if (item.kind === "workflow") return item.createdAt;
+  if (item.kind === "subagent") return item.member.createdAt;
+  return item.task.startedAt;
 }
 
 function itemUpdatedAt(item: PaneItem): number {
@@ -230,6 +249,22 @@ export class TasksPaneComponent implements Component {
     return Object.values(items).flat().filter((item) => isActive(item.status)).length;
   }
 
+  private visibleCount(): number {
+    return Object.values(normalize(this.getSnapshot(), this.showHistory)).flat().length;
+  }
+
+  /** Finished rows the pane lists next to the running ones, by outcome. */
+  settledCounts(): { done: number; failed: number; stopped: number } {
+    const counts = { done: 0, failed: 0, stopped: 0 };
+    for (const item of Object.values(normalize(this.getSnapshot(), false)).flat()) {
+      if (isActive(item.status)) continue;
+      if (item.status === "failed" || item.status === "blocked") counts.failed += 1;
+      else if (item.status === "cancelled" || item.status === "killed") counts.stopped += 1;
+      else counts.done += 1;
+    }
+    return counts;
+  }
+
   totalCount(): number {
     const items = normalize(this.getSnapshot(), true);
     return Object.values(items).flat().length;
@@ -284,7 +319,9 @@ export class TasksPaneComponent implements Component {
       if (this.focused) {
         // A user who is already inspecting the pane should see the final
         // status land in place instead of watching the selected row vanish.
-        this.showHistory = true;
+        // This turn's rows stay on their own; only work launched in an earlier
+        // turn needs the history view to remain visible.
+        if (this.visibleCount() === 0) this.showHistory = true;
       } else {
         this.open = false;
         this.manuallyClosed = false;
@@ -443,8 +480,16 @@ export class TaskStatusBarComponent implements Component {
     if (total === 0 && !this.pane.isOpen()) return [];
     const marker = this.pane.isOpen() ? "▾" : "▸";
     const theme = this.pane.theme();
+    // The list below also holds this turn's finished rows; say so, or the
+    // header counts fewer activities than the pane shows.
+    const settled = this.pane.settledCounts();
+    const outcome = [
+      settled.failed > 0 ? themeForeground(theme.error, `${settled.failed} failed`) : "",
+      settled.done > 0 ? `${settled.done} done` : "",
+      settled.stopped > 0 ? `${settled.stopped} stopped` : "",
+    ].filter(Boolean).map((part) => ` · ${part}`).join("");
     const text = count > 0
-      ? `${marker} ${themeForeground(theme.accent, this.pane.activityGlyph())} ${count} background activit${count === 1 ? "y" : "ies"} · Ctrl+G`
+      ? `${marker} ${themeForeground(theme.accent, this.pane.activityGlyph())} ${count} background activit${count === 1 ? "y" : "ies"}${outcome} · Ctrl+G`
       : `${marker} ${themeForeground(theme.success, "✓")} ${total} completed activit${total === 1 ? "y" : "ies"} · Ctrl+G`;
     return [themeDim(theme.dim, truncateToWidth(` ${text}`, Math.max(1, width), ""))];
   }
