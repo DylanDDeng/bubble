@@ -94,6 +94,44 @@ describe("background task lifecycle landing", () => {
     expect(landed.merged).toBe(false);
   });
 
+  it("pairs reused task ids with their own launch occurrence", () => {
+    // Ids restart at task_0001 per process: two launches in one resumed session.
+    const first = { ...launchRow("call_first"), metadata: { ...launchRow().metadata, taskId: "task_0001" } };
+    const second = { ...launchRow("call_second"), metadata: { ...launchRow().metadata, taskId: "task_0001" } };
+    const messages = [...transcriptWith(first), ...transcriptWith(second)];
+
+    const landed = landTaskLifecycles(messages, [
+      { occurrence: 0, task: finished({ id: "task_0001", status: "failed", exitCode: 1, endedAt: 20_000 }), output: "old failure" },
+      { occurrence: 1, task: finished({ id: "task_0001", status: "completed", exitCode: 0, endedAt: 90_000 }), output: "new success" },
+    ]);
+
+    expect(landed).toHaveLength(6);
+    const rows = landed.flatMap((message) => message.toolCalls ?? []);
+    expect(rows.map((row) => [row.id, row.metadata?.taskLifecycle, row.result])).toEqual([
+      ["call_first", "failed", "old failure"],
+      ["call_second", "completed", "new success"],
+    ]);
+  });
+
+  it("lands a live completion on the newest open launch row only", () => {
+    const landedEarlier = {
+      ...launchRow("call_old"),
+      metadata: { ...launchRow().metadata, taskLifecycle: "failed", endedAt: 20_000 },
+      result: "old failure",
+    };
+    const open = launchRow("call_new");
+    const messages = [...transcriptWith(landedEarlier), ...transcriptWith(open)];
+
+    const landed = applyTaskLifecycleToMessages(messages, finished({ status: "completed", exitCode: 0 }), "fresh");
+    expect(landed.merged).toBe(true);
+    const rows = landed.messages.flatMap((message) => message.toolCalls ?? []);
+    expect(rows.find((row) => row.id === "call_old")?.result).toBe("old failure");
+    expect(rows.find((row) => row.id === "call_new")?.result).toBe("fresh");
+
+    // Every launch already settled: nothing to land, caller falls back to a detached row.
+    expect(applyTaskLifecycleToMessages(landed.messages, finished({ endedAt: 99_000 })).merged).toBe(false);
+  });
+
   it("merges into live accumulator rows in place, skipping rows still running", () => {
     const settled = launchRow();
     const running: DisplayToolCall = { ...launchRow("call_late"), status: "running", result: undefined, metadata: undefined };

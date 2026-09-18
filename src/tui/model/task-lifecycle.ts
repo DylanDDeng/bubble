@@ -18,10 +18,49 @@ import { mapTranscriptTools } from "./subagent-view.js";
 export interface TaskLifecycleTerminal {
   task: BackgroundTaskInfo;
   output?: string;
+  /**
+   * Which launch of this task id the terminal state belongs to (0-based, in
+   * transcript order). Task ids restart at task_0001 in every process, so a
+   * resumed session can hold several launches sharing one id; persisted
+   * markers carry their launch order. Omitted for live completions, which
+   * always belong to the newest launch that has not settled yet.
+   */
+  occurrence?: number;
 }
 
 function isLaunchRowFor(tool: DisplayToolCall, taskId: string): boolean {
   return tool.metadata?.background === true && tool.metadata?.taskId === taskId;
+}
+
+function hasLanded(tool: DisplayToolCall): boolean {
+  return tool.metadata?.taskLifecycle !== undefined;
+}
+
+/** Launch rows for a task id in transcript order, one entry per tool call. */
+function launchRowsFor(messages: DisplayMessage[], taskId: string): DisplayToolCall[] {
+  const seen = new Set<string>();
+  const rows: DisplayToolCall[] = [];
+  for (const message of messages) {
+    const tools = message.toolCalls
+      ?? message.parts?.flatMap((part) => (part.type === "tools" ? part.toolCalls : []))
+      ?? [];
+    for (const tool of tools) {
+      if (!isLaunchRowFor(tool, taskId) || seen.has(tool.id)) continue;
+      seen.add(tool.id);
+      rows.push(tool);
+    }
+  }
+  return rows;
+}
+
+/** The launch row a terminal state should land on, or undefined. */
+function targetLaunchRow(messages: DisplayMessage[], taskId: string, occurrence?: number): DisplayToolCall | undefined {
+  const rows = launchRowsFor(messages, taskId);
+  if (occurrence !== undefined) return rows[occurrence];
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    if (!hasLanded(rows[index]!)) return rows[index];
+  }
+  return undefined;
 }
 
 function displayStatus(task: BackgroundTaskInfo): NonNullable<DisplayToolCall["status"]> {
@@ -64,20 +103,26 @@ export function mergeTaskLifecycleIntoLiveTools(
   task: BackgroundTaskInfo,
   output?: string,
 ): boolean {
-  const tool = tools.find((candidate) => isLaunchRowFor(candidate, task.id));
+  const tool = [...tools].reverse().find((candidate) => isLaunchRowFor(candidate, task.id) && !hasLanded(candidate));
   if (!tool || tool.status === "running") return false;
   Object.assign(tool, applyTaskLifecycleToTool(tool, task, output));
   return true;
 }
 
-/** Lands the terminal state on the committed launch row, if there is one. */
+/**
+ * Lands the terminal state on exactly one committed launch row: the given
+ * launch occurrence, or (for live completions) the newest one still open.
+ */
 export function applyTaskLifecycleToMessages(
   messages: DisplayMessage[],
   task: BackgroundTaskInfo,
   output?: string,
+  occurrence?: number,
 ): { messages: DisplayMessage[]; merged: boolean } {
+  const target = targetLaunchRow(messages, task.id, occurrence);
+  if (!target) return { messages, merged: false };
   const next = mapTranscriptTools(messages, (tool) =>
-    isLaunchRowFor(tool, task.id) ? applyTaskLifecycleToTool(tool, task, output) : tool);
+    tool.id === target.id ? applyTaskLifecycleToTool(tool, task, output) : tool);
   return { messages: next, merged: next !== messages };
 }
 
@@ -108,8 +153,8 @@ export function taskLifecycleDisplayMessage(task: BackgroundTaskInfo, output?: s
 export function landTaskLifecycles(messages: DisplayMessage[], terminals: TaskLifecycleTerminal[]): DisplayMessage[] {
   let next = messages;
   const detached: DisplayMessage[] = [];
-  for (const { task, output } of terminals) {
-    const landed = applyTaskLifecycleToMessages(next, task, output);
+  for (const { task, output, occurrence } of terminals) {
+    const landed = applyTaskLifecycleToMessages(next, task, output, occurrence);
     if (landed.merged) next = landed.messages;
     else detached.push(taskLifecycleDisplayMessage(task, output));
   }

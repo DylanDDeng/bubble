@@ -373,8 +373,11 @@ export class BubbleTuiController {
     // Switching back to the owner session reconstructs terminal task rows
     // from its persisted marker before held completions are released. Treat
     // that row as the same lifecycle event instead of appending a duplicate.
+    // Task ids repeat across processes, so the row must be this very run.
     if (this.transcript.some((message) => message.toolCalls?.some((tool) =>
-      tool.metadata?.taskId === task.id && tool.metadata?.taskLifecycle !== undefined))) {
+      tool.metadata?.taskId === task.id
+      && tool.metadata?.taskLifecycle !== undefined
+      && tool.metadata?.endedAt === task.endedAt))) {
       return;
     }
     const output = this.deps.processManager?.taskOutputTail(task.id, 12_000);
@@ -1094,7 +1097,10 @@ function restoredTaskLifecycles(manager: SessionManager): TaskLifecycleTerminal[
     }
   }
   const starts = new Map<string, Record<string, unknown>>();
-  const completed = new Map<string, { task: BackgroundTaskInfo; output?: string; order: number }>();
+  // Ids restart at task_0001 per process: count launches per id so each
+  // terminal marker lands on the launch row it belongs to.
+  const launches = new Map<string, number>();
+  const terminals: TaskLifecycleTerminal[] = [];
   for (let index = startIndex; index < entries.length; index += 1) {
     const entry = entries[index];
     if (entry?.type !== "marker" || !entry.value) continue;
@@ -1108,6 +1114,7 @@ function restoredTaskLifecycles(manager: SessionManager): TaskLifecycleTerminal[
     if (!id) continue;
     if (entry.kind === "task_started") {
       starts.set(id, payload);
+      launches.set(id, (launches.get(id) ?? 0) + 1);
       continue;
     }
     if (entry.kind !== "task_finished" && entry.kind !== "task_killed") continue;
@@ -1119,8 +1126,9 @@ function restoredTaskLifecycles(manager: SessionManager): TaskLifecycleTerminal[
         : "completed";
     const startedAt = numeric(payload.startedAt) ?? numeric(start.startedAt) ?? entry.timestamp;
     const endedAt = numeric(payload.endedAt) ?? entry.timestamp;
-    completed.set(id, {
-      order: index,
+    const seen = launches.get(id) ?? 0;
+    terminals.push({
+      occurrence: seen > 0 ? seen - 1 : undefined,
       task: {
         kind: "task",
         id,
@@ -1139,9 +1147,7 @@ function restoredTaskLifecycles(manager: SessionManager): TaskLifecycleTerminal[
       output: stringValue(payload.output),
     });
   }
-  return [...completed.values()]
-    .sort((left, right) => left.order - right.order)
-    .map(({ task, output }) => ({ task, output }));
+  return terminals;
 }
 
 function numeric(value: unknown): number | undefined {

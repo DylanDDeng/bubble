@@ -306,6 +306,78 @@ describe("Pi TUI background task lifecycle", () => {
     controller.shutdown("test");
   });
 
+  it("keeps a historic launch intact when a resumed process reuses its task id", async () => {
+    const dir = join(tmpdir(), `bubble-controller-task-reuse-${process.pid}-${Date.now()}`);
+    mkdirSync(dir, { recursive: true });
+    const sessionFile = join(dir, "session.jsonl");
+    const session = new SessionManager(sessionFile);
+    session.updateMetadata({ cwd: dir });
+    // A previous process ran task_0001 and persisted its failure.
+    session.appendMarker("task_started", JSON.stringify({ id: "task_0001", startedAt: 1_000, command: "npm test" }));
+    session.appendMarker("task_finished", JSON.stringify({
+      id: "task_0001", status: "failed", exitCode: 1, startedAt: 1_000, endedAt: 3_000, outputLines: 1, output: "old failure\n",
+    }));
+    const manager = new ProcessManager(); // fresh process: the next task is task_0001 again
+    const agent = {
+      messages: [
+        { role: "user", content: "run tests" },
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call_old", name: "bash", arguments: JSON.stringify({ command: "npm test", run_in_background: true }) }],
+        },
+        {
+          role: "tool",
+          toolCallId: "call_old",
+          content: "Started background task task_0001.",
+          metadata: { kind: "shell", command: "npm test", taskId: "task_0001", background: true },
+        },
+      ],
+      setSessionID: () => {},
+      listSubAgents: () => [],
+      listWorkflows: () => [],
+      getSubAgentMessages: () => [],
+      closeSubAgent: async () => {},
+      closeWorkflow: () => {},
+      resetContextUsageAnchor: () => {},
+      async *run(): AsyncIterable<AgentEvent> {
+        yield { type: "turn_start" };
+        yield { type: "tool_start", id: "call_new", name: "bash", args: { command: "printf 'fresh\\n'", run_in_background: true } };
+        const task = manager.startTask({ command: "printf 'fresh\\n'", description: "Again", cwd: dir, ownerSessionId: sessionFile });
+        expect(task.id).toBe("task_0001");
+        yield {
+          type: "tool_end",
+          id: "call_new",
+          name: "bash",
+          result: { content: `Started background task ${task.id}`, metadata: { kind: "shell", background: true, taskId: task.id } },
+        };
+        await manager.waitTasks([task.id], { timeoutMs: 3_000 });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        yield { type: "turn_end" };
+      },
+    };
+    const controller = new BubbleTuiController({
+      agent: agent as never,
+      sessionManager: session,
+      processManager: manager,
+      tasksAutoResume: false,
+      workspaceCwd: dir,
+      ports: new SpyHost().ports,
+    });
+
+    const before = controller.getTranscript().flatMap((message) => message.toolCalls ?? []);
+    expect(before.map((row) => [row.id, row.metadata?.taskLifecycle])).toEqual([["call_old", "failed"]]);
+
+    await controller.runTurn("go", dir);
+
+    const rows = controller.getTranscript().flatMap((message) => message.toolCalls ?? []);
+    expect(rows.map((row) => [row.id, row.metadata?.taskLifecycle, row.result])).toEqual([
+      ["call_old", "failed", "old failure\n"],
+      ["call_new", "completed", expect.stringContaining("fresh")],
+    ]);
+    controller.shutdown("test");
+  });
+
   it("does not duplicate a persisted completion row when switching back to its owner session", async () => {
     const dir = join(tmpdir(), `bubble-controller-task-switch-${process.pid}-${Date.now()}`);
     mkdirSync(dir, { recursive: true });
