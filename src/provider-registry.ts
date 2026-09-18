@@ -505,17 +505,17 @@ export class ProviderRegistry {
   }
 
   async prepareProvider(providerId: string): Promise<void> {
+    // One snapshot decides both "is it expired" and "what did we hold": with
+    // two reads another process could rotate in between, and the fresh set
+    // would be taken for the held one and refreshed again for nothing.
     if (providerId === "grok") {
-      if (this.authStorage.isExpired("grok") && this.authStorage.get("grok")?.refreshToken) {
-        await this.refreshGrokCredentials();
-      }
+      const held = this.authStorage.get("grok");
+      if (held?.refreshToken && credentialsExpired(held)) await this.refreshGrokCredentials(held);
       return;
     }
     if (providerId !== "openai" && providerId !== "openai-codex") return;
-    const authKey = this.resolveOAuthAuthKey(providerId);
-    if (this.authStorage.isExpired(authKey) && this.authStorage.get(authKey)?.refreshToken) {
-      await this.refreshOpenAICredentials(providerId);
-    }
+    const held = this.authStorage.get(this.resolveOAuthAuthKey(providerId));
+    if (held?.refreshToken && credentialsExpired(held)) await this.refreshOpenAICredentials(providerId, held);
   }
 
   private refreshOpenAICredentials(providerId: string, used?: OAuthCredentials): Promise<OAuthCredentials> {
@@ -593,10 +593,12 @@ export class ProviderRegistry {
       }
       const rotatedElsewhere = (since: OAuthCredentials | undefined): OAuthCredentials | undefined => {
         this.authStorage.reload();
-        const latest = this.authStorage.get(authKey);
+        // Re-resolved every time: a login elsewhere may have created the
+        // canonical key since, and it is then the entry to adopt.
+        const latest = this.authStorage.get(options.resolveKeys().authKey);
         if (!latest || !since) return undefined;
         if (latest.refreshToken === since.refreshToken && latest.accessToken === since.accessToken) return undefined;
-        return this.authStorage.isExpired(authKey) ? undefined : latest;
+        return credentialsExpired(latest) ? undefined : latest;
       };
       const adopted = rotatedElsewhere(held);
       if (adopted) return adopted;

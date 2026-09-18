@@ -260,6 +260,13 @@ export class AuthStorage {
       else delete next[providerId];
       const tmpPath = `${this.authPath}.${process.pid}.tmp`;
       writeFileSync(tmpPath, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
+      // Fencing: if this process was suspended past the stale threshold, the
+      // lock was broken and someone else may have committed since the re-read
+      // above. Publishing the snapshot now would roll their write back.
+      if (observeLock(lockPath)?.token !== token) {
+        unlinkSync(tmpPath);
+        throw new Error("Lost the credential write lock before publishing; the write was not applied.");
+      }
       renameSync(tmpPath, this.authPath);
       this.data = next;
       this.diskStamp = this.stampOf();

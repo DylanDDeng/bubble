@@ -216,4 +216,16 @@ describe("OAuth refresh with auth.json shared between processes", () => {
     expect(result.refreshToken).toBe("refresh-new-login");
     expect(JSON.parse(readFileSync(authPath, "utf-8")).openai.refreshToken).toBe("refresh-new-login");
   });
+
+  it("adopts a canonical login that landed while a legacy refresh was being rejected", async () => {
+    new AuthStorage(authPath).set("openai-codex", expired("legacy"));
+    const registry = new ProviderRegistry(emptyConfig());
+    refreshOpenAICodex.mockImplementation(async () => {
+      new AuthStorage(authPath).set("openai", fresh("new-login"));
+      throw new Error(REUSED);
+    });
+
+    await registry.prepareProvider("openai");
+    expect(registry.getAuthStorage().get("openai")!.refreshToken).toBe("refresh-new-login");
+  });
 });
