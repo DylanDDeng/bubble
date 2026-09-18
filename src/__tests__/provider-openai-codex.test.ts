@@ -127,7 +127,7 @@ describe("provider-openai-codex", () => {
   });
 
   it("returns the latest fallback model first", () => {
-    expect(getOpenAICodexFallbackModels()[0]).toBe("gpt-5.6-sol");
+    expect(getOpenAICodexFallbackModels()[0]).toBe("gpt-6-astra");
   });
 
   it("parses the account catalog without inventing off and honors server priority", async () => {

@@ -142,6 +142,9 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   // expanding provider membership.
   { id: OPENROUTER_MODEL_ID, name: "Ox Alpha", providerId: "openrouter", tier: "strong", reasoningLevels: OPENROUTER_OX_REASONING_LEVELS, defaultReasoningLevel: "max", contextWindow: 1048576 },
 
+  // Verified against /codex/models on 2026-09-17: same request shape as gpt-5.6-terra
+  // (responses-lite, six effort levels, 10k tool-output cap); minimal_client_version 0.153.0.
+  { id: "gpt-6-astra", name: "GPT-6-Astra", providerId: "openai-codex", tier: "strong", reasoningLevels: GPT56_LEVELS, defaultReasoningLevel: "medium", contextWindow: 372000, useResponsesLite: true, toolOutputTokenLimit: 10000 },
   { id: "gpt-5.6-sol", name: "GPT-5.6-Sol", providerId: "openai-codex", tier: "balanced", reasoningLevels: GPT56_LEVELS, defaultReasoningLevel: "low", contextWindow: 372000, useResponsesLite: true, toolOutputTokenLimit: 10000 },
   { id: "gpt-5.6-terra", name: "GPT-5.6-Terra", providerId: "openai-codex", tier: "strong", reasoningLevels: GPT56_LEVELS, defaultReasoningLevel: "medium", contextWindow: 372000, useResponsesLite: true, toolOutputTokenLimit: 10000 },
   { id: "gpt-5.6-luna", name: "GPT-5.6-Luna", providerId: "openai-codex", tier: "strong", reasoningLevels: GPT56_LUNA_LEVELS, defaultReasoningLevel: "medium", contextWindow: 372000, useResponsesLite: true, toolOutputTokenLimit: 10000 },

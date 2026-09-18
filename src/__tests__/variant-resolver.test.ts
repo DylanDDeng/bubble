@@ -25,8 +25,16 @@ describe("variant resolver", () => {
     expect(isThinkingLevel("ultra")).toBe(true);
   });
 
-  it("defines the exact GPT-5.6 fallback catalog", () => {
-    expect(listBuiltinModels("openai-codex").slice(0, 3)).toEqual([
+  it("defines the exact GPT-6 / GPT-5.6 fallback catalog", () => {
+    expect(listBuiltinModels("openai-codex").slice(0, 4)).toEqual([
+      expect.objectContaining({
+        id: "gpt-6-astra",
+        reasoningLevels: ["low", "medium", "high", "xhigh", "max", "ultra"],
+        defaultReasoningLevel: "medium",
+        contextWindow: 372000,
+        useResponsesLite: true,
+        toolOutputTokenLimit: 10000,
+      }),
       expect.objectContaining({
         id: "gpt-5.6-sol",
         reasoningLevels: ["low", "medium", "high", "xhigh", "max", "ultra"],
