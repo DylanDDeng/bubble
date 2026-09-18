@@ -56,6 +56,14 @@ import {
   type SubagentGroup,
 } from "../model/subagent-view.js";
 import { reconstructDisplayMessages } from "../model/display-reconstruct.js";
+import {
+  applyTaskLifecycleToMessages,
+  landTaskLifecycles,
+  mergeTaskLifecycleIntoLiveTools,
+  taskLifecycleDisplayMessage,
+  UNMATCHED_LAUNCH,
+  type TaskLifecycleTerminal,
+} from "../model/task-lifecycle.js";
 import type { SubmitPayload } from "../model/composer-types.js";
 import { buildImageContentParts, buildImageContentPartsFromDisplayText } from "../model/image-paste.js";
 import { displayImagesFromPayload, formatImageUserDisplayText } from "../image-display.js";
@@ -139,10 +147,10 @@ export class BubbleTuiController {
 
   constructor(private readonly deps: BubbleTuiControllerDeps) {
     this.sessionManager = deps.sessionManager;
-    this.transcript = [
-      ...reconstructDisplayMessages([...deps.agent.messages]),
-      ...restoredTaskLifecycleMessages(this.sessionManager),
-    ];
+    this.transcript = landTaskLifecycles(
+      reconstructDisplayMessages([...deps.agent.messages]),
+      restoredTaskLifecycles(this.sessionManager),
+    );
     this.overlays = new OverlayRequestController();
     this.startedAtMs = Date.now();
     this.sessionTransition = new SessionTransitionController({
@@ -163,7 +171,7 @@ export class BubbleTuiController {
       commit: (manager, transcript) => {
         this.sessionManager = manager;
         this.deps.ports.flush.cancelFlush();
-        this.transcript = [...transcript, ...restoredTaskLifecycleMessages(manager)];
+        this.transcript = landTaskLifecycles(transcript, restoredTaskLifecycles(manager));
         this.queue.queued.length = 0;
         this.liveStreamVisible = false;
         this.runState = null;
@@ -366,20 +374,49 @@ export class BubbleTuiController {
     // Switching back to the owner session reconstructs terminal task rows
     // from its persisted marker before held completions are released. Treat
     // that row as the same lifecycle event instead of appending a duplicate.
+    // Task ids repeat across processes, so the row must be this very run.
     if (this.transcript.some((message) => message.toolCalls?.some((tool) =>
-      tool.metadata?.taskId === task.id && tool.metadata?.taskLifecycle !== undefined))) {
+      tool.metadata?.taskId === task.id
+      && tool.metadata?.taskLifecycle !== undefined
+      && tool.metadata?.endedAt === task.endedAt))) {
+      return;
+    }
+    const output = this.deps.processManager?.taskOutputTail(task.id, 12_000);
+    // Land the outcome on the launch row: this round's launches are still in
+    // the streaming accumulator, earlier rounds' have committed.
+    if (this.runActive && this.runState
+      && mergeTaskLifecycleIntoLiveTools(this.runState.accumulator.toolCalls, task, output)) {
+      this.state.touch();
+      this.notify();
+      return;
+    }
+    const landed = applyTaskLifecycleToMessages(this.transcript, task, output);
+    if (landed.merged) {
+      this.transcript = landed.messages;
+      this.state.touch();
+      this.notify();
       return;
     }
     if (this.runActive) {
+      // Launch row not settled yet (or absent): retry on the next tool_end,
+      // and fall back to a detached row when the round commits.
       this.pendingTaskAnnouncements.set(task.id, task);
       this.state.touch();
       this.notify();
       return;
     }
-    this.appendDisplayMessage(taskLifecycleDisplayMessage(
-      task,
-      this.deps.processManager?.taskOutputTail(task.id, 12_000),
-    ));
+    this.appendDisplayMessage(taskLifecycleDisplayMessage(task, output));
+  }
+
+  /** Pending completions whose launch row has settled since they arrived. */
+  private landPendingTaskAnnouncementsInLiveRound(): void {
+    if (!this.runState || this.pendingTaskAnnouncements.size === 0) return;
+    for (const [id, task] of this.pendingTaskAnnouncements) {
+      const output = this.deps.processManager?.taskOutputTail(task.id, 12_000);
+      if (mergeTaskLifecycleIntoLiveTools(this.runState.accumulator.toolCalls, task, output)) {
+        this.pendingTaskAnnouncements.delete(id);
+      }
+    }
   }
 
   /** Move the newest live Bash Execute into the unified task manager. */
@@ -405,10 +442,10 @@ export class BubbleTuiController {
   /** Re-project the visible transcript after a non-controller command rewrites Agent history. */
   rebuildTranscriptFromAgent(): void {
     this.state.withTransaction(() => {
-      this.transcript = [
-        ...reconstructDisplayMessages([...this.deps.agent.messages]),
-        ...restoredTaskLifecycleMessages(this.sessionManager),
-      ];
+      this.transcript = landTaskLifecycles(
+        reconstructDisplayMessages([...this.deps.agent.messages]),
+        restoredTaskLifecycles(this.sessionManager),
+      );
       this.childRuns.clear();
       this.state.touch();
     });
@@ -427,10 +464,10 @@ export class BubbleTuiController {
       this.state.withTransaction(() => {
         purgeForSessionSwitch(this.queue);
         this.queue.queued.length = 0;
-        this.transcript = [
-          ...reconstructDisplayMessages([...this.deps.agent.messages]),
-          ...restoredTaskLifecycleMessages(this.sessionManager),
-        ];
+        this.transcript = landTaskLifecycles(
+          reconstructDisplayMessages([...this.deps.agent.messages]),
+          restoredTaskLifecycles(this.sessionManager),
+        );
         this.childRuns.clear();
         this.liveStreamVisible = false;
         this.runState = null;
@@ -715,6 +752,7 @@ export class BubbleTuiController {
         }
         const { state, effects } = reduceAgentEvent(this.runState!, event, ctx);
         this.runState = state;
+        if (event.type === "tool_end") this.landPendingTaskAnnouncementsInLiveRound();
 
         const subagentMetadata = event.type === "tool_update"
           ? event.update.metadata
@@ -870,13 +908,13 @@ export class BubbleTuiController {
         this.activeInputController = null;
         this.activeAbortController = null;
         if (this.pendingTaskAnnouncements.size > 0) {
-          this.transcript = [
-            ...this.transcript,
-            ...[...this.pendingTaskAnnouncements.values()].map((task) => taskLifecycleDisplayMessage(
+          this.transcript = landTaskLifecycles(
+            this.transcript,
+            [...this.pendingTaskAnnouncements.values()].map((task) => ({
               task,
-              this.deps.processManager?.taskOutputTail(task.id, 12_000),
-            )),
-          ];
+              output: this.deps.processManager?.taskOutputTail(task.id, 12_000),
+            })),
+          );
           this.pendingTaskAnnouncements.clear();
         }
         this.state.touch();
@@ -1044,43 +1082,7 @@ export class BubbleTuiController {
   }
 }
 
-function taskLifecycleDisplayMessage(task: BackgroundTaskInfo, output?: string): DisplayMessage {
-  const status = task.status === "killed"
-    ? "cancelled"
-    : task.status === "failed"
-      ? "failed"
-      : "completed";
-  const tool: DisplayToolCall = {
-    id: `task-lifecycle:${task.id}:${task.endedAt ?? Date.now()}`,
-    name: "bash",
-    args: {
-      command: task.command,
-      ...(task.description ? { description: task.description } : {}),
-    },
-    status,
-    isError: task.status === "failed",
-    result: output?.trim() ? output : undefined,
-    startedAt: task.startedAt,
-    metadata: {
-      kind: "shell",
-      background: true,
-      taskId: task.id,
-      taskLifecycle: task.status,
-      exitCode: task.exitCode ?? null,
-      endedAt: task.endedAt,
-      outputLines: task.outputLines,
-    },
-  };
-  return {
-    key: nextDisplayMessageKey("task"),
-    role: "assistant",
-    content: "",
-    toolCalls: [tool],
-    parts: [{ type: "tools", toolCalls: [tool] }],
-  };
-}
-
-function restoredTaskLifecycleMessages(manager: SessionManager): DisplayMessage[] {
+function restoredTaskLifecycles(manager: SessionManager): TaskLifecycleTerminal[] {
   let entries: ReturnType<SessionManager["getEntries"]>;
   try {
     entries = manager.getEntries();
@@ -1096,7 +1098,10 @@ function restoredTaskLifecycleMessages(manager: SessionManager): DisplayMessage[
     }
   }
   const starts = new Map<string, Record<string, unknown>>();
-  const completed = new Map<string, { task: BackgroundTaskInfo; output?: string; order: number }>();
+  // Ids restart at task_0001 per process: count launches per id so each
+  // terminal marker lands on the launch row it belongs to.
+  const launches = new Map<string, number>();
+  const terminals: TaskLifecycleTerminal[] = [];
   for (let index = startIndex; index < entries.length; index += 1) {
     const entry = entries[index];
     if (entry?.type !== "marker" || !entry.value) continue;
@@ -1110,6 +1115,7 @@ function restoredTaskLifecycleMessages(manager: SessionManager): DisplayMessage[
     if (!id) continue;
     if (entry.kind === "task_started") {
       starts.set(id, payload);
+      launches.set(id, (launches.get(id) ?? 0) + 1);
       continue;
     }
     if (entry.kind !== "task_finished" && entry.kind !== "task_killed") continue;
@@ -1121,8 +1127,11 @@ function restoredTaskLifecycleMessages(manager: SessionManager): DisplayMessage[
         : "completed";
     const startedAt = numeric(payload.startedAt) ?? numeric(start.startedAt) ?? entry.timestamp;
     const endedAt = numeric(payload.endedAt) ?? entry.timestamp;
-    completed.set(id, {
-      order: index,
+    const seen = launches.get(id) ?? 0;
+    terminals.push({
+      // A start persisted before conversation_clear is out of scope: keep its
+      // terminal state detached rather than landing it on a later reuse.
+      occurrence: seen > 0 ? seen - 1 : UNMATCHED_LAUNCH,
       task: {
         kind: "task",
         id,
@@ -1141,9 +1150,7 @@ function restoredTaskLifecycleMessages(manager: SessionManager): DisplayMessage[
       output: stringValue(payload.output),
     });
   }
-  return [...completed.values()]
-    .sort((left, right) => left.order - right.order)
-    .map(({ task, output }) => taskLifecycleDisplayMessage(task, output));
+  return terminals;
 }
 
 function numeric(value: unknown): number | undefined {

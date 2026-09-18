@@ -140,7 +140,7 @@ function freshestSubagentSnapshots(messages: readonly DisplayMessage[]): Subagen
 }
 
 /** Maps every tool call in the transcript; returns the same array when nothing changed. */
-function mapTranscriptTools(
+export function mapTranscriptTools(
   messages: DisplayMessage[],
   updateTool: (tool: DisplayToolCall) => DisplayToolCall,
 ): DisplayMessage[] {

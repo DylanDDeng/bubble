@@ -329,6 +329,16 @@ while no turn is running:
   running (review: it currently ticks only while `isRunning`). The subagent
   inspector gains a "Tasks" section (id, description, elapsed, exit code,
   kill binding `x`).
+- **Terminal state lands on the launch row** (2026-09-18): when a task
+  finishes, its completed/failed/killed state, exit code, duration and output
+  tail are merged into the `bash run_in_background` call that started it
+  (`src/tui/model/task-lifecycle.ts`, keyed by `metadata.taskId`), whether
+  that row is still in the streaming accumulator, already committed, or
+  rebuilt from history plus `task_finished` markers. A detached terminal row
+  is appended only when no launch row exists (transcript cleared, task
+  started outside this transcript). Before this, every completion was
+  appended after the assistant's answer, which read as a new failure the
+  model had not seen.
 - **Ctrl+B — send to background** (`Ctrl+G` is reserved for Tasks Pane), plus
   Grok-style automatic demotion after a default 15-second foreground budget.
   Both paths share the same mechanics (P1; respecified after review —
