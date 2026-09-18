@@ -230,6 +230,49 @@ describe("ProcessManager background tasks", () => {
       expect(finished).toEqual(["failed"]);
     });
 
+    // Real pipes: the shell exits at once and a grandchild writes ~50ms later, so
+    // the output is guaranteed to reach the pipe AFTER "exit" (the CI ordering).
+    const lateWriter = "(sleep 0.05; printf 'a\\nb\\nc\\n') & exit 0";
+
+    it.skipIf(process.platform === "win32")("captures output written to the pipe after exit", async () => {
+      const manager = new ProcessManager();
+      const task = manager.startTask({ command: lateWriter, cwd });
+      const [done] = await manager.waitTasks([task.id], { timeoutMs: 5000 });
+      expect(done!.status).toBe("completed");
+      expect(manager.taskOutputTail(task.id)).toBe("a\nb\nc\n");
+      expect(done!.outputLines).toBe(3);
+    });
+
+    it.skipIf(process.platform === "win32")(
+      "reads pending output before settling when the event loop stalls past the grace period",
+      async () => {
+        const { spawn } = await import("node:child_process");
+        const manager = new ProcessManager();
+        const child = spawn("bash", ["-c", lateWriter], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+        const task = manager.adoptTask({ command: lateWriter, cwd, child });
+        // Registered after the manager's exit handler: the grace timer is armed,
+        // then the loop blocks until it is overdue with the output still unread.
+        child.once("exit", () => {
+          const end = Date.now() + 300;
+          while (Date.now() < end) { /* block the event loop */ }
+        });
+        const [done] = await manager.waitTasks([task.id], { timeoutMs: 5000 });
+        expect(done!.status).toBe("completed");
+        expect(manager.taskOutputTail(task.id)).toBe("a\nb\nc\n");
+      },
+    );
+
+    it.skipIf(process.platform === "win32")("does not hang when a grandchild keeps the pipes open", async () => {
+      const manager = new ProcessManager();
+      const startedAt = Date.now();
+      const task = manager.startTask({ command: "echo started; sleep 30 & exit 0", cwd });
+      const [done] = await manager.waitTasks([task.id], { timeoutMs: 5000 });
+      expect(done!.status).toBe("completed");
+      expect(Date.now() - startedAt).toBeLessThan(3000);
+      expect(manager.taskOutputTail(task.id)).toBe("started\n");
+      if (done!.pid) process.kill(-done!.pid, "SIGKILL");
+    });
+
     it("killTask during the drain window reports the real exit, not killed", async () => {
       const manager = new ProcessManager();
       const child = fakeChild();

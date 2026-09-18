@@ -680,7 +680,10 @@ function onChildSettled(
   child.once("exit", (code) => {
     handlers.onExit?.(code);
     if (settled) return;
-    graceTimer = setTimeout(() => settle(code), POST_EXIT_STDIO_GRACE_MS);
+    // Timers run before the poll phase: if the loop stalled past the grace
+    // period, output already sitting in the pipe has not been read yet. Yield
+    // through one poll phase (setImmediate) so it is appended before settling.
+    graceTimer = setTimeout(() => setImmediate(() => settle(code)), POST_EXIT_STDIO_GRACE_MS);
     if (handlers.unrefTimer) graceTimer.unref?.();
   });
   child.once("close", (code) => settle(code));
