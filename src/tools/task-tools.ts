@@ -99,14 +99,16 @@ export function createBackgroundTaskTools(manager: ProcessManager): ToolRegistry
         if (!existing) {
           return { content: `Error: unknown task id: ${id || "(empty)"}.`, isError: true };
         }
-        if (existing.status !== "running") {
-          return {
-            content: `Task ${id} already finished (${existing.status}${existing.exitCode != null ? `, exit ${existing.exitCode}` : ""}). Nothing to kill.`,
-            status: "success",
-            metadata: { kind: "shell", background: true },
-          };
-        }
+        const alreadyFinished = (task: BackgroundTaskInfo): ToolResult => ({
+          content: `Task ${id} already finished (${task.status}${task.exitCode != null ? `, exit ${task.exitCode}` : ""}). Nothing to kill.`,
+          status: "success",
+          metadata: { kind: "shell", background: true },
+        });
+        if (existing.status !== "running") return alreadyFinished(existing);
         const killed = await manager.killTask(id);
+        // The task can exit on its own just before the kill lands; the manager
+        // then keeps its real outcome, so do not claim we killed it.
+        if (killed && killed.status !== "killed") return alreadyFinished(killed);
         return {
           content: `Killed background task ${id}${killed?.description ? ` (${killed.description})` : ""}.`,
           status: "success",
