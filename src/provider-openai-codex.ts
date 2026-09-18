@@ -845,13 +845,14 @@ function extractCodexModelDescriptors(payload: unknown): CodexModelDescriptor[] 
   return out;
 }
 
-// Extracts the family version from a codex slug (e.g. "gpt-5.5-codex" → 5005).
-// Used so models from a newer family float to the top even before the static
-// catalog knows about them.
+// Extracts the family version from a codex slug (e.g. "gpt-5.5-codex" → 5005,
+// "gpt-6-astra" → 6000). Used so models from a newer family float to the top
+// even before the static catalog knows about them. Integer-major slugs must
+// rank above every older major.minor family, not fall to zero.
 function parseCodexFamilyRank(id: string): number {
-  const match = id.match(/(\d+)\.(\d+)/);
+  const match = id.match(/(\d+)(?:\.(\d+))?/);
   if (!match) return 0;
-  return parseInt(match[1], 10) * 1000 + parseInt(match[2], 10);
+  return parseInt(match[1], 10) * 1000 + (match[2] ? parseInt(match[2], 10) : 0);
 }
 
 export function sortCodexModelDescriptors(descriptors: CodexModelDescriptor[]): CodexModelDescriptor[] {
