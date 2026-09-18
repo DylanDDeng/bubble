@@ -360,7 +360,13 @@ async function main() {
   // getConfigured() resolves the legacy openai-codex auth alias; the raw
   // auth key would skip token refresh and discovery for such logins.
   if (registry.getConfigured().find((item) => item.id === activeProviderId)?.authType === "oauth") {
-    await registry.prepareProvider(activeProviderId);
+    try {
+      await registry.prepareProvider(activeProviderId);
+    } catch (error) {
+      // A dead login must not lock the user out: /login only exists inside the
+      // session, so start anyway and let the first request surface the error.
+      console.error(chalk.yellow(`[auth] ${error instanceof Error ? error.message : String(error)}`));
+    }
     // The routing prompt below is composed once; give the account catalog a
     // bounded chance to land first so the menu the model reads matches what a
     // spawn will actually get (design §1.5).

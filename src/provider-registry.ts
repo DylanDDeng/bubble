@@ -456,29 +456,9 @@ export class ProviderRegistry {
       getCredentials: readCredentials,
       isExpired: (_credentials, graceMs) =>
         this.authStorage.isExpired(this.resolveOAuthAuthKey(providerId), graceMs),
-      refreshCredentials: async () => {
+      refreshCredentials: async (used) => {
         if (!refreshPromise) {
-          refreshPromise = (async () => {
-            const authKey = this.resolveOAuthAuthKey(providerId);
-            const current = this.authStorage.get(authKey);
-            if (!current?.refreshToken) {
-              throw new Error(`OpenAI OAuth credentials for ${providerId} are missing a refresh token.`);
-            }
-            const refreshed = await refreshOpenAICodex(current.refreshToken);
-            const next: OAuthCredentials = {
-              type: "oauth",
-              accessToken: refreshed.accessToken,
-              refreshToken: refreshed.refreshToken,
-              expiresAt: refreshed.expiresAt,
-              idToken: refreshed.idToken || current.idToken,
-              accountId: refreshed.accountId || current.accountId,
-            };
-            this.authStorage.set("openai", next);
-            if (authKey !== "openai") {
-              this.authStorage.set(authKey, next);
-            }
-            return next;
-          })().finally(() => {
+          refreshPromise = this.refreshOpenAICredentials(providerId, used).finally(() => {
             refreshPromise = undefined;
           });
         }
@@ -494,23 +474,9 @@ export class ProviderRegistry {
     return {
       getCredentials: () => this.authStorage.get("grok"),
       isExpired: (_credentials, graceMs) => this.authStorage.isExpired("grok", graceMs),
-      refreshCredentials: async () => {
+      refreshCredentials: async (used) => {
         if (!refreshPromise) {
-          refreshPromise = (async () => {
-            const current = this.authStorage.get("grok");
-            if (!current?.refreshToken) {
-              throw new Error("Grok OAuth credentials are missing a refresh token. Run /login grok again.");
-            }
-            const refreshed = await refreshGrok(current.refreshToken);
-            const next: OAuthCredentials = {
-              type: "oauth",
-              accessToken: refreshed.accessToken,
-              refreshToken: refreshed.refreshToken,
-              expiresAt: refreshed.expiresAt,
-            };
-            this.authStorage.set("grok", next);
-            return next;
-          })().finally(() => {
+          refreshPromise = this.refreshGrokCredentials(used).finally(() => {
             refreshPromise = undefined;
           });
         }
@@ -531,38 +497,116 @@ export class ProviderRegistry {
   }
 
   async prepareProvider(providerId: string): Promise<void> {
-    if (providerId === "grok" && this.authStorage.isExpired("grok")) {
-      const creds = this.authStorage.get("grok");
-      if (creds?.refreshToken) {
-        const refreshed = await refreshGrok(creds.refreshToken);
-        this.authStorage.set("grok", {
-          type: "oauth",
-          accessToken: refreshed.accessToken,
-          refreshToken: refreshed.refreshToken,
-          expiresAt: refreshed.expiresAt,
-        });
+    if (providerId === "grok") {
+      if (this.authStorage.isExpired("grok") && this.authStorage.get("grok")?.refreshToken) {
+        await this.refreshGrokCredentials();
       }
       return;
     }
+    if (providerId !== "openai" && providerId !== "openai-codex") return;
     const authKey = this.resolveOAuthAuthKey(providerId);
-    if ((providerId === "openai" || providerId === "openai-codex") && this.authStorage.isExpired(authKey)) {
-      const creds = this.authStorage.get(authKey);
-      if (creds?.refreshToken) {
-        const refreshed = await refreshOpenAICodex(creds.refreshToken);
-        const next: OAuthCredentials = {
+    if (this.authStorage.isExpired(authKey) && this.authStorage.get(authKey)?.refreshToken) {
+      await this.refreshOpenAICredentials(providerId);
+    }
+  }
+
+  private refreshOpenAICredentials(providerId: string, used?: OAuthCredentials): Promise<OAuthCredentials> {
+    const authKey = this.resolveOAuthAuthKey(providerId);
+    return this.refreshSharedCredentials({
+      authKey,
+      used,
+      // "openai" is the canonical key; a legacy openai-codex login is mirrored.
+      writeKeys: authKey === "openai" ? ["openai"] : ["openai", authKey],
+      label: "OpenAI",
+      loginHint: "/login openai",
+      refresh: async (current) => {
+        const refreshed = await refreshOpenAICodex(current.refreshToken);
+        return {
           type: "oauth",
           accessToken: refreshed.accessToken,
           refreshToken: refreshed.refreshToken,
           expiresAt: refreshed.expiresAt,
-          idToken: refreshed.idToken || creds.idToken,
-          accountId: refreshed.accountId || creds.accountId,
+          idToken: refreshed.idToken || current.idToken,
+          accountId: refreshed.accountId || current.accountId,
         };
-        this.authStorage.set("openai", next);
-        if (authKey !== "openai") {
-          this.authStorage.set(authKey, next);
-        }
+      },
+    });
+  }
+
+  private refreshGrokCredentials(used?: OAuthCredentials): Promise<OAuthCredentials> {
+    return this.refreshSharedCredentials({
+      authKey: "grok",
+      used,
+      writeKeys: ["grok"],
+      label: "Grok",
+      loginHint: "/login grok",
+      refresh: async (current) => {
+        const refreshed = await refreshGrok(current.refreshToken);
+        return {
+          type: "oauth",
+          accessToken: refreshed.accessToken,
+          refreshToken: refreshed.refreshToken,
+          expiresAt: refreshed.expiresAt,
+        };
+      },
+    });
+  }
+
+  /**
+   * The one place a refresh token is spent. auth.json is shared by every
+   * Bubble process and refresh tokens are single-use, so the token is only
+   * presented under the cross-process lock and only after re-reading the file:
+   * if another process already rotated it, its result is adopted and no
+   * request is made. A rejected token gets the same second look before the
+   * error surfaces, because the rotation may have landed mid-request.
+   *
+   * `used` is the credential set the caller was holding when it asked (the
+   * provider passes it, also for a forced refresh after a 401): "rotated" means
+   * the file no longer holds that set, not merely that it is unexpired.
+   */
+  private refreshSharedCredentials(options: {
+    authKey: string;
+    used?: OAuthCredentials;
+    writeKeys: string[];
+    label: string;
+    loginHint: string;
+    refresh: (current: OAuthCredentials) => Promise<OAuthCredentials>;
+  }): Promise<OAuthCredentials> {
+    const { authKey, writeKeys, label, loginHint, refresh } = options;
+    const held = options.used ?? this.authStorage.get(authKey);
+    return this.authStorage.withRefreshLock(async () => {
+      this.authStorage.reload();
+      const current = this.authStorage.get(authKey);
+      if (!current?.refreshToken) {
+        throw new Error(`${label} OAuth credentials are missing a refresh token. Run ${loginHint} again.`);
       }
-    }
+      const rotatedElsewhere = (since: OAuthCredentials | undefined): OAuthCredentials | undefined => {
+        this.authStorage.reload();
+        const latest = this.authStorage.get(authKey);
+        if (!latest || !since) return undefined;
+        if (latest.refreshToken === since.refreshToken && latest.accessToken === since.accessToken) return undefined;
+        return this.authStorage.isExpired(authKey) ? undefined : latest;
+      };
+      const adopted = rotatedElsewhere(held);
+      if (adopted) return adopted;
+
+      let next: OAuthCredentials;
+      try {
+        next = await refresh(current);
+      } catch (error) {
+        const rescued = rotatedElsewhere(current);
+        if (rescued) return rescued;
+        const message = error instanceof Error ? error.message : String(error);
+        // A 400/401 from the token endpoint is a verdict on the refresh token
+        // (reused, revoked, expired), not a transient failure: say what to do.
+        if (/Token refresh failed: 40[01]\b|refresh_token_reused|invalid_grant/.test(message)) {
+          throw new Error(`${label} login is no longer valid. Run ${loginHint} to sign in again.\n${message}`);
+        }
+        throw error;
+      }
+      for (const key of writeKeys) this.authStorage.set(key, next);
+      return next;
+    });
   }
 
   getConfigured(): ProviderProfile[] {
