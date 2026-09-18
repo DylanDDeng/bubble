@@ -15,15 +15,22 @@ import type { BackgroundTaskInfo } from "../../tasks/manager.js";
 import { nextDisplayMessageKey, type DisplayMessage, type DisplayToolCall } from "./display-history.js";
 import { mapTranscriptTools } from "./subagent-view.js";
 
+/**
+ * Occurrence for a restored terminal marker whose task_started marker is not
+ * in the retained log (the task was launched before a conversation_clear).
+ * It must never land on a later launch that happens to reuse the task id.
+ */
+export const UNMATCHED_LAUNCH = -1;
+
 export interface TaskLifecycleTerminal {
   task: BackgroundTaskInfo;
   output?: string;
   /**
    * Which launch of this task id the terminal state belongs to (0-based, in
-   * transcript order). Task ids restart at task_0001 in every process, so a
-   * resumed session can hold several launches sharing one id; persisted
-   * markers carry their launch order. Omitted for live completions, which
-   * always belong to the newest launch that has not settled yet.
+   * transcript order), or UNMATCHED_LAUNCH. Task ids restart at task_0001 in
+   * every process, so a resumed session can hold several launches sharing
+   * one id; persisted markers carry their launch order. Omitted for live
+   * completions, which always belong to the newest launch not settled yet.
    */
   occurrence?: number;
 }
@@ -56,7 +63,7 @@ function launchRowsFor(messages: DisplayMessage[], taskId: string): DisplayToolC
 /** The launch row a terminal state should land on, or undefined. */
 function targetLaunchRow(messages: DisplayMessage[], taskId: string, occurrence?: number): DisplayToolCall | undefined {
   const rows = launchRowsFor(messages, taskId);
-  if (occurrence !== undefined) return rows[occurrence];
+  if (occurrence !== undefined) return occurrence >= 0 ? rows[occurrence] : undefined;
   for (let index = rows.length - 1; index >= 0; index -= 1) {
     if (!hasLanded(rows[index]!)) return rows[index];
   }

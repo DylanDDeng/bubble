@@ -61,6 +61,7 @@ import {
   landTaskLifecycles,
   mergeTaskLifecycleIntoLiveTools,
   taskLifecycleDisplayMessage,
+  UNMATCHED_LAUNCH,
   type TaskLifecycleTerminal,
 } from "../model/task-lifecycle.js";
 import type { SubmitPayload } from "../model/composer-types.js";
@@ -1128,7 +1129,9 @@ function restoredTaskLifecycles(manager: SessionManager): TaskLifecycleTerminal[
     const endedAt = numeric(payload.endedAt) ?? entry.timestamp;
     const seen = launches.get(id) ?? 0;
     terminals.push({
-      occurrence: seen > 0 ? seen - 1 : undefined,
+      // A start persisted before conversation_clear is out of scope: keep its
+      // terminal state detached rather than landing it on a later reuse.
+      occurrence: seen > 0 ? seen - 1 : UNMATCHED_LAUNCH,
       task: {
         kind: "task",
         id,

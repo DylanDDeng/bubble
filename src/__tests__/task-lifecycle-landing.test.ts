@@ -5,6 +5,7 @@ import {
   applyTaskLifecycleToMessages,
   landTaskLifecycles,
   mergeTaskLifecycleIntoLiveTools,
+  UNMATCHED_LAUNCH,
 } from "../tui/model/task-lifecycle.js";
 import { buildTraceGroups } from "../tui/model/trace-groups.js";
 
@@ -130,6 +131,17 @@ describe("background task lifecycle landing", () => {
 
     // Every launch already settled: nothing to land, caller falls back to a detached row.
     expect(applyTaskLifecycleToMessages(landed.messages, finished({ endedAt: 99_000 })).merged).toBe(false);
+  });
+
+  it("keeps an unmatched restored terminal detached from a reused id's open launch", () => {
+    const open = { ...launchRow("call_new"), metadata: { ...launchRow().metadata, taskId: "task_0001" } };
+    const landed = landTaskLifecycles(transcriptWith(open), [
+      { occurrence: UNMATCHED_LAUNCH, task: finished({ id: "task_0001", endedAt: 20_000 }), output: "pre-clear failure" },
+    ]);
+    const rows = landed.flatMap((message) => message.toolCalls ?? []);
+    expect(rows.find((row) => row.id === "call_new")?.metadata?.taskLifecycle).toBeUndefined();
+    expect(rows.at(-1)?.id).toMatch(/^task-lifecycle:task_0001:/);
+    expect(rows.at(-1)?.result).toBe("pre-clear failure");
   });
 
   it("merges into live accumulator rows in place, skipping rows still running", () => {

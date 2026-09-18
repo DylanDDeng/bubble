@@ -378,6 +378,58 @@ describe("Pi TUI background task lifecycle", () => {
     controller.shutdown("test");
   });
 
+  it("does not land a pre-clear completion on a post-clear launch that reuses its id", () => {
+    const dir = join(tmpdir(), `bubble-controller-task-orphan-${process.pid}-${Date.now()}`);
+    mkdirSync(dir, { recursive: true });
+    const sessionFile = join(dir, "session.jsonl");
+    const session = new SessionManager(sessionFile);
+    session.updateMetadata({ cwd: dir });
+    session.appendMarker("task_started", JSON.stringify({ id: "task_0001", startedAt: 1_000, command: "npm test" }));
+    session.appendMarker("conversation_clear", "");
+    session.appendMarker("task_finished", JSON.stringify({
+      id: "task_0001", status: "failed", exitCode: 1, startedAt: 1_000, endedAt: 3_000, outputLines: 1, output: "pre-clear failure\n",
+    }));
+    const agent = {
+      messages: [
+        { role: "user", content: "again" },
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call_new", name: "bash", arguments: JSON.stringify({ command: "npm run build", run_in_background: true }) }],
+        },
+        {
+          role: "tool",
+          toolCallId: "call_new",
+          content: "Started background task task_0001.",
+          metadata: { kind: "shell", command: "npm run build", taskId: "task_0001", background: true },
+        },
+      ],
+      setSessionID: () => {},
+      listSubAgents: () => [],
+      listWorkflows: () => [],
+      getSubAgentMessages: () => [],
+      closeSubAgent: async () => {},
+      closeWorkflow: () => {},
+      resetContextUsageAnchor: () => {},
+      async *run(): AsyncIterable<AgentEvent> {
+        yield { type: "turn_start" };
+        yield { type: "turn_end" };
+      },
+    };
+    const controller = new BubbleTuiController({
+      agent: agent as never,
+      sessionManager: new SessionManager(sessionFile),
+      ports: new SpyHost().ports,
+    });
+
+    const rows = controller.getTranscript().flatMap((message) => message.toolCalls ?? []);
+    expect(rows.find((row) => row.id === "call_new")?.metadata?.taskLifecycle).toBeUndefined();
+    const detached = rows.filter((row) => row.id.startsWith("task-lifecycle:task_0001:"));
+    expect(detached).toHaveLength(1);
+    expect(detached[0]?.result).toContain("pre-clear failure");
+    controller.shutdown("test");
+  });
+
   it("does not duplicate a persisted completion row when switching back to its owner session", async () => {
     const dir = join(tmpdir(), `bubble-controller-task-switch-${process.pid}-${Date.now()}`);
     mkdirSync(dir, { recursive: true });
