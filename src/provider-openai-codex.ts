@@ -155,6 +155,10 @@ export function createOpenAICodexProvider(options: {
           }
         | undefined;
 
+      // OpenAI streams one reasoning summary per part; each part is a
+      // self-contained markdown block. Separate parts so Thinking does not
+      // read as one run-on line.
+      let summaryPartsSeen = 0;
       try {
         let response = await sendRequest();
 
@@ -214,6 +218,14 @@ export function createOpenAICodexProvider(options: {
             const delta = typeof (event as any).delta === "string" ? (event as any).delta : "";
             if (delta) {
               yield { type: "text", content: delta };
+            }
+            continue;
+          }
+
+          if (type === "response.reasoning_summary_part.added") {
+            summaryPartsSeen += 1;
+            if (summaryPartsSeen > 1) {
+              yield { type: "reasoning_delta", content: "\n\n" };
             }
             continue;
           }
@@ -506,6 +518,11 @@ function buildRequestBody(
     const wireEffort = options.reasoningEffort === "ultra" ? "max" : options.reasoningEffort;
     body.reasoning = {
       effort: wireEffort,
+      // The Codex backend's default_reasoning_summary is "none" for every
+      // current model, so without an explicit summary request no
+      // response.reasoning_summary_text.delta events arrive and the TUI never
+      // shows Thinking. Ask for the server-chosen summary like Codex CLI does.
+      summary: "auto",
       ...(options.useResponsesLite ? { context: "all_turns" } : {}),
     };
   }

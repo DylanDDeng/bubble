@@ -24,10 +24,13 @@ function makeAccessToken(accountId: string): string {
   })}.sig`;
 }
 
-function makeSseResponse(): Response {
+function makeSseResponse(events: Array<Record<string, unknown>> = []): Response {
   const encoder = new TextEncoder();
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
+      for (const event of events) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+      }
       controller.enqueue(encoder.encode(`data: ${JSON.stringify({
         type: "response.completed",
         response: {
@@ -308,7 +311,35 @@ describe("provider-openai-codex", () => {
     });
   });
 
-  it("maps the Ultra client preset to Max on the wire without enabling summaries", async () => {
+  it("separates consecutive reasoning summary parts with a blank line", async () => {
+    const token = makeAccessToken("account-123");
+    vi.stubGlobal("fetch", vi.fn(async () => makeSseResponse([
+      { type: "response.reasoning_summary_part.added", summary_index: 0 },
+      { type: "response.reasoning_summary_text.delta", delta: "**Planning**" },
+      { type: "response.reasoning_summary_part.done", summary_index: 0 },
+      { type: "response.reasoning_summary_part.added", summary_index: 1 },
+      { type: "response.reasoning_summary_text.delta", delta: "**Verifying**" },
+      { type: "response.reasoning_summary_part.done", summary_index: 1 },
+      { type: "response.output_text.delta", delta: "done" },
+    ])));
+
+    const provider = createOpenAICodexProvider({
+      providerId: "openai-codex",
+      apiKey: token,
+      baseURL: "https://chatgpt.com/backend-api",
+    });
+    const chunks = await collectStream(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "gpt-6-astra",
+      thinkingLevel: "high",
+    }));
+    const reasoning = chunks
+      .filter((chunk) => chunk.type === "reasoning_delta")
+      .map((chunk) => (chunk as { content: string }).content)
+      .join("");
+    expect(reasoning).toBe("**Planning**\n\n**Verifying**");
+  });
+
+  it("maps the Ultra client preset to Max on the wire and requests reasoning summaries", async () => {
     const token = makeAccessToken("account-123");
     const requestInits: RequestInit[] = [];
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -329,8 +360,9 @@ describe("provider-openai-codex", () => {
     }));
 
     const body = JSON.parse(String(requestInits[0].body));
-    expect(body.reasoning).toEqual({ effort: "max", context: "all_turns" });
-    expect(body.reasoning.summary).toBeUndefined();
+    // Every current Codex model reports default_reasoning_summary "none", so
+    // the summary must be requested explicitly or Thinking never renders.
+    expect(body.reasoning).toEqual({ effort: "max", summary: "auto", context: "all_turns" });
     expect(body.instructions).toBe("");
     expect(body.parallel_tool_calls).toBe(false);
     expect(body.input[0]).toEqual({ type: "additional_tools", role: "developer", tools: [] });
