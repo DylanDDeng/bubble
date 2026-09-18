@@ -20,6 +20,12 @@
  * process, so the event loop keeps owning it (design §2.2a). Reaping is
  * three-layered (design §2.2b): graceful shutdownTasks() with escalation, a
  * SIGKILL-only path for signal handlers, and a process.once("exit") backstop.
+ *
+ * Finalization waits for stdio to drain: Node may emit "exit" before the last
+ * pipe chunks are delivered, so a record is settled on "close" — with a short
+ * grace timer from "exit" as the fallback, because a detached grandchild that
+ * inherited the pipes (`some-server &`) can keep "close" from ever firing.
+ * Same pattern as POST_EXIT_STDIO_GRACE_MS in src/tools/bash.ts.
  */
 
 import { spawn, type ChildProcess, type ChildProcessByStdio } from "node:child_process";
@@ -31,6 +37,7 @@ import { appendTailCapped, killProcessTree, stripAnsi, tail } from "./process-ut
 
 const MAX_LOG_BYTES = 96 * 1024;
 const STOP_FORCE_AFTER_MS = 1000;
+const POST_EXIT_STDIO_GRACE_MS = 150;
 const MAX_RUNNING_TASKS_PER_SESSION = 8;
 const MAX_FINISHED_TASKS = 20;
 
@@ -62,6 +69,10 @@ export interface ManagedServerInfo {
 interface ManagedServerRecord extends ManagedServerInfo {
   kind: "server";
   child?: ChildProcessByStdio<null, Readable, Readable>;
+  /** Set synchronously at "exit"; `status` only flips once stdio has drained. */
+  exited?: { code: number | null };
+  /** Resolves once the exit has been settled into `status` (bounded). */
+  settled?: Promise<void>;
   logs: string;
 }
 
@@ -104,6 +115,10 @@ export interface BackgroundTaskInfo {
 
 interface BackgroundTaskRecord extends BackgroundTaskInfo {
   child?: ChildProcess;
+  /** Set once "exit" is observed; finalization is still pending stdio drain. */
+  exited?: { code: number | null };
+  /** Resolves once the exit has been finalized (close, or the bounded grace). */
+  settled?: Promise<void>;
   output: string;
   outputLineBreaks: number;
   outputHasData: boolean;
@@ -260,14 +275,19 @@ export class ProcessManager {
       append(Buffer.from(`\n[task failed to start: ${error.message}]\n`));
       this.finalizeTask(record, "failed", null);
     });
-    child.once("exit", (code) => {
-      if (record.status === "running") {
-        this.finalizeTask(record, code === 0 ? "completed" : "failed", code);
-      }
+    record.settled = onChildSettled(child, {
+      onExit: (code) => {
+        record.exited = { code };
+      },
+      onSettled: (code) => this.finalizeExitedTask(record, code),
     });
 
     this.bumpTaskState(record);
     return this.publicTask(record);
+  }
+
+  private finalizeExitedTask(record: BackgroundTaskRecord, code: number | null): void {
+    this.finalizeTask(record, code === 0 ? "completed" : "failed", code);
   }
 
   private finalizeTask(record: BackgroundTaskRecord, status: BackgroundTaskStatus, exitCode: number | null): void {
@@ -361,13 +381,18 @@ export class ProcessManager {
     if (!record || record.kind !== "task") return undefined;
     if (record.status !== "running") return this.publicTask(record);
     const pid = record.child?.pid ?? record.pid;
-    // Mark first so the exit listener does not double-finalize as failed.
-    this.finalizeTask(record, "killed", null);
+    // Mark first so the exit listener does not double-finalize as failed. A
+    // task that already exited on its own keeps its real outcome instead, and
+    // is left to the close/grace path: finish listeners snapshot the output
+    // tail, so they must not fire before the pending pipe data is appended.
+    if (!record.exited) this.finalizeTask(record, "killed", null);
     if (pid) {
+      // Also reaps pipe-holding grandchildren, which lets "close" fire promptly.
       killProcessTree(pid, "SIGTERM");
       const forceTimer = setTimeout(() => killProcessTree(pid, "SIGKILL"), STOP_FORCE_AFTER_MS);
       forceTimer.unref?.();
     }
+    if (record.exited) await record.settled;
     return this.publicTask(record);
   }
 
@@ -383,7 +408,10 @@ export class ProcessManager {
     for (const task of running) {
       const pid = task.child?.pid ?? task.pid;
       if (pid) killProcessTree(pid, "SIGKILL");
-      if (task.status === "running") this.finalizeTask(task, "killed", null);
+      if (task.status !== "running") continue;
+      // Exited on its own inside the drain window: bounded wait for its output.
+      if (task.exited) await task.settled;
+      else this.finalizeTask(task, "killed", null);
     }
   }
 
@@ -442,6 +470,8 @@ export class ProcessManager {
   private publicTask(record: BackgroundTaskRecord): BackgroundTaskInfo {
     const {
       child: _child,
+      exited: _exited,
+      settled: _settled,
       output: _output,
       outputLineBreaks: _outputLineBreaks,
       outputHasData: _outputHasData,
@@ -514,19 +544,31 @@ export class ProcessManager {
       record.status = "failed";
       appendServerLog(record, `\n[server failed: ${error.message}]\n`);
     });
-    child.once("exit", (code) => {
-      record.exitCode = code;
-      if (record.status !== "stopped") {
-        record.status = code === 0 ? "exited" : "failed";
-      }
-      record.child = undefined;
+    // Settle after stdio drains so a fast crash surfaces its logs in the
+    // "did not become ready" error instead of racing the status flip.
+    record.settled = onChildSettled(child, {
+      unrefTimer: true,
+      onExit: (code) => {
+        record.exited = { code };
+      },
+      onSettled: (code) => {
+        record.exitCode = code;
+        if (record.status !== "stopped") {
+          record.status = code === 0 ? "exited" : "failed";
+        }
+        record.child = undefined;
+      },
     });
 
     const timeoutSec = input.timeoutSec ?? 30;
     const ready = readinessUrl
       ? await waitForReadiness(record, readinessUrl, timeoutSec)
       : await waitForProcessToStayAlive(record, Math.min(timeoutSec, 2));
-    if (!ready) {
+    // `exited` is checked on its own: the status flip lags "exit" by the drain
+    // window, so a server dying right at the deadline still reads as active.
+    if (!ready || record.exited) {
+      // Bounded: lets the crash output land before it is quoted below.
+      if (record.exited) await record.settled;
       const logs = record.logs.trim();
       await this.stopManagedServer(id);
       throw new Error(`Server ${id} did not become ready within ${timeoutSec}s.${logs ? `\n\nLogs:\n${tail(logs, 4000)}` : ""}`);
@@ -628,6 +670,49 @@ process.once("exit", () => {
 // Server internals (moved verbatim)
 // ---------------------------------------------------------------------------
 
+/**
+ * Calls `onSettled` exactly once, after the child has exited AND its stdio has
+ * drained ("close"), or POST_EXIT_STDIO_GRACE_MS after "exit" when something
+ * else still holds the pipes open. `onExit` fires synchronously at "exit".
+ * The returned promise resolves right after `onSettled` has run.
+ */
+function onChildSettled(
+  child: ChildProcess,
+  handlers: {
+    onExit?: (code: number | null) => void;
+    onSettled: (code: number | null) => void;
+    unrefTimer?: boolean;
+  },
+): Promise<void> {
+  let settled = false;
+  let resolveSettled!: () => void;
+  const done = new Promise<void>((resolve) => {
+    resolveSettled = resolve;
+  });
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  const settle = (code: number | null) => {
+    if (settled) return;
+    settled = true;
+    if (graceTimer) clearTimeout(graceTimer);
+    try {
+      handlers.onSettled(code);
+    } finally {
+      resolveSettled();
+    }
+  };
+  child.once("exit", (code) => {
+    handlers.onExit?.(code);
+    if (settled) return;
+    // Timers run before the poll phase: if the loop stalled past the grace
+    // period, output already sitting in the pipe has not been read yet. Yield
+    // through one poll phase (setImmediate) so it is appended before settling.
+    graceTimer = setTimeout(() => setImmediate(() => settle(code)), POST_EXIT_STDIO_GRACE_MS);
+    if (handlers.unrefTimer) graceTimer.unref?.();
+  });
+  child.once("close", (code) => settle(code));
+  return done;
+}
+
 function publicServerInfo(server: ManagedServerRecord): ManagedServerInfo {
   return {
     id: server.id,
@@ -658,7 +743,7 @@ function unrefStream(stream: Readable): void {
 async function waitForReadiness(server: ManagedServerRecord, url: string, timeoutSec: number): Promise<boolean> {
   const deadline = Date.now() + timeoutSec * 1000;
   while (Date.now() < deadline) {
-    if (!isActiveStatus(server.status)) return false;
+    if (!isServerAlive(server)) return false;
     if (await canFetch(url)) return true;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
@@ -668,10 +753,10 @@ async function waitForReadiness(server: ManagedServerRecord, url: string, timeou
 async function waitForProcessToStayAlive(server: ManagedServerRecord, timeoutSec: number): Promise<boolean> {
   const deadline = Date.now() + timeoutSec * 1000;
   while (Date.now() < deadline) {
-    if (!isActiveStatus(server.status)) return false;
+    if (!isServerAlive(server)) return false;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  return isActiveStatus(server.status);
+  return isServerAlive(server);
 }
 
 async function canFetch(url: string): Promise<boolean> {
@@ -685,6 +770,10 @@ async function canFetch(url: string): Promise<boolean> {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function isServerAlive(server: ManagedServerRecord): boolean {
+  return !server.exited && isActiveStatus(server.status);
 }
 
 function isActiveStatus(status: ManagedServerStatus): boolean {

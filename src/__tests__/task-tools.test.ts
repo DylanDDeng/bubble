@@ -1,3 +1,5 @@
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -150,5 +152,21 @@ describe("kill_task", () => {
     const again = await killTask.execute({ task_id: task.id }, { cwd } as any);
     expect(again.isError).toBeUndefined();
     expect(again.content).toContain("already finished");
+  });
+
+  it("reports the real outcome when the task exited on its own just before the kill", async () => {
+    const manager = new ProcessManager();
+    const { killTask } = tools(manager);
+    const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter() });
+    const task = manager.adoptTask({ command: "fast", cwd, child: child as unknown as ChildProcess });
+
+    // Exited, but stdio has not drained yet: still "running" to the pre-check.
+    child.emit("exit", 0, null);
+    const pending = killTask.execute({ task_id: task.id }, { cwd } as any);
+    child.emit("close", 0, null);
+
+    const result = await pending;
+    expect(result.content).not.toContain("Killed background task");
+    expect(result.content).toContain("already finished (completed, exit 0)");
   });
 });
