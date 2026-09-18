@@ -183,8 +183,18 @@ describe("getCachedDiscoverySnapshot (§1.4)", () => {
     expect(snapshot?.source).toBe("remote");
     expect(snapshot?.models.map((model) => model.id)).toEqual(["stealth/ox-alpha"]);
 
-    // Past the 60s success TTL the snapshot is gone — never a stale authority.
+    // Past the 60s freshness TTL the live result is stale, but the catalog it
+    // confirmed stays trusted for routing until the disk-TTL horizon: the
+    // picker re-fetches on its own cadence, an account's membership does not
+    // lapse by the minute.
     vi.setSystemTime(new Date("2026-07-12T00:01:01Z"));
+    const retained = registry.getCachedDiscoverySnapshot("openrouter");
+    expect(retained?.complete).toBe(true);
+    expect(retained?.source).toBe("cache");
+    expect(retained?.models.map((model) => model.id)).toEqual(["stealth/ox-alpha"]);
+
+    // Past the horizon nothing is trusted anymore.
+    vi.setSystemTime(new Date("2026-07-13T00:00:01Z"));
     expect(registry.getCachedDiscoverySnapshot("openrouter")).toBeUndefined();
   });
 

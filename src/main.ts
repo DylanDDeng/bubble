@@ -357,7 +357,9 @@ async function main() {
     ? decodeModel(normalizedConfiguredModel)
     : { providerId: undefined, modelId: "" };
   let activeProviderId = effectiveProviderId || fallbackProviderId;
-  if (registry.supportsOAuth(activeProviderId) && registry.getAuthStorage().has(activeProviderId)) {
+  // getConfigured() resolves the legacy openai-codex auth alias; the raw
+  // auth key would skip token refresh and discovery for such logins.
+  if (registry.getConfigured().find((item) => item.id === activeProviderId)?.authType === "oauth") {
     await registry.prepareProvider(activeProviderId);
     // The routing prompt below is composed once; give the account catalog a
     // bounded chance to land first so the menu the model reads matches what a

@@ -352,7 +352,9 @@ export class RunDriver {
       : { providerId: undefined, modelId: "" };
     const activeProviderId = effectiveProviderId || fallbackProviderId;
     if (effectiveModelId) assertProviderModelAllowed(activeProviderId, effectiveModelId);
-    if (registry.supportsOAuth(activeProviderId) && registry.getAuthStorage().has(activeProviderId)) {
+    // getConfigured() resolves the legacy openai-codex auth alias; the raw
+    // auth key would skip token refresh and discovery for such logins.
+    if (registry.getConfigured().find((item) => item.id === activeProviderId)?.authType === "oauth") {
       await registry.prepareProvider(activeProviderId);
       // Same bounded wait as main.ts: the routing prompt is composed right after.
       await registry.waitForModelDiscovery(activeProviderId, 3_000);

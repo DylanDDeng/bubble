@@ -346,6 +346,70 @@ describe("ChatGPT (openai oauth) discovery scope", () => {
     expect(apiDiscover).not.toHaveBeenCalled();
   });
 
+  it("keeps the confirmed catalog for routing past the freshness minute and across a failed refresh", async () => {
+    const registry = isolatedRegistry([oauthProvider]);
+    const provider = registry.getConfigured().find((item) => item.id === "openai")!;
+    const key = (registry as any).modelDiscoveryKey(provider) as string;
+    const base = Date.now();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(base);
+    try {
+      (registry as any).modelDiscoveryCache.set(key, {
+        result: { models: [{ id: "gpt-6-astra", name: "GPT-6-Astra", providerId: "openai" }], source: "remote", authoritative: true },
+        expiresAt: base + 60_000,
+        confirmed: { models: [{ id: "gpt-6-astra", name: "GPT-6-Astra", providerId: "openai" }], until: base + 24 * 60 * 60 * 1000 },
+        identityKey: "acct",
+        providerId: "openai",
+        authType: "oauth",
+      });
+      expect(registry.getCachedDiscoverySnapshot("openai")?.complete).toBe(true);
+
+      // Freshness minute passed: still confirmed for routing.
+      nowSpy.mockReturnValue(base + 5 * 60_000);
+      const stale = registry.getCachedDiscoverySnapshot("openai");
+      expect(stale?.complete).toBe(true);
+      expect(stale?.models.map((m) => m.id)).toEqual(["gpt-6-astra"]);
+
+      // A failed refresh replaces the live result but carries the confirmation.
+      (registry as any).modelDiscoveryCache.set(key, {
+        result: { models: [{ id: "gpt-5.4-mini", name: "mini", providerId: "openai" }], source: "fallback", authoritative: false, error: "boom" },
+        expiresAt: base + 5 * 60_000 + 10_000,
+        confirmed: (registry as any).modelDiscoveryCache.get(key).confirmed,
+        identityKey: "acct",
+        providerId: "openai",
+        authType: "oauth",
+      });
+      const afterFailure = registry.getCachedDiscoverySnapshot("openai");
+      expect(afterFailure?.complete).toBe(true);
+      expect(afterFailure?.models.map((m) => m.id)).toEqual(["gpt-6-astra"]);
+
+      // Past the confirmation horizon nothing is trusted anymore.
+      nowSpy.mockReturnValue(base + 25 * 60 * 60 * 1000);
+      expect(registry.getCachedDiscoverySnapshot("openai")).toBeUndefined();
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it("a complete discovery result records a confirmation horizon; a failure carries the previous one", async () => {
+    const registry = isolatedRegistry([oauthProvider]);
+    const provider = registry.getConfigured().find((item) => item.id === "openai")!;
+    const key = (registry as any).modelDiscoveryKey(provider) as string;
+    vi.spyOn(registry as any, "performModelDiscovery").mockResolvedValueOnce({
+      models: [{ id: "gpt-6-astra", name: "GPT-6-Astra", providerId: "openai" }], source: "remote", authoritative: true,
+    });
+    await registry.discoverModels(provider, { forceRefresh: true });
+    const confirmed = (registry as any).modelDiscoveryCache.get(key).confirmed;
+    expect(confirmed?.models.map((m: { id: string }) => m.id)).toEqual(["gpt-6-astra"]);
+    expect(confirmed?.until).toBeGreaterThan(Date.now() + 60_000);
+
+    vi.spyOn(registry as any, "performModelDiscovery").mockResolvedValueOnce({
+      models: [], source: "fallback", authoritative: false, error: "network down",
+    });
+    await registry.discoverModels(provider, { forceRefresh: true });
+    expect((registry as any).modelDiscoveryCache.get(key).confirmed).toBe(confirmed);
+    expect(registry.getCachedDiscoverySnapshot("openai")?.complete).toBe(true);
+  });
+
   it("bounds the startup wait but lets a slow discovery finish in the background", async () => {
     const registry = isolatedRegistry([oauthProvider]);
     let settle!: () => void;

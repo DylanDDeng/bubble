@@ -850,10 +850,10 @@ export class BubbleSdk {
       }
       // getConfigured() reads config.json from disk every call, so keys
       // added after SDK construction are picked up without a reload call.
-      if (this.registry.supportsOAuth(providerId) && this.registry.getAuthStorage().has(providerId)) {
+      const target = this.registry.getConfigured().find((item) => item.id === providerId);
+      if (target?.authType === "oauth") {
         await this.registry.prepareProvider(providerId);
       }
-      const target = this.registry.getConfigured().find((item) => item.id === providerId);
       if (!target?.enabled || !target.apiKey) {
         throw new Error(
           `Subagent route requires provider "${providerId}", but it is not configured or has no active credentials.`,

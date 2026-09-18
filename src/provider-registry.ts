@@ -138,6 +138,17 @@ interface CachedModelDiscovery {
   providerId: string;
   authType?: ProviderProfile["authType"];
   protocol?: ProviderProtocol;
+  /**
+   * Last complete successful catalog for this key and how long routing may
+   * trust it. The freshness TTL above (one minute) only paces picker refreshes;
+   * an account's catalog does not stop being confirmed when that minute ends,
+   * nor when a transient refresh failure replaces the live result.
+   */
+  confirmed?: { models: ModelInfo[]; until: number };
+}
+
+function isCompleteDiscovery(result: Pick<ModelDiscoveryResult, "source" | "authoritative" | "error">): boolean {
+  return result.source === "remote" && result.authoritative && !result.error;
 }
 
 /**
@@ -149,7 +160,8 @@ interface CachedModelDiscovery {
  */
 export interface CachedDiscoverySnapshot {
   models: ModelInfo[];
-  source: Exclude<ModelDiscoverySource, "cache">;
+  /** "cache" marks a confirmed catalog retained past the live result's freshness. */
+  source: ModelDiscoverySource;
   complete: boolean;
   expiresAt: number;
   identityKey: string;
@@ -282,6 +294,7 @@ export class ProviderRegistry {
           providerId: provider.id,
           authType: entry.authType,
           protocol: entry.protocol,
+          confirmed: isCompleteDiscovery(result) ? { models: result.models, until: entry.expiresAt } : undefined,
         });
         // Rebuild the dynamic overlay so context window / reasoning levels
         // resolve from the cached catalog at startup, not only on /model open.
@@ -666,6 +679,9 @@ export class ProviderRegistry {
   ): Promise<ModelDiscoveryResult> {
     const key = this.modelDiscoveryKey(provider);
     const now = Date.now();
+    // Captured before a forced refresh evicts the live entry, so a failed
+    // re-fetch still carries the last confirmed catalog forward.
+    const retainedConfirmation = this.modelDiscoveryCache.get(key)?.confirmed;
 
     if (!options.forceRefresh) {
       const cached = this.modelDiscoveryCache.get(key);
@@ -718,9 +734,15 @@ export class ProviderRegistry {
 
       this.applyDynamicDiscoveryMetadata(provider, result);
       const previous = this.lastDiscoveryMembership.get(key);
+      const stored = { ...result, source: result.source === "cache" ? "remote" : result.source } as CachedModelDiscovery["result"];
       this.modelDiscoveryCache.set(key, {
-        result: { ...result, source: result.source === "cache" ? "remote" : result.source },
+        result: stored,
         expiresAt: Date.now() + (result.error ? MODEL_DISCOVERY_FAILURE_TTL_MS : MODEL_DISCOVERY_SUCCESS_TTL_MS),
+        // A complete success starts a new confirmation horizon; anything else
+        // (failure fallback, partial union) carries the previous one forward.
+        confirmed: isCompleteDiscovery(stored)
+          ? { models: stored.models, until: Date.now() + MODEL_DISCOVERY_DISK_TTL_MS }
+          : this.modelDiscoveryCache.get(key)?.confirmed ?? retainedConfirmation,
         identityKey: this.discoveryIdentity(provider),
         providerId: provider.id,
         authType: provider.authType,
@@ -1021,11 +1043,36 @@ export class ProviderRegistry {
     const provider = this.getConfigured().find((item) => item.id === providerId);
     if (!provider) return undefined;
     const cached = this.modelDiscoveryCache.get(this.modelDiscoveryKey(provider));
-    if (!cached || cached.expiresAt <= Date.now()) return undefined;
+    if (!cached) return undefined;
+    const now = Date.now();
+    const fresh = cached.expiresAt > now;
+    if (fresh && isCompleteDiscovery(cached.result)) {
+      return {
+        models: cached.result.models,
+        source: cached.result.source,
+        complete: true,
+        expiresAt: cached.expiresAt,
+        identityKey: cached.identityKey,
+      };
+    }
+    // The live result is stale or not complete: routing keeps the last
+    // confirmed catalog for this identity until its horizon passes, so a
+    // long session does not lose its tier candidates after the freshness
+    // minute or across one failed refresh.
+    if (cached.confirmed && cached.confirmed.until > now) {
+      return {
+        models: cached.confirmed.models,
+        source: "cache",
+        complete: true,
+        expiresAt: cached.confirmed.until,
+        identityKey: cached.identityKey,
+      };
+    }
+    if (!fresh) return undefined;
     return {
       models: cached.result.models,
       source: cached.result.source,
-      complete: cached.result.source === "remote" && cached.result.authoritative && !cached.result.error,
+      complete: false,
       expiresAt: cached.expiresAt,
       identityKey: cached.identityKey,
     };
