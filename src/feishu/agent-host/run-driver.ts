@@ -354,6 +354,7 @@ export class RunDriver {
     if (effectiveModelId) assertProviderModelAllowed(activeProviderId, effectiveModelId);
     if (registry.supportsOAuth(activeProviderId) && registry.getAuthStorage().has(activeProviderId)) {
       await registry.prepareProvider(activeProviderId);
+      registry.warmModelDiscovery(activeProviderId);
     }
     const target = registry.getConfigured().find((p) => p.id === activeProviderId) || defaultProvider;
     if (!target?.apiKey) {

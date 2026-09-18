@@ -65,6 +65,13 @@ export type RoutingMembershipSource = "custom-allowlist" | "complete-discovery" 
 
 export interface RoutingSnapshot {
   parent: { providerId: string; model: string; tier?: ModelTier };
+  /**
+   * Subscription (OAuth) catalogs are account-scoped: the server decides which
+   * models this account may use, so a builtin entry that discovery has not
+   * confirmed must never be chosen by automatic tier routing. API-key
+   * providers keep their builtin tiers routable.
+   */
+  accountScopedCatalog: boolean;
   /** Catalog-effective provider id (openai OAuth -> "openai-codex" alias). */
   effectiveProviderId: string;
   membershipSource: RoutingMembershipSource;
@@ -110,6 +117,7 @@ export function buildRoutingSnapshot(
   const effectiveProviderId = parent.providerId === "openai" && configured?.authType === "oauth"
     ? "openai-codex"
     : parent.providerId;
+  const accountScopedCatalog = configured?.authType === "oauth";
 
   const builtins = listBuiltinModels(effectiveProviderId);
   const builtinIndex = new Map(builtins.map((model, index) => [model.id, index]));
@@ -183,6 +191,7 @@ export function buildRoutingSnapshot(
 
   return {
     parent: { ...parent, tier: parentTier },
+    accountScopedCatalog,
     effectiveProviderId,
     membershipSource,
     models,
@@ -193,11 +202,31 @@ export function buildRoutingSnapshot(
     resolvedCategories: resolveCategoriesForMenu(
       parent,
       parentTier,
-      models,
+      tierCatalogEntries(models, accountScopedCatalog),
       agentCategories,
       agentRouting,
     ),
   };
+}
+
+/**
+ * Catalog visible to automatic tier routing. On an account-scoped catalog only
+ * discovery-confirmed or user-listed models are candidates; a builtin-only
+ * entry (e.g. a static fast-tier model the ChatGPT plan does not include)
+ * would otherwise be routed to and rejected server-side.
+ */
+export function tierCatalogEntries(
+  models: readonly RoutingModelEntry[],
+  accountScopedCatalog: boolean,
+): TierCatalogEntry[] {
+  return models
+    .filter((model) => !accountScopedCatalog || model.source !== "builtin")
+    .map((model): TierCatalogEntry => ({
+      id: model.id,
+      tier: model.tier,
+      routingPriority: model.routingPriority,
+      builtinIndex: model.builtinIndex,
+    }));
 }
 
 /** Tier-resolution context derived from a snapshot (consumed by categories §3.2). */
@@ -207,12 +236,7 @@ export function tierContextFromSnapshot(
 ): TierRoutingContext {
   return {
     parentTier: snapshot.parent.tier,
-    models: snapshot.models.map((model): TierCatalogEntry => ({
-      id: model.id,
-      tier: model.tier,
-      routingPriority: model.routingPriority,
-      builtinIndex: model.builtinIndex,
-    })),
+    models: tierCatalogEntries(snapshot.models, snapshot.accountScopedCatalog),
     autoTier: agentRouting.autoTier,
   };
 }
@@ -247,19 +271,14 @@ export function createRoutingSnapshotAccessor(
 function resolveCategoriesForMenu(
   parent: { providerId: string; model: string },
   parentTier: ModelTier | undefined,
-  models: RoutingModelEntry[],
+  models: TierCatalogEntry[],
   agentCategories: AgentCategoriesConfig,
   agentRouting: AgentRoutingConfig,
 ): RoutingSnapshot["resolvedCategories"] {
   const merged = mergeAgentCategoriesWithProvenance(agentCategories);
   const tierContext: TierRoutingContext = {
     parentTier,
-    models: models.map((model): TierCatalogEntry => ({
-      id: model.id,
-      tier: model.tier,
-      routingPriority: model.routingPriority,
-      builtinIndex: model.builtinIndex,
-    })),
+    models,
     autoTier: agentRouting.autoTier,
   };
   return Object.entries(merged).map(([name, entry]) => {

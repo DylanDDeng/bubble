@@ -143,6 +143,50 @@ describe("routing snapshot membership (§1.3)", () => {
     expect(snapshot.models.some((model) => model.id === "claude-opus-4-8")).toBe(false);
   });
 
+  it("never auto-routes an OAuth (account-scoped) catalog to a builtin-only tier model", () => {
+    const parent = { providerId: "openai", model: "gpt-6-astra" };
+    // No discovery yet: the static openai-codex list still carries a fast-tier
+    // model (gpt-5.4-mini) that a ChatGPT plan may not include.
+    const cold = snapshotFor({ providerId: "openai", oauth: true }, parent);
+    expect(cold.membershipSource).toBe("fallback-union");
+    expect(cold.accountScopedCatalog).toBe(true);
+    expect(cold.models.some((model) => model.id === "gpt-5.4-mini" && model.source === "builtin")).toBe(true);
+    expect(cold.resolvedCategories.find((c) => c.name === "explore")?.model).toBe("inherit");
+
+    // Discovery confirmed the account's catalog and it has no fast tier: inherit.
+    const noFast = snapshotFor({
+      providerId: "openai",
+      oauth: true,
+      discovery: {
+        models: [{ id: "gpt-6-astra", name: "GPT-6-Astra", providerId: "openai" }, { id: "gpt-5.5", name: "gpt-5.5", providerId: "openai" }],
+        source: "remote",
+        complete: true,
+        expiresAt: Date.now() + 60_000,
+        identityKey: "acct",
+      },
+    }, parent);
+    expect(noFast.resolvedCategories.find((c) => c.name === "explore")?.model).toBe("inherit");
+
+    // Discovery that does include a fast model makes it routable again.
+    const withFast = snapshotFor({
+      providerId: "openai",
+      oauth: true,
+      discovery: {
+        models: [{ id: "gpt-6-astra", name: "GPT-6-Astra", providerId: "openai" }, { id: "gpt-5.4-mini", name: "gpt-5.4-mini", providerId: "openai" }],
+        source: "remote",
+        complete: true,
+        expiresAt: Date.now() + 60_000,
+        identityKey: "acct",
+      },
+    }, parent);
+    expect(withFast.resolvedCategories.find((c) => c.name === "explore")?.model).toBe("gpt-5.4-mini");
+
+    // API-key catalogs are unaffected: builtin tiers stay routable.
+    const apiKey = snapshotFor();
+    expect(apiKey.accountScopedCatalog).toBe(false);
+    expect(apiKey.resolvedCategories.find((c) => c.name === "explore")?.model).toBe("claude-haiku-4-5-20251001");
+  });
+
   it("fallback-union includes builtin models when nothing authoritative exists", () => {
     const snapshot = snapshotFor();
     expect(snapshot.membershipSource).toBe("fallback-union");

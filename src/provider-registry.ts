@@ -23,7 +23,7 @@ import {
 import { ModelConfig } from "./model-config.js";
 import { AuthStorage } from "./oauth/index.js";
 import { fetchGeminiModels, geminiReasoningLevels } from "./provider-ai-sdk.js";
-import { extractChatGptAccountId, fetchOpenAICodexModelCatalog, type OpenAICodexAuthAdapter } from "./provider-openai-codex.js";
+import { extractChatGptAccountId, fetchOpenAICodexModelCatalog, getCodexClientVersion, type OpenAICodexAuthAdapter } from "./provider-openai-codex.js";
 import { fetchGrokSubscriptionModels, type GrokAuthAdapter } from "./provider-grok.js";
 import { refreshOpenAICodex } from "./oauth/openai-codex.js";
 import { refreshGrok } from "./oauth/grok.js";
@@ -358,6 +358,21 @@ export class ProviderRegistry {
 
   getAuthStorage(): AuthStorage {
     return this.authStorage;
+  }
+
+  /**
+   * Start background discovery for an account-scoped (OAuth) provider so the
+   * routing snapshot knows the account's real catalog before the first
+   * subagent spawn. Discovery was previously triggered only by the model
+   * picker, which left tier routing on the static builtin list for the whole
+   * session unless the user opened /model. Fire-and-forget: discovery never
+   * throws (failures resolve to the local fallback) and a fresh cache is reused.
+   */
+  warmModelDiscovery(providerId: string): void {
+    const provider = this.getConfigured().find((item) => item.id === providerId);
+    if (!provider?.enabled || !provider.apiKey || provider.authType !== "oauth") return;
+    if (this.getCachedDiscoverySnapshot(providerId)) return;
+    void this.discoverModels(provider).catch(() => undefined);
   }
 
   supportsOAuth(providerId: string): boolean {
@@ -962,7 +977,15 @@ export class ProviderRegistry {
       provider.authType ?? "api",
       provider.protocol ?? "default",
       this.discoveryIdentity(provider),
-      provider.id === "openrouter" ? OPENROUTER_CATALOG_SCOPE : undefined,
+      provider.id === "openrouter"
+        ? OPENROUTER_CATALOG_SCOPE
+        // The ChatGPT backend filters /codex/models by the client version we
+        // claim, so a catalog fetched under an older pin (possibly by another
+        // still-running Bubble sharing the disk cache) must not satisfy this
+        // build's discovery.
+        : provider.id === "openai" && provider.authType === "oauth"
+          ? `codex-client:${getCodexClientVersion()}`
+          : undefined,
     ]);
   }
 

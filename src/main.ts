@@ -356,6 +356,7 @@ async function main() {
   let activeProviderId = effectiveProviderId || fallbackProviderId;
   if (registry.supportsOAuth(activeProviderId) && registry.getAuthStorage().has(activeProviderId)) {
     await registry.prepareProvider(activeProviderId);
+    registry.warmModelDiscovery(activeProviderId);
   }
   const activeProvider = registry.getConfigured().find((p) => p.id === activeProviderId) || defaultProvider;
   const activeModel = activeProvider && effectiveModelId

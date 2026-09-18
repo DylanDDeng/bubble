@@ -19,6 +19,7 @@ import {
   type ProviderProfile,
 } from "../provider-registry.js";
 import { clearDynamicModelMetadata, getBuiltinModel } from "../model-catalog.js";
+import { getCodexClientVersion } from "../provider-openai-codex.js";
 import type { UserConfig } from "../config.js";
 
 afterEach(() => {
@@ -304,5 +305,44 @@ describe("grok subscription discovery", () => {
       process.env.BUBBLE_SYSTEM_PROXY = previousProxy;
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe("ChatGPT (openai oauth) discovery scope", () => {
+  const oauthProvider: ProviderProfile = {
+    id: "openai",
+    name: "OpenAI",
+    baseURL: "https://chatgpt.com/backend-api",
+    apiKey: "eyJ.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC0xIn19.sig",
+    enabled: true,
+    authType: "oauth",
+  };
+
+  it("keys the discovery cache by the claimed Codex client version", () => {
+    const registry = isolatedRegistry([oauthProvider]);
+    const key = (registry as any).modelDiscoveryKey(oauthProvider) as string;
+    // A catalog written by an older build (or another running Bubble sharing
+    // the disk cache) under a lower pin must not satisfy this build's lookup.
+    expect(key).toContain(`codex-client:${getCodexClientVersion()}`);
+    const apiKeyProvider: ProviderProfile = { ...oauthProvider, authType: "api", baseURL: "https://api.openai.com/v1" };
+    expect((registry as any).modelDiscoveryKey(apiKeyProvider)).not.toContain("codex-client:");
+  });
+
+  it("warms discovery for account-scoped providers only, and only when nothing fresh is cached", () => {
+    const registry = isolatedRegistry([oauthProvider]);
+    const discover = vi.spyOn(registry, "discoverModels").mockResolvedValue({ models: [], source: "remote", authoritative: true });
+    registry.warmModelDiscovery("openai");
+    expect(discover).toHaveBeenCalledTimes(1);
+
+    vi.spyOn(registry, "getCachedDiscoverySnapshot").mockReturnValue({
+      models: [], source: "remote", complete: true, expiresAt: Date.now() + 60_000, identityKey: "acct",
+    });
+    registry.warmModelDiscovery("openai");
+    expect(discover).toHaveBeenCalledTimes(1);
+
+    const apiRegistry = isolatedRegistry([{ ...oauthProvider, id: "deepseek", authType: "api", baseURL: "https://api.deepseek.com" }]);
+    const apiDiscover = vi.spyOn(apiRegistry, "discoverModels");
+    apiRegistry.warmModelDiscovery("deepseek");
+    expect(apiDiscover).not.toHaveBeenCalled();
   });
 });
