@@ -117,11 +117,11 @@ async function main() {
       console.error(chalk.red("Error: No provider configured. Start interactive mode and use /login or /provider --add <id>."));
       process.exit(1);
     }
-    console.log(chalk.dim("No provider configured yet. Start with /login for ChatGPT or /provider --add <id> for an API key."));
+    console.log(chalk.dim("No provider configured yet. Start with /login for ChatGPT or Grok, or /provider --add <id> for an API key."));
   }
 
   const defaultProvider = registry.getDefault();
-  const unavailableProviderMessage = "No provider configured. Use /login for ChatGPT or /provider --add <id> before sending a prompt.";
+  const unavailableProviderMessage = "No provider configured. Use /login for ChatGPT or Grok, or /provider --add <id> before sending a prompt.";
 
   let sessionPromptCacheKey: string | undefined;
 

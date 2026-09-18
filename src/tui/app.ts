@@ -10,6 +10,7 @@
  * All runtime logic flows through BubbleTuiController + OverlayRequestController;
  * this file owns rendering and input routing only.
  */
+import { classifyExternalRuntimeBinding } from "../external-runtime/session-policy.js";
 import process from "node:process";
 import {
   ProcessTerminal,
@@ -274,6 +275,9 @@ export class PiTuiApp {
       providerId: () => this.options.agent.providerId,
       themeMode: () => this.themeMode,
       detectedTheme: () => this.detectedTheme,
+      grokRuntimeActive: () => classifyExternalRuntimeBinding(
+        this.activeSessionManager().getMetadata?.().externalRuntime,
+      ) === "grok",
       onModelSuggestionsChanged: () => {
         if (!this.disposed) this.editor.refreshAutocomplete();
       },
@@ -737,6 +741,11 @@ export class PiTuiApp {
           this.composer.replaceDraft(
             mode === "model" ? "/model " : mode === "provider" ? "/provider " : "/theme ",
           );
+          this.editor.refreshAutocomplete();
+        } else if (mode === "login" || mode === "logout") {
+          // Same inline surface as /model: the account list appears as the
+          // command's argument menu, so nothing is chosen for the user.
+          this.composer.replaceDraft(mode === "login" ? "/login " : "/logout ");
           this.editor.refreshAutocomplete();
         } else if (mode === "key" && providerId) {
           this.openProviderKeyPhase(providerId);

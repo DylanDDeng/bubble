@@ -50,7 +50,7 @@ bubble
 
 On first launch, connect a provider:
 
-- Run `/login` to sign in to ChatGPT (OAuth) and use the Codex models, or
+- Run `/login` and pick an account: ChatGPT (OAuth, Codex models) or Grok Subscription, or
 - Run `/provider` to select Grok Subscription or add a provider with an API key.
 
 Then just type what you want done. Bubble plans, edits files, and runs commands, asking for approval where the current permission mode requires it.
