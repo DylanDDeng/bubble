@@ -69,6 +69,10 @@ export interface ManagedServerInfo {
 interface ManagedServerRecord extends ManagedServerInfo {
   kind: "server";
   child?: ChildProcessByStdio<null, Readable, Readable>;
+  /** Set synchronously at "exit"; `status` only flips once stdio has drained. */
+  exited?: { code: number | null };
+  /** Resolves once the exit has been settled into `status` (bounded). */
+  settled?: Promise<void>;
   logs: string;
 }
 
@@ -113,6 +117,8 @@ interface BackgroundTaskRecord extends BackgroundTaskInfo {
   child?: ChildProcess;
   /** Set once "exit" is observed; finalization is still pending stdio drain. */
   exited?: { code: number | null };
+  /** Resolves once the exit has been finalized (close, or the bounded grace). */
+  settled?: Promise<void>;
   output: string;
   outputLineBreaks: number;
   outputHasData: boolean;
@@ -269,7 +275,7 @@ export class ProcessManager {
       append(Buffer.from(`\n[task failed to start: ${error.message}]\n`));
       this.finalizeTask(record, "failed", null);
     });
-    onChildSettled(child, {
+    record.settled = onChildSettled(child, {
       onExit: (code) => {
         record.exited = { code };
       },
@@ -375,19 +381,18 @@ export class ProcessManager {
     if (!record || record.kind !== "task") return undefined;
     if (record.status !== "running") return this.publicTask(record);
     const pid = record.child?.pid ?? record.pid;
-    if (record.exited) {
-      // Already exited on its own, only the stdio drain was pending: report the
-      // real outcome. The group kill below still reaps pipe-holding grandchildren.
-      this.finalizeExitedTask(record, record.exited.code);
-    } else {
-      // Mark first so the exit listener does not double-finalize as failed.
-      this.finalizeTask(record, "killed", null);
-    }
+    // Mark first so the exit listener does not double-finalize as failed. A
+    // task that already exited on its own keeps its real outcome instead, and
+    // is left to the close/grace path: finish listeners snapshot the output
+    // tail, so they must not fire before the pending pipe data is appended.
+    if (!record.exited) this.finalizeTask(record, "killed", null);
     if (pid) {
+      // Also reaps pipe-holding grandchildren, which lets "close" fire promptly.
       killProcessTree(pid, "SIGTERM");
       const forceTimer = setTimeout(() => killProcessTree(pid, "SIGKILL"), STOP_FORCE_AFTER_MS);
       forceTimer.unref?.();
     }
+    if (record.exited) await record.settled;
     return this.publicTask(record);
   }
 
@@ -404,7 +409,8 @@ export class ProcessManager {
       const pid = task.child?.pid ?? task.pid;
       if (pid) killProcessTree(pid, "SIGKILL");
       if (task.status !== "running") continue;
-      if (task.exited) this.finalizeExitedTask(task, task.exited.code);
+      // Exited on its own inside the drain window: bounded wait for its output.
+      if (task.exited) await task.settled;
       else this.finalizeTask(task, "killed", null);
     }
   }
@@ -465,6 +471,7 @@ export class ProcessManager {
     const {
       child: _child,
       exited: _exited,
+      settled: _settled,
       output: _output,
       outputLineBreaks: _outputLineBreaks,
       outputHasData: _outputHasData,
@@ -539,8 +546,11 @@ export class ProcessManager {
     });
     // Settle after stdio drains so a fast crash surfaces its logs in the
     // "did not become ready" error instead of racing the status flip.
-    onChildSettled(child, {
+    record.settled = onChildSettled(child, {
       unrefTimer: true,
+      onExit: (code) => {
+        record.exited = { code };
+      },
       onSettled: (code) => {
         record.exitCode = code;
         if (record.status !== "stopped") {
@@ -554,7 +564,11 @@ export class ProcessManager {
     const ready = readinessUrl
       ? await waitForReadiness(record, readinessUrl, timeoutSec)
       : await waitForProcessToStayAlive(record, Math.min(timeoutSec, 2));
-    if (!ready) {
+    // `exited` is checked on its own: the status flip lags "exit" by the drain
+    // window, so a server dying right at the deadline still reads as active.
+    if (!ready || record.exited) {
+      // Bounded: lets the crash output land before it is quoted below.
+      if (record.exited) await record.settled;
       const logs = record.logs.trim();
       await this.stopManagedServer(id);
       throw new Error(`Server ${id} did not become ready within ${timeoutSec}s.${logs ? `\n\nLogs:\n${tail(logs, 4000)}` : ""}`);
@@ -660,6 +674,7 @@ process.once("exit", () => {
  * Calls `onSettled` exactly once, after the child has exited AND its stdio has
  * drained ("close"), or POST_EXIT_STDIO_GRACE_MS after "exit" when something
  * else still holds the pipes open. `onExit` fires synchronously at "exit".
+ * The returned promise resolves right after `onSettled` has run.
  */
 function onChildSettled(
   child: ChildProcess,
@@ -668,14 +683,22 @@ function onChildSettled(
     onSettled: (code: number | null) => void;
     unrefTimer?: boolean;
   },
-): void {
+): Promise<void> {
   let settled = false;
+  let resolveSettled!: () => void;
+  const done = new Promise<void>((resolve) => {
+    resolveSettled = resolve;
+  });
   let graceTimer: ReturnType<typeof setTimeout> | undefined;
   const settle = (code: number | null) => {
     if (settled) return;
     settled = true;
     if (graceTimer) clearTimeout(graceTimer);
-    handlers.onSettled(code);
+    try {
+      handlers.onSettled(code);
+    } finally {
+      resolveSettled();
+    }
   };
   child.once("exit", (code) => {
     handlers.onExit?.(code);
@@ -687,6 +710,7 @@ function onChildSettled(
     if (handlers.unrefTimer) graceTimer.unref?.();
   });
   child.once("close", (code) => settle(code));
+  return done;
 }
 
 function publicServerInfo(server: ManagedServerRecord): ManagedServerInfo {
@@ -719,7 +743,7 @@ function unrefStream(stream: Readable): void {
 async function waitForReadiness(server: ManagedServerRecord, url: string, timeoutSec: number): Promise<boolean> {
   const deadline = Date.now() + timeoutSec * 1000;
   while (Date.now() < deadline) {
-    if (!isActiveStatus(server.status)) return false;
+    if (!isServerAlive(server)) return false;
     if (await canFetch(url)) return true;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
@@ -729,10 +753,10 @@ async function waitForReadiness(server: ManagedServerRecord, url: string, timeou
 async function waitForProcessToStayAlive(server: ManagedServerRecord, timeoutSec: number): Promise<boolean> {
   const deadline = Date.now() + timeoutSec * 1000;
   while (Date.now() < deadline) {
-    if (!isActiveStatus(server.status)) return false;
+    if (!isServerAlive(server)) return false;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  return isActiveStatus(server.status);
+  return isServerAlive(server);
 }
 
 async function canFetch(url: string): Promise<boolean> {
@@ -746,6 +770,10 @@ async function canFetch(url: string): Promise<boolean> {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function isServerAlive(server: ManagedServerRecord): boolean {
+  return !server.exited && isActiveStatus(server.status);
 }
 
 function isActiveStatus(status: ManagedServerStatus): boolean {

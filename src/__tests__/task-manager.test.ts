@@ -273,15 +273,26 @@ describe("ProcessManager background tasks", () => {
       if (done!.pid) process.kill(-done!.pid, "SIGKILL");
     });
 
-    it("killTask during the drain window reports the real exit, not killed", async () => {
+    it("killTask during the drain window keeps the real exit and still waits for pending output", async () => {
       const manager = new ProcessManager();
       const child = fakeChild();
+      const finished: Array<{ status: string; tail?: string }> = [];
+      manager.onTaskFinished((t) => finished.push({ status: t.status, tail: manager.taskOutputTail(t.id) }));
       const task = manager.adoptTask({ command: "fast", cwd, child: child as unknown as ChildProcess });
 
       child.emit("exit", 0, null);
-      const result = await manager.killTask(task.id);
+      const killing = manager.killTask(task.id);
+      // The terminal marker snapshots the tail inside the finish event, so it
+      // must not fire before the output still in the pipe has been appended.
+      expect(finished).toHaveLength(0);
+
+      child.stdout.emit("data", Buffer.from("late\n"));
+      child.emit("close", 0, null);
+
+      const result = await killing;
       expect(result!.status).toBe("completed");
       expect(result!.exitCode).toBe(0);
+      expect(finished).toEqual([{ status: "completed", tail: "late\n" }]);
     });
   });
 });
