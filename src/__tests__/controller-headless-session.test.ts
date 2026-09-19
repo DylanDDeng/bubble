@@ -153,6 +153,26 @@ describe("BubbleTuiController headless session", () => {
     expect(rows[1]!.content).toBe("part two");
   });
 
+  it("stamps the start of each run so the tasks pane can tell this turn's work from history", async () => {
+    const { agent, controller } = makeController();
+    expect(controller.getTurnStartedAt()).toBeUndefined();
+
+    let seenDuringRun: number | undefined;
+    agent.run = async function* (): AsyncIterable<AgentEvent> {
+      seenDuringRun = controller.getTurnStartedAt();
+      yield { type: "turn_start" };
+    };
+    const before = Date.now();
+    await controller.runTurn("first", "/cwd");
+    const first = controller.getTurnStartedAt()!;
+    expect(seenDuringRun).toBe(first); // set before the agent can launch anything
+    expect(first).toBeGreaterThanOrEqual(before);
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await controller.runTurn("second", "/cwd");
+    expect(controller.getTurnStartedAt()!).toBeGreaterThan(first);
+  });
+
   it("subscribers observe monotonic snapshot versions across a run", async () => {
     const { agent, controller, host } = makeController();
     const versions: number[] = [];
@@ -809,6 +829,24 @@ describe("BubbleTuiController headless session", () => {
       content: "Switched session",
       syntheticKind: "ui_notice",
     });
+  });
+
+  it("clears the run boundary on a session switch: the restored session has no current turn", async () => {
+    const { agent, controller, host } = makeController();
+    agent.run = async function* (): AsyncIterable<AgentEvent> {
+      yield { type: "turn_start" };
+    };
+    await controller.runTurn("hi", "/cwd");
+    expect(controller.getTurnStartedAt()).toBeDefined();
+
+    host.ports.sessionHost.switchSession = () => {
+      agent.messages = [{ role: "system", content: "system" }];
+      return {
+        manager: { getSessionFile: () => "/next.jsonl", getMetadata: () => ({}), appendMessage: () => {} },
+      } as never;
+    };
+    expect(controller.switchSession({ targetFile: "/next.jsonl" }).ok).toBe(true);
+    expect(controller.getTurnStartedAt()).toBeUndefined();
   });
 
   it("creates a fresh session through the same lifecycle and leaves an empty transcript", () => {

@@ -331,6 +331,7 @@ export class PiTuiApp {
         groups: this.options.controller.getSubagentGroups?.() ?? [],
         workflows: this.options.controller.getWorkflows?.() ?? [],
         tasks: this.options.controller.getBackgroundTasks?.() ?? [],
+        turnStartedAt: this.options.controller.getTurnStartedAt?.(),
       }),
       () => this.tui.terminal.rows,
       {

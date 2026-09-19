@@ -20,6 +20,8 @@ export interface TasksPaneSnapshot {
   groups: SubagentGroup[];
   workflows: WorkflowRunSnapshot[];
   tasks: BackgroundTaskInfo[];
+  /** Start of the current agent run; undefined keeps finished work hidden. */
+  turnStartedAt?: number;
 }
 
 type PaneSection = "workflows" | "subagents" | "tasks";
@@ -157,7 +159,18 @@ function normalize(snapshot: TasksPaneSnapshot, showHistory: boolean): Record<Pa
     status: task.status,
     task,
   }));
-  const filter = (items: PaneItem[]) => (showHistory ? items : items.filter((item) => isActive(item.status)))
+  // Which rows belong above the composer is derived, not remembered: whatever
+  // is still running, plus whatever this turn launched — so a sibling that
+  // finishes (or fails) first stays in view with its outcome until the next
+  // turn, whether its siblings ran in parallel or one after another. Work from
+  // earlier turns is history and shows only on request.
+  const launchedThisTurn = (item: PaneItem) => {
+    const launchedAt = itemLaunchedAt(item);
+    return snapshot.turnStartedAt !== undefined && launchedAt !== undefined && launchedAt >= snapshot.turnStartedAt;
+  };
+  const filter = (items: PaneItem[]) => (showHistory
+    ? items
+    : items.filter((item) => isActive(item.status) || launchedThisTurn(item)))
     .sort((left, right) => {
       const activityOrder = Number(isActive(right.status)) - Number(isActive(left.status));
       if (activityOrder !== 0) return activityOrder;
@@ -170,6 +183,12 @@ function normalize(snapshot: TasksPaneSnapshot, showHistory: boolean): Record<Pa
   };
 }
 
+function itemLaunchedAt(item: PaneItem): number | undefined {
+  if (item.kind === "workflow") return item.createdAt;
+  if (item.kind === "subagent") return item.member.createdAt;
+  return item.task.startedAt;
+}
+
 function itemUpdatedAt(item: PaneItem): number {
   if (item.kind === "workflow") return item.updatedAt ?? item.createdAt ?? 0;
   if (item.kind === "subagent") return item.member.updatedAt ?? item.member.createdAt ?? 0;
@@ -180,10 +199,18 @@ export class TasksPaneComponent implements Component {
   focused = false;
   private open = false;
   private manuallyClosed = false;
+  /**
+   * History is a view the user opts into for one look, never a mode: it is
+   * dropped whenever the pane closes and when a new round of activity starts.
+   * Otherwise one Ctrl+G after a finished turn left every earlier subagent
+   * listed above the composer for the rest of the session, next to a header
+   * that counts only the running ones.
+   */
   private showHistory = false;
   private selectedId?: string;
   private hoveredId?: string;
   private lastActiveCount = 0;
+  private lastTurnStartedAt: number | undefined;
   private lastRows: RenderRow[] = [];
   private allRows: RenderRow[] = [];
   private frame = 0;
@@ -223,6 +250,26 @@ export class TasksPaneComponent implements Component {
     return Object.values(items).flat().filter((item) => isActive(item.status)).length;
   }
 
+  visibleCount(): number {
+    return Object.values(normalize(this.getSnapshot(), this.showHistory)).flat().length;
+  }
+
+  /**
+   * Finished rows the pane lists next to the running ones, by outcome. Counted
+   * in the pane's current view, history included when it is showing, so the
+   * header never reports fewer rows than the list holds.
+   */
+  settledCounts(): { done: number; failed: number; stopped: number } {
+    const counts = { done: 0, failed: 0, stopped: 0 };
+    for (const item of Object.values(normalize(this.getSnapshot(), this.showHistory)).flat()) {
+      if (isActive(item.status)) continue;
+      if (item.status === "failed" || item.status === "blocked") counts.failed += 1;
+      else if (item.status === "cancelled" || item.status === "killed") counts.stopped += 1;
+      else counts.done += 1;
+    }
+    return counts;
+  }
+
   totalCount(): number {
     const items = normalize(this.getSnapshot(), true);
     return Object.values(items).flat().length;
@@ -240,6 +287,7 @@ export class TasksPaneComponent implements Component {
     if (this.open && !forceFocus) {
       this.open = false;
       this.manuallyClosed = true;
+      this.showHistory = false;
     } else {
       this.open = true;
       this.manuallyClosed = false;
@@ -254,7 +302,54 @@ export class TasksPaneComponent implements Component {
   close(): void {
     this.open = false;
     this.manuallyClosed = true;
+    this.showHistory = false;
     this.callbacks.onRender();
+  }
+
+  /**
+   * Advance open/history state from the latest snapshot. Both the status bar
+   * and the pane call this before rendering: the bar is laid out first, so a
+   * transition made only inside the pane's render would leave the bar one
+   * frame behind — forever, when nothing is animating to trigger a redraw.
+   * Idempotent per snapshot (it compares against the last values it saw).
+   */
+  syncState(): void {
+    if (this.getTerminalRows() < 12) return;
+    const activeCount = this.activeCount();
+    // A new run, or activity starting from idle, ends the history view. The
+    // run boundary matters on its own: with a task still running the count
+    // never crosses zero, and new work would otherwise keep listing history.
+    // A user who is browsing history inside the pane keeps their rows; the
+    // view resets when they close it.
+    const turnStartedAt = this.getSnapshot().turnStartedAt;
+    const newTurn = turnStartedAt !== this.lastTurnStartedAt;
+    this.lastTurnStartedAt = turnStartedAt;
+    const activityFromIdle = activeCount > 0 && this.lastActiveCount === 0;
+    if ((newTurn || activityFromIdle) && !this.focused && this.showHistory) {
+      this.showHistory = false;
+      // If history was all the pane held (opened while idle, then a turn that
+      // launches nothing), close it rather than leave an empty pane under a
+      // "0 completed" header. Not a manual close: the next activity reopens it.
+      if (this.open && this.visibleCount() === 0) {
+        this.open = false;
+        this.manuallyClosed = false;
+      }
+    }
+    if (activityFromIdle && !this.manuallyClosed) this.open = true;
+    if (activeCount === 0 && this.lastActiveCount > 0) {
+      if (this.focused) {
+        // A user who is already inspecting the pane should see the final
+        // status land in place instead of watching the selected row vanish.
+        // This turn's rows stay on their own; only work launched in an earlier
+        // turn needs the history view to remain visible.
+        if (this.visibleCount() === 0) this.showHistory = true;
+      } else {
+        this.open = false;
+        this.manuallyClosed = false;
+        this.showHistory = false;
+      }
+    }
+    this.lastActiveCount = activeCount;
   }
 
   render(width: number): string[] {
@@ -264,19 +359,7 @@ export class TasksPaneComponent implements Component {
       this.allRows = [];
       return [];
     }
-    const activeCount = this.activeCount();
-    if (activeCount > 0 && this.lastActiveCount === 0 && !this.manuallyClosed) this.open = true;
-    if (activeCount === 0 && this.lastActiveCount > 0) {
-      if (this.focused) {
-        // A user who is already inspecting the pane should see the final
-        // status land in place instead of watching the selected row vanish.
-        this.showHistory = true;
-      } else {
-        this.open = false;
-        this.manuallyClosed = false;
-      }
-    }
-    this.lastActiveCount = activeCount;
+    this.syncState();
     if (!this.open) {
       this.lastRows = [];
       this.allRows = [];
@@ -423,13 +506,24 @@ export class TaskStatusBarComponent implements Component {
 
   render(width: number): string[] {
     if (!this.pane.isAvailable()) return [];
+    this.pane.syncState();
     const count = this.pane.activeCount();
-    const total = this.pane.totalCount();
-    if (total === 0 && !this.pane.isOpen()) return [];
+    // Closed, the bar advertises everything Ctrl+G will reveal; open, it must
+    // match the rows actually listed (a focused settle keeps only this turn's).
+    const total = this.pane.isOpen() ? this.pane.visibleCount() : this.pane.totalCount();
+    if (this.pane.totalCount() === 0 && !this.pane.isOpen()) return [];
     const marker = this.pane.isOpen() ? "▾" : "▸";
     const theme = this.pane.theme();
+    // The list below also holds this turn's finished rows; say so, or the
+    // header counts fewer activities than the pane shows.
+    const settled = this.pane.settledCounts();
+    const outcome = [
+      settled.failed > 0 ? themeForeground(theme.error, `${settled.failed} failed`) : "",
+      settled.done > 0 ? `${settled.done} done` : "",
+      settled.stopped > 0 ? `${settled.stopped} stopped` : "",
+    ].filter(Boolean).map((part) => ` · ${part}`).join("");
     const text = count > 0
-      ? `${marker} ${themeForeground(theme.accent, this.pane.activityGlyph())} ${count} background activit${count === 1 ? "y" : "ies"} · Ctrl+G`
+      ? `${marker} ${themeForeground(theme.accent, this.pane.activityGlyph())} ${count} background activit${count === 1 ? "y" : "ies"}${outcome} · Ctrl+G`
       : `${marker} ${themeForeground(theme.success, "✓")} ${total} completed activit${total === 1 ? "y" : "ies"} · Ctrl+G`;
     return [themeDim(theme.dim, truncateToWidth(` ${text}`, Math.max(1, width), ""))];
   }
