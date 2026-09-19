@@ -94,9 +94,10 @@ describe("Grok-style Tasks Pane", () => {
         runId: "run-1",
         kind: "single",
         label: "Ada",
-        members: [{ subAgentId: "child-1", nickname: "Ada", status, task: "review" }],
+        members: [{ subAgentId: "child-1", nickname: "Ada", status, task: "review", createdAt: 1_100 }],
       }],
       tasks: [],
+      turnStartedAt: 1_000,
     }), () => 40, cb);
     const statusBar = new TaskStatusBarComponent(pane);
 
@@ -377,8 +378,7 @@ describe("Grok-style Tasks Pane", () => {
     state.turnStartedAt = 2_000; // a turn that launches no background work
     const output = screen();
     expect(pane.isOpen()).toBe(false);
-    expect(output).not.toContain("0 completed");
-    expect(output).toContain("1 completed activity · Ctrl+G");
+    expect(output).toBe(""); // nothing from this turn: no bar, no "0 completed"
 
     // Not a manual close: the next activity still auto-opens the pane.
     spawn("Carl", 2_100);
@@ -403,9 +403,7 @@ describe("Grok-style Tasks Pane", () => {
     screen();
     pane.focused = false;
     state.turnStartedAt = 2_000; // idle history cleared by a turn that launches nothing
-    const cleared = screen();
-    expect(cleared).toContain("▸ ✓ 1 completed activity");
-    expect(cleared).not.toContain("▾");
+    expect(screen()).toBe(""); // closed and hidden within the same frame
     pane.dispose();
   });
 
@@ -438,10 +436,158 @@ describe("Grok-style Tasks Pane", () => {
     expect(output).not.toContain("Old1");
     expect(output).toContain("1 completed activity · Ctrl+G");
 
-    // Closed again, the bar advertises everything Ctrl+G will reveal.
+    // Closed again, the bar still counts this turn's rows, not the session's.
     pane.focused = false;
     pane.close();
-    expect(screen()).toContain("4 completed activities · Ctrl+G");
+    expect(screen()).toContain("▸ ✓ 1 completed activity · Ctrl+G");
+    pane.dispose();
+  });
+
+  // Issue #72, problem 1: the idle count must not grow with the session.
+  it("counts only this turn's work in the idle status bar, however long the session is", () => {
+    const { pane, state, spawn, screen } = turnPane();
+    let bar = "";
+    for (let turn = 1; turn <= 6; turn += 1) {
+      state.turnStartedAt = turn * 10_000;
+      const agent = spawn(`Agent${turn}`, turn * 10_000 + 10);
+      const task = { kind: "task", id: `task_${turn}`, command: `npm test ${turn}`, cwd: "/", status: "running", startedAt: turn * 10_000 + 20, outputTruncated: false, outputLines: 0 };
+      state.tasks.push(task);
+      screen();
+      agent.status = "completed";
+      task.status = "completed";
+      bar = screen();
+    }
+    expect(bar).toContain("▸ ✓ 2 completed activities · Ctrl+G");
+    expect(bar).not.toContain("12 completed");
+    pane.dispose();
+  });
+
+  it("hides the status bar on a turn without background work, and Ctrl+G still reaches history", () => {
+    const { pane, state, spawn, screen } = turnPane();
+    const sophie = spawn("Sophie", 1_100);
+    screen();
+    sophie.status = "completed";
+    expect(screen()).toContain("1 completed activity");
+
+    state.turnStartedAt = 2_000; // next turn launches nothing
+    expect(screen()).toBe("");
+
+    pane.toggle(true);
+    expect(screen()).toContain("✓ Sophie");
+    pane.dispose();
+  });
+
+  it("opens this turn's rows on Ctrl+G when there are any, keeping older history behind h", () => {
+    const { pane, spawn, screen } = turnPane();
+    spawn("Oldie", 100).status = "completed"; // earlier turn
+    const sophie = spawn("Sophie", 1_100);
+    screen();
+    sophie.status = "completed";
+    expect(screen()).toContain("▸ ✓ 1 completed activity"); // what Ctrl+G will list
+
+    pane.toggle(true);
+    const opened = screen();
+    expect(opened).toContain("✓ Sophie");
+    expect(opened).not.toContain("Oldie");
+
+    pane.handleInput("h");
+    expect(screen()).toContain("Oldie");
+    pane.dispose();
+  });
+
+  // Issue #72, problem 2: a selection nobody made must not scroll rows away.
+  function taskThenSubagents() {
+    const ctx = turnPane();
+    ctx.state.tasks.push({ kind: "task", id: "task_0001", command: "npm run dev", cwd: "/", status: "running", startedAt: 1_010, outputTruncated: false, outputLines: 3 });
+    ctx.screen(); // the task is the only row: it becomes the default selection
+    for (const name of ["Ada", "Bjarne", "Carl", "Dana", "Eve", "Finn"]) ctx.spawn(name, 1_100);
+    return ctx;
+  }
+
+  it("keeps the first running rows visible in an unfocused pane", () => {
+    const { pane, screen } = taskThenSubagents();
+    const output = screen();
+    expect(output).toContain("7 background activities");
+    expect(output).toContain("Subagents 6");
+    expect(output).toContain("Ada");
+    expect(output).toContain("Bjarne");
+    pane.dispose();
+  });
+
+  it("says how many rows do not fit instead of clipping them silently", () => {
+    const { pane, screen } = taskThenSubagents();
+    // 40 terminal rows -> 6 pane lines; 9 rows (2 headers + 7 items) do not fit.
+    const lines = screen().split("\n");
+    expect(lines).toHaveLength(1 + 6);
+    expect(lines.at(-1)).toMatch(/… 3 more below · Ctrl\+G/); // Eve, Finn and the task
+    pane.dispose();
+  });
+
+  it("starts at the top when the pane is focused after an untouched default selection", () => {
+    const { pane, screen } = taskThenSubagents();
+    screen();
+    pane.toggle(true);
+    pane.focused = true;
+    expect(screen()).toContain("Ada");
+    pane.dispose();
+  });
+
+  it("still follows a selection the user made, and reports rows above it", () => {
+    const { pane, screen } = taskThenSubagents();
+    pane.focused = true;
+    screen();
+    for (let step = 0; step < 6; step += 1) pane.handleInput("j"); // down to the task
+    const output = screen();
+    expect(output).toContain("npm run dev");
+    expect(output).not.toContain("Ada");
+    expect(output).toMatch(/… \d+ more above/);
+    pane.dispose();
+  });
+
+  it("does not reserve an overflow line it has nothing to say on (only collapsed headers hidden)", () => {
+    const rows = 20; // -> the 3-line minimum
+    const now = 5_000;
+    const pane = new TasksPaneComponent(() => ({
+      workflows: [{ runId: "wf-1", title: "Pipeline", status: "running", agentCount: 0, logs: [], snapshots: [], createdAt: now }],
+      groups: [{ id: "single:a", runId: "run-a", kind: "single" as const, label: "Ada", members: [{ subAgentId: "a", nickname: "Ada", status: "running", task: "x", createdAt: now }] }],
+      tasks: [{ kind: "task", id: "task_0001", command: "npm run dev", cwd: "/", status: "running", startedAt: now, outputTruncated: false, outputLines: 0 }] as any,
+      turnStartedAt: 1_000,
+    }), () => rows, callbacks());
+    pane.focused = true;
+    pane.render(100);
+    // Collapse Workflows and Subagents by clicking their headers, then select the task.
+    const click = (y: number) => pane.handleMouse({ kind: "press", y, x: 2, button: 0, release: false, clickCount: 1 } as any);
+    click(0); // Workflows header
+    pane.render(100); // the window scrolls to the next item: Subagents header is now line 0
+    click(0); // Subagents header
+
+    const lines = pane.render(100).map((line) => line.replace(/\x1b\[[0-9;]*m/g, "").trimEnd());
+    expect(lines.join("\n")).toContain("npm run dev");
+    expect(lines).toHaveLength(3); // all three lines used; no silent blank slot
+    pane.dispose();
+  });
+
+  it("hands focus back when the status bar closes a focused pane", () => {
+    const cb = callbacks();
+    let turnStartedAt = 1_000;
+    const members = [{ subAgentId: "s", nickname: "Sophie", status: "completed", task: "read", createdAt: 100 }];
+    const pane = new TasksPaneComponent(() => ({
+      workflows: [],
+      groups: [{ id: "single:s", runId: "run-s", kind: "single" as const, label: "Sophie", members }],
+      tasks: [],
+      turnStartedAt,
+    }), () => 40, cb);
+    const statusBar = new TaskStatusBarComponent(pane);
+
+    pane.toggle(true); // Ctrl+G: only older history exists
+    pane.focused = true;
+    expect(pane.render(100).join("\n")).toContain("Sophie");
+
+    statusBar.handleMouse({ kind: "press", y: 0, x: 2, button: 0, release: false, clickCount: 1 } as any);
+    expect(pane.isOpen()).toBe(false);
+    expect(cb.onEscape).toHaveBeenCalledTimes(1); // the app returns focus to the editor
+    expect(pane.focused).toBe(false);
+    turnStartedAt += 0;
     pane.dispose();
   });
 

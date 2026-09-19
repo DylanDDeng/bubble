@@ -208,6 +208,13 @@ export class TasksPaneComponent implements Component {
    */
   private showHistory = false;
   private selectedId?: string;
+  /**
+   * Whether the user picked the selection (keys or click). The pane always
+   * needs one, so it defaults to the first row — but a default nobody chose
+   * must not steer the window: a task that was once the only row stayed
+   * "selected" and scrolled later subagents out of an untouched pane.
+   */
+  private selectionIsUsers = false;
   private hoveredId?: string;
   private lastActiveCount = 0;
   private lastTurnStartedAt: number | undefined;
@@ -250,6 +257,11 @@ export class TasksPaneComponent implements Component {
     return Object.values(items).flat().filter((item) => isActive(item.status)).length;
   }
 
+  /** Rows the default view lists: running work plus what this turn launched. */
+  defaultViewCount(): number {
+    return Object.values(normalize(this.getSnapshot(), false)).flat().length;
+  }
+
   visibleCount(): number {
     return Object.values(normalize(this.getSnapshot(), this.showHistory)).flat().length;
   }
@@ -288,13 +300,22 @@ export class TasksPaneComponent implements Component {
       this.open = false;
       this.manuallyClosed = true;
       this.showHistory = false;
+      // Closing through the status bar (a click) bypasses the app's Ctrl+G
+      // handler. A pane that still owned the keyboard would swallow input while
+      // invisible — and the bar itself can now be hidden — so hand focus back.
+      if (this.focused) {
+        this.focused = false;
+        this.callbacks.onEscape();
+      }
     } else {
       this.open = true;
       this.manuallyClosed = false;
       // Once all activity has settled, Ctrl+G must remain a usable route back
       // to the completed child transcript. Opening an empty active-only pane
       // makes the work look lost even though the child session still exists.
-      if (this.activeCount() === 0 && this.totalCount() > 0) this.showHistory = true;
+      // This turn's rows (what the bar counts) open first; older history only
+      // when there is nothing else to show, and behind `h` otherwise.
+      if (this.activeCount() === 0 && this.defaultViewCount() === 0 && this.totalCount() > 0) this.showHistory = true;
     }
     this.callbacks.onRender();
   }
@@ -325,11 +346,11 @@ export class TasksPaneComponent implements Component {
     const newTurn = turnStartedAt !== this.lastTurnStartedAt;
     this.lastTurnStartedAt = turnStartedAt;
     const activityFromIdle = activeCount > 0 && this.lastActiveCount === 0;
-    if ((newTurn || activityFromIdle) && !this.focused && this.showHistory) {
+    if ((newTurn || activityFromIdle) && !this.focused) {
       this.showHistory = false;
-      // If history was all the pane held (opened while idle, then a turn that
-      // launches nothing), close it rather than leave an empty pane under a
-      // "0 completed" header. Not a manual close: the next activity reopens it.
+      // If that leaves nothing to list (the pane was opened while idle, then a
+      // turn launches nothing), close it rather than keep an empty pane under
+      // a "0 completed" header. Not a manual close: the next activity reopens it.
       if (this.open && this.visibleCount() === 0) {
         this.open = false;
         this.manuallyClosed = false;
@@ -380,18 +401,44 @@ export class TasksPaneComponent implements Component {
     }
     const itemRows = rows.filter((row): row is Extract<RenderRow, { kind: "item" }> => row.kind === "item");
     this.allRows = rows;
-    if (!this.selectedId || !itemRows.some((row) => `${row.item.kind}:${row.item.id}` === this.selectedId)) {
+    const selectionGone = !this.selectedId
+      || !itemRows.some((row) => `${row.item.kind}:${row.item.id}` === this.selectedId);
+    if (selectionGone) this.selectionIsUsers = false;
+    if (!this.selectionIsUsers) {
       this.selectedId = itemRows[0] ? `${itemRows[0].item.kind}:${itemRows[0].item.id}` : undefined;
     }
 
+    // When the rows do not fit, the last line says how many are out of view
+    // rather than clipping them silently. Only a focused pane scrolls to its
+    // selection; untouched, it shows the top, where running work sorts first.
     const maxRows = Math.max(3, Math.min(8, Math.floor(terminalRows * 0.15)));
-    let start = 0;
-    const selectedIndex = rows.findIndex((row) => row.kind === "item" && `${row.item.kind}:${row.item.id}` === this.selectedId);
-    if (selectedIndex >= maxRows) start = selectedIndex - maxRows + 1;
-    const visibleRows = rows.slice(start, start + maxRows);
+    const selectedIndex = this.focused
+      ? rows.findIndex((row) => row.kind === "item" && `${row.item.kind}:${row.item.id}` === this.selectedId)
+      : -1;
+    const layout = (windowRows: number) => {
+      const start = selectedIndex >= windowRows ? selectedIndex - windowRows + 1 : 0;
+      const items = (slice: RenderRow[]) => slice.filter((row) => row.kind === "item").length;
+      return { start, windowRows, above: items(rows.slice(0, start)), below: items(rows.slice(start + windowRows)) };
+    };
+    // Reserve the last line only when it has something to say: hidden rows can
+    // be nothing but collapsed section headers, and a blank reserved slot would
+    // cost one of as few as three lines.
+    let view = layout(maxRows);
+    if (rows.length > maxRows) {
+      const reserved = layout(maxRows - 1);
+      if (reserved.above + reserved.below > 0) view = reserved;
+    }
+    const visibleRows = rows.slice(view.start, view.start + view.windowRows);
     this.lastRows = visibleRows;
     const theme = this.getTheme();
-    return visibleRows.map((row) => {
+    const more = [
+      view.above > 0 ? `${view.above} more above` : "",
+      view.below > 0 ? `${view.below} more below` : "",
+    ].filter(Boolean).join(" · ");
+    const moreLine = view.windowRows < maxRows && more
+      ? [themeDim(theme.dim, pad(`   … ${more}${this.focused ? "" : " · Ctrl+G"}`, width))]
+      : [];
+    return [...visibleRows.map((row) => {
       if (row.kind === "header") {
         const count = items[row.section].length;
         const marker = this.collapsed.has(row.section) ? "▸" : "▾";
@@ -401,7 +448,7 @@ export class TasksPaneComponent implements Component {
       const key = `${row.item.kind}:${row.item.id}`;
       const state = key === this.selectedId && this.focused ? "selected" : key === this.hoveredId ? "hover" : "idle";
       return paint(this.renderItem(row.item, width), width, state, theme);
-    });
+    }), ...moreLine];
   }
 
   private renderItem(item: PaneItem, width: number): string {
@@ -443,13 +490,19 @@ export class TasksPaneComponent implements Component {
     const index = Math.max(0, itemRows.findIndex((row) => `${row.item.kind}:${row.item.id}` === this.selectedId));
     if (matchesKey(data, "up") || data === "k") {
       const row = itemRows[Math.max(0, index - 1)];
-      if (row) this.selectedId = `${row.item.kind}:${row.item.id}`;
+      if (row) {
+        this.selectedId = `${row.item.kind}:${row.item.id}`;
+        this.selectionIsUsers = true;
+      }
       this.callbacks.onRender();
       return;
     }
     if (matchesKey(data, "down") || data === "j") {
       const row = itemRows[Math.min(itemRows.length - 1, index + 1)];
-      if (row) this.selectedId = `${row.item.kind}:${row.item.id}`;
+      if (row) {
+        this.selectedId = `${row.item.kind}:${row.item.id}`;
+        this.selectionIsUsers = true;
+      }
       this.callbacks.onRender();
       return;
     }
@@ -484,6 +537,7 @@ export class TasksPaneComponent implements Component {
       return true;
     }
     this.selectedId = `${row.item.kind}:${row.item.id}`;
+    this.selectionIsUsers = true;
     if (event.clickCount >= 2) this.openItem(row.item);
     return true;
   }
@@ -508,10 +562,12 @@ export class TaskStatusBarComponent implements Component {
     if (!this.pane.isAvailable()) return [];
     this.pane.syncState();
     const count = this.pane.activeCount();
-    // Closed, the bar advertises everything Ctrl+G will reveal; open, it must
-    // match the rows actually listed (a focused settle keeps only this turn's).
-    const total = this.pane.isOpen() ? this.pane.visibleCount() : this.pane.totalCount();
-    if (this.pane.totalCount() === 0 && !this.pane.isOpen()) return [];
+    // The bar describes what the pane lists: open, the rows on screen; closed,
+    // the default view Ctrl+G opens (running work plus this turn's). It used to
+    // count the whole session, a number that only ever grew. With nothing from
+    // this turn the bar is hidden; Ctrl+G still reaches the history.
+    const total = this.pane.isOpen() ? this.pane.visibleCount() : this.pane.defaultViewCount();
+    if (total === 0 && !this.pane.isOpen()) return [];
     const marker = this.pane.isOpen() ? "▾" : "▸";
     const theme = this.pane.theme();
     // The list below also holds this turn's finished rows; say so, or the
