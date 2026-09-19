@@ -544,6 +544,53 @@ describe("Grok-style Tasks Pane", () => {
     pane.dispose();
   });
 
+  it("does not reserve an overflow line it has nothing to say on (only collapsed headers hidden)", () => {
+    const rows = 20; // -> the 3-line minimum
+    const now = 5_000;
+    const pane = new TasksPaneComponent(() => ({
+      workflows: [{ runId: "wf-1", title: "Pipeline", status: "running", agentCount: 0, logs: [], snapshots: [], createdAt: now }],
+      groups: [{ id: "single:a", runId: "run-a", kind: "single" as const, label: "Ada", members: [{ subAgentId: "a", nickname: "Ada", status: "running", task: "x", createdAt: now }] }],
+      tasks: [{ kind: "task", id: "task_0001", command: "npm run dev", cwd: "/", status: "running", startedAt: now, outputTruncated: false, outputLines: 0 }] as any,
+      turnStartedAt: 1_000,
+    }), () => rows, callbacks());
+    pane.focused = true;
+    pane.render(100);
+    // Collapse Workflows and Subagents by clicking their headers, then select the task.
+    const click = (y: number) => pane.handleMouse({ kind: "press", y, x: 2, button: 0, release: false, clickCount: 1 } as any);
+    click(0); // Workflows header
+    pane.render(100); // the window scrolls to the next item: Subagents header is now line 0
+    click(0); // Subagents header
+
+    const lines = pane.render(100).map((line) => line.replace(/\x1b\[[0-9;]*m/g, "").trimEnd());
+    expect(lines.join("\n")).toContain("npm run dev");
+    expect(lines).toHaveLength(3); // all three lines used; no silent blank slot
+    pane.dispose();
+  });
+
+  it("hands focus back when the status bar closes a focused pane", () => {
+    const cb = callbacks();
+    let turnStartedAt = 1_000;
+    const members = [{ subAgentId: "s", nickname: "Sophie", status: "completed", task: "read", createdAt: 100 }];
+    const pane = new TasksPaneComponent(() => ({
+      workflows: [],
+      groups: [{ id: "single:s", runId: "run-s", kind: "single" as const, label: "Sophie", members }],
+      tasks: [],
+      turnStartedAt,
+    }), () => 40, cb);
+    const statusBar = new TaskStatusBarComponent(pane);
+
+    pane.toggle(true); // Ctrl+G: only older history exists
+    pane.focused = true;
+    expect(pane.render(100).join("\n")).toContain("Sophie");
+
+    statusBar.handleMouse({ kind: "press", y: 0, x: 2, button: 0, release: false, clickCount: 1 } as any);
+    expect(pane.isOpen()).toBe(false);
+    expect(cb.onEscape).toHaveBeenCalledTimes(1); // the app returns focus to the editor
+    expect(pane.focused).toBe(false);
+    turnStartedAt += 0;
+    pane.dispose();
+  });
+
   it("keeps lifecycle echoes out of transcript while retaining launch history", () => {
     const launch: DisplayToolCall = {
       id: "launch",

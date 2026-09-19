@@ -300,6 +300,13 @@ export class TasksPaneComponent implements Component {
       this.open = false;
       this.manuallyClosed = true;
       this.showHistory = false;
+      // Closing through the status bar (a click) bypasses the app's Ctrl+G
+      // handler. A pane that still owned the keyboard would swallow input while
+      // invisible — and the bar itself can now be hidden — so hand focus back.
+      if (this.focused) {
+        this.focused = false;
+        this.callbacks.onEscape();
+      }
     } else {
       this.open = true;
       this.manuallyClosed = false;
@@ -405,23 +412,30 @@ export class TasksPaneComponent implements Component {
     // rather than clipping them silently. Only a focused pane scrolls to its
     // selection; untouched, it shows the top, where running work sorts first.
     const maxRows = Math.max(3, Math.min(8, Math.floor(terminalRows * 0.15)));
-    const overflow = rows.length > maxRows;
-    const windowRows = overflow ? maxRows - 1 : maxRows;
-    let start = 0;
-    if (this.focused) {
-      const selectedIndex = rows.findIndex((row) => row.kind === "item" && `${row.item.kind}:${row.item.id}` === this.selectedId);
-      if (selectedIndex >= windowRows) start = selectedIndex - windowRows + 1;
+    const selectedIndex = this.focused
+      ? rows.findIndex((row) => row.kind === "item" && `${row.item.kind}:${row.item.id}` === this.selectedId)
+      : -1;
+    const layout = (windowRows: number) => {
+      const start = selectedIndex >= windowRows ? selectedIndex - windowRows + 1 : 0;
+      const items = (slice: RenderRow[]) => slice.filter((row) => row.kind === "item").length;
+      return { start, windowRows, above: items(rows.slice(0, start)), below: items(rows.slice(start + windowRows)) };
+    };
+    // Reserve the last line only when it has something to say: hidden rows can
+    // be nothing but collapsed section headers, and a blank reserved slot would
+    // cost one of as few as three lines.
+    let view = layout(maxRows);
+    if (rows.length > maxRows) {
+      const reserved = layout(maxRows - 1);
+      if (reserved.above + reserved.below > 0) view = reserved;
     }
-    const visibleRows = rows.slice(start, start + windowRows);
+    const visibleRows = rows.slice(view.start, view.start + view.windowRows);
     this.lastRows = visibleRows;
     const theme = this.getTheme();
-    const hiddenAbove = rows.slice(0, start).filter((row) => row.kind === "item").length;
-    const hiddenBelow = rows.slice(start + windowRows).filter((row) => row.kind === "item").length;
     const more = [
-      hiddenAbove > 0 ? `${hiddenAbove} more above` : "",
-      hiddenBelow > 0 ? `${hiddenBelow} more below` : "",
+      view.above > 0 ? `${view.above} more above` : "",
+      view.below > 0 ? `${view.below} more below` : "",
     ].filter(Boolean).join(" · ");
-    const moreLine = overflow && more
+    const moreLine = view.windowRows < maxRows && more
       ? [themeDim(theme.dim, pad(`   … ${more}${this.focused ? "" : " · Ctrl+G"}`, width))]
       : [];
     return [...visibleRows.map((row) => {
