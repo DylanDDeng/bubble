@@ -363,6 +363,30 @@ describe("Grok-style Tasks Pane", () => {
     pane.dispose();
   });
 
+  it("closes instead of lingering empty when a new turn clears the idle history it was showing", () => {
+    const { pane, state, spawn, screen } = turnPane();
+    const sophie = spawn("Sophie", 1_100);
+    screen();
+    sophie.status = "completed";
+    screen(); // settled, auto-closed
+
+    pane.toggle(true); // Ctrl+G: look back
+    expect(screen()).toContain("Sophie");
+    pane.focused = false; // Escape back to the composer, pane still open
+
+    state.turnStartedAt = 2_000; // a turn that launches no background work
+    const output = screen();
+    expect(pane.isOpen()).toBe(false);
+    expect(output).not.toContain("0 completed");
+    expect(output).toContain("1 completed activity · Ctrl+G");
+
+    // Not a manual close: the next activity still auto-opens the pane.
+    spawn("Carl", 2_100);
+    expect(screen()).toContain("Carl");
+    expect(pane.isOpen()).toBe(true);
+    pane.dispose();
+  });
+
   it("counts the outcomes of the rows it lists, history included", () => {
     const { pane, state, spawn, screen } = turnPane();
     const old = spawn("Oldie", 100);

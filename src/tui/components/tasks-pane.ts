@@ -323,7 +323,16 @@ export class TasksPaneComponent implements Component {
     const newTurn = turnStartedAt !== this.lastTurnStartedAt;
     this.lastTurnStartedAt = turnStartedAt;
     const activityFromIdle = activeCount > 0 && this.lastActiveCount === 0;
-    if ((newTurn || activityFromIdle) && !this.focused) this.showHistory = false;
+    if ((newTurn || activityFromIdle) && !this.focused && this.showHistory) {
+      this.showHistory = false;
+      // If history was all the pane held (opened while idle, then a turn that
+      // launches nothing), close it rather than leave an empty pane under a
+      // "0 completed" header. Not a manual close: the next activity reopens it.
+      if (this.open && this.visibleCount() === 0) {
+        this.open = false;
+        this.manuallyClosed = false;
+      }
+    }
     if (activityFromIdle && !this.manuallyClosed) this.open = true;
     if (activeCount === 0 && this.lastActiveCount > 0) {
       if (this.focused) {
