@@ -1,0 +1,2210 @@
+import type { ComputerUseGrantView, ComputerUseLiveFrame, ComputerUseMediaRef } from './computer-use';
+
+// 共享类型定义（可导出）
+
+// ===== 文件夹配置 =====
+export interface FolderConfig {
+  path: string;           // "Work/ProjectA"
+  displayName?: string;
+  color?: string;
+  collapsed?: boolean;
+  order: number;
+}
+
+export interface FolderConfigFile {
+  version: number;
+  folders: FolderConfig[];
+}
+
+export interface UiResumeState {
+  activeSessionId: string | null;
+  showNewSession: boolean;
+  projectCwd: string | null;
+  projectTreeCollapsed: boolean;
+  projectPanelView: 'files' | 'changes';
+  terminalDrawerOpen?: boolean;
+  terminalDrawerHeight?: number;
+  // Recursive tiling workspace layout (source of truth). Serialized PaneNode
+  // tree + active leaf id; see src/ui/store/layout-tree.ts. Opaque here to keep
+  // the shared types renderer-agnostic.
+  schemaVersion?: number;
+  workspaceLayout?: unknown;
+  // Legacy two-pane fields (compat shadow; derived from workspaceLayout).
+  chatLayoutMode?: 'single' | 'split';
+  savedSplitVisible?: boolean;
+  activePaneId?: 'primary' | 'secondary' | string;
+  chatPanes?: {
+    primary: { id: 'primary'; sessionId: string | null; surface?: 'chat' | 'terminal' };
+    secondary: { id: 'secondary'; sessionId: string | null; surface?: 'chat' | 'terminal' };
+  };
+  chatSplitRatio?: number;
+}
+
+// MCP 服务器配置类型
+export interface McpServerConfig {
+  type?: 'stdio' | 'http' | 'sse';
+  command?: string;
+  args?: string[];
+  url?: string;
+  headers?: Record<string, string>;
+  env?: Record<string, string>;
+  /** Runtime-specific enable flag. Aegis persists the Codex value in its
+   * private MCP catalog and applies DeepSeek values per harness composition. */
+  enabled?: boolean;
+}
+
+// MCP 服务器状态
+export interface McpServerStatus {
+  name: string;
+  status: 'connected' | 'failed' | 'pending';
+  error?: string;
+  /** Codex: the server needs a fresh OAuth login (mcpServer/oauth/login). */
+  failureReason?: 'reauthenticationRequired';
+  /** Which agent reported this status. Used to avoid cross-agent name collisions. */
+  tool?: 'claude' | 'codex' | 'opencode' | 'kimi' | 'grok' | 'pi' | 'qoder' | 'bubble' | 'deepseek';
+}
+
+// Claude Skills 摘要
+export interface ClaudeSkillSummary {
+  name: string;
+  title: string;
+  description?: string;
+  path: string;
+  source: 'user' | 'project' | 'plugin';
+}
+
+export interface ClaudeModelConfig {
+  defaultModel: string | null;
+  options: string[];
+}
+
+export type ClaudePermissionMode =
+  | 'default'
+  | 'acceptEdits'
+  | 'bypassPermissions'
+  | 'plan'
+  | 'dontAsk'
+  | 'auto';
+export type ClaudeAccessMode = ClaudePermissionMode | 'fullAccess';
+export type ClaudeExecutionMode = 'execute' | 'plan';
+export type ClaudeReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type CodexExecutionMode = 'execute' | 'plan';
+export type CodexPermissionMode = 'defaultPermissions' | 'auto' | 'fullAccess';
+export type KimiPermissionMode = 'default' | 'plan' | 'auto' | 'yolo';
+/**
+ * Kimi thinking effort for the server runtime's per-prompt `thinking` field.
+ * An OPEN per-model set validated server-side — k2.x models take on/off,
+ * k3-class models take effort tiers (e.g. off/low/high/max per the model's
+ * `support_efforts` metadata). Never whitelist tiers in code; the UI builds
+ * its options from model metadata. Unset = the server's per-model default.
+ */
+export type KimiThinking = string;
+export type GrokPermissionMode = 'default' | 'plan' | 'auto' | 'yolo';
+export type GrokReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+/**
+ * DeepSeek Harness sandbox mode, forwarded as DSH_PERMISSION_MODE to the ACP
+ * server. workspace-write confines bash/fs to the session cwd and asks before
+ * a wider retry; danger-full-access never asks.
+ */
+export type DeepseekPermissionMode = 'workspace-write' | 'danger-full-access';
+/** DeepSeek Harness agent composition, matching the official Web UI presets. */
+export type DeepseekAgentPreset = 'standard' | 'code' | 'minimal' | 'cordis';
+/** DeepSeek Harness reasoning policy; forwarded as DSH_REASONING_EFFORT. */
+export type DeepseekReasoningEffort = 'off' | 'low' | 'high' | 'max';
+export type OpenCodePermissionMode = 'defaultPermissions' | 'plan' | 'fullAccess';
+// Mirrors Bubble SDK's PermissionMode union (runTurn({ mode })).
+export type BubblePermissionMode = 'default' | 'plan' | 'bypassPermissions';
+export type QoderPermissionMode =
+  | 'default'
+  | 'acceptEdits'
+  | 'bypassPermissions'
+  | 'yolo'
+  | 'plan'
+  | 'dontAsk'
+  | 'auto';
+/**
+ * Codex reasoning effort slug (e.g. "low", "medium", "high", "xhigh", "max",
+ * "ultra"). Deliberately an open string: the valid set is model-specific and
+ * comes from Codex's models_cache `supported_reasoning_levels`, so Aegis must
+ * not maintain its own whitelist — new levels should work without code changes.
+ */
+export type CodexReasoningEffort = string;
+export type PlanStepStatus = 'pending' | 'inProgress' | 'completed';
+
+export interface PlanStep {
+  step: string;
+  status: PlanStepStatus;
+}
+
+export interface ClaudeReasoningLevelOption {
+  effort: ClaudeReasoningEffort;
+  description: string;
+}
+
+export interface CodexReasoningLevelOption {
+  effort: CodexReasoningEffort;
+  description: string;
+}
+
+export interface CodexModelConfig {
+  defaultModel: string | null;
+  defaultReasoningEffort: CodexReasoningEffort | null;
+  options: string[];
+  availableModels: Array<{
+    name: string;
+    /** Human label from Codex cache (e.g. "GPT-5.6-Sol"); falls back to formatted slug. */
+    label?: string;
+    enabled: boolean;
+    isDefault: boolean;
+    defaultReasoningEffort?: CodexReasoningEffort | null;
+    supportedReasoningLevels?: CodexReasoningLevelOption[];
+    supportsFastMode?: boolean;
+    /** Lower numbers are higher priority in Codex's own listing. */
+    priority?: number | null;
+  }>;
+}
+
+export interface OpenCodeModelConfig {
+  defaultModel: string | null;
+  options: string[];
+  availableModels: Array<{
+    name: string;
+    enabled: boolean;
+    isDefault: boolean;
+  }>;
+}
+
+export interface KimiModelConfig {
+  defaultModel: string | null;
+  options: string[];
+  availableModels: Array<{
+    name: string;
+    label?: string;
+    provider?: string | null;
+    enabled: boolean;
+    isDefault: boolean;
+    maxContextSize?: number | null;
+    capabilities?: string[];
+    /**
+     * Thinking effort tiers from the server's model metadata
+     * (`support_efforts`); absent for on/off-style thinking models (k2.x).
+     */
+    supportEfforts?: string[];
+    /** Server-reported default tier (`default_effort`). */
+    defaultEffort?: string | null;
+  }>;
+}
+
+export interface GrokModelConfig {
+  defaultModel: string | null;
+  options: string[];
+  availableModels: Array<{
+    name: string;
+    label?: string;
+    provider?: string | null;
+    enabled: boolean;
+    isDefault: boolean;
+    maxContextSize?: number | null;
+    capabilities?: string[];
+    /** Reasoning effort tiers this model supports (models_cache.json), e.g. ['low','medium','high','xhigh']. */
+    reasoningEfforts?: GrokReasoningEffort[];
+  }>;
+}
+
+/**
+ * Model catalog for the DeepSeek Harness ACP profile. Sourced from the
+ * profile's cordis.yml (the llm-deepseek plugin's `models` list) — never a
+ * hardcoded list in app code; edit the profile to add models.
+ */
+export interface DeepseekModelConfig {
+  defaultModel: string | null;
+  options: string[];
+  imageModels?: string[];
+  availableModels?: Array<{
+    id: string;
+    name: string;
+    description?: string;
+    inputModalities: Array<'text' | 'image'>;
+    contextWindow: number;
+    /** Effective Harness request cap, not the API's maximum supported output. */
+    maxOutputTokens: number;
+    reasoningEfforts: DeepseekReasoningEffort[];
+  }>;
+}
+
+/** Settings-page view of the effective DeepSeek Harness API key. */
+export type DeepseekKeySource = 'aegis' | 'env' | 'dsh';
+
+export interface DeepseekKeyStatus {
+  hasApiKey: boolean;
+  keySource: DeepseekKeySource | null;
+  /** True when the installed dsh CLI has a key Aegis falls back to. */
+  dshKeyAvailable: boolean;
+}
+
+/** Browser Use origin permissions (Codex-parity three-state model). */
+export type BrowserUseOriginPolicy = 'allow' | 'block' | 'ask';
+
+export interface BrowserUsePermissionSettings {
+  enabled: boolean;
+  defaultPolicy: BrowserUseOriginPolicy;
+  origins: Record<string, BrowserUseOriginPolicy>;
+}
+
+/** Chrome cookie import into the built-in persist:coworker-browser partition. */
+export type ChromeCookieImportErrorCode =
+  | 'unsupported_platform'
+  | 'chrome_running'
+  | 'profile_not_found'
+  | 'no_cookies_db'
+  | 'v20_unsupported'
+  | 'keychain_denied'
+  | 'keychain_missing'
+  | 'app_data_denied'
+  | 'no_domains_selected'
+  | 'decrypt_failed'
+  | 'write_failed'
+  | 'import_failed';
+
+export interface ChromeCookieProfile {
+  directoryName: string;
+  profileName: string;
+  profilePath: string;
+  gaiaName?: string;
+  userName?: string;
+  hasCookies: boolean;
+}
+
+export interface ChromeCookieDomain {
+  host: string;
+  cookieCount: number;
+}
+
+export interface ChromeCookieImportCounts {
+  discovered: number;
+  imported: number;
+  skippedExpired: number;
+  skippedPartitioned: number;
+  skippedInvalid: number;
+  failed: number;
+}
+
+export interface ChromeCookieProfilesResult {
+  platformSupported: boolean;
+  chromeRunning: boolean;
+  profiles: ChromeCookieProfile[];
+  errorCode?: ChromeCookieImportErrorCode;
+  errorMessage?: string;
+}
+
+export interface ChromeCookieDomainsResult {
+  domains: ChromeCookieDomain[];
+  errorCode?: ChromeCookieImportErrorCode;
+  errorMessage?: string;
+}
+
+export interface ChromeCookieImportRequest {
+  profilePath: string;
+  /** Empty or omitted imports every host in the Chrome profile. */
+  domains?: string[];
+}
+
+export interface ChromeCookieImportResult {
+  ok: boolean;
+  errorCode?: ChromeCookieImportErrorCode;
+  errorMessage?: string;
+  cookies?: ChromeCookieImportCounts;
+  importedHosts?: string[];
+}
+
+export interface ChromeCookieImportStatus {
+  importedAt: number | null;
+  profileName: string | null;
+  domains: string[];
+  cookieCount: number;
+}
+
+export interface PiModelConfig {
+  defaultModel: string | null;
+  options: string[];
+  availableModels: Array<{
+    name: string;
+    label?: string;
+    provider?: string | null;
+    enabled: boolean;
+    isDefault: boolean;
+    maxContextSize?: number | null;
+    capabilities?: string[];
+  }>;
+}
+
+// Bubble provider credentials management (settings page; writes the same
+// ~/.bubble/config.json the Bubble CLI uses).
+export interface BubbleProviderSummary {
+  id: string;
+  name: string;
+  baseURL?: string;
+  supportsOAuth: boolean;
+  oauthOnly: boolean;
+  authType: "oauth" | "api" | "none";
+  /** An active API key (never an OAuth token) is stored. */
+  hasApiKey: boolean;
+  enabled: boolean;
+  isDefault: boolean;
+  /** Present in the user's config (vs. builtin-catalog-only). */
+  configured: boolean;
+}
+
+export interface BubbleOAuthState {
+  phase?: "authorizing" | "exchanging" | "saving";
+  status: "idle" | "pending" | "success" | "error";
+  providerId: string | null;
+  canReopen: boolean;
+  error?: string;
+}
+
+export interface BubbleProvidersConfig {
+  providers: BubbleProviderSummary[];
+  defaultProviderId: string | null;
+}
+
+export interface BubbleModelConfig {
+  defaultModel: string | null;
+  options: string[];
+  availableModels: Array<{
+    name: string;
+    label?: string;
+    provider?: string | null;
+    enabled: boolean;
+    isDefault: boolean;
+    maxContextSize?: number | null;
+    capabilities?: string[];
+    /** Thinking levels this model supports (SDK model catalog), e.g. ['low','medium','high','max']. */
+    reasoningLevels?: string[];
+    /** The catalog's default thinking level for this model, if any. */
+    defaultReasoningLevel?: string | null;
+  }>;
+}
+
+export interface QoderModelOption {
+  value: string;
+  displayName: string;
+  description?: string;
+  /** Vision-language models accept image attachments. */
+  isVl?: boolean;
+  isEnabled?: boolean;
+  isDefault?: boolean;
+  /** Active (default-tier) context window in tokens; drives the context ring. */
+  contextWindow?: number | null;
+  availableContextWindows?: number[];
+  maxInputTokens?: number | null;
+  maxOutputTokens?: number | null;
+  /** Reasoning effort tiers; absent for non-reasoning models. */
+  efforts?: string[];
+  defaultEffort?: string | null;
+  priceFactor?: number | null;
+  source?: 'system' | 'user';
+}
+
+export interface QoderModelConfig {
+  defaultModel: string | null;
+  options: string[];
+  models: QoderModelOption[];
+}
+
+export interface CodexRuntimeStatus {
+  ready: boolean;
+  cliAvailable: boolean;
+  /** Why the `codex app-server --help` probe failed (null when it passed). */
+  cliError?: string | null;
+  configExists: boolean;
+  hasModelConfig: boolean;
+  checkedAt: number;
+}
+
+export interface OpenCodeRuntimeStatus {
+  ready: boolean;
+  cliAvailable: boolean;
+  configExists: boolean;
+  hasModelConfig: boolean;
+  checkedAt: number;
+}
+
+export type KimiRuntimeAuthState = 'unknown' | 'ready' | 'login_required' | 'error';
+export type GrokRuntimeAuthState = 'unknown' | 'ready' | 'login_required' | 'error';
+
+export interface KimiRuntimeStatus {
+  ready: boolean;
+  cliAvailable: boolean;
+  cliPath: string | null;
+  cliVersion: string | null;
+  /** The CLI ships the `kimi server` runtime (REST + WS daemon). */
+  serverAvailable: boolean;
+  authState: KimiRuntimeAuthState;
+  loginCommand: string | null;
+  summary: string;
+  detail: string;
+  checkedAt: number;
+}
+
+export interface GrokRuntimeStatus {
+  ready: boolean;
+  cliAvailable: boolean;
+  cliPath: string | null;
+  cliVersion: string | null;
+  acpAvailable: boolean;
+  authState: GrokRuntimeAuthState;
+  loginCommand: string | null;
+  summary: string;
+  detail: string;
+  checkedAt: number;
+}
+
+export type ClaudeRuntimeStatusKind = 'ready' | 'login_required' | 'install_required' | 'error';
+export type ClaudeRuntimeSource = 'global' | 'unknown';
+
+export interface ClaudeRuntimeStatus {
+  kind: ClaudeRuntimeStatusKind;
+  ready: boolean;
+  runtimeInstalled: boolean;
+  runtimeSource: ClaudeRuntimeSource;
+  requiresAnthropicAuth: boolean;
+  authSatisfied: boolean;
+  hasApiKey: boolean;
+  loggedIn: boolean;
+  authMethod: string | null;
+  apiProvider: string | null;
+  cliPath: string | null;
+  cliVersion: string | null;
+  requestedModel: string | null;
+  summary: string;
+  detail: string;
+  installCommand: string | null;
+  loginCommand: string | null;
+  setupTokenCommand: string | null;
+  checkedAt: number;
+}
+
+export type FontSlot = 'ui' | 'display' | 'mono';
+export type FontSelectionSource = 'builtin' | 'system' | 'imported';
+export type FontFormat = 'ttf' | 'otf' | 'woff' | 'woff2';
+
+export interface FontSelection {
+  source: FontSelectionSource;
+  id: string;
+}
+
+export interface ImportedFontFace {
+  id: string;
+  label: string;
+  cssFamily: string;
+  format: FontFormat;
+  mimeType: string;
+  dataBase64: string;
+}
+
+export interface FontSettingsPayload {
+  selections: Record<FontSlot, FontSelection>;
+  importedFonts: ImportedFontFace[];
+}
+
+export interface SystemFontOption {
+  id: string;
+  label: string;
+  cssFamily: string;
+}
+
+export interface FeishuBridgeConfig {
+  enabled: boolean;
+  appId: string;
+  appSecret: string;
+  defaultCwd: string;
+  provider: AgentProvider;
+  model: string;
+  allowedUserIds: string;
+  autoStart: boolean;
+}
+
+export interface FeishuBridgeStatus {
+  running: boolean;
+  connected: boolean;
+  botOpenId?: string;
+  lastError?: string;
+  lastInboundAt?: number;
+  lastOutboundAt?: number;
+  activeBindings: number;
+}
+
+export type ClaudeCompatibleAuthType = 'api_key' | 'auth_token';
+export type ClaudeCompatibleProviderId =
+  | 'minimaxCn'
+  | 'minimax'
+  | 'mimo'
+  | 'zhipu'
+  | 'moonshot'
+  | 'deepseek';
+
+export interface ClaudeCompatibleProviderConfig {
+  enabled: boolean;
+  baseUrl: string;
+  authType: ClaudeCompatibleAuthType;
+  secret: string;
+  model: string;
+  smallFastModel?: string;
+  maxOutputTokens?: number;
+}
+
+export interface ClaudeCompatibleProvidersConfig {
+  providers: Record<ClaudeCompatibleProviderId, ClaudeCompatibleProviderConfig>;
+}
+
+export type WechatMarkdownHtmlThemeId = 'black-red-imprint' | 'black-orange-imprint';
+export type WechatMarkdownHtmlGeneratorRuntime = AgentProvider;
+
+export interface WechatMarkdownHtmlGeneratorConfig {
+  runtime: WechatMarkdownHtmlGeneratorRuntime;
+  providerId: string;
+  model: string;
+  temperature: number;
+  maxOutputTokens?: number;
+}
+
+export interface WechatMarkdownHtmlGenerationInput {
+  markdown: string;
+  themeId: WechatMarkdownHtmlThemeId;
+  filePath?: string;
+}
+
+export interface WechatMarkdownHtmlGenerationResult {
+  html: string;
+  model: string;
+  providerId: string;
+  runtime: WechatMarkdownHtmlGeneratorRuntime;
+  themeId: WechatMarkdownHtmlThemeId;
+}
+
+export interface WechatClipboardHtmlWriteInput {
+  html: string;
+}
+
+export interface WechatClipboardHtmlWriteResult {
+  ok: boolean;
+  error?: string;
+}
+
+// 附件类型（文件/图片）
+export type AttachmentKind = 'file' | 'image';
+
+export interface Attachment {
+  id: string;
+  path: string;
+  name: string;
+  size: number;
+  mimeType: string;
+  kind: AttachmentKind;
+  uiType?: 'pasted_text';
+  previewText?: string;
+}
+
+export type MemoryDocumentKind = 'assistant' | 'user' | 'project';
+export type MemoryScope = 'personal' | 'project';
+
+export interface MemoryDocument {
+  kind: MemoryDocumentKind;
+  scope: MemoryScope;
+  title: string;
+  description: string;
+  path: string;
+  content: string;
+  exists: boolean;
+  updatedAt: number;
+  projectCwd?: string | null;
+}
+
+export interface MemoryWorkspace {
+  rootPath: string;
+  assistantRoot: string;
+  projectRoot: string | null;
+  projectCwd: string | null;
+  assistantDocument: MemoryDocument;
+  userDocument: MemoryDocument;
+  projectDocument: MemoryDocument | null;
+}
+
+export const DEFAULT_WORKSPACE_CHANNEL_ID = 'all';
+
+export interface WorkspaceChannel {
+  id: string;
+  projectCwd: string;
+  name: string;
+  description?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+// Agent 提供商 / runtime
+export type AgentProvider = 'claude' | 'codex' | 'opencode' | 'kimi' | 'grok' | 'pi' | 'qoder' | 'bubble' | 'deepseek';
+export type SessionSource =
+  | 'aegis'
+  | 'claude_remote'
+  | 'codex_local'
+  | 'opencode_local'
+  | 'kimi_local'
+  | 'grok_local'
+  | 'pi_local'
+  | 'qoder_local'
+  | 'bubble_imported'
+  | 'bubble_local'
+  | 'deepseek_local';
+
+export interface ProviderComposerCapabilities {
+  provider: AgentProvider;
+  supportsSkillMentions: boolean;
+  supportsSkillDiscovery: boolean;
+  supportsNativeSlashCommandDiscovery: boolean;
+  supportsPluginMentions: boolean;
+  supportsPluginDiscovery: boolean;
+  supportsRuntimeModelList: boolean;
+  supportsThreadCompaction?: boolean;
+  supportsThreadImport?: boolean;
+}
+
+export interface ProviderSkillInterface {
+  displayName?: string;
+  shortDescription?: string;
+  /**
+   * Codex discovers these by convention from the skill's assets/ directory
+   * (`<name>-small.svg`, `<name>.png`). Local file paths are inlined as data
+   * URLs by the IPC layer before reaching the renderer.
+   */
+  iconSmall?: string | null;
+  iconLarge?: string | null;
+  brandColor?: string | null;
+  defaultPrompt?: string | null;
+}
+
+export interface ProviderSkillDescriptor {
+  name: string;
+  description?: string;
+  path: string;
+  enabled: boolean;
+  scope?: string;
+  interface?: ProviderSkillInterface;
+  dependencies?: unknown;
+  /** Inline SKILL.md body when the provider ships it in the listing (OpenCode). */
+  content?: string | null;
+}
+
+export interface ProviderInputReference {
+  name: string;
+  path: string;
+}
+
+export interface ProviderListSkillsInput {
+  provider: AgentProvider;
+  cwd?: string;
+  threadId?: string;
+  forceReload?: boolean;
+}
+
+export interface ProviderListSkillsResult {
+  skills: ProviderSkillDescriptor[];
+  source?: string;
+  cached?: boolean;
+}
+
+export type ProviderPluginInstallPolicy =
+  | 'NOT_AVAILABLE'
+  | 'AVAILABLE'
+  | 'INSTALLED_BY_DEFAULT';
+export type ProviderPluginAuthPolicy = 'ON_INSTALL' | 'ON_USE';
+
+export type ProviderPluginSource =
+  | { type: 'local'; path: string }
+  | { type: 'git'; url: string; path?: string | null; refName?: string | null; sha?: string | null }
+  | { type: 'remote' };
+
+export interface ProviderPluginInterface {
+  displayName?: string;
+  shortDescription?: string;
+  longDescription?: string;
+  developerName?: string;
+  category?: string;
+  capabilities?: string[];
+  websiteUrl?: string;
+  privacyPolicyUrl?: string;
+  termsOfServiceUrl?: string;
+  defaultPrompt?: string[];
+  brandColor?: string;
+  composerIcon?: string;
+  composerIconUrl?: string;
+  logo?: string;
+  logoUrl?: string;
+  screenshots?: string[];
+  screenshotUrls?: string[];
+}
+
+export interface ProviderPluginDescriptor {
+  id: string;
+  name: string;
+  /**
+   * Remote catalog identifier (`plugin_connector_…`). plugin/read and
+   * plugin/install resolve remote-marketplace plugins by THIS id, not by
+   * `name` — the catalog endpoint 404s on names.
+   */
+  remotePluginId?: string | null;
+  version?: string | null;
+  source: ProviderPluginSource;
+  installed: boolean;
+  enabled: boolean;
+  installPolicy: ProviderPluginInstallPolicy;
+  authPolicy: ProviderPluginAuthPolicy;
+  interface?: ProviderPluginInterface;
+}
+
+export interface ProviderPluginMarketplaceInterface {
+  displayName?: string;
+}
+
+export interface ProviderPluginMarketplaceDescriptor {
+  name: string;
+  path: string | null;
+  interface?: ProviderPluginMarketplaceInterface;
+  plugins: ProviderPluginDescriptor[];
+}
+
+export interface ProviderPluginMarketplaceLoadError {
+  marketplacePath: string;
+  message: string;
+}
+
+export interface ProviderListPluginsInput {
+  provider: AgentProvider;
+  cwd?: string;
+  threadId?: string;
+  forceRemoteSync?: boolean;
+  forceReload?: boolean;
+}
+
+export interface ProviderListPluginsResult {
+  marketplaces: ProviderPluginMarketplaceDescriptor[];
+  marketplaceLoadErrors: ProviderPluginMarketplaceLoadError[];
+  remoteSyncError: string | null;
+  featuredPluginIds: string[];
+  source?: string;
+  cached?: boolean;
+}
+
+export interface ProviderPluginAppSummary {
+  id: string;
+  name: string;
+  description?: string;
+  installUrl?: string;
+  needsAuth: boolean;
+}
+
+export interface ProviderPluginDetail {
+  marketplaceName: string;
+  marketplacePath: string | null;
+  summary: ProviderPluginDescriptor;
+  description?: string;
+  skills: ProviderSkillDescriptor[];
+  apps: ProviderPluginAppSummary[];
+  mcpServers: string[];
+}
+
+export interface ProviderReadPluginInput {
+  provider: AgentProvider;
+  marketplacePath?: string | null;
+  remoteMarketplaceName?: string | null;
+  pluginName: string;
+}
+
+export interface ProviderInstallPluginInput {
+  provider: AgentProvider;
+  marketplacePath?: string | null;
+  remoteMarketplaceName?: string | null;
+  pluginName: string;
+}
+
+export interface ProviderUninstallPluginInput {
+  provider: AgentProvider;
+  pluginId: string;
+}
+
+export interface ProviderReadPluginResult {
+  plugin: ProviderPluginDetail;
+  source?: string;
+  cached?: boolean;
+}
+
+export type AutomationScheduleKind = 'once' | 'daily' | 'weekly' | 'interval';
+
+export interface AutomationSchedule {
+  kind: AutomationScheduleKind;
+  timeOfDay?: string | null;
+  dayOfWeek?: number | null;
+  intervalMinutes?: number | null;
+  runAt?: number | null;
+}
+
+export interface AutomationRuntimeConfig {
+  provider: AgentProvider;
+  model?: string | null;
+  compatibleProviderId?: ClaudeCompatibleProviderId | null;
+  codexReasoningEffort?: CodexReasoningEffort | null;
+  codexFastMode?: boolean;
+}
+
+export type AutomationRunStatus = 'running' | 'completed' | 'failed';
+
+export interface AutomationDefinition {
+  id: string;
+  name: string;
+  projectCwd: string;
+  prompt: string;
+  schedule: AutomationSchedule;
+  runtime: AutomationRuntimeConfig;
+  enabled: boolean;
+  nextRunAt: number | null;
+  lastRunAt: number | null;
+  lastRunStatus: AutomationRunStatus | null;
+  lastRunSessionId: string | null;
+  runCount: number;
+  failureCount: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AutomationRunRecord {
+  id: string;
+  automationId: string;
+  sessionId: string | null;
+  status: AutomationRunStatus;
+  error: string | null;
+  startedAt: number | null;
+  finishedAt: number | null;
+  createdAt: number;
+}
+
+export interface UpsertAutomationInput {
+  id?: string;
+  name: string;
+  projectCwd: string;
+  prompt: string;
+  schedule: AutomationSchedule;
+  runtime: AutomationRuntimeConfig;
+  enabled?: boolean;
+}
+
+export interface AutomationSnapshot {
+  automations: AutomationDefinition[];
+  recentRuns: AutomationRunRecord[];
+}
+
+// 项目文件树节点
+export interface ProjectTreeNode {
+  name: string;
+  path: string;
+  kind: 'file' | 'dir';
+  children?: ProjectTreeNode[];
+}
+
+// Client -> Server 事件
+export type ClientEvent =
+  | { type: 'session.list' }
+  | { type: 'session.start'; payload: SessionStartPayload }
+  | { type: 'session.continue'; payload: SessionContinuePayload }
+  | { type: 'session.editLatestPrompt'; payload: SessionContinuePayload }
+  | { type: 'session.history'; payload: { sessionId: string } }
+  | { type: 'session.stop'; payload: { sessionId: string } }
+  | { type: 'runner.prewarm'; payload: RunnerPrewarmPayload }
+  | { type: 'session.delete'; payload: { sessionId: string } }
+  | { type: 'session.togglePin'; payload: { sessionId: string } }
+  | { type: 'permission.response'; payload: PermissionResponsePayload }
+  | { type: 'computerUse.revoke'; payload: { sessionId: string; grantKey?: string } }
+  | { type: 'computerUse.stop'; payload: { sessionId: string } }
+  // MCP 事件
+  | { type: 'mcp.get-config'; payload?: { projectPath?: string } }
+  | { type: 'mcp.save-config'; payload: {
+      servers?: Record<string, McpServerConfig>;
+      globalServers?: Record<string, McpServerConfig>;
+      projectServers?: Record<string, McpServerConfig>;
+      codexGlobalServers?: Record<string, McpServerConfig>;
+      opencodeGlobalServers?: Record<string, McpServerConfig>;
+      opencodeProjectServers?: Record<string, McpServerConfig>;
+      kimiGlobalServers?: Record<string, McpServerConfig>;
+      kimiProjectServers?: Record<string, McpServerConfig>;
+      qoderGlobalServers?: Record<string, McpServerConfig>;
+      bubbleGlobalServers?: Record<string, McpServerConfig>;
+      deepseekGlobalServers?: Record<string, McpServerConfig>;
+      deepseekProjectServers?: Record<string, McpServerConfig>;
+      projectPath?: string;
+  } }
+  // Skills 事件
+  | { type: 'skills.list'; payload?: { projectPath?: string } }
+  // 文件夹事件
+  | { type: 'folder.list' }
+  | { type: 'folder.create'; payload: { path: string; displayName?: string } }
+  | { type: 'folder.update'; payload: { path: string; updates: Partial<FolderConfig> } }
+  | { type: 'folder.delete'; payload: { path: string } }
+  | { type: 'folder.move'; payload: { oldPath: string; newPath: string } }
+  | { type: 'session.setFolder'; payload: { sessionId: string; folderPath: string | null } }
+  | { type: 'session.setChannel'; payload: { sessionId: string; channelId: string } }
+  | { type: 'session.setTeam'; payload: { sessionId: string; teamMode: SessionTeamMode; teamId?: string | null } };
+
+export interface AppUpdateStatus {
+  available: boolean;
+  version: string | null;
+  autoDetected: boolean;
+}
+
+// Server -> Client 事件
+export type ServerEvent =
+  | { type: 'session.open'; payload: { sessionId: string } }
+  | { type: 'session.list'; payload: { sessions: SessionInfo[] } }
+  | { type: 'session.status'; payload: SessionStatusPayload }
+  | { type: 'session.history'; payload: SessionHistoryPayload }
+  | { type: 'session.deleted'; payload: { sessionId: string } }
+  | { type: 'session.pinned'; payload: { sessionId: string; pinned: boolean } }
+  | { type: 'session.renamed'; payload: { sessionId: string; title: string; updatedAt: number } }
+  | {
+      type: 'stream.user_prompt';
+      payload: { sessionId: string; prompt: string; attachments?: Attachment[]; createdAt?: number };
+    }
+  | { type: 'stream.message'; payload: { sessionId: string; message: StreamMessage } }
+  // Incremental stdout/stderr from a tool that is still running (codex
+  // commandExecution). Transient display data — never persisted.
+  | { type: 'stream.tool_output_delta'; payload: { sessionId: string; toolUseId: string; delta: string } }
+  | { type: 'permission.request'; payload: PermissionRequestPayload }
+  // The provider resolved/abandoned a pending permission request (process
+  // death, stop, server-side resolution) — the card must be dropped.
+  | { type: 'permission.dismissed'; payload: { sessionId: string; toolUseId: string } }
+  | { type: 'computerUse.live'; payload: { sessionId: string; frame: ComputerUseLiveFrame } }
+  | { type: 'computerUse.grants'; payload: { sessionId: string; grants: ComputerUseGrantView[]; reason: string } }
+  | { type: 'computerUse.preview'; payload: { sessionId: string; open: boolean } }
+  | { type: 'computerUse.stopped'; payload: { sessionId: string } }
+  | { type: 'runner.error'; payload: { message: string; sessionId?: string } }
+  // Codex app-server pushed a fresh authoritative model catalog — renderers
+  // should refetch codex model config (fast-mode eligibility may change).
+  | { type: 'codex.modelCatalogUpdated'; payload: Record<string, never> }
+  // An MCP OAuth flow (mcpServer/oauth/login) finished — the settings panel
+  // should refresh runtime status and surface the outcome.
+  | {
+      type: 'codex.mcpOauthLoginCompleted';
+      payload: { serverName: string; success: boolean; error: string | null };
+    }
+  // Background live discovery found new/changed Bubble models — renderers
+  // should refetch the bubble model config (the first frame is local-only).
+  | { type: 'bubble.modelCatalogUpdated'; payload: Record<string, never> }
+  | { type: 'kimi.modelConfigUpdated'; payload: Record<string, never> }
+  | { type: 'qoder.modelConfigUpdated'; payload: Record<string, never> }
+  | { type: 'project.tree'; payload: { cwd: string; tree: ProjectTreeNode | null } }
+  | {
+      type: 'project.file';
+      payload: {
+        cwd: string;
+        filePath: string;
+        text: string;
+        mtimeMs: number;
+        size: number;
+        exists: boolean;
+      };
+    }
+  | { type: 'app.update'; payload: AppUpdateStatus }
+  // MCP 事件
+  | { type: 'mcp.config'; payload: {
+      servers: Record<string, McpServerConfig>;
+      globalServers?: Record<string, McpServerConfig>;
+      projectServers?: Record<string, McpServerConfig>;
+      codexGlobalServers?: Record<string, McpServerConfig>;
+      opencodeGlobalServers?: Record<string, McpServerConfig>;
+      opencodeProjectServers?: Record<string, McpServerConfig>;
+      kimiGlobalServers?: Record<string, McpServerConfig>;
+      kimiProjectServers?: Record<string, McpServerConfig>;
+      qoderGlobalServers?: Record<string, McpServerConfig>;
+      bubbleGlobalServers?: Record<string, McpServerConfig>;
+      deepseekGlobalServers?: Record<string, McpServerConfig>;
+      deepseekProjectServers?: Record<string, McpServerConfig>;
+    } }
+  | { type: 'mcp.status'; payload: { servers: McpServerStatus[] } }
+  | { type: 'skills.list'; payload: {
+      userRoot: string;
+      projectRoot?: string;
+      userSkills: ClaudeSkillSummary[];
+      projectSkills: ClaudeSkillSummary[];
+    } }
+  // 文件夹事件
+  | { type: 'folder.list'; payload: { folders: FolderConfig[] } }
+  | { type: 'folder.changed'; payload: { folders: FolderConfig[] } }
+  | { type: 'session.folderChanged'; payload: { sessionId: string; folderPath: string | null } }
+  | { type: 'session.channelChanged'; payload: { sessionId: string; channelId: string } }
+  | { type: 'session.teamChanged'; payload: { sessionId: string; teamMode: SessionTeamMode; teamId: string | null } }
+  | { type: 'automation.changed'; payload: AutomationSnapshot }
+  // 系统通知点击后的回位事件（主进程 → 聚焦窗口后广播）
+  | { type: 'app.focusSession'; payload: { sessionId: string } }
+  | { type: 'browser.open-panel'; payload: { sessionId: string } };
+
+// Payload 类型
+export interface SessionStartPayload {
+  codexGoal?: import('./session-goal').GoalAction;
+  title: string;
+  prompt: string;
+  effectivePrompt?: string;
+  automationRunId?: string;
+  skipTitleGeneration?: boolean;
+  cwd?: string;
+  projectCwd?: string | null;
+  envMode?: ThreadEnvironmentMode;
+  worktreePath?: string | null;
+  associatedWorktreePath?: string | null;
+  associatedWorktreeBranch?: string | null;
+  associatedWorktreeRef?: string | null;
+  scope?: SessionScope;
+  agentId?: string | null;
+  allowedTools?: string;
+  attachments?: Attachment[];
+  provider?: AgentProvider;
+  model?: string;
+  compatibleProviderId?: ClaudeCompatibleProviderId;
+  betas?: string[];
+  claudeAccessMode?: ClaudeAccessMode;
+  claudeExecutionMode?: ClaudeExecutionMode;
+  claudeReasoningEffort?: ClaudeReasoningEffort;
+  codexExecutionMode?: CodexExecutionMode;
+  codexPermissionMode?: CodexPermissionMode;
+  codexReasoningEffort?: CodexReasoningEffort;
+  codexFastMode?: boolean;
+  kimiPermissionMode?: KimiPermissionMode;
+  kimiThinking?: KimiThinking;
+  grokPermissionMode?: GrokPermissionMode;
+  grokReasoningEffort?: GrokReasoningEffort;
+  deepseekPermissionMode?: DeepseekPermissionMode;
+  deepseekAgentPreset?: DeepseekAgentPreset;
+  deepseekReasoningEffort?: DeepseekReasoningEffort;
+  codexSkills?: ProviderInputReference[];
+  codexMentions?: ProviderInputReference[];
+  opencodePermissionMode?: OpenCodePermissionMode;
+  qoderPermissionMode?: QoderPermissionMode;
+  bubblePermissionMode?: BubblePermissionMode;
+  /** Bubble thinking level (per-model open set, e.g. low/medium/high/max). */
+  bubbleThinkingLevel?: string;
+  teamMode?: SessionTeamMode;
+  teamId?: string | null;
+  hiddenFromThreads?: boolean;
+  channelId?: string;
+  // "在隔离副本中运行"：开跑前在项目里建一个 worktree，session 全程活在里面
+  createIsolatedWorkspace?: boolean;
+}
+
+// ── Claude rewind (conversation/files checkpoint restore) ───────────────────
+
+export type ClaudeRewindScope = 'conversation' | 'files' | 'both';
+
+export interface ClaudeRewindInput {
+  sessionId: string;
+  /** UUID of the SDK user message that anchors the checkpoint. */
+  anchorMessageId: string;
+  scope: ClaudeRewindScope;
+  /** Preview only: report what a files rewind would change without executing. */
+  dryRun?: boolean;
+}
+
+export interface ClaudeRewindFilesOutcome {
+  canRewind: boolean;
+  error?: string;
+  filesChanged?: string[];
+  insertions?: number;
+  deletions?: number;
+}
+
+export interface ClaudeRewindResult {
+  ok: boolean;
+  message?: string;
+  /** Whether a live query exists so files can be rewound at all. */
+  filesAvailable: boolean;
+  files?: ClaudeRewindFilesOutcome | null;
+  /** Prompt text of the rewound-away user message, for composer restore. */
+  removedPrompt?: string | null;
+}
+
+// ── Bubble rewind (conversation/files checkpoint restore) ──────────────────
+
+export interface BubbleRewindInput {
+  sessionId: string;
+  /** 0-based ordinal of the target user_prompt among user prompts. */
+  anchorIndex: number;
+  /** Display prompt text of the target user_prompt, for exact-match resolution. */
+  anchorPrompt?: string;
+  scope: ClaudeRewindScope;
+  /** Preview only: report what a files rewind would change without executing. */
+  dryRun?: boolean;
+}
+
+export interface SessionContinuePayload {
+  sessionId: string;
+  prompt: string;
+  effectivePrompt?: string;
+  attachments?: Attachment[];
+  provider?: AgentProvider;
+  model?: string;
+  compatibleProviderId?: ClaudeCompatibleProviderId;
+  betas?: string[];
+  claudeAccessMode?: ClaudeAccessMode;
+  claudeExecutionMode?: ClaudeExecutionMode;
+  claudeReasoningEffort?: ClaudeReasoningEffort;
+  codexExecutionMode?: CodexExecutionMode;
+  codexPermissionMode?: CodexPermissionMode;
+  codexReasoningEffort?: CodexReasoningEffort;
+  codexFastMode?: boolean;
+  kimiPermissionMode?: KimiPermissionMode;
+  kimiThinking?: KimiThinking;
+  grokPermissionMode?: GrokPermissionMode;
+  grokReasoningEffort?: GrokReasoningEffort;
+  deepseekPermissionMode?: DeepseekPermissionMode;
+  deepseekReasoningEffort?: DeepseekReasoningEffort;
+  codexSkills?: ProviderInputReference[];
+  codexMentions?: ProviderInputReference[];
+  opencodePermissionMode?: OpenCodePermissionMode;
+  qoderPermissionMode?: QoderPermissionMode;
+  bubblePermissionMode?: BubblePermissionMode;
+  /** Bubble thinking level (per-model open set). Absent = SDK/model default. */
+  bubbleThinkingLevel?: string;
+  teamMode?: SessionTeamMode;
+  teamId?: string | null;
+}
+
+/**
+ * Composer snapshot for speculative runner prewarm (P3). Carries the SAME
+ * fields the composer would send on `session.continue` — the prewarm entry's
+ * config must normalize identically to the eventual send, or the send-path
+ * reuse check aborts the prewarmed runner and pays a second cold start.
+ */
+export interface RunnerPrewarmPayload {
+  sessionId: string;
+  provider?: AgentProvider;
+  model?: string;
+  compatibleProviderId?: ClaudeCompatibleProviderId;
+  betas?: string[];
+  claudeAccessMode?: ClaudeAccessMode;
+  claudeExecutionMode?: ClaudeExecutionMode;
+  claudeReasoningEffort?: ClaudeReasoningEffort;
+  grokPermissionMode?: GrokPermissionMode;
+  grokReasoningEffort?: GrokReasoningEffort;
+}
+
+export type SessionScope = 'project' | 'dm';
+export type ThreadEnvironmentMode = 'local' | 'worktree';
+
+export interface SessionWorkspaceState {
+  envMode?: ThreadEnvironmentMode;
+  projectCwd?: string | null;
+  worktreePath?: string | null;
+  associatedWorktreePath?: string | null;
+  associatedWorktreeBranch?: string | null;
+  associatedWorktreeRef?: string | null;
+}
+
+export interface GitWorktree {
+  path: string;
+  branch: string | null;
+  head: string | null;
+  detached: boolean;
+  locked: boolean;
+  prunable: boolean;
+  current: boolean;
+}
+
+export interface GitBranchInfo {
+  name: string;
+  fullRef: string;
+  current: boolean;
+  remote: boolean;
+  upstream: string | null;
+  shortHash: string;
+  worktreePath?: string | null;
+}
+
+export type GitPullRequestLookupStatus = 'found' | 'not_found' | 'unknown';
+
+export interface GitPullRequestSummary {
+  number: number;
+  title: string;
+  state: 'open' | 'closed' | 'merged';
+  url: string;
+}
+
+/** App-owned task association; independent of the currently checked-out branch. */
+export interface SessionPullRequest extends GitPullRequestSummary {
+  repoRoot: string;
+  headBranch: string;
+  attachedAt: number;
+}
+
+export interface SessionPullRequestView extends SessionPullRequest {
+  lookupStatus: GitPullRequestLookupStatus | 'cached';
+}
+
+export interface AttachSessionPullRequestInput {
+  sessionId: string;
+  cwd: string;
+  repoRoot: string;
+  headBranch: string;
+  url: string;
+}
+
+export interface GitRepositoryInfo {
+  root: string | null;
+  originUrl: string | null;
+  owner: string | null;
+  name: string | null;
+  fullName: string | null;
+  webUrl: string | null;
+  defaultBranch: string | null;
+}
+
+export interface GitOverviewResult {
+  ok: boolean;
+  error: string | null;
+  hasRepo: boolean;
+  repoRoot: string | null;
+  repository: GitRepositoryInfo | null;
+  branch: string | null;
+  upstream: string | null;
+  hasUpstream: boolean;
+  aheadCount: number;
+  behindCount: number;
+  hasOriginRemote: boolean;
+  isGitHubRemote: boolean;
+  isDefaultBranch: boolean;
+  totalChanges: number;
+  insertions: number;
+  deletions: number;
+  prStatus: GitPullRequestLookupStatus;
+  pr: GitPullRequestSummary | null;
+}
+
+export interface GitChangeEntry {
+  filePath: string;
+  status: string;
+  staged: boolean;
+}
+
+export type GitPatchScope = 'working-tree' | 'unstaged' | 'staged' | 'branch';
+
+export interface GitPatchResult {
+  ok: boolean;
+  error: string | null;
+  scope: GitPatchScope;
+  patch: string;
+  repoRoot: string | null;
+  baseRef?: string | null;
+  truncated: boolean;
+}
+
+export interface GitCommitSummary {
+  sha: string;
+  shortSha: string;
+  subject: string;
+  committedAt: string;
+}
+
+export interface GitCommitListResult {
+  ok: boolean;
+  error: string | null;
+  commits: GitCommitSummary[];
+}
+
+export interface GitCommitPatchResult {
+  ok: boolean;
+  error: string | null;
+  sha: string;
+  patch: string;
+  repoRoot: string | null;
+  truncated: boolean;
+}
+
+export type EnvironmentEditorId =
+  | 'finder'
+  | 'system'
+  | 'cursor'
+  | 'vscode'
+  | 'windsurf'
+  | 'zed'
+  | 'trae'
+  | 'intellij'
+  | 'webstorm'
+  | 'sublime'
+  | 'xcode'
+  | 'terminal'
+  | 'iterm'
+  | 'ghostty'
+  | 'warp';
+
+export interface EnvironmentEditorLauncher {
+  id: EnvironmentEditorId;
+  label: string;
+  available: boolean;
+  appName?: string;
+  appPath?: string;
+  command?: string;
+  iconDataUrl?: string;
+}
+
+export interface OpenInEditorInput {
+  cwd: string;
+  editorId: EnvironmentEditorId;
+}
+
+
+export interface GitCheckoutBranchInput {
+  cwd: string;
+  branch: string;
+  sessionId?: string | null;
+}
+
+export interface GitCreateBranchInput {
+  cwd: string;
+  branch: string;
+  sessionId?: string | null;
+}
+
+export interface GitCreateWorktreeInput {
+  cwd: string;
+  branch: string;
+  newBranch?: string | null;
+  path?: string | null;
+}
+
+export interface GitSessionHandoffInput {
+  sessionId: string;
+  targetMode: ThreadEnvironmentMode;
+  branch?: string | null;
+  newBranch?: string | null;
+  worktreePath?: string | null;
+  includeChanges?: boolean;
+}
+
+export type SessionTeamMode = 'channel_default' | 'solo' | 'team' | 'manual';
+
+export interface SessionInfo {
+  id: string;
+  title: string;
+  status: SessionStatus;
+  scope?: SessionScope;
+  agentId?: string | null;
+  source?: SessionSource;
+  readOnly?: boolean;
+  cwd?: string;
+  projectCwd?: string | null;
+  envMode?: ThreadEnvironmentMode;
+  worktreePath?: string | null;
+  associatedWorktreePath?: string | null;
+  associatedWorktreeBranch?: string | null;
+  associatedWorktreeRef?: string | null;
+  claudeSessionId?: string;
+  provider?: AgentProvider;
+  model?: string;
+  compatibleProviderId?: ClaudeCompatibleProviderId;
+  betas?: string[];
+  claudeAccessMode?: ClaudeAccessMode;
+  claudeExecutionMode?: ClaudeExecutionMode;
+  claudeReasoningEffort?: ClaudeReasoningEffort;
+  codexExecutionMode?: CodexExecutionMode;
+  codexPermissionMode?: CodexPermissionMode;
+  codexReasoningEffort?: CodexReasoningEffort;
+  codexFastMode?: boolean;
+  kimiPermissionMode?: KimiPermissionMode;
+  kimiThinking?: KimiThinking;
+  /**
+   * Which kimi runtime this thread is bound to (derived from the stored
+   * session id's `server:` provenance prefix; unset ids default to 'server'
+   * since new threads run there). Gates server-only composer affordances
+   * like mid-turn steer.
+   */
+  kimiRuntime?: 'server' | 'legacy';
+  grokPermissionMode?: GrokPermissionMode;
+  grokReasoningEffort?: GrokReasoningEffort;
+  deepseekPermissionMode?: DeepseekPermissionMode;
+  deepseekAgentPreset?: DeepseekAgentPreset;
+  deepseekReasoningEffort?: DeepseekReasoningEffort;
+  opencodePermissionMode?: OpenCodePermissionMode;
+  qoderPermissionMode?: QoderPermissionMode;
+  bubblePermissionMode?: BubblePermissionMode;
+  pinned?: boolean;
+  folderPath?: string | null;
+  hiddenFromThreads?: boolean;
+  channelId?: string;
+  teamMode?: SessionTeamMode;
+  teamId?: string | null;
+  /** Set when this session was created by handing off from another agent. */
+  handoffSourceProvider?: AgentProvider | null;
+  latestClaudeModelUsage?: LatestClaudeModelUsage;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * `stopping` is BROADCAST-ONLY (codex two-phase stop): it is never persisted
+ * to the sessions table — the DB stays `running` until the stop settles and
+ * writes `idle`. Persisting it would open the git/workspace gates mid-turn
+ * and strand sessions after a crash (the boot sweep only resets `running`).
+ */
+export type SessionStatus = 'idle' | 'running' | 'stopping' | 'completed' | 'error';
+
+export interface SessionStatusPayload {
+  sessionId: string;
+  status: SessionStatus;
+  scope?: SessionScope;
+  agentId?: string | null;
+  source?: SessionSource;
+  readOnly?: boolean;
+  title?: string;
+  cwd?: string;
+  projectCwd?: string | null;
+  envMode?: ThreadEnvironmentMode;
+  worktreePath?: string | null;
+  associatedWorktreePath?: string | null;
+  associatedWorktreeBranch?: string | null;
+  associatedWorktreeRef?: string | null;
+  error?: string;
+  provider?: AgentProvider;
+  model?: string;
+  compatibleProviderId?: ClaudeCompatibleProviderId;
+  betas?: string[];
+  claudeAccessMode?: ClaudeAccessMode;
+  claudeExecutionMode?: ClaudeExecutionMode;
+  claudeReasoningEffort?: ClaudeReasoningEffort;
+  codexExecutionMode?: CodexExecutionMode;
+  codexPermissionMode?: CodexPermissionMode;
+  codexReasoningEffort?: CodexReasoningEffort;
+  codexFastMode?: boolean;
+  kimiPermissionMode?: KimiPermissionMode;
+  kimiThinking?: KimiThinking;
+  grokPermissionMode?: GrokPermissionMode;
+  grokReasoningEffort?: GrokReasoningEffort;
+  deepseekPermissionMode?: DeepseekPermissionMode;
+  deepseekAgentPreset?: DeepseekAgentPreset;
+  deepseekReasoningEffort?: DeepseekReasoningEffort;
+  opencodePermissionMode?: OpenCodePermissionMode;
+  qoderPermissionMode?: QoderPermissionMode;
+  bubblePermissionMode?: BubblePermissionMode;
+  hiddenFromThreads?: boolean;
+  channelId?: string;
+  teamMode?: SessionTeamMode;
+  teamId?: string | null;
+}
+
+export interface SessionHistoryPayload {
+  sessionId: string;
+  status: SessionStatus;
+  messages: StreamMessage[];
+  cursor?: string | null;
+  hasMore?: boolean;
+}
+
+export interface PermissionRequestPayload {
+  sessionId: string;
+  toolUseId: string;
+  toolName: string;
+  input: PermissionRequestInput;
+}
+
+export interface PermissionResponsePayload {
+  sessionId: string;
+  toolUseId: string;
+  result: PermissionResult;
+}
+
+export interface PermissionResult {
+  behavior: 'allow' | 'deny';
+  updatedInput?: Record<string, unknown>;
+  message?: string;
+  scope?: 'once' | 'session';
+  /** Aegis-only Computer Use grant. Never mapped to Codex persist. */
+  computerUseGrant?: 'until-revoked';
+}
+
+// AskUserQuestion 输入结构
+export interface AskUserQuestionInput {
+  questions: AskUserQuestion[];
+  answers?: Record<string, string>;
+}
+
+export interface AskUserQuestion {
+  question: string;
+  header?: string;
+  options?: { label: string; description?: string }[];
+  multiSelect?: boolean;
+}
+
+export interface ExternalFilePermissionInput {
+  kind: 'external-file-access';
+  question: string;
+  filePath: string;
+  cwd: string;
+  toolName: string;
+}
+
+export type CodexApprovalKind = 'command' | 'file-change' | 'permissions' | 'tool';
+
+export interface CodexApprovalPermissionInput {
+  kind: 'codex-approval';
+  approvalKind: CodexApprovalKind;
+  method: string;
+  question: string;
+  title: string;
+  toolName: string;
+  reason?: string | null;
+  command?: string | null;
+  cwd?: string | null;
+  filePath?: string | null;
+  files?: string[];
+  grantRoot?: string | null;
+  permissionSummary?: string[];
+  canAllowForSession?: boolean;
+}
+
+export interface AcpPermissionOption {
+  optionId: string;
+  name: string;
+  kind?: string;
+  description?: string;
+}
+
+export interface AcpPermissionInput {
+  kind: 'acp-permission';
+  provider: 'kimi' | 'grok' | 'opencode' | 'bubble' | 'deepseek';
+  question: string;
+  title: string;
+  toolName: string;
+  options: AcpPermissionOption[];
+  toolCall?: Record<string, unknown> | null;
+}
+
+export interface BrowserNavigationPermissionInput {
+  kind: 'browser-navigation';
+  question: string;
+  url: string;
+}
+
+export interface ComputerUsePermissionInput {
+  kind: 'computer-use';
+  question: string;
+  title: string;
+  server: string | null;
+  toolName: string;
+  toolTitle: string | null;
+  app: string | null;
+  mutating: boolean;
+  code: string | null;
+  params: Record<string, unknown>;
+  paramLines: Array<{ label: string; value: string }>;
+  canAllowForSession: boolean;
+  canAllowUntilRevoked: boolean;
+}
+
+export type PermissionRequestInput =
+  | AskUserQuestionInput
+  | ExternalFilePermissionInput
+  | CodexApprovalPermissionInput
+  | AcpPermissionInput
+  | BrowserNavigationPermissionInput
+  | ComputerUsePermissionInput;
+
+// StreamMessage 类型（SDK 消息或内部消息）
+export type StreamMessageBase = {
+  createdAt?: number;
+  agentId?: string | null;
+  agentRunId?: string | null;
+  parentTurnId?: string | null;
+  /**
+   * Claude Agent SDK subagent attribution. Messages emitted while a Task
+   * (subagent) tool call runs carry that Task's tool_use id here; top-level
+   * messages leave it null/undefined. The transcript nests parented messages
+   * under their Task row instead of rendering them inline.
+   */
+  parentToolUseId?: string | null;
+  /**
+   * Cross-agent delegation: messages mirrored into a parent session from a
+   * delegated agent's hidden execution session carry that agent's provider
+   * here, since the session-level provider no longer describes them.
+   */
+  sourceProvider?: AgentProvider | null;
+  /**
+   * Cross-agent delegation: the model the delegated agent actually runs
+   * (from its runtime init, falling back to the lead's requested model).
+   * The subagent panel header renders it.
+   */
+  sourceModel?: string | null;
+};
+
+export interface CompactMetadata {
+  trigger: 'manual' | 'auto';
+  preTokens: number;
+  /** Context occupancy right after compaction, when the runtime reports it. */
+  postTokens?: number;
+}
+
+export interface AvailableCommandInput {
+  hint: string;
+}
+
+export interface AvailableCommand {
+  name: string;
+  description: string;
+  input?: AvailableCommandInput;
+  /**
+   * Provider metadata for commands backed by a file (Grok ships skills and
+   * built-ins in one ACP list; only skills carry a path). Lets the composer
+   * classify an entry from what the agent reported instead of a local list.
+   */
+  meta?: { scope?: string; path?: string };
+}
+
+export type StreamMessage =
+  | (StreamMessageBase & { type: 'user_prompt'; prompt: string; attachments?: Attachment[] })
+  | (StreamMessageBase & {
+      /** Durable, native completion metadata; never sent to the model as a prompt. */
+      type: 'goal_completed';
+      uuid: string;
+      afterMessageId?: string;
+      goal: import('./session-goal').ThreadGoal;
+    })
+  | (StreamMessageBase & {
+      type: 'system';
+      subtype: 'init';
+      session_id: string;
+      model: string;
+      permissionMode: string;
+      cwd: string;
+      tools: string[];
+      slash_commands?: string[];
+      skills?: string[];
+      mcp_servers?: McpServerStatus[];
+    })
+  | (StreamMessageBase & {
+      type: 'system';
+      subtype: 'available_commands_update';
+      session_id: string;
+      availableCommands: AvailableCommand[];
+    })
+  | (StreamMessageBase & {
+      type: 'system';
+      subtype: 'compact_boundary';
+      uuid: string;
+      session_id: string;
+      compactMetadata: CompactMetadata;
+    })
+  // Emitted when the runtime starts compacting (PreCompact hook), so the UI
+  // can show a live "Compacting…" status. The matching compact_boundary marks
+  // the end of the compaction.
+  | (StreamMessageBase & {
+      type: 'system';
+      subtype: 'compact_status';
+      uuid: string;
+      session_id: string;
+      status: 'started';
+      trigger: 'manual' | 'auto';
+    })
+  // Emitted when an API request failed with a retryable error and the runtime
+  // will retry after a delay. Rendered as a transient status on the working
+  // indicator, never as a transcript card; any later substantive message
+  // (assistant/stream/result) means the retry resolved.
+  | (StreamMessageBase & {
+      type: 'system';
+      subtype: 'api_retry';
+      uuid: string;
+      session_id: string;
+      attempt: number;
+      maxRetries: number;
+      delayMs: number;
+      /** HTTP status of the failed request; null for connection errors. */
+      errorStatus: number | null;
+    })
+  // Emitted right after a turn's `result`: unified diff of the whole working
+  // tree across that turn (git tree snapshot before vs after). Captures file
+  // edits made outside Edit/Write tools (MCP servers, terminal commands),
+  // which tool-change records alone cannot see.
+  | (StreamMessageBase & {
+      type: 'system';
+      subtype: 'turn_changes';
+      uuid: string;
+      session_id: string;
+      turnChanges: { patch: string; truncated: boolean };
+    })
+  | (StreamMessageBase & {
+      type: 'system';
+      subtype: 'token_usage';
+      uuid: string;
+      session_id: string;
+      provider: 'codex' | 'kimi' | 'grok' | 'deepseek';
+      usage: CodexContextUsage;
+    })
+  | (StreamMessageBase & { type: 'assistant'; uuid: string; message: AssistantMessage; streaming?: boolean; phase?: 'commentary' | 'final_answer' })
+  | (StreamMessageBase & { type: 'user'; uuid: string; message: UserMessage })
+  | (StreamMessageBase & {
+      type: 'result';
+      subtype: 'success' | string;
+      duration_ms: number;
+      total_cost_usd: number;
+      usage: Usage;
+      model?: string;
+      modelUsage?: Record<string, ClaudeModelUsage>;
+      /** Provider-specific usage fold version for safe historical repair. */
+      usageAccounting?: string;
+      costEstimate?: ProviderCostEstimate;
+      /** Allows reports to preserve request-time estimates across rate boundaries. */
+      costAccounting?: string;
+    })
+  | (StreamMessageBase & {
+      type: 'plan_update';
+      uuid: string;
+      turnId: string;
+      explanation?: string | null;
+      steps: PlanStep[];
+    })
+  | (StreamMessageBase & {
+      // Turn-scope marker (codex): tells the renderer which turn is currently
+      // running so turn-scoped UI (the active plan card) can match plan_update
+      // turnIds against it. Transient — never persisted, never rendered.
+      type: 'turn_started';
+      uuid: string;
+      turnId: string;
+    })
+  | (StreamMessageBase & {
+      type: 'proposed_plan';
+      uuid: string;
+      planMarkdown: string;
+      turnId?: string;
+    })
+  | (StreamMessageBase & { type: 'stream_event'; event: StreamEvent })
+  | (StreamMessageBase & { type: 'mcp_status'; servers: McpServerStatus[] });
+
+// 简化的 Anthropic API 类型
+export interface AssistantMessage {
+  /** Native Anthropic-compatible stop reason; absent providers keep the terminal-result fallback. */
+  stop_reason?: string | null;
+  content: ContentBlock[];
+}
+
+export interface UserMessage {
+  content: ContentBlock[];
+}
+
+export type ContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'thinking'; thinking: string; signature?: string; durationMs?: number }
+  | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
+  | { type: 'tool_result'; tool_use_id: string; content: string; displayContent?: string; is_error?: boolean; mediaRefs?: ComputerUseMediaRef[]; images?: Attachment[] }
+  | { type: 'memory_citations'; citations: MemoryCitation[] };
+
+export interface MemoryCitation {
+  source: string;
+  lineStart?: number;
+  lineEnd?: number;
+  note?: string;
+}
+
+// ===== Canonical tool kinds =====
+// Provider-agnostic taxonomy used by the UI to drive icons, copy, and grouping
+// without leaking specific tool names from any single provider (Claude / Codex
+// / OpenCode). Adapters can map their native tool concepts onto this vocabulary;
+// new providers slot in by adding entries to the classifier rather than UI code.
+export type CanonicalToolKind =
+  | 'reasoning'
+  | 'file_read'
+  | 'file_change'
+  | 'command_execution'
+  | 'pattern_search'
+  | 'web_search'
+  | 'mcp_tool_call'
+  | 'subagent'
+  | 'todo_update'
+  | 'memory'
+  | 'image_view'
+  | 'approval'
+  | 'computer_use'
+  | 'unknown';
+
+export interface StreamEvent {
+  type: 'content_block_start' | 'content_block_delta' | 'content_block_stop';
+  index?: number;
+  delta?: { type: string; text?: string; thinking?: string; signature?: string };
+}
+
+export interface Usage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_input_tokens?: number | null;
+  cache_read_input_tokens?: number | null;
+  reasoning_output_tokens?: number | null;
+  context_window?: number | null;
+  total_tokens?: number | null;
+}
+
+export interface ProviderCostEstimate {
+  /** null means no verified price is available; never interpret it as free. */
+  usd: number | null;
+}
+
+export interface CodexContextUsage {
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+  totalTokens: number;
+  contextWindow: number;
+  turnCostEstimate?: ProviderCostEstimate;
+}
+
+export interface ClaudeModelUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+  costUSD: number;
+  contextWindow?: number;
+  maxOutputTokens?: number;
+  webSearchRequests?: number;
+}
+
+export interface LatestClaudeModelUsage {
+  model: string;
+  usage: ClaudeModelUsage;
+}
+
+export type AgentRuntimeState = 'ready' | 'login_required' | 'not_installed' | 'error';
+
+export interface AgentRuntimeEntry {
+  provider: AgentProvider;
+  title: string;
+  state: AgentRuntimeState;
+  version: string | null;
+  summary: string;
+  detail: string | null;
+  installCommand: string | null;
+  loginCommand: string | null;
+  docsUrl: string | null;
+  checkedAt: number;
+}
+
+export interface AgentRuntimeDirectoryReport {
+  entries: AgentRuntimeEntry[];
+  readyCount: number;
+  checkedAt: number;
+}
+
+export interface UserProfile {
+  displayName: string;
+  handle: string;
+  /** True when the user set the name themselves (vs. git/OS defaults). */
+  customized: boolean;
+}
+
+export interface UserProfileUpdate {
+  displayName: string | null;
+  handle: string | null;
+}
+
+export type ClaudeUsageRangeDays = 7 | 30 | 90 | 365;
+
+export interface ClaudeUsageModelSummary {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  totalCostUsd: number;
+  sessionCount: number;
+  cacheReadTokens: number;
+}
+
+export interface ClaudeUsageDailyPoint {
+  date: string;
+  totalTokens: number;
+  byModel: Record<string, number>;
+  byModelCostUsd?: Record<string, number>;
+}
+
+export interface ClaudeUsageReport {
+  rangeDays: ClaudeUsageRangeDays;
+  costMode?: 'actual' | 'estimated' | 'partial' | 'unavailable';
+  note?: string;
+  totals: {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+    totalCostUsd: number;
+    sessionCount: number;
+    cacheReadTokens: number;
+    cacheHitRate: number;
+  };
+  models: ClaudeUsageModelSummary[];
+  daily: ClaudeUsageDailyPoint[];
+}
+
+export type CodexRateLimitReachedType =
+  | 'rate_limit_reached'
+  | 'workspace_owner_credits_depleted'
+  | 'workspace_member_credits_depleted'
+  | 'workspace_owner_usage_limit_reached'
+  | 'workspace_member_usage_limit_reached';
+
+export interface CodexRateLimitWindow {
+  usedPercent: number;
+  remainingPercent: number;
+  windowDurationMins: number | null;
+  resetsAt: number | null;
+}
+
+export interface CodexCreditsSnapshot {
+  hasCredits: boolean;
+  unlimited: boolean;
+  balance: string | null;
+}
+
+export interface CodexRateLimitSnapshot {
+  limitId: string | null;
+  limitName: string | null;
+  primary: CodexRateLimitWindow | null;
+  secondary: CodexRateLimitWindow | null;
+  credits: CodexCreditsSnapshot | null;
+  planType: string | null;
+  rateLimitReachedType: CodexRateLimitReachedType | null;
+}
+
+/** Runtime status of one codex-managed MCP server (mcpServerStatus/list). */
+export interface CodexMcpServerRuntimeStatus {
+  name: string;
+  authStatus: 'unsupported' | 'notLoggedIn' | 'bearerToken' | 'oAuth';
+  toolNames: string[];
+}
+
+export interface CodexRateLimitReport {
+  source: 'codex-app-server';
+  fetchedAt: number;
+  rateLimits: CodexRateLimitSnapshot | null;
+  rateLimitsByLimitId: Record<string, CodexRateLimitSnapshot>;
+}
+
+export interface ClaudePlanUsageWindow {
+  /** Percentage of the window used, 0-100. */
+  utilization: number | null;
+  /** Epoch ms when the window resets. */
+  resetsAt: number | null;
+}
+
+export interface ClaudePlanModelWindow extends ClaudePlanUsageWindow {
+  /** Server-supplied label for the model bucket (e.g. "Opus"). */
+  displayName: string;
+}
+
+export interface ClaudePlanExtraUsage {
+  isEnabled: boolean;
+  monthlyLimit: number | null;
+  usedCredits: number | null;
+  utilization: number | null;
+  currency: string | null;
+}
+
+export interface ClaudePlanUsageReport {
+  source: 'claude-agent-sdk';
+  fetchedAt: number;
+  /** claude.ai subscription type ('pro', 'max', ...) or null for API key / 3P sessions. */
+  subscriptionType: string | null;
+  /** False when plan rate limits do not apply (API key, Bedrock, Vertex, ...). */
+  rateLimitsAvailable: boolean;
+  fiveHour: ClaudePlanUsageWindow | null;
+  sevenDay: ClaudePlanUsageWindow | null;
+  sevenDayOpus: ClaudePlanUsageWindow | null;
+  sevenDaySonnet: ClaudePlanUsageWindow | null;
+  modelScoped: ClaudePlanModelWindow[];
+  extraUsage: ClaudePlanExtraUsage | null;
+}
+
+export interface GrokPlanUsagePeriod {
+  /** Server period kind, e.g. 'USAGE_PERIOD_TYPE_WEEKLY'. */
+  type: string | null;
+  /** Epoch ms when the current period started. */
+  startsAt: number | null;
+  /** Epoch ms when the current period ends (usage resets). */
+  endsAt: number | null;
+}
+
+export interface GrokPlanUsageReport {
+  source: 'grok-acp';
+  fetchedAt: number;
+  /** grok.com subscription tier (e.g. 'X Premium+') or null when unknown. */
+  subscriptionTier: string | null;
+  /** Percentage of the current period's included credits used, 0-100. */
+  creditUsagePercent: number | null;
+  currentPeriod: GrokPlanUsagePeriod | null;
+  onDemandCap: number | null;
+  onDemandUsed: number | null;
+  prepaidBalance: number | null;
+}
+
+/** One Qoder account quota bucket (plan, add-on pack, or org resource package). */
+export interface QoderPlanQuotaBucket {
+  total: number | null;
+  used: number | null;
+  remaining: number | null;
+  /** Percentage of the bucket used, 0-100. */
+  percentage: number | null;
+  /** Unit label as reported by qodercli, or null. */
+  unit: string | null;
+}
+
+export interface QoderPlanUsageReport {
+  source: 'qoder-sdk';
+  fetchedAt: number;
+  /** Account tier as reported by qodercli (e.g. 'free' | 'pro'), or null. */
+  userType: string | null;
+  /** Percentage of the plan quota used overall, 0-100. */
+  totalUsagePercentage: number | null;
+  isHighestTier: boolean;
+  isQuotaExceeded: boolean;
+  /** Epoch ms when the current quota period ends, or null. */
+  expiresAt: number | null;
+  upgradeUrl: string | null;
+  userQuota: QoderPlanQuotaBucket | null;
+  addOnQuota: QoderPlanQuotaBucket | null;
+  orgResourcePackage: QoderPlanQuotaBucket | null;
+}
+
+/** Lightweight index entry for the chat outline rail: one per user prompt. */
+export interface SessionUserPromptSummary {
+  /** Epoch ms; matches the message's createdAt for history navigation. */
+  createdAt: number;
+  /** Prompt text truncated for preview display. */
+  text: string;
+  attachmentNames: string[];
+  /** The turn's last top-level assistant text, truncated ('' while pending). */
+  replyText: string;
+  /** File names touched by the turn's mutating tool calls, in first-touch order. */
+  changedFiles: string[];
+}
+
+export interface ChatMessageSearchMatch {
+  snippet: string;
+  messageType: 'user_prompt' | 'assistant' | 'user';
+  createdAt: number;
+}
+
+export interface ChatSessionSearchResult {
+  sessionId: string;
+  sessionTitle: string;
+  sessionSource?: SessionSource;
+  sessionCwd?: string;
+  sessionUpdatedAt: number;
+  matchCount: number;
+  matches: ChatMessageSearchMatch[];
+}
+
+export interface SkillMarketItem {
+  id: string;
+  owner: string;
+  repo: string;
+  skillId: string;
+  name: string;
+  source: string;
+  installs: number;
+  installsYesterday?: number;
+  change?: number;
+  detailUrl: string;
+}
+
+export interface SkillMarketDetail extends SkillMarketItem {
+  repoUrl: string;
+  installCommand: string;
+  description: string;
+  originalSource?: string;
+  weeklyInstallsLabel?: string;
+  securityAudits?: Array<{ name: string; status: string }>;
+}
+
+export interface SkillMarketInstallResult {
+  ok: boolean;
+  command: string;
+  output: string;
+  message?: string;
+}
+
+// GitHub pull-request directory (gh CLI backed)
+export type PullRequestCheckState = 'success' | 'failure' | 'pending' | 'none';
+
+export interface PullRequestCheckItem {
+  name: string;
+  workflowName?: string;
+  state: 'passed' | 'failed' | 'pending' | 'skipped' | 'neutral';
+  url?: string;
+}
+
+export interface PullRequestSummary {
+  /** `owner/repo#number` */
+  id: string;
+  repo: string;
+  number: number;
+  title: string;
+  author: string;
+  isDraft: boolean;
+  state: 'OPEN' | 'MERGED' | 'CLOSED';
+  createdAt: string;
+  updatedAt: string;
+  url: string;
+  role: 'authored' | 'reviewing' | 'both';
+  headRefName?: string;
+  baseRefName?: string;
+  additions?: number;
+  deletions?: number;
+}
+
+export interface PullRequestComment {
+  author: string;
+  /** GitHub avatar URL (bots have no github.com/<login>.png page). */
+  avatarUrl?: string;
+  body: string;
+  createdAt: string;
+  url?: string;
+  kind: 'comment' | 'review';
+  /** Review verdict (APPROVED / CHANGES_REQUESTED / COMMENTED) for kind 'review'. */
+  reviewState?: string;
+}
+
+export interface PullRequestDetail extends PullRequestSummary {
+  authorName?: string;
+  body: string;
+  commentCount: number;
+  comments: PullRequestComment[];
+  reviewers: Array<{ login: string; state: string }>;
+  checks: { state: PullRequestCheckState; summary: string; items: PullRequestCheckItem[] };
+  mergeable?: string;
+}
+
+export interface PullRequestCommit {
+  oid: string;
+  messageHeadline: string;
+  messageBody?: string;
+  author: string;
+  /** GitHub avatar when the commit email maps to an account. */
+  avatarUrl?: string;
+  authoredDate: string;
+}
+
+export interface PullRequestListResult {
+  prs: PullRequestSummary[];
+  fetchedAt: number;
+  cached: boolean;
+  error?: { kind: 'not_installed' | 'auth_required' | 'command_failed'; message: string };
+}
+
+// 系统监控类型（预留）
+export interface StatisticsData {
+  cpuUsage: number;
+  memoryUsage: number;
+}
+
+export interface StaticData {
+  cpuModel: string;
+  totalMemory: number;
+}

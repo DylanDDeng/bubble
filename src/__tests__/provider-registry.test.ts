@@ -6,6 +6,20 @@ afterEach(() => {
 });
 
 describe("provider registry", () => {
+  it.each(["listed", "auto-included"])("honors OAuth enable preferences with a models.json catalog (%s)", (mode) => {
+    const preference = { id: "openai", enabled: false };
+    const registry = new ProviderRegistry({ getProviders: () => [preference] } as any);
+    vi.spyOn((registry as any).modelConfig, "getAllProviders").mockReturnValue(
+      mode === "listed" ? { openai: { models: [] } } : { anthropic: { models: [] } },
+    );
+    vi.spyOn(registry.getAuthStorage(), "has").mockImplementation(id => id === "openai");
+    vi.spyOn(registry.getAuthStorage(), "getAccessToken").mockReturnValue("fixture-oauth-token");
+    expect(registry.getConfigured().find(p => p.id === "openai")?.enabled).toBe(false);
+    expect(registry.getEnabled().some(p => p.id === "openai")).toBe(false);
+    preference.enabled = true;
+    expect(registry.getEnabled().some(p => p.id === "openai")).toBe(true);
+  });
+
   it("normalizes provider-less models to openai by default", () => {
     expect(normalizeModel("gpt-4o")).toBe("openai:gpt-4o");
   });

@@ -1,0 +1,534 @@
+import type { SessionMenuRequest, SessionMenuAction } from './shared/session-menu';
+// 全局类型声明（Window 扩展）
+// 实际类型定义在 src/shared/types.ts
+
+import type {
+  AutomationDefinition,
+  AutomationSnapshot,
+  SessionInfo,
+  SessionStartPayload,
+  ClientEvent,
+  ClaudeCompatibleProvidersConfig,
+  ServerEvent,
+  StatisticsData,
+  StaticData,
+  Attachment,
+  ChatSessionSearchResult,
+  FontSettingsPayload,
+  MemoryDocument,
+  MemoryWorkspace,
+  ProjectTreeNode,
+  SystemFontOption,
+  ClaudeModelConfig,
+  ClaudeUsageRangeDays,
+  ClaudeUsageReport,
+  CodexRateLimitReport,
+  UpsertAutomationInput,
+  CodexModelConfig,
+  CodexRuntimeStatus,
+  KimiModelConfig,
+  GrokModelConfig,
+  DeepseekModelConfig,
+  DeepseekKeyStatus,
+  BrowserUsePermissionSettings,
+  PiModelConfig,
+  BubbleModelConfig,
+  BubbleProvidersConfig,
+  BubbleOAuthState,
+  QoderModelConfig,
+  OpenCodeModelConfig,
+  OpenCodeRuntimeStatus,
+  KimiRuntimeStatus,
+  GrokRuntimeStatus,
+  ClaudeRuntimeStatus,
+  UiResumeState,
+  SkillMarketItem,
+  SkillMarketDetail,
+  SkillMarketInstallResult,
+  FeishuBridgeConfig,
+  FeishuBridgeStatus,
+  AppUpdateStatus,
+  ProviderComposerCapabilities,
+  ProviderListPluginsInput,
+  ProviderListPluginsResult,
+  ProviderListSkillsInput,
+  ProviderListSkillsResult,
+  ProviderInstallPluginInput,
+  ProviderReadPluginInput,
+  ProviderUninstallPluginInput,
+  ProviderReadPluginResult,
+  WechatClipboardHtmlWriteInput,
+  WechatClipboardHtmlWriteResult,
+  WechatMarkdownHtmlGenerationInput,
+  WechatMarkdownHtmlGenerationResult,
+  WechatMarkdownHtmlGeneratorConfig,
+} from './shared/types';
+import type {
+  BrowserCapturePageResult,
+  BrowserNavigateInput,
+  BrowserNewTabInput,
+  BrowserOpenInput,
+  BrowserReadoutResult,
+  BrowserSendSelectionEvent,
+  BrowserSessionInput,
+  BrowserSetPanelBoundsInput,
+  BrowserTabInput,
+  SessionBrowserState,
+} from './shared/browser-types';
+import type {
+  StartTerminalSessionResult,
+  TerminalAgentKind,
+  TerminalClearInput,
+  TerminalCloseInput,
+  TerminalEventPayload,
+  TerminalOpenInput,
+  TerminalOpenResult,
+  TerminalResizeInput,
+  TerminalRestartInput,
+  TerminalTransportInfo,
+  TerminalWriteInput,
+} from './shared/terminal';
+
+declare global {
+  interface ElectronAPI {
+    getSessionGoal: (sessionId: string) => Promise<import('./shared/session-goal').SessionGoalSnapshot>;
+    changeSessionGoal: (sessionId: string, action: import('./shared/session-goal').GoalAction, settings?: import('./shared/session-goal').GoalSettings) => Promise<import('./shared/session-goal').SessionGoalSnapshot>;
+    onSessionGoalChanged: (callback: (snapshot: import('./shared/session-goal').SessionGoalSnapshot) => void) => () => void;
+
+    onServerEvent: (callback: (event: ServerEvent) => void) => () => void;
+    sendClientEvent: (event: ClientEvent) => void;
+    onTerminalEvent: (callback: (event: TerminalEventPayload) => void) => () => void;
+    terminal: {
+      open: (input: TerminalOpenInput) => Promise<TerminalOpenResult>;
+      write: (input: TerminalWriteInput) => Promise<{ ok: boolean; message?: string }>;
+      resize: (input: TerminalResizeInput) => Promise<{ ok: boolean; message?: string }>;
+      clear: (input: TerminalClearInput) => Promise<{ ok: boolean; message?: string }>;
+      restart: (input: TerminalRestartInput) => Promise<TerminalOpenResult>;
+      close: (input: TerminalCloseInput) => Promise<{ ok: boolean; message?: string }>;
+      getTransportInfo: () => Promise<TerminalTransportInfo>;
+      onEvent: (callback: (event: TerminalEventPayload) => void) => () => void;
+    };
+    onWindowShellState: (callback: (state: { rounded: boolean }) => void) => () => void;
+    registerProjectEditorFlushHandler: (
+      callback: () => { ok: boolean; message?: string } | Promise<{ ok: boolean; message?: string }>
+    ) => () => void;
+    generateSessionTitle: (prompt: string) => Promise<string>;
+    renameSession: (sessionId: string, title: string) => Promise<{ title: string; updatedAt: number }>;
+    startBackgroundSession: (
+      payload: SessionStartPayload
+    ) => Promise<{ ok: boolean; sessionId: string | null }>;
+    forkSession: (
+      sessionId: string,
+      options?: { hiddenFromThreads?: boolean; copyHistory?: boolean }
+    ) => Promise<{ ok: boolean; session?: SessionInfo; message?: string }>;
+    sessionHandoff: (payload: {
+      sessionId: string;
+      targetProvider: import('./shared/types').AgentProvider;
+    }) => Promise<{ ok: boolean; session?: SessionInfo; message?: string }>;
+    claudeRewind: (
+      input: import('./shared/types').ClaudeRewindInput
+    ) => Promise<import('./shared/types').ClaudeRewindResult>;
+    bubbleRewind: (
+      input: import('./shared/types').BubbleRewindInput
+    ) => Promise<import('./shared/types').ClaudeRewindResult>;
+    moveSessionToWorktree: (
+      sessionId: string
+    ) => Promise<{ ok: boolean; message?: string }>;
+    applyWorktreeChanges: (
+      sessionId: string
+    ) => Promise<{ ok: boolean; message?: string; conflict?: boolean }>;
+    discardWorktreeChanges: (sessionId: string) => Promise<{ ok: boolean; message?: string }>;
+    getRecentCwds: (limit?: number) => Promise<string[]>;
+    getAutomations: () => Promise<AutomationSnapshot>;
+    saveAutomation: (input: UpsertAutomationInput) => Promise<AutomationDefinition>;
+    deleteAutomation: (automationId: string) => Promise<{ ok: boolean }>;
+    setAutomationEnabled: (automationId: string, enabled: boolean) => Promise<AutomationDefinition | null>;
+    runAutomationNow: (automationId: string) => Promise<{ ok: boolean; sessionId?: string; message?: string }>;
+    getAppPreferences: () => Promise<import('./shared/app-preferences').AppPreferences>;
+    setShortcutCaptureActive: (active: boolean) => Promise<void>;
+    setAppPreferences: (patch: Partial<import('./shared/app-preferences').AppPreferences>) => Promise<import('./shared/app-preferences').AppPreferences>;
+    getSystemFonts: () => Promise<string[]>;
+    getSystemFontFamilies: () => Promise<import('./shared/system-fonts').SystemFontFamily[]>;
+    getTerminalShellOptions: () => Promise<{ value: string; label: string }[]>;
+    onAppPreferencesChanged: (callback: (preferences: import('./shared/app-preferences').AppPreferences) => void) => () => void;
+    getNotificationSettings: () => Promise<{ enabled: boolean; onlyWhenUnfocused: boolean; inputRequired?: boolean; approvalRequired?: boolean }>;
+    setNotificationSettings: (next: {
+      enabled?: boolean;
+      onlyWhenUnfocused?: boolean;
+      inputRequired?: boolean;
+      approvalRequired?: boolean;
+    }) => Promise<{ enabled: boolean; onlyWhenUnfocused: boolean; inputRequired?: boolean; approvalRequired?: boolean }>;
+    startTerminalSession: (sessionId: string, cwd: string, cols?: number, rows?: number, agentKind?: TerminalAgentKind) => Promise<StartTerminalSessionResult>;
+    writeTerminalSession: (sessionId: string, data: string) => Promise<{ ok: boolean; message?: string }>;
+    resizeTerminalSession: (sessionId: string, cols: number, rows: number) => Promise<{ ok: boolean; message?: string }>;
+    stopTerminalSession: (sessionId: string) => Promise<{ ok: boolean; message?: string }>;
+    getTerminalTransportInfo: () => Promise<TerminalTransportInfo>;
+    setWindowMinSize: (width: number, height: number) => Promise<{ ok: boolean }>;
+    getAppVersion: () => Promise<string>;
+    getWindowShellState: () => Promise<{ rounded: boolean }>;
+    setTheme: (theme: 'light' | 'dark' | 'system') => Promise<{ ok: boolean }>;
+    getUiResumeState: () => Promise<UiResumeState | null>;
+    getUiResumeStateSync: () => UiResumeState | null;
+    saveUiResumeState: (state: UiResumeState) => Promise<{ ok: boolean }>;
+    rendererState: {
+      getItem: (key: string) => string | null;
+      setItem: (key: string, value: string) => void;
+      removeItem: (key: string) => void;
+    };
+    updateProjectEditorDraft: (
+      draft: { cwd: string; filePath: string; content: string } | null
+    ) => void;
+    commitProjectEditorDraftSync: (
+      draft: { cwd: string; filePath: string; content: string } | null
+    ) => void;
+    writeProjectTextFileSync: (
+      draft: { cwd: string; filePath: string; content: string }
+    ) => void;
+    loadOlderSessionHistory: (sessionId: string, cursor: string, limit?: number) => Promise<import('./shared/types').SessionHistoryPayload>;
+    loadSessionHistoryAround: (
+      sessionId: string,
+      messageCreatedAt: number,
+      before?: number,
+      after?: number
+    ) => Promise<import('./shared/types').SessionHistoryPayload>;
+    checkForUpdates: () => Promise<{ ok: boolean }>;
+    getUpdateStatus: () => Promise<AppUpdateStatus>;
+    getClaudeModelConfig: () => Promise<ClaudeModelConfig>;
+    getClaudeCompatibleProviderConfig: () => Promise<ClaudeCompatibleProvidersConfig>;
+    saveClaudeCompatibleProviderConfig: (config: ClaudeCompatibleProvidersConfig) => Promise<ClaudeCompatibleProvidersConfig>;
+    getWechatHtmlGeneratorConfig: () => Promise<WechatMarkdownHtmlGeneratorConfig>;
+    saveWechatHtmlGeneratorConfig: (config: WechatMarkdownHtmlGeneratorConfig) => Promise<WechatMarkdownHtmlGeneratorConfig>;
+    generateWechatMarkdownHtml: (input: WechatMarkdownHtmlGenerationInput) => Promise<WechatMarkdownHtmlGenerationResult>;
+    writeWechatClipboardHtml: (input: WechatClipboardHtmlWriteInput) => Promise<WechatClipboardHtmlWriteResult>;
+    getClaudeUsageReport: (days?: ClaudeUsageRangeDays) => Promise<ClaudeUsageReport>;
+    getCodexUsageReport: (days?: ClaudeUsageRangeDays) => Promise<ClaudeUsageReport>;
+    getCodexRateLimits: () => Promise<CodexRateLimitReport>;
+    getClaudePlanUsage: () => Promise<import('./shared/types').ClaudePlanUsageReport>;
+    getGrokPlanUsage: () => Promise<import('./shared/types').GrokPlanUsageReport>;
+    getQoderPlanUsage: () => Promise<import('./shared/types').QoderPlanUsageReport | null>;
+    getSessionUserPrompts: (
+      sessionId: string
+    ) => Promise<import('./shared/types').SessionUserPromptSummary[]>;
+    getOpencodeUsageReport: (days?: ClaudeUsageRangeDays) => Promise<ClaudeUsageReport>;
+    getDeepseekSessionCost: (sessionId: string) => Promise<import('./shared/types').ProviderCostEstimate>;
+    getAgentUsageReport: (
+      provider: import('./shared/types').AgentProvider,
+      days?: ClaudeUsageRangeDays
+    ) => Promise<ClaudeUsageReport>;
+    searchChatMessages: (query: string, limit?: number) => Promise<ChatSessionSearchResult[]>;
+    getCodexModelConfig: () => Promise<CodexModelConfig>;
+    saveCodexModelVisibility: (enabledModels: string[]) => Promise<CodexModelConfig>;
+    getCodexRuntimeStatus: () => Promise<CodexRuntimeStatus>;
+    getCodexComposerCapabilities: () => Promise<ProviderComposerCapabilities>;
+    listCodexMcpStatus: () => Promise<{
+      ok: boolean;
+      message?: string;
+      servers: import('./shared/types').CodexMcpServerRuntimeStatus[];
+    }>;
+    startCodexMcpOauthLogin: (
+      serverName: string
+    ) => Promise<{ ok: boolean; message?: string; authorizationUrl?: string }>;
+    listCodexSkills: (input: Omit<ProviderListSkillsInput, 'provider'>) => Promise<ProviderListSkillsResult>;
+    listCodexPlugins: (input?: Omit<ProviderListPluginsInput, 'provider'>) => Promise<ProviderListPluginsResult>;
+    listKimiSkills: (input: Omit<ProviderListSkillsInput, 'provider'>) => Promise<ProviderListSkillsResult>;
+    listQoderSkills: (input: Omit<ProviderListSkillsInput, 'provider'>) => Promise<ProviderListSkillsResult>;
+    listBubbleSkills: (input: Omit<ProviderListSkillsInput, 'provider'>) => Promise<ProviderListSkillsResult>;
+    listGrokSkills: (input: Omit<ProviderListSkillsInput, 'provider'>) => Promise<ProviderListSkillsResult>;
+    listDeepseekSkills: (input: Omit<ProviderListSkillsInput, 'provider'>) => Promise<ProviderListSkillsResult>;
+    readCodexPlugin: (input: Omit<ProviderReadPluginInput, 'provider'>) => Promise<ProviderReadPluginResult>;
+    readCodexSkillContent: (skillPath: string) => Promise<{ ok: boolean; content?: string; message?: string }>;
+    readBubbleSkillContent: (name: string, cwd?: string) => Promise<{ ok: boolean; content?: string; message?: string }>;
+    installCodexPlugin: (input: Omit<ProviderInstallPluginInput, 'provider'>) => Promise<void>;
+    uninstallCodexPlugin: (input: Omit<ProviderUninstallPluginInput, 'provider'>) => Promise<void>;
+    listOpenCodeSkills: (input?: Omit<ProviderListSkillsInput, 'provider'>) => Promise<ProviderListSkillsResult>;
+    listClaudePlugins: () => Promise<ProviderListPluginsResult>;
+    readClaudePlugin: (pluginId: string) => Promise<ProviderReadPluginResult>;
+    installClaudePlugin: (pluginId: string) => Promise<void>;
+    uninstallClaudePlugin: (pluginId: string) => Promise<void>;
+    getOpencodeModelConfig: () => Promise<OpenCodeModelConfig>;
+    saveOpencodeModelVisibility: (enabledModels: string[]) => Promise<OpenCodeModelConfig>;
+    getOpencodeRuntimeStatus: () => Promise<OpenCodeRuntimeStatus>; 
+    getKimiModelConfig: () => Promise<KimiModelConfig>;
+    getKimiRuntimeStatus: () => Promise<KimiRuntimeStatus>;
+    getGrokRuntimeStatus: () => Promise<GrokRuntimeStatus>;
+    getGrokModelConfig: () => Promise<GrokModelConfig>;
+    getDeepseekModelConfig: () => Promise<DeepseekModelConfig>;
+    getDeepseekKeyStatus: () => Promise<DeepseekKeyStatus>;
+    getDeepseekApiKey: () => Promise<string>;
+    setDeepseekApiKey: (apiKey: string) => Promise<DeepseekKeyStatus>;
+    clearDeepseekApiKey: () => Promise<DeepseekKeyStatus>;
+    getBrowserUsePermissions: () => Promise<BrowserUsePermissionSettings>;
+    setBrowserUseEnabled: (enabled: boolean) => Promise<BrowserUsePermissionSettings>;
+    setBrowserUseOriginPolicy: (
+      origin: string,
+      policy: 'allow' | 'block' | 'ask' | null
+    ) => Promise<BrowserUsePermissionSettings>;
+    setBrowserUseDefaultPolicy: (
+      policy: 'allow' | 'block' | 'ask'
+    ) => Promise<BrowserUsePermissionSettings>;
+    listChromeCookieProfiles: () => Promise<import('./shared/types').ChromeCookieProfilesResult>;
+    listChromeCookieDomains: (profilePath: string) => Promise<import('./shared/types').ChromeCookieDomainsResult>;
+    importChromeCookies: (
+      request: import('./shared/types').ChromeCookieImportRequest
+    ) => Promise<import('./shared/types').ChromeCookieImportResult>;
+    getChromeCookieImportStatus: () => Promise<import('./shared/types').ChromeCookieImportStatus>;
+    clearImportedChromeCookies: () => Promise<{ ok: boolean; removed: number; errorMessage?: string }>;
+    getPiModelConfig: () => Promise<PiModelConfig>;
+    getBubbleModelConfig: () => Promise<BubbleModelConfig>;
+    startBubbleOAuth: (providerId: string) => Promise<BubbleOAuthState>;
+    getBubbleOAuthState: () => Promise<BubbleOAuthState>;
+    cancelBubbleOAuth: () => Promise<BubbleOAuthState>;
+    reopenBubbleOAuth: () => Promise<void>;
+    logoutBubbleOAuth: (providerId: string) => Promise<BubbleProvidersConfig>;
+    getBubbleProvidersConfig: () => Promise<BubbleProvidersConfig>;
+    getBubbleProviderKey: (providerId: string) => Promise<string>;
+    setBubbleProviderKey: (providerId: string, apiKey: string) => Promise<BubbleProvidersConfig>;
+    removeBubbleProvider: (providerId: string) => Promise<BubbleProvidersConfig>;
+    setBubbleDefaultProvider: (providerId: string) => Promise<BubbleProvidersConfig>;
+    setBubbleProviderEnabled: (providerId: string, enabled: boolean) => Promise<BubbleProvidersConfig>;
+    getQoderModelConfig: () => Promise<QoderModelConfig>;
+    getClaudeRuntimeStatus: (model?: string | null) => Promise<ClaudeRuntimeStatus>;
+    getSkillMarketHot: (limit?: number) => Promise<SkillMarketItem[]>;
+    searchSkillMarket: (query: string, limit?: number) => Promise<SkillMarketItem[]>;
+    getSkillMarketDetail: (id: string) => Promise<SkillMarketDetail>;
+    installSkillFromMarket: (id: string) => Promise<SkillMarketInstallResult>;
+    expandClaudeSkillPrompt: (skillFilePath: string, skillName: string, userPrompt: string) => Promise<{ ok: boolean; prompt?: string; message?: string }>;
+    getAgentRuntimeDirectory: (
+      force?: boolean
+    ) => Promise<import('./shared/types').AgentRuntimeDirectoryReport>;
+    listPullRequests: (
+      forceReload?: boolean
+    ) => Promise<import('./shared/types').PullRequestListResult>;
+    getPullRequestDetail: (input: {
+      repo: string;
+      number: number;
+      forceReload?: boolean;
+    }) => Promise<import('./shared/types').PullRequestDetail>;
+    mergePullRequest: (input: {
+      repo: string;
+      number: number;
+      method: 'merge' | 'squash' | 'rebase';
+    }) => Promise<{ ok: boolean; message?: string }>;
+    addPullRequestComment: (input: {
+      repo: string;
+      number: number;
+      body: string;
+    }) => Promise<{ ok: boolean; message?: string }>;
+    getPullRequestDiff: (input: {
+      repo: string;
+      number: number;
+      forceReload?: boolean;
+    }) => Promise<{ diff: string }>;
+    getPullRequestCommits: (input: {
+      repo: string;
+      number: number;
+      forceReload?: boolean;
+    }) => Promise<{ commits: import('./shared/types').PullRequestCommit[] }>;
+    setPullRequestDraft: (input: {
+      repo: string;
+      number: number;
+      draft: boolean;
+    }) => Promise<{ ok: boolean; message?: string }>;
+    getUserProfile: () => Promise<import('./shared/types').UserProfile>;
+    saveUserProfile: (
+      update: import('./shared/types').UserProfileUpdate
+    ) => Promise<import('./shared/types').UserProfile>;
+    getFontSettings: () => Promise<FontSettingsPayload>;
+    saveFontSelections: (selections: FontSettingsPayload['selections']) => Promise<FontSettingsPayload>;
+    listSystemFonts: () => Promise<SystemFontOption[]>;
+    importFontFile: () => Promise<FontSettingsPayload | null>;
+    deleteImportedFont: (fontId: string) => Promise<FontSettingsPayload>;
+    getFeishuBridgeConfig: () => Promise<FeishuBridgeConfig>;
+    saveFeishuBridgeConfig: (config: FeishuBridgeConfig) => Promise<FeishuBridgeConfig>;
+    getFeishuBridgeStatus: () => Promise<FeishuBridgeStatus>;
+    getMemoryWorkspace: (projectCwd?: string | null) => Promise<MemoryWorkspace>;
+    saveMemoryDocument: (filePath: string, content: string) => Promise<MemoryDocument>;
+    startFeishuBridge: () => Promise<FeishuBridgeStatus>;
+    stopFeishuBridge: () => Promise<FeishuBridgeStatus>;
+    selectDirectory: () => Promise<string | null>;
+    getPathForFile: (file: File) => string;
+    getClipboardFilePaths: () => string[];
+    importAttachments: (paths: string[]) => Promise<import('./shared/attachment-policy').AttachmentImportResult>;
+    chooseAttachments: () => Promise<import('./shared/attachment-policy').AttachmentImportResult>;
+    createFileAttachment: (name: string, data: Uint8Array) => Promise<Attachment>;
+    selectAttachments: () => Promise<Attachment[]>;
+    readAttachmentPreview: (filePath: string) => Promise<string | null>;
+    readComputerUseArtifact: (sessionId: string, sha256: string) => Promise<string | null>;
+    readComputerUseAppIcon: (app: string) => Promise<string | null>;
+    openComputerUsePreview: (
+      input: import('./shared/computer-use').ComputerUsePreviewOpenInput
+    ) => Promise<{ ok: boolean; open: boolean; sessionId: string; message?: string }>;
+    closeComputerUsePreview: () => Promise<{ ok: boolean; open: boolean }>;
+    getComputerUsePreviewState: () => Promise<import('./shared/computer-use').ComputerUsePreviewSnapshot | null>;
+    setComputerUsePreviewParked: (
+      sha256: string | null
+    ) => Promise<import('./shared/computer-use').ComputerUsePreviewSnapshot | null>;
+    stopComputerUse: (sessionId: string) => Promise<{ ok: boolean }>;
+    onComputerUsePreviewState: (
+      callback: (state: import('./shared/computer-use').ComputerUsePreviewSnapshot | null) => void
+    ) => () => void;
+    downloadAttachment: (filePath: string, suggestedName?: string) => Promise<{ filePath: string | null; error?: string }>;
+    readProjectFilePreview: (cwd: string, filePath: string) => Promise<unknown>;
+    resolveGrokSessionFile: (cwd: string, relativePath: string) => Promise<string | null>;
+    createProjectAttachment: (cwd: string, filePath: string) => Promise<Attachment | null>;
+    createProjectFile: (cwd: string, parentPath: string, name: string) => Promise<{ ok: boolean; path?: string; tree?: ProjectTreeNode; message?: string }>;
+    createProjectFolder: (cwd: string, parentPath: string, name: string) => Promise<{ ok: boolean; path?: string; tree?: ProjectTreeNode; message?: string }>;
+    moveProjectEntry: (cwd: string, sourcePath: string, targetParentPath: string) => Promise<{ ok: boolean; path?: string; tree?: ProjectTreeNode; message?: string }>;
+    deleteProjectEntry: (cwd: string, targetPath: string) => Promise<{ ok: boolean; tree?: ProjectTreeNode; message?: string }>;
+    selectMarkdownImageAsset: (cwd: string, markdownFilePath: string) => Promise<{ ok: boolean; relativePath?: string; name?: string; message?: string } | null>;
+    selectSkinImage: () => Promise<{ ok: true; fileName: string; dataUrl: string } | { ok: false; message: string } | null>;
+    readSkinImage: (fileName: string) => Promise<string | null>;
+    clearSkinImage: () => Promise<boolean>;
+    readMarkdownImageAsset: (cwd: string, markdownFilePath: string, imageSrc: string) => Promise<{ ok: boolean; dataUrl?: string; message?: string }>;
+    resolveMarkdownImageAssetUrl: (cwd: string, markdownFilePath: string, imageSrc: string) => Promise<{ ok: boolean; url?: string; size?: number; mtimeMs?: number; message?: string }>;
+    createMarkdownImageAsset: (cwd: string, markdownFilePath: string, fileName: string, mimeType: string | undefined, data: Uint8Array) => Promise<{ ok: boolean; relativePath?: string; name?: string; message?: string }>;
+    createInlineTextAttachment: (cwd: string, text: string) => Promise<Attachment | null>;
+    createInlineImageAttachment: (mimeType: string, data: Uint8Array) => Promise<Attachment | null>;
+    writeProjectTextFile: (cwd: string, filePath: string, content: string) => Promise<{ ok: boolean; message?: string; size?: number; mtimeMs?: number }>;
+    previewArtifactPath: (cwd: string, filePath: string, options?: { openInBrowser?: boolean }) => Promise<{ ok: boolean; url?: string; message?: string }>;
+    openPath: (filePath: string) => Promise<{ ok: boolean; message?: string }>;
+    revealPath: (filePath: string) => Promise<{ ok: boolean; message?: string }>;
+    listOpenWithApps: (
+      cwd: string,
+      filePath: string
+    ) => Promise<{ ok: boolean; apps?: Array<{ name: string; appPath: string; iconDataUrl: string | null }>; message?: string }>;
+    openFileWithApp: (
+      cwd: string,
+      filePath: string,
+      appPath: string
+    ) => Promise<{ ok: boolean; message?: string }>;
+    getProjectTree: (cwd: string, requestId?: string) => Promise<ProjectTreeNode | null>;
+    cancelProjectTreeRead: (requestId: string) => Promise<boolean>;
+    watchProjectTree: (cwd: string) => Promise<boolean>;
+    unwatchProjectTree: (cwd: string) => Promise<boolean>;
+    watchProjectFile: (cwd: string, filePath: string) => Promise<boolean>;
+    unwatchProjectFile: (cwd: string, filePath: string) => Promise<boolean>;
+    getGitChanges: (cwd: string) => Promise<{ ok: boolean; error: string | null; entries: import('./shared/types').GitChangeEntry[] }>;
+    getGitWorkingTreeSummary: (cwd: string) => Promise<{ ok: boolean; error: string | null; insertions: number; deletions: number }>;
+    listSessionPullRequests: (sessionId: string, refresh?: boolean) => Promise<import('./shared/types').SessionPullRequestView[]>;
+    attachSessionPullRequest: (input: import('./shared/types').AttachSessionPullRequestInput) => Promise<{ created: boolean; pr: import('./shared/types').SessionPullRequest }>;
+    detachSessionPullRequest: (sessionId: string, url: string, attachedAt: number) => Promise<void>;
+    onSessionPullRequestsChanged: (callback: (sessionId: string) => void) => () => void;
+    getGitOverview: (cwd: string) => Promise<import('./shared/types').GitOverviewResult>;
+    getGitPatch: (
+      cwd: string,
+      scope?: import('./shared/types').GitPatchScope
+    ) => Promise<import('./shared/types').GitPatchResult>;
+    getGitCommits: (
+      cwd: string,
+      limit?: number
+    ) => Promise<import('./shared/types').GitCommitListResult>;
+    getGitCommitPatch: (
+      cwd: string,
+      sha: string
+    ) => Promise<import('./shared/types').GitCommitPatchResult>;
+    getGitBranch: (cwd: string) => Promise<{ ok: boolean; branch: string | null; message?: string }>;
+    getGitRepoBrief: (cwd: string) => Promise<{
+      ok: boolean;
+      fullName: string | null;
+      defaultBranch: string | null;
+      branch: string | null;
+    }>;
+    getGitBranchChanges: (
+      cwd: string,
+      baseRef: string
+    ) => Promise<{ ok: boolean; files: number; insertions: number; deletions: number }>;
+    getGitBranches: (cwd: string) => Promise<{
+      ok: boolean;
+      error: string | null;
+      detachedHead: boolean;
+      headShortHash: string | null;
+      entries: Array<{
+        name: string;
+        fullRef: string;
+        current: boolean;
+        remote: boolean;
+        upstream: string | null;
+        shortHash: string;
+        worktreePath?: string | null;
+      }>;
+    }>;
+    gitCheckoutBranch: (input: import('./shared/types').GitCheckoutBranchInput) => Promise<{ ok: boolean; output?: string; message?: string }>;
+    gitCreateBranch: (input: import('./shared/types').GitCreateBranchInput) => Promise<{ ok: boolean; output?: string; message?: string }>;
+    gitCreateWorktree: (input: import('./shared/types').GitCreateWorktreeInput) => Promise<{ ok: boolean; message?: string; worktree?: import('./shared/types').GitWorktree | null }>;
+    gitSessionHandoff: (input: import('./shared/types').GitSessionHandoffInput) => Promise<{ ok: boolean; message?: string; worktree?: import('./shared/types').GitWorktree | null; session?: unknown }>;
+    getGitHistory: (cwd: string) => Promise<{
+      ok: boolean;
+      error: string | null;
+      entries: Array<{
+        hash: string;
+        shortHash: string;
+        subject: string;
+        authorName: string;
+        authoredAt: string;
+        relativeTime: string;
+      }>;
+    }>;
+    getGitDiff: (cwd: string, filePath: string) => Promise<string>;
+    gitStagePath: (cwd: string, filePath: string) => Promise<{ ok: boolean; message?: string }>;
+    gitUnstagePath: (cwd: string, filePath: string) => Promise<{ ok: boolean; message?: string }>;
+    gitDiscardPath: (cwd: string, filePath: string, status?: string) => Promise<{ ok: boolean; message?: string }>;
+    gitCommit: (cwd: string, message: string) => Promise<{ ok: boolean; message?: string; output?: string }>;
+    gitGenerateCommitMessage: (cwd: string) => Promise<{ ok: boolean; message?: string }>;
+    gitPush: (cwd: string) => Promise<{ ok: boolean; message?: string; output?: string }>;
+    gitSync: (cwd: string) => Promise<{ ok: boolean; message?: string; output?: string }>;
+    gitCreatePr: (cwd: string) => Promise<{ ok: boolean; message?: string; url?: string }>;
+    getEnvironmentEditorLaunchers: () => Promise<import('./shared/types').EnvironmentEditorLauncher[]>;
+    openInEditor: (input: import('./shared/types').OpenInEditorInput) => Promise<{ ok: boolean; message?: string }>;
+    getSessionOrganization: () => Promise<import('./shared/session-organization').SessionOrganizationSnapshot>;
+    changeSessionOrganization: (change: import('./shared/session-organization').SessionOrganizationChange) => Promise<import('./shared/session-organization').SessionOrganizationSnapshot>;
+    onSessionOrganizationChanged: (callback: (snapshot: import('./shared/session-organization').SessionOrganizationSnapshot) => void) => () => void;
+    exportSessionMarkdown: (sessionId: string, share: boolean) => Promise<void>;
+    copySessionMarkdown: (sessionId: string) => Promise<void>;
+    moveSessionProject: (sessionId: string, cwd: string, approvalToken?: string) => Promise<import('./shared/session-project').SessionProjectMoveResult>;
+    openSessionWindow: (sessionId: string) => Promise<void>;
+    showSessionMenu: (request: SessionMenuRequest) => Promise<SessionMenuAction | null>;
+    copySessionValue: (sessionId: string, target: 'link' | 'cwd') => Promise<void>;
+    openExternalUrl: (url: string) => Promise<{ ok: boolean; message?: string }>;
+    subscribeStatistics: (callback: (data: StatisticsData) => void) => () => void;
+    getStaticData: () => Promise<StaticData>;
+    browser: {
+      open: (input: BrowserOpenInput) => Promise<SessionBrowserState>;
+      close: (input: BrowserSessionInput) => Promise<SessionBrowserState>;
+      hide: (input: BrowserSessionInput) => Promise<SessionBrowserState>;
+      getState: (input: BrowserSessionInput) => Promise<SessionBrowserState>;
+      setPanelBounds: (input: BrowserSetPanelBoundsInput) => Promise<SessionBrowserState>;
+      navigate: (input: BrowserNavigateInput) => Promise<SessionBrowserState>;
+      reload: (input: BrowserTabInput) => Promise<SessionBrowserState>;
+      goBack: (input: BrowserTabInput) => Promise<SessionBrowserState>;
+      goForward: (input: BrowserTabInput) => Promise<SessionBrowserState>;
+      newTab: (input: BrowserNewTabInput) => Promise<SessionBrowserState>;
+      closeTab: (input: BrowserTabInput) => Promise<SessionBrowserState>;
+      selectTab: (input: BrowserTabInput) => Promise<SessionBrowserState>;
+      openDevTools: (input: BrowserTabInput) => Promise<SessionBrowserState>;
+      capture: (input: BrowserTabInput) => Promise<BrowserCapturePageResult>;
+      readPage: (input: BrowserTabInput) => Promise<BrowserReadoutResult>;
+      onState: (callback: (state: SessionBrowserState) => void) => () => void;
+      onSendSelection: (callback: (event: BrowserSendSelectionEvent) => void) => () => void;
+    };
+    designMode: {
+      enable: (
+        input: import('./shared/design-mode-types').DesignModeTarget & { projectRoot: string }
+      ) => Promise<import('./shared/design-mode-types').DesignEnableResult>;
+      disable: (
+        input: import('./shared/design-mode-types').DesignModeTarget & { token?: number }
+      ) => Promise<void>;
+      measureSelection: (
+        input: import('./shared/design-mode-types').DesignModeTarget
+      ) => Promise<{
+        found: boolean;
+        rect?: { x: number; y: number; w: number; h: number };
+        viewport?: { w: number; h: number };
+      }>;
+      onEvent: (
+        callback: (event: import('./shared/design-mode-types').DesignModeEvent) => void
+      ) => () => void;
+    };
+  }
+
+  interface Window {
+    electron: ElectronAPI;
+  }
+}
+
+export {};

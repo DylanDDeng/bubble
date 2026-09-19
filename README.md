@@ -1,10 +1,38 @@
 # Bubble
 
-Bubble is a terminal coding agent. It works inside a local project folder: it reads and edits files, runs commands behind configurable approval controls, searches and navigates code with language-server intelligence, browses the web, loads reusable skills, connects MCP tools, fans work out to subagents, and keeps persistent memory across sessions.
+Bubble is a local coding agent with a desktop app and a terminal interface. It works inside a local project folder: it reads and edits files, runs commands behind configurable approval controls, searches and navigates code with language-server intelligence, browses the web, loads reusable skills, connects MCP tools, fans work out to subagents, and keeps persistent memory across sessions.
 
 It is provider-agnostic. Bring an API key for OpenAI, Anthropic, Google, DeepSeek, Moonshot/Kimi, Zhipu, Z.AI, MiniMax, Groq, Together, Fireworks, a local OpenAI-compatible endpoint, and more; sign in to ChatGPT with OAuth; or sign in with OAuth to use a ChatGPT or Grok subscription directly.
 
 ---
+
+## Desktop app
+
+The desktop app is the primary direction for interactive development. It uses the existing Bubble SDK, providers and session history, with the Aegis desktop layout, working trace, KanBan, automations, pull requests and settings adapted for a standalone Bubble agent. Skills and model selection use Bubble directly.
+
+```bash
+npm ci
+npm run desktop:install
+npm run dev
+```
+
+`npm run dev` (or `npm run desktop:dev`) starts Electron with Vite hot updates. UI edits refresh in place; Electron/preload/shared code and Agent SDK edits compile and restart the desktop automatically. The first launch compiles the SDK and host, without a renderer production build. Stop everything with Ctrl+C. Use `npm run dev:tui` for terminal development.
+
+`npm run desktop` still builds and starts the desktop without hot updates; `npm --prefix desktop start` opens the last compiled build. For a local macOS dogfood app and DMG, run `npm run desktop:package`; it includes the Agent runtime and never publishes. Use `npm run desktop:build` to check a build and `npm run desktop:test` to run desktop checks. See [desktop architecture and migration notes](docs/desktop-architecture.md) for runtime boundaries, data migration and development commands. The CLI remains available.
+
+In **Settings → Providers → Bubble**, OpenAI offers **ChatGPT subscription** browser sign-in and a separate **API key** mode. **Grok Subscription** uses browser sign-in only. You can cancel a pending login or sign out from the same panel; OAuth tokens stay in the selected profile's Agent home and are never shown in the API key editor.
+
+Desktop data is separated into three profiles (macOS paths shown):
+
+| Command | Purpose | Desktop data | Agent data |
+| --- | --- | --- | --- |
+| `npm run dev` | Your persistent development/test sessions | `~/Library/Application Support/Bubble Dev` | `~/.bubble-dev` |
+| `npm run desktop:qa` | Agent verification; a fresh profile each launch | System temporary directory `bubble-desktop-qa-*/desktop` | Same temporary root, `agent/` |
+| `npm run desktop` / `npm --prefix desktop start` | Normal use with production data | `~/Library/Application Support/Bubble` | `~/.bubble` |
+
+Sessions, board state, automations, UI preferences, model/account configuration, OAuth data, memory and MCP settings follow the selected profile. History import reads only that profile's Agent home. Dev sessions survive restarts; QA uses a different temporary root for every launch (and keeps that root across hot restarts). Configure development models separately: production history and credentials are not automatically copied. Existing production data is left in place. These profiles separate app data, not the project files you ask the Agent to edit.
+
+Run automated verification with `npm run desktop:test`; manual/agent desktop verification must use `npm run desktop:qa`. If your development server is already running, use `PORT=4337 npm run desktop:qa`. QA paths are logged at startup and retained in the system temporary directory for diagnostics. The normal launch commands select their own profile and ignore inherited data-directory overrides.
 
 ## Requirements
 
@@ -245,7 +273,7 @@ Rules use a simple pattern syntax, for example:
 
 ## What Bubble can do
 
-**Files and code.** Read, write, and make targeted edits; find files by glob; search contents with ripgrep; and navigate with language-server operations (go-to-definition, find references, hover, document/workspace symbols, call hierarchy).
+**Files and code.** Read, write, and make targeted edits; list directories with ls; find files through Bash with find or rg --files; search contents with ripgrep; and navigate with language-server operations (go-to-definition, find references, hover, document/workspace symbols, call hierarchy).
 
 **Shell and dev servers.** Run bounded bash commands with streaming output, and start/stop/inspect long-running dev servers (`npm run dev`, Vite, Next, etc.) with readiness checks and captured logs.
 
@@ -363,7 +391,7 @@ npm test           # run the test suite (vitest)
 npm start          # run the built agent
 ```
 
-`npm run dev` compiles and launches in one step. The interactive TUI is built on React Ink.
+`npm run dev:tui` compiles and launches the terminal interface in one step.
 
 ## Feishu host (optional)
 

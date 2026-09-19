@@ -1,0 +1,350 @@
+import type { ClaudeModelUsage, StreamMessage } from '../types';
+
+export type ClaudeContextSnapshot = {
+  model: string;
+  used: number;
+  total: number;
+  percent: number;
+  costUSD: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  maxOutputTokens: number;
+  webSearchRequests: number;
+};
+
+export type CodexContextSnapshot = {
+  used: number;
+  total: number;
+  percent: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+};
+
+export type OpenCodeContextSnapshot = {
+  model: string;
+  used: number;
+  total: number;
+  percent: number;
+  costUSD: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  reasoningOutputTokens: number;
+};
+
+export type ContextUsageLevel = 'safe' | 'warning' | 'critical';
+
+// Threshold percentages of the context window. Claude (Agent SDK) and Codex
+// auto-compact near the upper limit, so we warn ahead of time to make the
+// boundary feel intentional.
+export const CONTEXT_WARNING_PERCENT = 75;
+export const CONTEXT_CRITICAL_PERCENT = 90;
+
+export function getContextUsageLevel(percent: number): ContextUsageLevel {
+  if (percent >= CONTEXT_CRITICAL_PERCENT) return 'critical';
+  if (percent >= CONTEXT_WARNING_PERCENT) return 'warning';
+  return 'safe';
+}
+
+// CSS variable used to color the usage ring / banner for a given level.
+export function getContextLevelColorVar(level: ContextUsageLevel): string {
+  switch (level) {
+    case 'critical':
+      return 'var(--error)';
+    case 'warning':
+      return 'var(--warning)';
+    default:
+      return 'var(--text-secondary)';
+  }
+}
+
+function isResultMessage(message: StreamMessage): message is Extract<StreamMessage, { type: 'result' }> {
+  return message.type === 'result';
+}
+
+function isCodexTokenUsageMessage(
+  message: StreamMessage
+): message is Extract<StreamMessage, { type: 'system'; subtype: 'token_usage' }> {
+  // Kimi (server runtime), Grok (ACP + signals.json) and DeepSeek (SDK
+  // session events) report usage through the same message shape and share
+  // the codex-style context ring.
+  return (
+    message.type === 'system' &&
+    message.subtype === 'token_usage' &&
+    (message.provider === 'codex' ||
+      message.provider === 'kimi' ||
+      message.provider === 'grok' ||
+      message.provider === 'deepseek')
+  );
+}
+
+function selectModelUsageEntry(
+  modelUsage: Record<string, ClaudeModelUsage>,
+  preferredModel?: string | null
+): [string, ClaudeModelUsage] | null {
+  const entries = Object.entries(modelUsage);
+  if (entries.length === 0) {
+    return null;
+  }
+
+  const normalizedPreferred = preferredModel?.trim().toLowerCase();
+  if (normalizedPreferred) {
+    return entries.find(([model]) => isClaudeUsageModelMatch(model, normalizedPreferred)) || null;
+  }
+
+  return entries.sort((left, right) => {
+    const leftUsage = left[1].inputTokens + left[1].outputTokens;
+    const rightUsage = right[1].inputTokens + right[1].outputTokens;
+    return rightUsage - leftUsage;
+  })[0] || null;
+}
+
+function normalizeClaudeUsageModelKey(model?: string | null): string {
+  return (model || '').trim().toLowerCase().replace(/\[1m\]$/i, '');
+}
+
+export function isClaudeUsageModelMatch(
+  reportedModel?: string | null,
+  preferredModel?: string | null
+): boolean {
+  const preferred = normalizeClaudeUsageModelKey(preferredModel);
+  if (!preferred) return true;
+  const reported = normalizeClaudeUsageModelKey(reportedModel);
+  if (reported === preferred) return true;
+  // Bare family aliases (sonnet/opus/haiku) mean "latest of this family", but
+  // usage reports concrete ids (claude-opus-4-8), so match on the family.
+  if (preferred === 'sonnet' || preferred === 'opus' || preferred === 'haiku') {
+    return reported.startsWith(`claude-${preferred}-`);
+  }
+  return false;
+}
+
+// Per-API-call usage as reported on assistant messages. Unlike the cumulative
+// `modelUsage` totals on result messages (whose cache reads re-count the whole
+// context every turn), input + cache read + cache write of the latest call IS
+// the current context occupancy — the number auto-compaction thresholds act on.
+export type ClaudeTurnUsage = {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  contextTokens: number;
+};
+
+export function getLatestClaudeTurnUsage(
+  messages: StreamMessage[],
+  preferredModel?: string | null
+): ClaudeTurnUsage | null {
+  // A compact boundary newer than the latest per-call usage means that usage
+  // describes the PRE-compact context. When the runtime reports the post-compact
+  // occupancy, use it for `contextTokens` so the ring drops immediately instead
+  // of staying stale until the next turn.
+  let compactedContextTokens: number | null = null;
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (
+      compactedContextTokens === null &&
+      message.type === 'system' &&
+      message.subtype === 'compact_boundary' &&
+      typeof message.compactMetadata.postTokens === 'number' &&
+      message.compactMetadata.postTokens > 0
+    ) {
+      compactedContextTokens = message.compactMetadata.postTokens;
+      continue;
+    }
+    if (message.type !== 'assistant') {
+      continue;
+    }
+
+    const raw = message.message as unknown as {
+      model?: string;
+      usage?: {
+        input_tokens?: number;
+        output_tokens?: number;
+        cache_read_input_tokens?: number;
+        cache_creation_input_tokens?: number;
+      };
+    };
+    const usage = raw?.usage;
+    if (!usage) {
+      continue;
+    }
+    if (preferredModel && raw.model && !isClaudeUsageModelMatch(raw.model, preferredModel)) {
+      continue;
+    }
+
+    const inputTokens = usage.input_tokens || 0;
+    const cacheReadTokens = usage.cache_read_input_tokens || 0;
+    const cacheCreationTokens = usage.cache_creation_input_tokens || 0;
+    const contextTokens = inputTokens + cacheReadTokens + cacheCreationTokens;
+    if (contextTokens <= 0) {
+      continue;
+    }
+
+    return {
+      inputTokens,
+      outputTokens: usage.output_tokens || 0,
+      cacheReadTokens,
+      cacheCreationTokens,
+      // Detail rows keep the real per-call numbers; only the occupancy is
+      // overridden when a compaction happened after this call.
+      contextTokens: compactedContextTokens ?? contextTokens,
+    };
+  }
+
+  if (compactedContextTokens !== null) {
+    return {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      contextTokens: compactedContextTokens,
+    };
+  }
+
+  return null;
+}
+
+export function buildClaudeContextSnapshot(
+  model: string,
+  usage: ClaudeModelUsage,
+  turnUsage?: ClaudeTurnUsage | null
+): ClaudeContextSnapshot {
+  const total = usage.contextWindow || 0;
+  // Prefer the latest call's usage: `usage` (modelUsage) accumulates across the
+  // session, so summing it says how much the session consumed, not how full the
+  // context is. Without a turn snapshot fall back to the cumulative sum.
+  const inputTokens = turnUsage ? turnUsage.inputTokens : usage.inputTokens || 0;
+  const outputTokens = turnUsage ? turnUsage.outputTokens : usage.outputTokens || 0;
+  const cacheReadTokens = turnUsage ? turnUsage.cacheReadTokens : usage.cacheReadInputTokens || 0;
+  const cacheCreationTokens = turnUsage
+    ? turnUsage.cacheCreationTokens
+    : usage.cacheCreationInputTokens || 0;
+  const used = turnUsage
+    ? turnUsage.contextTokens
+    : inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens;
+
+  return {
+    model,
+    used,
+    total,
+    percent: total > 0 ? Math.min(100, Math.max(0, Math.round((used / total) * 100))) : 0,
+    costUSD: usage.costUSD || 0,
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheCreationTokens,
+    maxOutputTokens: usage.maxOutputTokens || 0,
+    webSearchRequests: usage.webSearchRequests || 0,
+  };
+}
+
+export function getLatestClaudeContextSnapshot(
+  messages: StreamMessage[],
+  preferredModel?: string | null
+): ClaudeContextSnapshot | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!isResultMessage(message) || !message.modelUsage) {
+      continue;
+    }
+
+    const selected = selectModelUsageEntry(message.modelUsage, preferredModel);
+    if (!selected) {
+      continue;
+    }
+
+    const [model, usage] = selected;
+    return buildClaudeContextSnapshot(model, usage, getLatestClaudeTurnUsage(messages, model));
+  }
+
+  return null;
+}
+
+export function getLatestCodexContextSnapshot(messages: StreamMessage[]): CodexContextSnapshot | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!isCodexTokenUsageMessage(message)) {
+      continue;
+    }
+
+    const contextWindow = message.usage.contextWindow || 0;
+    if (contextWindow <= 0) {
+      continue;
+    }
+
+    const used = message.usage.totalTokens || 0;
+    return {
+      used,
+      total: contextWindow,
+      percent: Math.min(100, Math.max(0, Math.round((used / contextWindow) * 100))),
+      inputTokens: message.usage.inputTokens || 0,
+      cachedInputTokens: message.usage.cachedInputTokens || 0,
+      outputTokens: message.usage.outputTokens || 0,
+      reasoningOutputTokens: message.usage.reasoningOutputTokens || 0,
+    };
+  }
+
+  return null;
+}
+
+export function getLatestOpenCodeContextSnapshot(
+  messages: StreamMessage[],
+  preferredModel?: string | null,
+  fallbackModelLabel = 'OpenCode'
+): OpenCodeContextSnapshot | null {
+  const normalizedPreferred = preferredModel?.trim().toLowerCase();
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!isResultMessage(message) || !message.usage) {
+      continue;
+    }
+
+    const usage = message.usage;
+    const contextWindow = usage.context_window || 0;
+    if (contextWindow <= 0) {
+      continue;
+    }
+
+    const model = typeof (message as { model?: unknown }).model === 'string'
+      ? ((message as { model: string }).model || '').trim()
+      : '';
+    if (
+      normalizedPreferred &&
+      model &&
+      model.toLowerCase() !== normalizedPreferred
+    ) {
+      continue;
+    }
+
+    const inputTokens = usage.input_tokens || 0;
+    const outputTokens = usage.output_tokens || 0;
+    const cacheReadTokens = usage.cache_read_input_tokens || 0;
+    const cacheCreationTokens = usage.cache_creation_input_tokens || 0;
+    const reasoningOutputTokens = usage.reasoning_output_tokens || 0;
+    const used =
+      usage.total_tokens ||
+      inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens + reasoningOutputTokens;
+
+    return {
+      model: model || preferredModel || fallbackModelLabel,
+      used,
+      total: contextWindow,
+      percent: Math.min(100, Math.max(0, Math.round((used / contextWindow) * 100))),
+      costUSD: message.total_cost_usd || 0,
+      inputTokens,
+      outputTokens,
+      cacheReadTokens,
+      cacheCreationTokens,
+      reasoningOutputTokens,
+    };
+  }
+
+  return null;
+}

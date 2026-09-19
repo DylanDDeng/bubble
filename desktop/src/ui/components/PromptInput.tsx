@@ -1,0 +1,1858 @@
+import { useImageStudioAttachments } from '../hooks/useImageStudioAttachments';
+import { useImageStudioStore, EMPTY_IMAGE_STUDIO } from '../store/useImageStudioStore';
+import { resolveImageStudioReferences } from '../lib/image-studio';
+import { imageCommentPrompt, imageEditEffectivePrompt, supportsImageStudio } from '../utils/image-studio';
+import { composerEnterAction } from '../../shared/app-preferences';
+import { useAppPreferences } from '../store/useAppPreferences';
+import { focusComposerFromSurface } from '../utils/composer-surface-focus';
+import { useDeepseekSessionCost } from '../hooks/useDeepseekSessionCost';
+import { deepseekImageInputError } from '../../shared/deepseek-images';
+import { confirmDialog } from './ui/confirm-dialog';
+import { useSessionGoal } from '../hooks/useSessionGoal';
+import { GoalModePill, SessionGoal } from './SessionGoal';
+import { buildGoalObjective, parseGoalInput, supportsGoalUI, isClaudeGoalClearObjective } from '../../shared/session-goal';
+import {
+  useState,
+  useRef,
+  useEffect,
+  useMemo,
+  useCallback,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MutableRefObject,
+  type ReactNode,
+} from 'react';
+import { ArrowElbowRight, CornerDownRight, Plus, Square, Trash2 } from './icons';
+import { toast } from 'sonner';
+import { getSessionReferenceCapabilityError } from '../../shared/session-links';
+import { useAppStore } from '../store/useAppStore';
+import {
+  claimQueueFlushOwner,
+  releaseQueueFlushOwner,
+  selectQueuedMessages,
+  useComposerQueueStore,
+} from '../store/useComposerQueueStore';
+import { useShallow } from 'zustand/react/shallow';
+import { sendEvent } from '../hooks/useIPC';
+import type { Attachment } from '../types';
+import { AttachmentChips } from './AttachmentChips';
+import { useAttachmentImport } from '../hooks/useAttachmentImport';
+import { ClaudeSkillMenu } from './ClaudeSkillMenu';
+import { ProjectFileMentionMenu } from './ProjectFileMentionMenu';
+import { ComposerPromptEditor, type ComposerPromptEditorHandle } from './ComposerPromptEditor';
+import {
+  EMPTY_PROMPT_HISTORY_NAV,
+  collectPromptHistory,
+  isCursorOnFirstLine,
+  remapPromptHistoryNav,
+  stepPromptHistory,
+  type PromptHistoryNav,
+  type PromptHistoryStep,
+} from '../utils/prompt-history';
+import { ClaudeContextIndicator } from './ClaudeContextIndicator';
+import { CodexContextIndicator } from './CodexContextIndicator';
+import { OpenCodeContextIndicator } from './OpenCodeContextIndicator';
+import { ComposerAgentModelPicker } from './ComposerAgentControls';
+import * as Dialog from './ui/dialog';
+import { PROVIDERS } from '../utils/provider';
+import type { AgentProvider } from '../types';
+import {
+  PermissionModePicker,
+  BUBBLE_PERMISSION_MODE_OPTIONS,
+  CLAUDE_PERMISSION_MODE_OPTIONS,
+  CODEX_PERMISSION_MODE_OPTIONS,
+  DEEPSEEK_PERMISSION_MODE_OPTIONS,
+  KIMI_PERMISSION_MODE_OPTIONS,
+  OPENCODE_PERMISSION_MODE_OPTIONS,
+  QODER_PERMISSION_MODE_OPTIONS,
+} from './PermissionModePicker';
+import { ClaudePlanModePill } from './ClaudePlanModePill';
+import { DeepseekAgentPresetPicker } from './DeepseekAgentPresetPicker';
+import {
+  useComposerAgentSelection,
+  type ComposerAgentConfigurationChange,
+  type ComposerModelOption,
+} from '../hooks/useComposerAgentSelection';
+import { useComposerCapabilityMenu } from '../hooks/useClaudeSkillAutocomplete';
+import { useProjectFileMentions } from '../hooks/useProjectFileMentions';
+import { DEFAULT_WORKSPACE_CHANNEL_ID } from '../../shared/types';
+import {
+  buildCodexReferencePayload,
+  type CodexReferencePayload,
+} from '../utils/codex-composer';
+import { insertProjectFileMention } from '../utils/project-file-mentions';
+import { isSessionEffectivelyBusy, latestTurnHasPendingDelegation } from '../utils/workstream';
+import { buildPromptWithProjectFileMentions } from '../utils/project-file-mention-context';
+import { buildSideChatEffectivePrompt } from '../utils/side-chat';
+import { removeSelectedSlashCommandPrompt } from '../utils/claude-slash';
+import {
+  getLongPromptAttachmentFallbackMessage,
+  LONG_PROMPT_AUTO_ATTACHMENT_THRESHOLD,
+  maybeConvertLongPromptToAttachment,
+} from '../utils/long-prompt-attachment';
+import {
+  buildClaudeContextSnapshot,
+  getLatestClaudeContextSnapshot,
+  getLatestClaudeTurnUsage,
+  getLatestCodexContextSnapshot,
+  getLatestOpenCodeContextSnapshot,
+  isClaudeUsageModelMatch,
+} from '../utils/context-usage';
+
+function isImeComposingEvent(
+  event: ReactKeyboardEvent,
+  isComposingRef: MutableRefObject<boolean>
+): boolean {
+  return (
+    isComposingRef.current ||
+    event.nativeEvent.isComposing === true ||
+    (event.nativeEvent as KeyboardEvent).keyCode === 229
+  );
+}
+
+export function PromptInput({
+  sessionId,
+  approvalPending = false,
+  approvalPanel,
+  menuSide = 'top',
+  composerSurface = 'chat',
+  footer,
+}: {
+  sessionId?: string | null;
+  approvalPending?: boolean;
+  approvalPanel?: ReactNode;
+  /** Which side the model/permission menus open toward. The bottom-anchored
+   * chat and new-thread composers both use 'top'. */
+  menuSide?: 'top' | 'bottom';
+  /** 'chat' is the bottom composer (large rounded pill, no tray). 'landing'
+   * places the context controls (`footer`) above the input on an inset tray, matching
+   * the new-thread first-entry composer. */
+  composerSurface?: 'chat' | 'landing';
+  /** Content rendered inside the inset tray, above the input (landing only) —
+   * e.g. the project / branch context pills. */
+  footer?: ReactNode;
+} = {}) {
+  // P2: shallow-picked subscription (the composer must not re-render for
+  // unrelated store changes); the session itself is a narrow selector below.
+  const {
+    activeSessionId,
+    activeChannelByProject,
+    pendingStart,
+    setShowNewSession,
+    setShowSettings,
+    setActiveSettingsTab,
+    setPendingStart,
+    pendingChatInjection,
+    consumeChatInjection,
+    draftStartMode,
+    setSessionAgentSelection,
+    setSessionClaudeMode,
+    setSessionCodexExecutionMode,
+    setSessionBubblePermissionMode,
+  } = useAppStore(
+    useShallow((s) => ({
+      activeSessionId: s.activeSessionId,
+      activeChannelByProject: s.activeChannelByProject,
+      pendingStart: s.pendingStart,
+      setShowNewSession: s.setShowNewSession,
+      setShowSettings: s.setShowSettings,
+      setActiveSettingsTab: s.setActiveSettingsTab,
+      setPendingStart: s.setPendingStart,
+      pendingChatInjection: s.pendingChatInjection,
+      consumeChatInjection: s.consumeChatInjection,
+      draftStartMode: s.draftStartMode,
+      setSessionAgentSelection: s.setSessionAgentSelection,
+      setSessionClaudeMode: s.setSessionClaudeMode,
+      setSessionCodexExecutionMode: s.setSessionCodexExecutionMode,
+      setSessionBubblePermissionMode: s.setSessionBubblePermissionMode,
+    }))
+  );
+  const [prompt, setPrompt] = useState('');
+  // ArrowUp/ArrowDown history navigation. historyNavRef tracks the browsing
+  // position + stashed draft; historyAppliedTextRef remembers the last text WE
+  // put in the composer, so any user edit detectably exits history mode.
+  const historyNavRef = useRef<PromptHistoryNav>(EMPTY_PROMPT_HISTORY_NAV);
+  const historyAppliedTextRef = useRef<string | null>(null);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [cursorIndex, setCursorIndex] = useState(0);
+  const editorRef = useRef<ComposerPromptEditorHandle | null>(null);
+  const isComposingRef = useRef(false);
+  const targetSessionId = sessionId ?? activeSessionId;
+  const imageStudio = useImageStudioStore(state => targetSessionId ? state.sessions[targetSessionId] || EMPTY_IMAGE_STUDIO : EMPTY_IMAGE_STUDIO);
+  const imageAttachmentsLoading = useImageStudioAttachments(targetSessionId, imageStudio.selected, setAttachments);
+  const goalTargetRef = useRef(targetSessionId);
+  goalTargetRef.current = targetSessionId;
+  const activeSession = useAppStore((s) =>
+    targetSessionId ? s.sessions[targetSessionId] ?? null : null
+  );
+
+  const promptHistory = useMemo(
+    () => collectPromptHistory(activeSession?.messages ?? []),
+    [activeSession?.messages]
+  );
+
+  // Ends an active browse and restores the stashed draft (text AND
+  // attachments) into the composer, mirroring the ArrowDown exit — the
+  // recalled prompt must never strand in the composer with the draft
+  // unrecoverable. Focus is intentionally not forced: these exits are not
+  // always key-driven.
+  const exitHistoryBrowse = useCallback((nav: PromptHistoryNav) => {
+    historyNavRef.current = EMPTY_PROMPT_HISTORY_NAV;
+    historyAppliedTextRef.current = null;
+    if (nav.index === null) {
+      return;
+    }
+    const draft = nav.draft ?? '';
+    setPrompt(draft);
+    setCursorIndex(draft.length);
+    setAttachments(nav.draftAttachments ?? []);
+  }, []);
+
+  // Switching sessions exits history mode (restoring the stashed draft);
+  // editing the recalled text exits too, keeping the edit.
+  useEffect(() => {
+    exitHistoryBrowse(historyNavRef.current);
+  }, [exitHistoryBrowse, targetSessionId]);
+
+  useEffect(() => {
+    if (
+      historyNavRef.current.index !== null &&
+      historyAppliedTextRef.current !== null &&
+      prompt !== historyAppliedTextRef.current
+    ) {
+      // Editing the recalled text turns it into a new message that
+      // deliberately inherits nothing from the old draft (terminal
+      // semantics): the stashed text AND attachments are discarded, matching
+      // what sending the recalled entry does.
+      historyNavRef.current = EMPTY_PROMPT_HISTORY_NAV;
+      historyAppliedTextRef.current = null;
+    }
+  }, [prompt]);
+
+  // Scrolling the chat pane up lazily PREPENDS older messages (and a rewind
+  // can drop entries), shifting promptHistory under an active browse. Re-anchor
+  // the stored index to the recalled entry so the next step lands on the right
+  // neighbor instead of a drifted position; when the recalled entry vanished
+  // entirely the browse exits and the draft comes back.
+  useEffect(() => {
+    const nav = historyNavRef.current;
+    if (nav.index === null) {
+      return;
+    }
+    const remapped = remapPromptHistoryNav(promptHistory, nav, historyAppliedTextRef.current);
+    if (remapped.index === null) {
+      exitHistoryBrowse(nav);
+      return;
+    }
+    historyNavRef.current = remapped;
+  }, [exitHistoryBrowse, promptHistory]);
+
+  const applyPromptHistoryStep = (step: PromptHistoryStep) => {
+    historyNavRef.current = step.nav;
+    historyAppliedTextRef.current = step.nav.index === null ? null : step.text;
+    if (step.clamped) {
+      // Hit the oldest entry: the key is swallowed but nothing changed, so
+      // leave the text and caret exactly where they are.
+      return;
+    }
+    setPrompt(step.text);
+    setCursorIndex(step.text.length);
+    if (step.attachments) {
+      // Cleared on entry (recalled entries are text-only, so a send never
+      // attaches the old draft's files) and restored with the draft on exit.
+      setAttachments(step.attachments);
+    }
+    window.requestAnimationFrame(() => {
+      editorRef.current?.focus();
+      editorRef.current?.setCursorIndex(step.text.length);
+    });
+  };
+
+  const handleSessionAgentSelectionChange = useCallback(
+    (selection: import('../utils/session-model').AgentModelSelection) => {
+      if (activeSession) {
+        setSessionAgentSelection(activeSession.id, selection);
+      }
+    },
+    [activeSession?.id, setSessionAgentSelection]
+  );
+
+  const agentSelection = useComposerAgentSelection({
+    selectionKey: activeSession?.id || targetSessionId || '__composer__',
+    provider: activeSession?.provider || null,
+    model: activeSession?.model || null,
+    compatibleProviderId: activeSession?.compatibleProviderId || null,
+    claudePermissionMode:
+      activeSession?.provider === 'claude' ? activeSession.claudeAccessMode || null : null,
+    claudeExecutionMode:
+      activeSession?.provider === 'claude' ? activeSession.claudeExecutionMode || null : null,
+    codexExecutionMode:
+      activeSession?.provider === 'codex' ? activeSession.codexExecutionMode || null : null,
+    codexPermissionMode:
+      activeSession?.provider === 'codex' ? activeSession.codexPermissionMode || null : null,
+    opencodePermissionMode:
+      activeSession?.provider === 'opencode' ? activeSession.opencodePermissionMode || null : null,
+    bubblePermissionMode:
+      activeSession?.provider === 'bubble' ? activeSession.bubblePermissionMode || null : null,
+    claudeReasoningEffort:
+      activeSession?.provider === 'claude' ? activeSession.claudeReasoningEffort || null : null,
+    codexReasoningEffort:
+      activeSession?.provider === 'codex' ? activeSession.codexReasoningEffort || null : null,
+    codexFastMode:
+      activeSession?.provider === 'codex' ? activeSession.codexFastMode ?? null : null,
+    grokReasoningEffort:
+      activeSession?.provider === 'grok' ? activeSession.grokReasoningEffort || null : null,
+    deepseekAgentPreset:
+      activeSession?.provider === 'deepseek' ? activeSession.deepseekAgentPreset || null : null,
+    onSelectionChange: handleSessionAgentSelectionChange,
+  });
+  const runtimeProvider = agentSelection.provider;
+  const sessionGoal = useSessionGoal(activeSession?.id, supportsGoalUI(runtimeProvider), !activeSession?.isDraft);
+  const [goalSubmitting, setGoalSubmitting] = useState(false);
+  const selectedModel = agentSelection.model;
+
+  // P3: speculative Claude runner prewarm. The first keystroke for an idle
+  // Claude session boots the CLI (spawn + settings + MCP connect + resume
+  // replay) while the user is still composing, so the eventual send reuses a
+  // live runner instead of paying the cold start in front of the first
+  // token. Fired at most once per session per composer mount; the payload
+  // mirrors the `session.continue` fields so the main process's reuse check
+  // normalizes both identically.
+  const prewarmedSessionRef = useRef<string | null>(null);
+  // Latest composer config, refreshed every render so the debounced prewarm
+  // timer reads current values at fire time (see the effect below).
+  const prewarmConfigRef = useRef({
+    model: selectedModel,
+    compatibleProviderId: agentSelection.compatibleProviderId,
+    claudeAccessMode: agentSelection.claudePermissionMode,
+    claudeExecutionMode: agentSelection.claudeExecutionMode,
+    claudeReasoningEffort: agentSelection.claudeReasoningEffort,
+    grokPermissionMode: agentSelection.kimiPermissionMode,
+    grokReasoningEffort: agentSelection.grokReasoningEffort,
+  });
+  prewarmConfigRef.current = {
+    model: selectedModel,
+    compatibleProviderId: agentSelection.compatibleProviderId,
+    claudeAccessMode: agentSelection.claudePermissionMode,
+    claudeExecutionMode: agentSelection.claudeExecutionMode,
+    claudeReasoningEffort: agentSelection.claudeReasoningEffort,
+    grokPermissionMode: agentSelection.kimiPermissionMode,
+    grokReasoningEffort: agentSelection.grokReasoningEffort,
+  };
+  const hasComposerActivity = prompt.trim().length > 0;
+  useEffect(() => {
+    if (!hasComposerActivity || !targetSessionId) return;
+    // Grok pays the same shape of cold start (ACP initialize + session/new)
+    // in front of a thread's first message.
+    if (runtimeProvider !== 'claude' && runtimeProvider !== 'grok') return;
+    if (!activeSession || activeSession.isDraft || activeSession.readOnly) return;
+    if (activeSession.status === 'running') return;
+    if (prewarmedSessionRef.current === targetSessionId) return;
+    const timer = window.setTimeout(() => {
+      prewarmedSessionRef.current = targetSessionId;
+      // Read config from the ref, not the scheduling render's closure — if the
+      // user changes model/mode during the 300ms debounce, the prewarm must
+      // carry the LATEST values so the eventual send reuses it (or so the
+      // main-process divergence guard skips a doomed prewarm) instead of
+      // warming a stale-config runner that the send then aborts.
+      const cfg = prewarmConfigRef.current;
+      sendEvent({
+        type: 'runner.prewarm',
+        payload: {
+          sessionId: targetSessionId,
+          provider: runtimeProvider,
+          model: cfg.model || undefined,
+          ...(runtimeProvider === 'grok'
+            ? {
+                grokPermissionMode: cfg.grokPermissionMode,
+                grokReasoningEffort: cfg.grokReasoningEffort || undefined,
+              }
+            : {
+                compatibleProviderId: cfg.compatibleProviderId || undefined,
+                claudeAccessMode: cfg.claudeAccessMode,
+                claudeExecutionMode: cfg.claudeExecutionMode,
+                claudeReasoningEffort: cfg.claudeReasoningEffort || undefined,
+              }),
+        },
+      });
+    }, 300);
+    return () => window.clearTimeout(timer);
+    // Config values are intentionally excluded from deps — they're read from
+    // prewarmConfigRef at fire time (above), so a change during the debounce
+    // does not need to reschedule.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    hasComposerActivity,
+    targetSessionId,
+    runtimeProvider,
+    activeSession?.isDraft,
+    activeSession?.readOnly,
+    activeSession?.status,
+  ]);
+
+  // Bubble is the sole runtime. Model/provider changes stay in the same agent.
+  const handleAgentChange = useCallback(() => agentSelection.selectAgent('bubble'), [agentSelection]);
+  const handleModelChange = useCallback((option: ComposerModelOption) => {
+    agentSelection.selectModel(option, 'bubble');
+  }, [agentSelection]);
+  const handleAgentConfigurationChange = useCallback((change: ComposerAgentConfigurationChange) => {
+    agentSelection.selectAgentConfiguration({ ...change, provider: 'bubble' });
+  }, [agentSelection]);
+  const selectedModelLabel = agentSelection.selectedModelLabel;
+  const modelSetupRequired = Boolean(agentSelection.modelSetup);
+  const isClaudeContextVisible = runtimeProvider === 'claude' && activeSession?.provider === 'claude';
+  const isCodexContextVisible = runtimeProvider === 'codex' && activeSession?.provider === 'codex';
+  const isKimiContextVisible = runtimeProvider === 'kimi' && activeSession?.provider === 'kimi';
+  const isOpenCodeContextVisible = runtimeProvider === 'opencode' && activeSession?.provider === 'opencode';
+  const isPiContextVisible = runtimeProvider === 'pi' && activeSession?.provider === 'pi';
+  const isBubbleContextVisible = runtimeProvider === 'bubble' && activeSession?.provider === 'bubble';
+  const isQoderContextVisible = runtimeProvider === 'qoder' && activeSession?.provider === 'qoder';
+  const isGrokContextVisible = runtimeProvider === 'grok' && activeSession?.provider === 'grok';
+  const isDeepseekContextVisible = runtimeProvider === 'deepseek' && activeSession?.provider === 'deepseek';
+  const claudeContextModel = isClaudeContextVisible ? selectedModel || activeSession?.model || null : null;
+  const openCodeContextModel = isOpenCodeContextVisible ? selectedModel || activeSession?.model || null : null;
+  const piContextModel = isPiContextVisible ? selectedModel || activeSession?.model || null : null;
+  const bubbleContextModel = isBubbleContextVisible ? selectedModel || activeSession?.model || null : null;
+  const qoderContextModel = isQoderContextVisible ? selectedModel || activeSession?.model || null : null;
+
+  const latestDeepseekResult = useMemo(() => {
+    if (!isDeepseekContextVisible) return undefined;
+    for (let index = activeSession.messages.length - 1; index >= 0; index -= 1) {
+      if (activeSession.messages[index].type === 'result') return activeSession.messages[index];
+    }
+    return undefined;
+  }, [isDeepseekContextVisible, activeSession?.messages]);
+  const deepseekSessionCost = useDeepseekSessionCost(
+    isDeepseekContextVisible ? activeSession.id : undefined, latestDeepseekResult
+  );
+
+  const codexContextSnapshot = useMemo(
+    () =>
+      isCodexContextVisible || isKimiContextVisible || isGrokContextVisible || isDeepseekContextVisible
+        ? getLatestCodexContextSnapshot(activeSession.messages)
+        : null,
+    [activeSession?.messages, isCodexContextVisible, isKimiContextVisible, isGrokContextVisible, isDeepseekContextVisible]
+  );
+  const claudeContextSnapshot = useMemo(() => {
+    if (!isClaudeContextVisible) {
+      return null;
+    }
+    const latestFromMessages = getLatestClaudeContextSnapshot(activeSession.messages, claudeContextModel);
+    if (latestFromMessages) {
+      return latestFromMessages;
+    }
+    const latestUsage = activeSession.latestClaudeModelUsage;
+    return latestUsage && isClaudeUsageModelMatch(latestUsage.model, claudeContextModel)
+      ? buildClaudeContextSnapshot(
+          latestUsage.model,
+          latestUsage.usage,
+          getLatestClaudeTurnUsage(activeSession.messages, latestUsage.model)
+        )
+      : null;
+  }, [
+    claudeContextModel,
+    activeSession?.latestClaudeModelUsage,
+    activeSession?.messages,
+    isClaudeContextVisible,
+  ]);
+  const openCodeContextSnapshot = useMemo(
+    () =>
+      isOpenCodeContextVisible
+        ? getLatestOpenCodeContextSnapshot(activeSession.messages, openCodeContextModel)
+        : null,
+    [activeSession?.messages, isOpenCodeContextVisible, openCodeContextModel]
+  );
+  const piContextSnapshot = useMemo(
+    () =>
+      isPiContextVisible
+        ? getLatestOpenCodeContextSnapshot(activeSession.messages, piContextModel, 'Pi')
+        : null,
+    [activeSession?.messages, isPiContextVisible, piContextModel]
+  );
+  const bubbleContextSnapshot = useMemo(
+    () =>
+      isBubbleContextVisible
+        ? getLatestOpenCodeContextSnapshot(activeSession.messages, bubbleContextModel, 'Bubble')
+        : null,
+    [activeSession?.messages, isBubbleContextVisible, bubbleContextModel]
+  );
+  const qoderContextSnapshot = useMemo(
+    () =>
+      isQoderContextVisible
+        ? getLatestOpenCodeContextSnapshot(activeSession.messages, qoderContextModel, 'Qoder')
+        : null,
+    [activeSession?.messages, isQoderContextVisible, qoderContextModel]
+  );
+  const isRunning = activeSession?.status === 'running';
+  // Codex two-phase stop: 'stopping' is a broadcast-only transient while the
+  // interrupt awaits confirmation. The stop button is gone (no double-stop);
+  // sends stay allowed — the main process holds them until the stop settles.
+  const isStopping = activeSession?.status === 'stopping';
+  // Effectively running: the provider turn is live OR a background subagent
+  // Task from the latest turn is still unresolved after the main result
+  // flipped the session to 'completed' (Claude keeps streaming its messages).
+  // Shared predicate with ChatPane's turn-card deferral. A stopped ('idle')
+  // or errored session is never effectively running — its pending Tasks are
+  // dead. Stop still works: the session.stop path hard-aborts the warm
+  // runner, killing background tasks and settling status to 'idle'.
+  const preferences = useAppPreferences();
+  const isEffectivelyRunning = useMemo(
+    () => isSessionEffectivelyBusy(activeSession?.status, activeSession?.messages ?? []),
+    [activeSession?.status, activeSession?.messages]
+  );
+  const isBusy = isEffectivelyRunning || isStopping || pendingStart || approvalPending;
+  const attachmentImport = useAttachmentImport(targetSessionId, isBusy, (created) => {
+    setAttachments((previous) => {
+      const paths = new Set(previous.map(attachment => attachment.path));
+      return [...previous, ...created.filter(attachment => {
+        if (paths.has(attachment.path)) return false;
+        paths.add(attachment.path);
+        return true;
+      })];
+    });
+  });
+  // Codex app-server supports turn/steer: a message sent while a turn is
+  // streaming is injected into that turn instead of waiting for it to finish,
+  // so the composer stays live for codex sessions while they run.
+  // All providers can queue locally; steering requires a runtime that can
+  // inject into a running turn.
+  // Steer lock (docs/delegate-mcp-plan.md): while a delegated agent works in
+  // this session's directory, mid-turn sends are refused so the "lead blocked
+  // on the delegate call = single writer" invariant holds. The main process
+  // enforces the same rule in handleSessionContinue; this keeps the UX honest.
+  const delegationPending = useMemo(
+    () => latestTurnHasPendingDelegation(activeSession?.messages ?? []),
+    [activeSession?.messages]
+  );
+  const canSteerWhileRunning =
+    (runtimeProvider === 'codex' ||
+      (runtimeProvider === 'kimi' && activeSession?.kimiRuntime !== 'legacy') ||
+      // DeepSeek: mid-turn sends splice into the runtime's inbox and are
+      // consumed before the activity settles (adapter steer path).
+      runtimeProvider === 'deepseek') &&
+    isRunning &&
+    !approvalPending &&
+    !delegationPending &&
+    !modelSetupRequired;
+  const canQueueWhileRunning = isRunning && !approvalPending && !delegationPending && !modelSetupRequired;
+  const queuedMessages = useComposerQueueStore((state) =>
+    selectQueuedMessages(state, targetSessionId)
+  );
+
+  const capabilityMenu = useComposerCapabilityMenu({
+    enabled: Boolean(activeSession),
+    enableSkills: true,
+    provider: runtimeProvider,
+    prompt,
+    cursorIndex,
+    projectPath: activeSession?.cwd,
+    sessionMessages: activeSession?.messages || [],
+    setPrompt,
+    setCursorIndex,
+    onCommandSelect: (command, nextPrompt) => {
+      if (command.name === 'goal' && supportsGoalUI(agentSelection.provider)) {
+        if (agentSelection.provider === 'claude') agentSelection.setClaudeExecutionMode('execute');
+        else agentSelection.setCodexExecutionMode('execute');
+        sessionGoal.setDraft(true);
+        const next = removeSelectedSlashCommandPrompt(nextPrompt, command.name);
+        setPrompt(next.prompt);
+        setCursorIndex(next.cursorIndex);
+        return true;
+      }
+
+      if (command.name !== 'plan' || !activeSession) {
+        return false;
+      }
+
+      sessionGoal.setDraft(false);
+      if (runtimeProvider === 'claude') {
+        agentSelection.setClaudeExecutionMode('plan');
+        setSessionClaudeMode(activeSession.id, agentSelection.claudePermissionMode, 'plan');
+      } else if (runtimeProvider === 'codex') {
+        agentSelection.setCodexExecutionMode('plan');
+        setSessionCodexExecutionMode(activeSession.id, 'plan');
+      } else if (runtimeProvider === 'bubble') {
+        agentSelection.setBubbleExecutionMode('plan');
+        setSessionBubblePermissionMode(activeSession.id, 'plan');
+      } else {
+        return false;
+      }
+      const next = removeSelectedSlashCommandPrompt(nextPrompt, command.name);
+      setPrompt(next.prompt);
+      setCursorIndex(next.cursorIndex);
+      return true;
+    },
+  });
+
+  const projectFileMentions = useProjectFileMentions({
+    cwd: activeSession?.cwd,
+    prompt,
+    cursorIndex,
+  });
+
+  const resetComposer = useCallback(() => {
+    setPrompt('');
+    setCursorIndex(0);
+    setAttachments([]);
+    const id = goalTargetRef.current;
+    if (id) useImageStudioStore.getState().patch(id, { selected: [], comments: {}, feedback: undefined });
+    window.requestAnimationFrame(() => {
+      editorRef.current?.focus();
+      editorRef.current?.setCursorIndex(0);
+    });
+  }, []);
+
+  const openModelSetup = useCallback(() => {
+    const setup = agentSelection.modelSetup;
+    if (!setup) {
+      return;
+    }
+    setActiveSettingsTab(setup.settingsTab);
+    setShowSettings(true);
+  }, [agentSelection.modelSetup, setActiveSettingsTab, setShowSettings]);
+
+  useEffect(() => {
+    if (!pendingChatInjection) {
+      return;
+    }
+    if (pendingChatInjection.sessionId && pendingChatInjection.sessionId !== targetSessionId) {
+      return;
+    }
+    const injection = pendingChatInjection;
+    if (injection.text) {
+      setPrompt((current) => {
+        if (injection.mode === 'replace' || !current.trim()) {
+          return injection.text ?? '';
+        }
+        return `${current.trimEnd()}\n\n${injection.text}`;
+      });
+    }
+    if (injection.attachments && injection.attachments.length > 0) {
+      setAttachments((prev) => {
+        const existing = new Set(prev.map((item) => item.id));
+        const additions = (injection.attachments ?? []).filter((a) => !existing.has(a.id));
+        return [...prev, ...additions];
+      });
+    }
+    window.requestAnimationFrame(() => editorRef.current?.focus());
+    consumeChatInjection(injection.nonce);
+  }, [consumeChatInjection, pendingChatInjection, targetSessionId]);
+
+  // After a conversation rewind, the rewound-away prompt is offered back to
+  // the composer (matching Claude Code's /rewind behavior). Never clobber
+  // text the user has already typed.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ sessionId?: string; text?: string }>).detail;
+      if (!detail?.text || detail.sessionId !== targetSessionId) return;
+      setPrompt((current) => (current.trim() ? current : detail.text!));
+      setCursorIndex(detail.text.length);
+      window.requestAnimationFrame(() => editorRef.current?.focus());
+    };
+    window.addEventListener('aegis-composer-set-prompt', handler);
+    return () => window.removeEventListener('aegis-composer-set-prompt', handler);
+  }, [targetSessionId]);
+
+  const buildDispatchPrompt = async (): Promise<string | null> => {
+    const selectedSkillPrompt =
+      capabilityMenu.selectedSkill && runtimeProvider === 'codex'
+        ? capabilityMenu.selectedSkillRemainder.trim()
+        : prompt.trim();
+
+    const selectedImages = attachments.filter(item => item.id.startsWith('image-studio:'));
+    const referenceImages = attachments.filter(item => item.kind === 'image');
+    const imagePrompt = selectedImages.length && supportsImageStudio(runtimeProvider)
+      ? imageEditEffectivePrompt(runtimeProvider as 'codex' | 'grok', imageCommentPrompt(
+          referenceImages.map(item => item.id.startsWith('image-studio:') ? item.id.slice('image-studio:'.length) : item.path), imageStudio.comments, selectedSkillPrompt),
+          referenceImages.map(item => item.path))
+      : selectedSkillPrompt;
+    return buildPromptWithProjectFileMentions({
+      cwd: activeSession?.cwd || null,
+      prompt: imagePrompt,
+      ignoredMentionPaths: [],
+    });
+  };
+
+  const autoConvertComposerTextToAttachment = useCallback(async (
+    value: string,
+    nextCursorIndex: number
+  ): Promise<boolean> => {
+    if (isComposingRef.current) {
+      setPrompt(value);
+      setCursorIndex(nextCursorIndex);
+      return false;
+    }
+
+    // Text recalled from prompt history is exempt from long-prompt conversion:
+    // silently swapping a recalled prompt for an attachment would wipe the
+    // composer and drop the stashed draft.
+    if (historyAppliedTextRef.current !== null && value === historyAppliedTextRef.current) {
+      setPrompt(value);
+      setCursorIndex(nextCursorIndex);
+      return false;
+    }
+
+    if ((supportsGoalUI(runtimeProvider) && parseGoalInput(value, sessionGoal.drafting).isGoal) || value.trim().length <= LONG_PROMPT_AUTO_ATTACHMENT_THRESHOLD) {
+      setPrompt(value);
+      setCursorIndex(nextCursorIndex);
+      return false;
+    }
+
+    const promptWithAttachment = await maybeConvertLongPromptToAttachment({
+      cwd: activeSession?.cwd || null,
+      prompt: value,
+      attachments,
+    });
+
+    if (!promptWithAttachment.converted) {
+      setPrompt(value);
+      setCursorIndex(nextCursorIndex);
+      if (promptWithAttachment.reason === 'attachment_create_failed') {
+        toast.error('Failed to convert the long message into an attachment.');
+      }
+      return false;
+    }
+
+    setAttachments(promptWithAttachment.attachments);
+    setPrompt('');
+    setCursorIndex(0);
+    window.requestAnimationFrame(() => editorRef.current?.focus());
+    return true;
+  }, [activeSession?.cwd, attachments, runtimeProvider, sessionGoal.drafting]);
+
+  const handleSend = async (invertFollowUp = false) => {
+    const goalInput = parseGoalInput(prompt, sessionGoal.drafting);
+    const isGoal = supportsGoalUI(agentSelection.provider) && goalInput.isGoal;
+    if (isGoal && agentSelection.provider === 'claude' && isClaudeGoalClearObjective(goalInput.objective) && attachments.length === 0) {
+      if (goalSubmitting) return;
+      setGoalSubmitting(true);
+      try {
+        if (activeSession && !activeSession.isDraft) await sessionGoal.change({ type: 'clear' });
+        sessionGoal.setDraft(false);
+        resetComposer();
+      } catch (error) { toast.error(error instanceof Error ? error.message : 'Failed to clear goal'); }
+      finally { setGoalSubmitting(false); }
+      return;
+    }
+    if (isGoal && !goalInput.objective && attachments.length === 0) {
+      sessionGoal.setDraft(true);
+      if (agentSelection.provider === 'claude') agentSelection.setClaudeExecutionMode('execute');
+      else agentSelection.setCodexExecutionMode('execute');
+      setPrompt(''); setCursorIndex(0);
+      window.requestAnimationFrame(() => editorRef.current?.focus());
+      return;
+    }
+
+    if (attachmentImport.pending.current > 0 || imageAttachmentsLoading) return;
+    if (!prompt.trim() && attachments.length === 0) return;
+    if (runtimeProvider === 'deepseek') {
+      const imageError = deepseekImageInputError(attachments, agentSelection.model, agentSelection.deepseekModelConfig);
+      if (imageError) { toast.error(imageError); return; }
+    }
+    const referenceError = getSessionReferenceCapabilityError(prompt, runtimeProvider, activeSession?.id);
+    if (referenceError) { toast.error(referenceError); return; }
+    if (agentSelection.modelSetup) {
+      toast.error(agentSelection.modelSetup.title);
+      openModelSetup();
+      return;
+    }
+    if (!activeSession) {
+      setShowNewSession(true);
+      return;
+    }
+
+    const trimmedImagine = prompt.trim();
+    if (
+      runtimeProvider === 'grok' &&
+      attachments.length === 0 &&
+      /^\/imagine(?:-video)?$/i.test(trimmedImagine)
+    ) {
+      toast.error(
+        trimmedImagine.toLowerCase() === '/imagine-video'
+          ? 'Add a description after /imagine-video.'
+          : 'Add a description after /imagine.'
+      );
+      return;
+    }
+
+    // `/rewind` is a local UI command (checkpoint restore), not a prompt for
+    // the model: open the rewind dialog instead of dispatching a turn.
+    if (
+      (runtimeProvider === 'claude' || runtimeProvider === 'bubble') &&
+      prompt.trim().toLowerCase() === '/rewind' &&
+      attachments.length === 0 &&
+      activeSession.id
+    ) {
+      setPrompt('');
+      setCursorIndex(0);
+      window.dispatchEvent(
+        new CustomEvent('aegis-rewind-open', { detail: { sessionId: activeSession.id } })
+      );
+      return;
+    }
+
+    const displayPrompt = isGoal ? goalInput.objective : prompt.trim();
+    const normalizedPrompt = await buildDispatchPrompt();
+    if (normalizedPrompt === null) {
+      return;
+    }
+    const promptWithAttachment = isGoal ? { prompt: displayPrompt, attachments, converted: false, reason: undefined } : await maybeConvertLongPromptToAttachment({
+      cwd: activeSession?.cwd || null,
+      prompt: displayPrompt,
+      attachments,
+    });
+    const outgoingPrompt = promptWithAttachment.converted ? promptWithAttachment.prompt : displayPrompt;
+    // Side chats (Codex parity): the FIRST send carries the side-conversation
+    // preamble on the effective prompt so the fork doesn't continue the
+    // parent thread's task; the displayed prompt stays exactly what the user
+    // typed. Subsequent sends are plain.
+    const sideChatEntry = activeSession
+      ? useAppStore.getState().sideChats[activeSession.id]
+      : undefined;
+    if (sideChatEntry?.constraintPending) {
+      useAppStore.getState().noteSideChatUserTurn(activeSession.id);
+    }
+    const outgoingEffectivePrompt = sideChatEntry?.constraintPending
+      ? buildSideChatEffectivePrompt(
+          promptWithAttachment.converted ? promptWithAttachment.prompt : normalizedPrompt
+        )
+      : promptWithAttachment.converted
+        ? promptWithAttachment.prompt
+        : normalizedPrompt;
+    const outgoingAttachments = promptWithAttachment.attachments;
+    if (promptWithAttachment.reason === 'attachment_create_failed') {
+      toast.error('Failed to convert the long message into an attachment. Sending inline instead.');
+    }
+    const imageEdit = attachments.some(item => item.id.startsWith('image-studio:')) && supportsImageStudio(runtimeProvider);
+    const codexReferences = runtimeProvider === 'codex'
+      ? capabilityMenu.selectedSkill ? buildCodexReferencePayload(capabilityMenu.selectedSkill)
+        : imageEdit ? await resolveImageStudioReferences(activeSession.cwd) : {}
+      : {};
+    if (isGoal && !activeSession.isDraft) {
+      if (goalSubmitting) return;
+      if (sessionGoal.goal && sessionGoal.goal.status !== 'complete' && !(await confirmDialog({
+        title: 'Replace current goal?',
+        description: `This will keep the chat but replace the saved goal with your current composer text.\n\n${displayPrompt}`,
+        confirmLabel: 'Replace goal', cancelLabel: 'Cancel', tone: 'default',
+      }))) return;
+      setGoalSubmitting(true);
+      try {
+        await sessionGoal.change({ type: 'set', status: 'active', objective: buildGoalObjective(parseGoalInput(normalizedPrompt, true).objective, outgoingAttachments) }, {
+          appendTranscript: true,
+          claudeAccessMode: agentSelection.claudePermissionMode, claudeReasoningEffort: agentSelection.claudeReasoningEffort || undefined,
+          model: selectedModel || undefined, codexPermissionMode: agentSelection.codexPermissionMode,
+          codexReasoningEffort: agentSelection.codexReasoningEffort || undefined, codexFastMode: agentSelection.codexFastMode,
+        });
+        if (agentSelection.provider === 'claude') {
+          agentSelection.setClaudeExecutionMode('execute');
+          setSessionClaudeMode(activeSession.id, agentSelection.claudePermissionMode, 'execute');
+        } else {
+          agentSelection.setCodexExecutionMode('execute');
+          setSessionCodexExecutionMode(activeSession.id, 'execute');
+        }
+        sessionGoal.setDraft(false);
+        if (goalTargetRef.current === activeSession.id) resetComposer();
+      } catch (error) { toast.error(error instanceof Error ? error.message : 'Failed to set goal'); }
+      finally { setGoalSubmitting(false); }
+      return;
+    }
+    if (activeSession.isDraft) {
+      if (!activeSession.cwd?.trim()) {
+        toast.error('Select a project folder before starting a task.');
+        return;
+      }
+
+      if (isGoal) sessionGoal.setDraft(false);
+      setPendingStart(true);
+      useAppStore.setState({ pendingDraftSessionId: activeSession.id });
+      const projectKey = (activeSession.cwd || '').trim() || '__no_project__';
+      const channelId =
+        activeSession.channelId ||
+        activeChannelByProject[projectKey] ||
+        DEFAULT_WORKSPACE_CHANNEL_ID;
+      sendEvent({
+        type: 'session.start',
+        payload: {
+          title: activeSession.title || 'New Chat',
+          skipTitleGeneration: activeSession.draftTitleEdited || undefined,
+          codexGoal: isGoal && agentSelection.provider === 'codex' ? { type: 'set', status: 'active', objective: buildGoalObjective(parseGoalInput(normalizedPrompt, true).objective, outgoingAttachments) } : undefined,
+          prompt: isGoal ? (runtimeProvider === 'claude' ? `/goal ${buildGoalObjective(parseGoalInput(normalizedPrompt, true).objective, outgoingAttachments)}` : `/goal ${outgoingPrompt}`) : outgoingPrompt,
+          effectivePrompt: outgoingEffectivePrompt,
+          cwd: activeSession.cwd,
+          projectCwd: activeSession.projectCwd ?? activeSession.cwd ?? null,
+          envMode: activeSession.envMode ?? 'local',
+          worktreePath: activeSession.worktreePath ?? null,
+          associatedWorktreePath: activeSession.associatedWorktreePath ?? null,
+          associatedWorktreeBranch: activeSession.associatedWorktreeBranch ?? null,
+          associatedWorktreeRef: activeSession.associatedWorktreeRef ?? null,
+          scope: 'project',
+          channelId,
+          createIsolatedWorkspace:
+            draftStartMode[activeSession.id] === 'worktree' || undefined,
+          attachments: outgoingAttachments.length > 0 ? outgoingAttachments : undefined,
+          provider: runtimeProvider,
+          model: selectedModel || undefined,
+          compatibleProviderId:
+            runtimeProvider === 'claude' ? agentSelection.compatibleProviderId || undefined : undefined,
+          claudeAccessMode:
+            runtimeProvider === 'claude'
+              ? agentSelection.claudePermissionMode
+              : undefined,
+          claudeExecutionMode:
+            runtimeProvider === 'claude'
+              ? (isGoal ? 'execute' : agentSelection.claudeExecutionMode)
+              : undefined,
+          claudeReasoningEffort:
+            runtimeProvider === 'claude'
+              ? agentSelection.claudeReasoningEffort || undefined
+              : undefined,
+          ...codexReferences,
+          codexExecutionMode:
+            runtimeProvider === 'codex' ? (isGoal ? 'execute' : agentSelection.codexExecutionMode) : undefined,
+          codexPermissionMode:
+            runtimeProvider === 'codex'
+              ? agentSelection.codexPermissionMode
+              : undefined,
+          codexReasoningEffort:
+            runtimeProvider === 'codex'
+              ? agentSelection.codexReasoningEffort || undefined
+              : undefined,
+          codexFastMode:
+            runtimeProvider === 'codex' ? agentSelection.codexFastMode : undefined,
+          kimiPermissionMode:
+            runtimeProvider === 'kimi' || runtimeProvider === 'grok'
+              ? agentSelection.kimiPermissionMode
+              : undefined,
+          kimiThinking:
+            runtimeProvider === 'kimi' ? agentSelection.kimiThinkingToSend : undefined,
+          grokPermissionMode:
+            runtimeProvider === 'grok'
+              ? agentSelection.kimiPermissionMode
+              : undefined,
+          grokReasoningEffort:
+            runtimeProvider === 'grok'
+              ? agentSelection.grokReasoningEffort || undefined
+              : undefined,
+          opencodePermissionMode:
+            runtimeProvider === 'opencode'
+              ? agentSelection.opencodePermissionMode
+              : undefined,
+          qoderPermissionMode:
+            runtimeProvider === 'qoder'
+              ? agentSelection.qoderPermissionMode
+              : undefined,
+          deepseekPermissionMode:
+            runtimeProvider === 'deepseek'
+              ? agentSelection.deepseekPermissionMode
+              : undefined,
+          deepseekAgentPreset:
+            runtimeProvider === 'deepseek'
+              ? agentSelection.deepseekAgentPreset
+              : undefined,
+          deepseekReasoningEffort:
+            runtimeProvider === 'deepseek'
+              ? agentSelection.deepseekReasoningEffort
+              : undefined,
+          bubblePermissionMode:
+            runtimeProvider === 'bubble'
+              ? agentSelection.bubbleExecutionMode === 'plan'
+                ? 'plan'
+                : agentSelection.bubblePermissionMode
+              : undefined,
+          bubbleThinkingLevel:
+            runtimeProvider === 'bubble'
+              ? agentSelection.bubbleThinkingLevel || undefined
+              : undefined,
+          teamMode: 'solo',
+          teamId: null,
+        },
+      });
+      resetComposer();
+      return;
+    }
+
+    // Queue locally for all providers, or steer when the runtime supports it.
+    // Queued messages auto-send after successful completion.
+    const shouldSteer = !imageEdit && canSteerWhileRunning && ((preferences.followUpBehavior === 'steer') !== invertFollowUp);
+    if (canQueueWhileRunning && !shouldSteer) {
+      useComposerQueueStore.getState().enqueue(activeSession.id, {
+        id: crypto.randomUUID(),
+        displayPrompt: outgoingPrompt,
+        effectivePrompt: outgoingEffectivePrompt,
+        attachments: outgoingAttachments,
+        references: codexReferences,
+        exclusive: imageEdit,
+      });
+      resetComposer();
+      return;
+    }
+
+    sendContinueEvent(activeSession.id, {
+      displayPrompt: outgoingPrompt,
+      effectivePrompt: outgoingEffectivePrompt,
+      attachments: outgoingAttachments,
+      references: codexReferences,
+    });
+    resetComposer();
+  };
+
+  // One payload builder for all three continue paths: direct send, chip
+  // "Steer" (mid-turn injection), and the queue auto-flush on turn end.
+  const sendContinueEvent = (
+    sessionId: string,
+    outgoing: {
+      displayPrompt: string;
+      effectivePrompt: string;
+      attachments: Attachment[];
+      references: CodexReferencePayload;
+    }
+  ) => {
+    sendEvent({
+      type: 'session.continue',
+      payload: {
+        sessionId,
+        prompt: outgoing.displayPrompt,
+        effectivePrompt: outgoing.effectivePrompt,
+        attachments: outgoing.attachments.length > 0 ? outgoing.attachments : undefined,
+        provider: runtimeProvider,
+        model: selectedModel || undefined,
+        compatibleProviderId:
+          runtimeProvider === 'claude' ? agentSelection.compatibleProviderId || undefined : undefined,
+        claudeAccessMode:
+          runtimeProvider === 'claude'
+            ? agentSelection.claudePermissionMode
+            : undefined,
+        claudeExecutionMode:
+          runtimeProvider === 'claude'
+            ? agentSelection.claudeExecutionMode
+            : undefined,
+        claudeReasoningEffort:
+          runtimeProvider === 'claude'
+            ? agentSelection.claudeReasoningEffort || undefined
+            : undefined,
+        ...outgoing.references,
+        codexExecutionMode:
+          runtimeProvider === 'codex' ? agentSelection.codexExecutionMode : undefined,
+        codexPermissionMode:
+          runtimeProvider === 'codex'
+            ? agentSelection.codexPermissionMode
+            : undefined,
+        codexReasoningEffort:
+          runtimeProvider === 'codex'
+            ? agentSelection.codexReasoningEffort || undefined
+            : undefined,
+        codexFastMode:
+          runtimeProvider === 'codex' ? agentSelection.codexFastMode : undefined,
+        kimiPermissionMode:
+          runtimeProvider === 'kimi' || runtimeProvider === 'grok'
+            ? agentSelection.kimiPermissionMode
+            : undefined,
+        kimiThinking:
+          runtimeProvider === 'kimi' ? agentSelection.kimiThinkingToSend : undefined,
+        grokPermissionMode:
+          runtimeProvider === 'grok'
+            ? agentSelection.kimiPermissionMode
+            : undefined,
+        grokReasoningEffort:
+          runtimeProvider === 'grok'
+            ? agentSelection.grokReasoningEffort || undefined
+            : undefined,
+        opencodePermissionMode:
+          runtimeProvider === 'opencode'
+            ? agentSelection.opencodePermissionMode
+            : undefined,
+        qoderPermissionMode:
+          runtimeProvider === 'qoder'
+            ? agentSelection.qoderPermissionMode
+            : undefined,
+        deepseekPermissionMode:
+          runtimeProvider === 'deepseek'
+            ? agentSelection.deepseekPermissionMode
+            : undefined,
+        deepseekReasoningEffort:
+          runtimeProvider === 'deepseek'
+            ? agentSelection.deepseekReasoningEffort
+            : undefined,
+        bubblePermissionMode:
+          runtimeProvider === 'bubble'
+            ? agentSelection.bubbleExecutionMode === 'plan'
+              ? 'plan'
+              : agentSelection.bubblePermissionMode
+            : undefined,
+        bubbleThinkingLevel:
+          runtimeProvider === 'bubble'
+            ? agentSelection.bubbleThinkingLevel || undefined
+            : undefined,
+        teamMode: 'solo',
+        teamId: null,
+      },
+    });
+  };
+
+  // Chip action: inject a queued message into the still-running turn.
+  const steerQueuedMessage = (itemId: string) => {
+    if (!targetSessionId || approvalPending || (isRunning && !canSteerWhileRunning)) return;
+    const queued = useComposerQueueStore.getState().queues[targetSessionId]?.find(item => item.id === itemId);
+    if (queued?.exclusive && isRunning) return;
+    const item = useComposerQueueStore.getState().takeOne(targetSessionId, itemId);
+    if (!item) return;
+    if (item.dispatch) { item.dispatch(); return; }
+    sendContinueEvent(targetSessionId, item);
+  };
+
+  const removeQueuedMessage = (itemId: string) => {
+    if (!targetSessionId) return;
+    useComposerQueueStore.getState().remove(targetSessionId, itemId);
+  };
+
+  // While mounted and bound, this composer OWNS the session's queue flush —
+  // the store-level watcher (queue-auto-flush.ts) covers sessions no pane is
+  // showing, with session-sticky config instead of the live composer
+  // selection used here.
+  useEffect(() => {
+    if (!targetSessionId) return;
+    claimQueueFlushOwner(targetSessionId);
+    return () => releaseQueueFlushOwner(targetSessionId);
+  }, [targetSessionId]);
+
+  // Auto-flush: when the running turn finishes normally, queued messages are
+  // sent as the next turn (in queue order, combined into one dispatch). An
+  // error outcome keeps them queued so they aren't fired into a broken session.
+  // Tracked per session — a pane switch from a running session to a completed
+  // one must not read as a "turn just finished" transition.
+  const prevStatusRef = useRef<{ sessionId: string | null; status: string | undefined }>({
+    sessionId: targetSessionId ?? null,
+    status: activeSession?.status,
+  });
+  useEffect(() => {
+    const prev = prevStatusRef.current;
+    const current = activeSession?.status;
+    prevStatusRef.current = { sessionId: targetSessionId ?? null, status: current };
+    if (!targetSessionId || prev.sessionId !== targetSessionId) return;
+    if (prev.status !== 'running' || current !== 'completed') return;
+    const items = useComposerQueueStore.getState().takeNextBatch(targetSessionId);
+    if (items.length === 0) return;
+    if (items[0].exclusive && items[0].dispatch) { items[0].dispatch(); return; }
+    sendContinueEvent(targetSessionId, {
+      displayPrompt: items.map((item) => item.displayPrompt).join('\n\n'),
+      effectivePrompt: items.map((item) => item.effectivePrompt).join('\n\n'),
+      attachments: items.flatMap((item) => item.attachments),
+      references: {
+        codexSkills: items.flatMap((item) => item.references.codexSkills ?? []),
+        codexMentions: items.flatMap((item) => item.references.codexMentions ?? []),
+      },
+    });
+    // Config for the flushed turn is read from the CURRENT composer selection,
+    // matching what a manual send at this moment would use.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSession?.status, targetSessionId]);
+
+  const handleStop = () => {
+    if (targetSessionId) {
+      sendEvent({
+        type: 'session.stop',
+        payload: { sessionId: targetSessionId },
+      });
+    }
+  };
+
+  const handleAddAttachments = () => attachmentImport.choose();
+
+  const handleSelectProjectFile = useCallback(
+    async (file: { path: string; relativePath?: string }) => {
+      const cwd = activeSession?.cwd;
+      const mention = projectFileMentions.mention;
+      if (!cwd || !mention) {
+        return;
+      }
+
+      const next = insertProjectFileMention(
+        prompt,
+        mention,
+        file.relativePath || file.path
+      );
+      setPrompt(next.prompt);
+      setCursorIndex(next.cursorIndex);
+      window.requestAnimationFrame(() => {
+        editorRef.current?.focus();
+        editorRef.current?.setCursorIndex(next.cursorIndex);
+      });
+    },
+    [activeSession?.cwd, projectFileMentions.mention, prompt]
+  );
+
+  const handlePromptChange = async (value: string, nextCursorIndex: number) => {
+    await autoConvertComposerTextToAttachment(value, nextCursorIndex);
+  };
+
+  const handlePasteImages = useCallback(async (
+    images: { mimeType: string; data: Uint8Array; name?: string }[]
+  ): Promise<boolean> => {
+    if (isBusy || images.length === 0) return false;
+
+    const created: Attachment[] = [];
+    let failed = 0;
+    for (const image of images) {
+      try {
+        const attachment = await window.electron.createInlineImageAttachment(
+          image.mimeType,
+          image.data
+        );
+        if (attachment) {
+          created.push(attachment);
+        } else {
+          failed += 1;
+        }
+      } catch {
+        failed += 1;
+      }
+    }
+
+    if (created.length > 0) {
+      setAttachments((prev) => {
+        const existingPaths = new Set(prev.map((a) => a.path));
+        const next = [...prev];
+        for (const a of created) {
+          if (!existingPaths.has(a.path)) {
+            next.push(a);
+          }
+        }
+        return next;
+      });
+    }
+
+    if (failed > 0) {
+      toast.error(`Failed to paste ${failed} image(s). PNG, JPEG, WebP and GIF up to 10 MB are supported.`);
+    }
+
+    return created.length > 0;
+  }, [isBusy]);
+
+  const handleLongPaste = useCallback((
+    context: { text: string; start: number; end: number }
+  ): boolean => {
+    if (supportsGoalUI(runtimeProvider) && (sessionGoal.drafting || parseGoalInput(prompt || context.text, false).isGoal)) return false;
+    const pastedText = context.text.trim();
+    if (pastedText.length <= LONG_PROMPT_AUTO_ATTACHMENT_THRESHOLD) {
+      return false;
+    }
+
+    const pasteInline = () => {
+      const nextPrompt = `${prompt.slice(0, context.start)}${context.text}${prompt.slice(context.end)}`;
+      const nextCursorIndex = context.start + context.text.length;
+      setPrompt(nextPrompt);
+      setCursorIndex(nextCursorIndex);
+      window.requestAnimationFrame(() => {
+        editorRef.current?.focus();
+        editorRef.current?.setCursorIndex(nextCursorIndex);
+      });
+    };
+
+    const toastId = toast.loading('Creating text attachment...');
+    void (async () => {
+      try {
+        const promptWithAttachment = await maybeConvertLongPromptToAttachment({
+          cwd: activeSession?.cwd || null,
+          prompt: pastedText,
+          attachments,
+          allowProjectMentions: true,
+        });
+
+        if (!promptWithAttachment.converted) {
+          pasteInline();
+          toast.error(getLongPromptAttachmentFallbackMessage(promptWithAttachment.reason), {
+            id: toastId,
+          });
+          return;
+        }
+
+        const nextPrompt = `${prompt.slice(0, context.start)}${prompt.slice(context.end)}`;
+        setAttachments(promptWithAttachment.attachments);
+        setPrompt(nextPrompt);
+        setCursorIndex(context.start);
+        toast.dismiss(toastId);
+        window.requestAnimationFrame(() => {
+          editorRef.current?.focus();
+          editorRef.current?.setCursorIndex(context.start);
+        });
+      } catch {
+        pasteInline();
+        toast.error('Could not create a text attachment. Pasted inline instead.', {
+          id: toastId,
+        });
+        return;
+      }
+    })();
+
+    return true;
+  }, [activeSession?.cwd, attachments, prompt, runtimeProvider, sessionGoal.drafting]);
+
+  // ArrowUp on the first visual line ENTERS history browsing; while a browse
+  // is active the arrows always step (terminal-style) — recalled multiline
+  // prompts leave the caret on their last line and must not require walking
+  // it back up before browsing can continue. Editing the recalled text exits
+  // the browse and returns the arrows to normal caret movement. Returns true
+  // when the key was consumed.
+  const handleHistoryArrowKey = (e: ReactKeyboardEvent): boolean => {
+    if (
+      (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') ||
+      e.shiftKey || e.altKey || e.metaKey || e.ctrlKey
+    ) {
+      return false;
+    }
+
+    const caret = editorRef.current?.getCaretInfo();
+    if (!caret || !caret.collapsed) {
+      // With a non-collapsed selection the arrows keep their native
+      // collapse/extend behavior instead of replacing the composer content.
+      return false;
+    }
+
+    const browsing = historyNavRef.current.index !== null;
+    if (!browsing) {
+      if (e.key === 'ArrowDown') {
+        return false;
+      }
+      // Entering requires the caret on the first visual row: the editor
+      // soft-wraps, so a long logical line spans several rows and the lower
+      // ones keep native caret movement. Rect information can be unavailable
+      // (e.g. in tests) — fall back to newline scanning.
+      const onFirstLine = caret.onFirstVisualLine ?? isCursorOnFirstLine(prompt, caret.index);
+      if (!onFirstLine) {
+        return false;
+      }
+    }
+
+    const step = stepPromptHistory(
+      promptHistory,
+      historyNavRef.current,
+      e.key === 'ArrowUp' ? 'prev' : 'next',
+      prompt,
+      attachments
+    );
+    if (!step) {
+      return false;
+    }
+    e.preventDefault();
+    applyPromptHistoryStep(step);
+    return true;
+  };
+
+  const handleKeyDown = (e: ReactKeyboardEvent) => {
+    if (isImeComposingEvent(e, isComposingRef)) {
+      return;
+    }
+
+    // While a history browse is active it owns the arrow keys even when the
+    // recalled text re-opened the @-mention or slash menu — a recalled
+    // "/rewind" must not trap ArrowUp/ArrowDown in the menu. When idle, the
+    // menus keep priority and history only sees keys they did not consume.
+    const historyBrowseActive = historyNavRef.current.index !== null;
+    if (historyBrowseActive && handleHistoryArrowKey(e)) {
+      return;
+    }
+
+    if (projectFileMentions.hasMentionQuery) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        projectFileMentions.moveSelection(1);
+        return;
+      }
+
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        projectFileMentions.moveSelection(-1);
+        return;
+      }
+
+      if (
+        (e.key === 'Enter' || e.key === 'Tab') &&
+        projectFileMentions.suggestions.length > 0
+      ) {
+        e.preventDefault();
+        const currentSuggestion = projectFileMentions.getCurrentSuggestion();
+        if (currentSuggestion) {
+          void handleSelectProjectFile(currentSuggestion);
+        }
+        return;
+      }
+    }
+
+    if (capabilityMenu.hasSlashQuery) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        capabilityMenu.moveSelection(1);
+        return;
+      }
+
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        capabilityMenu.moveSelection(-1);
+        return;
+      }
+
+      if (
+        (e.key === 'Enter' || e.key === 'Tab') &&
+        capabilityMenu.suggestions.length > 0
+      ) {
+        e.preventDefault();
+        capabilityMenu.selectCurrentSuggestion();
+        window.requestAnimationFrame(() => editorRef.current?.focus());
+        return;
+      }
+    }
+
+    if (!historyBrowseActive && handleHistoryArrowKey(e)) {
+      return;
+    }
+
+    const enterAction = composerEnterAction(e, prompt, preferences.enterBehavior);
+    if (enterAction.send) {
+      e.preventDefault();
+      if (isEffectivelyRunning) {
+        // Steer-capable providers queue mid-turn (handleSend routes to the
+        // queue); Enter on an empty composer keeps the old stop shortcut.
+        if (canQueueWhileRunning && (prompt.trim() || attachments.length > 0)) {
+          handleSend(enterAction.invert);
+        } else {
+          handleStop();
+        }
+      } else if (!isBusy && !modelSetupRequired) {
+        handleSend(enterAction.invert);
+      }
+    }
+  };
+
+  const isLandingSurface = composerSurface === 'landing';
+  // The landing shares the home composer's themed surface and utility rail.
+  const composerOuterClass = isLandingSurface
+    ? 'group relative aegis-new-thread-composer-tray'
+    : 'group relative rounded-[28px] bg-transparent transition-shadow duration-200';
+  const composerInnerClass = isLandingSurface
+    ? 'aegis-new-thread-composer-surface'
+    : 'rounded-[26px] border border-[color-mix(in_srgb,var(--border)_72%,transparent)] bg-[var(--bg-primary)] shadow-[0_18px_44px_rgba(15,23,42,0.08)] transition-[border-color,box-shadow] duration-200 focus-within:border-[color-mix(in_srgb,var(--border)_92%,transparent)] focus-within:shadow-[0_20px_52px_rgba(15,23,42,0.12)]';
+
+  return (
+    <div className="bg-transparent" data-composer-empty={!prompt && attachments.length === 0}>
+      <div className="mx-auto max-w-4xl">
+        {queuedMessages.length > 0 ? (
+          // Codex-Desktop-style queue bar: a card tucked BEHIND the composer
+          // (the composer's top edge overlaps its extra bottom padding), one
+          // row per queued message with a branch glyph, a plain-text Steer
+          // action, and a flat trash button.
+          <div className="-mb-4 mx-1.5 rounded-t-[18px] border border-b-0 border-[var(--border)] bg-[var(--bg-primary)] px-1.5 pb-5 pt-1 shadow-[0_-4px_16px_rgba(15,23,42,0.04)]">
+            {queuedMessages.map((item) => (
+              <div key={item.id} className="flex items-center gap-2.5 py-1 pl-2.5 pr-1">
+                <ArrowElbowRight className="h-4 w-4 flex-shrink-0 text-[var(--text-muted)]" aria-hidden="true" />
+                <span className="min-w-0 flex-1 truncate text-[13.5px] text-[var(--text-primary)]">
+                  {item.displayPrompt || 'Queued message'}
+                </span>
+                {item.attachments.length > 0 ? (
+                  <span className="flex-shrink-0 text-[11px] text-[var(--text-muted)]">
+                    +{item.attachments.length} file{item.attachments.length > 1 ? 's' : ''}
+                  </span>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={() => steerQueuedMessage(item.id)}
+                  disabled={approvalPending || (isRunning && (!canSteerWhileRunning || item.exclusive))}
+                  title={
+                    item.exclusive && isRunning
+                      ? 'Waits for the current turn to finish'
+                      : delegationPending && isRunning
+                      ? 'Locked while a delegated agent is working'
+                      : canSteerWhileRunning
+                        ? 'Send into the running turn now'
+                        : 'Send as the next message'
+                  }
+                  className="flex flex-shrink-0 items-center gap-1.5 rounded-lg px-2 py-1 text-[13px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <CornerDownRight className="h-4 w-4" aria-hidden="true" />
+                  {canSteerWhileRunning && !item.exclusive ? 'Steer' : 'Send'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => removeQueuedMessage(item.id)}
+                  title="Remove from queue"
+                  aria-label="Remove queued message"
+                  className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {sessionGoal.goal && sessionGoal.goal.status !== 'complete' && <SessionGoal key={activeSession?.id} sessionId={activeSession!.id} goal={sessionGoal.goal} resumeConfirmation={sessionGoal.snapshot?.resumeConfirmation} onDismissResume={sessionGoal.dismissResume} onChange={action => sessionGoal.change(action, {
+          claudeAccessMode: agentSelection.claudePermissionMode, claudeReasoningEffort: agentSelection.claudeReasoningEffort || undefined,
+          model: selectedModel || undefined, codexPermissionMode: agentSelection.codexPermissionMode,
+          codexReasoningEffort: agentSelection.codexReasoningEffort || undefined, codexFastMode: agentSelection.codexFastMode,
+        })} />}
+        <div className={composerOuterClass}>
+          {projectFileMentions.hasMentionQuery ? (
+            <div className="absolute inset-x-0 bottom-full z-40">
+              <ProjectFileMentionMenu
+                suggestions={projectFileMentions.suggestions}
+                selectedIndex={projectFileMentions.selectedIndex}
+                loading={projectFileMentions.loading}
+                onSelect={(suggestion) => {
+                  void handleSelectProjectFile(suggestion);
+                }}
+              />
+            </div>
+          ) : capabilityMenu.hasSlashQuery ? (
+            <div className="absolute inset-x-0 bottom-full z-40">
+              <ClaudeSkillMenu
+                suggestions={capabilityMenu.suggestions}
+                selectedIndex={capabilityMenu.selectedIndex}
+                empty={capabilityMenu.suggestions.length === 0}
+                title={capabilityMenu.menuTitle}
+                emptyMessage={capabilityMenu.emptyMessage}
+                onSelect={(suggestion) => {
+                  capabilityMenu.selectSuggestion(suggestion);
+                  window.requestAnimationFrame(() => editorRef.current?.focus());
+                }}
+                onHighlight={capabilityMenu.setSelectedIndex}
+              />
+            </div>
+          ) : null}
+          {footer && isLandingSurface ? footer : null}
+          {approvalPending && approvalPanel ? (
+            approvalPanel
+          ) : (
+          <div
+            className={composerInnerClass}
+            onMouseDown={isLandingSurface ? focusComposerFromSurface : undefined}
+            data-composer-drop-zone
+            {...attachmentImport.dropProps}
+          >
+          {attachmentImport.isImporting && <div role="status" className="px-5 pt-3 text-xs text-[var(--text-muted)]">Adding attachments…</div>}
+          {imageAttachmentsLoading && <span className="sr-only" role="status">Adding selected images…</span>}
+          {attachments.length > 0 && (
+            <div className="px-5 pt-4">
+              <AttachmentChips
+                attachments={attachments}
+                onRemove={(id) => {
+                  setAttachments((prev) => prev.filter((a) => a.id !== id));
+                  if (targetSessionId && id.startsWith('image-studio:')) {
+                    const path = id.slice('image-studio:'.length);
+                    useImageStudioStore.getState().patch(targetSessionId, {
+                      selected: imageStudio.selected.filter(item => item !== path),
+                      comments: { ...imageStudio.comments, [path]: [] },
+                    });
+                  }
+                }}
+              />
+            </div>
+          )}
+
+          <ComposerPromptEditor
+            ref={editorRef}
+            value={capabilityMenu.displayPrompt}
+            cursorIndex={cursorIndex}
+            slashContext={capabilityMenu.slashContext}
+            slashDisplayLabels={capabilityMenu.slashDisplayLabels}
+            onChange={(value, nextCursorIndex) => {
+              void handlePromptChange(value, nextCursorIndex);
+            }}
+            onPasteText={(context) => {
+              return handleLongPaste(context);
+            }}
+            onPasteFiles={attachmentImport.files}
+            onPasteNativeFiles={attachmentImport.pasteNative}
+            onPasteImages={(images) => {
+              void handlePasteImages(images);
+            }}
+            onCompositionStart={() => {
+              isComposingRef.current = true;
+            }}
+            onCompositionEnd={() => {
+              isComposingRef.current = false;
+            }}
+            onKeyDown={handleKeyDown}
+            placeholder={
+              sessionGoal.drafting
+                ? 'Describe a goal to keep pursuing'
+                : approvalPending
+                ? 'Resolve this approval request to continue'
+                : isStopping
+                ? 'Stopping…'
+                : canQueueWhileRunning
+                ? 'Ask for follow-up changes'
+                : isEffectivelyRunning
+                ? 'Press Enter to stop...'
+                : pendingStart
+                ? 'Starting session...'
+                : 'message to agent'
+            }
+            disabled={pendingStart || approvalPending}
+            placeholderClassName={isLandingSurface ? 'inset-x-4 top-3 text-[14px] leading-[21px]' : undefined}
+            className="w-full bg-transparent px-4 pt-3 pb-1 text-[14px] outline-none resize-none min-h-[56px] max-h-[200px] disabled:opacity-50"
+            autoFocus={isLandingSurface}
+          />
+
+          <div className="aegis-composer-toolbar flex items-end justify-between gap-2 px-2.5 pb-2">
+            <div className="aegis-composer-leading-controls flex min-w-0 flex-1 items-center gap-1 overflow-visible">
+              <button
+                type="button"
+                onClick={() => {
+                  void handleAddAttachments();
+                }}
+                disabled={isBusy}
+                className="flex h-8 w-8 items-center justify-center rounded-full text-[var(--text-secondary)] transition-all duration-150 hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:scale-100"
+                title="Add files or photos"
+                aria-label="Add files or photos"
+              >
+                <Plus className="h-4 w-4" />
+              </button>
+              {(sessionGoal.drafting || (sessionGoal.goal && sessionGoal.goal.status !== 'complete')) && <GoalModePill onExit={() => {
+                if (sessionGoal.snapshot?.goal) void sessionGoal.change({ type: 'clear' }).then(() => sessionGoal.setDraft(false)).catch(error => toast.error(String(error)));
+                else sessionGoal.setDraft(false);
+              }} disabled={goalSubmitting} />}
+              {agentSelection.provider === 'codex' && (
+                <PermissionModePicker
+                  value={agentSelection.codexPermissionMode}
+                  options={CODEX_PERMISSION_MODE_OPTIONS}
+                  onChange={agentSelection.setCodexPermissionMode}
+                  menuSide={menuSide}
+                />
+              )}
+              {agentSelection.provider === 'codex' && agentSelection.codexExecutionMode === 'plan' && (
+                <ClaudePlanModePill
+                  onExit={() => {
+                    agentSelection.setCodexExecutionMode('execute');
+                    if (activeSession) {
+                      setSessionCodexExecutionMode(activeSession.id, 'execute');
+                    }
+                  }}
+                  disabled={isBusy}
+                />
+              )}
+              {agentSelection.provider === 'claude' && (
+                <PermissionModePicker
+                  value={agentSelection.claudePermissionMode}
+                  options={CLAUDE_PERMISSION_MODE_OPTIONS}
+                  menuMinWidthClass="min-w-[176px]"
+                  onChange={(mode) => {
+                    agentSelection.setClaudePermissionMode(mode);
+                    if (activeSession) {
+                      setSessionClaudeMode(activeSession.id, mode, agentSelection.claudeExecutionMode);
+                    }
+                  }}
+                  disabled={isBusy}
+                  menuSide={menuSide}
+                />
+              )}
+              {agentSelection.provider === 'claude' && agentSelection.claudeExecutionMode === 'plan' && (
+                <ClaudePlanModePill
+                  onExit={() => {
+                    agentSelection.setClaudeExecutionMode('execute');
+                    if (activeSession) {
+                      setSessionClaudeMode(activeSession.id, agentSelection.claudePermissionMode, 'execute');
+                    }
+                  }}
+                  disabled={isBusy}
+                />
+              )}
+              {agentSelection.provider === 'opencode' && (
+                <PermissionModePicker
+                  value={agentSelection.opencodePermissionMode}
+                  options={OPENCODE_PERMISSION_MODE_OPTIONS}
+                  onChange={agentSelection.setOpencodePermissionMode}
+                  disabled={isBusy}
+                  menuSide={menuSide}
+                />
+              )}
+              {(agentSelection.provider === 'kimi' || agentSelection.provider === 'grok') && (
+                <PermissionModePicker
+                  value={agentSelection.kimiPermissionMode}
+                  options={KIMI_PERMISSION_MODE_OPTIONS}
+                  onChange={agentSelection.setKimiPermissionMode}
+                  menuSide={menuSide}
+                />
+              )}
+              {agentSelection.provider === 'qoder' && (
+                <PermissionModePicker
+                  value={agentSelection.qoderPermissionMode}
+                  options={QODER_PERMISSION_MODE_OPTIONS}
+                  menuMinWidthClass="min-w-[176px]"
+                  onChange={agentSelection.setQoderPermissionMode}
+                  disabled={isBusy}
+                  menuSide={menuSide}
+                />
+              )}
+              {agentSelection.provider === 'deepseek' && (
+                <DeepseekAgentPresetPicker
+                  value={agentSelection.deepseekAgentPreset}
+                  onChange={agentSelection.setDeepseekAgentPreset}
+                  disabled={isBusy}
+                  readOnly={!activeSession?.isDraft}
+                  menuSide={menuSide}
+                />
+              )}
+              {agentSelection.provider === 'deepseek' && (
+                <PermissionModePicker
+                  value={agentSelection.deepseekPermissionMode}
+                  options={DEEPSEEK_PERMISSION_MODE_OPTIONS}
+                  onChange={agentSelection.setDeepseekPermissionMode}
+                  disabled={isBusy}
+                  menuSide={menuSide}
+                />
+              )}
+              {agentSelection.provider === 'bubble' && (
+                <PermissionModePicker
+                  value={agentSelection.bubblePermissionMode}
+                  options={BUBBLE_PERMISSION_MODE_OPTIONS}
+                  menuMinWidthClass="min-w-[176px]"
+                  onChange={agentSelection.setBubblePermissionMode}
+                  disabled={isBusy}
+                  menuSide={menuSide}
+                />
+              )}
+              {agentSelection.provider === 'bubble' && agentSelection.bubbleExecutionMode === 'plan' && (
+                <ClaudePlanModePill
+                  onExit={() => {
+                    agentSelection.setBubbleExecutionMode('execute');
+                    if (activeSession) {
+                      setSessionBubblePermissionMode(activeSession.id, agentSelection.bubblePermissionMode);
+                    }
+                  }}
+                  disabled={isBusy}
+                />
+              )}
+            </div>
+
+            <div className="aegis-composer-trailing-controls flex shrink-0 items-center gap-2">
+              {preferences.showContextUsage && claudeContextSnapshot ? (
+                <ClaudeContextIndicator
+                  snapshot={claudeContextSnapshot}
+                  modelLabel={selectedModelLabel || claudeContextModel}
+                />
+              ) : null}
+              {preferences.showContextUsage && codexContextSnapshot ? (
+                <CodexContextIndicator snapshot={codexContextSnapshot} cost={deepseekSessionCost} />
+              ) : null}
+              {preferences.showContextUsage && isOpenCodeContextVisible ? (
+                <OpenCodeContextIndicator
+                  snapshot={openCodeContextSnapshot}
+                  modelLabel={selectedModelLabel || openCodeContextModel}
+                />
+              ) : null}
+              {preferences.showContextUsage && isPiContextVisible ? (
+                <OpenCodeContextIndicator
+                  snapshot={piContextSnapshot}
+                  modelLabel={selectedModelLabel || piContextModel}
+                  providerLabel="Pi"
+                />
+              ) : null}
+              {preferences.showContextUsage && isBubbleContextVisible ? (
+                <OpenCodeContextIndicator
+                  snapshot={bubbleContextSnapshot}
+                  modelLabel={selectedModelLabel || bubbleContextModel}
+                  providerLabel="Bubble"
+                />
+              ) : null}
+              {preferences.showContextUsage && isQoderContextVisible ? (
+                <OpenCodeContextIndicator
+                  snapshot={qoderContextSnapshot}
+                  modelLabel={selectedModelLabel || qoderContextModel}
+                  providerLabel="Qoder"
+                />
+              ) : null}
+              <ComposerAgentModelPicker
+                agentProvider={runtimeProvider}
+                modelLabel={agentSelection.selectedModelLabel}
+                modelValue={selectedModel}
+                modelValueByProvider={agentSelection.modelValueByProvider}
+                allAgentModelOptions={agentSelection.allAgentModelOptions}
+                disabled={isBusy}
+                onAgentChange={handleAgentChange}
+                onModelChange={handleModelChange}
+                codexModels={agentSelection.codexModels.length > 0 ? agentSelection.codexModels : undefined}
+                grokModels={agentSelection.grokModels.length > 0 ? agentSelection.grokModels : undefined}
+                bubbleModels={agentSelection.bubbleModels.length > 0 ? agentSelection.bubbleModels : undefined}
+                claudeReasoningEffort={agentSelection.claudeReasoningEffort ?? undefined}
+                onClaudeReasoningEffortChange={(effort) =>
+                  handleAgentConfigurationChange({ provider: 'claude', claudeReasoningEffort: effort })
+                }
+                codexReasoningEffort={agentSelection.codexReasoningEffort ?? undefined}
+                onCodexReasoningEffortChange={(effort) =>
+                  handleAgentConfigurationChange({ provider: 'codex', codexReasoningEffort: effort })
+                }
+                grokReasoningEffort={agentSelection.grokReasoningEffort ?? undefined}
+                onGrokReasoningEffortChange={(effort) =>
+                  handleAgentConfigurationChange({ provider: 'grok', grokReasoningEffort: effort })
+                }
+                bubbleThinkingLevel={agentSelection.bubbleThinkingLevel ?? undefined}
+                onBubbleThinkingLevelChange={(level) =>
+                  handleAgentConfigurationChange({ provider: 'bubble', bubbleThinkingLevel: level })
+                }
+                deepseekReasoningEffort={agentSelection.deepseekReasoningEffort}
+                onDeepseekReasoningEffortChange={agentSelection.setDeepseekReasoningEffort}
+                codexFastMode={agentSelection.codexFastMode}
+                onCodexFastModeChange={(enabled) =>
+                  handleAgentConfigurationChange({ provider: 'codex', codexFastMode: enabled })
+                }
+                kimiThinkingOptions={agentSelection.kimiThinkingOptions}
+                kimiThinkingChecked={agentSelection.kimiThinkingChecked}
+                onKimiThinkingChange={agentSelection.setKimiThinking}
+                menuSide={menuSide}
+                bubbleModelsLoading={agentSelection.bubbleModelsLoading}
+              />
+              {/* While a steer-capable turn runs, the slot flips with composer
+                  content: empty → stop square; typing → the normal send arrow
+                  (which queues the follow-up), so the user sees they can send
+                  without stopping the agent. */}
+              {isEffectivelyRunning &&
+              !approvalPending &&
+              !(canQueueWhileRunning && (prompt.trim() || attachments.length > 0)) ? (
+                <button
+                  onClick={handleStop}
+                  className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--text-primary)] text-[var(--bg-primary)] transition-all duration-150 hover:scale-105"
+                  title="Stop"
+                  aria-label="Stop"
+                >
+                  <Square className="h-2.5 w-2.5" fill="currentColor" />
+                </button>
+              ) : (
+              <button
+                onClick={() => void handleSend()}
+                disabled={
+                  goalSubmitting ||
+                  attachmentImport.isImporting ||
+                  (!prompt.trim() && attachments.length === 0) ||
+                  modelSetupRequired ||
+                  pendingStart ||
+                  approvalPending ||
+                  (isEffectivelyRunning && !canQueueWhileRunning)
+                }
+                className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--text-primary)] text-[var(--bg-primary)] transition-all duration-150 hover:scale-105 disabled:cursor-not-allowed disabled:opacity-20 disabled:hover:scale-100"
+                title="Send"
+                aria-label="Send"
+              >
+                  <ArrowUpIcon />
+                </button>
+              )}
+            </div>
+          </div>
+          </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ArrowUpIcon() {
+  return (
+    <svg
+      className="w-5 h-5"
+      fill="none"
+      viewBox="0 0 24 24"
+      stroke="currentColor"
+      strokeWidth={2.5}
+      aria-hidden="true"
+    >
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 19V5m0 0l-6 6m6-6l6 6" />
+    </svg>
+  );
+}

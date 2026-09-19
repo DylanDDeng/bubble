@@ -33,13 +33,21 @@
     "test:vendor": "cd packages/pi-tui && node --test --experimental-strip-types --no-warnings \"test/*.test.ts\"",
     "test:package": "node scripts/verify-packed-install.mjs",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
-    "dev": "tsc && node dist/main.js",
+    "dev": "npm --prefix desktop run dev",
     "refresh-models": "NODE_USE_ENV_PROXY=1 node scripts/generate-model-data.mjs",
     "eval": "tsx evals/run.ts",
     "prepack": "npm run build",
     "start": "node dist/main.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "desktop": "npm run build && npm --prefix desktop run build && npm --prefix desktop start",
+    "desktop:install": "npm --prefix desktop install",
+    "desktop:build": "npm run build && npm --prefix desktop run build",
+    "desktop:test": "npm --prefix desktop test",
+    "dev:tui": "tsc && node dist/main.js",
+    "desktop:dev": "npm --prefix desktop run dev",
+    "desktop:qa": "npm --prefix desktop run dev:qa",
+    "desktop:package": "npm run build && npm --prefix desktop run package:local"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.2.1",

@@ -1,0 +1,893 @@
+import { composerEnterAction } from '../../shared/app-preferences';
+import { useAppPreferences } from '../store/useAppPreferences';
+import { focusComposerFromSurface } from '../utils/composer-surface-focus';
+import { deepseekImageInputError } from '../../shared/deepseek-images';
+import { useSessionGoal } from '../hooks/useSessionGoal';
+import { GoalModePill } from './SessionGoal';
+import { buildGoalObjective, parseGoalInput, supportsGoalUI, isClaudeGoalClearObjective } from '../../shared/session-goal';
+import { useAttachmentImport } from '../hooks/useAttachmentImport';
+import {
+  useState,
+  useEffect,
+  useMemo,
+  useRef,
+  useCallback,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MutableRefObject,
+} from 'react';
+import { toast } from 'sonner';
+import { getSessionReferenceCapabilityError } from '../../shared/session-links';
+import { useAppStore } from '../store/useAppStore';
+import { sendEvent } from '../hooks/useIPC';
+import type { Attachment } from '../types';
+import { AttachmentChips } from './AttachmentChips';
+import { ClaudeSkillMenu } from './ClaudeSkillMenu';
+import { ProjectFileMentionMenu } from './ProjectFileMentionMenu';
+import { ComposerPromptEditor, type ComposerPromptEditorHandle } from './ComposerPromptEditor';
+import { ComposerAgentModelPicker } from './ComposerAgentControls';
+import {
+  PermissionModePicker,
+  BUBBLE_PERMISSION_MODE_OPTIONS,
+  CLAUDE_PERMISSION_MODE_OPTIONS,
+  CODEX_PERMISSION_MODE_OPTIONS,
+  DEEPSEEK_PERMISSION_MODE_OPTIONS,
+  KIMI_PERMISSION_MODE_OPTIONS,
+  OPENCODE_PERMISSION_MODE_OPTIONS,
+  QODER_PERMISSION_MODE_OPTIONS,
+} from './PermissionModePicker';
+import { ClaudePlanModePill } from './ClaudePlanModePill';
+import { DeepseekAgentPresetPicker } from './DeepseekAgentPresetPicker';
+import { FolderOpen } from './icons';
+import { NewThreadLanding } from './NewThreadLanding';
+import { NewThreadProjectHeading } from './NewThreadProjectHeading';
+import { ComposerContextPills } from './ComposerContextPills';
+import { useComposerAgentSelection } from '../hooks/useComposerAgentSelection';
+import { useComposerCapabilityMenu } from '../hooks/useClaudeSkillAutocomplete';
+import { useProjectFileMentions } from '../hooks/useProjectFileMentions';
+import { DEFAULT_WORKSPACE_CHANNEL_ID } from '../../shared/types';
+import { buildCodexReferencePayload } from '../utils/codex-composer';
+import { insertProjectFileMention } from '../utils/project-file-mentions';
+import { buildPromptWithProjectFileMentions } from '../utils/project-file-mention-context';
+import { removeSelectedSlashCommandPrompt } from '../utils/claude-slash';
+import {
+  getLongPromptAttachmentFallbackMessage,
+  LONG_PROMPT_AUTO_ATTACHMENT_THRESHOLD,
+  maybeConvertLongPromptToAttachment,
+} from '../utils/long-prompt-attachment';
+
+function isImeComposingEvent(
+  event: ReactKeyboardEvent,
+  isComposingRef: MutableRefObject<boolean>
+): boolean {
+  return (
+    isComposingRef.current ||
+    event.nativeEvent.isComposing === true ||
+    (event.nativeEvent as KeyboardEvent).keyCode === 229
+  );
+}
+
+export function NewSessionView() {
+  const enterBehavior = useAppPreferences(s => s.enterBehavior);
+  const {
+    pendingStart,
+    projectCwd,
+    activeChannelByProject,
+    setPendingStart,
+    setProjectCwd,
+    setActiveChannelForProject,
+    setShowSettings,
+    setActiveSettingsTab,
+  } = useAppStore();
+  const [prompt, setPrompt] = useState('');
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  // 启动模式 pill：worktree = 提交时先建隔离 worktree
+  const [startMode, setStartMode] = useState<'local' | 'worktree'>('local');
+  const [showCwdHint, setShowCwdHint] = useState(false);
+  const [cursorIndex, setCursorIndex] = useState(0);
+  const editorRef = useRef<ComposerPromptEditorHandle | null>(null);
+  const isComposingRef = useRef(false);
+  const cwd = projectCwd || '';
+  const attachmentImport = useAttachmentImport(cwd, pendingStart, (created) => {
+    setAttachments(previous => {
+      const paths = new Set(previous.map(attachment => attachment.path));
+      return [...previous, ...created.filter(attachment => {
+        if (paths.has(attachment.path)) return false;
+        paths.add(attachment.path); return true;
+      })];
+    });
+  });
+  const hasSelectedCwd = cwd.trim().length > 0;
+  const agentSelection = useComposerAgentSelection({ selectionKey: '__new_session__' });
+  const modelSetupRequired = Boolean(agentSelection.modelSetup);
+  const sessionGoal = useSessionGoal(undefined, supportsGoalUI(agentSelection.provider));
+  const capabilityMenu = useComposerCapabilityMenu({
+    enabled: true,
+    enableSkills: true,
+    provider: agentSelection.provider,
+    prompt,
+    cursorIndex,
+    projectPath: cwd || undefined,
+    setPrompt,
+    setCursorIndex,
+    onCommandSelect: (command, nextPrompt) => {
+      if (command.name === 'goal' && supportsGoalUI(agentSelection.provider)) {
+        if (agentSelection.provider === 'claude') agentSelection.setClaudeExecutionMode('execute');
+        else agentSelection.setCodexExecutionMode('execute');
+        sessionGoal.setDraft(true);
+        const next = removeSelectedSlashCommandPrompt(nextPrompt, command.name);
+        setPrompt(next.prompt);
+        setCursorIndex(next.cursorIndex);
+        return true;
+      }
+
+      if (command.name !== 'plan') {
+        return false;
+      }
+
+      sessionGoal.setDraft(false);
+      if (agentSelection.provider === 'claude') {
+        agentSelection.setClaudeExecutionMode('plan');
+      } else if (agentSelection.provider === 'codex') {
+        agentSelection.setCodexExecutionMode('plan');
+      } else if (agentSelection.provider === 'bubble') {
+        agentSelection.setBubbleExecutionMode('plan');
+      } else {
+        return false;
+      }
+      const next = removeSelectedSlashCommandPrompt(nextPrompt, command.name);
+      setPrompt(next.prompt);
+      setCursorIndex(next.cursorIndex);
+      return true;
+    },
+  });
+  const projectFileMentions = useProjectFileMentions({
+    cwd,
+    prompt,
+    cursorIndex,
+  });
+  useEffect(() => {
+    if (!showCwdHint) return;
+    const timer = window.setTimeout(() => setShowCwdHint(false), 1800);
+    return () => window.clearTimeout(timer);
+  }, [showCwdHint]);
+
+  const buildDispatchPrompt = async (dispatchCwd = cwd): Promise<string | null> => {
+    const selectedSkillPrompt =
+      capabilityMenu.selectedSkill && agentSelection.provider === 'codex'
+        ? capabilityMenu.selectedSkillRemainder.trim()
+        : prompt.trim();
+
+    return buildPromptWithProjectFileMentions({
+      cwd: dispatchCwd,
+      prompt: selectedSkillPrompt,
+      ignoredMentionPaths: [],
+    });
+  };
+
+  const handleSelectProjectFolder = useCallback(async (): Promise<string | null> => {
+    if (pendingStart) {
+      return null;
+    }
+
+    const selected = await window.electron.selectDirectory();
+    if (!selected) {
+      return null;
+    }
+
+    setProjectCwd(selected);
+    setActiveChannelForProject(selected, DEFAULT_WORKSPACE_CHANNEL_ID);
+    setShowCwdHint(false);
+    window.requestAnimationFrame(() => editorRef.current?.focus());
+    return selected;
+  }, [pendingStart, setActiveChannelForProject, setProjectCwd]);
+
+  const openModelSetup = useCallback(() => {
+    const setup = agentSelection.modelSetup;
+    if (!setup) {
+      return;
+    }
+    setActiveSettingsTab(setup.settingsTab);
+    setShowSettings(true);
+  }, [agentSelection.modelSetup, setActiveSettingsTab, setShowSettings]);
+
+  const autoConvertComposerTextToAttachment = useCallback(async (
+    value: string,
+    nextCursorIndex: number
+  ): Promise<boolean> => {
+    if (isComposingRef.current) {
+      setPrompt(value);
+      setCursorIndex(nextCursorIndex);
+      return false;
+    }
+
+    if ((supportsGoalUI(agentSelection.provider) && parseGoalInput(value, sessionGoal.drafting).isGoal) || value.trim().length <= LONG_PROMPT_AUTO_ATTACHMENT_THRESHOLD) {
+      setPrompt(value);
+      setCursorIndex(nextCursorIndex);
+      return false;
+    }
+
+    const promptWithAttachment = await maybeConvertLongPromptToAttachment({
+      cwd,
+      prompt: value,
+      attachments,
+    });
+
+    if (!promptWithAttachment.converted) {
+      setPrompt(value);
+      setCursorIndex(nextCursorIndex);
+      if (promptWithAttachment.reason === 'attachment_create_failed') {
+        toast.error('Failed to convert the long message into an attachment.');
+      }
+      return false;
+    }
+
+    setAttachments(promptWithAttachment.attachments);
+    setPrompt('');
+    setCursorIndex(0);
+    window.requestAnimationFrame(() => editorRef.current?.focus());
+    return true;
+  }, [attachments, cwd, agentSelection.provider, sessionGoal.drafting]);
+
+  const handleStart = async () => {
+    const goalInput = parseGoalInput(prompt, sessionGoal.drafting);
+    const isGoal = supportsGoalUI(agentSelection.provider) && goalInput.isGoal;
+    if (isGoal && agentSelection.provider === 'claude' && isClaudeGoalClearObjective(goalInput.objective) && attachments.length === 0) {
+      sessionGoal.setDraft(false);
+      setPrompt(''); setCursorIndex(0);
+      return;
+    }
+    if (isGoal && !goalInput.objective && attachments.length === 0) {
+      sessionGoal.setDraft(true);
+      if (agentSelection.provider === 'claude') agentSelection.setClaudeExecutionMode('execute');
+      else agentSelection.setCodexExecutionMode('execute');
+      setPrompt(''); setCursorIndex(0);
+      window.requestAnimationFrame(() => editorRef.current?.focus());
+      return;
+    }
+
+    if (attachmentImport.pending.current > 0) return;
+    if (!prompt.trim() && attachments.length === 0) return;
+    if (agentSelection.provider === 'deepseek') {
+      const imageError = deepseekImageInputError(attachments, agentSelection.model, agentSelection.deepseekModelConfig);
+      if (imageError) { toast.error(imageError); return; }
+    }
+    const referenceError = getSessionReferenceCapabilityError(prompt, agentSelection.provider);
+    if (referenceError) { toast.error(referenceError); return; }
+    if (agentSelection.modelSetup) {
+      toast.error(agentSelection.modelSetup.title);
+      openModelSetup();
+      return;
+    }
+    let dispatchCwd = cwd.trim();
+    if (!dispatchCwd) {
+      setShowCwdHint(true);
+      const selected = await handleSelectProjectFolder();
+      if (!selected) {
+        return;
+      }
+      dispatchCwd = selected;
+    }
+
+    setPendingStart(true);
+
+    const displayPrompt = isGoal ? goalInput.objective : prompt.trim();
+    const normalizedPrompt = await buildDispatchPrompt(dispatchCwd);
+    if (normalizedPrompt === null) {
+      setPendingStart(false);
+      return;
+    }
+    const promptWithAttachment = isGoal ? { prompt: displayPrompt, attachments, converted: false, reason: undefined } : await maybeConvertLongPromptToAttachment({
+      cwd: dispatchCwd,
+      prompt: displayPrompt,
+      attachments,
+    });
+    const outgoingPrompt = promptWithAttachment.converted ? promptWithAttachment.prompt : displayPrompt;
+    const outgoingEffectivePrompt = promptWithAttachment.converted
+      ? promptWithAttachment.prompt
+      : normalizedPrompt;
+    const outgoingAttachments = promptWithAttachment.attachments;
+    if (promptWithAttachment.reason === 'attachment_create_failed') {
+      toast.error('Failed to convert the long message into an attachment. Sending inline instead.');
+    }
+    const codexReferences =
+      agentSelection.provider === 'codex'
+        ? buildCodexReferencePayload(capabilityMenu.selectedSkill)
+        : {};
+    const tempTitleSource = displayPrompt || outgoingPrompt;
+    const tempTitle = tempTitleSource.slice(0, 30) + (tempTitleSource.length > 30 ? '...' : '');
+    const channelId = activeChannelByProject[dispatchCwd] || DEFAULT_WORKSPACE_CHANNEL_ID;
+
+    if (isGoal) sessionGoal.setDraft(false);
+    sendEvent({
+      type: 'session.start',
+      payload: {
+        title: tempTitle,
+        codexGoal: isGoal && agentSelection.provider === 'codex' ? { type: 'set', status: 'active', objective: buildGoalObjective(parseGoalInput(normalizedPrompt, true).objective, outgoingAttachments) } : undefined,
+        prompt: isGoal ? (agentSelection.provider === 'claude' ? `/goal ${buildGoalObjective(parseGoalInput(normalizedPrompt, true).objective, outgoingAttachments)}` : `/goal ${outgoingPrompt}`) : outgoingPrompt,
+        effectivePrompt: outgoingEffectivePrompt,
+        cwd: dispatchCwd || undefined,
+        channelId,
+        createIsolatedWorkspace: startMode === 'worktree' || undefined,
+        attachments: outgoingAttachments.length > 0 ? outgoingAttachments : undefined,
+        provider: agentSelection.provider,
+        model: agentSelection.model || undefined,
+        compatibleProviderId:
+          agentSelection.provider === 'claude'
+            ? agentSelection.compatibleProviderId || undefined
+            : undefined,
+        claudeAccessMode:
+          agentSelection.provider === 'claude'
+            ? agentSelection.claudePermissionMode
+            : undefined,
+        claudeExecutionMode:
+          agentSelection.provider === 'claude'
+            ? (isGoal ? 'execute' : agentSelection.claudeExecutionMode)
+            : undefined,
+        claudeReasoningEffort:
+          agentSelection.provider === 'claude'
+            ? agentSelection.claudeReasoningEffort || undefined
+            : undefined,
+        ...codexReferences,
+        codexExecutionMode:
+          agentSelection.provider === 'codex' ? (isGoal ? 'execute' : agentSelection.codexExecutionMode) : undefined,
+        codexPermissionMode:
+          agentSelection.provider === 'codex'
+            ? agentSelection.codexPermissionMode
+            : undefined,
+        codexReasoningEffort:
+          agentSelection.provider === 'codex'
+            ? agentSelection.codexReasoningEffort || undefined
+            : undefined,
+        codexFastMode:
+          agentSelection.provider === 'codex' ? agentSelection.codexFastMode : undefined,
+        kimiPermissionMode:
+          agentSelection.provider === 'kimi' || agentSelection.provider === 'grok'
+            ? agentSelection.kimiPermissionMode
+            : undefined,
+        kimiThinking:
+          agentSelection.provider === 'kimi' ? agentSelection.kimiThinkingToSend : undefined,
+        grokPermissionMode:
+          agentSelection.provider === 'grok'
+            ? agentSelection.kimiPermissionMode
+            : undefined,
+        grokReasoningEffort:
+          agentSelection.provider === 'grok'
+            ? agentSelection.grokReasoningEffort || undefined
+            : undefined,
+        opencodePermissionMode:
+          agentSelection.provider === 'opencode'
+            ? agentSelection.opencodePermissionMode
+            : undefined,
+        qoderPermissionMode:
+          agentSelection.provider === 'qoder'
+            ? agentSelection.qoderPermissionMode
+            : undefined,
+        deepseekPermissionMode:
+          agentSelection.provider === 'deepseek'
+            ? agentSelection.deepseekPermissionMode
+            : undefined,
+        deepseekAgentPreset:
+          agentSelection.provider === 'deepseek'
+            ? agentSelection.deepseekAgentPreset
+            : undefined,
+        deepseekReasoningEffort:
+          agentSelection.provider === 'deepseek'
+            ? agentSelection.deepseekReasoningEffort
+            : undefined,
+        bubblePermissionMode:
+          agentSelection.provider === 'bubble'
+            ? agentSelection.bubbleExecutionMode === 'plan'
+              ? 'plan'
+              : agentSelection.bubblePermissionMode
+            : undefined,
+        bubbleThinkingLevel:
+          agentSelection.provider === 'bubble'
+            ? agentSelection.bubbleThinkingLevel || undefined
+            : undefined,
+        teamMode: 'solo',
+        teamId: null,
+      },
+    });
+
+    setPrompt('');
+    setAttachments([]);
+  };
+
+  const handleCwdChange = (next: string) => {
+    if (useAppStore.getState().pendingStart) return;
+    setStartMode('local');
+    setProjectCwd(next || null);
+  };
+
+  const handleAddAttachments = () => attachmentImport.choose();
+
+  const handleSelectProjectFile = useCallback(
+    async (file: { path: string; relativePath?: string }) => {
+      const mention = projectFileMentions.mention;
+      if (!cwd || !mention) {
+        return;
+      }
+
+      const next = insertProjectFileMention(
+        prompt,
+        mention,
+        file.relativePath || file.path
+      );
+      setPrompt(next.prompt);
+      setCursorIndex(next.cursorIndex);
+      window.requestAnimationFrame(() => {
+        editorRef.current?.focus();
+        editorRef.current?.setCursorIndex(next.cursorIndex);
+      });
+    },
+    [cwd, projectFileMentions.mention, prompt]
+  );
+
+  const handlePromptChange = async (value: string, nextCursorIndex: number) => {
+    await autoConvertComposerTextToAttachment(value, nextCursorIndex);
+  };
+
+  const handlePasteImages = useCallback(async (
+    images: { mimeType: string; data: Uint8Array; name?: string }[]
+  ): Promise<boolean> => {
+    if (pendingStart || images.length === 0) return false;
+
+    const created: Attachment[] = [];
+    let failed = 0;
+    for (const image of images) {
+      try {
+        const attachment = await window.electron.createInlineImageAttachment(
+          image.mimeType,
+          image.data
+        );
+        if (attachment) {
+          created.push(attachment);
+        } else {
+          failed += 1;
+        }
+      } catch {
+        failed += 1;
+      }
+    }
+
+    if (created.length > 0) {
+      setAttachments((prev) => {
+        const existingPaths = new Set(prev.map((a) => a.path));
+        const next = [...prev];
+        for (const a of created) {
+          if (!existingPaths.has(a.path)) {
+            next.push(a);
+          }
+        }
+        return next;
+      });
+    }
+
+    if (failed > 0) {
+      toast.error(`Failed to paste ${failed} image(s). PNG, JPEG, WebP and GIF up to 10 MB are supported.`);
+    }
+
+    return created.length > 0;
+  }, [pendingStart]);
+
+  const handleLongPaste = useCallback((
+    context: { text: string; start: number; end: number }
+  ): boolean => {
+    if (supportsGoalUI(agentSelection.provider) && (sessionGoal.drafting || parseGoalInput(prompt || context.text, false).isGoal)) return false;
+    const pastedText = context.text.trim();
+    if (pastedText.length <= LONG_PROMPT_AUTO_ATTACHMENT_THRESHOLD) {
+      return false;
+    }
+
+    const pasteInline = () => {
+      const nextPrompt = `${prompt.slice(0, context.start)}${context.text}${prompt.slice(context.end)}`;
+      const nextCursorIndex = context.start + context.text.length;
+      setPrompt(nextPrompt);
+      setCursorIndex(nextCursorIndex);
+      window.requestAnimationFrame(() => {
+        editorRef.current?.focus();
+        editorRef.current?.setCursorIndex(nextCursorIndex);
+      });
+    };
+
+    const toastId = toast.loading('Creating text attachment...');
+    void (async () => {
+      try {
+        const promptWithAttachment = await maybeConvertLongPromptToAttachment({
+          cwd,
+          prompt: pastedText,
+          attachments,
+          allowProjectMentions: true,
+        });
+
+        if (!promptWithAttachment.converted) {
+          pasteInline();
+          toast.error(getLongPromptAttachmentFallbackMessage(promptWithAttachment.reason), {
+            id: toastId,
+          });
+          return;
+        }
+
+        const nextPrompt = `${prompt.slice(0, context.start)}${prompt.slice(context.end)}`;
+        setAttachments(promptWithAttachment.attachments);
+        setPrompt(nextPrompt);
+        setCursorIndex(context.start);
+        toast.dismiss(toastId);
+        window.requestAnimationFrame(() => {
+          editorRef.current?.focus();
+          editorRef.current?.setCursorIndex(context.start);
+        });
+      } catch {
+        pasteInline();
+        toast.error('Could not create a text attachment. Pasted inline instead.', {
+          id: toastId,
+        });
+        return;
+      }
+    })();
+
+    return true;
+  }, [attachments, cwd, prompt, agentSelection.provider, sessionGoal.drafting]);
+
+  const canStartTask =
+    (prompt.trim().length > 0 || attachments.length > 0) &&
+    !pendingStart &&
+    !attachmentImport.isImporting &&
+    !modelSetupRequired;
+
+  const projectName = cwd ? cwd.split('/').filter(Boolean).pop() || cwd : '';
+
+  const handleKeyDown = (e: ReactKeyboardEvent) => {
+    if (isImeComposingEvent(e, isComposingRef)) {
+      return;
+    }
+
+    if (projectFileMentions.hasMentionQuery) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        projectFileMentions.moveSelection(1);
+        return;
+      }
+
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        projectFileMentions.moveSelection(-1);
+        return;
+      }
+
+      if (
+        (e.key === 'Enter' || e.key === 'Tab') &&
+        projectFileMentions.suggestions.length > 0
+      ) {
+        e.preventDefault();
+        const currentSuggestion = projectFileMentions.getCurrentSuggestion();
+        if (currentSuggestion) {
+          void handleSelectProjectFile(currentSuggestion);
+        }
+        return;
+      }
+    }
+
+    if (capabilityMenu.hasSlashQuery) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        capabilityMenu.moveSelection(1);
+        return;
+      }
+
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        capabilityMenu.moveSelection(-1);
+        return;
+      }
+
+      if (
+        (e.key === 'Enter' || e.key === 'Tab') &&
+        capabilityMenu.suggestions.length > 0
+      ) {
+        e.preventDefault();
+        capabilityMenu.selectCurrentSuggestion();
+        window.requestAnimationFrame(() => editorRef.current?.focus());
+        return;
+      }
+    }
+
+    if (composerEnterAction(e, prompt, enterBehavior).send && canStartTask) {
+      e.preventDefault();
+      handleStart();
+    }
+  };
+
+  return (
+    <div className="flex-1 min-h-0 min-w-0 flex flex-col">
+      <NewThreadLanding heading={<NewThreadProjectHeading cwd={cwd} disabled={pendingStart} onSelectProject={handleCwdChange} />}>
+            <div className="group relative aegis-new-thread-composer-tray">
+              {projectFileMentions.hasMentionQuery ? (
+                <div className="absolute inset-x-0 bottom-full z-40 mb-1">
+                  <ProjectFileMentionMenu
+                    suggestions={projectFileMentions.suggestions}
+                    selectedIndex={projectFileMentions.selectedIndex}
+                    loading={projectFileMentions.loading}
+                    onSelect={(suggestion) => {
+                      void handleSelectProjectFile(suggestion);
+                    }}
+                  />
+                </div>
+              ) : capabilityMenu.hasSlashQuery ? (
+                <div className="absolute inset-x-0 bottom-full z-40 mb-1">
+                  <ClaudeSkillMenu
+                    suggestions={capabilityMenu.suggestions}
+                    selectedIndex={capabilityMenu.selectedIndex}
+                    empty={capabilityMenu.suggestions.length === 0}
+                    title={capabilityMenu.menuTitle}
+                    emptyMessage={capabilityMenu.emptyMessage}
+                    onSelect={(suggestion) => {
+                      capabilityMenu.selectSuggestion(suggestion);
+                      window.requestAnimationFrame(() => editorRef.current?.focus());
+                    }}
+                    onHighlight={capabilityMenu.setSelectedIndex}
+                  />
+                </div>
+              ) : null}
+
+              <ComposerContextPills
+                cwd={cwd || null}
+                projectName={projectName}
+                hasSelectedCwd={hasSelectedCwd}
+                disabled={pendingStart}
+                onSelectRecent={handleCwdChange}
+                startMode={startMode}
+                onStartModeChange={setStartMode}
+              />
+
+              <div {...attachmentImport.dropProps} data-composer-drop-zone onMouseDown={focusComposerFromSurface} className="aegis-new-thread-composer-surface">
+                {attachmentImport.isImporting && <div role="status" className="px-4 pt-3 text-xs text-[var(--text-muted)]">Adding attachments…</div>}
+                {attachments.length > 0 && (
+                  <div className="px-4 pt-4">
+                    <AttachmentChips
+                      attachments={attachments}
+                      onRemove={(id) =>
+                        setAttachments((prev) => prev.filter((a) => a.id !== id))
+                      }
+                    />
+                  </div>
+                )}
+
+                <ComposerPromptEditor
+                  ref={editorRef}
+                  value={capabilityMenu.displayPrompt}
+                  cursorIndex={cursorIndex}
+                  slashContext={capabilityMenu.slashContext}
+                  slashDisplayLabels={capabilityMenu.slashDisplayLabels}
+                  onChange={(value, nextCursorIndex) => {
+                    void handlePromptChange(value, nextCursorIndex);
+                  }}
+                  onPasteText={(context) => {
+                    return handleLongPaste(context);
+                  }}
+                  onPasteFiles={attachmentImport.files}
+                  onPasteNativeFiles={attachmentImport.pasteNative}
+                  onPasteImages={(images) => {
+                    void handlePasteImages(images);
+                  }}
+                  onCompositionStart={() => {
+                    isComposingRef.current = true;
+                  }}
+                  onCompositionEnd={() => {
+                    isComposingRef.current = false;
+                  }}
+                  onKeyDown={handleKeyDown}
+                  placeholder={sessionGoal.drafting ? 'Describe a goal to keep pursuing' : 'message to agent'}
+                  placeholderClassName="inset-x-4 top-3 text-[14px] leading-[21px]"
+                  className="w-full bg-transparent px-4 pt-3 pb-1 text-[14px] outline-none resize-none no-drag min-h-[56px] max-h-[200px]"
+                  autoFocus
+                />
+
+                {/* Control order mirrors PromptInput: attach and permissions on
+                    the left; model and send on the right. */}
+                <div className="aegis-composer-toolbar flex items-end justify-between gap-2 px-2.5 pb-2">
+                  <div className="aegis-composer-leading-controls flex min-w-0 flex-1 items-center gap-1 overflow-visible">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void handleAddAttachments();
+                      }}
+                      disabled={pendingStart}
+                      className="flex h-8 w-8 items-center justify-center rounded-full text-[var(--text-secondary)] transition-all duration-150 hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
+                      title="Add files or photos"
+                      aria-label="Add files or photos"
+                    >
+                      <PlusIcon />
+                    </button>
+                    {sessionGoal.drafting && <GoalModePill onExit={() => sessionGoal.setDraft(false)} disabled={pendingStart} />}
+                    {agentSelection.provider === 'codex' && (
+                      <PermissionModePicker
+                        value={agentSelection.codexPermissionMode}
+                        options={CODEX_PERMISSION_MODE_OPTIONS}
+                        onChange={agentSelection.setCodexPermissionMode}
+                        disabled={pendingStart}
+                        menuSide="top"
+                      />
+                    )}
+                    {agentSelection.provider === 'codex' && agentSelection.codexExecutionMode === 'plan' && (
+                      <ClaudePlanModePill
+                        onExit={() => agentSelection.setCodexExecutionMode('execute')}
+                        disabled={pendingStart}
+                      />
+                    )}
+                    {agentSelection.provider === 'claude' && (
+                      <PermissionModePicker
+                        value={agentSelection.claudePermissionMode}
+                        options={CLAUDE_PERMISSION_MODE_OPTIONS}
+                        menuMinWidthClass="min-w-[176px]"
+                        onChange={agentSelection.setClaudePermissionMode}
+                        disabled={pendingStart}
+                        menuSide="top"
+                      />
+                    )}
+                    {agentSelection.provider === 'claude' && agentSelection.claudeExecutionMode === 'plan' && (
+                      <ClaudePlanModePill
+                        onExit={() => agentSelection.setClaudeExecutionMode('execute')}
+                        disabled={pendingStart}
+                      />
+                    )}
+                    {agentSelection.provider === 'opencode' && (
+                      <PermissionModePicker
+                        value={agentSelection.opencodePermissionMode}
+                        options={OPENCODE_PERMISSION_MODE_OPTIONS}
+                        onChange={agentSelection.setOpencodePermissionMode}
+                        disabled={pendingStart}
+                        menuSide="top"
+                      />
+                    )}
+                    {(agentSelection.provider === 'kimi' || agentSelection.provider === 'grok') && (
+                      <PermissionModePicker
+                        value={agentSelection.kimiPermissionMode}
+                        options={KIMI_PERMISSION_MODE_OPTIONS}
+                        onChange={agentSelection.setKimiPermissionMode}
+                        disabled={pendingStart}
+                        menuSide="top"
+                      />
+                    )}
+                    {agentSelection.provider === 'qoder' && (
+                      <PermissionModePicker
+                        value={agentSelection.qoderPermissionMode}
+                        options={QODER_PERMISSION_MODE_OPTIONS}
+                        menuMinWidthClass="min-w-[176px]"
+                        onChange={agentSelection.setQoderPermissionMode}
+                        disabled={pendingStart}
+                        menuSide="top"
+                      />
+                    )}
+                    {agentSelection.provider === 'deepseek' && (
+                      <DeepseekAgentPresetPicker
+                        value={agentSelection.deepseekAgentPreset}
+                        onChange={agentSelection.setDeepseekAgentPreset}
+                        disabled={pendingStart}
+                        menuSide="top"
+                      />
+                    )}
+                    {agentSelection.provider === 'deepseek' && (
+                      <PermissionModePicker
+                        value={agentSelection.deepseekPermissionMode}
+                        options={DEEPSEEK_PERMISSION_MODE_OPTIONS}
+                        onChange={agentSelection.setDeepseekPermissionMode}
+                        disabled={pendingStart}
+                        menuSide="top"
+                      />
+                    )}
+                    {agentSelection.provider === 'bubble' && (
+                      <PermissionModePicker
+                        value={agentSelection.bubblePermissionMode}
+                        options={BUBBLE_PERMISSION_MODE_OPTIONS}
+                        menuMinWidthClass="min-w-[176px]"
+                        onChange={agentSelection.setBubblePermissionMode}
+                        disabled={pendingStart}
+                        menuSide="top"
+                      />
+                    )}
+                    {agentSelection.provider === 'bubble' &&
+                      agentSelection.bubbleExecutionMode === 'plan' && (
+                        <ClaudePlanModePill
+                          onExit={() => agentSelection.setBubbleExecutionMode('execute')}
+                          disabled={pendingStart}
+                        />
+                      )}
+                  </div>
+
+                  <div className="aegis-composer-trailing-controls flex shrink-0 items-center gap-2">
+                    <ComposerAgentModelPicker
+                      agentProvider={agentSelection.provider}
+                      modelLabel={agentSelection.selectedModelLabel}
+                      modelValue={agentSelection.model}
+                      modelValueByProvider={agentSelection.modelValueByProvider}
+                      allAgentModelOptions={agentSelection.allAgentModelOptions}
+                      disabled={pendingStart}
+                      onAgentChange={agentSelection.selectAgent}
+                      onModelChange={agentSelection.selectModel}
+                      codexModels={agentSelection.codexModels.length > 0 ? agentSelection.codexModels : undefined}
+                      grokModels={agentSelection.grokModels.length > 0 ? agentSelection.grokModels : undefined}
+                      bubbleModels={agentSelection.bubbleModels.length > 0 ? agentSelection.bubbleModels : undefined}
+                      claudeReasoningEffort={agentSelection.claudeReasoningEffort ?? undefined}
+                      onClaudeReasoningEffortChange={(effort) =>
+                        agentSelection.selectAgentConfiguration({ provider: 'claude', claudeReasoningEffort: effort })
+                      }
+                      codexReasoningEffort={agentSelection.codexReasoningEffort ?? undefined}
+                      onCodexReasoningEffortChange={(effort) =>
+                        agentSelection.selectAgentConfiguration({ provider: 'codex', codexReasoningEffort: effort })
+                      }
+                      grokReasoningEffort={agentSelection.grokReasoningEffort ?? undefined}
+                      onGrokReasoningEffortChange={(effort) =>
+                        agentSelection.selectAgentConfiguration({ provider: 'grok', grokReasoningEffort: effort })
+                      }
+                      bubbleThinkingLevel={agentSelection.bubbleThinkingLevel ?? undefined}
+                      onBubbleThinkingLevelChange={(level) =>
+                        agentSelection.selectAgentConfiguration({ provider: 'bubble', bubbleThinkingLevel: level })
+                      }
+                      deepseekReasoningEffort={agentSelection.deepseekReasoningEffort}
+                      onDeepseekReasoningEffortChange={agentSelection.setDeepseekReasoningEffort}
+                      codexFastMode={agentSelection.codexFastMode}
+                      onCodexFastModeChange={(enabled) =>
+                        agentSelection.selectAgentConfiguration({ provider: 'codex', codexFastMode: enabled })
+                      }
+                      kimiThinkingOptions={agentSelection.kimiThinkingOptions}
+                      kimiThinkingChecked={agentSelection.kimiThinkingChecked}
+                      onKimiThinkingChange={agentSelection.setKimiThinking}
+                      menuSide="top"
+                      bubbleModelsLoading={agentSelection.bubbleModelsLoading}
+                    />
+                    <button
+                      type="button"
+                      aria-label={hasSelectedCwd ? 'Send' : 'Choose project and send'}
+                      title={hasSelectedCwd ? 'Send' : 'Choose project and send'}
+                      onClick={handleStart}
+                      disabled={!canStartTask}
+                      className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--text-primary)] text-[var(--bg-primary)] transition-all duration-150 hover:scale-105 no-drag disabled:cursor-not-allowed disabled:opacity-20 disabled:hover:scale-100"
+                    >
+                      {pendingStart ? (
+                        <span className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      ) : !hasSelectedCwd ? (
+                        <FolderOpen className="h-[18px] w-[18px]" />
+                      ) : (
+                        <ArrowUpIcon />
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+      </NewThreadLanding>
+    </div>
+  );
+}
+
+
+function ArrowUpIcon() {
+  return (
+    <svg
+      className="w-5 h-5"
+      fill="none"
+      viewBox="0 0 24 24"
+      stroke="currentColor"
+      strokeWidth={2.5}
+      aria-hidden="true"
+    >
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 19V5m0 0l-6 6m6-6l6 6" />
+    </svg>
+  );
+}
+
+function PlusIcon() {
+  return (
+    <svg
+      className="w-5 h-5"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      aria-hidden="true"
+    >
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v14M5 12h14" />
+    </svg>
+  );
+}

@@ -1,0 +1,43 @@
+// Local dogfood artifacts only. No feed, upload, signing account or notarization.
+module.exports = {
+  appId: 'ai.bubblebrain.desktop',
+  productName: 'Bubble',
+  directories: { output: 'out/dogfood', buildResources: 'build' },
+  electronDist: 'node_modules/electron/dist',
+  npmRebuild: false,
+  asar: true,
+  files: [
+    'package.json',
+    'dist-electron/**/*',
+    'dist-react/**/*',
+    'runtime/bubble/package.json',
+    'runtime/bubble/dist/**/*',
+    'appearance-reference.json',
+    'build/skins/aegis-reference.png',
+    'LICENSE',
+    'THIRD_PARTY_NOTICES.md',
+    '!**/__tests__/**',
+    '!**/*.test.*',
+    '!**/*.map',
+  ],
+  asarUnpack: ['node_modules/node-pty/**/*', '**/*.node'],
+  extraResources: [{ from: 'dist-electron/electron/preload.cjs', to: 'preload.cjs' }],
+  protocols: [{ name: 'Bubble session links', schemes: ['bubble-desktop'] }],
+  publish: null,
+  mac: {
+    target: 'dmg',
+    category: 'public.app-category.developer-tools',
+    icon: 'build/bubble-icon.icns',
+    identity: '-',
+    hardenedRuntime: false,
+    notarize: false,
+    artifactName: 'Bubble-${version}-${arch}-dogfood.${ext}',
+  },
+  dmg: {
+    title: 'Bubble',
+    contents: [
+      { x: 140, y: 150 },
+      { x: 420, y: 150, type: 'link', path: '/Applications' },
+    ],
+  },
+};

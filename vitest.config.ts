@@ -30,6 +30,7 @@ export default defineConfig({
       "**/node_modules/**",
       "dist",
       "services/**",
+      "desktop/**",
       "packages/**",
       "src/__tests__/tui-e2e/**",
     ],

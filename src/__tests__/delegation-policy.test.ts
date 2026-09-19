@@ -8,7 +8,7 @@ import { createRunWorkflowTool, createSpawnAgentTool } from "../tools/agent-life
 import type { Message, Provider, StreamChunk } from "../types.js";
 
 const PARENT_TOOLS = ["read", "grep", "spawn_agent", "wait_agent", "send_input", "close_agent", "list_agents", "run_workflow"];
-const CHILD_TOOLS = ["read", "glob", "grep", "lsp"];
+const CHILD_TOOLS = ["read", "ls", "grep", "lsp"];
 
 describe("delegation policy section (system prompt)", () => {
   it("includes both the positive triggers and every negative clause for agents with delegation tools", () => {

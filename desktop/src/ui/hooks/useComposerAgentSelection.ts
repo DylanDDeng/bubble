@@ -1,0 +1,1719 @@
+import { rendererStateStorage } from '../utils/renderer-state-storage';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { AgentProvider, ClaudeCompatibleProviderId, SettingsTab } from '../types';
+import {
+  resolveConfirmedListedPreference,
+  resolveListedOrPendingModel,
+  type AgentModelSelection,
+} from '../utils/session-model';
+import { formatGrokModelId, isGrokModelId } from '../../shared/provider-model';
+import { useClaudeModelConfig } from './useClaudeModelConfig';
+import { useCodexModelConfig } from './useCodexModelConfig';
+import { useOpencodeModelConfig } from './useOpencodeModelConfig';
+import { useKimiModelConfig } from './useKimiModelConfig';
+import { useGrokModelConfig } from './useGrokModelConfig';
+import { usePiModelConfig } from './usePiModelConfig';
+import { useBubbleModelConfig } from './useBubbleModelConfig';
+import { useQoderModelConfig } from './useQoderModelConfig';
+import { useDeepseekModelConfig } from './useDeepseekModelConfig';
+import { useCompatibleProviderConfig } from './useCompatibleProviderConfig';
+import { loadPreferredProvider, savePreferredProvider } from '../utils/provider';
+import {
+  canonicalizeClaudeModel,
+  buildClaudeModelOptions,
+  formatClaudeModelLabel,
+  isOfficialClaudeModel,
+  loadPreferredClaudeCompatibleProviderId,
+  loadPreferredClaudeModel,
+  savePreferredClaudeCompatibleProviderId,
+  savePreferredClaudeModel,
+} from '../utils/claude-model';
+import {
+  buildCodexModelOptions,
+  formatCodexModelLabel,
+  loadPreferredCodexModel,
+  resolveCodexModel,
+  savePreferredCodexModel,
+} from '../utils/codex-model';
+import {
+  ClaudeAccessMode,
+  ClaudePermissionMode,
+  ClaudeReasoningEffort,
+  CodexReasoningEffort,
+  CodexPermissionMode,
+  GrokReasoningEffort,
+  KimiPermissionMode,
+  KimiThinking,
+  OpenCodePermissionMode,
+  QoderPermissionMode,
+  DeepseekAgentPreset,
+  DeepseekPermissionMode,
+  DeepseekReasoningEffort,
+  BubblePermissionMode,
+} from '../../shared/types';
+import {
+  getDefaultCodexReasoningEffort,
+  getCodexReasoningOptions,
+  savePreferredCodexReasoningEffort,
+} from '../utils/codex-reasoning';
+import {
+  getDefaultClaudeReasoningEffort,
+  loadPreferredClaudeReasoningEffort,
+  savePreferredClaudeReasoningEffort,
+} from '../utils/claude-reasoning';
+import {
+  getDefaultGrokReasoningEffort,
+  loadPreferredGrokReasoningEffort,
+  savePreferredGrokReasoningEffort,
+} from '../utils/grok-reasoning';
+import {
+  bubbleThinkingLevelsForModel,
+  getDefaultBubbleThinkingLevel,
+  savePreferredBubbleThinkingLevel,
+} from '../utils/bubble-reasoning';
+import {
+  loadPreferredCodexFastMode,
+  savePreferredCodexFastMode,
+  supportsCodexFastMode,
+} from '../utils/codex-fast';
+import {
+  buildOpencodeModelOptions,
+  formatOpencodeModelLabel,
+  loadPreferredOpencodeModel,
+  savePreferredOpencodeModel,
+} from '../utils/opencode-model';
+import {
+  loadPreferredClaudePermissionMode,
+  normalizeClaudePermissionMode,
+  savePreferredClaudePermissionMode,
+} from '../utils/claude-permission';
+import {
+  loadPreferredCodexPermissionMode,
+  savePreferredCodexPermissionMode,
+} from '../utils/codex-permission';
+import {
+  loadPreferredKimiPermissionMode,
+  loadPreferredKimiThinking,
+  savePreferredKimiPermissionMode,
+  savePreferredKimiThinking,
+} from '../utils/kimi-permission';
+import {
+  loadPreferredOpencodePermissionMode,
+  savePreferredOpencodePermissionMode,
+} from '../utils/opencode-permission';
+import {
+  loadPreferredQoderPermissionMode,
+  savePreferredQoderPermissionMode,
+} from '../utils/qoder-permission';
+import {
+  loadPreferredDeepseekAgentPreset,
+  savePreferredDeepseekAgentPreset,
+} from '../utils/deepseek-agent-preset';
+import {
+  loadPreferredDeepseekPermissionMode,
+  savePreferredDeepseekPermissionMode,
+} from '../utils/deepseek-permission';
+import {
+  loadPreferredDeepseekReasoningEffort,
+  savePreferredDeepseekReasoningEffort,
+} from '../utils/deepseek-reasoning';
+import {
+  loadPreferredBubblePermissionMode,
+  savePreferredBubblePermissionMode,
+} from '../utils/bubble-permission';
+const KIMI_MODEL_STORAGE_KEY = 'cowork.preferredKimiModel';
+const GROK_MODEL_STORAGE_KEY = 'cowork.preferredGrokModel';
+const PI_MODEL_STORAGE_KEY = 'cowork.preferredPiModel';
+const BUBBLE_MODEL_STORAGE_KEY = 'cowork.preferredBubbleModel';
+const QODER_MODEL_STORAGE_KEY = 'cowork.preferredQoderModel';
+const DEEPSEEK_MODEL_STORAGE_KEY = 'cowork.preferredDeepseekModel';
+
+export interface ComposerModelOption {
+  key: string;
+  value: string;
+  label: string;
+  description?: string;
+  compatibleProviderId?: ClaudeCompatibleProviderId | null;
+  details?: string;
+  /** Keep saved model selections resolvable without offering duplicate aliases. */
+  hiddenFromPicker?: boolean;
+  deepseekReasoningEfforts?: DeepseekReasoningEffort[];
+}
+
+export interface ComposerModelSetupState {
+  label: string;
+  title: string;
+  settingsTab: SettingsTab;
+}
+
+export interface ComposerAgentConfigurationChange {
+  provider: AgentProvider;
+  claudeReasoningEffort?: ClaudeReasoningEffort;
+  codexReasoningEffort?: CodexReasoningEffort;
+  codexFastMode?: boolean;
+  grokReasoningEffort?: GrokReasoningEffort;
+  bubbleThinkingLevel?: string;
+}
+
+function loadPreferredKimiModel(): string | null {
+  if (typeof window === 'undefined') return null;
+  const raw = rendererStateStorage.getItem(KIMI_MODEL_STORAGE_KEY);
+  return raw?.trim() || null;
+}
+
+function savePreferredKimiModel(model: string | null): void {
+  if (typeof window === 'undefined') return;
+  if (!model) {
+    rendererStateStorage.removeItem(KIMI_MODEL_STORAGE_KEY);
+    return;
+  }
+  rendererStateStorage.setItem(KIMI_MODEL_STORAGE_KEY, model);
+}
+
+function loadPreferredDeepseekModel(): string | null {
+  if (typeof window === 'undefined') return null;
+  const raw = rendererStateStorage.getItem(DEEPSEEK_MODEL_STORAGE_KEY);
+  return raw?.trim() || null;
+}
+
+function savePreferredDeepseekModel(model: string | null): void {
+  if (typeof window === 'undefined') return;
+  if (!model) {
+    rendererStateStorage.removeItem(DEEPSEEK_MODEL_STORAGE_KEY);
+    return;
+  }
+  rendererStateStorage.setItem(DEEPSEEK_MODEL_STORAGE_KEY, model);
+}
+
+function loadPreferredGrokModel(): string | null {
+  if (typeof window === 'undefined') return null;
+  const raw = rendererStateStorage.getItem(GROK_MODEL_STORAGE_KEY);
+  return raw?.trim() || null;
+}
+
+function savePreferredGrokModel(model: string | null): void {
+  if (typeof window === 'undefined') return;
+  if (!model) {
+    rendererStateStorage.removeItem(GROK_MODEL_STORAGE_KEY);
+    return;
+  }
+  rendererStateStorage.setItem(GROK_MODEL_STORAGE_KEY, model);
+}
+
+function loadPreferredPiModel(): string | null {
+  if (typeof window === 'undefined') return null;
+  const raw = rendererStateStorage.getItem(PI_MODEL_STORAGE_KEY);
+  return raw?.trim() || null;
+}
+
+function savePreferredPiModel(model: string | null): void {
+  if (typeof window === 'undefined') return;
+  if (!model) {
+    rendererStateStorage.removeItem(PI_MODEL_STORAGE_KEY);
+    return;
+  }
+  rendererStateStorage.setItem(PI_MODEL_STORAGE_KEY, model);
+}
+
+function loadPreferredBubbleModel(): string | null {
+  if (typeof window === 'undefined') return null;
+  const raw = rendererStateStorage.getItem(BUBBLE_MODEL_STORAGE_KEY);
+  return raw?.trim() || null;
+}
+
+function savePreferredBubbleModel(model: string | null): void {
+  if (typeof window === 'undefined') return;
+  if (!model) {
+    rendererStateStorage.removeItem(BUBBLE_MODEL_STORAGE_KEY);
+    return;
+  }
+  rendererStateStorage.setItem(BUBBLE_MODEL_STORAGE_KEY, model);
+}
+
+function loadPreferredQoderModel(): string | null {
+  if (typeof window === 'undefined') return null;
+  const raw = rendererStateStorage.getItem(QODER_MODEL_STORAGE_KEY);
+  return raw?.trim() || null;
+}
+
+function savePreferredQoderModel(model: string | null): void {
+  if (typeof window === 'undefined') return;
+  if (!model) {
+    rendererStateStorage.removeItem(QODER_MODEL_STORAGE_KEY);
+    return;
+  }
+  rendererStateStorage.setItem(QODER_MODEL_STORAGE_KEY, model);
+}
+
+function resolveCompatibleProviderForModel(
+  model: string | null | undefined,
+  preferredProviderId: ClaudeCompatibleProviderId | null | undefined,
+  compatibleOptions: Array<{ id: ClaudeCompatibleProviderId; model: string }>
+): ClaudeCompatibleProviderId | null {
+  const normalized = model?.trim();
+  if (!normalized) return null;
+  const matches = compatibleOptions.filter((option) => option.model === normalized);
+  if (matches.length === 0) return null;
+  if (preferredProviderId && matches.some((option) => option.id === preferredProviderId)) {
+    return preferredProviderId;
+  }
+  return matches[0]?.id || null;
+}
+
+function buildConfiguredClaudeModelValues(
+  config: { defaultModel: string | null; options: string[] },
+  compatibleOptions: Array<{ model: string }>
+): string[] {
+  const compatibleModels = new Set(compatibleOptions.map((option) => option.model.trim()).filter(Boolean));
+  const defaultModel = canonicalizeClaudeModel(config.defaultModel);
+  return Array.from(
+    new Set(
+      buildClaudeModelOptions(config)
+        .map((value) => canonicalizeClaudeModel(value))
+        .filter((value): value is string => Boolean(value))
+        .filter((value) => isOfficialClaudeModel(value))
+        .filter((value) => value === defaultModel || !compatibleModels.has(value))
+    )
+  );
+}
+
+function resolveConfiguredClaudeSelection(
+  requestedModel: string | null,
+  requestedCompatibleProviderId: ClaudeCompatibleProviderId | null | undefined,
+  config: { defaultModel: string | null; options: string[] },
+  compatibleOptions: Array<{ id: ClaudeCompatibleProviderId; model: string }>
+): { model: string | null; compatibleProviderId: ClaudeCompatibleProviderId | null } {
+  const officialOptions = buildConfiguredClaudeModelValues(config, compatibleOptions);
+  const selectCandidate = (
+    candidateModel: string | null | undefined,
+    candidateCompatibleProviderId?: ClaudeCompatibleProviderId | null
+  ): { model: string; compatibleProviderId: ClaudeCompatibleProviderId | null } | null => {
+    const normalized = canonicalizeClaudeModel(candidateModel);
+    if (!normalized) return null;
+
+    if (candidateCompatibleProviderId) {
+      const compatibleMatch = compatibleOptions.find(
+        (option) => option.id === candidateCompatibleProviderId && option.model === normalized
+      );
+      if (compatibleMatch) {
+        return { model: compatibleMatch.model, compatibleProviderId: compatibleMatch.id };
+      }
+    }
+
+    if (officialOptions.includes(normalized)) {
+      return { model: normalized, compatibleProviderId: null };
+    }
+
+    const compatibleProviderId = resolveCompatibleProviderForModel(
+      normalized,
+      candidateCompatibleProviderId,
+      compatibleOptions
+    );
+    if (compatibleProviderId) {
+      return { model: normalized, compatibleProviderId };
+    }
+
+    return null;
+  };
+
+  return (
+    selectCandidate(requestedModel, requestedCompatibleProviderId) ||
+    selectCandidate(loadPreferredClaudeModel(), loadPreferredClaudeCompatibleProviderId()) ||
+    selectCandidate(config.defaultModel, null) ||
+    { model: null, compatibleProviderId: null }
+  );
+}
+
+function buildKimiModelOptions(config: ReturnType<typeof useKimiModelConfig>): ComposerModelOption[] {
+  const defaultOption: ComposerModelOption = {
+    key: 'kimi:default',
+    value: '',
+    label: 'Default',
+    description: config.defaultModel ? `Use ${formatKimiModelLabel(config.defaultModel, config)}` : 'Use Kimi Code default model',
+  };
+  const models = config.availableModels.length > 0
+    ? config.availableModels
+    : config.options.map((name) => ({ name, label: name, provider: null, enabled: true, isDefault: config.defaultModel === name }));
+  const explicitOptions = models
+    .filter((model) => model.enabled !== false)
+    .map((model) => ({
+      key: `kimi:${model.name}`,
+      value: model.name,
+      label: model.label || model.name,
+      description: model.isDefault
+        ? 'Configured default'
+        : model.provider
+          ? model.provider
+          : undefined,
+    }));
+  return [defaultOption, ...explicitOptions];
+}
+
+function formatKimiModelLabel(value: string, config: ReturnType<typeof useKimiModelConfig>): string {
+  const match = config.availableModels.find((model) => model.name === value);
+  return match?.label || value;
+}
+
+function resolveConfiguredKimiModel(
+  requestedModel: string | null | undefined,
+  config: ReturnType<typeof useKimiModelConfig>
+): string | null {
+  const options = buildKimiModelOptions(config);
+  return resolveListedOrPendingModel(
+    requestedModel,
+    loadPreferredKimiModel(),
+    config.defaultModel,
+    options.map((option) => option.value)
+  );
+}
+
+function buildGrokModelOptions(config: ReturnType<typeof useGrokModelConfig>): ComposerModelOption[] {
+  const defaultOption: ComposerModelOption = {
+    key: 'grok:default',
+    value: '',
+    label: 'Default',
+    description: config.defaultModel ? `Use ${formatGrokModelLabel(config.defaultModel, config)}` : 'Use Grok Build default model',
+  };
+  const models = config.availableModels.length > 0
+    ? config.availableModels
+    : config.options.map((name) => ({ name, label: name, provider: null, enabled: true, isDefault: config.defaultModel === name }));
+  const explicitOptions = models
+    .filter((model) => model.enabled !== false)
+    .map((model) => ({
+      key: `grok:${model.name}`,
+      value: model.name,
+      label: model.label || model.name,
+      description: model.isDefault
+        ? 'Configured default'
+        : model.provider
+          ? model.provider
+          : undefined,
+    }));
+  return [defaultOption, ...explicitOptions];
+}
+
+function formatGrokModelLabel(value: string, config: ReturnType<typeof useGrokModelConfig>): string {
+  const match = config.availableModels.find((model) => model.name === value);
+  if (match?.label) {
+    return match.label;
+  }
+  return formatGrokModelId(value);
+}
+
+function resolveConfiguredGrokModel(
+  requestedModel: string | null | undefined,
+  config: ReturnType<typeof useGrokModelConfig>
+): string | null {
+  const options = buildGrokModelOptions(config);
+  return resolveListedOrPendingModel(
+    requestedModel,
+    loadPreferredGrokModel(),
+    config.defaultModel,
+    options.map((option) => option.value),
+    isGrokModelId
+  );
+}
+
+function buildDeepseekModelOptions(config: ReturnType<typeof useDeepseekModelConfig>): ComposerModelOption[] {
+  const defaultOption: ComposerModelOption = {
+    key: 'deepseek:default',
+    value: '',
+    label: 'Default',
+  };
+  const explicitOptions = config.options.map((id) => {
+    const model = config.availableModels?.find((entry) => entry.id === id);
+    return {
+      key: `deepseek:${id}`,
+      value: id,
+      label: model?.name || id,
+      hiddenFromPicker: id === 'deepseek-v4-flash' && config.options.includes('deepseek-flash'),
+      details: [id, model?.description, model ? 'Output is the configured Harness limit.' : undefined].filter(Boolean).join('\n'),
+      deepseekReasoningEfforts: model?.reasoningEfforts,
+    };
+  });
+  defaultOption.deepseekReasoningEfforts = explicitOptions.find((option) => option.value === config.defaultModel)?.deepseekReasoningEfforts;
+
+  return [defaultOption, ...explicitOptions];
+}
+
+function resolveConfiguredDeepseekModel(
+  requestedModel: string | null | undefined,
+  config: ReturnType<typeof useDeepseekModelConfig>
+): string | null {
+  const options = buildDeepseekModelOptions(config);
+  return resolveListedOrPendingModel(
+    requestedModel,
+    loadPreferredDeepseekModel(),
+    config.defaultModel,
+    options.map((option) => option.value)
+  );
+}
+
+function buildOpencodeComposerModelOptions(config: ReturnType<typeof useOpencodeModelConfig>): ComposerModelOption[] {
+  const defaultOption: ComposerModelOption = {
+    key: 'opencode:default',
+    value: '',
+    label: 'Default',
+    description: config.defaultModel ? `Use ${formatOpencodeModelLabel(config.defaultModel)}` : 'Use OpenCode default model',
+  };
+  const explicitOptions = buildOpencodeModelOptions(config).map((option) => ({
+    key: `opencode:${option}`,
+    value: option,
+    label: formatOpencodeModelLabel(option),
+  }));
+  return [defaultOption, ...explicitOptions];
+}
+
+function formatPiModelLabel(value: string, config: ReturnType<typeof usePiModelConfig>): string {
+  const match = config.availableModels.find((model) => model.name === value);
+  return match?.label || value;
+}
+
+function buildPiModelOptions(config: ReturnType<typeof usePiModelConfig>): ComposerModelOption[] {
+  const defaultOption: ComposerModelOption = {
+    key: 'pi:default',
+    value: '',
+    label: 'Default',
+    description: config.defaultModel
+      ? `Use ${formatPiModelLabel(config.defaultModel, config)}`
+      : 'Use Pi default model',
+  };
+  const models = config.availableModels.length > 0
+    ? config.availableModels
+    : config.options.map((name) => ({ name, label: name, provider: null, enabled: true, isDefault: config.defaultModel === name }));
+  const explicitOptions = models
+    .filter((model) => model.enabled !== false)
+    .map((model) => ({
+      key: `pi:${model.name}`,
+      value: model.name,
+      label: model.label || model.name,
+      description: model.isDefault
+        ? 'Configured default'
+        : model.provider
+          ? model.provider
+          : undefined,
+    }));
+  return [defaultOption, ...explicitOptions];
+}
+
+// No separate "Default" row: the main process always injects the configured
+// default model into the list (tagged "Configured default"), so an indirect
+// empty-value option would only duplicate the concrete row. Selection falls
+// back to the concrete default in resolveConfiguredBubbleModel.
+function buildBubbleModelOptions(config: ReturnType<typeof useBubbleModelConfig>): ComposerModelOption[] {
+  const models = config.availableModels.length > 0
+    ? config.availableModels
+    : config.options.map((name) => ({ name, label: name, provider: null, enabled: true, isDefault: config.defaultModel === name }));
+  return models
+    .filter((model) => model.enabled !== false)
+    .map((model) => ({
+      key: `bubble:${model.name}`,
+      value: model.name,
+      label: model.label || model.name,
+      description: model.isDefault
+        ? 'Configured default'
+        : model.provider
+          ? model.provider
+          : undefined,
+    }));
+}
+
+function resolveConfiguredBubbleModel(
+  requestedModel: string | null | undefined,
+  config: ReturnType<typeof useBubbleModelConfig>
+): string | null {
+  const options = buildBubbleModelOptions(config);
+  const optionValues = new Set(options.map((option) => option.value.trim()));
+  const candidates = [requestedModel, loadPreferredBubbleModel()];
+  for (const candidate of candidates) {
+    const normalized = candidate?.trim() || null;
+    if (normalized && optionValues.has(normalized)) {
+      return normalized;
+    }
+  }
+  // No stored preference: preselect the configured default's concrete row,
+  // else the first available model.
+  const configuredDefault = (config.defaultModel || '').trim();
+  if (configuredDefault && optionValues.has(configuredDefault)) {
+    return configuredDefault;
+  }
+  return options.find((option) => option.value.trim())?.value.trim() || null;
+}
+
+function resolveConfiguredPiModel(
+  requestedModel: string | null | undefined,
+  config: ReturnType<typeof usePiModelConfig>
+): string | null {
+  const options = buildPiModelOptions(config);
+  const optionValues = new Set(options.map((option) => option.value.trim()));
+  const candidates = [requestedModel, loadPreferredPiModel()];
+  for (const candidate of candidates) {
+    const normalized = candidate?.trim() || null;
+    if (normalized && optionValues.has(normalized)) {
+      return normalized;
+    }
+  }
+  return null;
+}
+
+function formatQoderModelLabel(value: string, config: ReturnType<typeof useQoderModelConfig>): string {
+  const match = config.models.find((model) => model.value === value);
+  return match?.displayName || value;
+}
+
+function buildQoderModelOptions(config: ReturnType<typeof useQoderModelConfig>): ComposerModelOption[] {
+  const defaultOption: ComposerModelOption = {
+    key: 'qoder:default',
+    value: '',
+    label: 'Default',
+    description: config.defaultModel
+      ? `Use ${formatQoderModelLabel(config.defaultModel, config)}`
+      : 'Use Qoder default model',
+  };
+  const explicitOptions = config.models
+    .filter((model) => model.isEnabled !== false)
+    .map((model) => ({
+      key: `qoder:${model.value}`,
+      value: model.value,
+      label: model.displayName || model.value,
+      description: model.isDefault ? 'Configured default' : undefined,
+    }));
+  return [defaultOption, ...explicitOptions];
+}
+
+function resolveConfiguredQoderModel(
+  requestedModel: string | null | undefined,
+  config: ReturnType<typeof useQoderModelConfig>
+): string | null {
+  const options = buildQoderModelOptions(config);
+  const optionValues = new Set(options.map((option) => option.value.trim()));
+  const candidates = [requestedModel, loadPreferredQoderModel()];
+  for (const candidate of candidates) {
+    const normalized = candidate?.trim() || null;
+    if (normalized && optionValues.has(normalized)) {
+      return normalized;
+    }
+  }
+  return null;
+}
+
+export function useComposerAgentSelection(input?: {
+  selectionKey?: string | null;
+  provider?: AgentProvider | null;
+  model?: string | null;
+  compatibleProviderId?: ClaudeCompatibleProviderId | null;
+  // Accepts the wider access mode (includes 'fullAccess'); normalized internally.
+  claudePermissionMode?: ClaudeAccessMode | null;
+  claudeExecutionMode?: import('../../shared/types').ClaudeExecutionMode | null;
+  codexExecutionMode?: import('../../shared/types').CodexExecutionMode | null;
+  bubblePermissionMode?: import('../../shared/types').BubblePermissionMode | null;
+  codexPermissionMode?: CodexPermissionMode | null;
+  opencodePermissionMode?: OpenCodePermissionMode | null;
+  claudeReasoningEffort?: ClaudeReasoningEffort | null;
+  codexReasoningEffort?: CodexReasoningEffort | null;
+  codexFastMode?: boolean | null;
+  grokReasoningEffort?: GrokReasoningEffort | null;
+  /** Bubble thinking level seed (open set, per model). */
+  bubbleThinkingLevel?: string | null;
+  deepseekAgentPreset?: DeepseekAgentPreset | null;
+  onSelectionChange?: (selection: AgentModelSelection) => void;
+}) {
+  const claudeModelConfig = useClaudeModelConfig();
+  const codexModelConfig = useCodexModelConfig();
+  const opencodeModelConfig = useOpencodeModelConfig();
+  const kimiModelConfig = useKimiModelConfig();
+  const grokModelConfig = useGrokModelConfig();
+  const piModelConfig = usePiModelConfig();
+  const bubbleModelConfig = useBubbleModelConfig();
+  const qoderModelConfig = useQoderModelConfig();
+  const deepseekModelConfig = useDeepseekModelConfig();
+  const { compatibleOptions } = useCompatibleProviderConfig();
+  const [provider, setProviderState] = useState<AgentProvider>(() => input?.provider || loadPreferredProvider());
+  const [model, setModelState] = useState<string | null>(() => {
+    const initialProvider = input?.provider || loadPreferredProvider();
+    const explicit = input?.model?.trim() || null;
+    if (explicit && (initialProvider !== 'grok' || isGrokModelId(explicit))) return explicit;
+    // Draft/new sessions often have no model field yet — seed from preferred
+    // so the first paint never flashes the empty "Default" option.
+    if (initialProvider === 'grok') {
+      const preferredModel = loadPreferredGrokModel();
+      return isGrokModelId(preferredModel) ? preferredModel : null;
+    }
+    if (initialProvider === 'kimi') return loadPreferredKimiModel();
+    if (initialProvider === 'codex') return loadPreferredCodexModel();
+    if (initialProvider === 'opencode') return loadPreferredOpencodeModel();
+    if (initialProvider === 'pi') return loadPreferredPiModel();
+    if (initialProvider === 'bubble') return resolveConfiguredBubbleModel(null, bubbleModelConfig);
+    if (initialProvider === 'qoder') return loadPreferredQoderModel();
+    if (initialProvider === 'deepseek') return loadPreferredDeepseekModel();
+    if (initialProvider === 'claude') return loadPreferredClaudeModel();
+    return null;
+  });
+  const [compatibleProviderId, setCompatibleProviderId] = useState<ClaudeCompatibleProviderId | null>(
+    () => input?.compatibleProviderId || null
+  );
+  // Tracks which selectionKey the provider/model state currently belongs to.
+  // Initialized to the current key so the first paint of a fresh composer does
+  // not wait a frame for useEffect before applying session/preferred model.
+  const [appliedSelectionKey, setAppliedSelectionKey] = useState<string>(
+    () => input?.selectionKey ?? '__default__'
+  );
+
+  const allAgentModelOptions = useMemo(() => {
+    return {
+      claude: (() => {
+        const defaultOption: ComposerModelOption = {
+          key: 'claude:official:default',
+          value: '',
+          label: 'Default',
+          description: 'Do not override the default model',
+          compatibleProviderId: null,
+        };
+        const officialOptions = buildConfiguredClaudeModelValues(claudeModelConfig, compatibleOptions).map((option) => ({
+          key: `claude:official:${option}`,
+          value: option,
+          label: formatClaudeModelLabel(option),
+          compatibleProviderId: null,
+        }));
+        const compatible = compatibleOptions.map((option) => ({
+          key: `claude:compatible:${option.id}:${option.model}`,
+          value: option.model,
+          label: option.model,
+          description: option.label,
+          compatibleProviderId: option.id,
+        }));
+        return [defaultOption, ...officialOptions, ...compatible];
+      })(),
+      codex: buildCodexModelOptions(codexModelConfig).map((option) => {
+        const meta = codexModelConfig.availableModels.find((entry) => entry.name === option);
+        return {
+          key: `codex:${option}`,
+          value: option,
+          label: formatCodexModelLabel(option, meta?.label),
+        };
+      }),
+      opencode: buildOpencodeComposerModelOptions(opencodeModelConfig),
+      kimi: buildKimiModelOptions(kimiModelConfig),
+      grok: buildGrokModelOptions(grokModelConfig),
+      pi: buildPiModelOptions(piModelConfig),
+      bubble: buildBubbleModelOptions(bubbleModelConfig),
+      qoder: buildQoderModelOptions(qoderModelConfig),
+      deepseek: buildDeepseekModelOptions(deepseekModelConfig),
+    };
+  }, [claudeModelConfig, codexModelConfig, compatibleOptions, opencodeModelConfig, kimiModelConfig, grokModelConfig, piModelConfig, bubbleModelConfig, qoderModelConfig, deepseekModelConfig]);
+
+  const modelOptions = useMemo<ComposerModelOption[]>(() => {
+    if (provider === 'claude') {
+      const defaultOption: ComposerModelOption = {
+        key: 'claude:official:default',
+        value: '',
+        label: 'Default',
+        description: 'Do not override the default model',
+        compatibleProviderId: null,
+      };
+      const officialOptions = buildConfiguredClaudeModelValues(claudeModelConfig, compatibleOptions).map((option) => ({
+        key: `claude:official:${option}`,
+        value: option,
+        label: formatClaudeModelLabel(option),
+        compatibleProviderId: null,
+      }));
+      const compatible = compatibleOptions.map((option) => ({
+        key: `claude:compatible:${option.id}:${option.model}`,
+        value: option.model,
+        label: option.model,
+        description: option.label,
+        compatibleProviderId: option.id,
+      }));
+      return [defaultOption, ...officialOptions, ...compatible];
+    }
+
+    if (provider === 'codex') {
+      return buildCodexModelOptions(codexModelConfig).map((option) => {
+        const meta = codexModelConfig.availableModels.find((entry) => entry.name === option);
+        return {
+          key: `codex:${option}`,
+          value: option,
+          label: formatCodexModelLabel(option, meta?.label),
+        };
+      });
+    }
+
+    if (provider === 'opencode') {
+      return buildOpencodeComposerModelOptions(opencodeModelConfig);
+    }
+
+    if (provider === 'kimi') {
+      return buildKimiModelOptions(kimiModelConfig);
+    }
+
+    if (provider === 'grok') {
+      return buildGrokModelOptions(grokModelConfig);
+    }
+
+    if (provider === 'pi') {
+      return buildPiModelOptions(piModelConfig);
+    }
+
+    if (provider === 'bubble') {
+      return buildBubbleModelOptions(bubbleModelConfig);
+    }
+
+    if (provider === 'qoder') {
+      return buildQoderModelOptions(qoderModelConfig);
+    }
+
+    if (provider === 'deepseek') {
+      return buildDeepseekModelOptions(deepseekModelConfig);
+    }
+
+    return [];
+  }, [claudeModelConfig, codexModelConfig, compatibleOptions, opencodeModelConfig, kimiModelConfig, grokModelConfig, piModelConfig, bubbleModelConfig, qoderModelConfig, deepseekModelConfig, provider]);
+
+  const resolveModelForProvider = useCallback(
+    (
+      nextProvider: AgentProvider,
+      requestedModel?: string | null,
+      requestedCompatibleProviderId?: ClaudeCompatibleProviderId | null
+    ): { model: string | null; compatibleProviderId: ClaudeCompatibleProviderId | null } => {
+      const normalizedRequestedModel = requestedModel?.trim() || null;
+      if (nextProvider === 'claude') {
+        return resolveConfiguredClaudeSelection(
+          normalizedRequestedModel,
+          requestedCompatibleProviderId,
+          claudeModelConfig,
+          compatibleOptions
+        );
+      }
+
+      if (nextProvider === 'codex') {
+        return {
+          model: resolveCodexModel(normalizedRequestedModel || loadPreferredCodexModel(), codexModelConfig),
+          compatibleProviderId: null,
+        };
+      }
+
+      if (nextProvider === 'opencode') {
+        const options = buildOpencodeModelOptions(opencodeModelConfig);
+        const preferredModel = loadPreferredOpencodeModel();
+        const nextModel =
+          normalizedRequestedModel ||
+          preferredModel ||
+          opencodeModelConfig.defaultModel ||
+          options[0] ||
+          null;
+        return {
+          model: nextModel && (options.length === 0 || options.includes(nextModel)) ? nextModel : options[0] || null,
+          compatibleProviderId: null,
+        };
+      }
+
+      if (nextProvider === 'kimi') {
+        return {
+          model: resolveConfiguredKimiModel(normalizedRequestedModel, kimiModelConfig),
+          compatibleProviderId: null,
+        };
+      }
+
+      if (nextProvider === 'grok') {
+        return {
+          model: resolveConfiguredGrokModel(normalizedRequestedModel, grokModelConfig),
+          compatibleProviderId: null,
+        };
+      }
+
+      if (nextProvider === 'pi') {
+        return {
+          model: resolveConfiguredPiModel(normalizedRequestedModel, piModelConfig),
+          compatibleProviderId: null,
+        };
+      }
+
+      if (nextProvider === 'bubble') {
+        return {
+          model: resolveConfiguredBubbleModel(normalizedRequestedModel, bubbleModelConfig),
+          compatibleProviderId: null,
+        };
+      }
+
+      if (nextProvider === 'qoder') {
+        return {
+          model: resolveConfiguredQoderModel(normalizedRequestedModel, qoderModelConfig),
+          compatibleProviderId: null,
+        };
+      }
+
+      if (nextProvider === 'deepseek') {
+        return {
+          model: resolveConfiguredDeepseekModel(normalizedRequestedModel, deepseekModelConfig),
+          compatibleProviderId: null,
+        };
+      }
+
+      return {
+        model: null,
+        compatibleProviderId: null,
+      };
+    },
+    [claudeModelConfig, codexModelConfig, compatibleOptions, opencodeModelConfig, kimiModelConfig, grokModelConfig, piModelConfig, bubbleModelConfig, qoderModelConfig, deepseekModelConfig]
+  );
+
+  const decorateAgentSelection = useCallback(
+    (
+      selection: AgentModelSelection,
+      overrides: Partial<Pick<
+        AgentModelSelection,
+        'claudeReasoningEffort' | 'codexReasoningEffort' | 'codexFastMode' | 'grokReasoningEffort'
+      >> = {}
+    ): AgentModelSelection => {
+      const nextModel = selection.model;
+      if (selection.provider === 'claude') {
+        return {
+          ...selection,
+          claudeReasoningEffort:
+            overrides.claudeReasoningEffort ||
+            loadPreferredClaudeReasoningEffort(nextModel) ||
+            getDefaultClaudeReasoningEffort(nextModel),
+        };
+      }
+      if (selection.provider === 'codex' && nextModel) {
+        return {
+          ...selection,
+          codexReasoningEffort:
+            overrides.codexReasoningEffort ||
+            getDefaultCodexReasoningEffort(codexModelConfig, nextModel),
+          codexFastMode:
+            overrides.codexFastMode !== undefined
+              ? overrides.codexFastMode
+              : loadPreferredCodexFastMode(codexModelConfig, nextModel),
+        };
+      }
+      if (selection.provider === 'grok') {
+        return {
+          ...selection,
+          grokReasoningEffort:
+            overrides.grokReasoningEffort ||
+            loadPreferredGrokReasoningEffort(nextModel) ||
+            getDefaultGrokReasoningEffort(nextModel),
+        };
+      }
+      return selection;
+    },
+    [codexModelConfig]
+  );
+
+  const modelValueByProvider = useMemo(() => {
+    return Object.fromEntries(
+      (Object.keys(allAgentModelOptions) as AgentProvider[]).map((candidateProvider) => [
+        candidateProvider,
+        candidateProvider === provider
+          ? model
+          : resolveModelForProvider(candidateProvider).model,
+      ])
+    ) as Record<AgentProvider, string | null>;
+  }, [allAgentModelOptions, model, provider, resolveModelForProvider]);
+
+  // Apply session switches during render so the first painted frame already
+  // shows the target session's provider/model (avoids a one-frame "Default"
+  // flash after switching threads).
+  const selectionKey = input?.selectionKey ?? '__default__';
+  if (appliedSelectionKey !== selectionKey) {
+    setAppliedSelectionKey(selectionKey);
+    const nextProvider = input?.provider || loadPreferredProvider();
+    const nextSelection = resolveModelForProvider(
+      nextProvider,
+      input?.model,
+      input?.compatibleProviderId
+    );
+    setProviderState(nextProvider);
+    setModelState(nextSelection.model);
+    setCompatibleProviderId(nextSelection.compatibleProviderId);
+  }
+
+  // Keep provider/model in sync when the active session's own fields change
+  // without a selectionKey change (e.g. server assigns model after start).
+  useEffect(() => {
+    if ((input?.selectionKey ?? '__default__') !== appliedSelectionKey) {
+      return;
+    }
+    if (input?.provider && input.provider !== provider) {
+      setProviderState(input.provider);
+    }
+    if (input?.model !== undefined) {
+      const nextSelection = resolveModelForProvider(
+        input?.provider || provider,
+        input.model,
+        input.compatibleProviderId
+      );
+      if (
+        nextSelection.model !== model ||
+        nextSelection.compatibleProviderId !== (compatibleProviderId || null)
+      ) {
+        setModelState(nextSelection.model);
+        setCompatibleProviderId(nextSelection.compatibleProviderId);
+      }
+    }
+  }, [
+    appliedSelectionKey,
+    compatibleProviderId,
+    input?.compatibleProviderId,
+    input?.model,
+    input?.provider,
+    input?.selectionKey,
+    model,
+    provider,
+    resolveModelForProvider,
+  ]);
+
+  useEffect(() => {
+    if (model) {
+      return;
+    }
+    const nextSelection = resolveModelForProvider(provider, input?.model, input?.compatibleProviderId);
+    if (nextSelection.model) {
+      setModelState(nextSelection.model);
+      setCompatibleProviderId(nextSelection.compatibleProviderId);
+    }
+  }, [input?.compatibleProviderId, input?.model, model, provider, resolveModelForProvider]);
+
+  useEffect(() => {
+    if (!grokModelConfig.loaded) {
+      return;
+    }
+    const preferredModel = loadPreferredGrokModel();
+    const configuredModels =
+      buildGrokModelOptions(grokModelConfig)
+        .map((option) => option.value.trim())
+        .filter(Boolean);
+    const confirmedModel = resolveConfirmedListedPreference(
+      preferredModel,
+      grokModelConfig.defaultModel,
+      configuredModels
+    );
+    if (confirmedModel && confirmedModel !== preferredModel) {
+      savePreferredGrokModel(confirmedModel);
+    }
+  }, [grokModelConfig]);
+
+  useEffect(() => {
+    const normalizedModel = model?.trim() || null;
+    // Only treat a model as "configured" when it matches a non-empty option.
+    // Matching the empty "Default" option while model is null was preventing
+    // preferred-model resolution and left the trigger stuck on "Default".
+    const selectedModelStillConfigured = modelOptions.some(
+      (option) => {
+        const optionValue = option.value.trim() || null;
+        if (!optionValue) return false;
+        return (
+          optionValue === normalizedModel &&
+          (option.compatibleProviderId || null) === (compatibleProviderId || null)
+        );
+      }
+    );
+    if (selectedModelStillConfigured) {
+      return;
+    }
+    if (!normalizedModel && modelOptions.every((option) => !(option.value.trim()))) {
+      return;
+    }
+
+    const nextSelection = resolveModelForProvider(provider, input?.model, input?.compatibleProviderId);
+    if (
+      nextSelection.model !== model ||
+      nextSelection.compatibleProviderId !== (compatibleProviderId || null)
+    ) {
+      setModelState(nextSelection.model);
+      setCompatibleProviderId(nextSelection.compatibleProviderId);
+    }
+  }, [
+    compatibleProviderId,
+    input?.compatibleProviderId,
+    input?.model,
+    model,
+    modelOptions,
+    provider,
+    resolveModelForProvider,
+  ]);
+
+  const selectAgent = useCallback(
+    (nextProvider: AgentProvider) => {
+      savePreferredProvider(nextProvider);
+      const nextSelection = decorateAgentSelection({
+        provider: nextProvider,
+        ...resolveModelForProvider(nextProvider),
+      });
+      setProviderState(nextProvider);
+      setModelState(nextSelection.model);
+      setCompatibleProviderId(nextSelection.compatibleProviderId);
+      input?.onSelectionChange?.(nextSelection);
+    },
+    [decorateAgentSelection, input?.onSelectionChange, resolveModelForProvider]
+  );
+
+  const selectModel = useCallback(
+    (option: ComposerModelOption, targetProvider: AgentProvider = provider) => {
+      if (!option.key.startsWith(`${targetProvider}:`)) {
+        console.error('Ignored cross-provider model selection', {
+          optionKey: option.key,
+          targetProvider,
+        });
+        return;
+      }
+      const nextModel = option.value.trim() || null;
+      const nextCompatibleProviderId =
+        targetProvider === 'claude' ? option.compatibleProviderId || null : null;
+      const nextSelection = decorateAgentSelection({
+        provider: targetProvider,
+        model: nextModel,
+        compatibleProviderId: nextCompatibleProviderId,
+      });
+      if (targetProvider !== provider) {
+        savePreferredProvider(targetProvider);
+        setProviderState(targetProvider);
+      }
+      setModelState(nextModel);
+      setCompatibleProviderId(nextCompatibleProviderId);
+
+      if (targetProvider === 'claude') {
+        savePreferredClaudeModel(nextModel);
+        savePreferredClaudeCompatibleProviderId(nextCompatibleProviderId);
+      } else if (targetProvider === 'codex') {
+        savePreferredCodexModel(nextModel);
+      } else if (targetProvider === 'opencode') {
+        savePreferredOpencodeModel(nextModel);
+      } else if (targetProvider === 'kimi') {
+        savePreferredKimiModel(nextModel);
+      } else if (targetProvider === 'grok') {
+        savePreferredGrokModel(nextModel);
+      } else if (targetProvider === 'pi') {
+        savePreferredPiModel(nextModel);
+      } else if (targetProvider === 'bubble') {
+        savePreferredBubbleModel(nextModel);
+      } else if (targetProvider === 'qoder') {
+        savePreferredQoderModel(nextModel);
+      } else if (targetProvider === 'deepseek') {
+        savePreferredDeepseekModel(nextModel);
+      }
+
+      input?.onSelectionChange?.(nextSelection);
+    },
+    [decorateAgentSelection, input?.onSelectionChange, provider]
+  );
+
+  const selectedModelOption = useMemo(() => {
+    // Unresolved (null) must not bind to the empty-value "Default" option —
+    // that was the visible one-frame "Default" flash on session switches.
+    if (model == null) {
+      return null;
+    }
+    const normalizedModel = model.trim() || null;
+    return (
+      modelOptions.find(
+        (option) =>
+          (option.value.trim() || null) === normalizedModel &&
+          (option.compatibleProviderId || null) === (compatibleProviderId || null)
+      ) ||
+      modelOptions.find((option) => (option.value.trim() || null) === normalizedModel) ||
+      null
+    );
+  }, [compatibleProviderId, model, modelOptions]);
+
+  const modelSetup = useMemo<ComposerModelSetupState | null>(() => {
+    // Only show setup CTA when there is no resolvable model to display.
+    const hasConcreteModels = modelOptions.some((option) => Boolean(option.value.trim()));
+    if (hasConcreteModels || model) {
+      return null;
+    }
+
+    if (provider === 'claude') {
+      return null;
+    }
+
+    if (provider === 'kimi') {
+      return {
+        label: 'Setup Kimi',
+        title: 'Configure Kimi Code models',
+        settingsTab: 'providers',
+      };
+    }
+
+    if (provider === 'grok') {
+      if (!grokModelConfig.loaded) {
+        return null;
+      }
+      return {
+        label: 'Setup Grok',
+        title: 'Configure Grok Build',
+        settingsTab: 'providers',
+      };
+    }
+
+    if (provider === 'deepseek') {
+      return {
+        label: 'Setup DeepSeek Harness',
+        title: 'Install the DeepSeek Harness ACP profile',
+        settingsTab: 'providers',
+      };
+    }
+
+    if (provider === 'codex') {
+      return {
+        label: 'Setup Codex',
+        title: 'Configure Codex CLI models',
+        settingsTab: 'providers',
+      };
+    }
+
+    if (provider === 'opencode') {
+      return null;
+    }
+
+    return null;
+  }, [grokModelConfig.loaded, model, modelOptions, provider]);
+
+  const selectedModelLabel =
+    modelSetup?.label ||
+    selectedModelOption?.label ||
+    (model
+      ? provider === 'kimi'
+        ? formatKimiModelLabel(model, kimiModelConfig)
+        : provider === 'grok'
+          ? formatGrokModelLabel(model, grokModelConfig)
+          : model
+      : provider === 'grok'
+        ? formatGrokModelLabel(
+            resolveConfiguredGrokModel(null, grokModelConfig) || '',
+            grokModelConfig
+          ) || 'Grok'
+        : 'Default');
+
+  const [claudeReasoningEffort, setClaudeReasoningEffortState] = useState<ClaudeReasoningEffort | null>(() => {
+    if (provider !== 'claude') return null;
+    return input?.claudeReasoningEffort || loadPreferredClaudeReasoningEffort(model) || getDefaultClaudeReasoningEffort(model);
+  });
+
+  const [codexReasoningEffort, setCodexReasoningEffortState] = useState<CodexReasoningEffort | null>(() => {
+    if (provider !== 'codex' || !model) return null;
+    if (input?.codexReasoningEffort) return input.codexReasoningEffort;
+    return getDefaultCodexReasoningEffort(codexModelConfig, model) || null;
+  });
+
+  // Sync Claude reasoning effort when model changes
+  useEffect(() => {
+    if (provider === 'claude') {
+      setClaudeReasoningEffortState(
+        input?.claudeReasoningEffort || loadPreferredClaudeReasoningEffort(model) || getDefaultClaudeReasoningEffort(model)
+      );
+    } else {
+      setClaudeReasoningEffortState(null);
+    }
+  }, [provider, model, input?.claudeReasoningEffort]);
+
+  const setClaudeReasoningEffort = useCallback(
+    (effort: ClaudeReasoningEffort) => {
+      setClaudeReasoningEffortState(effort);
+      savePreferredClaudeReasoningEffort(model, effort);
+    },
+    [model]
+  );
+
+  // Sync reasoning effort when model changes
+  useEffect(() => {
+    if (provider === 'codex' && model) {
+      const defaultEffort = getDefaultCodexReasoningEffort(codexModelConfig, model);
+      setCodexReasoningEffortState(defaultEffort || null);
+    } else {
+      setCodexReasoningEffortState(null);
+    }
+  }, [provider, model, codexModelConfig]);
+
+  // A persisted session owns its last effective Codex effort. Apply that seed
+  // after the model-sync effect when switching/restoring sessions; explicit
+  // picker changes update the renderer session immediately through
+  // onSelectionChange, so this never replays a stale value over a user click.
+  useEffect(() => {
+    if (provider === 'codex' && input?.provider === 'codex' && input.codexReasoningEffort) {
+      setCodexReasoningEffortState(input.codexReasoningEffort);
+    }
+  }, [input?.codexReasoningEffort, input?.provider, input?.selectionKey, provider]);
+
+  const setCodexReasoningEffort = useCallback(
+    (effort: CodexReasoningEffort) => {
+      setCodexReasoningEffortState(effort);
+      if (model) {
+        savePreferredCodexReasoningEffort(model, effort);
+      }
+    },
+    [model]
+  );
+
+  const [grokReasoningEffort, setGrokReasoningEffortState] = useState<GrokReasoningEffort | null>(() => {
+    if (provider !== 'grok') return null;
+    return (
+      input?.grokReasoningEffort ||
+      loadPreferredGrokReasoningEffort(model) ||
+      getDefaultGrokReasoningEffort(model)
+    );
+  });
+
+  // Sync Grok reasoning effort when model/provider changes
+  useEffect(() => {
+    if (provider === 'grok') {
+      setGrokReasoningEffortState(
+        input?.grokReasoningEffort ||
+          loadPreferredGrokReasoningEffort(model) ||
+          getDefaultGrokReasoningEffort(model)
+      );
+    } else {
+      setGrokReasoningEffortState(null);
+    }
+  }, [provider, model, input?.grokReasoningEffort]);
+
+  const setGrokReasoningEffort = useCallback(
+    (effort: GrokReasoningEffort) => {
+      setGrokReasoningEffortState(effort);
+      if (model) {
+        savePreferredGrokReasoningEffort(model, effort);
+      }
+    },
+    [model]
+  );
+
+  const [bubbleThinkingLevel, setBubbleThinkingLevelState] = useState<string | null>(() => {
+    if (provider !== 'bubble') return null;
+    return (
+      input?.bubbleThinkingLevel ||
+      getDefaultBubbleThinkingLevel(bubbleModelConfig.availableModels, model)
+    );
+  });
+
+  // Sync Bubble thinking level when model/provider or the catalog settles.
+  // The first catalog frame arrives synchronously from the SDK's static
+  // catalog, but live discovery can add reasoningLevels later — re-resolve
+  // so the default tier appears once metadata lands.
+  useEffect(() => {
+    if (provider === 'bubble') {
+      setBubbleThinkingLevelState(
+        (current) =>
+          input?.bubbleThinkingLevel ||
+          (current && bubbleThinkingLevelsForModel(bubbleModelConfig.availableModels, model).includes(current)
+            ? current
+            : null) ||
+          getDefaultBubbleThinkingLevel(bubbleModelConfig.availableModels, model)
+      );
+    } else {
+      setBubbleThinkingLevelState(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [provider, model, input?.bubbleThinkingLevel, bubbleModelConfig]);
+
+  const setBubbleThinkingLevel = useCallback(
+    (level: string) => {
+      setBubbleThinkingLevelState(level);
+      if (model) {
+        savePreferredBubbleThinkingLevel(model, level);
+      }
+    },
+    [model]
+  );
+
+  const codexModels = useMemo(() => {
+    if (!codexModelConfig) return [];
+    // Keep enabled models in Codex cache order (already priority-sorted server-side).
+    const enabled = codexModelConfig.availableModels.filter((model) => model.enabled !== false);
+    return enabled.length > 0 ? enabled : codexModelConfig.availableModels;
+  }, [codexModelConfig]);
+
+  const grokModels = useMemo(() => {
+    // Keep enabled models in the order the cache reports them.
+    const enabled = grokModelConfig.availableModels.filter((model) => model.enabled !== false);
+    return enabled.length > 0 ? enabled : grokModelConfig.availableModels;
+  }, [grokModelConfig]);
+
+  const bubbleModels = useMemo(() => {
+    // Keep enabled models in discovery order (local static catalog first,
+    // then whatever the background refresh merged in).
+    const enabled = bubbleModelConfig.availableModels.filter((model) => model.enabled !== false);
+    return enabled.length > 0 ? enabled : bubbleModelConfig.availableModels;
+  }, [bubbleModelConfig]);
+
+  // Fast mode state
+  const supportsCodexFastModeCheck = useMemo(
+    () => provider === 'codex' && supportsCodexFastMode(codexModelConfig, model ?? undefined),
+    [provider, codexModelConfig, model]
+  );
+
+  const [codexFastMode, setCodexFastModeState] = useState<boolean>(() => {
+    if (!supportsCodexFastModeCheck || !model) return false;
+    if (input?.provider === 'codex' && input.codexFastMode != null) {
+      return input.codexFastMode;
+    }
+    return loadPreferredCodexFastMode(codexModelConfig, model) === true;
+  });
+
+  // Sync fast mode when model changes
+  useEffect(() => {
+    if (supportsCodexFastModeCheck && model) {
+      const preferred = loadPreferredCodexFastMode(codexModelConfig, model);
+      setCodexFastModeState(preferred === true);
+    } else {
+      setCodexFastModeState(false);
+    }
+  }, [supportsCodexFastModeCheck, codexModelConfig, model]);
+
+  useEffect(() => {
+    if (provider === 'codex' && input?.provider === 'codex' && input.codexFastMode != null) {
+      setCodexFastModeState(input.codexFastMode && supportsCodexFastModeCheck);
+    }
+  }, [input?.codexFastMode, input?.provider, input?.selectionKey, provider, supportsCodexFastModeCheck]);
+
+  const setCodexFastMode = useCallback(
+    (enabled: boolean) => {
+      setCodexFastModeState(enabled);
+      if (model) {
+        savePreferredCodexFastMode(codexModelConfig, model, enabled);
+      }
+    },
+    [codexModelConfig, model]
+  );
+
+  const [claudePermissionMode, setClaudePermissionModeState] = useState<ClaudePermissionMode>(() =>
+    normalizeClaudePermissionMode(input?.claudePermissionMode || loadPreferredClaudePermissionMode())
+  );
+  const [claudeExecutionMode, setClaudeExecutionMode] = useState<'execute' | 'plan'>(() =>
+    input?.claudeExecutionMode === 'plan' || input?.claudePermissionMode === 'plan' ? 'plan' : 'execute'
+  );
+  const [codexExecutionMode, setCodexExecutionMode] = useState<'execute' | 'plan'>(() =>
+    input?.codexExecutionMode === 'plan' ? 'plan' : 'execute'
+  );
+  const [codexPermissionMode, setCodexPermissionModeState] = useState<CodexPermissionMode>(() =>
+    input?.codexPermissionMode || loadPreferredCodexPermissionMode()
+  );
+  const [kimiPermissionMode, setKimiPermissionModeState] = useState<KimiPermissionMode>(() =>
+    loadPreferredKimiPermissionMode()
+  );
+  const [kimiThinking, setKimiThinkingState] = useState<KimiThinking | null>(() =>
+    loadPreferredKimiThinking()
+  );
+  // Thinking tiers are per-model metadata (open set, validated server-side):
+  // k3-class models list `support_efforts` (+ off), k2.x thinking models are
+  // on/off, everything else has no thinking control at all.
+  // The "Default" model option carries an empty value — resolve it to the
+  // configured default model so the out-of-box selection still gets its
+  // per-model tier menu.
+  const kimiEffectiveModel = provider === 'kimi' ? model || kimiModelConfig.defaultModel || '' : '';
+  const kimiThinkingOptions = useMemo<string[]>(() => {
+    if (provider !== 'kimi' || !kimiEffectiveModel) return [];
+    const entry = kimiModelConfig.availableModels.find((candidate) => candidate.name === kimiEffectiveModel);
+    if (!entry) return [];
+    if (entry.supportEfforts && entry.supportEfforts.length > 0) {
+      return ['off', ...entry.supportEfforts.filter((tier) => tier !== 'off')];
+    }
+    return entry.capabilities?.includes('thinking') ? ['on', 'off'] : [];
+  }, [kimiModelConfig, kimiEffectiveModel, provider]);
+  const kimiThinkingSupported = kimiThinkingOptions.length > 0;
+  // The server-side default tier for the selected model (shown as checked
+  // when the user has not made a valid explicit choice). When the model
+  // metadata does not name a default, report null — the UI must not claim
+  // a tier the server never confirmed (a guessed "Max" would be a lie).
+  const kimiThinkingDefault = useMemo<string | null>(() => {
+    if (kimiThinkingOptions.length === 0) return null;
+    const entry = kimiModelConfig.availableModels.find((candidate) => candidate.name === kimiEffectiveModel);
+    if (entry?.defaultEffort && kimiThinkingOptions.includes(entry.defaultEffort)) {
+      return entry.defaultEffort;
+    }
+    if (entry?.supportEfforts && entry.supportEfforts.length > 0) {
+      return null;
+    }
+    return 'on';
+  }, [kimiModelConfig, kimiThinkingOptions, kimiEffectiveModel]);
+  // Only a preference that is valid for the CURRENT model is sent; anything
+  // else stays unset so the server applies its per-model default.
+  const kimiThinkingToSend = useMemo<KimiThinking | undefined>(() => {
+    if (!kimiThinking || !kimiThinkingOptions.includes(kimiThinking)) return undefined;
+    return kimiThinking;
+  }, [kimiThinking, kimiThinkingOptions]);
+  const kimiThinkingChecked = kimiThinkingToSend ?? kimiThinkingDefault;
+  const [opencodePermissionMode, setOpencodePermissionModeState] = useState<OpenCodePermissionMode>(() =>
+    input?.opencodePermissionMode || loadPreferredOpencodePermissionMode()
+  );
+  // Qoder keeps no per-session mode (the main process never persists one), so
+  // the composer preference is the single source — same as kimi/grok.
+  const [qoderPermissionMode, setQoderPermissionModeState] = useState<QoderPermissionMode>(() =>
+    loadPreferredQoderPermissionMode()
+  );
+  // DeepSeek keeps no per-session mode either (the runtime pins it via env at
+  // spawn; a change respawns through the ipc config-drift path), so the
+  // composer preference is the single source — same as kimi/grok/qoder.
+  const [deepseekPermissionMode, setDeepseekPermissionModeState] = useState<DeepseekPermissionMode>(() =>
+    loadPreferredDeepseekPermissionMode()
+  );
+  const [deepseekAgentPreset, setDeepseekAgentPresetState] = useState<DeepseekAgentPreset>(() =>
+    input?.deepseekAgentPreset || loadPreferredDeepseekAgentPreset()
+  );
+  const [preferredDeepseekReasoningEffort, setDeepseekReasoningEffortState] = useState<DeepseekReasoningEffort>(() =>
+    loadPreferredDeepseekReasoningEffort()
+  );
+  const deepseekReasoningEffort: DeepseekReasoningEffort = deepseekModelConfig.availableModels?.[0]?.reasoningEfforts.length === 1
+    ? 'off' : preferredDeepseekReasoningEffort;
+  // Bubble picker preference (default/full-access) is composer-owned like
+  // qoder; plan is a separate execution-mode axis like claude/codex, seeded
+  // and resynced from the session's live mode so plan approval flips it back.
+  const [bubblePermissionMode, setBubblePermissionModeState] = useState<BubblePermissionMode>(() =>
+    loadPreferredBubblePermissionMode()
+  );
+  const [bubbleExecutionMode, setBubbleExecutionMode] = useState<'execute' | 'plan'>(() =>
+    input?.bubblePermissionMode === 'plan' ? 'plan' : 'execute'
+  );
+
+  useEffect(() => {
+    setBubbleExecutionMode(input?.bubblePermissionMode === 'plan' ? 'plan' : 'execute');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [input?.bubblePermissionMode, input?.selectionKey]);
+
+  useEffect(() => {
+    setClaudePermissionModeState(
+      normalizeClaudePermissionMode(input?.claudePermissionMode || loadPreferredClaudePermissionMode())
+    );
+    setClaudeExecutionMode(
+      input?.claudeExecutionMode === 'plan' || input?.claudePermissionMode === 'plan'
+        ? 'plan'
+        : 'execute'
+    );
+  }, [input?.claudeExecutionMode, input?.claudePermissionMode, input?.selectionKey]);
+
+  useEffect(() => {
+    setCodexExecutionMode(input?.codexExecutionMode === 'plan' ? 'plan' : 'execute');
+    setCodexPermissionModeState(input?.codexPermissionMode || loadPreferredCodexPermissionMode());
+  }, [input?.codexExecutionMode, input?.codexPermissionMode, input?.selectionKey]);
+
+  useEffect(() => {
+    setOpencodePermissionModeState(input?.opencodePermissionMode || loadPreferredOpencodePermissionMode());
+  }, [input?.opencodePermissionMode, input?.selectionKey]);
+
+  useEffect(() => {
+    setDeepseekAgentPresetState(
+      input?.deepseekAgentPreset || loadPreferredDeepseekAgentPreset()
+    );
+  }, [input?.deepseekAgentPreset, input?.selectionKey]);
+
+  const setClaudePermissionMode = useCallback(
+    (mode: ClaudePermissionMode, options?: { savePreference?: boolean }) => {
+      const normalized = normalizeClaudePermissionMode(mode);
+      setClaudePermissionModeState(normalized);
+      if (options?.savePreference !== false) {
+        savePreferredClaudePermissionMode(normalized);
+      }
+    },
+    []
+  );
+
+  const setCodexPermissionMode = useCallback((mode: CodexPermissionMode) => {
+    setCodexPermissionModeState(mode);
+    savePreferredCodexPermissionMode(mode);
+  }, []);
+
+  const setKimiPermissionMode = useCallback((mode: KimiPermissionMode) => {
+    setKimiPermissionModeState(mode);
+    savePreferredKimiPermissionMode(mode);
+  }, []);
+
+  const setKimiThinking = useCallback((value: KimiThinking | null) => {
+    setKimiThinkingState(value);
+    savePreferredKimiThinking(value);
+  }, []);
+
+  const setOpencodePermissionMode = useCallback((mode: OpenCodePermissionMode) => {
+    setOpencodePermissionModeState(mode);
+    savePreferredOpencodePermissionMode(mode);
+  }, []);
+
+  const setQoderPermissionMode = useCallback((mode: QoderPermissionMode) => {
+    setQoderPermissionModeState(mode);
+    savePreferredQoderPermissionMode(mode);
+  }, []);
+
+  const setDeepseekPermissionMode = useCallback((mode: DeepseekPermissionMode) => {
+    setDeepseekPermissionModeState(mode);
+    savePreferredDeepseekPermissionMode(mode);
+  }, []);
+
+  const setDeepseekAgentPreset = useCallback((preset: DeepseekAgentPreset) => {
+    setDeepseekAgentPresetState(preset);
+    savePreferredDeepseekAgentPreset(preset);
+  }, []);
+
+  const setDeepseekReasoningEffort = useCallback((effort: DeepseekReasoningEffort) => {
+    setDeepseekReasoningEffortState(effort);
+    savePreferredDeepseekReasoningEffort(effort);
+  }, []);
+
+  const setBubblePermissionMode = useCallback((mode: BubblePermissionMode) => {
+    setBubblePermissionModeState(mode);
+    savePreferredBubblePermissionMode(mode);
+  }, []);
+
+  const selectAgentConfiguration = useCallback(
+    (change: ComposerAgentConfigurationChange) => {
+      const resolved = resolveModelForProvider(change.provider);
+      const nextModel = resolved.model;
+
+      if (change.provider === 'codex' && change.codexReasoningEffort) {
+        const supported = getCodexReasoningOptions(codexModelConfig, nextModel).some(
+          (option) => option.effort === change.codexReasoningEffort
+        );
+        if (!supported) {
+          console.error('Ignored unsupported Codex reasoning effort', {
+            model: nextModel,
+            effort: change.codexReasoningEffort,
+          });
+          return;
+        }
+      }
+      if (
+        change.provider === 'codex' &&
+        change.codexFastMode === true &&
+        !supportsCodexFastMode(codexModelConfig, nextModel)
+      ) {
+        console.error('Ignored unsupported Codex fast mode', { model: nextModel });
+        return;
+      }
+      if (change.provider === 'grok' && change.grokReasoningEffort) {
+        const supported = grokModelConfig.availableModels.find((entry) => entry.name === nextModel)
+          ?.reasoningEfforts;
+        if (supported?.length && !supported.includes(change.grokReasoningEffort)) {
+          console.error('Ignored unsupported Grok reasoning effort', {
+            model: nextModel,
+            effort: change.grokReasoningEffort,
+          });
+          return;
+        }
+      }
+      if (change.provider === 'bubble' && change.bubbleThinkingLevel) {
+        const supported = bubbleThinkingLevelsForModel(bubbleModelConfig.availableModels, nextModel);
+        if (!supported.includes(change.bubbleThinkingLevel)) {
+          console.error('Ignored unsupported Bubble thinking level', {
+            model: nextModel,
+            effort: change.bubbleThinkingLevel,
+          });
+          return;
+        }
+      }
+
+      const nextSelection = decorateAgentSelection(
+        {
+          provider: change.provider,
+          model: nextModel,
+          compatibleProviderId: resolved.compatibleProviderId,
+        },
+        change
+      );
+
+      // Persist against the resolved TARGET model before React commits the
+      // provider/model switch. Model-sync effects then read the same explicit
+      // choice instead of replacing it with a default from the new model.
+      if (change.provider === 'claude' && nextSelection.claudeReasoningEffort) {
+        setClaudeReasoningEffortState(nextSelection.claudeReasoningEffort);
+        if (change.claudeReasoningEffort) {
+          savePreferredClaudeReasoningEffort(nextModel, change.claudeReasoningEffort);
+        }
+      } else if (change.provider === 'codex' && nextModel) {
+        if (nextSelection.codexReasoningEffort) {
+          setCodexReasoningEffortState(nextSelection.codexReasoningEffort);
+        }
+        setCodexFastModeState(nextSelection.codexFastMode === true);
+        if (change.codexReasoningEffort) {
+          savePreferredCodexReasoningEffort(nextModel, change.codexReasoningEffort);
+        }
+        if (change.codexFastMode !== undefined) {
+          savePreferredCodexFastMode(codexModelConfig, nextModel, change.codexFastMode);
+        }
+      } else if (change.provider === 'grok' && nextSelection.grokReasoningEffort) {
+        setGrokReasoningEffortState(nextSelection.grokReasoningEffort);
+        if (change.grokReasoningEffort) {
+          savePreferredGrokReasoningEffort(nextModel, change.grokReasoningEffort);
+        }
+      } else if (change.provider === 'bubble' && change.bubbleThinkingLevel) {
+        setBubbleThinkingLevelState(change.bubbleThinkingLevel);
+        if (nextModel) {
+          savePreferredBubbleThinkingLevel(nextModel, change.bubbleThinkingLevel);
+        }
+      }
+
+      savePreferredProvider(change.provider);
+      setProviderState(change.provider);
+      setModelState(nextModel);
+      setCompatibleProviderId(resolved.compatibleProviderId);
+      input?.onSelectionChange?.(nextSelection);
+    },
+    [
+      bubbleModelConfig.availableModels,
+      codexModelConfig,
+      decorateAgentSelection,
+      grokModelConfig.availableModels,
+      input?.onSelectionChange,
+      resolveModelForProvider,
+    ]
+  );
+
+  return {
+    provider,
+    model,
+    compatibleProviderId,
+    allAgentModelOptions,
+    modelValueByProvider,
+    modelOptions,
+    modelSetup,
+    bubbleModelsLoading: !bubbleModelConfig.loaded,
+    selectedModelOption,
+    selectedModelLabel,
+    selectAgent,
+    selectModel,
+    selectAgentConfiguration,
+    codexModelConfig,
+    deepseekModelConfig,
+    codexModels,
+    grokModels,
+    bubbleModels,
+    claudeReasoningEffort,
+    setClaudeReasoningEffort,
+    codexReasoningEffort,
+    setCodexReasoningEffort,
+    grokReasoningEffort,
+    setGrokReasoningEffort,
+    bubbleThinkingLevel,
+    setBubbleThinkingLevel,
+    codexFastMode,
+    setCodexFastMode,
+    claudePermissionMode,
+    setClaudePermissionMode,
+    claudeExecutionMode,
+    setClaudeExecutionMode,
+    codexExecutionMode,
+    setCodexExecutionMode,
+    codexPermissionMode,
+    setCodexPermissionMode,
+    kimiPermissionMode,
+    setKimiPermissionMode,
+    kimiThinking,
+    setKimiThinking,
+    kimiThinkingSupported,
+    kimiThinkingOptions,
+    kimiThinkingChecked,
+    kimiThinkingToSend,
+    kimiModels: kimiModelConfig.availableModels,
+    opencodePermissionMode,
+    setOpencodePermissionMode,
+    qoderPermissionMode,
+    setQoderPermissionMode,
+    deepseekPermissionMode,
+    setDeepseekPermissionMode,
+    deepseekAgentPreset,
+    setDeepseekAgentPreset,
+    deepseekReasoningEffort,
+    setDeepseekReasoningEffort,
+    bubblePermissionMode,
+    setBubblePermissionMode,
+    bubbleExecutionMode,
+    setBubbleExecutionMode,
+  };
+}

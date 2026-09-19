@@ -1,0 +1,1188 @@
+import type {
+  AskUserQuestionInput,
+  CanonicalToolKind,
+  ContentBlock,
+  PermissionRequestPayload,
+  SessionStatus,
+  StreamMessage,
+  ToolStatus,
+  TurnPhase,
+} from '../types';
+import {
+  getMessageContentBlocks,
+  normalizeToolResultBlock,
+  normalizeToolUseBlock,
+  type NormalizedToolUseBlock,
+} from './message-content';
+import {
+  classifyToolUse,
+  deriveReadableToolDisplay,
+  formatReadableToolSummary,
+  getToolSummary,
+  safeJsonStringify,
+} from './tool-summary';
+import { extractLatestTodoProgress } from './todo-progress';
+
+export type ToolUseBlock = ContentBlock & { type: 'tool_use' };
+export type ToolResultBlock = ContentBlock & { type: 'tool_result' };
+
+/**
+ * Nested activity of a subagent (Task tool call), derived from the stream
+ * messages whose parentToolUseId points at the Task's tool_use id.
+ */
+export interface SubagentTrace {
+  /** subagent_type from the Task input (e.g. "Explore", "general-purpose"). */
+  agentType: string | null;
+  /** Short task description from the Task input. */
+  description: string | null;
+  /** The subagent's own workstream entries (tools, thinking, notes). */
+  entries: WorkstreamEntry[];
+  /** Count of tool-ish entries, for the lane stats label. */
+  toolCount: number;
+  /** Earliest child-message timestamp — anchors the live elapsed timer. */
+  startedAt?: number;
+  /** Wall-clock duration once the Task has resolved. */
+  durationMs?: number;
+}
+
+export type WorkstreamEntry =
+  | {
+      id: string;
+      type: 'thinking';
+      summary: string;
+      detail?: string;
+      state?: 'active' | 'completed';
+    }
+  | {
+      id: string;
+      type: 'note';
+      summary: string;
+      detail?: string;
+      state?: 'streaming' | 'completed';
+    }
+  | {
+      id: string;
+      type: 'tool' | 'memory';
+      toolName: string;
+      kind: CanonicalToolKind;
+      summary: string;
+      detail?: string;
+      status: ToolStatus;
+      block: ToolUseBlock;
+      result?: ToolResultBlock;
+      /** Streamed stdout/stderr tail while the tool is still running. */
+      liveOutput?: string;
+    }
+  | {
+      id: string;
+      type: 'task';
+      toolName: string;
+      kind: CanonicalToolKind;
+      summary: string;
+      detail?: string;
+      status: ToolStatus;
+      block: ToolUseBlock;
+      result?: ToolResultBlock;
+      subagent?: SubagentTrace;
+      /**
+       * uuid of the assistant message that issued this Task tool call. Tasks
+       * sharing a source message were fanned out together in one turn step;
+       * the stage builder only merges lanes into a parallel board when the
+       * ids match, so sequential Tasks never read as a parallel run.
+       */
+      sourceMessageUuid?: string;
+    }
+  | {
+      id: string;
+      type: 'approval';
+      summary: string;
+      detail?: string;
+      state: 'waiting' | 'approved' | 'denied';
+    }
+  | {
+      id: string;
+      type: 'error';
+      summary: string;
+      detail?: string;
+    };
+
+export type WorkstreamState = 'running' | 'completed' | 'waiting' | 'error';
+
+export interface WorkstreamModel {
+  state: WorkstreamState;
+  title: string;
+  summary: string;
+  entries: WorkstreamEntry[];
+  previewEntries: WorkstreamEntry[];
+  toolCount: number;
+  noteCount: number;
+  /** Source assistant messages represented by the trace. */
+  messageCount?: number;
+  hiddenEntryCount: number;
+  /** First message createdAt — used to drive the "Working for Xs" live timer. */
+  startedAt?: number;
+  /** Final wall-clock duration when state === 'completed'. */
+  durationMs?: number;
+  todoProgress: ReturnType<typeof extractLatestTodoProgress> | null;
+}
+
+type TraceEntry =
+  | { type: 'thinking'; id: string; content: string; streaming?: boolean }
+  | { type: 'note'; id: string; content: string; streaming?: boolean }
+  | { type: 'tool'; id: string; block: ToolUseBlock; messageUuid?: string };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function getString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value : null;
+}
+
+function truncateSummary(content: string, maxChars = 140): string {
+  const trimmed = content.trim();
+  if (trimmed.length <= maxChars) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, maxChars).trimEnd()}...`;
+}
+
+function isAskUserQuestionInput(input: unknown): input is AskUserQuestionInput {
+  return (
+    typeof input === 'object' &&
+    input !== null &&
+    'questions' in input &&
+    Array.isArray((input as { questions?: unknown }).questions)
+  );
+}
+
+function isMemoryTool(toolName: string): boolean {
+  return (
+    toolName === 'remember_search' ||
+    toolName === 'remember_get' ||
+    toolName === 'remember_write' ||
+    toolName === 'remember_recent' ||
+    toolName.startsWith('aegis_memory_') ||
+    toolName.endsWith('__remember_search') ||
+    toolName.endsWith('__remember_get') ||
+    toolName.endsWith('__remember_write') ||
+    toolName.endsWith('__remember_recent')
+  );
+}
+
+function getApprovalStateFromRequest(
+  request: PermissionRequestPayload
+): Extract<WorkstreamEntry, { type: 'approval' }> {
+  if (isAskUserQuestionInput(request.input)) {
+    const firstQuestion = request.input.questions[0];
+    const summary =
+      (firstQuestion?.header?.trim() || firstQuestion?.question?.trim() || request.toolName).trim();
+    const detail = firstQuestion?.question?.trim() || undefined;
+    return {
+      id: `approval-${request.toolUseId}`,
+      type: 'approval',
+      summary,
+      detail,
+      state: 'waiting',
+    };
+  }
+
+  if (isRecord(request.input) && request.input.kind === 'external-file-access') {
+    return {
+      id: `approval-${request.toolUseId}`,
+      type: 'approval',
+      summary: getString(request.input.question) || 'Waiting for permission',
+      detail: getString(request.input.filePath) || undefined,
+      state: 'waiting',
+    };
+  }
+
+  if (isRecord(request.input) && request.input.kind === 'computer-use') {
+    return {
+      id: `approval-${request.toolUseId}`,
+      type: 'approval',
+      summary:
+        getString(request.input.toolTitle) ||
+        getString(request.input.title) ||
+        getString(request.input.question) ||
+        'Waiting for Computer Use approval',
+      detail: getString(request.input.app) || getString(request.input.toolName) || undefined,
+      state: 'waiting',
+    };
+  }
+
+  return {
+    id: `approval-${request.toolUseId}`,
+    type: 'approval',
+    summary: 'Waiting for approval',
+    detail: request.toolName,
+    state: 'waiting',
+  };
+}
+
+function normalizedToToolUseBlock(normalized: NormalizedToolUseBlock): ToolUseBlock {
+  return {
+    type: 'tool_use',
+    id: normalized.id,
+    name: normalized.name,
+    input: normalized.input,
+  };
+}
+
+export function extractToolBlocks(
+  messages: (StreamMessage & { type: 'assistant' })[]
+): ToolUseBlock[] {
+  const blocks: ToolUseBlock[] = [];
+  for (const msg of messages) {
+    for (const block of getMessageContentBlocks(msg)) {
+      const normalized = normalizeToolUseBlock(block);
+      if (normalized) {
+        blocks.push(normalizedToToolUseBlock(normalized));
+      }
+    }
+  }
+  return blocks;
+}
+
+/**
+ * Stable sort of assistant messages by `createdAt` (ascending). Messages
+ * without a numeric `createdAt`, or with equal timestamps, keep their original
+ * relative order. Used so a work group renders in true emission order even when
+ * a provider commits messages to the store out of order.
+ */
+export function sortMessagesByCreatedAt<T extends StreamMessage>(messages: T[]): T[] {
+  return messages
+    .map((message, index) => {
+      const raw = (message as { createdAt?: unknown }).createdAt;
+      const ts = typeof raw === 'number' && Number.isFinite(raw) ? raw : null;
+      return { message, index, ts };
+    })
+    .sort((a, b) => {
+      if (a.ts !== null && b.ts !== null && a.ts !== b.ts) {
+        return a.ts - b.ts;
+      }
+      return a.index - b.index;
+    })
+    .map((entry) => entry.message);
+}
+
+/**
+ * Group subagent-emitted messages by the Task tool_use id they belong to.
+ * Feed the result to createBatchWorkstreamModel so Task entries can render
+ * their nested subagent activity.
+ */
+export function groupSubagentMessagesByParent(
+  messages: StreamMessage[]
+): Map<string, StreamMessage[]> {
+  const map = new Map<string, StreamMessage[]>();
+  for (const message of messages) {
+    if (message.type !== 'assistant' && message.type !== 'user') continue;
+    const parentId = message.parentToolUseId;
+    if (typeof parentId !== 'string' || !parentId) continue;
+    const existing = map.get(parentId);
+    if (existing) {
+      existing.push(message);
+    } else {
+      map.set(parentId, [message]);
+    }
+  }
+  return map;
+}
+
+/**
+ * True when `block` is a subagent-spawning Task tool_use. Mirrors
+ * `classifyToolUse`'s 'subagent' classification, with the `subagent_type`
+ * input as the runtime-agnostic fallback signal (same convention as the
+ * subagent registry).
+ */
+export function isSubagentTaskBlock(block: ContentBlock): boolean {
+  const normalized = normalizeToolUseBlock(block);
+  if (!normalized) return false;
+  if (classifyToolUse(normalized.name, normalized.input) === 'subagent') return true;
+  const input = normalized.input as Record<string, unknown> | undefined;
+  return typeof input?.subagent_type === 'string' && input.subagent_type.trim().length > 0;
+}
+
+/**
+ * Cross-agent delegation: a `delegate_task` call (aegis-delegate MCP server)
+ * runs another agent whose trace mirrors into this session under the call's
+ * tool_use id. Returns the target agent's provider id, or null when the
+ * block is not a delegate call.
+ */
+export function getDelegateAgentFromBlock(block: ContentBlock): string | null {
+  return getDelegateCallInfo(block)?.agent ?? null;
+}
+
+export interface DelegateCallInfo {
+  agent: string;
+  /** Model the lead requested (tool param); the mirrored messages'
+   * `sourceModel` carries what the child runtime actually resolved. */
+  model: string | null;
+  reasoningEffort: string | null;
+}
+
+export function getDelegateCallInfo(block: ContentBlock): DelegateCallInfo | null {
+  const normalized = normalizeToolUseBlock(block);
+  if (!normalized) return null;
+  const name = normalized.name.trim().toLowerCase();
+  if (name !== 'delegate_task' && !name.endsWith('__delegate_task')) return null;
+  const input = normalized.input as Record<string, unknown> | undefined;
+  const agent = typeof input?.agent === 'string' ? input.agent.trim() : '';
+  if (!agent) return null;
+  const model = typeof input?.model === 'string' && input.model.trim() ? input.model.trim() : null;
+  const reasoningEffort =
+    typeof input?.reasoning_effort === 'string' && input.reasoning_effort.trim()
+      ? input.reasoning_effort.trim()
+      : null;
+  return { agent, model, reasoningEffort };
+}
+
+/**
+ * Human display for a delegate's model+effort: "gpt-5.6-sol" + "high" →
+ * "gpt 5.6 sol high". Empty string when neither is known.
+ */
+export function formatDelegateModelDisplay(
+  model: string | null | undefined,
+  reasoningEffort: string | null | undefined
+): string {
+  const modelPart = model?.trim() ? model.trim().replace(/-/g, ' ').replace(/\s+/g, ' ') : '';
+  const effortPart = reasoningEffort?.trim() ?? '';
+  return [modelPart, effortPart].filter(Boolean).join(' ');
+}
+
+/**
+ * True when the LATEST turn has a delegate_task call with no tool_result yet.
+ * The composer uses this for the steer lock: while a delegated agent works in
+ * the session's directory, "lead blocked on the call = single writer" must
+ * hold, so mid-turn sends are refused (the main process enforces the same
+ * rule in handleSessionContinue).
+ */
+export function latestTurnHasPendingDelegation(messages: StreamMessage[]): boolean {
+  let turnStart = 0;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]?.type === 'user_prompt') {
+      turnStart = i;
+      break;
+    }
+  }
+  const pending = new Set<string>();
+  for (let i = turnStart; i < messages.length; i += 1) {
+    const message = messages[i];
+    if (message.type !== 'assistant' && message.type !== 'user') continue;
+    const isTopLevel = !message.parentToolUseId;
+    for (const block of getMessageContentBlocks(message)) {
+      const use = normalizeToolUseBlock(block);
+      if (use) {
+        if (isTopLevel && getDelegateAgentFromBlock(block)) pending.add(use.id);
+        continue;
+      }
+      const result = normalizeToolResultBlock(block);
+      if (result) pending.delete(result.tool_use_id);
+    }
+  }
+  return pending.size > 0;
+}
+
+/**
+ * True when the LATEST turn (everything from the last `user_prompt` onward)
+ * contains a top-level subagent Task tool_use with no matching tool_result
+ * yet. Claude background subagents keep streaming into `session.messages`
+ * after the main agent's result flips the session to 'completed', so a
+ * pending Task in the latest turn means work is still in flight.
+ *
+ * Only main-agent Task blocks count (messages without `parentToolUseId`) —
+ * a subagent's own nested Tasks resolve inside its trace and must not hold
+ * the whole session busy. Historical turns are never consulted: interrupted
+ * turns leave their Tasks unresolved forever.
+ */
+export function latestTurnHasPendingSubagentTasks(messages: StreamMessage[]): boolean {
+  let turnStart = 0;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]?.type === 'user_prompt') {
+      turnStart = i;
+      break;
+    }
+  }
+
+  const pending = new Set<string>();
+  for (let i = turnStart; i < messages.length; i += 1) {
+    const message = messages[i];
+    if (message.type !== 'assistant' && message.type !== 'user') continue;
+    const isTopLevel = !message.parentToolUseId;
+    for (const block of getMessageContentBlocks(message)) {
+      const use = normalizeToolUseBlock(block);
+      if (use) {
+        if (isTopLevel && isSubagentTaskBlock(block)) pending.add(use.id);
+        continue;
+      }
+      const result = normalizeToolResultBlock(block);
+      if (result) pending.delete(result.tool_use_id);
+    }
+  }
+  return pending.size > 0;
+}
+
+/**
+ * True when the latest turn still has pending subagent Tasks that MAY resolve.
+ * A session the user stopped ('idle' — the stop path interrupts the provider
+ * and its background tasks) or that errored will never deliver those
+ * tool_results, so only 'running'/'completed' sessions qualify — mirroring
+ * `unresolvedFallbackStatus` flipping unresolved tools to 'interrupted' once
+ * the session is no longer running.
+ */
+export function hasUnresolvedActiveTurnTasks(
+  status: SessionStatus | undefined,
+  messages: StreamMessage[]
+): boolean {
+  if (status !== 'running' && status !== 'completed') return false;
+  return latestTurnHasPendingSubagentTasks(messages);
+}
+
+/**
+ * Shared "effectively busy" predicate for session-level UI (composer
+ * send-vs-stop, turn-card deferral, subagent panel liveness): the session is
+ * busy while its provider runs OR while background subagent Tasks from the
+ * latest turn are still streaming after the main result landed. Purely a UI
+ * derivation — main-process status semantics are untouched.
+ */
+export function isSessionEffectivelyBusy(
+  status: SessionStatus | undefined,
+  messages: StreamMessage[]
+): boolean {
+  return status === 'running' || hasUnresolvedActiveTurnTasks(status, messages);
+}
+
+export function extractTraceEntries(
+  messages: (StreamMessage & { type: 'assistant' })[],
+  partials?: {
+    partialText?: string;
+    partialThinking?: string;
+    /**
+     * When the live partial is the preamble of the still-streaming message
+     * (its tool calls are committed but its leading text has not landed in the
+     * content blocks yet), slot the partial just above that message's tools
+     * instead of the tail. Without this the preamble renders below the tools
+     * mid-stream and then jumps above once the text block is committed.
+     */
+    placePartialBeforeLastToolRun?: boolean;
+  }
+): TraceEntry[] {
+  const entries: TraceEntry[] = [];
+  const trimmedPartialText = partials?.partialText?.trim() || '';
+  const trimmedPartialThinking = partials?.partialThinking?.trim() || '';
+  const lastMsgIndex = messages.length - 1;
+  let textPartialUsed = false;
+  let thinkingPartialUsed = false;
+  // Index, in `entries`, of the first tool entry contributed by the last
+  // message — the natural insertion point for an unconsumed preamble partial.
+  let lastMsgFirstToolEntryIndex: number | null = null;
+
+  for (let msgIdx = 0; msgIdx < messages.length; msgIdx += 1) {
+    const msg = messages[msgIdx];
+    const isLast = msgIdx === lastMsgIndex;
+
+    for (const block of getMessageContentBlocks(msg)) {
+      if (block.type === 'thinking') {
+        const content = block.thinking?.trim() || '';
+        if (content) {
+          // If a real thinking content matches the partial buffer (prefix
+          // match), the partial has already been merged — mark it consumed
+          // so we don't append a duplicate later.
+          if (
+            trimmedPartialThinking &&
+            !thinkingPartialUsed &&
+            (content === trimmedPartialThinking || content.startsWith(trimmedPartialThinking))
+          ) {
+            thinkingPartialUsed = true;
+          }
+          entries.push({
+            type: 'thinking',
+            id: `thinking-${entries.length}`,
+            content,
+          });
+        } else if (isLast && trimmedPartialThinking && !thinkingPartialUsed) {
+          // Empty thinking slot in the streaming message — fill it with the
+          // live partial in its natural position.
+          entries.push({
+            type: 'thinking',
+            id: 'streaming-thinking',
+            content: trimmedPartialThinking,
+            streaming: true,
+          });
+          thinkingPartialUsed = true;
+        }
+        continue;
+      }
+
+      if (block.type === 'text') {
+        const content = block.text?.trim() || '';
+        if (content) {
+          if (
+            trimmedPartialText &&
+            !textPartialUsed &&
+            (content === trimmedPartialText || content.startsWith(trimmedPartialText))
+          ) {
+            textPartialUsed = true;
+          }
+          entries.push({
+            type: 'note',
+            id: `note-${entries.length}`,
+            content,
+          });
+        } else if (isLast && trimmedPartialText && !textPartialUsed) {
+          entries.push({
+            type: 'note',
+            id: 'streaming-text',
+            content: trimmedPartialText,
+            streaming: true,
+          });
+          textPartialUsed = true;
+        }
+        continue;
+      }
+
+      const normalizedTool = normalizeToolUseBlock(block);
+      if (normalizedTool) {
+        if (isLast && lastMsgFirstToolEntryIndex === null) {
+          lastMsgFirstToolEntryIndex = entries.length;
+        }
+        entries.push({
+          type: 'tool',
+          id: normalizedTool.id,
+          block: normalizedToToolUseBlock(normalizedTool),
+          messageUuid: msg.uuid,
+        });
+      }
+    }
+  }
+
+  // Partials that didn't slot into any empty block (e.g. the streaming text
+  // hasn't been pushed into the message yet) are normally appended at the
+  // tail. But when the partial is the preamble of the still-streaming message
+  // (its tools are committed and pending), insert it just above those tools so
+  // it doesn't render below them mid-stream and then jump up on completion.
+  const leftover: TraceEntry[] = [];
+  if (trimmedPartialThinking && !thinkingPartialUsed) {
+    leftover.push({
+      type: 'thinking',
+      id: 'streaming-thinking',
+      content: trimmedPartialThinking,
+      streaming: true,
+    });
+  }
+  if (trimmedPartialText && !textPartialUsed) {
+    leftover.push({
+      type: 'note',
+      id: 'streaming-text',
+      content: trimmedPartialText,
+      streaming: true,
+    });
+  }
+  if (leftover.length > 0) {
+    if (partials?.placePartialBeforeLastToolRun && lastMsgFirstToolEntryIndex !== null) {
+      entries.splice(lastMsgFirstToolEntryIndex, 0, ...leftover);
+    } else {
+      entries.push(...leftover);
+    }
+  }
+
+  return entries;
+}
+
+interface SubagentTraceContext {
+  /** Stream messages grouped by their parentToolUseId (Task tool_use id). */
+  messagesByParent: Map<string, StreamMessage[]>;
+  toolStatusMap: Map<string, ToolStatus>;
+  toolResultsMap: Map<string, ToolResultBlock>;
+  depth: number;
+}
+
+/** Subagents can spawn their own Tasks; cap how deep the nested traces go. */
+const MAX_SUBAGENT_TRACE_DEPTH = 3;
+
+function isAssistantStreamMessage(
+  message: StreamMessage
+): message is StreamMessage & { type: 'assistant' } {
+  return message.type === 'assistant';
+}
+
+function buildSubagentTrace(
+  block: ToolUseBlock,
+  parentStatus: ToolStatus,
+  context: SubagentTraceContext
+): SubagentTrace | undefined {
+  const taskFinished = parentStatus === 'success' || parentStatus === 'error';
+  const input = isRecord(block.input) ? block.input : {};
+  // Delegate calls carry the target agent in `agent` instead of subagent_type.
+  const agentType = getString(input.subagent_type) || getDelegateAgentFromBlock(block);
+  const description =
+    getString(input.description) ||
+    (getString(input.prompt) ? truncateSummary(getString(input.prompt)!, 120) : null);
+
+  const childMessages = context.messagesByParent.get(block.id) || [];
+  const assistantMessages = sortMessagesByCreatedAt(
+    childMessages.filter(isAssistantStreamMessage)
+  );
+
+  if (assistantMessages.length === 0 && !agentType && !description) {
+    return undefined;
+  }
+
+  // Unresolved child tools inherit the Task's fate: still pending while it
+  // runs, settled as success once it finished, frozen as interrupted when the
+  // Task itself was interrupted (a stopped turn must not leave spinners).
+  const unresolvedChildStatus: ToolStatus = taskFinished
+    ? 'success'
+    : parentStatus === 'interrupted'
+      ? 'interrupted'
+      : 'pending';
+  const entries =
+    context.depth < MAX_SUBAGENT_TRACE_DEPTH
+      ? extractTraceEntries(assistantMessages)
+          .filter((entry) => !(entry.type === 'tool' && entry.block.name === 'TodoWrite'))
+          .map((entry) =>
+            createEntryFromTrace(
+              entry,
+              context.toolStatusMap,
+              context.toolResultsMap,
+              unresolvedChildStatus,
+              { ...context, depth: context.depth + 1 }
+            )
+          )
+          .filter((entry): entry is WorkstreamEntry => Boolean(entry))
+      : [];
+
+  const toolCount = entries.filter(
+    (entry) => entry.type === 'tool' || entry.type === 'task' || entry.type === 'memory'
+  ).length;
+
+  let minTs = Number.POSITIVE_INFINITY;
+  let maxTs = Number.NEGATIVE_INFINITY;
+  for (const message of childMessages) {
+    const ts = (message as { createdAt?: unknown }).createdAt;
+    if (typeof ts !== 'number' || !Number.isFinite(ts)) continue;
+    if (ts < minTs) minTs = ts;
+    if (ts > maxTs) maxTs = ts;
+  }
+  const startedAt = Number.isFinite(minTs) ? minTs : undefined;
+  const durationMs =
+    taskFinished && Number.isFinite(minTs) && Number.isFinite(maxTs) && maxTs >= minTs
+      ? maxTs - minTs
+      : undefined;
+
+  return { agentType, description, entries, toolCount, startedAt, durationMs };
+}
+
+function createEntryFromTrace(
+  entry: TraceEntry,
+  toolStatusMap: Map<string, ToolStatus>,
+  toolResultsMap: Map<string, ToolResultBlock>,
+  pendingFallbackStatus: ToolStatus = 'pending',
+  subagentContext?: SubagentTraceContext,
+  toolLiveOutputMap?: Map<string, string>
+): WorkstreamEntry | null {
+  if (entry.type === 'thinking') {
+    return {
+      id: entry.id,
+      type: 'thinking',
+      summary: truncateSummary(entry.content, 120),
+      detail: entry.content,
+      state: entry.streaming ? 'active' : 'completed',
+    };
+  }
+
+  if (entry.type === 'note') {
+    return {
+      id: entry.id,
+      type: 'note',
+      summary: truncateSummary(entry.content, 120),
+      detail: entry.content,
+      ...(entry.streaming ? { state: 'streaming' as const } : {}),
+    };
+  }
+
+  const block = entry.block;
+  const result = toolResultsMap.get(block.id);
+  const rawStatus = toolStatusMap.get(block.id);
+  const status =
+    rawStatus === 'pending' && !result
+      ? pendingFallbackStatus
+      : rawStatus || (result?.is_error ? 'error' : 'success');
+  const display = deriveReadableToolDisplay(block.name, block.input, status);
+  const summary = formatReadableToolSummary(display) || block.name;
+  const kind = classifyToolUse(block.name, block.input);
+  const detail = result?.is_error ? getToolResultOutputContent(result) : undefined;
+
+  if (block.name === 'AskUserQuestion') {
+    return {
+      id: block.id,
+      type: 'approval',
+      summary: getToolSummary(block.name, block.input) || summary,
+      detail,
+      state: status === 'error' ? 'denied' : status === 'success' ? 'approved' : 'waiting',
+    };
+  }
+
+  // Match classifyToolUse's case-insensitive classification (and
+  // classifyStageKind's `kind === 'subagent'` check) so a provider's
+  // lowercase `task` tool still becomes a task entry instead of a plain
+  // tool row that the subagent stage would drop.
+  if (kind === 'subagent') {
+    return {
+      id: block.id,
+      type: 'task',
+      toolName: block.name,
+      kind,
+      summary,
+      detail,
+      status,
+      block,
+      result,
+      subagent: subagentContext
+        ? buildSubagentTrace(block, status, subagentContext)
+        : undefined,
+      sourceMessageUuid: entry.messageUuid,
+    };
+  }
+
+  if (isMemoryTool(block.name)) {
+    return {
+      id: block.id,
+      type: 'memory',
+      toolName: block.name,
+      kind,
+      summary,
+      detail,
+      status,
+      block,
+      result,
+    };
+  }
+
+  return {
+    id: block.id,
+    type: 'tool',
+    toolName: block.name,
+    kind,
+    summary,
+    detail,
+    status,
+    block,
+    result,
+    liveOutput: status === 'pending' && !result ? toolLiveOutputMap?.get(block.id) : undefined,
+  };
+}
+
+function deriveWorkstreamState(
+  entries: WorkstreamEntry[],
+  isSessionRunning: boolean
+): WorkstreamState {
+  if (entries.some((entry) => entry.type === 'approval' && entry.state === 'waiting')) {
+    return 'waiting';
+  }
+
+  if (
+    entries.some(
+      (entry) =>
+        entry.type === 'error' ||
+        ((entry.type === 'tool' || entry.type === 'task' || entry.type === 'memory') &&
+          entry.status === 'error')
+    )
+  ) {
+    return 'error';
+  }
+
+  if (isSessionRunning || entries.some((entry) => 'status' in entry && entry.status === 'pending')) {
+    return 'running';
+  }
+
+  return 'completed';
+}
+
+function buildWorkstreamTitle(state: WorkstreamState): string {
+  switch (state) {
+    case 'waiting':
+      return 'Waiting for input';
+    case 'error':
+      return 'Needs attention';
+    case 'running':
+      return 'Working';
+    case 'completed':
+    default:
+      return 'Completed';
+  }
+}
+
+function buildWorkstreamSummary(entries: WorkstreamEntry[], state: WorkstreamState): string {
+  const waitingEntry = entries.find((entry) => entry.type === 'approval' && entry.state === 'waiting');
+  if (waitingEntry) {
+    return waitingEntry.summary;
+  }
+
+  const erroredEntry = entries.find(
+    (entry) =>
+      entry.type === 'error' ||
+      ((entry.type === 'tool' || entry.type === 'task' || entry.type === 'memory') && entry.status === 'error')
+  );
+  if (erroredEntry) {
+    return erroredEntry.summary;
+  }
+
+  const activeThinking = [...entries]
+    .reverse()
+    .find((entry) => entry.type === 'thinking' && entry.state === 'active');
+  if (activeThinking) {
+    return activeThinking.summary;
+  }
+
+  const latestTask = [...entries].reverse().find((entry) => entry.type === 'task');
+  if (latestTask) {
+    return latestTask.summary;
+  }
+
+  const latestTool = [...entries].reverse().find(
+    (entry) => entry.type === 'tool' || entry.type === 'memory'
+  );
+  if (latestTool) {
+    return latestTool.summary;
+  }
+
+  const latestThinking = [...entries].reverse().find((entry) => entry.type === 'thinking');
+  if (latestThinking) {
+    return latestThinking.summary;
+  }
+
+  if (state === 'running') {
+    return 'Preparing response';
+  }
+
+  return 'No work details yet';
+}
+
+function buildLiveWorkstreamEntries(input?: {
+  partialText?: string;
+  partialThinking?: string;
+  permissionRequests?: PermissionRequestPayload[];
+}): WorkstreamEntry[] {
+  if (!input) {
+    return [];
+  }
+
+  const permissionEntries = (input.permissionRequests || []).map(getApprovalStateFromRequest);
+  const thinking = input.partialThinking?.trim();
+  const thinkingEntry =
+    thinking && thinking.length > 0
+      ? ({
+          id: 'streaming-thinking',
+          type: 'thinking',
+          summary: truncateSummary(thinking, 120),
+          detail: thinking,
+          state: 'active',
+        } satisfies WorkstreamEntry)
+      : null;
+  const text = input.partialText?.trim();
+  const textEntry =
+    text && text.length > 0
+      ? ({
+          id: 'streaming-text',
+          type: 'note',
+          summary: truncateSummary(text, 120),
+          detail: text,
+        } satisfies WorkstreamEntry)
+      : null;
+
+  return [
+    ...permissionEntries,
+    ...(thinkingEntry ? [thinkingEntry] : []),
+    ...(textEntry ? [textEntry] : []),
+  ];
+}
+
+function buildPreviewEntries(entries: WorkstreamEntry[]): WorkstreamEntry[] {
+  if (entries.length <= 3) {
+    return entries;
+  }
+
+  const prioritizedIds: string[] = [];
+  const lastApproval = [...entries].reverse().find((entry) => entry.type === 'approval');
+  const lastError = [...entries].reverse().find(
+    (entry) =>
+      entry.type === 'error' ||
+      ((entry.type === 'tool' || entry.type === 'task' || entry.type === 'memory') &&
+        entry.status === 'error')
+  );
+
+  if (lastApproval) prioritizedIds.push(lastApproval.id);
+  if (lastError && !prioritizedIds.includes(lastError.id)) prioritizedIds.push(lastError.id);
+
+  const tailEntries = entries.slice(-3);
+  for (const entry of tailEntries) {
+    if (!prioritizedIds.includes(entry.id)) {
+      prioritizedIds.push(entry.id);
+    }
+  }
+
+  const prioritized = entries.filter((entry) => prioritizedIds.includes(entry.id));
+  return prioritized.slice(-3);
+}
+
+export function createBatchWorkstreamModel(params: {
+  messages: (StreamMessage & { type: 'assistant' })[];
+  toolStatusMap: Map<string, ToolStatus>;
+  toolResultsMap: Map<string, ToolResultBlock>;
+  isSessionRunning: boolean;
+  startedAt?: number;
+  /** Turn-level completed duration supplied by the transcript timeline. */
+  durationMs?: number;
+  /**
+   * Session messages emitted by subagents, grouped by the Task tool_use id
+   * they belong to. When provided, Task entries carry a nested SubagentTrace.
+   */
+  subagentMessagesByParent?: Map<string, StreamMessage[]>;
+  liveTrace?: {
+    partialText?: string;
+    partialThinking?: string;
+    permissionRequests?: PermissionRequestPayload[];
+  };
+  /** Streamed stdout/stderr tails keyed by tool_use id (running tools only). */
+  toolLiveOutputMap?: Map<string, string>;
+}): WorkstreamModel {
+  // Render the work group in chronological (createdAt) order. Providers can
+  // commit a message to the store out of emission order — e.g. a preamble text
+  // block is buffered and flushed only after the tools it preceded, even though
+  // its createdAt is earlier. Mid-stream that text then renders below the tools
+  // and snaps above them once the store re-sorts on completion. Ordering by
+  // createdAt here makes the streaming and completed views agree. The sort is
+  // stable and preserves arrival order for ties or messages without createdAt.
+  const orderedMessages = sortMessagesByCreatedAt(params.messages);
+  const allBlocks = extractToolBlocks(orderedMessages);
+  // The live partial belongs to the latest streaming message. If that message
+  // already has tool calls but none have resolved yet, the partial is its
+  // preamble and must render above those tools (not appended below them).
+  const lastMessage = orderedMessages[orderedMessages.length - 1];
+  const lastMessageToolUseIds = lastMessage
+    ? getMessageContentBlocks(lastMessage)
+        .map((block) => normalizeToolUseBlock(block)?.id)
+        .filter((id): id is string => Boolean(id))
+    : [];
+  const lastMessageHasPendingTool =
+    lastMessageToolUseIds.length > 0 &&
+    lastMessageToolUseIds.some((id) => !params.toolResultsMap.has(id));
+  const traceEntries = extractTraceEntries(orderedMessages, {
+    partialText: params.liveTrace?.partialText,
+    partialThinking: params.liveTrace?.partialThinking,
+    placePartialBeforeLastToolRun: lastMessageHasPendingTool,
+  });
+  // While the session runs, every unresolved tool is genuinely in flight —
+  // parallel Task fan-outs leave several tools without results at once, so
+  // they must all stay pending (not just the last one). Once the session
+  // stops, an unresolved tool never got to finish (the user stopped the turn,
+  // or it was aborted): freeze it as 'interrupted' — no spinner, but no
+  // misleading green check for work that was canceled either.
+  const unresolvedFallbackStatus: ToolStatus = params.isSessionRunning ? 'pending' : 'interrupted';
+  const subagentContext: SubagentTraceContext | undefined = params.subagentMessagesByParent
+    ? {
+        messagesByParent: params.subagentMessagesByParent,
+        toolStatusMap: params.toolStatusMap,
+        toolResultsMap: params.toolResultsMap,
+        depth: 0,
+      }
+    : undefined;
+  const entries = traceEntries
+    .filter((entry) => !(entry.type === 'tool' && entry.block.name === 'TodoWrite'))
+    .map((entry) =>
+      createEntryFromTrace(
+        entry,
+        params.toolStatusMap,
+        params.toolResultsMap,
+        unresolvedFallbackStatus,
+        subagentContext,
+        params.toolLiveOutputMap
+      )
+    )
+    .filter((entry): entry is WorkstreamEntry => Boolean(entry));
+
+  const permissionEntries = (params.liveTrace?.permissionRequests || []).map(
+    getApprovalStateFromRequest
+  );
+  const allEntries = [...entries, ...permissionEntries];
+
+  const state = deriveWorkstreamState(allEntries, params.isSessionRunning);
+  const previewEntries = buildPreviewEntries(allEntries);
+  const toolCount = allEntries.filter(
+    (entry) => entry.type === 'tool' || entry.type === 'task' || entry.type === 'memory'
+  ).length;
+  const noteCount = allEntries.filter(
+    (entry) => entry.type === 'note' || entry.type === 'thinking'
+  ).length;
+  const providedDurationMs = params.durationMs;
+  const durationMs =
+    typeof providedDurationMs === 'number' &&
+    Number.isFinite(providedDurationMs) &&
+    providedDurationMs > 0
+      ? providedDurationMs
+      : computeBatchDurationMs(params.messages, state);
+  const startedAt = params.startedAt ?? computeBatchStartedAt(params.messages);
+
+  return {
+    state,
+    title: buildWorkstreamTitle(state),
+    summary: buildWorkstreamSummary(allEntries, state),
+    entries: allEntries,
+    previewEntries,
+    toolCount,
+    noteCount,
+    messageCount: new Set(params.messages.map((message) => message.uuid)).size,
+    hiddenEntryCount: Math.max(allEntries.length - previewEntries.length, 0),
+    startedAt,
+    durationMs,
+    todoProgress: extractLatestTodoProgress(allBlocks),
+  };
+}
+
+function computeBatchStartedAt(
+  messages: (StreamMessage & { type: 'assistant' })[]
+): number | undefined {
+  let min = Number.POSITIVE_INFINITY;
+  for (const message of messages) {
+    const ts = (message as { createdAt?: number }).createdAt;
+    if (typeof ts !== 'number' || !Number.isFinite(ts)) continue;
+    if (ts < min) min = ts;
+  }
+  return Number.isFinite(min) ? min : undefined;
+}
+
+function computeBatchDurationMs(
+  messages: (StreamMessage & { type: 'assistant' })[],
+  state: WorkstreamState
+): number | undefined {
+  if (state !== 'completed' || messages.length === 0) {
+    return undefined;
+  }
+
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+  for (const message of messages) {
+    const ts = (message as { createdAt?: number }).createdAt;
+    if (typeof ts !== 'number' || !Number.isFinite(ts)) continue;
+    if (ts < min) min = ts;
+    if (ts > max) max = ts;
+  }
+
+  if (!Number.isFinite(min) || !Number.isFinite(max)) {
+    return undefined;
+  }
+
+  const duration = max - min;
+  return duration > 0 ? duration : undefined;
+}
+
+export function createStreamingWorkstreamModel(params: {
+  partialText?: string;
+  partialThinking: string;
+  phase: TurnPhase;
+  startedAt?: number;
+  permissionRequests?: PermissionRequestPayload[];
+}): WorkstreamModel | null {
+  const entries = buildLiveWorkstreamEntries({
+    partialText: params.partialText,
+    partialThinking: params.partialThinking,
+    permissionRequests: params.permissionRequests,
+  });
+
+  if (entries.length === 0) {
+    return null;
+  }
+
+  const permissionEntries = entries.filter((entry) => entry.type === 'approval');
+  const thinkingEntry = entries.find((entry) => entry.type === 'thinking');
+  const state =
+    permissionEntries.length > 0
+      ? 'waiting'
+      : params.phase === 'complete'
+        ? 'completed'
+        : 'running';
+  const summary =
+    entries.find((entry) => entry.type === 'approval')?.summary ||
+    (thinkingEntry ? thinkingEntry.summary : params.phase === 'awaiting' ? 'Waiting for the next step' : 'Preparing response');
+
+  const previewEntries = buildPreviewEntries(entries);
+
+  return {
+    state,
+    title: buildWorkstreamTitle(state),
+    summary,
+    entries,
+    previewEntries,
+    toolCount: 0,
+    noteCount: entries.length,
+    hiddenEntryCount: Math.max(entries.length - previewEntries.length, 0),
+    startedAt: params.startedAt,
+    todoProgress: null,
+  };
+}
+
+export function parseToolResultPayload(result: ToolResultBlock | undefined): Record<string, unknown> | null {
+  if (!result || typeof result.content !== 'string') {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(result.content) as unknown;
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export function getToolResultDiffContent(result: ToolResultBlock | undefined): string | null {
+  const payload = parseToolResultPayload(result);
+  const metadata = isRecord(payload?.metadata) ? payload.metadata : null;
+  return getString(metadata?.diff);
+}
+
+export function getToolResultOutputContent(result: ToolResultBlock | undefined): string {
+  if (!result) {
+    return '';
+  }
+
+  const rawContent =
+    typeof result.content === 'string'
+      ? result.content
+      : safeJsonStringify(result.content);
+  const payload = parseToolResultPayload(result);
+  return getString(payload?.output) || rawContent;
+}
+
+export function getToolInputFilePath(input: Record<string, unknown>): string | null {
+  return getString(input.file_path) || getString(input.path) || getString(input.filePath) || getString(input.filename);
+}
+
+export function getToolInputContent(input: Record<string, unknown>): string | null {
+  return getString(input.content) || getString(input.text) || getString(input.data) || getString(input.file_content);
+}
+
+export function getToolInputOldText(input: Record<string, unknown>): string | null {
+  return (
+    getString(input.old_string) ||
+    getString(input.oldText) ||
+    getString(input.old_text) ||
+    getString(input.search) ||
+    getString(input.before) ||
+    getString(input.original)
+  );
+}
+
+export function getToolInputNewText(input: Record<string, unknown>): string | null {
+  return (
+    getString(input.new_string) ||
+    getString(input.newText) ||
+    getString(input.new_text) ||
+    getString(input.replace) ||
+    getString(input.replacement) ||
+    getString(input.after) ||
+    getString(input.updated)
+  );
+}
+
+export { safeJsonStringify };

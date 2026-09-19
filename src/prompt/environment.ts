@@ -15,7 +15,7 @@ export const defaultToolSnippets: Record<string, string> = {
   bash: "Execute a bash command",
   edit: "Apply targeted string replacements to a file",
   write: "Write a new file or overwrite an existing one",
-  glob: "Find files by glob pattern without using bash",
+  ls: "List directory contents, including hidden files and subdirectories",
   grep: "Search file contents using regex",
   web_search: "Search the public web for current information",
   web_fetch: "Fetch and extract the contents of a specific webpage",
@@ -29,7 +29,7 @@ export const defaultToolSnippets: Record<string, string> = {
 
 export const defaultToolNames = [
   "read",
-  "glob",
+  "ls",
   "bash",
   "edit",
   "write",

@@ -17,11 +17,11 @@ export interface SubtaskPolicy {
 const POLICY_MAP: Record<SubtaskType, SubtaskPolicy> = {
   search: {
     type: "search",
-    allowedTools: ["read", "glob", "grep", "web_search", "web_fetch", "skill"],
+    allowedTools: ["read", "ls", "grep", "web_search", "web_fetch", "skill"],
     reminder: [
       "Subtask policy: search",
       "- Focus on locating relevant files, symbols, and evidence quickly.",
-      "- Use glob for file discovery and grep for content search.",
+      "- Use ls for directory contents and grep for content search.",
       "- Return a concise summary of what you found and where.",
     ].join("\n"),
     resultStatus: "success",
@@ -29,7 +29,7 @@ const POLICY_MAP: Record<SubtaskType, SubtaskPolicy> = {
   },
   security_investigation: {
     type: "security_investigation",
-    allowedTools: ["read", "glob", "grep", "web_search", "web_fetch", "skill"],
+    allowedTools: ["read", "ls", "grep", "web_search", "web_fetch", "skill"],
     reminder: [
       "Subtask policy: security_investigation",
       "- Investigate only in read-only mode.",
@@ -53,7 +53,7 @@ const POLICY_MAP: Record<SubtaskType, SubtaskPolicy> = {
   },
   general_readonly: {
     type: "general_readonly",
-    allowedTools: ["read", "glob", "grep", "web_search", "web_fetch", "skill"],
+    allowedTools: ["read", "ls", "grep", "web_search", "web_fetch", "skill"],
     reminder: [
       "Subtask policy: general_readonly",
       "- Stay in read-only mode.",

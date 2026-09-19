@@ -66,7 +66,7 @@ async function startCallbackServer(
 
           if (code) {
             res.writeHead(200, { "Content-Type": "text/html" });
-            res.end(`<html><body><h1>Authorization successful</h1><p>You can close this window and return to the terminal.</p></body></html>`);
+            res.end(`<html><body><h1>Authorization received</h1><p>Return to Bubble to check whether sign-in completed. Bubble still needs to exchange and save your credentials.</p></body></html>`);
             if (!resolved) {
               resolved = true;
               server.close(() => resolve({ code, state: state || "" }));

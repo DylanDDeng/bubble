@@ -1,0 +1,729 @@
+import { getAssistantPhase } from '../../shared/assistant-phase';
+import type { ContentBlock, StreamMessage } from '../types';
+import type { ThreadGoal } from '../../shared/session-goal';
+import {
+  getMessageContentBlocks,
+  isAnyToolResultBlockType,
+  normalizeToolUseBlock,
+} from './message-content';
+
+type AssistantMessage = StreamMessage & { type: 'assistant' };
+const UNATTRIBUTED_ASSISTANT_RUN_KEY = 'assistant:unattributed';
+
+export type AssistantTimelinePresentation = 'answer' | 'progress';
+
+export interface TimelineWorkGroup {
+  id: string;
+  messages: AssistantMessage[];
+  originalIndices: number[];
+  /** Completed turn duration resolved from provider metadata or turn timestamps. */
+  durationMs?: number;
+}
+
+export type TranscriptTimelineItem =
+  | {
+      type: 'message';
+      message: StreamMessage;
+      originalIndex: number;
+      assistantPresentation?: AssistantTimelinePresentation;
+      inlineWorkGroup?: TimelineWorkGroup;
+      completedGoals?: ThreadGoal[];
+    }
+  | {
+      type: 'work';
+      group: TimelineWorkGroup;
+      active: boolean;
+      defaultExpanded: boolean;
+      canCollapse?: boolean;
+      disclosureResetKey: string;
+    };
+
+function isToolResultOnlyMessage(message: StreamMessage): boolean {
+  if (message.type !== 'user') return false;
+  const blocks = getMessageContentBlocks(message);
+  return blocks.length > 0 && blocks.every((block) => isAnyToolResultBlockType(block.type));
+}
+
+function isTraceBlock(block: ContentBlock): boolean {
+  return block.type === 'thinking' || Boolean(normalizeToolUseBlock(block));
+}
+
+function isTextBlock(block: ContentBlock): block is ContentBlock & { type: 'text' } {
+  return block.type === 'text' && Boolean(block.text?.trim());
+}
+
+function isAnswerSupportBlock(block: ContentBlock): boolean {
+  return block.type === 'memory_citations' && block.citations.length > 0;
+}
+
+function hasToolUseBlock(blocks: ContentBlock[]): boolean {
+  return blocks.some((block) => Boolean(normalizeToolUseBlock(block)));
+}
+
+function cloneAssistantMessageWithContent(
+  message: AssistantMessage,
+  content: ContentBlock[]
+): AssistantMessage {
+  return {
+    ...message,
+    message: {
+      ...message.message,
+      content,
+    },
+  };
+}
+
+function createWorkGroup(
+  messages: AssistantMessage[],
+  originalIndices: number[]
+): TimelineWorkGroup {
+  const firstMessage = messages[0];
+  const firstIndex = originalIndices[0] ?? 0;
+  const firstUuid =
+    typeof firstMessage?.uuid === 'string' && firstMessage.uuid.length > 0
+      ? firstMessage.uuid
+      : 'work';
+
+  return {
+    id: `work:${firstIndex}:${firstUuid}`,
+    messages,
+    originalIndices,
+  };
+}
+
+function getAssistantRunBoundaryKey(message: AssistantMessage): string {
+  const agentRunId = typeof message.agentRunId === 'string' ? message.agentRunId.trim() : '';
+  if (agentRunId) {
+    return `run:${agentRunId}`;
+  }
+
+  const agentId = typeof message.agentId === 'string' ? message.agentId.trim() : '';
+  if (agentId) {
+    return `agent:${agentId}`;
+  }
+
+  return UNATTRIBUTED_ASSISTANT_RUN_KEY;
+}
+
+function getWorkGroupRunBoundaryKey(group: TimelineWorkGroup): string | null {
+  const keys = new Set(group.messages.map(getAssistantRunBoundaryKey));
+  if (keys.size !== 1) {
+    return null;
+  }
+  return keys.values().next().value || null;
+}
+
+function getTimelineItemRunBoundaryKey(item: TranscriptTimelineItem): string | undefined {
+  if (item.type === 'work') {
+    return getWorkGroupRunBoundaryKey(item.group) || 'assistant:mixed';
+  }
+
+  if (item.type === 'message' && item.message.type === 'assistant') {
+    return getAssistantRunBoundaryKey(item.message);
+  }
+
+  return undefined;
+}
+
+function attachWorkToPreviousAssistant(
+  items: TranscriptTimelineItem[],
+  group: TimelineWorkGroup
+): boolean {
+  const previous = items[items.length - 1];
+  if (!previous || previous.type !== 'message' || previous.message.type !== 'assistant') {
+    return false;
+  }
+  if (getAssistantRunBoundaryKey(previous.message) !== getWorkGroupRunBoundaryKey(group)) {
+    return false;
+  }
+
+  previous.inlineWorkGroup = previous.inlineWorkGroup
+    ? {
+        id: previous.inlineWorkGroup.id,
+        messages: [...previous.inlineWorkGroup.messages, ...group.messages],
+        originalIndices: [...previous.inlineWorkGroup.originalIndices, ...group.originalIndices],
+      }
+    : group;
+  return true;
+}
+
+function markAssistantMessagePresentation(items: TranscriptTimelineItem[]): void {
+  let currentTurnAssistantItems: Array<
+    Extract<TranscriptTimelineItem, { type: 'message' }> & { message: AssistantMessage }
+  > = [];
+
+  const flushTurn = () => {
+    if (currentTurnAssistantItems.length === 0) {
+      return;
+    }
+
+    currentTurnAssistantItems.forEach((item, index) => {
+      item.assistantPresentation =
+        index === currentTurnAssistantItems.length - 1 ? 'answer' : 'progress';
+    });
+    currentTurnAssistantItems = [];
+  };
+  let currentRunBoundaryKey: string | null = null;
+
+  for (const item of items) {
+    if (item.type !== 'message') {
+      continue;
+    }
+
+    if (item.message.type === 'user_prompt') {
+      flushTurn();
+      currentRunBoundaryKey = null;
+      continue;
+    }
+
+    if (item.message.type === 'assistant') {
+      const nextRunBoundaryKey = getAssistantRunBoundaryKey(item.message);
+      if (currentTurnAssistantItems.length > 0 && currentRunBoundaryKey !== nextRunBoundaryKey) {
+        flushTurn();
+      }
+      if (currentTurnAssistantItems.length === 0) {
+        currentRunBoundaryKey = nextRunBoundaryKey;
+      }
+      currentTurnAssistantItems.push(
+        item as Extract<TranscriptTimelineItem, { type: 'message' }> & {
+          message: AssistantMessage;
+        }
+      );
+    }
+  }
+
+  flushTurn();
+}
+
+function isActiveWorkGroup(
+  group: TimelineWorkGroup,
+  options: { activeTurnStartIndex?: number; sessionRunning?: boolean }
+): boolean {
+  return (
+    options.sessionRunning === true &&
+    typeof options.activeTurnStartIndex === 'number' &&
+    group.originalIndices.some((index) => index > options.activeTurnStartIndex!)
+  );
+}
+
+function combineWorkGroups(groups: TimelineWorkGroup[]): TimelineWorkGroup | null {
+  const messages = groups.flatMap((group) => group.messages);
+  const originalIndices = groups.flatMap((group) => group.originalIndices);
+  if (messages.length === 0) {
+    return null;
+  }
+  return createWorkGroup(messages, originalIndices);
+}
+
+function timelineItemOriginalIndices(item: TranscriptTimelineItem): number[] {
+  return item.type === 'work' ? item.group.originalIndices : [item.originalIndex];
+}
+
+function isActiveRunningTurn(
+  turnItems: TranscriptTimelineItem[],
+  options: { activeTurnStartIndex?: number; sessionRunning?: boolean }
+): boolean {
+  const activeTurnStartIndex = options.activeTurnStartIndex;
+  return (
+    options.sessionRunning === true &&
+    typeof activeTurnStartIndex === 'number' &&
+    turnItems.some((item) =>
+      timelineItemOriginalIndices(item).some((index) => index > activeTurnStartIndex)
+    )
+  );
+}
+
+function hasTurnResult(turnItems: TranscriptTimelineItem[]): boolean {
+  return turnItems.some((item) => item.type === 'message' && item.message.type === 'result');
+}
+
+/**
+ * Whether the turn carries a tool call that never received its tool_result —
+ * the signature of a turn stopped (or aborted) while work was in flight, as
+ * opposed to e.g. a local utility reply that simply has no `result` record.
+ */
+function turnHasUnresolvedToolUse(
+  turnItems: TranscriptTimelineItem[],
+  resolvedToolUseIds: ReadonlySet<string>
+): boolean {
+  for (const item of turnItems) {
+    const groups =
+      item.type === 'work'
+        ? [item.group]
+        : item.inlineWorkGroup
+          ? [item.inlineWorkGroup]
+          : [];
+    for (const group of groups) {
+      for (const message of group.messages) {
+        for (const block of getMessageContentBlocks(message)) {
+          const normalized = normalizeToolUseBlock(block);
+          if (normalized && !resolvedToolUseIds.has(normalized.id)) {
+            return true;
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
+
+interface CollapseTurnOptions {
+  activeTurnStartIndex?: number;
+  sessionRunning?: boolean;
+  /** Timestamp of the user prompt that opened this turn, when available. */
+  turnStartedAt?: number;
+  /**
+   * True for the transcript's final turn. Only that turn can be the one a
+   * stop press just interrupted, and only it freezes in place.
+   */
+  trailingTurn?: boolean;
+  /** tool_use ids that received a tool_result anywhere in the transcript. */
+  resolvedToolUseIds?: ReadonlySet<string>;
+}
+
+function collapseTurnWorkBeforeAnswer(
+  turnItems: TranscriptTimelineItem[],
+  options: CollapseTurnOptions
+): TranscriptTimelineItem[] {
+  const answerSourceIndex = (() => {
+    for (let index = turnItems.length - 1; index >= 0; index -= 1) {
+      const item = turnItems[index];
+      if (item?.type === 'message' && item.message.type === 'assistant' && getAssistantPhase(item.message) !== 'commentary') {
+        return index;
+      }
+    }
+    return -1;
+  })();
+  const activeRunningTurn = isActiveRunningTurn(turnItems, options);
+  // Every provider ends a completed turn with a terminal `result` message
+  // (the stop flow deliberately suppresses it for user-stopped turns). A
+  // trailing turn that has no result, still carries an unresolved tool call,
+  // and belongs to a session that is no longer running was interrupted:
+  // freeze it exactly as it rendered mid-run — keep the trace expanded,
+  // don't promote mid-turn narration to a terminal answer — so nothing the
+  // user was watching vanishes when they press stop. The unresolved-tool
+  // requirement keeps result-less utility replies (e.g. local /usage
+  // summaries) rendering as normal answers.
+  const interruptedTurn =
+    options.trailingTurn === true &&
+    options.sessionRunning !== true &&
+    !hasTurnResult(turnItems) &&
+    turnHasUnresolvedToolUse(turnItems, options.resolvedToolUseIds ?? new Set());
+  const answerItem = turnItems[answerSourceIndex];
+  const hasExplicitFinalAnswer = answerItem?.type === 'message' &&
+    answerItem.message.type === 'assistant' && getAssistantPhase(answerItem.message) === 'final_answer';
+  const hasTerminalAnswer =
+    answerSourceIndex >= 0 &&
+    !interruptedTurn &&
+    (!activeRunningTurn || hasTurnResult(turnItems) || hasExplicitFinalAnswer);
+
+  const workGroups: TimelineWorkGroup[] = [];
+  const visibleItems: TranscriptTimelineItem[] = [];
+  let answerVisibleIndex = -1;
+
+  for (let index = 0; index < turnItems.length; index += 1) {
+    const item = turnItems[index];
+
+    if (item.type === 'work') {
+      workGroups.push(item.group);
+      continue;
+    }
+
+    if (item.type !== 'message') {
+      visibleItems.push(item);
+      continue;
+    }
+
+    if (item.message.type === 'assistant' && (!hasTerminalAnswer || index !== answerSourceIndex)) {
+      if (item.inlineWorkGroup) {
+        workGroups.push(item.inlineWorkGroup);
+      }
+      workGroups.push(createWorkGroup([item.message], [item.originalIndex]));
+      continue;
+    }
+
+    if (item.inlineWorkGroup) {
+      workGroups.push(item.inlineWorkGroup);
+    }
+
+    const visibleItem: TranscriptTimelineItem = {
+      ...item,
+      inlineWorkGroup: undefined,
+    };
+    visibleItems.push(visibleItem);
+
+    if (index === answerSourceIndex) {
+      answerVisibleIndex = visibleItems.length - 1;
+    }
+  }
+
+  const combinedWorkGroup = combineWorkGroups(workGroups);
+  if (!combinedWorkGroup) {
+    return visibleItems;
+  }
+
+  const durationMs = resolveCompletedTurnDurationMs(
+    turnItems,
+    options.turnStartedAt,
+    hasTerminalAnswer
+  );
+  const completedWorkGroup: TimelineWorkGroup =
+    typeof durationMs === 'number'
+      ? { ...combinedWorkGroup, durationMs }
+      : combinedWorkGroup;
+
+  const activeWork = isActiveWorkGroup(completedWorkGroup, options) && !hasTerminalAnswer;
+  const workItem: TranscriptTimelineItem = {
+    type: 'work',
+    group: completedWorkGroup,
+    active: activeWork,
+    // An interrupted turn keeps its trace open: it froze mid-run, and
+    // collapsing it on the stop press would make the work the user was
+    // watching vanish into the disclosure toggle.
+    defaultExpanded: activeWork || interruptedTurn,
+    canCollapse: !interruptedTurn && (hasTerminalAnswer || hasTurnResult(turnItems)),
+    disclosureResetKey: combinedWorkGroup.id,
+  };
+
+  if (answerVisibleIndex >= 0) {
+    visibleItems.splice(answerVisibleIndex, 0, workItem);
+  } else {
+    visibleItems.push(workItem);
+  }
+
+  return visibleItems;
+}
+
+function getMessageCreatedAt(message: StreamMessage): number | undefined {
+  const createdAt = (message as { createdAt?: unknown }).createdAt;
+  return typeof createdAt === 'number' && Number.isFinite(createdAt)
+    ? createdAt
+    : undefined;
+}
+
+function resolveCompletedTurnDurationMs(
+  turnItems: TranscriptTimelineItem[],
+  turnStartedAt: number | undefined,
+  hasTerminalAnswer: boolean
+): number | undefined {
+  const messages = turnItems
+    .filter((item): item is Extract<TranscriptTimelineItem, { type: 'message' }> => item.type === 'message')
+    .map((item) => item.message);
+  const result = [...messages]
+    .reverse()
+    .find((message): message is Extract<StreamMessage, { type: 'result' }> => message.type === 'result');
+  const reportedDuration = result?.duration_ms;
+  if (
+    typeof reportedDuration === 'number' &&
+    Number.isFinite(reportedDuration) &&
+    reportedDuration > 0
+  ) {
+    return reportedDuration;
+  }
+
+  if (!result && !hasTerminalAnswer) {
+    return undefined;
+  }
+
+  const terminalAssistant = [...messages]
+    .reverse()
+    .find((message) => message.type === 'assistant');
+  const completedAt = result
+    ? getMessageCreatedAt(result)
+    : terminalAssistant
+      ? getMessageCreatedAt(terminalAssistant)
+      : undefined;
+  const fallbackStartedAt =
+    typeof turnStartedAt === 'number' && Number.isFinite(turnStartedAt)
+      ? turnStartedAt
+      : messages
+          .map(getMessageCreatedAt)
+          .filter((timestamp): timestamp is number => typeof timestamp === 'number')
+          .reduce<number | undefined>(
+            (earliest, timestamp) =>
+              earliest === undefined || timestamp < earliest ? timestamp : earliest,
+            undefined
+          );
+
+  if (completedAt === undefined || fallbackStartedAt === undefined) {
+    return undefined;
+  }
+  const durationMs = completedAt - fallbackStartedAt;
+  return durationMs > 0 ? durationMs : undefined;
+}
+
+function collapseWorkBeforeTerminalAnswers(
+  items: TranscriptTimelineItem[],
+  options: CollapseTurnOptions
+): TranscriptTimelineItem[] {
+  // Chunk the items so the trailing turn is known before any turn renders:
+  // only the final turn can be the one a stop press interrupted.
+  type Chunk =
+    | { kind: 'passthrough'; item: TranscriptTimelineItem }
+    | { kind: 'turn'; items: TranscriptTimelineItem[]; startedAt?: number };
+  const chunks: Chunk[] = [];
+  let currentTurnItems: TranscriptTimelineItem[] = [];
+  let currentTurnStartedAt: number | undefined;
+  let endedGoalTurn = false;
+
+  const flushTurn = () => {
+    if (currentTurnItems.length === 0) {
+      return;
+    }
+    chunks.push({ kind: 'turn', items: currentTurnItems, startedAt: currentTurnStartedAt });
+    currentTurnItems = [];
+    endedGoalTurn = false;
+  };
+
+  let currentRunBoundaryKey: string | null = null;
+  let hasAssistantRunBoundary = false;
+
+  for (const item of items) {
+    // An autonomous goal can finish without another visible user prompt.
+    // Preserve that answer when subsequent native work starts in the same chat.
+    if (endedGoalTurn && (item.type === 'work' || item.message.type === 'assistant')) {
+      flushTurn();
+      currentTurnStartedAt = undefined;
+      currentRunBoundaryKey = null;
+      hasAssistantRunBoundary = false;
+    }
+    if (item.type === 'message' && item.message.type === 'user_prompt') {
+      flushTurn();
+      currentTurnStartedAt = getMessageCreatedAt(item.message);
+      currentRunBoundaryKey = null;
+      hasAssistantRunBoundary = false;
+      chunks.push({ kind: 'passthrough', item });
+      continue;
+    }
+
+    const itemRunBoundaryKey = getTimelineItemRunBoundaryKey(item);
+    if (itemRunBoundaryKey !== undefined) {
+      if (hasAssistantRunBoundary && currentRunBoundaryKey !== itemRunBoundaryKey) {
+        flushTurn();
+        currentRunBoundaryKey = null;
+        hasAssistantRunBoundary = false;
+      }
+      if (!hasAssistantRunBoundary) {
+        currentRunBoundaryKey = itemRunBoundaryKey;
+        hasAssistantRunBoundary = true;
+      }
+    }
+
+    currentTurnItems.push(item);
+    if (item.type === 'message' && item.completedGoals?.length) endedGoalTurn = true;
+  }
+
+  flushTurn();
+
+  let lastTurnChunkIndex = -1;
+  for (let index = chunks.length - 1; index >= 0; index -= 1) {
+    if (chunks[index].kind === 'turn') {
+      lastTurnChunkIndex = index;
+      break;
+    }
+  }
+
+  const result: TranscriptTimelineItem[] = [];
+  for (let index = 0; index < chunks.length; index += 1) {
+    const chunk = chunks[index];
+    if (chunk.kind === 'passthrough') {
+      result.push(chunk.item);
+      continue;
+    }
+    result.push(
+      ...collapseTurnWorkBeforeAnswer(chunk.items, {
+        ...options,
+        turnStartedAt: chunk.startedAt,
+        trailingTurn: index === lastTurnChunkIndex,
+      })
+    );
+  }
+  return result;
+}
+
+function collectResolvedToolUseIds(messages: StreamMessage[]): Set<string> {
+  const resolved = new Set<string>();
+  for (const message of messages) {
+    if (message.type !== 'user') continue;
+    for (const block of getMessageContentBlocks(message)) {
+      if (!isAnyToolResultBlockType(block.type)) continue;
+      const toolUseId = (block as { tool_use_id?: unknown }).tool_use_id;
+      if (typeof toolUseId === 'string' && toolUseId) {
+        resolved.add(toolUseId);
+      }
+    }
+  }
+  return resolved;
+}
+
+export function deriveTranscriptTimelineItems(
+  messages: StreamMessage[],
+  options: {
+    activeTurnStartIndex?: number;
+    sessionRunning?: boolean;
+    /**
+     * Subagent detail scope: when set, render ONLY the messages belonging to
+     * this subagent (parentToolUseId === scope) as the top-level transcript,
+     * instead of the default (skip all parentToolUseId messages). A nested
+     * sub-Task inside the subagent stays a Task block and renders as a nested
+     * board via the subagentMessagesByParent the render layer already holds —
+     * so grandchild activity is not lost. Default (undefined) is unchanged.
+     */
+    subagentScopeId?: string;
+  } = {}
+): TranscriptTimelineItem[] {
+  const items: TranscriptTimelineItem[] = [];
+  let pendingWorkMessages: AssistantMessage[] = [];
+  let pendingWorkOriginalIndices: number[] = [];
+
+  const flushPendingWork = (attachToPreviousAssistant = true) => {
+    if (pendingWorkMessages.length === 0) return;
+    const group = createWorkGroup(pendingWorkMessages, pendingWorkOriginalIndices);
+    if (!attachToPreviousAssistant || !attachWorkToPreviousAssistant(items, group)) {
+      const active = isActiveWorkGroup(group, options);
+      items.push({
+        type: 'work',
+        group,
+        active,
+        defaultExpanded: active,
+        disclosureResetKey: group.id,
+      });
+    }
+    pendingWorkMessages = [];
+    pendingWorkOriginalIndices = [];
+  };
+
+  const queueWork = (message: AssistantMessage, originalIndex: number, blocks: ContentBlock[]) => {
+    if (blocks.length === 0) return;
+    pendingWorkMessages.push(cloneAssistantMessageWithContent(message, blocks));
+    pendingWorkOriginalIndices.push(originalIndex);
+  };
+
+  const pushMessage = (message: StreamMessage, originalIndex: number) => {
+    const item: TranscriptTimelineItem = { type: 'message', message, originalIndex };
+    if (message.type === 'assistant' && pendingWorkMessages.length > 0) {
+      const group = createWorkGroup(pendingWorkMessages, pendingWorkOriginalIndices);
+      if (getAssistantRunBoundaryKey(message) === getWorkGroupRunBoundaryKey(group)) {
+        item.inlineWorkGroup = group;
+        pendingWorkMessages = [];
+        pendingWorkOriginalIndices = [];
+      } else {
+        flushPendingWork();
+      }
+    } else {
+      flushPendingWork();
+    }
+    items.push(item);
+  };
+
+  for (let originalIndex = 0; originalIndex < messages.length; originalIndex += 1) {
+    const message = messages[originalIndex];
+
+    if (message.type === 'stream_event' || message.type === 'goal_completed' || isToolResultOnlyMessage(message)) {
+      continue;
+    }
+
+    // Default: subagent (Task) messages render nested under their Task row in
+    // the workstream, never inline in the top-level transcript. Scoped
+    // (subagent detail panel): keep ONLY this subagent's own direct messages,
+    // skipping the top-level turn and every other subagent.
+    if (options.subagentScopeId) {
+      if (message.parentToolUseId !== options.subagentScopeId) {
+        continue;
+      }
+    } else if (message.parentToolUseId) {
+      continue;
+    }
+
+    if (message.type === 'user_prompt') {
+      flushPendingWork();
+      items.push({ type: 'message', message, originalIndex });
+      continue;
+    }
+
+    if (message.type !== 'assistant') {
+      pushMessage(message, originalIndex);
+      continue;
+    }
+
+    const blocks = getMessageContentBlocks(message);
+    const messageHasToolUse = hasToolUseBlock(blocks);
+    let traceBuffer: ContentBlock[] = [];
+    let textBuffer: ContentBlock[] = [];
+
+    const flushTraceBuffer = () => {
+      if (traceBuffer.length === 0) return;
+      queueWork(message, originalIndex, traceBuffer);
+      traceBuffer = [];
+    };
+
+    const flushTextBuffer = () => {
+      if (textBuffer.length === 0) return;
+      pushMessage(cloneAssistantMessageWithContent(message, textBuffer), originalIndex);
+      textBuffer = [];
+    };
+
+    for (const block of blocks) {
+      if (isTraceBlock(block)) {
+        flushTextBuffer();
+        traceBuffer.push(block);
+        continue;
+      }
+
+      if (isTextBlock(block) || isAnswerSupportBlock(block)) {
+        if (messageHasToolUse) {
+          traceBuffer.push(block);
+          continue;
+        }
+        flushTraceBuffer();
+        textBuffer.push(block);
+      }
+    }
+
+    flushTraceBuffer();
+    flushTextBuffer();
+  }
+
+  flushPendingWork();
+  markAssistantMessagePresentation(items);
+  attachCompletedGoals(items, messages);
+  const timeline = collapseWorkBeforeTerminalAnswers(items, {
+    ...options,
+    resolvedToolUseIds: collectResolvedToolUseIds(messages),
+  });
+  return timeline;
+}
+
+/** Native completion time pins a summary to its answer, including late events
+ * arriving after the next prompt. Stored summaries survive later goals/clears. */
+function attachCompletedGoals(items: TranscriptTimelineItem[], messages: StreamMessage[]) {
+  const completions = new Map<string, Extract<StreamMessage, { type: 'goal_completed' }>>();
+  for (const message of messages) {
+    if (message.type === 'goal_completed' && !message.parentToolUseId)
+      completions.set(message.uuid, message);
+  }
+  for (const { goal, afterMessageId } of completions.values()) {
+    if (goal.status !== 'complete') continue;
+    const completedAt = goal.updatedAt * 1000;
+    const startedAt = goal.createdAt * 1000;
+    let target: Extract<TranscriptTimelineItem, { type: 'message' }> | undefined;
+    let latest = -Infinity;
+    for (const item of items) {
+      if (item.type !== 'message' || item.message.type !== 'assistant'
+        || item.message.streaming || item.message.parentToolUseId || item.message.sourceProvider) continue;
+      if (afterMessageId) {
+        if (item.message.uuid === afterMessageId) target = item;
+        continue;
+      }
+      const at = item.message.createdAt;
+      if (typeof at !== 'number' || at < startedAt || at > completedAt || at < latest) continue;
+      if (!getMessageContentBlocks(item.message).some(isTextBlock)) continue;
+      target = item;
+      latest = at;
+    }
+    if (target) {
+      (target.completedGoals ??= []).push(goal);
+      target.assistantPresentation = 'answer';
+    }
+  }
+}

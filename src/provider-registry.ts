@@ -712,6 +712,15 @@ export class ProviderRegistry {
       }
     }
 
+    // OAuth providers can be injected even when models.json owns the model
+    // catalog. Honor the separately stored enable preference in either path.
+    const enablePreferences = new Map(this.config.getProviders().map((p) => [p.id, p.enabled]));
+    for (const provider of providers) {
+      if (provider.authType === "oauth" && enablePreferences.has(provider.id)) {
+        provider.enabled = enablePreferences.get(provider.id) !== false && !!provider.apiKey;
+      }
+    }
+
     return providers;
   }
 

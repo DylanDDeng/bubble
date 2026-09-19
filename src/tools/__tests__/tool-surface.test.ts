@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { createAllTools } from "../index.js";
+import { createWorktreeChildTools } from "../child-tools.js";
+import { buildSystemPrompt } from "../../system-prompt.js";
+import { buildToolPromptOptions } from "../prompt-metadata.js";
 import { createToolSearchTool } from "../tool-search.js";
 import { GoalStore } from "../../goal/store.js";
 import { builtinAgentProfiles, findAgentProfile, selectToolsForAgentProfile } from "../../agent/profiles.js";
@@ -16,6 +19,32 @@ function allTools(): ToolRegistryEntry[] {
 }
 
 describe("tool surface", () => {
+  it("removes standalone glob from main and child tools and their prompts", () => {
+    const tools = allTools();
+    const childTools = createWorktreeChildTools("/tmp/worktree");
+    for (const entries of [tools, childTools]) {
+      expect(entries.map((tool) => tool.name)).not.toContain("glob");
+      expect(entries.map((tool) => tool.name)).toEqual(expect.arrayContaining(["ls", "bash", "grep"]));
+      const prompt = buildSystemPrompt(buildToolPromptOptions(entries));
+      expect(prompt).not.toContain("- glob:");
+      expect(prompt).not.toContain("Use glob");
+      expect(prompt).toContain("Use bash for file operations like ls, find, and rg");
+    }
+    for (const profile of builtinAgentProfiles()) {
+      expect(profile.tools.include ?? []).not.toContain("glob");
+      expect(selectToolsForAgentProfile(tools, profile).map((tool) => tool.name)).not.toContain("glob");
+    }
+  });
+
+  it("exposes ls to the main agent and built-in explorers as a read-only tool", () => {
+    const tools = allTools();
+    const ls = tools.find((tool) => tool.name === "ls");
+    expect(ls).toMatchObject({ readOnly: true, effect: "read" });
+    expect(ls?.deferred).toBeFalsy();
+    const explorer = findAgentProfile(builtinAgentProfiles(), "explorer")!;
+    expect(selectToolsForAgentProfile(tools, explorer).map((tool) => tool.name)).toContain("ls");
+  });
+
   it("defers exactly the low-frequency tools; the schemas in every turn stay bounded", () => {
     const tools = allTools();
     const deferred = tools.filter((t) => t.deferred).map((t) => t.name).sort();

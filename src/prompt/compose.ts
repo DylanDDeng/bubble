@@ -101,12 +101,14 @@ function buildGuidelines(tools: string[], extraGuidelines: string[]): string[] {
     }
   };
 
-  if (tools.includes("glob")) {
-    add("Use glob for file discovery and project structure inspection; do not use bash ls/find for this unless glob cannot answer");
+  if (tools.includes("ls")) {
+    add("Use ls to list directory contents, including files and subdirectories");
   }
-
-  if (tools.includes("bash") && tools.includes("grep")) {
-    add("Use grep for content search; do not run grep, rg, or ripgrep through bash");
+  if (tools.includes("grep")) {
+    add("Use grep to search file contents");
+  }
+  if (tools.includes("bash")) {
+    add("Use bash for file operations like ls, find, and rg when appropriate");
   }
 
   if (tools.includes("question")) {

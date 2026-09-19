@@ -44,6 +44,22 @@ async function startLogin(): Promise<Started> {
 }
 
 describe("grok OAuth callback server", () => {
+  it("does not claim completed sign-in when token exchange has not succeeded", async () => {
+    const { uri, statuses, login } = await startLogin();
+    const authorizationUrl = statuses.join("\n").match(/https:\/\/auth\.x\.ai\/\S+/)?.[0];
+    const callback = new URL(uri);
+    callback.searchParams.set("state", new URL(authorizationUrl!).searchParams.get("state")!);
+    callback.searchParams.set("code", "fixture-authorization-code");
+    const response = await fetch(callback);
+    const html = await response.text();
+    expect(response.status).toBe(200);
+    expect(html).toContain("Authorization received");
+    expect(html).not.toContain("Authorization successful");
+    // The mocked token response has no credentials: browser callback success
+    // must not be presented as a completed account login.
+    await expect(login).rejects.toThrow(/no access token/);
+  }, 30_000);
+
   it("builds the authorization URL around a bound redirect URI", async () => {
     const { uri, statuses, login } = await startLogin();
 

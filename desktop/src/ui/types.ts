@@ -1,0 +1,767 @@
+// UI 层类型定义
+
+// Settings 标签类型
+export type SettingsTab = 'mcp' | 'general' | 'shortcuts' | 'appearance' | 'browser' | 'providers' | 'usage' | 'profile' | 'bridge';
+/** Agent runtime whose MCP servers the settings pane is showing. */
+export type McpSettingsRuntime = 'claude' | 'codex' | 'opencode' | 'kimi' | 'qoder' | 'bubble' | 'deepseek';
+
+import type { ChromeTheme, ThemeFonts, ThemeMode, ThemePack, ThemeState, ThemeVariant } from './theme/theme-types';
+// 从共享类型导入
+import type {
+  AgentProvider,
+  AppUpdateStatus,
+  ClaudeCompatibleProviderId,
+  ClaudeCompatibleProviderConfig,
+  ClaudeCompatibleProvidersConfig,
+  ClaudeReasoningEffort,
+  CodexReasoningEffort,
+  DeepseekReasoningEffort,
+  GrokReasoningEffort,
+  GrokPermissionMode,
+  ProjectTreeNode,
+  FolderConfig,
+  GitPatchScope,
+  SessionScope,
+  WorkspaceChannel,
+} from '../shared/types';
+
+export type {
+  SessionInfo,
+  SessionStatus,
+  StreamMessage,
+  Attachment,
+  ClaudeRewindScope,
+  ClaudeRewindFilesOutcome,
+  ClaudeRewindResult,
+  ProjectTreeNode,
+  AskUserQuestionInput,
+  AskUserQuestion,
+  AcpPermissionInput,
+  AcpPermissionOption,
+  CodexApprovalPermissionInput,
+  ComputerUsePermissionInput,
+  ExternalFilePermissionInput,
+  PermissionRequestInput,
+  ContentBlock,
+  PermissionRequestPayload,
+  PermissionResult,
+  ClientEvent,
+  ServerEvent,
+  AppUpdateStatus,
+  AutomationDefinition,
+  AutomationRunRecord,
+  AutomationSchedule,
+  AutomationSnapshot,
+  UiResumeState,
+  McpServerConfig,
+  McpServerStatus,
+  AvailableCommand,
+  ClaudeSkillSummary,
+  ClaudeModelConfig,
+  ClaudeCompatibleProviderId,
+  ClaudeCompatibleProviderConfig,
+  ClaudeCompatibleProvidersConfig,
+  ClaudePermissionMode,
+  ClaudeAccessMode,
+  ClaudeExecutionMode,
+  ClaudeReasoningEffort,
+  ClaudeReasoningLevelOption,
+  CodexExecutionMode,
+  CodexPermissionMode,
+  CodexReasoningEffort,
+  CodexReasoningLevelOption,
+  GrokReasoningEffort,
+  GrokPermissionMode,
+  PlanStep,
+  PlanStepStatus,
+  OpenCodePermissionMode,
+  ClaudeUsageDailyPoint,
+  ClaudeUsageModelSummary,
+  ClaudeUsageRangeDays,
+  ClaudeUsageReport,
+  CodexRateLimitReport,
+  CodexRateLimitSnapshot,
+  CodexRateLimitWindow,
+  ClaudePlanUsageReport,
+  ClaudePlanUsageWindow,
+  ClaudePlanModelWindow,
+  GrokPlanUsageReport,
+  QoderPlanUsageReport,
+  SessionUserPromptSummary,
+  ChatSessionSearchResult,
+  SessionHistoryPayload,
+  ClaudeModelUsage,
+  LatestClaudeModelUsage,
+  CodexModelConfig,
+  CodexRuntimeStatus,
+  OpenCodeModelConfig,
+  OpenCodeRuntimeStatus,
+  KimiModelConfig,
+  GrokModelConfig,
+  DeepseekModelConfig,
+  DeepseekKeyStatus,
+  BrowserUsePermissionSettings,
+  ChromeCookieDomain,
+  ChromeCookieImportCounts,
+  ChromeCookieImportResult,
+  ChromeCookieImportStatus,
+  ChromeCookieProfile,
+  ChromeCookieProfilesResult,
+  DeepseekPermissionMode,
+  DeepseekAgentPreset,
+  DeepseekReasoningEffort,
+  PiModelConfig,
+  BubbleModelConfig,
+  BubbleProvidersConfig,
+  BubbleProviderSummary,
+  QoderModelConfig,
+  QoderModelOption,
+  QoderPermissionMode,
+  BubblePermissionMode,
+  KimiPermissionMode,
+  KimiThinking,
+  KimiRuntimeStatus,
+  GrokRuntimeStatus,
+  ClaudeRuntimeStatus,
+  SkillMarketDetail,
+  SkillMarketInstallResult,
+  SkillMarketItem,
+  FontFormat,
+  FontSelection,
+  FontSelectionSource,
+  FontSettingsPayload,
+  FontSlot,
+  ImportedFontFace,
+  SystemFontOption,
+  FeishuBridgeConfig,
+  FeishuBridgeStatus,
+  MemoryDocument,
+  MemoryWorkspace,
+  AgentProvider,
+  UpsertAutomationInput,
+  WechatMarkdownHtmlGeneratorConfig,
+  ProviderComposerCapabilities,
+  ProviderListPluginsInput,
+  ProviderListPluginsResult,
+  ProviderListSkillsInput,
+  ProviderListSkillsResult,
+  ProviderPluginDescriptor,
+  ProviderPluginDetail,
+  ProviderPluginMarketplaceDescriptor,
+  ProviderReadPluginInput,
+  ProviderReadPluginResult,
+  ProviderInputReference,
+  ProviderSkillDescriptor,
+  AgentRuntimeDirectoryReport,
+  AgentRuntimeEntry,
+  AgentRuntimeState,
+  PullRequestCheckItem,
+  PullRequestCheckState,
+  PullRequestComment,
+  PullRequestCommit,
+  PullRequestDetail,
+  PullRequestListResult,
+  PullRequestSummary,
+  SessionSource,
+  SessionScope,
+  FolderConfig,
+  GitPatchScope,
+  GitPatchResult,
+  CanonicalToolKind,
+  WorkspaceChannel,
+  SessionTeamMode,
+} from '../shared/types';
+
+// 主题类型
+export type Theme = ThemeMode;
+export type { ChromeTheme, ThemeFonts, ThemePack, ThemeState, ThemeVariant };
+export type ChatLayoutMode = 'single' | 'split';
+export type ChatPaneId = 'primary' | 'secondary';
+export type WorkspaceSurface = 'chat' | 'terminal';
+
+export interface ChatPaneState {
+  id: ChatPaneId;
+  sessionId: string | null;
+  surface: WorkspaceSurface;
+}
+
+export interface SessionStreamingState {
+  isStreaming: boolean;
+  text: string;
+  thinking: string;
+}
+
+export type ActiveWorkspace = 'chat' | 'skills' | 'automations' | 'prs' | 'board';
+export type ChatSidebarView = 'threads' | 'skills';
+export type ProjectPanelView = 'files' | 'changes';
+export type ProjectUtilityPanelKind = 'files' | 'side-chat' | 'browser' | 'review' | 'terminal' | 'subagent' | 'goal' | 'images';
+export type ProjectUtilityPanelTarget =
+  | ProjectUtilityPanelKind
+  | `files:${string}`
+  | `browser:${string}`
+  | `goal:${string}`
+  | `images:${string}`
+  // One top-level tab PER subagent (the tool_use id after the colon) — there
+  // is no wrapper "subagent" tab; each subagent is its own strip tab.
+  | `subagent:${string}`
+  // Codex-style side chats: one tab per forked side conversation (the
+  // forked session id after the colon). Ephemeral — never persisted.
+  | `side-chat:${string}`;
+export interface ProjectFileOpenInput {
+  cwd: string;
+  path: string;
+  external?: boolean;
+  lineStart?: number;
+  lineEnd?: number;
+}
+export interface ProjectFileOpenRequest extends ProjectFileOpenInput {
+  id: number;
+  tabId: ProjectUtilityPanelTarget;
+}
+export type ProjectUtilityTabDescriptor = {
+  id: ProjectUtilityPanelTarget;
+  kind: ProjectUtilityPanelKind;
+  label: string;
+  /** For subagent tabs: the subagent tool_use id (drives the pixel avatar). */
+  subagentId?: string;
+  /** For side-chat tabs: a turn is streaming (pulsing dot on the tab). */
+  running?: boolean;
+  /** True while the side-chat fork is in flight (non-closable loading tab). */
+  pending?: boolean;
+};
+
+/**
+ * Codex-style side chat: an ephemeral fork of a conversation living in a
+ * right-panel tab. `constraintPending` gates the one-time side-conversation
+ * preamble (inherited history is reference-only, mutations off by default)
+ * injected into the first send's effectivePrompt; `userTurns` counts sends
+ * made in THIS side chat (inherited fork history doesn't count) and drives
+ * the destructive-close confirmation.
+ */
+export type SideChatEntry = {
+  sessionId: string;
+  sourceSessionId: string;
+  constraintPending: boolean;
+  userTurns: number;
+  createdAt: number;
+};
+
+export type ReviewDiffSource =
+  | {
+      kind: 'turn';
+      turnKey: string;
+      label: string;
+      sessionId?: string | null;
+    }
+  | {
+      kind: 'workspace';
+      scope: GitPatchScope;
+      label?: string | null;
+    }
+  | {
+      kind: 'commit';
+      sha: string;
+      shortSha: string;
+      label: string;
+    };
+
+export interface ReviewDiffSelection {
+  source: ReviewDiffSource;
+  records?: import('./utils/change-records').ChangeRecord[];
+  selectedRecordId?: string | null;
+  selectedFilePath?: string | null;
+  requestedAt: number;
+}
+
+export type ReviewDiffSelectionInput = Omit<ReviewDiffSelection, 'requestedAt'> & {
+  requestedAt?: number;
+};
+
+/** One open file inside a session's Files utility tab. Content is reloaded on restore. */
+export type SessionRightPanelFileTab = {
+  cwd: string;
+  filePath: string;
+  name?: string;
+  viewMode?: 'view' | 'code' | 'split';
+};
+
+export type SessionRightPanelFileState = {
+  files: SessionRightPanelFileTab[];
+  activeFile: { cwd: string; filePath: string } | null;
+};
+
+/**
+ * Per-session right-panel snapshot. Live `rightUtilityTabs` is the working
+ * copy for the active session; this map is what makes two sessions in the
+ * same cwd keep independent Files/Browser/etc. layouts.
+ */
+export type SessionRightPanelSnapshot = {
+  tabs: ProjectUtilityPanelTarget[];
+  activeTab: ProjectUtilityPanelTarget | null;
+  hidden: boolean;
+  fullscreen: 'browser' | 'files' | 'review' | 'images' | null;
+  fileTabsByUtilityTab: Record<string, SessionRightPanelFileState>;
+  reviewDiffSelection: ReviewDiffSelection | null;
+};
+
+export type SessionRightPanelLiveFields = {
+  rightUtilityTabs: ProjectUtilityPanelTarget[];
+  activeRightUtilityTab: ProjectUtilityPanelTarget | null;
+  rightUtilityPanelHidden: boolean;
+  rightPanelFullscreen: 'browser' | 'files' | 'review' | 'images' | null;
+  projectTreeCollapsed: boolean;
+  projectPanelView: ProjectPanelView;
+  browserPanelOpen: boolean;
+  reviewDiffSelection: ReviewDiffSelection | null;
+};
+
+// UI 会话视图状态
+export interface SessionView {
+  id: string;
+  title: string;
+  status: import('../shared/types').SessionStatus;
+  lastTurnError?: string;
+  scope?: SessionScope;
+  agentId?: string | null;
+  cwd?: string;
+  projectCwd?: string | null;
+  envMode?: import('../shared/types').ThreadEnvironmentMode;
+  worktreePath?: string | null;
+  associatedWorktreePath?: string | null;
+  associatedWorktreeBranch?: string | null;
+  associatedWorktreeRef?: string | null;
+  claudeSessionId?: string;
+  provider?: AgentProvider;
+  model?: string;
+  compatibleProviderId?: import('../shared/types').ClaudeCompatibleProviderId;
+  betas?: string[];
+  claudeAccessMode?: import('../shared/types').ClaudeAccessMode;
+  claudeExecutionMode?: import('../shared/types').ClaudeExecutionMode;
+  bubblePermissionMode?: import('../shared/types').BubblePermissionMode;
+  claudeReasoningEffort?: import('../shared/types').ClaudeReasoningEffort;
+  codexExecutionMode?: import('../shared/types').CodexExecutionMode;
+  codexPermissionMode?: import('../shared/types').CodexPermissionMode;
+  codexReasoningEffort?: import('../shared/types').CodexReasoningEffort;
+  codexFastMode?: boolean;
+  kimiPermissionMode?: import('../shared/types').KimiPermissionMode;
+  kimiThinking?: import('../shared/types').KimiThinking;
+  kimiRuntime?: import('../shared/types').SessionInfo['kimiRuntime'];
+  grokPermissionMode?: import('../shared/types').GrokPermissionMode;
+  grokReasoningEffort?: import('../shared/types').GrokReasoningEffort;
+  deepseekPermissionMode?: import('../shared/types').DeepseekPermissionMode;
+  deepseekAgentPreset?: import('../shared/types').DeepseekAgentPreset;
+  deepseekReasoningEffort?: import('../shared/types').DeepseekReasoningEffort;
+  opencodePermissionMode?: import('../shared/types').OpenCodePermissionMode;
+  pinned?: boolean;
+  folderPath?: string | null;
+  hiddenFromThreads?: boolean;
+  channelId?: string;
+  teamMode?: import('../shared/types').SessionTeamMode;
+  teamId?: string | null;
+  source?: import('../shared/types').SessionSource;
+  readOnly?: boolean;
+  isDraft?: boolean;
+  draftTitleEdited?: boolean;
+  handoffSourceProvider?: AgentProvider | null;
+  latestClaudeModelUsage?: import('../shared/types').LatestClaudeModelUsage;
+  messages: import('../shared/types').StreamMessage[];
+  hydrated: boolean;
+  historyCursor?: string | null;
+  hasMoreHistory?: boolean;
+  loadingMoreHistory?: boolean;
+  /** A hydration request is in flight (store-owned; components never dedupe). */
+  hydrationPending?: boolean;
+  /** Hydration failed after the bounded retry — surfaced as a manual Retry. */
+  hydrationError?: boolean;
+  hydrationAttempts?: number;
+  permissionRequests: import('../shared/types').PermissionRequestPayload[];
+  computerUseLive?: import('../shared/computer-use').ComputerUseLiveFrame | null;
+  computerUseFrames?: import('../shared/computer-use').ComputerUseLiveFrame[];
+  computerUseGrants?: import('../shared/computer-use').ComputerUseGrantView[];
+  /**
+   * Live stdout/stderr tails keyed by tool_use id, streamed while a tool is
+   * still running. Transient: never hydrated from history, cleared when the
+   * session leaves the running state.
+   */
+  toolLiveOutput?: Record<string, string>;
+  /**
+   * Codex: id of the turn currently running (from `turn/started`). Transient
+   * — never hydrated from history, cleared when a new turn begins. Drives the
+   * turn-scoped active plan card: a plan_update docks on the composer only
+   * while its turnId matches.
+   */
+  activeCodexTurnId?: string | null;
+  streaming: SessionStreamingState;
+  runtimeNotice?: 'completed' | 'error';
+  createdAt?: number;
+  updatedAt: number;
+}
+
+// Store 状态
+export interface AppState {
+  connected: boolean;
+  sessions: Record<string, SessionView>;
+  workspaceChannelsByProject: Record<string, WorkspaceChannel[]>;
+  activeChannelByProject: Record<string, string>;
+  activeSessionId: string | null;
+  activeWorkspace: ActiveWorkspace;
+  chatSidebarView: ChatSidebarView;
+  // Source of truth for the chat workspace layout (recursive tiling tree).
+  workspaceLayout: import('./store/layout-tree').WorkspaceLayout;
+  // Legacy two-pane fields, DERIVED from workspaceLayout after every change so
+  // existing consumers keep working. Do not write these directly.
+  chatLayoutMode: ChatLayoutMode;
+  savedSplitVisible: boolean;
+  activePaneId: ChatPaneId;
+  chatPanes: Record<ChatPaneId, ChatPaneState>;
+  chatSplitRatio: number;
+  showNewSession: boolean;
+  newSessionKey: number;
+  /** Recently viewed threads (null = new-session landing). Used by header back/forward. */
+  sidebarCollapsed: boolean;
+  /** Transient hover-peek: sidebar stays collapsed in layout but floats open as an overlay. */
+  sidebarPeek: boolean;
+  sidebarActivityView: boolean;
+  sidebarWidth: number;
+  sidebarWidthVersion: number;
+  globalError: string | null;
+  pendingStart: boolean;
+  pendingDraftSessionId: string | null;
+  projectCwd: string | null;
+  projectTreeCwd: string | null;
+  projectTree: ProjectTreeNode | null;
+  projectTreeCollapsed: boolean;
+  projectPanelView: ProjectPanelView;
+  rightUtilityTabs: ProjectUtilityPanelTarget[];
+  activeRightUtilityTab: ProjectUtilityPanelTarget | null;
+  rightUtilityPanelHidden: boolean;
+  /** Source of truth for each session's right panel. Live tab fields above are the active session's working copy. */
+  rightPanelBySessionId: Record<string, SessionRightPanelSnapshot>;
+  /** Codex-style side chats: ephemeral forked conversations keyed by session id. Never persisted. */
+  sideChats: Record<string, SideChatEntry>;
+  /**
+   * True while a content-driven reveal (file-link click) should skip the
+   * panel width tween; cleared by App after the reveal commits.
+   */
+  rightUtilityInstantRevealPending: boolean;
+  /** Atomic file-link navigation consumed by the active Files panel. */
+  pendingProjectFileOpen: ProjectFileOpenRequest | null;
+  clearRightUtilityInstantReveal: () => void;
+  reviewDiffSelection: ReviewDiffSelection | null;
+  terminalDrawerOpen: boolean;
+  terminalDrawerHeight: number;
+  browserPanelOpen: boolean;
+  rightPanelFullscreen: 'browser' | 'files' | 'review' | 'images' | null;
+  sessionsLoaded: boolean;
+  // 搜索状态
+  sidebarSearchQuery: string;
+  activeFilters: SearchFilters;
+  inSessionSearchOpen: boolean;
+  inSessionSearchQuery: string;
+  inSessionSearchResults: SearchMatch[];
+  inSessionSearchCurrentIndex: number;
+  searchPaletteOpen: boolean;
+  historyNavigationTarget: {
+    sessionId: string;
+    messageCreatedAt: number;
+    nonce: number;
+    /** Set false to scroll without the locate-flash highlight (outline rail). */
+    highlight?: boolean;
+  } | null;
+  // MCP 状态
+  mcpServers: Record<string, import('../shared/types').McpServerConfig>;
+  mcpGlobalServers: Record<string, import('../shared/types').McpServerConfig>;
+  mcpProjectServers: Record<string, import('../shared/types').McpServerConfig>;
+  mcpCodexGlobalServers: Record<string, import('../shared/types').McpServerConfig>;
+  mcpOpencodeGlobalServers: Record<string, import('../shared/types').McpServerConfig>;
+  mcpOpencodeProjectServers: Record<string, import('../shared/types').McpServerConfig>;
+  mcpKimiGlobalServers: Record<string, import('../shared/types').McpServerConfig>;
+  mcpKimiProjectServers: Record<string, import('../shared/types').McpServerConfig>;
+  mcpQoderGlobalServers: Record<string, import('../shared/types').McpServerConfig>;
+  mcpBubbleGlobalServers: Record<string, import('../shared/types').McpServerConfig>;
+  mcpDeepseekGlobalServers: Record<string, import('../shared/types').McpServerConfig>;
+  mcpDeepseekProjectServers: Record<string, import('../shared/types').McpServerConfig>;
+  mcpServerStatus: import('../shared/types').McpServerStatus[];
+  claudeUserSkills: import('../shared/types').ClaudeSkillSummary[];
+  claudeProjectSkills: import('../shared/types').ClaudeSkillSummary[];
+  claudeSkillsUserRoot: string;
+  claudeSkillsProjectRoot?: string;
+  // Settings 状态
+  showSettings: boolean;
+  // 新 thread 的启动模式（composer 底部 pill）：worktree = 提交时先建隔离 worktree。
+  // 按 draft session id 记，默认 local。
+  draftStartMode: Record<string, 'local' | 'worktree'>;
+  activeSettingsTab: SettingsTab;
+  // Which runtime's MCP servers the settings pane shows; drives the sidebar sub-nav too.
+  mcpSettingsRuntime: McpSettingsRuntime;
+  agentSetupOpen: boolean;
+  agentSetupDismissedAt: number | null;
+  agentSetupCompletedAt: number | null;
+  updateStatus: AppUpdateStatus;
+  pendingChatInjection: ChatInjectionRequest | null;
+  // 文件夹
+  folderConfigs: FolderConfig[];
+  // 主题
+  theme: Theme;
+  themeState: ThemeState;
+  uiFontFamily: string;
+  chatCodeFontFamily: string;
+  // 皮肤壁纸:skinImage 是 userData/skins 里的文件名(持久化),
+  // skinImageData 是运行时 data URL(不持久化,启动时按文件名重新读取)。
+  skinImage: string | null;
+  skinImageData: string | null;
+  skinOpacity: number;
+  computerUsePreviewSessionId: string | null;
+}
+
+// Store Actions
+export interface AppActions {
+  renameSession: (sessionId: string, title: string) => Promise<void>;
+  setConnected: (connected: boolean) => void;
+  handleServerEvent: (event: import('../shared/types').ServerEvent) => void;
+  setActiveSession: (sessionId: string | null) => void;
+  setActiveWorkspace: (workspace: ActiveWorkspace) => void;
+  setChatSidebarView: (view: ChatSidebarView) => void;
+  createWorkspaceChannel: (projectCwd: string, name: string) => string | null;
+  renameWorkspaceChannel: (projectCwd: string, channelId: string, newName: string) => boolean;
+  setActiveChannelForProject: (projectCwd: string, channelId: string) => void;
+  setSessionChannel: (sessionId: string, channelId: string) => void;
+  setSessionTeam: (
+    sessionId: string,
+    teamMode: import('../shared/types').SessionTeamMode,
+    teamId?: string | null
+  ) => void;
+  setActivePane: (paneId: ChatPaneId) => void;
+  setChatLayoutMode: (mode: ChatLayoutMode) => void;
+  setSavedSplitVisible: (visible: boolean) => void;
+  setChatPaneSession: (paneId: ChatPaneId, sessionId: string | null) => void;
+  setChatPaneSurface: (paneId: ChatPaneId, surface: WorkspaceSurface) => void;
+  setChatSplitRatio: (ratio: number) => void;
+  closeSplitChat: () => void;
+  swapChatPanes: () => void;
+  // Recursive tiling actions (operate on workspaceLayout by leaf id).
+  splitPaneAt: (
+    leafId: string,
+    edge: import('./store/layout-tree').SplitEdge,
+    sessionId: string | null
+  ) => void;
+  closePaneById: (leafId: string) => void;
+  resizeSplitById: (splitId: string, sizes: number[]) => void;
+  setActivePaneById: (leafId: string) => void;
+  placeSessionInPane: (leafId: string, sessionId: string | null) => void;
+  movePaneTo: (
+    leafId: string,
+    targetLeafId: string,
+    edge: import('./store/layout-tree').SplitEdge
+  ) => void;
+  // Fork a session's conversation and open the fork in a new pane.
+  forkSessionToPane: (sessionId: string, destination?: 'pane' | 'local' | 'worktree') => Promise<void>;
+  handoffSessionToProvider: (sessionId: string, targetProvider: AgentProvider) => Promise<void>;
+  setSessionAgentSelection: (
+    sessionId: string,
+    selection: import('./utils/session-model').AgentModelSelection
+  ) => void;
+  setSessionClaudeMode: (
+    sessionId: string,
+    accessMode: import('../shared/types').ClaudeAccessMode,
+    executionMode: import('../shared/types').ClaudeExecutionMode
+  ) => void;
+  setSessionBubblePermissionMode: (
+    sessionId: string,
+    bubblePermissionMode: import('../shared/types').BubblePermissionMode
+  ) => void;
+  setSessionCodexExecutionMode: (
+    sessionId: string,
+    executionMode: import('../shared/types').CodexExecutionMode
+  ) => void;
+  setDraftStartMode: (sessionId: string, mode: 'local' | 'worktree') => void;
+  setShowNewSession: (show: boolean) => void;
+  setSidebarCollapsed: (collapsed: boolean) => void;
+  setSidebarPeek: (open: boolean) => void;
+  toggleSidebarActivityView: () => void;
+  setSidebarWidth: (width: number) => void;
+  setProjectCwd: (cwd: string | null) => void;
+  setProjectTree: (cwd: string | null, tree: ProjectTreeNode | null) => void;
+  setProjectTreeCollapsed: (collapsed: boolean) => void;
+  setProjectPanelView: (view: ProjectPanelView) => void;
+  setActiveRightUtilityTab: (target: ProjectUtilityPanelTarget | null) => void;
+  openRightUtilityTab: (
+    target: ProjectUtilityPanelKind,
+    options?: {
+      newTab?: boolean;
+      /**
+       * Content-driven opens (e.g. clicking a file link in the transcript)
+       * reveal the panel WITHOUT the width tween: animating layout width
+       * reflows the chat pane every frame, which janks on heavy transcripts.
+       */
+      instantReveal?: boolean;
+    }
+  ) => void;
+  openProjectFileInRightPanel: (request: ProjectFileOpenInput) => void;
+  clearPendingProjectFileOpen: (requestId: number) => void;
+  setReviewDiffSelection: (selection: ReviewDiffSelectionInput | null) => void;
+  openReviewDiff: (selection: ReviewDiffSelectionInput) => void;
+  /** Open (or focus) the dedicated top-level tab for a subagent (parentToolUseId). */
+  openSubagentPanel: (subagentId: string) => void;
+  closeRightUtilityTab: (target: ProjectUtilityPanelTarget) => void;
+  /** Fork the source conversation into a new ephemeral right-panel side chat tab. */
+  openSideChat: (sourceSessionId: string | null) => Promise<void>;
+  /** Destroy a side chat: delete the forked session and drop its tab. Destructive. */
+  destroySideChat: (sessionId: string) => void;
+  /** Record a user send from a side chat: clears the pending constraint, counts the turn. */
+  noteSideChatUserTurn: (sessionId: string) => void;
+  closeRightUtilityPanels: () => void;
+  showRightUtilityPanels: () => void;
+  /** Persist the open files inside one Files utility tab for a specific session. */
+  syncSessionFileTabs: (
+    sessionId: string | null,
+    utilityTabId: ProjectUtilityPanelTarget,
+    fileState: SessionRightPanelFileState
+  ) => void;
+  setTerminalDrawerOpen: (open: boolean) => void;
+  setTerminalDrawerHeight: (height: number) => void;
+  setBrowserPanelOpen: (open: boolean) => void;
+  setRightPanelFullscreen: (target: 'browser' | 'files' | 'review' | 'images' | null) => void;
+  applyUiResumeState: (state: import('../shared/types').UiResumeState | null) => void;
+  clearGlobalError: () => void;
+  setPendingStart: (pending: boolean) => void;
+  createDraftSession: (
+    cwd?: string | null,
+    channelId?: string | null,
+    workspace?: Partial<Pick<
+      SessionView,
+      | 'projectCwd'
+      | 'envMode'
+      | 'worktreePath'
+      | 'associatedWorktreePath'
+      | 'associatedWorktreeBranch'
+      | 'associatedWorktreeRef'
+      | 'title'
+    >>
+  ) => string;
+  removeDraftSession: (sessionId: string) => void;
+  loadOlderSessionHistory: (sessionId: string) => void;
+  requestSessionHydration: (sessionId: string) => void;
+  retrySessionHydration: (sessionId: string) => void;
+  removePermissionRequest: (sessionId: string, toolUseId: string) => void;
+  // 搜索 Actions
+  setSidebarSearchQuery: (query: string) => void;
+  setActiveFilters: (filters: Partial<SearchFilters>) => void;
+  clearFilters: () => void;
+  openInSessionSearch: () => void;
+  closeInSessionSearch: () => void;
+  setInSessionSearchQuery: (query: string) => void;
+  setInSessionSearchResults: (results: SearchMatch[]) => void;
+  navigateSearchResult: (direction: 'next' | 'prev') => void;
+  setSearchPaletteOpen: (open: boolean) => void;
+  toggleSearchPalette: () => void;
+  setHistoryNavigationTarget: (target: AppState['historyNavigationTarget']) => void;
+  // MCP Actions
+  setMcpServers: (servers: Record<string, import('../shared/types').McpServerConfig>) => void;
+  setMcpServerStatus: (status: import('../shared/types').McpServerStatus[]) => void;
+  // Settings Actions
+  setShowSettings: (show: boolean) => void;
+  setActiveSettingsTab: (tab: SettingsTab) => void;
+  setMcpSettingsRuntime: (runtime: McpSettingsRuntime) => void;
+  setAgentSetupOpen: (open: boolean) => void;
+  dismissAgentSetup: () => void;
+  completeAgentSetup: () => void;
+  requestChatInjection: (request: Omit<ChatInjectionRequest, 'nonce'>) => void;
+  consumeChatInjection: (nonce: number) => void;
+  // 文件夹 Actions
+  setFolderConfigs: (configs: FolderConfig[]) => void;
+  // 主题 Actions
+  setTheme: (theme: Theme) => void;
+  setThemeState: (themeState: ThemeState) => void;
+  updateThemeVariant: (variant: ThemeVariant, patch: Partial<ChromeTheme>) => void;
+  setThemeVariantCodeThemeId: (variant: ThemeVariant, codeThemeId: string) => void;
+  setThemeVariantFonts: (variant: ThemeVariant, patch: Partial<ThemeFonts>) => void;
+  resetThemeVariant: (variant: ThemeVariant) => void;
+  setUiFontFamily: (value: string) => void;
+  setChatCodeFontFamily: (value: string) => void;
+  // 皮肤 Actions
+  setSkinImage: (fileName: string, dataUrl: string) => void;
+  setSkinOpacity: (opacity: number) => void;
+  clearSkin: () => void;
+}
+
+// Request to inject text/attachments into the active chat composer from
+// elsewhere in the app (e.g. browser panel screenshot or readout).
+export interface ChatInjectionRequest {
+  sessionId: string | null; // null => any active chat
+  text?: string;
+  attachments?: import('../shared/types').Attachment[];
+  mode: 'append' | 'replace';
+  nonce: number;
+  source?: string;
+}
+
+// 工具状态映射（用于显示 pending/success/error）
+// 'interrupted': the tool never resolved and its turn is over — the user
+// stopped the turn (or it was aborted) while the tool was in flight. Derived
+// in the workstream model, never stored in tool status maps.
+export type ToolStatus = 'pending' | 'success' | 'error' | 'interrupted';
+
+// 搜索匹配结果
+export interface SearchMatch {
+  messageIndex: number;
+  snippet: string;
+  createdAt?: number;
+}
+
+// 搜索过滤器
+export interface SearchFilters {
+  timeRange: 'all' | 'today' | 'week' | 'month';
+  cwd?: string;
+}
+
+// 搜索状态
+export interface SearchState {
+  sidebarSearchQuery: string;
+  activeFilters: SearchFilters;
+  inSessionSearchOpen: boolean;
+  inSessionSearchQuery: string;
+  inSessionSearchResults: SearchMatch[];
+  inSessionSearchCurrentIndex: number;
+  searchPaletteOpen: boolean;
+  historyNavigationTarget: AppState['historyNavigationTarget'];
+}
+
+// 搜索 Actions
+export interface SearchActions {
+  setSidebarSearchQuery: (query: string) => void;
+  setActiveFilters: (filters: Partial<SearchFilters>) => void;
+  clearFilters: () => void;
+  openInSessionSearch: () => void;
+  closeInSessionSearch: () => void;
+  setInSessionSearchQuery: (query: string) => void;
+  setInSessionSearchResults: (results: SearchMatch[]) => void;
+  navigateSearchResult: (direction: 'next' | 'prev') => void;
+  setSearchPaletteOpen: (open: boolean) => void;
+  toggleSearchPalette: () => void;
+  setHistoryNavigationTarget: (target: AppState['historyNavigationTarget']) => void;
+}
+
+// Turn Phase 状态机类型
+export type TurnPhase =
+  | 'pending'      // 刚开始，无任何输出
+  | 'awaiting'     // 工具完成，等待下一步
+  | 'tool_active'  // 工具正在执行
+  | 'streaming'    // 最终回复正在流式输出
+  | 'complete';    // 回合完成
+
+// 缓冲配置
+export interface BufferConfig {
+  MIN_BUFFER_MS: number;
+  MAX_BUFFER_MS: number;
+  MIN_WORDS_STANDARD: number;
+  MIN_WORDS_STRUCTURED: number;
+}
+
+// 默认缓冲配置
+export const DEFAULT_BUFFER_CONFIG: BufferConfig = {
+  MIN_BUFFER_MS: 500,
+  MAX_BUFFER_MS: 2500,
+  MIN_WORDS_STANDARD: 15,
+  MIN_WORDS_STRUCTURED: 8,
+};

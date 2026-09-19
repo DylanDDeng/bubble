@@ -1,0 +1,1299 @@
+import type { SessionMenuRequest, SessionMenuAction } from '../shared/session-menu';
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
+import type {
+  AutomationDefinition,
+  AutomationSnapshot,
+  ClaudeCompatibleProvidersConfig,
+  ClaudeUsageRangeDays,
+  CodexMcpServerRuntimeStatus,
+  FeishuBridgeConfig,
+  FontSettingsPayload,
+  GitPatchScope,
+  MemoryDocument,
+  MemoryWorkspace,
+  SkillMarketDetail,
+  SkillMarketInstallResult,
+  SkillMarketItem,
+  SystemFontOption,
+  UiResumeState,
+  UpsertAutomationInput,
+  ProviderComposerCapabilities,
+  ProviderListPluginsInput,
+  ProviderListPluginsResult,
+  ProviderListSkillsInput,
+  ProviderListSkillsResult,
+  ProviderInstallPluginInput,
+  ProviderReadPluginInput,
+  ProviderUninstallPluginInput,
+  ProviderReadPluginResult,
+  SessionStartPayload,
+  WechatClipboardHtmlWriteInput,
+  WechatClipboardHtmlWriteResult,
+  WechatMarkdownHtmlGenerationInput,
+  WechatMarkdownHtmlGenerationResult,
+  WechatMarkdownHtmlGeneratorConfig,
+} from '../shared/types';
+import type {
+  BrowserCapturePageResult,
+  BrowserNavigateInput,
+  BrowserNewTabInput,
+  BrowserOpenInput,
+  BrowserReadoutResult,
+  BrowserSendSelectionEvent,
+  BrowserSessionInput,
+  BrowserSetPanelBoundsInput,
+  BrowserTabInput,
+  SessionBrowserState,
+} from '../shared/browser-types';
+
+// IPC 通道常量（与 browser-ipc.ts 中 BROWSER_CHANNELS 保持一致，避免在 preload 里引入主进程模块）
+const BROWSER_CHANNELS = {
+  open: 'desktop:browser-open',
+  close: 'desktop:browser-close',
+  hide: 'desktop:browser-hide',
+  getState: 'desktop:browser-get-state',
+  setPanelBounds: 'desktop:browser-set-panel-bounds',
+  navigate: 'desktop:browser-navigate',
+  reload: 'desktop:browser-reload',
+  goBack: 'desktop:browser-go-back',
+  goForward: 'desktop:browser-go-forward',
+  newTab: 'desktop:browser-new-tab',
+  closeTab: 'desktop:browser-close-tab',
+  selectTab: 'desktop:browser-select-tab',
+  openDevTools: 'desktop:browser-open-devtools',
+  capture: 'desktop:browser-capture',
+  readPage: 'desktop:browser-read-page',
+  state: 'desktop:browser-state',
+  sendSelection: 'desktop:browser-send-selection',
+} as const;
+
+// 与 design-mode-ipc.ts 中 DESIGN_CHANNELS 保持一致
+const DESIGN_CHANNELS = {
+  enable: 'desktop:design-mode-enable',
+  disable: 'desktop:design-mode-disable',
+  measureSelection: 'desktop:design-mode-measure-selection',
+  event: 'desktop:design-mode-event',
+} as const;
+
+const PROJECT_EDITOR_FLUSH_REQUEST_CHANNEL = 'project-editor-flush-request';
+const PROJECT_EDITOR_FLUSH_RESPONSE_CHANNEL = 'project-editor-flush-response';
+
+type ProjectEditorFlushResult = { ok: boolean; message?: string };
+type ProjectEditorFlushHandler = () => ProjectEditorFlushResult | Promise<ProjectEditorFlushResult>;
+
+let projectEditorFlushHandler: ProjectEditorFlushHandler | null = null;
+
+ipcRenderer.on(
+  PROJECT_EDITOR_FLUSH_REQUEST_CHANNEL,
+  async (_event: unknown, request: { requestId?: string } | null) => {
+    try {
+      const result = projectEditorFlushHandler
+        ? await projectEditorFlushHandler()
+        : { ok: true };
+      ipcRenderer.send(PROJECT_EDITOR_FLUSH_RESPONSE_CHANNEL, {
+        requestId: request?.requestId,
+        ok: result?.ok !== false,
+        message: result?.message,
+      });
+    } catch (error) {
+      ipcRenderer.send(PROJECT_EDITOR_FLUSH_RESPONSE_CHANNEL, {
+        requestId: request?.requestId,
+        ok: false,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+);
+
+// 暴露 API 到渲染进程
+contextBridge.exposeInMainWorld('electron', {
+  // 订阅服务器事件
+  onServerEvent: (callback: (event: unknown) => void) => {
+    const handler = (_: unknown, eventJson: string) => {
+      try {
+        const event = JSON.parse(eventJson);
+        callback(event);
+      } catch (error) {
+        console.error('Failed to parse server event:', error);
+      }
+    };
+
+    ipcRenderer.on('server-event', handler);
+
+    // 返回取消订阅函数
+    return () => {
+      ipcRenderer.removeListener('server-event', handler);
+    };
+  },
+
+  // 发送客户端事件
+  sendClientEvent: (event: unknown) => {
+    ipcRenderer.send('client-event', JSON.stringify(event));
+  },
+
+  onTerminalEvent: (callback: (event: unknown) => void) => {
+    const handler = (_: unknown, eventJson: string) => {
+      try {
+        callback(JSON.parse(eventJson));
+      } catch (error) {
+        console.error('Failed to parse terminal event:', error);
+      }
+    };
+
+    ipcRenderer.on('terminal-event', handler);
+    return () => {
+      ipcRenderer.removeListener('terminal-event', handler);
+    };
+  },
+
+  terminal: {
+    open: (input: unknown) => {
+      return ipcRenderer.invoke('terminal:open', input);
+    },
+    write: (input: unknown) => {
+      return ipcRenderer.invoke('terminal:write', input);
+    },
+    resize: (input: unknown) => {
+      return ipcRenderer.invoke('terminal:resize', input);
+    },
+    clear: (input: unknown) => {
+      return ipcRenderer.invoke('terminal:clear', input);
+    },
+    restart: (input: unknown) => {
+      return ipcRenderer.invoke('terminal:restart', input);
+    },
+    close: (input: unknown) => {
+      return ipcRenderer.invoke('terminal:close', input);
+    },
+    getTransportInfo: () => {
+      return ipcRenderer.invoke('get-terminal-transport-info');
+    },
+    onEvent: (callback: (event: unknown) => void) => {
+      const handler = (_: unknown, eventJson: string) => {
+        try {
+          callback(JSON.parse(eventJson));
+        } catch (error) {
+          console.error('Failed to parse terminal event:', error);
+        }
+      };
+
+      ipcRenderer.on('terminal-event', handler);
+      return () => {
+        ipcRenderer.removeListener('terminal-event', handler);
+      };
+    },
+  },
+
+  onWindowShellState: (callback: (state: { rounded: boolean }) => void) => {
+    const handler = (_: unknown, state: { rounded: boolean }) => {
+      callback(state);
+    };
+
+    ipcRenderer.on('window-shell-state', handler);
+    return () => {
+      ipcRenderer.removeListener('window-shell-state', handler);
+    };
+  },
+
+  registerProjectEditorFlushHandler: (callback: ProjectEditorFlushHandler) => {
+    projectEditorFlushHandler = callback;
+    return () => {
+      if (projectEditorFlushHandler === callback) {
+        projectEditorFlushHandler = null;
+      }
+    };
+  },
+
+  // 生成会话标题
+  generateSessionTitle: (prompt: string) => {
+    return ipcRenderer.invoke('generate-session-title', prompt);
+  },
+  renameSession: (sessionId: string, title: string) => {
+    return ipcRenderer.invoke('rename-session', sessionId, title);
+  },
+
+  startBackgroundSession: (payload: SessionStartPayload) => {
+    return ipcRenderer.invoke('session-start-background', payload);
+  },
+
+  sessionHandoff: (payload: { sessionId: string; targetProvider: string }) => {
+    return ipcRenderer.invoke('session-handoff', payload);
+  },
+
+  forkSession: (
+    sessionId: string,
+    options?: { hiddenFromThreads?: boolean; copyHistory?: boolean }
+  ) => {
+    return ipcRenderer.invoke('fork-session', sessionId, options);
+  },
+
+  claudeRewind: (input: unknown) => {
+    return ipcRenderer.invoke('claude-rewind', input);
+  },
+
+  bubbleRewind: (input: unknown) => {
+    return ipcRenderer.invoke('bubble-rewind', input);
+  },
+
+  moveSessionToWorktree: (sessionId: string) => {
+    return ipcRenderer.invoke('move-session-to-worktree', sessionId);
+  },
+
+  applyWorktreeChanges: (sessionId: string) => {
+    return ipcRenderer.invoke('apply-worktree-changes', sessionId);
+  },
+
+  discardWorktreeChanges: (sessionId: string) => {
+    return ipcRenderer.invoke('discard-worktree-changes', sessionId);
+  },
+
+  // 获取最近工作目录
+  getRecentCwds: (limit?: number) => {
+    return ipcRenderer.invoke('get-recent-cwds', limit);
+  },
+
+  getAutomations: (): Promise<AutomationSnapshot> => {
+    return ipcRenderer.invoke('get-automations');
+  },
+
+  saveAutomation: (input: UpsertAutomationInput): Promise<AutomationDefinition> => {
+    return ipcRenderer.invoke('save-automation', input);
+  },
+
+  deleteAutomation: (automationId: string): Promise<{ ok: boolean }> => {
+    return ipcRenderer.invoke('delete-automation', automationId);
+  },
+
+  setAutomationEnabled: (
+    automationId: string,
+    enabled: boolean
+  ): Promise<AutomationDefinition | null> => {
+    return ipcRenderer.invoke('set-automation-enabled', automationId, enabled);
+  },
+
+  runAutomationNow: (
+    automationId: string
+  ): Promise<{ ok: boolean; sessionId?: string; message?: string }> => {
+    return ipcRenderer.invoke('run-automation-now', automationId);
+  },
+
+  setShortcutCaptureActive: (active: boolean) => ipcRenderer.invoke('set-shortcut-capture-active', active),
+  getAppPreferences: () => ipcRenderer.invoke('get-app-preferences'),
+  setAppPreferences: (patch: Partial<import('../shared/app-preferences').AppPreferences>) => ipcRenderer.invoke('set-app-preferences', patch),
+  getSystemFonts: () => ipcRenderer.invoke('get-system-fonts'),
+  getSystemFontFamilies: () => ipcRenderer.invoke('get-system-font-families'),
+  getTerminalShellOptions: () => ipcRenderer.invoke('get-terminal-shell-options'),
+  onAppPreferencesChanged: (callback: (preferences: import('../shared/app-preferences').AppPreferences) => void) => {
+    const listener = (_event: unknown, preferences: import('../shared/app-preferences').AppPreferences) => callback(preferences);
+    ipcRenderer.on('app-preferences-changed', listener);
+    return () => ipcRenderer.removeListener('app-preferences-changed', listener);
+  },
+  getNotificationSettings: (): Promise<{ enabled: boolean; onlyWhenUnfocused: boolean; inputRequired: boolean; approvalRequired: boolean }> => {
+    return ipcRenderer.invoke('get-notification-settings');
+  },
+
+  setNotificationSettings: (next: {
+    enabled?: boolean;
+    onlyWhenUnfocused?: boolean;
+    inputRequired?: boolean;
+    approvalRequired?: boolean;
+  }): Promise<{ enabled: boolean; onlyWhenUnfocused: boolean; inputRequired: boolean; approvalRequired: boolean }> => {
+    return ipcRenderer.invoke('set-notification-settings', next);
+  },
+
+  startTerminalSession: (
+    sessionId: string,
+    cwd: string,
+    cols?: number,
+    rows?: number,
+    agentKind?: string
+  ) => {
+    return ipcRenderer.invoke('start-terminal-session', sessionId, cwd, cols, rows, agentKind);
+  },
+
+  writeTerminalSession: (sessionId: string, data: string) => {
+    return ipcRenderer.invoke('write-terminal-session', sessionId, data);
+  },
+
+  resizeTerminalSession: (sessionId: string, cols: number, rows: number) => {
+    return ipcRenderer.invoke('resize-terminal-session', sessionId, cols, rows);
+  },
+
+  stopTerminalSession: (sessionId: string) => {
+    return ipcRenderer.invoke('stop-terminal-session', sessionId);
+  },
+
+  getTerminalTransportInfo: () => {
+    return ipcRenderer.invoke('get-terminal-transport-info');
+  },
+
+  setWindowMinSize: (width: number, height: number) => {
+    return ipcRenderer.invoke('set-window-min-size', width, height);
+  },
+
+  searchChatMessages: (query: string, limit?: number) => {
+    return ipcRenderer.invoke('search-chat-messages', query, limit);
+  },
+
+  getAppVersion: () => {
+    return ipcRenderer.invoke('get-app-version');
+  },
+
+  getWindowShellState: () => {
+    return ipcRenderer.invoke('get-window-shell-state');
+  },
+
+  setTheme: (theme: 'light' | 'dark' | 'system') => {
+    return ipcRenderer.invoke('set-theme', theme);
+  },
+
+  getUiResumeState: (): Promise<UiResumeState | null> => {
+    return ipcRenderer.invoke('get-ui-resume-state');
+  },
+
+  getUiResumeStateSync: (): UiResumeState | null => {
+    return ipcRenderer.sendSync('get-ui-resume-state-sync');
+  },
+
+  saveUiResumeState: (state: UiResumeState) => {
+    return Promise.resolve(ipcRenderer.sendSync('save-ui-resume-state-sync', state));
+  },
+
+  // Origin-independent replacement for localStorage-backed app state. The map
+  // is snapshotted synchronously once per page load so reads behave exactly
+  // like localStorage; writes are forwarded to the main process, which owns
+  // the userData/renderer-state.json file.
+  rendererState: (() => {
+    let cache: Record<string, string> | null = null;
+    const pending = new Map<string, string | null>();
+    let flushQueued = false;
+    const flush = (sync = false): void => {
+      flushQueued = false;
+      if (!pending.size) return;
+      const changes = [...pending];
+      pending.clear();
+      if (sync) ipcRenderer.sendSync('renderer-state:batch-sync', changes);
+      else ipcRenderer.send('renderer-state:batch', changes);
+    };
+    const schedule = (): void => {
+      if (flushQueued) return;
+      flushQueued = true;
+      queueMicrotask(() => flush());
+    };
+    // HMR/navigation/quit must not lose the final coalesced state.
+    window.addEventListener('beforeunload', () => flush(true));
+    const load = (): Record<string, string> => {
+      if (!cache) {
+        cache = (ipcRenderer.sendSync('renderer-state:get-all-sync') as Record<string, string>) || {};
+      }
+      return cache;
+    };
+    return {
+      getItem: (key: string): string | null => {
+        const value = load()[key];
+        return value === undefined ? null : value;
+      },
+      setItem: (key: string, value: string): void => {
+        if (load()[key] === value) return;
+        load()[key] = value;
+        pending.set(key, value);
+        schedule();
+      },
+      removeItem: (key: string): void => {
+        if (!Object.prototype.hasOwnProperty.call(load(), key)) return;
+        delete load()[key];
+        pending.set(key, null);
+        schedule();
+      },
+    };
+  })(),
+
+  // Mirror unsaved editor content to the main process during normal edits.
+  updateProjectEditorDraft: (
+    draft: { cwd: string; filePath: string; content: string } | null
+  ) => {
+    ipcRenderer.send('project-editor-draft-update', draft);
+  },
+
+  // Use sync IPC at blur/hidden/unload boundaries before the renderer freezes.
+  commitProjectEditorDraftSync: (
+    draft: { cwd: string; filePath: string; content: string } | null
+  ) => {
+    try {
+      ipcRenderer.sendSync('project-editor-draft-update-sync', draft);
+    } catch {
+      // ignore - best-effort flush during teardown
+    }
+  },
+
+  // Synchronously block during renderer teardown until the file write finishes.
+  writeProjectTextFileSync: (
+    draft: { cwd: string; filePath: string; content: string }
+  ) => {
+    try {
+      ipcRenderer.sendSync('write-project-text-file-sync', draft);
+    } catch {
+      // ignore - best-effort write during teardown
+    }
+  },
+
+  loadOlderSessionHistory: (sessionId: string, cursor: string, limit?: number) => {
+    return ipcRenderer.invoke('load-older-session-history', sessionId, cursor, limit);
+  },
+
+  loadSessionHistoryAround: (
+    sessionId: string,
+    messageCreatedAt: number,
+    before?: number,
+    after?: number
+  ) => {
+    return ipcRenderer.invoke('load-session-history-around', sessionId, messageCreatedAt, before, after);
+  },
+
+  checkForUpdates: () => {
+    return ipcRenderer.invoke('check-for-updates');
+  },
+
+  getUpdateStatus: () => {
+    return ipcRenderer.invoke('get-update-status');
+  },
+
+  // 获取 Claude 模型配置
+  getClaudeModelConfig: () => {
+    return ipcRenderer.invoke('get-claude-model-config');
+  },
+
+  // 获取 Claude-compatible provider 配置
+  getClaudeCompatibleProviderConfig: () => {
+    return ipcRenderer.invoke('get-claude-compatible-provider-config');
+  },
+
+  // 保存 Claude-compatible provider 配置
+  saveClaudeCompatibleProviderConfig: (config: ClaudeCompatibleProvidersConfig) => {
+    return ipcRenderer.invoke('save-claude-compatible-provider-config', config);
+  },
+
+  getWechatHtmlGeneratorConfig: (): Promise<WechatMarkdownHtmlGeneratorConfig> => {
+    return ipcRenderer.invoke('get-wechat-html-generator-config');
+  },
+
+  saveWechatHtmlGeneratorConfig: (
+    config: WechatMarkdownHtmlGeneratorConfig
+  ): Promise<WechatMarkdownHtmlGeneratorConfig> => {
+    return ipcRenderer.invoke('save-wechat-html-generator-config', config);
+  },
+
+  generateWechatMarkdownHtml: (
+    input: WechatMarkdownHtmlGenerationInput
+  ): Promise<WechatMarkdownHtmlGenerationResult> => {
+    return ipcRenderer.invoke('generate-wechat-markdown-html', input);
+  },
+
+  writeWechatClipboardHtml: (
+    input: WechatClipboardHtmlWriteInput
+  ): Promise<WechatClipboardHtmlWriteResult> => {
+    return ipcRenderer.invoke('write-wechat-clipboard-html', input);
+  },
+
+  // 获取 Claude usage 报表
+  getClaudeUsageReport: (days?: ClaudeUsageRangeDays) => {
+    return ipcRenderer.invoke('get-claude-usage-report', days);
+  },
+
+  getCodexUsageReport: (days?: ClaudeUsageRangeDays) => {
+    return ipcRenderer.invoke('get-codex-usage-report', days);
+  },
+
+  getCodexRateLimits: () => {
+    return ipcRenderer.invoke('get-codex-rate-limits');
+  },
+
+  getClaudePlanUsage: () => {
+    return ipcRenderer.invoke('get-claude-plan-usage');
+  },
+
+  getGrokPlanUsage: () => {
+    return ipcRenderer.invoke('get-grok-plan-usage');
+  },
+
+  getQoderPlanUsage: () => {
+    return ipcRenderer.invoke('get-qoder-plan-usage');
+  },
+
+  getSessionUserPrompts: (sessionId: string) => {
+    return ipcRenderer.invoke('get-session-user-prompts', sessionId);
+  },
+
+  getDeepseekSessionCost: (sessionId: string) => {
+    return ipcRenderer.invoke('get-deepseek-session-cost', sessionId);
+  },
+
+  getAgentUsageReport: (provider: string, days?: ClaudeUsageRangeDays) => {
+    return ipcRenderer.invoke('get-agent-usage-report', provider, days);
+  },
+
+  getOpencodeUsageReport: (days?: ClaudeUsageRangeDays) => {
+    return ipcRenderer.invoke('get-opencode-usage-report', days);
+  },
+
+  // 获取 Codex 模型配置
+  getCodexModelConfig: () => {
+    return ipcRenderer.invoke('get-codex-model-config');
+  },
+
+  saveCodexModelVisibility: (enabledModels: string[]) => {
+    return ipcRenderer.invoke('save-codex-model-visibility', enabledModels);
+  },
+
+  getCodexRuntimeStatus: () => {
+    return ipcRenderer.invoke('get-codex-runtime-status');
+  },
+  getCodexComposerCapabilities: (): Promise<ProviderComposerCapabilities> => {
+    return ipcRenderer.invoke('codex-get-composer-capabilities');
+  },
+  listCodexMcpStatus: (): Promise<{
+    ok: boolean;
+    message?: string;
+    servers: CodexMcpServerRuntimeStatus[];
+  }> => {
+    return ipcRenderer.invoke('codex-mcp-status-list');
+  },
+  startCodexMcpOauthLogin: (
+    serverName: string
+  ): Promise<{ ok: boolean; message?: string; authorizationUrl?: string }> => {
+    return ipcRenderer.invoke('codex-mcp-oauth-login', serverName);
+  },
+  listCodexSkills: (
+    input: Omit<ProviderListSkillsInput, 'provider'>
+  ): Promise<ProviderListSkillsResult> => {
+    return ipcRenderer.invoke('codex-list-skills', input);
+  },
+  listCodexPlugins: (
+    input?: Omit<ProviderListPluginsInput, 'provider'>
+  ): Promise<ProviderListPluginsResult> => {
+    return ipcRenderer.invoke('codex-list-plugins', input);
+  },
+  listKimiSkills: (
+    input: Omit<ProviderListSkillsInput, 'provider'>
+  ): Promise<ProviderListSkillsResult> => {
+    return ipcRenderer.invoke('kimi-list-skills', input);
+  },
+  listQoderSkills: (
+    input: Omit<ProviderListSkillsInput, 'provider'>
+  ): Promise<ProviderListSkillsResult> => {
+    return ipcRenderer.invoke('qoder-list-skills', input);
+  },
+  listBubbleSkills: (
+    input: Omit<ProviderListSkillsInput, 'provider'>
+  ): Promise<ProviderListSkillsResult> => {
+    return ipcRenderer.invoke('bubble-list-skills', input);
+  },
+  listGrokSkills: (
+    input: Omit<ProviderListSkillsInput, 'provider'>
+  ): Promise<ProviderListSkillsResult> => {
+    return ipcRenderer.invoke('grok-list-skills', input);
+  },
+  listDeepseekSkills: (
+    input: Omit<ProviderListSkillsInput, 'provider'>
+  ): Promise<ProviderListSkillsResult> => {
+    return ipcRenderer.invoke('deepseek-list-skills', input);
+  },
+  readCodexPlugin: (
+    input: Omit<ProviderReadPluginInput, 'provider'>
+  ): Promise<ProviderReadPluginResult> => {
+    return ipcRenderer.invoke('codex-read-plugin', input);
+  },
+  readBubbleSkillContent: (name: string, cwd?: string) => ipcRenderer.invoke('bubble-read-skill-content', name, cwd),
+  readCodexSkillContent: (
+    skillPath: string
+  ): Promise<{ ok: boolean; content?: string; message?: string }> => {
+    return ipcRenderer.invoke('codex-read-skill-content', skillPath);
+  },
+  installCodexPlugin: (
+    input: Omit<ProviderInstallPluginInput, 'provider'>
+  ): Promise<void> => {
+    return ipcRenderer.invoke('codex-install-plugin', input);
+  },
+  uninstallCodexPlugin: (
+    input: Omit<ProviderUninstallPluginInput, 'provider'>
+  ): Promise<void> => {
+    return ipcRenderer.invoke('codex-uninstall-plugin', input);
+  },
+  listOpenCodeSkills: (
+    input?: Omit<ProviderListSkillsInput, 'provider'>
+  ): Promise<ProviderListSkillsResult> => {
+    return ipcRenderer.invoke('opencode-list-skills', input);
+  },
+  listClaudePlugins: (): Promise<ProviderListPluginsResult> => {
+    return ipcRenderer.invoke('claude-list-plugins');
+  },
+  readClaudePlugin: (pluginId: string): Promise<ProviderReadPluginResult> => {
+    return ipcRenderer.invoke('claude-read-plugin', pluginId);
+  },
+  installClaudePlugin: (pluginId: string): Promise<void> => {
+    return ipcRenderer.invoke('claude-install-plugin', pluginId);
+  },
+  uninstallClaudePlugin: (pluginId: string): Promise<void> => {
+    return ipcRenderer.invoke('claude-uninstall-plugin', pluginId);
+  },
+
+  getOpencodeModelConfig: () => {
+    return ipcRenderer.invoke('get-opencode-model-config');
+  },
+
+  saveOpencodeModelVisibility: (enabledModels: string[]) => {
+    return ipcRenderer.invoke('save-opencode-model-visibility', enabledModels);
+  },
+
+  getOpencodeRuntimeStatus: () => {
+    return ipcRenderer.invoke('get-opencode-runtime-status');
+  },
+
+  getKimiModelConfig: () => {
+    return ipcRenderer.invoke('get-kimi-model-config');
+  },
+
+  getKimiRuntimeStatus: () => {
+    return ipcRenderer.invoke('get-kimi-runtime-status');
+  },
+
+  getGrokRuntimeStatus: () => {
+    return ipcRenderer.invoke('get-grok-runtime-status');
+  },
+
+  getGrokModelConfig: () => {
+    return ipcRenderer.invoke('get-grok-model-config');
+  },
+
+  getDeepseekModelConfig: () => {
+    return ipcRenderer.invoke('get-deepseek-model-config');
+  },
+
+  getPiModelConfig: () => {
+    return ipcRenderer.invoke('get-pi-model-config');
+  },
+
+  getBubbleModelConfig: () => {
+    return ipcRenderer.invoke('get-bubble-model-config');
+  },
+
+  startBubbleOAuth: (providerId: string) => ipcRenderer.invoke('start-bubble-oauth', providerId),
+  getBubbleOAuthState: () => ipcRenderer.invoke('get-bubble-oauth-state'),
+  cancelBubbleOAuth: () => ipcRenderer.invoke('cancel-bubble-oauth'),
+  reopenBubbleOAuth: () => ipcRenderer.invoke('reopen-bubble-oauth'),
+  logoutBubbleOAuth: (providerId: string) => ipcRenderer.invoke('logout-bubble-oauth', providerId),
+  getBubbleProvidersConfig: () => {
+    return ipcRenderer.invoke('get-bubble-providers-config');
+  },
+
+  getBubbleProviderKey: (providerId: string) => {
+    return ipcRenderer.invoke('get-bubble-provider-key', providerId);
+  },
+
+  setBubbleProviderKey: (providerId: string, apiKey: string) => {
+    return ipcRenderer.invoke('set-bubble-provider-key', providerId, apiKey);
+  },
+
+  removeBubbleProvider: (providerId: string) => {
+    return ipcRenderer.invoke('remove-bubble-provider', providerId);
+  },
+
+  setBubbleDefaultProvider: (providerId: string) => {
+    return ipcRenderer.invoke('set-bubble-default-provider', providerId);
+  },
+
+  setBubbleProviderEnabled: (providerId: string, enabled: boolean) => {
+    return ipcRenderer.invoke('set-bubble-provider-enabled', providerId, enabled);
+  },
+
+  getDeepseekKeyStatus: () => {
+    return ipcRenderer.invoke('get-deepseek-key-status');
+  },
+
+  getDeepseekApiKey: () => {
+    return ipcRenderer.invoke('get-deepseek-api-key');
+  },
+
+  setDeepseekApiKey: (apiKey: string) => {
+    return ipcRenderer.invoke('set-deepseek-api-key', apiKey);
+  },
+
+  clearDeepseekApiKey: () => {
+    return ipcRenderer.invoke('clear-deepseek-api-key');
+  },
+
+  getBrowserUsePermissions: () => {
+    return ipcRenderer.invoke('get-browser-use-permissions');
+  },
+
+  setBrowserUseEnabled: (enabled: boolean) => {
+    return ipcRenderer.invoke('set-browser-use-enabled', enabled);
+  },
+
+  setBrowserUseOriginPolicy: (origin: string, policy: 'allow' | 'block' | 'ask' | null) => {
+    return ipcRenderer.invoke('set-browser-use-origin-policy', origin, policy);
+  },
+
+  setBrowserUseDefaultPolicy: (policy: 'allow' | 'block' | 'ask') => {
+    return ipcRenderer.invoke('set-browser-use-default-policy', policy);
+  },
+
+  listChromeCookieProfiles: () => {
+    return ipcRenderer.invoke('list-chrome-cookie-profiles');
+  },
+
+  listChromeCookieDomains: (profilePath: string) => {
+    return ipcRenderer.invoke('list-chrome-cookie-domains', profilePath);
+  },
+
+  importChromeCookies: (request: { profilePath: string; domains?: string[] }) => {
+    return ipcRenderer.invoke('import-chrome-cookies', request);
+  },
+
+  getChromeCookieImportStatus: () => {
+    return ipcRenderer.invoke('get-chrome-cookie-import-status');
+  },
+
+  clearImportedChromeCookies: () => {
+    return ipcRenderer.invoke('clear-imported-chrome-cookies');
+  },
+
+  getQoderModelConfig: () => {
+    return ipcRenderer.invoke('get-qoder-model-config');
+  },
+
+  getClaudeRuntimeStatus: (model?: string | null) => {
+    return ipcRenderer.invoke('get-claude-runtime-status', model);
+  },
+
+  getSkillMarketHot: (limit?: number): Promise<SkillMarketItem[]> => {
+    return ipcRenderer.invoke('get-skill-market-hot', limit);
+  },
+  searchSkillMarket: (query: string, limit?: number): Promise<SkillMarketItem[]> => {
+    return ipcRenderer.invoke('search-skill-market', query, limit);
+  },
+  getSkillMarketDetail: (id: string): Promise<SkillMarketDetail> => {
+    return ipcRenderer.invoke('get-skill-market-detail', id);
+  },
+  installSkillFromMarket: (id: string): Promise<SkillMarketInstallResult> => {
+    return ipcRenderer.invoke('install-skill-from-market', id);
+  },
+  expandClaudeSkillPrompt: (skillFilePath: string, skillName: string, userPrompt: string) => {
+    return ipcRenderer.invoke('expand-claude-skill-prompt', skillFilePath, skillName, userPrompt);
+  },
+
+  getFeishuBridgeConfig: () => {
+    return ipcRenderer.invoke('get-feishu-bridge-config');
+  },
+  saveFeishuBridgeConfig: (config: FeishuBridgeConfig) => {
+    return ipcRenderer.invoke('save-feishu-bridge-config', config);
+  },
+  getFeishuBridgeStatus: () => {
+    return ipcRenderer.invoke('get-feishu-bridge-status');
+  },
+  getMemoryWorkspace: (projectCwd?: string | null): Promise<MemoryWorkspace> => {
+    return ipcRenderer.invoke('get-memory-workspace', projectCwd);
+  },
+  saveMemoryDocument: (filePath: string, content: string): Promise<MemoryDocument> => {
+    return ipcRenderer.invoke('save-memory-document', filePath, content);
+  },
+  startFeishuBridge: () => {
+    return ipcRenderer.invoke('start-feishu-bridge');
+  },
+  stopFeishuBridge: () => {
+    return ipcRenderer.invoke('stop-feishu-bridge');
+  },
+
+  // 本机 agent 运行时检测
+  getAgentRuntimeDirectory: (force?: boolean) => {
+    return ipcRenderer.invoke('get-agent-runtime-directory', force);
+  },
+
+  // GitHub pull-request directory
+  listPullRequests: (forceReload?: boolean) => {
+    return ipcRenderer.invoke('pull-requests-list', forceReload);
+  },
+  getPullRequestDetail: (input: { repo: string; number: number; forceReload?: boolean }) => {
+    return ipcRenderer.invoke('pull-requests-detail', input);
+  },
+  mergePullRequest: (input: { repo: string; number: number; method: 'merge' | 'squash' | 'rebase' }) => {
+    return ipcRenderer.invoke('pull-requests-merge', input);
+  },
+  addPullRequestComment: (input: { repo: string; number: number; body: string }) => {
+    return ipcRenderer.invoke('pull-requests-comment', input);
+  },
+  getPullRequestDiff: (input: { repo: string; number: number; forceReload?: boolean }) => {
+    return ipcRenderer.invoke('pull-requests-diff', input);
+  },
+  getPullRequestCommits: (input: { repo: string; number: number; forceReload?: boolean }) => {
+    return ipcRenderer.invoke('pull-requests-commits', input);
+  },
+  setPullRequestDraft: (input: { repo: string; number: number; draft: boolean }) => {
+    return ipcRenderer.invoke('pull-requests-set-draft', input);
+  },
+
+  // 用户资料
+  getUserProfile: () => {
+    return ipcRenderer.invoke('get-user-profile');
+  },
+  saveUserProfile: (update: { displayName: string | null; handle: string | null }) => {
+    return ipcRenderer.invoke('save-user-profile', update);
+  },
+
+  // 字体设置
+  getFontSettings: () => {
+    return ipcRenderer.invoke('get-font-settings');
+  },
+  saveFontSelections: (selections: FontSettingsPayload['selections']) => {
+    return ipcRenderer.invoke('save-font-selections', selections);
+  },
+  listSystemFonts: () => {
+    return ipcRenderer.invoke('list-system-fonts');
+  },
+  importFontFile: () => {
+    return ipcRenderer.invoke('import-font-file');
+  },
+  deleteImportedFont: (fontId: string) => {
+    return ipcRenderer.invoke('delete-imported-font', fontId);
+  },
+
+  // 选择目录
+  selectDirectory: () => {
+    return ipcRenderer.invoke('select-directory');
+  },
+
+  // 选择附件（文件/图片）
+  getPathForFile: (file: File): string => {
+    try { return webUtils.getPathForFile(file); } catch { return ''; }
+  },
+  getClipboardFilePaths: (): string[] => {
+    const paths = ipcRenderer.sendSync('clipboard-file-paths');
+    return Array.isArray(paths) ? paths : [];
+  },
+  importAttachments: (paths: string[]) => ipcRenderer.invoke('import-attachments', paths),
+  chooseAttachments: () => ipcRenderer.invoke('choose-attachments'),
+  createFileAttachment: (name: string, data: Uint8Array) => ipcRenderer.invoke('create-file-attachment', name, data),
+  selectAttachments: () => {
+    return ipcRenderer.invoke('select-attachments');
+  },
+
+  // 读取图片预览（data URL）
+  readAttachmentPreview: (filePath: string) => {
+    return ipcRenderer.invoke('read-attachment-preview', filePath);
+  },
+
+  readComputerUseArtifact: (sessionId: string, sha256: string) => {
+    return ipcRenderer.invoke('read-computer-use-artifact', sessionId, sha256);
+  },
+
+  readComputerUseAppIcon: (app: string) => {
+    return ipcRenderer.invoke('read-computer-use-app-icon', app);
+  },
+
+  openComputerUsePreview: (input: unknown) => {
+    return ipcRenderer.invoke('open-computer-use-preview', input);
+  },
+
+  closeComputerUsePreview: () => {
+    return ipcRenderer.invoke('close-computer-use-preview');
+  },
+
+  getComputerUsePreviewState: () => {
+    return ipcRenderer.invoke('get-computer-use-preview-state');
+  },
+
+  setComputerUsePreviewParked: (sha256: string | null) => {
+    return ipcRenderer.invoke('set-computer-use-preview-parked', sha256);
+  },
+
+  stopComputerUse: (sessionId: string) => {
+    return ipcRenderer.invoke('stop-computer-use', sessionId);
+  },
+
+  onComputerUsePreviewState: (callback: (state: unknown) => void) => {
+    const handler = (_: unknown, payload: string) => {
+      try {
+        callback(JSON.parse(payload));
+      } catch (error) {
+        console.error('Failed to parse computer-use preview state:', error);
+      }
+    };
+    ipcRenderer.on('computer-use-preview-state', handler);
+    return () => {
+      ipcRenderer.removeListener('computer-use-preview-state', handler);
+    };
+  },
+
+  downloadAttachment: (filePath: string, suggestedName?: string) => {
+    return ipcRenderer.invoke('download-attachment', filePath, suggestedName);
+  },
+
+  // 读取项目文件预览
+  readProjectFilePreview: (cwd: string, filePath: string) => {
+    return ipcRenderer.invoke('read-project-file-preview', cwd, filePath);
+  },
+
+  resolveGrokSessionFile: (cwd: string, relativePath: string) => {
+    return ipcRenderer.invoke('resolve-grok-session-file', cwd, relativePath);
+  },
+
+  createProjectAttachment: (cwd: string, filePath: string) => {
+    return ipcRenderer.invoke('create-project-attachment', cwd, filePath);
+  },
+
+  createProjectFile: (cwd: string, parentPath: string, name: string) => {
+    return ipcRenderer.invoke('create-project-file', cwd, parentPath, name);
+  },
+
+  createProjectFolder: (cwd: string, parentPath: string, name: string) => {
+    return ipcRenderer.invoke('create-project-folder', cwd, parentPath, name);
+  },
+
+  moveProjectEntry: (cwd: string, sourcePath: string, targetParentPath: string) => {
+    return ipcRenderer.invoke('move-project-entry', cwd, sourcePath, targetParentPath);
+  },
+
+  deleteProjectEntry: (cwd: string, targetPath: string) => {
+    return ipcRenderer.invoke('delete-project-entry', cwd, targetPath);
+  },
+
+  selectMarkdownImageAsset: (cwd: string, markdownFilePath: string) => {
+    return ipcRenderer.invoke('select-markdown-image-asset', cwd, markdownFilePath);
+  },
+
+  // 皮肤壁纸:选择/读取/清除
+  selectSkinImage: () => {
+    return ipcRenderer.invoke('select-skin-image');
+  },
+
+  readSkinImage: (fileName: string) => {
+    return ipcRenderer.invoke('read-skin-image', fileName);
+  },
+
+  clearSkinImage: () => {
+    return ipcRenderer.invoke('clear-skin-image');
+  },
+
+  readMarkdownImageAsset: (cwd: string, markdownFilePath: string, imageSrc: string) => {
+    return ipcRenderer.invoke('read-markdown-image-asset', cwd, markdownFilePath, imageSrc);
+  },
+
+  resolveMarkdownImageAssetUrl: (cwd: string, markdownFilePath: string, imageSrc: string) => {
+    return ipcRenderer.invoke('resolve-markdown-image-asset-url', cwd, markdownFilePath, imageSrc);
+  },
+
+  createMarkdownImageAsset: (
+    cwd: string,
+    markdownFilePath: string,
+    fileName: string,
+    mimeType: string | undefined,
+    data: Uint8Array
+  ) => {
+    return ipcRenderer.invoke('create-markdown-image-asset', cwd, markdownFilePath, fileName, mimeType, data);
+  },
+
+  createInlineTextAttachment: (cwd: string, text: string) => {
+    return ipcRenderer.invoke('create-inline-text-attachment', cwd, text);
+  },
+
+  createInlineImageAttachment: (mimeType: string, data: Uint8Array) => {
+    return ipcRenderer.invoke('create-inline-image-attachment', mimeType, data);
+  },
+
+  // 保存项目文本文件（仅 .txt）
+  writeProjectTextFile: (cwd: string, filePath: string, content: string) => {
+    return ipcRenderer.invoke('write-project-text-file', cwd, filePath, content);
+  },
+
+  // 预览 artifact 文件
+  previewArtifactPath: (cwd: string, filePath: string, options?: { openInBrowser?: boolean }) => {
+    return ipcRenderer.invoke('preview-artifact-path', cwd, filePath, options);
+  },
+
+  // 用系统默认应用打开文件
+  openPath: (filePath: string) => {
+    return ipcRenderer.invoke('open-path', filePath);
+  },
+
+  // 在文件管理器中展示文件
+  revealPath: (filePath: string) => {
+    return ipcRenderer.invoke('reveal-path', filePath);
+  },
+
+  // 列出可以打开该文件的本地应用（"打开方式"，仅 macOS）
+  listOpenWithApps: (cwd: string, filePath: string) => {
+    return ipcRenderer.invoke('list-open-with-apps', cwd, filePath);
+  },
+
+  // 用指定应用打开文件
+  openFileWithApp: (cwd: string, filePath: string, appPath: string) => {
+    return ipcRenderer.invoke('open-file-with-app', cwd, filePath, appPath);
+  },
+
+  // 获取项目文件树
+  getProjectTree: (cwd: string, requestId?: string) => {
+    return ipcRenderer.invoke('get-project-tree', cwd, requestId);
+  },
+
+  cancelProjectTreeRead: (requestId: string) => ipcRenderer.invoke('cancel-project-tree-read', requestId),
+
+  // 订阅项目文件树更新
+  watchProjectTree: (cwd: string) => {
+    return ipcRenderer.invoke('watch-project-tree', cwd);
+  },
+
+  // 取消订阅项目文件树更新
+  unwatchProjectTree: (cwd: string) => {
+    return ipcRenderer.invoke('unwatch-project-tree', cwd);
+  },
+
+  // 订阅单个可编辑文件的磁盘变化
+  watchProjectFile: (cwd: string, filePath: string) => {
+    return ipcRenderer.invoke('watch-project-file', cwd, filePath);
+  },
+
+  // 取消订阅单个文件的磁盘变化
+  unwatchProjectFile: (cwd: string, filePath: string) => {
+    return ipcRenderer.invoke('unwatch-project-file', cwd, filePath);
+  },
+
+  // Git 变更
+  getGitChanges: (cwd: string) => {
+    return ipcRenderer.invoke('get-git-changes', cwd);
+  },
+
+  getGitWorkingTreeSummary: (cwd: string) => {
+    return ipcRenderer.invoke('get-git-working-tree-summary', cwd);
+  },
+
+  listSessionPullRequests: (sessionId: string, refresh?: boolean) => ipcRenderer.invoke('list-session-pull-requests', sessionId, refresh),
+  attachSessionPullRequest: (input: import('../shared/types').AttachSessionPullRequestInput) => ipcRenderer.invoke('attach-session-pull-request', input),
+  detachSessionPullRequest: (sessionId: string, url: string, attachedAt: number) => ipcRenderer.invoke('detach-session-pull-request', sessionId, url, attachedAt),
+  onSessionPullRequestsChanged: (callback: (sessionId: string) => void) => {
+    const listener = (_event: unknown, sessionId: string) => callback(sessionId);
+    ipcRenderer.on('session-pull-requests-changed', listener);
+    return () => ipcRenderer.removeListener('session-pull-requests-changed', listener);
+  },
+
+  getGitOverview: (cwd: string) => {
+    return ipcRenderer.invoke('get-git-overview', cwd);
+  },
+
+  getGitPatch: (cwd: string, scope?: GitPatchScope) => {
+    return ipcRenderer.invoke('get-git-patch', cwd, scope);
+  },
+
+  getGitCommits: (cwd: string, limit?: number) => {
+    return ipcRenderer.invoke('get-git-commits', cwd, limit);
+  },
+
+  getGitCommitPatch: (cwd: string, sha: string) => {
+    return ipcRenderer.invoke('get-git-commit-patch', cwd, sha);
+  },
+
+  getGitBranch: (cwd: string) => {
+    return ipcRenderer.invoke('get-git-branch', cwd);
+  },
+
+  getGitRepoBrief: (cwd: string) => {
+    return ipcRenderer.invoke('get-git-repo-brief', cwd);
+  },
+
+  getGitBranchChanges: (cwd: string, baseRef: string) => {
+    return ipcRenderer.invoke('get-git-branch-changes', cwd, baseRef);
+  },
+
+  getGitBranches: (cwd: string) => {
+    return ipcRenderer.invoke('get-git-branches', cwd);
+  },
+
+  gitCheckoutBranch: (input: unknown) => {
+    return ipcRenderer.invoke('git-checkout-branch', input);
+  },
+
+  gitCreateBranch: (input: unknown) => {
+    return ipcRenderer.invoke('git-create-branch', input);
+  },
+
+  gitCreateWorktree: (input: unknown) => {
+    return ipcRenderer.invoke('git-create-worktree', input);
+  },
+
+  gitSessionHandoff: (input: unknown) => {
+    return ipcRenderer.invoke('git-session-handoff', input);
+  },
+
+  getGitHistory: (cwd: string) => {
+    return ipcRenderer.invoke('get-git-history', cwd);
+  },
+
+  getGitDiff: (cwd: string, filePath: string) => {
+    return ipcRenderer.invoke('get-git-diff', cwd, filePath);
+  },
+
+  gitStagePath: (cwd: string, filePath: string) => {
+    return ipcRenderer.invoke('git-stage-path', cwd, filePath);
+  },
+
+  gitUnstagePath: (cwd: string, filePath: string) => {
+    return ipcRenderer.invoke('git-unstage-path', cwd, filePath);
+  },
+
+  gitDiscardPath: (cwd: string, filePath: string, status?: string) => {
+    return ipcRenderer.invoke('git-discard-path', cwd, filePath, status);
+  },
+
+  gitCommit: (cwd: string, message: string) => {
+    return ipcRenderer.invoke('git-commit', cwd, message);
+  },
+
+  gitGenerateCommitMessage: (cwd: string) => {
+    return ipcRenderer.invoke('git-generate-commit-message', cwd);
+  },
+
+  gitPush: (cwd: string) => {
+    return ipcRenderer.invoke('git-push', cwd);
+  },
+
+  gitSync: (cwd: string) => {
+    return ipcRenderer.invoke('git-sync', cwd);
+  },
+
+  gitCreatePr: (cwd: string) => {
+    return ipcRenderer.invoke('git-create-pr', cwd);
+  },
+
+  getEnvironmentEditorLaunchers: () => {
+    return ipcRenderer.invoke('get-environment-editor-launchers');
+  },
+
+  openInEditor: (input: unknown) => {
+    return ipcRenderer.invoke('open-in-editor', input);
+  },
+
+
+
+
+  getSessionGoal: (sessionId: string) => ipcRenderer.invoke('get-session-goal', sessionId),
+  changeSessionGoal: (sessionId: string, action: import('../shared/session-goal').GoalAction, settings?: import('../shared/session-goal').GoalSettings) => ipcRenderer.invoke('change-session-goal', sessionId, action, settings),
+  onSessionGoalChanged: (callback: (snapshot: import('../shared/session-goal').SessionGoalSnapshot) => void) => {
+    const listener = (_event: unknown, snapshot: import('../shared/session-goal').SessionGoalSnapshot) => callback(snapshot);
+    ipcRenderer.on('session-goal-changed', listener);
+    return () => ipcRenderer.removeListener('session-goal-changed', listener);
+  },
+  getSessionOrganization: () => ipcRenderer.invoke('get-session-organization'),
+  changeSessionOrganization: (change: import('../shared/session-organization').SessionOrganizationChange) => ipcRenderer.invoke('change-session-organization', change),
+  onSessionOrganizationChanged: (callback: (snapshot: import('../shared/session-organization').SessionOrganizationSnapshot) => void) => {
+    const listener = (_event: unknown, snapshot: import('../shared/session-organization').SessionOrganizationSnapshot) => callback(snapshot);
+    ipcRenderer.on('session-organization-changed', listener);
+    return () => ipcRenderer.removeListener('session-organization-changed', listener);
+  },
+  exportSessionMarkdown: (sessionId: string, share: boolean) => ipcRenderer.invoke('export-session-markdown', sessionId, share),
+  copySessionMarkdown: (sessionId: string) => ipcRenderer.invoke('copy-session-markdown', sessionId),
+  moveSessionProject: (sessionId: string, cwd: string, approvalToken?: string) => ipcRenderer.invoke('move-session-project', sessionId, cwd, approvalToken),
+  openSessionWindow: (sessionId: string) => ipcRenderer.invoke('open-session-window', sessionId),
+  showSessionMenu: (request: SessionMenuRequest): Promise<SessionMenuAction | null> => ipcRenderer.invoke('show-session-menu', request),
+  copySessionValue: (sessionId: string, target: 'link' | 'cwd'): Promise<void> => ipcRenderer.invoke('copy-session-value', sessionId, target),
+  openExternalUrl: (url: string) => {
+    return ipcRenderer.invoke('open-external-url', url);
+  },
+
+  // 订阅系统统计（预留）
+  subscribeStatistics: (callback: (data: unknown) => void) => {
+    const handler = (_: unknown, data: unknown) => {
+      callback(data);
+    };
+
+    ipcRenderer.on('statistics', handler);
+
+    return () => {
+      ipcRenderer.removeListener('statistics', handler);
+    };
+  },
+
+  // 获取静态数据（预留）
+  getStaticData: () => {
+    return ipcRenderer.invoke('getStaticData');
+  },
+
+  // ===== 浏览器面板 (Session 级) =====
+  browser: {
+    open: (input: BrowserOpenInput): Promise<SessionBrowserState> =>
+      ipcRenderer.invoke(BROWSER_CHANNELS.open, input),
+    close: (input: BrowserSessionInput): Promise<SessionBrowserState> =>
+      ipcRenderer.invoke(BROWSER_CHANNELS.close, input),
+    hide: (input: BrowserSessionInput): Promise<SessionBrowserState> =>
+      ipcRenderer.invoke(BROWSER_CHANNELS.hide, input),
+    getState: (input: BrowserSessionInput): Promise<SessionBrowserState> =>
+      ipcRenderer.invoke(BROWSER_CHANNELS.getState, input),
+    setPanelBounds: (input: BrowserSetPanelBoundsInput): Promise<SessionBrowserState> =>
+      ipcRenderer.invoke(BROWSER_CHANNELS.setPanelBounds, input),
+    navigate: (input: BrowserNavigateInput): Promise<SessionBrowserState> =>
+      ipcRenderer.invoke(BROWSER_CHANNELS.navigate, input),
+    reload: (input: BrowserTabInput): Promise<SessionBrowserState> =>
+      ipcRenderer.invoke(BROWSER_CHANNELS.reload, input),
+    goBack: (input: BrowserTabInput): Promise<SessionBrowserState> =>
+      ipcRenderer.invoke(BROWSER_CHANNELS.goBack, input),
+    goForward: (input: BrowserTabInput): Promise<SessionBrowserState> =>
+      ipcRenderer.invoke(BROWSER_CHANNELS.goForward, input),
+    newTab: (input: BrowserNewTabInput): Promise<SessionBrowserState> =>
+      ipcRenderer.invoke(BROWSER_CHANNELS.newTab, input),
+    closeTab: (input: BrowserTabInput): Promise<SessionBrowserState> =>
+      ipcRenderer.invoke(BROWSER_CHANNELS.closeTab, input),
+    selectTab: (input: BrowserTabInput): Promise<SessionBrowserState> =>
+      ipcRenderer.invoke(BROWSER_CHANNELS.selectTab, input),
+    openDevTools: (input: BrowserTabInput): Promise<SessionBrowserState> =>
+      ipcRenderer.invoke(BROWSER_CHANNELS.openDevTools, input),
+    capture: (input: BrowserTabInput): Promise<BrowserCapturePageResult> =>
+      ipcRenderer.invoke(BROWSER_CHANNELS.capture, input),
+    readPage: (input: BrowserTabInput): Promise<BrowserReadoutResult> =>
+      ipcRenderer.invoke(BROWSER_CHANNELS.readPage, input),
+    onState: (callback: (state: SessionBrowserState) => void) => {
+      const handler = (_: unknown, state: SessionBrowserState) => {
+        try {
+          callback(state);
+        } catch (error) {
+          console.error('Browser state handler error:', error);
+        }
+      };
+      ipcRenderer.on(BROWSER_CHANNELS.state, handler);
+      return () => {
+        ipcRenderer.removeListener(BROWSER_CHANNELS.state, handler);
+      };
+    },
+    onSendSelection: (callback: (event: BrowserSendSelectionEvent) => void) => {
+      const handler = (_: unknown, event: BrowserSendSelectionEvent) => {
+        try {
+          callback(event);
+        } catch (error) {
+          console.error('Browser send-selection handler error:', error);
+        }
+      };
+      ipcRenderer.on(BROWSER_CHANNELS.sendSelection, handler);
+      return () => {
+        ipcRenderer.removeListener(BROWSER_CHANNELS.sendSelection, handler);
+      };
+    },
+  },
+  designMode: {
+    enable: (input: { sessionId: string; tabId: string; projectRoot: string }) =>
+      ipcRenderer.invoke(DESIGN_CHANNELS.enable, input),
+    disable: (input: { sessionId: string; tabId: string; token?: number }) =>
+      ipcRenderer.invoke(DESIGN_CHANNELS.disable, input),
+    measureSelection: (input: { sessionId: string; tabId: string }) =>
+      ipcRenderer.invoke(DESIGN_CHANNELS.measureSelection, input),
+    onEvent: (callback: (event: unknown) => void) => {
+      const handler = (_: unknown, event: unknown) => {
+        try {
+          callback(event);
+        } catch (error) {
+          console.error('Design mode event handler error:', error);
+        }
+      };
+      ipcRenderer.on(DESIGN_CHANNELS.event, handler);
+      return () => {
+        ipcRenderer.removeListener(DESIGN_CHANNELS.event, handler);
+      };
+    },
+  },
+});

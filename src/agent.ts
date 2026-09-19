@@ -2398,7 +2398,7 @@ export class Agent {
       return {
         content:
           `Error: Tool "${toolCall.name}" is not allowed in plan mode. ` +
-          `In plan mode you may only use read-only tools (read, glob, grep, web_search, web_fetch, spawn_agent, wait_agent, send_input, skill_search, skill, tool_search, question, exit_plan_mode). ` +
+          `In plan mode you may only use read-only tools (read, ls, grep, web_search, web_fetch, spawn_agent, wait_agent, send_input, skill_search, skill, tool_search, question, exit_plan_mode). ` +
           `To modify files or run commands, present your proposal and call exit_plan_mode so the user can review and approve it.`,
         isError: true,
       };

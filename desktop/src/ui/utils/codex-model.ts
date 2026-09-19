@@ -1,0 +1,79 @@
+import { rendererStateStorage } from './renderer-state-storage';
+import type { CodexModelConfig } from '../types';
+
+const STORAGE_KEY = 'cowork.preferredCodexModel';
+
+export function loadPreferredCodexModel(): string | null {
+  if (typeof window === 'undefined') return null;
+  const raw = rendererStateStorage.getItem(STORAGE_KEY);
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+export function savePreferredCodexModel(model: string | null): void {
+  if (typeof window === 'undefined') return;
+  if (!model) {
+    rendererStateStorage.removeItem(STORAGE_KEY);
+    return;
+  }
+  rendererStateStorage.setItem(STORAGE_KEY, model);
+}
+
+export function formatCodexModelLabel(model: string, displayName?: string | null): string {
+  const fromCache = displayName?.trim();
+  if (fromCache) {
+    // Codex display_name is often "GPT-5.6-Sol" — keep it readable.
+    return fromCache.replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  const normalized = model.trim();
+  if (!normalized) return 'Codex model';
+
+  return normalized
+    .split('-')
+    .map((part, index) => {
+      if (index === 0) return part.toUpperCase();
+      if (/^\d/.test(part)) return part;
+      return part.charAt(0).toUpperCase() + part.slice(1);
+    })
+    .join('-')
+    .replace(/-Codex/g, ' Codex')
+    .replace(/-Spark/g, ' Spark')
+    .replace(/-Mini/g, ' Mini')
+    .replace(/-Max/g, ' Max')
+    .replace(/-Sol\b/g, ' Sol')
+    .replace(/-Terra\b/g, ' Terra')
+    .replace(/-Luna\b/g, ' Luna');
+}
+
+export function buildCodexModelOptions(config: CodexModelConfig): string[] {
+  // Prefer enabled models only; fall back to full list if nothing is enabled.
+  const enabled = config.availableModels
+    .filter((model) => model.enabled !== false)
+    .map((model) => model.name)
+    .filter((value): value is string => Boolean(value));
+  if (enabled.length > 0) {
+    return Array.from(new Set(enabled));
+  }
+  return Array.from(new Set(config.options.filter((value): value is string => Boolean(value))));
+}
+
+export function resolveCodexModel(
+  model: string | null | undefined,
+  config: CodexModelConfig
+): string | null {
+  const normalized = model?.trim() || null;
+  const options = buildCodexModelOptions(config);
+  const defaultModel = config.defaultModel?.trim() || null;
+
+  if (normalized && (options.length === 0 || options.includes(normalized))) {
+    return normalized;
+  }
+
+  if (defaultModel && (options.length === 0 || options.includes(defaultModel))) {
+    return defaultModel;
+  }
+
+  return options[0] || null;
+}

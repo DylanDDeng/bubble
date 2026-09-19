@@ -1,0 +1,952 @@
+import { useAppPreferences } from '../store/useAppPreferences';
+import {
+  type ClipboardEvent,
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from 'react';
+import { parseSessionLink } from '../../shared/session-links';
+import { useAppStore } from '../store/useAppStore';
+import { getFileTypeIconVisual } from './FileTypeIcon';
+import { extractProjectFileMentions } from '../utils/project-file-mentions';
+import { extractKnownSiteLinkTokens } from '../utils/known-site-links';
+import { faviconUrlForHostname, isFaviconPlaceholder } from '../utils/link-favicons';
+
+// Tabler IconWorld — same icon the browser panel uses (exported as Globe from
+// components/icons); the composer chip is built with raw DOM nodes, so the
+// React component can't be rendered here.
+const LINK_FALLBACK_GLOBE_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0"/><path d="M3.6 9h16.8"/><path d="M3.6 15h16.8"/><path d="M11.5 3a17 17 0 0 0 0 18"/><path d="M12.5 3a17 17 0 0 1 0 18"/></svg>';
+import {
+  removeLeadingSlashTokenAdjacentToCursor,
+  splitPromptIntoComposerSegments,
+  type PromptSegment,
+  type SlashSegmentKind,
+  type SlashTokenContext,
+} from '../utils/composer-segments';
+
+export interface ComposerCaretInfo {
+  /** Caret offset in plain-text coordinates (0 when unavailable). */
+  index: number;
+  /** False while a non-collapsed selection is active. */
+  collapsed: boolean;
+  /**
+   * Whether the caret sits on the first *visual* row of the soft-wrapped
+   * editor content. Null when caret layout rects are unavailable (e.g. in
+   * jsdom) — callers should fall back to newline-based line checks.
+   */
+  onFirstVisualLine: boolean | null;
+}
+
+export interface ComposerPromptEditorHandle {
+  focus: () => void;
+  setCursorIndex: (index: number) => void;
+  /** Current caret position and visual-line placement. */
+  getCaretInfo: () => ComposerCaretInfo;
+}
+
+export interface ComposerPasteContext {
+  text: string;
+  start: number;
+  end: number;
+}
+
+export interface ComposerPasteImage {
+  mimeType: string;
+  data: Uint8Array;
+  name?: string;
+}
+
+function basenameOfPath(path: string): string {
+  const normalized = path.replace(/\\/g, '/');
+  const parts = normalized.split('/');
+  return parts[parts.length - 1] || path;
+}
+
+function normalizeSlashDisplayKey(value: string): string {
+  return value.replace(/^[/$]/, '').trim().toLowerCase();
+}
+
+function stripCapabilityPrefix(value: string): string {
+  return value
+    .replace(/^[/$]/, '')
+    .replace(/^plugin:/i, '')
+    .trim();
+}
+
+function isSegmentElement(node: Node | null | undefined): boolean {
+  return (
+    node instanceof HTMLElement &&
+    typeof node.dataset.segmentType === 'string' &&
+    node.dataset.segmentType.length > 0
+  );
+}
+
+function isImeKeyboardEvent(event: ReactKeyboardEvent<HTMLDivElement>): boolean {
+  return event.nativeEvent.isComposing === true || event.keyCode === 229 || event.key === 'Process';
+}
+
+function getChildTextLength(node: ChildNode): number {
+  if (node instanceof HTMLElement && node.hasAttribute('data-composer-trailing-break')) {
+    return 0;
+  }
+  if (node.nodeName === 'BR') {
+    return 1;
+  }
+
+  if (!(node instanceof HTMLElement)) {
+    return node.textContent?.length || 0;
+  }
+
+  if (isSegmentElement(node)) {
+    return node.dataset.rawText?.length || 0;
+  }
+
+  return Array.from(node.childNodes).reduce((total, child) => total + getChildTextLength(child), 0);
+}
+
+function getSerializedLength(root: HTMLDivElement): number {
+  return Array.from(root.childNodes).reduce((total, child) => total + getChildTextLength(child), 0);
+}
+
+function getCursorIndex(root: HTMLDivElement): number {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) {
+    return 0;
+  }
+
+  const range = selection.getRangeAt(0);
+  const { startContainer, startOffset } = range;
+
+  if (!root.contains(startContainer)) {
+    return 0;
+  }
+
+  let offset = 0;
+
+  const directChildFromNode = (node: Node | null): ChildNode | null => {
+    let current: Node | null = node;
+    while (current && current.parentNode !== root) {
+      current = current.parentNode;
+    }
+    return current instanceof Node ? (current as ChildNode) : null;
+  };
+
+  if (startContainer === root) {
+    for (let index = 0; index < startOffset; index += 1) {
+      const child = root.childNodes[index];
+      if (child) {
+        offset += getChildTextLength(child);
+      }
+    }
+    return offset;
+  }
+
+  const directChild = directChildFromNode(startContainer);
+  if (!directChild) {
+    return 0;
+  }
+
+  for (const child of Array.from(root.childNodes)) {
+    if (child === directChild) {
+      break;
+    }
+    offset += getChildTextLength(child);
+  }
+
+  if (isSegmentElement(directChild)) {
+    const element = directChild as HTMLElement;
+    const tokenLength = element.dataset.rawText?.length || 0;
+    return startOffset <= 0 ? offset : offset + tokenLength;
+  }
+
+  if (startContainer.nodeType === Node.TEXT_NODE) {
+    return offset + startOffset;
+  }
+
+  if (startContainer instanceof HTMLElement) {
+    const walker = document.createTreeWalker(startContainer, NodeFilter.SHOW_TEXT);
+    let textNode = walker.nextNode();
+    while (textNode) {
+      if (textNode === range.startContainer) {
+        return offset + startOffset;
+      }
+      offset += textNode.textContent?.length || 0;
+      textNode = walker.nextNode();
+    }
+  }
+
+  return offset;
+}
+
+interface CaretAnchor {
+  left: number;
+  top: number;
+  height: number;
+}
+
+/**
+ * Layout anchor for a collapsed range. A collapsed range whose container is an
+ * element (the caret sits between an atomic chip and nothing) reports a zero
+ * rect; anchor to the adjacent node instead: right edge of the node before it,
+ * else left edge of the node after it. Null when no usable rect exists (e.g.
+ * jsdom, or a fully empty editor).
+ */
+function getCollapsedCaretAnchor(range: Range): CaretAnchor | null {
+  const rangeRect = range.getBoundingClientRect();
+  if (rangeRect.width > 0 || rangeRect.height > 0) {
+    return { left: rangeRect.left, top: rangeRect.top, height: rangeRect.height };
+  }
+
+  const trailingBreak = range.startContainer.nextSibling;
+  if (
+    range.startContainer.nodeType === Node.TEXT_NODE &&
+    range.startOffset === range.startContainer.textContent?.length &&
+    trailingBreak instanceof HTMLElement &&
+    trailingBreak.hasAttribute('data-composer-trailing-break')
+  ) {
+    const rect = trailingBreak.getBoundingClientRect();
+    if (rect.height > 0) {
+      return { left: rect.left, top: rect.top, height: rect.height };
+    }
+  }
+
+  if (range.startContainer instanceof HTMLElement) {
+    const rectOfNode = (node: Node): DOMRect => {
+      if (node instanceof HTMLElement) {
+        return node.getBoundingClientRect();
+      }
+      const nodeRange = document.createRange();
+      nodeRange.selectNodeContents(node);
+      return nodeRange.getBoundingClientRect();
+    };
+    const before = range.startContainer.childNodes[range.startOffset - 1];
+    const after = range.startContainer.childNodes[range.startOffset];
+    if (after instanceof HTMLElement && after.hasAttribute('data-composer-trailing-break')) {
+      const rect = after.getBoundingClientRect();
+      return { left: rect.left, top: rect.top, height: rect.height };
+    }
+    if (before) {
+      const rect = rectOfNode(before);
+      if (rect.width > 0 || rect.height > 0) {
+        return { left: rect.right, top: rect.top, height: rect.height };
+      }
+    }
+    if (after) {
+      const rect = rectOfNode(after);
+      if (rect.width > 0 || rect.height > 0) {
+        return { left: rect.left, top: rect.top, height: rect.height };
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Whether the collapsed caret sits on the first *visual* row of the editor.
+ * The editor soft-wraps (whitespace-pre-wrap), so a single logical line can
+ * span several rows — newline scanning cannot answer this. Null when caret
+ * layout rects are unavailable.
+ */
+function isCaretOnFirstVisualLine(root: HTMLDivElement): boolean | null {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0 || !selection.isCollapsed) {
+    return null;
+  }
+  const range = selection.getRangeAt(0);
+  if (!root.contains(range.startContainer)) {
+    return null;
+  }
+
+  const anchor = getCollapsedCaretAnchor(range);
+  const contents = document.createRange();
+  contents.selectNodeContents(root);
+  const lineRects = Array.from(contents.getClientRects()).filter(
+    (rect) => rect.width > 0 || rect.height > 0
+  );
+  if (lineRects.length === 0) {
+    // No laid-out content: an empty editor is a single visual line, but when
+    // rects are unavailable altogether (jsdom) report unknown instead.
+    return getSerializedLength(root) === 0 && anchor ? true : null;
+  }
+  if (!anchor) {
+    return null;
+  }
+
+  let firstTop = Infinity;
+  for (const rect of lineRects) {
+    firstTop = Math.min(firstTop, rect.top);
+  }
+
+  // Rects on the same visual row share (near-)identical tops; half a caret
+  // height comfortably separates rows while absorbing sub-pixel jitter.
+  const tolerance = Math.max(4, anchor.height / 2);
+  return anchor.top - firstTop < tolerance;
+}
+
+function setCursorIndex(root: HTMLDivElement, index: number): void {
+  const selection = window.getSelection();
+  if (!selection) {
+    return;
+  }
+
+  const targetIndex = Math.max(0, Math.min(index, getSerializedLength(root)));
+  let remaining = targetIndex;
+  const range = document.createRange();
+
+  const children = Array.from(root.childNodes);
+  const trailingBreakIndex = children.findIndex(
+    (child) => child instanceof HTMLElement && child.hasAttribute('data-composer-trailing-break')
+  );
+  if (targetIndex === getSerializedLength(root) && trailingBreakIndex >= 0) {
+    range.setStart(root, trailingBreakIndex);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return;
+  }
+  for (let childIndex = 0; childIndex < children.length; childIndex += 1) {
+    const child = children[childIndex]!;
+    const childLength = getChildTextLength(child);
+
+    if (isSegmentElement(child)) {
+      if (remaining <= 0) {
+        range.setStart(root, childIndex);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return;
+      }
+      if (remaining <= childLength) {
+        range.setStart(root, childIndex + 1);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return;
+      }
+      remaining -= childLength;
+      continue;
+    }
+
+    if (remaining <= childLength) {
+      const textNode =
+        child.nodeType === Node.TEXT_NODE
+          ? child
+          : child.firstChild && child.firstChild.nodeType === Node.TEXT_NODE
+            ? child.firstChild
+            : child;
+      range.setStart(textNode, remaining);
+      range.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      return;
+    }
+
+    remaining -= childLength;
+  }
+
+  range.selectNodeContents(root);
+  range.collapse(false);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+function serializeEditorValue(root: HTMLDivElement): string {
+  const serializeNode = (node: ChildNode): string => {
+    if (node instanceof HTMLElement && node.hasAttribute('data-composer-trailing-break')) {
+      return '';
+    }
+    if (node.nodeName === 'BR') {
+      return '\n';
+    }
+
+    if (!(node instanceof HTMLElement)) {
+      return node.textContent || '';
+    }
+
+    if (isSegmentElement(node)) {
+      return node.dataset.rawText || '';
+    }
+
+    return Array.from(node.childNodes)
+      .map((child) => serializeNode(child))
+      .join('');
+  };
+
+  return Array.from(root.childNodes)
+    .map((child) => serializeNode(child))
+    .join('');
+}
+
+function createMentionNode(path: string, rawText: string): HTMLSpanElement {
+  const chip = document.createElement('span');
+  chip.dataset.segmentType = 'mention';
+  chip.dataset.rawText = rawText;
+  chip.dataset.mentionPath = path;
+  chip.contentEditable = 'false';
+  chip.spellcheck = false;
+  chip.title = path;
+  chip.className =
+    'mx-[1px] inline-flex max-w-[240px] select-none items-center gap-1 rounded-md border px-1.5 py-0.5 align-baseline text-[12px] leading-none';
+  chip.style.borderColor = 'var(--composer-mention-chip-border)';
+  chip.style.backgroundColor = 'var(--composer-mention-chip-bg)';
+  chip.style.color = 'var(--composer-mention-chip-text)';
+
+  const icon = document.createElement('span');
+  const iconVisual = getFileTypeIconVisual(basenameOfPath(path));
+  icon.setAttribute('aria-hidden', 'true');
+  icon.className = 'h-3.5 w-3.5 shrink-0';
+  if (iconVisual) {
+    const maskImage = `url("${iconVisual.dataUrl}")`;
+    icon.style.color = iconVisual.color;
+    icon.style.backgroundColor = 'currentColor';
+    icon.style.setProperty('-webkit-mask-image', maskImage);
+    icon.style.setProperty('-webkit-mask-position', 'center');
+    icon.style.setProperty('-webkit-mask-repeat', 'no-repeat');
+    icon.style.setProperty('-webkit-mask-size', 'contain');
+    icon.style.maskImage = maskImage;
+    icon.style.maskPosition = 'center';
+    icon.style.maskRepeat = 'no-repeat';
+    icon.style.maskSize = 'contain';
+  }
+
+  const label = document.createElement('span');
+  label.className = 'truncate font-mono text-[11px]';
+  label.textContent = `@${basenameOfPath(path)}`;
+
+  if (iconVisual) {
+    chip.append(icon);
+  }
+  chip.append(label);
+  return chip;
+}
+
+function createLinkNode(url: string, labelText: string, rawText: string): HTMLSpanElement {
+  const chip = document.createElement('span');
+  chip.dataset.segmentType = 'link';
+  chip.dataset.rawText = rawText;
+  chip.contentEditable = 'false';
+  chip.spellcheck = false;
+  chip.title = rawText;
+  chip.className = 'composer-inline-chip composer-inline-chip--link';
+
+  const referencedSessionId = parseSessionLink(url);
+  if (referencedSessionId) {
+    chip.dataset.sessionReference = referencedSessionId;
+    const session = useAppStore.getState().sessions[referencedSessionId];
+    labelText = session?.title || labelText;
+    const icon = document.createElement('span');
+    icon.className = 'composer-inline-chip__icon';
+    icon.textContent = '↗';
+    icon.setAttribute('aria-hidden', 'true');
+    chip.append(icon);
+  }
+  let hostname = '';
+  try {
+    hostname = referencedSessionId ? '' : new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+  } catch {
+    // Malformed URLs render without an icon.
+  }
+
+  if (hostname) {
+    const iconBox = document.createElement('span');
+    iconBox.className = 'composer-inline-chip__icon';
+    iconBox.setAttribute('aria-hidden', 'true');
+
+    const favicon = document.createElement('img');
+    favicon.src = faviconUrlForHostname(hostname);
+    favicon.alt = '';
+    favicon.className = 'composer-inline-chip__favicon';
+    favicon.loading = 'lazy';
+    favicon.decoding = 'async';
+    favicon.referrerPolicy = 'no-referrer';
+    const swapToGlobe = () => {
+      const template = document.createElement('template');
+      template.innerHTML = LINK_FALLBACK_GLOBE_SVG;
+      const globe = template.content.firstElementChild;
+      if (globe) favicon.replaceWith(globe);
+    };
+    favicon.onerror = swapToGlobe;
+    favicon.onload = () => {
+      if (isFaviconPlaceholder(favicon)) swapToGlobe();
+    };
+
+    iconBox.append(favicon);
+    chip.append(iconBox);
+  }
+
+  const label = document.createElement('span');
+  label.className = 'composer-inline-chip__label';
+  label.textContent = labelText;
+
+  chip.append(label);
+  return chip;
+}
+
+function createSlashNode(
+  kind: SlashSegmentKind,
+  name: string,
+  rawText: string,
+  slashDisplayLabels?: Record<string, string>
+): HTMLSpanElement {
+  const chip = document.createElement('span');
+  chip.dataset.segmentType = 'slash';
+  chip.dataset.slashKind = kind;
+  chip.dataset.rawText = rawText;
+  chip.dataset.slashName = name;
+  chip.contentEditable = 'false';
+  chip.spellcheck = false;
+  chip.title = rawText;
+  const isSkillLike = kind === 'skill' || kind === 'plugin';
+  chip.className = `composer-inline-chip composer-inline-chip--${kind}`;
+
+  const iconBox = document.createElement('span');
+  iconBox.className = 'composer-inline-chip__icon';
+  iconBox.setAttribute('aria-hidden', 'true');
+  if (kind === 'plugin') {
+    iconBox.innerHTML =
+      '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a6 6 0 0 1-12 0V8Z"/></svg>';
+  } else if (kind === 'skill') {
+    // Keep in sync with the SkillStack icon in icons.ts (codex-style tall
+    // outlined box with a mid-body slice).
+    iconBox.innerHTML =
+      '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5 L19 5.5 L12 8.5 L5 5.5 Z"/><path d="M5 5.5 V18.5 L12 21.5 L19 18.5 V5.5"/><path d="M5 12 L12 15 L19 12"/><path d="M12 8.5 V21.5"/></svg>';
+  } else {
+    iconBox.innerHTML =
+      '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>';
+  }
+
+  const label = document.createElement('span');
+  label.className = 'composer-inline-chip__label';
+  label.textContent = isSkillLike
+    ? slashDisplayLabels?.[normalizeSlashDisplayKey(name)] || stripCapabilityPrefix(name) || rawText
+    : rawText;
+
+  chip.append(iconBox, label);
+  return chip;
+}
+
+function renderSegments(
+  root: HTMLDivElement,
+  value: string,
+  slashContext?: SlashTokenContext,
+  slashDisplayLabels?: Record<string, string>,
+  plainText = false
+): void {
+  const segments: PromptSegment[] = splitPromptIntoComposerSegments(value, slashContext);
+  root.replaceChildren();
+
+  for (const segment of segments) {
+    if (segment.type === 'text') {
+      root.append(document.createTextNode(segment.text));
+      continue;
+    }
+
+    if (segment.type === 'mention') {
+      root.append(createMentionNode(segment.path, segment.text));
+      continue;
+    }
+
+    if (segment.type === 'link') {
+      root.append(plainText ? document.createTextNode(segment.text) : createLinkNode(segment.url, segment.label, segment.text));
+      continue;
+    }
+
+    root.append(createSlashNode(segment.kind, segment.name, segment.text, slashDisplayLabels));
+  }
+}
+
+function removeMentionAdjacentToCursor(
+  value: string,
+  cursorIndex: number,
+  key: 'Backspace' | 'Delete'
+): { value: string; cursorIndex: number } | null {
+  const mentions = extractProjectFileMentions(value);
+  for (const mention of mentions) {
+    if (key === 'Backspace' && cursorIndex === mention.end) {
+      return {
+        value: `${value.slice(0, mention.start)}${value.slice(mention.end)}`,
+        cursorIndex: mention.start,
+      };
+    }
+
+    if (key === 'Delete' && cursorIndex === mention.start) {
+      return {
+        value: `${value.slice(0, mention.start)}${value.slice(mention.end)}`,
+        cursorIndex: mention.start,
+      };
+    }
+  }
+
+  return null;
+}
+
+function removeLinkTokenAdjacentToCursor(
+  value: string,
+  cursorIndex: number,
+  key: 'Backspace' | 'Delete'
+): { value: string; cursorIndex: number } | null {
+  for (const token of extractKnownSiteLinkTokens(value)) {
+    if (
+      (key === 'Backspace' && cursorIndex === token.end) ||
+      (key === 'Delete' && cursorIndex === token.start)
+    ) {
+      return {
+        value: `${value.slice(0, token.start)}${value.slice(token.end)}`,
+        cursorIndex: token.start,
+      };
+    }
+  }
+
+  return null;
+}
+
+function replaceRange(
+  value: string,
+  start: number,
+  end: number,
+  text: string
+): { value: string; cursorIndex: number } {
+  const nextValue = `${value.slice(0, start)}${text}${value.slice(end)}`;
+  return {
+    value: nextValue,
+    cursorIndex: start + text.length,
+  };
+}
+
+export const ComposerPromptEditor = forwardRef<
+  ComposerPromptEditorHandle,
+  {
+    value: string;
+    cursorIndex: number;
+    onChange: (value: string, cursorIndex: number) => void;
+    onPasteText?: (context: ComposerPasteContext) => boolean | void | Promise<boolean | void>;
+    onPasteImages?: (images: ComposerPasteImage[]) => boolean | void | Promise<boolean | void>;
+    onPasteFiles?: (files: File[]) => void;
+    onPasteNativeFiles?: () => boolean;
+    onKeyDown?: (event: React.KeyboardEvent<HTMLDivElement>) => void;
+    onCompositionStart?: () => void;
+    onCompositionEnd?: () => void;
+    placeholder?: string;
+    disabled?: boolean;
+    autoFocus?: boolean;
+    className?: string;
+    slashContext?: SlashTokenContext;
+    slashDisplayLabels?: Record<string, string>;
+    /** Placement/size of the placeholder; defaults to the chat composer's inset. */
+    placeholderClassName?: string;
+  }
+>(function ComposerPromptEditor(props, ref) {
+  const plainText = useAppPreferences(s => s.plainTextComposer);
+  const lastPlainText = useRef(plainText);
+  const editorRef = useRef<HTMLDivElement | null>(null);
+  const isComposingRef = useRef(false);
+  const isApplyingSelectionRef = useRef(false);
+  const didAutoFocusRef = useRef(false);
+  const lastRenderedSlashContextRef = useRef<SlashTokenContext | undefined>(undefined);
+  const lastRenderedSlashDisplayLabelsRef = useRef<Record<string, string> | undefined>(undefined);
+  const displayHasValue = useMemo(() => props.value.length > 0, [props.value]);
+  useImperativeHandle(
+    ref,
+    () => ({
+      focus: () => {
+        editorRef.current?.focus();
+      },
+      setCursorIndex: (index: number) => {
+        if (editorRef.current) {
+          setCursorIndex(editorRef.current, index);
+        }
+      },
+      getCaretInfo: (): ComposerCaretInfo => {
+        const root = editorRef.current;
+        if (!root) {
+          return { index: 0, collapsed: true, onFirstVisualLine: null };
+        }
+        const collapsed = window.getSelection()?.isCollapsed ?? true;
+        return {
+          index: getCursorIndex(root),
+          collapsed,
+          onFirstVisualLine: collapsed ? isCaretOnFirstVisualLine(root) : null,
+        };
+      },
+    }),
+    []
+  );
+
+  useEffect(() => {
+    if (!props.autoFocus) {
+      didAutoFocusRef.current = false;
+      return;
+    }
+    if (didAutoFocusRef.current || !editorRef.current) {
+      return;
+    }
+    didAutoFocusRef.current = true;
+    editorRef.current.focus();
+    setCursorIndex(editorRef.current, props.cursorIndex);
+  }, [props.autoFocus, props.cursorIndex]);
+
+  useLayoutEffect(() => {
+    if (!editorRef.current) {
+      return;
+    }
+    if (isComposingRef.current) {
+      return;
+    }
+
+    const slashContextChanged = lastRenderedSlashContextRef.current !== props.slashContext;
+    const slashDisplayLabelsChanged =
+      lastRenderedSlashDisplayLabelsRef.current !== props.slashDisplayLabels;
+    if (
+      serializeEditorValue(editorRef.current) !== props.value ||
+      slashContextChanged ||
+      slashDisplayLabelsChanged || lastPlainText.current !== plainText
+    ) {
+      renderSegments(
+        editorRef.current,
+        props.value,
+        props.slashContext,
+        props.slashDisplayLabels,
+        plainText
+      );
+      lastPlainText.current = plainText;
+      lastRenderedSlashContextRef.current = props.slashContext;
+      lastRenderedSlashDisplayLabelsRef.current = props.slashDisplayLabels;
+    }
+
+    // Chromium does not lay out an empty line after a terminal text newline.
+    // Keep a non-serialized BR there so the native caret has a position
+    // on that line. Remove it when typing fills the line.
+    const existingTrailingBreak = editorRef.current.querySelector('[data-composer-trailing-break]');
+    if (props.value.endsWith('\n')) {
+      if (!existingTrailingBreak) {
+        const trailingBreak = document.createElement('br');
+        trailingBreak.setAttribute('data-composer-trailing-break', '');
+        editorRef.current.append(trailingBreak);
+      } else if (editorRef.current.lastChild !== existingTrailingBreak) {
+        editorRef.current.append(existingTrailingBreak);
+      }
+    } else {
+      existingTrailingBreak?.remove();
+    }
+
+    if (document.activeElement !== editorRef.current) {
+      return;
+    }
+
+    isApplyingSelectionRef.current = true;
+    setCursorIndex(editorRef.current, props.cursorIndex);
+    queueMicrotask(() => {
+      isApplyingSelectionRef.current = false;
+    });
+  }, [
+    plainText,
+    props.cursorIndex,
+    props.slashContext,
+    props.slashDisplayLabels,
+    props.value,
+  ]);
+
+  const handleInput = () => {
+    if (!editorRef.current || isApplyingSelectionRef.current) {
+      return;
+    }
+
+    const nextValue = serializeEditorValue(editorRef.current);
+    const nextCursor = getCursorIndex(editorRef.current);
+    props.onChange(nextValue, nextCursor);
+  };
+
+  const handleSelect = () => {
+    if (!editorRef.current || isApplyingSelectionRef.current) {
+      return;
+    }
+
+    const nextCursor = getCursorIndex(editorRef.current);
+    if (nextCursor !== props.cursorIndex) {
+      props.onChange(props.value, nextCursor);
+    }
+  };
+
+  const insertTextAtCursor = (text: string) => {
+    const next = replaceRange(props.value, props.cursorIndex, props.cursorIndex, text);
+    props.onChange(next.value, next.cursorIndex);
+  };
+
+  const handlePaste = (event: ClipboardEvent<HTMLDivElement>) => {
+    if (props.disabled) return;
+
+    const imageFiles: File[] = [];
+    const dt = event.clipboardData;
+    const files = Array.from(dt.files || []);
+    if (!files.length) for (const item of Array.from(dt.items || [])) {
+      if (item.kind === 'file') { const file = item.getAsFile(); if (file) files.push(file); }
+    }
+    if (files.length && props.onPasteFiles) {
+      event.preventDefault();
+      props.onPasteFiles(files);
+      return;
+    }
+    if (!files.length && props.onPasteNativeFiles?.()) {
+      event.preventDefault();
+      return;
+    }
+    if (dt) {
+      if (dt.files && dt.files.length > 0) {
+        for (let i = 0; i < dt.files.length; i += 1) {
+          const f = dt.files.item(i);
+          if (f && /^image\/(png|jpe?g|webp|gif)$/i.test(f.type)) {
+            imageFiles.push(f);
+          }
+        }
+      }
+      if (imageFiles.length === 0 && dt.items && dt.items.length > 0) {
+        for (let i = 0; i < dt.items.length; i += 1) {
+          const item = dt.items[i];
+          if (item.kind === 'file' && /^image\/(png|jpe?g|webp|gif)$/i.test(item.type)) {
+            const f = item.getAsFile();
+            if (f) imageFiles.push(f);
+          }
+        }
+      }
+    }
+
+    if (imageFiles.length > 0 && props.onPasteImages) {
+      event.preventDefault();
+      void Promise.all(
+        imageFiles.map(async (file) => ({
+          mimeType: file.type.toLowerCase(),
+          data: new Uint8Array(await file.arrayBuffer()),
+          name: file.name || undefined,
+        }))
+      ).then((images) => {
+        const handled = props.onPasteImages?.(images);
+        void handled;
+      });
+      return;
+    }
+
+    const text = event.clipboardData.getData('text/plain');
+    if (!text) return;
+    event.preventDefault();
+    const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    const context = {
+      text: normalized,
+      start: props.cursorIndex,
+      end: props.cursorIndex,
+    };
+    const handled = props.onPasteText?.(context);
+    if (handled instanceof Promise) {
+      void handled;
+      return;
+    }
+    if (handled === true) {
+      return;
+    }
+    insertTextAtCursor(normalized);
+  };
+
+  return (
+    <div className="relative">
+      {!displayHasValue && props.placeholder ? (
+        <div
+          className={`pointer-events-none absolute text-[var(--text-muted)] ${
+            props.placeholderClassName ?? 'inset-x-5 top-4 text-[14px]'
+          }`}
+        >
+          {props.placeholder}
+        </div>
+      ) : null}
+      <div
+        ref={editorRef}
+        contentEditable={!props.disabled}
+        suppressContentEditableWarning
+        role="textbox"
+        aria-multiline="true"
+        spellCheck={false}
+        className={`${props.className ?? ''} whitespace-pre-wrap break-words aegis-composer-editor [overflow-wrap:anywhere]`}
+        onInput={handleInput}
+        onPaste={handlePaste}
+        onKeyDown={(event) => {
+          if (isImeKeyboardEvent(event)) {
+            props.onKeyDown?.(event);
+            return;
+          }
+
+          if (event.key === 'Enter' && event.shiftKey && !event.metaKey && !event.ctrlKey) {
+            event.preventDefault();
+            insertTextAtCursor('\n');
+            return;
+          }
+
+          const selection = window.getSelection();
+          const collapsed = selection?.isCollapsed ?? true;
+          if (collapsed && (event.key === 'Backspace' || event.key === 'Delete')) {
+            const mentionRemoval = removeMentionAdjacentToCursor(
+              props.value,
+              props.cursorIndex,
+              event.key
+            );
+            if (mentionRemoval) {
+              event.preventDefault();
+              props.onChange(mentionRemoval.value, mentionRemoval.cursorIndex);
+              return;
+            }
+
+            const linkRemoval = removeLinkTokenAdjacentToCursor(
+              props.value,
+              props.cursorIndex,
+              event.key
+            );
+            if (linkRemoval && !plainText) {
+              event.preventDefault();
+              props.onChange(linkRemoval.value, linkRemoval.cursorIndex);
+              return;
+            }
+
+            if (props.slashContext) {
+              const slashRemoval = removeLeadingSlashTokenAdjacentToCursor(
+                props.value,
+                props.cursorIndex,
+                event.key,
+                props.slashContext
+              );
+              if (slashRemoval) {
+                event.preventDefault();
+                props.onChange(slashRemoval.value, slashRemoval.cursorIndex);
+                return;
+              }
+            }
+          }
+
+          props.onKeyDown?.(event);
+          if (event.key === 'Enter' && !event.defaultPrevented) {
+            event.preventDefault();
+            insertTextAtCursor('\n');
+          }
+        }}
+        onMouseUp={handleSelect}
+        onKeyUp={handleSelect}
+        onFocus={() => {
+          if (editorRef.current) {
+            setCursorIndex(editorRef.current, props.cursorIndex);
+          }
+        }}
+        onCompositionStart={() => {
+          isComposingRef.current = true;
+          props.onCompositionStart?.();
+        }}
+        onCompositionEnd={() => {
+          isComposingRef.current = false;
+          props.onCompositionEnd?.();
+          handleInput();
+        }}
+      />
+    </div>
+  );
+});

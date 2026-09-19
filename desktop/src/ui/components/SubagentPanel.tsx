@@ -1,0 +1,314 @@
+import { useMemo } from 'react';
+import { useAppStore } from '../store/useAppStore';
+import { Loader2, MessageSquare } from './icons';
+import type { StreamMessage, ToolStatus } from '../types';
+import {
+  getMessageContentBlocks,
+  normalizeToolUseBlock,
+  normalizeToolResultBlock,
+} from '../utils/message-content';
+import {
+  type ToolResultBlock,
+  formatDelegateModelDisplay,
+  getDelegateCallInfo,
+  groupSubagentMessagesByParent,
+  isSessionEffectivelyBusy,
+} from '../utils/workstream';
+import { ProviderIcon } from './AgentModelPicker';
+import type { AgentProvider } from '../../shared/types';
+import { deriveTranscriptTimelineItems } from '../utils/transcript-timeline';
+import { deriveSubagentSummaries, type SubagentSummary } from '../utils/subagent-registry';
+import { buildSubagentChangeSummary } from '../utils/turn-change-records';
+import { MessageCard } from './MessageCard';
+import { ToolExecutionBatch } from './ToolExecutionBatch';
+import { SubagentAvatar } from './SubagentAvatar';
+import { TurnChangesCard } from './TurnChangesCard';
+
+/** Live elapsed / final duration, human-friendly. */
+function formatDuration(ms: number | undefined): string {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m ${s % 60}s`;
+}
+
+type SubagentDisplayState = 'running' | 'done' | 'error' | 'frozen';
+
+function displayState(summary: SubagentSummary, sessionRunning: boolean): SubagentDisplayState {
+  if (summary.status === 'success') return 'done';
+  if (summary.status === 'error') return 'error';
+  if (summary.status === 'interrupted') return 'frozen';
+  // pending: live while the session runs; once the turn is over a still-
+  // pending subagent has been backgrounded — its trace is frozen (the CLI
+  // stops forwarding messages after a Task backgrounds itself).
+  return sessionRunning ? 'running' : 'frozen';
+}
+
+function StatusDot({ state }: { state: SubagentDisplayState }) {
+  const color =
+    state === 'running'
+      ? 'var(--accent)'
+      : state === 'error'
+        ? 'var(--danger, #e5484d)'
+        : state === 'frozen'
+          ? 'var(--text-muted)'
+          : 'var(--success, #30a46c)';
+  return (
+    <span
+      className="inline-block h-2 w-2 flex-shrink-0 rounded-full"
+      style={{ backgroundColor: color, boxShadow: state === 'running' ? `0 0 0 3px color-mix(in srgb, ${color} 25%, transparent)` : undefined }}
+    />
+  );
+}
+
+/**
+ * Read-only detail view for ONE subagent — each subagent gets its own
+ * top-level utility tab (`subagent:<id>`), so there is no internal switcher
+ * here; the strip tab IS the switcher. No composer — following up goes to the
+ * MAIN agent via a visible quote injected into the main composer, because the
+ * SDK cannot address a running/finished subagent directly.
+ */
+export function SubagentPanel({
+  collapsed,
+  sessionId,
+  subagentId,
+}: {
+  collapsed: boolean;
+  sessionId: string | null;
+  subagentId: string;
+}) {
+  const session = useAppStore((s) => (sessionId ? s.sessions[sessionId] ?? null : null));
+  const requestChatInjection = useAppStore((s) => s.requestChatInjection);
+
+  // includeNested: a delegated agent's own spawns are nested lanes in its
+  // panel — clicking one opens a panel for the nested id, which must resolve
+  // here even though it is not a top-level tab.
+  const summaries = useMemo(
+    () => (session ? deriveSubagentSummaries(session.messages, { includeNested: true }) : []),
+    [session?.messages]
+  );
+
+  const selected = summaries.find((s) => s.id === subagentId) ?? null;
+  const selectedId = selected?.id ?? null;
+
+  const { toolStatusMap, toolResultsMap } = useMemo(() => {
+    const statusMap = new Map<string, ToolStatus>();
+    const resultsMap = new Map<string, ToolResultBlock>();
+    if (!session) return { toolStatusMap: statusMap, toolResultsMap: resultsMap };
+    for (const msg of session.messages) {
+      if (msg.type !== 'assistant' && msg.type !== 'user') continue;
+      for (const block of getMessageContentBlocks(msg)) {
+        const use = normalizeToolUseBlock(block);
+        if (use) {
+          if (!statusMap.has(use.id)) statusMap.set(use.id, 'pending');
+          continue;
+        }
+        const result = normalizeToolResultBlock(block);
+        if (result) {
+          statusMap.set(result.tool_use_id, result.is_error ? 'error' : 'success');
+          resultsMap.set(result.tool_use_id, {
+            type: 'tool_result',
+            tool_use_id: result.tool_use_id,
+            content: result.content,
+            displayContent: result.displayContent,
+            is_error: result.is_error,
+            ...(result.images ? { images: result.images } : {}),
+            ...(result.mediaRefs ? { mediaRefs: result.mediaRefs } : {}),
+          });
+        }
+      }
+    }
+    return { toolStatusMap: statusMap, toolResultsMap: resultsMap };
+  }, [session?.messages]);
+
+  const subagentMessagesByParent = useMemo(
+    () => (session ? groupSubagentMessagesByParent(session.messages) : new Map<string, StreamMessage[]>()),
+    [session?.messages]
+  );
+
+  // Effectively busy, not raw status: Claude background subagents keep
+  // streaming after the main result flips the session to 'completed', so a
+  // pending Task in the latest turn is still LIVE (not backgrounded/frozen).
+  const sessionRunning = session
+    ? isSessionEffectivelyBusy(session.status, session.messages)
+    : false;
+
+  // This subagent's own file changes, shown once its Task resolved (a running
+  // subagent's records are still moving; a frozen one may never finish).
+  const selectedFinished = selected?.status === 'success' || selected?.status === 'error';
+  const changeSummary = useMemo(() => {
+    if (!selectedId || !selectedFinished) return null;
+    return buildSubagentChangeSummary(subagentMessagesByParent.get(selectedId) ?? []);
+  }, [selectedId, selectedFinished, subagentMessagesByParent]);
+
+  // Live only while THIS subagent's spawn call is unresolved — the session
+  // may stay busy on other lanes long after this trace finished.
+  const selectedRunning = Boolean(selected && selected.status === 'pending' && sessionRunning);
+
+  const timelineItems = useMemo(() => {
+    if (!session || !selectedId) return [];
+    return deriveTranscriptTimelineItems(session.messages, {
+      subagentScopeId: selectedId,
+      sessionRunning: selectedRunning,
+      // The scoped trace is ONE live turn. Without an active-turn anchor the
+      // collapse pass promotes the trailing text to a tentative "answer" on
+      // every new message and demotes it again when more activity follows —
+      // narration visibly jumps around the tool chips (the main transcript
+      // got the same fix via its real activeTurnStartIndex). Anchoring at -1
+      // keeps live narration in chronological order inside the work region;
+      // the closing text presents as the answer once the trace settles.
+      activeTurnStartIndex: -1,
+    });
+  }, [session?.messages, selectedId, selectedRunning]);
+
+  // Cross-agent delegations show the target agent's provider logo instead of
+  // the pixel avatar, plus the model it runs — find the anchoring
+  // delegate_task tool_use for agent + requested model/effort; the effective
+  // model comes from the mirrored messages' sourceModel (the child runtime's
+  // init reports what it actually resolved, e.g. codex's config default).
+  const delegateInfo = useMemo(() => {
+    if (!session || !selectedId) return null;
+    for (const message of session.messages) {
+      if (message.type !== 'assistant' || message.parentToolUseId) continue;
+      for (const block of getMessageContentBlocks(message)) {
+        const use = normalizeToolUseBlock(block);
+        if (use?.id === selectedId) {
+          return getDelegateCallInfo(block);
+        }
+      }
+    }
+    return null;
+  }, [session?.messages, selectedId]);
+  const delegateAgent = (delegateInfo?.agent ?? null) as AgentProvider | null;
+  const delegateModelLabel = useMemo(() => {
+    if (!delegateInfo || !selectedId) return '';
+    let actualModel: string | null = null;
+    for (const child of subagentMessagesByParent.get(selectedId) ?? []) {
+      const model = (child as { sourceModel?: string | null }).sourceModel;
+      if (typeof model === 'string' && model.trim()) {
+        actualModel = model.trim();
+        break;
+      }
+    }
+    return formatDelegateModelDisplay(actualModel ?? delegateInfo.model, delegateInfo.reasoningEffort);
+  }, [delegateInfo, selectedId, subagentMessagesByParent]);
+
+  if (collapsed) return null;
+
+  const state = selected ? displayState(selected, Boolean(sessionRunning)) : 'done';
+
+  const handleFollowUp = () => {
+    if (!selected || !sessionId) return;
+    const label = selected.persona.functionalName;
+    // A VISIBLE, editable quote in the MAIN composer — not a hidden prefix and
+    // not a fake per-subagent input. The user sees exactly what will be sent.
+    requestChatInjection({
+      sessionId,
+      text: `About the "${label}" subagent's work: `,
+      mode: 'append',
+      source: 'subagent-panel',
+    });
+  };
+
+  return (
+    <div
+      className="absolute inset-0 flex min-h-0 flex-col bg-[var(--bg-primary)]"
+      data-subagent-panel
+    >
+      {/* This subagent's transcript — the strip tab is the switcher */}
+      {selected ? (
+        <>
+          <div className="flex flex-shrink-0 items-center justify-between gap-2 border-b border-[var(--border)] px-3 py-2 text-xs text-[var(--text-muted)]">
+            <div className="flex min-w-0 items-center gap-2">
+              {delegateAgent ? (
+                <ProviderIcon provider={delegateAgent} />
+              ) : (
+                <SubagentAvatar id={selected.id} hue={selected.persona.colorHue} size={14} />
+              )}
+              <StatusDot state={state} />
+              <span
+                className="min-w-0 truncate text-[var(--text-secondary)]"
+                title={selected.persona.functionalName}
+              >
+                {selected.persona.functionalName}
+              </span>
+              {delegateModelLabel ? (
+                <span className="flex-shrink-0 rounded bg-[var(--bg-tertiary)] px-1.5 py-0.5 text-[11px] text-[var(--text-muted)]">
+                  {delegateModelLabel}
+                </span>
+              ) : null}
+              <span className="flex-shrink-0">
+                {state === 'running' ? 'Running' : state === 'error' ? 'Failed' : state === 'frozen' ? 'Backgrounded' : 'Done'}
+                {typeof selected.durationMs === 'number' ? ` · ${formatDuration(selected.durationMs)}` : ''}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={handleFollowUp}
+              className="inline-flex items-center gap-1 rounded-md border border-[var(--border)] px-2 py-1 text-[var(--text-secondary)] transition-colors hover:bg-[var(--sidebar-item-hover)] hover:text-[var(--text-primary)]"
+              title="Subagents can't be messaged directly — this prefills a quote in the main chat, and the main agent decides whether to spawn a follow-up task"
+            >
+              <MessageSquare className="h-3 w-3" />
+              Follow up in main chat
+            </button>
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-4">
+            {timelineItems.length === 0 ? (
+              <div className="mt-6 text-center text-xs text-[var(--text-muted)]">
+                {state === 'running' ? 'Subagent starting…' : 'No activity to show yet.'}
+              </div>
+            ) : (
+              timelineItems.map((item, idx) =>
+                item.type === 'work' ? (
+                  <ToolExecutionBatch
+                    key={item.group.id}
+                    messages={item.group.messages}
+                    toolStatusMap={toolStatusMap}
+                    toolResultsMap={toolResultsMap}
+                    isSessionRunning={Boolean(sessionRunning)}
+                    // The panel's work groups are visual clusters of ONE live
+                    // trace, not per-turn batches: while the trace is live, an
+                    // unresolved tool anywhere in it is still RUNNING (parallel
+                    // spawns resolve out of order) — with isLastBatch=false
+                    // they all froze as "interrupted" until results landed.
+                    isLastBatch={true}
+                    subagentMessagesByParent={subagentMessagesByParent}
+                    defaultExpanded
+                    resetKey={`${selected.id}:${item.group.id}`}
+                  />
+                ) : (
+                  <MessageCard
+                    key={`sub-${selected.id}-${item.originalIndex}-${idx}`}
+                    sessionId={sessionId}
+                    message={item.message}
+                    toolStatusMap={toolStatusMap}
+                    toolResultsMap={toolResultsMap}
+                    subagentMessagesByParent={subagentMessagesByParent}
+                  />
+                )
+              )
+            )}
+            {changeSummary ? <TurnChangesCard summary={changeSummary} /> : null}
+            {state === 'frozen' ? (
+              <div className="mt-3 rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] px-3 py-2 text-xs text-[var(--text-muted)]">
+                This subagent moved to the background — further progress is not streamed here. Its final result will be reported back to the agent that spawned it.
+              </div>
+            ) : null}
+            {state === 'running' ? (
+              <div className="mt-3 flex items-center gap-2 text-xs text-[var(--text-muted)]">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Running…
+              </div>
+            ) : null}
+          </div>
+        </>
+      ) : (
+        <div className="flex min-h-0 flex-1 items-center justify-center px-6 text-center text-xs text-[var(--text-muted)]">
+          This subagent isn't part of the current session — switch back to its original session to view it.
+        </div>
+      )}
+    </div>
+  );
+}
