@@ -306,13 +306,15 @@ export class TasksPaneComponent implements Component {
     this.callbacks.onRender();
   }
 
-  render(width: number): string[] {
-    const terminalRows = this.getTerminalRows();
-    if (terminalRows < 12) {
-      this.lastRows = [];
-      this.allRows = [];
-      return [];
-    }
+  /**
+   * Advance open/history state from the latest snapshot. Both the status bar
+   * and the pane call this before rendering: the bar is laid out first, so a
+   * transition made only inside the pane's render would leave the bar one
+   * frame behind — forever, when nothing is animating to trigger a redraw.
+   * Idempotent per snapshot (it compares against the last values it saw).
+   */
+  syncState(): void {
+    if (this.getTerminalRows() < 12) return;
     const activeCount = this.activeCount();
     // A new run, or activity starting from idle, ends the history view. The
     // run boundary matters on its own: with a task still running the count
@@ -348,6 +350,16 @@ export class TasksPaneComponent implements Component {
       }
     }
     this.lastActiveCount = activeCount;
+  }
+
+  render(width: number): string[] {
+    const terminalRows = this.getTerminalRows();
+    if (terminalRows < 12) {
+      this.lastRows = [];
+      this.allRows = [];
+      return [];
+    }
+    this.syncState();
     if (!this.open) {
       this.lastRows = [];
       this.allRows = [];
@@ -494,6 +506,7 @@ export class TaskStatusBarComponent implements Component {
 
   render(width: number): string[] {
     if (!this.pane.isAvailable()) return [];
+    this.pane.syncState();
     const count = this.pane.activeCount();
     // Closed, the bar advertises everything Ctrl+G will reveal; open, it must
     // match the rows actually listed (a focused settle keeps only this turn's).

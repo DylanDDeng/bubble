@@ -237,8 +237,8 @@ describe("Grok-style Tasks Pane", () => {
     };
     const statusBar = new TaskStatusBarComponent(pane);
     const screen = () => {
-      const body = pane.render(100); // render first: it drives open/close
-      return [...statusBar.render(100), ...body].join("\n").replace(/\x1b\[[0-9;]*m/g, "");
+      // Same order as the app layout: the status bar is rendered first.
+      return [...statusBar.render(100), ...pane.render(100)].join("\n").replace(/\x1b\[[0-9;]*m/g, "");
     };
     return { pane, state, spawn, screen };
   }
@@ -384,6 +384,28 @@ describe("Grok-style Tasks Pane", () => {
     spawn("Carl", 2_100);
     expect(screen()).toContain("Carl");
     expect(pane.isOpen()).toBe(true);
+    pane.dispose();
+  });
+
+  it("keeps the status bar in step with the pane within one frame (the bar is laid out first)", () => {
+    const { pane, state, spawn, screen } = turnPane();
+    const sophie = spawn("Sophie", 1_100);
+    // First frame of new activity: the bar already shows the pane as open.
+    expect(screen()).toContain("▾ ⠋ 1 background activity");
+
+    sophie.status = "completed";
+    // The frame in which everything settles: collapsed marker, no body.
+    const settled = screen();
+    expect(settled).toContain("▸ ✓ 1 completed activity");
+    expect(settled).not.toContain("▾");
+
+    pane.toggle(true);
+    screen();
+    pane.focused = false;
+    state.turnStartedAt = 2_000; // idle history cleared by a turn that launches nothing
+    const cleared = screen();
+    expect(cleared).toContain("▸ ✓ 1 completed activity");
+    expect(cleared).not.toContain("▾");
     pane.dispose();
   });
 
