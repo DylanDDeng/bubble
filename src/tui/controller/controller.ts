@@ -175,7 +175,10 @@ export class BubbleTuiController {
         this.transcript = landTaskLifecycles(transcript, restoredTaskLifecycles(manager));
         this.queue.queued.length = 0;
         this.liveStreamVisible = false;
-        this.runState = null;
+this.runState = null;
+        // Session-scoped: the restored session has not started a run, so none
+        // of its subagents or tasks belong to a "current turn".
+        this.turnStartedAt = undefined;
         this.activeInputController = null;
         this.activeAbortController = null;
         this.commandActivity = null;

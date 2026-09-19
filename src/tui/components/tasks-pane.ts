@@ -210,6 +210,7 @@ export class TasksPaneComponent implements Component {
   private selectedId?: string;
   private hoveredId?: string;
   private lastActiveCount = 0;
+  private lastTurnStartedAt: number | undefined;
   private lastRows: RenderRow[] = [];
   private allRows: RenderRow[] = [];
   private frame = 0;
@@ -249,14 +250,18 @@ export class TasksPaneComponent implements Component {
     return Object.values(items).flat().filter((item) => isActive(item.status)).length;
   }
 
-  private visibleCount(): number {
+  visibleCount(): number {
     return Object.values(normalize(this.getSnapshot(), this.showHistory)).flat().length;
   }
 
-  /** Finished rows the pane lists next to the running ones, by outcome. */
+  /**
+   * Finished rows the pane lists next to the running ones, by outcome. Counted
+   * in the pane's current view, history included when it is showing, so the
+   * header never reports fewer rows than the list holds.
+   */
   settledCounts(): { done: number; failed: number; stopped: number } {
     const counts = { done: 0, failed: 0, stopped: 0 };
-    for (const item of Object.values(normalize(this.getSnapshot(), false)).flat()) {
+    for (const item of Object.values(normalize(this.getSnapshot(), this.showHistory)).flat()) {
       if (isActive(item.status)) continue;
       if (item.status === "failed" || item.status === "blocked") counts.failed += 1;
       else if (item.status === "cancelled" || item.status === "killed") counts.stopped += 1;
@@ -309,12 +314,17 @@ export class TasksPaneComponent implements Component {
       return [];
     }
     const activeCount = this.activeCount();
-    if (activeCount > 0 && this.lastActiveCount === 0) {
-      // A user who is browsing history inside the pane keeps their rows; the
-      // view resets when they close it.
-      if (!this.focused) this.showHistory = false;
-      if (!this.manuallyClosed) this.open = true;
-    }
+    // A new run, or activity starting from idle, ends the history view. The
+    // run boundary matters on its own: with a task still running the count
+    // never crosses zero, and new work would otherwise keep listing history.
+    // A user who is browsing history inside the pane keeps their rows; the
+    // view resets when they close it.
+    const turnStartedAt = this.getSnapshot().turnStartedAt;
+    const newTurn = turnStartedAt !== this.lastTurnStartedAt;
+    this.lastTurnStartedAt = turnStartedAt;
+    const activityFromIdle = activeCount > 0 && this.lastActiveCount === 0;
+    if ((newTurn || activityFromIdle) && !this.focused) this.showHistory = false;
+    if (activityFromIdle && !this.manuallyClosed) this.open = true;
     if (activeCount === 0 && this.lastActiveCount > 0) {
       if (this.focused) {
         // A user who is already inspecting the pane should see the final
@@ -476,8 +486,10 @@ export class TaskStatusBarComponent implements Component {
   render(width: number): string[] {
     if (!this.pane.isAvailable()) return [];
     const count = this.pane.activeCount();
-    const total = this.pane.totalCount();
-    if (total === 0 && !this.pane.isOpen()) return [];
+    // Closed, the bar advertises everything Ctrl+G will reveal; open, it must
+    // match the rows actually listed (a focused settle keeps only this turn's).
+    const total = this.pane.isOpen() ? this.pane.visibleCount() : this.pane.totalCount();
+    if (this.pane.totalCount() === 0 && !this.pane.isOpen()) return [];
     const marker = this.pane.isOpen() ? "▾" : "▸";
     const theme = this.pane.theme();
     // The list below also holds this turn's finished rows; say so, or the

@@ -344,6 +344,61 @@ describe("Grok-style Tasks Pane", () => {
     pane.dispose();
   });
 
+  it("ends the history view on a new turn even when the active count never reaches zero", () => {
+    const { pane, state, spawn, screen } = turnPane();
+    const old = spawn("Oldie", 100);
+    old.status = "completed";
+    state.tasks.push({ kind: "task", id: "task_0001", command: "npm run dev", cwd: "/", status: "running", startedAt: 500, outputTruncated: false, outputLines: 0 });
+    pane.focused = true;
+    screen();
+    pane.handleInput("h"); // history on while the task runs
+    expect(screen()).toContain("Oldie");
+    pane.focused = false; // Escape: back to the composer, pane still open
+
+    state.turnStartedAt = 2_000;
+    spawn("Carl", 2_100); // active count goes 1 -> 2, never through 0
+    const output = screen();
+    expect(output).toContain("Carl");
+    expect(output).not.toContain("Oldie");
+    pane.dispose();
+  });
+
+  it("counts the outcomes of the rows it lists, history included", () => {
+    const { pane, state, spawn, screen } = turnPane();
+    const old = spawn("Oldie", 100);
+    old.status = "failed";
+    spawn("Bjarne", 1_200);
+    pane.focused = true;
+    screen();
+    pane.handleInput("h");
+
+    const output = screen();
+    expect(output).toContain("× Oldie");
+    expect(output).toContain("1 background activity · 1 failed · Ctrl+G");
+    expect(state.members).toHaveLength(2);
+    pane.dispose();
+  });
+
+  it("reports the listed rows, not the whole session, after a focused turn settles", () => {
+    const { pane, spawn, screen } = turnPane();
+    for (const name of ["Old1", "Old2", "Old3"]) spawn(name, 100).status = "completed";
+    const bjarne = spawn("Bjarne", 1_200);
+    pane.focused = true;
+    screen();
+    bjarne.status = "completed";
+
+    const output = screen();
+    expect(output).toContain("✓ Bjarne");
+    expect(output).not.toContain("Old1");
+    expect(output).toContain("1 completed activity · Ctrl+G");
+
+    // Closed again, the bar advertises everything Ctrl+G will reveal.
+    pane.focused = false;
+    pane.close();
+    expect(screen()).toContain("4 completed activities · Ctrl+G");
+    pane.dispose();
+  });
+
   it("keeps lifecycle echoes out of transcript while retaining launch history", () => {
     const launch: DisplayToolCall = {
       id: "launch",

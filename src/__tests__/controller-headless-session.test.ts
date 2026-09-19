@@ -831,6 +831,24 @@ describe("BubbleTuiController headless session", () => {
     });
   });
 
+  it("clears the run boundary on a session switch: the restored session has no current turn", async () => {
+    const { agent, controller, host } = makeController();
+    agent.run = async function* (): AsyncIterable<AgentEvent> {
+      yield { type: "turn_start" };
+    };
+    await controller.runTurn("hi", "/cwd");
+    expect(controller.getTurnStartedAt()).toBeDefined();
+
+    host.ports.sessionHost.switchSession = () => {
+      agent.messages = [{ role: "system", content: "system" }];
+      return {
+        manager: { getSessionFile: () => "/next.jsonl", getMetadata: () => ({}), appendMessage: () => {} },
+      } as never;
+    };
+    expect(controller.switchSession({ targetFile: "/next.jsonl" }).ok).toBe(true);
+    expect(controller.getTurnStartedAt()).toBeUndefined();
+  });
+
   it("creates a fresh session through the same lifecycle and leaves an empty transcript", () => {
     const { agent, controller, host } = makeController();
     controller.appendDisplayMessage({ key: "old", role: "assistant", content: "old answer" });
