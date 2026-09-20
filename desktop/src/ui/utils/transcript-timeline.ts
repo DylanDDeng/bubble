@@ -388,7 +388,12 @@ function collapseTurnWorkBeforeAnswer(
   if (answerVisibleIndex >= 0) {
     visibleItems.splice(answerVisibleIndex, 0, workItem);
   } else {
-    visibleItems.push(workItem);
+    // A failed turn without a final answer still ends with its failure notice.
+    // Keep the collected thinking/tool work before that terminal message.
+    const failureIndex = visibleItems.findIndex(
+      item => item.type === 'message' && item.message.type === 'turn_failure'
+    );
+    visibleItems.splice(failureIndex >= 0 ? failureIndex : visibleItems.length, 0, workItem);
   }
 
   return visibleItems;

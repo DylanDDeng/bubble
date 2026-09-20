@@ -1682,6 +1682,12 @@ export interface AvailableCommand {
 export type StreamMessage =
   | (StreamMessageBase & { type: 'user_prompt'; prompt: string; attachments?: Attachment[] })
   | (StreamMessageBase & {
+      /** Desktop-only failure history, never submitted to the model. */
+      type: 'turn_failure';
+      uuid: string;
+      error: string;
+    })
+  | (StreamMessageBase & {
       /** Durable, native completion metadata; never sent to the model as a prompt. */
       type: 'goal_completed';
       uuid: string;

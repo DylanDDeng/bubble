@@ -104,6 +104,9 @@ export function MessageCard({
       // user 消息里的 tool_result 已经被工作流批次吸收，单独渲染没意义
       return null;
 
+    case 'turn_failure':
+      return <TurnFailureNotice error={message.error} />;
+
     case 'result':
       // Hide session summary (duration/cost/tokens) to avoid confusing pricing across providers.
       return null;
@@ -115,6 +118,15 @@ export function MessageCard({
     default:
       return null;
   }
+}
+
+export function TurnFailureNotice({ error }: { error?: string }) {
+  return (
+    <div role="status" data-turn-failure className="my-3 text-[13px] text-[var(--text-secondary)]">
+      <div className="text-[var(--error)]">This turn did not finish.</div>
+      <div className="whitespace-pre-wrap break-words">{error || 'The connection ended before completion. Send a message to continue.'}</div>
+    </div>
+  );
 }
 
 function formatCompactTokens(value: number): string {

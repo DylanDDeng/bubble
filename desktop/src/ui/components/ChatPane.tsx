@@ -23,7 +23,7 @@ import {
 } from '../utils/message-content';
 import { deriveTranscriptTimelineItems } from '../utils/transcript-timeline';
 import { resolveCodexModel } from '../utils/codex-model';
-import { AssistantCopyAction, MessageCard, getAssistantMarkdownToCopy } from './MessageCard';
+import { AssistantCopyAction, MessageCard, TurnFailureNotice, getAssistantMarkdownToCopy } from './MessageCard';
 import { ChatOutlineRail } from './ChatOutlineRail';
 import { JumpToLatestButton } from './JumpToLatestButton';
 import { SessionTitleActions } from './SessionTitleActions';
@@ -2220,10 +2220,9 @@ export function ChatPane({
                 </div>
               )}
 
-              {session.status === 'error' && <div role="status" data-turn-failure className="my-3 text-[13px] text-[var(--text-secondary)]">
-                <div className="text-[var(--error)]">This turn did not finish.</div>
-                <div>{session.lastTurnError || 'The connection ended before completion. Send a message to continue.'}</div>
-              </div>}
+              {session.status === 'error' &&
+                !session.messages.slice(lastUserPromptIndex + 1).some(message => message.type === 'turn_failure') &&
+                <TurnFailureNotice error={session.lastTurnError} />}
 
               {/* Only show the idle activity label when no trace or final answer owns it. */}
               {(() => {

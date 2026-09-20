@@ -78,6 +78,7 @@
     "verify:reasoning-picker": "node scripts/tests/reasoning-picker-electron.test.mjs",
     "verify:codex-reasoning": "npm run transpile:electron && npx tsx scripts/tests/codex-reasoning-effort.test.ts && node scripts/tests/codex-reasoning-catalog.test.cjs",
     "verify:session-handoff": "npm run transpile:electron && node scripts/verify-session-handoff.mjs",
+    "verify:turn-failure-history": "npm run transpile:electron && tsx scripts/tests/turn-failure-timeline.test.ts && node scripts/launch-electron.mjs scripts/tests/turn-failure-persistence.cjs && node scripts/tests/failed-turn-retry-electron.test.mjs",
     "verify:claude-plan-slash": "npx tsx scripts/tests/claude-plan-slash-command.test.ts",
     "verify:picker-menu-side": "node scripts/verify-picker-menu-side.mjs",
     "verify:session-pull-requests": "npm run transpile:electron && node scripts/tests/session-pull-requests-electron.test.mjs",
