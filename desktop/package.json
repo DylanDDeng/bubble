@@ -13,7 +13,7 @@
     "transpile:electron": "tsc -p src/electron/tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "node scripts/sync-bubble-sdk.mjs && npm run typecheck && npm run transpile:electron && vite build",
-    "test": "npm run verify:theme-variables && npm run verify:workstream-stages && npm run verify:workstream-preamble-order && npm run verify:workstream-duration && npm run verify:board-task-semantics && npm run verify:composer-agent-selection && npm run verify:session-history && npm run verify:bubble-subagent && npm run verify:bubble-sdk-adapter && npm run verify:bubble-model-catalog && npm run verify:bubble-runtime && npm run verify:renderer-state-memory && npm run verify:project-tree-refresh && npm run verify:data-isolation && npm run verify:bubble-oauth",
+    "test": "npm run verify:theme-variables && tsx scripts/tests/activity-units.test.ts && npm run verify:workstream-stages && npm run verify:workstream-preamble-order && npm run verify:workstream-duration && npm run verify:board-task-semantics && npm run verify:composer-agent-selection && npm run verify:session-history && npm run verify:bubble-subagent && npm run verify:bubble-sdk-adapter && npm run verify:bubble-model-catalog && npm run verify:bubble-runtime && npm run verify:renderer-state-memory && npm run verify:project-tree-refresh && npm run verify:data-isolation && npm run verify:bubble-oauth && npm run verify:bubble-context",
     "verify:subagent-panel": "node scripts/verify-subagent-panel.mjs",
     "verify:design-mode": "node scripts/verify-design-mode.mjs",
     "verify:image-studio": "npx tsx scripts/tests/image-studio.test.ts && node scripts/tests/image-studio-electron.test.mjs",
@@ -78,6 +78,7 @@
     "verify:reasoning-picker": "node scripts/tests/reasoning-picker-electron.test.mjs",
     "verify:codex-reasoning": "npm run transpile:electron && npx tsx scripts/tests/codex-reasoning-effort.test.ts && node scripts/tests/codex-reasoning-catalog.test.cjs",
     "verify:session-handoff": "npm run transpile:electron && node scripts/verify-session-handoff.mjs",
+    "verify:turn-failure-history": "npm run transpile:electron && tsx scripts/tests/turn-failure-timeline.test.ts && node scripts/launch-electron.mjs scripts/tests/turn-failure-persistence.cjs && node scripts/tests/failed-turn-retry-electron.test.mjs",
     "verify:claude-plan-slash": "npx tsx scripts/tests/claude-plan-slash-command.test.ts",
     "verify:picker-menu-side": "node scripts/verify-picker-menu-side.mjs",
     "verify:session-pull-requests": "npm run transpile:electron && node scripts/tests/session-pull-requests-electron.test.mjs",
@@ -89,7 +90,7 @@
     "verify:pi-sdk-adapter": "node scripts/verify-pi-sdk-adapter.mjs",
     "verify:bubble-sdk-adapter": "node scripts/verify-bubble-sdk-adapter.mjs",
     "verify:bubble-model-catalog": "npm run transpile:electron && node scripts/launch-electron.mjs scripts/tests/bubble-model-catalog.cjs && node scripts/launch-electron.mjs scripts/tests/bubble-model-catalog-integration.cjs",
-    "verify:bubble-subagent": "npx tsx scripts/tests/bubble-subagent-protocol.test.ts && npx tsx scripts/tests/bubble-subagent-lifecycle-view.test.ts",
+    "verify:bubble-subagent": "npx tsx scripts/tests/bubble-subagent-protocol.test.ts && npx tsx scripts/tests/bubble-subagent-lifecycle-view.test.ts && node scripts/tests/bubble-subagent-visibility-electron.test.mjs",
     "verify:qoder-sdk-adapter": "npm run transpile:electron && node scripts/verify-qoder-sdk-adapter.mjs",
     "verify:deepseek-sdk-adapter": "npm run transpile:electron && node scripts/verify-deepseek-sdk-adapter.mjs && npx tsx scripts/tests/deepseek-subagent-trace.test.ts",
     "verify:deepseek-key-source": "npx tsx scripts/tests/deepseek-key-source.test.ts",
@@ -119,7 +120,10 @@
     "dev:qa": "node scripts/dev.mjs --qa",
     "verify:data-isolation": "npm run transpile:electron && node --test scripts/tests/desktop-data-isolation.test.cjs && node scripts/launch-electron.mjs scripts/tests/desktop-data-isolation-runtime.cjs",
     "verify:bubble-oauth": "npm run transpile:electron && node scripts/launch-electron.mjs scripts/tests/bubble-oauth-runtime.cjs",
-    "package:local": "npm run build && node scripts/package-local.mjs"
+    "package:local": "npm run build && node scripts/package-local.mjs",
+    "verify:codex-trace": "tsx scripts/tests/activity-units.test.ts && npm run verify:workstream-ui && npm run verify:bubble-subagent && npm run verify:workstream-preamble-order && npm run verify:workstream-duration",
+    "verify:bubble-context": "npm run transpile:electron && tsx scripts/tests/bubble-context.test.ts && node scripts/tests/bubble-context-electron.test.mjs",
+    "verify:codex-trace-reference": "tsx scripts/tests/codex-trace-reference.test.ts"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.65.0",

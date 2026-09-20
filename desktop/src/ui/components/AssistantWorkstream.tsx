@@ -1,8 +1,8 @@
-import { SubagentActivity } from './SubagentActivity';
+import { activeActivityLabel, buildActivityStages, buildActivityUnits, getActivityHeader, hasActivityDetail, isActivityPending, reasoningHeading } from '../utils/activity-units';
 import { shortChildTask } from '../utils/bubble-subagent-view';
 import { useWorkstreamDisclosure } from './WorkstreamDisclosureState';
 import { ToolResultContent, ToolOutputPanel } from './ToolResultContent';
-import { WorkstreamActivityLabel, WorkstreamCollapse, WorkstreamScrollArea } from './WorkstreamPrimitives';
+import { ActivityAnimationScope, ActivityDisclosureHeader, ActivitySummary, WorkstreamActivityLabel, WorkstreamCollapse, WorkstreamScrollArea } from './WorkstreamPrimitives';
 import { AttachmentPreviewGrid } from './AttachmentPreviewGrid';
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -10,14 +10,16 @@ import {
   CircleDashed,
   CircleX,
   FileDiff,
-  FolderSearch,
+  Search,
   Globe,
   Brain,
+  Books,
+  FolderOpen,
+  FolderSearch,
   Plug,
   LoaderCircle,
   ShieldAlert,
   SquareTerminal,
-  Workflow,
 } from './icons';
 import { useAppStore } from '../store/useAppStore';
 import {
@@ -25,7 +27,6 @@ import {
   type ToolUseBlock,
   type WorkstreamEntry,
   type WorkstreamModel,
-  getDelegateAgentFromBlock,
   getToolInputContent,
   getToolInputFilePath,
   getToolInputNewText,
@@ -51,6 +52,8 @@ import {
   getStageChangeRecords,
   getWorkstreamFailureCount,
   getWorkstreamStageActivityKind,
+  getExplorationPresentation,
+  getWorkstreamSummaryIconStage,
   formatWorkstreamStageSummary,
   summarizeWorkstreamEntries,
   type WorkstreamStage,
@@ -60,13 +63,12 @@ import {
 import { FileTypeIcon } from './FileTypeIcon';
 import { SubagentAvatar } from './SubagentAvatar';
 import { getSubagentPersona } from '../utils/subagent-persona';
-import { ProviderIcon } from './AgentModelPicker';
-import type { AgentProvider } from '../../shared/types';
 import { GeneratedMediaGallery } from './GeneratedMediaGallery';
 import { isMediaGenerationTool, type GeneratedMediaItem } from '../utils/generated-media';
 
 interface AssistantWorkstreamProps {
   model: WorkstreamModel;
+  isTurnInProgress: boolean;
   showIdleActivity?: boolean;
   className?: string;
   generatedMedia?: GeneratedMediaItem[];
@@ -78,6 +80,7 @@ const MAX_TITLE_CHARS = 800;
 
 export function AssistantWorkstream({
   model,
+  isTurnInProgress,
   showIdleActivity = true,
   className = '',
   generatedMedia,
@@ -85,7 +88,8 @@ export function AssistantWorkstream({
 }: AssistantWorkstreamProps) {
   // Hooks must run in the same order every render — keep useMemo above any
   // conditional early return.
-  const groups = useMemo(() => groupEntries(model.entries), [model.entries]);
+  const groups = useMemo(() => buildActivityUnits(model.entries), [model.entries]);
+  const turnReasoningHeading = reasoningHeading(model.entries);
   const lastMediaGroupIndex = useMemo(() => {
     if (!generatedMedia?.length) return -1;
     const mediaToolIds = new Set(
@@ -94,7 +98,7 @@ export function AssistantWorkstream({
     let lastCompact = -1;
     let lastMedia = -1;
     groups.forEach((group, index) => {
-      if (group.kind !== 'compact') return;
+      if (group.kind !== 'group') return;
       lastCompact = index;
       const hasReadyMediaTool = group.entries.some(
         (entry) =>
@@ -108,23 +112,24 @@ export function AssistantWorkstream({
     return lastMedia >= 0 ? lastMedia : lastCompact >= 0 ? lastCompact : groups.length - 1;
   }, [generatedMedia, groups]);
 
-  if (model.entries.length === 0 && !model.todoProgress) {
+  if ((model.entries.length === 0 || (groups.length === 0 && (!showIdleActivity || !isTurnInProgress))) && !model.todoProgress) {
     return null;
   }
 
   return (
-    <div className={`my-2 ${className}`.trim()}>
+    <div className={`workstream-activities my-2 ${className}`.trim()}>
       {groups.map((group, idx) => {
-        const groupKey = group.kind === 'compact' ? group.entries[0].id : group.entry.id;
-        const body = group.kind === 'text' ? (
-          <TextSegment key={groupKey} entry={group.entry} />
-        ) : group.kind === 'thinking' ? (
-          <ThinkingRow key={group.entry.id} entry={group.entry} />
+        const groupKey = group.id;
+        const live = showIdleActivity && isTurnInProgress && idx === groups.length - 1;
+        const body = group.kind === 'tasks' ? (
+          <SubagentGroup key={groupKey} entries={group.entries} />
+        ) : group.kind === 'standalone' ? (
+          group.entry.type === 'note' ? <TextSegment key={groupKey} entry={group.entry} />
+            : group.entry.type === 'tool' && (group.entry.subagentWait || group.entry.subagentControl)
+              ? <SubagentWaitRow key={groupKey} entry={group.entry} />
+              : <EntryRow key={groupKey} entry={group.entry} />
         ) : (
-          <CompactGroup
-            key={groupKey}
-            entries={group.entries}
-          />
+          <CompactGroup key={groupKey} entries={group.entries} live={live} turnReasoningHeading={turnReasoningHeading} cwd={mediaCwd} />
         );
         if (idx !== lastMediaGroupIndex || !generatedMedia?.length) {
           return body;
@@ -136,11 +141,11 @@ export function AssistantWorkstream({
           </div>
         );
       })}
-      {showIdleActivity && model.state === 'running' && !model.entries.some((entry) =>
-        entry.type === 'thinking' ? entry.state === 'active'
-          : entry.type === 'approval' ? entry.state === 'waiting'
-          : 'status' in entry && entry.status === 'pending'
-      ) ? <WorkingFooter label={model.entries.some(entry => entry.type === 'task' && entry.subagent?.runtime) ? 'Main agent is continuing' : 'Working'} /> : null}
+      {showIdleActivity && isTurnInProgress && groups.at(-1)?.kind !== 'group'
+        && !model.entries.some(entry => entry.type === 'approval' && entry.state === 'waiting'
+          || entry.type === 'tool' && entry.subagentWait
+          || entry.type === 'note' && entry.state === 'streaming')
+        ? <WorkingFooter label={turnReasoningHeading || 'Thinking'} /> : null}
       {model.todoProgress ? (
         <div className="my-2">
           <TodoProgressCard state={model.todoProgress} />
@@ -148,39 +153,6 @@ export function AssistantWorkstream({
       ) : null}
     </div>
   );
-}
-
-// ── Grouping ────────────────────────────────────────────────────────────────
-
-type EntryGroup =
-  | { kind: 'text'; entry: Extract<WorkstreamEntry, { type: 'note' }> }
-  | { kind: 'thinking'; entry: Extract<WorkstreamEntry, { type: 'thinking' }> }
-  | { kind: 'compact'; entries: WorkstreamEntry[] };
-
-function groupEntries(entries: WorkstreamEntry[]): EntryGroup[] {
-  const groups: EntryGroup[] = [];
-  let buffer: WorkstreamEntry[] = [];
-
-  const flush = () => {
-    if (buffer.length > 0) {
-      groups.push({ kind: 'compact', entries: buffer });
-      buffer = [];
-    }
-  };
-
-  for (const entry of entries) {
-    if (entry.type === 'note') {
-      flush();
-      groups.push({ kind: 'text', entry });
-    } else if (entry.type === 'thinking') {
-      flush();
-      groups.push({ kind: 'thinking', entry });
-    } else {
-      buffer.push(entry);
-    }
-  }
-  flush();
-  return groups;
 }
 
 // ── Text segment (assistant narration during the trace) ─────────────────────
@@ -194,7 +166,7 @@ function TextSegment({
   if (!text.trim()) return null;
   const displayText = truncateWithNotice(text, MAX_TRACE_TEXT_CHARS);
   return (
-    <div className="my-2 min-w-0 overflow-x-auto">
+    <div className="workstream-text my-2 min-w-0 overflow-x-auto">
       <StructuredResponse content={displayText} streaming={entry.state === 'streaming'} />
     </div>
   );
@@ -202,43 +174,42 @@ function TextSegment({
 
 // ── Compact group with overflow ─────────────────────────────────────────────
 
-function CompactGroup({
-  entries,
-}: {
-  entries: WorkstreamEntry[];
-}) {
+function CompactGroup({ entries, live, turnReasoningHeading, cwd }: { entries: WorkstreamEntry[]; live: boolean; turnReasoningHeading?: string; cwd?: string | null }) {
   const { changeRecordsByToolUseId, onOpenDiff } = useTurnDiffContext();
-  const stages = useMemo(
-    () => summarizeWorkstreamEntries(entries, { changeRecordsByToolUseId }),
-    [changeRecordsByToolUseId, entries]
-  );
-  const activeStage = [...stages].reverse().find((stage) => stage.status === 'pending' || stage.status === 'waiting');
-  const [expanded, setExpanded] = useWorkstreamDisclosure(`group:${entries[0]?.id}`, stages.some((stage) => stage.defaultExpanded));
-  const showGroup = stages.length > 1;
-  return (
-    <div className="my-2 space-y-px">
-      {showGroup && <button type="button" data-workstream-group aria-expanded={expanded}
-        onClick={() => setExpanded(!expanded)}
-        className="workstream-text flex max-w-full items-center gap-1.5 text-left text-[var(--text-muted)] hover:text-[var(--text-primary)]">
-        <WorkstreamActivityLabel active={activeStage?.status === 'pending'}>
-          {activeStage?.title || formatWorkstreamStageSummary(stages)}
-        </WorkstreamActivityLabel>
-        <FailureCount entries={entries} />
-        <ChevronRight className={`h-3.5 w-3.5 shrink-0 transition-transform ${expanded ? 'rotate-90' : ''}`} />
-      </button>}
-      <WorkstreamCollapse open={!showGroup || expanded}>
-        <WorkstreamScrollArea followKey={activeStage?.id}>
-          {stages.map((stage) =>
-            stage.kind === 'task' ? (
-              <SubagentStage key={stage.id} stage={stage} />
-            ) : (
-              <StageRow key={stage.id} stage={stage} onOpenDiff={onOpenDiff} />
-            )
-          )}
-        </WorkstreamScrollArea>
-      </WorkstreamCollapse>
-    </div>
-  );
+  const stages = useMemo(() => buildActivityStages(entries, { changeRecordsByToolUseId }), [entries, changeRecordsByToolUseId]);
+  const detailStages = useMemo(() => buildActivityStages(entries.filter(hasActivityDetail), { changeRecordsByToolUseId }), [entries, changeRecordsByToolUseId]);
+  const header = getActivityHeader(entries, live, turnReasoningHeading);
+  const [expanded, setExpanded] = useWorkstreamDisclosure(`activity:${entries[0].id}`);
+  const activities = entries.filter(entry => entry.type !== 'thinking');
+  const activeStage = header.kind === 'active'
+    ? summarizeWorkstreamEntries([header.entry], { changeRecordsByToolUseId })[0] : undefined;
+  // A completed single item is already its own disclosure. Don't add a group wrapper.
+  if (header.kind === 'summary' && activities.length === 1 && !isActivityPending(activities[0]) && stages.length === 1
+    && (stages[0].kind !== 'edit' || stages[0].files.length === 1)) {
+    return <StageRow stage={stages[0]} onOpenDiff={onOpenDiff} cwd={cwd} />;
+  }
+  const label = header.kind === 'thinking' ? header.label
+    : header.kind === 'active' ? activeActivityLabel(header.entry)
+    : stages.length ? formatWorkstreamStageSummary(stages) : 'Thought';
+  const canExpand = detailStages.length > 0;
+  const iconStage = activeStage || (header.kind === 'summary' ? getWorkstreamSummaryIconStage(stages) : undefined);
+  return <div className="my-2 space-y-1" data-activity-unit={entries[0].id} data-activity-state={header.kind}>
+    <button type="button" data-workstream-group aria-expanded={canExpand ? expanded : undefined} disabled={!canExpand}
+      onClick={() => canExpand && setExpanded(!expanded)}
+      className="workstream-text group flex max-w-full items-center gap-1.5 text-left text-[var(--text-muted)] enabled:hover:text-[var(--text-primary)] disabled:cursor-default">
+      <ActivitySummary summaryKey={header.key} immediate={header.kind === 'summary'}>
+        {iconStage && <StageKindIcon stage={iconStage} />}
+        <WorkstreamActivityLabel active={header.kind !== 'summary'}>{label}</WorkstreamActivityLabel>
+      </ActivitySummary>
+      <FailureCount entries={entries} />
+      {canExpand && <ChevronRight className={`h-3 w-3 shrink-0 transition-transform ${expanded ? 'rotate-90' : ''}`} />}
+    </button>
+    <WorkstreamCollapse open={expanded && canExpand}>
+      <ActivityAnimationScope enabled={false}><WorkstreamScrollArea bounded={false} followKey={header.kind === 'active' ? header.entry.id : undefined}>
+        {detailStages.map(stage => <StageRow key={stage.id} stage={stage} onOpenDiff={onOpenDiff} cwd={cwd} />)}
+      </WorkstreamScrollArea></ActivityAnimationScope>
+    </WorkstreamCollapse>
+  </div>;
 }
 
 // ── Stage summary rows ─────────────────────────────────────────────────────
@@ -251,18 +222,23 @@ function FailureCount({ entries }: { entries: WorkstreamEntry[] }) {
 function StageRow({
   stage,
   onOpenDiff,
+  cwd,
 }: {
   stage: WorkstreamStage;
+  cwd?: string | null;
   onOpenDiff?: (
     record: ChangeRecord,
     scope?: { records: ChangeRecord[]; label?: string; turnKey?: string }
   ) => void;
 }) {
-  const running = stage.status === 'pending';
   const [expanded, setExpanded] = useWorkstreamDisclosure(
-    `${stage.id}:${running ? 'running' : 'completed'}`,
+    `activity-detail:${stage.entries[0].id}`,
     stage.defaultExpanded
   );
+
+  if (stage.kind === 'explore' && stage.status === 'success') {
+    return <ExplorationRow stage={stage} cwd={cwd} />;
+  }
 
   const hasDetails = stage.entries.some(hasRawEntryDetail);
   const canExpand =
@@ -281,7 +257,7 @@ function StageRow({
         type="button"
         onClick={() => canExpand && setExpanded(!expanded)}
         disabled={!canExpand}
-        className={`flex w-full items-center gap-1.5 workstream-text py-0.5 text-left transition-colors disabled:opacity-100 ${
+        className={`flex w-full items-center gap-1.5 workstream-text text-left transition-colors disabled:opacity-100 ${
           canExpand ? '' : 'cursor-default'
         }`}
         aria-expanded={canExpand ? expanded : undefined}
@@ -301,9 +277,26 @@ function StageRow({
   );
 }
 
+/** Native completed exploration is an inline action, with a direct file link for reads. */
+function ExplorationRow({ stage, cwd }: { stage: WorkstreamStage; cwd?: string | null }) {
+  const openFile = useAppStore(state => state.openProjectFileInRightPanel);
+  const file = stage.files[0];
+  const absolute = file?.filePath.startsWith('/');
+  const root = cwd || (absolute ? file.filePath.slice(0, file.filePath.lastIndexOf('/')) || '/' : null);
+  return <div data-workstream-stage={stage.id} data-exploration-detail
+    className="workstream-text flex max-w-full min-w-0 items-center gap-1.5 text-[var(--text-muted)]">
+    <StageKindIcon stage={stage} />
+    <span className="min-w-0 truncate">
+      {file && root ? <>Read <button type="button" data-agent-activity-file-link
+        title={file.filePath} className="cursor-pointer hover:text-[var(--text-primary)] hover:underline"
+        onClick={() => openFile({ cwd: root, path: file.filePath, external: absolute })}>{file.fileName}</button></> : stage.title}
+    </span>
+  </div>;
+}
+
 function StageKindIcon({ stage }: { stage: WorkstreamStage }) {
   const kind = getWorkstreamStageActivityKind(stage);
-  const className = `h-3.5 w-3.5 flex-shrink-0 ${
+  const className = `h-4 w-4 flex-shrink-0 ${
     stage.status === 'waiting'
         ? 'text-amber-600'
         : 'text-[var(--text-muted)]/55'
@@ -319,7 +312,13 @@ function StageKindIcon({ stage }: { stage: WorkstreamStage }) {
   if (kind === 'web') return <Globe className={className} />;
   if (kind === 'memory') return <Brain className={className} />;
   if (kind === 'other') return <Plug className={className} />;
-  return <FolderSearch className={className} />;
+  if (kind === 'explore') {
+    const { icon } = getExplorationPresentation(stage.entries);
+    if (icon === 'read') return <Books className={className} />;
+    if (icon === 'list') return <FolderOpen className={className} />;
+    if (icon === 'explore') return <FolderSearch className={className} />;
+  }
+  return <Search className={className} />;
 }
 
 function StageStatusGlyph({
@@ -337,7 +336,7 @@ function StageStatusGlyph({
   if (stage.status === 'interrupted') {
     return <CircleDashed className="h-3 w-3 flex-shrink-0 text-[var(--text-muted)]/60" />;
   }
-  if (!canExpand) return null;
+  if (!canExpand || (stage.kind === 'command' && stage.status === 'success' && !expanded)) return null;
 
   return (
     <ChevronRight
@@ -656,115 +655,81 @@ function hasRawEntryDetail(entry: WorkstreamEntry): boolean {
 }
 
 // ── Subagent stage (Task tool calls) ────────────────────────────────────────
-// A single Task renders as a standalone lane row; parallel Tasks merge into a
-// board card with one lane per subagent. Each lane is a compact chip row —
-// clicking it opens the subagent's own tab in the right-side detail panel,
-// which is the only place the subagent's working trace renders.
+// Dispatch details and named lifecycle events stay outside ordinary activity groups.
+// Full child traces open through their stable Bubble anchor in the detail panel.
 
 type TaskEntry = Extract<WorkstreamEntry, { type: 'task' }>;
 
-function isTaskEntry(entry: WorkstreamEntry): entry is TaskEntry {
-  return entry.type === 'task';
+function SubagentGroup({ entries }: { entries: TaskEntry[] }) {
+  return <div className="my-2 space-y-2" data-subagent-group>
+    {entries.map(entry => <SubagentStatusRow key={entry.id} entry={entry} />)}
+  </div>;
 }
 
-function SubagentStage({ stage }: { stage: WorkstreamStage }) {
-  const taskEntries = stage.entries.filter(isTaskEntry);
-  // Anything classified into a task stage that didn't map to a task entry
-  // still renders as a plain row instead of silently disappearing.
-  if (taskEntries.length === 0) {
-    return (
-      <div className="space-y-px">
-        {stage.entries.map((entry) => (
-          <EntryRow key={entry.id} entry={entry} />
-        ))}
-      </div>
-    );
-  }
-  if (taskEntries.length === 1) {
-    return <SubagentLane entry={taskEntries[0]} standalone />;
-  }
-  return <SubagentBoard entries={taskEntries} />;
-}
-
-function SubagentBoard({ entries }: { entries: TaskEntry[] }) {
-  const running = entries.filter((entry) => entry.status === 'pending').length;
-  const failed = entries.filter((entry) => entry.status === 'error').length;
-  const stopped = entries.filter((entry) => entry.status === 'interrupted').length;
-  const done = entries.length - running - failed - stopped;
-  const metaParts: string[] = [];
-  if (done > 0) metaParts.push(`${done} done`);
-  if (running > 0) metaParts.push(`${running} running`);
-  if (failed > 0) metaParts.push(`${failed} failed`);
-  if (stopped > 0) metaParts.push(`${stopped} stopped`);
-
-  return (
-    <div className="my-1 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)]/40">
-      <div className="flex items-center gap-2 border-b border-[var(--border)] bg-[var(--subagent-bg)] px-2.5 py-1.5">
-        <Workflow className="h-3.5 w-3.5 flex-shrink-0 text-[var(--subagent)]" />
-        <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-[var(--text-primary)]">
-          {entries.length} subagents in parallel
-        </span>
-        <span className="flex-shrink-0 font-mono text-[10.5px] text-[var(--text-muted)]">
-          {metaParts.join(' · ')}
-        </span>
-      </div>
-      <div className="divide-y divide-[var(--border)]/60">
-        {entries.map((entry) => (
-          <SubagentLane key={entry.id} entry={entry} />
-        ))}
-      </div>
+/** One stable row per child. Its disclosure shows the task, not scheduler calls. */
+function SubagentStatusRow({ entry }: { entry: TaskEntry }) {
+  const [expanded, setExpanded] = useWorkstreamDisclosure(`agent-action:${entry.id}`);
+  const runtime = entry.subagent?.runtime;
+  const persona = getSubagentPersona(runtime?.agentId || entry.block.id, runtime?.role || entry.subagent?.agentType,
+    shortChildTask(entry.subagent?.description || ''), runtime?.nickname);
+  const awaitingCreation = entry.toolName === 'spawn_agent' && !runtime;
+  const label = awaitingCreation
+    ? entry.status === 'error' ? 'Failed to create' : entry.status === 'interrupted' ? 'Creation interrupted'
+      : entry.result ? 'Created' : 'Creating…'
+    : entry.status === 'error' ? 'Failed' : entry.status === 'interrupted' ? 'Interrupted'
+    : entry.status === 'success' ? 'Finished' : runtime?.status === 'queued' ? 'Queued' : 'Working…';
+  const name = awaitingCreation ? 'Agent' : persona.persona;
+  const description = entry.subagent?.description || getTaskDescription(entry) || entry.summary;
+  return <div data-subagent-lifecycle={entry.status} data-subagent-anchor={entry.block.id}>
+    <div className="workstream-text flex min-w-0 items-center gap-1.5 text-[var(--text-muted)]">
+      <SubagentAvatar id={runtime?.agentId || entry.block.id} hue={persona.colorHue} size={16} />
+      <ActivityDisclosureHeader expanded={expanded} onToggle={() => setExpanded(!expanded)}>
+        <button type="button" data-subagent-row={entry.block.id} data-subagent-status={entry.status}
+          title={buildSubagentLaneTitle(entry, description)} aria-label={`Open ${name} subagent`}
+          className="rounded-sm hover:text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-offset-2"
+          onClick={() => useAppStore.getState().openSubagentPanel(entry.block.id)}>{name}</button>
+        <span aria-live="polite" data-subagent-state-label> · {label}</span>
+      </ActivityDisclosureHeader>
     </div>
-  );
+    <WorkstreamCollapse open={expanded}>
+      <div className="workstream-details space-y-2 py-2" data-subagent-details={entry.block.id}>
+        <div className="workstream-text whitespace-pre-wrap break-words text-[var(--text-secondary)]">
+          {truncateWithNotice(description, MAX_TRACE_TEXT_CHARS)}
+        </div>
+        {entry.result?.is_error && <ToolEntryDetail entry={entry} />}
+      </div>
+    </WorkstreamCollapse>
+  </div>;
 }
 
-function SubagentLane({
-  entry,
-  standalone = false,
-}: {
-  entry: TaskEntry;
-  standalone?: boolean;
-}) {
-  const trace = entry.subagent;
-  const description = trace?.description || getTaskDescription(entry) || entry.summary;
-  // The avatar hue is derived from the Task tool_use id — the same key the
-  // subagent registry / utility tabs use — so the chat row and the tab show
-  // the same pixel creature for one subagent. Cross-agent delegations show
-  // the target agent's provider logo instead.
-  const persona = getSubagentPersona(trace?.runtime?.agentId || entry.block.id, trace?.runtime?.role || trace?.agentType, shortChildTask(trace?.description || trace?.runtime?.task || description), trace?.runtime?.nickname);
-  const delegateAgent = getDelegateAgentFromBlock(entry.block) as AgentProvider | null;
-
-  // The whole row opens this subagent's tab in the right-side detail panel —
-  // the subagent's working trace lives there, not inline in the main trace.
-  return (
-    <div className={`min-w-0 rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)]/40 ${standalone ? 'my-1' : ''}`}>
-      <button type="button" onClick={() => useAppStore.getState().openSubagentPanel(entry.block.id)}
-        title={buildSubagentLaneTitle(entry, description)}
-        className="flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left text-[12px] hover:bg-[var(--bg-tertiary)]/50">
-        {delegateAgent ? <ProviderIcon provider={delegateAgent} /> : <SubagentAvatar id={trace?.runtime?.agentId || entry.block.id} hue={persona.colorHue} size={14} />}
-        <span className="min-w-0 flex-1 truncate text-[var(--text-secondary)]">{persona.functionalName}</span>
-        <span className="shrink-0 text-[11px] text-[var(--text-muted)]">{persona.persona}</span>
-        <SubagentLaneStatusWord status={entry.status} />
-      </button>
-      {trace?.runtime && <div className="px-3 pb-2"><SubagentActivity runtime={trace.runtime} operations={trace.operations} active={entry.status === 'pending'} /></div>}
+function SubagentWaitRow({ entry }: { entry: Extract<WorkstreamEntry, { type: 'tool' | 'memory' }> }) {
+  const [expanded, setExpanded] = useWorkstreamDisclosure(`agent-control:${entry.id}`);
+  const targets = entry.subagentWait || entry.subagentControl?.targets || [];
+  const active = entry.status === 'pending';
+  const action = entry.subagentControl?.action;
+  const label = entry.subagentWait ? entry.summary
+    : entry.status === 'error' ? 'Agent operation failed'
+    : entry.status === 'interrupted' ? 'Agent operation interrupted'
+    : action === 'send_input' ? active ? 'Messaging' : 'Messaged'
+    : action === 'close_agent' ? active ? 'Closing' : 'Closed'
+    : active ? 'Waiting for' : 'Waited for';
+  return <div className="my-2" data-agent-control={entry.id}>
+    <div data-subagent-wait={entry.subagentWait ? entry.id : undefined} className="workstream-text">
+      <ActivityDisclosureHeader expanded={expanded} onToggle={() => setExpanded(!expanded)}>
+        <WorkstreamActivityLabel active={active}>{label}</WorkstreamActivityLabel>{' '}
+        {targets.map((target, index) => <span key={target.anchorId}>
+          {index > 0 && (index === targets.length - 1 ? ' and ' : ', ')}
+          <button type="button" data-agent-target className="hover:text-[var(--text-primary)] focus-visible:outline-2 rounded-sm"
+            onClick={() => useAppStore.getState().openSubagentPanel(target.anchorId)}>{target.name}</button>
+        </span>)}
+      </ActivityDisclosureHeader>
     </div>
-  );
+    <WorkstreamCollapse open={expanded}><div className="workstream-details"><ToolEntryDetail entry={entry} /></div></WorkstreamCollapse>
+  </div>;
 }
 
-/** Muted lowercase status word to the right of the subagent chip. */
-function SubagentLaneStatusWord({ status }: { status: TaskEntry['status'] }) {
-  if (status === 'pending') {
-    return (
-      <span className="flex flex-shrink-0 items-center gap-1 text-[11px] text-[var(--text-muted)]/80">
-        <LoaderCircle className="h-3 w-3 flex-shrink-0 animate-spin text-[var(--text-muted)]/55" />
-        running
-      </span>
-    );
-  }
-  const word =
-    status === 'error' ? 'failed' : status === 'interrupted' ? 'interrupted' : 'finished';
-  return (
-    <span className="flex-shrink-0 text-[11px] text-[var(--text-muted)]/80">{word}</span>
-  );
+function SubagentLane({ entry }: { entry: TaskEntry; standalone?: boolean }) {
+  return <SubagentGroup entries={[entry]} />;
 }
 
 /** Fuller hover info (agent type, tool count, duration) kept off the line. */
@@ -807,7 +772,7 @@ function EntryRow({ entry, showChangeHint = true }: { entry: WorkstreamEntry; sh
     return <SubagentLane entry={entry} standalone />;
   }
   if (entry.type === 'thinking') {
-    return <ThinkingRow entry={entry} />;
+    return null;
   }
   if (entry.type === 'note') {
     return <StreamingNoteRow entry={entry} />;
@@ -840,34 +805,6 @@ function StreamingNoteRow({
   );
 }
 
-// ── Thinking row ────────────────────────────────────────────────────────────
-
-function ThinkingRow({
-  entry,
-}: {
-  entry: Extract<WorkstreamEntry, { type: 'thinking' }>;
-}) {
-  const isActive = entry.state === 'active';
-  const [expanded, setExpanded] = useWorkstreamDisclosure(`reasoning:${entry.id}`);
-  const text = entry.detail || entry.summary;
-  return (
-    <div className="my-2">
-      <button type="button" className="workstream-text flex max-w-full items-center gap-1.5 py-0.5 text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-        aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
-        <WorkstreamActivityLabel active={isActive}>{isActive ? 'Thinking' : 'Reasoning'}</WorkstreamActivityLabel>
-        <ChevronRight className={`h-3.5 w-3.5 shrink-0 transition-transform ${expanded ? 'rotate-90' : ''}`} />
-      </button>
-      <WorkstreamCollapse open={expanded}>
-        <WorkstreamScrollArea followKey={isActive ? entry.id : undefined}>
-          <div className="workstream-text py-2 text-[var(--text-secondary)] whitespace-pre-wrap break-words">
-            {truncateWithNotice(text, MAX_TRACE_TEXT_CHARS)}
-          </div>
-        </WorkstreamScrollArea>
-      </WorkstreamCollapse>
-    </div>
-  );
-}
-
 // ── Approval row ────────────────────────────────────────────────────────────
 
 function ApprovalRow({
@@ -883,10 +820,12 @@ function ApprovalRow({
         : 'text-amber-600';
 
   return (
-    <div className="flex items-center gap-2 py-0.5 text-[12px] leading-5 text-[var(--text-primary)]">
+    <div data-approval-state={entry.state} className="workstream-text flex items-start gap-1.5 py-0.5 text-[var(--text-secondary)]">
       <ShieldAlert className={`h-3.5 w-3.5 flex-shrink-0 ${tone}`} />
-      <span className="min-w-0 flex-1 truncate">{entry.summary}</span>
-      <span className={`flex-shrink-0 text-[11px] uppercase tracking-[0.06em] ${tone}`}>
+      <span className="min-w-0 flex-1 break-words">{entry.summary}
+        {entry.detail && entry.detail !== entry.summary && <span className="block text-[var(--text-muted)]">{entry.detail}</span>}
+      </span>
+      <span className={`flex-shrink-0 ${tone}`}>
         {entry.state}
       </span>
     </div>
@@ -901,9 +840,11 @@ function ErrorRow({
   entry: Extract<WorkstreamEntry, { type: 'error' }>;
 }) {
   return (
-    <div className="flex items-baseline gap-2 py-0.5 text-[12px] leading-5 text-[var(--error)]" title={safeTitle(entry.detail)}>
+    <div role="alert" className="workstream-text flex items-baseline gap-1.5 py-0.5 text-[var(--error)]">
       <CircleX className="h-3.5 w-3.5 flex-shrink-0" />
-      <span className="min-w-0 flex-1 truncate">{entry.summary}</span>
+      <span className="min-w-0 flex-1 break-words">{entry.summary}
+        {entry.detail && entry.detail !== entry.summary && <span className="block whitespace-pre-wrap">{truncateWithNotice(entry.detail, MAX_TRACE_TEXT_CHARS)}</span>}
+      </span>
     </div>
   );
 }
@@ -1187,9 +1128,9 @@ function buildWritePreviewHunks(content: string): UnifiedDiffHunk[] {
 
 // ── Idle activity label (used when no current tool owns the status) ─────────
 
-export function WorkingFooter({ label = 'Working' }: { label?: string }) {
+export function WorkingFooter({ label = 'Thinking' }: { label?: string }) {
   return (
-    <div className="workstream-text my-2 text-[var(--text-muted)]">
+    <div data-thinking-footer className="workstream-text my-2 text-[var(--text-muted)]">
       <WorkstreamActivityLabel active>{label}</WorkstreamActivityLabel>
     </div>
   );

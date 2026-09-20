@@ -317,6 +317,7 @@ export class Agent {
   // computations including ones whose rewrite was later rejected — a
   // fired-but-never-written gap is the churn signal.
   private compactionStats = { resident: 0, subturn: 0, llm: 0, overflow: 0, fired: 0, droppedMessages: 0 };
+  private contextEvents: AgentEvent[] = [];
 
   constructor(options: AgentOptions) {
     this.provider = options.provider;
@@ -1033,10 +1034,12 @@ export class Agent {
       // [LLM summary] + [last user msg], and the projector becomes a no-op for
       // budget. If it fails (network error, etc.), the projector's existing
       // algorithmic fallback still kicks in.
-      await this.maybeCompactWithLLM(toolDefinitionTokens);
+      for await (const event of this.maybeCompactWithLLM(toolDefinitionTokens)) yield emit(event);
+      for (const event of this.contextEvents.splice(0)) yield emit(event);
 
       const bufferedStreamingToolCallIds = new Set<string>();
       let currentRequestEstimate: number | undefined;
+      let currentContextWindow: number | undefined;
       try {
         markStableCurrentToolResultsForCache(this.messages);
         const projectedMessages = projectMessages(this.messages, {
@@ -1056,6 +1059,8 @@ export class Agent {
           { additionalInputTokens: toolDefinitionTokens },
         );
         currentRequestEstimate = requestBudget.estimatedTokens;
+        currentContextWindow = requestBudget.contextWindow;
+        yield emit({ type: "context_usage", usedTokens: currentRequestEstimate, contextWindow: currentContextWindow, estimated: true });
         const maxInputTokens = getMaxInputTokens(requestBudget.contextWindow);
         if (maxInputTokens !== undefined && currentRequestEstimate > maxInputTokens) {
           throw new LocalContextPreflightError(currentRequestEstimate, maxInputTokens);
@@ -1364,6 +1369,7 @@ export class Agent {
           afterEstimatedTokens: recoveredRequestEstimate,
         });
         yield emit({ type: "context_recovered", droppedMessages, reason: "overflow" });
+        yield emit({ type: "context_compaction", status: "completed", preTokens: failedRequestEstimate, postTokens: recoveredRequestEstimate, contextWindow: currentContextWindow });
         continue;
       }
 
@@ -1371,6 +1377,10 @@ export class Agent {
       consecutiveEmptyAssistantRecoveries = 0;
       consecutiveStreamInterruptionRetries = 0;
 
+      if (turnUsage && Number.isFinite(turnUsage.promptTokens)) {
+        // Provider prompt usage already includes cached input; never add cache hits twice.
+        yield emit({ type: "context_usage", usedTokens: turnUsage.promptTokens + (turnUsage.completionTokens || 0), contextWindow: currentContextWindow, estimated: false });
+      }
       // Execute tools if any
       if (assistantMsg.toolCalls && assistantMsg.toolCalls.length > 0) {
         const parsedCalls: ParsedToolCall[] = [];
@@ -1682,6 +1692,7 @@ export class Agent {
           this.onToolResult?.(tc.name, result);
           executedResults.push(result);
           yield emit({ type: "tool_end", id: tc.id, name: tc.name, result });
+          for (const event of this.contextEvents.splice(0)) yield emit(event);
           for (const update of this.subagents.drainToolUpdates()) yield emit(update);
           if (this._modeVersion !== modeVersionBefore) {
             yield emit({ type: "mode_changed", mode: this._mode });
@@ -1891,7 +1902,7 @@ export class Agent {
     this.maybeCompactResidentHistory();
   }
 
-  private async maybeCompactWithLLM(additionalInputTokens = 0): Promise<void> {
+  private async *maybeCompactWithLLM(additionalInputTokens = 0): AsyncGenerator<AgentEvent> {
     if (!this.providerId || !this.apiModel) return;
     if (this.messages.length === 0) return;
 
@@ -1905,20 +1916,29 @@ export class Agent {
     });
     if (!budget.shouldCompact) return;
 
-    const { compactWithLLM } = await import("./context/llm-compactor.js");
-    const result = await compactWithLLM(this.messages, {
-      provider: this.provider,
-      modelId: this.apiModel,
-    });
-    if (result.compacted && result.messages) {
-      this.messages = result.messages;
-      this.lastInputTokens = null;
-      this.lastAnchorMessageCount = null;
-      this.fileStateTracker?.invalidateReadHistory();
-      this.compactionStats.llm += 1;
-      this.compactionStats.fired += 1;
-      this.persistCompactionSummary(result.summary);
-      traceEvent("compaction_fired", { path: "llm" });
+    yield { type: "context_compaction", status: "started", preTokens: budget.estimatedTokens, contextWindow: budget.contextWindow };
+    let completed = false;
+    try {
+      const { compactWithLLM } = await import("./context/llm-compactor.js");
+      const result = await compactWithLLM(this.messages, {
+        provider: this.provider,
+        modelId: this.apiModel,
+      });
+      if (result.compacted && result.messages) {
+        this.messages = result.messages;
+        this.lastInputTokens = null;
+        this.lastAnchorMessageCount = null;
+        this.fileStateTracker?.invalidateReadHistory();
+        this.compactionStats.llm += 1;
+        this.compactionStats.fired += 1;
+        this.persistCompactionSummary(result.summary);
+        traceEvent("compaction_fired", { path: "llm" });
+        completed = true;
+        const after = getContextBudget(this.providerId, this.apiModel, this.messages, { additionalInputTokens });
+        yield { type: "context_compaction", status: "completed", preTokens: budget.estimatedTokens, postTokens: after.estimatedTokens, contextWindow: budget.contextWindow };
+      }
+    } finally {
+      if (!completed) yield { type: "context_compaction", status: "failed", preTokens: budget.estimatedTokens, contextWindow: budget.contextWindow };
     }
     // If LLM compaction failed for any reason, leave this.messages alone —
     // the projector's algorithmic budgeted-mode passes will still try.
@@ -2288,6 +2308,10 @@ export class Agent {
         this.persistCompactionSummary(residentSummary);
       }
       if (compactedPath === "subturn") this.compactionStats.subturn += 1;
+      if (compactedPath && budget) {
+        this.contextEvents.push({ type: "context_compaction", status: "completed", preTokens: budget.estimatedTokens,
+          postTokens: getContextBudget(this.providerId, this.apiModel, candidate).estimatedTokens, contextWindow: budget.contextWindow });
+      }
     }
   }
 

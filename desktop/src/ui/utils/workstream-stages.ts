@@ -1,4 +1,5 @@
 import { extractComputerUseAppName } from '../../shared/computer-use';
+import { deriveReadableToolDisplay } from './tool-summary';
 import type { ChangeOperation, ChangeRecord, ChangeRecordState } from './change-records';
 import {
   getToolInputFilePath,
@@ -329,7 +330,7 @@ function buildStageCommands(entries: WorkstreamEntry[]): WorkstreamStageCommand[
     if (entry.kind !== 'command_execution') continue;
     const input = getToolInputRecord(entry);
     const command = getCommand(input) || entry.summary;
-    const output = getStageCommandOutput(entry);
+    const output = getStageCommandOutput(entry) || ('liveOutput' in entry ? entry.liveOutput || '' : '');
     commands.push({
       id: entry.block.id,
       command,
@@ -527,6 +528,28 @@ export function getWorkstreamStageActivityKind(stage: WorkstreamStage): Workstre
   return stage.kind === 'error' ? classifyStageKind(stage.entries[0], true) || 'error' : stage.kind;
 }
 
+/** The label and icon describe the whole exploration, independent of call order. */
+export function getExplorationPresentation(entries: WorkstreamEntry[]) {
+  const actions = new Set(entries.flatMap(entry => {
+    if (entry.type !== 'tool' && entry.type !== 'memory') return [];
+    if (entry.kind === 'file_read') return ['read'];
+    const display = deriveReadableToolDisplay(entry.toolName, entry.block.input, 'success');
+    return [display.verb === 'Listed' ? 'list' : 'search'];
+  }));
+  if (actions.size === 1 && actions.has('read')) return { label: 'read files', icon: 'read' } as const;
+  if (actions.size === 1 && actions.has('search')) return { label: 'searched files', icon: 'search' } as const;
+  if (actions.size === 1 && actions.has('list')) return { label: 'listed files', icon: 'list' } as const;
+  return { label: 'explored project', icon: 'explore' } as const;
+}
+
+/** Match the leading summary phrase, including every operation of that kind. */
+export function getWorkstreamSummaryIconStage(stages: WorkstreamStage[]): WorkstreamStage | undefined {
+  const first = stages.find(stage => stage.status === 'waiting') ?? stages[0];
+  if (!first || first.status === 'waiting') return first;
+  const kind = getWorkstreamStageActivityKind(first);
+  return { ...first, kind, entries: stages.filter(stage => getWorkstreamStageActivityKind(stage) === kind).flatMap(stage => stage.entries) };
+}
+
 export function formatWorkstreamStageSummary(stages: WorkstreamStage[]): string {
   if (stages.length === 0) return 'No work details yet';
 
@@ -545,7 +568,7 @@ export function formatWorkstreamStageSummary(stages: WorkstreamStage[]): string 
     } else if (kind === 'command') {
       const count = matching.reduce((total, stage) => total + (stage.commands.length || stage.entries.length), 0);
       parts.push(count === 1 ? 'ran a command' : 'ran commands');
-    } else if (kind === 'explore') parts.push('read files');
+    } else if (kind === 'explore') parts.push(getExplorationPresentation(matching.flatMap(stage => stage.entries)).label);
     else if (kind === 'web') parts.push('searched the web');
     else if (kind === 'computer_use') parts.push('used the computer');
     else if (kind === 'memory') parts.push('used memory');
@@ -553,6 +576,6 @@ export function formatWorkstreamStageSummary(stages: WorkstreamStage[]): string 
     else if (kind === 'other') parts.push(matching.length === 1 ? 'called a tool' : 'called tools');
     else if (kind === 'error') parts.push(matching.length === 1 ? 'encountered an error' : 'encountered errors');
   }
-  const summary = new Intl.ListFormat('en', { style: 'long', type: 'conjunction' }).format(parts);
+  const summary = new Intl.ListFormat('en', { style: 'long', type: 'unit' }).format(parts);
   return summary ? summary[0].toUpperCase() + summary.slice(1) : 'Completed work';
 }

@@ -25,6 +25,7 @@
 
 /* Theme variables - Light */
 :root {
+  --conversation-font-size: 13px;
   --bg-primary: #FCFCFC;
   --app-chrome-bg: #F4F4F4;
   --bg-secondary: rgba(0, 0, 0, 0.025);
@@ -793,7 +794,6 @@ body {
 
 .markdown-content.assistant-progress-markdown {
   color: var(--text-secondary);
-  font-size: calc(13px * var(--ui-font-scale, 1));
 }
 
 .markdown-content.assistant-progress-markdown p {
@@ -4030,29 +4030,43 @@ button.aegis-mdx-metadata-key:hover {
 }
 
 /* Agent activity shares the conversation typography and theme palette. */
-.workstream-text {
-  font-size: calc(14px * var(--ui-font-scale, 1));
+.workstream-text,
+.markdown-content.assistant-response-markdown,
+.markdown-content.assistant-progress-markdown {
+  font-size: calc(var(--conversation-font-size) * var(--ui-font-scale, 1));
   line-height: 1.5;
 }
-.workstream-activity-label { position: relative; display: inline-block; vertical-align: bottom; }
+.workstream-activity-label { position: relative; display: inline-block; vertical-align: top; }
+.workstream-shimmer { color: color-mix(in srgb, var(--text-primary) 55%, transparent); -webkit-text-fill-color: currentColor; }
 .workstream-activity-shimmer {
   position: absolute;
-  inset: 0;
-  color: transparent;
-  background: linear-gradient(110deg, transparent 35%, var(--text-primary) 50%, transparent 65%);
-  background-size: 250% 100%;
-  background-clip: text;
+  inset: 0 auto 0 0;
+  width: 100%;
+  text-overflow: inherit;
+  overflow: hidden;
   pointer-events: none;
   user-select: none;
-  animation: workstream-shimmer 4s linear .6s infinite;
-  opacity: 0;
+  transform: translateX(-50%);
+  mask-image: linear-gradient(90deg, transparent 0%, black 20% 30%, transparent 50% 100%);
 }
-@keyframes workstream-shimmer {
-  0% { background-position: 180% 0; opacity: 0; }
-  3% { opacity: .65; }
-  25%, 100% { background-position: -80% 0; opacity: 0; }
+.workstream-shimmer-highlight {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: inherit;
+  color: rgb(255 255 255 / 75%);
+  -webkit-text-fill-color: currentColor;
+  transform: translateX(50%);
 }
-.workstream-scroll-area { max-height: 14rem; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
+.workstream-shimmer-active .workstream-activity-shimmer { animation: workstream-shimmer-sweep 1s steps(48, end) 1; }
+.workstream-shimmer-active .workstream-shimmer-highlight { animation: workstream-shimmer-highlight 1s steps(48, end) 1; }
+@keyframes workstream-shimmer-sweep { from { transform: translateX(-50%); } to { transform: translateX(125%); } }
+@keyframes workstream-shimmer-highlight { from { transform: translateX(50%); } to { transform: translateX(-125%); } }
+@media (prefers-reduced-motion: reduce) {
+  .workstream-shimmer-active .workstream-activity-shimmer,
+  .workstream-shimmer-active .workstream-shimmer-highlight { animation: none; }
+}
+.workstream-scroll-area[data-bounded="true"] { max-height: 14rem; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
 .workstream-scroll-area[data-fade-top="true"] {
   mask-image: linear-gradient(to bottom, transparent, black 1.5rem);
 }
@@ -4063,7 +4077,10 @@ button.aegis-mdx-metadata-key:hover {
   mask-image: linear-gradient(to bottom, transparent, black 1.5rem, black calc(100% - 1.5rem), transparent);
 }
 
-.workstream-details { margin-inline-start: 22px; }
+.workstream-activities { display: flex; flex-direction: column; gap: 16px; }
+.workstream-activities > * { margin-block: 0; }
+.workstream-scroll-area > div { display: flex; flex-direction: column; gap: 4px; }
+.workstream-details { margin-inline-start: 24px; }
 .workstream-output-panel {
   min-width: 0;
   overflow: clip;

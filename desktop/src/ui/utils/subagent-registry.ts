@@ -25,6 +25,8 @@ export interface SubagentSummary {
   id: string;
   subagentType: string | null;
   description: string | null;
+  /** Full dispatch instruction, kept separate from the shortened row description. */
+  task?: string | null;
   status: ToolStatus;
   /** Earliest child-message timestamp; anchors a live elapsed timer. */
   startedAt?: number;
@@ -128,6 +130,7 @@ export function deriveSubagentSummaries(
         id: use.id,
         subagentType,
         description,
+        task: getString(input.prompt) || getString(input.message) || getString(input.task) || runtime?.task || null,
         status,
         startedAt,
         durationMs,

@@ -624,3 +624,25 @@ describe("subagent supplementary input", () => {
     expect(done.nickname).toBe(child.nickname);
   });
 });
+
+describe("wait_agent early completion", () => {
+  it("returns a short child's result without waiting out a generous timeout", async () => {
+    const { provider, release } = gatedProvider([
+      [{ type: "text", content: LONG_SUMMARY }, { type: "done" }],
+    ]);
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [] });
+    const child = await agent.spawnSubAgent("short task", "/tmp", { profile: defaultProfile(), parentToolCallId: "short-child" });
+    const waiting = agent.waitSubAgents({ agentIds: [child.agentId], timeoutMs: 200_000 });
+    release();
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const done = await Promise.race([
+        waiting,
+        new Promise<never>((_, reject) => { deadline = setTimeout(() => reject(new Error("Wait did not return on child completion")), 2_000); }),
+      ]);
+      expect(done[0].status).toBe("completed");
+    } finally {
+      clearTimeout(deadline);
+    }
+  });
+});

@@ -25,6 +25,8 @@ export type CodexContextSnapshot = {
 };
 
 export type OpenCodeContextSnapshot = {
+  estimated?: boolean;
+  usageScope?: 'turn';
   model: string;
   used: number;
   total: number;
@@ -346,5 +348,31 @@ export function getLatestOpenCodeContextSnapshot(
     };
   }
 
+  return null;
+}
+
+/** Bubble result usage is cumulative billing, never context occupancy. */
+export function getLatestBubbleContextSnapshot(messages: StreamMessage[], preferredModel?: string | null): OpenCodeContextSnapshot | null {
+  const modelMatches = (model: string) => !preferredModel || model.toLowerCase() === preferredModel.trim().toLowerCase();
+  let billing: Extract<StreamMessage, { type: 'result' }> | undefined;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.parentToolUseId) continue;
+    if (message.type === 'result' && modelMatches(message.model || '')) { billing = message; break; }
+  }
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.parentToolUseId || message.type !== 'system' || message.subtype !== 'bubble_context' || !modelMatches(message.model)) continue;
+    const context = message.context;
+    if (!context || !Number.isFinite(context.usedTokens) || context.usedTokens < 0 || !Number.isFinite(context.contextWindow) || context.contextWindow <= 0) return null;
+    const usage = billing?.usage;
+    return { model: message.model, used: context.usedTokens, total: context.contextWindow,
+      percent: Math.min(100, Math.max(0, Math.round(context.usedTokens / context.contextWindow * 100))),
+      estimated: context.estimated, usageScope: 'turn', costUSD: billing?.total_cost_usd || 0,
+      inputTokens: usage?.input_tokens || 0, outputTokens: usage?.output_tokens || 0,
+      cacheReadTokens: usage?.cache_read_input_tokens || 0, cacheCreationTokens: usage?.cache_creation_input_tokens || 0,
+      reasoningOutputTokens: usage?.reasoning_output_tokens || 0 };
+  }
+  // Old desktop records contain no occupancy measurement. Unknown is safer than a fabricated full ring.
   return null;
 }

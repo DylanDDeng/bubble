@@ -95,6 +95,7 @@ import {
   getLatestClaudeTurnUsage,
   getLatestCodexContextSnapshot,
   getLatestOpenCodeContextSnapshot,
+  getLatestBubbleContextSnapshot,
   isClaudeUsageModelMatch,
 } from '../utils/context-usage';
 
@@ -471,7 +472,7 @@ export function PromptInput({
   const bubbleContextSnapshot = useMemo(
     () =>
       isBubbleContextVisible
-        ? getLatestOpenCodeContextSnapshot(activeSession.messages, bubbleContextModel, 'Bubble')
+        ? getLatestBubbleContextSnapshot(activeSession.messages, bubbleContextModel)
         : null,
     [activeSession?.messages, isBubbleContextVisible, bubbleContextModel]
   );

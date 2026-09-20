@@ -104,6 +104,9 @@ export function MessageCard({
       // user 消息里的 tool_result 已经被工作流批次吸收，单独渲染没意义
       return null;
 
+    case 'turn_failure':
+      return <TurnFailureNotice error={message.error} />;
+
     case 'result':
       // Hide session summary (duration/cost/tokens) to avoid confusing pricing across providers.
       return null;
@@ -115,6 +118,15 @@ export function MessageCard({
     default:
       return null;
   }
+}
+
+export function TurnFailureNotice({ error }: { error?: string }) {
+  return (
+    <div role="status" data-turn-failure className="my-3 text-[13px] text-[var(--text-secondary)]">
+      <div className="text-[var(--error)]">This turn did not finish.</div>
+      <div className="whitespace-pre-wrap break-words">{error || 'The connection ended before completion. Send a message to continue.'}</div>
+    </div>
+  );
 }
 
 function formatCompactTokens(value: number): string {
@@ -136,6 +148,7 @@ function CompactBoundaryCard({
     message.compactMetadata.preTokens > 0
       ? formatCompactTokens(message.compactMetadata.preTokens)
       : null;
+  const postTokensLabel = typeof message.compactMetadata.postTokens === 'number' ? formatCompactTokens(message.compactMetadata.postTokens) : null;
   const explanation = isAuto
     ? 'The context was close to the model limit, so earlier messages were automatically summarized to free up space. The AI keeps the key points, but verbatim details may be omitted.'
     : 'You compacted the conversation manually. Earlier messages were summarized to free up context space.';
@@ -160,7 +173,7 @@ function CompactBoundaryCard({
               <ArchiveIcon />
               <span>{label}</span>
               {tokensLabel ? (
-                <span className="text-[var(--text-muted)]">· {tokensLabel} tokens</span>
+                <span className="text-[var(--text-muted)]">· {tokensLabel}{postTokensLabel ? ` → ${postTokensLabel}` : ''} tokens</span>
               ) : null}
             </button>
 
@@ -758,7 +771,7 @@ function AssistantCard({
           <StructuredResponse
             content={block.text}
             streaming={isStreaming}
-            className={isProgress ? 'assistant-progress-markdown' : ''}
+            className={isProgress ? 'assistant-progress-markdown' : 'assistant-response-markdown'}
           />
         </div>
       ))}

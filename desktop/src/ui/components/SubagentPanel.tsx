@@ -256,6 +256,7 @@ export function SubagentPanel({
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-4">
+            {selected.task && <SubagentTaskInstructions key={selected.id} task={selected.task} />}
             {timelineItems.length === 0 ? (
               <div className="mt-6 text-center text-xs text-[var(--text-muted)]">
                 {state === 'running' ? 'Subagent starting…' : 'No activity to show yet.'}
@@ -292,17 +293,17 @@ export function SubagentPanel({
                 )
               )
             )}
-            <SubagentActivity runtime={selected.runtime} operations={selected.operations} active={selectedRunning} details />
+            <SubagentActivity runtime={selected.runtime} operations={selected.operations} active={selectedRunning} />
             {changeSummary ? <TurnChangesCard summary={changeSummary} /> : null}
             {state === 'frozen' ? (
               <div className="mt-3 rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] px-3 py-2 text-xs text-[var(--text-muted)]">
                 This subagent is no longer running. Review its last activity and any undelivered messages before continuing.
               </div>
             ) : null}
-            {state === 'running' && !selected.runtime ? (
+            {state === 'running' ? (
               <div className="mt-3 flex items-center gap-2 text-xs text-[var(--text-muted)]">
                 <Loader2 className="h-3 w-3 animate-spin" />
-                Running…
+                {selected.runtime?.status === 'queued' ? 'Queued…' : 'Running…'}
               </div>
             ) : null}
           </div>
@@ -314,4 +315,17 @@ export function SubagentPanel({
       )}
     </div>
   );
+}
+
+function SubagentTaskInstructions({ task }: { task: string }) {
+  const long = task.length > 280 || task.split('\n').length > 4;
+  return <section data-subagent-task className="workstream-text my-3 text-[var(--text-secondary)]">
+    {long ? <details>
+      <summary className="cursor-pointer text-[var(--text-muted)]">Task instructions</summary>
+      <p className="mt-2 whitespace-pre-wrap break-words">{task}</p>
+    </details> : <>
+      <div className="mb-1 text-[var(--text-muted)]">Task instructions</div>
+      <p className="whitespace-pre-wrap break-words">{task}</p>
+    </>}
+  </section>;
 }

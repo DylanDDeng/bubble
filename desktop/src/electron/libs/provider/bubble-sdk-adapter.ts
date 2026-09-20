@@ -83,6 +83,7 @@ type ActiveBubbleSession = {
   thinkingLevel?: string;
   /** Model context window from the provider registry (Bubble's turn usage carries none). */
   contextWindow?: number | null;
+  lastContextTokens?: number;
   turnActive: boolean;
   abortController: AbortController | null;
   pendingRequests: Map<string, PendingBubbleRequest>;
@@ -420,7 +421,7 @@ export class BubbleSdkAdapter implements ProviderAdapter {
     // turn. The pre-reset usage snapshot is the best preTokens approximation.
     const trimmedPrompt = input.prompt.trim();
     if (!input.attachments?.length && trimmedPrompt.toLowerCase() === '/compact') {
-      await this.runCompact(session, session.usage.total_tokens || 0);
+      await this.runCompact(session, session.lastContextTokens || 0);
       return;
     }
 
@@ -751,6 +752,8 @@ export class BubbleSdkAdapter implements ProviderAdapter {
           session_id: session.threadId,
           compactMetadata: { trigger: 'manual', preTokens },
         });
+        session.lastContextTokens = undefined;
+        this.emitMessage(session, { type: 'system', subtype: 'bubble_context', uuid: uuidv4(), model: session.model || '', context: null });
       } else {
         this.emitAssistantText(session, 'Session is already compact enough.');
       }
@@ -866,6 +869,24 @@ export class BubbleSdkAdapter implements ProviderAdapter {
       case 'tool_end': {
         const toolEvent = event as Extract<BubbleAgentEvent, { type: 'tool_end' }>;
         this.handleToolResult(session, toolEvent.id, toolEvent.result);
+        return;
+      }
+      case 'context_usage': {
+        const snapshot = event as Extract<BubbleAgentEvent, { type: 'context_usage' }>;
+        this.emitContextSnapshot(session, snapshot.usedTokens, snapshot.contextWindow, snapshot.estimated);
+        return;
+      }
+      case 'context_compaction': {
+        const compact = event as Extract<BubbleAgentEvent, { type: 'context_compaction' }>;
+        this.flushAssistant(session, 'commentary');
+        if (compact.status === 'completed') {
+          this.emitMessage(session, { type: 'system', subtype: 'compact_boundary', uuid: uuidv4(), session_id: session.threadId,
+            compactMetadata: { trigger: 'auto', preTokens: compact.preTokens, postTokens: compact.postTokens } });
+          if (typeof compact.postTokens === 'number') this.emitContextSnapshot(session, compact.postTokens, compact.contextWindow, true);
+        } else {
+          this.emitMessage(session, { type: 'system', subtype: 'compact_status', uuid: uuidv4(), session_id: session.threadId,
+            status: compact.status, trigger: 'auto' });
+        }
         return;
       }
       case 'turn_end': {
@@ -1105,7 +1126,7 @@ export class BubbleSdkAdapter implements ProviderAdapter {
       // Capture the targets at invocation, not when a later render sees them
       // completed. This is display metadata, not a change to SDK arguments.
       args = { ...args, agent_ids: [...(session.subagentStates?.values() ?? [])]
-        .filter(state => ['queued', 'running'].includes(state.status)).map(state => state.agentId) };
+        .filter(state => state.status !== 'closed').map(state => state.agentId) };
     }
     this.emitMessage(session, {
       type: 'assistant',
@@ -1238,6 +1259,14 @@ export class BubbleSdkAdapter implements ProviderAdapter {
       usage: session.usage,
       model: session.model,
     });
+  }
+
+  private emitContextSnapshot(session: ActiveBubbleSession, usedTokens: number, contextWindow: number | undefined, estimated: boolean): void {
+    const window = contextWindow || session.contextWindow;
+    if (!Number.isFinite(usedTokens) || usedTokens < 0 || !window || !Number.isFinite(window) || window <= 0) return;
+    session.lastContextTokens = usedTokens;
+    this.emitMessage(session, { type: 'system', subtype: 'bubble_context', uuid: uuidv4(), model: session.model || '',
+      context: { usedTokens, contextWindow: window, estimated } });
   }
 
   private ensureCurrentAssistant(session: ActiveBubbleSession): BubbleAssistantAccumulator {

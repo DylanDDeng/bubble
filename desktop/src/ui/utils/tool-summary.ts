@@ -48,7 +48,7 @@ export function getToolSummary(name: string, input: unknown): string {
   switch (name.trim().toLowerCase()) {
     case 'Bash':
     case 'bash':
-      return getStringField(input, 'command') || '';
+      return getStringField(input, 'command') || getStringField(input, 'cmd') || '';
     case 'read':
     case 'read_image':
     case 'write':
@@ -266,6 +266,10 @@ function describeBashCommand(command: string, status: ToolStatus): ReadableToolD
       return { verb, target: dir || 'directory' };
     }
 
+    if (head === 'rg' && /(?:^|\s)--files(?:\s|$)/.test(rest)) {
+      return { verb: pickVerb(['Listing', 'Listed'], status), target: 'files' };
+    }
+
     if (head === 'grep' || head === 'rg' || head === 'ag') {
       const pattern = firstNonFlagToken(rest);
       return { verb, target: pattern ? `for ${truncate(pattern, 40)}` : 'pattern' };
@@ -341,7 +345,7 @@ export function deriveReadableToolDisplay(
   if (name === 'send_input') return { verb: status === 'error' ? 'Could not send' : status === 'pending' ? 'Sending' : 'Sent', target: 'supplementary message' };
   if (name === 'close_agent') return { verb: status === 'pending' ? 'Stopping' : 'Stopped', target: 'subagent' };
   if (name === 'Bash' || name === 'bash') {
-    const command = getStringField(input, 'command');
+    const command = getStringField(input, 'command') || getStringField(input, 'cmd');
     if (command) {
       return describeBashCommand(command, status);
     }
@@ -460,7 +464,7 @@ function detectBashKind(command: string | null | undefined): CanonicalToolKind {
   const firstSegment = inner.split(/\s+&&\s+|\s+\|\|\s+|\s*;\s*|\s*\|\s*/)[0] || inner;
   const { head } = splitFirstToken(firstSegment);
   if (SHELL_FILE_READERS.has(head)) return 'file_read';
-  if (head === 'grep' || head === 'rg' || head === 'ag' || head === 'find' || head === 'fd' || head === 'glob') {
+  if (head === 'ls' || head === 'tree' || head === 'grep' || head === 'rg' || head === 'ag' || head === 'find' || head === 'fd' || head === 'glob') {
     return 'pattern_search';
   }
   return 'command_execution';
@@ -473,7 +477,7 @@ export function classifyToolUse(toolName: string, input: unknown): CanonicalTool
     return 'file_change';
   }
   if (normalized === 'bash') {
-    return detectBashKind(getStringField(input, 'command'));
+    return detectBashKind(getStringField(input, 'command') || getStringField(input, 'cmd'));
   }
   if (normalized === 'grep' || normalized === 'glob' || normalized === 'ls') return 'pattern_search';
   if (normalized === 'websearch' || normalized === 'webfetch' || normalized === 'web_search' || normalized === 'web_fetch') return 'web_search';

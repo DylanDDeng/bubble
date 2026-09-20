@@ -18,6 +18,8 @@ export interface TimelineWorkGroup {
   originalIndices: number[];
   /** Completed turn duration resolved from provider metadata or turn timestamps. */
   durationMs?: number;
+  /** Stable start of the owning user turn, including while its answer streams. */
+  startedAt?: number;
 }
 
 export type TranscriptTimelineItem =
@@ -33,6 +35,8 @@ export type TranscriptTimelineItem =
       type: 'work';
       group: TimelineWorkGroup;
       active: boolean;
+      /** The turn can still run after its tool activity becomes collapsible. */
+      turnRunning?: boolean;
       defaultExpanded: boolean;
       canCollapse?: boolean;
       disclosureResetKey: string;
@@ -367,28 +371,35 @@ function collapseTurnWorkBeforeAnswer(
     options.turnStartedAt,
     hasTerminalAnswer
   );
-  const completedWorkGroup: TimelineWorkGroup =
-    typeof durationMs === 'number'
-      ? { ...combinedWorkGroup, durationMs }
-      : combinedWorkGroup;
+  const completedWorkGroup: TimelineWorkGroup = {
+    ...combinedWorkGroup,
+    startedAt: options.turnStartedAt,
+    ...(typeof durationMs === 'number' ? { durationMs } : {}),
+  };
 
   const activeWork = isActiveWorkGroup(completedWorkGroup, options) && !hasTerminalAnswer;
   const workItem: TranscriptTimelineItem = {
     type: 'work',
     group: completedWorkGroup,
     active: activeWork,
+    turnRunning: activeRunningTurn && !hasTurnResult(turnItems),
     // An interrupted turn keeps its trace open: it froze mid-run, and
     // collapsing it on the stop press would make the work the user was
     // watching vanish into the disclosure toggle.
     defaultExpanded: activeWork || interruptedTurn,
-    canCollapse: !interruptedTurn && (hasTerminalAnswer || hasTurnResult(turnItems)),
+    canCollapse: !interruptedTurn && hasTerminalAnswer,
     disclosureResetKey: combinedWorkGroup.id,
   };
 
   if (answerVisibleIndex >= 0) {
     visibleItems.splice(answerVisibleIndex, 0, workItem);
   } else {
-    visibleItems.push(workItem);
+    // A failed turn without a final answer still ends with its failure notice.
+    // Keep the collected thinking/tool work before that terminal message.
+    const failureIndex = visibleItems.findIndex(
+      item => item.type === 'message' && item.message.type === 'turn_failure'
+    );
+    visibleItems.splice(failureIndex >= 0 ? failureIndex : visibleItems.length, 0, workItem);
   }
 
   return visibleItems;
@@ -619,7 +630,7 @@ export function deriveTranscriptTimelineItems(
   for (let originalIndex = 0; originalIndex < messages.length; originalIndex += 1) {
     const message = messages[originalIndex];
 
-    if (message.bubbleSubagent || message.type === 'stream_event' || message.type === 'goal_completed' || isToolResultOnlyMessage(message)) {
+    if ((message.type === 'system' && message.subtype === 'bubble_context') || message.bubbleSubagent || message.type === 'stream_event' || message.type === 'goal_completed' || isToolResultOnlyMessage(message)) {
       continue;
     }
 

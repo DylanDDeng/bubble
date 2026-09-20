@@ -90,7 +90,7 @@ export function OpenCodeContextIndicator({
           {snapshot ? (
             <>
               <MetricRow label="Cost" value={formatCurrency(snapshot.costUSD)} />
-              <MetricRow label="Used" value={formatCompact(snapshot.used)} />
+              <MetricRow label={snapshot.estimated ? "Context (estimated)" : snapshot.usageScope ? "Context" : "Used"} value={formatCompact(snapshot.used)} />
               <MetricRow label="Limit" value={formatCompact(snapshot.total)} />
               {nearLimit ? (
                 <div
@@ -112,7 +112,7 @@ export function OpenCodeContextIndicator({
               <MetricRow label="Cache read" value={formatCompact(snapshot.cacheReadTokens)} />
               <MetricRow label="Cache write" value={formatCompact(snapshot.cacheCreationTokens)} />
               <div className="mt-1.5 border-t border-[var(--border)] pt-1.5 text-[11px] leading-4 text-[var(--text-muted)]">
-                Latest {providerLabel} usage for this model
+                {snapshot.usageScope ? 'Token breakdown and cost: latest completed turn. Context: latest runtime snapshot.' : `Latest ${providerLabel} usage for this model`}
               </div>
             </>
           ) : (

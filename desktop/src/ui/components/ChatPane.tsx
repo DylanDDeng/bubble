@@ -23,7 +23,7 @@ import {
 } from '../utils/message-content';
 import { deriveTranscriptTimelineItems } from '../utils/transcript-timeline';
 import { resolveCodexModel } from '../utils/codex-model';
-import { AssistantCopyAction, MessageCard, getAssistantMarkdownToCopy } from './MessageCard';
+import { AssistantCopyAction, MessageCard, TurnFailureNotice, getAssistantMarkdownToCopy } from './MessageCard';
 import { ChatOutlineRail } from './ChatOutlineRail';
 import { JumpToLatestButton } from './JumpToLatestButton';
 import { SessionTitleActions } from './SessionTitleActions';
@@ -1137,7 +1137,7 @@ export function ChatPane({
       const message = session.messages[i];
       if (!message) continue;
       if (message.type === 'system' && message.subtype === 'compact_status') {
-        return true;
+        return message.status === 'started';
       }
       if (message.type === 'system' && message.subtype === 'compact_boundary') {
         return false;
@@ -1189,7 +1189,7 @@ export function ChatPane({
       return `${kind} · retrying${attempts} in ${delaySeconds}s`;
     }
     if (isCompacting) return 'Compacting conversation';
-    return 'Working';
+    return 'Thinking';
   }, [apiRetry, isCompacting]);
 
   // ── Rewind (claude + bubble) ────────────────────────────────────────────
@@ -2050,8 +2050,9 @@ export function ChatPane({
                             toolStatusMap={toolStatusMap}
                             toolResultsMap={toolResultsMap}
                             isSessionRunning={session.status === 'running'}
+                            isTurnRunning={item.turnRunning ?? item.active}
                             isLastBatch={item.active}
-                            startedAt={item.active ? activeTurnStartedAt : undefined}
+                            startedAt={item.group.startedAt ?? (item.active ? activeTurnStartedAt : undefined)}
                             durationMs={item.group.durationMs}
                             subagentMessagesByParent={subagentMessagesByParent}
                             liveTrace={item.group.id === activeTimelineWorkId ? activeLiveTrace : undefined}
@@ -2220,14 +2221,14 @@ export function ChatPane({
                 </div>
               )}
 
-              {session.status === 'error' && <div role="status" data-turn-failure className="my-3 text-[13px] text-[var(--text-secondary)]">
-                <div className="text-[var(--error)]">This turn did not finish.</div>
-                <div>{session.lastTurnError || 'The connection ended before completion. Send a message to continue.'}</div>
-              </div>}
+              {session.status === 'error' &&
+                !session.messages.slice(lastUserPromptIndex + 1).some(message => message.type === 'turn_failure') &&
+                <TurnFailureNotice error={session.lastTurnError} />}
 
-              {/* Only show the idle activity label when no trace or final answer owns it. */}
+              {/* Compaction remains visible while an existing work trace owns the turn. */}
               {(() => {
                 if (session.status !== 'running') return null;
+                if (isCompacting) return <WorkingFooter label="Compacting conversation" />;
                 if (streamingWorkstreamModel) return null;
                 if (hasActiveTimelineWork) return null;
                 if (turnPhase === 'complete') return null;

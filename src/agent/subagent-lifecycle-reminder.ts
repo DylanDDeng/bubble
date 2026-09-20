@@ -1,5 +1,6 @@
 import type { SubagentThreadSnapshot } from "./subagent-control.js";
 import type { ToolResult } from "../types.js";
+import { SUBAGENT_WAIT_GUIDANCE } from "./subagent-wait-guidance.js";
 
 interface LifecycleSubagent {
   agentId: string;
@@ -37,7 +38,7 @@ export function buildSubagentLifecycleReminder(
     ...subagents.map(formatSubagentLine),
     "- Count unique agent_id values only; do not count repeated spawn_agent/wait_agent tool calls or repeated UI Subagents blocks as additional subagents.",
     "- Do not describe a subagent as running or still working if its status above is completed, failed, blocked, cancelled, or closed.",
-    "- After spawn_agent, call wait_agent before user-facing progress narration unless you are doing concrete non-overlapping local work.",
+    ...SUBAGENT_WAIT_GUIDANCE.map((guidance) => `- ${guidance}`),
     "- When writing a synthesis, use the exact unique subagent count and statuses above.",
   ];
   return lines.join("\n");

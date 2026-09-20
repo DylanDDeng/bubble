@@ -3,6 +3,8 @@ import { extractUnifiedDiffFilePath } from '../../src/shared/unified-diff';
 import { buildTurnChangeContext } from '../../src/ui/utils/turn-change-records';
 import {
   formatWorkstreamStageSummary,
+  getExplorationPresentation,
+  getWorkstreamSummaryIconStage,
   getStageChangeRecords,
   summarizeWorkstreamEntries,
 } from '../../src/ui/utils/workstream-stages';
@@ -658,8 +660,28 @@ const summary = formatWorkstreamStageSummary([
 ]);
 assert.equal(
   summary,
-  'Edited files, read files, and ran a command',
+  'Edited files, explored project, ran a command',
   'collapsed workstream summary should surface high-signal activity'
 );
 
 console.log('workstream stage verification passed');
+
+const reads = [toolEntry('read-icon', 'Read', 'file_read', 'Read a.ts', { file_path: 'a.ts' })];
+const searches = [toolEntry('search-icon', 'Grep', 'pattern_search', 'Searched code', { pattern: 'code' })];
+const lists = [toolEntry('list-icon', 'ls', 'pattern_search', 'Listed project', { path: '.' })];
+for (const [entries, label, icon] of [
+  [reads, 'Read files', 'read'],
+  [searches, 'Searched files', 'search'],
+  [lists, 'Listed files', 'list'],
+  [[...lists, ...searches, ...reads], 'Explored project', 'explore'],
+  [[...reads, ...searches, ...lists], 'Explored project', 'explore'],
+] as const) {
+  const stages = summarizeWorkstreamEntries([...entries]);
+  assert.equal(formatWorkstreamStageSummary(stages), label);
+  assert.equal(getExplorationPresentation(getWorkstreamSummaryIconStage(stages)!.entries).icon, icon);
+}
+const separatedExploration = summarizeWorkstreamEntries([
+  ...searches, toolEntry('separator', 'Bash', 'command_execution', 'Ran git status', { command: 'git status' }), ...reads,
+]);
+assert.equal(formatWorkstreamStageSummary(separatedExploration), 'Explored project, ran a command');
+assert.equal(getExplorationPresentation(getWorkstreamSummaryIconStage(separatedExploration)!.entries).icon, 'explore', 'summary icon includes exploration after intervening commands');

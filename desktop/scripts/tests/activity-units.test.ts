@@ -1,0 +1,71 @@
+import assert from 'node:assert/strict';
+import { activityDetailGroups, buildActivityStages, buildActivityUnits, getActivityHeader, hasActivityDetail, reasoningHeading } from '../../src/ui/utils/activity-units';
+import type { WorkstreamEntry } from '../../src/ui/utils/workstream';
+const tool = (id: string, kind: 'mcp_tool_call' | 'file_read' | 'command_execution' | 'file_change' = 'mcp_tool_call', status: 'pending' | 'success' | 'error' = 'success'): WorkstreamEntry => ({
+  id, type: 'tool', toolName: 'mcp__docs__read', kind, status, summary: 'Read docs',
+  block: { type: 'tool_use', id, name: 'mcp__docs__read', input: { page: id } },
+});
+const think: WorkstreamEntry = { id: 'thought', type: 'thinking', summary: 'Inspect', detail: '**Checking the runtime**\nInspect event ordering.', state: 'active' };
+assert.deepEqual(getActivityHeader([tool('done')], true), { kind: 'thinking', key: 'thinking', label: 'Thinking' });
+assert.equal(getActivityHeader([tool('done'), think], true).kind, 'thinking');
+assert.equal(reasoningHeading([think]), 'Checking the runtime');
+assert.equal(reasoningHeading([{ ...think, detail: '**Streaming an unfinished heading' }]), undefined);
+assert.equal(getActivityHeader([tool('running', 'mcp_tool_call', 'pending'), tool('failed', 'mcp_tool_call', 'error')], true).key, 'active:running', 'historical failure does not conceal a live operation');
+assert.equal(getActivityHeader([tool('running', 'mcp_tool_call', 'pending')], false).kind, 'summary', 'closed slices never take over current status');
+assert.equal(getActivityHeader([think], false).kind, 'summary');
+assert.deepEqual(getActivityHeader([tool('done')], true, 'Checking the runtime'), {
+  kind: 'thinking', key: 'thinking', label: 'Checking the runtime',
+}, 'a narration boundary does not lose the turn-wide reasoning heading');
+assert.equal(getActivityHeader([tool('pending', 'mcp_tool_call', 'pending')], true, 'Checking the runtime').kind,
+  'active', 'turn-wide reasoning never conceals a pending operation');
+assert.equal(buildActivityUnits([tool('read', 'file_read'), think, tool('shell', 'command_execution')]).length, 1, 'reasoning does not split a tool activity group');
+assert.deepEqual(buildActivityUnits([think]), [], 'reasoning feeds the turn fallback, not an activity row');
+assert.equal(buildActivityUnits([think, tool('read', 'file_read')])[0].id, 'activity:read', 'reasoning cannot change an activity group identity');
+assert.equal(hasActivityDetail(tool('read', 'file_read', 'pending')), false, 'unfinished reads have no empty detail row');
+assert.equal(hasActivityDetail(tool('read', 'file_read', 'error')), true, 'failed reads remain inspectable');
+const units = buildActivityUnits([tool('a'), { id: 'n', type: 'note', summary: 'I will verify it' }, tool('b'), { id: 'e', type: 'error', summary: 'Connection lost' }]);
+assert.deepEqual(units.map(u => u.kind), ['group', 'standalone', 'group', 'standalone']);
+assert.equal(buildActivityUnits([tool('a'), { id: 'p', type: 'approval', state: 'waiting', summary: 'Approve?' }]).at(-1)?.kind, 'standalone');
+assert.equal(activityDetailGroups([tool('a', 'command_execution'), tool('b', 'command_execution')]).length, 2, 'commands never merge merely because they share a stage kind');
+assert.equal(activityDetailGroups([tool('a', 'file_change'), tool('b', 'file_change')]).length, 2);
+assert.equal(activityDetailGroups([tool('a', 'file_read'), think, tool('b', 'file_read')]).length, 2, 'native activity details retain individual exploration operations');
+assert.deepEqual(buildActivityStages([tool('a', 'file_read'), tool('b', 'file_read')]).map(stage => stage.title), ['Read docs', 'Read docs']);
+assert.equal(activityDetailGroups([tool('a'), tool('b')]).length, 1, 'identical successful MCP labels coalesce');
+assert.equal(activityDetailGroups([tool('a'), { ...tool('b'), toolName: 'mcp__other__read' } as WorkstreamEntry]).length, 2, 'server identity is significant');
+assert.equal(activityDetailGroups([tool('a'), tool('b', 'mcp_tool_call', 'error')]).length, 2);
+assert.equal(activityDetailGroups([tool('a'), tool('b', 'mcp_tool_call', 'pending')]).length, 2);
+assert.equal(activityDetailGroups([tool('a'), { ...tool('b'), summary: 'Another target' }]).length, 2);
+const task = (id: string, sourceMessageUuid?: string): WorkstreamEntry => ({ id, type: 'task', toolName: 'spawn_agent', kind: 'subagent', summary: 'Review', status: 'pending', block: { type: 'tool_use', id, name: 'spawn_agent', input: {} }, sourceMessageUuid });
+assert.equal(buildActivityUnits([task('a', 'fanout'), task('b', 'fanout')]).length, 1);
+assert.equal(buildActivityUnits([task('a', 'one'), task('b', 'two')]).length, 2, 'sequential agents are separate events');
+console.log('PASS: Codex activity boundaries, liveness, reasoning summaries, command/edit identity and MCP aggregation');
+
+assert.equal(buildActivityStages([tool('a'), tool('b')]).length, 1);
+assert.equal(buildActivityStages([tool('a'), tool('b')])[0].title, 'Read docs · 2 calls');
+
+assert.equal(getActivityHeader([tool('read', 'file_read')], true).kind, 'active', 'exploration remains active between completed reads');
+assert.equal(getActivityHeader([tool('read', 'file_read'), think], true).kind, 'active', 'native exploration includes trailing reasoning until a non-exploration event arrives');
+
+// Exercise the real adapter vocabulary, not only hand-constructed render fixtures.
+import { classifyToolUse, deriveReadableToolDisplay, formatReadableToolSummary } from '../../src/ui/utils/tool-summary';
+import { extractTraceEntries } from '../../src/ui/utils/workstream';
+import { deriveTranscriptTimelineItems } from '../../src/ui/utils/transcript-timeline';
+import type { StreamMessage } from '../../src/shared/types';
+assert.equal(classifyToolUse('Bash', { command: 'ls -la src' }), 'pattern_search');
+assert.equal(classifyToolUse('Bash', { cmd: 'rg --files src' }), 'pattern_search');
+assert.equal(classifyToolUse('Bash', { command: 'npm test' }), 'command_execution');
+assert.equal(formatReadableToolSummary(deriveReadableToolDisplay('Bash', { command: 'rg --files src' }, 'pending')), 'Listing files');
+assert.equal(classifyToolUse('mcp__docs__read', {}), 'mcp_tool_call');
+const thoughtMessage: StreamMessage = { type: 'assistant', uuid: 'reasoning-source', message: { content: [{type:'thinking', thinking:'**Checking**\nInspect the files'}] } };
+const before: StreamMessage = { type:'assistant', uuid:'older', message:{content:[{type:'text',text:'Older note'}]} };
+assert.equal(extractTraceEntries([thoughtMessage])[0].id, extractTraceEntries([before, thoughtMessage])[1].id, 'reasoning identity is unaffected by earlier history');
+const partial: StreamMessage = {...thoughtMessage, message:{content:[{type:'thinking',thinking:''}]}};
+assert.equal(extractTraceEntries([partial],{partialThinking:'**Checking**'})[0].id, extractTraceEntries([thoughtMessage])[0].id, 'a streamed reasoning slot retains identity when committed');
+const noAnswer: StreamMessage[] = [
+ {type:'user_prompt',prompt:'Inspect'}, thoughtMessage,
+ {type:'result',subtype:'success',duration_ms:1000,total_cost_usd:0,usage:{input_tokens:1,output_tokens:1}},
+];
+const noAnswerWork = deriveTranscriptTimelineItems(noAnswer).find(item=>item.type==='work');
+assert(noAnswerWork?.type==='work');
+assert.equal(noAnswerWork.canCollapse,false,'a result without a final answer does not conceal the trace');
+console.log('PASS: real tool classifications, reasoning identity and final-answer collapse boundary');

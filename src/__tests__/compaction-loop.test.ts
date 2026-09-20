@@ -128,7 +128,8 @@ describe("compaction full-loop invariants", () => {
       systemPrompt: "system prompt for the loop test",
     });
 
-    await drain(agent.run(instruction, process.cwd()));
+    const events: AgentEvent[] = [];
+    for await (const event of agent.run(instruction, process.cwd())) events.push(event);
 
     // Invariant 1: at most one summary marker in the resident history...
     const residentSummaries = agent.messages.filter((m) => isCompactionSummaryMessage(m as Message));
@@ -156,6 +157,8 @@ describe("compaction full-loop invariants", () => {
     expect(stats.fired).toBeGreaterThan(0);
     expect(stats.fired).toBeLessThanOrEqual(TURNS / 4);
     expect(written).toBeLessThanOrEqual(stats.fired);
+    expect(events.filter(e => e.type === "context_compaction" && e.status === "completed").length).toBeGreaterThan(0);
+    expect(events.some(e => e.type === "context_usage" && e.contextWindow === 128000)).toBe(true);
   }, 30_000);
 
   it("repeated turn-level compaction never stacks summaries or grows history (direct loop)", () => {

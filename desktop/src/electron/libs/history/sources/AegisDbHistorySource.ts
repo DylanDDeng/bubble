@@ -1,4 +1,5 @@
 import * as sessions from '../../session-store';
+import { recoverBubbleHistoryContext } from '../../bubble-history-context';
 import { endIndexAfterTopLevelCount, startIndexForTopLevelCount } from '../page-boundaries';
 import type {
   SessionHistorySource,
@@ -26,11 +27,27 @@ export class AegisDbHistorySource implements SessionHistorySource {
   // messages ride along with their slice so a chatty Task can't fill a page
   // with rows the transcript never renders. See page-boundaries.ts.
   async loadLatest(session: UnifiedSessionRecord, limit: number): Promise<UnifiedHistoryPage> {
-    const messages = getRenderableMessages(session.id);
+    let messages = getRenderableMessages(session.id);
+    let recovered = null;
+    const row = session.provider === 'bubble' ? sessions.getSession(session.id) : null;
+    if (row && ['idle', 'completed', 'error'].includes(row.status) &&
+        !messages.some(m => !m.parentToolUseId && m.type === 'system' && m.subtype === 'bubble_context')) {
+      recovered = await recoverBubbleHistoryContext(row, messages);
+      // Opening history can overlap with sending a new turn. Never append an
+      // old measurement after a newly persisted runtime snapshot.
+      const current = sessions.getSession(session.id);
+      const currentMessages = getRenderableMessages(session.id);
+      if (!current || current.status !== row.status || current.updated_at !== row.updated_at ||
+          current.bubble_session_id !== row.bubble_session_id || current.model !== row.model ||
+          currentMessages.length !== messages.length || currentMessages.some(m =>
+            !m.parentToolUseId && m.type === 'system' && m.subtype === 'bubble_context')) recovered = null;
+      messages = currentMessages;
+    }
     const safeLimit = Math.max(1, limit);
     const start = startIndexForTopLevelCount(messages, messages.length, safeLimit);
     return {
-      messages: messages.slice(start),
+      // Synthesized telemetry is not stored and does not consume a page offset.
+      messages: [...messages.slice(start), ...(recovered ? [recovered] : [])],
       cursor: start > 0 ? encodeCursor(start) : null,
       hasMore: start > 0,
     };

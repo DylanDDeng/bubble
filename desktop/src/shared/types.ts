@@ -1682,6 +1682,12 @@ export interface AvailableCommand {
 export type StreamMessage =
   | (StreamMessageBase & { type: 'user_prompt'; prompt: string; attachments?: Attachment[] })
   | (StreamMessageBase & {
+      /** Desktop-only failure history, never submitted to the model. */
+      type: 'turn_failure';
+      uuid: string;
+      error: string;
+    })
+  | (StreamMessageBase & {
       /** Durable, native completion metadata; never sent to the model as a prompt. */
       type: 'goal_completed';
       uuid: string;
@@ -1721,8 +1727,15 @@ export type StreamMessage =
       subtype: 'compact_status';
       uuid: string;
       session_id: string;
-      status: 'started';
+      status: 'started' | 'failed';
       trigger: 'manual' | 'auto';
+    })
+  | (StreamMessageBase & {
+      type: 'system';
+      subtype: 'bubble_context';
+      uuid: string;
+      model: string;
+      context: { usedTokens: number; contextWindow: number; estimated: boolean } | null;
     })
   // Emitted when an API request failed with a retryable error and the runtime
   // will retry after a delay. Rendered as a transient status on the working

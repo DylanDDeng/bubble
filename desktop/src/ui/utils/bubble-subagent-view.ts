@@ -7,7 +7,7 @@ export function controlAgentIds(name: string, input: unknown): string[] {
   if (!childControlTools.has(name) || !input || typeof input !== 'object') return [];
   const args = input as Record<string, unknown>;
   return [...new Set([args.agent_id, ...(Array.isArray(args.agent_ids) ? args.agent_ids : [])]
-    .filter((id): id is string => typeof id === 'string' && !!id.trim()))];
+    .filter((id): id is string => typeof id === 'string' && !!id.trim()).map(id => id.trim()))];
 }
 export function latestChildState(messages: StreamMessage[]): BubbleSubagentState | undefined {
   return messages.reduce<BubbleSubagentState | undefined>((last, message) => {
@@ -27,7 +27,7 @@ export function shortChildTask(task: string): string {
   if (issue) first = `${issue[0].replace(/^GitHub\s*/i, '')} · ${first.replace(issue[0], '').replace(/的\s*$/, '').trim()}`;
   return first.length > 64 ? `${first.slice(0, 63)}…` : first;
 }
-export interface ChildOperation { id: string; label: string; detail: string; pending: boolean; failed: boolean }
+export interface ChildOperation { id: string; toolName: string; label: string; detail: string; pending: boolean; failed: boolean }
 export function childOperations(messages: StreamMessage[]): ChildOperation[] {
   const results = new Map<string, ReturnType<typeof normalizeToolResultBlock>>();
   for (const message of messages) for (const block of getMessageContentBlocks(message)) {
@@ -41,13 +41,16 @@ export function childOperations(messages: StreamMessage[]): ChildOperation[] {
     const result = results.get(tool.id);
     const pending = !result;
     const failed = !!result?.is_error;
+    const output = typeof result?.content === 'string' ? result.content : JSON.stringify(result?.content ?? '');
+    const timedOut = tool.name === 'wait_agent' && !failed && /(?:timed out|before the timeout)/i.test(output);
     const args = tool.input as Record<string, unknown>;
     const label = tool.name === 'wait_agent'
-      ? (failed ? 'Could not wait for subagent' : pending ? 'Main agent is waiting for this subagent' : 'Wait finished')
+      ? (failed ? 'Could not wait for subagent' : pending ? 'Main agent is waiting for this subagent'
+        : timedOut ? 'Wait timed out before a result was ready' : 'Wait returned')
       : tool.name === 'close_agent' ? (failed ? 'Could not stop subagent' : pending ? 'Stopping subagent' : 'Subagent stopped')
       : failed ? 'Supplementary message not delivered'
       : pending ? 'Sending supplementary message' : args?.interrupt ? 'Task redirected' : 'Supplementary message accepted';
-    operations.push({ id: tool.id, label, pending, failed,
+    operations.push({ id: tool.id, toolName: tool.name, label, pending, failed,
       detail: JSON.stringify({ tool: tool.name, input: tool.input, result: result?.content }, null, 2) });
   }
   return operations;

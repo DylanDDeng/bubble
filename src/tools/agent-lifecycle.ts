@@ -8,6 +8,7 @@ import type { SubagentThreadSnapshot } from "../agent/subagent-control.js";
 import { buildWorkflowResultBlock, workflowMemberWarning } from "../agent/workflow/control.js";
 import { precompileWorkflowScript } from "../agent/workflow/runtime.js";
 import { formatSubagentRoute } from "../agent/subagent-route-format.js";
+import { SUBAGENT_WAIT_GUIDANCE } from "../agent/subagent-wait-guidance.js";
 import type { ApprovalController } from "../approval/types.js";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
 
@@ -208,7 +209,7 @@ export function createWaitAgentTool(): ToolRegistryEntry {
     effect: "read",
     description: [
       "Wait for one or more spawned subagents to reach a final status and return snapshots.",
-      "If the wait times out while children are still queued or running, call wait_agent again with a longer timeout instead of redoing the same delegated work locally.",
+      ...SUBAGENT_WAIT_GUIDANCE,
     ].join(" "),
     parameters: {
       type: "object",
@@ -216,10 +217,10 @@ export function createWaitAgentTool(): ToolRegistryEntry {
         agent_id: { type: "string", description: "A single agent id to wait for." },
         agent_ids: {
           type: "array",
-          description: "Agent ids to wait for. If omitted, waits for any active subagent.",
+          description: "Agent ids to wait for; returns when any target finishes. Prefer explicit IDs for remaining work. If omitted, considers all non-closed subagents, including already-finished ones.",
           items: { type: "string" },
         },
-        timeout_ms: { type: "number", description: "Maximum wait time in milliseconds. Defaults to 30000." },
+        timeout_ms: { type: "number", description: "Maximum wait time in milliseconds, not a mandatory delay; returns early when a target finishes. Choose according to your next decision. Defaults to 30000." },
       },
       additionalProperties: false,
     },
@@ -586,7 +587,7 @@ function spawnNextSteps(snapshot: SubagentThreadSnapshot): string[] {
     ];
   }
   return [
-    `next: call wait_agent for ${snapshot.agentId} before reporting this subagent's current status or final result`,
+    `next: continue useful non-overlapping work; call wait_agent for ${snapshot.agentId} when its result is needed for your next step or final synthesis`,
   ];
 }
 
@@ -607,7 +608,7 @@ function waitTimeoutGuidance(snapshots: SubagentThreadSnapshot[]): string[] {
   if (running.length > 0) {
     lines.push(`${running.length} child${running.length === 1 ? " is" : "ren are"} still running.`);
   }
-  lines.push("Call wait_agent again with a longer timeout instead of duplicating the same work locally.");
+  lines.push("Reassess whether a child's result blocks your next meaningful step: continue useful independent work if available, otherwise call wait_agent again with a suitable timeout. Do not duplicate the delegated work.");
   return lines;
 }
 

@@ -48,6 +48,8 @@ export type BubbleToolResult = {
 
 export type BubbleAgentEvent =
   | { type: 'turn_start' }
+  | { type: 'context_usage'; usedTokens: number; contextWindow?: number; estimated: boolean }
+  | { type: 'context_compaction'; status: 'started' | 'completed' | 'failed'; preTokens: number; postTokens?: number; contextWindow?: number }
   | { type: 'text_delta'; content: string }
   | { type: 'reasoning_delta'; content: string }
   | { type: 'tool_call_start'; id: string; name: string }

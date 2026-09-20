@@ -135,6 +135,15 @@ assert.equal(work(before).disclosureResetKey, work(during).disclosureResetKey, '
 assert.equal(work(during).disclosureResetKey, work(answering).disclosureResetKey, 'final answer keeps disclosure identity');
 assert.equal(work(during).active, true, 'commentary keeps work active');
 assert.equal(work(answering).active, false, 'explicit final answer settles the trace before the runtime ends');
+assert.equal(work(answering).turnRunning, true, 'answer streaming still owns a live turn clock');
+assert.equal(work(before).group.startedAt, 1000);
+assert.equal(work(during).group.startedAt, 1000, 'narration does not reset the clock');
+assert.equal(work(answering).group.startedAt, 1000, 'collapse keeps the original clock origin');
+const finished = deriveTranscriptTimelineItems([prompt, reasoning, commentary, final,
+  { type: 'result', subtype: 'success', duration_ms: 40000, total_cost_usd: 0, usage: { input_tokens: 1, output_tokens: 1 } },
+], runningOptions);
+assert.equal(work(finished).turnRunning, false, 'terminal result stops the clock even before session status catches up');
+assert.equal(work(finished).group.durationMs, 40000);
 assert.equal(work(answering).defaultExpanded, false);
 assert(answering.some(item => item.type === 'message' && item.message.type === 'assistant' && item.message.uuid === 'f1'));
 const unphased = deriveTranscriptTimelineItems([prompt, reasoning, { ...final, phase: undefined }], runningOptions);

@@ -24,6 +24,7 @@ import {
   safeJsonStringify,
 } from './tool-summary';
 import { extractLatestTodoProgress } from './todo-progress';
+import { getSubagentPersona } from './subagent-persona';
 
 export type ToolUseBlock = ContentBlock & { type: 'tool_use' };
 export type ToolResultBlock = ContentBlock & { type: 'tool_result' };
@@ -76,6 +77,10 @@ export type WorkstreamEntry =
       result?: ToolResultBlock;
       /** Streamed stdout/stderr tail while the tool is still running. */
       liveOutput?: string;
+      /** A live coordination call, displayed outside ordinary tool groups. */
+      subagentWait?: { anchorId: string; name: string }[];
+      /** Native coordination event, kept in chronological history after it resolves. */
+      subagentControl?: { action: string; targets: { anchorId: string; name: string }[]; allTargetsLinked: boolean };
     }
   | {
       id: string;
@@ -295,14 +300,23 @@ export function groupSubagentMessagesByParent(
     if (message.bubbleSubagent) anchors.set(message.bubbleSubagent.agentId, message.bubbleSubagent.anchorId);
   }
   const controls = new Map<string, string[]>();
+  const seenSpawns = new Set<string>();
   for (const message of messages) {
     if (message.parentToolUseId) continue;
     for (const block of getMessageContentBlocks(message)) {
       const tool = normalizeToolUseBlock(block);
       if (!tool) continue;
+      if (isSubagentTaskBlock(block)) seenSpawns.add(tool.id);
       const ids = controlAgentIds(tool.name, tool.input);
       const targets = tool.name === 'wait_agent' && ids.length === 0
-        ? [...anchors.values()].filter(anchor => ['queued', 'running'].includes(latestChildState(map.get(anchor) ?? [])?.status ?? ''))
+        // The runtime includes finished (non-closed) children. Reconstruct the
+        // call's scope from preceding spawns, never from current running status.
+        // A later spawn must not change an earlier wait's historical targets.
+        ? [...anchors.values()].filter(anchor => {
+            if (!seenSpawns.has(anchor)) return false;
+            const state = latestChildState(map.get(anchor) ?? []);
+            return state?.status !== 'closed' || (typeof message.createdAt === 'number' && state.updatedAt > message.createdAt);
+          })
         : ids.map(id => anchors.get(id)).filter((id): id is string => !!id);
       if (!targets.length) continue;
       controls.set(tool.id, targets);
@@ -513,7 +527,7 @@ export function extractTraceEntries(
     const msg = messages[msgIdx];
     const isLast = msgIdx === lastMsgIndex;
 
-    for (const block of getMessageContentBlocks(msg)) {
+    for (const [blockIndex, block] of getMessageContentBlocks(msg).entries()) {
       if (block.type === 'thinking') {
         const content = block.thinking?.trim() || '';
         if (content) {
@@ -529,7 +543,7 @@ export function extractTraceEntries(
           }
           entries.push({
             type: 'thinking',
-            id: `thinking-${entries.length}`,
+            id: `thinking:${msg.uuid || msgIdx}:${blockIndex}`,
             content,
           });
         } else if (isLast && trimmedPartialThinking && !thinkingPartialUsed) {
@@ -537,7 +551,7 @@ export function extractTraceEntries(
           // live partial in its natural position.
           entries.push({
             type: 'thinking',
-            id: 'streaming-thinking',
+            id: `thinking:${msg.uuid || msgIdx}:${blockIndex}`,
             content: trimmedPartialThinking,
             streaming: true,
           });
@@ -1025,14 +1039,27 @@ export function createBatchWorkstreamModel(params: {
         depth: 0,
       }
     : undefined;
-  const linkedControlIds = new Set([...(params.subagentMessagesByParent?.values() ?? [])].flatMap(messages => childOperations(messages).map(operation => operation.id)));
+  const linkedControls = new Map<string, { action: string; targets: { anchorId: string; name: string }[] }>();
+  const activeWaits = new Map<string, { targets: { anchorId: string; name: string; running: boolean }[] }>();
+  for (const [anchorId, messages] of params.subagentMessagesByParent ?? []) {
+    const runtime = latestChildState(messages);
+    for (const operation of childOperations(messages)) {
+      const name = getSubagentPersona(runtime?.agentId || anchorId, runtime?.role, undefined, runtime?.nickname).persona;
+      const control = linkedControls.get(operation.id) ?? { action: operation.toolName, targets: [] };
+      if (!control.targets.some(target => target.anchorId === anchorId)) control.targets.push({ anchorId, name });
+      linkedControls.set(operation.id, control);
+      if (!params.isSessionRunning || !operation.pending || operation.toolName !== 'wait_agent') continue;
+      const wait = activeWaits.get(operation.id) ?? { targets: [] };
+      if (!wait.targets.some(target => target.anchorId === anchorId)) wait.targets.push({
+        anchorId,
+        name: getSubagentPersona(runtime?.agentId || anchorId, runtime?.role, undefined, runtime?.nickname).persona,
+        running: !runtime || runtime.status === 'running' || runtime.status === 'queued',
+      });
+      activeWaits.set(operation.id, wait);
+    }
+  }
   const entries = traceEntries
-    // Hide only successfully linked coordination calls. Unknown/stale ids keep
-    // a readable standalone row, including their errors, so nothing is lost.
-    .filter(entry => {
-      if (entry.type !== 'tool') return true;
-      return !linkedControlIds.has(entry.block.id);
-    })
+    // Coordination events are independent timeline items, not hidden in the spawn.
     .filter((entry) => !(entry.type === 'tool' && entry.block.name === 'TodoWrite'))
     .map((entry) =>
       createEntryFromTrace(
@@ -1044,7 +1071,19 @@ export function createBatchWorkstreamModel(params: {
         params.toolLiveOutputMap
       )
     )
-    .filter((entry): entry is WorkstreamEntry => Boolean(entry));
+    .filter((entry): entry is WorkstreamEntry => Boolean(entry))
+    .map(entry => {
+      const control = linkedControls.get(entry.id);
+      const wait = activeWaits.get(entry.id);
+      if (entry.type !== 'tool') return entry;
+      const ids = controlAgentIds(entry.toolName, entry.block.input);
+      const linkedControl = control ? { ...control, allTargetsLinked: ids.length === 0 || ids.length === control.targets.length } : undefined;
+      if (!wait) return linkedControl ? { ...entry, subagentControl: linkedControl } : entry;
+      const runningTargets = wait.targets.filter(target => target.running);
+      return { ...entry, status: 'pending' as const, subagentControl: linkedControl,
+        subagentWait: (runningTargets.length ? runningTargets : wait.targets).map(({ anchorId, name }) => ({ anchorId, name })),
+        summary: runningTargets.length ? 'Waiting for' : 'Collecting results from' };
+    });
 
   const permissionEntries = (params.liveTrace?.permissionRequests || []).map(
     getApprovalStateFromRequest

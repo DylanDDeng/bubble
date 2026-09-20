@@ -119,7 +119,7 @@ describe("wait_agent reply protocol (design §3.1, §3.4)", () => {
     expect(result.status).toBe("timeout");
     expect(result.content).toContain("queued for a concurrency slot");
     expect(result.content).toContain("still running");
-    expect(result.content).toContain("wait_agent again with a longer timeout");
+    expect(result.content).toContain("wait_agent again with a suitable timeout");
     expect(result.content).not.toContain("resume: call send_input");
   });
 });
@@ -212,5 +212,24 @@ describe("project profile trust gate", () => {
     expect(tool.description).toContain("scout");
     expect(tool.description).toContain("[project: requires user approval on first use]");
     expect(tool.description).toContain("project scout profile");
+  });
+});
+
+describe("wait_agent timeout choice", () => {
+  it("forwards a deliberate short timeout without introducing a policy minimum", async () => {
+    let requested: number | undefined;
+    const tool = createWaitAgentTool();
+    await tool.execute({ agent_id: "child_1", timeout_ms: 1_000 }, {
+      cwd: "/tmp",
+      agent: { waitSubAgents: async options => {
+        requested = options.timeoutMs;
+        return [snapshot({ status: "completed" })];
+      } },
+    });
+    expect(requested).toBe(1_000);
+    expect((tool.parameters.properties as Record<string, any>).timeout_ms.minimum).toBeUndefined();
+    expect(tool.description).toContain("upper bound, not a mandatory delay");
+    expect(tool.description).toContain("next meaningful step");
+    expect(tool.description).toContain("same decision-value principle applies to list_agents");
   });
 });

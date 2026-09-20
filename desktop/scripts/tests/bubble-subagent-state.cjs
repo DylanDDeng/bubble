@@ -18,6 +18,12 @@ app.whenReady().then(()=>{
  const stateEvents=events.filter(e=>e.message?.bubbleSubagent);
  assert.equal(stateEvents.at(-1).message.bubbleSubagent.status,'failed');
  assert.equal(new Set(stateEvents.map(e=>e.message.uuid)).size,1,'state updates upsert one durable child record');
+ adapter.handleToolUse(session,'wait-finished','wait_agent',{});
+ assert.deepEqual(events.find(e=>e.message?.uuid?.endsWith(':wait-finished')).message.message.content[0].input.agent_ids,['child'],'implicit wait captures finished children too, matching runtime targets');
+ update('closed');
+ adapter.handleToolUse(session,'wait-closed','wait_agent',{});
+ assert.deepEqual(events.find(e=>e.message?.uuid?.endsWith(':wait-closed')).message.message.content[0].input.agent_ids,[],'closed children are excluded');
+ update('failed');
  // Terminal update can beat the synchronous spawn result.
  session.emittedToolResultIds.clear();events.length=0;
  adapter.handleToolResult(session,'spawn',{content:'Spawned John: queued'});
