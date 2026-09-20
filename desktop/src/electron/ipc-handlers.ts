@@ -10935,6 +10935,21 @@ function startRunner(
         return;
       }
 
+      // Keep the failure at this turn's position in durable history. Result and
+      // status events do not write this record; retiring this handle below also
+      // prevents late duplicate error callbacks from appending another notice.
+      const failure: StreamMessage = {
+        type: 'turn_failure',
+        uuid: uuidv4(),
+        createdAt: Date.now(),
+        error: message,
+      };
+      sessions.addMessage(session.id, failure);
+      broadcast(mainWindow, {
+        type: 'stream.message',
+        payload: { sessionId: session.id, message: failure },
+      });
+
       sessions.updateSessionStatus(session.id, 'error');
       broadcast(mainWindow, {
         type: 'session.status',
