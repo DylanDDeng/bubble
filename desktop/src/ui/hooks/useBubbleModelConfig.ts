@@ -63,6 +63,7 @@ function normalizeBubbleModelConfig(
     defaultModel,
     options,
     availableModels,
+    catalogNotice: raw?.catalogNotice,
   };
 }
 

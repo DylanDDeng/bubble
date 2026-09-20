@@ -26,6 +26,8 @@ const EMPTY_BUBBLE_MODEL_CONFIG: BubbleModelConfig = {
 // Live model discovery hits each provider's HTTP endpoint and can take ~5s
 // per unreachable provider, so it must never block the picker. The picker's
 // data is assembled from local sources only:
+// OpenAI uses only confirmed remote membership, never the builtin catalog.
+// Other providers retain their existing local catalog contract:
 //   1. the SDK's builtin static catalog / the user's models.json
 //      (registry.localModelsForProvider — no network),
 //   2. the last successful live discovery, persisted on disk.
@@ -42,8 +44,19 @@ function bubbleModelDiskCachePath(): string | null {
 }
 
 function modelCacheIdentity(profile: BubbleProviderProfile): string {
-  return createHash('sha256').update(JSON.stringify([profile.authType || 'api', profile.baseURL, profile.apiKey])).digest('hex');
+  let identity = profile.apiKey;
+  if (profile.id === 'openai' && profile.authType === 'oauth' && typeof profile.apiKey === 'string') {
+    try {
+      const payload = JSON.parse(Buffer.from(profile.apiKey.split('.')[1], 'base64url').toString('utf8'));
+      const auth = payload['https://api.openai.com/auth'];
+      const account = auth?.chatgpt_account_id || auth?.account_id;
+      if (typeof account === 'string' && account) identity = JSON.stringify([account, payload.sub || '']);
+    } catch { /* Opaque tokens stay isolated by token hash. */ }
+  }
+  return createHash('sha256').update(JSON.stringify([profile.authType || 'api', profile.baseURL, identity])).digest('hex');
 }
+
+const catalogFailures = new Map<string, string>();
 
 function readBubbleModelDiskCache(cachePath: string | null, profiles: Map<string, BubbleProviderProfile>): Record<string, BubbleModelInfo[]> {
   if (!cachePath || !existsSync(cachePath)) {
@@ -53,12 +66,15 @@ function readBubbleModelDiskCache(cachePath: string | null, profiles: Map<string
     const parsed = JSON.parse(readFileSync(cachePath, 'utf-8')) as {
       providers?: Record<string, BubbleModelInfo[]>;
       identities?: Record<string, string>;
+      confirmedRemoteProviders?: string[];
     };
     // API and subscription accounts have different catalogs. Old/unmatched
     // cache entries must not leak models from the previous authentication mode.
     return Object.fromEntries(Object.entries(parsed.providers || {}).filter(([id]) => {
       const profile = profiles.get(id);
-      return profile && parsed.identities?.[id] === modelCacheIdentity(profile);
+      return profile && Array.isArray(parsed.providers?.[id])
+        && (id !== 'openai' || parsed.confirmedRemoteProviders?.includes(id))
+        && parsed.identities?.[id] === modelCacheIdentity(profile);
     }));
   } catch {
     return {};
@@ -98,8 +114,8 @@ type BubbleDiscoveryContext = {
   profiles: Map<string, BubbleProviderProfile>;
 };
 
-async function getBubbleDiscoveryContext(): Promise<BubbleDiscoveryContext> {
-  const sdk = await getBubbleSdk();
+async function getBubbleDiscoveryContext(sdkOverride?: BubbleSdkInstance): Promise<BubbleDiscoveryContext> {
+  const sdk = sdkOverride ?? await getBubbleSdk();
   reloadBubbleSdkConfig(sdk);
   const config = sdk.getModelConfig();
   return {
@@ -112,16 +128,31 @@ async function getBubbleDiscoveryContext(): Promise<BubbleDiscoveryContext> {
   };
 }
 
-export async function getBubbleModelConfig(): Promise<BubbleModelConfig> {
+function confirmedOpenAIModels(sdk: BubbleSdkInstance): BubbleModelInfo[] | undefined {
+  const snapshot = sdk.registry.getCachedDiscoverySnapshot('openai', { allowExpiredConfirmation: true });
+  return snapshot?.complete ? snapshot.models : undefined;
+}
+
+export async function getBubbleModelConfig(sdkOverride?: BubbleSdkInstance): Promise<BubbleModelConfig> {
   let defaultModel: string | null = null;
   const modelsByName = new Map<string, BubbleAvailableModel>();
+  let catalogNotice: string | undefined;
   try {
-    const context = await getBubbleDiscoveryContext();
+    const context = await getBubbleDiscoveryContext(sdkOverride);
     defaultModel = context.defaultModel;
     const diskCache = readBubbleModelDiskCache(bubbleModelDiskCachePath(), context.profiles);
     for (const providerId of context.configuredIds) {
       const profile = context.profiles.get(providerId);
       if (!profile) {
+        continue;
+      }
+      if (providerId === 'openai') {
+        const cached = confirmedOpenAIModels(context.sdk) ?? diskCache[providerId];
+        for (const model of cached ?? []) addModel(modelsByName, providerId, model);
+        const failure = catalogFailures.get(modelCacheIdentity(profile));
+        catalogNotice = failure
+          ? cached !== undefined ? 'OpenAI model refresh failed. Using the last successful catalog.' : 'Could not load OpenAI models. Retry from provider settings.'
+          : cached === undefined ? 'Loading OpenAI models…' : undefined;
         continue;
       }
       // Local catalog first (static builtin / models.json), then extras the
@@ -157,6 +188,7 @@ export async function getBubbleModelConfig(): Promise<BubbleModelConfig> {
     defaultModel,
     options: normalizedModels.filter((model) => model.enabled).map((model) => model.name),
     availableModels: normalizedModels,
+    catalogNotice,
   };
 }
 
@@ -193,11 +225,18 @@ async function runBubbleModelCatalogRefresh(): Promise<boolean> {
         return null;
       }
       try {
+        if (providerId === 'openai') {
+          const result = await context.sdk.registry.discoverModels(profile, { forceRefresh: true });
+          if (result.error || !result.authoritative || !['remote', 'cache'].includes(result.source)) {
+            return { providerId, models: confirmedOpenAIModels(context.sdk) ?? null, failed: true };
+          }
+          return { providerId, models: result.models };
+        }
         const models = (await context.sdk.registry.listModels(profile)) || [];
         return { providerId, models };
       } catch (error) {
         console.warn(`[bubble-settings] Failed to list Bubble models for "${providerId}":`, error);
-        return null;
+        return { providerId, models: providerId === 'openai' ? confirmedOpenAIModels(context.sdk) ?? null : null, failed: true };
       }
     })
   );
@@ -219,22 +258,30 @@ async function runBubbleModelCatalogRefresh(): Promise<boolean> {
     }
   }
   let refreshedCount = 0;
+  let noticeChanged = false;
   for (const entry of discovered) {
-    if (entry && entry.models.length > 0) {
+    if (entry?.providerId === 'openai') {
+      const identity = modelCacheIdentity(context.profiles.get(entry.providerId)!);
+      const failed = entry.failed === true;
+      noticeChanged = catalogFailures.has(identity) !== failed;
+      if (failed) catalogFailures.set(identity, 'unavailable');
+      else catalogFailures.delete(identity);
+    }
+    if (entry && entry.models !== null && (entry.providerId === 'openai' || entry.models.length > 0)) {
       merged[entry.providerId] = entry.models;
       refreshedCount += 1;
     }
   }
   if (refreshedCount === 0) {
-    return false; // total discovery failure — keep the previous cache intact
+    return noticeChanged; // total discovery failure — keep the previous cache intact
   }
   if (JSON.stringify(previous) === JSON.stringify(merged)) {
-    return false;
+    return noticeChanged;
   }
   const cachePath = bubbleModelDiskCachePath();
   if (cachePath) {
     try {
-      writeFileSync(cachePath, JSON.stringify({ updatedAt: Date.now(), providers: merged, identities: Object.fromEntries([...context.profiles].map(([id, profile]) => [id, modelCacheIdentity(profile)])) }));
+      writeFileSync(cachePath, JSON.stringify({ updatedAt: Date.now(), providers: merged, confirmedRemoteProviders: Object.keys(merged).filter(id => id === 'openai'), identities: Object.fromEntries([...context.profiles].map(([id, profile]) => [id, modelCacheIdentity(profile)])) }));
     } catch (error) {
       console.warn('[bubble-settings] Failed to persist Bubble model catalog cache:', error);
     }

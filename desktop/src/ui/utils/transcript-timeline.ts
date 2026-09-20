@@ -619,7 +619,7 @@ export function deriveTranscriptTimelineItems(
   for (let originalIndex = 0; originalIndex < messages.length; originalIndex += 1) {
     const message = messages[originalIndex];
 
-    if (message.type === 'stream_event' || message.type === 'goal_completed' || isToolResultOnlyMessage(message)) {
+    if (message.bubbleSubagent || message.type === 'stream_event' || message.type === 'goal_completed' || isToolResultOnlyMessage(message)) {
       continue;
     }
 

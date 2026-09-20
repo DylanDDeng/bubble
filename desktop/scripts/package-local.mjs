@@ -22,5 +22,6 @@ await run('scripts/prepare-electron-native-deps.mjs');
 await run('node_modules/electron-builder/out/cli/cli.js', [
   '--config', 'electron-builder.local.cjs', '--mac', '--' + process.arch, '--publish', 'never',
 ]);
+await run('scripts/audit-local-package.mjs');
 await run('scripts/verify-local-package.mjs');
 console.log('Local Bubble app and DMG created in desktop/out/dogfood. Nothing was published.');

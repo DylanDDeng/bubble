@@ -69,7 +69,7 @@ function timeoutThenSucceedProvider(turns: StreamChunk[][], failures = 1): { pro
 }
 
 /** Provider that blocks its first turn until released; honors abort like a real transport. */
-function gatedProvider(turns: StreamChunk[][]): { provider: Provider; release: () => void } {
+function gatedProvider(turns: StreamChunk[][]): { provider: Provider; release: () => void; started: () => boolean } {
   let release!: () => void;
   const gate = new Promise<void>((resolve) => {
     release = resolve;
@@ -96,7 +96,7 @@ function gatedProvider(turns: StreamChunk[][]): { provider: Provider; release: (
       return "complete";
     },
   };
-  return { provider, release };
+  return { provider, release, started: () => index > 0 };
 }
 
 function defaultProfile(): AgentProfile {
@@ -550,5 +550,77 @@ describe("handoff guard — structured-output children", () => {
     expect(needsExplicitFinalSummary(baseRecord(compactJson, true), true)).toBe(false);
     // The same short summary from an ordinary child still triggers the restate turn.
     expect(needsExplicitFinalSummary(baseRecord(compactJson, false), true)).toBe(true);
+  });
+});
+
+
+describe("subagent supplementary input", () => {
+  it("queues multiple messages without interrupting and applies them exactly once after a tool-free response", async () => {
+    const { provider, release, started } = gatedProvider([
+      [{ type: "text", content: LONG_SUMMARY }, { type: "done" }],
+      [{ type: "text", content: "Follow-up complete. " + LONG_SUMMARY }, { type: "done" }],
+    ]);
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [] });
+    const child = await agent.spawnSubAgent("Review issue", "/tmp", { profile: defaultProfile(), parentToolCallId: "original-spawn" });
+    await expect.poll(started).toBe(true);
+    const first = await agent.sendSubAgentInput(child.agentId, "Check renderer", "/tmp", { parentToolCallId: "send-1" });
+    const second = await agent.sendSubAgentInput(child.agentId, "Check persistence", "/tmp", { parentToolCallId: "send-2" });
+    expect(first.pendingInputCount).toBe(1);
+    expect(second.pendingInputCount).toBe(2);
+    expect(second.status).toBe("running");
+    const record = (agent as any).subagentStore.get(child.agentId);
+    expect(record.abortController.signal.aborted).toBe(false);
+    expect(record.parentToolCallId).toBe("original-spawn");
+    release();
+    const [done] = await agent.waitSubAgents({ agentIds: [child.agentId], timeoutMs: 2000 });
+    expect(done.status).toBe("completed");
+    expect(done.pendingInputCount).toBe(0);
+    expect(done.inputDelivery).toBe("applied");
+    for (const text of ["Check renderer", "Check persistence"]) {
+      expect(record.agent.messages.filter((message: Message) => message.role === "user" && message.content === text)).toHaveLength(1);
+    }
+    expect(done.summary).toContain("Follow-up complete");
+  });
+  it("accepts input while scheduler-queued and preserves identity across later resumes", async () => {
+    const { provider, release } = gatedProvider(Array.from({length: 5}, () => [{ type: "text" as const, content: LONG_SUMMARY }, { type: "done" as const }]));
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [], subagents: { maxActiveSubagents: 1 } });
+    const a = await agent.spawnSubAgent("first", "/tmp", { profile: defaultProfile(), parentToolCallId: "a" });
+    const b = await agent.spawnSubAgent("second", "/tmp", { profile: defaultProfile(), parentToolCallId: "b" });
+    const queued = await agent.sendSubAgentInput(b.agentId, "extra context", "/tmp");
+    expect(queued.status).toBe("queued");
+    expect(queued.pendingInputCount).toBe(1);
+    release();
+    await agent.waitSubAgents({ agentIds: [a.agentId], timeoutMs: 2000 });
+    await agent.waitSubAgents({ agentIds: [b.agentId], timeoutMs: 2000 });
+    const resumed = await agent.sendSubAgentInput(b.agentId, "new task", "/tmp", { parentToolCallId: "new-send" });
+    expect(resumed.nickname).toBe(b.nickname);
+    expect((agent as any).subagentStore.get(b.agentId).parentToolCallId).toBe("b");
+    await agent.waitSubAgents({ agentIds: [b.agentId], timeoutMs: 2000 });
+  });
+  it("reports undelivered input on cancellation instead of claiming delivery", async () => {
+    const { provider } = gatedProvider([]);
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [] });
+    const child = await agent.spawnSubAgent("first", "/tmp", { profile: defaultProfile(), parentToolCallId: "a" });
+    await expect.poll(() => agent.listSubAgents()[0]?.status).toBe("running");
+    await agent.sendSubAgentInput(child.agentId, "extra context", "/tmp");
+    const closed = await agent.closeSubAgent(child.agentId);
+    expect(closed.status).toBe("closed");
+    expect(closed.pendingInputCount).toBe(0);
+    expect(closed.inputDelivery).toBe("rejected");
+  });
+  it("can resume a previously interrupted child without reusing its aborted controller", async () => {
+    const { provider, started } = gatedProvider([
+      [], [{ type: "text", content: LONG_SUMMARY }, { type: "done" }],
+      [{ type: "text", content: LONG_SUMMARY }, { type: "done" }],
+    ]);
+    const agent = new Agent({ provider, model: "gpt-4o", tools: [] });
+    const child = await agent.spawnSubAgent("initial", "/tmp", { profile: defaultProfile(), parentToolCallId: "original" });
+    await expect.poll(started).toBe(true);
+    await agent.sendSubAgentInput(child.agentId, "redirect", "/tmp", { interrupt: true });
+    await agent.waitSubAgents({ agentIds: [child.agentId], timeoutMs: 2000 });
+    await agent.sendSubAgentInput(child.agentId, "follow up", "/tmp");
+    const [done] = await agent.waitSubAgents({ agentIds: [child.agentId], timeoutMs: 2000 });
+    expect(done.status).toBe("completed");
+    expect(done.nickname).toBe(child.nickname);
   });
 });

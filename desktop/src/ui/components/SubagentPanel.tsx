@@ -1,3 +1,4 @@
+import { SubagentActivity } from './SubagentActivity';
 import { useMemo } from 'react';
 import { useAppStore } from '../store/useAppStore';
 import { Loader2, MessageSquare } from './icons';
@@ -224,14 +225,14 @@ export function SubagentPanel({
               {delegateAgent ? (
                 <ProviderIcon provider={delegateAgent} />
               ) : (
-                <SubagentAvatar id={selected.id} hue={selected.persona.colorHue} size={14} />
+                <SubagentAvatar id={selected.persona.id} hue={selected.persona.colorHue} size={14} />
               )}
               <StatusDot state={state} />
               <span
                 className="min-w-0 truncate text-[var(--text-secondary)]"
-                title={selected.persona.functionalName}
+                title={`${selected.persona.persona} · ${selected.persona.functionalName}`}
               >
-                {selected.persona.functionalName}
+                {selected.persona.persona} · {selected.persona.functionalName}
               </span>
               {delegateModelLabel ? (
                 <span className="flex-shrink-0 rounded bg-[var(--bg-tertiary)] px-1.5 py-0.5 text-[11px] text-[var(--text-muted)]">
@@ -239,7 +240,7 @@ export function SubagentPanel({
                 </span>
               ) : null}
               <span className="flex-shrink-0">
-                {state === 'running' ? 'Running' : state === 'error' ? 'Failed' : state === 'frozen' ? 'Backgrounded' : 'Done'}
+                {state === 'running' ? (selected.runtime?.status === 'queued' ? 'Queued' : 'Running') : state === 'error' ? 'Failed' : state === 'frozen' ? 'Stopped' : 'Done'}
                 {typeof selected.durationMs === 'number' ? ` · ${formatDuration(selected.durationMs)}` : ''}
               </span>
             </div>
@@ -247,7 +248,7 @@ export function SubagentPanel({
               type="button"
               onClick={handleFollowUp}
               className="inline-flex items-center gap-1 rounded-md border border-[var(--border)] px-2 py-1 text-[var(--text-secondary)] transition-colors hover:bg-[var(--sidebar-item-hover)] hover:text-[var(--text-primary)]"
-              title="Subagents can't be messaged directly — this prefills a quote in the main chat, and the main agent decides whether to spawn a follow-up task"
+              title="Add context in the main chat. The main agent can queue a supplementary message for this subagent."
             >
               <MessageSquare className="h-3 w-3" />
               Follow up in main chat
@@ -267,7 +268,8 @@ export function SubagentPanel({
                     messages={item.group.messages}
                     toolStatusMap={toolStatusMap}
                     toolResultsMap={toolResultsMap}
-                    isSessionRunning={Boolean(sessionRunning)}
+                    isSessionRunning={selectedRunning}
+                    showIdleActivity={!selected.runtime}
                     // The panel's work groups are visual clusters of ONE live
                     // trace, not per-turn batches: while the trace is live, an
                     // unresolved tool anywhere in it is still RUNNING (parallel
@@ -290,13 +292,14 @@ export function SubagentPanel({
                 )
               )
             )}
+            <SubagentActivity runtime={selected.runtime} operations={selected.operations} active={selectedRunning} details />
             {changeSummary ? <TurnChangesCard summary={changeSummary} /> : null}
             {state === 'frozen' ? (
               <div className="mt-3 rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] px-3 py-2 text-xs text-[var(--text-muted)]">
-                This subagent moved to the background — further progress is not streamed here. Its final result will be reported back to the agent that spawned it.
+                This subagent is no longer running. Review its last activity and any undelivered messages before continuing.
               </div>
             ) : null}
-            {state === 'running' ? (
+            {state === 'running' && !selected.runtime ? (
               <div className="mt-3 flex items-center gap-2 text-xs text-[var(--text-muted)]">
                 <Loader2 className="h-3 w-3 animate-spin" />
                 Running…

@@ -771,8 +771,13 @@ export function buildThemeVariables(
   const sidebarItemHover = formatRgba(theme.ink, variant === 'light' ? 0.05 : 0.08);
   const sidebarItemActive = formatRgba(theme.ink, variant === 'light' ? 0.08 : 0.13);
   const accentForeground = getReadableTextColor(pack.theme.accent);
-  const userBubbleBg = '#EBEBEB';
-  const userBubbleText = '#111214';
+  // Arc prompts share the canvas hue, with a subtle accent tint for separation.
+  // Derive from the active palette so custom colors and light/dark stay in sync.
+  const isArc = pack.codeThemeId === 'arc';
+  const userBubbleBg = isArc
+    ? mixHex(pack.theme.surface, pack.theme.accent, variant === 'light' ? 0.09 : 0.14)
+    : '#EBEBEB';
+  const userBubbleText = isArc ? pack.theme.ink : '#111214';
   const uiFont = normalizeFontFamily(uiFontFamily) || themeFontFamily(pack.theme.fonts.ui, pack.theme.fonts.uiFace) || BASE_UI_FONT;
   const monoFont =
     normalizeFontFamily(chatCodeFontFamily) ||

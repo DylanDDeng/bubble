@@ -530,7 +530,7 @@ function EnvironmentSubagentSection({ session, summaries, onNavigate }: {
             title={s.persona.functionalName}
             className="environment-summary-row"
           >
-            <SubagentAvatar id={s.id} hue={s.persona.colorHue} size={14} />
+            <SubagentAvatar id={s.persona.id} hue={s.persona.colorHue} size={14} />
             <span className="shrink-0">{s.persona.persona}</span>
             <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--text-muted)]">
               {s.persona.functionalName}

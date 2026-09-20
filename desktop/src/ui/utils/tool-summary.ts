@@ -337,6 +337,9 @@ export function deriveReadableToolDisplay(
     return { verb: '', target: providerTitle };
   }
 
+  if (name === 'wait_agent') return { verb: status === 'pending' ? 'Waiting for' : 'Waited for', target: 'subagent result' };
+  if (name === 'send_input') return { verb: status === 'error' ? 'Could not send' : status === 'pending' ? 'Sending' : 'Sent', target: 'supplementary message' };
+  if (name === 'close_agent') return { verb: status === 'pending' ? 'Stopping' : 'Stopped', target: 'subagent' };
   if (name === 'Bash' || name === 'bash') {
     const command = getStringField(input, 'command');
     if (command) {

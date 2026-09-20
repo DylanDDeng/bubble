@@ -86,7 +86,8 @@ async function fetchOpenAICompatibleModelIds(
     data?: Array<{ id?: unknown; name?: unknown }>;
     models?: Array<{ id?: unknown; name?: unknown }>;
   };
-  const entries = payload.data ?? payload.models ?? [];
+  const entries = payload?.data ?? payload?.models;
+  if (!Array.isArray(entries)) throw new Error("Model catalog response has no model list.");
   return entries
     .filter((entry): entry is { id: string; name?: string } =>
       typeof entry?.id === "string" && entry.id.trim().length > 0)
@@ -285,8 +286,9 @@ export class ProviderRegistry {
       }>;
       const now = Date.now();
       for (const [key, entry] of Object.entries(parsed)) {
-        if (!entry || typeof entry.expiresAt !== "number" || entry.expiresAt <= now) continue;
+        if (!entry || typeof entry.expiresAt !== "number") continue;
         if (!entry.result || !Array.isArray(entry.result.models)) continue;
+        if (entry.expiresAt <= now && !(entry.providerId === "openai" && isCompleteDiscovery(entry.result))) continue;
         const provider = { id: entry.providerId ?? "", authType: entry.authType, protocol: entry.protocol };
         // Capability fields may have been derived by an older Bubble build.
         // Recompute them with the current code while retaining cached remote
@@ -332,7 +334,7 @@ export class ProviderRegistry {
         // A failed refresh must not erase the identity's last confirmed catalog
         // from disk when an unrelated provider triggers a rewrite; persist the
         // confirmation under its remaining horizon instead of dropping the key.
-        if (entry.confirmed && entry.confirmed.until > now) {
+        if (entry.confirmed && (entry.confirmed.until > now || entry.providerId === "openai")) {
           data[key] = {
             ...common,
             result: { models: entry.confirmed.models, source: "remote", authoritative: true },
@@ -785,8 +787,7 @@ export class ProviderRegistry {
   ): Promise<ModelDiscoveryResult> {
     const key = this.modelDiscoveryKey(provider);
     const now = Date.now();
-    // Captured before a forced refresh evicts the live entry, so a failed
-    // re-fetch still carries the last confirmed catalog forward.
+    // A failed refresh must carry the last confirmed catalog forward.
     const retainedConfirmation = this.modelDiscoveryCache.get(key)?.confirmed;
 
     if (!options.forceRefresh) {
@@ -801,7 +802,9 @@ export class ProviderRegistry {
         // without waiting up to 24 hours or requiring a manual Ctrl+R refresh.
         const local = this.localModelsForProvider(provider);
         const localIds = new Set(local.map((model) => model.id));
-        const models = cachedResult.source === "static"
+        const models = provider.id === "openai"
+          ? cachedResult.models
+          : cachedResult.source === "static"
           ? local
           : cachedResult.authoritative
             ? cachedResult.models
@@ -816,7 +819,8 @@ export class ProviderRegistry {
       const inFlight = this.modelDiscoveryInFlight.get(key);
       if (inFlight) return inFlight;
     } else {
-      this.modelDiscoveryCache.delete(key);
+      // Keep the last confirmation readable while the replacement is in flight.
+      // Forced discovery bypasses freshness without invalidating a good catalog.
       // Do not let a superseded request's finally-handler remove this retry.
       this.modelDiscoveryInFlight.delete(key);
     }
@@ -826,10 +830,12 @@ export class ProviderRegistry {
 
     let pending!: Promise<ModelDiscoveryResult>;
     pending = this.performModelDiscovery(provider).then((rawResult): ModelDiscoveryResult => {
-      const result = normalizeProviderDiscoveryMetadata(provider, rawResult);
+      const result = normalizeProviderDiscoveryMetadata(provider, provider.id === "openai" && rawResult.error
+        ? { ...rawResult, models: retainedConfirmation?.models ?? [] }
+        : rawResult);
       if (!this.isCurrentModelDiscovery(provider, key, generation)) {
         return {
-          models: this.localModelsForProvider(
+          models: provider.id === "openai" ? [] : this.localModelsForProvider(
             this.getConfigured().find((item) => item.id === provider.id) ?? provider,
           ),
           source: "fallback",
@@ -878,7 +884,7 @@ export class ProviderRegistry {
       provider.id,
       this.modelConfig.getCustomModels(provider.id),
     );
-    if (customModels.length > 0) {
+    if (customModels.length > 0 && provider.id !== "openai") {
       return { models: customModels, source: "static", authoritative: true };
     }
 
@@ -1044,10 +1050,19 @@ export class ProviderRegistry {
     // while unlisted), remote-only ids are appended, obvious non-chat
     // modalities are filtered out. Not authoritative — membership is a union,
     // so nothing downstream may treat it as a closed allowlist.
-    if (isOpenAICompatibleProtocol(provider.protocol) && provider.apiKey) {
+    if ((isOpenAICompatibleProtocol(provider.protocol) || provider.id === "openai") && provider.apiKey) {
       try {
         const remote = await fetchOpenAICompatibleModelIds(provider);
         const local = this.localModelsForProvider(provider);
+        if (provider.id === "openai") {
+          const metadata = new Map(local.map(model => [model.id, model]));
+          return {
+            models: remote.filter(entry => isLikelyChatModelId(entry.id)).map(entry => ({
+              ...metadata.get(entry.id), id: entry.id, name: entry.name || entry.id, providerId: provider.id,
+            })),
+            source: "remote", authoritative: true,
+          };
+        }
         const known = new Set(local.map((model) => model.id));
         const extras: ModelInfo[] = remote
           .filter((entry) => !known.has(entry.id) && isLikelyChatModelId(entry.id))
@@ -1061,7 +1076,8 @@ export class ProviderRegistry {
           return { models: local, source: "static", authoritative: true };
         }
         return { models: [...local, ...extras], source: "remote", authoritative: false };
-      } catch {
+      } catch (error) {
+        if (provider.id === "openai") return this.fallbackDiscovery(provider, error);
         // Vendors that don't implement /models (or gate it) fall back silently:
         // the curated catalog is the contract, discovery is a bonus.
         return { models: this.localModelsForProvider(provider), source: "static", authoritative: true };
@@ -1069,7 +1085,7 @@ export class ProviderRegistry {
     }
 
     return {
-      models: this.localModelsForProvider(provider),
+      models: provider.id === "openai" ? [] : this.localModelsForProvider(provider),
       source: "static",
       authoritative: true,
     };
@@ -1077,7 +1093,7 @@ export class ProviderRegistry {
 
   private fallbackDiscovery(provider: ProviderProfile, error: unknown): ModelDiscoveryResult {
     return {
-      models: this.localModelsForProvider(provider),
+      models: provider.id === "openai" ? [] : this.localModelsForProvider(provider),
       source: "fallback",
       authoritative: false,
       error: modelDiscoveryError(error),
@@ -1132,8 +1148,8 @@ export class ProviderRegistry {
         // claim, so a catalog fetched under an older pin (possibly by another
         // still-running Bubble sharing the disk cache) must not satisfy this
         // build's discovery.
-        : provider.id === "openai" && provider.authType === "oauth"
-          ? `codex-client:${getCodexClientVersion()}`
+        : provider.id === "openai"
+          ? `remote-only-v1:${provider.authType === "oauth" ? `codex-client:${getCodexClientVersion()}` : "api"}`
           : undefined,
     ]);
   }
@@ -1145,8 +1161,13 @@ export class ProviderRegistry {
    * derived strictly: only a successful full remote catalog qualifies —
    * never static or fallback results, whose internal `authoritative` flag
    * this design does not trust.
+   * Desktop catalogs can explicitly retain the last confirmation beyond its
+   * routing horizon; ordinary routing callers keep the default expiry policy.
    */
-  getCachedDiscoverySnapshot(providerId: string): CachedDiscoverySnapshot | undefined {
+  getCachedDiscoverySnapshot(
+    providerId: string,
+    options: { allowExpiredConfirmation?: boolean } = {},
+  ): CachedDiscoverySnapshot | undefined {
     const provider = this.getConfigured().find((item) => item.id === providerId);
     if (!provider) return undefined;
     const cached = this.modelDiscoveryCache.get(this.modelDiscoveryKey(provider));
@@ -1166,7 +1187,7 @@ export class ProviderRegistry {
     // confirmed catalog for this identity until its horizon passes, so a
     // long session does not lose its tier candidates after the freshness
     // minute or across one failed refresh.
-    if (cached.confirmed && cached.confirmed.until > now) {
+    if (cached.confirmed && (cached.confirmed.until > now || options.allowExpiredConfirmation)) {
       return {
         models: cached.confirmed.models,
         source: "cache",

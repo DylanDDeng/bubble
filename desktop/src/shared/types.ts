@@ -369,6 +369,7 @@ export interface BubbleProvidersConfig {
 }
 
 export interface BubbleModelConfig {
+  catalogNotice?: string;
   defaultModel: string | null;
   options: string[];
   availableModels: Array<{
@@ -1613,7 +1614,23 @@ export type PermissionRequestInput =
   | ComputerUsePermissionInput;
 
 // StreamMessage 类型（SDK 消息或内部消息）
+/** Durable child identity/state. Tool invocation success is not child completion. */
+export interface BubbleSubagentState {
+  agentId: string;
+  anchorId: string;
+  nickname: string;
+  role: string;
+  task: string;
+  status: string;
+  activity: string;
+  updatedAt: number;
+  startedAt: number;
+  pendingInputCount: number;
+  inputDelivery?: 'queued' | 'applied' | 'rejected';
+}
+
 export type StreamMessageBase = {
+  bubbleSubagent?: BubbleSubagentState;
   createdAt?: number;
   agentId?: string | null;
   agentRunId?: string | null;

@@ -214,7 +214,10 @@ export async function generateWorktreeBranchSlug(params: {
   betas?: string[];
   claudeReasoningEffort?: ClaudeReasoningEffort;
 }): Promise<string | null> {
-  const provider = params.provider || 'claude';
+  const provider = params.provider || 'bubble';
+  // Bubble uses the caller's local branch-name fallback. Do not start a
+  // different agent (or require its SDK) for a background naming operation.
+  if (provider === 'bubble') return null;
   const slugPrompt = `Summarize this task as a short English git branch name: 2-5 lowercase words joined by hyphens, no prefix, no quotes, letters and digits only.
 Task: "${params.prompt.slice(0, 500)}"
 Output only the branch name.`;
@@ -262,7 +265,7 @@ export async function generateSessionTitle(
   model?: string,
   compatibleProviderId?: ClaudeCompatibleProviderId,
   betas?: string[],
-  provider: AgentProvider = 'claude',
+  provider: AgentProvider = 'bubble',
   claudeReasoningEffort?: ClaudeReasoningEffort
 ): Promise<string> {
   if (provider !== 'claude') {

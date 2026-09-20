@@ -43,6 +43,7 @@ interface ToolExecutionBatchProps {
   resetKey?: string | number | null;
   generatedMedia?: GeneratedMediaItem[];
   mediaCwd?: string | null;
+  showIdleActivity?: boolean;
 }
 
 export function ToolExecutionBatch({
@@ -63,6 +64,7 @@ export function ToolExecutionBatch({
   resetKey,
   generatedMedia,
   mediaCwd,
+  showIdleActivity,
 }: ToolExecutionBatchProps) {
   const batchIsRunning = isSessionRunning && isLastBatch;
   const model = useMemo(
@@ -93,6 +95,7 @@ export function ToolExecutionBatch({
       resetKey={disclosureResetKey}
       generatedMedia={generatedMedia}
       mediaCwd={mediaCwd}
+      showIdleActivity={showIdleActivity}
     />
   );
 }
@@ -107,6 +110,7 @@ export function WorkstreamDisclosure({
   resetKey,
   generatedMedia,
   mediaCwd,
+  showIdleActivity,
 }: {
   model: WorkstreamModel;
   isRunning: boolean;
@@ -117,6 +121,7 @@ export function WorkstreamDisclosure({
   resetKey?: string | number | null;
   generatedMedia?: GeneratedMediaItem[];
   mediaCwd?: string | null;
+  showIdleActivity?: boolean;
 }) {
   const isControlled = typeof expanded === 'boolean';
   // A user choice wins over lifecycle defaults for the lifetime of this turn.
@@ -153,6 +158,7 @@ export function WorkstreamDisclosure({
           model={model}
           generatedMedia={canCollapse ? undefined : generatedMedia}
           mediaCwd={mediaCwd}
+      showIdleActivity={showIdleActivity}
         />
       </WorkstreamCollapse>
       {canCollapse && generatedMedia?.length ? <GeneratedMediaGallery items={generatedMedia} cwd={mediaCwd ?? null} /> : null}

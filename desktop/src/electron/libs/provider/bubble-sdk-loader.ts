@@ -196,6 +196,16 @@ export type BubbleProviderRegistry = {
   removeProvider(id: string): void;
   updateProviderKey(id: string, apiKey: string): void;
   listModels(provider: BubbleProviderProfile): Promise<BubbleModelInfo[]>;
+  getCachedDiscoverySnapshot(providerId: string, options?: { allowExpiredConfirmation?: boolean }): {
+    models: BubbleModelInfo[];
+    complete: boolean;
+  } | undefined;
+  discoverModels(provider: BubbleProviderProfile, options?: { forceRefresh?: boolean }): Promise<{
+    models: BubbleModelInfo[];
+    source: 'remote' | 'cache' | 'static' | 'fallback';
+    authoritative: boolean;
+    error?: string;
+  }>;
   /**
    * Local-only model list: the user's models.json custom models when present,
    * otherwise the SDK's builtin static catalog. Synchronous — never touches

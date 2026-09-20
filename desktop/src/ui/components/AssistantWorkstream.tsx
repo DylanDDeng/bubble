@@ -1,3 +1,5 @@
+import { SubagentActivity } from './SubagentActivity';
+import { shortChildTask } from '../utils/bubble-subagent-view';
 import { useWorkstreamDisclosure } from './WorkstreamDisclosureState';
 import { ToolResultContent, ToolOutputPanel } from './ToolResultContent';
 import { WorkstreamActivityLabel, WorkstreamCollapse, WorkstreamScrollArea } from './WorkstreamPrimitives';
@@ -65,6 +67,7 @@ import { isMediaGenerationTool, type GeneratedMediaItem } from '../utils/generat
 
 interface AssistantWorkstreamProps {
   model: WorkstreamModel;
+  showIdleActivity?: boolean;
   className?: string;
   generatedMedia?: GeneratedMediaItem[];
   mediaCwd?: string | null;
@@ -75,6 +78,7 @@ const MAX_TITLE_CHARS = 800;
 
 export function AssistantWorkstream({
   model,
+  showIdleActivity = true,
   className = '',
   generatedMedia,
   mediaCwd,
@@ -132,11 +136,11 @@ export function AssistantWorkstream({
           </div>
         );
       })}
-      {model.state === 'running' && !model.entries.some((entry) =>
+      {showIdleActivity && model.state === 'running' && !model.entries.some((entry) =>
         entry.type === 'thinking' ? entry.state === 'active'
           : entry.type === 'approval' ? entry.state === 'waiting'
           : 'status' in entry && entry.status === 'pending'
-      ) ? <WorkingFooter /> : null}
+      ) ? <WorkingFooter label={model.entries.some(entry => entry.type === 'task' && entry.subagent?.runtime) ? 'Main agent is continuing' : 'Working'} /> : null}
       {model.todoProgress ? (
         <div className="my-2">
           <TodoProgressCard state={model.todoProgress} />
@@ -726,32 +730,23 @@ function SubagentLane({
   // subagent registry / utility tabs use — so the chat row and the tab show
   // the same pixel creature for one subagent. Cross-agent delegations show
   // the target agent's provider logo instead.
-  const persona = getSubagentPersona(entry.block.id, trace?.agentType, description);
+  const persona = getSubagentPersona(trace?.runtime?.agentId || entry.block.id, trace?.runtime?.role || trace?.agentType, shortChildTask(trace?.description || trace?.runtime?.task || description), trace?.runtime?.nickname);
   const delegateAgent = getDelegateAgentFromBlock(entry.block) as AgentProvider | null;
 
   // The whole row opens this subagent's tab in the right-side detail panel —
   // the subagent's working trace lives there, not inline in the main trace.
   return (
-    <button
-      type="button"
-      onClick={() => useAppStore.getState().openSubagentPanel(entry.block.id)}
-      title={buildSubagentLaneTitle(entry, description)}
-      className={`group flex w-full min-w-0 cursor-pointer items-center gap-2 text-left text-[12px] leading-5 transition-colors ${
-        standalone ? 'py-0.5' : 'px-2.5 py-1'
-      }`}
-    >
-      <span className="flex min-w-0 max-w-full items-center gap-1.5 rounded-full border border-[var(--border)] bg-[var(--bg-secondary)]/60 py-0.5 pl-1.5 pr-2.5 transition-colors group-hover:border-[var(--text-muted)]/45 group-hover:bg-[var(--bg-tertiary)]/60">
-        {delegateAgent ? (
-          <ProviderIcon provider={delegateAgent} />
-        ) : (
-          <SubagentAvatar id={entry.block.id} hue={persona.colorHue} size={12} />
-        )}
-        <span className="min-w-0 truncate text-[12px] leading-4 text-[var(--text-secondary)] transition-colors group-hover:text-[var(--text-primary)]">
-          {description}
-        </span>
-      </span>
-      <SubagentLaneStatusWord status={entry.status} />
-    </button>
+    <div className={`min-w-0 rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)]/40 ${standalone ? 'my-1' : ''}`}>
+      <button type="button" onClick={() => useAppStore.getState().openSubagentPanel(entry.block.id)}
+        title={buildSubagentLaneTitle(entry, description)}
+        className="flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left text-[12px] hover:bg-[var(--bg-tertiary)]/50">
+        {delegateAgent ? <ProviderIcon provider={delegateAgent} /> : <SubagentAvatar id={trace?.runtime?.agentId || entry.block.id} hue={persona.colorHue} size={14} />}
+        <span className="min-w-0 flex-1 truncate text-[var(--text-secondary)]">{persona.functionalName}</span>
+        <span className="shrink-0 text-[11px] text-[var(--text-muted)]">{persona.persona}</span>
+        <SubagentLaneStatusWord status={entry.status} />
+      </button>
+      {trace?.runtime && <div className="px-3 pb-2"><SubagentActivity runtime={trace.runtime} operations={trace.operations} active={entry.status === 'pending'} /></div>}
+    </div>
   );
 }
 

@@ -1,0 +1,33 @@
+const { app } = require('electron');
+const fs = require('node:fs'), path = require('node:path'), os = require('node:os'), assert = require('node:assert/strict');
+const home = fs.mkdtempSync(path.join(os.tmpdir(),'bubble-child-state-'));
+app.setPath('userData',home); process.env.BUBBLE_HOME=path.join(home,'agent');
+app.whenReady().then(()=>{
+ const {BubbleSdkAdapter}=require('../../dist-electron/electron/libs/provider/bubble-sdk-adapter.js');
+ const adapter=new BubbleSdkAdapter();const events=[];adapter.events.on('event',e=>events.push(e));
+ const session={threadId:'qa',subagentStreams:new Map(),subagentStartedAt:new Map(),toolNames:new Map(),emittedToolCallIds:new Set(),emittedToolResultIds:new Set(),heldSpawnResults:new Map(),currentAssistant:null};
+ const update=(status,extra={})=>adapter.handleSubagentUpdate(session,{type:'subagent_update',parentToolCallId:'spawn',runId:'run',subAgentId:'child',agentName:'explorer',nickname:'John',status,metadata:{subagents:[{task:'Review Issue #74',createdAt:1,updatedAt:Date.now()}]},...extra});
+ adapter.handleToolUse(session,'spawn','spawn_agent',{agent_type:'explorer',message:'Review'});
+ update('running'); adapter.handleToolResult(session,'spawn',{content:'Spawned John: queued'});
+ assert.equal(events.filter(e=>e.message?.uuid?.startsWith('bubble-tool-result:')).length,0);
+ adapter.handleToolUse(session,'wait','wait_agent',{});
+ assert.deepEqual(events.find(e=>e.message?.uuid?.endsWith(':wait')).message.message.content[0].input.agent_ids,['child']);
+ update('failed',{message:'Child provider failed'});
+ const result=events.find(e=>e.message?.uuid?.startsWith('bubble-tool-result:')).message.message.content[0];
+ assert.equal(result.is_error,true);assert.equal(result.content,'Child provider failed');
+ const stateEvents=events.filter(e=>e.message?.bubbleSubagent);
+ assert.equal(stateEvents.at(-1).message.bubbleSubagent.status,'failed');
+ assert.equal(new Set(stateEvents.map(e=>e.message.uuid)).size,1,'state updates upsert one durable child record');
+ // Terminal update can beat the synchronous spawn result.
+ session.emittedToolResultIds.clear();events.length=0;
+ adapter.handleToolResult(session,'spawn',{content:'Spawned John: queued'});
+ assert.equal(events[0].message.message.content[0].is_error,true);
+ events.length=0;
+ adapter.handleToolUse(session,'workflow','run_workflow',{});
+ update('completed',{parentToolCallId:'workflow',subAgentId:'member',metadata:{mode:'workflow'}});
+ assert(!events.some(e=>e.message?.bubbleSubagent),'workflow member must not replace aggregate identity/status');
+ adapter.handleToolResult(session,'workflow',{content:'Workflow failed in phase 2',isError:true});
+ const aggregate=events.find(e=>e.message?.uuid?.startsWith('bubble-tool-result:')).message.message.content[0];
+ assert.equal(aggregate.is_error,true);assert.equal(aggregate.content,'Workflow failed in phase 2');
+ console.log('PASS: adapter persists child state, targets waits and handles terminal/spawn-result races');
+}).then(()=>{fs.rmSync(home,{recursive:true,force:true});app.exit(0)}).catch(e=>{console.error(e);app.exit(1)});

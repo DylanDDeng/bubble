@@ -14,6 +14,11 @@ fs.mkdirSync(process.env.BUBBLE_HOME);
 let server;
 let store;
 let lsp;
+let releaseChild;
+const childGate = new Promise(resolve => { releaseChild = resolve; });
+let childStarted;
+const childReady = new Promise(resolve => { childStarted = resolve; });
+let childFollowups = 0;
 const timeout = setTimeout(() => { console.error('Integration timed out'); app.exit(1); }, 45000);
 app.whenReady().then(async () => {
   server = createServer(async (req, res) => {
@@ -22,13 +27,38 @@ app.whenReady().then(async () => {
     const request = JSON.parse(body);
     const last = request.messages.at(-1);
     const editTurn = request.messages.some(message => message.role === 'user' && message.content === 'Test TypeScript edit');
+    const parentProbe = request.messages.some(message => message.role === 'user' && message.content === 'Test subagent queue');
+    const childProbe = request.messages.some(message => message.role === 'user' && message.content === 'Child queue probe');
     let call;
+    let responseText = 'Bubble desktop works.';
+    if (parentProbe) {
+      if (!request.messages.some(message => message.tool_call_id === 'spawn-probe')) {
+        call = { id: 'spawn-probe', name: 'spawn_agent', arguments: { agent_type: 'explorer', description: 'Queue integration', message: 'Child queue probe' } };
+      } else if (!request.messages.some(message => message.tool_call_id === 'send-probe')) {
+        await childReady;
+        const spawned = request.messages.find(message => message.tool_call_id === 'spawn-probe');
+        const agentId = spawned.content.match(/agent_id: ([\w-]+)/)?.[1];
+        assert(agentId, 'spawn tool returned child identity');
+        call = { id: 'send-probe', name: 'send_input', arguments: { agent_id: agentId, message: 'Supplementary queue probe' } };
+      } else if (!request.messages.some(message => message.tool_call_id === 'wait-probe')) {
+        assert(request.messages.find(message => message.tool_call_id === 'send-probe').content.includes('Queued input for'));
+        releaseChild();
+        call = { id: 'wait-probe', name: 'wait_agent', arguments: { timeout_ms: 5000 } };
+      }
+    }
+    if (childProbe) {
+      childStarted();
+      await childGate;
+      const count = request.messages.filter(message => message.role === 'user' && message.content === 'Supplementary queue probe').length;
+      if (count) { assert.equal(count, 1); childFollowups += 1; }
+      responseText = count ? 'Supplementary queue probe applied successfully.' : 'Initial child response.';
+    }
     if (last?.content === 'Test approval') call = { id: 'test-call', name: 'bash', arguments: { command: 'printf verified > approval-proof.txt' } };
     if (editTurn && last?.role === 'user') call = { id: 'read-call', name: 'read', arguments: { path: 'example.ts' } };
     if (editTurn && last?.tool_call_id === 'read-call') call = { id: 'edit-call', name: 'edit', arguments: { path: 'example.ts', edits: [{ oldText: 'value: number = 1', newText: 'value: number = "invalid"' }] } };
     const needsTool = !!call;
     res.writeHead(200, { 'content-type': 'text/event-stream' });
-    const delta = needsTool ? { role: 'assistant', tool_calls: [{ index: 0, id: call.id, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.arguments) } }] } : { role: 'assistant', content: 'Bubble desktop works.' };
+    const delta = needsTool ? { role: 'assistant', tool_calls: [{ index: 0, id: call.id, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.arguments) } }] } : { role: 'assistant', content: responseText };
     for (const frame of [
       { choices: [{ index: 0, delta, finish_reason: null }] },
       { choices: [{ index: 0, delta: {}, finish_reason: needsTool ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 12, completion_tokens: 4 } },
@@ -105,6 +135,29 @@ app.whenReady().then(async () => {
   assert(Object.values(lsp.diagnostics()).flat().some(diagnostic => diagnostic.message.includes('not assignable')), 'real tsserver returned diagnostics');
   assert(editEvents.some(event => event.type === 'message' && JSON.stringify(event.message).includes('Bubble desktop works.')), 'Agent continued after edit');
   await lsp.shutdown();
+  const childSession = store.createSession({ provider: 'bubble', title: 'Isolated subagent probe', cwd: home });
+  const childStates = [];
+  const childFinished = new Promise((resolve, reject) => {
+    adapter.events.on('event', event => {
+      if (event.threadId !== childSession.id) return;
+      if (event.type === 'message') {
+        store.addMessage(childSession.id, event.message);
+        if (event.message.bubbleSubagent) childStates.push(event.message.bubbleSubagent);
+      }
+      if (event.type === 'error') reject(event.error);
+      if (event.type === 'status_change' && event.status === 'completed') resolve();
+    });
+  });
+  await adapter.startSession({ threadId: childSession.id, provider: 'bubble', cwd: home, prompt: 'Test subagent queue', model: 'local-test:test', bubblePermissionMode: 'bypassPermissions' });
+  await childFinished;
+  assert.equal(childFollowups, 1, 'queued input continued the tool-free child exactly once');
+  assert(childStates.some(state => state.inputDelivery === 'queued'));
+  assert(childStates.some(state => state.inputDelivery === 'applied'));
+  assert.equal(childStates.at(-1).status, 'completed');
+  store.close(); store.initialize();
+  const restoredStates = store.getSessionHistory(childSession.id).filter(message => message.bubbleSubagent);
+  assert.equal(restoredStates.length, 1, 'SQLite upserts and restores one child state');
+  assert.deepEqual(restoredStates[0].bubbleSubagent, childStates.at(-1));
   await adapter.stopAll();
-  console.log('PASS: local SDK, approval, tool execution, streamed final, persisted history, skill detail, history migration, Bubble automation routing, TypeScript edit + real LSP + continued Agent turn');
+  console.log('PASS: local SDK, approval, tool execution, streamed final, persisted history, skill detail, history migration, Bubble automation routing, TypeScript edit + real LSP + continued Agent turn, subagent queue + wait + SQLite restore');
 }).then(() => { clearTimeout(timeout); server.close(); store.close(); fs.rmSync(home, {recursive: true, force: true}); app.exit(0); }).catch(error => { lsp?.shutdownNow(); console.error(error); clearTimeout(timeout); server?.close(); app.exit(1); });

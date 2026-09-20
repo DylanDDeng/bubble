@@ -22,6 +22,7 @@
  * must stay ABSENT (onMessageAppend, sessionID, routing catalog) — has exactly
  * one definition site.
  */
+import { AgentRunInputQueue } from "../input-controller.js";
 import { randomUUID } from "node:crypto";
 import { buildSystemPrompt } from "../../system-prompt.js";
 import { buildToolPromptOptions } from "../../tools/index.js";
@@ -148,6 +149,12 @@ export class SubagentRuntime {
       recordProviderError: (record, error, request) => this.recordSubagentProviderError(record, error, request),
       notifyWaiters: (record) => this.store.notifyWaiters(record),
       onFinal: (record, options) => {
+        if ((record.inputQueue?.pendingInputCount() ?? 0) > 0) {
+          record.inputQueue?.closePendingInputs();
+          record.inputDelivery = "rejected";
+          record.toolNotes.push("Pending supplementary input was not delivered because the run ended.");
+          this.emitSubagentLifecycle(record, options, record.status === "closed" ? "cancelled" : record.status);
+        }
         this.reclaimWorktree(record);
         // Workflow-internal agents are not persisted (they never re-import into
         // the store on restart) and never ingest into parent context (option C).
@@ -352,18 +359,31 @@ export class SubagentRuntime {
     }
     if (record.status === "running" || record.status === "queued") {
       if (!options.interrupt) {
-        throw new Error(`Subagent ${agentId} is still running. Call wait_agent first or pass interrupt:true.`);
+        if (typeof input !== "string") throw new Error("Running subagents currently accept text follow-ups only.");
+        record.inputQueue ??= new AgentRunInputQueue(`child-${agentId}`);
+        if (record.inputQueue.tryEnqueue(input)) {
+          record.inputDelivery = "queued";
+          record.updatedAt = Date.now();
+          this.queueSubagentUpdate(record, record.status, undefined, "Supplementary input queued for the next safe boundary.");
+          return this.snapshotSubagent(record);
+        }
+        // Admission closed at the final boundary. Resume only after the old
+        // run has fully settled; never run the same child concurrently.
+        await record.promise?.catch(() => undefined);
       }
-      record.abortController.abort(new SubagentAbortError(`Subagent ${agentId} interrupted.`, "interrupt"));
-      await record.promise?.catch(() => undefined);
-      record.abortController = new AbortController();
+      if (options.interrupt) {
+        record.abortController.abort(new SubagentAbortError(`Subagent ${agentId} interrupted.`, "interrupt"));
+        await record.promise?.catch(() => undefined);
+      }
     }
     if (record.status === "closed") {
       throw new Error(`Subagent ${agentId} is closed.`);
     }
 
-    record.parentToolCallId = options.parentToolCallId ?? record.parentToolCallId;
-    record.parentToolName = "send_input";
+    // Identity and trace anchor belong to the child, not a follow-up tool call.
+    record.abortController = new AbortController();
+    record.inputQueue = new AgentRunInputQueue(`child-${agentId}-${Date.now()}`);
+    record.inputDelivery = undefined;
     record.task = typeof input === "string" ? input : "(multimodal task)";
     record.summary = "";
     record.toolNotes = [];
@@ -830,6 +850,7 @@ export class SubagentRuntime {
       toolNotes: [],
       createdAt: now,
       updatedAt: now,
+      inputQueue: new AgentRunInputQueue(`child-input-${randomUUID()}`),
       abortController: new AbortController(),
       waiters: new Set(),
     };
@@ -987,6 +1008,8 @@ export class SubagentRuntime {
           error: record.error,
           createdAt: record.createdAt,
           updatedAt: record.updatedAt,
+          pendingInputCount: record.inputQueue?.pendingInputCount() ?? 0,
+          inputDelivery: record.inputDelivery,
         }],
       },
     };

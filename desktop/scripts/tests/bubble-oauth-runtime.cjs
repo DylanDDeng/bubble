@@ -51,7 +51,7 @@ app.whenReady().then(async () => {
   const apiProfile = (await getBubbleSdk()).registry.getConfigured().find(p => p.id === 'openai');
   const identity = require('node:crypto').createHash('sha256').update(JSON.stringify([apiProfile.authType || 'api', apiProfile.baseURL, apiProfile.apiKey])).digest('hex');
   fs.writeFileSync(path.join(app.getPath('userData'), 'bubble-model-catalog-cache.json'), JSON.stringify({
-    providers: { openai: [{ id: 'api-only-fixture-model' }] }, identities: { openai: identity },
+    providers: { openai: [{ id: 'api-only-fixture-model' }] }, identities: { openai: identity }, confirmedRemoteProviders: ['openai'],
   }));
   assert((await settings.getBubbleModelConfig()).options.includes('openai:api-only-fixture-model'));
   for (const provider of ['openai', 'grok']) {

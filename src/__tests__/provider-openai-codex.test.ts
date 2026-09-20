@@ -222,6 +222,9 @@ describe("provider-openai-codex", () => {
       .resolves.toEqual({ descriptors: [], status: "success" });
     await expect(fetchOpenAICodexModelCatalog({ ...options, fetch: unavailableFetch }))
       .resolves.toEqual({ descriptors: [], status: "unavailable" });
+    const malformedFetch = vi.fn(async () => new Response(JSON.stringify({ error: 'unexpected payload' }), { status: 200 }));
+    await expect(fetchOpenAICodexModelCatalog({ ...options, fetch: malformedFetch }))
+      .resolves.toEqual({ descriptors: [], status: "unavailable" });
     expect(successFetch).toHaveBeenCalledTimes(1);
     expect(unavailableFetch).toHaveBeenCalledTimes(2);
   });

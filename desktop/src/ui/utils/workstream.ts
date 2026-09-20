@@ -1,3 +1,5 @@
+import { latestChildState, childToolStatus, childOperations, controlAgentIds, childControlTools } from './bubble-subagent-view';
+import type { BubbleSubagentState } from '../../shared/types';
 import type {
   AskUserQuestionInput,
   CanonicalToolKind,
@@ -31,6 +33,8 @@ export type ToolResultBlock = ContentBlock & { type: 'tool_result' };
  * messages whose parentToolUseId points at the Task's tool_use id.
  */
 export interface SubagentTrace {
+  runtime?: BubbleSubagentState;
+  operations?: ReturnType<typeof childOperations>;
   /** subagent_type from the Task input (e.g. "Explore", "general-purpose"). */
   agentType: string | null;
   /** Short task description from the Task input. */
@@ -284,6 +288,34 @@ export function groupSubagentMessagesByParent(
       existing.push(message);
     } else {
       map.set(parentId, [message]);
+    }
+  }
+  const anchors = new Map<string, string>();
+  for (const message of messages) {
+    if (message.bubbleSubagent) anchors.set(message.bubbleSubagent.agentId, message.bubbleSubagent.anchorId);
+  }
+  const controls = new Map<string, string[]>();
+  for (const message of messages) {
+    if (message.parentToolUseId) continue;
+    for (const block of getMessageContentBlocks(message)) {
+      const tool = normalizeToolUseBlock(block);
+      if (!tool) continue;
+      const ids = controlAgentIds(tool.name, tool.input);
+      const targets = tool.name === 'wait_agent' && ids.length === 0
+        ? [...anchors.values()].filter(anchor => ['queued', 'running'].includes(latestChildState(map.get(anchor) ?? [])?.status ?? ''))
+        : ids.map(id => anchors.get(id)).filter((id): id is string => !!id);
+      if (!targets.length) continue;
+      controls.set(tool.id, targets);
+      for (const anchor of targets) map.set(anchor, [...(map.get(anchor) ?? []), { ...message, message: { content: [block] } } as StreamMessage]);
+    }
+  }
+  for (const message of messages) {
+    if (message.parentToolUseId) continue;
+    for (const block of getMessageContentBlocks(message)) {
+      const result = normalizeToolResultBlock(block);
+      for (const anchor of (result ? controls.get(result.tool_use_id) : undefined) ?? []) {
+        map.set(anchor, [...(map.get(anchor) ?? []), { ...message, message: { content: [block] } } as StreamMessage]);
+      }
     }
   }
   return map;
@@ -614,12 +646,13 @@ function buildSubagentTrace(
   const taskFinished = parentStatus === 'success' || parentStatus === 'error';
   const input = isRecord(block.input) ? block.input : {};
   // Delegate calls carry the target agent in `agent` instead of subagent_type.
-  const agentType = getString(input.subagent_type) || getDelegateAgentFromBlock(block);
+  const agentType = getString(input.subagent_type) || getString(input.agent_type) || getDelegateAgentFromBlock(block);
   const description =
     getString(input.description) ||
     (getString(input.prompt) ? truncateSummary(getString(input.prompt)!, 120) : null);
 
   const childMessages = context.messagesByParent.get(block.id) || [];
+  const runtime = latestChildState(childMessages);
   const assistantMessages = sortMessagesByCreatedAt(
     childMessages.filter(isAssistantStreamMessage)
   );
@@ -639,7 +672,7 @@ function buildSubagentTrace(
   const entries =
     context.depth < MAX_SUBAGENT_TRACE_DEPTH
       ? extractTraceEntries(assistantMessages)
-          .filter((entry) => !(entry.type === 'tool' && entry.block.name === 'TodoWrite'))
+          .filter((entry) => !(entry.type === 'tool' && (entry.block.name === 'TodoWrite' || childControlTools.has(entry.block.name))))
           .map((entry) =>
             createEntryFromTrace(
               entry,
@@ -670,7 +703,9 @@ function buildSubagentTrace(
       ? maxTs - minTs
       : undefined;
 
-  return { agentType, description, entries, toolCount, startedAt, durationMs };
+  return { agentType, description, entries, toolCount, startedAt: runtime?.startedAt ?? startedAt,
+    durationMs: runtime && taskFinished ? Math.max(0, runtime.updatedAt - runtime.startedAt) : durationMs,
+    runtime, operations: childOperations(childMessages) };
 }
 
 function createEntryFromTrace(
@@ -704,7 +739,7 @@ function createEntryFromTrace(
   const block = entry.block;
   const result = toolResultsMap.get(block.id);
   const rawStatus = toolStatusMap.get(block.id);
-  const status =
+  let status =
     rawStatus === 'pending' && !result
       ? pendingFallbackStatus
       : rawStatus || (result?.is_error ? 'error' : 'success');
@@ -728,6 +763,8 @@ function createEntryFromTrace(
   // lowercase `task` tool still becomes a task entry instead of a plain
   // tool row that the subagent stage would drop.
   if (kind === 'subagent') {
+    const runtime = latestChildState(subagentContext?.messagesByParent.get(block.id) ?? []);
+    if (runtime) status = childToolStatus(runtime, pendingFallbackStatus !== 'interrupted');
     return {
       id: block.id,
       type: 'task',
@@ -988,7 +1025,14 @@ export function createBatchWorkstreamModel(params: {
         depth: 0,
       }
     : undefined;
+  const linkedControlIds = new Set([...(params.subagentMessagesByParent?.values() ?? [])].flatMap(messages => childOperations(messages).map(operation => operation.id)));
   const entries = traceEntries
+    // Hide only successfully linked coordination calls. Unknown/stale ids keep
+    // a readable standalone row, including their errors, so nothing is lost.
+    .filter(entry => {
+      if (entry.type !== 'tool') return true;
+      return !linkedControlIds.has(entry.block.id);
+    })
     .filter((entry) => !(entry.type === 'tool' && entry.block.name === 'TodoWrite'))
     .map((entry) =>
       createEntryFromTrace(

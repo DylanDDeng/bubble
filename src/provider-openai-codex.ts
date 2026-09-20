@@ -452,9 +452,12 @@ export async function fetchOpenAICodexModelCatalog(options: {
       .then((payload) => ({ ok: true as const, payload }))
       .catch(() => ({ ok: false as const }));
     if (!parsed.ok) continue;
+    const payload = parsed.payload;
+    if (!Array.isArray(payload) && !(payload && typeof payload === "object"
+      && (Array.isArray(payload.models) || Array.isArray(payload.data)))) continue;
 
     return {
-      descriptors: sortCodexModelDescriptors(extractCodexModelDescriptors(parsed.payload)),
+      descriptors: sortCodexModelDescriptors(extractCodexModelDescriptors(payload)),
       status: "success",
     };
   }

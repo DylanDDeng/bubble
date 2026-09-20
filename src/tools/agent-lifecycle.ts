@@ -134,6 +134,7 @@ export function createSpawnAgentTool(
     parameters: {
       type: "object",
       properties: {
+        description: { type: "string", description: "Short task title for the activity card (under 60 characters). Put the full instructions in message." },
         agent_type: { type: "string", description: "Subagent profile or role name. Defaults to default. Built-in types include default, explorer, and worker; see the tool description for custom profiles." },
         agent: { type: "string", description: "Alias for agent_type." },
         category: { type: "string", description: "Optional semantic category for model/thinking routing, such as quick, deep, explore, review, frontend, or writing." },
@@ -260,7 +261,7 @@ export function createSendInputTool(): ToolRegistryEntry {
     name: "send_input",
     readOnly: true,
     effect: "read",
-    description: "Send a follow-up message to an existing subagent thread. If it is still running, pass interrupt:true to cancel and redirect it. Restarting a finished child goes through the scheduler like any spawn.",
+    description: "Send a follow-up message to an existing subagent thread. While running or queued, text input is queued and applied at the next safe boundary without interruption. Use interrupt:true only to cancel and redirect it. Restarting a finished child goes through the scheduler like any spawn.",
     parameters: {
       type: "object",
       properties: {
@@ -288,7 +289,7 @@ export function createSendInputTool(): ToolRegistryEntry {
           abortSignal: ctx.abortSignal,
         });
         return formatLifecycleResult("send_input", [snapshot], [
-          `Sent input to ${snapshot.nickname} (${snapshot.agentName})`,
+          `${snapshot.pendingInputCount ? "Queued input for" : "Sent input to"} ${snapshot.nickname} (${snapshot.agentName})`,
           `agent_id: ${snapshot.agentId}`,
           `status: ${snapshot.status}`,
           ...(snapshot.status === "queued" ? [queuedStatusLine(snapshot)] : []),
@@ -753,6 +754,8 @@ function snapshotToMetadata(snapshot: SubagentThreadSnapshot): Record<string, un
     error: snapshot.error,
     createdAt: snapshot.createdAt,
     updatedAt: snapshot.updatedAt,
+    pendingInputCount: snapshot.pendingInputCount,
+    inputDelivery: snapshot.inputDelivery,
   };
 }
 

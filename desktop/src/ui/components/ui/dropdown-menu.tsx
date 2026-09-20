@@ -48,7 +48,7 @@ const Content = React.forwardRef<HTMLDivElement, ContentProps>(
     <Menu.Positioner className={POSITIONER_Z_CLASS} sideOffset={sideOffset} side={side} align={align} alignOffset={alignOffset}>
       <Menu.Popup
         ref={ref}
-        className={cn('popover-surface z-50 min-w-[8rem] overflow-hidden p-1.5', className)}
+        className={cn('popover-surface z-50 min-w-[8rem] overflow-hidden p-1.5 outline-none', className)}
         {...props}
       />
     </Menu.Positioner>
@@ -63,7 +63,7 @@ const ContentWithPortal = React.forwardRef<HTMLDivElement, ContentProps>(
       <Menu.Positioner className={POSITIONER_Z_CLASS} sideOffset={sideOffset} side={side} align={align} alignOffset={alignOffset}>
         <Menu.Popup
           ref={ref}
-          className={cn('popover-surface z-50 min-w-[8rem] overflow-hidden p-1.5', className)}
+          className={cn('popover-surface z-50 min-w-[8rem] overflow-hidden p-1.5 outline-none', className)}
           {...props}
         />
       </Menu.Positioner>
@@ -231,7 +231,7 @@ const SubContent = React.forwardRef<HTMLDivElement, SubContentProps>(
       <Menu.Positioner className={POSITIONER_Z_CLASS} sideOffset={sideOffset} side={side} align={align} alignOffset={alignOffset}>
         <Menu.Popup
           ref={ref}
-          className={cn('popover-surface z-50 min-w-[8rem] overflow-hidden p-1.5', className)}
+          className={cn('popover-surface z-50 min-w-[8rem] overflow-hidden p-1.5 outline-none', className)}
           {...props}
         />
       </Menu.Positioner>

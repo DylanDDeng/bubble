@@ -116,11 +116,12 @@ export function getSubagentSprite(parentToolUseId: string): number[] {
 export function getSubagentPersona(
   parentToolUseId: string,
   subagentType?: string | null,
-  description?: string | null
+  description?: string | null,
+  runtimeName?: string
 ): SubagentPersona {
   const id = parentToolUseId;
   const nameHash = hashString(id);
-  const persona = PERSONA_NAMES[nameHash % PERSONA_NAMES.length];
+  const persona = runtimeName || PERSONA_NAMES[nameHash % PERSONA_NAMES.length];
   // A second, differently-seeded hash so hue is not correlated with the name
   // index (which would make same-name subagents also share a hue).
   const colorHue = hashString(`hue:${id}`) % 360;

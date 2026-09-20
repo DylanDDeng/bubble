@@ -1,0 +1,55 @@
+const { app } = require('electron');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const home = fs.mkdtempSync(path.join(os.tmpdir(), 'bubble-model-catalog-'));
+app.setPath('userData', home);
+process.env.BUBBLE_HOME = path.join(home, 'agent');
+const token = (account, nonce) => `header.${Buffer.from(JSON.stringify({sub:'fixture-user',nonce,'https://api.openai.com/auth':{chatgpt_account_id:account}})).toString('base64url')}.signature`;
+let profile = { id:'openai',authType:'oauth',apiKey:token('a',1),baseURL:'https://fixture.invalid',enabled:true };
+let outcome = { models:[{id:'gpt-future-fixture',name:'Future',providerId:'openai'}],source:'remote',authoritative:true };
+let discover = async () => outcome;
+const sdk = {
+  getModelConfig: () => ({defaultModel:'openai:gpt-5.1',providers:[{id:'openai',hasApiKey:true}]}),
+  registry:{getEnabled:()=>[profile],getCachedDiscoverySnapshot:()=>undefined,localModelsForProvider:()=>{throw Error('OpenAI must not read builtins')},discoverModels:()=>discover()},
+};
+app.whenReady().then(async()=>{
+  const loader = require('../../dist-electron/electron/libs/provider/bubble-sdk-loader.js');
+  loader.getBubbleSdk=async()=>sdk;
+  loader.reloadBubbleSdkConfig=()=>{};
+  const settings=require('../../dist-electron/electron/libs/bubble-settings.js');
+  const file=path.join(home,'bubble-model-catalog-cache.json');
+  assert.deepEqual((await settings.getBubbleModelConfig()).options,[]);
+  await settings.refreshBubbleModelCatalog();
+  assert.deepEqual((await settings.getBubbleModelConfig()).options,['openai:gpt-future-fixture']);
+  assert.equal((await settings.getBubbleModelConfig()).defaultModel,null,'stale default must not be reinserted');
+  const valid=fs.readFileSync(file,'utf8');
+  profile={...profile,apiKey:token('a',2)};
+  assert.deepEqual((await settings.getBubbleModelConfig()).options,['openai:gpt-future-fixture'],'token refresh retains same-account cache');
+  outcome={models:[{id:'gpt-5.1'}],source:'fallback',authoritative:false,error:'offline'};
+  assert.equal(await settings.refreshBubbleModelCatalog(),true);
+  assert.deepEqual((await settings.getBubbleModelConfig()).options,['openai:gpt-future-fixture']);
+  assert.match((await settings.getBubbleModelConfig()).catalogNotice,/last successful/);
+  assert.equal(fs.readFileSync(file,'utf8'),valid,'failure must not overwrite a good cache');
+  outcome={models:[],source:'remote',authoritative:true};
+  await settings.refreshBubbleModelCatalog();
+  assert.deepEqual((await settings.getBubbleModelConfig()).options,[],'successful empty list replaces old models');
+  profile={...profile,apiKey:token('b',1)};
+  discover=async()=>{throw Error('offline')};
+  await settings.refreshBubbleModelCatalog();
+  assert.deepEqual((await settings.getBubbleModelConfig()).options,[],'other account cannot reuse cache');
+  assert.match((await settings.getBubbleModelConfig()).catalogNotice,/Could not load/);
+  profile={...profile,apiKey:token('a',3)};
+  const legacy=JSON.parse(valid);delete legacy.confirmedRemoteProviders;
+  fs.writeFileSync(file,JSON.stringify(legacy));
+  assert.deepEqual((await settings.getBubbleModelConfig()).options,[],'unproven legacy cache must not revive builtins');
+  let resolve;discover=()=>new Promise(r=>{resolve=r});
+  const pending=settings.refreshBubbleModelCatalog();
+  while(!resolve) await new Promise(r=>setImmediate(r));
+  profile={...profile,apiKey:token('c',1)};
+  resolve({models:[{id:'gpt-account-a'}],source:'remote',authoritative:true});
+  assert.equal(await pending,false,'in-flight results cannot cross accounts');
+  assert.deepEqual((await settings.getBubbleModelConfig()).options,[]);
+  console.log('PASS: remote-only membership, fallback rejection, last-success cache, empty success, token refresh, account switch, legacy cache and in-flight race');
+}).then(()=>{fs.rmSync(home,{recursive:true,force:true});app.exit(0)}).catch(error=>{console.error(error);app.exit(1)});

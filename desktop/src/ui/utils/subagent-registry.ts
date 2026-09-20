@@ -1,3 +1,5 @@
+import { latestChildState, childToolStatus, shortChildTask, childOperations } from './bubble-subagent-view';
+import type { BubbleSubagentState } from '../../shared/types';
 /**
  * Derives the list of TOP-LEVEL subagents (Task tool calls the main agent
  * issued) for the current session, from `session.messages`. This is the data
@@ -17,6 +19,8 @@ import { groupSubagentMessagesByParent, isSubagentTaskBlock } from './workstream
 import { getSubagentPersona, type SubagentPersona } from './subagent-persona';
 
 export interface SubagentSummary {
+  runtime?: BubbleSubagentState;
+  operations?: ReturnType<typeof childOperations>;
   /** parentToolUseId — the Task tool_use id; the stable per-session key. */
   id: string;
   subagentType: string | null;
@@ -101,8 +105,9 @@ export function deriveSubagentSummaries(
         (getString(input.message) ? getString(input.message)!.slice(0, 200) : null) ||
         (getString(input.task) ? getString(input.task)!.slice(0, 200) : null);
 
-      const status = statusMap.get(use.id) ?? 'pending';
       const childMessages = messagesByParent.get(use.id) ?? [];
+      const runtime = latestChildState(childMessages);
+      const status = runtime ? childToolStatus(runtime, true) : statusMap.get(use.id) ?? 'pending';
 
       let minTs = Number.POSITIVE_INFINITY;
       let maxTs = Number.NEGATIVE_INFINITY;
@@ -113,8 +118,8 @@ export function deriveSubagentSummaries(
         if (ts > maxTs) maxTs = ts;
       }
       const finished = status === 'success' || status === 'error';
-      const startedAt = Number.isFinite(minTs) ? minTs : undefined;
-      const durationMs =
+      const startedAt = runtime?.startedAt ?? (Number.isFinite(minTs) ? minTs : undefined);
+      const durationMs = runtime && finished ? Math.max(0, runtime.updatedAt - runtime.startedAt) :
         finished && Number.isFinite(minTs) && Number.isFinite(maxTs) && maxTs >= minTs
           ? maxTs - minTs
           : undefined;
@@ -127,7 +132,9 @@ export function deriveSubagentSummaries(
         startedAt,
         durationMs,
         childMessageCount: childMessages.length,
-        persona: getSubagentPersona(use.id, subagentType, description),
+        runtime, operations: childOperations(childMessages),
+        persona: getSubagentPersona(runtime?.agentId || use.id, runtime?.role || subagentType,
+          shortChildTask(getString(input.description) || runtime?.task || description || ''), runtime?.nickname),
       });
     }
   }

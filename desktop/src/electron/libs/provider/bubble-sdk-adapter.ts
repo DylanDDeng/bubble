@@ -1,4 +1,6 @@
 import { assertBubbleSessionReader } from '../bubble-session-reader';
+import { getBubbleModelConfig } from '../bubble-settings';
+import { bubbleModelSelectionError } from '../../../shared/bubble-model-selection';
 import { isProjectFileApproval } from './project-access';
 import { EventEmitter } from 'events';
 import { readFile } from 'fs/promises';
@@ -8,6 +10,7 @@ import type {
   AskUserQuestionInput,
   Attachment,
   BubblePermissionMode,
+  BubbleSubagentState,
   ContentBlock,
   PermissionResult,
   ProviderListSkillsInput,
@@ -95,6 +98,7 @@ type ActiveBubbleSession = {
   subagentStreams: Map<string, BubbleSubagentStream>;
   /** tool_call id -> first-seen timestamp; anchors duration for finished lanes. */
   subagentStartedAt: Map<string, number>;
+  subagentStates?: Map<string, BubbleSubagentState>;
   /** tool_call id -> tool name, so spawn results can be identified later. */
   toolNames: Map<string, string>;
   /** spawn_agent/run_workflow results held back until the lane's terminal
@@ -345,6 +349,7 @@ export class BubbleSdkAdapter implements ProviderAdapter {
     const cwd = input.cwd || process.cwd();
     const sdk = await getBubbleSdk(cwd);
     this.assertConfigured(sdk);
+    const model = await this.resolveCatalogModel(sdk, input.model);
     const providerSessionId = this.resolveSessionId(sdk, input.resumeSessionId, cwd);
 
     const session: ActiveBubbleSession = {
@@ -352,7 +357,7 @@ export class BubbleSdkAdapter implements ProviderAdapter {
       providerSessionId,
       status: 'running',
       cwd,
-      model: input.model?.trim() || undefined,
+      model,
       permissionMode: input.bubblePermissionMode,
       thinkingLevel: input.bubbleThinkingLevel?.trim() || undefined,
       turnActive: false,
@@ -425,9 +430,13 @@ export class BubbleSdkAdapter implements ProviderAdapter {
       return;
     }
 
-    if (input.model?.trim()) {
-      session.model = input.model.trim();
+    const sdk = await getBubbleSdk(session.cwd);
+    const model = await this.resolveCatalogModel(sdk, input.model ?? session.model);
+    // Validation yields to the event loop; another send may have won the turn.
+    if (session.turnActive || this.sessions.get(input.threadId) !== session) {
+      throw new Error('Bubble session changed while preparing the turn. Please retry.');
     }
+    session.model = model;
     if (input.bubblePermissionMode) {
       session.permissionMode = input.bubblePermissionMode;
     }
@@ -570,9 +579,9 @@ export class BubbleSdkAdapter implements ProviderAdapter {
     const cwd = input.cwd || process.cwd();
     const sdk = await getBubbleSdk(cwd);
     this.assertConfigured(sdk);
+    let model = await this.resolveCatalogModel(sdk, input.model, true);
     const { id } = sdk.createSession({ cwd });
     let text = '';
-    let model = input.model?.trim() || undefined;
     const abortController = new AbortController();
     const timer = setTimeout(() => abortController.abort(), ONE_SHOT_TIMEOUT_MS);
     timer.unref?.();
@@ -583,7 +592,7 @@ export class BubbleSdkAdapter implements ProviderAdapter {
       // reject, so a one-shot can never block on an interactive card.
       const stream = sdk.runTurn(id, {
         prompt,
-        ...(model ? { model } : {}),
+        model,
         signal: abortController.signal,
         onStart: (info) => {
           assertBubbleSessionReader(prompt, info.tools, id);
@@ -924,6 +933,43 @@ export class BubbleSdkAdapter implements ProviderAdapter {
       session.subagentStartedAt.set(parentToolCallId, Date.now());
     }
 
+    const states = session.subagentStates ??= new Map();
+    const prior = states.get(update.subAgentId);
+    const snapshot = Array.isArray(update.metadata?.subagents) ? update.metadata.subagents[0] : undefined;
+    const info = isRecord(snapshot) ? snapshot : {};
+    const event = update.childEvent as { type?: string; name?: string; args?: Record<string, unknown> } | undefined;
+    let activity = prior?.activity || 'Starting';
+    if (event?.type === 'tool_start' || event?.type === 'tool_call_end') {
+      const target = getString(event.args?.path) || getString(event.args?.file_path);
+      const file = target.split('/').pop();
+      activity = `${normalizeToolName(event.name || 'Tool')}${file ? ` · ${file}` : ''}`;
+    } else if (event?.type === 'tool_end') activity = 'Analyzing results';
+    else if (event?.type === 'reasoning_delta') activity = 'Analyzing';
+    else if (event?.type === 'text_delta') activity = 'Writing response';
+    const state: BubbleSubagentState = {
+      agentId: update.subAgentId, anchorId: parentToolCallId,
+      nickname: update.nickname || prior?.nickname || update.agentName,
+      role: update.agentName, task: getString(info.task) || prior?.task || '',
+      status: update.status, activity,
+      startedAt: getNumber(info.createdAt) ?? prior?.startedAt ?? Date.now(),
+      updatedAt: getNumber(info.updatedAt) ?? Date.now(),
+      pendingInputCount: getNumber(info.pendingInputCount) ?? 0,
+      inputDelivery: info.inputDelivery as BubbleSubagentState['inputDelivery'],
+    };
+    // Persist at most one activity snapshot per second during token streaming.
+    // A status/delivery change is immediate and the UUID upserts one record.
+    const workflowChild = update.metadata?.mode === 'workflow';
+    if (!workflowChild && (!prior || state.status !== prior.status || state.inputDelivery !== prior.inputDelivery
+      || state.pendingInputCount !== prior.pendingInputCount || state.activity !== prior.activity
+      || state.updatedAt - prior.updatedAt >= 1000)) {
+      states.set(state.agentId, state);
+      this.emitMessage(session, {
+        type: 'assistant', uuid: `bubble-sub-state:${session.threadId}:${state.agentId}`,
+        parentToolUseId: parentToolCallId, createdAt: state.startedAt,
+        bubbleSubagent: state, message: { content: [] },
+      });
+    }
+
     // The spawning tool_use card may not have landed yet (queued frames can
     // race the main-loop tool_call_end) — the standard handleToolUse emits it.
     const child = update.childEvent;
@@ -1007,9 +1053,12 @@ export class BubbleSdkAdapter implements ProviderAdapter {
     ) {
       this.flushSubagentStream(session, parentToolCallId);
       const held = session.heldSpawnResults.get(parentToolCallId);
-      if (held) {
+      if (held && !workflowChild) {
         session.heldSpawnResults.delete(parentToolCallId);
-        this.emitToolResult(session, parentToolCallId, held);
+        this.emitToolResult(session, parentToolCallId, {
+          content: update.message || `Subagent ${state.nickname}: ${state.status}`,
+          isError: state.status === 'failed' || state.status === 'blocked',
+        });
       }
     }
   }
@@ -1051,6 +1100,13 @@ export class BubbleSdkAdapter implements ProviderAdapter {
     this.flushAssistant(session);
     session.emittedToolCallIds.add(toolCallId);
     session.toolNames.set(toolCallId, toolName);
+    if (toolName === 'wait_agent' && isRecord(args) && !getString(args.agent_id)
+      && (!Array.isArray(args.agent_ids) || args.agent_ids.length === 0)) {
+      // Capture the targets at invocation, not when a later render sees them
+      // completed. This is display metadata, not a change to SDK arguments.
+      args = { ...args, agent_ids: [...(session.subagentStates?.values() ?? [])]
+        .filter(state => ['queued', 'running'].includes(state.status)).map(state => state.agentId) };
+    }
     this.emitMessage(session, {
       type: 'assistant',
       uuid: `bubble-tool-use:${session.threadId}:${toolCallId}`,
@@ -1081,8 +1137,16 @@ export class BubbleSdkAdapter implements ProviderAdapter {
     // works (Claude's Task resolves only when the child finishes; Bubble's
     // spawn_agent returns "Spawned X (queued)" immediately).
     const toolName = (session.toolNames.get(toolCallId) || '').toLowerCase();
-    if (toolName === 'spawn_agent' || toolName === 'run_workflow') {
-      session.heldSpawnResults.set(toolCallId, result);
+    // A workflow call returns its aggregate outcome after every phase. A single
+    // member's terminal status must never complete or rename the whole workflow.
+    if (toolName === 'spawn_agent') {
+      const state = [...(session.subagentStates?.values() ?? [])].find((value) => value.anchorId === toolCallId);
+      if (result.isError || (state && !['running', 'queued'].includes(state.status))) {
+        this.emitToolResult(session, toolCallId, state ? {
+          content: `Subagent ${state.nickname}: ${state.status}`,
+          isError: state.status === 'failed' || state.status === 'blocked',
+        } : result);
+      } else session.heldSpawnResults.set(toolCallId, result);
       return;
     }
     this.emitToolResult(session, toolCallId, result);
@@ -1358,6 +1422,16 @@ export class BubbleSdkAdapter implements ProviderAdapter {
       }
     }
     return sdk.createSession({ cwd }).id;
+  }
+
+  private async resolveCatalogModel(sdk: BubbleSdkInstance, requested?: string, allowDefault = false): Promise<string> {
+    const catalog = await getBubbleModelConfig(sdk);
+    // Background one-shots may omit a selection, but their default must still
+    // come from the available catalog, never the SDK's unvalidated saved value.
+    const model = requested?.trim() || (allowDefault ? catalog.defaultModel || catalog.options[0] : undefined);
+    const error = bubbleModelSelectionError(model, catalog.options);
+    if (error) throw new Error(error);
+    return model!;
   }
 
   private assertConfigured(sdk: BubbleSdkInstance): void {

@@ -6,6 +6,15 @@ import {
 } from '../../src/ui/utils/session-model';
 import { formatGrokModelId, isGrokModelId } from '../../src/shared/provider-model';
 import type { SessionView } from '../../src/ui/types';
+import { bubbleModelSelectionError } from '../../src/shared/bubble-model-selection';
+
+// Empty catalogs must block sending even when a prior session/default model
+// survives in renderer state; a valid cached catalog should remain usable.
+assert.match(bubbleModelSelectionError(null, [])!, /No Bubble models/);
+assert.match(bubbleModelSelectionError('openai:gpt-5.1', [])!, /No Bubble models/);
+assert.match(bubbleModelSelectionError(null, ['openai:gpt-fixture'])!, /Select a Bubble model/);
+assert.match(bubbleModelSelectionError('openai:gpt-5.1', ['openai:gpt-fixture'])!, /no longer available/);
+assert.equal(bubbleModelSelectionError('openai:gpt-fixture', ['openai:gpt-fixture']), null);
 
 function testPrefersSessionModelWhenListLoaded() {
   const resolved = resolveListedOrPendingModel(

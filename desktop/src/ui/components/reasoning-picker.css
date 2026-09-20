@@ -242,6 +242,15 @@
   padding: 2px 4px;
   border-radius: 5px;
   line-height: 1.2;
+  /* Opening the menu focuses this item; focus is not a hover/selection fill. */
+  background: transparent;
+}
+.effort-picker-model-button:hover:not([data-disabled]) {
+  background: var(--bg-tertiary);
+}
+.effort-picker-model-button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
 }
 .effort-picker-selected-effort {
   display: flex;

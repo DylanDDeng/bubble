@@ -213,6 +213,8 @@ export interface AgentOptions {
 export interface AgentRunOptions {
   abortSignal?: AbortSignal;
   inputController?: AgentInputController;
+  /** Child follow-ups continue at a safe boundary, including a tool-free answer. */
+  continueOnPendingInput?: boolean;
   /** Local-only presentation metadata persisted with the submitted user turn. */
   userMessageUi?: Extract<Message, { role: "user" }>["ui"];
   /**
@@ -1737,12 +1739,16 @@ export class Agent {
         },
       }, abortSignal);
       for (const event of stopHook.events) yield emit(event);
-      const willContinue = !!(hookState as any).forceContinuationReason;
+      const willContinue = !!(hookState as any).forceContinuationReason
+        || (options.continueOnPendingInput === true && pendingInputCount() > 0);
       yield emit({ type: "turn_end", usage: turnUsage, systemFingerprint: turnSystemFingerprint, willContinue });
       if (willContinue) {
         delete (hookState as any).forceContinuationReason;
         continue;
       }
+      // A follow-up can arrive while the consumer handles turn_end. Recheck
+      // synchronously before closing admission so an accepted input is not lost.
+      if (options.continueOnPendingInput && pendingInputCount() > 0) continue;
       for (const event of await rejectPendingInputs("no_continuation")) yield emit(event);
       break;
     }

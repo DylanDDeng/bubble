@@ -824,6 +824,7 @@ const BubbleAgentSubContent: FC<{
   bubbleModels?: BubbleModelConfig['availableModels'];
   thinkingLevel: string | null;
   modelsLoading: boolean;
+  catalogNotice?: string;
   onSelectModel: (option: ComposerModelOption) => void;
   onThinkingLevelChange: (level: string) => void;
 }> = ({
@@ -832,13 +833,19 @@ const BubbleAgentSubContent: FC<{
   bubbleModels,
   thinkingLevel,
   modelsLoading,
+  catalogNotice,
   onSelectModel,
   onThinkingLevelChange,
 }) => {
   const levels = bubbleThinkingLevelsForModel(bubbleModels, selectedModel);
-  return <EffortModelPanel modelOptions={modelOptions} selectedModel={selectedModel} onSelectModel={onSelectModel}
+  if (modelOptions.length === 0) {
+    return <div role="status" className="px-2.5 py-3 text-[12px] text-[var(--text-muted)]">
+      {catalogNotice || (modelsLoading ? 'Loading models…' : 'No models available')}
+    </div>;
+  }
+  return <>{catalogNotice && <div role="status" className="px-2.5 py-2 text-[11px] text-[var(--text-muted)]">{catalogNotice}</div>}<EffortModelPanel modelOptions={modelOptions} selectedModel={selectedModel} onSelectModel={onSelectModel}
     efforts={levels} effort={thinkingLevel} onEffortChange={onThinkingLevelChange}
-    formatEffort={formatBubbleThinkingLevelLabel} loadingText={modelsLoading ? 'Loading models…' : null} />;
+    formatEffort={formatBubbleThinkingLevelLabel} loadingText={modelsLoading ? 'Loading models…' : catalogNotice ? 'No models available' : null} /></>;
 };
 
 const CodexAgentSubContent: FC<{
@@ -902,6 +909,7 @@ export function ComposerAgentModelPicker({
   onKimiThinkingChange,
   menuSide = 'top',
   bubbleModelsLoading = false,
+  bubbleCatalogNotice,
 }: {
   agentProvider: AgentProvider;
   modelLabel: string;
@@ -936,6 +944,7 @@ export function ComposerAgentModelPicker({
   menuSide?: 'top' | 'bottom';
   /** True while the first Bubble catalog load is in flight. */
   bubbleModelsLoading?: boolean;
+  bubbleCatalogNotice?: string;
 }) {
   const pickerTrigger = useStablePickerTrigger();
   const { entries } = useAgentReadiness(null, true);
@@ -1245,6 +1254,7 @@ export function ComposerAgentModelPicker({
                 modelOptions={modelOptions} selectedModel={modelValueByProvider[provider]}
                 bubbleModels={bubbleModels} thinkingLevel={bubbleThinkingLevel ?? null}
                 modelsLoading={bubbleModelsLoading}
+                catalogNotice={bubbleCatalogNotice}
                 onSelectModel={(option) => handleAgentAndModelChange(provider, option)}
                 onThinkingLevelChange={(level) => onBubbleThinkingLevelChange?.(level)} />;
             }

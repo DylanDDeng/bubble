@@ -1797,6 +1797,7 @@ export function PromptInput({
                 onKimiThinkingChange={agentSelection.setKimiThinking}
                 menuSide={menuSide}
                 bubbleModelsLoading={agentSelection.bubbleModelsLoading}
+                bubbleCatalogNotice={agentSelection.bubbleCatalogNotice}
               />
               {/* While a steer-capable turn runs, the slot flips with composer
                   content: empty → stop square; typing → the normal send arrow

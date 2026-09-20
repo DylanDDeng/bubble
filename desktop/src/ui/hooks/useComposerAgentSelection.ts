@@ -1,4 +1,5 @@
 import { rendererStateStorage } from '../utils/renderer-state-storage';
+import { bubbleModelSelectionError } from '../../shared/bubble-model-selection';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { AgentProvider, ClaudeCompatibleProviderId, SettingsTab } from '../types';
 import {
@@ -1118,6 +1119,10 @@ export function useComposerAgentSelection(input?: {
   }, [compatibleProviderId, model, modelOptions]);
 
   const modelSetup = useMemo<ComposerModelSetupState | null>(() => {
+    if (provider === 'bubble') {
+      const error = bubbleModelSelectionError(model, modelOptions.map(option => option.value));
+      return error ? { label: 'Select model', title: error, settingsTab: 'providers' } : null;
+    }
     // Only show setup CTA when there is no resolvable model to display.
     const hasConcreteModels = modelOptions.some((option) => Boolean(option.value.trim()));
     if (hasConcreteModels || model) {
@@ -1664,6 +1669,7 @@ export function useComposerAgentSelection(input?: {
     modelOptions,
     modelSetup,
     bubbleModelsLoading: !bubbleModelConfig.loaded,
+    bubbleCatalogNotice: bubbleModelConfig.catalogNotice,
     selectedModelOption,
     selectedModelLabel,
     selectAgent,

@@ -1269,6 +1269,7 @@ function BoardTaskComposer({
               onKimiThinkingChange={agentSelection.setKimiThinking}
               menuSide="bottom"
               bubbleModelsLoading={agentSelection.bubbleModelsLoading}
+              bubbleCatalogNotice={agentSelection.bubbleCatalogNotice}
             />
             </div>
           </div>

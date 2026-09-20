@@ -145,7 +145,7 @@ export class ChildRunner {
         options.abortSignal,
         record.abortController.signal,
       ]);
-      for await (const event of subAgent.run(input, runCwd, { abortSignal: childAbortSignal, resumeWithoutInput })) {
+      for await (const event of subAgent.run(input, runCwd, { abortSignal: childAbortSignal, resumeWithoutInput, inputController: record.inputQueue, continueOnPendingInput: true })) {
         if (event.type === "turn_start") {
           // Leftovers here belong to a half-built attempt the agent discarded
           // (stream-interruption retry re-issues the whole request); keeping
@@ -181,6 +181,8 @@ export class ChildRunner {
           turnSummaryBuffer = "";
           turnHadToolCall = false;
         }
+        if (event.type === "input_applied") record.inputDelivery = "applied";
+        if (event.type === "input_rejected") record.inputDelivery = "rejected";
         record.updatedAt = Date.now();
         emit("running", event);
       }
