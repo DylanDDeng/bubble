@@ -49,14 +49,16 @@ export async function recoverBubbleHistoryContext(
           if (typeof entry.metadata?.model === 'string') metadataModel = entry.metadata.model;
         }
         const message = entry.type === 'message' ? entry.data : entry.message;
-        if (entry.type === 'summary' || entry.type === 'compaction' || entry.type === 'context_checkpoint' ||
+        if (entry.type === 'summary' || entry.type === 'compaction' ||
             (entry.type === 'message' && message?.role === 'system') ||
             (entry.type === 'marker' && ['conversation_clear', 'model_switch', 'provider_switch', 'runtime_switch'].includes(entry.kind))) {
           // Compaction rewrites summary BEFORE retained messages. Their file order
-          // does not imply that their usage was measured after compaction. A
-          // context_checkpoint is appended after the retained originals instead.
+          // does not imply that their usage was measured after compaction.
           boundary = Math.max(boundary, entry.timestamp);
         }
+        // A checkpoint is appended after the retained originals, so file order is
+        // authoritative and immune to clock steps: only a later assistant counts.
+        if (entry.type === 'context_checkpoint') latest = null;
         if (entry.type === 'user_message' || (entry.type === 'message' && message?.role === 'user')) latest = null;
         if (entry.type !== 'assistant_message' && !(entry.type === 'message' && message?.role === 'assistant')) continue;
         latest = null;

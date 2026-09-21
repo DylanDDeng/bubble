@@ -359,9 +359,16 @@ export class MemoryDatabase {
         updated_at TEXT NOT NULL
       )
     `).run();
-    const columns = this.db.prepare("PRAGMA table_info(memory_stage1_outputs)").all() as { name: string }[];
-    if (!columns.some(column => column.name === "extractor_version")) {
-      this.db.prepare("ALTER TABLE memory_stage1_outputs ADD COLUMN extractor_version TEXT").run();
+    const hasExtractorVersion = () => (this.db.prepare("PRAGMA table_info(memory_stage1_outputs)").all() as { name: string }[])
+      .some(column => column.name === "extractor_version");
+    if (!hasExtractorVersion()) {
+      try {
+        this.db.prepare("ALTER TABLE memory_stage1_outputs ADD COLUMN extractor_version TEXT").run();
+      } catch (error) {
+        // Another process sharing this database can win the first-start
+        // migration between the check and the ALTER; that is success.
+        if (!hasExtractorVersion()) throw error;
+      }
     }
     this.db.prepare("INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('version', ?)").run(String(SCHEMA_VERSION));
   }

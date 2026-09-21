@@ -206,3 +206,21 @@ describe("checkpoint-aware memory extraction", () => {
     expect(complete).not.toHaveBeenCalled();
   });
 });
+
+describe("memory schema migration", () => {
+  it("tolerates another process adding extractor_version between the check and the ALTER", () => {
+    const db = new MemoryDatabase(cwd);
+    const internals = db as unknown as { db: { prepare(sql: string): { all(): unknown[] } }; migrate(): void };
+    const prepare = internals.db.prepare.bind(internals.db);
+    let staleReads = 1;
+    // First schema read predates the other process's ALTER; the column really exists.
+    internals.db.prepare = (sql: string) => {
+      const statement = prepare(sql);
+      if (!sql.startsWith("PRAGMA table_info(memory_stage1_outputs)") || staleReads-- <= 0) return statement;
+      return { all: () => (statement.all() as { name: string }[]).filter(column => column.name !== "extractor_version") };
+    };
+    expect(() => internals.migrate()).not.toThrow();
+    expect(staleReads).toBeLessThan(1);
+    db.close();
+  });
+});
