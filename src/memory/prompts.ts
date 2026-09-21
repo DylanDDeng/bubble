@@ -16,6 +16,9 @@ export function buildStageOneMessages(input: {
         "Do not include secrets, credentials, API keys, tokens, private keys, or full large logs.",
         "Prefer concrete project facts, user preferences, workflows, decisions, and gotchas.",
         "Skip transient progress updates and one-off chatter.",
+        "The transcript is a bounded chronological projection; checkpoint summaries replace superseded originals.",
+        "Conversation segments are separated by context clears, not requests to forget durable memory.",
+        "Prefer later corrections and decisions over earlier claims; do not retain revoked facts as current truth.",
       ].join("\n"),
     },
     {
