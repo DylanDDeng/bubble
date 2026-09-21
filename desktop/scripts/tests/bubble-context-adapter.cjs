@@ -55,6 +55,35 @@ app.whenReady().then(() => {
   assert.ok(legacy.uuid);
   replayAdapter.handleBubbleEvent(session, { type: 'context_compaction', status: 'completed', preTokens: 240000 });
   assert.notEqual(replay.at(-1).uuid, legacy.uuid, 'legacy completions retain unique UUIDs');
+  // Replay through SQLite, including a reopen and a later turn between receipts.
+  // Keep this separate from the UI rendering fixture above.
+  const replayStored = store.createSession({ title: 'Replay ordering', provider: 'bubble', cwd: dir });
+  const replayBoundary = replay[0];
+  const originalNow = Date.now;
+  try {
+    Date.now = () => 1000;
+    store.addMessage(replayStored.id, replayBoundary);
+    Date.now = () => 2000;
+    store.addMessage(replayStored.id, { type: 'user_prompt', uuid: 'after-checkpoint', prompt: 'next turn' });
+    store.close(); store.initialize();
+    Date.now = () => 3000;
+    store.addMessage(replayStored.id, { ...replayBoundary,
+      compactMetadata: { ...replayBoundary.compactMetadata, postTokens: 12345 } });
+    // An explicit retransmission timestamp must not move the boundary either.
+    store.addMessage(replayStored.id, { ...replayBoundary, createdAt: 4000,
+      compactMetadata: { ...replayBoundary.compactMetadata, postTokens: 9999 } });
+    store.close(); store.initialize();
+    const replayHistory = store.getSessionHistory(replayStored.id);
+    assert.deepEqual(replayHistory.map(m => m.uuid), [replayBoundary.uuid, 'after-checkpoint']);
+    assert.equal(replayHistory[0].createdAt, 1000, 'boundary retains its first persisted timestamp');
+    assert.equal(replayHistory[0].compactMetadata.postTokens, 9999, 'receipt payload can still be updated');
+    assert.equal(replayHistory[1].createdAt, 2000);
+    // Non-boundary upserts keep their existing timestamp update semantics.
+    store.addMessage(replayStored.id, { type: 'user_prompt', uuid: 'after-checkpoint', prompt: 'updated', createdAt: 5000 });
+    assert.equal(store.getStoredMessage(replayStored.id, 'after-checkpoint').createdAt, 5000);
+  } finally {
+    Date.now = originalNow;
+  }
   if (process.env.BUBBLE_CONTEXT_FIXTURE) fs.writeFileSync(process.env.BUBBLE_CONTEXT_FIXTURE, JSON.stringify(history));
   store.close();
   console.log('PASS: adapter context/compaction events persist and survive database reopen; cumulative billing stays separate');
