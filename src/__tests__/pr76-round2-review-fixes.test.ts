@@ -277,6 +277,34 @@ describe("summary input keeps breadth when tool results are large", () => {
     expect(fitted!.degradation).toBeUndefined();
   });
 
+  it("still finds a fitting verbatim input when the tokenizer's regime switch makes it cheaper than the trimmed floor", () => {
+    // ~70k characters of protected, token-dense text keep the trimmed floor under
+    // the tiktoken length limit (expensive o200k count); restoring the payload
+    // pushes the verbatim rendering over it, where the cheap heuristic applies.
+    const dense = ["😀", "🧪", "🛰️", "🧵", "🪢", "🧭", "🪁"];
+    let protectedText = "";
+    for (let i = 0; protectedText.length < 70_000; i++) protectedText += dense[i % dense.length] + (i % 5 === 0 ? " " : "");
+    let seed = 11;
+    const word = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed.toString(36); };
+    let payload = "";
+    while (payload.length < 15_000) payload += word() + " ";
+    const messages: Message[] = [
+      { role: "user", content: protectedText },
+      { role: "assistant", content: "", toolCalls: [{ id: "p", name: "read_file", arguments: '{"path":"notes.txt"}' }] },
+      { role: "tool", toolCallId: "p", content: payload },
+    ];
+    const measure = (text: string) => Math.ceil((estimateTextTokens("summarize", "openai") + estimateTextTokens(text, "openai") + 32) * 1.25);
+    const verbatim = `USER: ${protectedText}\n\nTOOL_CALL[read_file]: {"path":"notes.txt"}\n\nTOOL_RESULT[read_file]: ${payload}`;
+    const budget = measure(verbatim);
+    // Precondition of the scenario: the shorter, protected-only text measures far above the budget.
+    expect(measure(`USER: ${protectedText}`)).toBeGreaterThan(budget * 2);
+
+    const fitted = fitSummaryInput(messages, "summarize", budget, "openai");
+    expect(fitted).toBeDefined();
+    expect(fitted!.historyText).toBe(verbatim);
+    expect(fitted!.degradation).toBeUndefined();
+  }, 30_000);
+
   it("finds a large cap even where the provider tokenizer is not monotone in the cap", () => {
     // o200k below the tiktoken length limit, heuristic above it: a failing
     // midpoint below the switch must not hide the fitting interval above it.

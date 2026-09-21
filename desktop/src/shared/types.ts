@@ -1657,7 +1657,8 @@ export type StreamMessageBase = {
 };
 
 export interface CompactMetadata {
-  trigger: 'manual' | 'auto';
+  /** 'unknown': a stored boundary that carried no metadata — never assert a cause for it. */
+  trigger: 'manual' | 'auto' | 'unknown';
   preTokens: number;
   /** Context occupancy right after compaction, when the runtime reports it. */
   postTokens?: number;

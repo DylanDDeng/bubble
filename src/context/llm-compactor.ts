@@ -351,11 +351,13 @@ export function fitSummaryInput(
       }
       return render(bestCap, dropped).fitted;
     }
-    // Emptying the payloads is not always the smallest rendering: when it saves
-    // less than the trim note costs, the verbatim input is smaller and may still
-    // fit. That is only possible within the note's cost of the budget, so the
-    // full rendering is probed just then, not on every drop.
-    if (floor.trimmed && floor.overBy <= floor.noteTokens) {
+    // Emptying the payloads is not always the smallest rendering. With the
+    // additive heuristic the verbatim input can only be smaller when trimming
+    // saves less than its note costs, i.e. within that cost of the budget, so it
+    // is probed just then. A provider tokenizer gives no such bound: past its
+    // length limit it switches to the (cheaper) heuristic, so a longer verbatim
+    // input can measure far below a shorter trimmed one — always probe there.
+    if (floor.trimmed && (!heuristicOnly || floor.overBy <= floor.noteTokens)) {
       const whole = render(undefined, dropped);
       if (whole.fits) return whole.fitted;
     }

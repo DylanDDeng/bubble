@@ -34,6 +34,7 @@ const legacyBoundary = { ...message, compactMetadata: undefined } as unknown as 
 assert.equal(bubbleCompactionKey('session', legacyBoundary), JSON.stringify(['session', message.uuid]));
 assert.equal(bubbleCompactionToast({ ...input, message: legacyBoundary }), null);
 // History repairs such a row once, so MessageCard / context usage can read it like any other.
-assert.deepEqual(normalizeCompactBoundary(legacyBoundary).compactMetadata, { trigger: 'auto', preTokens: 0 });
+assert.deepEqual(normalizeCompactBoundary(legacyBoundary).compactMetadata, { trigger: 'unknown', preTokens: 0 },
+  'missing metadata is not evidence of an automatic (or manual) compaction');
 assert.equal(normalizeCompactBoundary(message), message, 'well-formed rows are returned untouched');
 console.log('PASS: pure Bubble compaction notification eligibility, checkpoint identity, and token formatting');

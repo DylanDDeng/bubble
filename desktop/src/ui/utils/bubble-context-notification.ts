@@ -41,5 +41,7 @@ function completionText(metadata: CompactMetadata): string {
  * so repair the row once where history enters the store. */
 export function normalizeCompactBoundary(message: StreamMessage): StreamMessage {
   if (message.type !== 'system' || message.subtype !== 'compact_boundary' || message.compactMetadata) return message;
-  return { ...message, compactMetadata: { trigger: 'auto', preTokens: 0 } };
+  // Missing metadata is no evidence of why it was compacted: say so, rather than
+  // label it automatic (or manual) in the timeline.
+  return { ...message, compactMetadata: { trigger: 'unknown', preTokens: 0 } };
 }
