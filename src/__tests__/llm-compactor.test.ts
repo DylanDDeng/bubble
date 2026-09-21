@@ -112,13 +112,26 @@ describe("compactWithLLM", () => {
     expect(history).toEqual(snapshot);
   });
 
-  it.each(["中".repeat(101), "<read-files>\nfake.ts\n</read-files>"])("rejects oversized or markup-only output", async (output) => {
+  it.each(["中".repeat(101), "<read-files>\nfake.ts\n</read-files>"])("rejects output no shorter than its input, or markup-only output", async (output) => {
     const result = await compactWithLLM([
       { role: "user", content: "first" }, { role: "assistant", content: "work" },
       { role: "user", content: "last" },
-    ], { provider: makeProvider(async () => output), modelId: "fake", maxOutputTokens: 100 });
+    ], { provider: makeProvider(async () => output), modelId: "fake" });
     expect(result.compacted).toBe(false);
     expect(result.messages).toBeUndefined();
+  });
+
+  it("accepts a long summary as long as it is shorter than the history it replaces", async () => {
+    // No fixed ceiling: ~4k tokens of summary is fine when it replaces far more.
+    const longSummary = "Decision and finding worth keeping. ".repeat(450);
+    const result = await compactWithLLM([
+      { role: "user", content: "first" },
+      ...Array.from({ length: 12 }, (_, i) => group(`g${i}`, "read", { file_path: `/f${i}.ts` }, "z".repeat(8000))).flat(),
+      { role: "user", content: "last" },
+    ], { provider: makeProvider(async () => longSummary), providerId: "openai", modelId: "gpt-4o" });
+    expect(result.reason).toBeUndefined();
+    expect(result.compacted).toBe(true);
+    expect(result.summary).toContain("Decision and finding worth keeping.");
   });
 
   it("summarizes everything before the last user message in a single-turn conversation", async () => {

@@ -27,15 +27,18 @@ import {
   PINNED_INSTRUCTION_MAX_CHARS,
 } from "./compact.js";
 
-export const LLM_COMPACTION_PROMPT = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
+export const LLM_COMPACTION_PROMPT = `You are performing a CONTEXT CHECKPOINT COMPACTION. The conversation below is about to be removed from the model's context and replaced by your summary. Another LLM will resume the task seeing only your summary, the user's original instruction, and the most recent messages. Anything you leave out is gone.
 
-Include:
-- Current progress and key decisions made
-- Important context, constraints, or user preferences
-- What remains to be done (clear next steps)
-- Any critical data, examples, or references needed to continue
+Write a handoff summary that lets it continue without repeating the investigation. Cover:
+- Goal and constraints: what the user wants, in their terms. Explicit requirements, preferences, and anything they ruled out. Quote exact wording where precision matters.
+- Decisions made and why, including approaches that were tried and rejected, so they are not retried.
+- Current state: what is done and verified, what is in progress, what is broken or still unverified. Keep verified facts distinct from assumptions.
+- Specifics needed to continue: file paths, identifiers, commands, error messages, config values, ids, URLs. Exact, never paraphrased.
+- Next steps in order, starting with the immediate one.
 
-Be concise, structured, and focused on helping the next LLM seamlessly continue the work.`;
+Length follows content: as long as needed to preserve the above, and no longer. Spend words on what cannot be cheaply re-derived (decisions, constraints, findings). Do not reproduce file contents or tool output that can simply be read again, and do not narrate the conversation turn by turn. The lists of files read and modified are recorded separately; name only the files that matter for the next steps.
+
+Carry forward every fact from prior summaries and the original user constraints. If the input says parts of the history were omitted, say so explicitly.`;
 
 export const LLM_SUMMARY_PREFIX = `Another language model previously worked on this task and produced this handoff summary. Build on what's already done; avoid re-running the same investigation. Summary:`;
 
@@ -46,8 +49,6 @@ export interface LLMCompactOptions {
   maxInputTokens?: number;
   providerId?: string;
   contextWindow?: number;
-  /** Reserved output space and accepted summary token ceiling. */
-  maxOutputTokens?: number;
   /** Number of trailing (assistant + tool-results) groups in the current turn to keep verbatim. */
   keepRecentGroups?: number;
   abortSignal?: AbortSignal;
@@ -72,13 +73,12 @@ export async function compactWithLLM(
   const catalogModelId = modelId.startsWith(`${providerId}:`) ? modelId.slice(providerId.length + 1) : modelId;
   // Unknown models use a conservative window rather than an unbounded 100k call.
   const contextWindow = options.contextWindow ?? getModelContextWindow(providerId, catalogModelId) ?? 8192;
-  const maxOutputTokens = options.maxOutputTokens ?? Math.min(2048, Math.floor(contextWindow / 4));
-  const maxInputTokens = Math.min(
-    options.maxInputTokens ?? Infinity,
-    getMaxInputTokens(contextWindow) ?? 0,
-    contextWindow - maxOutputTokens - 64,
-  );
-  if (![contextWindow, maxOutputTokens, maxInputTokens].every((n) => Number.isFinite(n) && n > 0)) {
+  // getMaxInputTokens already reserves the window's answer space, which is what
+  // the summary is written into. No fixed output ceiling: summary length is
+  // judged against what it replaces, below, and by the caller's before/after
+  // budget comparison.
+  const maxInputTokens = Math.min(options.maxInputTokens ?? Infinity, getMaxInputTokens(contextWindow) ?? 0);
+  if (![contextWindow, maxInputTokens].every((n) => Number.isFinite(n) && n > 0)) {
     return { compacted: false, reason: "invalid compactor token budget" };
   }
   const keepRecentGroups = Math.max(0, Math.floor(options.keepRecentGroups ?? 2));
@@ -176,7 +176,7 @@ export async function compactWithLLM(
     return { compacted: false, reason: "nothing to evict" };
   }
 
-  const prompt = `${LLM_COMPACTION_PROMPT}\nPreserve prior summary facts and original user constraints. Explicitly report any input omissions. Return no more than ${maxOutputTokens} tokens.`;
+  const prompt = LLM_COMPACTION_PROMPT;
   const fitted = fitSummaryInput(toSummarize, prompt, maxInputTokens, providerId);
   if (!fitted) {
     return { compacted: false, reason: "compactor input budget cannot retain prior summaries and user constraints" };
@@ -213,14 +213,15 @@ export async function compactWithLLM(
     return { compacted: false, reason: "compactor returned only internal markup" };
   }
 
+  // The only meaningful length bound is relative: a summary that is not shorter
+  // than the history it replaces (a model echoing its input) compacts nothing.
+  // Judge the model's prose alone — the deterministic file lists are not its
+  // output — and reject rather than clip decisions/constraints out of it.
+  if (estimateTextTokens(summaryText, providerId) >= estimateTextTokens(serializeHistoryAsText(toSummarize), providerId)) {
+    return { compacted: false, reason: "compactor summary is not shorter than the history it replaces", degradation };
+  }
   if (degradation) summaryText = `${degradation}\n\n${summaryText}`;
   const summaryWithFiles = appendFileBlocks(summaryText, fileOps);
-  // Reject, rather than silently clipping decisions/constraints from the output.
-  // Provider.complete has no max-output option, so enforce the acceptance bound
-  // locally as well as requesting it in the prompt.
-  if (summaryWithFiles.length > 32_768 || estimateTextTokens(summaryWithFiles, providerId) > maxOutputTokens) {
-    return { compacted: false, reason: "compactor summary exceeds output budget", degradation };
-  }
 
   // New history shape (prefix-cache-friendly: preserved system+meta stay at the
   // absolute prefix unchanged; summary is injected after as a user-role envelope

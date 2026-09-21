@@ -207,20 +207,22 @@ describe("compaction file tracking", () => {
     expect(ops.modified).toEqual(["src/one.ts", "src/three.ts", "src/two.ts"]);
   });
 
-  it("includes deterministic file blocks in the accepted output budget", async () => {
-    let calls = 0;
+  it("never rejects a summary because of its deterministic file blocks", async () => {
+    // The file lists are appended by code, not written by the model: a short
+    // summary in a session touching many files must still be accepted.
     const provider: Provider = {
       async *streamChat() {},
-      async complete() { calls++; return "summary"; },
+      async complete() { return "Short summary of progress and next steps."; },
     };
     const result = await compactWithLLM([
       { role: "user", content: "original" },
-      ...toolTurn([{ name: "read", args: { path: `${"中".repeat(200)}.ts` } }]),
+      ...Array.from({ length: 160 }, (_, i) =>
+        toolTurn([{ name: "read", args: { path: `/Users/dev/project/packages/core/src/modules/feature-${i}/implementation.ts` } }])).flat(),
       { role: "user", content: "latest" },
-    ], { provider, modelId: "fake", maxOutputTokens: 100 });
-    expect(calls).toBe(1);
-    expect(result.compacted).toBe(false);
-    expect(result.reason).toContain("output budget");
+    ], { provider, providerId: "openai", modelId: "gpt-4o" });
+    expect(result.reason).toBeUndefined();
+    expect(result.compacted).toBe(true);
+    expect(parseFileBlocks(result.summary ?? "").read).toHaveLength(160);
   });
 
   it("records evicted sub-turn file ops on the sub-turn summary", () => {
