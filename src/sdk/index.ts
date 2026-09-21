@@ -25,7 +25,7 @@ import {
   type SessionTurnReservation,
 } from "./session-turn-coordinator.js";
 import { ReplayEventLog } from "./replay-event-log.js";
-import { SessionHistoryDivergedError, SessionManager, type SessionSummary } from "../session.js";
+import { SessionManager, type SessionSummary } from "../session.js";
 import { splitLeadingContext } from "../context/compact.js";
 import { PermissionAwareApprovalController } from "../approval/controller.js";
 import { BashAllowlist } from "../approval/session-cache.js";
@@ -604,13 +604,14 @@ export class BubbleSdk {
         try {
           write();
         } catch (error) {
-          if (error instanceof SessionHistoryDivergedError) {
-            try {
-              contextRevision = session.getRevision();
-              const head = splitLeadingContext(agent.messages).leading;
-              agent.messages = [...head, ...session.getMessages()];
-            } catch { /* surface the original fence rejection */ }
-          }
+          // Any refused write (fence rejection, busy lock, I/O) leaves the agent's
+          // already-pushed message unpersisted. getMessages() refreshes, so read
+          // the history first and adopt the revision of that same snapshot.
+          try {
+            const reloaded = session.getMessages();
+            contextRevision = session.getRevision();
+            agent.messages = [...splitLeadingContext(agent.messages).leading, ...reloaded];
+          } catch { /* surface the original write failure */ }
           throw error;
         }
       };

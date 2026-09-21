@@ -13,7 +13,7 @@ import { createProviderInstance, createUnavailableProvider } from "./provider.js
 import { resolveConfiguredModel } from "./model-selection.js";
 import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingLevel } from "./provider-transform.js";
 import { ProviderRegistry, displayModel, encodeModel, decodeModel } from "./provider-registry.js";
-import { SessionHistoryDivergedError, SessionManager } from "./session.js";
+import { SessionManager } from "./session.js";
 import { SessionContextFence } from "./session-context-fence.js";
 import { createSessionTitleUpdater, type SessionTitleUpdater } from "./session-title.js";
 import { buildSystemPrompt } from "./system-prompt.js";
@@ -459,14 +459,14 @@ async function main() {
     try {
       write();
     } catch (error) {
-      if (error instanceof SessionHistoryDivergedError) {
-        try {
-          const history = contextFence.reloadHistory();
-          const head = splitLeadingContext(agent.messages).leading;
-          agent.messages = [...head, ...history];
-        } catch {
-          // Surface the original fence rejection; the next write retries the reload.
-        }
+      // Any refused write (fence rejection, busy lock, I/O) leaves the agent's
+      // already-pushed message unpersisted, so always restore the file's truth.
+      try {
+        const history = contextFence.reloadHistory();
+        const head = splitLeadingContext(agent.messages).leading;
+        agent.messages = [...head, ...history];
+      } catch {
+        // Surface the original write failure; the next write retries the reload.
       }
       throw error;
     }

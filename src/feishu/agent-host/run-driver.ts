@@ -14,7 +14,6 @@
 
 import chalk from "chalk";
 import { Agent } from "../../agent.js";
-import { SessionHistoryDivergedError } from "../../session.js";
 import { splitLeadingContext } from "../../context/compact.js";
 import { BudgetLedger } from "../../agent/budget-ledger.js";
 import { PermissionAwareApprovalController } from "../../approval/controller.js";
@@ -165,13 +164,14 @@ export class RunDriver {
       try {
         write();
       } catch (error) {
-        if (error instanceof SessionHistoryDivergedError) {
-          try {
-            contextRevision = session.manager.getRevision();
-            const head = splitLeadingContext(agent.messages).leading;
-            agent.messages = [...head, ...session.manager.getMessages()];
-          } catch { /* surface the original fence rejection */ }
-        }
+        // Any refused write (fence rejection, busy lock, I/O) leaves the agent's
+        // already-pushed message unpersisted. getMessages() refreshes, so read
+        // the history first and adopt the revision of that same snapshot.
+        try {
+          const reloaded = session.manager.getMessages();
+          contextRevision = session.manager.getRevision();
+          agent.messages = [...splitLeadingContext(agent.messages).leading, ...reloaded];
+        } catch { /* surface the original write failure */ }
         throw error;
       }
     };

@@ -19,23 +19,38 @@ function publish(path: string, token: string): void {
   try { linkSync(owner, path); } finally { unlinkSync(owner); }
 }
 
-/** Synchronous short transaction lock. Live owners are never expired by age. */
-export function withSessionWriteLock<T>(path: string, action: () => T): T {
+/** A live owner held the lock past the bounded wait. Nothing was written. */
+export class SessionWriteLockBusyError extends Error {
+  constructor(path: string) {
+    super(`Session write lock is held by another live writer: ${path}`);
+    this.name = "SessionWriteLockBusyError";
+  }
+}
+
+const LIVE_OWNER_WAIT_MS = 2_000;
+const sleepCell = new Int32Array(new SharedArrayBuffer(4));
+function sleepSync(ms: number): void { Atomics.wait(sleepCell, 0, 0, ms); }
+
+/** Synchronous short transaction lock. Live owners are never expired by age;
+ * contenders wait a bounded time for them, since transactions are short. */
+export function withSessionWriteLock<T>(path: string, action: () => T, waitMs = LIVE_OWNER_WAIT_MS): T {
   const token = `${process.pid}:${randomUUID()}`;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  const deadline = Date.now() + waitMs;
+  for (let delay = 2; ; delay = Math.min(delay * 2, 50)) {
     try { publish(path, token); break; }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST" || attempt === 2) throw error;
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (Date.now() >= deadline) throw new SessionWriteLockBusyError(path);
       let observed: string;
       try { observed = readFileSync(path, "utf8"); }
       catch (readError) { if ((readError as NodeJS.ErrnoException).code === "ENOENT") continue; throw readError; }
-      if (!deadOwner(observed)) throw error;
+      if (!deadOwner(observed)) { sleepSync(delay); continue; }
       // Serialize recovery. Recovery locks themselves use the same owner-safe
       // protocol, so killing a recovering process cannot permanently block it.
       withSessionWriteLock(`${path}.recovery`, () => {
         try { if (readFileSync(path, "utf8") === observed && deadOwner(observed)) unlinkSync(path); }
         catch (recoveryError) { if ((recoveryError as NodeJS.ErrnoException).code !== "ENOENT") throw recoveryError; }
-      });
+      }, Math.max(0, deadline - Date.now()));
     }
   }
   try { return action(); } finally { release(path, token); }

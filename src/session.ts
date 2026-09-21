@@ -228,21 +228,24 @@ export class SessionManager {
     else this.withWriteLock(write);
   }
 
-  private rewrite(entries: SessionLogEntry[]) {
-    const dir = dirname(this.sessionFile);
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
-    }
-    this.withWriteLock(() => {
+  /** Refresh, derive the replacement from the refreshed log, and swap the file
+   * as one locked transaction; `derive` returning undefined leaves it untouched. */
+  private rewrite<T>(derive: (entries: SessionLogEntry[]) => { entries: SessionLogEntry[]; result: T } | undefined): T | undefined {
+    mkdirSync(dirname(this.sessionFile), { recursive: true });
+    return withSessionWriteLock(`${this.sessionFile}.write-lock`, () => {
+      this.refresh();
+      const derived = derive(this.log.list());
+      if (!derived) return undefined;
       const temp = `${this.sessionFile}.${randomUUID()}.tmp`;
       try {
-        writeFileSync(temp, entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n", { mode: 0o600 });
+        writeFileSync(temp, derived.entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n", { mode: 0o600 });
         const fd = openSync(temp, "r");
         try { fsyncSync(fd); } finally { closeSync(fd); }
         renameSync(temp, this.sessionFile);
         this.diskRevision = this.currentDiskRevision();
-        this.log.replace(entries);
+        this.log.replace(derived.entries);
       } finally { if (existsSync(temp)) unlinkSync(temp); }
+      return derived.result;
     });
   }
 
@@ -270,10 +273,23 @@ export class SessionManager {
   }
 
   setMetadata(metadata: SessionMetadata) {
-    this.refresh();
-    const entry: SessionLogEntry = { id: `metadata-${randomUUID()}`, type: "metadata", metadata, timestamp: Date.now() };
-    this.persist(entry);
-    this.log.appendEntries([entry]);
+    this.mutateMetadata(() => metadata);
+  }
+
+  /** Refresh, derive, and append as one locked transaction. Metadata records
+   * are full snapshots, so a snapshot built outside the lock would silently
+   * overwrite a concurrent writer's fields. */
+  mutateMetadata(build: (current: SessionMetadata) => SessionMetadata) {
+    mkdirSync(dirname(this.sessionFile), { recursive: true });
+    try {
+      withSessionWriteLock(`${this.sessionFile}.write-lock`, () => {
+        this.refresh();
+        const entry: SessionLogEntry = { id: `metadata-${randomUUID()}`, type: "metadata",
+          metadata: build(this.log.getMetadata()), timestamp: Date.now() };
+        this.persist(entry, true);
+        this.log.appendEntries([entry]);
+      });
+    } catch (error) { this.reloadAfterWriteFailure(); throw error; }
     const committed = this.log.getMetadata();
     for (const listener of this.metadataListeners) {
       try {
@@ -286,29 +302,21 @@ export class SessionManager {
   }
 
   updateMetadata(patch: Partial<SessionMetadata>) {
-    this.refresh();
-    this.setMetadata({
-      ...this.log.getMetadata(),
-      ...dropUndefined(patch),
-    });
+    this.mutateMetadata((current) => ({ ...current, ...dropUndefined(patch) }));
   }
 
   clearTitleMetadata() {
-    this.refresh();
-    const {
+    this.mutateMetadata(({
       title: _title,
       titleSource: _titleSource,
       titleUpdatedAt: _titleUpdatedAt,
       titleUserMessageId: _titleUserMessageId,
       ...metadata
-    } = this.log.getMetadata();
-    this.setMetadata(metadata);
+    }) => metadata);
   }
 
   clearExternalRuntimeMetadata() {
-    this.refresh();
-    const { externalRuntime: _externalRuntime, ...metadata } = this.log.getMetadata();
-    this.setMetadata(metadata);
+    this.mutateMetadata(({ externalRuntime: _externalRuntime, ...metadata }) => metadata);
   }
 
   appendMessage(message: Message, expectedRevision?: string) {
@@ -403,13 +411,13 @@ export class SessionManager {
     let result = pending?.candidate ?? compactMessages(messages, options);
     if (!result.compacted) result = compactCurrentTurnToolGroups(messages);
     if (!result.compacted || !result.messages) return { compacted: false };
-    let inserted = false;
-    const next = result.messages.flatMap(message => {
-      if (!isCompactionSummaryMessage(message)) return [message];
-      if (inserted) return [];
-      inserted = true;
-      return [buildCompactionSummaryMessage(summary)];
-    });
+    // Replace only the summary that stands for the evicted input. A sub-turn
+    // candidate also carries earlier multi-turn summaries in its pre-turn; the
+    // summarizer never saw those, so they must survive verbatim.
+    const summaryIndex = result.summaryIndex ?? result.messages.findIndex(isCompactionSummaryMessage);
+    if (summaryIndex < 0) return { compacted: false };
+    const next = result.messages.map((message, index) =>
+      index === summaryIndex ? buildCompactionSummaryMessage(summary) : message);
     const revision = this.getRevision();
     this.commitContextCheckpoint(createContextCheckpoint(next, "manual", summary, revision));
     this.publishContextCommit(revision, true);
@@ -447,6 +455,7 @@ export class SessionManager {
 
   /** User messages after the latest /clear, oldest first — the valid rewind anchors. */
   listUserTurns(): UserTurn[] {
+    this.refresh();
     const entries = this.log.list();
     let start = 0;
     for (let i = entries.length - 1; i >= 0; i--) {
@@ -480,31 +489,40 @@ export class SessionManager {
    * entry id. Returns undefined when the id does not name a user message.
    */
   rewindToEntry(entryId: string): RewindResult | undefined {
-    const entries = this.log.list();
-    const index = entries.findIndex((entry) => entry.id === entryId && entry.type === "user_message");
-    if (index < 0) return undefined;
-
-    const target = entries[index];
-    const removed = entries.slice(index);
-    const revision = this.getRevision();
-    // Metadata records are full snapshots, not history deltas. Preserve the
-    // latest snapshot (including absent/cleared fields) in the atomic rewrite.
-    const metadata = { ...this.log.getMetadata() };
-    if (metadata.titleUserMessageId && removed.some((entry) => entry.id === metadata.titleUserMessageId)) {
-      delete metadata.title;
-      delete metadata.titleSource;
-      delete metadata.titleUpdatedAt;
-      delete metadata.titleUserMessageId;
-    }
-    this.rewrite([...entries.slice(0, index), {
-      id: `metadata-${randomUUID()}`, type: "metadata", metadata, timestamp: Date.now(),
-    }]);
-    this.publishContextCommit(revision, true);
-
-    return {
-      removedEntries: removed.length,
-      targetText: target.type === "user_message" ? messageText(target.message) : "",
-    };
+    // A rewind replaces history by explicit user action, so it selects from the
+    // refreshed log under the lock rather than fencing on a resident revision:
+    // a stale in-memory snapshot must not reject (or misplace) the rewrite.
+    let revision = this.getRevision();
+    let rewound: RewindResult | undefined;
+    try {
+      rewound = this.rewrite((entries) => {
+        const index = entries.findIndex((entry) => entry.id === entryId && entry.type === "user_message");
+        if (index < 0) return undefined;
+        revision = this.getRevision();
+        const target = entries[index];
+        const removed = entries.slice(index);
+        // Metadata records are full snapshots, not history deltas. Preserve the
+        // latest snapshot (including absent/cleared fields) in the atomic rewrite.
+        const metadata = { ...this.log.getMetadata() };
+        if (metadata.titleUserMessageId && removed.some((entry) => entry.id === metadata.titleUserMessageId)) {
+          delete metadata.title;
+          delete metadata.titleSource;
+          delete metadata.titleUpdatedAt;
+          delete metadata.titleUserMessageId;
+        }
+        return {
+          entries: [...entries.slice(0, index), {
+            id: `metadata-${randomUUID()}`, type: "metadata", metadata, timestamp: Date.now(),
+          }],
+          result: {
+            removedEntries: removed.length,
+            targetText: target.type === "user_message" ? messageText(target.message) : "",
+          },
+        };
+      });
+    } catch (error) { this.reloadAfterWriteFailure(); throw error; }
+    if (rewound) this.publishContextCommit(revision, true);
+    return rewound;
   }
 
   getEntries(): SessionLogEntry[] {

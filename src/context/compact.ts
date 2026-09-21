@@ -143,6 +143,9 @@ export interface CompactResult {
    * condense. Kept-verbatim messages are excluded so they are not duplicated
    * into the summary. */
   evictedMessages?: Message[];
+  /** Index in `messages` of the one summary that stands for `evictedMessages`.
+   * Other summaries in `messages` cover different history and must survive. */
+  summaryIndex?: number;
   droppedEntries?: number;
 }
 
@@ -366,6 +369,7 @@ export function compactMessages(
     summary: summaryWithFiles,
     messages: compactedMessages,
     evictedMessages: [...priorSummaries, ...oldMessages.filter((_message, index) => index !== pinnedIndex)],
+    summaryIndex: leading.length + (pinnedMessage ? 1 : 0),
     droppedEntries: summaryInput.length,
   };
 }
@@ -479,6 +483,7 @@ export function compactCurrentTurnToolGroups(
     summary,
     messages: compactedMessages,
     evictedMessages: [...priorSubturnSummaries, ...evictable.flatMap((g) => [g.assistant, ...g.toolResults])],
+    summaryIndex: leading.length + preTurn.length,
     droppedEntries: evictable.length,
   };
 }
