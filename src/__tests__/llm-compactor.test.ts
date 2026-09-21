@@ -45,12 +45,18 @@ describe("compactWithLLM", () => {
     const sent = input[1].content;
     expect(sent).toContain("OLD_DECISION");
     expect(sent).toContain("EARLIER_CONSTRAINT");
-    expect(sent).not.toContain("TOOL_CALL[read]: {}\n\nTOOL_RESULT[read]: 中文数据");
+    // The oversized old result loses its middle; the group itself still informs the summary.
+    expect(sent).toContain("TOOL_CALL[read]: {}");
+    expect(sent).not.toContain("中文数据".repeat(1000));
+    expect(sent).toMatch(/TOOL_RESULT\[read\]: 中文数据.*characters omitted/s);
     expect(sent).toContain("最近的发现");
-    expect(result.degradation).toContain("omitted 1");
-    expect(result.summary).toContain(result.degradation);
+    // The summarizer is told about the trimming; the durable summary is not —
+    // only whole dropped steps are worth recording there.
+    expect(sent).toContain("show only their head and tail");
+    expect(result.degradation).toBeUndefined();
+    expect(result.summary).not.toContain("head and tail");
     expect(Math.ceil((input.reduce((n, m) => n + estimateTextTokens(m.content), 0) + 32) * 1.25))
-      .toBeLessThanOrEqual(1024 - 256 - 64);
+      .toBeLessThanOrEqual(getMaxInputTokens(1024)!);
     expect(result.messages!.slice(-3)).toEqual(history.slice(-3));
   });
 
@@ -83,11 +89,26 @@ describe("compactWithLLM", () => {
     expect(complete).not.toHaveBeenCalled();
   });
 
+  it("trims a single huge tool result instead of giving up on the summary", async () => {
+    const complete = vi.fn(async () => "Read one large file.");
+    const result = await compactWithLLM([
+      { role: "user", content: "first" },
+      ...group("huge", "read", { file_path: "/big.txt" }, "汉".repeat(10_000)),
+      { role: "user", content: "last" },
+    ], { provider: makeProvider(complete), modelId: "fake", contextWindow: 1024 });
+    expect(result.compacted).toBe(true);
+    const sent = (complete.mock.calls as unknown as [Array<{ content: string }>][])[0][0][1].content;
+    expect(sent).toContain("/big.txt");
+    expect(sent).toContain("characters omitted");
+  });
+
   it("does not call on an empty transcript after input budget degradation", async () => {
+    // Assistant prose is not a trimmable payload: once the only group is dropped
+    // nothing is left to summarize, and the summarizer must not be called.
     const complete = vi.fn(async () => "should not be called");
     const result = await compactWithLLM([
       { role: "user", content: "first" },
-      ...group("huge", "read", {}, "汉".repeat(10_000)),
+      { role: "assistant", content: "汉".repeat(10_000) },
       { role: "user", content: "last" },
     ], { provider: makeProvider(complete), modelId: "fake", contextWindow: 1024 });
     expect(result.compacted).toBe(false);

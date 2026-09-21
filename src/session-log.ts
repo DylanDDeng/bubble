@@ -13,7 +13,6 @@ import type {
   SessionMetadata,
   SessionMetadataEntry,
   SessionProviderErrorEntry,
-  SessionSummaryEntry,
 } from "./session-types.js";
 import type { SanitizedProviderError } from "./provider-error-record.js";
 import { tryCheckpointMessages } from "./context/checkpoint.js";
@@ -109,17 +108,6 @@ export class SessionLog {
     const normalized = normalizeMessageToEntries(message, this.allocateId(), Date.now());
     this.appendEntries(normalized);
     return normalized;
-  }
-
-  appendSummary(summary: string): SessionSummaryEntry {
-    const entry: SessionSummaryEntry = {
-      id: this.allocateId(),
-      type: "summary",
-      summary,
-      timestamp: Date.now(),
-    };
-    this.appendEntries([entry]);
-    return entry;
   }
 
   appendMarker(kind: SessionMarkerKind, value: string): SessionLogEntry {

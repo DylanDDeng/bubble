@@ -258,19 +258,27 @@ export async function compactWithLLM(
   };
 }
 
-/** Fit the summarization input under the model's window by dropping complete
- * assistant/tool groups. Exported for regression tests only — callers use
- * compactWithLLM. */
+/** Fit the summarization input under the model's window, degrading breadth-first:
+ *  1. everything verbatim;
+ *  2. cap tool payloads (results and tool-call arguments alike) at the LARGEST
+ *     common length that fits — short payloads such as paths and commands stay
+ *     whole, only long ones lose their middle, and every group still informs
+ *     the summary;
+ *  3. only when even empty payloads do not fit, drop the oldest assistant/tool
+ *     group and search again, so what survives is as complete as the room allows.
+ * The cap is derived from the budget, never a fixed size. Prior summaries, user
+ * constraints and runtime context are never trimmed; if they alone exceed the
+ * budget this fails explicitly and the caller chooses a fallback.
+ * `degradation` is the durable part: whole steps the summary never saw. Trimmed
+ * middles are stated in the input only — that loss is inherent to summarizing.
+ * Exported for regression tests only — callers use compactWithLLM. */
 export function fitSummaryInput(
   messages: Message[], prompt: string, maxTokens: number, providerId: string,
 ): { historyText: string; degradation?: string } | undefined {
-  // Trim complete assistant/tool groups, never prior summaries, user constraints,
-  // or runtime context. If protected content alone exceeds the budget, fail
-  // explicitly and let the caller choose a fallback; do not call on empty input.
   // Group by pending tool-call ids, not adjacency: an interleaved meta reminder
-  // between a call and its result must not split the pair — otherwise trimming
-  // can drop the call while keeping an orphan `TOOL_RESULT[tool]` line that has
-  // lost its name and provenance.
+  // between a call and its result must not split the pair — otherwise dropping
+  // can remove the call while keeping an orphan `TOOL_RESULT[tool]` line that
+  // has lost its name and provenance.
   const groups: Message[][] = [];
   const groupByCallId = new Map<string, Message[]>();
   for (const message of messages) {
@@ -287,25 +295,77 @@ export function fitSummaryInput(
       for (const toolCall of message.toolCalls) groupByCallId.set(toolCall.id, group);
     }
   }
-  let dropped = 0;
-  while (true) {
+
+  const promptTokens = estimateTextTokens(prompt, providerId);
+  const render = (cap: number | undefined, dropped: number) => {
     const degradation = dropped
       ? `[Compaction input degraded: omitted ${dropped} older assistant/tool groups to fit the model window.]`
       : undefined;
-    const historyText = [degradation, serializeHistoryAsText(groups.flat())].filter(Boolean).join("\n\n");
+    const trimNote = cap !== undefined
+      ? `[Tool results and tool-call arguments longer than ${cap} characters show only their head and tail.]`
+      : undefined;
+    const historyText = [degradation, trimNote, serializeHistoryAsText(groups.flat(), cap)].filter(Boolean).join("\n\n");
     // Measure the actual serialized payload (including labels and prompt), with
     // the same conservative first-turn safety margin as the context budget.
-    const tokens = Math.ceil((estimateTextTokens(prompt, providerId)
-      + estimateTextTokens(historyText, providerId) + 32) * 1.25);
-    if (tokens <= maxTokens && groups.length > 0) return { historyText, degradation };
+    const tokens = Math.ceil((promptTokens + estimateTextTokens(historyText, providerId) + 32) * 1.25);
+    return { fits: tokens <= maxTokens, fitted: { historyText, degradation } };
+  };
+
+  for (let dropped = 0; groups.length > 0; dropped++) {
+    // Empty payloads are the cheapest probe and the floor of what trimming can reach.
+    let best = render(0, dropped);
+    if (best.fits) {
+      const whole = render(undefined, dropped);
+      if (whole.fits) return whole.fitted;
+      let low = 0;
+      let high = longestPayload(groups);
+      while (low < high) {
+        const middle = Math.ceil((low + high) / 2);
+        const probe = render(middle, dropped);
+        if (probe.fits) { low = middle; best = probe; } else high = middle - 1;
+      }
+      return best.fitted;
+    }
     const removable = groups.findIndex((group) => group.every((m) => m.role === "assistant" || m.role === "tool"));
     if (removable < 0) return undefined;
     groups.splice(removable, 1);
-    dropped++;
   }
+  return undefined;
 }
 
-function serializeHistoryAsText(messages: Message[]): string {
+function longestPayload(groups: Message[][]): number {
+  let longest = 0;
+  for (const group of groups) {
+    for (const message of group) {
+      if (message.role === "tool") longest = Math.max(longest, message.content.length);
+      else if (message.role === "assistant") {
+        for (const toolCall of message.toolCalls ?? []) longest = Math.max(longest, (toolCall.arguments || "").length);
+      }
+    }
+  }
+  return longest;
+}
+
+/** Keep the head and tail of a payload longer than `cap`; the marker states
+ * exactly how much is missing so the summarizer never mistakes it for the whole.
+ * Exported for regression tests only. */
+export function capPayload(text: string, cap: number | undefined): string {
+  if (cap === undefined || text.length <= cap) return text;
+  let headEnd = Math.ceil(cap / 2);
+  let tailStart = text.length - (cap - headEnd);
+  // Never cut a surrogate pair in half: a lone surrogate is invalid Unicode that
+  // some provider endpoints reject outright.
+  if (headEnd > 0 && isHighSurrogate(text.charCodeAt(headEnd - 1))) headEnd--;
+  if (tailStart < text.length && isLowSurrogate(text.charCodeAt(tailStart))) tailStart++;
+  const marker = `[... ${tailStart - headEnd} of ${text.length} characters omitted ...]`;
+  if (headEnd + marker.length + (text.length - tailStart) >= text.length) return text;
+  return `${text.slice(0, headEnd)}${marker}${text.slice(tailStart)}`;
+}
+
+const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff;
+const isLowSurrogate = (code: number) => code >= 0xdc00 && code <= 0xdfff;
+
+function serializeHistoryAsText(messages: Message[], payloadCap?: number): string {
   const lines: string[] = [];
   const toolNameByCallId = new Map<string, string>();
 
@@ -325,14 +385,14 @@ function serializeHistoryAsText(messages: Message[]): string {
         if (msg.toolCalls && msg.toolCalls.length > 0) {
           for (const tc of msg.toolCalls) {
             toolNameByCallId.set(tc.id, tc.name);
-            lines.push(`TOOL_CALL[${tc.name}]: ${summarizeToolCallArgs(tc)}`);
+            lines.push(`TOOL_CALL[${tc.name}]: ${capPayload(summarizeToolCallArgs(tc), payloadCap)}`);
           }
         }
         break;
       }
       case "tool": {
         const name = toolNameByCallId.get(msg.toolCallId) ?? "tool";
-        lines.push(`TOOL_RESULT[${name}]: ${msg.content}`);
+        lines.push(`TOOL_RESULT[${name}]: ${capPayload(msg.content, payloadCap)}`);
         break;
       }
       case "meta":

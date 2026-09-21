@@ -1,8 +1,14 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { SessionManager } from "../session.js";
+
+/** Legacy `summary` records are read-only history: no production code writes
+ * them any more, so tests seed one the way an old build left it on disk. */
+function seedLegacySummary(file: string, summary: string): void {
+  appendFileSync(file, JSON.stringify({ id: "legacy-summary", type: "summary", summary, timestamp: Date.now() }) + "\n");
+}
 
 describe("SessionManager", () => {
   const tmpDir = join(tmpdir(), "bubble-test-session-" + Date.now());
@@ -280,7 +286,7 @@ describe("SessionManager", () => {
     const sm = new SessionManager(file);
     sm.appendMessage({ role: "user", content: "old" });
     sm.appendMessage({ role: "assistant", content: "reply" });
-    sm.appendCompaction("Summary of old chat");
+    seedLegacySummary(file, "Summary of old chat");
     sm.appendMessage({ role: "user", content: "new" });
 
     const messages = sm.getMessages();
@@ -476,7 +482,7 @@ describe("SessionManager", () => {
     const sm = new SessionManager(file);
     sm.appendMessage({ role: "user", content: "old task" });
     sm.appendMessage({ role: "assistant", content: "old answer" });
-    sm.appendCompaction("old summary");
+    seedLegacySummary(file, "old summary");
     sm.appendMarker("conversation_clear", "");
 
     expect(sm.getMessages()).toEqual([]);
