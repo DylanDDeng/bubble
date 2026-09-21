@@ -368,7 +368,11 @@ export function compactMessages(
     compacted: true,
     summary: summaryWithFiles,
     messages: compactedMessages,
-    evictedMessages: [...priorSummaries, ...oldMessages.filter((_message, index) => index !== pinnedIndex)],
+    // The pin survives verbatim only up to its cap; the tail beyond it exists
+    // nowhere else, so an external summarizer must see it in the pin's place.
+    evictedMessages: [...priorSummaries, ...oldMessages.flatMap((message, index): Message[] =>
+      index !== pinnedIndex ? [message]
+        : pinOverflow ? [{ role: "user", content: `Original instruction beyond retained pin:\n${pinOverflow}` }] : [])],
     summaryIndex: leading.length + (pinnedMessage ? 1 : 0),
     droppedEntries: summaryInput.length,
   };

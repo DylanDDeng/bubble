@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "../session.js";
 import { SessionWriteLockBusyError, withSessionWriteLock } from "../context/session-write-lock.js";
-import { buildCompactionSummaryMessage, compactCurrentTurnToolGroups, isCompactionSummaryMessage } from "../context/compact.js";
+import { buildCompactionSummaryMessage, compactCurrentTurnToolGroups, isCompactionSummaryMessage, PINNED_INSTRUCTION_MAX_CHARS } from "../context/compact.js";
 import { createContextCheckpoint } from "../context/checkpoint.js";
 import type { Message } from "../types.js";
 
@@ -115,5 +115,24 @@ describe("session concurrency review regressions", () => {
     const reopened = new SessionManager(file);
     expect(reopened.getMessages().map(message => message.content)).toEqual(["turn one", "reply one"]);
     expect(reopened.getMetadata().model).toBe("foreign-model");
+  });
+
+  it("feeds the tail of an oversized pinned instruction to the manual summarizer", () => {
+    const manager = new SessionManager(sessionFile());
+    const opening = "head ".repeat(2000) + "LATE-REQUIREMENT-IN-TAIL";
+    expect(opening.indexOf("LATE-REQUIREMENT")).toBeGreaterThan(PINNED_INSTRUCTION_MAX_CHARS);
+    manager.appendMessage({ role: "user", content: opening });
+    manager.appendMessage({ role: "assistant", content: "ok" });
+    for (let i = 0; i < 6; i++) {
+      manager.appendMessage({ role: "user", content: `turn ${i}` });
+      manager.appendMessage({ role: "assistant", content: `reply ${i}` });
+    }
+
+    const plan = manager.getCompactionPlan();
+    expect(plan).not.toBeNull();
+    const input = JSON.stringify(plan!.oldMessages);
+    expect(input).toContain("LATE-REQUIREMENT-IN-TAIL");
+    // Only the tail: the retained head must not be duplicated into the summary input.
+    expect(input.length).toBeLessThan(opening.length);
   });
 });
