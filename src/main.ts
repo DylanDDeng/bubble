@@ -13,7 +13,7 @@ import { createProviderInstance, createUnavailableProvider } from "./provider.js
 import { resolveConfiguredModel } from "./model-selection.js";
 import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingLevel } from "./provider-transform.js";
 import { ProviderRegistry, displayModel, encodeModel, decodeModel } from "./provider-registry.js";
-import { SessionManager } from "./session.js";
+import { SessionHistoryDivergedError, SessionManager } from "./session.js";
 import { SessionContextFence } from "./session-context-fence.js";
 import { createSessionTitleUpdater, type SessionTitleUpdater } from "./session-title.js";
 import { buildSystemPrompt } from "./system-prompt.js";
@@ -450,6 +450,27 @@ async function main() {
   const budgetLedger = new BudgetLedger();
   let sessionTitleUpdater: SessionTitleUpdater | undefined;
   let contextFence = new SessionContextFence(sessionManager);
+  // A fence rejection means the durable log diverged from this host's resident
+  // history (a foreign append/clear/rewind landed while a turn was in flight).
+  // The write is refused — and the resident transcript must roll back to the
+  // file's truth, or the rejected message lingers in the TUI while every later
+  // fenced write keeps failing on the stale revision until a manual reload.
+  const persistFenced = (write: () => void): void => {
+    try {
+      write();
+    } catch (error) {
+      if (error instanceof SessionHistoryDivergedError) {
+        try {
+          const history = contextFence.reloadHistory();
+          const head = splitLeadingContext(agent.messages).leading;
+          agent.messages = [...head, ...history];
+        } catch {
+          // Surface the original fence rejection; the next write retries the reload.
+        }
+      }
+      throw error;
+    }
+  };
   const agent = new Agent({
     provider: activeProvider
       ? createProvider(activeProviderId, activeProvider.apiKey, activeProvider.baseURL)
@@ -468,7 +489,8 @@ async function main() {
       // Runtime meta messages are ephemeral; don't persist them —
       // they will be re-injected as needed on resume based on the current mode.
       if (message.role === "meta") return;
-      sessionManager.appendMessage(message, contextFence.getRevision());
+      const manager = sessionManager;
+      persistFenced(() => manager.appendMessage(message, contextFence.getRevision()));
       traceEvent("session_message_persisted", {
         message: summarizeTraceMessage(message),
       });
@@ -478,23 +500,25 @@ async function main() {
       }
     },
     onProviderError: (error) => {
-      sessionManager?.appendProviderError(error, contextFence.getRevision());
+      persistFenced(() => sessionManager?.appendProviderError(error, contextFence.getRevision()));
     },
     getContextRevision: () => contextFence.getRevision(),
     onContextCheckpoint: (checkpoint) => {
       if (!sessionManager) throw new Error("No session available for context commit");
-      sessionManager.commitContextCheckpoint(checkpoint, contextFence.getRevision());
+      const manager = sessionManager;
+      persistFenced(() => manager.commitContextCheckpoint(checkpoint, contextFence.getRevision()));
     },
     onToolResult: (toolName, result) => {
       if (!sessionManager) return;
       if (toolName !== "skill" || result.isError) return;
       const match = result.content.match(/^Skill:\s+([^\n]+)$/m);
       if (match?.[1]) {
-        sessionManager.appendMarker("skill_activated", match[1].trim(), contextFence.getRevision());
+        const manager = sessionManager;
+        persistFenced(() => manager.appendMarker("skill_activated", match[1]!.trim(), contextFence.getRevision()));
       }
     },
     onModeUpdate: (mode) => {
-      sessionManager?.appendMarker("mode_switch", mode, contextFence.getRevision());
+      persistFenced(() => sessionManager?.appendMarker("mode_switch", mode, contextFence.getRevision()));
     },
     budgetLedger,
     skills: skillSummaries,

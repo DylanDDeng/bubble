@@ -257,17 +257,34 @@ export async function compactWithLLM(
   };
 }
 
-function fitSummaryInput(
+/** Fit the summarization input under the model's window by dropping complete
+ * assistant/tool groups. Exported for regression tests only — callers use
+ * compactWithLLM. */
+export function fitSummaryInput(
   messages: Message[], prompt: string, maxTokens: number, providerId: string,
 ): { historyText: string; degradation?: string } | undefined {
   // Trim complete assistant/tool groups, never prior summaries, user constraints,
   // or runtime context. If protected content alone exceeds the budget, fail
   // explicitly and let the caller choose a fallback; do not call on empty input.
+  // Group by pending tool-call ids, not adjacency: an interleaved meta reminder
+  // between a call and its result must not split the pair — otherwise trimming
+  // can drop the call while keeping an orphan `TOOL_RESULT[tool]` line that has
+  // lost its name and provenance.
   const groups: Message[][] = [];
+  const groupByCallId = new Map<string, Message[]>();
   for (const message of messages) {
-    if (message.role === "tool" && groups.length && groups.at(-1)![0].role === "assistant") {
-      groups.at(-1)!.push(message);
-    } else groups.push([message]);
+    if (message.role === "tool") {
+      const group = groupByCallId.get(message.toolCallId);
+      if (group) {
+        group.push(message);
+        continue;
+      }
+    }
+    const group = [message];
+    groups.push(group);
+    if (message.role === "assistant" && message.toolCalls) {
+      for (const toolCall of message.toolCalls) groupByCallId.set(toolCall.id, group);
+    }
   }
   let dropped = 0;
   while (true) {

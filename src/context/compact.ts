@@ -138,6 +138,11 @@ export interface CompactResult {
   summary?: string;
   entries?: SessionLogEntry[];
   messages?: Message[];
+  /** Original messages the new summary replaces (prior summary carriers
+   * plus the evicted body) — the exact set an external summarizer should
+   * condense. Kept-verbatim messages are excluded so they are not duplicated
+   * into the summary. */
+  evictedMessages?: Message[];
   droppedEntries?: number;
 }
 
@@ -360,6 +365,7 @@ export function compactMessages(
     compacted: true,
     summary: summaryWithFiles,
     messages: compactedMessages,
+    evictedMessages: [...priorSummaries, ...oldMessages.filter((_message, index) => index !== pinnedIndex)],
     droppedEntries: summaryInput.length,
   };
 }
@@ -472,6 +478,7 @@ export function compactCurrentTurnToolGroups(
     compacted: true,
     summary,
     messages: compactedMessages,
+    evictedMessages: [...priorSubturnSummaries, ...evictable.flatMap((g) => [g.assistant, ...g.toolResults])],
     droppedEntries: evictable.length,
   };
 }

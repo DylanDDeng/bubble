@@ -25,7 +25,8 @@ import {
   type SessionTurnReservation,
 } from "./session-turn-coordinator.js";
 import { ReplayEventLog } from "./replay-event-log.js";
-import { SessionManager, type SessionSummary } from "../session.js";
+import { SessionHistoryDivergedError, SessionManager, type SessionSummary } from "../session.js";
+import { splitLeadingContext } from "../context/compact.js";
 import { PermissionAwareApprovalController } from "../approval/controller.js";
 import { BashAllowlist } from "../approval/session-cache.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
@@ -594,6 +595,25 @@ export class BubbleSdk {
 
       const history = session.getMessages();
       let contextRevision = session.getRevision();
+      // A fence rejection means the durable log diverged from this turn's
+      // resident snapshot (a foreign append or clear landed mid-flight). Refuse
+      // the write, then roll the resident transcript back to the file's truth so
+      // the rejected message does not linger and later writes are not wedged
+      // behind the stale revision.
+      const persistFenced = (write: () => void): void => {
+        try {
+          write();
+        } catch (error) {
+          if (error instanceof SessionHistoryDivergedError) {
+            try {
+              contextRevision = session.getRevision();
+              const head = splitLeadingContext(agent.messages).leading;
+              agent.messages = [...head, ...session.getMessages()];
+            } catch { /* surface the original fence rejection */ }
+          }
+          throw error;
+        }
+      };
       const agent = new Agent({
         provider,
         providerId,
@@ -618,24 +638,30 @@ export class BubbleSdk {
         onMessageAppend: (message: Message) => {
           if (message.role === "system" || message.role === "meta") return;
           if (this.turnCoordinator.isDeleted(sessionId)) return;
-          session.appendMessage(message, contextRevision);
-          contextRevision = session.getRevision();
+          persistFenced(() => {
+            session.appendMessage(message, contextRevision);
+            contextRevision = session.getRevision();
+          });
           if (message.role === "assistant") recordMemoryCitations(cwd, message.content);
         },
         onProviderError: (error) => {
           if (this.turnCoordinator.isDeleted(sessionId)) return;
-          session.appendProviderError(error, contextRevision);
+          persistFenced(() => session.appendProviderError(error, contextRevision));
         },
         getContextRevision: () => contextRevision,
         onContextCheckpoint: (checkpoint) => {
           if (this.turnCoordinator.isDeleted(sessionId)) throw new Error("Session deleted before context commit");
-          session.commitContextCheckpoint(checkpoint, contextRevision);
-          contextRevision = session.getRevision();
+          persistFenced(() => {
+            session.commitContextCheckpoint(checkpoint, contextRevision);
+            contextRevision = session.getRevision();
+          });
         },
         onModeUpdate: (m: PermissionMode) => {
           if (!this.turnCoordinator.isDeleted(sessionId)) {
-            session.appendMarker("mode_switch", m, contextRevision);
-            contextRevision = session.getRevision();
+            persistFenced(() => {
+              session.appendMarker("mode_switch", m, contextRevision);
+              contextRevision = session.getRevision();
+            });
           }
         },
       });
@@ -954,6 +980,10 @@ export class BubbleSdk {
       promptCacheKey,
       protocol: target.protocol,
       headers: target.headers,
+      // Main SDK turns need the same per-request OAuth renewal as the TUI
+      // and child provider factory, including calls after a long-running tool.
+      openAICodexAuth: this.registry.createOpenAICodexAuthAdapter(activeProviderId),
+      grokAuth: this.registry.createGrokAuthAdapter(activeProviderId),
     });
     return { provider, providerId: activeProviderId, model: activeModel };
   }

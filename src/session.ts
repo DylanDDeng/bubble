@@ -49,6 +49,19 @@ export interface UserTurn {
   timestamp: number;
 }
 
+/** A fenced write found the session log diverged from the writer's resident
+ * snapshot — a foreign append, clear, or rewind landed while a turn was in
+ * flight. The write is refused; the host must roll its resident history back
+ * to the file's truth (SessionContextFence.reloadHistory, then replace the
+ * agent's messages) before writing again, or every later fenced write keeps
+ * rejecting on the stale revision. */
+export class SessionHistoryDivergedError extends Error {
+  constructor(message = "Session changed during active turn; reload before committing context") {
+    super(message);
+    this.name = "SessionHistoryDivergedError";
+  }
+}
+
 export interface RewindResult {
   /** Number of log entries removed. */
   removedEntries: number;
@@ -82,9 +95,9 @@ export class SessionManager {
         // Refresh and compare the caller's snapshot under the same lock as the
         // append. Refreshing must never legitimize a stale caller revision.
         this.refresh();
-        if (this.getRevision() !== expectedRevision) throw new Error("Session changed during active turn; reload before committing context");
+        if (this.getRevision() !== expectedRevision) throw new SessionHistoryDivergedError();
       } else if (this.currentDiskRevision() !== this.diskRevision) {
-        throw new Error("Session changed; reload before committing context");
+        throw new SessionHistoryDivergedError("Session changed; reload before committing context");
       }
       return write();
     });
@@ -368,7 +381,12 @@ export class SessionManager {
     if (!candidate.compacted) candidate = compactCurrentTurnToolGroups(messages);
     if (!candidate.compacted) { this.pendingCompaction = undefined; return null; }
     this.pendingCompaction = { revision: this.getRevision(), candidate };
-    return { oldMessages: messages };
+    // Only the portion the candidate's summary replaces: kept recent turns
+    // survive verbatim, so feeding them to the summarizer would duplicate them
+    // in the summary and risk overflowing the compaction request into the
+    // heuristic fallback. Prior summary carriers are included so their facts
+    // roll forward.
+    return { oldMessages: candidate.evictedMessages ?? messages };
   }
 
   /**

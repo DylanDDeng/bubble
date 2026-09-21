@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BubbleSdk, type Provider } from "../index.js";
+import type { Message } from "../../types.js";
 import { Agent } from "../../agent.js";
 import { SessionManager } from "../../session.js";
 import { createSanitizedProviderError } from "../../provider-error-record.js";
@@ -33,8 +34,13 @@ describe("PR76 SDK callback history fencing", () => {
         providerId: "test", modelId: "test", thinkingLevel: "off", messageCount: 1, toolCount: 0,
       });
       expect(() => callback === "mode" ? callbacks.onModeUpdate("plan") : callbacks.onProviderError(diagnostic)).toThrow("active turn");
-      expect(callbacks.getContextRevision()).toBe(revision);
-      expect(() => callbacks.onMessageAppend({ role: "assistant", content: "stale answer" })).toThrow("active turn");
+      // The rejection rolls resident history back to the file's truth: the
+      // fenced revision adopts the foreign clear instead of wedging every
+      // later write behind the stale snapshot.
+      expect(callbacks.getContextRevision()).not.toBe(revision);
+      expect((callbacks as unknown as { messages: Message[] }).messages.filter(m => m.role !== "system")).toEqual([]);
+      // A write after the rollback goes through — the session is not wedged.
+      expect(() => callback === "mode" ? callbacks.onModeUpdate("plan") : callbacks.onProviderError(diagnostic)).not.toThrow();
       yield { type: "done" } as any;
     });
     for await (const _event of sdk.runTurn(id, { prompt: "next" })) { /* drain */ }

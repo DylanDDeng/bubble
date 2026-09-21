@@ -14,6 +14,8 @@
 
 import chalk from "chalk";
 import { Agent } from "../../agent.js";
+import { SessionHistoryDivergedError } from "../../session.js";
+import { splitLeadingContext } from "../../context/compact.js";
 import { BudgetLedger } from "../../agent/budget-ledger.js";
 import { PermissionAwareApprovalController } from "../../approval/controller.js";
 import { BashAllowlist } from "../../approval/session-cache.js";
@@ -154,6 +156,25 @@ export class RunDriver {
     const budgetLedger = new BudgetLedger();
     let sessionTitleUpdater: SessionTitleUpdater | undefined;
     let contextRevision = session.manager.getRevision();
+    // A fence rejection means the durable log diverged from this run's resident
+    // snapshot (a foreign append or clear landed mid-flight). Refuse the write,
+    // then roll the resident transcript back to the file's truth so the rejected
+    // message does not linger and later writes are not wedged behind the stale
+    // revision.
+    const persistFenced = (write: () => void): void => {
+      try {
+        write();
+      } catch (error) {
+        if (error instanceof SessionHistoryDivergedError) {
+          try {
+            contextRevision = session.manager.getRevision();
+            const head = splitLeadingContext(agent.messages).leading;
+            agent.messages = [...head, ...session.manager.getMessages()];
+          } catch { /* surface the original fence rejection */ }
+        }
+        throw error;
+      }
+    };
     const agent = new Agent({
       provider,
       providerId,
@@ -166,32 +187,40 @@ export class RunDriver {
       mode: initialMode,
       onMessageAppend: (message: Message) => {
         if (message.role === "system" || message.role === "meta") return;
-        session.manager.appendMessage(message, contextRevision);
-        contextRevision = session.manager.getRevision();
+        persistFenced(() => {
+          session.manager.appendMessage(message, contextRevision);
+          contextRevision = session.manager.getRevision();
+        });
         sessionTitleUpdater?.handlePersistedMessage(message);
         if (message.role === "assistant") {
           recordMemoryCitations(session.cwd, message.content);
         }
       },
       onProviderError: (error) => {
-        session.manager.appendProviderError(error, contextRevision);
+        persistFenced(() => session.manager.appendProviderError(error, contextRevision));
       },
       getContextRevision: () => contextRevision,
       onContextCheckpoint: (checkpoint) => {
-        session.manager.commitContextCheckpoint(checkpoint, contextRevision);
-        contextRevision = session.manager.getRevision();
+        persistFenced(() => {
+          session.manager.commitContextCheckpoint(checkpoint, contextRevision);
+          contextRevision = session.manager.getRevision();
+        });
       },
       onToolResult: (toolName, result) => {
         if (toolName !== "skill" || result.isError) return;
         const match = result.content.match(/^Skill:\s+([^\n]+)$/m);
         if (match?.[1]) {
-          session.manager.appendMarker("skill_activated", match[1].trim(), contextRevision);
-          contextRevision = session.manager.getRevision();
+          persistFenced(() => {
+            session.manager.appendMarker("skill_activated", match[1]!.trim(), contextRevision);
+            contextRevision = session.manager.getRevision();
+          });
         }
       },
       onModeUpdate: (mode: PermissionMode) => {
-        session.manager.appendMarker("mode_switch", mode, contextRevision);
-        contextRevision = session.manager.getRevision();
+        persistFenced(() => {
+          session.manager.appendMarker("mode_switch", mode, contextRevision);
+          contextRevision = session.manager.getRevision();
+        });
         this.opts.binder.setMode(req.scopeKey, mode);
       },
       budgetLedger,
