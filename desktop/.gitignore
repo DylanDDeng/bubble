@@ -6,7 +6,7 @@ out/
 
 dist-electron/
 dist-react/
-runtime/
+/runtime/
 artifacts/
 
 .dev-sdk-build/
