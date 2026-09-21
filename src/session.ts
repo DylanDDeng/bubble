@@ -337,12 +337,6 @@ export class SessionManager {
     else { this.log = new SessionLog(); this.diskRevision = "missing"; }
   }
 
-  appendCompaction(summary: string) {
-    this.refresh();
-    const entry = this.log.appendSummary(summary);
-    try { this.persist(entry); } catch (error) { this.reloadAfterWriteFailure(); throw error; }
-  }
-
   appendMarker(kind: SessionMarkerKind, value: string, expectedRevision?: string) {
     this.refresh();
     const revision = expectedRevision ?? this.getRevision();

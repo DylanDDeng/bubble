@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionHistoryDivergedError, SessionManager } from "../session.js";
 import { SessionContextFence } from "../session-context-fence.js";
-import { fitSummaryInput } from "../context/llm-compactor.js";
+import { capPayload, fitSummaryInput } from "../context/llm-compactor.js";
+import { estimateTextTokens } from "../context/budget.js";
 import type { Message } from "../types.js";
 
 const dirs: string[] = [];
@@ -17,6 +18,12 @@ function fixture() {
   return { session, reopen: () => new SessionManager(session.getSessionFile()) };
 }
 afterEach(() => dirs.splice(0).forEach(dir => rmSync(dir, { recursive: true, force: true })));
+
+/** Legacy `summary` records are read-only history: no production code writes
+ * them any more, so tests seed one the way an old build left it on disk. */
+function seedLegacySummary(file: string, summary: string): void {
+  appendFileSync(file, JSON.stringify({ id: "legacy-summary", type: "summary", summary, timestamp: Date.now() }) + "\n");
+}
 
 describe("PR76 round-2: fence rejection reloads resident history", () => {
   it("rejects a stale append with the typed divergence error", () => {
@@ -57,7 +64,7 @@ describe("PR76 round-2: fence rejection reloads resident history", () => {
 describe("PR76 round-2: manual compaction summarizes only the evicted portion", () => {
   it("excludes kept-verbatim turns from oldMessages, keeps prior summary carriers", () => {
     const { session } = fixture();
-    session.appendCompaction("prior facts survive");
+    seedLegacySummary(session.getSessionFile(), "prior facts survive");
     for (let turn = 0; turn < 5; turn++) {
       session.appendMessage({ role: "user", content: `task ${turn}` });
       session.appendMessage({ role: "assistant", content: `detail ${turn} `.repeat(40) });
@@ -101,15 +108,30 @@ describe("PR76 round-2: compactor input trimming keeps call/result pairs whole",
       { role: "tool", toolCallId: "call-2", content: "file body b" },
     ];
 
-    const fitted = fitSummaryInput(messages, "summarize", 2_000, "test");
-    expect(fitted).toBeDefined();
-    // The oversized pair is dropped whole: no orphan result, no nameless fallback line.
-    expect(fitted!.historyText).not.toContain("TOOL_RESULT[tool]");
-    expect(fitted!.historyText).not.toContain("checking the first file");
-    // Interleaved runtime context and the surviving pair stay intact.
-    expect(fitted!.historyText).toContain("budget reminder");
-    expect(fitted!.historyText).toContain("TOOL_RESULT[read_file]: file body b");
-    expect(fitted!.degradation).toContain("omitted 1");
+    // Trimming comes first: the oversized result loses its middle, both pairs survive.
+    const trimmed = fitSummaryInput(messages, "summarize", 2_000, "test");
+    expect(trimmed).toBeDefined();
+    expect(trimmed!.historyText).toContain("checking the first file");
+    expect(trimmed!.historyText).toContain('TOOL_CALL[read_file]: {"path":"a.ts"}');
+    expect(trimmed!.historyText).toContain("characters omitted");
+    expect(trimmed!.historyText).toContain("TOOL_RESULT[read_file]: file body b");
+    expect(trimmed!.historyText).toContain("show only their head and tail");
+    expect(trimmed!.degradation).toBeUndefined();
+
+    // Dropping is the last resort — and when it happens the pair goes whole:
+    // no orphan result, no nameless fallback line. Prose cannot be trimmed, so
+    // an oversized assistant message forces its group out.
+    const withProse = messages.map((message, index) =>
+      index === 1 ? { ...message, content: "checking the first file " + "y".repeat(80_000) } : message);
+    const dropped = fitSummaryInput(withProse, "summarize", 2_000, "test");
+    expect(dropped).toBeDefined();
+    expect(dropped!.historyText).not.toContain("TOOL_RESULT[tool]");
+    expect(dropped!.historyText).not.toContain("checking the first file");
+    expect(dropped!.historyText).not.toContain("a.ts");
+    // Interleaved runtime context and the surviving pair stay present.
+    expect(dropped!.historyText).toContain("budget reminder");
+    expect(dropped!.historyText).toContain("TOOL_CALL[read_file]");
+    expect(dropped!.degradation).toContain("omitted 1 older assistant/tool groups");
   });
 
   it("keeps a pair whole when a meta reminder sits between the call and its result at full size", () => {
@@ -128,5 +150,191 @@ describe("PR76 round-2: compactor input trimming keeps call/result pairs whole",
     expect(fitted!.historyText).toContain("TOOL_CALL[read_file]");
     expect(fitted!.historyText).toContain("TOOL_RESULT[read_file]: file body a");
     expect(fitted!.degradation).toBeUndefined();
+  });
+});
+
+describe("summary input keeps breadth when tool results are large", () => {
+  const reads = (count: number, size: number): Message[] => [
+    { role: "user", content: "survey the modules" },
+    ...Array.from({ length: count }, (_, i): Message[] => [
+      { role: "assistant", content: "", toolCalls: [{ id: `r${i}`, name: "read_file", arguments: `{"path":"src/module-${i}.ts"}` }] },
+      { role: "tool", toolCallId: `r${i}`, content: `// module ${i} head\n` + "x".repeat(size) + `\n// module ${i} tail` },
+    ]).flat(),
+  ];
+
+  it("trims every large result to a common budget-derived cap instead of dropping the older reads", () => {
+    const started = Date.now();
+    const fitted = fitSummaryInput(reads(30, 12_000), "summarize", 20_000, "test");
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(fitted).toBeDefined();
+    for (let i = 0; i < 30; i++) {
+      expect(fitted!.historyText).toContain(`src/module-${i}.ts`);
+      expect(fitted!.historyText).toContain(`// module ${i} head`);
+      expect(fitted!.historyText).toContain(`// module ${i} tail`);
+    }
+    expect(fitted!.historyText).toContain("show only their head and tail");
+    expect(fitted!.degradation).toBeUndefined();
+  });
+
+  it("caps results and arguments together, so large arguments do not erase every result", () => {
+    const messages: Message[] = [{ role: "user", content: "rewrite the modules" }];
+    for (let i = 0; i < 6; i++) {
+      messages.push(
+        { role: "assistant", content: "", toolCalls: [{ id: `r${i}`, name: "read_file", arguments: `{"path":"src/in-${i}.ts"}` }] },
+        { role: "tool", toolCallId: `r${i}`, content: `READ-HEAD-${i} ` + "r".repeat(12_000) },
+        { role: "assistant", content: "", toolCalls: [{ id: `w${i}`, name: "write_file", arguments: `{"path":"src/out-${i}.ts","content":"` + "w".repeat(40_000) + '"}' }] },
+        { role: "tool", toolCallId: `w${i}`, content: "ok" },
+      );
+    }
+    const fitted = fitSummaryInput(messages, "summarize", 8_000, "test")!;
+    for (let i = 0; i < 6; i++) {
+      expect(fitted.historyText).toContain(`READ-HEAD-${i}`);
+      expect(fitted.historyText).toContain(`src/in-${i}.ts`);
+      expect(fitted.historyText).toContain(`src/out-${i}.ts`);
+    }
+    expect(fitted.degradation).toBeUndefined();
+  });
+
+  it("searches the cap again after dropping a group, so survivors are as complete as the room allows", () => {
+    const messages: Message[] = [
+      { role: "user", content: "investigate" },
+      { role: "assistant", content: "untrimmable prose " + "p".repeat(80_000) },
+      ...reads(4, 3_000).slice(1),
+    ];
+    const fitted = fitSummaryInput(messages, "summarize", 8_000, "test")!;
+    expect(fitted.degradation).toContain("omitted 1 older assistant/tool groups");
+    expect(fitted.historyText).not.toContain("untrimmable prose");
+    // All four reads fit verbatim once the prose is gone: nothing is trimmed.
+    expect(fitted.historyText).not.toContain("characters omitted");
+    expect(fitted.historyText).toContain("x".repeat(3_000));
+  });
+
+  it("never splits a surrogate pair at a trim boundary", () => {
+    const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    const trimAt = (cap: number) => ({ cap, estimate: (text: string) => estimateTextTokens(text, "test"), trimmed: false });
+    // Both alignments, every cap: head and tail each land inside a pair somewhere.
+    for (const text of ["😀".repeat(400), "a" + "😀".repeat(400)]) {
+      let trimmed = 0;
+      for (let cap = 0; cap <= 120; cap++) {
+        const trim = trimAt(cap);
+        const capped = capPayload(text, trim);
+        expect(lone.test(capped)).toBe(false);
+        expect(trim.trimmed).toBe(capped !== text);
+        if (capped !== text) {
+          trimmed++;
+          expect(capped).toMatch(/\[\.\.\. \d+ of \d+ characters omitted \.\.\.\]/);
+        }
+      }
+      expect(trimmed).toBeGreaterThan(100);
+    }
+    expect(capPayload("short", trimAt(3))).toBe("short"); // A marker dearer than the saving is pointless.
+    expect(capPayload("anything", undefined)).toBe("anything");
+  });
+
+  it("judges whether trimming helps by token cost, not character count", () => {
+    // 30 CJK characters cost ~30 tokens; the longer ASCII marker costs ~10.
+    const trim = { cap: 0, estimate: (text: string) => estimateTextTokens(text, "test"), trimmed: false };
+    expect(capPayload("汉".repeat(30), trim)).toMatch(/^\[\.\.\. 30 of 30 characters omitted \.\.\.\]$/);
+    expect(trim.trimmed).toBe(true);
+
+    const messages: Message[] = [{ role: "user", content: "查一下" }];
+    for (let i = 0; i < 100; i++) {
+      messages.push(
+        { role: "assistant", content: "", toolCalls: [{ id: `c${i}`, name: "read", arguments: "{}" }] },
+        { role: "tool", toolCallId: `c${i}`, content: "汉".repeat(30) },
+      );
+    }
+    const fitted = fitSummaryInput(messages, "summarize", 3_000, "test")!;
+    // Every group fits once results are markers: nothing may be dropped.
+    expect(fitted.degradation).toBeUndefined();
+    expect(fitted.historyText.match(/TOOL_CALL\[read\]/g)).toHaveLength(100);
+  });
+
+  it("accepts an input that fits verbatim exactly, without charging for a trim note it does not need", () => {
+    const messages: Message[] = [{ role: "user", content: "only protected content ".repeat(40) }];
+    const verbatim = `USER: ${messages[0].content}`;
+    const exact = Math.ceil((estimateTextTokens("summarize", "test") + estimateTextTokens(verbatim, "test") + 32) * 1.25);
+    const fitted = fitSummaryInput(messages, "summarize", exact, "test");
+    expect(fitted).toBeDefined();
+    expect(fitted!.historyText).not.toContain("head and tail");
+    expect(fitSummaryInput(messages, "summarize", exact - 1, "test")).toBeUndefined();
+  });
+
+  it("keeps the verbatim input when trimming would save less than its own note costs", () => {
+    const result = "The quick brown fox jumps over the lazy dog while the build finishes and the tests all pass. Done!!";
+    expect(result.length).toBeGreaterThan(90);
+    const messages: Message[] = [
+      { role: "user", content: "run it" },
+      { role: "assistant", content: "", toolCalls: [{ id: "one", name: "bash", arguments: '{"command":"make"}' }] },
+      { role: "tool", toolCallId: "one", content: result },
+    ];
+    const verbatim = `USER: run it\n\nTOOL_CALL[bash]: {"command":"make"}\n\nTOOL_RESULT[bash]: ${result}`;
+    const exact = Math.ceil((estimateTextTokens("summarize", "test") + estimateTextTokens(verbatim, "test") + 32) * 1.25);
+    const fitted = fitSummaryInput(messages, "summarize", exact, "test");
+    // The marker plus the trim note is larger than the 100 characters it would replace.
+    expect(fitted).toBeDefined();
+    expect(fitted!.historyText).toBe(verbatim);
+    expect(fitted!.degradation).toBeUndefined();
+  });
+
+  it("still finds a fitting verbatim input when the tokenizer's regime switch makes it cheaper than the trimmed floor", () => {
+    // ~70k characters of protected, token-dense text keep the trimmed floor under
+    // the tiktoken length limit (expensive o200k count); restoring the payload
+    // pushes the verbatim rendering over it, where the cheap heuristic applies.
+    const dense = ["😀", "🧪", "🛰️", "🧵", "🪢", "🧭", "🪁"];
+    let protectedText = "";
+    for (let i = 0; protectedText.length < 70_000; i++) protectedText += dense[i % dense.length] + (i % 5 === 0 ? " " : "");
+    let seed = 11;
+    const word = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed.toString(36); };
+    let payload = "";
+    while (payload.length < 15_000) payload += word() + " ";
+    const messages: Message[] = [
+      { role: "user", content: protectedText },
+      { role: "assistant", content: "", toolCalls: [{ id: "p", name: "read_file", arguments: '{"path":"notes.txt"}' }] },
+      { role: "tool", toolCallId: "p", content: payload },
+    ];
+    const measure = (text: string) => Math.ceil((estimateTextTokens("summarize", "openai") + estimateTextTokens(text, "openai") + 32) * 1.25);
+    const verbatim = `USER: ${protectedText}\n\nTOOL_CALL[read_file]: {"path":"notes.txt"}\n\nTOOL_RESULT[read_file]: ${payload}`;
+    const budget = measure(verbatim);
+    // Precondition of the scenario: the shorter, protected-only text measures far above the budget.
+    expect(measure(`USER: ${protectedText}`)).toBeGreaterThan(budget * 2);
+
+    const fitted = fitSummaryInput(messages, "summarize", budget, "openai");
+    expect(fitted).toBeDefined();
+    expect(fitted!.historyText).toBe(verbatim);
+    expect(fitted!.degradation).toBeUndefined();
+  }, 30_000);
+
+  it("finds a large cap even where the provider tokenizer is not monotone in the cap", () => {
+    // o200k below the tiktoken length limit, heuristic above it: a failing
+    // midpoint below the switch must not hide the fitting interval above it.
+    let seed = 7;
+    const word = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed.toString(36); };
+    let body = "";
+    while (body.length < 300_000) body += word() + " ";
+    const messages: Message[] = [
+      { role: "user", content: "read the log" },
+      { role: "assistant", content: "", toolCalls: [{ id: "big", name: "read_file", arguments: '{"path":"app.log"}' }] },
+      { role: "tool", toolCallId: "big", content: body },
+    ];
+    const fitted = fitSummaryInput(messages, "summarize", 30_000, "openai")!;
+    expect(fitted).toBeDefined();
+    expect(fitted.historyText.length).toBeGreaterThan(80_000);
+    const tokens = Math.ceil((estimateTextTokens("summarize", "openai") + estimateTextTokens(fitted.historyText, "openai") + 32) * 1.25);
+    expect(tokens).toBeLessThanOrEqual(30_000);
+  }, 30_000);
+
+  it("leaves small results whole and spends the budget it has", () => {
+    const messages = reads(6, 12_000);
+    messages.push(
+      { role: "assistant", content: "", toolCalls: [{ id: "small", name: "read_file", arguments: '{"path":"src/tiny.ts"}' }] },
+      { role: "tool", toolCallId: "small", content: "export const tiny = true;" },
+    );
+    const tight = fitSummaryInput(messages, "summarize", 6_000, "test")!;
+    const roomy = fitSummaryInput(messages, "summarize", 12_000, "test")!;
+    expect(tight.historyText).toContain("TOOL_RESULT[read_file]: export const tiny = true;");
+    // A larger window keeps more of each result: the cap follows the budget.
+    expect(roomy.historyText.length).toBeGreaterThan(tight.historyText.length);
+    expect(fitSummaryInput(messages, "summarize", 200_000, "test")!.degradation).toBeUndefined();
   });
 });

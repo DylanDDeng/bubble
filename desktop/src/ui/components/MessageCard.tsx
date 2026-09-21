@@ -151,7 +151,9 @@ function CompactBoundaryCard({
   const postTokensLabel = typeof message.compactMetadata.postTokens === 'number' ? formatCompactTokens(message.compactMetadata.postTokens) : null;
   const explanation = isAuto
     ? 'The context was close to the model limit, so earlier messages were automatically summarized to free up space. The AI keeps the key points, but verbatim details may be omitted.'
-    : 'You compacted the conversation manually. Earlier messages were summarized to free up context space.';
+    : message.compactMetadata.trigger === 'manual'
+      ? 'You compacted the conversation manually. Earlier messages were summarized to free up context space.'
+      : 'Earlier messages were summarized to free up context space.';
 
   return (
     <div className="my-6 flex justify-center">

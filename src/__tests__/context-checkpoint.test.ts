@@ -114,7 +114,8 @@ describe("durable context checkpoints", () => {
 
   it("keeps all originals across three checkpoints and reads legacy summaries", () => {
     const { file, manager } = fixture();
-    manager.appendCompaction("legacy incomplete history");
+    // No production code writes legacy `summary` records any more; seed one as an old build left it.
+    appendFileSync(file, JSON.stringify({ id: "legacy-summary", type: "summary", summary: "legacy incomplete history", timestamp: Date.now() }) + "\n");
     expect(manager.getMessages()[0].content).toContain("legacy incomplete history");
     for (let i = 0; i < 3; i++) {
       manager.appendMessage({ role: "user", content: `turn ${i}` });

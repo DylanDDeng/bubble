@@ -75,7 +75,7 @@ import {
   sanitizeSidebarWidth,
 } from '../utils/sidebar-width';
 import { StreamDeltaCoalescer } from '../utils/stream-delta-coalescer';
-import { bubbleCompactionKey, bubbleCompactionToast } from '../utils/bubble-context-notification';
+import { bubbleCompactionKey, bubbleCompactionToast, normalizeCompactBoundary } from '../utils/bubble-context-notification';
 import { applySessionAgentSelection } from '../utils/session-model';
 import {
   SIDE_CHAT_PENDING_TAB,
@@ -723,11 +723,12 @@ function normalizeCodexExecutionMode(value: unknown): import('../types').CodexEx
 }
 
 function sanitizeHistoryMessages(sessionId: string, messages: StreamMessage[]): StreamMessage[] {
-  for (const message of messages) {
+  const history = messages.filter((message) => message.type !== 'stream_event').map(normalizeCompactBoundary);
+  for (const message of history) {
     const key = bubbleCompactionKey(sessionId, message);
     if (key) seenBubbleCompactions.add(key);
   }
-  return messages.filter((message) => message.type !== 'stream_event');
+  return history;
 }
 
 function framesFromComputerUseHistory(

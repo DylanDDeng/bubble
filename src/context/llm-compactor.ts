@@ -13,6 +13,7 @@
 import type { Message, Provider, ProviderMessage, ToolCall } from "../types.js";
 import { sanitizeInternalReminderBlocks } from "../agent/internal-reminder-sanitizer.js";
 import { estimateTextTokens, getMaxInputTokens } from "./budget.js";
+import { getTokenEstimator } from "./token-estimator.js";
 import { getModelContextWindow } from "../model-catalog.js";
 import { appendFileBlocks, stripFileBlocks } from "./compaction-files.js";
 import {
@@ -258,19 +259,27 @@ export async function compactWithLLM(
   };
 }
 
-/** Fit the summarization input under the model's window by dropping complete
- * assistant/tool groups. Exported for regression tests only — callers use
- * compactWithLLM. */
+/** Fit the summarization input under the model's window, degrading breadth-first:
+ *  1. everything verbatim;
+ *  2. cap tool payloads (results and tool-call arguments alike) at the LARGEST
+ *     common length that fits — short payloads such as paths and commands stay
+ *     whole, only long ones lose their middle, and every group still informs
+ *     the summary;
+ *  3. only when even empty payloads do not fit, drop the oldest assistant/tool
+ *     group and search again, so what survives is as complete as the room allows.
+ * The cap is derived from the budget, never a fixed size. Prior summaries, user
+ * constraints and runtime context are never trimmed; if they alone exceed the
+ * budget this fails explicitly and the caller chooses a fallback.
+ * `degradation` is the durable part: whole steps the summary never saw. Trimmed
+ * middles are stated in the input only — that loss is inherent to summarizing.
+ * Exported for regression tests only — callers use compactWithLLM. */
 export function fitSummaryInput(
   messages: Message[], prompt: string, maxTokens: number, providerId: string,
 ): { historyText: string; degradation?: string } | undefined {
-  // Trim complete assistant/tool groups, never prior summaries, user constraints,
-  // or runtime context. If protected content alone exceeds the budget, fail
-  // explicitly and let the caller choose a fallback; do not call on empty input.
   // Group by pending tool-call ids, not adjacency: an interleaved meta reminder
-  // between a call and its result must not split the pair — otherwise trimming
-  // can drop the call while keeping an orphan `TOOL_RESULT[tool]` line that has
-  // lost its name and provenance.
+  // between a call and its result must not split the pair — otherwise dropping
+  // can remove the call while keeping an orphan `TOOL_RESULT[tool]` line that
+  // has lost its name and provenance.
   const groups: Message[][] = [];
   const groupByCallId = new Map<string, Message[]>();
   for (const message of messages) {
@@ -287,25 +296,120 @@ export function fitSummaryInput(
       for (const toolCall of message.toolCalls) groupByCallId.set(toolCall.id, group);
     }
   }
-  let dropped = 0;
-  while (true) {
+
+  const promptTokens = estimateTextTokens(prompt, providerId);
+  const render = (cap: number | undefined, dropped: number, estimate = (text: string) => estimateTextTokens(text, providerId)) => {
     const degradation = dropped
       ? `[Compaction input degraded: omitted ${dropped} older assistant/tool groups to fit the model window.]`
       : undefined;
-    const historyText = [degradation, serializeHistoryAsText(groups.flat())].filter(Boolean).join("\n\n");
+    const trim: PayloadTrim | undefined = cap === undefined ? undefined : { cap, estimate, trimmed: false };
+    const body = serializeHistoryAsText(groups.flat(), trim);
+    // The note is part of the cost, so it appears only when something was cut:
+    // an input with nothing to trim must measure exactly like the verbatim one.
+    const trimNote = trim?.trimmed
+      ? `[Tool results and tool-call arguments longer than ${cap} characters show only their head and tail.]`
+      : undefined;
+    const historyText = [degradation, trimNote, body].filter(Boolean).join("\n\n");
     // Measure the actual serialized payload (including labels and prompt), with
     // the same conservative first-turn safety margin as the context budget.
-    const tokens = Math.ceil((estimateTextTokens(prompt, providerId)
-      + estimateTextTokens(historyText, providerId) + 32) * 1.25);
-    if (tokens <= maxTokens && groups.length > 0) return { historyText, degradation };
+    const tokens = Math.ceil((promptTokens + estimate(historyText) + 32) * 1.25);
+    // What the note itself costs: trimming that saves less than this makes the
+    // input LARGER than the verbatim one.
+    const noteTokens = trimNote ? Math.ceil((estimate(trimNote) + 2) * 1.25) + 1 : 0;
+    return { fits: tokens <= maxTokens, overBy: tokens - maxTokens, noteTokens, trimmed: !!trim?.trimmed, fitted: { historyText, degradation } };
+  };
+  /** Largest cap the predicate accepts, assuming it is monotone; the returned
+   * cap is always one that was actually probed and accepted. */
+  const searchCap = (longest: number, accepts: (cap: number) => boolean) => {
+    let low = 0;
+    let high = longest;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      if (accepts(middle)) low = middle; else high = middle - 1;
+    }
+    return low;
+  };
+  // A provider tokenizer is not monotone in the cap: the tiktoken estimator
+  // switches to the heuristic above a length limit and BPE counts wobble at cut
+  // points, so a failing midpoint can hide a fitting interval above it. The
+  // character-class heuristic IS monotone (every character only adds), so it
+  // also proposes a cap; whichever real-estimator-verified cap is larger wins.
+  const heuristicOnly = getTokenEstimator(providerId) === getTokenEstimator();
+
+  for (let dropped = 0; groups.length > 0; dropped++) {
+    // Empty payloads are the cheapest probe and the floor of what trimming can reach.
+    const floor = render(0, dropped);
+    if (floor.fits) {
+      if (!floor.trimmed) return floor.fitted; // Nothing to trim: this IS the verbatim input.
+      const whole = render(undefined, dropped);
+      if (whole.fits) return whole.fitted;
+      const longest = longestPayload(groups);
+      let bestCap = searchCap(longest, (cap) => render(cap, dropped).fits);
+      if (!heuristicOnly) {
+        const proposed = searchCap(longest, (cap) => render(cap, dropped, (text) => estimateTextTokens(text)).fits);
+        if (proposed > bestCap && render(proposed, dropped).fits) bestCap = proposed;
+      }
+      return render(bestCap, dropped).fitted;
+    }
+    // Emptying the payloads is not always the smallest rendering. With the
+    // additive heuristic the verbatim input can only be smaller when trimming
+    // saves less than its note costs, i.e. within that cost of the budget, so it
+    // is probed just then. A provider tokenizer gives no such bound: past its
+    // length limit it switches to the (cheaper) heuristic, so a longer verbatim
+    // input can measure far below a shorter trimmed one — always probe there.
+    if (floor.trimmed && (!heuristicOnly || floor.overBy <= floor.noteTokens)) {
+      const whole = render(undefined, dropped);
+      if (whole.fits) return whole.fitted;
+    }
     const removable = groups.findIndex((group) => group.every((m) => m.role === "assistant" || m.role === "tool"));
     if (removable < 0) return undefined;
     groups.splice(removable, 1);
-    dropped++;
   }
+  return undefined;
 }
 
-function serializeHistoryAsText(messages: Message[]): string {
+/** One trimming pass: the cap, how to price text, and whether anything was cut. */
+interface PayloadTrim { cap: number; estimate: (text: string) => number; trimmed: boolean }
+
+function longestPayload(groups: Message[][]): number {
+  let longest = 0;
+  for (const group of groups) {
+    for (const message of group) {
+      if (message.role === "tool") longest = Math.max(longest, message.content.length);
+      else if (message.role === "assistant") {
+        for (const toolCall of message.toolCalls ?? []) longest = Math.max(longest, (toolCall.arguments || "").length);
+      }
+    }
+  }
+  return longest;
+}
+
+/** Keep the head and tail of a payload longer than `cap`; the marker states
+ * exactly how much is missing so the summarizer never mistakes it for the whole.
+ * Returns the text unchanged (and leaves `trim.trimmed` alone) when cutting would
+ * not make it cheaper. Exported for regression tests only. */
+export function capPayload(text: string, trim: PayloadTrim | undefined): string {
+  if (!trim || text.length <= trim.cap) return text;
+  let headEnd = Math.ceil(trim.cap / 2);
+  let tailStart = text.length - (trim.cap - headEnd);
+  // Never cut a surrogate pair in half: a lone surrogate is invalid Unicode that
+  // some provider endpoints reject outright.
+  if (headEnd > 0 && isHighSurrogate(text.charCodeAt(headEnd - 1))) headEnd--;
+  if (tailStart < text.length && isLowSurrogate(text.charCodeAt(tailStart))) tailStart++;
+  const capped = `${text.slice(0, headEnd)}[... ${tailStart - headEnd} of ${text.length} characters omitted ...]${text.slice(tailStart)}`;
+  // Worth it only if it is cheaper in TOKENS. Fewer characters is taken as
+  // cheaper without pricing (large payloads, every probe); a marker longer than
+  // what it replaces can still be cheaper for token-dense text such as CJK, and
+  // that case is always short enough to price exactly.
+  if (capped.length >= text.length && trim.estimate(capped) >= trim.estimate(text)) return text;
+  trim.trimmed = true;
+  return capped;
+}
+
+const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff;
+const isLowSurrogate = (code: number) => code >= 0xdc00 && code <= 0xdfff;
+
+function serializeHistoryAsText(messages: Message[], trim?: PayloadTrim): string {
   const lines: string[] = [];
   const toolNameByCallId = new Map<string, string>();
 
@@ -325,14 +429,14 @@ function serializeHistoryAsText(messages: Message[]): string {
         if (msg.toolCalls && msg.toolCalls.length > 0) {
           for (const tc of msg.toolCalls) {
             toolNameByCallId.set(tc.id, tc.name);
-            lines.push(`TOOL_CALL[${tc.name}]: ${summarizeToolCallArgs(tc)}`);
+            lines.push(`TOOL_CALL[${tc.name}]: ${capPayload(summarizeToolCallArgs(tc), trim)}`);
           }
         }
         break;
       }
       case "tool": {
         const name = toolNameByCallId.get(msg.toolCallId) ?? "tool";
-        lines.push(`TOOL_RESULT[${name}]: ${msg.content}`);
+        lines.push(`TOOL_RESULT[${name}]: ${capPayload(msg.content, trim)}`);
         break;
       }
       case "meta":

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { bubbleCompactionKey, bubbleCompactionToast } from '../../src/ui/utils/bubble-context-notification.ts';
+import { bubbleCompactionKey, bubbleCompactionToast, normalizeCompactBoundary } from '../../src/ui/utils/bubble-context-notification.ts';
 import type { StreamMessage } from '../../src/shared/types.ts';
 
 const message: StreamMessage = { type: 'system', subtype: 'compact_boundary', uuid: 'transport', session_id: 'session',
@@ -29,4 +29,12 @@ for (const postTokens of [undefined, NaN, Infinity, -1]) {
 }
 assert.equal(bubbleCompactionToast({ ...input, message: { ...message, compactMetadata: { ...message.compactMetadata, postTokens: 0 } } })?.text,
   'Bubble auto-compacted the conversation context (240,000 → 0 tokens).');
+// A stored boundary without metadata (older build, another adapter) must not throw while history loads.
+const legacyBoundary = { ...message, compactMetadata: undefined } as unknown as typeof message;
+assert.equal(bubbleCompactionKey('session', legacyBoundary), JSON.stringify(['session', message.uuid]));
+assert.equal(bubbleCompactionToast({ ...input, message: legacyBoundary }), null);
+// History repairs such a row once, so MessageCard / context usage can read it like any other.
+assert.deepEqual(normalizeCompactBoundary(legacyBoundary).compactMetadata, { trigger: 'unknown', preTokens: 0 },
+  'missing metadata is not evidence of an automatic (or manual) compaction');
+assert.equal(normalizeCompactBoundary(message), message, 'well-formed rows are returned untouched');
 console.log('PASS: pure Bubble compaction notification eligibility, checkpoint identity, and token formatting');
