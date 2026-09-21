@@ -260,6 +260,23 @@ describe("summary input keeps breadth when tool results are large", () => {
     expect(fitSummaryInput(messages, "summarize", exact - 1, "test")).toBeUndefined();
   });
 
+  it("keeps the verbatim input when trimming would save less than its own note costs", () => {
+    const result = "The quick brown fox jumps over the lazy dog while the build finishes and the tests all pass. Done!!";
+    expect(result.length).toBeGreaterThan(90);
+    const messages: Message[] = [
+      { role: "user", content: "run it" },
+      { role: "assistant", content: "", toolCalls: [{ id: "one", name: "bash", arguments: '{"command":"make"}' }] },
+      { role: "tool", toolCallId: "one", content: result },
+    ];
+    const verbatim = `USER: run it\n\nTOOL_CALL[bash]: {"command":"make"}\n\nTOOL_RESULT[bash]: ${result}`;
+    const exact = Math.ceil((estimateTextTokens("summarize", "test") + estimateTextTokens(verbatim, "test") + 32) * 1.25);
+    const fitted = fitSummaryInput(messages, "summarize", exact, "test");
+    // The marker plus the trim note is larger than the 100 characters it would replace.
+    expect(fitted).toBeDefined();
+    expect(fitted!.historyText).toBe(verbatim);
+    expect(fitted!.degradation).toBeUndefined();
+  });
+
   it("finds a large cap even where the provider tokenizer is not monotone in the cap", () => {
     // o200k below the tiktoken length limit, heuristic above it: a failing
     // midpoint below the switch must not hide the fitting interval above it.

@@ -313,7 +313,10 @@ export function fitSummaryInput(
     // Measure the actual serialized payload (including labels and prompt), with
     // the same conservative first-turn safety margin as the context budget.
     const tokens = Math.ceil((promptTokens + estimate(historyText) + 32) * 1.25);
-    return { fits: tokens <= maxTokens, trimmed: !!trim?.trimmed, fitted: { historyText, degradation } };
+    // What the note itself costs: trimming that saves less than this makes the
+    // input LARGER than the verbatim one.
+    const noteTokens = trimNote ? Math.ceil((estimate(trimNote) + 2) * 1.25) + 1 : 0;
+    return { fits: tokens <= maxTokens, overBy: tokens - maxTokens, noteTokens, trimmed: !!trim?.trimmed, fitted: { historyText, degradation } };
   };
   /** Largest cap the predicate accepts, assuming it is monotone; the returned
    * cap is always one that was actually probed and accepted. */
@@ -347,6 +350,14 @@ export function fitSummaryInput(
         if (proposed > bestCap && render(proposed, dropped).fits) bestCap = proposed;
       }
       return render(bestCap, dropped).fitted;
+    }
+    // Emptying the payloads is not always the smallest rendering: when it saves
+    // less than the trim note costs, the verbatim input is smaller and may still
+    // fit. That is only possible within the note's cost of the budget, so the
+    // full rendering is probed just then, not on every drop.
+    if (floor.trimmed && floor.overBy <= floor.noteTokens) {
+      const whole = render(undefined, dropped);
+      if (whole.fits) return whole.fitted;
     }
     const removable = groups.findIndex((group) => group.every((m) => m.role === "assistant" || m.role === "tool"));
     if (removable < 0) return undefined;
