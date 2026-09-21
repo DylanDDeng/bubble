@@ -323,7 +323,7 @@ export class Agent {
   // unanswerable from the outside. `fired` counts successful compaction
   // computations including ones whose rewrite was later rejected — a
   // fired-but-never-written gap is the churn signal.
-  private compactionStats = { resident: 0, subturn: 0, llm: 0, overflow: 0, fired: 0, droppedMessages: 0 };
+  private compactionStats = { resident: 0, subturn: 0, llm: 0, heuristic: 0, overflow: 0, fired: 0, droppedMessages: 0 };
   private contextEvents: AgentEvent[] = [];
 
   constructor(options: AgentOptions) {
@@ -1858,6 +1858,12 @@ export class Agent {
       keepRecentGroups: attempt === 0 ? 1 : 0,
     });
     if (subturn.compacted && smaller(subturn.messages)) return subturn.messages;
+    // A two-turn text history has nothing to give at keepRecentTurns 2 and no
+    // tool groups; returning undefined on attempt 0 aborts before attempt 1.
+    if (keepRecentTurns > 1) {
+      const lastTurnOnly = compactMessages(originalMessages, { keepRecentTurns: 1 });
+      if (lastTurnOnly.compacted && smaller(lastTurnOnly.messages)) return lastTurnOnly.messages;
+    }
     // Fail explicitly rather than silently deleting the original instruction.
     return undefined;
   }
@@ -1893,18 +1899,40 @@ export class Agent {
         abortSignal,
       });
       throwIfAborted(abortSignal);
+      let path: "llm" | "heuristic" | "subturn" = "llm";
       if (!result.compacted) {
-        const fallback = compactMessages(this.messages, { keepRecentTurns: 2 });
-        result = fallback.compacted ? fallback : compactCurrentTurnToolGroups(this.messages, { keepRecentGroups: 2 });
+        // The request projection no longer compacts, so this fallback must
+        // escalate as far as the former budgeted passes did (down to one kept
+        // turn / one kept tool group) or a two-turn text history has no way
+        // under the window when the summarizer is unavailable. Take the first
+        // pass that fits the budget, otherwise the smallest one that fired.
+        const passes: Array<["heuristic" | "subturn", () => ReturnType<typeof compactMessages>]> = [
+          ["heuristic", () => compactMessages(this.messages, { keepRecentTurns: 2 })],
+          ["heuristic", () => compactMessages(this.messages, { keepRecentTurns: 1 })],
+          ["subturn", () => compactCurrentTurnToolGroups(this.messages, { keepRecentGroups: 2 })],
+          ["subturn", () => compactCurrentTurnToolGroups(this.messages, { keepRecentGroups: 1 })],
+        ];
+        let smallest = Infinity;
+        for (const [passPath, pass] of passes) {
+          const candidate = pass();
+          if (!candidate.compacted || !candidate.messages) continue;
+          const candidateBudget = getContextBudget(this.providerId, this.apiModel, candidate.messages, { additionalInputTokens });
+          if (candidateBudget.estimatedTokens < smallest) {
+            smallest = candidateBudget.estimatedTokens;
+            result = candidate;
+            path = passPath;
+          }
+          if (!candidateBudget.shouldCompact) break;
+        }
       }
       const beforeEstimate = getContextBudget(this.providerId, this.apiModel, this.messages, { additionalInputTokens }).estimatedTokens;
       const candidateEstimate = result.messages
         ? getContextBudget(this.providerId, this.apiModel, result.messages, { additionalInputTokens }).estimatedTokens : beforeEstimate;
       if (result.compacted && result.messages && candidateEstimate < beforeEstimate) {
         this.applyContextCheckpoint(result.messages, "auto", result.summary, revision, abortSignal);
-        this.compactionStats.llm += 1;
+        this.compactionStats[path] += 1;
         this.compactionStats.fired += 1;
-        traceEvent("compaction_fired", { path: "llm" });
+        traceEvent("compaction_fired", { path });
         completed = true;
         const after = getContextBudget(this.providerId, this.apiModel, this.messages, { additionalInputTokens });
         yield { type: "context_compaction", status: "completed", compactionId: this.lastCompactionId, persisted: !!this.onContextCheckpoint, preTokens: budget.estimatedTokens, postTokens: after.estimatedTokens, contextWindow: budget.contextWindow };
@@ -1917,7 +1945,7 @@ export class Agent {
   }
 
   /** Snapshot of how often each compaction path rewrote history this run. */
-  getCompactionStats(): { resident: number; subturn: number; llm: number; overflow: number; fired: number; droppedMessages: number } {
+  getCompactionStats(): { resident: number; subturn: number; llm: number; heuristic: number; overflow: number; fired: number; droppedMessages: number } {
     return { ...this.compactionStats };
   }
 

@@ -3,6 +3,7 @@ import { Agent } from "../agent.js";
 import { compactMessages, isCompactionSummaryMessage } from "../context/compact.js";
 import { LLM_SUMMARY_PREFIX } from "../context/llm-compactor.js";
 import { projectMessages } from "../context/projector.js";
+import { registerDynamicModelMetadata } from "../model-catalog.js";
 import type { AgentEvent, Message, Provider, StreamChunk, ToolRegistryEntry } from "../types.js";
 
 /**
@@ -248,5 +249,38 @@ describe("compaction full-loop invariants", () => {
     const result = compactMessages(legacyStack, { keepRecentTurns: 2 });
     expect(result.compacted).toBe(true);
     expect(countSummaryMarkers(result.messages!)).toBe(1);
+  });
+});
+
+describe("request-boundary fallback when the summarizer is unavailable", () => {
+  it("compacts a two-turn text-only history down to one kept turn and attributes it as heuristic", async () => {
+    const providerId = "fallback-regression";
+    const modelId = "window-16000";
+    registerDynamicModelMetadata({ id: modelId, name: modelId, providerId, reasoningLevels: ["off"], contextWindow: 16_000 });
+    const requests: number[] = [];
+    const provider: Provider = {
+      async *streamChat(messages) {
+        requests.push(JSON.stringify(messages).length);
+        yield { type: "text", content: "final answer" } as StreamChunk;
+        yield { type: "done" } as StreamChunk;
+      },
+      async complete() { throw new Error("summarizer unavailable"); },
+    };
+    const agent = new Agent({ provider, providerId, model: `${providerId}:${modelId}`, tools: [], systemPrompt: "system" });
+    const bulk = "long prose answer ".repeat(4000); // ~72k chars: over the 16k-token window on its own
+    agent.messages = [
+      ...agent.messages,
+      { role: "user", content: "first instruction" },
+      { role: "assistant", content: bulk },
+    ];
+
+    await drain(agent.run("second instruction", process.cwd()));
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toBeLessThan(bulk.length);
+    const stats = agent.getCompactionStats();
+    expect(stats).toMatchObject({ llm: 0, heuristic: 1, overflow: 0, fired: 1 });
+    expect(agent.messages.some((m) => isCompactionSummaryMessage(m as Message))).toBe(true);
+    expect(agent.messages.some((m) => m.role === "user" && m.content === "second instruction")).toBe(true);
   });
 });
