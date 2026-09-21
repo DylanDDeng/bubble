@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "../session.js";
-import { SessionWriteLockBusyError, withSessionWriteLock } from "../context/session-write-lock.js";
+import { processStartId, SessionWriteLockBusyError, withSessionWriteLock } from "../context/session-write-lock.js";
 import { buildCompactionSummaryMessage, compactCurrentTurnToolGroups, isCompactionSummaryMessage, PINNED_INSTRUCTION_MAX_CHARS } from "../context/compact.js";
 import { createContextCheckpoint } from "../context/checkpoint.js";
 import type { Message } from "../types.js";
@@ -159,13 +159,26 @@ describe("session concurrency review regressions", () => {
     expect(replayed).not.toContain("FUTURE-ONLY");
   });
 
-  it("recovers an old lock whose pid is alive but never releases, and leaves a fresh one alone", () => {
+  it("recovers a lock whose pid was recycled by another process, and never expires a live owner by age", () => {
     const lock = sessionFile() + ".write-lock";
-    // A crashed owner's pid recycled by an unrelated live process (here: ours).
-    writeFileSync(lock, `${process.pid}:recycled`);
-    expect(() => withSessionWriteLock(lock, () => "ran", 50)).toThrow(SessionWriteLockBusyError);
-    const old = new Date(Date.now() - 60_000);
+    const startId = processStartId(process.pid);
+    if (!startId) return; // Platform cannot identify process incarnations: locks are never expired.
+    const old = new Date(Date.now() - 3_600_000);
+
+    // Same pid, same incarnation, an hour old (suspended writer, stalled fsync): still the owner.
+    writeFileSync(lock, `${process.pid}:live-owner:${startId}`);
     utimesSync(lock, old, old);
+    expect(() => withSessionWriteLock(lock, () => "ran", 50)).toThrow(SessionWriteLockBusyError);
+    expect(existsSync(lock)).toBe(true);
+
+    // Legacy token without an incarnation: unknown, so never expired either.
+    writeFileSync(lock, `${process.pid}:legacy`);
+    utimesSync(lock, old, old);
+    expect(() => withSessionWriteLock(lock, () => "ran", 50)).toThrow(SessionWriteLockBusyError);
+
+    // A crashed owner's pid now belongs to an unrelated live process (here: ours,
+    // which started at a different time than the recorded owner).
+    writeFileSync(lock, `${process.pid}:crashed-owner:Thu Jan  1 00:00:00 1970`);
     expect(withSessionWriteLock(lock, () => "ran", 50)).toBe("ran");
     expect(existsSync(lock)).toBe(false);
   });
