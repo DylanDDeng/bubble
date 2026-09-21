@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { SessionHistoryDivergedError, SessionManager } from "../session.js";
 import { SessionContextFence } from "../session-context-fence.js";
 import { capPayload, fitSummaryInput } from "../context/llm-compactor.js";
+import { estimateTextTokens } from "../context/budget.js";
 import type { Message } from "../types.js";
 
 const dirs: string[] = [];
@@ -210,23 +211,73 @@ describe("summary input keeps breadth when tool results are large", () => {
 
   it("never splits a surrogate pair at a trim boundary", () => {
     const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    const trimAt = (cap: number) => ({ cap, estimate: (text: string) => estimateTextTokens(text, "test"), trimmed: false });
     // Both alignments, every cap: head and tail each land inside a pair somewhere.
     for (const text of ["😀".repeat(400), "a" + "😀".repeat(400)]) {
       let trimmed = 0;
       for (let cap = 0; cap <= 120; cap++) {
-        const capped = capPayload(text, cap);
+        const trim = trimAt(cap);
+        const capped = capPayload(text, trim);
         expect(lone.test(capped)).toBe(false);
+        expect(trim.trimmed).toBe(capped !== text);
         if (capped !== text) {
           trimmed++;
           expect(capped).toMatch(/\[\.\.\. \d+ of \d+ characters omitted \.\.\.\]/);
-          expect(capped.length).toBeLessThan(text.length);
         }
       }
       expect(trimmed).toBeGreaterThan(100);
     }
-    expect(capPayload("short", 3)).toBe("short"); // A marker longer than the saving is pointless.
+    expect(capPayload("short", trimAt(3))).toBe("short"); // A marker dearer than the saving is pointless.
     expect(capPayload("anything", undefined)).toBe("anything");
   });
+
+  it("judges whether trimming helps by token cost, not character count", () => {
+    // 30 CJK characters cost ~30 tokens; the longer ASCII marker costs ~10.
+    const trim = { cap: 0, estimate: (text: string) => estimateTextTokens(text, "test"), trimmed: false };
+    expect(capPayload("汉".repeat(30), trim)).toMatch(/^\[\.\.\. 30 of 30 characters omitted \.\.\.\]$/);
+    expect(trim.trimmed).toBe(true);
+
+    const messages: Message[] = [{ role: "user", content: "查一下" }];
+    for (let i = 0; i < 100; i++) {
+      messages.push(
+        { role: "assistant", content: "", toolCalls: [{ id: `c${i}`, name: "read", arguments: "{}" }] },
+        { role: "tool", toolCallId: `c${i}`, content: "汉".repeat(30) },
+      );
+    }
+    const fitted = fitSummaryInput(messages, "summarize", 3_000, "test")!;
+    // Every group fits once results are markers: nothing may be dropped.
+    expect(fitted.degradation).toBeUndefined();
+    expect(fitted.historyText.match(/TOOL_CALL\[read\]/g)).toHaveLength(100);
+  });
+
+  it("accepts an input that fits verbatim exactly, without charging for a trim note it does not need", () => {
+    const messages: Message[] = [{ role: "user", content: "only protected content ".repeat(40) }];
+    const verbatim = `USER: ${messages[0].content}`;
+    const exact = Math.ceil((estimateTextTokens("summarize", "test") + estimateTextTokens(verbatim, "test") + 32) * 1.25);
+    const fitted = fitSummaryInput(messages, "summarize", exact, "test");
+    expect(fitted).toBeDefined();
+    expect(fitted!.historyText).not.toContain("head and tail");
+    expect(fitSummaryInput(messages, "summarize", exact - 1, "test")).toBeUndefined();
+  });
+
+  it("finds a large cap even where the provider tokenizer is not monotone in the cap", () => {
+    // o200k below the tiktoken length limit, heuristic above it: a failing
+    // midpoint below the switch must not hide the fitting interval above it.
+    let seed = 7;
+    const word = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed.toString(36); };
+    let body = "";
+    while (body.length < 300_000) body += word() + " ";
+    const messages: Message[] = [
+      { role: "user", content: "read the log" },
+      { role: "assistant", content: "", toolCalls: [{ id: "big", name: "read_file", arguments: '{"path":"app.log"}' }] },
+      { role: "tool", toolCallId: "big", content: body },
+    ];
+    const fitted = fitSummaryInput(messages, "summarize", 30_000, "openai")!;
+    expect(fitted).toBeDefined();
+    expect(fitted.historyText.length).toBeGreaterThan(80_000);
+    const tokens = Math.ceil((estimateTextTokens("summarize", "openai") + estimateTextTokens(fitted.historyText, "openai") + 32) * 1.25);
+    expect(tokens).toBeLessThanOrEqual(30_000);
+  }, 30_000);
 
   it("leaves small results whole and spends the budget it has", () => {
     const messages = reads(6, 12_000);
