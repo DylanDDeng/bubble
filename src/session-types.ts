@@ -60,6 +60,11 @@ export interface SessionMetadataEntry extends BaseSessionLogEntry {
   metadata: SessionMetadata;
 }
 
+export interface SessionContextCheckpointEntry extends BaseSessionLogEntry {
+  type: "context_checkpoint";
+  checkpoint: import("./context/checkpoint.js").ContextCheckpoint;
+}
+
 export interface SessionSummaryEntry extends BaseSessionLogEntry {
   type: "summary";
   summary: string;
@@ -99,6 +104,7 @@ export interface SessionProviderErrorEntry extends BaseSessionLogEntry {
 export type SessionLogEntry =
   | SessionMetadataEntry
   | SessionSummaryEntry
+  | SessionContextCheckpointEntry
   | SessionMarkerEntry
   | SessionUserMessageEntry
   | SessionAssistantMessageEntry

@@ -592,6 +592,8 @@ export class BubbleSdk {
         ? `${builtSystemPrompt}\n\n${options.appendSystemPrompt.trim()}`
         : builtSystemPrompt;
 
+      const history = session.getMessages();
+      let contextRevision = session.getRevision();
       const agent = new Agent({
         provider,
         providerId,
@@ -616,24 +618,30 @@ export class BubbleSdk {
         onMessageAppend: (message: Message) => {
           if (message.role === "system" || message.role === "meta") return;
           if (this.turnCoordinator.isDeleted(sessionId)) return;
-          session.appendMessage(message);
+          session.appendMessage(message, contextRevision);
+          contextRevision = session.getRevision();
           if (message.role === "assistant") recordMemoryCitations(cwd, message.content);
         },
         onProviderError: (error) => {
           if (this.turnCoordinator.isDeleted(sessionId)) return;
           session.appendProviderError(error);
+          contextRevision = session.getRevision();
         },
-        onCompactionApplied: (summary: string) => {
-          if (this.turnCoordinator.isDeleted(sessionId)) return;
-          session.applyLLMCompaction(summary);
+        getContextRevision: () => contextRevision,
+        onContextCheckpoint: (checkpoint) => {
+          if (this.turnCoordinator.isDeleted(sessionId)) throw new Error("Session deleted before context commit");
+          session.commitContextCheckpoint(checkpoint);
+          contextRevision = session.getRevision();
         },
         onModeUpdate: (m: PermissionMode) => {
-          if (!this.turnCoordinator.isDeleted(sessionId)) session.appendMarker("mode_switch", m);
+          if (!this.turnCoordinator.isDeleted(sessionId)) {
+            session.appendMarker("mode_switch", m);
+            contextRevision = session.getRevision();
+          }
         },
       });
       agentRef = agent;
 
-      const history = session.getMessages();
       if (history.length > 0) {
         agent.messages = [{ role: "system", content: systemPrompt }, ...history];
       }

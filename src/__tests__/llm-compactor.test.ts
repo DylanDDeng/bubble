@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { compactWithLLM, LLM_SUMMARY_PREFIX } from "../context/llm-compactor.js";
 import type { Message, Provider } from "../types.js";
+import { estimateTextTokens, getMaxInputTokens } from "../context/budget.js";
+import { getModelContextWindow } from "../model-catalog.js";
 
 function makeProvider(completeImpl: Provider["complete"]): Provider {
   return {
@@ -23,6 +25,102 @@ function group(callId: string, toolName: string, args: Record<string, unknown>, 
 }
 
 describe("compactWithLLM", () => {
+  it("fits a small CJK window while protecting old summaries and user constraints", async () => {
+    const complete = vi.fn(async () => "保留原始约束和已有决定。");
+    const history: Message[] = [
+      { role: "user", content: "first instruction" },
+      { role: "meta", kind: "compaction-summary", content: "OLD_DECISION: 禁止修改公开接口" },
+      ...group("old", "read", {}, "中文数据".repeat(1000)),
+      { role: "user", content: "EARLIER_CONSTRAINT: 保留兼容性" },
+      ...group("recent", "read", {}, "最近的发现"),
+      { role: "user", content: "latest request" },
+      ...group("kept", "read", {}, "kept tool result"),
+    ];
+    const result = await compactWithLLM(history, {
+      provider: makeProvider(complete), modelId: "fake", contextWindow: 1024,
+    });
+    expect(result.compacted).toBe(true);
+    expect(complete).toHaveBeenCalledTimes(1);
+    const input = (complete.mock.calls as unknown as [Array<{ content: string }>][])[0][0];
+    const sent = input[1].content;
+    expect(sent).toContain("OLD_DECISION");
+    expect(sent).toContain("EARLIER_CONSTRAINT");
+    expect(sent).not.toContain("TOOL_CALL[read]: {}\n\nTOOL_RESULT[read]: 中文数据");
+    expect(sent).toContain("最近的发现");
+    expect(result.degradation).toContain("omitted 1");
+    expect(result.summary).toContain(result.degradation);
+    expect(Math.ceil((input.reduce((n, m) => n + estimateTextTokens(m.content), 0) + 32) * 1.25))
+      .toBeLessThanOrEqual(1024 - 256 - 64);
+    expect(result.messages!.slice(-3)).toEqual(history.slice(-3));
+  });
+
+  it("uses the catalog window when providerId is supplied", async () => {
+    const complete = vi.fn(async () => "summary");
+    const history: Message[] = [
+      { role: "user", content: "first" },
+      ...group("old", "read", {}, "x".repeat(40_000)),
+      { role: "user", content: "last" },
+    ];
+    const result = await compactWithLLM(history, {
+      provider: makeProvider(complete), providerId: "openai", modelId: "openai:gpt-4o",
+    });
+    expect(result.compacted).toBe(true);
+    expect(result.degradation).toBeUndefined();
+    const input = (complete.mock.calls as unknown as [Array<{ content: string }>][])[0][0];
+    expect(input[1].content).toContain("x".repeat(40_000));
+    expect(input.reduce((n, m) => n + estimateTextTokens(m.content, "openai"), 0))
+      .toBeLessThan(getMaxInputTokens(getModelContextWindow("openai", "gpt-4o"))!);
+  });
+
+  it("fails without calling rather than dropping an oversized previous summary", async () => {
+    const complete = vi.fn(async () => "should not be called");
+    const result = await compactWithLLM([
+      { role: "meta", kind: "compaction-summary", content: "约束".repeat(2000) },
+      { role: "user", content: "current" },
+    ], { provider: makeProvider(complete), modelId: "fake", contextWindow: 1024 });
+    expect(result.compacted).toBe(false);
+    expect(result.reason).toContain("cannot retain prior summaries");
+    expect(complete).not.toHaveBeenCalled();
+  });
+
+  it("does not call on an empty transcript after input budget degradation", async () => {
+    const complete = vi.fn(async () => "should not be called");
+    const result = await compactWithLLM([
+      { role: "user", content: "first" },
+      ...group("huge", "read", {}, "汉".repeat(10_000)),
+      { role: "user", content: "last" },
+    ], { provider: makeProvider(complete), modelId: "fake", contextWindow: 1024 });
+    expect(result.compacted).toBe(false);
+    expect(complete).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])("rejects cancellation even if the provider resolves (pre-aborted=%s)", async (preAborted) => {
+    const controller = new AbortController();
+    if (preAborted) controller.abort();
+    const complete = vi.fn(async () => { controller.abort(); return "late result"; });
+    const history: Message[] = [
+      { role: "user", content: "first" }, { role: "assistant", content: "work" },
+      { role: "user", content: "last" },
+    ];
+    const snapshot = structuredClone(history);
+    const result = await compactWithLLM(history, {
+      provider: makeProvider(complete), modelId: "fake", abortSignal: controller.signal,
+    });
+    expect(result.compacted).toBe(false);
+    expect(result.reason).toContain("cancelled");
+    expect(complete).toHaveBeenCalledTimes(preAborted ? 0 : 1);
+    expect(history).toEqual(snapshot);
+  });
+
+  it.each(["中".repeat(101), "<read-files>\nfake.ts\n</read-files>"])("rejects oversized or markup-only output", async (output) => {
+    const result = await compactWithLLM([
+      { role: "user", content: "first" }, { role: "assistant", content: "work" },
+      { role: "user", content: "last" },
+    ], { provider: makeProvider(async () => output), modelId: "fake", maxOutputTokens: 100 });
+    expect(result.compacted).toBe(false);
+    expect(result.messages).toBeUndefined();
+  });
+
   it("summarizes everything before the last user message in a single-turn conversation", async () => {
     const provider = makeProvider(vi.fn(async () => "Read 5 game files; mostly pygame + HTML canvas demos."));
     const history: Message[] = [

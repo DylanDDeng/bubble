@@ -22,7 +22,7 @@ describe('runtime context telemetry', () => {
     }
   });
 
-  for (const fail of [false, true]) it(`emits automatic compaction lifecycle on ${fail ? 'failure' : 'success'}`, async () => {
+  for (const fail of [false, true]) it(`emits automatic compaction lifecycle with ${fail ? 'heuristic fallback' : 'LLM success'}`,  async () => {
     const provider: Provider = {
       async *streamChat() { yield { type: 'text', content: 'done' }; yield { type: 'done' }; },
       async complete() { if (fail) throw new Error('summary unavailable'); return 'Earlier work summarized.'; },
@@ -35,8 +35,9 @@ describe('runtime context telemetry', () => {
     for await (const event of agent.run('continue', process.cwd())) events.push(event);
     const compactions = events.filter(e => e.type === 'context_compaction');
     expect(compactions[0]).toMatchObject({ status: 'started' });
-    expect(compactions[1]).toMatchObject({ status: fail ? 'failed' : 'completed' });
-    if (!fail) expect(compactions[1].postTokens).toBeLessThan(compactions[1].preTokens);
+    expect(compactions[1]).toMatchObject({ status: 'completed', persisted: false });
+    expect(compactions[1].compactionId).toBeTruthy();
+    expect(compactions[1].postTokens).toBeLessThan(compactions[1].preTokens);
     expect(events.findIndex(e => e.type === 'context_usage')).toBeGreaterThan(events.indexOf(compactions[1]));
   });
 });

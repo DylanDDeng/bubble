@@ -478,10 +478,10 @@ async function main() {
     onProviderError: (error) => {
       sessionManager?.appendProviderError(error);
     },
-    // Auto-compaction summaries are meta messages (dropped above); persist the
-    // compacted state as a session summary entry so it survives resume.
-    onCompactionApplied: (summary) => {
-      sessionManager?.applyLLMCompaction(summary);
+    getContextRevision: () => sessionManager?.getRevision() ?? "missing",
+    onContextCheckpoint: (checkpoint) => {
+      if (!sessionManager) throw new Error("No session available for context commit");
+      sessionManager.commitContextCheckpoint(checkpoint);
     },
     onToolResult: (toolName, result) => {
       if (!sessionManager) return;

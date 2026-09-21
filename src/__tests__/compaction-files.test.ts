@@ -173,7 +173,7 @@ describe("compaction file tracking", () => {
     expect(ops.modified).toEqual(["src/one.ts", "src/two.ts"]);
   });
 
-  it("hands the block-carrying summary to onCompactionApplied for persistence", async () => {
+  it("keeps overflow candidates uncommitted until request-space validation", async () => {
     const persisted: string[] = [];
     const provider = {
       complete: async () => "Overflow recovery summary.",
@@ -197,14 +197,30 @@ describe("compaction file tracking", () => {
       ...turn("four", "src/four.ts"),
     ];
 
-    // First recovery keeps two recent turns; the second is intentionally more
-    // aggressive and keeps one.
-    await (agent as unknown as { recoverFromOverflow(attempt: number): Promise<number> }).recoverFromOverflow(0);
+    const original = agent.messages;
+    const candidate = await (agent as unknown as { recoverFromOverflow(attempt: number): Promise<Message[]> }).recoverFromOverflow(0);
+    expect(agent.messages).toBe(original);
+    expect(persisted).toHaveLength(0);
+    const candidateText = candidate.map(message => typeof message.content === "string" ? message.content : "").join("\n");
+    expect(candidateText).toContain("Overflow recovery summary.");
+    const ops = parseFileBlocks(candidateText);
+    expect(ops.modified).toEqual(["src/one.ts", "src/three.ts", "src/two.ts"]);
+  });
 
-    expect(persisted).toHaveLength(1);
-    expect(persisted[0]).toContain("Overflow recovery summary.");
-    const ops = parseFileBlocks(persisted[0]);
-    expect(ops.modified).toEqual(["src/one.ts", "src/two.ts"]);
+  it("includes deterministic file blocks in the accepted output budget", async () => {
+    let calls = 0;
+    const provider: Provider = {
+      async *streamChat() {},
+      async complete() { calls++; return "summary"; },
+    };
+    const result = await compactWithLLM([
+      { role: "user", content: "original" },
+      ...toolTurn([{ name: "read", args: { path: `${"中".repeat(200)}.ts` } }]),
+      { role: "user", content: "latest" },
+    ], { provider, modelId: "fake", maxOutputTokens: 100 });
+    expect(calls).toBe(1);
+    expect(result.compacted).toBe(false);
+    expect(result.reason).toContain("output budget");
   });
 
   it("records evicted sub-turn file ops on the sub-turn summary", () => {

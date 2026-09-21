@@ -174,8 +174,9 @@ export class RunDriver {
       onProviderError: (error) => {
         session.manager.appendProviderError(error);
       },
-      onCompactionApplied: (summary: string) => {
-        session.manager.applyLLMCompaction(summary);
+      getContextRevision: () => session.manager.getRevision(),
+      onContextCheckpoint: (checkpoint) => {
+        session.manager.commitContextCheckpoint(checkpoint);
       },
       onToolResult: (toolName, result) => {
         if (toolName !== "skill" || result.isError) return;

@@ -191,6 +191,38 @@ describe("compaction full-loop invariants", () => {
     expect(messages.some((m) => typeof m.content === "string" && m.content.includes("TAIL_MARKER"))).toBe(true);
   });
 
+  it("carries old summary prose through repeated projected heuristic folds", () => {
+    let messages: Message[] = [
+      { role: "meta", kind: "compaction-summary", content: `${SUMMARY_MARKER}\n${LLM_SUMMARY_PREFIX}\nDURABLE_DECISION: use the existing schema.` },
+      { role: "user", content: "original" },
+    ];
+    for (let round = 0; round < 20; round++) {
+      messages.push({ role: "assistant", content: `progress ${round}` });
+      messages.push({ role: "user", content: `followup ${round}` });
+      const result = compactMessages(messages, { keepRecentTurns: 1 });
+      expect(result.compacted).toBe(true);
+      expect(result.summary).toContain("DURABLE_DECISION");
+      expect(countSummaryMarkers(result.messages!)).toBe(1);
+      const projected = projectMessages(result.messages!, { mode: "pruned" });
+      messages = projected as Message[];
+    }
+  });
+
+  it("bounds accumulated old prose and reports heuristic truncation", () => {
+    const result = compactMessages([
+      { role: "meta", kind: "compaction-summary", content: `${SUMMARY_MARKER}\nFIRST_DECISION\n${"中".repeat(20_000)}\nLAST_DECISION` },
+      { role: "user", content: "original" },
+      { role: "assistant", content: "work" },
+      { role: "user", content: "latest" },
+    ], { keepRecentTurns: 1 });
+    expect(result.compacted).toBe(true);
+    expect(result.summary!.length).toBeLessThanOrEqual(8192);
+    expect(result.summary).toContain("FIRST_DECISION");
+    expect(result.summary).toContain("LAST_DECISION");
+    expect(result.summary).toContain("Heuristic compaction degraded");
+    expect(countSummaryMarkers(result.messages!)).toBe(1);
+  });
+
   it("locks the llm-compactor envelope prefix to the literal compact.ts matches", () => {
     // compact.ts cannot import LLM_SUMMARY_PREFIX (module cycle), so it
     // matches a literal prefix. This test keeps the two in sync.

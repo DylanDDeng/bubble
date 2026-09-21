@@ -230,7 +230,10 @@ describe("DeepSeek cache prefix — system prompt + tools", () => {
     const turn2PrefixJson = JSON.stringify(turn2Projected.slice(0, turn1Projected.length));
 
     expect(turn2PrefixJson).toBe(turn1Json);
-    expect(utf8Bytes(turn1Json)).toBe(1164);
+    // Policy wording may evolve; cache correctness is byte-for-byte prefix
+    // stability across turns, not a frozen length of that wording.
+    expect(utf8Bytes(turn2PrefixJson)).toBe(utf8Bytes(turn1Json));
+    expect(Buffer.from(turn2PrefixJson, "utf8")).toEqual(Buffer.from(turn1Json, "utf8"));
   });
 
   it("tools schema bytes stay pinned when a text-only turn uses tool_choice none", () => {

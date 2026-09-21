@@ -581,7 +581,7 @@ describe("Agent", () => {
 
     const agent = new Agent({ provider, model: "gpt-4o", tools: [dummyTool] });
     const events = await collectEvents(agent, "Call dummy", "/tmp");
-    const eventTypes = events.map((event) => event.type);
+    const eventTypes = events.filter(event => event.type !== "context_usage").map((event) => event.type);
 
     expect(eventTypes).toEqual([
       "turn_start",
@@ -1289,7 +1289,7 @@ describe("Agent", () => {
     expect(lifecycleReminder?.content).toContain("Unique subagents currently tracked: 2.");
     expect(lifecycleReminder?.content).toContain("completed=2");
     expect(lifecycleReminder?.content).toContain("do not count repeated spawn_agent/wait_agent tool calls");
-    expect(lifecycleReminder?.content).toContain("call wait_agent before user-facing progress narration");
+    expect(lifecycleReminder?.content).toContain("wait_agent when that result is needed for your next meaningful step");
   });
 
   it("propagates parent abort signals into subagent provider calls", async () => {
@@ -1856,7 +1856,7 @@ describe("Agent", () => {
 
     expect(afterChars).toBeLessThan(beforeChars);
     expect(agent.messages.some((message) => (
-      message.role === "tool" && message.content.includes("output omitted to control context size")
+      message.role === "meta" && message.kind === "compaction-summary"
     ))).toBe(true);
   });
 
@@ -1940,7 +1940,9 @@ describe("Agent", () => {
     });
     for (let i = 0; i < 5; i++) {
       agent.messages.push({ role: "user", content: `turn ${i}` });
-      agent.messages.push({ role: "assistant", content: `reply ${i}` });
+      // Actual overflow recovery must reduce request tokens, not delete a
+      // protected instruction merely to shave a few bytes from a tiny fixture.
+      agent.messages.push({ role: "assistant", content: `reply ${i} ` + "investigation detail ".repeat(300) });
     }
 
     const events = await collectEvents(agent, "latest", "/tmp");
