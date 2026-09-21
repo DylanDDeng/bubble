@@ -4,7 +4,7 @@
  */
 
 import { compactCurrentTurnToolGroups, compactMessages, isCompactionSummaryMessage, splitLeadingContext } from "./context/compact.js";
-import { createContextCheckpoint, checkpointMessages, type ContextCheckpoint } from "./context/checkpoint.js";
+import { createContextCheckpoint, checkpointMessages, hasCompleteToolGroups, type ContextCheckpoint } from "./context/checkpoint.js";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -21,7 +21,7 @@ import {
   sleepBeforeRetry,
 } from "./network/retry.js";
 import { projectMessages } from "./context/projector.js";
-import { aggressivePruneMessages, markStableCurrentToolResultsForCache, markToolResultCacheStable } from "./context/prune.js";
+import { aggressivePruneMessages, pruneMessages, markStableCurrentToolResultsForCache, markToolResultCacheStable } from "./context/prune.js";
 import { normalizeToolResultForModel, truncateToolOutputForModel } from "./context/tool-output-truncate.js";
 import { buildDeferredToolsReminder, buildToolFreezeReminder, isPermissionModeReminder, reminderForMode } from "./prompt/reminders.js";
 import type { AgentEvent, AgentInputController, AgentRunInput, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ThinkingLevel, TokenUsage, ToolDefinition, ToolMessage, ToolResult, ToolRegistryEntry, ToolUpdate } from "./types.js";
@@ -1697,7 +1697,6 @@ export class Agent {
           // synchronously, so a mark added on a later turn never reaches disk.
           markToolResultCacheStable(tc.name, toolMessage);
           this.appendMessage(toolMessage);
-          this.compactResidentHistory();
           flushQueuedReminders();
           this.onToolResult?.(tc.name, result);
           executedResults.push(result);
@@ -1712,6 +1711,11 @@ export class Agent {
             throwIfAborted(abortSignal);
           }
         }
+
+        // A checkpoint must contain the whole batch, never provider repair's
+        // placeholder for a sibling that has not executed yet.
+        this.compactResidentHistory();
+        for (const event of this.contextEvents.splice(0)) yield emit(event);
 
         await hookBus.runBeforeContinuation({
           agent: this,
@@ -2204,14 +2208,16 @@ export class Agent {
 
 
   private maybeCompactResidentHistory(): void {
-    if (this.messages.length === 0) {
+    if (this.messages.length === 0 || !hasCompleteToolGroups(this.messages)) {
       return;
     }
 
     const before = this.messages;
     const beforeChars = estimateResidentChars(before);
     const beforeToolChars = estimateToolPayloadChars(before);
-    let candidate = projectMessages(before, { mode: "pruned" });
+    // Compact canonical history, not the provider projection: projection
+    // renders runtime meta as user text and can synthesize missing tool results.
+    let candidate = pruneMessages(before);
 
     const budget = this.providerId && this.apiModel
       ? getContextBudget(this.providerId, this.apiModel, candidate)
