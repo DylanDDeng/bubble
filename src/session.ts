@@ -538,8 +538,10 @@ export class SessionManager {
     const revision = expectedRevision ?? this.getRevision();
     this.withWriteLock(() => {
       const entries = this.log.list();
+      // Replay tolerates a structurally invalid (hand-edited) checkpoint record;
+      // it must not then make every later commit throw here.
       const existing = entries.find(entry => entry.type === "context_checkpoint"
-        && entry.checkpoint.compactionId === checkpoint.compactionId);
+        && entry.checkpoint?.compactionId === checkpoint.compactionId);
       if (existing) {
         if (existing.type !== "context_checkpoint" || JSON.stringify(existing.checkpoint) !== JSON.stringify(checkpoint)) {
           throw new Error("Conflicting context checkpoint id");
@@ -590,11 +592,21 @@ function summarizeSessionFile(file: string, cwdDir: string): SessionSummary | un
   const lines = content.split("\n").filter((line) => line.trim() !== "");
   if (lines.length === 0) return undefined;
 
+  // One unreadable session — an unsupported record, a hand-edited message the
+  // title/preview code cannot handle — must not take the whole listing down.
+  try {
+    return summarizeSessionLines(lines, file, cwdDir, stat.mtimeMs);
+  } catch {
+    return undefined;
+  }
+}
+
+function summarizeSessionLines(lines: string[], file: string, cwdDir: string, mtime: number): SessionSummary {
   const log = new SessionLog();
   log.load(lines);
+  const messages = log.toMessages();
   const metadata = log.getMetadata();
   const entries = log.list();
-  const messages = log.toMessages();
 
   const firstUserEntry = firstUserEntryAfterLatestClear(entries);
   const firstUserText = firstUserEntry ? messageText(firstUserEntry.message) : "";
@@ -613,7 +625,7 @@ function summarizeSessionFile(file: string, cwdDir: string): SessionSummary | un
     preview,
     firstUserMessage: preview,
     messageCount: messages.length,
-    mtime: stat.mtimeMs,
+    mtime,
   };
 }
 

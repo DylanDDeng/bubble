@@ -91,3 +91,10 @@ export function checkpointMessages(checkpoint: ContextCheckpoint): Message[] {
     ...(message.providerMetadata ? { providerMetadata: sanitizeAssistantProviderMetadata(message.providerMetadata) } : {}),
   } : message));
 }
+
+/** Replay-side read: a checkpoint this build cannot validate (a newer format,
+ * a hand-edited record) is not a boundary. Originals are retained, so callers
+ * fall back to an earlier boundary instead of failing the whole session. */
+export function tryCheckpointMessages(checkpoint: ContextCheckpoint): Message[] | undefined {
+  try { return checkpointMessages(checkpoint); } catch { return undefined; }
+}
