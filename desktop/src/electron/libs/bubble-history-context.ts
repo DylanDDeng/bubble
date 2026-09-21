@@ -49,11 +49,12 @@ export async function recoverBubbleHistoryContext(
           if (typeof entry.metadata?.model === 'string') metadataModel = entry.metadata.model;
         }
         const message = entry.type === 'message' ? entry.data : entry.message;
-        if (entry.type === 'summary' || entry.type === 'compaction' ||
+        if (entry.type === 'summary' || entry.type === 'compaction' || entry.type === 'context_checkpoint' ||
             (entry.type === 'message' && message?.role === 'system') ||
             (entry.type === 'marker' && ['conversation_clear', 'model_switch', 'provider_switch', 'runtime_switch'].includes(entry.kind))) {
           // Compaction rewrites summary BEFORE retained messages. Their file order
-          // does not imply that their usage was measured after compaction.
+          // does not imply that their usage was measured after compaction. A
+          // context_checkpoint is appended after the retained originals instead.
           boundary = Math.max(boundary, entry.timestamp);
         }
         if (entry.type === 'user_message' || (entry.type === 'message' && message?.role === 'user')) latest = null;
