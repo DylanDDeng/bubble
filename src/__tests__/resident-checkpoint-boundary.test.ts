@@ -174,4 +174,43 @@ describe("checkpoint runtime projection backstop", () => {
     ], "resident");
     expect(result.messages).toEqual([...summaries, ...prose]);
   });
+
+  it("frees resident memory under heap pressure below the token threshold without a durable checkpoint", () => {
+    const payload = "line of file content\n".repeat(60); // prunable, far below the 16k-token budget
+    const messages: Message[] = [{ role: "user", content: "read the files" }];
+    for (let i = 0; i < 6; i++) {
+      messages.push({ role: "assistant", content: "", toolCalls: [{ id: `r${i}`, name: "read", arguments: "{}" }] });
+      messages.push({ role: "tool", toolCallId: `r${i}`, content: payload });
+    }
+    const { agent, file, checkpoints } = fixture(messages);
+    expect(budget(agent.messages).shouldCompact).toBe(false);
+    const before = JSON.stringify(agent.messages).length;
+
+    agent.compactResidentHistory();
+
+    expect(JSON.stringify(agent.messages).length).toBeLessThan(before);
+    expect(checkpoints).toHaveLength(0);
+    // The durable log keeps the full tool output; only resident memory shrank.
+    expect(new SessionManager(file).getMessages().filter(m => m.role === "tool").every(m => m.content === payload)).toBe(true);
+  });
+
+  it("accepts tool-call ids reused across completed groups but not within one group", () => {
+    const reused: Message[] = [{ role: "user", content: "go" }];
+    for (let i = 0; i < 2; i++) {
+      reused.push({ role: "assistant", content: "", toolCalls: [{ id: "call_1", name: "read", arguments: "{}" }] });
+      reused.push({ role: "tool", toolCallId: "call_1", content: `result ${i}` });
+    }
+    expect(() => createContextCheckpoint(reused, "resident")).not.toThrow();
+    const { manager } = fixture([{ role: "user", content: "seed" }]);
+    manager.commitContextCheckpoint(createContextCheckpoint(reused, "manual", undefined, manager.getRevision()));
+    expect(manager.getMessages().filter(m => m.role === "tool").map(m => m.content)).toEqual(["result 0", "result 1"]);
+
+    const duplicateInGroup: Message[] = [
+      { role: "assistant", content: "", toolCalls: [
+        { id: "call_1", name: "read", arguments: "{}" }, { id: "call_1", name: "read", arguments: "{}" }] },
+      { role: "tool", toolCallId: "call_1", content: "x" },
+    ];
+    const checkpoint = { ...createContextCheckpoint([], "manual"), messages: duplicateInGroup };
+    expect(() => manager.commitContextCheckpoint(checkpoint)).toThrow("Invalid checkpoint tool call id");
+  });
 });

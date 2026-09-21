@@ -45,7 +45,6 @@ export function createContextCheckpoint(
 /** Live meta reminders may interleave results, but every canonical call needs a real result. */
 export function hasCompleteToolGroups(messages: Message[]): boolean {
   const pending = new Set<string>();
-  const seen = new Set<string>();
   for (const message of messages) {
     if (message.role === "meta") continue;
     if (message.role === "tool") {
@@ -54,9 +53,10 @@ export function hasCompleteToolGroups(messages: Message[]): boolean {
       if (pending.size) return false;
       if (message.role === "assistant") {
         for (const call of message.toolCalls ?? []) {
-          if (!call.id || seen.has(call.id)) return false;
+          // Ids only need to be unambiguous within their own group: providers
+          // may scope them per response (`call_1` in every reply).
+          if (!call.id || pending.has(call.id)) return false;
           pending.add(call.id);
-          seen.add(call.id);
         }
       }
     }
@@ -68,7 +68,6 @@ export function checkpointMessages(checkpoint: ContextCheckpoint): Message[] {
   if (checkpoint?.version !== 1 || typeof checkpoint.compactionId !== "string" || !checkpoint.compactionId
     || !Array.isArray(checkpoint.messages)) throw new Error("Unsupported context checkpoint");
   const pending = new Set<string>();
-  const seen = new Set<string>();
   for (const message of checkpoint.messages) {
     if (!message || !["user", "assistant", "tool", "system", "meta"].includes(message.role)
       || !(typeof message.content === "string" || (message.role === "user" && Array.isArray(message.content)))) {
@@ -77,8 +76,8 @@ export function checkpointMessages(checkpoint: ContextCheckpoint): Message[] {
     if (message.role === "assistant") {
       if (pending.size) throw new Error("Incomplete checkpoint tool group");
       for (const call of message.toolCalls ?? []) {
-        if (!call.id || seen.has(call.id)) throw new Error("Invalid checkpoint tool call id");
-        pending.add(call.id); seen.add(call.id);
+        if (!call.id || pending.has(call.id)) throw new Error("Invalid checkpoint tool call id");
+        pending.add(call.id);
       }
     } else if (message.role === "tool") {
       if (!pending.delete(message.toolCallId)) throw new Error("Orphan checkpoint tool result");

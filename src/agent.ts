@@ -2276,7 +2276,19 @@ export class Agent {
         || candidate.length < before.length
       )
     ) {
-      if (!compactedPath) return; // Request-only thinning must not mutate durable history.
+      if (!compactedPath) {
+        // Request-only thinning must not mutate durable history. Under heap
+        // pressure below the token threshold, the pruned candidate still has to
+        // replace resident memory or the life-support guard frees nothing; the
+        // session log keeps the full tool output.
+        if (shouldAggressivelyPrune) {
+          this.messages = candidate;
+          this.lastInputTokens = null;
+          this.lastAnchorMessageCount = null;
+          this.fileStateTracker?.invalidateReadHistory();
+        }
+        return;
+      }
       this.applyContextCheckpoint(candidate, "resident", residentSummary, this.getContextRevision?.());
       if (compactedPath === "resident") {
         this.compactionStats.resident += 1;
