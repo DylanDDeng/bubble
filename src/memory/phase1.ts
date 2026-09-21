@@ -3,7 +3,7 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { SessionLogEntry } from "../session.js";
 import { sanitizeInternalReminderBlocks } from "../agent/internal-reminder-sanitizer.js";
-import { checkpointMessages } from "../context/checkpoint.js";
+import { tryCheckpointMessages } from "../context/checkpoint.js";
 import { isCompactionSummaryMessage } from "../context/compact.js";
 import type { Message, ThinkingLevel } from "../types.js";
 import { MemoryDatabase } from "./db.js";
@@ -176,7 +176,9 @@ function serializeSessionEntries(entries: SessionLogEntry[]): string {
       if (segment.length) segments.push(segment);
       segment = [];
     } else if (entry.type === "context_checkpoint") {
-      const messages = checkpointMessages(entry.checkpoint);
+      // An unreadable checkpoint supersedes nothing; its originals stay in play.
+      const messages = tryCheckpointMessages(entry.checkpoint);
+      if (!messages) continue;
       segment = messages.flatMap(serializeCheckpointMessage);
       if (entry.checkpoint.summary && !segment.some(line => line.summary)) {
         segment.unshift({ text: `[summary] ${cleanText(entry.checkpoint.summary, MAX_CONTENT_CHARS)}`, summary: true });

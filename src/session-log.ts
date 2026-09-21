@@ -16,7 +16,7 @@ import type {
   SessionSummaryEntry,
 } from "./session-types.js";
 import type { SanitizedProviderError } from "./provider-error-record.js";
-import { checkpointMessages } from "./context/checkpoint.js";
+import { tryCheckpointMessages } from "./context/checkpoint.js";
 
 /** Records that change conversational context or its execution state.
  * Keep this shared by revision hashing and checkpoint receipt supersession.
@@ -150,11 +150,17 @@ export class SessionLog {
     let latestSummaryIndex = -1;
     let latestClearIndex = -1;
 
+    // An unreadable checkpoint is skipped, not fatal: its originals are still in
+    // the log, so replay continues from the previous readable boundary.
+    let checkpointProjection: Message[] | undefined;
     for (let index = this.entries.length - 1; index >= 0; index--) {
-      if (this.entries[index].type === "summary" || this.entries[index].type === "context_checkpoint") {
-        latestSummaryIndex = index;
-        break;
-      }
+      const entry = this.entries[index];
+      if (entry.type === "context_checkpoint") {
+        checkpointProjection = tryCheckpointMessages(entry.checkpoint);
+        if (!checkpointProjection) continue;
+      } else if (entry.type !== "summary") continue;
+      latestSummaryIndex = index;
+      break;
     }
 
     for (let index = this.entries.length - 1; index >= 0; index--) {
@@ -168,7 +174,7 @@ export class SessionLog {
     if (latestSummaryIndex > latestClearIndex) {
       const entry = this.entries[latestSummaryIndex];
       if (entry.type === "context_checkpoint") {
-        messages.push(...checkpointMessages(entry.checkpoint));
+        messages.push(...(checkpointProjection ?? []));
       } else if (entry.type === "summary") {
         // Legacy summaries remain readable; already discarded originals cannot be reconstructed.
         messages.push({ role: "system", content: `Previous conversation summary: ${entry.summary}` });

@@ -15,6 +15,7 @@ import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingL
 import { ProviderRegistry, displayModel, encodeModel, decodeModel } from "./provider-registry.js";
 import { SessionManager } from "./session.js";
 import { SessionContextFence } from "./session-context-fence.js";
+import { SessionWriteLockBusyError } from "./context/session-write-lock.js";
 import { createSessionTitleUpdater, type SessionTitleUpdater } from "./session-title.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { createRoutableModelIndex, createRoutingSnapshotAccessor } from "./agent/routing-catalog.js";
@@ -455,10 +456,14 @@ async function main() {
   // The write is refused — and the resident transcript must roll back to the
   // file's truth, or the rejected message lingers in the TUI while every later
   // fenced write keeps failing on the stale revision until a manual reload.
-  const persistFenced = (write: () => void): void => {
+  const persistFenced = (write: () => void, residentAhead = true): void => {
     try {
       write();
     } catch (error) {
+      // A busy lock on a checkpoint commit refused nothing resident: the agent
+      // replaces its history only after the commit succeeds, so there is nothing
+      // to roll back (and a reload would drop live runtime reminders).
+      if (!residentAhead && error instanceof SessionWriteLockBusyError) throw error;
       // Any refused write (fence rejection, busy lock, I/O) leaves the agent's
       // already-pushed message unpersisted, so always restore the file's truth.
       try {
@@ -506,7 +511,7 @@ async function main() {
     onContextCheckpoint: (checkpoint) => {
       if (!sessionManager) throw new Error("No session available for context commit");
       const manager = sessionManager;
-      persistFenced(() => manager.commitContextCheckpoint(checkpoint, contextFence.getRevision()));
+      persistFenced(() => manager.commitContextCheckpoint(checkpoint, contextFence.getRevision()), false);
     },
     onToolResult: (toolName, result) => {
       if (!sessionManager) return;

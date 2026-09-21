@@ -591,10 +591,16 @@ function summarizeSessionFile(file: string, cwdDir: string): SessionSummary | un
   if (lines.length === 0) return undefined;
 
   const log = new SessionLog();
-  log.load(lines);
+  let messages: Message[];
+  try {
+    log.load(lines);
+    messages = log.toMessages();
+  } catch {
+    // One unreadable session must not take the whole listing down with it.
+    return undefined;
+  }
   const metadata = log.getMetadata();
   const entries = log.list();
-  const messages = log.toMessages();
 
   const firstUserEntry = firstUserEntryAfterLatestClear(entries);
   const firstUserText = firstUserEntry ? messageText(firstUserEntry.message) : "";

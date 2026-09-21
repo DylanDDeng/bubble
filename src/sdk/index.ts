@@ -27,6 +27,7 @@ import {
 import { ReplayEventLog } from "./replay-event-log.js";
 import { SessionManager, type SessionSummary } from "../session.js";
 import { splitLeadingContext } from "../context/compact.js";
+import { SessionWriteLockBusyError } from "../context/session-write-lock.js";
 import { PermissionAwareApprovalController } from "../approval/controller.js";
 import { BashAllowlist } from "../approval/session-cache.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
@@ -600,10 +601,14 @@ export class BubbleSdk {
       // the write, then roll the resident transcript back to the file's truth so
       // the rejected message does not linger and later writes are not wedged
       // behind the stale revision.
-      const persistFenced = (write: () => void): void => {
+      const persistFenced = (write: () => void, residentAhead = true): void => {
         try {
           write();
         } catch (error) {
+          // A busy lock on a checkpoint commit refused nothing resident: the agent
+          // replaces its history only after the commit succeeds, so there is nothing
+          // to roll back (and a reload would drop live runtime reminders).
+          if (!residentAhead && error instanceof SessionWriteLockBusyError) throw error;
           // Any refused write (fence rejection, busy lock, I/O) leaves the agent's
           // already-pushed message unpersisted. getMessages() refreshes, so read
           // the history first and adopt the revision of that same snapshot.
@@ -655,7 +660,7 @@ export class BubbleSdk {
           persistFenced(() => {
             session.commitContextCheckpoint(checkpoint, contextRevision);
             contextRevision = session.getRevision();
-          });
+          }, false);
         },
         onModeUpdate: (m: PermissionMode) => {
           if (!this.turnCoordinator.isDeleted(sessionId)) {

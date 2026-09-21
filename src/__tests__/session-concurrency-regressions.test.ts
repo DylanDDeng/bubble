@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -134,5 +134,39 @@ describe("session concurrency review regressions", () => {
     expect(input).toContain("LATE-REQUIREMENT-IN-TAIL");
     // Only the tail: the retained head must not be duplicated into the summary input.
     expect(input.length).toBeLessThan(opening.length);
+  });
+
+  it("replays from the previous readable boundary when a checkpoint is unreadable", () => {
+    const file = sessionFile();
+    const manager = new SessionManager(file);
+    manager.appendMessage({ role: "user", content: "turn one" });
+    manager.appendMessage({ role: "assistant", content: "reply one" });
+    manager.commitContextCheckpoint(createContextCheckpoint([
+      buildCompactionSummaryMessage("READABLE-SUMMARY"), { role: "user", content: "turn one" }, { role: "assistant", content: "reply one" },
+    ], "manual", "READABLE-SUMMARY", manager.getRevision()));
+    manager.appendMessage({ role: "user", content: "turn two" });
+    manager.appendMessage({ role: "assistant", content: "reply two" });
+    // A newer build's format (or a hand-edited record) this build cannot validate.
+    appendFileSync(file, JSON.stringify({ id: "checkpoint-future", type: "context_checkpoint", timestamp: Date.now(),
+      checkpoint: { version: 2, compactionId: "future", reason: "auto", messages: [{ role: "user", content: "FUTURE-ONLY" }] } }) + "\n");
+    appendFileSync(file, JSON.stringify({ id: "99", type: "user_message", timestamp: Date.now(),
+      message: { role: "user", content: "turn three" } }) + "\n");
+
+    const replayed = JSON.stringify(new SessionManager(file).getMessages());
+    expect(replayed).toContain("READABLE-SUMMARY");
+    expect(replayed).toContain("reply two");
+    expect(replayed).toContain("turn three");
+    expect(replayed).not.toContain("FUTURE-ONLY");
+  });
+
+  it("recovers an old lock whose pid is alive but never releases, and leaves a fresh one alone", () => {
+    const lock = sessionFile() + ".write-lock";
+    // A crashed owner's pid recycled by an unrelated live process (here: ours).
+    writeFileSync(lock, `${process.pid}:recycled`);
+    expect(() => withSessionWriteLock(lock, () => "ran", 50)).toThrow(SessionWriteLockBusyError);
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lock, old, old);
+    expect(withSessionWriteLock(lock, () => "ran", 50)).toBe("ran");
+    expect(existsSync(lock)).toBe(false);
   });
 });

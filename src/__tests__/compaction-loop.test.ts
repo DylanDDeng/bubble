@@ -4,6 +4,7 @@ import { compactMessages, isCompactionSummaryMessage } from "../context/compact.
 import { LLM_SUMMARY_PREFIX } from "../context/llm-compactor.js";
 import { projectMessages } from "../context/projector.js";
 import { registerDynamicModelMetadata } from "../model-catalog.js";
+import { SessionWriteLockBusyError } from "../context/session-write-lock.js";
 import type { AgentEvent, Message, Provider, StreamChunk, ToolRegistryEntry } from "../types.js";
 
 /**
@@ -282,5 +283,43 @@ describe("request-boundary fallback when the summarizer is unavailable", () => {
     expect(stats).toMatchObject({ llm: 0, heuristic: 1, overflow: 0, fired: 1 });
     expect(agent.messages.some((m) => isCompactionSummaryMessage(m as Message))).toBe(true);
     expect(agent.messages.some((m) => m.role === "user" && m.content === "second instruction")).toBe(true);
+  });
+});
+
+describe("optional compaction under session lock contention", () => {
+  it("skips a proactive checkpoint when the lock is busy instead of aborting the turn", async () => {
+    const providerId = "busy-lock-regression";
+    const modelId = "window-16000";
+    registerDynamicModelMetadata({ id: modelId, name: modelId, providerId, reasoningLevels: ["off"], contextWindow: 16_000 });
+    let requests = 0;
+    const provider: Provider = {
+      async *streamChat() {
+        requests += 1;
+        yield { type: "text", content: "final answer" } as StreamChunk;
+        yield { type: "done" } as StreamChunk;
+      },
+      async complete() { return "Handoff summary: first instruction handled; continue with the second."; },
+    };
+    const commits: string[] = [];
+    const agent = new Agent({
+      provider, providerId, model: `${providerId}:${modelId}`, tools: [], systemPrompt: "system",
+      getContextRevision: () => "rev",
+      onContextCheckpoint: (checkpoint) => {
+        commits.push(checkpoint.reason);
+        // Another writer holds the lock for the proactive attempt only.
+        if (commits.length === 1) throw new SessionWriteLockBusyError("/session.jsonl.write-lock");
+      },
+    });
+    agent.messages = [
+      ...agent.messages,
+      { role: "user", content: "first instruction" },
+      { role: "assistant", content: "long prose answer ".repeat(4000) },
+    ];
+
+    await drain(agent.run("second instruction", process.cwd()));
+
+    expect(commits).toEqual(["auto", "overflow"]);
+    expect(requests).toBe(1);
+    expect(agent.getCompactionStats()).toMatchObject({ llm: 0, overflow: 1, fired: 1 });
   });
 });
