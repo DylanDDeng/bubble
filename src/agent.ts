@@ -5,7 +5,6 @@
 
 import { compactCurrentTurnToolGroups, compactMessages, isCompactionSummaryMessage, splitLeadingContext } from "./context/compact.js";
 import { createContextCheckpoint, checkpointMessages, hasCompleteToolGroups, type ContextCheckpoint } from "./context/checkpoint.js";
-import { SessionWriteLockBusyError } from "./context/session-write-lock.js";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -1930,7 +1929,7 @@ export class Agent {
       const candidateEstimate = result.messages
         ? getContextBudget(this.providerId, this.apiModel, result.messages, { additionalInputTokens }).estimatedTokens : beforeEstimate;
       if (result.compacted && result.messages && candidateEstimate < beforeEstimate) {
-        if (!this.applyOptionalContextCheckpoint(result.messages, "auto", result.summary, revision, abortSignal)) return;
+        this.applyContextCheckpoint(result.messages, "auto", result.summary, revision, abortSignal);
         this.compactionStats[path] += 1;
         this.compactionStats.fired += 1;
         traceEvent("compaction_fired", { path });
@@ -2318,7 +2317,7 @@ export class Agent {
         }
         return;
       }
-      if (!this.applyOptionalContextCheckpoint(candidate, "resident", residentSummary, this.getContextRevision?.())) return;
+      this.applyContextCheckpoint(candidate, "resident", residentSummary, this.getContextRevision?.());
       if (compactedPath === "resident") {
         this.compactionStats.resident += 1;
       }
@@ -2327,22 +2326,6 @@ export class Agent {
         this.contextEvents.push({ type: "context_compaction", status: "completed", compactionId: this.lastCompactionId, persisted: !!this.onContextCheckpoint, preTokens: budget.estimatedTokens,
           postTokens: getContextBudget(this.providerId, this.apiModel, candidate).estimatedTokens, contextWindow: budget.contextWindow });
       }
-    }
-  }
-
-  /** Proactive compaction is an optimization: when another writer merely holds
-   * the session lock, skip it and send the request as-is rather than abort the
-   * user's turn. Nothing was committed or replaced, so the next boundary simply
-   * tries again; if the request really is too large, overflow recovery (which
-   * must persist) reports the failure. A diverged history still throws. */
-  private applyOptionalContextCheckpoint(...args: Parameters<Agent["applyContextCheckpoint"]>): boolean {
-    try {
-      this.applyContextCheckpoint(...args);
-      return true;
-    } catch (error) {
-      if (!(error instanceof SessionWriteLockBusyError)) throw error;
-      traceEvent("compaction_skipped", { reason: "session_write_lock_busy", checkpointReason: args[1] });
-      return false;
     }
   }
 

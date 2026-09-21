@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "../session.js";
-import { processStartId, SessionWriteLockBusyError, withSessionWriteLock } from "../context/session-write-lock.js";
+import { linuxStartId, processStartId, SessionWriteLockBusyError, withSessionWriteLock } from "../context/session-write-lock.js";
 import { buildCompactionSummaryMessage, compactCurrentTurnToolGroups, isCompactionSummaryMessage, PINNED_INSTRUCTION_MAX_CHARS } from "../context/compact.js";
 import { createContextCheckpoint } from "../context/checkpoint.js";
 import type { Message } from "../types.js";
@@ -181,5 +181,13 @@ describe("session concurrency review regressions", () => {
     writeFileSync(lock, `${process.pid}:crashed-owner:Thu Jan  1 00:00:00 1970`);
     expect(withSessionWriteLock(lock, () => "ran", 50)).toBe("ran");
     expect(existsSync(lock)).toBe(false);
+  });
+
+  it("ties a Linux process start id to its boot, tolerating spaces and parens in the command name", () => {
+    const stat = (ticks: number) => `4321 (node (worker) x) S 1 4321 4321 0 -1 4194304 100 0 0 0 5 3 0 0 20 0 11 0 ${ticks} 1000000 200 18446744073709551615 1 1 0 0 0 0 0 0 0 0 0 0 17 3 0 0 0 0 0`;
+    expect(linuxStartId(stat(987654), "boot-a\n")).toBe("boot-a/987654");
+    // Same pid and same tick after a reboot is a different incarnation.
+    expect(linuxStartId(stat(987654), "boot-b\n")).not.toBe(linuxStartId(stat(987654), "boot-a\n"));
+    expect(linuxStartId(stat(987654), "")).toBeUndefined();
   });
 });

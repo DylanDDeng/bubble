@@ -22,9 +22,7 @@ function deadOwner(token: string): boolean {
 export function processStartId(pid: number): string | undefined {
   try {
     if (process.platform === "linux") {
-      // Field 22 (starttime); the comm field may itself contain spaces/parens.
-      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-      return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] || undefined;
+      return linuxStartId(readFileSync(`/proc/${pid}/stat`, "utf8"), readFileSync("/proc/sys/kernel/random/boot_id", "utf8"));
     }
     if (process.platform === "win32") return undefined;
     // lstart is rendered in the caller's locale and time zone. Owner and
@@ -35,6 +33,15 @@ export function processStartId(pid: number): string | undefined {
       env: { PATH: process.env.PATH ?? "/bin:/usr/bin", LC_ALL: "C", TZ: "UTC" },
     }).trim() || undefined;
   } catch { return undefined; }
+}
+
+/** Field 22 (starttime) counts clock ticks since boot, and lock files outlive
+ * reboots, so the boot id is part of the identity: the same pid and tick after
+ * another boot is a different process. The comm field may itself contain
+ * spaces and parentheses, hence the split after the last ")". Exported for tests. */
+export function linuxStartId(stat: string, bootId: string): string | undefined {
+  const startTicks = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+  return startTicks && bootId.trim() ? `${bootId.trim()}/${startTicks}` : undefined;
 }
 
 let ownStartId: string | undefined | null = null;
