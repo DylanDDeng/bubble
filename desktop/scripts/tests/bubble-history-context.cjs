@@ -46,6 +46,12 @@ app.whenReady().then(async () => {
   ]);
   write([{ id: 'summary', type: 'summary', summary: 'short', timestamp: 150 }, assistant()]);
   assert.equal((await recover(row(), [result])).context.usedTokens, 79228, 'post-compaction measurement is valid');
+  const checkpoint = timestamp => ({ id: 'checkpoint-c1', type: 'context_checkpoint', timestamp,
+    checkpoint: { version: 1, compactionId: 'c1', reason: 'auto', messages: [] } });
+  await unknown('checkpoint after the last assistant invalidates its pre-compaction usage', [assistant(), checkpoint(300)]);
+  await unknown('checkpoint order wins when the clock stepped backward', [assistant(), checkpoint(100)]);
+  write([assistant(100, 250000), checkpoint(150), assistant()]);
+  assert.equal((await recover(row(), [result])).context.usedTokens, 79228, 'usage measured after a checkpoint is valid');
   for (const kind of ['conversation_clear', 'model_switch', 'provider_switch', 'runtime_switch']) {
     await unknown(kind, [assistant(), { id: kind, type: 'marker', kind, timestamp: 300 }]);
   }

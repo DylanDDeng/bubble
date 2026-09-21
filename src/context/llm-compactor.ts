@@ -12,7 +12,8 @@
 
 import type { Message, Provider, ProviderMessage, ToolCall } from "../types.js";
 import { sanitizeInternalReminderBlocks } from "../agent/internal-reminder-sanitizer.js";
-import { estimateContextTokens } from "./budget.js";
+import { estimateTextTokens, getMaxInputTokens } from "./budget.js";
+import { getModelContextWindow } from "../model-catalog.js";
 import { appendFileBlocks, stripFileBlocks } from "./compaction-files.js";
 import {
   collectCompactionFileOps,
@@ -23,25 +24,31 @@ import {
   isCompactionSummaryMessage,
   isRealUserMessage,
   splitLeadingContext,
+  PINNED_INSTRUCTION_MAX_CHARS,
 } from "./compact.js";
 
-export const LLM_COMPACTION_PROMPT = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
+export const LLM_COMPACTION_PROMPT = `You are performing a CONTEXT CHECKPOINT COMPACTION. The conversation below is about to be removed from the model's context and replaced by your summary. Another LLM will resume the task seeing only your summary, the user's original instruction, and the most recent messages. Anything you leave out is gone.
 
-Include:
-- Current progress and key decisions made
-- Important context, constraints, or user preferences
-- What remains to be done (clear next steps)
-- Any critical data, examples, or references needed to continue
+Write a handoff summary that lets it continue without repeating the investigation. Cover:
+- Goal and constraints: what the user wants, in their terms. Explicit requirements, preferences, and anything they ruled out. Quote exact wording where precision matters.
+- Decisions made and why, including approaches that were tried and rejected, so they are not retried.
+- Current state: what is done and verified, what is in progress, what is broken or still unverified. Keep verified facts distinct from assumptions.
+- Specifics needed to continue: file paths, identifiers, commands, error messages, config values, ids, URLs. Exact, never paraphrased.
+- Next steps in order, starting with the immediate one.
 
-Be concise, structured, and focused on helping the next LLM seamlessly continue the work.`;
+Length follows content: as long as needed to preserve the above, and no longer. Spend words on what cannot be cheaply re-derived (decisions, constraints, findings). Do not reproduce file contents or tool output that can simply be read again, and do not narrate the conversation turn by turn. The lists of files read and modified are recorded separately; name only the files that matter for the next steps.
+
+Carry forward every fact from prior summaries and the original user constraints. If the input says parts of the history were omitted, say so explicitly.`;
 
 export const LLM_SUMMARY_PREFIX = `Another language model previously worked on this task and produced this handoff summary. Build on what's already done; avoid re-running the same investigation. Summary:`;
 
 export interface LLMCompactOptions {
   provider: Provider;
   modelId: string;
-  /** Compactor model call must complete within this token-cost ceiling. */
+  /** Total estimated request ceiling, including the compaction prompt. */
   maxInputTokens?: number;
+  providerId?: string;
+  contextWindow?: number;
   /** Number of trailing (assistant + tool-results) groups in the current turn to keep verbatim. */
   keepRecentGroups?: number;
   abortSignal?: AbortSignal;
@@ -52,6 +59,8 @@ export interface LLMCompactResult {
   summary?: string;
   messages?: Message[];
   reason?: string;
+  /** Explicit lossy-input diagnostics; also persisted in a successful summary. */
+  degradation?: string;
 }
 
 export async function compactWithLLM(
@@ -59,8 +68,20 @@ export async function compactWithLLM(
   options: LLMCompactOptions,
 ): Promise<LLMCompactResult> {
   const { provider, modelId, abortSignal } = options;
-  const maxInputTokens = options.maxInputTokens ?? 100_000;
-  const keepRecentGroups = options.keepRecentGroups ?? 2;
+  if (abortSignal?.aborted) return { compacted: false, reason: "compactor cancelled" };
+  const providerId = options.providerId ?? modelId.split(":")[0];
+  const catalogModelId = modelId.startsWith(`${providerId}:`) ? modelId.slice(providerId.length + 1) : modelId;
+  // Unknown models use a conservative window rather than an unbounded 100k call.
+  const contextWindow = options.contextWindow ?? getModelContextWindow(providerId, catalogModelId) ?? 8192;
+  // getMaxInputTokens already reserves the window's answer space, which is what
+  // the summary is written into. No fixed output ceiling: summary length is
+  // judged against what it replaces, below, and by the caller's before/after
+  // budget comparison.
+  const maxInputTokens = Math.min(options.maxInputTokens ?? Infinity, getMaxInputTokens(contextWindow) ?? 0);
+  if (![contextWindow, maxInputTokens].every((n) => Number.isFinite(n) && n > 0)) {
+    return { compacted: false, reason: "invalid compactor token budget" };
+  }
+  const keepRecentGroups = Math.max(0, Math.floor(options.keepRecentGroups ?? 2));
 
   // Positional leading prefix, not role-global filtering: filtering by role
   // used to relocate mid-history system messages (including prior summaries)
@@ -112,8 +133,11 @@ export async function compactWithLLM(
     if (msg.role === "assistant") {
       if (active) groups.push(active);
       active = { assistant: msg, toolResults: [] };
-    } else if (msg.role === "tool" && active) {
+    } else if (active) {
       active.toolResults.push(msg);
+    } else {
+      // Preserve interleaved reminders and other context, not just tool results.
+      active = { assistant: msg, toolResults: [] };
     }
   }
   if (active) groups.push(active);
@@ -132,6 +156,10 @@ export async function compactWithLLM(
       role: "user",
       content: `[Prior compaction summary]\n${stripFileBlocks(messageText(m))}`,
     })),
+    // The pin is capped; its tail is protected summary input, never silently lost.
+    ...(pinnedFirstUser && messageText(pinnedFirstUser).length > PINNED_INSTRUCTION_MAX_CHARS
+      ? [{ role: "user" as const, content: `[Original instruction beyond retained pin]\n${messageText(pinnedFirstUser).slice(PINNED_INSTRUCTION_MAX_CHARS)}` }]
+      : []),
     ...summarizablePriorTurns,
     ...evictedGroups.flatMap((g) => [g.assistant, ...g.toolResults]),
   ];
@@ -148,13 +176,17 @@ export async function compactWithLLM(
     return { compacted: false, reason: "nothing to evict" };
   }
 
-  const trimmedHistory = trimToFitTokenBudget(toSummarize, maxInputTokens);
-  const historyText = serializeHistoryAsText(trimmedHistory);
-
+  const prompt = LLM_COMPACTION_PROMPT;
+  const fitted = fitSummaryInput(toSummarize, prompt, maxInputTokens, providerId);
+  if (!fitted) {
+    return { compacted: false, reason: "compactor input budget cannot retain prior summaries and user constraints" };
+  }
+  const { historyText, degradation } = fitted;
   const summaryInput: ProviderMessage[] = [
-    { role: "system", content: LLM_COMPACTION_PROMPT },
+    { role: "system", content: prompt },
     { role: "user", content: historyText },
   ];
+  if (abortSignal?.aborted) return { compacted: false, reason: "compactor cancelled" };
 
   let summaryText: string;
   try {
@@ -167,6 +199,8 @@ export async function compactWithLLM(
     return { compacted: false, reason: `compactor call failed: ${(err as Error).message}` };
   }
 
+  // Some providers resolve even after abort; never apply that late result.
+  if (abortSignal?.aborted) return { compacted: false, reason: "compactor cancelled" };
   if (!summaryText || summaryText.trim().length === 0) {
     return { compacted: false, reason: "compactor returned empty summary" };
   }
@@ -174,10 +208,20 @@ export async function compactWithLLM(
   // (resident history holds them after pruned-mode projection), and models
   // quote their input. This summary is persisted via onCompactionApplied, so
   // scrub markup before it can reach the session file.
-  summaryText = sanitizeInternalReminderBlocks(summaryText).trim();
+  summaryText = stripFileBlocks(sanitizeInternalReminderBlocks(summaryText)).trim();
   if (!summaryText) {
     return { compacted: false, reason: "compactor returned only internal markup" };
   }
+
+  // The only meaningful length bound is relative: a summary that is not shorter
+  // than the history it replaces (a model echoing its input) compacts nothing.
+  // Judge the model's prose alone — the deterministic file lists are not its
+  // output — and reject rather than clip decisions/constraints out of it.
+  if (estimateTextTokens(summaryText, providerId) >= estimateTextTokens(serializeHistoryAsText(toSummarize), providerId)) {
+    return { compacted: false, reason: "compactor summary is not shorter than the history it replaces", degradation };
+  }
+  if (degradation) summaryText = `${degradation}\n\n${summaryText}`;
+  const summaryWithFiles = appendFileBlocks(summaryText, fileOps);
 
   // New history shape (prefix-cache-friendly: preserved system+meta stay at the
   // absolute prefix unchanged; summary is injected after as a user-role envelope
@@ -205,22 +249,60 @@ export async function compactWithLLM(
 
   return {
     compacted: true,
+    degradation,
     // Same payload the resident message carries (minus the envelope prefix —
     // session replay adds its own "Previous conversation summary:" header), so
     // the persisted checkpoint matches the in-memory state, file blocks included.
-    summary: appendFileBlocks(summaryText, fileOps),
+    summary: summaryWithFiles,
     messages: compacted,
   };
 }
 
-function trimToFitTokenBudget(messages: Message[], maxTokens: number): Message[] {
-  // Drop from the front (oldest first) until estimate fits. Front-trim matches
-  // Codex's pattern and preserves the most recent context the user cares about.
-  let working = [...messages];
-  while (working.length > 0 && estimateContextTokens(working) > maxTokens) {
-    working = working.slice(1);
+/** Fit the summarization input under the model's window by dropping complete
+ * assistant/tool groups. Exported for regression tests only — callers use
+ * compactWithLLM. */
+export function fitSummaryInput(
+  messages: Message[], prompt: string, maxTokens: number, providerId: string,
+): { historyText: string; degradation?: string } | undefined {
+  // Trim complete assistant/tool groups, never prior summaries, user constraints,
+  // or runtime context. If protected content alone exceeds the budget, fail
+  // explicitly and let the caller choose a fallback; do not call on empty input.
+  // Group by pending tool-call ids, not adjacency: an interleaved meta reminder
+  // between a call and its result must not split the pair — otherwise trimming
+  // can drop the call while keeping an orphan `TOOL_RESULT[tool]` line that has
+  // lost its name and provenance.
+  const groups: Message[][] = [];
+  const groupByCallId = new Map<string, Message[]>();
+  for (const message of messages) {
+    if (message.role === "tool") {
+      const group = groupByCallId.get(message.toolCallId);
+      if (group) {
+        group.push(message);
+        continue;
+      }
+    }
+    const group = [message];
+    groups.push(group);
+    if (message.role === "assistant" && message.toolCalls) {
+      for (const toolCall of message.toolCalls) groupByCallId.set(toolCall.id, group);
+    }
   }
-  return working;
+  let dropped = 0;
+  while (true) {
+    const degradation = dropped
+      ? `[Compaction input degraded: omitted ${dropped} older assistant/tool groups to fit the model window.]`
+      : undefined;
+    const historyText = [degradation, serializeHistoryAsText(groups.flat())].filter(Boolean).join("\n\n");
+    // Measure the actual serialized payload (including labels and prompt), with
+    // the same conservative first-turn safety margin as the context budget.
+    const tokens = Math.ceil((estimateTextTokens(prompt, providerId)
+      + estimateTextTokens(historyText, providerId) + 32) * 1.25);
+    if (tokens <= maxTokens && groups.length > 0) return { historyText, degradation };
+    const removable = groups.findIndex((group) => group.every((m) => m.role === "assistant" || m.role === "tool"));
+    if (removable < 0) return undefined;
+    groups.splice(removable, 1);
+    dropped++;
+  }
 }
 
 function serializeHistoryAsText(messages: Message[]): string {
@@ -250,10 +332,16 @@ function serializeHistoryAsText(messages: Message[]): string {
       }
       case "tool": {
         const name = toolNameByCallId.get(msg.toolCallId) ?? "tool";
-        lines.push(`TOOL_RESULT[${name}]: ${truncateInline(msg.content, 1500)}`);
+        lines.push(`TOOL_RESULT[${name}]: ${msg.content}`);
         break;
       }
+      case "meta":
+        // Expired runtime reminders remain in history but are no longer model
+        // context. Prior summaries have already been folded into user input.
+        if (msg.includeInLlm !== false) lines.push(`CONTEXT: ${msg.content}`);
+        break;
       default:
+        lines.push(`CONTEXT: ${messageText(msg)}`);
         break;
     }
   }
@@ -262,21 +350,7 @@ function serializeHistoryAsText(messages: Message[]): string {
 }
 
 function summarizeToolCallArgs(tc: ToolCall): string {
-  try {
-    const parsed = JSON.parse(tc.arguments || "{}") as Record<string, unknown>;
-    const pairs = Object.entries(parsed)
-      .filter(([, v]) => typeof v === "string" || typeof v === "number" || typeof v === "boolean")
-      .map(([k, v]) => `${k}=${JSON.stringify(v).slice(0, 200)}`);
-    return pairs.join(" ") || "(no args)";
-  } catch {
-    return truncateInline(tc.arguments || "", 200);
-  }
-}
-
-function truncateInline(text: string, max: number): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  if (normalized.length <= max) return normalized;
-  return `${normalized.slice(0, max - 3)}...`;
+  return tc.arguments || "{}";
 }
 
 function cloneMessage(message: Message): Message {

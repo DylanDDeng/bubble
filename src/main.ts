@@ -14,6 +14,7 @@ import { resolveConfiguredModel } from "./model-selection.js";
 import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingLevel } from "./provider-transform.js";
 import { ProviderRegistry, displayModel, encodeModel, decodeModel } from "./provider-registry.js";
 import { SessionManager } from "./session.js";
+import { SessionContextFence } from "./session-context-fence.js";
 import { createSessionTitleUpdater, type SessionTitleUpdater } from "./session-title.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { createRoutableModelIndex, createRoutingSnapshotAccessor } from "./agent/routing-catalog.js";
@@ -448,6 +449,28 @@ async function main() {
   }
   const budgetLedger = new BudgetLedger();
   let sessionTitleUpdater: SessionTitleUpdater | undefined;
+  let contextFence = new SessionContextFence(sessionManager);
+  // A fence rejection means the durable log diverged from this host's resident
+  // history (a foreign append/clear/rewind landed while a turn was in flight).
+  // The write is refused — and the resident transcript must roll back to the
+  // file's truth, or the rejected message lingers in the TUI while every later
+  // fenced write keeps failing on the stale revision until a manual reload.
+  const persistFenced = (write: () => void): void => {
+    try {
+      write();
+    } catch (error) {
+      // Any refused write (fence rejection, busy lock, I/O) leaves the agent's
+      // already-pushed message unpersisted, so always restore the file's truth.
+      try {
+        const history = contextFence.reloadHistory();
+        const head = splitLeadingContext(agent.messages).leading;
+        agent.messages = [...head, ...history];
+      } catch {
+        // Surface the original write failure; the next write retries the reload.
+      }
+      throw error;
+    }
+  };
   const agent = new Agent({
     provider: activeProvider
       ? createProvider(activeProviderId, activeProvider.apiKey, activeProvider.baseURL)
@@ -466,7 +489,8 @@ async function main() {
       // Runtime meta messages are ephemeral; don't persist them —
       // they will be re-injected as needed on resume based on the current mode.
       if (message.role === "meta") return;
-      sessionManager.appendMessage(message);
+      const manager = sessionManager;
+      persistFenced(() => manager.appendMessage(message, contextFence.getRevision()));
       traceEvent("session_message_persisted", {
         message: summarizeTraceMessage(message),
       });
@@ -476,23 +500,25 @@ async function main() {
       }
     },
     onProviderError: (error) => {
-      sessionManager?.appendProviderError(error);
+      persistFenced(() => sessionManager?.appendProviderError(error, contextFence.getRevision()));
     },
-    // Auto-compaction summaries are meta messages (dropped above); persist the
-    // compacted state as a session summary entry so it survives resume.
-    onCompactionApplied: (summary) => {
-      sessionManager?.applyLLMCompaction(summary);
+    getContextRevision: () => contextFence.getRevision(),
+    onContextCheckpoint: (checkpoint) => {
+      if (!sessionManager) throw new Error("No session available for context commit");
+      const manager = sessionManager;
+      persistFenced(() => manager.commitContextCheckpoint(checkpoint, contextFence.getRevision()));
     },
     onToolResult: (toolName, result) => {
       if (!sessionManager) return;
       if (toolName !== "skill" || result.isError) return;
       const match = result.content.match(/^Skill:\s+([^\n]+)$/m);
       if (match?.[1]) {
-        sessionManager.appendMarker("skill_activated", match[1].trim());
+        const manager = sessionManager;
+        persistFenced(() => manager.appendMarker("skill_activated", match[1]!.trim(), contextFence.getRevision()));
       }
     },
     onModeUpdate: (mode) => {
-      sessionManager?.appendMarker("mode_switch", mode);
+      persistFenced(() => sessionManager?.appendMarker("mode_switch", mode, contextFence.getRevision()));
     },
     budgetLedger,
     skills: skillSummaries,
@@ -608,7 +634,7 @@ async function main() {
 
   // Restore session if requested
   if (resumedExistingSession && sessionManager) {
-    const history = sessionManager.getMessages();
+    const history = contextFence.reloadHistory();
     if (history.length > 0) {
       agent.messages = [{ role: "system", content: systemPrompt }, ...history];
       // Reassigning agent.messages drops any runtime meta reminder injected during
@@ -760,6 +786,7 @@ async function main() {
     const activateSession = (next: SessionManager): { manager: SessionManager } | { error: string } => {
       try {
         const history = next.getMessages();
+        const historyRevision = next.getRevision();
         const nextPromptCacheKey = next.getOrCreatePromptCacheKey();
         const nextTitleUpdater = createSessionTitleUpdater({
           sessionManager: next,
@@ -779,6 +806,9 @@ async function main() {
         // Commit only after every file read/write and reconstruction step has
         // succeeded. Callers can safely prepare candidate sessions without a
         // failed switch rebinding persistence or replacing the live history.
+        if (next.getRevision() !== historyRevision) throw new Error("Session changed while switching; retry");
+        contextFence.dispose();
+        contextFence = new SessionContextFence(next);
         sessionManager = next;
         sessionPromptCacheKey = nextPromptCacheKey;
         sessionTitleUpdater = nextTitleUpdater;

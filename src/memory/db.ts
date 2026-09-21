@@ -11,6 +11,7 @@ export interface Stage1Output {
   cwd: string;
   entryCount: number;
   sourceUpdatedAt: string;
+  extractorVersion?: string;
   generatedAt: string;
   rawMemory: string;
   rolloutSummary: string;
@@ -35,7 +36,7 @@ export interface MemoryJob {
   lastError?: string;
 }
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const GLOBAL_CONSOLIDATION_KIND = "memory_consolidate_global";
 const GLOBAL_CONSOLIDATION_KEY = "global";
 const PHASE1_KIND = "memory_phase1_extract";
@@ -79,8 +80,8 @@ export class MemoryDatabase {
     this.db.prepare(`
       INSERT INTO memory_stage1_outputs (
         session_file, cwd, entry_count, source_updated_at, generated_at,
-        raw_memory, rollout_summary, rollout_slug, usage_count, selected_for_phase2
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+        raw_memory, rollout_summary, rollout_slug, extractor_version, usage_count, selected_for_phase2
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
       ON CONFLICT(session_file) DO UPDATE SET
         cwd = excluded.cwd,
         entry_count = excluded.entry_count,
@@ -89,8 +90,10 @@ export class MemoryDatabase {
         raw_memory = excluded.raw_memory,
         rollout_summary = excluded.rollout_summary,
         rollout_slug = excluded.rollout_slug,
+        extractor_version = excluded.extractor_version,
         selected_for_phase2 = CASE
           WHEN memory_stage1_outputs.selected_for_phase2_source_updated_at = excluded.source_updated_at
+            AND memory_stage1_outputs.extractor_version IS excluded.extractor_version
           THEN memory_stage1_outputs.selected_for_phase2
           ELSE 0
         END
@@ -103,6 +106,7 @@ export class MemoryDatabase {
       output.rawMemory,
       output.rolloutSummary,
       output.rolloutSlug ?? null,
+      output.extractorVersion ?? null,
     );
   }
 
@@ -355,6 +359,17 @@ export class MemoryDatabase {
         updated_at TEXT NOT NULL
       )
     `).run();
+    const hasExtractorVersion = () => (this.db.prepare("PRAGMA table_info(memory_stage1_outputs)").all() as { name: string }[])
+      .some(column => column.name === "extractor_version");
+    if (!hasExtractorVersion()) {
+      try {
+        this.db.prepare("ALTER TABLE memory_stage1_outputs ADD COLUMN extractor_version TEXT").run();
+      } catch (error) {
+        // Another process sharing this database can win the first-start
+        // migration between the check and the ALTER; that is success.
+        if (!hasExtractorVersion()) throw error;
+      }
+    }
     this.db.prepare("INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('version', ?)").run(String(SCHEMA_VERSION));
   }
 }
@@ -365,6 +380,7 @@ function mapStage1(row: Record<string, unknown>): Stage1Output {
     cwd: String(row.cwd),
     entryCount: Number(row.entry_count),
     sourceUpdatedAt: String(row.source_updated_at),
+    extractorVersion: typeof row.extractor_version === "string" ? row.extractor_version : undefined,
     generatedAt: String(row.generated_at),
     rawMemory: String(row.raw_memory),
     rolloutSummary: String(row.rollout_summary),

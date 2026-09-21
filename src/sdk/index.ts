@@ -26,6 +26,7 @@ import {
 } from "./session-turn-coordinator.js";
 import { ReplayEventLog } from "./replay-event-log.js";
 import { SessionManager, type SessionSummary } from "../session.js";
+import { splitLeadingContext } from "../context/compact.js";
 import { PermissionAwareApprovalController } from "../approval/controller.js";
 import { BashAllowlist } from "../approval/session-cache.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
@@ -592,6 +593,28 @@ export class BubbleSdk {
         ? `${builtSystemPrompt}\n\n${options.appendSystemPrompt.trim()}`
         : builtSystemPrompt;
 
+      const history = session.getMessages();
+      let contextRevision = session.getRevision();
+      // A fence rejection means the durable log diverged from this turn's
+      // resident snapshot (a foreign append or clear landed mid-flight). Refuse
+      // the write, then roll the resident transcript back to the file's truth so
+      // the rejected message does not linger and later writes are not wedged
+      // behind the stale revision.
+      const persistFenced = (write: () => void): void => {
+        try {
+          write();
+        } catch (error) {
+          // Any refused write (fence rejection, busy lock, I/O) leaves the agent's
+          // already-pushed message unpersisted. getMessages() refreshes, so read
+          // the history first and adopt the revision of that same snapshot.
+          try {
+            const reloaded = session.getMessages();
+            contextRevision = session.getRevision();
+            agent.messages = [...splitLeadingContext(agent.messages).leading, ...reloaded];
+          } catch { /* surface the original write failure */ }
+          throw error;
+        }
+      };
       const agent = new Agent({
         provider,
         providerId,
@@ -616,24 +639,35 @@ export class BubbleSdk {
         onMessageAppend: (message: Message) => {
           if (message.role === "system" || message.role === "meta") return;
           if (this.turnCoordinator.isDeleted(sessionId)) return;
-          session.appendMessage(message);
+          persistFenced(() => {
+            session.appendMessage(message, contextRevision);
+            contextRevision = session.getRevision();
+          });
           if (message.role === "assistant") recordMemoryCitations(cwd, message.content);
         },
         onProviderError: (error) => {
           if (this.turnCoordinator.isDeleted(sessionId)) return;
-          session.appendProviderError(error);
+          persistFenced(() => session.appendProviderError(error, contextRevision));
         },
-        onCompactionApplied: (summary: string) => {
-          if (this.turnCoordinator.isDeleted(sessionId)) return;
-          session.applyLLMCompaction(summary);
+        getContextRevision: () => contextRevision,
+        onContextCheckpoint: (checkpoint) => {
+          if (this.turnCoordinator.isDeleted(sessionId)) throw new Error("Session deleted before context commit");
+          persistFenced(() => {
+            session.commitContextCheckpoint(checkpoint, contextRevision);
+            contextRevision = session.getRevision();
+          });
         },
         onModeUpdate: (m: PermissionMode) => {
-          if (!this.turnCoordinator.isDeleted(sessionId)) session.appendMarker("mode_switch", m);
+          if (!this.turnCoordinator.isDeleted(sessionId)) {
+            persistFenced(() => {
+              session.appendMarker("mode_switch", m, contextRevision);
+              contextRevision = session.getRevision();
+            });
+          }
         },
       });
       agentRef = agent;
 
-      const history = session.getMessages();
       if (history.length > 0) {
         agent.messages = [{ role: "system", content: systemPrompt }, ...history];
       }
@@ -947,6 +981,10 @@ export class BubbleSdk {
       promptCacheKey,
       protocol: target.protocol,
       headers: target.headers,
+      // Main SDK turns need the same per-request OAuth renewal as the TUI
+      // and child provider factory, including calls after a long-running tool.
+      openAICodexAuth: this.registry.createOpenAICodexAuthAdapter(activeProviderId),
+      grokAuth: this.registry.createGrokAuthAdapter(activeProviderId),
     });
     return { provider, providerId: activeProviderId, model: activeModel };
   }

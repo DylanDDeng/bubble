@@ -3,21 +3,23 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdirSync, appendFileSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, appendFileSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync, renameSync, unlinkSync, openSync, closeSync, fsyncSync, ftruncateSync, readSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { isInternalBlockOnlyContent } from "./agent/internal-reminder-sanitizer.js";
 import { getBubbleHome } from "./bubble-home.js";
 import { CheckpointStore } from "./checkpoints.js";
+import { withSessionWriteLock } from "./context/session-write-lock.js";
 import {
-  buildCompactedEntries,
-  compactSessionEntries,
-  planOldMessages,
-  planSessionCompaction,
+  compactMessages,
+  compactCurrentTurnToolGroups,
+  buildCompactionSummaryMessage,
+  isCompactionSummaryMessage,
   type CompactOptions,
   type CompactResult,
 } from "./context/compact.js";
 import type { Message } from "./types.js";
-import { SessionLog } from "./session-log.js";
+import { createContextCheckpoint, checkpointMessages, type ContextCheckpoint } from "./context/checkpoint.js";
+import { SessionLog, affectsContextRevision } from "./session-log.js";
 import type { SessionLogEntry, SessionMarkerKind, SessionMetadata } from "./session-types.js";
 import type { SanitizedProviderError } from "./provider-error-record.js";
 import { normalizeSingleLine, truncateVisual } from "./text-display.js";
@@ -47,6 +49,19 @@ export interface UserTurn {
   timestamp: number;
 }
 
+/** A fenced write found the session log diverged from the writer's resident
+ * snapshot — a foreign append, clear, or rewind landed while a turn was in
+ * flight. The write is refused; the host must roll its resident history back
+ * to the file's truth (SessionContextFence.reloadHistory, then replace the
+ * agent's messages) before writing again, or every later fenced write keeps
+ * rejecting on the stale revision. */
+export class SessionHistoryDivergedError extends Error {
+  constructor(message = "Session changed during active turn; reload before committing context") {
+    super(message);
+    this.name = "SessionHistoryDivergedError";
+  }
+}
+
 export interface RewindResult {
   /** Number of log entries removed. */
   removedEntries: number;
@@ -54,14 +69,51 @@ export interface RewindResult {
   targetText: string;
 }
 
-const AUTO_COMPACT_ENTRY_THRESHOLD = 180;
-const AUTO_COMPACT_KEEP_RECENT_TURNS = 3;
-
 export class SessionManager {
   private sessionFile: string;
   private log = new SessionLog();
   private checkpoints?: CheckpointStore;
+  private diskRevision = "missing";
+  private pendingCompaction?: { revision: string; candidate: CompactResult };
+
+  /** Conversational revision excludes metadata-only writes (for example titles). */
+  getRevision(): string { return this.log.getRevision(); }
+
+  private refresh(): void {
+    if (this.currentDiskRevision() !== this.diskRevision) this.load();
+  }
+
+  private currentDiskRevision(): string {
+    try { const s = statSync(this.sessionFile, { bigint: true }); return `${s.ino}:${s.size}:${s.mtimeNs}`; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing"; throw error; }
+  }
+
+  private withWriteLock<T>(write: () => T, expectedRevision?: string): T {
+    mkdirSync(dirname(this.sessionFile), { recursive: true });
+    return withSessionWriteLock(`${this.sessionFile}.write-lock`, () => {
+      if (expectedRevision !== undefined) {
+        // Refresh and compare the caller's snapshot under the same lock as the
+        // append. Refreshing must never legitimize a stale caller revision.
+        this.refresh();
+        if (this.getRevision() !== expectedRevision) throw new SessionHistoryDivergedError();
+      } else if (this.currentDiskRevision() !== this.diskRevision) {
+        throw new SessionHistoryDivergedError("Session changed; reload before committing context");
+      }
+      return write();
+    });
+  }
   private readonly metadataListeners = new Set<(metadata: SessionMetadata) => void>();
+  private readonly contextListeners = new Set<(previous: string, revision: string, replacement: boolean) => void>();
+
+  /** Local commits only: disk refreshes must never advance a host's history fence. */
+  subscribeContextCommits(listener: (previous: string, revision: string, replacement: boolean) => void): () => void {
+    this.contextListeners.add(listener);
+    return () => this.contextListeners.delete(listener);
+  }
+
+  private publishContextCommit(previous: string, replacement = false): void {
+    for (const listener of this.contextListeners) listener(previous, this.getRevision(), replacement);
+  }
 
   constructor(sessionFile: string) {
     this.sessionFile = sessionFile;
@@ -133,12 +185,19 @@ export class SessionManager {
   }
 
   private load() {
-    const content = readFileSync(this.sessionFile, "utf-8");
-    const lines = content.split("\n").filter((line) => line.trim() !== "");
-    this.log.load(lines);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const before = this.currentDiskRevision();
+      const content = readFileSync(this.sessionFile, "utf-8");
+      const after = this.currentDiskRevision();
+      if (before !== after) continue;
+      this.log.load(content.split("\n").filter(line => line.trim() !== ""));
+      this.diskRevision = after;
+      return;
+    }
+    throw new Error("Session changed while loading; retry with a stable snapshot");
   }
 
-  private persist(entry: SessionLogEntry | SessionLogEntry[]) {
+  private persist(entry: SessionLogEntry | SessionLogEntry[], lockHeld = false) {
     const dir = dirname(this.sessionFile);
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true });
@@ -149,16 +208,45 @@ export class SessionManager {
       return;
     }
 
-    appendFileSync(this.sessionFile, entries.map((item) => JSON.stringify(item)).join("\n") + "\n");
+    const write = () => {
+      const fd = openSync(this.sessionFile, "a+");
+      const before = statSync(this.sessionFile).size;
+      try {
+        // Isolate an incomplete crash tail, without adding empty records normally.
+        const tail = Buffer.alloc(1);
+        if (before > 0) readSync(fd, tail, 0, 1, before - 1);
+        const separator = before > 0 && tail[0] !== 10 ? "\n" : "";
+        appendFileSync(fd, separator + entries.map((item) => JSON.stringify(item)).join("\n") + "\n");
+        fsyncSync(fd);
+      } catch (error) {
+        ftruncateSync(fd, before);
+        fsyncSync(fd);
+        throw error;
+      } finally { closeSync(fd); this.diskRevision = this.currentDiskRevision(); }
+    };
+    if (lockHeld) write();
+    else this.withWriteLock(write);
   }
 
-  private rewrite(entries: SessionLogEntry[]) {
-    const dir = dirname(this.sessionFile);
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
-    }
-    writeFileSync(this.sessionFile, entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
-    this.log.replace(entries);
+  /** Refresh, derive the replacement from the refreshed log, and swap the file
+   * as one locked transaction; `derive` returning undefined leaves it untouched. */
+  private rewrite<T>(derive: (entries: SessionLogEntry[]) => { entries: SessionLogEntry[]; result: T } | undefined): T | undefined {
+    mkdirSync(dirname(this.sessionFile), { recursive: true });
+    return withSessionWriteLock(`${this.sessionFile}.write-lock`, () => {
+      this.refresh();
+      const derived = derive(this.log.list());
+      if (!derived) return undefined;
+      const temp = `${this.sessionFile}.${randomUUID()}.tmp`;
+      try {
+        writeFileSync(temp, derived.entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n", { mode: 0o600 });
+        const fd = openSync(temp, "r");
+        try { fsyncSync(fd); } finally { closeSync(fd); }
+        renameSync(temp, this.sessionFile);
+        this.diskRevision = this.currentDiskRevision();
+        this.log.replace(derived.entries);
+      } finally { if (existsSync(temp)) unlinkSync(temp); }
+      return derived.result;
+    });
   }
 
   getMetadata(): SessionMetadata {
@@ -185,8 +273,23 @@ export class SessionManager {
   }
 
   setMetadata(metadata: SessionMetadata) {
-    const nextEntries = this.log.setMetadata(metadata);
-    this.rewrite(nextEntries);
+    this.mutateMetadata(() => metadata);
+  }
+
+  /** Refresh, derive, and append as one locked transaction. Metadata records
+   * are full snapshots, so a snapshot built outside the lock would silently
+   * overwrite a concurrent writer's fields. */
+  mutateMetadata(build: (current: SessionMetadata) => SessionMetadata) {
+    mkdirSync(dirname(this.sessionFile), { recursive: true });
+    try {
+      withSessionWriteLock(`${this.sessionFile}.write-lock`, () => {
+        this.refresh();
+        const entry: SessionLogEntry = { id: `metadata-${randomUUID()}`, type: "metadata",
+          metadata: build(this.log.getMetadata()), timestamp: Date.now() };
+        this.persist(entry, true);
+        this.log.appendEntries([entry]);
+      });
+    } catch (error) { this.reloadAfterWriteFailure(); throw error; }
     const committed = this.log.getMetadata();
     for (const listener of this.metadataListeners) {
       try {
@@ -199,53 +302,77 @@ export class SessionManager {
   }
 
   updateMetadata(patch: Partial<SessionMetadata>) {
-    this.setMetadata({
-      ...this.log.getMetadata(),
-      ...dropUndefined(patch),
-    });
+    this.mutateMetadata((current) => ({ ...current, ...dropUndefined(patch) }));
   }
 
   clearTitleMetadata() {
-    const {
+    this.mutateMetadata(({
       title: _title,
       titleSource: _titleSource,
       titleUpdatedAt: _titleUpdatedAt,
       titleUserMessageId: _titleUserMessageId,
       ...metadata
-    } = this.log.getMetadata();
-    this.setMetadata(metadata);
+    }) => metadata);
   }
 
   clearExternalRuntimeMetadata() {
-    const { externalRuntime: _externalRuntime, ...metadata } = this.log.getMetadata();
-    this.setMetadata(metadata);
+    this.mutateMetadata(({ externalRuntime: _externalRuntime, ...metadata }) => metadata);
   }
 
-  appendMessage(message: Message) {
-    const entries = this.log.appendMessage(message);
-    this.persist(entries);
-    this.maybeAutoCompact();
+  appendMessage(message: Message, expectedRevision?: string) {
+    this.refresh();
+    const revision = expectedRevision ?? this.getRevision();
+    try {
+      this.withWriteLock(() => {
+        const entries = this.log.appendMessage(message);
+        this.persist(entries, true);
+      }, revision);
+    } catch (error) { this.reloadAfterWriteFailure(); throw error; }
+    this.publishContextCommit(revision);
+    // Persistence never decides model context policy by record count.
+  }
+
+  private reloadAfterWriteFailure(): void {
+    if (existsSync(this.sessionFile)) this.load();
+    else { this.log = new SessionLog(); this.diskRevision = "missing"; }
   }
 
   appendCompaction(summary: string) {
+    this.refresh();
     const entry = this.log.appendSummary(summary);
-    this.persist(entry);
+    try { this.persist(entry); } catch (error) { this.reloadAfterWriteFailure(); throw error; }
   }
 
-  appendMarker(kind: SessionMarkerKind, value: string) {
-    const entry = this.log.appendMarker(kind, value);
-    this.persist(entry);
+  appendMarker(kind: SessionMarkerKind, value: string, expectedRevision?: string) {
+    this.refresh();
+    const revision = expectedRevision ?? this.getRevision();
+    try {
+      this.withWriteLock(() => {
+        const entry = this.log.appendMarker(kind, value);
+        this.persist(entry, true);
+      }, revision);
+    } catch (error) { this.reloadAfterWriteFailure(); throw error; }
+    this.publishContextCommit(revision, kind === "conversation_clear");
   }
 
-  appendProviderError(error: SanitizedProviderError) {
-    const entry = this.log.appendProviderError(error);
-    this.persist(entry);
+  appendProviderError(error: SanitizedProviderError, expectedRevision?: string) {
+    this.refresh();
+    try {
+      this.withWriteLock(() => {
+        const entry = this.log.appendProviderError(error);
+        this.persist(entry, true);
+      }, expectedRevision ?? this.getRevision());
+    } catch (failure) { this.reloadAfterWriteFailure(); throw failure; }
   }
 
   compact(options?: CompactOptions): CompactResult {
-    const result = compactSessionEntries(this.log.list(), options);
-    if (result.compacted && result.entries) {
-      this.rewrite(result.entries);
+    const messages = this.getMessages();
+    let result = compactMessages(messages, options);
+    if (!result.compacted) result = compactCurrentTurnToolGroups(messages);
+    if (result.compacted && result.messages) {
+      const revision = this.getRevision();
+      this.commitContextCheckpoint(createContextCheckpoint(result.messages, "manual", result.summary, revision));
+      this.publishContextCommit(revision, true);
     }
     return result;
   }
@@ -257,33 +384,48 @@ export class SessionManager {
    * caller should then report "already compact enough" without calling a model.
    */
   getCompactionPlan(options?: CompactOptions): { oldMessages: Message[] } | null {
-    const plan = planSessionCompaction(this.log.list(), options);
-    if (!plan.compactable) return null;
-    return { oldMessages: planOldMessages(plan) };
+    const messages = this.getMessages();
+    let candidate = compactMessages(messages, options);
+    if (!candidate.compacted) candidate = compactCurrentTurnToolGroups(messages);
+    if (!candidate.compacted) { this.pendingCompaction = undefined; return null; }
+    this.pendingCompaction = { revision: this.getRevision(), candidate };
+    // Only the portion the candidate's summary replaces: kept recent turns
+    // survive verbatim, so feeding them to the summarizer would duplicate them
+    // in the summary and risk overflowing the compaction request into the
+    // heuristic fallback. Prior summary carriers are included so their facts
+    // roll forward.
+    return { oldMessages: candidate.evictedMessages ?? messages };
   }
 
   /**
    * Apply a precomputed (typically LLM-generated) summary as the compaction
-   * checkpoint, rewriting the log to [metadata, summary, kept turns]. Mirrors
+   * checkpoint, appending an exact projection without deleting originals. Mirrors
    * `compact()` but skips the built-in heuristic summarizer. Returns
    * `{ compacted: false }` if the session is no longer compactable.
    */
   applyLLMCompaction(summary: string, options?: CompactOptions): CompactResult {
-    const entries = this.log.list();
-    const plan = planSessionCompaction(entries, options);
-    if (!plan.compactable) return { compacted: false };
-
-    const nextEntries = buildCompactedEntries(entries, plan, summary);
-    this.rewrite(nextEntries);
-    return {
-      compacted: true,
-      summary,
-      entries: nextEntries,
-      droppedEntries: plan.oldEntries.length,
-    };
+    const pending = this.pendingCompaction;
+    this.pendingCompaction = undefined;
+    const messages = this.getMessages();
+    if (pending && pending.revision !== this.getRevision()) throw new Error("Stale compaction plan; session changed during summarization");
+    let result = pending?.candidate ?? compactMessages(messages, options);
+    if (!result.compacted) result = compactCurrentTurnToolGroups(messages);
+    if (!result.compacted || !result.messages) return { compacted: false };
+    // Replace only the summary that stands for the evicted input. A sub-turn
+    // candidate also carries earlier multi-turn summaries in its pre-turn; the
+    // summarizer never saw those, so they must survive verbatim.
+    const summaryIndex = result.summaryIndex ?? result.messages.findIndex(isCompactionSummaryMessage);
+    if (summaryIndex < 0) return { compacted: false };
+    const next = result.messages.map((message, index) =>
+      index === summaryIndex ? buildCompactionSummaryMessage(summary) : message);
+    const revision = this.getRevision();
+    this.commitContextCheckpoint(createContextCheckpoint(next, "manual", summary, revision));
+    this.publishContextCommit(revision, true);
+    return { ...result, summary, messages: next };
   }
 
   getMessages(): Message[] {
+    this.refresh();
     return this.log.toMessages();
   }
 
@@ -313,6 +455,7 @@ export class SessionManager {
 
   /** User messages after the latest /clear, oldest first — the valid rewind anchors. */
   listUserTurns(): UserTurn[] {
+    this.refresh();
     const entries = this.log.list();
     let start = 0;
     for (let i = entries.length - 1; i >= 0; i--) {
@@ -346,23 +489,40 @@ export class SessionManager {
    * entry id. Returns undefined when the id does not name a user message.
    */
   rewindToEntry(entryId: string): RewindResult | undefined {
-    const entries = this.log.list();
-    const index = entries.findIndex((entry) => entry.id === entryId && entry.type === "user_message");
-    if (index < 0) return undefined;
-
-    const target = entries[index];
-    const removed = entries.slice(index);
-    this.rewrite(entries.slice(0, index));
-
-    const metadata = this.log.getMetadata();
-    if (metadata.titleUserMessageId && removed.some((entry) => entry.id === metadata.titleUserMessageId)) {
-      this.clearTitleMetadata();
-    }
-
-    return {
-      removedEntries: removed.length,
-      targetText: target.type === "user_message" ? messageText(target.message) : "",
-    };
+    // A rewind replaces history by explicit user action, so it selects from the
+    // refreshed log under the lock rather than fencing on a resident revision:
+    // a stale in-memory snapshot must not reject (or misplace) the rewrite.
+    let revision = this.getRevision();
+    let rewound: RewindResult | undefined;
+    try {
+      rewound = this.rewrite((entries) => {
+        const index = entries.findIndex((entry) => entry.id === entryId && entry.type === "user_message");
+        if (index < 0) return undefined;
+        revision = this.getRevision();
+        const target = entries[index];
+        const removed = entries.slice(index);
+        // Metadata records are full snapshots, not history deltas. Preserve the
+        // latest snapshot (including absent/cleared fields) in the atomic rewrite.
+        const metadata = { ...this.log.getMetadata() };
+        if (metadata.titleUserMessageId && removed.some((entry) => entry.id === metadata.titleUserMessageId)) {
+          delete metadata.title;
+          delete metadata.titleSource;
+          delete metadata.titleUpdatedAt;
+          delete metadata.titleUserMessageId;
+        }
+        return {
+          entries: [...entries.slice(0, index), {
+            id: `metadata-${randomUUID()}`, type: "metadata", metadata, timestamp: Date.now(),
+          }],
+          result: {
+            removedEntries: removed.length,
+            targetText: target.type === "user_message" ? messageText(target.message) : "",
+          },
+        };
+      });
+    } catch (error) { this.reloadAfterWriteFailure(); throw error; }
+    if (rewound) this.publishContextCommit(revision, true);
+    return rewound;
   }
 
   getEntries(): SessionLogEntry[] {
@@ -373,18 +533,32 @@ export class SessionManager {
     return this.sessionFile;
   }
 
-  private maybeAutoCompact() {
-    const entries = this.log.list();
-    if (entries.length < AUTO_COMPACT_ENTRY_THRESHOLD) {
-      return;
-    }
-
-    const result = compactSessionEntries(entries, {
-      keepRecentTurns: AUTO_COMPACT_KEEP_RECENT_TURNS,
-    });
-    if (result.compacted && result.entries) {
-      this.rewrite(result.entries);
-    }
+  /** Commit the exact conversational projection, never delete its source history. */
+  commitContextCheckpoint(checkpoint: ContextCheckpoint, expectedRevision?: string): void {
+    const revision = expectedRevision ?? this.getRevision();
+    this.withWriteLock(() => {
+      const entries = this.log.list();
+      const existing = entries.find(entry => entry.type === "context_checkpoint"
+        && entry.checkpoint.compactionId === checkpoint.compactionId);
+      if (existing) {
+        if (existing.type !== "context_checkpoint" || JSON.stringify(existing.checkpoint) !== JSON.stringify(checkpoint)) {
+          throw new Error("Conflicting context checkpoint id");
+        }
+        // An old receipt is not permission to restore context after clear/rewind
+        // or after new conversation data has superseded this exact projection.
+        if (entries.filter(affectsContextRevision).at(-1) !== existing) throw new Error("Stale context checkpoint receipt");
+        return;
+      }
+      if (checkpoint.baseRevision !== undefined && checkpoint.baseRevision !== this.getRevision()) {
+        throw new Error("Stale context checkpoint; session advanced during summarization");
+      }
+      checkpointMessages(checkpoint); // Validate before writing or publishing.
+      const entry: SessionLogEntry = { id: `checkpoint-${checkpoint.compactionId}`, type: "context_checkpoint",
+        checkpoint: structuredClone(checkpoint), timestamp: Date.now() };
+      this.persist(entry, true);
+      this.log.appendEntries([entry]);
+    }, revision);
+    this.publishContextCommit(revision);
   }
 }
 

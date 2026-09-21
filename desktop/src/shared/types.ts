@@ -1661,6 +1661,10 @@ export interface CompactMetadata {
   preTokens: number;
   /** Context occupancy right after compaction, when the runtime reports it. */
   postTokens?: number;
+  /** Stable Bubble checkpoint identity, also used to deduplicate notifications. */
+  compactionId?: string;
+  /** True only after Bubble has committed the context checkpoint. */
+  persisted?: boolean;
 }
 
 export interface AvailableCommandInput {

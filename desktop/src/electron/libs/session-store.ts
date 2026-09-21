@@ -2325,7 +2325,19 @@ export function findGoalCompletionAnswer(sessionId: string, startedAt: number, c
 // 添加消息
 export function addMessage(sessionId: string, message: StreamMessage): void {
   const sourceOrigin = getSessionSourceOrigin(sessionId);
-  const record = buildMessagePersistenceRecord(sessionId, sourceOrigin, message);
+  // A checkpoint receipt may be delivered again after later conversation turns.
+  // Update its payload, but never move the original boundary in persisted history.
+  const previousBoundary = message.type === 'system' && message.subtype === 'compact_boundary' && message.uuid
+    ? getDb().prepare('SELECT data, created_at, sort_key FROM messages WHERE session_id = ? AND id = ?')
+      .get(sessionId, message.uuid) as { data: string; created_at: number; sort_key: number } | undefined
+    : undefined;
+  const previousMessage = previousBoundary
+    ? readStoredMessagePayload(previousBoundary.data, previousBoundary.created_at)
+    : undefined;
+  const preserveBoundary = previousMessage?.type === 'system' && previousMessage.subtype === 'compact_boundary';
+  const record = buildMessagePersistenceRecord(sessionId, sourceOrigin,
+    preserveBoundary ? { ...message, createdAt: previousBoundary!.created_at } : message);
+  if (preserveBoundary) record.sortKey = previousBoundary!.sort_key;
 
   const stmt = getDb().prepare(`
     INSERT INTO messages (id, session_id, message_type, source_origin, search_text, sort_key, parent_turn_id, data, created_at)

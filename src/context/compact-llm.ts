@@ -168,6 +168,13 @@ async function generateSummary(oldMessages: Message[], options: LLMCompactOption
 export function serializeTranscript(messages: Message[]): string {
   const lines: string[] = [];
   for (const message of messages) {
+    // Manual /compact receives raw history, unlike the automatic path which
+    // first folds summary carriers into user messages. Keep those summaries,
+    // but do not turn ordinary system/meta reminders into durable history.
+    if (isCompactionSummaryMessage(message)) {
+      lines.push(`[Prior compaction summary] ${messageText(message)}`);
+      continue;
+    }
     switch (message.role) {
       case "user":
         lines.push(`[user] ${contentToText(message.content)}`);

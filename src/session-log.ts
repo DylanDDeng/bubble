@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   sanitizeAssistantProviderMetadata,
   sanitizeInternalReasoningText,
@@ -15,16 +16,47 @@ import type {
   SessionSummaryEntry,
 } from "./session-types.js";
 import type { SanitizedProviderError } from "./provider-error-record.js";
+import { checkpointMessages } from "./context/checkpoint.js";
+
+/** Records that change conversational context or its execution state.
+ * Keep this shared by revision hashing and checkpoint receipt supersession.
+ * Unknown/new markers are conservative: only known diagnostics are excluded.
+ */
+export function affectsContextRevision(entry: SessionLogEntry): boolean {
+  if (entry.type === "metadata" || entry.type === "provider_error") return false;
+  if (entry.type === "marker") {
+    return !["task_started", "task_finished", "task_killed"].includes(entry.kind);
+  }
+  return true;
+}
 
 export class SessionLog {
   private entries: SessionLogEntry[] = [];
+  private nextId = 1;
+  private contextRevision = "empty";
+
+  private allocateId(): string { return String(this.nextId++); }
+
+  appendEntries(entries: SessionLogEntry[]): void {
+    this.entries.push(...entries);
+    for (const entry of entries) {
+      this.nextId = Math.max(this.nextId, (parseInt(entry.id, 10) || 0) + 1);
+      if (affectsContextRevision(entry)) {
+        this.contextRevision = createHash("sha256").update(this.contextRevision).update(JSON.stringify(entry)).digest("hex");
+      }
+    }
+  }
+
+  getRevision(): string { return this.contextRevision; }
 
   load(lines: string[]) {
     this.entries = [];
+    this.nextId = 1;
+    this.contextRevision = "empty";
     for (const line of lines) {
       try {
         const raw = JSON.parse(line) as SessionLogEntry | LegacySessionEntry;
-        this.entries.push(...normalizeEntry(raw));
+        this.appendEntries(normalizeEntry(raw));
       } catch {
         // skip corrupt lines
       }
@@ -32,7 +64,10 @@ export class SessionLog {
   }
 
   replace(entries: SessionLogEntry[]) {
-    this.entries = entries;
+    this.entries = [];
+    this.nextId = 1;
+    this.contextRevision = "empty";
+    this.appendEntries(entries);
   }
 
   list(): SessionLogEntry[] {
@@ -40,7 +75,11 @@ export class SessionLog {
   }
 
   getMetadata(): SessionMetadata {
-    const entry = this.entries.find((item): item is SessionMetadataEntry => item.type === "metadata");
+    let entry: SessionMetadataEntry | undefined;
+    for (let i = this.entries.length - 1; i >= 0; i--) {
+      const item = this.entries[i];
+      if (item.type === "metadata") { entry = item; break; }
+    }
     const metadata = entry?.metadata ?? {};
     return {
       ...metadata,
@@ -67,42 +106,42 @@ export class SessionLog {
   }
 
   appendMessage(message: Message): SessionLogEntry[] {
-    const normalized = normalizeMessageToEntries(message, nextEntryId(this.entries), Date.now());
-    this.entries.push(...normalized);
+    const normalized = normalizeMessageToEntries(message, this.allocateId(), Date.now());
+    this.appendEntries(normalized);
     return normalized;
   }
 
   appendSummary(summary: string): SessionSummaryEntry {
     const entry: SessionSummaryEntry = {
-      id: nextEntryId(this.entries),
+      id: this.allocateId(),
       type: "summary",
       summary,
       timestamp: Date.now(),
     };
-    this.entries.push(entry);
+    this.appendEntries([entry]);
     return entry;
   }
 
   appendMarker(kind: SessionMarkerKind, value: string): SessionLogEntry {
     const entry: SessionLogEntry = {
-      id: nextEntryId(this.entries),
+      id: this.allocateId(),
       type: "marker",
       kind,
       value,
       timestamp: Date.now(),
     };
-    this.entries.push(entry);
+    this.appendEntries([entry]);
     return entry;
   }
 
   appendProviderError(error: SanitizedProviderError): SessionProviderErrorEntry {
     const entry: SessionProviderErrorEntry = {
-      id: nextEntryId(this.entries),
+      id: this.allocateId(),
       type: "provider_error",
       error,
       timestamp: Date.now(),
     };
-    this.entries.push(entry);
+    this.appendEntries([entry]);
     return entry;
   }
 
@@ -112,7 +151,7 @@ export class SessionLog {
     let latestClearIndex = -1;
 
     for (let index = this.entries.length - 1; index >= 0; index--) {
-      if (this.entries[index].type === "summary") {
+      if (this.entries[index].type === "summary" || this.entries[index].type === "context_checkpoint") {
         latestSummaryIndex = index;
         break;
       }
@@ -127,17 +166,21 @@ export class SessionLog {
     }
 
     if (latestSummaryIndex > latestClearIndex) {
-      const summary = this.entries[latestSummaryIndex] as SessionSummaryEntry;
-      messages.push({
-        role: "system",
-        content: `Previous conversation summary: ${summary.summary}`,
-      });
+      const entry = this.entries[latestSummaryIndex];
+      if (entry.type === "context_checkpoint") {
+        messages.push(...checkpointMessages(entry.checkpoint));
+      } else if (entry.type === "summary") {
+        // Legacy summaries remain readable; already discarded originals cannot be reconstructed.
+        messages.push({ role: "system", content: `Previous conversation summary: ${entry.summary}` });
+      }
     }
 
     const startIndex = Math.max(
       latestSummaryIndex > latestClearIndex ? latestSummaryIndex + 1 : 0,
       latestClearIndex + 1,
     );
+    const committedPrefixLength = latestSummaryIndex > latestClearIndex
+      && this.entries[latestSummaryIndex].type === "context_checkpoint" ? messages.length : 0;
     for (let index = startIndex; index < this.entries.length; index++) {
       const entry = this.entries[index];
       switch (entry.type) {
@@ -177,6 +220,18 @@ export class SessionLog {
       }
     }
 
+    // A committed checkpoint may end in completed tools without a final text
+    // response. It is a resumable model boundary, not an interrupted user turn.
+    if (committedPrefixLength > 0) {
+      const tail = messages.slice(committedPrefixLength);
+      const nextUser = tail.findIndex(message => message.role === "user");
+      const continuationEnd = nextUser < 0 ? tail.length : nextUser;
+      return [
+        ...messages.slice(0, committedPrefixLength),
+        ...pruneIncompleteToolGroups(tail.slice(0, continuationEnd)),
+        ...pruneIncompleteTail(tail.slice(continuationEnd)),
+      ];
+    }
     return pruneIncompleteTail(messages);
   }
 }
@@ -262,6 +317,7 @@ function normalizeMessageToEntries(message: Message, id: string, timestamp: numb
 function isSessionLogEntry(entry: SessionLogEntry | LegacySessionEntry): entry is SessionLogEntry {
   return [
     "metadata",
+    "context_checkpoint",
     "summary",
     "marker",
     "user_message",
@@ -270,16 +326,6 @@ function isSessionLogEntry(entry: SessionLogEntry | LegacySessionEntry): entry i
     "tool_result",
     "provider_error",
   ].includes(entry.type);
-}
-
-function nextEntryId(entries: SessionLogEntry[]): string {
-  let max = 0;
-  for (const entry of entries) {
-    const match = /^(\d+)/.exec(entry.id);
-    if (!match) continue;
-    max = Math.max(max, Number(match[1]));
-  }
-  return `${max + 1}`;
 }
 
 function cloneMessage(message: Message): Message {
@@ -307,6 +353,31 @@ function cloneMessage(message: Message): Message {
 function cloneProviderMetadata<T>(metadata: T | undefined): T | undefined {
   if (metadata === undefined) return undefined;
   return JSON.parse(JSON.stringify(metadata)) as T;
+}
+
+// A checkpoint can split a user turn. Its continuation has no user anchor,
+// so validate complete tool groups directly rather than relying on turn pruning.
+function pruneIncompleteToolGroups(messages: Message[]): Message[] {
+  const pending = new Set<string>();
+  let groupStart = -1;
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index];
+    if (message.role === "system" || message.role === "meta") continue;
+    if (message.role === "tool") {
+      if (!pending.delete(message.toolCallId)) return messages.slice(0, groupStart < 0 ? index : groupStart);
+      if (pending.size === 0) groupStart = -1;
+    } else {
+      if (pending.size) return messages.slice(0, groupStart);
+      if (message.role === "assistant" && message.toolCalls?.length) {
+        groupStart = index;
+        for (const call of message.toolCalls) {
+          if (!call.id || pending.has(call.id)) return messages.slice(0, groupStart);
+          pending.add(call.id);
+        }
+      }
+    }
+  }
+  return pending.size ? messages.slice(0, groupStart) : messages;
 }
 
 function pruneIncompleteTail(messages: Message[]): Message[] {

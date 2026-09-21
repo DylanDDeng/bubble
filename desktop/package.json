@@ -122,7 +122,7 @@
     "verify:bubble-oauth": "npm run transpile:electron && node scripts/launch-electron.mjs scripts/tests/bubble-oauth-runtime.cjs",
     "package:local": "npm run build && node scripts/package-local.mjs",
     "verify:codex-trace": "tsx scripts/tests/activity-units.test.ts && npm run verify:workstream-ui && npm run verify:bubble-subagent && npm run verify:workstream-preamble-order && npm run verify:workstream-duration",
-    "verify:bubble-context": "npm run transpile:electron && tsx scripts/tests/bubble-context.test.ts && node scripts/tests/bubble-context-electron.test.mjs",
+    "verify:bubble-context": "node scripts/verify-bubble-context.mjs",
     "verify:codex-trace-reference": "tsx scripts/tests/codex-trace-reference.test.ts"
   },
   "dependencies": {

@@ -880,8 +880,10 @@ export class BubbleSdkAdapter implements ProviderAdapter {
         const compact = event as Extract<BubbleAgentEvent, { type: 'context_compaction' }>;
         this.flushAssistant(session, 'commentary');
         if (compact.status === 'completed') {
-          this.emitMessage(session, { type: 'system', subtype: 'compact_boundary', uuid: uuidv4(), session_id: session.threadId,
-            compactMetadata: { trigger: 'auto', preTokens: compact.preTokens, postTokens: compact.postTokens } });
+          this.emitMessage(session, { type: 'system', subtype: 'compact_boundary',
+            uuid: compact.compactionId ? `bubble-compact:${compact.compactionId}` : uuidv4(), session_id: session.threadId,
+            compactMetadata: { trigger: 'auto', preTokens: compact.preTokens, postTokens: compact.postTokens,
+              compactionId: compact.compactionId, persisted: compact.persisted } });
           if (typeof compact.postTokens === 'number') this.emitContextSnapshot(session, compact.postTokens, compact.contextWindow, true);
         } else {
           this.emitMessage(session, { type: 'system', subtype: 'compact_status', uuid: uuidv4(), session_id: session.threadId,

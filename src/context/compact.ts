@@ -138,6 +138,14 @@ export interface CompactResult {
   summary?: string;
   entries?: SessionLogEntry[];
   messages?: Message[];
+  /** Original messages the new summary replaces (prior summary carriers
+   * plus the evicted body) — the exact set an external summarizer should
+   * condense. Kept-verbatim messages are excluded so they are not duplicated
+   * into the summary. */
+  evictedMessages?: Message[];
+  /** Index in `messages` of the one summary that stands for `evictedMessages`.
+   * Other summaries in `messages` cover different history and must survive. */
+  summaryIndex?: number;
   droppedEntries?: number;
 }
 
@@ -280,10 +288,8 @@ export function compactMessages(
   const keepRecentTurns = options.keepRecentTurns ?? 2;
   const maxSummaryItems = options.maxSummaryItems ?? 4;
 
-  // Replace semantics: prior summaries (any form, any position) die here —
-  // at most one summary exists after every compaction. Their content is
-  // template-grade (goal truncated to 140 chars, constant next-steps line);
-  // the pinned original instruction is the durable record, not old summaries.
+  // Replace envelopes, not their contents: prior LLM summaries can be the only
+  // surviving record of decisions and constraints. Merge their prose below.
   const { leading, body } = splitLeadingContext(messages);
   const priorSummaries = body.filter(isCompactionSummaryMessage);
   const bodyMessages = body.filter((message) => !isCompactionSummaryMessage(message));
@@ -322,8 +328,32 @@ export function compactMessages(
   if (!summary) {
     return { compacted: false };
   }
-  const summaryWithFiles = appendFileBlocks(
+  // Flatten prior envelopes and dedupe lines instead of nesting summaries on
+  // every pass. Keep an explicitly bounded prose record (head + recent tail),
+  // with a durable warning when the heuristic cannot retain everything.
+  const pinOverflow = pinnedMessage
+    ? messageText(pinnedMessage).slice(PINNED_INSTRUCTION_MAX_CHARS)
+    : "";
+  const summaryLines = [
+    ...priorSummaries.map((message) => stripFileBlocks(messageText(message))),
+    ...(pinOverflow ? [`Original instruction beyond retained pin:\n${pinOverflow}`] : []),
     summary,
+  ].join("\n")
+    .replace(/<\/?bubble_internal_(?:context|reminder)\b[^>]*>/g, "")
+    .split("\n")
+    .map((line) => line.trim()
+      .replace(/^Another language model previously worked on this task[^\n]*?Summary:\s*/, "")
+      .replace(/^Previous conversation summary:\s*/, "")
+      .replace(/^Earlier in this turn \(compacted to free context\):\s*/, ""))
+    .filter(Boolean);
+  const mergedSummary = [...new Set(summaryLines)].join("\n");
+  const proseLimit = 8192;
+  const overflowNotice = "\n[Heuristic compaction degraded: accumulated summary exceeded 8192 characters; middle omitted.]\n";
+  const boundedSummary = mergedSummary.length <= proseLimit ? mergedSummary
+    : mergedSummary.slice(0, 4096) + overflowNotice
+      + mergedSummary.slice(-(proseLimit - 4096 - overflowNotice.length));
+  const summaryWithFiles = appendFileBlocks(
+    boundedSummary,
     collectCompactionFileOps(oldMessages, priorSummaries),
   );
 
@@ -338,6 +368,12 @@ export function compactMessages(
     compacted: true,
     summary: summaryWithFiles,
     messages: compactedMessages,
+    // The pin survives verbatim only up to its cap; the tail beyond it exists
+    // nowhere else, so an external summarizer must see it in the pin's place.
+    evictedMessages: [...priorSummaries, ...oldMessages.flatMap((message, index): Message[] =>
+      index !== pinnedIndex ? [message]
+        : pinOverflow ? [{ role: "user", content: `Original instruction beyond retained pin:\n${pinOverflow}` }] : [])],
+    summaryIndex: leading.length + (pinnedMessage ? 1 : 0),
     droppedEntries: summaryInput.length,
   };
 }
@@ -450,6 +486,8 @@ export function compactCurrentTurnToolGroups(
     compacted: true,
     summary,
     messages: compactedMessages,
+    evictedMessages: [...priorSubturnSummaries, ...evictable.flatMap((g) => [g.assistant, ...g.toolResults])],
+    summaryIndex: leading.length + preTurn.length,
     droppedEntries: evictable.length,
   };
 }

@@ -14,6 +14,7 @@
 
 import chalk from "chalk";
 import { Agent } from "../../agent.js";
+import { splitLeadingContext } from "../../context/compact.js";
 import { BudgetLedger } from "../../agent/budget-ledger.js";
 import { PermissionAwareApprovalController } from "../../approval/controller.js";
 import { BashAllowlist } from "../../approval/session-cache.js";
@@ -153,6 +154,27 @@ export class RunDriver {
     });
     const budgetLedger = new BudgetLedger();
     let sessionTitleUpdater: SessionTitleUpdater | undefined;
+    let contextRevision = session.manager.getRevision();
+    // A fence rejection means the durable log diverged from this run's resident
+    // snapshot (a foreign append or clear landed mid-flight). Refuse the write,
+    // then roll the resident transcript back to the file's truth so the rejected
+    // message does not linger and later writes are not wedged behind the stale
+    // revision.
+    const persistFenced = (write: () => void): void => {
+      try {
+        write();
+      } catch (error) {
+        // Any refused write (fence rejection, busy lock, I/O) leaves the agent's
+        // already-pushed message unpersisted. getMessages() refreshes, so read
+        // the history first and adopt the revision of that same snapshot.
+        try {
+          const reloaded = session.manager.getMessages();
+          contextRevision = session.manager.getRevision();
+          agent.messages = [...splitLeadingContext(agent.messages).leading, ...reloaded];
+        } catch { /* surface the original write failure */ }
+        throw error;
+      }
+    };
     const agent = new Agent({
       provider,
       providerId,
@@ -165,25 +187,40 @@ export class RunDriver {
       mode: initialMode,
       onMessageAppend: (message: Message) => {
         if (message.role === "system" || message.role === "meta") return;
-        session.manager.appendMessage(message);
+        persistFenced(() => {
+          session.manager.appendMessage(message, contextRevision);
+          contextRevision = session.manager.getRevision();
+        });
         sessionTitleUpdater?.handlePersistedMessage(message);
         if (message.role === "assistant") {
           recordMemoryCitations(session.cwd, message.content);
         }
       },
       onProviderError: (error) => {
-        session.manager.appendProviderError(error);
+        persistFenced(() => session.manager.appendProviderError(error, contextRevision));
       },
-      onCompactionApplied: (summary: string) => {
-        session.manager.applyLLMCompaction(summary);
+      getContextRevision: () => contextRevision,
+      onContextCheckpoint: (checkpoint) => {
+        persistFenced(() => {
+          session.manager.commitContextCheckpoint(checkpoint, contextRevision);
+          contextRevision = session.manager.getRevision();
+        });
       },
       onToolResult: (toolName, result) => {
         if (toolName !== "skill" || result.isError) return;
         const match = result.content.match(/^Skill:\s+([^\n]+)$/m);
-        if (match?.[1]) session.manager.appendMarker("skill_activated", match[1].trim());
+        if (match?.[1]) {
+          persistFenced(() => {
+            session.manager.appendMarker("skill_activated", match[1]!.trim(), contextRevision);
+            contextRevision = session.manager.getRevision();
+          });
+        }
       },
       onModeUpdate: (mode: PermissionMode) => {
-        session.manager.appendMarker("mode_switch", mode);
+        persistFenced(() => {
+          session.manager.appendMarker("mode_switch", mode, contextRevision);
+          contextRevision = session.manager.getRevision();
+        });
         this.opts.binder.setMode(req.scopeKey, mode);
       },
       budgetLedger,
@@ -226,6 +263,7 @@ export class RunDriver {
     // Restore prior history into the running Agent instance.
     if (!session.fresh) {
       const history = session.manager.getMessages();
+      contextRevision = session.manager.getRevision();
       if (history.length > 0) {
         agent.messages = [{ role: "system", content: systemPrompt }, ...history];
         if (agent.mode === "plan") agent.injectModeReminder();

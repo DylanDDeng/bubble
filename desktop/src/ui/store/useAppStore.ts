@@ -75,6 +75,7 @@ import {
   sanitizeSidebarWidth,
 } from '../utils/sidebar-width';
 import { StreamDeltaCoalescer } from '../utils/stream-delta-coalescer';
+import { bubbleCompactionKey, bubbleCompactionToast } from '../utils/bubble-context-notification';
 import { applySessionAgentSelection } from '../utils/session-model';
 import {
   SIDE_CHAT_PENDING_TAB,
@@ -104,6 +105,8 @@ import {
 // module scope (one per renderer); the emitter is bound inside
 // handleServerEvent where set/get are in scope.
 const streamDeltaCoalescer = new StreamDeltaCoalescer();
+// Renderer-lifetime receipts survive history replacement and focus changes.
+const seenBubbleCompactions = new Set<string>();
 
 const DEFAULT_SKIN_OPACITY = 0.3;
 
@@ -719,7 +722,11 @@ function normalizeCodexExecutionMode(value: unknown): import('../types').CodexEx
   return value === 'plan' ? 'plan' : 'execute';
 }
 
-function sanitizeHistoryMessages(messages: StreamMessage[]): StreamMessage[] {
+function sanitizeHistoryMessages(sessionId: string, messages: StreamMessage[]): StreamMessage[] {
+  for (const message of messages) {
+    const key = bubbleCompactionKey(sessionId, message);
+    if (key) seenBubbleCompactions.add(key);
+  }
   return messages.filter((message) => message.type !== 'stream_event');
 }
 
@@ -878,7 +885,7 @@ export const useAppStore = create<Store>()(
             set((state) => {
               const current = state.sessions[sessionId];
               if (!current) return state;
-              const sanitizedMessages = sanitizeHistoryMessages(payload.messages);
+              const sanitizedMessages = sanitizeHistoryMessages(sessionId, payload.messages);
               const nextMessages = [...sanitizedMessages, ...current.messages];
               return {
                 sessions: {
@@ -3395,7 +3402,7 @@ function handleSessionHistory(
   set: SetState
 ) {
   const { sessionId, status, messages, cursor, hasMore } = payload;
-  const sanitizedMessages = sanitizeHistoryMessages(messages);
+  const sanitizedMessages = sanitizeHistoryMessages(sessionId, messages);
 
   set((state) => {
     const session = state.sessions[sessionId];
@@ -3520,6 +3527,11 @@ function handleStreamMessage(
   const { sessionId, message } = payload;
   const session = get().sessions[sessionId];
   const activeSessionId = get().activeSessionId;
+  const completion = bubbleCompactionToast({ sessionId, activeSessionId, session, message, seen: seenBubbleCompactions });
+  if (completion) {
+    seenBubbleCompactions.add(completion.key);
+    if (completion.text) toast.success(completion.text);
+  }
 
   if (
     message.type === 'system' &&

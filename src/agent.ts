@@ -3,9 +3,10 @@
  * It maintains message state, calls the LLM, executes tools, and auto-continues.
  */
 
-import { compactCurrentTurnToolGroups, compactMessages } from "./context/compact.js";
+import { compactCurrentTurnToolGroups, compactMessages, isCompactionSummaryMessage, splitLeadingContext } from "./context/compact.js";
+import { createContextCheckpoint, checkpointMessages, hasCompleteToolGroups, type ContextCheckpoint } from "./context/checkpoint.js";
 import { randomUUID } from "node:crypto";
-import { compactMessagesWithLLM } from "./context/compact-llm.js";
+
 import {
   estimateToolDefinitionsTokens,
   getContextBudget,
@@ -20,7 +21,7 @@ import {
   sleepBeforeRetry,
 } from "./network/retry.js";
 import { projectMessages } from "./context/projector.js";
-import { aggressivePruneMessages, markStableCurrentToolResultsForCache, markToolResultCacheStable } from "./context/prune.js";
+import { aggressivePruneMessages, pruneMessages, markStableCurrentToolResultsForCache, markToolResultCacheStable } from "./context/prune.js";
 import { normalizeToolResultForModel, truncateToolOutputForModel } from "./context/tool-output-truncate.js";
 import { buildDeferredToolsReminder, buildToolFreezeReminder, isPermissionModeReminder, reminderForMode } from "./prompt/reminders.js";
 import type { AgentEvent, AgentInputController, AgentRunInput, ContentPart, PermissionMode, Message, ParsedToolCall, Provider, ThinkingLevel, TokenUsage, ToolDefinition, ToolMessage, ToolResult, ToolRegistryEntry, ToolUpdate } from "./types.js";
@@ -177,6 +178,9 @@ export interface AgentOptions {
    * session-level summary entry would make resume skip earlier history.
    */
   onCompactionApplied?: (summary: string) => void;
+  /** Required durable commit hook for hosts; exceptions abort the context switch. */
+  onContextCheckpoint?: (checkpoint: ContextCheckpoint) => void;
+  getContextRevision?: () => string;
   hooks?: TurnHooks[];
   externalHooks?: ExternalHookController;
   agentRole?: "parent" | "subagent";
@@ -277,6 +281,9 @@ export class Agent {
   private _modeVersion = 0;
   private onModeUpdate?: (mode: PermissionMode) => void;
   private onCompactionApplied?: (summary: string) => void;
+  private onContextCheckpoint?: (checkpoint: ContextCheckpoint) => void;
+  private getContextRevision?: () => string;
+  private lastCompactionId?: string;
   private onMessageAppend?: (message: Message) => void;
   private onProviderError?: (error: SanitizedProviderError) => void;
   private onToolResult?: (toolName: string, result: ToolResult) => void;
@@ -316,7 +323,7 @@ export class Agent {
   // unanswerable from the outside. `fired` counts successful compaction
   // computations including ones whose rewrite was later rejected — a
   // fired-but-never-written gap is the churn signal.
-  private compactionStats = { resident: 0, subturn: 0, llm: 0, overflow: 0, fired: 0, droppedMessages: 0 };
+  private compactionStats = { resident: 0, subturn: 0, llm: 0, heuristic: 0, overflow: 0, fired: 0, droppedMessages: 0 };
   private contextEvents: AgentEvent[] = [];
 
   constructor(options: AgentOptions) {
@@ -332,6 +339,8 @@ export class Agent {
     this.onToolResult = options.onToolResult;
     this.onModeUpdate = options.onModeUpdate;
     this.onCompactionApplied = options.onCompactionApplied;
+    this.onContextCheckpoint = options.onContextCheckpoint;
+    this.getContextRevision = options.getContextRevision;
     this.hookDefinitions = options.hooks ?? [];
     this.externalHooks = options.externalHooks;
     this.agentRole = options.agentRole ?? "parent";
@@ -1034,7 +1043,7 @@ export class Agent {
       // [LLM summary] + [last user msg], and the projector becomes a no-op for
       // budget. If it fails (network error, etc.), the projector's existing
       // algorithmic fallback still kicks in.
-      for await (const event of this.maybeCompactWithLLM(toolDefinitionTokens)) yield emit(event);
+      for await (const event of this.maybeCompactWithLLM(toolDefinitionTokens, abortSignal)) yield emit(event);
       for (const event of this.contextEvents.splice(0)) yield emit(event);
 
       const bufferedStreamingToolCallIds = new Set<string>();
@@ -1043,7 +1052,8 @@ export class Agent {
       try {
         markStableCurrentToolResultsForCache(this.messages);
         const projectedMessages = projectMessages(this.messages, {
-          mode: "budgeted",
+          // Semantic compaction is committed above; projection only renders/thins.
+          mode: "pruned",
           providerId: this.providerId,
           modelId: this.apiModel,
           // Projection changes message identity/count (meta rendering, pruning,
@@ -1317,28 +1327,30 @@ export class Agent {
           throw error;
         }
         const messagesBeforeRecovery = this.messages;
-        const inputTokensBeforeRecovery = this.lastInputTokens;
-        const anchorBeforeRecovery = this.lastAnchorMessageCount;
+        const revisionBeforeRecovery = this.getContextRevision?.();
         const failedRequestEstimate = currentRequestEstimate ?? getContextBudget(
           this.providerId,
           this.apiModel,
           projectMessages(this.messages, {
-            mode: "budgeted",
+            mode: "pruned",
             providerId: this.providerId,
             modelId: this.apiModel,
             additionalInputTokens: toolDefinitionTokens,
           }),
           { additionalInputTokens: toolDefinitionTokens },
         ).estimatedTokens;
-        const droppedMessages = await this.recoverFromOverflow(
+        const candidate = await this.recoverFromOverflow(
           consecutiveOverflowRecoveries,
           error instanceof LocalContextPreflightError ? 0.999_999 : 0.9,
+          abortSignal,
         );
+        if (!candidate) { persistTerminalProviderError(error); throw error; }
+        const droppedMessages = messagesBeforeRecovery.length - candidate.length;
         const recoveredRequestEstimate = getContextBudget(
           this.providerId,
           this.apiModel,
-          projectMessages(this.messages, {
-            mode: "budgeted",
+          projectMessages(candidate, {
+            mode: "pruned",
             providerId: this.providerId,
             modelId: this.apiModel,
             additionalInputTokens: toolDefinitionTokens,
@@ -1352,12 +1364,10 @@ export class Agent {
         const meaningfulProviderProgress = error instanceof LocalContextPreflightError
           || recoveredRequestEstimate <= Math.floor(failedRequestEstimate * 0.9);
         if (!madeProgress || !meaningfulProviderProgress) {
-          this.messages = messagesBeforeRecovery;
-          this.lastInputTokens = inputTokensBeforeRecovery;
-          this.lastAnchorMessageCount = anchorBeforeRecovery;
           persistTerminalProviderError(error);
           throw error;
         }
+        this.applyContextCheckpoint(candidate, "overflow", undefined, revisionBeforeRecovery, abortSignal);
         consecutiveOverflowRecoveries += 1;
         this.compactionStats.overflow += 1;
         this.compactionStats.fired += 1;
@@ -1369,7 +1379,7 @@ export class Agent {
           afterEstimatedTokens: recoveredRequestEstimate,
         });
         yield emit({ type: "context_recovered", droppedMessages, reason: "overflow" });
-        yield emit({ type: "context_compaction", status: "completed", preTokens: failedRequestEstimate, postTokens: recoveredRequestEstimate, contextWindow: currentContextWindow });
+        yield emit({ type: "context_compaction", status: "completed", compactionId: this.lastCompactionId, persisted: !!this.onContextCheckpoint, preTokens: failedRequestEstimate, postTokens: recoveredRequestEstimate, contextWindow: currentContextWindow });
         continue;
       }
 
@@ -1687,7 +1697,6 @@ export class Agent {
           // synchronously, so a mark added on a later turn never reaches disk.
           markToolResultCacheStable(tc.name, toolMessage);
           this.appendMessage(toolMessage);
-          this.compactResidentHistory();
           flushQueuedReminders();
           this.onToolResult?.(tc.name, result);
           executedResults.push(result);
@@ -1702,6 +1711,11 @@ export class Agent {
             throwIfAborted(abortSignal);
           }
         }
+
+        // A checkpoint must contain the whole batch, never provider repair's
+        // placeholder for a sibling that has not executed yet.
+        this.compactResidentHistory();
+        for (const event of this.contextEvents.splice(0)) yield emit(event);
 
         await hookBus.runBeforeContinuation({
           agent: this,
@@ -1798,27 +1812,15 @@ export class Agent {
     }
   }
 
-  private async recoverFromOverflow(attempt: number, maximumSizeRatio = 0.999_999): Promise<number> {
-    const before = this.messages.length;
+  private async recoverFromOverflow(attempt: number, maximumSizeRatio = 0.999_999, abortSignal?: AbortSignal): Promise<Message[] | undefined> {
     const originalMessages = this.messages;
     const beforeBytes = serializedMessageBytes(originalMessages);
-    const commitIfSmaller = (candidate: Message[] | undefined, summary?: string): boolean => {
-      if (
-        !candidate
-        || serializedMessageBytes(candidate) > Math.floor(beforeBytes * maximumSizeRatio)
-      ) return false;
-      this.messages = candidate;
-      this.lastInputTokens = null;
-      this.lastAnchorMessageCount = null;
-      this.fileStateTracker?.invalidateReadHistory();
-      this.persistCompactionSummary(summary);
-      return true;
-    };
-
+    const smaller = (candidate: Message[] | undefined): candidate is Message[] =>
+      !!candidate && serializedMessageBytes(candidate) <= Math.floor(beforeBytes * maximumSizeRatio);
+    throwIfAborted(abortSignal);
     if (attempt === 0) {
-      if (commitIfSmaller(aggressivePruneMessages(originalMessages))) {
-        return before - this.messages.length;
-      }
+      const pruned = aggressivePruneMessages(originalMessages);
+      if (smaller(pruned)) return pruned;
     }
 
     // Unlike ordinary pruning, overflow recovery is allowed to thin the most
@@ -1835,74 +1837,42 @@ export class Agent {
       );
       return bounded.truncated ? { ...message, content: bounded.content } : message;
     });
-    if (commitIfSmaller(thinnedLatestTools)) {
-      return before - this.messages.length;
-    }
+    if (smaller(thinnedLatestTools)) return thinnedLatestTools;
 
     const keepRecentTurns = attempt >= 1 ? 1 : 2;
-    const llmResult = await compactMessagesWithLLM(originalMessages, {
-      provider: this.provider,
-      model: this.apiModel,
-      thinkingLevel: this.thinkingLevel,
-      keepRecentTurns,
-    });
-    if (llmResult.compacted && commitIfSmaller(llmResult.messages, llmResult.summary)) {
-      return before - this.messages.length;
-    }
-
-    // Single-turn capable LLM compactor. compactMessagesWithLLM above no-ops
-    // when there's only one user turn (the "single huge prompt with many tool
-    // calls" case), so try the turn-internal compactor before giving up.
+    // Use the same budget-aware summarizer for single- and multi-turn history.
     const { compactWithLLM } = await import("./context/llm-compactor.js");
     const singleTurnResult = await compactWithLLM(originalMessages, {
       provider: this.provider,
       modelId: this.apiModel,
+      providerId: this.providerId,
+      abortSignal,
     });
-    if (singleTurnResult.compacted && commitIfSmaller(singleTurnResult.messages, singleTurnResult.summary)) {
-      return before - this.messages.length;
-    }
+    throwIfAborted(abortSignal);
+    if (singleTurnResult.compacted && smaller(singleTurnResult.messages)) return singleTurnResult.messages;
 
     const fallback = compactMessages(originalMessages, { keepRecentTurns });
-    if (fallback.compacted && commitIfSmaller(fallback.messages, fallback.summary)) {
-      return before - this.messages.length;
-    }
+    if (fallback.compacted && smaller(fallback.messages)) return fallback.messages;
 
     const subturn = compactCurrentTurnToolGroups(originalMessages, {
       keepRecentGroups: attempt === 0 ? 1 : 0,
     });
-    if (subturn.compacted && commitIfSmaller(subturn.messages, subturn.summary)) {
-      return before - this.messages.length;
+    if (subturn.compacted && smaller(subturn.messages)) return subturn.messages;
+    // A two-turn text history has nothing to give at keepRecentTurns 2 and no
+    // tool groups; returning undefined on attempt 0 aborts before attempt 1.
+    if (keepRecentTurns > 1) {
+      const lastTurnOnly = compactMessages(originalMessages, { keepRecentTurns: 1 });
+      if (lastTurnOnly.compacted && smaller(lastTurnOnly.messages)) return lastTurnOnly.messages;
     }
-
-    // Codex-style last-resort: drop the single oldest non-protected message
-    // and let the retry loop try again. Cheap, but eventually narrows even an
-    // intractable single-turn overflow.
-    const realUserIndexes = originalMessages
-      .map((message, index) => message.role === "user" ? index : -1)
-      .filter((index) => index >= 0);
-    const oldestIdx = realUserIndexes.length > 1
-      ? realUserIndexes[0]
-      : -1;
-    const removeUntil = realUserIndexes.length > 1
-      ? realUserIndexes[1]
-      : -1;
-    if (oldestIdx >= 0 && removeUntil > oldestIdx && removeUntil < originalMessages.length) {
-      const candidate = [
-        ...originalMessages.slice(0, oldestIdx),
-        ...originalMessages.slice(removeUntil),
-      ];
-      if (!commitIfSmaller(candidate)) return 0;
-      return before - this.messages.length;
-    }
-
-    return 0;
+    // Fail explicitly rather than silently deleting the original instruction.
+    return undefined;
   }
 
   compactResidentHistory(): void {
     this.maybeCompactResidentHistory();
   }
 
-  private async *maybeCompactWithLLM(additionalInputTokens = 0): AsyncGenerator<AgentEvent> {
+  private async *maybeCompactWithLLM(additionalInputTokens = 0, abortSignal?: AbortSignal): AsyncGenerator<AgentEvent> {
     if (!this.providerId || !this.apiModel) return;
     if (this.messages.length === 0) return;
 
@@ -1912,30 +1882,60 @@ export class Agent {
     const budget = getContextBudget(this.providerId, this.apiModel, this.messages, {
       usageAnchorTokens: this.lastInputTokens ?? undefined,
       tailMessages: tail,
-      additionalInputTokens,
+      // Usage anchors already include the schemas sent with that request.
+      additionalInputTokens: this.lastInputTokens === null ? additionalInputTokens : 0,
     });
     if (!budget.shouldCompact) return;
 
     yield { type: "context_compaction", status: "started", preTokens: budget.estimatedTokens, contextWindow: budget.contextWindow };
     let completed = false;
+    const revision = this.getContextRevision?.();
     try {
       const { compactWithLLM } = await import("./context/llm-compactor.js");
-      const result = await compactWithLLM(this.messages, {
+      let result = await compactWithLLM(this.messages, {
         provider: this.provider,
+        providerId: this.providerId,
         modelId: this.apiModel,
+        abortSignal,
       });
-      if (result.compacted && result.messages) {
-        this.messages = result.messages;
-        this.lastInputTokens = null;
-        this.lastAnchorMessageCount = null;
-        this.fileStateTracker?.invalidateReadHistory();
-        this.compactionStats.llm += 1;
+      throwIfAborted(abortSignal);
+      let path: "llm" | "heuristic" | "subturn" = "llm";
+      if (!result.compacted) {
+        // The request projection no longer compacts, so this fallback must
+        // escalate as far as the former budgeted passes did (down to one kept
+        // turn / one kept tool group) or a two-turn text history has no way
+        // under the window when the summarizer is unavailable. Take the first
+        // pass that fits the budget, otherwise the smallest one that fired.
+        const passes: Array<["heuristic" | "subturn", () => ReturnType<typeof compactMessages>]> = [
+          ["heuristic", () => compactMessages(this.messages, { keepRecentTurns: 2 })],
+          ["heuristic", () => compactMessages(this.messages, { keepRecentTurns: 1 })],
+          ["subturn", () => compactCurrentTurnToolGroups(this.messages, { keepRecentGroups: 2 })],
+          ["subturn", () => compactCurrentTurnToolGroups(this.messages, { keepRecentGroups: 1 })],
+        ];
+        let smallest = Infinity;
+        for (const [passPath, pass] of passes) {
+          const candidate = pass();
+          if (!candidate.compacted || !candidate.messages) continue;
+          const candidateBudget = getContextBudget(this.providerId, this.apiModel, candidate.messages, { additionalInputTokens });
+          if (candidateBudget.estimatedTokens < smallest) {
+            smallest = candidateBudget.estimatedTokens;
+            result = candidate;
+            path = passPath;
+          }
+          if (!candidateBudget.shouldCompact) break;
+        }
+      }
+      const beforeEstimate = getContextBudget(this.providerId, this.apiModel, this.messages, { additionalInputTokens }).estimatedTokens;
+      const candidateEstimate = result.messages
+        ? getContextBudget(this.providerId, this.apiModel, result.messages, { additionalInputTokens }).estimatedTokens : beforeEstimate;
+      if (result.compacted && result.messages && candidateEstimate < beforeEstimate) {
+        this.applyContextCheckpoint(result.messages, "auto", result.summary, revision, abortSignal);
+        this.compactionStats[path] += 1;
         this.compactionStats.fired += 1;
-        this.persistCompactionSummary(result.summary);
-        traceEvent("compaction_fired", { path: "llm" });
+        traceEvent("compaction_fired", { path });
         completed = true;
         const after = getContextBudget(this.providerId, this.apiModel, this.messages, { additionalInputTokens });
-        yield { type: "context_compaction", status: "completed", preTokens: budget.estimatedTokens, postTokens: after.estimatedTokens, contextWindow: budget.contextWindow };
+        yield { type: "context_compaction", status: "completed", compactionId: this.lastCompactionId, persisted: !!this.onContextCheckpoint, preTokens: budget.estimatedTokens, postTokens: after.estimatedTokens, contextWindow: budget.contextWindow };
       }
     } finally {
       if (!completed) yield { type: "context_compaction", status: "failed", preTokens: budget.estimatedTokens, contextWindow: budget.contextWindow };
@@ -1945,7 +1945,7 @@ export class Agent {
   }
 
   /** Snapshot of how often each compaction path rewrote history this run. */
-  getCompactionStats(): { resident: number; subturn: number; llm: number; overflow: number; fired: number; droppedMessages: number } {
+  getCompactionStats(): { resident: number; subturn: number; llm: number; heuristic: number; overflow: number; fired: number; droppedMessages: number } {
     return { ...this.compactionStats };
   }
 
@@ -2236,14 +2236,16 @@ export class Agent {
 
 
   private maybeCompactResidentHistory(): void {
-    if (this.messages.length === 0) {
+    if (this.messages.length === 0 || !hasCompleteToolGroups(this.messages)) {
       return;
     }
 
     const before = this.messages;
     const beforeChars = estimateResidentChars(before);
     const beforeToolChars = estimateToolPayloadChars(before);
-    let candidate = projectMessages(before, { mode: "pruned" });
+    // Compact canonical history, not the provider projection: projection
+    // renders runtime meta as user text and can synthesize missing tool results.
+    let candidate = pruneMessages(before);
 
     const budget = this.providerId && this.apiModel
       ? getContextBudget(this.providerId, this.apiModel, candidate)
@@ -2259,7 +2261,9 @@ export class Agent {
     // now waits for the context-window budget itself; the heap guard stays
     // as process life-support, not policy.
     const shouldAggressivelyPrune = heapUsed >= RESIDENT_HISTORY_HEAP_HARD_LIMIT;
-    const shouldCompact = !!budget?.shouldCompact;
+    // Model summarization runs at the request boundary. Resident compaction is
+    // an emergency heap guard, not a competing token-triggered lossy policy.
+    const shouldCompact = shouldAggressivelyPrune && !!budget?.shouldCompact;
 
     if (shouldAggressivelyPrune) {
       candidate = aggressivePruneMessages(candidate);
@@ -2281,6 +2285,7 @@ export class Agent {
         if (subturn.compacted && subturn.messages) {
           candidate = subturn.messages as typeof candidate;
           compactedPath = "subturn";
+          residentSummary = subturn.summary;
           traceEvent("compaction_fired", { path: "subturn", droppedEntries: subturn.droppedEntries });
         }
       }
@@ -2299,33 +2304,48 @@ export class Agent {
         || candidate.length < before.length
       )
     ) {
-      this.messages = candidate;
-      this.lastInputTokens = null;
-      this.lastAnchorMessageCount = null;
-      this.fileStateTracker?.invalidateReadHistory();
+      if (!compactedPath) {
+        // Request-only thinning must not mutate durable history. Under heap
+        // pressure below the token threshold, the pruned candidate still has to
+        // replace resident memory or the life-support guard frees nothing; the
+        // session log keeps the full tool output.
+        if (shouldAggressivelyPrune) {
+          this.messages = candidate;
+          this.lastInputTokens = null;
+          this.lastAnchorMessageCount = null;
+          this.fileStateTracker?.invalidateReadHistory();
+        }
+        return;
+      }
+      this.applyContextCheckpoint(candidate, "resident", residentSummary, this.getContextRevision?.());
       if (compactedPath === "resident") {
         this.compactionStats.resident += 1;
-        this.persistCompactionSummary(residentSummary);
       }
       if (compactedPath === "subturn") this.compactionStats.subturn += 1;
       if (compactedPath && budget) {
-        this.contextEvents.push({ type: "context_compaction", status: "completed", preTokens: budget.estimatedTokens,
+        this.contextEvents.push({ type: "context_compaction", status: "completed", compactionId: this.lastCompactionId, persisted: !!this.onContextCheckpoint, preTokens: budget.estimatedTokens,
           postTokens: getContextBudget(this.providerId, this.apiModel, candidate).estimatedTokens, contextWindow: budget.contextWindow });
       }
     }
   }
 
-  /**
-   * Hand a multi-turn compaction summary to the host for session persistence.
-   * Failure is swallowed: losing persistence must never break the run itself.
-   */
-  private persistCompactionSummary(summary: string | undefined): void {
-    if (!summary?.trim()) return;
-    try {
-      this.onCompactionApplied?.(summary);
-    } catch {
-      // ignore — persistence is best-effort
-    }
+  /** Persist conversational context first; keep live reminders outside the durable projection. */
+  private applyContextCheckpoint(messages: Message[], reason: ContextCheckpoint["reason"], summary?: string,
+    baseRevision?: string, abortSignal?: AbortSignal): void {
+    throwIfAborted(abortSignal);
+    const checkpoint = createContextCheckpoint(messages, reason, summary, baseRevision);
+    this.onContextCheckpoint?.(checkpoint);
+    if (!this.onContextCheckpoint && summary?.trim()) this.onCompactionApplied?.(summary);
+    const { leading } = splitLeadingContext(messages);
+    // The compactor may have folded away reminders from its candidate. Their
+    // lifecycle belongs to the live Agent, not the durable summary/checkpoint.
+    const runtimeReminders = splitLeadingContext(this.messages).body.filter(message =>
+      message.role === "meta" && message.includeInLlm !== false && !isCompactionSummaryMessage(message));
+    this.messages = [...leading, ...checkpointMessages(checkpoint), ...runtimeReminders];
+    this.lastCompactionId = checkpoint.compactionId;
+    this.lastInputTokens = null;
+    this.lastAnchorMessageCount = null;
+    this.fileStateTracker?.invalidateReadHistory();
   }
 
   private appendMessage(message: Message) {

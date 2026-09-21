@@ -56,6 +56,9 @@ export async function recoverBubbleHistoryContext(
           // does not imply that their usage was measured after compaction.
           boundary = Math.max(boundary, entry.timestamp);
         }
+        // A checkpoint is appended after the retained originals, so file order is
+        // authoritative and immune to clock steps: only a later assistant counts.
+        if (entry.type === 'context_checkpoint') latest = null;
         if (entry.type === 'user_message' || (entry.type === 'message' && message?.role === 'user')) latest = null;
         if (entry.type !== 'assistant_message' && !(entry.type === 'message' && message?.role === 'assistant')) continue;
         latest = null;

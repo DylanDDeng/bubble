@@ -173,7 +173,7 @@ describe("compaction file tracking", () => {
     expect(ops.modified).toEqual(["src/one.ts", "src/two.ts"]);
   });
 
-  it("hands the block-carrying summary to onCompactionApplied for persistence", async () => {
+  it("keeps overflow candidates uncommitted until request-space validation", async () => {
     const persisted: string[] = [];
     const provider = {
       complete: async () => "Overflow recovery summary.",
@@ -197,14 +197,32 @@ describe("compaction file tracking", () => {
       ...turn("four", "src/four.ts"),
     ];
 
-    // First recovery keeps two recent turns; the second is intentionally more
-    // aggressive and keeps one.
-    await (agent as unknown as { recoverFromOverflow(attempt: number): Promise<number> }).recoverFromOverflow(0);
+    const original = agent.messages;
+    const candidate = await (agent as unknown as { recoverFromOverflow(attempt: number): Promise<Message[]> }).recoverFromOverflow(0);
+    expect(agent.messages).toBe(original);
+    expect(persisted).toHaveLength(0);
+    const candidateText = candidate.map(message => typeof message.content === "string" ? message.content : "").join("\n");
+    expect(candidateText).toContain("Overflow recovery summary.");
+    const ops = parseFileBlocks(candidateText);
+    expect(ops.modified).toEqual(["src/one.ts", "src/three.ts", "src/two.ts"]);
+  });
 
-    expect(persisted).toHaveLength(1);
-    expect(persisted[0]).toContain("Overflow recovery summary.");
-    const ops = parseFileBlocks(persisted[0]);
-    expect(ops.modified).toEqual(["src/one.ts", "src/two.ts"]);
+  it("never rejects a summary because of its deterministic file blocks", async () => {
+    // The file lists are appended by code, not written by the model: a short
+    // summary in a session touching many files must still be accepted.
+    const provider: Provider = {
+      async *streamChat() {},
+      async complete() { return "Short summary of progress and next steps."; },
+    };
+    const result = await compactWithLLM([
+      { role: "user", content: "original" },
+      ...Array.from({ length: 160 }, (_, i) =>
+        toolTurn([{ name: "read", args: { path: `/Users/dev/project/packages/core/src/modules/feature-${i}/implementation.ts` } }])).flat(),
+      { role: "user", content: "latest" },
+    ], { provider, providerId: "openai", modelId: "gpt-4o" });
+    expect(result.reason).toBeUndefined();
+    expect(result.compacted).toBe(true);
+    expect(parseFileBlocks(result.summary ?? "").read).toHaveLength(160);
   });
 
   it("records evicted sub-turn file ops on the sub-turn summary", () => {
