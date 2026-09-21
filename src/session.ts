@@ -19,7 +19,7 @@ import {
 } from "./context/compact.js";
 import type { Message } from "./types.js";
 import { createContextCheckpoint, checkpointMessages, type ContextCheckpoint } from "./context/checkpoint.js";
-import { SessionLog } from "./session-log.js";
+import { SessionLog, affectsContextRevision } from "./session-log.js";
 import type { SessionLogEntry, SessionMarkerKind, SessionMetadata } from "./session-types.js";
 import type { SanitizedProviderError } from "./provider-error-record.js";
 import { normalizeSingleLine, truncateVisual } from "./text-display.js";
@@ -90,6 +90,17 @@ export class SessionManager {
     });
   }
   private readonly metadataListeners = new Set<(metadata: SessionMetadata) => void>();
+  private readonly contextListeners = new Set<(previous: string, revision: string, replacement: boolean) => void>();
+
+  /** Local commits only: disk refreshes must never advance a host's history fence. */
+  subscribeContextCommits(listener: (previous: string, revision: string, replacement: boolean) => void): () => void {
+    this.contextListeners.add(listener);
+    return () => this.contextListeners.delete(listener);
+  }
+
+  private publishContextCommit(previous: string, replacement = false): void {
+    for (const listener of this.contextListeners) listener(previous, this.getRevision(), replacement);
+  }
 
   constructor(sessionFile: string) {
     this.sessionFile = sessionFile;
@@ -270,6 +281,7 @@ export class SessionManager {
   }
 
   clearTitleMetadata() {
+    this.refresh();
     const {
       title: _title,
       titleSource: _titleSource,
@@ -281,6 +293,7 @@ export class SessionManager {
   }
 
   clearExternalRuntimeMetadata() {
+    this.refresh();
     const { externalRuntime: _externalRuntime, ...metadata } = this.log.getMetadata();
     this.setMetadata(metadata);
   }
@@ -294,6 +307,7 @@ export class SessionManager {
         this.persist(entries, true);
       }, revision);
     } catch (error) { this.reloadAfterWriteFailure(); throw error; }
+    this.publishContextCommit(revision);
     // Persistence never decides model context policy by record count.
   }
 
@@ -308,16 +322,26 @@ export class SessionManager {
     try { this.persist(entry); } catch (error) { this.reloadAfterWriteFailure(); throw error; }
   }
 
-  appendMarker(kind: SessionMarkerKind, value: string) {
+  appendMarker(kind: SessionMarkerKind, value: string, expectedRevision?: string) {
     this.refresh();
-    const entry = this.log.appendMarker(kind, value);
-    try { this.persist(entry); } catch (error) { this.reloadAfterWriteFailure(); throw error; }
+    const revision = expectedRevision ?? this.getRevision();
+    try {
+      this.withWriteLock(() => {
+        const entry = this.log.appendMarker(kind, value);
+        this.persist(entry, true);
+      }, revision);
+    } catch (error) { this.reloadAfterWriteFailure(); throw error; }
+    this.publishContextCommit(revision, kind === "conversation_clear");
   }
 
-  appendProviderError(error: SanitizedProviderError) {
+  appendProviderError(error: SanitizedProviderError, expectedRevision?: string) {
     this.refresh();
-    const entry = this.log.appendProviderError(error);
-    try { this.persist(entry); } catch (failure) { this.reloadAfterWriteFailure(); throw failure; }
+    try {
+      this.withWriteLock(() => {
+        const entry = this.log.appendProviderError(error);
+        this.persist(entry, true);
+      }, expectedRevision ?? this.getRevision());
+    } catch (failure) { this.reloadAfterWriteFailure(); throw failure; }
   }
 
   compact(options?: CompactOptions): CompactResult {
@@ -325,7 +349,9 @@ export class SessionManager {
     let result = compactMessages(messages, options);
     if (!result.compacted) result = compactCurrentTurnToolGroups(messages);
     if (result.compacted && result.messages) {
-      this.commitContextCheckpoint(createContextCheckpoint(result.messages, "manual", result.summary, this.getRevision()));
+      const revision = this.getRevision();
+      this.commitContextCheckpoint(createContextCheckpoint(result.messages, "manual", result.summary, revision));
+      this.publishContextCommit(revision, true);
     }
     return result;
   }
@@ -366,7 +392,9 @@ export class SessionManager {
       inserted = true;
       return [buildCompactionSummaryMessage(summary)];
     });
-    this.commitContextCheckpoint(createContextCheckpoint(next, "manual", summary, this.getRevision()));
+    const revision = this.getRevision();
+    this.commitContextCheckpoint(createContextCheckpoint(next, "manual", summary, revision));
+    this.publishContextCommit(revision, true);
     return { ...result, summary, messages: next };
   }
 
@@ -440,12 +468,20 @@ export class SessionManager {
 
     const target = entries[index];
     const removed = entries.slice(index);
-    this.rewrite(entries.slice(0, index));
-
-    const metadata = this.log.getMetadata();
+    const revision = this.getRevision();
+    // Metadata records are full snapshots, not history deltas. Preserve the
+    // latest snapshot (including absent/cleared fields) in the atomic rewrite.
+    const metadata = { ...this.log.getMetadata() };
     if (metadata.titleUserMessageId && removed.some((entry) => entry.id === metadata.titleUserMessageId)) {
-      this.clearTitleMetadata();
+      delete metadata.title;
+      delete metadata.titleSource;
+      delete metadata.titleUpdatedAt;
+      delete metadata.titleUserMessageId;
     }
+    this.rewrite([...entries.slice(0, index), {
+      id: `metadata-${randomUUID()}`, type: "metadata", metadata, timestamp: Date.now(),
+    }]);
+    this.publishContextCommit(revision, true);
 
     return {
       removedEntries: removed.length,
@@ -462,8 +498,8 @@ export class SessionManager {
   }
 
   /** Commit the exact conversational projection, never delete its source history. */
-  commitContextCheckpoint(checkpoint: ContextCheckpoint): void {
-    const revision = this.getRevision();
+  commitContextCheckpoint(checkpoint: ContextCheckpoint, expectedRevision?: string): void {
+    const revision = expectedRevision ?? this.getRevision();
     this.withWriteLock(() => {
       const entries = this.log.list();
       const existing = entries.find(entry => entry.type === "context_checkpoint"
@@ -474,7 +510,7 @@ export class SessionManager {
         }
         // An old receipt is not permission to restore context after clear/rewind
         // or after new conversation data has superseded this exact projection.
-        if (entries.filter(entry => entry.type !== "metadata").at(-1) !== existing) throw new Error("Stale context checkpoint receipt");
+        if (entries.filter(affectsContextRevision).at(-1) !== existing) throw new Error("Stale context checkpoint receipt");
         return;
       }
       if (checkpoint.baseRevision !== undefined && checkpoint.baseRevision !== this.getRevision()) {
@@ -486,6 +522,7 @@ export class SessionManager {
       this.persist(entry, true);
       this.log.appendEntries([entry]);
     }, revision);
+    this.publishContextCommit(revision);
   }
 }
 

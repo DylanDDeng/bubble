@@ -18,6 +18,18 @@ import type {
 import type { SanitizedProviderError } from "./provider-error-record.js";
 import { checkpointMessages } from "./context/checkpoint.js";
 
+/** Records that change conversational context or its execution state.
+ * Keep this shared by revision hashing and checkpoint receipt supersession.
+ * Unknown/new markers are conservative: only known diagnostics are excluded.
+ */
+export function affectsContextRevision(entry: SessionLogEntry): boolean {
+  if (entry.type === "metadata" || entry.type === "provider_error") return false;
+  if (entry.type === "marker") {
+    return !["task_started", "task_finished", "task_killed"].includes(entry.kind);
+  }
+  return true;
+}
+
 export class SessionLog {
   private entries: SessionLogEntry[] = [];
   private nextId = 1;
@@ -29,7 +41,7 @@ export class SessionLog {
     this.entries.push(...entries);
     for (const entry of entries) {
       this.nextId = Math.max(this.nextId, (parseInt(entry.id, 10) || 0) + 1);
-      if (entry.type !== "metadata") {
+      if (affectsContextRevision(entry)) {
         this.contextRevision = createHash("sha256").update(this.contextRevision).update(JSON.stringify(entry)).digest("hex");
       }
     }

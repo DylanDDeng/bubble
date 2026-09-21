@@ -624,18 +624,17 @@ export class BubbleSdk {
         },
         onProviderError: (error) => {
           if (this.turnCoordinator.isDeleted(sessionId)) return;
-          session.appendProviderError(error);
-          contextRevision = session.getRevision();
+          session.appendProviderError(error, contextRevision);
         },
         getContextRevision: () => contextRevision,
         onContextCheckpoint: (checkpoint) => {
           if (this.turnCoordinator.isDeleted(sessionId)) throw new Error("Session deleted before context commit");
-          session.commitContextCheckpoint(checkpoint);
+          session.commitContextCheckpoint(checkpoint, contextRevision);
           contextRevision = session.getRevision();
         },
         onModeUpdate: (m: PermissionMode) => {
           if (!this.turnCoordinator.isDeleted(sessionId)) {
-            session.appendMarker("mode_switch", m);
+            session.appendMarker("mode_switch", m, contextRevision);
             contextRevision = session.getRevision();
           }
         },

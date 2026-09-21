@@ -153,6 +153,7 @@ export class RunDriver {
     });
     const budgetLedger = new BudgetLedger();
     let sessionTitleUpdater: SessionTitleUpdater | undefined;
+    let contextRevision = session.manager.getRevision();
     const agent = new Agent({
       provider,
       providerId,
@@ -165,26 +166,32 @@ export class RunDriver {
       mode: initialMode,
       onMessageAppend: (message: Message) => {
         if (message.role === "system" || message.role === "meta") return;
-        session.manager.appendMessage(message);
+        session.manager.appendMessage(message, contextRevision);
+        contextRevision = session.manager.getRevision();
         sessionTitleUpdater?.handlePersistedMessage(message);
         if (message.role === "assistant") {
           recordMemoryCitations(session.cwd, message.content);
         }
       },
       onProviderError: (error) => {
-        session.manager.appendProviderError(error);
+        session.manager.appendProviderError(error, contextRevision);
       },
-      getContextRevision: () => session.manager.getRevision(),
+      getContextRevision: () => contextRevision,
       onContextCheckpoint: (checkpoint) => {
-        session.manager.commitContextCheckpoint(checkpoint);
+        session.manager.commitContextCheckpoint(checkpoint, contextRevision);
+        contextRevision = session.manager.getRevision();
       },
       onToolResult: (toolName, result) => {
         if (toolName !== "skill" || result.isError) return;
         const match = result.content.match(/^Skill:\s+([^\n]+)$/m);
-        if (match?.[1]) session.manager.appendMarker("skill_activated", match[1].trim());
+        if (match?.[1]) {
+          session.manager.appendMarker("skill_activated", match[1].trim(), contextRevision);
+          contextRevision = session.manager.getRevision();
+        }
       },
       onModeUpdate: (mode: PermissionMode) => {
-        session.manager.appendMarker("mode_switch", mode);
+        session.manager.appendMarker("mode_switch", mode, contextRevision);
+        contextRevision = session.manager.getRevision();
         this.opts.binder.setMode(req.scopeKey, mode);
       },
       budgetLedger,
@@ -227,6 +234,7 @@ export class RunDriver {
     // Restore prior history into the running Agent instance.
     if (!session.fresh) {
       const history = session.manager.getMessages();
+      contextRevision = session.manager.getRevision();
       if (history.length > 0) {
         agent.messages = [{ role: "system", content: systemPrompt }, ...history];
         if (agent.mode === "plan") agent.injectModeReminder();
