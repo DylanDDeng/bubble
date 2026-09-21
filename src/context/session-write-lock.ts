@@ -99,14 +99,25 @@ export function withSessionWriteLock<T>(path: string, action: () => T, waitMs = 
     try { publish(path, token); break; }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      if (Date.now() >= deadline) throw new SessionWriteLockBusyError(path);
+      const timedOut = Date.now() >= deadline;
       let observed: string;
       try { observed = readFileSync(path, "utf8"); }
-      catch (readError) { if ((readError as NodeJS.ErrnoException).code === "ENOENT") continue; throw readError; }
-      // kill(0) is cheap and re-checked every round; the incarnation probe may
-      // spawn `ps`, so a given owner is probed once per acquisition.
-      const abandoned = () => deadOwner(observed) || (!verifiedLive.has(observed) && recycledOwner(observed));
-      if (!abandoned()) { verifiedLive.add(observed); sleepSync(delay); continue; }
+      catch (readError) {
+        if ((readError as NodeJS.ErrnoException).code !== "ENOENT") throw readError;
+        if (timedOut) throw new SessionWriteLockBusyError(path);
+        continue;
+      }
+      // kill(0) is cheap and re-checked every round. The incarnation probe may
+      // spawn `ps`, so an owner is probed when first seen and once more before
+      // giving up: it can exit and have its pid recycled while we wait.
+      const abandoned = () => deadOwner(observed)
+        || ((timedOut || !verifiedLive.has(observed)) && recycledOwner(observed));
+      if (!abandoned()) {
+        if (timedOut) throw new SessionWriteLockBusyError(path);
+        verifiedLive.add(observed);
+        sleepSync(delay);
+        continue;
+      }
       // Serialize recovery. Recovery locks themselves use the same owner-safe
       // protocol, so killing a recovering process cannot permanently block it.
       withSessionWriteLock(`${path}.recovery`, () => {

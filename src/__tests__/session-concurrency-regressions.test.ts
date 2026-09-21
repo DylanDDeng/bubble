@@ -190,4 +190,57 @@ describe("session concurrency review regressions", () => {
     expect(linuxStartId(stat(987654), "boot-b\n")).not.toBe(linuxStartId(stat(987654), "boot-a\n"));
     expect(linuxStartId(stat(987654), "")).toBeUndefined();
   });
+
+  it("keeps a completed tool turn that an unreadable checkpoint committed mid-turn", () => {
+    const file = sessionFile();
+    const manager = new SessionManager(file);
+    manager.appendMessage({ role: "user", content: "inspect the repo" });
+    manager.appendMessage({ role: "assistant", content: "", toolCalls: [{ id: "t1", name: "read", arguments: "{}" }] });
+    manager.appendMessage({ role: "tool", toolCallId: "t1", content: "COMPLETED-RESULT" });
+    // Committed at a complete-tool-group boundary, with no final text reply yet.
+    appendFileSync(file, JSON.stringify({ id: "checkpoint-future", type: "context_checkpoint", timestamp: Date.now(),
+      checkpoint: { version: 2, compactionId: "future", reason: "resident", messages: [] } }) + "\n");
+
+    const replayed = new SessionManager(file).getMessages();
+    expect(replayed.map(message => message.role)).toEqual(["user", "assistant", "tool"]);
+    expect(JSON.stringify(replayed)).toContain("COMPLETED-RESULT");
+  });
+
+  it("still commits new checkpoints after a structurally invalid checkpoint record", () => {
+    const file = sessionFile();
+    const manager = new SessionManager(file);
+    manager.appendMessage({ role: "user", content: "turn one" });
+    manager.appendMessage({ role: "assistant", content: "reply one" });
+    appendFileSync(file, JSON.stringify({ id: "checkpoint-broken", type: "context_checkpoint", timestamp: Date.now() }) + "\n");
+
+    const reopened = new SessionManager(file);
+    expect(reopened.getMessages().map(message => message.content)).toEqual(["turn one", "reply one"]);
+    expect(() => reopened.commitContextCheckpoint(createContextCheckpoint(
+      [buildCompactionSummaryMessage("AFTER-BROKEN"), { role: "user", content: "turn one" }, { role: "assistant", content: "reply one" }],
+      "manual", "AFTER-BROKEN", reopened.getRevision()))).not.toThrow();
+    expect(JSON.stringify(new SessionManager(file).getMessages())).toContain("AFTER-BROKEN");
+  });
+
+  it("lists the other sessions when one file holds a record the preview code cannot handle", () => {
+    const home = mkdtempSync(join(tmpdir(), "bubble-session-listing-"));
+    dirs.push(home);
+    const previousHome = process.env.BUBBLE_HOME;
+    process.env.BUBBLE_HOME = home;
+    try {
+      const cwd = join(home, "workspace");
+      const good = SessionManager.create(cwd, "good.jsonl");
+      good.appendMessage({ role: "user", content: "a readable session" });
+      good.appendMessage({ role: "assistant", content: "ok" });
+      const bad = SessionManager.create(cwd, "bad.jsonl");
+      bad.appendMessage({ role: "user", content: "placeholder" });
+      // Syntactically valid, accepted by load(), but content is not text or parts.
+      writeFileSync(bad.getSessionFile(), JSON.stringify({ id: "1", type: "user_message", timestamp: 1,
+        message: { role: "user", content: 42 } }) + "\n");
+
+      expect(SessionManager.summarizeSessionsForCwd(cwd).map(summary => summary.name)).toEqual(["good"]);
+      expect(SessionManager.listAllSessions().map(summary => summary.name)).toEqual(["good"]);
+    } finally {
+      if (previousHome === undefined) delete process.env.BUBBLE_HOME; else process.env.BUBBLE_HOME = previousHome;
+    }
+  });
 });

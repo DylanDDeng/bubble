@@ -187,9 +187,16 @@ export class SessionLog {
     );
     const committedPrefixLength = latestSummaryIndex > latestClearIndex
       && this.entries[latestSummaryIndex].type === "context_checkpoint" ? messages.length : 0;
+    // Every checkpoint past the readable boundary is unreadable by construction.
+    // Its projection is unusable, but its position still proves the originals
+    // before it were committed at a complete-tool-group model boundary.
+    let unreadableBoundaryLength = 0;
     for (let index = startIndex; index < this.entries.length; index++) {
       const entry = this.entries[index];
       switch (entry.type) {
+        case "context_checkpoint":
+          unreadableBoundaryLength = messages.length;
+          break;
         case "user_message":
           messages.push(cloneMessage(entry.message));
           break;
@@ -228,12 +235,23 @@ export class SessionLog {
 
     // A committed checkpoint may end in completed tools without a final text
     // response. It is a resumable model boundary, not an interrupted user turn.
-    if (committedPrefixLength > 0) {
-      const tail = messages.slice(committedPrefixLength);
+    const boundary = Math.max(committedPrefixLength, unreadableBoundaryLength);
+    if (boundary > 0) {
+      let head = messages.slice(0, boundary);
+      if (unreadableBoundaryLength > committedPrefixLength) {
+        // Replayed originals, not a validated projection: hold the turn the
+        // boundary split to complete-tool-group semantics, as its continuation is.
+        let turnStart = head.length;
+        for (let i = head.length - 1; i >= committedPrefixLength; i--) {
+          if (head[i].role === "user") { turnStart = i; break; }
+        }
+        head = [...head.slice(0, turnStart), ...pruneIncompleteToolGroups(head.slice(turnStart))];
+      }
+      const tail = messages.slice(boundary);
       const nextUser = tail.findIndex(message => message.role === "user");
       const continuationEnd = nextUser < 0 ? tail.length : nextUser;
       return [
-        ...messages.slice(0, committedPrefixLength),
+        ...head,
         ...pruneIncompleteToolGroups(tail.slice(0, continuationEnd)),
         ...pruneIncompleteTail(tail.slice(continuationEnd)),
       ];
