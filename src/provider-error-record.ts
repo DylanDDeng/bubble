@@ -3,6 +3,10 @@ import type { ThinkingLevel } from "./types.js";
 
 const MAX_FIELD_CHARS = 160;
 const RUNTIME_STARTED_AT = Date.now();
+const TRANSPORT_ERROR_CODES = new Set([
+  "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT",
+  "ECONNRESET", "ECONNREFUSED", "EPIPE", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN",
+]);
 const SAFE_ERROR_CODES = new Map<string, string>([
   ["authentication_error", "authentication_error"],
   ["bad_request", "bad_request"],
@@ -22,6 +26,7 @@ const SAFE_ERROR_CODES = new Map<string, string>([
   ["unauthenticated", "unauthenticated"],
   ["unsupported_parameter", "unsupported_parameter"],
   ["unsupported_value", "unsupported_value"],
+  ...Array.from(TRANSPORT_ERROR_CODES, (code): [string, string] => [code.toLowerCase(), code]),
 ]);
 const SAFE_PARAMETER_NAMES = new Set([
   "contents",
@@ -65,6 +70,7 @@ export interface SanitizedProviderError {
   bubbleVersion: string;
   pid: number;
   runtimeStartedAt: number;
+  retry?: { attempt: number; maxAttempts: number };
 }
 
 export interface ProviderErrorContext {
@@ -74,6 +80,7 @@ export interface ProviderErrorContext {
   thinkingLevel: ThinkingLevel;
   messageCount: number;
   toolCount: number;
+  retry?: { attempt: number; maxAttempts: number };
 }
 
 /**
@@ -91,7 +98,10 @@ export function createSanitizedProviderError(
   const rawMessage = firstString(sources, ["message"])
     || (typeof error === "string" ? error : "Provider request failed.");
   const httpStatus = firstHttpStatus(sources);
-  const code = sanitizeErrorCode(firstScalarString(sources, ["code", "errorCode", "type"]));
+  // A wrapper's unknown code must not hide an allowlisted nested transport code.
+  const code = sources.flatMap((source) => ["code", "errorCode", "type"].map((key) =>
+    typeof source[key] === "string" ? sanitizeErrorCode(source[key]) : undefined,
+  )).find((value) => value !== undefined);
   const parameter = sanitizeParameterName(firstScalarString(sources, ["param", "parameter"]));
 
   return {
@@ -100,7 +110,9 @@ export function createSanitizedProviderError(
     ...(context.model ? { model: sanitizeControlledIdentifier(context.model) } : {}),
     thinkingLevel: context.thinkingLevel,
     name: "ProviderError",
-    message: sanitizeProviderErrorText(rawMessage),
+    message: code && TRANSPORT_ERROR_CODES.has(code)
+      ? code.includes("TIMEOUT") || code === "ETIMEDOUT" ? "Provider request timed out." : "Provider connection failed."
+      : sanitizeProviderErrorText(rawMessage),
     ...(httpStatus !== undefined ? { httpStatus } : {}),
     ...(code ? { code } : {}),
     ...(parameter ? { parameter } : {}),
@@ -109,6 +121,10 @@ export function createSanitizedProviderError(
     bubbleVersion: getCurrentVersion(),
     pid: process.pid,
     runtimeStartedAt: RUNTIME_STARTED_AT,
+    ...(context.retry ? { retry: {
+      attempt: context.retry.attempt,
+      maxAttempts: context.retry.maxAttempts,
+    } } : {}),
   };
 }
 
@@ -151,14 +167,15 @@ export function sanitizeProviderErrorText(value: string): string {
 
 function errorSources(error: unknown): Record<string, unknown>[] {
   const sources: Record<string, unknown>[] = [];
-  const root = asRecord(error);
-  if (root) sources.push(root);
-  const nested = asRecord(root?.error);
-  if (nested) sources.push(nested);
-  const cause = asRecord(root?.cause);
-  if (cause) sources.push(cause);
-  const causeError = asRecord(cause?.error);
-  if (causeError) sources.push(causeError);
+  const pending = [error];
+  const seen = new Set<object>();
+  while (pending.length && sources.length < 12) {
+    const source = asRecord(pending.shift());
+    if (!source || seen.has(source)) continue;
+    seen.add(source);
+    sources.push(source);
+    pending.push(source.error, source.cause);
+  }
   return sources;
 }
 

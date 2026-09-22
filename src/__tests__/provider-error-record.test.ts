@@ -2,6 +2,18 @@ import { describe, expect, it } from "vitest";
 import { createSanitizedProviderError, sanitizeProviderErrorText } from "../provider-error-record.js";
 
 describe("provider error diagnostics", () => {
+  it("preserves allowlisted transport codes through wrappers and cyclic causes without leaking payloads", () => {
+    const socket = Object.assign(new Error("other side closed; secret credential"), { code: "UND_ERR_SOCKET" });
+    const terminated = new TypeError("terminated", { cause: socket });
+    const wrapper = Object.assign(new Error("opaque private prompt", { cause: terminated }), { code: "private-code" });
+    socket.cause = wrapper;
+    const record = createSanitizedProviderError(wrapper, {
+      providerId: "openai", modelId: "gpt-6-astra", thinkingLevel: "high", messageCount: 1, toolCount: 0,
+      retry: { attempt: 1, maxAttempts: 2 },
+    });
+    expect(record).toMatchObject({ code: "UND_ERR_SOCKET", message: "Provider connection failed.", retry: { attempt: 1, maxAttempts: 2 } });
+    expect(JSON.stringify(record)).not.toMatch(/secret credential|private prompt|private-code|stack/);
+  });
   it("keeps allowlisted validation fields without serializing request internals", () => {
     const error = Object.assign(
       new Error("Invalid parameter reasoning_effort; Authorization: Bearer secret-token-value-1234567890"),

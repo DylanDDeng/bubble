@@ -4,6 +4,7 @@ import type { OAuthCredentials } from "./oauth/types.js";
 import { getBuiltinModel, listBuiltinModels } from "./model-catalog.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
 import { chatGptFetch, type ChatGptFetch } from "./network/chatgpt-transport.js";
+import { logProviderTransportFailure } from "./network/provider-transport-log.js";
 import {
   computeRetryDelayMs,
   getProviderMaxRetries,
@@ -161,6 +162,11 @@ export function createOpenAICodexProvider(options: {
     };
 
     for (let attempt = 0; ; attempt++) {
+      const requestId = globalThis.crypto.randomUUID();
+      const startedAt = Date.now();
+      let responseStatus: number | undefined;
+      let receivedEvents = 0;
+      let lastEventAt: number | undefined;
       let sawParsedSseEvent = false;
       let currentToolCall:
         | {
@@ -177,11 +183,13 @@ export function createOpenAICodexProvider(options: {
       let summaryPartsSeen = 0;
       try {
         let response = await sendRequest();
+        responseStatus = response.status;
 
         if (!response.ok) {
           const errorText = await response.text().catch(() => "");
           if (response.status === 401 && options.auth && isTokenExpiredError(errorText)) {
             response = await sendRequest(true);
+            responseStatus = response.status;
           } else {
             throw new Error(`${response.status} status code${errorText ? `: ${errorText}` : " (no body)"}`);
           }
@@ -194,6 +202,8 @@ export function createOpenAICodexProvider(options: {
 
         for await (const event of parseSse(response)) {
           sawParsedSseEvent = true;
+          receivedEvents += 1;
+          lastEventAt = Date.now();
           const type = typeof event.type === "string" ? event.type : undefined;
           if (!type) continue;
 
@@ -322,24 +332,33 @@ export function createOpenAICodexProvider(options: {
         yield { type: "done" };
         return;
       } catch (error) {
-        if (
-          sawParsedSseEvent
+        const delegateRetry = sawParsedSseEvent
           && !chatOptions.abortSignal?.aborted
-          && isTransientCodexTransportError(error)
-        ) {
+          && isTransientCodexTransportError(error);
+        const retry = shouldRetryCodexTransportError({
+          error, attempt, sawParsedSseEvent, signal: chatOptions.abortSignal,
+        });
+        logProviderTransportFailure(error, {
+          providerId: options.providerId ?? "openai-codex",
+          modelId: chatOptions.model,
+          thinkingLevel: chatOptions.thinkingLevel ?? options.thinkingLevel ?? "off",
+          messageCount: messages.length,
+          toolCount: chatOptions.tools?.length ?? 0,
+          sessionId, requestId, attempt: attempt + 1, responseStatus, receivedEvents,
+          elapsedMs: Date.now() - startedAt,
+          lastEventAgeMs: lastEventAt === undefined ? undefined : Date.now() - lastEventAt,
+          decision: chatOptions.abortSignal?.aborted ? "cancelled"
+            : delegateRetry ? "delegate_retry" : retry ? "retry" : "fail",
+        });
+        if (delegateRetry) {
           // Partial content already surfaced — the agent loop discards the
           // half-built assistant message and re-issues the whole request.
           throw new ProviderStreamInterruptedError(
-            error instanceof Error ? error.message : String(error),
+            "ChatGPT connection interrupted while receiving a response.",
             { cause: error },
           );
         }
-        if (!shouldRetryCodexTransportError({
-          error,
-          attempt,
-          sawParsedSseEvent,
-          signal: chatOptions.abortSignal,
-        })) {
+        if (!retry) {
           throw error;
         }
         await sleepBeforeRetry(computeRetryDelayMs(attempt + 1), chatOptions.abortSignal);
@@ -704,6 +723,7 @@ function isTransientCodexTransportError(error: unknown): boolean {
     /\bConnectionClosed\b/i,
     /\bECONNRESET\b/i,
     /\bUND_ERR_SOCKET\b/i,
+    /\bUND_ERR_(?:CONNECT|HEADERS|BODY)_TIMEOUT\b/i,
     /\bEPIPE\b/i,
     /socket hang up/i,
     /fetch failed/i,
@@ -723,6 +743,8 @@ function errorMessageChain(error: unknown): string[] {
   for (let depth = 0; current && depth < 6; depth++) {
     if (current instanceof Error) {
       messages.push(current.name, current.message);
+      const code = (current as Error & { code?: unknown }).code;
+      if (typeof code === "string") messages.push(code);
       current = (current as Error & { cause?: unknown }).cause;
       continue;
     }

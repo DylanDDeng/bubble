@@ -763,7 +763,7 @@ describe("provider-openai-codex", () => {
     });
 
     await expect(collectStream(provider.streamChat([{ role: "user", content: "hi" }], { model: "gpt-5.5" })))
-      .rejects.toThrow(/socket connection/i);
+      .rejects.toMatchObject({ name: "ProviderStreamInterruptedError", cause: { message: "The socket connection was closed unexpectedly." } });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 

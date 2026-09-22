@@ -1296,6 +1296,11 @@ export class Agent {
           // turn_start resets the streaming display, so re-issuing the whole
           // request is safe.
           consecutiveStreamInterruptionRetries += 1;
+          this.persistProviderError(error, {
+            messageCount: currentRequestMessageCount,
+            toolCount: toolDefinitions.length,
+            retry: { attempt: consecutiveStreamInterruptionRetries, maxAttempts: streamRetryLimit },
+          });
           yield emit({
             type: "provider_retry",
             attempt: consecutiveStreamInterruptionRetries,
@@ -2373,7 +2378,7 @@ export class Agent {
 
   private persistProviderError(
     error: unknown,
-    request: { messageCount: number; toolCount: number },
+    request: { messageCount: number; toolCount: number; retry?: ProviderErrorContext["retry"] },
   ): void {
     this.recordProviderError(error, {
       providerId: this.providerId,
@@ -2382,6 +2387,7 @@ export class Agent {
       thinkingLevel: this.thinkingLevel,
       messageCount: request.messageCount,
       toolCount: request.toolCount,
+      retry: request.retry,
     });
   }
 
