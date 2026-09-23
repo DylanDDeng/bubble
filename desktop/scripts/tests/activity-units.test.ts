@@ -55,6 +55,24 @@ assert.equal(classifyToolUse('Bash', { command: 'ls -la src' }), 'pattern_search
 assert.equal(classifyToolUse('Bash', { cmd: 'rg --files src' }), 'pattern_search');
 assert.equal(classifyToolUse('Bash', { command: 'npm test' }), 'command_execution');
 assert.equal(formatReadableToolSummary(deriveReadableToolDisplay('Bash', { command: 'rg --files src' }, 'pending')), 'Listing files');
+const bashTitle = (command: string) => formatReadableToolSummary(deriveReadableToolDisplay('Bash', { command }, 'success'));
+assert.equal(
+  bashTitle('cd /tmp && python3 -m http.server 8765 >/tmp/http.log 2>&1 &\nSRV=$!\nnode shot.mjs\nkill $SRV'),
+  'Ran python3 -m http.server 8765 >/tmp/http.log 2>&1 +2 more',
+  'a leading cd / assignment never becomes the whole title, and the rest is counted',
+);
+assert.equal(bashTitle('cd /Users/me/app && ls -la'), 'Listed directory', 'cd prefix is skipped for the lead command');
+assert.equal(bashTitle('cd /tmp'), 'Ran cd /tmp', 'a lone setup command still titles itself');
+assert.equal(bashTitle('npm run build && npm test'), 'Ran npm run build +1 more');
+assert.equal(bashTitle("grep -rn 'a|b;c' src | head -5"), 'Searched for a|b;c', 'quoted separators and pipe stages are not extra work');
+assert.equal(bashTitle("python3 - <<'EOF'\nimport os; print(1)\nEOF"), "Ran python3 - <<'EOF' import os; print(1)", 'heredoc bodies stay with their statement');
+assert.equal(bashTitle('export CI=1\n# build; then test\nfor f in a b; do echo $f; done'), 'Ran for f in a b +1 more');
+assert.equal(bashTitle('grep -c foo <<< hello\nnpm test'), 'Searched for foo +1 more', 'a here-string has no body to swallow');
+assert.equal(bashTitle('node - <<\\EOF\na; b && c\nEOF\nnpm test'), 'Ran node - <<\\EOF a; b && c +1 more', 'escaped heredoc delimiters are recognized');
+assert.equal(bashTitle("python3 - <<'EOF' | tee out.log\nprint(1)\nEOF"), "Ran python3 - <<'EOF' print(1)", 'a piped heredoc keeps its body preview');
+const redosStart = performance.now();
+bashTitle(`x=${'a='.repeat(40)}a b c`);
+assert.ok(performance.now() - redosStart < 100, 'assignment detection must not backtrack exponentially');
 assert.equal(classifyToolUse('mcp__docs__read', {}), 'mcp_tool_call');
 const thoughtMessage: StreamMessage = { type: 'assistant', uuid: 'reasoning-source', message: { content: [{type:'thinking', thinking:'**Checking**\nInspect the files'}] } };
 const before: StreamMessage = { type:'assistant', uuid:'older', message:{content:[{type:'text',text:'Older note'}]} };

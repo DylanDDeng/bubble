@@ -228,6 +228,166 @@ function firstNonFlagToken(args: string): string | null {
   return null;
 }
 
+const HEREDOC_PREVIEW_CHARS = 200;
+
+/**
+ * Split a shell script into statements on `&&`, `||`, `;`, `&` and newlines,
+ * ignoring separators inside quotes, `$(...)` and heredoc bodies. Pipeline
+ * stages stay inside their statement (`grep x | head` is one unit of work),
+ * so each statement is returned as its first stage, whitespace-collapsed.
+ */
+function splitShellStatements(script: string): string[] {
+  const statements: string[] = [];
+  // `owner` is the statement whose first stage opened the heredoc, or -1.
+  const pendingHeredocs: Array<{ delimiter: string; owner: number }> = [];
+  let current = '';
+  let stageEnd = -1;
+  let quote: string | null = null;
+  let depth = 0;
+
+  const push = () => {
+    const lead = (stageEnd >= 0 ? current.slice(0, stageEnd) : current).replace(/\s+/g, ' ').trim();
+    if (lead) statements.push(lead);
+    current = '';
+    stageEnd = -1;
+  };
+
+  for (let i = 0; i < script.length; i += 1) {
+    const ch = script[i];
+    const next = script[i + 1];
+
+    if (quote) {
+      current += ch;
+      if (ch === '\\' && quote === '"' && next !== undefined) {
+        current += next;
+        i += 1;
+      } else if (ch === quote) {
+        quote = null;
+      }
+      continue;
+    }
+
+    if (ch === '\\' && next !== undefined) {
+      current += next === '\n' ? ' ' : ch + next;
+      i += 1;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === '#' && (current === '' || /\s/.test(current[current.length - 1]))) {
+      while (i + 1 < script.length && script[i + 1] !== '\n') i += 1;
+      continue;
+    }
+    // `<<` opens a heredoc; `<<<` is a here-string and has no body.
+    if (ch === '<' && next === '<' && script[i + 2] !== '<' && script[i - 1] !== '<' && depth === 0) {
+      const match = script.slice(i + 2).match(/^-?\s*\\?(['"]?)([\w.-]+)\1/);
+      if (match) pendingHeredocs.push({ delimiter: match[2], owner: stageEnd < 0 ? statements.length : -1 });
+    }
+
+    if (ch === '\n') {
+      if (depth === 0) push();
+      else current += ' ';
+      // Heredoc bodies are never statements of their own. A short prefix is
+      // kept on the statement that opened them, so a `python3 - <<EOF` title
+      // still hints at the script.
+      while (pendingHeredocs.length > 0) {
+        const { delimiter, owner } = pendingHeredocs.shift()!;
+        while (i < script.length) {
+          const lineEnd = script.indexOf('\n', i + 1);
+          const line = script.slice(i + 1, lineEnd === -1 ? script.length : lineEnd);
+          i = lineEnd === -1 ? script.length : lineEnd;
+          if (line.trim() === delimiter) break;
+          if (owner >= 0 && owner < statements.length && statements[owner].length < HEREDOC_PREVIEW_CHARS) {
+            statements[owner] = `${statements[owner]} ${line.replace(/\s+/g, ' ').trim()}`.trim();
+          }
+        }
+      }
+      continue;
+    }
+
+    if (ch === '(') depth += 1;
+    if (ch === ')' && depth > 0) depth -= 1;
+    if (depth > 0 || ch === ')') {
+      current += ch;
+      continue;
+    }
+
+    if ((ch === '&' && next === '&') || (ch === '|' && next === '|')) {
+      push();
+      i += 1;
+      continue;
+    }
+    if (ch === ';') {
+      push();
+      continue;
+    }
+    if (ch === '&') {
+      const prev = current[current.length - 1];
+      // `2>&1`, `>&2` and `&>` are redirections, not background separators.
+      if (prev === '>' || prev === '<' || next === '>') {
+        current += ch;
+      } else {
+        push();
+      }
+      continue;
+    }
+    if (ch === '|') {
+      if (stageEnd < 0) stageEnd = current.length;
+      current += ch;
+      if (next === '&') {
+        current += next;
+        i += 1;
+      }
+      continue;
+    }
+    current += ch;
+  }
+  push();
+  return statements;
+}
+
+const SHELL_CONTROL_KEYWORD_RE = /^(?:do|then|else|done|fi|esac|\{|\}|!)(?=\s|$)\s*/;
+
+function stripControlKeywords(statement: string): string {
+  let value = statement;
+  let match = value.match(SHELL_CONTROL_KEYWORD_RE);
+  while (match) {
+    value = value.slice(match[0].length);
+    match = value.match(SHELL_CONTROL_KEYWORD_RE);
+  }
+  return value;
+}
+
+/** Shell setup that changes context but does no work worth titling a row. */
+const SHELL_SETUP_COMMANDS = new Set([
+  'cd', 'pushd', 'popd', 'export', 'set', 'unset', 'source', '.', 'shopt',
+  'trap', 'ulimit', 'umask', 'local', 'declare', 'readonly',
+  'break', 'continue', 'true', ':',
+]);
+
+// One `NAME=value` word. Matched word by word from a loop: a single
+// `(?:...)+` pattern backtracks exponentially on input like `x=a=a=a=...`.
+const ASSIGNMENT_WORD_RE = /^[A-Za-z_]\w*\+?=(?:'[^']*'|"(?:[^"\\]|\\.)*"|[^\s'"]*)(?:\s+|$)/;
+
+function isPureAssignment(statement: string): boolean {
+  let rest = statement;
+  while (rest) {
+    const match = rest.match(ASSIGNMENT_WORD_RE);
+    if (!match) return false;
+    rest = rest.slice(match[0].length);
+  }
+  return true;
+}
+
+function isShellSetup(statement: string): boolean {
+  if (!statement) return true;
+  if (isPureAssignment(statement)) return true;
+  return SHELL_SETUP_COMMANDS.has(splitFirstToken(statement).head);
+}
+
 function describeBashCommand(command: string, status: ToolStatus): ReadableToolDisplay {
   if (/computer-use\/(?:skills\/)?computer-use\/SKILL\.md|skills\/computer-use\/SKILL\.md/.test(command)) {
     return {
@@ -236,9 +396,18 @@ function describeBashCommand(command: string, status: ToolStatus): ReadableToolD
     };
   }
   const inner = unwrapShellCommand(command);
-  // Strip the suffix after pipes / chains so the verb describes the leading
-  // command rather than the full pipeline.
-  const firstSegment = inner.split(/\s+&&\s+|\s+\|\|\s+|\s*;\s*|\s*\|\s*/)[0] || inner;
+  // Title the row after the first statement that does real work, so a
+  // leading `cd dir &&` or `VAR=...` never becomes the whole label, and say
+  // how many other working statements the title leaves out.
+  const statements = splitShellStatements(inner).map(stripControlKeywords);
+  const working = statements.filter((statement) => !isShellSetup(statement));
+  const lead = working[0] || statements[0] || inner;
+  const display = describeShellStatement(lead, status);
+  const hidden = Math.max(0, working.length - 1);
+  return hidden > 0 ? { ...display, target: `${display.target} +${hidden} more` } : display;
+}
+
+function describeShellStatement(firstSegment: string, status: ToolStatus): ReadableToolDisplay {
   const { head, rest } = splitFirstToken(firstSegment);
 
   if (head === 'git') {
@@ -327,7 +496,7 @@ function describeBashCommand(command: string, status: ToolStatus): ReadableToolD
 
   return {
     verb: pickVerb(DEFAULT_VERB, status),
-    target: truncate(firstSegment || command, 60),
+    target: truncate(firstSegment, 60),
   };
 }
 
