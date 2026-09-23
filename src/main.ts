@@ -37,7 +37,8 @@ import { SettingsManager } from "./permissions/settings.js";
 import { ExternalHookController } from "./hooks/index.js";
 import { getLspService } from "./lsp/index.js";
 import { loadMcpConfig } from "./mcp/config.js";
-import { McpManager } from "./mcp/manager.js";
+import { promptRepoTrust } from "./permissions/trust-prompt.js";
+import { McpManager, gateMcpTools } from "./mcp/manager.js";
 import type { PermissionMode, PlanDecision } from "./types.js";
 import { normalizeInheritedThinkingLevel } from "./variant/variant-resolver.js";
 import { QuestionController } from "./question/index.js";
@@ -186,6 +187,11 @@ async function main() {
   const approvalHandlerRef: { current?: (req: ApprovalRequest) => Promise<ApprovalDecision> } = {};
   const questionController = new QuestionController();
   const bashAllowlist = new BashAllowlist();
+  // Folder trust (Kimi Code style): the repository's .bubble settings may
+  // enable allow rules, MCP servers and LSP servers; ask before loading them.
+  if (!printMode && process.stdin.isTTY && process.stdout.isTTY) {
+    await promptRepoTrust(args.cwd);
+  }
   const settingsManager = new SettingsManager(args.cwd);
   for (const d of settingsManager.getMerged().diagnostics) {
     console.error(chalk.yellow(`[settings:${d.scope}] ${d.path}: ${d.message}`));
@@ -198,6 +204,7 @@ async function main() {
     getMode: () => agentRef?.mode ?? "default",
     handlerRef: approvalHandlerRef,
     bashAllowlist,
+    sessionGrants: new Set<string>(),
     cwd: args.cwd,
     getRuleSet: () => settingsManager.getMerged().ruleSet,
     externalHooks: hookController,
@@ -247,7 +254,7 @@ async function main() {
   let externalRuntime: ExternalRuntimeManager | undefined;
   if (mcpLoaded.servers.length > 0) {
     await mcpManager.start();
-    tools.push(...mcpManager.getToolEntries());
+    tools.push(...gateMcpTools(mcpManager.getToolEntries(), approvalController));
   }
 
   // Expose MCP prompts as slash commands. Queried live at each lookup so

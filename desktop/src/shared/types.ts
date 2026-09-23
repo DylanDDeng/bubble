@@ -114,6 +114,8 @@ export type DeepseekReasoningEffort = 'off' | 'low' | 'high' | 'max';
 export type OpenCodePermissionMode = 'defaultPermissions' | 'plan' | 'fullAccess';
 // Mirrors Bubble SDK's PermissionMode union (runTurn({ mode })).
 export type BubblePermissionMode = 'default' | 'plan' | 'bypassPermissions';
+/** Mode a Bubble turn switches to once the user approves a plan. */
+export type BubblePlanExitMode = Exclude<BubblePermissionMode, 'plan'>;
 export type QoderPermissionMode =
   | 'default'
   | 'acceptEdits'
@@ -1088,6 +1090,8 @@ export interface SessionStartPayload {
   opencodePermissionMode?: OpenCodePermissionMode;
   qoderPermissionMode?: QoderPermissionMode;
   bubblePermissionMode?: BubblePermissionMode;
+  /** Composer's non-plan mode, restored when a plan is approved. */
+  bubblePlanExitMode?: BubblePlanExitMode;
   /** Bubble thinking level (per-model open set, e.g. low/medium/high/max). */
   bubbleThinkingLevel?: string;
   teamMode?: SessionTeamMode;
@@ -1169,6 +1173,8 @@ export interface SessionContinuePayload {
   opencodePermissionMode?: OpenCodePermissionMode;
   qoderPermissionMode?: QoderPermissionMode;
   bubblePermissionMode?: BubblePermissionMode;
+  /** Composer's non-plan mode, restored when a plan is approved. */
+  bubblePlanExitMode?: BubblePlanExitMode;
   /** Bubble thinking level (per-model open set). Absent = SDK/model default. */
   bubbleThinkingLevel?: string;
   teamMode?: SessionTeamMode;

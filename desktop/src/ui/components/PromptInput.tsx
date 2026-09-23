@@ -98,6 +98,7 @@ import {
   getLatestBubbleContextSnapshot,
   isClaudeUsageModelMatch,
 } from '../utils/context-usage';
+import { toBubblePlanExitMode } from '../utils/bubble-permission';
 
 function isImeComposingEvent(
   event: ReactKeyboardEvent,
@@ -959,6 +960,10 @@ export function PromptInput({
                 ? 'plan'
                 : agentSelection.bubblePermissionMode
               : undefined,
+          bubblePlanExitMode:
+            runtimeProvider === 'bubble'
+              ? toBubblePlanExitMode(agentSelection.bubblePermissionMode)
+              : undefined,
           bubbleThinkingLevel:
             runtimeProvider === 'bubble'
               ? agentSelection.bubbleThinkingLevel || undefined
@@ -1078,6 +1083,10 @@ export function PromptInput({
             ? agentSelection.bubbleExecutionMode === 'plan'
               ? 'plan'
               : agentSelection.bubblePermissionMode
+            : undefined,
+        bubblePlanExitMode:
+          runtimeProvider === 'bubble'
+            ? toBubblePlanExitMode(agentSelection.bubblePermissionMode)
             : undefined,
         bubbleThinkingLevel:
           runtimeProvider === 'bubble'

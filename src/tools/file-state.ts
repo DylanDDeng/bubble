@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { stat, readFile } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
+import { resolveThroughLinks } from "./path-utils.js";
 
 export type FileObservationSource = "read" | "write" | "edit";
 
@@ -98,7 +99,16 @@ export class FileStateTracker {
   }
 }
 
+/**
+ * Inside the workspace both as written and where symlinks actually lead, so
+ * a link inside the repository cannot carry an auto-approved write outside.
+ */
 export function isWithinWorkspace(cwd: string, filePath: string): boolean {
-  const rel = relative(resolve(cwd), filePath);
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  return isInside(resolve(cwd), resolve(filePath))
+    && isInside(resolveThroughLinks(cwd), resolveThroughLinks(filePath));
+}
+
+function isInside(root: string, path: string): boolean {
+  const rel = relative(root, path);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }

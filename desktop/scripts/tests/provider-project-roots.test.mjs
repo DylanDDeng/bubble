@@ -27,10 +27,15 @@ try {
   assert(!covered([path.join(extra, '../outside/file.txt')]));
   fs.symlinkSync(outside, path.join(extra, 'escape'));
   assert(!covered([path.join(extra, 'escape/new/file.txt')]));
+  // Writing through a dangling link creates its target outside the project.
+  fs.symlinkSync(path.join(outside, 'created-later.txt'), path.join(extra, 'dangling'));
+  assert(!covered([path.join(extra, 'dangling')]));
   assert(!covered([extra, outside]));
   const fileApproval = (request, mode = 'default') => access.isProjectFileApproval(row.id, primary, mode, request);
   assert(fileApproval({ type: 'write', path: path.join(extra, 'file.txt') }));
   assert(!fileApproval({ type: 'write', path: extra }, 'plan'));
+  // Protected files (.git, permission settings) always reach the user.
+  assert(!fileApproval({ type: 'write', path: path.join(extra, '.bubble/settings.json'), protectedPath: true }));
   assert(!fileApproval({ type: 'bash', command: `touch ${extra}/file` }));
   assert(!fileApproval({ type: 'agent_profile', path: extra }));
   assert(fileApproval({ type: 'patch', paths: [extra, primary], files: [{path:extra}, {path:primary}] }));

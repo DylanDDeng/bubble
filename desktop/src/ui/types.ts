@@ -118,6 +118,7 @@ export type {
   QoderModelOption,
   QoderPermissionMode,
   BubblePermissionMode,
+  BubblePlanExitMode,
   KimiPermissionMode,
   KimiThinking,
   KimiRuntimeStatus,

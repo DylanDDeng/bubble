@@ -1371,7 +1371,7 @@ describe("slash commands", () => {
 
     let result = await slashRegistry.execute("/permissions", ctx);
     expect(result.handled).toBe(true);
-    expect(result.result).toContain("Session bash allowlist");
+    expect(result.result).toContain("Session-approved bash commands");
     expect(result.result).toContain("git status");
     expect(result.result).toContain("npm test");
 

@@ -4,7 +4,7 @@ import {
   sanitizeInternalReasoningText,
   sanitizeInternalReminderBlocks,
 } from "./agent/internal-reminder-sanitizer.js";
-import type { AssistantMessage, Message } from "./types.js";
+import type { AssistantMessage, Message, PermissionMode } from "./types.js";
 import type {
   LegacySessionEntry,
   SessionAssistantMessageEntry,
@@ -16,6 +16,7 @@ import type {
 } from "./session-types.js";
 import type { SanitizedProviderError } from "./provider-error-record.js";
 import { tryCheckpointMessages } from "./context/checkpoint.js";
+import { isPermissionModeReminder, reminderForMode } from "./prompt/reminders.js";
 
 /** Records that change conversational context or its execution state.
  * Keep this shared by revision hashing and checkpoint receipt supersession.
@@ -179,13 +180,31 @@ export class SessionLog {
     // Its projection is unusable, but its position still proves the originals
     // before it were committed at a complete-tool-group model boundary.
     let unreadableBoundaryLength = 0;
+    // Permission-mode switches become mode reminders where they happened, so
+    // the model reads the mode timeline in order: a later "plan mode is
+    // active" outranks an earlier tool result saying the mode went back to
+    // default. A switch is written out before the next user message (never
+    // inside a tool group); one from before a compaction/clear boundary still
+    // applies and opens the replayed history.
+    let pendingMode = lastModeSwitchBefore(this.entries, startIndex);
+    const flushMode = (): void => {
+      if (pendingMode === undefined) return;
+      messages.push({ role: "meta", kind: "system-reminder", content: reminderForMode(pendingMode) });
+      pendingMode = undefined;
+    };
     for (let index = startIndex; index < this.entries.length; index++) {
       const entry = this.entries[index];
       switch (entry.type) {
+        case "marker": {
+          const mode = entry.kind === "mode_switch" ? permissionModeOf(entry.value) : undefined;
+          if (mode) pendingMode = mode;
+          break;
+        }
         case "context_checkpoint":
           unreadableBoundaryLength = messages.length;
           break;
         case "user_message":
+          flushMode();
           messages.push(cloneMessage(entry.message));
           break;
         case "assistant_message":
@@ -220,6 +239,9 @@ export class SessionLog {
           break;
       }
     }
+
+    flushMode();
+    retireStaleModeReminders(messages);
 
     // A committed checkpoint may end in completed tools without a final text
     // response. It is a resumable model boundary, not an interrupted user turn.
@@ -369,6 +391,34 @@ function cloneProviderMetadata<T>(metadata: T | undefined): T | undefined {
 
 // A checkpoint can split a user turn. Its continuation has no user anchor,
 // so validate complete tool groups directly rather than relying on turn pruning.
+const PERMISSION_MODES = new Set<PermissionMode>(["default", "plan", "bypassPermissions"]);
+
+function permissionModeOf(value: string): PermissionMode | undefined {
+  return PERMISSION_MODES.has(value as PermissionMode) ? value as PermissionMode : undefined;
+}
+
+function lastModeSwitchBefore(entries: SessionLogEntry[], end: number): PermissionMode | undefined {
+  for (let index = end - 1; index >= 0; index--) {
+    const entry = entries[index];
+    if (entry.type === "marker" && entry.kind === "mode_switch") {
+      const mode = permissionModeOf(entry.value);
+      if (mode) return mode;
+    }
+  }
+  return undefined;
+}
+
+/** Only the latest mode reminder speaks to the model, as in a live agent. */
+function retireStaleModeReminders(messages: Message[]): void {
+  let latest = true;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role !== "meta" || message.kind !== "system-reminder" || !isPermissionModeReminder(message.content)) continue;
+    if (latest) latest = false;
+    else message.includeInLlm = false;
+  }
+}
+
 function pruneIncompleteToolGroups(messages: Message[]): Message[] {
   const pending = new Set<string>();
   let groupStart = -1;

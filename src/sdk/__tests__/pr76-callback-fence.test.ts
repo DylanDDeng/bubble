@@ -7,6 +7,7 @@ import type { Message } from "../../types.js";
 import { Agent } from "../../agent.js";
 import { SessionManager } from "../../session.js";
 import { createSanitizedProviderError } from "../../provider-error-record.js";
+import { splitLeadingContext } from "../../context/compact.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -38,12 +39,16 @@ describe("PR76 SDK callback history fencing", () => {
       // fenced revision adopts the foreign clear instead of wedging every
       // later write behind the stale snapshot.
       expect(callbacks.getContextRevision()).not.toBe(revision);
-      expect((callbacks as unknown as { messages: Message[] }).messages.filter(m => m.role !== "system")).toEqual([]);
+      // Leading context (system prompt + runtime reminders) survives; the
+      // conversation body is what must match the cleared file.
+      expect(splitLeadingContext((callbacks as unknown as { messages: Message[] }).messages).body).toEqual([]);
       // A write after the rollback goes through — the session is not wedged.
       expect(() => callback === "mode" ? callbacks.onModeUpdate("plan") : callbacks.onProviderError(diagnostic)).not.toThrow();
       yield { type: "done" } as any;
     });
     for await (const _event of sdk.runTurn(id, { prompt: "next" })) { /* drain */ }
-    expect(new SessionManager(session.getSessionFile()).getMessages()).toEqual([]);
+    // The clear stands: no conversation survives it. (A mode switch written
+    // after the clear shows up as its mode reminder, which is not conversation.)
+    expect(new SessionManager(session.getSessionFile()).getMessages().filter(m => m.role !== "meta")).toEqual([]);
   });
 });

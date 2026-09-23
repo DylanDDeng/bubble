@@ -165,6 +165,7 @@ function runProviderServiceAgent(options: RunnerOptions): RunnerHandle {
       opencodePermissionMode: options.opencodePermissionMode,
       qoderPermissionMode: options.qoderPermissionMode,
       bubblePermissionMode: options.bubblePermissionMode,
+      bubblePlanExitMode: options.bubblePlanExitMode,
       bubbleThinkingLevel: options.bubbleThinkingLevel,
       codexSkills: options.codexSkills,
       codexMentions: options.codexMentions,
@@ -294,6 +295,11 @@ function runProviderServiceAgent(options: RunnerOptions): RunnerHandle {
               sendOptions?.opencodePermissionMode ?? options.opencodePermissionMode,
             qoderPermissionMode: sendOptions?.qoderPermissionMode ?? options.qoderPermissionMode,
             bubblePermissionMode: sendOptions?.bubblePermissionMode ?? options.bubblePermissionMode,
+            // Paired with bubblePermissionMode: an exit mode never outlives
+            // the send that chose it.
+            bubblePlanExitMode: sendOptions?.bubblePermissionMode
+              ? sendOptions.bubblePlanExitMode
+              : options.bubblePlanExitMode,
             bubbleThinkingLevel: sendOptions?.bubbleThinkingLevel ?? options.bubbleThinkingLevel,
             codexSkills,
             codexMentions,

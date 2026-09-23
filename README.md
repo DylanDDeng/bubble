@@ -244,7 +244,7 @@ Bubble gates risky actions behind a permission mode. Press `Tab` to cycle modes 
 
 | Mode | Behavior |
 | --- | --- |
-| Default (Build) | File edits and writes auto-approve; bash and other tools prompt unless covered by an allow rule. |
+| Default (Build) | Workspace file edits and writes auto-approve, except protected files (`.git/`, `.bubble/settings*.json`, `.claude/settings*.json`). Bash, MCP tools and edits outside the workspace prompt unless covered by an allow rule or an "allow for this session" approval. |
 | Plan | Read-only investigation. The agent proposes a plan and waits for your approval before making changes. |
 | Bypass | Auto-approves every tool and disables all safety prompts. Enable deliberately with `--dangerously-skip-permissions`. |
 
@@ -253,6 +253,10 @@ Allow/deny rules are configured per scope and persisted across sessions. Manage 
 - `~/.bubble/settings.json` — user scope (applies everywhere)
 - `<project>/.bubble/settings.json` — project scope (commit to share with your team)
 - `<project>/.bubble/settings.local.json` — local overrides (gitignore)
+
+The two project files arrive with the repository, so what they grant — allow rules, `mcpServers` (which Bubble would start) and LSP server definitions — only loads once you trust the folder. Like Kimi Code, Bubble asks when it opens such a folder (at startup in the terminal, on the first message in the desktop app), listing what would be enabled; any later change to those settings asks again. Deny rules, and switches that only turn LSP servers off, always apply; deny rules apply even in Bypass mode.
+
+Bash allow rules understand compound commands: every command in `a && b | c` must be covered by some allow rule, and commands with `$(...)`, backticks or file redirections always prompt. Deny rules match any part of the line. "Don't ask again this session" remembers the exact command only. MCP tools are named `mcp__<server>__<tool>`; `mcp__<server>` allows every tool of that server.
 
 Rules use a simple pattern syntax, for example:
 

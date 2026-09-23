@@ -64,6 +64,7 @@ import type { Attachment, SessionView } from '../types';
 import type { CodexReferencePayload } from '../utils/codex-composer';
 import { DEFAULT_WORKSPACE_CHANNEL_ID } from '../../shared/types';
 import { createBoardTaskStartPayload } from '../utils/board-task-start';
+import { toBubblePlanExitMode } from '../utils/bubble-permission';
 
 export function BoardView() {
   const sessions = useAppStore((state) => state.sessions);
@@ -1049,6 +1050,10 @@ function BoardTaskComposer({
         ? agentSelection.bubbleExecutionMode === 'plan'
           ? 'plan'
           : agentSelection.bubblePermissionMode
+        : undefined,
+    bubblePlanExitMode:
+      agentSelection.provider === 'bubble'
+        ? toBubblePlanExitMode(agentSelection.bubblePermissionMode)
         : undefined,
     bubbleThinkingLevel:
       agentSelection.provider === 'bubble'

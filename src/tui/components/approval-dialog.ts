@@ -1,7 +1,6 @@
 import path from "node:path";
 import chalk from "chalk";
 import {
-  decodeKittyPrintable,
   matchesKey,
   truncateToWidth,
   wrapTextWithAnsi,
@@ -9,14 +8,13 @@ import {
   type Focusable,
 } from "@bubblebrain-ai/pi-tui";
 import type { ApprovalRequest } from "../../approval/types.js";
-import { inferBashPrefix } from "../../approval/session-cache.js";
 import { paintSheetLine, padSheetLine, safeSheetText } from "./bottom-sheet.js";
 import { darkTheme, type Theme } from "../model/theme.js";
 import { themeDim, themeForeground } from "../model/theme-style.js";
 
 export type ApprovalDialogChoice =
   | { kind: "approve_once" }
-  | { kind: "approve_bash_prefix"; prefix: string }
+  | { kind: "approve_session" }
   | { kind: "reject" };
 
 interface ApprovalPresentation {
@@ -29,23 +27,10 @@ type ApprovalChoiceKind = ApprovalDialogChoice["kind"];
 interface ApprovalChoiceRow {
   kind: ApprovalChoiceKind;
   label: string;
-  editablePrefix?: boolean;
 }
 
 export interface ApprovalDialogOptions {
-  /** Only advertise session remembering when the host can persist the prefix. */
-  allowBashPrefix?: boolean;
   getTheme?: () => Theme;
-}
-
-function printableInput(data: string): string | undefined {
-  const decoded = decodeKittyPrintable(data);
-  if (decoded !== undefined) return decoded;
-  // ProcessTerminal has already unwrapped bracketed paste. Reject raw control
-  // input here so an escape sequence can never become part of an allow rule.
-  // eslint-disable-next-line no-control-regex
-  if (!data || /[\u0000-\u001f\u007f-\u009f]/.test(data)) return undefined;
-  return data;
 }
 
 function bashCommandLabel(command: string): string {
@@ -130,7 +115,6 @@ function styleDetail(request: ApprovalRequest, detail: string, index: number, th
 export class ApprovalDialogComponent implements Component, Focusable {
   focused = false;
   private selectedIndex = 0;
-  private bashPrefix: string;
 
   onSelect?: (choice: ApprovalDialogChoice) => void;
   onCancel?: () => void;
@@ -139,18 +123,24 @@ export class ApprovalDialogComponent implements Component, Focusable {
     private readonly request: ApprovalRequest,
     private readonly getTerminalRows: () => number,
     private readonly options: ApprovalDialogOptions = {},
-  ) {
-    this.bashPrefix = request.type === "bash" ? inferBashPrefix(request.command) : "";
-  }
+  ) {}
 
+  /**
+   * "This session" appears only when the approval controller attached a
+   * sessionGrant: the exact bash command, or an MCP tool name.
+   */
   private choices(): ApprovalChoiceRow[] {
+    const grant = this.request.type === "bash" || this.request.type === "external_tool"
+      ? this.request.sessionGrant
+      : undefined;
     return [
       { kind: "approve_once", label: "Yes, proceed" },
-      ...(this.request.type === "bash" && this.options.allowBashPrefix
+      ...(grant
         ? [{
-            kind: "approve_bash_prefix" as const,
-            label: "Yes, don't ask again for",
-            editablePrefix: true,
+            kind: "approve_session" as const,
+            label: this.request.type === "bash"
+              ? "Yes, and don't ask again for this exact command this session"
+              : `Yes, don't ask again this session for ${safeSheetText(grant)}`,
           }]
         : []),
       { kind: "reject", label: "No, reject" },
@@ -212,10 +202,7 @@ export class ApprovalDialogComponent implements Component, Focusable {
     for (const { choice, index } of visibleChoices) {
       const selected = index === this.selectedIndex;
       const radio = selected ? "●" : "○";
-      const prefix = choice.editablePrefix
-        ? ` [${safeSheetText(this.bashPrefix) || "command prefix"}${selected ? "▏" : ""}]`
-        : "";
-      const label = `${index + 1} (${radio}) ${choice.label}${prefix}`;
+      const label = `${index + 1} (${radio}) ${choice.label}`;
       const line = `${indent}${selected
         ? chalk.bold(themeForeground(theme.inputText, label))
         : themeForeground(theme.muted, label)}`;
@@ -228,10 +215,7 @@ export class ApprovalDialogComponent implements Component, Focusable {
     );
 
     if (!showHelp) return paintedPanel;
-    const editing = choices[this.selectedIndex]?.editablePrefix;
-    const help = editing
-      ? `${this.selectedIndex + 1}/${choices.length} select  │  type/backspace edit prefix  │  Ctrl+U clear  │  Enter confirm  │  Esc deny`
-      : `${this.selectedIndex + 1}/${choices.length} select  │  Tab next  │  Enter confirm  │  Esc deny`;
+    const help = `${this.selectedIndex + 1}/${choices.length} select  │  Tab next  │  Enter confirm  │  Esc deny`;
     return [...paintedPanel, themeDim(theme.dim, padSheetLine(help, safeWidth))];
   }
 
@@ -251,33 +235,12 @@ export class ApprovalDialogComponent implements Component, Focusable {
     }
     const selected = choices[this.selectedIndex];
     if (!selected) return;
-    if (selected.editablePrefix && (matchesKey(data, "backspace") || matchesKey(data, "delete"))) {
-      this.bashPrefix = Array.from(this.bashPrefix).slice(0, -1).join("");
-      return;
-    }
-    if (selected.editablePrefix && matchesKey(data, "ctrl+u")) {
-      this.bashPrefix = "";
-      return;
-    }
     if (matchesKey(data, "enter")) {
-      if (selected.kind === "approve_bash_prefix") {
-        const prefix = this.bashPrefix.trim();
-        if (!prefix) return;
-        this.onSelect?.({ kind: selected.kind, prefix });
-      } else {
-        this.onSelect?.({ kind: selected.kind });
-      }
+      this.onSelect?.({ kind: selected.kind });
       return;
     }
     if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
       this.onCancel?.();
-      return;
-    }
-    if (selected.editablePrefix) {
-      const printable = printableInput(data);
-      if (printable !== undefined) {
-        this.bashPrefix += safeSheetText(printable).replace(/[\r\n\t]+/g, " ");
-      }
     }
   }
 

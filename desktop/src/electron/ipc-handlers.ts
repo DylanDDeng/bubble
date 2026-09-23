@@ -598,6 +598,12 @@ function normalizeBubblePermissionMode(
     : undefined;
 }
 
+function normalizeBubblePlanExitMode(
+  value?: string | null
+): import('../shared/types').BubblePlanExitMode | undefined {
+  return value === 'default' || value === 'bypassPermissions' ? value : undefined;
+}
+
 // Bubble thinking levels are the SDK's fixed THINKING_LEVELS union
 // (off/minimal/low/medium/high/xhigh/max/ultra); per-model validity against
 // the catalog's reasoningLevels is the composer's job.
@@ -9089,6 +9095,7 @@ async function handleSessionStart(
     opencodePermissionMode,
     qoderPermissionMode,
     bubblePermissionMode,
+    bubblePlanExitMode,
     bubbleThinkingLevel,
     teamMode,
     teamId,
@@ -9186,6 +9193,8 @@ async function handleSessionStart(
     chosenProvider === 'bubble' ? normalizeBubblePermissionMode(bubblePermissionMode) : undefined;
   const selectedBubbleThinkingLevel =
     chosenProvider === 'bubble' ? normalizeBubbleThinkingLevel(bubbleThinkingLevel) : undefined;
+  const selectedBubblePlanExitMode =
+    chosenProvider === 'bubble' ? normalizeBubblePlanExitMode(bubblePlanExitMode) : undefined;
   const selectedDeepseekPermissionMode =
     chosenProvider === 'deepseek' ? normalizeDeepseekPermissionMode(deepseekPermissionMode) : undefined;
   const selectedDeepseekAgentPreset =
@@ -9478,7 +9487,8 @@ async function handleSessionStart(
     selectedDeepseekPermissionMode,
     selectedDeepseekReasoningEffort,
     selectedBubbleThinkingLevel,
-    payload.codexGoal
+    payload.codexGoal,
+    selectedBubblePlanExitMode
   );
   return session.id;
 }
@@ -9516,6 +9526,7 @@ async function handleSessionContinue(
     opencodePermissionMode,
     qoderPermissionMode,
     bubblePermissionMode,
+    bubblePlanExitMode,
     bubbleThinkingLevel,
     teamMode,
     teamId,
@@ -9689,6 +9700,9 @@ async function handleSessionContinue(
     : undefined;
   const nextBubbleThinkingLevel = nextProvider === 'bubble'
     ? normalizeBubbleThinkingLevel(bubbleThinkingLevel)
+    : undefined;
+  const nextBubblePlanExitMode = nextProvider === 'bubble'
+    ? normalizeBubblePlanExitMode(bubblePlanExitMode)
     : undefined;
   const nextKimiThinking = nextProvider === 'kimi'
     ? normalizeKimiThinking(kimiThinking)
@@ -10065,6 +10079,7 @@ async function handleSessionContinue(
         opencodePermissionMode: nextOpenCodePermissionMode,
         qoderPermissionMode: nextQoderPermissionMode,
         bubblePermissionMode: nextBubblePermissionMode,
+        bubblePlanExitMode: nextBubblePlanExitMode,
         bubbleThinkingLevel: nextBubbleThinkingLevel,
       });
       existingEntry.handle.send(
@@ -10210,7 +10225,9 @@ async function handleSessionContinue(
     nextBubblePermissionMode,
     nextDeepseekPermissionMode,
     nextDeepseekReasoningEffort,
-    nextBubbleThinkingLevel
+    nextBubbleThinkingLevel,
+    undefined,
+    nextBubblePlanExitMode
   );
   return true;
 }
@@ -10259,7 +10276,8 @@ function startRunner(
   deepseekPermissionMode?: import('../shared/types').DeepseekPermissionMode,
   deepseekReasoningEffort?: import('../shared/types').DeepseekReasoningEffort,
   bubbleThinkingLevel?: string,
-  codexGoal?: GoalAction
+  codexGoal?: GoalAction,
+  bubblePlanExitMode?: import('../shared/types').BubblePlanExitMode
 ): void {
   if (!session) return;
 
@@ -10368,6 +10386,7 @@ function startRunner(
     opencodePermissionMode,
     qoderPermissionMode,
     bubblePermissionMode,
+    bubblePlanExitMode,
     bubbleThinkingLevel,
     onMessage: (message) => {
       // A runner the user stopped that has since been retired or replaced is

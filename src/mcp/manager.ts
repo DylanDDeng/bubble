@@ -8,6 +8,8 @@
  */
 
 import type { ToolRegistryEntry, ToolResult, ToolSchema } from "../types.js";
+import type { ApprovalController } from "../approval/types.js";
+import { gateToolAction } from "../approval/tool-helper.js";
 import type { UnifiedCommand } from "../slash-commands/unified.js";
 import { MCPClient, type PromptContentBlock, type PromptMessage } from "./client.js";
 import { HttpTransport, StdioTransport } from "./transports.js";
@@ -126,7 +128,10 @@ export class McpManager {
     return [...this.connections.values()].map((c) => c.state);
   }
 
-  /** Produce ToolRegistryEntry[] for every tool from every connected server. */
+  /**
+   * Produce ToolRegistryEntry[] for every tool from every connected server.
+   * Hosts must pass them through gateMcpTools before handing them to an agent.
+   */
   getToolEntries(): ToolRegistryEntry[] {
     const entries: ToolRegistryEntry[] = [];
     for (const conn of this.connections.values()) {
@@ -337,4 +342,33 @@ function formatToolContent(content: Array<{ type: string; text?: string; data?: 
     }
   }
   return parts.join("\n");
+}
+
+/**
+ * Puts MCP tools behind the approval controller. MCP servers can do anything
+ * (open PRs, post messages, write databases) and their read-only hints are
+ * self-reported, so each call is an `external_tool` request: allowed by rules
+ * (`mcp__server__tool`, or `mcp__server` for the whole server), a session
+ * grant, or bypassPermissions — otherwise the user is asked.
+ */
+export function gateMcpTools(
+  tools: ToolRegistryEntry[],
+  approval: ApprovalController | undefined,
+): ToolRegistryEntry[] {
+  if (!approval) return tools;
+  return tools.map((tool) => ({
+    ...tool,
+    requiresApproval: true,
+    async execute(args, ctx) {
+      const gate = await gateToolAction(approval, {
+        type: "external_tool",
+        toolCallId: ctx?.toolCall?.id ?? "",
+        title: tool.name,
+        kind: "mcp",
+        rawInput: args,
+      });
+      if (!gate.approved) return gate.result;
+      return tool.execute(args, ctx);
+    },
+  }));
 }

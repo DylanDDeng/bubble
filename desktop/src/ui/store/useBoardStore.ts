@@ -63,6 +63,7 @@ export type BoardSessionConfig = Pick<
   | 'opencodePermissionMode'
   | 'qoderPermissionMode'
   | 'bubblePermissionMode'
+  | 'bubblePlanExitMode'
   | 'bubbleThinkingLevel'
 >;
 

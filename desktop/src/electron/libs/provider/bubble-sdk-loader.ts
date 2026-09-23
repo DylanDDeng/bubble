@@ -98,6 +98,8 @@ export type BubbleApprovalRequest = { type: string } & Record<string, unknown>;
 export type BubbleApprovalDecision = {
   action: 'approve' | 'reject';
   feedback?: string;
+  /** Approve the request's `sessionGrant` scope for the rest of the session. */
+  remember?: 'session';
 };
 
 export type BubbleQuestionOption = { label: string; description: string };
@@ -133,12 +135,16 @@ export type BubbleRunTurnOptions = {
   prompt: string | BubbleContentPart[];
   model?: string;
   mode?: string;
+  /** Mode the SDK switches to when a plan is approved; older runtimes ignore it. */
+  planExitMode?: string;
   thinkingLevel?: string;
   signal?: AbortSignal;
   onStart?: (info: BubbleTurnStartInfo) => void;
   onApproval?: (req: BubbleApprovalRequest) => Promise<BubbleApprovalDecision>;
   onQuestion?: (req: BubbleQuestionRequest) => Promise<BubbleQuestionAnswer[] | null>;
   onPlanApproval?: (planMarkdown: string) => Promise<boolean>;
+  /** Folder trust for the session folder's .bubble settings; older runtimes never call it. */
+  onProjectTrust?: (request: { cwd: string; pending: BubbleRepoCapabilities }) => Promise<boolean>;
 };
 
 export type BubbleSessionSummary = {
@@ -214,6 +220,13 @@ export type BubbleProviderRegistry = {
    * the network, so it backs the picker's first frame.
    */
   localModelsForProvider(provider: BubbleProviderProfile): BubbleModelInfo[];
+};
+
+/** Repository settings waiting for trust (SDK RepoCapabilities). */
+export type BubbleRepoCapabilities = {
+  allow: string[];
+  mcpServers: string[];
+  lspServers: string[];
 };
 
 export type BubbleSdkInstance = {

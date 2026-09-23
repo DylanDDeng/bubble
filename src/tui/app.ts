@@ -400,17 +400,10 @@ export class PiTuiApp {
     if (approvalHandlerRef) {
       approvalHandlerRef.current = async (request: ApprovalRequest) => {
         const choice = await this.approvalDialog(request);
-        if (choice.kind === "approve_bash_prefix") {
-          if (request.type !== "bash" || !this.options.bashAllowlist) {
-            return {
-              action: "reject" as const,
-              feedback: "This host cannot remember Bash approvals for the current session.",
-            };
-          }
-          // Session-scoped and command-scoped: PermissionAwareApprovalController
-          // consults this same instance before opening the next dialog.
-          this.options.bashAllowlist.add(choice.prefix);
-          return { action: "approve" as const };
+        // "This session": the approval controller records the request's
+        // sessionGrant (exact bash command / MCP tool) before the next dialog.
+        if (choice.kind === "approve_session") {
+          return { action: "approve" as const, remember: "session" as const };
         }
         return choice.kind === "approve_once"
           ? { action: "approve" as const }
@@ -1689,7 +1682,6 @@ export class PiTuiApp {
         request,
         () => this.tui.terminal.rows,
         {
-          allowBashPrefix: this.options.bashAllowlist !== undefined,
           getTheme: () => this.theme,
         },
       );

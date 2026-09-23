@@ -26,6 +26,7 @@ import { createRoutableModelIndex, createRoutingSnapshotAccessor } from "../../a
 import { buildModelRoutingPrompt } from "../../prompt/routing.js";
 import { FileStateTracker } from "../../tools/file-state.js";
 import { buildToolPromptOptions, createAllTools, type PlanController } from "../../tools/index.js";
+import { gateMcpTools } from "../../mcp/manager.js";
 import { displayModel, encodeModel, decodeModel } from "../../provider-registry.js";
 import { buildMemoryPrompt, recordMemoryCitations } from "../../memory/index.js";
 import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingLevel } from "../../provider-transform.js";
@@ -118,7 +119,7 @@ export class RunDriver {
       // questionController intentionally omitted — Feishu v1 doesn't surface
       // the question tool to the agent.
     });
-    tools.push(...this.opts.deps.mcpManager.getToolEntries());
+    tools.push(...gateMcpTools(this.opts.deps.mcpManager.getToolEntries(), approvalController));
 
     const promptCacheKey = session.manager.getOrCreatePromptCacheKey();
     const { provider, providerId, model } = await this.resolveProvider(session, promptCacheKey);

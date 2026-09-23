@@ -49,6 +49,7 @@ import { buildCodexReferencePayload } from '../utils/codex-composer';
 import { insertProjectFileMention } from '../utils/project-file-mentions';
 import { buildPromptWithProjectFileMentions } from '../utils/project-file-mention-context';
 import { removeSelectedSlashCommandPrompt } from '../utils/claude-slash';
+import { toBubblePlanExitMode } from '../utils/bubble-permission';
 import {
   getLongPromptAttachmentFallbackMessage,
   LONG_PROMPT_AUTO_ATTACHMENT_THRESHOLD,
@@ -379,6 +380,10 @@ export function NewSessionView() {
             ? agentSelection.bubbleExecutionMode === 'plan'
               ? 'plan'
               : agentSelection.bubblePermissionMode
+            : undefined,
+        bubblePlanExitMode:
+          agentSelection.provider === 'bubble'
+            ? toBubblePlanExitMode(agentSelection.bubblePermissionMode)
             : undefined,
         bubbleThinkingLevel:
           agentSelection.provider === 'bubble'

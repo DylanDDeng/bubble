@@ -15,6 +15,11 @@ export interface PlanController {
   requestApproval(plan: string): Promise<PlanDecision>;
   /** Switch the agent's mode. Called after an approval so the next turn runs unconstrained. */
   setMode(mode: PermissionMode): void;
+  /**
+   * Mode to switch to once the plan is approved — the mode the user was in
+   * before entering plan mode. Defaults to "default" when omitted.
+   */
+  getExitMode?: () => Exclude<PermissionMode, "plan">;
 }
 
 export function createExitPlanModeTool(controller: PlanController): ToolRegistryEntry {
@@ -75,13 +80,14 @@ export function createExitPlanModeTool(controller: PlanController): ToolRegistry
       }
 
       if (decision.action === "approve") {
-        controller.setMode("default");
+        const exitMode = controller.getExitMode?.() ?? "default";
+        controller.setMode(exitMode);
         const finalPlan = decision.plan.trim() || plan;
         const edited = finalPlan !== plan;
         return {
           content:
             `User approved the plan${edited ? " (with edits)" : ""}. ` +
-            `Agent mode has been switched to default — you may now execute the plan using any tools. ` +
+            `Agent mode has been switched to ${exitMode} — you may now execute the plan using any tools. ` +
             `Approved plan:\n\n${finalPlan}`,
         };
       }

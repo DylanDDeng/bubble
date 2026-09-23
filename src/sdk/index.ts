@@ -26,9 +26,17 @@ import {
 } from "./session-turn-coordinator.js";
 import { ReplayEventLog } from "./replay-event-log.js";
 import { SessionManager, type SessionSummary } from "../session.js";
-import { splitLeadingContext } from "../context/compact.js";
+import { isPermissionModeReminder } from "../prompt/reminders.js";
 import { PermissionAwareApprovalController } from "../approval/controller.js";
 import { BashAllowlist } from "../approval/session-cache.js";
+import { SettingsManager } from "../permissions/settings.js";
+import {
+  isRepoConfigTrusted,
+  mergedRepoCapabilities,
+  readRepoSettings,
+  trustRepoConfig,
+  type RepoCapabilities,
+} from "../permissions/trust.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
 import { createAllTools, buildToolPromptOptions, type PlanController } from "../tools/index.js";
 import { buildSystemPrompt } from "../system-prompt.js";
@@ -45,7 +53,7 @@ import { SkillRegistry } from "../skills/registry.js";
 import { parseSkillInvocation } from "../skills/invocation.js";
 import type { SkillSummary } from "../skills/types.js";
 import { GoalStore } from "../goal/store.js";
-import { McpManager } from "../mcp/manager.js";
+import { McpManager, gateMcpTools } from "../mcp/manager.js";
 import { loadMcpConfig } from "../mcp/config.js";
 import { ExternalHookController } from "../hooks/controller.js";
 import { buildMemoryPrompt } from "../memory/store.js";
@@ -97,6 +105,13 @@ export interface TurnHandlers {
   onQuestion?: (req: QuestionRequest) => Promise<QuestionAnswer[] | null>;
   /** Plan-mode proposal. Return true to approve executing the plan. */
   onPlanApproval?: (planMarkdown: string) => Promise<boolean>;
+  /**
+   * Folder trust (Kimi Code style): the session folder's `.bubble` settings
+   * would enable allow rules, MCP servers or LSP servers the user has not
+   * trusted. Return true to trust them. Asked at most once per folder per SDK
+   * instance; without a handler, or on false, they stay off.
+   */
+  onProjectTrust?: (request: { cwd: string; pending: RepoCapabilities }) => Promise<boolean>;
   /** Fired once per turn after provider/model/tools are resolved, before the first event. */
   onStart?: (info: TurnStartInfo) => void;
 }
@@ -107,6 +122,13 @@ export interface RunTurnOptions extends TurnHandlers {
   /** "provider:model" or bare model id (resolved against the default provider). */
   model?: string;
   mode?: PermissionMode;
+  /**
+   * Mode the turn switches to when the user approves a plan (only relevant
+   * when `mode` is "plan"). Hosts pass the mode the user had selected before
+   * entering plan mode, so approving a plan does not silently downgrade
+   * bypassPermissions to default. Defaults to "default".
+   */
+  planExitMode?: Exclude<PermissionMode, "plan">;
   thinkingLevel?: ThinkingLevel;
   /**
    * Extra text appended to the built system prompt. Lets hosts (and the eval
@@ -221,10 +243,14 @@ export class BubbleSdk {
   private readonly mcpEnabled: boolean;
   private readonly cwdBySession = new Map<string, string>();
   private readonly bashAllowlists = new Map<string, BashAllowlist>();
+  private readonly sessionGrants = new Map<string, Set<string>>();
   private readonly turnCoordinator = new SessionTurnCoordinator();
   private readonly turnRuntimes = new Map<string, SdkTurnRuntime>();
   private readonly lastTurnOptions = new Map<string, Omit<RunTurnOptions, "prompt" | "signal">>();
   private readonly mcpToolsByCwd = new Map<string, Promise<ToolRegistryEntry[]>>();
+  private readonly mcpManagersByCwd = new Map<string, Promise<McpManager | null>>();
+  /** Folders whose trust question was already put to the host. */
+  private readonly projectTrustAsked = new Set<string>();
   private readonly inputIdNonce = randomUUID().slice(0, 6);
   private nextTurnInputPrefix = 0;
   private nextDetachedInputId = 0;
@@ -291,6 +317,7 @@ export class BubbleSdk {
     if (resolved) rmSync(resolved.manager.getSessionFile(), { force: true });
     this.cwdBySession.delete(sessionId);
     this.bashAllowlists.delete(sessionId);
+    this.sessionGrants.delete(sessionId);
     this.lastTurnOptions.delete(sessionId);
     this.sessionIndex.delete(sessionId);
     processSessionLocations.delete(sessionId);
@@ -376,6 +403,29 @@ export class BubbleSdk {
       disabledSkills: this.userConfig.getDisabledSkills(),
     });
     return registry.summaries();
+  }
+
+  /**
+   * Ask the host once per folder (onProjectTrust) before this turn loads the
+   * repository's allow rules, MCP servers and LSP servers. Trusting restarts
+   * the folder's MCP servers so newly trusted ones are available right away.
+   */
+  private async resolveProjectTrust(cwd: string, options: RunTurnOptions, signal: AbortSignal): Promise<void> {
+    if (!options.onProjectTrust || this.projectTrustAsked.has(cwd)) return;
+    // Read once: what gets trusted is exactly what the host was shown.
+    const raw = readRepoSettings(cwd);
+    if (isRepoConfigTrusted(cwd, raw)) return;
+    this.projectTrustAsked.add(cwd);
+    const trusted = await awaitWithAbort(
+      options.onProjectTrust({ cwd, pending: mergedRepoCapabilities(raw) }),
+      signal,
+    );
+    if (!trusted) return;
+    trustRepoConfig(cwd, raw);
+    const manager = this.mcpManagersByCwd.get(cwd);
+    this.mcpManagersByCwd.delete(cwd);
+    this.mcpToolsByCwd.delete(cwd);
+    await (await manager?.catch(() => null))?.shutdown().catch(() => undefined);
   }
 
   /** Configured providers + default model, for a host's model picker. */
@@ -489,11 +539,18 @@ export class BubbleSdk {
     const { sessionId, reservation, inputController } = runtime;
     const { manager: session, cwd } = resolved;
     const mode: PermissionMode = options.mode ?? "default";
+    const planExitMode: Exclude<PermissionMode, "plan"> =
+      options.planExitMode === "bypassPermissions" ? "bypassPermissions" : "default";
     const abortSignal = reservation.signal;
 
     let agentRef: Agent | undefined;
     let streamCompleted = false;
     const hookController = new ExternalHookController({ cwd, sessionId });
+    await this.resolveProjectTrust(cwd, options, abortSignal);
+    // Same allow/deny rules as the TUI (user, project and local settings;
+    // repository allow rules only once trusted). Deny rules bind even under
+    // bypassPermissions.
+    const ruleSet = new SettingsManager(cwd).getMerged().ruleSet;
     // Settles as reject the moment the turn aborts, so a tool blocked on a
     // host approval (or question) can never hang the abort path.
     const abortedDecision = new Promise<ApprovalDecision>((resolve) => {
@@ -513,7 +570,10 @@ export class BubbleSdk {
               }),
       },
       bashAllowlist: this.bashAllowlistFor(sessionId),
+      sessionGrants: this.sessionGrantsFor(sessionId),
       cwd,
+      // Read once per turn: edits to settings files apply from the next turn.
+      getRuleSet: () => ruleSet,
       externalHooks: hookController,
     });
     const fileStateTracker = new FileStateTracker(cwd);
@@ -523,13 +583,13 @@ export class BubbleSdk {
         const approved = options.onPlanApproval
           ? await awaitWithAbort(options.onPlanApproval(plan), abortSignal)
           : false;
-        if (approved) {
-          agentRef?.setMode("default");
-          return { action: "approve" as const, plan };
-        }
-        return { action: "reject" as const, reason: "Plan rejected by host" };
+        // exit_plan_mode applies getExitMode() itself on approval.
+        return approved
+          ? { action: "approve" as const, plan }
+          : { action: "reject" as const, reason: "Plan rejected by host" };
       },
       setMode: (m) => agentRef?.setMode(m),
+      getExitMode: () => planExitMode,
     };
     const questionController = new QuestionController();
     const unsubscribeQuestions = questionController.subscribe((event) => {
@@ -562,7 +622,7 @@ export class BubbleSdk {
         goalStore: new GoalStore(),
         checkpoints: () => session.getCheckpoints(),
       });
-      tools.push(...(await awaitWithAbort(this.mcpToolsFor(cwd), abortSignal)));
+      tools.push(...gateMcpTools(await awaitWithAbort(this.mcpToolsFor(cwd), abortSignal), approvalController));
       throwAbortSignal(abortSignal);
 
       const promptCacheKey = session.getOrCreatePromptCacheKey();
@@ -593,8 +653,17 @@ export class BubbleSdk {
         ? `${builtSystemPrompt}\n\n${options.appendSystemPrompt.trim()}`
         : builtSystemPrompt;
 
+      // Host-driven mode changes (picker, /plan, leaving plan) go into the log
+      // as markers, so the rebuilt history states the mode where it changed —
+      // after any older tool result that claimed a different mode.
+      if (latestRecordedMode(session) !== mode && !this.turnCoordinator.isDeleted(sessionId)) {
+        session.appendMarker("mode_switch", mode);
+      }
       const history = session.getMessages();
       let contextRevision = session.getRevision();
+      // The constructor's leading context minus its mode reminder: the history
+      // carries the mode timeline itself (session-log toMessages).
+      let leadingContext: Message[] = [];
       // A fence rejection means the durable log diverged from this turn's
       // resident snapshot (a foreign append or clear landed mid-flight). Refuse
       // the write, then roll the resident transcript back to the file's truth so
@@ -610,7 +679,7 @@ export class BubbleSdk {
           try {
             const reloaded = session.getMessages();
             contextRevision = session.getRevision();
-            agent.messages = [...splitLeadingContext(agent.messages).leading, ...reloaded];
+            agent.messages = [...leadingContext, ...reloaded];
           } catch { /* surface the original write failure */ }
           throw error;
         }
@@ -668,8 +737,16 @@ export class BubbleSdk {
       });
       agentRef = agent;
 
+      leadingContext = agent.messages.filter((message) =>
+        !(message.role === "meta" && isPermissionModeReminder(message.content)),
+      );
       if (history.length > 0) {
-        agent.messages = [{ role: "system", content: systemPrompt }, ...history];
+        // Leading context (system prompt + deferred-tools reminder, never
+        // persisted) stays ahead of the history, at the same position every
+        // turn, so the provider's prefix cache covers the previous turn. The
+        // mode reminder comes from the history's own mode markers instead, so
+        // it is ordered after anything older that mentioned a mode.
+        agent.messages = [...leadingContext, ...history];
       }
 
       reservation.markActive();
@@ -871,6 +948,15 @@ export class BubbleSdk {
     return allowlist;
   }
 
+  private sessionGrantsFor(sessionId: string): Set<string> {
+    let grants = this.sessionGrants.get(sessionId);
+    if (!grants) {
+      grants = new Set();
+      this.sessionGrants.set(sessionId, grants);
+    }
+    return grants;
+  }
+
   /**
    * Default cross-provider subagent factory over this SDK instance's own
    * registry — the same semantics as the TUI's createProviderForRoute. The
@@ -905,18 +991,23 @@ export class BubbleSdk {
     };
   }
 
-  /** MCP servers are started lazily, once per cwd (McpManager has no stop). */
+  /**
+   * MCP servers are started lazily, once per cwd, and restarted only when the
+   * repository's settings get trusted (resolveProjectTrust).
+   */
   private mcpToolsFor(cwd: string): Promise<ToolRegistryEntry[]> {
     if (!this.mcpEnabled) return Promise.resolve([]);
     let cached = this.mcpToolsByCwd.get(cwd);
     if (!cached) {
-      cached = (async () => {
+      const managerPromise = (async () => {
         const loaded = loadMcpConfig({ cwd });
-        if (loaded.servers.length === 0) return [];
+        if (loaded.servers.length === 0) return null;
         const manager = new McpManager({ servers: loaded.servers });
         await manager.start();
-        return manager.getToolEntries();
-      })().catch(() => []);
+        return manager;
+      })().catch(() => null);
+      this.mcpManagersByCwd.set(cwd, managerPromise);
+      cached = managerPromise.then((manager) => manager?.getToolEntries() ?? []);
       this.mcpToolsByCwd.set(cwd, cached);
     }
     return cached;
@@ -1054,6 +1145,19 @@ function throwAbortSignal(signal: AbortSignal): void {
   throw new AgentAbortError(typeof signal.reason === "string" ? signal.reason : "SDK turn cancelled.");
 }
 
+/** The mode the session log last recorded ("default" before any switch). */
+function latestRecordedMode(session: SessionManager): PermissionMode {
+  const entries = session.getEntries();
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index];
+    if (entry.type === "marker" && entry.kind === "mode_switch"
+      && (entry.value === "default" || entry.value === "plan" || entry.value === "bypassPermissions")) {
+      return entry.value;
+    }
+  }
+  return "default";
+}
+
 function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) {
     try {
@@ -1140,6 +1244,7 @@ export {
 export { PermissionAwareApprovalController } from "../approval/controller.js";
 export { BashAllowlist } from "../approval/session-cache.js";
 export type { ApprovalController, ApprovalDecision, ApprovalRequest } from "../approval/types.js";
+export type { RepoCapabilities } from "../permissions/trust.js";
 export { createAllTools, buildToolPromptOptions, type PlanController } from "../tools/index.js";
 export { buildSystemPrompt } from "../system-prompt.js";
 export { FileStateTracker } from "../tools/file-state.js";

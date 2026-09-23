@@ -11,6 +11,12 @@
  * `allow` / `deny` arrays are concatenated across scopes (with the rule text
  * itself carrying provenance via `PermissionRule.source`).
  *
+ * Allow rules and LSP server definitions from the project and local scopes
+ * live inside the repository, so they only take effect once the user trusts
+ * this folder (asked at startup, see trust.ts); until then they are reported in
+ * `untrusted` (MCP servers from those files are gated the same way by
+ * loadMcpConfig).
+ *
  * Parse errors do not fail the load; they collect into `diagnostics` so callers
  * can surface them in /permissions or on startup without taking the agent down.
  */
@@ -21,6 +27,7 @@ import { getBubbleHome } from "../bubble-home.js";
 import type { PermissionMode } from "../types.js";
 import { normalizeLspConfig, type LspConfig } from "../lsp/config.js";
 import { parseRules } from "./rule.js";
+import { isRepoConfigTrusted, repoCapabilities, trustRepoConfig, type RepoCapabilities } from "./trust.js";
 import type { PermissionRule, PermissionRuleSet } from "./types.js";
 
 export type SettingsScope = "user" | "project" | "local";
@@ -45,6 +52,10 @@ export interface MergedSettings {
   defaultMode?: PermissionMode;
   lsp?: LspConfig;
   ruleSet: PermissionRuleSet;
+  /** Project/local allow rules ignored until the user trusts them. */
+  untrustedAllow: PermissionRule[];
+  /** Everything in the repository settings that waits for trust (allow rules, MCP servers, LSP servers). */
+  untrusted: RepoCapabilities;
   diagnostics: SettingsDiagnostic[];
 }
 
@@ -67,9 +78,15 @@ export class SettingsManager {
     local: null,
   };
   private fileDiagnostics: SettingsDiagnostic[] = [];
+  private readonly cwd: string;
+  private readonly bubbleHome?: string;
+  /** Cached per load: whether the repository's capability settings are trusted. */
+  private repoTrusted = false;
 
   constructor(cwd: string, options: SettingsManagerOptions = {}) {
     const bubbleHome = options.bubbleHome ?? getBubbleHome();
+    this.cwd = cwd;
+    this.bubbleHome = bubbleHome;
 
     this.paths = {
       user: join(bubbleHome, "settings.json"),
@@ -86,6 +103,31 @@ export class SettingsManager {
     for (const scope of ["user", "project", "local"] as SettingsScope[]) {
       this.raw[scope] = this.readFile(scope);
     }
+    this.repoTrusted = isRepoConfigTrusted(this.cwd, this.repoRaw(), { bubbleHome: this.bubbleHome });
+  }
+
+  /**
+   * Trust the repository's current capability settings (allow rules, MCP
+   * servers, LSP servers from the project and local files).
+   */
+  trustRepoConfig(): void {
+    trustRepoConfig(this.cwd, this.repoRaw(), { bubbleHome: this.bubbleHome });
+    this.repoTrusted = true;
+  }
+
+  private repoRaw(): { project: unknown; local: unknown } {
+    return { project: this.raw.project, local: this.raw.local };
+  }
+
+  /**
+   * Bubble's own /permissions edits keep an existing trust: rules the user
+   * adds through Bubble are their decision. An untrusted rule set stays
+   * untrusted — editing it must not launder rules the user never reviewed.
+   */
+  private keepRepoTrustAfterWrite(scope: SettingsScope, wasTrusted: boolean): void {
+    if (scope === "user") return;
+    if (wasTrusted) this.trustRepoConfig();
+    else this.repoTrusted = isRepoConfigTrusted(this.cwd, this.repoRaw(), { bubbleHome: this.bubbleHome });
   }
 
   getPath(scope: SettingsScope): string {
@@ -100,19 +142,28 @@ export class SettingsManager {
     let lsp: LspConfig | undefined;
     const allow: PermissionRule[] = [];
     const deny: PermissionRule[] = [];
+    const untrustedAllow: PermissionRule[] = [];
 
     for (const scope of ["user", "project", "local"] as SettingsScope[]) {
       const data = this.raw[scope];
       if (!data) continue;
       if ("lsp" in data) {
-        const parsed = normalizeLspConfig(data.lsp);
+        const trustedLsp = scope === "user" || this.repoTrusted;
+        const parsed = trustedLsp ? normalizeLspConfig(data.lsp) : untrustedLspSwitches(data.lsp);
+        if (!trustedLsp && repoCapabilities(data).lspServers.length > 0) {
+          diagnostics.push({
+            scope,
+            path: this.paths[scope],
+            message: `Ignored LSP server definitions from this repository (${repoCapabilities(data).lspServers.join(", ")}): the folder is not trusted (Bubble asks at startup).`,
+          });
+        }
         if (parsed === undefined) {
           diagnostics.push({
             scope,
             path: this.paths[scope],
             message: "Ignored lsp setting — expected boolean or object.",
           });
-        } else {
+        } else if (parsed !== null) {
           lsp = parsed;
         }
       }
@@ -134,7 +185,18 @@ export class SettingsManager {
 
       if (Array.isArray(perms.allow)) {
         const parsed = parseRules(perms.allow);
-        allow.push(...parsed.rules);
+        if (scope === "user" || this.repoTrusted) {
+          allow.push(...parsed.rules);
+        } else {
+          untrustedAllow.push(...parsed.rules);
+          if (parsed.rules.length > 0) {
+            diagnostics.push({
+              scope,
+              path: this.paths[scope],
+              message: `Ignored ${parsed.rules.length} allow rule${parsed.rules.length === 1 ? "" : "s"} from this repository: the folder is not trusted (Bubble asks at startup).`,
+            });
+          }
+        }
         for (const err of parsed.errors) {
           diagnostics.push({
             scope,
@@ -161,6 +223,10 @@ export class SettingsManager {
       defaultMode,
       lsp,
       ruleSet: { allow, deny },
+      untrustedAllow,
+      untrusted: this.repoTrusted
+        ? { allow: [], mcpServers: [], lspServers: [] }
+        : mergeCapabilities(repoCapabilities(this.raw.project), repoCapabilities(this.raw.local)),
       diagnostics,
     };
   }
@@ -183,9 +249,11 @@ export class SettingsManager {
     current.push(rule);
     permissions[list] = current;
 
+    const wasTrusted = this.repoTrusted;
     const next: RawSettings = { ...raw, permissions };
     this.writeFile(scope, next);
     this.raw[scope] = next;
+    this.keepRepoTrustAfterWrite(scope, wasTrusted);
     return true;
   }
 
@@ -205,9 +273,11 @@ export class SettingsManager {
     // Drop the key if empty, keep file readable
     if (current.length === 0) delete nextPermissions[list];
 
+    const wasTrusted = this.repoTrusted;
     const next: RawSettings = { ...raw, permissions: nextPermissions };
     this.writeFile(scope, next);
     this.raw[scope] = next;
+    this.keepRepoTrustAfterWrite(scope, wasTrusted);
     return true;
   }
 
@@ -243,4 +313,29 @@ export class SettingsManager {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, JSON.stringify(data, null, 2) + "\n", "utf-8");
   }
+}
+
+/**
+ * What an untrusted repository may still say about LSP: turning it off, or
+ * turning individual servers off. Commands, env and options need trust.
+ * Returns null when nothing usable is left (the scope then does not override).
+ */
+function untrustedLspSwitches(value: unknown): LspConfig | undefined | null {
+  if (typeof value === "boolean") return value === false ? false : null;
+  const parsed = normalizeLspConfig(value);
+  if (parsed === undefined || typeof parsed === "boolean") return parsed;
+  const switches = Object.fromEntries(
+    Object.entries(parsed)
+      .filter(([, server]) => server.disabled === true)
+      .map(([id]) => [id, { disabled: true }]),
+  );
+  return Object.keys(switches).length > 0 ? switches : null;
+}
+
+function mergeCapabilities(a: RepoCapabilities, b: RepoCapabilities): RepoCapabilities {
+  return {
+    allow: [...a.allow, ...b.allow],
+    mcpServers: [...new Set([...a.mcpServers, ...b.mcpServers])],
+    lspServers: [...new Set([...a.lspServers, ...b.lspServers])],
+  };
 }

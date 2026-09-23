@@ -1,5 +1,5 @@
 import { rendererStateStorage } from './renderer-state-storage';
-import type { BubblePermissionMode } from '../types';
+import type { BubblePermissionMode, BubblePlanExitMode } from '../types';
 
 const STORAGE_KEY = 'cowork.preferredBubblePermissionMode';
 
@@ -18,4 +18,9 @@ export function loadPreferredBubblePermissionMode(): BubblePermissionMode {
 export function savePreferredBubblePermissionMode(mode: BubblePermissionMode): void {
   if (typeof window === 'undefined') return;
   rendererStateStorage.setItem(STORAGE_KEY, normalizeBubblePermissionMode(mode));
+}
+
+/** The composer preference as the mode a turn returns to once a plan is approved. */
+export function toBubblePlanExitMode(mode: BubblePermissionMode): BubblePlanExitMode {
+  return mode === 'bypassPermissions' ? 'bypassPermissions' : 'default';
 }

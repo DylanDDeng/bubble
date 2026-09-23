@@ -10,6 +10,7 @@ import type {
   AskUserQuestionInput,
   Attachment,
   BubblePermissionMode,
+  BubblePlanExitMode,
   BubbleSubagentState,
   ContentBlock,
   PermissionResult,
@@ -34,6 +35,7 @@ import {
   type BubbleAgentEvent,
   type BubbleApprovalDecision,
   type BubbleApprovalRequest,
+  type BubbleRepoCapabilities,
   type BubbleContentPart,
   type BubbleQuestionPrompt,
   type BubbleQuestionRequest,
@@ -79,6 +81,8 @@ type ActiveBubbleSession = {
   cwd: string;
   model?: string;
   permissionMode?: BubblePermissionMode;
+  /** Mode restored when a plan is approved (the composer's non-plan mode). */
+  planExitMode?: BubblePlanExitMode;
   /** Composer-selected thinking level (open set); undefined = SDK/model default. */
   thinkingLevel?: string;
   /** Model context window from the provider registry (Bubble's turn usage carries none). */
@@ -291,16 +295,37 @@ function describeApproval(request: BubbleApprovalRequest): { toolName: string; q
   }
 }
 
+const APPROVE_SESSION_OPTION_ID = 'approve_session';
+
+function describeRepoCapabilities(caps: BubbleRepoCapabilities): string[] {
+  return [
+    ...caps.allow.map((rule) => `allow rule ${rule}`),
+    ...caps.mcpServers.map((name) => `MCP server ${name} (Bubble starts it)`),
+    ...caps.lspServers.map((id) => `LSP server ${id} (custom command, env or options)`),
+  ];
+}
+
+
 function buildApprovalInput(request: BubbleApprovalRequest): AcpPermissionInput {
-  const { toolName, question } = describeApproval(request);
+  const described = describeApproval(request);
+  // The SDK marks settings/.git writes as protected: say why this edit asks.
+  const question = request.protectedPath === true
+    ? `${described.question} (protected file: can change permissions or run code)`
+    : described.question;
+  // The SDK only sets sessionGrant when one approval can safely cover later
+  // calls (a single simple bash command, an MCP tool).
+  const sessionGrant = getString(request.sessionGrant);
   return {
     kind: 'acp-permission',
     provider: 'bubble',
     question,
     title: question,
-    toolName,
+    toolName: described.toolName,
     options: [
       { optionId: 'approve', name: 'Approve', kind: 'allow_once' },
+      ...(sessionGrant
+        ? [{ optionId: APPROVE_SESSION_OPTION_ID, name: `Always allow ${sessionGrant} this session`, kind: 'allow_always' }]
+        : []),
       { optionId: 'reject', name: 'Reject', kind: 'reject_once' },
     ],
     toolCall: request,
@@ -360,6 +385,7 @@ export class BubbleSdkAdapter implements ProviderAdapter {
       cwd,
       model,
       permissionMode: input.bubblePermissionMode,
+      planExitMode: input.bubblePlanExitMode,
       thinkingLevel: input.bubbleThinkingLevel?.trim() || undefined,
       turnActive: false,
       abortController: null,
@@ -394,6 +420,7 @@ export class BubbleSdkAdapter implements ProviderAdapter {
         attachments: input.attachments,
         model: input.model,
         bubblePermissionMode: input.bubblePermissionMode,
+        bubblePlanExitMode: input.bubblePlanExitMode,
         bubbleThinkingLevel: input.bubbleThinkingLevel,
       });
     }
@@ -440,6 +467,9 @@ export class BubbleSdkAdapter implements ProviderAdapter {
     session.model = model;
     if (input.bubblePermissionMode) {
       session.permissionMode = input.bubblePermissionMode;
+      // Paired with the mode: a send that omits the exit mode falls back to
+      // default instead of inheriting an earlier send's escalation.
+      session.planExitMode = input.bubblePlanExitMode;
     }
     // Per-turn thinking level: a string switches it; undefined keeps the
     // session's current level (the warm envelope omits it for non-bubble
@@ -539,7 +569,11 @@ export class BubbleSdkAdapter implements ProviderAdapter {
     if (pending.kind === 'approval') {
       pending.resolve(
         decision.behavior === 'allow'
-          ? { action: 'approve', ...(decision.message ? { feedback: decision.message } : {}) }
+          ? {
+              action: 'approve',
+              ...(decision.message ? { feedback: decision.message } : {}),
+              ...(decision.updatedInput?.optionId === APPROVE_SESSION_OPTION_ID ? { remember: 'session' as const } : {}),
+            }
           : { action: 'reject', feedback: decision.message?.trim() || 'Denied by user' }
       );
       return;
@@ -790,6 +824,7 @@ export class BubbleSdkAdapter implements ProviderAdapter {
         prompt,
         ...(model ? { model } : {}),
         ...(session.permissionMode ? { mode: session.permissionMode } : {}),
+        ...(session.planExitMode ? { planExitMode: session.planExitMode } : {}),
         ...(session.thinkingLevel ? { thinkingLevel: session.thinkingLevel } : {}),
         signal: abortController.signal,
         onStart: (info) => {
@@ -808,6 +843,7 @@ export class BubbleSdkAdapter implements ProviderAdapter {
         onApproval: (request) => this.requestApproval(session, request),
         onQuestion: (request) => this.requestQuestion(session, request),
         onPlanApproval: (planMarkdown) => this.requestPlanApproval(session, planMarkdown),
+        onProjectTrust: (request) => this.requestProjectTrust(session, request.pending),
       });
       for await (const event of stream) {
         this.handleBubbleEvent(session, event);
@@ -1333,6 +1369,44 @@ export class BubbleSdkAdapter implements ProviderAdapter {
         threadId: session.threadId,
         requestId,
         toolName: 'AskUserQuestion',
+        input,
+      });
+    });
+  }
+
+  /**
+   * Folder trust, the Kimi Code way: before the first turn loads this folder's
+   * .bubble settings (allow rules, MCP servers, LSP servers), ask once.
+   */
+  private requestProjectTrust(session: ActiveBubbleSession, pending: BubbleRepoCapabilities): Promise<boolean> {
+    if (session.status === 'stopped' || this.sessions.get(session.threadId) !== session) {
+      return Promise.resolve(false);
+    }
+    const requestId = uuidv4();
+    const question = "Trust this folder? Its .bubble settings would enable:\n"
+      + describeRepoCapabilities(pending).map((line) => `- ${line}`).join('\n');
+    const input: AcpPermissionInput = {
+      kind: 'acp-permission',
+      provider: 'bubble',
+      question,
+      title: 'Trust this folder?',
+      toolName: 'Folder trust',
+      options: [
+        { optionId: 'approve', name: 'Trust this folder', kind: 'allow_once' },
+        { optionId: 'reject', name: "Don't trust", kind: 'reject_once' },
+      ],
+      toolCall: { type: 'project_trust', ...pending },
+    };
+    return new Promise<boolean>((resolve) => {
+      session.pendingRequests.set(requestId, {
+        kind: 'approval',
+        resolve: (decision) => resolve(decision.action === 'approve'),
+      });
+      this.emit({
+        type: 'permission_request',
+        threadId: session.threadId,
+        requestId,
+        toolName: input.toolName,
         input,
       });
     });

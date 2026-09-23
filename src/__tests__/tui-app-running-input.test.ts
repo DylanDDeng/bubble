@@ -777,13 +777,14 @@ describe("main pi-tui running input", () => {
 
     app.start();
     try {
-      const approved = approvalHandlerRef.current!({ type: "bash", command: "pwd", cwd: "/workspace" });
+      // sessionGrant as the approval controller attaches it when a session allowlist exists.
+      const approved = approvalHandlerRef.current!({ type: "bash", command: "pwd", cwd: "/workspace", sessionGrant: "pwd" });
       await terminal.waitForRender();
       const approvalViewport = terminal.getViewport().join("\n");
       expect(approvalViewport).toContain("Request approval for pwd");
       expect(approvalViewport).toContain("working directory: /workspace");
       expect(approvalViewport).toContain("1 (●) Yes, proceed");
-      expect(approvalViewport).toContain("2 (○) Yes, don't ask again");
+      expect(approvalViewport).toContain("2 (○) Yes, and don't ask again");
       expect(approvalViewport).not.toContain("Tool approval");
       terminal.sendInput("\r");
       await expect(approved).resolves.toEqual({ action: "approve" });
@@ -846,13 +847,13 @@ describe("main pi-tui running input", () => {
         type: "bash",
         command: "npm run build",
         cwd: "/workspace",
+        sessionGrant: "npm run build",
       });
       terminal.sendInput("\t");
       terminal.sendInput("\r");
-      await expect(alwaysApproved).resolves.toEqual({ action: "approve" });
-      expect(bashAllowlist.list()).toEqual(["npm run"]);
-      expect(bashAllowlist.matches("npm run test")).toBe(true);
-      expect(bashAllowlist.matches("git status")).toBe(false);
+      // The approval controller records the exact command; the dialog only
+      // reports the user's choice and never flips the permission mode.
+      await expect(alwaysApproved).resolves.toEqual({ action: "approve", remember: "session" });
       expect(modes).toEqual([]);
     } finally {
       app.dispose();

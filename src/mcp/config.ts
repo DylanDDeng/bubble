@@ -5,6 +5,10 @@
  * identified by its key in mcpServers; if the same name appears in multiple
  * scopes, the higher-precedence scope overwrites, and we record a diagnostic.
  *
+ * Servers from the project and local files arrive with the repository and
+ * Bubble would spawn their commands at startup, so they are skipped until the
+ * user trusts the folder (asked at startup, trust.ts).
+ *
  * Env expansion: ${VAR} in command, args, env values, url, or header values
  * is replaced with the matching process.env entry. Missing vars become empty
  * strings and yield a diagnostic (non-fatal).
@@ -13,6 +17,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getBubbleHome } from "../bubble-home.js";
+import { isRepoConfigTrusted, readRepoSettings } from "../permissions/trust.js";
 import type { McpServerConfig, ScopedMcpServerConfig } from "./types.js";
 
 export interface McpConfigDiagnostic {
@@ -41,6 +46,7 @@ export function loadMcpConfig(options: LoadMcpConfigOptions): LoadedMcpConfig {
 
   const diagnostics: McpConfigDiagnostic[] = [];
   const merged = new Map<string, ScopedMcpServerConfig>();
+  const repoTrusted = isRepoConfigTrusted(options.cwd, readRepoSettings(options.cwd), { bubbleHome });
 
   for (const scope of ["user", "project", "local"] as const) {
     const path = paths[scope];
@@ -55,6 +61,17 @@ export function loadMcpConfig(options: LoadMcpConfigOptions): LoadedMcpConfig {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
     const mcpServers = (raw as { mcpServers?: unknown }).mcpServers;
     if (!mcpServers || typeof mcpServers !== "object" || Array.isArray(mcpServers)) continue;
+    if (scope !== "user" && !repoTrusted) {
+      const names = Object.keys(mcpServers);
+      if (names.length > 0) {
+        diagnostics.push({
+          scope,
+          path,
+          message: `Skipped MCP server${names.length === 1 ? "" : "s"} ${names.join(", ")} from this repository: the folder is not trusted (Bubble asks at startup).`,
+        });
+      }
+      continue;
+    }
 
     for (const [name, value] of Object.entries(mcpServers as Record<string, unknown>)) {
       const validated = validateServerConfig(value, (msg) => {

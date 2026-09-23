@@ -15,6 +15,8 @@ export function isProjectFileApproval(
   threadId: string, cwd: string, mode: string | undefined, request: { type: string } & Record<string, unknown>
 ): boolean {
   if (mode === 'plan') return false;
+  // Protected files (.git, permission settings) always reach the user.
+  if (request.protectedPath === true) return false;
   if (request.type === 'write' || request.type === 'edit') {
     return projectContainsPaths(threadId, cwd, [request.path]);
   }

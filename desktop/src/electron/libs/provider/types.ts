@@ -29,6 +29,7 @@ import type {
   OpenCodePermissionMode,
   QoderPermissionMode,
   BubblePermissionMode,
+  BubblePlanExitMode,
   ClaudeAccessMode,
   ClaudeExecutionMode,
   ClaudeReasoningEffort,
@@ -100,6 +101,8 @@ export interface ProviderSessionStartInput {
   opencodePermissionMode?: OpenCodePermissionMode;
   qoderPermissionMode?: QoderPermissionMode;
   bubblePermissionMode?: BubblePermissionMode;
+  /** Mode restored when the user approves a plan (the composer's non-plan mode). */
+  bubblePlanExitMode?: BubblePlanExitMode;
   /** Bubble thinking level (per-model open set). Absent = SDK/model default. */
   bubbleThinkingLevel?: string;
   claudeAccessMode?: ClaudeAccessMode;
@@ -127,6 +130,8 @@ export interface ProviderSendTurnInput {
   opencodePermissionMode?: OpenCodePermissionMode;
   qoderPermissionMode?: QoderPermissionMode;
   bubblePermissionMode?: BubblePermissionMode;
+  /** Mode restored when the user approves a plan (the composer's non-plan mode). */
+  bubblePlanExitMode?: BubblePlanExitMode;
   /** Bubble thinking level (per-model open set). Absent = SDK/model default. */
   bubbleThinkingLevel?: string;
   codexSkills?: ProviderInputReference[];
