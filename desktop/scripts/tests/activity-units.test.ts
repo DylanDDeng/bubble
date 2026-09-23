@@ -93,6 +93,22 @@ assert.equal(bashKind('grep -rn foo src > hits.txt'), 'command_execution');
 assert.equal(bashKind('cat a.log | tee copy.log'), 'command_execution', 'a pipe into an unrecognized command is not exploration');
 assert.equal(bashKind('cat a.ts && npm test'), 'command_execution', 'exploration never hides other work');
 assert.equal(bashKind('grep -rn "a > b" src'), 'pattern_search', 'quoted > is not a redirect');
+// Setup is shell state only: anything that runs a program is work.
+assert.equal(bashKind('source scripts/setup.sh && cat package.json'), 'command_execution', 'a sourced script runs arbitrary work');
+assert.equal(bashKind("trap 'make clean' EXIT; cat a.ts"), 'command_execution', 'a trap handler runs later');
+assert.equal(bashKind('X=$(make) && cat a.ts'), 'command_execution', 'a command substitution runs a program');
+assert.equal(bashKind('export PATH=/x:$PATH && ls'), 'pattern_search');
+// Read-only programs stop being read-only with their writing/executing options.
+assert.equal(bashKind('cd repo && find . -delete'), 'command_execution');
+assert.equal(bashKind('find . -name "*.tmp" -exec rm {} \;'), 'command_execution');
+assert.equal(bashKind('fd -e log -x rm'), 'command_execution');
+assert.equal(bashKind('rg foo src | sort -o out.txt'), 'command_execution');
+assert.equal(bashKind('cat a.txt | uniq - out.txt'), 'command_execution', 'a second uniq operand is an output file');
+assert.equal(bashKind('find src -name "-delete"'), 'pattern_search', 'quoted text is a value, not an option');
+assert.equal(bashKind('rg foo src | sort | uniq -c'), 'pattern_search');
+// Heredocs end only on an exact delimiter line (`<<-` strips tabs, not spaces).
+assert.equal(bashTitle('cat <<EOF\n EOF \nnpm test\nEOF'), 'Ran cat <<EOF EOF npm test', 'a padded delimiter is body text');
+assert.equal(bashTitle('cat <<-EOF\n\tbody\n\tEOF\nnpm test'), 'Ran cat <<-EOF body +1 more', '<<- strips leading tabs');
 assert.equal(classifyToolUse('mcp__docs__read', {}), 'mcp_tool_call');
 const thoughtMessage: StreamMessage = { type: 'assistant', uuid: 'reasoning-source', message: { content: [{type:'thinking', thinking:'**Checking**\nInspect the files'}] } };
 const before: StreamMessage = { type:'assistant', uuid:'older', message:{content:[{type:'text',text:'Older note'}]} };

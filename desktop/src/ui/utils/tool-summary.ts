@@ -196,7 +196,7 @@ function collapseWhitespace(value: string): string {
 function splitShellStatements(script: string): ShellStatement[] {
   const statements: ShellStatement[] = [];
   // `owner` is the index of the statement that opened the heredoc.
-  const pendingHeredocs: Array<{ delimiter: string; owner: number }> = [];
+  const pendingHeredocs: Array<{ delimiter: string; stripTabs: boolean; owner: number }> = [];
   let current = '';
   let stageStarts: number[] = [];
   let quote: string | null = null;
@@ -244,8 +244,8 @@ function splitShellStatements(script: string): ShellStatement[] {
     }
     // `<<` opens a heredoc; `<<<` is a here-string and has no body.
     if (ch === '<' && next === '<' && script[i + 2] !== '<' && script[i - 1] !== '<' && depth === 0) {
-      const match = script.slice(i + 2).match(/^-?\s*\\?(['"]?)([\w.-]+)\1/);
-      if (match) pendingHeredocs.push({ delimiter: match[2], owner: statements.length });
+      const match = script.slice(i + 2).match(/^(-?)\s*\\?(['"]?)([\w.-]+)\2/);
+      if (match) pendingHeredocs.push({ delimiter: match[3], stripTabs: match[1] === '-', owner: statements.length });
     }
 
     if (ch === '\n') {
@@ -255,12 +255,14 @@ function splitShellStatements(script: string): ShellStatement[] {
       // kept on the statement that opened them, so a `python3 - <<EOF` title
       // still hints at the script.
       while (pendingHeredocs.length > 0) {
-        const { delimiter, owner } = pendingHeredocs.shift()!;
+        const { delimiter, stripTabs, owner } = pendingHeredocs.shift()!;
         while (i < script.length) {
           const lineEnd = script.indexOf('\n', i + 1);
           const line = script.slice(i + 1, lineEnd === -1 ? script.length : lineEnd);
           i = lineEnd === -1 ? script.length : lineEnd;
-          if (line.trim() === delimiter) break;
+          // Bash ends a heredoc only on a line that is exactly the delimiter;
+          // `<<-` additionally strips leading tabs (never spaces).
+          if ((stripTabs ? line.replace(/^\t+/, '') : line) === delimiter) break;
           const statement = statements[owner];
           if (statement && statement.text.length < HEREDOC_PREVIEW_CHARS) {
             statement.text = collapseWhitespace(`${statement.text} ${line}`);
@@ -323,10 +325,13 @@ function stripControlKeywords(statement: string): string {
   return value;
 }
 
-/** Shell setup that changes context but does no work worth titling a row. */
+/**
+ * Builtins that change shell state without running a program. `source` / `.`
+ * (run a script) and `trap` (runs a handler later) are deliberately absent.
+ */
 const SHELL_SETUP_COMMANDS = new Set([
-  'cd', 'pushd', 'popd', 'export', 'set', 'unset', 'source', '.', 'shopt',
-  'trap', 'ulimit', 'umask', 'local', 'declare', 'readonly',
+  'cd', 'pushd', 'popd', 'export', 'set', 'unset', 'shopt',
+  'ulimit', 'umask', 'local', 'declare', 'readonly',
   'break', 'continue', 'true', ':',
 ]);
 
@@ -346,6 +351,8 @@ function isPureAssignment(statement: string): boolean {
 
 function isShellSetup(statement: string): boolean {
   if (!statement) return true;
+  // A command substitution runs a program, e.g. `X=$(make)`.
+  if (/\$\(|`/.test(statement)) return false;
   if (isPureAssignment(statement)) return true;
   return SHELL_SETUP_COMMANDS.has(splitFirstToken(statement).head);
 }
@@ -508,18 +515,71 @@ export function formatReadableToolSummary(display: ReadableToolDisplay): string 
 // names from new providers slot in here rather than fanning out across UI
 // components.
 
-const SHELL_FILE_READERS = new Set([
-  'cat', 'head', 'tail', 'less', 'more', 'bat',
+type ShellExplorerKind = 'file_read' | 'pattern_search' | 'filter';
+
+interface ShellExplorer {
+  kind: ShellExplorerKind;
+  /** Options that make the program write files or run other programs. */
+  unsafeOptions?: string[];
+  /** More operands than this name an output file (`uniq in out`). */
+  maxOperands?: number;
+}
+
+/**
+ * Programs that only read, and the ways each can stop being read-only.
+ * `filter` programs only count after a pipe. Anything not listed here is a
+ * command: exploration is a claim that nothing but reading happened.
+ */
+const SHELL_EXPLORERS = new Map<string, ShellExplorer>([
+  ['cat', { kind: 'file_read' }],
+  ['head', { kind: 'file_read' }],
+  ['tail', { kind: 'file_read' }],
+  ['more', { kind: 'file_read' }],
+  ['bat', { kind: 'file_read' }],
+  ['less', { kind: 'file_read', unsafeOptions: ['-o', '-O', '--log-file', '--LOG-FILE'] }],
+  ['ls', { kind: 'pattern_search' }],
+  ['tree', { kind: 'pattern_search', unsafeOptions: ['-o'] }],
+  ['grep', { kind: 'pattern_search' }],
+  ['rg', { kind: 'pattern_search', unsafeOptions: ['--pre'] }],
+  ['ag', { kind: 'pattern_search', unsafeOptions: ['--pager'] }],
+  ['find', {
+    kind: 'pattern_search',
+    unsafeOptions: ['-delete', '-exec', '-execdir', '-ok', '-okdir', '-fprint', '-fprint0', '-fprintf', '-fls'],
+  }],
+  ['fd', { kind: 'pattern_search', unsafeOptions: ['-x', '--exec', '-X', '--exec-batch'] }],
+  ['glob', { kind: 'pattern_search' }],
+  ['wc', { kind: 'filter' }],
+  ['sort', { kind: 'filter', unsafeOptions: ['-o', '--output'] }],
+  ['uniq', { kind: 'filter', maxOperands: 1 }],
+  ['cut', { kind: 'filter' }],
+  ['tr', { kind: 'filter' }],
+  ['nl', { kind: 'filter' }],
+  ['column', { kind: 'filter' }],
 ]);
 
-const SHELL_SEARCHERS = new Set([
-  'ls', 'tree', 'grep', 'rg', 'ag', 'find', 'fd', 'glob',
-]);
+function hasOption(args: string[], option: string): boolean {
+  return args.some((arg) =>
+    arg === option
+    || (option.startsWith('--') && arg.startsWith(`${option}=`))
+    // A single-letter option can sit in a cluster (`-ro`) or carry its value (`-oout`).
+    || (/^-[A-Za-z]$/.test(option) && /^-[A-Za-z0-9]+$/.test(arg) && arg.slice(1).includes(option[1])));
+}
 
-/** Commands that only reshape text flowing through a pipe. */
-const SHELL_PIPE_FILTERS = new Set([
-  'wc', 'sort', 'uniq', 'cut', 'tr', 'nl', 'column',
-]);
+/** What a pipeline stage explores, or null when it may do anything but read. */
+function getStageExploration(stage: string): ShellExplorerKind | null {
+  const { head, rest } = splitFirstToken(stage);
+  const explorer = SHELL_EXPLORERS.get(head);
+  if (!explorer) return null;
+  // Quoted text is an argument value, never an option.
+  const args = stripQuoted(rest).split(/\s+/).filter(Boolean);
+  if (explorer.unsafeOptions?.some((option) => hasOption(args, option))) return null;
+  // A lone `-` is the stdin operand, not an option.
+  const operands = args.filter((arg) => arg === '-' || !arg.startsWith('-'));
+  if (explorer.maxOperands !== undefined && operands.length > explorer.maxOperands) {
+    return null;
+  }
+  return explorer.kind;
+}
 
 function stripQuoted(text: string): string {
   return text.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, '""');
@@ -540,13 +600,9 @@ function hasWriteOrInlineInput(stage: string): boolean {
 /** How a statement explores, or null when it does anything but read. */
 function getStatementExploration(statement: ShellStatement): 'file_read' | 'pattern_search' | null {
   if (statement.stages.some(hasWriteOrInlineInput)) return null;
-  const [first, ...rest] = statement.stages.map((stage) => splitFirstToken(stage).head);
-  if (rest.some((head) => !SHELL_FILE_READERS.has(head) && !SHELL_SEARCHERS.has(head) && !SHELL_PIPE_FILTERS.has(head))) {
-    return null;
-  }
-  if (SHELL_FILE_READERS.has(first)) return 'file_read';
-  if (SHELL_SEARCHERS.has(first)) return 'pattern_search';
-  return null;
+  const [first, ...rest] = statement.stages.map(getStageExploration);
+  if (rest.includes(null)) return null;
+  return first === 'file_read' || first === 'pattern_search' ? first : null;
 }
 
 /**
