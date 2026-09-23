@@ -114,6 +114,7 @@ const TOOL_VERBS: Record<string, VerbPair> = {
   Delete: ['Deleting', 'Deleted'],
   Glob: ['Finding', 'Found'],
   Grep: ['Searching', 'Searched'],
+  LS: ['Listing', 'Listed'],
   WebFetch: ['Fetching', 'Fetched'],
   WebSearch: ['Searching', 'Searched'],
   Task: ['Running', 'Ran'],
@@ -136,50 +137,6 @@ const TOOL_VERBS: Record<string, VerbPair> = {
   reference_to_video: ['Animating', 'Animated'],
   imagine: ['Generating', 'Generated'],
   'imagine-video': ['Animating', 'Animated'],
-};
-
-const SHELL_TOOL_VERBS: Record<string, VerbPair> = {
-  cat: ['Reading', 'Read'],
-  head: ['Reading', 'Read'],
-  tail: ['Reading', 'Read'],
-  less: ['Reading', 'Read'],
-  more: ['Reading', 'Read'],
-  bat: ['Reading', 'Read'],
-  ls: ['Listing', 'Listed'],
-  tree: ['Listing', 'Listed'],
-  grep: ['Searching', 'Searched'],
-  rg: ['Searching', 'Searched'],
-  ag: ['Searching', 'Searched'],
-  find: ['Finding', 'Found'],
-  fd: ['Finding', 'Found'],
-  rm: ['Removing', 'Removed'],
-  mkdir: ['Creating', 'Created'],
-  touch: ['Creating', 'Created'],
-  cp: ['Copying', 'Copied'],
-  mv: ['Moving', 'Moved'],
-  curl: ['Fetching', 'Fetched'],
-  wget: ['Fetching', 'Fetched'],
-};
-
-const GIT_VERBS: Record<string, VerbPair> = {
-  status: ['Checking', 'Checked'],
-  diff: ['Diffing', 'Diffed'],
-  log: ['Reading', 'Read'],
-  show: ['Reading', 'Read'],
-  add: ['Staging', 'Staged'],
-  commit: ['Committing', 'Committed'],
-  push: ['Pushing', 'Pushed'],
-  pull: ['Pulling', 'Pulled'],
-  fetch: ['Fetching', 'Fetched'],
-  checkout: ['Switching', 'Switched'],
-  switch: ['Switching', 'Switched'],
-  branch: ['Listing', 'Listed'],
-  merge: ['Merging', 'Merged'],
-  rebase: ['Rebasing', 'Rebased'],
-  reset: ['Resetting', 'Reset'],
-  stash: ['Stashing', 'Stashed'],
-  restore: ['Restoring', 'Restored'],
-  blame: ['Reading', 'Read'],
 };
 
 const DEFAULT_VERB: VerbPair = ['Running', 'Ran'];
@@ -218,116 +175,220 @@ function splitFirstToken(command: string): { head: string; rest: string } {
   return { head: match[1], rest: (match[2] || '').trim() };
 }
 
-function firstNonFlagToken(args: string): string | null {
-  const tokens = args.split(/\s+/).filter(Boolean);
-  for (const token of tokens) {
-    if (!token.startsWith('-')) {
-      return token.replace(/^['"]|['"]$/g, '');
-    }
-  }
-  return null;
+const HEREDOC_PREVIEW_CHARS = 200;
+
+interface ShellStatement {
+  /** The statement as written (pipes included), plus a heredoc preview. */
+  text: string;
+  /** Pipeline stages as written, without heredoc bodies. */
+  stages: string[];
 }
 
-function describeBashCommand(command: string, status: ToolStatus): ReadableToolDisplay {
+function collapseWhitespace(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Split a shell script into statements on `&&`, `||`, `;`, `&` and newlines,
+ * ignoring separators inside quotes, `$(...)` and heredoc bodies. Pipeline
+ * stages stay inside their statement: `grep x | head` is one unit of work.
+ */
+function splitShellStatements(script: string): ShellStatement[] {
+  const statements: ShellStatement[] = [];
+  // `owner` is the index of the statement that opened the heredoc.
+  const pendingHeredocs: Array<{ delimiter: string; stripTabs: boolean; owner: number }> = [];
+  let current = '';
+  let stageStarts: number[] = [];
+  let quote: string | null = null;
+  let depth = 0;
+
+  const push = () => {
+    const bounds = [0, ...stageStarts, current.length + 1];
+    const stages = bounds.slice(0, -1)
+      .map((start, index) => collapseWhitespace(current.slice(start, bounds[index + 1] - 1)))
+      .map(stripControlKeywords)
+      .filter(Boolean);
+    if (stages.length > 0) statements.push({ text: stripControlKeywords(collapseWhitespace(current)), stages });
+    current = '';
+    stageStarts = [];
+  };
+
+  for (let i = 0; i < script.length; i += 1) {
+    const ch = script[i];
+    const next = script[i + 1];
+
+    if (quote) {
+      current += ch;
+      if (ch === '\\' && quote === '"' && next !== undefined) {
+        current += next;
+        i += 1;
+      } else if (ch === quote) {
+        quote = null;
+      }
+      continue;
+    }
+
+    if (ch === '\\' && next !== undefined) {
+      current += next === '\n' ? ' ' : ch + next;
+      i += 1;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === '#' && (current === '' || /\s/.test(current[current.length - 1]))) {
+      while (i + 1 < script.length && script[i + 1] !== '\n') i += 1;
+      continue;
+    }
+    // `<<` opens a heredoc; `<<<` is a here-string and has no body.
+    if (ch === '<' && next === '<' && script[i + 2] !== '<' && script[i - 1] !== '<' && depth === 0) {
+      const match = script.slice(i + 2).match(/^(-?)\s*\\?(['"]?)([\w.-]+)\2/);
+      if (match) pendingHeredocs.push({ delimiter: match[3], stripTabs: match[1] === '-', owner: statements.length });
+    }
+
+    if (ch === '\n') {
+      if (depth === 0) push();
+      else current += ' ';
+      // Heredoc bodies are never statements of their own. A short prefix is
+      // kept on the statement that opened them, so a `python3 - <<EOF` title
+      // still hints at the script.
+      while (pendingHeredocs.length > 0) {
+        const { delimiter, stripTabs, owner } = pendingHeredocs.shift()!;
+        while (i < script.length) {
+          const lineEnd = script.indexOf('\n', i + 1);
+          const line = script.slice(i + 1, lineEnd === -1 ? script.length : lineEnd);
+          i = lineEnd === -1 ? script.length : lineEnd;
+          // Bash ends a heredoc only on a line that is exactly the delimiter;
+          // `<<-` additionally strips leading tabs (never spaces).
+          if ((stripTabs ? line.replace(/^\t+/, '') : line) === delimiter) break;
+          const statement = statements[owner];
+          if (statement && statement.text.length < HEREDOC_PREVIEW_CHARS) {
+            statement.text = collapseWhitespace(`${statement.text} ${line}`);
+          }
+        }
+      }
+      continue;
+    }
+
+    if (ch === '(') depth += 1;
+    if (ch === ')' && depth > 0) depth -= 1;
+    if (depth > 0 || ch === ')') {
+      current += ch;
+      continue;
+    }
+
+    if ((ch === '&' && next === '&') || (ch === '|' && next === '|')) {
+      push();
+      i += 1;
+      continue;
+    }
+    if (ch === ';') {
+      push();
+      continue;
+    }
+    if (ch === '&') {
+      const prev = current[current.length - 1];
+      // `2>&1`, `>&2` and `&>` are redirections, not background separators.
+      if (prev === '>' || prev === '<' || next === '>') {
+        current += ch;
+      } else {
+        push();
+      }
+      continue;
+    }
+    if (ch === '|') {
+      current += ch;
+      if (next === '&') {
+        current += next;
+        i += 1;
+      }
+      stageStarts.push(current.length);
+      continue;
+    }
+    current += ch;
+  }
+  push();
+  return statements;
+}
+
+const SHELL_CONTROL_KEYWORD_RE = /^(?:do|then|else|done|fi|esac|\{|\}|!)(?=\s|$)\s*/;
+
+function stripControlKeywords(statement: string): string {
+  let value = statement;
+  let match = value.match(SHELL_CONTROL_KEYWORD_RE);
+  while (match) {
+    value = value.slice(match[0].length);
+    match = value.match(SHELL_CONTROL_KEYWORD_RE);
+  }
+  return value;
+}
+
+/**
+ * Builtins that change shell state without running a program. `source` / `.`
+ * (run a script) and `trap` (runs a handler later) are deliberately absent.
+ */
+const SHELL_SETUP_COMMANDS = new Set([
+  'cd', 'pushd', 'popd', 'export', 'set', 'unset', 'shopt',
+  'ulimit', 'umask', 'local', 'declare', 'readonly',
+  'break', 'continue', 'true', ':',
+]);
+
+// One `NAME=value` word. Matched word by word from a loop: a single
+// `(?:...)+` pattern backtracks exponentially on input like `x=a=a=a=...`.
+const ASSIGNMENT_WORD_RE = /^[A-Za-z_]\w*\+?=(?:'[^']*'|"(?:[^"\\]|\\.)*"|[^\s'"]*)(?:\s+|$)/;
+
+function isPureAssignment(statement: string): boolean {
+  let rest = statement;
+  while (rest) {
+    const match = rest.match(ASSIGNMENT_WORD_RE);
+    if (!match) return false;
+    rest = rest.slice(match[0].length);
+  }
+  return true;
+}
+
+function isShellSetup(statement: string): boolean {
+  if (!statement) return true;
+  // A command substitution runs a program, e.g. `X=$(make)`.
+  if (/\$\(|`/.test(statement)) return false;
+  if (isPureAssignment(statement)) return true;
+  return SHELL_SETUP_COMMANDS.has(splitFirstToken(statement).head);
+}
+
+/**
+ * The statement a command row is about (the first one doing real work, not
+ * `cd dir &&` or `VAR=...`) and how many other working statements it hides.
+ */
+function analyzeShellCommand(command: string): { lead: ShellStatement | null; working: ShellStatement[] } {
+  const statements = splitShellStatements(unwrapShellCommand(command));
+  const working = statements.filter((statement) => !isShellSetup(statement.stages[0]));
+  return { lead: working[0] ?? statements[0] ?? null, working };
+}
+
+/**
+ * A command row shows what the model said the command does (Bash's
+ * `description`), or else the command itself. It never re-describes the
+ * command from its text: what a program does with its arguments cannot be
+ * read off shell syntax, and a guessed "Read 5" is worse than the literal.
+ */
+function describeBashCommand(command: string, description: string | null, status: ToolStatus): ReadableToolDisplay {
   if (/computer-use\/(?:skills\/)?computer-use\/SKILL\.md|skills\/computer-use\/SKILL\.md/.test(command)) {
     return {
       verb: pickVerb(['Reading', 'Read'], status),
       target: 'Computer Use skill',
     };
   }
-  const inner = unwrapShellCommand(command);
-  // Strip the suffix after pipes / chains so the verb describes the leading
-  // command rather than the full pipeline.
-  const firstSegment = inner.split(/\s+&&\s+|\s+\|\|\s+|\s*;\s*|\s*\|\s*/)[0] || inner;
-  const { head, rest } = splitFirstToken(firstSegment);
-
-  if (head === 'git') {
-    const gitTokens = rest.split(/\s+/).filter(Boolean);
-    const subcommand = gitTokens[0] || '';
-    const gitVerbs = GIT_VERBS[subcommand];
-    const target = `git ${truncate(rest, 40)}`.trim();
-    return {
-      verb: pickVerb(gitVerbs || DEFAULT_VERB, status),
-      target: target || 'git',
-    };
+  if (description) {
+    return { verb: '', target: truncate(collapseWhitespace(description), 80) };
   }
-
-  const shellVerbs = SHELL_TOOL_VERBS[head];
-  if (shellVerbs) {
-    const verb = pickVerb(shellVerbs, status);
-
-    if (head === 'cat' || head === 'head' || head === 'tail' || head === 'less' || head === 'more' || head === 'bat') {
-      const file = firstNonFlagToken(rest);
-      return { verb, target: file ? lastPathSegment(file) : 'file' };
-    }
-
-    if (head === 'ls' || head === 'tree') {
-      const dir = firstNonFlagToken(rest);
-      return { verb, target: dir || 'directory' };
-    }
-
-    if (head === 'rg' && /(?:^|\s)--files(?:\s|$)/.test(rest)) {
-      return { verb: pickVerb(['Listing', 'Listed'], status), target: 'files' };
-    }
-
-    if (head === 'grep' || head === 'rg' || head === 'ag') {
-      const pattern = firstNonFlagToken(rest);
-      return { verb, target: pattern ? `for ${truncate(pattern, 40)}` : 'pattern' };
-    }
-
-    if (head === 'find' || head === 'fd') {
-      const path = firstNonFlagToken(rest);
-      const nameFlag = rest.match(/-name\s+(['"]?)([^'"\s]+)\1/);
-      const pattern = nameFlag ? nameFlag[2] : null;
-      if (path && pattern) return { verb, target: `${pattern} in ${path}` };
-      if (pattern) return { verb, target: pattern };
-      if (path) return { verb, target: `in ${path}` };
-      return { verb, target: truncate(rest || head, 50) };
-    }
-
-    if (head === 'rm' || head === 'mkdir' || head === 'touch') {
-      const target = firstNonFlagToken(rest);
-      return { verb, target: target || (head === 'mkdir' ? 'directory' : 'file') };
-    }
-
-    if (head === 'cp' || head === 'mv') {
-      return { verb, target: truncate(rest, 50) };
-    }
-
-    if (head === 'curl' || head === 'wget') {
-      const urlMatch = rest.match(/https?:\/\/\S+/);
-      return { verb, target: urlMatch ? truncate(urlMatch[0], 60) : truncate(rest, 50) };
-    }
-  }
-
-  // Package managers and language runtimes — keep the full short command.
-  if (
-    head === 'npm' ||
-    head === 'yarn' ||
-    head === 'pnpm' ||
-    head === 'bun' ||
-    head === 'node' ||
-    head === 'python' ||
-    head === 'python3' ||
-    head === 'go' ||
-    head === 'cargo' ||
-    head === 'make' ||
-    head === 'docker' ||
-    head === 'kubectl' ||
-    head === 'pip' ||
-    head === 'pip3' ||
-    head === 'tsc' ||
-    head === 'deno'
-  ) {
-    return {
-      verb: pickVerb(DEFAULT_VERB, status),
-      target: truncate(`${head} ${rest}`.trim(), 60),
-    };
-  }
-
+  const { lead, working } = analyzeShellCommand(command);
+  const text = truncate(lead ? lead.text : collapseWhitespace(command), 60);
+  const hidden = Math.max(0, working.length - 1);
   return {
     verb: pickVerb(DEFAULT_VERB, status),
-    target: truncate(firstSegment || command, 60),
+    target: hidden > 0 ? `${text} +${hidden} more` : text,
   };
 }
 
@@ -347,7 +408,7 @@ export function deriveReadableToolDisplay(
   if (name === 'Bash' || name === 'bash') {
     const command = getStringField(input, 'command') || getStringField(input, 'cmd');
     if (command) {
-      return describeBashCommand(command, status);
+      return describeBashCommand(command, getStringField(input, 'description'), status);
     }
     return { verb: pickVerb(DEFAULT_VERB, status), target: 'command' };
   }
@@ -365,7 +426,7 @@ export function deriveReadableToolDisplay(
 
   if (name === 'LS' || name === 'ls') {
     const path = getStringField(input, 'path') || '.';
-    return { verb: pickVerb(SHELL_TOOL_VERBS.ls, status), target: path };
+    return { verb: pickVerb(TOOL_VERBS.LS, status), target: path };
   }
 
   if (name === 'Glob' || name === 'glob') {
@@ -454,20 +515,118 @@ export function formatReadableToolSummary(display: ReadableToolDisplay): string 
 // names from new providers slot in here rather than fanning out across UI
 // components.
 
-const SHELL_FILE_READERS = new Set([
-  'cat', 'head', 'tail', 'less', 'more', 'bat',
+type ShellExplorerKind = 'file_read' | 'pattern_search' | 'filter';
+
+interface ShellExplorer {
+  kind: ShellExplorerKind;
+  /** Options that make the program write files or run other programs. */
+  unsafeOptions?: string[];
+  /** More operands than this name an output file (`uniq in out`). */
+  maxOperands?: number;
+}
+
+/**
+ * Programs that only read, and the ways each can stop being read-only.
+ * `filter` programs only count after a pipe. Anything not listed here is a
+ * command: exploration is a claim that nothing but reading happened.
+ */
+const SHELL_EXPLORERS = new Map<string, ShellExplorer>([
+  ['cat', { kind: 'file_read' }],
+  ['head', { kind: 'file_read' }],
+  ['tail', { kind: 'file_read' }],
+  ['more', { kind: 'file_read' }],
+  ['bat', { kind: 'file_read' }],
+  ['less', { kind: 'file_read', unsafeOptions: ['-o', '-O', '--log-file', '--LOG-FILE'] }],
+  ['ls', { kind: 'pattern_search' }],
+  ['tree', { kind: 'pattern_search', unsafeOptions: ['-o'] }],
+  ['grep', { kind: 'pattern_search' }],
+  ['rg', { kind: 'pattern_search', unsafeOptions: ['--pre'] }],
+  ['ag', { kind: 'pattern_search', unsafeOptions: ['--pager'] }],
+  ['find', {
+    kind: 'pattern_search',
+    unsafeOptions: ['-delete', '-exec', '-execdir', '-ok', '-okdir', '-fprint', '-fprint0', '-fprintf', '-fls'],
+  }],
+  ['fd', { kind: 'pattern_search', unsafeOptions: ['-x', '--exec', '-X', '--exec-batch'] }],
+  ['glob', { kind: 'pattern_search' }],
+  ['wc', { kind: 'filter' }],
+  ['sort', { kind: 'filter', unsafeOptions: ['-o', '--output'] }],
+  ['uniq', { kind: 'filter', maxOperands: 1 }],
+  ['cut', { kind: 'filter' }],
+  ['tr', { kind: 'filter' }],
+  ['nl', { kind: 'filter' }],
+  ['column', { kind: 'filter' }],
 ]);
 
+function hasOption(args: string[], option: string): boolean {
+  return args.some((arg) =>
+    arg === option
+    || (option.startsWith('--') && arg.startsWith(`${option}=`))
+    // A single-letter option can sit in a cluster (`-ro`) or carry its value (`-oout`).
+    || (/^-[A-Za-z]$/.test(option) && /^-[A-Za-z0-9]+$/.test(arg) && arg.slice(1).includes(option[1])));
+}
+
+/** What a pipeline stage explores, or null when it may do anything but read. */
+function getStageExploration(stage: string): ShellExplorerKind | null {
+  const { head, rest } = splitFirstToken(stage);
+  const explorer = SHELL_EXPLORERS.get(head);
+  if (!explorer) return null;
+  // Quoted text is an argument value, never an option.
+  const args = stripQuoted(rest).split(/\s+/).filter(Boolean);
+  if (explorer.unsafeOptions?.some((option) => hasOption(args, option))) return null;
+  // A lone `-` is the stdin operand, not an option.
+  const operands = args.filter((arg) => arg === '-' || !arg.startsWith('-'));
+  if (explorer.maxOperands !== undefined && operands.length > explorer.maxOperands) {
+    return null;
+  }
+  return explorer.kind;
+}
+
+function stripQuoted(text: string): string {
+  return text.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, '""');
+}
+
+/**
+ * Whether a stage writes somewhere or takes a heredoc. Descriptor duplication
+ * (`2>&1`) and `/dev/null` sinks write nothing; every other `>` does, and a
+ * `<<` heredoc is inline input rather than a file being read.
+ */
+function hasWriteOrInlineInput(stage: string): boolean {
+  const redirects = stripQuoted(stage)
+    .replace(/(?:^|\s)(?:\d*|&)>>?\s*\/dev\/null(?=\s|$)/g, ' ')
+    .replace(/(?:^|\s)\d*[<>]&[\d-](?=\s|$)/g, ' ');
+  return />|<</.test(redirects);
+}
+
+/** How a statement explores, or null when it does anything but read. */
+function getStatementExploration(statement: ShellStatement): 'file_read' | 'pattern_search' | null {
+  if (statement.stages.some(hasWriteOrInlineInput)) return null;
+  const [first, ...rest] = statement.stages.map(getStageExploration);
+  if (rest.includes(null)) return null;
+  return first === 'file_read' || first === 'pattern_search' ? first : null;
+}
+
+/**
+ * Bash is grouped as exploration only when every working statement just
+ * reads; anything that runs, writes or is not recognized is a command.
+ */
 function detectBashKind(command: string | null | undefined): CanonicalToolKind {
   if (!command) return 'command_execution';
-  const inner = unwrapShellCommand(command);
-  const firstSegment = inner.split(/\s+&&\s+|\s+\|\|\s+|\s*;\s*|\s*\|\s*/)[0] || inner;
-  const { head } = splitFirstToken(firstSegment);
-  if (SHELL_FILE_READERS.has(head)) return 'file_read';
-  if (head === 'ls' || head === 'tree' || head === 'grep' || head === 'rg' || head === 'ag' || head === 'find' || head === 'fd' || head === 'glob') {
-    return 'pattern_search';
-  }
-  return 'command_execution';
+  const { working } = analyzeShellCommand(command);
+  const kinds = working.map(getStatementExploration);
+  if (kinds.length === 0 || kinds.includes(null)) return 'command_execution';
+  return kinds.includes('pattern_search') ? 'pattern_search' : 'file_read';
+}
+
+/** Whether an exploration tool call lists files rather than searching them. */
+export function isFileListing(toolName: string, input: unknown): boolean {
+  const normalized = toolName.trim().toLowerCase();
+  if (normalized === 'ls') return true;
+  if (normalized !== 'bash') return false;
+  const command = getStringField(input, 'command') || getStringField(input, 'cmd');
+  const lead = command ? analyzeShellCommand(command).lead : null;
+  if (!lead) return false;
+  const { head, rest } = splitFirstToken(lead.stages[0]);
+  return head === 'ls' || head === 'tree' || (head === 'rg' && /(?:^|\s)--files(?:\s|$)/.test(rest));
 }
 
 export function classifyToolUse(toolName: string, input: unknown): CanonicalToolKind {

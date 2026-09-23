@@ -1,5 +1,5 @@
 import { extractComputerUseAppName } from '../../shared/computer-use';
-import { deriveReadableToolDisplay } from './tool-summary';
+import { isFileListing } from './tool-summary';
 import type { ChangeOperation, ChangeRecord, ChangeRecordState } from './change-records';
 import {
   getToolInputFilePath,
@@ -533,8 +533,7 @@ export function getExplorationPresentation(entries: WorkstreamEntry[]) {
   const actions = new Set(entries.flatMap(entry => {
     if (entry.type !== 'tool' && entry.type !== 'memory') return [];
     if (entry.kind === 'file_read') return ['read'];
-    const display = deriveReadableToolDisplay(entry.toolName, entry.block.input, 'success');
-    return [display.verb === 'Listed' ? 'list' : 'search'];
+    return [isFileListing(entry.toolName, entry.block.input) ? 'list' : 'search'];
   }));
   if (actions.size === 1 && actions.has('read')) return { label: 'read files', icon: 'read' } as const;
   if (actions.size === 1 && actions.has('search')) return { label: 'searched files', icon: 'search' } as const;
