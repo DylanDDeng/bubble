@@ -54,25 +54,45 @@ import type { StreamMessage } from '../../src/shared/types';
 assert.equal(classifyToolUse('Bash', { command: 'ls -la src' }), 'pattern_search');
 assert.equal(classifyToolUse('Bash', { cmd: 'rg --files src' }), 'pattern_search');
 assert.equal(classifyToolUse('Bash', { command: 'npm test' }), 'command_execution');
-assert.equal(formatReadableToolSummary(deriveReadableToolDisplay('Bash', { command: 'rg --files src' }, 'pending')), 'Listing files');
-const bashTitle = (command: string) => formatReadableToolSummary(deriveReadableToolDisplay('Bash', { command }, 'success'));
+// Command rows show the model's own description, else the command as written.
+const bashTitle = (command: string, description?: string) =>
+  formatReadableToolSummary(deriveReadableToolDisplay('Bash', { command, description }, 'success'));
+assert.equal(
+  bashTitle("cd /tmp && python3 -m http.server 8765 &\ncat > shot.html <<'EOF'\n<p>x</p>\nEOF", '最终实跑验证并检查眼睛渲染'),
+  '最终实跑验证并检查眼睛渲染',
+  'the model-written description is the title, whatever the command looks like',
+);
+assert.equal(bashTitle('head -n 5 a.csv'), 'Ran head -n 5 a.csv', 'without a description the command is never reinterpreted');
+assert.equal(formatReadableToolSummary(deriveReadableToolDisplay('Bash', { command: 'rg --files src' }, 'pending')), 'Running rg --files src');
 assert.equal(
   bashTitle('cd /tmp && python3 -m http.server 8765 >/tmp/http.log 2>&1 &\nSRV=$!\nnode shot.mjs\nkill $SRV'),
   'Ran python3 -m http.server 8765 >/tmp/http.log 2>&1 +2 more',
   'a leading cd / assignment never becomes the whole title, and the rest is counted',
 );
-assert.equal(bashTitle('cd /Users/me/app && ls -la'), 'Listed directory', 'cd prefix is skipped for the lead command');
+assert.equal(bashTitle('cd /Users/me/app && ls -la'), 'Ran ls -la', 'cd prefix is skipped for the lead command');
 assert.equal(bashTitle('cd /tmp'), 'Ran cd /tmp', 'a lone setup command still titles itself');
 assert.equal(bashTitle('npm run build && npm test'), 'Ran npm run build +1 more');
-assert.equal(bashTitle("grep -rn 'a|b;c' src | head -5"), 'Searched for a|b;c', 'quoted separators and pipe stages are not extra work');
+assert.equal(bashTitle("grep -rn 'a|b;c' src | head -5"), "Ran grep -rn 'a|b;c' src | head -5", 'quoted separators and pipe stages are not extra work');
 assert.equal(bashTitle("python3 - <<'EOF'\nimport os; print(1)\nEOF"), "Ran python3 - <<'EOF' import os; print(1)", 'heredoc bodies stay with their statement');
 assert.equal(bashTitle('export CI=1\n# build; then test\nfor f in a b; do echo $f; done'), 'Ran for f in a b +1 more');
-assert.equal(bashTitle('grep -c foo <<< hello\nnpm test'), 'Searched for foo +1 more', 'a here-string has no body to swallow');
+assert.equal(bashTitle('grep -c foo <<< hello\nnpm test'), 'Ran grep -c foo <<< hello +1 more', 'a here-string has no body to swallow');
 assert.equal(bashTitle('node - <<\\EOF\na; b && c\nEOF\nnpm test'), 'Ran node - <<\\EOF a; b && c +1 more', 'escaped heredoc delimiters are recognized');
-assert.equal(bashTitle("python3 - <<'EOF' | tee out.log\nprint(1)\nEOF"), "Ran python3 - <<'EOF' print(1)", 'a piped heredoc keeps its body preview');
+assert.equal(bashTitle("python3 - <<'EOF' | tee out.log\nprint(1)\nEOF"), "Ran python3 - <<'EOF' | tee out.log print(1)", 'a piped heredoc keeps its body preview');
 const redosStart = performance.now();
 bashTitle(`x=${'a='.repeat(40)}a b c`);
 assert.ok(performance.now() - redosStart < 100, 'assignment detection must not backtrack exponentially');
+// Exploration is a claim that the command only reads; anything else is a command.
+const bashKind = (command: string) => classifyToolUse('Bash', { command });
+assert.equal(bashKind('cd src && ls -la'), 'pattern_search', 'setup statements do not change what a command does');
+assert.equal(bashKind('cat a.ts 2>&1 | head -20'), 'file_read', 'descriptor redirects and filters still only read');
+assert.equal(bashKind('cat a.ts > /dev/null'), 'file_read');
+assert.equal(bashKind('rg foo src | sort | uniq -c'), 'pattern_search');
+assert.equal(bashKind("cat > voxel.html <<'EOF'\n<div>a</div>\nEOF"), 'command_execution', 'writing a file is not exploration');
+assert.equal(bashKind("cat <<'EOF'\nhello\nEOF"), 'command_execution', 'a heredoc is inline input, not a file read');
+assert.equal(bashKind('grep -rn foo src > hits.txt'), 'command_execution');
+assert.equal(bashKind('cat a.log | tee copy.log'), 'command_execution', 'a pipe into an unrecognized command is not exploration');
+assert.equal(bashKind('cat a.ts && npm test'), 'command_execution', 'exploration never hides other work');
+assert.equal(bashKind('grep -rn "a > b" src'), 'pattern_search', 'quoted > is not a redirect');
 assert.equal(classifyToolUse('mcp__docs__read', {}), 'mcp_tool_call');
 const thoughtMessage: StreamMessage = { type: 'assistant', uuid: 'reasoning-source', message: { content: [{type:'thinking', thinking:'**Checking**\nInspect the files'}] } };
 const before: StreamMessage = { type:'assistant', uuid:'older', message:{content:[{type:'text',text:'Older note'}]} };
