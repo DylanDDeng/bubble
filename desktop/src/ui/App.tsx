@@ -87,7 +87,7 @@ import { applyThemePreferences } from './theme/themes';
 import { extractLatestSuccessfulHtmlArtifactFromLatestTurn } from './utils/artifacts';
 import { extractGeneratedMediaFromMessages } from './utils/generated-media';
 import { openGeneratedMediaInFilesPanel } from './components/GeneratedMediaGallery';
-import { openHtmlFileInBrowserTab } from './utils/html-preview';
+import { autoPreviewHtmlArtifact } from './utils/auto-html-preview';
 import { getBrowserUtilitySessionId } from './utils/browser-utility';
 import { StructuredResponse } from './components/StructuredResponse';
 import { AgentOnboardingView, useAgentOnboardingGate } from './components/onboarding/AgentOnboardingView';
@@ -903,30 +903,30 @@ export function App() {
 
       const artifact = extractLatestSuccessfulHtmlArtifactFromLatestTurn(session.messages);
       if (artifact) {
-        const previewKey = `${session.id}:${artifact.toolUseId}`;
-        if (autoPreviewedArtifactsRef.current.has(previewKey)) {
-          pendingAutoPreviewSessionsRef.current.delete(session.id);
-          continue;
-        }
-        autoPreviewedArtifactsRef.current.add(previewKey);
-
         const sessionId = session.id;
-        void openHtmlFileInBrowserTab({
+        void autoPreviewHtmlArtifact({
           cwd: session.cwd,
           filePath: artifact.filePath,
           sessionId,
-        })
-          .then(() => {
-            if (sessionId === activeSessionId) {
-              setRightPanelLauncherOpen(false);
-              openRightUtilityTab('browser');
-            }
-            pendingAutoPreviewSessionsRef.current.delete(sessionId);
-          })
-          .catch((error) => {
-            autoPreviewedArtifactsRef.current.delete(previewKey);
+          toolUseId: artifact.toolUseId,
+          pending: pendingAutoPreviewSessionsRef.current,
+          attempted: autoPreviewedArtifactsRef.current,
+          isCurrent: () => {
+            const state = useAppStore.getState();
+            const current = state.sessions[sessionId];
+            return state.activeSessionId === sessionId && current?.status === 'completed'
+              && current.cwd === session.cwd
+              && extractLatestSuccessfulHtmlArtifactFromLatestTurn(current.messages)?.toolUseId === artifact.toolUseId
+              && (state.rightUtilityPanelHidden || state.activeRightUtilityTab !== `images:${sessionId}`);
+          },
+          onOpened: () => {
+            setRightPanelLauncherOpen(false);
+            openRightUtilityTab('browser');
+          },
+          onError: (error) => {
             toast.error(`Failed to open in browser panel: ${error}`);
-          });
+          },
+        });
         continue;
       }
 

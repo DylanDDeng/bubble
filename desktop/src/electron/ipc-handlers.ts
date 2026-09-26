@@ -841,13 +841,13 @@ function isPathWithinRoot(rootPath: string, filePath: string): boolean {
 async function validateProjectFilePath(
   cwd: string,
   filePath: string
-): Promise<{ ok: true; rootReal: string; targetReal: string } | { ok: false; message: string }> {
+): Promise<{ ok: true; rootReal: string; targetReal: string } | { ok: false; message: string; code: 'invalid_path' | 'outside_project' }> {
   if (!cwd || !filePath) {
-    return { ok: false, message: 'Missing cwd or file path' };
+    return { ok: false, message: 'Missing cwd or file path', code: 'invalid_path' };
   }
 
   if (!isPathWithinRoot(cwd, filePath)) {
-    return { ok: false, message: 'File is outside the selected project folder' };
+    return { ok: false, message: 'File is outside the selected project folder', code: 'outside_project' };
   }
 
   try {
@@ -856,7 +856,7 @@ async function validateProjectFilePath(
       fsPromises.realpath(filePath),
     ]);
     if (!isPathWithinRoot(rootReal, targetReal)) {
-      return { ok: false, message: 'File is outside the selected project folder' };
+      return { ok: false, message: 'File is outside the selected project folder', code: 'outside_project' };
     }
     return { ok: true, rootReal, targetReal };
   } catch (error) {
@@ -1619,7 +1619,7 @@ async function getLocalPreviewUrl(
 async function getHtmlPreviewUrl(
   cwd: string,
   filePath: string
-): Promise<{ ok: true; url: string } | { ok: false; message: string }> {
+): Promise<{ ok: true; url: string } | { ok: false; message: string; code?: string }> {
   const resolvedPath = resolve(cwd || '.', filePath || '');
   const validation = await validateProjectFilePath(cwd, resolvedPath);
   if (!validation.ok) {
@@ -7410,7 +7410,7 @@ export function setupIPCHandlers(mainWindow: BrowserWindow): void {
       cwd: string,
       filePath: string,
       _options?: { openInBrowser?: boolean }
-    ): Promise<{ ok: boolean; url?: string; message?: string }> => {
+    ): Promise<{ ok: boolean; url?: string; message?: string; code?: string }> => {
       // HTML artifact previews are routed to the in-app browser panel from the
       // renderer. This handler only resolves the local preview server URL — it
       // must NOT open the system default browser, even if a legacy caller still

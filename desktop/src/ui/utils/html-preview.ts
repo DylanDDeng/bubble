@@ -3,6 +3,13 @@ export function isHtmlFilePath(filePath: string): boolean {
   return /\.(?:html|htm)$/i.test(normalized);
 }
 
+export class HtmlPreviewError extends Error {
+  constructor(message: string, readonly code?: string) {
+    super(message);
+    this.name = 'HtmlPreviewError';
+  }
+}
+
 export async function resolveHtmlPreviewUrl({
   cwd,
   filePath,
@@ -15,7 +22,7 @@ export async function resolveHtmlPreviewUrl({
   });
 
   if (!preview.ok || !preview.url) {
-    throw new Error(preview.message || 'Failed to resolve HTML preview URL.');
+    throw new HtmlPreviewError(preview.message || 'Failed to resolve HTML preview URL.', preview.code);
   }
   return preview.url;
 }

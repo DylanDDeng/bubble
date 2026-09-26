@@ -386,7 +386,7 @@ declare global {
     createMarkdownImageAsset: (cwd: string, markdownFilePath: string, fileName: string, mimeType: string | undefined, data: Uint8Array) => Promise<{ ok: boolean; relativePath?: string; name?: string; message?: string }>;
     createInlineImageAttachment: (mimeType: string, data: Uint8Array) => Promise<Attachment | null>;
     writeProjectTextFile: (cwd: string, filePath: string, content: string) => Promise<{ ok: boolean; message?: string; size?: number; mtimeMs?: number }>;
-    previewArtifactPath: (cwd: string, filePath: string, options?: { openInBrowser?: boolean }) => Promise<{ ok: boolean; url?: string; message?: string }>;
+    previewArtifactPath: (cwd: string, filePath: string, options?: { openInBrowser?: boolean }) => Promise<{ ok: boolean; url?: string; message?: string; code?: string }>;
     openPath: (filePath: string) => Promise<{ ok: boolean; message?: string }>;
     revealPath: (filePath: string) => Promise<{ ok: boolean; message?: string }>;
     listOpenWithApps: (
