@@ -290,21 +290,32 @@ function projectUserCard(message: DisplayMessage, options: TranscriptRenderOptio
 
 export function wrapPlain(text: string, columns: number): string[] {
   const out: string[] = [];
-  const splitToken = (token: string): string[] => {
-    const chunks: string[] = [];
+  const widths = new Map<string, number>();
+  const measure = (value: string): number => {
+    // Most reasoning/tool output is ASCII. Avoid invoking Intl.Segmenter for
+    // every character and repeatedly measuring the same growing line.
+    if (/^[\x20-\x7e]*$/.test(value)) return value.length;
+    const cached = widths.get(value);
+    if (cached !== undefined) return cached;
+    const width = stringWidth(value);
+    if (value.length <= 2) widths.set(value, width);
+    return width;
+  };
+  const splitToken = (token: string): Array<{ text: string; width: number }> => {
+    const chunks: Array<{ text: string; width: number }> = [];
     let chunk = "";
     let width = 0;
     for (const char of token) {
-      const charWidth = stringWidth(char);
+      const charWidth = measure(char);
       if (chunk && width + charWidth > columns) {
-        chunks.push(chunk);
+        chunks.push({ text: chunk, width: measure(chunk) });
         chunk = "";
         width = 0;
       }
       chunk += char;
       width += charWidth;
     }
-    if (chunk) chunks.push(chunk);
+    if (chunk) chunks.push({ text: chunk, width: measure(chunk) });
     return chunks;
   };
 
@@ -314,14 +325,17 @@ export function wrapPlain(text: string, columns: number): string[] {
       continue;
     }
     let line = "";
+    let lineWidth = 0;
     for (const word of paragraph.split(/\s+/)) {
       for (const chunk of splitToken(word)) {
-        const candidate = line ? `${line} ${chunk}` : chunk;
-        if (line && stringWidth(candidate) > columns) {
+        const candidateWidth = line ? lineWidth + 1 + chunk.width : chunk.width;
+        if (line && candidateWidth > columns) {
           out.push(line);
-          line = chunk;
+          line = chunk.text;
+          lineWidth = chunk.width;
         } else {
-          line = candidate;
+          line = line ? `${line} ${chunk.text}` : chunk.text;
+          lineWidth = candidateWidth;
         }
       }
     }

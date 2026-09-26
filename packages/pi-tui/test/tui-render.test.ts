@@ -14,6 +14,7 @@ import {
 } from "../src/terminal-image.ts";
 import type { Component, TUI } from "../src/tui.ts";
 import { TuiMainScreen } from "../src/tui-main-screen.ts";
+import { TuiAltScreen } from "../src/tui-alt-screen.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
 class TestComponent implements Component {
@@ -116,24 +117,33 @@ describe("TUI render scheduling", () => {
 		tui.stop();
 	});
 
-	it("invalidates component caches and forces a repaint after terminal wake", async () => {
-		const terminal = new VirtualTerminal(40, 10);
-		const tui: TUI = new TuiMainScreen(terminal);
-		const component = new InputComponent();
-		component.lines = ["before sleep"];
-		tui.addChild(component);
-		tui.start();
-		await terminal.waitForRender();
-		const rendersBeforeWake = component.renderCount;
+	for (const Screen of [TuiMainScreen, TuiAltScreen]) {
+		it(`${Screen.name} preserves caches across repeated wake repaints and accepts input`, async () => {
+			const terminal = new VirtualTerminal(40, 10);
+			const tui: TUI = new Screen(terminal);
+			const component = new InputComponent();
+			component.lines = ["before sleep"];
+			tui.addChild(component);
+			tui.start();
+			await terminal.waitForRender();
+			const rendersBeforeWake = component.renderCount;
+			const invalidationsBeforeWake = component.invalidateCount;
+			tui.setFocus(component);
 
-		terminal.resumeFromSleep();
-		await terminal.waitForRender();
+			for (let i = 0; i < 3; i++) {
+				terminal.resumeFromSleep();
+				await terminal.waitForRender();
+			}
 
-		assert.ok(component.invalidateCount >= 1);
-		assert.ok(component.renderCount > rendersBeforeWake);
-		assert.ok(terminal.getViewport().some((line) => line.includes("before sleep")));
-		tui.stop();
-	});
+			assert.strictEqual(component.invalidateCount, invalidationsBeforeWake);
+			assert.ok(component.renderCount > rendersBeforeWake);
+			assert.ok(terminal.getViewport().some((line) => line.includes("before sleep")));
+			terminal.sendInput("after wake");
+			await terminal.waitForRender();
+			assert.ok(terminal.getViewport().some((line) => line.includes("after wake")));
+			tui.stop();
+		});
+	}
 });
 
 describe("TUI debug logging", () => {
