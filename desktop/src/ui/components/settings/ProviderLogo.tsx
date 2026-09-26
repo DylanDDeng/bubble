@@ -13,6 +13,7 @@ import geminiLogo from '../../assets/gemini-color.svg';
 import volcengineLogo from '../../assets/volcengine-color.svg';
 import stepfunLogo from '../../assets/stepfun.svg';
 import openrouterLogo from '../../assets/openrouter-color.svg';
+import mimoLogo from '../../assets/xiaomimimo.svg';
 
 // Brand artwork already bundled for other pickers, keyed by Bubble provider id.
 // Providers without artwork fall back to a monogram tile in ProviderLogo.
@@ -25,6 +26,7 @@ const PROVIDER_LOGOS: Record<string, string> = {
   deepseek: deepseekLogo,
   minimax: minimaxLogo,
   'minimax-anthropic': minimaxLogo,
+  'mimo-token-plan': mimoLogo,
   zhipuai: zhipuLogo,
   'zhipuai-coding-plan': zhipuLogo,
   zai: zhipuLogo,
@@ -46,7 +48,7 @@ export function ProviderLogo({ providerId, name }: { providerId: string; name: s
   if (providerId === 'opencode-zen') return <OpenCodeLogo />;
   const logo = PROVIDER_LOGOS[providerId];
   if (logo) {
-    return <img src={logo} alt="" className={`h-4 w-4 flex-shrink-0 ${[claudeLogo, openaiLogo, grokLogo, moonshotLogo, stepfunLogo].includes(logo) ? 'provider-monochrome-logo' : ''}`} aria-hidden="true" />;
+    return <img src={logo} alt="" className={`h-4 w-4 flex-shrink-0 ${[claudeLogo, openaiLogo, grokLogo, moonshotLogo, stepfunLogo, mimoLogo].includes(logo) ? 'provider-monochrome-logo' : ''}`} aria-hidden="true" />;
   }
   return (
     <span
@@ -57,4 +59,3 @@ export function ProviderLogo({ providerId, name }: { providerId: string; name: s
     </span>
   );
 }
-

@@ -154,5 +154,9 @@ export function buildActivityStages(entries: WorkstreamEntry[], options: Summari
 
 /** Native yT omits unfinished read/search/list rows until they have a result. */
 export function hasActivityDetail(entry: WorkstreamEntry): boolean {
+  if (entry.type === 'tool' && entry.kind === 'file_change' && entry.status === 'pending') {
+    const input = entry.block.input as Record<string, unknown> | undefined;
+    if (input?.__aegisToolCallStreaming && !input.path && !input.file_path) return false;
+  }
   return entry.type !== 'thinking' && !(isExploration(entry) && isActivityPending(entry));
 }

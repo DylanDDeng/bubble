@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Message } from "../types.js";
+import { isClaudeWithBoundThinking } from "../anthropic-thinking.js";
 import { isInternalBlockOnlyContent, sanitizeInternalReminderBlocks, sanitizeInternalReasoningText, sanitizeAssistantProviderMetadata } from "../agent/internal-reminder-sanitizer.js";
 import { isCompactionSummaryMessage, splitLeadingContext } from "./compact.js";
 
@@ -31,12 +32,7 @@ export function createContextCheckpoint(
       && isInternalBlockOnlyContent(message.content)
       && !sanitizeInternalReminderBlocks(message.content).trim());
   });
-  const sanitized = durable.map(message => message.role === "assistant" ? {
-    ...message,
-    content: sanitizeInternalReminderBlocks(message.content),
-    ...(message.reasoning !== undefined ? { reasoning: sanitizeInternalReasoningText(message.reasoning) } : {}),
-    ...(message.providerMetadata ? { providerMetadata: sanitizeAssistantProviderMetadata(message.providerMetadata) } : {}),
-  } : message);
+  const sanitized = durable.map(sanitizeCheckpointMessage);
   return { version: 1, compactionId: randomUUID(), reason, baseRevision,
     summary: summary === undefined ? undefined : sanitizeInternalReminderBlocks(summary),
     messages: structuredClone(sanitized) };
@@ -84,12 +80,33 @@ export function checkpointMessages(checkpoint: ContextCheckpoint): Message[] {
     } else if (pending.size) throw new Error("Interrupted checkpoint tool group");
   }
   if (pending.size) throw new Error("Incomplete checkpoint tool group");
-  return structuredClone(checkpoint.messages.map(message => message.role === "assistant" ? {
+  // Also repairs checkpoints written by builds that retained now-invalid
+  // signatures. Messages appended AFTER this boundary are replayed normally.
+  return structuredClone(checkpoint.messages.map(sanitizeCheckpointMessage));
+}
+
+function sanitizeCheckpointMessage(message: Message): Message {
+  if (message.role !== "assistant") return message;
+  let metadata = message.providerMetadata;
+  const blocks = metadata?.anthropic?.contentBlocks;
+  if (blocks && isClaudeWithBoundThinking(message.modelId ?? message.model)) {
+    // A checkpoint rewrites the prefix. Remove the entire bound thinking run,
+    // including encrypted blocks, so the model can reason from the new context.
+    // Keep text, tool calls/results, and display reasoning; never mutate originals.
+    metadata = {
+      ...metadata,
+      anthropic: {
+        ...metadata?.anthropic,
+        contentBlocks: blocks.filter(block => block.type !== "thinking" && block.type !== "redacted_thinking"),
+      },
+    };
+  }
+  return {
     ...message,
     content: sanitizeInternalReminderBlocks(message.content),
     ...(message.reasoning !== undefined ? { reasoning: sanitizeInternalReasoningText(message.reasoning) } : {}),
-    ...(message.providerMetadata ? { providerMetadata: sanitizeAssistantProviderMetadata(message.providerMetadata) } : {}),
-  } : message));
+    ...(metadata ? { providerMetadata: sanitizeAssistantProviderMetadata(metadata) } : {}),
+  };
 }
 
 /** Replay-side read: a checkpoint this build cannot validate (a newer format,

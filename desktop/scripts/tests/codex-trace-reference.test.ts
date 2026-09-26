@@ -9,7 +9,7 @@ import { activityDetailGroups, buildActivityUnits, getActivityHeader, hasActivit
 import type { WorkstreamEntry } from '../../src/ui/utils/workstream';
 
 const archive = process.env.CODEX_REFERENCE_ASAR || '/Applications/Codex.app/Contents/Resources/app.asar';
-const asset = 'webview/assets/agent-activity-units-48dc779bfb79.js';
+const asset = 'webview/assets/agent-activity-units-5013ea5cce3e.js';
 const source = asar.extractFile(archive, asset).toString('utf8');
 function extractFunctions(source: string, names: string[]): string {
   const parsed = ts.createSourceFile('reference.js', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
@@ -18,17 +18,17 @@ function extractFunctions(source: string, names: string[]): string {
   assert.equal(functions.length, names.length, 'reference version changed; re-audit the native state functions');
   return functions.join('\n');
 }
-const blocks = asar.extractFile(archive, 'webview/assets/conversation-blocks-3f5612e1f0d0.js').toString('utf8');
-const itemSource = asar.extractFile(archive, 'webview/assets/agent-activity-item-3801f7067f55.js').toString('utf8');
+const blocks = asar.extractFile(archive, 'webview/assets/conversation-blocks-6c1d988a9fe3.js').toString('utf8');
+const itemSource = asar.extractFile(archive, 'webview/assets/agent-activity-item-1e8e8aa92843.js').toString('utf8');
 // This oracle covers ordinary filesystem operations, not skills, visualization
 // commands or rich MCP apps. Those imported predicates are explicitly false
 // only for this dataset. gn is exercised only on reasoning/assistant messages.
-const context = { S: () => false, y: () => false, Yf: () => false, G: { default: (items: unknown[]) => items.at(-1) },
-  le: () => false, p: () => false, $: (item: unknown, grouping: string) => ({ item, grouping }) };
-const native = vm.runInNewContext(`${extractFunctions(source, ['Je', 'Ye', 'Z', 'N', 'H', 'W', 'Fe', 'qe', 'Q', 'Ge'])}
+const context = { E: () => false, C: () => false, Yf: () => false, Ni: () => null,
+  J: { default: (items: unknown[]) => items.at(-1) }, ie: () => false, te: () => false };
+const native = vm.runInNewContext(`${extractFunctions(source, ['qe', 'Je', 'Q', 'L', 'q', 'G', 'Me', 'Ke', '$', 'We'])}
   ${extractFunctions(blocks, ['yT'])}
-  ${extractFunctions(itemSource, ['gn'])}
-  ({ header: Je, exploration: W, groups: qe, details: Ge, detailVisible: yT, normalize: gn })`, context, { timeout: 1000 });
+  const normalize = (() => { ${extractFunctions(itemSource, ['gn', '$'])}; return gn; })();
+  ({ header: qe, exploration: q, groups: Ke, details: We, detailVisible: yT, normalize })`, context, { timeout: 1000 });
 const variants = ['file_read', 'pattern_search', 'command_execution', 'mcp_tool_call', 'file_change'] as const;
 const statuses = ['pending', 'success', 'error', 'interrupted'] as const;
 let checked = 0;

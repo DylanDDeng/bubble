@@ -45,9 +45,9 @@ export function supportsClaude1mContext(model?: string | null): boolean {
   const normalized = normalizeClaudeRequestedModel(model);
   if (!normalized) return false;
   if (normalized === 'sonnet' || normalized === 'opus') return true;
-  // Family-based (any sonnet/opus generation), mirroring the frontend rule in
+  // Family-based (any sonnet/opus/fable generation), mirroring the frontend rule in
   // src/ui/utils/claude-model.ts so new model versions are supported without a code change.
-  return /^claude-(sonnet|opus)-\d+/i.test(normalized);
+  return /^claude-(sonnet|opus|fable)-\d+/i.test(normalized);
 }
 
 export function toClaudeCodeRuntimeModel(

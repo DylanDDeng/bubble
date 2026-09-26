@@ -107,12 +107,12 @@ describe("Codex real socket recovery", () => {
     expect(agent.messages.some(m => m.role === "assistant" && m.content === "complete answer")).toBe(true);
     expect(agent.messages.some(m => m.role === "assistant" && m.toolCalls?.some(t => t.id === "cut"))).toBe(false);
     expect(new SessionManager(file).getEntries()).toContainEqual(expect.objectContaining({
-      type: "provider_error", error: expect.objectContaining({ code: "UND_ERR_SOCKET", retry: { attempt: 1, maxAttempts: 2 } }),
+      type: "provider_error", error: expect.objectContaining({ code: "UND_ERR_SOCKET", retry: { attempt: 1, maxAttempts: 10 } }),
     }));
     expect(logs()[0]).toMatchObject({ decision: "delegate_retry", receivedEvents: 2, lastEventAgeMs: expect.any(Number) });
   });
 
-  it("stops after two stream retries and keeps the terminal nested error code", async () => {
+  it("stops after ten stream retries and keeps the terminal nested error code", async () => {
     const transport = await provider(res => {
       event(res, { type: "response.output_text.delta", delta: "partial" }); disconnect(res);
     });
@@ -121,9 +121,9 @@ describe("Codex real socket recovery", () => {
       onProviderError: error => session.appendProviderError(error),
     });
     await expect(collect(agent.run("test", home))).rejects.toThrow("ChatGPT connection interrupted");
-    expect(requests).toBe(3);
+    expect(requests).toBe(11);
     const errors = session.getEntries().filter(e => e.type === "provider_error").map(e => e.error);
-    expect(errors.map(e => e.retry?.attempt)).toEqual([1, 2, undefined]);
+    expect(errors.map(e => e.retry?.attempt)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, undefined]);
     expect(errors.every(e => e.code === "UND_ERR_SOCKET")).toBe(true);
   });
 
@@ -171,7 +171,7 @@ describe("Codex real socket recovery", () => {
     expect(requests).toBe(2);
     const saved = new SessionManager(join(getSessionsDir(cwd), `${session.id}.jsonl`));
     expect(saved.getEntries()).toContainEqual(expect.objectContaining({
-      type: "provider_error", error: expect.objectContaining({ code: "UND_ERR_SOCKET", retry: { attempt: 1, maxAttempts: 2 } }),
+      type: "provider_error", error: expect.objectContaining({ code: "UND_ERR_SOCKET", retry: { attempt: 1, maxAttempts: 10 } }),
     }));
     expect(sdk.getHistory(session.id).filter(m => m.role === "assistant").map(m => m.content)).toEqual(["complete answer"]);
     expect(logs()[0].error.code).toBe("UND_ERR_SOCKET");

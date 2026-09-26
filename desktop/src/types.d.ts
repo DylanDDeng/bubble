@@ -209,6 +209,8 @@ declare global {
     getSessionUserPrompts: (
       sessionId: string
     ) => Promise<import('./shared/types').SessionUserPromptSummary[]>;
+    getSessionSources: (sessionId: string) => Promise<import('./shared/types').Attachment[]>;
+    previewSessionSource: (sessionId: string, path: string) => Promise<import('./shared/session-sources').SessionSourcePreview>;
     getOpencodeUsageReport: (days?: ClaudeUsageRangeDays) => Promise<ClaudeUsageReport>;
     getDeepseekSessionCost: (sessionId: string) => Promise<import('./shared/types').ProviderCostEstimate>;
     getAgentUsageReport: (
@@ -382,7 +384,6 @@ declare global {
     readMarkdownImageAsset: (cwd: string, markdownFilePath: string, imageSrc: string) => Promise<{ ok: boolean; dataUrl?: string; message?: string }>;
     resolveMarkdownImageAssetUrl: (cwd: string, markdownFilePath: string, imageSrc: string) => Promise<{ ok: boolean; url?: string; size?: number; mtimeMs?: number; message?: string }>;
     createMarkdownImageAsset: (cwd: string, markdownFilePath: string, fileName: string, mimeType: string | undefined, data: Uint8Array) => Promise<{ ok: boolean; relativePath?: string; name?: string; message?: string }>;
-    createInlineTextAttachment: (cwd: string, text: string) => Promise<Attachment | null>;
     createInlineImageAttachment: (mimeType: string, data: Uint8Array) => Promise<Attachment | null>;
     writeProjectTextFile: (cwd: string, filePath: string, content: string) => Promise<{ ok: boolean; message?: string; size?: number; mtimeMs?: number }>;
     previewArtifactPath: (cwd: string, filePath: string, options?: { openInBrowser?: boolean }) => Promise<{ ok: boolean; url?: string; message?: string }>;

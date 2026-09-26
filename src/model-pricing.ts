@@ -167,8 +167,28 @@ export const MODEL_PRICING_OVERRIDES: ModelPricing[] = [
       }),
     };
   }),
-  // models.dev carries the Sonnet 5 launch-promo rate but not its expiry or
-  // the post-promo price; keep both so cost estimates survive the promo end.
+  // Official current prices, verified 2026-09-23:
+  // https://platform.claude.com/docs/en/about-claude/pricing
+  // Cache reads are 2.5% (Fable 5.1) / 5% (Opus 5.5), not the older 10%.
+  {
+    providerId: "anthropic",
+    modelId: "claude-fable-5-1",
+    currency: "USD",
+    inputCacheHitPerMillion: 0.25,
+    inputCacheMissPerMillion: 10,
+    inputCacheWritePerMillion: 12.5,
+    outputPerMillion: 50,
+  },
+  {
+    providerId: "anthropic",
+    modelId: "claude-opus-5-5",
+    currency: "USD",
+    inputCacheHitPerMillion: 0.2,
+    inputCacheMissPerMillion: 4,
+    inputCacheWritePerMillion: 5,
+    outputPerMillion: 20,
+  },
+  // The current official Sonnet 5 price is $2/$10 without an expiry.
   {
     providerId: "anthropic",
     modelId: "claude-sonnet-5",
@@ -177,13 +197,6 @@ export const MODEL_PRICING_OVERRIDES: ModelPricing[] = [
     inputCacheMissPerMillion: 2,
     inputCacheWritePerMillion: 2.5,
     outputPerMillion: 10,
-    effectiveUntil: "2026-08-31T23:59:00Z",
-    original: {
-      inputCacheHitPerMillion: 0.3,
-      inputCacheMissPerMillion: 3,
-      inputCacheWritePerMillion: 3.75,
-      outputPerMillion: 15,
-    },
   },
   // The StepFun step plan bills in CNY; models.dev normalizes prices to USD.
   {

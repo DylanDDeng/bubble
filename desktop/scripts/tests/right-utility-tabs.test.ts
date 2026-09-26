@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { resolveRightUtilityTabOpen } from '../../src/ui/utils/right-utility-tabs';
+import { resolveRightUtilityTabOpen, resolveProjectFileUtilityTab } from '../../src/ui/utils/right-utility-tabs';
 import { resolveDockedRightPanelWidth } from '../../src/ui/utils/right-panel-width';
 
 async function main() {
@@ -44,7 +44,43 @@ async function main() {
   assert.deepEqual(existing.tabs, second.tabs, 'ordinary Files navigation should reuse a tab');
   assert.equal(existing.activeTab, first.activeTab);
 
+  const fileStates = {
+    [first.activeTab]: { files: [], activeFile: { cwd: '/project', filePath: '/project/a.md' } },
+    [second.activeTab]: { files: [], activeFile: { cwd: '/project', filePath: '/project/b.png' } },
+  };
+  assert.equal(resolveProjectFileUtilityTab(second.tabs, second.activeTab, fileStates, '/project/a.md').activeTab, first.activeTab);
+  assert.equal(resolveProjectFileUtilityTab(second.tabs, second.activeTab, fileStates, '/project/b.png').activeTab, second.activeTab);
+  const legacy = { [first.activeTab]: {
+    activeFile: { cwd: '/project', filePath: '/project/a.md' },
+    files: [{ cwd: '/project', filePath: '/project/a.md' }, { cwd: '/project', filePath: '/project/hidden.md' }],
+  } };
+  assert.equal(resolveProjectFileUtilityTab(first.tabs, first.activeTab, legacy, '/project/hidden.md').tabs.length, 2,
+    'legacy hidden inner tabs must not replace a different visible document');
+  const third = resolveProjectFileUtilityTab(second.tabs, second.activeTab, fileStates, '/elsewhere/a.md');
+  assert.equal(third.tabs.length, 3, 'same basename in another directory is a distinct file');
+  const empty = resolveRightUtilityTabOpen(second.tabs, 'files', { newTab: true });
+  assert.equal(resolveProjectFileUtilityTab(empty.tabs, empty.activeTab, fileStates, '/project/new.pdf').activeTab, empty.activeTab,
+    'an explicitly opened empty Files tab can host the next document');
+  assert.equal(resolveProjectFileUtilityTab(['browser'], 'browser', fileStates, '/project/a.md').tabs.length, 2,
+    'closed file identities cannot resurrect a removed tab');
+
   const appSource = await readFile(new URL('../../src/ui/App.tsx', import.meta.url), 'utf8');
+  assert.match(
+    appSource,
+    /deriveSubagentSummaries\(activeSession\?\.messages \?\? \[\], \{ includeNested: true \}\)[\s\S]*?\.map\(summary => \[summary\.id, summary\.persona\]\)[\s\S]*?\[activeSession\?\.messages\]/,
+    'tab identities must use the same nested-aware, reactive session summaries as the detail panel'
+  );
+  assert.match(appSource, /subagentPersonas\.get\(subagentId\) \?\? getSubagentPersona\(subagentId\)/,
+    'legacy ID naming is only a fallback when the summary is unavailable');
+  assert.match(appSource, /label: persona\?\.persona \?\? 'Subagent',\s*subagentPersona: persona/,
+    'tab label and avatar must receive the same resolved identity');
+  assert.match(appSource, /rightUtilityTabs,\s*subagentPersonas,\s*\]\)/,
+    'open tab descriptors must update when runtime names arrive or history changes');
+  assert.match(appSource, /id=\{tab\.subagentPersona\.id\}\s*hue=\{tab\.subagentPersona\.colorHue\}/,
+    'tab avatars must use the detail persona ID and hue, not the routing tool ID');
+  assert.doesNotMatch(appSource, /getSubagentPersona\(tab\.subagentId\)/,
+    'the tab renderer must not regenerate an independent identity');
+
   // Tabs must open via onSelect (click completion) so Base UI still closes
   // the popup itself. Firing on pointerdown reflows the tab strip mid-press,
   // the popup re-anchors, and the release no longer counts as an item click,

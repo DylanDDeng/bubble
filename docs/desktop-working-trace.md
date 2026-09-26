@@ -29,6 +29,40 @@ This follows the recorded unbounded activity-list variant (`cT` feature gate `10
 
 ## Event and presentation contract
 
+The 2026-09-24 follow-up checked the installed `agent-activity-units-5013ea5cce3e.js`,
+`agent-activity-item-1e8e8aa92843.js` and `conversation-blocks-6c1d988a9fe3.js`.
+The optional reference test now targets those reviewed assets; it compares 3,200
+state combinations without executing application initialization code.
+
+Bubble SDK tool argument generation is visible from `tool_call_start`. A small,
+display-only preview extracts complete top-level path/command fields from at most
+16 KiB of the argument prefix. Incomplete paths and large content fields stay out
+of per-token IPC/history writes. `tool_call_end` replaces the same UUID with full
+canonical arguments, preserving the start timestamp and chronological position;
+`tool_start` does not duplicate it. Nested tools retain their parent attribution.
+This preview never changes the actual SDK tool arguments or model context.
+
+File entries distinguish Creating/Editing, Created/Edited, failure and interruption.
+The filename opens the file; the disclosure opens the recorded per-call diff once
+available. Large file diffs are scrollable and have no 20,000-character text cap.
+Reasoning stays in history and continues to contribute only its latest heading
+to the ordinary activity stream. The transient argument preview is deliberately
+not a token-by-token code editor or a claim that a pending operation has succeeded.
+
+`npm --prefix desktop run verify:tool-input-streaming` covers 12,000 argument deltas,
+bounded preview traffic, canonical replacement, database reopen, interruption and
+nested attribution. The real Electron disclosure test additionally covers the
+ChatPane/store path, file opening, an inline diff exceeding 20,000 characters, and
+stable rows/disclosure choices through completion.
+
+Validation on this checkout: renderer/host typechecks, the argument-streaming
+runtime test, child-state/protocol checks, stage/order/duration tests, the native
+reference oracle and the full Electron disclosure test passed. The broader
+`verify:bubble-sdk-adapter` source-assertion script still stops at its existing
+model-picker loading-copy assertion (the current picker has a catalog-error
+fallback instead of the asserted literal `null` branch). That unrelated source
+assertion is not evidence of a failing trace runtime.
+
 1. Bubble's actual tool status, turn status and child status determine liveness. A failed earlier tool does not make a still-running turn look completed. A successful spawn does not complete its child.
 2. Narration, errors, approvals, child operations and rich standalone tools break activity groups chronologically. Reasoning is filtered before activity grouping, so it cannot create an empty historical group or change a group's identity. Its latest heading feeds the turn-level thinking fallback. A reasoning-only live turn shows that status without a disclosure; a stopped turn leaves no phantom thinking row.
 3. Only the latest open group owns the current action or thinking header. Earlier groups show completed summaries. A trailing exploration slice remains active between reads, including trailing reasoning events, as in Codex's `W`. Otherwise, without a pending operation, a live group uses the latest reasoning heading across the entire turn (including across narration boundaries), or `Thinking`.
@@ -83,3 +117,11 @@ The recording supplies the previously missing visual reference. No Codex window 
 ## Waiting strategy
 
 The Agent's tool description, spawn next-step advice, timeout reply and lifecycle reminder now coordinate by task dependencies and decision value. Useful independent work can continue; wait when the child result blocks the next meaningful step or final synthesis. Short waits remain valid when they support a concrete scheduling decision. Status queries follow the same rule and are not a substitute polling loop. A timeout is an upper bound and completion wakes the caller early. No new minimum, changed default, or runtime scheduling policy is introduced. With multiple children, use explicit remaining IDs to avoid retrieving the same completed result repeatedly.
+
+## Stream reconnection
+
+Mid-stream transport failures use a default budget of ten retries (eleven requests including the original), with the existing bounded backoff and cancellation behavior. Explicit provider-specific caps remain authoritative. Bubble maps `provider_retry` into persisted `api_retry` metadata and shows one `Reconnecting n/10` line beside the existing trace. New top-level output records `api_retry_resolved`, including reasoning-only recovery; context updates, tool results and child activity cannot resolve the parent retry. Retry markers do not split work groups.
+
+Partial narration is committed to desktop history before retry, without replaying it into model context. Unfinished tool argument previews become interrupted; child retries update their own activity and retain their own partial narration. Stop, terminal results and new prompts remove the live retry state.
+
+Focused checks: `npm --prefix desktop run verify:stream-retry` (event mapping, history reopening, partial tools, child attribution, trace projection) and `npm --prefix desktop run verify:stream-retry-ui` (real ChatPane row identity, count, recovery, hydration, stop, and retained output). The UI screenshot is `desktop/artifacts/codex-trace/retry-10-of-10.png`. These checks verify local behavior, not pixel-exact Codex parity.

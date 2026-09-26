@@ -100,7 +100,21 @@ async function run() {
   assert.match(config.catalogNotice, /Could not load/);
   await assert.rejects(start('openai:gpt-catalog-fixture'), /No Bubble models/);
   adapter.disposeSession('fixture');
+  // MiMo's Anthropic plan has a local catalog, available before any network
+  // discovery. Preserve the SDK metadata used by the composer and model menu.
+  const { getBuiltinProvider } = await import(pathToFileURL(path.resolve(__dirname, '../../runtime/bubble/dist/model-catalog.js')).href);
+  profile = { ...getBuiltinProvider('mimo-token-plan'), authType: 'api', apiKey: 'tp-fixture', enabled: true };
+  sdk.registry = makeRegistry();
+  sdk.getModelConfig = () => ({ defaultModel: 'mimo-token-plan:mimo-v2.6-pro', providers: [{ id: 'mimo-token-plan', hasApiKey: true }] });
+  config = await settings.getBubbleModelConfig();
+  assert.equal(config.defaultModel, 'mimo-token-plan:mimo-v2.6-pro');
+  assert.deepEqual(config.options, ['mimo-token-plan:mimo-v2.6-pro', 'mimo-token-plan:mimo-v2.6-flash', 'mimo-token-plan:mimo-v2.5-pro', 'mimo-token-plan:mimo-v2.5']);
+  assert.deepEqual(config.availableModels[0].reasoningLevels, ['off', 'medium']);
+  assert.equal(config.availableModels[0].defaultReasoningLevel, 'medium');
+  assert.equal(config.availableModels[0].maxContextSize, 1000000);
+  assert.equal((await sdk.registry.discoverModels(profile)).source, 'static');
   console.log('PASS: real SDK HTTP discovery, expired cache restore, offline desktop fallback, account isolation, empty success and start/send/one-shot guards');
+  console.log('PASS: MiMo Token Plan model selection and thinking/context metadata');
 }
 
 app.whenReady().then(run).then(() => finish(0), error => { console.error(error); finish(1); });

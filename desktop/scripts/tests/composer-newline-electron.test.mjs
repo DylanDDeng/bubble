@@ -87,9 +87,9 @@ try {
   await writeFile(path.join(tmp, 'index.html'), '<html><body><div id="root"></div><script type="module" src="./harness.tsx"></script></body></html>');
   await writeFile(path.join(tmp, 'harness.tsx'), harness);
   await writeFile(path.join(tmp, 'main.cjs'), main);
-  server = await createServer({ root, configFile: path.join(root, 'vite.config.ts'), server: { host: '127.0.0.1', port: 0 } });
+  server = await createServer({ root, configFile: path.join(root, 'vite.config.ts'), cacheDir: path.join(tmp, 'vite-cache'), server: { host: '127.0.0.1', port: 0, watch: { ignored: ['**/.aegis-design-qa/**'] } } });
   await server.listen();
-  const env = { ...process.env, QA_URL: new URL(path.relative(root, tmp) + '/index.html', server.resolvedUrls.local[0]).href, QA_CAPTURE: path.join(root, 'output/playwright/composer-newline') };
+  const env = { ...process.env, BUBBLE_HOME: path.join(tmp, 'bubble-home'), QA_URL: new URL(path.relative(root, tmp) + '/index.html', server.resolvedUrls.local[0]).href, QA_CAPTURE: path.join(root, 'output/playwright/composer-newline') };
   delete env.ELECTRON_RUN_AS_NODE;
   await new Promise((resolve, reject) => {
     const child = spawn(path.join(root, 'node_modules/.bin/electron'), [path.join(tmp, 'main.cjs')], { env, stdio: ['ignore', 'pipe', 'pipe'] });

@@ -2,6 +2,7 @@ import { promises as fs } from 'fs';
 import type { Dirent } from 'fs';
 import { basename, join, sep } from 'path';
 import type { ProjectTreeNode } from '../types';
+import { projectScanRestriction, resolveProjectScanRoot, PROJECT_SCAN_NOTICE, type ProjectScanPolicy } from './project-scan-policy';
 
 const IGNORED_DIRECTORY_NAMES = new Set([
   '.git',
@@ -28,19 +29,19 @@ export function isIgnoredProjectTreeChange(relativePath: string): boolean {
   return relativePath.split(sep).slice(0, -1).some(part => IGNORED_DIRECTORY_NAMES.has(part));
 }
 
-async function buildNode(fullPath: string, name: string, signal?: AbortSignal): Promise<ProjectTreeNode> {
+async function buildNode(fullPath: string, name: string, signal?: AbortSignal, policy: ProjectScanPolicy = {}, displayPath = fullPath): Promise<ProjectTreeNode> {
   signal?.throwIfAborted();
   let stat;
   try {
     stat = await fs.lstat(fullPath);
   } catch {
     signal?.throwIfAborted();
-    return { name, path: fullPath, kind: 'file' };
+    return { name, path: displayPath, kind: 'file' };
   }
   signal?.throwIfAborted();
 
   if (!stat.isDirectory()) {
-    return { name, path: fullPath, kind: 'file' };
+    return { name, path: displayPath, kind: 'file' };
   }
 
   let entries: Dirent[] = [];
@@ -48,7 +49,7 @@ async function buildNode(fullPath: string, name: string, signal?: AbortSignal): 
     entries = await fs.readdir(fullPath, { withFileTypes: true });
   } catch {
     signal?.throwIfAborted();
-    return { name, path: fullPath, kind: 'dir', children: [] };
+    return { name, path: displayPath, kind: 'dir', children: [] };
   }
   signal?.throwIfAborted();
 
@@ -61,20 +62,24 @@ async function buildNode(fullPath: string, name: string, signal?: AbortSignal): 
 
     const childPath = join(fullPath, entry.name);
     if (entry.isDirectory()) {
-      children.push(await buildNode(childPath, entry.name, signal));
+      if (projectScanRestriction(childPath, policy)) continue;
+      children.push(await buildNode(childPath, entry.name, signal, policy, join(displayPath, entry.name)));
     } else {
-      children.push({ name: entry.name, path: childPath, kind: 'file' });
+      children.push({ name: entry.name, path: join(displayPath, entry.name), kind: 'file' });
     }
   }
 
-  return { name, path: fullPath, kind: 'dir', children };
+  return { name, path: displayPath, kind: 'dir', children };
 }
 
-export async function readProjectTree(rootPath: string, signal?: AbortSignal): Promise<ProjectTreeNode | null> {
+export async function readProjectTree(rootPath: string, signal?: AbortSignal, policy: ProjectScanPolicy = {}): Promise<ProjectTreeNode | null> {
   signal?.throwIfAborted();
+  const safeRoot = await resolveProjectScanRoot(rootPath, policy, signal);
+  if (safeRoot === undefined) return null;
+  if (!safeRoot) return { name: basename(rootPath) || rootPath, path: rootPath, kind: 'dir', children: [], scanNotice: PROJECT_SCAN_NOTICE };
   let stat;
   try {
-    stat = await fs.stat(rootPath);
+    stat = await fs.stat(safeRoot);
   } catch {
     signal?.throwIfAborted();
     return null;
@@ -85,5 +90,6 @@ export async function readProjectTree(rootPath: string, signal?: AbortSignal): P
   }
 
   const name = basename(rootPath) || rootPath;
-  return buildNode(rootPath, name, signal);
+  // Keep paths under the selected spelling, including safe /tmp aliases.
+  return buildNode(safeRoot, name, signal, policy, rootPath);
 }

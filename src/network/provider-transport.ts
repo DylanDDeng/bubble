@@ -277,7 +277,11 @@ function errorMessageChain(error: unknown): string[] {
   for (let depth = 0; current && depth < 8; depth++) {
     if (current instanceof Error) {
       messages.push(current.name, current.message);
-      current = (current as Error & { cause?: unknown }).cause;
+      // Node/undici stores errno on Error.code, including nested causes such
+      // as TypeError("terminated") -> SocketError { code: "UND_ERR_SOCKET" }.
+      const codedError = current as Error & { code?: unknown; cause?: unknown };
+      if (typeof codedError.code === "string") messages.push(codedError.code);
+      current = codedError.cause;
       continue;
     }
     if (typeof current === "object") {

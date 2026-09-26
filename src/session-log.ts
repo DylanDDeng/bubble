@@ -215,7 +215,7 @@ export class SessionLog {
             reasoning: entry.message.reasoning !== undefined
               ? sanitizeInternalReasoningText(entry.message.reasoning)
               : undefined,
-            providerMetadata: sanitizeAssistantProviderMetadata(cloneProviderMetadata(entry.message.providerMetadata)),
+            providerMetadata: sanitizeAssistantProviderMetadata(cloneProviderMetadata(entry.message.providerMetadata), entry.message.modelId ?? entry.message.model),
           });
           break;
         case "tool_call": {
@@ -320,7 +320,7 @@ function normalizeMessageToEntries(message: Message, id: string, timestamp: numb
           usage: message.usage,
           systemFingerprint: message.systemFingerprint,
           error: message.error,
-          providerMetadata: sanitizeAssistantProviderMetadata(cloneProviderMetadata(message.providerMetadata)),
+          providerMetadata: sanitizeAssistantProviderMetadata(cloneProviderMetadata(message.providerMetadata), message.modelId ?? message.model),
         },
         timestamp,
       };

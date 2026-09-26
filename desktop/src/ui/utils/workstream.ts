@@ -754,7 +754,9 @@ function createEntryFromTrace(
   const result = toolResultsMap.get(block.id);
   const rawStatus = toolStatusMap.get(block.id);
   let status =
-    rawStatus === 'pending' && !result
+    !result && isRecord(block.input) && block.input.__aegisToolCallInterrupted === true
+      ? 'interrupted' as const
+      : rawStatus === 'pending' && !result
       ? pendingFallbackStatus
       : rawStatus || (result?.is_error ? 'error' : 'success');
   const display = deriveReadableToolDisplay(block.name, block.input, status);

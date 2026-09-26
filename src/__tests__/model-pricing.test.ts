@@ -252,7 +252,7 @@ describe("model pricing", () => {
     expect(cached!.cost).toBeLessThan(uncached!.cost / 3);
   });
 
-  it("uses Sonnet 5 post-promo cache-write pricing after expiry", () => {
+  it("uses current official Sonnet 5 cache-write pricing in September", () => {
     const result = calculateUsageCost("anthropic", "claude-sonnet-5", {
       promptTokens: 1_000_000,
       promptCacheMissTokens: 1_000_000,
@@ -260,6 +260,6 @@ describe("model pricing", () => {
       completionTokens: 0,
     }, new Date("2026-09-01T00:00:00Z"));
 
-    expect(result).toEqual({ currency: "USD", cost: 3.75, estimated: false });
+    expect(result).toEqual({ currency: "USD", cost: 2.5, estimated: false });
   });
 });

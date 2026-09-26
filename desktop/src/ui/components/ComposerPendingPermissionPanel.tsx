@@ -41,8 +41,8 @@ export const ComposerPendingPermissionPanel = memo(function ComposerPendingPermi
   const parsed = useMemo(() => parsePermissionRequest(request), [request]);
 
   return (
-    <div className="overflow-hidden rounded-xl border border-[color-mix(in_srgb,var(--border)_82%,transparent)] bg-[var(--bg-primary)] shadow-[0_14px_36px_rgba(15,23,42,0.10)]">
-      <div className="flex items-center justify-between gap-4 px-4 py-3 sm:px-5">
+    <div data-composer-permission-panel className="flex max-h-[min(70dvh,680px)] min-h-0 flex-col overflow-hidden rounded-xl border border-[color-mix(in_srgb,var(--border)_82%,transparent)] bg-[var(--bg-primary)] shadow-[0_14px_36px_rgba(15,23,42,0.10)]">
+      <div className="flex shrink-0 items-center justify-between gap-4 px-4 py-3 sm:px-5">
         <div className="flex min-w-0 flex-1 items-center gap-3">
           <ShieldAlert className="h-4 w-4 shrink-0 text-amber-600" />
           <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
@@ -74,23 +74,24 @@ export const ComposerPendingPermissionPanel = memo(function ComposerPendingPermi
         </div>
       </div>
 
-      <div className="mx-4 border-t border-[var(--border)] sm:mx-5" />
+      <div className="mx-4 shrink-0 border-t border-[var(--border)] sm:mx-5" />
 
       {parsed.mode === 'question' && isAskUserQuestionInput(request.input) ? (
-        <div className="px-4 py-3 sm:px-5">
+        <div className="flex min-h-0 flex-col px-4 py-3 sm:px-5">
           <DecisionPanel
             chrome="bare"
+            scrollable
             input={request.input}
             onSubmit={(result) => onSubmit(request.toolUseId, result)}
           />
         </div>
       ) : parsed.mode === 'computer-use' && isComputerUsePermissionInput(request.input) ? (
-        <div className="flex flex-col gap-3 px-4 py-3 sm:px-5">
+        <div className="flex min-h-0 flex-col gap-3 overflow-y-auto px-4 py-3 sm:px-5">
           <ComputerUseApprovalBody input={request.input} />
           <ComposerPendingPermissionActions request={request} onSubmit={onSubmit} />
         </div>
       ) : (
-        <div className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+        <div className="flex min-h-0 flex-col gap-3 overflow-y-auto px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5">
           <p className="text-sm text-[var(--text-secondary)]">
             Resolve this approval request to continue
           </p>

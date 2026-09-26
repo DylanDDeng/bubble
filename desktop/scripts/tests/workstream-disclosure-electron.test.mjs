@@ -52,7 +52,20 @@ function App(){
  const [timing,setTiming]=useState(null);
  const [detailStatus,setDetailStatus]=useState('pending');
  const [n,setN]=useState(10),[running,setRunning]=useState(true),[turn,setTurn]=useState(1),[states,setStates]=useState(false),[chat,setChat]=useState(false),[recording,setRecording]=useState(false);
- window.qa={recording:()=>{setRecording(true);setChat(false)},newClockTurn:()=>store.setState(s=>({sessions:{...s.sessions,[chatId]:{...s.sessions[chatId],status:'running',messages:[...s.sessions[chatId].messages,{...prompt,createdAt:Date.now()},{...thought,uuid:'next-thought',createdAt:Date.now()}]}}})),summary:setTiming,detailStatus:setDetailStatus,chat:()=>{store.setState(s=>({sessions:{...s.sessions,[chatId]:{...s.sessions[chatId],messages:s.sessions[chatId].messages.map(m=>m===prompt?{...m,createdAt:Date.now()-16000}:m)}}}));setChat(true)},store,chatId,
+ window.qa={emit,recording:()=>{setRecording(true);setChat(false)},newClockTurn:()=>store.setState(s=>({sessions:{...s.sessions,[chatId]:{...s.sessions[chatId],status:'running',messages:[...s.sessions[chatId].messages,{...prompt,createdAt:Date.now()},{...thought,uuid:'next-thought',createdAt:Date.now()}]}}})),summary:setTiming,detailStatus:setDetailStatus,chat:()=>{store.setState(s=>({sessions:{...s.sessions,[chatId]:{...s.sessions[chatId],messages:s.sessions[chatId].messages.map(m=>m===prompt?{...m,createdAt:Date.now()-16000}:m)}}}));setChat(true)},store,chatId,
+  writePhase:phase=>{
+   if(phase==='start')window.writeStartedAt=Date.now()-15000;
+   const writeBase=window.writeStartedAt;
+   if(phase==='start') {
+    setChat(true);setTiming(null);setRecording(false);
+    store.setState(s=>({sessions:{...s.sessions,[chatId]:{...s.sessions[chatId],provider:'bubble',status:'running',messages:[{...prompt,createdAt:writeBase},
+      {type:'assistant',uuid:'long-thought',createdAt:writeBase+100,message:{content:[{type:'thinking',thinking:'Private reasoning '.repeat(6000)}]}},
+      {type:'assistant',uuid:'write-note',createdAt:writeBase+200,phase:'commentary',message:{content:[{type:'text',text:"Now I'll write the full scene file."}]}}]}}}));
+   }
+   if(['start','path','args'].includes(phase))emit({type:'assistant',uuid:'stream-write',createdAt:writeBase+300,message:{content:[{type:'tool_use',id:'stream-write',name:'Write',input:phase==='start'?{__aegisToolCallStreaming:true}:phase==='path'?{path:'/tmp/scene.html',__aegisToolCallStreaming:true}:{path:'/tmp/scene.html',content:'<html>\\n'+'<div>Shanghai voxel</div>\\n'.repeat(1565)+'<footer>END OF FULL FILE</footer>\\n</html>'}}]}});
+   if(phase==='result')emit({type:'user',uuid:'stream-write-result',createdAt:writeBase+400,message:{content:[{type:'tool_result',tool_use_id:'stream-write',content:'Wrote scene.html'}]}});
+   if(phase==='stop')store.setState(s=>({sessions:{...s.sessions,[chatId]:{...s.sessions[chatId],status:'completed'}}}));
+  },
   imageTurn:(provider,stage)=>{
    const imageTool={type:'assistant',uuid:'image-tool',createdAt:1200,message:{content:[{type:'tool_use',id:'image-edit',name:'image_edit',input:{prompt:'Make the cat white',__aegisGeneratedMedia:[{kind:'image',path:'/tmp/white-cat.png'}]}}]}};
    const imageResult={type:'user',uuid:'image-result',createdAt:1400,message:{content:[{type:'tool_result',tool_use_id:'image-edit',content:'/tmp/white-cat.png'}]}};
@@ -122,6 +135,32 @@ app.whenReady().then(async()=>{
  const shot=async(name)=>{fs.mkdirSync(process.env.QA_CAPTURE,{recursive:true});fs.writeFileSync(path.join(process.env.QA_CAPTURE,name+'.png'),(await w.webContents.capturePage()).toPNG())};
  try{
   await w.loadURL(process.env.QA_URL);await until('!!window.qa','renderer');await delay(500);
+  if (process.env.QA_RETRY_ONLY) {
+    await js('qa.writePhase("start");qa.emit({type:"assistant",uuid:"stream-write",createdAt:window.writeStartedAt+300,message:{content:[{type:"tool_use",id:"stream-write",name:"Write",input:{path:"/tmp/scene.html",__aegisToolCallInterrupted:true}}]}});qa.emit({type:"system",subtype:"api_retry",uuid:"retry-1",session_id:qa.chatId,attempt:1,maxRetries:10,errorStatus:null})');
+    await until('document.querySelector("[data-stream-retry]")?.textContent.includes("Reconnecting 1/10")','retry visible beside existing work');
+    assert.equal(await js('document.querySelectorAll("[data-stream-retry]").length'),1);
+    assert.equal(await js('[...document.querySelectorAll("[data-thinking-footer]")].filter(e=>!e.closest("[data-stream-retry]")).length'),0,'retry replaces generic Thinking status');
+    assert(await js('document.getElementById("real-chat").textContent.includes("Now I")'),'earlier narration remains');
+    await js('window.retryRow=document.querySelector("[data-stream-retry]");qa.emit({type:"system",subtype:"api_retry",uuid:"retry-10",session_id:qa.chatId,attempt:10,maxRetries:10,errorStatus:null})');
+    await until('document.querySelector("[data-stream-retry]")?.textContent.includes("Reconnecting 10/10")','latest attempt');
+    assert(await js('retryRow===document.querySelector("[data-stream-retry]")'),'one stable row');
+    assert(await js('document.getElementById("real-chat").textContent.includes("Stopped")'),'partial tool stays interrupted during retry');
+    await shot('retry-10-of-10');
+    await js('qa.store.setState(s=>({sessions:{...s.sessions,[qa.chatId]:{...s.sessions[qa.chatId],messages:JSON.parse(JSON.stringify(s.sessions[qa.chatId].messages))}}}))');
+    await until('document.querySelector("[data-stream-retry]")?.textContent.includes("10/10")','hydrated retry');
+    await js('qa.emit({type:"system",subtype:"api_retry_resolved",uuid:"resolved",session_id:qa.chatId,retryId:"retry-10"});qa.emit({type:"stream_event",event:{type:"content_block_delta",index:0,delta:{type:"thinking_delta",thinking:"Recovered reasoning"}}})');
+    await until('!document.querySelector("[data-stream-retry]")','delta-only recovery removes retry');
+    await until('qa.store.getState().sessions[qa.chatId].streaming.thinking.includes("Recovered reasoning")','recovered stream retained after coalescer flush');
+    await js('qa.store.setState(s=>({sessions:{...s.sessions,[qa.chatId]:{...s.sessions[qa.chatId],messages:JSON.parse(JSON.stringify(s.sessions[qa.chatId].messages))}}}))');
+    await delay(150);
+    assert.equal(await js('document.querySelectorAll("[data-stream-retry]").length'),0,'resolved retry does not resurrect after reload');
+    await js('qa.emit({type:"system",subtype:"api_retry",uuid:"retry-stop",session_id:qa.chatId,attempt:1,maxRetries:10,errorStatus:null});qa.store.setState(s=>({sessions:{...s.sessions,[qa.chatId]:{...s.sessions[qa.chatId],status:"stopped"}}}))');
+    await until('!document.querySelector("[data-stream-retry]")','stop removes retry');
+    assert.deepEqual(errors,[],'renderer console errors');
+    console.log('PASS: visible stable retry row, 10 attempts, retained trace, hydration, recovery and stop');
+    app.exit(0); return;
+  }
+  if (!process.env.QA_TOOL_STREAM_ONLY) {
   assert.equal(await expanded('#completed'),'false');
   assert(await js('document.querySelector("#completed [data-workstream-divider]").getBoundingClientRect().top >= document.querySelector("#completed .workstream-toggle-row button").getBoundingClientRect().bottom'),'divider sits below Worked for');
   assert.equal(await js('document.querySelector("#completed .workstream-toggle-row button").textContent'),'Worked for 44s');
@@ -273,7 +312,7 @@ app.whenReady().then(async()=>{
    await until('document.querySelectorAll("#real-chat img[alt=\\"white-cat.png\\"]").length===1','image appears before reply');
    for(const stage of ['streaming','completed']){
     await js('qa.imageTurn('+JSON.stringify(provider)+','+JSON.stringify(stage)+')');await delay(350);
-    await until('document.querySelectorAll("#real-chat img[alt=\\"white-cat.png\\"]").length===1','one image throughout completion');
+    await until('document.querySelectorAll("#real-chat img[alt=\\"white-cat.png\\"]").length===1','one image throughout completion: '+provider+' '+stage);
     assert(await js('(()=>{const image=document.querySelector("#real-chat img[alt=\\"white-cat.png\\"]"),reply=[...document.querySelectorAll("#real-chat p")].find(p=>p.textContent.startsWith("The cat is now white."));return !!reply&&image.getBoundingClientRect().bottom<=reply.getBoundingClientRect().top})()'),provider+' '+stage+': image stays above reply');
     await shot('image-order-'+provider+'-'+stage);
    }
@@ -307,8 +346,35 @@ app.whenReady().then(async()=>{
   await delay(1100);
   assert((await js('document.querySelector("#timing").innerText')).includes('Read two files'),'obsolete deferred update is cancelled');
   assert.deepEqual(errors,[],'renderer console errors');
-  console.log('workstream disclosure: lifecycle, reasoning, tool output, scrolling, keyboard and themes passed');app.exit(0);
- }catch(e){console.error(e);await shot('failure');app.exit(1)}
+  }
+  await js('qa.writePhase("start")');
+  await until('document.querySelector("#real-chat")?.innerText.includes("Editing files")','tool start is visible before arguments');
+  assert.equal(await js('document.querySelectorAll("#real-chat [data-workstream-group][aria-expanded]").length'),0,'no empty file disclosure');
+  assert.equal(await js('document.querySelector("#real-chat").innerText.includes("Private reasoning")'),false,'long thinking stays out of activity details');
+  await js('qa.writePhase("path")');
+  await until('document.querySelector("#real-chat [data-workstream-group]")?.hasAttribute("aria-expanded")','path enables file details');
+  await click('#real-chat [data-workstream-group]');
+  await until('document.querySelector("#real-chat [data-edit-stage] .workstream-activity-label")?.textContent.includes("Creating")','pending file uses present tense and filename');
+  assert.equal(await js('document.querySelectorAll("#real-chat [data-edit-stage] [aria-expanded]").length'),0,'no empty diff disclosure while arguments are incomplete');
+  await click('#real-chat [data-edit-stage] [data-agent-activity-file-link]');
+  assert.equal(await js('qa.store.getState().pendingProjectFileOpen?.path'),'/tmp/scene.html','filename opens the file directly');
+  await js('window.writeStage=document.querySelector("#real-chat [data-workstream-stage]")');
+  await js('qa.writePhase("args")');
+  await until('!!document.querySelector("#real-chat [data-edit-stage] [aria-expanded]")','diff disclosure appears with full arguments');
+  await click('#real-chat [data-edit-stage] [aria-expanded]');
+  await until('!!document.querySelector("#real-chat [data-trace-file-diff]")','canonical arguments expose the recorded diff');
+  assert(await js('writeStage===document.querySelector("#real-chat [data-workstream-stage]")'),'same file row through generation and execution');
+  assert(await js('document.querySelector("#real-chat [data-trace-file-diff]").textContent.includes("END OF FULL FILE")'),'file diff is not truncated at 20k characters');
+  assert.equal(await js('qa.store.getState().sessions[qa.chatId].messages.filter(m=>m.uuid==="stream-write").length'),1,'streamed updates replace the same store message');
+  await js('qa.writePhase("result")');
+  await until('document.querySelector("#real-chat [data-edit-stage] .workstream-activity-label")?.textContent.includes("Created")','completion switches to Created');
+  assert.equal(await js('document.querySelector("#real-chat [data-edit-stage] [aria-expanded]").getAttribute("aria-expanded")'),'true','inspection survives tool completion');
+  await shot('file-write-completed');
+  await js('qa.writePhase("start");qa.writePhase("path");qa.writePhase("stop")');
+  await until('document.querySelector("#real-chat [data-edit-stage] .workstream-activity-label")?.textContent.includes("Stopped creating")','interrupted generation never looks created');
+  assert.deepEqual(errors,[],'renderer console errors after write lifecycle');
+  console.log(process.env.QA_TOOL_STREAM_ONLY ? 'PASS: real ChatPane tool streaming, file opening, full inline diff, row identity and interruption' : 'workstream disclosure: lifecycle, reasoning, tool output, file argument streaming, inline diff, interruption, scrolling, keyboard and themes passed');app.exit(0);
+ }catch(e){console.error(e);console.error('QA images',await js('[...document.querySelectorAll("#real-chat img")].map(e=>({alt:e.alt,visible:!!e.getClientRects().length,inert:!!e.closest("[inert]"),parent:e.parentElement?.outerHTML.slice(0,240)}))'));await shot('failure');app.exit(1)}
 });
 `;
 try {

@@ -869,7 +869,7 @@ export const ComposerPromptEditor = forwardRef<
         role="textbox"
         aria-multiline="true"
         spellCheck={false}
-        className={`${props.className ?? ''} whitespace-pre-wrap break-words aegis-composer-editor [overflow-wrap:anywhere]`}
+        className={`${props.className ?? ''} whitespace-pre-wrap break-words overflow-y-auto overscroll-contain aegis-composer-editor [overflow-wrap:anywhere]`}
         onInput={handleInput}
         onPaste={handlePaste}
         onKeyDown={(event) => {

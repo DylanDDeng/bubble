@@ -25,6 +25,9 @@ import { useAppStore } from '../../store/useAppStore';
 import { deriveSubagentSummaries } from '../../utils/subagent-registry';
 import { SubagentAvatar } from '../SubagentAvatar';
 import { Users } from '../icons';
+import type { Attachment } from '../../types';
+import { SourceRow } from '../SessionSourcesPanel';
+import { Paperclip } from '../icons';
 import * as DropdownMenu from '../ui/dropdown-menu';
 
 function EnvironmentListIcon() {
@@ -280,10 +283,16 @@ export function EnvironmentHub({
   context,
   git,
   onOpenProjectPanel,
+  sources = [],
+  sourcesError = null,
+  onOpenSources,
 }: {
   context: ActiveEnvironmentContext;
   git: GitEnvironmentState;
   onOpenProjectPanel: (view: 'files' | 'changes') => void;
+  sources?: Attachment[];
+  sourcesError?: string | null;
+  onOpenSources?: (path: string | null) => void;
 }) {
   const prs = useSessionPullRequests(context, git);
   const [open, setOpen] = useState(false);
@@ -351,7 +360,7 @@ export function EnvironmentHub({
 
   // A plain directory has no Git environment to summarize. Other task
   // sections remain available independently when they contain information.
-  if (knownNonGit && !hasProjectFolders && !hasComputerUse && subagents.length === 0 && prs.items.length === 0 && !prs.error) return null;
+  if (knownNonGit && !hasProjectFolders && !hasComputerUse && subagents.length === 0 && prs.items.length === 0 && !prs.error && !sources.length && !sourcesError) return null;
 
   return (
     <div className="relative">
@@ -467,6 +476,16 @@ export function EnvironmentHub({
               )}
             </div>
             </> : null}
+            {(sources.length > 0 || sourcesError) && onOpenSources ? (
+              <section className="environment-summary-section" aria-label="Sources">
+                <div className="px-2 text-[11px] font-medium text-[var(--text-muted)]">Sources</div>
+                {sources.slice(-3).map(source => <SourceRow key={source.path} source={source} onClick={() => { onOpenSources(source.path); setOpen(false); }} />)}
+                <button type="button" className="environment-summary-row w-full" onClick={() => { onOpenSources(null); setOpen(false); }}>
+                  <Paperclip className="h-3.5 w-3.5 shrink-0" />
+                  <span>View all{sources.length ? ` (${sources.length})` : ''}</span>
+                </button>
+              </section>
+            ) : null}
             {!context.unavailableReason ? (
               <>
                 {hasProjectFolders ? (

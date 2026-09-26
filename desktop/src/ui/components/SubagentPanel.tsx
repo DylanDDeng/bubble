@@ -46,23 +46,6 @@ function displayState(summary: SubagentSummary, sessionRunning: boolean): Subage
   return sessionRunning ? 'running' : 'frozen';
 }
 
-function StatusDot({ state }: { state: SubagentDisplayState }) {
-  const color =
-    state === 'running'
-      ? 'var(--accent)'
-      : state === 'error'
-        ? 'var(--danger, #e5484d)'
-        : state === 'frozen'
-          ? 'var(--text-muted)'
-          : 'var(--success, #30a46c)';
-  return (
-    <span
-      className="inline-block h-2 w-2 flex-shrink-0 rounded-full"
-      style={{ backgroundColor: color, boxShadow: state === 'running' ? `0 0 0 3px color-mix(in srgb, ${color} 25%, transparent)` : undefined }}
-    />
-  );
-}
-
 /**
  * Read-only detail view for ONE subagent — each subagent gets its own
  * top-level utility tab (`subagent:<id>`), so there is no internal switcher
@@ -227,7 +210,6 @@ export function SubagentPanel({
               ) : (
                 <SubagentAvatar id={selected.persona.id} hue={selected.persona.colorHue} size={14} />
               )}
-              <StatusDot state={state} />
               <span
                 className="min-w-0 truncate text-[var(--text-secondary)]"
                 title={`${selected.persona.persona} · ${selected.persona.functionalName}`}

@@ -363,15 +363,14 @@ function buildExploreTitle(entries: WorkstreamEntry[], files: WorkstreamStageFil
 }
 
 function buildEditTitle(files: WorkstreamStageFile[], entries: WorkstreamEntry[]): string {
-  const targetCount = files.length || entries.length;
   const operations = new Set(files.map((file) => file.operation));
-  let verb = 'Edited';
-  if (operations.size === 1 && operations.has('write')) {
-    verb = 'Created';
-  } else if (operations.size === 1 && operations.has('delete')) {
-    verb = 'Deleted';
-  }
-  return `${verb} ${plural(targetCount, files.length === 1 || files.length > 1 ? 'file' : 'item')}`;
+  const [active, completed, action] = operations.size === 1 && operations.has('write')
+    ? ['Creating', 'Created', 'creating'] : operations.size === 1 && operations.has('delete')
+      ? ['Deleting', 'Deleted', 'deleting'] : ['Editing', 'Edited', 'editing'];
+  const status = aggregateStatus(entries);
+  const verb = status === 'pending' ? active : status === 'interrupted' ? `Stopped ${action}`
+    : status === 'error' ? `Failed ${action}` : completed;
+  return `${verb} ${files.length === 1 ? files[0].fileName : files.length ? plural(files.length, 'file') : 'files'}`;
 }
 
 function buildCommandTitle(commands: WorkstreamStageCommand[], entries: WorkstreamEntry[]): string {

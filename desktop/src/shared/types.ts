@@ -907,6 +907,8 @@ export interface AutomationSnapshot {
 
 // 项目文件树节点
 export interface ProjectTreeNode {
+  /** Explains why a broad/private root was not recursively indexed. */
+  scanNotice?: string;
   name: string;
   path: string;
   kind: 'file' | 'dir';
@@ -1749,9 +1751,8 @@ export type StreamMessage =
       context: { usedTokens: number; contextWindow: number; estimated: boolean } | null;
     })
   // Emitted when an API request failed with a retryable error and the runtime
-  // will retry after a delay. Rendered as a transient status on the working
-  // indicator, never as a transcript card; any later substantive message
-  // (assistant/stream/result) means the retry resolved.
+  // will retry after a delay. Persisted for history, displayed as one transient
+  // reconnecting line. A resolved marker also covers delta-only recovery.
   | (StreamMessageBase & {
       type: 'system';
       subtype: 'api_retry';
@@ -1759,9 +1760,16 @@ export type StreamMessage =
       session_id: string;
       attempt: number;
       maxRetries: number;
-      delayMs: number;
+      delayMs?: number;
       /** HTTP status of the failed request; null for connection errors. */
       errorStatus: number | null;
+    })
+  | (StreamMessageBase & {
+      type: 'system';
+      subtype: 'api_retry_resolved';
+      uuid: string;
+      session_id: string;
+      retryId: string;
     })
   // Emitted right after a turn's `result`: unified diff of the whole working
   // tree across that turn (git tree snapshot before vs after). Captures file

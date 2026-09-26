@@ -71,10 +71,14 @@ import { SubagentPanel } from './components/SubagentPanel';
 import { SubagentAvatar } from './components/SubagentAvatar';
 import { DesignAnnotateBridge } from './components/browser/DesignAnnotateBridge';
 import { getSubagentPersona } from './utils/subagent-persona';
+import { deriveSubagentSummaries } from './utils/subagent-registry';
 import { WorkspaceHost } from './components/WorkspaceHost';
 import { ChatPane } from './components/ChatPane';
 import { useBrowserStateStore } from './store/useBrowserStateStore';
 import { EnvironmentEditorPicker, EnvironmentHub } from './components/environment/EnvironmentHub';
+import { SessionSourcesPanel } from './components/SessionSourcesPanel';
+import { useSessionSources } from './hooks/useSessionSources';
+import { Paperclip } from './components/icons';
 import { useActiveEnvironmentContext } from './components/environment/useActiveEnvironmentContext';
 import { useGitEnvironment } from './components/environment/useGitEnvironment';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -436,6 +440,8 @@ export function App() {
     );
   }
   const environmentContext = useActiveEnvironmentContext();
+  const sessionSources = useSessionSources(environmentContext.session);
+  const [sourceSelection, setSourceSelection] = useState<{ sessionId: string; path: string | null } | null>(null);
   const gitEnvironment = useGitEnvironment(environmentContext.effectiveCwd, environmentContext.contextKey);
   const refreshEnvironmentGit = useCallback(async () => {
     await gitEnvironment.refresh();
@@ -704,12 +710,20 @@ export function App() {
     closeRightUtilityTabInStore(target);
   }, [activeSessionId, closeRightUtilityTabInStore, destroySideChat, removeBrowserSessionState, sideChats]);
 
+  // Resolve the same per-session identities as SubagentPanel, including nested
+  // spawns. Runtime updates and history hydration must also update open tabs.
+  const subagentPersonas = useMemo(() => new Map(
+    deriveSubagentSummaries(activeSession?.messages ?? [], { includeNested: true })
+      .map(summary => [summary.id, summary.persona])
+  ), [activeSession?.messages]);
+
   const rightUtilityTabDescriptors = useMemo<ProjectUtilityTabDescriptor[]>(() => {
     const workspaceLeaf = getPathLeaf(activeSession?.cwd || projectCwd || '');
     return rightUtilityTabs.map((tab) => {
       const kind = getProjectUtilityTabKind(tab);
       if (kind === 'images') return { id: tab, kind, label: 'Images' };
       if (kind === 'goal') return { id: tab, kind, label: 'Edit goal' };
+      if (kind === 'sources') return { id: tab, kind, label: 'Sources' };
       if (kind === 'files') {
         return { id: tab, kind, label: activeProjectFileTabs[tab]?.name || 'Files' };
       }
@@ -742,13 +756,15 @@ export function App() {
         };
       }
       if (kind === 'subagent') {
-        // The tab IS the subagent: pixel avatar + persona short name.
         const subagentId = getProjectUtilitySubagentId(tab);
+        const persona = subagentId
+          ? subagentPersonas.get(subagentId) ?? getSubagentPersona(subagentId)
+          : undefined;
         return {
           id: tab,
           kind,
-          label: subagentId ? getSubagentPersona(subagentId).persona : 'Subagent',
-          subagentId: subagentId ?? undefined,
+          label: persona?.persona ?? 'Subagent',
+          subagentPersona: persona,
         };
       }
       return { id: tab, kind, label: workspaceLeaf || 'Terminal' };
@@ -760,6 +776,7 @@ export function App() {
     browserSessionStates,
     projectCwd,
     rightUtilityTabs,
+    subagentPersonas,
   ]);
 
   const updateProjectFileTabLabel = useCallback((
@@ -1097,6 +1114,13 @@ export function App() {
                   context={environmentContext}
                   git={gitEnvironment}
                   onOpenProjectPanel={openEnvironmentProjectPanel}
+                  sources={sessionSources.sources}
+                  sourcesError={sessionSources.error}
+                  onOpenSources={(path) => {
+                    if (!environmentContext.sessionId) return;
+                    setSourceSelection({ sessionId: environmentContext.sessionId, path });
+                    openRightUtilityTab('sources');
+                  }}
                 />
                 <button
                   type="button"
@@ -1204,6 +1228,7 @@ export function App() {
               onClose={() => closeRightUtilityTab(tabId)}
               onActiveFileTabChange={(file) => updateProjectFileTabLabel(tabId, file)}
               onOpenUtilityTab={openRightUtilityTab}
+              onOpenFile={useAppStore.getState().openProjectFileInRightPanel}
               openRequest={pendingProjectFileOpen?.tabId === tabId ? pendingProjectFileOpen : null}
               onOpenRequestConsumed={clearPendingProjectFileOpen}
               sharedPanelWidth={renderedRightUtilityPanelWidth}
@@ -1212,6 +1237,18 @@ export function App() {
               onToggleFullscreen={toggleFilesPanelFullscreen}
             />
           ))}
+          {activeUtilityPanel === 'sources' && environmentContext.sessionId ? (
+            <SessionSourcesPanel
+              key={environmentContext.sessionId}
+              sessionId={environmentContext.sessionId}
+              sources={sessionSources.sources}
+              loading={sessionSources.loading}
+              error={sessionSources.error}
+              onRetry={sessionSources.refresh}
+              selectedPath={sourceSelection?.sessionId === environmentContext.sessionId ? sourceSelection.path : null}
+              onSelect={path => setSourceSelection({ sessionId: environmentContext.sessionId!, path })}
+            />
+          ) : null}
           {rightUtilityTabs.filter(tab => tab.startsWith('images:')).map(tab => (
             <ImageStudioPanel key={tab} sessionId={tab.slice(7)} hidden={activeUtilityPanel === null || activeRightUtilityTab !== tab} fullscreen={rightPanelFullscreen === 'images'} />
           ))}
@@ -1359,6 +1396,7 @@ export function App() {
 }
 
 function getUtilityTabIcon(target: ProjectUtilityPanelKind) {
+  if (target === 'sources') return Paperclip;
   if (target === 'images') return ImageStudioIcon;
   if (target === 'goal') return Target;
   if (target === 'terminal') return SquareTerminal;
@@ -1608,10 +1646,10 @@ function RightUtilityTabStrip({
                   className="flex min-w-0 flex-1 items-center gap-1.5 pl-2.5 pr-1 text-left"
                   title={tab.label}
                 >
-                  {tab.kind === 'subagent' && tab.subagentId ? (
+                  {tab.kind === 'subagent' && tab.subagentPersona ? (
                     <SubagentAvatar
-                      id={tab.subagentId}
-                      hue={getSubagentPersona(tab.subagentId).colorHue}
+                      id={tab.subagentPersona.id}
+                      hue={tab.subagentPersona.colorHue}
                       size={14}
                     />
                   ) : useFileIcon ? (

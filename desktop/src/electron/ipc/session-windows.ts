@@ -2,6 +2,7 @@ import { BrowserWindow, shell } from 'electron';
 import { getSession } from '../libs/session-store';
 import { DEV_SERVER_URL, getPreloadPath, getUIPath, ipcMainHandle, isDev } from '../util';
 import type { ServerEvent } from '../../shared/types';
+import { sendRendererEvent } from '../libs/renderer-event-delivery';
 
 /** Secondary windows own ephemeral UI state, while task data stays shared. */
 export const sessionWindows = new Map<number, { window: BrowserWindow; rendererState: Record<string, string> }>();
@@ -9,7 +10,7 @@ export const sessionWindows = new Map<number, { window: BrowserWindow; rendererS
 export function broadcastSessionEvent(primary: BrowserWindow, event: ServerEvent): void {
   const targets = event.type === 'session.open' ? [primary] : [primary, ...[...sessionWindows.values()].map(value => value.window)];
   for (const win of new Set(targets)) {
-    if (!win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.send('server-event', JSON.stringify(event));
+    sendRendererEvent(win, event);
   }
 }
 

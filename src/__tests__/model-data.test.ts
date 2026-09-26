@@ -38,8 +38,9 @@ describe("generated model data", () => {
     }
     // The StepFun CNY override wins over the USD entry models.dev normalizes to.
     expect(getModelPricing("stepfun", "step-3.7-flash")?.currency).toBe("CNY");
-    // The Sonnet 5 promo metadata survives regeneration.
-    expect(getModelPricing("anthropic", "claude-sonnet-5")?.effectiveUntil).toBeDefined();
+    // Current official pricing survives regeneration of the older snapshot.
+    expect(getModelPricing("anthropic", "claude-sonnet-5")?.effectiveUntil).toBeUndefined();
+    expect(getModelPricing("anthropic", "claude-opus-5-5")?.inputCacheHitPerMillion).toBe(0.2);
   });
 
   it("contains no duplicate (provider, model) pricing rows", () => {

@@ -630,7 +630,9 @@ export function deriveTranscriptTimelineItems(
   for (let originalIndex = 0; originalIndex < messages.length; originalIndex += 1) {
     const message = messages[originalIndex];
 
-    if ((message.type === 'system' && message.subtype === 'bubble_context') || message.bubbleSubagent || message.type === 'stream_event' || message.type === 'goal_completed' || isToolResultOnlyMessage(message)) {
+    if ((message.type === 'system' && (message.subtype === 'bubble_context'
+      || message.subtype === 'api_retry' || message.subtype === 'api_retry_resolved'))
+      || message.bubbleSubagent || message.type === 'stream_event' || message.type === 'goal_completed' || isToolResultOnlyMessage(message)) {
       continue;
     }
 

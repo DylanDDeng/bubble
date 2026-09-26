@@ -207,6 +207,18 @@ Built-in providers include OpenAI, Anthropic, Google, DeepSeek, Moonshot (CN and
 
 For Doubao Seed models on Volcengine Ark, run `/provider --add doubao` and paste your Ark API key. The built-in endpoint is `https://ark.cn-beijing.volces.com/api/v3` and uses Ark's Responses API. The model picker exposes `minimal`, `low`, `medium`, and `high`, defaulting to `high`; `minimal` disables Ark thinking, while the other levels enable it.
 
+For **Xiaomi MiMo Token Plan**, choose **Xiaomi MiMo Token Plan** in desktop
+Settings → Providers, or run `/provider --add mimo-token-plan` in the CLI.
+Enter the Token Plan key (`tp-…` for personal plans, `ttp-…` for team plans),
+then select `/model mimo-token-plan:mimo-v2.6-pro` or `mimo-v2.6-flash`.
+Bubble uses Anthropic Messages at
+`https://token-plan-cn.xiaomimimo.com/anthropic/v1/messages`, with streaming,
+tools, and a thinking on/off switch (on by default). Both models have a 1M
+context window and a 128K output cap. V2.5 Pro and V2.5 are also available;
+their announced retirement date is October 21, 2026. Use the plan-specific key,
+not a pay-as-you-go API key. See the
+[official integration guide](https://mimo.mi.com/docs/zh-CN/tokenplan/integration/tools-overview).
+
 ### Custom providers and models
 
 For StepFun's standard API, run `/provider --add stepfun-api`, enter your API

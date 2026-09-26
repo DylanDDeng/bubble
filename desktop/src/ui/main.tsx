@@ -5,7 +5,13 @@ import { App } from './App';
 import { ComputerUsePreviewApp } from './components/ComputerUsePreviewApp';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { isComputerUsePreviewHash } from '../shared/computer-use';
+import { installReactPerformanceCleanup } from './utils/react-performance-cleanup';
 import './index.css';
+
+if (import.meta.env.DEV) {
+  const dispose = installReactPerformanceCleanup();
+  import.meta.hot?.dispose(dispose);
+}
 
 window.addEventListener('unhandledrejection', (event) => {
   console.error('Unhandled promise rejection:', event.reason);

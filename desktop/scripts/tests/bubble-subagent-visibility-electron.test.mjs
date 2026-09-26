@@ -105,6 +105,17 @@ app.whenReady().then(async()=>{
   await click(toggle);await single();
   await run('qa.start()');
   assert.equal(await js('document.querySelector('+JSON.stringify(row)+').dataset.subagentStatus'),'pending','spawn success does not complete child');
+  // The row says the task; the disclosure must add something rather than repeat it.
+  assert((await js('document.querySelector('+JSON.stringify(lane+' [data-subagent-task-line]')+').textContent')).includes('Review error persistence and test coverage'),'task reads inline on the row');
+  assert.equal(await js('document.querySelectorAll('+JSON.stringify(lane+' [data-subagent-progress]')+').length'),1,'live progress sits on the row');
+  await click(toggle);
+  assert.equal(await js('document.querySelectorAll('+JSON.stringify(lane+' [data-subagent-details] .workstream-text')+').length'),1,'short task is not repeated inside the disclosure');
+  assert(await visible(lane+' [data-subagent-no-activity]'),'empty disclosure says so instead of duplicating the row');
+  await run('qa.emit({type:"assistant",uuid:"child-read",parentToolUseId:"spawn-0",message:{content:[{type:"tool_use",id:"child-read",name:"Read",input:{path:"src/store.ts"}}]}});qa.emit({type:"user",uuid:"child-read-result",parentToolUseId:"spawn-0",message:{content:[{type:"tool_result",tool_use_id:"child-read",content:"ok"}]}})');
+  assert.equal(await js('document.querySelectorAll('+JSON.stringify(lane+' [data-subagent-details] [data-workstream-stage]')+').length'),1,'disclosure lists the tools the child used');
+  assert.equal(await js('document.querySelectorAll('+JSON.stringify(lane+' [data-subagent-no-activity]')+').length'),0);
+  await shot('running-expanded');
+  await click(toggle);
   assert.equal(await js('document.querySelector("#chat [data-workstream-group]").getAttribute("aria-expanded")'),'false','ordinary tools stay collapsed');
   await run('qa.wait()');
   await single();assert((await label()).includes('Working'));

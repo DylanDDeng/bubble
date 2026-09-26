@@ -7,9 +7,11 @@ interface DecisionPanelProps {
   onSubmit: (result: PermissionResult) => void;
   /** "bare" omits the outer card so the panel can be embedded in another container. */
   chrome?: 'card' | 'bare';
+  /** Keep actions visible while long questions scroll within a constrained parent. */
+  scrollable?: boolean;
 }
 
-export function DecisionPanel({ input, onSubmit, chrome = 'card' }: DecisionPanelProps) {
+export function DecisionPanel({ input, onSubmit, chrome = 'card', scrollable = false }: DecisionPanelProps) {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [otherInputs, setOtherInputs] = useState<Record<string, string>>({});
 
@@ -92,7 +94,8 @@ export function DecisionPanel({ input, onSubmit, chrome = 'card' }: DecisionPane
       : 'bg-[var(--bg-tertiary)] rounded-lg p-4 my-3 border border-[var(--accent)]/30';
 
   return (
-    <div className={wrapperClass}>
+    <div className={`${wrapperClass} ${scrollable ? 'flex min-h-0 flex-col' : ''}`}>
+      <div data-decision-questions className={scrollable ? 'min-h-0 overflow-y-auto overscroll-contain' : undefined}>
       {input.questions.map((question, idx) => (
         <div key={idx} className={idx > 0 ? 'mt-4 pt-4 border-t border-[var(--border)]' : ''}>
           {/* Header */}
@@ -170,8 +173,10 @@ export function DecisionPanel({ input, onSubmit, chrome = 'card' }: DecisionPane
         </div>
       ))}
 
-      {/* Actions */}
-      <div className="flex justify-end gap-2 mt-4 pt-4 border-t border-[var(--border)]">
+      </div>
+
+      {/* Actions stay outside the scrolling questions. */}
+      <div className="flex shrink-0 justify-end gap-2 mt-4 pt-4 border-t border-[var(--border)]">
         <button
           onClick={handleCancel}
           className="px-4 py-2 rounded-lg text-sm hover:bg-[var(--border)] transition-colors"

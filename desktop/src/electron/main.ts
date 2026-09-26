@@ -1,6 +1,7 @@
 import { desktopDataProfile } from './data-environment';
 import { setupSessionWindowsIPC, sessionWindows } from './ipc/session-windows';
 import { initializeDesktopDefaults } from './libs/desktop-defaults';
+import { installRendererRecovery } from './libs/renderer-recovery';
 import { app, BrowserWindow, Menu, dialog, shell, ipcMain, nativeTheme, session } from 'electron';
 import { queueSessionLink } from './ipc/session-links';
 import { autoUpdater } from 'electron-updater';
@@ -552,6 +553,31 @@ function startDevFileReloadWatcher(win: BrowserWindow): void {
   }
 }
 
+function protectRenderer(win: BrowserWindow): void {
+  installRendererRecovery(win, {
+    isQuitting: () => isQuitting,
+    logDirectory: path.join(app.getPath('userData'), 'logs'),
+    sampleMemory: () => {
+      const pid = win.webContents.getOSProcessId();
+      const memory = app.getAppMetrics().find(metric => metric.pid === pid)?.memory;
+      return memory && { workingSetKB: memory.workingSetSize, peakWorkingSetKB: memory.peakWorkingSetSize };
+    },
+    offerRetry: async () => {
+      const { response } = await dialog.showMessageBox(win, {
+        type: 'error',
+        title: 'Bubble display recovery',
+        message: 'The display stopped unexpectedly several times.',
+        detail: 'Background agents have not been stopped. You can reload the display without restarting Bubble.',
+        buttons: ['Reload display', 'Keep background tasks running'],
+        defaultId: 0,
+        cancelId: 1,
+        noLink: true,
+      });
+      return response === 0;
+    },
+  });
+}
+
 function createWindow(): void {
   const windowState = loadWindowState();
 
@@ -606,6 +632,7 @@ function createWindow(): void {
   registerBrowserIpc(mainWindow);
   registerDesignModeIpc(mainWindow);
   registerWindowShellState(mainWindow);
+  protectRenderer(mainWindow);
 
   // 后台预热 Claude 运行时状态缓存，避免首次发消息时等待 1-5 秒
 
@@ -628,9 +655,6 @@ function createWindow(): void {
         return;
       }
       void loadDistFallbackUi(mainWindow);
-    });
-    webContents.on('render-process-gone', (_event, details) => {
-      console.error('[Dev] Renderer process gone:', details);
     });
     webContents.on('unresponsive', () => {
       logDevLifecycle('webContents.unresponsive');
@@ -902,7 +926,7 @@ app.whenReady().then(() => {
             // http://127.0.0.1:* covers the per-project local preview servers
             // (markdown images, PDF preview iframes); requests are still gated
             // by each server's per-instance random token.
-            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob: http://127.0.0.1:*; font-src 'self' data:; frame-src 'self' blob: data: http://127.0.0.1:*; object-src 'self' blob: data:; connect-src 'self'",
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob: http://127.0.0.1:*; font-src 'self' data:; media-src 'self' blob: data: http://127.0.0.1:*; frame-src 'self' blob: data: http://127.0.0.1:*; object-src 'self' blob: data:; connect-src 'self'",
           ],
         },
       });
@@ -1008,6 +1032,7 @@ app.whenReady().then(() => {
     rendererState: loadRendererState,
     onCreate: win => {
       registerWindowShellState(win);
+      protectRenderer(win);
       let closing = false;
       let flushed = false;
       win.on('close', event => {

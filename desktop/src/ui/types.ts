@@ -195,7 +195,7 @@ export interface SessionStreamingState {
 export type ActiveWorkspace = 'chat' | 'skills' | 'automations' | 'prs' | 'board';
 export type ChatSidebarView = 'threads' | 'skills';
 export type ProjectPanelView = 'files' | 'changes';
-export type ProjectUtilityPanelKind = 'files' | 'side-chat' | 'browser' | 'review' | 'terminal' | 'subagent' | 'goal' | 'images';
+export type ProjectUtilityPanelKind = 'files' | 'side-chat' | 'browser' | 'review' | 'terminal' | 'subagent' | 'goal' | 'images' | 'sources';
 export type ProjectUtilityPanelTarget =
   | ProjectUtilityPanelKind
   | `files:${string}`
@@ -223,8 +223,8 @@ export type ProjectUtilityTabDescriptor = {
   id: ProjectUtilityPanelTarget;
   kind: ProjectUtilityPanelKind;
   label: string;
-  /** For subagent tabs: the subagent tool_use id (drives the pixel avatar). */
-  subagentId?: string;
+  /** Display identity shared with the detail panel; tab id remains the tool_use id. */
+  subagentPersona?: import('./utils/subagent-persona').SubagentPersona;
   /** For side-chat tabs: a turn is streaming (pulsing dot on the tab). */
   running?: boolean;
   /** True while the side-chat fork is in flight (non-closable loading tab). */

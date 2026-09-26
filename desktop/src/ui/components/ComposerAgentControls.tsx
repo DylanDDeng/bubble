@@ -845,7 +845,7 @@ const BubbleAgentSubContent: FC<{
   }
   return <>{catalogNotice && <div role="status" className="px-2.5 py-2 text-[11px] text-[var(--text-muted)]">{catalogNotice}</div>}<EffortModelPanel modelOptions={modelOptions} selectedModel={selectedModel} onSelectModel={onSelectModel}
     efforts={levels} effort={thinkingLevel} onEffortChange={onThinkingLevelChange}
-    formatEffort={formatBubbleThinkingLevelLabel} loadingText={modelsLoading ? 'Loading models…' : catalogNotice ? 'No models available' : null} /></>;
+    formatEffort={(level) => formatBubbleThinkingLevelLabel(level, selectedModel)} loadingText={modelsLoading ? 'Loading models…' : catalogNotice ? 'No models available' : null} /></>;
 };
 
 const CodexAgentSubContent: FC<{
@@ -977,7 +977,7 @@ export function ComposerAgentModelPicker({
     ? ` ${grokEffortLabels[grokReasoningEffort]}`
     : '';
   const bubbleEffortSuffix = agentProvider === 'bubble' && bubbleThinkingLevel
-    ? ` ${formatBubbleThinkingLevelLabel(bubbleThinkingLevel)}`
+    ? ` ${formatBubbleThinkingLevelLabel(bubbleThinkingLevel, modelValue)}`
     : '';
   const deepseekEffortSuffix = agentProvider === 'deepseek' && deepseekReasoningEffort
     ? ` ${DEEPSEEK_REASONING_EFFORT_LABELS[deepseekReasoningEffort]}`

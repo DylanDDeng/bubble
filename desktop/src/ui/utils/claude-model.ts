@@ -24,12 +24,12 @@ export function canonicalizeClaudeModel(model: string | null | undefined): strin
 
 function parseClaudeModelFamily(
   model: string | null | undefined
-): { family: 'sonnet' | 'opus' | 'haiku'; major: number; minor: number } | null {
+): { family: 'sonnet' | 'opus' | 'haiku' | 'fable'; major: number; minor: number } | null {
   const normalized = canonicalizeClaudeModel(model);
   if (!normalized) return null;
-  const match = normalized.match(/^claude-(sonnet|opus|haiku)-(\d+)(?:-(\d+))?/i);
+  const match = normalized.match(/^claude-(sonnet|opus|haiku|fable)-(\d+)(?:-(\d{1,2})(?=-|$))?/i);
   if (!match) return null;
-  const family = match[1].toLowerCase() as 'sonnet' | 'opus' | 'haiku';
+  const family = match[1].toLowerCase() as 'sonnet' | 'opus' | 'haiku' | 'fable';
   const major = Number(match[2]);
   const minor = match[3] ? Number(match[3]) : 0;
   return { family, major, minor };
@@ -95,7 +95,7 @@ export function supportsClaude1mContext(model?: string | null): boolean {
   }
   const parsed = parseClaudeModelFamily(model);
   if (!parsed) return false;
-  return parsed.family === 'sonnet' || parsed.family === 'opus';
+  return parsed.family === 'sonnet' || parsed.family === 'opus' || parsed.family === 'fable';
 }
 
 export function isOfficialClaudeModel(model?: string | null): boolean {
@@ -110,8 +110,8 @@ export function formatClaudeModelLabel(model: string, context1m = false): string
 
   if (parsed) {
     const familyLabel =
-      parsed.family === 'sonnet' ? 'Sonnet' : parsed.family === 'opus' ? 'Opus' : 'Haiku';
-    const versionLabel = `${parsed.major}.${parsed.minor}`;
+      parsed.family === 'sonnet' ? 'Sonnet' : parsed.family === 'opus' ? 'Opus' : parsed.family === 'fable' ? 'Fable' : 'Haiku';
+    const versionLabel = parsed.minor ? `${parsed.major}.${parsed.minor}` : `${parsed.major}`;
     const suffix = context1m && supportsClaude1mContext(normalized) ? ' (1M context)' : '';
     return `${familyLabel} ${versionLabel}${suffix}`;
   }
@@ -126,13 +126,13 @@ export function formatClaudeModelLabel(model: string, context1m = false): string
   return model;
 }
 
-// Collapse each Claude family (sonnet/opus/haiku) to a single "latest" entry and drop
+// Collapse each Claude family (sonnet/opus/haiku/fable) to a single "latest" entry and drop
 // superseded versions. Within a family the survivor is:
 //   1. the bare alias (e.g. "sonnet" → "Sonnet (latest)") if one is present — it always
 //      tracks the newest model, so the concrete latest version is merged into it; else
 //   2. the highest concrete version, decided by comparing version numbers parsed from the
 //      id, so a newer generation wins automatically — no hardcoded model list to maintain.
-// Models that don't parse into a family (Fable, third-party ids) pass through untouched,
+// Models that don't parse into a family (third-party ids) pass through untouched,
 // and anything in `protectedModels` (e.g. the currently selected model) is always kept.
 function collapseClaudeFamiliesToLatest(
   models: string[],

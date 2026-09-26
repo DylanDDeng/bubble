@@ -15,6 +15,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { OAuthTokens } from "./types.js";
+import { withOAuthRefreshTimeout } from "./refresh-control.js";
 import { chatGptFetch, type ChatGptFetch } from "../network/chatgpt-transport.js";
 
 // Public OAuth client registered for the official Grok CLI ("Grok Build").
@@ -239,25 +240,28 @@ export async function loginGrok(
 
 export async function refreshGrok(
   refreshToken: string,
-  options: { fetch?: ChatGptFetch } = {},
+  options: { fetch?: ChatGptFetch; timeoutMs?: number } = {},
 ): Promise<OAuthTokens> {
-  const fetchImpl = options.fetch ?? chatGptFetch;
-  const response = await fetchImpl(TOKEN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: refreshToken,
-      client_id: CLIENT_ID,
-    }),
-  });
+  return withOAuthRefreshTimeout(async (signal) => {
+    const fetchImpl = options.fetch ?? chatGptFetch;
+    const response = await fetchImpl(TOKEN_URL, {
+      method: "POST",
+      signal,
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+        client_id: CLIENT_ID,
+      }),
+    });
 
-  if (!response.ok) {
-    const text = await response.text().catch(() => "Unknown error");
-    throw new Error(`Token refresh failed: ${response.status} ${response.statusText} - ${text}`);
-  }
+    if (!response.ok) {
+      const text = await response.text().catch(() => "Unknown error");
+      throw new Error(`Token refresh failed: ${response.status} ${response.statusText} - ${text}`);
+    }
 
-  return parseTokenResponse((await response.json()) as GrokTokenResponse, refreshToken);
+    return parseTokenResponse((await response.json()) as GrokTokenResponse, refreshToken);
+  }, options.timeoutMs);
 }
 
 /**

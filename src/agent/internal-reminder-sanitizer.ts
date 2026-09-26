@@ -1,4 +1,5 @@
 import type { AssistantProviderMetadata } from "../types.js";
+import { isClaudeWithBoundThinking } from "../anthropic-thinking.js";
 
 const INTERNAL_TAG_PREFIX = "<bubble_internal_";
 const MEMORY_CITATION_TAG = "<oai-mem-citation";
@@ -81,7 +82,12 @@ export function sanitizeInternalReasoningText(text: string): string {
 
 export function sanitizeAssistantProviderMetadata(
   metadata: AssistantProviderMetadata | undefined,
+  model?: string,
 ): AssistantProviderMetadata | undefined {
+  // These blocks are wire data, not display text. Removing thinking or editing
+  // earlier text invalidates later signatures. The separate content/reasoning
+  // fields remain sanitized for display; context checkpoints reset wire thinking.
+  if (isClaudeWithBoundThinking(model)) return metadata;
   const anthropic = metadata?.anthropic;
   const blocks = anthropic?.contentBlocks;
   if (!metadata || !anthropic || !blocks?.length) return metadata;

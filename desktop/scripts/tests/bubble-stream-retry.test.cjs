@@ -1,0 +1,60 @@
+const { app } = require('electron');
+const fs = require('node:fs'), path = require('node:path'), os = require('node:os');
+const assert = require('node:assert/strict');
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bubble-retry-trace-'));
+app.setPath('userData', path.join(dir,'profile'));
+process.env.BUBBLE_HOME = path.join(dir,'agent');
+app.whenReady().then(() => {
+  const store = require('../../dist-electron/electron/libs/session-store');
+  const { BubbleSdkAdapter } = require('../../dist-electron/electron/libs/provider/bubble-sdk-adapter');
+  store.initialize();
+  const stored = store.createSession({title:'Retry fixture',provider:'bubble',cwd:dir});
+  const adapter = new BubbleSdkAdapter(), messages = [];
+  adapter.events.on('event', event => {
+    if (event.message) { messages.push(event.message); store.addMessage(stored.id,event.message); }
+  });
+  const session = {threadId:stored.id,currentAssistant:null,status:'running',
+    subagentStreams:new Map(),subagentStartedAt:new Map(),toolNames:new Map(),heldSpawnResults:new Map(),
+    emittedToolCallIds:new Set(),emittedToolResultIds:new Set(),usage:{},totalCostUsd:0,durationStartMs:Date.now()};
+  const event = value => adapter.handleBubbleEvent(session,value);
+  event({type:'reasoning_delta',content:'Existing thought '.repeat(6000)});
+  event({type:'text_delta',content:'Existing narration'});
+  event({type:'provider_retry',attempt:1,maxAttempts:10,reason:'private diagnostics'});
+  const snapshot = messages.at(-2), retry = messages.at(-1);
+  assert.equal(snapshot.type,'assistant'); assert.equal(snapshot.phase,'commentary');
+  assert.equal(snapshot.message.content[0].thinking.length,102000);
+  assert.equal(retry.subtype,'api_retry'); assert.equal(retry.maxRetries,10);
+  assert.equal(JSON.stringify(retry).includes('private diagnostics'),false);
+  event({type:'turn_start'});
+  event({type:'context_usage',usedTokens:100,contextWindow:1000,estimated:true});
+  assert.equal(messages.some(m=>m.subtype==='api_retry_resolved'),false);
+  event({type:'provider_retry',attempt:2,maxAttempts:10,reason:'closed'});
+  assert.equal(messages.at(-1).attempt,2);
+  event({type:'reasoning_delta',content:'Recovered thought'});
+  assert.equal(messages.at(-2).subtype,'api_retry_resolved');
+  assert.equal(messages.at(-2).retryId,messages.findLast(m=>m.subtype==='api_retry').uuid);
+  event({type:'text_delta',content:'Recovered answer'});
+  assert.equal(messages.filter(m=>m.subtype==='api_retry_resolved').length,1);
+  adapter.finishTurn(session,null);
+  assert.equal(messages.filter(m=>m.type==='assistant').at(-1).message.content[0].thinking,'Recovered thought');
+  store.close(); store.initialize();
+  const history = store.getSessionHistory(stored.id);
+  assert.equal(history.find(m=>m.uuid===snapshot.uuid).message.content[0].thinking.length,102000);
+  assert.equal(history.filter(m=>m.subtype==='api_retry').length,2);
+  assert.equal(history.filter(m=>m.subtype==='api_retry_resolved').length,1);
+  event({type:'tool_call_start',id:'abandoned',name:'write'});
+  event({type:'tool_call_delta',id:'abandoned',name:'write',arguments:'{"path":"/tmp/incomplete.html","content":"'});
+  event({type:'provider_retry',attempt:1,maxAttempts:10,reason:'closed while writing arguments'});
+  const preview=messages.findLast(m=>m.uuid===`bubble-tool-use:${stored.id}:abandoned`);
+  assert.equal(preview.message.content[0].input.__aegisToolCallInterrupted,true);
+  assert.equal(session.streamingToolCalls.size,0);
+  const parentRetryId=session.pendingRetryId;
+  const childEvent=child=>adapter.handleSubagentUpdate(session,{type:'subagent_update',parentToolCallId:'spawn',runId:'run',subAgentId:'child',agentName:'worker',status:'running',childEvent:child});
+  childEvent({type:'reasoning_delta',content:'Child partial'});
+  childEvent({type:'provider_retry',attempt:3,maxAttempts:10,reason:'closed'});
+  assert.equal(session.pendingRetryId,parentRetryId,'child events cannot resolve parent retry');
+  assert.equal(session.subagentStates.get('child').activity,'Reconnecting 3/10');
+  assert(messages.some(m=>m.parentToolUseId==='spawn'&&m.message?.content?.some(b=>b.thinking==='Child partial')));
+  store.close();
+  console.log('PASS: display-only partial output, retry events, delta recovery and SQLite reopen');
+}).then(()=>{fs.rmSync(dir,{recursive:true,force:true});app.exit(0)},error=>{console.error(error);app.exit(1)});

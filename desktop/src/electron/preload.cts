@@ -523,6 +523,8 @@ contextBridge.exposeInMainWorld('electron', {
   getSessionUserPrompts: (sessionId: string) => {
     return ipcRenderer.invoke('get-session-user-prompts', sessionId);
   },
+  getSessionSources: (sessionId: string) => ipcRenderer.invoke('get-session-sources', sessionId),
+  previewSessionSource: (sessionId: string, path: string) => ipcRenderer.invoke('preview-session-source', sessionId, path),
 
   getDeepseekSessionCost: (sessionId: string) => {
     return ipcRenderer.invoke('get-deepseek-session-cost', sessionId);
@@ -990,10 +992,6 @@ contextBridge.exposeInMainWorld('electron', {
     data: Uint8Array
   ) => {
     return ipcRenderer.invoke('create-markdown-image-asset', cwd, markdownFilePath, fileName, mimeType, data);
-  },
-
-  createInlineTextAttachment: (cwd: string, text: string) => {
-    return ipcRenderer.invoke('create-inline-text-attachment', cwd, text);
   },
 
   createInlineImageAttachment: (mimeType: string, data: Uint8Array) => {

@@ -6,6 +6,7 @@ import { createServer } from "node:http";
 import { exec } from "node:child_process";
 import { randomBytes, createHash } from "node:crypto";
 import type { OAuthTokens } from "./types.js";
+import { withOAuthRefreshTimeout } from "./refresh-control.js";
 import { chatGptFetch, type ChatGptFetch } from "../network/chatgpt-transport.js";
 
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -208,39 +209,42 @@ export async function loginOpenAICodex(
 
 export async function refreshOpenAICodex(
   refreshToken: string,
-  options: { fetch?: ChatGptFetch } = {},
+  options: { fetch?: ChatGptFetch; timeoutMs?: number } = {},
 ): Promise<OAuthTokens> {
-  const fetchImpl = options.fetch ?? chatGptFetch;
-  const response = await fetchImpl(TOKEN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: refreshToken,
-      client_id: CLIENT_ID,
-    }),
-  });
+  return withOAuthRefreshTimeout(async (signal) => {
+    const fetchImpl = options.fetch ?? chatGptFetch;
+    const response = await fetchImpl(TOKEN_URL, {
+      method: "POST",
+      signal,
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+        client_id: CLIENT_ID,
+      }),
+    });
 
-  if (!response.ok) {
-    const text = await response.text().catch(() => "Unknown error");
-    throw new Error(`Token refresh failed: ${response.status} ${response.statusText} - ${text}`);
-  }
+    if (!response.ok) {
+      const text = await response.text().catch(() => "Unknown error");
+      throw new Error(`Token refresh failed: ${response.status} ${response.statusText} - ${text}`);
+    }
 
-  const data = (await response.json()) as {
-    access_token: string;
-    refresh_token?: string;
-    expires_in: number;
-    id_token?: string;
-  };
+    const data = (await response.json()) as {
+      access_token: string;
+      refresh_token?: string;
+      expires_in: number;
+      id_token?: string;
+    };
 
-  const expiresAt = Date.now() + data.expires_in * 1000;
-  const accountId = extractAccountId(data.id_token);
+    const expiresAt = Date.now() + data.expires_in * 1000;
+    const accountId = extractAccountId(data.id_token);
 
-  return {
-    accessToken: data.access_token,
-    refreshToken: data.refresh_token || refreshToken,
-    expiresAt,
-    idToken: data.id_token,
-    accountId,
-  };
+    return {
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token || refreshToken,
+      expiresAt,
+      idToken: data.id_token,
+      accountId,
+    };
+  }, options.timeoutMs);
 }

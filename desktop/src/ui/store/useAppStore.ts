@@ -84,6 +84,7 @@ import {
   isRightUtilityBrowserTab,
   isRightUtilityFileTab,
   resolveRightUtilityTabOpen,
+  resolveProjectFileUtilityTab,
   resolveRightUtilityTabOpenPreservingActive,
 } from '../utils/right-utility-tabs';
 import {
@@ -1896,13 +1897,23 @@ export const useAppStore = create<Store>()(
 
   openProjectFileInRightPanel: (request: ProjectFileOpenInput) => {
     set((state) => {
-      const opened = resolveRightUtilityTabOpen(state.rightUtilityTabs, 'files');
+      const fileStates = state.rightPanelBySessionId[rightPanelSessionKey(state.activeSessionId)]?.fileTabsByUtilityTab ?? {};
+      const opened = resolveProjectFileUtilityTab(state.rightUtilityTabs, state.activeRightUtilityTab, fileStates, request.path);
+      // Reserve the document synchronously, before any component mounts or IPC resolves.
+      // Consecutive opens must not mistake an in-flight tab for an empty Files tab.
+      const previous = fileStates[opened.activeTab];
+      const rightPanelBySessionId = withFileTabsForUtilityTab(
+        state.rightPanelBySessionId, state.activeSessionId, opened.activeTab,
+        { files: previous?.files ?? [], activeFile: { cwd: request.cwd, filePath: request.path } },
+        { ...pickLiveRightPanel(state), rightUtilityTabs: opened.tabs, activeRightUtilityTab: opened.activeTab },
+      );
       const isReveal =
         state.rightUtilityPanelHidden ||
         state.rightUtilityTabs.length === 0 ||
         !state.activeRightUtilityTab;
       projectFileOpenRequestCounter += 1;
       return {
+        rightPanelBySessionId,
         rightUtilityTabs: opened.tabs,
         activeRightUtilityTab: opened.activeTab,
         rightUtilityPanelHidden: false,

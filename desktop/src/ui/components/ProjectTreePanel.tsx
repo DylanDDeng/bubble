@@ -6,6 +6,7 @@ import { useAppStore } from '../store/useAppStore';
 import { MDContent } from '../render/markdown';
 import { HighlightedCode } from './HighlightedCode';
 import TextFileReader from './TextFileReader';
+import { ProjectVideoPreview } from './ProjectVideoPreview';
 import { FileTypeIcon } from './FileTypeIcon';
 import { CsvPreview, XlsxPreview } from './SpreadsheetPreview';
 import { ProjectMdxPreview, ProjectMdxProperties, parseMdxDocument } from './ProjectMdxPreview';
@@ -24,7 +25,7 @@ import {
   ContextMenuItem,
   ContextMenuSeparator,
 } from './ui/context-menu';
-import type { ProjectFileOpenRequest, ProjectTreeNode, ProjectUtilityPanelKind, ProjectUtilityPanelTarget } from '../types';
+import type { ProjectFileOpenInput, ProjectFileOpenRequest, ProjectTreeNode, ProjectUtilityPanelKind, ProjectUtilityPanelTarget } from '../types';
 import {
   isSameProjectTreeRoot,
   selectVisibleProjectTree,
@@ -663,6 +664,7 @@ export function ProjectTreePanel({
   onOpenUtilityTab,
   openRequest,
   onOpenRequestConsumed,
+  onOpenFile,
   isFullscreen = false,
   onToggleFullscreen,
   topInset = 0,
@@ -679,6 +681,7 @@ export function ProjectTreePanel({
   onOpenUtilityTab?: (target: ProjectUtilityPanelKind) => void;
   openRequest?: ProjectFileOpenRequest | null;
   onOpenRequestConsumed?: (requestId: number) => void;
+  onOpenFile?: (request: ProjectFileOpenInput) => void;
   isFullscreen?: boolean;
   onToggleFullscreen?: () => void;
   topInset?: number;
@@ -1225,9 +1228,9 @@ export function ProjectTreePanel({
       .then((tree) => {
         if (cancelled) return;
         if (tree) {
-          setProjectTreeError(null);
+          setProjectTreeError(tree.scanNotice || null);
           applyPanelTree(current, tree);
-          if (publishToStore) {
+          if (publishToStore && !tree.scanNotice) {
             void window.electron.watchProjectTree(current);
           }
         } else {
@@ -1394,6 +1397,11 @@ export function ProjectTreePanel({
     skipTransition = false
   ) => {
     if (!cwd) return;
+    if (onOpenFile && !skipTransition) {
+      if (selectedFilePath && selectedFilePath !== filePath && !(await prepareActiveFileForTransition())) return;
+      onOpenFile({ cwd, path: filePath });
+      return;
+    }
 
     // Tabs own closing now; clicking the active file in the tree should keep it active.
     if (toggleSame && selectedFilePath === filePath) {
@@ -1495,6 +1503,7 @@ export function ProjectTreePanel({
     refreshFileTabFromDisk,
     selectedFilePath,
     onOpenUtilityTab,
+    onOpenFile,
     setDraftTextSynced,
     setSaveStateSynced,
   ]);
@@ -1807,6 +1816,20 @@ export function ProjectTreePanel({
 
     const name = filePath.split('/').filter(Boolean).pop() || filePath;
     const fileCwd = options.cwd || dirnameOfPath(filePath);
+    const cachedTab = openFileTabsRef.current.find(tab => tab.filePath === filePath);
+    if (cachedTab) {
+      applyCachedFileTab(cachedTab);
+      const revealTarget = createProjectFileRevealTarget({
+        cwd: cachedTab.cwd, path: filePath, line: options.lineStart,
+        token: ++fileRevealTokenRef.current,
+      });
+      if (revealTarget) {
+        setFileRevealTarget(revealTarget);
+        setViewMode('code');
+      }
+      void refreshFileTabFromDisk(cachedTab.id);
+      return;
+    }
     setSelectedFilePath(filePath);
     setSelectedFileCwd(fileCwd);
     setViewMode('view');
@@ -1883,6 +1906,8 @@ export function ProjectTreePanel({
       }
     }
   }, [
+    applyCachedFileTab,
+    refreshFileTabFromDisk,
     ensureOpenFileTab,
     prepareActiveFileForTransition,
     selectedFilePath,
@@ -1915,7 +1940,7 @@ export function ProjectTreePanel({
     const restored = restoredFileStateRef.current;
     const files = restored?.files ?? [];
     const active = restored?.activeFile ?? null;
-    if (files.length === 0 && !active) {
+    if ((files.length === 0 && !active) || (openRequest && files.length === 0)) {
       setFileTabsHydrated(true);
       return;
     }
@@ -3481,11 +3506,11 @@ export function ProjectTreePanel({
                 )}
 
                 {!previewLoading && selectedPreview?.kind === 'video' && (
-                  <video
+                  <ProjectVideoPreview
+                    key={selectedPreview.path}
                     src={selectedPreview.previewUrl}
-                    className="max-w-full rounded-md"
-                    controls
-                    playsInline
+                    name={selectedPreview.name}
+                    active={!collapsed}
                   />
                 )}
 

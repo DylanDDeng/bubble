@@ -53,8 +53,9 @@ export function bubbleThinkingLevelsForModel(
 }
 
 /** Label for a thinking level (known tiers get hand labels, unknown pass through capitalized). */
-export function formatBubbleThinkingLevelLabel(level: string): string {
+export function formatBubbleThinkingLevelLabel(level: string, model?: string | null): string {
   const trimmed = level.trim().toLowerCase();
+  if (model?.startsWith('mimo-token-plan:') && trimmed === 'medium') return 'On';
   if (BUBBLE_THINKING_LEVEL_LABELS[trimmed]) {
     return BUBBLE_THINKING_LEVEL_LABELS[trimmed];
   }

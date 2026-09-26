@@ -1,6 +1,7 @@
 import type {
   ProjectUtilityPanelKind,
   ProjectUtilityPanelTarget,
+  SessionRightPanelFileState,
 } from '../types';
 
 let fileTabCounter = 0;
@@ -120,4 +121,27 @@ export function resolveRightUtilityTabOpenPreservingActive(
     return { tabs: addRightUtilityTab(tabs, activeTab), activeTab };
   }
   return resolveRightUtilityTabOpen(tabs, target);
+}
+
+/** File opens have a document identity; opening the generic Files tool does not. */
+export function resolveProjectFileUtilityTab(
+  tabs: ProjectUtilityPanelTarget[],
+  activeTab: ProjectUtilityPanelTarget | null,
+  files: Record<string, SessionRightPanelFileState>,
+  filePath: string,
+): { tabs: ProjectUtilityPanelTarget[]; activeTab: ProjectUtilityPanelTarget } {
+  const normalize = (path: string) => path.replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/$/, '');
+  const target = normalize(filePath);
+  const fileTabs = tabs.filter(isRightUtilityFileTab);
+  const matching = fileTabs.find(tab => {
+    const state = files[tab];
+    // Older snapshots may contain several hidden inner tabs. Only the visible
+    // document owns this outer tab; opening a hidden file gets its own tab.
+    return state?.activeFile && normalize(state.activeFile.filePath) === target;
+  });
+  if (matching) return { tabs, activeTab: matching };
+  const empty = (tab: ProjectUtilityPanelTarget) => !files[tab]?.activeFile && !files[tab]?.files.length;
+  const available = activeTab && fileTabs.includes(activeTab) && empty(activeTab)
+    ? activeTab : fileTabs.find(empty);
+  return available ? { tabs, activeTab: available } : resolveRightUtilityTabOpen(tabs, 'files', { newTab: true });
 }

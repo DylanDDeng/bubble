@@ -6,6 +6,7 @@ import { getMessageContentBlocks, normalizeToolUseBlock, normalizeToolResultBloc
 import type { ToolStatus } from '../../src/ui/types';
 import { deriveSubagentSummaries } from '../../src/ui/utils/subagent-registry';
 import { childOperations, shortChildTask } from '../../src/ui/utils/bubble-subagent-view';
+import { getSubagentPersona } from '../../src/ui/utils/subagent-persona';
 
 const call = (id: string, name: string, input: object): StreamMessage => ({ type: 'assistant', uuid: id, message: { content: [{ type: 'tool_use', id, name, input }] } });
 const result = (id: string, error = false): StreamMessage => ({ type: 'user', uuid: `${id}-result`, message: { content: [{ type: 'tool_result', tool_use_id: id, content: error ? 'Could not deliver' : 'ok', is_error: error }] } });
@@ -43,6 +44,37 @@ assert.equal(summary.operations?.filter(op => op.failed).length, 1);
 assert(summary.operations?.some(op => op.pending && op.label.includes('Main agent')));
 const restored = JSON.parse(JSON.stringify(messages));
 assert.deepEqual(deriveSubagentSummaries(restored), deriveSubagentSummaries(messages), 'reload preserves identity, state and coordination');
+// The tool-call anchor routes tabs; the SDK ID/nickname supplies display identity.
+// This same summary is consumed by both App's tab strip and SubagentPanel.
+const identitySpawn = call('identity-spawn', 'spawn_agent', { agent_type: 'implementer' });
+const identityState: BubbleSubagentState = {
+  ...state, anchorId: 'identity-spawn', agentId: 'sdk-agent-adele', nickname: 'Adele', role: 'implementer',
+};
+const identities = (input: StreamMessage[]) => new Map(
+  deriveSubagentSummaries(input, { includeNested: true }).map(item => [item.id, item.persona])
+);
+assert.equal(identities([identitySpawn]).get('identity-spawn')?.persona,
+  getSubagentPersona('identity-spawn').persona, 'before runtime arrival use deterministic legacy identity');
+for (const status of ['queued', 'running', 'completed'] as const) {
+  const input = [identitySpawn, stateMessage({ ...identityState, status })];
+  const persona = identities(input).get('identity-spawn')!;
+  assert.equal(persona.persona, 'Adele', `${status}: use SDK name, not a second generated name`);
+  assert.equal(persona.id, identityState.agentId, 'avatar uses SDK ID while routing keeps the anchor');
+  assert.equal(persona.colorHue, getSubagentPersona(identityState.agentId).colorHue);
+  assert.deepEqual(identities(JSON.parse(JSON.stringify(input))), identities(input), 'history restores display identity');
+}
+const nestedSpawn = { ...call('nested-spawn', 'spawn_agent', {}), parentToolUseId: 'identity-spawn' };
+const nestedState = stateMessage({ ...identityState, anchorId: 'nested-spawn', agentId: 'nested-agent', nickname: 'Grace' });
+const concurrent = identities([identitySpawn, stateMessage(identityState), nestedSpawn, nestedState]);
+assert.equal(concurrent.get('identity-spawn')?.persona, 'Adele');
+assert.equal(concurrent.get('nested-spawn')?.persona, 'Grace', 'nested tabs resolve their own runtime identity');
+const otherSession = identities([identitySpawn, stateMessage({ ...identityState, agentId: 'other-agent', nickname: 'Ada' })]);
+assert.equal(otherSession.get('identity-spawn')?.persona, 'Ada', 'same anchor in another session cannot retain the previous identity');
+assert.equal(identities([]).size, 0, 'clearing history clears resolved identities');
+const unnamed = identities([identitySpawn, stateMessage({ ...identityState, nickname: '' })]).get('identity-spawn')!;
+assert.equal(unnamed.persona, getSubagentPersona(identityState.agentId).persona, 'older runtime without nickname uses the same fallback as details');
+console.log('PASS: subagent identity lifecycle, nested routing, session isolation and history restoration');
+
 const failedChild = messages.map(m => m.bubbleSubagent ? stateMessage({...state,status:'failed',updatedAt:3000}) : m);
 assert.equal(model(failedChild).entries[0].status, 'error', 'real child failure overrides spawn success');
 const stoppedChild = messages.map(m => m.bubbleSubagent ? stateMessage({...state,status:'cancelled',updatedAt:3000}) : m);

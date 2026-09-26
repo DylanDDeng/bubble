@@ -48,6 +48,7 @@ export type BubbleToolResult = {
 
 export type BubbleAgentEvent =
   | { type: 'turn_start' }
+  | { type: 'provider_retry'; attempt: number; maxAttempts: number; reason: string }
   | { type: 'context_usage'; usedTokens: number; contextWindow?: number; estimated: boolean }
   | { type: 'context_compaction'; status: 'started' | 'completed' | 'failed'; preTokens: number; postTokens?: number; contextWindow?: number; compactionId?: string; persisted?: boolean }
   | { type: 'text_delta'; content: string }

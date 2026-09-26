@@ -19,6 +19,8 @@ import type {
   StreamMessage,
   Usage,
 } from '../../../shared/types';
+import { buildPromptText } from './bubble-prompt-text';
+import { toolInputPreview } from './tool-input-preview';
 import type {
   ProviderAdapter,
   ProviderAdapterCapabilities,
@@ -92,7 +94,9 @@ type ActiveBubbleSession = {
   abortController: AbortController | null;
   pendingRequests: Map<string, PendingBubbleRequest>;
   currentAssistant: BubbleAssistantAccumulator | null;
+  pendingRetryId?: string;
   emittedToolCallIds: Set<string>;
+  streamingToolCalls?: Map<string, { createdAt: number; input: Record<string, string>; name: string; parentToolUseId?: string }>;
   emittedToolResultIds: Set<string>;
   usage: Usage;
   totalCostUsd: number;
@@ -212,21 +216,6 @@ function createEmptyUsage(): Usage {
     total_tokens: 0,
     context_window: null,
   };
-}
-
-function buildPromptText(prompt: string, attachments: Attachment[] | undefined): string {
-  const lines = prompt ? [prompt] : [];
-  const fileAttachments = attachments?.filter((attachment) => attachment.kind !== 'image') || [];
-  if (fileAttachments.length > 0) {
-    if (lines.length > 0) {
-      lines.push('');
-    }
-    lines.push('Attachments:');
-    for (const attachment of fileAttachments) {
-      lines.push(`- ${attachment.name}: ${attachment.path}`);
-    }
-  }
-  return lines.join('\n');
 }
 
 // Bubble's ContentPart uses OpenAI-style image_url parts, so attachments are
@@ -484,6 +473,7 @@ export class BubbleSdkAdapter implements ProviderAdapter {
     session.usage = createEmptyUsage();
     session.totalCostUsd = 0;
     session.currentAssistant = null;
+    session.pendingRetryId = undefined;
     this.emit({ type: 'status_change', threadId: input.threadId, status: 'running' });
 
     // The turn loop consumes the runTurn generator for the whole turn; it
@@ -862,12 +852,25 @@ export class BubbleSdkAdapter implements ProviderAdapter {
 
   private handleBubbleEvent(session: ActiveBubbleSession, event: BubbleAgentEvent): void {
     switch (event.type) {
+      case 'provider_retry': {
+        const retry = event as { attempt: number; maxAttempts: number };
+        // Display-only commit: the SDK excludes partial output from retries.
+        this.flushAssistant(session, 'commentary');
+        this.interruptStreamingTools(session);
+        const uuid = `bubble-retry:${session.threadId}:${uuidv4()}`;
+        session.pendingRetryId = uuid;
+        this.emitMessage(session, { type: 'system', subtype: 'api_retry', uuid,
+          session_id: session.threadId, attempt: retry.attempt,
+          maxRetries: retry.maxAttempts, errorStatus: null });
+        return;
+      }
       case 'text_delta':
       case 'reasoning_delta': {
         const delta = getString((event as { content?: unknown }).content);
         if (!delta) {
           return;
         }
+        this.resolveRetry(session);
         const accumulator = this.ensureCurrentAssistant(session);
         if (event.type === 'reasoning_delta') {
           accumulator.thinking += delta;
@@ -887,7 +890,15 @@ export class BubbleSdkAdapter implements ProviderAdapter {
         });
         return;
       }
+      case 'tool_call_start':
+      case 'tool_call_delta': {
+        this.resolveRetry(session);
+        const toolEvent = event as { id: string; name: string; arguments?: string };
+        this.handleStreamingToolUse(session, toolEvent.id, toolEvent.name, toolEvent.arguments);
+        return;
+      }
       case 'tool_call_end': {
+        this.resolveRetry(session);
         const toolEvent = event as Extract<BubbleAgentEvent, { type: 'tool_call_end' }>;
         this.handleToolUse(
           session,
@@ -898,6 +909,7 @@ export class BubbleSdkAdapter implements ProviderAdapter {
         return;
       }
       case 'tool_start': {
+        this.resolveRetry(session);
         const toolEvent = event as Extract<BubbleAgentEvent, { type: 'tool_start' }>;
         this.handleToolUse(session, toolEvent.id, toolEvent.name, toolEvent.args);
         return;
@@ -971,7 +983,7 @@ export class BubbleSdkAdapter implements ProviderAdapter {
         }
         return;
       }
-      // Other event kinds (hooks / retries / future additions) have no UI
+      // Other event kinds (hooks / future additions) have no UI
       // mapping yet and fall through untouched.
       default:
         return;
@@ -996,15 +1008,16 @@ export class BubbleSdkAdapter implements ProviderAdapter {
     const prior = states.get(update.subAgentId);
     const snapshot = Array.isArray(update.metadata?.subagents) ? update.metadata.subagents[0] : undefined;
     const info = isRecord(snapshot) ? snapshot : {};
-    const event = update.childEvent as { type?: string; name?: string; args?: Record<string, unknown> } | undefined;
+    const event = update.childEvent as { type?: string; name?: string; args?: Record<string, unknown>; attempt?: number; maxAttempts?: number } | undefined;
     let activity = prior?.activity || 'Starting';
-    if (event?.type === 'tool_start' || event?.type === 'tool_call_end') {
+    if (event?.type === 'tool_start' || event?.type === 'tool_call_end' || event?.type === 'tool_call_start' || event?.type === 'tool_call_delta') {
       const target = getString(event.args?.path) || getString(event.args?.file_path);
       const file = target.split('/').pop();
       activity = `${normalizeToolName(event.name || 'Tool')}${file ? ` · ${file}` : ''}`;
     } else if (event?.type === 'tool_end') activity = 'Analyzing results';
     else if (event?.type === 'reasoning_delta') activity = 'Analyzing';
     else if (event?.type === 'text_delta') activity = 'Writing response';
+    else if (event?.type === 'provider_retry') activity = `Reconnecting ${event.attempt}/${event.maxAttempts}`;
     const state: BubbleSubagentState = {
       agentId: update.subAgentId, anchorId: parentToolCallId,
       nickname: update.nickname || prior?.nickname || update.agentName,
@@ -1032,6 +1045,10 @@ export class BubbleSdkAdapter implements ProviderAdapter {
     // The spawning tool_use card may not have landed yet (queued frames can
     // race the main-loop tool_call_end) — the standard handleToolUse emits it.
     const child = update.childEvent;
+    if (child?.type === 'provider_retry') {
+      this.flushSubagentStream(session, parentToolCallId);
+      this.interruptStreamingTools(session, parentToolCallId);
+    }
     if (child && (child.type === 'text_delta' || child.type === 'reasoning_delta')) {
       const delta = getString((child as { content?: unknown }).content);
       if (delta) {
@@ -1043,6 +1060,9 @@ export class BubbleSdkAdapter implements ProviderAdapter {
         if (child.type === 'reasoning_delta') stream.thinking += delta;
         else stream.text += delta;
       }
+    } else if (child && (child.type === 'tool_call_start' || child.type === 'tool_call_delta')) {
+      const tool = child as { id: string; name: string; arguments?: string };
+      this.handleStreamingToolUse(session, tool.id, tool.name, tool.arguments, parentToolCallId);
     } else if (child && (child.type === 'tool_start' || child.type === 'tool_call_end')) {
       // Flush narration buffered before the child's first tool card.
       this.flushSubagentStream(session, parentToolCallId);
@@ -1057,12 +1077,16 @@ export class BubbleSdkAdapter implements ProviderAdapter {
           stream = { text: '', thinking: '', toolCallIds: new Set() };
           session.subagentStreams.set(parentToolCallId, stream);
         }
-        if (!stream.toolCallIds.has(childToolId)) {
+        if (!session.emittedToolCallIds.has(childToolId)) {
           stream.toolCallIds.add(childToolId);
+          session.emittedToolCallIds.add(childToolId);
+          const preview = session.streamingToolCalls?.get(childToolId);
+          session.streamingToolCalls?.delete(childToolId);
           this.emitMessage(session, {
             type: 'assistant',
             uuid: `bubble-sub-tool-use:${session.threadId}:${childToolId}`,
             parentToolUseId: parentToolCallId,
+            ...(preview ? { createdAt: preview.createdAt } : {}),
             message: {
               content: [
                 {
@@ -1071,7 +1095,7 @@ export class BubbleSdkAdapter implements ProviderAdapter {
                   name: normalizeToolName(childToolName),
                   input: isRecord((child as { args?: unknown }).args)
                     ? ((child as { args?: unknown }).args as Record<string, unknown>)
-                    : {},
+                    : parseToolArguments(getString((child as { arguments?: unknown }).arguments)),
                 },
               ],
             },
@@ -1145,6 +1169,41 @@ export class BubbleSdkAdapter implements ProviderAdapter {
     }
   }
 
+  private handleStreamingToolUse(session: ActiveBubbleSession, id: string, name: string, argumentsText?: string, parentToolUseId?: string): void {
+    if (!id || session.emittedToolCallIds.has(id) || session.emittedToolResultIds.has(id)) return;
+    const calls = session.streamingToolCalls ??= new Map();
+    const previous = calls.get(id);
+    const input = argumentsText === undefined ? previous?.input ?? {} : toolInputPreview(argumentsText);
+    if (previous && JSON.stringify(previous.input) === JSON.stringify(input)) return;
+    // End the preceding narration before the new activity starts. Keep one
+    // identity and timestamp through preview, execution, history and completion.
+    if (!previous) {
+      if (parentToolUseId) this.flushSubagentStream(session, parentToolUseId);
+      else this.flushAssistant(session, 'commentary');
+    }
+    const createdAt = previous?.createdAt ?? Date.now();
+    calls.set(id, { createdAt, input, name, parentToolUseId });
+    this.emitMessage(session, {
+      type: 'assistant', uuid: `bubble-${parentToolUseId ? 'sub-' : ''}tool-use:${session.threadId}:${id}`, createdAt,
+      ...(parentToolUseId ? { parentToolUseId } : {}),
+      message: { content: [{ type: 'tool_use', id, name: normalizeToolName(name),
+        input: { ...input, __aegisToolCallStreaming: true } }] },
+    });
+  }
+
+  private interruptStreamingTools(session: ActiveBubbleSession, parentToolUseId?: string): void {
+    for (const [id, call] of session.streamingToolCalls ?? []) {
+      if (call.parentToolUseId !== parentToolUseId) continue;
+      session.streamingToolCalls?.delete(id);
+      this.emitMessage(session, {
+        type: 'assistant', uuid: `bubble-${parentToolUseId ? 'sub-' : ''}tool-use:${session.threadId}:${id}`,
+        createdAt: call.createdAt, ...(parentToolUseId ? { parentToolUseId } : {}),
+        message: { content: [{ type: 'tool_use', id, name: normalizeToolName(call.name),
+          input: { ...call.input, __aegisToolCallInterrupted: true } }] },
+      });
+    }
+  }
+
   private handleToolUse(
     session: ActiveBubbleSession,
     toolCallId: string,
@@ -1157,6 +1216,8 @@ export class BubbleSdkAdapter implements ProviderAdapter {
     // Ordering: the transcript expects the assistant text that preceded the
     // tool call to land before the tool_use card.
     this.flushAssistant(session);
+    const preview = session.streamingToolCalls?.get(toolCallId);
+    session.streamingToolCalls?.delete(toolCallId);
     session.emittedToolCallIds.add(toolCallId);
     session.toolNames.set(toolCallId, toolName);
     if (toolName === 'wait_agent' && isRecord(args) && !getString(args.agent_id)
@@ -1169,6 +1230,7 @@ export class BubbleSdkAdapter implements ProviderAdapter {
     this.emitMessage(session, {
       type: 'assistant',
       uuid: `bubble-tool-use:${session.threadId}:${toolCallId}`,
+      ...(preview ? { createdAt: preview.createdAt } : {}),
       message: {
         content: [
           {
@@ -1260,6 +1322,8 @@ export class BubbleSdkAdapter implements ProviderAdapter {
   }
 
   private finishTurn(session: ActiveBubbleSession, error: Error | null): void {
+    this.resolveRetry(session);
+    session.streamingToolCalls?.clear();
     this.flushAssistant(session);
     // Safety net: commit any subagent lane that never saw its terminal frame
     // (interrupt, transport error) so its buffered narration isn't lost — and
@@ -1286,6 +1350,14 @@ export class BubbleSdkAdapter implements ProviderAdapter {
     session.status = 'completed';
     this.emitResult(session);
     this.emit({ type: 'status_change', threadId: session.threadId, status: 'completed' });
+  }
+
+  private resolveRetry(session: ActiveBubbleSession): void {
+    const retryId = session.pendingRetryId;
+    if (!retryId) return;
+    session.pendingRetryId = undefined;
+    this.emitMessage(session, { type: 'system', subtype: 'api_retry_resolved',
+      uuid: `${retryId}:resolved`, session_id: session.threadId, retryId });
   }
 
   private emitResult(session: ActiveBubbleSession, subtype = 'success'): void {

@@ -1,3 +1,4 @@
+import { loadPassiveImagePreview } from '../utils/passive-image-preview';
 import { ImageStudioSessionContext, openImageStudio } from '../lib/image-studio';
 import { isValidElement, memo, useContext, useEffect, useMemo, useState, type MouseEvent, type ReactNode } from 'react';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
@@ -454,54 +455,16 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
       const sessions = useAppStore.getState().sessions;
       const id = imageSessionId || useAppStore.getState().activeSessionId;
       const session = id ? sessions[id] : null;
-      const candidates = [src.replace(/^\.\//, '')];
-      const base = candidates[0].split('/').pop();
-      if (base && base !== candidates[0]) candidates.push(base);
-      if (base && !candidates[0].includes('/')) {
-        candidates.push(`images/${base}`, `assets/${base}`, `videos/${base}`);
-      }
-
       try {
-        for (const requestedPath of candidates) {
-          const projectFile = getProjectFileLink(requestedPath, roots)
-            || getInlineProjectFileCode(requestedPath);
-          if (!projectFile) continue;
-          const resolved = projectFile.external
-            ? {
-                status: 'resolved' as const,
-                cwd: projectFile.path.replace(/\\/g, '/').replace(/\/[^/]*$/, '') || '/',
-                path: projectFile.path,
-              }
-            : await resolveProjectFileReference({
-                requestedPath: projectFile.path,
-                primaryRoots: [cwd, session?.projectCwd],
-                workspaceRoots: Object.values(sessions).flatMap((item) => [item.cwd, item.projectCwd]),
-                loadTree: async (root) =>
-                  useAppStore.getState().projectTreeCwd === root && useAppStore.getState().projectTree
-                    ? useAppStore.getState().projectTree
-                    : window.electron.getProjectTree(root),
-                statFile: statProjectFile,
-              });
-          if (resolved.status !== 'resolved') continue;
-          const previewCwd = isUnderRoot(resolved.cwd, resolved.path)
-            ? resolved.cwd
-            : dirnameOfPath(resolved.path);
-          const filePreview = await window.electron.readProjectFilePreview(
-            previewCwd,
-            resolved.path
-          ) as { kind?: string; dataUrl?: string; previewUrl?: string };
-          if (cancelled) return;
-          if (filePreview?.kind === 'image' && filePreview.dataUrl) {
-            setResolvedImagePath(resolved.path);
-            setPreview({ kind: 'image', src: filePreview.dataUrl });
-            return;
-          }
-          if (filePreview?.kind === 'video' && filePreview.previewUrl) {
-            setPreview({ kind: 'video', src: filePreview.previewUrl });
-            return;
-          }
-        }
-        if (!cancelled) setFailed(true);
+        const result = await loadPassiveImagePreview({
+          src, roots: [cwd, session?.projectCwd], cancelled: () => cancelled,
+          load: (root, file) => window.electron.readProjectFilePreview(root, file),
+        });
+        if (cancelled) return;
+        if (result) {
+          setResolvedImagePath(result.path);
+          setPreview({ kind: result.kind, src: result.src });
+        } else setFailed(true);
       } catch {
         if (!cancelled) setFailed(true);
       }

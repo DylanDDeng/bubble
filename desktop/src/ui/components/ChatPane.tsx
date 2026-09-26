@@ -1,3 +1,4 @@
+import { activeStreamRetry, streamRetryLabel } from '../utils/stream-retry';
 import { ImageStudioComposerHome } from './ImageStudioComposerDock';
 import { ImageStudioSessionContext } from '../lib/image-studio';
 import { getAssistantPhase } from '../../shared/assistant-phase';
@@ -1057,7 +1058,7 @@ export function ChatPane({
         const normalizedUse = normalizeToolUseBlock(block);
         if (normalizedUse) {
           if (!statusMap.has(normalizedUse.id)) {
-            statusMap.set(normalizedUse.id, 'pending');
+            statusMap.set(normalizedUse.id, normalizedUse.input.__aegisToolCallInterrupted === true ? 'interrupted' : 'pending');
           }
           continue;
         }
@@ -1149,48 +1150,8 @@ export function ChatPane({
     return false;
   }, [session?.messages, session?.status]);
 
-  // The runtime retries failed API calls silently (rate limits, overload,
-  // connection drops) — surface the latest api_retry as a transient status.
-  // Any later substantive message means the retry resolved.
-  const apiRetry = useMemo(() => {
-    if (!session || session.status !== 'running') return null;
-    for (let i = session.messages.length - 1; i >= 0; i -= 1) {
-      const message = session.messages[i];
-      if (!message) continue;
-      if (message.type === 'system' && message.subtype === 'api_retry') {
-        return message;
-      }
-      if (
-        message.type === 'assistant' ||
-        message.type === 'stream_event' ||
-        message.type === 'result' ||
-        message.type === 'user' ||
-        message.type === 'user_prompt'
-      ) {
-        return null;
-      }
-    }
-    return null;
-  }, [session?.messages, session?.status]);
-
-  const workingLabel = useMemo(() => {
-    if (apiRetry) {
-      const status = apiRetry.errorStatus;
-      const kind =
-        status === 429
-          ? 'Rate limited'
-          : status === 503 || status === 529
-            ? 'Server overloaded'
-            : status === null
-              ? 'Connection issue'
-              : `API error (${status})`;
-      const attempts = apiRetry.maxRetries > 0 ? ` ${apiRetry.attempt}/${apiRetry.maxRetries}` : '';
-      const delaySeconds = Math.max(1, Math.round(apiRetry.delayMs / 1000));
-      return `${kind} · retrying${attempts} in ${delaySeconds}s`;
-    }
-    if (isCompacting) return 'Compacting conversation';
-    return 'Thinking';
-  }, [apiRetry, isCompacting]);
+  const apiRetry = useMemo(() => session ? activeStreamRetry(session.messages, session.status) : null,
+    [session?.messages, session?.status]);
 
   // ── Rewind (claude + bubble) ────────────────────────────────────────────
   const [rewindTarget, setRewindTarget] = useState<RewindTarget | null>(null);
@@ -2052,6 +2013,7 @@ export function ChatPane({
                             isSessionRunning={session.status === 'running'}
                             isTurnRunning={item.turnRunning ?? item.active}
                             isLastBatch={item.active}
+                            showIdleActivity={!apiRetry}
                             startedAt={item.group.startedAt ?? (item.active ? activeTurnStartedAt : undefined)}
                             durationMs={item.group.durationMs}
                             subagentMessagesByParent={subagentMessagesByParent}
@@ -2199,6 +2161,7 @@ export function ChatPane({
                   {streamingWorkstreamModel ? (
                     <WorkstreamDisclosure
                       model={streamingWorkstreamModel}
+                      showIdleActivity={!apiRetry}
                       isRunning={turnPhase !== 'complete'}
                       defaultExpanded={turnPhase !== 'complete'}
                       resetKey={`${sessionId}:${lastUserPromptIndex}`}
@@ -2228,13 +2191,14 @@ export function ChatPane({
               {/* Compaction remains visible while an existing work trace owns the turn. */}
               {(() => {
                 if (session.status !== 'running') return null;
+                if (apiRetry) return <div role="status" aria-live="polite" data-stream-retry><WorkingFooter label={streamRetryLabel(apiRetry)} /></div>;
                 if (isCompacting) return <WorkingFooter label="Compacting conversation" />;
                 if (streamingWorkstreamModel) return null;
                 if (hasActiveTimelineWork) return null;
                 if (turnPhase === 'complete') return null;
                 if (hasStartedFinalAnswer) return null;
                 return (
-                  <WorkingFooter label={workingLabel} />
+                  <WorkingFooter label="Thinking" />
                 );
               })()}
 

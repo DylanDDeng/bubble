@@ -2361,7 +2361,7 @@ export class Agent {
       message.reasoning = sanitizeInternalReasoningText(message.reasoning);
     }
     if (message.role === "assistant" && message.providerMetadata) {
-      message.providerMetadata = sanitizeAssistantProviderMetadata(message.providerMetadata);
+      message.providerMetadata = sanitizeAssistantProviderMetadata(message.providerMetadata, message.modelId ?? message.model);
     }
     this.messages.push(message);
     traceEvent("agent_message_append", {

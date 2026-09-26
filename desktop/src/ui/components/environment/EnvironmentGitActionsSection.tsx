@@ -16,6 +16,7 @@ import type { ActiveEnvironmentContext } from './useActiveEnvironmentContext';
 import type { GitEnvironmentSnapshot, GitEnvironmentState } from './useGitEnvironment';
 
 const COMMIT_GENERATION_MIN_VISIBLE_MS = 450;
+const RUNNING_TASK_REASON = 'The active task is running.';
 
 function wait(ms: number) {
   return new Promise((resolve) => {
@@ -88,7 +89,7 @@ export function useEnvironmentGitActions({
     (!overview.hasRepo ? 'Not a Git repository.' : null) ||
     (!overview.ok ? 'Git state is unavailable. Refresh and try again.' : null) ||
     (!overview.branch ? 'Checking current branch.' : null) ||
-    (context.isRunning ? 'The active task is running.' : null) ||
+    (context.isRunning ? RUNNING_TASK_REASON : null) ||
     (overview.branch === 'HEAD' ? 'Detached HEAD is not supported for this action.' : null);
 
   const validateSnapshot = useCallback(async (snapshot: GitEnvironmentSnapshot) => {
@@ -549,7 +550,9 @@ export function EnvironmentGitActionsSection({
         />
       ) : null}
       {actions.mutatingDisabledReason ? (
-        <p className="px-2 py-1 text-[11px] leading-4 text-[var(--text-muted)]">{actions.mutatingDisabledReason}</p>
+        actions.mutatingDisabledReason !== RUNNING_TASK_REASON ? (
+          <p className="px-2 py-1 text-[11px] leading-4 text-[var(--text-muted)]">{actions.mutatingDisabledReason}</p>
+        ) : null
       ) : diverged ? (
         <p className="px-2 py-1 text-[11px] leading-4 text-[var(--text-muted)]">Branch has diverged. Rebase or merge before syncing.</p>
       ) : null}

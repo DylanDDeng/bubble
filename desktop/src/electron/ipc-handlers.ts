@@ -1,3 +1,4 @@
+import { resolveProjectScanRoot, resolvePassiveProjectPath } from './libs/project-scan-policy';
 import { startBubbleOAuth, cancelBubbleOAuth, getBubbleOAuthState, reopenBubbleOAuth } from './libs/bubble-oauth';
 import { setShortcutCaptureActive } from './libs/keyboard-shortcuts';
 import { getSystemFonts, getSystemFontFamilies } from './libs/system-fonts';
@@ -10,6 +11,7 @@ import { validateClaudeGoalObjective } from './libs/claude-goal';
 import { canonicalProjectPath } from './libs/project-paths';
 import { setupSessionProjectIPC } from './ipc/session-project';
 import { broadcastSessionEvent } from './ipc/session-windows';
+import { sendRendererEvent } from './libs/renderer-event-delivery';
 import { getGitPullRequestInfo, parseGitHubRepoFromRemote } from './libs/git-pull-requests';
 import { setupSessionPullRequestsIPC } from './ipc/session-pull-requests';
 import { disposeSessionHttpServer } from './libs/session-http-server';
@@ -292,6 +294,7 @@ import type {
   ClaudeRewindResult,
 } from '../shared/types';
 import { buildSessionUserPromptSummaries } from '../shared/outline-summary';
+import { collectSessionSources, type SessionSourcePreview } from '../shared/session-sources';
 import { isGrokModelId } from '../shared/provider-model';
 import { getProviderService } from './libs/provider/service';
 import { isKimiServerRuntimeConfirmed, warmKimiCapabilityProbe } from './libs/provider/kimi-adapter-facade';
@@ -320,9 +323,6 @@ import {
 const MAX_FILE_PREVIEW_BYTES = 5 * 1024 * 1024; // 5MB
 const MAX_STREAMING_PDF_PREVIEW_BYTES = 200 * 1024 * 1024; // 200MB
 const DIRECT_EDIT_BOOTSTRAP_MAX_TRANSCRIPT_CHARS = 20_000;
-const LONG_PROMPT_AUTO_ATTACHMENT_THRESHOLD = 500;
-const LONG_PROMPT_ATTACHMENT_INSTRUCTION =
-  'The main request is attached as a text file. Read the attachment first, then respond normally.';
 
 const MAX_SKIN_IMAGE_BYTES = 24 * 1024 * 1024; // 24MB
 const SKIN_IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
@@ -386,6 +386,9 @@ const LOCAL_PREVIEW_MIME_TYPES: Record<string, string> = {
   '.mp4': 'video/mp4',
   '.webm': 'video/webm',
   '.mov': 'video/quicktime',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.m4a': 'audio/mp4',
   '.txt': 'text/plain; charset=utf-8',
   '.map': 'application/json; charset=utf-8',
   '.woff': 'font/woff',
@@ -1460,6 +1463,7 @@ function streamPreviewFile(
     }
     res.destroy(error);
   });
+  res.once('close', () => stream.destroy());
   stream.pipe(res);
 }
 
@@ -1511,7 +1515,8 @@ async function handleLocalPreviewRequest(
   rootReal: string,
   token: string,
   req: IncomingMessage,
-  res: ServerResponse
+  res: ServerResponse,
+  exactFile = false
 ): Promise<void> {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     sendPreviewResponse(res, 405, 'Method not allowed');
@@ -1537,7 +1542,11 @@ async function handleLocalPreviewRequest(
     return;
   }
 
-  const filePath = await resolvePreviewRequestFile(rootReal, `/${segments.slice(1).join('/')}`);
+  // Explicit task attachments may live outside the project (e.g. CleanShot).
+  // Their token serves only that file, never its parent directory.
+  const filePath = exactFile
+    ? (segments.length === 1 ? rootReal : null)
+    : await resolvePreviewRequestFile(rootReal, `/${segments.slice(1).join('/')}`);
   if (!filePath) {
     sendPreviewResponse(res, 404, 'Not found');
     return;
@@ -1555,15 +1564,16 @@ async function handleLocalPreviewRequest(
   }
 }
 
-async function ensureLocalPreviewServer(rootReal: string): Promise<{ port: number; token: string }> {
-  const existing = localPreviewServers.get(rootReal);
+async function ensureLocalPreviewServer(rootReal: string, exactFile = false): Promise<{ port: number; token: string }> {
+  const serverKey = exactFile ? `attachment:${rootReal}` : rootReal;
+  const existing = localPreviewServers.get(serverKey);
   if (existing) {
     return { port: existing.port, token: existing.token };
   }
 
   const token = uuidv4();
   const server = createServer((req, res) => {
-    void handleLocalPreviewRequest(rootReal, token, req, res);
+    void handleLocalPreviewRequest(rootReal, token, req, res, exactFile);
   });
 
   const port = await new Promise<number>((resolvePort, reject) => {
@@ -1588,9 +1598,9 @@ async function ensureLocalPreviewServer(rootReal: string): Promise<{ port: numbe
 
   server.unref();
   server.once('close', () => {
-    localPreviewServers.delete(rootReal);
+    localPreviewServers.delete(serverKey);
   });
-  localPreviewServers.set(rootReal, { server, port, token });
+  localPreviewServers.set(serverKey, { server, port, token });
   return { port, token };
 }
 
@@ -2673,13 +2683,8 @@ async function handleEditLatestPrompt(
     return;
   }
 
-  const longPromptAttachment = await maybeConvertLongPromptToAttachment({
-    cwd: session.cwd,
-    prompt,
-    attachments,
-  });
-  const nextPromptText = longPromptAttachment.prompt;
-  const nextAttachments = longPromptAttachment.attachments;
+  const nextPromptText = prompt.trim();
+  const nextAttachments = (attachments ?? []).filter((attachment) => !!attachment?.path);
 
   if (session.provider === 'codex') {
     await handleEditLatestCodexPrompt(mainWindow, {
@@ -3504,87 +3509,6 @@ async function createInlineImageAttachment(
   return toAttachment(targetPath);
 }
 
-async function createInlineTextAttachment(cwd: string, text: string): Promise<Attachment | null> {
-  const normalizedCwd = cwd?.trim();
-  const normalizedText = text ?? '';
-  if (!normalizedCwd || !normalizedText.trim()) {
-    return null;
-  }
-  if (Buffer.byteLength(normalizedText, 'utf8') > MAX_ATTACHMENT_BYTES) {
-    return null;
-  }
-
-  const attachmentsDir = resolve(app.getPath('temp'), 'aegis-pasted-text');
-  const fileName = `prompt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.txt`;
-  const targetPath = resolve(attachmentsDir, fileName);
-
-  try {
-    await fsPromises.mkdir(attachmentsDir, { recursive: true });
-    await fsPromises.writeFile(targetPath, normalizedText, 'utf8');
-    const attachment = toAttachment(targetPath);
-    if (!attachment) {
-      return null;
-    }
-
-    return {
-      ...attachment,
-      uiType: 'pasted_text',
-      previewText: normalizedText,
-    };
-  } catch {
-    return null;
-  }
-}
-
-async function maybeConvertLongPromptToAttachment(params: {
-  cwd?: string | null;
-  prompt: string;
-  attachments?: Attachment[];
-}): Promise<{
-  prompt: string;
-  attachments: Attachment[];
-  converted: boolean;
-}> {
-  const prompt = params.prompt.trim();
-  const attachments = params.attachments?.filter((attachment) => !!attachment?.path) || [];
-  if (!prompt || prompt.length <= LONG_PROMPT_AUTO_ATTACHMENT_THRESHOLD) {
-    return {
-      prompt,
-      attachments,
-      converted: false,
-    };
-  }
-
-  const cwd = params.cwd?.trim();
-  if (!cwd) {
-    console.warn('[Long Prompt Attachment] Missing cwd; sending inline prompt instead.');
-    return {
-      prompt,
-      attachments,
-      converted: false,
-    };
-  }
-
-  const attachment = await createInlineTextAttachment(cwd, prompt);
-  if (!attachment) {
-    console.warn('[Long Prompt Attachment] Failed to create attachment; sending inline prompt instead.', {
-      cwd,
-      promptLength: prompt.length,
-    });
-    return {
-      prompt,
-      attachments,
-      converted: false,
-    };
-  }
-
-  return {
-    prompt: LONG_PROMPT_ATTACHMENT_INSTRUCTION,
-    attachments: [...attachments, attachment],
-    converted: true,
-  };
-}
-
 // Runner 句柄映射（带 Provider）
 const runnerHandles = new Map<
   string,
@@ -3882,7 +3806,7 @@ function getSessionState(sessionId: string): SessionState {
 
 // 广播事件到渲染进程
 function sendSessionReply(win: BrowserWindow, event: ServerEvent): void {
-  if (!win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.send('server-event', JSON.stringify(event));
+  sendRendererEvent(win, event);
 }
 
 function broadcast(mainWindow: BrowserWindow, event: ServerEvent): void {
@@ -5929,6 +5853,36 @@ export function setupIPCHandlers(mainWindow: BrowserWindow): void {
     return buildSessionUserPromptSummaries(messages);
   });
 
+  const loadSessionSources = async (sessionId: string) => {
+    const session = sessions.getSession(sessionId);
+    if (!session) throw new Error('Unknown session');
+    const unified = toUnifiedSessionRecord(session);
+    return collectSessionSources(await getHistorySourceForSession(unified).loadAll(unified));
+  };
+  ipcMainHandle('get-session-sources', (_event, sessionId: string) => loadSessionSources(sessionId));
+  ipcMainHandle('preview-session-source', async (_event, sessionId: string, filePath: string): Promise<SessionSourcePreview> => {
+    try {
+      const source = (await loadSessionSources(sessionId)).find(item => item.path === filePath);
+      if (!source) return { kind: 'error', message: 'This attachment does not belong to this task.' };
+      const target = await fsPromises.realpath(source.path);
+      const stat = await fsPromises.stat(target);
+      if (!stat.isFile()) return { kind: 'error', message: 'Attachment is not a file.' };
+      const mime = ATTACHMENT_MIME_TYPES[extname(source.path).toLowerCase()] || '';
+      const kind = mime.startsWith('image/') ? 'image' : mime.startsWith('video/') ? 'video'
+        : mime.startsWith('audio/') ? 'audio' : mime === 'application/pdf' ? 'pdf' : null;
+      if (kind) {
+        const { port, token } = await ensureLocalPreviewServer(target, true);
+        return { kind, url: `http://127.0.0.1:${port}/${token}` };
+      }
+      if ((mime.startsWith('text/') || mime === 'application/json') && stat.size <= 1024 * 1024) {
+        return { kind: 'text', text: await fsPromises.readFile(target, 'utf8') };
+      }
+      return { kind: 'file' };
+    } catch {
+      return { kind: 'error', message: 'Attachment is missing or could not be read.' };
+    }
+  });
+
   ipcMainHandle(
     'load-session-history-around',
     async (_event, sessionId: string, messageCreatedAt: number, before?: number, after?: number) => {
@@ -7096,14 +7050,6 @@ export function setupIPCHandlers(mainWindow: BrowserWindow): void {
     }
   );
 
-  ipcMainHandle('create-inline-text-attachment', async (_event, cwd: string, text: string) => {
-    if (!cwd || typeof text !== 'string') {
-      return null;
-    }
-
-    return createInlineTextAttachment(cwd, text);
-  });
-
   // RPC: 把剪贴板中的图片（PNG/JPEG 二进制）写入临时文件并返回 Attachment
   ipcMainHandle(
     'create-inline-image-attachment',
@@ -7130,6 +7076,16 @@ export function setupIPCHandlers(mainWindow: BrowserWindow): void {
       const resolved = resolve(cwd || '.', filePath || '');
       const name = basename(resolved) || resolved;
       const ext = extname(resolved).toLowerCase();
+
+      const previewPath = await resolvePassiveProjectPath(resolved);
+      if (!previewPath) {
+        return { kind: 'error', path: resolved, name, ext, message: previewPath === undefined
+          ? 'File not found' : 'Private app and media folders are not previewed automatically.' };
+      }
+      // Validate the root too, before validateProjectFilePath calls realpath.
+      if (!(await resolvePassiveProjectPath(cwd))) {
+        return { kind: 'error', path: resolved, name, ext, message: 'This folder is not available for preview.' };
+      }
 
       const validation = await validateProjectFilePath(cwd, resolved);
       if (!validation.ok) {
@@ -7190,6 +7146,39 @@ export function setupIPCHandlers(mainWindow: BrowserWindow): void {
         }
       }
 
+      // Video is streamed with HTTP byte ranges, never buffered into an IPC payload.
+      // The generic preview limit below applies only to files we read into memory.
+      if (ext === '.mp4' || ext === '.webm' || ext === '.mov') {
+        try {
+          const preview = await getLocalPreviewUrl(validation.rootReal, validation.targetReal);
+          if (!preview.ok) {
+            return {
+              kind: 'error',
+              path: validation.targetReal,
+              name,
+              ext,
+              message: preview.message,
+            };
+          }
+          return {
+            kind: 'video',
+            path: validation.targetReal,
+            name,
+            ext,
+            size: stat.size,
+            previewUrl: preview.url,
+          };
+        } catch (error) {
+          return {
+            kind: 'error',
+            path: validation.targetReal,
+            name,
+            ext,
+            message: `Failed to create video preview: ${String(error)}`,
+          };
+        }
+      }
+
       if (stat.size > MAX_FILE_PREVIEW_BYTES) {
         return {
           kind: 'too_large',
@@ -7221,37 +7210,6 @@ export function setupIPCHandlers(mainWindow: BrowserWindow): void {
             name,
             ext,
             message: `Failed to read image: ${String(error)}`,
-          };
-        }
-      }
-
-      if (ext === '.mp4' || ext === '.webm' || ext === '.mov') {
-        try {
-          const preview = await getLocalPreviewUrl(validation.rootReal, validation.targetReal);
-          if (!preview.ok) {
-            return {
-              kind: 'error',
-              path: validation.targetReal,
-              name,
-              ext,
-              message: preview.message,
-            };
-          }
-          return {
-            kind: 'video',
-            path: validation.targetReal,
-            name,
-            ext,
-            size: stat.size,
-            previewUrl: preview.url,
-          };
-        } catch (error) {
-          return {
-            kind: 'error',
-            path: validation.targetReal,
-            name,
-            ext,
-            message: `Failed to create video preview: ${String(error)}`,
           };
         }
       }
@@ -7543,7 +7501,8 @@ export function setupIPCHandlers(mainWindow: BrowserWindow): void {
     if (!cwd) {
       return false;
     }
-    if (!(await isReadableDirectory(cwd))) {
+    const safeRoot = await resolveProjectScanRoot(cwd);
+    if (!safeRoot || !(await isReadableDirectory(safeRoot))) {
       closeProjectTreeWatcher(cwd);
       return false;
     }
@@ -7553,7 +7512,7 @@ export function setupIPCHandlers(mainWindow: BrowserWindow): void {
     }
     try {
       const watcher = watch(
-        cwd,
+        safeRoot,
         { recursive: true },
         (_eventType, filename) => {
           if (filename && isIgnoredProjectTreeChange(filename.toString())) return;
@@ -9151,18 +9110,9 @@ async function handleSessionStart(
     }
   }
   const sourcePrompt = prompt.trim();
-  const longPromptAttachment = chosenProvider === 'claude' && parseGoalInput(sourcePrompt, false).isGoal
-    ? { prompt: sourcePrompt, attachments: attachments ?? [], converted: false }
-    : await maybeConvertLongPromptToAttachment({
-    cwd: sessionCwd,
-    prompt: sourcePrompt,
-    attachments,
-  });
-  const outgoingPrompt = longPromptAttachment.prompt;
-  const outgoingAttachments = longPromptAttachment.attachments;
-  const effectiveRunnerPrompt = longPromptAttachment.converted
-    ? outgoingPrompt
-    : (effectivePrompt ?? sourcePrompt).trim();
+  const outgoingPrompt = sourcePrompt;
+  const outgoingAttachments = (attachments ?? []).filter((attachment) => !!attachment?.path);
+  const effectiveRunnerPrompt = (effectivePrompt ?? sourcePrompt).trim();
   const runnerPrompt = chosenProvider === 'claude' && parseGoalInput(sourcePrompt, false).isGoal ? sourcePrompt : augmentPromptForLiveWidgetProtocol(
     await buildRunnerPromptWithMemory(chosenProvider, effectiveRunnerPrompt + referenceContext + sessions.buildProjectSourcesContext(normalizedProjectCwd, isolated?.worktreePath || normalizedWorktreePath || sessionCwd, Boolean(isolated) || normalizedEnvMode === 'worktree'), sessionCwd),
   );
@@ -9560,14 +9510,9 @@ async function handleSessionContinue(
     return false;
   }
 
-  const longPromptAttachment = (provider || session.provider) === 'claude' && parseGoalInput(prompt, false).isGoal
-    ? { prompt, attachments: attachments ?? [], converted: false }
-    : await maybeConvertLongPromptToAttachment({ cwd: session.cwd, prompt, attachments });
-  const outgoingPrompt = longPromptAttachment.prompt;
-  const outgoingAttachments = longPromptAttachment.attachments;
-  let effectiveRunnerPrompt = longPromptAttachment.converted
-    ? outgoingPrompt
-    : (effectivePrompt ?? outgoingPrompt).trim();
+  const outgoingPrompt = prompt.trim();
+  const outgoingAttachments = (attachments ?? []).filter((attachment) => !!attachment?.path);
+  let effectiveRunnerPrompt = (effectivePrompt ?? outgoingPrompt).trim();
 
   if (await maybeHandleLocalSlashCommand(mainWindow, session, outgoingPrompt, outgoingAttachments)) {
     return true;

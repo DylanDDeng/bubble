@@ -111,9 +111,6 @@ export function OpenCodeContextIndicator({
               <MetricRow label="Reasoning" value={formatCompact(snapshot.reasoningOutputTokens)} />
               <MetricRow label="Cache read" value={formatCompact(snapshot.cacheReadTokens)} />
               <MetricRow label="Cache write" value={formatCompact(snapshot.cacheCreationTokens)} />
-              <div className="mt-1.5 border-t border-[var(--border)] pt-1.5 text-[11px] leading-4 text-[var(--text-muted)]">
-                {snapshot.usageScope ? 'Token breakdown and cost: latest completed turn. Context: latest runtime snapshot.' : `Latest ${providerLabel} usage for this model`}
-              </div>
             </>
           ) : (
             <div className="mt-1.5 border-t border-[var(--border)] pt-1.5 text-[12px] leading-5 text-[var(--text-secondary)]">

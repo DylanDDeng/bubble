@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { THINKING_LEVELS, type Provider, type ProviderMessage, type ReasoningEffort, type StreamChunk, type ThinkingLevel, type TokenUsage, type ToolChoiceMode, type ToolDefinition } from "./types.js";
 import type { OAuthCredentials } from "./oauth/types.js";
+import { waitForOAuth } from "./oauth/refresh-control.js";
 import { getBuiltinModel, listBuiltinModels } from "./model-catalog.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
 import { chatGptFetch, type ChatGptFetch } from "./network/chatgpt-transport.js";
@@ -149,7 +150,12 @@ export function createOpenAICodexProvider(options: {
 
     let sentAccessToken: string | undefined;
     const sendRequest = async (forceRefresh = false) => {
-      const { accessToken, accountId } = await resolveRequestAuth(forceRefresh, forceRefresh ? sentAccessToken : undefined);
+      chatOptions.abortSignal?.throwIfAborted();
+      const { accessToken, accountId } = await waitForOAuth(
+        resolveRequestAuth(forceRefresh, forceRefresh ? sentAccessToken : undefined),
+        chatOptions.abortSignal,
+      );
+      chatOptions.abortSignal?.throwIfAborted();
       sentAccessToken = accessToken;
       return fetchImpl(resolveCodexUrl(options.baseURL), buildCodexRequestInit({
         accessToken,
