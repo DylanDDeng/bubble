@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import stringWidth from "string-width";
-import { wrapPlain } from "../tui/components/transcript.js";
+import { projectReasoningRows, wrapPlain } from "../tui/components/transcript.js";
 import { ResponsiveTranscriptComponent } from "../tui/components/responsive-transcript.js";
 
 vi.mock("string-width", async (importOriginal) => {
@@ -36,5 +36,43 @@ describe("long transcript layout work", () => {
     for (let frame = 0; frame < 30; frame++) expect(component.render(100)).toBe(rows);
     expect(stringWidth).not.toHaveBeenCalled();
     expect(messages[0]!.reasoning.length).toBeGreaterThan(1_000_000);
+  });
+
+  it("bounds Unicode measurement on cold layout, resize and new messages", () => {
+    const reasoning = "分析当前状态并检查输入是否正常。".repeat(62_500);
+    let messages = [{ key: "done", role: "assistant" as const, content: "Done", reasoning }];
+    const component = new ResponsiveTranscriptComponent(() => ({ messages, options: { showReasoning: false } }));
+    for (const width of [100, 99, 99]) {
+      vi.mocked(stringWidth).mockClear();
+      const rows = component.render(width);
+      // Previously each discarded CJK row invoked Unicode segmentation.
+      expect(vi.mocked(stringWidth).mock.calls.length).toBeLessThan(100);
+      expect(rows.length).toBeLessThan(20);
+      messages = [...messages, { key: `next-${messages.length}`, role: "assistant", content: "Next", reasoning: "" }];
+    }
+    expect(messages[0]!.reasoning).toBe(reasoning);
+  });
+
+  it("preserves exact expanded row boundaries in head and tail previews", () => {
+    const samples = [
+      "你好世界。检查状态，继续执行！".repeat(200),
+      "one two three four five six ".repeat(100),
+      "\n  \nfirst line\n\n" + "👩‍💻 e\u0301 中文 ".repeat(100) + "\n last line \n",
+    ];
+    for (const content of samples) {
+      for (const columns of [1, 8, 19, 80]) {
+        const options = { columns, showReasoning: true };
+        const expanded = projectReasoningRows(content, options).slice(1);
+        for (const limit of [0, 1, 5, expanded.length, expanded.length + 1]) {
+          for (const fromEnd of [true, false]) {
+            const preview = projectReasoningRows(content, options, { maxBodyRows: limit, fromEnd });
+            const expected = limit === 0 ? [] : fromEnd ? expanded.slice(-limit) : expanded.slice(0, limit);
+            expect(preview.slice(1, 1 + expected.length)).toEqual(expected);
+            expect(preview.length).toBe(1 + expected.length + Number(expanded.length > limit));
+          }
+        }
+      }
+    }
+    expect(projectReasoningRows("\n \t\n", { columns: 80 })).toEqual([]);
   });
 });

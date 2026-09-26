@@ -117,6 +117,46 @@ describe("TUI render scheduling", () => {
 		tui.stop();
 	});
 
+	it("reuploads Kitty images after wake without invalidating semantic caches", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		const terminal = new LoggingVirtualTerminal(40, 12);
+		const tui = new TuiAltScreen(terminal);
+		try {
+			const component = new InputComponent();
+			component.lines = ["history"];
+			tui.addChild(component);
+			tui.addChild(new Image(
+				"A".repeat(8192),
+				"image/png",
+				{ fallbackColor: (text) => text },
+				{ maxWidthCells: 8, maxHeightCells: 4 },
+				{ widthPx: 100, heightPx: 100 },
+			));
+			tui.setFocus(component);
+			tui.start();
+			await terminal.waitForRender();
+			assert.ok(terminal.getWrites().includes("\x1b_Ga=T"));
+			const invalidations = component.invalidateCount;
+
+			for (let wake = 0; wake < 2; wake++) {
+				terminal.clearWrites();
+				// The emulator may have discarded all image bytes while suspended.
+				terminal.resumeFromSleep();
+				await terminal.waitForRender();
+				assert.ok(terminal.getWrites().includes("\x1b_Ga=T"), "wake must resend image bytes");
+				assert.strictEqual(component.invalidateCount, invalidations);
+			}
+			terminal.clearWrites();
+			terminal.sendInput("after wake");
+			await terminal.waitForRender();
+			assert.ok(terminal.getViewport().some((line) => line.includes("after wake")));
+			assert.ok(!terminal.getWrites().includes("\x1b_Ga=T"), "ordinary frames must still reuse image bytes");
+		} finally {
+			tui.stop();
+			resetCapabilitiesCache();
+		}
+	});
+
 	for (const Screen of [TuiMainScreen, TuiAltScreen]) {
 		it(`${Screen.name} preserves caches across repeated wake repaints and accepts input`, async () => {
 			const terminal = new VirtualTerminal(40, 10);

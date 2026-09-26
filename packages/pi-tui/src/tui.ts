@@ -407,6 +407,9 @@ export abstract class TuiBase extends Container implements TUI {
 
 	protected afterTerminalStart(): void {}
 
+	/** Reset terminal-owned resources without invalidating semantic layout caches. */
+	protected afterTerminalResume(): void {}
+
 	protected beforeTerminalStop(_options: TuiStopOptions): void {}
 
 	protected afterTerminalStop(_options: TuiStopOptions): void {}
@@ -788,6 +791,7 @@ export abstract class TuiBase extends Container implements TUI {
 				// projections here makes a slow frame trigger the wake watchdog,
 				// which schedules another slow frame and starves keyboard input.
 				// Changed dimensions still miss each component's width cache.
+				this.afterTerminalResume();
 				this.requestRender(true);
 			},
 		);

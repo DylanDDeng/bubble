@@ -289,48 +289,62 @@ function projectUserCard(message: DisplayMessage, options: TranscriptRenderOptio
 }
 
 export function wrapPlain(text: string, columns: number): string[] {
-  const out: string[] = [];
-  const widths = new Map<string, number>();
-  const measure = (value: string): number => {
-    // Most reasoning/tool output is ASCII. Avoid invoking Intl.Segmenter for
-    // every character and repeatedly measuring the same growing line.
-    if (/^[\x20-\x7e]*$/.test(value)) return value.length;
-    const cached = widths.get(value);
-    if (cached !== undefined) return cached;
-    const width = stringWidth(value);
-    if (value.length <= 2) widths.set(value, width);
-    return width;
+  return Array.from(iteratePlainRows(text, columns));
+}
+
+/** Stream rows so collapsed reasoning need not retain its entire wrapped body. */
+function* iteratePlainRows(text: string, columns: number): Generator<string> {
+  const widths = new Map<string, { width: number; additive: boolean }>();
+  const ascii = { width: 1, additive: true };
+  const measureChar = (char: string) => {
+    const code = char.charCodeAt(0);
+    if (code >= 0x20 && code <= 0x7e) return ascii;
+    let cached = widths.get(char);
+    if (!cached) {
+      cached = {
+        width: stringWidth(char),
+        // These scalars cannot combine with each other. Other text (marks,
+        // emoji, joiners, ANSI, Jamo, etc.) still uses whole-chunk measurement.
+        additive: /^[\p{Unified_Ideograph}\p{Punctuation}]$/u.test(char),
+      };
+      widths.set(char, cached);
+    }
+    return cached;
   };
-  const splitToken = (token: string): Array<{ text: string; width: number }> => {
-    const chunks: Array<{ text: string; width: number }> = [];
+  function* splitToken(token: string): Generator<{ text: string; width: number }> {
     let chunk = "";
     let width = 0;
+    let additive = true;
     for (const char of token) {
-      const charWidth = measure(char);
-      if (chunk && width + charWidth > columns) {
-        chunks.push({ text: chunk, width: measure(chunk) });
+      const metric = measureChar(char);
+      if (chunk && width + metric.width > columns) {
+        yield { text: chunk, width: additive ? width : stringWidth(chunk) };
         chunk = "";
         width = 0;
+        additive = true;
       }
       chunk += char;
-      width += charWidth;
+      width += metric.width;
+      additive &&= metric.additive;
     }
-    if (chunk) chunks.push({ text: chunk, width: measure(chunk) });
-    return chunks;
-  };
+    if (chunk) yield { text: chunk, width: additive ? width : stringWidth(chunk) };
+  }
 
-  for (const paragraph of text.split("\n")) {
-    if (paragraph === "") {
-      out.push("");
-      continue;
-    }
+  // Scan paragraphs/tokens lazily: a head preview can stop early, and a tail
+  // preview never allocates arrays for all paragraphs, tokens or wrapped rows.
+  let start = 0;
+  while (start <= text.length) {
+    const newline = text.indexOf("\n", start);
+    const end = newline === -1 ? text.length : newline;
+    const paragraph = text.slice(start, end);
+    if (paragraph === "") yield "";
     let line = "";
     let lineWidth = 0;
-    for (const word of paragraph.split(/\s+/)) {
-      for (const chunk of splitToken(word)) {
+    for (const match of paragraph.matchAll(/\S+/g)) {
+      for (const chunk of splitToken(match[0])) {
         const candidateWidth = line ? lineWidth + 1 + chunk.width : chunk.width;
         if (line && candidateWidth > columns) {
-          out.push(line);
+          yield line;
           line = chunk.text;
           lineWidth = chunk.width;
         } else {
@@ -339,9 +353,10 @@ export function wrapPlain(text: string, columns: number): string[] {
         }
       }
     }
-    if (line) out.push(line);
+    if (line) yield line;
+    if (newline === -1) break;
+    start = newline + 1;
   }
-  return out;
 }
 
 /**
@@ -411,20 +426,25 @@ export function projectReasoningRows(
 ): string[] {
   const theme = options.theme ?? defaultTranscriptTheme;
   const geometry = railGeometry(options.columns);
-  const body = content
-    .split("\n")
-    .filter((line) => line.trim() !== "")
-    .flatMap((line) => wrapPlain(line, geometry.bodyColumns));
-  if (body.length === 0) return [];
-
-  const limit = Math.max(0, projection.maxBodyRows ?? (
-    options.showReasoning ? body.length : MINIMAL_REASONING_BODY_ROWS
-  ));
+  const limit = Math.max(0, Math.floor(projection.maxBodyRows ?? (
+    options.showReasoning ? Infinity : MINIMAL_REASONING_BODY_ROWS
+  )));
   const fromEnd = projection.fromEnd ?? !options.showReasoning;
-  const visible = limit === 0
-    ? []
-    : fromEnd
-      ? body.slice(-limit)
+  const body: string[] = [];
+  let count = 0;
+  for (const line of iteratePlainRows(content, geometry.bodyColumns)) {
+    if (!line) continue;
+    count += 1;
+    if (limit === 0) break;
+    if (limit === Infinity || !fromEnd) body.push(line);
+    else body[(count - 1) % limit] = line;
+    // One extra row suffices to detect hidden content in a head preview.
+    if (!fromEnd && count > limit) break;
+  }
+  if (count === 0) return [];
+  const visible = limit === 0 ? []
+    : fromEnd && count > limit
+      ? [...body.slice(count % limit), ...body.slice(0, count % limit)]
       : body.slice(0, limit);
   const style = (text: string) => theme.dim(chalk.italic(text));
   const row = (text: string) => style(geometry.rail
@@ -432,7 +452,7 @@ export function projectReasoningRows(
     : truncateVisible(text, geometry.bodyColumns));
   const rows = [row(`◆ Thinking${projection.running ? "…" : ""}`)];
   for (const line of visible) rows.push(row(line));
-  if (body.length > visible.length) {
+  if (count > visible.length) {
     rows.push(row(options.showReasoning ? "…" : "… (Ctrl+T to expand)"));
   }
   return rows;
