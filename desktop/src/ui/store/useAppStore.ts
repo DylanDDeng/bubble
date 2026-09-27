@@ -1,3 +1,4 @@
+import { getBrowserUtilitySessionId } from '../utils/browser-utility';
 import { consolidateThemeFonts } from '../theme/themes';
 import { useSessionOrganizationStore, changeSessionOrganization } from './useSessionOrganizationStore';
 import { create } from 'zustand';
@@ -2395,11 +2396,11 @@ export const useAppStore = create<Store>()(
       },
       rightPanelBySessionId: {
         ...state.rightPanelBySessionId,
-        [draft.id]: captureLiveRightPanel(
-          pickLiveRightPanel(state),
-          state.rightPanelBySessionId,
-          state.activeSessionId
-        ),
+        // A new conversation must not inherit another conversation's panels.
+        // Only promote the standalone new-chat workspace into its first draft.
+        [draft.id]: state.activeSessionId === null
+          ? captureLiveRightPanel(pickLiveRightPanel(state), state.rightPanelBySessionId, null)
+          : emptyRightPanelSnapshot(),
       },
       ...layoutPatch(
         tree.placeSession(state.workspaceLayout, tree.getActiveLeaf(state.workspaceLayout).id, draft.id)
@@ -2829,6 +2830,14 @@ export const useAppStore = create<Store>()(
 
 useAppStore.subscribe((state, prev) => {
   if (state.activeSessionId !== prev.activeSessionId) {
+    // Notify main before React starts rendering the next (potentially large)
+    // transcript. Layout cleanup remains responsible for other hide/unmounts.
+    if (typeof window !== 'undefined' && window.electron?.browser
+      && isRightUtilityBrowserTab(prev.activeRightUtilityTab)) {
+      void window.electron.browser.hide({
+        sessionId: getBrowserUtilitySessionId(prev.activeSessionId, prev.activeRightUtilityTab),
+      }).catch(() => {});
+    }
     const patch = switchSessionRightPanel({
       prevSessionId: prev.activeSessionId,
       nextSessionId: state.activeSessionId,

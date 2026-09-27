@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict';
+import vm from 'node:vm';
+import ts from 'typescript';
+import { getBrowserUtilitySessionId } from '../../src/ui/utils/browser-utility';
+import { isRightUtilityBrowserTab } from '../../src/ui/utils/right-utility-tabs';
 import { readFile } from 'node:fs/promises';
 import type { SessionRightPanelLiveFields, SessionRightPanelSnapshot } from '../../src/ui/types';
 import {
   captureLiveRightPanel,
   emptyRightPanelSnapshot,
   liveFieldsFromRightPanel,
+  liveRightPanelEquals,
   migrateRightPanelSessionId,
   persistRightPanelBySessionId,
   pruneRightPanelBySessionId,
@@ -197,6 +202,8 @@ function main() {
   testLiveFieldsFollowActiveTab();
   testEmptySessionKeepsPanelCollapsed();
   void assertWiring();
+  void testDraftPanelIsolation();
+  void testNativeHideBeforeSessionPanelRestore();
 }
 
 async function assertWiring() {
@@ -232,3 +239,74 @@ async function assertWiring() {
 }
 
 void main();
+
+
+async function testDraftPanelIsolation() {
+  const source = await readFile(new URL('../../src/ui/store/useAppStore.ts', import.meta.url), 'utf8');
+  const tree = ts.createSourceFile('store.ts', source, ts.ScriptTarget.Latest, true);
+  let action: ts.Expression | undefined;
+  function visit(node: ts.Node) {
+    if (ts.isPropertyAssignment(node) && node.name.getText(tree) === 'createDraftSession') action = node.initializer;
+    ts.forEachChild(node, visit);
+  }
+  visit(tree);
+  assert.ok(action, 'exercise the real createDraftSession action');
+  for (const previousSession of ['session-a', null]) {
+    let state: any = {
+      ...live({ rightUtilityTabs: ['browser'], activeRightUtilityTab: 'browser', browserPanelOpen: true }),
+      activeSessionId: previousSession,
+      projectCwd: '/shared', activeChannelByProject: {}, sessions: {},
+      rightPanelBySessionId: {}, workspaceLayout: {},
+    };
+    const context = vm.createContext({
+      get: () => state,
+      set: (update: any) => { state = { ...state, ...update(state) }; },
+      createDraftSessionView: () => ({ id: 'new-draft', isDraft: true }),
+      resolveActiveChannelIdForProject: () => 'default',
+      getProjectChannelKey: (cwd: string) => cwd,
+      normalizeWorkspaceChannelId: (id: string) => id,
+      captureLiveRightPanel, emptyRightPanelSnapshot,
+      pickLiveRightPanel: (value: any) => value,
+      tree: { getActiveLeaf: () => ({ id: 'main' }), placeSession: (_layout: any, _leaf: string, id: string) => ({ id }) },
+      layoutPatch: (layout: any) => ({ activeSessionId: layout.id }),
+      persistUiResumeStateSnapshot: () => {},
+    });
+    vm.runInContext(ts.transpileModule(`globalThis.createDraft = (${action.getText(tree)});`, {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText, context);
+    context.createDraft('/shared');
+    const panel = state.rightPanelBySessionId['new-draft'];
+    assert.deepEqual(panel.tabs, previousSession ? [] : ['browser']);
+    assert.equal(panel.hidden, previousSession !== null);
+  }
+  console.log('draft panel isolation passed: new conversations start empty; standalone promotion survives');
+}
+
+
+async function testNativeHideBeforeSessionPanelRestore() {
+  const source = await readFile(new URL('../../src/ui/store/useAppStore.ts', import.meta.url), 'utf8');
+  const tree = ts.createSourceFile('store.ts', source, ts.ScriptTarget.Latest, true);
+  let watcher: ts.Expression | undefined;
+  function visit(node: ts.Node) {
+    if (ts.isCallExpression(node) && node.expression.getText(tree) === 'useAppStore.subscribe'
+      && node.arguments[0]?.getText(tree).includes('switchSessionRightPanel')) watcher = node.arguments[0];
+    ts.forEachChild(node, visit);
+  }
+  visit(tree);
+  assert.ok(watcher);
+  const events: unknown[] = [];
+  const prev = { ...live({ rightUtilityTabs: ['browser:extra'], activeRightUtilityTab: 'browser:extra', browserPanelOpen: true }),
+    activeSessionId: 'a', sessions: { a: {}, b: {} }, rightPanelBySessionId: {} };
+  const context = vm.createContext({
+    window: { electron: { browser: { hide: (input: any) => { events.push(['hide', input.sessionId]); return Promise.resolve(); } } } },
+    getBrowserUtilitySessionId, isRightUtilityBrowserTab, switchSessionRightPanel, liveRightPanelEquals,
+    pickLiveRightPanel: (value: any) => value,
+    useAppStore: { setState: (patch: any) => { events.push(['restore', patch.browserPanelOpen, patch.rightUtilityPanelHidden]); } },
+  });
+  vm.runInContext(ts.transpileModule(`globalThis.watch = (${watcher.getText(tree)});`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText, context);
+  context.watch({ ...prev, activeSessionId: 'b' }, prev);
+  assert.deepEqual(events, [['hide', 'a:browser:extra'], ['restore', false, true]]);
+  console.log('native browser hide is dispatched before restoring the next session panel');
+}

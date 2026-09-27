@@ -228,6 +228,8 @@ export class BrowserManager {
   private window: BrowserWindow | null = null;
   private activeSessionId: string | null = null;
   private activeBounds: BrowserPanelBounds | null = null;
+  // Bounds belong to the mounted panel, including bounds received before open().
+  private panelSessionId: string | null = null;
   private attachedRuntimeKey: string | null = null;
   private attachedView: WebContentsView | null = null;
   /** Off-screen layout host for Browser Use while the user panel is closed. */
@@ -303,6 +305,7 @@ export class BrowserManager {
     const sessionIds = [...this.states.keys()];
     this.activeSessionId = null;
     this.activeBounds = null;
+    this.panelSessionId = null;
     for (const sessionId of sessionIds) {
       this.suspendSession(sessionId);
     }
@@ -338,6 +341,7 @@ export class BrowserManager {
     this.window = null;
     this.activeSessionId = null;
     this.activeBounds = null;
+    this.panelSessionId = null;
   }
 
   // ===== Public API =====
@@ -349,7 +353,7 @@ export class BrowserManager {
 
     if (
       this.activeBounds &&
-      (this.activeSessionId === null || this.activeSessionId === input.sessionId)
+      this.panelSessionId === input.sessionId
     ) {
       this.activateSession(input.sessionId, this.activeBounds);
     }
@@ -358,6 +362,10 @@ export class BrowserManager {
   }
 
   close(input: BrowserSessionInput): SessionBrowserState {
+    if (this.panelSessionId === input.sessionId) {
+      this.panelSessionId = null;
+      this.activeBounds = null;
+    }
     this.clearSuspendTimer(input.sessionId);
     if (this.activeSessionId === input.sessionId) {
       this.detachAttachedRuntime();
@@ -374,13 +382,17 @@ export class BrowserManager {
   }
 
   hide(input: BrowserSessionInput): void {
-    const state = this.states.get(input.sessionId);
-    if (!state?.open) return;
+    // Revoke pending bounds even when open() has not arrived yet. Otherwise a
+    // late/background open can resurrect a page over the next conversation.
+    if (this.panelSessionId === input.sessionId) {
+      this.panelSessionId = null;
+      this.activeBounds = null;
+    }
     if (this.activeSessionId === input.sessionId) {
       this.detachAttachedRuntime();
       this.activeSessionId = null;
     }
-    this.scheduleSessionSuspend(input.sessionId);
+    if (this.states.get(input.sessionId)?.open) this.scheduleSessionSuspend(input.sessionId);
   }
 
   getState(input: BrowserSessionInput): SessionBrowserState {
@@ -403,16 +415,19 @@ export class BrowserManager {
   setPanelBounds(input: BrowserSetPanelBoundsInput): SessionBrowserState {
     const state = this.getOrCreateState(input.sessionId);
     const nextBounds = normalizeBounds(input.bounds);
-    this.activeBounds = nextBounds;
-
-    if (!state.open || nextBounds === null) {
-      if (this.activeSessionId === input.sessionId) {
-        this.detachAttachedRuntime();
-        this.activeSessionId = null;
-        this.scheduleSessionSuspend(input.sessionId);
-      }
+    if (nextBounds === null) {
+      this.hide(input);
       return cloneSessionState(state);
     }
+    if (this.activeSessionId && this.activeSessionId !== input.sessionId) {
+      const previousSessionId = this.activeSessionId;
+      this.detachAttachedRuntime();
+      this.activeSessionId = null;
+      this.scheduleSessionSuspend(previousSessionId);
+    }
+    this.panelSessionId = input.sessionId;
+    this.activeBounds = nextBounds;
+    if (!state.open) return cloneSessionState(state);
     this.activateSession(input.sessionId, nextBounds);
     return cloneSessionState(state);
   }

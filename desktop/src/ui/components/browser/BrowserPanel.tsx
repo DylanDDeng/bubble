@@ -316,21 +316,18 @@ export function BrowserPanel({
     };
   }, [browserSessionId, collapsed, recordHistoryEntry, upsertSessionState]);
 
-  // Pane is hidden but we keep the state alive; tell main to detach.
+  // Revoke the native viewport during the layout commit, before the next
+  // conversation paints. Passive cleanup leaves the old page floating over it.
+  const visibleBrowserSessionRef = useRef<string | null>(null);
   useLayoutEffect(() => {
-    if (!nativeViewHidden) return;
-    window.electron.browser.hide({ sessionId: browserSessionId }).catch(() => {
-      // non-fatal
-    });
-  }, [browserSessionId, nativeViewHidden]);
-
-  useEffect(() => {
-    return () => {
-      window.electron.browser.hide({ sessionId: browserSessionId }).catch(() => {
-        // non-fatal: session switch unmounts this panel; keep the page suspended.
-      });
+    const hide = () => {
+      visibleBrowserSessionRef.current = null;
+      void window.electron.browser.hide({ sessionId: browserSessionId }).catch(() => {});
     };
-  }, [browserSessionId]);
+    visibleBrowserSessionRef.current = nativeViewHidden ? null : browserSessionId;
+    if (nativeViewHidden) hide();
+    return hide;
+  }, [browserSessionId, nativeViewHidden]);
 
   // ===== Context menu -> send selection to chat =====
   useEffect(() => {
@@ -393,7 +390,10 @@ export function BrowserPanel({
   const rafRef = useRef<number | null>(null);
 
   const pushBounds = useCallback(() => {
-    if (nativeViewHidden) return;
+    if (nativeViewHidden || visibleBrowserSessionRef.current !== browserSessionId) return;
+    // A queued resize/animation callback can run after the store switches but
+    // before React cleans up this panel. It must not reattach the old page.
+    if (useAppStore.getState().activeSessionId !== sessionId) return;
     const el = viewportRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
@@ -408,7 +408,7 @@ export function BrowserPanel({
         },
       })
       .catch(() => {});
-  }, [browserSessionId, nativeViewHidden]);
+  }, [browserSessionId, nativeViewHidden, sessionId]);
 
   useLayoutEffect(() => {
     pushBounds();
