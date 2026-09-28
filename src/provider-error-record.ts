@@ -14,6 +14,7 @@ const SAFE_ERROR_CODES = new Map<string, string>([
   ["failed_precondition", "failed_precondition"],
   ["internal_error", "internal_error"],
   ["invalid_argument", "invalid_argument"],
+  ["invalid_request_error", "invalid_request_error"],
   ["invalidparameter", "invalid_parameter"],
   ["invalid_parameter", "invalid_parameter"],
   ["location_not_supported", "location_not_supported"],
@@ -71,6 +72,7 @@ export interface SanitizedProviderError {
   pid: number;
   runtimeStartedAt: number;
   retry?: { attempt: number; maxAttempts: number };
+  requestShape?: Record<string, number>;
 }
 
 export interface ProviderErrorContext {
@@ -118,6 +120,7 @@ export function createSanitizedProviderError(
     ...(parameter ? { parameter } : {}),
     messageCount: Math.max(0, Math.trunc(context.messageCount)),
     toolCount: Math.max(0, Math.trunc(context.toolCount)),
+    ...sanitizedRequestShape(sources),
     bubbleVersion: getCurrentVersion(),
     pid: process.pid,
     runtimeStartedAt: RUNTIME_STARTED_AT,
@@ -126,6 +129,18 @@ export function createSanitizedProviderError(
       maxAttempts: context.retry.maxAttempts,
     } } : {}),
   };
+}
+
+function sanitizedRequestShape(sources: Record<string, unknown>[]): { requestShape?: Record<string, number> } {
+  const raw = sources.find(source => asRecord(source.requestShape))?.requestShape;
+  const shape = asRecord(raw);
+  if (!shape) return {};
+  const safe: Record<string, number> = {};
+  for (const key of ["messages", "tools", "assistant", "emptyAssistant", "reasoning", "toolCalls", "toolResults", "contentChars"]) {
+    const value = shape[key];
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) safe[key] = value;
+  }
+  return { requestShape: safe };
 }
 
 export function sanitizeProviderErrorText(value: string): string {
@@ -149,6 +164,9 @@ export function sanitizeProviderErrorText(value: string): string {
   }
   if (/forbidden|permission denied|access denied|\b403\b/i.test(text)) {
     return "Provider denied the request.";
+  }
+  if (/unprocessable entity|\b422\b/i.test(text)) {
+    return "Provider rejected the request (unprocessable entity).";
   }
   if (/invalid[^.]{0,60}(?:parameter|argument)|unsupported[^.]{0,60}(?:parameter|argument)|bad request|\b400\b/i.test(text)) {
     return "Provider rejected a request parameter.";

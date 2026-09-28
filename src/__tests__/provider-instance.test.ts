@@ -497,6 +497,33 @@ describe("createProviderInstance", () => {
     expect(body.thinking).toEqual({ type: "disabled" });
   });
 
+  it.each([undefined, "openai-responses", "openai-chat"] as const)("routes Space Bunny via chat with profile protocol %s", async protocol => {
+    createMock.mockResolvedValueOnce(fromArray([
+      { choices: [{ delta: { reasoning_content: "Consider the tool" } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "probe", arguments: '{"value":7}' } }] } }] },
+      { choices: [], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } },
+    ]));
+    const { createProviderInstance } = await import("../provider.js");
+    const provider = createProviderInstance({ providerId: "opencode-zen", apiKey: "fixture", baseURL: "https://opencode.ai/zen/v1", protocol });
+    const chunks = await collect(provider.streamChat([{ role: "user", content: "Use probe" }], {
+      model: "space-bunny-free", thinkingLevel: "max",
+      tools: [{ name: "probe", description: "Probe", parameters: { type: "object", properties: { value: { type: "number" } } } }],
+    }));
+    expect(createMock.mock.calls[0][0]).toMatchObject({ model: "space-bunny-free", stream: true, reasoning_effort: "max", stream_options: { include_usage: true } });
+    expect(createMock.mock.calls[0][0].input).toBeUndefined();
+    expect(chunks).toContainEqual({ type: "reasoning_delta", content: "Consider the tool" });
+    expect(chunks.some(chunk => chunk.type === "tool_call" && chunk.name === "probe")).toBe(true);
+    expect(chunks.some(chunk => chunk.type === "usage" && chunk.usage.totalTokens === 15)).toBe(true);
+    createMock.mockResolvedValueOnce({ choices: [{ message: { content: "OK" } }] });
+    expect(await provider.complete([
+      { role: "assistant", content: "", reasoning: "Consider the tool", toolCalls: [{ id: "call_1", name: "probe", arguments: '{"value":7}' }] },
+      { role: "tool", toolCallId: "call_1", content: "7" },
+    ], { model: "space-bunny-free", thinkingLevel: "low" })).toBe("OK");
+    expect(createMock.mock.calls[1][0]).toMatchObject({ reasoning_effort: "low", messages: [
+      { role: "assistant", reasoning_content: "Consider the tool" }, { role: "tool", tool_call_id: "call_1" },
+    ] });
+  });
+
   it("uses OpenCode Zen Responses API for Muse without Ark-only fields", async () => {
     vi.stubEnv("HTTPS_PROXY", "http://127.0.0.1:7890");
     vi.stubEnv("NO_PROXY", "");

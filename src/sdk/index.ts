@@ -74,6 +74,11 @@ import type {
 // ── Facade types ───────────────────────────────────────────────────────────
 
 export interface BubbleSdkOptions {
+  /** Optional process-local replay window. Active readers never lose unread
+   * events. Older cursors fail explicitly; restore durable session history.
+   * Omit for unlimited replay (the public SDK compatibility default). The
+   * first opener sets the shared process-local window for that session. */
+  sessionEventRetention?: number;
   /** Fallback working directory for sessions created without an explicit cwd. */
   defaultCwd?: string;
   /**
@@ -189,17 +194,15 @@ export interface SdkSessionEvent {
   turnId: string;
   event: AgentEvent;
   /**
-   * Present only on the synthesized record that ends a turn abnormally.
-   * Replay subscribers use it to tell "turn failed" from "turn still running";
-   * the per-turn runTurn() iterator instead surfaces the thrown error.
+   * Marks a settled turn after cleanup and admission of any fallback steer.
+   * Successful turns mark agent_end; failures synthesize a turn_end record.
    */
   terminal?: SdkSessionTerminal;
 }
 
-export interface SdkSessionTerminal {
-  kind: "failed" | "cancelled";
-  message: string;
-}
+export type SdkSessionTerminal =
+  | { kind: "completed" }
+  | { kind: "failed" | "cancelled"; message: string };
 
 export interface SdkStopOptions {
   /** Match Claude-style interruption: queued messages survive by default. */
@@ -207,6 +210,8 @@ export interface SdkStopOptions {
 }
 
 export interface SdkSessionHandle extends SdkSessionRef {
+  /** Current replay cursor; snapshot before send to observe only new work. */
+  readonly latestSequence: number;
   /** Events from every turn in this session. Opening another handle reconnects from sequence 1. */
   readonly events: AsyncIterable<SdkSessionEvent>;
   /** Reconnect after the last sequence the host durably processed. */
@@ -241,6 +246,7 @@ export class BubbleSdk {
 
   private readonly defaultCwd: string;
   private readonly mcpEnabled: boolean;
+  private readonly sessionEventRetention: number;
   private readonly cwdBySession = new Map<string, string>();
   private readonly bashAllowlists = new Map<string, BashAllowlist>();
   private readonly sessionGrants = new Map<string, Set<string>>();
@@ -260,6 +266,10 @@ export class BubbleSdk {
   constructor(options: BubbleSdkOptions = {}) {
     this.defaultCwd = options.defaultCwd || process.env.BUBBLE_CWD || os.homedir();
     this.mcpEnabled = options.mcp !== false;
+    this.sessionEventRetention = options.sessionEventRetention ?? Infinity;
+    if (this.sessionEventRetention !== Infinity && (!Number.isSafeInteger(this.sessionEventRetention) || this.sessionEventRetention < 1)) {
+      throw new Error('sessionEventRetention must be a positive integer');
+    }
   }
 
   // ── Sessions ─────────────────────────────────────────────────────────────
@@ -286,12 +296,13 @@ export class BubbleSdk {
     const resolved = this.resolveSession(sessionId);
     if (!resolved) throw new Error(`Unknown session: ${sessionId}`);
     const ownerKey = resolved.manager.getSessionFile();
-    const eventLog = sessionEventLogFor(ownerKey);
+    const eventLog = sessionEventLogFor(ownerKey, this.sessionEventRetention);
     const closed = new AbortController();
     return {
       id: sessionId,
       cwd: resolved.cwd,
-      events: eventLog.iterate({ signal: closed.signal }),
+      get latestSequence() { return eventLog.length; },
+      get events() { return eventLog.iterate({ signal: closed.signal }); },
       eventsFrom: (afterSequence) => eventLog.iterate({
         from: Math.max(0, afterSequence),
         signal: closed.signal,
@@ -498,10 +509,14 @@ export class BubbleSdk {
     resolved: { manager: SessionManager; cwd: string },
   ): Promise<void> {
     let failure: unknown;
+    let completedEvent: AgentEvent | undefined;
     try {
       for await (const event of this.runReservedTurn(runtime, runtime.options, resolved)) {
         runtime.events.append(event);
-        this.publishSessionEvent(runtime, event);
+        // Publish success after the generator's finally releases its slot.
+        // A host can then distinguish idle from an automatically queued steer.
+        if (event.type === "agent_end") completedEvent = event;
+        else this.publishSessionEvent(runtime, event);
       }
     } catch (error) {
       failure = error;
@@ -520,6 +535,8 @@ export class BubbleSdk {
             message: failure instanceof Error ? failure.message : String(failure),
           },
         );
+      } else {
+        this.publishSessionEvent(runtime, completedEvent ?? { type: "agent_end" }, { kind: "completed" });
       }
       runtime.events.close(failure);
       if (this.turnRuntimes.get(runtime.reservation.id) === runtime) {
@@ -924,7 +941,7 @@ export class BubbleSdk {
     event: AgentEvent,
     terminal?: SdkSessionTerminal,
   ): void {
-    const log = sessionEventLogFor(runtime.ownerKey);
+    const log = sessionEventLogFor(runtime.ownerKey, this.sessionEventRetention);
     log.append({
       sequence: log.length + 1,
       sessionId: runtime.sessionId,
@@ -1103,10 +1120,10 @@ function releaseProcessOwner(ownerKey: string, sdk: BubbleSdk): void {
   if (processSessionOwners.get(ownerKey) === sdk) processSessionOwners.delete(ownerKey);
 }
 
-function sessionEventLogFor(ownerKey: string): ReplayEventLog<SdkSessionEvent> {
+function sessionEventLogFor(ownerKey: string, retention = Infinity): ReplayEventLog<SdkSessionEvent> {
   let log = sessionEventLogs.get(ownerKey);
   if (!log) {
-    log = new ReplayEventLog<SdkSessionEvent>();
+    log = new ReplayEventLog<SdkSessionEvent>(retention);
     sessionEventLogs.set(ownerKey, log);
   }
   return log;

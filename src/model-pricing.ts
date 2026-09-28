@@ -81,6 +81,7 @@ export const MODEL_PRICING_OVERRIDES: ModelPricing[] = [
   ...[
     "muse-spark-1.3-contributor-free",
     "muse-spark-1.2-contributor-free",
+    "space-bunny-free",
   ].map((modelId): ModelPricing => ({
     providerId: "opencode-zen",
     modelId,

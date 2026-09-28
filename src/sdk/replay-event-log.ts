@@ -8,18 +8,28 @@ interface DeferredSignal {
  * consumer, and consumers can attach again with their last seen sequence.
  */
 export class ReplayEventLog<T> {
-  private readonly entries: T[] = [];
+  private readonly entries = new Map<number, T>();
+  private nextIndex = 0;
+  private firstIndex = 0;
+  private readonly readers = new Map<object, number>();
   private signal = deferredSignal();
   private closed = false;
   private failure: unknown;
 
-  get length(): number {
-    return this.entries.length;
+  constructor(private readonly retention = Infinity) {
+    if (retention !== Infinity && (!Number.isSafeInteger(retention) || retention < 1)) throw new Error('Invalid event retention');
   }
+
+  get length(): number {
+    return this.nextIndex;
+  }
+
+  get retainedCount(): number { return this.entries.size; }
 
   append(value: T): void {
     if (this.closed) return;
-    this.entries.push(value);
+    this.entries.set(this.nextIndex++, value);
+    this.prune();
     this.wake();
   }
 
@@ -32,21 +42,56 @@ export class ReplayEventLog<T> {
 
   iterate(options: { from?: number; signal?: AbortSignal } = {}): AsyncGenerator<T> {
     const start = Math.max(0, options.from ?? 0);
-    return this.readFrom(start, options.signal);
+    const reader = {};
+    const cancelled = new AbortController();
+    const signal = options.signal ? AbortSignal.any([options.signal, cancelled.signal]) : cancelled.signal;
+    const release = () => { this.readers.delete(reader); this.prune(); };
+    // Reserve the cursor when subscribing, before a synchronous producer can
+    // prune events and before the consumer calls next(). close/return also
+    // release subscriptions which were never advanced.
+    if (!signal.aborted) this.readers.set(reader, start);
+    signal.addEventListener('abort', release, { once: true });
+    const cleanup = () => { signal.removeEventListener('abort', release); release(); };
+    const iterator = this.readFrom(start, reader, signal, cleanup);
+    const finish = iterator.return.bind(iterator);
+    const fail = iterator.throw.bind(iterator);
+    iterator.return = async value => { cancelled.abort(); cleanup(); return finish(value); };
+    iterator.throw = async error => { cancelled.abort(); cleanup(); return fail(error); };
+    return iterator;
   }
 
-  private async *readFrom(start: number, abortSignal?: AbortSignal): AsyncGenerator<T> {
+  private async *readFrom(start: number, reader: object, abortSignal: AbortSignal, cleanup: () => void): AsyncGenerator<T> {
     let index = start;
-    while (true) {
-      while (index < this.entries.length) yield this.entries[index++]!;
-      if (this.closed) {
-        if (this.failure !== undefined) throw this.failure;
-        return;
+    try {
+      while (true) {
+        while (index < this.nextIndex) {
+          if (abortSignal.aborted) return;
+          if (index < this.firstIndex) {
+            throw new Error('Replay cursor expired; restore persisted history and subscribe from the latest sequence.');
+          }
+          const value = this.entries.get(index)!;
+          this.readers.set(reader, ++index);
+          this.prune();
+          yield value;
+        }
+        if (this.closed) {
+          if (this.failure !== undefined) throw this.failure;
+          return;
+        }
+        if (abortSignal.aborted) return;
+        const currentSignal = this.signal.promise;
+        await waitForSignal(currentSignal, abortSignal);
       }
-      if (abortSignal?.aborted) return;
-      const currentSignal = this.signal.promise;
-      await waitForSignal(currentSignal, abortSignal);
+    } finally {
+      cleanup();
     }
+  }
+
+  private prune(): void {
+    if (this.retention === Infinity) return;
+    let before = this.nextIndex - this.retention;
+    for (const index of this.readers.values()) before = Math.min(before, index);
+    while (this.firstIndex < before) this.entries.delete(this.firstIndex++);
   }
 
   private wake(): void {

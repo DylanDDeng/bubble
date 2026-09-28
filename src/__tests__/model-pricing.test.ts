@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 import { calculateUsageCost, getModelPricing } from "../model-pricing.js";
 
 describe("model pricing", () => {
+  it("prices Space Bunny Free input, output and cache tokens at zero", () => {
+    expect(calculateUsageCost("opencode-zen", "space-bunny-free", {
+      promptTokens: 1000, completionTokens: 200,
+      promptCacheHitTokens: 500, promptCacheMissTokens: 500, cacheCreationTokens: 100,
+    })).toEqual({ currency: "USD", cost: 0, estimated: false });
+  });
   it("contains OpenCode Zen Muse Spark pricing", () => {
     expect(getModelPricing("opencode-zen", "muse-spark-1.2")).toMatchObject({
       currency: "USD",

@@ -172,6 +172,8 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "muse-spark-1.3-contributor-free", name: "Muse Spark 1.3 Free", providerId: "opencode-zen", reasoningLevels: MUSE_SPARK_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
   { id: "muse-spark-1.2", name: "Muse Spark 1.2", providerId: "opencode-zen", reasoningLevels: MUSE_SPARK_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
   { id: "muse-spark-1.2-contributor-free", name: "Muse Spark 1.2 Free", providerId: "opencode-zen", reasoningLevels: MUSE_SPARK_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  // Zen /chat/completions; models.dev/opencode metadata checked 2026-09-26.
+  { id: "space-bunny-free", name: "Space Bunny Free", providerId: "opencode-zen", reasoningLevels: ["low", "medium", "high", "xhigh", "max"], defaultReasoningLevel: "high", contextWindow: 1048576 },
 
   // Current public lineup, verified against platform.claude.com on 2026-09-23.
   { id: "claude-fable-5-1", name: "Claude Fable 5.1", providerId: "anthropic", tier: "strong", reasoningLevels: ANTHROPIC_FABLE_EFFORT_LEVELS, defaultReasoningLevel: "high", contextWindow: 1000000 },

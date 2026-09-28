@@ -2,6 +2,17 @@ import { describe, expect, it } from "vitest";
 import { resolveProviderRequestConfig } from "../provider-transform.js";
 
 describe("provider transform", () => {
+  it.each(["low", "medium", "high", "xhigh", "max"] as const)("sends Space Bunny %s effort through Chat Completions", level => {
+    expect(resolveProviderRequestConfig("opencode-zen", "space-bunny-free", level)).toMatchObject({
+      effectiveThinkingLevel: level, extraBody: { reasoning_effort: level }, reasoningContentEcho: "tool_calls",
+    });
+  });
+
+  it.each(["off", "minimal", "ultra"] as const)("normalizes unsupported Space Bunny effort %s", level => {
+    expect(resolveProviderRequestConfig("opencode-zen", "space-bunny-free", level)).toMatchObject({
+      effectiveThinkingLevel: "high", extraBody: { reasoning_effort: "high" },
+    });
+  });
   it("emits only supported non-off reasoning effort for ChatGPT OAuth codex", () => {
     const high = resolveProviderRequestConfig("openai-codex", "gpt-5.6-sol", "high");
     const ultra = resolveProviderRequestConfig("openai-codex", "gpt-5.6-sol", "ultra");

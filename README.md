@@ -167,7 +167,13 @@ Turns are driven by the SDK itself, not by iterator consumption: a returned
 iterator is a replay subscription, so dropping it never stalls or cancels the
 turn. `openSession(sessionId)` returns a durable handle whose `events` iterable
 replays the whole session log from sequence 1 and `eventsFrom(n)` resumes after
-the last sequence the host durably processed. `stop(sessionId)` is
+the last sequence the host durably processed. Snapshot `handle.latestSequence`
+before sending to subscribe only to new work, including automatic fallback
+turns. Each turn ends with a `terminal` record (`completed`, `failed`, or
+`cancelled`) after its execution slot is released. A completed turn may have
+already started a queued successor; hosts should drain buffered records and
+check `getSessionRunState(sessionId).active` before showing the session as idle.
+`stop(sessionId)` is
 Claude-style: it interrupts the active turn and keeps the queue; pass
 `{ cancelQueued: true }` to clear both. `clearQueue(sessionId)` cancels only
 queued turns, and `deleteSession(sessionId)` awaits teardown before the JSONL

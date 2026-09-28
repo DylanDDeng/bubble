@@ -34,6 +34,7 @@ describe("provider registry", () => {
     expect(displayModel("anthropic:claude-fable-5")).toBe("Claude Fable 5");
     expect(displayModel("anthropic:claude-sonnet-4-6")).toBe("Claude Sonnet 4.6");
     expect(displayModel("opencode-zen:muse-spark-1.3-contributor-free")).toBe("Muse Spark 1.3 Free");
+    expect(displayModel("opencode-zen:space-bunny-free")).toBe("Space Bunny Free");
   });
 
   it("shows Doubao as a user-visible provider", () => {

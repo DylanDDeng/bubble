@@ -214,7 +214,7 @@ describe("variant resolver", () => {
     expect(getDefaultThinkingLevel("doubao", "doubao-seed-2-1-pro-260628")).toBe("high");
   });
 
-  it("includes only Muse models on the OpenCode Zen Muse provider", () => {
+  it("includes Muse and Space Bunny on OpenCode Zen", () => {
     expect(getBuiltinProvider("opencode-zen")).toMatchObject({
       name: "OpenCode Zen",
       baseURL: "https://opencode.ai/zen/v1",
@@ -224,12 +224,17 @@ describe("variant resolver", () => {
       "muse-spark-1.3-contributor-free",
       "muse-spark-1.2",
       "muse-spark-1.2-contributor-free",
+      "space-bunny-free",
     ]);
     expect(getAvailableThinkingLevels("opencode-zen", "muse-spark-1.3-contributor-free"))
       .toEqual(["minimal", "low", "medium", "high", "xhigh"]);
     expect(getDefaultThinkingLevel("opencode-zen", "muse-spark-1.3-contributor-free"))
       .toBe("high");
     expect(getModelContextWindow("opencode-zen", "muse-spark-1.2")).toBe(1048576);
+    expect(getAvailableThinkingLevels("opencode-zen", "space-bunny-free"))
+      .toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(getDefaultThinkingLevel("opencode-zen", "space-bunny-free")).toBe("high");
+    expect(getModelContextWindow("opencode-zen", "space-bunny-free")).toBe(1048576);
   });
 
   it("includes MiniMax agent models", () => {
@@ -265,6 +270,10 @@ describe("variant resolver", () => {
       protocol: "anthropic-messages",
     });
     expect(listBuiltinModels("anthropic").map((model) => model.id)).toEqual([
+      "claude-fable-5-1",
+      "claude-opus-5-5",
+      "claude-sonnet-5",
+      "claude-opus-5",
       "claude-fable-5",
       "claude-opus-4-8",
       "claude-sonnet-4-6",
