@@ -513,7 +513,7 @@ const claudeEffortLabels: Record<ClaudeReasoningEffort, string> = {
   low: 'Low',
   medium: 'Medium',
   high: 'High',
-  xhigh: 'X-High',
+  xhigh: 'Extra High',
   max: 'Max',
 };
 

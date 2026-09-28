@@ -23,7 +23,7 @@ export const GROK_REASONING_EFFORT_LABELS: Record<GrokReasoningEffort, string> =
   low: 'Low',
   medium: 'Medium',
   high: 'High',
-  xhigh: 'X-High',
+  xhigh: 'Extra High',
 };
 
 export function normalizeGrokReasoningEffort(

@@ -26,7 +26,7 @@ export const BUBBLE_THINKING_LEVEL_LABELS: Record<string, string> = {
   low: 'Low',
   medium: 'Medium',
   high: 'High',
-  xhigh: 'X-High',
+  xhigh: 'Extra High',
   max: 'Max',
   ultra: 'Ultra',
 };
