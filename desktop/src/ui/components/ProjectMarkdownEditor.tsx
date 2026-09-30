@@ -33,6 +33,7 @@ import {
   X,
 } from './icons';
 import { toast } from 'sonner';
+import { OutlineRail } from './OutlineRail';
 import { livePreviewMath, MarkdownRenderedWidget } from './markdown-live-preview-widgets';
 import { createMediaSourceButton, mediaSourceIsActive, moveThroughMedia, type MediaSourceRange } from './markdown-media-interaction';
 import { collectHtmlPreviews, isMarkdownVideo, MarkdownVideoWidget, markdownWikiEmbeds, type VideoPreview } from './markdown-html-preview';
@@ -2294,12 +2295,19 @@ export function ProjectMarkdownEditor({
   const composingInputRef = useRef(false);
   const composingMarkdownRef = useRef<string | null>(null);
   const compositionFlushTimerRef = useRef<number | null>(null);
-  const outlineCloseTimerRef = useRef<number | null>(null);
   const headingFlashTimerRef = useRef<number | null>(null);
   const previewCompartment = useRef(new Compartment());
   const [outlineItems, setOutlineItems] = useState<MarkdownOutlineItem[]>([]);
   const [activeOutlineId, setActiveOutlineId] = useState<string | null>(null);
-  const [outlineOpen, setOutlineOpen] = useState(false);
+  const outlineRailItems = useMemo(() => {
+    const parents: MarkdownOutlineItem[] = [];
+    return outlineItems.map(item => {
+      while (parents.length && parents[parents.length - 1].level >= item.level) parents.pop();
+      const entry = { id: item.id, title: item.text, summary: parents.at(-1)?.text };
+      parents.push(item);
+      return entry;
+    });
+  }, [outlineItems]);
   const [editorFocused, setEditorFocused] = useState(false);
   const [active, setActive] = useState<MarkdownToolbarState>(EMPTY_TOOLBAR_STATE);
   const breadcrumb = useMemo(() => formatBreadcrumb(cwd, filePath), [cwd, filePath]);
@@ -2415,24 +2423,6 @@ export function ProjectMarkdownEditor({
     });
     return () => onRegisterBridge?.(null);
   }, [flushPendingMarkdownToParent, getViewState, isComposing, onRegisterBridge, restoreViewState]);
-
-  const openOutline = useCallback(() => {
-    if (outlineCloseTimerRef.current) {
-      window.clearTimeout(outlineCloseTimerRef.current);
-      outlineCloseTimerRef.current = null;
-    }
-    setOutlineOpen(true);
-  }, []);
-
-  const queueCloseOutline = useCallback(() => {
-    if (outlineCloseTimerRef.current) {
-      window.clearTimeout(outlineCloseTimerRef.current);
-    }
-    outlineCloseTimerRef.current = window.setTimeout(() => {
-      setOutlineOpen(false);
-      outlineCloseTimerRef.current = null;
-    }, 180);
-  }, []);
 
   const applyFullMarkdownChange = useCallback((next: string) => {
     const view = viewRef.current;
@@ -2658,14 +2648,6 @@ export function ProjectMarkdownEditor({
     }
   }, [refreshDerivedUi, value]);
 
-  useEffect(() => {
-    return () => {
-      if (outlineCloseTimerRef.current) {
-        window.clearTimeout(outlineCloseTimerRef.current);
-      }
-    };
-  }, []);
-
   const toolbarActive = editorFocused ? active : EMPTY_TOOLBAR_STATE;
 
   return (
@@ -2693,61 +2675,27 @@ export function ProjectMarkdownEditor({
         <div className="aegis-md-error">{saveError}</div>
       )}
 
-      <div className="aegis-md-main">
-        <div className="aegis-md-canvas">
-          <div
-            ref={hostRef}
-            className="aegis-md-codemirror-root"
-            onMouseUp={refreshCurrentEditorUi}
-            onKeyUp={refreshCurrentEditorUi}
-          />
-        </div>
-
-        {!sourceMode && outlineItems.length > 0 && (
-          <aside
-            className={`aegis-md-outline${outlineOpen ? ' is-open' : ''}`}
-            aria-label="Document outline"
-          >
-            <button
-              type="button"
-              className="aegis-md-outline-trigger"
-              title="Show outline"
-              aria-label="Show outline"
-              aria-expanded={outlineOpen}
-              onMouseEnter={openOutline}
-              onMouseLeave={queueCloseOutline}
-              onFocus={openOutline}
-              onBlur={queueCloseOutline}
-              onClick={() => setOutlineOpen((current) => !current)}
-            >
-              {outlineItems.slice(0, 8).map((item) => (
-                <span
-                  key={item.id}
-                  className={`${item.id === activeOutlineId ? 'active' : ''} level-${item.level}`}
-                  title={item.text}
-                  aria-hidden="true"
-                />
-              ))}
-            </button>
+      <div className="aegis-md-viewport">
+        <div className="aegis-md-main">
+          <div className="aegis-md-canvas">
             <div
-              className="aegis-md-outline-content"
-              onMouseEnter={openOutline}
-              onMouseLeave={queueCloseOutline}
-            >
-              <div className="aegis-md-outline-list">
-                {outlineItems.map((item) => (
-                  <button
-                    type="button"
-                    key={item.id}
-                    className={`level-${item.level}${item.id === activeOutlineId ? ' active' : ''}`}
-                    onClick={() => jumpToOutlineItem(item)}
-                  >
-                    {item.text}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </aside>
+              ref={hostRef}
+              className="aegis-md-codemirror-root"
+              onMouseUp={refreshCurrentEditorUi}
+              onKeyUp={refreshCurrentEditorUi}
+            />
+          </div>
+        </div>
+        {!sourceMode && outlineItems.length > 0 && (
+          <OutlineRail
+            label="Document outline"
+            activeId={activeOutlineId}
+            items={outlineRailItems}
+            onNavigate={id => {
+              const item = outlineItems.find(entry => entry.id === id);
+              if (item) jumpToOutlineItem(item);
+            }}
+          />
         )}
       </div>
     </div>

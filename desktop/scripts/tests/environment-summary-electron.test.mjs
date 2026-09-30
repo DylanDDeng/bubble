@@ -14,6 +14,9 @@ import '/src/ui/index.css';
 window.qa={calls:[],refreshes:0,branchReads:0,attached:[],listeners:new Set()};
 Object.defineProperty(navigator,'clipboard',{value:{writeText:async text=>{qa.copied=text}}});
 window.electron={
+ terminal:{listProcesses:async()=>[]},
+ getEnvironmentEditorLaunchers:async()=>[],
+ chooseAttachments:async()=>({attachments:[{id:'new-source',name:'new-source.md',kind:'file',path:'/fixtures/new-source.md'}],errors:[]}),
  getUiResumeStateSync:()=>null, getRendererStateAllSync:()=>({}), saveUiResumeState:async()=>{},
  getGitBranches:async()=>{qa.branchReads++;await new Promise(r=>setTimeout(r,350));return {ok:true,entries:[{name:'feature/card',fullRef:'refs/heads/feature/card',current:true,remote:false}]}},
  getGitOverview:async()=>qa.overview,
@@ -37,7 +40,7 @@ const {EnvironmentHub}=await import('/src/ui/components/environment/EnvironmentH
 const {useGitEnvironment}=await import('/src/ui/components/environment/useGitEnvironment.ts');
 const {useAppStore}=await import('/src/ui/store/useAppStore.ts');
 const {useSessionOrganizationStore}=await import('/src/ui/store/useSessionOrganizationStore.ts');
-qa.organization=useSessionOrganizationStore;
+qa.organization=useSessionOrganizationStore;qa.app=useAppStore;
 const draft=useAppStore.getState().createDraftSession('/projects/podcast');
 const base={...useAppStore.getState().sessions[draft],id:'fixture',isDraft:false,status:'idle',messages:[]};
 function GitProbe(){
@@ -46,6 +49,8 @@ function GitProbe(){
  return <output id="probe-branch">{git.overview.branch||'unknown'}</output>;
 }
 function Harness(){
+ const [header,setHeader]=useState(false);qa.setHeader=setHeader;
+ const [sources,setSources]=useState([]);qa.setSources=setSources;
  const [probe,setProbe]=useState(false);qa.setProbe=setProbe;
  const [sessionId,setSessionId]=useState('fixture');qa.setSessionId=setSessionId;
  const [mode,setMode]=useState('local');const [patch,setPatch]=useState({});const [narrow,setNarrow]=useState(false);qa.setMode=value=>{setPatch({});setMode(value)};qa.patch=setPatch;qa.setNarrow=setNarrow;
@@ -70,7 +75,7 @@ function Harness(){
  Object.assign(overview,patch);
  qa.overview=overview;
  const git={overview,loading:mode==='loading'||mode==='pr-loading',lastUpdatedAt:Date.now(),refresh:async()=>{qa.refreshes++},getSnapshot:()=>({contextKey:mode,cwd:context.effectiveCwd,repoRoot:overview.repoRoot,branch:overview.branch,signature:[overview.repoRoot||'',overview.branch||'',overview.upstream||'',overview.aheadCount,overview.behindCount,overview.totalChanges,overview.insertions,overview.deletions,overview.prStatus,overview.pr?.number||''].join(':')})};
- return <><Toaster/><div hidden>{probe?<GitProbe/>:null}</div><main style={{display:'flex',height:'100vh',background:'var(--bg-primary)'}}><div style={{width:narrow?420:720,padding:20}}><header style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}><span>Environment preview</span><EnvironmentHub context={context} git={git} onOpenProjectPanel={view=>qa.view=view}/></header><button id="outside" style={{marginTop:480}}>Outside</button></div><aside style={{flex:1,borderLeft:'1px solid var(--border)',padding:20}}>Files</aside></main></>;
+ return <><Toaster/><div hidden>{probe?<GitProbe/>:null}</div><main style={{display:'flex',height:'100vh',background:'var(--bg-primary)'}}><div style={{width:narrow?420:720,padding:20}}><header style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}><span>Environment preview</span><EnvironmentHub alwaysShow={header} sources={sources} onOpenSources={path=>qa.source=path} onOpenTerminal={header?()=>qa.terminalOpened=true:undefined} context={context} git={git} onOpenProjectPanel={view=>qa.view=view}/></header><button id="outside" style={{marginTop:480}}>Outside</button></div><aside style={{flex:1,borderLeft:'1px solid var(--border)',padding:20}}>Files</aside></main></>;
 }
 createRoot(document.getElementById('root')).render(<Harness/>);
 `;
@@ -184,6 +189,17 @@ app.whenReady().then(async()=>{
  assert.doesNotMatch(await visible(),/PR #999/,'ignore delayed results from previous task');
  await js('qa.pendingPr[1].resolve([])');await delay(100);
  await js('qa.pendingPr[2].resolve([])');await delay(100);
+ await mode('local');await js('qa.setHeader(true)');await delay(150);
+ if(await js('document.querySelector("button[title=Environment]").getAttribute("aria-expanded")==="false"'))await click('Open environment panel');
+ assert.match(await visible(),/Not a Git repo/);assert.match(await visible(),/Background processes/);assert.match(await visible(),/No attachments/);
+ assert.doesNotMatch(await visible(),/Open in editor|Bottom terminal/);
+ await click('Environment options');assert.match(await visible(),/Open in editor/);await click('Bottom terminal');assert.equal(await js('qa.terminalOpened'),true);
+ await click('Open environment panel');await click('Add sources');
+ assert.equal(await js('qa.app.getState().pendingChatInjection.sessionId'),'second-task');
+ assert.equal(await js('qa.app.getState().pendingChatInjection.attachments[0].name'),'new-source.md');
+ await js('qa.setSources([{id:"source",kind:"file",name:"reference.md",path:"/fixtures/reference.md"}])');await delay(100);
+ await click('Open environment panel');await click('reference.md');assert.equal(await js('qa.source'),'/fixtures/reference.md');
+ await click('Open environment panel');await click('View all (1)');assert.equal(await js('qa.source'),null);
  assert.deepEqual(errors,[]);
  console.log('environment-summary: initial and cached branch, detached HEAD, non-Git sections, stale replies, combined commit/push, publish, PR states and creation, sync, worktree menu, clipboard menu, portals, running guards, anchor, dismissal passed');app.exit(0);
  }catch(e){console.error(e);console.error(errors);console.error(await visible());await snap('failure');app.exit(1)}
@@ -194,10 +210,10 @@ try {
  await writeFile(path.join(tmp,'index.html'),'<!doctype html><html><body style="margin:0"><div id="root"></div><script type="module" src="./harness.tsx"></script></body></html>');
  await writeFile(path.join(tmp,'harness.tsx'),harness);
  await writeFile(path.join(tmp,'main.cjs'),main);
- server=await createServer({root,configFile:path.join(root,'vite.config.ts'),server:{host:'127.0.0.1',port:0,strictPort:false}});await server.listen();
+ server=await createServer({root,configFile:path.join(root,'vite.config.ts'),cacheDir:path.join(tmp,'vite-cache'),server:{host:'127.0.0.1',port:0,strictPort:false}});await server.listen();
  const url=new URL(path.relative(root,tmp)+'/index.html',server.resolvedUrls.local[0]).href;
  await new Promise((resolve,reject)=>{
-  const env={...process.env,QA_URL:url};delete env.ELECTRON_RUN_AS_NODE;
+  const env={...process.env,QA_URL:url,BUBBLE_HOME:path.join(tmp,'agent')};delete env.ELECTRON_RUN_AS_NODE;
   const child=spawn(path.join(root,'node_modules/.bin/electron'),[path.join(tmp,'main.cjs')],{cwd:root,env,stdio:'inherit'});
   const timeout=setTimeout(()=>{child.kill();reject(new Error('Environment test timed out'));},60000);
   child.on('error',reject);child.on('exit',code=>{clearTimeout(timeout);code===0?resolve():reject(new Error('Electron exited '+code))});

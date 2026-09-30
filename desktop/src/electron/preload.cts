@@ -147,6 +147,7 @@ contextBridge.exposeInMainWorld('electron', {
   },
 
   terminal: {
+    listProcesses: (threadId: string) => ipcRenderer.invoke('terminal:list-processes', threadId),
     open: (input: unknown) => {
       return ipcRenderer.invoke('terminal:open', input);
     },

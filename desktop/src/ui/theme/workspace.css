@@ -1,3 +1,229 @@
+/* Workspace chrome follows the active palette, including custom and dark themes. */
+.bubble-workspace-rail {
+  position: absolute;
+  inset: 40px auto 0 0;
+  display: flex;
+  width: 44px;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 4px 12px;
+}
+
+.bubble-workspace-rail-button {
+  position: relative;
+  display: flex;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  color: var(--text-secondary);
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.bubble-workspace-rail-button:hover,
+.bubble-workspace-rail-button[aria-pressed='true'] {
+  background: var(--sidebar-item-active);
+  color: var(--text-primary);
+}
+
+.bubble-workspace-rail-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.bubble-workspace-rail-dot {
+  position: absolute;
+  top: 6px;
+  right: 5px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.bubble-sidebar-content {
+  margin-left: 44px;
+  border-radius: 14px 0 0 14px;
+  border: 1px solid var(--border);
+  border-right: 0;
+  background: color-mix(in srgb, var(--bg-primary) 48%, var(--app-sidebar-surface));
+}
+
+.aegis-sidebar .bubble-sidebar-content .aegis-sidebar-brand {
+  font-size: calc(16px * var(--ui-font-scale, 1)) !important;
+  letter-spacing: -0.025em;
+}
+
+.bubble-window-tabs {
+  min-height: 40px;
+  padding-left: max(8px, calc(176px - var(--bubble-sidebar-width, 0px)));
+}
+
+.bubble-window-navigation {
+  position: absolute;
+  z-index: 81;
+  top: 0;
+  left: 84px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+}
+
+/* Native Electron drag hit-testing ignores visual z-index. Keep every drag
+   rectangle physically clear of the fixed navigation buttons, even mid-motion. */
+.bubble-titlebar-drag-area {
+  position: absolute;
+  inset: 0 0 0 max(0px, calc(176px - var(--bubble-sidebar-width, 0px)));
+  pointer-events: none;
+}
+
+.bubble-workspace-surface {
+  isolation: isolate;
+  margin: 0;
+  border-radius: 0 14px 14px 0;
+  border: 1px solid var(--border);
+  box-shadow: none;
+}
+
+.bubble-workspace-surface .aegis-new-thread-heading {
+  font-size: calc(26px * var(--ui-font-scale, 1));
+  line-height: 1.35;
+  letter-spacing: -0.025em;
+}
+
+.bubble-chat-composer-surface {
+  border-radius: 24px;
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--text-primary) 4%, transparent),
+    0 12px 36px color-mix(in srgb, var(--text-primary) 3%, transparent);
+}
+
+.bubble-chat-composer-surface:focus-within {
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--text-primary) 5%, transparent),
+    0 12px 36px color-mix(in srgb, var(--text-primary) 4%, transparent);
+}
+
+.aegis-window-shell:has(.aegis-sidebar [aria-hidden='true'] .bubble-sidebar-content) .bubble-workspace-surface {
+  border-radius: 14px;
+}
+
+/* The tool fills the surface. Chat is optional and retains its mounted tree. */
+.bubble-full-view-chat {
+  position: absolute;
+  z-index: 85;
+  right: 12px;
+  bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  width: min(560px, calc(100% - 24px));
+  height: min(640px, calc(100% - 80px));
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--bg-primary);
+  box-shadow: var(--popover-shadow);
+}
+.bubble-full-view-chat.is-collapsed { display: none; }
+.bubble-floating-chat-header { display: flex; align-items: center; flex: 0 0 42px; gap: 8px; padding: 0 10px; }
+.bubble-floating-chat-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; font-size: 12px; color: var(--text-secondary); }
+.bubble-floating-chat-launcher { position: absolute; z-index: 85; right: 14px; bottom: 12px; display: grid; place-items: center; width: 34px; height: 34px; border: 1px solid var(--border); border-radius: 50%; background: var(--bg-primary); color: var(--text-secondary); box-shadow: 0 2px 8px color-mix(in srgb, var(--text-primary) 8%, transparent); }
+.bubble-floating-chat-launcher:hover { background: var(--bg-tertiary); }
+.bubble-full-view-chat :is(.bubble-conversation-header, .aegis-new-thread-hero),
+.bubble-full-view-chat [data-chat-pane-active='false'],
+.bubble-full-view-chat [data-workspace-branch]:not(:has([data-chat-pane-active='true'])) { display: none; }
+.bubble-full-view-chat [data-workspace-branch] { flex: 1 1 auto !important; }
+.bubble-full-view-chat [data-workspace-branch] > .cursor-col-resize,
+.bubble-full-view-chat [data-workspace-branch] > .cursor-row-resize { display: none; }
+.bubble-full-view-chat :is(.aegis-new-thread-landing, .aegis-new-thread-composer-zone, .aegis-chat-composer) { padding: 8px; }
+.bubble-full-view-chat .aegis-new-thread-composer { max-width: none; }
+.bubble-full-view-chat .aegis-composer-editor { min-height: 24px; max-height: 120px; }
+.bubble-full-view-chat .aegis-composer-context-row { font-size: 11px; }
+
+.bubble-browser-start {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  padding: 28px clamp(20px, 8%, 100px);
+  background: var(--utility-pane-surface);
+}
+.bubble-browser-start h2 {
+  max-width: 760px;
+  margin: 0 auto 14px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+}
+.bubble-browser-tools {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  max-width: 760px;
+  gap: 6px;
+  margin: 0 auto 32px;
+}
+.bubble-browser-tools button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--sidebar-item-hover);
+  color: var(--text-secondary);
+  text-align: left;
+  font-size: 12px;
+}
+.bubble-browser-tools button:hover { background: var(--sidebar-item-active); color: var(--text-primary); }
+.bubble-browser-recents { display: flex; max-width: 760px; margin: auto; gap: 12px; }
+.bubble-browser-recents button { display: flex; flex: 1; min-width: 0; flex-direction: column; align-items: center; gap: 14px; padding: 12px 4px; border-radius: 8px; color: var(--text-secondary); }
+.bubble-browser-recents button:hover { background: var(--sidebar-item-hover); }
+.bubble-browser-recents span { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.bubble-address-history { position: absolute; z-index: 90; top: calc(100% + 6px); left: 0; right: 0; padding: 4px; max-height: 320px; overflow-y: auto; border-radius: 12px; border: 1px solid var(--popover-border); background: var(--popover-bg); box-shadow: var(--popover-shadow); }
+.bubble-address-history button { display: flex; width: 100%; flex-direction: column; gap: 2px; padding: 8px 10px; border-radius: 6px; text-align: left; }
+.bubble-address-history button:hover, .bubble-address-history button[aria-selected='true'] { background: var(--sidebar-item-hover); }
+.bubble-address-history :is(span, small) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bubble-address-history span { font-size: 12px; color: var(--text-primary); }
+.bubble-address-history small { font-size: 11px; color: var(--text-muted); }
+
+.bubble-workspace-header {
+  position: relative;
+  z-index: 80;
+  display: flex;
+  flex: 0 0 40px;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 0 max(14px, calc(176px - var(--bubble-sidebar-width, 0px)));
+  color: var(--text-secondary);
+}
+.bubble-workspace-header-title { display: flex; flex: 1; min-width: 0; align-items: center; gap: 12px; }
+.bubble-workspace-header-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.bubble-header-button { display: inline-flex; width: 28px; height: 28px; align-items: center; justify-content: center; border-radius: 8px; color: var(--text-secondary); }
+.bubble-header-button:hover { background: var(--sidebar-item-hover); }
+.bubble-tab-count { display: grid; width: 14px; height: 14px; place-items: center; border: 1px solid currentColor; border-radius: 3px; font-size: 9px; line-height: 1; }
+.bubble-workspace-header [data-environment-summary] { right: -68px; margin-top: 16px; box-shadow: var(--popover-shadow); border: 1px solid var(--border); border-radius: 18px; }
+
+/* The title uses the space left by the fixed-width window controls. */
+.bubble-header-title-label { display: flex; flex: 1; align-items: center; min-width: 0; }
+
+/* Conversation chrome and utility tabs share one window-level row. */
+.bubble-workspace-header-chat { display: flex; flex: 1; min-width: 0; align-items: center; gap: 8px; }
+.bubble-workspace-header-tools { display: flex; flex: 0 0 auto; min-width: 0; align-items: center; gap: 6px; }
+.bubble-workspace-header[data-tools-visible] .bubble-workspace-header-tools { border-left: 1px solid var(--border); }
+.bubble-workspace-header-tabs { flex: 1; min-width: 0; overflow: hidden; }
+.bubble-workspace-header-tabs [data-workspace-tool-tabs] { background: transparent; padding: 0 4px; }
+.bubble-workspace-header[data-tools-visible] [data-environment-summary] { right: 0; }
+.bubble-workspace-header[data-full-view] .bubble-workspace-header-chat { flex: 0 1 260px; height: 32px; gap: 0; padding-right: 2px; border-radius: 8px; }
+.bubble-workspace-header[data-full-view] .bubble-workspace-header-chat[data-conversation-selected] { background: var(--sidebar-item-active); }
+.bubble-workspace-header[data-full-view] .bubble-workspace-header-tools { flex: 1; }
+
+.bubble-full-view-conversation-tab { display: flex; flex: 1; min-width: 0; align-items: center; gap: 8px; height: 32px; padding: 0 10px; border-radius: 8px; color: var(--text-muted); }
+.bubble-full-view-conversation-tab[aria-selected='true'] { color: var(--text-primary); }
+.bubble-full-view-conversation-tab span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.bubble-workspace-header[data-full-view] .bubble-workspace-header-tools { border-left: 0; }
+
 /* Markdown live preview keeps prose and editable source in one EditorView. */
 .bubble-md-live { --aegis-md-page-width: 100%; --aegis-md-page-padding-x: 16px; --aegis-md-prose-font-size: calc(14px * var(--ui-font-scale, 1)); }
 .bubble-md-live .aegis-md-codemirror-root .cm-activeLine { background: transparent; }

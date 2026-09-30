@@ -32,6 +32,11 @@ export type TabView =
 export interface AppTab {
   id: string;
   view: TabView;
+  /** Presentation state belongs to this page, while task data stays shared. */
+  board?: {
+    projectFilter: string;
+    scroll: Record<string, { left: number; top: number }>;
+  };
   /** Views visited in this tab, oldest first; `view` is `history[historyIndex]`. */
   history: TabView[];
   historyIndex: number;
@@ -102,6 +107,10 @@ interface TabsStore {
    * duplicate exists.
    */
   openTab: (view: TabView, options?: { background?: boolean }) => void;
+  newTab: () => void;
+  openWorkspace: (workspace: TabView['kind']) => void;
+  setBoardProjectFilter: (tabId: string, projectFilter: string) => void;
+  setBoardScroll: (tabId: string, key: string, left: number, top: number) => void;
   activateTab: (tabId: string) => void;
   closeTab: (tabId: string) => void;
   /** Record the app's current navigation state on the active tab. */
@@ -139,6 +148,53 @@ export const useTabsStore = create<TabsStore>()(
       return {
         tabs: [],
         activeTabId: null,
+
+        newTab: () => {
+          if (useAppStore.getState().activeWorkspace !== 'board') {
+            get().openTab({ kind: 'chat', sessionId: null });
+            return;
+          }
+          // Explicit new-page requests must bypass openTab's deduplication.
+          const tab = makeTab({ kind: 'board', taskId: null });
+          set({ tabs: [...get().tabs, tab], activeTabId: tab.id });
+          applyTabView(tab.view);
+        },
+
+        openWorkspace: (workspace) => {
+          const { tabs, activeTabId } = get();
+          const active = tabs.find((tab) => tab.id === activeTabId);
+          const app = useAppStore.getState();
+          const existing = active?.view.kind === workspace ? active :
+            tabs.find((tab) => workspace === 'chat' && tab.view.kind === 'chat' &&
+              tab.view.sessionId === app.activeSessionId) ??
+            tabs.find((tab) => tab.view.kind === workspace);
+          if (existing) {
+            set({ activeTabId: existing.id });
+            applyTabView(existing.view);
+          } else {
+            get().openTab(workspace === 'board' ? { kind: 'board', taskId: null } :
+              workspace === 'chat' ? { kind: 'chat', sessionId: app.showNewSession ? null : app.activeSessionId } :
+                { kind: workspace });
+          }
+        },
+
+        setBoardProjectFilter: (tabId, projectFilter) => set((state) => ({
+          tabs: state.tabs.map((tab) => tab.id === tabId
+            ? { ...tab, board: { projectFilter, scroll: {} } } : tab),
+        })),
+
+        setBoardScroll: (tabId, key, left, top) => {
+          const tab = get().tabs.find((entry) => entry.id === tabId);
+          const previous = tab?.board?.scroll[key];
+          if (!tab || (previous?.left === left && previous.top === top)) return;
+          set((state) => ({ tabs: state.tabs.map((entry) => entry.id === tabId ? {
+            ...entry,
+            board: {
+              projectFilter: entry.board?.projectFilter ?? 'all',
+              scroll: { ...entry.board?.scroll, [key]: { left, top } },
+            },
+          } : entry) }));
+        },
 
         openTab: (view, options) => {
           const { tabs } = get();

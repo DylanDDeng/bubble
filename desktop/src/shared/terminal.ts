@@ -58,6 +58,13 @@ export type TerminalCloseInput = TerminalThreadInput & {
   deleteHistory?: boolean;
 };
 
+/** Running child processes in a conversation's integrated terminals. */
+export type TerminalProcessSummary = {
+  terminalId: string;
+  pid: number;
+  agentKind: TerminalAgentKind;
+};
+
 export type TerminalSessionSnapshot = {
   threadId: string;
   terminalId: string;

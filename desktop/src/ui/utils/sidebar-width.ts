@@ -1,5 +1,5 @@
 export const MIN_SIDEBAR_WIDTH = 220;
-export const DEFAULT_SIDEBAR_WIDTH = 250;
+export const DEFAULT_SIDEBAR_WIDTH = 310;
 export const MAX_SIDEBAR_WIDTH = 420;
 export const SIDEBAR_WIDTH_VERSION = 9;
 
@@ -20,4 +20,12 @@ export function restorePersistedSidebarWidth(
     return sanitizeSidebarWidth(width, fallback);
   }
   return DEFAULT_SIDEBAR_WIDTH;
+}
+
+// Board preferences are independent of the conversation/sidebar preferences.
+export function selectSidebarCollapsed(state: { activeWorkspace: string; sidebarCollapsed: boolean; boardSidebarCollapsed: boolean }) {
+  return state.activeWorkspace === 'board' ? state.boardSidebarCollapsed : state.sidebarCollapsed;
+}
+export function selectSidebarWidth(state: { activeWorkspace: string; sidebarWidth: number; boardSidebarWidth: number }) {
+  return state.activeWorkspace === 'board' ? state.boardSidebarWidth : state.sidebarWidth;
 }

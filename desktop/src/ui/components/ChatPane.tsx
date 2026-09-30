@@ -1768,6 +1768,7 @@ export function ChatPane({
       className={`relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden transition-colors ${
         isActive ? 'bg-[var(--chat-pane-surface)]' : 'bg-[var(--chat-pane-surface-muted)]'
       }`}
+      data-chat-pane-active={isActive}
       onMouseDown={() => {
         if (!isActive && (sessionId || !onDropSession)) {
           onActivate();
@@ -1799,7 +1800,7 @@ export function ChatPane({
       ) : (
         <>
           {showHeader ? (
-            <div className="flex h-9 items-center justify-between bg-[var(--bg-primary)] px-3">
+            <div className="bubble-conversation-header flex h-9 items-center justify-between bg-[var(--bg-primary)] px-3">
               <div className="flex min-w-0 flex-1 items-center gap-2 text-[12px] text-[var(--text-secondary)]">
                 {session.handoffSourceProvider ? (
                   <SessionHandoffProviderRoute
@@ -1853,7 +1854,7 @@ export function ChatPane({
             </NewThreadLanding>
           ) : (
           <>
-          <div className="@container relative flex min-h-0 flex-1 flex-col">
+          <div data-chat-transcript className="@container relative flex min-h-0 flex-1 flex-col">
           {sessionId ? (
             <ComputerUseLiveHud
               sessionId={sessionId}

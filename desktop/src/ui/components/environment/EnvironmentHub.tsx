@@ -27,8 +27,11 @@ import { SubagentAvatar } from '../SubagentAvatar';
 import { Users } from '../icons';
 import type { Attachment } from '../../types';
 import { SourceRow } from '../SessionSourcesPanel';
-import { Paperclip } from '../icons';
+import { Paperclip, Plus, SquareTerminal } from '../icons';
+import { useAttachmentImport } from '../../hooks/useAttachmentImport';
+import { EnvironmentProcessesSection } from './EnvironmentProcessesSection';
 import * as DropdownMenu from '../ui/dropdown-menu';
+import { useBrowserNativeOverlayRegistration } from '../browser/browser-native-overlay';
 
 function EnvironmentListIcon() {
   return (
@@ -240,6 +243,7 @@ export function EnvironmentEditorPicker({ context }: { context: ActiveEnvironmen
       </div>
       <DropdownMenu.Portal>
         <DropdownMenu.Content
+          data-environment-hub-layer
           align="end"
           sideOffset={6}
           className="z-[9999] w-[200px] rounded-[14px] !border-0 bg-[var(--popover-bg)] [background-image:none] p-1.5 shadow-[0_18px_42px_-12px_rgba(15,23,42,0.16)]"
@@ -286,7 +290,11 @@ export function EnvironmentHub({
   sources = [],
   sourcesError = null,
   onOpenSources,
+  alwaysShow = false,
+  onOpenTerminal,
 }: {
+  alwaysShow?: boolean;
+  onOpenTerminal?: () => void;
   context: ActiveEnvironmentContext;
   git: GitEnvironmentState;
   onOpenProjectPanel: (view: 'files' | 'changes') => void;
@@ -296,6 +304,11 @@ export function EnvironmentHub({
 }) {
   const prs = useSessionPullRequests(context, git);
   const [open, setOpen] = useState(false);
+  useBrowserNativeOverlayRegistration(open);
+  const attachmentImport = useAttachmentImport(context.sessionId, context.isRunning, attachments => {
+    useAppStore.getState().requestChatInjection({ sessionId: context.sessionId, attachments, mode: 'append', source: 'environment-sources' });
+    setOpen(false);
+  });
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const overview = git.overview;
@@ -320,6 +333,8 @@ export function EnvironmentHub({
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       if (document.querySelector('[data-environment-hub-layer]')) return;
+      event.preventDefault();
+      event.stopPropagation();
       setOpen(false);
     };
     document.addEventListener('mousedown', handlePointerDown);
@@ -360,7 +375,7 @@ export function EnvironmentHub({
 
   // A plain directory has no Git environment to summarize. Other task
   // sections remain available independently when they contain information.
-  if (knownNonGit && !hasProjectFolders && !hasComputerUse && subagents.length === 0 && prs.items.length === 0 && !prs.error && !sources.length && !sourcesError) return null;
+  if (!alwaysShow && knownNonGit && !hasProjectFolders && !hasComputerUse && subagents.length === 0 && prs.items.length === 0 && !prs.error && !sources.length && !sourcesError) return null;
 
   return (
     <div className="relative">
@@ -386,13 +401,14 @@ export function EnvironmentHub({
         // utility panel shrinks the chat pane.
         <div
           ref={panelRef}
+          role="dialog" aria-label="Environment" data-environment-summary
           className="no-drag absolute right-0 top-full z-[70] mt-1.5 max-h-[min(680px,calc(100vh-64px))] w-[300px] max-w-[calc(100vw-24px)] overflow-hidden rounded-[20px] bg-[var(--popover-bg)] shadow-[var(--popover-shadow-lg)]"
         >
           <div className="scrollbar-slim max-h-[min(680px,calc(100vh-64px))] overflow-y-auto py-2.5">
-            {!knownNonGit ? <>
+            {(alwaysShow || !knownNonGit) ? <>
             <div className="flex items-center gap-2 px-3.5 pb-1">
               <div className="flex min-h-7 min-w-0 flex-1 items-center text-[12px] font-medium text-[var(--text-secondary)]">
-                Environment
+                <span className="truncate" title={context.effectiveCwd || undefined}>{context.effectiveCwd?.split(/[\\/]/).filter(Boolean).pop() || 'Workspace'}</span>
               </div>
               {!context.unavailableReason ? (
                 <DropdownMenu.Root modal={false}>
@@ -417,6 +433,15 @@ export function EnvironmentHub({
                         <Copy className="h-3.5 w-3.5 shrink-0 text-[var(--text-muted)]" />
                         <span>Copy workspace path</span>
                       </DropdownMenu.Item>
+                      {onOpenTerminal ? <>
+                        <DropdownMenu.Separator />
+                        <div className="flex items-center justify-between gap-4 px-2 py-1.5 text-xs text-[var(--text-secondary)]">
+                          <span>Open in editor</span><EnvironmentEditorPicker context={context} />
+                        </div>
+                        <DropdownMenu.Item onSelect={() => { onOpenTerminal(); setOpen(false); }} className="flex items-center gap-2">
+                          <SquareTerminal className="h-3.5 w-3.5" />Bottom terminal
+                        </DropdownMenu.Item>
+                      </> : null}
                       {overview.repository?.webUrl ? (
                         <DropdownMenu.Item
                           onSelect={() => void openRepository()}
@@ -441,17 +466,20 @@ export function EnvironmentHub({
               ) : (
                 <>
                   <section className="flex flex-col gap-0.5 px-1.5">
-                    {overview.hasRepo ? (
+                    {overview.hasRepo || alwaysShow ? (
                       <SectionRow
                         icon={FileDiff}
                         label="Changes"
+                        disabled={!overview.hasRepo}
+                        detail={knownNonGit ? 'Not a Git repo' : undefined}
+                        title={knownNonGit ? 'This workspace is not a Git repository.' : undefined}
                         onClick={() => onOpenProjectPanel('changes')}
-                        trailing={
+                        trailing={overview.hasRepo ? (
                           <span className="flex shrink-0 items-center gap-1 font-mono text-[11px] tabular-nums">
                             <span className="text-emerald-600">+{overview.insertions}</span>
                             <span className="text-[var(--error)]">-{overview.deletions}</span>
                           </span>
-                        }
+                        ) : null}
                       />
                     ) : null}
                     {overview.hasRepo && context.session && context.sessionId ? (
@@ -476,11 +504,16 @@ export function EnvironmentHub({
               )}
             </div>
             </> : null}
-            {(sources.length > 0 || sourcesError) && onOpenSources ? (
+            {alwaysShow ? <EnvironmentProcessesSection sessionId={context.sessionId} active={open} /> : null}
+            {(alwaysShow || sources.length > 0 || sourcesError) && onOpenSources ? (
               <section className="environment-summary-section" aria-label="Sources">
-                <div className="px-2 text-[11px] font-medium text-[var(--text-muted)]">Sources</div>
+                <div className="flex items-center justify-between px-2 text-[12px] text-[var(--text-muted)]">
+                  <span>Sources</span>
+                  {alwaysShow ? <button type="button" aria-label="Add sources" title="Attach files to your next message" disabled={!context.sessionId || context.isRunning || attachmentImport.isImporting} onClick={() => void attachmentImport.choose()} className="inline-flex h-6 w-6 items-center justify-center rounded-md hover:bg-[var(--sidebar-item-hover)] disabled:opacity-40"><Plus className="h-3.5 w-3.5" /></button> : null}
+                </div>
+                {!sources.length ? <p className="px-2 py-1 text-xs text-[var(--text-muted)]">{sourcesError || 'No attachments in this conversation.'}</p> : null}
                 {sources.slice(-3).map(source => <SourceRow key={source.path} source={source} onClick={() => { onOpenSources(source.path); setOpen(false); }} />)}
-                <button type="button" className="environment-summary-row w-full" onClick={() => { onOpenSources(null); setOpen(false); }}>
+                <button type="button" disabled={!context.sessionId} className="environment-summary-row w-full" onClick={() => { onOpenSources(null); setOpen(false); }}>
                   <Paperclip className="h-3.5 w-3.5 shrink-0" />
                   <span>View all{sources.length ? ` (${sources.length})` : ''}</span>
                 </button>
@@ -509,6 +542,7 @@ export function EnvironmentHub({
                 <EnvironmentSubagentSection session={context.session} summaries={subagents} onNavigate={() => setOpen(false)} />
               </>
             ) : null}
+
           </div>
         </div>
       ) : null}

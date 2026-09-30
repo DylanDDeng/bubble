@@ -1,8 +1,10 @@
+import { selectSidebarCollapsed, selectSidebarWidth } from '../utils/sidebar-width';
 import { shortcutLabel } from '../../shared/keyboard-shortcuts';
 import { useAppPreferences } from '../store/useAppPreferences';
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -15,6 +17,7 @@ import {
   Columns2,
   FolderOpen,
   GitPullRequest,
+  MessageSquare,
   Script,
   Search,
   Settings,
@@ -23,6 +26,7 @@ import {
 } from './icons';
 import { useAppStore } from '../store/useAppStore';
 import { useBoardStore } from '../store/useBoardStore';
+import { useTabsStore } from '../store/useTabsStore';
 import { SidebarSearchPalette } from './search/SidebarSearchPalette';
 import type {
   SidebarSearchAction,
@@ -34,19 +38,11 @@ import { CappedScrollbar } from './CappedScrollbar';
 import { DEFAULT_WORKSPACE_CHANNEL_ID } from '../../shared/types';
 import { getMessageContentBlocks } from '../utils/message-content';
 import { MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH } from '../utils/sidebar-width';
-import { SessionHistoryButtons } from './SessionHistoryButtons';
+import { animate, useMotionValue, useMotionValueEvent } from 'motion/react';
+import { useAppReducedMotion } from '../hooks/useAppReducedMotion';
 
 const SIDEBAR_TRIGGER_CLASS =
   'no-drag inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--text-secondary)] transition-[background-color,color,transform] duration-150 ease-[cubic-bezier(0.22,1,0.36,1)] hover:bg-[var(--sidebar-item-hover)] hover:text-[var(--text-primary)] active:scale-95';
-// Grace period before the hover-peek overlay collapses again, so the pointer
-// can travel between the collapsed-state trigger icon and the panel without
-// the peek flickering shut.
-const SIDEBAR_PEEK_CLOSE_DELAY_MS = 240;
-// Exit animation length for the hover-peek overlay. Must match the panel's
-// `duration-200` transition so the overlay only returns to the collapsed
-// (clipped) slot after it has fully faded out.
-const SIDEBAR_PEEK_ANIM_MS = 200;
-
 function SidebarToggleIcon({ className }: { className?: string }) {
   return (
     <svg
@@ -65,52 +61,23 @@ function SidebarToggleIcon({ className }: { className?: string }) {
   );
 }
 
-// Collapsing from the expanded panel's own trigger leaves the pointer resting
-// exactly where the collapsed trigger appears, and the browser reports that
-// as a fresh hover, so the panel would peek straight back open. Hold the peek
-// until the pointer has actually left the trigger; a keyboard collapse with
-// the pointer elsewhere releases on the first movement, so nothing is missed.
-let peekHeldUntilPointerLeaves = false;
-let releasePeekHold: (() => void) | null = null;
-
-function holdPeekUntilPointerLeaves() {
-  releasePeekHold?.();
-  peekHeldUntilPointerLeaves = true;
-  const release = () => {
-    peekHeldUntilPointerLeaves = false;
-    releasePeekHold = null;
-    document.removeEventListener('pointermove', handlePointerMove, true);
-  };
-  const handlePointerMove = (event: PointerEvent) => {
-    const target = event.target;
-    if (target instanceof Element && target.closest('[data-sidebar-trigger]')) return;
-    release();
-  };
-  releasePeekHold = release;
-  document.addEventListener('pointermove', handlePointerMove, true);
-}
-
 function SidebarToggleButton({
   collapsed,
   className = '',
   onClick,
-  onMouseEnter,
-  onMouseLeave,
 }: {
   collapsed: boolean;
   className?: string;
   onClick: () => void;
-  onMouseEnter?: () => void;
-  onMouseLeave?: () => void;
 }) {
   return (
     <button
       type="button"
       data-sidebar-trigger=""
       onClick={onClick}
-      onMouseEnter={onMouseEnter}
-      onMouseLeave={onMouseLeave}
       className={`${SIDEBAR_TRIGGER_CLASS} ${className}`}
+      aria-controls="bubble-project-sidebar"
+      aria-expanded={!collapsed}
       aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
       title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
     >
@@ -121,22 +88,14 @@ function SidebarToggleButton({
 }
 
 export function SidebarHeaderTrigger({ className = '' }: { className?: string }) {
-  const { sidebarCollapsed, setSidebarCollapsed, setSidebarPeek } = useAppStore();
+  const setSidebarCollapsed = useAppStore((state) => state.setSidebarCollapsed);
+  const sidebarCollapsed = useAppStore(selectSidebarCollapsed);
 
   return (
     <SidebarToggleButton
       collapsed={sidebarCollapsed}
       className={className}
       onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-      onMouseEnter={
-        sidebarCollapsed
-          ? () => {
-              if (peekHeldUntilPointerLeaves) return;
-              setSidebarPeek(true);
-            }
-          : undefined
-      }
-      onMouseLeave={sidebarCollapsed ? () => releasePeekHold?.() : undefined}
     />
   );
 }
@@ -144,16 +103,12 @@ export function SidebarHeaderTrigger({ className = '' }: { className?: string })
 export function Sidebar() {
   const {
     activeSessionId,
-    sidebarCollapsed,
-    sidebarPeek,
-    sidebarWidth,
     projectCwd,
     activeChannelByProject,
     sessions,
     activeWorkspace,
     chatLayoutMode,
     setChatLayoutMode,
-    setSidebarCollapsed,
     setSidebarWidth,
     setChatSidebarView,
     setProjectCwd,
@@ -162,14 +117,39 @@ export function Sidebar() {
     setActiveWorkspace,
     setShowNewSession,
     setShowSettings,
-    setSidebarPeek,
     createDraftSession,
     searchPaletteOpen,
     setSearchPaletteOpen,
     sidebarActivityView,
     toggleSidebarActivityView,
   } = useAppStore();
+  const sidebarCollapsed = useAppStore(selectSidebarCollapsed);
+  const sidebarWidth = useAppStore(selectSidebarWidth);
+  const keepRailVisible = activeWorkspace === 'board' && sidebarCollapsed;
   const [isSidebarResizing, setIsSidebarResizing] = useState(false);
+  const sidebarShellRef = useRef<HTMLDivElement>(null);
+  const reducedMotion = useAppReducedMotion();
+  const closedWidth = activeWorkspace === 'board' ? 44 : 0;
+  const expandedWidth = sidebarWidth + 44;
+  const targetWidth = sidebarCollapsed ? closedWidth : expandedWidth;
+  const animatedWidth = useMotionValue(targetWidth);
+  // One motion value drives layout, content visibility and titlebar clearance.
+  // Keep it alive across toggles so a reversal starts at the current position.
+  const syncSidebarMotion = useCallback((width: number) => {
+    const shell = sidebarShellRef.current?.closest<HTMLElement>('.aegis-window-shell');
+    shell?.style.setProperty('--bubble-sidebar-width', `${Math.max(0, width)}px`);
+    shell?.style.setProperty('--bubble-sidebar-opacity', `${Math.max(0, Math.min(1, (width - closedWidth) / (expandedWidth - closedWidth)))}`);
+  }, [closedWidth, expandedWidth]);
+  useMotionValueEvent(animatedWidth, 'change', syncSidebarMotion);
+  useLayoutEffect(() => {
+    syncSidebarMotion(animatedWidth.get());
+    if (isSidebarResizing || reducedMotion) {
+      animatedWidth.jump(targetWidth);
+      return;
+    }
+    const animation = animate(animatedWidth, targetWidth, { type: 'spring', duration: 0.3, bounce: 0.1 });
+    return () => animation.stop();
+  }, [animatedWidth, targetWidth, isSidebarResizing, reducedMotion, syncSidebarMotion]);
   const sidebarResizingRef = useRef(false);
   const sidebarScrollRef = useRef<HTMLDivElement>(null);
   const startXRef = useRef(0);
@@ -237,89 +217,6 @@ export function Sidebar() {
     };
   }, []);
 
-  // Hover-peek: while collapsed, hovering the header trigger floats the panel
-  // open as an overlay (layout stays collapsed); leaving the panel closes it
-  // after a short grace period.
-  //
-  // The phase machine exists so the CLOSE also animates: flipping straight
-  // back from `fixed` to the collapsed slot would clip the panel instantly
-  // (parent width 0 + overflow hidden) and the fade-out would never be seen.
-  // Instead the overlay stays mounted while it animates out ('closing'), and
-  // only returns to the clipped slot ('closed') once it is fully transparent.
-  type PeekPhase = 'closed' | 'open' | 'closing';
-  const [peekPhase, setPeekPhase] = useState<PeekPhase>('closed');
-  const peekOverlayActive = sidebarCollapsed && peekPhase !== 'closed';
-  const peekVisible = sidebarCollapsed && peekPhase === 'open';
-  const sidebarHidden = sidebarCollapsed && !peekOverlayActive;
-  const peekCloseTimerRef = useRef<number | null>(null);
-
-  const cancelScheduledPeekClose = useCallback(() => {
-    if (peekCloseTimerRef.current === null) return;
-    window.clearTimeout(peekCloseTimerRef.current);
-    peekCloseTimerRef.current = null;
-  }, []);
-
-  const schedulePeekClose = useCallback(() => {
-    cancelScheduledPeekClose();
-    peekCloseTimerRef.current = window.setTimeout(() => {
-      peekCloseTimerRef.current = null;
-      setSidebarPeek(false);
-    }, SIDEBAR_PEEK_CLOSE_DELAY_MS);
-  }, [cancelScheduledPeekClose, setSidebarPeek]);
-
-  // Re-entering the overlay cancels a pending (or in-flight) close: cancel
-  // the grace timer and restore the hover-intent flag, which flips a
-  // 'closing' phase straight back to 'open'.
-  const handlePeekOverlayMouseEnter = useCallback(() => {
-    cancelScheduledPeekClose();
-    if (!useAppStore.getState().sidebarPeek) setSidebarPeek(true);
-  }, [cancelScheduledPeekClose, setSidebarPeek]);
-
-  // Hover intent (store flag) drives the phase machine: open immediately,
-  // run the exit animation when the intent drops.
-  useEffect(() => {
-    if (sidebarPeek) {
-      setPeekPhase('open');
-    } else {
-      setPeekPhase((phase) => (phase === 'open' ? 'closing' : phase));
-    }
-  }, [sidebarPeek]);
-
-  // Finish the exit animation before returning the panel to the collapsed
-  // slot — it is already opacity-0 by then, so there is no visual pop.
-  useEffect(() => {
-    if (peekPhase !== 'closing') return;
-    const timer = window.setTimeout(() => setPeekPhase('closed'), SIDEBAR_PEEK_ANIM_MS);
-    return () => window.clearTimeout(timer);
-  }, [peekPhase]);
-
-  // Expanding for real (leaving the collapsed state) ends any peek phase.
-  useEffect(() => {
-    if (!sidebarCollapsed) setPeekPhase('closed');
-  }, [sidebarCollapsed]);
-
-  // Mouse-leave can't cover alt-tab: also fold the peek when the window
-  // itself loses focus while the pointer rests inside the overlay.
-  useEffect(() => {
-    if (!(sidebarCollapsed && sidebarPeek)) return;
-    const handleWindowBlur = () => setSidebarPeek(false);
-    window.addEventListener('blur', handleWindowBlur);
-    return () => window.removeEventListener('blur', handleWindowBlur);
-  }, [sidebarCollapsed, sidebarPeek, setSidebarPeek]);
-
-  // Never leave the transient peek latched: drop the pending close timer and
-  // reset the flag when the sidebar unmounts (e.g. entering Settings).
-  useEffect(() => {
-    return () => {
-      if (peekCloseTimerRef.current !== null) {
-        window.clearTimeout(peekCloseTimerRef.current);
-        peekCloseTimerRef.current = null;
-      }
-      const state = useAppStore.getState();
-      if (state.sidebarPeek) state.setSidebarPeek(false);
-    };
-  }, []);
-
   const handleProjectFolderSelect = async () => {
     const selected = await window.electron.selectDirectory();
     if (!selected) return;
@@ -327,12 +224,6 @@ export function Sidebar() {
     setActiveChannelForProject(selected, DEFAULT_WORKSPACE_CHANNEL_ID);
     setShowSettings(false);
     createDraftSession(selected, DEFAULT_WORKSPACE_CHANNEL_ID);
-  };
-
-  const toggleSidebarCollapsed = () => {
-    finishSidebarResize();
-    if (!sidebarCollapsed) holdPeekUntilPointerLeaves();
-    setSidebarCollapsed(!sidebarCollapsed);
   };
 
   const shortcuts = useAppPreferences(state => state.keyboardShortcuts);
@@ -513,11 +404,42 @@ export function Sidebar() {
     setShowSettings(false);
   };
 
-  const openSkillWorkspace = () => {
-    setActiveWorkspace('skills');
-    setChatSidebarView('threads');
-    setShowSettings(false);
-  };
+  const workspaceRail = (
+            <nav className="bubble-workspace-rail z-30" aria-label="Workspaces">
+              {([
+                { id: 'chat', label: 'Chats', icon: MessageSquare },
+                { id: 'automations', label: 'Automations', icon: Clock },
+                { id: 'skills', label: 'Skill Library', icon: Script },
+                { id: 'board', label: 'KanBan', icon: Columns2 },
+                { id: 'prs', label: 'Pull Requests', icon: GitPullRequest },
+              ] as const).map(({ id, label, icon: Icon }) => (
+                <button
+                  key={id}
+                  type="button"
+                  className="bubble-workspace-rail-button no-drag"
+                  aria-label={label}
+                  title={label}
+                  aria-pressed={activeWorkspace === id}
+                  onClick={() => {
+                    if (id === 'board' || activeWorkspace === 'board') {
+                      useTabsStore.getState().openWorkspace(id);
+                    } else {
+                      setActiveWorkspace(id);
+                    }
+                    setChatSidebarView('threads');
+                    setShowSettings(false);
+                  }}
+                >
+                  <Icon className="h-[18px] w-[18px]" strokeWidth={1.5} />
+                  {id === 'board' && boardReviewCount > 0 ? <span className="bubble-workspace-rail-dot" /> : null}
+                </button>
+              ))}
+              <div className="flex-1" />
+              <button type="button" className="bubble-workspace-rail-button no-drag" aria-label="Settings" title="Settings" onClick={() => setShowSettings(true)}>
+                <Settings className="h-[18px] w-[18px]" strokeWidth={1.5} />
+              </button>
+            </nav>
+  );
 
   return (
     <>
@@ -529,41 +451,27 @@ export function Sidebar() {
         />
       )}
 
-      <div className="aegis-sidebar relative flex h-full min-h-0 flex-shrink-0 self-stretch select-none">
+      <div ref={sidebarShellRef} className="aegis-sidebar relative flex h-full min-h-0 flex-shrink-0 self-stretch select-none" data-board-rail-only={keepRailVisible || undefined}>
+        <div className="absolute inset-y-0 left-0 z-30 w-11"
+          style={{ opacity: activeWorkspace === 'board' ? 1 : 'var(--bubble-sidebar-opacity)' }}
+          inert={sidebarCollapsed && !keepRailVisible} aria-hidden={sidebarCollapsed && !keepRailVisible}>
+          {workspaceRail}
+        </div>
         <div
-          className="relative flex h-full min-h-0 flex-shrink-0 self-stretch overflow-hidden transition-[width] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
-          style={{ width: sidebarCollapsed ? 0 : sidebarWidth }}
+          className="relative flex h-full min-h-0 flex-shrink-0 self-stretch overflow-hidden"
+          style={{ width: 'var(--bubble-sidebar-width)' }}
         >
           <div
-            className={`${
-                peekOverlayActive
-                  ? // Hover-peek overlay: the sidebar stays collapsed in layout
-                    // while the panel floats above the chat surface. z-[80]
-                    // sits above panel surfaces/resize shields (z-20/z-[70])
-                    // but below the modal layer band (z-[90]+). Kept `fixed`
-                    // during 'closing' so the fade-out transition is visible.
-                    'fixed bottom-0 left-0 top-0 z-[80] rounded-r-[12px] shadow-[24px_0_60px_rgba(15,23,42,0.18)]'
-                  : 'relative h-full'
-              } flex min-h-0 flex-col overflow-hidden bg-[var(--app-sidebar-surface)] transition-[opacity,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] ${
-                peekVisible || !sidebarCollapsed
-                  ? 'translate-x-0 opacity-100'
-                  : '-translate-x-2 opacity-0'
-              }${sidebarHidden ? ' pointer-events-none' : ''}`}
-            style={{ width: sidebarWidth, minWidth: sidebarWidth, backdropFilter: 'var(--app-sidebar-backdrop-filter)', WebkitBackdropFilter: 'var(--app-sidebar-backdrop-filter)' }}
-            aria-hidden={sidebarHidden}
-            onMouseEnter={peekOverlayActive ? handlePeekOverlayMouseEnter : undefined}
-            onMouseLeave={peekOverlayActive ? schedulePeekClose : undefined}
+            id="bubble-project-sidebar"
+            className={`relative h-full flex min-h-0 flex-col overflow-hidden bg-[var(--app-sidebar-surface)] ${sidebarCollapsed ? 'pointer-events-none' : ''}`}
+            style={{ opacity: 'var(--bubble-sidebar-opacity)', width: expandedWidth, minWidth: expandedWidth, backdropFilter: 'var(--app-sidebar-backdrop-filter)', WebkitBackdropFilter: 'var(--app-sidebar-backdrop-filter)' }}
+            aria-hidden={sidebarCollapsed}
+            inert={sidebarCollapsed}
           >
-            <div className="drag-region flex h-12 flex-shrink-0 items-center gap-0.5 pl-[84px] pr-2">
-              <SidebarToggleButton
-                collapsed={sidebarCollapsed}
-                onClick={toggleSidebarCollapsed}
-              />
-              <SessionHistoryButtons />
-            </div>
+            <div className="drag-region h-10 flex-shrink-0 ml-[176px]" aria-hidden="true" />
 
-            <div className="flex min-h-0 flex-1 flex-col">
-              <div className="flex items-center justify-between px-3 pb-2 pt-1">
+            <div className="bubble-sidebar-content flex min-h-0 flex-1 flex-col">
+              <div className="flex items-center justify-between px-4 pb-2 pt-3">
                 <div className="aegis-sidebar-brand font-semibold leading-none tracking-[-0.04em] text-[var(--text-primary)]">
                   Bubble
                 </div>
@@ -617,47 +525,6 @@ export function Sidebar() {
                   className="sidebar-scrollbar h-full overflow-y-auto overflow-x-hidden px-2"
                   data-sidebar-scroll-region
                 >
-                  <div className="pb-2 pt-0.5">
-                    <div className="space-y-0.5">
-                      <SidebarNavRow
-                        icon={<Columns2 className="h-[15px] w-[15px]" />}
-                        label="KanBan"
-                        active={activeWorkspace === 'board'}
-                        onClick={() => {
-                          setActiveWorkspace('board');
-                          setChatSidebarView('threads');
-                          setShowSettings(false);
-                        }}
-                      />
-                      <SidebarNavRow
-                        icon={<Clock className="h-[15px] w-[15px]" />}
-                        label="Automations"
-                        active={activeWorkspace === 'automations'}
-                        onClick={() => {
-                          setActiveWorkspace('automations');
-                          setChatSidebarView('threads');
-                          setShowSettings(false);
-                        }}
-                      />
-                      <SidebarNavRow
-                        icon={<GitPullRequest className="h-[15px] w-[15px]" />}
-                        label="Pull Requests"
-                        active={activeWorkspace === 'prs'}
-                        onClick={() => {
-                          setActiveWorkspace('prs');
-                          setChatSidebarView('threads');
-                          setShowSettings(false);
-                        }}
-                      />
-                      <SidebarNavRow
-                        icon={<Script className="h-[15px] w-[15px]" />}
-                        label="Skill Library"
-                        active={activeWorkspace === 'skills'}
-                        onClick={openSkillWorkspace}
-                      />
-                    </div>
-                  </div>
-
                   <div className="pt-3">
                     <FolderTreeView
                       onSessionClick={(sessionId, options) => {
@@ -687,17 +554,6 @@ export function Sidebar() {
                 <CappedScrollbar scrollRef={sidebarScrollRef} />
               </div>
 
-              <div className="px-2 py-2">
-                <button
-                  type="button"
-                  onClick={() => setShowSettings(true)}
-                  className="flex h-8 w-full min-w-0 items-center gap-2 rounded-lg px-2 text-left text-[var(--text-secondary)] transition-colors duration-150 hover:bg-[var(--sidebar-item-hover)] hover:text-[var(--text-primary)]"
-                  aria-label="Settings"
-                >
-                  <Settings className="h-[15px] w-[15px] text-[var(--text-muted)]" />
-                  <span className="truncate text-[13px] font-normal">Settings</span>
-                </button>
-              </div>
             </div>
           </div>
 

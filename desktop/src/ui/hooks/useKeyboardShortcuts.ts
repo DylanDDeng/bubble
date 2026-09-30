@@ -1,3 +1,4 @@
+import { selectSidebarCollapsed } from '../utils/sidebar-width';
 import { useEffect, useRef } from 'react';
 import { useAppStore } from '../store/useAppStore';
 import { useTabsStore } from '../store/useTabsStore';
@@ -16,6 +17,7 @@ export function useKeyboardShortcuts() {
       if (event.key === 'Escape') {
         if (state.searchPaletteOpen) state.setSearchPaletteOpen(false);
         else if (state.inSessionSearchOpen) state.closeInSessionSearch();
+        else if (state.rightPanelFullscreen) { event.preventDefault(); state.setRightPanelFullscreen(null); }
         else if (document.activeElement === sidebarSearchRef.current) sidebarSearchRef.current?.blur();
         return;
       }
@@ -33,14 +35,14 @@ export function useKeyboardShortcuts() {
       event.preventDefault();
       switch (id) {
         case 'search': state.toggleSearchPalette(); break;
-        case 'sidebar': state.setSidebarCollapsed(!state.sidebarCollapsed); break;
+        case 'sidebar': state.setSidebarCollapsed(!selectSidebarCollapsed(state)); break;
         case 'activity': state.toggleSidebarActivityView(); break;
         case 'back': tabs.goBack(); break;
         case 'forward': tabs.goForward(); break;
         case 'settings': state.setShowSettings(true); break;
         case 'newTask': state.setShowNewSession(true); break;
         case 'find': state.openInSessionSearch(); break;
-        case 'newTab': tabs.openTab({ kind: 'chat', sessionId: null }); break;
+        case 'newTab': tabs.newTab(); break;
         case 'closeTab': tabs.closeTab(tabs.activeTabId!); break;
         case 'nextTab':
         case 'previousTab': {

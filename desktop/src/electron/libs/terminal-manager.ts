@@ -13,6 +13,7 @@ import type {
   TerminalCloseInput,
   TerminalEvent,
   TerminalOpenInput,
+  TerminalProcessSummary,
   TerminalOpenResult,
   TerminalResizeInput,
   TerminalRestartInput,
@@ -765,6 +766,13 @@ export class TerminalManager {
       clearInterval(this.subprocessPollTimer);
       this.subprocessPollTimer = null;
     }
+  }
+
+  listProcesses(threadId: string): TerminalProcessSummary[] {
+    if (typeof threadId !== 'string' || !threadId.trim()) return [];
+    return [...this.sessions.values()]
+      .filter(session => session.threadId === threadId && session.status === 'running' && session.hasRunningSubprocess)
+      .map(session => ({ terminalId: session.terminalId, pid: session.process.pid, agentKind: session.agentKind }));
   }
 
   getSnapshot(rawInput: unknown): TerminalSessionSnapshot | null {

@@ -99,6 +99,7 @@ declare global {
     sendClientEvent: (event: ClientEvent) => void;
     onTerminalEvent: (callback: (event: TerminalEventPayload) => void) => () => void;
     terminal: {
+      listProcesses: (threadId: string) => Promise<import('./shared/terminal').TerminalProcessSummary[]>;
       open: (input: TerminalOpenInput) => Promise<TerminalOpenResult>;
       write: (input: TerminalWriteInput) => Promise<{ ok: boolean; message?: string }>;
       resize: (input: TerminalResizeInput) => Promise<{ ok: boolean; message?: string }>;

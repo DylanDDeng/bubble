@@ -2,8 +2,6 @@ import { useAppPreferences } from '../store/useAppPreferences';
 import { shortcutLabel } from '../../shared/keyboard-shortcuts';
 import { Clock, Columns2, GitPullRequest, MessageSquare, Plus, Script, X } from './icons';
 import { AgentIcon } from './ComposerAgentControls';
-import { SidebarHeaderTrigger } from './Sidebar';
-import { SessionHistoryButtons } from './SessionHistoryButtons';
 import { StageIcon } from './board-support';
 import { useAppStore } from '../store/useAppStore';
 import { useBoardStore } from '../store/useBoardStore';
@@ -19,23 +17,16 @@ export function AppTabBar() {
   const activeTabId = useTabsStore((state) => state.activeTabId);
   const activateTab = useTabsStore((state) => state.activateTab);
   const closeTab = useTabsStore((state) => state.closeTab);
-  const openTab = useTabsStore((state) => state.openTab);
-  const sidebarCollapsed = useAppStore((state) => state.sidebarCollapsed);
+  const newTab = useTabsStore((state) => state.newTab);
+  const isBoard = useAppStore((state) => state.activeWorkspace === 'board');
 
   const shortcuts = useAppPreferences(state => state.keyboardShortcuts);
 
   return (
     <div
-      className={`drag-region flex flex-shrink-0 items-center gap-1 pr-2 ${
-        sidebarCollapsed ? 'h-11 pl-[76px]' : 'h-9 pl-2'
-      }`}
+      className="bubble-window-tabs relative flex h-10 flex-shrink-0 items-center gap-1 pr-2"
     >
-      {sidebarCollapsed ? (
-        <div className="no-drag mr-1 flex items-center">
-          <SidebarHeaderTrigger />
-          <SessionHistoryButtons />
-        </div>
-      ) : null}
+      <div className="bubble-titlebar-drag-area drag-region" aria-hidden="true" />
       {/* Tabs are equal-width, Chrome-style: each wants 220px, they shrink
           together down to a floor, and only then does the strip scroll. The
           strip itself is content-sized so the "+" hugs the last tab. */}
@@ -56,9 +47,9 @@ export function AppTabBar() {
       </div>
       <button
         type="button"
-        onClick={() => openTab({ kind: 'chat', sessionId: null })}
-        title={['New tab', shortcutLabel('newTab', shortcuts)].filter(Boolean).join(' · ')}
-        aria-label="New tab"
+        onClick={newTab}
+        title={[isBoard ? 'New Kanban tab' : 'New tab', shortcutLabel('newTab', shortcuts)].filter(Boolean).join(' · ')}
+        aria-label={isBoard ? 'New Kanban tab' : 'New tab'}
         className="no-drag inline-flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md text-[var(--text-muted)] transition-colors hover:bg-[var(--sidebar-item-hover)] hover:text-[var(--text-primary)]"
       >
         <Plus className="h-3.5 w-3.5" />
@@ -85,6 +76,7 @@ function TabItem({
   return (
     <div
       role="tab"
+      data-app-tab-id={tab.id}
       aria-selected={active}
       tabIndex={0}
       onMouseDown={(event) => {
@@ -139,6 +131,9 @@ function useTabDescriptor(tab: AppTab): { icon: ReactNode; title: string } {
   const task = useBoardStore((state) =>
     view.kind === 'board' && view.taskId ? state.tasks[view.taskId] : undefined
   );
+  const boardNumber = useTabsStore((state) =>
+    state.tabs.filter((entry) => entry.view.kind === 'board').findIndex((entry) => entry.id === tab.id) + 1
+  );
 
   if (view.kind === 'board') {
     if (view.taskId) {
@@ -147,7 +142,9 @@ function useTabDescriptor(tab: AppTab): { icon: ReactNode; title: string } {
         title: task?.title || 'Task',
       };
     }
-    return { icon: <Columns2 className="h-3.5 w-3.5" />, title: 'Board' };
+    const project = tab.board?.projectFilter ?? 'all';
+    const label = project === 'all' ? 'All Projects' : project.split(/[\\/]/).filter(Boolean).pop() || 'No Project';
+    return { icon: <Columns2 className="h-3.5 w-3.5" />, title: `Kanban ${boardNumber} · ${label}` };
   }
   if (view.kind === 'chat') {
     if (view.sessionId) {

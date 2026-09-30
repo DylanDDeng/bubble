@@ -85,6 +85,7 @@ import {
   isRightUtilityBrowserTab,
   isRightUtilityFileTab,
   resolveRightUtilityTabOpen,
+  resolveRightUtilityFullscreen,
   resolveProjectFileUtilityTab,
   resolveRightUtilityTabOpenPreservingActive,
 } from '../utils/right-utility-tabs';
@@ -814,7 +815,8 @@ export const useAppStore = create<Store>()(
       showNewSession: initialUiResumeState?.showNewSession ?? true,
       newSessionKey: 0,
       sidebarCollapsed: false,
-      sidebarPeek: false,
+      boardSidebarCollapsed: true,
+      boardSidebarWidth: DEFAULT_SIDEBAR_WIDTH,
       sidebarActivityView: false,
       sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
       sidebarWidthVersion: SIDEBAR_WIDTH_VERSION,
@@ -1775,16 +1777,16 @@ export const useAppStore = create<Store>()(
     persistUiResumeStateSnapshot(get());
   },
 
-  setSidebarCollapsed: (collapsed) => set({ sidebarCollapsed: collapsed, sidebarPeek: false }),
-
-  setSidebarPeek: (open) => set({ sidebarPeek: open }),
+  setSidebarCollapsed: (collapsed) => set(state => state.activeWorkspace === 'board'
+    ? { boardSidebarCollapsed: collapsed }
+    : { sidebarCollapsed: collapsed }),
 
   toggleSidebarActivityView: () =>
     set((state) => ({ sidebarActivityView: !state.sidebarActivityView })),
 
-  setSidebarWidth: (width) => set((state) => ({
-    sidebarWidth: sanitizeSidebarWidth(width, state.sidebarWidth),
-  })),
+  setSidebarWidth: (width) => set(state => state.activeWorkspace === 'board'
+    ? { boardSidebarWidth: sanitizeSidebarWidth(width, state.boardSidebarWidth) }
+    : { sidebarWidth: sanitizeSidebarWidth(width, state.sidebarWidth) }),
 
   setProjectCwd: (cwd) => {
     set({ projectCwd: cwd });
@@ -1845,7 +1847,7 @@ export const useAppStore = create<Store>()(
   setActiveRightUtilityTab: (target) => {
     set((state) => ({
       activeRightUtilityTab: target,
-      rightPanelFullscreen: state.rightPanelFullscreen === 'images' && !target?.startsWith('images:') ? null : state.rightPanelFullscreen,
+      rightPanelFullscreen: resolveRightUtilityFullscreen(state.rightPanelFullscreen, target),
       rightUtilityTabs: target ? addRightUtilityTab(state.rightUtilityTabs, target) : state.rightUtilityTabs,
       rightUtilityPanelHidden: target ? false : state.rightUtilityPanelHidden,
     }));
@@ -1875,14 +1877,6 @@ export const useAppStore = create<Store>()(
         patch.projectPanelView = activeKind === 'review' ? 'changes' : 'files';
         patch.projectTreeCollapsed = false;
         patch.browserPanelOpen = false;
-        patch.rightPanelFullscreen =
-          (state.rightPanelFullscreen === 'browser' || state.rightPanelFullscreen === 'images')
-            ? null
-            : state.rightPanelFullscreen === 'files' && activeKind === 'review'
-              ? 'review'
-              : state.rightPanelFullscreen === 'review' && activeKind === 'files'
-                ? 'files'
-                : state.rightPanelFullscreen;
       } else if (activeKind === 'browser') {
         patch.browserPanelOpen = true;
         patch.projectTreeCollapsed = true;
@@ -1891,6 +1885,8 @@ export const useAppStore = create<Store>()(
         patch.projectTreeCollapsed = true;
         patch.rightPanelFullscreen = null;
       }
+
+      patch.rightPanelFullscreen = resolveRightUtilityFullscreen(state.rightPanelFullscreen, opened.activeTab);
 
       return patch;
     });
@@ -2031,17 +2027,7 @@ export const useAppStore = create<Store>()(
         patch.rightPanelFullscreen = null;
         patch.rightUtilityPanelHidden = false;
       }
-      const targetKind = getRightUtilityTabKind(target);
-      if (targetKind === 'images' && state.rightPanelFullscreen === 'images') patch.rightPanelFullscreen = null;
-      if (targetKind === 'browser' && state.rightPanelFullscreen === 'browser') {
-        patch.rightPanelFullscreen = null;
-      }
-      if (targetKind === 'files' && state.rightPanelFullscreen === 'files') {
-        patch.rightPanelFullscreen = null;
-      }
-      if (targetKind === 'review' && state.rightPanelFullscreen === 'review') {
-        patch.rightPanelFullscreen = null;
-      }
+      patch.rightPanelFullscreen = resolveRightUtilityFullscreen(state.rightPanelFullscreen, nextActiveTab);
 
       return patch;
     });
@@ -2239,6 +2225,14 @@ export const useAppStore = create<Store>()(
   },
 
   setRightPanelFullscreen: (target) => {
+    if (target === 'review') {
+      set(state => ({
+        rightPanelFullscreen: 'review', rightUtilityPanelHidden: false,
+        projectTreeCollapsed: false, projectPanelView: 'changes', browserPanelOpen: false,
+        rightUtilityTabs: addRightUtilityTab(state.rightUtilityTabs, 'review'), activeRightUtilityTab: 'review',
+      }));
+      return;
+    }
     if (target === 'images') {
       set({ rightPanelFullscreen: 'images', rightUtilityPanelHidden: false, browserPanelOpen: false });
       return;
@@ -2263,7 +2257,7 @@ export const useAppStore = create<Store>()(
     }
     if (target === 'files') {
       set((state) => {
-        const opened = resolveRightUtilityTabOpen(state.rightUtilityTabs, 'files');
+        const opened = resolveRightUtilityTabOpenPreservingActive(state.rightUtilityTabs, 'files', state.activeRightUtilityTab);
         return {
           rightPanelFullscreen: 'files',
           projectTreeCollapsed: false,
@@ -2666,6 +2660,8 @@ export const useAppStore = create<Store>()(
         chatPanes: state.chatPanes,
         chatSplitRatio: state.chatSplitRatio,
         sidebarCollapsed: state.sidebarCollapsed,
+        boardSidebarCollapsed: state.boardSidebarCollapsed,
+        boardSidebarWidth: state.boardSidebarWidth,
         sidebarActivityView: state.sidebarActivityView,
         sidebarWidth: state.sidebarWidth,
         sidebarWidthVersion: state.sidebarWidthVersion,
@@ -2707,6 +2703,8 @@ export const useAppStore = create<Store>()(
           chatPanes?: Record<ChatPaneId, ChatPaneState>;
           chatSplitRatio?: number;
           sidebarCollapsed?: boolean;
+          boardSidebarCollapsed?: boolean;
+          boardSidebarWidth?: number;
           sidebarActivityView?: boolean;
           sidebarWidth?: number;
           sidebarWidthVersion?: number;
@@ -2793,6 +2791,8 @@ export const useAppStore = create<Store>()(
           chatPanes,
           chatSplitRatio: derivedPaneFields.chatSplitRatio,
           sidebarCollapsed: persisted?.sidebarCollapsed ?? currentState.sidebarCollapsed,
+          boardSidebarCollapsed: persisted?.boardSidebarCollapsed ?? true,
+          boardSidebarWidth: sanitizeSidebarWidth(persisted?.boardSidebarWidth),
           sidebarActivityView: persisted?.sidebarActivityView ?? currentState.sidebarActivityView,
           sidebarWidth: restorePersistedSidebarWidth(
             persisted?.sidebarWidth,

@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -67,6 +68,12 @@ import { createBoardTaskStartPayload } from '../utils/board-task-start';
 import { toBubblePlanExitMode } from '../utils/bubble-permission';
 
 export function BoardView() {
+  const tabId = useTabsStore((state) => state.activeTabId);
+  return <BoardPage key={tabId} tabId={tabId} />;
+}
+
+function BoardPage({ tabId }: { tabId: string | null }) {
+  const pageRef = useRef<HTMLDivElement>(null);
   const sessions = useAppStore((state) => state.sessions);
   const currentProjectCwd = useAppStore((state) => state.projectCwd);
   const activeChannelByProject = useAppStore((state) => state.activeChannelByProject);
@@ -80,7 +87,10 @@ export function BoardView() {
   const removeTask = useBoardStore((state) => state.removeTask);
   const markSeen = useBoardStore((state) => state.markSeen);
 
-  const [projectFilter, setProjectFilter] = useState<string | 'all'>('all');
+  const projectFilter = useTabsStore((state) => state.tabs.find((tab) => tab.id === tabId)?.board?.projectFilter ?? 'all');
+  const setProjectFilter = (filter: string) => {
+    if (tabId) useTabsStore.getState().setBoardProjectFilter(tabId, filter);
+  };
   // Lifted to the store so app tabs can bookmark and restore the open task.
   const selectedTaskId = useBoardStore((state) => state.selectedTaskId);
   const setSelectedTaskId = useBoardStore((state) => state.setSelectedTask);
@@ -98,6 +108,15 @@ export function BoardView() {
   const [dragOverStage, setDragOverStage] = useState<BoardStage | null>(null);
   // Card right-click menu — Edit/Remove live here, not in the detail page.
   const [cardMenu, setCardMenu] = useState<{ taskId: string; x: number; y: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const scroll = useTabsStore.getState().tabs.find((tab) => tab.id === tabId)?.board?.scroll;
+    pageRef.current?.querySelectorAll<HTMLElement>('[data-board-scroll]').forEach((element) => {
+      const position = scroll?.[element.dataset.boardScroll!];
+      element.scrollLeft = position?.left ?? 0;
+      element.scrollTop = position?.top ?? 0;
+    });
+  }, [tabId, selectedTaskId, projectFilter]);
 
   useEffect(() => {
     if (!cardMenu) return;
@@ -327,7 +346,11 @@ export function BoardView() {
   };
 
   return (
-    <div className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-[var(--chat-pane-surface)]">
+    <div ref={pageRef} data-board-page={tabId} onScrollCapture={(event) => {
+      const element = event.target as HTMLElement;
+      const key = element.dataset.boardScroll;
+      if (tabId && key) useTabsStore.getState().setBoardScroll(tabId, key, element.scrollLeft, element.scrollTop);
+    }} className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-[var(--chat-pane-surface)]">
 
       {selectedTask ? (
         <BoardTaskDetail
@@ -376,7 +399,7 @@ export function BoardView() {
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto px-5 pb-5">
+      <div data-board-scroll="columns" className="flex min-h-0 flex-1 gap-3 overflow-x-auto px-5 pb-5">
         {BOARD_STAGES.every((stage) => hiddenStages[stage]) ? (
           <div className="flex flex-1 items-center justify-center text-[12.5px] text-[var(--text-muted)]">
             All columns are hidden. Show them again from the board options.
@@ -432,7 +455,7 @@ export function BoardView() {
                   </button>
                 </div>
               </div>
-              <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pb-3">
+              <div data-board-scroll={stage} className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pb-3">
                 {stageTasks.map((task) => (
                     <BoardCard
                       key={task.id}
@@ -588,6 +611,7 @@ function ProjectFilterMenu({
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
+        aria-label="Filter board by project"
         className={`inline-flex h-7 max-w-[220px] items-center gap-1.5 rounded-lg px-2.5 text-[12.5px] transition-colors hover:bg-[var(--sidebar-item-hover)] ${
           filtered
             ? 'font-medium text-[var(--text-primary)]'

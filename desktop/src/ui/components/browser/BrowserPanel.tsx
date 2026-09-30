@@ -56,6 +56,7 @@ import {
   resolveBrowserChromeStatus,
 } from './BrowserPanel.logic';
 import { useBrowserNativeOverlay } from './browser-native-overlay';
+import { BrowserStartPage } from './BrowserStartPage';
 
 const MIN_PANEL_WIDTH = 320;
 const MAX_PANEL_WIDTH = 1200;
@@ -76,6 +77,7 @@ interface BrowserPanelProps {
   onToggleFullscreen: () => void;
   topInset?: number;
   embedded?: boolean;
+  bottomInset?: number;
 }
 
 function persistedToState(state: PersistedSessionBrowserState): SessionBrowserState {
@@ -126,10 +128,10 @@ export function BrowserPanel({
   onToggleFullscreen,
   topInset = 0,
   embedded = false,
+  bottomInset = 0,
 }: BrowserPanelProps) {
   const browserSessionId = browserSessionIdProp ?? sessionId ?? '__standalone-browser__';
   const overlayOpen = useBrowserNativeOverlay();
-  const nativeViewHidden = collapsed || overlayOpen;
   const requestChatInjection = useAppStore((s) => s.requestChatInjection);
   const createDraftSession = useAppStore((s) => s.createDraftSession);
   // Target chat session for "send to chat" actions; create a draft if browsing
@@ -167,6 +169,22 @@ export function BrowserPanel({
   const [addressValue, setAddressValue] = useState('');
   const [addressEditing, setAddressEditing] = useState(false);
   const [addressDrafts, setAddressDrafts] = useState<Record<string, string>>({});
+  const [historyIndex, setHistoryIndex] = useState(-1);
+  const historyBySession = useBrowserStateStore(s => s.recentHistoryBySessionId);
+  const history = useMemo(() => {
+    const seen = new Set<string>();
+    return Object.values(historyBySession).flat().sort((a, b) => b.lastVisitedAt - a.lastVisitedAt)
+      .filter(item => {
+        if (seen.has(item.url) || !/^https?:\/\//i.test(item.url)) return false;
+        seen.add(item.url); return true;
+      }).slice(0, 12);
+  }, [historyBySession]);
+  const matchingHistory = history.filter(item => !addressValue || `${item.title} ${item.url}`.toLowerCase().includes(addressValue.toLowerCase()));
+  const historyOpen = addressEditing && matchingHistory.length > 0;
+  const showStartPage = !activeTab || !activeTab.url || activeTab.url === DEFAULT_HOME_URL;
+  // Both the start page and the address suggestions are React surfaces.
+  const nativeViewHidden = collapsed || overlayOpen || showStartPage || historyOpen;
+
   const lastSyncedAddressRef = useRef<string | undefined>(undefined);
   const previousActiveTabIdRef = useRef<string | null>(null);
 
@@ -475,9 +493,15 @@ export function BrowserPanel({
   );
 
   const handleAddressKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === 'Enter') {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      if (!matchingHistory.length) return;
       event.preventDefault();
-      void handleNavigate(addressValue);
+      setHistoryIndex(index => index < 0
+        ? (event.key === 'ArrowDown' ? 0 : matchingHistory.length - 1)
+        : (index + (event.key === 'ArrowDown' ? 1 : -1) + matchingHistory.length) % matchingHistory.length);
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      void handleNavigate(matchingHistory[historyIndex]?.url ?? addressValue);
     } else if (event.key === 'Escape') {
       event.preventDefault();
       setAddressValue(nextDisplayValue);
@@ -488,6 +512,7 @@ export function BrowserPanel({
 
   const handleAddressChange = (value: string) => {
     setAddressValue(value);
+    setHistoryIndex(-1);
     if (sessionState.activeTabId) {
       setAddressDrafts((prev) => ({ ...prev, [sessionState.activeTabId!]: value }));
     }
@@ -619,16 +644,16 @@ export function BrowserPanel({
   // Esc exits fullscreen. Only binds when in fullscreen so we don't swallow
   // Escape elsewhere (address bar blur, modal close, etc.).
   useEffect(() => {
-    if (!isFullscreen) return;
+    if (!isFullscreen || embedded) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
+      if (event.key === 'Escape' && !event.defaultPrevented) {
         event.stopPropagation();
         onToggleFullscreen();
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [isFullscreen, onToggleFullscreen]);
+  }, [embedded, isFullscreen, onToggleFullscreen]);
 
   // ===== Render =====
   return (
@@ -734,15 +759,25 @@ export function BrowserPanel({
               onChange={(e) => handleAddressChange(e.target.value)}
               onFocus={(e) => {
                 setAddressEditing(true);
+                setHistoryIndex(-1);
                 e.currentTarget.select();
               }}
               onBlur={() => {
                 window.setTimeout(() => setAddressEditing(false), 100);
               }}
               onKeyDown={handleAddressKeyDown}
-              placeholder="Search Google or enter a URL"
+              aria-label="Search or enter a URL"
+              role="combobox" aria-expanded={historyOpen} aria-controls={historyOpen ? `browser-history-${browserSessionId}` : undefined}
+              aria-autocomplete="list" aria-activedescendant={historyOpen && historyIndex >= 0 ? `browser-history-${browserSessionId}-${historyIndex}` : undefined}
+              placeholder="Search or enter a URL"
               className="h-7 w-full rounded-md border border-transparent bg-[var(--bg-tertiary)] px-2 text-[12px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:border-[var(--border-focus)] focus:outline-none focus:ring-1 focus:ring-[var(--border-focus)]"
             />
+            {historyOpen ? <div role="listbox" id={`browser-history-${browserSessionId}`} aria-label="Recent pages" className="bubble-address-history">
+              {matchingHistory.map((item, index) => <button key={item.url} id={`browser-history-${browserSessionId}-${index}`} role="option" aria-selected={historyIndex === index} type="button"
+                onMouseDown={event => event.preventDefault()} onClick={() => void handleNavigate(item.url)}>
+                <span>{item.title || item.url}</span><small>{item.url}</small>
+              </button>)}
+            </div> : null}
           </div>
 
           <button
@@ -825,10 +860,11 @@ export function BrowserPanel({
       {/* Viewport row: native WebContentsView mirror + (optional) design drawer.
           The drawer shrinks the viewport div; the ResizeObserver above pushes
           the smaller bounds to the main process automatically. */}
-      <div className="flex min-h-0 flex-1">
+      <div className="flex min-h-0 flex-1" style={{ marginBottom: bottomInset }}>
         <div className="relative min-h-0 flex-1 bg-[var(--bg-primary)]">
           <div ref={viewportRef} className="absolute inset-0" />
-          {chromeStatus && (
+          {showStartPage ? <BrowserStartPage history={history} onNavigate={url => void handleNavigate(url)} onOpenTool={tool => useAppStore.getState().openRightUtilityTab(tool)} /> : null}
+          {!showStartPage && chromeStatus && (
             <div
               className={`pointer-events-none absolute bottom-2 left-2 right-2 rounded-md border px-2 py-1 text-[11px] ${
                 chromeStatus.tone === 'error'

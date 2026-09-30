@@ -205,6 +205,7 @@ function SplitContainer({
       {node.children.map((child, index) => (
         <div
           key={child.id}
+          data-workspace-branch
           className="relative flex min-h-0 min-w-0 overflow-hidden"
           style={{ flexBasis: `${sizes[index] * 100}%`, flexGrow: 0, flexShrink: 0 }}
         >

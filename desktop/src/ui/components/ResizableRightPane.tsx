@@ -22,7 +22,11 @@ export function ResizableRightPane({
   onWidthChange,
   children,
   activePanel,
+  headerTarget,
+  contentHidden = false,
 }: {
+  contentHidden?: boolean;
+  headerTarget?: HTMLElement | null;
   width: number;
   maximumWidth: number;
   defaultWidth?: number;
@@ -50,6 +54,25 @@ export function ResizableRightPane({
   const handleRef = useRef<HTMLDivElement>(null);
   const cancelDragRef = useRef<(() => void) | null>(null);
   const wasFullscreenRef = useRef(fullscreen);
+
+  // The portaled tab row shares the pane's live geometry, including animated
+  // reveals and pointer drags, without rendering the conversation every frame.
+  useLayoutEffect(() => {
+    const pane = paneRef.current;
+    const header = headerTarget?.closest<HTMLElement>('[data-workspace-header]');
+    const tools = headerTarget?.parentElement;
+    if (!pane || !header || !tools) return;
+    const update = () => {
+      if (fullscreen || hidden || !isPresent) { tools.style.removeProperty('width'); return; }
+      const right = header.getBoundingClientRect().right - parseFloat(getComputedStyle(header).paddingRight);
+      tools.style.width = `${Math.max(0, right - pane.getBoundingClientRect().left)}px`;
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(pane);
+    observer.observe(header);
+    return () => { observer.disconnect(); tools.style.removeProperty('width'); };
+  }, [headerTarget, fullscreen, hidden, isPresent]);
 
   useLayoutEffect(() => {
     // External geometry/mode changes end a gesture without overwriting the
@@ -161,11 +184,14 @@ export function ResizableRightPane({
       data-right-utility-workspace
       data-active-panel={activePanel ?? 'none'}
       data-resizing={isResizing || undefined}
-      aria-hidden={hidden || !isPresent}
-      inert={hidden || !isPresent}
-      className={`relative flex h-full min-w-0 flex-col overflow-visible ${fullscreen ? 'flex-1' : 'flex-shrink-0'}`}
+      aria-hidden={hidden || !isPresent || contentHidden}
+      inert={hidden || !isPresent || contentHidden}
+      className={`relative flex h-full min-w-0 flex-col overflow-visible ${fullscreen ? 'flex-1 !w-auto' : 'flex-shrink-0'}`}
       style={{
-        width: fullscreen ? 'auto' : displayedWidth,
+        // Keep Motion subscribed across modes; CSS overrides the live width
+        // in full view so returning to split restores the same value.
+        width: displayedWidth,
+        ...(contentHidden ? { position: 'absolute', inset: 0, visibility: 'hidden' } as const : {}),
         pointerEvents: hidden || !isPresent ? 'none' : undefined,
       }}
     >
@@ -206,8 +232,9 @@ export function ResizableRightPane({
       )}
       <div className="absolute inset-0 overflow-hidden">
         <motion.div
-          className="absolute inset-y-0 left-0 flex min-h-0 flex-col overflow-hidden border-l border-[var(--border)] bg-[var(--utility-pane-surface)] backdrop-[var(--utility-pane-backdrop)] [contain:layout_paint]"
-          style={{ width: fullscreen ? '100%' : paneWidth }}
+          data-utility-pane-content
+          className={`absolute inset-y-0 left-0 flex min-h-0 flex-col overflow-hidden border-l border-[var(--border)] bg-[var(--utility-pane-surface)] backdrop-[var(--utility-pane-backdrop)] [contain:layout_paint] ${fullscreen ? '!w-full' : ''}`}
+          style={{ width: paneWidth }}
         >
           {children}
         </motion.div>

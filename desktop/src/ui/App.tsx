@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom';
 import { Image as ImageStudioIcon } from './components/icons';
 import { ImageStudioPanel, ImageStudioFileActions } from './components/ImageStudioPanel';
 import { subscribeAppPreferences } from './store/useAppPreferences';
@@ -21,8 +22,6 @@ import {
   GitBranch,
   GitCommit,
   GitPullRequest,
-  CollapseDiagonal,
-  ExpandDiagonal,
   Globe,
   MessageCircle,
   Plus,
@@ -35,20 +34,23 @@ import {
   Users,
   X,
 } from './components/icons';
-import { RightPanelToggleIcon } from './components/RightPanelToggleIcon';
 import { useAppStore } from './store/useAppStore';
 import { useShallow } from 'zustand/react/shallow';
 import { useIPC, sendEvent } from './hooks/useIPC';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
-import { Sidebar } from './components/Sidebar';
+import { Sidebar, SidebarHeaderTrigger } from './components/Sidebar';
+import { SessionHistoryButtons } from './components/SessionHistoryButtons';
 import { AutomationsView } from './components/AutomationsView';
 import { PullRequestsView } from './components/PullRequestsView';
 import { BoardView } from './components/BoardView';
 import { ensureBoardSessionSync, useBoardStore } from './store/useBoardStore';
 import { useTabsStore, type TabView } from './store/useTabsStore';
 import { AppTabBar } from './components/AppTabBar';
+import { FullViewChatRegion } from './components/FullViewChatRegion';
 import { NewSessionView } from './components/NewSessionView';
-import { SessionTitleActions } from './components/SessionTitleActions';
+import { SessionTitleEditor } from './components/SessionTitleEditor';
+import { SessionActionsMenu } from './components/SessionActionsMenu';
+import { WorkspaceHeader } from './components/WorkspaceHeader';
 import { LogoShimmer } from './components/LogoShimmer';
 import { SessionHandoffProviderRoute } from './components/SessionHandoffIndicator';
 import { PromptInput } from './components/PromptInput';
@@ -75,7 +77,7 @@ import { deriveSubagentSummaries } from './utils/subagent-registry';
 import { WorkspaceHost } from './components/WorkspaceHost';
 import { ChatPane } from './components/ChatPane';
 import { useBrowserStateStore } from './store/useBrowserStateStore';
-import { EnvironmentEditorPicker, EnvironmentHub } from './components/environment/EnvironmentHub';
+import { EnvironmentHub } from './components/environment/EnvironmentHub';
 import { SessionSourcesPanel } from './components/SessionSourcesPanel';
 import { useSessionSources } from './hooks/useSessionSources';
 import { Paperclip } from './components/icons';
@@ -171,7 +173,7 @@ function getBrowserUtilityLabel(
   const title = activeTab?.title?.trim();
   if (title && title !== 'New tab' && title !== 'New page') return title;
   const url = activeTab?.url?.trim();
-  if (!url || url === 'about:blank') return 'Browser';
+  if (!url || url === 'about:blank') return 'New tab';
   try {
     return new URL(url).hostname || 'Browser';
   } catch {
@@ -219,6 +221,8 @@ export function App() {
   const codexModelConfig = useCodexModelConfig();
   const [windowShellRounded, setWindowShellRounded] = useState(getDefaultWindowShellRounded);
   const [terminalFullscreen, setTerminalFullscreen] = useState(false);
+  const [fullViewChatSelected, setFullViewChatSelected] = useState(false);
+  const [fullViewChatHeight, setFullViewChatHeight] = useState(0);
   const [rightPanelLauncherOpen, setRightPanelLauncherOpen] = useState(false);
   // Session id of a side chat pending destructive-close confirmation.
   const [sideChatCloseRequest, setSideChatCloseRequest] = useState<string | null>(null);
@@ -227,6 +231,7 @@ export function App() {
     () => new Set()
   );
   const skinHostRef = useRef<HTMLDivElement>(null);
+  const [utilityTabsHost, setUtilityTabsHost] = useState<HTMLDivElement | null>(null);
   const [skinHostWidth, setSkinHostWidth] = useState(() =>
     typeof window === 'undefined' ? RIGHT_UTILITY_PANEL_DEFAULT_WIDTH : window.innerWidth
   );
@@ -252,7 +257,6 @@ export function App() {
     chatSplitRatio,
     showNewSession,
     newSessionKey,
-    sidebarCollapsed,
     projectCwd,
     showSettings,
     projectTreeCollapsed,
@@ -301,7 +305,6 @@ export function App() {
       chatSplitRatio: s.chatSplitRatio,
       showNewSession: s.showNewSession,
       newSessionKey: s.newSessionKey,
-      sidebarCollapsed: s.sidebarCollapsed,
       projectCwd: s.projectCwd,
       showSettings: s.showSettings,
       projectTreeCollapsed: s.projectTreeCollapsed,
@@ -647,7 +650,7 @@ export function App() {
     const observer = new ResizeObserver(updateWidth);
     observer.observe(skinHost);
     return () => observer.disconnect();
-  }, []);
+  }, [agentOnboarding.visible]);
 
   const renderedRightUtilityPanelWidth = rightPanelFullscreen
     ? rightUtilityPanelWidth
@@ -665,7 +668,10 @@ export function App() {
     closeRightUtilityPanelsInStore();
   }, [closeRightUtilityPanelsInStore]);
 
+  useEffect(() => { setFullViewChatSelected(false); }, [rightPanelFullscreen, activeRightUtilityTab, activeSessionId]);
+
   const selectRightUtilityTab = useCallback((target: ProjectUtilityPanelTarget) => {
+    setFullViewChatSelected(false);
     setActiveRightUtilityTab(target);
     activateRightUtilityContent(target);
   }, [activateRightUtilityContent, setActiveRightUtilityTab]);
@@ -697,7 +703,7 @@ export function App() {
       }
       return;
     }
-    if (kind === 'browser' && activeSessionId) {
+    if (kind === 'browser') {
       // Removing a browser tab must also tear down its native WebContentsView.
       // The in-chrome close button does this; the tab-strip close used to only
       // drop the tab, leaving the page attached to the window where it floated
@@ -731,9 +737,7 @@ export function App() {
         return { id: tab, kind, label: 'Changes' };
       }
       if (kind === 'browser') {
-        const browserSessionId = activeSessionId
-          ? getBrowserUtilitySessionId(activeSessionId, tab)
-          : null;
+        const browserSessionId = getBrowserUtilitySessionId(activeSessionId, tab);
         return {
           id: tab,
           kind,
@@ -827,10 +831,15 @@ export function App() {
     )
   );
 
+  const openNewWorkspaceTab = useCallback((fullView: boolean) => {
+    setRightPanelLauncherOpen(false);
+    openRightUtilityTab('browser', { newTab: true });
+    setRightPanelFullscreen(fullView ? 'browser' : null);
+  }, [openRightUtilityTab, setRightPanelFullscreen]);
+
   const openRightUtilityLauncher = useCallback(() => {
-    setRightPanelLauncherOpen(true);
-    closeRightUtilityPanelsInStore();
-  }, [closeRightUtilityPanelsInStore]);
+    openNewWorkspaceTab(false);
+  }, [openNewWorkspaceTab]);
 
   const toggleRightUtilityPanel = useCallback(() => {
     if (activeUtilityPanel) {
@@ -1032,18 +1041,50 @@ export function App() {
         windowShellRounded ? 'aegis-window-shell--rounded' : ''
       }`}
     >
+      {!showSettings && <div data-window-navigation className="bubble-window-navigation no-drag">
+        <SessionHistoryButtons />
+        <SidebarHeaderTrigger />
+      </div>}
       {/* Sidebar */}
       {!showSettings && <Sidebar />}
 
       {/* Main column: the tab strip sits on the window chrome; everything
           below floats as a rounded content card (Linear-style figure/ground). */}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      {!showSettings ? <AppTabBar /> : null}
+      {!showSettings && activeWorkspace === 'chat' ? <WorkspaceHeader
+        chatSelected={fullViewChatSelected}
+        conversationTitle={activeSession?.title || 'New Chat'}
+        onSelectChat={() => setFullViewChatSelected(true)}
+        tabSlotRef={setUtilityTabsHost}
+        title={<>{activeSession?.handoffSourceProvider ? <SessionHandoffProviderRoute sourceProvider={activeSession.handoffSourceProvider} targetProvider={activeSession.provider ?? 'claude'} /> : null}<SessionTitleEditor session={activeSession} className="truncate text-[13px] font-medium" /></>}
+        actions={activeSession ? <SessionActionsMenu session={activeSession} /> : null}
+        environment={<EnvironmentHub
+          alwaysShow context={environmentContext} git={gitEnvironment}
+          onOpenProjectPanel={openEnvironmentProjectPanel}
+          sources={sessionSources.sources} sourcesError={sessionSources.error}
+          onOpenSources={path => {
+            if (!environmentContext.sessionId) return;
+            setSourceSelection({ sessionId: environmentContext.sessionId, path });
+            openRightUtilityTab('sources');
+          }}
+          onOpenTerminal={() => { setRightPanelFullscreen(null); setTerminalDrawerOpen(true); setTerminalFullscreen(false); }}
+        />}
+        fullView={rightPanelFullscreen !== null}
+        tabsVisible={activeUtilityPanel !== null} tabCount={rightUtilityTabs.length}
+        onToggleTabs={toggleRightUtilityPanel} onNewTab={openNewWorkspaceTab}
+        onToggleFullView={() => {
+          if (rightPanelFullscreen) { setRightPanelFullscreen(null); return; }
+          const kind = activeRightUtilityTab ? getProjectUtilityTabKind(activeRightUtilityTab) : null;
+          if (kind === 'files' || kind === 'review' || kind === 'browser' || kind === 'images') setRightPanelFullscreen(kind);
+          else openNewWorkspaceTab(true);
+        }}
+      /> : null}
+      {!showSettings && activeWorkspace !== 'chat' ? <AppTabBar /> : null}
       {/* Shared chat surface: the wallpaper lives here so it spans both the
           conversation and the utility workspace (including fullscreen). */}
       <div
         ref={skinHostRef}
-        className={`aegis-skin-host relative mx-1.5 mb-1.5 flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-[10px] bg-[var(--bg-primary)] shadow-[0_1px_4px_rgba(15,18,25,0.06)] ${
+        className={`bubble-workspace-surface aegis-skin-host relative mx-1.5 mb-1.5 flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-[10px] bg-[var(--bg-primary)] shadow-[0_1px_4px_rgba(15,18,25,0.06)] ${
           skinVisible ? 'aegis-skin-host--active' : ''
         }`}
       >
@@ -1062,10 +1103,8 @@ export function App() {
           </div>
         ) : null}
 
-      {/* Main content area — hidden (display:none) when a right panel is fullscreened.
-          Uses display:contents when visible so its children still participate as flex items
-          of the shared chat surface (preserves existing layout). */}
-      <div className={rightPanelFullscreen ? 'hidden' : 'contents'}>
+      {/* Keep chat mounted across split/full view so drafts and attachments survive. */}
+      <FullViewChatRegion chatSelected={fullViewChatSelected} title={activeSession?.title || 'New Chat'} sessionId={activeSessionId} onSelectChat={() => setFullViewChatSelected(true)} fullView={Boolean(rightPanelFullscreen) && activeWorkspace === 'chat' && !showSettings} onHeightChange={setFullViewChatHeight}>
       {!showSettings && activeWorkspace === 'chat' && !sessionsLoaded ? (
         <div className="flex-1 min-w-0 bg-[var(--bg-primary)]" />
       ) : showSettings ? (
@@ -1092,56 +1131,6 @@ export function App() {
         <div
           className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[var(--chat-pane-surface)]"
         >
-          {/* Top drag region */}
-          <div className="relative h-11 flex-shrink-0 bg-[var(--chat-pane-surface)]">
-            <div className="flex h-full items-center justify-between px-3">
-              <div className="flex min-w-0 flex-1 items-center gap-2">
-                <div className="flex min-w-0 flex-1 items-center gap-2 pl-1">
-                  {activeSession?.handoffSourceProvider ? (
-                    <SessionHandoffProviderRoute
-                      sourceProvider={activeSession.handoffSourceProvider}
-                      targetProvider={activeSession.provider ?? 'claude'}
-                    />
-                  ) : null}
-                  <SessionTitleActions session={activeSession} className="text-[13px] font-medium text-[var(--text-primary)]" />
-                </div>
-              </div>
-              <div className="flex shrink-0 items-center justify-end gap-1 pr-10">
-                <div className="aegis-header-editor-actions">
-                  <EnvironmentEditorPicker context={environmentContext} />
-                </div>
-                <EnvironmentHub
-                  context={environmentContext}
-                  git={gitEnvironment}
-                  onOpenProjectPanel={openEnvironmentProjectPanel}
-                  sources={sessionSources.sources}
-                  sourcesError={sessionSources.error}
-                  onOpenSources={(path) => {
-                    if (!environmentContext.sessionId) return;
-                    setSourceSelection({ sessionId: environmentContext.sessionId, path });
-                    openRightUtilityTab('sources');
-                  }}
-                />
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTerminalDrawerOpen(!terminalDrawerOpen);
-                    setTerminalFullscreen(false);
-                  }}
-                  className={`no-drag inline-flex h-7 w-7 items-center justify-center rounded-lg text-[11px] font-medium transition-colors ${
-                    terminalDrawerOpen
-                      ? 'bg-[var(--sidebar-item-active)] text-[var(--text-primary)]'
-                      : 'text-[var(--text-secondary)] hover:bg-[var(--sidebar-item-hover)] hover:text-[var(--text-primary)]'
-                  }`}
-                  title="Bottom terminal"
-                  aria-label="Toggle bottom terminal drawer"
-                >
-                  <BottomTerminalToggleIcon />
-                </button>
-              </div>
-            </div>
-          </div>
-
           <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
             <WorkspaceHost
               codexModelConfig={codexModelConfig}
@@ -1149,7 +1138,7 @@ export function App() {
             />
 
             <TerminalDrawer
-              open={terminalDrawerOpen}
+              open={terminalDrawerOpen && !rightPanelFullscreen}
               height={terminalDrawerHeight}
               onHeightChange={setTerminalDrawerHeight}
               fullscreen={terminalFullscreen}
@@ -1164,9 +1153,12 @@ export function App() {
           </div>
         </div>
       ) : (
-        <NewSessionView key={newSessionKey} />
+        <div className="bubble-home-column flex min-h-0 min-w-0 flex-1 flex-col">
+
+          <NewSessionView key={newSessionKey} />
+        </div>
       )}
-      </div>
+      </FullViewChatRegion>
 
       <AnimatePresence initial={false}>
       {!showSettings &&
@@ -1174,6 +1166,8 @@ export function App() {
       (activeUtilityPanel !== null || (rightUtilityPanelHidden && rightUtilityTabs.length > 0)) ? (
         <RightUtilityWorkspace
           key="right-utility-workspace"
+          contentHidden={Boolean(rightPanelFullscreen) && fullViewChatSelected}
+          headerTarget={utilityTabsHost}
           hidden={activeUtilityPanel === null}
           instantReveal={rightUtilityInstantRevealPending}
           activePanel={activeUtilityPanel}
@@ -1188,11 +1182,13 @@ export function App() {
           resizable
           maximumWidth={getDockedRightPanelMaxWidth(skinHostWidth)}
           fullscreen={rightPanelFullscreen !== null}
-          windowControlsInset={rightPanelFullscreen !== null && sidebarCollapsed}
+          windowControlsInset={false}
           onSelectTab={selectRightUtilityTab}
           onCloseTab={closeRightUtilityTab}
           onOpenTab={openRightUtilityTab}
           onTogglePanel={toggleRightUtilityPanel}
+          onNewTab={openNewWorkspaceTab}
+          onReturnToChat={() => setRightPanelFullscreen(null)}
           onToggleFullscreen={(() => {
             const target =
               activeRightUtilityTab ??
@@ -1270,9 +1266,10 @@ export function App() {
             <BrowserPanel
               key={`${activeSessionId ?? 'new'}:${tabId}`}
               embedded
+              bottomInset={rightPanelFullscreen === 'browser' ? fullViewChatHeight : 0}
               sessionId={activeSessionId}
               browserSessionId={getBrowserUtilitySessionId(activeSessionId, tabId)}
-              collapsed={activeUtilityPanel !== 'browser' || activeRightUtilityTab !== tabId}
+              collapsed={activeUtilityPanel !== 'browser' || activeRightUtilityTab !== tabId || (Boolean(rightPanelFullscreen) && fullViewChatSelected)}
               width={renderedRightUtilityPanelWidth}
               onWidthChange={setRightUtilityPanelWidth}
               isFullscreen={rightPanelFullscreen === 'browser'}
@@ -1344,14 +1341,6 @@ export function App() {
       ) : null}
       </AnimatePresence>
 
-      {!showSettings && activeWorkspace === 'chat' && activeUtilityPanel === null ? (
-        <div className="absolute right-3 top-2 z-[90] no-drag">
-          <PanelLauncher
-            activePanel={activeUtilityPanel}
-            onToggle={toggleRightUtilityPanel}
-          />
-        </div>
-      ) : null}
       </div>
       </div>
 
@@ -1408,6 +1397,8 @@ function getUtilityTabIcon(target: ProjectUtilityPanelKind) {
 }
 
 function RightUtilityWorkspace({
+  contentHidden = false,
+  headerTarget,
   hidden,
   instantReveal,
   activePanel,
@@ -1424,9 +1415,13 @@ function RightUtilityWorkspace({
   onCloseTab,
   onOpenTab,
   onTogglePanel,
+  onNewTab,
+  onReturnToChat,
   onToggleFullscreen,
   children,
 }: {
+  contentHidden?: boolean;
+  headerTarget?: HTMLElement | null;
   hidden: boolean;
   /**
    * Skip the width transition for this reveal. Content-driven opens (file links)
@@ -1448,6 +1443,8 @@ function RightUtilityWorkspace({
   onCloseTab: (target: ProjectUtilityPanelTarget) => void;
   onOpenTab: (target: ProjectUtilityPanelKind, options?: { newTab?: boolean }) => void;
   onTogglePanel: () => void;
+  onNewTab: (fullView: boolean) => void;
+  onReturnToChat: () => void;
   /** Fullscreen toggle for the active tab; null when it has no fullscreen. */
   onToggleFullscreen: (() => void) | null;
   children: ReactNode;
@@ -1465,8 +1462,30 @@ function RightUtilityWorkspace({
   const [nativeOverlayOpen, setNativeOverlayOpen] = useState(false);
   useBrowserNativeOverlayRegistration(nativeOverlayOpen);
 
+  useEffect(() => { if (hidden) setNativeOverlayOpen(false); }, [hidden]);
+  const tabStrip = (
+    <RightUtilityTabStrip
+        tabs={tabs}
+        activeTab={contentHidden ? null : activeTab}
+        activePanel={activePanel}
+        browserAvailable={browserAvailable}
+        windowControlsInset={windowControlsInset}
+        fullscreen={fullscreen}
+        onSelectTab={onSelectTab}
+        onCloseTab={onCloseTab}
+        onOpenTab={onOpenTab}
+        onTogglePanel={onTogglePanel}
+        onNewTab={onNewTab}
+        onReturnToChat={onReturnToChat}
+        onToggleFullscreen={onToggleFullscreen}
+        onNativeOverlayChange={setNativeOverlayOpen}
+      />
+  );
+
   return (
     <ResizableRightPane
+      contentHidden={contentHidden}
+      headerTarget={headerTarget}
       width={width}
       maximumWidth={maximumWidth}
       defaultWidth={RIGHT_UTILITY_PANEL_DEFAULT_WIDTH}
@@ -1477,20 +1496,7 @@ function RightUtilityWorkspace({
       activePanel={activePanel}
       onWidthChange={onWidthChange}
     >
-      <RightUtilityTabStrip
-        tabs={tabs}
-        activeTab={activeTab}
-        activePanel={activePanel}
-        browserAvailable={browserAvailable}
-        windowControlsInset={windowControlsInset}
-        fullscreen={fullscreen}
-        onSelectTab={onSelectTab}
-        onCloseTab={onCloseTab}
-        onOpenTab={onOpenTab}
-        onTogglePanel={onTogglePanel}
-        onToggleFullscreen={onToggleFullscreen}
-        onNativeOverlayChange={setNativeOverlayOpen}
-      />
+      {headerTarget ? createPortal(hidden ? null : tabStrip, headerTarget) : tabStrip}
 
       <div className="relative min-h-0 flex-1 overflow-hidden">
         {children}
@@ -1567,6 +1573,7 @@ function RightUtilityTabStrip({
   onCloseTab,
   onOpenTab,
   onTogglePanel,
+  onNewTab,
   onToggleFullscreen,
   onNativeOverlayChange,
 }: {
@@ -1580,6 +1587,8 @@ function RightUtilityTabStrip({
   onCloseTab: (target: ProjectUtilityPanelTarget) => void;
   onOpenTab: (target: ProjectUtilityPanelKind, options?: { newTab?: boolean }) => void;
   onTogglePanel: () => void;
+  onNewTab: (fullView: boolean) => void;
+  onReturnToChat: () => void;
   onToggleFullscreen: (() => void) | null;
   onNativeOverlayChange: (open: boolean) => void;
 }) {
@@ -1606,11 +1615,13 @@ function RightUtilityTabStrip({
       // so dialog backdrops dim this strip like everything else. The old
       // z-[120] predates the native launcher popup and let the strip float
       // above every dialog overlay.
+      data-workspace-tool-tabs
       className="drag-region relative z-[80] flex h-10 shrink-0 items-center gap-1 overflow-visible bg-[var(--utility-pane-surface-strong)] backdrop-[var(--utility-pane-backdrop)] px-2"
       // In fullscreen with the sidebar collapsed the strip becomes the topmost
       // bar at the window's left edge, so it must clear the traffic lights.
       style={windowControlsInset ? { paddingLeft: 'var(--app-window-controls-inset-left)' } : undefined}
     >
+      {windowControlsInset ? <SidebarHeaderTrigger /> : null}
       <div
         ref={tabListRef}
         className="no-drag flex min-w-0 max-w-full items-center overflow-x-auto"
@@ -1700,6 +1711,7 @@ function RightUtilityTabStrip({
           </DropdownMenu.Trigger>
           <DropdownMenu.Portal>
             <DropdownMenu.Content align="start" sideOffset={6} className="min-w-[224px] p-1">
+              <DropdownMenu.Item className="gap-2 px-2.5 py-1.5 text-[13px]" onSelect={() => onNewTab(fullscreen)}><Plus className="h-3.5 w-3.5" />New tab</DropdownMenu.Item>
               {items.map((item) => (
                 <DropdownMenu.Item
                   key={item.id}
@@ -1727,23 +1739,6 @@ function RightUtilityTabStrip({
 
       <div className="no-drag ml-1 flex h-full shrink-0 items-center gap-0.5">
         {activeTab?.startsWith('images:') && <ImageStudioFileActions sessionId={activeTab.slice(7)} />}
-        {onToggleFullscreen ? (
-          <button
-            type="button"
-            onClick={onToggleFullscreen}
-            className="no-drag inline-flex h-7 w-7 items-center justify-center rounded-lg text-[var(--text-secondary)] transition-colors hover:bg-[var(--sidebar-item-hover)] hover:text-[var(--text-primary)]"
-            title={fullscreen ? 'Exit fullscreen (Esc)' : 'Fullscreen'}
-            aria-label={fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
-            aria-pressed={fullscreen}
-          >
-            {fullscreen ? (
-              <CollapseDiagonal className="h-[14px] w-[14px]" />
-            ) : (
-              <ExpandDiagonal className="h-[14px] w-[14px]" />
-            )}
-          </button>
-        ) : null}
-        <PanelLauncher activePanel={activePanel} onToggle={onTogglePanel} />
       </div>
     </div>
   );
@@ -1753,52 +1748,6 @@ function RightUtilityTabStrip({
 // board / environment list), but it is intentionally NOT offered in the
 // launcher menu — it only exists when the main agent has spawned subagents.
 type PanelLauncherKind = 'launcher' | ProjectUtilityPanelKind;
-
-function BottomTerminalToggleIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-[14px] w-[14px] shrink-0"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.25"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <rect width="18" height="16" x="3" y="4" rx="4" />
-      <path d="M9 16h6" />
-    </svg>
-  );
-}
-
-function PanelLauncher({
-  activePanel,
-  onToggle,
-}: {
-  activePanel: PanelLauncherKind | null;
-  onToggle: () => void;
-}) {
-  const active = Boolean(activePanel);
-
-  return (
-    <button
-      type="button"
-      onClick={onToggle}
-      className={`no-drag inline-flex h-7 w-7 items-center justify-center rounded-lg text-[11px] font-medium transition-colors ${
-        active
-          ? 'bg-[var(--sidebar-item-active)] text-[var(--text-primary)]'
-          : 'text-[var(--text-secondary)] hover:bg-[var(--sidebar-item-hover)] hover:text-[var(--text-primary)]'
-      }`}
-      title={active ? 'Close right panel' : 'Open right panel'}
-      aria-label={active ? 'Close right panel' : 'Open right panel launcher'}
-      aria-expanded={active}
-      aria-pressed={active}
-    >
-      <RightPanelToggleIcon />
-    </button>
-  );
-}
 
 type PanelLauncherItem = {
   id: Exclude<PanelLauncherKind, 'launcher'>;

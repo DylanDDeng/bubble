@@ -16,6 +16,8 @@ import { DEFAULT_TERMINAL_ID } from '../../shared/terminal'
 export function register(ctx: IPCHandlerContext): void {
   attachTerminalWindow(ctx.mainWindow)
 
+  ipcMainHandle('terminal:list-processes', async (_event, threadId: string) => terminalManager.listProcesses(threadId))
+
   ipcMainHandle('terminal:open', async (_event, input: TerminalOpenInput) => {
     return terminalManager.open(input)
   })

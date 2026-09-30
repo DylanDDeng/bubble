@@ -145,3 +145,13 @@ export function resolveProjectFileUtilityTab(
     ? activeTab : fileTabs.find(empty);
   return available ? { tabs, activeTab: available } : resolveRightUtilityTabOpen(tabs, 'files', { newTab: true });
 }
+
+/** Full view belongs to the workspace; carry it across supported tool tabs. */
+export function resolveRightUtilityFullscreen(
+  current: 'files' | 'review' | 'browser' | 'images' | null,
+  target: ProjectUtilityPanelTarget | null,
+): 'files' | 'review' | 'browser' | 'images' | null {
+  if (!current || !target) return null;
+  const kind = getRightUtilityTabKind(target);
+  return kind === 'files' || kind === 'review' || kind === 'browser' || kind === 'images' ? kind : null;
+}

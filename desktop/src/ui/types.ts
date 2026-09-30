@@ -420,8 +420,8 @@ export interface AppState {
   newSessionKey: number;
   /** Recently viewed threads (null = new-session landing). Used by header back/forward. */
   sidebarCollapsed: boolean;
-  /** Transient hover-peek: sidebar stays collapsed in layout but floats open as an overlay. */
-  sidebarPeek: boolean;
+  boardSidebarCollapsed: boolean;
+  boardSidebarWidth: number;
   sidebarActivityView: boolean;
   sidebarWidth: number;
   sidebarWidthVersion: number;
@@ -578,7 +578,6 @@ export interface AppActions {
   setDraftStartMode: (sessionId: string, mode: 'local' | 'worktree') => void;
   setShowNewSession: (show: boolean) => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
-  setSidebarPeek: (open: boolean) => void;
   toggleSidebarActivityView: () => void;
   setSidebarWidth: (width: number) => void;
   setProjectCwd: (cwd: string | null) => void;

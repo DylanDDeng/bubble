@@ -535,7 +535,7 @@ export function BoardTaskDetail({
               a task a few screens tall otherwise gets a thumb that fills
               most of the track. */}
           <div className="relative min-h-0 flex-1">
-          <div ref={scrollRef} className="capped-scrollbar-host h-full overflow-y-auto">
+          <div ref={scrollRef} data-board-scroll={`task:${task.id}`} className="capped-scrollbar-host h-full overflow-y-auto">
             <div className="mx-auto w-full max-w-[720px] px-8 pb-6 pt-7">
               <textarea
                 ref={titleRef}

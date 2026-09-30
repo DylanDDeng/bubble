@@ -274,13 +274,13 @@ function Harness() {
       },
       clickOutlineItem: (text) => {
         const main = document.querySelector('.aegis-md-main');
-        const button = Array.from(document.querySelectorAll('.aegis-md-outline-list button'))
-          .find((node) => (node.textContent || '').trim() === text);
+        const button = Array.from(document.querySelectorAll('[aria-label="Document outline"] [data-outline-tick]'))
+          .find((node) => node.getAttribute('aria-label') === text);
         if (!main || !button) return null;
         main.scrollTop = 0;
         const before = main.scrollTop;
         button.click();
-        return { before, text: button.textContent || '' };
+        return { before, text: button.getAttribute('aria-label') || '' };
       },
       getLineViewportPosition: measureLineViewportPosition,
       getSelectionLineText: () => {
@@ -510,7 +510,7 @@ function Harness() {
           horizontalRuleCount: document.querySelectorAll('.bubble-md-horizontal-rule').length,
           tableHeader: document.querySelector('.bubble-md-table-row.is-header .bubble-md-table-cell')?.textContent || '',
           taskCount: document.querySelectorAll('.aegis-cm-task-checkbox').length,
-          outlineTriggerTexts: Array.from(document.querySelectorAll('.aegis-md-outline-trigger span')).map((node) => node.textContent || ''),
+          outlineTriggerTexts: Array.from(document.querySelectorAll('[aria-label="Document outline"] .chat-outline-tick')).map((node) => node.textContent || ''),
           images,
           blockWidgetMetrics,
           scrollState,
