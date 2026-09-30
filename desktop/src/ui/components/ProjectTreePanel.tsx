@@ -10,6 +10,7 @@ import { ProjectVideoPreview } from './ProjectVideoPreview';
 import { FileTypeIcon } from './FileTypeIcon';
 import { CsvPreview, XlsxPreview } from './SpreadsheetPreview';
 import { ProjectMdxPreview, ProjectMdxProperties, parseMdxDocument } from './ProjectMdxPreview';
+import { ProjectMarkdownEditor } from './ProjectMarkdownEditor';
 import { ProjectMarkdownPreview } from './ProjectMarkdownPreview';
 import { ProjectTextEditor, type ProjectTextEditorHandle } from './ProjectTextEditor';
 import { IconButton } from './ui/icon-button';
@@ -975,19 +976,10 @@ export function ProjectTreePanel({
   }, [activeFileTabId, updateOpenFileTabs, viewMode]);
 
   const toggleMarkdownSource = useCallback(() => {
-    if (viewMode === 'code') {
-      captureActiveEditorViewState();
-      setViewMode('view');
-      return;
-    }
-    if (activeFileTabId) {
-      const tab = openFileTabsRef.current.find((item) => item.id === activeFileTabId);
-      pendingEditorViewStateRestoreRef.current = tab?.viewState
-        ? { tabId: activeFileTabId, viewState: tab.viewState }
-        : null;
-    }
-    setViewMode('code');
-  }, [activeFileTabId, captureActiveEditorViewState, viewMode]);
+    activeTextEditorBridgeRef.current?.flush();
+    captureActiveEditorViewState();
+    setViewMode(current => current === 'code' ? 'view' : 'code');
+  }, [captureActiveEditorViewState]);
 
   const prepareActiveFileForTransition = useCallback(async () => {
     captureActiveEditorViewState();
@@ -3540,25 +3532,21 @@ export function ProjectTreePanel({
 
                 {!previewLoading && selectedPreview?.kind === 'markdown' && (
                   selectedPreview.editable && selectedFileCwd && selectedFilePath ? (
-                    viewMode === 'code' ? (
-                      <div className="aegis-markdown-source-shell">
-                        <ProjectTextEditor
-                          ref={registerTextEditorBridge}
-                          value={draftText}
-                          onChange={handleDraftTextChange}
-                          onSave={() => handleSaveText()}
-                          fileName={selectedPreview.name}
-                          markdownSourceStyle
-                          scrollTarget={activeFileRevealTarget}
-                          className="aegis-markdown-source-editor"
-                        />
-                        {saveState === 'error' && saveError && (
-                          <div className="aegis-markdown-source-error">{saveError}</div>
-                        )}
-                      </div>
-                    ) : (
-                      <ProjectMarkdownPreview key={selectedFilePath} content={draftText} />
-                    )
+                    <ProjectMarkdownEditor
+                      key={selectedFilePath}
+                      value={draftText}
+                      cwd={selectedFileCwd}
+                      filePath={selectedFilePath}
+                      fileName={selectedPreview.name}
+                      hideTitleBar
+                      sourceMode={viewMode === 'code'}
+                      scrollTarget={activeFileRevealTarget}
+                      saveState={saveState}
+                      saveError={saveError}
+                      onChange={handleDraftTextChange}
+                      onSave={() => { void handleSaveText(); }}
+                      onRegisterBridge={registerTextEditorBridge}
+                    />
                   ) : (
                     <ProjectMarkdownPreview key={selectedPreview.path} content={selectedPreview.text} />
                   )

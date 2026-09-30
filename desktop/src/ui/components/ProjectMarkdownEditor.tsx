@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { EditorSelection, EditorState, StateEffect, StateField, Transaction, type Extension } from '@codemirror/state';
+import { Compartment, EditorSelection, EditorState, Prec, StateEffect, StateField, Transaction, type Extension } from '@codemirror/state';
 import {
   Decoration,
   EditorView,
@@ -12,6 +12,8 @@ import {
   type DecorationSet,
 } from '@codemirror/view';
 import {
+  syntaxTree,
+  ensureSyntaxTree,
   bracketMatching,
   defaultHighlightStyle,
   indentOnInput,
@@ -31,6 +33,9 @@ import {
   X,
 } from './icons';
 import { toast } from 'sonner';
+import { livePreviewMath, MarkdownRenderedWidget } from './markdown-live-preview-widgets';
+import { createMediaSourceButton, mediaSourceIsActive, moveThroughMedia, type MediaSourceRange } from './markdown-media-interaction';
+import { collectHtmlPreviews, isMarkdownVideo, MarkdownVideoWidget, markdownWikiEmbeds, type VideoPreview } from './markdown-html-preview';
 
 export type MarkdownOutlineItem = {
   id: string;
@@ -62,6 +67,8 @@ type ProjectMarkdownEditorProps = {
   cwd: string;
   filePath: string;
   fileName: string;
+  sourceMode?: boolean;
+  scrollTarget?: { line: number; token: number } | null;
   hideTitleBar?: boolean;
   windowControlsInset?: boolean;
   saveState: SaveState;
@@ -151,6 +158,8 @@ type MarkdownImageSourceCacheEntry = {
 };
 
 const updateListenerFacet = EditorView.updateListener;
+const markdownFocusEffect = StateEffect.define<boolean>();
+const markdownFocusField = StateField.define<boolean>({ create: () => false, update: (value, tr) => tr.effects.find(e => e.is(markdownFocusEffect))?.value ?? value });
 const markdownHeadingFlashEffect = StateEffect.define<number | null>();
 const markdownPointerSelectingEffect = StateEffect.define<boolean>();
 const METADATA_VISIBLE_ROWS = 8;
@@ -866,7 +875,7 @@ function scanTableBlocks(state: EditorState): MarkdownTableBlock[] {
 }
 
 function isRangeActive(state: EditorState, from: number, to: number): boolean {
-  return state.selection.ranges.some((range) => range.from <= to && range.to >= from);
+  return !!state.field(markdownFocusField, false) && state.selection.ranges.some((range) => range.from <= to && range.to >= from);
 }
 
 function lineIsActive(state: EditorState, lineFrom: number, lineTo: number): boolean {
@@ -878,6 +887,7 @@ function isMarkdownHorizontalRule(text: string): boolean {
 }
 
 function selectionTouchesSourceRange(state: EditorState, from: number, to: number): boolean {
+  if (!state.field(markdownFocusField, false)) return false;
   return state.selection.ranges.some((range) => {
     if (range.empty) {
       // Edge-inclusive: a bare caret sitting exactly at `to` (the position right
@@ -1143,22 +1153,30 @@ class ImagePreviewWidget extends MeasuredBlockWidget {
       && other.sourcePos === this.sourcePos;
   }
 
+  updateDOM(dom: HTMLElement, _view: EditorView, previous: ImagePreviewWidget) {
+    if (this.cwd !== previous.cwd || this.filePath !== previous.filePath || this.src !== previous.src) return false;
+    dom.dataset.sourcePos = String(this.sourcePos);
+    const img = dom.querySelector('img');
+    if (img) { img.alt = this.alt; img.title = this.alt; }
+    return true;
+  }
+
   toDOM(view: EditorView) {
     const container = createMeasuredMarkdownBlock(view, 'span', 'aegis-cm-image-widget', this.sourcePos);
-    container.tabIndex = 0;
+    const edit = createMediaSourceButton(view, container, 'image');
 
     const requestMeasure = () => requestMarkdownWidgetMeasure(view, container);
 
     const status = document.createElement('span');
     status.className = 'aegis-cm-image-status';
     status.textContent = 'Loading image...';
-    container.appendChild(status);
+    container.append(status, edit);
 
     const showError = (message: string) => {
       if (container.__aegisMarkdownWidgetDisposed) return;
       container.dataset.error = 'true';
       status.textContent = message;
-      container.replaceChildren(status);
+      container.replaceChildren(status, edit);
       requestMeasure();
     };
 
@@ -1174,7 +1192,7 @@ class ImagePreviewWidget extends MeasuredBlockWidget {
       img.decoding = 'async';
       img.addEventListener('load', requestMeasure, { once: true });
       img.addEventListener('error', () => showError('Image failed to load.'));
-      container.appendChild(img);
+      container.append(img, edit);
       requestMeasure();
       if (img.complete) {
         requestMeasure();
@@ -1204,22 +1222,11 @@ class ImagePreviewWidget extends MeasuredBlockWidget {
       }
     }
 
-    container.addEventListener('click', (event) => {
-      const target = findClosestElement(event.target);
-      if (!target?.closest('img, .aegis-cm-image-status')) return;
-      event.preventDefault();
-      event.stopPropagation();
-      view.dispatch({
-        selection: EditorSelection.cursor(this.sourcePos),
-        effects: EditorView.scrollIntoView(this.sourcePos, { y: 'center' }),
-      });
-      view.focus();
-    });
     return container;
   }
 
   ignoreEvent() {
-    return false;
+    return true;
   }
 }
 
@@ -1606,91 +1613,134 @@ function addInlineMarkdownDecorations(
 
 function buildLivePreviewDecorations(state: EditorState, cwd: string, filePath: string): DecorationSet {
   const decorations: Array<Range<Decoration>> = [];
+  const tree = ensureSyntaxTree(state, state.doc.length, 50) ?? syntaxTree(state);
   const frontmatter = findFrontmatterBlock(state);
-  const codeBlocks = scanCodeBlocks(state);
-  const tableBlocks = scanTableBlocks(state);
-  const blockLines = new Set<number>();
-
-  if (frontmatter && !frontmatterBlockIsActive(state, frontmatter)) {
-    for (let line = frontmatter.startLine; line <= frontmatter.endLine; line += 1) blockLines.add(line);
-    decorations.push(Decoration.replace({
-      widget: new FrontmatterPreviewWidget(frontmatter.frontmatter, frontmatter.from + 4),
-      block: true,
-    }).range(frontmatter.from, frontmatter.to));
-  }
-
-  for (const block of codeBlocks) {
-    if (!block.terminated) {
-      // Keep the literal ``` visible as plain text while the fence is still open
-      // (Obsidian-style); a block only collapses once it has a closing ```. This
-      // prevents an in-progress fence from folding the rest of the document.
-      blockLines.add(block.startLine);
-      continue;
+  const focused = !!state.field(markdownFocusField, false);
+  const hide = (from: number, to: number) => { if (to > from) decorations.push(Decoration.replace({}).range(from, to)); };
+  const mark = (from: number, to: number, className: string, attributes?: Record<string, string>) => { if (to > from) decorations.push(Decoration.mark({ class: className, attributes }).range(from, to)); };
+  const line = (pos: number, className: string, attributes?: Record<string, string>) => decorations.push(Decoration.line({ class: className, attributes }).range(state.doc.lineAt(pos).from));
+  const html = collectHtmlPreviews(state, tree);
+  const renderedVideos = html.videos.filter(video => video.from >= (frontmatter?.to ?? 0));
+  const renderMedia = (from: number, to: number, block: boolean, widget: WidgetType) => {
+    // Reuse the preview at the end of its source in both modes. Only the source
+    // text toggles, so editing cannot collapse or reload the media.
+    const mediaSource = block ? { from, to } : undefined;
+    if (mediaSourceIsActive(state, from, to)) {
+      decorations.push(Decoration.widget({ block, side: 1, widget, mediaSource }).range(to));
+    } else {
+      decorations.push(Decoration.replace({ block, widget, mediaSource }).range(from, to));
     }
-    for (let line = block.startLine; line <= block.endLine; line += 1) blockLines.add(line);
-    if (isRangeActive(state, block.from, block.to)) {
-      for (let lineNumber = block.startLine; lineNumber <= block.endLine; lineNumber += 1) {
-        const line = state.doc.line(lineNumber);
-        const boundaryClass = lineNumber === block.startLine
-          ? ' is-first'
-          : lineNumber === block.endLine
-            ? ' is-last'
-            : '';
-        const markerClass = lineNumber === block.startLine || lineNumber === block.endLine ? ' is-marker' : '';
-        decorations.push(
-          Decoration.line({ class: `aegis-cm-code-source-line${boundaryClass}${markerClass}` }).range(line.from)
-        );
+  };
+  const renderVideo = (video: VideoPreview) => {
+    const block = !state.sliceDoc(state.doc.lineAt(video.from).from, video.from).trim()
+      && !state.sliceDoc(video.to, state.doc.lineAt(video.to).to).trim();
+    renderMedia(video.from, video.to, block, new MarkdownVideoWidget(cwd, filePath, video));
+  };
+  for (const video of renderedVideos) renderVideo(video);
+  for (const underline of html.underlines) {
+    if (underline.from < (frontmatter?.to ?? 0)) continue;
+    if (renderedVideos.some(video => underline.from >= video.from && underline.to <= video.to)) continue;
+    mark(underline.openEnd, underline.closeStart, 'bubble-md-underline');
+    if (!isRangeActive(state, underline.from, underline.to)) {
+      hide(underline.from, underline.openEnd);
+      hide(underline.closeStart, underline.to);
+    }
+  }
+  if (frontmatter && !isRangeActive(state, frontmatter.from, frontmatter.to)) {
+    decorations.push(Decoration.replace({ block: true, widget: new FrontmatterPreviewWidget(frontmatter.frontmatter, frontmatter.from + 4) }).range(frontmatter.from, frontmatter.to));
+  }
+  tree.iterate({ enter(ref) {
+    const node = ref.node, name = node.name, parent = node.parent;
+    if (frontmatter && node.from < frontmatter.to && name !== 'Document') return false;
+    if (renderedVideos.some(video => node.from >= video.from && node.to <= video.to)) return false;
+    if (/^(ATX|Setext)Heading/.test(name)) {
+      line(node.from, `aegis-cm-heading-line level-${name.slice(-1)}`);
+    }
+    if (name === 'FencedCode') {
+      const fences = node.getChildren('CodeMark');
+      if (fences.length !== 2) return false;
+      const languageNode = node.getChild('CodeInfo');
+      const language = languageNode ? state.sliceDoc(languageNode.from, languageNode.to).trim() : '';
+      const first = state.doc.lineAt(node.from), last = state.doc.lineAt(node.to);
+      if (language === 'mermaid' && !isRangeActive(state, node.from, node.to)) {
+        const code = state.sliceDoc(first.to + 1, last.from).trimEnd();
+        decorations.push(Decoration.replace({ block: true, widget: new MarkdownRenderedWidget('mermaid', code, node.from, true) }).range(first.from, last.to));
+        return false;
       }
-      continue;
-    }
-    decorations.push(Decoration.replace({
-      widget: new CodeBlockPreviewWidget(block.language, block.code, block.from),
-      block: true,
-    }).range(block.from, block.to));
-  }
-
-  for (const table of tableBlocks) {
-    for (let line = table.startLine; line <= table.endLine; line += 1) blockLines.add(line);
-    if (isRangeActive(state, table.from, table.to)) continue;
-    decorations.push(Decoration.replace({
-      widget: new TablePreviewWidget(table.rows, table.from),
-      block: true,
-    }).range(table.from, table.to));
-  }
-
-  for (let lineNumber = 1; lineNumber <= state.doc.lines; lineNumber += 1) {
-    if (blockLines.has(lineNumber)) continue;
-    const line = state.doc.line(lineNumber);
-    const activeLine = lineIsActive(state, line.from, line.to);
-
-    if (!activeLine && isMarkdownHorizontalRule(line.text)) {
-      decorations.push(Decoration.replace({
-        widget: new HorizontalRulePreviewWidget(line.from),
-        block: true,
-      }).range(line.from, line.to));
-      continue;
-    }
-
-    const image = findImageInLine(line.text, line.from);
-    if (image && line.text.trim() === `![${image.alt}](${image.src})`) {
-      if (!activeLine) {
-        decorations.push(Decoration.replace({
-          widget: new ImagePreviewWidget(cwd, filePath, image.src, image.alt, image.from),
-          block: true,
-        }).range(image.from, image.to));
+      for (let i = first.number; i <= last.number; i++) {
+        const current = state.doc.line(i);
+        line(current.from, `bubble-md-code-line${i === first.number ? ' is-first' : ''}${i === last.number ? ' is-last' : ''}`, i === first.number ? { 'data-language': language } : undefined);
       }
-      continue;
+      // Fences remain hidden in live preview; the code itself stays editable.
+      if (language !== 'mermaid') { hide(first.from, first.to); hide(last.from, last.to); }
+      return false;
     }
-
-    addInlineMarkdownDecorations(state, line.from, line.text, decorations, activeLine);
-  }
-
+    if (name === 'CodeBlock' || name === 'HTMLBlock') return false;
+    if (name === 'Escape' && !isRangeActive(state, node.from, node.to)) {
+      hide(node.from, node.from + 1);
+      mark(node.from + 1, node.to, 'bubble-md-escaped');
+      return false;
+    }
+    if (name === 'MathBlock' || name === 'MathInline') {
+      if (!isRangeActive(state, node.from, node.to)) decorations.push(Decoration.replace({ block: name === 'MathBlock', widget: new MarkdownRenderedWidget('math', state.sliceDoc(node.from, node.to), node.from, name === 'MathBlock') }).range(node.from, node.to));
+      return false;
+    }
+    if (name === 'WikiEmbed') {
+      const [src, label] = state.doc.sliceString(node.from + 3, node.to - 2).split('|');
+      if (isMarkdownVideo(src)) renderVideo({ from: node.from, to: node.to, sources: [src.trim()], label: label || src });
+      else if (/\.(png|jpe?g|gif|webp|avif|svg)$/i.test(src)) {
+        const block = state.doc.lineAt(node.from).text.trim() === state.doc.sliceString(node.from, node.to);
+        renderMedia(node.from, node.to, block, new ImagePreviewWidget(cwd, filePath, src.trim(), label || src, node.from));
+      }
+      return false;
+    }
+    if (name === 'Image') {
+      const url = node.getChild('URL');
+      if (url) {
+        const src = state.sliceDoc(url.from, url.to).replace(/^<|>$/g, '');
+        const alt = state.sliceDoc(node.from, node.to).match(/^!\[([^\]]*)\]/)?.[1] ?? '';
+        const only = state.doc.lineAt(node.from).text.trim() === state.sliceDoc(node.from, node.to);
+        if (isMarkdownVideo(src)) renderVideo({ from: node.from, to: node.to, sources: [src], label: alt || 'Video preview' });
+        else renderMedia(node.from, node.to, only, new ImagePreviewWidget(cwd, filePath, src, alt, node.from));
+      }
+      return false;
+    }
+    if (name === 'TableHeader' || name === 'TableRow') line(node.from, `bubble-md-table-row${name === 'TableHeader' ? ' is-header' : ''}`);
+    if (name === 'TableCell') mark(node.from, node.to, 'bubble-md-table-cell');
+    if (name === 'TableDelimiter') { if (parent?.name === 'Table') line(node.from, 'bubble-md-table-separator'); hide(node.from, node.to); }
+    if (name === 'HorizontalRule') { line(node.from, 'bubble-md-horizontal-rule'); hide(node.from, node.to); return false; }
+    if (name === 'Blockquote' && parent?.name !== 'Blockquote') {
+      for (let i = state.doc.lineAt(node.from).number; i <= state.doc.lineAt(node.to).number; i++) line(state.doc.line(i).from, 'aegis-cm-blockquote-line');
+    }
+    if ((name === 'BulletList' || name === 'OrderedList') && parent?.name !== 'ListItem') {
+      for (let i = state.doc.lineAt(node.from).number; i <= state.doc.lineAt(node.to).number; i++) line(state.doc.line(i).from, 'bubble-md-list-line');
+    }
+    if (name === 'QuoteMark') {
+      let depth = 0;
+      for (let ancestor = parent; ancestor; ancestor = ancestor.parent) if (ancestor.name === 'Blockquote') depth++;
+      if (depth === 1) hide(node.from, node.to + (/\s/.test(state.sliceDoc(node.to, node.to + 1)) ? 1 : 0));
+    }
+    if (name === 'TaskMarker' && !isRangeActive(state, node.from, node.to)) decorations.push(Decoration.replace({ widget: new TaskCheckboxWidget(/x/i.test(state.sliceDoc(node.from, node.to)), node.from, node.to) }).range(node.from, node.to));
+    const styles: Record<string, string> = { StrongEmphasis: 'aegis-cm-strong', Emphasis: 'aegis-cm-emphasis', Strikethrough: 'aegis-cm-strike', InlineCode: 'aegis-cm-inline-code' };
+    if (styles[name]) mark(node.from, node.to, styles[name]);
+    if (name === 'Link' || name === 'Autolink') {
+      const url = node.getChild('URL');
+      if (url) mark(node.from, node.to, 'aegis-cm-link', { 'data-aegis-url': state.sliceDoc(url.from, url.to) });
+    }
+    if (name === 'URL' && parent?.name !== 'Link' && parent?.name !== 'Autolink') {
+      mark(node.from, node.to, 'aegis-cm-link', { 'data-aegis-url': state.sliceDoc(node.from, node.to) });
+    }
+    const marker = name === 'HeaderMark' || name === 'EmphasisMark' || name === 'StrikethroughMark' || (name === 'CodeMark' && parent?.name === 'InlineCode') || ((name === 'LinkMark' || name === 'URL') && parent?.name === 'Link' && !parent.getChild('LinkTitle')) || (name === 'LinkMark' && parent?.name === 'Autolink');
+    if (marker && parent) {
+      const to = node.to + (name === 'HeaderMark' && state.sliceDoc(node.to, node.to + 1) === ' ' ? 1 : 0);
+      const active = focused && state.selection.ranges.some(range => name === 'HeaderMark'
+        ? range.empty ? range.from >= node.from && range.from <= to : range.from < node.to && range.to > node.from
+        : range.from < parent.to && range.to > parent.from);
+      if (!active) hide(node.from, to);
+    }
+  } });
   const flashPos = state.field(headingFlashField, false);
-  if (typeof flashPos === 'number') {
-    const line = state.doc.lineAt(flashPos);
-    decorations.push(Decoration.line({ class: 'aegis-cm-heading-flash' }).range(line.from));
-  }
-
+  if (typeof flashPos === 'number') line(Math.min(flashPos, state.doc.length), 'aegis-cm-heading-flash');
   return Decoration.set(decorations, true);
 }
 
@@ -1736,7 +1786,7 @@ function createLivePreviewDecorationsField(cwd: string, filePath: string): State
 
       const shouldRebuild = transaction.docChanged
         || transaction.selection
-        || transaction.effects.some((effect) => effect.is(markdownHeadingFlashEffect));
+        || transaction.effects.some((effect) => effect.is(markdownHeadingFlashEffect) || effect.is(markdownFocusEffect));
       if (shouldRebuild) {
         return {
           decorations: buildLivePreviewDecorations(transaction.state, cwd, filePath),
@@ -1815,7 +1865,19 @@ class PointerStablePreviewPlugin {
     this.selecting = false;
     this.selectionAnchor = null;
     this.cancelAutoscroll();
+    const selection = this.view.state.selection.main;
+    const scroller = this.view.dom.closest<HTMLElement>('.aegis-md-main');
+    const before = selection.empty ? this.view.coordsAtPos(selection.head)?.top : undefined;
     this.view.dispatch({ effects: markdownPointerSelectingEffect.of(false) });
+    // Revealing/hiding a media source row above the clicked paragraph must not
+    // pull that paragraph out from underneath the mouse on pointer release.
+    if (scroller && before !== undefined) this.view.requestMeasure({
+      key: this,
+      read: view => view.state.selection.main.eq(selection) ? view.coordsAtPos(selection.head)?.top : undefined,
+      write: after => {
+        if (after !== undefined && Math.abs(after - before) > 1) scroller.scrollTop += after - before;
+      },
+    });
   };
 
   private handleDocumentMouseMove = (event: MouseEvent) => {
@@ -1931,9 +1993,24 @@ function createPointerStablePreviewExtension(): Extension {
 }
 
 function createLivePreviewExtension(cwd: string, filePath: string): Extension {
+  const previews = createLivePreviewDecorationsField(cwd, filePath);
+  const moveMedia = (view: EditorView, forward: boolean) => {
+    const media: MediaSourceRange[] = [];
+    const decorations = view.state.field(previews).decorations;
+    for (let cursor = decorations.iter(); cursor.value; cursor.next()) {
+      if (cursor.value.spec.mediaSource) media.push(cursor.value.spec.mediaSource);
+    }
+    return moveThroughMedia(view, forward, media);
+  };
   return [
     headingFlashField,
-    createLivePreviewDecorationsField(cwd, filePath),
+    markdownFocusField,
+    EditorView.focusChangeEffect.of((_view, focused) => markdownFocusEffect.of(focused)),
+    previews,
+    Prec.high(keymap.of([
+      { key: 'ArrowDown', run: view => moveMedia(view, true) },
+      { key: 'ArrowUp', run: view => moveMedia(view, false) },
+    ])),
     createPointerStablePreviewExtension(),
     EditorView.domEventHandlers({
       click: (event) => {
@@ -2198,6 +2275,8 @@ export function ProjectMarkdownEditor({
   cwd,
   filePath,
   fileName,
+  sourceMode = false,
+  scrollTarget,
   hideTitleBar = false,
   windowControlsInset = false,
   saveState,
@@ -2217,6 +2296,7 @@ export function ProjectMarkdownEditor({
   const compositionFlushTimerRef = useRef<number | null>(null);
   const outlineCloseTimerRef = useRef<number | null>(null);
   const headingFlashTimerRef = useRef<number | null>(null);
+  const previewCompartment = useRef(new Compartment());
   const [outlineItems, setOutlineItems] = useState<MarkdownOutlineItem[]>([]);
   const [activeOutlineId, setActiveOutlineId] = useState<string | null>(null);
   const [outlineOpen, setOutlineOpen] = useState(false);
@@ -2276,7 +2356,7 @@ export function ProjectMarkdownEditor({
     composingInputRef.current = false;
     const view = viewRef.current;
     if (view) {
-      const markdown = view.state.doc.toString();
+      const markdown = view.state.sliceDoc();
       if (markdown !== currentFullMarkdownRef.current) {
         emitLocalChange(markdown);
       }
@@ -2360,10 +2440,10 @@ export function ProjectMarkdownEditor({
       emitLocalChange(next);
       return;
     }
-    const current = view.state.doc.toString();
+    const current = view.state.sliceDoc();
     if (current === next) return;
     view.dispatch({
-      changes: { from: 0, to: current.length, insert: next },
+      changes: { from: 0, to: view.state.doc.length, insert: next },
       scrollIntoView: true,
     });
   }, [emitLocalChange]);
@@ -2428,7 +2508,7 @@ export function ProjectMarkdownEditor({
     };
 
     const updateListener = updateListenerFacet.of((update) => {
-      const markdown = update.state.doc.toString();
+      const markdown = update.state.sliceDoc();
       if (update.focusChanged) {
         setEditorFocused(update.view.hasFocus);
       }
@@ -2472,15 +2552,16 @@ export function ProjectMarkdownEditor({
       indentOnInput(),
       history(),
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
-      markdown({ base: markdownLanguage, codeLanguages: languages }),
+      markdown({ base: markdownLanguage, codeLanguages: languages, extensions: [livePreviewMath, markdownWikiEmbeds] }),
       createMarkdownShortcuts(() => onSaveRef.current()),
       createMarkdownInputPairsExtension(),
       createImageInputExtension(insertImageFiles),
-      createLivePreviewExtension(cwd, filePath),
+      previewCompartment.current.of(sourceMode ? [] : createLivePreviewExtension(cwd, filePath)),
       compositionHandlers,
       updateListener,
       EditorView.lineWrapping,
       EditorState.tabSize.of(2),
+      EditorState.lineSeparator.of(value.includes('\r\n') ? '\r\n' : '\n'),
       EditorView.theme({
         '&': { height: '100%' },
         '.cm-scroller': { overflow: 'visible' },
@@ -2523,6 +2604,23 @@ export function ProjectMarkdownEditor({
 
   useEffect(() => {
     const view = viewRef.current;
+    if (!view) return;
+    const scroll = hostRef.current?.closest<HTMLElement>('.aegis-md-main');
+    const top = scroll?.scrollTop ?? 0;
+    view.dispatch({ effects: previewCompartment.current.reconfigure(sourceMode ? [] : createLivePreviewExtension(cwd, filePath)) });
+    if (scroll) scroll.scrollTop = top;
+    view.requestMeasure();
+  }, [sourceMode, cwd, filePath]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || !scrollTarget) return;
+    const pos = view.state.doc.line(Math.max(1, Math.min(scrollTarget.line, view.state.doc.lines))).from;
+    scrollEditorPositionIntoMainView(view, hostRef.current, pos);
+  }, [scrollTarget]);
+
+  useEffect(() => {
+    const view = viewRef.current;
     const pending = pendingLocalValueRef.current;
     if (pending) {
       if (value === pending.latestValue) {
@@ -2541,7 +2639,7 @@ export function ProjectMarkdownEditor({
       currentFullMarkdownRef.current = value;
       return;
     }
-    const current = view.state.doc.toString();
+    const current = view.state.sliceDoc();
     if (value === current) {
       currentFullMarkdownRef.current = value;
       return;
@@ -2550,7 +2648,7 @@ export function ProjectMarkdownEditor({
     applyingPropValueRef.current = true;
     try {
       view.dispatch({
-        changes: { from: 0, to: current.length, insert: value },
+        changes: { from: 0, to: view.state.doc.length, insert: value },
         annotations: Transaction.userEvent.of('external-reload'),
       });
       currentFullMarkdownRef.current = value;
@@ -2572,7 +2670,8 @@ export function ProjectMarkdownEditor({
 
   return (
     <div
-      className={`aegis-md-editor${hideTitleBar ? ' title-hidden' : ''}${
+      data-markdown-editor-mode={sourceMode ? 'source' : 'live'}
+      className={`aegis-md-editor bubble-md-live${sourceMode ? ' is-source-mode' : ''}${hideTitleBar ? ' title-hidden' : ''}${
         windowControlsInset ? ' window-controls-inset' : ''
       }`}
     >
@@ -2604,7 +2703,7 @@ export function ProjectMarkdownEditor({
           />
         </div>
 
-        {outlineItems.length > 0 && (
+        {!sourceMode && outlineItems.length > 0 && (
           <aside
             className={`aegis-md-outline${outlineOpen ? ' is-open' : ''}`}
             aria-label="Document outline"
