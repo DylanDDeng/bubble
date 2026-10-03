@@ -10,3 +10,6 @@ dist-react/
 artifacts/
 
 .dev-sdk-build/
+
+# Electron QA scratch roots (vite cache, seeded sessions)
+dev-fixtures/
