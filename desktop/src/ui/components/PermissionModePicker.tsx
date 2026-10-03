@@ -62,7 +62,7 @@ export function PermissionModePicker<M extends string>({
         title={`Permission mode: ${current?.label ?? value}`}
         data-composer-control="permission"
         data-tone={tone}
-        className={`inline-flex items-center gap-1.5 rounded-lg px-1.5 py-1 text-[12px] font-medium transition-colors hover:bg-[var(--bg-tertiary)] disabled:cursor-not-allowed disabled:opacity-50 ${
+        className={`inline-flex min-w-0 items-center gap-1.5 rounded-lg px-1.5 py-1 text-[12px] font-medium transition-colors hover:bg-[var(--bg-tertiary)] disabled:cursor-not-allowed disabled:opacity-50 ${
           tone === 'full-access'
             ? 'text-[var(--warning)] hover:text-[var(--warning)]'
             : tone === 'danger'
@@ -73,7 +73,12 @@ export function PermissionModePicker<M extends string>({
         {tone === 'full-access' ? (
           <FullAccessPermissionIcon className="h-4 w-4 shrink-0" aria-hidden="true" />
         ) : null}
-        <span>{current?.label ?? value}</span>
+        {/* Two words read worse truncated than icon-only, so this label is the
+            footer's first `secondary`: the composer-footer container query
+            drops it while the shield icon and aria-label stay. */}
+        <span data-composer-footer-label data-composer-footer-collapse="secondary">
+          {current?.label ?? value}
+        </span>
       </button>
 
       </DropdownMenu.Trigger>

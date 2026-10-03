@@ -508,6 +508,7 @@ declare global {
       onState: (callback: (state: SessionBrowserState) => void) => () => void;
       onSendSelection: (callback: (event: BrowserSendSelectionEvent) => void) => () => void;
     };
+    design: import('./shared/design-types').DesignAPI;
     designMode: {
       enable: (
         input: import('./shared/design-mode-types').DesignModeTarget & { projectRoot: string }

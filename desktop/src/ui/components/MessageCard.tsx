@@ -16,6 +16,7 @@ import {
   type PromptPrefixDisplay,
 } from './PromptPrefixChip';
 import { ToolExecutionBatch } from './ToolExecutionBatch';
+import { DesignCommentPromptRow } from './design/DesignCommentPromptRow';
 import { getContentBlocks, isAnyToolUseBlockType } from '../utils/message-content';
 import { buildProviderSlashCommands, getSessionSlashCommands, parseSelectedSlashCommandPrompt } from '../utils/claude-slash';
 import type { ClaudeSkillSummary } from '../types';
@@ -65,6 +66,15 @@ export function MessageCard({
 }: MessageCardProps) {
   switch (message.type) {
     case 'user_prompt':
+      if (message.design)
+        return (
+          <DesignCommentPromptRow
+            prompt={message.prompt}
+            design={message.design}
+            sessionId={sessionId}
+            attachments={message.attachments}
+          />
+        );
       return (
         <UserPromptCard
           prompt={message.prompt}

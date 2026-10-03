@@ -28,12 +28,25 @@ async function run() {
   };
   let created = 0;
   const sentModels = [];
+  const records = [];
   const sdk = {
     registry: makeRegistry(),
     getModelConfig: () => ({ defaultModel: 'openai:gpt-5.1', providers: [{ id: 'openai', hasApiKey: true }] }),
     createSession: () => ({ id: `fixture-${++created}` }),
     deleteSession: () => {},
-    async *runTurn(id, options) { sentModels.push(options.model); yield { type: 'agent_end' }; },
+    runTurn(id, options) {
+      sentModels.push(options.model);
+      records.push({ sequence: records.length + 1, event: { type: 'agent_end' }, terminal: { kind: 'completed' } });
+      return (async function* () { yield { type: 'agent_end' }; })();
+    },
+    openSession: () => ({
+      get latestSequence() { return records.length; },
+      async *eventsFrom(cursor) { yield* records.slice(cursor); },
+      close() {},
+    }),
+    getSessionRunState: () => ({ active: false, queuedTurns: 0 }),
+    stop() {},
+    async stopAndWait() { return 0; },
   };
   const loader = require('../../dist-electron/electron/libs/provider/bubble-sdk-loader.js');
   loader.getBubbleSdk = async () => sdk;
@@ -113,8 +126,21 @@ async function run() {
   assert.equal(config.availableModels[0].defaultReasoningLevel, 'medium');
   assert.equal(config.availableModels[0].maxContextSize, 1000000);
   assert.equal((await sdk.registry.discoverModels(profile)).source, 'static');
+  profile = { ...getBuiltinProvider('opencode-zen'), authType: 'api', apiKey: 'zen-fixture', enabled: true };
+  sdk.registry = makeRegistry();
+  sdk.getModelConfig = () => ({ defaultModel: 'opencode-zen:space-bunny-free', providers: [{ id: 'opencode-zen', hasApiKey: true }] });
+  config = await settings.getBubbleModelConfig();
+  assert.equal(config.defaultModel, 'opencode-zen:space-bunny-free');
+  assert(config.options.includes('opencode-zen:space-bunny-free'));
+  const bunny = config.availableModels.find(model => model.name === 'opencode-zen:space-bunny-free');
+  assert(bunny, 'Space Bunny is available in the desktop catalog');
+  assert.equal(bunny.label, 'Space Bunny Free');
+  assert.deepEqual(bunny.reasoningLevels, ['low', 'medium', 'high', 'xhigh', 'max']);
+  assert.equal(bunny.defaultReasoningLevel, 'high');
+  assert.equal(bunny.maxContextSize, 1048576);
   console.log('PASS: real SDK HTTP discovery, expired cache restore, offline desktop fallback, account isolation, empty success and start/send/one-shot guards');
   console.log('PASS: MiMo Token Plan model selection and thinking/context metadata');
+  console.log('PASS: OpenCode Zen Space Bunny desktop selection and thinking/context metadata');
 }
 
 app.whenReady().then(run).then(() => finish(0), error => { console.error(error); finish(1); });

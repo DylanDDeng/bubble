@@ -53,6 +53,7 @@ export function getRightUtilityTabKind(
   target: ProjectUtilityPanelTarget
 ): ProjectUtilityPanelKind {
   if (target.startsWith('images:')) return 'images';
+  if (target.startsWith('design:')) return 'design';
   if (target.startsWith('goal:')) return 'goal';
   if (isRightUtilityFileTab(target)) return 'files';
   if (isRightUtilityBrowserTab(target)) return 'browser';
@@ -148,10 +149,10 @@ export function resolveProjectFileUtilityTab(
 
 /** Full view belongs to the workspace; carry it across supported tool tabs. */
 export function resolveRightUtilityFullscreen(
-  current: 'files' | 'review' | 'browser' | 'images' | null,
+  current: 'files' | 'review' | 'browser' | 'images' | 'design' | null,
   target: ProjectUtilityPanelTarget | null,
-): 'files' | 'review' | 'browser' | 'images' | null {
+): 'files' | 'review' | 'browser' | 'images' | 'design' | null {
   if (!current || !target) return null;
   const kind = getRightUtilityTabKind(target);
-  return kind === 'files' || kind === 'review' || kind === 'browser' || kind === 'images' ? kind : null;
+  return kind === 'files' || kind === 'review' || kind === 'browser' || kind === 'images' || kind === 'design' ? kind : null;
 }

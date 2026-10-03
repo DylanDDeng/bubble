@@ -7,11 +7,11 @@
  * older history becomes unreachable. This pure helper decides when to
  * auto-load the next older page instead, with two hard stops so a giant
  * single-turn session (whose pages add zero pixels) cannot quadratically
- * hydrate itself: a per-session page cap and a no-progress stall cap. Past
- * either cap the manual "Load earlier messages" affordance takes over.
+ * hydrate itself: a per-batch page cap and a no-progress stall cap. Past
+ * either cap, a new gesture toward older history starts another bounded batch.
  */
 
-/** Auto-fill at most this many pages per session view. */
+/** Auto-fill at most this many pages per view or explicit scroll gesture. */
 export const AUTO_FILL_MAX_PAGES = 3;
 /** Stop after this many auto-loads that made no progress (failed IPC etc.). */
 export const AUTO_FILL_MAX_STALLS = 3;

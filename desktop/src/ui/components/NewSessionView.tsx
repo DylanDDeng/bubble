@@ -577,15 +577,15 @@ export function NewSessionView() {
 
                 {/* Control order mirrors PromptInput: attach and permissions on
                     the left; model and send on the right. */}
-                <div className="aegis-composer-toolbar flex items-end justify-between gap-2 px-2.5 pb-2">
-                  <div className="aegis-composer-leading-controls flex min-w-0 flex-1 items-center gap-1 overflow-visible">
+                <div className="aegis-composer-toolbar flex flex-wrap items-center justify-between gap-2 px-2.5 pb-2">
+                  <div className="aegis-composer-leading-controls flex min-w-0 flex-1 flex-nowrap items-center gap-1">
                     <button
                       type="button"
                       onClick={() => {
                         void handleAddAttachments();
                       }}
                       disabled={pendingStart}
-                      className="flex h-8 w-8 items-center justify-center rounded-full text-[var(--text-secondary)] transition-all duration-150 hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
+                      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[var(--text-secondary)] transition-all duration-150 hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
                       title="Add files or photos"
                       aria-label="Add files or photos"
                     >
@@ -687,7 +687,7 @@ export function NewSessionView() {
                       )}
                   </div>
 
-                  <div className="aegis-composer-trailing-controls flex shrink-0 items-center gap-2">
+                  <div className="aegis-composer-trailing-controls flex min-w-0 items-center gap-2">
                     <ComposerAgentModelPicker
                       agentProvider={agentSelection.provider}
                       modelLabel={agentSelection.selectedModelLabel}
@@ -735,7 +735,7 @@ export function NewSessionView() {
                       title={hasSelectedCwd ? 'Send' : 'Choose project and send'}
                       onClick={handleStart}
                       disabled={!canStartTask}
-                      className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--text-primary)] text-[var(--bg-primary)] transition-all duration-150 hover:scale-105 no-drag disabled:cursor-not-allowed disabled:opacity-20 disabled:hover:scale-100"
+                      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--text-primary)] text-[var(--bg-primary)] transition-all duration-150 hover:scale-105 no-drag disabled:cursor-not-allowed disabled:opacity-20 disabled:hover:scale-100"
                     >
                       {pendingStart ? (
                         <span className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />

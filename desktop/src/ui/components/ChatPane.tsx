@@ -88,6 +88,24 @@ function isNearScrollBottom(container: HTMLDivElement): boolean {
   );
 }
 
+// Preserve native scroll chaining: a tool output, code block, or text area
+// should consume the gesture while it can still scroll toward its own top.
+function canScrollTranscriptEarlier(container: HTMLElement, target: EventTarget | null): boolean {
+  let element = target instanceof Element ? target : null;
+  while (element && element !== container) {
+    const style = getComputedStyle(element);
+    if (
+      /^(auto|scroll)$/.test(style.overflowY) &&
+      element.scrollHeight > element.clientHeight &&
+      (element.scrollTop > 0 || /^(contain|none)$/.test(style.overscrollBehaviorY))
+    ) {
+      return false;
+    }
+    element = element.parentElement;
+  }
+  return element === container;
+}
+
 function rememberChatScrollPosition(key: string, container: HTMLDivElement): void {
   chatPaneScrollPositions.set(key, {
     scrollTop: container.scrollTop,
@@ -1530,39 +1548,21 @@ export function ChatPane({
   ]);
 
   const autoFillStateRef = useRef(initialAutoFillState());
-  // Manual Load-earlier feedback: a prepended page can render zero new rows
-  // (it merges into an existing collapsed work group), which would make the
-  // button look broken — report the raw prepended count instead.
-  const manualLoadBaselineRef = useRef<number | null>(null);
-  const [manualLoadFeedback, setManualLoadFeedback] = useState<string | null>(null);
+  const historyTouchYRef = useRef<number | null>(null);
 
   useEffect(() => {
     scrollHeightBeforeLoadRef.current = 0;
     setHighlightedHistoryAnchor(null);
     autoFillStateRef.current = initialAutoFillState();
-    manualLoadBaselineRef.current = null;
-    setManualLoadFeedback(null);
+    historyTouchYRef.current = null;
   }, [sessionId]);
-
-  useEffect(() => {
-    if (session?.loadingMoreHistory) return;
-    const baseline = manualLoadBaselineRef.current;
-    if (baseline === null || !session) return;
-    manualLoadBaselineRef.current = null;
-    const added = session.messages.length - baseline;
-    if (added > 0) {
-      setManualLoadFeedback(`Loaded ${added} earlier ${added === 1 ? 'message' : 'messages'}`);
-      const timer = window.setTimeout(() => setManualLoadFeedback(null), 2500);
-      return () => window.clearTimeout(timer);
-    }
-    return undefined;
-  }, [session, session?.loadingMoreHistory, session?.messages.length]);
 
   // Viewport fill: a page of tool-heavy history collapses into a few
   // "Show work" rows and can render shorter than the viewport — no
   // scrollbar means the scroll-driven loader below is unreachable. Keep
   // loading older pages until the transcript overflows, within the pure
-  // helper's page/stall caps (past them the Load-earlier button takes over).
+  // helper's page/stall caps. Scrolling toward older history starts another
+  // bounded batch even when collapsed work leaves no scrollbar.
   useEffect(() => {
     const container = scrollContainerRef.current;
     if (!container || !sessionId || !session) return;
@@ -1590,6 +1590,22 @@ export function ChatPane({
     session?.historyCursor,
     loadOlderSessionHistory,
   ]);
+
+  const handleEarlierHistoryIntent = useCallback((target: EventTarget | null) => {
+    const container = scrollContainerRef.current;
+    if (!container || !sessionId || container.scrollTop >= 200) return;
+    if (!canScrollTranscriptEarlier(container, target)) return;
+    const current = useAppStore.getState().sessions[sessionId];
+    if (!current?.hydrated || !current.hasMoreHistory || !current.historyCursor || current.loadingMoreHistory) return;
+    autoFillStateRef.current = {
+      pages: 1,
+      stalls: 0,
+      lastMessageCount: current.messages.length,
+      lastCursor: current.historyCursor,
+    };
+    scrollHeightBeforeLoadRef.current = container.scrollHeight;
+    loadOlderSessionHistory(sessionId);
+  }, [sessionId, loadOlderSessionHistory]);
 
   const handleScroll = useCallback(() => {
     const container = scrollContainerRef.current;
@@ -1883,6 +1899,33 @@ export function ChatPane({
             ref={scrollContainerRef}
             data-chat-scroll-container
             onScroll={handleScroll}
+            tabIndex={0}
+            onWheel={(event) => {
+              if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+              if (event.deltaY < 0) handleEarlierHistoryIntent(event.target);
+            }}
+            onTouchStart={(event) => {
+              historyTouchYRef.current = event.touches.length === 1 ? event.touches[0].clientY : null;
+            }}
+            onTouchMove={(event) => {
+              if (event.touches.length !== 1) {
+                historyTouchYRef.current = null;
+                return;
+              }
+              const y = event.touches[0]?.clientY;
+              if (y === undefined || historyTouchYRef.current === null) return;
+              if (y - historyTouchYRef.current > 10) {
+                historyTouchYRef.current = y;
+                handleEarlierHistoryIntent(event.target);
+              }
+            }}
+            onTouchEnd={() => { historyTouchYRef.current = null; }}
+            onTouchCancel={() => { historyTouchYRef.current = null; }}
+            onKeyDown={(event) => {
+              if (event.target !== event.currentTarget) return;
+              if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+              if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) handleEarlierHistoryIntent(event.target);
+            }}
             className="flex-1 overflow-auto p-4 relative"
           >
             {isActive ? <InSessionSearch /> : null}
@@ -1916,40 +1959,19 @@ export function ChatPane({
                 </div>
               )}
 
-              {(session.hasMoreHistory || session.hydrationError) && (
+              {session.hydrationError && !session.hydrated && (
                 <div className="mb-4 flex flex-col items-center gap-1">
                   <button
                     type="button"
                     disabled={session.loadingMoreHistory}
                     onClick={() => {
                       if (!sessionId) return;
-                      if (session.hydrationError && !session.hydrated) {
-                        retrySessionHydration(sessionId);
-                        return;
-                      }
-                      const container = scrollContainerRef.current;
-                      if (container) {
-                        scrollHeightBeforeLoadRef.current = container.scrollHeight;
-                      }
-                      manualLoadBaselineRef.current = session.messages.length;
-                      loadOlderSessionHistory(sessionId);
+                      retrySessionHydration(sessionId);
                     }}
                     className="flex items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--bg-secondary)] px-4 py-2 text-sm text-[var(--text-secondary)] transition-colors duration-150 hover:text-[var(--text-primary)] disabled:opacity-70"
                   >
-                    {session.loadingMoreHistory ? (
-                      <>
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        Loading earlier messages…
-                      </>
-                    ) : session.hydrationError && !session.hydrated ? (
-                      'Retry loading history'
-                    ) : (
-                      'Load earlier messages'
-                    )}
+                    Retry loading history
                   </button>
-                  {manualLoadFeedback && !session.loadingMoreHistory ? (
-                    <span className="text-[11px] text-[var(--text-muted)]">{manualLoadFeedback}</span>
-                  ) : null}
                 </div>
               )}
 

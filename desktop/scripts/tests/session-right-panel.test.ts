@@ -195,6 +195,10 @@ function testEmptySessionKeepsPanelCollapsed() {
 }
 
 function main() {
+  const design = persistRightPanelBySessionId({ a: snapshot({ tabs: ['design', 'design:canvas-a'], activeTab: 'design:canvas-a', fullscreen: 'design' }) });
+  assert.deepEqual(design.a.tabs, ['design', 'design:canvas-a']);
+  assert.equal(design.a.activeTab, 'design:canvas-a');
+  assert.equal(liveFieldsFromRightPanel(design.a).rightPanelFullscreen, 'design');
   testSameCwdSessionsKeepIndependentPanels();
   testPersistStripsEphemeralTabs();
   testMigrateDraftKeepsOpenFiles();

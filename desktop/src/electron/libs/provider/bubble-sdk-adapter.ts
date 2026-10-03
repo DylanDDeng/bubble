@@ -1,3 +1,5 @@
+import { createDesignTools } from '../../design/tools';
+import { settleDesignTurn } from '../../design/service';
 import { assertBubbleSessionReader } from '../bubble-session-reader';
 import { getBubbleModelConfig } from '../bubble-settings';
 import { bubbleModelSelectionError } from '../../../shared/bubble-model-selection';
@@ -21,6 +23,7 @@ import type {
 } from '../../../shared/types';
 import { buildPromptText } from './bubble-prompt-text';
 import { toolInputPreview } from './tool-input-preview';
+import { StreamDeltaCoalescer } from '../../../shared/stream-delta-coalescer';
 import type {
   ProviderAdapter,
   ProviderAdapterCapabilities,
@@ -34,6 +37,7 @@ import type {
 import {
   getBubbleSdk,
   getBubbleSessionManager,
+  bundledSkillPaths,
   type BubbleAgentEvent,
   type BubbleApprovalDecision,
   type BubbleApprovalRequest,
@@ -76,6 +80,30 @@ type BubbleAssistantAccumulator = {
   createdAt: number;
 };
 
+type PendingBubblePreparation = {
+  finished: Promise<void>;
+  resolve: () => void;
+  error?: unknown;
+};
+
+function pendingPreparation(): PendingBubblePreparation {
+  let resolve!: () => void;
+  const finished = new Promise<void>(done => { resolve = done; });
+  return { finished, resolve };
+}
+
+// Cancelling metadata lookup must not wait for a remote catalog response.
+async function duringSetup<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  let cancel!: () => void;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    cancel = () => reject(new Error('Bubble task stopped during preparation.'));
+    if (signal.aborted) cancel();
+    else signal.addEventListener('abort', cancel, { once: true });
+  });
+  try { return await Promise.race([work, aborted]); }
+  finally { signal.removeEventListener('abort', cancel); }
+}
+
 type ActiveBubbleSession = {
   threadId: string;
   providerSessionId: string;
@@ -92,6 +120,9 @@ type ActiveBubbleSession = {
   lastContextTokens?: number;
   turnActive: boolean;
   abortController: AbortController | null;
+  setupAbort: AbortController;
+  startup: PendingBubblePreparation;
+  preparation?: PendingBubblePreparation;
   pendingRequests: Map<string, PendingBubbleRequest>;
   currentAssistant: BubbleAssistantAccumulator | null;
   pendingRetryId?: string;
@@ -359,25 +390,34 @@ export class BubbleSdkAdapter implements ProviderAdapter {
   readonly events = new EventEmitter();
 
   private sessions = new Map<string, ActiveBubbleSession>();
+  private readonly streamMessages = new StreamDeltaCoalescer();
+
+  constructor() {
+    this.streamMessages.setEmitter(({ sessionId, message }) => {
+      this.events.emit('event', { type: 'message', threadId: sessionId, message });
+    });
+  }
 
   async startSession(input: ProviderSessionStartInput): Promise<ProviderSession> {
     const cwd = input.cwd || process.cwd();
-    const sdk = await getBubbleSdk(cwd);
-    this.assertConfigured(sdk);
-    const model = await this.resolveCatalogModel(sdk, input.model);
-    const providerSessionId = this.resolveSessionId(sdk, input.resumeSessionId, cwd);
-
+    // Publish a stable cursor before the first await. The desktop can persist
+    // it even if the user stops while the SDK itself is still loading.
+    const providerSessionId = input.resumeSessionId?.trim() || `sdk-${uuidv4()}`;
+    const previous = this.sessions.get(input.threadId);
+    this.disposeSession(input.threadId);
     const session: ActiveBubbleSession = {
       threadId: input.threadId,
       providerSessionId,
       status: 'running',
       cwd,
-      model,
+      model: input.model,
       permissionMode: input.bubblePermissionMode,
       planExitMode: input.bubblePlanExitMode,
       thinkingLevel: input.bubbleThinkingLevel?.trim() || undefined,
       turnActive: false,
       abortController: null,
+      setupAbort: new AbortController(),
+      startup: pendingPreparation(),
       pendingRequests: new Map(),
       currentAssistant: null,
       emittedToolCallIds: new Set(),
@@ -390,37 +430,56 @@ export class BubbleSdkAdapter implements ProviderAdapter {
       toolNames: new Map(),
       heldSpawnResults: new Map(),
     };
-    // Never orphan a previous session for the same thread — an undisposed
-    // predecessor would leak its abort handle and pending approval cards.
-    this.disposeSession(input.threadId);
     this.sessions.set(input.threadId, session);
 
-    this.emit({
-      type: 'system_init',
-      threadId: input.threadId,
-      sessionId: providerSessionId,
-      model: session.model,
-    });
-
-    if (input.prompt || input.attachments?.length) {
-      await this.sendTurn({
+    try {
+      this.emit({
+        type: 'system_init',
         threadId: input.threadId,
-        prompt: input.prompt,
-        attachments: input.attachments,
-        model: input.model,
-        bubblePermissionMode: input.bubblePermissionMode,
-        bubblePlanExitMode: input.bubblePlanExitMode,
-        bubbleThinkingLevel: input.bubbleThinkingLevel,
+        sessionId: providerSessionId,
+        model: session.model,
       });
+      const sdk = await getBubbleSdk(cwd);
+      if (previous) {
+        await previous.startup.finished;
+        await previous.preparation?.finished;
+        await sdk.stopAndWait(previous.providerSessionId, { cancelQueued: true });
+      }
+      if (input.prompt || input.attachments?.length) {
+        this.resolveSessionId(sdk, input.resumeSessionId, cwd, providerSessionId);
+        await this.sendTurnForSession(session, {
+          threadId: input.threadId,
+          prompt: input.prompt,
+          attachments: input.attachments,
+          model: input.model,
+          bubblePermissionMode: input.bubblePermissionMode,
+          bubblePlanExitMode: input.bubblePlanExitMode,
+          bubbleThinkingLevel: input.bubbleThinkingLevel,
+        });
+      } else if (!session.setupAbort.signal.aborted) {
+        this.assertConfigured(sdk);
+        session.model = await duringSetup(this.resolveCatalogModel(sdk, input.model), session.setupAbort.signal);
+        this.resolveSessionId(sdk, input.resumeSessionId, cwd, providerSessionId);
+      }
+      return {
+        threadId: input.threadId,
+        provider: 'bubble',
+        providerSessionId,
+        status: session.status,
+        model: session.model,
+      };
+    } catch (error) {
+      session.startup.error = error;
+      // A failed fresh start must not leave an unusable resume cursor in the
+      // desktop database. Stopped starts keep theirs for their saved input.
+      if (!input.resumeSessionId && !session.setupAbort.signal.aborted) {
+        this.emit({ type: 'system_init', threadId: input.threadId, sessionId: '', model: session.model });
+      }
+      if (this.sessions.get(input.threadId) === session) this.sessions.delete(input.threadId);
+      throw error;
+    } finally {
+      session.startup.resolve();
     }
-
-    return {
-      threadId: input.threadId,
-      provider: 'bubble',
-      providerSessionId,
-      status: session.status,
-      model: session.model,
-    };
   }
 
   async sendTurn(input: ProviderSendTurnInput): Promise<void> {
@@ -428,8 +487,26 @@ export class BubbleSdkAdapter implements ProviderAdapter {
     if (!session) {
       throw new Error(`No Bubble session found for thread "${input.threadId}"`);
     }
+    if (session.setupAbort.signal.aborted) throw new Error('Bubble session is stopping. Please retry after it stops.');
+    await this.sendTurnForSession(session, input);
+  }
+
+  private async sendTurnForSession(session: ActiveBubbleSession, input: ProviderSendTurnInput): Promise<void> {
     if (session.turnActive) {
-      throw new Error(`Bubble is already running a turn for thread "${input.threadId}"`);
+      // The SDK owns admission and the end-of-turn race: unapplied steering
+      // automatically becomes a new turn, observed by the session event loop.
+      if (input.attachments?.length) throw new Error('Queue attachments until the current Bubble turn finishes.');
+      const sdk = await getBubbleSdk(session.cwd);
+      if (this.sessions.get(input.threadId) !== session || session.status === 'stopped') {
+        throw new Error('Bubble session stopped before steering could be delivered.');
+      }
+      if (session.turnActive) {
+        this.flushAssistant(session, 'commentary');
+        const result = sdk.steer(session.providerSessionId, input.prompt);
+        if (!result.accepted) throw new Error(`Bubble could not accept steering: ${result.reason}`);
+        return;
+      }
+      // The observed turn settled during SDK loading; send a normal turn.
     }
 
     // Manual `/compact` is handled locally (mirrors Claude Code): it compacts
@@ -441,44 +518,64 @@ export class BubbleSdkAdapter implements ProviderAdapter {
       return;
     }
 
-    const text = buildPromptText(input.prompt, input.attachments);
-    const prompt = await buildPromptParts(text, input.attachments);
-    if (typeof prompt === 'string' && !prompt.trim()) {
-      return;
+    if (session.preparation) throw new Error('Bubble is already preparing a turn. Please retry.');
+    const preparation = pendingPreparation();
+    session.preparation = preparation;
+    try {
+      const sdk = await getBubbleSdk(session.cwd);
+      // Finish materializing attachments even when stopped: the continuation
+      // must retain their bytes, not depend on an attachment file still existing.
+      const text = buildPromptText(input.prompt, input.attachments);
+      const prompt = await buildPromptParts(text, input.attachments);
+      if (typeof prompt === 'string' && !prompt.trim()) return;
+      let model: string;
+      try {
+        if (session.setupAbort.signal.aborted) throw new Error('Preparation stopped');
+        this.assertConfigured(sdk);
+        model = await duringSetup(this.resolveCatalogModel(sdk, input.model ?? session.model), session.setupAbort.signal);
+      } catch (error) {
+        if (!session.setupAbort.signal.aborted) throw error;
+        sdk.recordInterruptedInput(session.providerSessionId, prompt);
+        return;
+      }
+      if (session.setupAbort.signal.aborted) {
+        sdk.recordInterruptedInput(session.providerSessionId, prompt);
+        return;
+      }
+      if (session.turnActive || this.sessions.get(input.threadId) !== session) {
+        throw new Error('Bubble session changed while preparing the turn. Please retry.');
+      }
+      session.model = model;
+      if (input.bubblePermissionMode) {
+        session.permissionMode = input.bubblePermissionMode;
+        // Paired with the mode: a send that omits the exit mode falls back to
+        // default instead of inheriting an earlier send's escalation.
+        session.planExitMode = input.bubblePlanExitMode;
+      }
+      // Per-turn thinking level: a string switches it; undefined keeps the
+      // session's current level (the warm envelope omits it for non-bubble
+      // turns and when the composer has no selection — both mean "default").
+      if (typeof input.bubbleThinkingLevel === 'string') {
+        session.thinkingLevel = input.bubbleThinkingLevel.trim() || undefined;
+      }
+      session.status = 'running';
+      session.turnActive = true;
+      session.durationStartMs = Date.now();
+      session.durationEndMs = undefined;
+      session.usage = createEmptyUsage();
+      session.totalCostUsd = 0;
+      session.currentAssistant = null;
+      session.pendingRetryId = undefined;
+      // Reserve SDK execution before broadcasting running, so an immediate
+      // follow-up inherits this turn's model and approval callbacks.
+      void this.runTurnLoop(session, prompt, session.model, sdk);
+    } catch (error) {
+      preparation.error = error;
+      throw error;
+    } finally {
+      preparation.resolve();
+      if (session.preparation === preparation) session.preparation = undefined;
     }
-
-    const sdk = await getBubbleSdk(session.cwd);
-    const model = await this.resolveCatalogModel(sdk, input.model ?? session.model);
-    // Validation yields to the event loop; another send may have won the turn.
-    if (session.turnActive || this.sessions.get(input.threadId) !== session) {
-      throw new Error('Bubble session changed while preparing the turn. Please retry.');
-    }
-    session.model = model;
-    if (input.bubblePermissionMode) {
-      session.permissionMode = input.bubblePermissionMode;
-      // Paired with the mode: a send that omits the exit mode falls back to
-      // default instead of inheriting an earlier send's escalation.
-      session.planExitMode = input.bubblePlanExitMode;
-    }
-    // Per-turn thinking level: a string switches it; undefined keeps the
-    // session's current level (the warm envelope omits it for non-bubble
-    // turns and when the composer has no selection — both mean "default").
-    if (typeof input.bubbleThinkingLevel === 'string') {
-      session.thinkingLevel = input.bubbleThinkingLevel.trim() || undefined;
-    }
-    session.status = 'running';
-    session.turnActive = true;
-    session.durationStartMs = Date.now();
-    session.durationEndMs = undefined;
-    session.usage = createEmptyUsage();
-    session.totalCostUsd = 0;
-    session.currentAssistant = null;
-    session.pendingRetryId = undefined;
-    this.emit({ type: 'status_change', threadId: input.threadId, status: 'running' });
-
-    // The turn loop consumes the runTurn generator for the whole turn; it
-    // routes its own failures, so the floating promise never rejects.
-    void this.runTurnLoop(session, prompt, session.model);
   }
 
   async stopSession(threadId: string): Promise<void> {
@@ -487,22 +584,29 @@ export class BubbleSdkAdapter implements ProviderAdapter {
       return;
     }
     session.status = 'stopped';
-    try {
-      const sdk = await getBubbleSdk(session.cwd);
-      // Aborting is safe: the SDK auto-rejects pending approvals/questions of
-      // the aborted turn, so no adapter-side settlement is required beyond
-      // clearing the UI cards below.
-      sdk.stop(session.providerSessionId);
-    } catch {
-      // The SDK may not be loaded yet or the turn already idle.
-    }
+    session.setupAbort.abort();
     session.abortController?.abort();
     this.dismissAllRequests(session);
-    this.sessions.delete(threadId);
-    this.emit({ type: 'status_change', threadId, status: 'stopped' });
+    const preparing = session.preparation;
+    try {
+      await session.startup.finished;
+      await preparing?.finished;
+      if (session.startup.error) throw session.startup.error;
+      if (preparing?.error) throw preparing.error;
+      const sdk = await getBubbleSdk(session.cwd);
+      // The replacement runner awaits this promise. SDK stop() only requests
+      // cancellation; wait for durable history and the old terminal event too.
+      await sdk.stopAndWait(session.providerSessionId, { cancelQueued: true });
+    } finally {
+      if (this.sessions.get(threadId) === session) {
+        this.sessions.delete(threadId);
+        this.emit({ type: 'status_change', threadId, status: 'stopped' });
+      }
+    }
   }
 
   disposeSession(threadId: string): boolean {
+    this.streamMessages.discardSession(threadId);
     const session = this.sessions.get(threadId);
     if (!session) {
       return false;
@@ -511,6 +615,7 @@ export class BubbleSdkAdapter implements ProviderAdapter {
     this.sessions.delete(threadId);
     try {
       session.status = 'stopped';
+      session.setupAbort.abort();
       session.abortController?.abort();
       // Emits per-requestId permission_dismissed — the one emission dispose
       // allows (clears stranded cards; cannot be misread by stop gates).
@@ -642,7 +747,7 @@ export class BubbleSdkAdapter implements ProviderAdapter {
 
   async listSkills(input: ProviderListSkillsInput): Promise<ProviderListSkillsResult> {
     const sdk = await getBubbleSdk(input.cwd);
-    const skills = sdk.listSkills(input.cwd);
+    const skills = sdk.listSkills(input.cwd, bundledSkillPaths());
     return {
       skills: skills.map((skill) => ({
         name: skill.name,
@@ -804,14 +909,28 @@ export class BubbleSdkAdapter implements ProviderAdapter {
   private async runTurnLoop(
     session: ActiveBubbleSession,
     prompt: string | BubbleContentPart[],
-    model: string | undefined
+    model: string | undefined,
+    sdk: BubbleSdkInstance
   ): Promise<void> {
     const abortController = new AbortController();
     session.abortController = abortController;
+    let closeEvents: (() => void) | undefined;
     try {
-      const sdk = await getBubbleSdk(session.cwd);
-      const stream = sdk.runTurn(session.providerSessionId, {
+      if (abortController.signal.aborted) return;
+      const handle = sdk.openSession(session.providerSessionId);
+      const stream = handle.eventsFrom(handle.latestSequence);
+      closeEvents = () => handle.close();
+      abortController.signal.addEventListener('abort', () => {
+        sdk.stop(session.providerSessionId, { cancelQueued: true });
+        handle.close();
+      }, { once: true });
+      // runTurn eagerly starts execution. The session subscription also sees
+      // SDK-created fallback turns, which the original turn iterator cannot.
+      sdk.runTurn(session.providerSessionId, {
         prompt,
+        preserveInterruptedInput: true,
+        hostTools: createDesignTools(session.threadId, abortController.signal),
+        skillPaths: bundledSkillPaths(),
         ...(model ? { model } : {}),
         ...(session.permissionMode ? { mode: session.permissionMode } : {}),
         ...(session.planExitMode ? { planExitMode: session.planExitMode } : {}),
@@ -835,18 +954,39 @@ export class BubbleSdkAdapter implements ProviderAdapter {
         onPlanApproval: (planMarkdown) => this.requestPlanApproval(session, planMarkdown),
         onProjectTrust: (request) => this.requestProjectTrust(session, request.pending),
       });
-      for await (const event of stream) {
-        this.handleBubbleEvent(session, event);
-      }
-      this.finishTurn(session, null);
-    } catch (error) {
-      this.finishTurn(session, error instanceof Error ? error : new Error(String(error)));
-    } finally {
-      if (session.abortController === abortController) {
-        session.abortController = null;
+      this.emit({ type: 'status_change', threadId: session.threadId, status: 'running' });
+      for await (const record of stream) {
+        if (session.status === 'stopped' || this.sessions.get(session.threadId) !== session) break;
+        this.handleBubbleEvent(session, record.event);
+        if (record.terminal?.kind === 'failed' || record.terminal?.kind === 'cancelled') {
+          throw new Error(record.terminal.message);
+        }
+        if (record.terminal?.kind === 'completed' && record.sequence === handle.latestSequence
+          && !sdk.getSessionRunState(session.providerSessionId).active) break;
       }
       session.turnActive = false;
+      session.abortController = null;
       this.dismissAllRequests(session);
+      this.finishTurn(session, null);
+    } catch (error) {
+      abortController.abort();
+      session.turnActive = false;
+      session.abortController = null;
+      this.dismissAllRequests(session);
+      this.finishTurn(session, error instanceof Error ? error : new Error(String(error)));
+    } finally {
+      closeEvents?.();
+      if (session.abortController === abortController) {
+        session.abortController = null;
+        session.turnActive = false;
+        this.dismissAllRequests(session);
+      }
+      // Complete, error and stop all end here; finishTurn returns early on stop.
+      try {
+        settleDesignTurn(session.threadId);
+      } catch (error) {
+        console.warn('[design] Failed to settle comments after turn', error);
+      }
     }
   }
 
@@ -1577,28 +1717,23 @@ export class BubbleSdkAdapter implements ProviderAdapter {
   // ── Session resolution ─────────────────────────────────────────────────
 
   /**
-   * Bubble sessions persist lazily (nothing on disk before the first
-   * message), so an unknown resume id just means "start fresh". A known id
-   * resolves through the SDK's on-disk index regardless of host restarts.
+   * Resume through the durable index, including inputs stopped during setup.
+   * A missing resume record must never silently turn a follow-up into a new
+   * conversation with no original task.
    */
   private resolveSessionId(
     sdk: BubbleSdkInstance,
     resumeSessionId: string | undefined,
-    cwd: string
+    cwd: string,
+    newSessionId: string
   ): string {
     const normalized = resumeSessionId?.trim();
     if (normalized) {
-      try {
-        const match = sdk.listSessions().find((summary) => summary.name === normalized);
-        if (match) {
-          return normalized;
-        }
-        console.warn('[BubbleSdkAdapter] Bubble session not found on disk, creating a new one:', normalized);
-      } catch (error) {
-        console.warn('[BubbleSdkAdapter] failed to list Bubble sessions for resume:', error);
-      }
+      const match = sdk.listSessions().find((summary) => summary.name === normalized);
+      if (match) return normalized;
+      throw new Error(`Cannot resume Bubble session "${normalized}": its saved history is missing. No new session was created.`);
     }
-    return sdk.createSession({ cwd }).id;
+    return sdk.createSession({ cwd, id: newSessionId }).id;
   }
 
   private async resolveCatalogModel(sdk: BubbleSdkInstance, requested?: string, allowDefault = false): Promise<string> {
@@ -1633,6 +1768,12 @@ export class BubbleSdkAdapter implements ProviderAdapter {
   }
 
   private emit(event: ProviderRuntimeEvent): void {
+    if (event.type === 'message') {
+      if (this.streamMessages.push({ sessionId: event.threadId, message: event.message })) return;
+    } else if ('threadId' in event && event.threadId) {
+      // Status, approval and error boundaries must never overtake text.
+      this.streamMessages.flushSession(event.threadId);
+    }
     this.events.emit('event', event);
   }
 }

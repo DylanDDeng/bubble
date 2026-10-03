@@ -33,6 +33,7 @@ import {
 } from '../store/useComposerQueueStore';
 import { useShallow } from 'zustand/react/shallow';
 import { sendEvent } from '../hooks/useIPC';
+import { flushCompletedQueue } from '../lib/queue-auto-flush';
 import type { Attachment } from '../types';
 import { AttachmentChips } from './AttachmentChips';
 import { useAttachmentImport } from '../hooks/useAttachmentImport';
@@ -521,7 +522,7 @@ export function PromptInput({
     [activeSession?.messages]
   );
   const canSteerWhileRunning =
-    (runtimeProvider === 'codex' ||
+    (runtimeProvider === 'bubble' || runtimeProvider === 'codex' ||
       (runtimeProvider === 'kimi' && activeSession?.kimiRuntime !== 'legacy') ||
       // DeepSeek: mid-turn sends splice into the runtime's inbox and are
       // consumed before the activity settles (adapter steer path).
@@ -530,7 +531,9 @@ export function PromptInput({
     !approvalPending &&
     !delegationPending &&
     !modelSetupRequired;
-  const canQueueWhileRunning = isRunning && !approvalPending && !delegationPending && !modelSetupRequired;
+  // Queuing does not inject into the live writer. It remains available while
+  // delegated/background work runs, even after the parent's result arrives.
+  const canQueueWhileRunning = isEffectivelyRunning && !approvalPending && !modelSetupRequired;
   const queuedMessages = useComposerQueueStore((state) =>
     selectQueuedMessages(state, targetSessionId)
   );
@@ -914,8 +917,17 @@ export function PromptInput({
 
     // Queue locally for all providers, or steer when the runtime supports it.
     // Queued messages auto-send after successful completion.
-    const shouldSteer = !imageEdit && canSteerWhileRunning && ((preferences.followUpBehavior === 'steer') !== invertFollowUp);
-    if (canQueueWhileRunning && !shouldSteer) {
+    // File/attachment preparation can outlive the active turn. Decide with
+    // the current status so a late message cannot miss the completion event.
+    const currentSession = useAppStore.getState().sessions[activeSession.id];
+    const currentStatus = currentSession?.status;
+    const currentBusy = isSessionEffectivelyBusy(currentStatus, currentSession?.messages ?? []);
+    const shouldSteer = !imageEdit && !(runtimeProvider === 'bubble' && outgoingAttachments.length > 0)
+      && canSteerWhileRunning && currentStatus === 'running'
+      && !latestTurnHasPendingDelegation(currentSession?.messages ?? [])
+      && ((preferences.followUpBehavior === 'steer') !== invertFollowUp);
+    // A failed/stopped turn still keeps its follow-up queued for manual retry.
+    if ((canQueueWhileRunning || currentBusy) && (currentBusy || currentStatus !== 'completed') && !shouldSteer) {
       useComposerQueueStore.getState().enqueue(activeSession.id, {
         id: crypto.randomUUID(),
         displayPrompt: outgoingPrompt,
@@ -1036,9 +1048,10 @@ export function PromptInput({
 
   // Chip action: inject a queued message into the still-running turn.
   const steerQueuedMessage = (itemId: string) => {
-    if (!targetSessionId || approvalPending || (isRunning && !canSteerWhileRunning)) return;
+    if (!targetSessionId || approvalPending || (isEffectivelyRunning && !canSteerWhileRunning)) return;
     const queued = useComposerQueueStore.getState().queues[targetSessionId]?.find(item => item.id === itemId);
-    if (queued?.exclusive && isRunning) return;
+    if (isEffectivelyRunning && runtimeProvider === 'bubble' && queued?.attachments.length) return;
+    if (queued?.exclusive && isEffectivelyRunning) return;
     const item = useComposerQueueStore.getState().takeOne(targetSessionId, itemId);
     if (!item) return;
     if (item.dispatch) { item.dispatch(); return; }
@@ -1060,25 +1073,11 @@ export function PromptInput({
     return () => releaseQueueFlushOwner(targetSessionId);
   }, [targetSessionId]);
 
-  // Auto-flush: when the running turn finishes normally, queued messages are
-  // sent as the next turn (in queue order, combined into one dispatch). An
-  // error outcome keeps them queued so they aren't fired into a broken session.
-  // Tracked per session — a pane switch from a running session to a completed
-  // one must not read as a "turn just finished" transition.
-  const prevStatusRef = useRef<{ sessionId: string | null; status: string | undefined }>({
-    sessionId: targetSessionId ?? null,
-    status: activeSession?.status,
-  });
+  // Observe readiness rather than one React-rendered status transition: a
+  // queue may arrive after completion, or this pane may mount/switch then.
   useEffect(() => {
-    const prev = prevStatusRef.current;
-    const current = activeSession?.status;
-    prevStatusRef.current = { sessionId: targetSessionId ?? null, status: current };
-    if (!targetSessionId || prev.sessionId !== targetSessionId) return;
-    if (prev.status !== 'running' || current !== 'completed') return;
-    const items = useComposerQueueStore.getState().takeNextBatch(targetSessionId);
-    if (items.length === 0) return;
-    if (items[0].exclusive && items[0].dispatch) { items[0].dispatch(); return; }
-    sendContinueEvent(targetSessionId, {
+    if (!targetSessionId || approvalPending) return;
+    flushCompletedQueue(targetSessionId, items => sendContinueEvent(targetSessionId, {
       displayPrompt: items.map((item) => item.displayPrompt).join('\n\n'),
       effectivePrompt: items.map((item) => item.effectivePrompt).join('\n\n'),
       attachments: items.flatMap((item) => item.attachments),
@@ -1086,11 +1085,11 @@ export function PromptInput({
         codexSkills: items.flatMap((item) => item.references.codexSkills ?? []),
         codexMentions: items.flatMap((item) => item.references.codexMentions ?? []),
       },
-    });
+    }));
     // Config for the flushed turn is read from the CURRENT composer selection,
     // matching what a manual send at this moment would use.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSession?.status, targetSessionId]);
+  }, [activeSession?.status, isEffectivelyRunning, targetSessionId, queuedMessages, approvalPending]);
 
   const handleStop = () => {
     if (targetSessionId) {
@@ -1342,9 +1341,9 @@ export function PromptInput({
                 <button
                   type="button"
                   onClick={() => steerQueuedMessage(item.id)}
-                  disabled={approvalPending || (isRunning && (!canSteerWhileRunning || item.exclusive))}
+                  disabled={approvalPending || (isEffectivelyRunning && (!canSteerWhileRunning || item.exclusive || (runtimeProvider === 'bubble' && item.attachments.length > 0)))}
                   title={
-                    item.exclusive && isRunning
+                    (item.exclusive || (runtimeProvider === 'bubble' && item.attachments.length > 0)) && isEffectivelyRunning
                       ? 'Waits for the current turn to finish'
                       : delegationPending && isRunning
                       ? 'Locked while a delegated agent is working'
@@ -1355,7 +1354,7 @@ export function PromptInput({
                   className="flex flex-shrink-0 items-center gap-1.5 rounded-lg px-2 py-1 text-[13px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   <CornerDownRight className="h-4 w-4" aria-hidden="true" />
-                  {canSteerWhileRunning && !item.exclusive ? 'Steer' : 'Send'}
+                  {canSteerWhileRunning && !item.exclusive && !(runtimeProvider === 'bubble' && item.attachments.length > 0) ? 'Steer' : 'Send'}
                 </button>
                 <button
                   type="button"
@@ -1476,15 +1475,15 @@ export function PromptInput({
             autoFocus={isLandingSurface}
           />
 
-          <div className="aegis-composer-toolbar flex items-end justify-between gap-2 px-2.5 pb-2">
-            <div className="aegis-composer-leading-controls flex min-w-0 flex-1 items-center gap-1 overflow-visible">
+          <div className="aegis-composer-toolbar flex flex-wrap items-center justify-between gap-2 px-2.5 pb-2">
+            <div className="aegis-composer-leading-controls flex min-w-0 flex-1 flex-nowrap items-center gap-1">
               <button
                 type="button"
                 onClick={() => {
                   void handleAddAttachments();
                 }}
                 disabled={isBusy}
-                className="flex h-8 w-8 items-center justify-center rounded-full text-[var(--text-secondary)] transition-all duration-150 hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:scale-100"
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[var(--text-secondary)] transition-all duration-150 hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:scale-100"
                 title="Add files or photos"
                 aria-label="Add files or photos"
               >
@@ -1607,7 +1606,7 @@ export function PromptInput({
               )}
             </div>
 
-            <div className="aegis-composer-trailing-controls flex shrink-0 items-center gap-2">
+            <div className="aegis-composer-trailing-controls flex min-w-0 items-center gap-2">
               {preferences.showContextUsage && claudeContextSnapshot ? (
                 <ClaudeContextIndicator
                   snapshot={claudeContextSnapshot}
@@ -1694,7 +1693,7 @@ export function PromptInput({
               !(canQueueWhileRunning && (prompt.trim() || attachments.length > 0)) ? (
                 <button
                   onClick={handleStop}
-                  className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--text-primary)] text-[var(--bg-primary)] transition-all duration-150 hover:scale-105"
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--text-primary)] text-[var(--bg-primary)] transition-all duration-150 hover:scale-105"
                   title="Stop"
                   aria-label="Stop"
                 >
@@ -1712,7 +1711,7 @@ export function PromptInput({
                   approvalPending ||
                   (isEffectivelyRunning && !canQueueWhileRunning)
                 }
-                className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--text-primary)] text-[var(--bg-primary)] transition-all duration-150 hover:scale-105 disabled:cursor-not-allowed disabled:opacity-20 disabled:hover:scale-100"
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--text-primary)] text-[var(--bg-primary)] transition-all duration-150 hover:scale-105 disabled:cursor-not-allowed disabled:opacity-20 disabled:hover:scale-100"
                 title="Send"
                 aria-label="Send"
               >

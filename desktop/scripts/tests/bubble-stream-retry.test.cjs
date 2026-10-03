@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bubble-retry-trace-'));
 app.setPath('userData', path.join(dir,'profile'));
 process.env.BUBBLE_HOME = path.join(dir,'agent');
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   const store = require('../../dist-electron/electron/libs/session-store');
   const { BubbleSdkAdapter } = require('../../dist-electron/electron/libs/provider/bubble-sdk-adapter');
   store.initialize();
@@ -31,6 +31,7 @@ app.whenReady().then(() => {
   event({type:'provider_retry',attempt:2,maxAttempts:10,reason:'closed'});
   assert.equal(messages.at(-1).attempt,2);
   event({type:'reasoning_delta',content:'Recovered thought'});
+  await new Promise(resolve => setTimeout(resolve, 50)); // Adapter flush deadline.
   assert.equal(messages.at(-2).subtype,'api_retry_resolved');
   assert.equal(messages.at(-2).retryId,messages.findLast(m=>m.subtype==='api_retry').uuid);
   event({type:'text_delta',content:'Recovered answer'});

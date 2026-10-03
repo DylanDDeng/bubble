@@ -1,3 +1,4 @@
+import { registerDesignIpc } from './design/ipc';
 import { desktopDataProfile } from './data-environment';
 import { setupSessionWindowsIPC, sessionWindows } from './ipc/session-windows';
 import { initializeDesktopDefaults } from './libs/desktop-defaults';
@@ -631,6 +632,7 @@ function createWindow(): void {
   setupIPCHandlers(mainWindow);
   registerBrowserIpc(mainWindow);
   registerDesignModeIpc(mainWindow);
+  registerDesignIpc();
   registerWindowShellState(mainWindow);
   protectRenderer(mainWindow);
 

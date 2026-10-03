@@ -21,6 +21,7 @@ module.exports = {
     'dist-react/**/*',
     'runtime/bubble/package.json',
     'runtime/bubble/dist/**/*',
+    'skills/**/*',
     'appearance-reference.json',
     'build/skins/aegis-reference.png',
     'LICENSE',

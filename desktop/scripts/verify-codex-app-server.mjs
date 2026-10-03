@@ -502,6 +502,23 @@ async function testResume() {
   ok('agent message phase → streamed and completed assistant messages without duplicate completion');
 }
 
+// Follow-ups reach the active turn, or start once if that turn has just ended.
+for (const completedDuringSend of [false, true]) {
+  const { manager, outbound, responders } = createCapturingManager();
+  seedSession(manager, 'steer-fixture', 'provider-steer', { status: 'running', activeTurnId: 'active-turn' });
+  responders.set('turn/steer', () => completedDuringSend
+    ? { error: { code: -32600, message: 'No active turn' } }
+    : { result: { turnId: 'active-turn' } });
+  responders.set('turn/start', () => ({ result: { turn: { id: 'follow-up-turn' } } }));
+  await manager.sendTurn('steer-fixture', 'Follow-up fixture');
+  const sends = outbound.filter(message => message.method?.startsWith('turn/'));
+  assert.deepEqual(sends.map(message => message.method), completedDuringSend
+    ? ['turn/steer', 'turn/start'] : ['turn/steer']);
+  assert.equal(sends[0].params.expectedTurnId, 'active-turn');
+  assert(sends.every(message => message.params.input[0].text === 'Follow-up fixture'));
+  ok(completedDuringSend ? 'steer completion race preserves input in one new turn' : 'live steer delivers input without starting another turn');
+}
+
 // ── P0-6: two-phase stop ──────────────────────────────────────────────────
 async function testTwoPhaseStop() {
   console.log('P0-6 two-phase stop');

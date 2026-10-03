@@ -103,6 +103,7 @@ app.whenReady().then(async () => {
   assert.equal(imported.session_origin, 'bubble_imported');
   assert.equal(imported.status, 'idle', 'history import does not claim success');
   assert(store.getSessionHistory(imported.id).some(message => message.type === 'assistant'));
+  assert.deepEqual(bubbleHistoryMessages([{ role: 'user', toolObservation: true, content: [{ type: 'text', text: 'Internal screenshot' }] }], 'observation'), []);
   assert.equal(bubbleHistoryMessages([{ role: 'assistant', toolCalls: [{ id: 'x', name: 'bash', arguments: '{broken' }] }], 'bad')[0].message.content[0].input.raw, '{broken');
   const automation = store.saveAutomation({ name: 'Smoke', projectCwd: home, prompt: 'Say hello', schedule: { kind: 'interval', intervalMinutes: 60 }, runtime: { provider: 'bubble', model: 'local-test:test' }, enabled: false });
   assert.equal(automation.runtime.provider, 'bubble');

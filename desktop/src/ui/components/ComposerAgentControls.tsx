@@ -87,7 +87,10 @@ function agentLabel(provider: AgentProvider): string {
 // menu opens.
 const triggerClassName =
   'composer-pill-trigger relative flex h-8 min-w-0 items-center gap-1.5 rounded-lg px-2 text-[12px] text-[var(--text-secondary)] outline-none transition-colors hover:text-[var(--text-primary)] focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:cursor-not-allowed disabled:opacity-50';
-const fullModelLabelTriggerClassName = 'w-max max-w-none shrink-0 whitespace-nowrap';
+// Capped instead of `w-max shrink-0`: a long model name ellipsizes inside the
+// cap (the effort word beside it never shrinks) rather than pushing the row
+// wide and squeezing the controls on the other side.
+const fullModelLabelTriggerClassName = 'min-w-0 max-w-[256px]';
 
 // Portals retain context, so the visible provider panel can describe the
 // trigger without threading presentation state through every provider adapter.
@@ -126,7 +129,7 @@ function ModelEffortLabel({ model, effort, maximum = false }: {
   return (
     <span className="composer-model-effort-label">
       <span className="composer-model-name">{model}</span>
-      {effort && <span className="composer-model-effort" data-maximum={maximum || undefined}>{' '}{effort.trim()}</span>}
+      {effort && <span className="composer-model-effort" data-composer-footer-label data-composer-footer-collapse="secondary" data-maximum={maximum || undefined}>{effort.trim()}</span>}
     </span>
   );
 }
@@ -383,7 +386,7 @@ export function ComposerModelPicker({
             title={`Model: ${label}${codexReasoningEffort ? ` – ${codexReasoningEffort}` : ''}`}
             aria-label="Select model"
           >
-            <span ref={pickerTrigger.measurementRef} style={{ position: 'absolute' }} className="pointer-events-none invisible whitespace-nowrap" aria-hidden="true">Select effort</span>
+            <span ref={pickerTrigger.measurementRef} style={{ position: 'fixed' }} className="pointer-events-none invisible whitespace-nowrap" aria-hidden="true">Select effort</span>
             {pickerTrigger.open ? <span className="flex-1 whitespace-nowrap text-center">{pickerTrigger.openLabel}</span> : (
             <span className="flex items-center gap-1 whitespace-nowrap">
               {codexFastMode && <FastModeIcon className="h-3.5 w-3.5 flex-shrink-0 text-[var(--text-primary)]" />}
@@ -1018,7 +1021,7 @@ export function ComposerAgentModelPicker({
           }
           aria-label="Select model"
         >
-          <span ref={pickerTrigger.measurementRef} style={{ position: 'absolute' }} className="pointer-events-none invisible whitespace-nowrap" aria-hidden="true">Select effort</span>
+          <span ref={pickerTrigger.measurementRef} style={{ position: 'fixed' }} className="pointer-events-none invisible whitespace-nowrap" aria-hidden="true">Select effort</span>
           {pickerTrigger.open ? <span className="flex-1 whitespace-nowrap text-center">{pickerTrigger.openLabel}</span> : <>
           {agentProvider === 'codex' && codexFastMode ? (
             <FastModeIcon className="h-3.5 w-3.5 flex-shrink-0 text-[var(--text-primary)]" aria-hidden="true" />

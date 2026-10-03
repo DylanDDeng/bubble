@@ -133,7 +133,11 @@ export type BubbleTurnStartInfo = {
 };
 
 export type BubbleRunTurnOptions = {
+  hostTools?: import('../../design/tools').DesignHostTool[];
+  /** Skills the desktop ships with (older runtimes ignore it). */
+  skillPaths?: string[];
   prompt: string | BubbleContentPart[];
+  preserveInterruptedInput?: boolean;
   model?: string;
   mode?: string;
   /** Mode the SDK switches to when a plan is approved; older runtimes ignore it. */
@@ -241,10 +245,25 @@ export type BubbleSdkInstance = {
   listSessions(): BubbleSessionSummary[];
   createSession(options?: { cwd?: string; id?: string }): { id: string; cwd: string };
   getHistory(sessionId: string): unknown[];
+  recordInterruptedInput(sessionId: string, prompt: string | BubbleContentPart[]): void;
   deleteSession(sessionId: string): void;
   /** Abort the in-flight turn of a session, if any. */
-  stop(sessionId: string): void;
-  listSkills(cwd?: string): BubbleSkillSummary[];
+  stop(sessionId: string, options?: { cancelQueued?: boolean }): void;
+  stopAndWait(sessionId: string, options?: { cancelQueued?: boolean }): Promise<number>;
+  steer(sessionId: string, content: string):
+    | { accepted: true; disposition: 'steered' | 'queued'; outcome: Promise<unknown> }
+    | { accepted: false; disposition: 'rejected'; reason: string };
+  getSessionRunState(sessionId: string): { active: boolean; queuedTurns: number };
+  openSession(sessionId: string): {
+    readonly latestSequence: number;
+    eventsFrom(afterSequence: number): AsyncIterable<{
+      sequence: number;
+      event: BubbleAgentEvent;
+      terminal?: { kind: 'completed' } | { kind: 'failed' | 'cancelled'; message: string };
+    }>;
+    close(): void;
+  };
+  listSkills(cwd?: string, skillPaths?: string[]): BubbleSkillSummary[];
   getModelConfig(): BubbleModelConfig;
   runTurn(sessionId: string, options: BubbleRunTurnOptions): AsyncGenerator<BubbleAgentEvent>;
 };
@@ -293,7 +312,7 @@ export type BubbleSessionManager = {
 };
 
 export type BubbleSdkModule = {
-  BubbleSdk: new (options?: { defaultCwd?: string }) => BubbleSdkInstance;
+  BubbleSdk: new (options?: { defaultCwd?: string; sessionEventRetention?: number }) => BubbleSdkInstance;
   SessionManager: new (file: string) => BubbleSessionManager;
 };
 
@@ -345,12 +364,17 @@ export function loadBubbleProviderCatalog(): Promise<BubbleProviderCatalogModule
   return catalogPromise;
 }
 
+/** Skill directories that ship inside the app, e.g. bubble-design for the Design canvas. */
+export function bundledSkillPaths(): string[] {
+  return [join(app.getAppPath(), 'skills')];
+}
+
 export async function readBubbleSkillContent(name: string, cwd?: string): Promise<{ ok: boolean; content?: string; message?: string }> {
   const sdk = await getBubbleSdk(cwd);
   const module = await (importEsm as (path: string) => Promise<any>)(
     pathToFileURL(join(app.getAppPath(), 'runtime/bubble/dist/skills/registry.js')).href,
   );
-  const registry = new module.SkillRegistry({ cwd, skillPaths: sdk.userConfig.getSkillPaths(), disabledSkills: sdk.userConfig.getDisabledSkills() });
+  const registry = new module.SkillRegistry({ cwd, skillPaths: [...sdk.userConfig.getSkillPaths(), ...bundledSkillPaths()], disabledSkills: sdk.userConfig.getDisabledSkills() });
   const skill = registry.get(name);
   return skill ? { ok: true, content: skill.content } : { ok: false, message: 'This skill is no longer available.' };
 }
@@ -364,7 +388,9 @@ export async function getBubbleSdk(defaultCwd?: string): Promise<BubbleSdkInstan
   if (sdkInstance) return sdkInstance;
   if (!sdkInstancePromise) {
     sdkInstancePromise = loadBubbleSdk().then(({ BubbleSdk }) => {
-      const instance = new BubbleSdk(defaultCwd ? { defaultCwd } : undefined);
+      // Desktop history is persisted in SQLite. Keep only a small reconnect
+      // window instead of retaining every streamed token for the app lifetime.
+      const instance = new BubbleSdk({ ...(defaultCwd ? { defaultCwd } : {}), sessionEventRetention: 256 });
       installBubbleSessionReader(instance);
       sdkInstance = instance;
       return instance;

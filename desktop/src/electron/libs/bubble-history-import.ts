@@ -14,6 +14,7 @@ export function bubbleHistoryMessages(history: unknown[], sourceId: string): Str
     const message = entry as Record<string, any>;
     const uuid = `bubble-import:${sourceId}:${index}`;
     const createdAt = typeof message.timestamp === 'number' ? message.timestamp : undefined;
+    if (message.role === 'user' && message.toolObservation === true) return [];
     if (message.role === 'user') return [{ type: 'user_prompt', prompt: text(message.content), createdAt }];
     if (message.role === 'assistant') {
       const content: ContentBlock[] = [];

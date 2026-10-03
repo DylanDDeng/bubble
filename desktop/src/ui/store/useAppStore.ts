@@ -36,6 +36,7 @@ import type {
   StreamMessage,
   ContentBlock,
   Attachment,
+  DesignPromptRef,
   SearchFilters,
   SearchMatch,
   SettingsTab,
@@ -1920,7 +1921,7 @@ export const useAppStore = create<Store>()(
         projectTreeCollapsed: false,
         browserPanelOpen: false,
         rightPanelFullscreen:
-          (state.rightPanelFullscreen === 'browser' || state.rightPanelFullscreen === 'images')
+          (state.rightPanelFullscreen === 'browser' || state.rightPanelFullscreen === 'images' || state.rightPanelFullscreen === 'design')
             ? null
             : state.rightPanelFullscreen === 'review'
               ? 'files'
@@ -1968,7 +1969,7 @@ export const useAppStore = create<Store>()(
         projectTreeCollapsed: false,
         browserPanelOpen: false,
         rightPanelFullscreen:
-          (state.rightPanelFullscreen === 'browser' || state.rightPanelFullscreen === 'images')
+          (state.rightPanelFullscreen === 'browser' || state.rightPanelFullscreen === 'images' || state.rightPanelFullscreen === 'design')
             ? null
             : state.rightPanelFullscreen === 'files'
               ? 'review'
@@ -2217,7 +2218,7 @@ export const useAppStore = create<Store>()(
         activeRightUtilityTab: browserPanelOpen ? browserTab : state.activeRightUtilityTab,
         rightUtilityPanelHidden: browserPanelOpen ? false : state.rightUtilityPanelHidden,
         rightPanelFullscreen:
-          (!browserPanelOpen && state.rightPanelFullscreen === 'browser') || (browserPanelOpen && state.rightPanelFullscreen === 'images')
+          (!browserPanelOpen && state.rightPanelFullscreen === 'browser') || (browserPanelOpen && (state.rightPanelFullscreen === 'images' || state.rightPanelFullscreen === 'design'))
             ? null
             : state.rightPanelFullscreen,
       };
@@ -2233,8 +2234,8 @@ export const useAppStore = create<Store>()(
       }));
       return;
     }
-    if (target === 'images') {
-      set({ rightPanelFullscreen: 'images', rightUtilityPanelHidden: false, browserPanelOpen: false });
+    if (target === 'images' || target === 'design') {
+      set({ rightPanelFullscreen: target, rightUtilityPanelHidden: false, browserPanelOpen: false });
       return;
     }
     if (target === 'browser') {
@@ -3490,10 +3491,10 @@ function handleSessionDeleted(
 
 // 处理用户 prompt
 function handleUserPrompt(
-  payload: { sessionId: string; prompt: string; attachments?: Attachment[]; createdAt?: number },
+  payload: { sessionId: string; prompt: string; attachments?: Attachment[]; createdAt?: number; design?: DesignPromptRef },
   set: SetState
 ) {
-  const { sessionId, prompt, attachments, createdAt } = payload;
+  const { sessionId, prompt, attachments, createdAt, design } = payload;
 
   set((state) => {
     const session = state.sessions[sessionId];
@@ -3504,6 +3505,7 @@ function handleUserPrompt(
       prompt,
       attachments,
       createdAt: typeof createdAt === 'number' ? createdAt : Date.now(),
+      ...(design ? { design } : {}),
     };
 
     return {

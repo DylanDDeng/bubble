@@ -10,6 +10,7 @@ import React,{useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {Tooltip} from '@base-ui-components/react/tooltip';
 import {PromptInput} from '/src/ui/components/PromptInput';
+import {FullViewChatRegion} from '/src/ui/components/FullViewChatRegion';
 import {NewSessionView} from '/src/ui/components/NewSessionView';
 import {ComposerPendingPermissionPanel} from '/src/ui/components/ComposerPendingPermissionPanel';
 import {useAppStore} from '/src/ui/store/useAppStore';
@@ -21,9 +22,9 @@ store.setState(s=>({connected:true,projectCwd:'/tmp/composer-qa',activeSessionId
 const questions=Array.from({length:3},(_,i)=>({header:'Question '+(i+1),question:'Choose UI state, color or music '+(i+1),multiSelect:i===1,options:Array.from({length:4},(_,j)=>({label:'Option '+(i+1)+'-'+(j+1),description:'A detailed option explaining the animation, color and timing. '.repeat(5)}))}));
 const request={sessionId:id,toolUseId:'question',toolName:'AskUserQuestion',input:{questions}};
 window.qa={store,id,answers:[]};
-function Harness(){const [mode,setMode]=useState('new');qa.mode=setMode;
-return <Tooltip.Provider><div style={{height:'100vh',display:'flex',flexDirection:'column',overflow:'hidden',background:'var(--bg-primary)',color:'var(--text-primary)'}}><header style={{height:56,flexShrink:0}}>Bubble composer layout QA</header>
-{mode==='new'?<NewSessionView/>:<><main style={{flex:1,minHeight:0,overflow:'auto'}}>Conversation content</main><div className="aegis-chat-composer px-8 pb-4"><PromptInput sessionId={id} approvalPending={mode==='question'} approvalPanel={<ComposerPendingPermissionPanel request={request} pendingCount={1} onSubmit={(tool,result)=>qa.answers.push({tool,result})}/>}/></div></>}
+function Harness(){const [mode,setMode]=useState('new'),[full,setFull]=useState(false);qa.mode=setMode;qa.full=setFull;
+return <Tooltip.Provider><div style={{position:'relative',height:'100vh',display:'flex',flexDirection:'column',overflow:'hidden',background:'var(--bg-primary)',color:'var(--text-primary)'}}><header style={{height:56,flexShrink:0}}>Bubble composer layout QA</header>
+<FullViewChatRegion fullView={full} onHeightChange={()=>{}}>{mode==='new'?<NewSessionView/>:<><main data-chat-transcript style={{flex:1,minHeight:0,overflow:'auto'}}>Conversation content</main><div className="aegis-chat-composer px-8 pb-4"><PromptInput sessionId={id} approvalPending={mode==='question'} approvalPanel={<ComposerPendingPermissionPanel request={request} pendingCount={1} onSubmit={(tool,result)=>qa.answers.push({tool,result})}/>}/></div></>}</FullViewChatRegion>
 </div></Tooltip.Provider>}
 createRoot(document.getElementById('root')).render(<Harness/>);
 `;
@@ -43,6 +44,12 @@ app.whenReady().then(async()=>{
   await js('qa.mode('+JSON.stringify(mode)+')');await delay(100);
   await js('(()=>{const e=document.querySelector("[role=textbox]");e.focus();const data=new DataTransfer();data.setData("text/plain",'+JSON.stringify(text)+');e.dispatchEvent(new ClipboardEvent("paste",{clipboardData:data,bubbles:true,cancelable:true}))})()');
   await until('document.querySelector("[role=textbox]").textContent.includes("Line 89")','full paste');
+  // Native Edit > Select All followed by shortcut keyup used to collapse the
+  // first selection when the real new/chat parent echoed cursorIndex=0.
+  win.webContents.selectAll();
+  win.webContents.sendInputEvent({type:'keyUp',keyCode:'a',modifiers:['meta']});
+  await delay(100);
+  assert.equal(await js('getSelection().toString()'),text,mode+' first select-all keeps the full prompt selected');
   for(const [width,height] of [[1000,800],[540,420]]){
    win.setContentSize(width,height);await delay(100);
    await js('(()=>{const landing=document.querySelector(".aegis-new-thread-landing");if(landing)landing.scrollTop=landing.scrollHeight})()');
@@ -55,6 +62,18 @@ app.whenReady().then(async()=>{
   await js('document.querySelector("[role=textbox]").scrollTop=0');
   await shot(mode+'-long-prompt-top');
  }
+ // Full view must preserve the real editor instance, long prompt and toolbar.
+ win.setContentSize(1000,800);
+ await js('qa.originalEditor=document.querySelector("[role=textbox]");qa.full(true)');await delay(150);
+ assert.equal(await js('document.querySelector("[role=textbox]")===qa.originalEditor'),true);
+ assert.equal(await js('document.querySelector("[role=textbox]").textContent'),text);
+ const dock=await js('(()=>{const e=document.querySelector("[role=textbox]"),t=document.querySelector(".aegis-composer-toolbar").getBoundingClientRect(),r=document.querySelector("[data-full-view-chat]").getBoundingClientRect();return {width:r.width,top:r.top,bottom:r.bottom,toolbarBottom:t.bottom,client:e.clientHeight,scroll:e.scrollHeight}})()');
+ assert(dock.width<=440&&dock.top>0&&dock.bottom<=800,'compact dock fits in the window');
+ assert(dock.toolbarBottom<=800&&dock.client>0&&dock.scroll>dock.client,'long prompt scrolls without hiding actions');
+ await shot('full-view-long-prompt');
+ await js('qa.full(false)');await delay(100);
+ assert.equal(await js('document.querySelector("[role=textbox]")===qa.originalEditor'),true);
+ assert.equal(await js('document.querySelector("[role=textbox]").textContent'),text);
  await js('qa.mode("question")');await until('!!document.querySelector("[data-decision-questions]")','questions');
  for(const [width,height] of [[1000,800],[540,420],[390,360]]){
   win.setContentSize(width,height);await delay(100);

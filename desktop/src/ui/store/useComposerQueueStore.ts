@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Attachment } from '../types';
+import type { Attachment, DesignPromptRef } from '../types';
 import type { CodexReferencePayload } from '../utils/codex-composer';
 
 /**
@@ -23,6 +23,8 @@ export interface QueuedComposerMessage {
   /** An exclusive action keeps its captured session configuration. */
   dispatch?: () => void;
   onRemove?: () => void;
+  /** A design comment waiting for the turn to finish. */
+  design?: DesignPromptRef;
 }
 
 interface ComposerQueueStore {
@@ -44,6 +46,12 @@ const EMPTY_QUEUE: QueuedComposerMessage[] = [];
 // owner — i.e. panes the user navigated away from — using session-sticky
 // config. Refcounted (split view can bind two composers to one session).
 const flushOwners = new Map<string, number>();
+const ownerListeners = new Set<(sessionId: string) => void>();
+
+export function subscribeQueueFlushOwners(listener: (sessionId: string) => void): () => void {
+  ownerListeners.add(listener);
+  return () => { ownerListeners.delete(listener); };
+}
 
 export function claimQueueFlushOwner(sessionId: string): void {
   flushOwners.set(sessionId, (flushOwners.get(sessionId) || 0) + 1);
@@ -52,7 +60,10 @@ export function claimQueueFlushOwner(sessionId: string): void {
 export function releaseQueueFlushOwner(sessionId: string): void {
   const count = (flushOwners.get(sessionId) || 0) - 1;
   if (count > 0) flushOwners.set(sessionId, count);
-  else flushOwners.delete(sessionId);
+  else {
+    flushOwners.delete(sessionId);
+    for (const listener of ownerListeners) listener(sessionId);
+  }
 }
 
 export function hasQueueFlushOwner(sessionId: string): boolean {

@@ -300,6 +300,9 @@ import { getProviderService } from './libs/provider/service';
 import { isKimiServerRuntimeConfirmed, warmKimiCapabilityProbe } from './libs/provider/kimi-adapter-facade';
 import { disposeTerminalRuntime } from './libs/terminal-runtime';
 import { disposeTerminalTransportServer } from './libs/terminal-transport-server';
+import { markDesignCommentSent } from './design/service';
+import { designContextText } from './design/focus';
+import { sanitizeDesignPromptRef } from '../shared/design-comment';
 
 // === IPC 模块导入（从 ipc-handlers.ts 拆分） ===
 import { register as registerTerminal } from './ipc/terminal'
@@ -2779,6 +2782,7 @@ async function handleEditLatestPrompt(
     claudeReasoningEffort || previousClaudeReasoningEffort
   );
   const createdAt = Date.now();
+  // An edited prompt is a normal prompt: it no longer carries a design comment link.
   const editedUserPrompt: StreamMessage = {
     type: 'user_prompt',
     prompt: nextPrompt,
@@ -2995,6 +2999,7 @@ async function handleEditLatestOpenCodePrompt(
     opencodePermissionMode || previousOpenCodePermissionMode
   );
   const createdAt = Date.now();
+  // An edited prompt is a normal prompt: it no longer carries a design comment link.
   const editedUserPrompt: StreamMessage = {
     type: 'user_prompt',
     prompt: nextPrompt,
@@ -3211,6 +3216,7 @@ async function handleEditLatestCodexPrompt(
   );
   const nextCodexFastMode = normalizeCodexFastMode(codexFastMode ?? previousCodexFastMode);
   const createdAt = Date.now();
+  // An edited prompt is a normal prompt: it no longer carries a design comment link.
   const editedUserPrompt: StreamMessage = {
     type: 'user_prompt',
     prompt: nextPrompt,
@@ -9481,6 +9487,7 @@ async function handleSessionContinue(
     teamMode,
     teamId,
   } = payload;
+  const design = sanitizeDesignPromptRef(payload.design);
 
   const session = sessions.getSession(sessionId);
   if (!session) {
@@ -9627,7 +9634,7 @@ async function handleSessionContinue(
     sessions.clearSessionHandoffPending(sessionId);
   }
   const runnerPrompt = nextProvider === 'claude' && parseGoalInput(prompt, false).isGoal ? prompt.trim() : augmentPromptForLiveWidgetProtocol(
-    await buildRunnerPromptWithMemory(nextProvider, effectiveRunnerPrompt + referenceContext + sessions.buildProjectSourcesContext(session.project_cwd || session.cwd, session.cwd, session.env_mode === 'worktree' && Boolean(session.worktree_path)), session.cwd || undefined),
+    await buildRunnerPromptWithMemory(nextProvider, effectiveRunnerPrompt + referenceContext + (nextProvider === 'bubble' ? designContextText(sessionId) : '') + sessions.buildProjectSourcesContext(session.project_cwd || session.cwd, session.cwd, session.env_mode === 'worktree' && Boolean(session.worktree_path)), session.cwd || undefined),
     historyBeforeContinue
   );
   const previousOpenCodePermissionMode = normalizeOpenCodePermissionMode(session.opencode_permission_mode);
@@ -9833,7 +9840,7 @@ async function handleSessionContinue(
     const createdAt = Date.now();
     broadcast(mainWindow, {
       type: 'stream.user_prompt',
-      payload: { sessionId, prompt: outgoingPrompt, attachments: outgoingAttachments, createdAt },
+      payload: { sessionId, prompt: outgoingPrompt, attachments: outgoingAttachments, createdAt, ...(design ? { design } : {}) },
     });
 
     // 保存 user_prompt
@@ -9842,7 +9849,16 @@ async function handleSessionContinue(
       prompt: outgoingPrompt,
       attachments: outgoingAttachments,
       createdAt,
+      ...(design ? { design } : {}),
     });
+    // Design tools only exist in Bubble turns; other providers keep a plain note.
+    if (design && nextProvider === 'bubble') {
+      try {
+        markDesignCommentSent(sessionId, design, createdAt);
+      } catch (error) {
+        console.warn('[design] Failed to mark comment as sent', error);
+      }
+    }
   }
 
   // 检查运行时状态（在会话状态已设为 running 之后，以便前端立即显示 spinning 效果）
@@ -9934,6 +9950,7 @@ async function handleSessionContinue(
   // DeepSeek steers mid-turn through the runtime's inbox (client.prompt);
   // config drift while streaming must not abort the live runtime either.
   const deepseekMidTurn = nextProvider === 'deepseek' && session.status === 'running';
+  const bubbleMidTurn = nextProvider === 'bubble' && session.status === 'running';
   // A kimi runner whose adapter session was released while idle (daemon
   // exit, session_gone) is a zombie: reusing its handle throws "No Kimi
   // session found" at send time with a toast and a dropped message. Respawn
@@ -9952,7 +9969,7 @@ async function handleSessionContinue(
     if (
       runnerCwdChanged ||
       kimiSessionReleased ||
-      (((nextProvider === 'codex' && !codexMidTurn) || nextProvider === 'opencode' || (nextProvider === 'kimi' && !kimiMidTurn) || nextProvider === 'grok' || nextProvider === 'pi' || nextProvider === 'bubble' || (nextProvider === 'deepseek' && !deepseekMidTurn)) && modelChanged) ||
+      (((nextProvider === 'codex' && !codexMidTurn) || nextProvider === 'opencode' || (nextProvider === 'kimi' && !kimiMidTurn) || nextProvider === 'grok' || nextProvider === 'pi' || (nextProvider === 'bubble' && !bubbleMidTurn) || (nextProvider === 'deepseek' && !deepseekMidTurn)) && modelChanged) ||
       (nextProvider === 'codex' && !codexMidTurn && codexPermissionModeChanged) ||
       (nextProvider === 'codex' && !codexMidTurn && codexReasoningEffortChanged) ||
       (nextProvider === 'codex' && !codexMidTurn && codexFastModeChanged) ||

@@ -22,8 +22,9 @@ assert.ok(
   'background flush must not carry composer overrides — session-sticky config applies'
 );
 assert.ok(
-  flusher.includes("status === 'completed'") && flusher.includes("=== 'running'"),
-  'flush fires only on a running→completed transition'
+  flusher.includes("status !== 'completed'") && flusher.includes('useComposerQueueStore.subscribe') &&
+    flusher.includes('subscribeQueueFlushOwners(scheduleUnownedFlush)'),
+  'flush observes completed queues, including late enqueues and owner release'
 );
 
 const promptInput = read('src/ui/components/PromptInput.tsx');

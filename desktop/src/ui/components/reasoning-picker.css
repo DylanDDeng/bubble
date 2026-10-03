@@ -305,12 +305,30 @@
   outline-offset: 1px;
 }
 
-/* Closed composer trigger: model is primary; effort is supporting text. */
+/* Closed composer trigger: model is primary; effort is supporting text. The
+   pair is a flex row so the name can ellipsize independently — the effort word
+   is one short token and never gives up its width. `overflow: hidden` is what
+   makes the row yieldable at all: the trigger used to carry its own
+   max-width, so under pressure this label kept its intrinsic width, pushed the
+   toolbar wider than the composer, and the tail was clipped by the pane edge
+   instead of ellipsizing. */
 .composer-model-effort-label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
   white-space: nowrap;
   font-size: calc(12px * var(--ui-font-scale, 1));
   font-weight: 400;
 }
-.composer-model-name { color: var(--text-primary); }
-.composer-model-effort { color: var(--text-muted); }
+.composer-model-name {
+  min-width: 0;
+  flex-shrink: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+.composer-model-effort { flex-shrink: 0; color: var(--text-muted); }
 .composer-model-effort[data-maximum] { color: var(--accent); }

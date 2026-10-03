@@ -1274,6 +1274,26 @@ contextBridge.exposeInMainWorld('electron', {
       };
     },
   },
+  design: {
+    list: (input: unknown) => ipcRenderer.invoke('desktop:design-list', input),
+    create: (input: unknown) => ipcRenderer.invoke('desktop:design-create', input),
+    read: (input: unknown) => ipcRenderer.invoke('desktop:design-read', input),
+    update: (input: unknown) => ipcRenderer.invoke('desktop:design-update', input),
+    history: (input: unknown) => ipcRenderer.invoke('desktop:design-history', input),
+    restore: (input: unknown) => ipcRenderer.invoke('desktop:design-restore', input),
+    comment: (input: unknown) => ipcRenderer.invoke('desktop:design-comment', input),
+    reply: (input: unknown) => ipcRenderer.invoke('desktop:design-reply', input),
+    comments: (input: unknown) => ipcRenderer.invoke('desktop:design-comments', input),
+    resolve: (input: unknown) => ipcRenderer.invoke('desktop:design-resolve', input),
+    focus: (input: unknown) => ipcRenderer.invoke('desktop:design-focus', input),
+    preview: (input: unknown) => ipcRenderer.invoke('desktop:design-preview', input),
+    export: (input: unknown) => ipcRenderer.invoke('desktop:design-export', input),
+    onChanged: (callback: (event: unknown) => void) => {
+      const handler = (_: unknown, event: unknown) => callback(event);
+      ipcRenderer.on('desktop:design-changed', handler);
+      return () => ipcRenderer.removeListener('desktop:design-changed', handler);
+    },
+  },
   designMode: {
     enable: (input: { sessionId: string; tabId: string; projectRoot: string }) =>
       ipcRenderer.invoke(DESIGN_CHANNELS.enable, input),

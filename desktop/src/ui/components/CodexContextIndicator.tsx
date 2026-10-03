@@ -67,7 +67,7 @@ export function CodexContextIndicator({ snapshot, cost }: { snapshot: CodexConte
     >
       <button
         type="button"
-        className="flex h-8 w-8 items-center justify-center rounded-[6px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]"
+        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[6px] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]"
         aria-label="Context window usage"
       >
         <UsageRing percent={snapshot.percent} />

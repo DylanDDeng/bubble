@@ -1,3 +1,6 @@
+import { Palette as DesignIcon } from './components/icons';
+import { DesignPanel } from './components/design/DesignPanel';
+import { useDesignStore, subscribeDesignChanges } from './store/useDesignStore';
 import { createPortal } from 'react-dom';
 import { Image as ImageStudioIcon } from './components/icons';
 import { ImageStudioPanel, ImageStudioFileActions } from './components/ImageStudioPanel';
@@ -156,6 +159,7 @@ function getProjectUtilitySubagentId(target: ProjectUtilityPanelTarget): string 
 
 function getProjectUtilityTabKind(target: ProjectUtilityPanelTarget): ProjectUtilityPanelKind {
   if (target.startsWith('images:')) return 'images';
+  if (target.startsWith('design:')) return 'design';
   if (target.startsWith('goal:')) return 'goal';
   if (isProjectUtilityFileTab(target)) return 'files';
   if (isProjectUtilityBrowserTab(target)) return 'browser';
@@ -207,6 +211,8 @@ function getDefaultWindowShellRounded(): boolean {
 type ToolResultBlock = ContentBlock & { type: 'tool_result' };
 
 export function App() {
+  useEffect(subscribeDesignChanges, []);
+  const designTitles = useDesignStore(s => s.titles);
   useEffect(subscribeAppPreferences, []);
   const electronAvailable =
     typeof window !== 'undefined' &&
@@ -728,6 +734,7 @@ export function App() {
     return rightUtilityTabs.map((tab) => {
       const kind = getProjectUtilityTabKind(tab);
       if (kind === 'images') return { id: tab, kind, label: 'Images' };
+      if (kind === 'design') return { id: tab, kind, label: tab.startsWith('design:') ? `Design · ${designTitles[tab.slice(7)] || 'Canvas'}` : 'Design' };
       if (kind === 'goal') return { id: tab, kind, label: 'Edit goal' };
       if (kind === 'sources') return { id: tab, kind, label: 'Sources' };
       if (kind === 'files') {
@@ -775,6 +782,7 @@ export function App() {
     });
   }, [
     activeProjectFileTabs,
+    designTitles,
     activeSession?.cwd,
     activeSessionId,
     browserSessionStates,
@@ -1075,7 +1083,7 @@ export function App() {
         onToggleFullView={() => {
           if (rightPanelFullscreen) { setRightPanelFullscreen(null); return; }
           const kind = activeRightUtilityTab ? getProjectUtilityTabKind(activeRightUtilityTab) : null;
-          if (kind === 'files' || kind === 'review' || kind === 'browser' || kind === 'images') setRightPanelFullscreen(kind);
+          if (kind === 'files' || kind === 'review' || kind === 'browser' || kind === 'images' || kind === 'design') setRightPanelFullscreen(kind);
           else openNewWorkspaceTab(true);
         }}
       /> : null}
@@ -1195,6 +1203,7 @@ export function App() {
               (activeUtilityPanel !== 'launcher' ? activeUtilityPanel : null);
             const kind = rightUtilityTabDescriptors.find((tab) => tab.id === target)?.kind;
             if (kind === 'images') return () => setRightPanelFullscreen(rightPanelFullscreen === 'images' ? null : 'images');
+            if (kind === 'design') return () => setRightPanelFullscreen(rightPanelFullscreen === 'design' ? null : 'design');
             if (kind === 'files') return toggleFilesPanelFullscreen;
             if (kind === 'review') return toggleReviewPanelFullscreen;
             if (kind === 'browser') return toggleBrowserPanelFullscreen;
@@ -1212,6 +1221,7 @@ export function App() {
             onOpenBrowser={() => openRightUtilityTab('browser')}
             onOpenReview={() => openRightUtilityTab('review')}
             onOpenTerminal={() => openRightUtilityTab('terminal')}
+            onOpenDesign={() => openRightUtilityTab('design')}
           />
           {fileUtilityTabs.map((tabId) => (
             <ProjectTreePanel
@@ -1245,6 +1255,9 @@ export function App() {
               onSelect={path => setSourceSelection({ sessionId: environmentContext.sessionId!, path })}
             />
           ) : null}
+          {rightUtilityTabs.filter(tab => tab === 'design' || tab.startsWith('design:')).map(tab => (
+            <DesignPanel key={`${activeSessionId}:${tab}`} sessionId={activeSessionId} documentId={tab.startsWith('design:') ? tab.slice(7) : undefined} hidden={activeUtilityPanel !== 'design' || activeRightUtilityTab !== tab} />
+          ))}
           {rightUtilityTabs.filter(tab => tab.startsWith('images:')).map(tab => (
             <ImageStudioPanel key={tab} sessionId={tab.slice(7)} hidden={activeUtilityPanel === null || activeRightUtilityTab !== tab} fullscreen={rightPanelFullscreen === 'images'} />
           ))}
@@ -1387,6 +1400,7 @@ export function App() {
 function getUtilityTabIcon(target: ProjectUtilityPanelKind) {
   if (target === 'sources') return Paperclip;
   if (target === 'images') return ImageStudioIcon;
+  if (target === 'design') return DesignIcon;
   if (target === 'goal') return Target;
   if (target === 'terminal') return SquareTerminal;
   if (target === 'browser') return Globe;
@@ -1598,6 +1612,7 @@ function RightUtilityTabStrip({
     { id: 'browser' as const, label: 'Browser', icon: Globe, disabled: !browserAvailable },
     { id: 'review' as const, label: 'Review', icon: FileDiff, disabled: false },
     { id: 'terminal' as const, label: 'Terminal', icon: SquareTerminal, disabled: false },
+    { id: 'design' as const, label: 'Design', icon: DesignIcon, disabled: false },
   ];
 
   useEffect(() => {
@@ -1765,6 +1780,7 @@ function getPanelLauncherItems({
   onOpenBrowser,
   onOpenReview,
   onOpenTerminal,
+  onOpenDesign,
 }: {
   browserAvailable: boolean;
   onOpenFiles: () => void;
@@ -1772,6 +1788,7 @@ function getPanelLauncherItems({
   onOpenBrowser: () => void;
   onOpenReview: () => void;
   onOpenTerminal: () => void;
+  onOpenDesign: () => void;
 }): PanelLauncherItem[] {
   return [
     {
@@ -1801,6 +1818,12 @@ function getPanelLauncherItems({
       onSelect: onOpenReview,
     },
     {
+      id: 'design' as const,
+      label: 'Design',
+      icon: DesignIcon,
+      onSelect: onOpenDesign,
+    },
+    {
       id: 'terminal' as const,
       label: 'Terminal',
       icon: SquareTerminal,
@@ -1817,6 +1840,7 @@ function RightPanelLauncherContent({
   onOpenBrowser,
   onOpenReview,
   onOpenTerminal,
+  onOpenDesign,
 }: {
   hidden: boolean;
   browserAvailable: boolean;
@@ -1825,6 +1849,7 @@ function RightPanelLauncherContent({
   onOpenBrowser: () => void;
   onOpenReview: () => void;
   onOpenTerminal: () => void;
+  onOpenDesign: () => void;
 }) {
   const items = getPanelLauncherItems({
     browserAvailable,
@@ -1833,6 +1858,7 @@ function RightPanelLauncherContent({
     onOpenBrowser,
     onOpenReview,
     onOpenTerminal,
+    onOpenDesign,
   });
 
   return (

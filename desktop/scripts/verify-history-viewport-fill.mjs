@@ -3,8 +3,8 @@
 //   1. viewport-fill auto-load (collapsed tool-heavy pages render shorter
 //      than the viewport → no scrollbar → the scroll-driven loader was
 //      unreachable), with page/stall caps via the pure shared helper;
-//   2. "Load earlier messages" manual affordance (recovery past the caps,
-//      hydration retry when hydration failed);
+//   2. scroll-intent recovery past the caps, with a button only for failed
+//      initial hydration;
 //   3. store-owned hydration with bounded retry (component refs never
 //      retried and double-requested across the dead App.tsx twin);
 //   4. sanitize page-safety (persisting a page slice truncated the whole
@@ -105,7 +105,7 @@ function ok(label) {
     /scrollHeightBeforeLoadRef\.current = container\.scrollHeight;\s*\n\s*loadOlderSessionHistory\(sessionId\)/,
     'auto-fill must set the prepend anchor before loading'
   );
-  assert.match(chatPane, /Load earlier messages/, 'manual Load-earlier affordance must exist');
+  assert.ok(!chatPane.includes('Load earlier messages'), 'normal history pagination has no manual button');
   assert.match(chatPane, /Retry loading history/, 'hydration-retry affordance must exist');
   assert.ok(!chatPane.includes('historyRequested'), 'component-level hydration dedupe ref must be gone');
   assert.match(chatPane, /requestSessionHydration\(sessionId\)/, 'ChatPane must hydrate via the store action');

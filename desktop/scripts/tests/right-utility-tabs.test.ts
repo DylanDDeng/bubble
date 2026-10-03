@@ -1,9 +1,14 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { resolveRightUtilityTabOpen, resolveProjectFileUtilityTab } from '../../src/ui/utils/right-utility-tabs';
+import { resolveRightUtilityTabOpen, resolveProjectFileUtilityTab, getRightUtilityTabKind, resolveRightUtilityFullscreen } from '../../src/ui/utils/right-utility-tabs';
 import { resolveDockedRightPanelWidth } from '../../src/ui/utils/right-panel-width';
 
 async function main() {
+  assert.equal(getRightUtilityTabKind('design:canvas-a'), 'design');
+  assert.equal(resolveRightUtilityFullscreen('browser', 'design:canvas-a'), 'design');
+  assert.equal(resolveRightUtilityFullscreen('design', 'files:a'), 'files');
+  assert.equal(resolveRightUtilityFullscreen(null, 'design:canvas-a'), null);
+  assert.deepEqual(resolveRightUtilityTabOpen(['design'], 'design').tabs, ['design']);
   assert.equal(
     resolveDockedRightPanelWidth(820, 560),
     320,
@@ -74,7 +79,7 @@ async function main() {
     'legacy ID naming is only a fallback when the summary is unavailable');
   assert.match(appSource, /label: persona\?\.persona \?\? 'Subagent',\s*subagentPersona: persona/,
     'tab label and avatar must receive the same resolved identity');
-  assert.match(appSource, /rightUtilityTabs,\s*subagentPersonas,\s*\]\)/,
+  assert.match(appSource, /rightUtilityTabs,\s*subagentPersonas,\s*(?:designTitles,\s*)?\]\)/,
     'open tab descriptors must update when runtime names arrive or history changes');
   assert.match(appSource, /id=\{tab\.subagentPersona\.id\}\s*hue=\{tab\.subagentPersona\.colorHue\}/,
     'tab avatars must use the detail persona ID and hue, not the routing tool ID');

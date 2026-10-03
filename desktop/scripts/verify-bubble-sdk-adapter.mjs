@@ -38,8 +38,9 @@ assert.ok(
 assert.ok(
   adapter.includes('resolveSessionId') &&
     adapter.includes('sdk.listSessions()') &&
-    adapter.includes('sdk.createSession({ cwd })'),
-  'Bubble sessions must resume through the SDK on-disk index (lazy persistence tolerated)'
+    adapter.includes('sdk.createSession({ cwd, id: newSessionId })') &&
+    adapter.includes('saved history is missing. No new session was created.'),
+  'Bubble sessions must resume through the SDK on-disk index and reject missing history'
 );
 assert.ok(
   adapter.includes("type: 'stream_event'") &&
@@ -88,9 +89,10 @@ assert.ok(
   'Bubble adapter must sum per-step USD turn costs into the unified result cost (non-USD dropped, not mislabelled)'
 );
 assert.ok(
-  adapter.includes('sdk.stop(session.providerSessionId)') &&
+  adapter.includes('sdk.stop(session.providerSessionId, { cancelQueued: true })') &&
+    adapter.includes('await sdk.stopAndWait(session.providerSessionId, { cancelQueued: true })') &&
     adapter.includes('abortController?.abort()'),
-  'Bubble adapter must stop turns through sdk.stop + abort signal'
+  'Bubble adapter must abort turns and wait for SDK persistence and terminal publication'
 );
 assert.ok(
   adapter.includes('async runOneShot(') &&
@@ -239,7 +241,7 @@ const composerControls = read('src/ui/components/ComposerAgentControls.tsx');
 assert.ok(
   composerSelection.includes('bubbleModelsLoading: !bubbleModelConfig.loaded') &&
     composerControls.includes('modelsLoading={bubbleModelsLoading}') &&
-    composerControls.includes("loadingText={modelsLoading ? 'Loading models…' : null}"),
+    composerControls.includes("loadingText={modelsLoading ? 'Loading models…' :"),
   'Bubble picker must surface a loading state while the model catalog is in flight'
 );
 
@@ -271,7 +273,7 @@ assert.ok(
 const promptInput = read('src/ui/components/PromptInput.tsx');
 assert.ok(
   promptInput.includes("runtimeProvider === 'bubble'") &&
-    promptInput.includes("getLatestOpenCodeContextSnapshot(activeSession.messages, bubbleContextModel, 'Bubble')") &&
+    promptInput.includes('getLatestBubbleContextSnapshot(activeSession.messages, bubbleContextModel)') &&
     promptInput.includes('providerLabel="Bubble"'),
   'Composer must show Bubble token/context usage with Bubble-specific copy'
 );
