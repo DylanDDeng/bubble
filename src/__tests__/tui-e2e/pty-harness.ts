@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import xterm from "@xterm/headless";
+import { readRepoSettings, trustRepoConfig } from "../../permissions/trust.js";
 
 const XtermTerminal = xterm.Terminal;
 
@@ -59,6 +60,8 @@ export async function startTui(options: {
   args?: string[];
   env?: Record<string, string>;
   cwd?: string;
+  /** Pre-trust the cwd's .bubble settings so startup skips the trust prompt (default true). */
+  trustCwd?: boolean;
 } = {}): Promise<PtySession> {
   const pty = await import("node-pty");
   const cols = options.cols ?? 100;
@@ -70,11 +73,15 @@ export async function startTui(options: {
 
   const explicitBubbleHome = options.env?.BUBBLE_HOME;
   const bubbleHome = explicitBubbleHome ?? mkdtempSync(join(tmpdir(), "bubble-tui-e2e-"));
+  const cwd = options.cwd ?? repoRoot;
+  // The repo ships .bubble settings, and a fresh BUBBLE_HOME has never trusted
+  // them, so startup would block on "Trust this folder?". Trust as a returning user.
+  if (options.trustCwd !== false) trustRepoConfig(cwd, readRepoSettings(cwd), { bubbleHome });
   const proc = pty.spawn(process.execPath, [bin, ...(options.args ?? [])], {
     name: "xterm-256color",
     cols,
     rows,
-    cwd: options.cwd ?? repoRoot,
+    cwd,
     env: {
       ...process.env,
       // Keep the harness hermetic: no user config, no real API keys.
