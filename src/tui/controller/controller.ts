@@ -128,6 +128,7 @@ export class BubbleTuiController {
   private readonly queue: InputQueueState = createInputQueueState();
   private readonly sessionTransition: SessionTransitionController;
   private readonly startedAtMs: number;
+  private turnStartedAt: number | undefined;
   private readonly goalRuntime?: GoalRuntimeController;
   private readonly taskRuntime?: TaskRuntimeController;
   private readonly pendingTaskAnnouncements = new Map<string, BackgroundTaskInfo>();
@@ -174,7 +175,10 @@ export class BubbleTuiController {
         this.transcript = landTaskLifecycles(transcript, restoredTaskLifecycles(manager));
         this.queue.queued.length = 0;
         this.liveStreamVisible = false;
-        this.runState = null;
+this.runState = null;
+        // Session-scoped: the restored session has not started a run, so none
+        // of its subagents or tasks belong to a "current turn".
+        this.turnStartedAt = undefined;
         this.activeInputController = null;
         this.activeAbortController = null;
         this.commandActivity = null;
@@ -305,6 +309,15 @@ export class BubbleTuiController {
         }],
       }));
     return [...fromTrace, ...direct];
+  }
+
+  /**
+   * Start of the current (or, when idle, the latest) agent run. The tasks pane
+   * keeps finished work that was launched since then; wall clock on purpose,
+   * it is compared with subagent/task/workflow creation stamps.
+   */
+  getTurnStartedAt(): number | undefined {
+    return this.turnStartedAt;
   }
 
   getWorkflows(): WorkflowRunSnapshot[] {
@@ -700,6 +713,7 @@ export class BubbleTuiController {
     const agentInput = isSubmitPayload(input) ? this.submitAgentInput(input) : input;
     this.runActive = true;
     this.liveStreamVisible = true;
+    this.turnStartedAt = Date.now();
     this.runState = createRunState(Date.now());
     const inputController = new AgentRunInputQueue(`run-${this.runState.accumulator.runId}`);
     const abortController = new AbortController();
