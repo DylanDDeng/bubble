@@ -7,6 +7,7 @@ import { MDContent } from '../render/markdown';
 import { HighlightedCode } from './HighlightedCode';
 import TextFileReader from './TextFileReader';
 import { ProjectVideoPreview } from './ProjectVideoPreview';
+import { ProjectAudioPreview } from './ProjectAudioPreview';
 import { FileTypeIcon } from './FileTypeIcon';
 import { CsvPreview, XlsxPreview } from './SpreadsheetPreview';
 import { ProjectMdxPreview, ProjectMdxProperties, parseMdxDocument } from './ProjectMdxPreview';
@@ -109,7 +110,7 @@ type ProjectFilePreview =
       dataUrl: string;
     }
   | {
-      kind: 'video';
+      kind: 'video' | 'audio';
       path: string;
       name: string;
       ext: string;
@@ -2732,6 +2733,9 @@ export function ProjectTreePanel({
   const isImagePreviewSurface =
     !previewLoading &&
     selectedPreview?.kind === 'image';
+  const isAudioPreviewSurface =
+    !previewLoading &&
+    selectedPreview?.kind === 'audio';
   const isMdxCodePreviewSurface =
     isMdxFilePreview &&
     viewMode === 'code';
@@ -3504,6 +3508,8 @@ export function ProjectTreePanel({
                       ? 'bg-[var(--bg-primary)] p-0'
                     : isImagePreviewSurface
                       ? 'bg-[var(--bg-primary)] p-3'
+                    : isAudioPreviewSurface
+                      ? 'flex items-center justify-center bg-[var(--bg-primary)] p-6'
                     : 'rounded-lg border border-[var(--border)] bg-[var(--bg-primary)] p-3'
                 }`}
               >
@@ -3546,6 +3552,18 @@ export function ProjectTreePanel({
                     key={selectedPreview.path}
                     src={selectedPreview.previewUrl}
                     name={selectedPreview.name}
+                    active={!collapsed}
+                  />
+                )}
+
+                {!previewLoading && selectedPreview?.kind === 'audio' && (
+                  <ProjectAudioPreview
+                    key={selectedPreview.path}
+                    src={selectedPreview.previewUrl}
+                    cwd={selectedFileCwd}
+                    path={selectedPreview.path}
+                    name={selectedPreview.name}
+                    ext={selectedPreview.ext}
                     active={!collapsed}
                   />
                 )}

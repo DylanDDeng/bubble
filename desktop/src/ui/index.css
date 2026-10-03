@@ -3977,3 +3977,44 @@ button.aegis-mdx-metadata-key:hover {
 .group\/tool-result:hover .workstream-raw-trigger,
 .group\/tool-result:focus-within .workstream-raw-trigger { opacity: 1; }
 .workstream-raw-trigger:hover { background: var(--bg-tertiary); }
+
+/* Files panel audio preview: thin accent progress track with a round thumb. */
+.project-audio-seek {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 18px;
+  background: transparent;
+  cursor: pointer;
+}
+.project-audio-seek:disabled {
+  cursor: default;
+}
+.project-audio-seek::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--accent) 0 var(--project-audio-progress, 0%),
+    var(--border) var(--project-audio-progress, 0%) 100%
+  );
+}
+.project-audio-seek::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light);
+  transition: transform 120ms ease;
+}
+.project-audio-seek:not(:disabled):hover::-webkit-slider-thumb {
+  transform: scale(1.15);
+}
+.project-audio-seek:focus-visible {
+  outline: none;
+}
+.project-audio-seek:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 4px var(--accent-light), 0 0 0 1px var(--accent);
+}

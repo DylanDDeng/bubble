@@ -17,13 +17,13 @@ import {ProjectTreePanel} from '/src/ui/components/ProjectTreePanel';
 import {Tooltip} from '@base-ui-components/react/tooltip';
 import '/src/ui/index.css';
 const store=useAppStore;const root='/qa/project';
-const paths=['one.md','two.md','page.html','image.svg','readonly.txt','tree-only.md','movie.mp4'];
+const paths=['one.md','two.md','page.html','image.svg','readonly.txt','tree-only.md','movie.mp4','song.mp3'];
 const docs=[...Array.from({length:40},(_,i)=>'filler-'+String(i).padStart(2,'0')+'.txt'),'nested.md'];
 const tree={name:'project',path:root,kind:'dir',children:[{name:'docs',path:root+'/docs',kind:'dir',children:docs.map(name=>({name,path:root+'/docs/'+name,kind:'file'}))},...paths.map(name=>({name,path:root+'/'+name,kind:'file'}))]};
-const previews=[];
+const previews=[];const savedCopies=[];
 window.electron={getProjectTree:async()=>tree,cancelProjectTreeRead:async()=>{},watchProjectTree:async()=>true,unwatchProjectTree:async()=>{},onProjectTreeUpdated:()=>()=>{},
- readProjectFilePreview:async(cwd,p)=>{previews.push(p);const name=p.split('/').pop();const ext='.'+name.split('.').pop();const base={path:p,name,ext,size:10,mtimeMs:1};if(ext==='.mp4')return {...base,kind:'video',previewUrl:name==='broken.mp4'?'data:video/mp4;base64,AAAA':'/scripts/tests/fixtures/video-preview.mp4'};if(ext==='.svg')return {...base,kind:'image',dataUrl:'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg"/>'};return {...base,kind:ext==='.md'?'markdown':ext==='.html'?'html':'text',text:ext==='.html'?'<h1>Page</h1>':'# '+name,editable:ext==='.md'}},
- watchProjectFile:async()=>true,unwatchProjectFile:async()=>{},onProjectFileChanged:()=>()=>{},registerProjectEditor:async()=>{},unregisterProjectEditor:async()=>{},updateProjectEditorDraft:async()=>{},onProjectEditorFlushRequest:()=>()=>{},listOpenWithApps:async()=>({ok:true,apps:[]}),sendClientEvent:()=>{},
+ readProjectFilePreview:async(cwd,p)=>{previews.push(p);const name=p.split('/').pop();const ext='.'+name.split('.').pop();const base={path:p,name,ext,size:10,mtimeMs:1};if(ext==='.mp3')return {...base,kind:'audio',previewUrl:'/scripts/tests/fixtures/audio-preview.mp3'};if(ext==='.mp4')return {...base,kind:'video',previewUrl:name==='broken.mp4'?'data:video/mp4;base64,AAAA':'/scripts/tests/fixtures/video-preview.mp4'};if(ext==='.svg')return {...base,kind:'image',dataUrl:'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg"/>'};return {...base,kind:ext==='.md'?'markdown':ext==='.html'?'html':'text',text:ext==='.html'?'<h1>Page</h1>':'# '+name,editable:ext==='.md'}},
+ saveProjectFileCopy:async(cwd,p)=>{savedCopies.push([cwd,p]);return {ok:true,filePath:'/tmp/copy.mp3'}},watchProjectFile:async()=>true,unwatchProjectFile:async()=>{},onProjectFileChanged:()=>()=>{},registerProjectEditor:async()=>{},unregisterProjectEditor:async()=>{},updateProjectEditorDraft:async()=>{},onProjectEditorFlushRequest:()=>()=>{},listOpenWithApps:async()=>({ok:true,apps:[]}),sendClientEvent:()=>{},
 };
 const session=store.getState().createDraftSession(root);store.setState({activeSessionId:session,projectTree:tree,projectTreeCwd:root});
 let remount;
@@ -32,7 +32,7 @@ function Harness(){
  return <Tooltip.Provider><div><div role="tablist">{s.rightUtilityTabs.filter(t=>t.startsWith('files')).map(t=><button role="tab" aria-selected={s.activeRightUtilityTab===t} key={t} onClick={()=>s.setActiveRightUtilityTab(t)}>{s.rightPanelBySessionId[session]?.fileTabsByUtilityTab[t]?.activeFile?.filePath.split('/').pop()||'Files'}</button>)}</div><div style={{position:'relative',height:650,width:960}}>{s.rightUtilityTabs.filter(t=>t.startsWith('files')).map(t=><ProjectTreePanel key={t+version} sessionId={session} utilityTabId={t} embedded activeTab="files" collapsed={s.activeRightUtilityTab!==t} onClose={()=>s.closeRightUtilityTab(t)} onOpenFile={s.openProjectFileInRightPanel} openRequest={s.pendingProjectFileOpen?.tabId===t?s.pendingProjectFileOpen:null} onOpenRequestConsumed={s.clearPendingProjectFileOpen} sharedPanelWidth={960}/>)}</div></div></Tooltip.Provider>
 }
 createRoot(document.getElementById('root')).render(<Harness/>);
-window.qa={store,session,previews,remount:()=>remount(),open:name=>store.getState().openProjectFileInRightPanel({cwd:root,path:root+'/'+name}),snapshot:()=>{const s=store.getState();return {tabs:s.rightUtilityTabs,active:s.activeRightUtilityTab,files:s.rightPanelBySessionId[session]?.fileTabsByUtilityTab}}};
+window.qa={store,session,previews,savedCopies,remount:()=>remount(),open:name=>store.getState().openProjectFileInRightPanel({cwd:root,path:root+'/'+name}),snapshot:()=>{const s=store.getState();return {tabs:s.rightUtilityTabs,active:s.activeRightUtilityTab,files:s.rightPanelBySessionId[session]?.fileTabsByUtilityTab}}};
 `;
 const main=String.raw`
 const {app,BrowserWindow}=require('electron');const path=require('node:path');const assert=require('node:assert/strict');
@@ -80,7 +80,23 @@ app.whenReady().then(async()=>{
  await run("qa.open('broken.mp4')");await settle();
  for(let i=0;i<30;i++){if(await run("[...document.querySelectorAll('[role=alert]')].some(e=>e.textContent.includes('Unable to load or decode'))"))break;await delay(100)}
  assert(await run("[...document.querySelectorAll('[role=alert]')].some(e=>e.textContent.includes('Unable to load or decode'))"),'decoder failures have an explanation');
- assert.deepEqual(errors,[]);console.log('PASS Electron file tabs: distinct files, dedupe, mixed types, rapid opens, restore, tree routing, tree state across tabs, close/reopen, MP4 playback/pause/error');app.exit(0);
+ await run("qa.open('song.mp3')");await settle();
+ const audioCard="[...document.querySelectorAll('[data-testid=project-audio-preview]')].find(e=>e.getBoundingClientRect().width>0)";
+ for(let i=0;i<40;i++){if(await run("document.querySelector('audio')?.readyState>=1"))break;await delay(100)}
+ assert(await run(audioCard+".textContent.includes('MP3 audio')"),'audio card shows the format');
+ assert(await run(audioCard+".textContent.includes('0:00 / 0:02')"),'audio card shows the decoded duration');
+ if(process.env.QA_SCREENSHOT){const image=await w.webContents.capturePage();require('node:fs').writeFileSync(process.env.QA_SCREENSHOT,image.toPNG())}
+ await run(audioCard+".querySelector('[aria-label=Play]').click()");
+ for(let i=0;i<30;i++){if(await run("document.querySelector('audio').currentTime>0.2"))break;await delay(100)}
+ assert(await run("document.querySelector('audio').currentTime>0.2"),'audio plays in the file panel');
+ assert(await run("!!"+audioCard+".querySelector('[aria-label=Pause]')"),'play button switches to pause');
+ await run(audioCard+".querySelector('[aria-label=\"More actions\"]').click()");await settle();
+ const menuItems=await run("[...document.querySelectorAll('[role=menuitem]')].map(e=>e.textContent.trim())");
+ assert.deepEqual(menuItems,['Copy path','Save a copy…'],'audio card menu offers copy path and save a copy');
+ await run("[...document.querySelectorAll('[role=menuitem]')].find(e=>e.textContent.includes('Save a copy')).click()");await settle();
+ assert.deepEqual(await run('qa.savedCopies'),[['/qa/project','/qa/project/song.mp3']],'save a copy targets the previewed file');
+ await run("qa.open('one.md')");await settle();assert.equal(await run("document.querySelector('audio').paused"),true,'hidden file tab pauses audio');
+ assert.deepEqual(errors,[]);console.log('PASS Electron file tabs: distinct files, dedupe, mixed types, rapid opens, restore, tree routing, tree state across tabs, close/reopen, MP4 playback/pause/error, MP3 audio card');app.exit(0);
  }catch(e){console.error(e,errors);app.exit(1)}
 });
 `;
