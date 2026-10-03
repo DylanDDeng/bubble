@@ -84,6 +84,13 @@ describe("compactMessages pinning", () => {
     expect(out[1]).toMatchObject({ role: "user", content: LONG_INSTRUCTION });
   });
 
+  it("retains late constraints beyond the pin cap in the heuristic summary", () => {
+    const huge = "x".repeat(PINNED_INSTRUCTION_MAX_CHARS) + LATE_REQUIREMENT;
+    const result = compactMessages(multiTurnHistory(user(huge)), { keepRecentTurns: 2 });
+    expect(result.compacted).toBe(true);
+    expect(result.summary).toContain(LATE_REQUIREMENT);
+  });
+
   it("pins an oversized first message in truncated form", () => {
     const huge = "x".repeat(PINNED_INSTRUCTION_MAX_CHARS + 100);
     const result = compactMessages(multiTurnHistory(user(huge)), { keepRecentTurns: 2 });
@@ -136,6 +143,17 @@ describe("compactWithLLM pinning", () => {
     // The compactor model never sees the pinned instruction as fodder.
     const historyText = (complete.mock.calls[0][0] as { content: string }[])[1].content;
     expect(historyText).not.toContain("IMPORTANT_LATE_REQUIREMENT_MARKER");
+  });
+
+  it("sends the truncated pin tail as protected summary input", async () => {
+    const { provider, complete } = makeProvider();
+    const huge = "x".repeat(PINNED_INSTRUCTION_MAX_CHARS) + LATE_REQUIREMENT;
+    const result = await compactWithLLM(multiTurnHistory(user(huge)), { provider, modelId: "fake" });
+    expect(result.compacted).toBe(true);
+    const historyText = (complete.mock.calls[0][0] as { content: string }[])[1].content;
+    expect(historyText).toContain(LATE_REQUIREMENT);
+    expect(historyText).toContain("Original instruction beyond retained pin");
+    expect(result.messages![1].content).toContain("original message truncated");
   });
 
   it("leaves the single-user-turn shape unchanged (first == last user)", async () => {

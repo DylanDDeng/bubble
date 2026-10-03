@@ -1,9 +1,10 @@
+import { createHash } from "node:crypto";
 import {
   sanitizeAssistantProviderMetadata,
   sanitizeInternalReasoningText,
   sanitizeInternalReminderBlocks,
 } from "./agent/internal-reminder-sanitizer.js";
-import type { AssistantMessage, Message } from "./types.js";
+import type { AssistantMessage, Message, PermissionMode } from "./types.js";
 import type {
   LegacySessionEntry,
   SessionAssistantMessageEntry,
@@ -12,19 +13,50 @@ import type {
   SessionMetadata,
   SessionMetadataEntry,
   SessionProviderErrorEntry,
-  SessionSummaryEntry,
 } from "./session-types.js";
 import type { SanitizedProviderError } from "./provider-error-record.js";
+import { tryCheckpointMessages } from "./context/checkpoint.js";
+import { isPermissionModeReminder, reminderForMode } from "./prompt/reminders.js";
+
+/** Records that change conversational context or its execution state.
+ * Keep this shared by revision hashing and checkpoint receipt supersession.
+ * Unknown/new markers are conservative: only known diagnostics are excluded.
+ */
+export function affectsContextRevision(entry: SessionLogEntry): boolean {
+  if (entry.type === "metadata" || entry.type === "provider_error") return false;
+  if (entry.type === "marker") {
+    return !["task_started", "task_finished", "task_killed"].includes(entry.kind);
+  }
+  return true;
+}
 
 export class SessionLog {
   private entries: SessionLogEntry[] = [];
+  private nextId = 1;
+  private contextRevision = "empty";
+
+  private allocateId(): string { return String(this.nextId++); }
+
+  appendEntries(entries: SessionLogEntry[]): void {
+    this.entries.push(...entries);
+    for (const entry of entries) {
+      this.nextId = Math.max(this.nextId, (parseInt(entry.id, 10) || 0) + 1);
+      if (affectsContextRevision(entry)) {
+        this.contextRevision = createHash("sha256").update(this.contextRevision).update(JSON.stringify(entry)).digest("hex");
+      }
+    }
+  }
+
+  getRevision(): string { return this.contextRevision; }
 
   load(lines: string[]) {
     this.entries = [];
+    this.nextId = 1;
+    this.contextRevision = "empty";
     for (const line of lines) {
       try {
         const raw = JSON.parse(line) as SessionLogEntry | LegacySessionEntry;
-        this.entries.push(...normalizeEntry(raw));
+        this.appendEntries(normalizeEntry(raw));
       } catch {
         // skip corrupt lines
       }
@@ -32,7 +64,10 @@ export class SessionLog {
   }
 
   replace(entries: SessionLogEntry[]) {
-    this.entries = entries;
+    this.entries = [];
+    this.nextId = 1;
+    this.contextRevision = "empty";
+    this.appendEntries(entries);
   }
 
   list(): SessionLogEntry[] {
@@ -40,7 +75,11 @@ export class SessionLog {
   }
 
   getMetadata(): SessionMetadata {
-    const entry = this.entries.find((item): item is SessionMetadataEntry => item.type === "metadata");
+    let entry: SessionMetadataEntry | undefined;
+    for (let i = this.entries.length - 1; i >= 0; i--) {
+      const item = this.entries[i];
+      if (item.type === "metadata") { entry = item; break; }
+    }
     const metadata = entry?.metadata ?? {};
     return {
       ...metadata,
@@ -67,42 +106,31 @@ export class SessionLog {
   }
 
   appendMessage(message: Message): SessionLogEntry[] {
-    const normalized = normalizeMessageToEntries(message, nextEntryId(this.entries), Date.now());
-    this.entries.push(...normalized);
+    const normalized = normalizeMessageToEntries(message, this.allocateId(), Date.now());
+    this.appendEntries(normalized);
     return normalized;
-  }
-
-  appendSummary(summary: string): SessionSummaryEntry {
-    const entry: SessionSummaryEntry = {
-      id: nextEntryId(this.entries),
-      type: "summary",
-      summary,
-      timestamp: Date.now(),
-    };
-    this.entries.push(entry);
-    return entry;
   }
 
   appendMarker(kind: SessionMarkerKind, value: string): SessionLogEntry {
     const entry: SessionLogEntry = {
-      id: nextEntryId(this.entries),
+      id: this.allocateId(),
       type: "marker",
       kind,
       value,
       timestamp: Date.now(),
     };
-    this.entries.push(entry);
+    this.appendEntries([entry]);
     return entry;
   }
 
   appendProviderError(error: SanitizedProviderError): SessionProviderErrorEntry {
     const entry: SessionProviderErrorEntry = {
-      id: nextEntryId(this.entries),
+      id: this.allocateId(),
       type: "provider_error",
       error,
       timestamp: Date.now(),
     };
-    this.entries.push(entry);
+    this.appendEntries([entry]);
     return entry;
   }
 
@@ -111,11 +139,17 @@ export class SessionLog {
     let latestSummaryIndex = -1;
     let latestClearIndex = -1;
 
+    // An unreadable checkpoint is skipped, not fatal: its originals are still in
+    // the log, so replay continues from the previous readable boundary.
+    let checkpointProjection: Message[] | undefined;
     for (let index = this.entries.length - 1; index >= 0; index--) {
-      if (this.entries[index].type === "summary") {
-        latestSummaryIndex = index;
-        break;
-      }
+      const entry = this.entries[index];
+      if (entry.type === "context_checkpoint") {
+        checkpointProjection = tryCheckpointMessages(entry.checkpoint);
+        if (!checkpointProjection) continue;
+      } else if (entry.type !== "summary") continue;
+      latestSummaryIndex = index;
+      break;
     }
 
     for (let index = this.entries.length - 1; index >= 0; index--) {
@@ -127,21 +161,50 @@ export class SessionLog {
     }
 
     if (latestSummaryIndex > latestClearIndex) {
-      const summary = this.entries[latestSummaryIndex] as SessionSummaryEntry;
-      messages.push({
-        role: "system",
-        content: `Previous conversation summary: ${summary.summary}`,
-      });
+      const entry = this.entries[latestSummaryIndex];
+      if (entry.type === "context_checkpoint") {
+        messages.push(...(checkpointProjection ?? []));
+      } else if (entry.type === "summary") {
+        // Legacy summaries remain readable; already discarded originals cannot be reconstructed.
+        messages.push({ role: "system", content: `Previous conversation summary: ${entry.summary}` });
+      }
     }
 
     const startIndex = Math.max(
       latestSummaryIndex > latestClearIndex ? latestSummaryIndex + 1 : 0,
       latestClearIndex + 1,
     );
+    const committedPrefixLength = latestSummaryIndex > latestClearIndex
+      && this.entries[latestSummaryIndex].type === "context_checkpoint" ? messages.length : 0;
+    // Every checkpoint past the readable boundary is unreadable by construction.
+    // Its projection is unusable, but its position still proves the originals
+    // before it were committed at a complete-tool-group model boundary.
+    let unreadableBoundaryLength = 0;
+    // Permission-mode switches become mode reminders where they happened, so
+    // the model reads the mode timeline in order: a later "plan mode is
+    // active" outranks an earlier tool result saying the mode went back to
+    // default. A switch is written out before the next user message (never
+    // inside a tool group); one from before a compaction/clear boundary still
+    // applies and opens the replayed history.
+    let pendingMode = lastModeSwitchBefore(this.entries, startIndex);
+    const flushMode = (): void => {
+      if (pendingMode === undefined) return;
+      messages.push({ role: "meta", kind: "system-reminder", content: reminderForMode(pendingMode) });
+      pendingMode = undefined;
+    };
     for (let index = startIndex; index < this.entries.length; index++) {
       const entry = this.entries[index];
       switch (entry.type) {
+        case "marker": {
+          const mode = entry.kind === "mode_switch" ? permissionModeOf(entry.value) : undefined;
+          if (mode) pendingMode = mode;
+          break;
+        }
+        case "context_checkpoint":
+          unreadableBoundaryLength = messages.length;
+          break;
         case "user_message":
+          flushMode();
           messages.push(cloneMessage(entry.message));
           break;
         case "assistant_message":
@@ -152,7 +215,7 @@ export class SessionLog {
             reasoning: entry.message.reasoning !== undefined
               ? sanitizeInternalReasoningText(entry.message.reasoning)
               : undefined,
-            providerMetadata: sanitizeAssistantProviderMetadata(cloneProviderMetadata(entry.message.providerMetadata)),
+            providerMetadata: sanitizeAssistantProviderMetadata(cloneProviderMetadata(entry.message.providerMetadata), entry.message.modelId ?? entry.message.model),
           });
           break;
         case "tool_call": {
@@ -177,6 +240,32 @@ export class SessionLog {
       }
     }
 
+    flushMode();
+    retireStaleModeReminders(messages);
+
+    // A committed checkpoint may end in completed tools without a final text
+    // response. It is a resumable model boundary, not an interrupted user turn.
+    const boundary = Math.max(committedPrefixLength, unreadableBoundaryLength);
+    if (boundary > 0) {
+      let head = messages.slice(0, boundary);
+      if (unreadableBoundaryLength > committedPrefixLength) {
+        // Replayed originals, not a validated projection: hold the turn the
+        // boundary split to complete-tool-group semantics, as its continuation is.
+        let turnStart = head.length;
+        for (let i = head.length - 1; i >= committedPrefixLength; i--) {
+          if (head[i].role === "user") { turnStart = i; break; }
+        }
+        head = [...head.slice(0, turnStart), ...pruneIncompleteToolGroups(head.slice(turnStart))];
+      }
+      const tail = messages.slice(boundary);
+      const nextUser = tail.findIndex(message => message.role === "user");
+      const continuationEnd = nextUser < 0 ? tail.length : nextUser;
+      return [
+        ...head,
+        ...pruneIncompleteToolGroups(tail.slice(0, continuationEnd)),
+        ...pruneIncompleteTail(tail.slice(continuationEnd)),
+      ];
+    }
     return pruneIncompleteTail(messages);
   }
 }
@@ -231,7 +320,7 @@ function normalizeMessageToEntries(message: Message, id: string, timestamp: numb
           usage: message.usage,
           systemFingerprint: message.systemFingerprint,
           error: message.error,
-          providerMetadata: sanitizeAssistantProviderMetadata(cloneProviderMetadata(message.providerMetadata)),
+          providerMetadata: sanitizeAssistantProviderMetadata(cloneProviderMetadata(message.providerMetadata), message.modelId ?? message.model),
         },
         timestamp,
       };
@@ -262,6 +351,7 @@ function normalizeMessageToEntries(message: Message, id: string, timestamp: numb
 function isSessionLogEntry(entry: SessionLogEntry | LegacySessionEntry): entry is SessionLogEntry {
   return [
     "metadata",
+    "context_checkpoint",
     "summary",
     "marker",
     "user_message",
@@ -270,16 +360,6 @@ function isSessionLogEntry(entry: SessionLogEntry | LegacySessionEntry): entry i
     "tool_result",
     "provider_error",
   ].includes(entry.type);
-}
-
-function nextEntryId(entries: SessionLogEntry[]): string {
-  let max = 0;
-  for (const entry of entries) {
-    const match = /^(\d+)/.exec(entry.id);
-    if (!match) continue;
-    max = Math.max(max, Number(match[1]));
-  }
-  return `${max + 1}`;
 }
 
 function cloneMessage(message: Message): Message {
@@ -307,6 +387,59 @@ function cloneMessage(message: Message): Message {
 function cloneProviderMetadata<T>(metadata: T | undefined): T | undefined {
   if (metadata === undefined) return undefined;
   return JSON.parse(JSON.stringify(metadata)) as T;
+}
+
+// A checkpoint can split a user turn. Its continuation has no user anchor,
+// so validate complete tool groups directly rather than relying on turn pruning.
+const PERMISSION_MODES = new Set<PermissionMode>(["default", "plan", "bypassPermissions"]);
+
+function permissionModeOf(value: string): PermissionMode | undefined {
+  return PERMISSION_MODES.has(value as PermissionMode) ? value as PermissionMode : undefined;
+}
+
+function lastModeSwitchBefore(entries: SessionLogEntry[], end: number): PermissionMode | undefined {
+  for (let index = end - 1; index >= 0; index--) {
+    const entry = entries[index];
+    if (entry.type === "marker" && entry.kind === "mode_switch") {
+      const mode = permissionModeOf(entry.value);
+      if (mode) return mode;
+    }
+  }
+  return undefined;
+}
+
+/** Only the latest mode reminder speaks to the model, as in a live agent. */
+function retireStaleModeReminders(messages: Message[]): void {
+  let latest = true;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role !== "meta" || message.kind !== "system-reminder" || !isPermissionModeReminder(message.content)) continue;
+    if (latest) latest = false;
+    else message.includeInLlm = false;
+  }
+}
+
+function pruneIncompleteToolGroups(messages: Message[]): Message[] {
+  const pending = new Set<string>();
+  let groupStart = -1;
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index];
+    if (message.role === "system" || message.role === "meta") continue;
+    if (message.role === "tool") {
+      if (!pending.delete(message.toolCallId)) return messages.slice(0, groupStart < 0 ? index : groupStart);
+      if (pending.size === 0) groupStart = -1;
+    } else {
+      if (pending.size) return messages.slice(0, groupStart);
+      if (message.role === "assistant" && message.toolCalls?.length) {
+        groupStart = index;
+        for (const call of message.toolCalls) {
+          if (!call.id || pending.has(call.id)) return messages.slice(0, groupStart);
+          pending.add(call.id);
+        }
+      }
+    }
+  }
+  return pending.size ? messages.slice(0, groupStart) : messages;
 }
 
 function pruneIncompleteTail(messages: Message[]): Message[] {

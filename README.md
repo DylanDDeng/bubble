@@ -1,10 +1,38 @@
 # Bubble
 
-Bubble is a terminal coding agent. It works inside a local project folder: it reads and edits files, runs commands behind configurable approval controls, searches and navigates code with language-server intelligence, browses the web, loads reusable skills, connects MCP tools, fans work out to subagents, and keeps persistent memory across sessions.
+Bubble is a local coding agent with a desktop app and a terminal interface. It works inside a local project folder: it reads and edits files, runs commands behind configurable approval controls, searches and navigates code with language-server intelligence, browses the web, loads reusable skills, connects MCP tools, fans work out to subagents, and keeps persistent memory across sessions.
 
 It is provider-agnostic. Bring an API key for OpenAI, Anthropic, Google, DeepSeek, Moonshot/Kimi, Zhipu, Z.AI, MiniMax, Groq, Together, Fireworks, a local OpenAI-compatible endpoint, and more; sign in to ChatGPT with OAuth; or sign in with OAuth to use a ChatGPT or Grok subscription directly.
 
 ---
+
+## Desktop app
+
+The desktop app is the primary direction for interactive development. It uses the existing Bubble SDK, providers and session history, with the Aegis desktop layout, working trace, KanBan, automations, pull requests and settings adapted for a standalone Bubble agent. Skills and model selection use Bubble directly.
+
+```bash
+npm ci
+npm run desktop:install
+npm run dev
+```
+
+`npm run dev` (or `npm run desktop:dev`) starts Electron with Vite hot updates. UI edits refresh in place; Electron/preload/shared code and Agent SDK edits compile and restart the desktop automatically. The first launch compiles the SDK and host, without a renderer production build. Stop everything with Ctrl+C. Use `npm run dev:tui` for terminal development.
+
+`npm run desktop` still builds and starts the desktop without hot updates; `npm --prefix desktop start` opens the last compiled build. For a local macOS dogfood app and DMG, run `npm run desktop:package`; it includes the Agent runtime and never publishes. Use `npm run desktop:build` to check a build and `npm run desktop:test` to run desktop checks. See [desktop architecture and migration notes](docs/desktop-architecture.md) for runtime boundaries, data migration and development commands. The CLI remains available.
+
+In **Settings → Providers → Bubble**, OpenAI offers **ChatGPT subscription** browser sign-in and a separate **API key** mode. **Grok Subscription** uses browser sign-in only. You can cancel a pending login or sign out from the same panel; OAuth tokens stay in the selected profile's Agent home and are never shown in the API key editor.
+
+Desktop data is separated into three profiles (macOS paths shown):
+
+| Command | Purpose | Desktop data | Agent data |
+| --- | --- | --- | --- |
+| `npm run dev` | Your persistent development/test sessions | `~/Library/Application Support/Bubble Dev` | `~/.bubble-dev` |
+| `npm run desktop:qa` | Agent verification; a fresh profile each launch | System temporary directory `bubble-desktop-qa-*/desktop` | Same temporary root, `agent/` |
+| `npm run desktop` / `npm --prefix desktop start` | Normal use with production data | `~/Library/Application Support/Bubble` | `~/.bubble` |
+
+Sessions, board state, automations, UI preferences, model/account configuration, OAuth data, memory and MCP settings follow the selected profile. History import reads only that profile's Agent home. Dev sessions survive restarts; QA uses a different temporary root for every launch (and keeps that root across hot restarts). Configure development models separately: production history and credentials are not automatically copied. Existing production data is left in place. These profiles separate app data, not the project files you ask the Agent to edit.
+
+Run automated verification with `npm run desktop:test`; manual/agent desktop verification must use `npm run desktop:qa`. If your development server is already running, use `PORT=4337 npm run desktop:qa`. QA paths are logged at startup and retained in the system temporary directory for diagnostics. The normal launch commands select their own profile and ignore inherited data-directory overrides.
 
 ## Requirements
 
@@ -139,7 +167,13 @@ Turns are driven by the SDK itself, not by iterator consumption: a returned
 iterator is a replay subscription, so dropping it never stalls or cancels the
 turn. `openSession(sessionId)` returns a durable handle whose `events` iterable
 replays the whole session log from sequence 1 and `eventsFrom(n)` resumes after
-the last sequence the host durably processed. `stop(sessionId)` is
+the last sequence the host durably processed. Snapshot `handle.latestSequence`
+before sending to subscribe only to new work, including automatic fallback
+turns. Each turn ends with a `terminal` record (`completed`, `failed`, or
+`cancelled`) after its execution slot is released. A completed turn may have
+already started a queued successor; hosts should drain buffered records and
+check `getSessionRunState(sessionId).active` before showing the session as idle.
+`stop(sessionId)` is
 Claude-style: it interrupts the active turn and keeps the queue; pass
 `{ cancelQueued: true }` to clear both. `clearQueue(sessionId)` cancels only
 queued turns, and `deleteSession(sessionId)` awaits teardown before the JSONL
@@ -179,6 +213,18 @@ Built-in providers include OpenAI, Anthropic, Google, DeepSeek, Moonshot (CN and
 
 For Doubao Seed models on Volcengine Ark, run `/provider --add doubao` and paste your Ark API key. The built-in endpoint is `https://ark.cn-beijing.volces.com/api/v3` and uses Ark's Responses API. The model picker exposes `minimal`, `low`, `medium`, and `high`, defaulting to `high`; `minimal` disables Ark thinking, while the other levels enable it.
 
+For **Xiaomi MiMo Token Plan**, choose **Xiaomi MiMo Token Plan** in desktop
+Settings → Providers, or run `/provider --add mimo-token-plan` in the CLI.
+Enter the Token Plan key (`tp-…` for personal plans, `ttp-…` for team plans),
+then select `/model mimo-token-plan:mimo-v2.6-pro` or `mimo-v2.6-flash`.
+Bubble uses Anthropic Messages at
+`https://token-plan-cn.xiaomimimo.com/anthropic/v1/messages`, with streaming,
+tools, and a thinking on/off switch (on by default). Both models have a 1M
+context window and a 128K output cap. V2.5 Pro and V2.5 are also available;
+their announced retirement date is October 21, 2026. Use the plan-specific key,
+not a pay-as-you-go API key. See the
+[official integration guide](https://mimo.mi.com/docs/zh-CN/tokenplan/integration/tools-overview).
+
 ### Custom providers and models
 
 For StepFun's standard API, run `/provider --add stepfun-api`, enter your API
@@ -216,7 +262,7 @@ Bubble gates risky actions behind a permission mode. Press `Tab` to cycle modes 
 
 | Mode | Behavior |
 | --- | --- |
-| Default (Build) | File edits and writes auto-approve; bash and other tools prompt unless covered by an allow rule. |
+| Default (Build) | Workspace file edits and writes auto-approve, except protected files (`.git/`, `.bubble/settings*.json`, `.claude/settings*.json`). Bash, MCP tools and edits outside the workspace prompt unless covered by an allow rule or an "allow for this session" approval. |
 | Plan | Read-only investigation. The agent proposes a plan and waits for your approval before making changes. |
 | Bypass | Auto-approves every tool and disables all safety prompts. Enable deliberately with `--dangerously-skip-permissions`. |
 
@@ -225,6 +271,10 @@ Allow/deny rules are configured per scope and persisted across sessions. Manage 
 - `~/.bubble/settings.json` — user scope (applies everywhere)
 - `<project>/.bubble/settings.json` — project scope (commit to share with your team)
 - `<project>/.bubble/settings.local.json` — local overrides (gitignore)
+
+The two project files arrive with the repository, so what they grant — allow rules, `mcpServers` (which Bubble would start) and LSP server definitions — only loads once you trust the folder. Like Kimi Code, Bubble asks when it opens such a folder (at startup in the terminal, on the first message in the desktop app), listing what would be enabled; any later change to those settings asks again. Deny rules, and switches that only turn LSP servers off, always apply; deny rules apply even in Bypass mode.
+
+Bash allow rules understand compound commands: every command in `a && b | c` must be covered by some allow rule, and commands with `$(...)`, backticks or file redirections always prompt. Deny rules match any part of the line. "Don't ask again this session" remembers the exact command only. MCP tools are named `mcp__<server>__<tool>`; `mcp__<server>` allows every tool of that server.
 
 Rules use a simple pattern syntax, for example:
 
@@ -245,7 +295,7 @@ Rules use a simple pattern syntax, for example:
 
 ## What Bubble can do
 
-**Files and code.** Read, write, and make targeted edits; find files by glob; search contents with ripgrep; and navigate with language-server operations (go-to-definition, find references, hover, document/workspace symbols, call hierarchy).
+**Files and code.** Read, write, and make targeted edits; list directories with ls; find files through Bash with find or rg --files; search contents with ripgrep; and navigate with language-server operations (go-to-definition, find references, hover, document/workspace symbols, call hierarchy).
 
 **Shell and dev servers.** Run bounded bash commands with streaming output, and start/stop/inspect long-running dev servers (`npm run dev`, Vite, Next, etc.) with readiness checks and captured logs.
 
@@ -363,7 +413,7 @@ npm test           # run the test suite (vitest)
 npm start          # run the built agent
 ```
 
-`npm run dev` compiles and launches in one step. The interactive TUI is built on React Ink.
+`npm run dev:tui` compiles and launches the terminal interface in one step.
 
 ## Feishu host (optional)
 

@@ -581,7 +581,7 @@ describe("Agent", () => {
 
     const agent = new Agent({ provider, model: "gpt-4o", tools: [dummyTool] });
     const events = await collectEvents(agent, "Call dummy", "/tmp");
-    const eventTypes = events.map((event) => event.type);
+    const eventTypes = events.filter(event => event.type !== "context_usage").map((event) => event.type);
 
     expect(eventTypes).toEqual([
       "turn_start",
@@ -1289,7 +1289,7 @@ describe("Agent", () => {
     expect(lifecycleReminder?.content).toContain("Unique subagents currently tracked: 2.");
     expect(lifecycleReminder?.content).toContain("completed=2");
     expect(lifecycleReminder?.content).toContain("do not count repeated spawn_agent/wait_agent tool calls");
-    expect(lifecycleReminder?.content).toContain("call wait_agent before user-facing progress narration");
+    expect(lifecycleReminder?.content).toContain("wait_agent when that result is needed for your next meaningful step");
   });
 
   it("propagates parent abort signals into subagent provider calls", async () => {
@@ -1337,7 +1337,7 @@ describe("Agent", () => {
     expect(result.error).toBe("Subagent was cancelled.");
   });
 
-  it("adds memory prompt context to subagents without advertising skill summaries", async () => {
+  it("gives subagents that can load skills the parent's Skills catalog and memory context", async () => {
     const captured: Message[][] = [];
     const provider: Provider = {
       async *streamChat(messages) {
@@ -1387,7 +1387,10 @@ describe("Agent", () => {
     });
 
     const system = captured[0].find((message) => message.role === "system")?.content ?? "";
-    expect(system).not.toContain("debug-skill");
+    expect(system).toContain("## Skills");
+    expect(system).toContain("- debug-skill: Debug workflow");
+    // The child has no skill_search, so the catalog never points to it.
+    expect(system).not.toContain("skill_search");
     expect(system).toContain("Memory context visible");
     expect(system).toContain("Use selected context.");
   });
@@ -1856,7 +1859,7 @@ describe("Agent", () => {
 
     expect(afterChars).toBeLessThan(beforeChars);
     expect(agent.messages.some((message) => (
-      message.role === "tool" && message.content.includes("output omitted to control context size")
+      message.role === "meta" && message.kind === "compaction-summary"
     ))).toBe(true);
   });
 
@@ -1940,7 +1943,9 @@ describe("Agent", () => {
     });
     for (let i = 0; i < 5; i++) {
       agent.messages.push({ role: "user", content: `turn ${i}` });
-      agent.messages.push({ role: "assistant", content: `reply ${i}` });
+      // Actual overflow recovery must reduce request tokens, not delete a
+      // protected instruction merely to shave a few bytes from a tiny fixture.
+      agent.messages.push({ role: "assistant", content: `reply ${i} ` + "investigation detail ".repeat(300) });
     }
 
     const events = await collectEvents(agent, "latest", "/tmp");

@@ -44,6 +44,8 @@ export interface AssistantProviderMetadata {
 
 export interface UserMessage {
   role: "user";
+  /** Internal image observation; not an authored user prompt. */
+  toolObservation?: true;
   content: string | ContentPart[];
   /** Local presentation metadata; provider adapters intentionally ignore it. */
   ui?: {
@@ -188,6 +190,8 @@ export interface ToolResultMetadata {
 }
 
 export interface ToolResult {
+  /** Bounded screenshots, delivered as a model-visible image observation after the tool batch. */
+  images?: { mimeType: "image/png" | "image/jpeg"; data: string }[];
   content: string;
   isError?: boolean;
   status?: ToolResultStatus;
@@ -445,6 +449,8 @@ export type AgentInputRejectedReason = "no_continuation" | "turn_failed" | "turn
 
 export type AgentEvent =
   | { type: "turn_start" }
+  | { type: "context_usage"; usedTokens: number; contextWindow?: number; estimated: boolean }
+  | { type: "context_compaction"; status: "started" | "completed" | "failed"; compactionId?: string; persisted?: boolean; preTokens: number; postTokens?: number; contextWindow?: number }
   | { type: "text_delta"; content: string }
   | { type: "reasoning_delta"; content: string }
   | { type: "hook_start"; eventName: string; hookId: string; source: string }

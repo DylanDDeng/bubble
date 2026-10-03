@@ -15,6 +15,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { OAuthTokens } from "./types.js";
+import { withOAuthRefreshTimeout } from "./refresh-control.js";
 import { chatGptFetch, type ChatGptFetch } from "../network/chatgpt-transport.js";
 
 // Public OAuth client registered for the official Grok CLI ("Grok Build").
@@ -99,7 +100,7 @@ async function startCallbackServer(
 
           if (code) {
             res.writeHead(200, { "Content-Type": "text/html" });
-            res.end("<html><body><h1>Authorization successful</h1><p>You can close this window and return to the terminal.</p></body></html>");
+            res.end("<html><body><h1>Authorization received</h1><p>Return to Bubble to check whether sign-in completed. Bubble still needs to exchange and save your credentials.</p></body></html>");
             finish(() => settle({ code, state: state || "" }));
             return;
           }
@@ -239,25 +240,28 @@ export async function loginGrok(
 
 export async function refreshGrok(
   refreshToken: string,
-  options: { fetch?: ChatGptFetch } = {},
+  options: { fetch?: ChatGptFetch; timeoutMs?: number } = {},
 ): Promise<OAuthTokens> {
-  const fetchImpl = options.fetch ?? chatGptFetch;
-  const response = await fetchImpl(TOKEN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: refreshToken,
-      client_id: CLIENT_ID,
-    }),
-  });
+  return withOAuthRefreshTimeout(async (signal) => {
+    const fetchImpl = options.fetch ?? chatGptFetch;
+    const response = await fetchImpl(TOKEN_URL, {
+      method: "POST",
+      signal,
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+        client_id: CLIENT_ID,
+      }),
+    });
 
-  if (!response.ok) {
-    const text = await response.text().catch(() => "Unknown error");
-    throw new Error(`Token refresh failed: ${response.status} ${response.statusText} - ${text}`);
-  }
+    if (!response.ok) {
+      const text = await response.text().catch(() => "Unknown error");
+      throw new Error(`Token refresh failed: ${response.status} ${response.statusText} - ${text}`);
+    }
 
-  return parseTokenResponse((await response.json()) as GrokTokenResponse, refreshToken);
+    return parseTokenResponse((await response.json()) as GrokTokenResponse, refreshToken);
+  }, options.timeoutMs);
 }
 
 /**

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { SkillRegistry } from "../../skills/registry.js";
-import { createSkillTool } from "../skill.js";
+import { closestSkillNames, createSkillTool } from "../skill.js";
 
 function makeTempRoot(name: string): string {
   const root = join(tmpdir(), `bubble-skill-tool-${name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
@@ -50,6 +50,18 @@ Read the repo carefully before proposing changes.
 
     expect(result.isError).toBe(true);
     expect(result.content).toContain('Unknown skill "missing-skill"');
-    expect(result.content).toContain("Use skill_search");
+    expect(result.content).toContain("exact name from the Skills section");
+    // Shared with children that have no skill_search, so it never points there.
+    expect(result.content).not.toContain("skill_search");
+    expect(tool.description).not.toContain("skill_search");
+  });
+
+  it("suggests the closest known names for a mistyped skill", () => {
+    const names = ["bubble-design", "repo-review", "release-notes"];
+    expect(closestSkillNames("bubble-desgin", names)).toEqual(["bubble-design"]);
+    expect(closestSkillNames("review", names)).toEqual(["repo-review"]);
+    expect(closestSkillNames("kubernetes", names)).toEqual([]);
+    // A two-letter fragment is not a match.
+    expect(closestSkillNames("re", names)).toEqual([]);
   });
 });

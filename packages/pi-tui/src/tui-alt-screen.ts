@@ -421,6 +421,13 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return { lines, evictedImageDeletion };
 	}
 
+	protected override afterTerminalResume(): void {
+		// The terminal may have lost image bytes while our cached layout and
+		// transmission IDs remain valid. Re-upload visible images on this repaint,
+		// and offscreen images when they next enter the viewport.
+		this.uploadedKittyImages.clear();
+	}
+
 	protected override resetRenderState(): void {
 		this.previousScreen = [];
 		this.previousScreenWidth = 0;

@@ -1,7 +1,9 @@
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { getBubbleHomeInfo } from "../bubble-home.js";
+import { ModelConfig } from "../model-config.js";
 
 describe("bubble home", () => {
   const originalBubbleHome = process.env.BUBBLE_HOME;
@@ -42,5 +44,32 @@ describe("bubble home", () => {
       home: "/tmp/custom-bubble-home",
       environment: "custom",
     });
+  });
+
+  it("loads model configuration only from the selected Bubble home", () => {
+    const root = mkdtempSync(join(tmpdir(), "bubble-model-config-test-"));
+    try {
+      const userHome = join(root, "user-test");
+      const qaHome = join(root, "qa");
+      mkdirSync(userHome);
+      mkdirSync(qaHome);
+      writeFileSync(join(userHome, "models.json"), JSON.stringify({
+        providers: { fixture: { models: [{ id: "user-model" }] } },
+      }));
+      process.env.BUBBLE_HOME = userHome;
+      const userConfig = new ModelConfig();
+      expect(userConfig.getPath()).toBe(join(userHome, "models.json"));
+      expect(userConfig.getCustomModels("fixture").map(m => m.id)).toEqual(["user-model"]);
+
+      process.env.BUBBLE_HOME = qaHome;
+      expect(new ModelConfig().getCustomModels("fixture")).toEqual([]);
+      writeFileSync(join(qaHome, "models.json"), JSON.stringify({
+        providers: { fixture: { models: [{ id: "qa-model" }] } },
+      }));
+      expect(new ModelConfig().getCustomModels("fixture").map(m => m.id)).toEqual(["qa-model"]);
+      expect(userConfig.getPath(), 'existing instances keep their home').toBe(join(userHome, "models.json"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

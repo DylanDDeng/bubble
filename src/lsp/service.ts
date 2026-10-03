@@ -10,9 +10,27 @@ import {
   StreamMessageReader,
   StreamMessageWriter,
   type MessageConnection,
+  type Message,
 } from "vscode-jsonrpc/node.js";
 import { customLspServerEntries, isLspEnabled, isLspServerEnabled, type LspConfig, type LspServerId } from "./config.js";
 import type { LspDiagnostic } from "./diagnostics.js";
+
+// vscode-jsonrpc 8.x rethrows write failures inside an async Promise executor.
+// Dispose through the lifecycle handler instead: pending requests still reject,
+// without an additional unhandled rejection that can crash the desktop host.
+class LspMessageWriter extends StreamMessageWriter {
+  constructor(stream: ChildProcessWithoutNullStreams["stdin"], private readonly onWriteFailure: (error: unknown) => void) {
+    super(stream);
+  }
+
+  override async write(message: Message): Promise<void> {
+    try {
+      await super.write(message);
+    } catch (error) {
+      this.onWriteFailure(error);
+    }
+  }
+}
 
 export type LspStatusKind = "starting" | "connected" | "error";
 
@@ -65,6 +83,7 @@ interface LspClientState {
   connection: MessageConnection;
   documents: Map<string, LspDocumentState>;
   stopping: boolean;
+  fail(message: string): void;
 }
 
 interface LspServerHandle {
@@ -92,6 +111,22 @@ interface PendingDiagnosticWaiter {
   timeout: NodeJS.Timeout;
 }
 
+export interface LspTimeouts {
+  initializeMs?: number;
+  requestMs?: number;
+  shutdownMs?: number;
+}
+
+// Electron's executable is also a Node runtime, but only with this child-local
+// flag. Preserve it for descendants (e.g. typescript-language-server's tsserver).
+function spawnNodeServer(args: string[], cwd: string): ChildProcessWithoutNullStreams {
+  return spawn(process.execPath, args, {
+    cwd,
+    env: process.versions.electron ? { ...process.env, ELECTRON_RUN_AS_NODE: "1" } : process.env,
+    stdio: "pipe",
+  });
+}
+
 const execFile = promisify(execFileCallback);
 const services = new Map<string, ProjectLspService>();
 const TS_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"];
@@ -102,6 +137,8 @@ export class ProjectLspService implements LspService {
   private readonly emitter = new EventEmitter();
   private readonly clients = new Map<string, LspClientState>();
   private readonly spawning = new Map<string, Promise<LspClientState | undefined>>();
+  private readonly initializing = new Map<string, LspClientState>();
+  private generation = 0;
   private readonly starting = new Map<string, LspStatus>();
   private readonly broken = new Map<string, LspStatus>();
   private readonly unavailable = new Set<string>();
@@ -110,7 +147,7 @@ export class ProjectLspService implements LspService {
   private disposed = false;
   private config: LspConfig | undefined;
 
-  constructor(private readonly cwd: string, config?: LspConfig) {
+  constructor(private readonly cwd: string, config?: LspConfig, private readonly timeouts: LspTimeouts = {}) {
     this.config = config;
   }
 
@@ -217,8 +254,7 @@ export class ProjectLspService implements LspService {
     await Promise.all(clients.map((client) => this.openOrChange(client, file)));
     const results = await Promise.all(
       clients.map((client) =>
-        client.connection
-          .sendRequest("textDocument/documentSymbol", { textDocument: { uri: pathToFileURL(file).href } })
+        this.request(client, "textDocument/documentSymbol", { textDocument: { uri: pathToFileURL(file).href } })
           .catch(() => []),
       ),
     );
@@ -228,7 +264,7 @@ export class ProjectLspService implements LspService {
   async workspaceSymbol(query: string): Promise<unknown[]> {
     const results = await Promise.all(
       [...this.clients.values()].map((client) =>
-        client.connection.sendRequest("workspace/symbol", { query }).catch(() => []),
+        this.request(client, "workspace/symbol", { query }).catch(() => []),
       ),
     );
     return results.flatMap(normalizeLspResult).slice(0, 50);
@@ -262,12 +298,10 @@ export class ProjectLspService implements LspService {
   shutdownNow(): void {
     for (const waiter of this.waiters) waiter.resolve();
     this.waiters.clear();
-    for (const client of this.clients.values()) {
-      client.stopping = true;
-      client.connection.dispose();
-      client.process.kill();
-    }
-    this.clients.clear();
+    this.disposed = true;
+    this.generation += 1;
+    for (const client of [...this.initializing.values(), ...this.clients.values()]) this.stopClient(client);
+    this.starting.clear();
   }
 
   private async runRequest(input: LspLocationInput, method: string, params: unknown): Promise<unknown[]> {
@@ -276,7 +310,7 @@ export class ProjectLspService implements LspService {
     const clients = await this.getClients(file);
     await Promise.all(clients.map((client) => this.openOrChange(client, file)));
     const results = await Promise.all(
-      clients.map((client) => client.connection.sendRequest(method, params).catch(() => [])),
+      clients.map((client) => this.request(client, method, params).catch(() => [])),
     );
     return results.flatMap(normalizeLspResult);
   }
@@ -287,26 +321,27 @@ export class ProjectLspService implements LspService {
     const clients = await this.getClients(file);
     const results = await Promise.all(clients.map(async (client) => {
       await this.openOrChange(client, file);
-      const items = await client.connection
-        .sendRequest("textDocument/prepareCallHierarchy", {
+      const items = await this.request(client, "textDocument/prepareCallHierarchy", {
           textDocument: { uri: pathToFileURL(file).href },
           position: { line: input.line, character: input.character },
         })
         .catch(() => []);
       const first = normalizeLspResult(items)[0];
       if (!first) return [];
-      return client.connection.sendRequest(method, { item: first }).catch(() => []);
+      return this.request(client, method, { item: first }).catch(() => []);
     }));
     return results.flatMap(normalizeLspResult);
   }
 
   private async getClients(file: string): Promise<LspClientState[]> {
+    if (this.disposed) return [];
     const matches = await this.matchingServers(file);
     const clients = await Promise.all(matches.map(({ server, root }) => this.getClient(server, root)));
     return clients.filter((client): client is LspClientState => !!client);
   }
 
   private async getClient(server: LspServerInfo, root: string): Promise<LspClientState | undefined> {
+    if (this.disposed) return undefined;
     const key = `${root}:${server.id}`;
     const existing = this.clients.get(key);
     if (existing) return existing;
@@ -326,22 +361,32 @@ export class ProjectLspService implements LspService {
     const task = this.spawnClient(server, root, key);
     this.spawning.set(key, task);
     task.finally(() => {
-      if (this.spawning.get(key) === task) this.spawning.delete(key);
-      if (this.starting.delete(key)) this.emitStatus();
+      if (this.spawning.get(key) === task) {
+        this.spawning.delete(key);
+        if (this.starting.delete(key)) this.emitStatus();
+      }
     });
     return task;
   }
 
   private async spawnClient(server: LspServerInfo, root: string, key: string): Promise<LspClientState | undefined> {
+    const generation = this.generation;
+    let client: LspClientState | undefined;
     try {
       const handle = await server.spawn(root, { cwd: this.cwd });
       if (!handle) {
         this.unavailable.add(key);
         return undefined;
       }
+      if (this.disposed || generation !== this.generation || !isLspServerEnabled(this.config, server.id)) {
+        // Install an error handler even when shutdown won the spawn race.
+        handle.process.on("error", () => {});
+        handle.process.kill();
+        return undefined;
+      }
       const connection = createMessageConnection(
         new StreamMessageReader(handle.process.stdout),
-        new StreamMessageWriter(handle.process.stdin),
+        new LspMessageWriter(handle.process.stdin, (error) => client?.fail(`server write failed: ${String(error)}`)),
         {
           error: () => {},
           warn: () => {},
@@ -349,7 +394,7 @@ export class ProjectLspService implements LspService {
           log: () => {},
         },
       );
-      const client: LspClientState = {
+      client = {
         key,
         id: server.id,
         name: server.name,
@@ -359,7 +404,22 @@ export class ProjectLspService implements LspService {
         connection,
         documents: new Map(),
         stopping: false,
+        fail: (message) => {
+          if (client!.stopping) return;
+          this.stopClient(client!);
+          if (!this.disposed && generation === this.generation) this.markBroken(key, server, root, message);
+        },
       };
+      const activeClient = client;
+      this.initializing.set(key, client);
+      // Drain stderr: an unread pipe can block an otherwise healthy server.
+      handle.process.stderr.resume();
+      handle.process.once("error", (error) => activeClient.fail(`server error: ${error.message}`));
+      handle.process.once("exit", (code, signal) => activeClient.fail(
+        `server exited${code === null ? "" : ` with code ${code}`}${signal ? ` (${signal})` : ""}`,
+      ));
+      connection.onClose(() => activeClient.fail("server connection closed"));
+      connection.onError(([error]) => activeClient.fail(`server connection error: ${error.message}`));
 
       connection.onNotification("textDocument/publishDiagnostics", (params: any) => {
         if (!params?.uri) return;
@@ -375,15 +435,9 @@ export class ProjectLspService implements LspService {
       connection.onRequest("workspace/workspaceFolders", () => [{ uri: pathToFileURL(root).href, name: basename(root) }]);
       connection.onRequest("client/registerCapability", () => null);
       connection.onRequest("client/unregisterCapability", () => null);
-      handle.process.once("exit", (code, signal) => {
-        this.clients.delete(key);
-        if (!this.disposed && !client.stopping) {
-          this.markBroken(key, server, root, `server exited${code === null ? "" : ` with code ${code}`}${signal ? ` (${signal})` : ""}`);
-        }
-      });
       connection.listen();
 
-      await connection.sendRequest("initialize", {
+      await this.request(client, "initialize", {
         processId: process.pid,
         rootPath: root,
         rootUri: pathToFileURL(root).href,
@@ -407,14 +461,67 @@ export class ProjectLspService implements LspService {
           },
           window: { workDoneProgress: false },
         },
-      });
-      connection.sendNotification("initialized", {});
+      }, this.timeouts.initializeMs ?? 10_000);
+      if (client.stopping || this.disposed || generation !== this.generation) return undefined;
+      await this.notify(client, "initialized", {});
+      if (client.stopping || this.disposed || generation !== this.generation) return undefined;
       this.clients.set(key, client);
       this.emitStatus();
       return client;
     } catch (error) {
-      this.markBroken(key, server, root, error instanceof Error ? error.message : String(error));
+      if (client) client.fail(error instanceof Error ? error.message : String(error));
+      else if (!this.disposed && generation === this.generation) {
+        this.markBroken(key, server, root, error instanceof Error ? error.message : String(error));
+      }
       return undefined;
+    } finally {
+      if (this.initializing.get(key) === client) this.initializing.delete(key);
+    }
+  }
+
+  private async request(client: LspClientState, method: string, params?: unknown, timeoutMs = this.timeouts.requestMs ?? 10_000): Promise<unknown> {
+    return this.withDeadline(client, method, () => client.connection.sendRequest(method, params), timeoutMs);
+  }
+
+  private async notify(client: LspClientState, method: string, params: unknown): Promise<void> {
+    await this.withDeadline(client, method, () => client.connection.sendNotification(method, params));
+  }
+
+  private async withDeadline<T>(client: LspClientState, method: string, operation: () => Promise<T>, timeoutMs = this.timeouts.requestMs ?? 10_000): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        operation(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            const message = `${method} timed out after ${timeoutMs}ms`;
+            reject(new Error(message));
+            client.fail(message);
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private stopClient(client: LspClientState): void {
+    client.stopping = true;
+    if (this.clients.get(client.key) === client) this.clients.delete(client.key);
+    if (this.initializing.get(client.key) === client) this.initializing.delete(client.key);
+    // JSON-RPC close alone does not reject pending requests; dispose does.
+    client.connection.dispose();
+    if (client.process.exitCode === null && client.process.signalCode === null) {
+      client.process.kill();
+      const forceKill = setTimeout(() => {
+        if (client.process.exitCode === null && client.process.signalCode === null) client.process.kill("SIGKILL");
+      }, 1_000);
+      forceKill.unref();
+      client.process.once("exit", () => clearTimeout(forceKill));
+    }
+    for (const file of client.documents.keys()) {
+      this.diagnosticsByFile.get(file)?.delete(client.id);
+      this.resolveDiagnosticWaiters(file);
     }
   }
 
@@ -425,13 +532,13 @@ export class ProjectLspService implements LspService {
     const existing = client.documents.get(file);
     if (!existing) {
       client.documents.set(file, { languageId, version: 1 });
-      client.connection.sendNotification("textDocument/didOpen", {
+      await this.notify(client, "textDocument/didOpen", {
         textDocument: { uri, languageId, version: 1, text },
       });
       return;
     }
     existing.version += 1;
-    client.connection.sendNotification("textDocument/didChange", {
+    await this.notify(client, "textDocument/didChange", {
       textDocument: { uri, version: existing.version },
       contentChanges: [{ text }],
     });
@@ -508,13 +615,20 @@ export class ProjectLspService implements LspService {
 
   private async shutdownClient(client: LspClientState): Promise<void> {
     client.stopping = true;
-    await client.connection.sendRequest("shutdown").catch(() => undefined);
-    client.connection.sendNotification("exit");
-    client.connection.dispose();
-    client.process.kill();
+    try {
+      await this.request(client, "shutdown", undefined, this.timeouts.shutdownMs ?? 1_000);
+      await this.withDeadline(client, "exit", () => client.connection.sendNotification("exit"), this.timeouts.shutdownMs ?? 1_000);
+    } catch {
+      // Shutdown must finish even if the server no longer answers.
+    } finally {
+      this.stopClient(client);
+    }
   }
 
   private async shutdownClients(): Promise<void> {
+    this.generation += 1;
+    for (const client of [...this.initializing.values()]) this.stopClient(client);
+    this.spawning.clear();
     await Promise.all([...this.clients.values()].map((client) => this.shutdownClient(client)));
     this.clients.clear();
     this.starting.clear();
@@ -522,11 +636,11 @@ export class ProjectLspService implements LspService {
   }
 
   private async shutdownDisabledClients(): Promise<void> {
+    for (const client of [...this.initializing.values()]) {
+      if (!isLspServerEnabled(this.config, client.id)) this.stopClient(client);
+    }
     const disabled = [...this.clients.values()].filter((client) => !isLspServerEnabled(this.config, client.id));
     await Promise.all(disabled.map((client) => this.shutdownClient(client)));
-    for (const client of disabled) {
-      this.clients.delete(client.key);
-    }
   }
 }
 
@@ -560,7 +674,7 @@ const TypeScriptServer: LspServerInfo = {
       ?? resolveModule(requireFromSelf, "typescript-language-server/lib/cli.mjs");
     if (!tsserverPath || !serverPath) return undefined;
     return {
-      process: spawn(process.execPath, [serverPath, "--stdio"], { cwd: root, env: process.env, stdio: "pipe" }),
+      process: spawnNodeServer([serverPath, "--stdio"], root),
       initializationOptions: { tsserver: { path: tsserverPath } },
     };
   },
@@ -599,7 +713,7 @@ const VueServer: LspServerInfo = {
     if (!serverPath) return undefined;
     const args = tsdk ? [serverPath, "--stdio", "--tsdk", tsdk] : [serverPath, "--stdio"];
     return {
-      process: spawn(process.execPath, args, { cwd: root, env: process.env, stdio: "pipe" }),
+      process: spawnNodeServer(args, root),
     };
   },
 };
@@ -619,7 +733,7 @@ const ESLintServer: LspServerInfo = {
       ?? resolveModule(requireFromSelf, "vscode-langservers-extracted/bin/vscode-eslint-language-server");
     if (!serverPath) return undefined;
     return {
-      process: spawn(process.execPath, [serverPath, "--stdio"], { cwd: root, env: process.env, stdio: "pipe" }),
+      process: spawnNodeServer([serverPath, "--stdio"], root),
     };
   },
   configuration: (root, items) => items.map(() => eslintConfiguration(root)),

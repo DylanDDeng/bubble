@@ -7,12 +7,11 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { getBubbleHome } from "./bubble-home.js";
 import type { ModelTier, ProviderProtocol } from "./model-catalog.js";
 import type { ModelInfo } from "./provider-registry.js";
 import { filterProviderModels } from "./provider-model-policy.js";
 
-const MODELS_PATH = join(homedir(), ".bubble", "models.json");
 
 export interface ProviderModelConfig {
   baseURL?: string;
@@ -40,6 +39,7 @@ export interface ModelsConfig {
 }
 
 export class ModelConfig {
+  private readonly modelsPath = join(getBubbleHome(), "models.json");
   private data?: ModelsConfig;
   private loadError?: string;
 
@@ -48,9 +48,9 @@ export class ModelConfig {
   }
 
   private load() {
-    if (!existsSync(MODELS_PATH)) return;
+    if (!existsSync(this.modelsPath)) return;
     try {
-      const raw = readFileSync(MODELS_PATH, "utf-8");
+      const raw = readFileSync(this.modelsPath, "utf-8");
       this.data = JSON.parse(raw) as ModelsConfig;
     } catch (err: any) {
       this.loadError = err.message;
@@ -62,7 +62,7 @@ export class ModelConfig {
   }
 
   getPath(): string {
-    return MODELS_PATH;
+    return this.modelsPath;
   }
 
   getProviderConfig(providerId: string): ProviderModelConfig | undefined {

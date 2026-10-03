@@ -1,3 +1,4 @@
+import type { AgentRunInputQueue } from "./input-controller.js";
 import type { AgentProfile, AgentProfileSource, SubagentRunResult } from "./profiles.js";
 import type { ResolvedSubagentRoute } from "./categories.js";
 import type { SubagentWorktree } from "./worktree.js";
@@ -63,6 +64,8 @@ export interface SubagentThreadSnapshot {
   createdAt: number;
   updatedAt: number;
   deliveredAt?: number;
+  pendingInputCount?: number;
+  inputDelivery?: "queued" | "applied" | "rejected";
   /** 1-based position in the scheduler queue while status is "queued". */
   queuePosition?: number;
   /** Present for write_worktree children: where the isolated checkout lives. */
@@ -105,10 +108,12 @@ export interface SubagentThreadRecord {
   hookStopPending?: boolean;
   abortController: AbortController;
   waiters: Set<() => void>;
+  inputQueue?: AgentRunInputQueue;
+  inputDelivery?: "queued" | "applied" | "rejected";
   agent?: {
     messages: Message[];
     injectSystemReminder(content: string): void;
-    run(input: string | ContentPart[], cwd: string, options?: { abortSignal?: AbortSignal; resumeWithoutInput?: boolean }): AsyncIterable<AgentEvent>;
+    run(input: string | ContentPart[], cwd: string, options?: { abortSignal?: AbortSignal; resumeWithoutInput?: boolean; inputController?: import("../types.js").AgentInputController; continueOnPendingInput?: boolean }): AsyncIterable<AgentEvent>;
   };
   messages?: Message[];
   promise?: Promise<void>;
@@ -141,6 +146,8 @@ export function snapshotSubagentThread(record: SubagentThreadRecord): SubagentTh
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
     deliveredAt: record.deliveredAt,
+    pendingInputCount: record.inputQueue?.pendingInputCount() ?? 0,
+    inputDelivery: record.inputDelivery,
     worktree: record.worktree ? { ...record.worktree } : undefined,
   };
 }

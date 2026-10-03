@@ -66,14 +66,23 @@ describe("Ink trace groups", () => {
     });
   });
 
-  it("renames simple glob calls as list directory summaries", () => {
+  it("renders ls entries and does not count truncation notices as paths", () => {
+    const groups = buildTraceGroups([
+      tool("ls", { path: "." }, "a/\nb.txt\n\n[Output truncated: showing 2 of 3 entries. Increase limit to see more.]"),
+    ], { homeDir });
+    expect(groups[0]).toMatchObject({ title: "List Directory", count: 2, noun: "entries", items: ["a/", "b.txt"] });
+    const empty = buildTraceGroups([tool("ls", {}, "(empty directory)")], { homeDir });
+    expect(empty[0]).toMatchObject({ count: 0, items: [] });
+  });
+
+  it("labels glob as file matching even for a simple pattern", () => {
     const groups = buildTraceGroups([
       tool("glob", { pattern: "*" }, "a.html\nb.html\nsubdir"),
     ], { homeDir });
 
     expect(groups[0]).toMatchObject({
       kind: "list",
-      title: "List Directory",
+      title: "Find Files",
       count: 3,
       noun: "files",
       items: ["a.html", "b.html", "subdir"],

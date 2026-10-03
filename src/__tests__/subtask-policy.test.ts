@@ -4,7 +4,7 @@ import type { ToolRegistryEntry } from "../types.js";
 
 const TOOLS: ToolRegistryEntry[] = [
   { name: "read", description: "", parameters: { type: "object", properties: {} }, execute: async () => ({ content: "" }), readOnly: true },
-  { name: "glob", description: "", parameters: { type: "object", properties: {} }, execute: async () => ({ content: "" }), readOnly: true },
+  { name: "ls", description: "", parameters: { type: "object", properties: {} }, execute: async () => ({ content: "" }), readOnly: true },
   { name: "grep", description: "", parameters: { type: "object", properties: {} }, execute: async () => ({ content: "" }), readOnly: true },
   { name: "bash", description: "", parameters: { type: "object", properties: {} }, execute: async () => ({ content: "" }) },
   { name: "task", description: "", parameters: { type: "object", properties: {} }, execute: async () => ({ content: "" }), readOnly: true },
@@ -21,6 +21,7 @@ describe("subtask policy", () => {
     const policy = getSubtaskPolicy(undefined);
     expect(policy.type).toBe("general_readonly");
     expect(policy.allowedTools).toContain("read");
-    expect(policy.allowedTools).toContain("glob");
+    expect(policy.allowedTools).toContain("ls");
+    expect(policy.allowedTools).not.toContain("glob");
   });
 });

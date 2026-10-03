@@ -37,7 +37,7 @@ describe("agent stream interruption retry", () => {
     expect(calls).toBe(2);
     const retryEvents = events.filter((event) => event.type === "provider_retry");
     expect(retryEvents).toEqual([
-      { type: "provider_retry", attempt: 1, maxAttempts: 2, reason: "Anthropic connection failed mid-stream." },
+      { type: "provider_retry", attempt: 1, maxAttempts: 10, reason: "Anthropic connection failed mid-stream." },
     ]);
 
     const assistantMessages = agent.messages.filter((message) => message.role === "assistant");
@@ -61,8 +61,8 @@ describe("agent stream interruption retry", () => {
     const agent = new Agent({ provider, model: "test-model", tools: [] });
     await expect(collect(agent.run("hello", mkdtempSync(join(tmpdir(), "bubble-retry-")))))
       .rejects.toThrow(/connection failed mid-stream/);
-    // 1 initial attempt + 2 retries
-    expect(calls).toBe(3);
+    // 1 initial attempt + 10 retries
+    expect(calls).toBe(11);
   });
 
   it("honors a provider-specific retry limit for explicit terminal errors", async () => {

@@ -52,6 +52,15 @@ export function resolveProviderRequestConfig(
   const supportedLevels = getAvailableThinkingLevels(providerId, modelId);
   const effectiveThinkingLevel = normalizeThinkingLevel(requestedLevel, supportedLevels);
 
+  if (providerId === "opencode-zen" && modelId === "space-bunny-free") {
+    const level = normalizeInheritedThinkingLevel(providerId, modelId, requestedLevel);
+    return {
+      effectiveThinkingLevel: level,
+      reasoningContentEcho: "tool_calls",
+      extraBody: { reasoning_effort: level },
+    };
+  }
+
   if (providerId === "openai-codex") {
     const model = getBuiltinModel(providerId, modelId);
     if (!model || model.reasoningLevels.length === 0) {

@@ -20,6 +20,12 @@ export interface EditApprovalRequest {
    * (bypassPermissions still auto-approves, consistent with bash).
    */
   outsideWorkspace?: boolean;
+  /**
+   * Set by the approval controller: the path is a workspace file that can
+   * grant further capabilities (permission settings, git hooks/config), so
+   * it is never auto-approved in default mode. Hosts must not auto-approve it.
+   */
+  protectedPath?: boolean;
 }
 
 export interface WriteApprovalRequest {
@@ -32,6 +38,8 @@ export interface WriteApprovalRequest {
   fileExists: boolean;
   /** See EditApprovalRequest.outsideWorkspace. */
   outsideWorkspace?: boolean;
+  /** See EditApprovalRequest.protectedPath. */
+  protectedPath?: boolean;
 }
 
 export interface PatchApprovalRequest {
@@ -43,6 +51,8 @@ export interface PatchApprovalRequest {
   files: Array<{ path: string; kind: "add" | "update" | "delete" }>;
   /** Combined unified diff for all file changes. */
   diff: string;
+  /** See EditApprovalRequest.protectedPath. */
+  protectedPath?: boolean;
 }
 
 export interface BashApprovalRequest {
@@ -56,6 +66,12 @@ export interface BashApprovalRequest {
    * session allowlist, and bypass approve it like foreground by design.
    */
   background?: boolean;
+  /**
+   * Set by the approval controller when this request may be approved for the
+   * rest of the session: the exact scope the grant would cover (a bash
+   * command prefix, an MCP tool name). Absent = hosts offer only "once".
+   */
+  sessionGrant?: string;
 }
 
 export interface LspApprovalRequest {
@@ -82,7 +98,9 @@ export interface AgentProfileApprovalRequest {
 }
 
 /**
- * Permission gate for a tool exposed by an external ACP runtime.
+ * Permission gate for a tool Bubble does not implement itself: a tool
+ * exposed by an external ACP runtime (kind = ACP tool category) or an MCP
+ * server tool (kind = "mcp", title = the namespaced mcp__server__tool name).
  *
  * Keep this structural rather than importing ACP SDK types so the approval
  * layer remains provider-agnostic. External runtimes are responsible for
@@ -97,6 +115,8 @@ export interface ExternalToolApprovalRequest {
   kind: string;
   rawInput?: unknown;
   locations?: Array<{ path: string; line?: number | null }>;
+  /** See BashApprovalRequest.sessionGrant. */
+  sessionGrant?: string;
 }
 
 export type ApprovalRequest =
@@ -109,7 +129,16 @@ export type ApprovalRequest =
   | ExternalToolApprovalRequest;
 
 export type ApprovalDecision =
-  | { action: "approve"; feedback?: string }
+  | {
+      action: "approve";
+      feedback?: string;
+      /**
+       * "session": also approve future requests covered by the request's
+       * `sessionGrant` for the rest of the session. Ignored when the request
+       * carried no sessionGrant.
+       */
+      remember?: "session";
+    }
   | { action: "reject"; feedback?: string };
 
 export interface ApprovalController {

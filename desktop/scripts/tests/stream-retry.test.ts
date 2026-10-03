@@ -1,0 +1,25 @@
+import assert from 'node:assert/strict';
+import { activeStreamRetry, streamRetryLabel } from '../../src/ui/utils/stream-retry';
+import { createBatchWorkstreamModel } from '../../src/ui/utils/workstream';
+import { deriveTranscriptTimelineItems } from '../../src/ui/utils/transcript-timeline';
+import type { StreamMessage } from '../../src/shared/types';
+const thought: StreamMessage = { type:'assistant', uuid:'thought', phase:'commentary', message:{content:[{type:'thinking',thinking:'Existing thought'}]} };
+const retry: StreamMessage = { type:'system', subtype:'api_retry', uuid:'retry', session_id:'qa', attempt:1, maxRetries:10, errorStatus:null };
+const resolved: StreamMessage = { type:'system', subtype:'api_retry_resolved', uuid:'resolved', session_id:'qa', retryId:'retry' };
+assert.equal(streamRetryLabel(retry),'Reconnecting 1/10');
+assert.equal(activeStreamRetry([thought,retry], 'running'),retry);
+assert.equal(activeStreamRetry([thought,retry,{...retry,uuid:'retry-10',attempt:10}], 'running')?.attempt,10);
+for(const status of ['completed','stopped','error'] as const) assert.equal(activeStreamRetry([retry],status),null);
+assert.equal(activeStreamRetry([retry,{type:'user_prompt',prompt:'next'}],'running'),null);
+assert.equal(activeStreamRetry([retry,resolved],'running'),null);
+assert.equal(activeStreamRetry([retry,{...thought,parentToolUseId:'child'}],'running'),retry);
+assert.equal(activeStreamRetry([retry,{type:'user',uuid:'result',message:{content:[{type:'tool_result',tool_use_id:'tool',content:'done'}]}}],'running'),retry);
+assert.equal(activeStreamRetry([retry,{type:'system',subtype:'bubble_context',uuid:'context',model:'test',context:null}],'running'),retry);
+assert.equal(activeStreamRetry([retry,{type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'thinking_delta',thinking:'recovered'}}}],'running'),null);
+const timeline=deriveTranscriptTimelineItems([thought,retry,resolved,{...thought,uuid:'recovered'}],{sessionRunning:true});
+assert.equal(timeline.filter(item=>item.type==='work').length,1,'retry markers do not split the trace');
+console.log('PASS: retry count, recovery, stop, new prompt, child isolation and timeline continuity');
+
+const interrupted: StreamMessage & {type:'assistant'} = {type:'assistant',uuid:'tool',message:{content:[{type:'tool_use',id:'cut',name:'Write',input:{path:'/tmp/cut.html',__aegisToolCallInterrupted:true}}]}};
+const model=createBatchWorkstreamModel({messages:[interrupted],toolStatusMap:new Map([['cut','pending']]),toolResultsMap:new Map(),isSessionRunning:true});
+assert.equal(model.entries.find(e=>e.id==='cut'&&e.type==='tool')?.status,'interrupted');

@@ -1,4 +1,6 @@
 import { getAvailableThinkingLevels, normalizeThinkingLevel } from "./provider-transform.js";
+import { getModelDefaultReasoningLevel } from "./model-catalog.js";
+import { isClaudeWithBoundThinking } from "./anthropic-thinking.js";
 import { RateLimitError, type RateLimitPolicy } from "./network/errors.js";
 import { isProviderTransportError, normalizeProviderNetworkError, providerFetch } from "./network/provider-transport.js";
 import {
@@ -12,6 +14,7 @@ import {
 import type { ContentPart, Provider, ProviderMessage, ProviderRawContentBlock, StreamChunk, ThinkingLevel, ToolChoiceMode, ToolDefinition, TokenUsage } from "./types.js";
 
 const ANTHROPIC_VERSION = "2023-06-01";
+const THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01";
 const DEFAULT_MAX_TOKENS = 8192;
 const ANTHROPIC_OPUS_LONG_OUTPUT_MAX_TOKENS = 128000;
 const ANTHROPIC_LONG_OUTPUT_MAX_TOKENS = 64000;
@@ -20,6 +23,8 @@ const ANTHROPIC_LONG_OUTPUT_MAX_TOKENS = 64000;
 // MiniMax's docs recommend M3 128K, M2.x 64K output.
 const MINIMAX_M3_MAX_TOKENS = 128000;
 const MINIMAX_M2_MAX_TOKENS = 64000;
+// MiMo counts thinking and visible text together; match its documented 128K cap.
+const MIMO_MAX_TOKENS = 131072;
 const ANTHROPIC_PROMPT_CACHE_CONTROL = { type: "ephemeral" } as const;
 /** Hard API limit: a 5th cache_control breakpoint is a 400, not a warning. */
 const ANTHROPIC_MAX_CACHE_BREAKPOINTS = 4;
@@ -52,7 +57,11 @@ interface AnthropicRequest {
   tool_choice?: { type: "auto" | "any" | "none" };
   stream?: boolean;
   temperature?: number;
-  thinking?: { type: "adaptive" };
+  thinking?: {
+    type: "adaptive" | "enabled" | "disabled";
+    display?: "summarized";
+    block_binding?: { prefix_mismatch_behavior: "drop_block" };
+  };
   output_config?: { effort: AnthropicEffort };
 }
 
@@ -138,6 +147,7 @@ export function createAnthropicMessagesProvider(options: AnthropicProviderOption
 
     const events = streamAnthropicEventsWithRetry(options, {
       url: resolveAnthropicMessagesUrl(options.baseURL),
+      model: body.model,
       stream: true,
       method: "POST",
       body: JSON.stringify(body),
@@ -162,12 +172,14 @@ export function createAnthropicMessagesProvider(options: AnthropicProviderOption
 
     const response = await fetchAnthropicResponseWithRetry(options, {
       url: resolveAnthropicMessagesUrl(options.baseURL),
+      model: body.model,
       stream: false,
       method: "POST",
       body: JSON.stringify(body),
       signal: chatOptions?.abortSignal,
     });
-    const data = await response.json() as { content?: Array<Record<string, unknown>> };
+    const data = await response.json() as { content?: Array<Record<string, unknown>>; input_transformations?: unknown };
+    reportThinkingPrefixDrops(data.input_transformations);
     return extractAnthropicText(data.content).join("");
   }
 
@@ -186,9 +198,14 @@ export function buildAnthropicRequest(
     stream?: boolean;
   },
 ): AnthropicRequest {
-  const { system, messages: anthropicMessages } = toAnthropicMessages(messages, shouldEchoThinking(options.providerId));
+  const mimo = isMiMoProvider(options);
+  const modernClaude = isClaudeWithBoundThinking(chatOptions.model);
+  const { system, messages: anthropicMessages } = toAnthropicMessages(
+    messages, modernClaude ? "all" : shouldEchoThinking(options), !modernClaude,
+  );
   const enablePromptCache = supportsAnthropicPromptCache(options, chatOptions.model);
-  const tools: AnthropicTool[] | undefined = chatOptions.tools?.map((tool) => ({
+  // MiMo only supports tool_choice=auto. Removing tools enforces "none".
+  const tools: AnthropicTool[] | undefined = (mimo && chatOptions.toolChoice === "none" ? undefined : chatOptions.tools)?.map((tool) => ({
     name: tool.name,
     description: tool.description,
     input_schema: tool.parameters,
@@ -226,8 +243,10 @@ export function buildAnthropicRequest(
   }
 
   const effectiveThinkingLevel = normalizeThinkingLevel(
-    chatOptions.thinkingLevel ?? options.thinkingLevel ?? "off",
-    getAvailableThinkingLevels(options.providerId || "", chatOptions.model),
+    chatOptions.thinkingLevel ?? options.thinkingLevel
+      ?? (mimo ? "medium" : modernClaude || isClaude5WithOptionalThinking(chatOptions.model)
+        ? getModelDefaultReasoningLevel(options.providerId || "", chatOptions.model) ?? "off" : "off"),
+    mimo ? ["off", "medium"] : getAvailableThinkingLevels(options.providerId || "", chatOptions.model),
   );
 
   const body: AnthropicRequest = {
@@ -236,7 +255,7 @@ export function buildAnthropicRequest(
     system: buildAnthropicSystem(system, enablePromptCache),
     messages: anthropicMessages,
     tools: tools && tools.length > 0 ? tools : undefined,
-    tool_choice: tools && tools.length > 0 ? { type: chatOptions.toolChoice ?? "auto" } : undefined,
+    tool_choice: tools && tools.length > 0 ? { type: mimo ? "auto" : chatOptions.toolChoice ?? "auto" } : undefined,
     stream: chatOptions.stream || undefined,
   };
   if (
@@ -246,8 +265,18 @@ export function buildAnthropicRequest(
     body.temperature = chatOptions.temperature;
   }
 
-  if (effectiveThinkingLevel !== "off") {
-    body.thinking = { type: "adaptive" };
+  if (mimo) {
+    // MiMo defaults to thinking on and rejects Claude's adaptive mode/effort.
+    body.thinking = { type: effectiveThinkingLevel === "off" ? "disabled" : "enabled" };
+  } else if (effectiveThinkingLevel !== "off") {
+    body.thinking = modernClaude ? { type: "adaptive", display: "summarized" } : { type: "adaptive" };
+    if (modernClaude && isOfficialAnthropicBaseUrl(options.baseURL)) {
+      // Checkpoints proactively reset thinking. Runtime reminders, restored
+      // host context and tool changes can also change a prefix; let the API
+      // drop invalid blocks instead of failing the turn. Applied on every
+      // request so this behavior persists after restarts, per official guidance.
+      body.thinking.block_binding = { prefix_mismatch_behavior: "drop_block" };
+    }
     // Apply the selected reasoning depth via output_config.effort. Without this
     // every thinking request silently ran at Anthropic's default (high),
     // ignoring the chosen level. effort is an official-API feature, so only
@@ -262,6 +291,10 @@ export function buildAnthropicRequest(
     }
   }
 
+  // Opus 5 and Sonnet 5 default to thinking on; omission cannot express Off.
+  if (!mimo && effectiveThinkingLevel === "off" && isClaude5WithOptionalThinking(chatOptions.model)) {
+    body.thinking = { type: "disabled" };
+  }
   return body;
 }
 
@@ -361,6 +394,7 @@ function messageCacheKillSwitchEnabled(): boolean {
 }
 
 export function resolveAnthropicMaxTokens(options: AnthropicProviderOptions, model: string): number {
+  if (isMiMoProvider(options)) return MIMO_MAX_TOKENS;
   // MiniMax needs a large output budget so thinking doesn't starve the answer.
   if (isMiniMaxProvider(options)) {
     return /m3/i.test(model) ? MINIMAX_M3_MAX_TOKENS : MINIMAX_M2_MAX_TOKENS;
@@ -369,7 +403,8 @@ export function resolveAnthropicMaxTokens(options: AnthropicProviderOptions, mod
     return DEFAULT_MAX_TOKENS;
   }
 
-  if (isFableModelWith128kOutput(model) || isOpusModelWith128kOutput(model)) {
+  if (isFableModelWith128kOutput(model) || isOpusModelWith128kOutput(model)
+    || isClaudeFamilyVersionAtLeast(model, "sonnet", 5, 0)) {
     return ANTHROPIC_OPUS_LONG_OUTPUT_MAX_TOKENS;
   }
 
@@ -399,7 +434,8 @@ export function supportsAnthropicPromptCache(options: AnthropicProviderOptions, 
 
 export function toAnthropicMessages(
   messages: ProviderMessage[],
-  echoThinking = false,
+  echoThinking: boolean | "all" = false,
+  allowUnsignedThinking = true,
 ): { system: string; messages: AnthropicMessage[] } {
   const system: string[] = [];
   const out: AnthropicMessage[] = [];
@@ -426,7 +462,7 @@ export function toAnthropicMessages(
     }
 
     if (message.role === "assistant") {
-      const content = buildAssistantAnthropicBlocks(message, thinkingReplayIndexes.has(index));
+      const content = buildAssistantAnthropicBlocks(message, thinkingReplayIndexes.has(index), allowUnsignedThinking);
       if (content.length > 0) {
         pushAnthropicMessage(out, { role: "assistant", content });
       }
@@ -444,7 +480,7 @@ export function toAnthropicMessages(
   return { system: system.join("\n\n"), messages: out };
 }
 
-function buildAssistantAnthropicBlocks(message: Extract<ProviderMessage, { role: "assistant" }>, includeThinking: boolean): AnthropicContentBlock[] {
+function buildAssistantAnthropicBlocks(message: Extract<ProviderMessage, { role: "assistant" }>, includeThinking: boolean, allowUnsignedThinking: boolean): AnthropicContentBlock[] {
   const rawBlocks = message.providerMetadata?.anthropic?.contentBlocks;
   if (rawBlocks && rawBlocks.length > 0) {
     const blocks = rawBlocks
@@ -457,7 +493,7 @@ function buildAssistantAnthropicBlocks(message: Extract<ProviderMessage, { role:
   }
 
   const content: AnthropicContentBlock[] = [];
-  if (includeThinking && message.reasoning?.trim()) {
+  if (includeThinking && allowUnsignedThinking && message.reasoning?.trim()) {
     content.push({ type: "thinking", thinking: message.reasoning });
   }
   if (message.content.trim()) {
@@ -474,9 +510,17 @@ function buildAssistantAnthropicBlocks(message: Extract<ProviderMessage, { role:
   return content;
 }
 
-function getThinkingReplayIndexes(messages: ProviderMessage[], echoThinking: boolean): Set<number> {
+function getThinkingReplayIndexes(messages: ProviderMessage[], echoThinking: boolean | "all"): Set<number> {
   const indexes = new Set<number>();
   if (!echoThinking) return indexes;
+  // MiMo and bound Claude thinking need intact historical blocks across user
+  // turns. Removing a middle block breaks the later Claude signature chain.
+  if (echoThinking === "all") {
+    messages.forEach((message, index) => {
+      if (message.role === "assistant") indexes.add(index);
+    });
+    return indexes;
+  }
 
   let lastUserIndex = -1;
   for (let index = 0; index < messages.length; index++) {
@@ -530,6 +574,7 @@ export async function* translateAnthropicStream(events: AsyncIterable<Record<str
   for await (const event of events) {
     const type = typeof event.type === "string" ? event.type : "";
     if (type === "message_start") {
+      reportThinkingPrefixDrops((event.message as Record<string, unknown> | undefined)?.input_transformations);
       usage = mergeAnthropicUsage(usage, (event.message as Record<string, unknown> | undefined)?.usage);
       if (usage) yield { type: "usage", usage };
       continue;
@@ -664,6 +709,7 @@ async function* streamAnthropicEventsWithRetry(
   options: AnthropicProviderOptions,
   request: {
     url: string;
+    model: string;
     stream: true;
     method: "POST";
     body: string;
@@ -708,6 +754,7 @@ async function fetchAnthropicResponseWithRetry(
   options: AnthropicProviderOptions,
   request: {
     url: string;
+    model: string;
     stream: boolean;
     method: "POST";
     body: string;
@@ -722,7 +769,7 @@ async function fetchAnthropicResponseWithRetry(
     try {
       response = await providerFetch(request.url, {
         method: request.method,
-        headers: buildAnthropicHeaders(options, request.stream),
+        headers: buildAnthropicHeaders(options, request.stream, request.model),
         body: request.body,
         signal: request.signal,
         keepalive: false,
@@ -784,7 +831,7 @@ function resolveAnthropicMessagesUrl(baseURL: string): string {
   return `${normalized || "https://api.anthropic.com"}/v1/messages`;
 }
 
-function buildAnthropicHeaders(options: AnthropicProviderOptions, stream: boolean): HeadersInit {
+function buildAnthropicHeaders(options: AnthropicProviderOptions, stream: boolean, model: string): HeadersInit {
   const headers: Record<string, string> = {
     "content-type": "application/json",
     "x-api-key": options.apiKey,
@@ -796,7 +843,24 @@ function buildAnthropicHeaders(options: AnthropicProviderOptions, stream: boolea
   if (stream) headers.accept = "text/event-stream";
   // User-configured headers win last: anthropic-protocol coding plans gate on
   // client identity (e.g. a specific User-Agent), configured per provider.
-  return { ...headers, ...(options.headers ?? {}) };
+  const merged = { ...headers, ...(options.headers ?? {}) };
+  if (isOfficialAnthropicBaseUrl(options.baseURL) && isClaudeWithBoundThinking(model)) {
+    // Merge case-insensitively without losing user-configured beta features.
+    const betaKeys = Object.keys(merged).filter(key => key.toLowerCase() === "anthropic-beta");
+    const betas = betaKeys.flatMap(key => merged[key].split(",").map(value => value.trim()).filter(Boolean));
+    for (const key of betaKeys) delete merged[key];
+    merged["anthropic-beta"] = [...new Set([...betas, THINKING_BINDING_BETA])].join(",");
+  }
+  return merged;
+}
+
+function reportThinkingPrefixDrops(transformations: unknown): void {
+  if (!Array.isArray(transformations)) return;
+  const count = transformations.filter(item => item?.type === "thinking_dropped" && item?.reason === "prefix_binding_mismatch").length;
+  if (count > 0) {
+    // Count only; raw transformations, signatures and prompt text are private.
+    console.warn(`[anthropic-thinking] API discarded ${count} thinking block(s) after a conversation prefix change.`);
+  }
 }
 
 async function readAnthropicErrorDetail(response: Response): Promise<string> {
@@ -965,8 +1029,9 @@ function mergeAnthropicUsage(current: TokenUsage | undefined, raw: unknown): Tok
   };
 }
 
-function shouldEchoThinking(providerId?: string): boolean {
-  return providerId?.startsWith("minimax") ?? false;
+function shouldEchoThinking(options: AnthropicProviderOptions): boolean | "all" {
+  if (isMiMoProvider(options)) return "all";
+  return options.providerId?.startsWith("minimax") ?? false;
 }
 
 function shouldSendBearerAuth(options: AnthropicProviderOptions): boolean {
@@ -974,9 +1039,17 @@ function shouldSendBearerAuth(options: AnthropicProviderOptions): boolean {
 }
 
 function shouldSendTemperature(options: AnthropicProviderOptions, model: string, thinkingLevel: ThinkingLevel): boolean {
+  if (isMiMoProvider(options) && thinkingLevel !== "off") return false;
   if (!isOfficialAnthropicBaseUrl(options.baseURL)) return true;
   if (thinkingLevel !== "off") return false;
-  return !isOpusModelWithoutSamplingControls(model);
+  return !isOpusModelWithoutSamplingControls(model)
+    && !isFableModelWith128kOutput(model)
+    && !isClaudeFamilyVersionAtLeast(model, "sonnet", 5, 0);
+}
+
+function isClaude5WithOptionalThinking(model: string): boolean {
+  return isClaudeFamilyVersionAtLeast(model, "sonnet", 5, 0)
+    || (isClaudeFamilyVersionAtLeast(model, "opus", 5, 0) && !isClaudeWithBoundThinking(model));
 }
 
 function isOpusModelWith128kOutput(model: string): boolean {
@@ -1007,7 +1080,7 @@ function isClaudeFamilyVersionAtLeast(model: string, family: string, minMajor: n
   if (major > minMajor) return true;
   if (major < minMajor) return false;
 
-  if (!minorSegment || minorSegment.length > 2) return false;
+  if (!minorSegment || minorSegment.length > 2) return minMinor === 0;
   const minor = Number(minorSegment);
   return Number.isFinite(minor) && minor >= minMinor;
 }
@@ -1036,4 +1109,14 @@ function isOfficialAnthropicBaseUrl(baseURL: string): boolean {
 function isMiniMaxProvider(options: AnthropicProviderOptions): boolean {
   return (options.providerId || "").toLowerCase().startsWith("minimax")
     || options.baseURL.toLowerCase().includes("minimaxi");
+}
+
+function isMiMoProvider(options: AnthropicProviderOptions): boolean {
+  if (options.providerId === "mimo-token-plan") return true;
+  try {
+    return ["api.xiaomimimo.com", "token-plan-cn.xiaomimimo.com", "token-plan-sgp.xiaomimimo.com", "token-plan-ams.xiaomimimo.com"]
+      .includes(new URL(options.baseURL).hostname);
+  } catch {
+    return false;
+  }
 }

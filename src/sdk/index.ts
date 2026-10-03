@@ -26,8 +26,17 @@ import {
 } from "./session-turn-coordinator.js";
 import { ReplayEventLog } from "./replay-event-log.js";
 import { SessionManager, type SessionSummary } from "../session.js";
+import { isPermissionModeReminder } from "../prompt/reminders.js";
 import { PermissionAwareApprovalController } from "../approval/controller.js";
 import { BashAllowlist } from "../approval/session-cache.js";
+import { SettingsManager } from "../permissions/settings.js";
+import {
+  isRepoConfigTrusted,
+  mergedRepoCapabilities,
+  readRepoSettings,
+  trustRepoConfig,
+  type RepoCapabilities,
+} from "../permissions/trust.js";
 import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
 import { createAllTools, buildToolPromptOptions, type PlanController } from "../tools/index.js";
 import { buildSystemPrompt } from "../system-prompt.js";
@@ -44,7 +53,7 @@ import { SkillRegistry } from "../skills/registry.js";
 import { parseSkillInvocation } from "../skills/invocation.js";
 import type { SkillSummary } from "../skills/types.js";
 import { GoalStore } from "../goal/store.js";
-import { McpManager } from "../mcp/manager.js";
+import { McpManager, gateMcpTools } from "../mcp/manager.js";
 import { loadMcpConfig } from "../mcp/config.js";
 import { ExternalHookController } from "../hooks/controller.js";
 import { buildMemoryPrompt } from "../memory/store.js";
@@ -65,6 +74,11 @@ import type {
 // ── Facade types ───────────────────────────────────────────────────────────
 
 export interface BubbleSdkOptions {
+  /** Optional process-local replay window. Active readers never lose unread
+   * events. Older cursors fail explicitly; restore durable session history.
+   * Omit for unlimited replay (the public SDK compatibility default). The
+   * first opener sets the shared process-local window for that session. */
+  sessionEventRetention?: number;
   /** Fallback working directory for sessions created without an explicit cwd. */
   defaultCwd?: string;
   /**
@@ -96,16 +110,44 @@ export interface TurnHandlers {
   onQuestion?: (req: QuestionRequest) => Promise<QuestionAnswer[] | null>;
   /** Plan-mode proposal. Return true to approve executing the plan. */
   onPlanApproval?: (planMarkdown: string) => Promise<boolean>;
+  /**
+   * Folder trust (Kimi Code style): the session folder's `.bubble` settings
+   * would enable allow rules, MCP servers or LSP servers the user has not
+   * trusted. Return true to trust them. Asked at most once per folder per SDK
+   * instance; without a handler, or on false, they stay off.
+   */
+  onProjectTrust?: (request: { cwd: string; pending: RepoCapabilities }) => Promise<boolean>;
   /** Fired once per turn after provider/model/tools are resolved, before the first event. */
   onStart?: (info: TurnStartInfo) => void;
 }
 
 export interface RunTurnOptions extends TurnHandlers {
+  /**
+   * Turn-scoped host capabilities. Never cached globally or given to subagents;
+   * follow-up turns the SDK starts for this turn (queued input, pending steers)
+   * reuse this turn's options, these included.
+   */
+  hostTools?: ToolRegistryEntry[];
+  /**
+   * Extra skill directories for this turn, e.g. skills a host app ships with.
+   * Searched after the user's own roots, so a user skill of the same name wins.
+   * Like hostTools, follow-up turns the SDK starts for this turn reuse them.
+   */
+  skillPaths?: string[];
   /** Plain text, or content parts (text + base64 images) for attachments. */
   prompt: string | ContentPart[];
+  /** Preserve an admitted input if cancelled before initialization records it. */
+  preserveInterruptedInput?: boolean;
   /** "provider:model" or bare model id (resolved against the default provider). */
   model?: string;
   mode?: PermissionMode;
+  /**
+   * Mode the turn switches to when the user approves a plan (only relevant
+   * when `mode` is "plan"). Hosts pass the mode the user had selected before
+   * entering plan mode, so approving a plan does not silently downgrade
+   * bypassPermissions to default. Defaults to "default".
+   */
+  planExitMode?: Exclude<PermissionMode, "plan">;
   thinkingLevel?: ThinkingLevel;
   /**
    * Extra text appended to the built system prompt. Lets hosts (and the eval
@@ -166,17 +208,15 @@ export interface SdkSessionEvent {
   turnId: string;
   event: AgentEvent;
   /**
-   * Present only on the synthesized record that ends a turn abnormally.
-   * Replay subscribers use it to tell "turn failed" from "turn still running";
-   * the per-turn runTurn() iterator instead surfaces the thrown error.
+   * Marks a settled turn after cleanup and admission of any fallback steer.
+   * Successful turns mark agent_end; failures synthesize a turn_end record.
    */
   terminal?: SdkSessionTerminal;
 }
 
-export interface SdkSessionTerminal {
-  kind: "failed" | "cancelled";
-  message: string;
-}
+export type SdkSessionTerminal =
+  | { kind: "completed" }
+  | { kind: "failed" | "cancelled"; message: string };
 
 export interface SdkStopOptions {
   /** Match Claude-style interruption: queued messages survive by default. */
@@ -184,6 +224,8 @@ export interface SdkStopOptions {
 }
 
 export interface SdkSessionHandle extends SdkSessionRef {
+  /** Current replay cursor; snapshot before send to observe only new work. */
+  readonly latestSequence: number;
   /** Events from every turn in this session. Opening another handle reconnects from sequence 1. */
   readonly events: AsyncIterable<SdkSessionEvent>;
   /** Reconnect after the last sequence the host durably processed. */
@@ -208,6 +250,9 @@ interface SdkTurnRuntime {
   outcomes: Map<string, PendingSteerOutcome>;
   options: RunTurnOptions;
   events: ReplayEventLog<AgentEvent>;
+  started: boolean;
+  inputRecorded: boolean;
+  finished: Promise<void>;
 }
 
 // ── Facade ─────────────────────────────────────────────────────────────────
@@ -218,12 +263,17 @@ export class BubbleSdk {
 
   private readonly defaultCwd: string;
   private readonly mcpEnabled: boolean;
+  private readonly sessionEventRetention: number;
   private readonly cwdBySession = new Map<string, string>();
   private readonly bashAllowlists = new Map<string, BashAllowlist>();
+  private readonly sessionGrants = new Map<string, Set<string>>();
   private readonly turnCoordinator = new SessionTurnCoordinator();
   private readonly turnRuntimes = new Map<string, SdkTurnRuntime>();
   private readonly lastTurnOptions = new Map<string, Omit<RunTurnOptions, "prompt" | "signal">>();
   private readonly mcpToolsByCwd = new Map<string, Promise<ToolRegistryEntry[]>>();
+  private readonly mcpManagersByCwd = new Map<string, Promise<McpManager | null>>();
+  /** Folders whose trust question was already put to the host. */
+  private readonly projectTrustAsked = new Set<string>();
   private readonly inputIdNonce = randomUUID().slice(0, 6);
   private nextTurnInputPrefix = 0;
   private nextDetachedInputId = 0;
@@ -233,6 +283,10 @@ export class BubbleSdk {
   constructor(options: BubbleSdkOptions = {}) {
     this.defaultCwd = options.defaultCwd || process.env.BUBBLE_CWD || os.homedir();
     this.mcpEnabled = options.mcp !== false;
+    this.sessionEventRetention = options.sessionEventRetention ?? Infinity;
+    if (this.sessionEventRetention !== Infinity && (!Number.isSafeInteger(this.sessionEventRetention) || this.sessionEventRetention < 1)) {
+      throw new Error('sessionEventRetention must be a positive integer');
+    }
   }
 
   // ── Sessions ─────────────────────────────────────────────────────────────
@@ -259,12 +313,13 @@ export class BubbleSdk {
     const resolved = this.resolveSession(sessionId);
     if (!resolved) throw new Error(`Unknown session: ${sessionId}`);
     const ownerKey = resolved.manager.getSessionFile();
-    const eventLog = sessionEventLogFor(ownerKey);
+    const eventLog = sessionEventLogFor(ownerKey, this.sessionEventRetention);
     const closed = new AbortController();
     return {
       id: sessionId,
       cwd: resolved.cwd,
-      events: eventLog.iterate({ signal: closed.signal }),
+      get latestSequence() { return eventLog.length; },
+      get events() { return eventLog.iterate({ signal: closed.signal }); },
       eventsFrom: (afterSequence) => eventLog.iterate({
         from: Math.max(0, afterSequence),
         signal: closed.signal,
@@ -281,6 +336,31 @@ export class BubbleSdk {
     return this.resolveSession(sessionId)?.manager.getMessages() ?? [];
   }
 
+  /** Preserve an accepted desktop input cancelled before runTurn was admitted. */
+  recordInterruptedInput(sessionId: string, prompt: string | ContentPart[]): void {
+    const owner = this.ownerForSession(sessionId);
+    if (owner && owner !== this) return owner.recordInterruptedInput(sessionId, prompt);
+    if (this.turnCoordinator.isDeleted(sessionId) || this.getSessionRunState(sessionId).active) {
+      throw new Error(`Cannot record interrupted input while session is active or deleted: ${sessionId}`);
+    }
+    const resolved = this.resolveSession(sessionId);
+    if (!resolved) throw new Error(`Unknown session: ${sessionId}`);
+    this.persistInterruptedInput(resolved, prompt);
+  }
+
+  private persistInterruptedInput(resolved: { manager: SessionManager; cwd: string }, prompt: string | ContentPart[]): void {
+    const session = resolved.manager;
+    session.getMessages();
+    const revision = session.getRevision();
+    session.updateMetadata({ cwd: resolved.cwd });
+    session.appendMessage({ role: "user", content: prompt }, revision);
+    session.appendMessage({
+      role: "assistant",
+      content: "[Interrupted by user before execution started.]",
+      error: { name: "MessageAbortedError", message: "Turn stopped during initialization.", aborted: true },
+    }, session.getRevision());
+  }
+
   async deleteSession(sessionId: string): Promise<void> {
     const owner = this.ownerForSession(sessionId);
     if (owner && owner !== this) return owner.deleteSession(sessionId);
@@ -290,6 +370,7 @@ export class BubbleSdk {
     if (resolved) rmSync(resolved.manager.getSessionFile(), { force: true });
     this.cwdBySession.delete(sessionId);
     this.bashAllowlists.delete(sessionId);
+    this.sessionGrants.delete(sessionId);
     this.lastTurnOptions.delete(sessionId);
     this.sessionIndex.delete(sessionId);
     processSessionLocations.delete(sessionId);
@@ -306,8 +387,22 @@ export class BubbleSdk {
     const current = this.turnCoordinator.getCurrent(sessionId);
     const runtime = current ? this.turnRuntimes.get(current.id) : undefined;
     runtime?.inputController.closePendingInputs();
-    const stopped = this.turnCoordinator.stopCurrent(sessionId);
-    return stopped + (options.cancelQueued ? this.turnCoordinator.clearQueue(sessionId) : 0);
+    // A reserved turn can release its slot synchronously when cancelled.
+    // Clear the queue first so cancellation cannot promote an unwanted input.
+    const queued = options.cancelQueued ? this.turnCoordinator.clearQueue(sessionId) : 0;
+    return queued + this.turnCoordinator.stopCurrent(sessionId);
+  }
+
+  /** Stop and wait for persistence, cleanup, and terminal event publication. */
+  async stopAndWait(sessionId: string, options: SdkStopOptions = {}): Promise<number> {
+    const owner = this.ownerForSession(sessionId);
+    if (owner && owner !== this) return owner.stopAndWait(sessionId, options);
+    const current = this.turnCoordinator.getCurrent(sessionId);
+    const stopping = this.runtimesForSession(sessionId).filter(runtime =>
+      options.cancelQueued || runtime.reservation.id === current?.id);
+    const stopped = this.stop(sessionId, options);
+    await Promise.all(stopping.map(runtime => runtime.finished));
+    return stopped;
   }
 
   /** Cancel queued turns without interrupting the turn that owns the session slot. */
@@ -368,13 +463,36 @@ export class BubbleSdk {
 
   // ── Discovery (composer pickers) ─────────────────────────────────────────
 
-  listSkills(cwd?: string): SkillSummary[] {
+  listSkills(cwd?: string, skillPaths: string[] = []): SkillSummary[] {
     const registry = new SkillRegistry({
       cwd: cwd || this.defaultCwd,
-      skillPaths: this.userConfig.getSkillPaths(),
+      skillPaths: [...this.userConfig.getSkillPaths(), ...skillPaths],
       disabledSkills: this.userConfig.getDisabledSkills(),
     });
     return registry.summaries();
+  }
+
+  /**
+   * Ask the host once per folder (onProjectTrust) before this turn loads the
+   * repository's allow rules, MCP servers and LSP servers. Trusting restarts
+   * the folder's MCP servers so newly trusted ones are available right away.
+   */
+  private async resolveProjectTrust(cwd: string, options: RunTurnOptions, signal: AbortSignal): Promise<void> {
+    if (!options.onProjectTrust || this.projectTrustAsked.has(cwd)) return;
+    // Read once: what gets trusted is exactly what the host was shown.
+    const raw = readRepoSettings(cwd);
+    if (isRepoConfigTrusted(cwd, raw)) return;
+    this.projectTrustAsked.add(cwd);
+    const trusted = await awaitWithAbort(
+      options.onProjectTrust({ cwd, pending: mergedRepoCapabilities(raw) }),
+      signal,
+    );
+    if (!trusted) return;
+    trustRepoConfig(cwd, raw);
+    const manager = this.mcpManagersByCwd.get(cwd);
+    this.mcpManagersByCwd.delete(cwd);
+    this.mcpToolsByCwd.delete(cwd);
+    await (await manager?.catch(() => null))?.shutdown().catch(() => undefined);
   }
 
   /** Configured providers + default model, for a host's model picker. */
@@ -435,10 +553,13 @@ export class BubbleSdk {
       outcomes: new Map(),
       options,
       events: new ReplayEventLog<AgentEvent>(),
+      started: reservation.phase !== "queued",
+      inputRecorded: false,
+      finished: Promise.resolve(),
     };
     this.lastTurnOptions.set(sessionId, inheritableTurnOptions(options));
     this.turnRuntimes.set(reservation.id, runtime);
-    void this.pumpTurn(runtime, resolved);
+    runtime.finished = this.pumpTurn(runtime, resolved);
     return runtime;
   }
 
@@ -447,14 +568,39 @@ export class BubbleSdk {
     resolved: { manager: SessionManager; cwd: string },
   ): Promise<void> {
     let failure: unknown;
+    let completedEvent: AgentEvent | undefined;
     try {
       for await (const event of this.runReservedTurn(runtime, runtime.options, resolved)) {
         runtime.events.append(event);
-        this.publishSessionEvent(runtime, event);
+        // Publish success after the pump's finally releases its slot.
+        // A host can then distinguish idle from an automatically queued steer.
+        if (event.type === "agent_end") completedEvent = event;
+        else this.publishSessionEvent(runtime, event);
       }
     } catch (error) {
       failure = error;
+      // Setup can fail before runReservedTurn installs its own cleanup.
+      for (const event of this.rejectOutstandingSteers(runtime,
+        runtime.reservation.signal.aborted ? "turn_cancelled" : "turn_failed")) {
+        runtime.events.append(event);
+        this.publishSessionEvent(runtime, event);
+      }
+      // Desktop users already submitted this input. Even if setup was
+      // interrupted before Agent.run appended it, keep it for a later resume.
+      // Cancelled queued inputs never owned the turn and must stay discarded.
+      if (runtime.options.preserveInterruptedInput && runtime.started && !runtime.inputRecorded
+        && runtime.reservation.signal.aborted && !this.turnCoordinator.isDeleted(runtime.sessionId)) {
+        try {
+          this.persistInterruptedInput(resolved, runtime.options.prompt);
+        } catch (persistError) {
+          failure = persistError;
+        }
+      }
     } finally {
+      runtime.inputController.closePendingInputs();
+      // Release only after the interrupted input is durable. Keep the runtime
+      // discoverable until the terminal event is published for stopAndWait.
+      runtime.reservation.finish();
       if (failure !== undefined) {
         // The session-level log never closes per turn, so replay subscribers
         // need an explicit terminal record — otherwise a failed turn is
@@ -469,6 +615,8 @@ export class BubbleSdk {
             message: failure instanceof Error ? failure.message : String(failure),
           },
         );
+      } else {
+        this.publishSessionEvent(runtime, completedEvent ?? { type: "agent_end" }, { kind: "completed" });
       }
       runtime.events.close(failure);
       if (this.turnRuntimes.get(runtime.reservation.id) === runtime) {
@@ -488,11 +636,21 @@ export class BubbleSdk {
     const { sessionId, reservation, inputController } = runtime;
     const { manager: session, cwd } = resolved;
     const mode: PermissionMode = options.mode ?? "default";
+    const planExitMode: Exclude<PermissionMode, "plan"> =
+      options.planExitMode === "bypassPermissions" ? "bypassPermissions" : "default";
     const abortSignal = reservation.signal;
+
+    await reservation.waitForStart();
+    runtime.started = true;
 
     let agentRef: Agent | undefined;
     let streamCompleted = false;
     const hookController = new ExternalHookController({ cwd, sessionId });
+    await this.resolveProjectTrust(cwd, options, abortSignal);
+    // Same allow/deny rules as the TUI (user, project and local settings;
+    // repository allow rules only once trusted). Deny rules bind even under
+    // bypassPermissions.
+    const ruleSet = new SettingsManager(cwd).getMerged().ruleSet;
     // Settles as reject the moment the turn aborts, so a tool blocked on a
     // host approval (or question) can never hang the abort path.
     const abortedDecision = new Promise<ApprovalDecision>((resolve) => {
@@ -512,7 +670,10 @@ export class BubbleSdk {
               }),
       },
       bashAllowlist: this.bashAllowlistFor(sessionId),
+      sessionGrants: this.sessionGrantsFor(sessionId),
       cwd,
+      // Read once per turn: edits to settings files apply from the next turn.
+      getRuleSet: () => ruleSet,
       externalHooks: hookController,
     });
     const fileStateTracker = new FileStateTracker(cwd);
@@ -522,13 +683,13 @@ export class BubbleSdk {
         const approved = options.onPlanApproval
           ? await awaitWithAbort(options.onPlanApproval(plan), abortSignal)
           : false;
-        if (approved) {
-          agentRef?.setMode("default");
-          return { action: "approve" as const, plan };
-        }
-        return { action: "reject" as const, reason: "Plan rejected by host" };
+        // exit_plan_mode applies getExitMode() itself on approval.
+        return approved
+          ? { action: "approve" as const, plan }
+          : { action: "reject" as const, reason: "Plan rejected by host" };
       },
       setMode: (m) => agentRef?.setMode(m),
+      getExitMode: () => planExitMode,
     };
     const questionController = new QuestionController();
     const unsubscribeQuestions = questionController.subscribe((event) => {
@@ -547,10 +708,9 @@ export class BubbleSdk {
     abortSignal.addEventListener("abort", () => questionController.rejectAll(), { once: true });
 
     try {
-      await reservation.waitForStart();
       const skillRegistry = new SkillRegistry({
         cwd,
-        skillPaths: this.userConfig.getSkillPaths(),
+        skillPaths: [...this.userConfig.getSkillPaths(), ...(options.skillPaths ?? [])],
         disabledSkills: this.userConfig.getDisabledSkills(),
       });
       const tools = createAllTools(cwd, skillRegistry, {
@@ -561,7 +721,22 @@ export class BubbleSdk {
         goalStore: new GoalStore(),
         checkpoints: () => session.getCheckpoints(),
       });
-      tools.push(...(await awaitWithAbort(this.mcpToolsFor(cwd), abortSignal)));
+      tools.push(...gateMcpTools(await awaitWithAbort(this.mcpToolsFor(cwd), abortSignal), approvalController));
+      const hostTools = options.hostTools ?? [];
+      const registered = new Set(tools.map(tool => tool.name));
+      for (const tool of hostTools) {
+        if (registered.has(tool.name)) throw new Error(`Duplicate host tool: ${tool.name}`);
+        registered.add(tool.name);
+        const guarded = {
+          ...tool,
+          execute: async (args: Parameters<ToolRegistryEntry["execute"]>[0], ctx: Parameters<ToolRegistryEntry["execute"]>[1]) => {
+            throwAbortSignal(abortSignal);
+            return tool.execute(args, { ...ctx, abortSignal });
+          },
+          cloneForChild: (): ToolRegistryEntry => ({ ...tool, enabled: () => false, execute: async () => ({ content: "Host capability is not available to this child.", isError: true }) }),
+        };
+        tools.push(...(tool.readOnly ? [guarded] : gateMcpTools([guarded], approvalController)));
+      }
       throwAbortSignal(abortSignal);
 
       const promptCacheKey = session.getOrCreatePromptCacheKey();
@@ -579,6 +754,8 @@ export class BubbleSdk {
       const memoryPrompt = buildMemoryPrompt(cwd);
       const builtSystemPrompt = buildSystemPrompt({
         agentName: "Bubble",
+        skills: skillRegistry.summaries(),
+        skillCatalogChars: this.userConfig.getSkillCatalogChars(),
         configuredProvider: providerId || "none",
         configuredModel: model ? displayModel(model) : "none",
         configuredModelId: model || "none",
@@ -592,6 +769,37 @@ export class BubbleSdk {
         ? `${builtSystemPrompt}\n\n${options.appendSystemPrompt.trim()}`
         : builtSystemPrompt;
 
+      // Host-driven mode changes (picker, /plan, leaving plan) go into the log
+      // as markers, so the rebuilt history states the mode where it changed —
+      // after any older tool result that claimed a different mode.
+      if (latestRecordedMode(session) !== mode && !this.turnCoordinator.isDeleted(sessionId)) {
+        session.appendMarker("mode_switch", mode);
+      }
+      const history = session.getMessages();
+      let contextRevision = session.getRevision();
+      // The constructor's leading context minus its mode reminder: the history
+      // carries the mode timeline itself (session-log toMessages).
+      let leadingContext: Message[] = [];
+      // A fence rejection means the durable log diverged from this turn's
+      // resident snapshot (a foreign append or clear landed mid-flight). Refuse
+      // the write, then roll the resident transcript back to the file's truth so
+      // the rejected message does not linger and later writes are not wedged
+      // behind the stale revision.
+      const persistFenced = (write: () => void): void => {
+        try {
+          write();
+        } catch (error) {
+          // Any refused write (fence rejection, busy lock, I/O) leaves the agent's
+          // already-pushed message unpersisted. getMessages() refreshes, so read
+          // the history first and adopt the revision of that same snapshot.
+          try {
+            const reloaded = session.getMessages();
+            contextRevision = session.getRevision();
+            agent.messages = [...leadingContext, ...reloaded];
+          } catch { /* surface the original write failure */ }
+          throw error;
+        }
+      };
       const agent = new Agent({
         provider,
         providerId,
@@ -605,6 +813,7 @@ export class BubbleSdk {
         budgetLedger: new BudgetLedger(),
         fileStateTracker,
         skills: skillRegistry.summaries(),
+        skillCatalogChars: this.userConfig.getSkillCatalogChars(),
         memoryPrompt,
         externalHooks: hookController,
         // Cross-provider subagent routes (spawn_agent with "provider:model")
@@ -616,26 +825,46 @@ export class BubbleSdk {
         onMessageAppend: (message: Message) => {
           if (message.role === "system" || message.role === "meta") return;
           if (this.turnCoordinator.isDeleted(sessionId)) return;
-          session.appendMessage(message);
+          if (message.role === "user") runtime.inputRecorded = true;
+          persistFenced(() => {
+            session.appendMessage(message, contextRevision);
+            contextRevision = session.getRevision();
+          });
           if (message.role === "assistant") recordMemoryCitations(cwd, message.content);
         },
         onProviderError: (error) => {
           if (this.turnCoordinator.isDeleted(sessionId)) return;
-          session.appendProviderError(error);
+          persistFenced(() => session.appendProviderError(error, contextRevision));
         },
-        onCompactionApplied: (summary: string) => {
-          if (this.turnCoordinator.isDeleted(sessionId)) return;
-          session.applyLLMCompaction(summary);
+        getContextRevision: () => contextRevision,
+        onContextCheckpoint: (checkpoint) => {
+          if (this.turnCoordinator.isDeleted(sessionId)) throw new Error("Session deleted before context commit");
+          persistFenced(() => {
+            session.commitContextCheckpoint(checkpoint, contextRevision);
+            contextRevision = session.getRevision();
+          });
         },
         onModeUpdate: (m: PermissionMode) => {
-          if (!this.turnCoordinator.isDeleted(sessionId)) session.appendMarker("mode_switch", m);
+          if (!this.turnCoordinator.isDeleted(sessionId)) {
+            persistFenced(() => {
+              session.appendMarker("mode_switch", m, contextRevision);
+              contextRevision = session.getRevision();
+            });
+          }
         },
       });
       agentRef = agent;
 
-      const history = session.getMessages();
+      leadingContext = agent.messages.filter((message) =>
+        !(message.role === "meta" && isPermissionModeReminder(message.content)),
+      );
       if (history.length > 0) {
-        agent.messages = [{ role: "system", content: systemPrompt }, ...history];
+        // Leading context (system prompt + deferred-tools reminder, never
+        // persisted) stays ahead of the history, at the same position every
+        // turn, so the provider's prefix cache covers the previous turn. The
+        // mode reminder comes from the history's own mode markers instead, so
+        // it is ordered after anything older that mentioned a mode.
+        agent.messages = [...leadingContext, ...history];
       }
 
       reservation.markActive();
@@ -676,8 +905,6 @@ export class BubbleSdk {
       );
       unsubscribeQuestions();
       questionController.rejectAll();
-      reservation.finish();
-      if (this.turnRuntimes.get(reservation.id) === runtime) this.turnRuntimes.delete(reservation.id);
     }
   }
 
@@ -813,7 +1040,7 @@ export class BubbleSdk {
     event: AgentEvent,
     terminal?: SdkSessionTerminal,
   ): void {
-    const log = sessionEventLogFor(runtime.ownerKey);
+    const log = sessionEventLogFor(runtime.ownerKey, this.sessionEventRetention);
     log.append({
       sequence: log.length + 1,
       sessionId: runtime.sessionId,
@@ -835,6 +1062,15 @@ export class BubbleSdk {
       this.bashAllowlists.set(sessionId, allowlist);
     }
     return allowlist;
+  }
+
+  private sessionGrantsFor(sessionId: string): Set<string> {
+    let grants = this.sessionGrants.get(sessionId);
+    if (!grants) {
+      grants = new Set();
+      this.sessionGrants.set(sessionId, grants);
+    }
+    return grants;
   }
 
   /**
@@ -871,18 +1107,23 @@ export class BubbleSdk {
     };
   }
 
-  /** MCP servers are started lazily, once per cwd (McpManager has no stop). */
+  /**
+   * MCP servers are started lazily, once per cwd, and restarted only when the
+   * repository's settings get trusted (resolveProjectTrust).
+   */
   private mcpToolsFor(cwd: string): Promise<ToolRegistryEntry[]> {
     if (!this.mcpEnabled) return Promise.resolve([]);
     let cached = this.mcpToolsByCwd.get(cwd);
     if (!cached) {
-      cached = (async () => {
+      const managerPromise = (async () => {
         const loaded = loadMcpConfig({ cwd });
-        if (loaded.servers.length === 0) return [];
+        if (loaded.servers.length === 0) return null;
         const manager = new McpManager({ servers: loaded.servers });
         await manager.start();
-        return manager.getToolEntries();
-      })().catch(() => []);
+        return manager;
+      })().catch(() => null);
+      this.mcpManagersByCwd.set(cwd, managerPromise);
+      cached = managerPromise.then((manager) => manager?.getToolEntries() ?? []);
       this.mcpToolsByCwd.set(cwd, cached);
     }
     return cached;
@@ -947,6 +1188,10 @@ export class BubbleSdk {
       promptCacheKey,
       protocol: target.protocol,
       headers: target.headers,
+      // Main SDK turns need the same per-request OAuth renewal as the TUI
+      // and child provider factory, including calls after a long-running tool.
+      openAICodexAuth: this.registry.createOpenAICodexAuthAdapter(activeProviderId),
+      grokAuth: this.registry.createGrokAuthAdapter(activeProviderId),
     });
     return { provider, providerId: activeProviderId, model: activeModel };
   }
@@ -974,10 +1219,10 @@ function releaseProcessOwner(ownerKey: string, sdk: BubbleSdk): void {
   if (processSessionOwners.get(ownerKey) === sdk) processSessionOwners.delete(ownerKey);
 }
 
-function sessionEventLogFor(ownerKey: string): ReplayEventLog<SdkSessionEvent> {
+function sessionEventLogFor(ownerKey: string, retention = Infinity): ReplayEventLog<SdkSessionEvent> {
   let log = sessionEventLogs.get(ownerKey);
   if (!log) {
-    log = new ReplayEventLog<SdkSessionEvent>();
+    log = new ReplayEventLog<SdkSessionEvent>(retention);
     sessionEventLogs.set(ownerKey, log);
   }
   return log;
@@ -1014,6 +1259,19 @@ function throwAbortSignal(signal: AbortSignal): void {
   if (!signal.aborted) return;
   if (signal.reason instanceof Error) throw signal.reason;
   throw new AgentAbortError(typeof signal.reason === "string" ? signal.reason : "SDK turn cancelled.");
+}
+
+/** The mode the session log last recorded ("default" before any switch). */
+function latestRecordedMode(session: SessionManager): PermissionMode {
+  const entries = session.getEntries();
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index];
+    if (entry.type === "marker" && entry.kind === "mode_switch"
+      && (entry.value === "default" || entry.value === "plan" || entry.value === "bypassPermissions")) {
+      return entry.value;
+    }
+  }
+  return "default";
 }
 
 function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -1102,6 +1360,7 @@ export {
 export { PermissionAwareApprovalController } from "../approval/controller.js";
 export { BashAllowlist } from "../approval/session-cache.js";
 export type { ApprovalController, ApprovalDecision, ApprovalRequest } from "../approval/types.js";
+export type { RepoCapabilities } from "../permissions/trust.js";
 export { createAllTools, buildToolPromptOptions, type PlanController } from "../tools/index.js";
 export { buildSystemPrompt } from "../system-prompt.js";
 export { FileStateTracker } from "../tools/file-state.js";

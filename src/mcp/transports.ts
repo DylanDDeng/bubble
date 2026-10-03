@@ -66,6 +66,14 @@ export class StdioTransport implements McpTransport {
     child.on("error", (err) => {
       this.errorHandler?.(err);
     });
+    // A server that exits (or closes stdin) makes our next write fail with
+    // EPIPE on the pipe itself; unhandled, that error event kills the whole
+    // host. Report it as a transport failure instead.
+    child.stdin.on("error", (err) => {
+      this.errorHandler?.(new Error(`stdio server stopped reading its input (${(err as NodeJS.ErrnoException).code ?? err.message})${this.stderrBuffer ? `\nstderr:\n${this.stderrBuffer.trim()}` : ""}`));
+    });
+    child.stdout.on("error", (err) => this.errorHandler?.(err));
+    child.stderr.on("error", (err) => this.errorHandler?.(err));
 
     child.on("exit", (code, signal) => {
       if (this.closed) return;
@@ -96,6 +104,9 @@ export class StdioTransport implements McpTransport {
 
   async send(message: JsonRpcRequest | JsonRpcNotification | JsonRpcResponse): Promise<void> {
     if (!this.child || this.closed) throw new Error("Transport not started or already closed");
+    if (this.child.stdin.destroyed || this.child.stdin.writableEnded) {
+      throw new Error("stdio server is no longer accepting input");
+    }
     this.child.stdin.write(JSON.stringify(message) + "\n");
   }
 

@@ -1,0 +1,49 @@
+{
+  "theme": "light",
+  "themeState": {
+    "chromeThemes": {
+      "dark": {
+        "accent": "#0169cc",
+        "contrast": 60,
+        "fonts": {
+          "ui": null,
+          "code": null
+        },
+        "ink": "#fcfcfc",
+        "opaqueWindows": false,
+        "semanticColors": {
+          "diffAdded": "#00a240",
+          "diffRemoved": "#e02e2a",
+          "skill": "#b06dff"
+        },
+        "surface": "#111111"
+      },
+      "light": {
+        "accent": "#5145cd",
+        "contrast": 40,
+        "fonts": {
+          "ui": null,
+          "code": null
+        },
+        "ink": "#29243d",
+        "opaqueWindows": false,
+        "semanticColors": {
+          "diffAdded": "#197354",
+          "diffRemoved": "#bd3658",
+          "skill": "#7945b5"
+        },
+        "surface": "#f0edfa"
+      }
+    },
+    "codeThemeIds": {
+      "dark": "codex",
+      "light": "arc"
+    }
+  },
+  "uiFontFamily": "",
+  "chatCodeFontFamily": "",
+  "sidebarWidth": 250,
+  "sidebarWidthVersion": 9,
+  "skinOpacity": 0.3,
+  "skinImage": "aegis-reference.png"
+}

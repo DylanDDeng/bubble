@@ -57,6 +57,7 @@ import { SkillsPanelComponent } from "./components/skills-panel.js";
 import { SessionPickerComponent } from "./components/session-picker.js";
 import { ComposerImagePreviewComponent, ImageViewerComponent } from "./components/image-preview.js";
 import { registry as slashRegistry } from "../slash-commands/index.js";
+import { syncSystemPrompt } from "../slash-commands/commands.js";
 import type { SlashCommandContext } from "../slash-commands/types.js";
 import type { ContextUsageSnapshot } from "../context/usage.js";
 import { collectUsageStatsBundle } from "../stats/usage.js";
@@ -401,17 +402,10 @@ export class PiTuiApp {
     if (approvalHandlerRef) {
       approvalHandlerRef.current = async (request: ApprovalRequest) => {
         const choice = await this.approvalDialog(request);
-        if (choice.kind === "approve_bash_prefix") {
-          if (request.type !== "bash" || !this.options.bashAllowlist) {
-            return {
-              action: "reject" as const,
-              feedback: "This host cannot remember Bash approvals for the current session.",
-            };
-          }
-          // Session-scoped and command-scoped: PermissionAwareApprovalController
-          // consults this same instance before opening the next dialog.
-          this.options.bashAllowlist.add(choice.prefix);
-          return { action: "approve" as const };
+        // "This session": the approval controller records the request's
+        // sessionGrant (exact bash command / MCP tool) before the next dialog.
+        if (choice.kind === "approve_session") {
+          return { action: "approve" as const, remember: "session" as const };
         }
         return choice.kind === "approve_once"
           ? { action: "approve" as const }
@@ -1002,8 +996,12 @@ export class PiTuiApp {
       getTerminalRows: () => this.tui.terminal.rows,
       onClose: () => handle?.hide(),
       onRender: () => this.renderSnapshot(),
+      getCatalogChars: () => this.options.agent.getSkillCatalogChars?.(),
       onSkillsChanged: () => {
         this.options.agent.setSkillSummaries(skillRegistry.summaries());
+        // The Skills catalog lives in the system prompt; rebuild it so the next turn sees the change.
+        const ctx = this.buildSlashContext();
+        syncSystemPrompt(ctx, ctx.agent.model ?? "");
         this.editor.refreshAutocomplete();
         this.renderSnapshot();
       },
@@ -1690,7 +1688,6 @@ export class PiTuiApp {
         request,
         () => this.tui.terminal.rows,
         {
-          allowBashPrefix: this.options.bashAllowlist !== undefined,
           getTheme: () => this.theme,
         },
       );

@@ -258,6 +258,16 @@ describe("provider transport", () => {
     expect(isProviderTransportError(new Error("invalid request body"))).toBe(false);
   });
 
+  it.each(["UND_ERR_SOCKET", "ECONNRESET", "ETIMEDOUT"])("recognizes nested Error.code %s without matching the message", (code) => {
+    const cause = Object.assign(new Error("other side closed"), { name: "SocketError", code });
+    expect(isProviderTransportError(new TypeError("terminated", { cause }))).toBe(true);
+  });
+
+  it("does not classify bare termination or user cancellation as transport failures", () => {
+    expect(isProviderTransportError(new TypeError("terminated"))).toBe(false);
+    expect(isProviderTransportError(new DOMException("The operation was aborted", "AbortError"))).toBe(false);
+  });
+
   it("does NOT rewrap a plain timeout into the proxy/TLS advice message", () => {
     // Timeout patterns live outside isProviderNetworkErrorText so a bare
     // timeout is returned as-is, never decorated with misleading proxy advice.

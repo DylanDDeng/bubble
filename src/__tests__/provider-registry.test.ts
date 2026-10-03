@@ -6,6 +6,20 @@ afterEach(() => {
 });
 
 describe("provider registry", () => {
+  it.each(["listed", "auto-included"])("honors OAuth enable preferences with a models.json catalog (%s)", (mode) => {
+    const preference = { id: "openai", enabled: false };
+    const registry = new ProviderRegistry({ getProviders: () => [preference] } as any);
+    vi.spyOn((registry as any).modelConfig, "getAllProviders").mockReturnValue(
+      mode === "listed" ? { openai: { models: [] } } : { anthropic: { models: [] } },
+    );
+    vi.spyOn(registry.getAuthStorage(), "has").mockImplementation(id => id === "openai");
+    vi.spyOn(registry.getAuthStorage(), "getAccessToken").mockReturnValue("fixture-oauth-token");
+    expect(registry.getConfigured().find(p => p.id === "openai")?.enabled).toBe(false);
+    expect(registry.getEnabled().some(p => p.id === "openai")).toBe(false);
+    preference.enabled = true;
+    expect(registry.getEnabled().some(p => p.id === "openai")).toBe(true);
+  });
+
   it("normalizes provider-less models to openai by default", () => {
     expect(normalizeModel("gpt-4o")).toBe("openai:gpt-4o");
   });
@@ -20,6 +34,7 @@ describe("provider registry", () => {
     expect(displayModel("anthropic:claude-fable-5")).toBe("Claude Fable 5");
     expect(displayModel("anthropic:claude-sonnet-4-6")).toBe("Claude Sonnet 4.6");
     expect(displayModel("opencode-zen:muse-spark-1.3-contributor-free")).toBe("Muse Spark 1.3 Free");
+    expect(displayModel("opencode-zen:space-bunny-free")).toBe("Space Bunny Free");
   });
 
   it("shows Doubao as a user-visible provider", () => {
@@ -356,3 +371,35 @@ function jsonResponse(body: unknown): Response {
     headers: { "content-type": "application/json" },
   });
 }
+
+describe("OpenAI remote-only catalogs", () => {
+  it("uses API membership exactly and retains the last success across failed refreshes", async () => {
+    const registry = new ProviderRegistry(emptyConfig());
+    const provider: ProviderProfile = { id: "openai", name: "OpenAI", baseURL: "https://fixture.invalid/v1", apiKey: "fixture", enabled: true, authType: "api" };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ data: [{ id: "gpt-future-fixture" }] }));
+    vi.stubGlobal("fetch", fetchMock);
+    expect((await registry.discoverModels(provider)).models.map(m => m.id)).toEqual(["gpt-future-fixture"]);
+    fetchMock.mockResolvedValue(jsonResponse({ error: "malformed catalog" }));
+    expect((await registry.discoverModels(provider, { forceRefresh: true })).models.map(m => m.id)).toEqual(["gpt-future-fixture"]);
+    fetchMock.mockRejectedValue(new Error("offline"));
+    const failed = await registry.discoverModels(provider, { forceRefresh: true });
+    expect(failed.error).toBeTruthy();
+    expect(failed.models.map(m => m.id)).toEqual(["gpt-future-fixture"]);
+    expect((await registry.discoverModels(provider)).models.map(m => m.id)).toEqual(["gpt-future-fixture"]);
+    expect((await registry.discoverModels({ ...provider, apiKey: "another-account" })).models).toEqual([]);
+    fetchMock.mockResolvedValue(jsonResponse({ data: [] }));
+    expect((await registry.discoverModels(provider, { forceRefresh: true })).models).toEqual([]);
+    fetchMock.mockRejectedValue(new Error("offline"));
+    expect((await registry.discoverModels(provider, { forceRefresh: true })).models).toEqual([]);
+  });
+
+  it("never returns builtins on a cold OAuth discovery failure", async () => {
+    const registry = new ProviderRegistry(emptyConfig());
+    const provider: ProviderProfile = { id: "openai", name: "OpenAI", baseURL: "https://fixture.invalid", apiKey: "invalid-fixture-token", enabled: true, authType: "oauth" };
+    vi.spyOn(registry, "prepareProvider").mockResolvedValue(undefined as any);
+    const first = await registry.discoverModels(provider);
+    expect(first.error).toBeTruthy();
+    expect(first.models).toEqual([]);
+    expect((await registry.discoverModels(provider)).models).toEqual([]);
+  });
+});

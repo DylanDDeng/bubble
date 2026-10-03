@@ -27,6 +27,7 @@ function session(initial: { goal?: GoalState; externalRuntime?: unknown } = {}) 
     getSessionFile: () => "/session.jsonl",
     getMetadata: () => metadata,
     setMetadata,
+    mutateMetadata: (build: (current: typeof metadata) => typeof metadata) => setMetadata(build(metadata)),
     metadata: () => metadata,
   };
 }

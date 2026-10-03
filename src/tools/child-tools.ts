@@ -15,7 +15,7 @@ import type { PermissionCheckResult } from "../permissions/types.js";
 import type { ToolRegistryEntry } from "../types.js";
 import { createBashTool } from "./bash.js";
 import { createEditTool } from "./edit.js";
-import { createGlobTool } from "./glob.js";
+import { createLsTool } from "./ls.js";
 import { createGrepTool } from "./grep.js";
 import { createReadTool } from "./read.js";
 import { createWriteTool } from "./write.js";
@@ -92,7 +92,7 @@ export class WorktreeApprovalController implements ApprovalController {
   }
 }
 
-const WORKTREE_TOOL_NAMES = new Set(["read", "glob", "grep", "edit", "write", "bash"]);
+const WORKTREE_TOOL_NAMES = new Set(["read", "ls", "grep", "edit", "write", "bash"]);
 
 /**
  * Builds the write child's toolset bound to its worktree: fresh instances
@@ -104,7 +104,7 @@ const WORKTREE_TOOL_NAMES = new Set(["read", "glob", "grep", "edit", "write", "b
  * exposes a cloneForChild hook (the standard `read`, which carries a
  * FileStateTracker) is rebuilt as a fresh per-child instance, so concurrent
  * members of a fan-out never share mutable tool state. Stateless tools
- * (glob/grep, web/memory/skill) and custom/mock tools without the hook are
+ * (ls/grep, web/memory/skill) and custom/mock tools without the hook are
  * passed through unchanged. Write children get full isolation via
  * createWorktreeChildTools instead.
  */
@@ -117,7 +117,7 @@ export function createWorktreeChildTools(worktreeCwd: string, include?: string[]
   const fileState = new FileStateTracker(worktreeCwd);
   const tools: ToolRegistryEntry[] = [
     createReadTool(worktreeCwd, approval, undefined, fileState),
-    createGlobTool(worktreeCwd),
+    createLsTool(worktreeCwd),
     createGrepTool(worktreeCwd),
     createEditTool(worktreeCwd, approval, undefined, fileState),
     createWriteTool(worktreeCwd, {}, approval, undefined, fileState),

@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 import { calculateUsageCost, getModelPricing } from "../model-pricing.js";
 
 describe("model pricing", () => {
+  it("prices Space Bunny Free input, output and cache tokens at zero", () => {
+    expect(calculateUsageCost("opencode-zen", "space-bunny-free", {
+      promptTokens: 1000, completionTokens: 200,
+      promptCacheHitTokens: 500, promptCacheMissTokens: 500, cacheCreationTokens: 100,
+    })).toEqual({ currency: "USD", cost: 0, estimated: false });
+  });
   it("contains OpenCode Zen Muse Spark pricing", () => {
     expect(getModelPricing("opencode-zen", "muse-spark-1.2")).toMatchObject({
       currency: "USD",
@@ -252,7 +258,7 @@ describe("model pricing", () => {
     expect(cached!.cost).toBeLessThan(uncached!.cost / 3);
   });
 
-  it("uses Sonnet 5 post-promo cache-write pricing after expiry", () => {
+  it("uses current official Sonnet 5 cache-write pricing in September", () => {
     const result = calculateUsageCost("anthropic", "claude-sonnet-5", {
       promptTokens: 1_000_000,
       promptCacheMissTokens: 1_000_000,
@@ -260,6 +266,6 @@ describe("model pricing", () => {
       completionTokens: 0,
     }, new Date("2026-09-01T00:00:00Z"));
 
-    expect(result).toEqual({ currency: "USD", cost: 3.75, estimated: false });
+    expect(result).toEqual({ currency: "USD", cost: 2.5, estimated: false });
   });
 });

@@ -64,6 +64,7 @@ export const BUILTIN_PROVIDERS: BuiltinProviderDefinition[] = [
   { id: "doubao", name: "Doubao (Volcengine Ark)", baseURL: "https://ark.cn-beijing.volces.com/api/v3", protocol: "ark-responses" },
   { id: "minimax", name: "MiniMax Token Plan", baseURL: "https://api.minimaxi.com/anthropic", protocol: "anthropic-messages" },
   { id: "minimax-anthropic", name: "MiniMax API", baseURL: "https://api.minimaxi.com/anthropic", protocol: "anthropic-messages" },
+  { id: "mimo-token-plan", name: "Xiaomi MiMo Token Plan", baseURL: "https://token-plan-cn.xiaomimimo.com/anthropic", protocol: "anthropic-messages" },
   { id: "stepfun", name: "StepFun Step Plan", baseURL: "https://api.stepfun.com/step_plan/v1" },
   { id: "stepfun-api", name: "StepFun API", baseURL: "https://api.stepfun.com/v1", protocol: "openai-chat" },
   { id: "moonshot-cn", name: "Moonshot (国内 platform.moonshot.cn)", baseURL: "https://api.moonshot.cn/v1" },
@@ -119,9 +120,8 @@ const DOUBAO_SEED_REASONING_LEVELS: ReasoningEffort[] = ["minimal", "low", "medi
 const MINIMAX_M3_REASONING_LEVELS: ReasoningEffort[] = ["off", "medium"];
 const MINIMAX_REASONING_LEVELS: ReasoningEffort[] = ["medium"];
 // Anthropic exposes reasoning depth through output_config.effort (low | medium
-// | high | xhigh | max), not a token budget. xhigh is Opus 4.7+ only; max is
-// Opus 4.6+/Sonnet 4.6/Fable 5; Haiku 4.5 does not accept the effort param.
-// Fable 5 has thinking always on, so it has no "off". "off" disables thinking.
+// | high | xhigh | max), not a token budget. Sonnet 5 also supports xhigh.
+// Fable 5+ and Opus 5.5 have thinking always on, so they have no "off".
 const ANTHROPIC_OPUS_EFFORT_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high", "xhigh", "max"];
 const ANTHROPIC_SONNET_EFFORT_LEVELS: ReasoningEffort[] = ["off", "low", "medium", "high", "max"];
 const ANTHROPIC_FABLE_EFFORT_LEVELS: ReasoningEffort[] = ["low", "medium", "high", "xhigh", "max"];
@@ -172,7 +172,14 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "muse-spark-1.3-contributor-free", name: "Muse Spark 1.3 Free", providerId: "opencode-zen", reasoningLevels: MUSE_SPARK_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
   { id: "muse-spark-1.2", name: "Muse Spark 1.2", providerId: "opencode-zen", reasoningLevels: MUSE_SPARK_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
   { id: "muse-spark-1.2-contributor-free", name: "Muse Spark 1.2 Free", providerId: "opencode-zen", reasoningLevels: MUSE_SPARK_LEVELS, defaultReasoningLevel: "high", contextWindow: 1048576 },
+  // Zen /chat/completions; models.dev/opencode metadata checked 2026-09-26.
+  { id: "space-bunny-free", name: "Space Bunny Free", providerId: "opencode-zen", reasoningLevels: ["low", "medium", "high", "xhigh", "max"], defaultReasoningLevel: "high", contextWindow: 1048576 },
 
+  // Current public lineup, verified against platform.claude.com on 2026-09-23.
+  { id: "claude-fable-5-1", name: "Claude Fable 5.1", providerId: "anthropic", tier: "strong", reasoningLevels: ANTHROPIC_FABLE_EFFORT_LEVELS, defaultReasoningLevel: "high", contextWindow: 1000000 },
+  { id: "claude-opus-5-5", name: "Claude Opus 5.5", providerId: "anthropic", tier: "strong", reasoningLevels: ANTHROPIC_FABLE_EFFORT_LEVELS, defaultReasoningLevel: "medium", contextWindow: 1000000 },
+  { id: "claude-sonnet-5", name: "Claude Sonnet 5", providerId: "anthropic", tier: "balanced", reasoningLevels: ANTHROPIC_OPUS_EFFORT_LEVELS, defaultReasoningLevel: "high", contextWindow: 1000000 },
+  { id: "claude-opus-5", name: "Claude Opus 5", providerId: "anthropic", tier: "strong", reasoningLevels: ANTHROPIC_OPUS_EFFORT_LEVELS, defaultReasoningLevel: "high", contextWindow: 1000000 },
   { id: "claude-fable-5", name: "Claude Fable 5", providerId: "anthropic", tier: "strong", reasoningLevels: ANTHROPIC_FABLE_EFFORT_LEVELS, defaultReasoningLevel: "high", contextWindow: 1000000 },
   { id: "claude-opus-4-8", name: "Claude Opus 4.8", providerId: "anthropic", tier: "strong", reasoningLevels: ANTHROPIC_OPUS_EFFORT_LEVELS, defaultReasoningLevel: "high", contextWindow: 1000000 },
   { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", providerId: "anthropic", tier: "balanced", reasoningLevels: ANTHROPIC_SONNET_EFFORT_LEVELS, defaultReasoningLevel: "high", contextWindow: 1000000 },
@@ -240,6 +247,12 @@ export const BUILTIN_MODELS: BuiltinModelDefinition[] = [
   { id: "MiniMax-M3", name: "MiniMax M3", providerId: "minimax-anthropic", tier: "strong", reasoningLevels: MINIMAX_M3_REASONING_LEVELS, contextWindow: 1000000 },
   { id: "MiniMax-M2.7", name: "MiniMax M2.7", providerId: "minimax-anthropic", tier: "balanced", reasoningLevels: MINIMAX_REASONING_LEVELS, contextWindow: 204800 },
   { id: "MiniMax-M2.7-highspeed", name: "MiniMax M2.7 Highspeed", providerId: "minimax-anthropic", tier: "fast", reasoningLevels: MINIMAX_REASONING_LEVELS, contextWindow: 204800 },
+  // Token Plan's text models; V2.5 remains available until 2026-10-21.
+  // https://mimo.mi.com/docs/zh-CN/tokenplan/integration/claudecode
+  { id: "mimo-v2.6-pro", name: "MiMo V2.6 Pro", providerId: "mimo-token-plan", tier: "strong", reasoningLevels: TOGGLE_THINKING_LEVELS, defaultReasoningLevel: "medium", contextWindow: 1000000 },
+  { id: "mimo-v2.6-flash", name: "MiMo V2.6 Flash", providerId: "mimo-token-plan", tier: "fast", reasoningLevels: TOGGLE_THINKING_LEVELS, defaultReasoningLevel: "medium", contextWindow: 1000000 },
+  { id: "mimo-v2.5-pro", name: "MiMo V2.5 Pro", providerId: "mimo-token-plan", reasoningLevels: TOGGLE_THINKING_LEVELS, defaultReasoningLevel: "medium", contextWindow: 1000000 },
+  { id: "mimo-v2.5", name: "MiMo V2.5", providerId: "mimo-token-plan", reasoningLevels: TOGGLE_THINKING_LEVELS, defaultReasoningLevel: "medium", contextWindow: 1000000 },
   { id: "step-3.7-flash", name: "Step 3.7 Flash", providerId: "stepfun", reasoningLevels: STEPFUN_REASONING_LEVELS, contextWindow: 256000 },
   { id: "step-3.5-flash-2603", name: "Step 3.5 Flash 2603", providerId: "stepfun", reasoningLevels: STEPFUN_REASONING_LEVELS },
   { id: "step-3.5-flash", name: "Step 3.5 Flash", providerId: "stepfun", reasoningLevels: STEPFUN_REASONING_LEVELS },

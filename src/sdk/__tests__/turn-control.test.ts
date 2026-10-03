@@ -21,8 +21,8 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   return { promise, resolve };
 }
 
-function sdkWithProvider(provider: Provider): BubbleSdk {
-  const sdk = new BubbleSdk({ defaultCwd: temporaryDirectory, mcp: false });
+function sdkWithProvider(provider: Provider, sessionEventRetention?: number): BubbleSdk {
+  const sdk = new BubbleSdk({ defaultCwd: temporaryDirectory, mcp: false, sessionEventRetention });
   const target = sdk as unknown as {
     resolveProvider: () => { provider: Provider; providerId: string; model: string };
   };
@@ -53,6 +53,35 @@ async function until(
 }
 
 describe("BubbleSdk turn control", () => {
+  it("publishes settled success and a cursor that excludes previous turns", async () => {
+    const sdk = sdkWithProvider({
+      async *streamChat(messages) {
+        yield { type: "text", content: latestUserText(messages) };
+        yield { type: "done" };
+      },
+      async complete() { return ""; },
+    });
+    const session = sdk.createSession({ id: `settled-success-${Date.now()}` });
+    const handle = sdk.openSession(session.id);
+    try {
+      for (const prompt of ["first", "second"]) {
+        const cursor = handle.latestSequence;
+        sdk.runTurn(session.id, { prompt }); // No per-turn consumer is needed.
+        const events: SdkSessionEvent[] = [];
+        for await (const record of handle.eventsFrom(cursor)) {
+          events.push(record);
+          if (record.terminal) break;
+        }
+        expect(events.at(-1)).toMatchObject({ event: { type: "agent_end" }, terminal: { kind: "completed" } });
+        expect(sdk.getSessionRunState(session.id).active).toBe(false);
+        expect(events[0]!.sequence).toBe(cursor + 1);
+        expect(events.filter(item => item.event.type === "text_delta").map(item =>
+          (item.event as { content: string }).content).join("")).toBe(prompt);
+        expect(handle.latestSequence).toBe(events.at(-1)!.sequence);
+      }
+    } finally { handle.close(); }
+  });
+
   it("reserves eagerly, accepts setup-time steer, and stops before consumption", async () => {
     const provider: Provider = {
       async *streamChat() {
@@ -560,15 +589,40 @@ describe("BubbleSdk turn control", () => {
 
     // Reconnect skips durably processed events.
     const resumed: SdkSessionEvent[] = [];
-    for await (const item of handle.eventsFrom(2)) {
+    const reconnected = sdk.openSession(session.id);
+    for await (const item of reconnected.eventsFrom(2)) {
       resumed.push(item);
       if (item.event.type === "turn_end") break;
     }
-    handle.close();
+    reconnected.close();
     expect(resumed.length).toBeGreaterThan(0);
     expect(resumed[0]!.sequence).toBe(3);
     const tail = replay.slice(replay.findIndex((item) => item.sequence === resumed[0]!.sequence));
     expect(resumed.map((item) => item.sequence)).toEqual(tail.map((item) => item.sequence));
+  });
+
+  it("bounds desktop replay without truncating live output or durable history", async () => {
+    const sdk = sdkWithProvider({
+      async *streamChat() {
+        for (let i = 0; i < 1000; i++) yield { type: "text" as const, content: "token " };
+        yield { type: "done" as const };
+      },
+      async complete() { return ""; },
+    }, 256);
+    const session = sdk.createSession({ id: `bounded-${Date.now()}` });
+    const handle = sdk.openSession(session.id);
+    const stream = handle.eventsFrom(handle.latestSequence);
+    sdk.runTurn(session.id, { prompt: "stream" });
+    let text = "";
+    for await (const record of stream) {
+      if (record.event.type === "text_delta") text += record.event.content;
+      if (record.terminal) break;
+    }
+    expect(text).toBe("token ".repeat(1000));
+    expect(sdk.getHistory(session.id).some(message => message.content === text)).toBe(true);
+    await expect((async () => { for await (const _ of handle.eventsFrom(0)) { /* expired */ } })())
+      .rejects.toThrow("cursor expired");
+    handle.close();
   });
 
   it("routes a second SDK instance's calls to the instance running the session", async () => {

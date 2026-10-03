@@ -17,6 +17,8 @@ import {
   type GrokAuthAdapter,
 } from "./provider-grok.js";
 import { getChatGptFetch } from "./network/chatgpt-transport.js";
+import { createProviderFetch } from "./network/provider-transport.js";
+import { chatRequestShape, isSpaceBunnyUpstreamRejection, recoverableSpaceBunnyError } from "./provider-zen-errors.js";
 import { createProviderProtocolArtifactFilter } from "./provider-artifacts.js";
 import { resolveProviderRequestConfig } from "./provider-transform.js";
 import { debugReasoningStream, summarizeDebugText } from "./reasoning-debug.js";
@@ -26,7 +28,7 @@ import {
   RateLimitError,
   type RateLimitPolicy,
 } from "./network/errors.js";
-import { isRetryableHttpStatus, ProviderStreamInterruptedError } from "./network/retry.js";
+import { computeRetryDelayMs, isRetryableHttpStatus, ProviderStreamInterruptedError, sleepBeforeRetry } from "./network/retry.js";
 import type { ProviderProtocol } from "./model-catalog.js";
 import type { Provider, ProviderMessage, StreamChunk, ThinkingLevel, ToolChoiceMode, ToolDefinition } from "./types.js";
 import { assertProviderModelAllowed } from "./provider-model-policy.js";
@@ -145,6 +147,18 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
   }
 
   if (protocol === "openai-responses") {
+    if (options.providerId === "opencode-zen") {
+      // Existing Zen profiles explicitly store Responses for Muse. Dispatch
+      // by model at send time: Space Bunny rejects /responses with 400
+      // ModelProtocolUnsupported and uses /chat/completions instead.
+      const responses = createOpenAIResponsesProvider(options);
+      const chat = createProviderInstance({ ...options, protocol: "openai-chat" });
+      const forModel = (model?: string) => model === "space-bunny-free" ? chat : responses;
+      return {
+        streamChat: (messages, chatOptions) => forModel(chatOptions.model).streamChat(messages, chatOptions),
+        complete: (messages, chatOptions) => forModel(chatOptions?.model).complete(messages, chatOptions),
+      };
+    }
     return createOpenAIResponsesProvider(options);
   }
 
@@ -175,6 +189,9 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
     baseURL: options.baseURL,
     timeout: resolveRequestTimeoutMs(process.env.BUBBLE_PROVIDER_REQUEST_TIMEOUT_MS),
     ...(Object.keys(defaultHeaders).length > 0 ? { defaultHeaders } : {}),
+    ...(options.providerId === "opencode-zen" ? {
+      fetch: createProviderFetch({ providerName: "OpenCode Zen" }) as unknown as NonNullable<ConstructorParameters<typeof OpenAI>[0]>["fetch"],
+    } : {}),
     ...(grokSubscription
       ? {
           fetch: (options.grokAuth
@@ -247,6 +264,9 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
           ...(chatOptions.rateLimitPolicy === "defer" ? { maxRetries: 0 } : {}),
         } as any);
       } catch (error: any) {
+        if (!chatOptions.abortSignal?.aborted && isSpaceBunnyUpstreamRejection(options.providerId, chatOptions.model, error)) {
+          throw Object.assign(recoverableSpaceBunnyError(error), { requestShape: chatRequestShape(requestBody) });
+        }
         if (error?.status === 429) {
           const retryAfterHeader = error?.headers?.["retry-after"];
           const retryAfterSeconds = Number(retryAfterHeader);
@@ -289,6 +309,9 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
       });
     } catch (error) {
       if (chatOptions.abortSignal?.aborted) throw error;
+      if (isSpaceBunnyUpstreamRejection(options.providerId, chatOptions.model, error)) {
+        throw Object.assign(recoverableSpaceBunnyError(error), { requestShape: chatRequestShape(body) });
+      }
       if (isProviderResponseError(error)) {
         const rateLimited = error.status === 429 || error.errorType === "rate_limit_exceeded";
         if (rateLimited && chatOptions.rateLimitPolicy === "defer") {
@@ -349,10 +372,15 @@ export function createProviderInstance(options: ProviderInstanceOptions): Provid
     if (requestConfig.reasoningEffort && requestConfig.reasoningEffort !== "off") {
       body.reasoning = { enabled: true };
     }
-    const response = await client.chat.completions.create(body, {
-      signal: chatOptions?.abortSignal,
-    } as any);
-    return response.choices[0]?.message?.content ?? "";
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const response = await client.chat.completions.create(body, { signal: chatOptions?.abortSignal } as any);
+        return response.choices[0]?.message?.content ?? "";
+      } catch (error) {
+        if (chatOptions?.abortSignal?.aborted || attempt >= 2 || !isSpaceBunnyUpstreamRejection(options.providerId, body.model, error)) throw error;
+        await sleepBeforeRetry(computeRetryDelayMs(attempt + 1), chatOptions?.abortSignal);
+      }
+    }
   }
 
   return { streamChat, complete };
@@ -395,6 +423,7 @@ function isMiniMaxOpenAICompatible(options: Pick<ProviderInstanceOptions, "provi
 function shouldRequestStreamUsage(options: Pick<ProviderInstanceOptions, "providerId" | "baseURL">): boolean {
   const providerId = (options.providerId || "").toLowerCase();
   return providerId === "openai"
+    || providerId === "opencode-zen"
     || providerId === "deepseek"
     || providerId === "moonshot-cn"
     || providerId === "moonshot-intl"

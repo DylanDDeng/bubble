@@ -1,0 +1,146 @@
+import { latestChildState, childToolStatus, shortChildTask, childOperations } from './bubble-subagent-view';
+import type { BubbleSubagentState } from '../../shared/types';
+/**
+ * Derives the list of TOP-LEVEL subagents (Task tool calls the main agent
+ * issued) for the current session, from `session.messages`. This is the data
+ * source for the subagent detail panel's list and the environment panel's
+ * subagent index — both are per-session and re-derived from messages, so they
+ * stay correct across streaming, rewind (a rewound-away Task simply drops out
+ * of the list), and session switches, with no separate mutable state.
+ *
+ * Only top-level subagents are listed: a subagent's own nested sub-Tasks
+ * appear INSIDE that subagent's transcript, not as separate entries here.
+ * "Top-level" = a Task tool_use block that appears in a main-agent message
+ * (one whose `parentToolUseId` is null/absent).
+ */
+import type { StreamMessage, ToolStatus } from '../types';
+import { getMessageContentBlocks, normalizeToolUseBlock, normalizeToolResultBlock } from './message-content';
+import { groupSubagentMessagesByParent, isSubagentTaskBlock } from './workstream';
+import { getSubagentPersona, type SubagentPersona } from './subagent-persona';
+
+export interface SubagentSummary {
+  runtime?: BubbleSubagentState;
+  operations?: ReturnType<typeof childOperations>;
+  /** parentToolUseId — the Task tool_use id; the stable per-session key. */
+  id: string;
+  subagentType: string | null;
+  description: string | null;
+  /** Full dispatch instruction, kept separate from the shortened row description. */
+  task?: string | null;
+  status: ToolStatus;
+  /** Earliest child-message timestamp; anchors a live elapsed timer. */
+  startedAt?: number;
+  /** Wall-clock duration once the Task resolved. */
+  durationMs?: number;
+  /** Count of child messages (rough activity indicator for the list). */
+  childMessageCount: number;
+  persona: SubagentPersona;
+}
+
+function getString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value : null;
+}
+
+/** tool_use id → success/error from its matching tool_result (else pending). */
+function buildTaskStatusMap(messages: StreamMessage[]): Map<string, ToolStatus> {
+  const status = new Map<string, ToolStatus>();
+  for (const message of messages) {
+    if (message.type !== 'assistant' && message.type !== 'user') continue;
+    for (const block of getMessageContentBlocks(message)) {
+      const use = normalizeToolUseBlock(block);
+      if (use) {
+        if (!status.has(use.id)) status.set(use.id, 'pending');
+        continue;
+      }
+      const result = normalizeToolResultBlock(block);
+      if (result) {
+        status.set(result.tool_use_id, result.is_error ? 'error' : 'success');
+      }
+    }
+  }
+  return status;
+}
+
+export function deriveSubagentSummaries(
+  messages: StreamMessage[],
+  options?: {
+    /**
+     * Also include Task/Agent blocks issued by SUBagents themselves (e.g. a
+     * delegated agent's own spawns). The default top-level-only view feeds
+     * the tab strip / hub lists; the panel opts in so clicking a nested lane
+     * can resolve its summary and open a scoped view.
+     */
+    includeNested?: boolean;
+  }
+): SubagentSummary[] {
+  if (!messages.length) return [];
+
+  const statusMap = buildTaskStatusMap(messages);
+  const messagesByParent = groupSubagentMessagesByParent(messages);
+  const summaries: SubagentSummary[] = [];
+  const seen = new Set<string>();
+
+  for (const message of messages) {
+    if (message.type !== 'assistant') continue;
+    // Top-level only: Task blocks issued by a SUBagent (parentToolUseId set)
+    // are that subagent's nested work, shown inside its transcript.
+    if (message.parentToolUseId && !options?.includeNested) continue;
+
+    for (const block of getMessageContentBlocks(message)) {
+      if (!isSubagentTaskBlock(block)) continue;
+      const use = normalizeToolUseBlock(block);
+      if (!use || seen.has(use.id)) continue;
+      seen.add(use.id);
+
+      const input = (use.input && typeof use.input === 'object' ? use.input : {}) as Record<string, unknown>;
+      // Delegate calls carry the target agent in `agent`; Bubble's spawn
+      // surface carries it in `agent_type` / `task` (spawn_agent) or `steps`
+      // (run_workflow).
+      const subagentType =
+        getString(input.subagent_type) ??
+        getString(input.agent) ??
+        getString(input.agent_type) ??
+        null;
+      const description =
+        getString(input.description) ||
+        (getString(input.prompt) ? getString(input.prompt)!.slice(0, 200) : null) ||
+        (getString(input.message) ? getString(input.message)!.slice(0, 200) : null) ||
+        (getString(input.task) ? getString(input.task)!.slice(0, 200) : null);
+
+      const childMessages = messagesByParent.get(use.id) ?? [];
+      const runtime = latestChildState(childMessages);
+      const status = runtime ? childToolStatus(runtime, true) : statusMap.get(use.id) ?? 'pending';
+
+      let minTs = Number.POSITIVE_INFINITY;
+      let maxTs = Number.NEGATIVE_INFINITY;
+      for (const child of childMessages) {
+        const ts = (child as { createdAt?: unknown }).createdAt;
+        if (typeof ts !== 'number' || !Number.isFinite(ts)) continue;
+        if (ts < minTs) minTs = ts;
+        if (ts > maxTs) maxTs = ts;
+      }
+      const finished = status === 'success' || status === 'error';
+      const startedAt = runtime?.startedAt ?? (Number.isFinite(minTs) ? minTs : undefined);
+      const durationMs = runtime && finished ? Math.max(0, runtime.updatedAt - runtime.startedAt) :
+        finished && Number.isFinite(minTs) && Number.isFinite(maxTs) && maxTs >= minTs
+          ? maxTs - minTs
+          : undefined;
+
+      summaries.push({
+        id: use.id,
+        subagentType,
+        description,
+        task: getString(input.prompt) || getString(input.message) || getString(input.task) || runtime?.task || null,
+        status,
+        startedAt,
+        durationMs,
+        childMessageCount: childMessages.length,
+        runtime, operations: childOperations(childMessages),
+        persona: getSubagentPersona(runtime?.agentId || use.id, runtime?.role || subagentType,
+          shortChildTask(getString(input.description) || runtime?.task || description || ''), runtime?.nickname),
+      });
+    }
+  }
+
+  return summaries;
+}

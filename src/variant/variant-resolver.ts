@@ -37,6 +37,7 @@ export function isThinkingOnlyModel(providerId = "", modelId = ""): boolean {
 export function isThinkingToggleModel(providerId = "", modelId = ""): boolean {
   const normalizedProvider = providerId.toLowerCase();
   const normalizedModel = modelId.toLowerCase();
+  if (normalizedProvider === "mimo-token-plan") return true;
   if (normalizedProvider.includes("minimax") || normalizedModel.includes("minimax")) return true;
   return KIMI_TOGGLE_PROVIDER_IDS.has(normalizedProvider)
     && KIMI_THINKING_TOGGLE_MODELS.has(normalizedModel);

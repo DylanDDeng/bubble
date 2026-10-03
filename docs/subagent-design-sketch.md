@@ -132,7 +132,7 @@ Tool selection is deterministic:
 
 Presets:
 
-- `readonly`: `read`, `glob`, `grep`, `lsp`, `web_search`, `web_fetch`,
+- `readonly`: `read`, `ls`, `grep`, `lsp`, `web_search`, `web_fetch`,
   `memory_search`, `memory_read_summary`, `skill`.
 - `none`: no tools.
 - `explicit`: only `include`.

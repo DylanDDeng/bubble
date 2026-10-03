@@ -32,13 +32,31 @@ describe("system prompt", () => {
     expect(prompt).toContain("verifying when possible");
     expect(prompt).toMatch(/If a tool fails, diagnose the error/);
     expect(prompt).toContain("Current working directory: /tmp/project");
-    expect(prompt).toContain("- glob: Find files by glob pattern without using bash");
+    expect(prompt).toContain("- ls: List directory contents");
+    expect(prompt).not.toContain("- glob:");
     expect(prompt).not.toContain("apply_patch");
-    expect(prompt).toContain("Use glob for file discovery");
+    expect(prompt).not.toContain("Use glob");
     expect(prompt).toContain("Runtime meta instructions are private control state");
     expect(prompt).toContain("do not quote, mention, or paraphrase them in user-facing text");
     expect(prompt).toContain("- question: Ask the user structured questions");
     expect(prompt).toContain("explicitly discussing, brainstorming, or shaping an approach");
+  });
+
+  it.each([
+    ["bash"],
+    ["read", "ls", "grep", "bash"],
+  ])("allows shell file operations with available tools %j", (...tools) => {
+    const prompt = buildSystemPrompt({ tools });
+    expect(prompt).toContain("Use bash for file operations like ls, find, and rg when appropriate");
+    expect(prompt).not.toContain("do not use bash ls/find");
+    expect(prompt).not.toContain("do not run grep, rg");
+    expect(prompt).not.toContain("Prefer structured tools");
+  });
+
+  it("only describes directory and shell tools when available", () => {
+    const prompt = buildSystemPrompt({ tools: ["read"] });
+    expect(prompt).not.toContain("Use ls to list");
+    expect(prompt).not.toContain("Use bash for file operations");
   });
 
   it("accepts tool-specific snippets and guidelines", () => {
@@ -150,12 +168,12 @@ describe("system prompt", () => {
     const withoutQuestion = buildSystemPrompt({
       configuredProvider: "openai",
       configuredModel: "gpt-5.4",
-      tools: ["read", "glob"],
+      tools: ["read"],
     });
     const withQuestion = buildSystemPrompt({
       configuredProvider: "openai",
       configuredModel: "gpt-5.4",
-      tools: ["read", "glob", "question"],
+      tools: ["read", "ls", "question"],
     });
 
     expect(withoutQuestion).not.toContain("- question:");

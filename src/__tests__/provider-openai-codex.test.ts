@@ -222,6 +222,9 @@ describe("provider-openai-codex", () => {
       .resolves.toEqual({ descriptors: [], status: "success" });
     await expect(fetchOpenAICodexModelCatalog({ ...options, fetch: unavailableFetch }))
       .resolves.toEqual({ descriptors: [], status: "unavailable" });
+    const malformedFetch = vi.fn(async () => new Response(JSON.stringify({ error: 'unexpected payload' }), { status: 200 }));
+    await expect(fetchOpenAICodexModelCatalog({ ...options, fetch: malformedFetch }))
+      .resolves.toEqual({ descriptors: [], status: "unavailable" });
     expect(successFetch).toHaveBeenCalledTimes(1);
     expect(unavailableFetch).toHaveBeenCalledTimes(2);
   });
@@ -760,15 +763,15 @@ describe("provider-openai-codex", () => {
     });
 
     await expect(collectStream(provider.streamChat([{ role: "user", content: "hi" }], { model: "gpt-5.5" })))
-      .rejects.toThrow(/socket connection/i);
+      .rejects.toMatchObject({ name: "ProviderStreamInterruptedError", cause: { message: "The socket connection was closed unexpectedly." } });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("does not retry transport failures when the request has been aborted", async () => {
     const token = makeAccessToken("account-123");
     const controller = new AbortController();
-    controller.abort(new DOMException("Aborted", "AbortError"));
     const fetchMock = vi.fn(async () => {
+      controller.abort(new DOMException("Aborted", "AbortError"));
       throw new Error("The socket connection was closed unexpectedly.");
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -784,6 +787,26 @@ describe("provider-openai-codex", () => {
       { model: "gpt-5.5", abortSignal: controller.signal },
     ))).rejects.toThrow(/socket connection/i);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not start authentication or HTTP work for an already aborted request", async () => {
+    const controller = new AbortController();
+    controller.abort(new DOMException("Aborted", "AbortError"));
+    const fetchMock = vi.fn();
+    const getCredentials = vi.fn(() => undefined);
+    const refreshCredentials = vi.fn(async () => { throw new Error("Unexpected refresh"); });
+    const provider = createOpenAICodexProvider({
+      apiKey: makeAccessToken("account-123"),
+      baseURL: "https://chatgpt.com/backend-api",
+      fetch: fetchMock,
+      auth: { getCredentials, refreshCredentials },
+    });
+    await expect(collectStream(provider.streamChat([{ role: "user", content: "hi" }], {
+      model: "gpt-5.5", abortSignal: controller.signal,
+    }))).rejects.toMatchObject({ name: "AbortError" });
+    expect(getCredentials).not.toHaveBeenCalled();
+    expect(refreshCredentials).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("sorts models by family version desc, floating new families above catalog entries", () => {

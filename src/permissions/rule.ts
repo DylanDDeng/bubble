@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 import picomatch from "picomatch";
+import { analyzeShellCommand, effectiveCommandTokens, shellTokens } from "./shell-command.js";
 import type {
   ParsedRule,
   PermissionCheckResult,
@@ -102,11 +103,18 @@ export function parseRules(inputs: string[]): {
 /**
  * Does `rule` match `query`?
  *
- * Tool name must match (or rule.tool is "*"). If the rule has no pattern, it
- * matches any use of that tool. Otherwise the tool-specific matcher decides.
+ * Tool name must match (or rule.tool is "*"; `mcp__server` covers every
+ * `mcp__server__tool`). If the rule has no pattern, it matches any use of that
+ * tool. Otherwise the tool-specific matcher decides. `list` matters for Bash:
+ * an allow rule must cover every command a compound command runs, while a
+ * deny rule fires if it covers any of them.
  */
-export function matchRule(rule: PermissionRule, query: PermissionQuery): boolean {
-  if (rule.tool !== "*" && rule.tool !== query.tool) {
+export function matchRule(
+  rule: PermissionRule,
+  query: PermissionQuery,
+  list: "allow" | "deny" = "allow",
+): boolean {
+  if (rule.tool !== "*" && rule.tool !== query.tool && !isMcpServerRule(rule, query)) {
     return false;
   }
 
@@ -119,7 +127,9 @@ export function matchRule(rule: PermissionRule, query: PermissionQuery): boolean
   switch (toolKey) {
     case "Bash":
       if (!("command" in query) || typeof query.command !== "string") return false;
-      return matchBash(rule.pattern, query.command);
+      return list === "deny"
+        ? bashDenyMatches(rule.pattern, query.command)
+        : bashAllowMatches(rule.pattern, query.command);
     case "Read":
     case "Write":
     case "Edit":
@@ -147,19 +157,77 @@ export function checkPermission(
   query: PermissionQuery,
 ): PermissionCheckResult {
   for (const rule of rules.deny) {
-    if (matchRule(rule, query)) {
+    if (matchRule(rule, query, "deny")) {
       return { decision: "deny", rule };
     }
   }
+  if (query.tool === "Bash" && "command" in query && typeof query.command === "string") {
+    return checkBashAllow(rules.allow, query.command);
+  }
   for (const rule of rules.allow) {
-    if (matchRule(rule, query)) {
+    if (matchRule(rule, query, "allow")) {
       return { decision: "allow", rule };
     }
   }
   return { decision: "ask" };
 }
 
+/**
+ * A compound command is allowed when every simple command in it is covered
+ * by some allow rule (different rules may cover different parts), and it has
+ * nothing opaque — unless a rule grants any command (`Bash`, `*`, `Bash(:*)`).
+ */
+function checkBashAllow(allowRules: PermissionRule[], command: string): PermissionCheckResult {
+  const bashRules = allowRules.filter((rule) => rule.tool === "Bash" || rule.tool === "*");
+  const anyCommand = bashRules.find((rule) =>
+    rule.pattern === undefined || tokenize(rule.pattern).join(" ") === ":*",
+  );
+  if (anyCommand) return { decision: "allow", rule: anyCommand };
+
+  const analysis = analyzeShellCommand(command);
+  if (analysis.opaque || analysis.segments.length === 0) return { decision: "ask" };
+  let first: PermissionRule | undefined;
+  for (const segment of analysis.segments) {
+    const tokens = shellTokens(segment);
+    const rule = bashRules.find((candidate) => matchBash(candidate.pattern!, tokens));
+    if (!rule) return { decision: "ask" };
+    first ??= rule;
+  }
+  return first ? { decision: "allow", rule: first } : { decision: "ask" };
+}
+
 // --- per-tool matchers ---------------------------------------------------
+
+/** `mcp__github` (no pattern) covers every tool of that MCP server. */
+function isMcpServerRule(rule: PermissionRule, query: PermissionQuery): boolean {
+  return rule.pattern === undefined
+    && rule.tool.startsWith("mcp__")
+    && query.tool.startsWith(`${rule.tool}__`);
+}
+
+/**
+ * Allow: every simple command the line runs must match, and nothing opaque
+ * (substitution, file redirection, heredoc) may ride along.
+ */
+function bashAllowMatches(pattern: string, command: string): boolean {
+  // `Bash(:*)` is an explicit "any command" grant.
+  if (tokenize(pattern).join(" ") === ":*") return true;
+  const analysis = analyzeShellCommand(command);
+  if (analysis.opaque || analysis.segments.length === 0) return false;
+  return analysis.segments.every((segment) => matchBash(pattern, shellTokens(segment)));
+}
+
+/**
+ * Deny: any simple command matching — as written, or with leading
+ * assignments/wrappers (`sudo`, `env`, ...) stripped — blocks the line.
+ */
+function bashDenyMatches(pattern: string, command: string): boolean {
+  const analysis = analyzeShellCommand(command);
+  if (analysis.segments.length === 0) return matchBash(pattern, shellTokens(command));
+  return analysis.segments.some((segment) =>
+    matchBash(pattern, shellTokens(segment)) || matchBash(pattern, effectiveCommandTokens(segment)),
+  );
+}
 
 /**
  * Bash pattern matching.
@@ -167,12 +235,10 @@ export function checkPermission(
  * - `git status`     → command tokens equal ["git","status"] exactly
  * - `git status:*`   → command tokens start with ["git","status"]
  *
- * Tokenization splits on whitespace. Shell control tokens (`&&`, `|`, `;`) are
- * treated as plain tokens; a rule that includes them would have to match them
- * literally. v1 does not try to parse shell grammar.
+ * Matches one simple command's tokens; bashAllowMatches / bashDenyMatches
+ * split compound commands first (see shell-command.ts).
  */
-function matchBash(pattern: string, command: string): boolean {
-  const cmdTokens = tokenize(command);
+function matchBash(pattern: string, cmdTokens: string[]): boolean {
   let ruleTokens = tokenize(pattern);
   let prefixMatch = false;
 

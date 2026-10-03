@@ -7,7 +7,8 @@ import type {
 import type { PermissionMode } from "../types.js";
 import type { ExternalHookController } from "../hooks/controller.js";
 import { truncateHookText } from "../hooks/index.js";
-import type { BashAllowlist } from "./session-cache.js";
+import { bashSessionGrant, type BashAllowlist } from "./session-cache.js";
+import { isProtectedWorkspacePath } from "./protected-paths.js";
 import type { ApprovalController, ApprovalDecision, ApprovalRequest } from "./types.js";
 
 export interface ApprovalControllerOptions {
@@ -21,6 +22,11 @@ export interface ApprovalControllerOptions {
   handlerRef: { current?: (req: ApprovalRequest) => Promise<ApprovalDecision> };
   /** Session-scoped bash command prefix allowlist. Optional. */
   bashAllowlist?: BashAllowlist;
+  /**
+   * Session-scoped grants for non-bash requests (MCP tools), keyed by
+   * sessionGrantKey. Optional; without it hosts cannot offer "this session".
+   */
+  sessionGrants?: Set<string>;
   /** Working directory — used to anchor relative path rules. */
   cwd: string;
   /**
@@ -40,11 +46,13 @@ export interface ApprovalControllerOptions {
  *   deny rule match              → reject (applies even under bypassPermissions)
  *   bypassPermissions            → auto-approve, no prompt
  *   default + edit|write         → auto-approve (workspace paths only; a
- *                                  path outside the workspace falls through
- *                                  to allow rules / the interactive prompt)
+ *                                  path outside the workspace, or a protected
+ *                                  one — .git, agent permission settings —
+ *                                  falls through to the interactive prompt)
  *   plan                         → reject with instructions to use exit_plan_mode
- *   allow rule match             → auto-approve
- *   bash in session allowlist    → auto-approve
+ *   allow rule match             → auto-approve (never for protected paths)
+ *   session grant (bash prefix,
+ *     MCP tool)                  → auto-approve
  *   bash / other                 → delegate to UI; if no UI, reject
  *
  * Deny rules sit at the top as a hard ceiling: bypassPermissions is a trust
@@ -60,7 +68,8 @@ export class PermissionAwareApprovalController implements ApprovalController {
     return checkPermission(ruleSet, query);
   }
 
-  async request(req: ApprovalRequest): Promise<ApprovalDecision> {
+  async request(original: ApprovalRequest): Promise<ApprovalDecision> {
+    const req = this.annotate(original);
     const ruleResult = this.checkRequestRules(req);
     const finalize = async (decision: ApprovalDecision): Promise<ApprovalDecision> => {
       await this.runPermissionResultHook(req, decision);
@@ -86,7 +95,12 @@ export class PermissionAwareApprovalController implements ApprovalController {
 
     const outsideWorkspace =
       (req.type === "edit" || req.type === "write") && req.outsideWorkspace === true;
-    if (mode === "default" && !outsideWorkspace && (req.type === "edit" || req.type === "write" || req.type === "patch")) {
+    const protectedPath =
+      (req.type === "edit" || req.type === "write" || req.type === "patch") && req.protectedPath === true;
+    if (
+      mode === "default" && !outsideWorkspace && !protectedPath
+      && (req.type === "edit" || req.type === "write" || req.type === "patch")
+    ) {
       return finalize({ action: "approve" });
     }
 
@@ -100,12 +114,18 @@ export class PermissionAwareApprovalController implements ApprovalController {
       });
     }
 
-    if (ruleResult.decision === "allow") {
+    // A broad allow rule (`Edit`, `Write(**)`) must not silently cover a
+    // protected path; the user confirms those one at a time.
+    if (ruleResult.decision === "allow" && !protectedPath) {
       return finalize({ action: "approve" });
     }
 
     // Session-scoped allowlist: previously-approved bash prefixes skip the prompt.
     if (req.type === "bash" && this.options.bashAllowlist?.matches(req.command)) {
+      return finalize({ action: "approve" });
+    }
+    const grantKey = sessionGrantKey(req);
+    if (grantKey && this.options.sessionGrants?.has(grantKey)) {
       return finalize({ action: "approve" });
     }
 
@@ -117,7 +137,48 @@ export class PermissionAwareApprovalController implements ApprovalController {
       });
     }
 
-    return finalize(await handler(req));
+    const decision = await handler(req);
+    if (decision.action === "approve" && decision.remember === "session") {
+      this.rememberForSession(req);
+    }
+    return finalize(decision);
+  }
+
+  /**
+   * Facts the host needs to render the prompt correctly: whether a path is
+   * protected (never auto-approve it host-side either) and what scope a
+   * "this session" approval would cover.
+   */
+  private annotate(req: ApprovalRequest): ApprovalRequest {
+    const cwd = this.options.cwd;
+    switch (req.type) {
+      case "edit":
+      case "write":
+        return isProtectedWorkspacePath(cwd, req.path) ? { ...req, protectedPath: true } : req;
+      case "patch": {
+        const paths = [...req.paths, ...req.files.map((file) => file.path)];
+        return paths.some((path) => isProtectedWorkspacePath(cwd, path)) ? { ...req, protectedPath: true } : req;
+      }
+      case "bash": {
+        const grant = this.options.bashAllowlist ? bashSessionGrant(req.command) : undefined;
+        return grant ? { ...req, sessionGrant: grant } : req;
+      }
+      case "external_tool":
+        return req.kind === "mcp" && this.options.sessionGrants && req.title.trim()
+          ? { ...req, sessionGrant: req.title.trim() }
+          : req;
+      default:
+        return req;
+    }
+  }
+
+  private rememberForSession(req: ApprovalRequest): void {
+    if (req.type === "bash") {
+      if (req.sessionGrant) this.options.bashAllowlist?.add(req.sessionGrant);
+      return;
+    }
+    const key = sessionGrantKey(req);
+    if (key) this.options.sessionGrants?.add(key);
   }
 
   private requestToQuery(req: ApprovalRequest): PermissionQuery {
@@ -269,6 +330,11 @@ function summarizeApprovalRequest(req: ApprovalRequest): Record<string, unknown>
         rawInput: req.rawInput,
       };
   }
+}
+
+function sessionGrantKey(req: ApprovalRequest): string | undefined {
+  if (req.type === "external_tool" && req.sessionGrant) return `${req.kind}:${req.sessionGrant}`;
+  return undefined;
 }
 
 function externalCommand(rawInput: unknown): string | undefined {

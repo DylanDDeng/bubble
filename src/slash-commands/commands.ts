@@ -4,6 +4,7 @@ import { formatDiagnostics } from "../lsp/index.js";
 import { normalizeNameForMCP } from "../mcp/name.js";
 import { parseRule } from "../permissions/rule.js";
 import type { RuleList, SettingsScope } from "../permissions/settings.js";
+import { describeRepoCapabilities } from "../permissions/trust.js";
 import { encodeModel, decodeModel, displayModel, BUILTIN_PROVIDERS, isUserVisibleProvider } from "../provider-registry.js";
 import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingLevel } from "../provider-transform.js";
 import { SessionManager } from "../session.js";
@@ -220,16 +221,18 @@ function persistSelectedModel(model: string, ctx: Parameters<SlashCommand["handl
   }
 }
 
-function syncSystemPrompt(ctx: Parameters<SlashCommand["handler"]>[1], model: string) {
+/** Rebuild the system prompt from the agent's live options (model, tools, memory, Skills catalog). */
+export function syncSystemPrompt(ctx: Pick<Parameters<SlashCommand["handler"]>[1], "agent" | "cwd">, model: string) {
   const { providerId } = decodeModel(model);
   const toolPromptOptions = typeof ctx.agent.getSystemPromptToolOptions === "function"
     ? ctx.agent.getSystemPromptToolOptions()
     : {};
   ctx.agent.setSystemPrompt(buildSystemPrompt({
     agentName: "Bubble",
-    configuredProvider: providerId,
-    configuredModel: displayModel(model),
-    configuredModelId: model,
+    // Same placeholders as startup when no model is configured yet.
+    configuredProvider: providerId || "none",
+    configuredModel: model ? displayModel(model) : "none",
+    configuredModelId: model || "none",
     thinkingLevel: ctx.agent.thinking,
     workingDir: ctx.cwd,
     ...toolPromptOptions,
@@ -978,7 +981,7 @@ const builtinSlashCommandEntries: SlashCommand[] = [
   },
   {
     name: "permissions",
-    description: "Inspect or edit allow/deny rules. Subcommands: add <scope> <list> <rule>, remove <scope> <list> <rule>, clear (session allowlist), reload.",
+    description: "Inspect or edit allow/deny rules. Subcommands: add <scope> <list> <rule>, remove <scope> <list> <rule>, clear (session approvals), reload.",
     async handler(args, ctx) {
       const tokens = args.trim().split(/\s+/).filter(Boolean);
       const sub = tokens[0] ?? "";
@@ -992,7 +995,7 @@ const builtinSlashCommandEntries: SlashCommand[] = [
         const size = ctx.bashAllowlist.size();
         if (size === 0) return "Bash allowlist is already empty.";
         ctx.bashAllowlist.clear();
-        return `Cleared ${size} bash prefix${size === 1 ? "" : "es"} from the session allowlist.`;
+        return `Cleared ${size} session-approved bash command${size === 1 ? "" : "s"}.`;
       }
 
       if (sub === "reload") {
@@ -1023,6 +1026,12 @@ const builtinSlashCommandEntries: SlashCommand[] = [
           for (const r of merged.ruleSet.allow) lines.push(`  ${r.source}`);
         }
 
+        const untrusted = merged.untrusted;
+        if (untrusted.allow.length + untrusted.mcpServers.length + untrusted.lspServers.length > 0) {
+          lines.push("", "This folder is not trusted, so these stay off (Bubble asks at startup):");
+          lines.push(...describeRepoCapabilities(untrusted).map((line) => `  ${line}`));
+        }
+
         lines.push("", `Deny rules (${merged.ruleSet.deny.length}):`);
         if (merged.ruleSet.deny.length === 0) {
           lines.push("  (none)");
@@ -1041,11 +1050,11 @@ const builtinSlashCommandEntries: SlashCommand[] = [
       if (ctx.bashAllowlist) {
         const entries = ctx.bashAllowlist.list();
         if (lines.length > 0) lines.push("");
-        lines.push(`Session bash allowlist (${entries.length}):`);
+        lines.push(`Session-approved bash commands (${entries.length}):`);
         if (entries.length === 0) {
-          lines.push('  (none) — approving "Yes, and don\'t ask again for <prefix>" adds entries here');
+          lines.push('  (none) — "don\'t ask again for this exact command this session" adds entries here');
         } else {
-          for (const prefix of entries) lines.push(`  ${prefix}`);
+          for (const command of entries) lines.push(`  ${command}`);
         }
       }
 

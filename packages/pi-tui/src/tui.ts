@@ -407,6 +407,9 @@ export abstract class TuiBase extends Container implements TUI {
 
 	protected afterTerminalStart(): void {}
 
+	/** Reset terminal-owned resources without invalidating semantic layout caches. */
+	protected afterTerminalResume(): void {}
+
 	protected beforeTerminalStop(_options: TuiStopOptions): void {}
 
 	protected afterTerminalStop(_options: TuiStopOptions): void {}
@@ -783,10 +786,12 @@ export abstract class TuiBase extends Container implements TUI {
 			(data) => this.handleTerminalInput(data),
 			() => this.requestRender(),
 			() => {
-				// The terminal emulator may have reset its alternate-screen contents
-				// while the application state remained live. Repaint from source state
-				// instead of trusting the pre-sleep diff cache.
-				this.invalidate();
+				// Wake can erase terminal pixels, but does not invalidate semantic
+				// component caches. Reset only the screen diff: clearing transcript
+				// projections here makes a slow frame trigger the wake watchdog,
+				// which schedules another slow frame and starves keyboard input.
+				// Changed dimensions still miss each component's width cache.
+				this.afterTerminalResume();
 				this.requestRender(true);
 			},
 		);

@@ -3,6 +3,10 @@ import type { ThinkingLevel } from "./types.js";
 
 const MAX_FIELD_CHARS = 160;
 const RUNTIME_STARTED_AT = Date.now();
+const TRANSPORT_ERROR_CODES = new Set([
+  "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT",
+  "ECONNRESET", "ECONNREFUSED", "EPIPE", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN",
+]);
 const SAFE_ERROR_CODES = new Map<string, string>([
   ["authentication_error", "authentication_error"],
   ["bad_request", "bad_request"],
@@ -10,6 +14,7 @@ const SAFE_ERROR_CODES = new Map<string, string>([
   ["failed_precondition", "failed_precondition"],
   ["internal_error", "internal_error"],
   ["invalid_argument", "invalid_argument"],
+  ["invalid_request_error", "invalid_request_error"],
   ["invalidparameter", "invalid_parameter"],
   ["invalid_parameter", "invalid_parameter"],
   ["location_not_supported", "location_not_supported"],
@@ -22,6 +27,7 @@ const SAFE_ERROR_CODES = new Map<string, string>([
   ["unauthenticated", "unauthenticated"],
   ["unsupported_parameter", "unsupported_parameter"],
   ["unsupported_value", "unsupported_value"],
+  ...Array.from(TRANSPORT_ERROR_CODES, (code): [string, string] => [code.toLowerCase(), code]),
 ]);
 const SAFE_PARAMETER_NAMES = new Set([
   "contents",
@@ -65,6 +71,8 @@ export interface SanitizedProviderError {
   bubbleVersion: string;
   pid: number;
   runtimeStartedAt: number;
+  retry?: { attempt: number; maxAttempts: number };
+  requestShape?: Record<string, number>;
 }
 
 export interface ProviderErrorContext {
@@ -74,6 +82,7 @@ export interface ProviderErrorContext {
   thinkingLevel: ThinkingLevel;
   messageCount: number;
   toolCount: number;
+  retry?: { attempt: number; maxAttempts: number };
 }
 
 /**
@@ -91,7 +100,10 @@ export function createSanitizedProviderError(
   const rawMessage = firstString(sources, ["message"])
     || (typeof error === "string" ? error : "Provider request failed.");
   const httpStatus = firstHttpStatus(sources);
-  const code = sanitizeErrorCode(firstScalarString(sources, ["code", "errorCode", "type"]));
+  // A wrapper's unknown code must not hide an allowlisted nested transport code.
+  const code = sources.flatMap((source) => ["code", "errorCode", "type"].map((key) =>
+    typeof source[key] === "string" ? sanitizeErrorCode(source[key]) : undefined,
+  )).find((value) => value !== undefined);
   const parameter = sanitizeParameterName(firstScalarString(sources, ["param", "parameter"]));
 
   return {
@@ -100,16 +112,35 @@ export function createSanitizedProviderError(
     ...(context.model ? { model: sanitizeControlledIdentifier(context.model) } : {}),
     thinkingLevel: context.thinkingLevel,
     name: "ProviderError",
-    message: sanitizeProviderErrorText(rawMessage),
+    message: code && TRANSPORT_ERROR_CODES.has(code)
+      ? code.includes("TIMEOUT") || code === "ETIMEDOUT" ? "Provider request timed out." : "Provider connection failed."
+      : sanitizeProviderErrorText(rawMessage),
     ...(httpStatus !== undefined ? { httpStatus } : {}),
     ...(code ? { code } : {}),
     ...(parameter ? { parameter } : {}),
     messageCount: Math.max(0, Math.trunc(context.messageCount)),
     toolCount: Math.max(0, Math.trunc(context.toolCount)),
+    ...sanitizedRequestShape(sources),
     bubbleVersion: getCurrentVersion(),
     pid: process.pid,
     runtimeStartedAt: RUNTIME_STARTED_AT,
+    ...(context.retry ? { retry: {
+      attempt: context.retry.attempt,
+      maxAttempts: context.retry.maxAttempts,
+    } } : {}),
   };
+}
+
+function sanitizedRequestShape(sources: Record<string, unknown>[]): { requestShape?: Record<string, number> } {
+  const raw = sources.find(source => asRecord(source.requestShape))?.requestShape;
+  const shape = asRecord(raw);
+  if (!shape) return {};
+  const safe: Record<string, number> = {};
+  for (const key of ["messages", "tools", "assistant", "emptyAssistant", "reasoning", "toolCalls", "toolResults", "contentChars"]) {
+    const value = shape[key];
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) safe[key] = value;
+  }
+  return { requestShape: safe };
 }
 
 export function sanitizeProviderErrorText(value: string): string {
@@ -134,6 +165,9 @@ export function sanitizeProviderErrorText(value: string): string {
   if (/forbidden|permission denied|access denied|\b403\b/i.test(text)) {
     return "Provider denied the request.";
   }
+  if (/unprocessable entity|\b422\b/i.test(text)) {
+    return "Provider rejected the request (unprocessable entity).";
+  }
   if (/invalid[^.]{0,60}(?:parameter|argument)|unsupported[^.]{0,60}(?:parameter|argument)|bad request|\b400\b/i.test(text)) {
     return "Provider rejected a request parameter.";
   }
@@ -151,14 +185,15 @@ export function sanitizeProviderErrorText(value: string): string {
 
 function errorSources(error: unknown): Record<string, unknown>[] {
   const sources: Record<string, unknown>[] = [];
-  const root = asRecord(error);
-  if (root) sources.push(root);
-  const nested = asRecord(root?.error);
-  if (nested) sources.push(nested);
-  const cause = asRecord(root?.cause);
-  if (cause) sources.push(cause);
-  const causeError = asRecord(cause?.error);
-  if (causeError) sources.push(causeError);
+  const pending = [error];
+  const seen = new Set<object>();
+  while (pending.length && sources.length < 12) {
+    const source = asRecord(pending.shift());
+    if (!source || seen.has(source)) continue;
+    seen.add(source);
+    sources.push(source);
+    pending.push(source.error, source.cause);
+  }
   return sources;
 }
 

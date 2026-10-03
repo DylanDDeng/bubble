@@ -7,13 +7,14 @@
 import chalk from "chalk";
 import { Agent } from "./agent.js";
 import { BudgetLedger } from "./agent/budget-ledger.js";
-import { parseArgs, printHelp } from "./cli.js";
+import { enterWorkingDirectory, parseArgs, printHelp } from "./cli.js";
 import { effectiveThemeModeForTerminal, shouldProbeTerminalTheme, UserConfig } from "./config.js";
 import { createProviderInstance, createUnavailableProvider } from "./provider.js";
 import { resolveConfiguredModel } from "./model-selection.js";
 import { getAvailableThinkingLevels, getDefaultThinkingLevel, normalizeThinkingLevel } from "./provider-transform.js";
 import { ProviderRegistry, displayModel, encodeModel, decodeModel } from "./provider-registry.js";
 import { SessionManager } from "./session.js";
+import { SessionContextFence } from "./session-context-fence.js";
 import { createSessionTitleUpdater, type SessionTitleUpdater } from "./session-title.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { createRoutableModelIndex, createRoutingSnapshotAccessor } from "./agent/routing-catalog.js";
@@ -36,7 +37,8 @@ import { SettingsManager } from "./permissions/settings.js";
 import { ExternalHookController } from "./hooks/index.js";
 import { getLspService } from "./lsp/index.js";
 import { loadMcpConfig } from "./mcp/config.js";
-import { McpManager } from "./mcp/manager.js";
+import { promptRepoTrust } from "./permissions/trust-prompt.js";
+import { McpManager, gateMcpTools } from "./mcp/manager.js";
 import type { PermissionMode, PlanDecision } from "./types.js";
 import { normalizeInheritedThinkingLevel } from "./variant/variant-resolver.js";
 import { QuestionController } from "./question/index.js";
@@ -77,6 +79,14 @@ async function main() {
     const { getCurrentVersion } = await import("./update/index.js");
     console.log(`v${getCurrentVersion()}`);
     process.exit(0);
+  }
+
+  // --cwd means "run as if launched there" (like git -C): every layer, including
+  // the TUI, shell children and relative paths, then sees the same directory.
+  const cwdError = enterWorkingDirectory(args.cwd);
+  if (cwdError) {
+    console.error(`bubble: ${cwdError}`);
+    process.exit(1);
   }
 
   if (args.command === "update") {
@@ -185,6 +195,11 @@ async function main() {
   const approvalHandlerRef: { current?: (req: ApprovalRequest) => Promise<ApprovalDecision> } = {};
   const questionController = new QuestionController();
   const bashAllowlist = new BashAllowlist();
+  // Folder trust (Kimi Code style): the repository's .bubble settings may
+  // enable allow rules, MCP servers and LSP servers; ask before loading them.
+  if (!printMode && process.stdin.isTTY && process.stdout.isTTY) {
+    await promptRepoTrust(args.cwd);
+  }
   const settingsManager = new SettingsManager(args.cwd);
   for (const d of settingsManager.getMerged().diagnostics) {
     console.error(chalk.yellow(`[settings:${d.scope}] ${d.path}: ${d.message}`));
@@ -197,6 +212,7 @@ async function main() {
     getMode: () => agentRef?.mode ?? "default",
     handlerRef: approvalHandlerRef,
     bashAllowlist,
+    sessionGrants: new Set<string>(),
     cwd: args.cwd,
     getRuleSet: () => settingsManager.getMerged().ruleSet,
     externalHooks: hookController,
@@ -246,7 +262,7 @@ async function main() {
   let externalRuntime: ExternalRuntimeManager | undefined;
   if (mcpLoaded.servers.length > 0) {
     await mcpManager.start();
-    tools.push(...mcpManager.getToolEntries());
+    tools.push(...gateMcpTools(mcpManager.getToolEntries(), approvalController));
   }
 
   // Expose MCP prompts as slash commands. Queried live at each lookup so
@@ -415,6 +431,8 @@ async function main() {
     : undefined;
   const systemPrompt = buildSystemPrompt({
     agentName: "Bubble",
+    skills: skillSummaries,
+    skillCatalogChars: userConfig.getSkillCatalogChars(),
     configuredProvider: activeProviderId || "none",
     configuredModel: activeModel ? displayModel(activeModel) : "none",
     configuredModelId: activeModel || "none",
@@ -448,6 +466,28 @@ async function main() {
   }
   const budgetLedger = new BudgetLedger();
   let sessionTitleUpdater: SessionTitleUpdater | undefined;
+  let contextFence = new SessionContextFence(sessionManager);
+  // A fence rejection means the durable log diverged from this host's resident
+  // history (a foreign append/clear/rewind landed while a turn was in flight).
+  // The write is refused — and the resident transcript must roll back to the
+  // file's truth, or the rejected message lingers in the TUI while every later
+  // fenced write keeps failing on the stale revision until a manual reload.
+  const persistFenced = (write: () => void): void => {
+    try {
+      write();
+    } catch (error) {
+      // Any refused write (fence rejection, busy lock, I/O) leaves the agent's
+      // already-pushed message unpersisted, so always restore the file's truth.
+      try {
+        const history = contextFence.reloadHistory();
+        const head = splitLeadingContext(agent.messages).leading;
+        agent.messages = [...head, ...history];
+      } catch {
+        // Surface the original write failure; the next write retries the reload.
+      }
+      throw error;
+    }
+  };
   const agent = new Agent({
     provider: activeProvider
       ? createProvider(activeProviderId, activeProvider.apiKey, activeProvider.baseURL)
@@ -466,7 +506,8 @@ async function main() {
       // Runtime meta messages are ephemeral; don't persist them —
       // they will be re-injected as needed on resume based on the current mode.
       if (message.role === "meta") return;
-      sessionManager.appendMessage(message);
+      const manager = sessionManager;
+      persistFenced(() => manager.appendMessage(message, contextFence.getRevision()));
       traceEvent("session_message_persisted", {
         message: summarizeTraceMessage(message),
       });
@@ -476,26 +517,29 @@ async function main() {
       }
     },
     onProviderError: (error) => {
-      sessionManager?.appendProviderError(error);
+      persistFenced(() => sessionManager?.appendProviderError(error, contextFence.getRevision()));
     },
-    // Auto-compaction summaries are meta messages (dropped above); persist the
-    // compacted state as a session summary entry so it survives resume.
-    onCompactionApplied: (summary) => {
-      sessionManager?.applyLLMCompaction(summary);
+    getContextRevision: () => contextFence.getRevision(),
+    onContextCheckpoint: (checkpoint) => {
+      if (!sessionManager) throw new Error("No session available for context commit");
+      const manager = sessionManager;
+      persistFenced(() => manager.commitContextCheckpoint(checkpoint, contextFence.getRevision()));
     },
     onToolResult: (toolName, result) => {
       if (!sessionManager) return;
       if (toolName !== "skill" || result.isError) return;
       const match = result.content.match(/^Skill:\s+([^\n]+)$/m);
       if (match?.[1]) {
-        sessionManager.appendMarker("skill_activated", match[1].trim());
+        const manager = sessionManager;
+        persistFenced(() => manager.appendMarker("skill_activated", match[1]!.trim(), contextFence.getRevision()));
       }
     },
     onModeUpdate: (mode) => {
-      sessionManager?.appendMarker("mode_switch", mode);
+      persistFenced(() => sessionManager?.appendMarker("mode_switch", mode, contextFence.getRevision()));
     },
     budgetLedger,
     skills: skillSummaries,
+    skillCatalogChars: userConfig.getSkillCatalogChars(),
     memoryPrompt,
     fileStateTracker,
     agentCategories: userConfig.getAgentCategories(),
@@ -608,7 +652,7 @@ async function main() {
 
   // Restore session if requested
   if (resumedExistingSession && sessionManager) {
-    const history = sessionManager.getMessages();
+    const history = contextFence.reloadHistory();
     if (history.length > 0) {
       agent.messages = [{ role: "system", content: systemPrompt }, ...history];
       // Reassigning agent.messages drops any runtime meta reminder injected during
@@ -760,6 +804,7 @@ async function main() {
     const activateSession = (next: SessionManager): { manager: SessionManager } | { error: string } => {
       try {
         const history = next.getMessages();
+        const historyRevision = next.getRevision();
         const nextPromptCacheKey = next.getOrCreatePromptCacheKey();
         const nextTitleUpdater = createSessionTitleUpdater({
           sessionManager: next,
@@ -779,6 +824,9 @@ async function main() {
         // Commit only after every file read/write and reconstruction step has
         // succeeded. Callers can safely prepare candidate sessions without a
         // failed switch rebinding persistence or replacing the live history.
+        if (next.getRevision() !== historyRevision) throw new Error("Session changed while switching; retry");
+        contextFence.dispose();
+        contextFence = new SessionContextFence(next);
         sessionManager = next;
         sessionPromptCacheKey = nextPromptCacheKey;
         sessionTitleUpdater = nextTitleUpdater;

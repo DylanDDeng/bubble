@@ -385,6 +385,8 @@ describe("ChatGPT (openai oauth) discovery scope", () => {
       // Past the confirmation horizon nothing is trusted anymore.
       nowSpy.mockReturnValue(base + 25 * 60 * 60 * 1000);
       expect(registry.getCachedDiscoverySnapshot("openai")).toBeUndefined();
+      expect(registry.getCachedDiscoverySnapshot("openai", { allowExpiredConfirmation: true })?.models.map(m => m.id))
+        .toEqual(["gpt-6-astra"]);
     } finally {
       nowSpy.mockRestore();
     }
@@ -408,6 +410,23 @@ describe("ChatGPT (openai oauth) discovery scope", () => {
     await registry.discoverModels(provider, { forceRefresh: true });
     expect((registry as any).modelDiscoveryCache.get(key).confirmed).toBe(confirmed);
     expect(registry.getCachedDiscoverySnapshot("openai")?.complete).toBe(true);
+  });
+
+  it("keeps the confirmation readable while a forced refresh is pending", async () => {
+    const registry = isolatedRegistry([oauthProvider]);
+    const provider = registry.getConfigured().find(item => item.id === "openai")!;
+    const discovery = vi.spyOn(registry as any, "performModelDiscovery");
+    discovery.mockResolvedValueOnce({
+      models: [{ id: "gpt-fixture", name: "Fixture", providerId: "openai" }], source: "remote", authoritative: true,
+    });
+    await registry.discoverModels(provider, { forceRefresh: true });
+    let finish!: (value: unknown) => void;
+    discovery.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+    const pending = registry.discoverModels(provider, { forceRefresh: true });
+    expect(registry.getCachedDiscoverySnapshot("openai")?.models.map(m => m.id)).toEqual(["gpt-fixture"]);
+    finish({ models: [], source: "fallback", authoritative: false, error: "offline" });
+    await pending;
+    expect(registry.getCachedDiscoverySnapshot("openai")?.models.map(m => m.id)).toEqual(["gpt-fixture"]);
   });
 
   it("persists a retained confirmation to disk when the live result is an error", () => {

@@ -1,0 +1,15 @@
+node_modules/
+dist/
+out/
+.package-staging/
+.qa/
+
+dist-electron/
+dist-react/
+/runtime/
+artifacts/
+
+.dev-sdk-build/
+
+# Electron QA scratch roots (vite cache, seeded sessions)
+dev-fixtures/

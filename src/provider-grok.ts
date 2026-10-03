@@ -9,6 +9,7 @@
  */
 
 import type { OAuthCredentials } from "./oauth/types.js";
+import { waitForOAuth } from "./oauth/refresh-control.js";
 import { getChatGptFetch, type ChatGptFetch } from "./network/chatgpt-transport.js";
 import { THINKING_LEVELS, type ThinkingLevel } from "./types.js";
 
@@ -65,7 +66,10 @@ export function createGrokSubscriptionFetch(
   }
 
   return async (input, init) => {
-    const token = await freshAccessToken();
+    const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+    signal?.throwIfAborted();
+    const token = await waitForOAuth(freshAccessToken(), signal);
+    signal?.throwIfAborted();
     if (!token) {
       return baseFetch(input, init);
     }

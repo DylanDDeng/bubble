@@ -8,7 +8,7 @@ export { createManagedServerTools } from "./server.js";
 export { createWriteTool } from "./write.js";
 export { createEditTool } from "./edit.js";
 export { buildToolPromptOptions } from "./prompt-metadata.js";
-export { createGlobTool } from "./glob.js";
+export { createLsTool } from "./ls.js";
 export { createGrepTool } from "./grep.js";
 export { createLspTool } from "./lsp.js";
 export { createWebFetchTool } from "./web-fetch.js";
@@ -28,7 +28,7 @@ import { createBashTool } from "./bash.js";
 import { createManagedServerTools } from "./server.js";
 import { createEditTool } from "./edit.js";
 import { createExitPlanModeTool, type PlanController } from "./exit-plan-mode.js";
-import { createGlobTool } from "./glob.js";
+import { createLsTool } from "./ls.js";
 import { createGrepTool } from "./grep.js";
 import { getLspService, type LspService } from "../lsp/index.js";
 import { createLspTool } from "./lsp.js";
@@ -102,7 +102,7 @@ export function createAllTools(
     ...createManagedServerTools(cwd, approval),
     createWriteTool(cwd, {}, approval, lsp, fileState, options.checkpoints),
     createEditTool(cwd, approval, lsp, fileState, options.checkpoints),
-    createGlobTool(cwd),
+    createLsTool(cwd),
     createGrepTool(cwd),
     createLspTool(cwd, lsp, approval),
     createWebSearchTool(),

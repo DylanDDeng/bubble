@@ -1,25 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { BashAllowlist, inferBashPrefix } from "../approval/session-cache.js";
+import { BashAllowlist } from "../approval/session-cache.js";
 import { PermissionAwareApprovalController } from "../approval/controller.js";
 import type { ApprovalRequest } from "../approval/types.js";
 
 describe("BashAllowlist", () => {
-  it("matches exact and whitespace-separated command extensions", () => {
+  it("matches only the exact approved command", () => {
     const a = new BashAllowlist();
     a.add("git status");
     expect(a.matches("git status")).toBe(true);
-    expect(a.matches("git status -s")).toBe(true);
-    expect(a.matches("git status --porcelain")).toBe(true);
+    expect(a.matches("  git status  ")).toBe(true);
+    expect(a.matches("git status -s")).toBe(false);
+    expect(a.matches("git status && rm -rf ~")).toBe(false);
     expect(a.matches("git push")).toBe(false);
-    expect(a.matches("git statuss")).toBe(false);
     expect(a.matches("GIT STATUS")).toBe(false); // case-sensitive
-  });
-
-  it("ignores trailing :* sugar when storing", () => {
-    const a = new BashAllowlist();
-    a.add("npm run:*");
-    expect(a.list()).toEqual(["npm run"]);
-    expect(a.matches("npm run test")).toBe(true);
   });
 
   it("trims whitespace and deduplicates", () => {
@@ -34,7 +27,6 @@ describe("BashAllowlist", () => {
     const a = new BashAllowlist();
     a.add("");
     a.add("   ");
-    a.add(":*");
     expect(a.size()).toBe(0);
   });
 
@@ -47,25 +39,6 @@ describe("BashAllowlist", () => {
     expect(a.list()).toEqual(["git diff"]);
     a.clear();
     expect(a.list()).toEqual([]);
-  });
-});
-
-describe("inferBashPrefix", () => {
-  it("uses two-token prefix when the second token looks like a subcommand", () => {
-    expect(inferBashPrefix("git status -s")).toBe("git status");
-    expect(inferBashPrefix("npm run test")).toBe("npm run");
-    expect(inferBashPrefix("npm test")).toBe("npm test");
-  });
-
-  it("falls back to one token when the second starts with a flag or path", () => {
-    expect(inferBashPrefix("rm -rf /tmp/x")).toBe("rm");
-    expect(inferBashPrefix("node ./main.js")).toBe("node");
-  });
-
-  it("handles single-token and empty commands", () => {
-    expect(inferBashPrefix("ls")).toBe("ls");
-    expect(inferBashPrefix("   ")).toBe("");
-    expect(inferBashPrefix("")).toBe("");
   });
 });
 
@@ -86,7 +59,7 @@ describe("PermissionAwareApprovalController + BashAllowlist integration", () => 
       cwd: "/tmp/bubble-test",
     });
 
-    const req: ApprovalRequest = { type: "bash", command: "git status -s", cwd: "/tmp" };
+    const req: ApprovalRequest = { type: "bash", command: "git status", cwd: "/tmp" };
     expect((await controller.request(req)).action).toBe("approve");
     expect(uiCalls).toBe(0);
   });

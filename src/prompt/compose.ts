@@ -11,13 +11,17 @@ import { buildDelegationPolicyPrompt } from "./delegation.js";
 import { buildEnvironmentPrompt, defaultToolNames, type EnvironmentPromptOptions } from "./environment.js";
 import { buildRuntimePrompt } from "./runtime.js";
 import type { SkillSummary } from "../skills/types.js";
+import { buildSkillCatalog, type SkillCatalog } from "../skills/format.js";
 
 export interface ComposeSystemPromptOptions extends EnvironmentPromptOptions {
   agentName?: string;
   guidelines?: string[];
   thinkingLevel?: ThinkingLevel;
   mode?: PermissionMode;
+  /** Prompt-visible skills; when given (and `skill` is a tool), listed as a catalog. */
   skills?: SkillSummary[];
+  /** Catalog budget in characters (default SKILL_CATALOG_CHARS); 0 falls back to search only. */
+  skillCatalogChars?: number;
   memoryPrompt?: string;
   agentProfilePrompt?: string;
   /** Rendered subagent model-routing menu (design §4). Placed right after the
@@ -37,10 +41,20 @@ export function composeSystemPrompt(options: ComposeSystemPromptOptions = {}): s
     tools: options.tools ?? defaultToolNames,
     toolSnippets: options.toolSnippets,
   });
+  const tools = options.tools ?? defaultToolNames;
+  // Level one of skill loading: names and one-line descriptions are always in
+  // context; bodies load on demand with `skill`. Last section, so the prefix
+  // above stays byte-identical while the skill set is unchanged.
+  const skillCatalog = options.skills && tools.includes("skill")
+    ? buildSkillCatalog(options.skills, {
+      budgetChars: options.skillCatalogChars,
+      searchable: tools.includes("skill_search"),
+    })
+    : undefined;
   const runtimePrompt = buildRuntimePrompt({
     thinkingLevel: options.thinkingLevel,
     mode: options.mode,
-    guidelines: buildGuidelines(options.tools ?? defaultToolNames, options.guidelines ?? []),
+    guidelines: buildGuidelines(tools, options.guidelines ?? [], skillCatalog),
   });
   const delegationPrompt = buildDelegationPolicyPrompt(options.tools ?? defaultToolNames);
   // Same gate as the delegation policy: children (no spawn_agent) never see the menu.
@@ -54,6 +68,7 @@ export function composeSystemPrompt(options: ComposeSystemPromptOptions = {}): s
     modelRoutingPrompt,
     options.agentProfilePrompt,
     options.memoryPrompt,
+    skillCatalog?.text,
   ].filter(Boolean).join("\n\n");
 }
 
@@ -93,7 +108,7 @@ function buildProviderPrompt(
   return buildDefaultProviderPrompt(agentName);
 }
 
-function buildGuidelines(tools: string[], extraGuidelines: string[]): string[] {
+function buildGuidelines(tools: string[], extraGuidelines: string[], skillCatalog?: SkillCatalog): string[] {
   const guidelines: string[] = [];
   const add = (item: string) => {
     if (!guidelines.includes(item)) {
@@ -101,19 +116,23 @@ function buildGuidelines(tools: string[], extraGuidelines: string[]): string[] {
     }
   };
 
-  if (tools.includes("glob")) {
-    add("Use glob for file discovery and project structure inspection; do not use bash ls/find for this unless glob cannot answer");
+  if (tools.includes("ls")) {
+    add("Use ls to list directory contents, including files and subdirectories");
   }
-
-  if (tools.includes("bash") && tools.includes("grep")) {
-    add("Use grep for content search; do not run grep, rg, or ripgrep through bash");
+  if (tools.includes("grep")) {
+    add("Use grep to search file contents");
+  }
+  if (tools.includes("bash")) {
+    add("Use bash for file operations like ls, find, and rg when appropriate");
   }
 
   if (tools.includes("question")) {
     add("When the user is explicitly discussing, brainstorming, or shaping an approach instead of asking for immediate execution, use the question tool for targeted clarification or preference choices when it would materially improve the discussion; do not use it for generic permission-to-proceed questions");
   }
 
-  if (tools.includes("skill_search") && tools.includes("skill")) {
+  // With a catalog the Skills section itself says how to load; search remains
+  // the only route when the host gave no catalog or turned it off.
+  if (!skillCatalog?.listed && tools.includes("skill_search") && tools.includes("skill")) {
     add("Skills may provide specialized workflows. When a task appears to match a specialized workflow, call skill_search to find relevant skills, then call skill with the exact name to load the selected skill before applying it");
   }
 

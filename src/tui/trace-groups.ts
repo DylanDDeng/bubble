@@ -166,9 +166,10 @@ function classifyTool(toolCall: DisplayToolCall): TraceClassifier {
   }
 
   switch (toolCall.name) {
+    case "ls":
+      return { kind: "list", title: "List Directory", bucketKey: "list:directory", groupable: true };
     case "glob": {
-      const pattern = String(toolCall.args.pattern ?? "");
-      const title = isDirectoryLikeGlob(pattern) ? "List Directory" : "Find Files";
+      const title = "Find Files";
       return {
         kind: "list",
         title,
@@ -253,7 +254,9 @@ function buildListGroup(
   const sourceItems = hasResultData ? resultItems : fallbackItems;
   const { shown, omitted } = take(sourceItems, options.maxItems);
   const count = matchCount ?? (hasResultData ? resultItems.length : sourceItems.length || raw.length);
-  const noun = hasResultData ? plural(count, "file", "files") : plural(count, "search", "searches");
+  const noun = hasResultData
+    ? classifier.title === "List Directory" ? plural(count, "entry", "entries") : plural(count, "file", "files")
+    : plural(count, "search", "searches");
 
   return {
     kind: "list",
@@ -276,7 +279,7 @@ function listResultItems(tool: DisplayToolCall, homeDir: string): string[] {
   const metadataPaths = Array.isArray(tool.metadata?.paths)
     ? tool.metadata.paths.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
     : [];
-  if (metadataPaths.length > 0) {
+  if (Array.isArray(tool.metadata?.paths)) {
     return metadataPaths.map((line) => formatTracePath(line, homeDir));
   }
   return resultLines(tool.result)
@@ -305,7 +308,9 @@ function isEmptyListResult(result: string | undefined): boolean {
 
 function isListResultLine(line: string): boolean {
   const normalized = line.trim();
-  return !/^No files found\.?$/i.test(normalized)
+  return !/^\(empty directory\)$/i.test(normalized)
+    && !/^\[Output truncated.*\]$/i.test(normalized)
+    && !/^No files found\.?$/i.test(normalized)
     && !/^\[More than \d+ files, output truncated\]$/i.test(normalized);
 }
 
@@ -567,11 +572,6 @@ function isFailedSubagent(subagent: SubagentTraceItem): boolean {
 
 function isToolPending(tool: DisplayToolCall): boolean {
   return tool.result === undefined && tool.resultCollapsed !== true;
-}
-
-function isDirectoryLikeGlob(pattern: string): boolean {
-  const normalized = pattern.trim();
-  return normalized === "" || normalized === "*" || normalized === "**" || normalized === "**/*";
 }
 
 function resultLines(result: string | undefined): string[] {

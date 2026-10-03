@@ -217,7 +217,7 @@ export class GoalRuntimeController {
   private persistGoal(goal: GoalState | null): void {
     try {
       const manager = this.deps.getSessionManager();
-      manager.setMetadata({ ...manager.getMetadata(), goal: goal ?? undefined });
+      manager.mutateMetadata((current) => ({ ...current, goal: goal ?? undefined }));
     } catch {
       // Persistence is best-effort; a filesystem failure must not break a run.
     }

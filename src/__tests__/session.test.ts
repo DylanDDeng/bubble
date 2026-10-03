@@ -1,8 +1,14 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { SessionManager } from "../session.js";
+
+/** Legacy `summary` records are read-only history: no production code writes
+ * them any more, so tests seed one the way an old build left it on disk. */
+function seedLegacySummary(file: string, summary: string): void {
+  appendFileSync(file, JSON.stringify({ id: "legacy-summary", type: "summary", summary, timestamp: Date.now() }) + "\n");
+}
 
 describe("SessionManager", () => {
   const tmpDir = join(tmpdir(), "bubble-test-session-" + Date.now());
@@ -280,7 +286,7 @@ describe("SessionManager", () => {
     const sm = new SessionManager(file);
     sm.appendMessage({ role: "user", content: "old" });
     sm.appendMessage({ role: "assistant", content: "reply" });
-    sm.appendCompaction("Summary of old chat");
+    seedLegacySummary(file, "Summary of old chat");
     sm.appendMessage({ role: "user", content: "new" });
 
     const messages = sm.getMessages();
@@ -476,7 +482,7 @@ describe("SessionManager", () => {
     const sm = new SessionManager(file);
     sm.appendMessage({ role: "user", content: "old task" });
     sm.appendMessage({ role: "assistant", content: "old answer" });
-    sm.appendCompaction("old summary");
+    seedLegacySummary(file, "old summary");
     sm.appendMarker("conversation_clear", "");
 
     expect(sm.getMessages()).toEqual([]);
@@ -500,7 +506,7 @@ describe("SessionManager", () => {
     expect(fresh.getSessionFile()).toContain(".jsonl");
   });
 
-  it("compacts older turns into a summary entry", () => {
+  it("compacts older turns into an append-only exact context checkpoint", () => {
     const file = join(tmpDir, "compact-structured.jsonl");
     const sm = new SessionManager(file);
     sm.appendMessage({ role: "user", content: "task one" });
@@ -514,11 +520,13 @@ describe("SessionManager", () => {
     expect(result.compacted).toBe(true);
 
     const lines = readFileSync(file, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
-    expect(lines.some((line) => line.type === "summary")).toBe(true);
-
+    expect(lines.some((line) => line.type === "context_checkpoint")).toBe(true);
+    expect(lines.filter((line) => line.type === "user_message")).toHaveLength(3);
+    expect(lines.filter((line) => line.type === "assistant_message")).toHaveLength(3);
     const restored = sm.getMessages();
-    expect(restored[0].role).toBe("system");
-    expect((restored[0] as any).content).toContain("Previous conversation summary:");
+    expect(restored[0]).toEqual({ role: "user", content: "task one" });
+    expect(restored.some(message => message.role === "meta" && message.content.includes("Previous conversation summary:"))).toBe(true);
+    expect(new SessionManager(file).getMessages()).toEqual(restored);
   });
 
   it("keeps generated entry ids unique after compaction", () => {
@@ -544,7 +552,7 @@ describe("SessionManager", () => {
     expect(new Set(ids).size).toBe(ids.length);
   });
 
-  it("auto-compacts very long sessions while appending messages", () => {
+  it("does not compact or delete history merely because it crosses 180 entries", () => {
     const file = join(tmpDir, "auto-compact.jsonl");
     const sm = new SessionManager(file);
 
@@ -554,7 +562,8 @@ describe("SessionManager", () => {
     }
 
     const lines = readFileSync(file, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
-    expect(lines.some((line) => line.type === "summary")).toBe(true);
-    expect(lines.length).toBeLessThan(220);
+    expect(lines.some((line) => line.type === "summary" || line.type === "context_checkpoint")).toBe(false);
+    expect(lines).toHaveLength(220);
+    expect(new SessionManager(file).getMessages()).toHaveLength(220);
   });
 });

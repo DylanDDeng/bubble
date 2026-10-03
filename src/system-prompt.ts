@@ -29,8 +29,10 @@ export interface SystemPromptOptions {
   mode?: PermissionMode;
   /** Current date override */
   currentDate?: string;
-  /** Prompt-visible skills */
+  /** Prompt-visible skills, listed as the Skills catalog when `skill` is a tool */
   skills?: SkillSummary[];
+  /** Catalog budget in characters; 0 turns the catalog off */
+  skillCatalogChars?: number;
   /** Prompt-visible memory guidance and summaries */
   memoryPrompt?: string;
   /** Durable child-agent profile prompt used for subagents. */
