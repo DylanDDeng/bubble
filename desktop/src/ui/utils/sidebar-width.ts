@@ -1,3 +1,5 @@
+// Fixed-width workspace switcher at the window's left edge (matches .bubble-workspace-rail).
+export const WORKSPACE_RAIL_WIDTH = 44;
 export const MIN_SIDEBAR_WIDTH = 220;
 export const DEFAULT_SIDEBAR_WIDTH = 310;
 export const MAX_SIDEBAR_WIDTH = 420;

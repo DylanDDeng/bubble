@@ -23,7 +23,7 @@ module.exports = async ({ js, click, capture, delay, win }) => {
   for (const workspace of ['chat','board']) {
     if(workspace==='board') await click('[aria-label="KanBan"]');
     await js('qa.app.getState().setSidebarWidth(310);qa.app.getState().setSidebarCollapsed(false)');await delay(450);
-    const base=await sample(), closed=workspace==='board'?44:0;
+    const base=await sample(), closed=44;
     await js('qa.startSidebarSamples()');await click(trigger);
     const closing=await js('qa.motionDone');checkFrames(closing,base,closed,354);
     assert.equal(closing.at(-1).width,closed);

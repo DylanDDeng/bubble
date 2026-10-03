@@ -37,7 +37,7 @@ import { FolderTreeView } from './FolderTreeView';
 import { CappedScrollbar } from './CappedScrollbar';
 import { DEFAULT_WORKSPACE_CHANNEL_ID } from '../../shared/types';
 import { getMessageContentBlocks } from '../utils/message-content';
-import { MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH } from '../utils/sidebar-width';
+import { MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, WORKSPACE_RAIL_WIDTH } from '../utils/sidebar-width';
 import { animate, useMotionValue, useMotionValueEvent } from 'motion/react';
 import { useAppReducedMotion } from '../hooks/useAppReducedMotion';
 
@@ -125,12 +125,12 @@ export function Sidebar() {
   } = useAppStore();
   const sidebarCollapsed = useAppStore(selectSidebarCollapsed);
   const sidebarWidth = useAppStore(selectSidebarWidth);
-  const keepRailVisible = activeWorkspace === 'board' && sidebarCollapsed;
   const [isSidebarResizing, setIsSidebarResizing] = useState(false);
   const sidebarShellRef = useRef<HTMLDivElement>(null);
   const reducedMotion = useAppReducedMotion();
-  const closedWidth = activeWorkspace === 'board' ? 44 : 0;
-  const expandedWidth = sidebarWidth + 44;
+  // Collapsing hides only the project panel; the workspace rail always stays.
+  const closedWidth = WORKSPACE_RAIL_WIDTH;
+  const expandedWidth = sidebarWidth + WORKSPACE_RAIL_WIDTH;
   const targetWidth = sidebarCollapsed ? closedWidth : expandedWidth;
   const animatedWidth = useMotionValue(targetWidth);
   // One motion value drives layout, content visibility and titlebar clearance.
@@ -451,10 +451,8 @@ export function Sidebar() {
         />
       )}
 
-      <div ref={sidebarShellRef} className="aegis-sidebar relative flex h-full min-h-0 flex-shrink-0 self-stretch select-none" data-board-rail-only={keepRailVisible || undefined}>
-        <div className="absolute inset-y-0 left-0 z-30 w-11"
-          style={{ opacity: activeWorkspace === 'board' ? 1 : 'var(--bubble-sidebar-opacity)' }}
-          inert={sidebarCollapsed && !keepRailVisible} aria-hidden={sidebarCollapsed && !keepRailVisible}>
+      <div ref={sidebarShellRef} className="aegis-sidebar relative flex h-full min-h-0 flex-shrink-0 self-stretch select-none">
+        <div className="absolute inset-y-0 left-0 z-30 w-11">
           {workspaceRail}
         </div>
         <div

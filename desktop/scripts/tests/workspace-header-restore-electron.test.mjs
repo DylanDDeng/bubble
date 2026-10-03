@@ -140,8 +140,10 @@ const wait=async(fn,label)=>{for(let i=0;i<300;i++){try{if(await fn())return;}ca
     assert.equal(await sidebarWidth(),44,'tab navigation also uses board preference');
     await click('[data-window-navigation] [aria-label="Expand sidebar"]');await delay(400);
     await click('[aria-label="Chats"]');await delay(400);
-    assert.equal(await sidebarWidth(),0,'collapsed chat preference is also restored');
-    await hoverCollapsedTrigger(0);
+    assert.equal(await sidebarWidth(),44,'collapsed chat preference is also restored, keeping the rail');
+    assert.ok(await js('document.querySelector("[aria-label=Workspaces]").getBoundingClientRect().width>0'),'chat keeps the workspace rail when collapsed');
+    await hoverCollapsedTrigger(44);
+    await capture('chat-sidebar-collapsed');
     await click('[data-window-navigation] [aria-label="Expand sidebar"]');await delay(400);
     win.webContents.sendInputEvent({type:'mouseMove',x:1100,y:500});await delay(650);
     assert.equal(await sidebarWidth(),320,'chat click expands and pointer leaving keeps it open');
