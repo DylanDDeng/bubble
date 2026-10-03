@@ -2039,16 +2039,13 @@ button.md-inline-file-code:hover .md-inline-file-code-label {
   box-sizing: border-box;
   width: min(100%, 820px);
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: start;
-  gap: 8px 18px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
   margin: 24px auto 0;
-  border: 0;
-  border-top: 1px solid color-mix(in srgb, var(--border) 56%, transparent);
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 44%, transparent);
-  border-radius: 0;
-  background: transparent;
-  padding: 10px 0;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text-primary) 5%, var(--bg-primary));
+  padding: 14px 20px 16px;
 }
 
 .aegis-mdx-properties-compact {
@@ -2056,13 +2053,10 @@ button.md-inline-file-code:hover .md-inline-file-code-label {
 }
 
 .aegis-mdx-metadata-title {
-  display: inline-flex;
-  min-height: 26px;
-  align-items: center;
   margin: 0;
-  color: color-mix(in srgb, var(--text-muted) 82%, var(--text-primary));
+  color: var(--text-muted);
   font-size: calc(12px * var(--ui-font-scale, 1));
-  font-weight: 600;
+  font-weight: 500;
   letter-spacing: 0;
   line-height: 1.2;
 }
@@ -2070,15 +2064,14 @@ button.md-inline-file-code:hover .md-inline-file-code-label {
 .aegis-mdx-metadata-grid {
   display: grid;
   min-width: 0;
-  align-self: center;
-  gap: 6px;
+  gap: 4px;
 }
 
 .aegis-mdx-metadata-row {
   display: grid;
-  grid-template-columns: minmax(52px, 96px) minmax(0, 1fr);
-  min-height: 26px;
-  align-items: center;
+  grid-template-columns: minmax(64px, 140px) minmax(0, 1fr);
+  min-height: 24px;
+  align-items: baseline;
   gap: 12px;
 }
 
@@ -2089,9 +2082,10 @@ button.md-inline-file-code:hover .md-inline-file-code-label {
   background: transparent;
   color: var(--text-muted);
   cursor: default;
+  font-family: var(--font-mono);
   font-size: calc(13px * var(--ui-font-scale, 1));
-  font-weight: 500;
-  line-height: 1.3;
+  font-weight: 400;
+  line-height: 1.6;
   text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2107,15 +2101,11 @@ button.aegis-mdx-metadata-key:hover {
 
 .aegis-mdx-metadata-value {
   min-width: 0;
-  color: color-mix(in srgb, var(--text-primary) 90%, #333);
-  font-size: calc(14px * var(--ui-font-scale, 1));
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-
-.aegis-mdx-metadata-value.kind-boolean,
-.aegis-mdx-metadata-value.kind-number {
+  color: color-mix(in srgb, var(--text-primary) 86%, var(--text-muted));
   font-family: var(--font-mono);
+  font-size: calc(13px * var(--ui-font-scale, 1));
+  line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 
 .aegis-mdx-metadata-input {
@@ -2125,15 +2115,12 @@ button.aegis-mdx-metadata-key:hover {
   border: 1px solid transparent;
   border-radius: 4px;
   background: transparent;
-  color: color-mix(in srgb, var(--text-primary) 90%, #333);
-  font-size: calc(14px * var(--ui-font-scale, 1));
-  line-height: 1.35;
+  color: color-mix(in srgb, var(--text-primary) 86%, var(--text-muted));
+  font-family: var(--font-mono);
+  font-size: calc(13px * var(--ui-font-scale, 1));
+  line-height: 1.6;
   outline: none;
   padding: 0 6px;
-}
-
-.aegis-mdx-metadata-input.kind-number {
-  font-family: var(--font-mono);
 }
 
 .aegis-mdx-metadata-input:hover,
@@ -2147,10 +2134,10 @@ button.aegis-mdx-metadata-key:hover {
   width: fit-content;
   align-items: center;
   gap: 9px;
-  color: color-mix(in srgb, var(--text-primary) 90%, #333);
+  color: color-mix(in srgb, var(--text-primary) 86%, var(--text-muted));
   font-family: var(--font-mono);
   font-size: calc(13px * var(--ui-font-scale, 1));
-  line-height: 1.35;
+  line-height: 1.6;
 }
 
 .aegis-mdx-metadata-boolean input {
@@ -2167,35 +2154,19 @@ button.aegis-mdx-metadata-key:hover {
 }
 
 .aegis-mdx-metadata-chip {
-  --aegis-mdx-chip-color: var(--text-muted);
   display: inline-flex;
   min-width: 0;
   max-width: 100%;
   align-items: center;
-  min-height: 24px;
-  border: 1px solid color-mix(in srgb, var(--aegis-mdx-chip-color) 22%, var(--border));
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--aegis-mdx-chip-color) 10%, var(--bg-primary));
-  color: color-mix(in srgb, var(--aegis-mdx-chip-color) 70%, var(--text-primary));
+  min-height: 22px;
+  border: 0;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+  color: color-mix(in srgb, var(--text-primary) 82%, var(--text-muted));
+  font-family: var(--font-mono);
   font-size: calc(13px * var(--ui-font-scale, 1));
   line-height: 1.2;
   padding: 2px 8px;
-}
-
-.aegis-mdx-metadata-chip-tone-0 {
-  --aegis-mdx-chip-color: oklch(55% 0.11 250);
-}
-
-.aegis-mdx-metadata-chip-tone-1 {
-  --aegis-mdx-chip-color: oklch(52% 0.09 164);
-}
-
-.aegis-mdx-metadata-chip-tone-2 {
-  --aegis-mdx-chip-color: oklch(58% 0.1 72);
-}
-
-.aegis-mdx-metadata-chip-tone-3 {
-  --aegis-mdx-chip-color: oklch(55% 0.1 344);
 }
 
 .aegis-mdx-metadata-chip-editable,
@@ -2205,7 +2176,7 @@ button.aegis-mdx-metadata-key:hover {
 }
 
 .aegis-mdx-metadata-chip-add {
-  --aegis-mdx-chip-color: var(--text-muted);
+  color: var(--text-muted);
 }
 
 .aegis-mdx-metadata-chip input {

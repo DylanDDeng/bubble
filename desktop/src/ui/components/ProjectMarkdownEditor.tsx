@@ -261,16 +261,6 @@ function formatYamlInlineArray(items: string[]): string {
   return `[${items.map((item) => JSON.stringify(item.trim())).join(', ')}]`;
 }
 
-function getMetadataChipToneClass(value: string): string {
-  const normalized = value.trim();
-  if (!normalized) return '';
-  let hash = 0;
-  for (let index = 0; index < normalized.length; index += 1) {
-    hash = (hash * 31 + normalized.charCodeAt(index)) >>> 0;
-  }
-  return `aegis-mdx-metadata-chip-tone-${hash % 4}`;
-}
-
 function detectMetadataKind(value: string, items: string[]): MarkdownMetadataFieldKind {
   const trimmed = value.trim();
   if (items.length > 0 || /^\[[\s\S]*\]$/.test(trimmed)) return 'array';
@@ -394,7 +384,7 @@ function MarkdownMetadataCard({
 
   return (
     <section className="aegis-mdx-metadata-card aegis-md-editor-metadata" aria-label="Metadata">
-      <div className="aegis-mdx-metadata-title">Meta</div>
+      <div className="aegis-mdx-metadata-title">Metadata</div>
       <div className="aegis-mdx-metadata-grid">
         {visibleFields.map((field) => (
           <div key={`${field.key}-${field.line}`} className="aegis-mdx-metadata-row">
@@ -404,11 +394,10 @@ function MarkdownMetadataCard({
             {field.kind === 'array' ? (
               <div className="aegis-mdx-metadata-chips" aria-label={field.key}>
                 {field.items.map((item, index) => {
-                  const toneClass = getMetadataChipToneClass(item);
                   return (
                     <span
                       key={`${field.key}-${field.line}-${index}`}
-                      className={`aegis-mdx-metadata-chip aegis-mdx-metadata-chip-editable${toneClass ? ` ${toneClass}` : ''}`}
+                      className="aegis-mdx-metadata-chip aegis-mdx-metadata-chip-editable"
                     >
                       <input
                         value={item}
@@ -1403,7 +1392,7 @@ class FrontmatterPreviewWidget extends MeasuredBlockWidget {
 
     const title = document.createElement('div');
     title.className = 'aegis-mdx-metadata-title';
-    title.textContent = 'Meta';
+    title.textContent = 'Metadata';
     section.appendChild(title);
 
     const grid = document.createElement('div');
@@ -1426,8 +1415,7 @@ class FrontmatterPreviewWidget extends MeasuredBlockWidget {
         chips.setAttribute('aria-label', field.key);
         field.items.forEach((item) => {
           const chip = document.createElement('span');
-          const toneClass = getMetadataChipToneClass(item);
-          chip.className = `aegis-mdx-metadata-chip${toneClass ? ` ${toneClass}` : ''}`;
+          chip.className = 'aegis-mdx-metadata-chip';
           chip.textContent = item;
           chips.appendChild(chip);
         });
