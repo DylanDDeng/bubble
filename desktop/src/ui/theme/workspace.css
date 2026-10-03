@@ -236,6 +236,7 @@
 .bubble-md-video-widget { position: relative; display: flex; flex-direction: column; box-sizing: border-box; width: 100%; max-width: 860px; margin: 0; padding: 8px 0; gap: 6px; }
 .bubble-md-video-widget video { display: block; width: 100%; max-height: 560px; min-height: 160px; border-radius: 8px; background: var(--bg-secondary); object-fit: contain; }
 .aegis-cm-image-widget { position: relative; width: fit-content; cursor: default; }
+.aegis-cm-image-widget[data-fluid="true"], .aegis-cm-image-widget[data-fluid="true"] img { width: 100%; box-sizing: border-box; }
 .bubble-md-media-edit { position: absolute; top: 12px; right: 8px; z-index: 1; display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 1px solid var(--border); border-radius: 6px; color: var(--text-muted); background: var(--bg-primary); font-family: var(--font-mono); font-size: 12px; cursor: pointer; opacity: 0; }
 :is(.aegis-cm-image-widget, .bubble-md-video-widget):is(:hover, :focus-within) .bubble-md-media-edit { opacity: 1; }
 .bubble-md-media-edit:focus-visible { opacity: 1; outline: 2px solid var(--text-muted); outline-offset: 2px; }

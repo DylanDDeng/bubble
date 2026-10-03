@@ -1185,13 +1185,21 @@ class ImagePreviewWidget extends MeasuredBlockWidget {
       if (container.__aegisMarkdownWidgetDisposed) return;
       container.innerHTML = '';
       delete container.dataset.error;
+      delete container.dataset.fluid;
       const img = document.createElement('img');
       img.src = src;
       img.alt = this.alt;
       img.title = this.alt;
       img.loading = 'lazy';
       img.decoding = 'async';
-      img.addEventListener('load', requestMeasure, { once: true });
+      img.addEventListener('load', () => {
+        // An SVG with only a viewBox has no intrinsic width, so the fit-content frame collapses it to 0px.
+        const frameWidth = container.parentElement?.clientWidth ?? 0;
+        if (img.naturalWidth > 0 && frameWidth > 0 && img.clientWidth === 0) {
+          container.dataset.fluid = 'true';
+        }
+        requestMeasure();
+      }, { once: true });
       img.addEventListener('error', () => showError('Image failed to load.'));
       container.append(img, edit);
       requestMeasure();
