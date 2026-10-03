@@ -18,7 +18,8 @@ import {Tooltip} from '@base-ui-components/react/tooltip';
 import '/src/ui/index.css';
 const store=useAppStore;const root='/qa/project';
 const paths=['one.md','two.md','page.html','image.svg','readonly.txt','tree-only.md','movie.mp4'];
-const tree={name:'project',path:root,kind:'dir',children:paths.map(name=>({name,path:root+'/'+name,kind:'file'}))};
+const docs=[...Array.from({length:40},(_,i)=>'filler-'+String(i).padStart(2,'0')+'.txt'),'nested.md'];
+const tree={name:'project',path:root,kind:'dir',children:[{name:'docs',path:root+'/docs',kind:'dir',children:docs.map(name=>({name,path:root+'/docs/'+name,kind:'file'}))},...paths.map(name=>({name,path:root+'/'+name,kind:'file'}))]};
 const previews=[];
 window.electron={getProjectTree:async()=>tree,cancelProjectTreeRead:async()=>{},watchProjectTree:async()=>true,unwatchProjectTree:async()=>{},onProjectTreeUpdated:()=>()=>{},
  readProjectFilePreview:async(cwd,p)=>{previews.push(p);const name=p.split('/').pop();const ext='.'+name.split('.').pop();const base={path:p,name,ext,size:10,mtimeMs:1};if(ext==='.mp4')return {...base,kind:'video',previewUrl:name==='broken.mp4'?'data:video/mp4;base64,AAAA':'/scripts/tests/fixtures/video-preview.mp4'};if(ext==='.svg')return {...base,kind:'image',dataUrl:'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg"/>'};return {...base,kind:ext==='.md'?'markdown':ext==='.html'?'html':'text',text:ext==='.html'?'<h1>Page</h1>':'# '+name,editable:ext==='.md'}},
@@ -58,17 +59,28 @@ app.whenReady().then(async()=>{
  await run("qa.open('two.md')");await settle();assert.equal((await run('qa.snapshot()')).tabs.length,5,'closed file can reopen');
  const newTreeFile=await run("(()=>{const p=[...document.querySelectorAll('.aegis-project-panel')].find(p=>getComputedStyle(p).display!=='none'&&p.getBoundingClientRect().width>0);const row=[...p.querySelectorAll('span')].find(e=>e.textContent==='tree-only.md'&&e.children.length===0);row?.click();return !!row})()");
  assert(newTreeFile);await settle();assert.equal((await run('qa.snapshot()')).tabs.length,6,'a new tree file also gets a visible tab');
+ await run("qa.open('one.md')");await settle();
+ const visiblePanel="[...document.querySelectorAll('.aegis-project-panel')].find(p=>getComputedStyle(p).display!=='none'&&p.getBoundingClientRect().width>0)";
+ const treeRow=name=>'[...'+visiblePanel+".querySelectorAll('span')].find(e=>e.textContent==="+JSON.stringify(name)+'&&e.children.length===0)';
+ assert(await run('(()=>{const row='+treeRow('docs')+';row?.click();return !!row})()'),'folder row exists');await settle();
+ const scrolled=await run('(()=>{const row='+treeRow('nested.md')+";if(!row)return -1;const scroller=row.closest('.overflow-auto');row.scrollIntoView({block:'end'});scroller.dispatchEvent(new Event('scroll'));return scroller.scrollTop})()");
+ assert(scrolled>0,'tree is scrolled down to the nested file');
+ const tabsBeforeNested=(await run('qa.snapshot()')).tabs.length;
+ await run(treeRow('nested.md')+'.click()');await settle();
+ assert.equal((await run('qa.snapshot()')).tabs.length,tabsBeforeNested+1,'nested tree file opens a new tab');
+ assert(await run('!!'+treeRow('nested.md')),'new tab keeps the clicked folder expanded');
+ assert.equal(await run(treeRow('nested.md')+".closest('.overflow-auto').scrollTop"),scrolled,'new tab keeps the tree scroll position');
  await run("qa.open('movie.mp4')");await settle();
  for(let i=0;i<40;i++){if(await run("document.querySelector('video')?.readyState>=2"))break;await delay(100)}
  assert.equal(await run("document.querySelector('video').videoWidth"),160,'right panel renders a real decoded MP4');
  await run("(()=>{const v=document.querySelector('video');v.muted=true;return v.play()})()");await settle();
  assert(await run("document.querySelector('video').currentTime>0"),'video advances in the file panel');
  await run("qa.open('one.md')");await settle();assert.equal(await run("document.querySelector('video').paused"),true,'hidden file tab pauses playback');
- await run("qa.open('movie.mp4')");await settle();assert.equal((await run('qa.snapshot()')).tabs.length,7,'video reopens in its existing tab');
+ await run("qa.open('movie.mp4')");await settle();assert.equal((await run('qa.snapshot()')).tabs.length,8,'video reopens in its existing tab');
  await run("qa.open('broken.mp4')");await settle();
  for(let i=0;i<30;i++){if(await run("[...document.querySelectorAll('[role=alert]')].some(e=>e.textContent.includes('Unable to load or decode'))"))break;await delay(100)}
  assert(await run("[...document.querySelectorAll('[role=alert]')].some(e=>e.textContent.includes('Unable to load or decode'))"),'decoder failures have an explanation');
- assert.deepEqual(errors,[]);console.log('PASS Electron file tabs: distinct files, dedupe, mixed types, rapid opens, restore, tree routing, close/reopen, MP4 playback/pause/error');app.exit(0);
+ assert.deepEqual(errors,[]);console.log('PASS Electron file tabs: distinct files, dedupe, mixed types, rapid opens, restore, tree routing, tree state across tabs, close/reopen, MP4 playback/pause/error');app.exit(0);
  }catch(e){console.error(e,errors);app.exit(1)}
 });
 `;
