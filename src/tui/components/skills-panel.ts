@@ -13,6 +13,7 @@ import {
   type TuiMouseEvent,
 } from "@bubblebrain-ai/pi-tui";
 import type { SkillRegistry } from "../../skills/registry.js";
+import { buildSkillCatalog } from "../../skills/format.js";
 import type { SkillRecord } from "../../skills/types.js";
 import { parseTerminalMouseWheel } from "../model/terminal-mouse.js";
 import { darkTheme, type Theme } from "../model/theme.js";
@@ -60,6 +61,8 @@ export interface SkillsPanelComponentOptions {
   onClose(): void;
   onRender(): void;
   onSkillsChanged(): void;
+  /** Catalog budget in characters (the agent's setting); undefined uses the default. */
+  getCatalogChars?(): number | undefined;
   theme?: Theme;
 }
 
@@ -168,7 +171,10 @@ export class SkillsPanelComponent implements Component, Focusable {
     const top = themeForeground(theme.border, `┌${"─".repeat(topDashCount)}`) + ` ${close} ` + themeForeground(theme.border, "┐");
     const bottom = themeForeground(theme.border, `└${horizontal}┘`);
     const separator = themeForeground(theme.border, `├${horizontal}┤`);
-    const tab = this.frameLine(`  ${chalk.bold(themeForeground(theme.inputText, themeBackground(theme.traceHoverBg, " Skills ")))}`, innerWidth);
+    const tab = this.frameLine(
+      `  ${chalk.bold(themeForeground(theme.inputText, themeBackground(theme.traceHoverBg, " Skills ")))}  ${themeForeground(theme.muted, this.catalogSummary())}`,
+      innerWidth,
+    );
     const search = this.frameLine(this.renderSearch(innerWidth), innerWidth);
 
     const footerRows = this.searchActive ? 0 : 2;
@@ -324,6 +330,19 @@ export class SkillsPanelComponent implements Component, Focusable {
   private frameLine(content: string, width: number): string {
     const theme = this.options.theme ?? darkTheme;
     return `${themeForeground(theme.border, "│")}${themeBackground(theme.backgroundPanel, fit(content, width))}${themeForeground(theme.border, "│")}`;
+  }
+
+  /** How much of the always-present catalog the enabled skills use, so users know when to prune. */
+  private catalogSummary(): string {
+    const catalog = buildSkillCatalog(this.registry.summaries(), { budgetChars: this.options.getCatalogChars?.() });
+    if (catalog.budgetChars === 0) return "catalog off · skill_search only";
+    const duplicates = this.registry.getDiagnostics().filter((d) => d.message.startsWith("Duplicate skill name")).length;
+    return [
+      `catalog ${catalog.chars.toLocaleString("en-US")}/${catalog.budgetChars.toLocaleString("en-US")} chars`,
+      `${catalog.listed} listed`,
+      catalog.unlisted ? `${catalog.unlisted} not listed` : "",
+      duplicates ? `${duplicates} duplicate${duplicates === 1 ? "" : "s"} ignored` : "",
+    ].filter(Boolean).join(" · ");
   }
 
   private renderSearch(innerWidth: number): string {

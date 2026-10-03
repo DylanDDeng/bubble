@@ -141,6 +141,8 @@ export class RunDriver {
     );
     const systemPrompt = buildSystemPrompt({
       agentName: "Bubble",
+      skills,
+      skillCatalogChars: this.opts.deps.userConfig.getSkillCatalogChars(),
       configuredProvider: providerId || "none",
       configuredModel: model ? displayModel(model) : "none",
       configuredModelId: model || "none",
@@ -226,6 +228,7 @@ export class RunDriver {
       },
       budgetLedger,
       skills,
+      skillCatalogChars: this.opts.deps.userConfig.getSkillCatalogChars(),
       memoryPrompt,
       fileStateTracker,
       agentCategories: this.opts.deps.userConfig.getAgentCategories(),

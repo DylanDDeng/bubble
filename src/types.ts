@@ -44,6 +44,8 @@ export interface AssistantProviderMetadata {
 
 export interface UserMessage {
   role: "user";
+  /** Internal image observation; not an authored user prompt. */
+  toolObservation?: true;
   content: string | ContentPart[];
   /** Local presentation metadata; provider adapters intentionally ignore it. */
   ui?: {
@@ -188,6 +190,8 @@ export interface ToolResultMetadata {
 }
 
 export interface ToolResult {
+  /** Bounded screenshots, delivered as a model-visible image observation after the tool batch. */
+  images?: { mimeType: "image/png" | "image/jpeg"; data: string }[];
   content: string;
   isError?: boolean;
   status?: ToolResultStatus;

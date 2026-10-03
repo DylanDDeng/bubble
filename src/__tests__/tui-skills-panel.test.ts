@@ -112,6 +112,11 @@ describe("SkillsPanelComponent", () => {
     }
   });
 
+  it("shows how much of the always-present Skills catalog is used", () => {
+    const { panel } = fixture();
+    expect(plain(panel.render(110))).toMatch(/catalog [\d,]+\/12,000 chars · 2 listed/);
+  });
+
   it("renders Grok-style collapsed source groups and expandable Skill details", () => {
     const { panel } = fixture();
     let lines = panel.render(110);

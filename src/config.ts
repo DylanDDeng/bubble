@@ -71,7 +71,7 @@ export interface UserConfigData {
   defaultThinkingLevel?: ThinkingLevel;
   skillPaths?: string[];
   /** Skill names disabled from invocation/search until re-enabled in /skills. */
-  skills?: { disabled?: string[] };
+  skills?: { disabled?: string[]; catalogChars?: number };
   /**
    * Three shapes are accepted on disk so we can evolve without breaking
    * existing configs:
@@ -275,6 +275,14 @@ export class UserConfig {
   setSkillPaths(paths: string[]) {
     this.data.skillPaths = paths.slice();
     this.save();
+  }
+
+  /** Skill catalog budget in characters; undefined uses the default, 0 turns the catalog off. */
+  getSkillCatalogChars(): number | undefined {
+    const value = this.data.skills?.catalogChars;
+    return typeof value === "number" && Number.isFinite(value) && value >= 0
+      ? Math.min(Math.floor(value), 200_000)
+      : undefined;
   }
 
   getDisabledSkills(): string[] {

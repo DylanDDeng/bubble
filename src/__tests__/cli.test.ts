@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { parseArgs } from "../cli.js";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { enterWorkingDirectory, parseArgs } from "../cli.js";
 
 describe("parseArgs", () => {
   it("does not set a default model anymore", () => {
@@ -34,5 +37,29 @@ describe("persistent CLI flags", () => {
       ['-p','--input-format','stream-json','--output-format','stream-json','prompt'],
       ['-p','--input-format','stream-json','--output-format','stream-json','--resume'],
     ]) expect(()=>parseArgs(args)).toThrow();
+  });
+});
+
+describe("--cwd", () => {
+  it("resolves a relative --cwd to an absolute path", () => {
+    expect(parseArgs(["--cwd", "../repo"]).cwd).toBe(resolve("../repo"));
+    expect(parseArgs(["--cwd"]).cwd).toBe(process.cwd());
+  });
+
+  it("enters the directory, and reports a missing one without moving", () => {
+    const start = process.cwd();
+    const root = mkdtempSync(join(tmpdir(), "bubble-cwd-"));
+    const file = join(root, "file.txt");
+    writeFileSync(file, "x");
+    try {
+      expect(enterWorkingDirectory(join(root, "missing"))).toMatch(/does not exist/);
+      expect(enterWorkingDirectory(file)).toMatch(/is not a directory/);
+      expect(process.cwd()).toBe(start);
+      expect(enterWorkingDirectory(root)).toBeUndefined();
+      expect(realpathSync(process.cwd())).toBe(realpathSync(root));
+    } finally {
+      process.chdir(start);
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

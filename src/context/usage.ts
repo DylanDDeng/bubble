@@ -1,5 +1,5 @@
 import { getModelContextWindow } from "../model-catalog.js";
-import { formatSkillsPrompt } from "../skills/format.js";
+import { SKILL_CATALOG_HEADING, SKILL_CATALOG_INTRO } from "../skills/format.js";
 import type { SkillSummary } from "../skills/types.js";
 import type { Message, ToolRegistryEntry } from "../types.js";
 import { buildDeferredToolsReminder } from "../prompt/reminders.js";
@@ -48,8 +48,12 @@ export function buildContextUsageSnapshot(input: {
   const otherMessages = input.messages.filter((message) => message.role !== "system");
   const deferredToolEntries = input.deferredToolEntries ?? [];
   const systemContent = systemMessages.map((message) => message.content).join("\n\n");
-  const skillsPrompt = formatSkillsPrompt(input.skills);
-  const skillsInSystemPrompt = !!skillsPrompt && systemContent.includes(skillsPrompt);
+  // The catalog is whatever Skills section the prompt actually carries, whatever its budget.
+  const skillsPrompt = extractSkillCatalog(systemContent);
+  const skillsInSystemPrompt = !!skillsPrompt;
+  const advertisedSkills = skillsPrompt
+    ? skillsPrompt.split("\n").filter((line) => line.startsWith("- ") && !line.startsWith("- … ")).length
+    : 0;
   const skillsTokens = skillsInSystemPrompt ? estimateTextTokens(skillsPrompt, input.providerId) : 0;
   const systemPromptTokens = Math.max(0, estimateTextTokens(systemContent, input.providerId) - skillsTokens);
   const toolsTokens = estimateToolEntriesTokens(input.toolEntries, input.providerId);
@@ -79,7 +83,7 @@ export function buildContextUsageSnapshot(input: {
       skills: {
         label: "Skills",
         tokens: skillsTokens,
-        detail: skillsInSystemPrompt && input.skills.length > 0 ? `${input.skills.length} advertised skill${input.skills.length === 1 ? "" : "s"}` : "none in current prompt",
+        detail: advertisedSkills > 0 ? `${advertisedSkills} advertised skill${advertisedSkills === 1 ? "" : "s"}` : "none in current prompt",
       },
       deferredTools: {
         label: "Deferred/MCP",
@@ -96,7 +100,7 @@ export function buildContextUsageSnapshot(input: {
     },
     toolCount: input.toolEntries.length,
     deferredToolCount: deferredToolEntries.length,
-    skillCount: skillsInSystemPrompt ? input.skills.length : 0,
+    skillCount: advertisedSkills,
     messageCount: input.messages.length,
   };
 }
@@ -260,4 +264,17 @@ function colorForLabel(label: string): string {
   if (label === "Deferred/MCP") return ANSI_BLUE;
   if (label === "Free space") return ANSI_DARK_GRAY;
   return ANSI_GRAY;
+}
+
+/**
+ * The Skills catalog the prompt carries: heading plus its fixed intro line, so a
+ * "## Skills" heading in AGENTS.md or memory is never mistaken for it. The last
+ * match wins (the catalog is appended after memory); it ends at the next blank line.
+ */
+function extractSkillCatalog(systemContent: string): string {
+  const marker = `${SKILL_CATALOG_HEADING}\n${SKILL_CATALOG_INTRO}\n`;
+  const at = systemContent.lastIndexOf(marker);
+  if (at < 0 || (at > 0 && !systemContent.slice(0, at).endsWith("\n\n"))) return "";
+  const end = systemContent.indexOf("\n\n", at);
+  return systemContent.slice(at, end < 0 ? undefined : end);
 }

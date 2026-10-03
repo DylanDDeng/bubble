@@ -122,8 +122,22 @@ export interface TurnHandlers {
 }
 
 export interface RunTurnOptions extends TurnHandlers {
+  /**
+   * Turn-scoped host capabilities. Never cached globally or given to subagents;
+   * follow-up turns the SDK starts for this turn (queued input, pending steers)
+   * reuse this turn's options, these included.
+   */
+  hostTools?: ToolRegistryEntry[];
+  /**
+   * Extra skill directories for this turn, e.g. skills a host app ships with.
+   * Searched after the user's own roots, so a user skill of the same name wins.
+   * Like hostTools, follow-up turns the SDK starts for this turn reuse them.
+   */
+  skillPaths?: string[];
   /** Plain text, or content parts (text + base64 images) for attachments. */
   prompt: string | ContentPart[];
+  /** Preserve an admitted input if cancelled before initialization records it. */
+  preserveInterruptedInput?: boolean;
   /** "provider:model" or bare model id (resolved against the default provider). */
   model?: string;
   mode?: PermissionMode;
@@ -236,6 +250,9 @@ interface SdkTurnRuntime {
   outcomes: Map<string, PendingSteerOutcome>;
   options: RunTurnOptions;
   events: ReplayEventLog<AgentEvent>;
+  started: boolean;
+  inputRecorded: boolean;
+  finished: Promise<void>;
 }
 
 // ── Facade ─────────────────────────────────────────────────────────────────
@@ -319,6 +336,31 @@ export class BubbleSdk {
     return this.resolveSession(sessionId)?.manager.getMessages() ?? [];
   }
 
+  /** Preserve an accepted desktop input cancelled before runTurn was admitted. */
+  recordInterruptedInput(sessionId: string, prompt: string | ContentPart[]): void {
+    const owner = this.ownerForSession(sessionId);
+    if (owner && owner !== this) return owner.recordInterruptedInput(sessionId, prompt);
+    if (this.turnCoordinator.isDeleted(sessionId) || this.getSessionRunState(sessionId).active) {
+      throw new Error(`Cannot record interrupted input while session is active or deleted: ${sessionId}`);
+    }
+    const resolved = this.resolveSession(sessionId);
+    if (!resolved) throw new Error(`Unknown session: ${sessionId}`);
+    this.persistInterruptedInput(resolved, prompt);
+  }
+
+  private persistInterruptedInput(resolved: { manager: SessionManager; cwd: string }, prompt: string | ContentPart[]): void {
+    const session = resolved.manager;
+    session.getMessages();
+    const revision = session.getRevision();
+    session.updateMetadata({ cwd: resolved.cwd });
+    session.appendMessage({ role: "user", content: prompt }, revision);
+    session.appendMessage({
+      role: "assistant",
+      content: "[Interrupted by user before execution started.]",
+      error: { name: "MessageAbortedError", message: "Turn stopped during initialization.", aborted: true },
+    }, session.getRevision());
+  }
+
   async deleteSession(sessionId: string): Promise<void> {
     const owner = this.ownerForSession(sessionId);
     if (owner && owner !== this) return owner.deleteSession(sessionId);
@@ -345,8 +387,22 @@ export class BubbleSdk {
     const current = this.turnCoordinator.getCurrent(sessionId);
     const runtime = current ? this.turnRuntimes.get(current.id) : undefined;
     runtime?.inputController.closePendingInputs();
-    const stopped = this.turnCoordinator.stopCurrent(sessionId);
-    return stopped + (options.cancelQueued ? this.turnCoordinator.clearQueue(sessionId) : 0);
+    // A reserved turn can release its slot synchronously when cancelled.
+    // Clear the queue first so cancellation cannot promote an unwanted input.
+    const queued = options.cancelQueued ? this.turnCoordinator.clearQueue(sessionId) : 0;
+    return queued + this.turnCoordinator.stopCurrent(sessionId);
+  }
+
+  /** Stop and wait for persistence, cleanup, and terminal event publication. */
+  async stopAndWait(sessionId: string, options: SdkStopOptions = {}): Promise<number> {
+    const owner = this.ownerForSession(sessionId);
+    if (owner && owner !== this) return owner.stopAndWait(sessionId, options);
+    const current = this.turnCoordinator.getCurrent(sessionId);
+    const stopping = this.runtimesForSession(sessionId).filter(runtime =>
+      options.cancelQueued || runtime.reservation.id === current?.id);
+    const stopped = this.stop(sessionId, options);
+    await Promise.all(stopping.map(runtime => runtime.finished));
+    return stopped;
   }
 
   /** Cancel queued turns without interrupting the turn that owns the session slot. */
@@ -407,10 +463,10 @@ export class BubbleSdk {
 
   // ── Discovery (composer pickers) ─────────────────────────────────────────
 
-  listSkills(cwd?: string): SkillSummary[] {
+  listSkills(cwd?: string, skillPaths: string[] = []): SkillSummary[] {
     const registry = new SkillRegistry({
       cwd: cwd || this.defaultCwd,
-      skillPaths: this.userConfig.getSkillPaths(),
+      skillPaths: [...this.userConfig.getSkillPaths(), ...skillPaths],
       disabledSkills: this.userConfig.getDisabledSkills(),
     });
     return registry.summaries();
@@ -497,10 +553,13 @@ export class BubbleSdk {
       outcomes: new Map(),
       options,
       events: new ReplayEventLog<AgentEvent>(),
+      started: reservation.phase !== "queued",
+      inputRecorded: false,
+      finished: Promise.resolve(),
     };
     this.lastTurnOptions.set(sessionId, inheritableTurnOptions(options));
     this.turnRuntimes.set(reservation.id, runtime);
-    void this.pumpTurn(runtime, resolved);
+    runtime.finished = this.pumpTurn(runtime, resolved);
     return runtime;
   }
 
@@ -513,14 +572,35 @@ export class BubbleSdk {
     try {
       for await (const event of this.runReservedTurn(runtime, runtime.options, resolved)) {
         runtime.events.append(event);
-        // Publish success after the generator's finally releases its slot.
+        // Publish success after the pump's finally releases its slot.
         // A host can then distinguish idle from an automatically queued steer.
         if (event.type === "agent_end") completedEvent = event;
         else this.publishSessionEvent(runtime, event);
       }
     } catch (error) {
       failure = error;
+      // Setup can fail before runReservedTurn installs its own cleanup.
+      for (const event of this.rejectOutstandingSteers(runtime,
+        runtime.reservation.signal.aborted ? "turn_cancelled" : "turn_failed")) {
+        runtime.events.append(event);
+        this.publishSessionEvent(runtime, event);
+      }
+      // Desktop users already submitted this input. Even if setup was
+      // interrupted before Agent.run appended it, keep it for a later resume.
+      // Cancelled queued inputs never owned the turn and must stay discarded.
+      if (runtime.options.preserveInterruptedInput && runtime.started && !runtime.inputRecorded
+        && runtime.reservation.signal.aborted && !this.turnCoordinator.isDeleted(runtime.sessionId)) {
+        try {
+          this.persistInterruptedInput(resolved, runtime.options.prompt);
+        } catch (persistError) {
+          failure = persistError;
+        }
+      }
     } finally {
+      runtime.inputController.closePendingInputs();
+      // Release only after the interrupted input is durable. Keep the runtime
+      // discoverable until the terminal event is published for stopAndWait.
+      runtime.reservation.finish();
       if (failure !== undefined) {
         // The session-level log never closes per turn, so replay subscribers
         // need an explicit terminal record — otherwise a failed turn is
@@ -559,6 +639,9 @@ export class BubbleSdk {
     const planExitMode: Exclude<PermissionMode, "plan"> =
       options.planExitMode === "bypassPermissions" ? "bypassPermissions" : "default";
     const abortSignal = reservation.signal;
+
+    await reservation.waitForStart();
+    runtime.started = true;
 
     let agentRef: Agent | undefined;
     let streamCompleted = false;
@@ -625,10 +708,9 @@ export class BubbleSdk {
     abortSignal.addEventListener("abort", () => questionController.rejectAll(), { once: true });
 
     try {
-      await reservation.waitForStart();
       const skillRegistry = new SkillRegistry({
         cwd,
-        skillPaths: this.userConfig.getSkillPaths(),
+        skillPaths: [...this.userConfig.getSkillPaths(), ...(options.skillPaths ?? [])],
         disabledSkills: this.userConfig.getDisabledSkills(),
       });
       const tools = createAllTools(cwd, skillRegistry, {
@@ -640,6 +722,21 @@ export class BubbleSdk {
         checkpoints: () => session.getCheckpoints(),
       });
       tools.push(...gateMcpTools(await awaitWithAbort(this.mcpToolsFor(cwd), abortSignal), approvalController));
+      const hostTools = options.hostTools ?? [];
+      const registered = new Set(tools.map(tool => tool.name));
+      for (const tool of hostTools) {
+        if (registered.has(tool.name)) throw new Error(`Duplicate host tool: ${tool.name}`);
+        registered.add(tool.name);
+        const guarded = {
+          ...tool,
+          execute: async (args: Parameters<ToolRegistryEntry["execute"]>[0], ctx: Parameters<ToolRegistryEntry["execute"]>[1]) => {
+            throwAbortSignal(abortSignal);
+            return tool.execute(args, { ...ctx, abortSignal });
+          },
+          cloneForChild: (): ToolRegistryEntry => ({ ...tool, enabled: () => false, execute: async () => ({ content: "Host capability is not available to this child.", isError: true }) }),
+        };
+        tools.push(...(tool.readOnly ? [guarded] : gateMcpTools([guarded], approvalController)));
+      }
       throwAbortSignal(abortSignal);
 
       const promptCacheKey = session.getOrCreatePromptCacheKey();
@@ -657,6 +754,8 @@ export class BubbleSdk {
       const memoryPrompt = buildMemoryPrompt(cwd);
       const builtSystemPrompt = buildSystemPrompt({
         agentName: "Bubble",
+        skills: skillRegistry.summaries(),
+        skillCatalogChars: this.userConfig.getSkillCatalogChars(),
         configuredProvider: providerId || "none",
         configuredModel: model ? displayModel(model) : "none",
         configuredModelId: model || "none",
@@ -714,6 +813,7 @@ export class BubbleSdk {
         budgetLedger: new BudgetLedger(),
         fileStateTracker,
         skills: skillRegistry.summaries(),
+        skillCatalogChars: this.userConfig.getSkillCatalogChars(),
         memoryPrompt,
         externalHooks: hookController,
         // Cross-provider subagent routes (spawn_agent with "provider:model")
@@ -725,6 +825,7 @@ export class BubbleSdk {
         onMessageAppend: (message: Message) => {
           if (message.role === "system" || message.role === "meta") return;
           if (this.turnCoordinator.isDeleted(sessionId)) return;
+          if (message.role === "user") runtime.inputRecorded = true;
           persistFenced(() => {
             session.appendMessage(message, contextRevision);
             contextRevision = session.getRevision();
@@ -804,8 +905,6 @@ export class BubbleSdk {
       );
       unsubscribeQuestions();
       questionController.rejectAll();
-      reservation.finish();
-      if (this.turnRuntimes.get(reservation.id) === runtime) this.turnRuntimes.delete(reservation.id);
     }
   }
 

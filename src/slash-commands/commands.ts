@@ -221,16 +221,18 @@ function persistSelectedModel(model: string, ctx: Parameters<SlashCommand["handl
   }
 }
 
-function syncSystemPrompt(ctx: Parameters<SlashCommand["handler"]>[1], model: string) {
+/** Rebuild the system prompt from the agent's live options (model, tools, memory, Skills catalog). */
+export function syncSystemPrompt(ctx: Pick<Parameters<SlashCommand["handler"]>[1], "agent" | "cwd">, model: string) {
   const { providerId } = decodeModel(model);
   const toolPromptOptions = typeof ctx.agent.getSystemPromptToolOptions === "function"
     ? ctx.agent.getSystemPromptToolOptions()
     : {};
   ctx.agent.setSystemPrompt(buildSystemPrompt({
     agentName: "Bubble",
-    configuredProvider: providerId,
-    configuredModel: displayModel(model),
-    configuredModelId: model,
+    // Same placeholders as startup when no model is configured yet.
+    configuredProvider: providerId || "none",
+    configuredModel: model ? displayModel(model) : "none",
+    configuredModelId: model || "none",
     thinkingLevel: ctx.agent.thinking,
     workingDir: ctx.cwd,
     ...toolPromptOptions,

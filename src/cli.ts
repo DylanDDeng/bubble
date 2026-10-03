@@ -2,6 +2,8 @@
  * CLI argument parsing.
  */
 
+import { statSync } from "node:fs";
+import { resolve } from "node:path";
 import { THINKING_LEVELS, type PermissionMode, type ThinkingLevel } from "./types.js";
 import { isThinkingLevel } from "./variant/thinking-level.js";
 
@@ -58,9 +60,12 @@ export function parseArgs(argv: string[]): CliArgs {
       case "-m":
         args.model = argv[++i];
         break;
-      case "--cwd":
-        args.cwd = argv[++i];
+      case "--cwd": {
+        // Absolute, so it survives the chdir in main() and matches session metadata.
+        const dir = argv[++i];
+        if (dir) args.cwd = resolve(dir);
         break;
+      }
       case "--api-key":
       case "-k":
         args.apiKey = argv[++i];
@@ -182,4 +187,19 @@ Options (serve --feishu):
   --kill-old               Kill any conflicting bubble instance for the same App ID
   --dry-run                Connect once, then exit (smoke test)
 `);
+}
+
+/**
+ * Make `cwd` the process working directory, so --cwd behaves exactly like
+ * launching Bubble there. Returns an error message instead of throwing.
+ */
+export function enterWorkingDirectory(cwd: string): string | undefined {
+  if (cwd === process.cwd()) return undefined;
+  try {
+    if (!statSync(cwd).isDirectory()) return `--cwd ${cwd} is not a directory.`;
+    process.chdir(cwd);
+    return undefined;
+  } catch {
+    return `--cwd ${cwd} does not exist or cannot be opened.`;
+  }
 }

@@ -7,7 +7,7 @@
 import chalk from "chalk";
 import { Agent } from "./agent.js";
 import { BudgetLedger } from "./agent/budget-ledger.js";
-import { parseArgs, printHelp } from "./cli.js";
+import { enterWorkingDirectory, parseArgs, printHelp } from "./cli.js";
 import { effectiveThemeModeForTerminal, shouldProbeTerminalTheme, UserConfig } from "./config.js";
 import { createProviderInstance, createUnavailableProvider } from "./provider.js";
 import { resolveConfiguredModel } from "./model-selection.js";
@@ -79,6 +79,14 @@ async function main() {
     const { getCurrentVersion } = await import("./update/index.js");
     console.log(`v${getCurrentVersion()}`);
     process.exit(0);
+  }
+
+  // --cwd means "run as if launched there" (like git -C): every layer, including
+  // the TUI, shell children and relative paths, then sees the same directory.
+  const cwdError = enterWorkingDirectory(args.cwd);
+  if (cwdError) {
+    console.error(`bubble: ${cwdError}`);
+    process.exit(1);
   }
 
   if (args.command === "update") {
@@ -423,6 +431,8 @@ async function main() {
     : undefined;
   const systemPrompt = buildSystemPrompt({
     agentName: "Bubble",
+    skills: skillSummaries,
+    skillCatalogChars: userConfig.getSkillCatalogChars(),
     configuredProvider: activeProviderId || "none",
     configuredModel: activeModel ? displayModel(activeModel) : "none",
     configuredModelId: activeModel || "none",
@@ -529,6 +539,7 @@ async function main() {
     },
     budgetLedger,
     skills: skillSummaries,
+    skillCatalogChars: userConfig.getSkillCatalogChars(),
     memoryPrompt,
     fileStateTracker,
     agentCategories: userConfig.getAgentCategories(),

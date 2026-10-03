@@ -1,3 +1,4 @@
+import { toolImageObservation } from "./context/tool-images.js";
 /**
  * Agent - The core decision loop.
  * It maintains message state, calls the LLM, executes tools, and auto-continues.
@@ -188,6 +189,8 @@ export interface AgentOptions {
   budgetLedger?: BudgetLedger;
   budgetSource?: { runId: string; subAgentId?: string };
   skills?: SkillSummary[];
+  /** Skill catalog budget in characters for rebuilt system prompts (0 = off). */
+  skillCatalogChars?: number;
   memoryPrompt?: string;
   fileStateTracker?: FileStateTracker;
   agentCategories?: AgentCategoriesConfig;
@@ -296,6 +299,7 @@ export class Agent {
   private budgetLedger?: BudgetLedger;
   private budgetSource: { runId: string; subAgentId?: string };
   private skillSummaries: SkillSummary[];
+  private skillCatalogChars?: number;
   private memoryPrompt?: string;
   private fileStateTracker?: FileStateTracker;
   private agentCategories: AgentCategoriesConfig;
@@ -350,6 +354,7 @@ export class Agent {
     this.budgetLedger = options.budgetLedger;
     this.budgetSource = options.budgetSource ?? { runId: this.sessionID ?? "agent" };
     this.skillSummaries = options.skills ?? [];
+    this.skillCatalogChars = options.skillCatalogChars;
     this.memoryPrompt = options.memoryPrompt;
     this.fileStateTracker = options.fileStateTracker;
     this.agentCategories = options.agentCategories ?? {};
@@ -391,6 +396,8 @@ export class Agent {
         // must see deferred-but-registered tools (an explicit include in a
         // profile is the author pre-unlocking them).
         allTools: () => [...this.tools.values()],
+        getSkillSummaries: () => this.getSkillSummaries(),
+        getSkillCatalogChars: () => this.getSkillCatalogChars(),
         createChild: (spec) => this.createChildAgent(spec),
         recordProviderError: (error, context) => this.recordProviderError(error, context),
         runExternalHook: (input, abortSignal) => this.runExternalHook(input as any, abortSignal),
@@ -538,8 +545,11 @@ export class Agent {
     return [...this.tools.values()].filter((t) => t.deferred);
   }
 
-  getSystemPromptToolOptions(): Pick<import("./system-prompt.js").SystemPromptOptions, "tools" | "toolSnippets" | "guidelines" | "modelRoutingPrompt" | "memoryPrompt"> {
+  getSystemPromptToolOptions(): Pick<import("./system-prompt.js").SystemPromptOptions, "tools" | "toolSnippets" | "guidelines" | "modelRoutingPrompt" | "memoryPrompt" | "skills" | "skillCatalogChars"> {
     return {
+      // Rebuilt prompts (model switch, /skills changes) keep the Skills catalog.
+      skills: this.skillSummaries,
+      skillCatalogChars: this.skillCatalogChars,
       ...buildToolPromptOptions(this.getActiveToolEntries()),
       // Rendered through the live accessor (design §1.5), so every host-
       // triggered prompt rebuild picks up the current catalog.
@@ -550,7 +560,15 @@ export class Agent {
     };
   }
 
-  /** Refresh the live Skill catalog after /skills reloads or changes enablement. */
+  getSkillSummaries(): SkillSummary[] {
+    return this.skillSummaries.slice();
+  }
+
+  getSkillCatalogChars(): number | undefined {
+    return this.skillCatalogChars;
+  }
+
+  /** Refresh the live Skill catalog after /skills reloads or changes enablement; hosts then rebuild the system prompt. */
   setSkillSummaries(skills: SkillSummary[]): void {
     this.skillSummaries = skills.slice();
     this.notifyContextChanged();
@@ -1716,6 +1734,9 @@ export class Agent {
             throwIfAborted(abortSignal);
           }
         }
+
+        const imageObservation = toolImageObservation(executedResults);
+        if (imageObservation) this.appendMessage(imageObservation);
 
         // A checkpoint must contain the whole batch, never provider repair's
         // placeholder for a sibling that has not executed yet.

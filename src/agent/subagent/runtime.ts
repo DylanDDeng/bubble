@@ -22,6 +22,7 @@
  * must stay ABSENT (onMessageAppend, sessionID, routing catalog) — has exactly
  * one definition site.
  */
+import type { SkillSummary } from "../../skills/types.js";
 import { AgentRunInputQueue } from "../input-controller.js";
 import { randomUUID } from "node:crypto";
 import { buildSystemPrompt } from "../../system-prompt.js";
@@ -79,6 +80,9 @@ export interface SubagentRuntimeParent {
   readonly apiModel: string;
   readonly thinkingLevel: ThinkingLevel;
   readonly memoryPrompt: string | undefined;
+  /** Optional so lightweight parents (tests, embedders) need not provide a catalog. */
+  getSkillSummaries?(): SkillSummary[];
+  getSkillCatalogChars?(): number | undefined;
   readonly providerFactory: ((route: ResolvedSubagentRoute) => Provider | Promise<Provider>) | undefined;
   /**
    * The UNFILTERED tool map — deferred-but-unlocked entries included. Profile
@@ -915,6 +919,10 @@ export class SubagentRuntime {
       mode: childMode,
       workingDir: childCwd,
       ...buildToolPromptOptions(tools),
+      // A child that can load skills sees the same catalog as its parent.
+      ...(childToolNames.includes("skill")
+        ? { skills: this.parent.getSkillSummaries?.(), skillCatalogChars: this.parent.getSkillCatalogChars?.() }
+        : {}),
       memoryPrompt: childToolNames.some((name) => name === "memory")
         ? this.parent.memoryPrompt
         : undefined,

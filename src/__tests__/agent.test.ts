@@ -1337,7 +1337,7 @@ describe("Agent", () => {
     expect(result.error).toBe("Subagent was cancelled.");
   });
 
-  it("adds memory prompt context to subagents without advertising skill summaries", async () => {
+  it("gives subagents that can load skills the parent's Skills catalog and memory context", async () => {
     const captured: Message[][] = [];
     const provider: Provider = {
       async *streamChat(messages) {
@@ -1387,7 +1387,10 @@ describe("Agent", () => {
     });
 
     const system = captured[0].find((message) => message.role === "system")?.content ?? "";
-    expect(system).not.toContain("debug-skill");
+    expect(system).toContain("## Skills");
+    expect(system).toContain("- debug-skill: Debug workflow");
+    // The child has no skill_search, so the catalog never points to it.
+    expect(system).not.toContain("skill_search");
     expect(system).toContain("Memory context visible");
     expect(system).toContain("Use selected context.");
   });
