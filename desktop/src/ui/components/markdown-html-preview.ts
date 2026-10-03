@@ -1,6 +1,7 @@
 import type { EditorState } from '@codemirror/state';
 import { EditorView, WidgetType } from '@codemirror/view';
 import { createMediaSourceButton } from './markdown-media-interaction';
+import { siteRootPathCandidates } from '../../shared/site-root-path';
 import type { Tree } from '@lezer/common';
 import type { MarkdownConfig } from '@lezer/markdown';
 
@@ -86,10 +87,14 @@ async function resolveMedia(cwd: string, filePath: string, src: string, kind: 'v
     const decoded = decodeURIComponent(src).replace(/\\/g, '/');
     target = /^(?:\/|[a-z]:\/)/i.test(decoded) ? decoded : `${filePath.replace(/\\/g, '/').replace(/[^/]*$/, '')}${decoded}`;
   }
-  const result = await window.electron.readProjectFilePreview(cwd, target) as { kind: string; previewUrl?: string; dataUrl?: string; message?: string };
-  const url = kind === 'video' ? result.previewUrl : result.dataUrl;
-  if (result.kind !== kind || !url) throw Error(result.message || `Unable to load ${kind}.`);
-  return url;
+  let message: string | undefined;
+  for (const candidate of siteRootPathCandidates(cwd, target)) {
+    const result = await window.electron.readProjectFilePreview(cwd, candidate) as { kind: string; previewUrl?: string; dataUrl?: string; message?: string };
+    const url = kind === 'video' ? result.previewUrl : result.dataUrl;
+    if (result.kind === kind && url) return url;
+    message ??= result.message;
+  }
+  throw Error(message || `Unable to load ${kind}.`);
 }
 
 type VideoElement = HTMLElement & { disposeMedia?: () => void };

@@ -56,7 +56,7 @@
     "verify:fork-session": "node scripts/verify-fork-session.mjs",
     "verify:markdown-editor": "node scripts/verify-markdown-editor.mjs",
     "verify:markdown-live-preview": "npm run transpile:electron && node scripts/tests/markdown-live-preview-electron.test.mjs",
-    "verify:markdown-frontmatter": "npx tsx scripts/tests/markdown-frontmatter-preview.test.ts && node scripts/tests/markdown-frontmatter-preview-electron.test.mjs",
+    "verify:markdown-frontmatter": "npx tsx scripts/tests/markdown-frontmatter-preview.test.ts && npx tsx scripts/tests/site-root-path.test.ts && node scripts/tests/markdown-frontmatter-preview-electron.test.mjs",
     "verify:project-file-navigation": "npx tsx scripts/tests/project-file-navigation.test.ts",
     "verify:right-utility-tabs": "npx tsx scripts/tests/right-utility-tabs.test.ts",
     "verify:project-file-tabs": "node scripts/tests/project-file-tabs-electron.test.mjs",

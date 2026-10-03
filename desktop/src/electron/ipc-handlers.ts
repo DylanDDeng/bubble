@@ -33,6 +33,7 @@ import { appendSessionReferences } from './libs/session-reference';
 import { setupSessionTitleIPC } from './ipc/session-title';
 import { setupAttachmentIPC } from './ipc/attachments';
 import { ATTACHMENT_MIME_TYPES, MAX_ATTACHMENT_BYTES, attachmentSizeLimit } from '../shared/attachment-policy';
+import { siteRootPathCandidates } from '../shared/site-root-path';
 import { runCodexOneShot, runOpenCodeOneShot } from './libs/codex-runner';
 import {
   forkClaudeAgentSession,
@@ -1267,23 +1268,32 @@ async function resolveMarkdownImageAssetFile(
     return { ok: false, message: markdownValidation.message };
   }
 
-  let imagePath: string;
+  let imagePaths: string[];
   if (/^file:/i.test(trimmedSrc)) {
     try {
-      imagePath = fileURLToPath(trimmedSrc);
+      imagePaths = [fileURLToPath(trimmedSrc)];
     } catch {
       return { ok: false, message: 'Invalid file URL for image.' };
     }
   } else {
     const normalizedSrc = decodeMarkdownAssetPath(trimmedSrc).replace(/\\/g, '/');
-    imagePath = isAbsolute(normalizedSrc)
-      ? normalizedSrc
-      : resolve(dirname(markdownValidation.targetReal), normalizedSrc);
+    imagePaths = isAbsolute(normalizedSrc)
+      ? siteRootPathCandidates(cwd, normalizedSrc)
+      : [resolve(dirname(markdownValidation.targetReal), normalizedSrc)];
   }
 
-  const imageValidation = await validateProjectFilePath(cwd, imagePath);
-  if (!imageValidation.ok) {
-    return { ok: false, message: imageValidation.message };
+  // Take the first in-project candidate that exists; otherwise report on the first in-project one.
+  let imageValidation: Awaited<ReturnType<typeof validateProjectFilePath>> | undefined;
+  for (const candidate of imagePaths) {
+    const validation = await validateProjectFilePath(cwd, candidate);
+    if (validation.ok && existsSync(validation.targetReal)) {
+      imageValidation = validation;
+      break;
+    }
+    if (!imageValidation || (!imageValidation.ok && validation.ok)) imageValidation = validation;
+  }
+  if (!imageValidation?.ok) {
+    return { ok: false, message: imageValidation?.message ?? 'Missing image path.' };
   }
 
   const ext = extname(imageValidation.targetReal).toLowerCase();
