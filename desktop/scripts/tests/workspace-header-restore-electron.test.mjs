@@ -74,6 +74,12 @@ const wait=async(fn,label)=>{for(let i=0;i<300;i++){try{if(await fn())return;}ca
    assert.equal(await js('qa.tabs.getState().activeTabId'),expected.active);
   }
   await wait(()=>js('document.body.innerText.includes("已完成界面检查")'),'persisted transcript');
+  if(process.env.QA_BROWSER_RESTORE==='1') {
+   const capture=async name=>{if(process.env.QA_CAPTURE){fs.mkdirSync(process.env.QA_CAPTURE,{recursive:true});fs.writeFileSync(path.join(process.env.QA_CAPTURE,name+'.png'),(await win.webContents.capturePage()).toPNG());}};
+   await require(path.join(root,'scripts/tests/browser-restore-qa.cjs'))({js,delay,capture,phase:process.env.QA_PHASE});
+   console.log('HEADER_RESTORE_PASS '+process.env.QA_PHASE);
+   app.quit();return;
+  }
   win.setSize(1280,820);win.show();app.focus({steal:true});win.focus();win.webContents.focus();await delay(500);
   if(process.env.QA_MARKDOWN==='1' || process.env.QA_BOARD_SIDEBAR==='1' || process.env.QA_BOARD_TABS==='1') {
    // The user may switch apps during QA; keep browser focus deterministic.

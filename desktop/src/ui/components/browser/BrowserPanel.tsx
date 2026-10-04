@@ -303,9 +303,13 @@ export function BrowserPanel({
 
     let cancelled = false;
     const api = window.electron.browser;
+    // After a relaunch the main process has no tabs; seed it with the page this
+    // panel had (persisted renderer state), or the open reply resets it to blank.
+    const cached = useBrowserStateStore.getState().sessionStatesBySessionId[browserSessionId];
+    const cachedTab = cached?.tabs.find((tab) => tab.id === cached.activeTabId) ?? cached?.tabs[0];
 
     api
-      .open({ sessionId: browserSessionId, initialUrl: DEFAULT_HOME_URL })
+      .open({ sessionId: browserSessionId, initialUrl: cachedTab?.url || DEFAULT_HOME_URL })
       .then((state) => {
         if (cancelled) return;
         setSessionState(state);
