@@ -936,6 +936,10 @@ contextBridge.exposeInMainWorld('electron', {
     return ipcRenderer.invoke('read-project-file-preview', cwd, filePath);
   },
 
+  saveProjectFileCopy: (cwd: string, filePath: string) => {
+    return ipcRenderer.invoke('save-project-file-copy', cwd, filePath);
+  },
+
   resolveGrokSessionFile: (cwd: string, relativePath: string) => {
     return ipcRenderer.invoke('resolve-grok-session-file', cwd, relativePath);
   },

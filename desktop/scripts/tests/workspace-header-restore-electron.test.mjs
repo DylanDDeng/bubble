@@ -74,6 +74,12 @@ const wait=async(fn,label)=>{for(let i=0;i<300;i++){try{if(await fn())return;}ca
    assert.equal(await js('qa.tabs.getState().activeTabId'),expected.active);
   }
   await wait(()=>js('document.body.innerText.includes("已完成界面检查")'),'persisted transcript');
+  if(process.env.QA_BROWSER_RESTORE==='1') {
+   const capture=async name=>{if(process.env.QA_CAPTURE){fs.mkdirSync(process.env.QA_CAPTURE,{recursive:true});fs.writeFileSync(path.join(process.env.QA_CAPTURE,name+'.png'),(await win.webContents.capturePage()).toPNG());}};
+   await require(path.join(root,'scripts/tests/browser-restore-qa.cjs'))({js,delay,capture,phase:process.env.QA_PHASE});
+   console.log('HEADER_RESTORE_PASS '+process.env.QA_PHASE);
+   app.quit();return;
+  }
   win.setSize(1280,820);win.show();app.focus({steal:true});win.focus();win.webContents.focus();await delay(500);
   if(process.env.QA_MARKDOWN==='1' || process.env.QA_BOARD_SIDEBAR==='1' || process.env.QA_BOARD_TABS==='1') {
    // The user may switch apps during QA; keep browser focus deterministic.
@@ -92,6 +98,16 @@ const wait=async(fn,label)=>{for(let i=0;i<300;i++){try{if(await fn())return;}ca
   // Renderer input exercises layout and handlers; macOS app-region hit-testing
   // must also be verified with OS-level coordinate clicks.
   const click=async selector=>{const p=await js('(()=>{const r=document.querySelector('+JSON.stringify(selector)+').getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()');win.webContents.sendInputEvent({type:'mouseDown',button:'left',clickCount:1,...p});win.webContents.sendInputEvent({type:'mouseUp',button:'left',clickCount:1,...p});await delay(150);};
+  if(process.env.QA_RESIZE_PERF==='1') {
+   if(process.env.QA_PHASE==='seed') await require(path.join(root,'scripts/tests/resize-perf-qa.cjs'))({js,delay,win,root});
+   console.log('HEADER_RESTORE_PASS '+process.env.QA_PHASE);
+   app.quit();return;
+  }
+  if(process.env.QA_BROWSER_START==='1') {
+   if(process.env.QA_PHASE==='seed') await require(path.join(root,'scripts/tests/browser-start-qa.cjs'))({js,click,capture,delay,win});
+   console.log('HEADER_RESTORE_PASS '+process.env.QA_PHASE);
+   app.quit();return;
+  }
   if(process.env.QA_BOARD_TABS==='1') {
    await require(path.join(root,'scripts/tests/kanban-tabs-qa.cjs'))({js,click,capture,delay,win,expected,fixture});
    console.log('HEADER_RESTORE_PASS '+process.env.QA_PHASE);

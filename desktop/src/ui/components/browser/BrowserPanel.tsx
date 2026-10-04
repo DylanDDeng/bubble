@@ -56,7 +56,7 @@ import {
   resolveBrowserChromeStatus,
 } from './BrowserPanel.logic';
 import { useBrowserNativeOverlay } from './browser-native-overlay';
-import { BrowserStartPage } from './BrowserStartPage';
+import { BrowserLoadErrorPage, BrowserStartPage } from './BrowserStartPage';
 
 const MIN_PANEL_WIDTH = 320;
 const MAX_PANEL_WIDTH = 1200;
@@ -182,8 +182,10 @@ export function BrowserPanel({
   const matchingHistory = history.filter(item => !addressValue || `${item.title} ${item.url}`.toLowerCase().includes(addressValue.toLowerCase()));
   const historyOpen = addressEditing && matchingHistory.length > 0;
   const showStartPage = !activeTab || !activeTab.url || activeTab.url === DEFAULT_HOME_URL;
-  // Both the start page and the address suggestions are React surfaces.
-  const nativeViewHidden = collapsed || overlayOpen || showStartPage || historyOpen;
+  // The failed page is blank and would cover the error, so the panel draws it.
+  const loadError = !showStartPage && activeTab && !activeTab.isLoading ? activeTab.lastError : null;
+  // The start page, error page and address suggestions are React surfaces.
+  const nativeViewHidden = collapsed || overlayOpen || showStartPage || !!loadError || historyOpen;
 
   const lastSyncedAddressRef = useRef<string | undefined>(undefined);
   const previousActiveTabIdRef = useRef<string | null>(null);
@@ -301,9 +303,13 @@ export function BrowserPanel({
 
     let cancelled = false;
     const api = window.electron.browser;
+    // After a relaunch the main process has no tabs; seed it with the page this
+    // panel had (persisted renderer state), or the open reply resets it to blank.
+    const cached = useBrowserStateStore.getState().sessionStatesBySessionId[browserSessionId];
+    const cachedTab = cached?.tabs.find((tab) => tab.id === cached.activeTabId) ?? cached?.tabs[0];
 
     api
-      .open({ sessionId: browserSessionId, initialUrl: DEFAULT_HOME_URL })
+      .open({ sessionId: browserSessionId, initialUrl: cachedTab?.url || DEFAULT_HOME_URL })
       .then((state) => {
         if (cancelled) return;
         setSessionState(state);
@@ -337,12 +343,16 @@ export function BrowserPanel({
   // Revoke the native viewport during the layout commit, before the next
   // conversation paints. Passive cleanup leaves the old page floating over it.
   const visibleBrowserSessionRef = useRef<string | null>(null);
+  // Bounds last sent for the visible view; identical rects are not resent.
+  const lastPushedBoundsRef = useRef<string | null>(null);
   useLayoutEffect(() => {
     const hide = () => {
       visibleBrowserSessionRef.current = null;
       void window.electron.browser.hide({ sessionId: browserSessionId }).catch(() => {});
     };
     visibleBrowserSessionRef.current = nativeViewHidden ? null : browserSessionId;
+    // hide() revokes the bounds in the main process; the next show must resend.
+    lastPushedBoundsRef.current = null;
     if (nativeViewHidden) hide();
     return hide;
   }, [browserSessionId, nativeViewHidden]);
@@ -405,7 +415,6 @@ export function BrowserPanel({
 
   // ===== Viewport bounds sync =====
   const viewportRef = useRef<HTMLDivElement | null>(null);
-  const rafRef = useRef<number | null>(null);
 
   const pushBounds = useCallback(() => {
     if (nativeViewHidden || visibleBrowserSessionRef.current !== browserSessionId) return;
@@ -415,17 +424,20 @@ export function BrowserPanel({
     const el = viewportRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
+    const bounds = {
+      x: Math.round(rect.left),
+      y: Math.round(rect.top),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+    };
+    const key = `${browserSessionId}:${bounds.x},${bounds.y},${bounds.width},${bounds.height}`;
+    if (key === lastPushedBoundsRef.current) return;
+    lastPushedBoundsRef.current = key;
     window.electron.browser
-      .setPanelBounds({
-        sessionId: browserSessionId,
-        bounds: {
-          x: Math.round(rect.left),
-          y: Math.round(rect.top),
-          width: Math.round(rect.width),
-          height: Math.round(rect.height),
-        },
-      })
-      .catch(() => {});
+      .setPanelBounds({ sessionId: browserSessionId, bounds })
+      .catch(() => {
+        lastPushedBoundsRef.current = null;
+      });
   }, [browserSessionId, nativeViewHidden, sessionId]);
 
   useLayoutEffect(() => {
@@ -436,20 +448,15 @@ export function BrowserPanel({
     if (nativeViewHidden) return;
     const el = viewportRef.current;
     if (!el) return;
-    const observer = new ResizeObserver(() => {
-      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
-      rafRef.current = requestAnimationFrame(() => {
-        rafRef.current = null;
-        pushBounds();
-      });
-    });
+    // ResizeObserver runs after layout and before paint: push in the same
+    // frame. Deferring to requestAnimationFrame cost the view one more frame.
+    const observer = new ResizeObserver(() => pushBounds());
     observer.observe(el);
     const onWindowResize = () => pushBounds();
     window.addEventListener('resize', onWindowResize);
     return () => {
       observer.disconnect();
       window.removeEventListener('resize', onWindowResize);
-      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
     };
   }, [nativeViewHidden, pushBounds]);
 
@@ -864,7 +871,8 @@ export function BrowserPanel({
         <div className="relative min-h-0 flex-1 bg-[var(--bg-primary)]">
           <div ref={viewportRef} className="absolute inset-0" />
           {showStartPage ? <BrowserStartPage history={history} onNavigate={url => void handleNavigate(url)} onOpenTool={tool => useAppStore.getState().openRightUtilityTab(tool)} /> : null}
-          {!showStartPage && chromeStatus && (
+          {loadError && activeTab ? <BrowserLoadErrorPage message={loadError} url={activeTab.url} onRetry={() => void handleNavigate(activeTab.url)} /> : null}
+          {!showStartPage && !loadError && chromeStatus && (
             <div
               className={`pointer-events-none absolute bottom-2 left-2 right-2 rounded-md border px-2 py-1 text-[11px] ${
                 chromeStatus.tone === 'error'

@@ -44,8 +44,15 @@
   background: var(--accent);
 }
 
+/* The sidebar card and the workspace surface read as one floating card: keep
+   window chrome visible to its right and below it. */
+:root {
+  --bubble-canvas-gap: 8px;
+}
+
 .bubble-sidebar-content {
   margin-left: 44px;
+  margin-bottom: var(--bubble-canvas-gap);
   border-radius: 14px 0 0 14px;
   border: 1px solid var(--border);
   border-right: 0;
@@ -60,6 +67,18 @@
 .bubble-window-tabs {
   min-height: 40px;
   padding-left: max(8px, calc(176px - var(--bubble-sidebar-width, 0px)));
+}
+
+/* The window corner (traffic lights) up to the navigation buttons. Every
+   other titlebar drag area starts after the buttons, at x = 176px. */
+.bubble-titlebar-corner-drag {
+  position: absolute;
+  z-index: 81;
+  top: 0;
+  left: 0;
+  width: 84px;
+  height: 40px;
+  pointer-events: none;
 }
 
 .bubble-window-navigation {
@@ -82,7 +101,7 @@
 
 .bubble-workspace-surface {
   isolation: isolate;
-  margin: 0;
+  margin: 0 var(--bubble-canvas-gap) var(--bubble-canvas-gap) 0;
   border-radius: 0 14px 14px 0;
   border: 1px solid var(--border);
   box-shadow: none;
@@ -180,6 +199,11 @@
 .bubble-browser-recents button { display: flex; flex: 1; min-width: 0; flex-direction: column; align-items: center; gap: 14px; padding: 12px 4px; border-radius: 8px; color: var(--text-secondary); }
 .bubble-browser-recents button:hover { background: var(--sidebar-item-hover); }
 .bubble-browser-recents span { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.bubble-browser-error { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; text-align: center; color: var(--text-muted); }
+.bubble-browser-error h2 { margin: 6px 0 0; color: var(--text-primary); font-size: 14px; }
+.bubble-browser-error p { max-width: min(560px, 100%); margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.bubble-browser-error button { margin-top: 8px; padding: 6px 14px; border-radius: 8px; background: var(--sidebar-item-hover); color: var(--text-primary); font-size: 12px; }
+.bubble-browser-error button:hover { background: var(--sidebar-item-active); }
 .bubble-address-history { position: absolute; z-index: 90; top: calc(100% + 6px); left: 0; right: 0; padding: 4px; max-height: 320px; overflow-y: auto; border-radius: 12px; border: 1px solid var(--popover-border); background: var(--popover-bg); box-shadow: var(--popover-shadow); }
 .bubble-address-history button { display: flex; width: 100%; flex-direction: column; gap: 2px; padding: 8px 10px; border-radius: 6px; text-align: left; }
 .bubble-address-history button:hover, .bubble-address-history button[aria-selected='true'] { background: var(--sidebar-item-hover); }

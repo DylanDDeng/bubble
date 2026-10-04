@@ -393,6 +393,11 @@ const LOCAL_PREVIEW_MIME_TYPES: Record<string, string> = {
   '.mp3': 'audio/mpeg',
   '.wav': 'audio/wav',
   '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.ogg': 'audio/ogg',
+  '.oga': 'audio/ogg',
+  '.opus': 'audio/ogg',
+  '.flac': 'audio/flac',
   '.txt': 'text/plain; charset=utf-8',
   '.map': 'application/json; charset=utf-8',
   '.woff': 'font/woff',
@@ -400,6 +405,9 @@ const LOCAL_PREVIEW_MIME_TYPES: Record<string, string> = {
   '.ttf': 'font/ttf',
   '.pdf': 'application/pdf',
 };
+
+const PROJECT_PREVIEW_VIDEO_EXTS = new Set(['.mp4', '.webm', '.mov']);
+const PROJECT_PREVIEW_AUDIO_EXTS = new Set(['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.oga', '.opus', '.flac']);
 
 const projectTreeReader = createProjectTreeReader(scanProjectTree);
 const readProjectTree = projectTreeReader.read;
@@ -770,7 +778,7 @@ type ProjectFilePreview =
       dataUrl: string;
     }
   | {
-      kind: 'video';
+      kind: 'video' | 'audio';
       path: string;
       name: string;
       ext: string;
@@ -6794,6 +6802,38 @@ export function setupIPCHandlers(mainWindow: BrowserWindow): void {
     return { filePath: targetPath };
   });
 
+  // RPC: save a copy of a project file wherever the user picks (Files panel "Save a copy…").
+  ipcMainHandle(
+    'save-project-file-copy',
+    async (event, cwd: string, filePath: string): Promise<{ ok: boolean; filePath?: string; canceled?: boolean; message?: string }> => {
+      const validation = await validateProjectFilePath(cwd, resolve(cwd || '.', filePath || ''));
+      if (!validation.ok) return { ok: false, message: validation.message };
+      try {
+        if (!(await fsPromises.stat(validation.targetReal)).isFile()) return { ok: false, message: 'Not a file' };
+      } catch {
+        return { ok: false, message: 'File not found' };
+      }
+
+      const win = BrowserWindow.fromWebContents(event.sender);
+      const name = basename(validation.targetReal);
+      const options = {
+        title: 'Save a copy',
+        defaultPath: join(app.getPath('downloads'), name),
+        buttonLabel: 'Save',
+      };
+      const result = win ? await dialog.showSaveDialog(win, options) : await dialog.showSaveDialog(options);
+      if (result.canceled || !result.filePath) return { ok: false, canceled: true };
+      if (resolve(result.filePath) === validation.targetReal) return { ok: true, filePath: result.filePath };
+
+      try {
+        await fsPromises.copyFile(validation.targetReal, result.filePath);
+        return { ok: true, filePath: result.filePath };
+      } catch (error) {
+        return { ok: false, message: `Failed to save a copy: ${String(error)}` };
+      }
+    }
+  );
+
   // RPC: 获取项目文件树
   ipcMainHandle('get-project-tree', async (event, cwd: string, requestId?: string) => {
     if (!cwd) {
@@ -7162,9 +7202,14 @@ export function setupIPCHandlers(mainWindow: BrowserWindow): void {
         }
       }
 
-      // Video is streamed with HTTP byte ranges, never buffered into an IPC payload.
+      // Video and audio are streamed with HTTP byte ranges, never buffered into an IPC payload.
       // The generic preview limit below applies only to files we read into memory.
-      if (ext === '.mp4' || ext === '.webm' || ext === '.mov') {
+      const mediaKind = PROJECT_PREVIEW_VIDEO_EXTS.has(ext)
+        ? 'video'
+        : PROJECT_PREVIEW_AUDIO_EXTS.has(ext)
+          ? 'audio'
+          : null;
+      if (mediaKind) {
         try {
           const preview = await getLocalPreviewUrl(validation.rootReal, validation.targetReal);
           if (!preview.ok) {
@@ -7177,7 +7222,7 @@ export function setupIPCHandlers(mainWindow: BrowserWindow): void {
             };
           }
           return {
-            kind: 'video',
+            kind: mediaKind,
             path: validation.targetReal,
             name,
             ext,
@@ -7190,7 +7235,7 @@ export function setupIPCHandlers(mainWindow: BrowserWindow): void {
             path: validation.targetReal,
             name,
             ext,
-            message: `Failed to create video preview: ${String(error)}`,
+            message: `Failed to create ${mediaKind} preview: ${String(error)}`,
           };
         }
       }

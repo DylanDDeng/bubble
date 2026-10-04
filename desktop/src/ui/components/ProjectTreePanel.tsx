@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent, type ReactNode } from 'react';
 import { FolderClosed, FolderOpen, Folders, ChevronDown, ChevronLeft, ChevronRight, Copy, Check, Search, X, Maximize2, Minimize2, File, Files, FileAddIcon, FolderAddIcon } from './icons';
 import { pptxToHtml } from '@jvmr/pptx-to-html';
 import { toast } from 'sonner';
@@ -7,6 +7,7 @@ import { MDContent } from '../render/markdown';
 import { HighlightedCode } from './HighlightedCode';
 import TextFileReader from './TextFileReader';
 import { ProjectVideoPreview } from './ProjectVideoPreview';
+import { ProjectAudioPreview } from './ProjectAudioPreview';
 import { FileTypeIcon } from './FileTypeIcon';
 import { CsvPreview, XlsxPreview } from './SpreadsheetPreview';
 import { ProjectMdxPreview, ProjectMdxProperties, parseMdxDocument } from './ProjectMdxPreview';
@@ -38,6 +39,17 @@ import {
   type ProjectFileRevealTarget,
 } from '../utils/project-file-navigation';
 import { rightPanelSessionKey } from '../utils/session-right-panel';
+import {
+  createDefaultProjectTreeExplorerState,
+  getProjectTreeAncestorDirs,
+  getProjectTreeExplorerKey,
+  getProjectTreeExplorerScrollTop,
+  getProjectTreeExplorerState,
+  setProjectTreeExplorerScrollTop,
+  subscribeProjectTreeExplorerState,
+  updateProjectTreeExplorerState,
+  type ProjectTreeExplorerState,
+} from '../utils/project-tree-explorer-state';
 
 type ProjectPanelTab = 'files';
 type ViewMode = 'view' | 'code' | 'split';
@@ -61,6 +73,7 @@ const PROJECT_TREE_INDENT_PX = 18;
 const PROJECT_TREE_ROW_PADDING_LEFT_PX = 4;
 const PROJECT_TREE_GUIDE_OFFSET_PX = 12;
 const FILE_PREVIEW_LOADING_DELAY_MS = 150;
+const EMPTY_PATH_SET: Set<string> = new Set();
 const HTML_PREVIEW_CACHE_LIMIT = 12;
 const HTML_PREVIEW_CACHE_MAX_FILE_BYTES = 2 * 1024 * 1024;
 
@@ -97,7 +110,7 @@ type ProjectFilePreview =
       dataUrl: string;
     }
   | {
-      kind: 'video';
+      kind: 'video' | 'audio';
       path: string;
       name: string;
       ext: string;
@@ -710,9 +723,6 @@ export function ProjectTreePanel({
   const [loading, setLoading] = useState(false);
   const [projectTreeError, setProjectTreeError] = useState<string | null>(null);
   const prevCwdRef = useRef<string | null>(null);
-  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
-  const [treeFilter, setTreeFilter] = useState('');
-  const initRootRef = useRef<string | null>(null);
   const [panelWidth, setPanelWidth] = useState(defaultRailWidth);
   const panelResizingRef = useRef(false);
   const [isPanelResizing, setIsPanelResizing] = useState(false);
@@ -878,12 +888,50 @@ export function ProjectTreePanel({
   const activeCwd = activeSession?.cwd || null;
   const workspaceCwd = activeCwd || projectCwd || null;
   const cwd = navigationCwd || workspaceCwd || null;
-  const prevTreeResetCwdRef = useRef<string | null>(cwd);
   const restoredFileStateRef = useRef(
     useAppStore.getState().rightPanelBySessionId[rightPanelSessionKey(panelSessionId)]
       ?.fileTabsByUtilityTab[utilityTabId] ?? null
   );
   const [fileTabsHydrated, setFileTabsHydrated] = useState(false);
+  const collapsedRef = useRef(collapsed);
+  collapsedRef.current = collapsed;
+
+  // Expanded folders and the filter live in a store shared by every Files tab
+  // of this session + root: opening a file from the tree mounts a new tab, and
+  // that tab must show the tree exactly as the user left it.
+  const explorerRoot = cwd?.trim() || null;
+  const explorerKey = explorerRoot
+    ? getProjectTreeExplorerKey(rightPanelSessionKey(panelSessionId), explorerRoot)
+    : null;
+  const sharedExplorerState = useSyncExternalStore(
+    subscribeProjectTreeExplorerState,
+    () => getProjectTreeExplorerState(explorerKey)
+  );
+  const defaultExplorerState = useMemo(
+    () => (explorerRoot ? createDefaultProjectTreeExplorerState(explorerRoot) : null),
+    [explorerRoot]
+  );
+  const explorerState = sharedExplorerState ?? defaultExplorerState;
+  const expandedPaths = explorerState?.expandedPaths ?? EMPTY_PATH_SET;
+  const treeFilter = explorerState?.filter ?? '';
+  const updateExplorerState = useCallback(
+    (updater: (current: ProjectTreeExplorerState) => ProjectTreeExplorerState) => {
+      if (!explorerKey || !explorerRoot) return;
+      updateProjectTreeExplorerState(explorerKey, explorerRoot, updater);
+    },
+    [explorerKey, explorerRoot]
+  );
+  const setExpandedPaths = useCallback((updater: (prev: Set<string>) => Set<string>) => {
+    updateExplorerState((current) => {
+      const nextExpandedPaths = updater(current.expandedPaths);
+      return nextExpandedPaths === current.expandedPaths
+        ? current
+        : { ...current, expandedPaths: nextExpandedPaths };
+    });
+  }, [updateExplorerState]);
+  const setTreeFilter = useCallback((filter: string) => {
+    updateExplorerState((current) => (current.filter === filter ? current : { ...current, filter }));
+  }, [updateExplorerState]);
 
   const applyPanelTree = useCallback((root: string, tree: ProjectTreeNode | null) => {
     setPanelTree(tree);
@@ -992,19 +1040,18 @@ export function ProjectTreePanel({
   }, [captureActiveEditorViewState]);
 
   const expandParentsForPath = useCallback((path: string) => {
-    const parts = path.split('/').filter(Boolean);
-    if (parts.length <= 1) return;
+    // Background tabs restoring their documents must not rewrite the shared tree.
+    if (collapsedRef.current || !explorerRoot) return;
+    const ancestors = getProjectTreeAncestorDirs(explorerRoot, path);
+    if (ancestors.length === 0) return;
 
     setExpandedPaths((prev) => {
+      if (ancestors.every((dir) => prev.has(dir))) return prev;
       const next = new Set(prev);
-      let current = '';
-      for (const part of parts.slice(0, -1)) {
-        current = current ? `${current}/${part}` : part;
-        next.add(current);
-      }
+      for (const dir of ancestors) next.add(dir);
       return next;
     });
-  }, []);
+  }, [explorerRoot, setExpandedPaths]);
 
   const expandPath = useCallback((path: string) => {
     setExpandedPaths((prev) => {
@@ -1012,7 +1059,7 @@ export function ProjectTreePanel({
       next.add(path);
       return next;
     });
-  }, []);
+  }, [setExpandedPaths]);
 
   const ensureOpenFileTab = useCallback((
     preview: EditableProjectFilePreview,
@@ -1286,17 +1333,16 @@ export function ProjectTreePanel({
     return new Set([...expandedPaths, ...filteredTree.expandedPaths]);
   }, [expandedPaths, filteredTree]);
 
-  useEffect(() => {
-    // Session-scoped Files panels keep their own open files. Changing cwd
-    // only resets tree chrome (expansion / filter), not the editor tabs —
-    // those are persisted per session and restored on mount.
-    if (openRequest && openRequest.cwd === cwd) return;
-    if (prevTreeResetCwdRef.current === cwd) return;
-    prevTreeResetCwdRef.current = cwd;
-    setExpandedPaths(new Set());
-    setTreeFilter('');
-    initRootRef.current = null;
-  }, [cwd, openRequest]);
+  // The scroll offset is shared like the rest of the explorer state. Re-apply
+  // it whenever this tab is shown: a freshly opened tab starts at the top, and
+  // a hidden one may have been scrolled from another tab meanwhile.
+  const treeScrollRef = useRef<HTMLDivElement>(null);
+  const hasVisibleTree = Boolean(visibleTree);
+  useLayoutEffect(() => {
+    if (collapsed || !explorerKey || !hasVisibleTree) return;
+    const scroller = treeScrollRef.current;
+    if (scroller) scroller.scrollTop = getProjectTreeExplorerScrollTop(explorerKey);
+  }, [collapsed, explorerKey, hasVisibleTree]);
 
   useEffect(() => {
     setPanelWidth((current) =>
@@ -1335,13 +1381,6 @@ export function ProjectTreePanel({
     usesSharedPanelWidth,
   ]);
 
-  useEffect(() => {
-    if (!visibleTree?.path) return;
-    if (initRootRef.current === visibleTree.path) return;
-    initRootRef.current = visibleTree.path;
-    setExpandedPaths(new Set([visibleTree.path]));
-  }, [visibleTree?.path]);
-
   const togglePath = useCallback((path: string) => {
     setExpandedPaths((prev) => {
       const next = new Set(prev);
@@ -1352,7 +1391,7 @@ export function ProjectTreePanel({
       }
       return next;
     });
-  }, []);
+  }, [setExpandedPaths]);
 
   const getDefaultCreateParent = useCallback(() => {
     if (selectedFilePath) {
@@ -1824,6 +1863,7 @@ export function ProjectTreePanel({
     }
     setSelectedFilePath(filePath);
     setSelectedFileCwd(fileCwd);
+    expandParentsForPath(filePath);
     setViewMode('view');
     setMdxRevealTarget(null);
     setFileRevealTarget(null);
@@ -1901,6 +1941,7 @@ export function ProjectTreePanel({
     applyCachedFileTab,
     refreshFileTabFromDisk,
     ensureOpenFileTab,
+    expandParentsForPath,
     prepareActiveFileForTransition,
     selectedFilePath,
     setDraftTextSynced,
@@ -2692,6 +2733,9 @@ export function ProjectTreePanel({
   const isImagePreviewSurface =
     !previewLoading &&
     selectedPreview?.kind === 'image';
+  const isAudioPreviewSurface =
+    !previewLoading &&
+    selectedPreview?.kind === 'audio';
   const isMdxCodePreviewSurface =
     isMdxFilePreview &&
     viewMode === 'code';
@@ -2739,9 +2783,7 @@ export function ProjectTreePanel({
     !!projectRootDropHoverId && projectDropHoverId === projectRootDropHoverId;
   const isProjectRootExpanded =
     !!visibleTree &&
-    (isFilteringTree ||
-      expandedPaths.has(visibleTree.path) ||
-      initRootRef.current !== visibleTree.path);
+    (isFilteringTree || expandedPaths.has(visibleTree.path));
   const projectRootName = visibleTree
     ? visibleTree.name || basenameOfPath(visibleTree.path)
     : cwd ? basenameOfPath(cwd) : 'Project';
@@ -2927,6 +2969,12 @@ export function ProjectTreePanel({
           }
         >
           <div
+            ref={treeScrollRef}
+            onScroll={(event) => {
+              if (!collapsed && explorerKey) {
+                setProjectTreeExplorerScrollTop(explorerKey, event.currentTarget.scrollTop);
+              }
+            }}
             className={`flex-1 overflow-auto px-2.5 pb-3 transition-colors duration-150 ${
               isProjectRootDropTarget ? 'bg-[var(--tree-item-hover)]' : ''
             }`}
@@ -3460,6 +3508,8 @@ export function ProjectTreePanel({
                       ? 'bg-[var(--bg-primary)] p-0'
                     : isImagePreviewSurface
                       ? 'bg-[var(--bg-primary)] p-3'
+                    : isAudioPreviewSurface
+                      ? 'flex items-center justify-center bg-[var(--bg-primary)] p-6'
                     : 'rounded-lg border border-[var(--border)] bg-[var(--bg-primary)] p-3'
                 }`}
               >
@@ -3502,6 +3552,18 @@ export function ProjectTreePanel({
                     key={selectedPreview.path}
                     src={selectedPreview.previewUrl}
                     name={selectedPreview.name}
+                    active={!collapsed}
+                  />
+                )}
+
+                {!previewLoading && selectedPreview?.kind === 'audio' && (
+                  <ProjectAudioPreview
+                    key={selectedPreview.path}
+                    src={selectedPreview.previewUrl}
+                    cwd={selectedFileCwd}
+                    path={selectedPreview.path}
+                    name={selectedPreview.name}
+                    ext={selectedPreview.ext}
                     active={!collapsed}
                   />
                 )}

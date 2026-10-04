@@ -372,6 +372,7 @@ declare global {
     ) => () => void;
     downloadAttachment: (filePath: string, suggestedName?: string) => Promise<{ filePath: string | null; error?: string }>;
     readProjectFilePreview: (cwd: string, filePath: string) => Promise<unknown>;
+    saveProjectFileCopy: (cwd: string, filePath: string) => Promise<{ ok: boolean; filePath?: string; canceled?: boolean; message?: string }>;
     resolveGrokSessionFile: (cwd: string, relativePath: string) => Promise<string | null>;
     createProjectAttachment: (cwd: string, filePath: string) => Promise<Attachment | null>;
     createProjectFile: (cwd: string, parentPath: string, name: string) => Promise<{ ok: boolean; path?: string; tree?: ProjectTreeNode; message?: string }>;
