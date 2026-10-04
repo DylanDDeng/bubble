@@ -2,7 +2,7 @@ import { execFile as execFileCallback, spawn, type ChildProcessWithoutNullStream
 import { EventEmitter } from "node:events";
 import { access, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import {
@@ -609,7 +609,8 @@ export class ProjectLspService implements LspService {
   private resolveInsideCwd(filePath: string): string | undefined {
     const file = normalize(isAbsolute(filePath) ? filePath : resolve(this.cwd, filePath));
     const rel = relative(this.cwd, file);
-    if (rel.startsWith("..") || isAbsolute(rel)) return undefined;
+    // Only a whole `..` segment climbs out; `..notes.md` is a file in the project.
+    if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return undefined;
     return file;
   }
 

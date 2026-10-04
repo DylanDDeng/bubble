@@ -437,12 +437,18 @@ export class SessionManager {
     return this.checkpoints;
   }
 
-  /** Entry id of the most recent user message, or "0" before the first one. */
+  /**
+   * Entry id of the most recent user turn (as listUserTurns counts them), or
+   * "0" before the first one. Checkpoints are keyed by it, so edits made after
+   * a tool screenshot or a harness-injected block stay with the user's turn.
+   */
   lastUserEntryId(): string {
     const entries = this.log.list();
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i];
-      if (entry.type === "user_message") return entry.id;
+      if (entry.type !== "user_message") continue;
+      if (entry.message.toolObservation || isInternalBlockOnlyContent(entry.message.content)) continue;
+      return entry.id;
     }
     return "0";
   }
@@ -466,7 +472,8 @@ export class SessionManager {
       if (entry.type !== "user_message") continue;
       // Harness-injected turns (goal kicks, task wakes) are internal blocks —
       // not rewind anchors, and their markup must never render in the picker.
-      if (isInternalBlockOnlyContent(entry.message.content)) continue;
+      // Tool screenshots are user-role only for the provider; not turns either.
+      if (isInternalBlockOnlyContent(entry.message.content) || entry.message.toolObservation) continue;
       const text = messageText(entry.message);
       turns.push({
         id: entry.id,
@@ -641,7 +648,7 @@ function firstUserEntryAfterLatestClear(entries: SessionLogEntry[]) {
     const entry = entries[i];
     // Skip harness-injected internal blocks (goal kicks, task wakes): they
     // must not become the /resume preview or the deterministic title.
-    if (entry.type === "user_message" && !isInternalBlockOnlyContent(entry.message.content)) {
+    if (entry.type === "user_message" && !isInternalBlockOnlyContent(entry.message.content) && !entry.message.toolObservation) {
       return entry;
     }
   }

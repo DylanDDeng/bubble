@@ -40,6 +40,13 @@ describe('LSP process lifecycle', () => {
       expect(service.status()).toEqual([expect.objectContaining({ status: 'error', message: expect.stringMatching(mode === 'exit' ? /exited|closed/ : /timed out/) })]);
     });
   }
+  it('treats names that begin with two dots as inside the project', async () => {
+    const { cwd, service } = setup('silent');
+    const dotted = join(cwd, '..notes.fixture');
+    writeFileSync(dotted, 'const value = 1;\n');
+    expect(await service.hasClients(dotted)).toBe(true);
+    expect(await service.hasClients(join(cwd, '..', 'outside.fixture'))).toBe(false);
+  });
   it('handles a spawn error without crashing or leaving a pending request', async () => {
     const { cwd, file, service } = setup('silent');
     service.updateConfig({ fixture: { command: [join(cwd, 'missing-binary')], extensions: ['.fixture'] } });

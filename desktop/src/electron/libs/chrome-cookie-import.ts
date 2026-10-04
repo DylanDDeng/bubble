@@ -2,7 +2,8 @@ import { execFile } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { homedir as osHomedir, tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
+import { escapesRoot } from './path-containment';
 import { promisify } from 'node:util';
 import Database from 'better-sqlite3';
 import type {
@@ -241,7 +242,7 @@ function cookieStoreOf(deps: { cookieStore?: ElectronCookieStore }): ElectronCoo
 
 function isPathInside(parent: string, child: string): boolean {
   const relativePath = relative(resolve(parent), resolve(child));
-  return relativePath !== '' && !relativePath.startsWith('..') && !isAbsolute(relativePath);
+  return relativePath !== '' && !escapesRoot(relativePath);
 }
 
 function createElectronCookieStore(): ElectronCookieStore {

@@ -37,6 +37,32 @@ describe("compactCurrentTurnToolGroups", () => {
     expect(result.compacted).toBe(false);
   });
 
+  it("keeps screenshot observations with the tool groups that produced them", () => {
+    const observation = (n: number): Message => ({
+      role: "user",
+      toolObservation: true,
+      content: [{ type: "text", text: `Screenshot observation from the preceding tool result (not a new user request):\nshot ${n}` }],
+    });
+    const messages: Message[] = [
+      { role: "user", content: "inspect the page" },
+      ...[1, 2, 3, 4].flatMap((n) => [...group(`c${n}`, "screenshot", {}, `captured ${n}`), observation(n)]),
+    ];
+
+    const result = compactCurrentTurnToolGroups(messages, { keepRecentGroups: 2 });
+
+    expect(result.compacted).toBe(true);
+    const texts = (result.messages ?? []).map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)));
+    // The kept groups keep their screenshots; the evicted ones go with them.
+    expect(texts.some((t) => t.includes("shot 3"))).toBe(true);
+    expect(texts.some((t) => t.includes("shot 4"))).toBe(true);
+    expect(texts.some((t) => t.includes("shot 1") || t.includes("shot 2"))).toBe(false);
+    expect((result.evictedMessages ?? []).filter((m) => m.role === "user" && m.toolObservation)).toHaveLength(2);
+    // Each kept observation still directly follows its own tool result.
+    const kept = result.messages ?? [];
+    const shot4 = kept.findIndex((m) => m.role === "user" && m.toolObservation && JSON.stringify(m.content).includes("shot 4"));
+    expect(kept[shot4 - 1]).toMatchObject({ role: "tool", toolCallId: "c4" });
+  });
+
   it("summarizes older tool-call groups inside a single user turn", () => {
     const messages: Message[] = [
       { role: "system", content: "you are helpful" },

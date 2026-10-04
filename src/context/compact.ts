@@ -71,7 +71,9 @@ export function isCompactionSummaryMessage(message: Message): boolean {
 
 /** A message the user actually typed (not a projected reminder, not a summary). */
 export function isRealUserMessage(message: Message): boolean {
-  if (message.role !== "user") return false;
+  // Tool screenshots ride in a user-role message for the provider, but they
+  // belong to the tool turn: never a turn boundary.
+  if (message.role !== "user" || message.toolObservation) return false;
   const text = messageText(message);
   if (!text.trim() || isInternalBlockContent(text)) return false;
   if (text.trimStart().startsWith(LLM_ENVELOPE_PREFIX)) return false;
@@ -437,7 +439,9 @@ export function compactCurrentTurnToolGroups(
     if (msg.role === "assistant") {
       if (current) groups.push(current);
       current = { assistant: msg, toolResults: [] };
-    } else if (msg.role === "tool" && current) {
+    } else if ((msg.role === "tool" || (msg.role === "user" && msg.toolObservation)) && current) {
+      // A screenshot observation follows its tool result: it lives and dies
+      // with that group instead of vanishing from kept groups.
       current.toolResults.push(msg);
     }
   }
