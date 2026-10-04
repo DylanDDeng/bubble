@@ -92,6 +92,11 @@ const wait=async(fn,label)=>{for(let i=0;i<300;i++){try{if(await fn())return;}ca
   // Renderer input exercises layout and handlers; macOS app-region hit-testing
   // must also be verified with OS-level coordinate clicks.
   const click=async selector=>{const p=await js('(()=>{const r=document.querySelector('+JSON.stringify(selector)+').getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()');win.webContents.sendInputEvent({type:'mouseDown',button:'left',clickCount:1,...p});win.webContents.sendInputEvent({type:'mouseUp',button:'left',clickCount:1,...p});await delay(150);};
+  if(process.env.QA_BROWSER_START==='1') {
+   if(process.env.QA_PHASE==='seed') await require(path.join(root,'scripts/tests/browser-start-qa.cjs'))({js,click,capture,delay,win});
+   console.log('HEADER_RESTORE_PASS '+process.env.QA_PHASE);
+   app.quit();return;
+  }
   if(process.env.QA_BOARD_TABS==='1') {
    await require(path.join(root,'scripts/tests/kanban-tabs-qa.cjs'))({js,click,capture,delay,win,expected,fixture});
    console.log('HEADER_RESTORE_PASS '+process.env.QA_PHASE);

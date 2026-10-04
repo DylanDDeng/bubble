@@ -42,6 +42,8 @@
     "verify:codex-config-isolation-e2e": "npm run transpile:electron && node scripts/tests/codex-config-isolation-electron.test.mjs",
     "verify:codex-per-thread-e2e": "npm run transpile:electron && node scripts/tests/codex-per-thread-app-server.e2e.mjs",
     "verify:delegate-mcp": "npm run transpile:electron && node scripts/verify-delegate-mcp.mjs",
+    "verify:browser-navigate": "npm run transpile:electron && node --test scripts/tests/browser-panel-session.test.cjs && node scripts/launch-electron.mjs scripts/tests/browser-navigate-electron.test.cjs",
+    "verify:browser-start": "QA_BROWSER_START=1 npm run verify:workspace-header-restore",
     "verify:browser-use": "node scripts/verify-browser-use.mjs && npx tsx scripts/tests/browser-use-runtime.test.ts && npx tsx scripts/tests/chrome-cookie-import.test.ts",
     "verify:browser-use-deepseek-e2e": "npm run transpile:electron && node scripts/tests/browser-use-deepseek-electron.test.mjs",
     "verify:spreadsheet-preview": "node scripts/verify-spreadsheet-preview.mjs",

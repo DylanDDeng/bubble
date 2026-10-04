@@ -24,3 +24,17 @@ export function BrowserStartPage({ history, onNavigate, onOpenTool }: {
     </> : null}
   </div>;
 }
+
+/** Electron renders failed loads as a blank page, so the panel shows the error itself. */
+export function BrowserLoadErrorPage({ message, url, onRetry }: {
+  message: string;
+  url: string;
+  onRetry: () => void;
+}) {
+  return <div className="bubble-browser-start bubble-browser-error" role="alert" data-browser-error-page>
+    <Globe className="h-8 w-8" strokeWidth={1.3} />
+    <h2>{message}</h2>
+    <p title={url}>{url}</p>
+    <button type="button" onClick={onRetry}>Try again</button>
+  </div>;
+}

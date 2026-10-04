@@ -64,3 +64,48 @@ test('unmount before open, zero bounds and close all revoke viewport ownership',
     assert.equal(attached(), null, operation);
   }
 });
+
+test('navigating a new tab keeps the target URL while the load is in flight', async () => {
+  const { manager: m, bounds } = fixture();
+  // A fake live view: getURL() reports the last committed page until commit.
+  const page = { committed: 'about:blank', loading: false, title: '' };
+  let finishLoad;
+  const runtime = {
+    key: 'a:tab', sessionId: 'a', tabId: null,
+    view: { webContents: {
+      getURL: () => page.committed,
+      getTitle: () => page.title || page.committed,
+      isLoading: () => page.loading,
+      canGoBack: () => false,
+      canGoForward: () => false,
+      loadURL: url => new Promise(resolve => {
+        page.loading = true;
+        // did-start-loading: Electron still reports the page being left.
+        m.syncRuntimeState('a', runtime.tabId);
+        finishLoad = () => { page.committed = url; page.title = 'Bubble News'; page.loading = false; resolve(); };
+      }),
+    } },
+  };
+  m.ensureLiveRuntime = (sessionId, tabId) => {
+    runtime.tabId = tabId;
+    m.runtimes.set(`${sessionId}:${tabId}`, runtime);
+    return runtime;
+  };
+  m.attachRuntime = () => {};
+  m.setPanelBounds({ sessionId: 'a', bounds });
+  m.open({ sessionId: 'a', initialUrl: 'about:blank' });
+  const urls = [];
+  m.subscribe(state => urls.push(state.tabs.find(tab => tab.id === state.activeTabId)?.url));
+
+  const target = 'https://bubblenews.today/newbie-tutorials/how-to-talk-to-ai/';
+  m.navigate({ sessionId: 'a', url: target });
+  assert.ok(urls.length >= 2, 'loading emitted state updates');
+  assert.ok(urls.every(url => url === target), `never snaps back to the start page: ${urls.join(', ')}`);
+
+  finishLoad();
+  await new Promise(resolve => setImmediate(resolve));
+  const tab = m.getState({ sessionId: 'a' }).tabs[0];
+  assert.equal(tab.url, target);
+  assert.equal(tab.title, 'Bubble News');
+  assert.equal(runtime.pendingUrl, null, 'commit clears the pending target');
+});

@@ -56,6 +56,12 @@ interface LiveTabRuntime {
   sessionId: string;
   tabId: string;
   view: WebContentsView;
+  /**
+   * URL of a loadURL() that has not committed yet. Until it commits,
+   * getURL() still reports the previous page (about:blank for a new tab),
+   * which must not overwrite the tab's target URL.
+   */
+  pendingUrl?: string | null;
 }
 
 export interface BrowserAgentTarget {
@@ -449,6 +455,14 @@ export class BrowserManager {
         this.attachRuntime(runtime, this.activeBounds);
       }
       void this.loadTab(input.sessionId, tab.id, { force: true, runtime });
+    } else {
+      // The panel detaches the view behind its own surfaces (start page, error
+      // page). A live view still loads in the background, so the page is ready
+      // when it is shown again and "Try again" on the same URL really reloads.
+      const runtime = this.runtimes.get(buildRuntimeKey(input.sessionId, tab.id));
+      if (runtime && !this.isRuntimeClosing(input.sessionId, tab.id)) {
+        void this.loadTab(input.sessionId, tab.id, { force: true, runtime });
+      }
     }
     this.emitState(input.sessionId);
     return cloneSessionState(state);
@@ -813,7 +827,9 @@ export class BrowserManager {
       if (!runtimeExisted || wasSuspended) {
         void this.loadTab(sessionId, tab.id, { force: true, runtime });
       } else {
-        syncTabStateFromRuntime(state, tab, runtime.view.webContents);
+        // navigate() only records the URL while the view is detached (e.g.
+        // behind the start page); load it now. Unchanged tabs just sync.
+        void this.loadTab(sessionId, tab.id, { runtime });
       }
     }
     syncSessionLastError(state);
@@ -1057,6 +1073,17 @@ export class BrowserManager {
       if (this.isRuntimeClosing(sessionId, tabId)) return;
       this.syncRuntimeState(sessionId, tabId, faviconUrls);
     });
+    webContents.on('did-start-navigation', (details) => {
+      if (this.isRuntimeClosing(sessionId, tabId)) return;
+      if (!details.isMainFrame || details.isSameDocument) return;
+      // A load error belongs to the page that failed; any new document clears it.
+      const state = this.states.get(sessionId);
+      const tab = state ? this.getTab(state, tabId) : null;
+      if (!state || !tab?.lastError) return;
+      tab.lastError = null;
+      syncSessionLastError(state);
+      this.emitState(sessionId);
+    });
     webContents.on('did-start-loading', () => {
       if (this.isRuntimeClosing(sessionId, tabId)) return;
       this.syncRuntimeState(sessionId, tabId);
@@ -1065,8 +1092,9 @@ export class BrowserManager {
       if (this.isRuntimeClosing(sessionId, tabId)) return;
       this.syncRuntimeState(sessionId, tabId);
     });
-    webContents.on('did-navigate', () => {
+    webContents.on('did-navigate', (_event, url) => {
       if (this.isRuntimeClosing(sessionId, tabId)) return;
+      settlePendingUrl(runtime, url);
       this.syncRuntimeState(sessionId, tabId);
     });
     webContents.on('did-navigate-in-page', () => {
@@ -1078,6 +1106,7 @@ export class BrowserManager {
       (_event, errorCode, _errorDescription, validatedURL, isMainFrame) => {
         if (this.isRuntimeClosing(sessionId, tabId)) return;
         if (!isMainFrame || errorCode === BROWSER_ERROR_ABORTED) return;
+        runtime.pendingUrl = null;
         const state = this.states.get(sessionId);
         const tab = state ? this.getTab(state, tabId) : null;
         if (!state || !tab) return;
@@ -1145,15 +1174,21 @@ export class BrowserManager {
     tab.isLoading = true;
     tab.lastError = null;
     syncSessionLastError(state);
+    runtime.pendingUrl = nextUrl;
     this.emitState(sessionId);
 
     try {
       await webContents.loadURL(nextUrl);
+      // loadURL() can resolve on the fresh view's initial about:blank load,
+      // before nextUrl commits; only a real commit settles it.
+      if (runtime.pendingUrl === nextUrl) settlePendingUrl(runtime, webContents.getURL());
       if (this.isRuntimeClosing(sessionId, tabId)) {
         return;
       }
       this.syncRuntimeState(sessionId, tabId);
     } catch (error) {
+      // A newer loadURL() supersedes (aborts) this one and owns pendingUrl.
+      if (runtime.pendingUrl === nextUrl) runtime.pendingUrl = null;
       if (this.isRuntimeClosing(sessionId, tabId)) {
         return;
       }
@@ -1174,7 +1209,7 @@ export class BrowserManager {
     const tab = state ? this.getTab(state, tabId) : null;
     const runtime = this.runtimes.get(buildRuntimeKey(sessionId, tabId));
     if (!state || !tab || !runtime) return;
-    syncTabStateFromRuntime(state, tab, runtime.view.webContents, faviconUrls);
+    syncTabStateFromRuntime(state, tab, runtime, faviconUrls);
     syncSessionLastError(state);
     this.emitState(sessionId);
   }
@@ -1441,14 +1476,28 @@ export class BrowserManager {
   }
 }
 
+/**
+ * A fresh view commits its initial about:blank document (did-navigate, and
+ * loadURL() may even resolve) while the first real load is still on its way;
+ * that is not the commit pendingUrl waits for.
+ */
+function settlePendingUrl(runtime: LiveTabRuntime, committedUrl: string): void {
+  if (!committedUrl) return;
+  if (committedUrl !== ABOUT_BLANK_URL || runtime.pendingUrl === ABOUT_BLANK_URL) runtime.pendingUrl = null;
+}
+
 function syncTabStateFromRuntime(
   state: SessionBrowserState,
   tab: BrowserTabState,
-  webContents: WebContentsView['webContents'],
+  runtime: LiveTabRuntime,
   faviconUrls?: string[]
 ): void {
+  const webContents = runtime.view.webContents;
   const currentUrl = webContents.getURL();
-  const nextUrl = currentUrl || tab.url;
+  // While our own load is uncommitted, show where it is going, not the page
+  // it is leaving; otherwise a new tab snaps back to about:blank. pendingUrl
+  // is cleared on commit, failure and loadURL() settling.
+  const nextUrl = runtime.pendingUrl || currentUrl || tab.url;
   const nextTitle = webContents.getTitle();
   tab.status = 'live';
   tab.url = nextUrl;
@@ -1460,9 +1509,8 @@ function syncTabStateFromRuntime(
   if (faviconUrls) {
     tab.faviconUrl = faviconUrls[0] ?? tab.faviconUrl;
   }
-  if (tab.lastError && !tab.isLoading) {
-    tab.lastError = null;
-  }
+  // lastError is not cleared here: Chromium finishes loading its (blank)
+  // error page right after did-fail-load. New navigations clear it.
   syncSessionLastError(state);
 }
 

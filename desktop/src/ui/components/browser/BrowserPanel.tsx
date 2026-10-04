@@ -56,7 +56,7 @@ import {
   resolveBrowserChromeStatus,
 } from './BrowserPanel.logic';
 import { useBrowserNativeOverlay } from './browser-native-overlay';
-import { BrowserStartPage } from './BrowserStartPage';
+import { BrowserLoadErrorPage, BrowserStartPage } from './BrowserStartPage';
 
 const MIN_PANEL_WIDTH = 320;
 const MAX_PANEL_WIDTH = 1200;
@@ -182,8 +182,10 @@ export function BrowserPanel({
   const matchingHistory = history.filter(item => !addressValue || `${item.title} ${item.url}`.toLowerCase().includes(addressValue.toLowerCase()));
   const historyOpen = addressEditing && matchingHistory.length > 0;
   const showStartPage = !activeTab || !activeTab.url || activeTab.url === DEFAULT_HOME_URL;
-  // Both the start page and the address suggestions are React surfaces.
-  const nativeViewHidden = collapsed || overlayOpen || showStartPage || historyOpen;
+  // The failed page is blank and would cover the error, so the panel draws it.
+  const loadError = !showStartPage && activeTab && !activeTab.isLoading ? activeTab.lastError : null;
+  // The start page, error page and address suggestions are React surfaces.
+  const nativeViewHidden = collapsed || overlayOpen || showStartPage || !!loadError || historyOpen;
 
   const lastSyncedAddressRef = useRef<string | undefined>(undefined);
   const previousActiveTabIdRef = useRef<string | null>(null);
@@ -864,7 +866,8 @@ export function BrowserPanel({
         <div className="relative min-h-0 flex-1 bg-[var(--bg-primary)]">
           <div ref={viewportRef} className="absolute inset-0" />
           {showStartPage ? <BrowserStartPage history={history} onNavigate={url => void handleNavigate(url)} onOpenTool={tool => useAppStore.getState().openRightUtilityTab(tool)} /> : null}
-          {!showStartPage && chromeStatus && (
+          {loadError && activeTab ? <BrowserLoadErrorPage message={loadError} url={activeTab.url} onRetry={() => void handleNavigate(activeTab.url)} /> : null}
+          {!showStartPage && !loadError && chromeStatus && (
             <div
               className={`pointer-events-none absolute bottom-2 left-2 right-2 rounded-md border px-2 py-1 text-[11px] ${
                 chromeStatus.tone === 'error'
