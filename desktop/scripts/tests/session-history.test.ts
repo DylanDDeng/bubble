@@ -178,12 +178,21 @@ assert.equal(migrated.tabs[0].historyIndex, 0);
 // --- chrome placement -------------------------------------------------------
 
 async function main() {
+  // Back/forward live once in the fixed window navigation, shared by every
+  // workspace; the tab bar and sidebar must not render their own copies.
+  const appSource = await readFile(new URL('../../src/ui/App.tsx', import.meta.url), 'utf8');
+  assert.match(
+    appSource,
+    /<div data-window-navigation[^>]*>\s*<SessionHistoryButtons \/>/,
+    'the window navigation must render back/forward'
+  );
+  assert.equal(appSource.match(/<SessionHistoryButtons\b/g)?.length, 1, 'back/forward render exactly once');
   for (const file of ['AppTabBar.tsx', 'Sidebar.tsx']) {
     const source = await readFile(
       new URL(`../../src/ui/components/${file}`, import.meta.url),
       'utf8'
     );
-    assert.match(source, /<SessionHistoryButtons/, `${file} must render back/forward`);
+    assert.doesNotMatch(source, /<SessionHistoryButtons/, `${file} must not duplicate back/forward`);
   }
 
   const buttonsSource = await readFile(
