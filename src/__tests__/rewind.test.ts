@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { CheckpointStore } from "../checkpoints.js";
+import { isRealUserMessage } from "../context/compact.js";
 import { SessionManager } from "../session.js";
 import { builtinSlashCommands } from "../slash-commands/commands.js";
 import type { SlashCommandContext } from "../slash-commands/types.js";
@@ -28,6 +29,41 @@ describe("SessionManager rewind", () => {
     expect(turns).toHaveLength(2);
     expect(turns[0].preview).toBe("first question");
     expect(turns[1].preview).toBe("second question");
+  });
+
+  it("does not list tool screenshot observations as user turns", () => {
+    const dir = freshDir();
+    const file = join(dir, "s.jsonl");
+    const sm = new SessionManager(file);
+    sm.appendMessage({ role: "user", content: "take a screenshot" });
+    sm.appendMessage({ role: "assistant", content: "", toolCalls: [{ id: "c1", name: "screenshot", arguments: "{}" }] });
+    sm.appendMessage({ role: "tool", content: "captured", toolCallId: "c1" });
+    const observation = {
+      role: "user" as const,
+      toolObservation: true as const,
+      content: [{ type: "text" as const, text: "Screenshot observation from the preceding tool result (not a new user request):\ncaptured" }],
+    };
+    sm.appendMessage(observation);
+    sm.appendMessage({ role: "assistant", content: "done" });
+
+    expect(sm.listUserTurns().map((turn) => turn.preview)).toEqual(["take a screenshot"]);
+    // The flag survives the session log, so a reopened session agrees.
+    expect(new SessionManager(file).listUserTurns().map((turn) => turn.preview)).toEqual(["take a screenshot"]);
+    expect(isRealUserMessage(observation)).toBe(false);
+    expect(isRealUserMessage({ role: "user", content: "take a screenshot" })).toBe(true);
+  });
+
+  it("keys edits made after a tool screenshot to the user's turn", async () => {
+    const dir = freshDir();
+    const sm = new SessionManager(join(dir, "s.jsonl"));
+    sm.appendMessage({ role: "user", content: "take a screenshot then fix the page" });
+    sm.appendMessage({ role: "assistant", content: "", toolCalls: [{ id: "c1", name: "screenshot", arguments: "{}" }] });
+    sm.appendMessage({ role: "tool", content: "captured", toolCallId: "c1" });
+    sm.appendMessage({ role: "user", toolObservation: true, content: [{ type: "text", text: "Screenshot observation" }] });
+    await sm.getCheckpoints().captureBefore(join(dir, "page.html"), "<p>old</p>");
+
+    const [turn] = sm.listUserTurns();
+    expect(sm.getCheckpoints().filesTouchedAt(turn.id)).toEqual([join(dir, "page.html")]);
   });
 
   it("excludes turns before the latest conversation_clear", () => {
