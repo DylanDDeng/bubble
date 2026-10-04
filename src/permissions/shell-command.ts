@@ -123,6 +123,32 @@ export function shellTokens(segment: string): string[] {
 const COMMAND_WRAPPERS = new Set(["command", "exec", "nohup", "builtin", "env", "sudo", "doas", "nice", "xargs"]);
 
 /**
+ * Wrapper options that take a separate argument (`sudo -u root`), so that
+ * argument is not mistaken for the command. `env -S` is deliberately absent:
+ * its argument is the command line itself.
+ */
+const WRAPPER_OPTION_ARGS: Record<string, { short: string; long: string[] }> = {
+  sudo: { short: "CDghpRrTtUu", long: ["chdir", "chroot", "close-from", "command-timeout", "group", "host", "other-user", "prompt", "role", "type", "user"] },
+  doas: { short: "Cu", long: [] },
+  env: { short: "aCPu", long: ["argv0", "chdir", "unset"] },
+  nice: { short: "n", long: ["adjustment"] },
+  // GNU --eof/--replace/--max-lines take a value only as `--opt=value`.
+  xargs: { short: "adEIJLnPRSs", long: ["arg-file", "delimiter", "max-args", "max-chars", "max-procs", "process-slot-var"] },
+  exec: { short: "a", long: [] },
+};
+
+/** getopt rules: in `-Eu root` the last letter takes the next word; in `-uroot` it is attached. */
+function optionTakesNextWord(wrapper: string, option: string): boolean {
+  const spec = WRAPPER_OPTION_ARGS[wrapper];
+  if (!spec) return false;
+  if (option.startsWith("--")) return !option.includes("=") && spec.long.includes(option.slice(2));
+  for (let index = 1; index < option.length; index++) {
+    if (spec.short.includes(option[index])) return index === option.length - 1;
+  }
+  return false;
+}
+
+/**
  * The words of a segment with leading `VAR=value` assignments and command
  * wrappers (`sudo -u x`, `env`, `nohup`, ...) removed. Deny rules match
  * against this too, so `sudo rm -rf x` and `FOO=1 rm -rf x` still hit a
@@ -136,8 +162,12 @@ export function effectiveCommandTokens(segment: string): string[] {
     changed = false;
     while (tokens.length > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0])) { tokens.shift(); changed = true; }
     if (tokens.length > 0 && COMMAND_WRAPPERS.has(tokens[0])) {
-      tokens.shift();
-      while (tokens.length > 0 && tokens[0].startsWith("-")) tokens.shift();
+      const wrapper = tokens.shift()!;
+      while (tokens.length > 0 && tokens[0].startsWith("-")) {
+        const option = tokens.shift()!;
+        if (option === "--") break;
+        if (optionTakesNextWord(wrapper, option)) tokens.shift();
+      }
       changed = true;
     }
   }

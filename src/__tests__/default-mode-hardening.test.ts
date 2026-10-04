@@ -9,6 +9,7 @@ import type { ApprovalDecision, ApprovalRequest } from "../approval/types.js";
 import { buildRuleSet, checkPermission } from "../permissions/rule.js";
 import { analyzeShellCommand } from "../permissions/shell-command.js";
 import { gateMcpTools } from "../mcp/manager.js";
+import { createGrepTool } from "../tools/grep.js";
 import { isSensitivePath } from "../tools/sensitive-paths.js";
 import { isWithinWorkspace } from "../tools/file-state.js";
 import type { PermissionMode, ToolRegistryEntry } from "../types.js";
@@ -80,6 +81,31 @@ describe("compound-aware bash matching", () => {
       "echo ok && rm -rf x",
       "echo ok; rm -rf x",
       "sudo rm -rf x",
+      // Wrapper options that take an argument must not hide the command.
+      "sudo -u root rm -rf x",
+      "sudo -Eu root rm -rf x",
+      "sudo -uroot rm -rf x",
+      "sudo --user root rm -rf x",
+      "sudo --user=root rm -rf x",
+      "sudo -g wheel -u root -- rm -rf x",
+      "doas -u root rm -rf x",
+      "env -u HOME rm -rf x",
+      "env -C /tmp rm -rf x",
+      "env -P /bin rm -rf x",
+      "env -S 'rm -rf x'",
+      "nice -n 10 rm -rf x",
+      "nice -10 rm -rf x",
+      "xargs -I {} rm -rf {}",
+      "xargs -n 1 rm -rf",
+      "xargs --replace rm -rf {}",
+      "xargs --max-lines rm -rf",
+      "xargs --eof rm -rf",
+      "xargs --replace={} rm -rf {}",
+      "xargs -J % rm -rf %",
+      "xargs -R 1 -I % rm -rf %",
+      "env -a name rm -rf x",
+      "exec -a name rm -rf x",
+      "sudo nice -n 5 env -u X rm -rf x",
       "FOO=1 rm -rf x",
       "env FOO=1 rm -rf x",
       "echo $(rm -rf x)",
@@ -265,6 +291,35 @@ describe("sensitive credential paths", () => {
     expect(isSensitivePath(join(home, ".AWS/Credentials"))).toBe(true);
     expect(isSensitivePath(join(home, ".SSH/id_ed25519"))).toBe(true);
     expect(isSensitivePath(join(home, ".SSH/Config"))).toBe(false);
+  });
+
+  it("keeps grep out of credential files below an explicit search root", async () => {
+    for (const [file, text] of [
+      [".aws/credentials", "aws_secret_access_key = SECRET_AWS"],
+      [".aws/config", "region = SECRET_SAFE_AWS_CONFIG"],
+      [".ssh/id_ed25519", "SECRET_SSH_KEY"],
+      [".ssh/id_ed25519.pub", "SECRET_SAFE_PUBKEY"],
+      ["Library/Keychains/login.db", "SECRET_KEYCHAIN"],
+      ["notes.txt", "SECRET_SAFE_NOTES"],
+    ] as const) {
+      mkdirSync(join(home, file, ".."), { recursive: true });
+      writeFileSync(join(home, file), `${text}\n`);
+    }
+    const grep = createGrepTool(home);
+    const search = async (path: string) =>
+      (await grep.execute({ pattern: "SECRET_", path }, { cwd: home })).content;
+
+    // ripgrep descends into an explicit hidden root; the matches must not leak.
+    const aws = await search(join(home, ".aws"));
+    expect(aws).toContain("SECRET_SAFE_AWS_CONFIG");
+    expect(aws).not.toContain("SECRET_AWS");
+    const ssh = await search(join(home, ".ssh"));
+    expect(ssh).toContain("SECRET_SAFE_PUBKEY");
+    expect(ssh).not.toContain("SECRET_SSH_KEY");
+    // Keychains is not a hidden directory, so a home-wide search walks it.
+    const all = await search(home);
+    expect(all).toContain("SECRET_SAFE_NOTES");
+    expect(all).not.toContain("SECRET_KEYCHAIN");
   });
 
   it("follows symlinks so a workspace link cannot reach a credential file", () => {

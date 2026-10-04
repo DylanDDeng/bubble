@@ -141,6 +141,18 @@ function executeBoundedGrep(options: {
     });
     const decoder = new StringDecoder("utf8");
     const matches: GrepMatch[] = [];
+    // The root check alone is not enough: ripgrep searches inside an explicit
+    // hidden root, so `path: ~/.aws` would reach ~/.aws/credentials. Every
+    // matched file gets the same check the read tool applies (cached per file).
+    const sensitiveByPath = new Map<string, boolean>();
+    const isSensitiveMatch = (absolutePath: string) => {
+      let sensitive = sensitiveByPath.get(absolutePath);
+      if (sensitive === undefined) {
+        sensitive = isSensitivePath(absolutePath);
+        sensitiveByPath.set(absolutePath, sensitive);
+      }
+      return sensitive;
+    };
     let stdoutBuffer = "";
     let stdoutBytes = 0;
     let stderrBytes = 0;
@@ -168,6 +180,11 @@ function executeBoundedGrep(options: {
         const event = JSON.parse(line) as any;
         if (event.type !== "match") return;
         const rawPath = decodeRgField(event.data?.path);
+        // A path that is not valid UTF-8 cannot be checked (or read back by
+        // the model), so its matches are dropped rather than shown unchecked.
+        if (event.data?.path && !rawPath) return;
+        const absolutePath = rawPath ? resolvePath(options.cwd, rawPath) : undefined;
+        if (absolutePath && isSensitiveMatch(absolutePath)) return;
         const lineNumber = event.data?.line_number;
         const rawText = decodeRgField(event.data?.lines, "[non-UTF-8 match bytes omitted]") ?? "";
         const displayPath = rawPath || "<non-UTF-8 path>";
@@ -178,7 +195,7 @@ function executeBoundedGrep(options: {
         );
         matches.push({
           rendered,
-          ...(rawPath ? { absolutePath: resolvePath(options.cwd, rawPath) } : {}),
+          ...(absolutePath ? { absolutePath } : {}),
         });
         // We stop at N rather than pretending we proved there are N+1 matches.
         // The notice says "limit reached / may be incomplete", which is honest
