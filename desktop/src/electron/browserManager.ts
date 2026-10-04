@@ -139,6 +139,10 @@ function defaultTitleForUrl(url: string): string {
   }
 }
 
+function sameBounds(a: BrowserPanelBounds | null, b: BrowserPanelBounds): boolean {
+  return !!a && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
+}
+
 function normalizeBounds(bounds: BrowserPanelBounds | null): BrowserPanelBounds | null {
   if (!bounds) return null;
   if (
@@ -428,6 +432,24 @@ export class BrowserManager {
     const nextBounds = normalizeBounds(input.bounds);
     if (nextBounds === null) {
       this.hide(input);
+      return cloneSessionState(state);
+    }
+    // Live window resizes stream bounds for the page already on screen: just
+    // move the view. The full activation path re-syncs and re-broadcasts the
+    // whole browser state, which costs frames when it runs on every resize.
+    const activeTab = this.getActiveTab(state);
+    if (
+      state.open &&
+      this.activeSessionId === input.sessionId &&
+      this.panelSessionId === input.sessionId &&
+      this.attachedView &&
+      activeTab &&
+      this.attachedRuntimeKey === buildRuntimeKey(input.sessionId, activeTab.id)
+    ) {
+      if (!sameBounds(this.activeBounds, nextBounds)) {
+        this.activeBounds = nextBounds;
+        this.attachedView.setBounds(nextBounds);
+      }
       return cloneSessionState(state);
     }
     if (this.activeSessionId && this.activeSessionId !== input.sessionId) {

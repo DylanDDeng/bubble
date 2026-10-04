@@ -343,12 +343,16 @@ export function BrowserPanel({
   // Revoke the native viewport during the layout commit, before the next
   // conversation paints. Passive cleanup leaves the old page floating over it.
   const visibleBrowserSessionRef = useRef<string | null>(null);
+  // Bounds last sent for the visible view; identical rects are not resent.
+  const lastPushedBoundsRef = useRef<string | null>(null);
   useLayoutEffect(() => {
     const hide = () => {
       visibleBrowserSessionRef.current = null;
       void window.electron.browser.hide({ sessionId: browserSessionId }).catch(() => {});
     };
     visibleBrowserSessionRef.current = nativeViewHidden ? null : browserSessionId;
+    // hide() revokes the bounds in the main process; the next show must resend.
+    lastPushedBoundsRef.current = null;
     if (nativeViewHidden) hide();
     return hide;
   }, [browserSessionId, nativeViewHidden]);
@@ -411,7 +415,6 @@ export function BrowserPanel({
 
   // ===== Viewport bounds sync =====
   const viewportRef = useRef<HTMLDivElement | null>(null);
-  const rafRef = useRef<number | null>(null);
 
   const pushBounds = useCallback(() => {
     if (nativeViewHidden || visibleBrowserSessionRef.current !== browserSessionId) return;
@@ -421,17 +424,20 @@ export function BrowserPanel({
     const el = viewportRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
+    const bounds = {
+      x: Math.round(rect.left),
+      y: Math.round(rect.top),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+    };
+    const key = `${browserSessionId}:${bounds.x},${bounds.y},${bounds.width},${bounds.height}`;
+    if (key === lastPushedBoundsRef.current) return;
+    lastPushedBoundsRef.current = key;
     window.electron.browser
-      .setPanelBounds({
-        sessionId: browserSessionId,
-        bounds: {
-          x: Math.round(rect.left),
-          y: Math.round(rect.top),
-          width: Math.round(rect.width),
-          height: Math.round(rect.height),
-        },
-      })
-      .catch(() => {});
+      .setPanelBounds({ sessionId: browserSessionId, bounds })
+      .catch(() => {
+        lastPushedBoundsRef.current = null;
+      });
   }, [browserSessionId, nativeViewHidden, sessionId]);
 
   useLayoutEffect(() => {
@@ -442,20 +448,15 @@ export function BrowserPanel({
     if (nativeViewHidden) return;
     const el = viewportRef.current;
     if (!el) return;
-    const observer = new ResizeObserver(() => {
-      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
-      rafRef.current = requestAnimationFrame(() => {
-        rafRef.current = null;
-        pushBounds();
-      });
-    });
+    // ResizeObserver runs after layout and before paint: push in the same
+    // frame. Deferring to requestAnimationFrame cost the view one more frame.
+    const observer = new ResizeObserver(() => pushBounds());
     observer.observe(el);
     const onWindowResize = () => pushBounds();
     window.addEventListener('resize', onWindowResize);
     return () => {
       observer.disconnect();
       window.removeEventListener('resize', onWindowResize);
-      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
     };
   }, [nativeViewHidden, pushBounds]);
 

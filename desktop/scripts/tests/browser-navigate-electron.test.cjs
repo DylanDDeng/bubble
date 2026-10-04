@@ -102,7 +102,27 @@ app.whenReady().then(async () => {
     browserManager.setPanelBounds({ sessionId: 'qa', bounds });
     await settle(tab => tab.title === 'Fixture page' && !tab.isLoading, 'start-page pick loads while hidden');
     assert.deepEqual(urls.filter(item => item.url !== target), [], 'start-page pick never snaps back: ' + JSON.stringify(urls));
-    console.log(`BROWSER_NAVIGATE_PASS new tab, page-to-page, 204, failed loads and start-page pick`);
+    // Live resize: a page already on screen only moves; no state re-broadcast.
+    const view = runtime().view;
+    assert.ok(win.contentView.children.includes(view), 'page is attached');
+    let emitted = 0;
+    const stopCounting = browserManager.subscribe(() => { emitted += 1; });
+    for (const width of [560, 520, 480]) {
+      browserManager.setPanelBounds({ sessionId: 'qa', bounds: { ...bounds, width } });
+      assert.deepEqual(view.getBounds(), { ...bounds, width }, 'view follows each resize step');
+    }
+    browserManager.setPanelBounds({ sessionId: 'qa', bounds: { ...bounds, width: 480 } });
+    stopCounting();
+    assert.equal(emitted, 0, 'resizing does not re-broadcast browser state');
+
+    // Another conversation's panel still takes the full path and detaches this page.
+    browserManager.open({ sessionId: 'other', initialUrl: 'about:blank' });
+    browserManager.setPanelBounds({ sessionId: 'other', bounds });
+    assert.equal(win.contentView.children.includes(view), false, 'switching conversations detaches the previous page');
+    browserManager.setPanelBounds({ sessionId: 'qa', bounds });
+    assert.ok(win.contentView.children.includes(view), 'returning reattaches it');
+    assert.deepEqual(view.getBounds(), bounds);
+    console.log(`BROWSER_NAVIGATE_PASS new tab, page-to-page, 204, failed loads, start-page pick and live resize`);
   } catch (error) {
     console.error(error);
     exitCode = 1;
