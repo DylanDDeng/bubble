@@ -44,6 +44,7 @@ import {
 import { ensureProviderService, runAgentLoop } from './libs/agent-loop';
 import { browserManager } from './browserManager';
 import { readProjectTree as scanProjectTree, isIgnoredProjectTreeChange } from './libs/project-tree';
+import { escapesRoot } from './libs/path-containment';
 import { createProjectTreeReader } from './libs/project-tree-reader';
 import { createCoalescedRefresh } from './libs/coalesced-refresh';
 import {
@@ -846,8 +847,7 @@ type ProjectFilePreview =
 function isPathWithinRoot(rootPath: string, filePath: string): boolean {
   const root = resolve(rootPath);
   const target = resolve(filePath);
-  const rel = relative(root, target);
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+  return !escapesRoot(relative(root, target));
 }
 
 async function validateProjectFilePath(
@@ -3762,8 +3762,7 @@ function retireSessionRunner(sessionId: string): void {
 
 function isPathAtOrUnder(child: string, root: string): boolean {
   try {
-    const rel = relative(resolve(root), resolve(child));
-    return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+    return !escapesRoot(relative(resolve(root), resolve(child)));
   } catch {
     return false;
   }

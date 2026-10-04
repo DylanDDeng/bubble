@@ -1117,6 +1117,9 @@ export class BrowserManager {
     });
     webContents.on('did-stop-loading', () => {
       if (this.isRuntimeClosing(sessionId, tabId)) return;
+      // Loading stopped and the target never committed (204, download): the
+      // view stays on its previous page, so stop reporting the target URL.
+      if (runtime.pendingUrl && !webContents.isLoading()) runtime.pendingUrl = null;
       this.syncRuntimeState(sessionId, tabId);
     });
     webContents.on('did-navigate', (_event, url) => {

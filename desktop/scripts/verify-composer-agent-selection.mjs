@@ -23,6 +23,9 @@ assert.ok(
 // wide; inside the cap only the model name ellipsizes, never the effort label.
 const pickerCss = read('src/ui/components/reasoning-picker.css');
 const cssRule = (selector) => pickerCss.match(new RegExp(`\\n${selector.replace('.', '\\.')}\\s*\\{([^}]*)\\}`))?.[1] ?? '';
+// The whole declaration value, so `flex-shrink: 0.5` is not read as `0`.
+const declares = (rule, property, value) =>
+  new RegExp(`(?:^|;)\\s*${property}:\\s*${value.replace('.', '\\.')}\\s*(?:;|$)`).test(rule);
 assert.ok(
   controls.includes("const fullModelLabelTriggerClassName = 'min-w-0 max-w-[256px]';") &&
     (controls.match(/className=\{`\$\{triggerClassName\} \$\{fullModelLabelTriggerClassName\}`\}/g) ?? []).length === 2 &&
@@ -31,9 +34,9 @@ assert.ok(
   'composer model triggers must be capped and render the model and effort as separate labels'
 );
 assert.ok(
-  /text-overflow:\s*ellipsis/.test(cssRule('.composer-model-name')) &&
-    /flex-shrink:\s*1/.test(cssRule('.composer-model-name')) &&
-    /flex-shrink:\s*0/.test(cssRule('.composer-model-effort')),
+  declares(cssRule('.composer-model-name'), 'text-overflow', 'ellipsis') &&
+    declares(cssRule('.composer-model-name'), 'flex-shrink', '1') &&
+    declares(cssRule('.composer-model-effort'), 'flex-shrink', '0'),
   'inside the capped trigger only the model name may ellipsize; the reasoning label must never shrink'
 );
 

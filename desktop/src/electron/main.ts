@@ -23,6 +23,7 @@ import {
 } from './util';
 import { ensureShellEnvironment } from './libs/shell-environment';
 import { listRunningSessions } from './libs/session-store';
+import { writeProjectEditorDraftSync } from './libs/editor-draft-flush';
 import type { AppUpdateStatus } from '../shared/types';
 
 // close 确认用：数据库未初始化等异常一律按 0 处理，绝不阻塞关窗
@@ -81,7 +82,6 @@ type PendingProjectEditorDraft = {
   content: string;
 };
 let pendingProjectEditorDraft: PendingProjectEditorDraft | null = null;
-const EDITABLE_PROJECT_EDITOR_EXTENSIONS = new Set(['.txt', '.md', '.mdx']);
 let handledTerminationSignal = false;
 
 function setPendingProjectEditorDraft(draft: PendingProjectEditorDraft | null): void {
@@ -98,36 +98,7 @@ function flushPendingProjectEditorDraftSync(suppliedDraft?: PendingProjectEditor
   if (!draft) return;
   if (suppliedDraft === undefined) pendingProjectEditorDraft = null;
   try {
-    const root = path.resolve(draft.cwd || '.');
-    const resolved = path.resolve(root, draft.filePath || '');
-    const ext = path.extname(resolved).toLowerCase();
-    if (!EDITABLE_PROJECT_EDITOR_EXTENSIONS.has(ext)) {
-      return;
-    }
-    const rel = path.relative(root, resolved);
-    if (rel.startsWith('..') || path.isAbsolute(rel)) {
-      return;
-    }
-    const stat = fs.existsSync(resolved) ? fs.statSync(resolved) : null;
-    if (!stat?.isFile()) {
-      return;
-    }
-    const tempPath = path.join(
-      path.dirname(resolved),
-      `.${path.basename(resolved)}.${process.pid}.${Date.now()}.${Math.random()
-        .toString(36)
-        .slice(2)}.tmp`
-    );
-    try {
-      fs.writeFileSync(tempPath, draft.content ?? '', { encoding: 'utf8', mode: stat.mode });
-      fs.renameSync(tempPath, resolved);
-    } finally {
-      try {
-        if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
-      } catch {
-        // ignore cleanup failures
-      }
-    }
+    writeProjectEditorDraftSync(draft);
   } catch (error) {
     console.warn('[ProjectEditor] Failed to flush pending draft synchronously:', error);
   }

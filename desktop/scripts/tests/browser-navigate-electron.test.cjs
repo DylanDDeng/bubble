@@ -7,7 +7,11 @@ const os = require('node:os');
 const path = require('node:path');
 const fs = require('node:fs');
 
-app.setPath('userData', fs.mkdtempSync(path.join(os.tmpdir(), 'bubble-browser-nav-')));
+// Runtime tests isolate both Electron userData and Bubble's Agent data.
+const qaData = fs.mkdtempSync(path.join(os.tmpdir(), 'bubble-browser-nav-'));
+app.setPath('userData', path.join(qaData, 'profile'));
+process.env.BUBBLE_HOME = path.join(qaData, 'agent');
+fs.mkdirSync(process.env.BUBBLE_HOME, { recursive: true });
 
 app.whenReady().then(async () => {
   let exitCode = 0;
@@ -26,8 +30,23 @@ app.whenReady().then(async () => {
     await win.loadURL('data:text/html,<p>host</p>');
     browserManager.setWindow(win);
     const bounds = { x: 400, y: 80, width: 600, height: 600 };
+    // A fresh tab whose very first load commits nothing (204) falls back to
+    // the start page instead of claiming the 204 URL over a blank view.
+    browserManager.setPanelBounds({ sessionId: 'fresh', bounds });
+    browserManager.open({ sessionId: 'fresh', initialUrl: 'about:blank' });
+    browserManager.navigate({ sessionId: 'fresh', url: `http://127.0.0.1:${server.address().port}/no-content` });
+    for (let i = 0; i < 150; i++) {
+      const tab = browserManager.getState({ sessionId: 'fresh' }).tabs[0];
+      if (!tab.isLoading && tab.url === 'about:blank') break;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.equal(browserManager.getState({ sessionId: 'fresh' }).tabs[0].url, 'about:blank', 'fresh-tab 204 returns to the start page');
+    assert.equal([...browserManager.runtimes.values()].find(r => r.sessionId === 'fresh').pendingUrl, null);
+    browserManager.close({ sessionId: 'fresh' });
+
     browserManager.setPanelBounds({ sessionId: 'qa', bounds });
     browserManager.open({ sessionId: 'qa', initialUrl: 'about:blank' });
+
 
     const target = `http://127.0.0.1:${server.address().port}/newbie-tutorials/how-to-talk-to-ai/`;
     const urls = [];
