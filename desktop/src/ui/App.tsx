@@ -1060,6 +1060,7 @@ export function App() {
         windowShellRounded ? 'aegis-window-shell--rounded' : ''
       }`}
     >
+      {!showSettings && <div className="bubble-titlebar-corner-drag drag-region" aria-hidden="true" />}
       {!showSettings && <div data-window-navigation className="bubble-window-navigation no-drag">
         <SessionHistoryButtons />
         <SidebarHeaderTrigger />

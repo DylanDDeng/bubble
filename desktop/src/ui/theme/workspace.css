@@ -69,6 +69,18 @@
   padding-left: max(8px, calc(176px - var(--bubble-sidebar-width, 0px)));
 }
 
+/* The window corner (traffic lights) up to the navigation buttons. Every
+   other titlebar drag area starts after the buttons, at x = 176px. */
+.bubble-titlebar-corner-drag {
+  position: absolute;
+  z-index: 81;
+  top: 0;
+  left: 0;
+  width: 84px;
+  height: 40px;
+  pointer-events: none;
+}
+
 .bubble-window-navigation {
   position: absolute;
   z-index: 81;
