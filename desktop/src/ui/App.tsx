@@ -7,7 +7,7 @@ import { ImageStudioPanel, ImageStudioFileActions } from './components/ImageStud
 import { subscribeAppPreferences } from './store/useAppPreferences';
 import { TextInputDialogHost } from './components/ui/text-input-dialog';
 import { GoalEditorPanel } from './components/SessionGoal';
-import { useEffect, useRef, useMemo, useState, useCallback, type ReactNode } from 'react';
+import { useEffect, useRef, useMemo, useState, useCallback, type ComponentType, type ReactNode } from 'react';
 import * as Dialog from '@/ui/components/ui/dialog';
 import * as DropdownMenu from '@/ui/components/ui/dropdown-menu';
 import { ConfirmDialogHost } from '@/ui/components/ui/confirm-dialog';
@@ -165,6 +165,17 @@ function getProjectUtilityTabKind(target: ProjectUtilityPanelTarget): ProjectUti
   if (isProjectUtilityBrowserTab(target)) return 'browser';
   if (isProjectUtilitySubagentTab(target)) return 'subagent';
   return target as ProjectUtilityPanelKind;
+}
+
+function getBrowserUtilityFavicon(
+  state: ReturnType<typeof useBrowserStateStore.getState>['sessionStatesBySessionId'][string] | null | undefined
+): string | null {
+  const activeTab =
+    state?.tabs.find((tab) => tab.id === state.activeTabId) ??
+    state?.tabs[0] ??
+    null;
+  if (!activeTab?.faviconUrl || !/^https?:\/\//i.test(activeTab.url ?? '')) return null;
+  return activeTab.faviconUrl;
 }
 
 function getBrowserUtilityLabel(
@@ -745,12 +756,12 @@ export function App() {
       }
       if (kind === 'browser') {
         const browserSessionId = getBrowserUtilitySessionId(activeSessionId, tab);
+        const browserState = browserSessionId ? browserSessionStates[browserSessionId] : null;
         return {
           id: tab,
           kind,
-          label: getBrowserUtilityLabel(
-            browserSessionId ? browserSessionStates[browserSessionId] : null
-          ),
+          label: getBrowserUtilityLabel(browserState),
+          faviconUrl: getBrowserUtilityFavicon(browserState),
         };
       }
       if (kind === 'side-chat') {
@@ -1397,6 +1408,25 @@ export function App() {
   );
 }
 
+/** The page's own favicon; the globe stands in until it loads or if it fails. */
+function BrowserTabFavicon({ src, fallback: Fallback }: { src: string; fallback: ComponentType<{ className?: string }> }) {
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  if (failedSrc === src) {
+    return <Fallback className="h-3.5 w-3.5 flex-shrink-0 text-[var(--text-muted)]" aria-hidden="true" />;
+  }
+  return (
+    <img
+      src={src}
+      alt=""
+      aria-hidden="true"
+      draggable={false}
+      referrerPolicy="no-referrer"
+      className="h-3.5 w-3.5 flex-shrink-0 rounded-[3px] object-contain"
+      onError={() => setFailedSrc(src)}
+    />
+  );
+}
+
 function getUtilityTabIcon(target: ProjectUtilityPanelKind) {
   if (target === 'sources') return Paperclip;
   if (target === 'images') return ImageStudioIcon;
@@ -1678,6 +1708,8 @@ function RightUtilityTabStrip({
                       hue={tab.subagentPersona.colorHue}
                       size={14}
                     />
+                  ) : tab.kind === 'browser' && tab.faviconUrl ? (
+                    <BrowserTabFavicon src={tab.faviconUrl} fallback={Icon} />
                   ) : useFileIcon ? (
                     <FileTypeIcon
                       name={tab.label}

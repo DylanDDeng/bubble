@@ -7,9 +7,14 @@ const http = require('node:http');
 module.exports = async ({ js, click, capture, delay }) => {
   const listen = (server, port = 0) => new Promise(resolve => server.listen(port, '127.0.0.1', () => resolve(server.address().port)));
   const page = new http.Server((req, res) => {
+    if (req.url === '/icon.svg') {
+      res.writeHead(200, { 'content-type': 'image/svg+xml' });
+      res.end('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" rx="3" fill="#e5484d"/></svg>');
+      return;
+    }
     setTimeout(() => {
       res.writeHead(200, { 'content-type': 'text/html' });
-      res.end(`<title>${req.url === '/retry' ? 'Retry page' : 'Fixture page'}</title><p>loaded</p>`);
+      res.end(`<title>${req.url === '/retry' ? 'Retry page' : 'Fixture page'}</title><link rel="icon" href="/icon.svg"><p>loaded</p>`);
     }, 400);
   });
   const port = await listen(page);
@@ -54,6 +59,10 @@ module.exports = async ({ js, click, capture, delay }) => {
     }
     assert.equal(await js('qa.browserTab().url'), target);
     assert.equal(await js('document.querySelector("input[placeholder=\\"Search or enter a URL\\"]").value.includes("/newbie-tutorials/how-to-talk-to-ai/")'), true, 'address bar shows the page');
+    // The tab strip shows the page's own favicon, not the generic globe.
+    const tabIcon = '[data-utility-tab-kind="browser"] img';
+    await until(`document.querySelector('${tabIcon}')?.complete && document.querySelector('${tabIcon}').naturalWidth > 0`, 'favicon in the tab strip');
+    assert.equal(await js(`document.querySelector('${tabIcon}').getAttribute('src')`), `http://127.0.0.1:${port}/icon.svg`);
     await capture('browser-recent-opened');
 
     // 2. A failed load shows the panel's error page instead of a blank view.
@@ -62,6 +71,7 @@ module.exports = async ({ js, click, capture, delay }) => {
     await delay(800);
     assert.equal(await js('!!document.querySelector("[data-browser-error-page]")'), true, 'error page stays');
     assert.match(await js('document.querySelector("[data-browser-error-page] h2").textContent'), /refused|Couldn't/);
+    assert.equal(await js(`!!document.querySelector('${tabIcon}')`), false, 'a failed page does not keep the previous site icon');
     await capture('browser-load-error');
 
     // 3. The server comes back; "Try again" reloads the same URL.

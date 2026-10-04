@@ -62,6 +62,11 @@ interface LiveTabRuntime {
    * which must not overwrite the tab's target URL.
    */
   pendingUrl?: string | null;
+  /**
+   * Last icon page-favicon-updated reported. Chromium only reports when the
+   * candidates change, so a same-site page that reuses the icon gets none.
+   */
+  reportedFaviconUrl?: string | null;
 }
 
 export interface BrowserAgentTarget {
@@ -1095,6 +1100,10 @@ export class BrowserManager {
     webContents.on('did-navigate', (_event, url) => {
       if (this.isRuntimeClosing(sessionId, tabId)) return;
       settlePendingUrl(runtime, url);
+      // A committed page shows the view's current icon (an error page may
+      // have dropped it); if this page's differs, page-favicon-updated follows.
+      const tab = this.states.get(sessionId)?.tabs.find((item) => item.id === tabId);
+      if (tab) tab.faviconUrl = runtime.reportedFaviconUrl ?? null;
       this.syncRuntimeState(sessionId, tabId);
     });
     webContents.on('did-navigate-in-page', () => {
@@ -1112,6 +1121,7 @@ export class BrowserManager {
         if (!state || !tab) return;
         tab.url = validatedURL || tab.url;
         tab.title = defaultTitleForUrl(tab.url);
+        tab.faviconUrl = null;
         tab.isLoading = false;
         tab.lastError = mapBrowserLoadError(errorCode);
         syncSessionLastError(state);
@@ -1507,7 +1517,8 @@ function syncTabStateFromRuntime(
   tab.canGoForward = webContents.canGoForward();
   tab.lastCommittedUrl = currentUrl || tab.lastCommittedUrl;
   if (faviconUrls) {
-    tab.faviconUrl = faviconUrls[0] ?? tab.faviconUrl;
+    runtime.reportedFaviconUrl = faviconUrls[0] ?? runtime.reportedFaviconUrl ?? null;
+    tab.faviconUrl = runtime.reportedFaviconUrl ?? tab.faviconUrl;
   }
   // lastError is not cleared here: Chromium finishes loading its (blank)
   // error page right after did-fail-load. New navigations clear it.
