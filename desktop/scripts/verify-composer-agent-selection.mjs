@@ -19,12 +19,22 @@ assert.ok(
     !controls.includes('onGrokReasoningEffortChange={(effort) => {\n                          onAgentChange(provider);'),
   'model options must remain provider-scoped and per-model controls must not split one click into two state updates'
 );
+// Model triggers are capped (not w-max) so a long name cannot push the row
+// wide; inside the cap only the model name ellipsizes, never the effort label.
+const pickerCss = read('src/ui/components/reasoning-picker.css');
+const cssRule = (selector) => pickerCss.match(new RegExp(`\\n${selector.replace('.', '\\.')}\\s*\\{([^}]*)\\}`))?.[1] ?? '';
 assert.ok(
-  controls.includes("const fullModelLabelTriggerClassName = 'w-max max-w-none shrink-0 whitespace-nowrap';") &&
+  controls.includes("const fullModelLabelTriggerClassName = 'min-w-0 max-w-[256px]';") &&
     (controls.match(/className=\{`\$\{triggerClassName\} \$\{fullModelLabelTriggerClassName\}`\}/g) ?? []).length === 2 &&
     controls.includes('<ModelEffortLabel model={modelLabel} effort={effortSuffix}') &&
     !controls.includes('<span className="min-w-0 truncate">{modelLabel}{effortSuffix}</span>'),
-  'composer model triggers must reserve their full content width without truncating the reasoning label'
+  'composer model triggers must be capped and render the model and effort as separate labels'
+);
+assert.ok(
+  /text-overflow:\s*ellipsis/.test(cssRule('.composer-model-name')) &&
+    /flex-shrink:\s*1/.test(cssRule('.composer-model-name')) &&
+    /flex-shrink:\s*0/.test(cssRule('.composer-model-effort')),
+  'inside the capped trigger only the model name may ellipsize; the reasoning label must never shrink'
 );
 
 const hook = read('src/ui/hooks/useComposerAgentSelection.ts');
