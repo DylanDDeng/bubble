@@ -65,7 +65,11 @@ export function ProjectAudioPreview({
     const audio = audioRef.current;
     if (!audio) return;
     if (audio.paused) {
-      void audio.play().catch(() => setFailed(true));
+      // A pause() during the play() request rejects it with AbortError; that is
+      // the user toggling quickly, not an unplayable file.
+      void audio.play().catch((error: unknown) => {
+        if ((error as { name?: string } | null)?.name !== 'AbortError') setFailed(true);
+      });
     } else {
       audio.pause();
     }
