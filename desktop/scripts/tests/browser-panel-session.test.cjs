@@ -78,6 +78,7 @@ test('navigating a new tab keeps the target URL while the load is in flight', as
       isLoading: () => page.loading,
       canGoBack: () => false,
       canGoForward: () => false,
+      getZoomFactor: () => 1,
       loadURL: url => new Promise(resolve => {
         page.loading = true;
         // did-start-loading: Electron still reports the page being left.
@@ -108,4 +109,47 @@ test('navigating a new tab keeps the target URL while the load is in flight', as
   assert.equal(tab.url, target);
   assert.equal(tab.title, 'Bubble News');
   assert.equal(runtime.pendingUrl, null, 'commit clears the pending target');
+});
+
+function moduleExports() {
+  const source = readFileSync(path.join(__dirname, '../../src/electron/browserManager.ts'), 'utf8');
+  const ctx = vm.createContext({ exports: {}, console, setTimeout, clearTimeout, URL,
+    require(name) {
+      if (name === 'electron') return {};
+      if (name === './util') return { normalizeExternalUrl: value => value };
+      if (name === '../shared/browser-types') return { BROWSER_SESSION_PARTITION: 'qa' };
+      return require(name);
+    },
+  });
+  vm.runInContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, ctx);
+  return ctx.exports;
+}
+
+test('zoom steps follow Chrome presets and stop at the ends', () => {
+  const { nextZoomFactor } = moduleExports();
+  assert.equal(nextZoomFactor(1, 'in'), 1.1);
+  assert.equal(nextZoomFactor(1, 'out'), 0.9);
+  assert.equal(nextZoomFactor(1.1, 'out'), 1);
+  assert.equal(nextZoomFactor(1.05, 'in'), 1.1, 'off-preset factors snap to the next preset');
+  assert.equal(nextZoomFactor(5, 'in'), 5);
+  assert.equal(nextZoomFactor(0.25, 'out'), 0.25);
+  assert.equal(nextZoomFactor(3, 'reset'), 1);
+});
+
+test('page-focused browser shortcuts use the platform primary modifier', () => {
+  const { browserShortcutForInput: shortcut } = moduleExports();
+  const key = (k, mods = {}) => ({ type: 'keyDown', key: k, meta: false, control: false, shift: false, alt: false, ...mods });
+  assert.equal(shortcut(key('f', { meta: true }), 'darwin'), 'find');
+  assert.equal(shortcut(key('F', { meta: true }), 'darwin'), 'find');
+  assert.equal(shortcut(key('g', { meta: true }), 'darwin'), 'find-next');
+  assert.equal(shortcut(key('G', { meta: true, shift: true }), 'darwin'), 'find-previous');
+  assert.equal(shortcut(key('=', { meta: true }), 'darwin'), 'in');
+  assert.equal(shortcut(key('+', { meta: true, shift: true }), 'darwin'), 'in');
+  assert.equal(shortcut(key('-', { meta: true }), 'darwin'), 'out');
+  assert.equal(shortcut(key('0', { meta: true }), 'darwin'), 'reset');
+  assert.equal(shortcut(key('f', { control: true }), 'darwin'), null, 'Ctrl+F is a page shortcut on macOS');
+  assert.equal(shortcut(key('f', { control: true }), 'win32'), 'find');
+  assert.equal(shortcut(key('f', { meta: true, alt: true }), 'darwin'), null);
+  assert.equal(shortcut({ ...key('f', { meta: true }), type: 'keyUp' }, 'darwin'), null);
+  assert.equal(shortcut(key('f'), 'darwin'), null);
 });

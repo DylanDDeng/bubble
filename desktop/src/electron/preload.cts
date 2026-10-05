@@ -34,8 +34,14 @@ import type {
   WechatMarkdownHtmlGeneratorConfig,
 } from '../shared/types';
 import type {
+  BrowserCaptureInput,
   BrowserCapturePageResult,
+  BrowserClearDataType,
+  BrowserDataSummary,
+  BrowserFindInput,
   BrowserNavigateInput,
+  BrowserPanelEvent,
+  BrowserZoomInput,
   BrowserNewTabInput,
   BrowserOpenInput,
   BrowserReadoutResult,
@@ -63,6 +69,12 @@ const BROWSER_CHANNELS = {
   openDevTools: 'desktop:browser-open-devtools',
   capture: 'desktop:browser-capture',
   readPage: 'desktop:browser-read-page',
+  dataSummary: 'desktop:browser-data-summary',
+  clearData: 'desktop:browser-clear-data',
+  zoom: 'desktop:browser-zoom',
+  find: 'desktop:browser-find',
+  stopFind: 'desktop:browser-stop-find',
+  panelEvent: 'desktop:browser-panel-event',
   state: 'desktop:browser-state',
   sendSelection: 'desktop:browser-send-selection',
 } as const;
@@ -741,6 +753,9 @@ contextBridge.exposeInMainWorld('electron', {
     return ipcRenderer.invoke('set-browser-use-default-policy', policy);
   },
 
+  detectBrowserImportSources: () => {
+    return ipcRenderer.invoke('detect-browser-import-sources');
+  },
   listChromeCookieProfiles: () => {
     return ipcRenderer.invoke('list-chrome-cookie-profiles');
   },
@@ -1247,10 +1262,13 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke(BROWSER_CHANNELS.selectTab, input),
     openDevTools: (input: BrowserTabInput): Promise<SessionBrowserState> =>
       ipcRenderer.invoke(BROWSER_CHANNELS.openDevTools, input),
-    capture: (input: BrowserTabInput): Promise<BrowserCapturePageResult> =>
+    capture: (input: BrowserCaptureInput): Promise<BrowserCapturePageResult> =>
       ipcRenderer.invoke(BROWSER_CHANNELS.capture, input),
     readPage: (input: BrowserTabInput): Promise<BrowserReadoutResult> =>
       ipcRenderer.invoke(BROWSER_CHANNELS.readPage, input),
+    getDataSummary: (): Promise<BrowserDataSummary> => ipcRenderer.invoke(BROWSER_CHANNELS.dataSummary),
+    clearData: (types: BrowserClearDataType[]): Promise<BrowserDataSummary> =>
+      ipcRenderer.invoke(BROWSER_CHANNELS.clearData, types),
     onState: (callback: (state: SessionBrowserState) => void) => {
       const handler = (_: unknown, state: SessionBrowserState) => {
         try {
@@ -1277,6 +1295,22 @@ contextBridge.exposeInMainWorld('electron', {
         ipcRenderer.removeListener(BROWSER_CHANNELS.sendSelection, handler);
       };
     },
+    onPanelEvent: (callback: (event: BrowserPanelEvent) => void) => {
+      const handler = (_: unknown, event: BrowserPanelEvent) => {
+        try {
+          callback(event);
+        } catch (error) {
+          console.error('Browser panel event handler error:', error);
+        }
+      };
+      ipcRenderer.on(BROWSER_CHANNELS.panelEvent, handler);
+      return () => {
+        ipcRenderer.removeListener(BROWSER_CHANNELS.panelEvent, handler);
+      };
+    },
+    zoom: (input: BrowserZoomInput): Promise<SessionBrowserState> => ipcRenderer.invoke(BROWSER_CHANNELS.zoom, input),
+    find: (input: BrowserFindInput): Promise<void> => ipcRenderer.invoke(BROWSER_CHANNELS.find, input),
+    stopFind: (input: BrowserTabInput): Promise<void> => ipcRenderer.invoke(BROWSER_CHANNELS.stopFind, input),
   },
   design: {
     list: (input: unknown) => ipcRenderer.invoke('desktop:design-list', input),

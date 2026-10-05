@@ -64,8 +64,14 @@ import type {
   WechatMarkdownHtmlGeneratorConfig,
 } from './shared/types';
 import type {
+  BrowserCaptureInput,
   BrowserCapturePageResult,
+  BrowserClearDataType,
+  BrowserDataSummary,
+  BrowserFindInput,
   BrowserNavigateInput,
+  BrowserPanelEvent,
+  BrowserZoomInput,
   BrowserNewTabInput,
   BrowserOpenInput,
   BrowserReadoutResult,
@@ -269,6 +275,7 @@ declare global {
     setBrowserUseDefaultPolicy: (
       policy: 'allow' | 'block' | 'ask'
     ) => Promise<BrowserUsePermissionSettings>;
+    detectBrowserImportSources: () => Promise<import('./shared/types').BrowserImportSourcesResult>;
     listChromeCookieProfiles: () => Promise<import('./shared/types').ChromeCookieProfilesResult>;
     listChromeCookieDomains: (profilePath: string) => Promise<import('./shared/types').ChromeCookieDomainsResult>;
     importChromeCookies: (
@@ -504,10 +511,16 @@ declare global {
       closeTab: (input: BrowserTabInput) => Promise<SessionBrowserState>;
       selectTab: (input: BrowserTabInput) => Promise<SessionBrowserState>;
       openDevTools: (input: BrowserTabInput) => Promise<SessionBrowserState>;
-      capture: (input: BrowserTabInput) => Promise<BrowserCapturePageResult>;
+      capture: (input: BrowserCaptureInput) => Promise<BrowserCapturePageResult>;
       readPage: (input: BrowserTabInput) => Promise<BrowserReadoutResult>;
+      getDataSummary: () => Promise<BrowserDataSummary>;
+      clearData: (types: BrowserClearDataType[]) => Promise<BrowserDataSummary>;
       onState: (callback: (state: SessionBrowserState) => void) => () => void;
       onSendSelection: (callback: (event: BrowserSendSelectionEvent) => void) => () => void;
+      onPanelEvent: (callback: (event: BrowserPanelEvent) => void) => () => void;
+      zoom: (input: BrowserZoomInput) => Promise<SessionBrowserState>;
+      find: (input: BrowserFindInput) => Promise<void>;
+      stopFind: (input: BrowserTabInput) => Promise<void>;
     };
     design: import('./shared/design-types').DesignAPI;
     designMode: {

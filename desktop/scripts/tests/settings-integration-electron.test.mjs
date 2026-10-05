@@ -18,7 +18,11 @@ window.qa={store:useAppStore,toast,calls:[],profile:{displayName:'Test User',han
 window.electron={
  getBrowserUsePermissions:async()=>{if(qa.failBrowser)throw Error('Browser unavailable');return qa.permissions;},
  setBrowserUseEnabled:async enabled=>qa.permissions={...qa.permissions,enabled},
- listChromeCookieProfiles:async()=>({platformSupported:true,chromeRunning:true,profiles:[{profileName:'Personal',profilePath:'/tmp/profile-1',hasCookies:true},{profileName:'Work',profilePath:'/tmp/profile-2',hasCookies:true}]}),
+ getEnvironmentEditorLaunchers:async()=>[],getTerminalShellOptions:async()=>[],getNotificationSettings:async()=>({enabled:false,onlyWhenUnfocused:true}),getAppVersion:async()=>'0.0.0-qa',
+ getAppPreferences:async()=>({}),onAppPreferencesChanged:()=>()=>{},
+ detectBrowserImportSources:async()=>({platformSupported:true,sources:[{source:'chrome',appName:'Google Chrome',running:true}]}),
+ listChromeCookieProfiles:async()=>({platformSupported:true,chromeRunning:true,sources:[{source:'chrome',appName:'Google Chrome',running:true}],profiles:[{source:'chrome',appName:'Google Chrome',directoryName:'Default',profileName:'Personal',profilePath:'/tmp/profile-1',hasCookies:true},{source:'chrome',appName:'Google Chrome',directoryName:'Profile 1',profileName:'Work',profilePath:'/tmp/profile-2',hasCookies:true}]}),
+ listChromeCookieDomains:async()=>({domains:[{host:'example.test',cookieCount:3}]}),
  getChromeCookieImportStatus:async()=>qa.cookieStatus,
  importChromeCookies:async input=>{qa.calls.push({type:'cookies',input});qa.cookieStatus={importedAt:Date.now(),profileName:'Work',cookieCount:4,domains:['example.test']};return {ok:true,cookies:{imported:4,discovered:4,failed:0,skippedPartitioned:0,skippedExpired:0,skippedInvalid:0}};},
  clearImportedChromeCookies:async()=>{qa.cookieStatus={importedAt:null,profileName:null,cookieCount:0,domains:[]};return {ok:true,removed:4};},
@@ -61,9 +65,11 @@ app.whenReady().then(async()=>{
  try{
   await win.loadURL(process.env.QA_URL);await until('!!document.querySelector("[aria-label=\\"Toggle browser use\\"]")');
   await shot('browser-light');await click('[aria-label="Toggle browser use"]');assert.equal(await js('qa.permissions.enabled'),false);
-  await button('Import…');await click('[aria-label="Chrome profile"]');await shot('browser-profile-menu');
+  await button('Import…');await until('!!document.querySelector("[aria-label=\\"Browser profile\\"]")');await click('[aria-label="Browser profile"]');await shot('browser-profile-menu');
   await js('Array.from(document.querySelectorAll("[role=menuitem]")).find(e=>e.textContent.includes("Work")).click()');await delay(100);
   await button('Import','[role=dialog]');assert.equal(await js('qa.calls.find(c=>c.type==="cookies").input.profilePath'),'/tmp/profile-2');
+  await until('document.querySelector("[role=dialog]")?.textContent.includes("Import complete")');await shot('browser-import-complete');await button('Done','[role=dialog]');
+  await until('qa.cookieStatus.cookieCount===4&&!!Array.from(document.querySelectorAll("main button")).find(e=>e.textContent.trim()==="Clear")');
   await button('Clear');assert.equal(await js('qa.cookieStatus.cookieCount'),0);
   await nav('bridge');await until('!!document.querySelector("[aria-label=\\"App ID\\"]")');await shot('bridge-light');
   await text('[aria-label="App ID"]','test-changed');await button('Cancel');assert.equal(await js('document.querySelector("[aria-label=\\"App ID\\"]").value'),'test-app');

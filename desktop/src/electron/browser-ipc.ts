@@ -2,7 +2,12 @@ import { BrowserWindow, ipcMain } from 'electron';
 import { browserManager } from './browserManager';
 import { designModeService } from './design-mode-service';
 import { ipcMainHandle } from './util';
+import { clearBrowserData, getBrowserDataSummary } from './libs/browser-data';
 import type {
+  BrowserCaptureInput,
+  BrowserClearDataType,
+  BrowserFindInput,
+  BrowserZoomInput,
   BrowserNavigateInput,
   BrowserNewTabInput,
   BrowserOpenInput,
@@ -30,12 +35,19 @@ export const BROWSER_CHANNELS = {
   openDevTools: 'desktop:browser-open-devtools',
   capture: 'desktop:browser-capture',
   readPage: 'desktop:browser-read-page',
+  dataSummary: 'desktop:browser-data-summary',
+  clearData: 'desktop:browser-clear-data',
+  zoom: 'desktop:browser-zoom',
+  find: 'desktop:browser-find',
+  stopFind: 'desktop:browser-stop-find',
+  panelEvent: 'desktop:browser-panel-event',
   state: 'desktop:browser-state',
   sendSelection: 'desktop:browser-send-selection',
 } as const;
 
 let unsubscribe: (() => void) | null = null;
 let unsubscribeSelection: (() => void) | null = null;
+let unsubscribePanelEvents: (() => void) | null = null;
 
 export function registerBrowserIpc(mainWindow: BrowserWindow): void {
   if (unsubscribe) {
@@ -64,7 +76,16 @@ export function registerBrowserIpc(mainWindow: BrowserWindow): void {
     }
   });
 
+  unsubscribePanelEvents?.();
+  unsubscribePanelEvents = browserManager.subscribePanelEvents((event) => {
+    if (!mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(BROWSER_CHANNELS.panelEvent, event);
+    }
+  });
+
   mainWindow.on('closed', () => {
+    unsubscribePanelEvents?.();
+    unsubscribePanelEvents = null;
     if (unsubscribe) {
       unsubscribe();
       unsubscribe = null;
@@ -125,15 +146,27 @@ export function registerBrowserIpc(mainWindow: BrowserWindow): void {
     browserManager.openDevTools(input);
     return browserManager.getState({ sessionId: input.sessionId });
   });
-  ipcMainHandle(BROWSER_CHANNELS.capture, (_event, input: BrowserTabInput) =>
+  ipcMainHandle(BROWSER_CHANNELS.capture, (_event, input: BrowserCaptureInput) =>
     browserManager.capturePage(input)
   );
   ipcMainHandle(BROWSER_CHANNELS.readPage, (_event, input: BrowserTabInput) =>
     browserManager.readPageContent(input)
   );
+  ipcMainHandle(BROWSER_CHANNELS.zoom, (_event, input: BrowserZoomInput) => browserManager.zoom(input));
+  ipcMainHandle(BROWSER_CHANNELS.find, (_event, input: BrowserFindInput) => browserManager.findInPage(input));
+  ipcMainHandle(BROWSER_CHANNELS.stopFind, (_event, input: BrowserTabInput) => browserManager.stopFindInPage(input));
+  ipcMainHandle(BROWSER_CHANNELS.dataSummary, () => getBrowserDataSummary());
+  ipcMainHandle(BROWSER_CHANNELS.clearData, (_event, types: unknown) => {
+    const valid = Array.isArray(types)
+      ? types.filter((type): type is BrowserClearDataType => type === 'siteData' || type === 'cache')
+      : [];
+    return clearBrowserData(valid);
+  });
 }
 
 export function disposeBrowserIpc(): void {
+  unsubscribePanelEvents?.();
+  unsubscribePanelEvents = null;
   if (unsubscribe) {
     unsubscribe();
     unsubscribe = null;

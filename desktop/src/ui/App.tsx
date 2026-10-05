@@ -18,6 +18,7 @@ import {
   Check,
   CloudUpload,
   Copy,
+  CopyPlus,
   FileDiff,
   FolderClosed,
   FolderOpen,
@@ -94,6 +95,8 @@ import { extractGeneratedMediaFromMessages } from './utils/generated-media';
 import { openGeneratedMediaInFilesPanel } from './components/GeneratedMediaGallery';
 import { autoPreviewHtmlArtifact } from './utils/auto-html-preview';
 import { getBrowserUtilitySessionId } from './utils/browser-utility';
+import { browserTabPage, openBrowserTab } from './utils/open-browser-tab';
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from './components/ui/context-menu';
 import { StructuredResponse } from './components/StructuredResponse';
 import { AgentOnboardingView, useAgentOnboardingGate } from './components/onboarding/AgentOnboardingView';
 import {
@@ -1607,6 +1610,99 @@ function SideChatCloseConfirmDialog({
   );
 }
 
+const TAB_MENU_ITEM_CLASS = 'gap-2 py-1.5';
+
+function UtilityTabContextMenu({
+  tab,
+  tabs,
+  onSelectTab,
+  onCloseTab,
+}: {
+  tab: ProjectUtilityTabDescriptor;
+  tabs: ProjectUtilityTabDescriptor[];
+  onSelectTab: (target: ProjectUtilityPanelTarget) => void;
+  onCloseTab: (target: ProjectUtilityPanelTarget) => void;
+}) {
+  const index = tabs.findIndex((item) => item.id === tab.id);
+  const others = tabs.filter((item) => item.id !== tab.id);
+  const toTheRight = tabs.slice(index + 1);
+  const page = tab.kind === 'browser' ? browserTabPage(tab.id) : null;
+  return (
+    <ContextMenuContent className="min-w-[210px]" data-utility-tab-menu={tab.id}>
+      {page ? (
+        <>
+          <ContextMenuItem
+            className={TAB_MENU_ITEM_CLASS}
+            disabled={!page.url || !page.tabId}
+            onClick={() => {
+              onSelectTab(tab.id);
+              if (page.tabId) void window.electron.browser.reload({ sessionId: page.sessionId, tabId: page.tabId }).catch(() => {});
+            }}
+          >
+            <RefreshCw className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
+            Reload
+          </ContextMenuItem>
+          <ContextMenuItem className={TAB_MENU_ITEM_CLASS} disabled={!page.url} onClick={() => openBrowserTab({ url: page.url, after: tab.id })}>
+            <CopyPlus className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
+            Duplicate
+          </ContextMenuItem>
+          <ContextMenuItem className={TAB_MENU_ITEM_CLASS} onClick={() => openBrowserTab({ after: tab.id })}>
+            <Plus className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
+            New tab to the right
+          </ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem
+            className={TAB_MENU_ITEM_CLASS}
+            disabled={!page.url}
+            onClick={() => {
+              if (!page.url) return;
+              void navigator.clipboard.writeText(page.url);
+              toast.success('URL copied');
+            }}
+          >
+            <Copy className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
+            Copy URL
+          </ContextMenuItem>
+          <ContextMenuItem
+            className={TAB_MENU_ITEM_CLASS}
+            disabled={!page.url}
+            onClick={() => page.url && void window.electron.openExternalUrl(page.url)}
+          >
+            <ExternalLink className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
+            Open in external browser
+          </ContextMenuItem>
+          <ContextMenuSeparator />
+        </>
+      ) : null}
+      <ContextMenuItem className={TAB_MENU_ITEM_CLASS} onClick={() => onCloseTab(tab.id)}>
+        <X className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
+        Close
+      </ContextMenuItem>
+      <ContextMenuItem
+        className={TAB_MENU_ITEM_CLASS}
+        disabled={others.length === 0}
+        onClick={() => {
+          onSelectTab(tab.id);
+          for (const item of others) onCloseTab(item.id);
+        }}
+      >
+        <span className="h-3.5 w-3.5" aria-hidden="true" />
+        Close other tabs
+      </ContextMenuItem>
+      <ContextMenuItem
+        className={TAB_MENU_ITEM_CLASS}
+        disabled={toTheRight.length === 0}
+        onClick={() => {
+          for (const item of toTheRight) onCloseTab(item.id);
+        }}
+      >
+        <span className="h-3.5 w-3.5" aria-hidden="true" />
+        Close tabs to the right
+      </ContextMenuItem>
+    </ContextMenuContent>
+  );
+}
+
 function RightUtilityTabStrip({
   tabs,
   activeTab,
@@ -1688,7 +1784,8 @@ function RightUtilityTabStrip({
                 }`}
                 aria-hidden="true"
               />
-              <div
+              <ContextMenu onOpenChange={onNativeOverlayChange}>
+              <ContextMenuTrigger
                 className={`group flex h-8 max-w-[190px] items-center rounded-[9px] text-xs transition-colors ${
                   active
                     ? 'bg-[var(--sidebar-item-active)] font-medium text-[var(--text-primary)]'
@@ -1743,7 +1840,9 @@ function RightUtilityTabStrip({
                 >
                   <X className="h-3 w-3" aria-hidden="true" />
                 </button>
-              </div>
+              </ContextMenuTrigger>
+              <UtilityTabContextMenu tab={tab} tabs={tabs} onSelectTab={onSelectTab} onCloseTab={onCloseTab} />
+              </ContextMenu>
             </div>
           );
         })}

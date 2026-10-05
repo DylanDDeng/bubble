@@ -17,11 +17,16 @@
 import * as Crypto from 'node:crypto';
 import { BrowserWindow, Menu, clipboard, nativeTheme, shell, WebContentsView } from 'electron';
 import type {
+  BrowserCaptureInput,
   BrowserCapturePageResult,
+  BrowserFindInput,
   BrowserNavigateInput,
   BrowserNewTabInput,
   BrowserOpenInput,
   BrowserPanelBounds,
+  BrowserPanelEvent,
+  BrowserZoomAction,
+  BrowserZoomInput,
   BrowserReadoutLink,
   BrowserReadoutResult,
   BrowserSessionInput,
@@ -38,6 +43,30 @@ export { BROWSER_SESSION_PARTITION };
 const BROWSER_SESSION_SUSPEND_DELAY_MS = 30_000;
 const BROWSER_ERROR_ABORTED = -3;
 const SEARCH_URL_PREFIX = 'https://www.google.com/search?q=';
+const CAPTURE_ATTEMPTS = 3;
+const CAPTURE_RETRY_DELAY_MS = 40;
+
+/**
+ * A view that has not presented a frame since it was attached has no surface
+ * to copy ("Current display surface not available for capture"); its first
+ * capture fails. Request a fresh frame and retry.
+ */
+async function capturePageWithRetry(webContents: Electron.WebContents): Promise<Electron.NativeImage> {
+  let lastError: unknown = new Error('Captured image is empty.');
+  for (let attempt = 0; attempt < CAPTURE_ATTEMPTS; attempt += 1) {
+    try {
+      const image = await webContents.capturePage();
+      if (!image.isEmpty()) return image;
+      lastError = new Error('Captured image is empty.');
+    } catch (error) {
+      lastError = error;
+    }
+    if (webContents.isDestroyed() || attempt === CAPTURE_ATTEMPTS - 1) break;
+    webContents.invalidate();
+    await new Promise((resolve) => setTimeout(resolve, CAPTURE_RETRY_DELAY_MS));
+  }
+  throw lastError;
+}
 
 type BrowserStateListener = (state: SessionBrowserState) => void;
 
@@ -227,12 +256,38 @@ function mapBrowserLoadError(errorCode: number): string {
     case -118:
       return 'This page took too long to respond.';
     case -137:
-      return "A secure connection couldn't be established.";
-    case -200:
-      return "A secure connection couldn't be established.";
+      return "Couldn't resolve this address.";
     default:
-      return "Couldn't open this page.";
+      return errorCode <= -200 && errorCode > -300
+        ? "A secure connection couldn't be established."
+        : "Couldn't open this page.";
   }
+}
+
+// Chrome's zoom steps.
+const ZOOM_FACTORS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4, 5];
+
+export function nextZoomFactor(current: number, action: BrowserZoomAction): number {
+  if (action === 'reset') return 1;
+  if (action === 'in') return ZOOM_FACTORS.find((factor) => factor > current + 0.001) ?? ZOOM_FACTORS[ZOOM_FACTORS.length - 1];
+  return [...ZOOM_FACTORS].reverse().find((factor) => factor < current - 0.001) ?? ZOOM_FACTORS[0];
+}
+
+/** Browser shortcuts pressed while the page has keyboard focus (renderer keydowns never see them). */
+export function browserShortcutForInput(
+  input: Pick<Electron.Input, 'type' | 'key' | 'meta' | 'control' | 'shift' | 'alt'>,
+  platform: NodeJS.Platform = process.platform
+): BrowserZoomAction | 'find' | 'find-next' | 'find-previous' | null {
+  if (input.type !== 'keyDown' || input.alt) return null;
+  const primary = platform === 'darwin' ? input.meta && !input.control : input.control && !input.meta;
+  if (!primary) return null;
+  const key = input.key.toLowerCase();
+  if (key === 'f' && !input.shift) return 'find';
+  if (key === 'g') return input.shift ? 'find-previous' : 'find-next';
+  if (key === '=' || key === '+') return 'in';
+  if (key === '-' || key === '_') return 'out';
+  if (key === '0' && !input.shift) return 'reset';
+  return null;
 }
 
 function buildRuntimeKey(sessionId: string, tabId: string): string {
@@ -258,6 +313,7 @@ export class BrowserManager {
   /** agentActive re-entrancy depth per session (browser-use actions). */
   private readonly agentActivityDepth = new Map<string, number>();
   private readonly selectionListeners = new Set<BrowserSendSelectionListener>();
+  private readonly panelEventListeners = new Set<(event: BrowserPanelEvent) => void>();
   private readonly suspendTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly closingRuntimeKeys = new Set<string>();
   private hostReloadCleanup: (() => void) | null = null;
@@ -338,6 +394,63 @@ export class BrowserManager {
     return () => {
       this.selectionListeners.delete(listener);
     };
+  }
+
+  subscribePanelEvents(listener: (event: BrowserPanelEvent) => void): () => void {
+    this.panelEventListeners.add(listener);
+    return () => {
+      this.panelEventListeners.delete(listener);
+    };
+  }
+
+  private findActive(sessionId: string, tabId: string): boolean {
+    const state = this.states.get(sessionId);
+    return !!(state && this.getTab(state, tabId)?.findMatches);
+  }
+
+  private emitPanelEvent(event: BrowserPanelEvent): void {
+    for (const listener of this.panelEventListeners) {
+      try {
+        listener(event);
+      } catch (error) {
+        console.error('Browser panel event listener failed:', error);
+      }
+    }
+  }
+
+  zoom(input: BrowserZoomInput): SessionBrowserState {
+    const runtime = this.runtimes.get(buildRuntimeKey(input.sessionId, input.tabId));
+    if (runtime && !runtime.view.webContents.isDestroyed()) {
+      const webContents = runtime.view.webContents;
+      webContents.setZoomFactor(nextZoomFactor(webContents.getZoomFactor(), input.action));
+      this.syncRuntimeState(input.sessionId, input.tabId);
+    }
+    return this.getState(input);
+  }
+
+  findInPage(input: BrowserFindInput): void {
+    const runtime = this.runtimes.get(buildRuntimeKey(input.sessionId, input.tabId));
+    if (!runtime || runtime.view.webContents.isDestroyed()) return;
+    if (!input.text) {
+      this.stopFindInPage(input);
+      return;
+    }
+    runtime.view.webContents.findInPage(input.text, {
+      forward: input.forward !== false,
+      // Electron's findNext means "begin a new find session", the opposite of continuing.
+      findNext: input.next !== true,
+    });
+  }
+
+  stopFindInPage(input: BrowserTabInput): void {
+    const runtime = this.runtimes.get(buildRuntimeKey(input.sessionId, input.tabId));
+    if (runtime && !runtime.view.webContents.isDestroyed()) runtime.view.webContents.stopFindInPage('clearSelection');
+    const state = this.states.get(input.sessionId);
+    const tab = state ? this.getTab(state, input.tabId) : null;
+    if (state && tab?.findMatches) {
+      tab.findMatches = null;
+      this.emitState(input.sessionId);
+    }
   }
 
   dispose(): void {
@@ -634,7 +747,7 @@ export class BrowserManager {
 
   // ===== Screenshot / Readout for Agent =====
 
-  async capturePage(input: BrowserTabInput): Promise<BrowserCapturePageResult> {
+  async capturePage(input: BrowserCaptureInput): Promise<BrowserCapturePageResult> {
     const state = this.states.get(input.sessionId);
     const tab = state ? this.getTab(state, input.tabId) : null;
     const runtime = this.runtimes.get(buildRuntimeKey(input.sessionId, input.tabId));
@@ -642,11 +755,17 @@ export class BrowserManager {
       return { ok: false, message: 'This tab is not active right now.' };
     }
     try {
-      const image = await runtime.view.webContents.capturePage();
-      if (image.isEmpty()) {
-        return { ok: false, message: 'Captured image is empty.' };
-      }
+      const image = await capturePageWithRetry(runtime.view.webContents);
       const size = image.getSize();
+      if (input.format === 'jpeg') {
+        return {
+          ok: true,
+          dataUrl: `data:image/jpeg;base64,${image.toJPEG(85).toString('base64')}`,
+          mimeType: 'image/jpeg',
+          width: size.width,
+          height: size.height,
+        };
+      }
       const buffer = image.toPNG();
       const base64 = buffer.toString('base64');
       return {
@@ -1091,6 +1210,35 @@ export class BrowserManager {
       return { action: 'deny' };
     });
 
+    // Keys typed into the page never reach the renderer, and the app menu's
+    // zoom roles would zoom the app UI instead of the page.
+    webContents.on('before-input-event', (event, input) => {
+      if (this.isRuntimeClosing(sessionId, tabId)) return;
+      const shortcut = browserShortcutForInput(input);
+      if (shortcut === 'in' || shortcut === 'out' || shortcut === 'reset') {
+        event.preventDefault();
+        this.zoom({ sessionId, tabId, action: shortcut });
+      } else if (shortcut) {
+        event.preventDefault();
+        this.emitPanelEvent({ type: shortcut, sessionId, tabId });
+      } else if (input.type === 'keyDown' && input.key === 'Escape' && this.findActive(sessionId, tabId)) {
+        event.preventDefault();
+        this.emitPanelEvent({ type: 'find-close', sessionId, tabId });
+      }
+    });
+    webContents.on('found-in-page', (_event, result) => {
+      if (this.isRuntimeClosing(sessionId, tabId)) return;
+      const state = this.states.get(sessionId);
+      const tab = state ? this.getTab(state, tabId) : null;
+      if (!state || !tab) return;
+      tab.findMatches = { active: result.activeMatchOrdinal, total: result.matches };
+      this.emitState(sessionId);
+    });
+    webContents.on('zoom-changed', (_event, direction) => {
+      if (this.isRuntimeClosing(sessionId, tabId)) return;
+      this.zoom({ sessionId, tabId, action: direction === 'in' ? 'in' : 'out' });
+    });
+
     webContents.on('page-title-updated', (event) => {
       event.preventDefault();
       if (this.isRuntimeClosing(sessionId, tabId)) return;
@@ -1104,10 +1252,12 @@ export class BrowserManager {
       if (this.isRuntimeClosing(sessionId, tabId)) return;
       if (!details.isMainFrame || details.isSameDocument) return;
       // A load error belongs to the page that failed; any new document clears it.
+      // So do find matches: they counted the old document.
       const state = this.states.get(sessionId);
       const tab = state ? this.getTab(state, tabId) : null;
-      if (!state || !tab?.lastError) return;
+      if (!state || !tab || (!tab.lastError && !tab.findMatches)) return;
       tab.lastError = null;
+      if (tab.findMatches) tab.findMatches = { active: 0, total: 0 };
       syncSessionLastError(state);
       this.emitState(sessionId);
     });
@@ -1149,6 +1299,7 @@ export class BrowserManager {
         tab.faviconUrl = null;
         tab.isLoading = false;
         tab.lastError = mapBrowserLoadError(errorCode);
+        tab.lastErrorCode = errorCode;
         syncSessionLastError(state);
         this.emitState(sessionId);
       }
@@ -1167,6 +1318,7 @@ export class BrowserManager {
         tab.status = 'suspended';
         tab.isLoading = false;
         tab.lastError = 'This tab stopped unexpectedly.';
+        tab.lastErrorCode = null;
         syncSessionLastError(state);
         this.emitState(sessionId);
       }
@@ -1232,7 +1384,12 @@ export class BrowserManager {
         return;
       }
       tab.isLoading = false;
-      tab.lastError = "Couldn't open this page.";
+      // did-fail-load usually recorded this load's specific error already; keep it.
+      if (!tab.lastError || tab.lastErrorCode == null) {
+        const errno = (error as { errno?: unknown }).errno;
+        tab.lastErrorCode = typeof errno === 'number' ? errno : null;
+        tab.lastError = typeof errno === 'number' ? mapBrowserLoadError(errno) : "Couldn't open this page.";
+      }
       syncSessionLastError(state);
       this.emitState(sessionId);
     }
@@ -1469,14 +1626,21 @@ export class BrowserManager {
       });
     }
 
+    const externalLinkUrl = linkUrl ? normalizeExternalUrl(linkUrl) : null;
     if (linkUrl) {
       if (hasSelection) template.push({ type: 'separator' });
-      template.push({
-        label: 'Open link',
-        click: () => {
-          this.navigate({ sessionId, tabId, url: linkUrl });
-        },
-      });
+      if (/^https?:\/\//i.test(linkUrl)) {
+        template.push({
+          label: 'Open link in new tab',
+          click: () => this.emitPanelEvent({ type: 'open-in-new-tab', sessionId, tabId, url: linkUrl }),
+        });
+      }
+      if (externalLinkUrl) {
+        template.push({
+          label: 'Open link in external browser',
+          click: () => void shell.openExternal(externalLinkUrl),
+        });
+      }
       template.push({
         label: 'Copy link address',
         click: () => {
@@ -1500,6 +1664,13 @@ export class BrowserManager {
       label: 'Reload',
       click: () => webContents.reload(),
     });
+    const externalPageUrl = normalizeExternalUrl(webContents.getURL());
+    if (!linkUrl && externalPageUrl && /^https?:\/\//i.test(externalPageUrl)) {
+      template.push({
+        label: 'Open in external browser',
+        click: () => void shell.openExternal(externalPageUrl),
+      });
+    }
     template.push({ type: 'separator' });
     template.push({
       label: 'Inspect element',
@@ -1541,6 +1712,7 @@ function syncTabStateFromRuntime(
   tab.canGoBack = webContents.canGoBack();
   tab.canGoForward = webContents.canGoForward();
   tab.lastCommittedUrl = currentUrl || tab.lastCommittedUrl;
+  tab.zoomPercent = Math.round(webContents.getZoomFactor() * 100);
   if (faviconUrls) {
     runtime.reportedFaviconUrl = faviconUrls[0] ?? runtime.reportedFaviconUrl ?? null;
     tab.faviconUrl = runtime.reportedFaviconUrl ?? tab.faviconUrl;

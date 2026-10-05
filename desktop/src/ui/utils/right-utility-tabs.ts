@@ -67,7 +67,7 @@ function createFileTabId(): ProjectUtilityPanelTarget {
   return `files:${Date.now().toString(36)}-${fileTabCounter}`;
 }
 
-function createBrowserTabId(): ProjectUtilityPanelTarget {
+export function createBrowserTabId(): ProjectUtilityPanelTarget {
   browserTabCounter += 1;
   return `browser:${Date.now().toString(36)}-${browserTabCounter}`;
 }
@@ -79,10 +79,20 @@ export function addRightUtilityTab(
   return tabs.includes(target) ? tabs : [...tabs, target];
 }
 
+export function insertRightUtilityTabAfter(
+  tabs: ProjectUtilityPanelTarget[],
+  target: ProjectUtilityPanelTarget,
+  after: ProjectUtilityPanelTarget | null | undefined
+): ProjectUtilityPanelTarget[] {
+  if (tabs.includes(target)) return tabs;
+  const index = after ? tabs.indexOf(after) : -1;
+  return index < 0 ? [...tabs, target] : [...tabs.slice(0, index + 1), target, ...tabs.slice(index + 1)];
+}
+
 export function resolveRightUtilityTabOpen(
   tabs: ProjectUtilityPanelTarget[],
   target: ProjectUtilityPanelKind,
-  options?: { newTab?: boolean }
+  options?: { newTab?: boolean; insertAfter?: ProjectUtilityPanelTarget | null; browserTabId?: ProjectUtilityPanelTarget }
 ): { tabs: ProjectUtilityPanelTarget[]; activeTab: ProjectUtilityPanelTarget } {
   if (target === 'files') {
     const existing = tabs.find(isRightUtilityFileTab);
@@ -94,9 +104,9 @@ export function resolveRightUtilityTabOpen(
   }
 
   if (target === 'browser') {
-    const activeTab = options?.newTab ? createBrowserTabId() : 'browser';
+    const activeTab = options?.browserTabId ?? (options?.newTab ? createBrowserTabId() : 'browser');
     return {
-      tabs: addRightUtilityTab(tabs, activeTab),
+      tabs: insertRightUtilityTabAfter(tabs, activeTab, options?.insertAfter),
       activeTab,
     };
   }
