@@ -199,11 +199,48 @@
 .bubble-browser-recents button { display: flex; flex: 1; min-width: 0; flex-direction: column; align-items: center; gap: 14px; padding: 12px 4px; border-radius: 8px; color: var(--text-secondary); }
 .bubble-browser-recents button:hover { background: var(--sidebar-item-hover); }
 .bubble-browser-recents span { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
-.bubble-browser-error { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; text-align: center; color: var(--text-muted); }
-.bubble-browser-error h2 { margin: 6px 0 0; color: var(--text-primary); font-size: 14px; }
-.bubble-browser-error p { max-width: min(560px, 100%); margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
-.bubble-browser-error button { margin-top: 8px; padding: 6px 14px; border-radius: 8px; background: var(--sidebar-item-hover); color: var(--text-primary); font-size: 12px; }
-.bubble-browser-error button:hover { background: var(--sidebar-item-active); }
+.bubble-browser-error { display: flex; justify-content: center; padding-top: clamp(32px, 14vh, 120px); }
+.bubble-browser-error-body { display: flex; width: min(520px, 100%); flex-direction: column; gap: 12px; color: var(--text-secondary); }
+.bubble-browser-error-body > svg { color: var(--text-muted); }
+.bubble-browser-error h2 { max-width: none; margin: 4px 0 0; color: var(--text-primary); font-size: 20px; font-weight: 600; line-height: 26px; }
+.bubble-browser-error-summary { margin: 0; overflow-wrap: anywhere; font-size: 13px; line-height: 20px; }
+.bubble-browser-error-tips { display: flex; flex-direction: column; gap: 4px; font-size: 13px; line-height: 20px; }
+.bubble-browser-error-tips ul { margin: 0; padding-left: 18px; list-style: disc; }
+.bubble-browser-error-tips li + li { margin-top: 4px; }
+.bubble-browser-error-tips small { display: block; color: var(--text-muted); font-size: 12px; line-height: 18px; }
+.bubble-browser-error code { color: var(--text-muted); font-size: 11px; letter-spacing: 0.02em; }
+.bubble-browser-error-body > button { margin-top: 8px; }
+.bubble-browser-address-resting {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 16px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 16px), transparent);
+}
+.bubble-browser-progress {
+  position: absolute;
+  inset: auto 0 0;
+  height: 2px;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+.bubble-browser-progress::after {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 35%;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
+  transform: translateX(-100%);
+}
+.bubble-browser-progress[data-loading='true'] { opacity: 1; }
+.bubble-browser-progress[data-loading='true']::after { animation: bubble-browser-progress 1.1s cubic-bezier(0.4, 0, 0.2, 1) infinite; }
+@keyframes bubble-browser-progress {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(290%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bubble-browser-progress[data-loading='true']::after { width: 100%; animation: none; transform: none; opacity: 0.6; }
+}
 .bubble-address-history { position: absolute; z-index: 90; top: calc(100% + 6px); left: 0; right: 0; padding: 4px; max-height: 320px; overflow-y: auto; border-radius: 12px; border: 1px solid var(--popover-border); background: var(--popover-bg); box-shadow: var(--popover-shadow); }
 .bubble-address-history button { display: flex; width: 100%; flex-direction: column; gap: 2px; padding: 8px 10px; border-radius: 6px; text-align: left; }
 .bubble-address-history button:hover, .bubble-address-history button[aria-selected='true'] { background: var(--sidebar-item-hover); }

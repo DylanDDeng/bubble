@@ -268,7 +268,25 @@ export type ChromeCookieImportErrorCode =
   | 'write_failed'
   | 'import_failed';
 
+/** Chromium-family browsers whose macOS cookie store shares Chrome's format. */
+export type BrowserImportSource = 'chrome' | 'arc' | 'edge' | 'brave' | 'chromium' | 'vivaldi';
+
+export interface BrowserImportSourceInfo {
+  source: BrowserImportSource;
+  appName: string;
+  running: boolean;
+  /** PNG data URL of the installed app's icon, when the app bundle exists. */
+  iconDataUrl?: string;
+}
+
+export interface BrowserImportSourcesResult {
+  platformSupported: boolean;
+  sources: BrowserImportSourceInfo[];
+}
+
 export interface ChromeCookieProfile {
+  source: BrowserImportSource;
+  appName: string;
   directoryName: string;
   profileName: string;
   profilePath: string;
@@ -294,6 +312,7 @@ export interface ChromeCookieImportCounts {
 export interface ChromeCookieProfilesResult {
   platformSupported: boolean;
   chromeRunning: boolean;
+  sources: BrowserImportSourceInfo[];
   profiles: ChromeCookieProfile[];
   errorCode?: ChromeCookieImportErrorCode;
   errorMessage?: string;

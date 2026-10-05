@@ -81,7 +81,7 @@ const wait=async(fn,label)=>{for(let i=0;i<300;i++){try{if(await fn())return;}ca
    app.quit();return;
   }
   win.setSize(1280,820);win.show();app.focus({steal:true});win.focus();win.webContents.focus();await delay(500);
-  if(process.env.QA_MARKDOWN==='1' || process.env.QA_BOARD_SIDEBAR==='1' || process.env.QA_BOARD_TABS==='1') {
+  if(process.env.QA_MARKDOWN==='1' || process.env.QA_BOARD_SIDEBAR==='1' || process.env.QA_BOARD_TABS==='1' || process.env.QA_BROWSER_START==='1') {
    // The user may switch apps during QA; keep browser focus deterministic.
    win.webContents.debugger.attach('1.3');
    await win.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled',{enabled:true});

@@ -35,6 +35,10 @@ interface BrowserStateStore {
   upsertSessionState: (state: PersistedSessionBrowserState) => void;
   removeSessionState: (sessionId: string) => void;
   recordHistoryEntry: (sessionId: string, entry: BrowserHistoryEntry) => void;
+  /** Drops visits at or after `sinceMs` from every session. */
+  clearHistory: (sinceMs: number) => void;
+  importPromptDismissed: boolean;
+  dismissImportPrompt: () => void;
 }
 
 export const useBrowserStateStore = create<BrowserStateStore>()(
@@ -82,6 +86,18 @@ export const useBrowserStateStore = create<BrowserStateStore>()(
           };
         });
       },
+      clearHistory: (sinceMs) => {
+        set((prev) => ({
+          recentHistoryBySessionId: Object.fromEntries(
+            Object.entries(prev.recentHistoryBySessionId).map(([sessionId, entries]) => [
+              sessionId,
+              entries.filter((entry) => entry.lastVisitedAt < sinceMs),
+            ])
+          ),
+        }));
+      },
+      importPromptDismissed: false,
+      dismissImportPrompt: () => set({ importPromptDismissed: true }),
     }),
     {
       name: BROWSER_STATE_STORAGE_KEY,

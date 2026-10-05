@@ -104,7 +104,9 @@ import {
   isBrowserUseEnabled,
 } from './libs/browser-use-permissions';
 import {
+  browserImportAppBundlePath,
   clearImportedChromeCookies,
+  detectBrowserImportSources,
   getChromeCookieImportStatus,
   importChromeCookies,
   listChromeCookieDomains,
@@ -257,6 +259,7 @@ import type {
   SessionStatus,
 } from './types';
 import type {
+  BrowserImportSourceInfo,
   ClaudeCompatibleProvidersConfig,
   ClaudeCompatibleProviderId,
   ClaudeUsageRangeDays,
@@ -4152,6 +4155,16 @@ async function extractAppIconDataUrls(appPaths: string[]): Promise<void> {
   }
 }
 
+async function withBrowserSourceIcons(sources: BrowserImportSourceInfo[]): Promise<BrowserImportSourceInfo[]> {
+  const paths = new Map(sources.map((info) => [info.source, browserImportAppBundlePath(info.source)]));
+  await extractAppIconDataUrls([...paths.values()].filter((path): path is string => !!path));
+  return sources.map((info) => {
+    const path = paths.get(info.source);
+    const iconDataUrl = path ? openWithIconCache.get(path) : null;
+    return iconDataUrl ? { ...info, iconDataUrl } : info;
+  });
+}
+
 // The dropdown shows at most a handful of apps; don't extract icons for the
 // long tail Launch Services returns.
 const OPEN_WITH_APP_LIMIT = 8;
@@ -5009,8 +5022,14 @@ export function setupIPCHandlers(mainWindow: BrowserWindow): void {
     return getBrowserUsePermissionSettings();
   });
 
+  ipcMainHandle('detect-browser-import-sources', async () => {
+    const detected = detectBrowserImportSources();
+    return { ...detected, sources: await withBrowserSourceIcons(detected.sources) };
+  });
+
   ipcMainHandle('list-chrome-cookie-profiles', async () => {
-    return listChromeCookieProfilesWithRunning();
+    const listed = await listChromeCookieProfilesWithRunning();
+    return { ...listed, sources: await withBrowserSourceIcons(listed.sources) };
   });
 
   ipcMainHandle('list-chrome-cookie-domains', async (_event, profilePath: string) => {

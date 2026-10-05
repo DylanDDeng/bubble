@@ -28,18 +28,35 @@ import {
   ArrowLeft,
   ArrowRight,
   Camera,
+  Code2,
   Copy,
+  ExternalLink,
+  FileImport,
   FileText,
   Loader2,
+  Minus,
   MoreHorizontal,
   Palette,
+  Plus,
   RefreshCw,
+  Search,
+  Trash2,
+  ZoomIn,
 } from '../icons';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuShortcut,
+  DropdownMenuTrigger,
+} from '../ui/dropdown-menu';
 import { toast } from 'sonner';
 import type {
   BrowserReadoutResult,
   BrowserSendSelectionEvent,
   BrowserTabState,
+  BrowserZoomAction,
   SessionBrowserState,
 } from '../../../shared/browser-types';
 import type { Attachment } from '../../../shared/types';
@@ -51,18 +68,46 @@ import {
 } from '../../store/useBrowserStateStore';
 import {
   browserAddressDisplayValue,
+  browserAddressRestingValue,
+  isImeComposing,
   normalizeBrowserAddressInput,
   resolveBrowserAddressSync,
   resolveBrowserChromeStatus,
 } from './BrowserPanel.logic';
 import { useBrowserNativeOverlay } from './browser-native-overlay';
-import { BrowserLoadErrorPage, BrowserStartPage } from './BrowserStartPage';
+import { BrowserImportBanner, BrowserLoadErrorPage, BrowserStartPage } from './BrowserStartPage';
+import { BrowserFindBar } from './BrowserFindBar';
+import { browserUtilityTabForSession, openBrowserTab } from '../../utils/open-browser-tab';
+import { BrowserImportDialog } from './BrowserImportDialog';
+import { BrowserClearDataDialog } from './BrowserClearDataDialog';
+import type { BrowserImportSourceInfo } from '../../types';
 
 const MIN_PANEL_WIDTH = 320;
 const MAX_PANEL_WIDTH = 1200;
 const DEFAULT_HOME_URL = 'about:blank';
 const READOUT_TEXT_CHAR_LIMIT = 6000;
 const READOUT_LINK_LIMIT = 15;
+const SNAPSHOT_TIMEOUT_MS = 400;
+const SNAPSHOT_RELEASE_MS = 250;
+const ZOOM_FLASH_MS = 2500;
+// Room kept on BOTH sides of the address text so the zoom control never shifts its centering.
+const ZOOM_RESERVE_COMPACT_PX = 50;
+const ZOOM_RESERVE_EXPANDED_PX = 96;
+const TOOLBAR_BUTTON_CLASS =
+  'inline-flex h-7 w-7 items-center justify-center text-[var(--text-secondary)] transition-colors hover:bg-[var(--sidebar-item-hover)] hover:text-[var(--text-primary)] disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-[var(--text-secondary)]';
+const MENU_ITEM_CLASS = 'gap-2.5 py-1.5 text-[13px]';
+
+// Shared by every panel: detection extracts app icons, so it runs once per app launch.
+let importPromptRequest: Promise<BrowserImportSourceInfo[]> | null = null;
+function loadImportPromptSources(): Promise<BrowserImportSourceInfo[]> {
+  importPromptRequest ??= Promise.all([
+    window.electron.detectBrowserImportSources(),
+    window.electron.getChromeCookieImportStatus(),
+  ])
+    .then(([detected, status]) => (status.importedAt ? [] : detected.sources))
+    .catch(() => []);
+  return importPromptRequest;
+}
 
 interface BrowserPanelProps {
   // The chat session to inject "send to chat" output into. Null when the
@@ -180,12 +225,25 @@ export function BrowserPanel({
       }).slice(0, 12);
   }, [historyBySession]);
   const matchingHistory = history.filter(item => !addressValue || `${item.title} ${item.url}`.toLowerCase().includes(addressValue.toLowerCase()));
-  const historyOpen = addressEditing && matchingHistory.length > 0;
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [clearDataOpen, setClearDataOpen] = useState(false);
+  const [importSources, setImportSources] = useState<BrowserImportSourceInfo[]>([]);
+  const importPromptDismissed = useBrowserStateStore((s) => s.importPromptDismissed);
+  const dismissImportPrompt = useBrowserStateStore((s) => s.dismissImportPrompt);
+  const [pageSnapshot, setPageSnapshot] = useState<{ key: string; src: string | null } | null>(null);
   const showStartPage = !activeTab || !activeTab.url || activeTab.url === DEFAULT_HOME_URL;
   // The failed page is blank and would cover the error, so the panel draws it.
   const loadError = !showStartPage && activeTab && !activeTab.isLoading ? activeTab.lastError : null;
+  const pageCovered = collapsed || showStartPage || !!loadError;
+  const snapshotKey = activeTab ? `${browserSessionId}:${activeTab.id}:${activeTab.url}` : '';
+  const frozenPage = pageSnapshot?.key === snapshotKey ? pageSnapshot : null;
+  // App-level overlays (tab menus, dialogs) also wait for the snapshot, so the page never blanks behind them.
+  const pageAlreadyHidden = pageCovered || (overlayOpen && !!frozenPage);
+  // The native view paints above the DOM; suggestions wait for the snapshot that stands in for it.
+  const historyOpen = addressEditing && matchingHistory.length > 0 && (pageAlreadyHidden || !!frozenPage);
   // The start page, error page and address suggestions are React surfaces.
-  const nativeViewHidden = collapsed || overlayOpen || showStartPage || !!loadError || historyOpen;
+  const nativeViewHidden = pageAlreadyHidden || historyOpen || menuOpen;
 
   const lastSyncedAddressRef = useRef<string | undefined>(undefined);
   const previousActiveTabIdRef = useRef<string | null>(null);
@@ -193,6 +251,136 @@ export function BrowserPanel({
   const [localError, setLocalError] = useState<string | null>(null);
   const [screenshotBusy, setScreenshotBusy] = useState(false);
   const [readoutBusy, setReadoutBusy] = useState(false);
+  const addressInputRef = useRef<HTMLInputElement | null>(null);
+  const lastRecordedUrlRef = useRef<string | null>(null);
+
+  const freezingKeyRef = useRef<string | null>(null);
+  const freezePage = useCallback(async () => {
+    if (!activeTab || pageCovered || frozenPage || freezingKeyRef.current === snapshotKey) return;
+    const key = snapshotKey;
+    freezingKeyRef.current = key;
+    const capture = () =>
+      window.electron.browser
+        .capture({ sessionId: browserSessionId, tabId: activeTab.id, format: 'jpeg' })
+        .catch(() => null);
+    const result = await Promise.race([
+      capture().then((first) => (first?.ok ? first : capture())),
+      new Promise<null>((resolve) => window.setTimeout(() => resolve(null), SNAPSHOT_TIMEOUT_MS)),
+    ]);
+    const src = result?.ok && result.dataUrl ? result.dataUrl : null;
+    // Decode first: an undecoded <img> paints a blank frame where the page was.
+    if (src) {
+      const image = new Image();
+      image.src = src;
+      await image.decode().catch(() => {});
+    }
+    if (freezingKeyRef.current === key) freezingKeyRef.current = null;
+    setPageSnapshot({ key, src });
+  }, [activeTab, browserSessionId, frozenPage, pageCovered, snapshotKey]);
+
+  useEffect(() => {
+    if (overlayOpen && !frozenPage) void freezePage();
+  }, [overlayOpen, frozenPage, freezePage]);
+
+  useEffect(() => {
+    if (addressEditing || menuOpen || overlayOpen || !pageSnapshot) return;
+    const timer = window.setTimeout(() => setPageSnapshot(null), SNAPSHOT_RELEASE_MS);
+    return () => window.clearTimeout(timer);
+  }, [addressEditing, menuOpen, overlayOpen, pageSnapshot]);
+
+  useEffect(() => {
+    if (collapsed || importPromptDismissed) return;
+    let cancelled = false;
+    void loadImportPromptSources().then((sources) => {
+      if (!cancelled) setImportSources(sources);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [collapsed, importPromptDismissed]);
+
+  const handleImported = useCallback(() => {
+    importPromptRequest = Promise.resolve([]);
+    setImportSources([]);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (addressEditing) addressInputRef.current?.select();
+  }, [addressEditing]);
+
+  // ===== Find in page =====
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState('');
+  const findInputRef = useRef<HTMLInputElement | null>(null);
+  const findTabId = showStartPage || loadError ? null : activeTab?.id ?? null;
+  const findTargetRef = useRef<{ tabId: string | null; query: string }>({ tabId: null, query: '' });
+  findTargetRef.current = { tabId: findTabId, query: findQuery };
+
+  const runFind = useCallback(
+    (options: { forward?: boolean; next?: boolean } = {}) => {
+      const { tabId, query } = findTargetRef.current;
+      if (!tabId) return;
+      void window.electron.browser.find({ sessionId: browserSessionId, tabId, text: query, ...options }).catch(() => {});
+    },
+    [browserSessionId]
+  );
+  const openFind = useCallback(() => {
+    if (!findTargetRef.current.tabId) return;
+    setFindOpen(true);
+    requestAnimationFrame(() => {
+      findInputRef.current?.focus();
+      findInputRef.current?.select();
+    });
+  }, []);
+  const closeFind = useCallback(() => {
+    setFindOpen(false);
+    const { tabId } = findTargetRef.current;
+    if (tabId) void window.electron.browser.stopFind({ sessionId: browserSessionId, tabId }).catch(() => {});
+  }, [browserSessionId]);
+
+  useEffect(() => {
+    if (findOpen) runFind();
+  }, [findOpen, findQuery, runFind]);
+  // A new document (or a different tab) invalidates the matches; search it again.
+  useEffect(() => {
+    if (findOpen && findTargetRef.current.query) runFind();
+  }, [activeTab?.url, findOpen, runFind]);
+  useEffect(() => {
+    if (findOpen && (!findTabId || collapsed)) closeFind();
+  }, [findOpen, findTabId, collapsed, closeFind]);
+
+  // Shortcuts pressed while the page has focus arrive from the main process.
+  useEffect(() => {
+    return window.electron.browser.onPanelEvent((event) => {
+      if (event.sessionId !== browserSessionId) return;
+      if (event.type === 'open-in-new-tab') {
+        openBrowserTab({ url: event.url, after: browserUtilityTabForSession(browserSessionId) });
+      } else if (event.type === 'find') {
+        openFind();
+      } else if (event.type === 'find-close') {
+        closeFind();
+      } else if (findTargetRef.current.query) {
+        if (!findOpen) openFind();
+        runFind({ forward: event.type === 'find-next', next: true });
+      } else {
+        openFind();
+      }
+    });
+  }, [browserSessionId, closeFind, findOpen, openFind, runFind]);
+
+  const handlePanelKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!(event.metaKey || event.ctrlKey) || event.altKey || event.key.toLowerCase() !== 'f') return;
+    event.preventDefault();
+    openFind();
+  };
+
+  const handleMenuOpenChange = (open: boolean) => {
+    if (!open) {
+      setMenuOpen(false);
+      return;
+    }
+    void freezePage().then(() => setMenuOpen(true));
+  };
 
   // ===== Design mode =====
   // The design session is keyed by the (browserSessionId, tabId) it was
@@ -307,6 +495,7 @@ export function BrowserPanel({
     // panel had (persisted renderer state), or the open reply resets it to blank.
     const cached = useBrowserStateStore.getState().sessionStatesBySessionId[browserSessionId];
     const cachedTab = cached?.tabs.find((tab) => tab.id === cached.activeTabId) ?? cached?.tabs[0];
+    lastRecordedUrlRef.current = null;
 
     api
       .open({ sessionId: browserSessionId, initialUrl: cachedTab?.url || DEFAULT_HOME_URL })
@@ -324,7 +513,14 @@ export function BrowserPanel({
       setSessionState(nextState);
       upsertSessionState(stateToPersisted(nextState));
       const active = nextState.tabs.find((tab) => tab.id === nextState.activeTabId);
-      if (active && active.url && active.url !== DEFAULT_HOME_URL) {
+      if (!active || !active.url || active.url === DEFAULT_HOME_URL) return;
+      const known = useBrowserStateStore
+        .getState()
+        .recentHistoryBySessionId[browserSessionId]?.find((entry) => entry.url === active.url);
+      // A new URL is a visit; later title/icon updates only refresh an entry still in history.
+      const isNewVisit = active.url !== lastRecordedUrlRef.current;
+      if (isNewVisit || (known && (known.title !== active.title || known.faviconUrl !== active.faviconUrl))) {
+        lastRecordedUrlRef.current = active.url;
         recordHistoryEntry(browserSessionId, {
           url: active.url,
           title: active.title,
@@ -345,6 +541,13 @@ export function BrowserPanel({
   const visibleBrowserSessionRef = useRef<string | null>(null);
   // Bounds last sent for the visible view; identical rects are not resent.
   const lastPushedBoundsRef = useRef<string | null>(null);
+  // Read by effect cleanups, which run after the NEXT render has set these.
+  const snapshotStandsInRef = useRef(false);
+  snapshotStandsInRef.current = !pageCovered && !!frozenPage?.src;
+  const nativeViewHiddenRef = useRef(nativeViewHidden);
+  nativeViewHiddenRef.current = nativeViewHidden;
+  const browserSessionIdRef = useRef(browserSessionId);
+  browserSessionIdRef.current = browserSessionId;
   useLayoutEffect(() => {
     const hide = () => {
       visibleBrowserSessionRef.current = null;
@@ -353,8 +556,28 @@ export function BrowserPanel({
     visibleBrowserSessionRef.current = nativeViewHidden ? null : browserSessionId;
     // hide() revokes the bounds in the main process; the next show must resend.
     lastPushedBoundsRef.current = null;
-    if (nativeViewHidden) hide();
-    return hide;
+    if (!nativeViewHidden) {
+      return () => {
+        // Going behind a snapshot: the next run hides once the snapshot is on screen.
+        const nextBehindSnapshot =
+          browserSessionIdRef.current === browserSessionId && nativeViewHiddenRef.current && snapshotStandsInRef.current;
+        if (nextBehindSnapshot) visibleBrowserSessionRef.current = null;
+        else hide();
+      };
+    }
+    if (!snapshotStandsInRef.current) {
+      hide();
+      return hide;
+    }
+    // The main process drops the view within milliseconds, but the snapshot
+    // only reaches the screen with the next frame; in between the page blanks.
+    let frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(hide);
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      hide();
+    };
   }, [browserSessionId, nativeViewHidden]);
 
   // ===== Context menu -> send selection to chat =====
@@ -500,6 +723,7 @@ export function BrowserPanel({
   );
 
   const handleAddressKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (isImeComposing(event)) return;
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       if (!matchingHistory.length) return;
       event.preventDefault();
@@ -536,6 +760,52 @@ export function BrowserPanel({
   const handleReload = () => {
     if (!activeTab) return;
     window.electron.browser.reload({ sessionId: browserSessionId, tabId: activeTab.id }).catch(() => {});
+  };
+  const handleCopyUrl = () => {
+    if (!activeTab?.url) return;
+    void navigator.clipboard.writeText(activeTab.url);
+    toast.success('URL copied');
+  };
+  const handleOpenExternal = () => {
+    if (!activeTab?.url) return;
+    void window.electron.openExternalUrl(activeTab.url).then((result) => {
+      if (!result.ok) toast.error(result.message || 'Unable to open in external browser');
+    });
+  };
+  const zoomPercent = (!showStartPage && activeTab?.zoomPercent) || 100;
+  // After a zoom change the address bar briefly expands to − 110% + so the change is visible and repeatable.
+  const [zoomFlash, setZoomFlash] = useState(false);
+  const [zoomHover, setZoomHover] = useState(false);
+  const zoomTrackRef = useRef<{ tabId: string | null; percent: number }>({ tabId: null, percent: 100 });
+  useEffect(() => {
+    const tabId = activeTab?.id ?? null;
+    const previous = zoomTrackRef.current;
+    zoomTrackRef.current = { tabId, percent: zoomPercent };
+    if (previous.tabId !== tabId || previous.percent === zoomPercent) return;
+    setZoomFlash(true);
+    const timer = window.setTimeout(() => setZoomFlash(false), ZOOM_FLASH_MS);
+    return () => window.clearTimeout(timer);
+  }, [activeTab?.id, zoomPercent]);
+  const zoomExpanded = zoomFlash || zoomHover;
+  const zoomControlVisible = !showStartPage && !addressEditing && (zoomPercent !== 100 || zoomFlash);
+  const zoomReserve = zoomControlVisible ? (zoomExpanded ? ZOOM_RESERVE_EXPANDED_PX : ZOOM_RESERVE_COMPACT_PX) : null;
+  useEffect(() => {
+    if (!zoomControlVisible) setZoomHover(false);
+  }, [zoomControlVisible]);
+  // The open menu covers a frozen snapshot, so zooming from it closes it to show the page.
+  const handleMenuZoom = (action: BrowserZoomAction) => {
+    handleZoom(action);
+    setMenuOpen(false);
+  };
+  const handleZoom = (action: BrowserZoomAction) => {
+    if (!activeTab) return;
+    window.electron.browser.zoom({ sessionId: browserSessionId, tabId: activeTab.id, action }).catch(() => {});
+  };
+  const handleOpenDevTools = () => {
+    if (!activeTab) return;
+    window.electron.browser
+      .openDevTools({ sessionId: browserSessionId, tabId: activeTab.id })
+      .catch(() => {});
   };
 
   const handleCaptureScreenshot = async () => {
@@ -692,6 +962,7 @@ export function BrowserPanel({
             }
       }
       aria-hidden={collapsed && !isFullscreen}
+      onKeyDown={handlePanelKeyDown}
     >
       {!embedded && !collapsed && !isFullscreen && (
         <div
@@ -711,74 +982,119 @@ export function BrowserPanel({
       ) : null}
 
       {/* Chrome */}
-      <div className="no-drag flex-shrink-0 bg-[var(--bg-secondary)]/45">
-        <div className="flex items-center gap-1 px-2 py-1.5">
-          {sessionState.agentActive ? (
-            <span
-              className="mr-0.5 inline-flex h-7 items-center gap-1.5 rounded-md bg-[var(--accent-light)] px-2 text-[11px] font-medium text-[var(--accent)]"
-              title="An agent is driving this browser panel"
-            >
-              <span className="relative flex h-1.5 w-1.5">
-                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--accent)] opacity-60" />
-                <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
+      <div className="no-drag relative flex-shrink-0">
+        <div className="grid h-11 grid-cols-[minmax(max-content,1fr)_minmax(0,770px)_minmax(max-content,1fr)] items-center gap-1.5 px-2">
+          <div className="flex items-center gap-1.5 justify-self-start">
+            {sessionState.agentActive ? (
+              <span
+                className="inline-flex h-7 items-center gap-1.5 rounded-[10px] bg-[var(--accent-light)] px-2 text-[11px] font-medium text-[var(--accent)]"
+                title="An agent is driving this browser panel"
+              >
+                <span className="relative flex h-1.5 w-1.5">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--accent)] opacity-60" />
+                  <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
+                </span>
+                Agent
               </span>
-              Agent
-            </span>
-          ) : null}
-          <button
-            type="button"
-            onClick={handleBack}
-            disabled={!activeTab?.canGoBack}
-            className="inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--text-secondary)] transition-colors hover:bg-[var(--sidebar-item-hover)] hover:text-[var(--text-primary)] disabled:opacity-40 disabled:hover:bg-transparent"
-            title="Back"
-            aria-label="Back"
-          >
-            <ArrowLeft className="h-[13px] w-[13px]" />
-          </button>
-          <button
-            type="button"
-            onClick={handleForward}
-            disabled={!activeTab?.canGoForward}
-            className="inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--text-secondary)] transition-colors hover:bg-[var(--sidebar-item-hover)] hover:text-[var(--text-primary)] disabled:opacity-40 disabled:hover:bg-transparent"
-            title="Forward"
-            aria-label="Forward"
-          >
-            <ArrowRight className="h-[13px] w-[13px]" />
-          </button>
-          <button
-            type="button"
-            onClick={handleReload}
-            disabled={!activeTab}
-            className="inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--text-secondary)] transition-colors hover:bg-[var(--sidebar-item-hover)] hover:text-[var(--text-primary)] disabled:opacity-40 disabled:hover:bg-transparent"
-            title="Reload"
-            aria-label="Reload"
-          >
-            <RefreshCw
-              className={`h-[13px] w-[13px] ${activeTab?.isLoading ? 'animate-spin' : ''}`}
-            />
-          </button>
+            ) : null}
+            <div role="group" aria-label="Navigation" className="flex items-center gap-px">
+              <button
+                type="button"
+                onClick={handleBack}
+                disabled={!activeTab?.canGoBack}
+                className={`${TOOLBAR_BUTTON_CLASS} rounded-l-[10px]`}
+                title="Back"
+                aria-label="Back"
+              >
+                <ArrowLeft className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={handleForward}
+                disabled={!activeTab?.canGoForward}
+                className={TOOLBAR_BUTTON_CLASS}
+                title="Forward"
+                aria-label="Forward"
+              >
+                <ArrowRight className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={handleReload}
+                disabled={!activeTab || showStartPage}
+                className={`${TOOLBAR_BUTTON_CLASS} rounded-r-[10px]`}
+                title="Reload"
+                aria-label="Reload"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
 
-          <div className="relative mx-1 flex-1">
-            <input
-              type="text"
-              spellCheck={false}
-              value={addressValue}
-              onChange={(e) => handleAddressChange(e.target.value)}
-              onFocus={(e) => {
-                setAddressEditing(true);
-                setHistoryIndex(-1);
-                e.currentTarget.select();
-              }}
-              onBlur={() => {
-                window.setTimeout(() => setAddressEditing(false), 100);
-              }}
-              onKeyDown={handleAddressKeyDown}
-              aria-label="Search or enter a URL"
-              role="combobox" aria-expanded={historyOpen} aria-controls={historyOpen ? `browser-history-${browserSessionId}` : undefined}
-              aria-autocomplete="list" aria-activedescendant={historyOpen && historyIndex >= 0 ? `browser-history-${browserSessionId}-${historyIndex}` : undefined}
-              placeholder="Search or enter a URL"
-              className="h-7 w-full rounded-md border border-transparent bg-[var(--bg-tertiary)] px-2 text-[12px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:border-[var(--border-focus)] focus:outline-none focus:ring-1 focus:ring-[var(--border-focus)]"
-            />
+          <div className="relative min-w-0">
+            <div
+              className={`relative flex h-7 cursor-text items-center rounded-[10px] transition-[background-color,box-shadow] duration-150 ${
+                addressEditing
+                  ? 'bg-[var(--sidebar-item-hover)] ring-1 ring-inset ring-[color-mix(in_srgb,var(--text-primary)_14%,transparent)]'
+                  : 'hover:bg-[var(--sidebar-item-hover)]'
+              }`}
+            >
+              <input
+                ref={addressInputRef}
+                type="text"
+                spellCheck={false}
+                value={addressEditing ? addressValue : browserAddressRestingValue(addressValue)}
+                onChange={(e) => handleAddressChange(e.target.value)}
+                onFocus={(e) => {
+                  setAddressEditing(true);
+                  setHistoryIndex(-1);
+                  e.currentTarget.select();
+                  void freezePage();
+                }}
+                onBlur={() => {
+                  window.setTimeout(() => setAddressEditing(false), 100);
+                }}
+                onKeyDown={handleAddressKeyDown}
+                aria-label="Search or enter a URL"
+                role="combobox" aria-expanded={historyOpen} aria-controls={historyOpen ? `browser-history-${browserSessionId}` : undefined}
+                aria-autocomplete="list" aria-activedescendant={historyOpen && historyIndex >= 0 ? `browser-history-${browserSessionId}-${historyIndex}` : undefined}
+                placeholder="Search or enter a URL"
+                style={zoomReserve ? { paddingLeft: zoomReserve, paddingRight: zoomReserve } : undefined}
+                className={`h-full w-full min-w-0 bg-transparent px-3 text-[12px] leading-[18px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)] ${
+                  addressEditing ? 'text-left' : 'bubble-browser-address-resting text-center'
+                }`}
+              />
+              {zoomControlVisible ? (
+                <div
+                  data-browser-zoom-control
+                  data-expanded={zoomExpanded ? 'true' : 'false'}
+                  onMouseEnter={() => setZoomHover(true)}
+                  onMouseLeave={() => setZoomHover(false)}
+                  className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center rounded-[7px] bg-[var(--sidebar-item-hover)] text-[11px] font-medium tabular-nums text-[var(--text-secondary)]"
+                >
+                  {zoomExpanded ? (
+                    <button type="button" aria-label="Zoom out" onClick={() => handleZoom('out')} className="flex h-5 w-5 items-center justify-center rounded-[6px] hover:bg-[var(--sidebar-item-active)] hover:text-[var(--text-primary)]">
+                      <Minus className="h-3 w-3" />
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() => handleZoom('reset')}
+                    data-browser-zoom-indicator
+                    className="h-5 min-w-9 rounded-[6px] px-1.5 transition-colors hover:bg-[var(--sidebar-item-active)] hover:text-[var(--text-primary)]"
+                    title="Reset zoom (⌘0)"
+                    aria-label={`Zoom ${zoomPercent}%, reset to 100%`}
+                  >
+                    {zoomPercent}%
+                  </button>
+                  {zoomExpanded ? (
+                    <button type="button" aria-label="Zoom in" onClick={() => handleZoom('in')} className="flex h-5 w-5 items-center justify-center rounded-[6px] hover:bg-[var(--sidebar-item-active)] hover:text-[var(--text-primary)]">
+                      <Plus className="h-3 w-3" />
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
             {historyOpen ? <div role="listbox" id={`browser-history-${browserSessionId}`} aria-label="Recent pages" className="bubble-address-history">
               {matchingHistory.map((item, index) => <button key={item.url} id={`browser-history-${browserSessionId}-${index}`} role="option" aria-selected={historyIndex === index} type="button"
                 onMouseDown={event => event.preventDefault()} onClick={() => void handleNavigate(item.url)}>
@@ -787,82 +1103,123 @@ export function BrowserPanel({
             </div> : null}
           </div>
 
-          <button
-            type="button"
-            onClick={handleCaptureScreenshot}
-            disabled={!activeTab || screenshotBusy}
-            className="inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--text-secondary)] transition-colors hover:bg-[var(--sidebar-item-hover)] hover:text-[var(--text-primary)] disabled:opacity-40 disabled:hover:bg-transparent"
-            title="Screenshot to chat"
-            aria-label="Screenshot to chat"
-          >
-            {screenshotBusy ? (
-              <Loader2 className="h-[13px] w-[13px] animate-spin" />
-            ) : (
-              <Camera className="h-[13px] w-[13px]" />
-            )}
-          </button>
-          <button
-            type="button"
-            onClick={handleReadPage}
-            disabled={!activeTab || readoutBusy}
-            className="inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--text-secondary)] transition-colors hover:bg-[var(--sidebar-item-hover)] hover:text-[var(--text-primary)] disabled:opacity-40 disabled:hover:bg-transparent"
-            title="Send page content to chat"
-            aria-label="Send page content to chat"
-          >
-            {readoutBusy ? (
-              <Loader2 className="h-[13px] w-[13px] animate-spin" />
-            ) : (
-              <FileText className="h-[13px] w-[13px]" />
-            )}
-          </button>
-          <button
-            type="button"
-            onClick={() => void toggleDesignMode()}
-            disabled={!activeTab}
-            className={`inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors disabled:opacity-40 disabled:hover:bg-transparent ${
-              designTarget
-                ? 'bg-[color-mix(in_srgb,var(--accent)_18%,transparent)] text-[var(--accent)]'
-                : 'text-[var(--text-secondary)] hover:bg-[var(--sidebar-item-hover)] hover:text-[var(--text-primary)]'
-            }`}
-            title={designTarget ? 'Exit design mode' : 'Design mode: click an element, describe the change, send it to the agent'}
-            aria-label="Toggle design mode"
-          >
-            <Palette className="h-[13px] w-[13px]" />
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              if (activeTab?.url) {
-                void navigator.clipboard.writeText(activeTab.url);
-                toast.success('URL copied');
-              }
-            }}
-            disabled={!activeTab}
-            className="inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--text-secondary)] transition-colors hover:bg-[var(--sidebar-item-hover)] hover:text-[var(--text-primary)] disabled:opacity-40 disabled:hover:bg-transparent"
-            title="Copy URL"
-            aria-label="Copy URL"
-          >
-            <Copy className="h-[13px] w-[13px]" />
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              if (activeTab) {
-                window.electron.browser
-                  .openDevTools({ sessionId: browserSessionId, tabId: activeTab.id })
-                  .catch(() => {});
-              }
-            }}
-            disabled={!activeTab}
-            className="inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--text-secondary)] transition-colors hover:bg-[var(--sidebar-item-hover)] hover:text-[var(--text-primary)] disabled:opacity-40 disabled:hover:bg-transparent"
-            title="Open DevTools"
-            aria-label="Open DevTools"
-          >
-            <MoreHorizontal className="h-[13px] w-[13px]" />
-          </button>
+          <div className="flex items-center gap-0.5 justify-self-end">
+            <button
+              type="button"
+              onClick={() => void toggleDesignMode()}
+              disabled={!activeTab}
+              className={`${TOOLBAR_BUTTON_CLASS} rounded-[10px] ${
+                designTarget
+                  ? 'bg-[color-mix(in_srgb,var(--accent)_18%,transparent)] !text-[var(--accent)] hover:bg-[color-mix(in_srgb,var(--accent)_24%,transparent)]'
+                  : ''
+              }`}
+              title={designTarget ? 'Exit design mode' : 'Design mode: click an element, describe the change, send it to the agent'}
+              aria-label="Toggle design mode"
+              aria-pressed={!!designTarget}
+            >
+              <Palette className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={handleCaptureScreenshot}
+              disabled={!activeTab || screenshotBusy}
+              className={`${TOOLBAR_BUTTON_CLASS} rounded-[10px]`}
+              title="Screenshot to chat"
+              aria-label="Screenshot to chat"
+            >
+              {screenshotBusy ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Camera className="h-3.5 w-3.5" />
+              )}
+            </button>
+            <DropdownMenu open={menuOpen} onOpenChange={handleMenuOpenChange}>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className={`${TOOLBAR_BUTTON_CLASS} rounded-[10px] data-[popup-open]:bg-[var(--sidebar-item-hover)] data-[popup-open]:text-[var(--text-primary)]`}
+                  title="Browser actions"
+                  aria-label="Browser actions"
+                  data-browser-actions-trigger
+                >
+                  <MoreHorizontal className="h-3.5 w-3.5" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" sideOffset={6} className="min-w-[220px]" data-browser-actions-menu>
+                <DropdownMenuItem className={MENU_ITEM_CLASS} disabled={showStartPage || readoutBusy} onClick={() => void handleReadPage()}>
+                  <FileText className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
+                  Send page content to chat
+                </DropdownMenuItem>
+                <DropdownMenuItem className={MENU_ITEM_CLASS} disabled={showStartPage} onClick={handleCopyUrl}>
+                  <Copy className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
+                  Copy URL
+                </DropdownMenuItem>
+                <DropdownMenuItem className={MENU_ITEM_CLASS} disabled={showStartPage} onClick={handleOpenExternal}>
+                  <ExternalLink className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
+                  Open in external browser
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem className={MENU_ITEM_CLASS} disabled={!findTabId} onClick={openFind}>
+                  <Search className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
+                  Find in page
+                  <DropdownMenuShortcut>⌘F</DropdownMenuShortcut>
+                </DropdownMenuItem>
+                <div className="flex items-center gap-2.5 rounded-lg px-3 py-1 text-[13px]" data-browser-zoom-controls>
+                  <ZoomIn className="h-3.5 w-3.5 text-[var(--text-secondary)]" aria-hidden="true" />
+                  <span className="flex-1">Zoom</span>
+                  <div className="flex items-center rounded-[8px] bg-[var(--sidebar-item-hover)] p-0.5">
+                    <button type="button" aria-label="Zoom out" disabled={showStartPage} onClick={() => handleMenuZoom('out')} className="flex h-6 w-6 items-center justify-center rounded-[6px] text-[var(--text-secondary)] hover:bg-[var(--popover-bg)] hover:text-[var(--text-primary)] disabled:opacity-40">
+                      <Minus className="h-3 w-3" />
+                    </button>
+                    <button type="button" aria-label="Reset zoom" disabled={showStartPage} onClick={() => handleMenuZoom('reset')} className="h-6 min-w-11 rounded-[6px] px-1 text-[12px] tabular-nums text-[var(--text-primary)] hover:bg-[var(--popover-bg)] disabled:opacity-40">
+                      {zoomPercent}%
+                    </button>
+                    <button type="button" aria-label="Zoom in" disabled={showStartPage} onClick={() => handleMenuZoom('in')} className="flex h-6 w-6 items-center justify-center rounded-[6px] text-[var(--text-secondary)] hover:bg-[var(--popover-bg)] hover:text-[var(--text-primary)] disabled:opacity-40">
+                      <Plus className="h-3 w-3" />
+                    </button>
+                  </div>
+                </div>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem className={MENU_ITEM_CLASS} onClick={() => setImportOpen(true)}>
+                  <FileImport className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
+                  Import from browser…
+                </DropdownMenuItem>
+                <DropdownMenuItem className={MENU_ITEM_CLASS} onClick={() => setClearDataOpen(true)}>
+                  <Trash2 className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
+                  Clear browsing data…
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem className={MENU_ITEM_CLASS} disabled={!activeTab} onClick={handleOpenDevTools}>
+                  <Code2 className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
+                  Open DevTools
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
         </div>
-
+        <div aria-hidden="true" className="bubble-browser-progress" data-loading={activeTab?.isLoading ? 'true' : 'false'} />
       </div>
+
+      {findOpen && findTabId ? (
+        <BrowserFindBar
+          inputRef={findInputRef}
+          query={findQuery}
+          matches={activeTab?.findMatches}
+          onQueryChange={setFindQuery}
+          onNext={() => runFind({ forward: true, next: true })}
+          onPrevious={() => runFind({ forward: false, next: true })}
+          onClose={closeFind}
+        />
+      ) : null}
+      {importSources.length > 0 && !importPromptDismissed ? (
+        <BrowserImportBanner
+          sources={importSources}
+          onImport={() => void freezePage().then(() => setImportOpen(true))}
+          onDismiss={dismissImportPrompt}
+        />
+      ) : null}
+      <BrowserImportDialog open={importOpen} onOpenChange={setImportOpen} onImported={handleImported} />
+      <BrowserClearDataDialog open={clearDataOpen} onOpenChange={setClearDataOpen} />
 
       {/* Viewport row: native WebContentsView mirror + (optional) design drawer.
           The drawer shrinks the viewport div; the ResizeObserver above pushes
@@ -870,8 +1227,18 @@ export function BrowserPanel({
       <div className="flex min-h-0 flex-1" style={{ marginBottom: bottomInset }}>
         <div className="relative min-h-0 flex-1 bg-[var(--bg-primary)]">
           <div ref={viewportRef} className="absolute inset-0" />
+          {frozenPage?.src && !showStartPage && !loadError ? (
+            <img
+              src={frozenPage.src}
+              alt=""
+              aria-hidden="true"
+              draggable={false}
+              data-browser-page-snapshot
+              className="pointer-events-none absolute inset-0 h-full w-full select-none object-cover object-left-top"
+            />
+          ) : null}
           {showStartPage ? <BrowserStartPage history={history} onNavigate={url => void handleNavigate(url)} onOpenTool={tool => useAppStore.getState().openRightUtilityTab(tool)} /> : null}
-          {loadError && activeTab ? <BrowserLoadErrorPage message={loadError} url={activeTab.url} onRetry={() => void handleNavigate(activeTab.url)} /> : null}
+          {loadError && activeTab ? <BrowserLoadErrorPage message={loadError} errorCode={activeTab.lastErrorCode} url={activeTab.url} onRetry={() => void handleNavigate(activeTab.url)} /> : null}
           {!showStartPage && !loadError && chromeStatus && (
             <div
               className={`pointer-events-none absolute bottom-2 left-2 right-2 rounded-md border px-2 py-1 text-[11px] ${

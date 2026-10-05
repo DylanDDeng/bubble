@@ -32,6 +32,20 @@ export function browserAddressDisplayValue(
   return nextUrl === ABOUT_BLANK_URL ? '' : nextUrl;
 }
 
+/**
+ * True while an IME (e.g. Chinese pinyin) is composing: its Enter commits the
+ * typed letters, Escape cancels them, arrows pick candidates. None of those
+ * may reach the input's own shortcuts.
+ */
+export function isImeComposing(event: { nativeEvent: Pick<KeyboardEvent, 'isComposing' | 'keyCode'> }): boolean {
+  return event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229;
+}
+
+/** Unfocused address bar text: no scheme, no bare-origin trailing slash. */
+export function browserAddressRestingValue(value: string): string {
+  return value.replace(/^https?:\/\//i, '').replace(/^([^/?#]+)\/$/, '$1');
+}
+
 function looksLikeUrlInput(value: string): boolean {
   return (
     value.includes('.') ||

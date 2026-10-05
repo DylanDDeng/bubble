@@ -13,8 +13,10 @@ import {
   chromeHostMatchesAllowlist,
   clearImportedChromeCookies,
   cookieUrlForRow,
+  detectBrowserImportSources,
   getChromeCookieImportStatus,
   importChromeCookies,
+  isBrowserProcessName,
   isGoogleChromeProcessName,
   isHostOnlyCookie,
   listChromeCookieDomains,
@@ -182,6 +184,10 @@ function writeLocalState(root: string, names: Record<string, { name: string; use
       },
     })
   );
+}
+
+function profileOutsideSources(root: string): string {
+  return writeChromeProfile(join(root, 'elsewhere'), 'Default', []);
 }
 
 async function run(): Promise<void> {
@@ -560,6 +566,66 @@ async function run(): Promise<void> {
     assert.equal(v24Imported.ok, true);
     assert.equal(v24Imported.cookies?.imported, 1);
     assert.equal([...v24Store.records.values()][0]?.value, 'yes');
+
+    // Chromium-family sources share the cookie format but not the Keychain item.
+    const chromeRoot = join(root, 'sources', 'chrome');
+    const arcRoot = join(root, 'sources', 'arc');
+    mkdirSync(chromeRoot, { recursive: true });
+    mkdirSync(arcRoot, { recursive: true });
+    writeLocalState(chromeRoot, { Default: { name: 'Person 1' } });
+    writeLocalState(arcRoot, { Default: { name: 'Work' } });
+    writeChromeProfile(chromeRoot, 'Default', []);
+    const arcProfile = writeChromeProfile(arcRoot, 'Default', [
+      createCookieRow({
+        host_key: '.arc.example',
+        name: 'sid',
+        encrypted_value: encryptChromeV10('arc-session', KEY),
+        is_persistent: 1,
+        has_expires: 1,
+        expires_utc: persistentExpiry(),
+      }),
+    ]);
+    const sourceDirs = { chrome: chromeRoot, arc: arcRoot, edge: join(root, 'sources', 'missing-edge') };
+    assert.deepEqual(
+      detectBrowserImportSources({ platform: 'darwin', sourceUserDataDirs: sourceDirs }).sources.map((info) => info.source),
+      ['chrome', 'arc']
+    );
+    const multi = listChromeCookieProfiles({ platform: 'darwin', sourceUserDataDirs: sourceDirs });
+    assert.deepEqual(
+      multi.profiles.map((profile) => `${profile.source}:${profile.appName}:${profile.profileName}`),
+      ['chrome:Google Chrome:Person 1', 'arc:Arc:Work']
+    );
+    const keychainSources: string[] = [];
+    const arcStore = createMemoryCookieStore();
+    const arcImported = await importChromeCookies(
+      { profilePath: arcProfile },
+      {
+        platform: 'darwin',
+        sourceUserDataDirs: sourceDirs,
+        isChromeRunning: async () => false,
+        readSafeStoragePassword: async (source) => {
+          keychainSources.push(source);
+          return PASSWORD;
+        },
+        cookieStore: arcStore,
+        importStatePath: join(root, 'arc-state.json'),
+      }
+    );
+    assert.equal(arcImported.ok, true);
+    assert.deepEqual(keychainSources, ['arc'], 'Arc cookies use Arc Safe Storage');
+    assert.equal([...arcStore.records.values()][0]?.value, 'arc-session');
+    assert.equal(
+      getChromeCookieImportStatus({ importStatePath: join(root, 'arc-state.json') }).profileName,
+      'Arc · Work'
+    );
+    const outside = await importChromeCookies(
+      { profilePath: profileOutsideSources(root) },
+      { platform: 'darwin', sourceUserDataDirs: sourceDirs, cookieStore: createMemoryCookieStore() }
+    );
+    assert.equal(outside.errorCode, 'profile_not_found', 'profiles outside known browser roots are refused');
+    assert.equal(isBrowserProcessName('Arc', 'arc'), true);
+    assert.equal(isBrowserProcessName('Arc Helper', 'arc'), false);
+    assert.equal(isBrowserProcessName('Microsoft Edge', 'edge'), true);
 
     pinBrowserUseOriginsAsk(['https://pinned.example']);
     saveBrowserUsePermissionSettings({

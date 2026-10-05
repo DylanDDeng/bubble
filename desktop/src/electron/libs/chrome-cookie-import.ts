@@ -7,6 +7,9 @@ import { escapesRoot } from './path-containment';
 import { promisify } from 'node:util';
 import Database from 'better-sqlite3';
 import type {
+  BrowserImportSource,
+  BrowserImportSourceInfo,
+  BrowserImportSourcesResult,
   ChromeCookieDomain,
   ChromeCookieDomainsResult,
   ChromeCookieImportCounts,
@@ -72,13 +75,45 @@ export interface ChromeCookieRow {
 export interface ChromeCookieImportDeps {
   platform?: NodeJS.Platform;
   homedir?: () => string;
+  /** Limits import to one Chrome user-data root (tests, AEGIS_CHROME_USER_DATA_DIR). */
   chromeUserDataDir?: string;
+  /** Limits import to these sources' user-data roots. */
+  sourceUserDataDirs?: Partial<Record<BrowserImportSource, string>>;
   nowMs?: () => number;
-  isChromeRunning?: () => Promise<boolean>;
-  readSafeStoragePassword?: () => Promise<string>;
+  isChromeRunning?: (source: BrowserImportSource) => Promise<boolean>;
+  readSafeStoragePassword?: (source: BrowserImportSource) => Promise<string>;
   cookieStore?: ElectronCookieStore;
   importStatePath?: string;
   mkdtemp?: (prefix: string) => Promise<string>;
+}
+
+export interface BrowserImportSourceSpec {
+  source: BrowserImportSource;
+  appName: string;
+  /** Under ~/Library/Application Support. */
+  userDataPath: string[];
+  keychainService: string;
+  keychainAccount: string;
+  processNames: string[];
+  appBundleName: string;
+}
+
+/** Keychain names checked against installed Chrome, Arc and Edge items. */
+export const BROWSER_IMPORT_SOURCES: readonly BrowserImportSourceSpec[] = [
+  { source: 'chrome', appName: 'Google Chrome', userDataPath: ['Google', 'Chrome'], keychainService: 'Chrome Safe Storage', keychainAccount: 'Chrome', processNames: ['Google Chrome'], appBundleName: 'Google Chrome.app' },
+  { source: 'arc', appName: 'Arc', userDataPath: ['Arc', 'User Data'], keychainService: 'Arc Safe Storage', keychainAccount: 'Arc', processNames: ['Arc'], appBundleName: 'Arc.app' },
+  { source: 'edge', appName: 'Microsoft Edge', userDataPath: ['Microsoft Edge'], keychainService: 'Microsoft Edge Safe Storage', keychainAccount: 'Microsoft Edge', processNames: ['Microsoft Edge'], appBundleName: 'Microsoft Edge.app' },
+  { source: 'brave', appName: 'Brave', userDataPath: ['BraveSoftware', 'Brave-Browser'], keychainService: 'Brave Safe Storage', keychainAccount: 'Brave', processNames: ['Brave Browser'], appBundleName: 'Brave Browser.app' },
+  { source: 'chromium', appName: 'Chromium', userDataPath: ['Chromium'], keychainService: 'Chromium Safe Storage', keychainAccount: 'Chromium', processNames: ['Chromium'], appBundleName: 'Chromium.app' },
+  { source: 'vivaldi', appName: 'Vivaldi', userDataPath: ['Vivaldi'], keychainService: 'Vivaldi Safe Storage', keychainAccount: 'Vivaldi', processNames: ['Vivaldi'], appBundleName: 'Vivaldi.app' },
+];
+
+interface ResolvedImportSource extends BrowserImportSourceSpec {
+  userDataDir: string;
+}
+
+function importSourceSpec(source: BrowserImportSource): BrowserImportSourceSpec {
+  return BROWSER_IMPORT_SOURCES.find((spec) => spec.source === source) ?? BROWSER_IMPORT_SOURCES[0];
 }
 
 type LocalStateProfile = {
@@ -96,8 +131,25 @@ interface LastImportState {
   cookieCount: number;
 }
 
-function defaultChromeUserDataDir(home: string): string {
-  return join(home, 'Library', 'Application Support', 'Google', 'Chrome');
+function resolveImportSources(overrides: ChromeCookieImportDeps, home: string): ResolvedImportSource[] {
+  const envChrome = process.env.AEGIS_CHROME_USER_DATA_DIR?.trim();
+  const fixedDirs =
+    overrides.sourceUserDataDirs ??
+    (overrides.chromeUserDataDir ? { chrome: overrides.chromeUserDataDir } : envChrome ? { chrome: envChrome } : null);
+  return BROWSER_IMPORT_SOURCES.flatMap((spec) => {
+    const userDataDir = fixedDirs ? fixedDirs[spec.source] : join(home, 'Library', 'Application Support', ...spec.userDataPath);
+    return userDataDir ? [{ ...spec, userDataDir }] : [];
+  });
+}
+
+function sourceForProfilePath(sources: ResolvedImportSource[], profilePath: string): ResolvedImportSource | null {
+  return sources.find((source) => isPathInside(source.userDataDir, profilePath)) ?? null;
+}
+
+/** Installed app bundle for a source, used for its icon. */
+export function browserImportAppBundlePath(source: BrowserImportSource, home = osHomedir()): string | null {
+  const bundle = importSourceSpec(source).appBundleName;
+  return [join('/Applications', bundle), join(home, 'Applications', bundle)].find((path) => existsSync(path)) ?? null;
 }
 
 function defaultImportStatePath(home: string): string {
@@ -217,19 +269,15 @@ function resolveDeps(overrides: ChromeCookieImportDeps = {}): Required<
     ChromeCookieImportDeps,
     'platform' | 'homedir' | 'nowMs' | 'isChromeRunning' | 'readSafeStoragePassword' | 'mkdtemp'
   >
-> & { chromeUserDataDir: string; importStatePath: string; cookieStore?: ElectronCookieStore } {
+> & { sources: ResolvedImportSource[]; importStatePath: string; cookieStore?: ElectronCookieStore } {
   const home = (overrides.homedir ?? osHomedir)();
-  const chromeUserDataDir =
-    overrides.chromeUserDataDir ||
-    process.env.AEGIS_CHROME_USER_DATA_DIR?.trim() ||
-    defaultChromeUserDataDir(home);
   return {
     platform: overrides.platform ?? process.platform,
     homedir: overrides.homedir ?? osHomedir,
-    chromeUserDataDir,
+    sources: resolveImportSources(overrides, home),
     nowMs: overrides.nowMs ?? Date.now,
-    isChromeRunning: overrides.isChromeRunning ?? detectGoogleChromeRunning,
-    readSafeStoragePassword: overrides.readSafeStoragePassword ?? readChromeSafeStoragePassword,
+    isChromeRunning: overrides.isChromeRunning ?? detectBrowserRunning,
+    readSafeStoragePassword: overrides.readSafeStoragePassword ?? readBrowserSafeStoragePassword,
     cookieStore: overrides.cookieStore,
     importStatePath: overrides.importStatePath || defaultImportStatePath(home),
     mkdtemp: overrides.mkdtemp ?? ((prefix) => mkdtemp(prefix)),
@@ -291,44 +339,65 @@ function reloadCoworkerBrowserViews(): void {
 }
 
 export function isGoogleChromeProcessName(comm: string): boolean {
-  return comm.trim() === 'Google Chrome';
+  return isBrowserProcessName(comm, 'chrome');
 }
 
-export async function detectGoogleChromeRunning(): Promise<boolean> {
+export function isBrowserProcessName(comm: string, source: BrowserImportSource): boolean {
+  return importSourceSpec(source).processNames.includes(comm.trim());
+}
+
+export async function detectBrowserRunning(source: BrowserImportSource): Promise<boolean> {
   if (process.platform !== 'darwin') return false;
   try {
     const { stdout } = await execFileAsync('/bin/ps', ['-axc', '-o', 'comm='], {
       timeout: 5_000,
       encoding: 'utf8',
     });
-    return stdout.split('\n').some((line) => isGoogleChromeProcessName(line));
+    return stdout.split('\n').some((line) => isBrowserProcessName(line, source));
   } catch {
     return false;
   }
 }
 
+async function findKeychainPassword(args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync('/usr/bin/security', ['find-generic-password', '-w', ...args], {
+    timeout: 30_000,
+    encoding: 'utf8',
+  });
+  return stdout.replace(/\n$/, '');
+}
+
+function isKeychainItemNotFound(error: unknown): boolean {
+  const stderr = (error as { stderr?: unknown }).stderr;
+  return typeof stderr === 'string' && stderr.includes('could not be found');
+}
+
 /**
- * Reads Chrome's os_crypt password from macOS Keychain.
+ * Reads a Chromium browser's os_crypt password from macOS Keychain.
  * Uses /usr/bin/security so we do not add another native addon; the system
  * prompt may name `security` rather than the app. Only called after the user
- * confirms import in settings.
+ * confirms an import. Some builds store the item under another account name,
+ * so a missing service+account pair falls back to the service alone.
  */
-export async function readChromeSafeStoragePassword(): Promise<string> {
+export async function readBrowserSafeStoragePassword(source: BrowserImportSource): Promise<string> {
+  const spec = importSourceSpec(source);
   try {
-    const { stdout } = await execFileAsync(
-      '/usr/bin/security',
-      ['find-generic-password', '-w', '-s', 'Chrome Safe Storage', '-a', 'Chrome'],
-      { timeout: 30_000, encoding: 'utf8' }
-    );
-    const password = stdout.replace(/\n$/, '');
+    let password: string;
+    try {
+      password = await findKeychainPassword(['-s', spec.keychainService, '-a', spec.keychainAccount]);
+    } catch (error) {
+      if (!isKeychainItemNotFound(error)) throw error;
+      password = await findKeychainPassword(['-s', spec.keychainService]);
+    }
     if (!password) {
-      const error = new Error('Chrome Safe Storage keychain item was empty.');
+      const error = new Error(`${spec.keychainService} keychain item was empty.`);
       (error as Error & { code?: string }).code = 'keychain_missing';
       throw error;
     }
     return password;
   } catch (error) {
     const err = error as Error & { code?: string; stderr?: string };
+    if (err.code === 'keychain_missing') throw err;
     const stderr = typeof err.stderr === 'string' ? err.stderr : '';
     const denied =
       stderr.includes('User interaction is not allowed') ||
@@ -336,8 +405,10 @@ export async function readChromeSafeStoragePassword(): Promise<string> {
       /denied/i.test(stderr);
     const wrapped = new Error(
       denied
-        ? 'Keychain access was denied. Allow access to Chrome Safe Storage and try again.'
-        : 'Could not read Chrome Safe Storage from Keychain. Unlock the login keychain and try again.'
+        ? `Keychain access was denied. Allow access to ${spec.keychainService} and try again.`
+        : isKeychainItemNotFound(error)
+          ? `${spec.appName} has no ${spec.keychainService} item in Keychain. Open ${spec.appName} once, then try again.`
+          : `Could not read ${spec.keychainService} from Keychain. Unlock the login keychain and try again.`
     );
     (wrapped as Error & { code?: string }).code = denied ? 'keychain_denied' : 'keychain_missing';
     throw wrapped;
@@ -356,70 +427,105 @@ function resolveCookieDbPath(profilePath: string): string | null {
   return null;
 }
 
+const UNSUPPORTED_PLATFORM_MESSAGE =
+  'Browser data import is available on macOS. Windows Chrome uses App-Bound Encryption and cannot be imported.';
+const PROFILE_NOT_FOUND_MESSAGE = 'That browser profile is no longer available.';
+
+function sourceInfo(spec: BrowserImportSourceSpec): BrowserImportSourceInfo {
+  return { source: spec.source, appName: spec.appName, running: false };
+}
+
+/** Sources whose user-data folder exists. Reads no browser files, so it never trips a privacy prompt. */
+export function detectBrowserImportSources(overrides: ChromeCookieImportDeps = {}): BrowserImportSourcesResult {
+  const deps = resolveDeps(overrides);
+  if (deps.platform !== 'darwin') return { platformSupported: false, sources: [] };
+  return {
+    platformSupported: true,
+    sources: deps.sources.filter((source) => existsSync(source.userDataDir)).map(sourceInfo),
+  };
+}
+
+function readLocalStateProfiles(userDataDir: string): Record<string, LocalStateProfile> | 'denied' {
+  try {
+    const parsed = JSON.parse(readFileSync(join(userDataDir, 'Local State'), 'utf8')) as {
+      profile?: { info_cache?: Record<string, LocalStateProfile> };
+    };
+    return parsed.profile?.info_cache ?? {};
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === 'EPERM' || code === 'EACCES' ? 'denied' : {};
+  }
+}
+
+function profileDisplayName(userDataDir: string, directoryName: string): string {
+  const infoCache = readLocalStateProfiles(userDataDir);
+  return (infoCache === 'denied' ? undefined : infoCache[directoryName]?.name?.trim()) || directoryName;
+}
+
 export function listChromeCookieProfiles(overrides: ChromeCookieImportDeps = {}): ChromeCookieProfilesResult {
   const deps = resolveDeps(overrides);
   if (deps.platform !== 'darwin') {
     return {
       platformSupported: false,
       chromeRunning: false,
+      sources: [],
       profiles: [],
       errorCode: 'unsupported_platform',
-      errorMessage: 'Chrome cookie import is available on macOS. Windows Chrome uses App-Bound Encryption and cannot be imported.',
+      errorMessage: UNSUPPORTED_PLATFORM_MESSAGE,
     };
   }
 
-  const root = deps.chromeUserDataDir;
-  const localStatePath = join(root, 'Local State');
-  if (!existsSync(localStatePath)) {
-    return { platformSupported: true, chromeRunning: false, profiles: [] };
-  }
-
-  let infoCache: Record<string, LocalStateProfile> = {};
-  try {
-    const parsed = JSON.parse(readFileSync(localStatePath, 'utf8')) as {
-      profile?: { info_cache?: Record<string, LocalStateProfile> };
-    };
-    infoCache = parsed.profile?.info_cache ?? {};
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'EPERM' || code === 'EACCES') {
-      return {
-        platformSupported: true,
-        chromeRunning: false,
-        profiles: [],
-        errorCode: 'app_data_denied',
-        errorMessage:
-          'macOS blocked access to Chrome data. Allow this app to access data from other apps in Privacy & Security, then try again.',
-      };
-    }
-    return { platformSupported: true, chromeRunning: false, profiles: [] };
-  }
-
+  const sources: BrowserImportSourceInfo[] = [];
   const profiles: ChromeCookieProfile[] = [];
-  for (const [directoryName, info] of Object.entries(infoCache)) {
-    if (directoryName === 'System Profile' || directoryName === 'Guest Profile') continue;
-    const profilePath = join(root, directoryName);
-    profiles.push({
-      directoryName,
-      profileName: info.name?.trim() || directoryName,
-      profilePath,
-      gaiaName: info.gaia_name?.trim() || undefined,
-      userName: info.user_name?.trim() || undefined,
-      hasCookies: profileHasCookies(profilePath),
-    });
+  const deniedApps: string[] = [];
+  for (const spec of deps.sources) {
+    if (!existsSync(join(spec.userDataDir, 'Local State'))) continue;
+    sources.push(sourceInfo(spec));
+    const infoCache = readLocalStateProfiles(spec.userDataDir);
+    if (infoCache === 'denied') {
+      deniedApps.push(spec.appName);
+      continue;
+    }
+    const sourceProfiles: ChromeCookieProfile[] = [];
+    for (const [directoryName, info] of Object.entries(infoCache)) {
+      if (directoryName === 'System Profile' || directoryName === 'Guest Profile') continue;
+      const profilePath = join(spec.userDataDir, directoryName);
+      sourceProfiles.push({
+        source: spec.source,
+        appName: spec.appName,
+        directoryName,
+        profileName: info.name?.trim() || directoryName,
+        profilePath,
+        gaiaName: info.gaia_name?.trim() || undefined,
+        userName: info.user_name?.trim() || undefined,
+        hasCookies: profileHasCookies(profilePath),
+      });
+    }
+    sourceProfiles.sort((a, b) => a.profileName.localeCompare(b.profileName));
+    profiles.push(...sourceProfiles);
   }
-  profiles.sort((a, b) => a.profileName.localeCompare(b.profileName));
-  return { platformSupported: true, chromeRunning: false, profiles };
+  if (deniedApps.length > 0) {
+    return {
+      platformSupported: true,
+      chromeRunning: false,
+      sources,
+      profiles,
+      errorCode: 'app_data_denied',
+      errorMessage: `macOS blocked access to ${deniedApps.join(', ')} data. Allow this app to access data from other apps in Privacy & Security, then try again.`,
+    };
+  }
+  return { platformSupported: true, chromeRunning: false, sources, profiles };
 }
 
 async function withCopiedCookieDb<T>(
   profilePath: string,
+  appName: string,
   mkdtempFn: (prefix: string) => Promise<string>,
   fn: (dbPath: string) => T | Promise<T>
 ): Promise<T> {
   const source = resolveCookieDbPath(profilePath);
   if (!source) {
-    const error = new Error('This Chrome profile has no cookies database.');
+    const error = new Error(`This ${appName} profile has no cookies database.`);
     (error as Error & { code?: string }).code = 'no_cookies_db';
     throw error;
   }
@@ -436,14 +542,14 @@ async function withCopiedCookieDb<T>(
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'EPERM' || code === 'EACCES') {
       const wrapped = new Error(
-        'macOS blocked access to Chrome cookies. Allow this app to access data from other apps in Privacy & Security, then try again.'
+        `macOS blocked access to ${appName} cookies. Allow this app to access data from other apps in Privacy & Security, then try again.`
       );
       (wrapped as Error & { code?: string }).code = 'app_data_denied';
       throw wrapped;
     }
     if (isSqliteBusyError(error)) {
       const wrapped = new Error(
-        'Chrome is using the cookies database. Keep Chrome open if you want Gmail session cookies, or quit it if this copy keeps failing.'
+        `${appName} is using the cookies database. Keep it open if you want session cookies, or quit it if this copy keeps failing.`
       );
       (wrapped as Error & { code?: string }).code = 'chrome_running';
       throw wrapped;
@@ -468,7 +574,7 @@ function openCookiesDatabase(dbPath: string): Database.Database {
   } catch (error) {
     if (isSqliteBusyError(error)) {
       const wrapped = new Error(
-        'Chrome is using the cookies database. Keep Chrome open if you want Gmail session cookies, or quit it if this copy keeps failing.'
+        'The browser is using its cookies database. Keep it open if you want session cookies, or quit it if this copy keeps failing.'
       );
       (wrapped as Error & { code?: string }).code = 'chrome_running';
       throw wrapped;
@@ -518,14 +624,15 @@ export async function listChromeCookieDomains(
     return {
       domains: [],
       errorCode: 'unsupported_platform',
-      errorMessage: 'Chrome cookie import is available on macOS.',
+      errorMessage: UNSUPPORTED_PLATFORM_MESSAGE,
     };
   }
-  if (!existsSync(profilePath) || !isPathInside(deps.chromeUserDataDir, profilePath)) {
-    return { domains: [], errorCode: 'profile_not_found', errorMessage: 'That Chrome profile is no longer available.' };
+  const source = sourceForProfilePath(deps.sources, profilePath);
+  if (!source || !existsSync(profilePath)) {
+    return { domains: [], errorCode: 'profile_not_found', errorMessage: PROFILE_NOT_FOUND_MESSAGE };
   }
   try {
-    const domains = await withCopiedCookieDb(profilePath, deps.mkdtemp, (dbPath) => {
+    const domains = await withCopiedCookieDb(profilePath, source.appName, deps.mkdtemp, (dbPath) => {
       const db = openCookiesDatabase(dbPath);
       try {
         const counts = new Map<string, number>();
@@ -556,17 +663,18 @@ export async function importChromeCookies(
     return {
       ok: false,
       errorCode: 'unsupported_platform',
-      errorMessage: 'Chrome cookie import is available on macOS. Windows Chrome uses App-Bound Encryption and cannot be imported.',
+      errorMessage: UNSUPPORTED_PLATFORM_MESSAGE,
     };
   }
   const domains = [...new Set((request.domains ?? []).map((domain) => stripLeadingDot(domain).trim()).filter(Boolean))];
   const importAll = domains.length === 0;
-  if (!existsSync(request.profilePath) || !isPathInside(deps.chromeUserDataDir, request.profilePath)) {
-    return { ok: false, errorCode: 'profile_not_found', errorMessage: 'That Chrome profile is no longer available.' };
+  const source = sourceForProfilePath(deps.sources, request.profilePath);
+  if (!source || !existsSync(request.profilePath)) {
+    return { ok: false, errorCode: 'profile_not_found', errorMessage: PROFILE_NOT_FOUND_MESSAGE };
   }
 
   try {
-    return await withCopiedCookieDb(request.profilePath, deps.mkdtemp, async (dbPath) => {
+    return await withCopiedCookieDb(request.profilePath, source.appName, deps.mkdtemp, async (dbPath) => {
       const db = openCookiesDatabase(dbPath);
       let rows: ChromeCookieRow[];
       let dbVersion = 0;
@@ -585,7 +693,7 @@ export async function importChromeCookies(
         return {
           ok: false,
           errorCode: 'v20_unsupported' as const,
-          errorMessage: 'This Chrome profile uses App-Bound Encryption (v20 cookies), which cannot be imported.',
+          errorMessage: `This ${source.appName} profile uses App-Bound Encryption (v20 cookies), which cannot be imported.`,
         };
       }
 
@@ -606,7 +714,7 @@ export async function importChromeCookies(
       if (rows.some((row) => cookieNeedsOsCrypt(row))) {
         let password: string;
         try {
-          password = await deps.readSafeStoragePassword();
+          password = await deps.readSafeStoragePassword(source.source);
         } catch (error) {
           return { ok: false, errorCode: errorCodeOf(error), errorMessage: errorMessageOf(error) };
         }
@@ -652,7 +760,7 @@ export async function importChromeCookies(
         return {
           ok: false,
           errorCode: 'decrypt_failed' as const,
-          errorMessage: 'Could not decrypt Chrome cookies. Unlock the login keychain and try again.',
+          errorMessage: `Could not decrypt ${source.appName} cookies. Unlock the login keychain and try again.`,
           cookies: counts,
         };
       }
@@ -684,7 +792,7 @@ export async function importChromeCookies(
         saveLastImportState(deps.importStatePath, {
           importedAt: nowMs,
           profilePath: request.profilePath,
-          profileName: basename(request.profilePath),
+          profileName: `${source.appName} · ${profileDisplayName(source.userDataDir, basename(request.profilePath))}`,
           domains: uniqueHosts([...(previous?.domains ?? []), ...cleanupHosts]),
           hosts: uniqueHosts([...(previous?.hosts ?? []), ...importedHosts]),
           cookieCount: counts.imported,
@@ -696,7 +804,7 @@ export async function importChromeCookies(
         return {
           ok: false,
           errorCode: 'decrypt_failed' as const,
-          errorMessage: 'Could not decrypt some Chrome cookies. Unlock the login keychain and try again.',
+          errorMessage: `Could not decrypt some ${source.appName} cookies. Unlock the login keychain and try again.`,
           cookies: counts,
           importedHosts: [...importedHosts].sort(),
         };
@@ -750,13 +858,23 @@ export async function clearImportedChromeCookies(
   return { ok: true, removed };
 }
 
+/** After the built-in browser's cookies are wiped, nothing imported remains to clear. */
+export function forgetChromeCookieImport(overrides: ChromeCookieImportDeps = {}): void {
+  saveLastImportState(resolveDeps(overrides).importStatePath, null);
+}
+
 export async function listChromeCookieProfilesWithRunning(
   overrides: ChromeCookieImportDeps = {}
 ): Promise<ChromeCookieProfilesResult> {
   const listed = listChromeCookieProfiles(overrides);
   if (!listed.platformSupported) return listed;
   const deps = resolveDeps(overrides);
-  listed.chromeRunning = await deps.isChromeRunning();
+  await Promise.all(
+    listed.sources.map(async (info) => {
+      info.running = await deps.isChromeRunning(info.source);
+    })
+  );
+  listed.chromeRunning = listed.sources.some((info) => info.source === 'chrome' && info.running);
   return listed;
 }
 
@@ -837,7 +955,7 @@ function errorCodeOf(error: unknown): ChromeCookieImportResult['errorCode'] {
 
 function errorMessageOf(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
-  return 'Chrome cookie import failed.';
+  return 'Browser cookie import failed.';
 }
 
 function readLastImportState(path: string): LastImportState | null {

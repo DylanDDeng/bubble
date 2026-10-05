@@ -102,6 +102,9 @@ export type {
   DeepseekModelConfig,
   DeepseekKeyStatus,
   BrowserUsePermissionSettings,
+  BrowserImportSource,
+  BrowserImportSourceInfo,
+  BrowserImportSourcesResult,
   ChromeCookieDomain,
   ChromeCookieImportCounts,
   ChromeCookieImportResult,
@@ -599,6 +602,10 @@ export interface AppActions {
        * reflows the chat pane every frame, which janks on heavy transcripts.
        */
       instantReveal?: boolean;
+      /** Browser only: place the new tab right after this one instead of at the end. */
+      insertAfter?: ProjectUtilityPanelTarget | null;
+      /** Browser only: use this pre-made `browser:` id (its session may be seeded first). */
+      browserTabId?: ProjectUtilityPanelTarget;
     }
   ) => void;
   openProjectFileInRightPanel: (request: ProjectFileOpenInput) => void;
