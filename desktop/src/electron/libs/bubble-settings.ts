@@ -228,6 +228,7 @@ async function runBubbleModelCatalogRefresh(): Promise<boolean> {
         if (providerId === 'openai') {
           const result = await context.sdk.registry.discoverModels(profile, { forceRefresh: true });
           if (result.error || !result.authoritative || !['remote', 'cache'].includes(result.source)) {
+            console.warn('[bubble-settings] OpenAI model discovery failed:', result.error || `source=${result.source} authoritative=${result.authoritative}`);
             return { providerId, models: confirmedOpenAIModels(context.sdk) ?? null, failed: true };
           }
           return { providerId, models: result.models };

@@ -174,6 +174,8 @@ const MODEL_DISCOVERY_FAILURE_TTL_MS = 10_000;
 const MODEL_DISCOVERY_DISK_TTL_MS = 24 * 60 * 60 * 1000;
 /** Discovery must never delay startup or a model picker for long. */
 const MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
+// Per request: the ChatGPT backend is often reached through a user proxy.
+const OPENAI_CODEX_MODEL_DISCOVERY_TIMEOUT_MS = 15_000;
 // Included in the cache identity so a pre-single-model OpenRouter disk cache
 // can never repopulate the picker with the old full remote catalog.
 const OPENROUTER_CATALOG_SCOPE = "ox-alpha-only-v2";
@@ -960,10 +962,10 @@ export class ProviderRegistry {
         const catalog = await fetchOpenAICodexModelCatalog({
           baseURL: currentProvider.baseURL,
           accessToken: currentProvider.apiKey,
-          signal: AbortSignal.timeout(MODEL_DISCOVERY_TIMEOUT_MS),
+          timeoutMs: OPENAI_CODEX_MODEL_DISCOVERY_TIMEOUT_MS,
         });
         if (catalog.status === "unavailable") {
-          throw new Error("OpenAI Codex model catalog is unavailable.");
+          throw new Error(`OpenAI Codex model catalog is unavailable${catalog.reason ? ` (${catalog.reason})` : ""}.`);
         }
         const visible = catalog.descriptors.filter((descriptor) => descriptor.visibility !== "hide");
         return {

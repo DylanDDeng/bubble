@@ -149,6 +149,26 @@ describe("provider-openai-codex", () => {
     expect(seen[0]?.signal).toBe(controller.signal);
   });
 
+  it("gives each catalog path its own timeout window", async () => {
+    const seen: (AbortSignal | null | undefined)[] = [];
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      seen.push(init?.signal);
+      if (seen.length === 1) throw new Error("The operation was aborted due to timeout");
+      return new Response(JSON.stringify(GPT56_CATALOG_FIXTURE), { status: 200 });
+    });
+    const result = await fetchOpenAICodexModelCatalog({
+      baseURL: "https://chatgpt.com/backend-api",
+      accessToken: makeAccessToken("account-123"),
+      fetch: fetchMock,
+      timeoutMs: 15_000,
+    });
+    expect(result.status).toBe("success");
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toBeInstanceOf(AbortSignal);
+    expect(seen[1]).not.toBe(seen[0]);
+    expect(seen[1]?.aborted).toBe(false);
+  });
+
   it("parses the account catalog without inventing off and honors server priority", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify(GPT56_CATALOG_FIXTURE), { status: 200 }));
 
@@ -221,10 +241,10 @@ describe("provider-openai-codex", () => {
     await expect(fetchOpenAICodexModelCatalog({ ...options, fetch: successFetch }))
       .resolves.toEqual({ descriptors: [], status: "success" });
     await expect(fetchOpenAICodexModelCatalog({ ...options, fetch: unavailableFetch }))
-      .resolves.toEqual({ descriptors: [], status: "unavailable" });
+      .resolves.toMatchObject({ descriptors: [], status: "unavailable", reason: expect.stringContaining("HTTP 503") });
     const malformedFetch = vi.fn(async () => new Response(JSON.stringify({ error: 'unexpected payload' }), { status: 200 }));
     await expect(fetchOpenAICodexModelCatalog({ ...options, fetch: malformedFetch }))
-      .resolves.toEqual({ descriptors: [], status: "unavailable" });
+      .resolves.toMatchObject({ descriptors: [], status: "unavailable", reason: expect.stringContaining("unexpected payload") });
     expect(successFetch).toHaveBeenCalledTimes(1);
     expect(unavailableFetch).toHaveBeenCalledTimes(2);
   });
