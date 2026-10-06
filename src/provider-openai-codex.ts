@@ -440,6 +440,8 @@ export async function fetchOpenAICodexModels(options: {
 export interface OpenAICodexModelCatalogResult {
   descriptors: CodexModelDescriptor[];
   status: "success" | "unavailable";
+  /** Why each discovery path failed, when status is "unavailable". */
+  reason?: string;
 }
 
 /**
@@ -452,14 +454,23 @@ export async function fetchOpenAICodexModelCatalog(options: {
   fetch?: ChatGptFetch;
   /** Bounds both catalog GETs; a stalled warm-up must not pin the in-flight slot. */
   signal?: AbortSignal;
+  /** Per-request timeout, so a slow first path still leaves the fallback a full window. */
+  timeoutMs?: number;
 }): Promise<OpenAICodexModelCatalogResult> {
   const accountId = extractChatGptAccountId(options.accessToken);
   if (!accountId) {
-    return { descriptors: [], status: "unavailable" };
+    return { descriptors: [], status: "unavailable", reason: "access token has no ChatGPT account id" };
   }
   const fetchImpl = options.fetch ?? chatGptFetch;
+  const failures: string[] = [];
 
   for (const path of MODEL_DISCOVERY_PATHS) {
+    const signal = options.timeoutMs === undefined
+      ? options.signal
+      : options.signal
+        ? AbortSignal.any([options.signal, AbortSignal.timeout(options.timeoutMs)])
+        : AbortSignal.timeout(options.timeoutMs);
+    const startedAt = Date.now();
     const response = await fetchImpl(resolveRelativeUrl(options.baseURL, path), {
       method: "GET",
       headers: buildBaseHeaders(
@@ -468,18 +479,31 @@ export async function fetchOpenAICodexModelCatalog(options: {
         globalThis.crypto?.randomUUID?.() ?? `bubble_${Date.now()}`,
         { accept: "application/json" },
       ),
-      signal: options.signal,
-    }).catch(() => undefined);
+      signal,
+    }).catch((error: unknown) => {
+      failures.push(`${path}: ${error instanceof Error ? error.message : String(error)} after ${Date.now() - startedAt}ms`);
+      return undefined;
+    });
 
-    if (!response?.ok) continue;
+    if (!response) continue;
+    if (!response.ok) {
+      failures.push(`${path}: HTTP ${response.status} after ${Date.now() - startedAt}ms`);
+      continue;
+    }
 
     const parsed = await response.json()
       .then((payload) => ({ ok: true as const, payload }))
       .catch(() => ({ ok: false as const }));
-    if (!parsed.ok) continue;
+    if (!parsed.ok) {
+      failures.push(`${path}: invalid JSON`);
+      continue;
+    }
     const payload = parsed.payload;
     if (!Array.isArray(payload) && !(payload && typeof payload === "object"
-      && (Array.isArray(payload.models) || Array.isArray(payload.data)))) continue;
+      && (Array.isArray(payload.models) || Array.isArray(payload.data)))) {
+      failures.push(`${path}: unexpected payload`);
+      continue;
+    }
 
     return {
       descriptors: sortCodexModelDescriptors(extractCodexModelDescriptors(payload)),
@@ -487,7 +511,7 @@ export async function fetchOpenAICodexModelCatalog(options: {
     };
   }
 
-  return { descriptors: [], status: "unavailable" };
+  return { descriptors: [], status: "unavailable", reason: failures.join("; ") };
 }
 
 function buildRequestBody(
