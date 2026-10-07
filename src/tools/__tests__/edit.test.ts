@@ -493,6 +493,20 @@ describe("edit tool", () => {
     expect(readFileSync(file, "utf-8")).toBe("label = \"hello\nworld\"\n");
   });
 
+  it("matches oldText that includes the BOM copied from the start of a file", async () => {
+    const file = join(tmpDir, "bom-copied.ts");
+    writeFileSync(file, "\uFEFFexport const value = 1;\n", "utf-8");
+
+    const tool = createEditTool(tmpDir);
+    const result = await tool.execute(
+      { path: "bom-copied.ts", edits: [{ oldText: "\uFEFFexport const value = 1;", newText: "\uFEFFexport const value = 2;" }] },
+      { cwd: tmpDir },
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(readFileSync(file, "utf-8")).toBe("\uFEFFexport const value = 2;\n");
+  });
+
   it("does not report normalized matching notes on exact edits", async () => {
     const file = join(tmpDir, "crlf-bom.cs");
     writeFileSync(file, "\uFEFFclass A {\r\n  int X;\r\n}\r\n", "utf-8");

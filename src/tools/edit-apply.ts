@@ -292,9 +292,10 @@ export function applyEditsToContent(rawContent: string, edits: EditOperation[], 
   const { bom, text } = stripBom(rawContent);
   const lineEnding = detectLineEnding(text);
   const normalizedOriginal = normalizeToLF(text);
+  const dropCopiedBom = (value: string) => (bom ? stripBom(value).text : value);
   const normalizedEdits = edits.map((edit) => ({
-    oldText: normalizeToLF(edit.oldText),
-    newText: normalizeToLF(edit.newText),
+    oldText: normalizeToLF(dropCopiedBom(edit.oldText)),
+    newText: normalizeToLF(dropCopiedBom(edit.newText)),
   }));
 
   const matches = normalizedEdits.map((edit, index) => matchEdit(normalizedOriginal, edit, index, normalizedEdits.length, options));
