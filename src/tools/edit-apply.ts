@@ -71,8 +71,41 @@ function normalizeToLF(text: string): string {
   return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
-function restoreLineEndings(text: string, lineEnding: "\n" | "\r\n"): string {
-  return lineEnding === "\r\n" ? text.replace(/\n/g, "\r\n") : text;
+function buildOriginalOffsets(text: string): number[] {
+  const offsets: number[] = [];
+  for (let i = 0; i < text.length; i++) {
+    offsets.push(i);
+    if (text[i] === "\r" && text[i + 1] === "\n") i++;
+  }
+  offsets.push(text.length);
+  return offsets;
+}
+
+function lineEndingAt(text: string, offset: number, fallback: string): string {
+  const after = text.slice(offset).match(/\r\n|\r|\n/);
+  if (after) return after[0];
+  const before = text.slice(0, offset).match(/(\r\n|\r|\n)[^\r\n]*$/);
+  return before ? before[1] : fallback;
+}
+
+// Splices replacements into the original text so untouched lines keep their own
+// terminators; inserted text uses the terminator of the line being edited.
+function spliceOriginal(
+  text: string,
+  matches: EditMatchInfo[],
+  edits: EditOperation[],
+  fallbackEnding: string,
+): string {
+  const offsets = buildOriginalOffsets(text);
+  let out = "";
+  let cursor = 0;
+  for (const match of [...matches].sort((a, b) => a.start - b.start)) {
+    const start = offsets[match.start];
+    const ending = lineEndingAt(text, start, fallbackEnding);
+    out += text.slice(cursor, start) + edits[match.editIndex].newText.replace(/\n/g, ending);
+    cursor = offsets[match.end];
+  }
+  return out + text.slice(cursor);
 }
 
 function normalizeLineForMatch(line: string): string {
@@ -322,7 +355,7 @@ export function applyEditsToContent(rawContent: string, edits: EditOperation[], 
   }
 
   return {
-    content: bom + restoreLineEndings(normalizedNext, lineEnding),
+    content: bom + spliceOriginal(text, matches, normalizedEdits, lineEnding),
     normalizedOriginal,
     normalizedNext,
     bom,

@@ -507,6 +507,28 @@ describe("edit tool", () => {
     expect(readFileSync(file, "utf-8")).toBe("\uFEFFexport const value = 2;\n");
   });
 
+  it("keeps each line's own ending in files that mix CRLF and LF", async () => {
+    const file = join(tmpDir, "mixed.cfg");
+    writeFileSync(file, "# head\r\nretries = 3\r\n\n# tail\nport = 8000\nhost = a\n", "utf-8");
+
+    const tool = createEditTool(tmpDir);
+    const result = await tool.execute(
+      {
+        path: "mixed.cfg",
+        edits: [
+          { oldText: "retries = 3\n", newText: "retries = 5\ntimeout = 10\n" },
+          { oldText: "port = 8000\n", newText: "port = 9000\nproto = tcp\n" },
+        ],
+      },
+      { cwd: tmpDir },
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(readFileSync(file, "utf-8")).toBe(
+      "# head\r\nretries = 5\r\ntimeout = 10\r\n\n# tail\nport = 9000\nproto = tcp\nhost = a\n",
+    );
+  });
+
   it("does not report normalized matching notes on exact edits", async () => {
     const file = join(tmpDir, "crlf-bom.cs");
     writeFileSync(file, "\uFEFFclass A {\r\n  int X;\r\n}\r\n", "utf-8");
