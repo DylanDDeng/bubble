@@ -59,6 +59,12 @@
   background: color-mix(in srgb, var(--bg-primary) 48%, var(--app-sidebar-surface));
 }
 
+/* Settings reuse the floating card: the nav takes the sidebar tint. */
+.bubble-settings-nav {
+  width: var(--bubble-settings-nav-width, 280px);
+  background: color-mix(in srgb, var(--bg-primary) 48%, var(--app-sidebar-surface));
+}
+
 .aegis-sidebar .bubble-sidebar-content .aegis-sidebar-brand {
   font-size: calc(16px * var(--ui-font-scale, 1)) !important;
   letter-spacing: -0.025em;
@@ -125,6 +131,11 @@
 }
 
 .aegis-window-shell:has(.aegis-sidebar [aria-hidden='true'] .bubble-sidebar-content) .bubble-workspace-surface {
+  border-radius: 14px;
+}
+
+/* Settings occupy the sidebar card's slot: flush with the rail, one card. */
+.bubble-workspace-surface.bubble-workspace-surface--settings {
   border-radius: 14px;
 }
 

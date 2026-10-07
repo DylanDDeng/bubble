@@ -3,7 +3,7 @@ import './settings-controls.css';
 import { AppearanceControls } from './AppearanceControls';
 import { findSettings, type SettingsSearchEntry } from './settings-search';
 import { useEffect, useLayoutEffect, useState, type ReactNode } from 'react';
-import { ArrowLeft, Keyboard, Server, Settings as SettingsIcon, Sun, ChartColumn, User, PlugZap, Bot, Image, Trash2, Globe } from '../icons';
+import { Keyboard, Server, Settings as SettingsIcon, Sun, ChartColumn, User, PlugZap, Bot, Image, Trash2, Globe } from '../icons';
 import { useAppStore } from '../../store/useAppStore';
 import { BubbleUsageSettingsContent } from './ClaudeUsageSettings';
 import { CompatibleProviderSettingsContent, PROVIDER_META } from './CompatibleProviderSettings';
@@ -22,6 +22,7 @@ import { Search } from '../icons';
 import { toast } from 'sonner';
 import type { ChromeTheme, Theme, ThemeFonts, ThemeState, ThemeVariant } from '../../types';
 import { consolidateThemeFonts, resolveThemeMode, resolveThemePack } from '../../theme/themes';
+import { selectSidebarWidth } from '../../utils/sidebar-width';
 
 const SETTINGS_TABS = {
   general: {
@@ -83,7 +84,6 @@ export function Settings() {
 
   const {
     showSettings,
-    setShowSettings,
     activeSettingsTab,
     setActiveSettingsTab,
     theme,
@@ -101,6 +101,7 @@ export function Settings() {
     mcpSettingsRuntime,
     setMcpSettingsRuntime,
   } = useAppStore();
+  const sidebarWidth = useAppStore(selectSidebarWidth);
 
   const [bubbleEntries, setBubbleEntries] = useState<SettingsSearchEntry[]>([]);
   const searching = showSettings && Boolean(search.trim());
@@ -169,22 +170,14 @@ export function Settings() {
     : 'general';
   const activeMeta = SETTINGS_TABS[resolvedActiveSettingsTab];
   return (
-    <div className="aegis-settings flex h-full min-h-0 min-w-0 flex-col bg-[var(--bg-primary)]">
-      <div className="flex h-8 flex-shrink-0">
-        <div className="aegis-window-left-surface drag-region w-[280px] flex-shrink-0 border-r border-[var(--border)] bg-[var(--bg-primary)]" />
-        <div className="drag-region flex-1 bg-[var(--bg-primary)]" />
-      </div>
-
-      <div className="flex min-h-0 flex-1 bg-[var(--bg-primary)]">
-      <aside className="aegis-window-left-surface w-[280px] flex-shrink-0 select-none border-r border-[var(--border)] bg-[var(--bg-primary)]">
-        <div className="flex h-full min-h-0 flex-col px-1.5 pb-4 pt-2">
-          <button
-            onClick={() => setShowSettings(false)}
-            className="mb-2 flex h-[30px] shrink-0 items-center gap-2 rounded-lg px-2 text-[13px] font-normal leading-[18px] text-[var(--text-primary)] transition-colors hover:bg-[var(--sidebar-item-hover)]"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            <span>Back to app</span>
-          </button>
+    <div className="aegis-settings flex h-full min-h-0 min-w-0 bg-[var(--bg-primary)]">
+      {/* Same width as the project sidebar, so the divider holds still when Settings open. */}
+      <aside className="bubble-settings-nav flex-shrink-0 select-none border-r border-[var(--border)]" style={{ ['--bubble-settings-nav-width' as string]: `${sidebarWidth}px` }}>
+        <div className="flex h-full min-h-0 flex-col px-1.5 pb-4 pt-3">
+          {/* Mirrors the sidebar's "Bubble" brand row; the rail is the way back. */}
+          <div className="mb-2 flex h-7 shrink-0 items-center px-2.5 text-[16px] font-semibold leading-none tracking-[-0.025em] text-[var(--text-primary)]">
+            Settings
+          </div>
 
           <div className="mb-4 flex h-[30px] shrink-0 items-center gap-2 rounded-lg bg-[var(--sidebar-item-hover)] px-2 focus-within:ring-1 focus-within:ring-[var(--border-focus)]">
             <Search className="h-4 w-4 shrink-0 text-[var(--text-muted)]" />
@@ -273,7 +266,6 @@ export function Settings() {
           {resolvedActiveSettingsTab === 'profile' && <ProfileSettingsGroup />}
         </div>
       </main>
-      </div>
     </div>
   );
 }

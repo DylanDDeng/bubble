@@ -5,21 +5,29 @@ import { useAppStore } from '../store/useAppStore';
 import { useBoardStore } from '../store/useBoardStore';
 import { canNavigateActiveTab, isTabViewVisitable, useTabsStore, type TabView } from '../store/useTabsStore';
 
+/** Back from Settings returns to the view underneath; otherwise step the tab history. */
+export function navigateBack(): void {
+  const app = useAppStore.getState();
+  if (app.showSettings) app.setShowSettings(false);
+  else useTabsStore.getState().goBack();
+}
+
 /**
  * Back/Forward through the active tab's view history: sessions, the board,
- * a board task's detail page, and the other workspaces alike.
+ * a board task's detail page, and the other workspaces alike. Settings sit on
+ * top of that history, so Back closes them and Forward has nowhere to go.
  */
 export function SessionHistoryButtons({ className = '' }: { className?: string }) {
   const sessions = useAppStore((state) => state.sessions);
+  const showSettings = useAppStore((state) => state.showSettings);
   const boardTasks = useBoardStore((state) => state.tasks);
   const tabs = useTabsStore((state) => state.tabs);
   const activeTabId = useTabsStore((state) => state.activeTabId);
-  const goBack = useTabsStore((state) => state.goBack);
   const goForward = useTabsStore((state) => state.goForward);
 
   const visitable = (view: TabView) => isTabViewVisitable(view, sessions, boardTasks);
-  const canBack = canNavigateActiveTab({ tabs, activeTabId }, -1, visitable);
-  const canForward = canNavigateActiveTab({ tabs, activeTabId }, 1, visitable);
+  const canBack = showSettings || canNavigateActiveTab({ tabs, activeTabId }, -1, visitable);
+  const canForward = !showSettings && canNavigateActiveTab({ tabs, activeTabId }, 1, visitable);
   const shortcuts = useAppPreferences(state => state.keyboardShortcuts);
 
   return (
@@ -27,7 +35,7 @@ export function SessionHistoryButtons({ className = '' }: { className?: string }
       <button
         type="button"
         disabled={!canBack}
-        onClick={() => goBack()}
+        onClick={navigateBack}
         className={navButtonClass(canBack)}
         title={['Back', shortcutLabel('back', shortcuts)].filter(Boolean).join(' · ')}
         aria-label="Back"

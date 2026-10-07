@@ -3875,13 +3875,13 @@ button.aegis-mdx-metadata-key:hover {
 .aegis-settings .settings-row > :last-child { min-width: 0; max-width: 100%; }
 .aegis-settings .settings-row input { max-width: 100%; }
 @media (max-width: 800px) {
-  .aegis-settings aside, .aegis-settings > div:first-child > div:first-child { width: 180px; }
+  .aegis-settings aside { width: 180px; }
   .aegis-settings-content { padding-inline: 20px; }
   .aegis-settings .settings-row { grid-template-columns: minmax(0, 1fr); gap: 8px; }
   .aegis-settings .settings-row > :last-child { justify-content: flex-start; }
 }
 @media (max-width: 560px) {
-  .aegis-settings > div:nth-child(2) { flex-direction: column; }
+  .aegis-settings { flex-direction: column; }
   .aegis-settings aside { width: 100%; max-height: 220px; overflow-y: auto; border-right: 0; border-bottom: 1px solid var(--border); }
   .aegis-settings aside > div { height: auto; padding-block: 8px; }
   .aegis-settings-content { padding: 20px 16px; }

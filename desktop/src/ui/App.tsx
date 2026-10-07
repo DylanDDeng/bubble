@@ -42,7 +42,7 @@ import { useAppStore } from './store/useAppStore';
 import { useShallow } from 'zustand/react/shallow';
 import { useIPC, sendEvent } from './hooks/useIPC';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
-import { Sidebar, SidebarHeaderTrigger } from './components/Sidebar';
+import { Sidebar, SidebarHeaderTrigger, WorkspaceRail } from './components/Sidebar';
 import { SessionHistoryButtons } from './components/SessionHistoryButtons';
 import { AutomationsView } from './components/AutomationsView';
 import { PullRequestsView } from './components/PullRequestsView';
@@ -1063,13 +1063,18 @@ export function App() {
         windowShellRounded ? 'aegis-window-shell--rounded' : ''
       }`}
     >
-      {!showSettings && <div className="bubble-titlebar-corner-drag drag-region" aria-hidden="true" />}
-      {!showSettings && <div data-window-navigation className="bubble-window-navigation no-drag">
+      <div className="bubble-titlebar-corner-drag drag-region" aria-hidden="true" />
+      <div data-window-navigation className="bubble-window-navigation no-drag">
         <SessionHistoryButtons />
-        <SidebarHeaderTrigger />
-      </div>}
+        {!showSettings && <SidebarHeaderTrigger />}
+      </div>
       {/* Sidebar */}
-      {!showSettings && <Sidebar />}
+      {showSettings ? (
+        <div className="aegis-sidebar relative h-full w-11 flex-shrink-0 select-none">
+          <div className="drag-region h-10" aria-hidden="true" />
+          <WorkspaceRail />
+        </div>
+      ) : <Sidebar />}
 
       {/* Main column: the tab strip sits on the window chrome; everything
           below floats as a rounded content card (Linear-style figure/ground). */}
@@ -1103,13 +1108,15 @@ export function App() {
         }}
       /> : null}
       {!showSettings && activeWorkspace !== 'chat' ? <AppTabBar /> : null}
+      {/* Starts after the window navigation (x = 176px; this column begins after the 44px rail). */}
+      {showSettings ? <div className="drag-region ml-[132px] h-10 flex-shrink-0" aria-hidden="true" /> : null}
       {/* Shared chat surface: the wallpaper lives here so it spans both the
           conversation and the utility workspace (including fullscreen). */}
       <div
         ref={skinHostRef}
         className={`bubble-workspace-surface aegis-skin-host relative mx-1.5 mb-1.5 flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-[10px] bg-[var(--bg-primary)] shadow-[0_1px_4px_rgba(15,18,25,0.06)] ${
           skinVisible ? 'aegis-skin-host--active' : ''
-        }`}
+        } ${showSettings ? 'bubble-workspace-surface--settings' : ''}`}
       >
         {skinVisible ? (
           <div aria-hidden className="aegis-skin-layer" style={{ opacity: skinOpacity }}>

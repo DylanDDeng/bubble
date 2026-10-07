@@ -3,6 +3,7 @@ import { useEffect, useRef } from 'react';
 import { useAppStore } from '../store/useAppStore';
 import { useTabsStore } from '../store/useTabsStore';
 import { useAppPreferences } from '../store/useAppPreferences';
+import { navigateBack } from '../components/SessionHistoryButtons';
 import { matchesShortcut, SHORTCUT_COMMANDS, shortcutBindings, shortcutConflict } from '../../shared/keyboard-shortcuts';
 
 /** One dispatcher for the keymap shown in Settings. Local editors handle keys first. */
@@ -25,7 +26,7 @@ export function useKeyboardShortcuts() {
       const command = SHORTCUT_COMMANDS.find(c => shortcutBindings(c.id, overrides).some(b => matchesShortcut(event, b) && !shortcutConflict(b, c.id, overrides)));
       if (!command) return;
       const id = command.id;
-      if (state.showSettings && id !== 'settings') return;
+      if (state.showSettings && id !== 'settings' && id !== 'back') return;
       // Leave formatting and cursor navigation with editable controls.
       const editing = target?.closest('input, textarea, [contenteditable="true"], [role="textbox"]');
       if (editing && ['sidebar', 'activity', 'back', 'forward'].includes(id)) return;
@@ -37,7 +38,7 @@ export function useKeyboardShortcuts() {
         case 'search': state.toggleSearchPalette(); break;
         case 'sidebar': state.setSidebarCollapsed(!selectSidebarCollapsed(state)); break;
         case 'activity': state.toggleSidebarActivityView(); break;
-        case 'back': tabs.goBack(); break;
+        case 'back': navigateBack(); break;
         case 'forward': tabs.goForward(); break;
         case 'settings': state.setShowSettings(true); break;
         case 'newTask': state.setShowNewSession(true); break;

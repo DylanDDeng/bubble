@@ -100,6 +100,56 @@ export function SidebarHeaderTrigger({ className = '' }: { className?: string })
   );
 }
 
+/** Workspace switcher; stays visible in Settings so the window frame never changes. */
+export function WorkspaceRail() {
+  const activeWorkspace = useAppStore((state) => state.activeWorkspace);
+  const showSettings = useAppStore((state) => state.showSettings);
+  const setActiveWorkspace = useAppStore((state) => state.setActiveWorkspace);
+  const setChatSidebarView = useAppStore((state) => state.setChatSidebarView);
+  const setShowSettings = useAppStore((state) => state.setShowSettings);
+  // Badge = cards waiting for YOUR review, not the board's total size.
+  const boardReviewCount = useBoardStore((state) =>
+    Object.values(state.tasks).reduce((count, task) => count + (task.stage === 'review' ? 1 : 0), 0)
+  );
+
+  return (
+    <nav className="bubble-workspace-rail z-30" aria-label="Workspaces">
+      {([
+        { id: 'chat', label: 'Chats', icon: MessageSquare },
+        { id: 'automations', label: 'Automations', icon: Clock },
+        { id: 'skills', label: 'Skill Library', icon: Script },
+        { id: 'board', label: 'KanBan', icon: Columns2 },
+        { id: 'prs', label: 'Pull Requests', icon: GitPullRequest },
+      ] as const).map(({ id, label, icon: Icon }) => (
+        <button
+          key={id}
+          type="button"
+          className="bubble-workspace-rail-button no-drag"
+          aria-label={label}
+          title={label}
+          aria-pressed={!showSettings && activeWorkspace === id}
+          onClick={() => {
+            if (id === 'board' || activeWorkspace === 'board') {
+              useTabsStore.getState().openWorkspace(id);
+            } else {
+              setActiveWorkspace(id);
+            }
+            setChatSidebarView('threads');
+            setShowSettings(false);
+          }}
+        >
+          <Icon className="h-[18px] w-[18px]" strokeWidth={1.5} />
+          {id === 'board' && boardReviewCount > 0 ? <span className="bubble-workspace-rail-dot" /> : null}
+        </button>
+      ))}
+      <div className="flex-1" />
+      <button type="button" className="bubble-workspace-rail-button no-drag" aria-label="Settings" title="Settings" aria-pressed={showSettings} onClick={() => setShowSettings(true)}>
+        <Settings className="h-[18px] w-[18px]" strokeWidth={1.5} />
+      </button>
+    </nav>
+  );
+}
+
 export function Sidebar() {
   const {
     activeSessionId,
@@ -156,10 +206,6 @@ export function Sidebar() {
   const startWidthRef = useRef(sidebarWidth);
   const activeSession = activeSessionId ? sessions[activeSessionId] : null;
   const newThreadCwd = activeSession?.cwd || projectCwd;
-  // Badge = cards waiting for YOUR review, not the board's total size.
-  const boardReviewCount = useBoardStore((state) =>
-    Object.values(state.tasks).reduce((count, task) => count + (task.stage === 'review' ? 1 : 0), 0)
-  );
   // runtimeNotice = 任务在后台结束但用户还没点开看（查看后自动清除），
   // 铃铛上的小圆点就是这个未读信号，和 Codex 的 activity badge 一致。
   const hasUnviewedFinishedSession = Object.values(sessions).some((session) =>
@@ -404,43 +450,6 @@ export function Sidebar() {
     setShowSettings(false);
   };
 
-  const workspaceRail = (
-            <nav className="bubble-workspace-rail z-30" aria-label="Workspaces">
-              {([
-                { id: 'chat', label: 'Chats', icon: MessageSquare },
-                { id: 'automations', label: 'Automations', icon: Clock },
-                { id: 'skills', label: 'Skill Library', icon: Script },
-                { id: 'board', label: 'KanBan', icon: Columns2 },
-                { id: 'prs', label: 'Pull Requests', icon: GitPullRequest },
-              ] as const).map(({ id, label, icon: Icon }) => (
-                <button
-                  key={id}
-                  type="button"
-                  className="bubble-workspace-rail-button no-drag"
-                  aria-label={label}
-                  title={label}
-                  aria-pressed={activeWorkspace === id}
-                  onClick={() => {
-                    if (id === 'board' || activeWorkspace === 'board') {
-                      useTabsStore.getState().openWorkspace(id);
-                    } else {
-                      setActiveWorkspace(id);
-                    }
-                    setChatSidebarView('threads');
-                    setShowSettings(false);
-                  }}
-                >
-                  <Icon className="h-[18px] w-[18px]" strokeWidth={1.5} />
-                  {id === 'board' && boardReviewCount > 0 ? <span className="bubble-workspace-rail-dot" /> : null}
-                </button>
-              ))}
-              <div className="flex-1" />
-              <button type="button" className="bubble-workspace-rail-button no-drag" aria-label="Settings" title="Settings" onClick={() => setShowSettings(true)}>
-                <Settings className="h-[18px] w-[18px]" strokeWidth={1.5} />
-              </button>
-            </nav>
-  );
-
   return (
     <>
       {isSidebarResizing && (
@@ -453,7 +462,7 @@ export function Sidebar() {
 
       <div ref={sidebarShellRef} className="aegis-sidebar relative flex h-full min-h-0 flex-shrink-0 self-stretch select-none">
         <div className="absolute inset-y-0 left-0 z-30 w-11">
-          {workspaceRail}
+          <WorkspaceRail />
         </div>
         <div
           className="relative flex h-full min-h-0 flex-shrink-0 self-stretch overflow-hidden"
