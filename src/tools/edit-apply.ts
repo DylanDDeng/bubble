@@ -5,22 +5,12 @@ export interface EditOperation {
   newText: string;
 }
 
-export type EditMatchMode =
-  | "exact"
-  | "trimmed"
-  | "unescaped"
-  | "normalized-line"
-  | "smart-line"
-  | "markdown-table"
-  | "single-line-whitespace";
-
 export interface EditApplyOptions {
   path?: string;
 }
 
 export interface EditMatchInfo {
   editIndex: number;
-  mode: EditMatchMode;
   start: number;
   end: number;
 }
@@ -55,11 +45,6 @@ interface NonBlankLine {
   normalized: string;
 }
 
-interface TextCandidate {
-  text: string;
-  mode: EditMatchMode;
-}
-
 interface BestLineHint {
   startLine: number;
   score: number;
@@ -86,42 +71,41 @@ function normalizeToLF(text: string): string {
   return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
-function unescapeOverEscaped(text: string): string {
-  return text
-    .replace(/\\u([0-9a-fA-F]{4})/g, (_match, hex: string) => String.fromCodePoint(Number.parseInt(hex, 16)))
-    .replace(/\\n/g, "\n")
-    .replace(/\\t/g, "\t")
-    .replace(/\\r/g, "\r")
-    .replace(/\\f/g, "\f")
-    .replace(/\\b/g, "\b")
-    .replace(/\\v/g, "\v")
-    .replace(/\\"/g, '"')
-    .replace(/\\\\/g, "\\");
+function buildOriginalOffsets(text: string): number[] {
+  const offsets: number[] = [];
+  for (let i = 0; i < text.length; i++) {
+    offsets.push(i);
+    if (text[i] === "\r" && text[i + 1] === "\n") i++;
+  }
+  offsets.push(text.length);
+  return offsets;
 }
 
-function addTextCandidate(candidates: TextCandidate[], seen: Set<string>, text: string, mode: EditMatchMode): void {
-  if (text.length === 0 || seen.has(text)) return;
-  seen.add(text);
-  candidates.push({ text, mode });
+function lineEndingAt(text: string, offset: number, fallback: string): string {
+  const after = text.slice(offset).match(/\r\n|\r|\n/);
+  if (after) return after[0];
+  const before = text.slice(0, offset).match(/(\r\n|\r|\n)[^\r\n]*$/);
+  return before ? before[1] : fallback;
 }
 
-function generateTextCandidates(oldText: string): TextCandidate[] {
-  const candidates: TextCandidate[] = [];
-  const seen = new Set<string>();
-  const trimmed = oldText.trim();
-  const unescaped = normalizeToLF(unescapeOverEscaped(oldText));
-  const unescapedTrimmed = normalizeToLF(unescapeOverEscaped(trimmed));
-
-  addTextCandidate(candidates, seen, oldText, "exact");
-  addTextCandidate(candidates, seen, trimmed, "trimmed");
-  addTextCandidate(candidates, seen, unescaped, "unescaped");
-  addTextCandidate(candidates, seen, unescapedTrimmed, "unescaped");
-
-  return candidates;
-}
-
-function restoreLineEndings(text: string, lineEnding: "\n" | "\r\n"): string {
-  return lineEnding === "\r\n" ? text.replace(/\n/g, "\r\n") : text;
+// Splices replacements into the original text so untouched lines keep their own
+// terminators; inserted text uses the terminator of the line being edited.
+function spliceOriginal(
+  text: string,
+  matches: EditMatchInfo[],
+  edits: EditOperation[],
+  fallbackEnding: string,
+): string {
+  const offsets = buildOriginalOffsets(text);
+  let out = "";
+  let cursor = 0;
+  for (const match of [...matches].sort((a, b) => a.start - b.start)) {
+    const start = offsets[match.start];
+    const ending = lineEndingAt(text, start, fallbackEnding);
+    out += text.slice(cursor, start) + edits[match.editIndex].newText.replace(/\n/g, ending);
+    cursor = offsets[match.end];
+  }
+  return out + text.slice(cursor);
 }
 
 function normalizeLineForMatch(line: string): string {
@@ -132,10 +116,6 @@ function normalizeLineForMatch(line: string): string {
     .replace(/[\u201C\u201D\u201E\u201F]/g, '"')
     .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, "-")
     .replace(/[\u00A0\u2002-\u200A\u202F\u205F\u3000]/g, " ");
-}
-
-function normalizeLeadingWhitespaceForMatch(line: string): string {
-  return normalizeLineForMatch(line).replace(/^\s+/, " ");
 }
 
 function findAllOccurrences(content: string, needle: string): number[] {
@@ -178,141 +158,6 @@ function normalizedOldNonBlankLines(oldText: string): string[] {
   return splitLines(oldText)
     .map((line) => normalizeLineForMatch(line.text))
     .filter((line) => line.trim().length > 0);
-}
-
-function singleNonBlankOldLine(oldText: string): string | undefined {
-  const lines = normalizedOldNonBlankLines(oldText);
-  return lines.length === 1 ? lines[0] : undefined;
-}
-
-function findNormalizedLineMatches(content: string, oldText: string): Array<{ start: number; end: number }> {
-  const contentLines = splitLines(content);
-  const searchable = nonBlankLines(contentLines);
-  const oldLines = normalizedOldNonBlankLines(oldText);
-  if (oldLines.length === 0) return [];
-
-  const matches: Array<{ start: number; end: number }> = [];
-  for (let i = 0; i <= searchable.length - oldLines.length; i++) {
-    let matched = true;
-    for (let j = 0; j < oldLines.length; j++) {
-      if (searchable[i + j].normalized !== oldLines[j]) {
-        matched = false;
-        break;
-      }
-    }
-    if (matched) {
-      const first = contentLines[searchable[i].lineIndex];
-      const last = contentLines[searchable[i + oldLines.length - 1].lineIndex];
-      matches.push({ start: first.start, end: last.endNoNewline });
-    }
-  }
-  return matches;
-}
-
-function findSmartLineMatches(content: string, oldText: string): Array<{ start: number; end: number }> {
-  const contentLines = splitLines(content);
-  const oldLines = splitLines(oldText).map((line) => normalizeLeadingWhitespaceForMatch(line.text));
-  if (oldLines.length === 0 || oldLines.every((line) => line.length === 0)) return [];
-
-  const matches: Array<{ start: number; end: number }> = [];
-  for (let i = 0; i <= contentLines.length - oldLines.length; i++) {
-    let matched = true;
-    for (let j = 0; j < oldLines.length; j++) {
-      const actual = normalizeLeadingWhitespaceForMatch(contentLines[i + j].text);
-      if (actual !== oldLines[j]) {
-        matched = false;
-        break;
-      }
-    }
-    if (matched) {
-      const first = contentLines[i];
-      const last = contentLines[i + oldLines.length - 1];
-      matches.push({ start: first.start, end: last.endNoNewline });
-    }
-  }
-  return matches;
-}
-
-function splitMarkdownTableCells(line: string): string[] | undefined {
-  const normalized = normalizeLineForMatch(line).trim();
-  if (!normalized.startsWith("|") || !normalized.endsWith("|")) return undefined;
-
-  const parts: string[] = [];
-  let current = "";
-  let escaped = false;
-  for (const char of normalized) {
-    if (escaped) {
-      current += char;
-      escaped = false;
-      continue;
-    }
-    if (char === "\\") {
-      current += char;
-      escaped = true;
-      continue;
-    }
-    if (char === "|") {
-      parts.push(current);
-      current = "";
-      continue;
-    }
-    current += char;
-  }
-  parts.push(current);
-
-  if (parts.length < 4 || parts[0] !== "" || parts[parts.length - 1] !== "") return undefined;
-  const cells = parts.slice(1, -1).map((cell) => cell.trim());
-  return cells.length >= 2 ? cells : undefined;
-}
-
-function sameCells(a: string[], b: string[]): boolean {
-  return a.length === b.length && a.every((cell, index) => cell === b[index]);
-}
-
-function findMarkdownTableMatches(content: string, oldText: string): Array<{ start: number; end: number }> {
-  const oldLine = singleNonBlankOldLine(oldText);
-  if (!oldLine) return [];
-  const oldCells = splitMarkdownTableCells(oldLine);
-  if (!oldCells) return [];
-
-  const matches: Array<{ start: number; end: number }> = [];
-  for (const line of splitLines(content)) {
-    const cells = splitMarkdownTableCells(line.text);
-    if (cells && sameCells(cells, oldCells)) {
-      matches.push({ start: line.start, end: line.endNoNewline });
-    }
-  }
-  return matches;
-}
-
-function collapseInlineWhitespace(text: string): string {
-  return normalizeLineForMatch(text).trim().replace(/[ \t]+/g, " ");
-}
-
-function isDocumentLikePath(path: string | undefined): boolean {
-  return !!path && /\.(?:md|mdx|markdown|txt|rst|adoc)$/i.test(path);
-}
-
-function findSingleLineWhitespaceMatches(
-  content: string,
-  oldText: string,
-  options: EditApplyOptions | undefined,
-): Array<{ start: number; end: number }> {
-  if (!isDocumentLikePath(options?.path)) return [];
-
-  const oldLine = singleNonBlankOldLine(oldText);
-  if (!oldLine) return [];
-  const normalizedOld = collapseInlineWhitespace(oldLine);
-  if (normalizedOld.length === 0) return [];
-
-  const matches: Array<{ start: number; end: number }> = [];
-  for (const line of splitLines(content)) {
-    const collapsed = collapseInlineWhitespace(line.text);
-    if (collapsed === normalizedOld && line.text !== oldLine) {
-      matches.push({ start: line.start, end: line.endNoNewline });
-    }
-  }
-  return matches;
 }
 
 function summarizeOldText(oldText: string): string {
@@ -426,103 +271,20 @@ function matchEdit(
   }
 
   const oldText = normalizeToLF(edit.oldText);
-  const candidates = generateTextCandidates(oldText);
-
-  for (const candidate of candidates) {
-    const exact = findAllOccurrences(content, candidate.text);
-    if (exact.length === 1) {
-      return { editIndex: index, mode: candidate.mode, start: exact[0], end: exact[0] + candidate.text.length };
-    }
-    if (exact.length > 1) {
-      const recovery = [
-        "",
-        "Extend oldText with more surrounding context (the lines immediately before/after) until it uniquely identifies the intended span.",
-      ].join("\n");
-      const duplicateReason = candidate.mode === "exact"
-        ? `appears ${exact.length} times in file`
-        : `matched ${exact.length} times after ${candidate.mode} matching`;
-      throw new EditApplyError(
-        total === 1
-          ? `Error: oldText ${duplicateReason}. Must be unique: "${summarizeOldText(oldText)}"${recovery}`
-          : `Error: edits[${index}].oldText ${duplicateReason}. Must be unique: "${summarizeOldText(oldText)}"${recovery}`,
-      );
-    }
+  const occurrences = findAllOccurrences(content, oldText);
+  if (occurrences.length === 1) {
+    return { editIndex: index, start: occurrences[0], end: occurrences[0] + oldText.length };
   }
-
-  for (const candidate of candidates) {
-    const normalizedLineMatches = findNormalizedLineMatches(content, candidate.text);
-    if (normalizedLineMatches.length === 1) {
-      return {
-        editIndex: index,
-        mode: candidate.mode === "exact" ? "normalized-line" : candidate.mode,
-        start: normalizedLineMatches[0].start,
-        end: normalizedLineMatches[0].end,
-      };
-    }
-    if (normalizedLineMatches.length > 1) {
-      throw new EditApplyError(
-        total === 1
-          ? `Error: oldText matched ${normalizedLineMatches.length} normalized line blocks in file. Provide more surrounding context.`
-          : `Error: edits[${index}].oldText matched ${normalizedLineMatches.length} normalized line blocks in file. Provide more surrounding context.`,
-      );
-    }
-  }
-
-  for (const candidate of candidates) {
-    const markdownTableMatches = findMarkdownTableMatches(content, candidate.text);
-    if (markdownTableMatches.length === 1) {
-      return {
-        editIndex: index,
-        mode: "markdown-table",
-        start: markdownTableMatches[0].start,
-        end: markdownTableMatches[0].end,
-      };
-    }
-    if (markdownTableMatches.length > 1) {
-      throw new EditApplyError(
-        total === 1
-          ? `Error: oldText matched ${markdownTableMatches.length} markdown table rows in file. Provide more surrounding context.`
-          : `Error: edits[${index}].oldText matched ${markdownTableMatches.length} markdown table rows in file. Provide more surrounding context.`,
-      );
-    }
-  }
-
-  for (const candidate of candidates) {
-    const whitespaceMatches = findSingleLineWhitespaceMatches(content, candidate.text, options);
-    if (whitespaceMatches.length === 1) {
-      return {
-        editIndex: index,
-        mode: "single-line-whitespace",
-        start: whitespaceMatches[0].start,
-        end: whitespaceMatches[0].end,
-      };
-    }
-    if (whitespaceMatches.length > 1) {
-      throw new EditApplyError(
-        total === 1
-          ? `Error: oldText matched ${whitespaceMatches.length} whitespace-normalized lines in file. Provide more surrounding context.`
-          : `Error: edits[${index}].oldText matched ${whitespaceMatches.length} whitespace-normalized lines in file. Provide more surrounding context.`,
-      );
-    }
-  }
-
-  for (const candidate of candidates) {
-    const smartLineMatches = findSmartLineMatches(content, candidate.text);
-    if (smartLineMatches.length === 1) {
-      return {
-        editIndex: index,
-        mode: "smart-line",
-        start: smartLineMatches[0].start,
-        end: smartLineMatches[0].end,
-      };
-    }
-    if (smartLineMatches.length > 1) {
-      throw new EditApplyError(
-        total === 1
-          ? `Error: oldText matched ${smartLineMatches.length} indentation-normalized line blocks in file. Provide more surrounding context.`
-          : `Error: edits[${index}].oldText matched ${smartLineMatches.length} indentation-normalized line blocks in file. Provide more surrounding context.`,
-      );
-    }
+  if (occurrences.length > 1) {
+    const recovery = [
+      "",
+      "Extend oldText with more surrounding context (the lines immediately before/after) until it uniquely identifies the intended span.",
+    ].join("\n");
+    throw new EditApplyError(
+      total === 1
+        ? `Error: oldText appears ${occurrences.length} times in file. Must be unique: "${summarizeOldText(oldText)}"${recovery}`
+        : `Error: edits[${index}].oldText appears ${occurrences.length} times in file. Must be unique: "${summarizeOldText(oldText)}"${recovery}`,
+    );
   }
 
   const hint = findBestLineHint(content, oldText);
@@ -563,9 +325,10 @@ export function applyEditsToContent(rawContent: string, edits: EditOperation[], 
   const { bom, text } = stripBom(rawContent);
   const lineEnding = detectLineEnding(text);
   const normalizedOriginal = normalizeToLF(text);
+  const dropCopiedBom = (value: string) => (bom ? stripBom(value).text : value);
   const normalizedEdits = edits.map((edit) => ({
-    oldText: normalizeToLF(edit.oldText),
-    newText: normalizeToLF(edit.newText),
+    oldText: normalizeToLF(dropCopiedBom(edit.oldText)),
+    newText: normalizeToLF(dropCopiedBom(edit.newText)),
   }));
 
   const matches = normalizedEdits.map((edit, index) => matchEdit(normalizedOriginal, edit, index, normalizedEdits.length, options));
@@ -592,17 +355,11 @@ export function applyEditsToContent(rawContent: string, edits: EditOperation[], 
   }
 
   return {
-    content: bom + restoreLineEndings(normalizedNext, lineEnding),
+    content: bom + spliceOriginal(text, matches, normalizedEdits, lineEnding),
     normalizedOriginal,
     normalizedNext,
     bom,
     lineEnding,
     matches,
   };
-}
-
-export function formatEditMatchNotes(matches: EditMatchInfo[]): string {
-  const normalizedCount = matches.filter((match) => match.mode !== "exact").length;
-  if (normalizedCount === 0) return "";
-  return `\n\nNote: ${normalizedCount} edit${normalizedCount === 1 ? "" : "s"} applied using normalized line matching for whitespace/formatting differences.`;
 }

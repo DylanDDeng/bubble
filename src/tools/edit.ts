@@ -13,7 +13,7 @@ import type { CheckpointStore } from "../checkpoints.js";
 import { countUnifiedDiffChanges } from "../diff-stats.js";
 import type { ToolRegistryEntry, ToolResult } from "../types.js";
 import { formatDiagnosticBlocks, type LspService } from "../lsp/index.js";
-import { applyEditsToContent, EditApplyError, formatEditMatchNotes } from "./edit-apply.js";
+import { applyEditsToContent, EditApplyError } from "./edit-apply.js";
 import { withFileMutationQueue } from "./file-mutation-queue.js";
 import { isWithinWorkspace, type FileStateTracker } from "./file-state.js";
 import { resolveToolPath } from "./path-utils.js";
@@ -84,7 +84,7 @@ export function createEditTool(
     effect: "write_direct",
     requiresApproval: true,
     description:
-      "Edit a single file using targeted text replacements. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes overlap or one replacement is nested inside another, merge them into one edit. Do not include large unchanged regions just to connect distant changes.",
+      "Edit a single file using targeted text replacements. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes overlap or one replacement is nested inside another, merge them into one edit. Do not include large unchanged regions just to connect distant changes. Matching is exact; a UTF-8 BOM and CRLF line endings are handled automatically and preserved, so write oldText/newText with plain \\n line breaks.",
     promptSnippet:
       "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
     promptGuidelines: [
@@ -199,7 +199,7 @@ export function createEditTool(
         await writeFile(filePath, applied.content, "utf-8");
         await fileState?.observe(filePath, "edit", applied.content).catch(() => undefined);
 
-        let output = `Edited ${filePath}${formatEditMatchNotes(applied.matches)}\n\nDiff:\n${diff}`;
+        let output = `Edited ${filePath}\n\nDiff:\n${diff}`;
         if (lsp) {
           try {
             await lsp.touchFile(filePath, "document");

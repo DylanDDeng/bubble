@@ -101,3 +101,19 @@ metadata fossils (searchSignature/searchFamily), bash.ts parse
 simplification, subtask-policy dead fields, tool prompt-cost review,
 run_workflow exclusive rule re-review, forceContinuationReason mechanism
 (left as an intentionally empty hook capability by wave 1).
+
+## Edit matching (done)
+
+`edit` used to retry a failed `oldText` lookup through six looser matchers
+(trimmed, unescaped, normalized-line, markdown-table, single-line-whitespace,
+smart-line). That is the harness correcting the model's output, so it goes.
+Matching is now exact and unique. CRLF/LF and a leading UTF-8 BOM are still
+normalized for comparison and restored on write, because the model cannot see
+those bytes. On a miss, the closest-line hint is returned so the model can
+re-read and retry. The approval diff, checkpoint, file-state, LSP and write
+queue pipeline is unchanged.
+
+Evidence (deepseek-v4-flash, isolated runs, ~180 applied edits across three
+rounds including CRLF/BOM, mixed tabs, look-alike blocks and Markdown
+tables): the looser matchers never fired, and an exact-only build produced
+the same verified results (36/36 vs 36/36 on the final round).
