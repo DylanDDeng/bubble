@@ -75,6 +75,7 @@ import {
   SIDEBAR_WIDTH_VERSION,
   restorePersistedSidebarWidth,
   sanitizeSidebarWidth,
+  workspaceHasSidebarPanel,
 } from '../utils/sidebar-width';
 import { StreamDeltaCoalescer } from '../utils/stream-delta-coalescer';
 import { bubbleCompactionKey, bubbleCompactionToast, normalizeCompactBoundary } from '../utils/bubble-context-notification';
@@ -1778,9 +1779,11 @@ export const useAppStore = create<Store>()(
     persistUiResumeStateSnapshot(get());
   },
 
-  setSidebarCollapsed: (collapsed) => set(state => state.activeWorkspace === 'board'
-    ? { boardSidebarCollapsed: collapsed }
-    : { sidebarCollapsed: collapsed }),
+  setSidebarCollapsed: (collapsed) => set(state => !workspaceHasSidebarPanel(state.activeWorkspace)
+    ? {}
+    : state.activeWorkspace === 'board'
+      ? { boardSidebarCollapsed: collapsed }
+      : { sidebarCollapsed: collapsed }),
 
   toggleSidebarActivityView: () =>
     set((state) => ({ sidebarActivityView: !state.sidebarActivityView })),

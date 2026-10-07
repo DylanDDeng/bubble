@@ -24,8 +24,14 @@ export function restorePersistedSidebarWidth(
   return DEFAULT_SIDEBAR_WIDTH;
 }
 
+// Workspaces unrelated to sessions show only the rail, never the session panel.
+export function workspaceHasSidebarPanel(activeWorkspace: string) {
+  return activeWorkspace !== 'skills';
+}
+
 // Board preferences are independent of the conversation/sidebar preferences.
 export function selectSidebarCollapsed(state: { activeWorkspace: string; sidebarCollapsed: boolean; boardSidebarCollapsed: boolean }) {
+  if (!workspaceHasSidebarPanel(state.activeWorkspace)) return true;
   return state.activeWorkspace === 'board' ? state.boardSidebarCollapsed : state.sidebarCollapsed;
 }
 export function selectSidebarWidth(state: { activeWorkspace: string; sidebarWidth: number; boardSidebarWidth: number }) {
