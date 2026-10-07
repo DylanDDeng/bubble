@@ -1,4 +1,4 @@
-import { selectSidebarCollapsed, selectSidebarWidth } from '../utils/sidebar-width';
+import { selectSidebarCollapsed, selectSidebarWidth, workspaceHasSidebarPanel } from '../utils/sidebar-width';
 import { shortcutLabel } from '../../shared/keyboard-shortcuts';
 import { useAppPreferences } from '../store/useAppPreferences';
 import {
@@ -90,6 +90,9 @@ function SidebarToggleButton({
 export function SidebarHeaderTrigger({ className = '' }: { className?: string }) {
   const setSidebarCollapsed = useAppStore((state) => state.setSidebarCollapsed);
   const sidebarCollapsed = useAppStore(selectSidebarCollapsed);
+  const hasSidebarPanel = useAppStore((state) => workspaceHasSidebarPanel(state.activeWorkspace));
+
+  if (!hasSidebarPanel) return null;
 
   return (
     <SidebarToggleButton
